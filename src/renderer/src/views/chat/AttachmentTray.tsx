@@ -14,34 +14,36 @@
  * 用户拖了 5 个文件进来,其中一个太大被拒,如果它悄悄不见了,
  * 用户只会以为自己少拖了一个。
  */
-import { AlertCircle, FileText, RotateCw, X } from 'lucide-react'
-import type { ReactNode } from 'react'
-import type { Attachment } from '../../../../shared/domain/attachment'
-import { isImageMime } from '../../../../shared/domain/attachment'
-import { cn } from '../../lib/cn'
+import { AlertCircle, FileText, RotateCw, X } from "lucide-react";
+import type { ReactNode } from "react";
+import type { Attachment } from "../../../../shared/domain/attachment";
+import { isImageMime } from "../../../../shared/domain/attachment";
+import { useI18n } from "../../i18n";
+import { cn } from "../../lib/cn";
 
 /**
  * 托盘里的一项。上传是异步的,所以「一个 chip」在拿到 `Attachment` 之前
  * 就要存在 —— 它的身份是本地 mint 的 `key`,而不是附件 id。
  */
 export interface TrayItem {
-  key: string
-  name: string
-  status: 'uploading' | 'done' | 'error'
-  attachment?: Attachment
-  error?: string
+  key: string;
+  name: string;
+  status: "uploading" | "done" | "error";
+  attachment?: Attachment;
+  error?: string;
 }
 
 export function AttachmentTray({
   items,
   onRemove,
-  onRetry
+  onRetry,
 }: {
-  items: TrayItem[]
-  onRemove: (key: string) => void
-  onRetry: (key: string) => void
+  items: TrayItem[];
+  onRemove: (key: string) => void;
+  onRetry: (key: string) => void;
 }): ReactNode {
-  if (items.length === 0) return null
+  const { t } = useI18n();
+  if (items.length === 0) return null;
 
   return (
     <div
@@ -53,39 +55,50 @@ export function AttachmentTray({
         <AttachmentChip
           key={item.key}
           item={item}
-          onRemove={() => { onRemove(item.key) }}
-          onRetry={() => { onRetry(item.key) }}
+          onRemove={() => {
+            onRemove(item.key);
+          }}
+          onRetry={() => {
+            onRetry(item.key);
+          }}
+          labels={{
+            uploading: t("chat.uploading"),
+            retry: t("accessibility.retry"),
+            remove: t("accessibility.remove"),
+          }}
         />
       ))}
     </div>
-  )
+  );
 }
 
 function AttachmentChip({
   item,
   onRemove,
-  onRetry
+  onRetry,
+  labels,
 }: {
-  item: TrayItem
-  onRemove: () => void
-  onRetry: () => void
+  item: TrayItem;
+  onRemove: () => void;
+  onRetry: () => void;
+  labels: { uploading: string; retry: string; remove: string };
 }): ReactNode {
-  const a = item.attachment
-  const isImage = a !== undefined && isImageMime(a.mime)
+  const a = item.attachment;
+  const isImage = a !== undefined && isImageMime(a.mime);
 
   return (
     <div
       data-testid="attachment-chip"
       data-status={item.status}
-      title={item.status === 'error' ? item.error : item.name}
+      title={item.status === "error" ? item.error : item.name}
       className={cn(
-        'group relative flex h-9 max-w-[180px] items-center gap-1.5 rounded-[7px] border pr-1 pl-1.5 text-[11.5px]',
-        item.status === 'error'
-          ? 'border-danger/40 bg-danger/8 text-danger'
-          : 'border-border bg-tint text-fg-muted'
+        "group relative flex h-9 max-w-[180px] items-center gap-1.5 rounded-[7px] border pr-1 pl-1.5 text-[11.5px]",
+        item.status === "error"
+          ? "border-danger/40 bg-danger/8 text-danger"
+          : "border-border bg-tint text-fg-muted",
       )}
     >
-      {item.status === 'error' ? (
+      {item.status === "error" ? (
         <AlertCircle size={13} className="shrink-0" />
       ) : isImage && a !== undefined ? (
         // ★ 协议直供。没有 blob URL,也就没有 revoke 的生命周期问题
@@ -94,7 +107,9 @@ function AttachmentChip({
           alt=""
           className="h-6 w-6 shrink-0 rounded-[4px] object-cover"
           // 文件被外部删除 → 协议回 404 → 退化成文件图标,而不是裂图
-          onError={(e) => { e.currentTarget.style.display = 'none' }}
+          onError={(e) => {
+            e.currentTarget.style.display = "none";
+          }}
         />
       ) : (
         <FileText size={13} className="shrink-0 text-fg-faint" />
@@ -102,15 +117,15 @@ function AttachmentChip({
 
       <span className="min-w-0 truncate">{item.name}</span>
 
-      {item.status === 'uploading' && (
-        <span className="shrink-0 text-fg-faint">上传中…</span>
+      {item.status === "uploading" && (
+        <span className="shrink-0 text-fg-faint">{labels.uploading}</span>
       )}
 
-      {item.status === 'error' && (
+      {item.status === "error" && (
         <button
           type="button"
           onClick={onRetry}
-          aria-label="重试"
+          aria-label={labels.retry}
           className="shrink-0 rounded-[5px] p-1 transition-colors hover:bg-danger/15"
         >
           <RotateCw size={12} />
@@ -120,12 +135,12 @@ function AttachmentChip({
       <button
         type="button"
         onClick={onRemove}
-        aria-label="移除"
+        aria-label={labels.remove}
         data-testid="attachment-remove"
         className="shrink-0 rounded-[5px] p-1 text-fg-faint transition-colors hover:bg-tint-hover hover:text-fg"
       >
         <X size={12} />
       </button>
     </div>
-  )
+  );
 }

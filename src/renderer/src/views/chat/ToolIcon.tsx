@@ -46,18 +46,6 @@ export const SHAPE_ICON: Record<ToolShape, LucideIcon> = {
   external: Plug
 }
 
-/** 形态类的中文名 —— 折叠组标题用它组词(「3 次读取」)。 */
-export const SHAPE_LABEL: Record<ToolShape, string> = {
-  reasoning: '思考',
-  read: '读取',
-  mutate: '修改',
-  search: '检索',
-  command: '命令',
-  network: '网络',
-  orchestration: '调度',
-  external: '外部工具'
-}
-
 /** 状态 → 前景色。成功态刻意用 faint:成功是默认结果,不该抢眼。 */
 export const STATUS_COLOR: Record<ToolViewStatus, string> = {
   pending: 'text-fg-faint',

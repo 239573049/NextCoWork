@@ -209,7 +209,7 @@ export function FilesView({
                         close()
                       }}
                     >
-                      {SORT_LABEL[sortBy]}
+                      {sortLabel(t, sortBy)}
                     </MenuItem>
                     <MenuItem
                       icon={showHidden ? <EyeOff size={14} /> : <Eye size={14} />}
@@ -251,7 +251,7 @@ export function FilesView({
                   <Plus size={14} />
                 </IconButton>
                 <IconButton
-                  label={SORT_LABEL[sortBy]}
+                  label={sortLabel(t, sortBy)}
                   size={24}
                   active={sortBy !== 'name'}
                   onClick={() => cycleSort(setSortBy)}
@@ -376,10 +376,8 @@ function TreeRow({
   )
 }
 
-const SORT_LABEL: Record<SortBy, string> = {
-  name: '按名称排序',
-  mtime: '按修改时间排序',
-  size: '按大小排序'
+function sortLabel(t: ReturnType<typeof useI18n>['t'], sort: SortBy): string {
+  return t({ name: 'files.sortName', mtime: 'files.sortMtime', size: 'files.sortSize' }[sort])
 }
 
 function cycleSort(set: (f: (cur: SortBy) => SortBy) => void): void {

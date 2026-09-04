@@ -9,37 +9,21 @@
 import { Blocks, Bot, Plug } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { EmptyState } from '../../../components/ui/EmptyState'
+import { useI18n } from '../../../i18n'
 
-const REASON: Record<string, { icon: ReactNode; title: string; hint: string }> = {
-  connector: {
-    icon: <Plug size={26} />,
-    title: '没有连接器',
-    hint:
-      '参考产品在这里放的是它自家的一批云服务接入。NextCoWork 是本地模式,' +
-      '外部能力统一走 MCP —— 左边那一栏就是。'
-  },
-  plugin: {
-    icon: <Blocks size={26} />,
-    title: '没有插件系统',
-    hint:
-      '方案里没有第三方插件这一块。能扩展的两条路都在:MCP 接外部工具,' +
-      '技能(设置 › 通用)改 Agent 的行为。'
-  },
-  bot: {
-    icon: <Bot size={26} />,
-    title: '没有机器人对话',
-    hint:
-      '参考产品用它把对话接到飞书 / 钉钉 / 微信这类 IM 上。方案里没有这一块,' +
-      '也没有承载它的服务端。'
-  }
-}
+const ICON = { connector: <Plug size={26} />, plugin: <Blocks size={26} />, bot: <Bot size={26} /> } as const
 
 export function NotPlannedPane({ sub }: { sub: string }): ReactNode {
-  const r = REASON[sub]
-  if (r === undefined) return null
+  const { t } = useI18n()
+  if (!(sub in ICON)) return null
+  const key = sub as keyof typeof ICON
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center">
-      <EmptyState icon={r.icon} title={r.title} hint={r.hint} />
+      <EmptyState
+        icon={ICON[key]}
+        title={t(`connection.notPlanned.${key}.title` as 'connection.notPlanned.connector.title' | 'connection.notPlanned.plugin.title' | 'connection.notPlanned.bot.title')}
+        hint={t(`connection.notPlanned.${key}.hint` as 'connection.notPlanned.connector.hint' | 'connection.notPlanned.plugin.hint' | 'connection.notPlanned.bot.hint')}
+      />
     </div>
   )
 }

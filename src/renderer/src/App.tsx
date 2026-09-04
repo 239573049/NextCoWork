@@ -31,7 +31,10 @@ export default function App(): React.JSX.Element {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [fatal, setFatal] = useState<string | null>(null)
   const hydrate = useWindowStore((s) => s.hydrate)
+  const openWorkspace = useWindowStore((s) => s.openWorkspace)
   const openSession = useTabsStore((s) => s.openSession)
+  const syncBrowserTabs = useTabsStore((s) => s.syncBrowserTabs)
+  const setRightPanelForWorkspace = useWindowStore((s) => s.setRightPanelForWorkspace)
   const { setLocale, t } = useI18n()
 
   useEffect(() => {
@@ -45,6 +48,10 @@ export default function App(): React.JSX.Element {
     const offTheme = on('theme:changed', ({ resolved }) => setAppearance(resolved))
     const offWorkspaces = on('workspace:changed', ({ workspaces: ws }) => setWorkspaces(ws))
     const offSessions = on('sessions:changed', () => { void refreshHydratedSessions() })
+    const offBrowser = on('browser:changed', (change) => {
+      syncBrowserTabs(change.workspaceId, change.tabs)
+      if (change.rightPanelOpen === true) setRightPanelForWorkspace(change.workspaceId, true)
+    })
 
     announceReady('main')
     void getBootstrap()
@@ -60,6 +67,7 @@ export default function App(): React.JSX.Element {
         if (raw !== null) {
           const workspaceId = decodeURIComponent(raw[1]!)
           const sessionId = decodeURIComponent(raw[2]!)
+          openWorkspace(workspaceId)
           openSession(workspaceId, sessionId)
           window.history.replaceState(null, '', window.location.pathname + window.location.search)
         }
@@ -72,8 +80,9 @@ export default function App(): React.JSX.Element {
       offTheme()
       offWorkspaces()
       offSessions()
+      offBrowser()
     }
-  }, [hydrate, openSession])
+  }, [hydrate, openSession, openWorkspace, setRightPanelForWorkspace, syncBrowserTabs])
 
   /**
    * ★ **深浅和颜色是两路来的,必须汇到一处再落地。**

@@ -112,7 +112,10 @@ describe('upsertProvider', () => {
     const withFuture = draft({
       protocolOptions: {
         anthropic: { cacheTtl: '1h' },
-        futureProtocol: { enabled: true }
+        futureProtocol: {
+          enabled: true,
+          transport: { region: 'cn-east', timeoutMs: 10_000 }
+        }
       } as UpstreamProvider['protocolOptions']
     })
     upsertProvider(withFuture)
@@ -120,16 +123,55 @@ describe('upsertProvider', () => {
     const renamed = upsertProvider(draft({ name: 'Acme 新名字' }))
     expect(renamed.protocolOptions).toEqual({
       anthropic: { cacheTtl: '1h' },
-      futureProtocol: { enabled: true }
+      futureProtocol: {
+        enabled: true,
+        transport: { region: 'cn-east', timeoutMs: 10_000 }
+      }
     })
 
     const changed = upsertProvider(
-      draft({ protocolOptions: { anthropic: { cacheTtl: 'off' } } })
+      draft({
+        protocolOptions: {
+          anthropic: { cacheTtl: 'off' },
+          futureProtocol: { transport: { timeoutMs: 30_000 } }
+        } as UpstreamProvider['protocolOptions']
+      })
     )
     expect(changed.protocolOptions).toEqual({
       anthropic: { cacheTtl: 'off' },
-      futureProtocol: { enabled: true }
+      futureProtocol: {
+        enabled: true,
+        transport: { region: 'cn-east', timeoutMs: 30_000 }
+      }
     })
+  })
+
+  it('空的嵌套更新保留已有档位；显式 undefined/null 不能清空或绕过校验', () => {
+    upsertProvider(draft({ protocolOptions: { anthropic: { cacheTtl: '1h' } } }))
+
+    const emptyTop = upsertProvider(
+      draft({ protocolOptions: {} })
+    )
+    expect(anthropicCacheTtlOf(emptyTop)).toBe('1h')
+
+    const emptyAnthropic = upsertProvider(
+      draft({ protocolOptions: { anthropic: {} } } as unknown as UpstreamProvider)
+    )
+    expect(anthropicCacheTtlOf(emptyAnthropic)).toBe('1h')
+
+    expect(() =>
+      upsertProvider(
+        draft({
+          protocolOptions: { anthropic: { cacheTtl: undefined } }
+        } as unknown as UpstreamProvider)
+      )
+    ).toThrow(/off、5m 或 1h/)
+    expect(() =>
+      upsertProvider(
+        draft({ protocolOptions: { anthropic: null } } as unknown as UpstreamProvider)
+      )
+    ).toThrow(/必须是一个对象/)
+    expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('1h')
   })
 
   it('显式非法 TTL 被拒绝且不覆盖原配置；异常旧值按 off 使用', () => {

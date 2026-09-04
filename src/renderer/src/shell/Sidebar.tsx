@@ -32,7 +32,10 @@ import { ChevronRight, PanelLeft } from 'lucide-react'
 import { FEATURE_ICON } from './icons'
 import { useI18n, type Translate } from '../i18n'
 import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
+import { Dialog } from '../components/ui/Dialog'
+import { Button } from '../components/ui/Button'
 import { duplicateSession, renameSession, setArchived, setFavorited, deleteSession } from '../services/sessions'
+import { copyText, openSessionWindow } from '../services/app'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'skills', 'review']
 
@@ -377,6 +380,8 @@ function SessionGroupBlock({
 }): ReactNode {
   const [open, setOpen] = useState(true)
   const [menu, setMenu] = useState<{ session: SessionListItem; position: ContextMenuPosition } | null>(null)
+  const [dialog, setDialog] = useState<{ kind: 'rename' | 'delete'; session: SessionListItem } | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const run = async (action: () => Promise<void>): Promise<void> => {
     try { await action() } catch (error) { console.error('[sessions] 操作失败', error) }
     setMenu(null)
@@ -430,12 +435,12 @@ function SessionGroupBlock({
           {(close) => (
             <>
               <MenuAction icon={<ExternalLink size={15} />} label={t('session.openNewWindow')} onSelect={() => {
-                window.open(`${window.location.href.split('#')[0]}#session=${encodeURIComponent(workspaceId)}/${encodeURIComponent(menu.session.id)}`, '_blank', 'noopener,noreferrer')
-                close()
+                void run(() => openSessionWindow(workspaceId, menu.session.id))
               }} />
               <MenuAction icon={<Pencil size={15} />} label={t('session.rename')} onSelect={() => {
-                const next = window.prompt(t('session.renamePrompt'), menu.session.title)
-                if (next !== null) void run(() => renameSession(menu.session.id, next))
+                setRenameDraft(menu.session.title)
+                setDialog({ kind: 'rename', session: menu.session })
+                close()
               }} />
               <MenuAction icon={<Copy size={15} />} label={t('session.copy')} onSelect={() => {
                 void run(async () => {
@@ -444,7 +449,7 @@ function SessionGroupBlock({
               }} />
               <MenuAction icon={<Link size={15} />} label={t('session.copyLink')} onSelect={() => {
                 void run(async () => {
-                  await navigator.clipboard.writeText(`${window.location.href.split('#')[0]}#session=${encodeURIComponent(workspaceId)}/${encodeURIComponent(menu.session.id)}`)
+                  await copyText(`${window.location.href.split('#')[0]}#session=${encodeURIComponent(workspaceId)}/${encodeURIComponent(menu.session.id)}`)
                 })
               }} />
               <div role="separator" className="my-1 h-px bg-border" />
@@ -453,12 +458,49 @@ function SessionGroupBlock({
               <MenuAction icon={<ListChecks size={15} />} label={multiSelect ? t('session.multiSelectDone') : t('session.multiSelect')} onSelect={() => { close(); onToggleMultiSelect() }} />
               <div role="separator" className="my-1 h-px bg-border" />
               <MenuAction danger icon={<Trash2 size={15} />} label={t('session.delete')} onSelect={() => {
-                if (window.confirm(t('session.confirmDeleteMessage', { title: menu.session.title }))) void run(() => deleteSession(menu.session.id))
+                setDialog({ kind: 'delete', session: menu.session })
+                close()
               }} />
             </>
           )}
         </ContextMenu>
       )}
+      <Dialog
+        open={dialog?.kind === 'rename'}
+        onClose={() => setDialog(null)}
+        title={t('session.rename')}
+        width={420}
+        footer={
+          <>
+            <Button size="sm" onClick={() => setDialog(null)}>{t('common.cancel')}</Button>
+            <Button size="sm" variant="accent" disabled={renameDraft.trim().length === 0} onClick={() => {
+              if (dialog?.kind !== 'rename') return
+              void run(() => renameSession(dialog.session.id, renameDraft)).then(() => setDialog(null))
+            }}>{t('common.save')}</Button>
+          </>
+        }
+      >
+        <label className="block text-[12px] text-fg-muted" htmlFor="session-rename-input">{t('session.renamePrompt')}</label>
+        <input id="session-rename-input" autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} className="selectable mt-2 h-9 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent" />
+      </Dialog>
+      <Dialog
+        open={dialog?.kind === 'delete'}
+        onClose={() => setDialog(null)}
+        title={t('session.confirmDelete')}
+        description={dialog?.kind === 'delete' ? dialog.session.title : undefined}
+        width={420}
+        footer={
+          <>
+            <Button size="sm" onClick={() => setDialog(null)}>{t('common.cancel')}</Button>
+            <Button size="sm" variant="danger" onClick={() => {
+              if (dialog?.kind !== 'delete') return
+              void run(() => deleteSession(dialog.session.id)).then(() => setDialog(null))
+            }}>{t('session.delete')}</Button>
+          </>
+        }
+      >
+        <p className="text-[13px] leading-[1.6] text-fg-muted">{dialog?.kind === 'delete' ? t('session.confirmDeleteMessage', { title: dialog.session.title }) : ''}</p>
+      </Dialog>
     </li>
   )
 }

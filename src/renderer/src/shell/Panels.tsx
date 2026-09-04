@@ -18,93 +18,117 @@
  * 版式沿用 §8 的「靠底色差分层」:面板用 `bg-surface`(和侧边栏同级),
  * 与 `bg-canvas` 的主内容区之间只有一道 `border-hairline`,没有阴影。
  */
-import { X } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { InnerTab, InnerTabKind, InnerTabMenuItem, TabPane } from '../../../shared/domain/tab'
-import { BOTTOM_TAB_MENU, RIGHT_TAB_MENU } from '../../../shared/domain/tab'
-import type { Workspace } from '../../../shared/domain/workspace'
-import { EmptyState } from '../components/ui/EmptyState'
-import { IconButton } from '../components/ui/IconButton'
-import { cn } from '../lib/cn'
-import { InnerView } from '../views/registry'
-import { InnerTabBar } from './InnerTabBar'
+import { X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type {
+  InnerTab,
+  InnerTabKind,
+  InnerTabMenuItem,
+  TabPane,
+} from "../../../shared/domain/tab";
+import { BOTTOM_TAB_MENU, RIGHT_TAB_MENU } from "../../../shared/domain/tab";
+import type { Workspace } from "../../../shared/domain/workspace";
+import { EmptyState } from "../components/ui/EmptyState";
+import { IconButton } from "../components/ui/IconButton";
+import { cn } from "../lib/cn";
+import { InnerView } from "../views/registry";
+import { InnerTabBar } from "./InnerTabBar";
+import { useI18n } from "../i18n";
 
 interface PanelProps {
-  workspace: Workspace | null
-  tabs: readonly InnerTab[]
-  activeId: string | null
-  runningSessionIds: ReadonlySet<string>
-  fallbackModel: string
+  workspace: Workspace | null;
+  tabs: readonly InnerTab[];
+  activeId: string | null;
+  runningSessionIds: ReadonlySet<string>;
+  fallbackModel: string;
   /** 拖出来的尺寸(右侧是宽、底部是高),由 useWindowStore 持有并落盘 */
-  size: number
+  size: number;
   /**
    * 展开态。**和「渲不渲染」是两件事** —— 收起时先翻这个、播完 280ms 才卸载
    * (见 lib/usePresence),否则退场动画没有节点可跑。
    */
-  open: boolean
+  open: boolean;
   /**
    * ★ 正在开合。**transition 只在这段时间里挂**,不能常开:
    * 面板尺寸同时被「开关」和「拖分隔条」两件事写,常开的话每一次 pointermove
    * 都排一段 280ms 插值,分隔条就永远追不上鼠标 —— 拖起来像在拉皮筋。
    */
-  animating: boolean
-  onResize: (px: number) => void
-  onActivate: (id: string) => void
-  onCloseTab: (id: string) => void
-  onMove: (from: number, to: number) => void
-  onOpen: (kind: InnerTabKind) => void
-  onClosePanel: () => void
+  animating: boolean;
+  onResize: (px: number) => void;
+  onActivate: (id: string) => void;
+  onCloseTab: (id: string) => void;
+  onMove: (from: number, to: number) => void;
+  onOpen: (kind: InnerTabKind) => void;
+  onClosePanel: () => void;
 }
 
 export function BottomPanel(props: PanelProps): ReactNode {
+  const { t } = useI18n();
   return (
     <section
       style={{ height: props.open ? props.size : 0 }}
       className={cn(
-        'relative flex shrink-0 flex-col overflow-hidden border-t border-hairline bg-surface',
-        props.animating && 'transition-[height] duration-280 ease-panel'
+        "relative flex shrink-0 flex-col overflow-hidden border-t border-hairline bg-surface",
+        props.animating && "transition-[height] duration-280 ease-panel",
       )}
     >
-      <Resizer axis="y" size={props.size} onResize={props.onResize} label="调整底部面板高度" />
+      <Resizer
+        axis="y"
+        size={props.size}
+        onResize={props.onResize}
+        label={t("nav.adjustBottomPanel")}
+      />
       {/*
         ★ 里面这层**钉死在目标尺寸上**,动的只有外面那个 section。
         不钉的话,内容在这 280ms 里是被压扁的:Tab 条和视图跟着 flex 一路缩,
         终端会连着收到几十次 resize、聊天记录会反复重排。钉住 + overflow-hidden
         以后它是被**裁**出来的 —— 面板长高,内容原样露出来,一次布局都不多做。
       */}
-      <div style={{ height: props.size }} className="flex min-h-0 shrink-0 flex-col">
+      <div
+        style={{ height: props.size }}
+        className="flex min-h-0 shrink-0 flex-col"
+      >
         <PanelBody
           {...props}
           menu={BOTTOM_TAB_MENU}
-          closeLabel="关闭底部面板"
-          empty="用 + 在下面开一个终端或预览"
+          closeLabel={t("nav.closeBottomPanel")}
+          empty={t("nav.panelEmptyBottom")}
         />
       </div>
     </section>
-  )
+  );
 }
 
 export function RightPanel(props: PanelProps): ReactNode {
+  const { t } = useI18n();
   return (
     <aside
       style={{ width: props.open ? props.size : 0 }}
       className={cn(
-        'relative flex shrink-0 flex-col overflow-hidden border-l border-hairline bg-surface',
-        props.animating && 'transition-[width] duration-280 ease-panel'
+        "relative flex shrink-0 flex-col overflow-hidden border-l border-hairline bg-surface",
+        props.animating && "transition-[width] duration-280 ease-panel",
       )}
     >
-      <Resizer axis="x" size={props.size} onResize={props.onResize} label="调整右侧面板宽度" />
+      <Resizer
+        axis="x"
+        size={props.size}
+        onResize={props.onResize}
+        label={t("nav.adjustRightPanel")}
+      />
       {/* 同底部:定宽内层,内容被裁出来而不是被挤扁 —— 见 BottomPanel 里那段 */}
-      <div style={{ width: props.size }} className="flex h-full min-w-0 shrink-0 flex-col">
+      <div
+        style={{ width: props.size }}
+        className="flex h-full min-w-0 shrink-0 flex-col"
+      >
         <PanelBody
           {...props}
           menu={RIGHT_TAB_MENU}
-          closeLabel="关闭右侧面板"
-          empty="用 + 添加一个工作台标签"
+          closeLabel={t("nav.closeRightPanel")}
+          empty={t("nav.panelEmptyRight")}
         />
       </div>
     </aside>
-  )
+  );
 }
 
 /** 两格唯一的差别就是菜单、关闭按钮的名字和空态文案,其余一模一样。 */
@@ -121,13 +145,14 @@ function PanelBody({
   onCloseTab,
   onMove,
   onOpen,
-  onClosePanel
+  onClosePanel,
 }: PanelProps & {
-  menu: readonly InnerTabMenuItem[]
-  closeLabel: string
-  empty: string
+  menu: readonly InnerTabMenuItem[];
+  closeLabel: string;
+  empty: string;
 }): ReactNode {
-  const active = tabs.find((t) => t.id === activeId)
+  const { t } = useI18n();
+  const active = tabs.find((t) => t.id === activeId);
 
   return (
     <>
@@ -148,13 +173,21 @@ function PanelBody({
       />
 
       {active === undefined || workspace === null ? (
-        <EmptyState title={workspace === null ? '还没有打开工作区' : empty} className="py-6" />
+        <EmptyState
+          title={workspace === null ? t("workspace.none") : empty}
+          className="py-6"
+        />
       ) : (
         // key 挂 Tab id:换 Tab 必须重建视图,否则新 Tab 会接着画上一个的状态
-        <InnerView key={active.id} tab={active} workspace={workspace} fallbackModel={fallbackModel} />
+        <InnerView
+          key={active.id}
+          tab={active}
+          workspace={workspace}
+          fallbackModel={fallbackModel}
+        />
       )}
     </>
-  )
+  );
 }
 
 /**
@@ -175,53 +208,53 @@ function Resizer({
   axis,
   size,
   onResize,
-  label
+  label,
 }: {
-  axis: 'x' | 'y'
-  size: number
-  onResize: (px: number) => void
-  label: string
+  axis: "x" | "y";
+  size: number;
+  onResize: (px: number) => void;
+  label: string;
 }): ReactNode {
-  const [dragging, setDragging] = useState(false)
-  const start = useRef({ pos: 0, size: 0 })
+  const [dragging, setDragging] = useState(false);
+  const start = useRef({ pos: 0, size: 0 });
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    e.preventDefault()
-    e.currentTarget.setPointerCapture(e.pointerId)
-    start.current = { pos: axis === 'x' ? e.clientX : e.clientY, size }
-    setDragging(true)
-  }
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    start.current = { pos: axis === "x" ? e.clientX : e.clientY, size };
+    setDragging(true);
+  };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
-    if (!dragging) return
-    const delta = (axis === 'x' ? e.clientX : e.clientY) - start.current.pos
+    if (!dragging) return;
+    const delta = (axis === "x" ? e.clientX : e.clientY) - start.current.pos;
     // 右侧面板在右边、底部面板在下边,往回拖才是变大 —— 所以位移取负
-    onResize(start.current.size - delta)
-  }
+    onResize(start.current.size - delta);
+  };
 
   const stop = (e: React.PointerEvent<HTMLDivElement>): void => {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId)
+      e.currentTarget.releasePointerCapture(e.pointerId);
     }
-    setDragging(false)
-  }
+    setDragging(false);
+  };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
-    const grow = axis === 'x' ? 'ArrowLeft' : 'ArrowUp'
-    const shrink = axis === 'x' ? 'ArrowRight' : 'ArrowDown'
-    if (e.key === grow) onResize(size + 16)
-    else if (e.key === shrink) onResize(size - 16)
-    else return
-    e.preventDefault()
-  }
+    const grow = axis === "x" ? "ArrowLeft" : "ArrowUp";
+    const shrink = axis === "x" ? "ArrowRight" : "ArrowDown";
+    if (e.key === grow) onResize(size + 16);
+    else if (e.key === shrink) onResize(size - 16);
+    else return;
+    e.preventDefault();
+  };
 
-  useBodyCursor(dragging ? (axis === 'x' ? 'col-resize' : 'row-resize') : null)
+  useBodyCursor(dragging ? (axis === "x" ? "col-resize" : "row-resize") : null);
 
   return (
     <div
       role="separator"
       aria-label={label}
-      aria-orientation={axis === 'x' ? 'vertical' : 'horizontal'}
+      aria-orientation={axis === "x" ? "vertical" : "horizontal"}
       tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -230,13 +263,15 @@ function Resizer({
       onKeyDown={onKeyDown}
       className={cn(
         // 面板自己是 relative,分隔条贴在它靠主区的那条边上
-        'app-no-drag absolute z-20 transition-colors',
-        'focus-visible:bg-accent focus-visible:outline-none',
-        axis === 'x' ? 'inset-y-0 -left-[2px] w-[5px] cursor-col-resize' : 'inset-x-0 -top-[2px] h-[5px] cursor-row-resize',
-        dragging ? 'bg-accent' : 'hover:bg-accent-soft'
+        "app-no-drag absolute z-20 transition-colors",
+        "focus-visible:bg-accent focus-visible:outline-none",
+        axis === "x"
+          ? "inset-y-0 -left-[2px] w-[5px] cursor-col-resize"
+          : "inset-x-0 -top-[2px] h-[5px] cursor-row-resize",
+        dragging ? "bg-accent" : "hover:bg-accent-soft",
       )}
     />
-  )
+  );
 }
 
 /**
@@ -247,17 +282,17 @@ function Resizer({
  */
 function useBodyCursor(cursor: string | null): void {
   useEffect(() => {
-    if (cursor === null) return
-    const prev = document.body.style.cursor
-    const prevSelect = document.body.style.userSelect
-    document.body.style.cursor = cursor
+    if (cursor === null) return;
+    const prev = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = cursor;
     // 顺带禁掉选中:拖过一段文字会把它整段刷蓝
-    document.body.style.userSelect = 'none'
+    document.body.style.userSelect = "none";
     return () => {
-      document.body.style.cursor = prev
-      document.body.style.userSelect = prevSelect
-    }
-  }, [cursor])
+      document.body.style.cursor = prev;
+      document.body.style.userSelect = prevSelect;
+    };
+  }, [cursor]);
 }
 
 /**
@@ -280,19 +315,19 @@ export function useSeedPane({
   pane,
   kind,
   count,
-  openTab
+  openTab,
 }: {
-  open: boolean
-  workspaceId: string | null
-  pane: 'bottom' | 'right'
+  open: boolean;
+  workspaceId: string | null;
+  pane: "bottom" | "right";
   /** 这一格默认开哪种 Tab:底部是终端,右侧是工作区文件 */
-  kind: InnerTabKind
+  kind: InnerTabKind;
   /** 这一格现有 Tab 数 */
-  count: number
-  openTab: (workspaceId: string, kind: InnerTabKind, pane: TabPane) => void
+  count: number;
+  openTab: (workspaceId: string, kind: InnerTabKind, pane: TabPane) => void;
 }): void {
   useEffect(() => {
-    if (!open || workspaceId === null || count > 0) return
-    openTab(workspaceId, kind, pane)
-  }, [open, workspaceId, pane, kind, count, openTab])
+    if (!open || workspaceId === null || count > 0) return;
+    openTab(workspaceId, kind, pane);
+  }, [open, workspaceId, pane, kind, count, openTab]);
 }

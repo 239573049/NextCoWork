@@ -22,58 +22,75 @@
  * 另一份没有的 bug 修复。那个 hook 这次为此加了 axis 参数,默认 'x' 保持
  * 外层 Tab 条原样。
  */
-import { Check, ExternalLink, GripVertical, Loader2, Search } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
-import type { SearchProviderStatus } from '../../../../../shared/domain/search'
-import { searchMeta } from '../../../../../shared/domain/search'
-import { Button } from '../../../components/ui/Button'
-import { TextInput } from '../../../components/ui/TextInput'
-import { Toggle } from '../../../components/ui/Toggle'
-import { cn } from '../../../lib/cn'
-import { openExternal } from '../../../services/app'
-import { testSearchProvider } from '../../../services/websearch'
-import { useDragReorder } from '../../../shell/useDragReorder'
-import { useWebSearchStore } from '../../../stores/websearch'
-import { SettingGroup } from '../../Row'
+import {
+  Check,
+  ExternalLink,
+  GripVertical,
+  Loader2,
+  Search,
+} from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import type { SearchProviderStatus } from "../../../../../shared/domain/search";
+import { searchMeta } from "../../../../../shared/domain/search";
+import { Button } from "../../../components/ui/Button";
+import { TextInput } from "../../../components/ui/TextInput";
+import { Toggle } from "../../../components/ui/Toggle";
+import { useI18n } from "../../../i18n";
+import { cn } from "../../../lib/cn";
+import { openExternal } from "../../../services/app";
+import { testSearchProvider } from "../../../services/websearch";
+import { useDragReorder } from "../../../shell/useDragReorder";
+import { useWebSearchStore } from "../../../stores/websearch";
+import { SettingGroup } from "../../Row";
 
 export function SearchPane(): ReactNode {
-  const { providers, loaded, error, load, setEnabled, reorder, setCredential, clearCredential } =
-    useWebSearchStore()
+  const { t } = useI18n();
+  const {
+    providers,
+    loaded,
+    error,
+    load,
+    setEnabled,
+    reorder,
+    setCredential,
+    clearCredential,
+  } = useWebSearchStore();
 
   useEffect(() => {
-    void load()
-  }, [load])
+    void load();
+  }, [load]);
 
-  const ordered = [...providers].sort((a, b) => a.config.priority - b.config.priority)
+  const ordered = [...providers].sort(
+    (a, b) => a.config.priority - b.config.priority,
+  );
 
   const drag = useDragReorder((from, to) => {
-    const ids = ordered.map((p) => p.config.id)
-    const [moved] = ids.splice(from, 1)
-    if (moved === undefined) return
-    ids.splice(to, 0, moved)
-    void reorder(ids)
-  }, 'y')
+    const ids = ordered.map((p) => p.config.id);
+    const [moved] = ids.splice(from, 1);
+    if (moved === undefined) return;
+    ids.splice(to, 0, moved);
+    void reorder(ids);
+  }, "y");
 
   return (
     <SettingGroup>
       <div className="px-4 py-3">
-        <p className="text-[13px] text-fg">搜索服务</p>
+        <p className="text-[13px] text-fg">{t("connection.search.title")}</p>
         <p className="mt-0.5 text-[12px] text-fg-faint">
-          从上往下依次尝试,某一家失败(网络错、Key 无效、零结果)就自动切下一家。
-          拖动可以改这个顺序。
+          {t("connection.search.hint")}
         </p>
       </div>
 
       {error !== null ? (
         <div className="px-4 pb-4">
           <p className="rounded-[8px] bg-danger/10 px-2.5 py-2 text-[12px] text-danger">
-            读取搜索服务失败:{error}
+            {t("connection.search.loadFailed", { error })}
           </p>
         </div>
       ) : !loaded ? (
         <div className="flex items-center justify-center gap-2 py-8 text-[12.5px] text-fg-faint">
           <Loader2 size={14} className="animate-spin" />
-          正在读取
+          {t("connection.search.reading")}
         </div>
       ) : (
         <ul className="relative border-t border-hairline">
@@ -92,7 +109,7 @@ export function SearchPane(): ReactNode {
         </ul>
       )}
     </SettingGroup>
-  )
+  );
 }
 
 function ProviderRow({
@@ -102,50 +119,57 @@ function ProviderRow({
   onGrab,
   onToggle,
   onSaveKey,
-  onClearKey
+  onClearKey,
 }: {
-  status: SearchProviderStatus
-  rank: number
-  style: React.CSSProperties
-  onGrab: (e: React.PointerEvent<HTMLElement>) => void
-  onToggle: (enabled: boolean) => void
-  onSaveKey: (apiKey: string) => Promise<void>
-  onClearKey: () => void
+  status: SearchProviderStatus;
+  rank: number;
+  style: React.CSSProperties;
+  onGrab: (e: React.PointerEvent<HTMLElement>) => void;
+  onToggle: (enabled: boolean) => void;
+  onSaveKey: (apiKey: string) => Promise<void>;
+  onClearKey: () => void;
 }): ReactNode {
-  const id = status.config.id
-  const meta = searchMeta(id)
-  const blocked = meta?.unavailable
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [tested, setTested] = useState<string | null>(null)
+  const { t } = useI18n();
+  const id = status.config.id;
+  const meta = searchMeta(id);
+  const blocked = meta?.unavailable;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [tested, setTested] = useState<string | null>(null);
 
   const save = (): void => {
-    if (draft.trim() === '') return
-    setBusy(true)
+    if (draft.trim() === "") return;
+    setBusy(true);
     void onSaveKey(draft.trim())
       .then(() => {
-        setDraft('') // ★ 存完就从内存里抹掉,别留在 React 状态里
-        setEditing(false)
+        setDraft(""); // ★ 存完就从内存里抹掉,别留在 React 状态里
+        setEditing(false);
       })
-      .catch((e: unknown) => setTested(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false))
-  }
+      .catch((e: unknown) =>
+        setTested(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
 
   const test = (): void => {
-    setBusy(true)
-    setTested(null)
+    setBusy(true);
+    setTested(null);
     void testSearchProvider(id)
       .then((r) => {
         if (!r.ok) {
-          setTested(r.error.message)
-          return
+          setTested(r.error.message);
+          return;
         }
-        const { ok, latencyMs, message } = r.data
-        setTested(ok ? `通了${latencyMs === undefined ? '' : ` · ${String(latencyMs)}ms`}` : (message ?? '没通'))
+        const { ok, latencyMs, message } = r.data;
+        setTested(
+          ok
+            ? `${t("connection.search.connected")}${latencyMs === undefined ? "" : ` · ${String(latencyMs)}ms`}`
+            : (message ?? t("connection.search.unavailable")),
+        );
       })
-      .finally(() => setBusy(false))
-  }
+      .finally(() => setBusy(false));
+  };
 
   return (
     <li
@@ -154,16 +178,16 @@ function ProviderRow({
       data-drag-item
       style={style}
       className={cn(
-        'border-b border-hairline bg-canvas px-4 py-3 last:border-b-0',
-        blocked !== undefined && 'opacity-60'
+        "border-b border-hairline bg-canvas px-4 py-3 last:border-b-0",
+        blocked !== undefined && "opacity-60",
       )}
     >
       <div className="flex items-start gap-2.5">
         {/* 用不了的那两家不给拖 —— 排在第几位对它们没有任何意义 */}
         <span
           className={cn(
-            'app-no-drag mt-[3px] shrink-0 text-fg-faint',
-            blocked === undefined ? 'cursor-grab' : 'cursor-default opacity-30'
+            "app-no-drag mt-[3px] shrink-0 text-fg-faint",
+            blocked === undefined ? "cursor-grab" : "cursor-default opacity-30",
           )}
           onPointerDown={blocked === undefined ? onGrab : undefined}
           aria-hidden
@@ -180,18 +204,22 @@ function ProviderRow({
             {status.hasKey && (
               <span className="flex shrink-0 items-center gap-1 text-[11.5px] text-accent">
                 <Check size={11} />
-                已配置
+                {t("connection.search.configured")}
                 {status.last4 !== undefined && (
                   <code className="text-fg-faint">····{status.last4}</code>
                 )}
               </span>
             )}
           </div>
-          <p className="mt-0.5 text-[12px] text-fg-muted">{meta?.description}</p>
+          <p className="mt-0.5 text-[12px] text-fg-muted">
+            {meta?.description}
+          </p>
 
           {/* ★ 原因原样显示,不概括成「暂不可用」—— 那句话里有用户接下来该做什么 */}
           {blocked !== undefined && (
-            <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">{blocked}</p>
+            <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
+              {blocked}
+            </p>
           )}
 
           {blocked === undefined && (
@@ -204,13 +232,20 @@ function ProviderRow({
                       onChange={setDraft}
                       onCommit={save}
                       size="sm"
-                      ariaLabel={`${meta?.name ?? id} 的 API Key`}
-                      placeholder="粘贴 API Key"
+                      ariaLabel={t("connection.search.apiKey", {
+                        name: meta?.name ?? id,
+                      })}
+                      placeholder={t("connection.search.pasteKey")}
                       disabled={busy}
                     />
                   </div>
-                  <Button size="sm" variant="accent" disabled={busy || draft.trim() === ''} onClick={save}>
-                    保存
+                  <Button
+                    size="sm"
+                    variant="accent"
+                    disabled={busy || draft.trim() === ""}
+                    onClick={save}
+                  >
+                    {t("common.save")}
                   </Button>
                   {meta !== undefined && (
                     <Button
@@ -218,28 +253,36 @@ function ProviderRow({
                       icon={<ExternalLink size={12} />}
                       onClick={() => void openExternal(meta.keyUrl)}
                     >
-                      获取
+                      {t("connection.search.get")}
                     </Button>
                   )}
                 </div>
               ) : (
                 <div className="flex items-center gap-1.5">
                   <Button size="sm" onClick={() => setEditing(true)}>
-                    更换 Key
+                    {t("connection.search.replaceKey")}
                   </Button>
                   <Button size="sm" onClick={onClearKey}>
-                    清除
+                    {t("connection.search.clear")}
                   </Button>
                   <Button
                     size="sm"
-                    icon={busy ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
+                    icon={
+                      busy ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Search size={12} />
+                      )
+                    }
                     disabled={busy}
                     onClick={test}
                   >
-                    测试
+                    {t("connection.search.test")}
                   </Button>
                   {tested !== null && (
-                    <span className="truncate text-[11.5px] text-fg-muted">{tested}</span>
+                    <span className="truncate text-[11.5px] text-fg-muted">
+                      {tested}
+                    </span>
                   )}
                 </div>
               )}
@@ -249,7 +292,7 @@ function ProviderRow({
 
         <div className="shrink-0 pt-0.5">
           <Toggle
-            label={`启用 ${meta?.name ?? id}`}
+            label={t("connection.search.enable", { name: meta?.name ?? id })}
             checked={status.config.enabled}
             disabled={blocked !== undefined}
             onChange={onToggle}
@@ -257,5 +300,5 @@ function ProviderRow({
         </div>
       </div>
     </li>
-  )
+  );
 }

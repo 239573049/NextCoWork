@@ -11,15 +11,16 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { Folder, PanelBottom, PanelRight, Plus, X } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { FEATURE_LABEL, type OuterTab } from '../../../shared/domain/tab'
-import type { Workspace } from '../../../shared/domain/workspace'
-import { IconButton } from '../components/ui/IconButton'
-import { Menu, MenuItem, MenuSeparator } from '../components/ui/Menu'
-import { cn } from '../lib/cn'
-import { FEATURE_ICON } from './icons'
-import { useDragReorder } from './useDragReorder'
+import { Folder, PanelBottom, PanelRight, Plus, X } from "lucide-react";
+import type { ReactNode } from "react";
+import { FEATURE_LABEL, type OuterTab } from "../../../shared/domain/tab";
+import type { Workspace } from "../../../shared/domain/workspace";
+import { IconButton } from "../components/ui/IconButton";
+import { Menu, MenuItem, MenuSeparator } from "../components/ui/Menu";
+import { cn } from "../lib/cn";
+import { FEATURE_ICON } from "./icons";
+import { useDragReorder } from "./useDragReorder";
+import { useI18n } from "../i18n";
 
 export function OuterTabBar({
   tabs,
@@ -35,39 +36,44 @@ export function OuterTabBar({
   rightPanelOpen,
   bottomPanelOpen,
   onToggleRightPanel,
-  onToggleBottomPanel
+  onToggleBottomPanel,
 }: {
-  tabs: readonly OuterTab[]
-  activeId: string | null
-  workspaces: readonly Workspace[]
+  tabs: readonly OuterTab[];
+  activeId: string | null;
+  workspaces: readonly Workspace[];
   /** 有 run 在跑的工作区 —— Tab 上那个小圆点。数据源是 RunRegistry 聚合,不是任何 UI 状态 */
-  runningWorkspaceIds: ReadonlySet<string>
-  onActivate: (id: string) => void
-  onClose: (id: string) => void
-  onMove: (from: number, to: number) => void
-  onOpenWorkspace: (workspaceId: string) => void
-  onPickWorkspace: () => void
-  onCreateWorkspace: () => void
-  rightPanelOpen: boolean
-  bottomPanelOpen: boolean
-  onToggleRightPanel: () => void
-  onToggleBottomPanel: () => void
+  runningWorkspaceIds: ReadonlySet<string>;
+  onActivate: (id: string) => void;
+  onClose: (id: string) => void;
+  onMove: (from: number, to: number) => void;
+  onOpenWorkspace: (workspaceId: string) => void;
+  onPickWorkspace: () => void;
+  onCreateWorkspace: () => void;
+  rightPanelOpen: boolean;
+  bottomPanelOpen: boolean;
+  onToggleRightPanel: () => void;
+  onToggleBottomPanel: () => void;
 }): ReactNode {
-  const { dragging, onPointerDown, styleFor } = useDragReorder(onMove)
+  const { t } = useI18n();
+  const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
 
   return (
     <div className="flex min-w-0 flex-1 items-end gap-0.5">
       {tabs.map((tab, i) => {
-        const active = tab.id === activeId
+        const active = tab.id === activeId;
         const running =
-          tab.kind === 'workspace' && runningWorkspaceIds.has(tab.ref.workspaceId)
+          tab.kind === "workspace" &&
+          runningWorkspaceIds.has(tab.ref.workspaceId);
         const ws =
-          tab.kind === 'workspace'
+          tab.kind === "workspace"
             ? workspaces.find((w) => w.id === tab.ref.workspaceId)
-            : undefined
+            : undefined;
         const label =
-          tab.kind === 'workspace' ? (ws?.name ?? '未知工作区') : FEATURE_LABEL[tab.ref.feature]
-        const Icon = tab.kind === 'workspace' ? Folder : FEATURE_ICON[tab.ref.feature]
+          tab.kind === "workspace"
+            ? (ws?.name ?? t("nav.unknownWorkspace"))
+            : FEATURE_LABEL[tab.ref.feature];
+        const Icon =
+          tab.kind === "workspace" ? Folder : FEATURE_ICON[tab.ref.feature];
 
         return (
           <div
@@ -79,12 +85,12 @@ export function OuterTabBar({
             aria-selected={active}
             title={ws?.rootPath ?? label}
             className={cn(
-              'app-no-drag group relative flex h-[30px] max-w-[200px] min-w-0 shrink-0 items-center',
-              'gap-1.5 rounded-t-[10px] pr-1.5 pl-3 text-[13px] select-none',
-              !dragging && 'transition-[transform,background-color]',
+              "app-no-drag group relative flex h-[30px] max-w-[200px] min-w-0 shrink-0 items-center",
+              "gap-1.5 rounded-t-[10px] pr-1.5 pl-3 text-[13px] select-none",
+              !dragging && "transition-[transform,background-color]",
               active
-                ? 'bg-canvas text-fg'
-                : 'text-fg-muted hover:bg-tint-hover/60 hover:text-fg'
+                ? "bg-canvas text-fg"
+                : "text-fg-muted hover:bg-tint-hover/60 hover:text-fg",
             )}
           >
             {/*
@@ -93,31 +99,36 @@ export function OuterTabBar({
               **无彩度**(max−min ≤ 2),而强调色 #2d4739 的彩度是 26。
               也就是说激活态不靠「图标变彩」表达,靠的是整张 Tab 挖到画布色 + 文字变实。
             */}
-            <Icon size={13} className={cn('shrink-0', active ? 'text-fg' : 'text-icon')} />
+            <Icon
+              size={13}
+              className={cn("shrink-0", active ? "text-fg" : "text-icon")}
+            />
             <span className="min-w-0 flex-1 truncate">{label}</span>
-            {running && <span className="size-1.5 shrink-0 rounded-pill bg-accent" />}
+            {running && (
+              <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
+            )}
             <button
               type="button"
-              aria-label={`关闭 ${label}`}
+              aria-label={t("nav.closeTab", { label })}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => {
-                e.stopPropagation()
-                onClose(tab.id)
+                e.stopPropagation();
+                onClose(tab.id);
               }}
               className={cn(
-                'app-no-drag flex size-[18px] shrink-0 items-center justify-center rounded-[5px]',
-                'text-fg-faint opacity-0 transition-opacity group-hover:opacity-100',
-                'hover:bg-tint-strong hover:text-fg focus-visible:opacity-100'
+                "app-no-drag flex size-[18px] shrink-0 items-center justify-center rounded-[5px]",
+                "text-fg-faint opacity-0 transition-opacity group-hover:opacity-100",
+                "hover:bg-tint-strong hover:text-fg focus-visible:opacity-100",
               )}
             >
               <X size={12} />
             </button>
           </div>
-        )
+        );
       })}
 
       <Menu
-        label="打开工作区"
+        label={t("nav.openWorkspace")}
         width={300}
         className="mb-0.5 ml-0.5"
         trigger={<Plus size={15} />}
@@ -130,10 +141,12 @@ export function OuterTabBar({
                 key={w.id}
                 icon={<Folder size={14} />}
                 description={w.rootPath}
-                checked={tabs.some((t) => t.kind === 'workspace' && t.ref.workspaceId === w.id)}
+                checked={tabs.some(
+                  (t) => t.kind === "workspace" && t.ref.workspaceId === w.id,
+                )}
                 onSelect={() => {
-                  onOpenWorkspace(w.id)
-                  close()
+                  onOpenWorkspace(w.id);
+                  close();
                 }}
               >
                 {w.name}
@@ -143,20 +156,20 @@ export function OuterTabBar({
             <MenuItem
               icon={<Folder size={14} />}
               onSelect={() => {
-                onPickWorkspace()
-                close()
+                onPickWorkspace();
+                close();
               }}
             >
-              打开现有文件夹
+              {t("nav.openFolder")}
             </MenuItem>
             <MenuItem
               icon={<Plus size={14} />}
               onSelect={() => {
-                onCreateWorkspace()
-                close()
+                onCreateWorkspace();
+                close();
               }}
             >
-              创建新工作区
+              {t("nav.createWorkspace")}
             </MenuItem>
           </>
         )}
@@ -178,7 +191,7 @@ export function OuterTabBar({
       */}
       <div className="flex shrink-0 items-center gap-1 self-center">
         <IconButton
-          label="底部面板"
+          label={t("nav.bottomPanel")}
           size={28}
           width={38}
           active={bottomPanelOpen}
@@ -188,7 +201,7 @@ export function OuterTabBar({
           <PanelBottom size={16} />
         </IconButton>
         <IconButton
-          label="工作区文件"
+          label={t("nav.workspaceFiles")}
           size={28}
           width={38}
           active={rightPanelOpen}
@@ -199,5 +212,5 @@ export function OuterTabBar({
         </IconButton>
       </div>
     </div>
-  )
+  );
 }

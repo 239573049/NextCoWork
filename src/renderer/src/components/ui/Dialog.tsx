@@ -42,6 +42,7 @@ import { createPortal } from 'react-dom'
 import { cn } from '../../lib/cn'
 import { IconButton } from './IconButton'
 import { useFocusTrap } from './useFocusTrap'
+import { useI18n } from '../../i18n'
 
 export function Dialog({
   title,
@@ -62,6 +63,7 @@ export function Dialog({
   width?: number
   children: ReactNode
 }): ReactNode {
+  const { t } = useI18n()
   const panelRef = useRef<HTMLDivElement>(null)
   const firstRef = useRef<HTMLDivElement>(null)
 
@@ -109,7 +111,7 @@ export function Dialog({
               <div className="mt-0.5 text-[12px] text-fg-faint">{description}</div>
             )}
           </div>
-          <IconButton label="关闭" onClick={onClose}>
+          <IconButton label={t('common.close')} onClick={onClose}>
             <X size={15} />
           </IconButton>
         </div>

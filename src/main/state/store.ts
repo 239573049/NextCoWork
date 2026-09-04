@@ -16,6 +16,7 @@
 import type { AgentMessage } from '../../shared/agent/message'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
+import type { ModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
@@ -98,6 +99,19 @@ export const store = {
   },
   removeAlias(providerId: string, alias: string): void {
     repo.removeAlias(providerId, alias)
+  },
+
+  // ── user model catalogue ──
+  // Provider discovery intentionally never calls these methods. A row enters
+  // this collection only through the explicit model-catalog IPC actions.
+  listUserModelCatalog(): ModelCatalogDefinition[] {
+    return repo.listUserModelCatalog()
+  },
+  putUserModelCatalog(model: ModelCatalogDefinition): ModelCatalogDefinition {
+    return repo.putUserModelCatalog(model)
+  },
+  removeUserModelCatalog(id: string): void {
+    repo.removeUserModelCatalog(id)
   },
 
   // ── MCP 服务器(设置 › 连接 › MCP) ──

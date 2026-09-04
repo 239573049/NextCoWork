@@ -31,7 +31,7 @@ import {
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
-import { getBootstrap, openExternal, registerThemeBridge } from './app'
+import { copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge } from './app'
 import {
   listSessionAttachments,
   pickAttachments,
@@ -54,6 +54,11 @@ import {
   removeModel
 } from './provider'
 import {
+  listUserModelCatalog,
+  removeUserModelCatalog,
+  upsertUserModelCatalog
+} from './model-catalog'
+import {
   getMcpSecretsInfo,
   listMcpServers,
   registerMcpBridge,
@@ -72,6 +77,8 @@ import {
   testSearchProvider
 } from './websearch'
 import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
+import { browserManager, setBrowserChangeListener } from '../browser/manager'
+import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
 import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans } from './theme'
 import {
@@ -141,6 +148,8 @@ const handlers: HandlerMap = {
   // ── 已实现 ──
   'app:getBootstrap': (_req, ctx) => getBootstrap(ctx.kind),
   'app:openExternal': ({ url }) => openExternal(url),
+  'app:copyText': ({ text }) => copyText(text),
+  'app:openSessionWindow': (req) => openSessionWindow(req),
   'settings:get': () => getSettings(),
   'settings:update': (patch) => updateSettings(patch),
   'theme:importImage': () => importImage(),
@@ -151,8 +160,53 @@ const handlers: HandlerMap = {
   'workspace:list': () => listWorkspaces(),
   'workspace:pick': () => pickWorkspace(),
   'workspace:update': (req) => updateWorkspace(req),
-  'workspace:close': ({ id }) => closeWorkspace(id),
+  'workspace:close': ({ id }) => {
+    browserManager.closeWorkspace(id)
+    return closeWorkspace(id)
+  },
   'workspace:listDir': (req) => listDir(req),
+  'browser:list': ({ workspaceId }) => browserManager.list(workspaceId),
+  'browser:open': ({ workspaceId, url, title, profileId }) =>
+    browserManager.open({ workspaceId, url, title, profileId, source: 'user' }),
+  'browser:navigate': ({ workspaceId, tabId, url }) => {
+    const tab = browserManager.get(tabId)
+    if (tab?.workspaceId !== workspaceId) throw new Error('浏览器标签不属于当前工作区')
+    return browserManager.navigate(tabId, url)
+  },
+  'browser:close': ({ workspaceId, tabId }) => {
+    const tab = browserManager.get(tabId)
+    if (tab?.workspaceId !== workspaceId) throw new Error('浏览器标签不属于当前工作区')
+    return browserManager.close(tabId)
+  },
+  'browser:profiles': () => browserManager.listProfiles(),
+  'browser:createProfile': ({ name, domains, startUrl }) => {
+    const profile = browserManager.createProfile(name, domains, startUrl)
+    windows.emitToAll('browser:profilesChanged', browserManager.listProfiles())
+    return profile
+  },
+  'browser:deleteProfile': async ({ id }) => {
+    const profile = browserManager.listProfiles().find((item) => item.id === id)
+    if (profile === undefined) throw new Error('Profile 不存在')
+    if (profile.isDefault) return browserManager.deleteProfile(id)
+    await Promise.all(store.listWorkspaces().map((workspace) => clearBrowserProfileState(workspace.id, id)))
+    browserManager.deleteProfile(id)
+    windows.emitToAll('browser:profilesChanged', browserManager.listProfiles())
+  },
+  'browser:exportCookies': ({ workspaceId, profileId }, ctx) => {
+    const profile = browserManager.listProfiles().find((item) => item.id === profileId)
+    if (profile === undefined) throw new Error('Profile 不存在')
+    return exportBrowserCookies(ctx.sender, workspaceId, profile)
+  },
+  'browser:importCookies': ({ workspaceId, profileId }, ctx) => {
+    if (!browserManager.listProfiles().some((item) => item.id === profileId)) throw new Error('Profile 不存在')
+    return importBrowserCookies(ctx.sender, workspaceId, profileId)
+  },
+  'browser:clearProfileState': ({ workspaceId, profileId }) => {
+    const profile = browserManager.listProfiles().find((item) => item.id === profileId)
+    if (profile === undefined) throw new Error('Profile 不存在')
+    if (profile.isDefault) throw new Error('默认浏览器不能清除登录态')
+    return clearBrowserProfileState(workspaceId, profileId)
+  },
   'tabs:getInner': ({ workspaceId }) => store.getKv(innerTabKey(workspaceId), EMPTY_INNER),
   'session:getInput': ({ sessionId }) => readSessionInput(sessionId),
 
@@ -246,6 +300,9 @@ const handlers: HandlerMap = {
   'provider:test': todo('provider:test', '步骤 13(先要 OpenAI 编解码)'),
   'model:update': (req) => updateModel(req),
   'model:remove': ({ providerId, alias }) => removeModel(providerId, alias),
+  'modelCatalog:list': () => listUserModelCatalog(),
+  'modelCatalog:upsert': (req) => upsertUserModelCatalog(req),
+  'modelCatalog:remove': ({ id }) => removeUserModelCatalog(id),
   'gateway:getStatus': todo('gateway:getStatus', '步骤 13'),
   'gateway:setEnabled': todo('gateway:setEnabled', '步骤 13'),
   'gateway:resetHealth': todo('gateway:resetHealth', '步骤 13')
@@ -382,6 +439,7 @@ export function registerIpc(): void {
 
   registerThemeBridge()
   registerMcpBridge()
+  setBrowserChangeListener((change) => windows.emitToAll('browser:changed', change))
   /*
     ★ 子 run 的启动器。方向是 **ipc 依赖 runtime,runtime 永不依赖 ipc** ——
     反过来写会把 electron 拖进 runtime 的 import 图,`agent-run.test.ts`

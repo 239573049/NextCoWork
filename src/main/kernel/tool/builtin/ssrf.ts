@@ -31,6 +31,8 @@
  * 彻底解决要把连接固定到已校验的 IP 上(自定义 agent + `lookup`),不在这一批。
  */
 
+import { promises as dns } from 'node:dns'
+
 /** 4 个 8 位段 → 一个 32 位无符号数。不是合法 IPv4 就返回 `null`。 */
 function parseIpv4(host: string): number | null {
   const parts = host.split('.')
@@ -156,6 +158,31 @@ export function ssrfRisk(url: URL): string | null {
   if (!host.includes('.') && !host.startsWith('[')) return refuseLocal(host)
 
   return null
+}
+
+/**
+ * 对域名做一次尽力而为的 DNS 层筛查。
+ *
+ * `ssrfRisk` 负责 URL 字面量，不能发现 `public.example` 解析到
+ * `127.0.0.1` 的情况。浏览器工具会在每一跳请求前调用这里；DNS 不可用时
+ * 保持和 WebFetch 一致的可用性策略，交给底层请求自行失败。
+ */
+export async function resolvedAddressRisk(hostname: string, timeoutMs = 1500): Promise<string | null> {
+  let addresses: Array<{ address: string }>
+  try {
+    addresses = await Promise.race([
+      dns.lookup(hostname, { all: true }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('dns timeout')), timeoutMs))
+    ])
+  } catch {
+    return null
+  }
+  const privateAddress = addresses.find((entry) => isPrivateAddress(entry.address))
+  if (privateAddress === undefined) return null
+  return (
+    `Refusing to reach "${hostname}": it resolves to a loopback or private-network address ` +
+    `(${privateAddress.address}).`
+  )
 }
 
 function refuseLocal(host: string): string {

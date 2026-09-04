@@ -140,6 +140,38 @@ function isAnthropicCacheTtl(value: unknown): value is AnthropicCacheTtl {
   return value === 'off' || value === '5m' || value === '1h'
 }
 
+/**
+ * Merge JSON-shaped option objects recursively.
+ *
+ * A protocol option is itself an object and future protocols may add another
+ * nested object below it. Treating `protocolOptions` as a shallow object would
+ * make a partial update such as `{ future: { transport: { timeout: 30 } } }`
+ * silently erase the saved region/auth fields next to `timeout`. Arrays and
+ * scalar values remain replacement values; an explicit `undefined` behaves as
+ * an omitted legacy field and therefore cannot erase persisted configuration.
+ */
+function mergeOptionRecords(
+  existing: Record<string, unknown>,
+  incoming: Record<string, unknown>
+): Record<string, unknown> {
+  const keys = new Set([...Object.keys(existing), ...Object.keys(incoming)])
+  return Object.fromEntries(
+    [...keys].flatMap((key) => {
+      if (!Object.hasOwn(incoming, key) || incoming[key] === undefined) {
+        return Object.hasOwn(existing, key) ? [[key, existing[key]]] : []
+      }
+      const oldValue = record(existing[key])
+      const nextValue = record(incoming[key])
+      return [[
+        key,
+        oldValue !== undefined && nextValue !== undefined
+          ? mergeOptionRecords(oldValue, nextValue)
+          : incoming[key]
+      ]]
+    })
+  )
+}
+
 /** Merge protocol options without letting legacy renderer updates erase them. */
 function mergeProtocolOptions(
   existing: ProviderProtocolOptions | undefined,
@@ -150,23 +182,19 @@ function mergeProtocolOptions(
   if (next === undefined) throw new Error('protocolOptions 必须是一个对象')
 
   const old = record(existing) ?? {}
-  const merged: Record<string, unknown> = { ...old, ...next }
+  const merged = mergeOptionRecords(old, next)
   if (Object.hasOwn(next, 'anthropic')) {
     const raw = next['anthropic']
-    if (raw === undefined) {
-      if (old['anthropic'] === undefined) delete merged['anthropic']
-      else merged['anthropic'] = old['anthropic']
-    } else {
+    if (raw !== undefined) {
       const anthropic = record(raw)
       if (anthropic === undefined) throw new Error('protocolOptions.anthropic 必须是一个对象')
       if (Object.hasOwn(anthropic, 'cacheTtl') && !isAnthropicCacheTtl(anthropic['cacheTtl'])) {
         throw new Error('Anthropic 缓存时长必须是 off、5m 或 1h')
       }
-      const oldAnthropic = record(old['anthropic']) ?? {}
+      const mergedAnthropic = record(merged['anthropic']) ?? {}
       merged['anthropic'] = {
-        ...oldAnthropic,
-        ...anthropic,
-        cacheTtl: normalizeAnthropicCacheTtl(anthropic['cacheTtl'] ?? oldAnthropic['cacheTtl'])
+        ...mergedAnthropic,
+        cacheTtl: normalizeAnthropicCacheTtl(mergedAnthropic['cacheTtl'])
       }
     }
   }

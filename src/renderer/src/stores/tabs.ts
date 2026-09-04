@@ -16,6 +16,7 @@ import { ulid } from '../../../shared/util/id'
 import { getInnerTabs, persistInnerTabs } from '../services/app'
 import { createSession } from '../services/sessions'
 import { killTerminal } from '../services/terminal'
+import { closeBrowserTab } from '../services/browser'
 import { isSessionUntouched, releaseSession } from './session'
 
 const EMPTY: InnerTabState = {
@@ -23,6 +24,14 @@ const EMPTY: InnerTabState = {
   activeTabId: null,
   bottomActiveTabId: null,
   rightActiveTabId: null
+}
+
+interface BrowserTabSyncItem {
+  id: string
+  url: string
+  title: string
+  source: 'user' | 'agent'
+  profileId?: string
 }
 
 /**
@@ -38,6 +47,9 @@ export interface TabInit {
   path?: string
   /** 给 browser 用 */
   url?: string
+  /** Agent/browser manager tab identity. */
+  browserId?: string
+  profileId?: string
 }
 
 /** `+` 菜单里各种 kind 的初始 Tab。ref 的形状由 kind 决定,所以只能在这里分支。 */
@@ -54,7 +66,17 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
     case 'draw':
       return { id, kind, pane, title: init.title ?? '未命名绘图', ref: { path } }
     case 'browser':
-      return { id, kind, pane, title: init.title ?? '新标签页', ref: { url: init.url ?? '' } }
+      return {
+        id,
+        kind,
+        pane,
+        title: init.title ?? '新标签页',
+        ref: {
+          url: init.url ?? '',
+          ...(init.browserId === undefined ? {} : { browserId: init.browserId }),
+          ...(init.profileId === undefined ? {} : { profileId: init.profileId })
+        }
+      }
     case 'preview':
       return { id, kind, pane, title: init.title ?? '文件预览', ref: { path } }
     case 'files':
@@ -110,6 +132,11 @@ interface TabsState {
   /** `from`/`to` 是**该格内**的下标,见 shared/domain/tab.ts 的 reorderInPane */
   move: (workspaceId: string, from: number, to: number, pane?: TabPane) => void
   rename: (workspaceId: string, tabId: string, title: string) => void
+  setBrowser: (workspaceId: string, tabId: string, patch: { url?: string; title?: string; browserId?: string; profileId?: string }) => void
+  syncBrowserTabs: (
+    workspaceId: string,
+    tabs: ReadonlyArray<{ id: string; url: string; title: string; source: 'user' | 'agent'; profileId?: string }>
+  ) => void
   /** 工作区关闭时销毁:Tab 表和它那些会话的转录一起放掉(正在跑的除外) */
   forget: (workspaceId: string) => void
 }
@@ -141,6 +168,17 @@ export const useTabsStore = create<TabsState>((set, get) => {
 
   /** 正在取持久化布局的工作区。`ensure` 挂在 effect 上,会被重入。 */
   const loading = new Set<string>()
+  // Agent events can arrive for a workspace that is not currently visible.
+  // Keep them pending until that workspace's persisted inner tabs are hydrated,
+  // otherwise a background browser event could overwrite its chat tabs.
+  const pendingBrowser = new Map<string, readonly BrowserTabSyncItem[]>()
+
+  function applyPendingBrowser(workspaceId: string): void {
+    const pending = pendingBrowser.get(workspaceId)
+    if (pending === undefined) return
+    pendingBrowser.delete(workspaceId)
+    get().syncBrowserTabs(workspaceId, pending)
+  }
 
   async function loadOrSeed(workspaceId: string): Promise<void> {
     const persisted = await getInnerTabs(workspaceId)
@@ -149,6 +187,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
     if (persisted.tabs.length > 0) {
       // 读回来的和写出去的是同一份,不回写 —— 否则每次启动都白打一次盘
       set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: persisted } })
+      applyPendingBrowser(workspaceId)
       return
     }
     const tab = makeTab('chat', 'main')
@@ -159,6 +198,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
       bottomActiveTabId: null,
       rightActiveTabId: null
     })
+    applyPendingBrowser(workspaceId)
   }
 
   return {
@@ -287,6 +327,9 @@ export const useTabsStore = create<TabsState>((set, get) => {
       // the explicit lifecycle boundary; switching tabs only unmounts xterm
       // and intentionally keeps the shell (and its scrollback) alive.
       if (target.kind === 'terminal') void killTerminal(target.ref.terminalId).catch(() => undefined)
+      if (target.kind === 'browser' && target.ref.browserId !== undefined) {
+        void closeBrowserTab(workspaceId, target.ref.browserId).catch(() => undefined)
+      }
 
       // 下一个激活项在**本格内**顺位递补 —— 关掉底部的终端不该跳到主区的对话上
       const siblings = tabsInPane(cur.tabs, pane)
@@ -322,6 +365,107 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const cur = get().stateOf(workspaceId)
       const tabs = cur.tabs.map((t) => (t.id === tabId ? { ...t, title } : t))
       write(workspaceId, { ...cur, tabs })
+    },
+
+    setBrowser(workspaceId, tabId, patch) {
+      const cur = get().stateOf(workspaceId)
+      const tabs = cur.tabs.map((tab) => {
+        if (tab.id !== tabId || tab.kind !== 'browser') return tab
+        return {
+          ...tab,
+          ...(patch.title === undefined ? {} : { title: patch.title }),
+          ref: {
+            ...tab.ref,
+            ...(patch.url === undefined ? {} : { url: patch.url }),
+            ...(patch.browserId === undefined ? {} : { browserId: patch.browserId }),
+            ...(patch.profileId === undefined ? {} : { profileId: patch.profileId })
+          }
+        }
+      })
+      write(workspaceId, { ...cur, tabs })
+    },
+
+    syncBrowserTabs(workspaceId, remoteTabs) {
+      if (get().byWorkspace[workspaceId] === undefined) {
+        pendingBrowser.set(workspaceId, [...remoteTabs])
+        get().ensure(workspaceId)
+        return
+      }
+      const cur = get().stateOf(workspaceId)
+      const remoteIds = new Set(remoteTabs.map((tab) => tab.id))
+      let tabs = cur.tabs.filter(
+        (tab) => tab.kind !== 'browser' || tab.ref.browserId === undefined || remoteIds.has(tab.ref.browserId)
+      )
+      let changed = false
+      if (tabs.length !== cur.tabs.length) changed = true
+      for (const remote of remoteTabs) {
+        const existing = tabs.find(
+          (tab): tab is Extract<InnerTab, { kind: 'browser' }> =>
+            tab.kind === 'browser' &&
+            (
+              tab.ref.browserId === remote.id ||
+              (
+                tab.ref.browserId === undefined &&
+                (
+                  tab.ref.url === remote.url ||
+                  // A user-created browser tab is registered in the main
+                  // process just before the invoke promise resolves. Its
+                  // change event can therefore arrive before BrowserView
+                  // has attached the returned browserId. Reconcile that
+                  // optimistic blank tab instead of creating a duplicate.
+                  (remote.source === 'user' && paneOf(tab) === 'main' && tab.ref.url === '')
+                )
+              )
+            )
+        )
+        if (existing !== undefined) {
+          if (
+            existing.ref.url !== remote.url ||
+            existing.title !== remote.title ||
+            existing.ref.browserId !== remote.id ||
+            existing.ref.profileId !== remote.profileId
+          ) {
+            tabs = tabs.map((tab) =>
+              tab.id === existing.id && tab.kind === 'browser'
+                ? {
+                    ...tab,
+                    title: remote.title,
+                    ref: {
+                      ...tab.ref,
+                      url: remote.url,
+                      browserId: remote.id,
+                      ...(remote.profileId === undefined ? {} : { profileId: remote.profileId })
+                    }
+                  }
+                : tab
+            )
+            changed = true
+          }
+          continue
+        }
+        // Agent tabs live in the right workbench so they never replace the
+        // conversation currently being edited in the main pane.
+        tabs.push({
+          id: ulid(),
+          kind: 'browser',
+          pane: remote.source === 'agent' ? 'right' : 'main',
+          title: remote.title,
+          ref: {
+            url: remote.url,
+            browserId: remote.id,
+            ...(remote.profileId === undefined ? {} : { profileId: remote.profileId })
+          }
+        })
+        changed = true
+      }
+      if (changed) {
+        const right = tabs.filter((tab) => tab.kind === 'browser' && tab.ref.browserId !== undefined && tab.pane === 'right')
+        write(workspaceId, {
+          ...cur,
+          tabs,
+          rightActiveTabId: cur.rightActiveTabId ?? right[0]?.id ?? null
+        })
+      }
     },
 
     forget(workspaceId) {

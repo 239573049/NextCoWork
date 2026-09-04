@@ -24,36 +24,58 @@ import {
   Settings2,
   Slash,
   Square,
-  Wrench
-} from 'lucide-react'
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import type { PermissionMode } from '../../../../shared/agent/permission'
-import { PERMISSION_MODES, PERMISSION_MODE_HINT, PERMISSION_MODE_LABEL } from '../../../../shared/agent/permission'
-import type { SessionMode, ThinkingLevel } from '../../../../shared/agent/run-request'
+  Wrench,
+} from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
+import type { PermissionMode } from "../../../../shared/agent/permission";
+import {
+  PERMISSION_MODES,
+} from "../../../../shared/agent/permission";
+import type {
+  SessionMode,
+  ThinkingLevel,
+} from "../../../../shared/agent/run-request";
 import {
   SESSION_MODE_HINT,
   SESSION_MODE_LABEL,
   SESSION_MODES,
   THINKING_LEVEL_LABEL,
-  THINKING_LEVELS
-} from '../../../../shared/agent/run-request'
-import type { Workspace, WorkspaceSettings } from '../../../../shared/domain/workspace'
-import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
-import { ProviderIcon } from '../../components/brand/ProviderIcon'
-import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../../components/ui/Menu'
-import { cn } from '../../lib/cn'
-import { useI18n } from '../../i18n'
-import { updateWorkspace } from '../../services/app'
-import { useModelsStore } from '../../stores/models'
-import { AttachmentTray, type TrayItem } from './AttachmentTray'
+  THINKING_LEVELS,
+} from "../../../../shared/agent/run-request";
+import type {
+  Workspace,
+  WorkspaceSettings,
+} from "../../../../shared/domain/workspace";
+import type {
+  ModelAlias,
+  UpstreamProvider,
+} from "../../../../shared/domain/provider";
+import { ProviderIcon } from "../../components/brand/ProviderIcon";
+import {
+  Menu,
+  MenuItem,
+  MenuLabel,
+  MenuSeparator,
+} from "../../components/ui/Menu";
+import { cn } from "../../lib/cn";
+import { useI18n } from "../../i18n";
+import { updateWorkspace } from "../../services/app";
+import { useModelsStore } from "../../stores/models";
+import { AttachmentTray, type TrayItem } from "./AttachmentTray";
 
 export interface ComposerValue {
-  permissionMode: PermissionMode
-  model: string
-  mode: SessionMode
-  thinking: ThinkingLevel
-  webSearch: boolean
+  permissionMode: PermissionMode;
+  model: string;
+  mode: SessionMode;
+  thinking: ThinkingLevel;
+  webSearch: boolean;
 }
 
 export function Composer({
@@ -68,37 +90,39 @@ export function Composer({
   onAttachFiles,
   onPickAttachment,
   onRemoveAttachment,
-  onRetryAttachment
+  onRetryAttachment,
 }: {
-  workspace: Workspace
+  workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
-  fallbackModel: string
-  draft: string
-  onDraft: (v: string) => void
-  running: boolean
-  onSend: (text: string, value: ComposerValue) => void
-  onStop: () => void
+  fallbackModel: string;
+  draft: string;
+  onDraft: (v: string) => void;
+  running: boolean;
+  onSend: (text: string, value: ComposerValue) => void;
+  onStop: () => void;
   /**
    * 草稿附件。★ **状态不在这里** —— 它与 draft 同级,住在 ChatView,
    * 因为发送时要把它转成 `ContentPart[]`,而那是 ChatView 的职责。
    * 这里只负责渲染与三个入口。
    */
-  attachments?: TrayItem[]
+  attachments?: TrayItem[];
   /** 拖拽 / 粘贴共用 */
-  onAttachFiles?: (files: File[]) => void
+  onAttachFiles?: (files: File[]) => void;
   /** 点 `+` → 走主进程 dialog */
-  onPickAttachment?: () => void
-  onRemoveAttachment?: (key: string) => void
-  onRetryAttachment?: (key: string) => void
+  onPickAttachment?: () => void;
+  onRemoveAttachment?: (key: string) => void;
+  onRetryAttachment?: (key: string) => void;
 }): ReactNode {
-  const { t } = useI18n()
-  const { models, providers, loaded, providerOf, load } = useModelsStore()
-  const [value, setValue] = useState<ComposerValue>(() => fromSettings(workspace.settings))
-  const ref = useRef<HTMLTextAreaElement>(null)
+  const { t } = useI18n();
+  const { models, providers, loaded, providerOf, load } = useModelsStore();
+  const [value, setValue] = useState<ComposerValue>(() =>
+    fromSettings(workspace.settings),
+  );
+  const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    void load()
-  }, [load])
+    void load();
+  }, [load]);
 
   /**
    * 切工作区 = 换一套默认值。
@@ -110,30 +134,33 @@ export function Composer({
    *
    * 用 React 官方那个「渲染期按 key 调整 state」的写法:只认 workspace.id 变没变。
    */
-  const [seenWorkspace, setSeenWorkspace] = useState(workspace.id)
+  const [seenWorkspace, setSeenWorkspace] = useState(workspace.id);
   /** 拖拽悬停高亮。★ 纯视觉状态,不影响任何数据流 */
-  const [dragging, setDragging] = useState(false)
+  const [dragging, setDragging] = useState(false);
   if (seenWorkspace !== workspace.id) {
-    setSeenWorkspace(workspace.id)
-    setValue(fromSettings(workspace.settings))
+    setSeenWorkspace(workspace.id);
+    setValue(fromSettings(workspace.settings));
   }
 
   // 自动增高。max-height 在 className 里,超过就滚动
   useEffect(() => {
-    const el = ref.current
-    if (el === null) return
-    el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [draft])
+    const el = ref.current;
+    if (el === null) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
 
   function patch(p: Partial<ComposerValue>): void {
-    const next = { ...value, ...p }
-    setValue(next)
+    const next = { ...value, ...p };
+    setValue(next);
     // 写回工作区当新默认值。失败只记日志 —— 药丸已经生效了,
     // 一个存不下来的默认值不值得打断用户正在写的这句话。
-    void updateWorkspace({ id: workspace.id, settings: toSettings(next) }).catch((err: unknown) => {
-      console.error('[composer] 工作区默认值写回失败:', err)
-    })
+    void updateWorkspace({
+      id: workspace.id,
+      settings: toSettings(next),
+    }).catch((err: unknown) => {
+      console.error("[composer] 工作区默认值写回失败:", err);
+    });
   }
 
   /**
@@ -144,21 +171,26 @@ export function Composer({
    * 而他并不知道自己什么时候「选」过。
    */
   const model =
-    value.model !== '' ? value.model : fallbackModel !== '' ? fallbackModel : (models[0]?.alias ?? '')
-  const provider = providerOf(model)
-  const modelLabel = model !== '' ? model : loaded ? t('chat.noModel') : t('common.loading')
+    value.model !== ""
+      ? value.model
+      : fallbackModel !== ""
+        ? fallbackModel
+        : (models[0]?.alias ?? "");
+  const provider = providerOf(model);
+  const modelLabel =
+    model !== "" ? model : loaded ? t("chat.noModel") : t("common.loading");
 
   function submit(): void {
-    const text = draft.trim()
+    const text = draft.trim();
     // ★ 只有附件、没有文字也该能发 —— 拖一张图进来直接问「这是什么」是常见用法。
     //   但上传还没完成时不发:那样 parts 里会缺一张图,而用户以为发出去了。
-    const hasReady = attachments.some((a) => a.status === 'done')
-    const pending = attachments.some((a) => a.status === 'uploading')
-    if (pending) return
-    if ((text === '' && !hasReady) || model === '') return
+    const hasReady = attachments.some((a) => a.status === "done");
+    const pending = attachments.some((a) => a.status === "uploading");
+    if (pending) return;
+    if ((text === "" && !hasReady) || model === "") return;
     // 发送时打快照:药丸此刻的值进 RunRequest,run 跑起来后再改药丸不影响它
-    onSend(text, { ...value, model })
-    onDraft('')
+    onSend(text, { ...value, model });
+    onDraft("");
   }
 
   /**
@@ -167,21 +199,23 @@ export function Composer({
    * 一个 `node_modules` 拖进来是几万个文件。
    */
   function handleDrop(e: React.DragEvent): void {
-    if (onAttachFiles === undefined) return
-    const files = [...e.dataTransfer.files].filter((f) => f.size > 0 || f.type !== '')
-    if (files.length === 0) return
-    e.preventDefault()
-    setDragging(false)
-    onAttachFiles(files)
+    if (onAttachFiles === undefined) return;
+    const files = [...e.dataTransfer.files].filter(
+      (f) => f.size > 0 || f.type !== "",
+    );
+    if (files.length === 0) return;
+    e.preventDefault();
+    setDragging(false);
+    onAttachFiles(files);
   }
 
   /** 粘贴。★ 截图粘贴是最高频入口,而它只有 `files`,没有文件名 */
   function handlePaste(e: React.ClipboardEvent): void {
-    if (onAttachFiles === undefined) return
-    const files = [...e.clipboardData.files]
-    if (files.length === 0) return
+    if (onAttachFiles === undefined) return;
+    const files = [...e.clipboardData.files];
+    if (files.length === 0) return;
     // 不 preventDefault:剪贴板里可能同时有文字,那部分仍该正常粘进输入框
-    onAttachFiles(files)
+    onAttachFiles(files);
   }
 
   return (
@@ -192,15 +226,17 @@ export function Composer({
       */}
       <div
         className={cn(
-          'mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors',
-          dragging ? 'border-accent' : 'border-border'
+          "mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors",
+          dragging ? "border-accent" : "border-border",
         )}
         onDragOver={(e) => {
-          if (onAttachFiles === undefined) return
-          e.preventDefault()
-          setDragging(true)
+          if (onAttachFiles === undefined) return;
+          e.preventDefault();
+          setDragging(true);
         }}
-        onDragLeave={() => { setDragging(false) }}
+        onDragLeave={() => {
+          setDragging(false);
+        }}
         onDrop={handleDrop}
       >
         <AttachmentTray
@@ -218,41 +254,47 @@ export function Composer({
           onKeyDown={(e) => {
             // Enter 发送,Shift+Enter 换行。输入法组词期间的 Enter 是「上屏」,
             // 不是「发送」—— 少了 isComposing 这个判断,中文用户每打一个词就发一次。
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault()
-              submit()
+            if (
+              e.key === "Enter" &&
+              !e.shiftKey &&
+              !e.nativeEvent.isComposing
+            ) {
+              e.preventDefault();
+              submit();
             }
           }}
           rows={1}
-          placeholder={running ? t('chat.queuePlaceholder') : t('chat.placeholder')}
+          placeholder={
+            running ? t("chat.queuePlaceholder") : t("chat.placeholder")
+          }
           className="scroll-thin selectable max-h-[280px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[13.5px] leading-relaxed text-fg placeholder:text-fg-faint focus:outline-none"
         />
 
         <div className="flex items-center gap-1 px-2.5 pt-1 pb-2.5">
           {/* ── 权限档位:界面上就在这个位置 ── */}
           <Menu
-            label={t('composer.permission')}
+            label={t("composer.permission")}
             width={260}
             trigger={
-              <Pill accent={value.permissionMode === 'full'}>
-                {PERMISSION_MODE_LABEL[value.permissionMode]}
+              <Pill accent={value.permissionMode === "full"}>
+                {t(`permission.${value.permissionMode}` as "permission.ask" | "permission.auto" | "permission.full")}
               </Pill>
             }
           >
             {(close) => (
               <>
-                <MenuLabel>{t('composer.approvalHint')}</MenuLabel>
+                <MenuLabel>{t("composer.approvalHint")}</MenuLabel>
                 {PERMISSION_MODES.map((m) => (
                   <MenuItem
                     key={m}
                     checked={m === value.permissionMode}
-                    description={PERMISSION_MODE_HINT[m]}
+                    description={t(`permission.${m}Hint` as "permission.askHint" | "permission.autoHint" | "permission.fullHint")}
                     onSelect={() => {
-                      patch({ permissionMode: m })
-                      close()
+                      patch({ permissionMode: m });
+                      close();
                     }}
                   >
-                    {PERMISSION_MODE_LABEL[m]}
+                    {t(`permission.${m}` as "permission.ask" | "permission.auto" | "permission.full")}
                   </MenuItem>
                 ))}
               </>
@@ -261,12 +303,14 @@ export function Composer({
 
           {/* ── `/` 会话模式 ── */}
           <Menu
-            label={t('composer.mode')}
+            label={t("composer.mode")}
             width={250}
             trigger={
-              <Pill active={value.mode !== 'normal'}>
+              <Pill active={value.mode !== "normal"}>
                 <Slash size={12} />
-                {value.mode !== 'normal' && <span>{SESSION_MODE_LABEL[value.mode]}</span>}
+                {value.mode !== "normal" && (
+                  <span>{SESSION_MODE_LABEL[value.mode]}</span>
+                )}
               </Pill>
             }
           >
@@ -277,10 +321,10 @@ export function Composer({
                     key={m}
                     checked={m === value.mode}
                     description={SESSION_MODE_HINT[m]}
-                    icon={m === 'goal' ? <InfinityIcon size={14} /> : undefined}
+                    icon={m === "goal" ? <InfinityIcon size={14} /> : undefined}
                     onSelect={() => {
-                      patch({ mode: m })
-                      close()
+                      patch({ mode: m });
+                      close();
                     }}
                   >
                     {SESSION_MODE_LABEL[m]}
@@ -292,7 +336,7 @@ export function Composer({
 
           {/* ── `+` 附加能力 ── */}
           <Menu
-            label={t('composer.more')}
+            label={t("composer.more")}
             width={240}
             trigger={
               <Pill>
@@ -304,26 +348,26 @@ export function Composer({
               <>
                 <MenuItem
                   icon={<Paperclip size={14} />}
-                  description={t('composer.attachmentHint')}
+                  description={t("composer.attachmentHint")}
                   onSelect={() => {
-                    close()
-                    onPickAttachment?.()
+                    close();
+                    onPickAttachment?.();
                   }}
                 >
-                  {t('composer.addAttachment')}
+                  {t("composer.addAttachment")}
                 </MenuItem>
                 <MenuSeparator />
                 <MenuItem
                   checked={value.webSearch}
                   icon={<Globe size={14} />}
                   // 「完全访问」也不解除这个开关(方案 §4.5),菜单上要说出来
-                  description={t('composer.webSearchHint')}
+                  description={t("composer.webSearchHint")}
                   onSelect={() => {
-                    patch({ webSearch: !value.webSearch })
-                    close()
+                    patch({ webSearch: !value.webSearch });
+                    close();
                   }}
                 >
-                  {t('composer.webSearch')}
+                  {t("composer.webSearch")}
                 </MenuItem>
               </>
             )}
@@ -334,7 +378,7 @@ export function Composer({
               <Globe size={12} />
             </Pill>
           )}
-          {value.thinking !== 'auto' && (
+          {value.thinking !== "auto" && (
             <Pill readonly>
               <Wrench size={12} />
               <span>{THINKING_LEVEL_LABEL[value.thinking]}</span>
@@ -365,37 +409,47 @@ export function Composer({
           <button
             type="button"
             data-testid="composer-send"
-            aria-label={running ? t('chat.stop') : t('chat.send')}
+            aria-label={running ? t("chat.stop") : t("chat.send")}
             // 生成中按钮变「停止」,但输入框仍可打字 —— 排队走 Enter
             onClick={running ? onStop : submit}
-            disabled={!running && (draft.trim() === '' || model === '')}
-            title={running ? t('composer.stopGeneration') : model === '' ? t('composer.noAvailableModel') : model}
-            className={cn(
-              'flex h-7 w-7 shrink-0 items-center justify-center rounded-pill transition-colors',
+            disabled={!running && (draft.trim() === "" || model === "")}
+            title={
               running
-                ? 'bg-tint-strong text-fg hover:bg-tint-hover'
-                : 'bg-accent text-accent-fg hover:opacity-90',
-              'disabled:cursor-not-allowed disabled:bg-tint disabled:text-fg-faint'
+                ? t("composer.stopGeneration")
+                : model === ""
+                  ? t("composer.noAvailableModel")
+                  : model
+            }
+            className={cn(
+              "flex h-7 w-7 shrink-0 items-center justify-center rounded-pill transition-colors",
+              running
+                ? "bg-tint-strong text-fg hover:bg-tint-hover"
+                : "bg-accent text-accent-fg hover:opacity-90",
+              "disabled:cursor-not-allowed disabled:bg-tint disabled:text-fg-faint",
             )}
           >
-            {running ? <Square size={12} fill="currentColor" /> : <ArrowUp size={15} />}
+            {running ? (
+              <Square size={12} fill="currentColor" />
+            ) : (
+              <ArrowUp size={15} />
+            )}
           </button>
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 function Pill({
   children,
   active = false,
   readonly = false,
-  accent = false
+  accent = false,
 }: {
-  children: ReactNode
-  active?: boolean
+  children: ReactNode;
+  active?: boolean;
   /** 只读徽标:重复显示 `+` 菜单里已开的项,让它们在收起状态下也看得见 */
-  readonly?: boolean
+  readonly?: boolean;
   /**
    * 参考实现里**整个浅色界面只有两处用色**,这排药丸占掉一处(另一处是发送按钮):
    * 「完全访问」是底 `accent/10` + 字/图标 accent,其余档位是中性的。
@@ -406,23 +460,23 @@ function Pill({
    *   反解出来正好都是 accent @10% 压在输入框底上(`theme.css` §5)。
    *   于是换颜色主题时药丸底自己跟着 accent 走,不用另外声明。
    */
-  accent?: boolean
+  accent?: boolean;
 }): ReactNode {
   return (
     <span
       className={cn(
-        'flex h-7 shrink-0 items-center gap-1.5 rounded-pill px-2.5 text-[12.5px]',
+        "flex h-7 shrink-0 items-center gap-1.5 rounded-pill px-2.5 text-[12.5px]",
         readonly
-          ? 'bg-tint/60 text-fg-muted'
+          ? "bg-tint/60 text-fg-muted"
           : accent
-            ? 'bg-accent/10 text-accent transition-colors'
-            : 'transition-colors hover:bg-tint-hover ' +
-                (active ? 'bg-tint text-fg' : 'text-fg-muted hover:text-fg')
+            ? "bg-accent/10 text-accent transition-colors"
+            : "transition-colors hover:bg-tint-hover " +
+              (active ? "bg-tint text-fg" : "text-fg-muted hover:text-fg"),
       )}
     >
       {children}
     </span>
-  )
+  );
 }
 
 /**
@@ -439,54 +493,64 @@ function ModelPicker({
   loaded,
   thinking,
   onModel,
-  onThinking
+  onThinking,
 }: {
-  model: string
-  modelLabel: string
-  provider?: UpstreamProvider
-  providers: UpstreamProvider[]
-  models: ModelAlias[]
-  loaded: boolean
-  thinking: ThinkingLevel
-  onModel: (model: string) => void
-  onThinking: (thinking: ThinkingLevel) => void
+  model: string;
+  modelLabel: string;
+  provider?: UpstreamProvider;
+  providers: UpstreamProvider[];
+  models: ModelAlias[];
+  loaded: boolean;
+  thinking: ThinkingLevel;
+  onModel: (model: string) => void;
+  onThinking: (thinking: ThinkingLevel) => void;
 }): ReactNode {
-  const [providerId, setProviderId] = useState<string | null>(null)
-  const [configOpen, setConfigOpen] = useState(false)
-  const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(null)
-  const providerRefs = useRef<Record<string, HTMLButtonElement | null>>({})
-  const submenuRef = useRef<HTMLDivElement>(null)
-  const closeMenuRef = useRef<() => void>(() => {})
-  const availableProviders = providers.filter((p) => models.some((m) => m.providerId === p.id))
+  const { t } = useI18n();
+  const [providerId, setProviderId] = useState<string | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(
+    null,
+  );
+  const providerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const closeMenuRef = useRef<() => void>(() => {});
+  const availableProviders = providers.filter((p) =>
+    models.some((m) => m.providerId === p.id),
+  );
   const openProviderSubmenu = (id: string): void => {
-    setProviderId(id)
-    setSubmenuAnchor(providerRefs.current[id] ?? null)
-  }
+    setProviderId(id);
+    setSubmenuAnchor(providerRefs.current[id] ?? null);
+  };
 
   return (
     <>
       <Menu
-        label="模型"
+        label={t("chat.modelPicker")}
         width={300}
         align="end"
         trigger={
           <Pill>
-            <ProviderIcon name={[model, provider?.name, provider?.id]} size={13} />
+            <ProviderIcon
+              name={[model, provider?.name, provider?.id]}
+              size={13}
+            />
             <span className="max-w-[150px] truncate">{modelLabel}</span>
             <ChevronRight size={12} className="ml-0.5 text-fg-faint" />
           </Pill>
         }
         onOpenChange={(open) => {
           if (!open) {
-            setProviderId(null)
-            setConfigOpen(false)
-            setSubmenuAnchor(null)
+            setProviderId(null);
+            setConfigOpen(false);
+            setSubmenuAnchor(null);
           }
         }}
-        containsTarget={(target) => submenuRef.current?.contains(target) ?? false}
+        containsTarget={(target) =>
+          submenuRef.current?.contains(target) ?? false
+        }
       >
         {(close) => {
-          closeMenuRef.current = close
+          closeMenuRef.current = close;
           if (configOpen) {
             return (
               <>
@@ -497,13 +561,13 @@ function ModelPicker({
                   className="app-no-drag mb-1 flex w-full items-center gap-1.5 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg"
                 >
                   <ChevronLeft size={14} />
-                  <span>返回提供商</span>
+                  <span>{t("chat.backToProviders")}</span>
                 </button>
                 <MenuSeparator />
                 <MenuLabel>
                   <span className="flex items-center gap-1.5">
                     <BrainCircuit size={12} />
-                    模型配置 · 思考强度
+                    {t("chat.modelConfigThinking")}
                   </span>
                 </MenuLabel>
                 {THINKING_LEVELS.map((level) => (
@@ -511,15 +575,15 @@ function ModelPicker({
                     key={level}
                     checked={level === thinking}
                     onSelect={() => {
-                      onThinking(level)
-                      close()
+                      onThinking(level);
+                      close();
                     }}
                   >
                     {THINKING_LEVEL_LABEL[level]}
                   </MenuItem>
                 ))}
               </>
-            )
+            );
           }
 
           return (
@@ -527,33 +591,37 @@ function ModelPicker({
               <MenuLabel>
                 <span className="flex items-center gap-1.5">
                   <Settings2 size={12} />
-                  选择模型提供商
+                  {t("chat.selectProvider")}
                 </span>
               </MenuLabel>
               {!loaded ? (
-                <MenuLabel>加载中…</MenuLabel>
+                <MenuLabel>{t("common.loading")}</MenuLabel>
               ) : availableProviders.length === 0 ? (
-                <MenuLabel>还没有配置模型,去设置页添加</MenuLabel>
+                <MenuLabel>{t("chat.noModelsConfigured")}</MenuLabel>
               ) : (
                 availableProviders.map((p) => {
-                  const count = models.filter((m) => m.providerId === p.id).length
+                  const count = models.filter(
+                    (m) => m.providerId === p.id,
+                  ).length;
                   return (
                     <MenuItem
                       key={p.id}
                       checked={p.id === provider?.id}
-                      description={`${count} 个可用模型`}
+                      description={t("chat.availableModels", { count })}
                       buttonRef={(node) => {
-                        providerRefs.current[p.id] = node
+                        providerRefs.current[p.id] = node;
                       }}
                       onHover={() => openProviderSubmenu(p.id)}
                       onSelect={() => openProviderSubmenu(p.id)}
                     >
                       <span className="flex items-center gap-2">
-                        <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                        <span className="min-w-0 flex-1 truncate">
+                          {p.name}
+                        </span>
                         <ChevronRight size={13} className="text-fg-faint" />
                       </span>
                     </MenuItem>
-                  )
+                  );
                 })
               )}
               <MenuSeparator />
@@ -561,42 +629,46 @@ function ModelPicker({
                 icon={<BrainCircuit size={14} />}
                 description={`思考强度 · ${THINKING_LEVEL_LABEL[thinking]}`}
                 onSelect={() => {
-                  setConfigOpen(true)
-                  setProviderId(null)
-                  setSubmenuAnchor(null)
+                  setConfigOpen(true);
+                  setProviderId(null);
+                  setSubmenuAnchor(null);
                 }}
               >
                 <span className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate">模型配置</span>
+                  <span className="min-w-0 flex-1 truncate">
+                    {t("chat.modelConfig")}
+                  </span>
                   <ChevronRight size={13} className="text-fg-faint" />
                 </span>
               </MenuItem>
             </>
-          )
+          );
         }}
       </Menu>
-      {submenuAnchor !== null && providerId !== null && typeof document !== 'undefined'
+      {submenuAnchor !== null &&
+      providerId !== null &&
+      typeof document !== "undefined"
         ? createPortal(
             <ModelSubmenu
               anchor={submenuAnchor}
               panelRef={(node) => {
-                submenuRef.current = node
+                submenuRef.current = node;
               }}
-            provider={providers.find((p) => p.id === providerId)}
-            models={models.filter((m) => m.providerId === providerId)}
-            model={model}
-            onSelect={(alias) => {
-                onModel(alias)
-                closeMenuRef.current()
-                setSubmenuAnchor(null)
-                setProviderId(null)
+              provider={providers.find((p) => p.id === providerId)}
+              models={models.filter((m) => m.providerId === providerId)}
+              model={model}
+              onSelect={(alias) => {
+                onModel(alias);
+                closeMenuRef.current();
+                setSubmenuAnchor(null);
+                setProviderId(null);
               }}
             />,
-            document.body
+            document.body,
           )
         : null}
     </>
-  )
+  );
 }
 
 function ModelSubmenu({
@@ -605,56 +677,72 @@ function ModelSubmenu({
   provider,
   models,
   model,
-  onSelect
+  onSelect,
 }: {
-  anchor: HTMLElement
-  panelRef: (node: HTMLDivElement | null) => void
-  provider?: UpstreamProvider
-  models: ModelAlias[]
-  model: string
-  onSelect: (alias: string) => void
+  anchor: HTMLElement;
+  panelRef: (node: HTMLDivElement | null) => void;
+  provider?: UpstreamProvider;
+  models: ModelAlias[];
+  model: string;
+  onSelect: (alias: string) => void;
 }): ReactNode {
-  const [position, setPosition] = useState({ top: 0, left: 0 })
-  const width = 300
-  const panelNode = useRef<HTMLDivElement | null>(null)
+  const { t } = useI18n();
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const width = 300;
+  const panelNode = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
     const measure = (): void => {
-      const rect = anchor.getBoundingClientRect()
-      const viewportWidth = window.innerWidth
-      const viewportHeight = window.innerHeight
-      const panelHeight = Math.min(panelNode.current?.scrollHeight ?? 0, Math.max(0, viewportHeight - 16))
-      const preferredLeft = rect.right + 6 + width <= viewportWidth ? rect.right + 6 : rect.left - width - 6
-      const left = Math.max(8, Math.min(preferredLeft, viewportWidth - width - 8))
+      const rect = anchor.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const panelHeight = Math.min(
+        panelNode.current?.scrollHeight ?? 0,
+        Math.max(0, viewportHeight - 16),
+      );
+      const preferredLeft =
+        rect.right + 6 + width <= viewportWidth
+          ? rect.right + 6
+          : rect.left - width - 6;
+      const left = Math.max(
+        8,
+        Math.min(preferredLeft, viewportWidth - width - 8),
+      );
       // 与触发项顶部对齐；下方空间不足时向上推，确保整个弹层留在视口内。
-      const top = Math.max(8, Math.min(rect.top, viewportHeight - panelHeight - 8))
-      setPosition({ top, left })
-    }
-    measure()
-    const resizeObserver = new ResizeObserver(measure)
-    if (panelNode.current !== null) resizeObserver.observe(panelNode.current)
-    window.addEventListener('resize', measure)
-    window.addEventListener('scroll', measure, true)
+      const top = Math.max(
+        8,
+        Math.min(rect.top, viewportHeight - panelHeight - 8),
+      );
+      setPosition({ top, left });
+    };
+    measure();
+    const resizeObserver = new ResizeObserver(measure);
+    if (panelNode.current !== null) resizeObserver.observe(panelNode.current);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
     return () => {
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', measure)
-      window.removeEventListener('scroll', measure, true)
-    }
-  }, [anchor, models.length])
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [anchor, models.length]);
 
   return (
     <div
       ref={(node) => {
-        panelNode.current = node
-        panelRef(node)
+        panelNode.current = node;
+        panelRef(node);
       }}
       role="menu"
-      style={{ width, top: position.top, left: position.left, maxHeight: 'calc(100vh - 16px)' }}
+      style={{
+        width,
+        top: position.top,
+        left: position.left,
+        maxHeight: "calc(100vh - 16px)",
+      }}
       className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40"
     >
-      <MenuLabel>
-        {provider?.name ?? '模型'}
-      </MenuLabel>
+      <MenuLabel>{provider?.name ?? t("chat.modelPicker")}</MenuLabel>
       {models.map((m) => {
         return (
           <MenuItem
@@ -664,10 +752,10 @@ function ModelSubmenu({
           >
             {m.alias}
           </MenuItem>
-        )
+        );
       })}
     </div>
-  )
+  );
 }
 
 // ── 药丸值 ↔ 工作区设置。两边字段名一致,但**不是同一个类型** ──
@@ -679,8 +767,8 @@ function fromSettings(s: WorkspaceSettings): ComposerValue {
     model: s.defaultModel,
     mode: s.defaultMode,
     thinking: s.defaultThinking,
-    webSearch: s.webSearch
-  }
+    webSearch: s.webSearch,
+  };
 }
 
 function toSettings(v: ComposerValue): Partial<WorkspaceSettings> {
@@ -689,6 +777,6 @@ function toSettings(v: ComposerValue): Partial<WorkspaceSettings> {
     defaultModel: v.model,
     defaultMode: v.mode,
     defaultThinking: v.thinking,
-    webSearch: v.webSearch
-  }
+    webSearch: v.webSearch,
+  };
 }

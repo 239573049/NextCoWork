@@ -414,6 +414,7 @@ export class AgentSession {
 
   private toolContext(callId: string): ToolContext {
     return {
+      workspaceId: this.req.workspaceId,
       workspaceRoot: this.deps.workspaceRoot,
       // ★ 必传:只断 SSE 不断工具,会留下一堆僵尸 shell 和还在写的文件(方案 §4.3)
       signal: this.handle.signal,

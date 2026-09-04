@@ -74,6 +74,8 @@ export type SpawnSubagentFn = (req: SubagentRequest) => Promise<SubagentOutcome>
  * 只中断 HTTP 流而不把 signal 传进工具体,会留下一堆僵尸 shell 和还在写的文件。
  */
 export interface ToolContext {
+  /** 工作区身份。浏览器工具用它做会话隔离；旧的无头调用可省略。 */
+  workspaceId?: string
   workspaceRoot: string
   signal: AbortSignal
   /** 运行期快照 —— run 开始时定死 */

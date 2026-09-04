@@ -69,8 +69,45 @@ const BACKUP_EXT = '.ncwbackup'
 const AUTO_BACKUP_RE = /^nextcowork-auto\.ncwbackup$/
 const MAX_IMPORT_BYTES = 128 * 1024 * 1024
 const MAX_BACKUP_BYTES = 1024 * 1024 * 1024
+/**
+ * Electron keeps its profile caches beside our database because the app uses
+ * the same project-level userData directory.  They are application-owned
+ * local data too, and must be removed by "delete and quit".  Keep this list
+ * explicit: a user may place unrelated files in the directory while
+ * inspecting/debugging it, and a broad recursive sweep would be surprising.
+ */
+const ELECTRON_PROFILE_PATHS = [
+  'Cache',
+  'Code Cache',
+  'GPUCache',
+  'DawnGraphiteCache',
+  'DawnWebGPUCache',
+  'Session Storage',
+  'Local Storage',
+  'blob_storage',
+  'Shared Dictionary',
+  'Network Persistent State',
+  'Cookies',
+  'Cookies-journal',
+  'Trust Tokens',
+  'Trust Tokens-journal',
+  'DIPS',
+  'DIPS-wal',
+  'DIPS-wal 2',
+  'Local State',
+  'Preferences',
+  'Service Worker',
+  'IndexedDB',
+  'WebStorage',
+  'Network',
+  'TransportSecurity',
+  'QuotaManager',
+  'QuotaManager-journal',
+  'History',
+  'History-journal',
+  'Crashpad'
+] as const
 const pendingImports = new Map<number, DataExport>()
-const pendingImportPaths = new Map<number, string>()
 let importSeq = 0
 let pendingRestore: { path: string; preview: RestorePreview } | null = null
 let backupRunning = false
@@ -720,7 +757,11 @@ async function restoreCredentialRollback(snapshot: Map<string, CredentialRollbac
         // Re-seeding the old plaintext repairs an in-memory/test host and is
         // harmless for Electron (it simply encrypts it again).
         await secrets.set(ref, state.plaintext)
-      } else if (state.blob === undefined && state.plaintextReadable) {
+      } else if (state.blob === undefined) {
+        // If the snapshot had no encrypted blob, any credential written by the
+        // failed import must be removed. This remains true even when reading
+        // the pre-import value failed (for example, a corrupt safeStorage
+        // value): there was no database credential to preserve.
         // The optional hook is implemented by Electron and nodeHost. Older
         // injected hosts can still rely on the database restoration above.
         await secrets.remove?.(ref)
@@ -771,7 +812,6 @@ export async function importPreview(): Promise<ImportPreview | null> {
   const counts = compareCounts(data)
   const id = ++importSeq
   pendingImports.set(id, data)
-  pendingImportPaths.set(id, path)
   // 只有一个待确认导入；旧预览失效，避免用户确认错文件。
   for (const key of pendingImports.keys()) if (key !== id) pendingImports.delete(key)
   return {
@@ -825,7 +865,6 @@ export async function importApply(req: { password?: string }): Promise<ImportApp
       return merged
     })
     pendingImports.clear()
-    pendingImportPaths.clear()
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
     windows.emitToAll('sessions:changed', {})
@@ -1477,7 +1516,18 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   // to the process working directory.  Only a user-selected absolute path is
   // an external backup location worth preserving.
   const externalBackup = externalBackupPath(configuredBackup)
-  const managedNames = [ATTACHMENTS_DIR, 'themes', 'skills', 'agents', 'plugins', 'plugin', 'logs', 'cache', 'workspaces']
+  const managedNames = [
+    ATTACHMENTS_DIR,
+    'themes',
+    'skills',
+    'agents',
+    'plugins',
+    'plugin',
+    'logs',
+    'cache',
+    'workspaces',
+    ...ELECTRON_PROFILE_PATHS
+  ]
   for (const name of managedNames) {
     const path = join(root, name)
     removeManagedPath(path, externalBackup)

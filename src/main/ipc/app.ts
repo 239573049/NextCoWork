@@ -5,7 +5,7 @@
  * Bootstrap **一次拿全**,而不是让渲染层开局打七八个 invoke —— 那样会出现
  * 「设置到了但工作区还没到」的中间态,每个组件都得写一遍 loading 分支。
  */
-import { app, nativeTheme, shell } from 'electron'
+import { app, clipboard, nativeTheme, shell } from 'electron'
 import type { Bootstrap } from '../../shared/domain/bootstrap'
 import type { ResolvedTheme, ThemePreference } from '../../shared/domain/settings'
 import type { WindowKind } from '../../shared/domain/tab'
@@ -55,6 +55,21 @@ export async function openExternal(url: string): Promise<void> {
     throw new IpcError('unknown', `拒绝打开非 https 链接: ${url}`)
   }
   await shell.openExternal(url)
+}
+
+let sessionWindowOpener: ((workspaceId: string, sessionId: string) => void) | null = null
+
+export function setSessionWindowOpener(opener: (workspaceId: string, sessionId: string) => void): void {
+  sessionWindowOpener = opener
+}
+
+export function copyText(text: string): void {
+  clipboard.writeText(text)
+}
+
+export function openSessionWindow(req: { workspaceId: string; sessionId: string }): void {
+  if (sessionWindowOpener === null) throw new IpcError('unknown', '暂时无法打开新窗口')
+  sessionWindowOpener(req.workspaceId, req.sessionId)
 }
 
 /** 跟随系统时,系统切换深浅色要能推到所有窗口 */

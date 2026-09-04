@@ -24,7 +24,7 @@
  * - 应用数据库默认落在当前工作目录的 `.next-cowork/` 下,便于项目级携带和
  *   备份；调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
  */
-import { mkdirSync, statSync } from 'node:fs'
+import { lstatSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { MIGRATIONS } from './schema'
@@ -260,7 +260,13 @@ export function fileStats(): { dbBytes: number; walBytes: number } {
   if (handlePath === null || handlePath === MEMORY) return { dbBytes: 0, walBytes: 0 }
   const size = (p: string): number => {
     try {
-      return statSync(p).size
+      // Database/WAL paths are application-managed files.  Never follow a
+      // symlink here: a compromised or manually edited data directory must
+      // not make storage statistics read the size of an unrelated external
+      // file.  A symlink is reported as unavailable (0 bytes), just like a
+      // missing file.
+      const entry = lstatSync(p)
+      return entry.isFile() ? entry.size : 0
     } catch {
       return 0
     }

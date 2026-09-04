@@ -18,81 +18,100 @@
  * 挂容器要求焦点在容器内才收得到。用户点了一下遮罩(焦点跑到 body)之后
  * 再按 Esc 就没反应 —— 一个只在特定操作顺序下复现的"有时候关不掉"。
  */
-import { ChevronLeft, ChevronRight, X } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
+import { useI18n } from "../../i18n";
 
 export interface LightboxImage {
-  mime: string
-  dataRef: string
+  mime: string;
+  dataRef: string;
 }
 
 export function ImageLightbox({
   images,
   startIndex,
-  onClose
+  onClose,
 }: {
-  images: readonly LightboxImage[]
-  startIndex: number
-  onClose: () => void
+  images: readonly LightboxImage[];
+  startIndex: number;
+  onClose: () => void;
 }): ReactNode {
-  const [index, setIndex] = useState(startIndex)
-  const closeRef = useRef<HTMLButtonElement>(null)
+  const { t } = useI18n();
+  const [index, setIndex] = useState(startIndex);
+  const closeRef = useRef<HTMLButtonElement>(null);
   /** 打开前的焦点。关闭时要还回去 */
-  const restoreRef = useRef<Element | null>(null)
+  const restoreRef = useRef<Element | null>(null);
 
   const prev = useCallback(() => {
-    setIndex((i) => (i - 1 + images.length) % images.length)
-  }, [images.length])
+    setIndex((i) => (i - 1 + images.length) % images.length);
+  }, [images.length]);
 
   const next = useCallback(() => {
-    setIndex((i) => (i + 1) % images.length)
-  }, [images.length])
+    setIndex((i) => (i + 1) % images.length);
+  }, [images.length]);
 
   useEffect(() => {
-    restoreRef.current = document.activeElement
-    closeRef.current?.focus()
+    restoreRef.current = document.activeElement;
+    closeRef.current?.focus();
 
     // ★ 挂 window,不挂容器 —— 点过遮罩之后焦点在 body,挂容器就收不到了
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') { e.preventDefault(); onClose() }
-      if (e.key === 'ArrowLeft') { e.preventDefault(); prev() }
-      if (e.key === 'ArrowRight') { e.preventDefault(); next() }
-    }
-    window.addEventListener('keydown', onKey)
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        prev();
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        next();
+      }
+    };
+    window.addEventListener("keydown", onKey);
 
     // 背景不该跟着滚:灯箱是模态的,滚轮应当作用在图上而不是它下面的转录
-    const prevOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
 
     return () => {
-      window.removeEventListener('keydown', onKey)
-      document.body.style.overflow = prevOverflow
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
       // 焦点还给触发元素。它可能已经被卸载(转录重渲染),所以要判一下
-      const el = restoreRef.current
-      if (el instanceof HTMLElement && document.contains(el)) el.focus()
-    }
-  }, [onClose, prev, next])
+      const el = restoreRef.current;
+      if (el instanceof HTMLElement && document.contains(el)) el.focus();
+    };
+  }, [onClose, prev, next]);
 
-  const current = images[index]
-  if (current === undefined) return null
+  const current = images[index];
+  if (current === undefined) return null;
 
   return createPortal(
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="图片预览"
+      aria-label={t("chat.imagePreview")}
       data-testid="image-lightbox"
       // 点遮罩关闭。★ 只认落在遮罩自身上的点击 —— 冒泡上来的(点在图上)不算,
       //   否则用户想拖选图片时一松手就关了。
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/80 backdrop-blur-sm"
     >
       <button
         ref={closeRef}
         type="button"
         onClick={onClose}
-        aria-label="关闭"
+        aria-label={t("common.close")}
         data-testid="lightbox-close"
         className="absolute top-4 right-4 rounded-[7px] p-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
       >
@@ -101,8 +120,22 @@ export function ImageLightbox({
 
       {images.length > 1 && (
         <>
-          <NavButton side="left" onClick={prev} />
-          <NavButton side="right" onClick={next} />
+          <NavButton
+            side="left"
+            onClick={prev}
+            labels={{
+              previous: t("chat.previousImage"),
+              next: t("chat.nextImage"),
+            }}
+          />
+          <NavButton
+            side="right"
+            onClick={next}
+            labels={{
+              previous: t("chat.previousImage"),
+              next: t("chat.nextImage"),
+            }}
+          />
           <div className="absolute bottom-5 left-1/2 -translate-x-1/2 rounded-full bg-black/50 px-2.5 py-1 text-[12px] text-white/80">
             {index + 1} / {images.length}
           </div>
@@ -120,22 +153,30 @@ export function ImageLightbox({
         className="max-h-[90vh] max-w-[90vw] object-contain"
       />
     </div>,
-    document.body
-  )
+    document.body,
+  );
 }
 
-function NavButton({ side, onClick }: { side: 'left' | 'right'; onClick: () => void }): ReactNode {
+function NavButton({
+  side,
+  onClick,
+  labels,
+}: {
+  side: "left" | "right";
+  onClick: () => void;
+  labels: { previous: string; next: string };
+}): ReactNode {
   return (
     <button
       type="button"
       onClick={onClick}
-      aria-label={side === 'left' ? '上一张' : '下一张'}
+      aria-label={side === "left" ? labels.previous : labels.next}
       data-testid={`lightbox-${side}`}
       className={`absolute top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/70 transition-colors hover:bg-black/60 hover:text-white ${
-        side === 'left' ? 'left-4' : 'right-4'
+        side === "left" ? "left-4" : "right-4"
       }`}
     >
-      {side === 'left' ? <ChevronLeft size={20} /> : <ChevronRight size={20} />}
+      {side === "left" ? <ChevronLeft size={20} /> : <ChevronRight size={20} />}
     </button>
-  )
+  );
 }

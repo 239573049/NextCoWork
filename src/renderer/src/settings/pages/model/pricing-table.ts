@@ -11,13 +11,13 @@
  * - `tierLabel` 把档位边界标错 —— 数字全对、归属错了,而阶梯是**整单重定价**
  *   (`pricing.ts` §4.2),读者照着标签去核对只会更确信。
  */
-import { findPreset } from '../../../../../shared/domain/presets'
 import type {
   Currency,
   ModelPricing,
   PriceTier,
   PriceWindow
 } from '../../../../../shared/domain/pricing'
+import { findPreset } from '../../../../../shared/domain/presets'
 
 const SYMBOL: Readonly<Record<Currency, string>> = { USD: '$', CNY: '¥' }
 
@@ -62,18 +62,50 @@ export function tierLabel(tiers: readonly PriceTier[], i: number): string {
 
 const DAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const
 
+export interface PricingDaysParts {
+  kind: 'all' | 'list' | 'range'
+  days: readonly number[]
+}
+
+export function describeDaysParts(days: readonly number[] | undefined): PricingDaysParts {
+  if (days === undefined || days.length === 0) return { kind: 'all', days: [] }
+  const sorted = [...new Set(days)].sort((a, b) => a - b)
+  if (sorted.length === 7) return { kind: 'all', days: sorted }
+  const contiguous = sorted.every((d, i) => i === 0 || d === (sorted[i - 1] as number) + 1)
+  return { kind: contiguous && sorted.length > 2 ? 'range' : 'list', days: sorted }
+}
+
 /**
  * `daysOfWeek` 的人话。**省略 = 每天**,不是「没有」——
  * 这个字段的默认值本身就是 `pricing.ts` 里点名过的坑(漏了它周六会按高峰价算)。
  */
 export function describeDays(days: readonly number[] | undefined): string {
-  if (days === undefined || days.length === 0) return '每天'
-  const sorted = [...new Set(days)].sort((a, b) => a - b)
-  const names = sorted.map((d) => DAY_NAMES[d] ?? `周${d}`)
-  if (sorted.length === 7) return '每天'
-  const contiguous = sorted.every((d, i) => i === 0 || d === (sorted[i - 1] as number) + 1)
-  if (!contiguous || sorted.length <= 2) return names.join('、')
-  return `${names[0]} 至 ${names[names.length - 1]}`
+  const parts = describeDaysParts(days)
+  if (parts.kind === 'all') return '每天'
+  const names = parts.days.map((d) => DAY_NAMES[d] ?? `周${d}`)
+  return parts.kind === 'range' ? `${names[0]} 至 ${names[names.length - 1]}` : names.join('、')
+}
+
+export interface PricingWindowParts {
+  label: string
+  days: PricingDaysParts
+  start: string
+  end: string
+  timezone: string
+  detail: 'rates' | 'multiplier' | 'none'
+  multiplier?: number
+}
+
+export function describeWindowParts(w: PriceWindow): PricingWindowParts {
+  return {
+    label: w.label,
+    days: describeDaysParts(w.daysOfWeek),
+    start: w.start,
+    end: w.end,
+    timezone: w.timezone,
+    detail: w.rates !== undefined ? 'rates' : w.multiplier !== undefined ? 'multiplier' : 'none',
+    multiplier: w.multiplier
+  }
 }
 
 /**
@@ -85,11 +117,22 @@ export function describeDays(days: readonly number[] | undefined): string {
  * 而对不上的时候,用户信的是界面。
  */
 export function describeWindow(w: PriceWindow): string {
-  const when = `${describeDays(w.daysOfWeek)} ${w.start}–${w.end} ${w.timezone}`
+  const parts = describeWindowParts(w)
+  const when = `${describeDays(w.daysOfWeek)} ${parts.start}–${parts.end} ${parts.timezone}`
   // `rates` 赢 —— 和 `priceOf` 的优先级一致(整套覆盖比一个标量更具体)
-  if (w.rates !== undefined) return `${w.label} · ${when} · 整套费率覆盖`
-  if (w.multiplier !== undefined) return `${w.label} · ${when} · ×${w.multiplier}`
-  return `${w.label} · ${when}`
+  if (parts.detail === 'rates') return `${parts.label} · ${when} · 整套费率覆盖`
+  if (parts.detail === 'multiplier') return `${parts.label} · ${when} · ×${parts.multiplier}`
+  return `${parts.label} · ${when}`
+}
+
+export interface PricingEffectiveParts {
+  from?: string
+  until?: string
+}
+
+export function describeEffectiveParts(p: ModelPricing): PricingEffectiveParts | null {
+  const { effectiveFrom: from, effectiveUntil: until } = p
+  return from === undefined && until === undefined ? null : { from, until }
 }
 
 /**
@@ -101,8 +144,9 @@ export function describeWindow(w: PriceWindow): string {
  * 读者只会当成数据错了。
  */
 export function describeEffective(p: ModelPricing): string {
-  const { effectiveFrom: from, effectiveUntil: until } = p
-  if (from === undefined && until === undefined) return ''
+  const parts = describeEffectiveParts(p)
+  if (parts === null) return ''
+  const { from, until } = parts
   if (from !== undefined && until !== undefined) return `${from} 至 ${until} 生效`
   return from !== undefined ? `${from} 起生效` : `${until} 前有效`
 }
@@ -110,7 +154,7 @@ export function describeEffective(p: ModelPricing): string {
 export interface PricingGroup {
   key: string
   title: string
-  /** 组下那句小字。通用价和覆盖价的**查找语义不同**,这里把差别说出来 */
+  /** 组下那句小字。通用价和覆盖价的查找语义不同。 */
   hint: string
   rows: readonly ModelPricing[]
 }

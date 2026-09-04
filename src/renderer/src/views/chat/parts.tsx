@@ -10,14 +10,15 @@
  * 这个文件只负责把 presenter 的输出摆进版式里。新增一个工具的展示规则
  * 不需要动这里一行。
  */
-import { Brain, ChevronRight, CornerDownRight } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
-import { formatCallDuration } from '../../../../shared/agent/duration'
-import type { ToolCallState } from '../../../../shared/agent/transcript'
-import { presenterOf } from '../../../../shared/domain/tool-presenter'
-import { cn } from '../../lib/cn'
-import { ToolDetail } from './ToolDetail'
-import { ToolIcon, type ToolViewStatus } from './ToolIcon'
+import { Brain, ChevronRight, CornerDownRight } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { formatCallDuration } from "../../../../shared/agent/duration";
+import type { ToolCallState } from "../../../../shared/agent/transcript";
+import { presenterOf } from "../../../../shared/domain/tool-presenter";
+import { cn } from "../../lib/cn";
+import { useI18n } from "../../i18n";
+import { ToolDetail } from "./ToolDetail";
+import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 
 /**
  * 「深度思考 N 秒」—— 截图里是一条可折叠的行,默认收起。
@@ -27,12 +28,13 @@ import { ToolIcon, type ToolViewStatus } from './ToolIcon'
  */
 export function ThinkingBlock({
   text,
-  streaming
+  streaming,
 }: {
-  text: string
-  streaming: boolean
+  text: string;
+  streaming: boolean;
 }): ReactNode {
-  const [open, setOpen] = useState(streaming)
+  const { t } = useI18n();
+  const [open, setOpen] = useState(streaming);
   return (
     <div className="rounded-card bg-surface-raised/60">
       <button
@@ -43,11 +45,11 @@ export function ThinkingBlock({
       >
         <ChevronRight
           size={13}
-          className={cn('shrink-0 transition-transform', open && 'rotate-90')}
+          className={cn("shrink-0 transition-transform", open && "rotate-90")}
         />
         <Brain size={13} className="shrink-0 text-accent-soft" />
         <span className="min-w-0 flex-1 truncate">
-          {streaming ? '正在深度思考…' : '深度思考'}
+          {streaming ? t("chat.thinkingNow") : t("chat.thinking")}
         </span>
       </button>
       {open && (
@@ -56,7 +58,7 @@ export function ThinkingBlock({
         </p>
       )}
     </div>
-  )
+  );
 }
 
 /**
@@ -73,13 +75,13 @@ export function ThinkingBlock({
 export function ToolCallCard({
   call,
   name,
-  input
+  input,
 }: {
   /** 从 `transcript.tools[callId]` 来;还没收到 tool_start 时可能是 undefined */
-  call: ToolCallState | undefined
+  call: ToolCallState | undefined;
   /** 兜底:`tool_call` part 自带名字,即使 tools 表里还没有它 */
-  name: string
-  input: unknown
+  name: string;
+  input: unknown;
 }): ReactNode {
   /**
    * `null` = 用户还没表态,按默认规则走;一旦点过就永久接管。
@@ -87,19 +89,19 @@ export function ToolCallCard({
    * ★ 不能写成 `useState(status === 'error')` —— 初始值只在挂载时算一次,
    * 而工具是先 running 后 error 的,那样失败永远不会自动展开。
    */
-  const [manual, setManual] = useState<boolean | null>(null)
+  const [manual, setManual] = useState<boolean | null>(null);
 
-  const status: ToolViewStatus = call === undefined ? 'pending' : call.status
-  const shownInput = call?.input ?? input
-  const toolName = call?.name ?? name
-  const presenter = presenterOf(toolName)
+  const status: ToolViewStatus = call === undefined ? "pending" : call.status;
+  const shownInput = call?.input ?? input;
+  const toolName = call?.name ?? name;
+  const presenter = presenterOf(toolName);
 
   // 失败默认展开:`toolFail` 的文案是设计过的可执行提示(见 fs.ts 里 Edit 失败
   // 那段三段式说明),把它藏在折叠里等于白写。
-  const open = manual ?? status === 'error'
+  const open = manual ?? status === "error";
 
-  const duration = call === undefined ? undefined : formatCallDuration(call)
-  const summary = presenter.summary?.(shownInput, call?.output)
+  const duration = call === undefined ? undefined : formatCallDuration(call);
+  const summary = presenter.summary?.(shownInput, call?.output);
 
   return (
     <div
@@ -109,13 +111,15 @@ export function ToolCallCard({
       data-tool-status={status}
       data-tool-shape={presenter.shape}
       className={cn(
-        'overflow-hidden rounded-card border bg-surface-raised/60',
-        status === 'error' ? 'border-danger/40' : 'border-border'
+        "overflow-hidden rounded-card border bg-surface-raised/60",
+        status === "error" ? "border-danger/40" : "border-border",
       )}
     >
       {/* 失败时左侧一道竖条:在一屏十几行工具里,颜色差比文字差更快被扫到 */}
       <div className="flex">
-        {status === 'error' && <span aria-hidden className="w-[2px] shrink-0 bg-danger" />}
+        {status === "error" && (
+          <span aria-hidden className="w-[2px] shrink-0 bg-danger" />
+        )}
         <button
           type="button"
           aria-expanded={open}
@@ -124,10 +128,15 @@ export function ToolCallCard({
         >
           <ChevronRight
             size={13}
-            className={cn('shrink-0 text-fg-faint transition-transform', open && 'rotate-90')}
+            className={cn(
+              "shrink-0 text-fg-faint transition-transform",
+              open && "rotate-90",
+            )}
           />
           <ToolIcon shape={presenter.shape} status={status} />
-          <span className="min-w-0 flex-1 truncate text-fg">{presenter.title(shownInput)}</span>
+          <span className="min-w-0 flex-1 truncate text-fg">
+            {presenter.title(shownInput)}
+          </span>
 
           {/* 运行中的一行进度优先于摘要 —— 它是此刻唯一在变的信息 */}
           {call?.progress !== undefined ? (
@@ -152,12 +161,12 @@ export function ToolCallCard({
             shape={presenter.shape}
             input={shownInput}
             output={call?.output}
-            isError={status === 'error'}
+            isError={status === "error"}
           />
         </div>
       )}
     </div>
-  )
+  );
 }
 
 /**
@@ -169,32 +178,54 @@ export function ToolCallCard({
  */
 function StatusSlot({
   status,
-  duration
+  duration,
 }: {
-  status: ToolViewStatus
-  duration: string | undefined
+  status: ToolViewStatus;
+  duration: string | undefined;
 }): ReactNode {
-  if (status === 'error') {
-    return <span className="shrink-0 text-[11px] text-danger">失败</span>
+  const { t } = useI18n();
+  if (status === "error") {
+    return (
+      <span className="shrink-0 text-[11px] text-danger">
+        {t("chat.tool.failedStatus")}
+      </span>
+    );
   }
-  if (status === 'running') {
-    return <span className="shrink-0 text-[11px] text-accent">执行中</span>
+  if (status === "running") {
+    return (
+      <span className="shrink-0 text-[11px] text-accent">
+        {t("chat.tool.runningStatus")}
+      </span>
+    );
   }
-  if (status === 'pending') {
-    return <span className="shrink-0 text-[11px] text-fg-faint">等待</span>
+  if (status === "pending") {
+    return (
+      <span className="shrink-0 text-[11px] text-fg-faint">
+        {t("chat.tool.waitingStatus")}
+      </span>
+    );
   }
   // ok:有耗时就显示耗时,没有(旧转录)就什么都不显示 —— 空着比写「完成」干净
   return duration === undefined ? null : (
-    <span className="shrink-0 font-mono text-[11px] text-fg-faint">{duration}</span>
-  )
+    <span className="shrink-0 font-mono text-[11px] text-fg-faint">
+      {duration}
+    </span>
+  );
 }
 
 /** 子代理:UI 上是父 run 里一个可展开节点(方案 §4.9)。展开面板留到步骤 11。 */
-export function SubagentNode({ summary }: { summary: string | undefined }): ReactNode {
+export function SubagentNode({
+  summary,
+}: {
+  summary: string | undefined;
+}): ReactNode {
+  const { t } = useI18n();
   return (
     <div className="flex items-center gap-2 rounded-card border border-border px-3 py-2 text-[12.5px] text-fg-muted">
       <CornerDownRight size={13} className="shrink-0 text-accent-soft" />
-      <span className="min-w-0 flex-1 truncate">{summary ?? '子代理运行中…'}</span>
+      <span className="min-w-0 flex-1 truncate">
+        {summary ?? t("chat.subagentRunning")}
+      </span>
     </div>
-  )
+  );
 }

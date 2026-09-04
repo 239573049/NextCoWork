@@ -170,7 +170,10 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
           preview.hasEncryptedCredentials ? importPassword : undefined,
         ),
       (value) =>
-        `已导入 ${formatCount(value.imported)} 项，覆盖 ${formatCount(value.overwritten)} 项`,
+        t("data.imported", {
+          imported: formatCount(value.imported),
+          overwritten: formatCount(value.overwritten),
+        }),
     );
     if (result !== null) closeModal();
   };
@@ -180,7 +183,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
     const result = await run(
       "restore",
       () => dataService.restoreBackup(true),
-      (value) => (value?.restored ? "数据已从备份恢复" : null),
+      (value) => (value?.restored ? t("data.restoreComplete") : null),
     );
     if (result?.restored) closeModal();
   };

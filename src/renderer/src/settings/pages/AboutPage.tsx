@@ -1,14 +1,16 @@
 import type { ReactNode } from 'react'
 import type { Bootstrap } from '../../../../shared/domain/bootstrap'
 import { SettingGroup, SettingRow } from '../Row'
+import { useI18n } from '../../i18n'
 
 /**
  * 版本号取自 `Bootstrap.versions`,不是 preload 的 `versions()` ——
  * 后者只有 electron/chrome/node,没有应用自己的版本号。
  */
 export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): ReactNode {
+  const { t } = useI18n()
   const rows: ReadonlyArray<[string, string]> = [
-    ['版本', versions.app],
+    [t('about.version'), versions.app],
     ['Electron', versions.electron],
     ['Chromium', versions.chrome],
     ['Node', versions.node]
@@ -17,7 +19,7 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
     <SettingGroup>
       <SettingRow
         title="NextCoWork"
-        description="本地优先的 AI 协作工作台。数据只存在这台电脑上。"
+        description={t('about.description')}
       />
       {rows.map(([k, v], i) => (
         <SettingRow key={k} title={k} last={i === rows.length - 1}>

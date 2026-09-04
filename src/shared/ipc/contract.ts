@@ -35,6 +35,7 @@ import type {
   ModelAlias,
   UpstreamProvider
 } from '../domain/provider'
+import type { ModelCatalogDefinition } from '../domain/model-catalog'
 import type { SearchHit, Session, SessionDetail, SessionListItem } from '../domain/session'
 import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
@@ -42,6 +43,7 @@ import type { ImageTheme } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
+import type { BrowserChange, BrowserProfile, BrowserTab } from '../domain/browser'
 import type {
   BackupStatus,
   CleanupAge,
@@ -133,6 +135,8 @@ export interface IpcInvokeMap {
   // ── 应用 ──
   'app:getBootstrap': { req: void; res: Bootstrap }
   'app:openExternal': { req: { url: string }; res: void }
+  'app:copyText': { req: { text: string }; res: void }
+  'app:openSessionWindow': { req: { workspaceId: string; sessionId: string }; res: void }
 
   // ── 设置 ──
   'settings:get': { req: void; res: AppSettings }
@@ -180,6 +184,21 @@ export interface IpcInvokeMap {
    * 它来自渲染层,是不可信输入,`../..` 会被拒。
    */
   'workspace:listDir': { req: { workspaceId: string; path: string }; res: DirListing }
+
+  // ── 浏览器工作台 ──
+  'browser:list': { req: { workspaceId: string }; res: BrowserTab[] }
+  'browser:open': {
+    req: { workspaceId: string; url: string; title?: string; profileId?: string }
+    res: BrowserTab
+  }
+  'browser:navigate': { req: { workspaceId: string; tabId: string; url: string }; res: BrowserTab }
+  'browser:close': { req: { workspaceId: string; tabId: string }; res: void }
+  'browser:profiles': { req: void; res: BrowserProfile[] }
+  'browser:createProfile': { req: { name: string; domains?: string[]; startUrl?: string }; res: BrowserProfile }
+  'browser:deleteProfile': { req: { id: string }; res: void }
+  'browser:exportCookies': { req: { workspaceId: string; profileId: string }; res: boolean }
+  'browser:importCookies': { req: { workspaceId: string; profileId: string }; res: number | null }
+  'browser:clearProfileState': { req: { workspaceId: string; profileId: string }; res: void }
 
   // ── Tab 状态(读;写走 send,见 IpcSendMap) ──
   'tabs:getInner': { req: { workspaceId: string }; res: InnerTabState }
@@ -332,6 +351,10 @@ export interface IpcInvokeMap {
   /** Model management console writes. */
   'model:update': { req: import('../domain/provider').ModelAlias; res: import('../domain/provider').ModelAlias }
   'model:remove': { req: { providerId: string; alias: string }; res: void }
+  /** User-created catalogue rows. Provider model discovery never writes here. */
+  'modelCatalog:list': { req: void; res: ModelCatalogDefinition[] }
+  'modelCatalog:upsert': { req: ModelCatalogDefinition; res: ModelCatalogDefinition }
+  'modelCatalog:remove': { req: { id: string }; res: void }
 
   // ── 本地网关 ──
   'gateway:getStatus': { req: void; res: GatewayStatus }
@@ -417,6 +440,10 @@ export interface IpcEventMap {
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
   'sessions:changed': { workspaceId?: string }
+  'browser:changed': BrowserChange
+  'browser:profilesChanged': BrowserProfile[]
+  /** The persisted user catalogue changed. Built-in rows are bundled code. */
+  'modelCatalog:changed': { custom: ModelCatalogDefinition[] }
   /**
    * 上游供应商或别名变了。**两张表一起带**,因为设置页左列的每一行都是
    * 「供应商 + 它的主别名」—— 只推 providers 的话,改完供应商名字副标题还是旧的,
@@ -444,6 +471,8 @@ export interface IpcEventMap {
 export const INVOKE_CHANNELS = {
   'app:getBootstrap': 1,
   'app:openExternal': 1,
+  'app:copyText': 1,
+  'app:openSessionWindow': 1,
   'settings:get': 1,
   'settings:update': 1,
   'theme:importImage': 1,
@@ -456,6 +485,16 @@ export const INVOKE_CHANNELS = {
   'workspace:update': 1,
   'workspace:close': 1,
   'workspace:listDir': 1,
+  'browser:list': 1,
+  'browser:open': 1,
+  'browser:navigate': 1,
+  'browser:close': 1,
+  'browser:profiles': 1,
+  'browser:createProfile': 1,
+  'browser:deleteProfile': 1,
+  'browser:exportCookies': 1,
+  'browser:importCookies': 1,
+  'browser:clearProfileState': 1,
   'tabs:getInner': 1,
   'session:getInput': 1,
   'attachment:upload': 1,
@@ -510,6 +549,9 @@ export const INVOKE_CHANNELS = {
   'provider:test': 1,
   'model:update': 1,
   'model:remove': 1,
+  'modelCatalog:list': 1,
+  'modelCatalog:upsert': 1,
+  'modelCatalog:remove': 1,
   'gateway:getStatus': 1,
   'gateway:setEnabled': 1,
   'gateway:resetHealth': 1,
@@ -552,7 +594,10 @@ export const EVENT_CHANNELS = {
   'mcp:changed': 1,
   'provider:changed': 1,
   'websearch:changed': 1,
-  'sessions:changed': 1
+  'sessions:changed': 1,
+  'browser:changed': 1,
+  'browser:profilesChanged': 1,
+  'modelCatalog:changed': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

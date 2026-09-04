@@ -18,6 +18,7 @@ import { initRuntime, shutdownMcp } from './runtime'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
+import { setSessionWindowOpener } from './ipc/app'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 单实例锁 —— 必须在 whenReady 之前。方案 §9:两个实例开同一个 SQLite 文件,
@@ -62,7 +63,7 @@ function logStartupProbe(): void {
   })
 }
 
-function createMainWindow(): BrowserWindow {
+function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: string }): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -81,7 +82,11 @@ function createMainWindow(): BrowserWindow {
       // (沙箱下无法 require 多文件),见 electron.vite.config.ts。
       sandbox: true,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Browser tabs use Electron's isolated <webview> element. It remains
+      // sandboxed and nodeIntegration-free; enabling the tag does not expose
+      // the host preload bridge to page content.
+      webviewTag: true
     }
   })
 
@@ -89,14 +94,36 @@ function createMainWindow(): BrowserWindow {
 
   // 任何 window.open / target=_blank 一律不在应用内开新窗口,交给系统浏览器。
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://')) void shell.openExternal(url)
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     // Renderer-controlled session links open another app window, while all
     // other external targets continue to use the system browser policy.
     const appUrl = win.webContents.getURL().split('#')[0]
-    if ((appUrl !== '' && url.startsWith(appUrl)) || (process.env['ELECTRON_RENDERER_URL'] !== undefined && url.startsWith(process.env['ELECTRON_RENDERER_URL']!))) {
+    const devUrl = process.env['ELECTRON_RENDERER_URL']
+    if ((typeof appUrl === 'string' && appUrl !== '' && url.startsWith(appUrl)) || (typeof devUrl === 'string' && url.startsWith(devUrl))) {
       return { action: 'allow' }
     }
     return { action: 'deny' }
+  })
+
+  // Browser workbench pages run in a separate, sandboxed webview session.
+  // Never allow a page to inherit the app preload or load local/custom-scheme
+  // resources. Links opened by a page leave through the system browser.
+  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
+    if (typeof params.src === 'string' && params.src !== '' && !/^https?:\/\//i.test(params.src)) event.preventDefault()
+  })
+
+  win.webContents.on('did-attach-webview', (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+      return { action: 'deny' }
+    })
+    contents.on('will-navigate', (event, url) => {
+      if (!/^https?:\/\//i.test(url)) event.preventDefault()
+    })
   })
 
   // 阻止渲染层被导航到站外(拖入链接、意外的 location 赋值)。
@@ -111,9 +138,11 @@ function createMainWindow(): BrowserWindow {
   windows.register(win.webContents, 'main')
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    const hash = sessionRoute === undefined ? '' : `#session=${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
+    void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}${hash}`)
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'))
+    const hash = sessionRoute === undefined ? undefined : `session=${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
+    void win.loadFile(join(__dirname, '../renderer/index.html'), hash === undefined ? undefined : { hash })
   }
 
   return win
@@ -239,6 +268,10 @@ void app.whenReady().then(() => {
 
   // 契约里的每个频道在这里一次性注册完(缺一个就编译不过)。
   // 必须在建窗之前:渲染层的第一个 invoke 可能在窗口 show 之前就到。
+  setSessionWindowOpener((workspaceId, sessionId) => {
+    const child = createMainWindow({ workspaceId, sessionId })
+    child.once('ready-to-show', () => child.focus())
+  })
   registerIpc()
 
   createMainWindow()

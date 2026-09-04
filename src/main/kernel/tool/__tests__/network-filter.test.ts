@@ -50,7 +50,7 @@ describe('联网闸 · 真的内置工具', () => {
     const r = seeded()
     const gone = new Set(ids(r, true))
     for (const id of ids(r, false)) gone.delete(id)
-    expect([...gone].sort()).toEqual(['WebFetch', 'web_search'])
+    expect([...gone].sort()).toEqual(['WebFetch', 'browser_navigate', 'browser_open', 'browser_snapshot', 'web_search'])
   })
 
   /** 缺省不过滤 —— 理由在 `SnapshotFilter.network` 的注释里 */

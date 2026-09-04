@@ -26,6 +26,14 @@ export function openExternal(url: string): Promise<void> {
   return invoke('app:openExternal', { url })
 }
 
+export function copyText(text: string): Promise<void> {
+  return invoke('app:copyText', { text })
+}
+
+export function openSessionWindow(workspaceId: string, sessionId: string): Promise<void> {
+  return invoke('app:openSessionWindow', { workspaceId, sessionId })
+}
+
 // ─── 设置 ───
 
 export function getSettings(): Promise<AppSettings> {

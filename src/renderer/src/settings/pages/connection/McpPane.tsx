@@ -122,6 +122,7 @@ function ServerRow({
   onEdit: () => void;
   onRemove: () => void;
 }): ReactNode {
+  const { t } = useI18n();
   const { config, state, tools, toolCount } = status;
   const [testing, setTesting] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -162,7 +163,7 @@ function ServerRow({
             <span className="truncate text-[13px] text-fg">{config.name}</span>
             <span className="shrink-0 rounded-[5px] bg-tint px-1.5 py-px text-[11px] text-fg-faint">
               {config.transport === "stdio"
-                ? "本地进程"
+                ? t("connection.mcp.transport.stdio")
                 : config.transport === "sse"
                   ? "SSE"
                   : "HTTP"}

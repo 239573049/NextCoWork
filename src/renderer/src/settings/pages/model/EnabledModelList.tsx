@@ -106,7 +106,7 @@ export function EnabledModelList({
         <p className="px-1.5 py-3 text-[12px] leading-[1.6] text-fg-faint">
           {t("models.emptyProviders", { count: PROVIDER_PRESETS.length })}
           <Plus size={11} className="mx-0.5 inline align-[-1px]" />
-          先看看有哪些。
+          {t("models.browseProviders")}
         </p>
       )}
 
@@ -140,20 +140,20 @@ export function EnabledModelList({
         icon={<ImageIcon size={14} />}
         label={t("models.imageFallback")}
         tag={t("models.notModeled")}
-        title="参考实现里给看图单独指定一个模型。我们的 ModelAlias 还没有 modality 字段(方案 §1.2),没有落点"
+        title={t("models.imageFallbackHint")}
       />
       <ExtraRow
         icon={<Workflow size={14} />}
         label={t("models.planExecution")}
         tag={t("models.notModeled")}
-        title="参考实现把规划和执行拆给两个模型。我们的内核是单模型循环,拆开要动 kernel,不在本轮"
+        title={t("models.planExecutionHint")}
       />
       {/* ★ 方案 §10 明确砍掉云同步。这里直说「不做」,不做成「即将推出」 */}
       <ExtraRow
         icon={<Cloud size={14} />}
         label={t("models.cloudSync")}
         tag={t("models.notPlanned")}
-        title="方案 §10 明确砍掉了云同步 —— 这不是还没做,是决定不做"
+        title={t("models.cloudSyncHint")}
       />
     </div>
   );

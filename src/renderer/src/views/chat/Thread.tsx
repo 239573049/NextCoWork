@@ -15,6 +15,7 @@ import { isToolResultOnly } from '../../../../shared/agent/message'
 import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { cn } from '../../lib/cn'
+import { useI18n } from '../../i18n'
 import { MessageImage } from './MessageImage'
 import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
 
@@ -228,6 +229,7 @@ function LiveTurn({
   providerName: string | undefined
   running: boolean
 }): ReactNode {
+  const { t } = useI18n()
   const last = live[live.length - 1]
   return (
     <div className="flex flex-col gap-2.5">
@@ -249,7 +251,7 @@ function LiveTurn({
               <ToolCallCard
                 key={b.index}
                 call={b.callId === undefined ? undefined : tools[b.callId]}
-                name={b.name ?? '工具'}
+                name={b.name ?? t('chat.tool.name')}
                 // 流式中途的参数 JSON 一定是非法的,原样显示片段而不是尝试 parse
                 input={b.text}
               />

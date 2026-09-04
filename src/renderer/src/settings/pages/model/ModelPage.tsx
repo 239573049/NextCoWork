@@ -22,12 +22,13 @@ import type {
 import type { ModelPricing } from "../../../../../shared/domain/pricing";
 import { PRICING_SEED } from "../../../../../shared/domain/pricing-seed";
 import { PROVIDER_PRESETS } from "../../../../../shared/domain/presets";
+import { MODEL_MANUFACTURERS } from "../../../../../shared/domain/model-catalog-inventory";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Dialog } from "../../../components/ui/Dialog";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
-import { updateModel, removeModel } from "../../../services/provider";
+import { listModels, setProviderAliases, updateModel, removeModel } from "../../../services/provider";
 import { useModelsStore } from "../../../stores/models";
 import type { SettingsPageProps } from "../../props";
 import { SettingGroup, TodoRow } from "../../Row";
@@ -140,153 +141,30 @@ function LegacyTextTab({
   );
 }
 
-type Manufacturer = {
-  id: string;
-  label: string;
-  match: (modelId: string) => boolean;
-};
+type Manufacturer = { id: string; label: string; aliases: readonly string[] };
+type CatalogRow = ModelAlias & { manufacturer: string; manufacturerLabel: string; configured: boolean; pricing?: ModelPricing };
 
-const MANUFACTURERS: readonly Manufacturer[] = [
-  {
-    id: "openai",
-    label: "OpenAI",
-    match: (id) => /^(gpt|o[1-9]|chatgpt)/i.test(id),
-  },
-  { id: "anthropic", label: "Anthropic", match: (id) => /^claude/i.test(id) },
-  { id: "google", label: "Google", match: (id) => /^(gemini|gemma)/i.test(id) },
-  { id: "deepseek", label: "DeepSeek", match: (id) => /^deepseek/i.test(id) },
-  { id: "zhipu", label: "智谱 GLM", match: (id) => /^(glm|chatglm)/i.test(id) },
-  { id: "qwen", label: "阿里云 Qwen", match: (id) => /^(qwen|通义)/i.test(id) },
-  {
-    id: "moonshot",
-    label: "Moonshot / Kimi",
-    match: (id) => /^(moonshot|kimi)/i.test(id),
-  },
-  { id: "xai", label: "xAI Grok", match: (id) => /^grok/i.test(id) },
-  {
-    id: "mistral",
-    label: "Mistral AI",
-    match: (id) => /^(mistral|devstral)/i.test(id),
-  },
-  { id: "cohere", label: "Cohere", match: (id) => /^command/i.test(id) },
-  { id: "minimax", label: "MiniMax", match: (id) => /^minimax/i.test(id) },
-  {
-    id: "meta",
-    label: "Meta Llama",
-    match: (id) => /^(llama|meta-llama)/i.test(id),
-  },
-];
-
-const PROVIDER_MANUFACTURER: Record<string, string> = {
-  openai: "openai",
-  anthropic: "anthropic",
-  "gemini-openai": "google",
-  deepseek: "deepseek",
-  zhipu: "zhipu",
-  "zhipu-coding": "zhipu",
-  zai: "zhipu",
-  "zai-coding": "zhipu",
-  dashscope: "qwen",
-  "dashscope-intl": "qwen",
-  moonshot: "moonshot",
-  "moonshot-global": "moonshot",
-  "kimi-coding": "moonshot",
-  xai: "xai",
-  mistral: "mistral",
-  cohere: "cohere",
-  minimax: "minimax",
-  "minimax-global": "minimax",
-  groq: "meta",
-};
-
-function manufacturerFor(
-  modelId: string,
-  providerIds: readonly string[] = [],
-): Manufacturer & { id: string } {
-  // Aggregators commonly prefix the upstream ID (for example
-  // `anthropic/claude-*`). Inspect every path segment before using provider
-  // metadata so the catalogue remains vendor-first even when a connection is
-  // an aggregator such as OpenRouter or SiliconFlow.
-  const segments = modelId.split("/").filter(Boolean);
-  const byId = (id: string): Manufacturer | undefined =>
-    MANUFACTURERS.find((m) => m.id === id);
-  for (const segment of segments) {
-    const match = MANUFACTURERS.find((m) => m.match(segment));
-    if (match) return match;
-  }
-  for (const providerId of providerIds) {
-    const manufacturerId = PROVIDER_MANUFACTURER[providerId];
-    const match =
-      manufacturerId === undefined ? undefined : byId(manufacturerId);
-    if (match) return match;
-  }
-  return { id: "other", label: "其他厂商", match: () => false };
+function manufacturerFor(modelId: string): Manufacturer {
+  const lower = modelId.toLowerCase();
+  return MODEL_MANUFACTURERS.find((m) => m.aliases.some((a) => lower.includes(a.toLowerCase()))) ??
+    MODEL_MANUFACTURERS.find((m) => m.id === "other") ?? { id: "other", label: "Other", aliases: [] };
 }
-
-type CatalogRow = ModelAlias & {
-  manufacturer: string;
-  manufacturerLabel: string;
-  configured: boolean;
-  pricing?: ModelPricing;
-};
 
 function catalogRows(configured: readonly ModelAlias[]): CatalogRow[] {
   const byId = new Map(configured.map((m) => [m.upstreamModel, m]));
-  const providersByModel = new Map<string, string[]>();
-  for (const model of configured) {
-    const owners = providersByModel.get(model.upstreamModel) ?? [];
-    owners.push(model.providerId);
-    providersByModel.set(model.upstreamModel, owners);
-  }
-  const ids = new Set<string>([
-    ...PRICING_SEED.map((p) => p.modelId),
-    ...PROVIDER_PRESETS.flatMap((p) => p.suggestedModels),
-    ...configured.map((m) => m.upstreamModel),
-  ]);
+  const ids = new Set([...PRICING_SEED.map((p) => p.modelId), ...PROVIDER_PRESETS.flatMap((p) => p.suggestedModels), ...configured.map((m) => m.upstreamModel)]);
   return [...ids].map((id) => {
     const existing = byId.get(id);
+    const manufacturer = manufacturerFor(id);
     const pricing = PRICING_SEED.find((p) => p.modelId === id);
-    const manufacturer = manufacturerFor(
-      id,
-      providersByModel.get(id) ??
-        PROVIDER_PRESETS.filter((p) => p.suggestedModels.includes(id)).map(
-          (p) => p.id,
-        ),
-    );
-    const catalogDefaults: ModelAlias = {
-      alias: id,
-      providerId: "catalog",
-      upstreamModel: id,
-      capabilities: {
-        tools: true,
-        vision: /^(claude|gemini|gpt-4o|gpt-5|glm|qwen)/i.test(id),
-        thinking: /(reason|o[1-9]|deepseek|glm|qwen)/i.test(id),
-        caching: true,
-        textInput: true,
-        fileInput: false,
-        videoInput: false,
-        audioInput: false,
-        textOutput: true,
-        imageOutput: false,
-        videoOutput: false,
-        audioOutput: false,
-        webSearch: false,
-        structuredOutput: true,
-        streaming: true,
-        batch: false,
-      },
-      contextWindow: 0,
-      maxOutputTokens: 0,
-      enabled: false,
-    };
     return {
-      ...(existing ?? catalogDefaults),
+      ...(existing ?? { alias: id, providerId: "catalog", upstreamModel: id, capabilities: { tools: true, vision: false, thinking: false, caching: true, textInput: true, fileInput: false, videoInput: false, audioInput: false, textOutput: true, imageOutput: false, videoOutput: false, audioOutput: false, webSearch: false, structuredOutput: true, streaming: true, batch: false }, contextWindow: 0, maxOutputTokens: 0, enabled: false }),
       manufacturer: manufacturer.id,
       manufacturerLabel: manufacturer.label,
       configured: existing !== undefined,
       pricing,
       displayName: existing?.displayName ?? pricing?.displayName,
-    };
+    } as CatalogRow;
   });
 }
 
@@ -320,7 +198,7 @@ function ModelConsole({
   const manufacturerList = useMemo(() => {
     const present = new Set(catalog.map((m) => m.manufacturer));
     return [
-      ...MANUFACTURERS.filter((m) => present.has(m.id)).map((m) => m.id),
+      ...MODEL_MANUFACTURERS.filter((m) => present.has(m.id)).map((m) => m.id),
       ...(present.has("other") ? ["other"] : []),
     ];
   }, [catalog]);
@@ -408,7 +286,7 @@ function ModelConsole({
               ? manufacturerList.map((id) => ({
                   id,
                   label:
-                    MANUFACTURERS.find((m) => m.id === id)?.label ?? t("models.otherVendor"),
+                    MODEL_MANUFACTURERS.find((m) => m.id === id)?.label ?? t("models.otherVendor"),
                 }))
               : entries.map((e) => ({
                   id: e.provider.id,
@@ -535,14 +413,14 @@ function ModelConsole({
         width={420}
       >
         {editingModel && "configured" in editingModel && !editingModel.configured ? (
-          <CatalogModelInspector model={editingModel} />
+          <CatalogModelInspector model={editingModel} providers={providers} onBound={() => setEditingModel(null)} />
         ) : editingModel ? (
           (() => {
             const entry = entries.find((e) => e.provider.id === editingModel.providerId);
             return entry ? (
               <ModelInspector model={editingModel} entry={entry} onDeleted={() => setEditingModel(null)} />
             ) : (
-              <EmptyState className="py-12" title="供应商已不存在" hint="请重新选择一个模型或检查供应商配置。" />
+              <EmptyState className="py-12" title={t("models.providerMissing")} hint={t("models.providerMissingHint")} />
             );
           })()
         ) : null}
@@ -602,7 +480,7 @@ function ModelRow({
       video: t("models.video"),
       speech: t("models.speech"),
       transcription: t("models.transcription"),
-    }[m.modality ?? "text"] ?? "文本";
+    }[m.modality ?? "text"] ?? t("models.text");
   return (
     <tr
       onClick={onSelect}
@@ -835,7 +713,7 @@ function ModelInspector({
         </p>
         <p className="mt-1 text-[10.5px] text-fg-faint">
           {model.source?.fetchedAt
-            ? `抓取于 ${model.source.fetchedAt}`
+            ? t("models.sourceFetchedAt", { date: model.source.fetchedAt })
             : t("models.fetchSourceHint")}
         </p>
       </InspectorSection>
@@ -843,8 +721,21 @@ function ModelInspector({
   );
 }
 
-function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
+function CatalogModelInspector({ model: initial, providers, onBound }: { model: CatalogRow; providers: readonly { id: string; name: string }[]; onBound?: () => void }): ReactNode {
   const { t } = useI18n();
+  const [model, setModel] = useState(initial);
+  const [bindingProviderId, setBindingProviderId] = useState(providers[0]?.id ?? "");
+  const [binding, setBinding] = useState(false);
+  useEffect(() => setModel(initial), [initial]);
+  const setCap = (key: keyof ModelCapabilities, value: boolean): void =>
+    setModel((current) => ({
+      ...current,
+      capabilities: { ...current.capabilities, [key]: value },
+    }));
+  const thinking: ThinkingConfig = model.thinkingConfig ?? {
+    mode: model.capabilities.thinking ? "toggle" : "unsupported",
+    defaultEnabled: false,
+  };
   const pricing = model.pricing;
   const rate = pricing?.tiers[0]?.rate;
   const currency = pricing?.currency ?? "USD";
@@ -854,6 +745,22 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
       : currency === "USD"
         ? `$${value.toFixed(2)}`
         : `${currency} ${value.toFixed(2)}`;
+  const bindModel = async (): Promise<void> => {
+    if (!bindingProviderId || binding) return;
+    setBinding(true);
+    try {
+      const currentAliases = await listModels(bindingProviderId);
+      const names = [...new Set([...currentAliases.map((alias) => alias.upstreamModel), model.upstreamModel])];
+      const aliases = await setProviderAliases(bindingProviderId, names);
+      const created = aliases.find((alias) => alias.upstreamModel === model.upstreamModel);
+      if (created) await updateModel({ ...created, ...model, providerId: bindingProviderId, alias: created.alias, enabled: true });
+      onBound?.();
+    } catch (error) {
+      console.error("[model] 绑定目录模型失败", error);
+    } finally {
+      setBinding(false);
+    }
+  };
   return (
     <div className="space-y-4 overflow-y-auto pb-3">
       <div>
@@ -871,34 +778,29 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
           </span>
         </div>
         <p className="mt-2 text-[11px] leading-[1.5] text-fg-muted">
-          {model.manufacturerLabel} · 当前尚未绑定 AI
-          连接。先在“文本生成”中配置供应商，绑定后即可编辑该模型的能力和请求策略。
+          {t("models.catalogModelDescription", {
+            manufacturer: model.manufacturer === "other" ? t("models.otherVendor") : model.manufacturerLabel,
+          })}
         </p>
       </div>
-      <InspectorSection title="目录能力">
-        <div className="flex flex-wrap gap-1.5">
-          {[
-            model.capabilities.vision && "Vision",
-            model.capabilities.fileInput && "File",
-            model.capabilities.videoInput && "Video",
-            model.capabilities.webSearch && "Web",
-            model.capabilities.tools && "Tools",
-            model.capabilities.thinking && "Think",
-            model.capabilities.imageOutput && "Image",
-          ]
-            .filter(Boolean)
-            .map((label) => (
-              <span
-                key={label as string}
-                className="rounded-[5px] bg-surface-sunken px-1.5 py-0.5 text-[10.5px] text-fg-muted"
-              >
-                {label}
-              </span>
-            ))}
-        </div>
-        <p className="mt-2 text-[10.5px] text-fg-faint">
-          {t("models.unboundHint")}
-        </p>
+      <InspectorSection title={t("models.capabilities")}>
+              <Capability icon={<Image size={13} />} label={t("models.capabilityVision")} value={Boolean(model.capabilities.vision)} onChange={(v) => setCap("vision", v)} />
+        <Capability icon={<File size={13} />} label={t("models.capabilityFile")} value={Boolean(model.capabilities.fileInput)} onChange={(v) => setCap("fileInput", v)} />
+        <Capability icon={<Video size={13} />} label={t("models.capabilityVideo")} value={Boolean(model.capabilities.videoInput)} onChange={(v) => setCap("videoInput", v)} />
+        <Capability icon={<Globe size={13} />} label={t("models.webSearch")} value={Boolean(model.capabilities.webSearch)} onChange={(v) => setCap("webSearch", v)} />
+        <Capability icon={<Wrench size={13} />} label={t("models.capabilityTools")} value={Boolean(model.capabilities.tools)} onChange={(v) => setCap("tools", v)} />
+        <Capability icon={<Zap size={13} />} label={t("models.imageGeneration")} value={Boolean(model.capabilities.imageOutput)} onChange={(v) => setCap("imageOutput", v)} />
+        <p className="mt-2 text-[10.5px] text-fg-faint">{t("models.unboundHint")}</p>
+      </InspectorSection>
+      <InspectorSection title={t("models.reasoning")}>
+        <select value={thinking.mode} onChange={(e) => setModel((current) => ({ ...current, thinkingConfig: { ...thinking, mode: e.target.value as ThinkingMode }, capabilities: { ...current.capabilities, thinking: e.target.value !== "unsupported" } }))} className="h-7 w-full rounded-[6px] border border-border bg-surface-field px-2 text-[11.5px] text-fg">
+          <option value="unsupported">{t("models.unsupported")}</option>
+          <option value="always">{t("models.always")}</option>
+          <option value="toggle">{t("models.toggle")}</option>
+          <option value="effort">{t("models.effort")}</option>
+          <option value="budget">{t("models.budget")}</option>
+        </select>
+        <p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">{t("models.reasoningHint")}</p>
       </InspectorSection>
       <InspectorSection title={t("models.officialPrice")}>
         {pricing ? (
@@ -919,8 +821,8 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
             </div>
             <p className="mt-2 text-[10.5px] text-fg-faint">
               {pricing.currency === "USD"
-                ? "官方 USD 价格"
-                : "官方原币价格；当前界面未配置换算汇率"}{" "}
+                ? t("models.currencyOfficial")
+                : t("models.currencyOriginal")}{" "}
               ·{" "}
               {pricing.tiers.length > 1
                 ? t("models.tierStep", { count: pricing.tiers.length })
@@ -940,9 +842,19 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
         )}
       </InspectorSection>
       <div className="rounded-[8px] border border-border bg-surface-sunken/50 px-2.5 py-2 text-[10.5px] leading-[1.5] text-fg-faint">
-        连接状态：未配置 · 该模型仍会保留在官方目录中，不会因为尚未配置 Provider
-        而消失。
+        {t("models.connectionUnconfiguredHint")}
       </div>
+      {providers.length > 0 && (
+        <div className="border-t border-hairline pt-3">
+          <div className="mb-2 text-[11.5px] text-fg-faint">{t("models.saveToConnection")}</div>
+          <div className="flex gap-2">
+            <select value={bindingProviderId} onChange={(event) => setBindingProviderId(event.target.value)} className="h-7 min-w-0 flex-1 rounded-[6px] border border-border bg-surface-field px-2 text-[11.5px] text-fg">
+              {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+            </select>
+            <button type="button" disabled={binding || !bindingProviderId} onClick={() => void bindModel()} className="rounded-[6px] bg-accent px-2.5 text-[11px] text-accent-fg disabled:opacity-50">{binding ? t("models.binding") : t("models.bindAndSave")}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -987,18 +899,18 @@ function UsageTab(): ReactNode {
     <>
       <SettingGroup title={t("models.usageAndCost")}>
         <TodoRow
-          title="总费用 / 总请求 / 成功率 / 平均延迟"
-          description="费用按原币与 USD 估值分别汇总，历史记录冻结当时汇率。"
+          title={t("models.usageSummary")}
+          description={t("models.usageSummaryHint")}
           step="未接:usage:getSummary"
         />
         <TodoRow
-          title="请求日志"
-          description="一次 HTTP 尝试记一条，可追溯命中的定价档位与时段规则。"
+          title={t("models.requestLogs")}
+          description={t("models.requestLogsHint")}
           step="未接:usage:getRequestLogs"
         />
         <TodoRow
-          title="模型 / 供应商统计"
-          description="按时间范围查看模型、供应商和币种维度的成本。"
+          title={t("models.modelProviderStats")}
+          description={t("models.modelProviderStatsHint")}
           step="未接:usage:getModelStats"
           last
         />

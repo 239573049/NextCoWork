@@ -16,14 +16,24 @@
  * 这一条不在 `.app-drag` 区里,所以不需要逐个 `.app-no-drag` ——
  * 但拖动重排用的是同一个 hook,行为和外层一致。
  */
-import { ChevronDown, Plus, X } from 'lucide-react'
-import { Fragment, type ReactNode } from 'react'
-import type { InnerTab, InnerTabKind, InnerTabMenuItem } from '../../../shared/domain/tab'
-import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../components/ui/Menu'
-import { prettyAccelerator } from '../lib/accelerator'
-import { cn } from '../lib/cn'
-import { INNER_TAB_ICON } from './icons'
-import { useDragReorder } from './useDragReorder'
+import { ChevronDown, Plus, X } from "lucide-react";
+import { Fragment, type ReactNode } from "react";
+import type {
+  InnerTab,
+  InnerTabKind,
+  InnerTabMenuItem,
+} from "../../../shared/domain/tab";
+import {
+  Menu,
+  MenuItem,
+  MenuLabel,
+  MenuSeparator,
+} from "../components/ui/Menu";
+import { prettyAccelerator } from "../lib/accelerator";
+import { cn } from "../lib/cn";
+import { INNER_TAB_ICON } from "./icons";
+import { useDragReorder } from "./useDragReorder";
+import { useI18n } from "../i18n";
 
 export function InnerTabBar({
   tabs,
@@ -35,36 +45,38 @@ export function InnerTabBar({
   onActivate,
   onClose,
   onMove,
-  onOpen
+  onOpen,
 }: {
-  tabs: readonly InnerTab[]
-  activeId: string | null
-  runningSessionIds: ReadonlySet<string>
+  tabs: readonly InnerTab[];
+  activeId: string | null;
+  runningSessionIds: ReadonlySet<string>;
   /** `+` 菜单的内容。主区与底部各有一份常量,见 shared/domain/tab.ts */
-  menu: readonly InnerTabMenuItem[]
+  menu: readonly InnerTabMenuItem[];
   /** 条右端那个按钮:主区是「全部标签页」,底部是「关闭面板」 */
-  trailing?: ReactNode
-  className?: string
-  onActivate: (id: string) => void
-  onClose: (id: string) => void
+  trailing?: ReactNode;
+  className?: string;
+  onActivate: (id: string) => void;
+  onClose: (id: string) => void;
   /** 下标是**本条内**的下标 —— 两条 Tab 条共用一张表,见 reorderInPane */
-  onMove: (from: number, to: number) => void
-  onOpen: (kind: InnerTabKind) => void
+  onMove: (from: number, to: number) => void;
+  onOpen: (kind: InnerTabKind) => void;
 }): ReactNode {
-  const { dragging, onPointerDown, styleFor } = useDragReorder(onMove)
+  const { t } = useI18n();
+  const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
 
   return (
     <div
       className={cn(
-        'flex h-10 shrink-0 items-center gap-1 border-b border-hairline px-2',
-        className
+        "flex h-10 shrink-0 items-center gap-1 border-b border-hairline px-2",
+        className,
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-1">
         {tabs.map((tab, i) => {
-          const active = tab.id === activeId
-          const running = tab.kind === 'chat' && runningSessionIds.has(tab.ref.sessionId)
-          const Icon = INNER_TAB_ICON[tab.kind]
+          const active = tab.id === activeId;
+          const running =
+            tab.kind === "chat" && runningSessionIds.has(tab.ref.sessionId);
+          const Icon = INNER_TAB_ICON[tab.kind];
           return (
             <div
               key={tab.id}
@@ -75,37 +87,41 @@ export function InnerTabBar({
               aria-selected={active}
               title={tab.title}
               className={cn(
-                'group flex h-7 max-w-[190px] min-w-0 shrink-0 items-center gap-1.5 rounded-[8px]',
-                'pr-1 pl-2.5 text-[12.5px] select-none',
-                !dragging && 'transition-[transform,background-color]',
-                active ? 'bg-tint text-fg' : 'text-fg-muted hover:bg-tint/50 hover:text-fg'
+                "group flex h-7 max-w-[190px] min-w-0 shrink-0 items-center gap-1.5 rounded-[8px]",
+                "pr-1 pl-2.5 text-[12.5px] select-none",
+                !dragging && "transition-[transform,background-color]",
+                active
+                  ? "bg-tint text-fg"
+                  : "text-fg-muted hover:bg-tint/50 hover:text-fg",
               )}
             >
               <Icon size={13} className="shrink-0 text-fg-faint" />
               <span className="min-w-0 flex-1 truncate">{tab.title}</span>
-              {running && <span className="size-1.5 shrink-0 rounded-pill bg-accent" />}
+              {running && (
+                <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
+              )}
               <button
                 type="button"
-                aria-label={`关闭 ${tab.title}`}
+                aria-label={t("nav.closeTab", { label: tab.title })}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
-                  e.stopPropagation()
-                  onClose(tab.id)
+                  e.stopPropagation();
+                  onClose(tab.id);
                 }}
                 className={cn(
-                  'flex size-[17px] shrink-0 items-center justify-center rounded-[5px]',
-                  'text-fg-faint opacity-0 transition-opacity group-hover:opacity-100',
-                  'hover:bg-tint-strong hover:text-fg focus-visible:opacity-100'
+                  "flex size-[17px] shrink-0 items-center justify-center rounded-[5px]",
+                  "text-fg-faint opacity-0 transition-opacity group-hover:opacity-100",
+                  "hover:bg-tint-strong hover:text-fg focus-visible:opacity-100",
                 )}
               >
                 <X size={11} />
               </button>
             </div>
-          )
+          );
         })}
 
         <Menu
-          label="新建标签页"
+          label={t("nav.newTab")}
           width={230}
           trigger={<Plus size={15} />}
           triggerClassName="flex size-7 items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
@@ -119,13 +135,13 @@ export function InnerTabBar({
                   {item.separatorBefore === true && <MenuSeparator />}
                   <MenuItem
                     icon={(() => {
-                      const Icon = INNER_TAB_ICON[item.kind]
-                      return <Icon size={14} />
+                      const Icon = INNER_TAB_ICON[item.kind];
+                      return <Icon size={14} />;
                     })()}
                     accelerator={prettyAccelerator(item.accelerator)}
                     onSelect={() => {
-                      onOpen(item.kind)
-                      close()
+                      onOpen(item.kind);
+                      close();
                     }}
                   >
                     {item.label}
@@ -139,7 +155,7 @@ export function InnerTabBar({
 
       {trailing}
     </div>
-  )
+  );
 }
 
 /**
@@ -154,15 +170,16 @@ export function InnerTabBar({
 export function AllTabsMenu({
   tabs,
   activeId,
-  onActivate
+  onActivate,
 }: {
-  tabs: readonly InnerTab[]
-  activeId: string | null
-  onActivate: (id: string) => void
+  tabs: readonly InnerTab[];
+  activeId: string | null;
+  onActivate: (id: string) => void;
 }): ReactNode {
+  const { t } = useI18n();
   return (
     <Menu
-      label="全部标签页"
+      label={t("nav.allTabs")}
       width={240}
       align="end"
       trigger={<ChevronDown size={15} />}
@@ -170,9 +187,9 @@ export function AllTabsMenu({
     >
       {(close) => (
         <>
-          {tabs.length === 0 && <MenuLabel>没有标签页</MenuLabel>}
+          {tabs.length === 0 && <MenuLabel>{t("nav.noTabs")}</MenuLabel>}
           {tabs.map((tab) => {
-            const Icon = INNER_TAB_ICON[tab.kind]
+            const Icon = INNER_TAB_ICON[tab.kind];
             return (
               <MenuItem
                 key={tab.id}
@@ -181,16 +198,16 @@ export function AllTabsMenu({
                 // 激活项一勾整列就横向跳一下
                 checked={tab.id === activeId}
                 onSelect={() => {
-                  onActivate(tab.id)
-                  close()
+                  onActivate(tab.id);
+                  close();
                 }}
               >
                 {tab.title}
               </MenuItem>
-            )
+            );
           })}
         </>
       )}
     </Menu>
-  )
+  );
 }

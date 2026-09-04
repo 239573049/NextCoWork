@@ -28,11 +28,13 @@ interface WindowState {
   activeWorkspaceId: string | null
   sidebarCollapsed: boolean
   /**
-   * 外层 Tab 条右端那两个面板开关(量自 docs/image-new:`PanelBottom` 在
-   * x949..962、`PanelRight` 在 x991..1004)。**它们是窗口级的,不是工作区级的** ——
-   * 参考实现里切工作区 Tab 时右侧「工作区文件」面板保持打开,只是换了内容。
+   * 外层 Tab 条右端的右侧工作台开关。当前值是 active workspace 的投影；
+   * 真正的展开态记录在 `rightPanelOpenByWorkspace`，后台 Agent 不能掀开
+   * 用户此刻正在看的另一个工作区。
    */
   rightPanelOpen: boolean
+  /** 右侧工作台展开态按工作区隔离；后台 Agent 的动作不会改当前工作区。 */
+  rightPanelOpenByWorkspace: Record<string, boolean>
   bottomPanelOpen: boolean
   /**
    * 拖出来的面板尺寸。**和上面两个开关不同,这两个是落盘的** ——
@@ -67,6 +69,7 @@ interface WindowState {
   move: (from: number, to: number) => void
   toggleSidebar: () => void
   toggleRightPanel: () => void
+  setRightPanelForWorkspace: (workspaceId: string, open: boolean) => void
   toggleBottomPanel: () => void
   /** 拖动分隔条时每帧都在调 —— 落盘那侧防抖 500ms,这里不用自己攒 */
   setRightPanelWidth: (px: number) => void
@@ -131,6 +134,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
     activeWorkspaceId: null,
     sidebarCollapsed: false,
     rightPanelOpen: false,
+    rightPanelOpenByWorkspace: {},
     bottomPanelOpen: false,
     rightPanelWidth: RIGHT_PANEL.def,
     bottomPanelHeight: BOTTOM_PANEL.def,
@@ -168,7 +172,12 @@ export const useWindowStore = create<WindowState>((set, get) => {
       set({
         activeOuterId: outerId,
         // 功能 Tab 不改工作区上下文 —— 侧边栏保持原样
-        ...(tab.kind === 'workspace' ? { activeWorkspaceId: tab.ref.workspaceId } : {})
+        ...(tab.kind === 'workspace'
+          ? {
+              activeWorkspaceId: tab.ref.workspaceId,
+              rightPanelOpen: get().rightPanelOpenByWorkspace[tab.ref.workspaceId] ?? false
+            }
+          : {})
       })
       persist(get().outer, outerId)
     },
@@ -183,7 +192,12 @@ export const useWindowStore = create<WindowState>((set, get) => {
       }
       const tab: OuterTab = { id: ulid(), kind: 'workspace', ref: { workspaceId } }
       const outer = [...get().outer, tab]
-      set({ outer, activeOuterId: tab.id, activeWorkspaceId: workspaceId })
+      set({
+        outer,
+        activeOuterId: tab.id,
+        activeWorkspaceId: workspaceId,
+        rightPanelOpen: get().rightPanelOpenByWorkspace[workspaceId] ?? false
+      })
       persist(outer, tab.id)
     },
 
@@ -213,10 +227,15 @@ export const useWindowStore = create<WindowState>((set, get) => {
       // 关掉的是当前 Tab 时,焦点给右邻;没有右邻给左邻 —— 浏览器的习惯
       const nextActive =
         activeOuterId === outerId ? (next[idx]?.id ?? next[idx - 1]?.id ?? null) : activeOuterId
+      const nextWorkspaceId = firstWorkspaceId(next, nextActive)
       set({
         outer: next,
         activeOuterId: nextActive,
-        activeWorkspaceId: firstWorkspaceId(next, nextActive)
+        activeWorkspaceId: nextWorkspaceId,
+        rightPanelOpen:
+          nextWorkspaceId === null
+            ? false
+            : get().rightPanelOpenByWorkspace[nextWorkspaceId] ?? false
       })
       persist(next, nextActive)
 
@@ -244,7 +263,22 @@ export const useWindowStore = create<WindowState>((set, get) => {
     },
 
     toggleRightPanel() {
-      set({ rightPanelOpen: !get().rightPanelOpen })
+      const next = !get().rightPanelOpen
+      const workspaceId = get().activeWorkspaceId
+      set({
+        rightPanelOpen: next,
+        ...(workspaceId === null
+          ? {}
+          : { rightPanelOpenByWorkspace: { ...get().rightPanelOpenByWorkspace, [workspaceId]: next } })
+      })
+    },
+
+    setRightPanelForWorkspace(workspaceId, open) {
+      const byWorkspace = { ...get().rightPanelOpenByWorkspace, [workspaceId]: open }
+      set({
+        rightPanelOpenByWorkspace: byWorkspace,
+        ...(get().activeWorkspaceId === workspaceId ? { rightPanelOpen: open } : {})
+      })
     },
 
     toggleBottomPanel() {

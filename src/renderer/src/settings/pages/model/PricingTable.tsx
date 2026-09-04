@@ -2,19 +2,21 @@ import { ExternalLink, Search } from 'lucide-react'
 import { useMemo, useState, type ReactNode } from 'react'
 import type { Currency, ModelPricing } from '../../../../../shared/domain/pricing'
 import { PRICING_SEED } from '../../../../../shared/domain/pricing-seed'
+import { findPreset } from '../../../../../shared/domain/presets'
 import { EmptyState } from '../../../components/ui/EmptyState'
 import { TextInput } from '../../../components/ui/TextInput'
 import { cn } from '../../../lib/cn'
 import { openExternal } from '../../../services/app'
 import { SettingGroup, TodoRow } from '../../Row'
 import {
-  describeEffective,
-  describeWindow,
+  describeEffectiveParts,
+  describeWindowParts,
   formatRate,
   groupPricing,
   matchPricing,
   tierLabel
 } from './pricing-table'
+import { useI18n } from '../../../i18n'
 
 /**
  * 「模型定价」表 —— 方案 §4 的种子表在界面上的样子。
@@ -32,40 +34,40 @@ import {
  * `border-hairline` 分隔),**没有新造间距体系** —— 这一页没有参考截图可量。
  */
 export function PricingTable(): ReactNode {
+  const { t } = useI18n()
   const [query, setQuery] = useState('')
   const groups = useMemo(() => groupPricing(matchPricing(PRICING_SEED, query)), [query])
 
   return (
     <>
-      <SettingGroup title="模型定价">
+      <SettingGroup title={t('models.pricingTitle')}>
         <div className="flex items-center gap-4 py-4">
           <div className="min-w-0 flex-1">
-            <p className="text-[13px] text-fg">内置基础定价</p>
+            <p className="text-[13px] text-fg">{t('models.pricingBuiltIn')}</p>
             <p className="mt-1 text-[12px] leading-[1.5] text-fg-muted">
-              {PRICING_SEED.length} 行,{fetchedLabel()}。费率单位是
-              <span className="text-fg">每百万 token</span>,币种按厂商原样记录、不做汇率换算。
-              这是一份带日期的快照,<span className="text-fg">以供应商最终结算为准</span>。
+              {t('models.pricingSummary', { count: PRICING_SEED.length })}，{fetchedLabel(t)}。{t('models.pricingSnapshotHint')}
+              <span className="text-fg">{t('models.pricingFinalBilling')}</span>。{t('models.pricingCurrencyHint')}
             </p>
           </div>
           <div className="w-[220px] shrink-0">
             <TextInput
               value={query}
               onChange={setQuery}
-              placeholder="搜索模型或厂商"
-              ariaLabel="搜索定价"
+              placeholder={t('models.pricingSearch')}
+              ariaLabel={t('models.pricingSearchLabel')}
               icon={<Search size={13} className="text-icon" />}
             />
           </div>
         </div>
         <TodoRow
-          title="手工覆盖 / 新增一行定价"
-          description="种子表过期或你走的是某个聚合平台的特价时,用覆盖价盖过它。读这张表不需要 IPC,写才需要。"
-          step="未接:pricing:upsert"
+          title={t('models.pricingManualTitle')}
+          description={t('models.pricingManualHint')}
+          step={t('models.pricingStep')}
         />
         <TodoRow
-          title="用过但查不到定价的模型"
-          description="从用量记录里取费用为空的那些。模型名抄错了的话,唯一的外显就是费用列永远显示「—」,这里是把它变得看得见的入口。"
-          step="未接:usage:getRequestLogs"
+          title={t('models.pricingUnknownTitle')}
+          description={t('models.pricingUnknownHint')}
+          step={t('models.usageLogsStep')}
           last
         />
       </SettingGroup>
@@ -74,15 +76,21 @@ export function PricingTable(): ReactNode {
         <EmptyState
           className="py-10"
           icon={<Search size={22} />}
-          title="没有匹配的模型"
-          hint={`「${query.trim()}」在 ${PRICING_SEED.length} 行定价里一条都没命中。`}
+          title={t('models.pricingNoMatch')}
+          hint={t('models.pricingNoMatchHint', { query: query.trim(), count: PRICING_SEED.length })}
         />
       ) : (
         groups.map((g) => (
           <section key={g.key} className="pt-5">
-            <h4 className="px-1 text-[12.5px] text-fg">{g.title}</h4>
-            <p className="mt-1 px-1 text-[12px] leading-[1.5] text-fg-muted">{g.hint}</p>
-            <PriceRows rows={g.rows} />
+            <h4 className="px-1 text-[12.5px] text-fg">
+              {g.key === '*' ? t('models.pricingGroupGeneric') : findPreset(g.key)?.name ?? g.key}
+            </h4>
+            <p className="mt-1 px-1 text-[12px] leading-[1.5] text-fg-muted">
+              {g.key === '*'
+                ? t('models.pricingGroupGenericHint')
+                : t('models.pricingGroupProviderHint', { provider: findPreset(g.key)?.name ?? g.key })}
+            </p>
+            <PriceRows rows={g.rows} t={t} />
           </section>
         ))
       )}
@@ -91,30 +99,38 @@ export function PricingTable(): ReactNode {
 }
 
 /** 全表的采集日期。种子表的测试保证它一致,不一致时**说出来**而不是挑一个显示 */
-function fetchedLabel(): string {
+function fetchedLabel(t: ReturnType<typeof useI18n>['t']): string {
   const dates = [...new Set(PRICING_SEED.map((p) => p.fetchedAt))]
-  return dates.length === 1 ? `录入于 ${dates[0]}` : `录入日期不一致(${dates.length} 种)`
+  return dates.length === 1
+    ? t('models.pricingFetchedAt', { date: dates[0]! })
+    : t('models.pricingFetchedInconsistent', { count: dates.length })
 }
 
-const HEAD = ['输入', '输出', '缓存读', '缓存写 5m', '缓存写 1h'] as const
+const HEAD = [
+  'models.columns.input',
+  'models.columns.output',
+  'models.pricingHeaderCacheRead',
+  'models.pricingHeaderCacheWrite5m',
+  'models.pricingHeaderCacheWrite1h'
+] as const
 
-function PriceRows({ rows }: { rows: readonly ModelPricing[] }): ReactNode {
+function PriceRows({ rows, t }: { rows: readonly ModelPricing[]; t: ReturnType<typeof useI18n>['t'] }): ReactNode {
   return (
     <table className="mt-2 w-full border-collapse text-[12px]">
       <thead>
         <tr className="border-b border-hairline text-fg-faint">
-          <th className="py-2 pl-1 text-left font-normal">模型</th>
-          <th className="w-[68px] py-2 text-left font-normal">档</th>
+          <th className="py-2 pl-1 text-left font-normal">{t('models.columns.model')}</th>
+          <th className="w-[68px] py-2 text-left font-normal">{t('models.pricingHeaderTier')}</th>
           {HEAD.map((h) => (
             <th key={h} className="w-[76px] py-2 pr-1 text-right font-normal">
-              {h}
+              {t(h)}
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
         {rows.map((p) =>
-          p.tiers.map((t, i) => (
+          p.tiers.map((tier, i) => (
             <tr
               key={`${p.modelId}@${p.effectiveFrom ?? ''}#${i}`}
               className={cn(i === p.tiers.length - 1 && 'border-b border-hairline')}
@@ -124,10 +140,10 @@ function PriceRows({ rows }: { rows: readonly ModelPricing[] }): ReactNode {
                   <ModelCell p={p} />
                 </td>
               )}
-              <td className="py-2.5 align-top text-fg-muted">{tierLabel(p.tiers, i) || '—'}</td>
+              <td className="py-2.5 align-top text-fg-muted">{tierLabel(p.tiers, i) || t('models.pricingNotApplicable')}</td>
               {rateCells(p.currency).map(({ key, pick }) => (
                 <td key={key} className="py-2.5 pr-1 text-right align-top tabular-nums text-fg">
-                  {pick(t.rate)}
+                  {pick(tier.rate)}
                 </td>
               ))}
             </tr>
@@ -156,13 +172,16 @@ function rateCells(
 }
 
 function ModelCell({ p }: { p: ModelPricing }): ReactNode {
-  const effective = describeEffective(p)
+  const { t } = useI18n()
+  const effectiveParts = describeEffectiveParts(p)
   const host = hostOf(p.source)
   return (
     <>
       <p className="text-[12.5px] text-fg">{p.displayName}</p>
       <p className="mt-0.5 font-mono text-[11.5px] text-fg-muted">{p.modelId}</p>
-      {effective !== '' && <p className="mt-1 text-[11.5px] text-fg-faint">{effective}</p>}
+      {effectiveParts !== null && (
+        <p className="mt-1 text-[11.5px] text-fg-faint">{formatEffective(effectiveParts, t)}</p>
+      )}
       {/*
         ★ 时段计费逐条写出来,包括星期和时区。`inWindow` 判断用的就是 `w.timezone`,
         这里替用户换算成本机时间会让界面和实际计费规则对不上 —— 而对不上的时候,
@@ -170,7 +189,7 @@ function ModelCell({ p }: { p: ModelPricing }): ReactNode {
       */}
       {p.windows?.map((w) => (
         <p key={w.label + w.start} className="mt-1 text-[11.5px] text-fg-faint">
-          {describeWindow(w)}
+          {formatWindow(describeWindowParts(w), t)}
         </p>
       ))}
       <button
@@ -187,6 +206,33 @@ function ModelCell({ p }: { p: ModelPricing }): ReactNode {
       </button>
     </>
   )
+}
+
+function formatEffective(
+  parts: NonNullable<ReturnType<typeof describeEffectiveParts>>,
+  t: ReturnType<typeof useI18n>['t']
+): string {
+  if (parts.from !== undefined && parts.until !== undefined) return t('models.pricingEffectiveRange', { from: parts.from, until: parts.until })
+  if (parts.from !== undefined) return t('models.pricingEffectiveFrom', { from: parts.from })
+  return t('models.pricingEffectiveUntil', { until: parts.until ?? '' })
+}
+
+function formatWindow(
+  parts: ReturnType<typeof describeWindowParts>,
+  t: ReturnType<typeof useI18n>['t']
+): string {
+  const dayNames = parts.days.days.map((day) => t('models.pricingDay', { day }))
+  const days = parts.days.kind === 'all'
+    ? t('models.pricingEveryDay')
+    : parts.days.kind === 'range'
+      ? t('models.pricingDayRange', { from: dayNames[0] ?? '', to: dayNames[dayNames.length - 1] ?? '' })
+      : dayNames.join(t('models.pricingDayListSeparator'))
+  const detail = parts.detail === 'rates'
+    ? t('models.pricingWindowRates')
+    : parts.detail === 'multiplier'
+      ? t('models.pricingWindowMultiplier', { value: parts.multiplier ?? '' })
+      : null
+  return [parts.label, `${days} ${parts.start}–${parts.end} ${parts.timezone}`, detail].filter(Boolean).join(' · ')
 }
 
 /** 来源主机名。解析不了就原样显示 —— 种子表的测试保证它是 https URL,这里只是不炸 */

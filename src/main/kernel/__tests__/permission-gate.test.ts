@@ -229,7 +229,7 @@ describe('TOOLS_NEEDING_NETWORK', () => {
       .map((t) => t.internalId)
       .sort()
     expect(net).toEqual([...TOOLS_NEEDING_NETWORK].sort())
-    expect(net).toEqual(['WebFetch', 'web_search'])
+    expect(net).toEqual(['WebFetch', 'browser_navigate', 'browser_open', 'browser_snapshot', 'web_search'])
   })
 })
 

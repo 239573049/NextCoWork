@@ -1,8 +1,6 @@
 import type { ReactNode } from 'react'
 import {
   PERMISSION_MODES,
-  PERMISSION_MODE_HINT,
-  PERMISSION_MODE_LABEL,
   type PermissionMode
 } from '../../../../shared/agent/permission'
 import { Segmented } from '../../components/ui/Segmented'
@@ -21,8 +19,9 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           title={t('general.defaultPermission')}
           description={
             <>
-              {PERMISSION_MODE_HINT[settings.defaultPermissionMode]}。这是<b className="font-normal text-fg">{t('general.new')}</b>
-              工作区的初值;已经存在的工作区用它自己那一份(输入框左下角那颗)。
+              {t('general.defaultPermissionHint', {
+                hint: t(`permission.${settings.defaultPermissionMode}` as 'permission.ask' | 'permission.auto' | 'permission.full')
+              })}
             </>
           }
           wide
@@ -31,7 +30,7 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           <Segmented<PermissionMode>
             label={t('general.defaultPermission')}
             value={settings.defaultPermissionMode}
-            options={PERMISSION_MODES.map((m) => ({ value: m, label: PERMISSION_MODE_LABEL[m] }))}
+            options={PERMISSION_MODES.map((m) => ({ value: m, label: t(`permission.${m}` as 'permission.ask' | 'permission.auto' | 'permission.full') }))}
             onChange={(defaultPermissionMode) => patch({ defaultPermissionMode })}
           />
         </SettingRow>
@@ -44,7 +43,7 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
       <SettingGroup title={t('general.agentResources')}>
         <SettingRow
           title={t('general.perSessionSubagents')}
-          description="一段对话里最多同时派出几个子代理(方案 §4.9)。落点:步骤 11 的子代理池。"
+          description={t('general.perSessionSubagentsHint')}
           wide
         >
           <SliderField
@@ -58,7 +57,7 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
         </SettingRow>
         <SettingRow
           title={t('general.globalSubagents')}
-          description="全应用的子代理池大小。0 = 不允许派子代理。"
+          description={t('general.globalSubagentsHint')}
           wide
           last
         >

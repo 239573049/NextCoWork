@@ -56,7 +56,7 @@ export type InnerTab =
   | (InnerTabBase & { kind: 'terminal'; ref: { terminalId: string } })
   | (InnerTabBase & { kind: 'doc'; ref: { path: string } })
   | (InnerTabBase & { kind: 'draw'; ref: { path: string } })
-  | (InnerTabBase & { kind: 'browser'; ref: { url: string } })
+  | (InnerTabBase & { kind: 'browser'; ref: { url: string; browserId?: string; profileId?: string } })
   | (InnerTabBase & { kind: 'preview'; ref: { path: string } })
   /**
    * 工作区文件树。`ref.path` 是**子树根**(相对工作区,`''` = 工作区根)——

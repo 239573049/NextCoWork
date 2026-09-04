@@ -19,6 +19,8 @@ import type { McpServerConfig } from '../../shared/domain/mcp'
 import { mcpSecretRef } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
 import { normalizeUpstreamProvider } from '../../shared/domain/provider'
+import type { ModelCatalogDefinition } from '../../shared/domain/model-catalog'
+import { isModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
 import { defaultProviderConfigs, searchSecretRef } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
@@ -217,6 +219,11 @@ export function putSession(session: Session): Session {
     normalized.updatedAt,
     sessionRowJson(normalized)
   )
+  // Message bodies are indexed separately in FTS5. Keep the denormalized
+  // title column in sync when a session is renamed (or imported) so searches
+  // by conversation title do not continue returning the old title until the
+  // next message is committed.
+  stmt('UPDATE messages_fts SET title = ? WHERE session_id = ?').run(normalized.title, normalized.id)
   return normalized
 }
 
@@ -1291,6 +1298,44 @@ export function setKv(key: string, value: unknown): void {
 
 export function removeKv(key: string): void {
   stmt('DELETE FROM kv WHERE key = ?').run(key)
+}
+
+// ── User model catalogue ───────────────────────────────────────────────────
+
+/**
+ * Only user-created definitions are persisted. Built-in definitions ship in
+ * source control and must not be copied into SQLite: otherwise an application
+ * upgrade could never add or correct a built-in row for an existing user.
+ */
+const USER_MODEL_CATALOG_KEY = 'model-catalog.custom'
+
+export function listUserModelCatalog(): ModelCatalogDefinition[] {
+  const raw = getKv<unknown>(USER_MODEL_CATALOG_KEY, [])
+  if (!Array.isArray(raw)) return []
+  return raw.filter(isModelCatalogDefinition)
+}
+
+export function putUserModelCatalog(model: ModelCatalogDefinition): ModelCatalogDefinition {
+  if (!isModelCatalogDefinition(model)) throw new Error('自定义模型目录记录格式无效。')
+  return tx(() => {
+    const rows = listUserModelCatalog()
+    const key = model.id.trim().toLowerCase()
+    const index = rows.findIndex((row) => row.id.trim().toLowerCase() === key)
+    if (index === -1) rows.push(model)
+    else rows[index] = model
+    setKv(USER_MODEL_CATALOG_KEY, rows)
+    return model
+  })
+}
+
+export function removeUserModelCatalog(id: string): void {
+  tx(() => {
+    const rows = listUserModelCatalog()
+    const key = id.trim().toLowerCase()
+    const next = rows.filter((row) => row.id.trim().toLowerCase() !== key)
+    if (next.length === rows.length) return
+    setKv(USER_MODEL_CATALOG_KEY, next)
+  })
 }
 
 // ── MCP 服务器 ──────────────────────────────────────────────────────────────

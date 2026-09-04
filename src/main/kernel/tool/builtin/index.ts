@@ -22,6 +22,7 @@ import { taskTool } from './task'
 import { todoWriteTool } from './todo'
 import { webFetchTool } from './web'
 import { webSearchTool } from './web-search'
+import { browserTools } from './browser'
 
 export function builtinTools(): ToolRegistration[] {
   return [
@@ -38,6 +39,7 @@ export function builtinTools(): ToolRegistration[] {
     webFetchTool,
     skillTool,
     webSearchTool,
+    ...browserTools,
     /*
       ★ `Task` 是唯一一个**每次现造**的内置工具:它的 description 里逐字带着
       当前可用的子代理清单(照搬 CC),而那份清单会随目录重扫而变。
@@ -57,3 +59,4 @@ export { taskTool } from './task'
 export { todoWriteTool } from './todo'
 export { webFetchTool } from './web'
 export { webSearchTool } from './web-search'
+export { browserTools } from './browser'

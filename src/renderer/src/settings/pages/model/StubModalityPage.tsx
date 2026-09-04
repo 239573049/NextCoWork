@@ -2,6 +2,7 @@ import { AudioLines, Image, Mic, Video, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Modality } from "../../../../../shared/domain/pricing";
 import { EmptyState } from "../../../components/ui/EmptyState";
+import { useI18n } from "../../../i18n";
 
 /**
  * 四个铺出来但本轮没有内容的模态 Tab。照 `pages/StubPage.tsx` 的规矩:
@@ -18,30 +19,11 @@ import { EmptyState } from "../../../components/ui/EmptyState";
  */
 type DeadModality = Exclude<Modality, "text">;
 
-const REASON: Record<
-  DeadModality,
-  { icon: LucideIcon; title: string; hint: string }
-> = {
-  image: {
-    icon: Image,
-    title: "图像生成本轮不做",
-    hint: "上游编解码只有文本一条路。定价的形状倒是留好了 —— TokenRates.perCall 就是给按次计费的生图用的。",
-  },
-  video: {
-    icon: Video,
-    title: "视频生成本轮不做",
-    hint: "除了编解码,定价也套不上:各家普遍按秒和分辨率计价,而 TokenRates 的单位是每百万 token。",
-  },
-  speech: {
-    icon: AudioLines,
-    title: "语音生成本轮不做",
-    hint: "同上。语音合成普遍按字符计费,现在的费率表达不了,接它要先改 PriceTier 的形状。",
-  },
-  transcription: {
-    icon: Mic,
-    title: "语音识别本轮不做",
-    hint: "同上。识别普遍按音频时长计费,这一维在 TokenRates 里同样没有对应字段。",
-  },
+const ICON: Record<DeadModality, LucideIcon> = {
+  image: Image,
+  video: Video,
+  speech: AudioLines,
+  transcription: Mic,
 };
 
 export function StubModalityPage({
@@ -49,10 +31,15 @@ export function StubModalityPage({
 }: {
   modality: DeadModality;
 }): ReactNode {
-  const r = REASON[modality];
+  const { t } = useI18n();
+  const Icon = ICON[modality];
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center">
-      <EmptyState icon={<r.icon size={26} />} title={r.title} hint={r.hint} />
+      <EmptyState
+        icon={<Icon size={26} />}
+        title={t(`stub.${modality}.title` as "stub.image.title" | "stub.video.title" | "stub.speech.title" | "stub.transcription.title")}
+        hint={t(`stub.${modality}.hint` as "stub.image.hint" | "stub.video.hint" | "stub.speech.hint" | "stub.transcription.hint")}
+      />
     </div>
   );
 }

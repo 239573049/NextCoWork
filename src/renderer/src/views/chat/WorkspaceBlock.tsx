@@ -5,40 +5,48 @@
  * 两层折叠叠加,一次展开只往下走一级 —— 直接展平会让「展开工作区」这个动作的
  * 结果不可预测:可能是 3 行,也可能是 40 行。用户不敢点的折叠等于没有折叠。
  */
-import { ChevronRight, LayoutGrid } from 'lucide-react'
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { formatDuration } from '../../../../shared/agent/duration'
-import type { ToolCallState } from '../../../../shared/agent/transcript'
+import { ChevronRight, LayoutGrid } from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { formatDuration } from "../../../../shared/agent/duration";
+import type { ToolCallState } from "../../../../shared/agent/transcript";
 import {
   summarize,
   workspaceTitleParts,
-  type TimelineItem
-} from '../../../../shared/domain/tool-timeline'
-import { cn } from '../../lib/cn'
-import { ToolTimeline } from './ToolTimeline'
-import { ShapeStrip } from './ToolIcon'
+  type TimelineItem,
+} from "../../../../shared/domain/tool-timeline";
+import { cn } from "../../lib/cn";
+import { useI18n } from "../../i18n";
+import { ToolTimeline } from "./ToolTimeline";
+import { ShapeStrip } from "./ToolIcon";
 
 /** 标题行最多画几个形态图标,超出显示 `+n` */
-const MAX_SHAPE_ICONS = 4
+const MAX_SHAPE_ICONS = 4;
 
 /** 收束延迟。理由见下面 useEffect 的说明。 */
-const COLLAPSE_DELAY_MS = 400
+const COLLAPSE_DELAY_MS = 400;
 
 export function WorkspaceBlock({
   items,
   tools,
   defaultOpen,
   fileChangeCount = 0,
-  scrollRef
+  scrollRef,
 }: {
-  items: readonly TimelineItem[]
-  tools: Readonly<Record<string, ToolCallState>>
+  items: readonly TimelineItem[];
+  tools: Readonly<Record<string, ToolCallState>>;
   /** 有失败时收进来但默认展开 */
-  defaultOpen: boolean
-  fileChangeCount?: number
+  defaultOpen: boolean;
+  fileChangeCount?: number;
   /** 滚动容器 —— 收束时要在同一帧做锚点补偿,没有它就会「跳一下」 */
-  scrollRef?: React.RefObject<HTMLElement | null>
+  scrollRef?: React.RefObject<HTMLElement | null>;
 }): ReactNode {
+  const { t } = useI18n();
   /**
    * ★ **延迟 400ms 再收束,且不加动画。**
    *
@@ -49,18 +57,18 @@ export function WorkspaceBlock({
    * 不加动画的理由:收束时用户的视线应该在下方的结论文本上,
    * 一段 300ms 的高度动画会把视线硬拽回上方。
    */
-  const [open, setOpen] = useState(true)
-  const ref = useRef<HTMLDivElement>(null)
-  const pendingCollapse = useRef(false)
+  const [open, setOpen] = useState(true);
+  const ref = useRef<HTMLDivElement>(null);
+  const pendingCollapse = useRef(false);
 
   useEffect(() => {
-    if (defaultOpen) return
+    if (defaultOpen) return;
     const t = setTimeout(() => {
-      pendingCollapse.current = true
-      setOpen(false)
-    }, COLLAPSE_DELAY_MS)
-    return () => clearTimeout(t)
-  }, [defaultOpen])
+      pendingCollapse.current = true;
+      setOpen(false);
+    }, COLLAPSE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [defaultOpen]);
 
   /**
    * 滚动锚定补偿。
@@ -73,23 +81,23 @@ export function WorkspaceBlock({
    * 而前者就是用户视线实际停留的那条边。
    */
   useLayoutEffect(() => {
-    if (!pendingCollapse.current) return
-    pendingCollapse.current = false
-    const scroller = scrollRef?.current
-    const el = ref.current
-    if (!scroller || !el) return
-    const before = el.getBoundingClientRect().top
+    if (!pendingCollapse.current) return;
+    pendingCollapse.current = false;
+    const scroller = scrollRef?.current;
+    const el = ref.current;
+    if (!scroller || !el) return;
+    const before = el.getBoundingClientRect().top;
     requestAnimationFrame(() => {
-      const after = el.getBoundingClientRect().top
-      const delta = after - before
-      if (delta !== 0) scroller.scrollTop += delta
-    })
-  }, [open, scrollRef])
+      const after = el.getBoundingClientRect().top;
+      const delta = after - before;
+      if (delta !== 0) scroller.scrollTop += delta;
+    });
+  }, [open, scrollRef]);
 
-  const summary = summarize(items, tools, fileChangeCount)
-  const { normal, danger } = workspaceTitleParts(summary, formatDuration)
-  const shownShapes = summary.shapes.slice(0, MAX_SHAPE_ICONS)
-  const extraShapes = summary.shapes.length - shownShapes.length
+  const summary = summarize(items, tools, fileChangeCount);
+  const { normal, danger } = workspaceTitleParts(summary, formatDuration);
+  const shownShapes = summary.shapes.slice(0, MAX_SHAPE_ICONS);
+  const extraShapes = summary.shapes.length - shownShapes.length;
 
   return (
     <div
@@ -97,8 +105,8 @@ export function WorkspaceBlock({
       data-testid="workspace-block"
       data-open={open}
       className={cn(
-        'overflow-hidden rounded-card border bg-surface-raised/40',
-        danger !== undefined ? 'border-danger/30' : 'border-border'
+        "overflow-hidden rounded-card border bg-surface-raised/40",
+        danger !== undefined ? "border-danger/30" : "border-border",
       )}
     >
       <button
@@ -109,15 +117,22 @@ export function WorkspaceBlock({
       >
         <ChevronRight
           size={13}
-          className={cn('shrink-0 text-fg-faint transition-transform', open && 'rotate-90')}
+          className={cn(
+            "shrink-0 text-fg-faint transition-transform",
+            open && "rotate-90",
+          )}
         />
         <LayoutGrid size={13} className="shrink-0 text-accent-soft" />
-        <span className="shrink-0 text-fg">工作区</span>
+        <span className="shrink-0 text-fg">{t("chat.workspace")}</span>
         <ShapeStrip shapes={shownShapes} />
-        {extraShapes > 0 && <span className="shrink-0 text-[11px] text-fg-faint">+{extraShapes}</span>}
+        {extraShapes > 0 && (
+          <span className="shrink-0 text-[11px] text-fg-faint">
+            +{extraShapes}
+          </span>
+        )}
 
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg-faint">
-          {normal.join(' · ')}
+          {normal.join(" · ")}
         </span>
         {danger !== undefined && (
           <span className="shrink-0 text-[11.5px] text-danger">{danger}</span>
@@ -135,5 +150,5 @@ export function WorkspaceBlock({
         </div>
       )}
     </div>
-  )
+  );
 }

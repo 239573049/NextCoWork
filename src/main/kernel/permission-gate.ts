@@ -65,7 +65,13 @@ export function evaluate(q: PermissionQuery): PermissionOutcome {
  * 而那个字段本身也不采信任何不可信输入:MCP 工具的值由 `mcp/bridge.ts`
  * 按我们库里存的**传输方式**推出来,不读服务器自报的 annotations。判定权仍在我们这边。
  */
-export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set(['WebFetch', 'web_search'])
+export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set([
+  'WebFetch',
+  'web_search',
+  'browser_open',
+  'browser_navigate',
+  'browser_snapshot'
+])
 
 /**
  * 「该问但问不了」时给模型的原文。

@@ -95,7 +95,7 @@ export function ProviderCatalog({
       <div className="flex items-center gap-3 pb-3">
         <Segmented
           size="sm"
-          label="供应商分类"
+          label={t("models.providerCategory")}
           value={tab}
           onChange={(v) => {
             setTab(v);
@@ -120,8 +120,7 @@ export function ProviderCatalog({
 
       {query.trim() !== "" && (
         <p className="pb-2 text-[11.5px] text-fg-faint">
-          搜索跨全部 {PROVIDER_PRESETS.length} 家,不限当前分类 —— 命中{" "}
-          {list.length} 家。
+          {t("models.searchAllHint", { total: PROVIDER_PRESETS.length, count: list.length })}
         </p>
       )}
 
@@ -146,11 +145,7 @@ export function ProviderCatalog({
       )}
 
       <p className="mt-4 border-t border-hairline pt-3 text-[11.5px] leading-[1.6] text-fg-faint">
-        {PROVIDER_PRESETS.length} 家里有 {divergentCount()} 家
-        <span className="text-fg-muted">换协议就换地址</span>
-        (OpenRouter 的 OpenAI 端是 /api/v1、Anthropic 端是
-        /api)。所以地址是挂在协议上的, 翻「API 格式」开关时会跟着换 ——
-        不然表单看着完全正常,请求 404。
+        {t("models.protocolAddressHint", { total: PROVIDER_PRESETS.length, divergent: divergentCount() })}
       </p>
     </Dialog>
   );

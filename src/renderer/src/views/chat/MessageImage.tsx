@@ -17,40 +17,47 @@
  * 「哪些图算一组」是**消息**这一层才知道的事,所以 `siblings` 由 `UserBubble`
  * 传进来 —— 组件自己猜不出来。
  */
-import { ImageOff } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
-import { NCW_SCHEME } from '../../../../shared/domain/attachment'
-import { cn } from '../../lib/cn'
-import { ImageLightbox, type LightboxImage } from './ImageLightbox'
+import { ImageOff } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { NCW_SCHEME } from "../../../../shared/domain/attachment";
+import { cn } from "../../lib/cn";
+import { useI18n } from "../../i18n";
+import { ImageLightbox, type LightboxImage } from "./ImageLightbox";
 
 export function MessageImage({
   mime,
   dataRef,
   siblings,
-  index = 0
+  index = 0,
 }: {
-  mime: string
-  dataRef: string
+  mime: string;
+  dataRef: string;
   /** 同一条消息里的全部可显示图片。缺省时按单张处理 */
-  siblings?: readonly LightboxImage[]
+  siblings?: readonly LightboxImage[];
   /** 本图在 siblings 里的位置 */
-  index?: number
+  index?: number;
 }): ReactNode {
-  const [failed, setFailed] = useState(false)
-  const [zoomed, setZoomed] = useState(false)
-  const displayable = dataRef.startsWith(`${NCW_SCHEME}://`)
+  const { t } = useI18n();
+  const [failed, setFailed] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
+  const displayable = dataRef.startsWith(`${NCW_SCHEME}://`);
 
   if (!displayable) {
     // 外部绝对路径:显示文件名而不是整条路径 —— 路径可能很长,
     // 而用户真正需要辨认的是「哪一张图」。
-    return <ImagePlaceholder label={fileNameOf(dataRef)} hint="外部文件" />
+    return (
+      <ImagePlaceholder
+        label={fileNameOf(dataRef)}
+        hint={t("chat.externalFile")}
+      />
+    );
   }
 
   if (failed) {
-    return <ImagePlaceholder label="图片已不存在" hint={mime} />
+    return <ImagePlaceholder label={t("chat.imageMissing")} hint={mime} />;
   }
 
-  const group = siblings ?? [{ mime, dataRef }]
+  const group = siblings ?? [{ mime, dataRef }];
 
   return (
     <>
@@ -60,8 +67,10 @@ export function MessageImage({
       */}
       <button
         type="button"
-        onClick={() => { setZoomed(true) }}
-        aria-label="放大查看图片"
+        onClick={() => {
+          setZoomed(true);
+        }}
+        aria-label={t("chat.zoomImage")}
         className="block cursor-zoom-in"
       >
         <img
@@ -69,7 +78,9 @@ export function MessageImage({
           alt=""
           data-testid="message-image"
           loading="lazy"
-          onError={() => { setFailed(true) }}
+          onError={() => {
+            setFailed(true);
+          }}
           /*
             ★ 尺寸上限是必须的:一张 4000px 宽的截图会把消息气泡撑破,
             而 `max-w-full` 只管宽度 —— 竖长图仍会占满整屏往下推。
@@ -83,30 +94,38 @@ export function MessageImage({
         <ImageLightbox
           images={group}
           startIndex={index}
-          onClose={() => { setZoomed(false) }}
+          onClose={() => {
+            setZoomed(false);
+          }}
         />
       )}
     </>
-  )
+  );
 }
 
-function ImagePlaceholder({ label, hint }: { label: string; hint: string }): ReactNode {
+function ImagePlaceholder({
+  label,
+  hint,
+}: {
+  label: string;
+  hint: string;
+}): ReactNode {
   return (
     <div
       data-testid="message-image-placeholder"
       className={cn(
-        'my-1 inline-flex items-center gap-2 rounded-card border border-border',
-        'bg-tint/50 px-2.5 py-2 text-[12px] text-fg-faint'
+        "my-1 inline-flex items-center gap-2 rounded-card border border-border",
+        "bg-tint/50 px-2.5 py-2 text-[12px] text-fg-faint",
       )}
     >
       <ImageOff size={14} className="shrink-0" />
       <span className="max-w-[240px] truncate">{label}</span>
       <span className="shrink-0 text-fg-faint/70">{hint}</span>
     </div>
-  )
+  );
 }
 
 function fileNameOf(path: string): string {
-  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  return i < 0 ? path : path.slice(i + 1)
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i < 0 ? path : path.slice(i + 1);
 }
