@@ -1,0 +1,108 @@
+/**
+ * 归一化的上游事件流 —— 方案 §4.2。
+ * 这是「上游那一层」的事件;往 UI 推的是 AgentEvent(见 event.ts),它是这个的超集。
+ */
+import type { AgentError } from './error'
+
+export type StopReason =
+  | 'end_turn'
+  | 'tool_use'
+  | 'max_tokens'
+  | 'stop_sequence'
+  | 'refusal'
+  | 'aborted'
+
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+  /**
+   * ★ 缓存两项不能省:开启提示缓存那天,没有它们成本显示就是错的
+   * (而且是**静默**错的 —— 数字看着很合理)。
+   */
+  cacheCreationInputTokens?: number
+  cacheReadInputTokens?: number
+  /**
+   * ★ 上面那个 `cacheCreationInputTokens` 是**两档写入价的和**,不够计价用:
+   * Anthropic 的 1h 缓存写是 5m 的两倍价,上游在
+   * `cache_creation.ephemeral_1h_input_tokens` 里单独给这个数。
+   * 拿不到就留 undefined —— `priceOf` 那时把写入**全部**按 5m 计,
+   * 而不是猜一个比例(猜错的方向是少收用户的钱,且没人看得出来)。
+   */
+  cacheCreation1hInputTokens?: number
+}
+
+export type ProviderStreamEvent =
+  | { type: 'message_start'; model: string }
+  | { type: 'text_delta'; index: number; text: string }
+  | { type: 'thinking_delta'; index: number; text: string }
+  | { type: 'tool_call_start'; index: number; callId: string; name: string }
+  | { type: 'tool_call_delta'; index: number; callId: string; argsDelta: string }
+  | { type: 'tool_call_end'; index: number; callId: string }
+  /**
+   * ★ 厂商透传的载体 —— 没有它,message.ts 里的 `ContentPart.opaque` 是**死的**。
+   *
+   * Anthropic 的扩展思考把 signature 放在 `signature_delta` 里,而下一轮必须
+   * 原样回传,丢了就是 400。signature 不是「内容」,塞进 thinking_delta 会污染正文;
+   * 它属于**整个块**,所以按 index 单独发一条。redacted_thinking 走同一条路
+   * (整块都不透明)。
+   *
+   * 内核不解释 opaque,只负责搬:decode → 这个事件 → ContentPart.opaque → encode。
+   */
+  | { type: 'block_opaque'; index: number; opaque: unknown }
+  | { type: 'provider_retry'; attempt: number; delayMs: number }
+  | { type: 'provider_switch'; from: string; to: string; reason: string }
+  | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage }
+  | { type: 'error'; error: AgentError }
+
+/**
+ * ★ index 是内容块序号,不能省(方案 §4.2)。
+ *
+ * 一条消息里出现「文本 → 工具调用 → 文本」或两个并行工具调用时,没有 index 就无法归位。
+ * Anthropic 的 content_block_start/delta/stop 带 index 正是为此。
+ * 现在加是免费的,以后加是全量重构。
+ *
+ * ★ adapter 契约:**必须**发 tool_call_start … tool_call_end;
+ *   中间的 delta 数量**可以为 0** —— 部分上游是一次性给全整个工具调用对象的。
+ *
+ * ★ argsDelta 按字符串累积,**只在 tool_call_end 时 JSON.parse 一次**;
+ *   失败则产出一个工具错误,而不是把异常抛出循环。流式中途的 JSON 一定是非法的。
+ */
+
+/**
+ * 工具调用参数的流式累积器。放在 shared 是因为解码侧(main)和
+ * 测试侧都要用同一份语义,而它是纯函数。
+ */
+export class ToolCallAccumulator {
+  private readonly buf = new Map<string, { name: string; args: string }>()
+
+  start(callId: string, name: string): void {
+    this.buf.set(callId, { name, args: '' })
+  }
+
+  delta(callId: string, argsDelta: string): void {
+    const e = this.buf.get(callId)
+    if (e) e.args += argsDelta
+  }
+
+  /**
+   * 只在 tool_call_end 调用。解析失败**不抛异常** —— 返回 ok:false,
+   * 调用方把它变成一个工具错误继续循环。
+   */
+  end(callId: string): { ok: true; name: string; input: unknown } | { ok: false; name: string; raw: string; reason: string } {
+    const e = this.buf.get(callId)
+    if (!e) return { ok: false, name: '<unknown>', raw: '', reason: `未见 tool_call_start: ${callId}` }
+    this.buf.delete(callId)
+    // 空参数是合法的:无参工具的上游可能一个 delta 都不发
+    const raw = e.args.trim() === '' ? '{}' : e.args
+    try {
+      return { ok: true, name: e.name, input: JSON.parse(raw) }
+    } catch (err) {
+      return { ok: false, name: e.name, raw, reason: (err as Error).message }
+    }
+  }
+
+  /** 中断收尾时要知道还有哪些没闭合 */
+  pending(): Array<{ callId: string; name: string }> {
+    return [...this.buf.entries()].map(([callId, v]) => ({ callId, name: v.name }))
+  }
+}

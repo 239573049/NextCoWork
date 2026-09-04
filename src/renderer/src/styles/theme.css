@@ -1,0 +1,295 @@
+@import 'tailwindcss';
+
+/*
+  方案 §8 的 token 层。数值不是调出来的,是**从参考实现的截图上量出来的** ——
+  量法是区域直方图,不是取单像素:
+
+    node scripts/pick-color.mjs docs/image-latest/dark.png 250,330,200,45:画布
+
+  四个数 = 一块矩形,打印出现次数前三名和占比。**占比就是可信度判据**:面板底色
+  这次全部量到 100% 单色,说明这版参考实现把 macOS vibrancy 关了 —— 深色数值第一次
+  可以直接采信。`docs/images`(v1.1.15)那批不行,同一处窗口底在三张图里分别是
+  #454849 / #2b2b2d / #2b2b2d,那是「面板色 × 壁纸」。
+
+  ★ **文字和图标的颜色是下界,不是真值。** 截图是 520px 的缩图,一两个像素宽的笔画
+    会和底色混在一起。取「离底色最远的那个像素」得到的是笔画芯,混合只会把它往底色
+    拽,所以量到的值只保证「至少这么亮/这么暗」。要精确得拿原始分辨率的截图重量一次。
+
+  ── 一、四层结构。**chrome 在两个主题里往相反方向走。** ──
+
+    深色  canvas #1e2020  <  surface #232726  <  app/raised #2a2d2b  <  chrome #343a37
+    浅色  chrome #e8e4dd  <  app/raised #f2eee6  <  surface #f6f4ef  <  canvas #faf9f5
+
+  两行的规律是同一条:**canvas 是极值,chrome 站在离 canvas 最远的那一端。**
+  深色里 chrome 最亮、浅色里 chrome 最暗,看着相反,做的是同一件事 —— 把外层 Tab 条
+  从内容里推开。旧注释写的「越靠外越亮」只在深色成立,是把一个主题的巧合当成了规律。
+
+  这也是 `--color-chrome` 必须独立于 `--color-surface` 的理由,而且现在**两个主题都要**:
+  深色里 chrome 比侧边栏亮 17 级,浅色里比侧边栏暗 14 级,合并哪边都会让激活的那张
+  外层 Tab 浮不出来。
+
+  ── 二、激活的外层 Tab 与 canvas 同色 ──
+
+    深色 #1e2020 · 浅色 #faf9f5 —— 两个主题都验证过。
+
+  浏览器式标签:激活的那张和它底下的内容连成一片,靠的是同色,不是高亮。
+
+  ── 三、强调色两个主题都是绿,但明暗相反 ──
+
+    深色  accent #36d285(亮绿) + accent-fg #0a2615(深绿近黑)
+    浅色  accent #2d4739(墨绿) + accent-fg #ffffff
+
+  **v1.1.15 那套橙 #df7e45 已经不存在了**,深浅两套都换成了绿。连带着:
+
+    · 静息图标是中性灰,**两个主题都是**。旧注释说「深色里 icon 与 accent 同值(都用橙),
+      只有浅色才需要分开」—— 那个前提没了,现在两处都分开。
+      icon   = 「这是个可点的东西」(静息态)
+      accent = 「这个是激活的 / 这是主动作」
+    · 除了 macOS 红绿灯和文件类型图标,整个界面只有强调色一个色相。
+
+  ── 四、「选中靠挖暗」这条**只在外层 Tab 成立**,内层 Tab 是反的 ──
+
+    深色  激活的内层 Tab #2b2e2d  比 canvas #1e2020 **亮**(凸出来)
+    浅色  激活的内层 Tab #efefec  比 canvas #faf9f5 **暗**(凹下去)
+
+  统一的说法是「离开 canvas 一步,方向跟着 chrome 走」。旧注释里「选中一律往暗里挖、
+  悬停往暖里偏」是 v1.1.15 橙色时代的规律,新深色里前半句就不成立了,别再照着写。
+
+  ── 五、哪些是量的、哪些是推的 ──
+
+  量到的:上面四条里出现的所有数,加 surface-input(输入框 #2a2d2b / #ffffff)、
+  分区卡(= 窗口底,深浅都成立)、三级文字。
+
+  ★ **「完全访问」药丸底没有对应的 token,它是 `bg-accent/10`。** 量到的是
+    深 #2a3d33 / 浅 #e8ebe9,反解发现两个主题下都等于 accent 压在输入框底上、
+    不透明度 10%(逐通道差 ≤ 2/255,肉眼无法分辨):
+      深 #36d285 @10% over #2a2d2b → #2b3e34(实测 #2a3d33)
+      浅 #2d4739 @10% over #ffffff → #eaedeb(实测 #e8ebe9)
+    写成半透明而不是第 23 个 token,是因为换色器换的是 accent —— 药丸底自己就跟着走了,
+    不用每套主题再手调一个「绿味的暗色」。
+
+  **推的**(这批截图里没有鼠标、没有浮层、没有正文消息,量不到):
+  tint-hover / tint-strong / surface-field / surface-sunken / hairline / border /
+  accent-soft / danger / scrim。推的办法是沿用 v1.1.15 那套的**步长**,只把色相换成绿。
+  拿到带浮层和 hover 的截图就该把这几个重量一遍。
+
+  Tailwind v4 不再需要 tailwind.config.js —— @theme 里的 token 直接生成工具类
+  (--color-canvas → bg-canvas / text-canvas / border-canvas)。
+  深色是基准值,浅色重新赋同名变量,工具类本身不用改。
+*/
+@theme {
+  /* ── 结构:量自 docs/image-latest/dark.png,全部 100% 单色 ── */
+  --color-app: #2a2d2b; /* 窗口底 —— 面板之间露出来的那条缝(实测 3px 宽) */
+  --color-canvas: #1e2020; /* 内容面板 / 激活的外层 Tab / 内层 Tab 条 */
+  --color-surface: #232726; /* 侧边栏 */
+  --color-chrome: #343a37; /* 外层 Tab 条 —— 深色下**比侧边栏亮**,见上 §1 */
+  --color-surface-raised: #2a2d2b; /* 侧边栏里的分区卡 —— 和窗口底同色,深浅都成立 */
+  --color-surface-input: #2a2d2b; /* 画布上的输入框 —— 深色下并入 raised,浅色下是纯白 */
+  /*
+    **浮层里的**输入框(设置浮层的搜索框、端口框、代理地址框)。这批截图里没有浮层,
+    按 v1.1.15 的步长推:raised 往上一级(+10)。深色下和 chrome 撞值,浅色下分开 ——
+    和 surface/chrome 那一对正好是镜像,同一个道理:两个 token 在一个主题里恰好相等,
+    不等于它们是同一个东西。
+  */
+  --color-surface-field: #343a37;
+  --color-surface-sunken: #252b28; /* 按下 / 激活的图标按钮:从 chrome 往下挖(推的) */
+
+  /* ── 交互态 ── */
+  --color-tint: #2b2e2d; /* 激活的内层 Tab(实测)/ 控件槽 / 用户气泡 */
+  --color-tint-hover: #363b38; /* 悬停(推的:+11,带绿) */
+  --color-tint-strong: #3c423e; /* 菜单行悬停 / 分类 chip(推的:+17) */
+
+  --color-border: #2b2e2d; /* 与 tint 同值 —— 沿用 v1.1.15 里两者相等的关系 */
+  --color-hairline: #252727; /* 内容区里的行分隔线,比 canvas 只高一点点 */
+
+  --color-fg: #ececec;
+  --color-fg-muted: #959897;
+  --color-fg-faint: #7b7d7c;
+
+  --color-icon: #cfcfcf; /* ★ 中性灰,**不是**强调色 —— 见上 §3。缩图下界 */
+  --color-accent: #36d285; /* ★ 亮绿(激活芯片实心底 / 「完全访问」盾牌与文字) */
+  --color-accent-fg: #0a2615; /* 压在 accent 上的文字 —— 深绿近黑 */
+  --color-accent-soft: #5a8a72; /* 正文里的装饰性小图标(推的:accent 去饱和) */
+  --color-danger: #d9614e; /* 未量到,沿用 v1.1.15 */
+
+  /*
+    ★ **遮罩是纯黑 + 透明度,不是一个实色。** 反解 v1.1.15 的设置浮层截图:
+    同一张图里侧边栏 #3d4041 → #27292a、画布 #333636 → #232426,**两处压出来的
+    结果不一样**,说明遮罩是半透明的。设遮罩为纯黑、不透明度 a,则 c×(1−a) = 结果:
+      0x3d(61) → 0x27(39):a ≈ 0.36     0x33(51) → 0x23(35):a ≈ 0.31
+      0x40(64) → 0x29(41):a ≈ 0.36     0x36(54) → 0x24(36):a ≈ 0.33
+    四处都落在 0.31~0.36,所以是**纯黑 35%**。用法固定为 `bg-scrim/35`。
+  */
+  --color-scrim: #000000;
+
+  /*
+    ── 展开 / 收起的统一动作曲线 ──
+
+    `cubic-bezier(0.32, 0.72, 0, 1)`:起步快、尾巴长,最后 30% 的时间只走完
+    最后几个像素。面板这种「一大块东西改尺寸」的动作要的就是这条 —— `ease-in-out`
+    两头都慢,同样 200ms 看着像慢半拍;线性则在停下的那一帧显得很硬。
+    三处开合(侧边栏 / 底部 / 右侧)和分区卡都用它,整套界面的手感才是一套。
+  */
+  --ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --radius-panel: 12px; /* 浮动面板 —— 采样:侧边栏左上角圆角 ≈ 12px */
+  --radius-card: 10px;
+  --radius-pill: 999px;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+/*
+  ── 浅色:量自 docs/image-new(三张)+ docs/image-latest/light.png(复量)──
+
+  复量的结论是**浅色这版没动**:canvas #faf9f5、surface #f6f4ef、窗口底 #f2eee6、
+  chrome #e8e4dd、输入框 #ffffff、激活内层 Tab #efefec、正文 #181c19、
+  「完全访问」药丸底 #e8ebe9(= `bg-accent/10`,见上 §5)—— 八处和 docs/image-new 逐一对上。
+  所以这一版改的只有深色,浅色原样保留。
+*/
+:root[data-theme='light'] {
+  --color-app: #f2eee6; /* 窗口底 —— 面板之间的缝 */
+  --color-canvas: #faf9f5; /* 内容面板 / 激活的外层 Tab / 选中的会话行 */
+  --color-surface: #f6f4ef; /* 侧边栏 / 画布上的工具卡 */
+  --color-chrome: #e8e4dd; /* 外层 Tab 条 —— 浅色下**比侧边栏暗**,见上 §1 */
+  --color-surface-raised: #f2eee6; /* 侧边栏里的分区卡 / 菜单 —— 同窗口底 */
+  --color-surface-input: #ffffff; /* 输入框:整个界面唯一的纯白 */
+  --color-surface-field: #ffffff; /* 浮层里的输入框 —— 浅色下靠纯白+描边分出来 */
+  --color-surface-sunken: #dbd8d1; /* 按下 / 激活的图标按钮(量自收起态的侧边栏按钮) */
+
+  --color-tint: #efefec; /* 激活的内层 Tab / 时间戳药丸 / 发丝线,都是这一个值 */
+  --color-tint-hover: #edeae6; /* Explore 芯片 / 头像圆 */
+  --color-tint-strong: #e2ded7;
+
+  --color-border: #e6e6e2; /* 输入框描边 */
+  --color-hairline: #efefec; /* 内层 Tab 条下那一道 */
+
+  --color-fg: #181c19;
+  --color-fg-muted: #72736f;
+  --color-fg-faint: #96958f;
+
+  --color-icon: #7e7f7e; /* ★ 中性灰,不是强调色 —— 见上 §3 */
+  --color-accent: #2d4739; /* ★ 墨绿 —— 深色是亮绿 #36d285,明暗相反 */
+  --color-accent-fg: #ffffff;
+  --color-accent-soft: #8e8f8d;
+  --color-danger: #c4412c;
+
+  --color-scrim: #2b2a27; /* 暖近黑 —— 浅色下压暗要压暖,压蓝会发灰(无参考,按规律推) */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-app);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* 桌面端:整窗不跟随鼠标选中,交互区各自 opt-in(.selectable) */
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+.selectable {
+  user-select: text;
+  cursor: auto;
+}
+
+/* macOS titleBarStyle: 'hiddenInset' —— 自绘标题栏区要显式声明可拖拽,
+   其中的按钮再各自声明 no-drag,否则点不动。
+   ★ 外层 Tab 条整条落在这个区域里,每个 Tab 都必须 .app-no-drag,
+     否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。 */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* 内容区滚动条:细、无按钮、悬停才明显 —— 截图里滚动条几乎看不见 */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-tint) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--color-tint);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--color-tint-strong);
+  background-clip: content-box;
+}
+.scroll-thin::-webkit-scrollbar-corner,
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 截图 36dbfd7f:内容滚到吸顶的子 Tab 条下方时,顶部有一道渐隐遮罩 */
+.fade-top {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
+}
+
+/* 镜像:截图 06cd7b3c(设置浮层)里滚动区最后一行是渐隐的,底下才是「完成」那条页脚 */
+.fade-bottom {
+  mask-image: linear-gradient(to top, transparent 0, #000 16px);
+}
+
+/*
+  侧边栏收起后,外层 Tab 条左端才浮出来的那颗展开按钮。
+
+  **延迟 250ms 是必要的,不是装饰**:侧边栏要 280ms 才收完,不等它就会出现
+  「按钮已经在 Tab 条上了、侧边栏还盖在原地」的一瞬重影 —— 那颗按钮和侧边栏里
+  「收起」的那颗是同一个控件的两个位置,同屏出现两个是穿帮。
+  `both` 让它在这 250ms 里保持 opacity 0(而不是先闪一下再淡入)。
+  ★ 这个延迟和 AppShell 里的 PANEL_MS 是一对,改了那边就得改这里。
+*/
+@keyframes reveal-delayed {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.reveal-delayed {
+  animation: reveal-delayed 160ms ease-out 250ms both;
+}
+
+/*
+  系统里勾了「减弱动态效果」就别播 —— 前庭功能敏感的人看这类大块位移会晕。
+  不写 0 而写 0.01ms:`transitionend` / `animationend` 照常触发,靠事件收尾的
+  逻辑不会因为「动画从来没开始过」而卡住。usePresence 用的是定时器,不受影响。
+*/
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+  }
+}
+
+/*
+  ── z 轴一共只有三层,写在这里免得下一个人再发明一层 ──
+
+    0    正常内容流(面板、Tab 条、侧边栏 —— 全靠底色差分层,不用 z)
+    50   **面板内部**的浮层:Menu / 下拉。它相对自己的定位祖先浮起来
+    100  模态浮层(设置)。它自己建立层叠上下文,所以它**内部**的 z-50 菜单
+         天然在它的遮罩之上 —— 不要为了让菜单显示出来去把 Menu 提到 z-200,
+         那只会让菜单反过来盖住别的模态。
+*/

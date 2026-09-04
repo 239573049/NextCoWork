@@ -1,0 +1,516 @@
+import { describe, expect, it } from 'vitest'
+import type { ProviderStreamEvent } from '../../../../shared/agent/stream'
+import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
+import { nodeHost, type KernelHost } from '../../host'
+import type { CanonicalRequest } from '../canonical'
+import { parseRetryAfter, UpstreamRouter, type ProviderConfigSource } from '../router'
+
+// ─── 夹具 ────────────────────────────────────────────────────────────
+
+function provider(id: string, over: Partial<UpstreamProvider> = {}): UpstreamProvider {
+  return {
+    id,
+    name: id,
+    protocol: 'anthropic',
+    baseUrl: `https://${id}.example.com`,
+    credentialRef: `ref:${id}`,
+    priority: 0,
+    enabled: true,
+    ...over
+  }
+}
+
+function alias(aliasName: string, providerId: string): ModelAlias {
+  return {
+    alias: aliasName,
+    providerId,
+    upstreamModel: `${aliasName}-upstream`,
+    capabilities: { tools: true, vision: false, thinking: true, caching: true },
+    contextWindow: 200_000,
+    maxOutputTokens: 8192
+  }
+}
+
+const REQ: CanonicalRequest = {
+  model: 'm',
+  system: '',
+  messages: [{ id: 'u1', role: 'user', parts: [{ type: 'text', text: 'hi' }], createdAt: 0, schemaVersion: 1 }],
+  tools: [],
+  maxOutputTokens: 1024
+}
+
+/** 一段完整的 Anthropic SSE 响应 */
+function sseBody(parts: { text?: string; stop?: string } = {}): string {
+  const lines = [
+    'event: message_start\ndata: {"type":"message_start","message":{"model":"m-up","usage":{"input_tokens":5,"output_tokens":0}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+  ]
+  if (parts.text !== undefined) {
+    lines.push(
+      `event: content_block_delta\ndata: ${JSON.stringify({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: parts.text }
+      })}\n\n`
+    )
+  }
+  lines.push('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n')
+  lines.push(
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"${parts.stop ?? 'end_turn'}"},"usage":{"output_tokens":3}}\n\n`
+  )
+  lines.push('event: message_stop\ndata: {"type":"message_stop"}\n\n')
+  return lines.join('')
+}
+
+/** 一段**中途断掉**的 SSE:发了内容但没有 message_stop */
+function truncatedBody(text: string): string {
+  return (
+    'event: message_start\ndata: {"type":"message_start","message":{"model":"m-up","usage":{"input_tokens":5}}}\n\n' +
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+    `event: content_block_delta\ndata: ${JSON.stringify({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text }
+    })}\n\n`
+  )
+}
+
+function ok(body: string): Response {
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+
+function fail(status: number, type = 'api_error', message = 'boom', headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify({ type: 'error', error: { type, message } }), { status, headers })
+}
+
+interface Rig {
+  router: UpstreamRouter
+  host: KernelHost
+  calls: string[]
+  bodies: Array<Record<string, unknown>>
+  headers: Array<Record<string, string>>
+  now: { t: number }
+}
+
+function rig(opts: {
+  providers: UpstreamProvider[]
+  aliases: ModelAlias[]
+  failover?: boolean
+  keys?: Record<string, string | null>
+  responses: Array<Response | (() => Response) | Error>
+}): Rig {
+  const calls: string[] = []
+  const bodies: Array<Record<string, unknown>> = []
+  const headers: Array<Record<string, string>> = []
+  const now = { t: 1_000_000 }
+  let i = 0
+
+  const host = nodeHost({
+    clock: { now: () => now.t },
+    secrets: {
+      get: async (ref) => {
+        const explicit = opts.keys?.[ref]
+        return explicit === undefined ? 'sk-test' : explicit
+      },
+      set: async () => {},
+      available: () => true
+    },
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(String(input))
+      if (typeof init?.body === 'string') bodies.push(JSON.parse(init.body))
+      headers.push((init?.headers ?? {}) as Record<string, string>)
+      const r = opts.responses[i++]
+      if (r === undefined) throw new Error(`没有为第 ${i} 次调用准备响应`)
+      if (r instanceof Error) throw r
+      return typeof r === 'function' ? r() : r
+    }) as typeof fetch,
+    logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
+  })
+
+  const config: ProviderConfigSource = {
+    providers: () => opts.providers,
+    aliases: () => opts.aliases,
+    failoverEnabled: () => opts.failover ?? true
+  }
+  return { router: new UpstreamRouter(host, config, { baseDelayMs: 0 }), host, calls, bodies, headers, now }
+}
+
+async function drain(r: UpstreamRouter, signal = new AbortController().signal): Promise<ProviderStreamEvent[]> {
+  const out: ProviderStreamEvent[] = []
+  for await (const ev of r.stream(REQ, signal)) out.push(ev)
+  return out
+}
+
+// ─── 用例 ────────────────────────────────────────────────────────────
+
+describe('UpstreamRouter · 正常路径', () => {
+  it('单 provider 流式贯通', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))]
+    })
+    const out = await drain(router)
+    expect(out.map((e) => e.type)).toEqual(['message_start', 'text_delta', 'message_end'])
+    expect(calls).toEqual(['https://p1.example.com/v1/messages'])
+  })
+
+  /**
+   * ★ 别名 → 上游真实模型名的翻译发生在路由器(§5.2)。
+   * 把 alias 原样下发,每一个请求都会 404,而错误信息只会说「model not found」。
+   */
+  it('下发的是 upstreamModel 而不是 alias', async () => {
+    const { router, bodies } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    expect(bodies[0]?.model).toBe('m-upstream')
+    expect(bodies[0]?.stream).toBe(true)
+  })
+
+  /** Anthropic 用 x-api-key,不是 Authorization: Bearer —— 写错就是 401 */
+  it('凭证走 x-api-key 且带 anthropic-version', async () => {
+    const { router, headers } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    expect(headers[0]).toMatchObject({ 'x-api-key': 'sk-test', 'anthropic-version': '2023-06-01' })
+    expect(headers[0]?.authorization).toBeUndefined()
+  })
+
+  it('成功后健康度上升、连败清零', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    const h = router.health()[0]
+    expect(h).toMatchObject({ providerId: 'p1', healthy: true, consecutiveFailures: 0 })
+    expect(h?.score).toBe(1)
+  })
+
+  it('listModels 只列出已启用 provider 的别名', () => {
+    const { router } = rig({
+      providers: [provider('p1'), provider('p2', { enabled: false })],
+      aliases: [alias('m', 'p1'), alias('m2', 'p2')],
+      responses: []
+    })
+    expect(router.listModels().map((a) => a.alias)).toEqual(['m'])
+  })
+})
+
+describe('UpstreamRouter · 首字节边界(§5.3)', () => {
+  /**
+   * ★ 本文件最重要的一条。
+   *
+   * 上游已经吐了内容再切换 provider,会产生**重复输出和错位的工具调用** ——
+   * 而且是在用户眼皮底下发生的。所以内容一开始,重试和切换就都关闭,
+   * 失败变成硬错误由用户决定重发。
+   */
+  it('已有内容后不再重试、不再切换,直接硬错误', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      // 第一次:发了文字然后连接断掉(可重试的 network 错误)
+      responses: [ok(truncatedBody('已经说了一半')), ok(sseBody({ text: '不该被用到' }))]
+    })
+    const out = await drain(router)
+
+    expect(out.filter((e) => e.type === 'text_delta')).toHaveLength(1)
+    expect(out.some((e) => e.type === 'provider_retry')).toBe(false)
+    expect(out.some((e) => e.type === 'provider_switch')).toBe(false)
+    expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'network' } })
+    // 只发了一次请求 —— 第二个 provider 根本没被碰
+    expect(calls).toHaveLength(1)
+  })
+
+  /** 反面:内容还没开始时,同一个可重试错误必须触发重试 */
+  it('还没有内容时同样的错误会重试', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(503), ok(sseBody({ text: '好' }))]
+    })
+    const out = await drain(router)
+    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0 })
+    expect(out.at(-1)?.type).toBe('message_end')
+    expect(calls).toHaveLength(2)
+  })
+
+  /** message_start 不算内容 —— 此时重试不会产生任何重复输出 */
+  it('只收到 message_start 仍可切换', async () => {
+    const bare =
+      'event: message_start\ndata: {"type":"message_start","message":{"model":"m-up","usage":{}}}\n\n'
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [ok(bare), ok(bare), ok(bare), ok(sseBody({ text: '来自 p2' }))]
+    })
+    const out = await drain(router)
+    expect(out.some((e) => e.type === 'provider_switch')).toBe(true)
+    expect(out.at(-1)?.type).toBe('message_end')
+    expect(calls.at(-1)).toContain('p2')
+  })
+})
+
+describe('UpstreamRouter · 重试与切换', () => {
+  it('不可重试的错误直接换下一个 provider,不在原地重试', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [fail(400, 'invalid_request_error', 'bad'), ok(sseBody({ text: 'ok' }))]
+    })
+    const out = await drain(router)
+    expect(out.find((e) => e.type === 'provider_switch')).toMatchObject({ from: 'p1', to: 'p2' })
+    expect(calls).toEqual([
+      'https://p1.example.com/v1/messages',
+      'https://p2.example.com/v1/messages'
+    ])
+  })
+
+  it('重试到上限后换下一个 provider', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [fail(503), fail(503), fail(503), ok(sseBody({ text: 'ok' }))]
+    })
+    const out = await drain(router)
+    expect(out.filter((e) => e.type === 'provider_retry')).toHaveLength(2) // 3 次尝试 = 2 次重试
+    expect(calls.filter((c) => c.includes('p1'))).toHaveLength(3)
+    expect(out.at(-1)?.type).toBe('message_end')
+  })
+
+  /** 没有 provider_retry / provider_switch,用户看到的就是白白冻结几十秒(§4.2) */
+  it('重试与切换都对外可见', async () => {
+    const { router } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [fail(500), fail(500), fail(500), ok(sseBody({ text: 'ok' }))]
+    })
+    const kinds = (await drain(router)).map((e) => e.type)
+    expect(kinds.slice(0, 3)).toEqual(['provider_retry', 'provider_retry', 'provider_switch'])
+  })
+
+  it('全部候选失败时给出最后的错误', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(400, 'invalid_request_error', '工具 schema 非法')]
+    })
+    const out = await drain(router)
+    expect(out).toEqual([
+      { type: 'error', error: { code: 'provider', message: '工具 schema 非法', retryable: false, status: 400 } }
+    ])
+  })
+
+  /** auth 比「最后一个网络错误」更值得展示:它有明确的行动(去设置页) */
+  it('候选中出现过 auth 时优先报 auth', async () => {
+    const { router } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      keys: { 'ref:p1': null },
+      responses: [fail(400, 'invalid_request_error', '后面这个错误不该盖住 auth')]
+    })
+    const out = await drain(router)
+    expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'auth' } })
+  })
+
+  it('缺密钥的 provider 不发请求,直接切下一个', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      keys: { 'ref:p1': null },
+      responses: [ok(sseBody({ text: 'from p2' }))]
+    })
+    expect((await drain(router)).at(-1)?.type).toBe('message_end')
+    expect(calls).toEqual(['https://p2.example.com/v1/messages'])
+  })
+
+  it('尊重 Retry-After 而不是自己的退避表', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(429, 'rate_limit_error', 'slow', { 'retry-after': '0' }), ok(sseBody({ text: 'x' }))]
+    })
+    const out = await drain(router)
+    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0 })
+  })
+
+  it('fetch 抛出被归一化成可重试的 network 错误', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [new Error('ECONNREFUSED'), ok(sseBody({ text: 'x' }))]
+    })
+    const out = await drain(router)
+    expect(out.some((e) => e.type === 'provider_retry')).toBe(true)
+    expect(out.at(-1)?.type).toBe('message_end')
+  })
+
+  it('未实现的上游协议给出明确说明而不是诡异的 400', async () => {
+    const { router } = rig({
+      providers: [provider('p1', { protocol: 'openai-chat' })],
+      aliases: [alias('m', 'p1')],
+      responses: []
+    })
+    const out = await drain(router)
+    expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'provider' } })
+    expect((out.at(-1) as { error: { message: string } }).error.message).toContain('openai-chat')
+  })
+})
+
+describe('UpstreamRouter · 旁路模式(failover: off)', () => {
+  /** 直取会话指定的 provider,不做健康评分、不做切换 —— 延迟最低、路径最短(§5.6) */
+  it('失败也不切换到第二个 provider', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      failover: false,
+      responses: [fail(400, 'invalid_request_error', 'nope')]
+    })
+    const out = await drain(router)
+    expect(out.some((e) => e.type === 'provider_switch')).toBe(false)
+    expect(calls.every((c) => c.includes('p1'))).toBe(true)
+  })
+
+  it('不健康的 provider 在旁路模式下仍被使用', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      failover: false,
+      responses: [fail(500), fail(500), fail(500), ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router) // 打到不健康
+    expect(router.health()[0]?.healthy).toBe(false)
+    await drain(router) // 仍然会用它
+    expect(calls.at(-1)).toContain('p1')
+  })
+})
+
+describe('UpstreamRouter · 健康评分与冷却', () => {
+  it('连续失败达阈值 → 不健康 + 冷却', async () => {
+    const { router, now } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(500), fail(500), fail(500)]
+    })
+    await drain(router)
+    const h = router.health()[0]
+    expect(h).toMatchObject({ healthy: false, consecutiveFailures: 3 })
+    expect(h?.cooldownUntil).toBeGreaterThan(now.t)
+    expect(h?.score).toBeLessThan(0.2)
+  })
+
+  it('冷却中的 provider 被移出候选集 → no_healthy_provider', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(500), fail(500), fail(500)]
+    })
+    await drain(router)
+    const out = await drain(router)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ type: 'error', error: { code: 'no_healthy_provider' } })
+  })
+
+  it('冷却到期后自动重新纳入候选', async () => {
+    const { router, now } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(500), fail(500), fail(500), ok(sseBody({ text: '回来了' }))]
+    })
+    await drain(router)
+    now.t += 31_000
+    expect((await drain(router)).at(-1)?.type).toBe('message_end')
+  })
+
+  it('resetHealth 立刻解除冷却', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [fail(500), fail(500), fail(500), ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    router.resetHealth('p1')
+    expect(router.health()).toEqual([])
+    expect((await drain(router)).at(-1)?.type).toBe('message_end')
+  })
+
+  /** 优先级是用户的显式意图,不该被健康评分推翻 */
+  it('健康度只在同优先级内部排序', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [fail(500), ok(sseBody({ text: 'x' })), ok(sseBody({ text: 'y' }))]
+    })
+    await drain(router) // p1 挂一次(分数掉一半)但没到冷却阈值
+    await drain(router)
+    // 第二轮仍从 p1 开始 —— 优先级压过分数
+    expect(calls.at(-1)).toContain('p1')
+  })
+})
+
+describe('UpstreamRouter · 没有候选', () => {
+  it('别名未配置', async () => {
+    const { router } = rig({ providers: [provider('p1')], aliases: [], responses: [] })
+    const out = await drain(router)
+    expect(out[0]).toMatchObject({ type: 'error', error: { code: 'no_healthy_provider' } })
+    expect((out[0] as { error: { message: string } }).error.message).toContain('m')
+  })
+
+  it('provider 全部停用', async () => {
+    const { router } = rig({
+      providers: [provider('p1', { enabled: false })],
+      aliases: [alias('m', 'p1')],
+      responses: []
+    })
+    expect((await drain(router))[0]).toMatchObject({ error: { code: 'no_healthy_provider' } })
+  })
+})
+
+describe('UpstreamRouter · 中断', () => {
+  /** 中断必须原样抛出,不能被归一化成一个「网络错误」—— 那会让 UI 弹一个假的失败提示 */
+  it('中断抛出而不是变成 error 事件', async () => {
+    const ac = new AbortController()
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [
+        () => {
+          ac.abort()
+          return ok(sseBody({ text: 'x' }))
+        }
+      ]
+    })
+    await expect(drain(router, ac.signal)).rejects.toThrow(/abort/i)
+  })
+})
+
+describe('parseRetryAfter', () => {
+  it('秒数', () => {
+    expect(parseRetryAfter('3', 0)).toBe(3000)
+    expect(parseRetryAfter('0', 0)).toBe(0)
+  })
+  it('HTTP 日期', () => {
+    const now = Date.parse('2026-01-01T00:00:00Z')
+    expect(parseRetryAfter('Thu, 01 Jan 2026 00:00:05 GMT', now)).toBe(5000)
+  })
+  it('过去的日期归零而不是负数', () => {
+    const now = Date.parse('2026-01-01T00:01:00Z')
+    expect(parseRetryAfter('Thu, 01 Jan 2026 00:00:00 GMT', now)).toBe(0)
+  })
+  /** 上游给一个离谱的 Retry-After 时不能真的挂在那里等一小时 */
+  it('封顶 60 秒', () => {
+    expect(parseRetryAfter('99999', 0)).toBe(60_000)
+  })
+  it('缺失或无法解析时返回 undefined', () => {
+    expect(parseRetryAfter(null, 0)).toBeUndefined()
+    expect(parseRetryAfter('  ', 0)).toBeUndefined()
+    expect(parseRetryAfter('soon', 0)).toBeUndefined()
+  })
+})

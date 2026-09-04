@@ -1,0 +1,60 @@
+appId: com.nextcowork.app
+productName: NextCoWork
+directories:
+  buildResources: build
+  output: dist
+
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!docs/*'
+  - '!test/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierrc,.prettierignore}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
+
+# ★ node-pty 在 macOS 依赖 spawn-helper 可执行文件、Windows 依赖 conpty.dll。
+# asar 内的二进制无法 exec —— 不 unpack 就是「dev 好好的,打包后开终端报错」。
+asarUnpack:
+  - '**/node_modules/node-pty/**'
+  - resources/**
+
+# 原生模块按 Electron 的 ABI 重建(内部走 @electron/rebuild)
+npmRebuild: true
+
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  # 下面两项需要正确的代码签名才能生效;未签名的本地构建会直接崩在完整性校验上。
+  # 正式发布(配好签名)时打开。
+  enableEmbeddedAsarIntegrityValidation: false
+  onlyLoadAppFromAsar: false
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+
+win:
+  target:
+    - nsis
+
+linux:
+  target:
+    - AppImage
+  category: Development
+
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  createDesktopShortcut: always
