@@ -28,7 +28,8 @@
  * 落在哪」。符号链接只有第二层能拦(而它拦不住 —— 见 `realpath` 那条注释)。
  */
 import { net, protocol } from 'electron'
-import { defaultDatabaseDirectory } from '../db'
+import { databaseDirectory } from '../db'
+import { lstat, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -43,7 +44,7 @@ import {
 export const ATTACHMENTS_DIR = 'attachments'
 
 export function attachmentRoot(): string {
-  return join(defaultDatabaseDirectory(), ATTACHMENTS_DIR)
+  return join(databaseDirectory(), ATTACHMENTS_DIR)
 }
 
 /**
@@ -117,6 +118,48 @@ export async function handleAttachmentRequest(
     return new Response('forbidden', { status: 403 })
   }
 
+  /*
+    `resolveAttachmentPath` deliberately stays pure so URL-shape tests do not
+    need a filesystem.  Before handing the path to `file://`, however, resolve
+    both sides through symlinks.  Otherwise a file placed at
+    `attachments/sessions/S1/image.png` that points at `/etc/passwd` would pass
+    the lexical boundary check and Chromium would follow the link for us.
+  */
+  let canonicalTarget: string
+  try {
+    const rootStat = await lstat(root)
+    // The application owns this directory.  A symlinked root would turn the
+    // entire protocol into an alias for an arbitrary external tree.
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      return new Response('not found', { status: 404 })
+    }
+    const canonicalRoot = await realpath(root)
+    let resolvedTarget: string
+    try {
+      resolvedTarget = await realpath(target)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ELOOP') return new Response('forbidden', { status: 403 })
+      return new Response('not found', { status: 404 })
+    }
+    if (!isWithinRoot(canonicalRoot, resolvedTarget)) {
+      return new Response('forbidden', { status: 403 })
+    }
+    const targetStat = await lstat(resolvedTarget)
+    if (!targetStat.isFile()) return new Response('not found', { status: 404 })
+    canonicalTarget = resolvedTarget
+  } catch (err) {
+    // Missing files are normal (the user may have removed an attachment from
+    // disk).  Do not expose filesystem errors or turn them into a stack trace
+    // in the renderer.
+    if ((err as NodeJS.ErrnoException)?.code === 'ELOOP') {
+      return new Response('forbidden', { status: 403 })
+    }
+    if ((err as NodeJS.ErrnoException)?.code === 'EACCES') {
+      return new Response('not found', { status: 404 })
+    }
+    return new Response('not found', { status: 404 })
+  }
+
   try {
     /*
       ★ 转发给 net.fetch,而不是自己 readFileSync:
@@ -127,7 +170,7 @@ export async function handleAttachmentRequest(
       - 但 **Content-Type 仍要自己给**:file:// 的类型推断在各平台不一致,
         推不出来时浏览器会把图片当下载处理。
     */
-    const res = await net.fetch(pathToFileURL(target).toString())
+    const res = await net.fetch(pathToFileURL(canonicalTarget).toString())
     if (!res.ok) return new Response('not found', { status: 404 })
 
     const headers = new Headers(res.headers)

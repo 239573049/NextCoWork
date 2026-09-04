@@ -2,8 +2,8 @@
  * 子代理定义的扫描 —— 照搬 Claude Code 的 `agents/*.md`。
  *
  * ```
- * <userData>/agents/<name>.md                     全局
- * <workspaceRoot>/.nextcowork/agents/<name>.md    项目(同名时项目胜出)
+ * <appData>/agents/<name>.md                     全局
+ * <workspaceRoot>/.next-cowork/agents/<name>.md  项目(同名时项目胜出)
  * ```
  *
  * 结构和 `skill/load.ts` 是刻意平行的(两层目录、同名时项目胜出、永不 throw、
@@ -32,7 +32,7 @@ import { normalizeToolList } from './tool-alias'
 
 /** 目录名 —— 和 CC 一致 */
 export const AGENTS_DIR = 'agents'
-export const PROJECT_AGENTS_PREFIX = '.nextcowork'
+export const PROJECT_AGENTS_PREFIX = '.next-cowork'
 
 /** 单个定义文件读进内存的字节上限。正文还会再被 `AGENT_PROMPT_MAX` 截一次。 */
 const AGENT_FILE_MAX_BYTES = 128 * 1024
@@ -52,7 +52,7 @@ export interface AgentScanResult {
 
 export interface AgentScanInput {
   fs: KernelFs
-  /** `<userData>/agents`。空串 = 跳过全局这一层。 */
+  /** `<appData>/agents`。空串 = 跳过全局这一层。 */
   globalRoot: string
   /** `<workspaceRoot>/.nextcowork/agents`。空串 = 没有工作区。 */
   projectRoot: string

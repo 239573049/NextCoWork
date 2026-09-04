@@ -208,15 +208,23 @@ export const useTabsStore = create<TabsState>((set, get) => {
       write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, tab] }, pane, tab.id))
     },
 
-    openSession(workspaceId, sessionId, title = '历史对话') {
+    openSession(workspaceId, sessionId, title) {
       const cur = get().stateOf(workspaceId)
       const existing = cur.tabs.find((t) => t.kind === 'chat' && t.ref.sessionId === sessionId)
       if (existing !== undefined) {
         write(workspaceId, withActive(cur, 'main', existing.id))
         return
       }
-      const tab = makeTab('chat', 'main', { title })
-      const chat = tab.kind === 'chat' ? { ...tab, ref: { sessionId } } : tab
+      // Build the tab directly from the existing session id. Calling makeTab
+      // first creates a second, throw-away id (and used to make opening a
+      // history item look like it created a new conversation).
+      const chat: InnerTab = {
+        id: ulid(),
+        kind: 'chat',
+        pane: 'main',
+        title: title?.trim() ?? '',
+        ref: { sessionId }
+      }
       write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, chat] }, 'main', chat.id))
     },
 

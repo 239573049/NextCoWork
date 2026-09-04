@@ -61,7 +61,7 @@ const SKIP_FILES: ReadonlySet<string> = new Set(['.DS_Store', 'Thumbs.db'])
 /**
  * ★ **不跳过点开头的目录**(表里明确列出的那几个除外)。
  *
- * `.github` / `.claude` / `.nextcowork` / `.vscode` 里全是用户真的想让模型看见的东西。
+ * `.github` / `.claude` / `.next-cowork` / `.vscode` 里全是用户真的想让模型看见的东西。
  * 「点开头 = 隐藏 = 不重要」这个直觉在代码仓库里是反的。
  */
 export function defaultSkip(name: string, isDir: boolean): boolean {

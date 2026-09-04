@@ -143,6 +143,95 @@ function cacheControl(ttl: AnthropicCacheTtl): AnthropicCacheControl | undefined
   return ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+/**
+ * Remove adapter-supplied breakpoints before applying the Provider policy.
+ * Anthropic currently accepts cache_control directly on system content blocks
+ * and tool definitions, so only those direct children need to be inspected.
+ */
+function withoutCacheBreakpoints(value: unknown): unknown {
+  if (!Array.isArray(value)) return value
+  return value.map((item) => {
+    const block = record(item)
+    if (block === undefined || !Object.hasOwn(block, 'cache_control')) return item
+    const { cache_control: _ignored, ...rest } = block
+    return rest
+  })
+}
+
+/**
+ * Apply request-scoped Anthropic identity and the Provider-owned cache policy.
+ *
+ * This function is intentionally reusable after model-level request patches.
+ * Those patches may customise ordinary wire parameters, but they must not be
+ * able to replace metadata.user_id, silently enable caching for an `off`
+ * Provider, or change a Provider's TTL. Reapplying the policy at the final wire
+ * boundary also keeps the explicit breakpoint and top-level automatic cache on
+ * exactly the same TTL.
+ */
+export function applyAnthropicRequestOptions(
+  body: unknown,
+  options: AnthropicEncodeOptions
+): Record<string, unknown> {
+  const source = record(body)
+  if (source === undefined) throw new TypeError('Anthropic 请求体必须是一个对象')
+
+  const next = structuredClone(source)
+  const userId = typeof options.userId === 'string' ? options.userId : ''
+  const cacheTtl = normalizeAnthropicCacheTtl(options.cacheTtl)
+  const caching = cacheControl(cacheTtl)
+
+  // Preserve unrelated adapter metadata, but make the reserved identity field
+  // authoritative. A patch may add a harmless relay-specific metadata key; it
+  // may not replace the workspace id with a name, path, or another tenant.
+  next.metadata = { ...(record(next.metadata) ?? {}), user_id: userId }
+
+  // Provider settings are authoritative. Start from a breakpoint-free shape
+  // so `off` really means no cache field and an enabled tier cannot inherit a
+  // model patch's mismatched TTL.
+  delete next.cache_control
+  if (Object.hasOwn(next, 'system')) next.system = withoutCacheBreakpoints(next.system)
+  if (Object.hasOwn(next, 'tools')) next.tools = withoutCacheBreakpoints(next.tools)
+  if (caching === undefined) return next
+
+  next.cache_control = { ...caching }
+
+  // A non-empty system prefix is the preferred stable breakpoint. The normal
+  // encoder supplies a string and therefore retains the required single-block
+  // shape. If an adapter supplied a block array, marking its final block keeps
+  // the same tools → system → messages prefix semantics.
+  if (typeof next.system === 'string' && next.system !== '') {
+    next.system = [{ type: 'text', text: next.system, cache_control: { ...caching } }]
+    return next
+  }
+  if (Array.isArray(next.system) && next.system.length > 0) {
+    for (let index = next.system.length - 1; index >= 0; index--) {
+      const block = record(next.system[index])
+      if (block === undefined) continue
+      next.system[index] = { ...block, cache_control: { ...caching } }
+      return next
+    }
+  }
+
+  // With no system prompt, the final tool is the last stable block in the
+  // Anthropic cache order. If neither exists, the top-level automatic marker
+  // above is sufficient for the growing conversation history.
+  if (Array.isArray(next.tools) && next.tools.length > 0) {
+    for (let index = next.tools.length - 1; index >= 0; index--) {
+      const tool = record(next.tools[index])
+      if (tool === undefined) continue
+      next.tools[index] = { ...tool, cache_control: { ...caching } }
+      break
+    }
+  }
+  return next
+}
+
 export function encodeAnthropic(
   req: CanonicalRequest,
   upstreamModel: string,
@@ -170,29 +259,12 @@ export function encodeAnthropic(
     model: upstreamModel,
     max_tokens: req.maxOutputTokens,
     messages: toAnthropicMessages(req.messages),
-    stream: true,
-    // Identity/tenant metadata is independent from prompt caching and is sent
-    // even when caching is disabled.
-    metadata: { user_id: userId }
+    stream: true
   }
-  const caching = cacheControl(cacheTtl)
   const tools = req.tools.length > 0 ? toAnthropicTools(req.tools) : []
 
-  if (req.system !== '') {
-    body.system =
-      caching === undefined
-        ? req.system
-        : [{ type: 'text', text: req.system, cache_control: { ...caching } }]
-  } else if (caching !== undefined && tools.length > 0) {
-    // With no system prompt, the final tool is the last stable block in the
-    // tools → system → messages prefix order.
-    const last = tools.length - 1
-    tools[last] = { ...(tools[last] as object), cache_control: { ...caching } }
-  }
+  if (req.system !== '') body.system = req.system
   if (tools.length > 0) body.tools = tools
-  // The top-level marker advances with a growing conversation while the
-  // explicit system/tool marker keeps the stable prefix independently reusable.
-  if (caching !== undefined) body.cache_control = { ...caching }
   if (req.stopSequences?.length) body.stop_sequences = req.stopSequences
 
   if (req.thinkingBudget !== undefined) {
@@ -215,6 +287,9 @@ export function encodeAnthropic(
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01'
     },
-    body
+    // Identity metadata and cache policy are independent and applied together
+    // only at the protocol boundary. Router applies this once more after model
+    // request patches so neither invariant can be overridden there.
+    body: applyAnthropicRequestOptions(body, { userId, cacheTtl })
   }
 }

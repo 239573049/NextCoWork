@@ -23,7 +23,7 @@ import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain
 import { defaultProviderConfigs, searchSecretRef } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import { DEFAULT_SETTINGS, mergeSettings } from '../../shared/domain/settings'
-import type { CleanupPreview, CleanupResult, DataExport, ExportSession, ImportApplyResult } from '../../shared/domain/data'
+import { dataMergeDecision, type CleanupPreview, type CleanupResult, type DataExport, type ExportSession, type ImportApplyResult } from '../../shared/domain/data'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import type { Workspace } from '../../shared/domain/workspace'
@@ -650,25 +650,6 @@ export function exportDataSnapshot(): Omit<DataExport, 'encryptedCredentials'> {
   }
 }
 
-function newerThan(local: { updatedAt?: number } | Workspace | undefined, incoming: { updatedAt?: number } | Workspace): boolean {
-  if (local === undefined) return true
-  const localAt = (local as { updatedAt?: unknown }).updatedAt
-  const incomingAt = (incoming as { updatedAt?: unknown }).updatedAt
-  if (typeof localAt !== 'number' || typeof incomingAt !== 'number') return false
-  return incomingAt > localAt
-}
-
-type VersionDecision = 'new' | 'old' | 'unknown'
-
-/** 对没有时间戳的旧配置，明确返回 unknown（策略是保留本地）。 */
-function versionDecision(local: unknown, incoming: unknown): VersionDecision {
-  if (local === undefined) return 'new'
-  const localAt = typeof local === 'object' && local !== null ? (local as Record<string, unknown>)['updatedAt'] : undefined
-  const incomingAt = typeof incoming === 'object' && incoming !== null ? (incoming as Record<string, unknown>)['updatedAt'] : undefined
-  if (typeof localAt !== 'number' || !Number.isFinite(localAt) || typeof incomingAt !== 'number' || !Number.isFinite(incomingAt)) return 'unknown'
-  return incomingAt > localAt ? 'new' : 'old'
-}
-
 /** 在一个 SQLite 事务里逐项合并导入数据。 */
 export function mergeDataExport(data: DataExport): ImportApplyResult {
   return tx(() => {
@@ -693,38 +674,41 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
 
     for (const w of data.workspaces) {
       const local = getWorkspace(w.id)
-      if (local === undefined || newerThan(local, w)) {
+      const decision = dataMergeDecision(local, w)
+      if (decision !== 'skip') {
         putWorkspace({ ...w, unavailable: !existsSync(w.rootPath) })
         imported++
         workspacesImported++
-        if (local !== undefined) overwritten++
+        if (decision === 'overwrite') overwritten++
       } else skipped++
     }
     for (const p of data.providers) {
       const local = listProviders().find((x) => x.id === p.id)
-      const decision = versionDecision(local, p)
-      if (decision === 'new') { putProvider(p); imported++; if (local !== undefined) overwritten++ } else skipped++
+      const decision = dataMergeDecision(local, p)
+      if (decision !== 'skip') { putProvider(p); imported++; if (decision === 'overwrite') overwritten++ } else skipped++
     }
     for (const a of data.aliases) {
       const local = listAliases().find((x) => x.providerId === a.providerId && x.alias === a.alias)
-      if (local === undefined) { putAlias(a); imported++ } else skipped++
+      const decision = dataMergeDecision(local, a)
+      if (decision !== 'skip') { putAlias(a); imported++; if (decision === 'overwrite') overwritten++ } else skipped++
     }
     for (const c of data.mcpServers) {
       const local = getMcpServer(c.id)
-      const decision = versionDecision(local, c)
-      if (decision === 'new') { putMcpServer(c); imported++; if (local !== undefined) overwritten++ } else skipped++
+      const decision = dataMergeDecision(local, c)
+      if (decision !== 'skip') { putMcpServer(c); imported++; if (decision === 'overwrite') overwritten++ } else skipped++
     }
     for (const c of data.searchProviders) {
       const local = listStoredSearchProviders().find((x) => x.id === c.id)
-      const decision = versionDecision(local, c)
-      if (decision === 'new') { putSearchProvider(c); imported++; if (local !== undefined) overwritten++ } else skipped++
+      const decision = dataMergeDecision(local, c)
+      if (decision !== 'skip') { putSearchProvider(c); imported++; if (decision === 'overwrite') overwritten++ } else skipped++
     }
     setKv('skills.disabled', data.disabledSkillIds)
 
     for (const item of data.sessions) {
       const local = getSession(item.session.id)
-      if (local !== undefined && !newerThan(local, item.session)) { skipped++; continue }
-      if (local !== undefined) overwritten++
+      const decision = dataMergeDecision(local, item.session)
+      if (decision === 'skip') { skipped++; continue }
+      if (decision === 'overwrite') overwritten++
       putSession(item.session)
       replaceHistory(item.session.id, item.messages)
       imported++

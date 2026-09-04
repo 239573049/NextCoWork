@@ -24,7 +24,8 @@ import {
   openSync,
   closeSync,
   fsyncSync,
-  lstatSync
+  lstatSync,
+  realpathSync
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
@@ -45,13 +46,14 @@ import {
   BACKUP_FORMAT_VERSION,
   DATA_EXPORT_VERSION,
   cutoffForAge,
+  dataMergeDecision,
   isDataExport
 } from '../../shared/domain/data'
 import { DEFAULT_SETTINGS, mergeSettings, type StorageStats } from '../../shared/domain/settings'
 import { mcpSecretKind, mcpSecretRef } from '../../shared/domain/mcp'
 import { searchSecretRef } from '../../shared/domain/search'
 import { DRAFT_ATTACHMENT_TTL_MS } from '../../shared/domain/attachment'
-import { databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, defaultDatabaseDirectory, openDatabase, txAsync, vacuumDatabase } from '../db'
+import { databaseDirectory, databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, openDatabase, txAsync, vacuumDatabase } from '../db'
 import { MIGRATIONS } from '../db/schema'
 import * as repo from '../db/repo'
 import { getHost } from '../runtime'
@@ -80,7 +82,7 @@ interface StoredBackupStatus {
 }
 
 function dataDirectory(): string {
-  return defaultDatabaseDirectory()
+  return databaseDirectory()
 }
 
 function attachmentDirectory(): string {
@@ -115,14 +117,80 @@ interface LocalBackupState {
 function normalizeLocalBackupDirectory(value: unknown, root = dataDirectory(), dbPath = databaseFilePath()): string | null {
   if (typeof value !== 'string' || !isAbsolute(value)) return null
   const path = resolve(value)
-  // A database file can never be a backup directory. Treating it as one would
-  // make the clear-local-data path either preserve the database or delete a
-  // file the user did not select as a directory.
+  if (isDangerousBackupPath(path, root, dbPath)) return null
+  // A symlink selected as the backup directory is ambiguous: preserving the
+  // link can preserve an application-managed path, while following it can
+  // make a delete operation cross the data boundary.  Treat legacy symlink
+  // values as invalid; the user can choose the real directory again.
+  try {
+    if (lstatSync(path).isSymbolicLink()) return null
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') return null
+  }
+  return path
+}
+
+/**
+ * Resolve an existing prefix through symlinks while retaining non-existent
+ * trailing components.  Backup paths are user-controlled filesystem input;
+ * lexical `resolve()` alone is not enough to decide whether a path overlaps
+ * the application's managed tree.
+ */
+function canonicalBoundaryPath(path: string): string {
+  let current = resolve(path)
+  const tail: string[] = []
+  while (true) {
+    try {
+      const real = realpathSync(current)
+      return resolve(real, ...tail.reverse())
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') return resolve(path)
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      tail.push(basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * Backup directories must be disjoint from the application data tree.  This
+ * rejects the root itself, every managed descendant (including the database
+ * file), and an ancestor that would make the whole application tree part of
+ * the protected backup directory.  Symlink targets are checked canonically.
+ */
+function isDangerousBackupPath(path: string, root: string, dbPath: string | null): boolean {
+  const managedRoot = resolve(root)
+  if (path === managedRoot || isWithin(managedRoot, path) || isWithin(path, managedRoot)) return true
+  if (dbPath !== null && path === resolve(dbPath)) return true
+  const canonicalRoot = canonicalBoundaryPath(managedRoot)
+  const canonicalPath = canonicalBoundaryPath(path)
+  return canonicalPath === canonicalRoot || isWithin(canonicalRoot, canonicalPath) || isWithin(canonicalPath, canonicalRoot)
+}
+
+/** Return the lexical path only when it is a safe external location. */
+function externalBackupPath(value: unknown, root = dataDirectory(), dbPath = databaseFilePath()): string | null {
+  if (typeof value !== 'string' || !isAbsolute(value)) return null
+  const path = resolve(value)
+  const managedRoot = resolve(root)
   if (dbPath !== null && path === resolve(dbPath)) return null
-  // `root` itself is the application's managed container, not an external
-  // directory. Keep the value for display/restore compatibility, but callers
-  // that delete managed data handle this special case explicitly.
-  void root
+  if (path === managedRoot || isWithin(path, managedRoot)) return null
+
+  const canonicalRoot = canonicalBoundaryPath(managedRoot)
+  const canonicalPath = canonicalBoundaryPath(path)
+  if (isWithin(canonicalPath, canonicalRoot)) return null
+  if (isWithin(canonicalRoot, canonicalPath)) {
+    // A legacy configuration may be a symlink *inside* the managed tree that
+    // points to an external backup directory. Preserve the link itself, but
+    // never follow it. Regular descendants and symlinks that resolve back
+    // into the managed tree are not protected.
+    try {
+      if (lstatSync(path).isSymbolicLink()) return path
+    } catch { /* a missing path cannot be a managed symlink */ }
+    return null
+  }
+  // The directory must be disjoint from the managed root. An ancestor would
+  // otherwise protect the entire application tree during clear-local-data.
   return path
 }
 
@@ -158,8 +226,9 @@ function restoreLocalBackupState(state: LocalBackupState): void {
 function toBackupStatus(): BackupStatus {
   const settings = store.getSettings()
   const s = readBackupStatus()
+  const directory = normalizeLocalBackupDirectory(settings.data.backupDirectory)
   return {
-    directory: settings.data.backupDirectory,
+    directory,
     lastBackupAt: s.lastBackupAt,
     lastBackupPath: s.lastBackupPath,
     lastError: s.lastError,
@@ -541,39 +610,44 @@ function compareCounts(data: DataExport): { newCount: number; overwriteCount: nu
   let skippedCount = 0
   for (const w of data.workspaces) {
     const local = store.getWorkspace(w.id)
-    // Workspace 没有可靠的 updatedAt；同 ID 时保留本地记录。
-    if (local === undefined) newCount++
+    const decision = dataMergeDecision(local, w)
+    if (decision === 'new') newCount++
+    else if (decision === 'overwrite') overwriteCount++
     else skippedCount++
   }
   for (const item of data.sessions) {
     const local = store.getSession(item.session.id)
-    if (local === undefined) newCount++
-    else if (item.session.updatedAt > local.updatedAt) overwriteCount++
+    const decision = dataMergeDecision(local, item.session)
+    if (decision === 'new') newCount++
+    else if (decision === 'overwrite') overwriteCount++
     else skippedCount++
   }
   for (const p of data.providers) {
     const local = store.listProviders().find((x) => x.id === p.id)
-    const incomingAt = (p as unknown as Record<string, unknown>)['updatedAt']
-    const localAt = local === undefined ? undefined : (local as unknown as Record<string, unknown>)['updatedAt']
-    if (local === undefined) newCount++
-    else if (typeof incomingAt === 'number' && typeof localAt === 'number' && incomingAt > localAt) overwriteCount++
+    const decision = dataMergeDecision(local, p)
+    if (decision === 'new') newCount++
+    else if (decision === 'overwrite') overwriteCount++
     else skippedCount++
   }
-  for (const a of data.aliases) if (store.listAliases().some((x) => x.providerId === a.providerId && x.alias === a.alias)) skippedCount++; else newCount++
+  for (const a of data.aliases) {
+    const local = store.listAliases().find((x) => x.providerId === a.providerId && x.alias === a.alias)
+    const decision = dataMergeDecision(local, a)
+    if (decision === 'new') newCount++
+    else if (decision === 'overwrite') overwriteCount++
+    else skippedCount++
+  }
   for (const c of data.mcpServers) {
     const local = store.listMcpServers().find((x) => x.id === c.id)
-    const incomingAt = (c as unknown as Record<string, unknown>)['updatedAt']
-    const localAt = local === undefined ? undefined : (local as unknown as Record<string, unknown>)['updatedAt']
-    if (local === undefined) newCount++
-    else if (typeof incomingAt === 'number' && typeof localAt === 'number' && incomingAt > localAt) overwriteCount++
+    const decision = dataMergeDecision(local, c)
+    if (decision === 'new') newCount++
+    else if (decision === 'overwrite') overwriteCount++
     else skippedCount++
   }
   for (const c of data.searchProviders) {
     const local = repo.listStoredSearchProviders().find((x) => x.id === c.id)
-    const incomingAt = (c as unknown as Record<string, unknown>)['updatedAt']
-    const localAt = local === undefined ? undefined : (local as unknown as Record<string, unknown>)['updatedAt']
-    if (local === undefined) newCount++
-    else if (typeof incomingAt === 'number' && typeof localAt === 'number' && incomingAt > localAt) overwriteCount++
+    const decision = dataMergeDecision(local, c)
+    if (decision === 'new') newCount++
+    else if (decision === 'overwrite') overwriteCount++
     else skippedCount++
   }
   return { newCount, overwriteCount, skippedCount }
@@ -778,12 +852,22 @@ export async function chooseBackupDirectory(): Promise<string | null> {
   const result = await dialog.showOpenDialog({ title: '选择备份目录', properties: ['openDirectory', 'createDirectory'] })
   if (result.canceled || !result.filePaths[0]) return null
   const path = resolve(result.filePaths[0])
+  if (isDangerousBackupPath(path, dataDirectory(), databaseFilePath())) {
+    throw new IpcError('unknown', '备份目录不能位于 NextCoWork 数据目录内或包含数据目录')
+  }
   try {
     mkdirSync(path, { recursive: true })
+    if (lstatSync(path).isSymbolicLink()) throw new Error('备份目录不能是符号链接')
+    // Re-check after creation: a parent symlink can make a lexical path look
+    // external while its real target is inside the managed tree.
+    if (isDangerousBackupPath(path, dataDirectory(), databaseFilePath())) throw new Error('备份目录与数据目录重叠')
     const probe = join(path, `.nextcowork-write-test-${process.pid}`)
     writeFileSync(probe, '')
     unlinkSync(probe)
-  } catch { throw new IpcError('unknown', '备份目录不可写') }
+  } catch (err) {
+    if (err instanceof IpcError) throw err
+    throw new IpcError('unknown', '备份目录不存在、不可写或与数据目录重叠')
+  }
   store.updateSettings({ data: { backupDirectory: path } })
   windows.emitToAll('settings:changed', store.getSettings())
   return path
@@ -797,17 +881,22 @@ function ensureBackupDirectory(): string {
   const path = store.getSettings().data.backupDirectory
   if (!path) throw new IpcError('unknown', '请先选择备份目录')
   if (!isAbsolute(path)) throw new IpcError('unknown', '备份目录路径无效')
+  const normalized = normalizeLocalBackupDirectory(path)
+  if (normalized === null) throw new IpcError('unknown', '备份目录路径无效或与 NextCoWork 数据目录重叠')
   try {
-    mkdirSync(path, { recursive: true })
-    const st = statSync(path)
+    mkdirSync(normalized, { recursive: true })
+    const lst = lstatSync(normalized)
+    if (lst.isSymbolicLink()) throw new Error('备份目录不能是符号链接')
+    if (isDangerousBackupPath(normalized, dataDirectory(), databaseFilePath())) throw new Error('备份目录与数据目录重叠')
+    const st = statSync(normalized)
     if (!st.isDirectory()) throw new Error('不是目录')
-    const probe = join(path, `.nextcowork-write-test-${process.pid}-${Date.now()}`)
+    const probe = join(normalized, `.nextcowork-write-test-${process.pid}-${Date.now()}`)
     writeFileSync(probe, '')
     unlinkSync(probe)
   } catch {
     throw new IpcError('unknown', '备份目录不存在或不可写')
   }
-  return path
+  return normalized
 }
 
 function dbSnapshot(): Buffer {
@@ -871,6 +960,22 @@ export async function createBackup(req: { manual?: boolean } = { manual: true })
   }
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function normalizedSettings(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return structuredClone(DEFAULT_SETTINGS)
+  }
+  return mergeSettings(DEFAULT_SETTINGS, value as Parameters<typeof mergeSettings>[1])
+}
+
 function parseBackup(path: string): { manifest: BackupManifest; database: Buffer; settings: unknown } {
   if (!isAbsolute(path) || !existsSync(path)) throw new IpcError('unknown', '备份文件不存在')
   try {
@@ -917,7 +1022,6 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
   if (dbRaw.length < 64 || dbRaw.toString('ascii', 0, 15) !== 'SQLite format 3') throw new IpcError('unknown', '备份数据库文件无效')
   const schemaVersion = dbRaw.readUInt32BE(60)
   if (schemaVersion !== m.schemaVersion) throw new IpcError('unknown', '备份数据库版本与 manifest 不一致')
-  validateBackupDatabase(dbRaw, m)
   let settings: unknown
   try { settings = JSON.parse(settingsRaw.toString('utf8')) } catch { throw new IpcError('unknown', '备份设置损坏') }
   if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
@@ -930,6 +1034,7 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
   } catch {
     throw new IpcError('unknown', '备份设置结构无效')
   }
+  validateBackupDatabase(dbRaw, m, settings)
   return { manifest: m as BackupManifest, database: dbRaw, settings }
 }
 
@@ -940,7 +1045,7 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
  * Deserialize into an isolated in-memory handle so no application state is
  * touched while previewing an untrusted archive.
  */
-function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>): void {
+function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>, expectedSettings: unknown): void {
   let temp: DatabaseSync | null = null
   try {
     temp = new DatabaseSync(':memory:', { enableForeignKeyConstraints: true })
@@ -957,6 +1062,18 @@ function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>):
     }
     if ((credentials > 0) !== manifest.encryptedCredentials) {
       throw new Error('manifest credential flag mismatch')
+    }
+    const settingsRow = temp.prepare('SELECT json FROM settings WHERE id = 1').get() as Record<string, unknown> | undefined
+    let databaseSettings: unknown = DEFAULT_SETTINGS
+    if (settingsRow !== undefined) {
+      try {
+        databaseSettings = JSON.parse(String(settingsRow['json']))
+      } catch {
+        throw new Error('settings row is not valid JSON')
+      }
+    }
+    if (stableJson(normalizedSettings(databaseSettings)) !== stableJson(normalizedSettings(expectedSettings))) {
+      throw new Error('settings.json 与 database.sqlite 不一致')
     }
   } catch (err) {
     if (err instanceof IpcError) throw err
@@ -1350,7 +1467,7 @@ export function clearHistory(): CleanupResult {
   return result
 }
 
-/** 删除本应用管理的目录/文件；不会递归删除 userData 根，因而保留共享目录。 */
+/** 删除本应用管理的目录/文件；不会递归删除数据根目录本身。 */
 export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } {
   if (!req.confirm) throw new IpcError('unknown', '必须明确确认删除本机数据')
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再删除')
@@ -1359,9 +1476,7 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   // A malformed legacy setting must not accidentally protect a path relative
   // to the process working directory.  Only a user-selected absolute path is
   // an external backup location worth preserving.
-  const externalBackup = configuredBackup !== null && isAbsolute(configuredBackup)
-    ? resolve(configuredBackup)
-    : null
+  const externalBackup = externalBackupPath(configuredBackup)
   const managedNames = [ATTACHMENTS_DIR, 'themes', 'skills', 'agents', 'plugins', 'plugin', 'logs', 'cache', 'workspaces']
   for (const name of managedNames) {
     const path = join(root, name)

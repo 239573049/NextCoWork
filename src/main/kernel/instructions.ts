@@ -7,7 +7,7 @@
  * 我们用 `AGENTS.md`,只认这一个名字(不做 `CLAUDE.md` 回落)。
  *
  * ```
- * <userData>/AGENTS.md        全局:用户对所有项目的偏好
+ * <appData>/AGENTS.md          全局:用户对所有项目的偏好
  * <workspaceRoot>/AGENTS.md   项目:这个仓库自己的规矩
  * ```
  *
@@ -58,7 +58,7 @@ export interface InstructionsDiagnostic {
 
 export interface InstructionsScanInput {
   fs: KernelFs
-  /** `<userData>`。空串 = 跳过全局这一层。 */
+  /** `<appData>`。空串 = 跳过全局这一层。 */
   globalRoot: string
   /** `<workspaceRoot>`。空串 = 没有工作区。 */
   projectRoot: string

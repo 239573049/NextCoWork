@@ -2,8 +2,8 @@
  * 子代理定义 —— 照搬 Claude Code 的 `agents/*.md`。
  *
  * ```
- * <userData>/agents/<name>.md                     全局
- * <workspaceRoot>/.nextcowork/agents/<name>.md    项目(同名时项目胜出)
+ * <appData>/agents/<name>.md                      全局
+ * <workspaceRoot>/.next-cowork/agents/<name>.md  项目(同名时项目胜出)
  * ```
  *
  * ★ 和 Skill 的**不对称是有意的**:Skill 是 `skills/<name>/SKILL.md`(一个目录,

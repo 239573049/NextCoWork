@@ -22,6 +22,7 @@ import { upsertProvider } from "../../../services/provider";
 import { useModelsStore } from "../../../stores/models";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { isPresetAdded, providerFromPreset } from "./provider-edit";
+import { useI18n } from "../../../i18n";
 import {
   CATALOG_TABS,
   divergentCount,
@@ -69,6 +70,7 @@ export function ProviderCatalog({
   /** 建好之后把左列选到它。不给的话用户建完还得自己去找刚加的那一条 */
   onAdded?: (providerId: string) => void;
 }): ReactNode {
+  const { t } = useI18n();
   const [tab, setTab] = useState<CatalogTab>("recommended");
   const [query, setQuery] = useState("");
   const providers = useModelsStore((s) => s.providers);
@@ -86,8 +88,8 @@ export function ProviderCatalog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="添加供应商"
-      description={`内置 ${PROVIDER_PRESETS.length} 家预设,地址与协议经探针实测。添加后在右侧填密钥即可用`}
+      title={t("models.addProvider")}
+      description={t("models.catalogHint", { count: PROVIDER_PRESETS.length })}
       width={760}
     >
       <div className="flex items-center gap-3 pb-3">
@@ -109,8 +111,8 @@ export function ProviderCatalog({
             size="sm"
             value={query}
             onChange={setQuery}
-            placeholder="搜名字、地址或模型"
-            ariaLabel="搜索供应商预设"
+            placeholder={t("models.searchProvider")}
+            ariaLabel={t("models.searchProviderLabel")}
             icon={<Search size={13} className="text-icon" />}
           />
         </div>
@@ -126,8 +128,8 @@ export function ProviderCatalog({
       {list.length === 0 ? (
         <EmptyState
           icon={<Search size={20} />}
-          title="没有匹配的供应商"
-          hint="试试域名的一段,比如 openrouter.ai 或 127.0.0.1。"
+          title={t("models.noProviderMatch")}
+          hint={t("models.providerSearchHint")}
           className="py-10"
         />
       ) : (
@@ -163,6 +165,7 @@ function PresetCard({
   added: boolean;
   onAdded?: (providerId: string) => void;
 }): ReactNode {
+  const { t } = useI18n();
   const rows = endpointRows(p);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,11 +194,11 @@ function PresetCard({
         >
           {p.name}
         </span>
-        {p.subscription === true && <Tag>订阅制</Tag>}
+        {p.subscription === true && <Tag>{t("models.subscription")}</Tag>}
         {/* ★ 未核实的带角标 —— 让「未核实」进界面而不是停在报告里:
             配失败时用户知道该去查文档,而不是怀疑自己填错了 */}
         {p.verification === "unverified" ? (
-          <Tag danger>未核实</Tag>
+          <Tag danger>{t("models.unverified")}</Tag>
         ) : (
           <Tag>{VERIFICATION_LABEL[p.verification]}</Tag>
         )}
@@ -225,7 +228,7 @@ function PresetCard({
       {hasDivergentBaseUrls(p) && (
         <p className="mt-1.5 flex items-center gap-1 text-[10.5px] text-fg-faint">
           <Shuffle size={10} className="shrink-0" />
-          换协议会换地址
+          {t("models.protocolChangesAddress")}
         </p>
       )}
 
@@ -261,13 +264,13 @@ function PresetCard({
           )}
         >
           <ExternalLink size={10} />
-          接入文档
+          {t("models.docs")}
         </button>
         <span className="min-w-0 flex-1" />
         {added ? (
           <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
             <Check size={11} />
-            已添加
+            {t("models.added")}
           </span>
         ) : (
           <Button
@@ -283,7 +286,7 @@ function PresetCard({
             }
             onClick={add}
           >
-            添加
+            {t("common.add")}
           </Button>
         )}
       </div>

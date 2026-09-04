@@ -10,6 +10,7 @@ import { PROVIDER_PRESETS } from "../../../../../shared/domain/presets";
 import { cn } from "../../../lib/cn";
 import { type ProviderEntry } from "./enabled-models";
 import { ProviderAvatar } from "./ProviderAvatar";
+import { useI18n } from "../../../i18n";
 
 /**
  * 参考图左边那一列。
@@ -41,18 +42,17 @@ export function EnabledModelList({
    */
   footer?: ReactNode;
 }): ReactNode {
+  const { t } = useI18n();
   return (
     <div className="flex w-[236px] shrink-0 flex-col">
       <div className="flex items-start gap-2 px-1 pb-2">
         <div className="min-w-0 flex-1">
-          <p className="text-[13px] text-fg">启用的模型</p>
-          <p className="mt-0.5 text-[11.5px] leading-[1.5] text-fg-faint">
-            首位为默认。排序要等写入面(步骤 4)
-          </p>
+          <p className="text-[13px] text-fg">{t("models.enabledModels")}</p>
+          <p className="mt-0.5 text-[11.5px] leading-[1.5] text-fg-faint">{t("models.firstIsDefault")}</p>
         </div>
         <button
           type="button"
-          aria-label="添加供应商"
+          aria-label={t("models.addProvider")}
           onClick={onAdd}
           className={cn(
             "app-no-drag mt-0.5 flex size-6 shrink-0 items-center justify-center",
@@ -89,12 +89,12 @@ export function EnabledModelList({
                   </span>
                   {e.isDefault && (
                     <span className="shrink-0 text-[11px] text-accent">
-                      默认
+                      {t("common.default")}
                     </span>
                   )}
                 </span>
                 <span className="mt-0.5 block truncate text-[11.5px] text-fg-faint">
-                  {e.primaryAlias ?? "未配置模型"}
+                  {e.primaryAlias ?? t("models.unconfigured")}
                 </span>
               </span>
             </button>
@@ -104,8 +104,7 @@ export function EnabledModelList({
 
       {loaded && entries.length === 0 && (
         <p className="px-1.5 py-3 text-[12px] leading-[1.6] text-fg-faint">
-          还没有配置任何上游供应商。内置了 {PROVIDER_PRESETS.length}{" "}
-          家预设,点上面的
+          {t("models.emptyProviders", { count: PROVIDER_PRESETS.length })}
           <Plus size={11} className="mx-0.5 inline align-[-1px]" />
           先看看有哪些。
         </p>
@@ -120,7 +119,7 @@ export function EnabledModelList({
         )}
       >
         <Plus size={14} className="shrink-0 text-icon" />
-        添加模型
+        {t("models.addModel")}
       </button>
 
       {footer !== undefined && (
@@ -139,21 +138,21 @@ export function EnabledModelList({
       */}
       <ExtraRow
         icon={<ImageIcon size={14} />}
-        label="图片识别 Fallback"
-        tag="未建模"
+        label={t("models.imageFallback")}
+        tag={t("models.notModeled")}
         title="参考实现里给看图单独指定一个模型。我们的 ModelAlias 还没有 modality 字段(方案 §1.2),没有落点"
       />
       <ExtraRow
         icon={<Workflow size={14} />}
-        label="规划 & 执行模型"
-        tag="未建模"
+        label={t("models.planExecution")}
+        tag={t("models.notModeled")}
         title="参考实现把规划和执行拆给两个模型。我们的内核是单模型循环,拆开要动 kernel,不在本轮"
       />
       {/* ★ 方案 §10 明确砍掉云同步。这里直说「不做」,不做成「即将推出」 */}
       <ExtraRow
         icon={<Cloud size={14} />}
-        label="模型配置云同步"
-        tag="不做"
+        label={t("models.cloudSync")}
+        tag={t("models.notPlanned")}
         title="方案 §10 明确砍掉了云同步 —— 这不是还没做,是决定不做"
       />
     </div>

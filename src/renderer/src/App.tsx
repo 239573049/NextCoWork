@@ -20,6 +20,7 @@ import { AppShell } from './shell/AppShell'
 import { startAgentEventPump, adoptActiveRuns, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
 import { useWindowStore } from './stores/window'
+import { useTabsStore } from './stores/tabs'
 import { applyTheme } from './theme/apply'
 import { useI18n } from './i18n'
 
@@ -30,6 +31,7 @@ export default function App(): React.JSX.Element {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [fatal, setFatal] = useState<string | null>(null)
   const hydrate = useWindowStore((s) => s.hydrate)
+  const openSession = useTabsStore((s) => s.openSession)
   const { setLocale, t } = useI18n()
 
   useEffect(() => {
@@ -54,6 +56,13 @@ export default function App(): React.JSX.Element {
         hydrate(b)
         // ⌘R 重载后主进程里还活着的 run —— 角标要立刻正确,不能等下一个事件
         adoptActiveRuns(b.activeRuns)
+        const raw = window.location.hash.match(/^#session=([^/]+)\/([^/]+)$/)
+        if (raw !== null) {
+          const workspaceId = decodeURIComponent(raw[1]!)
+          const sessionId = decodeURIComponent(raw[2]!)
+          openSession(workspaceId, sessionId)
+          window.history.replaceState(null, '', window.location.pathname + window.location.search)
+        }
       })
       .catch((e: unknown) => setFatal(e instanceof Error ? e.message : String(e)))
 
@@ -64,7 +73,7 @@ export default function App(): React.JSX.Element {
       offWorkspaces()
       offSessions()
     }
-  }, [hydrate])
+  }, [hydrate, openSession])
 
   /**
    * ★ **深浅和颜色是两路来的,必须汇到一处再落地。**

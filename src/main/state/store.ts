@@ -196,8 +196,14 @@ export const store = {
   getSessionDetail(sessionId: string): SessionDetail | undefined {
     return repo.getSessionDetail(sessionId)
   },
+  replaceHistory(sessionId: string, messages: readonly AgentMessage[]): void {
+    repo.replaceHistory(sessionId, messages)
+  },
   sessionAttachmentPaths(sessionId: string): string[] {
     return repo.sessionAttachmentPaths(sessionId)
+  },
+  getAttachmentRowByOwnerAndFileName(ownerId: string, fileName: string): repo.AttachmentRow | undefined {
+    return repo.findAttachmentByOwnerAndFileName(ownerId, fileName)
   },
   listSessions(workspaceId: string, archived?: boolean): SessionListItem[] {
     return repo.listSessions(workspaceId, archived)

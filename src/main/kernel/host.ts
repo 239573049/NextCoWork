@@ -124,7 +124,7 @@ export function nodeHost(overrides: Partial<KernelHost> = {}): KernelHost {
   const mem = new Map<string, string>()
   return {
     paths: {
-      userData: () => join(tmpdir(), 'nextcowork-dev'),
+      userData: () => join(process.cwd(), '.next-cowork'),
       temp: () => tmpdir()
     },
     secrets: {

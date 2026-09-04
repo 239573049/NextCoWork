@@ -218,6 +218,62 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(bodies[1]?.metadata).toEqual({ user_id: 'ws-test' })
   })
 
+  it('模型级 request-adapter 不能覆盖 Anthropic 的身份、TTL 或稳定断点', async () => {
+    const a = alias('m', 'p1')
+    a.requestAdapter = {
+      preset: 'custom',
+      patches: [
+        { op: 'replace', path: '/metadata', value: { user_id: 'attacker' } },
+        { op: 'replace', path: '/cache_control', value: { type: 'ephemeral', ttl: '5m' } },
+        { op: 'add', path: '/system', value: 'adapter supplied stable prefix' }
+      ]
+    }
+    const { router, bodies } = rig({
+      providers: [provider('p1', { protocolOptions: { anthropic: { cacheTtl: '1h' } } })],
+      aliases: [a],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+
+    await drain(router)
+
+    expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
+    expect(bodies[0]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(bodies[0]?.system).toEqual([
+      {
+        type: 'text',
+        text: 'adapter supplied stable prefix',
+        cache_control: { type: 'ephemeral', ttl: '1h' }
+      }
+    ])
+  })
+
+  it('缓存关闭时 request-adapter 也不能注入 cache_control 或断点', async () => {
+    const a = alias('m', 'p1')
+    a.requestAdapter = {
+      preset: 'custom',
+      patches: [
+        { op: 'replace', path: '/metadata', value: { user_id: 'attacker' } },
+        { op: 'add', path: '/cache_control', value: { type: 'ephemeral', ttl: '1h' } },
+        {
+          op: 'add',
+          path: '/system',
+          value: [{ type: 'text', text: 'should not become a breakpoint', cache_control: { type: 'ephemeral' } }]
+        }
+      ]
+    }
+    const { router, bodies } = rig({
+      providers: [provider('p1')],
+      aliases: [a],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+
+    await drain(router)
+
+    expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
+    expect(bodies[0]).not.toHaveProperty('cache_control')
+    expect(bodies[0]?.system).toEqual([{ type: 'text', text: 'should not become a breakpoint' }])
+  })
+
   /** Anthropic 用 x-api-key,不是 Authorization: Bearer —— 写错就是 401 */
   it('凭证走 x-api-key 且带 anthropic-version', async () => {
     const { router, headers } = rig({

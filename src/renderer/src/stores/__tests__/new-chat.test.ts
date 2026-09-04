@@ -118,4 +118,16 @@ describe('侧边栏「新建对话」', () => {
     tabs.open(WS, 'chat')
     expect(chats()).toHaveLength(2)
   })
+
+  it('打开历史会话复用 session 引用,重复点击不会新增 Tab', () => {
+    const tabs = useTabsStore.getState()
+    tabs.openSession(WS, 'session-history', '一条历史会话')
+    expect(chats()).toHaveLength(1)
+    const first = chats()[0]!
+
+    tabs.openSession(WS, 'session-history', '一条历史会话')
+    expect(chats()).toHaveLength(1)
+    expect(activeId()).toBe(first.id)
+    expect(first.ref.sessionId).toBe('session-history')
+  })
 })

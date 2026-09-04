@@ -83,6 +83,7 @@ import {
 } from './workspace'
 import {
   createSession,
+  duplicateSession,
   deleteSession,
   getSession,
   listSessions,
@@ -165,6 +166,7 @@ const handlers: HandlerMap = {
   'sessions:list': (req) => listSessions(req),
   'sessions:get': (req) => getSession(req),
   'sessions:create': (req) => createSession(req),
+  'sessions:duplicate': (req) => duplicateSession(req),
   'sessions:rename': (req) => renameSession(req),
   'sessions:setArchived': (req) => setArchived(req),
   'sessions:setFavorited': (req) => setFavorited(req),

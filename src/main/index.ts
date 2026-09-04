@@ -2,8 +2,9 @@
  * KernelHost 之外唯一允许 import electron 的地方之一(窗口/生命周期)。
  * 内核代码永远不从这里 import —— 依赖方向是单向的:main → kernel,不反向。
  */
-import { join } from 'node:path'
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { app, shell, BrowserWindow, nativeImage } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
@@ -27,11 +28,10 @@ if (!gotTheLock) {
   app.quit()
 }
 
-// dev 用独立的 userData 路径,别让开发跑污染真实数据(方案 §9)。
-// 必须在 app ready 之前调用才生效。
-if (is.dev) {
-  app.setPath('userData', `${app.getPath('userData')}-dev`)
-}
+// 应用数据、附件和 Electron profile 统一落在项目级 `.next-cowork/`。
+// 必须在 app ready 之前设置才生效。
+const legacyUserDataPath = app.getPath('userData')
+app.setPath('userData', defaultDatabaseDirectory())
 
 /*
   ★ **必须在 `app.whenReady()` 之前** —— 与单实例锁、userData 改路径同属
@@ -90,6 +90,12 @@ function createMainWindow(): BrowserWindow {
   // 任何 window.open / target=_blank 一律不在应用内开新窗口,交给系统浏览器。
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
+    // Renderer-controlled session links open another app window, while all
+    // other external targets continue to use the system browser policy.
+    const appUrl = win.webContents.getURL().split('#')[0]
+    if ((appUrl !== '' && url.startsWith(appUrl)) || (process.env['ELECTRON_RENDERER_URL'] !== undefined && url.startsWith(process.env['ELECTRON_RENDERER_URL']!))) {
+      return { action: 'allow' }
+    }
     return { action: 'deny' }
   })
 
@@ -120,13 +126,52 @@ function createMainWindow(): BrowserWindow {
 function prepareProjectDatabaseDirectory(): string {
   const targetDir = defaultDatabaseDirectory()
   const targetPath = join(targetDir, DB_FILENAME)
-  const legacyPath = join(app.getPath('userData'), DB_FILENAME)
+  const legacyPath = join(legacyUserDataPath, DB_FILENAME)
   if (!existsSync(targetPath) && existsSync(legacyPath)) {
     mkdirSync(targetDir, { recursive: true })
     copyFileSync(legacyPath, targetPath)
     for (const suffix of ['-wal', '-shm']) {
       const source = `${legacyPath}${suffix}`
       if (existsSync(source)) copyFileSync(source, `${targetPath}${suffix}`)
+    }
+    // Move application-owned file trees alongside the copied database. The
+    // attachment rows contain absolute paths, so rewrite those references in
+    // the copied database before the normal migration runner opens it.
+    const managedDirs = ['attachments', 'skills', 'agents', 'workspaces']
+    for (const name of managedDirs) {
+      const source = join(legacyUserDataPath, name)
+      const target = join(targetDir, name)
+      if (existsSync(source) && !existsSync(target)) cpSync(source, target, { recursive: true })
+    }
+    const legacyInstructions = join(legacyUserDataPath, 'AGENTS.md')
+    const targetInstructions = join(targetDir, 'AGENTS.md')
+    if (existsSync(legacyInstructions) && !existsSync(targetInstructions)) {
+      copyFileSync(legacyInstructions, targetInstructions)
+    }
+    // Legacy themes lived beside the old database; their new canonical home
+    // is the shared attachments/themes subtree.
+    const legacyThemes = join(legacyUserDataPath, 'themes')
+    const targetThemes = join(targetDir, 'attachments', 'themes')
+    if (existsSync(legacyThemes) && !existsSync(targetThemes)) {
+      mkdirSync(dirname(targetThemes), { recursive: true })
+      cpSync(legacyThemes, targetThemes, { recursive: true })
+    }
+    try {
+      const migrated = new DatabaseSync(targetPath)
+      const oldRoot = legacyUserDataPath
+      migrated.prepare('UPDATE attachments SET path = REPLACE(path, ?, ?) WHERE path LIKE ?').run(
+        join(oldRoot, 'attachments'),
+        join(targetDir, 'attachments'),
+        `${join(oldRoot, 'attachments')}%`
+      )
+      migrated.prepare('UPDATE sessions SET root_path_at_creation = REPLACE(root_path_at_creation, ?, ?) WHERE root_path_at_creation LIKE ?').run(
+        join(oldRoot, 'workspaces'),
+        join(targetDir, 'workspaces'),
+        `${join(oldRoot, 'workspaces')}%`
+      )
+      migrated.close()
+    } catch (err) {
+      console.warn(`[db] 旧数据库路径迁移未完成，将保留原数据并继续启动: ${String(err)}`)
     }
     console.log(`[db] 已将旧数据库迁移到 ${targetDir}`)
   }
@@ -168,8 +213,7 @@ void app.whenReady().then(() => {
     数据库目录固定为当前工作目录下的 `.next-cowork/`，与 Electron 的
     `userData` 路径解耦；`openDatabase` 会在首次启动时自动创建它。
   */
-  // SQLite 主库使用项目级目录,避免把 NextCoWork 数据散落到 Electron
-  // 的平台 userData 目录。目录不存在时由 openDatabase 自动创建。
+  // SQLite 主库及应用管理的文件资源统一使用项目级 .next-cowork 目录。
   openDatabase(prepareProjectDatabaseDirectory())
 
   /*

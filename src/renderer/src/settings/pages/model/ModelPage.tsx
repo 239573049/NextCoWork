@@ -1,10 +1,10 @@
 import {
   Check,
-  CircleHelp,
   Cpu,
   File,
   Globe,
   Image,
+  Pencil,
   Plus,
   Search,
   Trash2,
@@ -23,6 +23,7 @@ import type { ModelPricing } from "../../../../../shared/domain/pricing";
 import { PRICING_SEED } from "../../../../../shared/domain/pricing-seed";
 import { PROVIDER_PRESETS } from "../../../../../shared/domain/presets";
 import { EmptyState } from "../../../components/ui/EmptyState";
+import { Dialog } from "../../../components/ui/Dialog";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
@@ -83,13 +84,13 @@ function LegacyTextTab({
           footer={
             <div className="space-y-1 text-[11px] text-fg-faint">
               <label className="flex items-center justify-between gap-2">
-                默认模型
+                {t("models.default")}
                 <select
                   value={settings.defaultModel}
                   onChange={(e) => patch({ defaultModel: e.target.value })}
                   className="max-w-[116px] rounded border border-border bg-surface-field px-1 py-0.5 text-[10px] text-fg"
                 >
-                  <option value="">跟随对话</option>
+                  <option value="">{t("models.followConversation")}</option>
                   {models.map((m) => (
                     <option key={m.alias} value={m.alias}>
                       {m.alias}
@@ -98,7 +99,7 @@ function LegacyTextTab({
                 </select>
               </label>
               <label className="flex items-center justify-between gap-2">
-                默认子代理
+                {t("models.defaultSubagent")}
                 <select
                   value={settings.subagent.model}
                   onChange={(e) =>
@@ -106,7 +107,7 @@ function LegacyTextTab({
                   }
                   className="max-w-[116px] rounded border border-border bg-surface-field px-1 py-0.5 text-[10px] text-fg"
                 >
-                  <option value="">跟随对话</option>
+                  <option value="">{t("models.followConversation")}</option>
                   {models.map((m) => (
                     <option key={m.alias} value={m.alias}>
                       {m.alias}
@@ -122,8 +123,8 @@ function LegacyTextTab({
         ) : (
           <EmptyState
             className="min-w-0 flex-1 py-16"
-            title="还没有可配置的供应商"
-            hint="点击左侧加号添加供应商。"
+            title={t("models.noProvider")}
+            hint={t("models.addProviderHint")}
           />
         )}
       </div>
@@ -303,6 +304,7 @@ function ModelConsole({
     load = useModelsStore((s) => s.load);
   const [providerId, setProviderId] = useState<string | null>(null),
     [selectedKey, setSelectedKey] = useState<string | null>(null),
+    [editingModel, setEditingModel] = useState<CatalogRow | ModelAlias | null>(null),
     [catalogOpen, setCatalogOpen] = useState(false),
     [query, setQuery] = useState(""),
     [capability, setCapability] = useState("all"),
@@ -368,22 +370,18 @@ function ModelConsole({
     filtered.find((m) => `${m.providerId}:${m.alias}` === selectedKey) ??
     filtered[0] ??
     null;
-  const selectedEntry =
-    selected === null || catalogMode
-      ? undefined
-      : entries.find((entry) => entry.provider.id === selected.providerId);
   return (
     <>
       <div className="flex min-h-[520px] min-w-0 gap-3">
         <aside className="w-[178px] shrink-0 border-r border-hairline pr-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-[13px] text-fg">
-              {catalogMode ? "模型厂商" : "供应商"}
+              {catalogMode ? t("models.manufacturer") : t("models.vendor")}
             </span>
             <button
               type="button"
-              aria-label={catalogMode ? "配置供应商" : "添加供应商"}
-              title={catalogMode ? "配置供应商" : "添加供应商"}
+              aria-label={t("models.addProvider")}
+              title={t("models.addProvider")}
               onClick={() => setCatalogOpen(true)}
               className="rounded-[6px] p-1 text-icon hover:bg-tint-hover hover:text-fg"
             >
@@ -400,7 +398,7 @@ function ModelConsole({
                 : "text-fg-muted hover:bg-tint-hover",
             )}
           >
-            <span>{catalogMode ? "全部模型" : "全部供应商"}</span>
+            <span>{catalogMode ? t("models.all") : t("models.allProviders")}</span>
             <span className="text-[11px] text-fg-faint">
               {catalogMode ? catalog.length : models.length}
             </span>
@@ -410,7 +408,7 @@ function ModelConsole({
               ? manufacturerList.map((id) => ({
                   id,
                   label:
-                    MANUFACTURERS.find((m) => m.id === id)?.label ?? "其他厂商",
+                    MANUFACTURERS.find((m) => m.id === id)?.label ?? t("models.otherVendor"),
                 }))
               : entries.map((e) => ({
                   id: e.provider.id,
@@ -440,7 +438,7 @@ function ModelConsole({
           </ul>
           {loaded && !catalogMode && entries.length === 0 && (
             <p className="mt-3 text-[11.5px] leading-[1.5] text-fg-faint">
-              还没有供应商。内置 {PROVIDER_PRESETS.length} 家预设。
+              {t("models.noProviders", { count: PROVIDER_PRESETS.length })}
             </p>
           )}
         </aside>
@@ -451,8 +449,8 @@ function ModelConsole({
                 size="sm"
                 value={query}
                 onChange={setQuery}
-                placeholder="搜索模型 ID 或名称"
-                ariaLabel="搜索模型"
+                placeholder={t("models.search")}
+                ariaLabel={t("models.searchLabel")}
                 icon={<Search size={13} />}
               />
             </div>
@@ -461,41 +459,39 @@ function ModelConsole({
               onChange={(e) => setModalityFilter(e.target.value)}
               className="h-8 rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"
             >
-              <option value="all">全部类型</option>
-              <option value="text">文本</option>
-              <option value="image">图像</option>
-              <option value="video">视频</option>
-              <option value="speech">语音</option>
-              <option value="transcription">转写</option>
+              <option value="all">{t("models.allTypes")}</option>
+              <option value="text">{t("models.text")}</option>
+              <option value="image">{t("models.image")}</option>
+              <option value="video">{t("models.video")}</option>
+              <option value="speech">{t("models.speech")}</option>
+              <option value="transcription">{t("models.transcription")}</option>
             </select>
             <select
               value={capability}
               onChange={(e) => setCapability(e.target.value)}
               className="h-8 rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"
             >
-              <option value="all">全部能力</option>
+              <option value="all">{t("models.allCapabilities")}</option>
               <option value="vision">Vision</option>
               <option value="file">File</option>
               <option value="web">Web</option>
               <option value="think">Think</option>
             </select>
           </div>
-          <div className="overflow-hidden rounded-[10px] border border-border">
-            <div className="overflow-x-auto">
+          <div className="max-h-[510px] overflow-auto scroll-thin rounded-[10px] border border-border">
+            <div className="min-w-0 overflow-x-auto">
               <table className="w-full min-w-[710px] border-collapse text-[11.5px]">
                 <thead className="bg-surface">
                   <tr className="border-b border-hairline text-fg-faint">
                     <th className="w-7 py-2"></th>
-                    <th className="py-2 text-left font-normal">模型</th>
-                    <th className="py-2 text-left font-normal">类型</th>
-                    <th className="py-2 text-left font-normal">能力</th>
-                    <th className="py-2 text-left font-normal">输入</th>
-                    <th className="py-2 text-left font-normal">输出</th>
-                    <th className="py-2 text-left font-normal">计费</th>
-                    <th className="py-2 text-left font-normal">状态</th>
-                    <th className="w-16 py-2 pr-2 text-right font-normal">
-                      操作
-                    </th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.model")}</th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.type")}</th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.capabilities")}</th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.input")}</th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.output")}</th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.pricing")}</th>
+                    <th className="py-2 text-left font-normal">{t("models.columns.status")}</th>
+                    <th className="sticky right-0 w-16 bg-surface py-2 pr-2 text-right font-normal shadow-[-6px_0_8px_-8px_rgba(0,0,0,0.35)]">{t("models.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -520,17 +516,37 @@ function ModelConsole({
               <EmptyState
                 className="py-12"
                 icon={<Cpu size={20} />}
-                title="没有匹配的模型"
+                title={t("models.noMatch")}
                 hint={
                   loaded
-                    ? "调整厂商、搜索或能力筛选条件。"
-                    : "正在读取模型目录…"
+                    ? t("models.adjustFilters")
+                    : t("models.readingCatalog")
                 }
               />
             )}
           </div>
         </section>
       </div>
+      <Dialog
+        open={editingModel !== null}
+        onClose={() => setEditingModel(null)}
+        title={t("models.edit")}
+        description={editingModel?.displayName ?? editingModel?.alias}
+        width={420}
+      >
+        {editingModel && "configured" in editingModel && !editingModel.configured ? (
+          <CatalogModelInspector model={editingModel} />
+        ) : editingModel ? (
+          (() => {
+            const entry = entries.find((e) => e.provider.id === editingModel.providerId);
+            return entry ? (
+              <ModelInspector model={editingModel} entry={entry} onDeleted={() => setEditingModel(null)} />
+            ) : (
+              <EmptyState className="py-12" title="供应商已不存在" hint="请重新选择一个模型或检查供应商配置。" />
+            );
+          })()
+        ) : null}
+      </Dialog>
       <ProviderCatalog
         open={catalogOpen}
         onClose={() => setCatalogOpen(false)}
@@ -540,8 +556,7 @@ function ModelConsole({
         }}
       />
       <div className="mt-4 border-t border-hairline pt-2 text-[11px] text-fg-faint">
-        模型数量不限于 20
-        个；导入时可搜索并批量选择。价格以官方来源和录入日期为准。
+        {t("models.limitHint")}
       </div>
     </>
   );
@@ -551,10 +566,12 @@ function ModelRow({
   model: m,
   selected,
   onSelect,
+  onEdit,
 }: {
   model: CatalogRow | ModelAlias;
   selected: boolean;
   onSelect: () => void;
+  onEdit: () => void;
 }): ReactNode {
   const { t } = useI18n();
   const caps = [
@@ -580,11 +597,11 @@ function ModelRow({
   const configured = "configured" in m ? m.configured : true;
   const modalityLabel =
     {
-      text: "文本",
-      image: "图像",
-      video: "视频",
-      speech: "语音",
-      transcription: "转写",
+      text: t("models.text"),
+      image: t("models.image"),
+      video: t("models.video"),
+      speech: t("models.speech"),
+      transcription: t("models.transcription"),
     }[m.modality ?? "text"] ?? "文本";
   return (
     <tr
@@ -624,33 +641,47 @@ function ModelRow({
       <td className="py-2 tabular-nums text-fg-muted">
         {money(rate?.input)}
         {currency !== "USD" && rate?.input !== undefined && (
-          <span className="ml-1 text-[9px] text-fg-faint">估值 USD</span>
+          <span className="ml-1 text-[9px] text-fg-faint">{t("models.estimatedUsd")}</span>
         )}
       </td>
       <td className="py-2 tabular-nums text-fg-muted">
         {money(rate?.output)}
         {currency !== "USD" && rate?.output !== undefined && (
-          <span className="ml-1 text-[9px] text-fg-faint">估值 USD</span>
+          <span className="ml-1 text-[9px] text-fg-faint">{t("models.estimatedUsd")}</span>
         )}
       </td>
       <td className="py-2 text-fg-muted">
         {price ? (
           <span>
-            {price.tiers.length > 1 ? `${price.tiers.length} 档` : "单档"}
-            {price.windows?.length ? ` · ${price.windows.length} 时段` : ""}
+            {price.tiers.length > 1 ? t("models.tiers", { count: price.tiers.length }) : t("models.singleTier")}
+            {price.windows?.length ? t("models.windows", { count: price.windows.length }) : ""}
           </span>
         ) : (
-          "待校验"
+          t("models.pendingValidation")
         )}
       </td>
       <td className="py-2 pr-2 text-right">
         {!configured ? (
-          <span className="text-fg-faint">未配置</span>
+          <span className="text-fg-faint">{t("models.unconfigured")}</span>
         ) : m.enabled === false ? (
-          <span className="text-fg-faint">停用</span>
+          <span className="text-fg-faint">{t("models.disabled")}</span>
         ) : (
-          <span className="text-accent">启用</span>
+          <span className="text-accent">{t("models.enabled")}</span>
         )}
+      </td>
+      <td className="sticky right-0 bg-canvas py-2 pr-2 text-right shadow-[-6px_0_8px_-8px_rgba(0,0,0,0.35)]">
+        <button
+          type="button"
+          aria-label={`${t("models.edit")} ${m.displayName ?? m.alias}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit();
+          }}
+          className="inline-flex items-center gap-1 rounded-[5px] px-1.5 py-1 text-[10.5px] text-fg-muted hover:bg-tint-hover hover:text-fg"
+        >
+          <Pencil size={12} />
+          {t("models.edit")}
+        </button>
       </td>
     </tr>
   );
@@ -665,6 +696,7 @@ function ModelInspector({
   entry: ProviderEntry;
   onDeleted: () => void;
 }): ReactNode {
+  const { t } = useI18n();
   const [model, setModel] = useState(initial);
   useEffect(() => setModel(initial), [initial]);
   const save = (p: Partial<ModelAlias>): void => {
@@ -694,7 +726,7 @@ function ModelInspector({
         </div>
         <button
           type="button"
-          aria-label="删除模型"
+          aria-label={t("models.delete")}
           onClick={() => {
             void removeModel(model.providerId, model.alias).then(onDeleted);
           }}
@@ -703,7 +735,7 @@ function ModelInspector({
           <Trash2 size={13} />
         </button>
       </div>
-      <InspectorSection title="能力">
+      <InspectorSection title={t("models.capabilities")}>
         <Capability
           icon={<Image size={13} />}
           label="Vision"
@@ -724,7 +756,7 @@ function ModelInspector({
         />
         <Capability
           icon={<Globe size={13} />}
-          label="内置 Web Search"
+          label={t("models.webSearch")}
           value={Boolean(model.capabilities.webSearch)}
           onChange={(v) => setCap("webSearch", v)}
         />
@@ -736,12 +768,12 @@ function ModelInspector({
         />
         <Capability
           icon={<Zap size={13} />}
-          label="图片生成"
+          label={t("models.imageGeneration")}
           value={Boolean(model.capabilities.imageOutput)}
           onChange={(v) => setCap("imageOutput", v)}
         />
       </InspectorSection>
-      <InspectorSection title="Think / Reasoning">
+      <InspectorSection title={t("models.reasoning")}>
         <select
           value={thinking.mode}
           onChange={(e) =>
@@ -758,20 +790,20 @@ function ModelInspector({
           }
           className="h-7 w-full rounded-[6px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"
         >
-          <option value="unsupported">不支持</option>
-          <option value="always">始终启用</option>
-          <option value="toggle">可开关</option>
-          <option value="effort">Effort 等级</option>
-          <option value="budget">Token Budget</option>
+          <option value="unsupported">{t("models.unsupported")}</option>
+          <option value="always">{t("models.always")}</option>
+          <option value="toggle">{t("models.toggle")}</option>
+          <option value="effort">{t("models.effort")}</option>
+          <option value="budget">{t("models.budget")}</option>
         </select>
         <p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">
-          GLM、DeepSeek、Anthropic 等供应商会按适配器转换为各自请求字段。
+          {t("models.reasoningHint")}
         </p>
       </InspectorSection>
-      <InspectorSection title="请求体适配">
+      <InspectorSection title={t("models.requestAdapter")}>
         <div className="flex items-center gap-1 text-[11px] text-fg-muted">
           <Cpu size={13} />
-          预设适配器
+          {t("models.presetAdapter")}
         </div>
         <select
           value={model.requestAdapter?.preset ?? "auto"}
@@ -787,25 +819,24 @@ function ModelInspector({
           }
           className="mt-2 h-7 w-full rounded-[6px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"
         >
-          <option value="auto">自动识别</option>
+          <option value="auto">{t("models.autoDetect")}</option>
           <option value="anthropic">Anthropic</option>
           <option value="openai-chat">OpenAI Chat</option>
           <option value="openai-responses">OpenAI Responses</option>
-          <option value="custom">自定义 Patch</option>
+          <option value="custom">{t("models.customPatch")}</option>
         </select>
         <p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">
-          仅允许 add / replace / remove 请求参数；model、messages、stream
-          与认证字段不可修改。
+          {t("models.adapterHint")}
         </p>
       </InspectorSection>
-      <InspectorSection title="官方来源">
+      <InspectorSection title={t("models.officialSource")}>
         <p className="text-[11px] text-fg-muted">
-          {model.source?.url ?? "暂无来源链接"}
+          {model.source?.url ?? t("models.noSource")}
         </p>
         <p className="mt-1 text-[10.5px] text-fg-faint">
           {model.source?.fetchedAt
             ? `抓取于 ${model.source.fetchedAt}`
-            : "请补充官方定价与能力来源"}
+            : t("models.fetchSourceHint")}
         </p>
       </InspectorSection>
     </div>
@@ -813,6 +844,7 @@ function ModelInspector({
 }
 
 function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
+  const { t } = useI18n();
   const pricing = model.pricing;
   const rate = pricing?.tiers[0]?.rate;
   const currency = pricing?.currency ?? "USD";
@@ -835,7 +867,7 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
             </p>
           </div>
           <span className="rounded-full bg-surface-sunken px-2 py-0.5 text-[10px] text-fg-faint">
-            目录模型
+            {t("models.catalogModel")}
           </span>
         </div>
         <p className="mt-2 text-[11px] leading-[1.5] text-fg-muted">
@@ -865,21 +897,21 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
             ))}
         </div>
         <p className="mt-2 text-[10.5px] text-fg-faint">
-          目录能力是安全默认值；供应商绑定后可以按连接单独覆盖。
+          {t("models.unboundHint")}
         </p>
       </InspectorSection>
-      <InspectorSection title="官方价格">
+      <InspectorSection title={t("models.officialPrice")}>
         {pricing ? (
           <>
             <div className="grid grid-cols-2 gap-2 text-[11px]">
               <div>
-                <div className="text-fg-faint">输入 / 1M tokens</div>
+                <div className="text-fg-faint">{t("models.inputPerMillion")}</div>
                 <div className="mt-0.5 tabular-nums text-fg">
                   {money(rate?.input)}
                 </div>
               </div>
               <div>
-                <div className="text-fg-faint">输出 / 1M tokens</div>
+                <div className="text-fg-faint">{t("models.outputPerMillion")}</div>
                 <div className="mt-0.5 tabular-nums text-fg">
                   {money(rate?.output)}
                 </div>
@@ -891,19 +923,19 @@ function CatalogModelInspector({ model }: { model: CatalogRow }): ReactNode {
                 : "官方原币价格；当前界面未配置换算汇率"}{" "}
               ·{" "}
               {pricing.tiers.length > 1
-                ? `${pricing.tiers.length} 档阶梯`
-                : "单档"}
+                ? t("models.tierStep", { count: pricing.tiers.length })
+                : t("models.singleTier")}
               {pricing.windows?.length
-                ? ` · ${pricing.windows.length} 条时段规则`
+                ? t("models.windowRules", { count: pricing.windows.length })
                 : ""}
             </p>
             <p className="mt-1 truncate text-[10px] text-fg-faint">
-              来源：{pricing.source} · 抓取于 {pricing.fetchedAt}
+              {t("models.sourceFetched", { source: pricing.source, date: pricing.fetchedAt })}
             </p>
           </>
         ) : (
           <p className="text-[11px] text-fg-faint">
-            暂无官方价格快照，状态为待校验。
+            {t("models.noOfficialPrice")}
           </p>
         )}
       </InspectorSection>
@@ -950,9 +982,10 @@ function Capability({
   );
 }
 function UsageTab(): ReactNode {
+  const { t } = useI18n();
   return (
     <>
-      <SettingGroup title="用量与费用">
+      <SettingGroup title={t("models.usageAndCost")}>
         <TodoRow
           title="总费用 / 总请求 / 成功率 / 平均延迟"
           description="费用按原币与 USD 估值分别汇总，历史记录冻结当时汇率。"

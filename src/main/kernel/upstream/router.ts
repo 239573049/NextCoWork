@@ -20,7 +20,7 @@ import {
   type UpstreamRequestContext
 } from './canonical'
 import { anthropicErrorToAgentError, decodeAnthropic } from './decode/anthropic'
-import { encodeAnthropic } from './encode/anthropic'
+import { applyAnthropicRequestOptions, encodeAnthropic } from './encode/anthropic'
 import { sseFromResponse } from './sse'
 
 /** 每个 provider 最多试几次(含首次)。第 3 次还不行,换下一个 provider 比继续磕更有用。 */
@@ -223,7 +223,16 @@ export class UpstreamRouter {
         userId: context.workspaceId,
         cacheTtl
       })
-      const body = applyRequestPatches(enc.body, c.alias.requestAdapter?.patches)
+      const patchedBody = applyRequestPatches(enc.body, c.alias.requestAdapter?.patches)
+      // Model-level patches are allowed to customise ordinary parameters, but
+      // Provider-owned Anthropic identity/cache fields are re-applied at the
+      // final wire boundary. This keeps metadata.user_id mandatory and makes a
+      // Provider's off/5m/1h choice authoritative even for legacy aliases with
+      // broad custom patches.
+      const body = applyAnthropicRequestOptions(patchedBody, {
+        userId: context.workspaceId,
+        cacheTtl
+      })
       const res = await this.host.fetch(joinUpstreamUrl(c.provider.baseUrl, enc.path), {
         method: 'POST',
         headers: { ...enc.headers, accept: 'text/event-stream' },

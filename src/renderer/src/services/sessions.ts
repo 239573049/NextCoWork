@@ -13,6 +13,10 @@ export function createSession(workspaceId: string, title?: string, sessionId?: s
   return invoke('sessions:create', { workspaceId, ...(title === undefined ? {} : { title }), ...(sessionId === undefined ? {} : { sessionId }) })
 }
 
+export function duplicateSession(sessionId: string, title: string): Promise<Session> {
+  return invoke('sessions:duplicate', { sessionId, title })
+}
+
 export function renameSession(sessionId: string, title: string): Promise<void> {
   return invoke('sessions:rename', { sessionId, title })
 }
@@ -32,4 +36,3 @@ export function deleteSession(sessionId: string): Promise<void> {
 export function searchAll(q: string, workspaceId?: string, limit = 50): Promise<SearchHit[]> {
   return invoke('conversations:searchAll', workspaceId === undefined ? { q, limit } : { q, workspaceId, limit })
 }
-

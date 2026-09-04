@@ -366,7 +366,7 @@ function workspaceRootFor(workspaceId: string): string {
 /**
  * 重扫两层 Skill 目录,结果整体换进注册表。
  *
- * ★ **每次发送前扫一遍**,不是启动时扫一次。用户在 `.nextcowork/skills/` 里
+ * ★ **每次发送前扫一遍**,不是启动时扫一次。用户在 `.next-cowork/skills/` 里
  * 放一条新的 Skill 之后,期待的是「下一次提问它就知道了」——「重启应用才生效」
  * 这件事没有任何地方会提示他。代价是两次 readDir,和一次上游往返比可以忽略。
  *
@@ -425,7 +425,7 @@ function activeSkills(req: RunRequest): readonly Skill[] {
  *
  * ★ 第二件事不能省。`Task` 的 description 里逐字带着可用子代理的清单
  * (照搬 CC),而 description 是在 `register()` 的那一刻定死的字符串 ——
- * 不重注册的话,用户刚放进 `.nextcowork/agents/` 的那个代理**存在、能派、
+ * 不重注册的话,用户刚放进 `.next-cowork/agents/` 的那个代理**存在、能派、
  * 但模型看不见它**,而这件事没有任何症状。
  *
  * `register()` 按 internalId 幂等替换且保住 externalName,所以重注册不会让

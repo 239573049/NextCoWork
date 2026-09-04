@@ -42,6 +42,7 @@ import { ImportModelsDialog } from "./ImportModelsDialog";
 import { modelListAvailability } from "./import-models";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { baseUrlForProtocol, presetHasProtocol } from "./provider-edit";
+import { useI18n } from "../../../i18n";
 
 /**
  * 参考图右边那张卡片。
@@ -80,6 +81,7 @@ import { baseUrlForProtocol, presetHasProtocol } from "./provider-edit";
  * 第二次有意的点击。删除连密钥一起删(`provider:remove` 那边),所以这一步不能省。
  */
 export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
+  const { t } = useI18n();
   const { provider: p, aliases } = entry;
   const { family, responses } = splitProtocol(p.protocol);
   /*
@@ -245,30 +247,30 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
         )}
 
         <div className="space-y-4 px-4 py-4">
-          <Field label="供应商名称">
+          <Field label={t("provider.name")}>
             <TextInput
               value={name}
               onChange={setName}
               onCommit={commitName}
-              ariaLabel="供应商名称"
+              ariaLabel={t("provider.name")}
               disabled={busy}
             />
           </Field>
 
           <Field
-            label="API 地址(自定义服务)"
-            hint="从服务商接入文档复制 Base URL 或完整请求地址,离开输入框后会自动识别并整理。"
+            label={t("provider.apiAddress")}
+            hint={t("provider.apiAddressHint")}
           >
             <TextInput
               value={baseUrl}
               onChange={setBaseUrl}
               onCommit={commitUrl}
-              ariaLabel="API 地址"
+              ariaLabel={t("provider.apiAddress")}
               inputMode="url"
               disabled={busy}
             />
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              实际会请求{" "}
+              {t("provider.actualRequest")} {" "}
               <code className="text-fg-muted">
                 {previewUrl(baseUrl, p.protocol)}
               </code>
@@ -276,8 +278,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             {swapped !== null && (
               /* ★ 地址被开关改掉了就说一声。静默换掉是这一整块最不该有的行为 */
               <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-muted">
-                换协议时地址已跟着换成这家该协议的地址 ——
-                这两个协议在同一个域名下路径前缀不同。
+                {t("provider.addressSwapped")}
               </p>
             )}
             {warnings.map((w) => (
@@ -291,14 +292,14 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             ))}
           </Field>
 
-          <Field label="API 格式">
+          <Field label={t("provider.apiFormat")}>
             <Segmented
-              label="API 格式"
+              label={t("provider.apiFormat")}
               className="w-full"
               value={family}
               options={[
-                { value: "openai", label: "OpenAI 格式" },
-                { value: "anthropic", label: "Anthropic 格式" },
+                { value: "openai", label: t("provider.openaiFormat") },
+                { value: "anthropic", label: t("provider.anthropicFormat") },
               ]}
               onChange={(f) =>
                 switchProtocol(joinProtocol(f, f === "openai" && responses))
@@ -310,10 +311,9 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           {family === "openai" && (
             <div className="flex items-start gap-4">
               <div className="min-w-0 flex-1">
-                <p className="text-[13px] text-fg">使用 Responses API</p>
+                <p className="text-[13px] text-fg">{t("provider.responsesApi")}</p>
                 <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
-                  强制走 /v1/responses。仅当供应商支持 Responses
-                  端点时开启,否则会 404。
+                  {t("provider.responseApiHint")}
                 </p>
                 {responses && !presetHasProtocol(p.id, "openai-responses") && (
                   /*
@@ -323,7 +323,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-[1.6] text-danger">
                     <AlertTriangle size={12} className="mt-[2px] shrink-0" />
                     <span className="min-w-0">
-                      我们实测这家没有可用的 Responses 端点,开着大概率 404。
+                      {t("provider.responseApiWarning")}
                     </span>
                   </p>
                 )}
@@ -333,7 +333,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   checked={responses}
                   disabled={busy}
                   onChange={(on) => switchProtocol(joinProtocol("openai", on))}
-                  label="使用 Responses API"
+                  label={t("provider.responsesApi")}
                 />
               </div>
             </div>
@@ -341,24 +341,24 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
 
           {family === "anthropic" && (
             <Field
-              label="提示缓存"
-              hint="一般情况下保持关闭。缓存适合长且重复的上下文；1 小时写入通常更贵，且部分 Anthropic 兼容中转站不支持。"
+              label={t("provider.cache")}
+              hint={t("provider.cacheHint")}
             >
               <Segmented
-                label="提示缓存"
+                label={t("provider.cache")}
                 size="sm"
                 value={cacheTtl}
                 options={[
-                  { value: "off", label: "关闭" },
-                  { value: "5m", label: "5 分钟" },
-                  { value: "1h", label: "1 小时" },
+                  { value: "off", label: t("provider.off") },
+                  { value: "5m", label: t("provider.fiveMinutes") },
+                  { value: "1h", label: t("provider.oneHour") },
                 ]}
                 onChange={changeCacheTtl}
               />
             </Field>
           )}
 
-          <Field label="API 密钥">
+          <Field label={t("provider.apiKey")}>
             {editingKey || !hasKey ? (
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
@@ -366,8 +366,8 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                     value={keyDraft}
                     onChange={setKeyDraft}
                     onCommit={saveKey}
-                    ariaLabel={`${p.name} 的 API 密钥`}
-                    placeholder="粘贴 API Key"
+                    ariaLabel={t("provider.apiKeyLabel", { provider: p.name })}
+                    placeholder={t("provider.pasteKey")}
                     disabled={busy}
                   />
                 </div>
@@ -377,7 +377,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   disabled={busy || keyDraft.trim() === ""}
                   onClick={saveKey}
                 >
-                  保存
+                  {t("common.save")}
                 </Button>
                 {hasKey && (
                   <Button
@@ -385,7 +385,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                     disabled={busy}
                     onClick={() => setEditingKey(false)}
                   >
-                    取消
+                    {t("common.cancel")}
                   </Button>
                 )}
               </div>
@@ -408,7 +408,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   </span>
                   <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
                     <Check size={11} />
-                    已配置
+                  {t("provider.configured")}
                   </span>
                 </div>
                 <Button
@@ -416,28 +416,27 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   disabled={busy}
                   onClick={() => setEditingKey(true)}
                 >
-                  更换
+                  {t("provider.replace")}
                 </Button>
               </div>
             )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              明文只在主进程里存在,经 safeStorage 加密后落盘 ——
-              设置页永远拿不回来,最多显示后四位。
+              {t("provider.keySavedHint")}
             </p>
             {cred !== null && !cred.encryptionAvailable && (
               /* ★ 不做明文降级,所以这里会真的存不进去 —— 提前说,别等他填完才报错 */
               <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-[1.6] text-danger">
                 <AlertTriangle size={12} className="mt-[2px] shrink-0" />
                 <span className="min-w-0">
-                  系统密钥环不可用,密钥无法安全存储,保存会被拒绝(不会退回明文落盘)。
+                  {t("provider.keyringWarning")}
                 </span>
               </p>
             )}
           </Field>
 
           <Field
-            label="模型优先级(至少添加一个)"
-            hint="这家自己的模型顺序。切到别的供应商是另一条轴 —— 那由左列同名别名的候选链决定。"
+            label={t("provider.modelPriority")}
+            hint={t("provider.modelPriorityHint")}
             action={
               <>
                 {listAvail.enabled && aliases.length > 0 && (
@@ -451,14 +450,14 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   icon={<CloudDownload size={13} />}
                   onClick={() => setImportOpen(true)}
                 >
-                  从服务商拉取模型列表
+                  {t("provider.fetchModels")}
                 </Button>
               </>
             }
           >
             {aliases.length === 0 ? (
               <p className="rounded-[8px] border border-dashed border-border px-2.5 py-3 text-[12px] text-fg-faint">
-                这家还没有配任何模型 —— 点右上角从服务商拉一份列表。
+                {t("provider.noModels")}
               </p>
             ) : (
               /*
@@ -483,19 +482,19 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                     />
                     {i === 0 && (
                       <span className="shrink-0 rounded-[5px] bg-tint px-1.5 py-0.5 text-[10.5px] text-fg-muted">
-                        主模型
+                        {t("provider.primaryModel")}
                       </span>
                     )}
                     <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg">
                       {m.alias}
                     </span>
-                    <RowIcon label="思考档位">
+                    <RowIcon label={t("models.reasoning")}>
                       <Brain size={13} />
                     </RowIcon>
-                    <RowIcon label="编辑">
+                    <RowIcon label={t("chat.edit")}>
                       <Pencil size={13} />
                     </RowIcon>
-                    <RowIcon label="移除">
+                    <RowIcon label={t("common.delete")}>
                       <Trash2 size={13} />
                     </RowIcon>
                   </li>
@@ -503,8 +502,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               </ul>
             )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              {listAvail.hint ??
-                "整表的增删走上面那颗按钮。逐行的三个图标(思考档位 / 改别名 / 单删)还不通 —— 它们要的是「改一行的字段」,那是另一条频道。"}
+              {listAvail.hint ?? t("provider.rowActionsHint")}
             </p>
           </Field>
         </div>
@@ -513,14 +511,14 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           {confirmDelete ? (
             <div className="flex items-center gap-2">
               <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-muted">
-                连同这家的模型别名和已保存的密钥一起删掉,不能撤销。
+                {t("provider.deleteHint")}
               </p>
               <Button
                 size="sm"
                 disabled={busy}
                 onClick={() => setConfirmDelete(false)}
               >
-                取消
+                {t("common.cancel")}
               </Button>
               <Button
                 size="sm"
@@ -528,7 +526,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 disabled={busy}
                 onClick={remove}
               >
-                确认删除
+                {t("provider.confirmDelete")}
               </Button>
             </div>
           ) : (
@@ -542,8 +540,8 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             */}
               <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
                 {p.id === BUILTIN_PROVIDER_ID
-                  ? "内置的 RoutinAI 是种子数据,删掉后下次启动会重新出现(密钥不会回来)。"
-                  : "删掉后不会自己回来 —— 要再用得回「供应商目录」重新添一次。"}
+                  ? t("provider.builtinDeleteHint")
+                  : t("provider.customDeleteHint")}
               </p>
               <Button
                 size="sm"
@@ -551,7 +549,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 disabled={busy}
                 onClick={() => setConfirmDelete(true)}
               >
-                删除
+                {t("provider.delete")}
               </Button>
             </div>
           )}

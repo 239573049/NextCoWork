@@ -2,8 +2,8 @@
  * Skill 扫描 —— 照搬 Claude Code 的目录约定。
  *
  * ```
- * <userData>/skills/<name>/SKILL.md          全局
- * <workspaceRoot>/.nextcowork/skills/<name>/SKILL.md   项目(同名时项目胜出)
+ * <appData>/skills/<name>/SKILL.md          全局
+ * <workspaceRoot>/.next-cowork/skills/<name>/SKILL.md   项目(同名时项目胜出)
  * ```
  *
  * ★ 为什么是**目录**而不是单文件:Skill 常常要带脚本、模板、参考资料
@@ -39,7 +39,7 @@ const MAX_SKILLS = 200
 
 /** 目录名 —— 和 CC 一致 */
 export const SKILLS_DIR = 'skills'
-export const PROJECT_SKILLS_PREFIX = '.nextcowork'
+export const PROJECT_SKILLS_PREFIX = '.next-cowork'
 
 export type { SkillScope }
 
@@ -56,7 +56,7 @@ export interface SkillScanResult {
 
 export interface SkillScanInput {
   fs: KernelFs
-  /** `<userData>/skills`。空串 = 跳过全局这一层。 */
+  /** `<appData>/skills`。空串 = 跳过全局这一层。 */
   globalRoot: string
   /** `<workspaceRoot>/.nextcowork/skills`。空串 = 没有工作区。 */
   projectRoot: string

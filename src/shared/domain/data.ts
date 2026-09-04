@@ -97,6 +97,33 @@ export interface ImportApplyResult {
   messagesImported: number
 }
 
+/**
+ * Decide how one imported record should be merged with the local record.
+ *
+ * The export format intentionally keeps `updatedAt` optional for records that
+ * predate the timestamp field.  When either side cannot provide a finite
+ * timestamp, the safe rule is to keep the local value.  Keeping this decision
+ * in the shared domain layer makes the preview counts and the SQLite merge
+ * use exactly the same conflict semantics.
+ */
+export type DataMergeDecision = 'new' | 'overwrite' | 'skip'
+
+export function dataMergeDecision(local: unknown, incoming: unknown): DataMergeDecision {
+  if (local === undefined) return 'new'
+  const localAt = typeof local === 'object' && local !== null
+    ? (local as Record<string, unknown>)['updatedAt']
+    : undefined
+  const incomingAt = typeof incoming === 'object' && incoming !== null
+    ? (incoming as Record<string, unknown>)['updatedAt']
+    : undefined
+  if (
+    typeof localAt === 'number' && Number.isFinite(localAt) &&
+    typeof incomingAt === 'number' && Number.isFinite(incomingAt) &&
+    incomingAt > localAt
+  ) return 'overwrite'
+  return 'skip'
+}
+
 export interface RestorePreview {
   path: string
   manifest: BackupManifest
@@ -406,7 +433,7 @@ function isProvider(value: unknown): value is UpstreamProvider {
     typeof value.credentialRef !== 'string' ||
     !isIntegerAtLeast(value.priority, 0) ||
     !isBoolean(value.enabled) ||
-    optionalTimestamp(value, 'updatedAt')
+    !optionalTimestamp(value, 'updatedAt')
   ) return false
   if (!has(value, 'protocolOptions')) return true
   if (!isRecord(value.protocolOptions)) return false

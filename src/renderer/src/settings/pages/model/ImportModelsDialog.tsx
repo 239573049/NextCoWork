@@ -6,6 +6,7 @@ import { Dialog } from "../../../components/ui/Dialog";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { TextInput } from "../../../components/ui/TextInput";
 import { cn } from "../../../lib/cn";
+import { useI18n } from "../../../i18n";
 import {
   fetchProviderModels,
   setProviderAliases,
@@ -54,6 +55,7 @@ export function ImportModelsDialog({
   onClose: () => void;
   onDone?: () => void;
 }): ReactNode {
+  const { t } = useI18n();
   const [rows, setRows] = useState<ImportRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -103,7 +105,7 @@ export function ImportModelsDialog({
   const pick = (id: string): void => {
     const r = toggleRow(selected, id, Number.POSITIVE_INFINITY);
     setSelected(r.selected);
-    setNote(r.atCap ? "无法选择该模型。" : null);
+    setNote(r.atCap ? t("models.cannotSelect") : null);
   };
 
   const pickAll = (): void => {
@@ -131,18 +133,17 @@ export function ImportModelsDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="导入模型"
+      title={t("models.import")}
       description={
         rows === null
-          ? `正在从 ${providerName} 拉取模型列表`
-          : `从服务商拉取到 ${String(fromUpstreamCount)} 个模型,已添加模型会默认勾选;` +
-            `取消勾选会从当前列表删除`
+          ? t("models.fetching", { provider: providerName })
+          : t("models.fetchedHint", { count: fromUpstreamCount })
       }
       width={560}
       footer={
         <>
           <Button size="sm" onClick={onClose} disabled={saving}>
-            取消
+            {t("common.cancel")}
           </Button>
           <Button
             size="sm"
@@ -155,7 +156,7 @@ export function ImportModelsDialog({
             }
             onClick={submit}
           >
-            更新列表({String(selected.size)})
+            {t("models.updateList", { count: selected.size })}
           </Button>
         </>
       }
@@ -171,7 +172,7 @@ export function ImportModelsDialog({
           </div>
           {rows === null && (
             <Button size="sm" onClick={() => setAttempt((n) => n + 1)}>
-              重试
+              {t("common.retry")}
             </Button>
           )}
         </div>
@@ -181,8 +182,8 @@ export function ImportModelsDialog({
         error === null && (
           <EmptyState
             icon={<Loader2 size={20} className="animate-spin" />}
-            title="正在拉取"
-            hint="按这家的协议取模型列表 —— Anthropic 走 /v1/models,OpenAI 族走 /models。"
+            title={t("models.fetchingTitle")}
+            hint={t("models.fetchingHint")}
             className="py-12"
           />
         )
@@ -194,20 +195,20 @@ export function ImportModelsDialog({
                 size="sm"
                 value={query}
                 onChange={setQuery}
-                placeholder="搜索模型 ID"
-                ariaLabel="搜索模型 ID"
+                placeholder={t("models.searchId")}
+                ariaLabel={t("models.searchId")}
                 icon={<Search size={13} className="text-icon" />}
               />
             </div>
             <span className="shrink-0 text-[11.5px] text-fg-faint">
-              已选 {selected.size} 个
+              {t("models.selectedCount", { count: selected.size })}
             </span>
             <button
               type="button"
               onClick={pickAll}
               className="app-no-drag shrink-0 text-[11.5px] text-fg-muted underline underline-offset-2 transition-colors hover:text-fg"
             >
-              {allVisibleChecked ? "取消全选" : "全选"}
+              {allVisibleChecked ? t("models.clearAll") : t("models.selectAll")}
             </button>
           </div>
 
@@ -218,8 +219,8 @@ export function ImportModelsDialog({
           {visible.length === 0 ? (
             <EmptyState
               icon={<Search size={20} />}
-              title="没有匹配的模型"
-              hint="搜的是模型 ID 和显示名,试试型号的一段。"
+              title={t("models.noMatch")}
+              hint={t("models.searchIdHint")}
               className="py-10"
             />
           ) : (
@@ -261,6 +262,7 @@ function ModelRow({
   checked: boolean;
   onToggle: () => void;
 }): ReactNode {
+  const { t } = useI18n();
   return (
     <li className="border-b border-hairline last:border-b-0">
       <button
@@ -293,7 +295,7 @@ function ModelRow({
         </span>
         {/* 本地独有的角标和「已添加」不同 —— 两者都是已添加,但来源不一样,而来源决定了
             取消勾选的后果有多不可逆(上游那份下次还能拉回来,这份不能) */}
-        {!row.fromUpstream ? <Tag>本地</Tag> : row.added && <Tag>已添加</Tag>}
+        {!row.fromUpstream ? <Tag>{t("models.local")}</Tag> : row.added && <Tag>{t("models.added")}</Tag>}
       </button>
     </li>
   );

@@ -5,7 +5,7 @@
  *
  * | 端口 | 为什么非 Electron 不可 |
  * |---|---|
- * | `paths`   | `app.getPath('userData')` 是各平台约定目录的唯一权威 |
+ * | `paths`   | 统一的项目级 `.next-cowork` 数据目录与系统临时目录 |
  * | `secrets` | `safeStorage` 用的是系统钥匙串,没有纯 Node 的等价物 |
  * | `fetch`   | `net.fetch` 走 Chromium 网络栈,于是 `net/proxy.ts` 那一次 `setProxy` 对全应用的出站请求一起生效 |
  *

@@ -1,9 +1,14 @@
 /** 会话实体 IPC：所有读写都经过 state/store，避免 handler 直接写 SQL。 */
+import { readFileSync } from 'node:fs'
+import { basename } from 'node:path'
 import type { Session } from '../../shared/domain/session'
+import { mimeOfExt, parseNcwUrl } from '../../shared/domain/attachment'
+import { ulid } from '../../shared/util/id'
 import { runs } from '../kernel/run-registry'
 import { windows } from '../window/registry'
 import { store } from '../state/store'
 import { removeSessionAttachmentFiles } from './storage'
+import { uploadAttachment } from './attachment'
 
 function changed(workspaceId?: string): void {
   windows.emitToAll('sessions:changed', workspaceId === undefined ? {} : { workspaceId })
@@ -34,6 +39,53 @@ export function createSession(req: { workspaceId: string; title?: string; sessio
     rootPathAtCreation: ws?.rootPath ?? ''
   })
   changed(req.workspaceId)
+  return session
+}
+
+/** Clone a transcript into a new session, including managed image attachments. */
+export function duplicateSession(req: { sessionId: string; title: string }): Session {
+  const source = store.getSessionDetail(req.sessionId)
+  if (source === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+  const sourceSession = source.session
+  const sessionId = ulid()
+  const session = store.createSession({
+    id: sessionId,
+    workspaceId: sourceSession.workspaceId,
+    title: req.title,
+    model: sourceSession.model,
+    mode: sourceSession.mode,
+    thinking: sourceSession.thinking,
+    rootPathAtCreation: sourceSession.rootPathAtCreation
+  })
+  try {
+    const messages = source.messages.map((message) => ({
+      ...message,
+      id: ulid(message.createdAt),
+      parts: message.parts.map((part) => {
+        if (part.type !== 'image') return part
+        const locator = parseNcwUrl(part.dataRef)
+        if (locator?.scope !== 'session' || locator.ownerId !== req.sessionId) return part
+        const row = store.getAttachmentRowByOwnerAndFileName(req.sessionId, locator.fileName)
+        if (row === undefined) return part
+        const bytes = new Uint8Array(readFileSync(row.path))
+        const copied = uploadAttachment({
+          scope: 'session',
+          ownerId: sessionId,
+          displayName: row.displayName ?? basename(row.path),
+          mime: mimeOfExt(row.path),
+          bytes: bytes as Uint8Array<ArrayBuffer>
+        })
+        return { ...part, dataRef: copied.url }
+      })
+    }))
+    store.replaceHistory(sessionId, messages)
+  } catch (error) {
+    const paths = store.sessionAttachmentPaths(sessionId)
+    store.deleteSession(sessionId)
+    removeSessionAttachmentFiles(paths)
+    throw error
+  }
+  changed(sourceSession.workspaceId)
   return session
 }
 

@@ -25,7 +25,7 @@
  *   备份；调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
  */
 import { mkdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { MIGRATIONS } from './schema'
 
@@ -38,6 +38,11 @@ const MEMORY = ':memory:'
 /** 默认项目级数据目录: `<cwd>/.next-cowork/`。 */
 export function defaultDatabaseDirectory(): string {
   return join(process.cwd(), DATABASE_DIRNAME)
+}
+
+/** 当前打开的文件库所在目录；测试和恢复流程可通过 openDatabase 指定目录。 */
+export function databaseDirectory(): string {
+  return handlePath === null || handlePath === MEMORY ? defaultDatabaseDirectory() : dirname(handlePath)
 }
 
 let handle: DatabaseSync | null = null

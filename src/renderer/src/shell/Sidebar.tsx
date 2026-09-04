@@ -19,7 +19,7 @@
  * 也没有分隔条。中途一度以为它在 235~312 之间浮动,那是把设置浮层的左侧导航栏
  * 当成侧边栏量了 —— 浮层盖住了扫描线,量到的是它内部的分栏。
  */
-import { MessageSquarePlus, Search, Settings, SquarePen } from 'lucide-react'
+import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
@@ -30,7 +30,9 @@ import { IconButton } from '../components/ui/IconButton'
 import { cn } from '../lib/cn'
 import { ChevronRight, PanelLeft } from 'lucide-react'
 import { FEATURE_ICON } from './icons'
-import { useI18n } from '../i18n'
+import { useI18n, type Translate } from '../i18n'
+import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
+import { duplicateSession, renameSession, setArchived, setFavorited, deleteSession } from '../services/sessions'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'skills', 'review']
 
@@ -61,7 +63,7 @@ export function Sidebar({
   onSearch: () => void
   onOpenFeature: (f: FeatureKind) => void
   onOpenSettings: () => void
-  onSelectSession: (tabId: string) => void
+  onSelectSession: (sessionId: string) => void
   onCollapse: () => void
 }): ReactNode {
   const { t } = useI18n()
@@ -143,44 +145,20 @@ export function Sidebar({
                 </IconButton>
               }
             >
-              {chatTabs.length === 0 && sessions.filter((s) => !s.archived).length === 0 ? (
+              {sessions.filter((s) => !s.archived).length === 0 &&
+              chatTabs.every((tab) => tab.kind !== 'chat' || sessions.some((s) => s.id === tab.ref.sessionId && s.archived)) ? (
                 <EmptyState title={t('workspace.noChats')} className="py-6" />
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
-                  {chatTabs.map((t) => (
-                    <li key={t.id}>
-                      <button
-                        type="button"
-                        onClick={() => onSelectSession(t.id)}
-                        className={cn(
-                          'flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left',
-                          'text-[12.5px] transition-colors',
-                          t.kind === 'chat' && t.ref.sessionId === activeSessionId
-                            ? 'bg-canvas text-fg'
-                            : 'text-fg-muted hover:bg-tint-hover hover:text-fg'
-                        )}
-                      >
-                        <span className="min-w-0 flex-1 truncate">{t.title}</span>
-                        {t.kind === 'chat' && runningSessionIds.has(t.ref.sessionId) && (
-                          <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
-                        )}
-                      </button>
-                    </li>
-                  ))}
-                  {sessions
-                    .filter((s) => !s.archived && !chatTabs.some((t) => t.kind === 'chat' && t.ref.sessionId === s.id))
-                    .map((s) => (
-                      <li key={`history-${s.id}`}>
-                        <button
-                          type="button"
-                          onClick={() => onSelectSession(s.id)}
-                          className="flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
-                        >
-                          <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                          {s.favorited && <span className="shrink-0 text-accent">★</span>}
-                        </button>
-                      </li>
-                    ))}
+                  <SessionGroupList
+                    workspaceId={workspace.id}
+                    sessions={sessions}
+                    chatTabs={chatTabs}
+                    activeSessionId={activeSessionId}
+                    runningSessionIds={runningSessionIds}
+                    onSelectSession={onSelectSession}
+                    t={t}
+                  />
                 </ul>
               )}
             </Section>
@@ -282,6 +260,211 @@ function NavItem({
       <span className="min-w-0 flex-1 truncate">{children}</span>
     </button>
   )
+}
+
+type SidebarI18n = Translate
+
+/**
+ * 历史会话按更新时间分组。已打开的 Tab 仍由 session id 去重，
+ * 这样点击历史项只会激活现有 Tab，不会在列表里再画一条重复记录。
+ */
+function SessionGroupList({
+  workspaceId,
+  sessions,
+  chatTabs,
+  activeSessionId,
+  runningSessionIds,
+  onSelectSession,
+  t
+}: {
+  workspaceId: string
+  sessions: readonly SessionListItem[]
+  chatTabs: readonly InnerTab[]
+  activeSessionId: string | null
+  runningSessionIds: ReadonlySet<string>
+  onSelectSession: (sessionId: string) => void
+  t: SidebarI18n
+}): ReactNode {
+  const known = new Map(sessions.map((session) => [session.id, session]))
+  const allSessions: SessionListItem[] = sessions.filter((session) => !session.archived)
+  for (const tab of chatTabs) {
+    if (tab.kind !== 'chat' || known.has(tab.ref.sessionId)) continue
+    allSessions.push({
+      id: tab.ref.sessionId,
+      title: tab.title,
+      updatedAt: Date.now(),
+      archived: false,
+      favorited: false,
+      running: runningSessionIds.has(tab.ref.sessionId)
+    })
+  }
+  const startOfToday = new Date().setHours(0, 0, 0, 0)
+  const startOfRecent = startOfToday - 6 * 86_400_000
+  const [multiSelect, setMultiSelect] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
+  const toggleSelected = (sessionId: string): void => {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(sessionId)) next.delete(sessionId)
+      else next.add(sessionId)
+      return next
+    })
+  }
+  const groups = [
+    { key: 'today', title: t('workspace.today'), items: allSessions.filter((s) => s.updatedAt >= startOfToday) },
+    { key: 'recent', title: t('workspace.last7Days'), items: allSessions.filter((s) => s.updatedAt < startOfToday && s.updatedAt >= startOfRecent) },
+    { key: 'earlier', title: t('workspace.earlier'), items: allSessions.filter((s) => s.updatedAt < startOfRecent) }
+  ] as const
+
+  return (
+    <>
+      {groups.map((group) => {
+        const visible = group.items.filter((s) => !chatTabs.some((tab) => tab.kind === 'chat' && tab.ref.sessionId === s.id))
+        const openTabs = group.items.filter((s) => chatTabs.some((tab) => tab.kind === 'chat' && tab.ref.sessionId === s.id))
+        const items = [...openTabs, ...visible]
+        if (items.length === 0) return null
+        return (
+          <SessionGroupBlock
+            key={group.key}
+            title={group.title}
+            items={items}
+            chatTabs={chatTabs}
+            activeSessionId={activeSessionId}
+            runningSessionIds={runningSessionIds}
+            onSelectSession={onSelectSession}
+            t={t}
+            multiSelect={multiSelect}
+            selectedIds={selectedIds}
+            toggleSelected={toggleSelected}
+            onToggleMultiSelect={() => {
+              setMultiSelect((value) => !value)
+              setSelectedIds(new Set())
+            }}
+            workspaceId={workspaceId}
+          />
+        )
+      })}
+    </>
+  )
+}
+
+function SessionGroupBlock({
+  title,
+  items,
+  chatTabs,
+  activeSessionId,
+  runningSessionIds,
+  onSelectSession,
+  t,
+  multiSelect,
+  selectedIds,
+  toggleSelected,
+  onToggleMultiSelect,
+  workspaceId
+}: {
+  title: string
+  items: readonly SessionListItem[]
+  chatTabs: readonly InnerTab[]
+  activeSessionId: string | null
+  runningSessionIds: ReadonlySet<string>
+  onSelectSession: (sessionId: string) => void
+  t: SidebarI18n
+  multiSelect: boolean
+  selectedIds: ReadonlySet<string>
+  toggleSelected: (sessionId: string) => void
+  onToggleMultiSelect: () => void
+  workspaceId: string
+}): ReactNode {
+  const [open, setOpen] = useState(true)
+  const [menu, setMenu] = useState<{ session: SessionListItem; position: ContextMenuPosition } | null>(null)
+  const run = async (action: () => Promise<void>): Promise<void> => {
+    try { await action() } catch (error) { console.error('[sessions] 操作失败', error) }
+    setMenu(null)
+  }
+  return (
+    <li className="pt-1 first:pt-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[11.5px] text-fg-faint"
+      >
+        <ChevronRight size={12} className={cn('transition-transform duration-180', open && 'rotate-90')} />
+        <span>{title}</span>
+      </button>
+      {open && (
+        <ul className="flex flex-col gap-0.5">
+          {items.map((session) => {
+            const openTab = chatTabs.find((tab) => tab.kind === 'chat' && tab.ref.sessionId === session.id)
+            const active = session.id === activeSessionId
+            return (
+              <li key={session.id}>
+                <button
+                  type="button"
+                  onClick={() => multiSelect ? toggleSelected(session.id) : onSelectSession(session.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault()
+                    setMenu({ session, position: { x: event.clientX, y: event.clientY } })
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
+                    active ? 'bg-canvas text-fg' : 'text-fg-muted hover:bg-tint-hover hover:text-fg'
+                  )}
+                >
+                      {multiSelect && <span className={cn('flex size-4 shrink-0 items-center justify-center rounded-[4px] border', selectedIds.has(session.id) ? 'border-accent bg-accent text-canvas' : 'border-border')}>
+                        {selectedIds.has(session.id) && <Check size={11} />}
+                      </span>}
+                      <span className="min-w-0 flex-1 truncate">{openTab?.title ?? session.title}</span>
+                  {(runningSessionIds.has(session.id) || session.running) && (
+                    <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
+                  )}
+                  {session.favorited && <span className="shrink-0 text-accent">★</span>}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {menu !== null && (
+        <ContextMenu position={menu.position} label={t('session.menu')} onClose={() => setMenu(null)} width={220}>
+          {(close) => (
+            <>
+              <MenuAction icon={<ExternalLink size={15} />} label={t('session.openNewWindow')} onSelect={() => {
+                window.open(`${window.location.href.split('#')[0]}#session=${encodeURIComponent(workspaceId)}/${encodeURIComponent(menu.session.id)}`, '_blank', 'noopener,noreferrer')
+                close()
+              }} />
+              <MenuAction icon={<Pencil size={15} />} label={t('session.rename')} onSelect={() => {
+                const next = window.prompt(t('session.renamePrompt'), menu.session.title)
+                if (next !== null) void run(() => renameSession(menu.session.id, next))
+              }} />
+              <MenuAction icon={<Copy size={15} />} label={t('session.copy')} onSelect={() => {
+                void run(async () => {
+                  await duplicateSession(menu.session.id, t('session.copyTitle', { title: menu.session.title }))
+                })
+              }} />
+              <MenuAction icon={<Link size={15} />} label={t('session.copyLink')} onSelect={() => {
+                void run(async () => {
+                  await navigator.clipboard.writeText(`${window.location.href.split('#')[0]}#session=${encodeURIComponent(workspaceId)}/${encodeURIComponent(menu.session.id)}`)
+                })
+              }} />
+              <div role="separator" className="my-1 h-px bg-border" />
+              <MenuAction icon={<Pin size={15} />} label={menu.session.favorited ? t('session.unpin') : t('session.pin')} onSelect={() => void run(() => setFavorited(menu.session.id, !menu.session.favorited))} />
+              <MenuAction icon={<Archive size={15} />} label={menu.session.archived ? t('session.unarchive') : t('session.archive')} onSelect={() => void run(() => setArchived(menu.session.id, !menu.session.archived))} />
+              <MenuAction icon={<ListChecks size={15} />} label={multiSelect ? t('session.multiSelectDone') : t('session.multiSelect')} onSelect={() => { close(); onToggleMultiSelect() }} />
+              <div role="separator" className="my-1 h-px bg-border" />
+              <MenuAction danger icon={<Trash2 size={15} />} label={t('session.delete')} onSelect={() => {
+                if (window.confirm(t('session.confirmDeleteMessage', { title: menu.session.title }))) void run(() => deleteSession(menu.session.id))
+              }} />
+            </>
+          )}
+        </ContextMenu>
+      )}
+    </li>
+  )
+}
+
+function MenuAction({ icon, label, danger = false, onSelect }: { icon: ReactNode; label: string; danger?: boolean; onSelect: () => void }): ReactNode {
+  return <button type="button" role="menuitem" onClick={onSelect} className={cn('flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[13px] transition-colors hover:bg-tint-strong', danger ? 'text-danger' : 'text-fg')}><span className={danger ? 'text-danger' : 'text-accent-soft'}>{icon}</span><span className="truncate">{label}</span></button>
 }
 
 /** 可折叠卡片 —— 截图里下半三块都是这个形状 */

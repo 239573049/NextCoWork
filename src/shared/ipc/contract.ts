@@ -210,6 +210,7 @@ export interface IpcInvokeMap {
   'sessions:list': { req: { workspaceId: string; archived?: boolean }; res: SessionListItem[] }
   'sessions:get': { req: { sessionId: string }; res: SessionDetail }
   'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string }; res: Session }
+  'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
   'sessions:setArchived': { req: { sessionId: string; archived: boolean }; res: void }
   'sessions:setFavorited': { req: { sessionId: string; favorited: boolean }; res: void }
@@ -464,6 +465,7 @@ export const INVOKE_CHANNELS = {
   'sessions:list': 1,
   'sessions:get': 1,
   'sessions:create': 1,
+  'sessions:duplicate': 1,
   'sessions:rename': 1,
   'sessions:setArchived': 1,
   'sessions:setFavorited': 1,
