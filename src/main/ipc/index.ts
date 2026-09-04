@@ -73,7 +73,7 @@ import {
 } from './websearch'
 import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
 import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
-import { deleteImage, importImage, listImages, readImage, saveImage, sweepOrphans } from './theme'
+import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans } from './theme'
 import {
   closeWorkspace,
   listDir,
@@ -349,7 +349,12 @@ function safeHandle<K extends InvokeChannel>(channel: K, fn: Handler<K>): void {
       // 但它不是故障,不该打堆栈 —— 后面还有十几步没实现,
       // 每步都往控制台糊一屏堆栈的话,真正的错误就沉底了。
       if (err instanceof NotImplementedError) console.warn(`[ipc] ${error.message}`)
-      else if (error.code === 'unknown') console.error(`[ipc] ${channel} 失败:`, err)
+      else if (
+        error.code === 'unknown' &&
+        !(channel === 'sessions:get' && /会话不存在|不存在该会话|session.*not found/i.test(error.message))
+      ) {
+        console.error(`[ipc] ${channel} 失败:`, err)
+      }
       return { ok: false, error }
     }
   })
@@ -388,6 +393,10 @@ export function registerIpc(): void {
 
   // 自动备份只在启动时按到期判断一次，不依赖渲染层计时器。
   scheduleAutomaticBackup()
+
+  // ★ 必须排在 sweepOrphans 之前:搬完才知道哪些文件还在。
+  //   反过来的话,sweep 扫的是空的新目录,而旧目录里的图一张都不在索引对应的位置上。
+  migrateLegacyThemesDir()
 
   // 扫掉两相导入中途放弃留下的孤儿图片。放在这里是因为**此刻 pending 必然是空的**,
   // 所以「不在索引里」就等于「没人要」—— 换成运行期任何一个时刻都不成立。

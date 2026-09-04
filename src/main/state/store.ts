@@ -196,6 +196,9 @@ export const store = {
   getSessionDetail(sessionId: string): SessionDetail | undefined {
     return repo.getSessionDetail(sessionId)
   },
+  sessionAttachmentPaths(sessionId: string): string[] {
+    return repo.sessionAttachmentPaths(sessionId)
+  },
   listSessions(workspaceId: string, archived?: boolean): SessionListItem[] {
     return repo.listSessions(workspaceId, archived)
   },

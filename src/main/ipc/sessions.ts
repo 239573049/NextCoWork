@@ -3,6 +3,7 @@ import type { Session } from '../../shared/domain/session'
 import { runs } from '../kernel/run-registry'
 import { windows } from '../window/registry'
 import { store } from '../state/store'
+import { removeSessionAttachmentFiles } from './storage'
 
 function changed(workspaceId?: string): void {
   windows.emitToAll('sessions:changed', workspaceId === undefined ? {} : { workspaceId })
@@ -52,11 +53,29 @@ export function setFavorited(req: { sessionId: string; favorited: boolean }): vo
 }
 
 export function deleteSession(req: { sessionId: string }): void {
-  if (runs.activeRunIds().some((id) => runs.get(id)?.sessionId === req.sessionId)) {
+  // Deleting one session while another run is still writing can race the
+  // shared database snapshot/attachment cleanup (and makes a later restore or
+  // clear-history operation ambiguous). Treat session deletion as the same
+  // high-risk operation as the bulk data actions: any active Agent blocks it.
+  if (runs.activeRunIds().length > 0) {
     throw new Error('有运行中的 Agent，请先停止任务后再删除会话')
   }
+  // Capture paths before the database cascade removes their rows.  The
+  // storage helper re-checks remaining references after deletion, so a file
+  // shared by an older/migrated record is never removed prematurely.
+  const attachmentPaths = requireSessionAttachmentPaths(req.sessionId)
   store.deleteSession(req.sessionId)
+  const physical = removeSessionAttachmentFiles(attachmentPaths)
+  if (physical.undeletable.length > 0) {
+    console.warn('[sessions] 会话附件未能全部删除:', physical.undeletable)
+  }
   changed()
+}
+
+function requireSessionAttachmentPaths(sessionId: string): string[] {
+  // Keep SQL out of the handler; the store/repository owns the attachment
+  // shape and this small accessor is exposed through the storage boundary.
+  return store.sessionAttachmentPaths(sessionId)
 }
 
 export function searchAll(req: { q: string; workspaceId?: string; limit: number }) {

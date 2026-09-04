@@ -12,12 +12,14 @@
  * 索引是一个 JSON 文件,不是 SQLite —— 这坨数据五个字段、几十条上限、
  * 只在设置页读写。为它加一张表加一条迁移,换来的还是同样一次 `readFileSync`。
  */
-import { dialog } from 'electron'
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { app, dialog } from 'electron'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import type { ImageTheme } from '../../shared/domain/theme'
+import { buildNcwUrl } from '../../shared/domain/attachment'
 import type { ImportedImage } from '../../shared/ipc/contract'
 import { prefixedId } from '../../shared/util/id'
+import { attachmentRoot } from '../net/attachment-protocol'
 import { getHost } from '../runtime'
 import { IpcError } from './errors'
 
@@ -76,15 +78,36 @@ interface StoredItem {
 // 目录与索引
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * 主题图的目录。
+ *
+ * ★ **从 `userData/themes/` 迁到了 `userData/attachments/themes/`** ——
+ * 与会话附件同根,这样 `ncw://attachments/themes/…` 能直接寻址到它们。
+ * 迁移由 `migrateLegacyThemesDir()` 在启动时做一次。
+ *
+ * ★ 根取自 `attachmentRoot()` 而不是自己拼:协议 handler 与清理扫描
+ * 读的必须是**同一个**目录,两处各拼一次早晚会分岔(dev 下 userData 还带 `-dev` 后缀)。
+ */
 function themesDir(): string {
-  const dir = join(getHost().paths.userData(), 'themes')
+  const dir = join(attachmentRoot(), 'themes')
   mkdirSync(dir, { recursive: true })
   return dir
 }
 
+/** 迁移前的位置。只在启动搬运时用到 */
+function legacyThemesDir(): string {
+  // 旧版本把主题放在 Electron userData/themes;保留一次性迁移入口。
+  return join(app.getPath('userData'), 'themes')
+}
+
+/** 磁盘文件名。两个部件都已经过白名单,没有一个字符来自外部 */
+function fileNameOf(item: StoredItem): string {
+  return `${item.id}${EXT_OF[item.mime] ?? '.png'}`
+}
+
 /** ★ 唯一一处由 id 拼出文件名的地方,两个部件都已经过白名单 */
 function fileOf(item: StoredItem): string {
-  return join(themesDir(), `${item.id}${EXT_OF[item.mime] ?? '.png'}`)
+  return join(themesDir(), fileNameOf(item))
 }
 
 function indexFile(): string {
@@ -133,10 +156,12 @@ function writeIndex(items: readonly StoredItem[]): void {
 }
 
 function toTheme(item: StoredItem): ImageTheme {
+  const url = buildNcwUrl({ scope: 'theme', fileName: fileNameOf(item) })
   return {
     id: item.id,
     name: item.name,
-    source: { kind: 'uploaded', assetId: item.id },
+    // ★ url 由主进程给,渲染层不拼 —— 目录结构不该变成跨进程契约
+    source: { kind: 'uploaded', assetId: item.id, url: url ?? '' },
     seed: item.seed,
     palette: item.palette
   }
@@ -295,8 +320,55 @@ export function deleteImage(req: { id: string }): ImageTheme[] {
  * 扫掉没进表的文件 —— 两相导入中途放弃留下的那种(见契约的 `ImportedImage`)。
  * 启动时跑一次:这时候 `pending` 必然是空的,所以「不在表里」就等于「没人要」。
  */
-export function sweepOrphans(): void {
+/**
+ * 把 `userData/themes/` 搬到 `userData/attachments/themes/`。**启动时一次,幂等。**
+ *
+ * ★ 用 `renameSync` 而不是拷贝+删:同一文件系统内 rename 是原子的,
+ * 中途断电要么在旧位置要么在新位置,不会出现半个文件。
+ *
+ * ★ **目标已存在就跳过而不是覆盖**:那意味着上一次搬运已经处理过这个文件,
+ * 而旧位置残留的是它的副本。覆盖会用一个可能更旧的文件盖掉现役的那个。
+ *
+ * 搬完删掉旧目录 —— 留着的话下次启动还会再扫一遍,而且用户会在 userData 里
+ * 看到两个 themes 目录不知道哪个是真的。
+ */
+export function migrateLegacyThemesDir(): void {
+  const from = legacyThemesDir()
+  if (!existsSync(from)) return
+
+  const to = themesDir()
+  let moved = 0
   try {
+    for (const name of readdirSync(from)) {
+      const src = join(from, name)
+      const dst = join(to, name)
+      if (existsSync(dst)) {
+        rmSync(src, { force: true })
+        continue
+      }
+      try {
+        renameSync(src, dst)
+        moved++
+      } catch {
+        // 跨设备(用户把 userData 做成了软链)时 rename 会失败,退回拷贝
+        try {
+          writeFileSync(dst, readFileSync(src))
+          rmSync(src, { force: true })
+          moved++
+        } catch {
+          // 这一张搬不动就留在原地,下次启动再试。不因为一张图中断整批
+        }
+      }
+    }
+    // 空了才删目录:还有搬不动的文件时留着,否则那些文件就永久失联了
+    if (readdirSync(from).length === 0) rmSync(from, { recursive: true, force: true })
+  } catch (err) {
+    console.warn('[theme] 主题目录迁移未完成,下次启动会重试:', err)
+  }
+  if (moved > 0) console.log(`[theme] 已迁移 ${String(moved)} 个主题文件到 attachments/themes/`)
+}
+
+export function sweepOrphans(): void {  try {
     const keep = new Set(readIndex().map((t) => basename(fileOf(t))))
     for (const name of readdirSync(themesDir())) {
       if (name === 'index.json' || keep.has(name)) continue

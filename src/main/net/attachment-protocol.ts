@@ -27,7 +27,8 @@
  * 第二层不是冗余:第一层管的是「URL 长得对不对」,第二层管的是「拼出来的路径
  * 落在哪」。符号链接只有第二层能拦(而它拦不住 —— 见 `realpath` 那条注释)。
  */
-import { app, net, protocol } from 'electron'
+import { net, protocol } from 'electron'
+import { defaultDatabaseDirectory } from '../db'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -42,7 +43,7 @@ import {
 export const ATTACHMENTS_DIR = 'attachments'
 
 export function attachmentRoot(): string {
-  return join(app.getPath('userData'), ATTACHMENTS_DIR)
+  return join(defaultDatabaseDirectory(), ATTACHMENTS_DIR)
 }
 
 /**

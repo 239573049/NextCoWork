@@ -1,12 +1,15 @@
-import { AlertTriangle, Check, Loader2, Search } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { MAX_ALIASES_PER_PROVIDER, type ModelAlias } from '../../../../../shared/domain/provider'
-import { Button } from '../../../components/ui/Button'
-import { Dialog } from '../../../components/ui/Dialog'
-import { EmptyState } from '../../../components/ui/EmptyState'
-import { TextInput } from '../../../components/ui/TextInput'
-import { cn } from '../../../lib/cn'
-import { fetchProviderModels, setProviderAliases } from '../../../services/provider'
+import { AlertTriangle, Check, Loader2, Search } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { type ModelAlias } from "../../../../../shared/domain/provider";
+import { Button } from "../../../components/ui/Button";
+import { Dialog } from "../../../components/ui/Dialog";
+import { EmptyState } from "../../../components/ui/EmptyState";
+import { TextInput } from "../../../components/ui/TextInput";
+import { cn } from "../../../lib/cn";
+import {
+  fetchProviderModels,
+  setProviderAliases,
+} from "../../../services/provider";
 import {
   filterRows,
   importRows,
@@ -14,8 +17,8 @@ import {
   submitOrder,
   toggleAll,
   toggleRow,
-  type ImportRow
-} from './import-models'
+  type ImportRow,
+} from "./import-models";
 
 /**
  * 参考图那个「导入模型」弹窗 —— 从服务商拉回列表,勾选后整表替换。
@@ -41,85 +44,88 @@ export function ImportModelsDialog({
   providerName,
   aliases,
   onClose,
-  onDone
+  onDone,
 }: {
-  open: boolean
-  providerId: string
-  providerName: string
+  open: boolean;
+  providerId: string;
+  providerName: string;
   /** 这家现有的别名 —— 决定哪些默认勾上,以及哪些是「本地独有」 */
-  aliases: readonly ModelAlias[]
-  onClose: () => void
-  onDone?: () => void
+  aliases: readonly ModelAlias[];
+  onClose: () => void;
+  onDone?: () => void;
 }): ReactNode {
-  const [rows, setRows] = useState<ImportRow[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
-  const [query, setQuery] = useState('')
-  const [note, setNote] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
+  const [rows, setRows] = useState<ImportRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   /** 每次打开自增,useEffect 靠它重跑 —— 「重试」也是加一 */
-  const [attempt, setAttempt] = useState(0)
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!open) return
-    let alive = true
-    setRows(null)
-    setError(null)
-    setNote(null)
-    setQuery('')
+    if (!open) return;
+    let alive = true;
+    setRows(null);
+    setError(null);
+    setNote(null);
+    setQuery("");
     void fetchProviderModels(providerId)
       .then((fetched) => {
-        if (!alive) return
-        const next = importRows(fetched, aliases)
-        setRows(next)
-        setSelected(initialSelection(next))
+        if (!alive) return;
+        const next = importRows(fetched, aliases);
+        setRows(next);
+        setSelected(initialSelection(next, Number.POSITIVE_INFINITY));
       })
       .catch((e: unknown) => {
-        if (!alive) return
-        setError(e instanceof Error ? e.message : String(e))
-      })
+        if (!alive) return;
+        setError(e instanceof Error ? e.message : String(e));
+      });
     /*
       ★ 卸载/重开时把回调作废。没有这一句的话,用户拉到一半关掉弹窗、
       换一家再打开,上一次的响应会晚到并把**另一家**的模型填进来 ——
       而那份列表看着完全正常,直到他点「更新列表」把别的家的模型名存进这家。
     */
     return () => {
-      alive = false
-    }
+      alive = false;
+    };
     // ★ `aliases` 刻意不进依赖:store 每广播一次都是个新数组,进去就会无限重拉。
     // 它只在**打开的那一刻**被读一次,用来决定哪些默认勾上 —— 这正是想要的语义
     // (弹窗开着的时候别名被别处改了,不该把用户正在勾的东西重置掉)。
-  }, [open, providerId, attempt])
+  }, [open, providerId, attempt]);
 
-  const visible = useMemo(() => filterRows(rows ?? [], query), [rows, query])
-  const allVisibleChecked = visible.length > 0 && visible.every((r) => selected.has(r.id))
-  const fromUpstreamCount = (rows ?? []).filter((r) => r.fromUpstream).length
-  const localOnlyCount = (rows ?? []).length - fromUpstreamCount
+  const visible = useMemo(() => filterRows(rows ?? [], query), [rows, query]);
+  const allVisibleChecked =
+    visible.length > 0 && visible.every((r) => selected.has(r.id));
+  const fromUpstreamCount = (rows ?? []).filter((r) => r.fromUpstream).length;
+  const localOnlyCount = (rows ?? []).length - fromUpstreamCount;
 
   const pick = (id: string): void => {
-    const r = toggleRow(selected, id)
-    setSelected(r.selected)
-    setNote(r.atCap ? `最多 ${String(MAX_ALIASES_PER_PROVIDER)} 个,先取消几个再选。` : null)
-  }
+    const r = toggleRow(selected, id, Number.POSITIVE_INFINITY);
+    setSelected(r.selected);
+    setNote(r.atCap ? "无法选择该模型。" : null);
+  };
 
   const pickAll = (): void => {
-    const r = toggleAll(selected, visible)
-    setSelected(r.selected)
-    setNote(r.truncated ? `到上限了,只勾到 ${String(MAX_ALIASES_PER_PROVIDER)} 个。` : null)
-  }
+    const r = toggleAll(selected, visible, Number.POSITIVE_INFINITY);
+    setSelected(r.selected);
+    setNote(null);
+  };
 
   const submit = (): void => {
-    if (rows === null) return
-    setSaving(true)
-    setError(null)
+    if (rows === null) return;
+    setSaving(true);
+    setError(null);
     void setProviderAliases(providerId, submitOrder(rows, selected))
       .then(() => {
-        onDone?.()
-        onClose()
+        onDone?.();
+        onClose();
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setSaving(false))
-  }
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setSaving(false));
+  };
 
   return (
     <Dialog
@@ -130,7 +136,7 @@ export function ImportModelsDialog({
         rows === null
           ? `正在从 ${providerName} 拉取模型列表`
           : `从服务商拉取到 ${String(fromUpstreamCount)} 个模型,已添加模型会默认勾选;` +
-            `取消勾选会从当前列表删除(最多 ${String(MAX_ALIASES_PER_PROVIDER)} 个)`
+            `取消勾选会从当前列表删除`
       }
       width={560}
       footer={
@@ -142,10 +148,14 @@ export function ImportModelsDialog({
             size="sm"
             variant="accent"
             disabled={rows === null || saving || selected.size === 0}
-            icon={saving ? <Loader2 size={13} className="animate-spin" /> : undefined}
+            icon={
+              saving ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : undefined
+            }
             onClick={submit}
           >
-            更新列表({String(selected.size)}/{String(MAX_ALIASES_PER_PROVIDER)})
+            更新列表({String(selected.size)})
           </Button>
         </>
       }
@@ -155,7 +165,9 @@ export function ImportModelsDialog({
           <AlertTriangle size={13} className="mt-[2px] shrink-0 text-danger" />
           <div className="min-w-0 flex-1">
             {/* ★ 原样显示主进程那句 —— 它带着真实 URL 和状态码,是用户唯一能拿去查的东西 */}
-            <p className="text-[11.5px] leading-[1.6] break-words text-danger">{error}</p>
+            <p className="text-[11.5px] leading-[1.6] break-words text-danger">
+              {error}
+            </p>
           </div>
           {rows === null && (
             <Button size="sm" onClick={() => setAttempt((n) => n + 1)}>
@@ -187,17 +199,21 @@ export function ImportModelsDialog({
                 icon={<Search size={13} className="text-icon" />}
               />
             </div>
-            <span className="shrink-0 text-[11.5px] text-fg-faint">已选 {selected.size} 个</span>
+            <span className="shrink-0 text-[11.5px] text-fg-faint">
+              已选 {selected.size} 个
+            </span>
             <button
               type="button"
               onClick={pickAll}
               className="app-no-drag shrink-0 text-[11.5px] text-fg-muted underline underline-offset-2 transition-colors hover:text-fg"
             >
-              {allVisibleChecked ? '取消全选' : '全选'}
+              {allVisibleChecked ? "取消全选" : "全选"}
             </button>
           </div>
 
-          {note !== null && <p className="pb-2 text-[11.5px] text-danger">{note}</p>}
+          {note !== null && (
+            <p className="pb-2 text-[11.5px] text-danger">{note}</p>
+          )}
 
           {visible.length === 0 ? (
             <EmptyState
@@ -233,17 +249,17 @@ export function ImportModelsDialog({
         </>
       )}
     </Dialog>
-  )
+  );
 }
 
 function ModelRow({
   row,
   checked,
-  onToggle
+  onToggle,
 }: {
-  row: ImportRow
-  checked: boolean
-  onToggle: () => void
+  row: ImportRow;
+  checked: boolean;
+  onToggle: () => void;
 }): ReactNode {
   return (
     <li className="border-b border-hairline last:border-b-0">
@@ -256,17 +272,23 @@ function ModelRow({
       >
         <span
           className={cn(
-            'flex size-[15px] shrink-0 items-center justify-center rounded-[4px] border transition-colors',
-            checked ? 'border-accent bg-accent text-accent-fg' : 'border-border'
+            "flex size-[15px] shrink-0 items-center justify-center rounded-[4px] border transition-colors",
+            checked
+              ? "border-accent bg-accent text-accent-fg"
+              : "border-border",
           )}
           aria-hidden
         >
           {checked && <Check size={11} strokeWidth={3} />}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-mono text-[12px] text-fg">{row.id}</span>
+          <span className="block truncate font-mono text-[12px] text-fg">
+            {row.id}
+          </span>
           {row.displayName !== undefined && row.displayName !== row.id && (
-            <span className="block truncate text-[11px] text-fg-faint">{row.displayName}</span>
+            <span className="block truncate text-[11px] text-fg-faint">
+              {row.displayName}
+            </span>
           )}
         </span>
         {/* 本地独有的角标和「已添加」不同 —— 两者都是已添加,但来源不一样,而来源决定了
@@ -274,7 +296,7 @@ function ModelRow({
         {!row.fromUpstream ? <Tag>本地</Tag> : row.added && <Tag>已添加</Tag>}
       </button>
     </li>
-  )
+  );
 }
 
 function Tag({ children }: { children: ReactNode }): ReactNode {
@@ -282,5 +304,5 @@ function Tag({ children }: { children: ReactNode }): ReactNode {
     <span className="shrink-0 rounded-[5px] bg-tint px-1.5 py-0.5 text-[10.5px] text-fg-muted">
       {children}
     </span>
-  )
+  );
 }

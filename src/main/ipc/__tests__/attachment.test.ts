@@ -205,8 +205,38 @@ describe('removeAttachment', () => {
   })
 })
 
-describe('会话行不存在时也能上传', () => {
+describe('显示名(迁移 6)', () => {
   /**
+   * ★ 磁盘文件名是 ULID,所以「用户看到的名字」必须单独存一列。
+   * 不存的表现很具体:传图 → 关应用 → 重开,chip 从「季度报表.png」
+   * 变成「01J8XQZ4M7.png」—— 而 ULID 恰恰是为了不让人认路径才选的。
+   */
+  it('重启后列回来的仍是原始名,不是 ULID 文件名', () => {
+    uploadAttachment({
+      scope: 'session', ownerId: 'S1', displayName: '季度报表.png',
+      mime: 'image/png', bytes: bytesOf('A')
+    })
+
+    const restored = listSessionAttachments({ sessionId: 'S1' })
+    expect(restored[0]?.displayName).toBe('季度报表.png')
+    // 磁盘上仍是 ULID —— 两者是分开的
+    expect(restored[0]?.url).toMatch(/\/[0-9A-Z]{26}\.png$/)
+  })
+
+  it('★ 去重命中时显示名取本次的 —— 去重的是字节,不是用户对它的称呼', () => {
+    uploadAttachment({
+      scope: 'session', ownerId: 'S1', displayName: '旧名.png',
+      mime: 'image/png', bytes: bytesOf('SAME')
+    })
+    const b = uploadAttachment({
+      scope: 'session', ownerId: 'S1', displayName: '新名.png',
+      mime: 'image/png', bytes: bytesOf('SAME')
+    })
+    expect(b.displayName).toBe('新名.png')
+  })
+})
+
+describe('会话行不存在时也能上传', () => {  /**
    * ★ 这条用例钉的是一个真实缺陷:`attachments.session_id` 上有指向 `sessions`
    * 的外键,而上传发生在**发送之前** —— 新建对话还没发第一条消息时,
    * `sessions` 表里没有那一行。早先的实现往 `session_id` 里写 ownerId,

@@ -225,6 +225,64 @@ describe('decodeAnthropic · usage 与 stopReason', () => {
     expect(out.at(-1)).toMatchObject({ stopReason: 'max_tokens', usage: { outputTokens: 64 } })
   })
 
+  it('解析 5 分钟与 1 小时缓存写入明细，并保留顶层聚合值', async () => {
+    const out = await decode([
+      {
+        type: 'message_start',
+        message: {
+          model: 'm',
+          usage: {
+            input_tokens: 10,
+            cache_creation_input_tokens: 300,
+            cache_creation: {
+              ephemeral_5m_input_tokens: 100,
+              ephemeral_1h_input_tokens: 200
+            }
+          }
+        }
+      },
+      STOP
+    ])
+    expect(out.at(-1)).toMatchObject({
+      type: 'message_end',
+      usage: {
+        cacheCreationInputTokens: 300,
+        cacheCreation1hInputTokens: 200
+      }
+    })
+  })
+
+  it('顶层聚合缺失时用 5m + 1h 补出总写入量', async () => {
+    const out = await decode([
+      {
+        type: 'message_start',
+        message: {
+          model: 'm',
+          usage: {
+            input_tokens: 10,
+            cache_creation: {
+              ephemeral_5m_input_tokens: 40,
+              ephemeral_1h_input_tokens: 60
+            },
+            cache_read_input_tokens: 7
+          }
+        }
+      },
+      STOP
+    ])
+    expect(out.at(-1)).toEqual({
+      type: 'message_end',
+      stopReason: 'end_turn',
+      usage: {
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheCreationInputTokens: 100,
+        cacheCreation1hInputTokens: 60,
+        cacheReadInputTokens: 7
+      }
+    })
+  })
+
   it('未知 stop_reason 退化成 end_turn 而不是抛错', () => {
     expect(toStopReason('pause_turn')).toBe('end_turn')
     expect(toStopReason(undefined)).toBe('end_turn')
@@ -334,5 +392,79 @@ describe('anthropicErrorToAgentError', () => {
     expect(e.code).toBe('provider')
     expect(e.message).toContain('418')
     expect(e.status).toBe(418)
+  })
+
+  it('缓存字段被纯文本 400 明确拒绝时分类为 cache_unsupported', () => {
+    const e = anthropicErrorToAgentError(400, 'cache_control is not supported', {
+      cacheTtl: '5m',
+      providerName: '中转站 A'
+    })
+    expect(e).toMatchObject({ code: 'cache_unsupported', status: 400, retryable: false })
+    expect(e.message).toContain('中转站 A')
+    expect(e.message).toContain('5 分钟')
+    expect(e.message).toContain('cache_control is not supported')
+  })
+
+  it('422 的错误类型包含 ttl 时也分类为 cache_unsupported', () => {
+    const e = anthropicErrorToAgentError(
+      422,
+      { type: 'error', error: { type: 'invalid_ttl', message: 'invalid request' } },
+      { cacheTtl: '1h', providerName: 'Relay' }
+    )
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.message).toContain('Relay')
+    expect(e.message).toContain('invalid request')
+  })
+
+  it('只有错误类型没有 message 时仍保留上游原始类型', () => {
+    const e = anthropicErrorToAgentError(
+      400,
+      { error: { type: 'cache_control_not_supported' } },
+      { cacheTtl: '5m', providerName: 'Relay' }
+    )
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.message).toContain('cache_control_not_supported')
+  })
+
+  it('error 字段为纯文本时保留中转站原始错误', () => {
+    const e = anthropicErrorToAgentError(
+      422,
+      { error: 'cache_control is not supported by this relay' },
+      { cacheTtl: '1h', providerName: 'Relay' }
+    )
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.message).toContain('cache_control is not supported by this relay')
+  })
+
+  it('无标准 message/type 的缓存拒绝 JSON 也保留原始摘要', () => {
+    const e = anthropicErrorToAgentError(
+      400,
+      { details: { reason: 'cache_control unsupported by relay' } },
+      { cacheTtl: '5m', providerName: 'Relay' }
+    )
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.message).toContain('cache_control unsupported by relay')
+  })
+
+  it('缓存关闭时普通 400 不会被误判为 cache_unsupported', () => {
+    expect(
+      anthropicErrorToAgentError(400, { error: { message: 'cache_control is not supported' } }, { cacheTtl: 'off' })
+    ).toMatchObject({ code: 'provider', retryable: false })
+  })
+
+  it('运行时未知 TTL 按关闭处理，不会误判缓存不兼容', () => {
+    expect(
+      anthropicErrorToAgentError(
+        400,
+        { error: { message: 'cache_control is not supported' } },
+        { cacheTtl: '90d' as never }
+      )
+    ).toMatchObject({ code: 'provider', retryable: false })
+  })
+
+  it('普通错误消息中的相似子串不会被误判为缓存不兼容', () => {
+    expect(
+      anthropicErrorToAgentError(400, { error: { message: 'little parameter is invalid' } }, { cacheTtl: '5m' })
+    ).toMatchObject({ code: 'provider', retryable: false })
   })
 })

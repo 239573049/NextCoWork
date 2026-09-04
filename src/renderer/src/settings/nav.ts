@@ -61,11 +61,12 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
      * 两处对不上就是静默筛出空表,所以 `pages/model/tabs.ts` 的测试守着这条。
      */
     subs: [
-      { id: 'catalog', label: '模型目录' },
-      { id: 'pricing', label: '定价规则' },
-      { id: 'capabilities', label: '能力矩阵' },
-      { id: 'request', label: '请求策略' },
-      { id: 'usage', label: '用量与成本' }
+      { id: 'text', label: '文本生成' },
+      { id: 'image', label: '图像生成' },
+      { id: 'video', label: '视频生成' },
+      { id: 'speech', label: '语音生成' },
+      { id: 'transcription', label: '语音识别' },
+      { id: 'usage', label: '使用统计' }
     ]
   },
   { id: 'review', label: '每日回顾' },
@@ -179,28 +180,28 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   // ★ 只有「文本生成」这个子 Tab 有真行。其余五个今天是占位,**不给它们编行** ——
   // 上面那句「这张表是唯一事实来源」的代价就是:搜出来点过去,那一行必须真的在。
   // 供应商的行随步骤 4 的写入面补进来;定价与用量在方案里没有编号,随内容一起补。
-  { page: 'model', sub: 'catalog', title: '默认模型', keywords: ['model', '模型'] },
+  { page: 'model', sub: 'text', title: '默认模型', keywords: ['model', '模型'] },
   {
     page: 'model',
-    sub: 'catalog',
+    sub: 'text',
     title: '默认子代理模型',
     keywords: ['subagent', 'model', '子代理']
   },
   {
     page: 'model',
-    sub: 'catalog',
+    sub: 'text',
     title: '启用的模型',
     keywords: ['provider', 'model', '供应商', '模型']
   },
   {
     page: 'model',
-    sub: 'catalog',
+    sub: 'text',
     title: '供应商目录',
     keywords: ['provider', 'preset', 'openrouter', '供应商', '预设', '添加']
   },
   {
     page: 'model',
-    sub: 'catalog',
+    sub: 'text',
     title: '模型优先级',
     // 「拉取 / 同步 / fetch」都收进来:用户想找的是那颗按钮,而按钮上写的是「拉取」
     keywords: ['model', 'fetch', 'sync', 'import', '拉取', '同步', '导入', '模型列表']

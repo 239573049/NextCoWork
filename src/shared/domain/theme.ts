@@ -777,9 +777,16 @@ export interface ImageTheme {
   /**
    * 内置的那六张是**渐变配方**,不是图片文件 —— 架子阶段不往仓库里塞位图,
    * 而渐变正好也是这几张卡真正的样子(它们本来就是抽象色块)。
-   * 用户上传的那种是 `{ kind: 'uploaded' }`,`assetId` 指向 userData 里的文件。
+   *
+   * 上传的那种带 `url`(`ncw://attachments/themes/…`),渲染层直接
+   * `<img src>` / `background-image` 引用它。
+   *
+   * ★ **`url` 取代了原来那套「assetId → blob: URL」的兑现机制。**
+   * 那套机制的全部存在理由是「显示本地图必须先把字节传过来」——
+   * 懒兑现、并发去重、revoke 生命周期,三样都是绕这一条限制的成本。
+   * 有了协议之后它们一起消失。`assetId` 留着是因为删除仍按它定位。
    */
-  source: { kind: 'builtin'; css: string } | { kind: 'uploaded'; assetId: string }
+  source: { kind: 'builtin'; css: string } | { kind: 'uploaded'; assetId: string; url?: string }
   /** 主色。整套 token 由它经 `specFromSeed` 派生 */
   seed: string
   /**

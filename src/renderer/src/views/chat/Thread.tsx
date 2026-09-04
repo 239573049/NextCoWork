@@ -123,7 +123,14 @@ function UserBubble({ message }: { message: AgentMessage }): ReactNode {
         {images.length > 0 && (
           <div className={cn('flex flex-wrap gap-1.5', text !== '' && 'mt-2')}>
             {images.map((img, i) => (
-              <MessageImage key={`${img.dataRef}:${String(i)}`} mime={img.mime} dataRef={img.dataRef} />
+              <MessageImage
+                key={`${img.dataRef}:${String(i)}`}
+                mime={img.mime}
+                dataRef={img.dataRef}
+                // ★ 同一条消息里的图是一组 —— 灯箱据此给出翻页
+                siblings={images.map((x) => ({ mime: x.mime, dataRef: x.dataRef }))}
+                index={i}
+              />
             ))}
           </div>
         )}

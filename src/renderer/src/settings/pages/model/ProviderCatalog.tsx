@@ -1,17 +1,27 @@
-import { Check, ExternalLink, Loader2, Plus, Search, Shuffle } from 'lucide-react'
-import { useMemo, useState, type ReactNode } from 'react'
-import { PROVIDER_PRESETS, type ProviderPreset } from '../../../../../shared/domain/presets'
-import { Button } from '../../../components/ui/Button'
-import { Dialog } from '../../../components/ui/Dialog'
-import { EmptyState } from '../../../components/ui/EmptyState'
-import { Segmented } from '../../../components/ui/Segmented'
-import { TextInput } from '../../../components/ui/TextInput'
-import { cn } from '../../../lib/cn'
-import { openExternal } from '../../../services/app'
-import { upsertProvider } from '../../../services/provider'
-import { useModelsStore } from '../../../stores/models'
-import { ProviderAvatar } from './ProviderAvatar'
-import { isPresetAdded, providerFromPreset } from './provider-edit'
+import {
+  Check,
+  ExternalLink,
+  Loader2,
+  Plus,
+  Search,
+  Shuffle,
+} from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import {
+  PROVIDER_PRESETS,
+  type ProviderPreset,
+} from "../../../../../shared/domain/presets";
+import { Button } from "../../../components/ui/Button";
+import { Dialog } from "../../../components/ui/Dialog";
+import { EmptyState } from "../../../components/ui/EmptyState";
+import { Segmented } from "../../../components/ui/Segmented";
+import { TextInput } from "../../../components/ui/TextInput";
+import { cn } from "../../../lib/cn";
+import { openExternal } from "../../../services/app";
+import { upsertProvider } from "../../../services/provider";
+import { useModelsStore } from "../../../stores/models";
+import { ProviderAvatar } from "./ProviderAvatar";
+import { isPresetAdded, providerFromPreset } from "./provider-edit";
 import {
   CATALOG_TABS,
   divergentCount,
@@ -22,8 +32,8 @@ import {
   presetsForTab,
   tabCount,
   VERIFICATION_LABEL,
-  type CatalogTab
-} from './provider-catalog'
+  type CatalogTab,
+} from "./provider-catalog";
 
 /**
  * 「添加供应商」的预设目录 —— 参考图那个五分类卡片网格。
@@ -52,22 +62,25 @@ import {
 export function ProviderCatalog({
   open,
   onClose,
-  onAdded
+  onAdded,
 }: {
-  open: boolean
-  onClose: () => void
+  open: boolean;
+  onClose: () => void;
   /** 建好之后把左列选到它。不给的话用户建完还得自己去找刚加的那一条 */
-  onAdded?: (providerId: string) => void
+  onAdded?: (providerId: string) => void;
 }): ReactNode {
-  const [tab, setTab] = useState<CatalogTab>('recommended')
-  const [query, setQuery] = useState('')
-  const providers = useModelsStore((s) => s.providers)
+  const [tab, setTab] = useState<CatalogTab>("recommended");
+  const [query, setQuery] = useState("");
+  const providers = useModelsStore((s) => s.providers);
 
   // 搜索时跨全表找 —— 用户打「openrouter」不该还要先猜它在哪个分类
   const list = useMemo(
-    () => (query.trim() === '' ? presetsForTab(tab) : matchPresets(PROVIDER_PRESETS, query)),
-    [tab, query]
-  )
+    () =>
+      query.trim() === ""
+        ? presetsForTab(tab)
+        : matchPresets(PROVIDER_PRESETS, query),
+    [tab, query],
+  );
 
   return (
     <Dialog
@@ -83,12 +96,12 @@ export function ProviderCatalog({
           label="供应商分类"
           value={tab}
           onChange={(v) => {
-            setTab(v)
-            setQuery('')
+            setTab(v);
+            setQuery("");
           }}
           options={CATALOG_TABS.map((t) => ({
             value: t.id,
-            label: `${t.label} ${String(tabCount(t.id))}`
+            label: `${t.label} ${String(tabCount(t.id))}`,
           }))}
         />
         <div className="min-w-0 flex-1">
@@ -103,9 +116,10 @@ export function ProviderCatalog({
         </div>
       </div>
 
-      {query.trim() !== '' && (
+      {query.trim() !== "" && (
         <p className="pb-2 text-[11.5px] text-fg-faint">
-          搜索跨全部 {PROVIDER_PRESETS.length} 家,不限当前分类 —— 命中 {list.length} 家。
+          搜索跨全部 {PROVIDER_PRESETS.length} 家,不限当前分类 —— 命中{" "}
+          {list.length} 家。
         </p>
       )}
 
@@ -132,49 +146,55 @@ export function ProviderCatalog({
       <p className="mt-4 border-t border-hairline pt-3 text-[11.5px] leading-[1.6] text-fg-faint">
         {PROVIDER_PRESETS.length} 家里有 {divergentCount()} 家
         <span className="text-fg-muted">换协议就换地址</span>
-        (OpenRouter 的 OpenAI 端是 /api/v1、Anthropic 端是 /api)。所以地址是挂在协议上的, 翻「API
-        格式」开关时会跟着换 —— 不然表单看着完全正常,请求 404。
+        (OpenRouter 的 OpenAI 端是 /api/v1、Anthropic 端是
+        /api)。所以地址是挂在协议上的, 翻「API 格式」开关时会跟着换 ——
+        不然表单看着完全正常,请求 404。
       </p>
     </Dialog>
-  )
+  );
 }
 
 function PresetCard({
   preset: p,
   added,
-  onAdded
+  onAdded,
 }: {
-  preset: ProviderPreset
-  added: boolean
-  onAdded?: (providerId: string) => void
+  preset: ProviderPreset;
+  added: boolean;
+  onAdded?: (providerId: string) => void;
 }): ReactNode {
-  const rows = endpointRows(p)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const rows = endpointRows(p);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const add = (): void => {
-    const draft = providerFromPreset(p)
+    const draft = providerFromPreset(p);
     // endpoints 非空是预设表的结构约束(presets.test.ts 守着),这里兜底不报错
-    if (draft === null) return
-    setBusy(true)
-    setError(null)
+    if (draft === null) return;
+    setBusy(true);
+    setError(null);
     void upsertProvider(draft)
       .then(() => onAdded?.(draft.id))
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false))
-  }
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
 
   return (
     <div className="min-w-0 rounded-[10px] border border-border bg-canvas px-3 py-2.5">
       <div className="flex items-center gap-2">
         <ProviderAvatar name={p.name} id={p.id} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg" title={p.name}>
+        <span
+          className="min-w-0 flex-1 truncate text-[12.5px] text-fg"
+          title={p.name}
+        >
           {p.name}
         </span>
         {p.subscription === true && <Tag>订阅制</Tag>}
         {/* ★ 未核实的带角标 —— 让「未核实」进界面而不是停在报告里:
             配失败时用户知道该去查文档,而不是怀疑自己填错了 */}
-        {p.verification === 'unverified' ? (
+        {p.verification === "unverified" ? (
           <Tag danger>未核实</Tag>
         ) : (
           <Tag>{VERIFICATION_LABEL[p.verification]}</Tag>
@@ -185,7 +205,9 @@ function PresetCard({
         {rows.map((r) => (
           <li key={r.protocol} className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="shrink-0 text-[11px] text-fg-muted">{r.label}</span>
+              <span className="shrink-0 text-[11px] text-fg-muted">
+                {r.label}
+              </span>
               <span className="min-w-0 flex-1 truncate text-right text-[10.5px] text-fg-faint">
                 {LIST_ACCESS_LABEL[r.list]}
               </span>
@@ -208,21 +230,25 @@ function PresetCard({
       )}
 
       {p.notes !== undefined && (
-        <p className="mt-1.5 text-[11px] leading-[1.55] text-fg-muted">{p.notes}</p>
+        <p className="mt-1.5 text-[11px] leading-[1.55] text-fg-muted">
+          {p.notes}
+        </p>
       )}
 
       {p.suggestedModels.length > 0 && (
         <p
           className="mt-1.5 truncate font-mono text-[10.5px] text-fg-faint"
-          title={p.suggestedModels.join('\n')}
+          title={p.suggestedModels.join("\n")}
         >
-          {p.suggestedModels.join(' · ')}
+          {p.suggestedModels.join(" · ")}
         </p>
       )}
 
       {/* ★ 原样显示主进程回的那句话。这里最可能出现的是 baseUrl 被拒
           (`normalizeBaseUrl` 只放行 http/https),概括成「添加失败」就没了线索 */}
-      {error !== null && <p className="mt-1.5 text-[10.5px] text-danger">{error}</p>}
+      {error !== null && (
+        <p className="mt-1.5 text-[10.5px] text-danger">{error}</p>
+      )}
 
       <div className="mt-2 flex items-center gap-2">
         <button
@@ -230,8 +256,8 @@ function PresetCard({
           onClick={() => void openExternal(p.docsUrl)}
           title={p.docsUrl}
           className={cn(
-            'app-no-drag flex shrink-0 items-center gap-1 text-[11px]',
-            'text-fg-muted transition-colors hover:text-fg'
+            "app-no-drag flex shrink-0 items-center gap-1 text-[11px]",
+            "text-fg-muted transition-colors hover:text-fg",
           )}
         >
           <ExternalLink size={10} />
@@ -248,7 +274,13 @@ function PresetCard({
             size="sm"
             variant="accent"
             disabled={busy}
-            icon={busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            icon={
+              busy ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Plus size={12} />
+              )
+            }
             onClick={add}
           >
             添加
@@ -256,18 +288,24 @@ function PresetCard({
         )}
       </div>
     </div>
-  )
+  );
 }
 
-function Tag({ children, danger = false }: { children: ReactNode; danger?: boolean }): ReactNode {
+function Tag({
+  children,
+  danger = false,
+}: {
+  children: ReactNode;
+  danger?: boolean;
+}): ReactNode {
   return (
     <span
       className={cn(
-        'shrink-0 rounded-[5px] px-1.5 py-0.5 text-[10px]',
-        danger ? 'bg-danger/10 text-danger' : 'bg-tint text-fg-faint'
+        "shrink-0 rounded-[5px] px-1.5 py-0.5 text-[10px]",
+        danger ? "bg-danger/10 text-danger" : "bg-tint text-fg-faint",
       )}
     >
       {children}
     </span>
-  )
+  );
 }

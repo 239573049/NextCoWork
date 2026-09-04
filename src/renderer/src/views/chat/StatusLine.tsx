@@ -10,17 +10,10 @@
  * `TokenUsage`、`context_usage`。不新增任何数据。
  */
 import type { ReactNode } from 'react'
-import type { RunStatus } from '../../../../shared/agent/event'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import { hasRun } from '../../../../shared/agent/transcript'
 import { cn } from '../../lib/cn'
-
-const STATUS_LABEL: Record<RunStatus, string> = {
-  running: '生成中',
-  done: '已完成',
-  error: '出错',
-  aborted: '已停止'
-}
+import { useI18n } from '../../i18n'
 
 /**
  * 压力条**平时根本不画**,过半才出现,逼近上限才变色。
@@ -44,6 +37,7 @@ export function StatusLine({
   lastSeq: number
   queued: number
 }): ReactNode {
+  const { t } = useI18n()
   const { status, model, usage, contextUsage } = transcript
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
@@ -63,7 +57,7 @@ export function StatusLine({
       data-queued={queued}
       className="mx-auto flex w-full max-w-[760px] shrink-0 items-center gap-2 px-6 pb-1.5 text-[11.5px] text-fg-faint"
     >
-      <span className={cn(running && 'text-accent')}>{STATUS_LABEL[status]}</span>
+      <span className={cn(running && 'text-accent')}>{t(`chat.status.${status}` as Parameters<typeof t>[0])}</span>
 
       {usage !== undefined && (
         <>
@@ -77,7 +71,7 @@ export function StatusLine({
       {queued > 0 && (
         <>
           <Dot />
-          <span>队列 {queued}</span>
+          <span>{t('chat.queue', { count: queued })}</span>
         </>
       )}
 
@@ -91,7 +85,7 @@ export function StatusLine({
           {contextUsage.shouldCompact && (
             // 上下文用尽是这类应用最高频的失败(方案 §4.2)。逼近上限时
             // 明说该怎么办,而不是等它 400 之后再报一个 context_length。
-            <span className="text-accent">接近上限,可 /compact</span>
+            <span className="text-accent">{t('chat.contextNearLimit')}</span>
           )}
           <div className="h-[3px] w-16 overflow-hidden rounded-pill bg-tint">
             <div

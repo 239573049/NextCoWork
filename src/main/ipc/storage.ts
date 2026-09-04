@@ -7,6 +7,7 @@
  */
 import { app, dialog, shell } from 'electron'
 import { createHash, createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import {
   copyFileSync,
   accessSync,
@@ -22,7 +23,8 @@ import {
   writeFileSync,
   openSync,
   closeSync,
-  fsyncSync
+  fsyncSync,
+  lstatSync
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
@@ -45,11 +47,11 @@ import {
   cutoffForAge,
   isDataExport
 } from '../../shared/domain/data'
-import type { StorageStats } from '../../shared/domain/settings'
+import { DEFAULT_SETTINGS, mergeSettings, type StorageStats } from '../../shared/domain/settings'
 import { mcpSecretKind, mcpSecretRef } from '../../shared/domain/mcp'
 import { searchSecretRef } from '../../shared/domain/search'
 import { DRAFT_ATTACHMENT_TTL_MS } from '../../shared/domain/attachment'
-import { databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, openDatabase, txAsync, vacuumDatabase } from '../db'
+import { databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, defaultDatabaseDirectory, openDatabase, txAsync, vacuumDatabase } from '../db'
 import { MIGRATIONS } from '../db/schema'
 import * as repo from '../db/repo'
 import { getHost } from '../runtime'
@@ -78,7 +80,7 @@ interface StoredBackupStatus {
 }
 
 function dataDirectory(): string {
-  return app.getPath('userData')
+  return defaultDatabaseDirectory()
 }
 
 function attachmentDirectory(): string {
@@ -98,6 +100,59 @@ function readBackupStatus(): StoredBackupStatus {
 
 function writeBackupStatus(status: StoredBackupStatus): void {
   store.setKv(BACKUP_STATUS_KEY, status)
+}
+
+interface LocalBackupState {
+  directory: string | null
+  status: StoredBackupStatus
+}
+
+/**
+ * A backup directory is a local-device preference. It must never be imported
+ * from another machine's database, and a malformed legacy value must not turn
+ * into a path relative to the process working directory.
+ */
+function normalizeLocalBackupDirectory(value: unknown, root = dataDirectory(), dbPath = databaseFilePath()): string | null {
+  if (typeof value !== 'string' || !isAbsolute(value)) return null
+  const path = resolve(value)
+  // A database file can never be a backup directory. Treating it as one would
+  // make the clear-local-data path either preserve the database or delete a
+  // file the user did not select as a directory.
+  if (dbPath !== null && path === resolve(dbPath)) return null
+  // `root` itself is the application's managed container, not an external
+  // directory. Keep the value for display/restore compatibility, but callers
+  // that delete managed data handle this special case explicitly.
+  void root
+  return path
+}
+
+function captureLocalBackupState(): LocalBackupState {
+  const settings = store.getSettings()
+  return {
+    directory: normalizeLocalBackupDirectory(settings.data.backupDirectory),
+    status: readBackupStatus()
+  }
+}
+
+/**
+ * Keep only a status that can be proven to belong to the current device's
+ * configured directory. This prevents an archive from another machine from
+ * leaving an absolute path in `data.backup.status` after restore.
+ */
+function sanitizeLocalBackupStatus(directory: string | null, status: StoredBackupStatus): StoredBackupStatus {
+  if (directory === null) return { lastBackupAt: null, lastBackupPath: null, lastError: null }
+  if (status.lastBackupPath === null) return { ...status }
+  if (!isAbsolute(status.lastBackupPath) || !isWithin(directory, status.lastBackupPath)) {
+    return { lastBackupAt: null, lastBackupPath: null, lastError: null }
+  }
+  return { ...status, lastBackupPath: resolve(status.lastBackupPath) }
+}
+
+/** Re-apply the local-only backup settings after replacing a database file. */
+function restoreLocalBackupState(state: LocalBackupState): void {
+  const directory = normalizeLocalBackupDirectory(state.directory)
+  store.updateSettings({ data: { backupDirectory: directory } })
+  writeBackupStatus(sanitizeLocalBackupStatus(directory, state.status))
 }
 
 function toBackupStatus(): BackupStatus {
@@ -392,6 +447,38 @@ function credentialRefs(): string[] {
   return [...refs]
 }
 
+/**
+ * The encrypted section travels with the configuration it belongs to.  The
+ * old implementation checked it only against the *current* machine's
+ * configuration, which made a perfectly valid export fail as soon as it
+ * contained a provider/MCP/search service that had not been created locally
+ * yet.  Build the allow-list from both sides before writing any credential.
+ *
+ * We intentionally use the provider's persisted `credentialRef` rather than
+ * deriving `provider:${id}`: older installations and the built-in provider
+ * can have stable refs that predate the current naming rule.
+ */
+function credentialRefsForData(data: DataExport): Set<string> {
+  const refs = new Set(credentialRefs())
+  for (const provider of data.providers) {
+    if (typeof provider.credentialRef === 'string' && provider.credentialRef !== '') {
+      refs.add(provider.credentialRef)
+    }
+  }
+  for (const cfg of data.mcpServers) {
+    if (typeof cfg?.id !== 'string' || cfg.id === '') continue
+    const kind = cfg.transport === 'stdio' ? 'env' : 'headers'
+    refs.add(mcpSecretRef(cfg.id, kind))
+  }
+  for (const cfg of data.searchProviders) {
+    if (typeof cfg?.id === 'string') {
+      refs.add(searchSecretRef(cfg.id as Parameters<typeof searchSecretRef>[0]))
+    }
+  }
+  refs.add(PROXY_PASSWORD_REF)
+  return refs
+}
+
 function encryptCredentials(values: Record<string, string>, password: string): EncryptedCredentials {
   const salt = randomBytes(16)
   const nonce = randomBytes(12)
@@ -503,16 +590,85 @@ function parseExport(path: string): DataExport {
   return value
 }
 
+interface CredentialRollbackState {
+  /** The encrypted bytes are the source of truth for the Electron host. */
+  blob: Uint8Array | undefined
+  /** Plaintext is only retained briefly to repair simple/in-memory hosts. */
+  plaintext: string | null
+  plaintextReadable: boolean
+}
+
+/**
+ * Capture the credentials an import is allowed to touch before opening the
+ * SQLite transaction. `safeStorage.set()` is deliberately not part of the
+ * SQLite transaction in every host implementation (and test hosts often use
+ * an in-memory map), so a database rollback alone is insufficient.
+ */
+async function snapshotCredentialRollback(refs: readonly string[]): Promise<Map<string, CredentialRollbackState>> {
+  const secrets = getHost().secrets
+  const snapshot = new Map<string, CredentialRollbackState>()
+  for (const ref of refs) {
+    let plaintext: string | null = null
+    let plaintextReadable = true
+    try {
+      plaintext = await secrets.get(ref)
+    } catch {
+      // A corrupt/foreign safeStorage blob can be restored byte-for-byte even
+      // when it cannot be decrypted. Keep that fact so rollback does not
+      // accidentally delete a credential we could not inspect.
+      plaintextReadable = false
+    }
+    snapshot.set(ref, {
+      blob: repo.getCredential(ref),
+      plaintext,
+      plaintextReadable
+    })
+  }
+  return snapshot
+}
+
+async function restoreCredentialRollback(snapshot: Map<string, CredentialRollbackState>): Promise<void> {
+  if (snapshot.size === 0) return
+  // Restore the encrypted database blobs first. This is what the production
+  // Electron host reads, and it also makes the operation deterministic if a
+  // custom host has no remove() hook.
+  repo.tx(() => {
+    for (const [ref, state] of snapshot) {
+      if (state.blob === undefined) repo.removeCredential(ref)
+      else repo.putCredential(ref, state.blob)
+    }
+  })
+
+  const secrets = getHost().secrets
+  for (const [ref, state] of snapshot) {
+    try {
+      if (state.plaintext !== null && state.plaintextReadable) {
+        // Re-seeding the old plaintext repairs an in-memory/test host and is
+        // harmless for Electron (it simply encrypts it again).
+        await secrets.set(ref, state.plaintext)
+      } else if (state.blob === undefined && state.plaintextReadable) {
+        // The optional hook is implemented by Electron and nodeHost. Older
+        // injected hosts can still rely on the database restoration above.
+        await secrets.remove?.(ref)
+      }
+    } catch (err) {
+      // Rollback is best effort at this boundary. Keep the original import
+      // error as the user-facing cause, but leave an auditable diagnostic.
+      console.error('[storage] 凭证回滚失败:', ref, err)
+    }
+  }
+}
+
 // ── public storage handlers ────────────────────────────────────────────────
 
 export function getStats(): StorageStats {
   return repo.storageStats(dataDirectory(), attachmentDirectory(), readBackupStatus().lastBackupAt)
 }
 
-export function openDataDirectory(): void {
+export async function openDataDirectory(): Promise<void> {
   const path = dataDirectory()
-  const error = shell.openPath(path)
-  void error.then((message) => { if (message) console.warn(`[storage] 打开数据目录失败: ${message}`) })
+  const message = await shell.openPath(path)
+  if (message) throw new IpcError('unknown', `打开数据目录失败: ${message}`)
 }
 
 export function vacuum(): StorageStats {
@@ -569,11 +725,12 @@ export async function importApply(req: { password?: string }): Promise<ImportApp
     if (req.password === undefined) throw new IpcError('auth', '该导出包含加密密钥，需要输入密码')
     // 先验证密码，再开始事务；无效密码不会修改任何记录。
     credentialValues = decryptCredentials(data.encryptedCredentials, req.password)
-    const allowed = new Set(credentialRefs())
+    const allowed = credentialRefsForData(data)
     for (const ref of Object.keys(credentialValues)) {
       if (!allowed.has(ref)) throw new IpcError('unknown', '导入文件包含未知凭证引用')
     }
   }
+  const credentialRollback = await snapshotCredentialRollback(Object.keys(credentialValues))
   // 凭证写入使用 safeStorage，和数据库事务不是同一个同步 API。先保存数据库
   // 快照，任何一步失败都恢复整库，保证「导入失败 = 现有数据完全不变」。
   const dbPath = databaseFilePath()
@@ -600,12 +757,13 @@ export async function importApply(req: { password?: string }): Promise<ImportApp
     windows.emitToAll('sessions:changed', {})
     return result
   } catch (err) {
+    await restoreCredentialRollback(credentialRollback)
     if (safety !== null && dbPath !== null) {
       try {
         closeDatabase()
         atomicWrite(dbPath, readFileSync(safety))
         for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* ignore */ } }
-        openDatabase(dataDirectory())
+        openDatabase(dirname(dbPath))
       } catch (rollbackError) {
         console.error('[storage] 导入回滚失败', rollbackError)
       }
@@ -759,12 +917,53 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
   if (dbRaw.length < 64 || dbRaw.toString('ascii', 0, 15) !== 'SQLite format 3') throw new IpcError('unknown', '备份数据库文件无效')
   const schemaVersion = dbRaw.readUInt32BE(60)
   if (schemaVersion !== m.schemaVersion) throw new IpcError('unknown', '备份数据库版本与 manifest 不一致')
+  validateBackupDatabase(dbRaw, m)
   let settings: unknown
   try { settings = JSON.parse(settingsRaw.toString('utf8')) } catch { throw new IpcError('unknown', '备份设置损坏') }
   if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
     throw new IpcError('unknown', '备份设置结构无效')
   }
+  try {
+    // This also accepts older settings files that predate `data`; the shared
+    // merger supplies the current defaults while rejecting non-object input.
+    mergeSettings(DEFAULT_SETTINGS, settings as Parameters<typeof mergeSettings>[1])
+  } catch {
+    throw new IpcError('unknown', '备份设置结构无效')
+  }
   return { manifest: m as BackupManifest, database: dbRaw, settings }
+}
+
+/**
+ * Cross-check manifest claims against the SQLite payload itself.  A checksum
+ * proves that the database was not changed after the manifest was written,
+ * but it does not prove that the manifest's human-readable counts are true.
+ * Deserialize into an isolated in-memory handle so no application state is
+ * touched while previewing an untrusted archive.
+ */
+function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>): void {
+  let temp: DatabaseSync | null = null
+  try {
+    temp = new DatabaseSync(':memory:', { enableForeignKeyConstraints: true })
+    // `deserialize` is present in the Node runtime shipped with Electron,
+    // but older @types/node releases do not declare it yet.
+    const deserialize = (temp as DatabaseSync & { deserialize(data: Uint8Array): void }).deserialize
+    if (typeof deserialize !== 'function') throw new Error('当前运行时不支持 SQLite 归档校验')
+    deserialize.call(temp, raw)
+    const sessions = Number((temp.prepare('SELECT COUNT(*) AS n FROM sessions').get() as Record<string, unknown>)['n'] ?? -1)
+    const messages = Number((temp.prepare('SELECT COUNT(*) AS n FROM messages').get() as Record<string, unknown>)['n'] ?? -1)
+    const credentials = Number((temp.prepare('SELECT COUNT(*) AS n FROM credentials').get() as Record<string, unknown>)['n'] ?? -1)
+    if (sessions !== manifest.sessionCount || messages !== manifest.messageCount) {
+      throw new Error('manifest count mismatch')
+    }
+    if ((credentials > 0) !== manifest.encryptedCredentials) {
+      throw new Error('manifest credential flag mismatch')
+    }
+  } catch (err) {
+    if (err instanceof IpcError) throw err
+    throw new IpcError('unknown', `备份数据库内容校验失败: ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    try { temp?.close() } catch { /* best effort */ }
+  }
 }
 
 export async function restoreBackup(req: { confirm?: boolean }): Promise<RestoreResult | null> {
@@ -789,6 +988,7 @@ export async function restoreBackup(req: { confirm?: boolean }): Promise<Restore
   const dbPath = databaseFilePath()
   if (dbPath === null) throw new IpcError('unknown', '当前数据库不是文件库')
   const safety = `${dbPath}.restore-safety-${Date.now()}`
+  const localBackupState = captureLocalBackupState()
   checkpointDatabase()
   copyFileSync(dbPath, safety)
   try {
@@ -796,7 +996,11 @@ export async function restoreBackup(req: { confirm?: boolean }): Promise<Restore
     atomicWrite(dbPath, parsed.database)
     // 清掉旧 WAL/SHM，防止旧日志覆盖恢复后的文件。
     for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* 不存在 */ } }
-    openDatabase(dataDirectory())
+    openDatabase(dirname(dbPath))
+    // The archive may have been produced on another device. Restore the
+    // current device's backup directory and sanitize its status immediately
+    // after reopening the replacement database.
+    restoreLocalBackupState(localBackupState)
     pendingRestore = null
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
@@ -808,7 +1012,8 @@ export async function restoreBackup(req: { confirm?: boolean }): Promise<Restore
       for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* 不存在 */ } }
       atomicWrite(dbPath, readFileSync(safety))
       for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* 不存在 */ } }
-      openDatabase(dataDirectory())
+      openDatabase(dirname(dbPath))
+      restoreLocalBackupState(localBackupState)
     } catch (rollbackError) {
       console.error('[storage] 恢复回滚失败', rollbackError)
     }
@@ -834,7 +1039,22 @@ function isManagedSessionAttachment(path: string): boolean {
 
 /** 删除受管理目录时保留用户选定的备份目录（无论它嵌套在哪一侧）。 */
 function removeManagedPath(path: string, protectedPath: string | null): void {
-  if (!existsSync(path)) return
+  let stat
+  try { stat = lstatSync(path) } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return
+    throw new IpcError('unknown', `读取 ${path} 失败: ${String(err)}`)
+  }
+
+  // A symlink is a leaf. Never pass it to a recursive remover and never use
+  // statSync here: both can follow a link into an external directory.
+  if (stat.isSymbolicLink()) {
+    if (protectedPath !== null && isWithin(protectedPath, path)) return
+    try { unlinkSync(path) } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw new IpcError('unknown', `删除 ${path} 失败: ${String(err)}`)
+    }
+    return
+  }
+
   if (protectedPath !== null && isWithin(protectedPath, path)) {
     // 备份目录位于待删目录之上/就是待删目录：整棵都不能动。
     return
@@ -842,7 +1062,7 @@ function removeManagedPath(path: string, protectedPath: string | null): void {
   if (protectedPath !== null && isWithin(path, protectedPath)) {
     // 备份目录是待删目录的子树：只清理其余兄弟，保留这条子树。
     try {
-      if (!statSync(path).isDirectory()) return
+      if (!stat.isDirectory()) return
       for (const entry of readdirSync(path, { withFileTypes: true })) {
         removeManagedPath(join(path, entry.name), protectedPath)
       }
@@ -851,17 +1071,28 @@ function removeManagedPath(path: string, protectedPath: string | null): void {
     }
     return
   }
-  try { rmSync(path, { recursive: true, force: true }) } catch (err) {
-    throw new IpcError('unknown', `删除 ${path} 失败: ${String(err)}`)
-  }
+  try {
+    if (stat.isDirectory()) rmSync(path, { recursive: true, force: true })
+    else unlinkSync(path)
+  } catch (err) { throw new IpcError('unknown', `删除 ${path} 失败: ${String(err)}`) }
 }
 
 function walkFiles(root: string): string[] {
-  if (!existsSync(root)) return []
+  let rootStat
+  try { rootStat = lstatSync(root) } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return []
+    return []
+  }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return []
   const out: string[] = []
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const path = join(root, entry.name)
-    if (entry.isDirectory()) out.push(...walkFiles(path))
+    // Dirent.isDirectory() is intentionally not enough for a hostile tree:
+    // inspect the link itself and treat symlinks as leaves.
+    let stat
+    try { stat = lstatSync(path) } catch { continue }
+    if (stat.isSymbolicLink()) out.push(path)
+    else if (stat.isDirectory()) out.push(...walkFiles(path))
     else out.push(path)
   }
   return out
@@ -916,9 +1147,19 @@ function scanReclaimable(now: number): ReclaimScan {
   let bytes = 0
   const add = (p: string): void => {
     files.push(p)
-    try { bytes += statSync(p).size } catch { /* 统计不精确不影响回收 */ }
+    try { bytes += lstatSync(p).size } catch { /* 统计不精确不影响回收 */ }
   }
 
+  /*
+    ★ **只扫 sessions/ 子树,不扫整个附件根。**
+
+    附件根下不止会话附件:`themes/` 放主题图,它们由 `theme.ts` 的 index.json
+    管理、**不在 attachments 表里**。而这个函数的孤儿判据是「表里没有就删」——
+    对整个根跑一遍的话,用户传的每一张主题图都会在下一次清理时消失。
+
+    所以判据按子树分治:sessions/ 归这里,themes/ 归 `sweepOrphans`,
+    各自认自己的权威来源。判据的适用范围本身就是判据的一部分。
+  */
   for (const path of walkFiles(root)) {
     // 上传中断留下的残片。以 `.` 开头 + `.tmp` 结尾，`ncw://` 也寻址不到它们
     if (basename(path).startsWith('.') && path.endsWith('.tmp')) { add(path); continue }
@@ -932,7 +1173,9 @@ function scanReclaimable(now: number): ReclaimScan {
   // 超期草稿：文件与行一起收
   for (const row of repo.listStaleDraftAttachments(now - DRAFT_ATTACHMENT_TTL_MS)) {
     if (row.scope !== 'session' || !isManagedSessionAttachment(row.path)) continue
-    if (!files.includes(row.path) && existsSync(row.path)) add(row.path)
+    if (!files.includes(row.path)) {
+      try { lstatSync(row.path); add(row.path) } catch { /* 文件已不存在 */ }
+    }
     rowIds.push(row.id)
     rowPaths.set(row.id, row.path)
   }
@@ -941,7 +1184,9 @@ function scanReclaimable(now: number): ReclaimScan {
   for (const row of repo.attachmentRows()) {
     // attachmentRows() 是兼容旧调用点的精简视图；路径边界仍由这里负责。
     if (!isManagedSessionAttachment(row.path)) continue
-    if (!existsSync(row.path) && !rowIds.includes(row.id)) {
+    let present = true
+    try { lstatSync(row.path) } catch { present = false }
+    if (!present && !rowIds.includes(row.id)) {
       rowIds.push(row.id)
       rowPaths.set(row.id, row.path)
       bytes += row.size
@@ -974,11 +1219,14 @@ function removeUnreferencedManagedFiles(paths: readonly string[]): PhysicalClean
   for (const raw of paths) {
     if (!isManagedSessionAttachment(raw)) continue
     const path = resolve(raw)
-    if (seen.has(path) || referenced.has(path) || !existsSync(path)) continue
+    let stat
+    try { stat = lstatSync(path) } catch { continue }
+    if (seen.has(path) || referenced.has(path)) continue
     seen.add(path)
     try {
-      // unlink 文件或符号链接；绝不递归删除异常目录。
-      if (!statSync(path).isFile()) { undeletable.push(path); continue }
+      // Unlink a regular file or the symlink itself; never recurse into an
+      // unexpected directory and never follow a link to its target.
+      if (!stat.isFile() && !stat.isSymbolicLink()) { undeletable.push(path); continue }
       unlinkSync(path)
       deleted++
     } catch {
@@ -986,6 +1234,16 @@ function removeUnreferencedManagedFiles(paths: readonly string[]): PhysicalClean
     }
   }
   return { deleted, undeletable: [...new Set(undeletable)] }
+}
+
+/**
+ * Reclaim the physical files that belonged to a deleted session.  SQLite's
+ * cascade removes the attachment rows, but it cannot remove files outside
+ * the database.  Keep this helper in the storage boundary so session IPC and
+ * the bulk cleanup paths share the same path and reference checks.
+ */
+export function removeSessionAttachmentFiles(paths: readonly string[]): PhysicalCleanup {
+  return removeUnreferencedManagedFiles(paths)
 }
 
 function attachmentCleanupPreview(): CleanupPreview {
@@ -1003,7 +1261,8 @@ function attachmentCleanupPreview(): CleanupPreview {
 function likelyUndeletable(paths: readonly string[]): string[] {
   const result: string[] = []
   for (const raw of paths) {
-    if (!isManagedSessionAttachment(raw) || !existsSync(raw)) continue
+    if (!isManagedSessionAttachment(raw)) continue
+    try { lstatSync(raw) } catch { continue }
     try {
       // 删除权限由父目录决定；这里只做预览，不把文件内容或路径交给 renderer。
       accessSync(dirname(raw), constants.W_OK)

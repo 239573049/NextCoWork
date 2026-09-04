@@ -186,17 +186,24 @@ function seedBuiltinUpstream(): string | null {
   const endpoint = endpointFor(preset, 'anthropic')
   if (endpoint === null) return null
 
-  store.putProvider({
-    id: BUILTIN_PROVIDER_ID,
-    name: preset.name,
-    protocol: endpoint.protocol,
-    baseUrl: endpoint.baseUrl,
-    credentialRef: `provider:${BUILTIN_PROVIDER_ID}`,
-    // 50:让位给用户自己配的(预设建出来是 `PRESET_PRIORITY` 60)。
-    // 手工建的演示上游仍是 100 —— 全表最低,谁都排在它前面
-    priority: 50,
-    enabled: true
-  })
+  // Seeding runs once per process, including after a database restart. Never
+  // overwrite an existing provider: doing so would erase protocolOptions
+  // (including the user's Anthropic cache TTL), a protocol switch, or an
+  // explicit disabled state. A deleted built-in provider is still recreated.
+  const existing = store.listProviders().find((p) => p.id === BUILTIN_PROVIDER_ID)
+  if (existing === undefined) {
+    store.putProvider({
+      id: BUILTIN_PROVIDER_ID,
+      name: preset.name,
+      protocol: endpoint.protocol,
+      baseUrl: endpoint.baseUrl,
+      credentialRef: `provider:${BUILTIN_PROVIDER_ID}`,
+      // 50:让位给用户自己配的(预设建出来是 `PRESET_PRIORITY` 60)。
+      // 手工建的演示上游仍是 100 —— 全表最低,谁都排在它前面
+      priority: 50,
+      enabled: true
+    })
+  }
 
   /**
    * ★ 别名只种预设里 `suggestedModels` 的第一条,而且 `alias === upstreamModel`。
@@ -225,8 +232,8 @@ function seedBuiltinUpstream(): string | null {
  * 而参考实现里那个「默认工作区」正是这个位置(定时任务页的筛选器里
  * `全部工作区 / 默认工作区 / NextCoWork` 就是它和真实工作区并列)。
  *
- * 根目录落在 userData 下而**不是** `process.cwd()`:打包后 cwd 在应用包内部,
- * 步骤 9 的 fs 工具就会以「围栏之内」的名义写进应用包里。
+ * 根目录落在统一的应用数据根 `.next-cowork/` 下,而不是 `process.cwd()`:
+ * 打包后 cwd 在应用包内部,步骤 9 的 fs 工具就会以「围栏之内」的名义写进应用包里。
  *
  * 建目录失败不该拦住启动 —— 标 `unavailable` 就是 `Workspace` 上那个字段
  * 存在的理由(方案 §9:「工作区根会在运行期被删除或改名,加载时标记

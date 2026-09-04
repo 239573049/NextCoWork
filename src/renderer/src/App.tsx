@@ -21,6 +21,7 @@ import { startAgentEventPump, adoptActiveRuns, refreshHydratedSessions, useRunIn
 import { useImageThemes } from './stores/imageTheme'
 import { useWindowStore } from './stores/window'
 import { applyTheme } from './theme/apply'
+import { useI18n } from './i18n'
 
 export default function App(): React.JSX.Element {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
@@ -29,6 +30,11 @@ export default function App(): React.JSX.Element {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [fatal, setFatal] = useState<string | null>(null)
   const hydrate = useWindowStore((s) => s.hydrate)
+  const { setLocale, t } = useI18n()
+
+  useEffect(() => {
+    if (settings !== null) setLocale(settings.locale)
+  }, [settings, setLocale])
 
   useEffect(() => startAgentEventPump(), [])
 
@@ -74,21 +80,19 @@ export default function App(): React.JSX.Element {
    * 它的 seed 才是整套 token 的出处,所以 `uploaded` 到达之前 `resolveImageTheme`
    * 查不到这个 id,界面会先按颜色主题画一帧,拿到表之后再落一次。
    *
-   * 只兑现**选中的那一张**的 blob URL(理由在 store 的文件头);其余的等设置页
-   * 挂载时再说。传内置 id 或 null 进去就只拉表,不发多余的读文件请求。
+   * ★ 只拉表,没有第二步。底图 URL 跟着表一起来(`source.url` 是 `ncw://` 地址),
+   * 原先那套「按需兑现 blob URL」的机制随协议迁移一起删掉了。
    */
   const uploadedThemes = useImageThemes((s) => s.uploaded)
-  const themeAssetUrls = useImageThemes((s) => s.urls)
-  const selectedImageId = settings?.imageTheme.id ?? null
 
   useEffect(() => {
-    void useImageThemes.getState().load(selectedImageId)
-  }, [selectedImageId])
+    void useImageThemes.getState().load()
+  }, [])
 
   useEffect(() => {
     if (appearance === null || settings === null) return
-    applyTheme(document.documentElement, appearance, settings, uploadedThemes, themeAssetUrls)
-  }, [appearance, settings, uploadedThemes, themeAssetUrls])
+    applyTheme(document.documentElement, appearance, settings, uploadedThemes)
+  }, [appearance, settings, uploadedThemes])
 
   // 运行中角标的数据源是 RunRegistry 的投影,不是任何 UI 状态(方案 §8)
   const runIndex = useRunIndex()
@@ -98,7 +102,7 @@ export default function App(): React.JSX.Element {
   if (fatal !== null) {
     return (
       <div className="flex h-full items-center justify-center bg-app p-8">
-        <p className="selectable max-w-lg font-mono text-[13px] text-danger">首屏握手失败:{fatal}</p>
+        <p className="selectable max-w-lg font-mono text-[13px] text-danger">{t('app.handshakeFailed', { error: fatal })}</p>
       </div>
     )
   }

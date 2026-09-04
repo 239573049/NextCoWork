@@ -13,7 +13,10 @@
  */
 import { agentError, type AgentError } from '../../../../shared/agent/error'
 import type { ProviderStreamEvent, StopReason, TokenUsage } from '../../../../shared/agent/stream'
-import type { AnthropicCacheTtl } from '../../../../shared/domain/provider'
+import {
+  normalizeAnthropicCacheTtl,
+  type AnthropicCacheTtl
+} from '../../../../shared/domain/provider'
 import type { SseEvent } from '../sse'
 
 // ─── 从 unknown 里安全取值 ───────────────────────────────────────────
@@ -35,6 +38,50 @@ function num(o: Record<string, unknown> | undefined, k: string): number | undefi
 }
 function sub(o: Record<string, unknown> | undefined, k: string): Record<string, unknown> | undefined {
   return rec(o?.[k])
+}
+
+/**
+ * 错误响应不一定是 Anthropic 官方的 JSON 形状。
+ *
+ * 兼容中转站常见的几种返回分别是：
+ *
+ * - `{ error: { type, message } }`（官方形状）；
+ * - `{ message, type }`（把 `error` 外壳剥掉）；
+ * - 纯文本或 HTML（网关/反向代理自己的错误页）。
+ *
+ * 缓存兼容性错误的判定必须覆盖这三类，否则一个返回纯文本
+ * `cache_control is not supported` 的中转站会被误当成普通 400，随后触发
+ * 重试/切换，既违背配置错误语义，也可能重复产生费用。
+ */
+function errorDetails(body: unknown, status: number): { message: string; kind: string; searchable: string } {
+  const root = rec(body)
+  const nested = sub(root, 'error')
+  const nestedMessage = str(nested, 'message')
+  const rootMessage = str(root, 'message')
+  const errorValue = root?.['error']
+  const errorText = typeof errorValue === 'string' ? errorValue.trim() : ''
+  const text = typeof body === 'string' ? body.trim() : ''
+  let serialized = ''
+  if (body !== null && typeof body === 'object') {
+    try {
+      serialized = JSON.stringify(body)
+    } catch {
+      // Error bodies normally come from JSON.parse and cannot be cyclic; keep
+      // the structured message fallback if a custom relay violates that.
+    }
+  }
+  const message =
+    nestedMessage ??
+    rootMessage ??
+    (errorText !== ''
+      ? errorText
+      : text === ''
+        ? serialized === ''
+          ? `上游返回 ${status}`
+          : `上游返回 ${status}: ${serialized}`
+        : `上游返回 ${status}: ${text}`)
+  const kind = str(nested, 'type') ?? str(root, 'type') ?? ''
+  return { message, kind, searchable: `${message}\n${kind}\n${text}\n${serialized}` }
 }
 
 /**
@@ -69,21 +116,26 @@ export function anthropicErrorToAgentError(
   body: unknown,
   options: { cacheTtl?: AnthropicCacheTtl; providerName?: string } = {}
 ): AgentError {
-  const err = sub(rec(body), 'error')
-  const message = str(err, 'message') ?? `上游返回 ${status}`
-  const kind = str(err, 'type') ?? ''
+  const { message, kind, searchable } = errorDetails(body, status)
+  const cacheTtl = normalizeAnthropicCacheTtl(options.cacheTtl)
 
   if (
     (status === 400 || status === 422) &&
-    options.cacheTtl !== undefined &&
-    options.cacheTtl !== 'off' &&
-    /cache[_ -]?control|cache breakpoint|cache[_ -]?breakpoint|\bephemeral\b|\bttl\b/i.test(message)
+    cacheTtl !== 'off' &&
+    /cache[_ -]?control|cache[_ -]?breakpoint|(?:^|[^a-z0-9])(ephemeral|ttl)(?:$|[^a-z0-9])/i.test(searchable)
   ) {
-    const ttl = options.cacheTtl === '1h' ? '1 小时' : '5 分钟'
+    const ttl = cacheTtl === '1h' ? '1 小时' : '5 分钟'
     const provider = options.providerName === undefined ? '当前供应商' : `供应商「${options.providerName}」`
+    // Some relays provide only an error type (for example
+    // `cache_control_not_supported`) and omit `message`. Keep that raw type in
+    // the actionable error so the user can identify the upstream limitation.
+    const upstreamError =
+      kind !== '' && !message.toLowerCase().includes(kind.toLowerCase())
+        ? `${kind}: ${message}`
+        : message
     return agentError(
       'cache_unsupported',
-      `${provider}拒绝了 Anthropic ${ttl}提示缓存配置：${message}。请在供应商设置中关闭或调整提示缓存。`,
+      `${provider}拒绝了 Anthropic ${ttl}提示缓存配置：${upstreamError}。请在供应商设置中关闭或调整提示缓存。`,
       { status, retryable: false }
     )
   }

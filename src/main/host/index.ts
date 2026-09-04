@@ -13,7 +13,8 @@
  * 覆盖它们只会多一份要同步维护的代码。
  */
 import { app, net, safeStorage } from 'electron'
-import { getCredential, putCredential } from '../db/repo'
+import { getCredential, putCredential, removeCredential } from '../db/repo'
+import { defaultDatabaseDirectory } from '../db'
 import type { KernelHost } from '../kernel/host'
 import { nodeHost } from '../kernel/host'
 import { withDemo } from '../kernel/upstream/demo'
@@ -47,6 +48,11 @@ function electronSecrets(): KernelHost['secrets'] {
       }
       putCredential(ref, safeStorage.encryptString(value))
     },
+    remove: async (ref) => {
+      // safeStorage has no delete primitive of its own; deleting the encrypted
+      // blob from our credentials table is the authoritative removal.
+      removeCredential(ref)
+    },
     available: () => safeStorage.isEncryptionAvailable()
   }
 }
@@ -74,7 +80,7 @@ export function electronHost(): KernelHost {
   return withDemo(
     nodeHost({
       paths: {
-        userData: () => app.getPath('userData'),
+        userData: () => defaultDatabaseDirectory(),
         temp: () => app.getPath('temp')
       },
       secrets: electronSecrets(),

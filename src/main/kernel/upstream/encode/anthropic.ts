@@ -6,7 +6,10 @@
  */
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import type { ToolInfo } from '../../../../shared/agent/tool'
-import type { AnthropicCacheTtl } from '../../../../shared/domain/provider'
+import {
+  normalizeAnthropicCacheTtl,
+  type AnthropicCacheTtl
+} from '../../../../shared/domain/provider'
 import type { CanonicalRequest } from '../canonical'
 
 interface AnthropicMessage {
@@ -143,9 +146,26 @@ function cacheControl(ttl: AnthropicCacheTtl): AnthropicCacheControl | undefined
 export function encodeAnthropic(
   req: CanonicalRequest,
   upstreamModel: string,
+  apiKey: string
+): EncodedRequest
+export function encodeAnthropic(
+  req: CanonicalRequest,
+  upstreamModel: string,
   apiKey: string,
   options: AnthropicEncodeOptions
+): EncodedRequest
+export function encodeAnthropic(
+  req: CanonicalRequest,
+  upstreamModel: string,
+  apiKey: string,
+  options?: AnthropicEncodeOptions
 ): EncodedRequest {
+  // Keep the three-argument form source-compatible for older gateway callers.
+  // Production routing always supplies a validated workspace id; an omitted
+  // option is therefore a cache-off request with an empty (non-production)
+  // metadata value rather than a way to silently enable caching.
+  const userId = typeof options?.userId === 'string' ? options.userId : ''
+  const cacheTtl = normalizeAnthropicCacheTtl(options?.cacheTtl)
   const body: Record<string, unknown> = {
     model: upstreamModel,
     max_tokens: req.maxOutputTokens,
@@ -153,9 +173,9 @@ export function encodeAnthropic(
     stream: true,
     // Identity/tenant metadata is independent from prompt caching and is sent
     // even when caching is disabled.
-    metadata: { user_id: options.userId }
+    metadata: { user_id: userId }
   }
-  const caching = cacheControl(options.cacheTtl)
+  const caching = cacheControl(cacheTtl)
   const tools = req.tools.length > 0 ? toAnthropicTools(req.tools) : []
 
   if (req.system !== '') {

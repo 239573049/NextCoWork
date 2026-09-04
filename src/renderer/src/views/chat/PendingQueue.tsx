@@ -22,6 +22,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { QueuedInput } from '../../../../shared/domain/queued-input'
 import { Menu, MenuItem } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
+import { useI18n } from '../../i18n'
 
 export function PendingQueue({
   items,
@@ -126,6 +127,7 @@ function QueueHeader({
   onToggle: () => void
   onResume: () => void
 }): ReactNode {
+  const { t } = useI18n()
   return (
     <div className="flex h-8 items-center gap-2 px-2.5">
       <button
@@ -138,8 +140,8 @@ function QueueHeader({
         <ChevronIcon collapsed={collapsed} />
         {/* aria-live 只播报计数,不播报每条内容 —— 排三条消息不该念三段话 */}
         <span aria-live="polite" className="truncate">
-          已排队 {count} 条
-          {promotedCount > 0 && ` · ${promotedCount} 条待插话`}
+          {t('chat.queue', { count })}
+          {promotedCount > 0 && t('chat.queuePromoted', { count: promotedCount })}
         </span>
       </button>
 
@@ -150,7 +152,7 @@ function QueueHeader({
           data-testid="queue-resume"
           className="shrink-0 rounded-[6px] px-2 py-0.5 text-[11.5px] text-accent transition-colors hover:bg-accent/10"
         >
-          继续执行
+          {t('chat.continue')}
         </button>
       )}
     </div>
@@ -191,6 +193,7 @@ export function PendingQueueItem({
   onDrop: () => void
   onMoveToDraft: () => void
 }): ReactNode {
+  const { t } = useI18n()
   const promoted = item.status === 'promoted'
   const imageCount = item.attachments.filter((a) => a.kind === 'image').length
   const fileCount = item.attachments.length - imageCount
@@ -220,9 +223,9 @@ export function PendingQueueItem({
         className="min-w-0 flex-1 truncate text-left text-[12.5px] text-fg"
         title={item.text}
       >
-        {item.text.trim() === '' ? <span className="text-fg-faint">(空消息)</span> : item.text}
-        {imageCount > 0 && <span className="text-fg-faint"> · {imageCount} 图片</span>}
-        {fileCount > 0 && <span className="text-fg-faint"> · {fileCount} 附件</span>}
+        {item.text.trim() === '' ? <span className="text-fg-faint">{t('chat.emptyMessage')}</span> : item.text}
+        {imageCount > 0 && <span className="text-fg-faint">{t('chat.images', { count: imageCount })}</span>}
+        {fileCount > 0 && <span className="text-fg-faint">{t('chat.attachments', { count: fileCount })}</span>}
       </button>
 
       {/* ★ 常驻,不是 hover 才出现 */}
@@ -237,17 +240,17 @@ export function PendingQueueItem({
             ? 'text-accent hover:bg-accent/10'
             : 'text-fg-faint hover:bg-tint-hover hover:text-fg-muted'
         )}
-        title={promoted ? '取消插话' : '下一轮优先发送这条'}
+        title={promoted ? t('chat.cancelInterrupt') : t('chat.interrupt')}
       >
         <ArrowUpToLine size={12} />
-        {promoted ? '已插话' : '插话'}
+        {promoted ? t('chat.interrupted') : t('chat.interrupt')}
       </button>
 
       <button
         type="button"
         onClick={onDrop}
         data-testid="queue-item-drop"
-        aria-label="删除"
+        aria-label={t('common.delete')}
         className="shrink-0 rounded-[6px] p-1 text-fg-faint transition-colors hover:bg-tint-hover hover:text-danger"
       >
         <Trash2 size={13} />
@@ -255,11 +258,11 @@ export function PendingQueueItem({
 
       <Menu
         width={180}
-        label="排队消息操作"
+        label={t('chat.queueActions')}
         trigger={
           <span
             className="flex shrink-0 rounded-[6px] p-1 text-fg-faint transition-colors hover:bg-tint-hover hover:text-fg-muted"
-            aria-label="更多"
+            aria-label={t('common.more')}
           >
             <MoreHorizontal size={13} />
           </span>
@@ -274,7 +277,7 @@ export function PendingQueueItem({
                 onStartEdit()
               }}
             >
-              编辑
+              {t('chat.edit')}
             </MenuItem>
             <MenuItem
               icon={<Undo2 size={13} />}
@@ -283,7 +286,7 @@ export function PendingQueueItem({
                 onMoveToDraft()
               }}
             >
-              撤回到输入框
+              {t('chat.recall')}
             </MenuItem>
           </>
         )}
@@ -308,6 +311,7 @@ export function PendingQueueEditor({
   onCancel: () => void
   onSave: (text: string) => void
 }): ReactNode {
+  const { t } = useI18n()
   const [text, setText] = useState(initialText)
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -349,7 +353,7 @@ export function PendingQueueEditor({
           onClick={onCancel}
           className="rounded-[6px] px-2.5 py-1 text-[12px] text-fg-muted transition-colors hover:bg-tint-hover"
         >
-          取消
+          {t('common.cancel')}
         </button>
         <button
           type="button"
@@ -358,7 +362,7 @@ export function PendingQueueEditor({
           data-testid="queue-editor-save"
           className="rounded-[6px] bg-accent px-2.5 py-1 text-[12px] font-medium text-accent-fg transition-opacity disabled:opacity-40"
         >
-          保存
+          {t('common.save')}
         </button>
       </div>
     </div>

@@ -58,7 +58,6 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
   const xtermRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const [status, setStatus] = useState<'starting' | 'connected' | 'exited' | 'error'>('starting')
-  const [exitCode, setExitCode] = useState<number | null>(null)
 
   useEffect(() => {
     const host = hostRef.current
@@ -109,7 +108,6 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
     const offExit = onTerminalExit(({ id, code }) => {
       if (id !== tab.ref.terminalId || cancelled) return
       setStatus('exited')
-      setExitCode(code)
       terminal.write(`\r\n\x1b[90m[终端已退出，退出码 ${code}]\x1b[0m\r\n`)
     })
     const dataDisposable = terminal.onData((data) => writeTerminal(tab.ref.terminalId, data))
@@ -136,7 +134,6 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
         }
         queued.length = 0
         setStatus(info.alive ? 'connected' : 'exited')
-        if (!info.alive) setExitCode(null)
         fitAndResize()
       } catch (error) {
         if (cancelled) return
@@ -159,15 +156,6 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
 
   return (
     <div className="terminal-surface flex min-h-0 flex-1 flex-col" data-terminal-status={status}>
-      <div className="flex h-7 shrink-0 items-center justify-between border-b border-hairline px-3 text-[11px] text-fg-faint">
-        <span className="truncate font-mono">{workspace.rootPath}</span>
-        <span className="ml-3 shrink-0 tabular-nums">
-          {status === 'starting' && '正在连接…'}
-          {status === 'connected' && '已连接'}
-          {status === 'exited' && `已退出${exitCode === null ? '' : ` · ${exitCode}`}`}
-          {status === 'error' && '连接失败'}
-        </span>
-      </div>
       <div ref={hostRef} className="terminal-host min-h-0 flex-1 px-3 py-2" />
     </div>
   )

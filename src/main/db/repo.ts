@@ -18,6 +18,7 @@ import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import { mcpSecretRef } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
+import { normalizeUpstreamProvider } from '../../shared/domain/provider'
 import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
 import { defaultProviderConfigs, searchSecretRef } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
@@ -29,8 +30,8 @@ import type { Workspace } from '../../shared/domain/workspace'
 import { fileStats, stmt, tx } from './index'
 import { ulid } from '../../shared/util/id'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { basename, join } from 'node:path'
 
 export { tx } from './index'
 
@@ -308,30 +309,146 @@ function upsertFts(session: Session, message: AgentMessage): void {
  * ★ 从 URL 反推主键**不需要知道附件根在哪**:磁盘文件名就是
  * `<attachmentId><ext>`,去掉扩展名就是 id。这让 repo 层不必依赖 `electron`。
  */
+interface ManagedAttachmentCandidate {
+  row: AttachmentRow
+  index: number
+}
+
+function attachmentRowsForMessage(messageId: string): AttachmentRow[] {
+  return stmt('SELECT * FROM attachments WHERE message_id = ? ORDER BY id').all(messageId).map(toAttachmentRow)
+}
+
+/**
+ * Attach a managed file to one message without moving an existing reference.
+ *
+ * Upload de-duplication intentionally returns one id while an attachment is
+ * still a draft. Once that draft is committed, a second message may refer to
+ * the same URL. The old one-row implementation updated `message_id` in place,
+ * silently detaching the first message. Reuse an existing row for this message
+ * when possible, claim an uncommitted draft otherwise, and create a stable
+ * reference row for every additional message/part.
+ */
+function commitManagedAttachment(
+  candidate: AttachmentRow,
+  session: Session,
+  message: AgentMessage,
+  index: number,
+  usedIds: Set<string>,
+  currentRows: AttachmentRow[]
+): string {
+  const reusable = currentRows.find(
+    (row) => !usedIds.has(row.id) && row.scope === 'session' && row.ownerId === session.id && row.path === candidate.path
+  )
+  if (reusable !== undefined) {
+    if (reusable.status !== 'committed' || reusable.sessionId !== session.id) {
+      stmt(
+        `UPDATE attachments SET status = 'committed', session_id = ?, owner_id = ?
+         WHERE id = ? AND scope = 'session' AND owner_id = ? AND message_id = ?`
+      ).run(session.id, session.id, reusable.id, session.id, message.id)
+    }
+    usedIds.add(reusable.id)
+    return reusable.id
+  }
+
+  const canClaimDraft =
+    !usedIds.has(candidate.id) &&
+    candidate.scope === 'session' &&
+    candidate.ownerId === session.id &&
+    candidate.status === 'draft' &&
+    candidate.sessionId === null &&
+    candidate.messageId === null
+  if (canClaimDraft) {
+    stmt(
+      `UPDATE attachments SET status = 'committed', message_id = ?, session_id = ?, owner_id = ?
+       WHERE id = ? AND scope = 'session' AND owner_id = ? AND status = 'draft'
+         AND message_id IS NULL AND session_id IS NULL`
+    ).run(message.id, session.id, session.id, candidate.id, session.id)
+    usedIds.add(candidate.id)
+    return candidate.id
+  }
+
+  // A deterministic id makes message replay idempotent. If a malicious or
+  // legacy record already occupies it, include the source id and increment
+  // until the existing row is either the same reference or a free key.
+  const baseId = `${message.id}:managed:${String(index)}`
+  let id = baseId
+  let suffix = 0
+  while (true) {
+    const existing = getAttachmentRow(id)
+    if (existing === undefined) break
+    if (
+      existing.scope === 'session' &&
+      existing.ownerId === session.id &&
+      existing.messageId === message.id &&
+      existing.path === candidate.path
+    ) {
+      usedIds.add(id)
+      return id
+    }
+    suffix++
+    id = `${baseId}:${candidate.id}:${String(suffix)}`
+  }
+
+  stmt(
+    `INSERT INTO attachments
+       (id, session_id, message_id, path, size, checksum, scope, status, owner_id, display_name, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'session', 'committed', ?, ?, ?)`
+  ).run(
+    id,
+    session.id,
+    message.id,
+    candidate.path,
+    candidate.size,
+    candidate.checksum,
+    session.id,
+    candidate.displayName,
+    message.createdAt
+  )
+  usedIds.add(id)
+  return id
+}
+
 function recordMessageAttachments(session: Session, message: AgentMessage): void {
   const imageParts = message.parts.filter((p): p is Extract<ContentPart, { type: 'image' }> => p.type === 'image')
 
   // 受管理的(ncw://)与外部的(绝对路径)分开处理
-  const managedIds: string[] = []
+  const managed: ManagedAttachmentCandidate[] = []
   const external: Array<{ part: Extract<ContentPart, { type: 'image' }>; index: number }> = []
   imageParts.forEach((part, index) => {
     const loc = parseNcwUrl(part.dataRef)
-    if (loc === null) external.push({ part, index })
-    else managedIds.push(attachmentIdOfFileName(loc.fileName))
+    if (loc === null) {
+      external.push({ part, index })
+      return
+    }
+
+    // A renderer can construct an otherwise valid ncw:// URL for another
+    // session. Never let that URL re-home an attachment into this message;
+    // theme/export assets likewise do not belong to transcript data.
+    if (loc.scope !== 'session' || loc.ownerId !== session.id) return
+
+    const candidateId = attachmentIdOfFileName(loc.fileName)
+    const row = getAttachmentRow(candidateId)
+    if (
+      row !== undefined &&
+      row.scope === 'session' &&
+      row.ownerId === session.id &&
+      basename(row.path) === loc.fileName
+    ) {
+      managed.push({ row, index })
+      return
+    }
+
+    // Be tolerant of old/migrated rows whose primary key and file basename
+    // diverged. Owner and basename are both required before claiming a row.
+    const fallback = findAttachmentByOwnerAndFileName(session.id, loc.fileName)
+    if (fallback !== undefined) managed.push({ row: fallback, index })
   })
 
-  // 消息是幂等更新的。先清掉这一条消息旧的**外部**引用，再写当前快照，
-  // 否则用户把图片从草稿/重试消息里移除后，孤儿引用会永远阻止文件清理。
-  // ★ 只清 `messageId:index` 形态的行 —— 受管理附件的 id 是 ULID,
-  //   它们由 commitAttachmentsByIds 负责,不该被这里的重放清掉。
-  const externalIds = external.map(({ index }) => `${message.id}:${String(index)}`)
-  if (externalIds.length === 0) {
-    stmt("DELETE FROM attachments WHERE message_id = ? AND id LIKE ? || ':%'").run(message.id, message.id)
-  } else {
-    stmt(
-      `DELETE FROM attachments WHERE message_id = ? AND id LIKE ? || ':%' AND id NOT IN (${externalIds.map(() => '?').join(',')})`
-    ).run(message.id, message.id, ...externalIds)
-  }
+  const currentRows = attachmentRowsForMessage(message.id)
+  const usedIds = new Set<string>()
+  const managedIds = managed.map(({ row, index }) =>
+    commitManagedAttachment(row, session, message, index, usedIds, currentRows)
+  )
 
   for (const { part, index } of external) {
     const path = part.dataRef
@@ -358,7 +475,13 @@ function recordMessageAttachments(session: Session, message: AgentMessage): void
     ).run(id, session.id, message.id, path, size, checksum, session.id, message.createdAt)
   }
 
-  commitAttachmentsByIds(managedIds, message.id, session.id)
+  const externalIds = external.map(({ index }) => `${message.id}:${String(index)}`)
+  const keepIds = [...new Set([...managedIds, ...externalIds])]
+  if (keepIds.length === 0) {
+    stmt('DELETE FROM attachments WHERE message_id = ?').run(message.id)
+  } else {
+    stmt(`DELETE FROM attachments WHERE message_id = ? AND id NOT IN (${keepIds.map(() => '?').join(',')})`).run(message.id, ...keepIds)
+  }
 }
 
 /** `01J8X.png` → `01J8X`。磁盘文件名的主干就是附件主键 */
@@ -368,6 +491,30 @@ function attachmentIdOfFileName(fileName: string): string {
 }
 
 /** message_commit 的唯一落盘入口；同一 message id 重放时幂等。 */
+function writeMessage(session: Session, message: AgentMessage, ordinal: number): void {
+  const existing = stmt('SELECT session_id FROM messages WHERE id = ?').get(message.id) as Record<string, unknown> | undefined
+  if (existing !== undefined && String(existing['session_id']) !== session.id) {
+    throw new Error(`消息 ${message.id} 已属于另一个会话`)
+  }
+  stmt(
+    `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET ordinal = excluded.ordinal, parts = excluded.parts, role = excluded.role,
+       schema_version = excluded.schema_version, created_at = excluded.created_at`
+  ).run(
+    message.id,
+    session.id,
+    ordinal,
+    message.role,
+    JSON.stringify(message.parts),
+    message.schemaVersion,
+    message.createdAt
+  )
+  upsertFts(session, message)
+  recordMessageAttachments(session, message)
+  putSession({ ...session, updatedAt: Math.max(session.updatedAt, message.createdAt) })
+}
+
 export function commitMessage(sessionId: string, message: AgentMessage): void {
   tx(() => {
     const session = getSession(sessionId)
@@ -379,23 +526,7 @@ export function commitMessage(sessionId: string, message: AgentMessage): void {
     const ordinal = existing === undefined
       ? Number((stmt('SELECT COALESCE(MAX(ordinal), -1) AS n FROM messages WHERE session_id = ?').get(sessionId) as Record<string, unknown>)['n'] ?? -1) + 1
       : Number(existing['ordinal'])
-    stmt(
-      `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET parts = excluded.parts, role = excluded.role,
-         schema_version = excluded.schema_version, created_at = excluded.created_at`
-    ).run(
-      message.id,
-      sessionId,
-      ordinal,
-      message.role,
-      JSON.stringify(message.parts),
-      message.schemaVersion,
-      message.createdAt
-    )
-    upsertFts(session, message)
-    recordMessageAttachments(session, message)
-    putSession({ ...session, updatedAt: Math.max(session.updatedAt, message.createdAt) })
+    writeMessage(session, message, ordinal)
   })
 }
 
@@ -420,11 +551,43 @@ export function replaceHistory(sessionId: string, messages: readonly AgentMessag
   tx(() => {
     const session = getSession(sessionId)
     if (session === undefined) throw new Error(`会话不存在: ${sessionId}`)
+
+    // `replaceHistory` is also used after a run to reconcile the renderer's
+    // transcript with SQLite.  Deleting all messages first looks simple, but
+    // it cascades their managed attachment rows.  The following commit would
+    // then only UPDATE a missing row, turning every `ncw://` image into an
+    // unreferenced file.  Re-number existing rows into a temporary negative
+    // range, upsert the incoming messages in their authoritative order, and
+    // remove only messages that disappeared.  Their attachment rows are then
+    // safely cascaded by SQLite.
+    const ids = new Set<string>()
+    for (const message of messages) {
+      if (ids.has(message.id)) throw new Error(`消息 ${message.id} 在转录中重复`)
+      ids.add(message.id)
+      const owner = stmt('SELECT session_id FROM messages WHERE id = ?').get(message.id) as Record<string, unknown> | undefined
+      if (owner !== undefined && String(owner['session_id']) !== sessionId) {
+        throw new Error(`消息 ${message.id} 已属于另一个会话`)
+      }
+    }
+
     stmt('DELETE FROM messages_fts WHERE session_id = ?').run(sessionId)
-    stmt('DELETE FROM messages WHERE session_id = ?').run(sessionId)
-    stmt('DELETE FROM attachments WHERE session_id = ?').run(sessionId)
-    messages.forEach((m) => commitMessage(sessionId, m))
-    putSession({ ...session, updatedAt: Math.max(session.updatedAt, messages.at(-1)?.createdAt ?? session.updatedAt) })
+    stmt('UPDATE messages SET ordinal = -ordinal - 1 WHERE session_id = ?').run(sessionId)
+    for (const [ordinal, message] of messages.entries()) writeMessage(session, message, ordinal)
+
+    const existing = stmt('SELECT id FROM messages WHERE session_id = ?').all(sessionId)
+    for (const row of existing) {
+      const id = String((row as Record<string, unknown>)['id'])
+      if (ids.has(id)) continue
+      stmt('DELETE FROM messages WHERE id = ?').run(id)
+    }
+
+    const current = getSession(sessionId)
+    if (current !== undefined) {
+      putSession({
+        ...current,
+        updatedAt: Math.max(current.updatedAt, messages.at(-1)?.createdAt ?? current.updatedAt)
+      })
+    }
   })
 }
 
@@ -614,6 +777,11 @@ export function attachmentRowsForSessions(sessionIds: readonly string[]): Attach
   )
 }
 
+/** Paths captured before a session cascade removes its attachment rows. */
+export function sessionAttachmentPaths(sessionId: string): string[] {
+  return attachmentRowsForSessions([sessionId]).map((row) => row.path)
+}
+
 /** 当前所有会话附件（调用方负责做路径边界校验）。 */
 export function allSessionAttachmentRows(): AttachmentReferenceRow[] {
   return attachmentRows().filter((row) => row.scope === 'session')
@@ -629,16 +797,28 @@ export function removeAttachmentRow(id: string): void {
   stmt('DELETE FROM attachments WHERE id = ?').run(id)
 }
 
+/** Number of attachment rows that still point at a physical path. */
+export function attachmentReferenceCount(path: string, excludeId?: string): number {
+  const row = excludeId === undefined
+    ? stmt('SELECT COUNT(*) AS n FROM attachments WHERE path = ?').get(path)
+    : stmt('SELECT COUNT(*) AS n FROM attachments WHERE path = ? AND id <> ?').get(path, excludeId)
+  return Number((row as Record<string, unknown> | undefined)?.['n'] ?? 0)
+}
+
 // ─── 上传附件(scope/status,迁移 5) ──────────────────────────────────────────
 
 export interface AttachmentRow {
   id: string
   scope: string
   ownerId: string | null
+  sessionId: string | null
+  messageId: string | null
   path: string
   size: number
   checksum: string
   status: string
+  /** 用户看到的原始名。迁移 6 之前的行是 null,读的时候退回 basename(path) */
+  displayName: string | null
   createdAt: number
 }
 
@@ -648,10 +828,13 @@ function toAttachmentRow(row: unknown): AttachmentRow {
     id: String(r['id']),
     scope: String(r['scope'] ?? 'session'),
     ownerId: r['owner_id'] == null ? null : String(r['owner_id']),
+    sessionId: r['session_id'] == null ? null : String(r['session_id']),
+    messageId: r['message_id'] == null ? null : String(r['message_id']),
     path: String(r['path']),
     size: Number(r['size'] ?? 0),
     checksum: String(r['checksum'] ?? ''),
     status: String(r['status'] ?? 'committed'),
+    displayName: r['display_name'] == null ? null : String(r['display_name']),
     createdAt: Number(r['created_at'] ?? 0)
   }
 }
@@ -671,13 +854,23 @@ export function putDraftAttachment(a: {
   path: string
   size: number
   checksum: string
+  displayName?: string
   createdAt: number
 }): void {
   stmt(
-    `INSERT INTO attachments (id, session_id, message_id, path, size, checksum, scope, status, owner_id, created_at)
-     VALUES (?, NULL, NULL, ?, ?, ?, ?, 'draft', ?, ?)
+    `INSERT INTO attachments (id, session_id, message_id, path, size, checksum, scope, status, owner_id, display_name, created_at)
+     VALUES (?, NULL, NULL, ?, ?, ?, ?, 'draft', ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET path = excluded.path, size = excluded.size`
-  ).run(a.id, a.path, a.size, a.checksum, a.scope, a.ownerId ?? null, a.createdAt)
+  ).run(
+    a.id,
+    a.path,
+    a.size,
+    a.checksum,
+    a.scope,
+    a.ownerId ?? null,
+    a.displayName ?? null,
+    a.createdAt
+  )
 }
 
 /**
@@ -706,6 +899,25 @@ export function findAttachmentByChecksum(
 export function getAttachmentRow(id: string): AttachmentRow | undefined {
   const row = stmt('SELECT * FROM attachments WHERE id = ?').get(id)
   return row == null ? undefined : toAttachmentRow(row)
+}
+
+/**
+ * Compatibility lookup for migrated attachment rows whose id no longer
+ * matches the basename encoded in an ncw:// URL.  The owner and session scope
+ * are part of the predicate; basename alone is never sufficient because two
+ * sessions may legitimately contain files with the same name.
+ */
+export function findAttachmentByOwnerAndFileName(ownerId: string, fileName: string): AttachmentRow | undefined {
+  const rows = stmt(
+    `SELECT * FROM attachments
+       WHERE scope = 'session' AND owner_id = ? AND status IN ('draft', 'committed')
+       ORDER BY created_at DESC, id DESC`
+  ).all(ownerId)
+  for (const row of rows) {
+    const parsed = toAttachmentRow(row)
+    if (basename(parsed.path) === fileName) return parsed
+  }
+  return undefined
 }
 
 /** 某个会话下所有还没发出去的附件 —— 重启后恢复草稿附件区要用 */
@@ -739,11 +951,78 @@ export function commitAttachmentsByIds(
   sessionId: string
 ): void {
   if (ids.length === 0) return
-  const placeholders = ids.map(() => '?').join(',')
-  stmt(
-    `UPDATE attachments SET status = 'committed', message_id = ?, session_id = ?, owner_id = ?
-     WHERE id IN (${placeholders})`
-  ).run(messageId, sessionId, sessionId, ...ids)
+  tx(() => {
+    const currentRows = attachmentRowsForMessage(messageId)
+    const usedIds = new Set<string>()
+    ids.forEach((id, index) => {
+      const row = getAttachmentRow(id)
+      if (
+        row === undefined ||
+        row.scope !== 'session' ||
+        row.ownerId !== sessionId
+      ) return
+
+      // Keep an already-associated row in place. A row committed to another
+      // message is never moved; create a reference below instead.
+      const current = currentRows.find(
+        (candidate) => !usedIds.has(candidate.id) && candidate.path === row.path
+      )
+      if (current !== undefined) {
+        usedIds.add(current.id)
+        return
+      }
+
+      if (
+        !usedIds.has(row.id) &&
+        row.status === 'draft' &&
+        row.messageId === null &&
+        row.sessionId === null
+      ) {
+        stmt(
+          `UPDATE attachments SET status = 'committed', message_id = ?, session_id = ?, owner_id = ?
+           WHERE id = ? AND scope = 'session' AND owner_id = ? AND status = 'draft'
+             AND message_id IS NULL AND session_id IS NULL`
+        ).run(messageId, sessionId, sessionId, row.id, sessionId)
+        usedIds.add(row.id)
+        return
+      }
+
+      const baseId = `${messageId}:managed:${String(index)}`
+      let referenceId = baseId
+      let suffix = 0
+      while (true) {
+        const existing = getAttachmentRow(referenceId)
+        if (existing === undefined) break
+        if (
+          existing.scope === 'session' &&
+          existing.ownerId === sessionId &&
+          existing.messageId === messageId &&
+          existing.path === row.path
+        ) {
+          usedIds.add(referenceId)
+          return
+        }
+        suffix++
+        referenceId = `${baseId}:${row.id}:${String(suffix)}`
+      }
+      stmt(
+        `INSERT INTO attachments
+           (id, session_id, message_id, path, size, checksum, scope, status, owner_id, display_name, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'session', 'committed', ?, ?, ?)`
+      ).run(
+        referenceId,
+        sessionId,
+        messageId,
+        row.path,
+        row.size,
+        row.checksum,
+        sessionId,
+        row.displayName,
+        row.createdAt
+      )
+      usedIds.add(referenceId)
+    })
+  })
 }
 
 /** 同上,但按磁盘路径定位。测试与迁移用 */
@@ -753,11 +1032,75 @@ export function commitAttachmentsByPath(
   sessionId: string
 ): void {
   if (paths.length === 0) return
-  const placeholders = paths.map(() => '?').join(',')
-  stmt(
-    `UPDATE attachments SET status = 'committed', message_id = ?, session_id = ?
-     WHERE path IN (${placeholders}) AND status = 'draft'`
-  ).run(messageId, sessionId, ...paths)
+  tx(() => {
+    const rows = stmt(
+      `SELECT * FROM attachments
+         WHERE path IN (${paths.map(() => '?').join(',')})
+           AND scope = 'session' AND owner_id = ?
+         ORDER BY created_at, id`
+    ).all(...paths, sessionId).map(toAttachmentRow)
+    const currentRows = attachmentRowsForMessage(messageId)
+    const usedIds = new Set<string>()
+    rows.forEach((row, index) => {
+      const current = currentRows.find(
+        (candidate) => !usedIds.has(candidate.id) && candidate.path === row.path
+      )
+      if (current !== undefined) {
+        usedIds.add(current.id)
+        return
+      }
+      if (
+        row.status === 'draft' &&
+        row.messageId === null &&
+        row.sessionId === null
+      ) {
+        stmt(
+          `UPDATE attachments SET status = 'committed', message_id = ?, session_id = ?, owner_id = ?
+           WHERE id = ? AND scope = 'session' AND owner_id = ? AND status = 'draft'
+             AND message_id IS NULL AND session_id IS NULL`
+        ).run(messageId, sessionId, sessionId, row.id, sessionId)
+        usedIds.add(row.id)
+        return
+      }
+      // A committed row belongs to another message. Reuse the same reference
+      // id convention as commitAttachmentsByIds so repeated migrations remain
+      // idempotent and the physical file gets reference-counted by path.
+      const baseId = `${messageId}:managed:${String(index)}`
+      let referenceId = baseId
+      let suffix = 0
+      while (true) {
+        const existing = getAttachmentRow(referenceId)
+        if (existing === undefined) break
+        if (
+          existing.scope === 'session' &&
+          existing.ownerId === sessionId &&
+          existing.messageId === messageId &&
+          existing.path === row.path
+        ) {
+          usedIds.add(referenceId)
+          return
+        }
+        suffix++
+        referenceId = `${baseId}:${row.id}:${String(suffix)}`
+      }
+      stmt(
+        `INSERT INTO attachments
+           (id, session_id, message_id, path, size, checksum, scope, status, owner_id, display_name, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'session', 'committed', ?, ?, ?)`
+      ).run(
+        referenceId,
+        sessionId,
+        messageId,
+        row.path,
+        row.size,
+        row.checksum,
+        sessionId,
+        row.displayName,
+        row.createdAt
+      )
+      usedIds.add(referenceId)
+    })
+  })
 }
 
 export function searchAll(q: string, workspaceId?: string, limit = 50): SearchHit[] {
@@ -806,6 +1149,11 @@ export function deleteAllHistory(): CleanupResult {
     // 显式删除。主题/导出附件不属于对话历史，必须保留。
     stmt("DELETE FROM attachments WHERE scope = 'session'").run()
     stmt('DELETE FROM runs').run()
+    // Drafts and queued inputs are stored in kv because they can exist before
+    // a session row is created. Clearing history must remove those otherwise
+    // unreachable rows as well; deleting only the relational tables leaves
+    // stale text that can reappear when an id is reused.
+    stmt("DELETE FROM kv WHERE key LIKE 'session.input.%'").run()
     return { ...p, deleted: p.sessionCount + p.messageCount + p.attachmentCount }
   })
 }
@@ -818,6 +1166,7 @@ export function clearSessionDataForTest(): void {
     stmt('DELETE FROM attachments').run()
     stmt('DELETE FROM messages').run()
     stmt('DELETE FROM sessions').run()
+    stmt("DELETE FROM kv WHERE key LIKE 'session.input.%'").run()
   })
 }
 
@@ -858,14 +1207,26 @@ export function storageStats(dataDirectory: string, attachmentDirectory: string,
   const c = messageBytes()
   const s = stmt('SELECT COUNT(*) AS n FROM sessions').get() as Record<string, unknown>
   const a = stmt('SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes FROM attachments').get() as Record<string, unknown>
-  let attachmentBytes = Number(a.bytes ?? 0)
+  let attachmentBytes = 0
   try {
-    // 目录大小按实际文件统计；数据库记录大小是缺失文件时的保底。
-    const walk = (dir: string): number => readdirSync(dir, { withFileTypes: true }).reduce((n, e) => {
-      const p = join(dir, e.name)
-      try { return n + (e.isDirectory() ? walk(p) : statSync(p).size) } catch { return n }
-    }, 0)
-    if (existsSync(attachmentDirectory)) attachmentBytes = Math.max(attachmentBytes, walk(attachmentDirectory))
+    // 统计的是附件目录的实际占用，而不是 attachments 表里记录的大小：
+    // 表中可能有外部绝对路径或已经丢失的文件，不能把它们冒充本机目录空间。
+    // 先 lstat，再递归；符号链接按链接自身的大小计入，绝不跟随到外部目录。
+    const walk = (dir: string): number => {
+      let dirStat
+      try { dirStat = lstatSync(dir) } catch { return 0 }
+      if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return dirStat.size
+      let total = 0
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name)
+        try {
+          const st = lstatSync(p)
+          total += st.isDirectory() && !st.isSymbolicLink() ? walk(p) : st.size
+        } catch { /* 文件在扫描期间消失 */ }
+      }
+      return total
+    }
+    attachmentBytes = walk(attachmentDirectory)
   } catch { /* 目录不存在或不可读 */ }
   return {
     dbBytes: files.dbBytes,
@@ -887,15 +1248,16 @@ export function listProviders(): UpstreamProvider[] {
   // 「今天先切到 A、明天先切到 B」比切错还难查
   return stmt('SELECT json FROM providers ORDER BY priority, id')
     .all()
-    .map((r) => parse<UpstreamProvider>(r['json']))
+    .map((r) => normalizeUpstreamProvider(parse<UpstreamProvider>(r['json'])))
 }
 
 export function putProvider(p: UpstreamProvider): UpstreamProvider {
+  const normalized = normalizeUpstreamProvider(p)
   stmt(
     `INSERT INTO providers (id, priority, json) VALUES (?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET priority = excluded.priority, json = excluded.json`
-  ).run(p.id, p.priority, JSON.stringify(p))
-  return p
+  ).run(normalized.id, normalized.priority, JSON.stringify(normalized))
+  return normalized
 }
 
 /**

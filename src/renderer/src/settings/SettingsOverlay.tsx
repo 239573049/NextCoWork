@@ -35,7 +35,6 @@ import { SETTINGS_ICON } from './icons'
 import {
   matchPages,
   matchRows,
-  PAGE_LABEL,
   SETTINGS_PAGES,
   type SettingsPageId,
   type SettingsRow
@@ -47,6 +46,7 @@ import { GeneralPage } from './pages/GeneralPage'
 import { ModelPage } from './pages/model/ModelPage'
 import { PreferencePage } from './pages/PreferencePage'
 import { StubPage } from './pages/StubPage'
+import { useI18n, type Translate } from '../i18n'
 
 
 export function SettingsOverlay({
@@ -67,6 +67,7 @@ export function SettingsOverlay({
   const [query, setQuery] = useState('')
   const [sub, setSub] = useState<string>('')
   const [seenPage, setSeenPage] = useState(page)
+  const { t } = useI18n()
 
   const def = SETTINGS_PAGES.find((p) => p.id === page)
   const subs = def?.subs
@@ -77,7 +78,10 @@ export function SettingsOverlay({
     setSeenPage(page)
     setSub(subs?.[0]?.id ?? '')
   }
-  const activeSub = subs === undefined ? '' : subs.some((s) => s.id === sub) ? sub : subs[0]!.id
+  const availableSubs = subs === undefined
+    ? undefined
+    : [...subs.map((item) => ({ ...item, label: subLabel(t, item.id) })), ...(page === 'model' ? [{ id: 'management', label: t('settings.sub.management') }] : [])]
+  const activeSub = availableSubs === undefined ? '' : availableSubs.some((s) => s.id === sub) ? sub : availableSubs[0]!.id
 
   useFocusTrap(panelRef, true, searchRef)
 
@@ -116,7 +120,7 @@ export function SettingsOverlay({
       className="app-no-drag fixed inset-0 z-100 flex items-center justify-center p-[10px]"
       role="dialog"
       aria-modal="true"
-      aria-label="设置"
+      aria-label={t('common.settings')}
     >
       {/* 纯黑 35% —— 这个数是从参考图反解出来的,见 theme.css 的 --color-scrim */}
       <div className="absolute inset-0 bg-scrim/35 backdrop-blur-[2px]" onClick={onClose} />
@@ -132,7 +136,7 @@ export function SettingsOverlay({
         {/* ── 左:导航 ── */}
         <nav className="flex w-[192px] shrink-0 flex-col bg-surface">
           <div className="flex h-[44px] shrink-0 items-center px-3">
-            <span className="flex-1 text-[13px] text-fg">设置</span>
+            <span className="flex-1 text-[13px] text-fg">{t('common.settings')}</span>
             <kbd className="font-sans text-[11px] text-fg-faint">
               {prettyAccelerator('CmdOrCtrl+,')}
             </kbd>
@@ -142,8 +146,8 @@ export function SettingsOverlay({
             <TextInput
               value={query}
               onChange={setQuery}
-              placeholder="搜索"
-              ariaLabel="搜索设置"
+              placeholder={t('settings.search')}
+              ariaLabel={t('settings.searchLabel')}
               icon={<Search size={13} />}
               inputRef={searchRef}
               className="h-[30px]"
@@ -170,7 +174,7 @@ export function SettingsOverlay({
                     <span className="shrink-0 text-icon">
                       <Icon size={15} />
                     </span>
-                    <span className="min-w-0 flex-1 truncate">{p.label}</span>
+                    <span className="min-w-0 flex-1 truncate">{pageLabel(t, p.id)}</span>
                   </button>
                 </li>
               )
@@ -186,18 +190,18 @@ export function SettingsOverlay({
         */}
         <div data-menu-bounds className="flex min-w-0 flex-1 flex-col bg-canvas">
           <header className="flex shrink-0 items-center gap-4 px-6 pt-5 pb-3">
-            <h2 className="text-[15px] text-fg">{searching ? '搜索结果' : PAGE_LABEL[page]}</h2>
-            {!searching && subs !== undefined && (
+            <h2 className="text-[15px] text-fg">{searching ? t('settings.searchResults') : pageLabel(t, page)}</h2>
+            {!searching && availableSubs !== undefined && (
               <Segmented
                 size="sm"
-                label={`${PAGE_LABEL[page]}的分类`}
+                label={`${pageLabel(t, page)}${t('settings.categorySuffix')}`}
                 value={activeSub}
-                options={subs.map((s) => ({ value: s.id, label: s.label }))}
+                options={(availableSubs ?? []).map((s) => ({ value: s.id, label: s.label }))}
                 onChange={setSub}
               />
             )}
             <span className="flex-1" />
-            <IconButton label="关闭设置" onClick={onClose}>
+            <IconButton label={t('accessibility.closeSettings')} onClick={onClose}>
               <X size={15} />
             </IconButton>
           </header>
@@ -218,7 +222,7 @@ export function SettingsOverlay({
 
           <footer className="flex h-[82px] shrink-0 items-center justify-end px-6">
             <Button variant="accent" onClick={onClose}>
-              完成
+              {t('common.done')}
             </Button>
           </footer>
         </div>
@@ -269,9 +273,10 @@ function SearchResults({
   pages: readonly SettingsPageId[]
   onPick: (p: SettingsPageId, sub?: string) => void
 }): ReactNode {
+  const { t } = useI18n()
   if (rows.length === 0 && pages.length === 0) {
     return (
-      <p className="py-10 text-center text-[13px] text-fg-muted">没有匹配的设置项</p>
+      <p className="py-10 text-center text-[13px] text-fg-muted">{t('settings.noMatch')}</p>
     )
   }
   return (
@@ -279,15 +284,15 @@ function SearchResults({
       {pages.map((id) => (
         <li key={`page-${id}`}>
           <ResultButton onClick={() => onPick(id)}>
-            <span className="text-fg">{PAGE_LABEL[id]}</span>
-            <span className="text-[11.5px] text-fg-faint">整页</span>
+            <span className="text-fg">{pageLabel(t, id)}</span>
+            <span className="text-[11.5px] text-fg-faint">{t('settings.page')}</span>
           </ResultButton>
         </li>
       ))}
       {rows.map((r) => (
         <li key={`${r.page}-${r.sub ?? ''}-${r.title}`}>
           <ResultButton onClick={() => onPick(r.page, r.sub)}>
-            <span className="text-fg-muted">{PAGE_LABEL[r.page]}</span>
+            <span className="text-fg-muted">{pageLabel(t, r.page)}</span>
             <span className="text-fg-faint">›</span>
             <span className="min-w-0 flex-1 truncate text-fg">{r.title}</span>
           </ResultButton>
@@ -295,6 +300,14 @@ function SearchResults({
       ))}
     </ul>
   )
+}
+
+function pageLabel(t: Translate, page: SettingsPageId): string {
+  return t(`settings.page.${page}` as Parameters<Translate>[0])
+}
+
+function subLabel(t: Translate, id: string): string {
+  return t(`settings.sub.${id}` as Parameters<Translate>[0])
 }
 
 function ResultButton({

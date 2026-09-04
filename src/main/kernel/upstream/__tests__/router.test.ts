@@ -137,7 +137,17 @@ function rig(opts: {
 
 async function drain(r: UpstreamRouter, signal = new AbortController().signal): Promise<ProviderStreamEvent[]> {
   const out: ProviderStreamEvent[] = []
-  for await (const ev of r.stream(REQ, signal)) out.push(ev)
+  for await (const ev of r.stream(REQ, signal, { workspaceId: 'ws-test' })) out.push(ev)
+  return out
+}
+
+async function drainWithContext(
+  r: UpstreamRouter,
+  context: { workspaceId: string },
+  signal = new AbortController().signal
+): Promise<ProviderStreamEvent[]> {
+  const out: ProviderStreamEvent[] = []
+  for await (const ev of r.stream(REQ, signal, context)) out.push(ev)
   return out
 }
 
@@ -168,6 +178,44 @@ describe('UpstreamRouter · 正常路径', () => {
     await drain(router)
     expect(bodies[0]?.model).toBe('m-upstream')
     expect(bodies[0]?.stream).toBe(true)
+  })
+
+  it('Anthropic 请求始终带 metadata.user_id，缓存档位映射到实际请求体', async () => {
+    const { router, bodies } = rig({
+      providers: [
+        provider('p1', {
+          protocolOptions: { anthropic: { cacheTtl: '1h' } }
+        })
+      ],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
+    expect(bodies[0]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+  })
+
+  it('同一 alias 的每次 attempt 使用实际选中 Provider 自己的缓存档位', async () => {
+    const { router, bodies } = rig({
+      providers: [
+        provider('p1', {
+          priority: 0,
+          protocolOptions: { anthropic: { cacheTtl: '5m' } }
+        }),
+        provider('p2', {
+          priority: 1,
+          protocolOptions: { anthropic: { cacheTtl: '1h' } }
+        })
+      ],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      // 普通参数错误允许切换；缓存不兼容错误则不会切换（另有专测）。
+      responses: [fail(400, 'invalid_request_error', 'ordinary error'), ok(sseBody({ text: 'p2' }))]
+    })
+    await drain(router)
+    expect(bodies[0]?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(bodies[1]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
+    expect(bodies[1]?.metadata).toEqual({ user_id: 'ws-test' })
   })
 
   /** Anthropic 用 x-api-key,不是 Authorization: Bearer —— 写错就是 401 */
@@ -361,6 +409,70 @@ describe('UpstreamRouter · 重试与切换', () => {
     const out = await drain(router)
     expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'provider' } })
     expect((out.at(-1) as { error: { message: string } }).error.message).toContain('openai-chat')
+  })
+})
+
+describe('UpstreamRouter · Anthropic 缓存兼容性错误', () => {
+  it('明确拒绝 cache_control 时只发一次请求，不重试、不切换且不记健康失败', async () => {
+    const { router, calls, bodies } = rig({
+      providers: [
+        provider('p1', {
+          name: 'Relay A',
+          priority: 0,
+          protocolOptions: { anthropic: { cacheTtl: '5m' } }
+        }),
+        provider('p2', {
+          name: 'Relay B',
+          priority: 1,
+          protocolOptions: { anthropic: { cacheTtl: '1h' } }
+        })
+      ],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [fail(400, 'invalid_request_error', 'cache_control is not supported')]
+    })
+    const out = await drain(router)
+    expect(calls).toHaveLength(1)
+    expect(bodies).toHaveLength(1)
+    expect(out.filter((e) => e.type === 'provider_retry')).toEqual([])
+    expect(out.filter((e) => e.type === 'provider_switch')).toEqual([])
+    expect(out.at(-1)).toMatchObject({
+      type: 'error',
+      error: { code: 'cache_unsupported', retryable: false, status: 400 }
+    })
+    expect((out.at(-1) as { error: { message: string } }).error.message).toContain('Relay A')
+    expect((out.at(-1) as { error: { message: string } }).error.message).toContain('5 分钟')
+    expect(router.health()).toEqual([])
+  })
+
+  it('空或超长 workspaceId 在读取密钥和发出 HTTP 前失败', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: []
+    })
+    for (const workspaceId of ['', '   ', 'x'.repeat(513)]) {
+      const out = await drainWithContext(router, { workspaceId })
+      expect(out).toHaveLength(1)
+      expect(out[0]).toMatchObject({ type: 'error', error: { retryable: false } })
+    }
+    expect(calls).toEqual([])
+  })
+
+  it('畸形运行时 context 不会抛异常或访问 Provider', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: []
+    })
+    const out: ProviderStreamEvent[] = []
+    for await (const ev of router.stream(
+      REQ,
+      new AbortController().signal,
+      undefined as unknown as { workspaceId: string }
+    )) out.push(ev)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ type: 'error', error: { retryable: false } })
+    expect(calls).toEqual([])
   })
 })
 

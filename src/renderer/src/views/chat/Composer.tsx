@@ -26,7 +26,8 @@ import {
   Square,
   Wrench
 } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { PermissionMode } from '../../../../shared/agent/permission'
 import { PERMISSION_MODES, PERMISSION_MODE_HINT, PERMISSION_MODE_LABEL } from '../../../../shared/agent/permission'
 import type { SessionMode, ThinkingLevel } from '../../../../shared/agent/run-request'
@@ -42,6 +43,7 @@ import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/pro
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
+import { useI18n } from '../../i18n'
 import { updateWorkspace } from '../../services/app'
 import { useModelsStore } from '../../stores/models'
 import { AttachmentTray, type TrayItem } from './AttachmentTray'
@@ -89,6 +91,7 @@ export function Composer({
   onRemoveAttachment?: (key: string) => void
   onRetryAttachment?: (key: string) => void
 }): ReactNode {
+  const { t } = useI18n()
   const { models, providers, loaded, providerOf, load } = useModelsStore()
   const [value, setValue] = useState<ComposerValue>(() => fromSettings(workspace.settings))
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -143,7 +146,7 @@ export function Composer({
   const model =
     value.model !== '' ? value.model : fallbackModel !== '' ? fallbackModel : (models[0]?.alias ?? '')
   const provider = providerOf(model)
-  const modelLabel = model !== '' ? model : loaded ? '未配置模型' : '加载中…'
+  const modelLabel = model !== '' ? model : loaded ? t('chat.noModel') : t('common.loading')
 
   function submit(): void {
     const text = draft.trim()
@@ -221,14 +224,14 @@ export function Composer({
             }
           }}
           rows={1}
-          placeholder={running ? '当前回复完成后按队列继续执行' : '给 NextCoWork 派个活…'}
+          placeholder={running ? t('chat.queuePlaceholder') : t('chat.placeholder')}
           className="scroll-thin selectable max-h-[280px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[13.5px] leading-relaxed text-fg placeholder:text-fg-faint focus:outline-none"
         />
 
         <div className="flex items-center gap-1 px-2.5 pt-1 pb-2.5">
           {/* ── 权限档位:界面上就在这个位置 ── */}
           <Menu
-            label="权限档位"
+            label={t('composer.permission')}
             width={260}
             trigger={
               <Pill accent={value.permissionMode === 'full'}>
@@ -238,7 +241,7 @@ export function Composer({
           >
             {(close) => (
               <>
-                <MenuLabel>AI 操作如何审批?更改会在下一次新回复生效</MenuLabel>
+                <MenuLabel>{t('composer.approvalHint')}</MenuLabel>
                 {PERMISSION_MODES.map((m) => (
                   <MenuItem
                     key={m}
@@ -258,7 +261,7 @@ export function Composer({
 
           {/* ── `/` 会话模式 ── */}
           <Menu
-            label="会话模式"
+            label={t('composer.mode')}
             width={250}
             trigger={
               <Pill active={value.mode !== 'normal'}>
@@ -289,7 +292,7 @@ export function Composer({
 
           {/* ── `+` 附加能力 ── */}
           <Menu
-            label="更多"
+            label={t('composer.more')}
             width={240}
             trigger={
               <Pill>
@@ -301,26 +304,26 @@ export function Composer({
               <>
                 <MenuItem
                   icon={<Paperclip size={14} />}
-                  description="也可以直接拖进来或粘贴截图"
+                  description={t('composer.attachmentHint')}
                   onSelect={() => {
                     close()
                     onPickAttachment?.()
                   }}
                 >
-                  添加附件
+                  {t('composer.addAttachment')}
                 </MenuItem>
                 <MenuSeparator />
                 <MenuItem
                   checked={value.webSearch}
                   icon={<Globe size={14} />}
                   // 「完全访问」也不解除这个开关(方案 §4.5),菜单上要说出来
-                  description="完全访问档位也受它约束"
+                  description={t('composer.webSearchHint')}
                   onSelect={() => {
                     patch({ webSearch: !value.webSearch })
                     close()
                   }}
                 >
-                  联网搜索
+                  {t('composer.webSearch')}
                 </MenuItem>
               </>
             )}
@@ -354,7 +357,6 @@ export function Composer({
             providers={providers}
             models={models}
             loaded={loaded}
-            providerOf={providerOf}
             thinking={value.thinking}
             onModel={(nextModel) => patch({ model: nextModel })}
             onThinking={(thinking) => patch({ thinking })}
@@ -363,11 +365,11 @@ export function Composer({
           <button
             type="button"
             data-testid="composer-send"
-            aria-label={running ? '停止' : '发送'}
+            aria-label={running ? t('chat.stop') : t('chat.send')}
             // 生成中按钮变「停止」,但输入框仍可打字 —— 排队走 Enter
             onClick={running ? onStop : submit}
             disabled={!running && (draft.trim() === '' || model === '')}
-            title={running ? '停止生成' : model === '' ? '还没有可用的模型' : model}
+            title={running ? t('composer.stopGeneration') : model === '' ? t('composer.noAvailableModel') : model}
             className={cn(
               'flex h-7 w-7 shrink-0 items-center justify-center rounded-pill transition-colors',
               running
@@ -435,7 +437,6 @@ function ModelPicker({
   providers,
   models,
   loaded,
-  providerOf,
   thinking,
   onModel,
   onThinking
@@ -446,35 +447,82 @@ function ModelPicker({
   providers: UpstreamProvider[]
   models: ModelAlias[]
   loaded: boolean
-  providerOf: (alias: string) => UpstreamProvider | undefined
   thinking: ThinkingLevel
   onModel: (model: string) => void
   onThinking: (thinking: ThinkingLevel) => void
 }): ReactNode {
   const [providerId, setProviderId] = useState<string | null>(null)
-
-  const providerModels = providerId === null ? [] : models.filter((m) => m.providerId === providerId)
+  const [configOpen, setConfigOpen] = useState(false)
+  const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(null)
+  const providerRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  const submenuRef = useRef<HTMLDivElement>(null)
+  const closeMenuRef = useRef<() => void>(() => {})
   const availableProviders = providers.filter((p) => models.some((m) => m.providerId === p.id))
+  const openProviderSubmenu = (id: string): void => {
+    setProviderId(id)
+    setSubmenuAnchor(providerRefs.current[id] ?? null)
+  }
 
   return (
-    <Menu
-      label="模型"
-      width={300}
-      align="end"
-      trigger={
-        <Pill>
-          <ProviderIcon name={[model, provider?.name, provider?.id]} size={13} />
-          <span className="max-w-[150px] truncate">{modelLabel}</span>
-          <ChevronRight size={12} className="ml-0.5 text-fg-faint" />
-        </Pill>
-      }
-      onOpenChange={(open) => {
-        if (!open) setProviderId(null)
-      }}
-    >
-      {(close) => (
-        <>
-          {providerId === null ? (
+    <>
+      <Menu
+        label="模型"
+        width={300}
+        align="end"
+        trigger={
+          <Pill>
+            <ProviderIcon name={[model, provider?.name, provider?.id]} size={13} />
+            <span className="max-w-[150px] truncate">{modelLabel}</span>
+            <ChevronRight size={12} className="ml-0.5 text-fg-faint" />
+          </Pill>
+        }
+        onOpenChange={(open) => {
+          if (!open) {
+            setProviderId(null)
+            setConfigOpen(false)
+            setSubmenuAnchor(null)
+          }
+        }}
+        containsTarget={(target) => submenuRef.current?.contains(target) ?? false}
+      >
+        {(close) => {
+          closeMenuRef.current = close
+          if (configOpen) {
+            return (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => setConfigOpen(false)}
+                  className="app-no-drag mb-1 flex w-full items-center gap-1.5 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg"
+                >
+                  <ChevronLeft size={14} />
+                  <span>返回提供商</span>
+                </button>
+                <MenuSeparator />
+                <MenuLabel>
+                  <span className="flex items-center gap-1.5">
+                    <BrainCircuit size={12} />
+                    模型配置 · 思考强度
+                  </span>
+                </MenuLabel>
+                {THINKING_LEVELS.map((level) => (
+                  <MenuItem
+                    key={level}
+                    checked={level === thinking}
+                    onSelect={() => {
+                      onThinking(level)
+                      close()
+                    }}
+                  >
+                    {THINKING_LEVEL_LABEL[level]}
+                  </MenuItem>
+                ))}
+              </>
+            )
+          }
+
+          return (
             <>
               <MenuLabel>
                 <span className="flex items-center gap-1.5">
@@ -493,9 +541,12 @@ function ModelPicker({
                     <MenuItem
                       key={p.id}
                       checked={p.id === provider?.id}
-                      icon={<ProviderIcon name={[p.name, p.id]} size={15} />}
                       description={`${count} 个可用模型`}
-                      onSelect={() => setProviderId(p.id)}
+                      buttonRef={(node) => {
+                        providerRefs.current[p.id] = node
+                      }}
+                      onHover={() => openProviderSubmenu(p.id)}
+                      onSelect={() => openProviderSubmenu(p.id)}
                     >
                       <span className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate">{p.name}</span>
@@ -506,83 +557,116 @@ function ModelPicker({
                 })
               )}
               <MenuSeparator />
-              <MenuLabel>
-                <span className="flex items-center gap-1.5">
-                  <BrainCircuit size={12} />
-                  模型配置
-                </span>
-              </MenuLabel>
-              {THINKING_LEVELS.map((level) => (
-                <MenuItem
-                  key={level}
-                  checked={level === thinking}
-                  onSelect={() => {
-                    onThinking(level)
-                    close()
-                  }}
-                >
-                  思考强度 · {THINKING_LEVEL_LABEL[level]}
-                </MenuItem>
-              ))}
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => setProviderId(null)}
-                className="app-no-drag mb-1 flex w-full items-center gap-1.5 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg"
+              <MenuItem
+                icon={<BrainCircuit size={14} />}
+                description={`思考强度 · ${THINKING_LEVEL_LABEL[thinking]}`}
+                onSelect={() => {
+                  setConfigOpen(true)
+                  setProviderId(null)
+                  setSubmenuAnchor(null)
+                }}
               >
-                <ChevronLeft size={14} />
-                <span>全部提供商</span>
-              </button>
-              <MenuSeparator />
-              <MenuLabel>
-                <span className="flex items-center gap-1.5">
-                  <ProviderIcon name={[providers.find((p) => p.id === providerId)?.name, providerId]} size={13} />
-                  {providers.find((p) => p.id === providerId)?.name ?? providerId}
+                <span className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate">模型配置</span>
+                  <ChevronRight size={13} className="text-fg-faint" />
                 </span>
-              </MenuLabel>
-              {providerModels.map((m) => {
-                const p = providerOf(m.alias)
-                return (
-                  <MenuItem
-                    key={`${m.providerId}/${m.alias}`}
-                    checked={m.alias === model}
-                    icon={<ProviderIcon name={[m.alias, p?.name, p?.id]} size={14} />}
-                    onSelect={() => {
-                      onModel(m.alias)
-                      close()
-                    }}
-                  >
-                    {m.alias}
-                  </MenuItem>
-                )
-              })}
-              <MenuSeparator />
-              <MenuLabel>
-                <span className="flex items-center gap-1.5">
-                  <BrainCircuit size={12} />
-                  模型配置
-                </span>
-              </MenuLabel>
-              {THINKING_LEVELS.map((level) => (
-                <MenuItem
-                  key={level}
-                  checked={level === thinking}
-                  onSelect={() => {
-                    onThinking(level)
-                    close()
-                  }}
-                >
-                  思考强度 · {THINKING_LEVEL_LABEL[level]}
-                </MenuItem>
-              ))}
+              </MenuItem>
             </>
-          )}
-        </>
-      )}
-    </Menu>
+          )
+        }}
+      </Menu>
+      {submenuAnchor !== null && providerId !== null && typeof document !== 'undefined'
+        ? createPortal(
+            <ModelSubmenu
+              anchor={submenuAnchor}
+              panelRef={(node) => {
+                submenuRef.current = node
+              }}
+            provider={providers.find((p) => p.id === providerId)}
+            models={models.filter((m) => m.providerId === providerId)}
+            model={model}
+            onSelect={(alias) => {
+                onModel(alias)
+                closeMenuRef.current()
+                setSubmenuAnchor(null)
+                setProviderId(null)
+              }}
+            />,
+            document.body
+          )
+        : null}
+    </>
+  )
+}
+
+function ModelSubmenu({
+  anchor,
+  panelRef,
+  provider,
+  models,
+  model,
+  onSelect
+}: {
+  anchor: HTMLElement
+  panelRef: (node: HTMLDivElement | null) => void
+  provider?: UpstreamProvider
+  models: ModelAlias[]
+  model: string
+  onSelect: (alias: string) => void
+}): ReactNode {
+  const [position, setPosition] = useState({ top: 0, left: 0 })
+  const width = 300
+  const panelNode = useRef<HTMLDivElement | null>(null)
+
+  useLayoutEffect(() => {
+    const measure = (): void => {
+      const rect = anchor.getBoundingClientRect()
+      const viewportWidth = window.innerWidth
+      const viewportHeight = window.innerHeight
+      const panelHeight = Math.min(panelNode.current?.scrollHeight ?? 0, Math.max(0, viewportHeight - 16))
+      const preferredLeft = rect.right + 6 + width <= viewportWidth ? rect.right + 6 : rect.left - width - 6
+      const left = Math.max(8, Math.min(preferredLeft, viewportWidth - width - 8))
+      // 与触发项顶部对齐；下方空间不足时向上推，确保整个弹层留在视口内。
+      const top = Math.max(8, Math.min(rect.top, viewportHeight - panelHeight - 8))
+      setPosition({ top, left })
+    }
+    measure()
+    const resizeObserver = new ResizeObserver(measure)
+    if (panelNode.current !== null) resizeObserver.observe(panelNode.current)
+    window.addEventListener('resize', measure)
+    window.addEventListener('scroll', measure, true)
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', measure)
+      window.removeEventListener('scroll', measure, true)
+    }
+  }, [anchor, models.length])
+
+  return (
+    <div
+      ref={(node) => {
+        panelNode.current = node
+        panelRef(node)
+      }}
+      role="menu"
+      style={{ width, top: position.top, left: position.left, maxHeight: 'calc(100vh - 16px)' }}
+      className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40"
+    >
+      <MenuLabel>
+        {provider?.name ?? '模型'}
+      </MenuLabel>
+      {models.map((m) => {
+        return (
+          <MenuItem
+            key={`${m.providerId}/${m.alias}`}
+            checked={m.alias === model}
+            onSelect={() => onSelect(m.alias)}
+          >
+            {m.alias}
+          </MenuItem>
+        )
+      })}
+    </div>
   )
 }
 

@@ -39,13 +39,9 @@ import { iconFor } from '../../lib/file-icon'
 import { listDir } from '../../services/app'
 import { useTabsStore } from '../../stores/tabs'
 import { flatten } from './flatten'
+import { useI18n } from '../../i18n'
 
 type Scope = 'conversation' | 'all'
-
-const SCOPES: readonly { id: Scope; label: string }[] = [
-  { id: 'conversation', label: '对话文件' },
-  { id: 'all', label: '所有文件' }
-]
 
 /**
  * 工具条全展开需要的宽度。低于它就折进 `…`。
@@ -71,6 +67,11 @@ export function FilesView({
   selectedPath: string | null
   onOpenFile: (path: string, name: string) => void
 }): ReactNode {
+  const { t } = useI18n()
+  const scopes: readonly { id: Scope; label: string }[] = [
+    { id: 'conversation', label: t('files.conversation') },
+    { id: 'all', label: t('files.all') }
+  ]
   const [scope, setScope] = useState<Scope>('all')
   const [sortBy, setSortBy] = useState<SortBy>('name')
   const [showHidden, setShowHidden] = useState(false)
@@ -144,7 +145,7 @@ export function FilesView({
     <div className="flex min-h-0 flex-1 flex-col">
       <div ref={toolbar} className="flex shrink-0 items-center gap-2 px-2 pb-1.5">
         <div className="flex shrink-0 items-center gap-2">
-          {SCOPES.map((s) => (
+          {scopes.map((s) => (
             <button
               key={s.id}
               type="button"
@@ -164,7 +165,7 @@ export function FilesView({
 
         <div className="flex min-w-0 flex-1 items-center justify-end gap-0.5">
           {query === null ? (
-            <IconButton label="搜索文件" size={24} onClick={() => setQuery('')}>
+            <IconButton label={t('files.search')} size={24} onClick={() => setQuery('')}>
               <Search size={14} />
             </IconButton>
           ) : (
@@ -173,12 +174,12 @@ export function FilesView({
               <input
                 autoFocus
                 value={query}
-                placeholder="按名称过滤"
+                placeholder={t('files.filterPlaceholder')}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Escape' && setQuery(null)}
                 className="min-w-0 flex-1 bg-transparent py-1 text-[12.5px] text-fg outline-none placeholder:text-fg-faint"
               />
-              <IconButton label="关闭搜索" size={18} onClick={() => setQuery(null)}>
+              <IconButton label={t('files.closeSearch')} size={18} onClick={() => setQuery(null)}>
                 <X size={11} />
               </IconButton>
             </div>
@@ -191,7 +192,7 @@ export function FilesView({
                 折叠只是换个呈现,不是另写一套精简版工具条(那必然会慢慢长歪)。
               */
               <Menu
-                label="更多操作"
+                label={t('files.moreActions')}
                 width={190}
                 trigger={<MoreHorizontal size={14} />}
                 triggerClassName="flex size-6 items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
@@ -199,7 +200,7 @@ export function FilesView({
                 {(close) => (
                   <>
                     <MenuItem icon={<Plus size={14} />} onSelect={close}>
-                      新建文件
+                      {t('files.new')}
                     </MenuItem>
                     <MenuItem
                       icon={<ArrowUpDown size={14} />}
@@ -217,7 +218,7 @@ export function FilesView({
                         close()
                       }}
                     >
-                      {showHidden ? '隐藏隐藏文件' : '显示隐藏文件'}
+                      {showHidden ? t('files.hideHidden') : t('files.showHidden')}
                     </MenuItem>
                     <MenuSeparator />
                     <MenuItem
@@ -227,10 +228,10 @@ export function FilesView({
                         close()
                       }}
                     >
-                      全部折叠
+                      {t('files.collapseAll')}
                     </MenuItem>
                     <MenuItem icon={<FolderOpen size={14} />} onSelect={close}>
-                      在访达中显示
+                      {t('files.showInFinder')}
                     </MenuItem>
                     <MenuItem
                       icon={<RefreshCw size={14} />}
@@ -239,14 +240,14 @@ export function FilesView({
                         close()
                       }}
                     >
-                      刷新
+                      {t('common.refresh')}
                     </MenuItem>
                   </>
                 )}
               </Menu>
             ) : (
               <>
-                <IconButton label="新建文件" size={24}>
+                <IconButton label={t('files.new')} size={24}>
                   <Plus size={14} />
                 </IconButton>
                 <IconButton
@@ -258,20 +259,20 @@ export function FilesView({
                   <ArrowUpDown size={14} />
                 </IconButton>
                 <IconButton
-                  label={showHidden ? '隐藏隐藏文件' : '显示隐藏文件'}
+                  label={showHidden ? t('files.hideHidden') : t('files.showHidden')}
                   size={24}
                   active={showHidden}
                   onClick={() => setShowHidden((v) => !v)}
                 >
                   {showHidden ? <Eye size={14} /> : <EyeOff size={14} />}
                 </IconButton>
-                <IconButton label="全部折叠" size={24} onClick={() => setExpanded(new Set())}>
+                <IconButton label={t('files.collapseAll')} size={24} onClick={() => setExpanded(new Set())}>
                   <ListCollapse size={14} />
                 </IconButton>
-                <IconButton label="在访达中显示" size={24}>
+                <IconButton label={t('files.showInFinder')} size={24}>
                   <FolderOpen size={14} />
                 </IconButton>
-                <IconButton label="刷新" size={24} onClick={refresh}>
+                <IconButton label={t('common.refresh')} size={24} onClick={refresh}>
                   <RefreshCw size={14} />
                 </IconButton>
               </>
@@ -281,14 +282,14 @@ export function FilesView({
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
         {scope === 'conversation' ? (
-          <EmptyState title="这次对话还没有碰过文件" hint="Agent 读写过的文件会出现在这里" className="py-10" />
+          <EmptyState title={t('files.noConversation')} hint={t('files.noConversationHint')} className="py-10" />
         ) : failed.has(rootPath) ? (
-          <EmptyState title="读不到这个目录" hint="可能已被移动或没有访问权限" className="py-10" />
+          <EmptyState title={t('files.unreadable')} hint={t('files.unreadableHint')} className="py-10" />
         ) : root === undefined ? (
-          <EmptyState title="正在读取…" className="py-10" />
+          <EmptyState title={t('common.loading')} className="py-10" />
         ) : rows.length === 0 ? (
           <EmptyState
-            title={query !== null && query !== '' ? '没有匹配的文件' : '这个目录是空的'}
+            title={query !== null && query !== '' ? t('files.noMatch') : t('files.empty')}
             className="py-10"
           />
         ) : (

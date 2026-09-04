@@ -21,7 +21,7 @@
  */
 import { MessageSquarePlus, Search, Settings, SquarePen } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
-import { FEATURE_LABEL, type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
+import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
 import type { SessionListItem } from '../../../shared/domain/session'
 import { Mark } from '../components/brand/Mark'
@@ -30,6 +30,7 @@ import { IconButton } from '../components/ui/IconButton'
 import { cn } from '../lib/cn'
 import { ChevronRight, PanelLeft } from 'lucide-react'
 import { FEATURE_ICON } from './icons'
+import { useI18n } from '../i18n'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'skills', 'review']
 
@@ -63,6 +64,7 @@ export function Sidebar({
   onSelectSession: (tabId: string) => void
   onCollapse: () => void
 }): ReactNode {
+  const { t } = useI18n()
   return (
     <aside className="flex w-[297px] shrink-0 flex-col overflow-hidden rounded-panel bg-surface">
       {/*
@@ -81,7 +83,7 @@ export function Sidebar({
           `active` 留给收起态:参考里只有收起的那颗是挖暗 + 强调色。
         */}
         <IconButton
-          label="收起侧边栏"
+          label={t('nav.collapseSidebar')}
           size={28}
           width={38}
           onClick={onCollapse}
@@ -98,10 +100,10 @@ export function Sidebar({
       {/* ── 上半:全局 ── */}
       <nav className="flex flex-col gap-0.5 px-2.5">
         <NavItem icon={<SquarePen size={16} />} onClick={onNewChat}>
-          新建对话
+          {t('nav.newChat')}
         </NavItem>
         <NavItem icon={<Search size={16} />} onClick={onSearch}>
-          搜索
+          {t('nav.search')}
         </NavItem>
         {NAV_FEATURES.map((f) => {
           const Icon = FEATURE_ICON[f]
@@ -112,7 +114,7 @@ export function Sidebar({
               active={activeFeature === f}
               onClick={() => onOpenFeature(f)}
             >
-              {FEATURE_LABEL[f]}
+              {t(`feature.${f}` as Parameters<typeof t>[0])}
             </NavItem>
           )
         })}
@@ -123,26 +125,26 @@ export function Sidebar({
         {workspace === null ? (
           <EmptyState
             icon={<MessageSquarePlus size={22} />}
-            title="还没有打开工作区"
-            hint="用顶部的 + 打开一个文件夹"
+            title={t('workspace.none')}
+            hint={t('workspace.noneHint')}
           />
         ) : (
           <>
-            <Section title="长期计划" defaultOpen={false}>
-              <EmptyState title="还没有长期计划" className="py-6" />
+            <Section title={t('workspace.plan')} defaultOpen={false}>
+              <EmptyState title={t('workspace.noPlan')} className="py-6" />
             </Section>
 
             <Section
-              title="最近对话"
+              title={t('workspace.recentChats')}
               defaultOpen
               action={
-                <IconButton label="新建对话" size={22} onClick={onNewChat}>
+                <IconButton label={t('nav.newChat')} size={22} onClick={onNewChat}>
                   <SquarePen size={13} />
                 </IconButton>
               }
             >
               {chatTabs.length === 0 && sessions.filter((s) => !s.archived).length === 0 ? (
-                <EmptyState title="还没有开始对话" className="py-6" />
+                <EmptyState title={t('workspace.noChats')} className="py-6" />
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
                   {chatTabs.map((t) => (
@@ -183,9 +185,9 @@ export function Sidebar({
               )}
             </Section>
 
-            <Section title="归档" defaultOpen={false}>
+            <Section title={t('workspace.archived')} defaultOpen={false}>
               {sessions.filter((s) => s.archived).length === 0 ? (
-                <EmptyState title="没有归档的对话" className="py-6" />
+                <EmptyState title={t('workspace.noArchived')} className="py-6" />
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
                   {sessions.filter((s) => s.archived).map((s) => (
@@ -215,7 +217,7 @@ export function Sidebar({
       <div
         role="button"
         tabIndex={0}
-        aria-label="打开设置"
+        aria-label={t('nav.settings')}
         onClick={(event) => {
           // 齿轮本身已经是独立按钮，避免事件冒泡后把打开动作执行两次。
           if (event.target instanceof Element && event.target.closest('button') !== null) return
@@ -235,10 +237,10 @@ export function Sidebar({
           <Mark size={16} />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[12.5px] text-fg">本地模式</p>
-          <p className="truncate text-[11px] text-fg-faint">数据只存在这台电脑上</p>
+          <p className="truncate text-[12.5px] text-fg">{t('sidebar.localMode')}</p>
+          <p className="truncate text-[11px] text-fg-faint">{t('sidebar.localModeHint')}</p>
         </div>
-        <IconButton label="设置" onClick={onOpenSettings}>
+        <IconButton label={t('common.settings')} onClick={onOpenSettings}>
           <Settings size={15} />
         </IconButton>
       </div>

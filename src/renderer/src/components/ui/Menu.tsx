@@ -27,7 +27,7 @@
  *
  * 仍然**不 portal** —— 上面那条 `.app-no-drag` 的理由没变,而 `fixed` 已经够用了。
  */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { Check } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { placeMenu, type Placement } from './menu-position'
@@ -41,7 +41,8 @@ export function Menu({
   className,
   triggerClassName,
   disabled = false,
-  onOpenChange
+  onOpenChange,
+  containsTarget
 }: {
   /** 触发按钮的**内容**;按钮本身由 Menu 渲染,免得每个调用点重复写 no-drag */
   trigger: ReactNode
@@ -54,6 +55,8 @@ export function Menu({
   disabled?: boolean
   /** 在菜单打开/关闭时通知调用方，用于重置多级菜单的临时视图状态。 */
   onOpenChange?: (open: boolean) => void
+  /** 允许通过 portal 渲染的二级菜单参与“点击外部关闭”判断。 */
+  containsTarget?: (target: Node) => boolean
 }): ReactNode {
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState<Placement | null>(null)
@@ -103,7 +106,7 @@ export function Menu({
     measure()
     // 多级菜单切换视图时内容高度会变化；观察面板尺寸，保持向上翻转和底部对齐准确。
     const resizeObserver = new ResizeObserver(measure)
-    resizeObserver.observe(panel)
+    if (panelRef.current !== null) resizeObserver.observe(panelRef.current)
     /*
       脱离了文档流就不会跟着滚动容器走,所以得自己跟。
       scroll 用 capture —— 真正在滚的是设置浮层的内容区,不是 window,
@@ -121,7 +124,8 @@ export function Menu({
   useEffect(() => {
     if (!open) return
     const onDown = (e: PointerEvent): void => {
-      if (!wrapRef.current?.contains(e.target as Node)) {
+      const target = e.target as Node
+      if (!wrapRef.current?.contains(target) && !containsTarget?.(target)) {
         setOpen(false)
         onOpenChange?.(false)
       }
@@ -141,7 +145,7 @@ export function Menu({
       document.removeEventListener('pointerdown', onDown, true)
       document.removeEventListener('keydown', onKey)
     }
-  }, [open, onOpenChange])
+  }, [open, onOpenChange, containsTarget])
 
   return (
     <div ref={wrapRef} className={cn('relative flex', className)}>
@@ -199,6 +203,8 @@ export function MenuItem({
   checked,
   danger = false,
   disabled = false,
+  buttonRef,
+  onHover,
   onSelect
 }: {
   children: ReactNode
@@ -209,13 +215,17 @@ export function MenuItem({
   checked?: boolean
   danger?: boolean
   disabled?: boolean
+  buttonRef?: Ref<HTMLButtonElement>
+  onHover?: () => void
   onSelect: () => void
 }): ReactNode {
   return (
     <button
+      ref={buttonRef}
       type="button"
       role="menuitem"
       disabled={disabled}
+      onPointerEnter={onHover}
       onClick={onSelect}
       className={cn(
         'flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[13px]',

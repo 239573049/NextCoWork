@@ -74,11 +74,11 @@ export function addedModels(aliases: readonly ModelAlias[]): Set<string> {
  * (上限是后来加的,库里可能已经有更多条;那时候按钮点不动、又说不清为什么,
  * 比少勾几个糟得多。)
  */
-export function initialSelection(rows: readonly ImportRow[]): Set<string> {
+export function initialSelection(rows: readonly ImportRow[], limit = MAX_ALIASES_PER_PROVIDER): Set<string> {
   const out = new Set<string>()
   for (const r of rows) {
     if (!r.added) continue
-    if (out.size >= MAX_ALIASES_PER_PROVIDER) break
+    if (out.size >= limit) break
     out.add(r.id)
   }
   return out
@@ -101,11 +101,12 @@ export function filterRows(rows: readonly ImportRow[], query: string): ImportRow
  */
 export function toggleRow(
   selected: ReadonlySet<string>,
-  id: string
+  id: string,
+  limit = MAX_ALIASES_PER_PROVIDER
 ): { selected: Set<string>; atCap: boolean } {
   const next = new Set(selected)
   if (next.delete(id)) return { selected: next, atCap: false }
-  if (next.size >= MAX_ALIASES_PER_PROVIDER) return { selected: next, atCap: true }
+  if (next.size >= limit) return { selected: next, atCap: true }
   next.add(id)
   return { selected: next, atCap: false }
 }
@@ -118,7 +119,8 @@ export function toggleRow(
  */
 export function toggleAll(
   selected: ReadonlySet<string>,
-  visible: readonly ImportRow[]
+  visible: readonly ImportRow[],
+  limit = MAX_ALIASES_PER_PROVIDER
 ): { selected: Set<string>; truncated: boolean } {
   const next = new Set(selected)
   if (visible.length > 0 && visible.every((r) => next.has(r.id))) {
@@ -128,10 +130,7 @@ export function toggleAll(
   let truncated = false
   for (const r of visible) {
     if (next.has(r.id)) continue
-    if (next.size >= MAX_ALIASES_PER_PROVIDER) {
-      truncated = true
-      break
-    }
+    if (next.size >= limit) { truncated = true; break }
     next.add(r.id)
   }
   return { selected: next, truncated }

@@ -28,8 +28,7 @@ export function applyTheme(
   root: HTMLElement,
   appearance: ResolvedTheme,
   settings: AppSettings,
-  uploaded: readonly ImageTheme[] = [],
-  assetUrls: ReadonlyMap<string, string> = new Map()
+  uploaded: readonly ImageTheme[] = []
 ): void {
   root.dataset['theme'] = appearance
 
@@ -40,7 +39,7 @@ export function applyTheme(
   // 也就不存在「换主题之后还剩一个旧色」这种半截状态。
   for (const k of THEME_TOKENS) root.style.setProperty(`--color-${k}`, tokens[k])
 
-  const backdrop = backdropOf(image, assetUrls)
+  const backdrop = backdropOf(image)
   if (backdrop === null) {
     root.style.removeProperty(IMAGE_VAR)
     delete root.dataset['imageRender']
@@ -52,16 +51,18 @@ export function applyTheme(
 
 /**
  * ★ **整套颜色不依赖那张图能不能读出来。** 种子色是跟着 `ImageTheme` 一起存的,
- * 上面 `tokensOf` 只用到 `seed` —— 所以主进程还没把位图递过来的那几帧里,
+ * 上面 `tokensOf` 只用到 `seed` —— 所以位图还没加载出来的那几帧里,
  * 界面已经是正确的颜色了,只是底图还没铺上。位图读失败也就只是没底图,
  * 不会退化成「一半新色一半旧色」。
  *
- * `assetUrls` 是 assetId → `blob:` URL 的表,由上传流程维护
- * (`theme:readImage` 拿到字节 → `URL.createObjectURL`)。取不到就当作没底图。
+ * ★ 底图 URL 现在**直接来自 `image.source.url`**(`ncw://` 协议地址)。
+ * 原先这里要收一张 `assetId → blob: URL` 的映射表,因为显示本地图必须先把
+ * 字节传过来 —— 那张表连同它的懒兑现、并发去重、revoke 生命周期一起没了。
  */
-function backdropOf(image: ImageTheme | null, assetUrls: ReadonlyMap<string, string>): string | null {
+function backdropOf(image: ImageTheme | null): string | null {
   if (image === null) return null
   if (image.source.kind === 'builtin') return image.source.css
-  const url = assetUrls.get(image.source.assetId)
-  return url === undefined ? null : `url("${url}")`
+  return image.source.url === undefined || image.source.url === ''
+    ? null
+    : `url("${image.source.url}")`
 }

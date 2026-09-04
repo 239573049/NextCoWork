@@ -15,8 +15,8 @@
  * 正确性负担(理由同 `repo.findAttachmentByChecksum`)。
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { dialog } from 'electron'
 import type {
   Attachment,
@@ -39,8 +39,13 @@ function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-/** 行 → 对外类型。★ `url` 由 locator 反推,**绝对路径不出主进程** */
-function toAttachment(row: repo.AttachmentRow, displayName: string): Attachment {
+/**
+ * 行 → 对外类型。★ `url` 由 locator 反推,**绝对路径不出主进程**。
+ *
+ * `displayName` 优先取列里存的原始名;迁移 6 之前的行没有它,退回 ULID 文件名 ——
+ * 那正是加这一列之前的表现,旧数据不会更糟。
+ */
+function toAttachment(row: repo.AttachmentRow): Attachment {
   const scope = row.scope as AttachmentScope
   const url = buildNcwUrl({
     scope,
@@ -55,7 +60,7 @@ function toAttachment(row: repo.AttachmentRow, displayName: string): Attachment 
     id: row.id,
     scope,
     ownerId: row.ownerId ?? undefined,
-    displayName,
+    displayName: row.displayName ?? basename(row.path),
     mime: mimeOfExt(row.path),
     size: row.size,
     checksum: row.checksum,
@@ -73,9 +78,10 @@ export function uploadAttachment(req: AttachmentUploadRequest): Attachment {
   const checksum = sha256(req.bytes)
 
   // ★ 去重命中时**不写新文件**,直接复用。同一张截图粘三次只占一份磁盘。
+  //   ★ 但 displayName 仍取本次上传的 —— 去重的是字节,不是用户对它的称呼。
   const hit = repo.findAttachmentByChecksum(checksum, req.scope, req.ownerId)
   if (hit !== undefined && existsSync(hit.path)) {
-    return toAttachment(hit, req.displayName)
+    return { ...toAttachment(hit), displayName: req.displayName }
   }
 
   const id = ulid()
@@ -105,6 +111,7 @@ export function uploadAttachment(req: AttachmentUploadRequest): Attachment {
     path: target,
     size: req.bytes.byteLength,
     checksum,
+    displayName: req.displayName,
     createdAt
   })
 
@@ -168,18 +175,45 @@ export async function pickAttachments(req: {
 export function removeAttachment(req: { id: string }): void {
   const row = repo.getAttachmentRow(req.id)
   if (row === undefined) return
-  // 先删文件再删行:反过来的话,删行成功、删文件失败会留下一个
-  // 表里没有的磁盘文件 —— 而它正好落进「孤儿」的定义里,下次清理会收掉它。
-  // 这个顺序下最坏是留一条指向不存在文件的行,清理侧已有那条规则。
-  rmSync(row.path, { force: true })
+
+  // This endpoint is for removing an attachment chip before send. A
+  // committed row belongs to a message and must not be detached through a
+  // renderer-controlled id; doing so would leave the transcript referring to
+  // a missing file.
+  if (row.status === 'committed' || row.messageId !== null || row.sessionId !== null) {
+    throw new IpcError('unknown', '已提交的附件不能从消息中移除')
+  }
+
+  // Only files under the application-managed session tree may be unlinked.
+  // Agent-generated images can be absolute paths and are deliberately kept as
+  // references only; an attachment id must never become an arbitrary delete
+  // primitive for the renderer.
+  const managedRoot = join(attachmentRoot(), 'sessions')
+  const path = resolve(row.path)
+  const rel = relative(resolve(managedRoot), path)
+  const managed = rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+  if (managed && repo.attachmentReferenceCount(row.path, row.id) === 0) {
+    try {
+      // lstat/unlink removes a symlink itself and never follows it to an
+      // external target. Directories are not valid uploaded attachments.
+      const st = lstatSync(row.path)
+      if (st.isDirectory()) throw new Error('附件路径是目录')
+      unlinkSync(row.path)
+    } catch (err) {
+      // A missing file is already equivalent to removal. Permission and type
+      // errors are surfaced while the database row is retained for retry.
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw new IpcError('unknown', `删除附件文件失败: ${String(err)}`)
+      }
+    }
+  }
+
+  // Remove the row after the physical operation. For external paths this only
+  // removes our bookkeeping row; the user's file is never touched.
   repo.removeAttachmentRow(req.id)
 }
 
-/** 重启后恢复草稿附件区 */
+/** 重启后恢复草稿附件区。★ 显示名从 `display_name` 列读回,不再退化成 ULID */
 export function listSessionAttachments(req: { sessionId: string }): Attachment[] {
-  return repo.listDraftAttachments(req.sessionId).map((row) =>
-    // displayName 没有单独落列,退回文件名。UI 侧在会话内仍持有用户看到的原始名,
-    // 只有「重启后恢复」这一条路径会退化成 ULID 文件名。
-    toAttachment(row, basename(row.path))
-  )
+  return repo.listDraftAttachments(req.sessionId).map(toAttachment)
 }

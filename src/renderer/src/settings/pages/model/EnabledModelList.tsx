@@ -1,9 +1,15 @@
-import { Cloud, GripVertical, Image as ImageIcon, Plus, Workflow } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { PROVIDER_PRESETS } from '../../../../../shared/domain/presets'
-import { cn } from '../../../lib/cn'
-import { type ProviderEntry } from './enabled-models'
-import { ProviderAvatar } from './ProviderAvatar'
+import {
+  Cloud,
+  GripVertical,
+  Image as ImageIcon,
+  Plus,
+  Workflow,
+} from "lucide-react";
+import type { ReactNode } from "react";
+import { PROVIDER_PRESETS } from "../../../../../shared/domain/presets";
+import { cn } from "../../../lib/cn";
+import { type ProviderEntry } from "./enabled-models";
+import { ProviderAvatar } from "./ProviderAvatar";
 
 /**
  * 参考图左边那一列。
@@ -21,19 +27,19 @@ export function EnabledModelList({
   selectedId,
   onSelect,
   onAdd,
-  footer
+  footer,
 }: {
-  entries: readonly ProviderEntry[]
-  loaded: boolean
-  selectedId: string | null
-  onSelect: (id: string) => void
-  onAdd: () => void
+  entries: readonly ProviderEntry[];
+  loaded: boolean;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onAdd: () => void;
   /**
    * 参考图在这一列底下放的是「哪个角色用哪个模型」。我们真有的那两个
    * (默认模型 / 默认子代理模型)由 `ModelPage` 塞进来 —— 它们要 `patch()`,
    * 而这个组件不该知道设置是怎么写回去的。
    */
-  footer?: ReactNode
+  footer?: ReactNode;
 }): ReactNode {
   return (
     <div className="flex w-[236px] shrink-0 flex-col">
@@ -49,8 +55,8 @@ export function EnabledModelList({
           aria-label="添加供应商"
           onClick={onAdd}
           className={cn(
-            'app-no-drag mt-0.5 flex size-6 shrink-0 items-center justify-center',
-            'rounded-[7px] text-icon transition-colors hover:bg-tint hover:text-fg'
+            "app-no-drag mt-0.5 flex size-6 shrink-0 items-center justify-center",
+            "rounded-[7px] text-icon transition-colors hover:bg-tint hover:text-fg",
           )}
         >
           <Plus size={15} />
@@ -65,20 +71,30 @@ export function EnabledModelList({
               onClick={() => onSelect(e.provider.id)}
               aria-current={e.provider.id === selectedId}
               className={cn(
-                'app-no-drag flex w-full items-center gap-2 rounded-[9px] px-1.5 py-2 text-left',
-                'transition-colors',
-                e.provider.id === selectedId ? 'bg-tint' : 'hover:bg-tint/60'
+                "app-no-drag flex w-full items-center gap-2 rounded-[9px] px-1.5 py-2 text-left",
+                "transition-colors",
+                e.provider.id === selectedId ? "bg-tint" : "hover:bg-tint/60",
               )}
             >
-              <GripVertical size={13} className="shrink-0 text-fg-faint opacity-30" aria-hidden />
+              <GripVertical
+                size={13}
+                className="shrink-0 text-fg-faint opacity-30"
+                aria-hidden
+              />
               <ProviderAvatar name={e.provider.name} id={e.provider.id} />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5">
-                  <span className="min-w-0 truncate text-[12.5px] text-fg">{e.provider.name}</span>
-                  {e.isDefault && <span className="shrink-0 text-[11px] text-accent">默认</span>}
+                  <span className="min-w-0 truncate text-[12.5px] text-fg">
+                    {e.provider.name}
+                  </span>
+                  {e.isDefault && (
+                    <span className="shrink-0 text-[11px] text-accent">
+                      默认
+                    </span>
+                  )}
                 </span>
                 <span className="mt-0.5 block truncate text-[11.5px] text-fg-faint">
-                  {e.primaryAlias ?? '未配置模型'}
+                  {e.primaryAlias ?? "未配置模型"}
                 </span>
               </span>
             </button>
@@ -88,7 +104,8 @@ export function EnabledModelList({
 
       {loaded && entries.length === 0 && (
         <p className="px-1.5 py-3 text-[12px] leading-[1.6] text-fg-faint">
-          还没有配置任何上游供应商。内置了 {PROVIDER_PRESETS.length} 家预设,点上面的
+          还没有配置任何上游供应商。内置了 {PROVIDER_PRESETS.length}{" "}
+          家预设,点上面的
           <Plus size={11} className="mx-0.5 inline align-[-1px]" />
           先看看有哪些。
         </p>
@@ -98,8 +115,8 @@ export function EnabledModelList({
         type="button"
         onClick={onAdd}
         className={cn(
-          'app-no-drag mt-1 flex w-full items-center gap-1.5 rounded-[9px] px-1.5 py-2',
-          'text-[12.5px] text-fg-muted transition-colors hover:bg-tint/60 hover:text-fg'
+          "app-no-drag mt-1 flex w-full items-center gap-1.5 rounded-[9px] px-1.5 py-2",
+          "text-[12.5px] text-fg-muted transition-colors hover:bg-tint/60 hover:text-fg",
         )}
       >
         <Plus size={14} className="shrink-0 text-icon" />
@@ -140,7 +157,7 @@ export function EnabledModelList({
         title="方案 §10 明确砍掉了云同步 —— 这不是还没做,是决定不做"
       />
     </div>
-  )
+  );
 }
 
 /** 左列底下那三行。都还没有落点,所以一律不可点,右边直说缺的是什么 */
@@ -148,12 +165,12 @@ function ExtraRow({
   icon,
   label,
   tag,
-  title
+  title,
 }: {
-  icon: ReactNode
-  label: string
-  tag: string
-  title?: string
+  icon: ReactNode;
+  label: string;
+  tag: string;
+  title?: string;
 }): ReactNode {
   return (
     <div
@@ -166,5 +183,5 @@ function ExtraRow({
       <span className="min-w-0 flex-1 truncate text-[12.5px]">{label}</span>
       <span className="shrink-0 text-[11px]">{tag}</span>
     </div>
-  )
+  );
 }

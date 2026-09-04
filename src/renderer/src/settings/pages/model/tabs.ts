@@ -1,21 +1,21 @@
 import type { Modality } from '../../../../../shared/domain/pricing'
 
-export type ModelTab = 'catalog' | 'pricing' | 'capabilities' | 'request' | 'usage' | Modality
+export type ModelTab = Modality | 'usage' | 'management'
 
 export const MODEL_TABS: readonly ModelTab[] = [
-  'catalog',
-  'pricing',
-  'capabilities',
-  'request',
+  'text',
+  'image',
+  'video',
+  'speech',
+  'transcription',
   'usage'
 ]
 
 export function parseModelTab(sub: string): ModelTab {
-  if (sub === 'text') return 'catalog'
-  if (sub === 'image' || sub === 'video' || sub === 'speech' || sub === 'transcription') return sub
-  return MODEL_TABS.find((tab) => tab === sub) ?? 'catalog'
+  if (sub === 'management') return 'management'
+  return MODEL_TABS.find((tab) => tab === sub) ?? 'text'
 }
 
 export function isModality(tab: ModelTab): tab is Modality {
-  return tab === 'text' || tab === 'image' || tab === 'video' || tab === 'speech' || tab === 'transcription'
+  return tab !== 'usage' && tab !== 'management'
 }

@@ -82,7 +82,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
     setImportPassword('')
   }, [])
 
-  const run = useCallback(async <T,>(label: string, action: () => Promise<T>, success?: (value: T) => string | null): Promise<T | null> => {
+  const run = useCallback(async <T,>(label: string, action: () => Promise<T>, success?: (value: T) => string | null, refreshAfter = true): Promise<T | null> => {
     setBusy(label)
     setError(null)
     setNotice(null)
@@ -90,7 +90,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
       const value = await action()
       const message = success?.(value)
       if (message !== undefined && message !== null) setNotice(message)
-      await refresh()
+      if (refreshAfter) await refresh()
       return value
     } catch (err) {
       setError(errorMessage(err))
@@ -156,7 +156,10 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
       label = 'clear-local-data'
       action = () => dataService.clearLocalData(true)
     }
-    const result = await run(label, action)
+    // `clearLocalData` closes the database and requests app.quit(); querying
+    // stats again after it succeeds would race the shutdown path and turn a
+    // completed deletion into a spurious error state.
+    const result = await run(label, action, undefined, target.preview.kind !== 'local-data')
     if (result !== null) closeModal()
   }
 

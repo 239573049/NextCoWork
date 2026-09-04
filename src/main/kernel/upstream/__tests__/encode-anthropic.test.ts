@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { assistantMessage, userMessage } from '../../../../shared/agent/message'
 import type { ToolInfo } from '../../../../shared/agent/tool'
+import type { AnthropicCacheTtl } from '../../../../shared/domain/provider'
 import { joinUpstreamUrl, type CanonicalRequest } from '../canonical'
 import { encodeAnthropic, toAnthropicMessages, toAnthropicTools } from '../encode/anthropic'
+
+const ENCODE_OPTIONS = { userId: 'ws-test', cacheTtl: 'off' as const }
 
 function u(...parts: ContentPart[]): AgentMessage {
   return userMessage('u', parts, 0)
@@ -18,6 +21,28 @@ const BASE: CanonicalRequest = {
   messages: [],
   tools: [],
   maxOutputTokens: 4096
+}
+
+const TOOL: ToolInfo = {
+  internalId: 'read_file',
+  externalName: 'read_file',
+  description: 'read a file',
+  inputSchema: { type: 'object' },
+  readOnly: true,
+  destructive: false,
+  needsNetwork: false,
+  source: { kind: 'builtin' }
+}
+
+type JsonRecord = Record<string, unknown>
+
+function encodedBody(over: Partial<CanonicalRequest> = {}, cacheTtl: AnthropicCacheTtl = 'off'): JsonRecord {
+  return encodeAnthropic(
+    { ...BASE, ...over },
+    'claude-x',
+    'sk-1',
+    { userId: 'ws-opaque', cacheTtl }
+  ).body as JsonRecord
 }
 
 describe('toAnthropicMessages · 会被上游拒收的形状', () => {
@@ -159,19 +184,72 @@ describe('encodeAnthropic', () => {
     const enc = encodeAnthropic(
       { ...BASE, system: '你是助手', messages: [u({ type: 'text', text: 'hi' })] },
       'claude-x',
-      'sk-1'
+      'sk-1',
+      ENCODE_OPTIONS
     )
     expect(enc.path).toBe('/v1/messages')
     expect(enc.headers).toMatchObject({ 'x-api-key': 'sk-1', 'anthropic-version': '2023-06-01' })
     expect(enc.body).toMatchObject({ model: 'claude-x', max_tokens: 4096, stream: true, system: '你是助手' })
+    expect(enc.body).toMatchObject({ metadata: { user_id: 'ws-test' } })
+  })
+
+  it('metadata.user_id 与缓存开关独立：关闭缓存仍发送工作区标识', () => {
+    const body = encodedBody({ system: '稳定提示' }, 'off')
+    expect(body.metadata).toEqual({ user_id: 'ws-opaque' })
+    expect(body).not.toHaveProperty('cache_control')
+    expect(body.system).toBe('稳定提示')
+  })
+
+  it('5 分钟缓存使用 Anthropic 默认 TTL，并在 system 上固定稳定前缀断点', () => {
+    const body = encodedBody({ system: '稳定提示', tools: [TOOL] }, '5m')
+    expect(body.cache_control).toEqual({ type: 'ephemeral' })
+    expect(body.system).toEqual([
+      { type: 'text', text: '稳定提示', cache_control: { type: 'ephemeral' } }
+    ])
+    expect(body).not.toHaveProperty('ttl')
+    expect((body.system as unknown[])[0]).not.toHaveProperty('cache_control.ttl')
+    expect(body.tools).toEqual([
+      { name: 'read_file', description: 'read a file', input_schema: { type: 'object' } }
+    ])
+  })
+
+  it('1 小时缓存在顶层和显式 system 断点使用相同 TTL', () => {
+    const body = encodedBody({ system: '稳定提示' }, '1h')
+    expect(body.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(body.system).toEqual([
+      { type: 'text', text: '稳定提示', cache_control: { type: 'ephemeral', ttl: '1h' } }
+    ])
+  })
+
+  it('没有 system 时把断点放在最后一个 tool；两者都空时只保留顶层标识', () => {
+    const toolsBody = encodedBody({ tools: [TOOL, { ...TOOL, externalName: 'write_file' }] }, '1h')
+    expect(toolsBody.system).toBeUndefined()
+    expect(toolsBody.tools).toEqual([
+      { name: 'read_file', description: 'read a file', input_schema: { type: 'object' } },
+      {
+        name: 'write_file',
+        description: 'read a file',
+        input_schema: { type: 'object' },
+        cache_control: { type: 'ephemeral', ttl: '1h' }
+      }
+    ])
+
+    const emptyBody = encodedBody({}, '5m')
+    expect(emptyBody.cache_control).toEqual({ type: 'ephemeral' })
+    expect(emptyBody.system).toBeUndefined()
+    expect(emptyBody.tools).toBeUndefined()
+  })
+
+  it('不发送 OpenAI 专属 prompt_cache_key', () => {
+    expect(encodedBody()).not.toHaveProperty('prompt_cache_key')
   })
 
   it('空 system 不下发该字段', () => {
-    expect(encodeAnthropic(BASE, 'm', 'k').body).not.toHaveProperty('system')
+    expect(encodeAnthropic(BASE, 'm', 'k', ENCODE_OPTIONS).body).not.toHaveProperty('system')
   })
 
   it('无工具时不下发 tools 字段', () => {
-    expect(encodeAnthropic(BASE, 'm', 'k').body).not.toHaveProperty('tools')
+    expect(encodeAnthropic(BASE, 'm', 'k', ENCODE_OPTIONS).body).not.toHaveProperty('tools')
   })
 
   /**
@@ -179,21 +257,21 @@ describe('encodeAnthropic', () => {
    * 不在这里兜住,它就以「高思考档位下必然报错」的形式出现在用户面前。
    */
   it('thinking 预算不小于 max_tokens 时抬高 max_tokens', () => {
-    const body = encodeAnthropic({ ...BASE, maxOutputTokens: 4096, thinkingBudget: 8192 }, 'm', 'k')
+    const body = encodeAnthropic({ ...BASE, maxOutputTokens: 4096, thinkingBudget: 8192 }, 'm', 'k', ENCODE_OPTIONS)
       .body as Record<string, unknown>
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 })
     expect(body.max_tokens).toBe(8192 + 4096)
   })
 
   it('max_tokens 已经够大时不改动', () => {
-    const body = encodeAnthropic({ ...BASE, maxOutputTokens: 32000, thinkingBudget: 8192 }, 'm', 'k')
+    const body = encodeAnthropic({ ...BASE, maxOutputTokens: 32000, thinkingBudget: 8192 }, 'm', 'k', ENCODE_OPTIONS)
       .body as Record<string, unknown>
     expect(body.max_tokens).toBe(32000)
   })
 
   /** 开启 thinking 时上游不接受 temperature */
   it('开 thinking 时不下发 temperature', () => {
-    const body = encodeAnthropic({ ...BASE, thinkingBudget: 1024, temperature: 0.7 }, 'm', 'k').body as Record<
+    const body = encodeAnthropic({ ...BASE, thinkingBudget: 1024, temperature: 0.7 }, 'm', 'k', ENCODE_OPTIONS).body as Record<
       string,
       unknown
     >
@@ -201,12 +279,12 @@ describe('encodeAnthropic', () => {
   })
 
   it('不开 thinking 时 temperature 正常下发', () => {
-    const body = encodeAnthropic({ ...BASE, temperature: 0.7 }, 'm', 'k').body as Record<string, unknown>
+    const body = encodeAnthropic({ ...BASE, temperature: 0.7 }, 'm', 'k', ENCODE_OPTIONS).body as Record<string, unknown>
     expect(body.temperature).toBe(0.7)
   })
 
   it('stopSequences 为空数组时不下发', () => {
-    const body = encodeAnthropic({ ...BASE, stopSequences: [] }, 'm', 'k').body as Record<string, unknown>
+    const body = encodeAnthropic({ ...BASE, stopSequences: [] }, 'm', 'k', ENCODE_OPTIONS).body as Record<string, unknown>
     expect(body).not.toHaveProperty('stop_sequences')
   })
 })

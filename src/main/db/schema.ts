@@ -334,13 +334,11 @@ ALTER TABLE attachments ADD COLUMN status TEXT NOT NULL DEFAULT 'committed';
 -- ★ owner_id 与 session_id 是**两回事**,不是冗余:
 --
 -- session_id 上有指向 sessions 的外键,而附件是在**发送之前**上传的 ——
--- 用户新建对话、还没发第一条消息时,sessions 表里没有那一行
--- (见 store.setHistory 里「渲染层可能在真正发送前就生成 sessionId」那句)。
+-- 用户新建对话、还没发第一条消息时,sessions 表里没有那一行。
 -- 上传时往 session_id 里填就会直接违反外键。
 --
 -- 所以:draft 行填 owner_id(无外键),消息提交时由 recordMessageAttachments
 -- 填上 session_id —— 那一刻会话行必然已经存在,CASCADE 从此生效。
--- owner_id 同时给了 theme/export 的 ownerId 一个落点。
 ALTER TABLE attachments ADD COLUMN owner_id TEXT;
 UPDATE attachments SET owner_id = session_id WHERE owner_id IS NULL;
 
@@ -350,10 +348,43 @@ CREATE INDEX attachments_by_status ON attachments (status, created_at);
 CREATE INDEX attachments_by_checksum ON attachments (checksum, scope, owner_id);
 `
 
+/**
+ * 第 6 条:附件的显示名。
+ *
+ * 磁盘文件名是 ULID(理由见 `shared/domain/attachment.ts`:路径注入、重名覆盖、
+ * 跨平台非法字符),所以**用户看到的名字必须单独存一列**。
+ *
+ * 不加这一列的表现很具体:传了图 → 关掉应用 → 重开,草稿附件区里的 chip
+ * 从「季度报表.png」变成「01J8XQZ4M7.png」。用户认不出哪张是哪张 ——
+ * 而 ULID 恰恰是为了不让人认路径才选的。
+ *
+ * 可空:迁移之前的行没有这个信息,读的时候退回 `basename(path)`。
+ * 那正是不加这列时的表现,所以旧数据不会更糟。
+ */
+const V6_ATTACHMENT_DISPLAY_NAME = `
+ALTER TABLE attachments ADD COLUMN display_name TEXT;
+`
+
+/**
+ * 第 7 条:附件 owner_id。
+ *
+ * owner_id 是草稿附件的归属键,不能复用带外键的 session_id:新会话在发送
+ * 第一条消息前可能还没有 sessions 行。它原本误放进第 5 条迁移,导致已经
+ * 执行过旧版第 5 条的用户永远拿不到这列(SQLite 不会重跑已记录的迁移)。
+ * 因此这里必须追加新迁移,而不是修改历史迁移。
+ */
+const V7_ATTACHMENT_OWNER = `
+-- 第 5 条建立的是不含 owner_id 的旧索引;换成完整的去重键。
+DROP INDEX IF EXISTS attachments_by_checksum;
+CREATE INDEX attachments_by_checksum ON attachments (checksum, scope, owner_id);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
   { version: 3, name: 'pricing-usage', sql: V3_PRICING_USAGE },
   { version: 4, name: 'sessions-data', sql: V4_SESSIONS },
-  { version: 5, name: 'attachment-scope', sql: V5_ATTACHMENT_SCOPE }
+  { version: 5, name: 'attachment-scope', sql: V5_ATTACHMENT_SCOPE },
+  { version: 6, name: 'attachment-display-name', sql: V6_ATTACHMENT_DISPLAY_NAME },
+  { version: 7, name: 'attachment-owner', sql: V7_ATTACHMENT_OWNER }
 ]

@@ -39,22 +39,10 @@ export function PreferencePage({ settings, patch }: SettingsPageProps): ReactNod
   const appearance = useAppearance()
   const imageId = settings.imageTheme.id
 
-  /**
-   * 上传的那几张。**表不是这一页拉的** —— `App.tsx` 开机时就拉了一次
-   * (整套 token 要靠选中那张的 seed 派生,不能等设置页打开)。这里只补
-   * 「把每张都兑现成 blob URL」:开机只兑现了选中的那一张,理由在 store 的文件头。
-   *
-   * 依赖项是 `uploaded` 而不是 `[]`:表比这一页晚到时(先开设置页、再拉回表)
-   * 也要补一次,否则那几张卡会一直停在纯色。`ensure` 幂等,重跑不花钱。
-   */
+  /** 上传的那几张由主进程提供稳定的 ncw:// URL，浏览器直接负责加载。 */
   const uploaded = useImageThemes((s) => s.uploaded)
-  const urls = useImageThemes((s) => s.urls)
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
-
-  useEffect(() => {
-    void useImageThemes.getState().ensureAll()
-  }, [uploaded])
 
   async function upload(): Promise<void> {
     setImporting(true)
@@ -123,7 +111,7 @@ export function PreferencePage({ settings, patch }: SettingsPageProps): ReactNod
               <ImageCard
                 key={t.id}
                 theme={t}
-                backdrop={urls.get(t.id)}
+                backdrop={t.source.kind === 'uploaded' ? t.source.url : undefined}
                 selected={t.id === imageId}
                 onClick={() => patch({ imageTheme: { id: t.id === imageId ? null : t.id } })}
                 onDelete={() => void removeUploaded(t.id)}

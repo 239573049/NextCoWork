@@ -10,7 +10,7 @@
 import type { AgentError } from '../../../shared/agent/error'
 import { agentError } from '../../../shared/agent/error'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
-import type { ModelAlias, ProviderHealth, UpstreamProvider } from '../../../shared/domain/provider'
+import type { ModelAlias, ProviderHealth, RequestPatchRule, UpstreamProvider } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import { abortableSleep, isAbortError } from '../abort'
 import type { KernelHost } from '../host'
@@ -107,7 +107,7 @@ export class UpstreamRouter {
     const enabled = new Set(
       this.config.providers().filter((p) => p.enabled).map((p) => p.id)
     )
-    return this.config.aliases().filter((a) => enabled.has(a.providerId))
+    return this.config.aliases().filter((a) => enabled.has(a.providerId) && a.enabled !== false)
   }
 
   health(): ProviderHealth[] {
@@ -129,7 +129,7 @@ export class UpstreamRouter {
     for (const alias of this.config.aliases()) {
       if (alias.alias !== model) continue
       const provider = byId.get(alias.providerId)
-      if (provider?.enabled === true) list.push({ provider, alias })
+      if (provider?.enabled === true && alias.enabled !== false) list.push({ provider, alias })
     }
     list.sort((a, b) => a.provider.priority - b.provider.priority)
 
@@ -223,10 +223,11 @@ export class UpstreamRouter {
         userId: context.workspaceId,
         cacheTtl
       })
+      const body = applyRequestPatches(enc.body, c.alias.requestAdapter?.patches)
       const res = await this.host.fetch(joinUpstreamUrl(c.provider.baseUrl, enc.path), {
         method: 'POST',
         headers: { ...enc.headers, accept: 'text/event-stream' },
-        body: JSON.stringify(enc.body),
+        body: JSON.stringify(body),
         signal
       })
 
@@ -277,9 +278,21 @@ export class UpstreamRouter {
     signal: AbortSignal,
     context: UpstreamRequestContext
   ): AsyncGenerator<ProviderStreamEvent> {
+    // `context` comes from the typed AgentSession boundary, but this router is
+    // also used by the local gateway and by integrations that can cross a
+    // JavaScript (rather than TypeScript) boundary. Treat malformed runtime
+    // input as an ordinary local validation failure instead of throwing before
+    // the generator can emit an error event.
+    const workspaceId =
+      typeof context?.workspaceId === 'string' ? context.workspaceId : ''
     if (
-      context.workspaceId.trim() === '' ||
-      context.workspaceId.length > ANTHROPIC_USER_ID_MAX
+      workspaceId.trim() === '' ||
+      // Anthropic specifies this limit in characters. JavaScript's
+      // `String.length` counts UTF-16 code units, so use code points here;
+      // production `ws_...` IDs are ASCII, but this keeps the boundary
+      // correct for callers that provide a Unicode identifier in tests or
+      // through an integration.
+      [...workspaceId].length > ANTHROPIC_USER_ID_MAX
     ) {
       yield {
         type: 'error',
@@ -316,7 +329,7 @@ export class UpstreamRouter {
       }
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const outcome = yield* this.attempt(c, req, signal, context)
+        const outcome = yield* this.attempt(c, req, signal, { workspaceId })
         if (outcome.kind === 'ok') return
 
         // A cache compatibility error is a configuration mismatch, not an
@@ -375,4 +388,27 @@ export class UpstreamRouter {
       { retryable: cooling }
     )
   }
+}
+
+/** Apply the model-level, deliberately narrow request customisation surface. */
+function applyRequestPatches(body: unknown, patches: readonly RequestPatchRule[] | undefined): unknown {
+  if (!patches || !Array.isArray(patches) || patches.length === 0) return body
+  const root = structuredClone(body) as Record<string, unknown>
+  const forbidden = new Set(['/model', '/messages', '/stream'])
+  for (const patch of patches) {
+    if (patch.op !== 'add' && patch.op !== 'replace' && patch.op !== 'remove') throw new Error(`请求 Patch 操作不支持: ${String(patch.op)}`)
+    if (!patch.path.startsWith('/') || forbidden.has(patch.path) || /\/(?:model|messages|stream)(?:\/|$)/.test(patch.path)) throw new Error(`请求 Patch 路径不允许: ${patch.path}`)
+    const parts = patch.path.slice(1).split('/').map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
+    let cursor: Record<string, unknown> = root
+    for (const part of parts.slice(0, -1)) {
+      const next = cursor[part]
+      if (typeof next !== 'object' || next === null || Array.isArray(next)) throw new Error(`请求 Patch 父路径不存在: ${patch.path}`)
+      cursor = next as Record<string, unknown>
+    }
+    const key = parts[parts.length - 1]
+    if (!key) throw new Error(`请求 Patch 路径为空: ${patch.path}`)
+    if (patch.op === 'remove') delete cursor[key]
+    else cursor[key] = patch.value
+  }
+  return root
 }

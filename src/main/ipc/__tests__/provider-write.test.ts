@@ -18,10 +18,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { UpstreamProvider } from '../../../shared/domain/provider'
+import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import { closeDatabase, openDatabase } from '../../db/index'
 import { resetRuntimeForTest } from '../../runtime'
 import { store } from '../../state/store'
 import { listModels, listProviders, removeProvider, upsertProvider } from '../provider'
+import { BUILTIN_PROVIDER_ID } from '../../../shared/domain/presets'
 
 let dir = ''
 
@@ -90,6 +92,84 @@ describe('upsertProvider', () => {
   it('名称去空白;全空白的名称拒掉', () => {
     expect(upsertProvider(draft({ name: '  Acme  ' })).name).toBe('Acme')
     expect(() => upsertProvider(draft({ name: '   ' }))).toThrow(/名称/)
+  })
+
+  it('按 Provider 保存 Anthropic 缓存档位，并在旧字段缺失时有效值为 off', () => {
+    expect(anthropicCacheTtlOf(draft())).toBe('off')
+    const saved = upsertProvider(
+      draft({ protocolOptions: { anthropic: { cacheTtl: '5m' } } })
+    )
+    expect(anthropicCacheTtlOf(saved)).toBe('5m')
+
+    const changedProtocol = upsertProvider(
+      draft({ protocol: 'openai-chat', protocolOptions: undefined })
+    )
+    expect(anthropicCacheTtlOf(changedProtocol)).toBe('5m')
+    expect(anthropicCacheTtlOf(upsertProvider(draft({ protocol: 'anthropic' })))).toBe('5m')
+  })
+
+  it('省略 protocolOptions 的旧版更新不会清空配置；显式嵌套更新保留未来字段', () => {
+    const withFuture = draft({
+      protocolOptions: {
+        anthropic: { cacheTtl: '1h' },
+        futureProtocol: { enabled: true }
+      } as UpstreamProvider['protocolOptions']
+    })
+    upsertProvider(withFuture)
+
+    const renamed = upsertProvider(draft({ name: 'Acme 新名字' }))
+    expect(renamed.protocolOptions).toEqual({
+      anthropic: { cacheTtl: '1h' },
+      futureProtocol: { enabled: true }
+    })
+
+    const changed = upsertProvider(
+      draft({ protocolOptions: { anthropic: { cacheTtl: 'off' } } })
+    )
+    expect(changed.protocolOptions).toEqual({
+      anthropic: { cacheTtl: 'off' },
+      futureProtocol: { enabled: true }
+    })
+  })
+
+  it('显式非法 TTL 被拒绝且不覆盖原配置；异常旧值按 off 使用', () => {
+    upsertProvider(draft({ protocolOptions: { anthropic: { cacheTtl: '1h' } } }))
+    expect(() =>
+      upsertProvider(
+        draft({
+          protocolOptions: { anthropic: { cacheTtl: '90d' } }
+        } as unknown as UpstreamProvider)
+      )
+    ).toThrow(/off、5m 或 1h/)
+    expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('1h')
+
+    // Direct/imported legacy JSON may contain an unknown value; persistence
+    // sanitizes it so a future read can never accidentally enable caching.
+    store.putProvider(
+      draft({
+        protocolOptions: { anthropic: { cacheTtl: 'unknown' } }
+      } as unknown as UpstreamProvider)
+    )
+    expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('off')
+  })
+
+  it('重播种内置 Provider 时保留已保存的协议配置', () => {
+    store.putProvider(
+      draft({
+        id: BUILTIN_PROVIDER_ID,
+        protocol: 'openai-chat',
+        protocolOptions: { anthropic: { cacheTtl: '1h' } }
+      })
+    )
+
+    // resetRuntimeForTest clears the per-process seeded flag while leaving the
+    // SQLite row in place, matching an application restart.
+    resetRuntimeForTest()
+    const seeded = listProviders().find((p) => p.id === BUILTIN_PROVIDER_ID)
+    expect(seeded).toMatchObject({
+      protocol: 'openai-chat',
+      protocolOptions: { anthropic: { cacheTtl: '1h' } }
+    })
   })
 })
 

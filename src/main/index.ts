@@ -3,10 +3,11 @@
  * 内核代码永远不从这里 import —— 依赖方向是单向的:main → kernel,不反向。
  */
 import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { app, shell, BrowserWindow, nativeImage } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
-import { closeDatabase, openDatabase } from './db'
+import { closeDatabase, defaultDatabaseDirectory, DB_FILENAME, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } from './ipc'
@@ -112,6 +113,26 @@ function createMainWindow(): BrowserWindow {
   return win
 }
 
+/**
+ * 首次切换到项目级目录时保留旧版 Electron userData 数据库。
+ * 只在目标库不存在时复制，不覆盖用户已经在 `.next-cowork` 中生成的库。
+ */
+function prepareProjectDatabaseDirectory(): string {
+  const targetDir = defaultDatabaseDirectory()
+  const targetPath = join(targetDir, DB_FILENAME)
+  const legacyPath = join(app.getPath('userData'), DB_FILENAME)
+  if (!existsSync(targetPath) && existsSync(legacyPath)) {
+    mkdirSync(targetDir, { recursive: true })
+    copyFileSync(legacyPath, targetPath)
+    for (const suffix of ['-wal', '-shm']) {
+      const source = `${legacyPath}${suffix}`
+      if (existsSync(source)) copyFileSync(source, `${targetPath}${suffix}`)
+    }
+    console.log(`[db] 已将旧数据库迁移到 ${targetDir}`)
+  }
+  return targetDir
+}
+
 void app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.nextcowork.app')
 
@@ -144,15 +165,17 @@ void app.whenReady().then(() => {
     根本没做时的原症状,没人会怀疑到调用顺序上来。`openDatabase()` 因此
     在重复调用时直接抛错,把这个顺序钉死。
 
-    dev 的独立路径已经在模块顶层由 `app.setPath('userData', …-dev)` 处理过了,
-    这里拿到的就是该用的那个目录。
+    数据库目录固定为当前工作目录下的 `.next-cowork/`，与 Electron 的
+    `userData` 路径解耦；`openDatabase` 会在首次启动时自动创建它。
   */
-  openDatabase(app.getPath('userData'))
+  // SQLite 主库使用项目级目录,避免把 NextCoWork 数据散落到 Electron
+  // 的平台 userData 目录。目录不存在时由 openDatabase 自动创建。
+  openDatabase(prepareProjectDatabaseDirectory())
 
   /*
     ★ 第二段。必须排在 `openDatabase` 之后 —— 附件根目录取的是同一个
-    `userData` 路径,而 dev 下那个路径是模块顶层改过的;两处读的必须是同一个值,
-    否则协议寻址的目录与清理扫描的目录会是两个。
+    附件协议仍使用 Electron 的 `userData` 路径；数据库位置的切换不会改变
+    已有附件目录和主题资源的寻址。
   */
   installAttachmentProtocol()
 

@@ -21,8 +21,8 @@
  *   挪进 `utilityProcess` 是唯一的出路,而那一步的前提就是调用点全走访问器。
  *   同样的理由:聚合查询一律带 LIMIT 和时间窗,`VACUUM` 只在空闲时跑。
  * - 迁移**只增不改**(见 `schema.ts`)。
- * - dev 用独立的 `userData` 路径 —— 已经由 `main/index.ts` 在 app ready 之前
- *   `app.setPath('userData', …-dev)` 处理掉了,这里不需要再判一次。
+ * - 应用数据库默认落在当前工作目录的 `.next-cowork/` 下,便于项目级携带和
+ *   备份；调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
  */
 import { mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -31,8 +31,14 @@ import { MIGRATIONS } from './schema'
 
 /** 库文件名。`-wal` / `-shm` 是 SQLite 自己在同目录建的兄弟文件。 */
 export const DB_FILENAME = 'nextcowork.db'
+export const DATABASE_DIRNAME = '.next-cowork'
 
 const MEMORY = ':memory:'
+
+/** 默认项目级数据目录: `<cwd>/.next-cowork/`。 */
+export function defaultDatabaseDirectory(): string {
+  return join(process.cwd(), DATABASE_DIRNAME)
+}
 
 let handle: DatabaseSync | null = null
 let handlePath: string | null = null
@@ -96,6 +102,16 @@ function migrate(d: DatabaseSync): void {
     if (applied.has(m.version)) continue
     d.exec('BEGIN')
     try {
+      // 第 7 版修复了一个曾被错误标记为第 5 版的列。部分数据库已
+      // 执行过带 owner_id 的第 5 版,部分数据库没有;先检查再补列,
+      // 让两条历史路径都能安全升级。
+      if (m.version === 7) {
+        const columns = d.prepare('PRAGMA table_info(attachments)').all()
+        if (!columns.some((column) => String(column['name']) === 'owner_id')) {
+          d.exec('ALTER TABLE attachments ADD COLUMN owner_id TEXT')
+          d.exec('UPDATE attachments SET owner_id = session_id WHERE owner_id IS NULL')
+        }
+      }
       d.exec(m.sql)
       // 审计时间戳走 Date.now() 而不是 `host.clock` 端口:数据库层够不着宿主,
       // 而这个值只用于「什么时候升的级」,没有任何测试或计价逻辑读它。

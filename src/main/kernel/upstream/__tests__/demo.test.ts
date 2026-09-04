@@ -61,7 +61,7 @@ async function streamAll(
 ): Promise<ProviderStreamEvent[]> {
   // 显式标注:`const out = []` 的渐进推断挺不过一次 `for await` 的 push,会停在 never[]
   const out: ProviderStreamEvent[] = []
-  for await (const ev of r.stream(req, signal)) out.push(ev)
+  for await (const ev of r.stream(req, signal, { workspaceId: 'ws-test' })) out.push(ev)
   return out
 }
 
@@ -652,7 +652,7 @@ describe('中断', () => {
     const seen: ProviderStreamEvent[] = []
     await expect(
       (async () => {
-        for await (const ev of r.stream(creq(), ac.signal)) {
+        for await (const ev of r.stream(creq(), ac.signal, { workspaceId: 'ws-test' })) {
           seen.push(ev)
           if (seen.length === 3) ac.abort()
         }

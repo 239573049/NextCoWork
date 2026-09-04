@@ -28,8 +28,53 @@ export function normalizeAnthropicCacheTtl(value: unknown): AnthropicCacheTtl {
   return value === '5m' || value === '1h' ? value : 'off'
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+/**
+ * Sanitize the persisted protocol-options boundary without throwing away
+ * fields belonging to protocols added in a later version.
+ *
+ * The IPC write path rejects an explicitly invalid TTL. This helper is for
+ * older JSON/imports/direct storage reads, where the safe behavior is to keep
+ * the record readable but make an unknown Anthropic value behave as `off`.
+ */
+export function normalizeProviderProtocolOptions(value: unknown): ProviderProtocolOptions | undefined {
+  const source = record(value)
+  if (source === undefined) return undefined
+
+  const normalized: Record<string, unknown> = { ...source }
+  if (Object.hasOwn(source, 'anthropic')) {
+    const rawAnthropic = source['anthropic']
+    const anthropic = record(rawAnthropic)
+    normalized['anthropic'] = {
+      ...(anthropic ?? {}),
+      cacheTtl: normalizeAnthropicCacheTtl(anthropic?.['cacheTtl'])
+    }
+  }
+  return Object.keys(normalized).length === 0
+    ? undefined
+    : (normalized as ProviderProtocolOptions)
+}
+
+/** Normalize only the protocol-specific portion of a provider JSON record. */
+export function normalizeUpstreamProvider(provider: UpstreamProvider): UpstreamProvider {
+  const protocolOptions = normalizeProviderProtocolOptions(provider.protocolOptions)
+  return protocolOptions === undefined
+    ? (() => {
+        const { protocolOptions: _omitted, ...rest } = provider
+        return rest
+      })()
+    : { ...provider, protocolOptions }
+}
+
 export function anthropicCacheTtlOf(provider: Pick<UpstreamProvider, 'protocolOptions'>): AnthropicCacheTtl {
-  return normalizeAnthropicCacheTtl(provider.protocolOptions?.anthropic?.cacheTtl)
+  const options = normalizeProviderProtocolOptions(provider?.protocolOptions)
+  const anthropic = record(options?.anthropic)
+  return normalizeAnthropicCacheTtl(anthropic?.['cacheTtl'])
 }
 
 export const PROTOCOL_LABEL: Record<UpstreamProtocol, string> = {

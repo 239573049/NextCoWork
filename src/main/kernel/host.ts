@@ -93,6 +93,8 @@ export interface KernelHost {
   secrets: {
     get(ref: string): Promise<string | null>
     set(ref: string, value: string): Promise<void>
+    /** Remove a stored credential when an operation that wrote it rolls back. */
+    remove?(ref: string): Promise<void>
     /** Linux 无 keyring 时为 false —— 调用方必须有明确的降级路径,不是一个未处理的 false */
     available(): boolean
   }
@@ -129,6 +131,9 @@ export function nodeHost(overrides: Partial<KernelHost> = {}): KernelHost {
       get: async (ref) => mem.get(ref) ?? null,
       set: async (ref, v) => {
         mem.set(ref, v)
+      },
+      remove: async (ref) => {
+        mem.delete(ref)
       },
       available: () => true
     },

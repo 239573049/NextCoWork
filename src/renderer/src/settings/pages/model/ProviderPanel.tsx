@@ -6,34 +6,42 @@ import {
   GripVertical,
   Loader2,
   Pencil,
-  Trash2
-} from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
-import { baseUrlWarnings, normalizeBaseUrl, previewUrl } from '../../../../../shared/domain/baseurl'
-import { BUILTIN_PROVIDER_ID } from '../../../../../shared/domain/presets'
-import type { AnthropicCacheTtl, CredentialInfo, UpstreamProvider } from '../../../../../shared/domain/provider'
+  Trash2,
+} from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  baseUrlWarnings,
+  normalizeBaseUrl,
+  previewUrl,
+} from "../../../../../shared/domain/baseurl";
+import { BUILTIN_PROVIDER_ID } from "../../../../../shared/domain/presets";
+import type {
+  AnthropicCacheTtl,
+  CredentialInfo,
+  UpstreamProvider,
+} from "../../../../../shared/domain/provider";
 import {
   anthropicCacheTtlOf,
   joinProtocol,
   MAX_ALIASES_PER_PROVIDER,
-  splitProtocol
-} from '../../../../../shared/domain/provider'
-import { Button } from '../../../components/ui/Button'
-import { Segmented } from '../../../components/ui/Segmented'
-import { TextInput } from '../../../components/ui/TextInput'
-import { Toggle } from '../../../components/ui/Toggle'
-import { cn } from '../../../lib/cn'
+  splitProtocol,
+} from "../../../../../shared/domain/provider";
+import { Button } from "../../../components/ui/Button";
+import { Segmented } from "../../../components/ui/Segmented";
+import { TextInput } from "../../../components/ui/TextInput";
+import { Toggle } from "../../../components/ui/Toggle";
+import { cn } from "../../../lib/cn";
 import {
   getCredentialInfo,
   removeProvider,
   setCredential,
-  upsertProvider
-} from '../../../services/provider'
-import { type ProviderEntry } from './enabled-models'
-import { ImportModelsDialog } from './ImportModelsDialog'
-import { modelListAvailability } from './import-models'
-import { ProviderAvatar } from './ProviderAvatar'
-import { baseUrlForProtocol, presetHasProtocol } from './provider-edit'
+  upsertProvider,
+} from "../../../services/provider";
+import { type ProviderEntry } from "./enabled-models";
+import { ImportModelsDialog } from "./ImportModelsDialog";
+import { modelListAvailability } from "./import-models";
+import { ProviderAvatar } from "./ProviderAvatar";
+import { baseUrlForProtocol, presetHasProtocol } from "./provider-edit";
 
 /**
  * 参考图右边那张卡片。
@@ -72,8 +80,8 @@ import { baseUrlForProtocol, presetHasProtocol } from './provider-edit'
  * 第二次有意的点击。删除连密钥一起删(`provider:remove` 那边),所以这一步不能省。
  */
 export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
-  const { provider: p, aliases } = entry
-  const { family, responses } = splitProtocol(p.protocol)
+  const { provider: p, aliases } = entry;
+  const { family, responses } = splitProtocol(p.protocol);
   /*
     ★ 置灰与否看的是**预设表 + 当前地址**,不是「试了再报错」:
     `supportsModelList: false` 的那几家(DeepSeek / Kimi 的 Anthropic 端等)
@@ -82,141 +90,152 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
     ★ 但地址被改过就照常放行 —— 那张快照描述的已经不是用户那个端点了。
     判据和三条分支写在 `import-models.ts` 的 modelListAvailability,那边有测试。
   */
-  const listAvail = modelListAvailability(p)
+  const listAvail = modelListAvailability(p);
 
-  const [name, setName] = useState(p.name)
-  const [baseUrl, setBaseUrl] = useState(p.baseUrl)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [name, setName] = useState(p.name);
+  const [baseUrl, setBaseUrl] = useState(p.baseUrl);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   /** 「地址跟着协议换了」的一次性提示。换供应商或再改一次就消失 */
-  const [swapped, setSwapped] = useState<string | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [swapped, setSwapped] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const [importOpen, setImportOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false);
 
-  const [cred, setCred] = useState<CredentialInfo | null>(null)
-  const [keyDraft, setKeyDraft] = useState('')
-  const [editingKey, setEditingKey] = useState(false)
-  const [cacheTtl, setCacheTtl] = useState<AnthropicCacheTtl>(() => anthropicCacheTtlOf(p))
+  const [cred, setCred] = useState<CredentialInfo | null>(null);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [editingKey, setEditingKey] = useState(false);
+  const [cacheTtl, setCacheTtl] = useState<AnthropicCacheTtl>(() =>
+    anthropicCacheTtlOf(p),
+  );
 
   /*
     ★ 只认 `p.id`,不认 `p`。挂上 `p` 的话,保存成功后广播回来会再跑一次 ——
     用户已经开始改下一个字段的草稿会被冲掉。切换供应商才该重置草稿。
   */
   useEffect(() => {
-    setName(p.name)
-    setBaseUrl(p.baseUrl)
-    setError(null)
-    setSwapped(null)
-    setKeyDraft('')
-    setEditingKey(false)
-    setCred(null)
-    setConfirmDelete(false)
-    setCacheTtl(anthropicCacheTtlOf(p))
+    setName(p.name);
+    setBaseUrl(p.baseUrl);
+    setError(null);
+    setSwapped(null);
+    setKeyDraft("");
+    setEditingKey(false);
+    setCred(null);
+    setConfirmDelete(false);
+    setCacheTtl(anthropicCacheTtlOf(p));
 
-    let alive = true
+    let alive = true;
     void getCredentialInfo(p.id)
       .then((info) => {
-        if (alive) setCred(info)
+        if (alive) setCred(info);
       })
-      .catch((e: unknown) => console.error('[provider] 读取密钥状态失败', e))
+      .catch((e: unknown) => console.error("[provider] 读取密钥状态失败", e));
     return () => {
-      alive = false
-    }
+      alive = false;
+    };
     // 依赖只有 p.id 是刻意的,理由见上面那段注释(这个仓库没开 exhaustive-deps 规则)
-  }, [p.id])
+  }, [p.id]);
 
   // Provider broadcasts are the source of truth after a discrete option is
   // saved. Keep the control synchronized when another window changes it.
   useEffect(() => {
-    setCacheTtl(anthropicCacheTtlOf(p))
-  }, [p.protocolOptions?.anthropic?.cacheTtl])
+    setCacheTtl(anthropicCacheTtlOf(p));
+  }, [p.protocolOptions?.anthropic?.cacheTtl]);
 
   const save = (patch: Partial<UpstreamProvider>): void => {
-    setBusy(true)
-    setError(null)
+    setBusy(true);
+    setError(null);
     void upsertProvider({ ...p, ...patch })
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(e instanceof Error ? e.message : String(e));
         // 存不下去就把草稿退回库里那份 —— 留着一个没生效的值在框里,
         // 用户下次打开会以为它已经存进去了
-        setName(p.name)
-        setBaseUrl(p.baseUrl)
-        setCacheTtl(anthropicCacheTtlOf(p))
+        setName(p.name);
+        setBaseUrl(p.baseUrl);
+        setCacheTtl(anthropicCacheTtlOf(p));
       })
-      .finally(() => setBusy(false))
-  }
+      .finally(() => setBusy(false));
+  };
 
   const commitName = (): void => {
-    const v = name.trim()
-    if (v === '' || v === p.name) return setName(p.name)
-    save({ name: v })
-  }
+    const v = name.trim();
+    if (v === "" || v === p.name) return setName(p.name);
+    save({ name: v });
+  };
 
   const commitUrl = (): void => {
-    const v = normalizeBaseUrl(baseUrl)
-    setBaseUrl(v) // ★ 整理后的值写回框里,别让显示的和存的是两个东西
-    if (v === '' || v === p.baseUrl) return
-    save({ baseUrl: v })
-  }
+    const v = normalizeBaseUrl(baseUrl);
+    setBaseUrl(v); // ★ 整理后的值写回框里,别让显示的和存的是两个东西
+    if (v === "" || v === p.baseUrl) return;
+    save({ baseUrl: v });
+  };
 
-  const switchProtocol = (next: UpstreamProvider['protocol']): void => {
-    const r = baseUrlForProtocol(p, next)
-    setBaseUrl(r.baseUrl)
-    setSwapped(r.changed ? r.baseUrl : null)
-    save({ protocol: next, baseUrl: r.baseUrl })
-  }
+  const switchProtocol = (next: UpstreamProvider["protocol"]): void => {
+    const r = baseUrlForProtocol(p, next);
+    setBaseUrl(r.baseUrl);
+    setSwapped(r.changed ? r.baseUrl : null);
+    save({ protocol: next, baseUrl: r.baseUrl });
+  };
 
   const changeCacheTtl = (next: AnthropicCacheTtl): void => {
-    setCacheTtl(next)
+    setCacheTtl(next);
     save({
       protocolOptions: {
         ...(p.protocolOptions ?? {}),
         anthropic: {
           ...(p.protocolOptions?.anthropic ?? {}),
-          cacheTtl: next
-        }
-      }
-    })
-  }
+          cacheTtl: next,
+        },
+      },
+    });
+  };
 
   const saveKey = (): void => {
-    const v = keyDraft.trim()
-    if (v === '') return
-    setBusy(true)
-    setError(null)
+    const v = keyDraft.trim();
+    if (v === "") return;
+    setBusy(true);
+    setError(null);
     void setCredential(p.id, v)
       .then((info) => {
-        setCred(info)
-        setKeyDraft('') // ★ 存完就从 React 状态里抹掉,别留在内存里
-        setEditingKey(false)
+        setCred(info);
+        setKeyDraft(""); // ★ 存完就从 React 状态里抹掉,别留在内存里
+        setEditingKey(false);
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false))
-  }
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
 
   const remove = (): void => {
-    setBusy(true)
-    setError(null)
+    setBusy(true);
+    setError(null);
     void removeProvider(p.id)
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e))
-        setConfirmDelete(false)
+        setError(e instanceof Error ? e.message : String(e));
+        setConfirmDelete(false);
       })
-      .finally(() => setBusy(false))
+      .finally(() => setBusy(false));
     // 删成功不用收尾:广播回来这条就没了,ModelPage 的 `selected` 自己兜到第一条
-  }
+  };
 
-  const warnings = baseUrlWarnings(baseUrl, p.protocol)
-  const hasKey = cred?.hasKey ?? false
+  const warnings = baseUrlWarnings(baseUrl, p.protocol);
+  const hasKey = cred?.hasKey ?? false;
 
   return (
     <>
       <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas">
         <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
           <ProviderAvatar name={p.name} id={p.id} />
-          <span className="min-w-0 flex-1 truncate text-[13px] text-fg">{p.name}</span>
-          {busy && <Loader2 size={13} className="shrink-0 animate-spin text-fg-faint" />}
+          <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
+            {p.name}
+          </span>
+          {busy && (
+            <Loader2
+              size={13}
+              className="shrink-0 animate-spin text-fg-faint"
+            />
+          )}
         </div>
 
         {error !== null && (
@@ -249,12 +268,16 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               disabled={busy}
             />
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              实际会请求 <code className="text-fg-muted">{previewUrl(baseUrl, p.protocol)}</code>
+              实际会请求{" "}
+              <code className="text-fg-muted">
+                {previewUrl(baseUrl, p.protocol)}
+              </code>
             </p>
             {swapped !== null && (
               /* ★ 地址被开关改掉了就说一声。静默换掉是这一整块最不该有的行为 */
               <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-muted">
-                换协议时地址已跟着换成这家该协议的地址 —— 这两个协议在同一个域名下路径前缀不同。
+                换协议时地址已跟着换成这家该协议的地址 ——
+                这两个协议在同一个域名下路径前缀不同。
               </p>
             )}
             {warnings.map((w) => (
@@ -274,22 +297,25 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               className="w-full"
               value={family}
               options={[
-                { value: 'openai', label: 'OpenAI 格式' },
-                { value: 'anthropic', label: 'Anthropic 格式' }
+                { value: "openai", label: "OpenAI 格式" },
+                { value: "anthropic", label: "Anthropic 格式" },
               ]}
-              onChange={(f) => switchProtocol(joinProtocol(f, f === 'openai' && responses))}
+              onChange={(f) =>
+                switchProtocol(joinProtocol(f, f === "openai" && responses))
+              }
             />
           </Field>
 
           {/* ★ 只在 OpenAI 族下出现 —— 三个协议值到「两控件」的投影,见 provider.ts */}
-          {family === 'openai' && (
+          {family === "openai" && (
             <div className="flex items-start gap-4">
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] text-fg">使用 Responses API</p>
                 <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
-                  强制走 /v1/responses。仅当供应商支持 Responses 端点时开启,否则会 404。
+                  强制走 /v1/responses。仅当供应商支持 Responses
+                  端点时开启,否则会 404。
                 </p>
-                {responses && !presetHasProtocol(p.id, 'openai-responses') && (
+                {responses && !presetHasProtocol(p.id, "openai-responses") && (
                   /*
                   ★ 提示而不是**禁掉**开关:预设表只是我们实测到的形状,
                   厂商随时会加。禁掉等于拿一张快照锁死用户。
@@ -306,14 +332,14 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 <Toggle
                   checked={responses}
                   disabled={busy}
-                  onChange={(on) => switchProtocol(joinProtocol('openai', on))}
+                  onChange={(on) => switchProtocol(joinProtocol("openai", on))}
                   label="使用 Responses API"
                 />
               </div>
             </div>
           )}
 
-          {family === 'anthropic' && (
+          {family === "anthropic" && (
             <Field
               label="提示缓存"
               hint="一般情况下保持关闭。缓存适合长且重复的上下文；1 小时写入通常更贵，且部分 Anthropic 兼容中转站不支持。"
@@ -323,9 +349,9 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 size="sm"
                 value={cacheTtl}
                 options={[
-                  { value: 'off', label: '关闭' },
-                  { value: '5m', label: '5 分钟' },
-                  { value: '1h', label: '1 小时' }
+                  { value: "off", label: "关闭" },
+                  { value: "5m", label: "5 分钟" },
+                  { value: "1h", label: "1 小时" },
                 ]}
                 onChange={changeCacheTtl}
               />
@@ -348,13 +374,17 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 <Button
                   size="sm"
                   variant="accent"
-                  disabled={busy || keyDraft.trim() === ''}
+                  disabled={busy || keyDraft.trim() === ""}
                   onClick={saveKey}
                 >
                   保存
                 </Button>
                 {hasKey && (
-                  <Button size="sm" disabled={busy} onClick={() => setEditingKey(false)}>
+                  <Button
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => setEditingKey(false)}
+                  >
                     取消
                   </Button>
                 )}
@@ -368,26 +398,31 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               */}
                 <div
                   className={cn(
-                    'flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border',
-                    'bg-surface-field px-2.5'
+                    "flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border",
+                    "bg-surface-field px-2.5",
                   )}
                 >
                   <span className="min-w-0 flex-1 truncate text-[13px] tracking-[0.18em] text-fg-muted">
-                    {'••••••••••••'}
-                    {cred?.last4 ?? ''}
+                    {"••••••••••••"}
+                    {cred?.last4 ?? ""}
                   </span>
                   <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
                     <Check size={11} />
                     已配置
                   </span>
                 </div>
-                <Button size="sm" disabled={busy} onClick={() => setEditingKey(true)}>
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setEditingKey(true)}
+                >
                   更换
                 </Button>
               </div>
             )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              明文只在主进程里存在,经 safeStorage 加密后落盘 —— 设置页永远拿不回来,最多显示后四位。
+              明文只在主进程里存在,经 safeStorage 加密后落盘 ——
+              设置页永远拿不回来,最多显示后四位。
             </p>
             {cred !== null && !cred.encryptionAvailable && (
               /* ★ 不做明文降级,所以这里会真的存不进去 —— 提前说,别等他填完才报错 */
@@ -469,7 +504,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
               {listAvail.hint ??
-                '整表的增删走上面那颗按钮。逐行的三个图标(思考档位 / 改别名 / 单删)还不通 —— 它们要的是「改一行的字段」,那是另一条频道。'}
+                "整表的增删走上面那颗按钮。逐行的三个图标(思考档位 / 改别名 / 单删)还不通 —— 它们要的是「改一行的字段」,那是另一条频道。"}
             </p>
           </Field>
         </div>
@@ -480,10 +515,19 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-muted">
                 连同这家的模型别名和已保存的密钥一起删掉,不能撤销。
               </p>
-              <Button size="sm" disabled={busy} onClick={() => setConfirmDelete(false)}>
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => setConfirmDelete(false)}
+              >
                 取消
               </Button>
-              <Button size="sm" variant="danger" disabled={busy} onClick={remove}>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={busy}
+                onClick={remove}
+              >
                 确认删除
               </Button>
             </div>
@@ -498,8 +542,8 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             */}
               <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
                 {p.id === BUILTIN_PROVIDER_ID
-                  ? '内置的 RoutinAI 是种子数据,删掉后下次启动会重新出现(密钥不会回来)。'
-                  : '删掉后不会自己回来 —— 要再用得回「供应商目录」重新添一次。'}
+                  ? "内置的 RoutinAI 是种子数据,删掉后下次启动会重新出现(密钥不会回来)。"
+                  : "删掉后不会自己回来 —— 要再用得回「供应商目录」重新添一次。"}
               </p>
               <Button
                 size="sm"
@@ -522,38 +566,51 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
         onClose={() => setImportOpen(false)}
       />
     </>
-  )
+  );
 }
 
 function Field({
   label,
   hint,
   action,
-  children
+  children,
 }: {
-  label: string
-  hint?: string
+  label: string;
+  hint?: string;
   /** 标签那一行右端的按钮(「从服务商拉取模型列表」) */
-  action?: ReactNode
-  children: ReactNode
+  action?: ReactNode;
+  children: ReactNode;
 }): ReactNode {
   return (
     <div>
       {/* ★ 只有带按钮的那一行才撑高 —— 无条件加 min-h 会把另外四个字段的行高
           一起改掉,而那套间距是照着设置浮层量准的 */}
-      <div className={cn('mb-1.5 flex items-center gap-2', action !== undefined && 'min-h-[26px]')}>
+      <div
+        className={cn(
+          "mb-1.5 flex items-center gap-2",
+          action !== undefined && "min-h-[26px]",
+        )}
+      >
         <p className="min-w-0 flex-1 text-[12.5px] text-fg-muted">{label}</p>
         {action}
       </div>
       {children}
       {hint !== undefined && (
-        <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">{hint}</p>
+        <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
+          {hint}
+        </p>
       )}
     </div>
-  )
+  );
 }
 
-function RowIcon({ label, children }: { label: string; children: ReactNode }): ReactNode {
+function RowIcon({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}): ReactNode {
   return (
     <button
       type="button"
@@ -563,5 +620,5 @@ function RowIcon({ label, children }: { label: string; children: ReactNode }): R
     >
       {children}
     </button>
-  )
+  );
 }

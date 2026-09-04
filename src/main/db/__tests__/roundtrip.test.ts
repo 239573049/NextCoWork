@@ -20,10 +20,11 @@ import { SEARCH_PROVIDER_IDS, searchSecretRef } from '../../../shared/domain/sea
 import { DEFAULT_SETTINGS } from '../../../shared/domain/settings'
 import { MIGRATIONS } from '../schema'
 import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
+import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import type { Workspace } from '../../../shared/domain/workspace'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import { store } from '../../state/store'
-import { DB_FILENAME, closeDatabase, openDatabase } from '../index'
+import { DATABASE_DIRNAME, DB_FILENAME, closeDatabase, defaultDatabaseDirectory, openDatabase } from '../index'
 import * as repo from '../repo'
 
 let dir = ''
@@ -101,6 +102,46 @@ describe('★ 关库重开之后,配置一样都不少', () => {
       outer: [{ id: 't1' }],
       activeOuterId: 't1'
     })
+  })
+
+  it('Provider 的协议专属缓存档位跨重启并经导出导入保留', () => {
+    const configured = [
+      ['关闭', 'off'],
+      ['五分钟', '5m'],
+      ['一小时', '1h']
+    ] as const
+
+    for (const [id, cacheTtl] of configured) {
+      store.putProvider({
+        ...provider(id, configured.findIndex(([name]) => name === id)),
+        protocolOptions: { anthropic: { cacheTtl } }
+      })
+    }
+
+    restart()
+
+    const readTtls = Object.fromEntries(
+      store.listProviders().map((p) => [p.id, anthropicCacheTtlOf(p)])
+    )
+    expect(readTtls).toEqual({ 关闭: 'off', 五分钟: '5m', 一小时: '1h' })
+
+    // Provider JSON is part of the regular data snapshot; no special export
+    // channel is needed for protocol-specific options.
+    const exported = repo.exportDataSnapshot()
+    expect(exported.providers.map((p) => [p.id, anthropicCacheTtlOf(p)])).toEqual([
+      ['关闭', 'off'],
+      ['五分钟', '5m'],
+      ['一小时', '1h']
+    ])
+
+    for (const [id] of configured) store.removeProvider(id)
+    expect(store.listProviders()).toEqual([])
+    repo.mergeDataExport(exported)
+    restart()
+
+    expect(
+      Object.fromEntries(store.listProviders().map((p) => [p.id, anthropicCacheTtlOf(p)]))
+    ).toEqual({ 关闭: 'off', 五分钟: '5m', 一小时: '1h' })
   })
 
   it('别名带着能力位和数字字段一起回来,不是只剩个名字', () => {
@@ -263,6 +304,10 @@ describe('搜索服务', () => {
 })
 
 describe('迁移', () => {
+  it('默认数据库目录是项目下的 .next-cowork', () => {
+    expect(defaultDatabaseDirectory()).toBe(join(process.cwd(), DATABASE_DIRNAME))
+  })
+
   it('重开不会重跑迁移,也不会清空已有的行', () => {
     store.putProvider(provider('主', 0))
     restart()
@@ -284,6 +329,46 @@ describe('迁移', () => {
       MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0)
     )
     expect(store.listProviders()).toHaveLength(1)
+  })
+
+  it('从旧版第 6 版升级时补 owner_id,并修复去重索引', () => {
+    // 模拟已经执行过旧版 1~6 的真实用户库:第 5 版只有 scope/status,
+    // 第 6 版只有 display_name,两者都没有 owner_id。
+    const legacyDir = mkdtempSync(join(tmpdir(), 'nextcowork-legacy-'))
+    const legacyPath = join(legacyDir, DB_FILENAME)
+    const raw = new DatabaseSync(legacyPath)
+    raw.exec('CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)')
+    const insert = raw.prepare('INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)')
+    for (const migration of MIGRATIONS.slice(0, 6)) {
+      // 第 5 版曾有一个发布变体漏掉 owner_id,但仍写入了同一个迁移号。
+      // 用那条真实历史形态构造数据库,验证第 7 版能补列。
+      const sql = migration.version === 5
+        ? migration.sql
+            .replace('ALTER TABLE attachments ADD COLUMN owner_id TEXT;\n', '')
+            .replace('UPDATE attachments SET owner_id = session_id WHERE owner_id IS NULL;\n', '')
+            .replace('CREATE INDEX attachments_by_checksum ON attachments (checksum, scope, owner_id);', 'CREATE INDEX attachments_by_checksum ON attachments (checksum, scope);')
+        : migration.sql
+      raw.exec(sql)
+      insert.run(migration.version, migration.name, Date.now())
+    }
+    raw.close()
+
+    // 让应用按当前迁移表打开这个旧库,只应执行新增的第 7 条。
+    closeDatabase()
+    openDatabase(legacyDir)
+    const upgraded = new DatabaseSync(legacyPath, { readOnly: true })
+    const columns = upgraded.prepare('PRAGMA table_info(attachments)').all().map((r) => String(r['name']))
+    const checksumIndex = upgraded
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'attachments_by_checksum'")
+      .get()
+    const versions = upgraded.prepare('SELECT version FROM migrations ORDER BY version').all().map((r) => Number(r['version']))
+    upgraded.close()
+    closeDatabase()
+    rmSync(legacyDir, { recursive: true, force: true })
+
+    expect(columns).toContain('owner_id')
+    expect(String(checksumIndex?.['sql'])).toContain('(checksum, scope, owner_id)')
+    expect(versions).toEqual(MIGRATIONS.map((migration) => migration.version))
   })
 
   /**
