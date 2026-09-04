@@ -28,6 +28,7 @@ describe('defineTool · 入参校验', () => {
     schema: z.object({ n: z.number(), s: z.string().optional() }),
     readOnly: true,
     destructive: false,
+    needsNetwork: false,
     run: async (input) => toolOk(`n=${input.n}`)
   })
 
@@ -61,6 +62,7 @@ describe('defineTool · 入参校验', () => {
       schema: z.object({ opts: z.object({ depth: z.number() }) }),
       readOnly: true,
       destructive: false,
+      needsNetwork: false,
       run: async () => toolOk('x')
     })
     const r = await nested.execute({ opts: { depth: 'deep' } }, ctx())
@@ -80,6 +82,7 @@ describe('defineTool · 异常收敛', () => {
       schema: z.object({}),
       readOnly: true,
       destructive: false,
+      needsNetwork: false,
       run: async () => {
         throw new Error('ENOENT: 文件不存在')
       }
@@ -96,6 +99,7 @@ describe('defineTool · 异常收敛', () => {
       schema: z.object({}),
       readOnly: true,
       destructive: false,
+      needsNetwork: false,
       run: async () => {
         throw '一个字符串'
       }
@@ -114,6 +118,7 @@ describe('defineTool · 异常收敛', () => {
       schema: z.object({}),
       readOnly: true,
       destructive: false,
+      needsNetwork: false,
       run: async () => {
         throw new DOMException('aborted', 'AbortError')
       }
@@ -129,6 +134,7 @@ describe('defineTool · schema 导出', () => {
     schema: z.object({ text: z.string().describe('要回显的文本') }),
     readOnly: true,
     destructive: false,
+    needsNetwork: false,
     run: async () => toolOk('x')
   })
 

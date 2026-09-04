@@ -108,11 +108,11 @@ export function redosRisk(pattern: string): string | null {
     if (!containsUnbounded(body)) continue
 
     return (
-      `这个正则有灾难性回溯的风险,已经拒绝执行(它可能让整个应用卡死几分钟)。` +
-      `问题出在 "(${body})" 这个分组:它自己带了无界量词(* + 或 {n,}),外面又套了一层无界量词,` +
-      `匹配失败时要穷举指数级多种切分方式。` +
-      `改法:把内层或外层的量词去掉一个(例如 (a+)+ 直接写成 a+),` +
-      `或者把内层换成有界的写法(例如 {1,20}),再不行就用更具体的字面量缩小范围。`
+      `This pattern risks catastrophic backtracking and was refused (it could freeze the whole app for minutes). ` +
+      `The problem is the group "(${body})": it contains an unbounded quantifier (*, +, or {n,}) and is itself ` +
+      `wrapped in another unbounded quantifier, so a failed match has to try exponentially many splits. ` +
+      `Fix it by dropping one of the two quantifiers (write (a+)+ as just a+), by bounding the inner one ` +
+      `(e.g. {1,20}), or by adding a more specific literal to narrow the search.`
     )
   }
 

@@ -110,13 +110,14 @@ export function isPrivateAddress(host: string): boolean {
 function isPrivateV4(v: number): boolean {
   const a = (v >>> 24) & 0xff
   const b = (v >>> 16) & 0xff
+  const c = (v >>> 8) & 0xff
   if (a === 0) return true // 0.0.0.0/8
   if (a === 10) return true // 私网
   if (a === 127) return true // 环回
   if (a === 100 && b >= 64 && b <= 127) return true // 100.64/10 运营商级 NAT
   if (a === 169 && b === 254) return true // ★ 链路本地 —— 云元数据 169.254.169.254
   if (a === 172 && b >= 16 && b <= 31) return true // 私网
-  if (a === 192 && b === 0) return true // 192.0.0/24 IETF 协议专用
+  if (a === 192 && b === 0 && c === 0) return true // 192.0.0/24 IETF 协议专用(★ 是 /24,不是 /16)
   if (a === 192 && b === 168) return true // 私网
   if (a === 198 && (b === 18 || b === 19)) return true // 基准测试专用
   if (a >= 224) return true // 组播 + 保留(含 255.255.255.255)
@@ -135,8 +136,8 @@ const LOCAL_SUFFIXES = ['.localhost', '.local', '.internal', '.intranet', '.home
 export function ssrfRisk(url: URL): string | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return (
-      `只支持 http 和 https,不支持 "${url.protocol}"。` +
-      `要读本地文件请用 Read,不要用 file:// 这类地址。`
+      `Only http and https are supported, not "${url.protocol}". ` +
+      `To read a local file use Read — do not reach for file:// style addresses.`
     )
   }
 
@@ -145,7 +146,7 @@ export function ssrfRisk(url: URL): string | null {
     塞进一次它自己发起的请求里 —— 那是一条现成的外发通道。
   */
   if (url.username !== '' || url.password !== '') {
-    return 'URL 里不能带用户名或密码。请去掉 "user:pass@" 那一段再试。'
+    return 'The URL must not carry a username or password. Remove the "user:pass@" part and try again.'
   }
 
   const host = url.hostname.toLowerCase()
@@ -159,9 +160,10 @@ export function ssrfRisk(url: URL): string | null {
 
 function refuseLocal(host: string): string {
   return (
-    `拒绝访问 "${host}":这是本机或内网地址,联网工具只能访问公网。` +
-    `本机地址背后通常是没有鉴权的调试端口、内网设备或云厂商的实例元数据端点,` +
-    `不该由模型发起的请求去碰。` +
-    `如果确实要访问本机服务,请让用户自己在浏览器里打开,或者明确要求你用 Bash 去做。`
+    `Refusing to reach "${host}": this is a loopback or private-network address, and network tools may ` +
+    `only reach the public internet. Addresses like this usually sit in front of unauthenticated debug ` +
+    `ports, internal devices, or a cloud provider's instance metadata endpoint — not something a ` +
+    `model-initiated request should touch. If a local service really is the target, ask the user to open ` +
+    `it themselves, or to explicitly ask you to use Bash for it.`
   )
 }

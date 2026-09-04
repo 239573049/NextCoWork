@@ -3,7 +3,9 @@ import type { ImageTheme, Palette, ThemeToken, ThemeTokens } from '../theme'
 import {
   BASE,
   COLOR_THEMES,
+  CUSTOM_COLOR_THEME_ID,
   DEFAULT_COLOR_THEME_ID,
+  DEFAULT_CUSTOM_SEED,
   IMAGE_THEMES,
   RANDOM_COLOR_THEME_ID,
   THEME_TOKENS,
@@ -11,6 +13,8 @@ import {
   extractPalette,
   hexToHsl,
   hslToHex,
+  normalizeHex,
+  paletteOf,
   randomSeedColor,
   resolveColorTheme,
   resolveImageTheme,
@@ -58,8 +62,12 @@ const TINT_TOKENS = [
   'fg-faint'
 ] as const satisfies readonly ThemeToken[]
 
-const SPEC_TOKENS = ['icon', 'accent', 'accent-fg', 'accent-soft'] as const satisfies
-  readonly ThemeToken[]
+const SPEC_TOKENS = [
+  'icon',
+  'accent',
+  'accent-fg',
+  'accent-soft'
+] as const satisfies readonly ThemeToken[]
 
 // ─── 小工具 ───
 
@@ -120,9 +128,7 @@ describe('hexToHsl ⇄ hslToHex', () => {
    * 「重新选中当前主题什么都不会变」——那正是用户最容易察觉的一种 bug。
    */
   it('量出来的每一个色值往返零误差', () => {
-    const measured = new Set(
-      APPEARANCES.flatMap((a) => THEME_TOKENS.map((k) => BASE[a].tokens[k]))
-    )
+    const measured = new Set(APPEARANCES.flatMap((a) => THEME_TOKENS.map((k) => BASE[a].tokens[k])))
     expect(measured.size).toBeGreaterThan(30)
     for (const hex of measured) {
       expect(hslToHex(hexToHsl(hex)), hex).toBe(hex)
@@ -199,8 +205,8 @@ describe('retint · 恒等', () => {
   })
 
   it('经 tokensOf 走一遍也一样', () => {
-    expect(tokensOf('light', DEFAULT_COLOR_THEME_ID, 0, null)).toEqual(BASE.light.tokens)
-    expect(tokensOf('dark', DEFAULT_COLOR_THEME_ID, 0, null)).toEqual(BASE.dark.tokens)
+    expect(tokensOf('light', { id: DEFAULT_COLOR_THEME_ID }, null)).toEqual(BASE.light.tokens)
+    expect(tokensOf('dark', { id: DEFAULT_COLOR_THEME_ID }, null)).toEqual(BASE.dark.tokens)
   })
 })
 
@@ -437,15 +443,16 @@ describe('派生出来的强调色读得见', () => {
 describe('resolveColorTheme', () => {
   it('按 id 取到的就是表里那一套', () => {
     for (const t of COLOR_THEMES) {
-      if (t.id === RANDOM_COLOR_THEME_ID) continue
-      expect(resolveColorTheme(t.id, 0)).toBe(t)
+      // 头尾两套在表里只是占位声明,真正的色板是现算的 —— 见 `derivedTheme`
+      if (t.id === RANDOM_COLOR_THEME_ID || t.id === CUSTOM_COLOR_THEME_ID) continue
+      expect(resolveColorTheme({ id: t.id })).toBe(t)
     }
   })
 
   /** id 来自设置,而设置将来会从磁盘读回来 —— 不认识的 id 落回默认,不抛 */
   it('不认识的 id 落回默认,不抛', () => {
-    expect(resolveColorTheme('这套主题不存在', 0).id).toBe(DEFAULT_COLOR_THEME_ID)
-    expect(resolveColorTheme('', 7).id).toBe(DEFAULT_COLOR_THEME_ID)
+    expect(resolveColorTheme({ id: '这套主题不存在' }).id).toBe(DEFAULT_COLOR_THEME_ID)
+    expect(resolveColorTheme({ id: '', seed: 7 }).id).toBe(DEFAULT_COLOR_THEME_ID)
   })
 
   /**
@@ -453,8 +460,8 @@ describe('resolveColorTheme', () => {
    * 而且重启之后回不到用户掷出来的那一套。
    */
   it('随机:同一个种子永远同一套', () => {
-    expect(tokensOf('dark', RANDOM_COLOR_THEME_ID, 42, null)).toEqual(
-      tokensOf('dark', RANDOM_COLOR_THEME_ID, 42, null)
+    expect(tokensOf('dark', { id: RANDOM_COLOR_THEME_ID, seed: 42 }, null)).toEqual(
+      tokensOf('dark', { id: RANDOM_COLOR_THEME_ID, seed: 42 }, null)
     )
   })
 
@@ -474,9 +481,101 @@ describe('resolveColorTheme', () => {
   it('随机掷出来的每一套也满足对比度要求', () => {
     for (let seed = 0; seed < 30; seed++) {
       for (const a of APPEARANCES) {
-        const t = tokensOf(a, RANDOM_COLOR_THEME_ID, seed, null)
+        const t = tokensOf(a, { id: RANDOM_COLOR_THEME_ID, seed }, null)
         expect(contrast(t.accent, t.canvas), `${seed}/${a}`).toBeGreaterThanOrEqual(3.5)
         expect(contrast(t['accent-fg'], t.accent), `${seed}/${a}`).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+  })
+})
+
+describe('normalizeHex', () => {
+  /**
+   * ★ 这个函数存在的理由是 `hexToHsl` **不校验**:`Number.parseInt('zz', 16)`
+   * 是 `NaN`,一路走到 `hslToHex` 会吐出 `#NaNNaNNaN` —— 一个 CSS 认不出来的字符串,
+   * 于是那一格 token 保持上一次的值,表现成「换了主题但有一个颜色没跟着变」。
+   * 而这个函数的输入正是最脏的两处:磁盘上存着的旧值,和用户边打边触发的半截字符串。
+   */
+  it('接受三种写法,统一成小写 #rrggbb', () => {
+    const accepted: [string, string][] = [
+      ['#36D285', '#36d285'],
+      ['36d285', '#36d285'],
+      ['#ABC', '#aabbcc'],
+      ['fff', '#ffffff'],
+      ['  #36d285  ', '#36d285']
+    ]
+    for (const [input, want] of accepted) expect(normalizeHex(input), input).toBe(want)
+  })
+
+  it('拒绝其余一切,给 null 而不是半截结果', () => {
+    // `#3` / `#36d2` 是「正在打」的中间态;`#12345g` 长度对但有非法字符 ——
+    // 它正是 parseInt 会静静吐出 NaN 的那一类
+    const rejected = ['', '#', '#3', '#36d2', '#36d2857', '#12345g', 'rgb(1,2,3)', '#36d285ff']
+    for (const input of rejected) expect(normalizeHex(input), input).toBeNull()
+  })
+})
+
+describe('自定义颜色主题', () => {
+  it('用户挑的色决定整套 —— 和图片主题走同一条派生', () => {
+    const seed = '#c04a2b'
+    expect(tokensOf('dark', { id: CUSTOM_COLOR_THEME_ID, custom: seed }, null)).toEqual(
+      retint(BASE.dark, specFromSeed(seed, 'dark'))
+    )
+  })
+
+  /**
+   * ★ 脏值落回默认,**不是**吐出一套算不出来的颜色。`custom` 是从磁盘读回来的,
+   * 而磁盘上可能存着任何东西(手改过的库、写了一半的值)。
+   */
+  it('脏值落回 DEFAULT_CUSTOM_SEED,不产生 #NaNNaNNaN', () => {
+    const fallback = tokensOf(
+      'dark',
+      { id: CUSTOM_COLOR_THEME_ID, custom: DEFAULT_CUSTOM_SEED },
+      null
+    )
+    for (const dirty of ['', '#3', 'zzzzzz', '#12345g']) {
+      const t = tokensOf('dark', { id: CUSTOM_COLOR_THEME_ID, custom: dirty }, null)
+      expect(t, dirty).toEqual(fallback)
+      for (const k of THEME_TOKENS) expect(t[k], `${dirty}/${k}`).not.toContain('NaN')
+    }
+    // 连 custom 都没给(老设置里没有这个字段)也是同一条路
+    expect(tokensOf('dark', { id: CUSTOM_COLOR_THEME_ID }, null)).toEqual(fallback)
+  })
+
+  /**
+   * ★ 用户能挑到**任何**颜色,包括和底色几乎同明度的那些。整套 token 里
+   * 只有 `fitLightness` 拦得住这件事,所以这里绕一圈色相把它钉住 ——
+   * 少了它,「挑一个深灰」得到的是一套读不清的界面,而且看着像是配色没生效。
+   */
+  it('绕一圈色相,派生出来的强调色都过对比度下限', () => {
+    for (let h = 0; h < 360; h += 15) {
+      for (const l of [12, 50, 92]) {
+        const custom = hslToHex({ h, s: 70, l })
+        for (const a of APPEARANCES) {
+          const t = tokensOf(a, { id: CUSTOM_COLOR_THEME_ID, custom }, null)
+          const at = `${custom}/${a}`
+          expect(contrast(t.accent, t.canvas), at).toBeGreaterThanOrEqual(3.5)
+          expect(contrast(t['accent-fg'], t.accent), at).toBeGreaterThanOrEqual(4.5)
+        }
+      }
+    }
+  })
+
+  /**
+   * ★ 上面那条「不许动明度结构」遍历的是 `COLOR_THEMES`,而「自定义」在表里
+   * 只是一张占位声明 —— 用户真正挑出来的那些 spec 一条也没被它覆盖到。
+   * 所以这里拿几个离谱的颜色再钉一遍:底色那八格的 L 一格都不许动。
+   */
+  it('用户挑什么颜色,四层底色的明度都原样保留', () => {
+    for (const custom of ['#c04a2b', '#000000', '#ffffff', '#7a7a7a']) {
+      for (const a of APPEARANCES) {
+        const t = tokensOf(a, { id: CUSTOM_COLOR_THEME_ID, custom }, null)
+        for (const k of [...NEUTRAL_TOKENS, ...TINT_TOKENS]) {
+          const before = hexToHsl(BASE[a].tokens[k]).l
+          expect(Math.abs(hexToHsl(t[k]).l - before), `${custom}/${a}/${k}`).toBeLessThanOrEqual(
+            0.4
+          )
+        }
       }
     }
   })
@@ -488,9 +587,9 @@ describe('tokensOf · 图片主题盖过颜色主题', () => {
    * 会变成一个说不清的问题。选了图 = 颜色主题那一栏不生效。
    */
   it('给了图就不看颜色主题', () => {
-    const withImage = tokensOf('dark', 'minimal', 0, { seed: '#b5714a' })
-    expect(withImage).toEqual(tokensOf('dark', 'celadon', 99, { seed: '#b5714a' }))
-    expect(withImage).not.toEqual(tokensOf('dark', 'minimal', 0, null))
+    const withImage = tokensOf('dark', { id: 'minimal' }, { seed: '#b5714a' })
+    expect(withImage).toEqual(tokensOf('dark', { id: 'celadon', seed: 99 }, { seed: '#b5714a' }))
+    expect(withImage).not.toEqual(tokensOf('dark', { id: 'minimal' }, null))
   })
 
   /**
@@ -502,17 +601,17 @@ describe('tokensOf · 图片主题盖过颜色主题', () => {
     for (const id of ['claude', 'celadon', 'minimal']) {
       const theme = COLOR_THEMES.find((x) => x.id === id)
       expect(theme, id).toBeDefined()
-      const back = tokensOf('dark', id, 0, null)
+      const back = tokensOf('dark', { id }, null)
       expect(back, id).toEqual(retint(BASE.dark, theme!.dark))
-      expect(back, id).not.toEqual(tokensOf('dark', id, 0, { seed: '#b5714a' }))
+      expect(back, id).not.toEqual(tokensOf('dark', { id }, { seed: '#b5714a' }))
     }
     // 默认那一套额外多一条:它回落到的正是采样表原样
-    expect(tokensOf('dark', DEFAULT_COLOR_THEME_ID, 0, null)).toEqual(BASE.dark.tokens)
+    expect(tokensOf('dark', { id: DEFAULT_COLOR_THEME_ID }, null)).toEqual(BASE.dark.tokens)
   })
 
   it('内置的六张图各自给出一套不同的界面', () => {
     const seen = new Set(
-      IMAGE_THEMES.map((t) => JSON.stringify(tokensOf('dark', 'claude', 0, { seed: t.seed })))
+      IMAGE_THEMES.map((t) => JSON.stringify(tokensOf('dark', { id: 'claude' }, { seed: t.seed })))
     )
     expect(seen.size).toBe(IMAGE_THEMES.length)
   })
@@ -548,9 +647,7 @@ describe('extractPalette', () => {
    * 按面积聚类会稳定地返回那片灰。
    */
   it('少量鲜艳色压过大片灰', () => {
-    const out = extractPalette(
-      img([...solid([128, 128, 128], 180), ...solid([230, 120, 40], 20)])
-    )
+    const out = extractPalette(img([...solid([128, 128, 128], 180), ...solid([230, 120, 40], 20)]))
     expect(chromaOf(out[0] ?? '#808080')).toBeGreaterThan(80)
   })
 
@@ -619,6 +716,57 @@ describe('resolveImageTheme', () => {
     expect(resolveImageTheme('my-photo', [mine])).toBe(mine)
     // 同名的上传图顶不掉内置的 —— 内置 id 是我们自己发的常量
     expect(resolveImageTheme(shadow.id, [shadow])).toBe(IMAGE_THEMES[0])
+  })
+})
+
+describe('paletteOf', () => {
+  /**
+   * ★ 色点直接从渐变配方里读,不另存一份 —— 这一条就是那个决定的守卫:
+   * 有人改了某张卡的配方却忘了改色点,这里会红。
+   */
+  it('内置的:色点就是配方里的色标,且第一颗不是凭空造的', () => {
+    for (const t of IMAGE_THEMES) {
+      const dots = paletteOf(t)
+      expect(dots.length, t.id).toBeGreaterThanOrEqual(3)
+      for (const c of dots) {
+        expect(c, t.id).toMatch(/^#[0-9a-f]{6}$/)
+        if (t.source.kind === 'builtin') expect(t.source.css.toLowerCase()).toContain(c)
+      }
+      // 六张图的种子都取自各自配方的中间那一档
+      expect(dots, t.id).toContain(t.seed)
+    }
+  })
+
+  it('内置的:重复的色标只画一颗点', () => {
+    const flat: ImageTheme = {
+      id: 'flat',
+      name: '平的',
+      seed: '#123456',
+      source: { kind: 'builtin', css: 'linear-gradient(0deg, #123456 0%, #123456 100%)' }
+    }
+    expect(paletteOf(flat)).toEqual(['#123456'])
+  })
+
+  it('上传的:用导入时算好的那份', () => {
+    const mine: ImageTheme = {
+      id: 'my-photo',
+      name: '我的图',
+      seed: '#b5714a',
+      source: { kind: 'uploaded', assetId: 'a1' },
+      palette: ['#b5714a', '#e0a882', '#6d3f28', '#2b2118']
+    }
+    expect(paletteOf(mine)).toEqual(['#b5714a', '#e0a882', '#6d3f28', '#2b2118'])
+  })
+
+  /** 位图还没读出来 / 老数据没有这个字段:画一颗种子色,不画空白 */
+  it('上传的:没存色点时兜底成种子色', () => {
+    const mine: ImageTheme = {
+      id: 'my-photo',
+      name: '我的图',
+      seed: '#b5714a',
+      source: { kind: 'uploaded', assetId: 'a1' }
+    }
+    expect(paletteOf(mine)).toEqual(['#b5714a'])
   })
 })
 

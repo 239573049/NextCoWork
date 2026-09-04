@@ -58,8 +58,13 @@ export function ChatView({
           webSearch: v.webSearch,
           permissionMode: v.permissionMode,
           model: v.model,
-          // 步骤 12 接上 SkillRegistry 后换成 workspace.settings.activeSkillIds
-          skillIds: []
+          /*
+            ★ 这里传空数组曾经让整个 Skill 功能在产品里悄悄失效:单测全绿,
+            而模型永远看不到任何 Skill。现在传的是工作区的选装清单,
+            **空清单在主进程一侧意味着「全都要」**(见 `SkillRegistry.resolve`),
+            所以新建的工作区不需要用户先去哪里勾一遍。
+          */
+          skillIds: workspace.settings.activeSkillIds
         })
       }}
       onStop={stop}

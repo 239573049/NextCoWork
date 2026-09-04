@@ -41,6 +41,19 @@ export interface ToolInfo {
   readOnly: boolean
   /** 决定权限档位(§4.5 那张 5 行表的入参之一) */
   destructive: boolean
+  /**
+   * 这次调用本身会不会出网。
+   *
+   * ★ **只能由我们这一侧填,永远不采信工具作者的说法。**内置工具在
+   * `defineTool` 的入参里写死;MCP 工具由 `mcp/bridge.ts` 按**传输方式**推出来
+   * (那是我们库里的配置),而**不是**读服务器自报的 annotations ——
+   * 否则一个远程 MCP 服务器只要声明「我不联网」,用户那颗联网开关就被它关掉了。
+   *
+   * 两处消费者:`registry.snapshot({network})` 决定这一轮要不要下发它,
+   * `permission-gate.ts` 那张表的第 1 行决定要不要放行这一次调用。
+   * 前者省掉一次白跑的轮次,后者是兜底 —— 缺了任何一个都还站得住。
+   */
+  needsNetwork: boolean
   source: ToolSource
 }
 

@@ -3,13 +3,17 @@
  * 内核代码永远不从这里 import —— 依赖方向是单向的:main → kernel,不反向。
  */
 import { join } from 'node:path'
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, nativeImage } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
+import appIconPath from '../../resources/icon.png?asset'
 import { closeDatabase, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownRuns } from './ipc'
-import { initRuntime } from './runtime'
+import { applyProxy, installProxyAuth } from './net/proxy'
+import { initRuntime, shutdownMcp } from './runtime'
+import { store } from './state/store'
+import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,6 +58,8 @@ function createMainWindow(): BrowserWindow {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#1c1b19',
+    // Windows/Linux 的任务栏与窗口图标(macOS 忽略,那边走下面的 app.dock.setIcon)
+    icon: nativeImage.createFromPath(appIconPath),
     // macOS:红绿灯嵌进侧边栏(方案 §8)
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
     webPreferences: {
@@ -97,6 +103,14 @@ function createMainWindow(): BrowserWindow {
 void app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.nextcowork.app')
 
+  // ★ dev 与未打包运行时的 dock 图标。打包后的 .app 由 electron-builder 从
+  // build/icon.png 生成 icns 内嵌,但 `electron-vite dev` / 直接跑 out/ 都不经过
+  // electron-builder —— 那两种情况下 dock 显示的是 Electron 二进制自带的原子图标。
+  // 这一句把 dock 图标在所有运行方式下统一成我们自己的(打包后再设一次也无副作用)。
+  if (process.platform === 'darwin') {
+    app.dock?.setIcon(nativeImage.createFromPath(appIconPath))
+  }
+
   app.on('browser-window-created', (_, window) => {
     // dev 下 F12 开 devtools、生产下屏蔽 CommandOrControl+R
     optimizer.watchWindowShortcuts(window)
@@ -125,16 +139,43 @@ void app.whenReady().then(() => {
 
   initRuntime(electronHost())
 
+  /*
+    ★ 代理必须在**任何一次出站请求之前**装好。`initRuntime` 已经把 host 装上了,
+    但它自己不发请求;第一个真的出站是渲染层握手之后的模型探活。排在这之后的话,
+    那几次请求会走直连 —— 而在只有代理才能出网的网络里,表现是「刚启动那会儿
+    连不上,过一会儿就好了」,一个几乎没法复现的故障。
+
+    不 await:`setProxy` 是异步的,而 `whenReady` 这个回调是同步的。建窗和
+    注册 IPC 不依赖代理装完,而 Chromium 在 setProxy 落地前发出的请求会排队。
+  */
+  installProxyAuth()
+  void applyProxy(store.getSettings().proxy)
+
   // 契约里的每个频道在这里一次性注册完(缺一个就编译不过)。
   // 必须在建窗之前:渲染层的第一个 invoke 可能在窗口 show 之前就到。
   registerIpc()
 
   createMainWindow()
 
+  // 菜单栏托盘。放在建窗之后:它的「显示窗口」要能拿到已经存在的那个窗口。
+  initTray(showMainWindow)
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
   })
 })
+
+/** 从托盘唤起:已有窗口就还原并聚焦,一个都没有(mac 关窗不退出)就新建一个。 */
+function showMainWindow(): void {
+  const [win] = BrowserWindow.getAllWindows()
+  if (win) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  } else {
+    createMainWindow()
+  }
+}
 
 // 第二个实例被拉起时,聚焦已有窗口而不是新开一个。
 app.on('second-instance', () => {
@@ -153,8 +194,15 @@ app.on('window-all-closed', () => {
 // 用户最后一次拖出来的顺序就丢了 —— 而那正是他最可能记得的一次操作。
 // 顺带停掉所有在跑的 run:它们的定时器/上游流会拖住退出。
 app.on('before-quit', () => {
+  destroyTray()
   flushPendingPersists()
   shutdownRuns()
+  /*
+    MCP 的 stdio 传输背后是**真的子进程**。不关的话它们会活过主进程 ——
+    表现是退出应用之后活动监视器里还挂着几个 node,而下次启动又会各起一份。
+    不 await:`before-quit` 是同步的,而 `shutdown()` 里每一步都自带兜底。
+  */
+  void shutdownMcp()
   // 顺序要紧:上面那次 flush 是**经 store 写库的**,先关库就等于把它丢了。
   // 关库会顺手做一次 WAL checkpoint,把 -wal 并回主文件。
   closeDatabase()

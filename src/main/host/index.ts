@@ -7,7 +7,7 @@
  * |---|---|
  * | `paths`   | `app.getPath('userData')` 是各平台约定目录的唯一权威 |
  * | `secrets` | `safeStorage` 用的是系统钥匙串,没有纯 Node 的等价物 |
- * | `fetch`   | `net.fetch` 走 Chromium 网络栈 —— 设置页的「代理」对模型请求生效,靠的就是它 |
+ * | `fetch`   | `net.fetch` 走 Chromium 网络栈,于是 `net/proxy.ts` 那一次 `setProxy` 对全应用的出站请求一起生效 |
  *
  * 其余端口(clock / logger / fs / spawn)在 Electron 里和在 Node 里是同一件事,
  * 覆盖它们只会多一份要同步维护的代码。
@@ -53,8 +53,11 @@ function electronSecrets(): KernelHost['secrets'] {
 
 /**
  * `net.fetch` 的签名比 WHATWG fetch 窄一点(不吃 `URL`),补一层适配。
- * 用它而不是全局 fetch,是为了让请求走 Chromium 网络栈 —— 系统代理、
- * 企业证书、设置页的代理配置才对模型请求生效。
+ *
+ * 用它而不是全局 fetch,是为了让请求走 Chromium 网络栈:企业证书、系统代理,
+ * 以及**设置页那份代理配置** —— 后者不是自动的,由 `net/proxy.ts` 显式
+ * `session.defaultSession.setProxy()` 装上去(Chromium 默认只跟随系统代理)。
+ * 全局 fetch 走的是 Node 的网络栈,那三样一样都拿不到。
  */
 const electronFetch: typeof fetch = (input, init) =>
   net.fetch(input instanceof URL ? input.href : input, init)

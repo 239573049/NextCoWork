@@ -109,6 +109,7 @@ interface Registered {
   internalId: string
   readOnly?: boolean
   destructive?: boolean
+  needsNetwork?: boolean
   source?: ToolSource
   execute?: (input: unknown, ctx: ToolContext) => Promise<ToolResult>
 }
@@ -122,6 +123,7 @@ function registry(...tools: Registered[]): ToolRegistry {
       inputSchema: { type: 'object' },
       readOnly: t.readOnly ?? true,
       destructive: t.destructive ?? false,
+      needsNetwork: t.needsNetwork ?? false,
       source: t.source ?? { kind: 'builtin' },
       execute: t.execute ?? ((input) => Promise.resolve(toolOk(JSON.stringify(input))))
     })
@@ -564,7 +566,7 @@ describe('审批接缝(方案 §4.5 / §4.6)', () => {
       approve: () => Promise.resolve({ kind: 'deny' })
     })
     const result = history[2]?.parts[0]
-    expect(result?.type === 'tool_result' && result.output.content).toContain('拒绝')
+    expect(result?.type === 'tool_result' && result.output.content).toContain('denied')
   })
 
   /** 用原值执行等于无视用户的修改 */
@@ -731,7 +733,7 @@ describe('中断收尾', () => {
 
     const result = partsOf(history).find((p) => p.type === 'tool_result')
     expect(result).toMatchObject({ callId: 'c1', isError: true })
-    expect(result?.type === 'tool_result' && result.output.content).toContain('中断')
+    expect(result?.type === 'tool_result' && result.output.content).toContain('interrupted')
   })
 
   /** 没有这条,UI 上那张工具卡片会停在「执行中」直到下次重载 */

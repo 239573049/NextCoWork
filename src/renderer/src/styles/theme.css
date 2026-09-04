@@ -203,6 +203,46 @@ body {
   cursor: auto;
 }
 
+/* ── 图片主题的底图 ────────────────────────────────────────────────
+   `--theme-image` 与 `data-image-render` 由 `theme/apply.ts` 写在 <html> 上,
+   **只在选了图时存在** —— 所以 `:root[data-image-render]` 就是「选了图」这个条件,
+   不需要再多一个标志位。
+
+   ★ **图片主题的主效果是整套 token 被重新配色,不是这一层。** 面板全是不透明的,
+     所以底图露出来的是 `.app-ground` 那圈 8px 的边框和面板之间的缝 —— 它是一层
+     环境光,不是壁纸。想让它大面积露出来得先给每一层面板加透明度,而那会毁掉
+     `theme.css` §1 那四层底色的层次关系(那是整个界面的地基)。
+
+   `z-index: -1` + `isolation: isolate`:负层级只在 `.app-ground` 自己的层叠上下文里
+   往下沉,于是它盖在 `bg-app` 之上、在所有面板之下。不加 isolate 的话它会一路沉到
+   根上下文,被 body 那层不透明底色挡住。 */
+.app-ground {
+  position: relative;
+  isolation: isolate;
+}
+
+:root[data-image-render] .app-ground::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--theme-image);
+  background-size: cover;
+  background-position: center;
+}
+
+/* 模糊:整张图糊成一团环境光。放大 1.3 是因为 blur 会把边缘吸淡,
+   不放大的话四周会出现一圈明显的透明带。 */
+:root[data-image-render='blur'] .app-ground::before {
+  filter: blur(44px) saturate(1.15);
+  transform: scale(1.3);
+}
+
+/* 覆盖色:图不糊,但让 `--color-app` 从下面透上来,压成一层同色系的底 */
+:root[data-image-render='overlay'] .app-ground::before {
+  opacity: 0.55;
+}
+
 /* macOS titleBarStyle: 'hiddenInset' —— 自绘标题栏区要显式声明可拖拽,
    其中的按钮再各自声明 no-drag,否则点不动。
    ★ 外层 Tab 条整条落在这个区域里,每个 Tab 都必须 .app-no-drag,
@@ -214,28 +254,55 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* 内容区滚动条:细、无按钮、悬停才明显 —— 截图里滚动条几乎看不见 */
-.scroll-thin {
+/*
+  滚动条:细、无轨道背景、悬停才明显 —— 截图里滚动条几乎看不见。
+
+  ★ **这是全局默认,不是 opt-in。** 以前只有 `.scroll-thin` 才生效,于是每个新写的
+    `overflow-y-auto` 都要记得挂 class,漏一个就露出 Chromium 默认滚动条 ——
+    默认那条自带浅灰实心 track,在深色主题里是一条亮痕。Dialog 的内容区就漏了。
+    选择器用 `*` 而不是维护一份「所有滚动容器」的名单,是因为名单一定会再漏。
+
+  ── 「无背景」在这里要同时关掉三个面,少一个就还留着底 ──
+
+    ::-webkit-scrollbar        滚动条整条的底(UA 会给它填色,必须显式抹掉)
+    ::-webkit-scrollbar-track  轨道 —— 就是截图里那条灰
+    ::-webkit-scrollbar-corner 纵横滚动条交汇的方块(只在双向滚动时露出来,
+                               但一露就是一块死灰的方角,很显眼)
+
+  `scrollbar-color: <thumb> transparent` 是标准属性、管 Firefox,同时也是
+  Chromium 的新式路径;两套都写是因为 `::-webkit-*` 在混用时优先级更高,
+  只写标准属性在当前 Electron(Chromium 144)上 thumb 形状会退化成方角。
+*/
+* {
   scrollbar-width: thin;
   scrollbar-color: var(--color-tint) transparent;
 }
-.scroll-thin::-webkit-scrollbar {
+*::-webkit-scrollbar {
   width: 8px;
   height: 8px;
+  background: transparent;
 }
-.scroll-thin::-webkit-scrollbar-thumb {
+/* thumb 靠 border + background-clip 挤出内缩,而不是直接把 scrollbar 调窄:
+   8px 的命中区保留给鼠标,视觉上只有中间 4px 有颜色。改成 width:4px 会很难点中。 */
+*::-webkit-scrollbar-thumb {
   background: var(--color-tint);
   border: 2px solid transparent;
   background-clip: content-box;
   border-radius: 999px;
 }
-.scroll-thin::-webkit-scrollbar-thumb:hover {
+*::-webkit-scrollbar-thumb:hover {
   background: var(--color-tint-strong);
   background-clip: content-box;
 }
-.scroll-thin::-webkit-scrollbar-corner,
-.scroll-thin::-webkit-scrollbar-track {
+*::-webkit-scrollbar-corner,
+*::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* 保留给已有的 7 处调用点 —— 现在是空操作(全局已覆盖),但留着以免删 class 时
+   连带删掉别的样式意图,也让「这里会滚动」在 JSX 上仍然是自解释的。 */
+.scroll-thin {
+  scrollbar-width: thin;
 }
 
 /* 截图 36dbfd7f:内容滚到吸顶的子 Tab 条下方时,顶部有一道渐隐遮罩 */

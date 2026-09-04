@@ -24,6 +24,7 @@ function reg(over: Partial<ToolRegistration> & { internalId: string }): ToolRegi
     inputSchema: { type: 'object' },
     readOnly: true,
     destructive: false,
+    needsNetwork: false,
     source: { kind: 'builtin' },
     execute: async () => toolOk('ok'),
     ...over
@@ -144,6 +145,52 @@ describe('ToolRegistry · snapshot', () => {
   /** ★ plan 模式的**真正实现**:过滤掉写工具,而不是在提示词里祈祷(方案 §4.8) */
   it('readOnlyOnly 过滤掉所有写工具', () => {
     expect(seeded().snapshot({ readOnlyOnly: true }).map((t) => t.internalId)).toEqual(['read'])
+  })
+
+  /**
+   * Composer 上那颗「联网搜索」药丸的落点。三条用例分别钉三件不同的事:
+   *
+   * ① 关掉时联网工具**不下发** —— 不然模型会先白跑一轮再被权限闸拒掉;
+   * ② 打开时它回来,且不影响别的工具;
+   * ③ **不传这个字段时不过滤**。`snapshot()` 有一堆调用点(Skill、子代理、诊断),
+   *    默认过滤掉联网工具的话,某个调用点忘了传就会表现成「搜索工具时有时没有」——
+   *    而真正承重的那道闸在 `permission-gate.ts`,它不看这个字段。
+   */
+  function withNet(): ToolRegistry {
+    const r = seeded()
+    r.register(reg({ internalId: 'WebFetch', readOnly: true, needsNetwork: true }))
+    return r
+  }
+
+  it('network:false 时联网工具不下发', () => {
+    const ids = withNet()
+      .snapshot({ network: false })
+      .map((t) => t.internalId)
+    expect(ids).not.toContain('WebFetch')
+    expect(ids).toContain('read')
+  })
+
+  it('network:true 时联网工具照常下发', () => {
+    expect(
+      withNet()
+        .snapshot({ network: true })
+        .map((t) => t.internalId)
+    ).toContain('WebFetch')
+  })
+
+  it('不传 network 时不过滤', () => {
+    expect(
+      withNet()
+        .snapshot()
+        .map((t) => t.internalId)
+    ).toContain('WebFetch')
+  })
+
+  /** 两个过滤器是**与**的关系:plan 模式下一个只读的联网工具仍然要被联网闸拦住 */
+  it('readOnlyOnly 与 network 同时生效', () => {
+    expect(withNet().snapshot({ readOnlyOnly: true, network: false }).map((t) => t.internalId)).toEqual([
+      'read'
+    ])
   })
 
   it('无过滤时全部返回,且保持注册顺序', () => {

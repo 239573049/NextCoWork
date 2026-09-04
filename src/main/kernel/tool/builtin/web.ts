@@ -121,34 +121,39 @@ async function resolvedAddressRisk(hostname: string): Promise<string | null> {
   const bad = addrs.find((a) => isPrivateAddress(a.address))
   if (bad === undefined) return null
   return (
-    `拒绝访问 "${hostname}":它解析到的是本机或内网地址(${bad.address})。` +
-    `一个公网域名指向内网,通常意味着这是一次刻意的绕过尝试。`
+    `Refusing to reach "${hostname}": it resolves to a loopback or private-network address (${bad.address}). ` +
+    `A public hostname pointing inward is usually a deliberate attempt to get around this check.`
   )
 }
 
 const WebFetchInput = z.object({
-  url: z.string().url().describe('要抓取的 URL,必须是完整的 http/https 地址'),
+  url: z.string().url().describe('The URL to fetch. Must be a complete http/https address'),
   prompt: z
     .string()
     .min(1)
     .max(2000)
-    .describe('你想从这个页面里得到什么。它会被原样放在返回内容的开头,帮你在读完长正文后不跑题')
+    .describe(
+      'What you are looking for on this page. It is echoed verbatim at the top of the result so you stay on ' +
+        'target after reading a long page'
+    )
 })
 
 export const webFetchTool: ToolRegistration = defineTool({
   internalId: 'WebFetch',
   description:
-    '抓取一个 URL 的内容,转成文本交给你。\n\n' +
-    '- ★ **返回的是页面正文本身,不是替你总结好的答案。**提取、判断、引用都由你自己来做\n' +
-    '- prompt 写清楚你要找什么;它会放在正文前面,方便你读完之后对照\n' +
-    '- 只支持 http / https。http 会自动升级成 https\n' +
-    '- 只接受文本类内容(HTML、纯文本、JSON、XML 等)。PDF、图片、压缩包一律拒绝\n' +
-    `- 正文超过 ${String(MAX_TEXT_CHARS / 1000)}k 字符会被截断\n` +
-    '- HTML 会被去掉标签转成正文文本,表格和嵌套列表的结构可能会丢\n' +
-    '- **不能访问本机和内网地址**(localhost、127.0.0.1、192.168.x.x、云元数据端点等),' +
-    '也不能带 user:pass@ 形式的凭证\n' +
-    '- 需要登录才能看的页面抓不到 —— 拿到登录页时不要反复重试,直接告诉用户\n' +
-    '- 跨主机的重定向会被拒绝并把新地址告诉你,需要的话你再用新地址调一次',
+    'Fetches the content at a URL and converts it to text for you.\n\n' +
+    '- IMPORTANT: this returns THE PAGE ITSELF, not an answer summarized for you. Extracting, judging, and ' +
+    'quoting are your job\n' +
+    '- Say in prompt what you are looking for; it is placed above the text so you can check yourself against it\n' +
+    '- Only http and https are supported. http is upgraded to https automatically\n' +
+    '- Only textual content is accepted (HTML, plain text, JSON, XML, …). PDFs, images, and archives are refused\n' +
+    `- Text longer than ${String(MAX_TEXT_CHARS / 1000)}k characters is truncated\n` +
+    '- HTML is stripped to readable text; table and nested-list structure may be lost\n' +
+    '- Loopback and private-network addresses are BLOCKED (localhost, 127.0.0.1, 192.168.x.x, cloud metadata ' +
+    'endpoints, …), as are user:pass@ credentials in the URL\n' +
+    '- Pages behind a login cannot be fetched. If you get a login page, do NOT retry — tell the user\n' +
+    '- A redirect to a different host is refused and the new address is handed back to you; call again with ' +
+    'that address if you want it',
   schema: WebFetchInput,
   /*
     ★ readOnly: true —— 它确实不改变任何东西。联网这件事**不靠 readOnly 管**,
@@ -157,12 +162,19 @@ export const webFetchTool: ToolRegistration = defineTool({
   */
   readOnly: true,
   destructive: false,
+  /*
+    ★ 这是本仓库第一个 `needsNetwork: true`。它和上面那条 `readOnly: true` 的注释
+    是一体两面:只读放行排在联网拒绝**后面**,所以这个字段真的能拦住它。
+  */
+  needsNetwork: true,
   async run(input, ctx) {
     let url: URL
     try {
       url = new URL(input.url)
     } catch {
-      return toolFail(`URL 格式不对:"${input.url}"。请给一个完整地址,例如 https://example.com/page。`)
+      return toolFail(
+        `Malformed URL: "${input.url}". Give a complete address, e.g. https://example.com/page.`
+      )
     }
 
     // 和 CC 一致:http 升级成 https。降级传输里的内容会被中间人改写。
@@ -209,14 +221,14 @@ export const webFetchTool: ToolRegistration = defineTool({
         try {
           next = new URL(loc, current)
         } catch {
-          return toolFail(`服务器返回了一个无法解析的重定向地址:"${loc}"。`)
+          return toolFail(`The server returned a redirect address that could not be parsed: "${loc}".`)
         }
 
         // 每一跳都重新过一遍闸,和第一次一模一样的标准
         const risk = ssrfRisk(next)
-        if (risk !== null) return toolFail(`重定向到了不允许的地址。${risk}`)
+        if (risk !== null) return toolFail(`The redirect target is not allowed. ${risk}`)
         const nextDns = await resolvedAddressRisk(next.hostname)
-        if (nextDns !== null) return toolFail(`重定向到了不允许的地址。${nextDns}`)
+        if (nextDns !== null) return toolFail(`The redirect target is not allowed. ${nextDns}`)
 
         /*
           ★ 跨主机重定向**停下来问模型**,而不是默默跟过去。CC 也是这个行为。
@@ -225,22 +237,22 @@ export const webFetchTool: ToolRegistration = defineTool({
         */
         if (next.hostname !== current.hostname) {
           return toolOk(
-            `这个地址重定向到了另一个主机:${next.toString()}\n` +
-              `内容没有被抓取。如果这个新地址确实是你要的,请用它再调一次 WebFetch。`
+            `This address redirects to a different host: ${next.toString()}\n` +
+              `Nothing was fetched. If that new address is what you want, call WebFetch again with it.`
           )
         }
         current = next
       }
 
-      if (res === null) return toolFail('请求没有得到任何响应。')
+      if (res === null) return toolFail('The request produced no response at all.')
 
       if (!res.ok) {
         return toolFail(
-          `HTTP ${String(res.status)} ${res.statusText}(${current.toString()})。` +
+          `HTTP ${String(res.status)} ${res.statusText} (${current.toString()}). ` +
             (res.status === 401 || res.status === 403
-              ? '这个页面需要登录或没有访问权限,重试不会有帮助,请把这个情况告诉用户。'
+              ? 'This page needs a login or you do not have access. Retrying will not help — tell the user.'
               : res.status === 404
-                ? '地址不存在。请检查 URL,或者换一个来源。'
+                ? 'The address does not exist. Check the URL, or find another source.'
                 : '')
         )
       }
@@ -248,9 +260,9 @@ export const webFetchTool: ToolRegistration = defineTool({
       const ctype = res.headers.get('content-type') ?? ''
       if (!isTextual(ctype)) {
         return toolFail(
-          `这个地址返回的是 "${ctype || '未知类型'}",不是文本内容,已拒绝。` +
-            `这个工具只能读 HTML、纯文本、JSON、XML 一类的内容 —— ` +
-            `PDF、图片、压缩包请让用户下载后放进工作区,再用 Read 打开。`
+          `This address returned "${ctype || 'an unknown type'}", which is not textual content, so it was refused. ` +
+            `This tool only reads HTML, plain text, JSON, XML and the like. For a PDF, an image, or an archive, ` +
+            `ask the user to download it into the workspace and open it with Read.`
         )
       }
 
@@ -265,30 +277,33 @@ export const webFetchTool: ToolRegistration = defineTool({
 
       if (text === '') {
         return toolOk(
-          `${current.toString()} 抓取成功,但页面没有可读的文本内容。` +
-            `多半是个完全靠 JavaScript 渲染的页面 —— 这个工具拿不到那类内容,请换一个来源。`
+          `${current.toString()} was fetched successfully but has no readable text. ` +
+            `It is most likely rendered entirely by JavaScript, which this tool cannot execute. Find another source.`
         )
       }
 
       const body = clampWithEllipsis(text, MAX_TEXT_CHARS)
       const notes: string[] = []
-      if (body.length < text.length) notes.push('正文过长,已截断')
-      if (truncatedBytes) notes.push(`响应超过 ${String(MAX_BYTES / 1024 / 1024)}MB,只读了前面一部分`)
+      if (body.length < text.length) notes.push('text was too long and has been truncated')
+      if (truncatedBytes)
+        notes.push(`the response exceeded ${String(MAX_BYTES / 1024 / 1024)}MB, so only the start was read`)
 
       return toolOk(
-        `你要找的是:${input.prompt}\n\n` +
-          `以下是 ${current.toString()} 的正文${notes.length > 0 ? `(${notes.join(';')})` : ''}:\n\n` +
+        `You are looking for: ${input.prompt}\n\n` +
+          `Content of ${current.toString()}${notes.length > 0 ? ` (${notes.join('; ')})` : ''}:\n\n` +
           body
       )
     } catch (err) {
       // 中断由 defineTool 处理;走到这里的是超时或真正的网络错误
       if (ctx.signal.aborted) throw err
       if (timer.signal.aborted) {
-        return toolFail(`请求 ${url.toString()} 超时(超过 ${String(FETCH_TIMEOUT_MS / 1000)} 秒)。`)
+        return toolFail(
+          `The request to ${url.toString()} timed out after ${String(FETCH_TIMEOUT_MS / 1000)} seconds.`
+        )
       }
       return toolFail(
-        `请求 ${url.toString()} 失败:${err instanceof Error ? err.message : String(err)}。` +
-          `请检查地址是否正确,或者换一个来源 —— 反复重试同一个地址不会有帮助。`
+        `The request to ${url.toString()} failed: ${err instanceof Error ? err.message : String(err)}. ` +
+          `Check the address or find another source — retrying the same URL will not help.`
       )
     } finally {
       clearTimeout(t)

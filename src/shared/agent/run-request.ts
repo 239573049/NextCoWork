@@ -102,6 +102,15 @@ export interface RunRequest {
   model: string
   /** 本轮激活的 Skill */
   skillIds: string[]
+
+  /**
+   * 这个 run 是哪个子代理在跑(`agents/<name>.md` 的 name)。缺省 = 主 run。
+   *
+   * ★ 放在 `RunRequest` 里而不是当成启动器的一个私有参数,是因为它得
+   * **活得和 run 一样久**:重扫目录之后 `AgentDefinition` 对象会被整体换掉,
+   * 而一个正在跑的子 run 仍然要能说出「我是谁」。名字是稳定的,对象不是。
+   */
+  agentType?: string
 }
 
 /** 常量就是常量,不做配置项(方案 §10)。 */

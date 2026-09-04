@@ -166,7 +166,7 @@ export function AppShell({
   }
 
   return (
-    <div className="flex h-full bg-app p-2">
+    <div className="app-ground flex h-full bg-app p-2">
       {/*
         ★ 中缝的 8px 从根上的 `gap-2` 挪到了侧边栏自己的 `mr-2`。
         gap 是**父元素**的属性,不会因为孩子宽度变成 0 就消失 —— 留着它的话,
@@ -192,7 +192,10 @@ export function AppShell({
             activeFeature={activeOuter?.kind === 'feature' ? activeOuter.ref.feature : null}
             activeSessionId={activeInner?.kind === 'chat' ? activeInner.ref.sessionId : null}
             runningSessionIds={runningSessionIds}
-            onNewChat={() => activeWorkspaceId !== null && tabs.open(activeWorkspaceId, 'chat')}
+            // ★ `newChat` 不是 `open`:已经有一个没用过的对话就切过去,不再攒一排
+            // 一模一样的「新对话」。Tab 条上那颗 `+` 仍走 `open`,它问的是
+            // 「再给我一个」—— 见 stores/tabs.ts 的 newChat
+            onNewChat={() => activeWorkspaceId !== null && tabs.newChat(activeWorkspaceId)}
             onSearch={() => {
               /* 步骤 14:cmdk 命令面板 */
             }}

@@ -83,6 +83,29 @@ class WindowRegistry {
     if (set.size === 0) this.topics.delete(topic)
   }
 
+  /**
+   * 把 `from` 这个主题的订阅者**原样复制**给 `to`。子 run 的订阅就是这么来的。
+   *
+   * ★ 不做这一步的表现极其隐蔽:一切正常、没有任何报错、只是界面上什么都不发生。
+   * 因为 `RunPump.flush()` 在 `!hasSubscribers(topic)` 时**整批丢弃**事件 ——
+   * 子 run 有自己的 runId,于是有自己的主题,而没有任何窗口订阅过那个主题。
+   *
+   * 是**复制而不是别名**:父 run 结束后它的订阅可能被清掉,而子 run 还在跑;
+   * 别名会让子 run 跟着一起失聪。代价是父 run 之后新增的订阅者
+   * (⌘R 重载后重新 attach 的窗口)看不到子 run —— 那条路由
+   * `attachRun` 会走 `snapshot().children`,不靠这里。
+   */
+  inherit(from: string, to: string): void {
+    const src = this.topics.get(from)
+    if (!src || src.size === 0) return
+    let dst = this.topics.get(to)
+    if (!dst) {
+      dst = new Set()
+      this.topics.set(to, dst)
+    }
+    for (const id of src) dst.add(id)
+  }
+
   /** 一个 run / 终端还有没有人在看。没人看时可以停掉合批泵,但**不停 run 本身**。 */
   hasSubscribers(topic: string): boolean {
     return (this.topics.get(topic)?.size ?? 0) > 0

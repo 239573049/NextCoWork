@@ -59,8 +59,9 @@ const SIGNAL_EVERY = 32
 
 /** 忽略表在两个工具的描述里都要提一句 —— 模型据此判断「没搜到」是不是可信 */
 const IGNORE_NOTE =
-  '会自动跳过 node_modules、.git、dist、out、build、target、coverage 等生成物和依赖目录' +
-  '(这是一张固定的表,不读 .gitignore)。要搜这些目录里的内容,请改用 Bash。'
+  'Dependency and build directories (node_modules, .git, dist, out, build, target, coverage, …) are ' +
+  'skipped automatically. This is a fixed list; .gitignore is NOT read. To search inside those ' +
+  'directories, use Bash instead.'
 
 /**
  * `type` 参数认识的语言别名。
@@ -101,30 +102,31 @@ const TYPE_GLOBS: Record<string, string> = {
 // ────────────────────────────── Glob ──────────────────────────────
 
 const GlobInput = z.object({
-  pattern: z.string().min(1).describe('用来匹配文件的 glob 模式'),
+  pattern: z.string().min(1).describe('The glob pattern to match file paths against'),
   path: z
     .string()
     .optional()
     .describe(
-      '要搜索的目录(绝对路径)。省略则搜整个工作区。' +
-        '重要:要用默认目录就**省略这个字段**,不要传 "undefined" 或 "null"'
+      'Directory to search in (absolute path). Omit it to search the whole workspace. ' +
+        'IMPORTANT: to use the default, OMIT this field entirely — do not pass "undefined" or "null"'
     )
 })
 
 export const globTool: ToolRegistration = defineTool({
   internalId: 'Glob',
   description:
-    '- 快速的文件名匹配工具,仓库多大都能用\n' +
-    '- 支持 "**/*.js"、"src/**/*.ts" 这样的 glob 模式\n' +
-    '- 返回的文件路径**按修改时间排序**(最近改的在前)\n' +
-    '- 需要按文件名找文件时用它;需要按**内容**找时用 Grep\n' +
-    '- 开放式的搜索(可能要来回 glob + grep 好几轮)请改用 Task 派一个子代理\n' +
-    '- 你可以在一次回复里调用多个工具,预判性地一次发起多个搜索比一轮轮试快得多\n' +
-    `- 注意 * 不跨目录:要搜所有子目录下的 ts 文件写 "**/*.ts",不是 "*.ts"\n` +
+    '- Fast file-pattern matching that works on any codebase size\n' +
+    '- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n' +
+    '- Returns matching paths SORTED BY MODIFICATION TIME, most recent first\n' +
+    '- Use this when you are looking for files by name; use Grep when you are looking for them by CONTENT\n' +
+    '- For an open-ended search that may take several rounds of globbing and grepping, use Task to launch a subagent instead\n' +
+    '- You can call multiple tools in one reply. Speculatively firing several searches at once beats trying one at a time\n' +
+    '- Note that * does not cross directory boundaries: to find every .ts file in every subdirectory write "**/*.ts", not "*.ts"\n' +
     `- ${IGNORE_NOTE}`,
   schema: GlobInput,
   readOnly: true,
   destructive: false,
+  needsNetwork: false,
   async run(input, ctx) {
     const r = resolvePath(ctx, input.path ?? '')
     if (!r.ok) return r.result
@@ -144,8 +146,9 @@ export const globTool: ToolRegistration = defineTool({
     const hits = res.entries.filter((e) => !e.isDir && re.test(normalizeGlobPath(e.rel)))
     if (hits.length === 0) {
       return toolOk(
-        `没有文件匹配 "${input.pattern}"(在 ${base} 下)。` +
-          `提示:* 不跨目录,跨目录要写 **/。${res.timedOut ? '另外这次遍历超时了,结果可能不全。' : ''}`
+        `No files match "${input.pattern}" under ${base}. ` +
+          `Note that * does not cross directory boundaries — use **/ to descend.` +
+          `${res.timedOut ? ' The traversal also timed out, so this result may be incomplete.' : ''}`
       )
     }
 
@@ -164,13 +167,15 @@ export const globTool: ToolRegistration = defineTool({
     const shown = withTime.slice(0, MAX_GLOB_RESULTS)
     const notes: string[] = []
     if (hits.length > shown.length) {
-      notes.push(`共匹配 ${String(hits.length)} 个文件,只列出最近修改的 ${String(shown.length)} 个`)
+      notes.push(
+        `${String(hits.length)} files matched; listing the ${String(shown.length)} most recently modified`
+      )
     }
-    if (res.truncated) notes.push('遍历量超限,可能还有没扫到的目录')
-    if (res.timedOut) notes.push('遍历超时,结果可能不全')
+    if (res.truncated) notes.push('traversal limit reached; some directories were not scanned')
+    if (res.timedOut) notes.push('traversal timed out; the result may be incomplete')
 
     return toolOk(
-      shown.map((h) => h.rel).join('\n') + (notes.length > 0 ? `\n\n[${notes.join(';')}]` : '')
+      shown.map((h) => h.rel).join('\n') + (notes.length > 0 ? `\n\n[${notes.join('; ')}]` : '')
     )
   }
 })
@@ -178,57 +183,58 @@ export const globTool: ToolRegistration = defineTool({
 // ────────────────────────────── Grep ──────────────────────────────
 
 const GrepInput = z.object({
-  pattern: z.string().min(1).describe('用来在文件内容里搜索的正则表达式(JavaScript 语法)'),
+  pattern: z.string().min(1).describe('The regular expression to search file contents for (JavaScript syntax)'),
   path: z
     .string()
     .optional()
-    .describe('要搜索的文件或目录(绝对路径)。省略则搜整个工作区'),
+    .describe('File or directory to search (absolute path). Omit it to search the whole workspace'),
   glob: z
     .string()
     .optional()
-    .describe('用 glob 模式过滤文件,例如 "*.js" 或 "**/*.{ts,tsx}"。和 type 二选一'),
+    .describe('Filter files by glob pattern, e.g. "*.js" or "**/*.{ts,tsx}". Mutually exclusive with type'),
   type: z
     .string()
     .optional()
     .describe(
-      '按语言类型过滤文件,例如 "js"、"py"、"rust"。比 glob 更省事,常见语言都认。' +
-        '要更细的控制时用 glob'
+      'Filter files by language type, e.g. "js", "py", "rust". Easier than glob and covers the common ' +
+        'languages. Use glob when you need finer control'
     ),
   output_mode: z
     .enum(['content', 'files_with_matches', 'count'])
     .optional()
     .describe(
-      '输出形式:"content" 给出命中的行(支持 -A/-B/-C/-n/head_limit);' +
-        '"files_with_matches" 只给文件路径(默认);"count" 给每个文件的命中条数'
+      'Output shape: "content" returns the matching lines (supports -A/-B/-C/-n/head_limit); ' +
+        '"files_with_matches" returns just the file paths (default); "count" returns a match count per file'
     ),
-  '-i': z.boolean().optional().describe('忽略大小写'),
-  '-n': z.boolean().optional().describe('输出里带行号。只在 output_mode 为 "content" 时有效'),
+  '-i': z.boolean().optional().describe('Case-insensitive matching'),
+  '-n': z.boolean().optional().describe('Include line numbers in the output. Only used when output_mode is "content"'),
   '-A': z
     .number()
     .int()
     .min(0)
     .max(50)
     .optional()
-    .describe('每条命中后面多带几行。只在 output_mode 为 "content" 时有效'),
+    .describe('Lines of context to show after each match. Only used when output_mode is "content"'),
   '-B': z
     .number()
     .int()
     .min(0)
     .max(50)
     .optional()
-    .describe('每条命中前面多带几行。只在 output_mode 为 "content" 时有效'),
+    .describe('Lines of context to show before each match. Only used when output_mode is "content"'),
   '-C': z
     .number()
     .int()
     .min(0)
     .max(50)
     .optional()
-    .describe('每条命中前后各多带几行。只在 output_mode 为 "content" 时有效'),
+    .describe('Lines of context to show on each side of a match. Only used when output_mode is "content"'),
   multiline: z
     .boolean()
     .optional()
     .describe(
-      '让模式可以跨行匹配(此时 . 也匹配换行)。默认 false —— 默认只在单行内匹配'
+      'Let the pattern match across line boundaries (. then matches newlines too). Defaults to false — ' +
+        'by default matching happens within a single line'
     ),
   head_limit: z
     .number()
@@ -236,7 +242,9 @@ const GrepInput = z.object({
     .min(1)
     .max(1000)
     .optional()
-    .describe('只保留前 N 条结果(行 / 文件 / 计数行,取决于 output_mode)。省略则用内置上限')
+    .describe(
+      'Keep only the first N results (lines, files, or count rows, depending on output_mode). Omit for the built-in cap'
+    )
 })
 
 interface FileHits {
@@ -347,22 +355,24 @@ function renderContent(
 export const grepTool: ToolRegistration = defineTool({
   internalId: 'Grep',
   description:
-    '一个用来在文件内容里搜索的强力工具。\n\n' +
-    '用法:\n' +
-    '- 搜代码内容**一律用 Grep**,不要用 Bash 去调 grep / rg —— 这个工具做过忽略规则、' +
-    '二进制跳过和超时保护\n' +
-    '- 支持完整的**JavaScript 正则**语法(例如 "log.*Error"、"function\\s+\\w+")。' +
-    '★ 不是 ripgrep:JS 里 { } 不需要转义,也没有 ripgrep 的那些扩展语法\n' +
-    '- 用 glob 参数按文件名过滤(如 "*.js"、"**/*.tsx"),或用 type 按语言过滤(如 "js"、"py")\n' +
-    '- output_mode:"content" 给出命中的行,"files_with_matches" 只给文件路径(**默认**),' +
-    '"count" 给每个文件的命中条数\n' +
-    '- 开放式的、要来回搜好几轮的问题,改用 Task 派一个子代理\n' +
-    '- 默认只在**单行内**匹配。要跨行匹配(例如 "interface\\s+X[\\s\\S]*?field")请传 multiline: true\n' +
-    '- 二进制文件和超过 5MB 的文件会被跳过\n' +
+    'A powerful search tool for finding text inside files.\n\n' +
+    'Usage:\n' +
+    '- ALWAYS use Grep to search file contents. NEVER shell out to grep or rg through Bash — this tool ' +
+    'applies the ignore list, skips binaries, and has a timeout budget that the shell versions do not\n' +
+    '- Supports full JAVASCRIPT regular expression syntax (e.g. "log.*Error", "function\\s+\\w+"). ' +
+    'This is NOT ripgrep: { } need no escaping here, and ripgrep-specific extensions do not exist\n' +
+    '- Filter files with glob (e.g. "*.js", "**/*.tsx") or with type by language (e.g. "js", "py")\n' +
+    '- output_mode: "content" returns matching lines, "files_with_matches" returns just paths (DEFAULT), ' +
+    '"count" returns a match count per file\n' +
+    '- For an open-ended question that will take several rounds of searching, use Task to launch a subagent instead\n' +
+    '- Matching is WITHIN A SINGLE LINE by default. Pass multiline: true to match across lines ' +
+    '(e.g. "interface\\s+X[\\s\\S]*?field")\n' +
+    '- Binary files and files over 5MB are skipped\n' +
     `- ${IGNORE_NOTE}`,
   schema: GrepInput,
   readOnly: true,
   destructive: false,
+  needsNetwork: false,
   async run(input, ctx) {
     const r = resolvePath(ctx, input.path ?? '')
     if (!r.ok) return r.result
@@ -386,21 +396,21 @@ export const grepTool: ToolRegistration = defineTool({
       )
     } catch (err) {
       return toolFail(
-        `正则表达式不合法:${err instanceof Error ? err.message : String(err)}。` +
-          `这里用的是 JavaScript 正则语法;搜字面量时记得给 . ( ) [ ] * + ? 加反斜杠。`
+        `Invalid regular expression: ${err instanceof Error ? err.message : String(err)}. ` +
+          `This is JavaScript regex syntax; when searching for a literal, escape . ( ) [ ] * + ? with a backslash.`
       )
     }
 
     // ★ 认不出的 type 要报错,不能当成「不过滤」—— 静默放宽范围是查不出来的错
     if (input.type !== undefined && TYPE_GLOBS[input.type] === undefined) {
       return toolFail(
-        `不认识的 type "${input.type}"。可用:${Object.keys(TYPE_GLOBS).join('、')}。` +
-          `或者改用 glob 参数直接写文件名模式。`
+        `Unknown type "${input.type}". Available: ${Object.keys(TYPE_GLOBS).join(', ')}. ` +
+          `Or use the glob parameter and write the filename pattern directly.`
       )
     }
 
     const st = await ctx.host.fs.stat(r.abs).catch(() => null)
-    if (st === null) return toolFail(`路径不存在:${relOf(ctx, r.abs)}`)
+    if (st === null) return toolFail(`Path does not exist: ${relOf(ctx, r.abs)}`)
     const base = relOf(ctx, r.abs)
 
     const nameFilterPattern = input.glob ?? (input.type === undefined ? undefined : TYPE_GLOBS[input.type])
@@ -439,7 +449,7 @@ export const grepTool: ToolRegistration = defineTool({
       if (++scanned % SIGNAL_EVERY === 0) {
         // ★ 中断要能在搜索途中生效。不查的话,停止按钮要等整个仓库搜完才有反应
         if (ctx.signal.aborted) break
-        ctx.emit({ callId: ctx.callId, message: `已搜 ${String(scanned)} 个文件` })
+        ctx.emit({ callId: ctx.callId, message: `Searched ${String(scanned)} files` })
       }
       if (ctx.host.clock.now() > budget) {
         budgetHit = true
@@ -455,7 +465,9 @@ export const grepTool: ToolRegistration = defineTool({
 
     const notes: string[] = []
     if (totalMatches >= MAX_GREP_MATCHES) {
-      notes.push(`命中数已达上限 ${String(MAX_GREP_MATCHES)},请把 pattern、glob 或 path 收窄再搜`)
+      notes.push(
+        `hit the ${String(MAX_GREP_MATCHES)} match cap; narrow the pattern, glob, or path and search again`
+      )
     }
     /*
       ★ 超时**必须说出来**。静默返回部分结果的话,模型会据此断言
@@ -467,14 +479,14 @@ export const grepTool: ToolRegistration = defineTool({
           `结果不完整。请用 path、glob 或 type 缩小范围再搜一次`
       )
     }
-    if (walkTruncated) notes.push('遍历量超限,可能还有没扫到的目录')
+    if (walkTruncated) notes.push('traversal limit reached; some directories were not scanned')
 
-    const tail = notes.length > 0 ? `\n\n[${notes.join(';')}]` : ''
+    const tail = notes.length > 0 ? `\n\n[${notes.join('; ')}]` : ''
 
     if (hits.length === 0) {
       return toolOk(
-        `在 ${base} 下的 ${String(files.length)} 个文件里没有匹配 "${input.pattern}" 的内容。` +
-          (notes.length > 0 ? `\n[${notes.join(';')}]` : '')
+        `No content matching "${input.pattern}" in the ${String(files.length)} files under ${base}.` +
+          (notes.length > 0 ? `\n[${notes.join('; ')}]` : '')
       )
     }
 
@@ -486,7 +498,7 @@ export const grepTool: ToolRegistration = defineTool({
       const shown = limit === undefined ? paths : paths.slice(0, limit)
       return toolOk(
         shown.join('\n') +
-          (shown.length < paths.length ? `\n[只显示前 ${String(shown.length)} 个文件]` : '') +
+          (shown.length < paths.length ? `\n[showing the first ${String(shown.length)} files]` : '') +
           tail
       )
     }
@@ -496,7 +508,7 @@ export const grepTool: ToolRegistration = defineTool({
       const shown = limit === undefined ? rows : rows.slice(0, limit)
       return toolOk(
         shown.join('\n') +
-          (shown.length < rows.length ? `\n[只显示前 ${String(shown.length)} 个文件]` : '') +
+          (shown.length < rows.length ? `\n[showing the first ${String(shown.length)} files]` : '') +
           tail
       )
     }
@@ -508,7 +520,7 @@ export const grepTool: ToolRegistration = defineTool({
     const shown = limit === undefined ? rendered : rendered.slice(0, limit)
     return toolOk(
       shown.join('\n') +
-        (shown.length < rendered.length ? `\n[只显示前 ${String(shown.length)} 行]` : '') +
+        (shown.length < rendered.length ? `\n[showing the first ${String(shown.length)} lines]` : '') +
         tail
     )
   }

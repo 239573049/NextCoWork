@@ -14,7 +14,7 @@ import type { InnerTab, InnerTabKind, InnerTabState, TabPane } from '../../../sh
 import { paneOf, reorderInPane, tabsInPane } from '../../../shared/domain/tab'
 import { ulid } from '../../../shared/util/id'
 import { getInnerTabs, persistInnerTabs } from '../services/app'
-import { releaseSession } from './session'
+import { isSessionUntouched, releaseSession } from './session'
 
 const EMPTY: InnerTabState = {
   tabs: [],
@@ -81,6 +81,19 @@ interface TabsState {
    * 要得到两个对话),所以去重不能塞进它里面。
    */
   openPath: (workspaceId: string, kind: InnerTabKind, path: string, title: string) => void
+  /**
+   * 侧边栏那颗「新建对话」走这条,**也不是 `open`**。
+   *
+   * 区别在于这两颗按钮问的是**不同的问题**:Tab 条上的 `+ 新建对话` 说的是
+   * 「再给我一个」(连点两次要得到两个,所以它必须走 `open`);侧边栏那颗说的是
+   * 「我要开始一段新对话」—— 手边已经摊着一张没写过字的白纸时,再抽一张出来
+   * 只会攒下一排一模一样的「新对话」,而用户以为自己什么也没做成。
+   *
+   * 所以:主区里已经有一个**没用过**的对话就切过去,没有才新建。
+   * 「没用过」的判据是 `isSessionUntouched`,和 `ChatView` 用来决定画不画
+   * 问候语那一屏的是同一个 —— 屏幕上是白纸的,这里就当白纸。
+   */
+  newChat: (workspaceId: string) => void
   activate: (workspaceId: string, tabId: string) => void
   close: (workspaceId: string, tabId: string) => void
   /** `from`/`to` 是**该格内**的下标,见 shared/domain/tab.ts 的 reorderInPane */
@@ -196,6 +209,29 @@ export const useTabsStore = create<TabsState>((set, get) => {
       }
       const tab = makeTab(kind, 'main', { path, title })
       write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, tab] }, 'main', tab.id))
+    },
+
+    newChat(workspaceId) {
+      const cur = get().stateOf(workspaceId)
+      const chats = tabsInPane(cur.tabs, 'main').filter(
+        (t): t is Extract<InnerTab, { kind: 'chat' }> => t.kind === 'chat'
+      )
+      /*
+        先看当前这一个 —— 已经站在一张白纸前时,这一下应该什么也不发生,
+        而不是切到另一张同样空白的纸上(那看着像点错了)。
+        否则取**最靠后**的那一个:`open` 是往后追加的,所以上一次「新建对话」
+        给出来的就是最后那一个。
+      */
+      const active = activeIn(cur, 'main')
+      const reusable =
+        chats.find((t) => t.id === active && isSessionUntouched(t.ref.sessionId)) ??
+        [...chats].reverse().find((t) => isSessionUntouched(t.ref.sessionId))
+
+      if (reusable === undefined) {
+        get().open(workspaceId, 'chat')
+        return
+      }
+      get().activate(workspaceId, reusable.id)
     },
 
     activate(workspaceId, tabId) {

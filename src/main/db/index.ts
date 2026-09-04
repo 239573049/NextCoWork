@@ -10,7 +10,7 @@
  * |---|---|
  * | 开库、WAL、`migrations` 表、`schema_version` | — |
  * | `settings` / `kv` / `workspaces` / `providers` / `model_aliases` / `credentials` | — |
- * | `model_pricing` / `usage_records`(下一条迁移,随定价库一起) | — |
+ * | `model_pricing` / `usage_records`(第 3 条迁移) | — |
  * | — | `conversations` / `messages` / `runs` / `messages_fts` + 三个触发器 |
  * | — | `sessions:*` 七条、`conversations:searchAll` |
  *

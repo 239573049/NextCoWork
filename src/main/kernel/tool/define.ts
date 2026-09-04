@@ -26,6 +26,13 @@ export interface ToolSpec<S extends z.ZodType> {
   readOnly: boolean
   /** 决定权限档位(§4.5 那张 5 行表的入参之一) */
   destructive: boolean
+  /**
+   * 这次调用本身会不会出网。**必填,不给默认值** —— 和 `readOnly` / `destructive`
+   * 一样,每个工具都得当面回答一次。给个 `?? false` 的默认值的话,
+   * 下一个联网工具的作者忘了写,它就悄悄绕过了用户的联网开关,
+   * 而这件事没有任何症状会暴露出来。
+   */
+  needsNetwork: boolean
   source?: ToolSource
   run(input: z.output<S>, ctx: ToolContext): Promise<ToolResult>
 }
@@ -53,12 +60,13 @@ export function defineTool<S extends z.ZodType>(spec: ToolSpec<S>): ToolRegistra
     inputSchema: toJsonSchema(spec.schema),
     readOnly: spec.readOnly,
     destructive: spec.destructive,
+    needsNetwork: spec.needsNetwork,
     source: spec.source ?? { kind: 'builtin' },
 
     async execute(input: unknown, ctx: ToolContext): Promise<ToolResult> {
       const parsed = spec.schema.safeParse(input)
       if (!parsed.success) {
-        return toolFail(`参数不合法 —— ${explain(parsed.error)}`)
+        return toolFail(`Invalid arguments — ${explain(parsed.error)}`)
       }
       try {
         return await spec.run(parsed.data, ctx)
@@ -66,7 +74,7 @@ export function defineTool<S extends z.ZodType>(spec: ToolSpec<S>): ToolRegistra
         // ★ 中断原样抛出,不伪装成工具失败
         if (isAbortError(err)) throw err
         const msg = err instanceof Error ? err.message : String(err)
-        return toolFail(`工具执行失败:${msg}`)
+        return toolFail(`Tool execution failed: ${msg}`)
       }
     }
   }

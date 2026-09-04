@@ -172,8 +172,33 @@ export function hslToHex({ h, s, l }: Hsl): string {
   else if (hh < 300) rgb = [x, 0, c]
   else rgb = [c, 0, x]
 
-  const hex = rgb.map((v) => Math.round((v + m) * 255).toString(16).padStart(2, '0')).join('')
+  const hex = rgb
+    .map((v) =>
+      Math.round((v + m) * 255)
+        .toString(16)
+        .padStart(2, '0')
+    )
+    .join('')
   return `#${hex}`
+}
+
+/**
+ * 任意字符串 → `#rrggbb`(小写),不认识给 `null`。
+ *
+ * ★ **`hexToHsl` 不校验输入**,这就是这个函数存在的理由:`Number.parseInt('zz', 16)`
+ * 是 `NaN`,一路走到 `hslToHex` 吐出来的是 `#NaNNaNNaN` —— 一个写进 CSS 变量
+ * 就让整套界面失色、却不会在任何一条日志里露面的值。
+ * 而「自定义」那个种子色**两条来路都不可信**:一条是从磁盘读回来的设置,
+ * 一条是用户在 hex 输入框里边打边变的半截字符串(`#3` 也会触发一次 onChange)。
+ *
+ * 收简写(`#abc`)和不带 `#` 的写法 —— 这两种是手打出来的常态,而下游拿到的
+ * 一律是规范形式,所以宽进严出在这里是安全的。
+ */
+export function normalizeHex(input: string): string | null {
+  const s = input.trim().replace(/^#/, '').toLowerCase()
+  const m = /^([0-9a-f]{3})$|^([0-9a-f]{6})$/.exec(s)
+  if (m === null) return null
+  return m[2] !== undefined ? `#${m[2]}` : `#${[...s].map((c) => c + c).join('')}`
 }
 
 /**
@@ -349,9 +374,7 @@ function relLuminance(hex: string): number {
     const c = v / 255
     return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
   }
-  return (
-    0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255)
-  )
+  return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255)
 }
 
 function contrastRatio(a: string, b: string): number {
@@ -407,7 +430,9 @@ function foregroundOn(accent: string, h: number): string {
   const nearBlack = hslToHex({ h, s: 28, l: fitLightness(h, 28, accent, FG_TARGET, 'darker', 9) })
   // 强调色本身是个中间调时两边都到不了 —— 那就退回「取更好的那个」,
   // 但这已经不是默认路径了。`specFromSeed` 里的强调色都是拟合过的,不会落在这儿。
-  return contrastRatio(nearBlack, accent) >= contrastRatio('#ffffff', accent) ? nearBlack : '#ffffff'
+  return contrastRatio(nearBlack, accent) >= contrastRatio('#ffffff', accent)
+    ? nearBlack
+    : '#ffffff'
 }
 
 /**
@@ -525,13 +550,44 @@ function identityOf(appearance: Appearance): ThemeSpec {
 
 export const DEFAULT_COLOR_THEME_ID = 'ink-green'
 export const RANDOM_COLOR_THEME_ID = 'random'
+export const CUSTOM_COLOR_THEME_ID = 'custom'
 
 /**
- * 六套,和界面上的六张卡一一对应。
+ * 第一次点开「自定义」时用的种子色。取参考实现深色那个亮绿 ——
+ * 于是从默认的「墨绿」切过去,界面**一帧都不跳**,用户先看到的是
+ * 「和刚才一样,但现在这颗色点是我的了」,而不是一次莫名其妙的换色。
+ */
+export const DEFAULT_CUSTOM_SEED = '#36d285'
+
+/**
+ * 设置里「颜色主题」那一栏存的三个字段。**类型归 theme.ts 所有** ——
+ * 认识 `seed` / `custom` 各归谁用的是 `resolveColorTheme`,不是设置层。
+ *
+ * `seed` 只有「随机」读,`custom` 只有「自定义」读;两个字段都必须落盘,
+ * 因为两套主题都是**由一个种子现算**的,不落盘就回不到用户挑中的那一套。
+ */
+export interface ColorThemeChoice {
+  id: string
+  seed: number
+  custom: string
+}
+
+/**
+ * 函数侧只有 `id` 是必须的 —— 调用点不必为一个这套主题根本不读的字段
+ * 编一个数出来(`tokensOf('dark', { id: 'minimal' }, null)` 就够了)。
+ */
+export type ColorThemeChoiceLike = Pick<ColorThemeChoice, 'id'> & Partial<ColorThemeChoice>
+
+/**
+ * 七套,和界面上的七张卡一一对应。
+ *
+ * ★ **头尾两套在这张表里只是占位声明** —— 「随机」按种子、「自定义」按用户挑的
+ *   那个色,真正的色板都由 `resolveColorTheme` 现算(见那里)。表里仍然要有它们,
+ *   因为名字、描述、以及「界面上一共有几张卡」这三件事只该写一遍。
  *
  * ★ **「墨绿」两个外观都是采样数据的原样出口** —— 新版参考实现深浅两套都是绿,
  *   所以 `BASE.light` / `BASE.dark` 的恒等声明现在归同一套主题。
- *   其余五套全是推出来的。
+ *   中间那四套全是推出来的。
  *
  * ★ **「Claude」由此从「原样出口」降级成一套保留色板。** 它曾经是深色的恒等声明
  *   (参考实现 v1.1.15 是暖橙),那一版的量测已经作废,但那套橙本身还是好看的,
@@ -653,29 +709,56 @@ export const COLOR_THEMES: readonly ColorTheme[] = [
       accentFg: '#1c1c1c',
       accentSoft: '#8c8c8c'
     }
+  },
+  {
+    id: CUSTOM_COLOR_THEME_ID,
+    name: '自定义',
+    description: '自己挑一个强调色,整套界面按它重新配色 —— 和图片主题走的是同一条派生',
+    // 占位:实际声明由 `resolveColorTheme` 按 `custom` 现算,见那里的注释
+    light: specFromSeed(DEFAULT_CUSTOM_SEED, 'light'),
+    dark: specFromSeed(DEFAULT_CUSTOM_SEED, 'dark')
   }
 ]
 
 /**
- * id + 种子 → 主题。
+ * 「随机」和「自定义」共用的现算路径:一个种子色 → 一整套声明。
  *
- * 「随机」是**种子的纯函数**,不是一个每次调用都变的东西 ——
- * 否则每次重渲染界面都换一次色,而且重启之后回不到原来那套。
- * 重掷 = 换一个种子存进设置,不是在这里摇骰子。
+ * 名字和描述从表里取,不在这儿再写一遍 —— 界面上那张卡和这里给出来的
+ * 必须是同一句话,而抄两份的那一份迟早会忘了跟着改。
  */
-export function resolveColorTheme(id: string, seed: number): ColorTheme {
-  if (id === RANDOM_COLOR_THEME_ID) {
-    const c = randomSeedColor(seed)
-    return {
-      id: RANDOM_COLOR_THEME_ID,
-      name: '随机',
-      description: '每次点击重掷一次色相,掷出来的那个会被记住',
-      light: specFromSeed(c, 'light'),
-      dark: specFromSeed(c, 'dark')
-    }
+function derivedTheme(id: string, seed: string): ColorTheme {
+  const decl = COLOR_THEMES.find((t) => t.id === id)
+  return {
+    id,
+    name: decl?.name ?? id,
+    description: decl?.description ?? '',
+    light: specFromSeed(seed, 'light'),
+    dark: specFromSeed(seed, 'dark')
+  }
+}
+
+/**
+ * 设置里那一栏 → 主题。
+ *
+ * 「随机」与「自定义」都是**种子的纯函数**,不是每次调用都变的东西 ——
+ * 否则每次重渲染界面都换一次色,而且重启之后回不到原来那套。
+ * 重掷 = 换一个 `seed` 存进设置,挑色 = 换一个 `custom`,都不是在这里摇骰子。
+ *
+ * ★ `custom` 先过 `normalizeHex`:它是从磁盘读回来的,也可能是用户还没打完的
+ *   半截 hex。不过这一关,`specFromSeed` 会把 `NaN` 一路带进 22 个 token。
+ */
+export function resolveColorTheme(choice: ColorThemeChoiceLike): ColorTheme {
+  if (choice.id === RANDOM_COLOR_THEME_ID) {
+    return derivedTheme(RANDOM_COLOR_THEME_ID, randomSeedColor(choice.seed ?? 0))
+  }
+  if (choice.id === CUSTOM_COLOR_THEME_ID) {
+    return derivedTheme(
+      CUSTOM_COLOR_THEME_ID,
+      normalizeHex(choice.custom ?? '') ?? DEFAULT_CUSTOM_SEED
+    )
   }
   return (
-    COLOR_THEMES.find((t) => t.id === id) ??
+    COLOR_THEMES.find((t) => t.id === choice.id) ??
     // 落回默认而不是抛:id 来自设置,而设置将来会从磁盘读回来,
     // 降级安装 / 手改配置都可能留下一个不认识的 id
     COLOR_THEMES.find((t) => t.id === DEFAULT_COLOR_THEME_ID) ??
@@ -699,6 +782,15 @@ export interface ImageTheme {
   source: { kind: 'builtin'; css: string } | { kind: 'uploaded'; assetId: string }
   /** 主色。整套 token 由它经 `specFromSeed` 派生 */
   seed: string
+  /**
+   * 卡片上那几颗色点。**只有上传的那种需要存它** —— 内置的是渐变配方,
+   * 配方里的色标本身就是这张图的颜色(见 `paletteOf`)。
+   *
+   * 导入时由 `extractPalette` 算一次写在这里,之后就不再需要位图了 ——
+   * 和 `seed` 同一个道理:文件被挪走、主进程还没把字节递过来的那几帧,
+   * 色点照样画得出来。
+   */
+  palette?: readonly string[]
 }
 
 export const IMAGE_THEMES: readonly ImageTheme[] = [
@@ -775,6 +867,25 @@ export function resolveImageTheme(
   return IMAGE_THEMES.find((t) => t.id === id) ?? uploaded.find((t) => t.id === id) ?? null
 }
 
+/**
+ * 卡片上那一排色点。
+ *
+ * ★ **内置那六张的颜色不另存一份。** 渐变配方里的色标就是这张图的颜色,
+ * 存两份必然有一份会忘了跟着改 —— 而「色点和卡片对不上」这种错没人会报警。
+ * 上传的那种没有配方,取的是导入时算好的 `palette`。
+ *
+ * 兜底成种子色而不是空数组:配方里一个色标都读不出来时(比如哪天换成
+ * `image-set()`),画一颗总比画一排空白强。
+ */
+export function paletteOf(theme: ImageTheme): string[] {
+  const raw =
+    theme.source.kind === 'builtin'
+      ? (theme.source.css.match(/#[0-9a-f]{6}/gi) ?? []).map((h) => h.toLowerCase())
+      : (theme.palette ?? [])
+  const uniq = [...new Set(raw)]
+  return uniq.length > 0 ? uniq : [theme.seed]
+}
+
 // ─────────────────────────── 从图片里取色 ───────────────────────────
 
 /**
@@ -827,9 +938,7 @@ export function extractPalette(rgba: Uint8ClampedArray, count = 4): string[] {
     const chroma = max - min
     if (chroma < 24 || l < 12 || l > 92) continue
 
-    const hsl = hexToHsl(
-      `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`
-    )
+    const hsl = hexToHsl(`#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`)
     const bucket = buckets[Math.floor(wrapHue(hsl.h) / (360 / BUCKETS)) % BUCKETS]
     if (!bucket) continue
 
@@ -873,13 +982,12 @@ export function extractPalette(rgba: Uint8ClampedArray, count = 4): string[] {
  */
 export function tokensOf(
   appearance: Appearance,
-  colorThemeId: string,
-  seed: number,
+  color: ColorThemeChoiceLike,
   image: { seed: string } | null
 ): ThemeTokens {
   const base = BASE[appearance]
   if (image) return retint(base, specFromSeed(image.seed, appearance))
-  return retint(base, resolveColorTheme(colorThemeId, seed)[appearance])
+  return retint(base, resolveColorTheme(color)[appearance])
 }
 
 /** 界面上那颗色点 / 那个色环。 */

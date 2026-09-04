@@ -94,13 +94,16 @@ const ENDPOINT_SUFFIXES: readonly string[] = [
  * `https://generativelanguage.googleapis.com/v1beta/openai/`,所以这里**不削**它 ——
  * 用户从 Google 文档里抄来什么,失焦后还是什么,不会觉得表单把地址改坏了。
  *
- * ⚠️ **但要说清楚:保住尾斜杠并不能让 Gemini 真的通。**
- * 「剥掉尾斜杠会 404」那条说的是 OpenAI **SDK** 的 urljoin 语义,而
- * `joinUpstreamUrl` 是字符串拼接,尾斜杠对它没有任何影响。Gemini 真正的问题是
- * 路径:兼容层的端点是 `/v1beta/openai/chat/completions`,而我们会拼出
- * `/v1beta/openai/v1/chat/completions` —— **多一段 `/v1`**。
- * 修在 `joinUpstreamUrl`(步骤 4,和 OpenAI 编解码一起),不是修在这里。
- * 在那之前 Gemini 预设应当标 `verification: 'unverified'`。
+ * ⚠️ **保住尾斜杠这件事本身,对我们的拼接没有任何影响。**
+ * 「剥掉尾斜杠会 404」那条说的是 OpenAI **SDK** 的 urljoin 语义;
+ * `joinUpstreamUrl` 是字符串拼接,尾不尾斜杠拼出来一样。所以这一条例外
+ * 买到的只有一样东西 —— **用户从 Google 文档里抄来什么,失焦后还是什么**。
+ * 它是个体验决定,不是正确性修复,别把它当成 Gemini 能通的理由。
+ *
+ * Gemini 真正会 404 的那处**已经修好了**:曾经 `REQUEST_PATH` 把版本段写进
+ * path,于是这里会拼出 `/v1beta/openai/v1/chat/completions`(多一段 `/v1`)。
+ * 后来发现那不是 Gemini 一家的例外,而是整个 OpenAI 族的约定被写反了 ——
+ * 见 `REQUEST_PATH` 上面那张各家前缀表。
  */
 const KEEPS_TRAILING_SLASH = /\/v1beta\/openai\/?$/
 
@@ -185,7 +188,8 @@ export function baseUrlWarnings(baseUrl: string, protocol: UpstreamProtocol): Ba
     })
   }
 
-  let url: URL | null = null
+  // 形状同 `normalizeBaseUrl`:catch 直接 return,所以不需要 `| null` 的初值
+  let url: URL
   try {
     url = new URL(base)
   } catch {

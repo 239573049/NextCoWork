@@ -35,7 +35,13 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   defaultModel: '',
   defaultMode: 'normal',
   defaultThinking: 'auto',
-  webSearch: false,
+  /*
+    ★ 出厂就开。`WebFetch` 受这个开关管(见 `kernel/permission-gate.ts` 那张表的
+    第 1 行:关掉时连只读的联网工具也一律拒),默认 false 的话新用户装完的第一感受
+    是「让它查个文档它说不让上网」,而没有任何地方提示开关在哪。
+    这不是把权限放宽 —— 用户随时能关,而关掉的效果是硬拒,不是「问一下」。
+  */
+  webSearch: true,
   activeSkillIds: []
 }
 

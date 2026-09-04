@@ -14,7 +14,9 @@
  * 原样跑过。
  */
 import type { AgentMessage } from '../../shared/agent/message'
+import type { McpServerConfig } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
+import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
 import type { Workspace } from '../../shared/domain/workspace'
@@ -31,6 +33,9 @@ import * as repo from '../db/repo'
  * 内存无上限,这是它是临时实现的一部分。
  */
 const transcripts = new Map<string, AgentMessage[]>()
+
+/** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
+const DISABLED_SKILLS_KEY = 'skills.disabled'
 
 export const store = {
   // ── settings ──
@@ -95,12 +100,71 @@ export const store = {
     repo.removeAlias(providerId, alias)
   },
 
+  // ── MCP 服务器(设置 › 连接 › MCP) ──
+  /**
+   * 顺序按 id,没有语义 —— 但要稳定。理由在 `repo.listMcpServers`。
+   *
+   * ★ 这里出去的是**配置**,不带运行时状态。状态在 `McpManager` 手里
+   * (`main/mcp/manager.ts`),两者由 `ipc/mcp.ts` 合成 `McpServerStatus` 再下发。
+   * 让这一层去问 manager 会把「持久化」和「进程内运行时」拧在一起,
+   * 而 manager 的生命周期比数据库短得多。
+   */
+  listMcpServers(): McpServerConfig[] {
+    return repo.listMcpServers()
+  },
+  getMcpServer(id: string): McpServerConfig | undefined {
+    return repo.getMcpServer(id)
+  },
+  putMcpServer(c: McpServerConfig): McpServerConfig {
+    return repo.putMcpServer(c)
+  },
+  /** 配置连密钥一起删,在一个事务里 —— 理由在 `repo.removeMcpServer` */
+  removeMcpServer(id: string): void {
+    repo.removeMcpServer(id)
+  },
+
+  // ── 搜索服务(设置 › 连接 › 搜索服务) ──
+  /** ★ 返回目录表里的八家**全部**,不只是库里存过的那几行(见 repo) */
+  listSearchProviders(): SearchProviderConfig[] {
+    return repo.listSearchProviders()
+  },
+  putSearchProvider(c: SearchProviderConfig): SearchProviderConfig {
+    return repo.putSearchProvider(c)
+  },
+  /** 拖拽排序:整批写、一个事务。半新半旧的 priority 会让「先试哪家」不确定 */
+  putSearchProviders(list: readonly SearchProviderConfig[]): void {
+    repo.putSearchProviders(list)
+  },
+  clearSearchCredential(id: SearchProviderId): void {
+    repo.clearSearchCredential(id)
+  },
+
   // ── kv(窗口/Tab 布局等易失 UI 状态) ──
   getKv<T>(key: string, fallback: T): T {
     return repo.getKv(key, fallback)
   },
   setKv(key: string, value: unknown): void {
     repo.setKv(key, value)
+  },
+
+  // ── Skill 的全局开关 ──
+  /**
+   * ★ 存的是**关掉的那些**,不是打开的那些。
+   *
+   * 存「打开的」的话,用户新装一条 Skill 之后它默认不在列表里 ——
+   * 表现是「装了但没反应」,而界面上那个开关看起来是开着的。
+   * 存「关掉的」则相反:没被点过的一律有效,这也和
+   * `SkillRegistry.resolve()` 里「空清单 = 全都要」是同一个取向。
+   */
+  getDisabledSkillIds(): string[] {
+    const raw = repo.getKv<unknown>(DISABLED_SKILLS_KEY, [])
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+  },
+  setSkillGlobalEnabled(skillId: string, enabled: boolean): void {
+    const now = new Set(store.getDisabledSkillIds())
+    if (enabled) now.delete(skillId)
+    else now.add(skillId)
+    repo.setKv(DISABLED_SKILLS_KEY, [...now])
   },
 
   // ── 会话转录(步骤 6 迁到 messages 表) ──

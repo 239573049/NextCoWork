@@ -34,7 +34,7 @@ export function applyTheme(
   root.dataset['theme'] = appearance
 
   const image = resolveImageTheme(settings.imageTheme.id, uploaded)
-  const tokens = tokensOf(appearance, settings.colorTheme.id, settings.colorTheme.seed, image)
+  const tokens = tokensOf(appearance, settings.colorTheme, image)
 
   // 22 个全写一遍,不做差量:上一次写的值总会被这一次盖掉,
   // 也就不存在「换主题之后还剩一个旧色」这种半截状态。

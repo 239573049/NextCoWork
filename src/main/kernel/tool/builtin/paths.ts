@@ -19,7 +19,8 @@ import type { ToolContext } from '../registry'
  * 然后把文件写进一个谁也不会去看的地方,并报告「已完成」。
  */
 export const NO_WORKSPACE =
-  '当前会话没有绑定工作区,文件类工具不可用。请让用户先打开一个工作区目录,再重试这一步。'
+  'This session has no workspace bound, so file tools are unavailable. Ask the user to open a workspace ' +
+  'directory first, then retry this step.'
 
 export type Resolved = { ok: true; abs: string } | { ok: false; result: ToolResult }
 
@@ -38,15 +39,15 @@ export function resolvePath(ctx: ToolContext, p: string): Resolved {
       return {
         ok: false,
         result: toolFail(
-          `路径 "${p}" 越出了工作区。文件工具只能访问工作区目录内部的文件。` +
-            `请改用工作区相对路径(例如 src/main/index.ts)。`
+          `The path "${p}" is outside the workspace. File tools can only reach files inside the workspace ` +
+            `directory. Use a workspace-relative path instead, e.g. src/main/index.ts.`
         )
       }
     }
     // 根本身不存在(工作区被删了/改名了)。这是环境问题,不是模型的错。
     return {
       ok: false,
-      result: toolFail(`无法解析路径 "${p}":${err instanceof Error ? err.message : String(err)}`)
+      result: toolFail(`Could not resolve the path "${p}": ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 }

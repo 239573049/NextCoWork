@@ -1,28 +1,35 @@
+import markUrl from '../../assets/mark.png'
+
 /**
  * NextCoWork 的标识。
  *
- * ⚠️ 参考截图里那个「M」是 **NewMax 自己的商标**(关于页 bc870493 证实),不能用。
- * 这里是一个占位:一笔连写的 N,方头圆角,和界面同一种几何语言。
- * 真正的品牌图形应当由你来定 —— 换掉这一个文件即可,其它地方只 import `<Mark />`。
+ * 图形来自 `nextcowork-symbol-transparent-v5.png`(透明底的符号)。
+ * 这里不直接 `<img>` —— 那是一张固定炭灰色的图,贴到深色侧边栏会看不见。
+ * 改用它的 alpha 通道做 CSS mask,让符号取 `currentColor`:
+ * 形状是新符号,颜色跟随主题(深色→浅前景,浅色→深前景),两个主题都成立。
+ *
+ * 想换品牌图形?换掉 assets/mark.png 即可,其它地方只 import `<Mark />`。
  */
 export function Mark({ size = 26, className }: { size?: number; className?: string }): React.ReactNode {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      className={className}
+    <span
       role="img"
       aria-label="NextCoWork"
-    >
-      <path
-        d="M4.5 19.5V5.2c0-.5.6-.7.9-.3L18.6 19c.3.4.9.2.9-.3V4.5"
-        stroke="currentColor"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+      className={className}
+      style={{
+        display: 'inline-block',
+        width: size,
+        height: size,
+        backgroundColor: 'currentColor',
+        WebkitMaskImage: `url(${markUrl})`,
+        maskImage: `url(${markUrl})`,
+        WebkitMaskSize: 'contain',
+        maskSize: 'contain',
+        WebkitMaskRepeat: 'no-repeat',
+        maskRepeat: 'no-repeat',
+        WebkitMaskPosition: 'center',
+        maskPosition: 'center'
+      }}
+    />
   )
 }

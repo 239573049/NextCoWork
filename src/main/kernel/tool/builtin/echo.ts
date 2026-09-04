@@ -15,9 +15,9 @@ import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
 
 const EchoInput = z.object({
-  text: z.string().describe('要回显的文本'),
+  text: z.string().describe('The text to echo back'),
   /** 用来验证中断真的穿透到了工具体内 —— 没有这个参数就没法测中断路径 */
-  delayMs: z.number().int().min(0).max(60_000).optional().describe('回显前等待的毫秒数,默认 0')
+  delayMs: z.number().int().min(0).max(60_000).optional().describe('Milliseconds to wait before echoing. Defaults to 0')
 })
 
 /** 可中断的 sleep。工具里所有的等待都必须长这样,否则 abort 会留下僵尸。 */
@@ -38,10 +38,11 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 export const echoTool: ToolRegistration = defineTool({
   internalId: 'echo',
-  description: '原样返回传入的文本。用于验证工具调用链路是否正常。',
+  description: 'Returns the text you pass in, unchanged. Used to verify that the tool-call path works.',
   schema: EchoInput,
   readOnly: true,
   destructive: false,
+  needsNetwork: false,
   async run(input, ctx) {
     if (input.delayMs !== undefined && input.delayMs > 0) {
       ctx.emit({ callId: ctx.callId, message: `等待 ${input.delayMs}ms` })

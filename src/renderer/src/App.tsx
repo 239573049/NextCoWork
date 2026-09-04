@@ -18,6 +18,7 @@ import { announceReady, getBootstrap } from './services/app'
 import { on } from './services/ipc'
 import { AppShell } from './shell/AppShell'
 import { startAgentEventPump, adoptActiveRuns, useRunIndex } from './stores/session'
+import { useImageThemes } from './stores/imageTheme'
 import { useWindowStore } from './stores/window'
 import { applyTheme } from './theme/apply'
 
@@ -66,10 +67,26 @@ export default function App(): React.JSX.Element {
    *
    * 两个都还没到的那几帧,界面用的是 `theme.css` 里写死的墨绿 —— 首屏就是对的。
    */
+  /**
+   * 上传的图片主题。**它和上面两路是第三个来源** —— 选中的那张如果是上传的,
+   * 它的 seed 才是整套 token 的出处,所以 `uploaded` 到达之前 `resolveImageTheme`
+   * 查不到这个 id,界面会先按颜色主题画一帧,拿到表之后再落一次。
+   *
+   * 只兑现**选中的那一张**的 blob URL(理由在 store 的文件头);其余的等设置页
+   * 挂载时再说。传内置 id 或 null 进去就只拉表,不发多余的读文件请求。
+   */
+  const uploadedThemes = useImageThemes((s) => s.uploaded)
+  const themeAssetUrls = useImageThemes((s) => s.urls)
+  const selectedImageId = settings?.imageTheme.id ?? null
+
+  useEffect(() => {
+    void useImageThemes.getState().load(selectedImageId)
+  }, [selectedImageId])
+
   useEffect(() => {
     if (appearance === null || settings === null) return
-    applyTheme(document.documentElement, appearance, settings)
-  }, [appearance, settings])
+    applyTheme(document.documentElement, appearance, settings, uploadedThemes, themeAssetUrls)
+  }, [appearance, settings, uploadedThemes, themeAssetUrls])
 
   // 运行中角标的数据源是 RunRegistry 的投影,不是任何 UI 状态(方案 §8)
   const runIndex = useRunIndex()

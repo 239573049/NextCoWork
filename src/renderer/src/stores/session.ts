@@ -13,7 +13,12 @@
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
-import { applyEvents, emptyTranscript, type TranscriptState } from '../../../shared/agent/transcript'
+import {
+  applyEvents,
+  emptyTranscript,
+  hasRun,
+  type TranscriptState
+} from '../../../shared/agent/transcript'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
@@ -210,6 +215,30 @@ export function sessionStore(sessionId: string): SessionStore {
 export function releaseSession(sessionId: string): boolean {
   for (const r of runIndex.values()) if (r.sessionId === sessionId) return false
   return stores.delete(sessionId)
+}
+
+/**
+ * 这个会话有没有被用过 —— 「点侧边栏的『新建对话』时能不能重用现成的那一个」的判据。
+ *
+ * ★ **不能拿 `sessionStore(id)` 来问。** 那个函数是懒创建的,用它探测会把每个
+ * chat Tab 的 store 都建出来,正好把本文件开头第 2 条(懒创建、关工作区时销毁)
+ * 反过来变成「开过的会话全都常驻」。所以这里直接查注册表:**查不到就是没碰过**。
+ *
+ * 判据用的是 `ChatView` 决定画哪一屏的那个 `hasRun` —— 于是「屏幕上显示着问候语
+ * 的那些对话」和「这里认为可以重用的那些」是同一批,两边不会各说各话。
+ *
+ * 草稿和排队中的输入另算:输入框里躺着半句话的会话不算空,用户这时候点
+ * 「新建对话」要的是干净的一屏,而不是回到自己刚才写了一半的地方。
+ */
+export function isSessionUntouched(sessionId: string): boolean {
+  const store = stores.get(sessionId)
+  if (store === undefined) return true
+  const s = store.getState()
+  return (
+    !hasRun(s.transcript, s.activeRunId !== null) &&
+    s.draft.trim() === '' &&
+    s.queuedInputs.length === 0
+  )
 }
 
 /**

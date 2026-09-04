@@ -223,6 +223,25 @@ export class RunRegistry {
     return [...this.runs.values()].filter((r) => r.status === 'running').map((r) => r.runId)
   }
 
+  /**
+   * 某个 run 名下**还在跑**的子 run。
+   *
+   * ★ 数的是「还在跑的」,不是 `handle.children.size` —— 后者是**累计**的
+   * (`children` 只加不减),用它当并发闸门的话,一次 run 里派满 N 个子代理之后
+   * 就再也派不出第五个了,哪怕它们早就全部结束。
+   */
+  activeChildrenOf(runId: string): RunHandle[] {
+    const parent = this.runs.get(runId)
+    if (!parent) return []
+    return [...parent.children]
+      .map((id) => this.runs.get(id))
+      .filter((h): h is RunHandle => h !== undefined && h.status === 'running')
+  }
+
+  activeChildCount(runId: string): number {
+    return this.activeChildrenOf(runId).length
+  }
+
   /** 级联中断(方案 §4.8 第 5 件):父 run 停,子 run 一起停 */
   abort(runId: string, cascade: boolean, reason: AbortReason = { by: 'user' }): void {
     const handle = this.runs.get(runId)

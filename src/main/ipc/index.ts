@@ -22,10 +22,35 @@ import { INVOKE_CHANNELS, SEND_CHANNELS } from '../../shared/ipc/contract'
 import { EMPTY_INNER, EMPTY_OUTER, innerTabKey, outerTabKey, store } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
 import { getBootstrap, openExternal, registerThemeBridge } from './app'
-import { abortRun, attachRun, startRun } from './agent'
+import { abortRun, attachRun, startChildRun, startRun } from './agent'
+import { installChildRunLauncher } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import { listModels, listProviders } from './provider'
+import {
+  getMcpSecretsInfo,
+  listMcpServers,
+  registerMcpBridge,
+  removeMcpServer,
+  setMcpSecrets,
+  testMcpConnection,
+  upsertMcpServer
+} from './mcp'
 import { getSettings, updateSettings } from './settings'
+import {
+  clearSearchCredential,
+  listSearchProviders,
+  reorderSearchProviders,
+  setSearchCredential,
+  setSearchEnabled,
+  testSearchProvider
+} from './websearch'
+import {
+  clearProxyPassword,
+  getProxyPasswordInfo,
+  setProxyPassword
+} from '../net/proxy'
+import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
+import { deleteImage, importImage, listImages, readImage, saveImage, sweepOrphans } from './theme'
 import { closeWorkspace, listDir, listWorkspaces, pickWorkspace, updateWorkspace } from './workspace'
 
 type Handler<K extends InvokeChannel> = (
@@ -60,6 +85,11 @@ const handlers: HandlerMap = {
   'app:openExternal': ({ url }) => openExternal(url),
   'settings:get': () => getSettings(),
   'settings:update': (patch) => updateSettings(patch),
+  'theme:importImage': () => importImage(),
+  'theme:saveImage': (req) => saveImage(req),
+  'theme:listImages': () => listImages(),
+  'theme:readImage': (req) => readImage(req),
+  'theme:deleteImage': (req) => deleteImage(req),
   'workspace:list': () => listWorkspaces(),
   'workspace:pick': () => pickWorkspace(),
   'workspace:update': (req) => updateWorkspace(req),
@@ -94,15 +124,30 @@ const handlers: HandlerMap = {
   'terminal:getBuffer': todo('terminal:getBuffer', '步骤 8'),
 
   // ── 步骤 10:MCP ──
-  'mcp:list': todo('mcp:list', '步骤 10'),
-  'mcp:upsert': todo('mcp:upsert', '步骤 10'),
-  'mcp:remove': todo('mcp:remove', '步骤 10'),
-  'mcp:testConnection': todo('mcp:testConnection', '步骤 10'),
+  'mcp:list': () => listMcpServers(),
+  'mcp:upsert': (cfg) => upsertMcpServer(cfg),
+  'mcp:remove': ({ id }) => removeMcpServer(id),
+  'mcp:testConnection': ({ id }) => testMcpConnection(id),
+  'mcp:setSecrets': ({ id, values }) => setMcpSecrets(id, values),
+  'mcp:getSecretsInfo': ({ id }) => getMcpSecretsInfo(id),
 
-  // ── 步骤 12:Skill ──
-  'skills:list': todo('skills:list', '步骤 12'),
-  'skills:setGlobalEnabled': todo('skills:setGlobalEnabled', '步骤 12'),
-  'skills:setWorkspaceActive': todo('skills:setWorkspaceActive', '步骤 12'),
+  // ── 搜索服务 ──
+  'websearch:list': () => listSearchProviders(),
+  'websearch:setEnabled': ({ id, enabled }) => setSearchEnabled(id, enabled),
+  'websearch:reorder': ({ ids }) => reorderSearchProviders(ids),
+  'websearch:setCredential': ({ id, apiKey }) => setSearchCredential(id, apiKey),
+  'websearch:clearCredential': ({ id }) => clearSearchCredential(id),
+  'websearch:test': ({ id }) => testSearchProvider(id),
+
+  // ── 网络代理 ──
+  'proxy:setPassword': ({ password }) => setProxyPassword(password),
+  'proxy:clearPassword': () => clearProxyPassword(),
+  'proxy:getPasswordInfo': () => getProxyPasswordInfo(),
+
+  // ── Skill(渐进披露:提示词里只有目录,正文经 `Skill` 工具取)──
+  'skills:list': (req) => listSkills(req),
+  'skills:setGlobalEnabled': (req) => setSkillGlobalEnabled(req),
+  'skills:setWorkspaceActive': (req) => setSkillWorkspaceActive(req),
 
   // ── 步骤 4 / 13:上游与网关 ──
   // 只读两条已实现:它们是输入框那颗模型选择器的唯一数据源(见 ipc/provider.ts)
@@ -210,6 +255,18 @@ export function registerIpc(): void {
   }
 
   registerThemeBridge()
+  registerMcpBridge()
+  /*
+    ★ 子 run 的启动器。方向是 **ipc 依赖 runtime,runtime 永不依赖 ipc** ——
+    反过来写会把 electron 拖进 runtime 的 import 图,`agent-run.test.ts`
+    那条无头链路当场就断(见 runtime.ts 文件头)。和 `registerMcpBridge`
+    里那次 `setMcpChangeListener` 是同一种接线。
+  */
+  installChildRunLauncher(startChildRun)
+
+  // 扫掉两相导入中途放弃留下的孤儿图片。放在这里是因为**此刻 pending 必然是空的**,
+  // 所以「不在索引里」就等于「没人要」—— 换成运行期任何一个时刻都不成立。
+  sweepOrphans()
 }
 
 export { EMPTY_OUTER }

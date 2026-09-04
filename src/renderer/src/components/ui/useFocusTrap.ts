@@ -7,7 +7,10 @@ import { useEffect, type RefObject } from 'react'
  * (桌面应用上这看着就是坏了);关掉之后焦点掉在 body 上,再按 Tab 会从
  * 侧边栏第一项重新开始。
  *
- * 单独成文件而不是写进 `SettingsOverlay`:步骤 5 的权限审批弹窗要用同一套。
+ * 单独成文件而不是写进 `SettingsOverlay`:`Dialog.tsx`(添加 MCP 服务器那个弹窗)
+ * 已经在用同一套,步骤 5 的权限审批弹窗也要用。它因此从 `settings/` 搬到了
+ * `components/ui/` —— 住在 settings 里的东西被 components 反向 import,
+ * 下一个人会以为那是个疏漏。
  */
 const FOCUSABLE = [
   'a[href]',

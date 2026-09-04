@@ -48,14 +48,46 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
     ]
   },
   { id: 'preference', label: '偏好' },
-  { id: 'model', label: '模型' },
+  {
+    id: 'model',
+    label: '模型',
+    /**
+     * ★ 六个 Tab **不是六种能力**,是「照参考图铺满 + 诚实标注哪几个是空的」——
+     * 本轮只有 `text` 真能用(范围决策:六个全铺,只有文本真能用)。
+     *
+     * 前五个 id 和 `shared/domain/pricing.ts` 的 `Modality` **逐字相同**,
+     * 而 `usage` 刻意**不在** `Modality` 里 —— 它是另一种视图,不是一种模态
+     * (那边的注释写了理由:混进去会让「按模态过滤定价表」到处特判它)。
+     * 两处对不上就是静默筛出空表,所以 `pages/model/tabs.ts` 的测试守着这条。
+     */
+    subs: [
+      { id: 'text', label: '文本生成' },
+      { id: 'image', label: '图像生成' },
+      { id: 'video', label: '视频生成' },
+      { id: 'speech', label: '语音生成' },
+      { id: 'transcription', label: '语音识别' },
+      { id: 'usage', label: '使用统计' }
+    ]
+  },
   { id: 'review', label: '每日回顾' },
   {
     id: 'connection',
     label: '连接',
+    /**
+     * ★ **七项照参考图铺,顺序也照抄** —— 其中只有 MCP / 搜索服务 / 网络
+     * 三项背后有真运行时(方案的步骤 10、以及本轮新接的搜索与代理)。
+     * 开放网关的 HTTP 壳是步骤 13,那一页照实标注「未监听」;
+     * 连接器 / 插件 / 机器人对话在方案里**没有对应子系统**,三页各一句直说,
+     * 不编占位数据 —— 同 `StubPage.tsx` 的规矩。
+     */
     subs: [
+      { id: 'connector', label: '连接器' },
+      { id: 'mcp', label: 'MCP' },
+      { id: 'plugin', label: '插件' },
+      { id: 'search', label: '搜索服务' },
+      { id: 'bot', label: '机器人对话' },
       { id: 'gateway', label: '开放网关' },
-      { id: 'proxy', label: '代理' }
+      { id: 'network', label: '网络' }
     ]
   },
   { id: 'computer', label: '电脑操作' },
@@ -89,27 +121,129 @@ export interface SettingsRow {
 export const SETTINGS_INDEX: readonly SettingsRow[] = [
   // ── 通用 ──
   { page: 'general', sub: 'app', title: '界面语言', keywords: ['language', 'locale', '语言'] },
-  { page: 'general', sub: 'app', title: '任务完成提示音', keywords: ['notification', 'sound', '通知'] },
-  { page: 'general', sub: 'app', title: '权限审批提示音', keywords: ['notification', 'sound', '通知'] },
-  { page: 'general', sub: 'app', title: '计划审批提示音', keywords: ['notification', 'sound', '通知'] },
-  { page: 'general', sub: 'agent', title: '默认权限档位', keywords: ['permission', '审批', '权限'] },
-  { page: 'general', sub: 'task', title: '单对话子代理上限', keywords: ['subagent', '子代理', '并发'] },
-  { page: 'general', sub: 'task', title: '子代理并发上限', keywords: ['subagent', '子代理', '并发'] },
+  {
+    page: 'general',
+    sub: 'app',
+    title: '任务完成提示音',
+    keywords: ['notification', 'sound', '通知']
+  },
+  {
+    page: 'general',
+    sub: 'app',
+    title: '权限审批提示音',
+    keywords: ['notification', 'sound', '通知']
+  },
+  {
+    page: 'general',
+    sub: 'app',
+    title: '计划审批提示音',
+    keywords: ['notification', 'sound', '通知']
+  },
+  {
+    page: 'general',
+    sub: 'agent',
+    title: '默认权限档位',
+    keywords: ['permission', '审批', '权限']
+  },
+  {
+    page: 'general',
+    sub: 'task',
+    title: '单对话子代理上限',
+    keywords: ['subagent', '子代理', '并发']
+  },
+  {
+    page: 'general',
+    sub: 'task',
+    title: '子代理并发上限',
+    keywords: ['subagent', '子代理', '并发']
+  },
 
   // ── 偏好 ──
-  { page: 'preference', title: '主题', keywords: ['theme', 'dark', 'light', '深色', '浅色'] },
+  {
+    page: 'preference',
+    title: '外观模式',
+    keywords: ['theme', 'dark', 'light', '深色', '浅色', '主题']
+  },
+  {
+    page: 'preference',
+    title: '图片主题',
+    keywords: ['image', 'wallpaper', 'theme', '图片', '壁纸', '主题']
+  },
+  {
+    page: 'preference',
+    title: '颜色主题',
+    keywords: ['color', 'palette', 'theme', '配色', '颜色', '主题']
+  },
   { page: 'preference', title: '打开设置', keywords: ['shortcut', 'keybinding', '快捷键'] },
 
   // ── 模型 ──
-  { page: 'model', title: '默认模型', keywords: ['model', '模型'] },
-  { page: 'model', title: '默认子代理模型', keywords: ['subagent', 'model', '子代理'] },
+  // ★ 只有「文本生成」这个子 Tab 有真行。其余五个今天是占位,**不给它们编行** ——
+  // 上面那句「这张表是唯一事实来源」的代价就是:搜出来点过去,那一行必须真的在。
+  // 供应商的行随步骤 4 的写入面补进来;定价与用量在方案里没有编号,随内容一起补。
+  { page: 'model', sub: 'text', title: '默认模型', keywords: ['model', '模型'] },
+  {
+    page: 'model',
+    sub: 'text',
+    title: '默认子代理模型',
+    keywords: ['subagent', 'model', '子代理']
+  },
+  {
+    page: 'model',
+    sub: 'text',
+    title: '启用的模型',
+    keywords: ['provider', 'model', '供应商', '模型']
+  },
+  {
+    page: 'model',
+    sub: 'text',
+    title: '供应商目录',
+    keywords: ['provider', 'preset', 'openrouter', '供应商', '预设', '添加']
+  },
 
   // ── 连接 ──
+  // ★ 连接器 / 插件 / 机器人对话三个子 Tab **没有行** —— 它们背后没有子系统,
+  // 编几行出来会让「搜出来点过去必须真的在」这条约定当场破掉。
+  {
+    page: 'connection',
+    sub: 'mcp',
+    title: '添加 MCP 服务器',
+    keywords: ['mcp', 'server', '服务器']
+  },
+  { page: 'connection', sub: 'mcp', title: 'MCP 服务器', keywords: ['mcp', 'tool', '工具'] },
+  {
+    page: 'connection',
+    sub: 'search',
+    title: '搜索服务',
+    keywords: ['search', 'web', '联网', '搜索']
+  },
+  {
+    page: 'connection',
+    sub: 'search',
+    title: '搜索服务优先级',
+    keywords: ['search', 'priority', 'order', '优先级', '排序']
+  },
   { page: 'connection', sub: 'gateway', title: '启用本地网关', keywords: ['gateway', '网关'] },
   { page: 'connection', sub: 'gateway', title: '期望端口', keywords: ['port', 'gateway', '端口'] },
   { page: 'connection', sub: 'gateway', title: '故障切换', keywords: ['failover', '切换'] },
-  { page: 'connection', sub: 'proxy', title: '启用代理', keywords: ['proxy', '代理'] },
-  { page: 'connection', sub: 'proxy', title: '代理地址', keywords: ['proxy', 'url', '代理'] },
+  { page: 'connection', sub: 'network', title: '启用代理', keywords: ['proxy', '代理', '网络'] },
+  {
+    page: 'connection',
+    sub: 'network',
+    title: '代理服务器',
+    keywords: ['proxy', 'host', 'port', '代理', '地址', '端口']
+  },
+  {
+    page: 'connection',
+    sub: 'network',
+    title: '代理身份验证',
+    keywords: ['proxy', 'auth', '认证', '密码']
+  },
+  {
+    page: 'connection',
+    sub: 'network',
+    title: '直连白名单',
+    keywords: ['proxy', 'bypass', 'whitelist', '白名单', '直连']
+  },
 
   // ── 数据 ──
   { page: 'data', title: '数据库大小', keywords: ['storage', 'database', '存储'] },

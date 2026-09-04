@@ -145,6 +145,7 @@ describe('toAnthropicTools', () => {
       inputSchema: { type: 'object' },
       readOnly: false,
       destructive: false,
+      needsNetwork: false,
       source: { kind: 'builtin' }
     }
     expect(toAnthropicTools([t])).toEqual([

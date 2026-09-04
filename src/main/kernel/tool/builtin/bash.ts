@@ -38,19 +38,21 @@ const MAX_TIMEOUT_MS = 600_000
 const MAX_OUTPUT_CHARS = 30_000
 
 const BashInput = z.object({
-  command: z.string().min(1).describe('要执行的命令'),
+  command: z.string().min(1).describe('The command to execute'),
   timeout: z
     .number()
     .int()
     .min(1)
     .max(MAX_TIMEOUT_MS)
     .optional()
-    .describe(`可选的超时,单位毫秒,最大 ${String(MAX_TIMEOUT_MS)}。省略则用 ${String(DEFAULT_TIMEOUT_MS)}`),
+    .describe(
+      `Optional timeout in milliseconds, up to ${String(MAX_TIMEOUT_MS)}. Defaults to ${String(DEFAULT_TIMEOUT_MS)}`
+    ),
   description: z
     .string()
     .max(200)
     .optional()
-    .describe('用 5-10 个字说清这条命令做什么,会显示在界面上给用户看')
+    .describe('Clear, concise description of what this command does in 5-10 words. The user sees it in the UI')
 })
 
 /** 一段输出的呈现:空的时候要说「空」,不能给一段静默的空白让模型以为没读到。 */
@@ -62,31 +64,34 @@ function section(title: string, body: string): string {
 export const bashTool: ToolRegistration = defineTool({
   internalId: 'Bash',
   description:
-    '在工作区目录里执行一条 shell 命令,带超时和输出上限。\n\n' +
-    '执行之前:\n' +
-    '1. **确认目录**:要在新目录里建文件时,先用 LS 确认父目录确实存在、确实是你想的那个位置。\n' +
-    '2. **确认命令**:命令是直接在用户机器上跑的。会删数据、会改全局配置、会往外发东西的命令,' +
-    '先跟用户说清楚再执行。\n\n' +
-    '用法说明:\n' +
-    `- command 必填。timeout 可选,单位毫秒,最大 ${String(MAX_TIMEOUT_MS)}(10 分钟),` +
-    `省略则 ${String(DEFAULT_TIMEOUT_MS)}(2 分钟)\n` +
-    '- 用 5-10 个字写一下 description,用户在界面上看到的就是它\n' +
-    `- 输出超过 ${String(MAX_OUTPUT_CHARS)} 个字符会被截断\n` +
-    '- ★ **每次调用都是一个全新的 shell,状态不保留**。上一次的 cd、export、变量赋值' +
-    '在下一次调用里全都不在了。工作目录始终是工作区根目录,所以**请用绝对路径或工作区相对路径**,' +
-    '不要靠 cd 来定位。要在别处执行就写成 `cd 子目录 && 命令`,放在**同一次调用**里\n' +
-    '- ★ **标准输入是关闭的**。任何会等输入的命令都会挂到超时:' +
-    'git commit 要带 -m,包管理器要带 --yes / --no-input,不要用需要登录交互的命令\n' +
-    '- **非常重要**:不要用 shell 里的 `find` / `grep` 搜索,请用 Grep 和 Glob;' +
-    '不要用 `cat` / `head` / `tail` / `ls` 读文件和列目录,请用 Read 和 LS。' +
-    '那几个工具做了忽略规则、二进制跳过、行号和超时保护,而 shell 版本没有\n' +
-    '- 多条命令请用 `&&`(前一条成功才继续)或 `;` 连在一行里\n' +
-    '- 路径里有空格时要加引号:`cd "路径 带空格"`\n' +
-    '- 退出码非 0 时会作为错误返回给你,stdout 和 stderr 都在里面',
+    'Executes a shell command in the workspace directory, with a timeout and an output cap.\n\n' +
+    'Before you run anything:\n' +
+    '1. VERIFY THE DIRECTORY. If the command creates files in a new directory, first use LS to confirm ' +
+    'the parent exists and is where you think it is.\n' +
+    '2. VERIFY THE COMMAND. It runs directly on the user\'s machine. If it deletes data, changes global ' +
+    'configuration, or sends anything outward, tell the user what it does before running it.\n\n' +
+    'Usage notes:\n' +
+    `- command is required. timeout is optional, in milliseconds, up to ${String(MAX_TIMEOUT_MS)} (10 minutes); ` +
+    `it defaults to ${String(DEFAULT_TIMEOUT_MS)} (2 minutes)\n` +
+    '- Write a 5-10 word description; that is what the user sees in the UI\n' +
+    `- Output longer than ${String(MAX_OUTPUT_CHARS)} characters is truncated\n` +
+    '- IMPORTANT: EVERY CALL GETS A FRESH SHELL AND KEEPS NO STATE. A cd, an export, or a variable you set ' +
+    'in one call does not exist in the next. The working directory is always the workspace root, so use ' +
+    'absolute or workspace-relative paths instead of relying on cd. To run somewhere else, write ' +
+    '`cd subdir && command` inside a SINGLE call\n' +
+    '- IMPORTANT: STDIN IS CLOSED. Any command that waits for input will hang until it times out: pass -m to ' +
+    'git commit, pass --yes / --no-input to package managers, and never run something that needs an interactive login\n' +
+    '- VERY IMPORTANT: NEVER use shell `find` or `grep` to search — use Grep and Glob. NEVER use `cat`, `head`, ' +
+    '`tail`, or `ls` to read files and list directories — use Read and LS. Those tools apply the ignore list, ' +
+    'skip binaries, add line numbers, and enforce a timeout; the shell equivalents do none of that\n' +
+    '- Chain multiple commands on one line with `&&` (stop on first failure) or `;`\n' +
+    '- Quote paths that contain spaces: `cd "path with spaces"`\n' +
+    '- A non-zero exit code comes back to you as an error, with stdout and stderr included',
   schema: BashInput,
   readOnly: false,
   // ★ 破坏性:一条 shell 命令能做的事没有上界。`auto` 档下会走到「需要询问」。
   destructive: true,
+  needsNetwork: false,
   async run(input, ctx) {
     if (ctx.workspaceRoot === '') return toolFail(NO_WORKSPACE)
 
@@ -111,15 +116,15 @@ export const bashTool: ToolRegistration = defineTool({
     const parts = [section('stdout', r.stdout), section('stderr', r.stderr)].filter((s) => s !== '')
 
     if (r.code === 0) {
-      return toolOk(parts.length === 0 ? '(命令执行成功,没有任何输出)' : parts.join('\n'))
+      return toolOk(parts.length === 0 ? '(command succeeded with no output)' : parts.join('\n'))
     }
 
     const head =
       r.code === 124
-        ? `命令超时(超过 ${String(timeoutMs)}ms),整个进程组已被终止。`
-        : `命令退出码 ${String(r.code)}。`
+        ? `Command timed out after ${String(timeoutMs)}ms; the whole process group was killed.`
+        : `Command exited with code ${String(r.code)}.`
     return toolFail(
-      parts.length === 0 ? `${head}(没有任何输出)` : `${head}\n${parts.join('\n')}`
+      parts.length === 0 ? `${head} (no output)` : `${head}\n${parts.join('\n')}`
     )
   }
 })

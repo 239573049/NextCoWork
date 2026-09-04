@@ -3,6 +3,8 @@
  * 它就是主进程原来那句「浅合并够用」的反例,也是这个函数存在的全部理由。
  */
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_PROXY } from '../proxy'
+import { DEFAULT_CUSTOM_SEED } from '../theme'
 import { DEFAULT_SETTINGS, mergeSettings, type AppSettings } from '../settings'
 
 const base = (): AppSettings => structuredClone(DEFAULT_SETTINGS)
@@ -28,10 +30,15 @@ describe('mergeSettings', () => {
   it('六个嵌套块都走深合并', () => {
     const s = mergeSettings(base(), {
       subagent: { globalLimit: 8 },
-      proxy: { url: 'http://127.0.0.1:7890' }
+      proxy: { host: '127.0.0.1', port: 7890 }
     })
     expect(s.subagent).toEqual({ model: '', perSessionLimit: 4, globalLimit: 8 })
-    expect(s.proxy).toEqual({ enabled: false, url: 'http://127.0.0.1:7890' })
+    // 只给了两段,另外六段是缺省值 —— 这一条钉的就是「兄弟属性还在」
+    expect(s.proxy).toEqual({
+      ...DEFAULT_PROXY,
+      host: '127.0.0.1',
+      port: 7890
+    })
   })
 
   it('顶层标量整个覆盖', () => {
@@ -83,7 +90,33 @@ describe('mergeSettings · 主题', () => {
   it('重掷随机只动 seed', () => {
     const s = mergeSettings(base(), { colorTheme: { id: 'random', seed: 1 } })
     const again = mergeSettings(s, { colorTheme: { seed: 2 } })
-    expect(again.colorTheme).toEqual({ id: 'random', seed: 2 })
+    expect(again.colorTheme).toEqual({ id: 'random', seed: 2, custom: DEFAULT_CUSTOM_SEED })
+  })
+
+  /**
+   * ★ 「随机」的种子和「自定义」的颜色住在同一块里,而这两栏是同一处界面上
+   * 紧挨着的两个控件 —— 掷一次随机就把用户挑的那个色抹掉的话,
+   * 切回「自定义」会发现颜色变了,而中间他什么都没碰过。
+   */
+  it('重掷随机不动自定义色,反过来也一样', () => {
+    let s = mergeSettings(base(), { colorTheme: { id: 'custom', custom: '#c04a2b' } })
+    s = mergeSettings(s, { colorTheme: { id: 'random', seed: 9 } })
+    expect(s.colorTheme.custom).toBe('#c04a2b')
+    s = mergeSettings(s, { colorTheme: { id: 'custom', custom: '#5b7fa8' } })
+    expect(s.colorTheme.seed).toBe(9)
+  })
+
+  /**
+   * ★ 老库里这一块只有 `{ id, seed }`。`repo.getSettings` 走的是
+   * `mergeSettings(DEFAULT_SETTINGS, 磁盘上那份)`,所以缺席的字段自动落到默认值 ——
+   * 「自定义」这一栏不需要写迁移代码,但这条路必须有用例钉着:
+   * 落不到默认值的话,`custom` 会是 `undefined`,而 `specFromSeed(undefined)`
+   * 吐出来的是一整套 `#NaNNaNNaN`。
+   */
+  it('老设置里没有 custom 时补上默认值', () => {
+    const legacy = { id: 'opulent', seed: 3 }
+    const s = mergeSettings(DEFAULT_SETTINGS, { colorTheme: legacy })
+    expect(s.colorTheme).toEqual({ id: 'opulent', seed: 3, custom: DEFAULT_CUSTOM_SEED })
   })
 
   /**
@@ -93,5 +126,48 @@ describe('mergeSettings · 主题', () => {
   it('切外观模式不动颜色主题', () => {
     const s = mergeSettings(base(), { colorTheme: { id: 'opulent' } })
     expect(mergeSettings(s, { theme: 'dark' }).colorTheme.id).toBe('opulent')
+  })
+})
+
+/**
+ * 代理那一块从 `{enabled,url}` 拆成八段(`proxy.ts` 的文件头解释了为什么)。
+ * 拆开之后有两件事必须钉住,它们的失败症状都很难从界面上倒推回来。
+ */
+describe('mergeSettings · 代理', () => {
+  /**
+   * ★ 旧库里存着的是 `{enabled, url}`。用户升上来时那条 `url` 会**作为 patch**
+   * 走进 `mergeSettings`(`repo.getSettings` 就是拿整行 JSON 当 patch 合的),
+   * 所以迁移必须在这里发生,而不是在某个一次性的启动脚本里。
+   */
+  it('旧库里的 url 被拆成 scheme/host/port', () => {
+    const legacy = { url: 'http://127.0.0.1:7890', enabled: true } as unknown as Partial<
+      AppSettings['proxy']
+    >
+    const s = mergeSettings(base(), { proxy: legacy })
+    expect(s.proxy.mode).toBe('manual')
+    expect(s.proxy.scheme).toBe('http')
+    expect(s.proxy.host).toBe('127.0.0.1')
+    expect(s.proxy.port).toBe(7890)
+    expect(s.proxy.enabled).toBe(true)
+  })
+
+  /**
+   * ★ 这一条防的是一个具体的坏体验:表单里改了地址,一松手它又变回旧值。
+   * 迁移只在 host / mode 都没给的时候才动手 —— 一旦用户填了新地址,
+   * 旧 url 就再没有发言权了。
+   */
+  it('用户填了新地址时,旧 url 不再覆盖它', () => {
+    const patch = { url: 'http://127.0.0.1:7890', host: '10.0.0.1' } as unknown as Partial<
+      AppSettings['proxy']
+    >
+    expect(mergeSettings(base(), { proxy: patch }).proxy.host).toBe('10.0.0.1')
+  })
+
+  it('只改一个开关不动其余七段', () => {
+    let s = mergeSettings(base(), { proxy: { mode: 'manual', host: 'p.example', port: 1080 } })
+    s = mergeSettings(s, { proxy: { enabled: true } })
+    expect(s.proxy.host).toBe('p.example')
+    expect(s.proxy.port).toBe(1080)
+    expect(s.proxy.mode).toBe('manual')
   })
 })

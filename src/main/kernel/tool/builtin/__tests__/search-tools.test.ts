@@ -98,7 +98,7 @@ describe('Glob', () => {
   it('没匹配到时给的是提示,不是 isError', async () => {
     const r = await globTool.execute({ pattern: '*.rs' }, ctx())
     expect(r.isError).toBeFalsy()
-    expect(r.output.content).toContain('没有文件匹配')
+    expect(r.output.content).toContain('No files match')
   })
 
   it('★ node_modules 等生成物目录被跳过', async () => {
@@ -122,7 +122,7 @@ describe('Glob', () => {
   it('没有工作区时直接拒绝', async () => {
     const r = await globTool.execute({ pattern: '*' }, ctx({ workspaceRoot: '' }))
     expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('工作区')
+    expect(r.output.content).toContain('workspace')
   })
 })
 
@@ -176,7 +176,7 @@ describe('Grep · output_mode', () => {
   it('head_limit 截断结果', async () => {
     const r = await grepTool.execute({ pattern: 'alpha', head_limit: 1 }, ctx())
     expect(r.output.content.split('\n')[0]).not.toBe('')
-    expect(r.output.content).toContain('只显示前 1')
+    expect(r.output.content).toContain('showing the first 1')
   })
 })
 
@@ -227,7 +227,7 @@ describe('Grep · 过滤与选项', () => {
   it('-i 忽略大小写', async () => {
     put('a.ts', 'HelloWorld\n')
     const off = await grepTool.execute({ pattern: 'helloworld' }, ctx())
-    expect(off.output.content).toContain('没有匹配')
+    expect(off.output.content).toContain('No content matching')
     const on = await grepTool.execute({ pattern: 'helloworld', '-i': true }, ctx())
     expect(on.output.content).toContain('a.ts')
   })
@@ -259,7 +259,7 @@ describe('Grep · 过滤与选项', () => {
   it('multiline 让模式跨行', async () => {
     put('a.ts', 'interface X {\n  field: string\n}\n')
     const off = await grepTool.execute({ pattern: 'interface X.*field' }, ctx())
-    expect(off.output.content).toContain('没有匹配')
+    expect(off.output.content).toContain('No content matching')
     const on = await grepTool.execute(
       { pattern: 'interface X.*field', multiline: true },
       ctx()
@@ -305,7 +305,7 @@ describe('Grep · 过滤与选项', () => {
   it('没有工作区时直接拒绝', async () => {
     const r = await grepTool.execute({ pattern: 'x' }, ctx({ workspaceRoot: '' }))
     expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('工作区')
+    expect(r.output.content).toContain('workspace')
   })
 })
 
@@ -346,9 +346,9 @@ describe('★ Grep · 灾难性回溯', () => {
     const r = await grepTool.execute({ pattern: '(a+)+$', output_mode: 'content' }, ctx())
     const dt = Date.now() - t0
     expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('回溯')
+    expect(r.output.content).toContain('backtracking')
     // 说明里必须写清楚怎么改,否则模型只会原样重试
-    expect(r.output.content).toContain('改法')
+    expect(r.output.content).toContain('Fix it by')
     expect(dt, `耗时 ${String(dt)}ms —— 静态筛查是不是被去掉了?`).toBeLessThan(1000)
   })
 

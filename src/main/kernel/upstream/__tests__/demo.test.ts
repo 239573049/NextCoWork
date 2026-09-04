@@ -79,6 +79,7 @@ function echoRegistry(): ToolRegistry {
     inputSchema: { type: 'object', properties: { message: { type: 'string' } } },
     readOnly: true,
     destructive: false,
+    needsNetwork: false,
     source: { kind: 'builtin' },
     execute: (input) => Promise.resolve(toolOk(`echo: ${JSON.stringify(input)}`))
   })
@@ -337,6 +338,7 @@ describe('工具调用', () => {
           inputSchema: { type: 'object', properties: { message: { type: 'string' } } },
           readOnly: true,
           destructive: false,
+          needsNetwork: false,
           source: { kind: 'builtin' }
         }
       ]

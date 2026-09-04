@@ -34,7 +34,7 @@ import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
 import type { KernelHost } from './host'
 import type { RunHandle } from './run-registry'
-import type { Tool, ToolContext, ToolRegistry } from './tool/registry'
+import type { SpawnSubagentFn, Tool, ToolContext, ToolRegistry } from './tool/registry'
 import type { CanonicalRequest } from './upstream/canonical'
 
 /**
@@ -76,13 +76,32 @@ export interface SessionDeps {
   history?: readonly AgentMessage[]
   skills?: readonly Skill[]
   approve?: ApproveFn
+  /**
+   * 收窄本轮工具快照的**额外**闸门。
+   *
+   * ★ plan 模式的 `readOnlyOnly` **不走这里** —— 那是模式的定义,不是配置。
+   * 这条缝只接一种来源:子代理定义文件里的 `tools:`(已归一化成 internalId)。
+   * 缺省 = 不收窄。
+   *
+   * `snapshot()` 结构上只过滤、不新增,所以这个清单**永远不可能提权**:
+   * 写一个不存在的名字进去,结果是少一个工具,不是多一个。
+   */
+  allowedTools?: readonly string[]
+  /**
+   * 子代理的角色提示词。★ **追加**在 `BASE_PROMPT` 之后,不替换它 ——
+   * 换掉基础提示词的子代理会丢掉「被拒绝时不要试图绕开」那一类约束,
+   * 而一个会绕开约束的子代理正是这整套权限设计最不想要的东西。
+   */
+  agentPrompt?: string
+  /** 派子代理。缺省 = 这个环境里派不了(纯内核测试),`Task` 会当场说清楚。 */
+  spawnSubagent?: SpawnSubagentFn
 }
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
 const FALLBACK_CONTEXT_WINDOW = 200_000
 const FALLBACK_MAX_OUTPUT = 8192
 
-const INTERRUPTED = '[已中断:用户在这次工具调用完成前停止了运行]'
+const INTERRUPTED = '[interrupted: the user stopped the run before this tool call finished]'
 
 /** 工具执行期间的异常收敛(中断除外)。`defineTool` 已经做过一遍,但 MCP 工具是直接注册的。 */
 function toolThrewError(err: unknown): string {
@@ -189,7 +208,19 @@ export class AgentSession {
      */
     const advertised = this.deps.tools.snapshot({
       // ★ plan 模式的**真正实现**:过滤掉写工具,而不是在提示词里祈祷(§4.8)
-      readOnlyOnly: this.req.mode === 'plan'
+      readOnlyOnly: this.req.mode === 'plan',
+      /*
+        子代理定义文件里的 `tools:`。★ 和上面那行是**两个不同的问题**,
+        所以是两个字段而不是一个合并后的清单:`readOnlyOnly` 是模式的定义
+        (plan 就是不写盘),`allowList` 是这个子代理被授予了什么。
+        两个都在时取交集 —— 一个 plan 模式下的子代理仍然只能读。
+      */
+      ...(this.deps.allowedTools !== undefined ? { allowList: this.deps.allowedTools } : {}),
+      /*
+        ★ Composer 上那颗「联网搜索」药丸第一次真的控制住东西的地方。
+        关掉时联网工具连下发都不下发,模型不会先白跑一轮再被拒。
+      */
+      network: this.req.webSearch
     })
     const byName = new Map(advertised.map((t) => [t.externalName, t]))
     // `execute` 是闭包,过不了结构化克隆 —— 请求体里不该带着它
@@ -200,6 +231,7 @@ export class AgentSession {
       messages: this.messages,
       tools: infos,
       skills: this.deps.skills ?? [],
+      ...(this.deps.agentPrompt !== undefined ? { agentPrompt: this.deps.agentPrompt } : {}),
       mode: this.req.mode,
       thinking: this.req.thinking,
       model: this.req.model,
@@ -292,14 +324,17 @@ export class AgentSession {
       // 不去执行,把**原文**回给模型 —— 只说「参数错了」它无从下手
       return this.toolFailure(
         callId,
-        `工具参数不是合法的 JSON(${call.reason})。你发出的原文是:\n${call.raw}`
+        `The tool arguments were not valid JSON (${call.reason}). This is what you sent:\n${call.raw}`
       )
     }
 
     const tool = tools.get(call.name)
     if (tool === undefined) {
       // 模型会编工具名;这一轮进行中工具也可能被下线。两种都是**工具错误**,不是崩溃。
-      return this.toolFailure(callId, `没有名为 ${call.name} 的工具。请从可用工具列表里选。`)
+      return this.toolFailure(
+        callId,
+        `There is no tool named ${call.name}. Pick one from the list of available tools.`
+      )
     }
 
     // ★ 下发/回传/展示三处用的都是 externalName —— 三条轨道上必须是同一个名字,
@@ -310,7 +345,7 @@ export class AgentSession {
     if (decision.kind === 'deny') {
       // 拒绝要让模型**看见**:系统提示词里写了「被拒绝时不要试图绕开」,
       // 而那句话的前提是它知道自己被拒了。
-      return this.toolFailure(callId, decision.reason ?? '用户拒绝了这次工具调用。')
+      return this.toolFailure(callId, decision.reason ?? 'The user denied this tool call.')
     }
     // allow_edited 的入参是用户改过的 —— 用原值执行等于无视用户的修改
     const input = decision.kind === 'allow_edited' ? decision.input : call.input
@@ -326,7 +361,7 @@ export class AgentSession {
        */
       if (isAbortError(err)) throw err
       // 其余异常收敛成工具错误:`tool_failed` 进转录并继续循环(方案 §4.11)
-      return this.toolFailure(callId, `工具执行失败:${toolThrewError(err)}`)
+      return this.toolFailure(callId, `Tool execution failed: ${toolThrewError(err)}`)
     }
 
     /**
@@ -356,7 +391,14 @@ export class AgentSession {
       //   拷贝会在换宿主后留下一份旧引用,正是 ctx 传递想避免的那件事
       host: this.deps.host,
       // 进度是易失的:单独的事件类型,永不写入转录
-      emit: (progress) => this.handle.emit({ type: 'tool_progress', callId, progress })
+      emit: (progress) => this.handle.emit({ type: 'tool_progress', callId, progress }),
+      /*
+        ★ 没装启动器时**不放这个字段进去**,而不是放一个抛错的函数:
+        `Task` 判的是 `ctx.spawnSubagent === undefined`,据此给出一句
+        「这个环境里派不了子代理」的人话。放一个会抛的桩,模型看到的
+        就变成一条内部错误信息了。
+      */
+      ...(this.deps.spawnSubagent !== undefined ? { spawnSubagent: this.deps.spawnSubagent } : {})
     }
   }
 

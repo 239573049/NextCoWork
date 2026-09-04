@@ -25,9 +25,11 @@ export type PermissionOutcome =
  * 换个入口,而且绕过了这道闸。最后一句直接堵掉那条路。
  */
 const NETWORK_OFF =
-  '这个工具需要联网,但当前工作区的「联网」开关是关闭的,所以调用被拒绝。' +
-  '这是用户的设置,不是你调用得不对。请不要改用 Bash 里的 curl / wget 去做同一件事 —— ' +
-  '那会绕过用户明确关掉的开关。请告诉用户:这一步需要联网,可以在工作区设置里打开。'
+  'This tool needs network access, but the "network" switch is turned off for this workspace, so the ' +
+  'call was denied. This is the user\'s setting, not a mistake in how you called it. Do NOT reach for ' +
+  'curl or wget through Bash to do the same thing — that would route around a switch the user turned ' +
+  'off deliberately. Tell the user this step needs network access and that they can enable it in the ' +
+  'workspace settings.'
 
 /**
  * 那张表。**顺序即语义**,`permission-gate.test.ts` 按行逐条钉死。
@@ -50,13 +52,20 @@ export function evaluate(q: PermissionQuery): PermissionOutcome {
 }
 
 /**
- * 需要联网的工具的 `internalId`。
+ * 需要联网的工具的 `internalId` —— 一张**下限表**。
  *
- * ★ 用一张显式的表,而不是给 `ToolRegistration` 加一个 `needsNetwork` 字段 ——
- * 加字段的话,MCP 工具(步骤 10)的作者可以自己把它写成 `false`,于是
- * 「联网开关」这个用户设置就被第三方工具描述给关掉了。判定权留在我们这边。
+ * 原来这里是唯一的判定依据,理由是「给 `ToolRegistration` 加 `needsNetwork` 字段的话,
+ * MCP 工具的作者可以自己写成 `false`,用户的联网开关就被第三方描述关掉了」。
+ * 那个顾虑是对的,但结论过头了:一张写死 internalId 的表**列不出 MCP 工具**
+ * (它们的 id 是运行时才知道的 `mcp__<server>__<tool>`),于是步骤 10 一落地,
+ * 所有 MCP 工具都会绕过这道闸 —— 恰好是同一个顾虑的更严重版本。
+ *
+ * 现在的分工是:`ToolInfo.needsNetwork` 承担判定,但**它只能往严的方向说话** ——
+ * 这张表里的名字无论字段怎么填都算联网(见 `runtime.ts` 里那个 `||`)。
+ * 而那个字段本身也不采信任何不可信输入:MCP 工具的值由 `mcp/bridge.ts`
+ * 按我们库里存的**传输方式**推出来,不读服务器自报的 annotations。判定权仍在我们这边。
  */
-export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set(['WebFetch'])
+export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set(['WebFetch', 'web_search'])
 
 /**
  * 「该问但问不了」时给模型的原文。
@@ -68,11 +77,13 @@ export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set(['WebFetch'])
  * ③ **给用户一条出路** —— 只说「不行」的话,用户看到的是一个卡住的助手。
  */
 export const ASK_NOT_WIRED_YET =
-  '这次调用需要用户当面批准,但这个版本还没有把审批对话框接上 —— 所以它被自动拒绝了。' +
-  '**这不是你的错,也不是你调用得不对。**\n\n' +
-  '不要换一个工具去做同一件事,不要试图绕过这个限制,也不要重试。' +
-  '请直接停下来告诉用户:这一步需要审批,而审批功能尚未可用;' +
-  '如果他想让你继续,可以把工作区的权限模式改成「自动」或「完全」,或者自己动手做这一步。'
+  'This call needs the user to approve it in person, but the approval dialog is not wired up in this ' +
+  'build yet — so it was denied automatically. THIS IS NOT YOUR FAULT, and there is nothing wrong with ' +
+  'how you called it.\n\n' +
+  'Do NOT reach for a different tool to do the same thing, do NOT try to work around this, and do NOT ' +
+  'retry. Stop and tell the user: this step needs approval, and approval is not available yet. If they ' +
+  'want you to continue, they can set the workspace permission mode to "auto" or "full", or do this ' +
+  'step themselves.'
 
 /** 给测试和诊断用:把一次判定压成一行人话。 */
 export function describeOutcome(mode: PermissionMode, o: PermissionOutcome): string {

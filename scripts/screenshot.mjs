@@ -186,7 +186,189 @@ try {
   await sleep(400)
   await cdp.shoot('05-collapsed')
 
-  console.log(`\n✅ 截完了,共 5 张,在 ${OUT}/`)
+  /*
+    设置 › 连接 —— 四个真接了运行时的子页各一张,用来和参考图并排比。
+
+    ★ **按 aria-label / 按可见文字点,不按 class 点。** class 是随时会变的样式细节,
+    而 label 是无障碍契约的一部分,本来就该稳定;拿 class 当选择器的截图脚本
+    会在一次纯样式改动之后无声地截错东西。
+  */
+  const clickLabel = async (label) => {
+    const ok = await cdp.eval(`
+      (() => {
+        const b = [...document.querySelectorAll('button')].find(
+          (x) => x.getAttribute('aria-label') === ${JSON.stringify(label)}
+        )
+        if (!b) return false
+        b.click()
+        return true
+      })()
+    `)
+    if (!ok) throw new Error(`找不到 aria-label 为「${label}」的按钮`)
+  }
+
+  /** 左侧导航按可见文字点 —— 那些按钮没有 aria-label,文字就是它的名字 */
+  const clickNav = async (text) => {
+    const ok = await cdp.eval(`
+      (() => {
+        const b = [...document.querySelectorAll('[role="dialog"] nav button')].find(
+          (x) => x.textContent.trim() === ${JSON.stringify(text)}
+        )
+        if (!b) return false
+        b.click()
+        return true
+      })()
+    `)
+    if (!ok) throw new Error(`设置里找不到「${text}」这一页`)
+  }
+
+  /** 子 Tab 是 Segmented,渲染成 role=radio */
+  const clickSub = async (text) => {
+    const ok = await cdp.eval(`
+      (() => {
+        const b = [...document.querySelectorAll('[role="radio"]')].find(
+          (x) => x.textContent.trim() === ${JSON.stringify(text)}
+        )
+        if (!b) return false
+        b.click()
+        return true
+      })()
+    `)
+    if (!ok) throw new Error(`连接页下找不到「${text}」这个子 Tab`)
+  }
+
+  await clickLabel('展开侧边栏')
+  await sleep(300)
+  await clickLabel('设置')
+  await until('设置浮层', () =>
+    cdp.eval(`document.querySelector('[role="dialog"][aria-label="设置"]') !== null`)
+  )
+  await sleep(300)
+  await clickNav('连接')
+  await sleep(300)
+
+  for (const [name, sub] of [
+    ['06-connection-mcp', 'MCP'],
+    ['07-connection-search', '搜索服务'],
+    ['08-connection-gateway', '开放网关'],
+    ['09-connection-network', '网络']
+  ]) {
+    await clickSub(sub)
+    // 列表要等一次 IPC 往返(mcp:list / websearch:list),不等就截到「正在读取」
+    await sleep(600)
+    await cdp.shoot(name)
+  }
+
+  /*
+    两张**验证图**,不是评审图 —— 它们各自钉住一个已经修过的 bug,
+    而这两个 bug 都只在「动起来」的时候才看得见,静态截图看不出来:
+
+    10:添加 MCP 服务器的弹窗。它渲染在设置内容区里,而那个容器带 `mask-image`,
+       于是 `position: fixed` 的包含块变成了那块滚动区(见 Dialog.tsx 的文件头)。
+       症状是弹窗被压进内容区、标题随内容滚没。这张图必须看见弹窗**盖住整个窗口**。
+    11:搜索服务的拖动。抓手是行里的小把手,`useDragReorder` 曾经拿它的
+       `parentElement` 当列表算几何,于是行与行互相压住。除了截图,下面还**读一遍
+       落定后的顺序**并断言 —— 顺序是 `priority`,而 priority 决定 web_search
+       先打哪一家,这件事不能只靠肉眼看图。
+  */
+  await clickSub('MCP')
+  await sleep(500)
+  await cdp.eval(`
+    (() => {
+      const b = [...document.querySelectorAll('button')].find(
+        (x) => x.textContent.trim() === '添加'
+      )
+      if (!b) throw new Error('MCP 页上找不到「添加」按钮')
+      b.click()
+      return true
+    })()
+  `)
+  await until('MCP 弹窗', () =>
+    cdp.eval(`document.querySelector('[role="dialog"][aria-label="添加 MCP 服务器"]') !== null`)
+  )
+  await sleep(300)
+  await cdp.shoot('10-mcp-dialog')
+
+  // 弹窗里有草稿态输入框,按 Esc 关(这条路径本身也是约束 3 要保的)
+  await cdp.eval(`
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  `)
+  await sleep(300)
+
+  await clickSub('搜索服务')
+  await sleep(600)
+
+  /** 每行右边那个开关的 aria-label 是「启用 <名字>」—— 拿它当行的名字最稳 */
+  const providerOrder = () =>
+    cdp.eval(`
+      [...document.querySelectorAll('li[data-drag-item]')].map((li) =>
+        li.querySelector('[role="switch"]')?.getAttribute('aria-label')?.replace(/^启用 /, '') ?? '?'
+      )
+    `)
+
+  const before = await providerOrder()
+  console.log(`拖动前:${before.join(' → ')}`)
+
+  /**
+   * 一行的两个坐标,两个都要:
+   * - `grip` 是**按下去**的地方(抓手在行的顶端附近,不在行中心);
+   * - `center` 是**判定落点**用的(`useDragReorder` 比的是被拖元素的中心
+   *   与各行原始中心)。
+   *
+   * 混用这两个就会差一格:按住抓手拖到下一行的抓手上,位移只有「行高」,
+   * 而被拖元素的中心此刻恰好压在那一行的中心线上 —— 落点在边界上。
+   */
+  const rowAt = (i) =>
+    cdp.eval(`
+      (() => {
+        const li = document.querySelectorAll('li[data-drag-item]')[${String(i)}]
+        if (!li) return null
+        const g = li.querySelector('.cursor-grab').getBoundingClientRect()
+        const r = li.getBoundingClientRect()
+        return {
+          grip: { x: Math.round(g.left + g.width / 2), y: Math.round(g.top + g.height / 2) },
+          center: Math.round(r.top + r.height / 2)
+        }
+      })()
+    `)
+
+  const mouse = (type, x, y) =>
+    cdp.send('Input.dispatchMouseEvent', {
+      type,
+      x,
+      y,
+      button: 'left',
+      buttons: type === 'mouseReleased' ? 0 : 1,
+      clickCount: 1
+    })
+
+  // 把第 1 行往下拖过第 2 行。步进着走 —— 一步跳到位的话 4px 起拖阈值那段
+  // 逻辑根本不会被走到,而它正是这个 hook 里最容易写错的一段
+  const from = await rowAt(0)
+  const to = await rowAt(2)
+  if (from === null || to === null) throw new Error('搜索服务列表里找不到抓手')
+  // 位移按**中心到中心**算,再多走 6px 越过边界 —— 正好压线时该落在哪一格
+  // 是个可以两说的约定,截图脚本不该去考它
+  const dy = to.center - from.center + 6
+  await mouse('mousePressed', from.grip.x, from.grip.y)
+  for (let k = 1; k <= 8; k += 1) {
+    await mouse('mouseMoved', from.grip.x, Math.round(from.grip.y + (dy * k) / 8))
+    await sleep(40)
+  }
+  await cdp.shoot('11-search-dragging')
+  await mouse('mouseReleased', from.grip.x, from.grip.y + dy)
+  await sleep(800)
+
+  const after = await providerOrder()
+  console.log(`拖动后:${after.join(' → ')}`)
+  const expected = [before[1], before[2], before[0], ...before.slice(3)]
+  if (after.join('|') !== expected.join('|')) {
+    throw new Error(`拖动没落到该落的位置。期望 ${expected.join(' → ')},实际 ${after.join(' → ')}`)
+  }
+  console.log('✓ 拖动重排落点正确')
+  await cdp.shoot('12-search-reordered')
+
+  console.log(`\n✅ 截完了,共 12 张,在 ${OUT}/`)
 } catch (err) {
   failed = true
   console.error(`\n❌ 截图失败:${err.message}`)

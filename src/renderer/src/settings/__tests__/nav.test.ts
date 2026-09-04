@@ -55,7 +55,8 @@ describe('matchRows', () => {
   it('命中英文关键词', () => {
     const titles = matchRows('proxy').map((r) => r.title)
     expect(titles).toContain('启用代理')
-    expect(titles).toContain('代理地址')
+    // 三段拆开之后这一行叫「代理服务器」了(协议 / 地址 / 端口 在同一行里)
+    expect(titles).toContain('代理服务器')
   })
 
   it('命中页名 —— 打「连接」应该把这一页的行全带出来', () => {

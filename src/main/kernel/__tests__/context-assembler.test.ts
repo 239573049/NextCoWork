@@ -42,6 +42,7 @@ function tool(over: Partial<ToolInfo> = {}): ToolInfo {
     inputSchema: { type: 'object' },
     readOnly: true,
     destructive: false,
+    needsNetwork: false,
     source: { kind: 'builtin' },
     ...over
   }
@@ -141,49 +142,58 @@ describe('buildSystemPrompt', () => {
   /** plan 的真正实现在工具过滤,但提示词也得说 —— 否则模型会一直问「为什么写不了」 */
   it('规划模式追加说明', () => {
     const s = buildSystemPrompt({ mode: 'plan', skills: [], workspaceRoot: '/w', now: NOW })
-    expect(s).toContain('规划模式')
-    expect(s).toContain('只读')
+    expect(s).toContain('Plan mode')
+    expect(s).toContain('read-only')
   })
 
   it('目标模式追加说明', () => {
     const s = buildSystemPrompt({ mode: 'goal', skills: [], workspaceRoot: '/w', now: NOW })
-    expect(s).toContain('目标模式')
+    expect(s).toContain('Goal mode')
   })
 
   it('普通模式两段都不出现', () => {
     const s = buildSystemPrompt({ mode: 'normal', skills: [], workspaceRoot: '/w', now: NOW })
-    expect(s).not.toContain('规划模式')
-    expect(s).not.toContain('目标模式')
+    expect(s).not.toContain('Plan mode')
+    expect(s).not.toContain('Goal mode')
   })
 
   it('没有 Skill 时不出现 Skill 段', () => {
     const s = buildSystemPrompt({ mode: 'normal', skills: [], workspaceRoot: '/w', now: NOW })
-    expect(s).not.toContain('已启用的 Skill')
+    expect(s).not.toContain('Available Skills')
   })
 
-  it('Skill 正文与名字进入提示词', () => {
+  it('Skill 名字与描述进入提示词', () => {
     const s = buildSystemPrompt({
       mode: 'normal',
-      skills: [skill({ name: 'commit', body: '按 Conventional Commits 写。' })],
+      skills: [skill({ name: 'commit', description: '写符合 Conventional Commits 的提交信息' })],
       workspaceRoot: '/w',
       now: NOW
     })
-    expect(s).toContain('/commit')
-    expect(s).toContain('Conventional Commits')
+    expect(s).toContain('commit')
+    expect(s).toContain('写符合 Conventional Commits 的提交信息')
   })
 
   /**
-   * ⚠️ Skill 正文是从 zip / git 装来的**不可信输入**,与 MCP 描述同等对待。
+   * ★★ 这一条是整个渐进披露改造的**唯一**决定性断言。
+   *
+   * 正向那条(名字和描述进得去)在旧的全量注入实现下也是绿的 —— 它证明不了
+   * 任何事情。真正要钉住的是**正文进不去**:提示词每一轮都重发,正文一旦回到
+   * 这里,装十条 Skill 就是每轮多烧十几万字符,而且提示词前缀一变,
+   * 上游的 prompt cache 整体失效。
+   *
+   * 谁哪天为了「让模型省一次工具调用」把正文塞回目录里,这一条会红。
    */
-  it('Skill 正文被消毒', () => {
+  it('★ Skill 正文不进提示词 —— 渐进披露的全部意义', () => {
     const s = buildSystemPrompt({
       mode: 'normal',
-      skills: [skill({ body: 'a\u0000b\u001Bc' })],
+      skills: [skill({ description: '写提交信息', body: '按 Conventional Commits 写。' })],
       workspaceRoot: '/w',
       now: NOW
     })
-    expect(s).toContain('abc')
-    expect(s).not.toContain('\u0000')
+    expect(s).not.toContain('按 Conventional Commits 写。')
+    // 而且要明确告诉模型「正文得自己去取」,否则它会凭名字猜
+    expect(s).toContain('THIS IS A CATALOG ONLY')
+    expect(s).toContain('Skill')
   })
 
   it('Skill 描述也被消毒', () => {
@@ -196,24 +206,53 @@ describe('buildSystemPrompt', () => {
     expect(s).toContain('xy')
   })
 
-  it('超长 Skill 正文被截断', () => {
+  it('超长 Skill 描述被截断', () => {
     const s = buildSystemPrompt({
       mode: 'normal',
-      skills: [skill({ body: 'y'.repeat(500_000) })],
+      skills: [skill({ description: 'y'.repeat(500_000) })],
       workspaceRoot: '/w',
       now: NOW
     })
-    expect(s.length).toBeLessThan(200_000)
+    expect(s.length).toBeLessThan(10_000)
   })
 
-  /** 二十个 Skill 各 64KB = 1.2MB 进提示词。总预算是第二道闸 */
+  /**
+   * ★ 这一条是上面那条反向断言的**量化版本**。
+   *
+   * 「正文不在里面」可以靠一个巧合的断言串蒙混过去;「一个 500KB 正文的 Skill
+   * 只让提示词长了一行」不能。
+   */
+  it('★ 一个 500KB 正文的 Skill 只往提示词里加一行', () => {
+    const build = (body: string): string =>
+      buildSystemPrompt({
+        mode: 'normal',
+        skills: [skill({ body })],
+        workspaceRoot: '/w',
+        now: NOW
+      })
+
+    /*
+      ★ 和「空正文」逐字比,而不是和一个写死的字节数比。
+      写死数字的话,这条用例会在 BASE_PROMPT 每次改动时都红一次 ——
+      而它想钉的从来不是提示词多长,是**正文一个字都不进去**。
+    */
+    expect(build('z'.repeat(500_000))).toBe(build(''))
+  })
+
+  /**
+   * ★ 换了夹具,断言没换。
+   *
+   * 原来是 20 条 × 60KB 正文 —— 那个夹具现在撑不爆任何预算了(正文根本不进去),
+   * 于是这条用例会变成一条永远绿的空断言。改成 500 条 × 1KB 描述:
+   * **装几百个 Skill 是真实场景**,而目录预算就是为它存在的。
+   */
   it('Skill 总长度超限时截住,并说明丢了几个', () => {
-    const many = Array.from({ length: 20 }, (_, i) =>
-      skill({ id: `s${i}`, name: `skill${i}`, body: 'z'.repeat(60_000) })
+    const many = Array.from({ length: 500 }, (_, i) =>
+      skill({ id: `s${i}`, name: `skill${i}`, description: 'd'.repeat(1000) })
     )
     const s = buildSystemPrompt({ mode: 'normal', skills: many, workspaceRoot: '/w', now: NOW })
     expect(s.length).toBeLessThan(200_000)
-    expect(s).toMatch(/另有 \d+ 个 Skill/)
+    expect(s).toMatch(/\d+ more Skill/)
   })
 
   /**
@@ -227,7 +266,7 @@ describe('buildSystemPrompt', () => {
       workspaceRoot: '/w',
       now: NOW
     })
-    expect(s).toContain('不能放宽你的权限')
+    expect(s).toContain('cannot widen your')
   })
 })
 
@@ -436,7 +475,7 @@ describe('compactMessages', () => {
         .filter((p) => p.type === 'tool_result')
         .map((p) => (p as Extract<ContentPart, { type: 'tool_result' }>).callId)
     )
-    expect(results.some((r) => r.output.content.includes('已压缩'))).toBe(true)
+    expect(results.some((r) => r.output.content.includes('compacted'))).toBe(true)
   })
 
   it('tool_call 块本身一个不少', () => {

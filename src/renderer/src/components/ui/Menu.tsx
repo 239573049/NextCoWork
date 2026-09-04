@@ -10,10 +10,27 @@
  *
  * 关闭时机三条:面板外 pointerdown、Esc、选中某一项。第三条由 `onSelect` 自动做 ——
  * 每个调用点自己记得 close() 的话,总有一处会忘。
+ *
+ * ## 面板是 `position: fixed`,不是 `absolute`(方案 §7 第 1 条)
+ *
+ * 原来是 `absolute top-full`,于是任何一个 `overflow` 祖先都会把它**裁掉半截** ——
+ * 设置浮层的内容区正是 `overflow-y-auto`,而模型页会长到需要滚动。
+ * 现在改成脱离文档流、由触发器的 `getBoundingClientRect()` 定位,
+ * 空间不够就向上翻;落点算法在 `menu-position.ts`(纯函数,那边有测试)。
+ *
+ * ⚠️ **`fixed` 能对齐视口有个前提:祖先里不能有 `transform` / `filter` /
+ * `backdrop-filter` / `will-change` / `contain`** —— 有的话它会退化成相对那个祖先定位,
+ * 而我们喂进去的是视口坐标,面板会跑到离触发器很远的地方。
+ * 改这条的成本落在别处:给设置浮层加一个 `scale` 入场动画就会让五处菜单一起错位。
+ * 当前五个调用点(外层 Tab / 内层 Tab / 权限档位 / 模型选择器 / 文件视图)的
+ * 祖先链上都没有,唯一的 `backdrop-blur` 在遮罩上,而遮罩是内容的**兄弟**。
+ *
+ * 仍然**不 portal** —— 上面那条 `.app-no-drag` 的理由没变,而 `fixed` 已经够用了。
  */
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Check } from 'lucide-react'
 import { cn } from '../../lib/cn'
+import { placeMenu, type Placement } from './menu-position'
 
 export function Menu({
   trigger,
@@ -36,8 +53,51 @@ export function Menu({
   disabled?: boolean
 }): ReactNode {
   const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState<Placement | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
   const panelId = useId()
+
+  /*
+    ★ `useLayoutEffect` 而不是 `useEffect`:它在**浏览器绘制之前**跑完,
+    所以「先渲染出来量高度、再挪到正确位置」这两步用户看不到。
+    用 useEffect 的话面板会在左上角闪一帧。
+  */
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null)
+      return
+    }
+    const measure = (): void => {
+      const t = triggerRef.current?.getBoundingClientRect()
+      const panel = panelRef.current
+      if (t === undefined || panel === null) return
+      /*
+        ★ 量 `scrollHeight` 而不是 `offsetHeight`。后者在限高之后就等于 maxHeight,
+        于是「面板多高」和「该给多少高」互为因果,滚动时会一路收缩到最小值。
+        scrollHeight 始终是内容的真实高度,不受我们自己设的 maxHeight 影响。
+      */
+      setPos(
+        placeMenu(t, panel.scrollHeight, width, align, {
+          width: window.innerWidth,
+          height: window.innerHeight
+        })
+      )
+    }
+    measure()
+    /*
+      脱离了文档流就不会跟着滚动容器走,所以得自己跟。
+      scroll 用 capture —— 真正在滚的是设置浮层的内容区,不是 window,
+      而 scroll 事件不冒泡到 document,只有捕获阶段抓得到。
+    */
+    window.addEventListener('resize', measure)
+    document.addEventListener('scroll', measure, true)
+    return () => {
+      window.removeEventListener('resize', measure)
+      document.removeEventListener('scroll', measure, true)
+    }
+  }, [open, width, align])
 
   useEffect(() => {
     if (!open) return
@@ -63,6 +123,7 @@ export function Menu({
   return (
     <div ref={wrapRef} className={cn('relative flex', className)}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={label}
         aria-haspopup="menu"
@@ -77,13 +138,20 @@ export function Menu({
 
       {open && (
         <div
+          ref={panelRef}
           id={panelId}
           role="menu"
-          style={{ width }}
+          style={{
+            width,
+            top: pos?.top ?? 0,
+            left: pos?.left ?? 0,
+            maxHeight: pos?.maxHeight,
+            // 还没量到高度的那一帧:先渲染出来(否则量不到),但别让人看见
+            visibility: pos === null ? 'hidden' : undefined
+          }}
           className={cn(
-            'app-no-drag absolute top-full z-50 mt-1.5 overflow-hidden rounded-card',
-            'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40',
-            align === 'start' ? 'left-0' : 'right-0'
+            'app-no-drag scroll-thin fixed z-50 overflow-y-auto rounded-card',
+            'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40'
           )}
         >
           {children(() => setOpen(false))}

@@ -83,3 +83,21 @@ export function mcpSecretKind(cfg: McpServerConfig): 'env' | 'headers' {
 export function mcpSecretNames(cfg: McpServerConfig): readonly string[] {
   return cfg.transport === 'stdio' ? cfg.envNames : cfg.headerNames
 }
+
+/**
+ * 「这台服务器的密钥现在存了哪几个键」——`mcp:setSecrets` / `mcp:getSecretsInfo` 的回程。
+ *
+ * ★ 回的是**键名**,不是值。键名本来就明文躺在 `mcp_servers.json` 的
+ * `envNames` / `headerNames` 里,回传它不泄露任何东西;而值是那条
+ * 「凭证频道只写不读」规矩管着的东西(方案 §9),永远不回程。
+ *
+ * 为什么不复用 `CredentialInfo`:那个形状是给**单个** apiKey 设计的
+ * (`last4` 取末四位)。MCP 这边是一张 map,「末四位」对一张 map 没有意义 ——
+ * 硬套的话界面上会出现一个来自随机某个键的四位数字,比不显示更糟。
+ */
+export interface McpSecretsInfo {
+  /** 库里真的存着值的键名,是 `mcpSecretNames(cfg)` 的子集 */
+  storedNames: string[]
+  /** Linux 无 keyring 时为 false —— 界面要照实横幅,而不是假装存上了 */
+  encryptionAvailable: boolean
+}

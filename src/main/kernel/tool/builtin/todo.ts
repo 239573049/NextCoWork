@@ -23,17 +23,20 @@ import type { ToolRegistration } from '../registry'
 const MAX_TODOS = 40
 
 const TodoItem = z.object({
-  content: z.string().min(1).max(500).describe('任务内容,祈使句,例如「跑测试」'),
-  status: z.enum(['pending', 'in_progress', 'completed']).describe('任务状态'),
+  content: z.string().min(1).max(500).describe('The task, in imperative form, e.g. "Run the tests"'),
+  status: z.enum(['pending', 'in_progress', 'completed']).describe('The task state'),
   activeForm: z
     .string()
     .min(1)
     .max(500)
-    .describe('进行时的说法,例如「正在跑测试」—— 这一条进行中时界面上显示的就是它')
+    .describe('The present continuous form, e.g. "Running the tests" — this is what the UI shows while it is in progress')
 })
 
 const TodoWriteInput = z.object({
-  todos: z.array(TodoItem).max(MAX_TODOS).describe('完整的任务清单。**每次都要发全量**,不是增量')
+  todos: z
+    .array(TodoItem)
+    .max(MAX_TODOS)
+    .describe('The complete task list. ALWAYS send the WHOLE list, never a delta')
 })
 
 const MARK: Record<z.infer<typeof TodoItem>['status'], string> = {
@@ -45,27 +48,30 @@ const MARK: Record<z.infer<typeof TodoItem>['status'], string> = {
 export const todoWriteTool: ToolRegistration = defineTool({
   internalId: 'TodoWrite',
   description:
-    '用这个工具管理当前任务的清单。它能帮你把工作拆开、记住进度,也让用户看得见你在做什么。\n\n' +
-    '什么时候该用:\n' +
-    '- 任务需要三步以上,或者要动多个文件\n' +
-    '- 用户一口气给了好几件事(编号的、逗号分隔的都算)\n' +
-    '- 任务不简单、值得先想清楚顺序\n' +
-    '- 刚拿到需求时:先列出来,再开工\n' +
-    '- 开始做某一项之前:把它标成 in_progress\n' +
-    '- 做完某一项之后:**立刻**标成 completed,不要攒着一起标\n\n' +
-    '什么时候不用:\n' +
-    '- 只有一步、而且很直接的事\n' +
-    '- 纯粹是回答一个问题、解释一段代码\n' +
-    '- 三两下就做完的事 —— 这时候用它反而是噪音\n\n' +
-    '怎么用:\n' +
-    '- **每次都发全量清单**,不是只发变化的那几条。发什么,清单就变成什么\n' +
-    '- 状态只有三种:pending(还没开始)、in_progress(正在做)、completed(做完了)\n' +
-    '- ★ **同一时刻只能有一项 in_progress**。全都标成进行中等于没有计划,' +
-    '而用户在界面上看到的是「它同时在做五件事」\n' +
-    '- content 用祈使句(「跑测试」),activeForm 用进行时(「正在跑测试」),两个都要给\n' +
-    '- 只有**真的做完并且验证过**才标 completed。测试还红着、实现还缺一半,就留在 in_progress,' +
-    '并另开一条把没做完的部分写清楚\n' +
-    '- 做不下去时不要标 completed:留着它,再加一条说明卡在哪里',
+    'Use this tool to manage a task list for the work in front of you. It helps you break the work up, ' +
+    'keeps track of where you are, and shows the user what you are doing.\n\n' +
+    'When to use it:\n' +
+    '- The task takes three or more steps, or touches several files\n' +
+    '- The user gave you several things at once (numbered, or comma-separated)\n' +
+    '- The task is non-trivial and the order matters\n' +
+    '- As soon as you receive the request: write the list first, then start\n' +
+    '- Before starting an item: mark it in_progress\n' +
+    '- After finishing an item: mark it completed IMMEDIATELY. Do NOT batch completions up\n\n' +
+    'When NOT to use it:\n' +
+    '- A single, straightforward step\n' +
+    '- Purely answering a question or explaining some code\n' +
+    '- Anything you can finish in a couple of actions — here the list is just noise\n\n' +
+    'How to use it:\n' +
+    '- ALWAYS send the complete list, not just the entries that changed. What you send IS the list\n' +
+    '- There are exactly three states: pending (not started), in_progress (working on it now), ' +
+    'completed (done)\n' +
+    '- IMPORTANT: EXACTLY ONE item may be in_progress at a time. Marking everything in progress is the ' +
+    'same as having no plan, and the user sees "it is doing five things at once"\n' +
+    '- content is imperative ("Run the tests"), activeForm is present continuous ("Running the tests"). ' +
+    'Both are required\n' +
+    '- Mark completed ONLY when the work is actually done AND verified. If tests are still failing or the ' +
+    'implementation is half-finished, leave it in_progress and add a new entry describing what is left\n' +
+    '- NEVER mark something completed because you got stuck. Leave it, and add an entry saying what blocked you',
   schema: TodoWriteInput,
   /*
     ★ readOnly。它不碰磁盘、不碰网络,而 plan 模式(`readOnlyOnly` 快照)
@@ -73,14 +79,15 @@ export const todoWriteTool: ToolRegistration = defineTool({
   */
   readOnly: true,
   destructive: false,
-  // eslint-disable-next-line @typescript-eslint/require-await -- 契约要求 Promise;这个工具本身没有任何异步的事要做
+  needsNetwork: false,
+  // 契约要求返回 Promise;这个工具本身没有任何异步的事要做
   async run(input) {
     const { todos } = input
 
     if (todos.length === 0) {
       return toolFail(
-        '任务清单是空的。要么给出至少一条任务,要么就别调用这个工具 —— ' +
-          '发一个空清单会把界面上已经列出来的计划抹掉。'
+        'The task list is empty. Either send at least one task, or do not call this tool at all — ' +
+          'an empty list wipes out the plan the user can already see.'
       )
     }
 
@@ -92,9 +99,9 @@ export const todoWriteTool: ToolRegistration = defineTool({
     const active = todos.filter((t) => t.status === 'in_progress')
     if (active.length > 1) {
       return toolFail(
-        `同一时刻只能有一项 in_progress,你给了 ${String(active.length)} 项:` +
-          `${active.map((t) => `「${t.content}」`).join('、')}。` +
-          `请只保留你**此刻**真正在做的那一项,其余的改回 pending。`
+        `Exactly one item may be in_progress at a time, and you sent ${String(active.length)}: ` +
+          `${active.map((t) => `"${t.content}"`).join(', ')}. ` +
+          `Keep only the one you are ACTUALLY working on right now, and set the rest back to pending.`
       )
     }
 
@@ -102,8 +109,9 @@ export const todoWriteTool: ToolRegistration = defineTool({
     const body = todos.map((t) => `${MARK[t.status]} ${t.content}`).join('\n')
 
     return toolOk(
-      `清单已更新(${String(done)}/${String(todos.length)} 完成):\n${body}\n\n` +
-        `继续按这份清单做。做完一项就立刻再调一次这个工具把它标掉,不要等到最后一起标。`
+      `Todo list updated (${String(done)}/${String(todos.length)} completed):\n${body}\n\n` +
+        `Keep working through this list. As soon as an item is done, call this tool again to mark it — ` +
+        `do NOT wait and mark them all at the end.`
     )
   }
 })

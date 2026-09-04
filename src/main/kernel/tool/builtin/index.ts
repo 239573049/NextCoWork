@@ -17,8 +17,11 @@ import { bashTool } from './bash'
 import { echoTool } from './echo'
 import { editTool, lsTool, readTool, writeTool } from './fs'
 import { globTool, grepTool } from './search'
+import { skillTool } from './skill'
+import { taskTool } from './task'
 import { todoWriteTool } from './todo'
 import { webFetchTool } from './web'
+import { webSearchTool } from './web-search'
 
 export function builtinTools(): ToolRegistration[] {
   return [
@@ -32,8 +35,16 @@ export function builtinTools(): ToolRegistration[] {
     grepTool,
     bashTool,
     todoWriteTool,
-    webFetchTool
-    // 批次 4:Skill;批次 5:Task
+    webFetchTool,
+    skillTool,
+    webSearchTool,
+    /*
+      ★ `Task` 是唯一一个**每次现造**的内置工具:它的 description 里逐字带着
+      当前可用的子代理清单(照搬 CC),而那份清单会随目录重扫而变。
+      `runtime.ts` 在每次 run 之前会用新的清单再 `register()` 一次 ——
+      注册表按 internalId 幂等替换且保住 externalName,所以历史转录不会失配。
+    */
+    taskTool()
   ]
 }
 
@@ -41,5 +52,8 @@ export { bashTool } from './bash'
 export { echoTool } from './echo'
 export { editTool, lsTool, readTool, writeTool } from './fs'
 export { globTool, grepTool } from './search'
+export { skillTool } from './skill'
+export { taskTool } from './task'
 export { todoWriteTool } from './todo'
 export { webFetchTool } from './web'
+export { webSearchTool } from './web-search'

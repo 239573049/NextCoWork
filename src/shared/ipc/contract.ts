@@ -18,7 +18,9 @@ import type { RunRequest } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
 import type { DirListing } from '../domain/file-tree'
-import type { McpServerConfig, McpServerStatus } from '../domain/mcp'
+import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
+import type { ProxyPasswordInfo } from '../domain/proxy'
+import type { SearchProviderId, SearchProviderStatus } from '../domain/search'
 import type {
   CredentialInfo,
   FailoverEvent,
@@ -34,6 +36,7 @@ import type {
   StorageStats
 } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
+import type { ImageTheme } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
@@ -84,6 +87,33 @@ export function hasSeqGap(env: AgentEventEnvelope, lastSeq: number): boolean {
   return envelopeFirstSeq(env) !== lastSeq + 1
 }
 
+/**
+ * `theme:importImage` 的回程:主进程已经把文件收进 `userData/themes/`,
+ * 但**还没登记** —— 种子色和色点要等渲染层解码完这张位图才算得出来
+ * (`extractPalette` 要的是 RGBA,而主进程没有 canvas)。
+ *
+ * 所以导入是**两相**的:这一相给字节,渲染层算完再走 `theme:saveImage` 落表。
+ * 中途放弃(窗口关了、这张图解不开)留下的是一个没进表的孤儿文件,下次启动扫掉 ——
+ * 而不是一条读得出文件、读不出颜色的坏记录。**宁可丢文件,不要留坏行。**
+ */
+export interface ImportedImage {
+  id: string
+  /** 文件名去掉扩展名,当作这张卡的默认名字 */
+  name: string
+  mime: string
+  /**
+   * ★ **`<ArrayBuffer>` 不是装饰。** TS 5.7 起 `Uint8Array` 对底层缓冲泛型化,
+   * 而裸 `Uint8Array` 推出来的是 `ArrayBufferLike` —— 里面含着 `SharedArrayBuffer`,
+   * 于是 `new Blob([bytes])` 不给过(`BlobPart` 只收 `ArrayBufferView<ArrayBuffer>`)。
+   * 而渲染层拿到这些字节**唯一要做的事**就是建 Blob 去解码。
+   *
+   * 写死成 `<ArrayBuffer>` 是**如实描述**,不是糊弄编译器:主进程那边是
+   * `new Uint8Array(readFileSync(...))`,结构化克隆过来的也从不是共享内存。
+   * 换成在调用点 `new Uint8Array(bytes)` 复制一份,代价是白拷一次最大 16MB。
+   */
+  bytes: Uint8Array<ArrayBuffer>
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 二、渲染 → 主,要返回值(invoke)
 // ═══════════════════════════════════════════════════════════════
@@ -97,6 +127,29 @@ export interface IpcInvokeMap {
   'settings:get': { req: void; res: AppSettings }
   // 嵌套块可以只给要改的属性 —— 见 AppSettingsPatch 的注释(那是一整类竞态)
   'settings:update': { req: AppSettingsPatch; res: AppSettings }
+
+  // ── 图片主题(设置 › 偏好 › 图片主题)──
+  /** ★ 选文件走主进程 dialog.showOpenDialog —— 渲染层永不指定任意路径(方案 §9) */
+  'theme:importImage': { req: void; res: ImportedImage | null }
+  /**
+   * 导入第二相:渲染层解码算出 seed/palette 之后才登记。返回登记后的全表 ——
+   * 让调用点不必再补一次 `theme:listImages`(两次调用之间的那一小段里,
+   * 界面上的列表和磁盘上的表是两回事)。
+   */
+  'theme:saveImage': {
+    req: { id: string; name: string; seed: string; palette: string[] }
+    res: ImageTheme[]
+  }
+  'theme:listImages': { req: void; res: ImageTheme[] }
+  /**
+   * ★ **id → 查表 → 路径。** 渲染层递进来的 id 只用来查一条记录,
+   * 拿到的是主进程当初自己写下的路径;id 本身**从不参与 `join`**(方案 §9)。
+   */
+  'theme:readImage': {
+    req: { id: string }
+    res: { mime: string; bytes: Uint8Array<ArrayBuffer> }
+  }
+  'theme:deleteImage': { req: { id: string }; res: ImageTheme[] }
 
   // ── 工作区 ──
   'workspace:list': { req: void; res: Workspace[] }
@@ -155,6 +208,53 @@ export interface IpcInvokeMap {
   'mcp:upsert': { req: McpServerConfig; res: McpServerStatus }
   'mcp:remove': { req: { id: string }; res: void }
   'mcp:testConnection': { req: { id: string }; res: McpServerStatus }
+  /**
+   * stdio 的环境变量值 / HTTP 的请求头值。**只写不读**,和 `provider:setCredential`
+   * 同一条规矩 —— 回程只说存了哪几个键名(见 `McpSecretsInfo`)。
+   *
+   * 和 `mcp:upsert` 分开两条频道,而不是把值塞进 `McpServerConfig`:
+   * 那个类型会被写进 `mcp_servers.json` 那一列,也会被将来的「导出配置」读到。
+   * 值一旦进了这个类型,总有一天会跟着配置一起落到明文里。
+   */
+  'mcp:setSecrets': { req: { id: string; values: Record<string, string> }; res: McpSecretsInfo }
+  'mcp:getSecretsInfo': { req: { id: string }; res: McpSecretsInfo }
+
+  // ── 搜索服务(设置 › 连接 › 搜索服务)──
+  /*
+    ★ 叫 `websearch:*` 而不是 `search:*`。本仓库已经有一个「搜索」了 ——
+    `conversations:searchAll` 那个本地全文检索。两个 `search:` 前缀混在同一张表里,
+    下一个人接手时得先读实现才知道哪个是哪个,而频道名恰恰是最该自解释的地方。
+  */
+  'websearch:list': { req: void; res: SearchProviderStatus[] }
+  'websearch:setEnabled': { req: { id: SearchProviderId; enabled: boolean }; res: void }
+  /** 拖拽排序的落点。全量给一遍顺序,而不是 `{from,to}` —— 界面已经算好了 */
+  'websearch:reorder': { req: { ids: SearchProviderId[] }; res: void }
+  /** ★ 只写不读,和 `provider:setCredential` 同一条规矩(方案 §9) */
+  'websearch:setCredential': { req: { id: SearchProviderId; apiKey: string }; res: CredentialInfo }
+  'websearch:clearCredential': { req: { id: SearchProviderId }; res: void }
+  /**
+   * 真发一次最小查询。**不返回搜索结果**,只返回通不通 ——
+   * 返回结果的话这条频道就成了一个绕过工具链、绕过联网开关的搜索入口。
+   */
+  'websearch:test': {
+    req: { id: SearchProviderId }
+    res: { ok: boolean; latencyMs?: number; message?: string }
+  }
+
+  // ── 网络代理(设置 › 连接 › 网络)──
+  /*
+    代理的其余字段都在 `AppSettings.proxy` 里,经 `settings:update` 走 ——
+    **只有密码另开频道**。理由和 `provider:setCredential` 一样:`AppSettings`
+    是要被 `settings:get` 整个读回渲染层的,密码进了那个类型,就等于每次
+    打开设置页都往渲染进程送一次明文。
+
+    回程是 `{hasKey, encryptionAvailable}`,**没有 last4**。API Key 的末四位
+    是用来认「我填的是哪一把」的(用户手里往往有好几把);密码只有一个,
+    末四位帮不上忙,却实实在在泄了四个字符。
+  */
+  'proxy:setPassword': { req: { password: string }; res: ProxyPasswordInfo }
+  'proxy:clearPassword': { req: void; res: ProxyPasswordInfo }
+  'proxy:getPasswordInfo': { req: void; res: ProxyPasswordInfo }
 
   // ── Skill ──
   'skills:list': { req: { workspaceId?: string }; res: SkillListItem[] }
@@ -227,6 +327,7 @@ export interface IpcEventMap {
   'workspace:changed': { workspaces: Workspace[] }
   'skills:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
+  'websearch:changed': { providers: SearchProviderStatus[] }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -250,6 +351,11 @@ export const INVOKE_CHANNELS = {
   'app:openExternal': 1,
   'settings:get': 1,
   'settings:update': 1,
+  'theme:importImage': 1,
+  'theme:saveImage': 1,
+  'theme:listImages': 1,
+  'theme:readImage': 1,
+  'theme:deleteImage': 1,
   'workspace:list': 1,
   'workspace:pick': 1,
   'workspace:update': 1,
@@ -278,6 +384,17 @@ export const INVOKE_CHANNELS = {
   'mcp:upsert': 1,
   'mcp:remove': 1,
   'mcp:testConnection': 1,
+  'mcp:setSecrets': 1,
+  'mcp:getSecretsInfo': 1,
+  'websearch:list': 1,
+  'websearch:setEnabled': 1,
+  'websearch:reorder': 1,
+  'websearch:setCredential': 1,
+  'websearch:clearCredential': 1,
+  'websearch:test': 1,
+  'proxy:setPassword': 1,
+  'proxy:clearPassword': 1,
+  'proxy:getPasswordInfo': 1,
   'skills:list': 1,
   'skills:setGlobalEnabled': 1,
   'skills:setWorkspaceActive': 1,
@@ -313,7 +430,8 @@ export const EVENT_CHANNELS = {
   'theme:changed': 1,
   'workspace:changed': 1,
   'skills:changed': 1,
-  'mcp:changed': 1
+  'mcp:changed': 1,
+  'websearch:changed': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

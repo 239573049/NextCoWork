@@ -121,11 +121,43 @@ export type RunDriver = (handle: RunHandle, req: RunRequest) => void | Promise<v
  */
 export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver = runAgent): void {
   windows.subscribe(runTopic(req.runId), ctx.sender)
+  launch(req, driver)
+}
 
+/**
+ * 建 handle、建泵、开跑。**不订阅** —— 订阅是窗口的事,而子 run 没有自己的窗口。
+ *
+ * 拆出来的理由就是这一句:`startRun` 和 `startChildRun` 的差别**只有订阅从哪儿来**,
+ * 其余三步必须一模一样。写成两份的话,哪天有人只在 `startRun` 里加了一行,
+ * 子 run 那条路径就少了那一行,而症状会出现在完全不相干的地方。
+ */
+function launch(req: RunRequest, driver: RunDriver): RunHandle {
   const handle = runs.create(req)
   pumps.set(req.runId, new RunPump(handle))
-
   void driver(handle, req)
+  return handle
+}
+
+/**
+ * 派一个子 run。
+ *
+ * ★ **订阅继承自父 run**,这是整条子代理链路上最容易漏、也最难查的一步:
+ * 不做的话一切正常、没有报错、只是界面上什么都不发生 —— 因为
+ * `RunPump.flush()` 在没有订阅者时会**整批丢弃**事件(见 `flush` 里那段注释)。
+ * 单测里只断言「子 run 的 status 是 done」的话,这一步完全没接也是绿的,
+ * 所以 `subagent-wiring.test.ts` 断言的是父窗口真的收到了带子 runId 的信封。
+ *
+ * ★ 顺序:先继承订阅,**再** launch。反过来的话,子 run 头几个事件
+ * (它一定会先发一个 `context_usage`)会落进一个还没有订阅者的泵里,被整批丢掉。
+ * 这和 `startRun` 里「订阅在前、启动在后」是同一条规矩。
+ */
+export function startChildRun(
+  parent: RunHandle,
+  req: RunRequest,
+  driver: RunDriver = runAgent
+): RunHandle {
+  windows.inherit(runTopic(parent.runId), runTopic(req.runId))
+  return launch(req, driver)
 }
 
 /**

@@ -18,6 +18,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "e2e": "npm run build && node scripts/e2e-probe.mjs",
+    "e2e:theme": "npm run build && node scripts/theme-probe.mjs",
     "shot": "npm run build && node scripts/screenshot.mjs",
     "review": "node scripts/inline-shots.mjs docs/design-review.standalone.html",
     "test:watch": "vitest",

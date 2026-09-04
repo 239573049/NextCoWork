@@ -14,7 +14,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { McpServerConfig } from '../../../shared/domain/mcp'
+import { mcpSecretRef } from '../../../shared/domain/mcp'
+import { SEARCH_PROVIDER_IDS, searchSecretRef } from '../../../shared/domain/search'
 import { DEFAULT_SETTINGS } from '../../../shared/domain/settings'
+import { MIGRATIONS } from '../schema'
 import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
 import type { Workspace } from '../../../shared/domain/workspace'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
@@ -167,6 +171,97 @@ describe('密钥:数据库这一层只认字节', () => {
   })
 })
 
+/**
+ * V2 的两张表。这里测的仍然是「关了再开还在」,外加两件**只有跨进程才看得出来**的事:
+ * 删配置要连密钥一起删,以及搜索服务读回来是「目录八家」而不是「库里那几行」。
+ */
+describe('MCP 服务器', () => {
+  const stdio = (id: string): McpServerConfig => ({
+    id,
+    name: id,
+    enabled: true,
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-everything'],
+    envNames: ['TOKEN']
+  })
+
+  it('三种传输方式都能原样读回来', () => {
+    store.putMcpServer(stdio('local'))
+    store.putMcpServer({
+      id: 'remote',
+      name: '远端',
+      enabled: false,
+      transport: 'streamable-http',
+      url: 'https://mcp.example.com/v1',
+      headerNames: ['Authorization']
+    })
+    restart()
+
+    const all = store.listMcpServers()
+    expect(all.map((c) => c.id)).toEqual(['local', 'remote'])
+    const local = all[0]
+    expect(local?.transport).toBe('stdio')
+    // 可辨识联合读回来之后仍然是那个分支 —— JSON 列保住了变体特有的字段
+    expect(local !== undefined && local.transport === 'stdio' ? local.args : null).toEqual([
+      '-y',
+      '@modelcontextprotocol/server-everything'
+    ])
+  })
+
+  /**
+   * ★ 这一条是 `removeMcpServer` 存在的理由。只删配置的话,`credentials` 里
+   * 那行密文会变成孤儿(键名存在刚被删掉的配置里),而且下次建一个同 id 的
+   * 服务器会**默默继承**上一个的 token —— 症状是「我没填 Authorization,它却连上了」。
+   */
+  it('删服务器时密钥一起删,同 id 重建不会继承旧密钥', () => {
+    store.putMcpServer(stdio('s1'))
+    repo.putCredential(mcpSecretRef('s1', 'env'), new Uint8Array([9, 9]))
+    restart()
+    expect(repo.getCredential(mcpSecretRef('s1', 'env'))).toEqual(new Uint8Array([9, 9]))
+
+    store.removeMcpServer('s1')
+    restart()
+    expect(store.listMcpServers()).toEqual([])
+    expect(repo.getCredential(mcpSecretRef('s1', 'env'))).toBeUndefined()
+  })
+})
+
+describe('搜索服务', () => {
+  /**
+   * ★ 一家都没配过时库是空的,但界面要列出八家。这个左连接收在 repo 里做一次,
+   * 而不是让设置页、`web_search`、连通性测试各做一遍 —— 三份实现必然分叉。
+   */
+  it('库为空时也返回目录里的八家', () => {
+    const all = store.listSearchProviders()
+    expect(all).toHaveLength(SEARCH_PROVIDER_IDS.length)
+    expect(all.every((c) => !c.enabled)).toBe(true)
+  })
+
+  it('存过的按 priority 排在前,没存过的接在后面', () => {
+    store.putSearchProviders([
+      { id: 'brave', enabled: true, priority: 0 },
+      { id: 'tavily', enabled: true, priority: 1 }
+    ])
+    restart()
+
+    const all = store.listSearchProviders()
+    expect(all.slice(0, 2).map((c) => c.id)).toEqual(['brave', 'tavily'])
+    // 八家一个不少 —— 覆盖两家不等于把另外六家弄丢了
+    expect(all).toHaveLength(SEARCH_PROVIDER_IDS.length)
+  })
+
+  it('清 Key 只清这一家,不动别家', () => {
+    repo.putCredential(searchSecretRef('tavily'), new Uint8Array([1]))
+    repo.putCredential(searchSecretRef('exa'), new Uint8Array([2]))
+    store.clearSearchCredential('tavily')
+    restart()
+
+    expect(repo.getCredential(searchSecretRef('tavily'))).toBeUndefined()
+    expect(repo.getCredential(searchSecretRef('exa'))).toEqual(new Uint8Array([2]))
+  })
+})
+
 describe('迁移', () => {
   it('重开不会重跑迁移,也不会清空已有的行', () => {
     store.putProvider(provider('主', 0))
@@ -178,8 +273,16 @@ describe('迁移', () => {
     const version = raw.prepare('PRAGMA user_version').get()
     raw.close()
 
-    expect(rows).toHaveLength(1)
-    expect(Number(version?.['user_version'])).toBe(1)
+    /*
+      ★ 对着 `MIGRATIONS` 断言,不写死数字。写死的话每加一条迁移都会挂在这里,
+      而失败信息(`expected 2 to be 1`)完全说不出「你只是加了条迁移」——
+      下一个人会先去怀疑迁移跑重了。这一条要测的是**重开不重跑**,
+      也就是「行数 == 迁移条数」,而不是「行数 == 1」。
+    */
+    expect(rows).toHaveLength(MIGRATIONS.length)
+    expect(Number(version?.['user_version'])).toBe(
+      MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0)
+    )
     expect(store.listProviders()).toHaveLength(1)
   })
 
@@ -251,5 +354,135 @@ describe('openDatabase 的调用顺序是被钉死的', () => {
     closeDatabase()
     store.listProviders() // 没人指定位置 —— 开一个内存库兜底
     expect(() => openDatabase(dir)).toThrow(/内存兜底/)
+  })
+})
+
+/**
+ * 第 3 条迁移(`model_pricing` / `usage_records`)。定价库的访问器还没写(步骤 3/5),
+ * 所以这一组直接对表断言 —— 测的是 **DDL 承诺的那几件事**,而它们都会**静默**地坏:
+ *
+ * 1. 加了外键 → 整张种子表插不进去;
+ * 2. 唯一索引写成普通复合主键 → 重复行共存,查价随机命中一条;
+ * 3. `cost_micros` 写成 NOT NULL DEFAULT 0 → 「查不到定价」变成「这次免费」。
+ *
+ * 三件都不会有人报 bug,所以在这里钉住。
+ */
+describe('定价与用量的表结构', () => {
+  /** 直连库文件。`enableForeignKeyConstraints` 默认为 true,正是外键那条要的环境 */
+  const raw = (): DatabaseSync => new DatabaseSync(join(dir, DB_FILENAME))
+
+  const insertPricing = (
+    d: DatabaseSync,
+    providerId: string | null,
+    modelId: string,
+    effectiveFrom: string | null
+  ): void => {
+    d.prepare(
+      `INSERT INTO model_pricing
+         (provider_id, model_id, effective_from, display_name, currency, modality,
+          tiers, source, fetched_at)
+       VALUES (?, ?, ?, 'x', 'USD', 'text', '[]', 'https://example.com', '2026-09-04')`
+    ).run(providerId, modelId, effectiveFrom)
+  }
+
+  /**
+   * ★★ **`model_pricing.provider_id` 上不能有外键。**
+   *
+   * 种子表按**厂商**记价(`deepseek` / `zai`),而那些厂商用户可能一个都没配 ——
+   * 加外键的后果不是「少几行」,是**整张种子表一行都插不进去**,
+   * 表现为「装完之后定价页整页空白」。
+   *
+   * 这条用一个**确定不存在**于 providers 表里的 id 去插,所以它红的时候
+   * 只有一个可能:有人给这列补了 `REFERENCES providers (id)`。
+   */
+  it('provider_id 指向一个没配过的厂商时照样插得进去(不能有外键)', () => {
+    const d = raw()
+    expect(d.prepare('SELECT COUNT(*) c FROM providers').get()?.['c']).toBe(0)
+    expect(() => insertPricing(d, 'deepseek', 'deepseek-v4-flash', null)).not.toThrow()
+    d.close()
+  })
+
+  /**
+   * ★ NULL 在 UNIQUE 里彼此不相等,所以 `(provider_id, model_id, effective_from)`
+   * 做普通复合主键**挡不住**这一条 —— 表达式索引是唯一拦得住的写法。
+   */
+  it('通用价(provider_id 与 effective_from 都为 NULL)不能重复', () => {
+    const d = raw()
+    insertPricing(d, null, 'gpt-6-astra', null)
+    expect(() => insertPricing(d, null, 'gpt-6-astra', null)).toThrow(/UNIQUE/)
+    d.close()
+  })
+
+  /** 反向:索引不能宽到把该共存的行也拦掉 —— 这两种形状种子表里都真实存在 */
+  it('同名模型的不同厂商价、以及同厂商的不同生效区间,都能共存', () => {
+    const d = raw()
+    insertPricing(d, null, 'glm-5.3-flash', null)
+    insertPricing(d, 'zai', 'glm-5.3-flash', '2026-01-01')
+    insertPricing(d, 'zai', 'glm-5.3-flash', '2026-09-10')
+    expect(d.prepare('SELECT COUNT(*) c FROM model_pricing').get()?.['c']).toBe(3)
+    d.close()
+  })
+
+  /**
+   * ★★ `cost_micros` 的 NULL 和 0 是**两个不同的事实**:前者「查不到定价」,
+   * 后者「真的不要钱」。PricingTable 顶部那张「用过但查不到定价」的表就是
+   * 靠 `IS NULL` 筛出来的 —— 这一列要是 NOT NULL DEFAULT 0,那个入口直接失效,
+   * 而「种子表 modelId 抄错了」从此没有任何外显方式。
+   */
+  it('cost_micros 可空,且 NULL 与 0 查得出区别', () => {
+    const d = raw()
+    const ins = (id: string, cost: number | null): void => {
+      d.prepare(
+        `INSERT INTO usage_records
+           (id, at, run_id, provider_id, alias, upstream_model, latency_ms, ok, cost_micros)
+         VALUES (?, 1, 'r', 'p', 'a', 'm', 10, 1, ?)`
+      ).run(id, cost)
+    }
+    ins('无定价', null)
+    ins('免费', 0)
+
+    const missing = d.prepare('SELECT id FROM usage_records WHERE cost_micros IS NULL').all()
+    expect(missing.map((r) => r['id'])).toEqual(['无定价'])
+    d.close()
+  })
+
+  /**
+   * ★ 和上一条**刻意相反**:token 数缺省补 0 是对的 —— `TokenUsage` 里没有缓存字段
+   * 就是真的没有那类 token。这条断言把这个不对称固定下来,免得有人为了「一致」
+   * 把两边改成同一种写法(往哪边改都会坏掉其中一个)。
+   */
+  it('token 计数列缺省是 0,不是 NULL', () => {
+    const d = raw()
+    d.prepare(
+      `INSERT INTO usage_records (id, at, run_id, provider_id, alias, upstream_model, latency_ms, ok)
+       VALUES ('x', 1, 'r', 'p', 'a', 'm', 10, 1)`
+    ).run()
+    const row = d.prepare('SELECT * FROM usage_records WHERE id = ?').get('x')
+    expect(row?.['input_tokens']).toBe(0)
+    expect(row?.['cache_write_1h_tokens']).toBe(0)
+    // 同一行里,没给的费用仍然是 NULL
+    expect(row?.['cost_micros']).toBeNull()
+    d.close()
+  })
+
+  it('两张表跨重启都在,索引也在', () => {
+    restart()
+    const d = raw()
+    const names = (type: string): string[] =>
+      d
+        .prepare(`SELECT name FROM sqlite_master WHERE type = ? AND name NOT LIKE 'sqlite_%'`)
+        .all(type)
+        .map((r) => String(r['name']))
+    expect(names('table')).toEqual(expect.arrayContaining(['model_pricing', 'usage_records']))
+    expect(names('index')).toEqual(
+      expect.arrayContaining([
+        'model_pricing_key',
+        'model_pricing_by_model',
+        'usage_records_by_at',
+        'usage_records_by_model',
+        'usage_records_by_provider'
+      ])
+    )
+    d.close()
   })
 })

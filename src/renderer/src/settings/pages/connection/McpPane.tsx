@@ -1,0 +1,213 @@
+/**
+ * MCP —— 参考图那一页的服务器列表。
+ *
+ * ★ **一行显示的是「配置 + 连接状态」合成的一份**(`McpServerStatus`),
+ * 不是渲染层拿两份自己 join。理由写在那个类型的注释里:两份各自到达,
+ * 中间那一帧必然有一边是旧的 —— 表现为「刚加的服务器先显示未连接,
+ * 一秒后才跳成已连接」,而它其实从来没断过。
+ *
+ * ★ **所有写操作都不本地 `set`**,等主进程的 `mcp:changed` 广播回来
+ * (store 里写了理由)。于是「停用」这个开关按下去到变色之间有一小段延迟,
+ * 那段延迟是真的 —— 它正在断开一个子进程。假装立刻断了才是骗人。
+ */
+import { Cable, Loader2, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { useEffect, useState, type ReactNode } from 'react'
+import type { McpConnectionState, McpServerStatus } from '../../../../../shared/domain/mcp'
+import { Button } from '../../../components/ui/Button'
+import { EmptyState } from '../../../components/ui/EmptyState'
+import { IconButton } from '../../../components/ui/IconButton'
+import { Toggle } from '../../../components/ui/Toggle'
+import { cn } from '../../../lib/cn'
+import { testMcpConnection } from '../../../services/mcp'
+import { useMcpStore } from '../../../stores/mcp'
+import { SettingGroup } from '../../Row'
+import { McpServerDialog } from './McpServerDialog'
+
+const STATE_TEXT: Readonly<Record<McpConnectionState, string>> = {
+  disconnected: '未连接',
+  connecting: '连接中',
+  connected: '已连接',
+  error: '连接失败'
+}
+
+const STATE_DOT: Readonly<Record<McpConnectionState, string>> = {
+  disconnected: 'bg-fg-faint',
+  connecting: 'bg-accent-soft',
+  connected: 'bg-accent',
+  error: 'bg-danger'
+}
+
+export function McpPane(): ReactNode {
+  const { servers, loaded, error, load, upsert, remove } = useMcpStore()
+  const [dialog, setDialog] = useState<{ open: boolean; editing: McpServerStatus | null }>({
+    open: false,
+    editing: null
+  })
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  return (
+    <SettingGroup>
+      <div className="flex items-center justify-between px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-[13px] text-fg">MCP 服务器</p>
+          <p className="mt-0.5 text-[12px] text-fg-faint">
+            连上之后,它带来的工具会以 <code className="text-fg-muted">mcp__ID__工具名</code>{' '}
+            出现在模型的工具列表里。
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="accent"
+          icon={<Plus size={13} />}
+          onClick={() => setDialog({ open: true, editing: null })}
+        >
+          添加
+        </Button>
+      </div>
+
+      {/* ★ 读失败和「一台都没加」是两回事,分开说 —— 混成一句会让用户去添加
+          一台他其实已经加过的服务器 */}
+      {error !== null ? (
+        <div className="px-4 pb-4">
+          <p className="rounded-[8px] bg-danger/10 px-2.5 py-2 text-[12px] text-danger">
+            读取服务器列表失败:{error}
+          </p>
+        </div>
+      ) : !loaded ? (
+        <div className="flex items-center justify-center gap-2 py-8 text-[12.5px] text-fg-faint">
+          <Loader2 size={14} className="animate-spin" />
+          正在读取
+        </div>
+      ) : servers.length === 0 ? (
+        <EmptyState
+          icon={<Cable size={22} />}
+          title="暂无自定义 MCP 服务器"
+          hint="添加一台之后,它提供的工具会自动注册进模型可用的工具列表。"
+        />
+      ) : (
+        <ul className="border-t border-hairline">
+          {servers.map((s) => (
+            <ServerRow
+              key={s.config.id}
+              status={s}
+              onToggle={(enabled) => void upsert({ ...s.config, enabled })}
+              onEdit={() => setDialog({ open: true, editing: s })}
+              onRemove={() => void remove(s.config.id)}
+            />
+          ))}
+        </ul>
+      )}
+
+      <McpServerDialog
+        open={dialog.open}
+        editing={dialog.editing}
+        existingIds={servers.map((s) => s.config.id)}
+        onClose={() => setDialog({ open: false, editing: null })}
+      />
+    </SettingGroup>
+  )
+}
+
+function ServerRow({
+  status,
+  onToggle,
+  onEdit,
+  onRemove
+}: {
+  status: McpServerStatus
+  onToggle: (enabled: boolean) => void
+  onEdit: () => void
+  onRemove: () => void
+}): ReactNode {
+  const { config, state, tools, toolCount } = status
+  const [testing, setTesting] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  /** 「测试连接」的结果。失败是正常返回值,不是异常 —— 见 services/mcp.ts */
+  const [tested, setTested] = useState<string | null>(null)
+
+  const test = (): void => {
+    setTesting(true)
+    setTested(null)
+    void testMcpConnection(config.id)
+      .then((r) => {
+        setTested(r.ok ? `连上了,${String(r.data.toolCount)} 个工具` : r.error.message)
+      })
+      .finally(() => setTesting(false))
+  }
+
+  const where =
+    config.transport === 'stdio'
+      ? [config.command, ...config.args].join(' ')
+      : config.url
+
+  return (
+    <li className="border-b border-hairline px-4 py-3 last:border-b-0">
+      <div className="flex items-start gap-3">
+        <span
+          className={cn('mt-[7px] size-[7px] shrink-0 rounded-full', STATE_DOT[state])}
+          aria-hidden
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-[13px] text-fg">{config.name}</span>
+            <span className="shrink-0 rounded-[5px] bg-tint px-1.5 py-px text-[11px] text-fg-faint">
+              {config.transport === 'stdio' ? '本地进程' : config.transport === 'sse' ? 'SSE' : 'HTTP'}
+            </span>
+            <span className="shrink-0 text-[11.5px] text-fg-faint">{STATE_TEXT[state]}</span>
+          </div>
+
+          {config.description !== undefined && config.description !== '' && (
+            <p className="mt-0.5 truncate text-[12px] text-fg-muted">{config.description}</p>
+          )}
+          <p className="mt-0.5 truncate font-mono text-[11.5px] text-fg-faint">{where}</p>
+
+          {status.error !== undefined && (
+            <p className="mt-1.5 text-[11.5px] text-danger">{status.error}</p>
+          )}
+          {tested !== null && <p className="mt-1.5 text-[11.5px] text-fg-muted">{tested}</p>}
+
+          {/* 工具数是这台服务器有没有真的在干活的唯一可见证据 —— 连上了但零工具
+              通常意味着服务器起来了、握手也过了,但它什么也没暴露 */}
+          {toolCount > 0 && (
+            <button
+              type="button"
+              className="app-no-drag mt-1.5 text-[11.5px] text-accent hover:underline"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {toolCount} 个工具
+              {expanded ? ' ▾' : ' ▸'}
+            </button>
+          )}
+          {expanded && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {tools.map((t) => (
+                <code
+                  key={t}
+                  className="selectable rounded-[5px] bg-tint px-1.5 py-px text-[11px] text-fg-muted"
+                >
+                  {t}
+                </code>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <IconButton label="测试连接" onClick={test} disabled={testing}>
+            {testing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          </IconButton>
+          <IconButton label="编辑" onClick={onEdit}>
+            <Pencil size={14} />
+          </IconButton>
+          <IconButton label="删除" onClick={onRemove}>
+            <Trash2 size={14} />
+          </IconButton>
+          <Toggle label={`启用 ${config.name}`} checked={config.enabled} onChange={onToggle} />
+        </div>
+      </div>
+    </li>
+  )
+}

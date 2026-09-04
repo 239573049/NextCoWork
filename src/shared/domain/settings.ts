@@ -2,7 +2,14 @@
  * 应用级设置。工作区级的在 workspace.ts。
  */
 import type { PermissionMode } from '../agent/permission'
-import { DEFAULT_COLOR_THEME_ID, type ImageRender } from './theme'
+import type { ProxySettings } from './proxy'
+import { DEFAULT_PROXY, migrateLegacyProxy } from './proxy'
+import {
+  DEFAULT_COLOR_THEME_ID,
+  DEFAULT_CUSTOM_SEED,
+  type ColorThemeChoice,
+  type ImageRender
+} from './theme'
 
 /** 三态,默认跟随系统(方案 §8:深浅两套对等)。 */
 export type ThemePreference = 'system' | 'light' | 'dark'
@@ -18,18 +25,19 @@ export interface AppSettings {
   locale: 'zh-CN' | 'en-US'
 
   /**
-   * 「颜色主题」栏(随机 / 墨绿 / 霁青 / 极简 / Claude / 奢华)。
+   * 「颜色主题」栏(随机 / 墨绿 / 霁青 / 极简 / Claude / 奢华 / 自定义)。
+   *
+   * ★ 形状(`ColorThemeChoice`)归 `theme.ts` 所有 —— 认识这三个字段各归谁用的是
+   * `resolveColorTheme`,不是设置层。这里存的就是那一栏的全部状态。
    *
    * `id` 认不出来时 `resolveColorTheme` 落回默认而不抛 —— 它是从磁盘读回来的,
    * 而磁盘上可能存着一套后来被删掉的主题。
    *
-   * `seed` 只给「随机」那一套用,重掷一次 +1。**它必须落盘**:`randomSeedColor`
-   * 是种子的纯函数,正是为了让用户掷出来的那一套在重启之后还回得去。
+   * `seed`(给「随机」,重掷一次换一个)和 `custom`(给「自定义」,用户挑的那个
+   * 强调色)**都必须落盘**:两套主题都是由一个种子经 `specFromSeed` 现算的,
+   * 不落盘就回不到用户挑中的那一套。
    */
-  colorTheme: {
-    id: string
-    seed: number
-  }
+  colorTheme: ColorThemeChoice
 
   /**
    * 「图片主题」栏。选了图就**盖过** `colorTheme`(见 theme.ts 的 `tokensOf`)。
@@ -75,24 +83,27 @@ export interface AppSettings {
     planApproval: boolean
   }
 
-  /** 界面上的「代理」页对 AI 模型请求生效 —— 注入到 KernelHost.fetch */
-  proxy: {
-    enabled: boolean
-    url: string
-  }
+  /**
+   * 界面「连接 › 网络」那一页。★ 它**真的作用于全应用的出站请求** ——
+   * `main/net/proxy.ts` 把它翻译成 `session.defaultSession.setProxy`,
+   * 于是模型请求、MCP 的 HTTP 传输、搜索适配器一并跟着走(它们都经 `net.fetch`)。
+   *
+   * 形状与全部纯函数在 `proxy.ts`,那边的文件头解释了为什么拆成三段。
+   */
+  proxy: ProxySettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
   locale: 'zh-CN',
-  colorTheme: { id: DEFAULT_COLOR_THEME_ID, seed: 0 },
+  colorTheme: { id: DEFAULT_COLOR_THEME_ID, seed: 0, custom: DEFAULT_CUSTOM_SEED },
   imageTheme: { id: null, render: 'blur' },
   defaultPermissionMode: 'auto',
   defaultModel: '',
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
-  proxy: { enabled: false, url: '' }
+  proxy: structuredClone(DEFAULT_PROXY)
 }
 
 /**
@@ -141,7 +152,11 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.notifications !== undefined) {
     next.notifications = { ...next.notifications, ...patch.notifications }
   }
-  if (patch.proxy !== undefined) next.proxy = { ...next.proxy, ...patch.proxy }
+  // ★ 经一道迁移:旧库里这一块是 `{ enabled, url }`。`migrateLegacyProxy` 只在
+  // 三段字段缺席时才把 url 拆开,所以它对正常的表单 patch 是恒等的 —— 理由在 proxy.ts
+  if (patch.proxy !== undefined) {
+    next.proxy = { ...next.proxy, ...migrateLegacyProxy(patch.proxy) }
+  }
 
   return next
 }

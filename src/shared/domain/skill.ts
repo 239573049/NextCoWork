@@ -5,6 +5,15 @@
 
 export type SkillSourceKind = 'builtin' | 'folder' | 'zip' | 'git'
 
+/**
+ * 装在哪一层。
+ *
+ * ★ 和 `SkillSourceKind` 是两个不同的问题:`kind` 说的是**怎么装进来的**
+ * (从文件夹、从 zip、从 git),`scope` 说的是**装在哪儿**(全局 / 这个项目)。
+ * 同名时项目胜出,靠的是 scope,不是 kind —— 两条都可能是 `folder`。
+ */
+export type SkillScope = 'global' | 'project'
+
 export interface Skill {
   id: string
   /** `/name` 调用 */
@@ -13,6 +22,8 @@ export interface Skill {
   /** 开发工具 / 文档助手 / 数据分析 / … */
   category: string
   source: { kind: SkillSourceKind; path: string }
+  /** 全局装的还是这个项目里装的。同名时项目胜出。 */
+  scope?: SkillScope
   /** 全局开关;还要在工作区里单独启用才生效(界面「Skill 工作区选装模式」) */
   globalEnabled: boolean
   frontmatter: SkillFrontmatter
@@ -39,6 +50,7 @@ export interface SkillListItem {
   description: string
   category: string
   sourceKind: SkillSourceKind
+  scope?: SkillScope
   globalEnabled: boolean
   /** 在**当前**工作区是否激活 */
   activeInWorkspace: boolean

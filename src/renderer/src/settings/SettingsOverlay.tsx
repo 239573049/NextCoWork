@@ -27,6 +27,7 @@ import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
 import { Segmented } from '../components/ui/Segmented'
 import { TextInput } from '../components/ui/TextInput'
+import { useFocusTrap } from '../components/ui/useFocusTrap'
 import { prettyAccelerator } from '../lib/accelerator'
 import { cn } from '../lib/cn'
 import { updateSettings } from '../services/app'
@@ -43,10 +44,10 @@ import { AboutPage } from './pages/AboutPage'
 import { ConnectionPage } from './pages/ConnectionPage'
 import { DataPage } from './pages/DataPage'
 import { GeneralPage } from './pages/GeneralPage'
-import { ModelPage } from './pages/ModelPage'
+import { ModelPage } from './pages/model/ModelPage'
 import { PreferencePage } from './pages/PreferencePage'
 import { StubPage } from './pages/StubPage'
-import { useFocusTrap } from './useFocusTrap'
+
 
 export function SettingsOverlay({
   page,

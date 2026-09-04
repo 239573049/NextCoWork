@@ -212,6 +212,7 @@ describe('agent:run 走默认驱动 · 真 session + 内置演示上游', () => 
         schema: z.object({ text: z.string(), delayMs: z.number().optional() }),
         readOnly: true,
         destructive: false,
+        needsNetwork: false,
         async run(input, ctx) {
           await abortableSleep(30_000, ctx.signal)
           return toolOk(input.text)

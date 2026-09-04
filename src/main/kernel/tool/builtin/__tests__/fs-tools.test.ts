@@ -85,13 +85,13 @@ describe('Read', () => {
     writeFileSync(join(root, 'a.txt'), 'one\ntwo')
     const r = await readTool.execute({ file_path: join(root, 'a.txt'), offset: 99 }, ctx())
     expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('2 行')
+    expect(r.output.content).toContain('only 2 lines')
   })
 
   it('超长的行被截断,并标注出来', async () => {
     writeFileSync(join(root, 'min.js'), 'x'.repeat(5000))
     const r = await readTool.execute({ file_path: join(root, 'min.js') }, ctx())
-    expect(r.output.content).toContain('[本行已截断]')
+    expect(r.output.content).toContain('[line truncated]')
     expect(r.output.content.length).toBeLessThan(3000)
   })
 
@@ -113,14 +113,14 @@ describe('Read', () => {
     writeFileSync(join(root, 'blob.bin'), Buffer.from([0x50, 0x4b, 0x00, 0x01, 0x02]))
     const r = await readTool.execute({ file_path: join(root, 'blob.bin') }, ctx())
     expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('二进制')
+    expect(r.output.content).toContain('binary file')
   })
 
   it('空文件不是错误 —— 说清楚它存在但是空的', async () => {
     writeFileSync(join(root, 'empty.txt'), '')
     const r = await readTool.execute({ file_path: join(root, 'empty.txt') }, ctx())
     expect(r.isError).toBeFalsy()
-    expect(r.output.content).toContain('空')
+    expect(r.output.content).toContain('empty')
   })
 
   it('太大的文件被拒绝,并指向 Grep / sed', async () => {
@@ -141,7 +141,7 @@ describe('Write', () => {
       ctx()
     )
     expect(r.isError).toBeFalsy()
-    expect(r.output.content).toContain('已创建')
+    expect(r.output.content).toContain('Created')
     const back = await readTool.execute({ file_path: join(root, 'a/b/c.ts') }, ctx())
     expect(back.output.content).toContain('export const x = 1')
   })
@@ -166,7 +166,7 @@ describe('Write', () => {
     await readFirst('a.txt', c)
     const r = await writeTool.execute({ file_path: join(root, 'a.txt'), content: '新的' }, c)
     expect(r.isError).toBeFalsy()
-    expect(r.output.content).toContain('已覆盖')
+    expect(r.output.content).toContain('Overwrote')
   })
 
   /** ★ 状态按 run 分桶 —— 换一次运行就要重新确认文件的当下内容 */
@@ -233,7 +233,7 @@ describe('Edit', () => {
       c
     )
     expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('3 次')
+    expect(r.output.content).toContain('appears 3 times')
     const back = await readTool.execute({ file_path: join(root, 'a.ts') }, c)
     expect(back.output.content).not.toContain('bar')
   })
@@ -247,7 +247,7 @@ describe('Edit', () => {
       c
     )
     expect(r.isError).toBeFalsy()
-    expect(r.output.content).toContain('3 处')
+    expect(r.output.content).toContain('3 occurrence')
   })
 
   /**
@@ -264,7 +264,7 @@ describe('Edit', () => {
     )
     expect(r.isError).toBe(true)
     expect(r.output.content).not.toContain(SECRET)
-    expect(r.output.content).toContain('行号')
+    expect(r.output.content).toContain('line-number prefix')
   })
 
   it('old_string 和 new_string 一样时直接拒绝', async () => {
@@ -312,7 +312,7 @@ describe('LS', () => {
     mkdirSync(join(root, 'empty'))
     const r = await lsTool.execute({ path: join(root, 'empty') }, ctx())
     expect(r.isError).toBeFalsy()
-    expect(r.output.content).toContain('空目录')
+    expect(r.output.content).toContain('empty directory')
   })
 
   it('传文件时指向 Read', async () => {
@@ -347,7 +347,7 @@ describe('★ 路径逃逸', () => {
       const r = await readTool.execute({ file_path: p }, ctx())
       expect(r.isError, why).toBe(true)
       expect(r.output.content, why).not.toContain(SECRET)
-      expect(r.output.content, why).toContain('工作区')
+      expect(r.output.content, why).toContain('workspace')
     }
   })
 
@@ -396,7 +396,7 @@ describe('★ 路径逃逸', () => {
     for (const [name, p] of calls) {
       const r = await p
       expect(r.isError, name).toBe(true)
-      expect(r.output.content, name).toContain('工作区')
+      expect(r.output.content, name).toContain('workspace')
     }
   })
 })
