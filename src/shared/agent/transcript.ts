@@ -33,6 +33,17 @@ export interface ToolCallState {
   /** 易失,不进转录(方案 §4.3) */
   progress?: string
   output?: ToolOutput
+  /**
+   * `tool_start` 到达时的墙钟毫秒。
+   *
+   * ★ **可选,且不新增事件类型。** 事件自带 `at` 时用事件的(那是主进程打的戳,
+   * 排除了 IPC 排队延迟);没有就退化到 `Date.now()`。已落盘的旧转录重放时两者都没有
+   * 就只剩 `Date.now()`,算出来的耗时不准 —— 那是历史数据的固有损失,
+   * 不值得为它做一次转录格式迁移。
+   */
+  startedAt?: number
+  /** `tool_end` 到达时的墙钟毫秒。 */
+  endedAt?: number
 }
 
 export interface TranscriptState {
@@ -159,7 +170,13 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         ...s,
         tools: {
           ...s.tools,
-          [e.callId]: { callId: e.callId, name: e.toolName, input: e.input, status: 'running' }
+          [e.callId]: {
+            callId: e.callId,
+            name: e.toolName,
+            input: e.input,
+            status: 'running',
+            startedAt: e.at ?? Date.now()
+          }
         }
       }
 
@@ -185,7 +202,8 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             ...base,
             status: e.isError ? 'error' : 'ok',
             output: e.output,
-            progress: undefined
+            progress: undefined,
+            endedAt: e.at ?? Date.now()
           }
         }
       }

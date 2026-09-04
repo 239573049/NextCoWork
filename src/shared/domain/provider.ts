@@ -7,6 +7,31 @@
 
 export type UpstreamProtocol = 'anthropic' | 'openai-chat' | 'openai-responses'
 
+/** Anthropic prompt-cache lifetime configured per provider. */
+export type AnthropicCacheTtl = 'off' | '5m' | '1h'
+
+/** Protocol-specific options are deliberately nested so future protocols can add their own fields. */
+export interface AnthropicProtocolOptions {
+  cacheTtl: AnthropicCacheTtl
+}
+
+export interface ProviderProtocolOptions {
+  anthropic?: AnthropicProtocolOptions
+}
+
+/**
+ * Runtime boundary for provider JSON. Older exports and hand-edited records may
+ * omit this field or contain an unknown value; those records must never
+ * accidentally enable caching.
+ */
+export function normalizeAnthropicCacheTtl(value: unknown): AnthropicCacheTtl {
+  return value === '5m' || value === '1h' ? value : 'off'
+}
+
+export function anthropicCacheTtlOf(provider: Pick<UpstreamProvider, 'protocolOptions'>): AnthropicCacheTtl {
+  return normalizeAnthropicCacheTtl(provider.protocolOptions?.anthropic?.cacheTtl)
+}
+
 export const PROTOCOL_LABEL: Record<UpstreamProtocol, string> = {
   anthropic: 'Anthropic Messages',
   'openai-chat': 'OpenAI Chat Completions',
@@ -50,6 +75,8 @@ export interface UpstreamProvider {
   /** 故障切换顺序,小的优先 */
   priority: number
   enabled: boolean
+  /** Protocol-specific settings. Missing on legacy provider JSON. */
+  protocolOptions?: ProviderProtocolOptions
 }
 
 /** 设置页对密钥**只写不读**:返回这个,永不回传明文。 */
@@ -66,6 +93,41 @@ export interface ModelCapabilities {
   /** 为 false 时忽略 ThinkingLevel:界面「不支持该参数的模型将自动忽略此设置」 */
   thinking: boolean
   caching: boolean
+  /** Extended capability matrix used by the model management console. */
+  textInput?: boolean
+  fileInput?: boolean
+  videoInput?: boolean
+  audioInput?: boolean
+  textOutput?: boolean
+  imageOutput?: boolean
+  videoOutput?: boolean
+  audioOutput?: boolean
+  webSearch?: boolean
+  structuredOutput?: boolean
+  streaming?: boolean
+  batch?: boolean
+}
+
+export type ModelModality = 'text' | 'image' | 'video' | 'speech' | 'transcription'
+export type ThinkingMode = 'unsupported' | 'always' | 'toggle' | 'effort' | 'budget'
+
+export interface ThinkingConfig {
+  mode: ThinkingMode
+  defaultEnabled: boolean
+  defaultEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'max'
+  defaultBudgetTokens?: number
+  parameterPath?: string
+}
+
+export interface RequestPatchRule {
+  op: 'add' | 'replace' | 'remove'
+  path: string
+  value?: unknown
+}
+
+export interface RequestAdapterConfig {
+  preset: 'auto' | 'anthropic' | 'openai-chat' | 'openai-responses' | 'custom'
+  patches: RequestPatchRule[]
 }
 
 export interface ModelAlias {
@@ -77,6 +139,82 @@ export interface ModelAlias {
   capabilities: ModelCapabilities
   contextWindow: number
   maxOutputTokens: number
+  displayName?: string
+  modality?: ModelModality
+  enabled?: boolean
+  thinkingConfig?: ThinkingConfig
+  requestAdapter?: RequestAdapterConfig
+  source?: { url: string; fetchedAt: string; verifiedAt?: string }
+}
+
+/**
+ * 从上游 `GET …/models` 拉回来的一条。**这不是配置,是上游报上来的事实。**
+ *
+ * 和 `ModelAlias` 分开是因为两者知道的东西完全不同:这边只有一个真实模型名
+ * (顶多再加个显示名),而别名表里那些 `capabilities` / `contextWindow`
+ * **模型列表端点根本不提供** —— 两族协议都不提供。合成一个类型的话,
+ * 那几个字段在导入这条路上只能被编出来。
+ */
+export interface FetchedModel {
+  /** 下发给上游的真实模型名 */
+  id: string
+  /** Anthropic 的 `display_name`。OpenAI 族没有这个字段 */
+  displayName?: string
+}
+
+/**
+ * 一家供应商最多配多少个别名。参考图的导入弹窗写死了这个数
+ * (「取消勾选会从当前列表删除(最多 20 个)」/「更新列表(17/20)」)。
+ *
+ * ★ 主进程**也要**照它拒绝,不是只做界面上的置灰:频道可以被直接调用
+ * (协议 §3 规则 6 同一个理由),而这个上限的实际作用是挡住
+ * 「一家聚合平台拉回来 300 个模型,用户手一滑全勾上」——
+ * 那之后左列和模型下拉框会长到没法用。
+ */
+export const MAX_ALIASES_PER_PROVIDER = 20
+
+/**
+ * 导入一个**新**模型时,别名表那三样填什么。
+ *
+ * ★★ **模型列表端点不给这些信息,所以这里没有「正确答案」,只有「错的方向」。**
+ * 三个值各自选了错起来代价小的那一侧:
+ *
+ * - `thinking: false` —— 全表唯一有运行时后果的一个
+ *   (`agent-session.ts` 拿它决定要不要下发思考预算)。填 true 而模型不支持,
+ *   请求直接 400,用户连话都发不出去;填 false 而模型支持,只是思考档位被忽略,
+ *   而界面上本来就写着「不支持该参数的模型将自动忽略此设置」。
+ * - `maxOutputTokens: 8192` —— 它就是 `max_tokens`。填高了模型直接 400,
+ *   填低了只是回答短一点。和 `agent-session.ts` 的 `FALLBACK_MAX_OUTPUT` 同值,
+ *   那边是「查不到别名」,这边是「查得到但不知道上限」——**同一个未知,同一个偏向**。
+ * - `tools` / `vision` / `caching` —— 今天全应用没有任何代码读它们
+ *   (grep 得到零个消费者),所以填什么都不改变行为。跟着 seed 那条走,
+ *   将来真接上去的时候是一次统一的改动,而不是「导入进来的和种进去的不一样」。
+ */
+export const IMPORTED_ALIAS_DEFAULTS: {
+  capabilities: ModelCapabilities
+  contextWindow: number
+  maxOutputTokens: number
+} = {
+  capabilities: {
+    tools: true,
+    vision: true,
+    thinking: false,
+    caching: true,
+    textInput: true,
+    fileInput: false,
+    videoInput: false,
+    audioInput: false,
+    textOutput: true,
+    imageOutput: false,
+    videoOutput: false,
+    audioOutput: false,
+    webSearch: false,
+    structuredOutput: true,
+    streaming: true,
+    batch: false
+  },
+  contextWindow: 200_000,
+  maxOutputTokens: 8192
 }
 
 // ─── 健康与故障切换(方案 §5.3) ───

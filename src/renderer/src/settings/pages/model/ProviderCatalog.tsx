@@ -1,13 +1,17 @@
-import { ExternalLink, Search, Shuffle } from 'lucide-react'
+import { Check, ExternalLink, Loader2, Plus, Search, Shuffle } from 'lucide-react'
 import { useMemo, useState, type ReactNode } from 'react'
 import { PROVIDER_PRESETS, type ProviderPreset } from '../../../../../shared/domain/presets'
+import { Button } from '../../../components/ui/Button'
 import { Dialog } from '../../../components/ui/Dialog'
 import { EmptyState } from '../../../components/ui/EmptyState'
 import { Segmented } from '../../../components/ui/Segmented'
 import { TextInput } from '../../../components/ui/TextInput'
 import { cn } from '../../../lib/cn'
 import { openExternal } from '../../../services/app'
-import { avatarInitial } from './enabled-models'
+import { upsertProvider } from '../../../services/provider'
+import { useModelsStore } from '../../../stores/models'
+import { ProviderAvatar } from './ProviderAvatar'
+import { isPresetAdded, providerFromPreset } from './provider-edit'
 import {
   CATALOG_TABS,
   divergentCount,
@@ -24,12 +28,20 @@ import {
 /**
  * 「添加供应商」的预设目录 —— 参考图那个五分类卡片网格。
  *
- * ★ **这个弹窗现在是只读的,它是一本册子,不是一个添加流程。** 点卡片不会
- * 建出供应商 —— `provider:upsert` 还是 `todo()`(步骤 4)。所以卡片不做成按钮:
- * 一个点下去没反应的卡片,用户会以为是自己没点中。
+ * ★★ **前一版的文件头写着「这个弹窗是只读的,它是一本册子,不是一个添加流程」——
+ * 那句已经不成立了。** 当时 `provider:upsert` 还是 `todo()`,一张点下去没反应的卡片
+ * 会让用户以为是自己没点中,所以刻意不做成按钮。频道现在通了,每张卡片右下角
+ * 因此有了「添加」。
  *
- * 但它今天就有实打实的用处,因为**里面每个字都是实测来的**:
- * `presets.ts` 那 42 条的判据是 `curl` 探针 + **同前缀假路径对照**
+ * ★ 但**只有那颗按钮是按钮,卡片本身仍然不是** —— 卡片上还有「接入文档」这个
+ * 会打开浏览器的动作,整卡可点的话,想看文档的人会先建出一个供应商。
+ *
+ * ★ 已经建过的显示「已添加」并置灰,不是重复建一条:`upsertProvider` 按 id 覆盖,
+ * 再点一次会把用户改过的地址和名字冲回预设的初值 —— 而 key 还留着,于是变成
+ * 「密钥没动、地址被换走」,这种配置错到报错为止都看不出来。
+ *
+ * 卡片里每个字都是实测来的:
+ * `presets.ts` 那些条目的判据是 `curl` 探针 + **同前缀假路径对照**
  * (DeepSeek / 火山 / 星火 / 智谱这几家对任意路径都返回 401,不做对照全是假阳性)。
  * 用户手上有一个域名想知道是哪家、或者配到一半 401 想查是不是走错了鉴权域,
  * 这本册子直接答得上来 —— 这些正是调研报告里最贵的那部分,不该停在 md 文件里。
@@ -39,13 +51,17 @@ import {
  */
 export function ProviderCatalog({
   open,
-  onClose
+  onClose,
+  onAdded
 }: {
   open: boolean
   onClose: () => void
+  /** 建好之后把左列选到它。不给的话用户建完还得自己去找刚加的那一条 */
+  onAdded?: (providerId: string) => void
 }): ReactNode {
   const [tab, setTab] = useState<CatalogTab>('recommended')
   const [query, setQuery] = useState('')
+  const providers = useModelsStore((s) => s.providers)
 
   // 搜索时跨全表找 —— 用户打「openrouter」不该还要先猜它在哪个分类
   const list = useMemo(
@@ -58,7 +74,7 @@ export function ProviderCatalog({
       open={open}
       onClose={onClose}
       title="添加供应商"
-      description={`内置 ${PROVIDER_PRESETS.length} 家预设,地址与协议经探针实测。选中后建档要等 provider:upsert(步骤 4)`}
+      description={`内置 ${PROVIDER_PRESETS.length} 家预设,地址与协议经探针实测。添加后在右侧填密钥即可用`}
       width={760}
     >
       <div className="flex items-center gap-3 pb-3">
@@ -103,13 +119,19 @@ export function ProviderCatalog({
       ) : (
         <div className="grid grid-cols-2 gap-2.5">
           {list.map((p) => (
-            <PresetCard key={p.id} preset={p} />
+            <PresetCard
+              key={p.id}
+              preset={p}
+              added={isPresetAdded(p, providers)}
+              onAdded={onAdded}
+            />
           ))}
         </div>
       )}
 
       <p className="mt-4 border-t border-hairline pt-3 text-[11.5px] leading-[1.6] text-fg-faint">
-        42 家里有 {divergentCount()} 家<span className="text-fg-muted">换协议就换地址</span>
+        {PROVIDER_PRESETS.length} 家里有 {divergentCount()} 家
+        <span className="text-fg-muted">换协议就换地址</span>
         (OpenRouter 的 OpenAI 端是 /api/v1、Anthropic 端是 /api)。所以地址是挂在协议上的, 翻「API
         格式」开关时会跟着换 —— 不然表单看着完全正常,请求 404。
       </p>
@@ -117,21 +139,35 @@ export function ProviderCatalog({
   )
 }
 
-function PresetCard({ preset: p }: { preset: ProviderPreset }): ReactNode {
+function PresetCard({
+  preset: p,
+  added,
+  onAdded
+}: {
+  preset: ProviderPreset
+  added: boolean
+  onAdded?: (providerId: string) => void
+}): ReactNode {
   const rows = endpointRows(p)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const add = (): void => {
+    const draft = providerFromPreset(p)
+    // endpoints 非空是预设表的结构约束(presets.test.ts 守着),这里兜底不报错
+    if (draft === null) return
+    setBusy(true)
+    setError(null)
+    void upsertProvider(draft)
+      .then(() => onAdded?.(draft.id))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false))
+  }
 
   return (
     <div className="min-w-0 rounded-[10px] border border-border bg-canvas px-3 py-2.5">
       <div className="flex items-center gap-2">
-        <span
-          className={cn(
-            'flex size-5 shrink-0 items-center justify-center rounded-[6px]',
-            'bg-surface-sunken text-[10px] text-fg-muted'
-          )}
-          aria-hidden
-        >
-          {avatarInitial(p.name)}
-        </span>
+        <ProviderAvatar name={p.name} id={p.id} size="sm" />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg" title={p.name}>
           {p.name}
         </span>
@@ -175,6 +211,19 @@ function PresetCard({ preset: p }: { preset: ProviderPreset }): ReactNode {
         <p className="mt-1.5 text-[11px] leading-[1.55] text-fg-muted">{p.notes}</p>
       )}
 
+      {p.suggestedModels.length > 0 && (
+        <p
+          className="mt-1.5 truncate font-mono text-[10.5px] text-fg-faint"
+          title={p.suggestedModels.join('\n')}
+        >
+          {p.suggestedModels.join(' · ')}
+        </p>
+      )}
+
+      {/* ★ 原样显示主进程回的那句话。这里最可能出现的是 baseUrl 被拒
+          (`normalizeBaseUrl` 只放行 http/https),概括成「添加失败」就没了线索 */}
+      {error !== null && <p className="mt-1.5 text-[10.5px] text-danger">{error}</p>}
+
       <div className="mt-2 flex items-center gap-2">
         <button
           type="button"
@@ -188,13 +237,22 @@ function PresetCard({ preset: p }: { preset: ProviderPreset }): ReactNode {
           <ExternalLink size={10} />
           接入文档
         </button>
-        {p.suggestedModels.length > 0 && (
-          <span
-            className="min-w-0 flex-1 truncate text-right font-mono text-[10.5px] text-fg-faint"
-            title={p.suggestedModels.join('\n')}
-          >
-            {p.suggestedModels.join(' · ')}
+        <span className="min-w-0 flex-1" />
+        {added ? (
+          <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
+            <Check size={11} />
+            已添加
           </span>
+        ) : (
+          <Button
+            size="sm"
+            variant="accent"
+            disabled={busy}
+            icon={busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            onClick={add}
+          >
+            添加
+          </Button>
         )}
       </div>
     </div>

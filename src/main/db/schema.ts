@@ -233,8 +233,127 @@ CREATE INDEX usage_records_by_model ON usage_records (upstream_model, at DESC);
 CREATE INDEX usage_records_by_provider ON usage_records (provider_id, at DESC);
 `
 
+/**
+ * 第 4 条：会话转录与本机数据管理。
+ *
+ * 会话/消息的正文仍以 JSON 保存，避免把 ContentPart[] 压扁成字符串后丢掉
+ * 工具调用、思考签名和图片引用。可查询字段单独提列，FTS 索引由 repository
+ * 在 message_commit 边界维护。
+ */
+const V4_SESSIONS = `
+CREATE TABLE sessions (
+  id                   TEXT PRIMARY KEY,
+  workspace_id         TEXT NOT NULL,
+  title                TEXT NOT NULL,
+  model                TEXT NOT NULL,
+  mode                 TEXT NOT NULL,
+  thinking             TEXT NOT NULL,
+  root_path_at_creation TEXT NOT NULL,
+  status               TEXT NOT NULL DEFAULT 'idle',
+  archived             INTEGER NOT NULL DEFAULT 0,
+  favorited            INTEGER NOT NULL DEFAULT 0,
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL,
+  json                 TEXT NOT NULL
+);
+CREATE INDEX sessions_by_workspace ON sessions (workspace_id, archived, updated_at DESC);
+CREATE INDEX sessions_by_updated ON sessions (updated_at DESC);
+
+CREATE TABLE messages (
+  id             TEXT PRIMARY KEY,
+  session_id     TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+  ordinal        INTEGER NOT NULL,
+  role           TEXT NOT NULL,
+  parts          TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  created_at     INTEGER NOT NULL,
+  UNIQUE (session_id, ordinal)
+);
+CREATE INDEX messages_by_session ON messages (session_id, ordinal);
+
+CREATE TABLE runs (
+  id         TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+  status     TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at   INTEGER,
+  json       TEXT
+);
+CREATE INDEX runs_by_session ON runs (session_id, started_at DESC);
+
+CREATE TABLE attachments (
+  id          TEXT PRIMARY KEY,
+  session_id  TEXT REFERENCES sessions (id) ON DELETE CASCADE,
+  message_id  TEXT REFERENCES messages (id) ON DELETE CASCADE,
+  path        TEXT NOT NULL,
+  size        INTEGER NOT NULL DEFAULT 0,
+  checksum    TEXT,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX attachments_by_path ON attachments (path);
+CREATE INDEX attachments_by_message ON attachments (message_id);
+
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+  message_id UNINDEXED,
+  session_id UNINDEXED,
+  title,
+  content,
+  tokenize = 'unicode61'
+);
+`
+
+/**
+ * 第 5 条:附件的 scope 与生命周期。
+ *
+ * ## 为什么必须加这两列
+ *
+ * `attachments` 原本只记录**已经提交进消息**的会话附件,而清理规则是
+ * 「扫附件根目录,不在表里的一律删」。那条规则默认「表覆盖全集」。
+ *
+ * 一旦附件根下开始放别的东西,这个默认就不成立了,而它的失效方式是**静默删文件**:
+ *
+ * - 主题图不在表里 → 被当孤儿删掉
+ * - **用户刚上传、还没点发送的附件不在表里** → 挑好图去倒杯水,
+ *   期间清理跑过一次,回来图没了
+ *
+ * `scope` 让清理能按子树分治,`status` 把孤儿的定义从「表里没有」
+ * 收紧为「表里标记为可回收且已过宽限期」。
+ *
+ * ## 为什么是 ALTER 而不是重建表
+ *
+ * `attachments` 上有两条指向 `sessions`/`messages` 的外键。重建表要先关外键、
+ * 拷数据、改名、再开 —— 而 SQLite 的 `PRAGMA foreign_keys` 是**连接级**的,
+ * 在事务里改它不生效。两列都有默认值,ALTER 是安全且足够的。
+ */
+const V5_ATTACHMENT_SCOPE = `
+-- 既有行全部是「会话附件且已提交」——这正是加这两列之前唯一可能存在的形态,
+-- 所以默认值就是对历史数据的正确回填,不需要额外的 UPDATE。
+ALTER TABLE attachments ADD COLUMN scope TEXT NOT NULL DEFAULT 'session';
+ALTER TABLE attachments ADD COLUMN status TEXT NOT NULL DEFAULT 'committed';
+
+-- ★ owner_id 与 session_id 是**两回事**,不是冗余:
+--
+-- session_id 上有指向 sessions 的外键,而附件是在**发送之前**上传的 ——
+-- 用户新建对话、还没发第一条消息时,sessions 表里没有那一行
+-- (见 store.setHistory 里「渲染层可能在真正发送前就生成 sessionId」那句)。
+-- 上传时往 session_id 里填就会直接违反外键。
+--
+-- 所以:draft 行填 owner_id(无外键),消息提交时由 recordMessageAttachments
+-- 填上 session_id —— 那一刻会话行必然已经存在,CASCADE 从此生效。
+-- owner_id 同时给了 theme/export 的 ownerId 一个落点。
+ALTER TABLE attachments ADD COLUMN owner_id TEXT;
+UPDATE attachments SET owner_id = session_id WHERE owner_id IS NULL;
+
+-- 清理按 (status, created_at) 扫:找「draft 且超期」的那批
+CREATE INDEX attachments_by_status ON attachments (status, created_at);
+-- 上传去重按 (checksum, scope, owner_id) 查
+CREATE INDEX attachments_by_checksum ON attachments (checksum, scope, owner_id);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
-  { version: 3, name: 'pricing-usage', sql: V3_PRICING_USAGE }
+  { version: 3, name: 'pricing-usage', sql: V3_PRICING_USAGE },
+  { version: 4, name: 'sessions-data', sql: V4_SESSIONS },
+  { version: 5, name: 'attachment-scope', sql: V5_ATTACHMENT_SCOPE }
 ]

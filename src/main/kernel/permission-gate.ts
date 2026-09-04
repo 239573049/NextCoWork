@@ -91,3 +91,37 @@ export function describeOutcome(mode: PermissionMode, o: PermissionOutcome): str
   if (o.kind === 'ask') return `${mode}:需要询问`
   return `${mode}:拒绝`
 }
+
+/**
+ * `# Environment` 里那几行**权限事实**。
+ *
+ * ★ 它放在这里、跟着上面那张表走,而不是在 `context-assembler.ts` 里另写一份 ——
+ * 理由和 `text.ts` / `untrusted.ts` 文件头那条一样:**两处必须给出同一个答案**。
+ * 提示词说「写盘会被拒」而闸门其实放行(或者反过来),是最坏的一种漂移:
+ * 模型会据此**提前放弃**一件它本来做得成的事,而这中间不会有任何报错。
+ * 接上审批对话框那天,改的是这个文件,两边一起变。
+ *
+ * 写成事实而不是规则(见 `context-assembler.ts` 文件头第 3 关):模型**事前**
+ * 就知道自己写盘要不要审批,而不是撞一次墙再学 —— 撞墙那一轮不只是浪费,
+ * 它的下一步大概率是去试 `Bash` 绕。
+ */
+export function permissionFacts(mode: PermissionMode, webSearch: boolean): string {
+  const say = (readOnly: boolean, destructive: boolean): string => {
+    const o = evaluate({ mode, readOnly, destructive, webSearch })
+    if (o.kind === 'allow') return 'run without asking'
+    // ★ 这一批「需要询问」= 拒绝(见文件头)。如实说,别写成「会询问用户」——
+    //   提示词里的假事实比缺失的事实更糟,模型不会去质疑它。
+    if (o.kind === 'ask') return 'are DENIED — the approval dialog is not wired up in this build yet'
+    return 'are denied'
+  }
+  const net = webSearch
+    ? 'available'
+    : 'denied — the network switch is off for this workspace, and Bash cannot be used to route around it'
+
+  return (
+    `Permission mode: ${mode}\n` +
+    `- Reading and searching: ${say(true, false)}\n` +
+    `- Writing files and running commands: ${say(false, true)}\n` +
+    `- Tools that need the network: ${net}`
+  )
+}

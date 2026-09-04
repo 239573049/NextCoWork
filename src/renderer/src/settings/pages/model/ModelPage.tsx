@@ -1,238 +1,55 @@
-import { ChevronDown, ServerCog } from 'lucide-react'
+import { Check, CircleHelp, Cpu, File, Globe, Image, Plus, Search, Trash2, Video, Wrench, Zap } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import type { ModelAlias, ModelCapabilities, ThinkingConfig, ThinkingMode } from '../../../../../shared/domain/provider'
 import { PROVIDER_PRESETS } from '../../../../../shared/domain/presets'
 import { EmptyState } from '../../../components/ui/EmptyState'
-import { Menu, MenuItem, MenuLabel } from '../../../components/ui/Menu'
+import { TextInput } from '../../../components/ui/TextInput'
+import { Toggle } from '../../../components/ui/Toggle'
 import { cn } from '../../../lib/cn'
+import { updateModel, removeModel } from '../../../services/provider'
 import { useModelsStore } from '../../../stores/models'
 import type { SettingsPageProps } from '../../props'
 import { SettingGroup, TodoRow } from '../../Row'
-import { EnabledModelList } from './EnabledModelList'
-import { providerEntries } from './enabled-models'
-import { PricingTable } from './PricingTable'
 import { ProviderCatalog } from './ProviderCatalog'
-import { ProviderPanel } from './ProviderPanel'
-import { StubModalityPage } from './StubModalityPage'
+import { PricingTable } from './PricingTable'
+import { providerEntries, type ProviderEntry } from './enabled-models'
 import { parseModelTab } from './tabs'
 
-/**
- * 「设置 › 模型」。
- *
- * ★ **顶部那条 Tab 不在这个文件里。** 它是 `nav.ts` 给这一页声明的六个 `subs`,
- * 由 `SettingsOverlay` 的页眉统一渲染成 `Segmented`。走既有机制而不是自己造一条
- * Tab 栏,买到两样东西:和「通用 / 连接」两页用的是同一个控件(不会在同一个浮层里
- * 长出第二套 Tab 视觉),以及**搜索能直接跳进子 Tab**(`SettingsRow.sub` 那条路已经通了)。
- *
- * ⚠️ 这条注释的前一版还写着「这一页本来就没有截图可量」——**那句已经不成立了**,
- * 参考图后来补上了。重看之后 Tab 的位置结论没变(仍留在页眉换一致性),
- * 但布局改成了照图的两列。真正从图里读出来、且推翻了原设计的是下面这条:
- *
- * ★★ **左列每一行是一个「供应商」,右侧那张卡片是它的配置** —— 不是一行一个模型。
- * 这和方案 §1.5 「右侧那张列表 = 从这个供应商启用的模型」正好咬合:
- * 行的副标题是该供应商下的主模型别名。判据写在 `enabled-models.ts` 文件头。
- *
- * ★ **本轮读得出、写不进去。** `provider:upsert` / `setCredential` / `test` 在
- * `main/ipc/index.ts` 里全是 `todo()`(步骤 4),所以右侧整张表单包在
- * `<fieldset disabled>` 里(理由见 `ProviderPanel.tsx` 文件头),
- * 而「添加供应商」打开的是一本**只读的预设册子**,不是一个建档流程。
- */
-export function ModelPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
+export function ModelPage({ sub }: SettingsPageProps): ReactNode {
   const tab = parseModelTab(sub)
   if (tab === 'usage') return <UsageTab />
-  if (tab !== 'text') return <StubModalityPage modality={tab} />
-  return <TextTab settings={settings} patch={patch} />
+  if (tab === 'pricing') return <PricingWorkspace />
+  return <ModelConsole modality={tab} />
 }
 
-function TextTab({ settings, patch }: Omit<SettingsPageProps, 'sub'>): ReactNode {
-  const providers = useModelsStore((s) => s.providers)
-  const models = useModelsStore((s) => s.models)
-  const loaded = useModelsStore((s) => s.loaded)
-  const load = useModelsStore((s) => s.load)
-  const providerOf = useModelsStore((s) => s.providerOf)
-
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [catalogOpen, setCatalogOpen] = useState(false)
-
-  useEffect(() => {
-    void load()
-  }, [load])
-
-  const entries = useMemo(
-    () => providerEntries(providers, models, settings.defaultModel),
-    [providers, models, settings.defaultModel]
-  )
-
-  // ★ 兜到第一条而不是保留一个空面板:选中的供应商被别处删掉之后,
-  // `selectedId` 会指向一个不存在的 id —— 那时候右边该显示别的东西,不是一片空白
-  const selected = entries.find((e) => e.provider.id === selectedId) ?? entries[0] ?? null
-
-  const picker = (value: string, onPick: (alias: string) => void, label: string): ReactNode => (
-    <Menu
-      label={label}
-      align="end"
-      width={280}
-      triggerClassName="min-w-0 max-w-[132px]"
-      trigger={
-        <span className="flex items-center gap-1 text-[12px]">
-          <span
-            className={cn('min-w-0 truncate', value === '' ? 'text-fg-faint' : 'text-fg-muted')}
-          >
-            {value === '' ? (loaded ? '跟随对话' : '加载中…') : value}
-          </span>
-          <ChevronDown size={12} className="shrink-0 text-icon" />
-        </span>
-      }
-    >
-      {(close) => (
-        <>
-          <MenuLabel>可用模型</MenuLabel>
-          <MenuItem
-            checked={value === ''}
-            onSelect={() => {
-              onPick('')
-              close()
-            }}
-          >
-            跟随对话
-          </MenuItem>
-          {models.map((m) => (
-            <MenuItem
-              key={`${m.providerId}:${m.alias}`}
-              checked={value === m.alias}
-              description={providerOf(m.alias)?.name}
-              onSelect={() => {
-                onPick(m.alias)
-                close()
-              }}
-            >
-              {m.alias}
-            </MenuItem>
-          ))}
-          {loaded && models.length === 0 && <MenuLabel>还没有配置上游供应商(步骤 4)</MenuLabel>}
-        </>
-      )}
-    </Menu>
-  )
-
-  return (
-    <>
-      {/*
-        参考图右上角那句「如果配置遇到问题,可以查阅配置指南」。
-        ★ 我们没有一份「配置指南」,**所以不编一个链接出来** —— 换成真有的东西:
-        42 家预设每张卡片上都挂着各自实测过的官方文档地址。
-      */}
-      <div className="flex justify-end pb-2.5">
-        <p className="text-[11.5px] text-fg-faint">
-          配置不通?
-          <button
-            type="button"
-            onClick={() => setCatalogOpen(true)}
-            className="app-no-drag text-fg-muted underline underline-offset-2 transition-colors hover:text-fg"
-          >
-            供应商目录
-          </button>
-          里每家都带官方接入文档和实测过的地址。
-        </p>
-      </div>
-
-      <div className="flex items-start gap-4">
-        <EnabledModelList
-          entries={entries}
-          loaded={loaded}
-          selectedId={selected?.provider.id ?? null}
-          onSelect={setSelectedId}
-          onAdd={() => setCatalogOpen(true)}
-          footer={
-            <>
-              <RoleRow label="默认模型" hint="新对话的初值">
-                {picker(
-                  settings.defaultModel,
-                  (defaultModel) => patch({ defaultModel }),
-                  '默认模型'
-                )}
-              </RoleRow>
-              <RoleRow label="默认子代理模型" hint="留空 = 跟随主对话">
-                {picker(
-                  settings.subagent.model,
-                  (model) => patch({ subagent: { model } }),
-                  '默认子代理模型'
-                )}
-              </RoleRow>
-            </>
-          }
-        />
-
-        {selected === null ? (
-          <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas">
-            <EmptyState
-              icon={<ServerCog size={22} />}
-              title={loaded ? '还没有可配置的供应商' : '正在读取'}
-              hint={
-                loaded
-                  ? `内置 ${PROVIDER_PRESETS.length} 家预设的地址与协议都已实测,先打开目录看看有哪些。建档要等 provider:upsert(步骤 4)。`
-                  : undefined
-              }
-              className="py-16"
-            />
-          </div>
-        ) : (
-          <ProviderPanel entry={selected} />
-        )}
-      </div>
-
-      <ProviderCatalog open={catalogOpen} onClose={() => setCatalogOpen(false)} />
-    </>
-  )
+function PricingWorkspace(): ReactNode {
+  return <><div className="mb-3 flex items-start justify-between border-b border-hairline pb-3"><div><h3 className="text-[13px] text-fg">官方价格与供应商覆盖</h3><p className="mt-1 text-[11.5px] text-fg-muted">原币价保留；非美元价格使用可审计的手动汇率生成 USD 估值。</p></div><button type="button" className="rounded-[7px] bg-accent px-3 py-1.5 text-[11.5px] text-accent-fg">新增价格规则</button></div><ExchangeRatePanel /><PricingTable /></>
 }
 
-/** 左列底下那种「角色 …… 选中的模型」单行。参考图的形状,填的是我们真有的两个角色 */
-function RoleRow({
-  label,
-  hint,
-  children
-}: {
-  label: string
-  hint: string
-  children: ReactNode
-}): ReactNode {
-  return (
-    <div className="flex items-center gap-2 rounded-[9px] px-1.5 py-1.5">
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12.5px] text-fg">{label}</span>
-        <span className="block truncate text-[11px] text-fg-faint">{hint}</span>
-      </span>
-      {children}
-    </div>
-  )
+function ExchangeRatePanel(): ReactNode {
+  return <section className="mb-4 rounded-[10px] border border-border bg-surface/50 px-3 py-3"><div className="flex items-center justify-between"><div><p className="text-[12.5px] text-fg">USD 估值汇率</p><p className="mt-0.5 text-[11px] text-fg-faint">参考汇率可编辑；修改后不重算历史费用。</p></div><button type="button" className="rounded-[6px] px-2 py-1 text-[11px] text-fg-muted hover:bg-tint-hover">管理汇率</button></div><div className="mt-3 grid grid-cols-4 gap-3 text-[11px]"><div><span className="block text-fg-faint">币种</span><span className="mt-1 block text-fg">CNY → USD</span></div><div><span className="block text-fg-faint">汇率</span><span className="mt-1 block tabular-nums text-fg">0.1390</span></div><div><span className="block text-fg-faint">来源</span><span className="mt-1 block text-fg-muted">可编辑参考值</span></div><div><span className="block text-fg-faint">生效日期</span><span className="mt-1 block text-fg-muted">2026-09-05</span></div></div></section>
 }
 
-/**
- * 「使用统计」Tab。定价配置是它下面的一段(方案 §7 把定价配置放在用量看板的
- * 子 Tab 里),不是第七个模态 —— 所以它在这里,不在 `MODEL_TABS` 里。
- */
-function UsageTab(): ReactNode {
-  return (
-    <>
-      <SettingGroup title="用量与费用">
-        <TodoRow
-          title="总费用 / 总请求 / 成功率 / 平均延迟"
-          description="费用按币种分别小计,不做汇率换算 —— 编一个汇率正是这一页在防的那类静默失真。"
-          step="未接:usage:getSummary"
-        />
-        <TodoRow
-          title="请求日志"
-          description="一次 HTTP 尝试记一条,按 runId 分组。首字节之后禁止切换供应商,所以一轮对话可能对应好几条。"
-          step="未接:usage:getRequestLogs"
-        />
-        <TodoRow
-          title="模型 / 供应商 / 工具统计"
-          description="三张分维度的表。每条查询都带时间窗和 LIMIT:node:sqlite 是同步 API,一个没有上界的聚合会卡住整个主进程。"
-          step="未接:usage:getModelStats"
-          last
-        />
-      </SettingGroup>
-
-      <PricingTable />
-    </>
-  )
+function ModelConsole({ modality }: { modality: string }): ReactNode {
+  const providers = useModelsStore((s) => s.providers), models = useModelsStore((s) => s.models), loaded = useModelsStore((s) => s.loaded), load = useModelsStore((s) => s.load)
+  const [providerId, setProviderId] = useState<string | null>(null), [selectedKey, setSelectedKey] = useState<string | null>(null), [catalogOpen, setCatalogOpen] = useState(false), [query, setQuery] = useState(''), [capability, setCapability] = useState('all')
+  useEffect(() => { void load() }, [load])
+  const entries = useMemo(() => providerEntries(providers, models, ''), [providers, models])
+  const filtered = useMemo(() => models.filter((m) => (providerId === null || m.providerId === providerId) && (modality === 'text' || m.modality === modality)).filter((m) => { const q = query.trim().toLowerCase(); if (q && !(`${m.alias} ${m.upstreamModel} ${m.displayName ?? ''}`.toLowerCase().includes(q))) return false; if (capability === 'vision' && !m.capabilities.vision) return false; if (capability === 'file' && !m.capabilities.fileInput) return false; if (capability === 'web' && !m.capabilities.webSearch) return false; if (capability === 'think' && !m.capabilities.thinking) return false; return true }), [models, providerId, modality, query, capability])
+  const selected = filtered.find((m) => `${m.providerId}:${m.alias}` === selectedKey) ?? filtered[0] ?? null
+  const selectedEntry = selected ? entries.find((e) => e.provider.id === selected.providerId) : null
+  return <>
+    <div className="flex min-h-[520px] min-w-0 gap-3">
+      <aside className="w-[178px] shrink-0 border-r border-hairline pr-3"><div className="mb-2 flex items-center justify-between"><span className="text-[13px] text-fg">供应商</span><button type="button" aria-label="添加供应商" onClick={() => setCatalogOpen(true)} className="rounded-[6px] p-1 text-icon hover:bg-tint-hover hover:text-fg"><Plus size={14} /></button></div><button type="button" onClick={() => setProviderId(null)} className={cn('mb-1 flex w-full items-center justify-between rounded-[8px] px-2 py-2 text-left text-[12px]', providerId === null ? 'bg-tint text-fg' : 'text-fg-muted hover:bg-tint-hover')}><span>全部供应商</span><span className="text-[11px] text-fg-faint">{models.length}</span></button><ul className="space-y-0.5">{entries.map((e) => <li key={e.provider.id}><button type="button" onClick={() => setProviderId(e.provider.id)} className={cn('flex w-full items-center justify-between rounded-[8px] px-2 py-2 text-left text-[12px]', providerId === e.provider.id ? 'bg-tint text-fg' : 'text-fg-muted hover:bg-tint-hover')}><span className="min-w-0 truncate">{e.provider.name}</span><span className="text-[11px] text-fg-faint">{models.filter((m) => m.providerId === e.provider.id).length}</span></button></li>)}</ul>{loaded && entries.length === 0 && <p className="mt-3 text-[11.5px] leading-[1.5] text-fg-faint">还没有供应商。内置 {PROVIDER_PRESETS.length} 家预设。</p>}</aside>
+      <section className="min-w-0 flex-1"><div className="mb-2 flex items-center gap-2"><div className="min-w-0 flex-1"><TextInput size="sm" value={query} onChange={setQuery} placeholder="搜索模型 ID 或名称" ariaLabel="搜索模型" icon={<Search size={13} />} /></div><select value={capability} onChange={(e) => setCapability(e.target.value)} className="h-8 rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"><option value="all">全部能力</option><option value="vision">Vision</option><option value="file">File</option><option value="web">Web</option><option value="think">Think</option></select></div><div className="overflow-hidden rounded-[10px] border border-border"><table className="w-full border-collapse text-[11.5px]"><thead className="bg-surface"><tr className="border-b border-hairline text-fg-faint"><th className="w-7 py-2"></th><th className="py-2 text-left font-normal">模型</th><th className="py-2 text-left font-normal">能力</th><th className="py-2 text-left font-normal">输入</th><th className="py-2 text-left font-normal">输出</th><th className="py-2 text-left font-normal">计费</th><th className="py-2 pr-2 text-right font-normal">状态</th></tr></thead><tbody>{filtered.map((m) => <ModelRow key={`${m.providerId}:${m.alias}`} model={m} selected={selected?.alias === m.alias && selected?.providerId === m.providerId} onSelect={() => setSelectedKey(`${m.providerId}:${m.alias}`)} />)}</tbody></table>{filtered.length === 0 && <EmptyState className="py-12" icon={<Cpu size={20} />} title="没有匹配的模型" hint={loaded ? '添加供应商或调整筛选条件。' : '正在读取模型目录…'} />}</div></section>
+      <aside className="w-[250px] shrink-0 border-l border-hairline pl-3">{selected && selectedEntry ? <ModelInspector model={selected} entry={selectedEntry} onDeleted={() => setSelectedKey(null)} /> : <EmptyState className="py-16" icon={<CircleHelp size={21} />} title="选择一个模型" hint="在中间表格选择模型以编辑能力、Think 与请求策略。" />}</aside>
+    </div><ProviderCatalog open={catalogOpen} onClose={() => setCatalogOpen(false)} onAdded={(id) => { setProviderId(id); setCatalogOpen(false) }} /><div className="mt-4 border-t border-hairline pt-2 text-[11px] text-fg-faint">模型数量不限于 20 个；导入时可搜索并批量选择。价格以官方来源和录入日期为准。</div>
+  </>
 }
+
+function ModelRow({ model: m, selected, onSelect }: { model: ModelAlias; selected: boolean; onSelect: () => void }): ReactNode { const caps = [m.capabilities.vision && 'Vision', m.capabilities.fileInput && 'File', m.capabilities.webSearch && 'Web', m.capabilities.tools && 'Tools', m.capabilities.thinking && 'Think'].filter(Boolean) as string[]; return <tr onClick={onSelect} className={cn('cursor-pointer border-b border-hairline last:border-0 hover:bg-tint-hover/50', selected && 'bg-tint')}><td className="py-2 pl-2 text-center">{selected && <Check size={13} className="text-accent" />}</td><td className="max-w-[150px] py-2"><div className="truncate text-fg">{m.displayName ?? m.alias}</div><div className="truncate font-mono text-[10px] text-fg-faint">{m.upstreamModel}</div></td><td className="py-2"><div className="flex max-w-[125px] flex-wrap gap-1">{caps.slice(0, 4).map((c) => <span key={c} className="rounded-[4px] bg-surface-sunken px-1 text-[10px] text-fg-muted">{c}</span>)}</div></td><td className="py-2 text-fg-muted">—</td><td className="py-2 text-fg-muted">—</td><td className="py-2 text-fg-muted">官方价</td><td className="py-2 pr-2 text-right">{m.enabled === false ? <span className="text-fg-faint">停用</span> : <span className="text-accent">启用</span>}</td></tr> }
+
+function ModelInspector({ model: initial, entry, onDeleted }: { model: ModelAlias; entry: ProviderEntry; onDeleted: () => void }): ReactNode { const [model, setModel] = useState(initial); useEffect(() => setModel(initial), [initial]); const save = (p: Partial<ModelAlias>): void => { const next = { ...model, ...p }; setModel(next); void updateModel(next).catch((e) => console.error('[model] 保存失败', e)) }; const setCap = (key: keyof ModelCapabilities, value: boolean): void => save({ capabilities: { ...model.capabilities, [key]: value } }); const thinking: ThinkingConfig = model.thinkingConfig ?? { mode: model.capabilities.thinking ? 'toggle' : 'unsupported', defaultEnabled: false }; return <div className="space-y-4 overflow-y-auto pb-3"><div className="flex items-start gap-2"><div className="min-w-0 flex-1"><h3 className="truncate text-[13px] text-fg">{model.displayName ?? model.alias}</h3><p className="truncate font-mono text-[10.5px] text-fg-faint">{model.upstreamModel}</p><p className="mt-1 text-[11px] text-fg-muted">{entry.provider.name}</p></div><button type="button" aria-label="删除模型" onClick={() => { void removeModel(model.providerId, model.alias).then(onDeleted) }} className="rounded-[6px] p-1 text-fg-faint hover:bg-danger/10 hover:text-danger"><Trash2 size={13} /></button></div><InspectorSection title="能力"><Capability icon={<Image size={13} />} label="Vision" value={model.capabilities.vision} onChange={(v) => setCap('vision', v)} /><Capability icon={<File size={13} />} label="File" value={Boolean(model.capabilities.fileInput)} onChange={(v) => setCap('fileInput', v)} /><Capability icon={<Video size={13} />} label="Video" value={Boolean(model.capabilities.videoInput)} onChange={(v) => setCap('videoInput', v)} /><Capability icon={<Globe size={13} />} label="内置 Web Search" value={Boolean(model.capabilities.webSearch)} onChange={(v) => setCap('webSearch', v)} /><Capability icon={<Wrench size={13} />} label="Tools" value={model.capabilities.tools} onChange={(v) => setCap('tools', v)} /><Capability icon={<Zap size={13} />} label="图片生成" value={Boolean(model.capabilities.imageOutput)} onChange={(v) => setCap('imageOutput', v)} /></InspectorSection><InspectorSection title="Think / Reasoning"><select value={thinking.mode} onChange={(e) => save({ thinkingConfig: { ...thinking, mode: e.target.value as ThinkingMode }, capabilities: { ...model.capabilities, thinking: e.target.value !== 'unsupported' } })} className="h-7 w-full rounded-[6px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"><option value="unsupported">不支持</option><option value="always">始终启用</option><option value="toggle">可开关</option><option value="effort">Effort 等级</option><option value="budget">Token Budget</option></select><p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">GLM、DeepSeek、Anthropic 等供应商会按适配器转换为各自请求字段。</p></InspectorSection><InspectorSection title="请求体适配"><div className="flex items-center gap-1 text-[11px] text-fg-muted"><Cpu size={13} />预设适配器</div><select value={model.requestAdapter?.preset ?? 'auto'} onChange={(e) => save({ requestAdapter: { preset: e.target.value as NonNullable<ModelAlias['requestAdapter']>['preset'], patches: model.requestAdapter?.patches ?? [] } })} className="mt-2 h-7 w-full rounded-[6px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"><option value="auto">自动识别</option><option value="anthropic">Anthropic</option><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="custom">自定义 Patch</option></select><p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">仅允许 add / replace / remove 请求参数；model、messages、stream 与认证字段不可修改。</p></InspectorSection><InspectorSection title="官方来源"><p className="text-[11px] text-fg-muted">{model.source?.url ?? '暂无来源链接'}</p><p className="mt-1 text-[10.5px] text-fg-faint">{model.source?.fetchedAt ? `抓取于 ${model.source.fetchedAt}` : '请补充官方定价与能力来源'}</p></InspectorSection></div> }
+function InspectorSection({ title, children }: { title: string; children: ReactNode }): ReactNode { return <section className="border-t border-hairline pt-3"><h4 className="mb-2 text-[11.5px] text-fg-faint">{title}</h4>{children}</section> }
+function Capability({ icon, label, value, onChange }: { icon: ReactNode; label: string; value: boolean; onChange: (v: boolean) => void }): ReactNode { return <div className="flex items-center gap-2 py-1"><span className="text-icon">{icon}</span><span className="min-w-0 flex-1 text-[11.5px] text-fg-muted">{label}</span><Toggle checked={value} onChange={onChange} label={label} /></div> }
+function UsageTab(): ReactNode { return <><SettingGroup title="用量与费用"><TodoRow title="总费用 / 总请求 / 成功率 / 平均延迟" description="费用按原币与 USD 估值分别汇总，历史记录冻结当时汇率。" step="未接:usage:getSummary" /><TodoRow title="请求日志" description="一次 HTTP 尝试记一条，可追溯命中的定价档位与时段规则。" step="未接:usage:getRequestLogs" /><TodoRow title="模型 / 供应商统计" description="按时间范围查看模型、供应商和币种维度的成本。" step="未接:usage:getModelStats" last /></SettingGroup><PricingTable /></> }

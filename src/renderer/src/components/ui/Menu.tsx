@@ -40,7 +40,8 @@ export function Menu({
   label,
   className,
   triggerClassName,
-  disabled = false
+  disabled = false,
+  onOpenChange
 }: {
   /** 触发按钮的**内容**;按钮本身由 Menu 渲染,免得每个调用点重复写 no-drag */
   trigger: ReactNode
@@ -51,6 +52,8 @@ export function Menu({
   className?: string
   triggerClassName?: string
   disabled?: boolean
+  /** 在菜单打开/关闭时通知调用方，用于重置多级菜单的临时视图状态。 */
+  onOpenChange?: (open: boolean) => void
 }): ReactNode {
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState<Placement | null>(null)
@@ -78,14 +81,29 @@ export function Menu({
         于是「面板多高」和「该给多少高」互为因果,滚动时会一路收缩到最小值。
         scrollHeight 始终是内容的真实高度,不受我们自己设的 maxHeight 影响。
       */
+      /*
+        ★ 菜单该被哪块面夹住,由**那块面自己声明**(`data-menu-bounds`),
+        不在这里按调用点写 if。壳层那几个菜单(外层 Tab / 输入框)的边界本来
+        就是视口,声明不声明都对;而设置浮层里的必须夹在内容列里,
+        否则 280px 的面板右对齐到一颗窄药丸上就会盖到左边的导航去。
+        找不到就退回视口 —— 新加的调用点不会因为忘了声明而错位。
+      */
+      const box = triggerRef.current?.closest('[data-menu-bounds]')?.getBoundingClientRect()
       setPos(
-        placeMenu(t, panel.scrollHeight, width, align, {
-          width: window.innerWidth,
-          height: window.innerHeight
-        })
+        placeMenu(
+          t,
+          panel.scrollHeight,
+          width,
+          align,
+          { width: window.innerWidth, height: window.innerHeight },
+          box
+        )
       )
     }
     measure()
+    // 多级菜单切换视图时内容高度会变化；观察面板尺寸，保持向上翻转和底部对齐准确。
+    const resizeObserver = new ResizeObserver(measure)
+    resizeObserver.observe(panel)
     /*
       脱离了文档流就不会跟着滚动容器走,所以得自己跟。
       scroll 用 capture —— 真正在滚的是设置浮层的内容区,不是 window,
@@ -96,13 +114,17 @@ export function Menu({
     return () => {
       window.removeEventListener('resize', measure)
       document.removeEventListener('scroll', measure, true)
+      resizeObserver.disconnect()
     }
   }, [open, width, align])
 
   useEffect(() => {
     if (!open) return
     const onDown = (e: PointerEvent): void => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+      if (!wrapRef.current?.contains(e.target as Node)) {
+        setOpen(false)
+        onOpenChange?.(false)
+      }
     }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
@@ -110,6 +132,7 @@ export function Menu({
       // 不标记的话「在设置里打开模型选择器再按 Esc」会**同时**关掉菜单和整个面板。
       e.preventDefault()
       setOpen(false)
+      onOpenChange?.(false)
     }
     // capture:面板里的控件可能 stopPropagation,冒泡阶段会漏掉外部点击
     document.addEventListener('pointerdown', onDown, true)
@@ -118,7 +141,7 @@ export function Menu({
       document.removeEventListener('pointerdown', onDown, true)
       document.removeEventListener('keydown', onKey)
     }
-  }, [open])
+  }, [open, onOpenChange])
 
   return (
     <div ref={wrapRef} className={cn('relative flex', className)}>
@@ -130,7 +153,11 @@ export function Menu({
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          const next = !open
+          setOpen(next)
+          onOpenChange?.(next)
+        }}
         className={cn('app-no-drag disabled:opacity-40', triggerClassName)}
       >
         {trigger}
@@ -154,7 +181,10 @@ export function Menu({
             'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40'
           )}
         >
-          {children(() => setOpen(false))}
+          {children(() => {
+            setOpen(false)
+            onOpenChange?.(false)
+          })}
         </div>
       )}
     </div>

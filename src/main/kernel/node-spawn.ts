@@ -63,6 +63,20 @@ function signalNumber(sig: NodeJS.Signals): number {
   return table[sig] ?? 0
 }
 
+/**
+ * Agent 的 bash 工具真正会用的那个 shell。
+ *
+ * ★ 导出它,是因为**提示词里要把这个名字告诉模型**(见 `context-assembler.ts`
+ * 的 `# Environment`)。写死一份在提示词那边的话,两处迟早会分叉 ——
+ * 而分叉的结果是我们信誓旦旦告诉模型「你在 zsh 里」,它据此写了一条
+ * zsh 才有的语法,然后在 /bin/sh 里失败。事实型提示词一旦是假的,
+ * 比不写更糟:模型不会怀疑它。
+ */
+export function agentShell(): string {
+  if (isWindows) return process.env.ComSpec ?? 'cmd.exe'
+  return process.env.SHELL ?? '/bin/sh'
+}
+
 export function nodeSpawn(): SpawnFn {
   return (cmd, opts) =>
     new Promise<SpawnResult>((resolve, reject) => {
@@ -73,7 +87,7 @@ export function nodeSpawn(): SpawnFn {
 
       const [file, args] = isWindows
         ? ['cmd.exe', ['/d', '/s', '/c', cmd]]
-        : [process.env.SHELL ?? '/bin/sh', ['-c', cmd]]
+        : [agentShell(), ['-c', cmd]]
 
       const child = spawn(file, args, {
         cwd: opts.cwd,

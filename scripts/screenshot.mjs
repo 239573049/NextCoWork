@@ -296,7 +296,13 @@ try {
   await sleep(300)
 
   await clickSub('搜索服务')
-  await sleep(600)
+  /*
+    ★ 这里等得比别处久,不是保守:排序是**乐观更新**(见 stores/websearch.ts),
+    而首次进页面那趟 `websearch:list` 的响应要是晚于放手才回来,它会拿库里
+    那份旧顺序把乐观更新盖回去 —— 表现是这一场偶发地「拖了等于没拖」。
+    先让那趟往返落定再动手。
+  */
+  await sleep(1400)
 
   /** 每行右边那个开关的 aria-label 是「启用 <名字>」—— 拿它当行的名字最稳 */
   const providerOrder = () =>
@@ -368,7 +374,72 @@ try {
   console.log('✓ 拖动重排落点正确')
   await cdp.shoot('12-search-reordered')
 
-  console.log(`\n✅ 截完了,共 12 张,在 ${OUT}/`)
+  /*
+    13:侧边栏那颗「新建对话」。它以前和 Tab 条上的 `+` 走同一条 `open`,
+       连点就攒出一排一模一样的「新对话」。同样只在动起来时才看得见,
+       所以这里**读 Tab 条上的对话数并断言**,不只截图:
+
+       第一下开一个 → 再点两下仍是一个(重用) → 往输入框里打一个字
+       (草稿让它不再算空)→ 这时候点才应该真的多出一个。
+  */
+  await cdp.eval(`
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  `)
+  await sleep(400)
+
+  /** 主区 Tab 条上标题是「新对话」的有几个 */
+  const newChatTabs = () =>
+    cdp.eval(`
+      [...document.querySelectorAll('[role="tab"]')].filter(
+        (t) => t.textContent.includes('新对话')
+      ).length
+    `)
+
+  const clickNewChat = async () => {
+    await clickLabel('新建对话')
+    await sleep(350)
+  }
+
+  /*
+    ★ 基准取**第一下之后**的数,不是进来时的数 —— 前面 02~04 那几场已经在
+    第一个对话里发过一条消息,它是「用过的」,所以第一下**应该**新建一个。
+    要量的是第二下、第三下不再新建。
+  */
+  await clickNewChat()
+  const base = await newChatTabs()
+  await clickNewChat()
+  await clickNewChat()
+  const reused = await newChatTabs()
+  if (reused !== base) {
+    throw new Error(`连点「新建对话」不该攒出多个空对话。第一下之后 ${base} 个,再点两下变成 ${reused} 个`)
+  }
+  console.log(`✓ 连点「新建对话」停在 ${reused} 个对话上,没有再新增`)
+  await cdp.shoot('13-new-chat-reused')
+
+  // 打一个字:有草稿的会话不算空,这时候点才该真的新建
+  await cdp.eval(`
+    (() => {
+      const el = document.querySelector('[data-testid="composer-input"]')
+      if (!el) throw new Error('找不到输入框')
+      el.focus()
+      const set = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      ).set
+      set.call(el, '写了一半')
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()
+  `)
+  await sleep(300)
+  await clickNewChat()
+  const created = await newChatTabs()
+  if (created !== reused + 1) {
+    throw new Error(`草稿没写完的对话不该被重用。期望 ${reused + 1} 个,实际 ${created} 个`)
+  }
+  console.log('✓ 有草稿时「新建对话」照常新建')
+  await cdp.shoot('14-new-chat-created')
+
+  console.log(`\n✅ 截完了,共 14 张,在 ${OUT}/`)
 } catch (err) {
   failed = true
   console.error(`\n❌ 截图失败:${err.message}`)

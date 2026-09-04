@@ -17,6 +17,8 @@ export interface TerminalInfo {
 
 export interface TerminalCreateRequest {
   workspaceId: string
+  /** Renderer tab id; reusing it reconnects to an existing shell after remount. */
+  id?: string
   cwd?: string
   cols: number
   rows: number
@@ -40,4 +42,6 @@ export interface TerminalBuffer {
   /** 环形缓冲里现存的内容;可能从中间截断 */
   data: string
   truncated: boolean
+  /** Last output batch included in data; lets renderer deduplicate reconnect races. */
+  seq: number
 }

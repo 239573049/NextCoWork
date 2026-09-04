@@ -22,7 +22,10 @@ import type { InnerTab } from '../../../../shared/domain/tab'
 vi.mock('../../services/app', () => ({
   getInnerTabs: vi.fn(async () => ({ tabs: [], activeTabId: null })),
   persistInnerTabs: vi.fn(),
-  persistOuterTabs: vi.fn()
+  persistOuterTabs: vi.fn(),
+  // 未发出的输入落盘。null = 没有存档,让每个用例从空白 store 起步
+  getSessionInput: vi.fn(async () => null),
+  persistSessionInput: vi.fn()
 }))
 
 vi.mock('../../services/agent', () => ({

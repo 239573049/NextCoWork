@@ -61,12 +61,11 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
      * 两处对不上就是静默筛出空表,所以 `pages/model/tabs.ts` 的测试守着这条。
      */
     subs: [
-      { id: 'text', label: '文本生成' },
-      { id: 'image', label: '图像生成' },
-      { id: 'video', label: '视频生成' },
-      { id: 'speech', label: '语音生成' },
-      { id: 'transcription', label: '语音识别' },
-      { id: 'usage', label: '使用统计' }
+      { id: 'catalog', label: '模型目录' },
+      { id: 'pricing', label: '定价规则' },
+      { id: 'capabilities', label: '能力矩阵' },
+      { id: 'request', label: '请求策略' },
+      { id: 'usage', label: '用量与成本' }
     ]
   },
   { id: 'review', label: '每日回顾' },
@@ -180,24 +179,31 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   // ★ 只有「文本生成」这个子 Tab 有真行。其余五个今天是占位,**不给它们编行** ——
   // 上面那句「这张表是唯一事实来源」的代价就是:搜出来点过去,那一行必须真的在。
   // 供应商的行随步骤 4 的写入面补进来;定价与用量在方案里没有编号,随内容一起补。
-  { page: 'model', sub: 'text', title: '默认模型', keywords: ['model', '模型'] },
+  { page: 'model', sub: 'catalog', title: '默认模型', keywords: ['model', '模型'] },
   {
     page: 'model',
-    sub: 'text',
+    sub: 'catalog',
     title: '默认子代理模型',
     keywords: ['subagent', 'model', '子代理']
   },
   {
     page: 'model',
-    sub: 'text',
+    sub: 'catalog',
     title: '启用的模型',
     keywords: ['provider', 'model', '供应商', '模型']
   },
   {
     page: 'model',
-    sub: 'text',
+    sub: 'catalog',
     title: '供应商目录',
     keywords: ['provider', 'preset', 'openrouter', '供应商', '预设', '添加']
+  },
+  {
+    page: 'model',
+    sub: 'catalog',
+    title: '模型优先级',
+    // 「拉取 / 同步 / fetch」都收进来:用户想找的是那颗按钮,而按钮上写的是「拉取」
+    keywords: ['model', 'fetch', 'sync', 'import', '拉取', '同步', '导入', '模型列表']
   },
 
   // ── 连接 ──
@@ -246,10 +252,23 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   },
 
   // ── 数据 ──
+  { page: 'data', title: '设置云同步', keywords: ['cloud', 'sync', '云端', '同步'] },
+  { page: 'data', title: '导出', keywords: ['export', '迁移', 'backup', '导出'] },
+  { page: 'data', title: '导入数据', keywords: ['import', '迁移', '导入'] },
+  { page: 'data', title: '备份目录', keywords: ['backup', 'directory', '备份', '目录'] },
+  { page: 'data', title: '备份频率', keywords: ['backup', 'frequency', '备份', '频率'] },
+  { page: 'data', title: '上次备份', keywords: ['backup', '备份'] },
+  { page: 'data', title: '从备份文件恢复', keywords: ['restore', 'backup', '恢复', '备份'] },
   { page: 'data', title: '数据库大小', keywords: ['storage', 'database', '存储'] },
+  { page: 'data', title: '对话文件', keywords: ['storage', 'database', '存储'] },
   { page: 'data', title: '对话数量', keywords: ['storage', '统计'] },
   { page: 'data', title: '消息数量', keywords: ['storage', '统计'] },
+  { page: 'data', title: '数据目录', keywords: ['storage', 'directory', '存储', '目录'] },
   { page: 'data', title: '优化存储', keywords: ['vacuum', 'storage', '清理'] },
+  { page: 'data', title: '清理附件目录', keywords: ['attachment', 'cleanup', '清理', '附件'] },
+  { page: 'data', title: '清理范围', keywords: ['cleanup', 'range', '清理', '范围'] },
+  { page: 'data', title: '清空对话历史', keywords: ['delete', 'history', '清空', '对话'] },
+  { page: 'data', title: '删除并退出', keywords: ['delete', 'reset', '退出', '删除'] },
 
   // ── 关于 ──
   { page: 'about', title: '版本', keywords: ['version', 'about', '版本'] }

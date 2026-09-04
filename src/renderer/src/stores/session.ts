@@ -12,19 +12,38 @@
  */
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { AgentEvent } from '../../../shared/agent/event'
-import type { RunRequest } from '../../../shared/agent/run-request'
+import type { ContentPart } from '../../../shared/agent/message'
+import type { SendOptions } from '../../../shared/agent/run-request'
 import {
   applyEvents,
   emptyTranscript,
   hasRun,
   type TranscriptState
 } from '../../../shared/agent/transcript'
+import type { QueuedInput } from '../../../shared/domain/queued-input'
+import {
+  QUEUE_MAX_ITEMS,
+  QUEUE_MAX_TEXT,
+  SESSION_INPUT_VERSION,
+  batchToParts,
+  isLive,
+  makeQueuedInput,
+  mergeBatch,
+  partsToAttachments,
+  pickNextBatch
+} from '../../../shared/domain/queued-input'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
 import { abortRun, attachRun, onAgentEvent, startRun } from '../services/agent'
+import { getSessionInput, persistSessionInput } from '../services/app'
+import { getSession } from '../services/sessions'
 
-export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input'>
+/**
+ * ★ 类型本体已挪到 `shared/agent/run-request.ts` —— 队列条目要逐条冻结它,
+ * 而 shared 不能反向依赖渲染层。这里 re-export 保持既有引用点不变。
+ */
+export type { SendOptions }
 
 export interface SessionState {
   sessionId: string
@@ -33,20 +52,32 @@ export interface SessionState {
   /** 已应用的最后一个 seq。防漂移就靠它 */
   lastSeq: number
   transcript: TranscriptState
-  /** 生成期间用户可以继续输入并入队(截图:「当前回复完成后按队列继续执行」) */
-  queuedInputs: string[]
   /**
-   * 上一次发送用的档位/模型/模式。出队续跑时要复用它 ——
-   * **不能读当时的 UI 值**:用户可能在排队期间改了模型下拉,
-   * 而排队那条消息是按他当时看到的设置写的。
+   * 生成期间用户可以继续输入并入队(截图:「当前回复完成后按队列继续执行」)。
+   *
+   * ★ 从 `string[]` 升格为结构化条目:截图要求逐条插话/编辑/删除,
+   * 而字符串数组里**两条内容相同的消息不可区分**。只含非终态条目。
+   */
+  queuedInputs: QueuedInput[]
+  /**
+   * 上一次发送用的档位/模型/模式。
+   *
+   * ★ 队列条目现在**各自带 `options`**,续跑读的是条目自己的快照,不是这个字段。
+   * 它保留下来是给「空队列时的续跑」和 UI 回显用的。
    */
   lastOptions: SendOptions | null
-  /** 输入框草稿 —— 切 Tab 不能丢 */
+  /** 输入框草稿 —— 切 Tab 不能丢,**进程重启也不能丢**(落盘,见 §8) */
   draft: string
 
-  send: (text: string, opts: SendOptions) => Promise<void>
+  send: (text: string, opts: SendOptions, parts?: ContentPart[]) => Promise<void>
   stop: () => Promise<void>
   setDraft: (v: string) => void
+  /** 插话 —— toggle:pending ⇄ promoted。不发起任何请求 */
+  promoteInput: (id: string) => void
+  editInput: (id: string, text: string) => void
+  dropInput: (id: string) => void
+  /** 「⋯ → 撤回到输入框」:出队并回填草稿 */
+  moveInputToDraft: (id: string) => void
   applyEnvelope: (env: AgentEventEnvelope) => void
   applyEvents: (events: AgentEvent[]) => void
 }
@@ -63,12 +94,31 @@ function createSessionStore(sessionId: string): SessionStore {
     lastOptions: null,
     draft: '',
 
-    async send(text, opts) {
+    async send(text, opts, parts) {
       const s = get()
       // ★ 不变式:一个会话同一时刻只有一个 run。用户连按两次回车就能并发起两个 run,
       // 共享同一份转录 → 消息交错。这几行就是那条不变式的全部实现。
       if (s.activeRunId !== null) {
-        set({ queuedInputs: [...s.queuedInputs, text], draft: '' })
+        // ★ 软上限:超过就不是队列了,是便签本。**拒绝入队并保留草稿** ——
+        // 静默丢弃会让用户以为消息进了队列。
+        if (s.queuedInputs.length >= QUEUE_MAX_ITEMS) return
+        set({
+          queuedInputs: [
+            ...s.queuedInputs,
+            // ★ 逐条冻结 options:排队 5 分钟里改两次模型,三条消息该有三份档位。
+            //   ★ 附件也必须一起存 —— 不存的话,生成期间带图发的那条消息
+            //     续跑时会只剩文字,图静默消失,而用户明明看到自己发了图。
+            makeQueuedInput(
+              ulid(),
+              text.slice(0, QUEUE_MAX_TEXT),
+              opts,
+              Date.now(),
+              parts === undefined ? [] : partsToAttachments(parts)
+            )
+          ],
+          draft: ''
+        })
+        persistInput(sessionId, true)
         return
       }
 
@@ -94,9 +144,12 @@ function createSessionStore(sessionId: string): SessionStore {
         lastOptions: opts,
         draft: ''
       })
+      persistInput(sessionId, true)
 
       try {
-        await startRun({ ...opts, runId, sessionId, input: [{ type: 'text', text }] })
+        // parts 缺省时退回原来的单段文本 —— 队列续跑要带附件才走这条路
+        const input = parts ?? [{ type: 'text' as const, text }]
+        await startRun({ ...opts, runId, sessionId, input })
       } catch (err) {
         unregisterRun(runId)
         set({ activeRunId: null })
@@ -114,6 +167,71 @@ function createSessionStore(sessionId: string): SessionStore {
 
     setDraft(v) {
       set({ draft: v })
+      // ★ 按键级频率,走防抖。丢失窗口 ≤500ms,代价是半个词
+      persistInput(sessionId, false)
+    },
+
+    /**
+     * 插话 —— **toggle**。用户点第二次的意图明确就是取消,报错或无操作都不对。
+     *
+     * ★ 取消时清掉 `promotedAt`:再次引入应当排到已引入者的**队尾**,
+     * 而不是凭借第一次点击的时刻插回中间。
+     */
+    promoteInput(id) {
+      const s = get()
+      const item = s.queuedInputs.find((q) => q.id === id)
+      if (item === undefined) return
+
+      // ★ **不能直接用 Date.now()。** 它是毫秒分辨率,而排序的正确性不该依赖
+      //   「两次点击不会落在同一毫秒」。同值时 sort 稳定退化成入队序 ——
+      //   于是先插的乙、后插的甲会按甲、乙发出去,与用户点击顺序相反。
+      //   取 max(now, 已有最大值 + 1) 保证严格单调,同时保住时间戳语义
+      //   (UI 仍可拿它显示「刚刚引入」),且重启恢复后新插话依然排在旧的之后。
+      const maxAt = s.queuedInputs.reduce((m, q) => Math.max(m, q.promotedAt ?? 0), 0)
+      const at = Math.max(Date.now(), maxAt + 1)
+
+      const next = s.queuedInputs.map((q) =>
+        q.id === id
+          ? q.status === 'promoted'
+            ? { ...q, status: 'pending' as const, promotedAt: undefined }
+            : { ...q, status: 'promoted' as const, promotedAt: at }
+          : q
+      )
+      set({ queuedInputs: next })
+      persistInput(sessionId, true)
+
+      // ★ 空闲态被点插话:条目本不该存在于队列(空闲时 send 直接发)。
+      //   若因竞态残留,等价于「立即发送」,而不是让它永远躺在那儿。
+      if (s.activeRunId === null) drainQueue(sessionId)
+    },
+
+    editInput(id, text) {
+      const s = get()
+      // ★ 不重置 options(档位仍是入队时刻的快照),也不重置 promotedAt
+      //   (编辑不改变加塞顺序)。
+      set({
+        queuedInputs: s.queuedInputs.map((q) =>
+          q.id === id ? { ...q, text: text.slice(0, QUEUE_MAX_TEXT) } : q
+        )
+      })
+      persistInput(sessionId, true)
+    },
+
+    dropInput(id) {
+      set({ queuedInputs: get().queuedInputs.filter((q) => q.id !== id) })
+      persistInput(sessionId, true)
+    },
+
+    moveInputToDraft(id) {
+      const s = get()
+      const item = s.queuedInputs.find((q) => q.id === id)
+      if (item === undefined) return
+      set({
+        queuedInputs: s.queuedInputs.filter((q) => q.id !== id),
+        // 已有草稿时接在后面,不覆盖 —— 覆盖会吞掉用户正在写的半句话
+        draft: s.draft === '' ? item.text : `${s.draft}\n\n${item.text}`
+      })
+      persistInput(sessionId, true)
     },
 
     applyEnvelope(env) {
@@ -132,7 +250,7 @@ function createSessionStore(sessionId: string): SessionStore {
         lastSeq: env.seq,
         ...settleRun(env.runId, env.events)
       })
-      drainQueue(sessionId)
+      if (endedCleanly(env.events)) drainQueue(sessionId)
     },
 
     applyEvents(events) {
@@ -140,7 +258,7 @@ function createSessionStore(sessionId: string): SessionStore {
         transcript: applyEvents(get().transcript, events),
         ...settleRun(get().activeRunId, events)
       })
-      drainQueue(sessionId)
+      if (endedCleanly(events)) drainQueue(sessionId)
     }
   }))
 }
@@ -166,7 +284,18 @@ function settleRun(runId: string | null, events: readonly AgentEvent[]): Partial
 }
 
 /**
- * run 结束后自动发出排队的下一条 —— 截图里生成中的占位符写的就是
+ * run 是否**正常**跑完。
+ *
+ * ★ 只有 `done` 才自动续跑。`aborted` 时用户按的是停止 —— 他要的是接管控制权,
+ * 此时自动发出下一条等于无视那个意图;`error` 时自动灌入下一条往往连着错 N 次
+ * 并烧掉 N 轮 token。两种情况队列都**留在原地**,由用户点「继续执行」。
+ */
+function endedCleanly(events: readonly AgentEvent[]): boolean {
+  return events.some((e) => e.type === 'run_end' && e.status === 'done')
+}
+
+/**
+ * run 结束后自动发出排队的下一批 —— 截图里生成中的占位符写的就是
  * 「当前回复完成后按队列继续执行」。
  *
  * 不写进 `settleRun`,是因为那里只能返回状态补丁,而这里要发起一次新的 `send()`。
@@ -175,12 +304,152 @@ function drainQueue(sessionId: string): void {
   const store = stores.get(sessionId)
   if (!store) return
   const s = store.getState()
-  const [next, ...rest] = s.queuedInputs
-  if (s.activeRunId !== null || next === undefined || s.lastOptions === null) return
-  store.setState({ queuedInputs: rest })
-  void s.send(next, s.lastOptions).catch((err: unknown) => {
+  if (s.activeRunId !== null) return
+
+  const batch = pickNextBatch(s.queuedInputs)
+  if (batch.length === 0) return
+
+  const merged = mergeBatch(batch)
+  // 超限被排除的条目**退回队列**并降回 pending —— 它们没被发出去,
+  // 留在 promoted 会让下一轮又把它们排到最前,而用户以为已经发了。
+  const deferred = new Set(merged.deferredIds)
+  const sentIds = new Set(batch.filter((q) => !deferred.has(q.id)).map((q) => q.id))
+
+  store.setState({
+    queuedInputs: s.queuedInputs
+      .filter((q) => !sentIds.has(q.id))
+      .map((q) => (deferred.has(q.id) ? { ...q, status: 'pending' as const, promotedAt: undefined } : q))
+  })
+  persistInput(sessionId, true)
+
+  // ★ 档位取**最早被引入**那条的快照:用户按他当时看到的设置写下这句话。
+  //   `lastOptions` 只在条目自身没有快照时兜底(理论上不会发生)。
+  const opts = batch[0]?.options ?? s.lastOptions
+  if (opts === null || opts === undefined) return
+
+  void s.send(merged.text, opts, batchToParts(merged)).catch((err: unknown) => {
     console.error('[agent] 队列续跑失败:', err)
   })
+}
+
+/**
+ * 用户手动继续 —— 中断/报错/进程重启后队列不会自己动,由这里接手。
+ * 与自动续跑走同一条路径,不存在第二套发送逻辑。
+ */
+export function resumeQueue(sessionId: string): void {
+  drainQueue(sessionId)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 持久化 —— 未发出的输入是全应用唯一没有第二份副本的数据(设计 §8)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * ★ 已发出的内容在转录里有据可查,**只有未发出的输入是唯一副本** ——
+ * 进程一死就永久消失,用户连「我刚才写了什么」都无从追溯。
+ */
+function persistInput(sessionId: string, immediate: boolean): void {
+  const store = stores.get(sessionId)
+  if (!store) return
+  const s = store.getState()
+  persistSessionInput(
+    sessionId,
+    {
+      v: SESSION_INPUT_VERSION,
+      draft: s.draft,
+      // 只落非终态 —— 终态条目本就已经移出数组,这层过滤是对不变式的兜底
+      queued: s.queuedInputs.filter(isLive),
+      savedAt: Date.now()
+    },
+    immediate
+  )
+}
+
+/** 已发起过 hydrate 的会话。重复调用是无害的,但白费一次 IPC */
+const hydrated = new Set<string>()
+
+/**
+ * 回填草稿与队列。
+ *
+ * ★ **回填必须带守卫**:IPC 往返期间用户可能已经打字或已经发送了。
+ * 无条件 `setState` 会用旧快照盖掉刚敲进去的内容 —— 这是持久化最常见的翻车方式。
+ * 同 `tabs.ts` 那条 `persisted.tabs.length > 0` 守卫的精神。
+ *
+ * ★ **恢复后不自动续跑**:即便队列非空且空闲,也不调 `drainQueue` ——
+ * 用户重启应用时绝不期待它自己开始发消息。进程死亡本质上就是一次异常中断,
+ * 与 aborted 同等对待,由界面上的「继续执行」交还给用户。
+ */
+async function hydrateInput(sessionId: string): Promise<void> {
+  try {
+    const saved = await getSessionInput(sessionId)
+    if (saved === null) return
+
+    const store = stores.get(sessionId)
+    if (!store) return
+    const s = store.getState()
+    if (s.draft !== '' || s.queuedInputs.length > 0 || s.activeRunId !== null) return
+
+    store.setState({ draft: saved.draft, queuedInputs: saved.queued })
+  } catch (err) {
+    // 回填失败不该拦住会话可用 —— 最坏结果是少一份草稿
+    console.error('[agent] 恢复未发出的输入失败:', err)
+  }
+}
+
+/** 重启后从 SQLite 回填已提交消息；流式 run 期间只合并缺少的 id。 */
+async function hydrateHistory(sessionId: string, authoritative = false): Promise<void> {
+  try {
+    const detail = await getSession(sessionId)
+    const store = stores.get(sessionId)
+    if (!store) return
+    store.setState((s) => {
+      // IPC 往返期间可能刚好启动了新的 run；不要用旧数据库快照覆盖
+      // 正在流式显示的内容。
+      if (s.activeRunId !== null || [...runIndex.values()].some((r) => r.sessionId === sessionId)) return s
+
+      const databaseIds = new Set(detail.messages.map((m) => m.id))
+      // 正常情况下当前 renderer 消息都已经先于事件写入数据库；这里只
+      // 追加极短竞态窗口里尚未返回的本地消息，并且始终把数据库的
+      // `ordinal` 顺序放在前面，绝不按 createdAt 重新排序。
+      const localOnly = authoritative
+        ? []
+        : s.transcript.messages.filter((m) => !databaseIds.has(m.id))
+      const messages = [...detail.messages, ...localOnly]
+      return {
+        ...s,
+        transcript: {
+          ...s.transcript,
+          messages,
+          live: [],
+          tools: {},
+          status: 'done'
+        }
+      }
+    })
+  } catch (err) {
+    // 新 Tab 可能还没有主进程会话记录；真正发送时 runtime 会补齐。
+    if (err instanceof Error && /会话不存在|不存在该会话|session.*not found/i.test(err.message)) {
+      const store = stores.get(sessionId)
+      store?.setState((s) => {
+        if (s.activeRunId !== null || [...runIndex.values()].some((r) => r.sessionId === sessionId)) return s
+        return {
+          ...s,
+          transcript: {
+            ...s.transcript,
+            messages: [],
+            live: [],
+            tools: {},
+            status: 'done',
+            error: undefined,
+            usage: undefined,
+            contextUsage: undefined
+          }
+        }
+      })
+    } else {
+      console.error('[agent] 加载会话历史失败:', err)
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -194,6 +463,11 @@ export function sessionStore(sessionId: string): SessionStore {
   if (!s) {
     s = createSessionStore(sessionId)
     stores.set(sessionId, s)
+  }
+  if (!hydrated.has(sessionId)) {
+    hydrated.add(sessionId)
+    void hydrateInput(sessionId)
+    void hydrateHistory(sessionId)
   }
   return s
 }
@@ -214,7 +488,22 @@ export function sessionStore(sessionId: string): SessionStore {
  */
 export function releaseSession(sessionId: string): boolean {
   for (const r of runIndex.values()) if (r.sessionId === sessionId) return false
-  return stores.delete(sessionId)
+  const deleted = stores.delete(sessionId)
+  if (deleted) hydrated.delete(sessionId)
+  return deleted
+}
+
+/**
+ * 主进程完成导入、恢复或清理后广播 `sessions:changed` 时调用。
+ * 侧边栏列表会重新加载，但已经打开的 Tab 也必须同步数据库，否则
+ * 删除历史后仍会继续显示旧 transcript。
+ */
+export async function refreshHydratedSessions(): Promise<void> {
+  const ids = [...stores.keys()]
+  await Promise.all(ids.map(async (sessionId) => {
+    if ([...runIndex.values()].some((r) => r.sessionId === sessionId)) return
+    await hydrateHistory(sessionId, true)
+  }))
 }
 
 /**

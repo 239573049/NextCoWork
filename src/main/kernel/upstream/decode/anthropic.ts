@@ -13,6 +13,7 @@
  */
 import { agentError, type AgentError } from '../../../../shared/agent/error'
 import type { ProviderStreamEvent, StopReason, TokenUsage } from '../../../../shared/agent/stream'
+import type { AnthropicCacheTtl } from '../../../../shared/domain/provider'
 import type { SseEvent } from '../sse'
 
 // ─── 从 unknown 里安全取值 ───────────────────────────────────────────
@@ -63,10 +64,29 @@ export function toStopReason(raw: string | undefined): StopReason {
  * 由 router 拿着 Response 分类。分类规则写在这里是因为它属于「Anthropic 协议知识」,
  * 和 router 的「重试与切换策略」是两件事。
  */
-export function anthropicErrorToAgentError(status: number, body: unknown): AgentError {
+export function anthropicErrorToAgentError(
+  status: number,
+  body: unknown,
+  options: { cacheTtl?: AnthropicCacheTtl; providerName?: string } = {}
+): AgentError {
   const err = sub(rec(body), 'error')
   const message = str(err, 'message') ?? `上游返回 ${status}`
   const kind = str(err, 'type') ?? ''
+
+  if (
+    (status === 400 || status === 422) &&
+    options.cacheTtl !== undefined &&
+    options.cacheTtl !== 'off' &&
+    /cache[_ -]?control|cache breakpoint|cache[_ -]?breakpoint|\bephemeral\b|\bttl\b/i.test(message)
+  ) {
+    const ttl = options.cacheTtl === '1h' ? '1 小时' : '5 分钟'
+    const provider = options.providerName === undefined ? '当前供应商' : `供应商「${options.providerName}」`
+    return agentError(
+      'cache_unsupported',
+      `${provider}拒绝了 Anthropic ${ttl}提示缓存配置：${message}。请在供应商设置中关闭或调整提示缓存。`,
+      { status, retryable: false }
+    )
+  }
 
   if (status === 401 || status === 403) {
     return agentError('auth', message, { status, retryable: false })
@@ -141,7 +161,14 @@ export async function* decodeAnthropic(
         usage.inputTokens = num(u, 'input_tokens') ?? 0
         const cc = num(u, 'cache_creation_input_tokens')
         const cr = num(u, 'cache_read_input_tokens')
+        const creation = sub(u, 'cache_creation')
+        const write5m = num(creation, 'ephemeral_5m_input_tokens')
+        const write1h = num(creation, 'ephemeral_1h_input_tokens')
         if (cc !== undefined) usage.cacheCreationInputTokens = cc
+        else if (write5m !== undefined || write1h !== undefined) {
+          usage.cacheCreationInputTokens = (write5m ?? 0) + (write1h ?? 0)
+        }
+        if (write1h !== undefined) usage.cacheCreation1hInputTokens = write1h
         if (cr !== undefined) usage.cacheReadInputTokens = cr
         sawStart = true
         yield { type: 'message_start', model: str(msg, 'model') ?? '<unknown>' }

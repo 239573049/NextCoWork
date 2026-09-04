@@ -15,6 +15,7 @@ import { isToolResultOnly } from '../../../../shared/agent/message'
 import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { cn } from '../../lib/cn'
+import { MessageImage } from './MessageImage'
 import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
 
 export function Thread({
@@ -87,17 +88,46 @@ export function Thread({
   )
 }
 
+/**
+ * 用户气泡。
+ *
+ * ★ **不能只取 text part。** 原实现把 parts 里的文本拼起来、其余一律丢弃,
+ * 于是两件事同时发生:发出去的图在自己的气泡里看不见,而**只发图不发文字**的
+ * 消息因为 `text === ''` 被整条 return null —— 那条消息从界面上彻底消失,
+ * 尽管它已经发给模型了。而「拖张图进来直接问」正是最常见的用法之一。
+ *
+ * 按 parts 原顺序渲染:发送侧 `partsOf` 把文本放在最前,所以视觉上是
+ * 「先说话、后配图」,与用户敲下去的顺序一致。
+ */
 function UserBubble({ message }: { message: AgentMessage }): ReactNode {
   const text = message.parts
-    .map((p) => (p.type === 'text' ? p.text : ''))
+    .filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
     .join('')
     .trim()
-  if (text === '') return null
+  const images = message.parts.filter(
+    (p): p is Extract<ContentPart, { type: 'image' }> => p.type === 'image'
+  )
+
+  // 文本与图片都没有才是真的空
+  if (text === '' && images.length === 0) return null
+
   return (
     <div className="flex justify-end">
-      <p className="selectable max-w-[85%] rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap text-fg">
-        {text}
-      </p>
+      <div className="max-w-[85%] rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5">
+        {text !== '' && (
+          <p className="selectable text-[13.5px] leading-relaxed whitespace-pre-wrap text-fg">
+            {text}
+          </p>
+        )}
+        {images.length > 0 && (
+          <div className={cn('flex flex-wrap gap-1.5', text !== '' && 'mt-2')}>
+            {images.map((img, i) => (
+              <MessageImage key={`${img.dataRef}:${String(i)}`} mime={img.mime} dataRef={img.dataRef} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -168,7 +198,7 @@ function PartBlock({
     case 'subagent':
       return <SubagentNode summary={part.summary} />
     case 'image':
-      return <p className="text-[12.5px] text-fg-faint">[图片 {part.mime}]</p>
+      return <MessageImage mime={part.mime} dataRef={part.dataRef} />
     case 'error':
       return (
         <p className="selectable font-mono text-[12.5px] text-danger">

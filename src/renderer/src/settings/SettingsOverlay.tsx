@@ -179,7 +179,12 @@ export function SettingsOverlay({
         </nav>
 
         {/* ── 右:内容 ── */}
-        <div className="flex min-w-0 flex-1 flex-col bg-canvas">
+        {/*
+          ★ 菜单的夹取边界(见 `menu-position.ts` 的 `MenuBounds`)。标在**内容列**上,
+          不是标在整个浮层上:导航就在浮层里,夹到浮层等于允许面板盖住导航,
+          而那正是要修的现象。
+        */}
+        <div data-menu-bounds className="flex min-w-0 flex-1 flex-col bg-canvas">
           <header className="flex shrink-0 items-center gap-4 px-6 pt-5 pb-3">
             <h2 className="text-[15px] text-fg">{searching ? '搜索结果' : PAGE_LABEL[page]}</h2>
             {!searching && subs !== undefined && (
@@ -246,7 +251,7 @@ function PageBody({
     case 'connection':
       return <ConnectionPage {...props} />
     case 'data':
-      return <DataPage />
+      return <DataPage {...props} />
     case 'about':
       return <AboutPage versions={versions} />
     default:

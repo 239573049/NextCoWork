@@ -14,6 +14,8 @@ import type { InnerTab, InnerTabKind, InnerTabState, TabPane } from '../../../sh
 import { paneOf, reorderInPane, tabsInPane } from '../../../shared/domain/tab'
 import { ulid } from '../../../shared/util/id'
 import { getInnerTabs, persistInnerTabs } from '../services/app'
+import { createSession } from '../services/sessions'
+import { killTerminal } from '../services/terminal'
 import { isSessionUntouched, releaseSession } from './session'
 
 const EMPTY: InnerTabState = {
@@ -60,6 +62,13 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
   }
 }
 
+function registerChat(workspaceId: string, tab: InnerTab): void {
+  if (tab.kind !== 'chat') return
+  void createSession(workspaceId, tab.title, tab.ref.sessionId).catch(() => {
+    // 主进程会在第一次发送时再次 ensure；离线/测试环境不阻断 Tab 创建。
+  })
+}
+
 interface TabsState {
   byWorkspace: Record<string, InnerTabState>
 
@@ -75,6 +84,8 @@ interface TabsState {
    */
   ensure: (workspaceId: string) => void
   open: (workspaceId: string, kind: InnerTabKind, pane?: TabPane, init?: TabInit) => void
+  /** 在已有会话上打开一个新 Tab（侧边栏历史会话使用）。 */
+  openSession: (workspaceId: string, sessionId: string, title?: string) => void
   /**
    * 在文件树里点一个文件时走这条,**不是 `open`**:同一个文件已经开着就切过去,
    * 不再开第二个。`open` 反过来必须每次都新建(连点两次 `+ 新建对话`
@@ -141,6 +152,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
       return
     }
     const tab = makeTab('chat', 'main')
+    registerChat(workspaceId, tab)
     write(workspaceId, {
       tabs: [tab],
       activeTabId: tab.id,
@@ -177,6 +189,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
           console.error('[tabs] 内层 Tab 布局读取失败,按新工作区处理:', err)
           if (get().byWorkspace[workspaceId] === undefined) {
             const tab = makeTab('chat', 'main')
+            registerChat(workspaceId, tab)
             write(workspaceId, {
               tabs: [tab],
               activeTabId: tab.id,
@@ -191,7 +204,20 @@ export const useTabsStore = create<TabsState>((set, get) => {
     open(workspaceId, kind, pane = 'main', init) {
       const cur = get().stateOf(workspaceId)
       const tab = makeTab(kind, pane, init)
+      registerChat(workspaceId, tab)
       write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, tab] }, pane, tab.id))
+    },
+
+    openSession(workspaceId, sessionId, title = '历史对话') {
+      const cur = get().stateOf(workspaceId)
+      const existing = cur.tabs.find((t) => t.kind === 'chat' && t.ref.sessionId === sessionId)
+      if (existing !== undefined) {
+        write(workspaceId, withActive(cur, 'main', existing.id))
+        return
+      }
+      const tab = makeTab('chat', 'main', { title })
+      const chat = tab.kind === 'chat' ? { ...tab, ref: { sessionId } } : tab
+      write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, chat] }, 'main', chat.id))
     },
 
     openPath(workspaceId, kind, path, title) {
@@ -249,6 +275,11 @@ export const useTabsStore = create<TabsState>((set, get) => {
       if (target === undefined) return
       const pane = paneOf(target)
 
+      // A terminal is a real PTY owned by the main process. Closing its tab is
+      // the explicit lifecycle boundary; switching tabs only unmounts xterm
+      // and intentionally keeps the shell (and its scrollback) alive.
+      if (target.kind === 'terminal') void killTerminal(target.ref.terminalId).catch(() => undefined)
+
       // 下一个激活项在**本格内**顺位递补 —— 关掉底部的终端不该跳到主区的对话上
       const siblings = tabsInPane(cur.tabs, pane)
       const idx = siblings.findIndex((t) => t.id === tabId)
@@ -267,6 +298,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
       */
       if (pane === 'main' && rest.length === 0) {
         const tab = makeTab('chat', 'main')
+        registerChat(workspaceId, tab)
         write(workspaceId, { ...cur, tabs: [...tabs, tab], activeTabId: tab.id })
         return
       }

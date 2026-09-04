@@ -32,10 +32,11 @@ import { ulid } from '../../shared/util/id'
 import { isAbortError } from './abort'
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
+import type { GitContext } from './git-context'
 import type { KernelHost } from './host'
 import type { RunHandle } from './run-registry'
 import type { SpawnSubagentFn, Tool, ToolContext, ToolRegistry } from './tool/registry'
-import type { CanonicalRequest } from './upstream/canonical'
+import type { CanonicalRequest, UpstreamRequestContext } from './upstream/canonical'
 
 /**
  * session 需要上游的**全部**能力 —— 就这两个方法。
@@ -45,7 +46,11 @@ import type { CanonicalRequest } from './upstream/canonical'
  * 这个窄口子是「无头 vitest 是后续每一步的回归网」(方案 §12 步骤 4)成立的前提。
  */
 export interface SessionUpstream {
-  stream(req: CanonicalRequest, signal: AbortSignal): AsyncIterable<ProviderStreamEvent>
+  stream(
+    req: CanonicalRequest,
+    signal: AbortSignal,
+    context: UpstreamRequestContext
+  ): AsyncIterable<ProviderStreamEvent>
   listModels(): ModelAlias[]
 }
 
@@ -74,6 +79,8 @@ export interface SessionDeps {
    * 由调用方决定写不写盘。步骤 6 的 SQLite 就接在这个缝上。
    */
   history?: readonly AgentMessage[]
+  /** 每个完整消息块提交时调用；主进程把它接到 SQLite。 */
+  onMessageCommit?: (message: AgentMessage) => void
   skills?: readonly Skill[]
   approve?: ApproveFn
   /**
@@ -95,6 +102,12 @@ export interface SessionDeps {
   agentPrompt?: string
   /** 派子代理。缺省 = 这个环境里派不了(纯内核测试),`Task` 会当场说清楚。 */
   spawnSubagent?: SpawnSubagentFn
+  /**
+   * 以下两项注入进**这一轮发出去的那份消息流**,转录一个字都不动
+   * (`context-assembler.ts` 的 `decorate`)。两个都是 run 开始时读一次的快照。
+   */
+  projectInstructions?: string
+  git?: GitContext
 }
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
@@ -226,6 +239,8 @@ export class AgentSession {
     // `execute` 是闭包,过不了结构化克隆 —— 请求体里不该带着它
     const infos: ToolInfo[] = advertised.map(({ execute: _execute, ...info }) => info)
 
+    const todoToolName = this.deps.tools.byInternalId('TodoWrite')?.externalName
+
     const alias = this.aliasFor(this.req.model)
     const { request, usage } = assemble({
       messages: this.messages,
@@ -237,6 +252,23 @@ export class AgentSession {
       model: this.req.model,
       workspaceRoot: this.deps.workspaceRoot,
       now: this.deps.host.clock.now(),
+      platform: this.deps.host.platform,
+      permissionMode: this.req.permissionMode,
+      webSearch: this.req.webSearch,
+      reminder: {
+        ...(this.deps.projectInstructions !== undefined
+          ? { projectInstructions: this.deps.projectInstructions }
+          : {}),
+        ...(this.deps.git !== undefined ? { git: this.deps.git } : {}),
+        /*
+          ★ 从**注册表**查外部名,不从上面那份 `advertised` 快照里取。
+          那份被 `readOnlyOnly` / `allowList` / `network` 过滤过 —— 一个 `tools:`
+          写得窄的子代理会因此看不见**它自己写的** todo,而症状是「模型忘了
+          自己的计划」,没有任何报错。也不能写字面量 'TodoWrite':撞名时
+          `ToolNamer` 会加 8 位哈希后缀,那时字面匹配永远静默地返回空。
+        */
+        ...(todoToolName !== undefined ? { todoToolName } : {})
+      },
       contextWindow: alias?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
       maxOutputTokens: alias?.maxOutputTokens ?? FALLBACK_MAX_OUTPUT,
       supportsThinking: alias?.capabilities.thinking ?? false
@@ -251,7 +283,9 @@ export class AgentSession {
     let stopReason: StopReason = 'end_turn'
     let streamError: AgentError | undefined
 
-    for await (const ev of this.deps.upstream.stream(request, this.handle.signal)) {
+    for await (const ev of this.deps.upstream.stream(request, this.handle.signal, {
+      workspaceId: this.req.workspaceId
+    })) {
       this.handle.emit({ type: 'stream', delta: ev })
       acc.apply(ev)
       if (ev.type === 'message_end') stopReason = ev.stopReason
@@ -483,6 +517,8 @@ export class AgentSession {
   /** 落盘边界(方案 §4.2):也是 RunRegistry 裁剪冗余 delta 的那个点 */
   private commit(message: AgentMessage): void {
     this.messages.push(message)
+    // 先落盘再通知渲染层，避免 UI 看见一条重启后不存在的消息。
+    this.deps.onMessageCommit?.(message)
     this.handle.emit({ type: 'message_commit', message })
   }
 }

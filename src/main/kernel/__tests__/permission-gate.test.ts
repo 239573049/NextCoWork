@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import { PERMISSION_MODES } from '../../../shared/agent/permission'
-import { TOOLS_NEEDING_NETWORK, evaluate } from '../permission-gate'
+import { TOOLS_NEEDING_NETWORK, evaluate, permissionFacts } from '../permission-gate'
 import { builtinTools } from '../tool/builtin'
 
 /**
@@ -230,5 +230,47 @@ describe('TOOLS_NEEDING_NETWORK', () => {
       .sort()
     expect(net).toEqual([...TOOLS_NEEDING_NETWORK].sort())
     expect(net).toEqual(['WebFetch', 'web_search'])
+  })
+})
+
+/**
+ * `permissionFacts` —— 系统提示词 `# Environment` 里那几行。
+ *
+ * ★ 这一组钉的不是文案,是**它和上面那张表说同一件事**。漂移的表现最坏:
+ * 提示词说「写盘会被拒」而闸门其实放行,模型就会**提前放弃**一件它做得成的事,
+ * 而这中间不会有任何报错。
+ */
+describe('permissionFacts', () => {
+  it('三档说三种话', () => {
+    expect(permissionFacts('ask', true)).toContain('Permission mode: ask')
+    expect(permissionFacts('ask', true)).toContain('DENIED')
+    expect(permissionFacts('auto', true)).toContain('DENIED') // 破坏性操作那一档
+    expect(permissionFacts('full', true)).not.toContain('DENIED')
+  })
+
+  it('★ 读永远放行 —— 三档都不能把读说成要审批', () => {
+    for (const mode of PERMISSION_MODES) {
+      expect(permissionFacts(mode, true)).toContain('Reading and searching: run without asking')
+    }
+  })
+
+  it('★ 联网开关连 full 档都放宽不了,而且要堵死 Bash 那条路', () => {
+    const s = permissionFacts('full', false)
+
+    expect(s).toContain('the network switch is off')
+    expect(s).toContain('Bash')
+  })
+
+  it('★ 说的和那张表判的是同一件事', () => {
+    for (const mode of PERMISSION_MODES) {
+      for (const webSearch of [true, false]) {
+        const said = permissionFacts(mode, webSearch)
+        const write = evaluate({ mode, readOnly: false, destructive: true, webSearch })
+        const line = said.split('\n').find((l) => l.startsWith('- Writing files')) ?? ''
+
+        expect(line.includes('DENIED')).toBe(write.kind === 'ask')
+        expect(line.includes('run without asking')).toBe(write.kind === 'allow')
+      }
+    }
   })
 })

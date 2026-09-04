@@ -29,6 +29,9 @@ import { ASK_NOT_WIRED_YET, TOOLS_NEEDING_NETWORK, evaluate } from './kernel/per
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
+import type { GitContext } from './kernel/git-context'
+import { readGitContext } from './kernel/git-context'
+import { scanInstructions } from './kernel/instructions'
 import { agentRegistry } from './kernel/agent/registry'
 import type { Skill } from '../shared/domain/skill'
 import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, scanSkills } from './kernel/skill/load'
@@ -39,9 +42,10 @@ import type { SpawnSubagentFn } from './kernel/tool/registry'
 import { ToolRegistry } from './kernel/tool/registry'
 import { McpManager } from './mcp/manager'
 import { installSearchConfig } from './search/service'
-import { DEMO_ALIAS, DEMO_ALIASES, DEMO_PROVIDER, withDemo } from './kernel/upstream/demo'
+import { withDemo } from './kernel/upstream/demo'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
+import { BUILTIN_PROVIDER_ID, endpointFor, findPreset } from '../shared/domain/presets'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
@@ -65,6 +69,12 @@ let seeded = false
  * 根本没有窗口可广播。
  */
 let mcpOnChange: ((id: string) => void) | null = null
+
+/**
+ * 会话持久化发生在 runtime，但广播属于 Electron IPC 层。和 MCP 状态
+ * 广播一样用一个零 Electron 的注入回调，避免 runtime 反向依赖窗口模块。
+ */
+let sessionOnChange: ((workspaceId: string) => void) | null = null
 
 /**
  * 装宿主。**必须在第一个 run 之前**,由 `main/index.ts` 在 `app.whenReady()` 里调用 ——
@@ -110,32 +120,101 @@ const providerConfig: ProviderConfigSource = {
 }
 
 /**
- * 内置演示上游进表。
+ * 全新安装要种进去的东西。
  *
- * ★ **总是进**,不是「没有别的 provider 时才进」。它的 priority 是 100(全表最低),
- * 真 provider 一配上就压过它;别名 `nextcowork-demo` 也不会和任何真别名撞。
- * 于是「什么时候该有演示上游」这个问题根本不需要答案 —— 它一直在,
- * 选不选是用户的事。反过来做成条件注册,就得回答「配了真 key 之后演示上游
- * 该不该消失」,而两个答案都会让某个人在某天困惑。
+ * ★★ **演示上游(`demo.invalid`)不再进供应商表。**
+ * 它以前是种的,理由写在这里:priority 100 全表最低、别名不会和真别名撞、
+ * 「一直在」比「条件注册」少一个要回答的问题。**那些理由都还成立,推翻它的是别的:
+ * 内置上游现在是一家真服务(RoutinAI),而设置页里并排列着一条地址写着
+ * `https://demo.invalid` 的供应商,对用户就是一件需要解释的东西** ——
+ * 它既不能用、又删不掉(seed 会把它种回来),而「点开就能用」这个它本来要买的好处,
+ * 已经被那家真上游买走了。
+ *
+ * ★ **`demo.ts` 一行没动,那套机器整个还在**:`withDemo` 仍然包在生产宿主外面
+ * (`host/index.ts`),发往 `demo.invalid` 的请求照旧被截下来喂罐头 SSE。
+ * 也就是说手工建一个指向 `https://demo.invalid` 的供应商,今天照样能跑完整条链路 ——
+ * 拿掉的只是「默认替用户建好它」。测试里要它的,自己 `store.putProvider(DEMO_PROVIDER)`
+ * 一行就有(`agent-run.test.ts` / `subagent-wiring.test.ts` 就是这么做的)。
  */
 function seed(): void {
   if (seeded) return
   seeded = true
-  store.putProvider(DEMO_PROVIDER)
-  for (const alias of DEMO_ALIASES) store.putAlias(alias)
+  const builtinAlias = seedBuiltinUpstream()
 
   /**
-   * 没配过模型 = 全新安装。指向演示上游,第一次点发送就有东西可看,
-   * 不必先去设置页填 key —— 这正是内置演示上游存在的理由。
+   * 没配过模型 = 全新安装,指向内置上游那条别名。
+   *
+   * ★ 这条别名**没有密钥**(见 `seedBuiltinUpstream`),所以第一次发送会得到一个
+   * 鉴权错误而不是一段回答 —— 这是拿掉演示上游换来的代价,是清楚的:
+   * 一个「填 key」的提示,比一条地址写着 `demo.invalid` 的假供应商更好解释。
    *
    * 常量留在 main 侧而不是写进 `DEFAULT_SETTINGS`:`src/shared/` 不能
-   * 反向 import `src/main/`,而演示上游是 main 的东西。
+   * 反向 import `src/main/`,而上游是 main 的东西。
    */
-  if (store.getSettings().defaultModel === '') {
-    store.updateSettings({ defaultModel: DEMO_ALIAS })
+  if (builtinAlias !== null && store.getSettings().defaultModel === '') {
+    store.updateSettings({ defaultModel: builtinAlias })
   }
 
   seedDefaultWorkspace()
+}
+
+/**
+ * 内置上游 RoutinAI(`https://api.routin.ai`)。**全新安装唯一被种进供应商表的一条。**
+ *
+ * ★★ **它和演示上游是两个东西,而且现在只种它一个。**
+ * 演示上游(`demo.invalid`)是**假网络**:`withDemoUpstream` 按主机名把它的请求
+ * 截下来喂罐头 SSE。那套机器整个还在(见上面 `seed` 的文件头),只是不再替用户
+ * 建好那条配置。内置上游是**真网络**,要真 key。
+ *
+ * ★ 演示上游不种了,但下面这条禁令**一个字都没松**:绝不能把
+ * `DEMO_PROVIDER.baseUrl` 改成 api.routin.ai ——
+ * 那个常量正是 `withDemoUpstream` 用来算劫持主机名的东西
+ * (`demo.ts` 的 `new URL(DEMO_PROVIDER.baseUrl).hostname`)。改了它,
+ * **每一个发往 api.routin.ai 的真请求都会收到罐头假回复**,而且看起来完全正常 ——
+ * 正是 demo.ts 文件头那句「dev 里一切正常,因为根本没有请求出去过」的最坏版本。
+ *
+ * 地址从预设表取,不在这里写第二遍:两处各写一份的话,改了预设而没改这里,
+ * 内置上游会停在一个旧地址上,而界面显示的是预设那条。
+ *
+ * ★ 不种密钥。演示上游有一个常量假 key(走的是 safeStorage 同一条取值路径),
+ * 这里**没有** —— 往一个真服务发 `sk-demo-not-a-real-key` 只会换回一个 401,
+ * 而那句「未授权访问」会让用户以为是自己填错了。没有 key 就显示「未配置」。
+ */
+function seedBuiltinUpstream(): string | null {
+  const preset = findPreset(BUILTIN_PROVIDER_ID)
+  if (preset === null) return null
+  const endpoint = endpointFor(preset, 'anthropic')
+  if (endpoint === null) return null
+
+  store.putProvider({
+    id: BUILTIN_PROVIDER_ID,
+    name: preset.name,
+    protocol: endpoint.protocol,
+    baseUrl: endpoint.baseUrl,
+    credentialRef: `provider:${BUILTIN_PROVIDER_ID}`,
+    // 50:让位给用户自己配的(预设建出来是 `PRESET_PRIORITY` 60)。
+    // 手工建的演示上游仍是 100 —— 全表最低,谁都排在它前面
+    priority: 50,
+    enabled: true
+  })
+
+  /**
+   * ★ 别名只种预设里 `suggestedModels` 的第一条,而且 `alias === upstreamModel`。
+   * 参考图那颗药丸写的就是 `RoutinAI / claude-fable-5-1`(`brands.ts:80`、
+   * `Thread.tsx:27` 都引了这一对),所以这不是编的。真实的模型全集要
+   * `GET /v1/models`,那个端点 401 —— 没 key 拉不到,也就不该在这里猜。
+   */
+  const first = preset.suggestedModels[0]
+  if (first === undefined) return null
+  store.putAlias({
+    alias: first,
+    providerId: BUILTIN_PROVIDER_ID,
+    upstreamModel: first,
+    capabilities: { tools: true, vision: true, thinking: true, caching: true },
+    contextWindow: 200_000,
+    maxOutputTokens: 64_000
+  })
+  return first
 }
 
 /**
@@ -185,7 +264,7 @@ function seedDefaultWorkspace(): void {
  * seed 的公开触发点。
  *
  * `getRouter()` 也会 seed,但首屏拉 provider / 模型列表时可能一个 run 都还没跑过 ——
- * 那时下拉框会是空的,而设置里的 defaultModel 已经指着演示上游了。
+ * 那时下拉框会是空的,而设置里的 defaultModel 已经指着内置上游了。
  * 两处指向同一个 `seed()`,所以「什么时候 seed 过了」只有一个答案。
  */
 export function ensureSeeded(): void {
@@ -231,6 +310,11 @@ export function getMcp(): McpManager {
 /** 由 `ipc/mcp.ts` 在 `registerIpc()` 里装上 —— 理由见 `mcpOnChange` 的注释 */
 export function setMcpChangeListener(fn: (id: string) => void): void {
   mcpOnChange = fn
+}
+
+/** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。 */
+export function setSessionChangeListener(fn: (workspaceId: string) => void): void {
+  sessionOnChange = fn
 }
 
 /**
@@ -293,6 +377,26 @@ export async function refreshSkills(workspaceId: string): Promise<void> {
   // 诊断只记日志,不阻断:一条坏掉的 SKILL.md 不该让别的都用不了
   for (const d of result.diagnostics) h.logger.warn(`[skill] ${d.path}: ${d.message}`)
   skillRegistry().replaceAll(result)
+}
+
+/**
+ * 读这个工作区的 `AGENTS.md`(全局一份 + 项目一份,拼接后消毒)。
+ *
+ * ★ 和 `refreshSkills` / `refreshAgents` 不同,这里**不建注册表单例**:
+ * 没有任何工具会在运行期查它,它只在组装时用一次。一个返回字符串的函数就够,
+ * 而且顺带躲掉了 `skillRegistry()` 那个没有 test reset 钩子的问题。
+ */
+export async function loadInstructions(workspaceId: string): Promise<string> {
+  const h = getHost()
+  const root = workspaceRootFor(workspaceId)
+  const result = await scanInstructions({
+    fs: h.fs,
+    globalRoot: h.paths.userData(),
+    projectRoot: root
+  })
+  // 诊断只记日志,不阻断 —— 一份读不了的 AGENTS.md 不该让这次提问跑不起来
+  for (const d of result.diagnostics) h.logger.warn(`[instructions] ${d.path}: ${d.message}`)
+  return result.text
 }
 
 /**
@@ -582,6 +686,27 @@ export async function runAgent(
    */
   agent?: AgentDefinition
 ): Promise<void> {
+  const existing = store.getSession(req.sessionId)
+  const firstText = req.input
+    .filter((p): p is Extract<typeof req.input[number], { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
+    .join(' ')
+    .trim()
+  const session = store.ensureSession({
+    id: req.sessionId,
+    workspaceId: req.workspaceId,
+    model: req.model,
+    mode: req.mode,
+    thinking: req.thinking,
+    rootPathAtCreation: workspaceRootFor(req.workspaceId),
+    ...(existing === undefined && firstText !== '' ? { title: firstText.slice(0, 80) } : {})
+  })
+  // 新会话第一次发送时把模型/模式冻结到元数据；后续 run 不覆盖用户改过的标题。
+  if (existing !== undefined && (existing.model !== req.model || existing.mode !== req.mode || existing.thinking !== req.thinking)) {
+    store.putSession({ ...session, model: req.model, mode: req.mode, thinking: req.thinking, updatedAt: Date.now() })
+  }
+  const startedAt = getHost().clock.now()
+  store.setRunRecord(req.runId, req.sessionId, 'running', startedAt)
   /*
     ★ 扫描在**建 session 之前**。系统提示词是在第一轮组装时定下来的,
     晚一步扫的话这一轮的目录还是上一轮那份 —— 用户刚装的那条 Skill
@@ -595,7 +720,27 @@ export async function runAgent(
     await refreshAgents(req.workspaceId)
   }
 
-  const session = new AgentSession(
+  /*
+    ★ 这两件事在那个 `if` **外面** —— 先弄清那个 `if` 到底在防什么:
+    它防的**不是**「数据太旧」,而是 `refreshSkills` / `refreshAgents` 会
+    `replaceAll()` 一个**进程内单例**(父 run 跑到一半时子 run 去重扫,
+    父代理下一轮的 Skill 目录就被换掉了)。
+
+    读一个文件、shell 一次 git,**什么单例都不动**,所以不属于那道闸门。
+    而子代理在**同一个工作区**里改同一份代码:不给它项目规矩,它会写出一份
+    不合仓库约定的代码交回来 —— 父代理拿到的只有结论,看不出错在哪一步。
+
+    ★ 唯一不给子代理的是 todo 快照,而它**不需要特判**:快照是从 `messages`
+    反推的,子 run 的 `messages` 是空的,推出来自然就是没有。这条自解。
+  */
+  const projectInstructions = await loadInstructions(req.workspaceId)
+  const git: GitContext | undefined = await readGitContext(
+    getHost().spawn,
+    workspaceRootFor(req.workspaceId),
+    handle.signal
+  )
+
+  const agentSession = new AgentSession(
     {
       host: getHost(),
       upstream: getRouter(),
@@ -609,6 +754,12 @@ export async function runAgent(
        * **接线不变**,换的只是 `getHistory`/`setHistory` 的实现。
        */
       history: store.getHistory(req.sessionId),
+      onMessageCommit: (message) => {
+        store.commitMessage(req.sessionId, message)
+        // message_commit 已经完成 SQLite 写入，再通知渲染层刷新侧边栏
+        // 的 updatedAt；事件泵随后仍会按原顺序接收 message_commit。
+        sessionOnChange?.(req.workspaceId)
+      },
       approve: approveWith(req),
       /*
         ★ 这里给的是**目录**,不是正文。`context-assembler.ts` 只读
@@ -624,7 +775,14 @@ export async function runAgent(
       */
       ...(agent !== undefined ? { agentPrompt: agent.prompt } : {}),
       ...(agent?.tools !== undefined ? { allowedTools: agent.tools } : {}),
-      spawnSubagent: spawnSubagentFor(handle, req)
+      spawnSubagent: spawnSubagentFor(handle, req),
+      /*
+        ★ 这两项注入的是**发出去的那份消息流**,转录一个字都不动
+        (`context-assembler.ts` 的 `decorate`)。commit 进转录的话,用户会在
+        **自己的**聊天气泡里逐字读到整篇 AGENTS.md,而且旧会话会永远重放旧规矩。
+      */
+      ...(projectInstructions !== '' ? { projectInstructions } : {}),
+      ...(git !== undefined ? { git } : {})
     },
     handle,
     req
@@ -635,8 +793,10 @@ export async function runAgent(
    * 一堆没有配对 tool_result 的 tool_call 上行 —— 那正是方案 §4.8
    * 花了整节篇幅避免的 400。
    */
-  return session.run().finally(() => {
-    store.setHistory(req.sessionId, session.history)
+  return agentSession.run().finally(() => {
+    // message_commit 已逐条落盘；replaceHistory 是兼容旧调用/修复异常的最终校验。
+    store.setHistory(req.sessionId, agentSession.history)
+    store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
   })
 }
 
@@ -649,6 +809,7 @@ export function resetRuntimeForTest(): void {
   // manager 会攥着上一个用例的 ToolRegistry —— 那正是要断开的引用
   mcp = null
   mcpOnChange = null
+  sessionOnChange = null
   childRunLauncher = null
   childSeq = 0
   seeded = false

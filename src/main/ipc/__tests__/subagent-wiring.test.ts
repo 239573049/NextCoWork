@@ -25,7 +25,13 @@ import type { AgentEvent } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { runs } from '../../kernel/run-registry'
-import { DEMO_ALIAS, demoHost, renderDemoSse } from '../../kernel/upstream/demo'
+import {
+  DEMO_ALIAS,
+  DEMO_ALIASES,
+  DEMO_PROVIDER,
+  demoHost,
+  renderDemoSse
+} from '../../kernel/upstream/demo'
 import { installChildRunLauncher, installHost, resetRuntimeForTest } from '../../runtime'
 import { store } from '../../state/store'
 import type { WindowContext } from '../../window/registry'
@@ -185,6 +191,10 @@ beforeEach(() => {
   resetRuntimeForTest()
   store.setHistory(PARENT_SESSION, [])
   installHost(demoHost({ fetch: fakeUpstream() }, { chunkDelayMs: 0 }))
+  // ★ `seed()` 不再种演示上游(理由见 runtime.ts 的 seed 文件头),而这份测试
+  // 全程用 DEMO_ALIAS 发 run —— 自己种两行,机器本身一点没变
+  store.putProvider(DEMO_PROVIDER)
+  for (const alias of DEMO_ALIASES) store.putAlias(alias)
 })
 
 afterEach(() => {

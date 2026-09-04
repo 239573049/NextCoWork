@@ -305,6 +305,25 @@ body {
   scrollbar-width: thin;
 }
 
+/* xterm deliberately fills its panel instead of introducing a second framed card. */
+.terminal-surface {
+  background: var(--color-surface);
+}
+.terminal-host {
+  min-height: 0;
+}
+.terminal-host .xterm {
+  height: 100%;
+  padding: 2px 0;
+}
+.terminal-host .xterm-viewport,
+.terminal-host .xterm-screen {
+  background: transparent !important;
+}
+.terminal-host .xterm-viewport {
+  overflow-y: auto !important;
+}
+
 /* 截图 36dbfd7f:内容滚到吸顶的子 Tab 条下方时,顶部有一道渐隐遮罩 */
 .fade-top {
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px);

@@ -36,12 +36,18 @@ vi.mock('../../services/agent', () => ({
 vi.mock('../../services/app', () => ({
   getInnerTabs: vi.fn(async () => ({ tabs: [], activeTabId: null })),
   persistInnerTabs: vi.fn(),
-  persistOuterTabs: vi.fn()
+  persistOuterTabs: vi.fn(),
+  // ★ 未发出的输入落盘。这里替成空实现,断言的是 store 的状态机而不是 IPC ——
+  //   持久化本身由 shared/__tests__/queued-input.test.ts 的纯函数覆盖。
+  //   `getSessionInput` 必须返回 null:返回存档会让 hydrate 往刚建好的 store 里
+  //   回填内容,于是每个用例的初始状态都不再是空的。
+  getSessionInput: vi.fn(async () => null),
+  persistSessionInput: vi.fn()
 }))
 
 import { abortRun, startRun } from '../../services/agent'
 import type { SendOptions } from '../session'
-import { adoptActiveRuns, releaseSession, sessionStore, useRunIndex } from '../session'
+import { adoptActiveRuns, releaseSession, resumeQueue, sessionStore, useRunIndex } from '../session'
 import { useTabsStore } from '../tabs'
 
 const mockStartRun = vi.mocked(startRun)
@@ -234,7 +240,8 @@ describe('排队续跑', () => {
     await s.getState().send('第二条', OPTS)
 
     expect(mockStartRun).toHaveBeenCalledTimes(1)
-    expect(s.getState().queuedInputs).toEqual(['第二条'])
+    expect(s.getState().queuedInputs.map((q) => q.text)).toEqual(['第二条'])
+    expect(s.getState().queuedInputs[0]?.status).toBe('pending')
     expect(s.getState().activeRunId).toBe(runId)
     expect(indexed('s-queue')).toEqual([runId])
   })
@@ -256,7 +263,18 @@ describe('排队续跑', () => {
     expect(indexed('s-drain')).toEqual([second])
   })
 
-  it('续跑复用发送当时的档位,不读此刻的 UI 值', async () => {
+  /**
+   * ★ **断言值变了,而且是有意的。**
+   *
+   * 这条用例原来断言续跑用的是**第一条**的档位(`sonnet`/`full`),因为旧实现
+   * 读的是全队列共用的 `lastOptions` —— 那是「上一次发送用的档位」。
+   * 但用例名说的是「发送当时的档位」,而对第二条消息来说,它「发送当时」的档位
+   * 是入队那一刻的 `OPTS`,不是第一条的。旧断言编码的其实是实现的缺陷。
+   *
+   * 现在每个条目**各自冻结** `options`,所以续跑读的是第二条自己的快照。
+   * 用例的意图没变,变的是它终于测到了那个意图。
+   */
+  it('续跑复用该条目入队当时的档位,不读此刻的 UI 值,也不借用上一条的', async () => {
     const s = session('s-opts')
     await s.getState().send('第一条', { ...OPTS, model: 'sonnet', permissionMode: 'full' })
     await s.getState().send('第二条', OPTS)
@@ -266,8 +284,202 @@ describe('排队续跑', () => {
 
     expect(mockStartRun.mock.calls[1]?.[0]).toMatchObject({
       input: [{ type: 'text', text: '第二条' }],
-      model: 'sonnet',
-      permissionMode: 'full'
+      model: 'demo-model',
+      permissionMode: 'ask'
+    })
+  })
+
+  it('排队期间改档位不影响已入队条目 —— 快照在入队那一刻就冻住了', async () => {
+    const s = session('s-frozen')
+    await s.getState().send('第一条', OPTS)
+    // 用户在排队期间把模型换成 sonnet 再排一条
+    await s.getState().send('第二条', { ...OPTS, model: 'sonnet' })
+    // 又换回去,但这次没有再发 —— 已入队那条不该跟着变
+    await s.getState().send('第三条', { ...OPTS, model: 'haiku' })
+
+    expect(s.getState().queuedInputs.map((q) => q.options.model)).toEqual(['sonnet', 'haiku'])
+  })
+
+  describe('插话', () => {
+    it('promote 后优先于先入队的 pending,且不捎带它', async () => {
+      const s = session('s-promote')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队甲', OPTS)
+      await s.getState().send('排队乙', OPTS)
+
+      const 乙 = s.getState().queuedInputs[1]!
+      s.getState().promoteInput(乙.id)
+
+      s.getState().applyEvents([runEnd])
+      await vi.waitFor(() => expect(mockStartRun).toHaveBeenCalledTimes(2))
+
+      expect(mockStartRun.mock.calls[1]?.[0]).toMatchObject({
+        input: [{ type: 'text', text: '排队乙' }]
+      })
+      // 甲还在队列里,没被顺带发出去
+      expect(s.getState().queuedInputs.map((q) => q.text)).toEqual(['排队甲'])
+    })
+
+    it('再点一次取消插话,并清掉 promotedAt —— 重新引入应排到队尾', async () => {
+      const s = session('s-toggle')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队甲', OPTS)
+
+      const 甲 = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(甲.id)
+      expect(s.getState().queuedInputs[0]?.status).toBe('promoted')
+
+      s.getState().promoteInput(甲.id)
+      expect(s.getState().queuedInputs[0]?.status).toBe('pending')
+      expect(s.getState().queuedInputs[0]?.promotedAt).toBeUndefined()
+    })
+
+    it('多条 promote 合并成一次输入,按插话顺序而非入队顺序', async () => {
+      const s = session('s-merge')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('甲', OPTS)
+      await s.getState().send('乙', OPTS)
+
+      const [甲, 乙] = s.getState().queuedInputs
+      s.getState().promoteInput(乙!.id) // 先插乙
+      s.getState().promoteInput(甲!.id) // 后插甲
+
+      s.getState().applyEvents([runEnd])
+      await vi.waitFor(() => expect(mockStartRun).toHaveBeenCalledTimes(2))
+
+      expect(mockStartRun.mock.calls[1]?.[0]).toMatchObject({
+        input: [{ type: 'text', text: '乙\n\n甲' }]
+      })
+      expect(s.getState().queuedInputs).toEqual([])
+    })
+  })
+
+  describe('附件随队列走', () => {
+    /**
+     * ★ 这一组钉的是一个会静默丢数据的缺陷:入队分支原本只存 `text`,
+     * parts 里的附件被整个丢弃。表现是「生成期间拖图发送 → 排队 → 续跑时
+     * 只发出了文字」,图片消失而界面上没有任何提示。
+     */
+    const IMG = 'ncw://attachments/sessions/s-att/01J8A.png'
+
+    it('入队时保留 ncw:// 附件', async () => {
+      const s = session('s-att')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('带图的', OPTS, [
+        { type: 'text', text: '带图的' },
+        { type: 'image', mime: 'image/png', dataRef: IMG }
+      ])
+
+      expect(s.getState().queuedInputs[0]?.attachments).toEqual([
+        { kind: 'image', name: '01J8A.png', url: IMG }
+      ])
+    })
+
+    it('★ 续跑时图片重新出现在 input 里 —— 不是只剩文字', async () => {
+      const s = session('s-att2')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('带图的', OPTS, [
+        { type: 'text', text: '带图的' },
+        { type: 'image', mime: 'image/png', dataRef: IMG }
+      ])
+
+      s.getState().applyEvents([runEnd])
+      await vi.waitFor(() => expect(mockStartRun).toHaveBeenCalledTimes(2))
+
+      expect(mockStartRun.mock.calls[1]?.[0]).toMatchObject({
+        input: [
+          { type: 'text', text: '带图的' },
+          { type: 'image', mime: 'image/png', dataRef: IMG }
+        ]
+      })
+    })
+
+    it('外部绝对路径的图不入队 —— 它会随存档漂到别的机器,且本来也显示不出来', async () => {
+      const s = session('s-att3')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('外部图', OPTS, [
+        { type: 'text', text: '外部图' },
+        { type: 'image', mime: 'image/png', dataRef: '/abs/plot.png' }
+      ])
+
+      expect(s.getState().queuedInputs[0]?.attachments).toEqual([])
+    })
+  })
+
+  describe('异常结束时队列不动', () => {
+    it('用户按停止后不自动续跑 —— 他要的是接管控制权', async () => {
+      const s = session('s-abort')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队的', OPTS)
+
+      s.getState().applyEvents([{ type: 'run_end', status: 'aborted' }])
+
+      expect(mockStartRun).toHaveBeenCalledTimes(1)
+      expect(s.getState().queuedInputs.map((q) => q.text)).toEqual(['排队的'])
+      expect(s.getState().activeRunId).toBeNull()
+    })
+
+    it('报错后不自动续跑 —— 否则连着错 N 次烧 N 轮 token', async () => {
+      const s = session('s-error')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队的', OPTS)
+
+      s.getState().applyEvents([{ type: 'run_end', status: 'error' }])
+
+      expect(mockStartRun).toHaveBeenCalledTimes(1)
+      expect(s.getState().queuedInputs.map((q) => q.text)).toEqual(['排队的'])
+    })
+
+    it('停下之后用户手动继续,走的是同一条续跑路径', async () => {
+      const s = session('s-resume')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队的', OPTS)
+      s.getState().applyEvents([{ type: 'run_end', status: 'aborted' }])
+
+      resumeQueue('s-resume')
+      await vi.waitFor(() => expect(mockStartRun).toHaveBeenCalledTimes(2))
+      expect(s.getState().queuedInputs).toEqual([])
+    })
+  })
+
+  describe('编辑与移除', () => {
+    it('编辑改文本但不动档位快照与插话顺序', async () => {
+      const s = session('s-edit')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('原文', { ...OPTS, model: 'sonnet' })
+
+      const item = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(item.id)
+      const at = s.getState().queuedInputs[0]?.promotedAt
+      s.getState().editInput(item.id, '改过的')
+
+      const after = s.getState().queuedInputs[0]!
+      expect(after.text).toBe('改过的')
+      expect(after.options.model).toBe('sonnet')
+      expect(after.promotedAt).toBe(at)
+    })
+
+    it('撤回到输入框:出队并接在草稿后面,不覆盖正在写的半句话', async () => {
+      const s = session('s-recall')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队的', OPTS)
+      s.getState().setDraft('写了一半')
+
+      const item = s.getState().queuedInputs[0]!
+      s.getState().moveInputToDraft(item.id)
+
+      expect(s.getState().queuedInputs).toEqual([])
+      expect(s.getState().draft).toBe('写了一半\n\n排队的')
+    })
+
+    it('删除只影响目标条目', async () => {
+      const s = session('s-drop')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('甲', OPTS)
+      await s.getState().send('乙', OPTS)
+
+      s.getState().dropInput(s.getState().queuedInputs[0]!.id)
+      expect(s.getState().queuedInputs.map((q) => q.text)).toEqual(['乙'])
     })
   })
 })

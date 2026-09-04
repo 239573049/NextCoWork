@@ -113,6 +113,15 @@ export interface RunRequest {
   agentType?: string
 }
 
+/**
+ * 发起一次 run 所需的档位 —— `RunRequest` 去掉三个「每次都要重新决定」的字段。
+ *
+ * ★ 定义在 shared 而不是 `stores/session.ts`,是因为**队列条目要逐条冻结它**
+ * (`QueuedInput.options`),而 `shared/domain/queued-input.ts` 不能反向依赖渲染层。
+ * `session.ts` 仍然 re-export 同名类型,既有引用点不受影响。
+ */
+export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input'>
+
 /** 常量就是常量,不做配置项(方案 §10)。 */
 export const MAX_TURNS = 25
 export const MAX_TURNS_GOAL = 60

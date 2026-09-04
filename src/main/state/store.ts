@@ -20,6 +20,8 @@ import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
 import type { Workspace } from '../../shared/domain/workspace'
+import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
+import type { SessionCreateInput } from '../db/repo'
 import * as repo from '../db/repo'
 
 /**
@@ -32,8 +34,6 @@ import * as repo from '../db/repo'
  *
  * 内存无上限,这是它是临时实现的一部分。
  */
-const transcripts = new Map<string, AgentMessage[]>()
-
 /** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
 const DISABLED_SKILLS_KEY = 'skills.disabled'
 
@@ -169,10 +169,62 @@ export const store = {
 
   // ── 会话转录(步骤 6 迁到 messages 表) ──
   getHistory(sessionId: string): readonly AgentMessage[] {
-    return transcripts.get(sessionId) ?? []
+    return repo.getHistory(sessionId)
   },
   setHistory(sessionId: string, messages: readonly AgentMessage[]): void {
-    transcripts.set(sessionId, [...messages])
+    const existing = repo.getSession(sessionId)
+    if (existing === undefined) {
+      // 兼容旧的 renderer：它可能在真正发送前就生成了 sessionId。
+      repo.createSession({ id: sessionId, workspaceId: '', rootPathAtCreation: '' })
+    }
+    repo.replaceHistory(sessionId, messages)
+  },
+
+  // ── 会话实体 ──
+  createSession(input: SessionCreateInput): Session {
+    return repo.createSession(input)
+  },
+  ensureSession(input: SessionCreateInput): Session {
+    return repo.ensureSession(input)
+  },
+  putSession(session: Session): Session {
+    return repo.putSession(session)
+  },
+  getSession(sessionId: string): Session | undefined {
+    return repo.getSession(sessionId)
+  },
+  getSessionDetail(sessionId: string): SessionDetail | undefined {
+    return repo.getSessionDetail(sessionId)
+  },
+  listSessions(workspaceId: string, archived?: boolean): SessionListItem[] {
+    return repo.listSessions(workspaceId, archived)
+  },
+  renameSession(sessionId: string, title: string): void {
+    repo.renameSession(sessionId, title)
+  },
+  setSessionArchived(sessionId: string, archived: boolean): void {
+    repo.setSessionArchived(sessionId, archived)
+  },
+  setSessionFavorited(sessionId: string, favorited: boolean): void {
+    repo.setSessionFavorited(sessionId, favorited)
+  },
+  deleteSession(sessionId: string): void {
+    // ★ 连带删掉它未发出的输入。同 `removeWorkspace` 里那两条一起删的理由:
+    //   只删会话却留下 kv 行的话,那份草稿再没有任何入口能读到它,也没有任何
+    //   一处会主动清理 —— 它会在库里永久堆着。
+    repo.tx(() => {
+      repo.deleteSession(sessionId)
+      repo.removeKv(sessionInputKey(sessionId))
+    })
+  },
+  searchSessions(q: string, workspaceId?: string, limit = 50): SearchHit[] {
+    return repo.searchAll(q, workspaceId, limit)
+  },
+  commitMessage(sessionId: string, message: AgentMessage): void {
+    repo.commitMessage(sessionId, message)
+  },
+  setRunRecord(id: string, sessionId: string, status: string, startedAt: number, endedAt?: number): void {
+    repo.setRunRecord(id, sessionId, status, startedAt, endedAt)
   },
 
   /**
@@ -181,7 +233,7 @@ export const store = {
    * 表现是断言里凭空多出几条消息。
    */
   clearHistoriesForTest(): void {
-    transcripts.clear()
+    repo.clearSessionDataForTest()
   }
 }
 
@@ -189,6 +241,15 @@ export const store = {
 
 export const outerTabKey = (windowKind: string): string => `tabs.outer.${windowKind}`
 export const innerTabKey = (workspaceId: string): string => `tabs.inner.${workspaceId}`
+
+/**
+ * 未发出的输入(草稿 + 插入队列)。
+ *
+ * ★ 复用 `kv` 而不是新建表:查询形状是**整行读、整行写**,每会话一行,
+ * 字段还在演进 —— 与 `schema.ts` 给 kv 写的判据逐条对上,拆真列换不到
+ * 任何查询能力,却要为 `QueuedInput` 的每次增删字段写一条迁移。
+ */
+export const sessionInputKey = (sessionId: string): string => `session.input.${sessionId}`
 
 export const EMPTY_OUTER: WindowTabState = { outer: [], activeOuterId: null }
 export const EMPTY_INNER: InnerTabState = { tabs: [], activeTabId: null }

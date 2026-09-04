@@ -12,7 +12,20 @@
  * ★ **生成中不禁用输入框**,占位符改成「当前回复完成后按队列继续执行」。
  * 队列语义在 session store 里(`queuedInputs`),这里只是不拦着用户打字。
  */
-import { ArrowUp, Globe, Infinity as InfinityIcon, Plus, Slash, Square, Wrench } from 'lucide-react'
+import {
+  ArrowUp,
+  BrainCircuit,
+  ChevronLeft,
+  ChevronRight,
+  Globe,
+  Infinity as InfinityIcon,
+  Paperclip,
+  Plus,
+  Settings2,
+  Slash,
+  Square,
+  Wrench
+} from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { PermissionMode } from '../../../../shared/agent/permission'
 import { PERMISSION_MODES, PERMISSION_MODE_HINT, PERMISSION_MODE_LABEL } from '../../../../shared/agent/permission'
@@ -25,11 +38,13 @@ import {
   THINKING_LEVELS
 } from '../../../../shared/agent/run-request'
 import type { Workspace, WorkspaceSettings } from '../../../../shared/domain/workspace'
+import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
 import { updateWorkspace } from '../../services/app'
 import { useModelsStore } from '../../stores/models'
+import { AttachmentTray, type TrayItem } from './AttachmentTray'
 
 export interface ComposerValue {
   permissionMode: PermissionMode
@@ -46,7 +61,12 @@ export function Composer({
   onDraft,
   running,
   onSend,
-  onStop
+  onStop,
+  attachments = [],
+  onAttachFiles,
+  onPickAttachment,
+  onRemoveAttachment,
+  onRetryAttachment
 }: {
   workspace: Workspace
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
@@ -56,8 +76,20 @@ export function Composer({
   running: boolean
   onSend: (text: string, value: ComposerValue) => void
   onStop: () => void
+  /**
+   * 草稿附件。★ **状态不在这里** —— 它与 draft 同级,住在 ChatView,
+   * 因为发送时要把它转成 `ContentPart[]`,而那是 ChatView 的职责。
+   * 这里只负责渲染与三个入口。
+   */
+  attachments?: TrayItem[]
+  /** 拖拽 / 粘贴共用 */
+  onAttachFiles?: (files: File[]) => void
+  /** 点 `+` → 走主进程 dialog */
+  onPickAttachment?: () => void
+  onRemoveAttachment?: (key: string) => void
+  onRetryAttachment?: (key: string) => void
 }): ReactNode {
-  const { models, loaded, providerOf, load } = useModelsStore()
+  const { models, providers, loaded, providerOf, load } = useModelsStore()
   const [value, setValue] = useState<ComposerValue>(() => fromSettings(workspace.settings))
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -76,6 +108,8 @@ export function Composer({
    * 用 React 官方那个「渲染期按 key 调整 state」的写法:只认 workspace.id 变没变。
    */
   const [seenWorkspace, setSeenWorkspace] = useState(workspace.id)
+  /** 拖拽悬停高亮。★ 纯视觉状态,不影响任何数据流 */
+  const [dragging, setDragging] = useState(false)
   if (seenWorkspace !== workspace.id) {
     setSeenWorkspace(workspace.id)
     setValue(fromSettings(workspace.settings))
@@ -113,10 +147,38 @@ export function Composer({
 
   function submit(): void {
     const text = draft.trim()
-    if (text === '' || model === '') return
+    // ★ 只有附件、没有文字也该能发 —— 拖一张图进来直接问「这是什么」是常见用法。
+    //   但上传还没完成时不发:那样 parts 里会缺一张图,而用户以为发出去了。
+    const hasReady = attachments.some((a) => a.status === 'done')
+    const pending = attachments.some((a) => a.status === 'uploading')
+    if (pending) return
+    if ((text === '' && !hasReady) || model === '') return
     // 发送时打快照:药丸此刻的值进 RunRequest,run 跑起来后再改药丸不影响它
     onSend(text, { ...value, model })
     onDraft('')
+  }
+
+  /**
+   * 拖拽落入。★ **过滤掉目录** —— `DataTransfer` 里的目录项 `size` 为 0 且
+   * 读不出内容,不拦的话会变成一堆失败的 chip。不递归展开:
+   * 一个 `node_modules` 拖进来是几万个文件。
+   */
+  function handleDrop(e: React.DragEvent): void {
+    if (onAttachFiles === undefined) return
+    const files = [...e.dataTransfer.files].filter((f) => f.size > 0 || f.type !== '')
+    if (files.length === 0) return
+    e.preventDefault()
+    setDragging(false)
+    onAttachFiles(files)
+  }
+
+  /** 粘贴。★ 截图粘贴是最高频入口,而它只有 `files`,没有文件名 */
+  function handlePaste(e: React.ClipboardEvent): void {
+    if (onAttachFiles === undefined) return
+    const files = [...e.clipboardData.files]
+    if (files.length === 0) return
+    // 不 preventDefault:剪贴板里可能同时有文字,那部分仍该正常粘进输入框
+    onAttachFiles(files)
   }
 
   return (
@@ -125,12 +187,31 @@ export function Composer({
         ★ `surface-input` 不是 `surface-raised`:深色下两者同值,浅色下输入框是**纯白**
         (#ffffff),而 raised 卡片是 #f2eee6。合并了浅色主题下输入框就沉进背景里。
       */}
-      <div className="mx-auto w-full max-w-[760px] rounded-panel border border-border bg-surface-input">
+      <div
+        className={cn(
+          'mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors',
+          dragging ? 'border-accent' : 'border-border'
+        )}
+        onDragOver={(e) => {
+          if (onAttachFiles === undefined) return
+          e.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={() => { setDragging(false) }}
+        onDrop={handleDrop}
+      >
+        <AttachmentTray
+          items={attachments}
+          onRemove={(k) => onRemoveAttachment?.(k)}
+          onRetry={(k) => onRetryAttachment?.(k)}
+        />
+
         <textarea
           ref={ref}
           data-testid="composer-input"
           value={draft}
           onChange={(e) => onDraft(e.target.value)}
+          onPaste={handlePaste}
           onKeyDown={(e) => {
             // Enter 发送,Shift+Enter 换行。输入法组词期间的 Enter 是「上屏」,
             // 不是「发送」—— 少了 isComposing 这个判断,中文用户每打一个词就发一次。
@@ -219,6 +300,17 @@ export function Composer({
             {(close) => (
               <>
                 <MenuItem
+                  icon={<Paperclip size={14} />}
+                  description="也可以直接拖进来或粘贴截图"
+                  onSelect={() => {
+                    close()
+                    onPickAttachment?.()
+                  }}
+                >
+                  添加附件
+                </MenuItem>
+                <MenuSeparator />
+                <MenuItem
                   checked={value.webSearch}
                   icon={<Globe size={14} />}
                   // 「完全访问」也不解除这个开关(方案 §4.5),菜单上要说出来
@@ -230,20 +322,6 @@ export function Composer({
                 >
                   联网搜索
                 </MenuItem>
-                <MenuSeparator />
-                <MenuLabel>思考强度</MenuLabel>
-                {THINKING_LEVELS.map((t) => (
-                  <MenuItem
-                    key={t}
-                    checked={t === value.thinking}
-                    onSelect={() => {
-                      patch({ thinking: t })
-                      close()
-                    }}
-                  >
-                    {THINKING_LEVEL_LABEL[t]}
-                  </MenuItem>
-                ))}
               </>
             )}
           </Menu>
@@ -269,41 +347,18 @@ export function Composer({
             模型属于后者 —— 它和发送按钮是一件事的两半,挤在左边那堆开关里
             会被当成又一个开关。
           */}
-          <Menu
-            label="模型"
-            width={280}
-            align="end"
-            trigger={
-              <Pill>
-                <ProviderIcon name={[model, provider?.name, provider?.id]} size={13} />
-                <span className="max-w-[150px] truncate">{modelLabel}</span>
-              </Pill>
-            }
-          >
-            {(close) =>
-              models.length === 0 ? (
-                <MenuLabel>{loaded ? '还没有配置模型,去设置页添加' : '加载中…'}</MenuLabel>
-              ) : (
-                models.map((m) => {
-                  const p = providerOf(m.alias)
-                  return (
-                    <MenuItem
-                      key={`${m.providerId}/${m.alias}`}
-                      checked={m.alias === model}
-                      icon={<ProviderIcon name={[m.alias, p?.name, p?.id]} size={14} />}
-                      description={p?.name}
-                      onSelect={() => {
-                        patch({ model: m.alias })
-                        close()
-                      }}
-                    >
-                      {m.alias}
-                    </MenuItem>
-                  )
-                })
-              )
-            }
-          </Menu>
+          <ModelPicker
+            model={model}
+            modelLabel={modelLabel}
+            provider={provider}
+            providers={providers}
+            models={models}
+            loaded={loaded}
+            providerOf={providerOf}
+            thinking={value.thinking}
+            onModel={(nextModel) => patch({ model: nextModel })}
+            onThinking={(thinking) => patch({ thinking })}
+          />
 
           <button
             type="button"
@@ -365,6 +420,169 @@ function Pill({
     >
       {children}
     </span>
+  )
+}
+
+/**
+ * 模型选择采用两级结构：第一次打开先选供应商，进入供应商后再选模型。
+ * 这样模型别名很多时不会把所有供应商混在一个长菜单里；底部固定保留本轮模型
+ * 配置（当前是思考强度），切换模型时不需要再去“更多”菜单里找。
+ */
+function ModelPicker({
+  model,
+  modelLabel,
+  provider,
+  providers,
+  models,
+  loaded,
+  providerOf,
+  thinking,
+  onModel,
+  onThinking
+}: {
+  model: string
+  modelLabel: string
+  provider?: UpstreamProvider
+  providers: UpstreamProvider[]
+  models: ModelAlias[]
+  loaded: boolean
+  providerOf: (alias: string) => UpstreamProvider | undefined
+  thinking: ThinkingLevel
+  onModel: (model: string) => void
+  onThinking: (thinking: ThinkingLevel) => void
+}): ReactNode {
+  const [providerId, setProviderId] = useState<string | null>(null)
+
+  const providerModels = providerId === null ? [] : models.filter((m) => m.providerId === providerId)
+  const availableProviders = providers.filter((p) => models.some((m) => m.providerId === p.id))
+
+  return (
+    <Menu
+      label="模型"
+      width={300}
+      align="end"
+      trigger={
+        <Pill>
+          <ProviderIcon name={[model, provider?.name, provider?.id]} size={13} />
+          <span className="max-w-[150px] truncate">{modelLabel}</span>
+          <ChevronRight size={12} className="ml-0.5 text-fg-faint" />
+        </Pill>
+      }
+      onOpenChange={(open) => {
+        if (!open) setProviderId(null)
+      }}
+    >
+      {(close) => (
+        <>
+          {providerId === null ? (
+            <>
+              <MenuLabel>
+                <span className="flex items-center gap-1.5">
+                  <Settings2 size={12} />
+                  选择模型提供商
+                </span>
+              </MenuLabel>
+              {!loaded ? (
+                <MenuLabel>加载中…</MenuLabel>
+              ) : availableProviders.length === 0 ? (
+                <MenuLabel>还没有配置模型,去设置页添加</MenuLabel>
+              ) : (
+                availableProviders.map((p) => {
+                  const count = models.filter((m) => m.providerId === p.id).length
+                  return (
+                    <MenuItem
+                      key={p.id}
+                      checked={p.id === provider?.id}
+                      icon={<ProviderIcon name={[p.name, p.id]} size={15} />}
+                      description={`${count} 个可用模型`}
+                      onSelect={() => setProviderId(p.id)}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                        <ChevronRight size={13} className="text-fg-faint" />
+                      </span>
+                    </MenuItem>
+                  )
+                })
+              )}
+              <MenuSeparator />
+              <MenuLabel>
+                <span className="flex items-center gap-1.5">
+                  <BrainCircuit size={12} />
+                  模型配置
+                </span>
+              </MenuLabel>
+              {THINKING_LEVELS.map((level) => (
+                <MenuItem
+                  key={level}
+                  checked={level === thinking}
+                  onSelect={() => {
+                    onThinking(level)
+                    close()
+                  }}
+                >
+                  思考强度 · {THINKING_LEVEL_LABEL[level]}
+                </MenuItem>
+              ))}
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => setProviderId(null)}
+                className="app-no-drag mb-1 flex w-full items-center gap-1.5 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg"
+              >
+                <ChevronLeft size={14} />
+                <span>全部提供商</span>
+              </button>
+              <MenuSeparator />
+              <MenuLabel>
+                <span className="flex items-center gap-1.5">
+                  <ProviderIcon name={[providers.find((p) => p.id === providerId)?.name, providerId]} size={13} />
+                  {providers.find((p) => p.id === providerId)?.name ?? providerId}
+                </span>
+              </MenuLabel>
+              {providerModels.map((m) => {
+                const p = providerOf(m.alias)
+                return (
+                  <MenuItem
+                    key={`${m.providerId}/${m.alias}`}
+                    checked={m.alias === model}
+                    icon={<ProviderIcon name={[m.alias, p?.name, p?.id]} size={14} />}
+                    onSelect={() => {
+                      onModel(m.alias)
+                      close()
+                    }}
+                  >
+                    {m.alias}
+                  </MenuItem>
+                )
+              })}
+              <MenuSeparator />
+              <MenuLabel>
+                <span className="flex items-center gap-1.5">
+                  <BrainCircuit size={12} />
+                  模型配置
+                </span>
+              </MenuLabel>
+              {THINKING_LEVELS.map((level) => (
+                <MenuItem
+                  key={level}
+                  checked={level === thinking}
+                  onSelect={() => {
+                    onThinking(level)
+                    close()
+                  }}
+                >
+                  思考强度 · {THINKING_LEVEL_LABEL[level]}
+                </MenuItem>
+              ))}
+            </>
+          )}
+        </>
+      )}
+    </Menu>
   )
 }
 

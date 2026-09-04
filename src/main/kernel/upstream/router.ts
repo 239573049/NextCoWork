@@ -11,9 +11,14 @@ import type { AgentError } from '../../../shared/agent/error'
 import { agentError } from '../../../shared/agent/error'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ModelAlias, ProviderHealth, UpstreamProvider } from '../../../shared/domain/provider'
+import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import { abortableSleep, isAbortError } from '../abort'
 import type { KernelHost } from '../host'
-import { joinUpstreamUrl, type CanonicalRequest } from './canonical'
+import {
+  joinUpstreamUrl,
+  type CanonicalRequest,
+  type UpstreamRequestContext
+} from './canonical'
 import { anthropicErrorToAgentError, decodeAnthropic } from './decode/anthropic'
 import { encodeAnthropic } from './encode/anthropic'
 import { sseFromResponse } from './sse'
@@ -24,6 +29,7 @@ const DEFAULT_BASE_DELAY_MS = 500
 /** 连续失败到这个数就判不健康 */
 const UNHEALTHY_AFTER = 3
 const COOLDOWN_MS = 30_000
+const ANTHROPIC_USER_ID_MAX = 512
 
 /**
  * 配置来源。步骤 6 之后由 SQLite 提供,现在由内存 store 提供 ——
@@ -186,7 +192,8 @@ export class UpstreamRouter {
   private async *attempt(
     c: Candidate,
     req: CanonicalRequest,
-    signal: AbortSignal
+    signal: AbortSignal,
+    context: UpstreamRequestContext
   ): AsyncGenerator<ProviderStreamEvent, Outcome> {
     let sawContent = false
     const startedAt = this.host.clock.now()
@@ -211,7 +218,11 @@ export class UpstreamRouter {
         }
       }
 
-      const enc = encodeAnthropic(req, c.alias.upstreamModel, apiKey)
+      const cacheTtl = anthropicCacheTtlOf(c.provider)
+      const enc = encodeAnthropic(req, c.alias.upstreamModel, apiKey, {
+        userId: context.workspaceId,
+        cacheTtl
+      })
       const res = await this.host.fetch(joinUpstreamUrl(c.provider.baseUrl, enc.path), {
         method: 'POST',
         headers: { ...enc.headers, accept: 'text/event-stream' },
@@ -228,7 +239,10 @@ export class UpstreamRouter {
         } catch {
           /* 非 JSON 的错误体(网关的 HTML 页)—— 原样交给分类器 */
         }
-        const error = anthropicErrorToAgentError(res.status, parsed)
+        const error = anthropicErrorToAgentError(res.status, parsed, {
+          cacheTtl,
+          providerName: c.provider.name
+        })
         const after = parseRetryAfter(res.headers.get('retry-after'), this.host.clock.now())
         if (after !== undefined) error.retryAfterMs = after
         return { kind: 'failed', sawContent, error }
@@ -258,7 +272,26 @@ export class UpstreamRouter {
    * 主入口。**重试放在这里,绝不放在 session 里** —— 放在 session 里会重放
    * 已经执行过的工具调用(方案 §5.3)。
    */
-  async *stream(req: CanonicalRequest, signal: AbortSignal): AsyncGenerator<ProviderStreamEvent> {
+  async *stream(
+    req: CanonicalRequest,
+    signal: AbortSignal,
+    context: UpstreamRequestContext
+  ): AsyncGenerator<ProviderStreamEvent> {
+    if (
+      context.workspaceId.trim() === '' ||
+      context.workspaceId.length > ANTHROPIC_USER_ID_MAX
+    ) {
+      yield {
+        type: 'error',
+        error: agentError(
+          'provider',
+          `工作区标识必须是 1–${ANTHROPIC_USER_ID_MAX} 个字符，Anthropic 请求尚未发送。`,
+          { retryable: false }
+        )
+      }
+      return
+    }
+
     const candidates = this.candidates(req.model)
     if (candidates.length === 0) {
       yield { type: 'error', error: this.noCandidateError(req.model) }
@@ -283,8 +316,16 @@ export class UpstreamRouter {
       }
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const outcome = yield* this.attempt(c, req, signal)
+        const outcome = yield* this.attempt(c, req, signal, context)
         if (outcome.kind === 'ok') return
+
+        // A cache compatibility error is a configuration mismatch, not an
+        // unhealthy provider. Preserve the exact requested wire shape and
+        // stop this logical request without retrying or switching candidates.
+        if (outcome.error.code === 'cache_unsupported') {
+          yield { type: 'error', error: outcome.error }
+          return
+        }
 
         this.recordFailure(c.provider.id, outcome.error)
         lastError = outcome.error

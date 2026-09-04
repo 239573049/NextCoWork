@@ -5,14 +5,7 @@
  * `doc` / `draw` / `browser` 本版只出空壳 —— 它们要验证的是「Tab 系统支持异构
  * kind」这件事,不是各自的领域模型(方案 §十)。
  */
-import {
-  FileText,
-  Globe,
-  Image as ImageIcon,
-  PenTool,
-  SquareTerminal,
-  type LucideIcon
-} from 'lucide-react'
+import { FileText, Globe, Image as ImageIcon, PenTool, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { FeatureKind, InnerTab, InnerTabKind } from '../../../shared/domain/tab'
 import { FEATURE_LABEL } from '../../../shared/domain/tab'
@@ -21,6 +14,7 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { FEATURE_ICON } from '../shell/icons'
 import { ChatView } from './chat/ChatView'
 import { FilesTab } from './files/FilesView'
+import { TerminalView } from './terminal/TerminalView'
 
 export interface InnerViewProps {
   tab: InnerTab
@@ -43,7 +37,7 @@ export function InnerView({ tab, workspace, fallbackModel }: InnerViewProps): Re
         />
       )
     case 'terminal':
-      return <Placeholder icon={SquareTerminal} title="终端" step="步骤 8(node-pty + xterm)" />
+      return <TerminalView tab={tab} workspace={workspace} />
     case 'doc':
       return <Placeholder icon={FileText} title="文档" step="本版只出空壳" />
     case 'draw':

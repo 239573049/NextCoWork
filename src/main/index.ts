@@ -9,7 +9,8 @@ import appIconPath from '../../resources/icon.png?asset'
 import { closeDatabase, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
-import { flushPendingPersists, registerIpc, shutdownRuns } from './ipc'
+import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } from './ipc'
+import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp } from './runtime'
 import { store } from './state/store'
@@ -30,6 +31,17 @@ if (!gotTheLock) {
 if (is.dev) {
   app.setPath('userData', `${app.getPath('userData')}-dev`)
 }
+
+/*
+  ★ **必须在 `app.whenReady()` 之前** —— 与单实例锁、userData 改路径同属
+  「ready 之前才有效」的那一类。
+
+  放到 ready 之后不会报任何错,协议照样注册得上,但 `standard` / `secure` /
+  `stream` 这些 privileges 会**全部丢失**。症状是彼此看起来毫无关联的一组故障:
+  图片有时能显示、`fetch('ncw://…')` 报 CORS、视频不能拖进度条 ——
+  没有一条会指向「注册时机不对」。
+*/
+registerAttachmentScheme()
 
 // 步骤 0 的 sqlite 探针。留着不删:将来升 Electron 大版本时,
 // 它是第一个会告诉你出事的地方(方案 §9)。
@@ -126,7 +138,7 @@ void app.whenReady().then(() => {
    * 也必须在这里(而不是模块顶层)构造 host:`safeStorage` 与 `net.fetch` 都要求 app ready。
    */
   /*
-    ★ **必须排在 `initRuntime()` 前面**:seed 会往 providers 表写演示上游,
+    ★ **必须排在 `initRuntime()` 前面**:seed 会往 providers 表写内置上游,
     而在库打开之前碰 store 的话,那些行会落进一个内存兜底库里,
     换成文件库时凭空消失 —— 症状正好是「配置重启后没了」,也就是持久化
     根本没做时的原症状,没人会怀疑到调用顺序上来。`openDatabase()` 因此
@@ -136,6 +148,13 @@ void app.whenReady().then(() => {
     这里拿到的就是该用的那个目录。
   */
   openDatabase(app.getPath('userData'))
+
+  /*
+    ★ 第二段。必须排在 `openDatabase` 之后 —— 附件根目录取的是同一个
+    `userData` 路径,而 dev 下那个路径是模块顶层改过的;两处读的必须是同一个值,
+    否则协议寻址的目录与清理扫描的目录会是两个。
+  */
+  installAttachmentProtocol()
 
   initRuntime(electronHost())
 
@@ -197,6 +216,7 @@ app.on('before-quit', () => {
   destroyTray()
   flushPendingPersists()
   shutdownRuns()
+  shutdownTerminals()
   /*
     MCP 的 stdio 传输背后是**真的子进程**。不关的话它们会活过主进程 ——
     表现是退出应用之后活动监视器里还挂着几个 node,而下次启动又会各起一份。

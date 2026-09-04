@@ -1,14 +1,14 @@
-import markUrl from '../../assets/mark.png'
+import markUrl from '../../../../../resources/trayTemplate.png'
 
 /**
  * NextCoWork 的标识。
  *
- * 图形来自 `nextcowork-symbol-transparent-v5.png`(透明底的符号)。
- * 这里不直接 `<img>` —— 那是一张固定炭灰色的图,贴到深色侧边栏会看不见。
+ * 图形使用应用现有的托盘模板资源 `resources/trayTemplate.png`。
+ * 这里不直接 `<img>` —— 位图本身是固定黑色,贴到深色侧边栏会看不见。
  * 改用它的 alpha 通道做 CSS mask,让符号取 `currentColor`:
- * 形状是新符号,颜色跟随主题(深色→浅前景,浅色→深前景),两个主题都成立。
+ * 颜色跟随主题(深色→浅前景,浅色→深前景),两个主题都成立。
  *
- * 想换品牌图形?换掉 assets/mark.png 即可,其它地方只 import `<Mark />`。
+ * 想换品牌图形?换掉 `resources/trayTemplate.png` 即可,其它地方只 import `<Mark />`。
  */
 export function Mark({ size = 26, className }: { size?: number; className?: string }): React.ReactNode {
   return (

@@ -23,6 +23,7 @@ import { MessageSquarePlus, Search, Settings, SquarePen } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { FEATURE_LABEL, type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
+import type { SessionListItem } from '../../../shared/domain/session'
 import { Mark } from '../components/brand/Mark'
 import { EmptyState } from '../components/ui/EmptyState'
 import { IconButton } from '../components/ui/IconButton'
@@ -35,6 +36,7 @@ const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'skills', 
 export function Sidebar({
   workspace,
   chatTabs,
+  sessions,
   activeFeature,
   activeSessionId,
   runningSessionIds,
@@ -49,6 +51,8 @@ export function Sidebar({
   workspace: Workspace | null
   /** 当前工作区里已打开的对话 Tab —— 步骤 6 接上 SQLite 后换成真正的历史会话表 */
   chatTabs: readonly InnerTab[]
+  /** 数据库中的全部会话；未打开的历史会话也应出现在侧边栏。 */
+  sessions: readonly SessionListItem[]
   activeFeature: FeatureKind | null
   activeSessionId: string | null
   runningSessionIds: ReadonlySet<string>
@@ -137,7 +141,7 @@ export function Sidebar({
                 </IconButton>
               }
             >
-              {chatTabs.length === 0 ? (
+              {chatTabs.length === 0 && sessions.filter((s) => !s.archived).length === 0 ? (
                 <EmptyState title="还没有开始对话" className="py-6" />
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
@@ -161,12 +165,43 @@ export function Sidebar({
                       </button>
                     </li>
                   ))}
+                  {sessions
+                    .filter((s) => !s.archived && !chatTabs.some((t) => t.kind === 'chat' && t.ref.sessionId === s.id))
+                    .map((s) => (
+                      <li key={`history-${s.id}`}>
+                        <button
+                          type="button"
+                          onClick={() => onSelectSession(s.id)}
+                          className="flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
+                        >
+                          <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                          {s.favorited && <span className="shrink-0 text-accent">★</span>}
+                        </button>
+                      </li>
+                    ))}
                 </ul>
               )}
             </Section>
 
             <Section title="归档" defaultOpen={false}>
-              <EmptyState title="没有归档的对话" className="py-6" />
+              {sessions.filter((s) => s.archived).length === 0 ? (
+                <EmptyState title="没有归档的对话" className="py-6" />
+              ) : (
+                <ul className="flex flex-col gap-0.5 pb-1">
+                  {sessions.filter((s) => s.archived).map((s) => (
+                    <li key={`archived-${s.id}`}>
+                      <button
+                        type="button"
+                        onClick={() => onSelectSession(s.id)}
+                        className="flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
+                      >
+                        <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                        {s.favorited && <span className="shrink-0 text-accent">★</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Section>
           </>
         )}
@@ -177,7 +212,25 @@ export function Sidebar({
         钱包 / 云同步 / 每日回顾那一整块商业化面),所以这个位置换成设置入口 ——
         形状留着,含义换掉。
       */}
-      <div className="flex shrink-0 items-center gap-2.5 px-3 py-3">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label="打开设置"
+        onClick={(event) => {
+          // 齿轮本身已经是独立按钮，避免事件冒泡后把打开动作执行两次。
+          if (event.target instanceof Element && event.target.closest('button') !== null) return
+          onOpenSettings()
+        }}
+        onKeyDown={(event) => {
+          // 只处理卡片本身获得焦点时的键盘操作，避免齿轮按钮的按键事件重复触发。
+          if (event.target !== event.currentTarget) return
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            onOpenSettings()
+          }
+        }}
+        className="mx-1.5 mb-1.5 flex shrink-0 cursor-pointer items-center gap-2.5 rounded-card px-3 py-3 transition-colors hover:bg-tint-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+      >
         <div className="flex size-8 items-center justify-center rounded-pill bg-tint-strong text-fg">
           <Mark size={16} />
         </div>

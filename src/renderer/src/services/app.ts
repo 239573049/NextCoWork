@@ -6,6 +6,7 @@
  */
 import type { Bootstrap } from '../../../shared/domain/bootstrap'
 import type { DirListing } from '../../../shared/domain/file-tree'
+import type { SessionInputState } from '../../../shared/domain/queued-input'
 import type { AppSettings, AppSettingsPatch } from '../../../shared/domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../../../shared/domain/tab'
 import type { Workspace, WorkspaceSettings } from '../../../shared/domain/workspace'
@@ -87,4 +88,26 @@ export function persistOuterTabs(kind: WindowKind, state: WindowTabState): void 
 
 export function persistInnerTabs(workspaceId: string, state: InnerTabState): void {
   send('tabs:persistInner', { workspaceId, state })
+}
+
+// ─── 未发出的输入(草稿 + 插入队列) ───
+
+/**
+ * 返回 null = 没有存档,或存档已失效(版本不符 / 超 30 天)。
+ * **校验在主进程侧做**,这里拿到的要么可用要么是 null,不需要二次判断。
+ */
+export function getSessionInput(sessionId: string): Promise<SessionInputState | null> {
+  return invoke('session:getInput', { sessionId })
+}
+
+/**
+ * ★ `immediate` 两档(协议里写了完整理由):草稿按键走防抖,
+ * 队列的增删改走立即落盘 —— 丢一整条排队消息与丢半个词的代价不对等。
+ */
+export function persistSessionInput(
+  sessionId: string,
+  state: SessionInputState,
+  immediate = false
+): void {
+  send('session:persistInput', { sessionId, state, immediate })
 }

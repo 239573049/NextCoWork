@@ -17,6 +17,23 @@ export interface TriggerRect {
   right: number
 }
 
+/**
+ * 面板不许越过的边框(视口坐标)。**默认是视口,但那对浮层里的菜单是错的。**
+ *
+ * ★ 起因是模型页那两颗药丸:触发器只有 132px 宽,而面板 280px 且 `align='end'`
+ * (右缘对齐触发器右缘)—— 于是面板往左伸出 148px,穿过设置浮层的内容列、
+ * 盖在左边那条导航上。视口没越界,所以旧的夹取一点都没拦。
+ *
+ * 看着像「菜单飘出去了」,但坐标其实一个没算错:**是夹取的对象选错了。**
+ * 菜单属于哪块面,就该被哪块面夹住。
+ */
+export interface MenuBounds {
+  top: number
+  left: number
+  right: number
+  bottom: number
+}
+
 export interface Placement {
   /** 视口坐标,直接给 `position: fixed` 用 */
   top: number
@@ -53,10 +70,24 @@ export function placeMenu(
   panelHeight: number,
   width: number,
   align: 'start' | 'end',
-  viewport: { width: number; height: number }
+  viewport: { width: number; height: number },
+  /** 省略 = 用视口。见 `MenuBounds` */
+  bounds?: MenuBounds
 ): Placement {
-  const below = viewport.height - trigger.bottom - GAP - EDGE
-  const above = trigger.top - GAP - EDGE
+  /*
+    ★ 和视口取交集,不是直接采信 `bounds`:调用方喂进来的是一个
+    `getBoundingClientRect()`,而那块面自己可能有一部分在视口外(窗口被拖小、
+    或者它本身在滚动)。只夹到它身上的话,面板会被推到看不见的地方 ——
+    比「盖住导航」更糟,因为那是**打开了却找不到**。
+  */
+  const area = {
+    top: Math.max(0, bounds?.top ?? 0),
+    left: Math.max(0, bounds?.left ?? 0),
+    right: Math.min(viewport.width, bounds?.right ?? viewport.width),
+    bottom: Math.min(viewport.height, bounds?.bottom ?? viewport.height)
+  }
+  const below = area.bottom - trigger.bottom - GAP - EDGE
+  const above = trigger.top - area.top - GAP - EDGE
 
   const flipped = panelHeight > below && above > below
   const maxHeight = Math.max(MIN_HEIGHT, flipped ? above : below)
@@ -68,11 +99,13 @@ export function placeMenu(
     把面板顶出视口(视口极矮时)。夹的上界用 `Math.max(EDGE, …)`,
     这样连 `height + 2*EDGE` 都塞不下的极端情况也不会得到一个负的上界。
   */
-  const top = clamp(wanted, EDGE, Math.max(EDGE, viewport.height - height - EDGE))
+  const loTop = area.top + EDGE
+  const top = clamp(wanted, loTop, Math.max(loTop, area.bottom - height - EDGE))
 
   // align='end' = 面板右缘对齐触发器右缘(原来的 `right-0`)
   const wantedLeft = align === 'start' ? trigger.left : trigger.right - width
-  const left = clamp(wantedLeft, EDGE, Math.max(EDGE, viewport.width - width - EDGE))
+  const loLeft = area.left + EDGE
+  const left = clamp(wantedLeft, loLeft, Math.max(loLeft, area.right - width - EDGE))
 
   return { top, left, maxHeight, flipped }
 }

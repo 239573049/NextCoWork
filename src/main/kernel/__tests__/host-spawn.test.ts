@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { isAbortError } from '../abort'
 import { nodeHost } from '../host'
+import { agentShell } from '../node-spawn'
 
 /**
  * `SpawnFn` 的真进程测试。
@@ -192,4 +193,21 @@ describe('spawn 的输出预算', () => {
     expect(r.stdout.length).toBeGreaterThanOrEqual(512 * 1024)
     expect(r.stdout.length).toBeLessThan(2_000_000)
   }, 30_000)
+})
+
+/**
+ * ★ 提示词里那句 `Shell: …` 和 bash 工具真正跑命令用的那个 shell,必须是同一个。
+ *
+ * 这条看起来像在测一个 getter,它测的其实是**别让提示词说谎**:
+ * 事实型提示词一旦是假的,比不写更糟 —— 模型不会怀疑它,只会照着
+ * 那个不存在的 shell 写语法,然后拿到一条毫无头绪的语法错误。
+ */
+describe('agentShell', () => {
+  it('★ nodeHost().platform.shell 和 spawn 真用的 shell 是同一个', () => {
+    expect(nodeHost().platform.shell).toBe(agentShell())
+  })
+
+  it('给得出一个非空的 shell —— 环境没有 SHELL 时也要有兜底', () => {
+    expect(agentShell().length).toBeGreaterThan(0)
+  })
 })

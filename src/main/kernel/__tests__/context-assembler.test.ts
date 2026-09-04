@@ -15,10 +15,27 @@ import {
   estimateTokens,
   estimateTools,
   resolveThinkingBudget,
-  type AssembleInput
+  type AssembleInput,
+  type SystemPromptInput
 } from '../context-assembler'
 
 const NOW = Date.UTC(2026, 8, 4, 12, 0, 0)
+const PLAT = { os: 'darwin', osVersion: '25.6.0', shell: '/bin/zsh' }
+
+/**
+ * `buildSystemPrompt` 的共用底座 —— 每条用例只写它**真正关心**的那几个字段。
+ * ★ `permissionMode` / `webSearch` 与 `platform` 同为必填:漏传会编译不过,
+ * 而不是静默地少掉几行事实。
+ */
+const PROMPT: SystemPromptInput = {
+  mode: 'normal',
+  skills: [],
+  workspaceRoot: '/w',
+  now: NOW,
+  platform: PLAT,
+  permissionMode: 'auto',
+  webSearch: false
+}
 
 function skill(over: Partial<Skill> = {}): Skill {
   return {
@@ -56,8 +73,10 @@ function input(over: Partial<AssembleInput> = {}): AssembleInput {
     mode: 'normal',
     thinking: 'off',
     model: 'claude-sonnet-4',
+    permissionMode: 'auto',
+    webSearch: false,
     workspaceRoot: '/ws',
-    now: NOW,
+    now: NOW, platform: PLAT,
     contextWindow: 200_000,
     maxOutputTokens: 8192,
     supportsThinking: true,
@@ -134,40 +153,54 @@ describe('estimateMessages / estimateTools', () => {
 
 describe('buildSystemPrompt', () => {
   it('带上工作区与日期', () => {
-    const s = buildSystemPrompt({ mode: 'normal', skills: [], workspaceRoot: '/a/b', now: NOW })
+    const s = buildSystemPrompt({ ...PROMPT, workspaceRoot: '/a/b' })
     expect(s).toContain('/a/b')
     expect(s).toContain('2026-09-04')
   })
 
+  /**
+   * ★ 平台事实必须真的落进提示词。
+   *
+   * 这条钉的是一整类 bash 失败:模型不知道自己在 macOS 上,就会写
+   * `sed -i 's/a/b/' f`(GNU 形式,BSD 上要求 `-i ''`)、写 `readlink -f`
+   * (BSD 上没有)。这些都不是「模型笨」,是我们没告诉它。
+   */
+  it('★ 平台与 shell 进提示词 —— 一条事实抵一段跨平台规则', () => {
+    const s = buildSystemPrompt({
+      ...PROMPT,
+      platform: { os: 'win32', osVersion: '10.0.22631', shell: 'cmd.exe' }
+    })
+    expect(s).toContain('Platform: win32 (10.0.22631)')
+    expect(s).toContain('Shell: cmd.exe')
+  })
+
   /** plan 的真正实现在工具过滤,但提示词也得说 —— 否则模型会一直问「为什么写不了」 */
   it('规划模式追加说明', () => {
-    const s = buildSystemPrompt({ mode: 'plan', skills: [], workspaceRoot: '/w', now: NOW })
+    const s = buildSystemPrompt({ ...PROMPT, mode: 'plan' })
     expect(s).toContain('Plan mode')
     expect(s).toContain('read-only')
   })
 
   it('目标模式追加说明', () => {
-    const s = buildSystemPrompt({ mode: 'goal', skills: [], workspaceRoot: '/w', now: NOW })
+    const s = buildSystemPrompt({ ...PROMPT, mode: 'goal' })
     expect(s).toContain('Goal mode')
   })
 
   it('普通模式两段都不出现', () => {
-    const s = buildSystemPrompt({ mode: 'normal', skills: [], workspaceRoot: '/w', now: NOW })
+    const s = buildSystemPrompt({ ...PROMPT })
     expect(s).not.toContain('Plan mode')
     expect(s).not.toContain('Goal mode')
   })
 
   it('没有 Skill 时不出现 Skill 段', () => {
-    const s = buildSystemPrompt({ mode: 'normal', skills: [], workspaceRoot: '/w', now: NOW })
+    const s = buildSystemPrompt({ ...PROMPT })
     expect(s).not.toContain('Available Skills')
   })
 
   it('Skill 名字与描述进入提示词', () => {
     const s = buildSystemPrompt({
-      mode: 'normal',
-      skills: [skill({ name: 'commit', description: '写符合 Conventional Commits 的提交信息' })],
-      workspaceRoot: '/w',
-      now: NOW
+      ...PROMPT,
+      skills: [skill({ name: 'commit', description: '写符合 Conventional Commits 的提交信息' })]
     })
     expect(s).toContain('commit')
     expect(s).toContain('写符合 Conventional Commits 的提交信息')
@@ -185,10 +218,8 @@ describe('buildSystemPrompt', () => {
    */
   it('★ Skill 正文不进提示词 —— 渐进披露的全部意义', () => {
     const s = buildSystemPrompt({
-      mode: 'normal',
-      skills: [skill({ description: '写提交信息', body: '按 Conventional Commits 写。' })],
-      workspaceRoot: '/w',
-      now: NOW
+      ...PROMPT,
+      skills: [skill({ description: '写提交信息', body: '按 Conventional Commits 写。' })]
     })
     expect(s).not.toContain('按 Conventional Commits 写。')
     // 而且要明确告诉模型「正文得自己去取」,否则它会凭名字猜
@@ -198,20 +229,16 @@ describe('buildSystemPrompt', () => {
 
   it('Skill 描述也被消毒', () => {
     const s = buildSystemPrompt({
-      mode: 'normal',
-      skills: [skill({ description: 'x\u0007y' })],
-      workspaceRoot: '/w',
-      now: NOW
+      ...PROMPT,
+      skills: [skill({ description: 'x\u0007y' })]
     })
     expect(s).toContain('xy')
   })
 
   it('超长 Skill 描述被截断', () => {
     const s = buildSystemPrompt({
-      mode: 'normal',
-      skills: [skill({ description: 'y'.repeat(500_000) })],
-      workspaceRoot: '/w',
-      now: NOW
+      ...PROMPT,
+      skills: [skill({ description: 'y'.repeat(500_000) })]
     })
     expect(s.length).toBeLessThan(10_000)
   })
@@ -225,10 +252,8 @@ describe('buildSystemPrompt', () => {
   it('★ 一个 500KB 正文的 Skill 只往提示词里加一行', () => {
     const build = (body: string): string =>
       buildSystemPrompt({
-        mode: 'normal',
-        skills: [skill({ body })],
-        workspaceRoot: '/w',
-        now: NOW
+        ...PROMPT,
+        skills: [skill({ body })]
       })
 
     /*
@@ -250,9 +275,30 @@ describe('buildSystemPrompt', () => {
     const many = Array.from({ length: 500 }, (_, i) =>
       skill({ id: `s${i}`, name: `skill${i}`, description: 'd'.repeat(1000) })
     )
-    const s = buildSystemPrompt({ mode: 'normal', skills: many, workspaceRoot: '/w', now: NOW })
+    const s = buildSystemPrompt({ ...PROMPT, skills: many })
     expect(s.length).toBeLessThan(200_000)
     expect(s).toMatch(/\d+ more Skill/)
+  })
+
+  /**
+   * ★ 权限档位是**事实**,不是规则(文件头第 3 关)。
+   *
+   * 它挡的是这样一轮:模型不知道自己在 ask 档,先调一次 `Write`、被拒、
+   * 然后**去试 `Bash` 绕**(`# Permissions` 整段就是在补救这件事)。
+   * 事前告知一行,比事后拦一次便宜得多。
+   */
+  it('★ 权限档位与联网开关进 # Environment', () => {
+    const s = buildSystemPrompt({ ...PROMPT, permissionMode: 'ask', webSearch: false })
+    expect(s).toContain('Permission mode: ask')
+    // 如实说:这一批「需要询问」= 拒绝,不是「会弹窗问用户」
+    expect(s).toContain('DENIED')
+    expect(s).toContain('the network switch is off')
+  })
+
+  it('full 档 + 开着联网时不吓唬模型', () => {
+    const s = buildSystemPrompt({ ...PROMPT, permissionMode: 'full', webSearch: true })
+    expect(s).toContain('Permission mode: full')
+    expect(s).not.toContain('DENIED')
   })
 
   /**
@@ -261,10 +307,8 @@ describe('buildSystemPrompt', () => {
    */
   it('Skill 段声明权限边界', () => {
     const s = buildSystemPrompt({
-      mode: 'normal',
-      skills: [skill()],
-      workspaceRoot: '/w',
-      now: NOW
+      ...PROMPT,
+      skills: [skill()]
     })
     expect(s).toContain('cannot widen your')
   })

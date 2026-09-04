@@ -34,6 +34,15 @@ export interface CanonicalRequest {
 }
 
 /**
+ * Run-scoped facts needed by upstream adapters but not part of the protocol-
+ * neutral prompt. Keep these outside CanonicalRequest so provider-specific
+ * metadata cannot leak into another wire protocol by accident.
+ */
+export interface UpstreamRequestContext {
+  workspaceId: string
+}
+
+/**
  * ★ 实现搬到了 `shared/domain/baseurl.ts`,这里只再导出 —— 调用点一个都不用改。
  *
  * 搬家的理由是本函数原来那段注释自己写下的约束:「设置页必须把最终拼出的 URL

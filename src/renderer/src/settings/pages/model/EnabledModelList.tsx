@@ -2,7 +2,8 @@ import { Cloud, GripVertical, Image as ImageIcon, Plus, Workflow } from 'lucide-
 import type { ReactNode } from 'react'
 import { PROVIDER_PRESETS } from '../../../../../shared/domain/presets'
 import { cn } from '../../../lib/cn'
-import { avatarInitial, type ProviderEntry } from './enabled-models'
+import { type ProviderEntry } from './enabled-models'
+import { ProviderAvatar } from './ProviderAvatar'
 
 /**
  * 参考图左边那一列。
@@ -70,15 +71,7 @@ export function EnabledModelList({
               )}
             >
               <GripVertical size={13} className="shrink-0 text-fg-faint opacity-30" aria-hidden />
-              <span
-                className={cn(
-                  'flex size-6 shrink-0 items-center justify-center rounded-[7px]',
-                  'bg-surface-sunken text-[11px] text-fg-muted'
-                )}
-                aria-hidden
-              >
-                {avatarInitial(e.provider.name)}
-              </span>
+              <ProviderAvatar name={e.provider.name} id={e.provider.id} />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5">
                   <span className="min-w-0 truncate text-[12.5px] text-fg">{e.provider.name}</span>

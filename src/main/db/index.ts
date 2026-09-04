@@ -201,6 +201,28 @@ export function tx<T>(fn: () => T): T {
   }
 }
 
+/**
+ * 异步事务，供需要跨越安全存储/原生 API 的数据导入使用。
+ *
+ * `DatabaseSync` 本身是同步句柄，但导入的凭证写入接口是 Promise。若先
+ * 提交 SQLite、再写凭证，第二个写入失败时就无法满足「导入失败 = 完全不变」。
+ * 这里让事务保持打开直到 Promise 完成；嵌套调用沿用外层事务，和 `tx` 的
+ * 语义一致。主进程同一时刻只有一个导入操作，因此不会出现两个异步事务交叉。
+ */
+export async function txAsync<T>(fn: () => T | Promise<T>): Promise<T> {
+  const d = db()
+  if (d.isTransaction) return await fn()
+  d.exec('BEGIN')
+  try {
+    const out = await fn()
+    d.exec('COMMIT')
+    return out
+  } catch (err) {
+    try { d.exec('ROLLBACK') } catch { /* 原始错误更有用 */ }
+    throw err
+  }
+}
+
 /** 关库。退出前调,或测试里重置。 */
 export function closeDatabase(): void {
   prepared.clear()
@@ -223,6 +245,22 @@ export function fileStats(): { dbBytes: number; walBytes: number } {
     }
   }
   return { dbBytes: size(handlePath), walBytes: size(`${handlePath}-wal`) }
+}
+
+/** 当前数据库主文件路径；未指定文件库时返回 null（测试内存库）。 */
+export function databaseFilePath(): string | null {
+  return handlePath === null || handlePath === MEMORY ? null : handlePath
+}
+
+/** 当前连接已经执行到的 schema 版本，供备份 manifest 校验使用。 */
+export function databaseSchemaVersion(): number {
+  const row = db().prepare('PRAGMA user_version').get() as Record<string, unknown>
+  return Number(row['user_version'] ?? 0)
+}
+
+/** 在复制快照或替换文件前把 WAL 合并并截断。 */
+export function checkpointDatabase(): void {
+  db().exec('PRAGMA wal_checkpoint(TRUNCATE)')
 }
 
 /**

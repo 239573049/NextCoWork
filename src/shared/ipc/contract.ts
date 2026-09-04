@@ -20,26 +20,37 @@ import type { Bootstrap } from '../domain/bootstrap'
 import type { DirListing } from '../domain/file-tree'
 import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
 import type { ProxyPasswordInfo } from '../domain/proxy'
+import type {
+  Attachment,
+  AttachmentScope,
+  AttachmentUploadRequest
+} from '../domain/attachment'
+import type { SessionInputState } from '../domain/queued-input'
 import type { SearchProviderId, SearchProviderStatus } from '../domain/search'
 import type {
   CredentialInfo,
   FailoverEvent,
+  FetchedModel,
   GatewayStatus,
   ModelAlias,
   UpstreamProvider
 } from '../domain/provider'
 import type { SearchHit, Session, SessionDetail, SessionListItem } from '../domain/session'
-import type {
-  AppSettings,
-  AppSettingsPatch,
-  ResolvedTheme,
-  StorageStats
-} from '../domain/settings'
+import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
 import type { ImageTheme } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
+import type {
+  BackupStatus,
+  CleanupAge,
+  CleanupPreview,
+  CleanupResult,
+  ImportApplyResult,
+  ImportPreview,
+  RestoreResult
+} from '../domain/data'
 
 // ═══════════════════════════════════════════════════════════════
 // 一、信封
@@ -173,10 +184,32 @@ export interface IpcInvokeMap {
   // ── Tab 状态(读;写走 send,见 IpcSendMap) ──
   'tabs:getInner': { req: { workspaceId: string }; res: InnerTabState }
 
+  /**
+   * 未发出的输入(草稿 + 插入队列)。★ **读走 invoke,写走 send** ——
+   * 与 Tab 布局同构。返回 null = 没有存档 / 存档已失效(版本不符或超 TTL),
+   * 校验在主进程侧做,渲染层拿到的要么是可用的,要么是 null。
+   */
+  'session:getInput': { req: { sessionId: string }; res: SessionInputState | null }
+
+  // ── 附件(上传走 invoke;读取走 ncw:// 协议,不经 IPC) ──
+  /**
+   * ★ 上传必须知道成败与落点,所以是 invoke 而不是 send。
+   * 返回的 `Attachment.url` 是 `ncw://` 地址 —— **绝对路径不出主进程**。
+   */
+  'attachment:upload': { req: AttachmentUploadRequest; res: Attachment }
+  /** ★ 走主进程 dialog,渲染层永不指定任意路径(方案 §9)。取消返回空数组 */
+  'attachment:pick': {
+    req: { scope: AttachmentScope; ownerId?: string }
+    res: Attachment[]
+  }
+  'attachment:remove': { req: { id: string }; res: void }
+  /** 已上传但还没发出去的 —— 重启后恢复草稿附件区 */
+  'attachment:listBySession': { req: { sessionId: string }; res: Attachment[] }
+
   // ── 会话 ──
   'sessions:list': { req: { workspaceId: string; archived?: boolean }; res: SessionListItem[] }
   'sessions:get': { req: { sessionId: string }; res: SessionDetail }
-  'sessions:create': { req: { workspaceId: string; title?: string }; res: Session }
+  'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
   'sessions:setArchived': { req: { sessionId: string; archived: boolean }; res: void }
   'sessions:setFavorited': { req: { sessionId: string; favorited: boolean }; res: void }
@@ -272,7 +305,32 @@ export interface IpcInvokeMap {
   'provider:setCredential': { req: { providerId: string; apiKey: string }; res: CredentialInfo }
   'provider:getCredentialInfo': { req: { providerId: string }; res: CredentialInfo }
   'provider:listModels': { req: { providerId?: string }; res: ModelAlias[] }
+  /**
+   * ★★ **叫 `fetchModels` 而不是 `listModels`,因为那个名字已经被上面那条占了 ——
+   * 而且占的是相反的意思。** 上面那条列的是「本地配置过的别名」,这条是
+   * 「去问上游它有哪些模型」。参考文档 `docs/ipc-protocol.md:337` 恰好用
+   * `listModels` 表示后者,照抄过来就会得到两个同名、语义相反的频道。
+   *
+   * 真发一次网络请求,所以是 async 且可能失败(密钥没填 / 这家没有列表端点)。
+   */
+  'provider:fetchModels': { req: { providerId: string }; res: FetchedModel[] }
+  /**
+   * 整表替换这家的模型别名。
+   *
+   * ★ **是「替换」不是「追加」,因为导入弹窗的语义就是替换** ——
+   * 参考图那句「取消勾选会从当前列表删除」和按钮上的「更新列表(17/20)」
+   * 说的是同一件事:弹窗关掉之后,这家的别名 = 当时勾着的那些,一个不多一个不少。
+   * 拆成 upsert/remove 两条的话,渲染层得自己算差集,而算错的表现是
+   * 「取消勾选了但它还在」—— 一个没人会去 diff 的静默错。
+   *
+   * `models` 是**上游真实模型名**(`FetchedModel.id`),顺序即别名表顺序。
+   * 上限 `MAX_ALIASES_PER_PROVIDER`,主进程照样拒绝(不只是界面置灰)。
+   */
+  'provider:setAliases': { req: { providerId: string; models: string[] }; res: ModelAlias[] }
   'provider:test': { req: { providerId: string }; res: { ok: boolean; latencyMs?: number } }
+  /** Model management console writes. */
+  'model:update': { req: import('../domain/provider').ModelAlias; res: import('../domain/provider').ModelAlias }
+  'model:remove': { req: { providerId: string; alias: string }; res: void }
 
   // ── 本地网关 ──
   'gateway:getStatus': { req: void; res: GatewayStatus }
@@ -282,6 +340,19 @@ export interface IpcInvokeMap {
   // ── 数据(界面「数据」页) ──
   'storage:getStats': { req: void; res: StorageStats }
   'storage:vacuum': { req: void; res: StorageStats }
+  'storage:openDataDirectory': { req: void; res: void }
+  'storage:export': { req: { includeEncryptedKeys?: boolean; password?: string }; res: { path: string; encrypted: boolean; bytes: number } | null }
+  'storage:importPreview': { req: void; res: ImportPreview | null }
+  'storage:importApply': { req: { password?: string }; res: ImportApplyResult }
+  'storage:chooseBackupDirectory': { req: void; res: string | null }
+  'storage:getBackupStatus': { req: void; res: BackupStatus }
+  'storage:createBackup': { req: { manual?: boolean }; res: BackupStatus }
+  'storage:restoreBackup': { req: { confirm?: boolean }; res: RestoreResult | null }
+  'storage:cleanupPreview': { req: { kind: 'attachments' | 'age' | 'history' | 'local-data'; age?: CleanupAge }; res: CleanupPreview }
+  'storage:cleanupAttachments': { req: void; res: CleanupResult }
+  'storage:cleanupByAge': { req: { age: CleanupAge }; res: CleanupResult }
+  'storage:clearHistory': { req: void; res: CleanupResult }
+  'storage:clearLocalData': { req: { confirm: boolean }; res: { deleted: boolean } }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -305,6 +376,22 @@ export interface IpcSendMap {
    */
   'tabs:persistOuter': { kind: WindowKind; state: WindowTabState }
   'tabs:persistInner': { workspaceId: string; state: InnerTabState }
+
+  /**
+   * 未发出的输入落盘。★ **`immediate` 分两档,这是与 Tab 布局唯一的不同**:
+   *
+   * - 草稿每次按键都变 → `false`,走同一个 500ms 防抖,丢失窗口 ≤500ms,代价是半个词。
+   * - 入队/插话/编辑/删除是离散低频动作 → `true`,立即写。丢一整条排队消息的代价
+   *   远高于丢半个词,而这类操作的频率低到根本不值得防抖。
+   *
+   * 强杀(kill -9)拦不住任何一档 —— 这正是队列走立即写、只让草稿承担
+   * 那 500ms 风险窗口的原因。
+   */
+  'session:persistInput': {
+    sessionId: string
+    state: SessionInputState
+    immediate: boolean
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -318,7 +405,7 @@ export interface IpcSendMap {
  */
 export interface IpcEventMap {
   'agent:event': AgentEventEnvelope
-  'terminal:data': { id: string; chunk: string }
+  'terminal:data': { id: string; seq: number; chunk: string }
   'terminal:exit': { id: string; code: number }
   'gateway:status': GatewayStatus
   'gateway:failover': FailoverEvent
@@ -328,6 +415,13 @@ export interface IpcEventMap {
   'skills:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
+  'sessions:changed': { workspaceId?: string }
+  /**
+   * 上游供应商或别名变了。**两张表一起带**,因为设置页左列的每一行都是
+   * 「供应商 + 它的主别名」—— 只推 providers 的话,改完供应商名字副标题还是旧的,
+   * 而那需要渲染层再发一次 `provider:listModels` 才补得回来。
+   */
+  'provider:changed': { providers: UpstreamProvider[]; models: ModelAlias[] }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -362,6 +456,11 @@ export const INVOKE_CHANNELS = {
   'workspace:close': 1,
   'workspace:listDir': 1,
   'tabs:getInner': 1,
+  'session:getInput': 1,
+  'attachment:upload': 1,
+  'attachment:pick': 1,
+  'attachment:remove': 1,
+  'attachment:listBySession': 1,
   'sessions:list': 1,
   'sessions:get': 1,
   'sessions:create': 1,
@@ -404,12 +503,29 @@ export const INVOKE_CHANNELS = {
   'provider:setCredential': 1,
   'provider:getCredentialInfo': 1,
   'provider:listModels': 1,
+  'provider:fetchModels': 1,
+  'provider:setAliases': 1,
   'provider:test': 1,
+  'model:update': 1,
+  'model:remove': 1,
   'gateway:getStatus': 1,
   'gateway:setEnabled': 1,
   'gateway:resetHealth': 1,
   'storage:getStats': 1,
-  'storage:vacuum': 1
+  'storage:vacuum': 1,
+  'storage:openDataDirectory': 1,
+  'storage:export': 1,
+  'storage:importPreview': 1,
+  'storage:importApply': 1,
+  'storage:chooseBackupDirectory': 1,
+  'storage:getBackupStatus': 1,
+  'storage:createBackup': 1,
+  'storage:restoreBackup': 1,
+  'storage:cleanupPreview': 1,
+  'storage:cleanupAttachments': 1,
+  'storage:cleanupByAge': 1,
+  'storage:clearHistory': 1,
+  'storage:clearLocalData': 1
 } as const satisfies Record<keyof IpcInvokeMap, 1>
 
 export const SEND_CHANNELS = {
@@ -417,7 +533,8 @@ export const SEND_CHANNELS = {
   'terminal:resize': 1,
   'window:ready': 1,
   'tabs:persistOuter': 1,
-  'tabs:persistInner': 1
+  'tabs:persistInner': 1,
+  'session:persistInput': 1
 } as const satisfies Record<keyof IpcSendMap, 1>
 
 export const EVENT_CHANNELS = {
@@ -431,7 +548,9 @@ export const EVENT_CHANNELS = {
   'workspace:changed': 1,
   'skills:changed': 1,
   'mcp:changed': 1,
-  'websearch:changed': 1
+  'provider:changed': 1,
+  'websearch:changed': 1,
+  'sessions:changed': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

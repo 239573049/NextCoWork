@@ -19,13 +19,40 @@ import type {
   SendChannel
 } from '../../shared/ipc/contract'
 import { INVOKE_CHANNELS, SEND_CHANNELS } from '../../shared/ipc/contract'
-import { EMPTY_INNER, EMPTY_OUTER, innerTabKey, outerTabKey, store } from '../state/store'
+import type { SessionInputState } from '../../shared/domain/queued-input'
+import { isValidSessionInput } from '../../shared/domain/queued-input'
+import {
+  EMPTY_INNER,
+  EMPTY_OUTER,
+  innerTabKey,
+  outerTabKey,
+  sessionInputKey,
+  store
+} from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
+import { shutdownTerminals, terminalHost } from '../terminal-host'
 import { getBootstrap, openExternal, registerThemeBridge } from './app'
+import {
+  listSessionAttachments,
+  pickAttachments,
+  removeAttachment,
+  uploadAttachment
+} from './attachment'
 import { abortRun, attachRun, startChildRun, startRun } from './agent'
-import { installChildRunLauncher } from '../runtime'
+import { installChildRunLauncher, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
-import { listModels, listProviders } from './provider'
+import {
+  fetchModels,
+  getCredentialInfo,
+  listModels,
+  listProviders,
+  removeProvider,
+  setAliases,
+  setCredential,
+  upsertProvider,
+  updateModel,
+  removeModel
+} from './provider'
 import {
   getMcpSecretsInfo,
   listMcpServers,
@@ -44,14 +71,44 @@ import {
   setSearchEnabled,
   testSearchProvider
 } from './websearch'
-import {
-  clearProxyPassword,
-  getProxyPasswordInfo,
-  setProxyPassword
-} from '../net/proxy'
+import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
 import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
 import { deleteImage, importImage, listImages, readImage, saveImage, sweepOrphans } from './theme'
-import { closeWorkspace, listDir, listWorkspaces, pickWorkspace, updateWorkspace } from './workspace'
+import {
+  closeWorkspace,
+  listDir,
+  listWorkspaces,
+  pickWorkspace,
+  updateWorkspace
+} from './workspace'
+import {
+  createSession,
+  deleteSession,
+  getSession,
+  listSessions,
+  renameSession,
+  searchAll,
+  setArchived,
+  setFavorited
+} from './sessions'
+import {
+  chooseBackupDirectory,
+  cleanupAttachments,
+  cleanupByAge,
+  cleanupPreview,
+  clearHistory,
+  clearLocalData,
+  createBackup,
+  exportData,
+  getBackupStatus,
+  getStats,
+  importApply,
+  importPreview,
+  openDataDirectory,
+  restoreBackup,
+  scheduleAutomaticBackup,
+  vacuum
+} from './storage'
 
 type Handler<K extends InvokeChannel> = (
   req: InvokeReq<K>,
@@ -96,18 +153,38 @@ const handlers: HandlerMap = {
   'workspace:close': ({ id }) => closeWorkspace(id),
   'workspace:listDir': (req) => listDir(req),
   'tabs:getInner': ({ workspaceId }) => store.getKv(innerTabKey(workspaceId), EMPTY_INNER),
+  'session:getInput': ({ sessionId }) => readSessionInput(sessionId),
 
-  // ── 步骤 6:SQLite ──
-  'sessions:list': todo('sessions:list', '步骤 6'),
-  'sessions:get': todo('sessions:get', '步骤 6'),
-  'sessions:create': todo('sessions:create', '步骤 6'),
-  'sessions:rename': todo('sessions:rename', '步骤 6'),
-  'sessions:setArchived': todo('sessions:setArchived', '步骤 6'),
-  'sessions:setFavorited': todo('sessions:setFavorited', '步骤 6'),
-  'sessions:delete': todo('sessions:delete', '步骤 6'),
-  'conversations:searchAll': todo('conversations:searchAll', '步骤 6(FTS5)'),
-  'storage:getStats': todo('storage:getStats', '步骤 6'),
-  'storage:vacuum': todo('storage:vacuum', '步骤 6'),
+  // ── 附件(读取走 ncw:// 协议,不占 IPC) ──
+  'attachment:upload': (req) => uploadAttachment(req),
+  'attachment:pick': (req) => pickAttachments(req),
+  'attachment:remove': (req) => removeAttachment(req),
+  'attachment:listBySession': (req) => listSessionAttachments(req),
+
+  // ── 会话 / SQLite ──
+  'sessions:list': (req) => listSessions(req),
+  'sessions:get': (req) => getSession(req),
+  'sessions:create': (req) => createSession(req),
+  'sessions:rename': (req) => renameSession(req),
+  'sessions:setArchived': (req) => setArchived(req),
+  'sessions:setFavorited': (req) => setFavorited(req),
+  'sessions:delete': (req) => deleteSession(req),
+  'conversations:searchAll': (req) => searchAll(req),
+  'storage:getStats': () => getStats(),
+  'storage:vacuum': () => vacuum(),
+  'storage:openDataDirectory': () => openDataDirectory(),
+  'storage:export': (req) => exportData(req),
+  'storage:importPreview': () => importPreview(),
+  'storage:importApply': (req) => importApply(req),
+  'storage:chooseBackupDirectory': () => chooseBackupDirectory(),
+  'storage:getBackupStatus': () => getBackupStatus(),
+  'storage:createBackup': (req) => createBackup(req),
+  'storage:restoreBackup': (req) => restoreBackup(req),
+  'storage:cleanupPreview': (req) => cleanupPreview(req),
+  'storage:cleanupAttachments': () => cleanupAttachments(),
+  'storage:cleanupByAge': (req) => cleanupByAge(req),
+  'storage:clearHistory': () => clearHistory(),
+  'storage:clearLocalData': (req) => clearLocalData(req),
 
   // ── 步骤 3–5:RunRegistry / AgentSession / 交互 ──
   'agent:run': (req, ctx) => startRun(req, ctx),
@@ -118,10 +195,10 @@ const handlers: HandlerMap = {
   'agent:listTools': todo('agent:listTools', '步骤 4'),
 
   // ── 步骤 8:终端 ──
-  'terminal:create': todo('terminal:create', '步骤 8'),
-  'terminal:kill': todo('terminal:kill', '步骤 8'),
-  'terminal:list': todo('terminal:list', '步骤 8'),
-  'terminal:getBuffer': todo('terminal:getBuffer', '步骤 8'),
+  'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
+  'terminal:kill': ({ id }) => terminalHost.kill(id),
+  'terminal:list': ({ workspaceId }) => terminalHost.list(workspaceId),
+  'terminal:getBuffer': ({ id }, ctx) => terminalHost.attach(id, ctx.sender),
 
   // ── 步骤 10:MCP ──
   'mcp:list': () => listMcpServers(),
@@ -150,14 +227,23 @@ const handlers: HandlerMap = {
   'skills:setWorkspaceActive': (req) => setSkillWorkspaceActive(req),
 
   // ── 步骤 4 / 13:上游与网关 ──
-  // 只读两条已实现:它们是输入框那颗模型选择器的唯一数据源(见 ipc/provider.ts)
   'provider:list': () => listProviders(),
   'provider:listModels': ({ providerId }) => listModels(providerId),
-  'provider:upsert': todo('provider:upsert', '步骤 4'),
-  'provider:remove': todo('provider:remove', '步骤 4'),
-  'provider:setCredential': todo('provider:setCredential', '步骤 4(safeStorage)'),
-  'provider:getCredentialInfo': todo('provider:getCredentialInfo', '步骤 4'),
-  'provider:test': todo('provider:test', '步骤 4'),
+  'provider:upsert': (req) => upsertProvider(req),
+  'provider:remove': ({ id }) => removeProvider(id),
+  'provider:fetchModels': ({ providerId }) => fetchModels(providerId),
+  'provider:setAliases': ({ providerId, models }) => setAliases(providerId, models),
+  'provider:setCredential': ({ providerId, apiKey }) => setCredential(providerId, apiKey),
+  'provider:getCredentialInfo': ({ providerId }) => getCredentialInfo(providerId),
+  /**
+   * ★ `test` 单独留着 todo,**不是漏了**。它要真发一次请求,而非 Anthropic 协议的
+   * 编解码还没写(步骤 13,`router.ts:195` 那个 early-return)——
+   * 现在接上去,给 OpenAI 格式的供应商点「测试」必然失败,而报出来的是「连不通」,
+   * 用户会去查自己的地址和 key。那不是连不通,是我们还没实现。
+   */
+  'provider:test': todo('provider:test', '步骤 13(先要 OpenAI 编解码)'),
+  'model:update': (req) => updateModel(req),
+  'model:remove': ({ providerId, alias }) => removeModel(providerId, alias),
   'gateway:getStatus': todo('gateway:getStatus', '步骤 13'),
   'gateway:setEnabled': todo('gateway:setEnabled', '步骤 13'),
   'gateway:resetHealth': todo('gateway:resetHealth', '步骤 13')
@@ -174,15 +260,47 @@ const handlers: HandlerMap = {
 const PERSIST_DEBOUNCE_MS = 500
 const pendingPersists = new Map<string, { timer: NodeJS.Timeout; value: unknown }>()
 
-function persistDebounced(key: string, value: unknown): void {
+/**
+ * @param immediate 跳过防抖直接落盘。用于**离散低频且丢不起**的写入
+ *   (入队/插话/删除一条排队消息)——它们的频率低到不值得防抖,
+ *   而丢失代价远高于「最后一次拖动的 Tab 顺序」。
+ */
+function persistDebounced(key: string, value: unknown, immediate = false): void {
   const prev = pendingPersists.get(key)
   if (prev) clearTimeout(prev.timer)
+
+  if (immediate) {
+    // ★ 必须连 pending 一起清掉:否则先 immediate 写了新值,
+    //   之前那个还挂着的定时器过一会儿会把**旧值**盖回去。
+    pendingPersists.delete(key)
+    store.setKv(key, value)
+    return
+  }
+
   const timer = setTimeout(() => {
     pendingPersists.delete(key)
     store.setKv(key, value)
   }, PERSIST_DEBOUNCE_MS)
   // 连值一起存住:退出时要**写掉**它,不是丢掉它
   pendingPersists.set(key, { timer, value })
+}
+
+/**
+ * 读回未发出的输入。**校验在主进程侧做**,渲染层拿到的要么可用,要么是 null。
+ *
+ * ★ 读到失效存档时**顺手删键** —— 这就是「30 天兜底清扫」的全部实现。
+ * 单独跑一个扫描任务是过度设计:一份存档只有在被读的时候才有意义,
+ * 而没人读的键留在 kv 里除了占几 KB 没有别的影响。
+ */
+function readSessionInput(sessionId: string): SessionInputState | null {
+  const key = sessionInputKey(sessionId)
+  const raw = store.getKv<unknown>(key, null)
+  if (raw === null) return null
+  if (!isValidSessionInput(raw, Date.now())) {
+    store.setKv(key, null)
+    return null
+  }
+  return raw
 }
 
 /** app quit 前把挂着的写入落掉,否则最后一次拖动的顺序会丢。 */
@@ -204,10 +322,11 @@ const sendHandlers: SendHandlerMap = {
   'tabs:persistOuter': ({ kind, state }) => persistDebounced(outerTabKey(kind), state),
   'tabs:persistInner': ({ workspaceId, state }) =>
     persistDebounced(innerTabKey(workspaceId), state),
+  'session:persistInput': ({ sessionId, state, immediate }) =>
+    persistDebounced(sessionInputKey(sessionId), state, immediate),
 
-  // 步骤 8 接上 TerminalHost
-  'terminal:write': () => {},
-  'terminal:resize': () => {}
+  'terminal:write': ({ id, data }) => terminalHost.write(id, data),
+  'terminal:resize': ({ id, cols, rows }) => terminalHost.resize(id, cols, rows)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -263,6 +382,12 @@ export function registerIpc(): void {
     里那次 `setMcpChangeListener` 是同一种接线。
   */
   installChildRunLauncher(startChildRun)
+  setSessionChangeListener((workspaceId) => {
+    windows.emitToAll('sessions:changed', { workspaceId })
+  })
+
+  // 自动备份只在启动时按到期判断一次，不依赖渲染层计时器。
+  scheduleAutomaticBackup()
 
   // 扫掉两相导入中途放弃留下的孤儿图片。放在这里是因为**此刻 pending 必然是空的**,
   // 所以「不在索引里」就等于「没人要」—— 换成运行期任何一个时刻都不成立。
@@ -271,3 +396,4 @@ export function registerIpc(): void {
 
 export { EMPTY_OUTER }
 export { shutdownRuns } from './agent'
+export { shutdownTerminals }

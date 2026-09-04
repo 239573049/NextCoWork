@@ -6,6 +6,7 @@
  */
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import type { ToolInfo } from '../../../../shared/agent/tool'
+import type { AnthropicCacheTtl } from '../../../../shared/domain/provider'
 import type { CanonicalRequest } from '../canonical'
 
 interface AnthropicMessage {
@@ -124,19 +125,54 @@ export interface EncodedRequest {
   body: unknown
 }
 
+export interface AnthropicEncodeOptions {
+  /** Stable opaque workspace identifier; never a path, API key, name, or email. */
+  userId: string
+  cacheTtl: AnthropicCacheTtl
+}
+
+type AnthropicCacheControl = { type: 'ephemeral'; ttl?: '1h' }
+
+function cacheControl(ttl: AnthropicCacheTtl): AnthropicCacheControl | undefined {
+  if (ttl === 'off') return undefined
+  // Anthropic's default is 5 minutes. Omitting `ttl: "5m"` also keeps older
+  // Anthropic-compatible relays working while 1h must be explicit.
+  return ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+}
+
 export function encodeAnthropic(
   req: CanonicalRequest,
   upstreamModel: string,
-  apiKey: string
+  apiKey: string,
+  options: AnthropicEncodeOptions
 ): EncodedRequest {
   const body: Record<string, unknown> = {
     model: upstreamModel,
     max_tokens: req.maxOutputTokens,
     messages: toAnthropicMessages(req.messages),
-    stream: true
+    stream: true,
+    // Identity/tenant metadata is independent from prompt caching and is sent
+    // even when caching is disabled.
+    metadata: { user_id: options.userId }
   }
-  if (req.system !== '') body.system = req.system
-  if (req.tools.length > 0) body.tools = toAnthropicTools(req.tools)
+  const caching = cacheControl(options.cacheTtl)
+  const tools = req.tools.length > 0 ? toAnthropicTools(req.tools) : []
+
+  if (req.system !== '') {
+    body.system =
+      caching === undefined
+        ? req.system
+        : [{ type: 'text', text: req.system, cache_control: { ...caching } }]
+  } else if (caching !== undefined && tools.length > 0) {
+    // With no system prompt, the final tool is the last stable block in the
+    // tools → system → messages prefix order.
+    const last = tools.length - 1
+    tools[last] = { ...(tools[last] as object), cache_control: { ...caching } }
+  }
+  if (tools.length > 0) body.tools = tools
+  // The top-level marker advances with a growing conversation while the
+  // explicit system/tool marker keeps the stable prefix independently reusable.
+  if (caching !== undefined) body.cache_control = { ...caching }
   if (req.stopSequences?.length) body.stop_sequences = req.stopSequences
 
   if (req.thinkingBudget !== undefined) {

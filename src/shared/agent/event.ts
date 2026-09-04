@@ -17,10 +17,17 @@ export type AgentEvent =
   | { type: 'stream'; delta: ProviderStreamEvent }
   /** ★ 落盘边界 —— db 只在这里写,绝不在 delta 上写(方案 §9) */
   | { type: 'message_commit'; message: AgentMessage }
-  | { type: 'tool_start'; callId: string; toolName: string; input: unknown }
+  /**
+   * `at` 是主进程打的墙钟毫秒,用来算工具耗时。
+   *
+   * ★ **可选**:发射端还没填的时候,转录 reducer 退化到自己 `Date.now()`。
+   * 这让「先上渲染层版本、之后再补主进程戳」不必改 UI 一行代码,
+   * 也让已落盘的旧事件重放时不会因为缺字段而失败。
+   */
+  | { type: 'tool_start'; callId: string; toolName: string; input: unknown; at?: number }
   /** 易失,永不进转录 */
   | { type: 'tool_progress'; callId: string; progress: ToolProgress }
-  | { type: 'tool_end'; callId: string; output: ToolOutput; isError: boolean }
+  | { type: 'tool_end'; callId: string; output: ToolOutput; isError: boolean; at?: number }
   | { type: 'interaction_request'; interaction: PendingInteraction }
   | { type: 'interaction_resolved'; id: string; outcome: InteractionOutcome }
   | { type: 'subagent_start'; callId: string; childRunId: string }

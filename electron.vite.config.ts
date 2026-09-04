@@ -34,9 +34,15 @@ function cspDevPlugin(): Plugin {
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
-    'img-src * data: blob:',
+    /*
+      ★ `ncw:` 必须显式列出,**`*` 覆盖不到它**。CSP 的 `*` 通配符只匹配
+      网络 scheme(http/https/ws/ftp),自定义 scheme 一律要点名。
+      所以这行看着已经很宽,少了 `ncw:` 照样把附件图全挡掉。
+    */
+    'img-src * data: blob: ncw:',
+    "media-src 'self' ncw:",
     "font-src 'self' data:",
-    "connect-src 'self' ws://localhost:* http://localhost:* ws://127.0.0.1:* http://127.0.0.1:*",
+    "connect-src 'self' ncw: ws://localhost:* http://localhost:* ws://127.0.0.1:* http://127.0.0.1:*",
     "object-src 'none'",
     "base-uri 'none'"
   ].join('; ')

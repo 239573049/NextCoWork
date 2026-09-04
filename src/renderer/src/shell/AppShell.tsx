@@ -17,15 +17,18 @@
  * 做成 feature Tab 的话,「关掉设置」和「关掉一个工作区」就成了同一个动作。
  */
 import { PanelLeft } from 'lucide-react'
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { Bootstrap } from '../../../shared/domain/bootstrap'
 import type { AppSettings } from '../../../shared/domain/settings'
 import { INNER_TAB_MENU, tabsInPane } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
+import type { SessionListItem } from '../../../shared/domain/session'
 import { IconButton } from '../components/ui/IconButton'
 import { cn } from '../lib/cn'
 import { usePresence } from '../lib/usePresence'
 import { pickWorkspace } from '../services/app'
+import { listSessions } from '../services/sessions'
+import { on } from '../services/ipc'
 import { SettingsOverlay } from '../settings/SettingsOverlay'
 import { useTabsStore } from '../stores/tabs'
 import { useWindowStore } from '../stores/window'
@@ -90,6 +93,23 @@ export function AppShell({
 
   const activeOuter = outer.find((t) => t.id === activeOuterId)
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId)
+  const [sessionItems, setSessionItems] = useState<SessionListItem[]>([])
+
+  useEffect(() => {
+    if (activeWorkspaceId === null) {
+      setSessionItems([])
+      return
+    }
+    let alive = true
+    const load = (): void => {
+      void listSessions(activeWorkspaceId).then((items) => { if (alive) setSessionItems(items) }).catch((err: unknown) => console.error('[sessions] 加载列表失败', err))
+    }
+    load()
+    const off = on('sessions:changed', (event) => {
+      if (event.workspaceId === undefined || event.workspaceId === activeWorkspaceId) load()
+    })
+    return () => { alive = false; off() }
+  }, [activeWorkspaceId])
 
   // 工作区一露面就保证它至少有一个对话 Tab —— 空的内层 Tab 条没有任何可做的事。
   // 依赖取的是 action 而不是整个 `tabs`:后者每次写入都换新引用,而 ensure 本身会写。
@@ -189,6 +209,7 @@ export function AppShell({
           <Sidebar
             workspace={workspace ?? null}
             chatTabs={inner?.tabs.filter((t) => t.kind === 'chat') ?? []}
+            sessions={sessionItems}
             activeFeature={activeOuter?.kind === 'feature' ? activeOuter.ref.feature : null}
             activeSessionId={activeInner?.kind === 'chat' ? activeInner.ref.sessionId : null}
             runningSessionIds={runningSessionIds}
@@ -205,6 +226,10 @@ export function AppShell({
               if (activeWorkspaceId === null || inner === null) return
               const t = inner.tabs.find((x) => x.kind === 'chat' && x.ref.sessionId === sessionId)
               if (t !== undefined) tabs.activate(activeWorkspaceId, t.id)
+              else {
+                const item = sessionItems.find((x) => x.id === sessionId)
+                tabs.openSession(activeWorkspaceId, sessionId, item?.title)
+              }
             }}
             onCollapse={win.toggleSidebar}
           />

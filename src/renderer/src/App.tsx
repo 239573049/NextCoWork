@@ -17,7 +17,7 @@ import type { Workspace } from '../../shared/domain/workspace'
 import { announceReady, getBootstrap } from './services/app'
 import { on } from './services/ipc'
 import { AppShell } from './shell/AppShell'
-import { startAgentEventPump, adoptActiveRuns, useRunIndex } from './stores/session'
+import { startAgentEventPump, adoptActiveRuns, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
 import { useWindowStore } from './stores/window'
 import { applyTheme } from './theme/apply'
@@ -36,6 +36,7 @@ export default function App(): React.JSX.Element {
     const offSettings = on('settings:changed', setSettings)
     const offTheme = on('theme:changed', ({ resolved }) => setAppearance(resolved))
     const offWorkspaces = on('workspace:changed', ({ workspaces: ws }) => setWorkspaces(ws))
+    const offSessions = on('sessions:changed', () => { void refreshHydratedSessions() })
 
     announceReady('main')
     void getBootstrap()
@@ -55,6 +56,7 @@ export default function App(): React.JSX.Element {
       offSettings()
       offTheme()
       offWorkspaces()
+      offSessions()
     }
   }, [hydrate])
 

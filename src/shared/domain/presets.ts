@@ -445,6 +445,35 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
 
   // ────────────────────────── 聚合平台 ──────────────────────────
   {
+    id: 'routin',
+    name: 'RoutinAI',
+    category: 'aggregator',
+    recommended: true,
+    /*
+      探针(2026-09-04,真路径 + 同前缀假路径对照):
+        GET  /v1/messages         → 405(POST-only)  ← Anthropic 端点存在
+        GET  /v1/chat/completions → 405(POST-only)  ← OpenAI chat 端点存在
+        GET  /v1/models           → 401 API Key is required
+        GET  /v1/nc-decoy-9x      → 404             ← 对照,证明上面不是 catch-all
+        GET  /models              → 404             ← 版本段是必须的
+
+      ★ 两个协议的 base **不一样**,原因是 `REQUEST_PATH` 那条两族相反的约定:
+      Anthropic 自己补 `/v1/messages`(base 裸域名),OpenAI 族的 `/v1` 在 base 里。
+      写成同一个 base 的话,翻一下「API 格式」开关地址就静默失效。
+
+      ★★ **不给 openai-responses**。`/v1/responses` 回的是 426
+      「This endpoint requires a WebSocket upgrade request」—— 那是一个**同名的
+      WebSocket 端点**,不是 OpenAI 的 Responses API。凭路径存在就录进来,
+      用户翻到那个开关会得到一个永远连不上的配置。
+    */
+    endpoints: [anth('https://api.routin.ai', true), oa('https://api.routin.ai/v1', true)],
+    docsUrl: 'https://api.routin.ai/',
+    suggestedModels: ['claude-fable-5-1'],
+    notes:
+      '同一个域名下两种协议的地址不同(Anthropic 不带 /v1,OpenAI 带)——翻「API 格式」时地址会跟着换。',
+    verification: 'probed'
+  },
+  {
     id: 'openrouter',
     name: 'OpenRouter',
     category: 'aggregator',
@@ -668,14 +697,39 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   }
 ]
 
+/**
+ * 内置上游用的是哪一条预设。
+ *
+ * ★ 住在这里而不是 `main/runtime.ts`,是因为**两侧都要它**:主进程照它种供应商,
+ * 设置页照它判断「这条删了下次启动还会回来」。渲染层不能 import `main/`,
+ * 而在两边各写一个 `'routin'` 字面量,改预设 id 时只会有一边跟着改 ——
+ * 另一边不报错,只是从此判断恒为 false。
+ */
+export const BUILTIN_PROVIDER_ID = 'routin'
+
 /** 按分类取,保持表内顺序 */
 export function presetsByCategory(category: PresetCategory): ProviderPreset[] {
   return PROVIDER_PRESETS.filter((p) => p.category === category)
 }
 
-/** 第一个 Tab。见 `PresetCategory` 上面那段:推荐是跨类别的精选,不是第五个类别 */
+/**
+ * 第一个 Tab。见 `PresetCategory` 上面那段:推荐是跨类别的精选,不是第五个类别。
+ *
+ * ★ **内置上游永远排第一**,而且是在这里按 `BUILTIN_PROVIDER_ID` 提上来的,
+ * 不是把它那条记录挪到 `PROVIDER_PRESETS` 的表头。两个理由:那张表是按类别
+ * 分块写的(RoutinAI 属于 `aggregator` 那一块),挪出去这块就断了;更要紧的是
+ * 「谁排第一」该跟着**内置上游是谁**走,而不是跟着一条记录碰巧写在文件第几行 ——
+ * 将来换一家内置上游,改那一个常量就够了,不用记得还要挪位置。
+ *
+ * 只提不塞:内置上游自己没标 `recommended` 时不会被硬塞进来。那种情况下
+ * 「第一个是内置上游」这条不成立,由 `presets.test.ts` 里那条断言当场报出来,
+ * 而不是在这里偷偷替表做决定。
+ */
 export function recommendedPresets(): ProviderPreset[] {
-  return PROVIDER_PRESETS.filter((p) => p.recommended === true)
+  const picked = PROVIDER_PRESETS.filter((p) => p.recommended === true)
+  const builtin = picked.find((p) => p.id === BUILTIN_PROVIDER_ID)
+  if (builtin === undefined) return picked
+  return [builtin, ...picked.filter((p) => p !== builtin)]
 }
 
 export function findPreset(id: string): ProviderPreset | null {

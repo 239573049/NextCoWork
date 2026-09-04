@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { joinUpstreamUrl, normalizeBaseUrl, previewUrl, REQUEST_PATH } from '../baseurl'
 import {
+  BUILTIN_PROVIDER_ID,
   endpointFor,
   findPreset,
   PROVIDER_PRESETS,
@@ -212,6 +213,36 @@ describe('预设表 · 分类与推荐', () => {
       expect(presetsByCategory(c).length, c).toBeGreaterThan(0)
     }
     expect(recommendedPresets().length).toBeGreaterThan(0)
+  })
+
+  /**
+   * ★★ 内置上游排「推荐服务」第一位。
+   *
+   * 它是全新安装唯一被种进供应商表、并且 `defaultModel` 指着的那一家
+   * (`main/runtime.ts` 的 `seedBuiltinUpstream`)—— 目录里让它排第一,
+   * 是让「已经给你配好的那家」和「列表里第一张卡片」是同一家。
+   *
+   * 这条顺序**不靠 `PROVIDER_PRESETS` 里的行号**:那张表按类别分块写,
+   * RoutinAI 在 `aggregator` 那一块的中间。`recommendedPresets()` 按
+   * `BUILTIN_PROVIDER_ID` 把它提到最前,所以将来换一家内置上游,
+   * 改那一个常量就够了 —— 这条断言就是那句话的证据。
+   */
+  it('★ 推荐服务第一个是内置上游,哪怕它在表里排在中间', () => {
+    const rec = recommendedPresets()
+    expect(rec[0]?.id).toBe(BUILTIN_PROVIDER_ID)
+    // 提上来的、不是碰巧写在表头的 —— 表里它并不在最前
+    const raw = PROVIDER_PRESETS.filter((p) => p.recommended === true)
+    expect(raw.findIndex((p) => p.id === BUILTIN_PROVIDER_ID)).toBeGreaterThan(0)
+    // 只提不塞:剩下那些的相对次序一个都没动
+    expect(rec.slice(1).map((p) => p.id)).toEqual(
+      raw.filter((p) => p.id !== BUILTIN_PROVIDER_ID).map((p) => p.id)
+    )
+  })
+
+  it('内置上游确实在表里,且标着推荐 —— 少一样第一位就不成立', () => {
+    const builtin = findPreset(BUILTIN_PROVIDER_ID)
+    expect(builtin).not.toBeNull()
+    expect(builtin?.recommended).toBe(true)
   })
 
   it('presetsByCategory 保持表内顺序', () => {

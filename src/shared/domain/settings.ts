@@ -16,6 +16,38 @@ export type ThemePreference = 'system' | 'light' | 'dark'
 /** 实际生效的那个,由主进程 nativeTheme 解析后下发 */
 export type ResolvedTheme = 'light' | 'dark'
 
+/** 本机数据备份频率。云同步不属于本地数据设置的一部分。 */
+export type BackupFrequency = 'manual' | 'daily' | 'weekly'
+
+export interface DataSettings {
+  /** 用户选择的本机备份目录；null 表示尚未选择。 */
+  backupDirectory: string | null
+  backupFrequency: BackupFrequency
+}
+
+const BACKUP_FREQUENCIES: readonly BackupFrequency[] = ['manual', 'daily', 'weekly']
+
+function isBackupFrequency(value: unknown): value is BackupFrequency {
+  return typeof value === 'string' && BACKUP_FREQUENCIES.includes(value as BackupFrequency)
+}
+
+/**
+ * 旧设置文件是用户可编辑/可迁移的输入，不能因为一个坏字段让整个设置页
+ * 变成 undefined。只接受这一块已知的两个字段，其余一律回到默认值。
+ */
+function mergeDataSettings(current: DataSettings, patch: unknown): DataSettings {
+  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return { ...current }
+  const value = patch as Record<string, unknown>
+  const backupDirectory =
+    value.backupDirectory === null || typeof value.backupDirectory === 'string'
+      ? value.backupDirectory
+      : current.backupDirectory
+  const backupFrequency = isBackupFrequency(value.backupFrequency)
+    ? value.backupFrequency
+    : current.backupFrequency
+  return { backupDirectory, backupFrequency }
+}
+
 export interface AppSettings {
   /**
    * 界面「主题」页第一栏「外观模式」。**它只决定深浅,不决定颜色** ——
@@ -91,6 +123,9 @@ export interface AppSettings {
    * 形状与全部纯函数在 `proxy.ts`,那边的文件头解释了为什么拆成三段。
    */
   proxy: ProxySettings
+
+  /** 设置 › 数据：只保存本机备份偏好，不包含任何云端开关。 */
+  data: DataSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -103,7 +138,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
-  proxy: structuredClone(DEFAULT_PROXY)
+  proxy: structuredClone(DEFAULT_PROXY),
+  data: { backupDirectory: null, backupFrequency: 'manual' }
 }
 
 /**
@@ -157,6 +193,7 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.proxy !== undefined) {
     next.proxy = { ...next.proxy, ...migrateLegacyProxy(patch.proxy) }
   }
+  if (patch.data !== undefined) next.data = mergeDataSettings(next.data, patch.data)
 
   return next
 }
@@ -172,14 +209,20 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   subagent: true,
   gateway: true,
   notifications: true,
-  proxy: true
+  proxy: true,
+  data: true
 }
 void PATCHABLE_KEYS
 
 /** 界面「数据」页:数据库大小 / 对话数量 / 消息数量 / 优化存储(VACUUM)。 */
 export interface StorageStats {
   dbBytes: number
+  walBytes: number
+  conversationBytes: number
+  attachmentBytes: number
   conversationCount: number
   messageCount: number
-  walBytes: number
+  attachmentCount: number
+  dataDirectory: string
+  lastBackupAt: number | null
 }

@@ -94,3 +94,64 @@ describe('placeMenu · 水平方向', () => {
     expect(p.left).toBe(8)
   })
 })
+
+/**
+ * ★ 这一组钉的是**第二次**踩到的那个坑:面板没被裁、坐标也没算错,
+ * 却飘到了它不该出现的那块面上 —— 设置浮层的模型选择器盖住了左边的导航。
+ *
+ * 判据不是「在视口里」,是「在自己那块面里」。两者的差别只有给了 bounds 才看得出来,
+ * 所以每一条都拿同一个触发器跑两遍:不给 bounds 时复现 bug,给了才对。
+ */
+describe('placeMenu · 夹在自己那块面里', () => {
+  /** 设置浮层的内容列:左边 192px 是导航,面板不许越过 */
+  const content = { top: 100, left: 392, right: 1240, bottom: 820 }
+  /** 模型页那颗药丸:窄(132px),且靠着内容列的右侧 */
+  const pill: TriggerRect = { top: 130, bottom: 152, left: 448, right: 580 }
+
+  it('★ 不给边界时会往左伸出内容列 —— 这就是那个 bug 的样子', () => {
+    // 280 宽的面板右对齐到 580,左缘落在 300:比内容列左边缘(392)还靠左 92px
+    expect(placeMenu(pill, 200, 280, 'end', vp).left).toBe(300)
+  })
+
+  it('给了边界就被推回来,左缘不越过内容列', () => {
+    const p = placeMenu(pill, 200, 280, 'end', vp, content)
+    expect(p.left).toBe(392 + 8)
+    // 推回来之后仍然完整放得下,没有被压窄
+    expect(p.left + 280).toBeLessThanOrEqual(1240)
+  })
+
+  it('右侧同样夹住:贴着内容列右缘的触发器不许把面板顶出去', () => {
+    const right: TriggerRect = { top: 130, bottom: 152, left: 1180, right: 1236 }
+    const p = placeMenu(right, 200, 280, 'start', vp, content)
+    expect(p.left + 280).toBe(1240 - 8)
+  })
+
+  it('竖直方向照样按内容列算:贴着内容列底边时向上翻,而不是等到视口底边才翻', () => {
+    // 触发器下方:视口还剩 900-800=100,内容列只剩 820-800=20。
+    // 面板 80px —— 在视口里放得下(不翻),在内容列里放不下(该翻)。
+    // ★ 面板高度必须挑在这两个数中间,否则两次调用都翻,这条就没在对照任何东西了
+    const low: TriggerRect = { top: 768, bottom: 800, left: 448, right: 580 }
+    expect(placeMenu(low, 80, 280, 'end', vp).flipped).toBe(false)
+
+    const p = placeMenu(low, 80, 280, 'end', vp, content)
+    expect(p.flipped).toBe(true)
+    expect(p.top + 80).toBe(768 - 6)
+  })
+
+  it('★ 边界有一部分在视口外时,和视口取交集 —— 面板宁可盖住边界也不能跑出视口', () => {
+    // 窗口被拖小之后内容列的下半截在视口外
+    const spilling = { top: 100, left: 392, right: 1240, bottom: 2000 }
+    const t: TriggerRect = { top: 400, bottom: 432, left: 448, right: 580 }
+    const p = placeMenu(t, 5000, 280, 'end', { width: 1440, height: 600 }, spilling)
+    expect(p.top + p.maxHeight).toBeLessThanOrEqual(600)
+  })
+
+  it('不给边界时和以前逐字一样(五个参数的旧调用点不受影响)', () => {
+    const full = { top: 0, left: 0, right: vp.width, bottom: vp.height }
+    for (const align of ['start', 'end'] as const) {
+      expect(placeMenu(middle, 200, 280, align, vp)).toEqual(
+        placeMenu(middle, 200, 280, align, vp, full)
+      )
+    }
+  })
+})

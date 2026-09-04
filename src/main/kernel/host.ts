@@ -12,10 +12,10 @@
  * (safeStorage 和 app.getPath 是仅有的两个真正需要 Electron 的能力)。
  * 这样「内核能不能脱离 Electron 跑」这个问题不靠自律维持,靠默认路径维持。
  */
-import { tmpdir } from 'node:os'
+import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { nodeFs } from './node-fs'
-import { nodeSpawn } from './node-spawn'
+import { agentShell, nodeSpawn } from './node-spawn'
 
 export interface Logger {
   debug(msg: string, ...args: unknown[]): void
@@ -64,6 +64,29 @@ export type SpawnFn = (
   opts: { cwd: string; signal: AbortSignal; timeoutMs?: number }
 ) => Promise<SpawnResult>
 
+/**
+ * 平台事实 —— **给模型看的**,不是给代码用的。
+ *
+ * ★ 为什么要走端口,而不是在组装提示词的地方直接读 `process`:
+ * 读环境和读时钟是同一类事。`context-assembler.ts` 的文件头把
+ * 「不读时钟、不读环境变量」写成了契约,靠的就是这两样都从入参进来 ——
+ * 否则「在测试里摆出一台 Windows」这件事根本做不到。
+ *
+ * ★ 为什么值得进提示词:**一条事实几乎总是比一条关于这条事实的规则更便宜、
+ * 也更管用**。`Platform: darwin` 是三个 token;要用规则达到同样效果,
+ * 得写「注意 macOS 的 sed -i 要带一个空串参数、readlink 没有 -f……」——
+ * 三十个 token,列不全,而且模型照样会忘。提示词的预算应该花在
+ * 模型**推不出来**的事实上,而不是花在它已经知道、只是不知道适不适用的规则上。
+ */
+export interface PlatformInfo {
+  /** `process.platform`:darwin / linux / win32 */
+  os: string
+  /** `os.release()` */
+  osVersion: string
+  /** ★ 必须和 `node-spawn.ts` 真拿去跑命令的那个 shell 是同一个,见 `agentShell()` */
+  shell: string
+}
+
 export interface KernelHost {
   paths: { userData(): string; temp(): string }
   /** ★ 只存引用,永不在内核里出现明文 key(方案 §9) */
@@ -74,6 +97,7 @@ export interface KernelHost {
     available(): boolean
   }
   clock: { now(): number }
+  platform: PlatformInfo
   logger: Logger
   fs: KernelFs
   spawn: SpawnFn
@@ -109,6 +133,7 @@ export function nodeHost(overrides: Partial<KernelHost> = {}): KernelHost {
       available: () => true
     },
     clock: { now: () => Date.now() },
+    platform: { os: process.platform, osVersion: release(), shell: agentShell() },
     logger: consoleLogger,
     fs: nodeFs(),
     spawn: nodeSpawn(),

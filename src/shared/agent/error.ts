@@ -21,6 +21,8 @@ export type AgentErrorCode =
   | 'tool_failed'
   /** 上游返回了我们无法归一化的东西 */
   | 'provider'
+  /** Provider explicitly rejected configured prompt-cache fields. */
+  | 'cache_unsupported'
   /** 别名下所有 provider 都不健康(§5.3) */
   | 'no_healthy_provider'
   | 'unknown'

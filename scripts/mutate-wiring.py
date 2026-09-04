@@ -47,21 +47,32 @@ MUTANTS = [
     # ── runtime 的装配 ─────────────────────────────────────────────
     ('W4', RUNTIME, 'session 不给工具(模型永远没有工具可调)', [
         ('tools: getTools(),', 'tools: new ToolRegistry(),')]),
+    # ★ 这条以前写的是「在 `host = h` 后面插一个 if (false)」—— 那时 `router = null`
+    # 紧跟在它下面。后来 `installSearchConfig` 插进了中间,于是那个突变改的是搜索配置,
+    # 而这三份测试都不碰搜索 —— 它会报「存活」,指向一个并不存在的窟窿。
+    # 教训:**变异体要钉在语句上,不要钉在「某一行的下一行」上。**
     ('W5', RUNTIME, 'installHost 之后路由器不重建(装了新宿主也不生效)', [
-        ('  host = h\n', '  host = h\n  if (false)\n')]),
+        ('  router = null\n}', '  void 0\n}')]),
     ('W6', RUNTIME, 'getTools 不注册内置工具', [
         ('for (const reg of builtinTools()) tools.register(reg)', 'void builtinTools()')]),
     ('W7', RUNTIME, 'getRouter 不先 seed(provider 表是空的 → no_healthy_provider)', [
         ('export function getRouter(): UpstreamRouter {\n  seed()',
          'export function getRouter(): UpstreamRouter {')]),
-    ('W8', RUNTIME, 'seed 不写别名表(alias 解析不出上游模型名)', [
-        ('for (const alias of DEMO_ALIASES) store.putAlias(alias)', 'void DEMO_ALIASES')]),
+    # ★ W8/W9/W10 以前打的是「seed 种演示上游」那三行。演示上游已经不再进供应商表
+    # (runtime.ts 的 seed 文件头写了为什么),所以三个突变点跟着搬到内置上游那边 ——
+    # 保护的东西没变:**全新安装必须有一个能选的模型**。
+    # ★ 用 `void 0 &&` 短路掉而不是删掉整段:变异体必须仍然**能编译能跑**,
+    # 否则杀掉它的是一个 ReferenceError,不是任何一条断言 —— 那种「被杀」不算数。
+    ('W8', RUNTIME, 'seed 不写别名表(defaultModel 指向一条不存在的别名)', [
+        ('  store.putAlias({\n    alias: first,', '  void 0 &&\n    store.putAlias({\n      alias: first,')]),
     ('W9', RUNTIME, 'seed 不写 provider 表', [
-        ('store.putProvider(DEMO_PROVIDER)', 'void DEMO_PROVIDER')]),
-    ('W10', RUNTIME, '全新安装不把 defaultModel 指向演示上游(首屏模型选择器是空的)', [
-        ("store.updateSettings({ defaultModel: DEMO_ALIAS })", 'void DEMO_ALIAS')]),
+        ('  store.putProvider({\n    id: BUILTIN_PROVIDER_ID,',
+         '  void 0 &&\n    store.putProvider({\n      id: BUILTIN_PROVIDER_ID,')]),
+    ('W10', RUNTIME, '全新安装不把 defaultModel 指向内置上游(首屏模型选择器是空的)', [
+        ('store.updateSettings({ defaultModel: builtinAlias })', 'void builtinAlias')]),
     ('W11', RUNTIME, 'defaultModel 无条件覆盖(用户选的模型每次启动被顶掉)', [
-        ("if (store.getSettings().defaultModel === '') {", 'if (true) {')]),
+        ("if (builtinAlias !== null && store.getSettings().defaultModel === '') {",
+         'if (builtinAlias !== null) {')]),
 
     # ── 别名表的主键:(providerId, alias) 而不是 alias ────────────────
     ('W12', STORE, '别名表用 alias 做主键(同一 alias 的第二个 provider 顶掉第一个,'

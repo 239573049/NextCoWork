@@ -43,7 +43,19 @@ const SAMPLES: readonly (readonly [string, Brand])[] = [
   ['sonar-pro', 'perplexity'],
   ['AWS Bedrock', 'bedrock'],
   ['Vertex AI', 'vertexai'],
-  ['Azure', 'azure']
+  ['Azure', 'azure'],
+  ['302.AI', 'ai302'],
+  ['AiHubMix', 'aihubmix'],
+  ['百度千帆', 'baiducloud'],
+  ['阿里百炼', 'bailian'],
+  ['command-r-plus', 'cohere'],
+  ['DeepInfra', 'deepinfra'],
+  ['Jan', 'menlo'],
+  ['OpenCode Go', 'opencode'],
+  ['RoutinAI', 'routin'],
+  ['商汤日日新', 'sensenova'],
+  ['vLLM', 'vllm'],
+  ['Z.AI', 'zai']
 ]
 
 describe('resolveBrand', () => {
@@ -79,6 +91,58 @@ describe('resolveBrand', () => {
       expect(resolveBrand('Azure OpenAI')).toBe('openai')
       expect(resolveBrand('Azure')).toBe('azure')
     })
+
+    it('★ zai 排在 zhipu 前 ——「Z.AI(智谱国际)」里含着「智谱」', () => {
+      expect(resolveBrand('Z.AI(智谱国际)按量')).toBe('zai')
+      expect(resolveBrand('Z.AI Coding Plan(订阅制)')).toBe('zai')
+      // 国内那两条仍然是智谱
+      expect(resolveBrand('智谱·按量 API(国内)')).toBe('zhipu')
+    })
+
+    it('★ bailian 排在 qwen 前 —— 卡片说的是平台,模型名说的是家族', () => {
+      expect(resolveBrand('阿里百炼 / 通义(国内)')).toBe('bailian')
+      // 而**模型**名里没有「百炼」,照旧落到 qwen —— 两条轴各自成立
+      expect(resolveBrand('qwen3-max')).toBe('qwen')
+      expect(resolveBrand('通义千问')).toBe('qwen')
+    })
+  })
+
+  /**
+   * ★★ 这一组守的是**曾经真的错了**的那三条:「添加供应商」目录里
+   * Google Gemini 和 Cohere 挂着 OpenAI 的 logo、llama.cpp 挂着 Meta 的 ∞。
+   * 三个都不报错,只是错 —— 没有这几条断言,它们会再错回去。
+   */
+  describe('协议注记不是牌子', () => {
+    it('「(OpenAI 兼容)」说的是端点形状,不是这家公司', () => {
+      expect(resolveBrand('Google Gemini(OpenAI 兼容)')).toBe('gemini')
+      expect(resolveBrand('Cohere(OpenAI 兼容)')).toBe('cohere')
+    })
+
+    it('半角括号和英文 compatible 一样吃掉', () => {
+      expect(resolveBrand('Gemini (OpenAI compatible)')).toBe('gemini')
+    })
+
+    it('括号里**不含**「兼容」的一个字都不动', () => {
+      // 这条是上面那个正则「窄」的证据:去掉的只能是协议注记
+      expect(resolveBrand('我司网关(转发 OpenAI)')).toBe('openai')
+    })
+  })
+
+  describe('★ null 规则:挡住后面更松的规则,但不终止查找', () => {
+    it('llama.cpp 不是 Meta 的项目 —— 宁可退回首字母,也不挂错 logo', () => {
+      expect(resolveBrand('llama.cpp server')).toBeNull()
+      expect(resolveBrand('llamacpp')).toBeNull()
+      expect(resolveBrand('llama-cpp-python')).toBeNull()
+    })
+
+    it('被挡掉的只是**这个**候选,下一个候选照试', () => {
+      // Composer 传的是 [模型名, 供应商名];模型名被挡掉,供应商名仍然值得一试
+      expect(resolveBrand('llama.cpp server', 'DeepSeek')).toBe('deepseek')
+    })
+
+    it('真正的 llama 模型不受影响', () => {
+      expect(resolveBrand('llama-3.3-70b')).toBe('meta')
+    })
   })
 
   describe('短 token 的词边界 —— 这是用正则不用 includes 的全部理由', () => {
@@ -91,6 +155,16 @@ describe('resolveBrand', () => {
     it('meta 不匹配 metallama 里的 meta(而 llama 规则会先接住它)', () => {
       expect(resolveBrand('metallama')).toBe('meta')
       expect(resolveBrand('metadata-tool')).toBeNull()
+    })
+
+    it('★ routin 不误伤「routing」—— 差一个字母,而且是个到处都在的词', () => {
+      expect(resolveBrand('routing')).toBeNull()
+      expect(resolveBrand('Smart Routing Gateway')).toBeNull()
+      // 空格 / 连字符 / 下划线都算同一个名字
+      expect(resolveBrand('Routin AI')).toBe('routin')
+      expect(resolveBrand('routin-ai')).toBe('routin')
+      // 光秃秃的预设 id 也要认得 —— 用户把它改名之后就只剩这个
+      expect(resolveBrand('routin')).toBe('routin')
     })
   })
 
@@ -115,8 +189,21 @@ describe('resolveBrand', () => {
       expect(resolveBrand('claude-fable-5-1', 'DeepSeek')).toBe('claude')
     })
 
-    it('聚合商 provider 认不出时,退到模型别名上', () => {
-      expect(resolveBrand('RoutinAI', 'claude-fable-5-1')).toBe('claude')
+    it('provider 认不出时,退到模型别名上', () => {
+      expect(resolveBrand('我司内部网关', 'claude-fable-5-1')).toBe('claude')
+    })
+
+    /**
+     * ★★ RoutinAI 是内置上游,**它自己有 logo**,而它下面跑的是 claude 别名。
+     * 于是同一对名字换个顺序传进来,答案该不一样 —— 这不是矛盾,是两个界面在问
+     * 两个问题:正文里问「这条是哪个模型答的」,供应商列表里问「这是哪一家」。
+     *
+     * 写下来是因为它看着像不一致:哪天有人「顺手把调用点的参数顺序统一一下」,
+     * 坏掉的是其中一边,而且不报错 —— 只是图标默默换成了另一个。
+     */
+    it('★ RoutinAI 上的 claude 模型:正文显示 Claude,供应商列表显示 RoutinAI', () => {
+      expect(resolveBrand('claude-fable-5-1', 'RoutinAI')).toBe('claude')
+      expect(resolveBrand('RoutinAI', 'routin')).toBe('routin')
     })
 
     it('跳过 undefined 和空串,不当成命中', () => {
@@ -125,7 +212,7 @@ describe('resolveBrand', () => {
   })
 
   describe('认不出是正常路径,不是错误', () => {
-    it.each([['RoutinAI'], ['我司内部网关'], ['']])('%s → null', (input) => {
+    it.each([['我司内部网关'], ['OhMyGPT'], ['']])('%s → null', (input) => {
       expect(resolveBrand(input)).toBeNull()
     })
 
