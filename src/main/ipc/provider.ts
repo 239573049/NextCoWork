@@ -1,7 +1,5 @@
 /**
- * 上游供应商与模型别名。读 + 写(步骤 4 的写入面)。`test` 仍是 todo ——
- * 真发一次请求要先有 OpenAI 那两套编解码(步骤 13),否则对非 Anthropic 协议
- * 必然失败,那不是「连不通」而是「我们还没实现」,报给用户是误导。
+ * 上游供应商与模型别名。配置读取统一解析模型目录和供应商覆盖值。
  *
  * 单独实现这两条,是因为它们是**输入框那颗模型选择器的唯一数据源**:
  * 没有它们,发送行上那颗药丸只能写死一个字符串,而「当前用的是哪个上游、
@@ -28,9 +26,13 @@ import type {
 import {
   IMPORTED_ALIAS_DEFAULTS,
   normalizeAnthropicCacheTtl,
+  providerCredentialRef,
   PROTOCOL_LABEL
 } from '../../shared/domain/provider'
 import { removeCredential } from '../db/repo'
+import { modelBindingResolver } from '../../shared/domain/model-binding'
+import { catalogDefinitionFromAlias, isModelCatalogDefinition } from '../../shared/domain/model-catalog'
+import { listResolvedModels } from '../state/model-bindings'
 import {
   modelListErrorMessage,
   modelListRequest,
@@ -53,11 +55,8 @@ export function listProviders(): UpstreamProvider[] {
  */
 export function listModels(providerId?: string): ModelAlias[] {
   ensureSeeded()
-  const rank = new Map(store.listProviders().map((p, i) => [p.id, i]))
-  return store
-    .listAliases()
+  return listResolvedModels()
     .filter((a) => providerId === undefined || a.providerId === providerId)
-    .sort((a, b) => (rank.get(a.providerId) ?? 1e9) - (rank.get(b.providerId) ?? 1e9))
 }
 
 /** Update one configured model while preserving provider/alias identity. */
@@ -67,17 +66,10 @@ export function updateModel(input: ModelAlias): ModelAlias {
     (m) => m.providerId === input.providerId && m.alias === input.alias
   )
   if (existing === undefined) throw new Error(`模型不存在: ${input.alias}`)
-  const normalized: ModelAlias = {
-    ...existing,
-    ...input,
-    providerId: existing.providerId,
-    alias: existing.alias,
-    upstreamModel: existing.upstreamModel,
-    enabled: input.enabled !== false,
-    capabilities: { ...existing.capabilities, ...input.capabilities },
-    thinkingConfig: input.thinkingConfig ?? existing.thinkingConfig,
-    requestAdapter: input.requestAdapter ?? existing.requestAdapter
-  }
+  const normalized = modelBindingResolver(store.listUserModelCatalog()).update(existing, input)
+  if (!isModelCatalogDefinition(catalogDefinitionFromAlias(normalized, {
+    manufacturerId: 'provider', manufacturerLabel: 'Provider'
+  }))) throw new Error('模型配置无效，请检查能力、输出限制和思考强度。')
   store.putAlias(normalized)
   broadcast()
   return normalized
@@ -90,6 +82,50 @@ export function removeModel(providerId: string, alias: string): void {
   broadcast()
 }
 
+/** Rename one model alias while keeping its provider binding and runtime configuration intact. */
+export function renameModel(
+  providerId: string,
+  alias: string,
+  nextAlias: string,
+): ModelAlias {
+  ensureSeeded()
+  const existing = store
+    .listAliases()
+    .find((model) => model.providerId === providerId && model.alias === alias)
+  if (existing === undefined) throw new Error(`模型不存在: ${alias}`)
+
+  const next = nextAlias.trim()
+  if (next === "") throw new Error("模型别名不能为空")
+  if (next === alias) return modelBindingResolver(store.listUserModelCatalog()).resolve(existing)
+  if (
+    store
+      .listAliases()
+      .some((model) => model.providerId === providerId && model.alias === next)
+  ) {
+    throw new Error(`模型别名已存在: ${next}`)
+  }
+
+  const hasAnotherOriginalAlias = store
+    .listAliases()
+    .some((model) => model.providerId !== providerId && model.alias === alias)
+  store.removeAlias(providerId, alias)
+  const renamed = store.putAlias({ ...existing, alias: next })
+
+  // 只有旧别名完全消失时才跟着改默认值。若还有另一家提供同名别名，保持原选择。
+  if (!hasAnotherOriginalAlias) {
+    const settings = store.getSettings()
+    const patch: AppSettingsPatch = {}
+    if (settings.defaultModel === alias) patch.defaultModel = next
+    if (settings.subagent.model === alias) patch.subagent = { model: next }
+    if (Object.keys(patch).length > 0) {
+      windows.emitToAll("settings:changed", store.updateSettings(patch))
+    }
+  }
+
+  broadcast()
+  return modelBindingResolver(store.listUserModelCatalog()).resolve(renamed)
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 写入面(步骤 4)
 // ═══════════════════════════════════════════════════════════════
@@ -97,7 +133,8 @@ export function removeModel(providerId: string, alias: string): void {
 function broadcast(): void {
   windows.emitToAll('provider:changed', {
     providers: store.listProviders(),
-    models: store.listAliases()
+    // 广播与 `provider:listModels` 走同一个排序,否则刚拖完在设置页看似没变。
+    models: listModels()
   })
 }
 
@@ -123,11 +160,6 @@ function normalizeBaseUrl(raw: string): string {
     throw new Error(`API 地址只能是 http 或 https,收到 ${u.protocol}`)
   }
   return trimmed
-}
-
-/** provider 的密钥引用。渲染层永远拿不到也永远指定不了 —— 见 upsertProvider */
-function refFor(id: string): string {
-  return `provider:${id}`
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -232,7 +264,7 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
     name,
     protocol: input.protocol,
     baseUrl: normalizeBaseUrl(input.baseUrl),
-    credentialRef: existing?.credentialRef ?? refFor(id),
+    credentialRef: existing?.credentialRef ?? providerCredentialRef(id),
     priority: Number.isFinite(input.priority) ? input.priority : 50,
     enabled: input.enabled,
     ...(protocolOptions === undefined ? {} : { protocolOptions })
@@ -363,7 +395,7 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
  * ★ **已有的那条整行留着,只按 `upstreamModel` 认。** 用户可能给它改过别名、
  * 调过上下文窗口(将来那个编辑入口通了之后)—— 重新导入一次就把这些冲掉,
  * 等于每次点「拉取」都在悄悄重置他的配置。所以匹配用 `upstreamModel`,
- * 命中就原样保留,只有**新的**才套 `IMPORTED_ALIAS_DEFAULTS`。
+ * 命中就保留供应商覆盖值；新模型通过模型目录补齐能力和请求配置。
  *
  * ★ 末尾必须 `repointDanglingDefaults()`:取消勾选掉的那个可能正是
  * `settings.defaultModel`,而它悬空的表现不是报错,是**下一次发送在路由器里
@@ -386,6 +418,7 @@ export function setAliases(providerId: string, models: readonly string[]): Model
   // 模型管理控制台支持完整的供应商目录，不再限制为 20 条。
 
   const before = store.listAliases().filter((a) => a.providerId === providerId)
+  const resolver = modelBindingResolver(store.listUserModelCatalog())
   const keep = new Map<string, ModelAlias>()
   for (const a of before) if (!keep.has(a.upstreamModel)) keep.set(a.upstreamModel, a)
 
@@ -394,13 +427,15 @@ export function setAliases(providerId: string, models: readonly string[]): Model
       store.removeAlias(providerId, a.alias)
     }
   }
-  for (const m of wanted) {
+  for (const [priority, m] of wanted.entries()) {
     const existing = keep.get(m)
     // ★ 别名默认等于上游模型名(和 seed 那条一致)。这里不加任何前缀/后缀 ——
     // 别名是用户在药丸和 `defaultModel` 里看见的字符串,加工过就对不上他在上游文档里读到的名字
-    store.putAlias(
-      existing ?? { ...IMPORTED_ALIAS_DEFAULTS, alias: m, providerId, upstreamModel: m }
-    )
+    store.putAlias(resolver.resolve(
+      existing === undefined
+        ? { ...IMPORTED_ALIAS_DEFAULTS, alias: m, providerId, upstreamModel: m, priority, catalogOverrides: [] }
+        : { ...existing, priority }
+    ))
   }
 
   repointDanglingDefaults()

@@ -11,7 +11,7 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { Folder, PanelBottom, PanelRight, Plus, X } from "lucide-react";
+import { Folder, LoaderCircle, PanelBottom, PanelRight, Plus, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { FEATURE_LABEL, type OuterTab } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
@@ -105,7 +105,7 @@ export function OuterTabBar({
             />
             <span className="min-w-0 flex-1 truncate">{label}</span>
             {running && (
-              <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
+              <LoaderCircle size={11} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
             )}
             <button
               type="button"

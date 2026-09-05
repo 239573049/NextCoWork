@@ -45,6 +45,8 @@ export class RunHandle {
   readonly depth: number
 
   status: RunStatus = 'running'
+  readonly startedAt = Date.now()
+  endedAt?: number
   /** 已分配的最后一个 seq。**永远单调递增**,不受裁剪影响 */
   seq = 0
 
@@ -126,7 +128,11 @@ export class RunHandle {
       if (entry.event.type === 'message_commit') break
       // 只清 delta。tool_start / tool_end / interaction_* 是**结构性**的,
       // 留着几乎不占地方,而重放时 UI 要靠它们重建工具卡片。
-      if (entry.event.type === 'stream') this.log.splice(i, 1)
+      // Model and API usage are not contained in the committed message. Keep
+      // them so a renderer reload can reconstruct the same run totals.
+      if (entry.event.type === 'stream'
+        && entry.event.delta.type !== 'message_start'
+        && entry.event.delta.type !== 'message_end') this.log.splice(i, 1)
     }
   }
 
@@ -164,6 +170,8 @@ export class RunHandle {
       ...(this.parentRunId !== undefined ? { parentRunId: this.parentRunId } : {}),
       depth: this.depth,
       status: this.status,
+      startedAt: this.startedAt,
+      ...(this.endedAt === undefined ? {} : { endedAt: this.endedAt }),
       seq: this.seq,
       events: this.since(sinceSeq),
       pendingInteractions: [...this.pendingInteractions],
@@ -186,7 +194,10 @@ export class RunHandle {
 
   finish(status: RunStatus, error?: AgentError): void {
     if (this.status !== 'running') return
-    this.emit(error ? { type: 'run_end', status, error } : { type: 'run_end', status })
+    this.endedAt = Date.now()
+    this.emit(error
+      ? { type: 'run_end', status, error, at: this.endedAt }
+      : { type: 'run_end', status, at: this.endedAt })
   }
 }
 
@@ -240,6 +251,13 @@ export class RunRegistry {
 
   activeChildCount(runId: string): number {
     return this.activeChildrenOf(runId).length
+  }
+
+  /** 全局仍在运行的子 run 数,用于应用级子代理并发上限。 */
+  activeSubagentCount(): number {
+    return [...this.runs.values()].filter(
+      (r) => r.parentRunId !== undefined && r.status === 'running'
+    ).length
   }
 
   /** 级联中断(方案 §4.8 第 5 件):父 run 停,子 run 一起停 */

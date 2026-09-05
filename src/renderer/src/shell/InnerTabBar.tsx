@@ -16,7 +16,7 @@
  * 这一条不在 `.app-drag` 区里,所以不需要逐个 `.app-no-drag` ——
  * 但拖动重排用的是同一个 hook,行为和外层一致。
  */
-import { ChevronDown, Plus, X } from "lucide-react";
+import { ChevronDown, LoaderCircle, Plus, X } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 import type {
   InnerTab,
@@ -34,9 +34,14 @@ import { cn } from "../lib/cn";
 import { INNER_TAB_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
 import { useI18n } from "../i18n";
+import { documentKey, isDocumentDirty, useDocumentsStore } from '../stores/documents';
+import { DOCK_TAB_MIME } from './dock-layout';
 
 export function InnerTabBar({
   tabs,
+  groupId,
+  workspaceId,
+  canDragTab,
   activeId,
   runningSessionIds,
   menu,
@@ -48,6 +53,9 @@ export function InnerTabBar({
   onOpen,
 }: {
   tabs: readonly InnerTab[];
+  groupId?: string;
+  workspaceId?: string;
+  canDragTab?: (tab: InnerTab) => boolean;
   activeId: string | null;
   runningSessionIds: ReadonlySet<string>;
   /** `+` 菜单的内容。主区与底部各有一份常量,见 shared/domain/tab.ts */
@@ -62,10 +70,12 @@ export function InnerTabBar({
   onOpen: (kind: InnerTabKind) => void;
 }): ReactNode {
   const { t } = useI18n();
+  const drafts = useDocumentsStore((state) => state.entries);
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
 
   return (
     <div
+      data-dock-tabbar={groupId}
       className={cn(
         "flex h-10 shrink-0 items-center gap-1 border-b border-hairline px-2",
         className,
@@ -77,17 +87,30 @@ export function InnerTabBar({
           const running =
             tab.kind === "chat" && runningSessionIds.has(tab.ref.sessionId);
           const Icon = INNER_TAB_ICON[tab.kind];
+          const draft = workspaceId && (tab.kind === 'doc' || tab.kind === 'preview') ? drafts[documentKey(workspaceId, tab.ref.path)] : undefined;
+          const dirty = draft !== undefined && isDocumentDirty(draft);
           return (
             <div
               key={tab.id}
+              draggable={groupId !== undefined && (canDragTab?.(tab) ?? true)}
+              data-dock-tab-id={groupId === undefined ? undefined : tab.id}
+              onDragStart={(event) => {
+                if (groupId === undefined || (canDragTab !== undefined && !canDragTab(tab))) return;
+                event.dataTransfer.setData(DOCK_TAB_MIME, JSON.stringify({ tabId: tab.id, groupId, workspaceId }));
+                event.dataTransfer.effectAllowed = 'move';
+              }}
               style={styleFor(i)}
-              onPointerDown={(e) => onPointerDown(e, i)}
+              // Dock 分组使用原生拖放来同时支持同组排序、跨组移动和边缘拆分。
+              // 外层 Tab 仍使用 pointer reorder，因为它位于 Electron 自绘标题栏中。
+              onPointerDown={(e) => {
+                if (groupId === undefined) onPointerDown(e, i);
+              }}
               onClick={() => onActivate(tab.id)}
               role="tab"
               aria-selected={active}
               title={tab.title}
               className={cn(
-                "group flex h-7 max-w-[190px] min-w-0 shrink-0 items-center gap-1.5 rounded-[8px]",
+                "app-no-drag group flex h-7 max-w-[190px] min-w-0 shrink-0 items-center gap-1.5 rounded-[8px]",
                 "pr-1 pl-2.5 text-[12.5px] select-none",
                 !dragging && "transition-[transform,background-color]",
                 active
@@ -97,8 +120,9 @@ export function InnerTabBar({
             >
               <Icon size={13} className="shrink-0 text-fg-faint" />
               <span className="min-w-0 flex-1 truncate">{tab.title}</span>
+              {dirty && <span title={t('document.unsaved')} aria-label={t('document.unsaved')} className="size-1.5 shrink-0 rounded-full bg-accent" />}
               {running && (
-                <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
+                <LoaderCircle size={11} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
               )}
               <button
                 type="button"

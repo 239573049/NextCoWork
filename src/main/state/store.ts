@@ -1,5 +1,5 @@
 /**
- * 主进程状态的访问器。**除会话转录外都已经落在 SQLite 里**(`src/main/db/`)。
+ * 主进程状态的访问器。配置、会话与完整转录都落在 SQLite 里(`src/main/db/`)。
  *
  * 这一层刻意保留下来,没有让 handler 直接调 `db/repo`:
  *
@@ -7,13 +7,14 @@
  *   `utilityProcess`」那天要改的仍然只有这一层的实现(`DatabaseSync` 是同步的,
  *   迟早要挪 —— 理由写在 `db/index.ts` 文件头)。
  * - kv 的键名(`outerTabKey` / `innerTabKey`)属于这一层的词汇,不属于数据库。
- * - 转录还在内存里,而调用点不需要知道哪些字段落了盘、哪些没有。
+ * - 调用点不需要知道各领域对象在 SQLite 中的具体表结构。
  *
  * 当初那句「步骤 6 的迁移只该是『实现换掉』,不该是『调用点全改』」就是为这一刻写的:
  * 这次替换**没有改动任何一个访问器的签名**,同目录的 `__tests__/store.test.ts`
  * 原样跑过。
  */
 import type { AgentMessage } from '../../shared/agent/message'
+import type { ContextCheckpoint, ContextSearchHit } from '../../shared/agent/context-management'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
 import type { ModelCatalogDefinition } from '../../shared/domain/model-catalog'
@@ -22,19 +23,17 @@ import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
 import type { Workspace } from '../../shared/domain/workspace'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
+import type {
+  UsageAttemptRecord,
+  UsageDimensionStat,
+  UsageRequestLogsPage,
+  UsageRequestLogsQuery,
+  UsageSummary,
+  UsageWindow
+} from '../../shared/domain/usage'
 import type { SessionCreateInput } from '../db/repo'
 import * as repo from '../db/repo'
 
-/**
- * 会话转录。**仍然是内存 Map —— 步骤 6 才换成 `messages` 表 + FTS5。**
- * `db/index.ts` 文件头那张表画了确切的界。
- *
- * 在那一步之前它不能不存在:`AgentSession` 的 `history` 缺省是空转录,
- * 于是每一轮模型都从零开始 —— 界面上明明有三轮问答,模型却看不见前两轮。
- * 那不是「步骤 6 还没做」,是对话功能是坏的。
- *
- * 内存无上限,这是它是临时实现的一部分。
- */
 /** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
 const DISABLED_SKILLS_KEY = 'skills.disabled'
 
@@ -99,6 +98,26 @@ export const store = {
   },
   removeAlias(providerId: string, alias: string): void {
     repo.removeAlias(providerId, alias)
+  },
+
+  // ── usage ledger ──
+  recordUsageAttempt(record: UsageAttemptRecord): void {
+    repo.recordUsageAttempt(record)
+  },
+  updateUsageToolsForRun(runId: string, toolCalls: number, toolErrors: number): boolean {
+    return repo.updateUsageToolsForRun(runId, toolCalls, toolErrors)
+  },
+  getUsageSummary(window: UsageWindow): UsageSummary {
+    return repo.getUsageSummary(window)
+  },
+  getUsageRequestLogs(query: UsageRequestLogsQuery): UsageRequestLogsPage {
+    return repo.getUsageRequestLogs(query)
+  },
+  getUsageProviderStats(window: UsageWindow): UsageDimensionStat[] {
+    return repo.getUsageProviderStats(window)
+  },
+  getUsageModelStats(window: UsageWindow): UsageDimensionStat[] {
+    return repo.getUsageModelStats(window)
   },
 
   // ── user model catalogue ──
@@ -195,6 +214,14 @@ export const store = {
   },
 
   // ── 会话实体 ──
+  getInnerTabs(workspaceId: string): InnerTabState {
+    const state = repo.getKv<InnerTabState>(innerTabKey(workspaceId), EMPTY_INNER)
+    return { ...state, tabs: state.tabs.map((tab) => {
+      const session = tab.kind === 'chat' ? repo.getSession(tab.ref.sessionId) : undefined
+      const title = session?.workspaceId === workspaceId ? session.title : undefined
+      return title === undefined || title === tab.title ? tab : { ...tab, title }
+    }) }
+  },
   createSession(input: SessionCreateInput): Session {
     return repo.createSession(input)
   },
@@ -232,16 +259,27 @@ export const store = {
     repo.setSessionFavorited(sessionId, favorited)
   },
   deleteSession(sessionId: string): void {
-    // ★ 连带删掉它未发出的输入。同 `removeWorkspace` 里那两条一起删的理由:
-    //   只删会话却留下 kv 行的话,那份草稿再没有任何入口能读到它,也没有任何
-    //   一处会主动清理 —— 它会在库里永久堆着。
-    repo.tx(() => {
-      repo.deleteSession(sessionId)
-      repo.removeKv(sessionInputKey(sessionId))
-    })
+    // 未发出的输入、以及派生出来的子代理转录,都由 `repo.deleteSession` 一起收 ——
+    // 它是整棵子树遍历的那一层,级联必须和遍历在同一处(见那边的注释)。
+    repo.deleteSession(sessionId)
   },
   searchSessions(q: string, workspaceId?: string, limit = 50): SearchHit[] {
     return repo.searchAll(q, workspaceId, limit)
+  },
+  listContextCheckpoints(sessionId: string): ContextCheckpoint[] {
+    return repo.listContextCheckpoints(sessionId)
+  },
+  getContextCheckpoint(id: string): ContextCheckpoint | undefined {
+    return repo.getContextCheckpoint(id)
+  },
+  upsertContextCheckpoint(checkpoint: ContextCheckpoint): ContextCheckpoint {
+    return repo.upsertContextCheckpoint(checkpoint)
+  },
+  updateContextCheckpoint(id: string, note: string, revision: number, now: number): ContextCheckpoint {
+    return repo.updateContextCheckpoint(id, note, revision, now)
+  },
+  searchSessionHistory(sessionId: string, q: string, limit = 5): ContextSearchHit[] {
+    return repo.searchSessionHistory(sessionId, q, limit)
   },
   commitMessage(sessionId: string, message: AgentMessage): void {
     repo.commitMessage(sessionId, message)

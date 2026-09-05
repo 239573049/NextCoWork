@@ -27,13 +27,24 @@ import { maxTurnsFor } from '../../shared/agent/run-request'
 import type { ProviderStreamEvent, StopReason } from '../../shared/agent/stream'
 import type { ToolInfo, ToolResult } from '../../shared/agent/tool'
 import type { ModelAlias } from '../../shared/domain/provider'
+import {
+  modelSupportsTools,
+  validateModelRuntime
+} from '../../shared/domain/model-runtime'
 import type { Skill } from '../../shared/domain/skill'
 import { ulid } from '../../shared/util/id'
 import { isAbortError } from './abort'
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
+import { compactMessages, withSummary } from './context-assembler'
+import type { ContextCheckpoint } from '../../shared/agent/context-management'
+import type {
+  ContextManagementSettings,
+  PersonalizationSettings
+} from '../../shared/domain/settings'
 import type { GitContext } from './git-context'
 import type { KernelHost } from './host'
+import type { InteractFn } from './interaction-gate'
 import type { RunHandle } from './run-registry'
 import type { SpawnSubagentFn, Tool, ToolContext, ToolRegistry } from './tool/registry'
 import type { CanonicalRequest, UpstreamRequestContext } from './upstream/canonical'
@@ -81,8 +92,11 @@ export interface SessionDeps {
   history?: readonly AgentMessage[]
   /** 每个完整消息块提交时调用；主进程把它接到 SQLite。 */
   onMessageCommit?: (message: AgentMessage) => void
+  /** 上游响应结束后执行工具；把真实执行结果回填到产生这些调用的用量记录。 */
+  onToolUsage?: (summary: { runId: string; toolCalls: number; toolErrors: number }) => void
   skills?: readonly Skill[]
   approve?: ApproveFn
+  interact?: InteractFn
   /**
    * 收窄本轮工具快照的**额外**闸门。
    *
@@ -108,6 +122,15 @@ export interface SessionDeps {
    */
   projectInstructions?: string
   git?: GitContext
+  /**
+   * 「偏好 › 个性化」。★ 和上面两项**不同的是它进系统提示词,不进消息流** ——
+   * 它是 run 级常量,放进每轮现算的 reminder 里等于每轮为同一句话
+   * 重破一次 prompt cache(理由同 `SystemPromptInput` 里 `permissionMode` 那段)。
+   */
+  personalization?: PersonalizationSettings
+  contextManagement?: ContextManagementSettings
+  contextCheckpoints?: readonly ContextCheckpoint[]
+  saveContextCheckpoint?: (checkpoint: ContextCheckpoint) => void
 }
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
@@ -115,6 +138,8 @@ const FALLBACK_CONTEXT_WINDOW = 200_000
 const FALLBACK_MAX_OUTPUT = 8192
 
 const INTERRUPTED = '[interrupted: the user stopped the run before this tool call finished]'
+const RECOVERED_INTERRUPTED =
+  '[not executed: the previous run ended before this tool call produced a result]'
 
 /** 工具执行期间的异常收敛(中断除外)。`defineTool` 已经做过一遍,但 MCP 工具是直接注册的。 */
 function toolThrewError(err: unknown): string {
@@ -128,11 +153,15 @@ function toRunError(err: unknown): AgentError {
 
 export class AgentSession {
   private readonly messages: AgentMessage[]
+  /** 当前上下文窗口使用的投影；完整 messages 仍保留用于持久化和后续摘要。 */
+  private contextMessages: AgentMessage[]
   /**
    * ★ 当前轮次正在累积的块。中断时**唯一**能把半截回复救回来的东西 ——
    * 用户已经在屏幕上读到的字,不能因为他点了停止就凭空消失。
    */
   private pending: BlockAccumulator | null = null
+  private contextNote: string | undefined
+  private contextWindowIndex = 0
 
   constructor(
     private readonly deps: SessionDeps,
@@ -140,6 +169,25 @@ export class AgentSession {
     private readonly req: RunRequest
   ) {
     this.messages = [...(deps.history ?? [])]
+    this.contextMessages = [...this.messages]
+    const latestCheckpoint = [...(deps.contextCheckpoints ?? [])].sort((a, b) => b.windowIndex - a.windowIndex)[0]
+    this.contextNote = latestCheckpoint?.note
+    this.contextWindowIndex = latestCheckpoint?.windowIndex ?? 0
+    if (latestCheckpoint !== undefined && this.contextMessages.length > 0) {
+      this.contextMessages = withSummary(
+        compactMessages(this.contextMessages),
+        latestCheckpoint.note,
+        latestCheckpoint.id,
+        deps.host.clock.now()
+      )
+    }
+    /**
+     * 进程被杀掉或宿主在 session.run() 进入 catch 之前失去控制时，上一轮可能只
+     * 来得及提交 assistant/tool_use。必须在提交本轮用户消息之前修复它：否则新
+     * 的 user 消息会插在 tool_use 与 tool_result 之间，下一次 Anthropic 请求仍然
+     * 会因为「tool_result 必须紧邻」而返回 400。
+     */
+    this.closeUnexecutedCalls(RECOVERED_INTERRUPTED)
     // 空 input = 续跑(排队消息之外的场景,见 RunRequest.input)
     if (req.input.length > 0) {
       const now = deps.host.clock.now()
@@ -148,13 +196,13 @@ export class AgentSession {
        *
        * 只 push 的话它就只存在于主进程:渲染层的转录是事件流的投影,
        * 没有这条 commit,用户按下回车后自己的消息永远不出现在对话里。
-       * 渲染层可以自己补一条,但那样同一条消息就有两个 id(一个渲染层 mint 的、
-       * 一个主进程 mint 的),而步骤 6 落盘的是主进程那个 —— 重载之后会看到两条。
+       * 渲染层现在会先补一条同 ID 的乐观消息;这里复用 `inputMessageId` 后,
+       * message_commit 会确认并替换它,步骤 6 落盘的仍然只有这一条。
        *
        * 这里 emit 得到的时机是安全的:`startRun` 先建 handle 与泵、再调驱动,
        * 构造函数跑到这一行时事件已经有人接了。
        */
-      this.commit(userMessage(ulid(now), [...req.input], now))
+      this.commit(userMessage(req.inputMessageId ?? ulid(now), [...req.input], now))
     }
   }
 
@@ -181,7 +229,12 @@ export class AgentSession {
         return
       }
       this.deps.host.logger.error('[session] run 失败', err)
-      this.handle.finish('error', toRunError(err))
+      const error = toRunError(err)
+      const acc = this.pending
+      this.pending = null
+      this.commitAssistant([...(acc?.finalize().parts ?? []), { type: 'error', error }])
+      this.closeUnexecutedCalls('[not executed: the run failed before this tool could finish]')
+      this.handle.finish('error', error)
     }
   }
 
@@ -214,12 +267,31 @@ export class AgentSession {
    * 与**本轮下发给模型的那份工具快照**。
    */
   private async turn(): Promise<{ calls: PendingCall[]; tools: Map<string, Tool> } | null> {
+    this.handle.signal.throwIfAborted()
+    const alias = this.aliasFor(this.req.model)
+    if (alias !== undefined) {
+      const issue = validateModelRuntime({
+        alias,
+        messages: this.messages,
+        webSearchRequested: this.req.webSearch
+      })[0]
+      if (issue !== undefined) {
+        this.handle.finish(
+          'error',
+          agentError(issue.code === 'context_length' ? 'context_length' : 'provider', issue.message, {
+            retryable: false
+          })
+        )
+        return null
+      }
+    }
+
     /**
      * ★ 每轮取一次快照(方案 §4.4)。同一份快照有两个用途:下发给模型的
      * 工具列表,和稍后按名字找回工具 —— 必须是同一份,否则会出现
      * 「下发的列表里有,执行时却找不到」的错位。
      */
-    const advertised = this.deps.tools.snapshot({
+    const available = this.deps.tools.snapshot({
       // ★ plan 模式的**真正实现**:过滤掉写工具,而不是在提示词里祈祷(§4.8)
       readOnlyOnly: this.req.mode === 'plan',
       /*
@@ -235,18 +307,24 @@ export class AgentSession {
       */
       network: this.req.webSearch
     })
+    // A model without tool calling must not receive a tool schema merely
+    // because the application registry contains tools. Existing tool history
+    // is rejected above because it cannot be encoded safely for such a model.
+    const advertised = modelSupportsTools(alias) ? available : []
     const byName = new Map(advertised.map((t) => [t.externalName, t]))
     // `execute` 是闭包,过不了结构化克隆 —— 请求体里不该带着它
     const infos: ToolInfo[] = advertised.map(({ execute: _execute, ...info }) => info)
 
     const todoToolName = this.deps.tools.byInternalId('TodoWrite')?.externalName
 
-    const alias = this.aliasFor(this.req.model)
-    const { request, usage } = assemble({
-      messages: this.messages,
+    const assembleInput = {
+      messages: this.contextMessages,
       tools: infos,
       skills: this.deps.skills ?? [],
       ...(this.deps.agentPrompt !== undefined ? { agentPrompt: this.deps.agentPrompt } : {}),
+      ...(this.deps.personalization !== undefined
+        ? { personalization: this.deps.personalization }
+        : {}),
       mode: this.req.mode,
       thinking: this.req.thinking,
       model: this.req.model,
@@ -271,29 +349,98 @@ export class AgentSession {
       },
       contextWindow: alias?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
       maxOutputTokens: alias?.maxOutputTokens ?? FALLBACK_MAX_OUTPUT,
-      supportsThinking: alias?.capabilities.thinking ?? false
-    })
+      supportsThinking: alias?.capabilities.thinking ?? false,
+      reasoningEfforts: alias?.reasoningEfforts,
+      ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {})
+    }
+    let { request, usage } = assemble(assembleInput)
+
+    const contextSettings = this.deps.contextManagement
+    if (usage.shouldCompact && contextSettings?.autoCompact === true) {
+      const checkpoint = contextSettings.experimentalMode === true
+        ? await (async () => {
+          this.handle.emit({ type: 'context_status', status: { phase: 'preparing', windowIndex: this.contextWindowIndex + 1 } })
+          return this.createContextCheckpoint({
+            alias,
+            previousNote: this.contextNote,
+            inputTokensBefore: usage.used,
+            force: true
+          })
+        })()
+        : undefined
+      if (checkpoint !== undefined) {
+        this.contextNote = checkpoint.note
+        this.contextWindowIndex = checkpoint.windowIndex
+        const compacted = compactMessages(this.messages)
+        const projected = withSummary(compacted, checkpoint.note, checkpoint.id, this.deps.host.clock.now())
+        this.contextMessages = [...projected]
+        ;({ request, usage } = assemble({ ...assembleInput, messages: projected }))
+        const finalized = { ...checkpoint, inputTokensAfter: usage.used, updatedAt: this.deps.host.clock.now() }
+        this.deps.saveContextCheckpoint?.(finalized)
+        this.handle.emit({ type: 'context_checkpoint', checkpoint: finalized })
+        this.handle.emit({ type: 'context_status', status: { phase: 'ready', windowIndex: finalized.windowIndex } })
+      } else {
+        this.handle.emit({ type: 'context_status', status: { phase: 'fallback', windowIndex: this.contextWindowIndex } })
+        const projected = compactMessages(this.messages)
+        this.contextMessages = [...projected]
+        ;({ request, usage } = assemble({ ...assembleInput, messages: projected }))
+      }
+    }
 
     // ★ 在**请求发出前**发,不在收到响应后发 —— 压力条要在这一轮真的挤爆之前
     // 就让用户看见(方案 §4.12)。
     this.handle.emit({ type: 'context_usage', ...usage })
 
+    if (alias !== undefined) {
+      const contextIssue = validateModelRuntime({
+        alias,
+        messages: request.messages,
+        estimatedInputTokens: usage.used
+      }).find((issue) => issue.code === 'context_length')
+      if (contextIssue !== undefined) {
+        this.handle.finish(
+          'error',
+          agentError('context_length', contextIssue.message, { retryable: false })
+        )
+        return null
+      }
+    }
+
     const acc = new BlockAccumulator()
     this.pending = acc
     let stopReason: StopReason = 'end_turn'
     let streamError: AgentError | undefined
+    let ended = false
 
     for await (const ev of this.deps.upstream.stream(request, this.handle.signal, {
-      workspaceId: this.req.workspaceId
+      workspaceId: this.req.workspaceId,
+      runId: this.req.runId,
+      sessionId: this.req.sessionId
     })) {
+      this.handle.signal.throwIfAborted()
       this.handle.emit({ type: 'stream', delta: ev })
       acc.apply(ev)
-      if (ev.type === 'message_end') stopReason = ev.stopReason
+      if (ev.type === 'message_end') {
+        stopReason = ev.stopReason
+        ended = true
+      }
       // 路由器把总失败表达成一个**终止事件**而不是异常(见 router.stream),
       // 所以这里是正常的循环出口,不是 catch。
       else if (ev.type === 'error') streamError = ev.error
     }
+    this.handle.signal.throwIfAborted()
     this.pending = null
+
+    if (streamError === undefined && !ended) {
+      streamError = agentError('network', 'The upstream connection closed before the response completed.', {
+        messageKey: 'agent.error.incompleteResponse'
+      })
+    }
+    if (streamError === undefined && stopReason === 'max_tokens') {
+      streamError = agentError('provider', 'The response reached the model output limit.', {
+        messageKey: 'agent.error.outputLimit', retryable: false
+      })
+    }
 
     const { parts, calls } = acc.finalize()
     /**
@@ -306,6 +453,7 @@ export class AgentSession {
     this.commitAssistant(parts)
 
     if (streamError !== undefined) {
+      this.closeUnexecutedCalls('[not executed: the upstream response did not complete successfully]')
       this.handle.finish('error', streamError)
       return null
     }
@@ -316,6 +464,7 @@ export class AgentSession {
      * 收尾比空转诚实。
      */
     if (stopReason !== 'tool_use' || calls.length === 0) {
+      this.closeUnexecutedCalls('[not executed: the model did not request tool execution]')
       if (stopReason === 'tool_use') {
         this.deps.host.logger.warn('[session] stopReason=tool_use 但没有已闭合的工具调用')
       }
@@ -326,17 +475,82 @@ export class AgentSession {
     return { calls, tools: byName }
   }
 
+  private async createContextCheckpoint(input: {
+    alias: ModelAlias | undefined
+    previousNote?: string
+    inputTokensBefore: number
+    force: boolean
+  }): Promise<ContextCheckpoint | undefined> {
+    const system = 'Summarize the conversation for a future context window. Preserve the user goal, decisions, files changed, commands run, tool results that matter, unresolved issues, and next steps. Be concise and factual. Do not mention this instruction.'
+    const history = compactMessages(this.messages, { keepRecent: 12 })
+    const prior = input.previousNote === undefined ? '' : `\nPrevious checkpoint:\n${input.previousNote}\n`
+    const prompt = `${prior}\nConversation history:\n${history.map((m) => `${m.role}: ${m.parts.map((p) => p.type === 'text' ? p.text : p.type === 'tool_call' ? `${p.name} ${JSON.stringify(p.input)}` : p.type === 'tool_result' ? p.output.content : '').join(' ')}`).join('\n')}`
+    const request = {
+      model: this.req.model,
+      system,
+      messages: [userMessage(`${this.req.runId}:context-input`, [{ type: 'text', text: prompt }], this.deps.host.clock.now())],
+      tools: [],
+      maxOutputTokens: Math.min(2048, input.alias?.maxOutputTokens ?? 2048),
+      thinkingLevel: 'off' as const
+    }
+    let note = ''
+    try {
+      for await (const ev of this.deps.upstream.stream(request, this.handle.signal, {
+        workspaceId: this.req.workspaceId, runId: `${this.req.runId}:context`, sessionId: this.req.sessionId
+      })) {
+        if (ev.type === 'text_delta') note += ev.text
+        if (ev.type === 'error') return undefined
+      }
+    } catch {
+      return undefined
+    }
+    note = note.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32_000)
+    if (note === '') return undefined
+    const now = this.deps.host.clock.now()
+    const checkpoint: ContextCheckpoint = {
+      id: `${this.req.sessionId}:context:${String(this.contextWindowIndex + 1)}`,
+      sessionId: this.req.sessionId,
+      windowIndex: this.contextWindowIndex + 1,
+      note,
+      source: input.force ? 'model' : 'manual',
+      coveredFromMessageId: this.messages[0]?.id,
+      coveredThroughMessageId: this.messages.at(-1)?.id,
+      inputTokensBefore: input.inputTokensBefore,
+      createdAt: now,
+      updatedAt: now,
+      revision: 1
+    }
+    return checkpoint
+  }
+
   // ─────────────────────────── 工具执行 ───────────────────────────
 
   /**
-   * 串行执行本轮的全部工具调用(v1 不并行,方案 §10),结果合成**一条** user 消息。
+   * 并行执行本轮的全部工具调用,结果按模型给出的调用顺序合成**一条** user 消息。
+   *
+   * 同一轮的工具调用来自同一份模型决策,彼此不能看到对方的结果,因此可以同时
+   * 开始。结果数组仍按 `calls` 的索引写回,保证上游协议看到稳定的 tool_result
+   * 顺序；每个 promise 都会等到结束,这样中断或异常时已经完成的工具结果仍能
+   * 在 `finally` 中落盘,而没有结果的调用交给 `finalizeAbort` / 错误收尾补齐。
    */
   private async executeAll(calls: PendingCall[], tools: Map<string, Tool>): Promise<void> {
     const parts: ContentPart[] = []
+    const results: Array<ContentPart | undefined> = Array.from({ length: calls.length })
+    let failed = false
+    let firstError: unknown
     try {
-      for (const call of calls) {
-        parts.push(await this.executeOne(call, tools))
-      }
+      await Promise.all(calls.map(async (call, index) => {
+        try {
+          results[index] = await this.executeOne(call, tools)
+        } catch (error) {
+          // Keep other calls running so already-started tools can finish cleanly.
+          if (!failed) {
+            failed = true
+            firstError = error
+          }
+        }
+      }))
+      if (failed) throw firstError
     } finally {
       /**
        * ★ `finally` 而不是只在成功路径上提交:中断发生在第 2 个工具执行途中时,
@@ -344,14 +558,39 @@ export class AgentSession {
        * `orphanedToolCalls` 当成孤儿补上一条「已中断」—— 做过的事被记成没做,
        * 而模型下一轮会据此重做一遍。
        */
+      for (const result of results) {
+        if (result !== undefined) parts.push(result)
+      }
       if (parts.length > 0) {
         const now = this.deps.host.clock.now()
         this.commit(toolResultMessage(ulid(now), parts, now))
+      }
+      const completed = parts.filter(
+        (part): part is Extract<ContentPart, { type: 'tool_result' }> =>
+          part.type === 'tool_result'
+      )
+      // An abort or unexpected failure can leave the current and remaining
+      // calls without results here. `finalizeAbort` records those as
+      // interrupted failures in the transcript, so the usage ledger must use
+      // the same accounting rather than presenting them as successful tools.
+      const toolErrors =
+        completed.filter((part) => part.isError).length + (calls.length - completed.length)
+      try {
+        this.deps.onToolUsage?.({
+          runId: this.req.runId,
+          toolCalls: calls.length,
+          toolErrors
+        })
+      } catch (err) {
+        // Usage diagnostics must never turn a completed tool call into an
+        // agent-run failure.
+        this.deps.host.logger.warn('[usage] 回填工具执行统计失败，运行本身不受影响', err)
       }
     }
   }
 
   private async executeOne(call: PendingCall, tools: Map<string, Tool>): Promise<ContentPart> {
+    this.handle.signal.throwIfAborted()
     const { callId } = call
 
     if (!call.ok) {
@@ -383,6 +622,7 @@ export class AgentSession {
     }
     // allow_edited 的入参是用户改过的 —— 用原值执行等于无视用户的修改
     const input = decision.kind === 'allow_edited' ? decision.input : call.input
+    this.handle.signal.throwIfAborted()
 
     let result: ToolResult
     try {
@@ -409,7 +649,13 @@ export class AgentSession {
         : result.output
 
     this.handle.emit({ type: 'tool_end', callId, output, isError: result.isError })
-    return { type: 'tool_result', callId, output, isError: result.isError }
+    return {
+      type: 'tool_result',
+      callId,
+      output,
+      isError: result.isError,
+      ...(result.subagent === undefined ? {} : { subagent: result.subagent })
+    }
   }
 
   private toolContext(callId: string): ToolContext {
@@ -433,7 +679,8 @@ export class AgentSession {
         「这个环境里派不了子代理」的人话。放一个会抛的桩,模型看到的
         就变成一条内部错误信息了。
       */
-      ...(this.deps.spawnSubagent !== undefined ? { spawnSubagent: this.deps.spawnSubagent } : {})
+      ...(this.deps.spawnSubagent !== undefined ? { spawnSubagent: this.deps.spawnSubagent } : {}),
+      ...(this.deps.interact !== undefined ? { interact: this.deps.interact } : {})
     }
   }
 
@@ -473,10 +720,15 @@ export class AgentSession {
     this.pending = null
     if (acc !== null) this.commitAssistant(acc.finalize().parts)
 
-    // 2) 补 tool_result。此时剩下的孤儿只有一种:已闭合、已开始执行、没跑完的。
+    this.closeUnexecutedCalls(INTERRUPTED)
+    this.handle.finish('aborted')
+  }
+
+  /** Closed calls can also be stranded by a stream failure after tool_call_end. */
+  private closeUnexecutedCalls(reason: string): void {
     const orphans = orphanedToolCalls(this.messages)
     if (orphans.length > 0) {
-      const output: ToolOutput = { content: INTERRUPTED }
+      const output: ToolOutput = { content: reason }
       const parts: ContentPart[] = orphans.map((o) => ({
         type: 'tool_result',
         callId: o.callId,
@@ -491,7 +743,6 @@ export class AgentSession {
       this.commit(toolResultMessage(ulid(now), parts, now))
     }
 
-    this.handle.finish('aborted')
   }
 
   // ─────────────────────────── 小工具 ───────────────────────────
@@ -518,6 +769,7 @@ export class AgentSession {
   /** 落盘边界(方案 §4.2):也是 RunRegistry 裁剪冗余 delta 的那个点 */
   private commit(message: AgentMessage): void {
     this.messages.push(message)
+    this.contextMessages.push(message)
     // 先落盘再通知渲染层，避免 UI 看见一条重启后不存在的消息。
     this.deps.onMessageCommit?.(message)
     this.handle.emit({ type: 'message_commit', message })

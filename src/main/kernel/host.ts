@@ -104,6 +104,12 @@ export interface KernelHost {
   fs: KernelFs
   spawn: SpawnFn
   fetch: typeof fetch
+  /**
+   * Fetch through one isolated Electron session. Browser tools use this port
+   * so Profile cookies participate without importing Electron into the kernel.
+   * Pure Node hosts may omit it and fall back to `fetch`.
+   */
+  browserFetch?: (partition: string, input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 }
 
 const consoleLogger: Logger = {

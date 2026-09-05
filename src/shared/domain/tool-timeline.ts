@@ -10,7 +10,7 @@
  * 这里**不 import 任何 React**。组件只负责把这些函数的输出摆进版式。
  */
 import { durationOf } from '../agent/duration'
-import type { ToolCallState } from '../agent/transcript'
+import type { SubagentState, ToolCallState } from '../agent/transcript'
 import { presenterOf, type ToolShape } from './tool-presenter'
 
 /**
@@ -24,13 +24,13 @@ import { presenterOf, type ToolShape } from './tool-presenter'
 export type TimelineItem =
   | { key: string; kind: 'thinking'; text: string; streaming: boolean }
   | { key: string; kind: 'tool'; callId: string | undefined; name: string; input: unknown }
-  | { key: string; kind: 'subagent'; summary: string | undefined }
+  | { key: string; kind: 'subagent'; callId: string; summary: string | undefined; state?: SubagentState }
 
 /** 可见的最近工具行数。理由见设计文档 §5.2:约 130px,不把正文挤出视口。 */
 export const TOOL_WINDOW_SIZE = 3
 
-/** 少于这么多项就不套「工作区」外壳 —— 为一次调用加一层容器是纯粹的层级浪费。 */
-export const WORKSPACE_MIN_ITEMS = 2
+/** A completed run with any process item can be summarized above its answer. */
+export const WORKSPACE_MIN_ITEMS = 1
 
 export function shapeOfItem(
   item: TimelineItem,
@@ -53,6 +53,15 @@ export function statusOfItem(
   item: TimelineItem,
   tools: Readonly<Record<string, ToolCallState>>
 ): 'pending' | 'running' | 'ok' | 'error' {
+  if (item.kind === 'subagent') {
+    switch (item.state?.status) {
+      case 'running': return 'running'
+      case 'error':
+      case 'aborted': return 'error'
+      case 'done': return 'ok'
+      default: return 'pending'
+    }
+  }
   if (item.kind !== 'tool') return 'ok'
   if (item.callId === undefined) return 'pending'
   const call = tools[item.callId]
@@ -90,6 +99,27 @@ export function groupItems(
   }
   if (cur.length > 0) groups.push(cur)
   return groups
+}
+
+/** Group every adjacent tool call, including different tool shapes. Thinking and
+ * prose stay boundaries so a run can be summarized as one compact process row. */
+export function groupConsecutiveTools(items: readonly TimelineItem[]): TimelineItem[][] {
+  const groups: TimelineItem[][] = []
+  for (const item of items) {
+    const previous = groups.at(-1)
+    if (item.kind === 'tool' && previous?.[0]?.kind === 'tool') previous.push(item)
+    else groups.push([item])
+  }
+  return groups
+}
+
+/** A multi-call group is safe to collapse once every call has a durable result. */
+export function isCompletedToolGroup(
+  group: readonly TimelineItem[],
+  tools: Readonly<Record<string, ToolCallState>>
+): boolean {
+  return group.length > 1 && group.every((item) => item.kind === 'tool'
+    && item.callId !== undefined && statusOfItem(item, tools) === 'ok')
 }
 
 /**
@@ -251,7 +281,7 @@ export interface WorkspaceDecision {
  *    收起来等于多要求一次点击才能看到最需要的信息。
  * 2. 存在**位于所有工具块之后的非空正文** —— 否则收束后界面上只剩一个
  *    孤零零的「工作区」块,用户看不到任何结论。那不是折叠,是把内容藏没了。
- * 3. 过程项 ≥ 2 —— 为一次调用套一层外壳是层级浪费。
+ * 3. 至少存在一个过程项 —— 完成后的思考或工具内容都应收束到摘要行。
  */
 export function decideWorkspace({
   outcome,

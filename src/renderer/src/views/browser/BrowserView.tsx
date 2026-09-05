@@ -42,9 +42,11 @@ export function BrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind:
     if (tab.ref.url === '') return
     let alive = true
     void listBrowserTabs(workspace.id).then((tabs) => {
-      const known = tab.ref.browserId === undefined ? undefined : tabs.find((item) => item.id === tab.ref.browserId)
+      const known = tabs.find(
+        (item) => item.id === tab.ref.browserId || (item.source === 'user' && item.clientTabId === tab.id)
+      )
       if (known !== undefined) return known
-      return openBrowserTab(workspace.id, tab.ref.url, tab.title, tab.ref.profileId)
+      return openBrowserTab(workspace.id, tab.ref.url, tab.title, tab.ref.profileId, tab.id)
     }).then((remote) => {
       if (!alive) return
       setBrowser(workspace.id, tab.id, { browserId: remote.id, url: remote.url })
@@ -104,7 +106,7 @@ export function BrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind:
       setError(null)
       setLoading(true)
       if (tab.ref.browserId === undefined) {
-        const remote = await openBrowserTab(workspace.id, parsed.href, tab.title, tab.ref.profileId)
+        const remote = await openBrowserTab(workspace.id, parsed.href, tab.title, tab.ref.profileId, tab.id)
         setBrowser(workspace.id, tab.id, { browserId: remote.id, url: remote.url })
       } else {
         await navigateBrowserTab(workspace.id, tab.ref.browserId, parsed.href)

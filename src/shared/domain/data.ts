@@ -6,7 +6,9 @@
  * JSON 的类型里没有明文凭证字段。
  */
 import type { AgentMessage } from '../agent/message'
+import type { ContextCheckpoint } from '../agent/context-management'
 import type { ModelAlias, UpstreamProvider } from './provider'
+import { isModelCatalogOverride } from './provider'
 import type { AppSettings } from './settings'
 import type { SearchProviderConfig } from './search'
 import type { Session } from './session'
@@ -23,12 +25,17 @@ export const BACKUP_FORMAT_VERSION = 1
 export interface ExportSession {
   session: Session
   messages: AgentMessage[]
+  /** Optional for exports produced before context management was added. */
+  contextCheckpoints?: ContextCheckpoint[]
 }
 
 export interface DataExport {
   type: typeof DATA_EXPORT_TYPE
   version: number
-  exportedAt: string
+  /** ISO string in current exports; numeric timestamps are accepted from legacy exports. */
+  exportedAt: string | number
+  /** Legacy database schema marker, retained for import compatibility. */
+  schemaVersion?: number
   settings: AppSettings
   workspaces: Workspace[]
   sessions: ExportSession[]
@@ -39,7 +46,9 @@ export interface DataExport {
   /** IDs of globally disabled skills; skill files themselves are never exported. */
   disabledSkillIds: string[]
   /** Workspace-local skill selection is already part of each Workspace. */
-  encryptedCredentials?: EncryptedCredentials
+  encryptedCredentials?: EncryptedCredentials | boolean
+  /** Legacy user supplied model catalogue, ignored by current import code. */
+  userModelCatalog?: unknown
 }
 
 export interface EncryptedCredentials {
@@ -156,7 +165,22 @@ export type CleanupAge = 3 | 6 | 12
 /** 截止时间：当前时刻往前 N 个月，按日历月而不是固定 90 天。 */
 export function cutoffForAge(now: number, months: CleanupAge): number {
   const date = new Date(now)
+  const day = date.getDate()
+  // Move through day 1 first. Native Date#setMonth overflows at month ends
+  // (May 31 - 3 months becomes March 3), which would delete several extra
+  // days. Clamp back to the last real day of the target calendar month.
+  date.setDate(1)
   date.setMonth(date.getMonth() - months)
+  const lastDay = new Date(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    0,
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  ).getDate()
+  date.setDate(Math.min(day, lastDay))
   return date.getTime()
 }
 
@@ -167,8 +191,8 @@ export function isDataExport(value: unknown): value is DataExport {
   if (
     v.type !== DATA_EXPORT_TYPE ||
     !isIntegerAtLeast(v.version, 1) ||
-    typeof v.exportedAt !== 'string' ||
-    !Number.isFinite(Date.parse(v.exportedAt)) ||
+    !((typeof v.exportedAt === 'string' && Number.isFinite(Date.parse(v.exportedAt))) ||
+      (typeof v.exportedAt === 'number' && Number.isFinite(v.exportedAt))) ||
     !isAppSettings(v.settings) ||
     !Array.isArray(v.workspaces) ||
     !Array.isArray(v.sessions) ||
@@ -178,7 +202,8 @@ export function isDataExport(value: unknown): value is DataExport {
     !Array.isArray(v.searchProviders) ||
     !Array.isArray(v.disabledSkillIds) ||
     !v.disabledSkillIds.every(isNonEmptyString) ||
-    (v.encryptedCredentials !== undefined && !isEncryptedCredentials(v.encryptedCredentials))
+    (v.encryptedCredentials !== undefined &&
+      typeof v.encryptedCredentials !== 'boolean' && !isEncryptedCredentials(v.encryptedCredentials))
   ) return false
 
   // Duplicate primary keys make a merge order-dependent. Reject them before
@@ -231,6 +256,14 @@ function optionalBoolean(value: Record<string, unknown>, key: string): boolean {
   return !has(value, key) || isBoolean(value[key])
 }
 
+function optionalIntegerAtLeast(
+  value: Record<string, unknown>,
+  key: string,
+  minimum: number,
+): boolean {
+  return !has(value, key) || isIntegerAtLeast(value[key], minimum)
+}
+
 function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
@@ -251,7 +284,9 @@ function isAppSettings(value: unknown): boolean {
     !isColorThemeChoice(v.colorTheme) ||
     !isImageThemeChoice(v.imageTheme) ||
     !enumValue(v.defaultPermissionMode, PERMISSION_MODES) ||
+    (has(v, 'permissionReviewerModel') && typeof v.permissionReviewerModel !== 'string') ||
     typeof v.defaultModel !== 'string' ||
+    (has(v, 'contextManagement') && !isContextManagementSettings(v.contextManagement)) ||
     !isSubagentSettings(v.subagent) ||
     !isGatewaySettings(v.gateway) ||
     !isNotificationSettings(v.notifications) ||
@@ -259,6 +294,11 @@ function isAppSettings(value: unknown): boolean {
   ) return false
   if (has(v, 'data') && !isDataSettings(v.data)) return false
   return true
+}
+
+function isContextManagementSettings(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return isBoolean(value.experimentalMode) && isBoolean(value.autoCompact)
 }
 
 function isColorThemeChoice(value: unknown): boolean {
@@ -275,7 +315,7 @@ function isSubagentSettings(value: unknown): boolean {
   if (!isRecord(value)) return false
   return (
     typeof value.model === 'string' &&
-    isIntegerAtLeast(value.perSessionLimit, 0) &&
+    isIntegerAtLeast(value.perSessionLimit, 1) &&
     isIntegerAtLeast(value.globalLimit, 0)
   )
 }
@@ -346,6 +386,7 @@ function isSession(value: unknown): value is Session {
     isNonEmptyString(value.id) &&
     typeof value.workspaceId === 'string' &&
     typeof value.title === 'string' &&
+    (value.titleSource === undefined || enumValue(value.titleSource, ['default', 'generated', 'manual'])) &&
     typeof value.model === 'string' &&
     enumValue(value.mode, SESSION_MODES) &&
     enumValue(value.thinking, THINKING_LEVELS) &&
@@ -361,7 +402,21 @@ function isSession(value: unknown): value is Session {
 function isExportSession(value: unknown): value is ExportSession {
   if (!isRecord(value) || !isSession(value.session) || !Array.isArray(value.messages)) return false
   const messages = value.messages as unknown[]
-  return messages.every(isAgentMessage) && uniqueBy(messages, (message) => (message as AgentMessage).id)
+  if (!messages.every(isAgentMessage) || !uniqueBy(messages, (message) => (message as AgentMessage).id)) return false
+  if (value.contextCheckpoints === undefined) return true
+  return Array.isArray(value.contextCheckpoints) && value.contextCheckpoints.every(isContextCheckpoint)
+}
+
+function isContextCheckpoint(value: unknown): value is ContextCheckpoint {
+  if (!isRecord(value)) return false
+  return isNonEmptyString(value.id) && isNonEmptyString(value.sessionId) &&
+    isIntegerAtLeast(value.windowIndex, 0) && typeof value.note === 'string' &&
+    enumValue(value.source, ['model', 'mechanical', 'manual', 'auto']) &&
+    optionalString(value, 'coveredFromMessageId') && optionalString(value, 'coveredThroughMessageId') &&
+    optionalIntegerAtLeast(value, 'inputTokensBefore', 0) && optionalIntegerAtLeast(value, 'inputTokensAfter', 0) &&
+    (value.searchHits === undefined || Array.isArray(value.searchHits)) &&
+    isIntegerAtLeast(value.createdAt, 0) && isIntegerAtLeast(value.updatedAt, 0) &&
+    isIntegerAtLeast(value.revision, 1)
 }
 
 function isAgentMessage(value: unknown): value is AgentMessage {
@@ -430,7 +485,7 @@ function isProvider(value: unknown): value is UpstreamProvider {
     typeof value.name !== 'string' ||
     !enumValue(value.protocol, ['anthropic', 'openai-chat', 'openai-responses']) ||
     typeof value.baseUrl !== 'string' ||
-    typeof value.credentialRef !== 'string' ||
+    !isNonEmptyString(value.credentialRef) ||
     !isIntegerAtLeast(value.priority, 0) ||
     !isBoolean(value.enabled) ||
     !optionalTimestamp(value, 'updatedAt')
@@ -457,12 +512,15 @@ function isModelAlias(value: unknown): value is ModelAlias {
     !isCapabilities(value.capabilities) ||
     !isIntegerAtLeast(value.contextWindow, 1) ||
     !isIntegerAtLeast(value.maxOutputTokens, 1) ||
+    !optionalIntegerAtLeast(value, 'priority', 0) ||
     !optionalString(value, 'displayName') ||
     !optionalTimestamp(value, 'updatedAt')
   ) return false
   if (has(value, 'modality') && !enumValue(value.modality, ['text', 'image', 'video', 'speech', 'transcription'])) return false
   if (has(value, 'enabled') && !isBoolean(value.enabled)) return false
   if (has(value, 'thinkingConfig') && !isThinkingConfig(value.thinkingConfig)) return false
+  if (has(value, 'reasoningEfforts') && (!Array.isArray(value.reasoningEfforts) || !value.reasoningEfforts.every((effort) => ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(effort))))) return false
+  if (has(value, 'catalogOverrides') && (!Array.isArray(value.catalogOverrides) || !value.catalogOverrides.every(isModelCatalogOverride))) return false
   if (has(value, 'requestAdapter') && !isRequestAdapter(value.requestAdapter)) return false
   if (has(value, 'source') && !isRecord(value.source)) return false
   if (isRecord(value.source) && (!isNonEmptyString(value.source.url) || typeof value.source.fetchedAt !== 'string' || !optionalString(value.source, 'verifiedAt'))) return false
@@ -473,12 +531,24 @@ function isCapabilities(value: unknown): boolean {
   if (!isRecord(value)) return false
   const required = ['tools', 'vision', 'thinking', 'caching']
   return required.every((key) => isBoolean(value[key])) &&
-    ['textInput', 'fileInput', 'videoInput', 'audioInput', 'textOutput', 'imageOutput', 'videoOutput', 'audioOutput', 'webSearch', 'structuredOutput', 'streaming', 'batch'].every((key) => optionalBoolean(value, key))
+    ['textInput', 'visionInput', 'fileInput', 'videoInput', 'audioInput', 'textOutput', 'imageOutput', 'videoOutput', 'audioOutput', 'webSearch', 'structuredOutput', 'streaming', 'batch'].every((key) => optionalBoolean(value, key))
 }
 
 function isThinkingConfig(value: unknown): boolean {
   if (!isRecord(value)) return false
-  return enumValue(value.mode, ['unsupported', 'always', 'toggle', 'effort', 'budget']) && isBoolean(value.defaultEnabled) && (!has(value, 'defaultEffort') || enumValue(value.defaultEffort, ['minimal', 'low', 'medium', 'high', 'max'])) && (!has(value, 'defaultBudgetTokens') || isIntegerAtLeast(value.defaultBudgetTokens, 0)) && optionalString(value, 'parameterPath')
+  if (!enumValue(value.mode, ['unsupported', 'always', 'toggle', 'effort', 'budget']) || !isBoolean(value.defaultEnabled) || (has(value, 'defaultEffort') && !enumValue(value.defaultEffort, ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])) || (has(value, 'defaultBudgetTokens') && !isIntegerAtLeast(value.defaultBudgetTokens, 0)) || !optionalString(value, 'parameterPath')) return false
+  if ((has(value, 'enabledValue') && !isJsonValue(value.enabledValue)) || (has(value, 'disabledValue') && !isJsonValue(value.disabledValue))) return false
+  const parameterPath = typeof value.parameterPath === 'string' ? value.parameterPath.trim() : ''
+  const leaf = parameterPath.split('.').at(-1)
+  if (value.mode === 'budget' && (leaf === 'enable_thinking' || leaf === 'thinking_mode' || parameterPath === 'thinking.enabled' || parameterPath === 'reasoning_split')) return false
+  if (value.mode === 'toggle' && (parameterPath === 'thinking_budget' || parameterPath.endsWith('.budget_tokens'))) return false
+  if (has(value, 'effortMap')) {
+    if (!isRecord(value.effortMap)) return false
+    for (const [effort, mapped] of Object.entries(value.effortMap)) {
+      if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort) || !isJsonValue(mapped)) return false
+    }
+  }
+  return true
 }
 
 function isRequestAdapter(value: unknown): boolean {

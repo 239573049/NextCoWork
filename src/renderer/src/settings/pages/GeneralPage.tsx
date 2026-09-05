@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import {
   PERMISSION_MODES,
   type PermissionMode
@@ -6,15 +6,28 @@ import {
 import { Segmented } from '../../components/ui/Segmented'
 import { Slider } from '../../components/ui/Slider'
 import { Toggle } from '../../components/ui/Toggle'
+import { Select } from '../../components/ui/Select'
+import { useModelsStore } from '../../stores/models'
 import { LandsAt, SettingGroup, SettingRow } from '../Row'
 import type { SettingsPageProps } from '../props'
 import { useI18n } from '../../i18n'
 
 export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
   const { t } = useI18n()
+  const models = useModelsStore((s) => s.models)
+  const loaded = useModelsStore((s) => s.loaded)
+  const load = useModelsStore((s) => s.load)
+  useEffect(() => {
+    if (sub === 'agent' && !loaded) void load()
+  }, [sub, loaded, load])
   if (sub === 'agent') {
-    return (
-      <SettingGroup>
+    const reviewerModels = [...new Set(models.filter((m) => m.enabled !== false).map((m) => m.alias))]
+    const modelOptions = [
+      { value: '', label: t('general.permissionReviewerModelEmpty') },
+      ...reviewerModels.map((alias) => ({ value: alias, label: alias }))
+    ]
+      return (
+        <SettingGroup>
         <SettingRow
           title={t('general.defaultPermission')}
           description={
@@ -25,7 +38,6 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             </>
           }
           wide
-          last
         >
           <Segmented<PermissionMode>
             label={t('general.defaultPermission')}
@@ -33,6 +45,27 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             options={PERMISSION_MODES.map((m) => ({ value: m, label: t(`permission.${m}` as 'permission.ask' | 'permission.auto' | 'permission.full') }))}
             onChange={(defaultPermissionMode) => patch({ defaultPermissionMode })}
           />
+        </SettingRow>
+        <SettingRow
+          title={t('general.permissionReviewerModel')}
+          description={t('general.permissionReviewerModelHint')}
+          wide
+          last
+        >
+          <Select
+            value={settings.permissionReviewerModel}
+            options={modelOptions}
+            ariaLabel={t('general.permissionReviewerModel')}
+            onValueChange={(permissionReviewerModel) => patch({ permissionReviewerModel })}
+          />
+        </SettingRow>
+        <SettingRow title={t('general.contextManagement')} description={t('general.contextManagementHint')}>
+          <Toggle label={t('general.contextManagement')} checked={settings.contextManagement.experimentalMode}
+            onChange={(experimentalMode) => patch({ contextManagement: { experimentalMode } })} />
+        </SettingRow>
+        <SettingRow title={t('general.autoCompact')} description={t('general.autoCompactHint')} last>
+          <Toggle label={t('general.autoCompact')} checked={settings.contextManagement.autoCompact}
+            onChange={(autoCompact) => patch({ contextManagement: { autoCompact } })} />
         </SettingRow>
       </SettingGroup>
     )

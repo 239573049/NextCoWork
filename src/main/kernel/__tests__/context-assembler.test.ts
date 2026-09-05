@@ -7,6 +7,8 @@ import {
 } from '../../../shared/agent/message'
 import type { ToolInfo } from '../../../shared/agent/tool'
 import type { Skill } from '../../../shared/domain/skill'
+import type { PersonalizationSettings } from '../../../shared/domain/settings'
+import { PERSONALIZATION_MAX } from '../../../shared/domain/settings'
 import {
   assemble,
   buildSystemPrompt,
@@ -290,8 +292,7 @@ describe('buildSystemPrompt', () => {
   it('★ 权限档位与联网开关进 # Environment', () => {
     const s = buildSystemPrompt({ ...PROMPT, permissionMode: 'ask', webSearch: false })
     expect(s).toContain('Permission mode: ask')
-    // 如实说:这一批「需要询问」= 拒绝,不是「会弹窗问用户」
-    expect(s).toContain('DENIED')
+    expect(s).toContain('wait for user approval')
     expect(s).toContain('the network switch is off')
   })
 
@@ -311,6 +312,107 @@ describe('buildSystemPrompt', () => {
       skills: [skill()]
     })
     expect(s).toContain('cannot widen your')
+  })
+})
+
+/**
+ * 「偏好 › 个性化」那三栏。它们是这份提示词里**唯一由用户逐字写出来**的部分,
+ * 所以这一节钉的是三件事:全空时一个字都不多、位置压得住模式说明、脏值进不来。
+ */
+describe('buildSystemPrompt · 个性化', () => {
+  const P = (over: Partial<PersonalizationSettings> = {}): PersonalizationSettings => ({
+    name: '',
+    background: '',
+    instructions: '',
+    ...over
+  })
+
+  /**
+   * ★ 从没填过这一页的用户是**绝大多数**,而他们的提示词里不该多出一个空标题 ——
+   * 一个只有标题没有内容的 `# About the user` 会让模型去猜它本该是什么。
+   */
+  it('★ 三栏全空时一段都不加', () => {
+    const blank = buildSystemPrompt({ ...PROMPT, personalization: P() })
+    expect(blank).toBe(buildSystemPrompt(PROMPT))
+    expect(blank).not.toContain('About the user')
+  })
+
+  it('只填了姓名时不出现「工作描述」那半句', () => {
+    const s = buildSystemPrompt({ ...PROMPT, personalization: P({ name: '张三' }) })
+    expect(s).toContain('Name: 张三')
+    expect(s).not.toContain('What they do')
+    expect(s).not.toContain('User instructions')
+  })
+
+  /**
+   * ★ 事实和指令分成两段,不是拼成一段。「我是前端工程师」和「一律用中文回答」
+   * 在模型眼里是两种东西,混在一个标题下会让后者读起来像是在自我介绍。
+   */
+  it('★ 姓名/背景进事实段,全局提示词单独成段', () => {
+    const s = buildSystemPrompt({
+      ...PROMPT,
+      personalization: P({ name: '张三', background: '前端工程师', instructions: '用中文回答' })
+    })
+    expect(s.indexOf('# About the user')).toBeLessThan(s.indexOf('# User instructions'))
+    expect(s).toContain('What they do: 前端工程师')
+    expect(s).toContain('用中文回答')
+  })
+
+  /**
+   * ★ 这条钉的是**优先级**。不写这句的话,一条「永远用中文回答」会让模型在用户
+   * 明确说 "answer in English" 时也照旧说中文 —— 而用户完全不知道该去哪里关掉它。
+   */
+  it('★ 声明「用户最新的话优先于全局提示词」', () => {
+    const s = buildSystemPrompt({ ...PROMPT, personalization: P({ instructions: '用中文回答' }) })
+    expect(s).toContain("user's latest message wins")
+  })
+
+  /**
+   * ★ 位置不是排版偏好。plan 模式那段说的是「你现在只有只读工具」,它必须压得住
+   * 一条写着「别问了直接改」的全局提示词 —— 用户设的是默认口吻,不是权限。
+   */
+  it('★ 排在 # Environment 之后、模式说明之前', () => {
+    const s = buildSystemPrompt({
+      ...PROMPT,
+      mode: 'plan',
+      personalization: P({ instructions: '别问我,直接改' })
+    })
+    const env = s.indexOf('# Environment')
+    const mine = s.indexOf('# User instructions')
+    const plan = s.indexOf('# Plan mode')
+    expect(env).toBeLessThan(mine)
+    expect(mine).toBeLessThan(plan)
+  })
+
+  /**
+   * 「可信」和「格式正确」是两回事:粘贴进来的文本能带着 C0 控制字符,
+   * 而旧库里可能躺着一段在上限存在之前写下的超长指令 —— 落库那侧的闸门
+   * 只管**以后**写进来的值。
+   */
+  it('削掉控制字符,但留住换行(多行指令要分行读)', () => {
+    const s = buildSystemPrompt({
+      ...PROMPT,
+      personalization: P({ instructions: '第一条\n第二条' })
+    })
+    expect(s).toContain('第一条\n第二条')
+    expect(s).not.toContain('')
+  })
+
+  it('★ 超长的全局提示词在这里再截一次,并留下明确标记', () => {
+    const s = buildSystemPrompt({
+      ...PROMPT,
+      personalization: P({ instructions: '好'.repeat(PERSONALIZATION_MAX.instructions + 500) })
+    })
+    expect(s).toContain('...')
+    expect(s.length).toBeLessThan(
+      buildSystemPrompt(PROMPT).length + PERSONALIZATION_MAX.instructions + 500
+    )
+  })
+
+  /** 只打了空格的那一栏等于没填 —— 否则提示词里会多出一行 `Name:` */
+  it('纯空白的字段当作没填', () => {
+    const s = buildSystemPrompt({ ...PROMPT, personalization: P({ name: '   \n  ' }) })
+    expect(s).not.toContain('About the user')
   })
 })
 
@@ -364,6 +466,11 @@ describe('assemble', () => {
 
   it('关闭思考时不带 thinkingBudget 字段', () => {
     expect(assemble(input({ thinking: 'off' })).request).not.toHaveProperty('thinkingBudget')
+  })
+
+  it('保留旧模型配置中的明确关闭意图，即使旧能力标记为 false', () => {
+    expect(assemble(input({ thinking: 'off', supportsThinking: false })).request.reasoning)
+      .toEqual({ mode: 'toggle', enabled: false, explicit: true })
   })
 
   it('开启思考时带上预算', () => {

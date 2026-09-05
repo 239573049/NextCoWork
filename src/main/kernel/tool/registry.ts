@@ -9,6 +9,7 @@ import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../sh
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { KernelHost } from '../host'
+import type { InteractFn } from '../interaction-gate'
 import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
 
 /**
@@ -18,7 +19,7 @@ import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
  *   把 `secrets.get()` 递过去,等于 `host.ts` 里「明文 key 永不进内核」那条作废。
  * - `paths`:`userData` 在工作区外面。工具要么走路径围栏,要么根本不该碰路径。
  */
-export type ToolHost = Pick<KernelHost, 'fs' | 'spawn' | 'fetch' | 'clock' | 'logger'>
+export type ToolHost = Pick<KernelHost, 'fs' | 'spawn' | 'fetch' | 'browserFetch' | 'clock' | 'logger'>
 
 /**
  * 派一个子代理出去 —— `Task` 工具与外面那台机器之间**唯一**的接触面。
@@ -41,6 +42,8 @@ export interface SubagentRequest {
   description: string
   /** 父 run 的这次工具调用 id。`subagent_start/end` 要靠它把子 run 挂到这张卡片上 */
   callId: string
+  /** 不等待结果，让父代理继续工作；子 run 仍在主进程中独立运行。 */
+  background?: boolean
 }
 
 /**
@@ -63,6 +66,10 @@ export type SubagentOutcome =
       text: string
       /** `status === 'error'` 时的原因 */
       error?: string
+    }
+  | {
+      kind: 'background'
+      childRunId: string
     }
 
 export type SpawnSubagentFn = (req: SubagentRequest) => Promise<SubagentOutcome>
@@ -103,6 +110,7 @@ export interface ToolContext {
    * ctx 都必须带上一个它永远不会碰的函数,是没有道理的。
    */
   spawnSubagent?: SpawnSubagentFn
+  interact?: InteractFn
 }
 
 /**

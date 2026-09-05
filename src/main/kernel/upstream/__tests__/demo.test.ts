@@ -225,6 +225,12 @@ describe('校验:演示上游和真上游一样挑剔', () => {
     expect(err?.message).toContain('max_tokens')
   })
 
+  it('显式关闭不要求预算，也不生成演示思考块', () => {
+    const request = body({ thinking: { type: 'disabled' } })
+    expect(validateAnthropicRequest(request)).toBeNull()
+    expect(planDemoReply(request, 1).blocks.some((block) => block.kind === 'thinking')).toBe(false)
+  })
+
   it('工具名超出 ^[a-zA-Z0-9_-]{1,64}$ 被拒', () => {
     const long = `mcp__${'x'.repeat(70)}`
     expect(validateAnthropicRequest(body({ tools: [{ name: long, input_schema: {} }] }))?.message)

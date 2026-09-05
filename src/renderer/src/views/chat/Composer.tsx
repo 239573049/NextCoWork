@@ -15,15 +15,20 @@
 import {
   ArrowUp,
   BrainCircuit,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Globe,
-  Infinity as InfinityIcon,
+  Lightbulb,
   Paperclip,
   Plus,
   Settings2,
-  Slash,
+  ShieldCheck,
+  ShieldQuestion,
   Square,
+  Target,
+  Unlock,
   Wrench,
 } from "lucide-react";
 import {
@@ -43,12 +48,8 @@ import type {
   ThinkingLevel,
 } from "../../../../shared/agent/run-request";
 import {
-  SESSION_MODE_HINT,
-  SESSION_MODE_LABEL,
-  SESSION_MODES,
-  THINKING_LEVEL_LABEL,
-  THINKING_LEVELS,
 } from "../../../../shared/agent/run-request";
+import { modelThinkingLevels, normalizeModelThinkingLevel } from "../../../../shared/domain/model-runtime";
 import type {
   Workspace,
   WorkspaceSettings,
@@ -114,7 +115,9 @@ export function Composer({
   onRetryAttachment?: (key: string) => void;
 }): ReactNode {
   const { t } = useI18n();
-  const { models, providers, loaded, providerOf, load } = useModelsStore();
+  const { models: configuredModels, providers, loaded, providerOf, load } = useModelsStore();
+  const models = configuredModels.filter((m) => m.enabled !== false &&
+    providers.some((p) => p.id === m.providerId && p.enabled));
   const [value, setValue] = useState<ComposerValue>(() =>
     fromSettings(workspace.settings),
   );
@@ -177,6 +180,13 @@ export function Composer({
         ? fallbackModel
         : (models[0]?.alias ?? "");
   const provider = providerOf(model);
+  const selectedModel = models.find((m) => m.alias === model && m.providerId === provider?.id);
+  const thinking = loaded ? normalizeModelThinkingLevel(value.thinking, selectedModel) : value.thinking;
+  useEffect(() => {
+    if (!loaded || thinking === value.thinking) return;
+    setValue((current) => ({ ...current, thinking }));
+    void updateWorkspace({ id: workspace.id, settings: { defaultThinking: thinking } }).catch(console.error);
+  }, [loaded, thinking, value.thinking, workspace.id]);
   const modelLabel =
     model !== "" ? model : loaded ? t("chat.noModel") : t("common.loading");
 
@@ -189,7 +199,7 @@ export function Composer({
     if (pending) return;
     if ((text === "" && !hasReady) || model === "") return;
     // 发送时打快照:药丸此刻的值进 RunRequest,run 跑起来后再改药丸不影响它
-    onSend(text, { ...value, model });
+    onSend(text, { ...value, model, thinking });
     onDraft("");
   }
 
@@ -274,20 +284,25 @@ export function Composer({
           {/* ── 权限档位:界面上就在这个位置 ── */}
           <Menu
             label={t("composer.permission")}
-            width={260}
+            width={280}
+            panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
+            triggerClassName="rounded-full focus-visible:outline-2 focus-visible:outline-accent"
             trigger={
               <Pill accent={value.permissionMode === "full"}>
                 {t(`permission.${value.permissionMode}` as "permission.ask" | "permission.auto" | "permission.full")}
+                <ChevronDown size={11} className="text-fg-faint" />
               </Pill>
             }
           >
             {(close) => (
               <>
-                <MenuLabel>{t("composer.approvalHint")}</MenuLabel>
+                <div className="px-2 pt-1.5 pb-1 text-[11px] text-fg-faint">{t("composer.permission")}</div>
                 {PERMISSION_MODES.map((m) => (
-                  <MenuItem
+                  <ComposerMenuItem
                     key={m}
                     checked={m === value.permissionMode}
+                    selection="radio"
+                    icon={m === "ask" ? <ShieldQuestion size={16} /> : m === "auto" ? <ShieldCheck size={16} /> : <Unlock size={16} />}
                     description={t(`permission.${m}Hint` as "permission.askHint" | "permission.autoHint" | "permission.fullHint")}
                     onSelect={() => {
                       patch({ permissionMode: m });
@@ -295,59 +310,39 @@ export function Composer({
                     }}
                   >
                     {t(`permission.${m}` as "permission.ask" | "permission.auto" | "permission.full")}
-                  </MenuItem>
+                  </ComposerMenuItem>
                 ))}
+                <div className="mx-2 mt-1 border-t border-border pt-1.5 pb-1 text-[10px] leading-4 text-fg-faint">
+                  {t("composer.approvalHint")}
+                </div>
               </>
             )}
           </Menu>
 
-          {/* ── `/` 会话模式 ── */}
-          <Menu
-            label={t("composer.mode")}
-            width={250}
-            trigger={
-              <Pill active={value.mode !== "normal"}>
-                <Slash size={12} />
-                {value.mode !== "normal" && (
-                  <span>{SESSION_MODE_LABEL[value.mode]}</span>
-                )}
-              </Pill>
-            }
-          >
-            {(close) => (
-              <>
-                {SESSION_MODES.map((m) => (
-                  <MenuItem
-                    key={m}
-                    checked={m === value.mode}
-                    description={SESSION_MODE_HINT[m]}
-                    icon={m === "goal" ? <InfinityIcon size={14} /> : undefined}
-                    onSelect={() => {
-                      patch({ mode: m });
-                      close();
-                    }}
-                  >
-                    {SESSION_MODE_LABEL[m]}
-                  </MenuItem>
-                ))}
-              </>
-            )}
-          </Menu>
-
-          {/* ── `+` 附加能力 ── */}
+          {/* ── `+` 统一收纳附件、会话模式和联网开关 ── */}
           <Menu
             label={t("composer.more")}
-            width={240}
+            width={320}
+            panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
+            triggerClassName="group rounded-full focus-visible:outline-2 focus-visible:outline-accent"
             trigger={
-              <Pill>
-                <Plus size={13} />
-              </Pill>
+              <span className={cn(
+                "relative flex h-7 w-7 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg group-aria-expanded:bg-tint",
+                (value.mode !== "normal" || value.webSearch) && "bg-tint text-fg",
+              )}>
+                <Plus size={16} />
+                {(value.mode !== "normal" || value.webSearch) && (
+                  <span aria-hidden="true" className="absolute top-1 right-1 h-1 w-1 rounded-full bg-accent" />
+                )}
+              </span>
             }
           >
             {(close) => (
               <>
-                <MenuItem
-                  icon={<Paperclip size={14} />}
+                <div className="px-2 pt-1.5 pb-1 text-[11px] text-fg-faint">{t("composer.add")}</div>
+                <ComposerMenuItem
+                  icon={<Paperclip size={16} />}
+                  disabled={onPickAttachment === undefined}
                   description={t("composer.attachmentHint")}
                   onSelect={() => {
                     close();
@@ -355,33 +350,45 @@ export function Composer({
                   }}
                 >
                   {t("composer.addAttachment")}
-                </MenuItem>
+                </ComposerMenuItem>
+                <ComposerMenuItem
+                  icon={<Lightbulb size={16} />}
+                  checked={value.mode === "plan"}
+                  description={t("composer.planHint")}
+                  onSelect={() => patch({ mode: value.mode === "plan" ? "normal" : "plan" })}
+                >
+                  {t("composer.plan")}
+                </ComposerMenuItem>
+                <ComposerMenuItem
+                  icon={<Target size={16} />}
+                  checked={value.mode === "goal"}
+                  description={t("composer.goalHint")}
+                  onSelect={() => patch({ mode: value.mode === "goal" ? "normal" : "goal" })}
+                >
+                  {t("composer.goal")}
+                </ComposerMenuItem>
                 <MenuSeparator />
-                <MenuItem
+                <div className="px-2 pt-1 pb-1 text-[11px] text-fg-faint">{t("common.settings")}</div>
+                <ComposerMenuItem
                   checked={value.webSearch}
-                  icon={<Globe size={14} />}
+                  icon={<Globe size={16} />}
                   // 「完全访问」也不解除这个开关(方案 §4.5),菜单上要说出来
                   description={t("composer.webSearchHint")}
                   onSelect={() => {
                     patch({ webSearch: !value.webSearch });
-                    close();
                   }}
                 >
                   {t("composer.webSearch")}
-                </MenuItem>
+                </ComposerMenuItem>
               </>
             )}
           </Menu>
 
-          {value.webSearch && (
-            <Pill readonly>
-              <Globe size={12} />
-            </Pill>
-          )}
-          {value.thinking !== "auto" && (
+          {thinking !== "auto" && (
             <Pill readonly>
               <Wrench size={12} />
-              <span>{THINKING_LEVEL_LABEL[value.thinking]}</span>
+              <span>{t(selectedModel?.thinkingConfig?.mode === 'toggle' && thinking === 'medium'
+                ? 'chat.thinkingOn' : `chat.thinkingLevel.${thinking}`)}</span>
             </Pill>
           )}
 
@@ -390,7 +397,7 @@ export function Composer({
           {/*
             ── 模型选择器:靠右,紧挨发送按钮 ──
             截图 c6184031 里这一排是**两头分布**的:左边是「这一轮怎么执行」
-            (权限档位 / `/` 模式 / `+` 附加能力),右边是「发给谁」加发送。
+            (权限档位 / `+` 会话选项),右边是「发给谁」加发送。
             模型属于后者 —— 它和发送按钮是一件事的两半,挤在左边那堆开关里
             会被当成又一个开关。
           */}
@@ -401,8 +408,10 @@ export function Composer({
             providers={providers}
             models={models}
             loaded={loaded}
-            thinking={value.thinking}
-            onModel={(nextModel) => patch({ model: nextModel })}
+            thinking={thinking}
+            onModel={(nextModel) => patch({ model: nextModel, thinking: normalizeModelThinkingLevel(
+              thinking, models.find((m) => m.alias === nextModel)
+            ) })}
             onThinking={(thinking) => patch({ thinking })}
           />
 
@@ -437,6 +446,55 @@ export function Composer({
         </div>
       </div>
     </div>
+  );
+}
+
+/** 输入框菜单的操作与开关共用一行布局，开关保持菜单展开以便连续调整。 */
+function ComposerMenuItem({
+  children,
+  icon,
+  description,
+  checked,
+  selection = "toggle",
+  disabled = false,
+  onSelect,
+}: {
+  children: ReactNode;
+  icon: ReactNode;
+  description: string;
+  checked?: boolean;
+  selection?: "radio" | "toggle";
+  disabled?: boolean;
+  onSelect: () => void;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      role={checked === undefined ? "menuitem" : selection === "radio" ? "menuitemradio" : "menuitemcheckbox"}
+      aria-checked={checked}
+      title={description}
+      disabled={disabled}
+      onClick={onSelect}
+      className={cn(
+        "flex min-h-8 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-fg transition-colors hover:bg-tint focus-visible:bg-tint focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:opacity-40",
+        checked && selection === "radio" && "bg-tint/70",
+      )}
+    >
+      <span aria-hidden="true" className="shrink-0 text-fg-muted [&>svg]:size-3.5">{icon}</span>
+      <span className={cn("min-w-0 flex-1", selection !== "radio" && "flex items-baseline gap-1.5")}>
+        <span className="block shrink-0 text-[12px] leading-[18px]">{children}</span>
+        <span className="block truncate text-[11px] leading-4 text-fg-faint">{description}</span>
+      </span>
+      {checked !== undefined && (
+        selection === "radio" ? (
+          <Check aria-hidden="true" size={13} className={cn("shrink-0 text-accent", !checked && "invisible")} />
+        ) : (
+          <span aria-hidden="true" className={cn("flex h-3.5 w-6 shrink-0 items-center rounded-full p-0.5 transition-colors", checked ? "bg-accent" : "bg-tint-strong")}>
+            <span className={cn("h-2.5 w-2.5 rounded-full transition-transform motion-reduce:transition-none", checked ? "translate-x-2.5 bg-accent-fg" : "bg-fg-muted")} />
+          </span>
+        )
+      )}
+    </button>
   );
 }
 
@@ -507,6 +565,19 @@ function ModelPicker({
 }): ReactNode {
   const { t } = useI18n();
   const [providerId, setProviderId] = useState<string | null>(null);
+  const selectedModel = models.find((m) => m.alias === model && m.providerId === provider?.id);
+  const thinkingLevels = modelThinkingLevels(selectedModel);
+  const thinkingConfig = selectedModel?.thinkingConfig;
+  const thinkingLabel = (level: ThinkingLevel): string => t(
+    thinkingConfig?.mode === 'toggle' && level === 'medium' ? 'chat.thinkingOn' : `chat.thinkingLevel.${level}`
+  );
+  const defaultLevel: ThinkingLevel = thinkingConfig?.defaultEnabled !== true || thinkingConfig.defaultEffort === 'none'
+    ? 'off' : thinkingConfig.defaultEffort === 'xhigh' ? 'higher' : thinkingConfig.defaultEffort ?? 'medium';
+  const thinkingDescription = thinkingConfig?.mode === 'unsupported' ? t('chat.thinkingUnsupported')
+    : thinkingConfig?.mode === 'always' ? t('chat.thinkingAlways')
+    : thinking === 'auto' && thinkingConfig !== undefined
+      ? t('chat.thinkingAutomatic', { level: thinkingLabel(defaultLevel) })
+      : t('chat.thinkingLevelDescription', { level: thinkingLabel(thinking) });
   const [configOpen, setConfigOpen] = useState(false);
   const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(
     null,
@@ -570,7 +641,8 @@ function ModelPicker({
                     {t("chat.modelConfigThinking")}
                   </span>
                 </MenuLabel>
-                {THINKING_LEVELS.map((level) => (
+                <MenuLabel>{thinkingDescription}</MenuLabel>
+                {thinkingLevels.map((level) => (
                   <MenuItem
                     key={level}
                     checked={level === thinking}
@@ -579,7 +651,7 @@ function ModelPicker({
                       close();
                     }}
                   >
-                    {THINKING_LEVEL_LABEL[level]}
+                    {thinkingLabel(level)}
                   </MenuItem>
                 ))}
               </>
@@ -627,7 +699,8 @@ function ModelPicker({
               <MenuSeparator />
               <MenuItem
                 icon={<BrainCircuit size={14} />}
-                description={`思考强度 · ${THINKING_LEVEL_LABEL[thinking]}`}
+                description={thinkingDescription}
+                disabled={thinkingLevels.length < 2}
                 onSelect={() => {
                   setConfigOpen(true);
                   setProviderId(null);

@@ -1,13 +1,21 @@
 /**
- * 偏好 · 主题。三栏,对应参考图里紧挨着的三组控件:
+ * 偏好 —— 三个子 Tab:主题 / 快捷键 / 个性化。
+ *
+ * **主题**是参考图里紧挨着的三组控件:
  *
  * - **外观模式** —— 只管深浅,不管颜色;
  * - **图片主题** —— 选了图就**盖过**下面那一栏(见 `theme.ts` 的 `tokensOf`);
  * - **颜色主题** —— 七套色板,「随机」和「自定义」那两套按种子现算。
  *
- * ★ 这一页**一个判断都不做**:选哪套、认不认识这个 id、什么颜色,
+ * ★ 主题这一段**一个判断都不做**:选哪套、认不认识这个 id、什么颜色,
  * 全在 `shared/domain/theme.ts` 里(那边在 vitest 里跑得起来,这边跑不起来 ——
  * 测试环境是 node,没有 document)。这里只摆控件、调 `patch`。
+ *
+ * ★ **个性化那三栏和这一页其余部分不是一类东西。** 主题改的是像素,
+ * 而它改的是**模型看到什么** —— 三个字段会被拼进每一次对话的系统提示词
+ * (`main/kernel/context-assembler.ts` 的 `buildPersonalizationSection`)。
+ * 它落在「偏好」而不是「通用 › Agent」,是因为参考图这么放,而参考图是对的:
+ * 用户找的是「怎么让它按我的方式说话」,那和挑配色是同一种心情。
  */
 import { Check, Pipette, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -15,6 +23,7 @@ import type {
   ResolvedTheme,
   ThemePreference,
 } from "../../../../shared/domain/settings";
+import { PERSONALIZATION_MAX } from "../../../../shared/domain/settings";
 import type { ImageRender, ImageTheme } from "../../../../shared/domain/theme";
 import {
   COLOR_THEMES,
@@ -30,6 +39,9 @@ import {
 } from "../../../../shared/domain/theme";
 import { Button } from "../../components/ui/Button";
 import { Segmented } from "../../components/ui/Segmented";
+import { TextArea } from "../../components/ui/TextArea";
+import { TextInput } from "../../components/ui/TextInput";
+import { useDraft } from "../../components/ui/useDraft";
 import { useI18n } from "../../i18n";
 import { prettyAccelerator } from "../../lib/accelerator";
 import { cn } from "../../lib/cn";
@@ -40,8 +52,20 @@ import type { SettingsPageProps } from "../props";
 
 export function PreferencePage({
   settings,
+  sub,
   patch,
 }: SettingsPageProps): ReactNode {
+  if (sub === "shortcut") return <ShortcutPane />;
+  if (sub === "personalization") {
+    return <PersonalizationPane settings={settings} patch={patch} />;
+  }
+  return <ThemePane settings={settings} patch={patch} />;
+}
+
+function ThemePane({
+  settings,
+  patch,
+}: Omit<SettingsPageProps, "sub">): ReactNode {
   const { t } = useI18n();
   // 色板要按**当前生效**的深浅画:同一套主题两个外观是两张表
   const appearance = useAppearance();
@@ -237,19 +261,89 @@ export function PreferencePage({
           </div>
         </SettingField>
       </SettingGroup>
-
-      <SettingGroup title={t("preference.shortcuts")}>
-        <SettingRow
-          title={t("preference.openSettings")}
-          description={t("preference.openSettingsHint")}
-          last
-        >
-          <kbd className="rounded-[6px] bg-tint px-2 py-1 font-sans text-[12px] text-fg">
-            {prettyAccelerator("CmdOrCtrl+,")}
-          </kbd>
-        </SettingRow>
-      </SettingGroup>
     </>
+  );
+}
+
+/** 快捷键。今天只有一条,而它是**只读**的 —— 重绑是另一件事,不在这一步。 */
+function ShortcutPane(): ReactNode {
+  const { t } = useI18n();
+  return (
+    <SettingGroup>
+      <SettingRow
+        title={t("preference.openSettings")}
+        description={t("preference.openSettingsHint")}
+        last
+      >
+        <kbd className="rounded-[6px] bg-tint px-2 py-1 font-sans text-[12px] text-fg">
+          {prettyAccelerator("CmdOrCtrl+,")}
+        </kbd>
+      </SettingRow>
+    </SettingGroup>
+  );
+}
+
+/**
+ * 个性化。三个字段全部通栏(`SettingField`),因为它们是**要写字的**框 ——
+ * 右对齐的 318px 控件列是给药丸和开关的,一个 318px 宽的多行框写不下一段自我介绍。
+ *
+ * ★ 三个都走草稿 + 失焦提交(`useDraft`),不是逐键 `patch`:理由在那个 hook 里。
+ */
+function PersonalizationPane({
+  settings,
+  patch,
+}: Omit<SettingsPageProps, "sub">): ReactNode {
+  const { t } = useI18n();
+  const p = settings.personalization;
+  const name = useDraft(p.name);
+
+  return (
+    <SettingGroup>
+      <SettingField title={t("preference.name")} description={t("preference.nameHint")}>
+        <TextInput
+          value={name.draft}
+          ariaLabel={t("preference.name")}
+          placeholder={t("preference.namePlaceholder")}
+          onChange={name.setDraft}
+          // 单行框的 Enter 就是「我写完了」,和失焦同义 —— `TextInput` 两条都走 onCommit
+          onCommit={() =>
+            name.commit((v) => patch({ personalization: { name: v } }))
+          }
+          onFocus={name.onFocus}
+        />
+      </SettingField>
+
+      <SettingField
+        title={t("preference.background")}
+        description={t("preference.backgroundHint")}
+      >
+        <TextArea
+          value={p.background}
+          rows={3}
+          maxLength={PERSONALIZATION_MAX.background}
+          ariaLabel={t("preference.background")}
+          placeholder={t("preference.backgroundPlaceholder")}
+          onCommit={(background) => patch({ personalization: { background } })}
+        />
+      </SettingField>
+
+      <SettingField
+        title={t("preference.instructions")}
+        description={t("preference.instructionsHint")}
+        last
+      >
+        <TextArea
+          value={p.instructions}
+          rows={6}
+          maxLength={PERSONALIZATION_MAX.instructions}
+          ariaLabel={t("preference.instructions")}
+          placeholder={t("preference.instructionsPlaceholder")}
+          onCommit={(instructions) =>
+            patch({ personalization: { instructions } })
+          }
+        />
+      </SettingField>
+    </SettingGroup>
   );
 }
 
@@ -275,6 +369,9 @@ function ImageCard({
   onDelete?: () => void;
   deleteLabel?: string;
 }): ReactNode {
+  const { t } = useI18n();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
   return (
     // ★ 删除键不能嵌进卡片那颗 <button> 里:按钮套按钮浏览器会把内层拆出去,
     // 点删除就变成了点卡片。所以两颗是兄弟,靠这层 relative 叠在一起
@@ -341,17 +438,30 @@ function ImageCard({
       {onDelete !== undefined && (
         <button
           type="button"
-          aria-label={deleteLabel}
-          onClick={onDelete}
+          aria-label={confirmingDelete ? t("common.confirmDelete") : deleteLabel}
+          title={confirmingDelete ? t("common.confirmDelete") : deleteLabel}
+          onClick={() => {
+            if (confirmingDelete) {
+              setConfirmingDelete(false);
+              onDelete();
+            } else {
+              setConfirmingDelete(true);
+            }
+          }}
           className={cn(
-            "app-no-drag absolute top-1.5 left-1.5 grid size-[18px] place-items-center rounded-full",
+            "app-no-drag absolute top-1.5 left-1.5 grid min-h-[18px] place-items-center rounded-full",
+            confirmingDelete ? "px-1.5" : "size-[18px]",
             "bg-black/45 text-white/90 opacity-0 transition",
             // 悬停才露出来 —— 常驻的话六张内置卡和上传卡长得不一样,
             // 而它们本该是同一类东西。focus-visible 是键盘的那条路
             "group-hover:opacity-100 hover:bg-danger hover:text-white focus-visible:opacity-100",
           )}
         >
-          <Trash2 size={11} />
+          {confirmingDelete ? (
+            <span className="text-[10px] leading-4">{t("common.confirmDelete")}</span>
+          ) : (
+            <Trash2 size={11} />
+          )}
         </button>
       )}
     </div>

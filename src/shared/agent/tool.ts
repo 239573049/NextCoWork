@@ -4,7 +4,7 @@
  * 类型放在 shared 是因为渲染层要渲染它们(审批弹窗要显示工具名与入参、
  * 设置页要列 MCP 工具)。**运行时的 Tool 对象只有主进程有**,因为 execute 是闭包。
  */
-import type { ToolOutput } from './message'
+import type { SubagentResult, ToolOutput } from './message'
 
 /**
  * 最小可用的 JSON Schema 形状。刻意不引 `@types/json-schema` ——
@@ -79,6 +79,8 @@ export interface ToolProgress {
 export interface ToolResult {
   output: ToolOutput
   isError: boolean
+  /** Optional UI-only metadata; encoders ignore it when sending tool results upstream. */
+  subagent?: SubagentResult
 }
 
 export function toolOk(content: string, extra?: Omit<ToolOutput, 'content'>): ToolResult {

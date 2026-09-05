@@ -19,7 +19,7 @@
  * 也没有分隔条。中途一度以为它在 235~312 之间浮动,那是把设置浮层的左侧导航栏
  * 当成侧边栏量了 —— 浮层盖住了扫描线,量到的是它内部的分栏。
  */
-import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
+import { Archive, Check, Copy, ExternalLink, Link, LoaderCircle, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
@@ -34,7 +34,7 @@ import { useI18n, type Translate } from '../i18n'
 import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
-import { duplicateSession, renameSession, setArchived, setFavorited, deleteSession } from '../services/sessions'
+import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
 import { copyText, openSessionWindow } from '../services/app'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'skills', 'review']
@@ -51,6 +51,7 @@ export function Sidebar({
   onOpenFeature,
   onOpenSettings,
   onSelectSession,
+  onDeleteSession,
   onCollapse
 }: {
   /** 当前工作区。null = 一个都没打开(下半整体降级为空态) */
@@ -67,6 +68,7 @@ export function Sidebar({
   onOpenFeature: (f: FeatureKind) => void
   onOpenSettings: () => void
   onSelectSession: (sessionId: string) => void
+  onDeleteSession: (sessionId: string) => Promise<void>
   onCollapse: () => void
 }): ReactNode {
   const { t } = useI18n()
@@ -160,6 +162,7 @@ export function Sidebar({
                     activeSessionId={activeSessionId}
                     runningSessionIds={runningSessionIds}
                     onSelectSession={onSelectSession}
+                    onDeleteSession={onDeleteSession}
                     t={t}
                   />
                 </ul>
@@ -278,6 +281,7 @@ function SessionGroupList({
   activeSessionId,
   runningSessionIds,
   onSelectSession,
+  onDeleteSession,
   t
 }: {
   workspaceId: string
@@ -286,6 +290,7 @@ function SessionGroupList({
   activeSessionId: string | null
   runningSessionIds: ReadonlySet<string>
   onSelectSession: (sessionId: string) => void
+  onDeleteSession: (sessionId: string) => Promise<void>
   t: SidebarI18n
 }): ReactNode {
   const known = new Map(sessions.map((session) => [session.id, session]))
@@ -335,6 +340,7 @@ function SessionGroupList({
             activeSessionId={activeSessionId}
             runningSessionIds={runningSessionIds}
             onSelectSession={onSelectSession}
+            onDeleteSession={onDeleteSession}
             t={t}
             multiSelect={multiSelect}
             selectedIds={selectedIds}
@@ -358,6 +364,7 @@ function SessionGroupBlock({
   activeSessionId,
   runningSessionIds,
   onSelectSession,
+  onDeleteSession,
   t,
   multiSelect,
   selectedIds,
@@ -371,6 +378,7 @@ function SessionGroupBlock({
   activeSessionId: string | null
   runningSessionIds: ReadonlySet<string>
   onSelectSession: (sessionId: string) => void
+  onDeleteSession: (sessionId: string) => Promise<void>
   t: SidebarI18n
   multiSelect: boolean
   selectedIds: ReadonlySet<string>
@@ -380,11 +388,13 @@ function SessionGroupBlock({
 }): ReactNode {
   const [open, setOpen] = useState(true)
   const [menu, setMenu] = useState<{ session: SessionListItem; position: ContextMenuPosition } | null>(null)
-  const [dialog, setDialog] = useState<{ kind: 'rename' | 'delete'; session: SessionListItem } | null>(null)
+  const [dialog, setDialog] = useState<{ kind: 'rename'; session: SessionListItem } | null>(null)
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const run = async (action: () => Promise<void>): Promise<void> => {
     try { await action() } catch (error) { console.error('[sessions] 操作失败', error) }
     setMenu(null)
+    setConfirmingDeleteId(null)
   }
   return (
     <li className="pt-1 first:pt-0">
@@ -421,7 +431,7 @@ function SessionGroupBlock({
                       </span>}
                       <span className="min-w-0 flex-1 truncate">{openTab?.title ?? session.title}</span>
                   {(runningSessionIds.has(session.id) || session.running) && (
-                    <span className="size-1.5 shrink-0 rounded-pill bg-accent" />
+                    <LoaderCircle size={12} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
                   )}
                   {session.favorited && <span className="shrink-0 text-accent">★</span>}
                 </button>
@@ -431,7 +441,10 @@ function SessionGroupBlock({
         </ul>
       )}
       {menu !== null && (
-        <ContextMenu position={menu.position} label={t('session.menu')} onClose={() => setMenu(null)} width={220}>
+        <ContextMenu position={menu.position} label={t('session.menu')} onClose={() => {
+          setMenu(null)
+          setConfirmingDeleteId(null)
+        }} width={220}>
           {(close) => (
             <>
               <MenuAction icon={<ExternalLink size={15} />} label={t('session.openNewWindow')} onSelect={() => {
@@ -439,6 +452,7 @@ function SessionGroupBlock({
               }} />
               <MenuAction icon={<Pencil size={15} />} label={t('session.rename')} onSelect={() => {
                 setRenameDraft(menu.session.title)
+                setConfirmingDeleteId(null)
                 setDialog({ kind: 'rename', session: menu.session })
                 close()
               }} />
@@ -455,12 +469,20 @@ function SessionGroupBlock({
               <div role="separator" className="my-1 h-px bg-border" />
               <MenuAction icon={<Pin size={15} />} label={menu.session.favorited ? t('session.unpin') : t('session.pin')} onSelect={() => void run(() => setFavorited(menu.session.id, !menu.session.favorited))} />
               <MenuAction icon={<Archive size={15} />} label={menu.session.archived ? t('session.unarchive') : t('session.archive')} onSelect={() => void run(() => setArchived(menu.session.id, !menu.session.archived))} />
-              <MenuAction icon={<ListChecks size={15} />} label={multiSelect ? t('session.multiSelectDone') : t('session.multiSelect')} onSelect={() => { close(); onToggleMultiSelect() }} />
+              <MenuAction icon={<ListChecks size={15} />} label={multiSelect ? t('session.multiSelectDone') : t('session.multiSelect')} onSelect={() => { setConfirmingDeleteId(null); close(); onToggleMultiSelect() }} />
               <div role="separator" className="my-1 h-px bg-border" />
-              <MenuAction danger icon={<Trash2 size={15} />} label={t('session.delete')} onSelect={() => {
-                setDialog({ kind: 'delete', session: menu.session })
-                close()
-              }} />
+              <MenuAction
+                danger
+                icon={<Trash2 size={15} />}
+                label={confirmingDeleteId === menu.session.id ? t('common.confirmDelete') : t('session.delete')}
+                onSelect={() => {
+                  if (confirmingDeleteId === menu.session.id) {
+                    void run(() => onDeleteSession(menu.session.id))
+                  } else {
+                    setConfirmingDeleteId(menu.session.id)
+                  }
+                }}
+              />
             </>
           )}
         </ContextMenu>
@@ -482,24 +504,6 @@ function SessionGroupBlock({
       >
         <label className="block text-[12px] text-fg-muted" htmlFor="session-rename-input">{t('session.renamePrompt')}</label>
         <input id="session-rename-input" autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} className="selectable mt-2 h-9 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent" />
-      </Dialog>
-      <Dialog
-        open={dialog?.kind === 'delete'}
-        onClose={() => setDialog(null)}
-        title={t('session.confirmDelete')}
-        description={dialog?.kind === 'delete' ? dialog.session.title : undefined}
-        width={420}
-        footer={
-          <>
-            <Button size="sm" onClick={() => setDialog(null)}>{t('common.cancel')}</Button>
-            <Button size="sm" variant="danger" onClick={() => {
-              if (dialog?.kind !== 'delete') return
-              void run(() => deleteSession(dialog.session.id)).then(() => setDialog(null))
-            }}>{t('session.delete')}</Button>
-          </>
-        }
-      >
-        <p className="text-[13px] leading-[1.6] text-fg-muted">{dialog?.kind === 'delete' ? t('session.confirmDeleteMessage', { title: dialog.session.title }) : ''}</p>
       </Dialog>
     </li>
   )

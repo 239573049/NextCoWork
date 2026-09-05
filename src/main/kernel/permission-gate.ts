@@ -3,13 +3,10 @@
  *
  * ★ 刻意和 `PermissionDecision` 分成两个类型。`allow_always` / `allow_edited` 是
  * **用户的回答**,闸门永远不可能产出它们。混成一个类型的话,「谁有资格说 always」
- * 在类型上就看不出来了 —— 而那正是以后接对话框时最容易搞错的一处。
+ * 在类型上就看不出来了。
  *
- * ## 这一批「需要询问」= 拒绝
- *
- * 审批对话框(InteractionGate / 待决表)不在这一批里。`evaluate()` 照实返回 `ask`,
- * 由调用方(`runtime.ts`)决定怎么降级 —— 这样以后接上对话框时,改的是调用方
- * 那三行,而不是这张表。表本身是对的,只是暂时没人能回答它的问题。
+ * `evaluate()` 返回 `ask` 时,调用方(`runtime.ts`)通过 InteractionGate
+ * 等待用户回答。策略判断不持有待决状态,也不把询问自动降级为拒绝。
  */
 import type { PermissionMode, PermissionQuery } from '../../shared/agent/permission'
 
@@ -73,24 +70,6 @@ export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set([
   'browser_snapshot'
 ])
 
-/**
- * 「该问但问不了」时给模型的原文。
- *
- * ★ 三句话各有各的用途,一句都不能省:
- * ① **归因** —— 不说的话,模型会开始怀疑自己的参数,把同一个调用改着法儿重试三次;
- * ② **禁止绕行** —— 不说的话,它会去试 `Bash` 里的 `cat` 来替代 `Write`,
- *    而那恰恰是这道闸要防的事;
- * ③ **给用户一条出路** —— 只说「不行」的话,用户看到的是一个卡住的助手。
- */
-export const ASK_NOT_WIRED_YET =
-  'This call needs the user to approve it in person, but the approval dialog is not wired up in this ' +
-  'build yet — so it was denied automatically. THIS IS NOT YOUR FAULT, and there is nothing wrong with ' +
-  'how you called it.\n\n' +
-  'Do NOT reach for a different tool to do the same thing, do NOT try to work around this, and do NOT ' +
-  'retry. Stop and tell the user: this step needs approval, and approval is not available yet. If they ' +
-  'want you to continue, they can set the workspace permission mode to "auto" or "full", or do this ' +
-  'step themselves.'
-
 /** 给测试和诊断用:把一次判定压成一行人话。 */
 export function describeOutcome(mode: PermissionMode, o: PermissionOutcome): string {
   if (o.kind === 'allow') return `${mode}:放行`
@@ -105,7 +84,6 @@ export function describeOutcome(mode: PermissionMode, o: PermissionOutcome): str
  * 理由和 `text.ts` / `untrusted.ts` 文件头那条一样:**两处必须给出同一个答案**。
  * 提示词说「写盘会被拒」而闸门其实放行(或者反过来),是最坏的一种漂移:
  * 模型会据此**提前放弃**一件它本来做得成的事,而这中间不会有任何报错。
- * 接上审批对话框那天,改的是这个文件,两边一起变。
  *
  * 写成事实而不是规则(见 `context-assembler.ts` 文件头第 3 关):模型**事前**
  * 就知道自己写盘要不要审批,而不是撞一次墙再学 —— 撞墙那一轮不只是浪费,
@@ -115,9 +93,7 @@ export function permissionFacts(mode: PermissionMode, webSearch: boolean): strin
   const say = (readOnly: boolean, destructive: boolean): string => {
     const o = evaluate({ mode, readOnly, destructive, webSearch })
     if (o.kind === 'allow') return 'run without asking'
-    // ★ 这一批「需要询问」= 拒绝(见文件头)。如实说,别写成「会询问用户」——
-    //   提示词里的假事实比缺失的事实更糟,模型不会去质疑它。
-    if (o.kind === 'ask') return 'are DENIED — the approval dialog is not wired up in this build yet'
+    if (o.kind === 'ask') return 'wait for user approval before execution'
     return 'are denied'
   }
   const net = webSearch

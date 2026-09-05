@@ -17,7 +17,7 @@ import type { Workspace } from '../../shared/domain/workspace'
 import { announceReady, getBootstrap } from './services/app'
 import { on } from './services/ipc'
 import { AppShell } from './shell/AppShell'
-import { startAgentEventPump, adoptActiveRuns, refreshHydratedSessions, useRunIndex } from './stores/session'
+import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
 import { useWindowStore } from './stores/window'
 import { useTabsStore } from './stores/tabs'
@@ -34,6 +34,7 @@ export default function App(): React.JSX.Element {
   const openWorkspace = useWindowStore((s) => s.openWorkspace)
   const openSession = useTabsStore((s) => s.openSession)
   const syncBrowserTabs = useTabsStore((s) => s.syncBrowserTabs)
+  const syncSessionTitle = useTabsStore((s) => s.syncSessionTitle)
   const setRightPanelForWorkspace = useWindowStore((s) => s.setRightPanelForWorkspace)
   const { setLocale, t } = useI18n()
 
@@ -47,7 +48,13 @@ export default function App(): React.JSX.Element {
     const offSettings = on('settings:changed', setSettings)
     const offTheme = on('theme:changed', ({ resolved }) => setAppearance(resolved))
     const offWorkspaces = on('workspace:changed', ({ workspaces: ws }) => setWorkspaces(ws))
-    const offSessions = on('sessions:changed', () => { void refreshHydratedSessions() })
+    const offSessions = on('sessions:changed', ({ workspaceId, renamed }) => {
+      if (workspaceId !== undefined && renamed !== undefined) {
+        syncSessionTitle(workspaceId, renamed.sessionId, renamed.title)
+        return
+      }
+      void refreshHydratedSessions()
+    })
     const offBrowser = on('browser:changed', (change) => {
       syncBrowserTabs(change.workspaceId, change.tabs)
       if (change.rightPanelOpen === true) setRightPanelForWorkspace(change.workspaceId, true)
@@ -63,6 +70,9 @@ export default function App(): React.JSX.Element {
         hydrate(b)
         // ⌘R 重载后主进程里还活着的 run —— 角标要立刻正确,不能等下一个事件
         adoptActiveRuns(b.activeRuns)
+        // A background child may outlive its parent run and still needs a
+        // route back to the parent Task card after this renderer reloads.
+        adoptActiveSubagents(b.activeSubagents ?? [])
         const raw = window.location.hash.match(/^#session=([^/]+)\/([^/]+)$/)
         if (raw !== null) {
           const workspaceId = decodeURIComponent(raw[1]!)
@@ -82,7 +92,7 @@ export default function App(): React.JSX.Element {
       offSessions()
       offBrowser()
     }
-  }, [hydrate, openSession, openWorkspace, setRightPanelForWorkspace, syncBrowserTabs])
+  }, [hydrate, openSession, openWorkspace, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
 
   /**
    * ★ **深浅和颜色是两路来的,必须汇到一处再落地。**

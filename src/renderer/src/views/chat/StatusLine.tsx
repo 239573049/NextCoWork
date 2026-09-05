@@ -1,5 +1,5 @@
 /**
- * 输入框上方那行状态 —— 截图:`生成中 · 7s · ↓93`,外加上下文压力条。
+ * 本轮助手回复下方的执行状态、用量与上下文压力条。
  *
  * ★ **这里同时是 e2e 探针的读取点。** 属性是机器可读的
  * (`data-status` / `data-seq` / `data-model`),不是给人看的那句中文 ——
@@ -10,6 +10,7 @@
  * `TokenUsage`、`context_usage`。不新增任何数据。
  */
 import type { ReactNode } from 'react'
+import { LoaderCircle } from 'lucide-react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import { hasRun } from '../../../../shared/agent/transcript'
 import { cn } from '../../lib/cn'
@@ -29,11 +30,13 @@ const PRESSURE_WARN = 0.75
 export function StatusLine({
   transcript,
   running,
+  waitingForResponse,
   lastSeq,
   queued
 }: {
   transcript: TranscriptState
   running: boolean
+  waitingForResponse: boolean
   lastSeq: number
   queued: number
 }): ReactNode {
@@ -55,14 +58,17 @@ export function StatusLine({
       data-seq={lastSeq}
       data-model={model ?? ''}
       data-queued={queued}
-      className="mx-auto flex w-full max-w-[760px] shrink-0 items-center gap-2 px-6 pb-1.5 text-[11.5px] text-fg-faint"
+      className="flex w-full items-center gap-2 text-[11.5px] text-fg-faint"
     >
-      <span className={cn(running && 'text-accent')}>{t(`chat.status.${status}` as Parameters<typeof t>[0])}</span>
+      <span role="status" className={cn('inline-flex items-center gap-1.5', running && 'text-accent')}>
+        {running && <LoaderCircle size={12} aria-hidden className="animate-spin motion-reduce:animate-none" />}
+        {t(waitingForResponse ? 'chat.status.waitingResponse' : `chat.status.${status}`)}
+      </span>
 
-      {usage !== undefined && (
+      {running && usage !== undefined && (
         <>
           <Dot />
-          <span title={`输入 ${usage.inputTokens} · 输出 ${usage.outputTokens}`}>
+          <span title={t('chat.usageTooltip', { input: usage.inputTokens, output: usage.outputTokens })}>
             ↓{usage.outputTokens}
           </span>
         </>
@@ -80,7 +86,7 @@ export function StatusLine({
       {contextUsage !== undefined && (ratio >= PRESSURE_SHOW || contextUsage.shouldCompact) && (
         <div
           className="flex items-center gap-1.5"
-          title={`上下文 ${contextUsage.used} / ${contextUsage.window}`}
+          title={t('chat.contextTooltip', { used: contextUsage.used, window: contextUsage.window })}
         >
           {contextUsage.shouldCompact && (
             // 上下文用尽是这类应用最高频的失败(方案 §4.2)。逼近上限时

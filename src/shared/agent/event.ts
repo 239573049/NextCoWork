@@ -8,10 +8,14 @@ import type { AgentError } from './error'
 import type { AgentMessage } from './message'
 import type { PendingInteraction, InteractionOutcome } from './interaction'
 import type { ProviderStreamEvent } from './stream'
+import type { TokenUsage } from './stream'
 import type { ToolOutput } from './message'
 import type { ToolProgress } from './tool'
+import type { ContextCheckpoint, ContextStatus } from './context-management'
 
 export type RunStatus = 'running' | 'done' | 'error' | 'aborted'
+
+export type SubagentPhase = 'starting' | 'thinking' | 'tool' | 'finishing' | 'background'
 
 export type AgentEvent =
   | { type: 'stream'; delta: ProviderStreamEvent }
@@ -30,11 +34,46 @@ export type AgentEvent =
   | { type: 'tool_end'; callId: string; output: ToolOutput; isError: boolean; at?: number }
   | { type: 'interaction_request'; interaction: PendingInteraction }
   | { type: 'interaction_resolved'; id: string; outcome: InteractionOutcome }
-  | { type: 'subagent_start'; callId: string; childRunId: string }
-  | { type: 'subagent_end'; callId: string; childRunId: string; status: RunStatus }
+  | {
+      type: 'subagent_start'
+      callId: string
+      childRunId: string
+      description?: string
+      subagentType?: string
+      model?: string
+      background?: boolean
+      at?: number
+    }
+  | {
+      type: 'subagent_update'
+      callId: string
+      childRunId: string
+      phase?: SubagentPhase
+      currentTool?: string
+      toolCalls?: number
+      toolErrors?: number
+      usage?: TokenUsage
+      contextUsage?: { used: number; window: number; shouldCompact: boolean }
+      /** Sequence of the corresponding child-run event, used to deduplicate the inherited raw event. */
+      childSeq?: number
+      at?: number
+    }
+  | {
+      type: 'subagent_end'
+      callId: string
+      childRunId: string
+      status: RunStatus
+      summary?: string
+      /** Sequence of the child run_end event, used to deduplicate the inherited raw event. */
+      childSeq?: number
+      at?: number
+    }
   /** ★ 抄自 agent-request-flow.md §4 的 agent:contextUsage —— 见下方注释 */
   | { type: 'context_usage'; used: number; window: number; shouldCompact: boolean }
-  | { type: 'run_end'; status: RunStatus; error?: AgentError }
+  | { type: 'context_status'; status: ContextStatus }
+  | { type: 'context_checkpoint'; checkpoint: ContextCheckpoint }
+  /** `at` is the wall-clock time at which the run reached its terminal state. */
+  | { type: 'run_end'; status: RunStatus; error?: AgentError; at?: number }
 
 /**
  * ★ context_usage 每轮由 ContextAssembler 算完请求后顺手发一条,
@@ -52,6 +91,9 @@ export interface RunSnapshot {
   parentRunId?: string
   depth: number
   status: RunStatus
+  /** Wall-clock bounds are optional for snapshots created by older runtimes. */
+  startedAt?: number
+  endedAt?: number
   /** 快照产出时的 seq;渲染层据此续接增量 */
   seq: number
   /** sinceSeq 之后的事件,按序 */

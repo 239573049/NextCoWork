@@ -283,6 +283,51 @@ describe('decodeAnthropic · usage 与 stopReason', () => {
     })
   })
 
+  it('只有 5 分钟明细时也补出总缓存写入量', async () => {
+    const out = await decode([
+      {
+        type: 'message_start',
+        message: {
+          model: 'm',
+          usage: {
+            input_tokens: 10,
+            cache_creation: { ephemeral_5m_input_tokens: 45 }
+          }
+        }
+      },
+      STOP
+    ])
+    expect(out.at(-1)).toMatchObject({
+      type: 'message_end',
+      usage: { cacheCreationInputTokens: 45 }
+    })
+    expect((out.at(-1) as unknown as { usage: Record<string, unknown> }).usage)
+      .not.toHaveProperty('cacheCreation1hInputTokens')
+  })
+
+  it('只有 1 小时明细时同时补出总写入量与 1 小时写入量', async () => {
+    const out = await decode([
+      {
+        type: 'message_start',
+        message: {
+          model: 'm',
+          usage: {
+            input_tokens: 10,
+            cache_creation: { ephemeral_1h_input_tokens: 75 }
+          }
+        }
+      },
+      STOP
+    ])
+    expect(out.at(-1)).toMatchObject({
+      type: 'message_end',
+      usage: {
+        cacheCreationInputTokens: 75,
+        cacheCreation1hInputTokens: 75
+      }
+    })
+  })
+
   it('未知 stop_reason 退化成 end_turn 而不是抛错', () => {
     expect(toStopReason('pause_turn')).toBe('end_turn')
     expect(toStopReason(undefined)).toBe('end_turn')
@@ -444,6 +489,39 @@ describe('anthropicErrorToAgentError', () => {
     )
     expect(e.code).toBe('cache_unsupported')
     expect(e.message).toContain('cache_control unsupported by relay')
+  })
+
+  it('标准消息过于笼统时保留非标准 details 里的缓存拒绝原因', () => {
+    const e = anthropicErrorToAgentError(
+      422,
+      {
+        error: { type: 'invalid_request_error', message: 'invalid request' },
+        details: { field: 'cache_control', reason: 'unsupported' }
+      },
+      { cacheTtl: '1h', providerName: 'Relay' }
+    )
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.message).toContain('cache_control')
+    expect(e.message).toContain('unsupported')
+  })
+
+  it('大型错误体只附加包含缓存证据的有界摘要', () => {
+    const e = anthropicErrorToAgentError(
+      400,
+      {
+        error: { type: 'invalid_request_error', message: 'invalid request' },
+        details: {
+          diagnostic: 'x'.repeat(10_000),
+          field: 'cache_control',
+          reason: 'unsupported'
+        }
+      },
+      { cacheTtl: '5m', providerName: 'Relay' }
+    )
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.message).toContain('cache_control')
+    expect(e.message).toContain('unsupported')
+    expect(e.message.length).toBeLessThan(4_500)
   })
 
   it('缓存关闭时普通 400 不会被误判为 cache_unsupported', () => {

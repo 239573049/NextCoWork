@@ -26,12 +26,8 @@ import type { ToolShape } from '../../../../shared/domain/tool-presenter'
 import { cn } from '../../lib/cn'
 
 /**
- * 界面上的四态。数据模型里只有三态(`ToolCallState.status`),
- * `pending` 是**派生**的:live 里有 tool_use 块,但 `tools[callId]` 还没建立
- * —— 也就是 `Thread.tsx` 里那个 `call === undefined` 的处境。
- *
- * 刻意不把 pending 加进 reducer 的枚举:没有任何事件会写入它,
- * 加进去就是一个永远为假的分支。
+ * 四态与 ToolCallState 一致。已提交的 tool_call 在执行前是 pending；
+ * 流式参数尚未提交、tools[callId] 还不存在时，界面也使用 pending。
  */
 export type ToolViewStatus = 'pending' | 'running' | 'ok' | 'error'
 

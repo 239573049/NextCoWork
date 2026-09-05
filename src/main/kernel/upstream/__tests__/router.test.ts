@@ -1,9 +1,82 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderStreamEvent } from '../../../../shared/agent/stream'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
+import type { UnpricedUsageAttempt } from '../../../../shared/domain/usage'
 import { nodeHost, type KernelHost } from '../../host'
 import type { CanonicalRequest } from '../canonical'
 import { parseRetryAfter, UpstreamRouter, type ProviderConfigSource } from '../router'
+import { chunk, sse, responseDone, messageItem } from './openai-fixtures'
+
+describe('OpenAI protocol routing and recovery', () => {
+  it('resolves Auto against each provider binding when their supported efforts differ', async () => {
+    const r = rig({
+      providers: [provider('chat', { protocol: 'openai-chat' }), provider('responses', { protocol: 'openai-responses', priority: 1 })],
+      aliases: [
+        { ...alias('m', 'chat'), thinkingConfig: { mode: 'effort', defaultEnabled: true, defaultEffort: 'high' }, reasoningEfforts: ['high'] },
+        { ...alias('m', 'responses'), thinkingConfig: { mode: 'effort', defaultEnabled: true, defaultEffort: 'low' }, reasoningEfforts: ['low'] }
+      ],
+      responses: [fail(503), fail(503), fail(503), sse(responseDone([messageItem]))]
+    })
+    const output: ProviderStreamEvent[] = []
+    for await (const event of r.router.stream({ ...REQ, thinkingLevel: 'auto',
+      reasoning: { mode: 'effort', enabled: true, explicit: false, effort: 'high' }
+    }, new AbortController().signal, { workspaceId: 'w' })) output.push(event)
+    expect(r.bodies[0]?.reasoning_effort).toBe('high')
+    expect(r.bodies[3]?.reasoning).toEqual({ effort: 'low' })
+    expect(output.at(-1)).toMatchObject({ type: 'message_end' })
+  })
+  it('retries Chat before content and switches to Responses using its own wire format', async () => {
+    const r = rig({
+      providers: [provider('chat', { protocol: 'openai-chat' }), provider('responses', { protocol: 'openai-responses', priority: 1 })],
+      aliases: [alias('m', 'chat'), alias('m', 'responses')],
+      responses: [fail(503), fail(503), fail(503), sse(responseDone([messageItem]))]
+    })
+    const output = await drain(r.router)
+    expect(r.calls).toEqual([
+      'https://chat.example.com/chat/completions', 'https://chat.example.com/chat/completions',
+      'https://chat.example.com/chat/completions', 'https://responses.example.com/responses'
+    ])
+    expect(r.bodies[0]).toHaveProperty('messages')
+    expect(r.bodies[3]).toHaveProperty('input')
+    expect(r.bodies[3]).not.toHaveProperty('messages')
+    expect(r.bodies.every((body) => body.metadata === undefined)).toBe(true)
+    expect(output.filter((event) => event.type === 'provider_retry')).toHaveLength(2)
+    expect(output).toContainEqual(expect.objectContaining({ type: 'provider_switch' }))
+    expect(output.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+  })
+
+  it('never retries or switches after DeepSeek reasoning has reached the user', async () => {
+    const r = rig({
+      providers: [provider('chat', { protocol: 'openai-chat' }), provider('fallback', { priority: 1 })],
+      aliases: [alias('m', 'chat'), alias('m', 'fallback')],
+      responses: [sse(chunk({ reasoning_content: 'Thinking so far.' }), { error: { type: 'server_error', message: 'Interrupted' } })]
+    })
+    const output = await drain(r.router)
+    expect(r.calls).toHaveLength(1)
+    expect(output).toContainEqual(expect.objectContaining({ type: 'thinking_delta', text: 'Thinking so far.' }))
+    expect(output.at(-1)).toMatchObject({ type: 'error' })
+    expect(r.usageRecords[0]).toMatchObject({ ok: false })
+  })
+
+  it('accepts a compatible provider returning JSON instead of SSE', async () => {
+    const r = rig({ providers: [provider('chat', { protocol: 'openai-chat' })], aliases: [alias('m', 'chat')],
+      responses: [Response.json({ model: 'deepseek-test', choices: [{ index: 0, finish_reason: 'stop', message: {
+        role: 'assistant', reasoning_content: 'Check.', content: 'Done.'
+      } }], usage: { prompt_tokens: 10, completion_tokens: 8 } })]
+    })
+    const output = await drain(r.router)
+    expect(output).toContainEqual(expect.objectContaining({ type: 'thinking_delta', text: 'Check.' }))
+    expect(output.at(-1)).toMatchObject({ type: 'message_end', usage: { inputTokens: 10, outputTokens: 8 } })
+  })
+
+  it('does not count an empty decoded response as a successful request', async () => {
+    const r = rig({ providers: [provider('a')], aliases: [alias('m', 'a')], responses: [ok(''), ok(''), ok('')] })
+    expect((await drain(r.router)).at(-1)).toMatchObject({ type: 'error', error: { code: 'network' } })
+    expect(r.usageRecords).toHaveLength(3)
+    expect(r.usageRecords.every((attempt) => !attempt.ok)).toBe(true)
+    expect(r.router.health()[0]?.healthy).toBe(false)
+  })
+})
 
 // ─── 夹具 ────────────────────────────────────────────────────────────
 
@@ -62,6 +135,21 @@ function sseBody(parts: { text?: string; stop?: string } = {}): string {
   return lines.join('')
 }
 
+function thinkingSseBody(): string {
+  return [
+    'event: message_start\ndata: {"type":"message_start","message":{"model":"m-up","usage":{"input_tokens":5,"output_tokens":0}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}\n\n',
+    `event: content_block_delta\ndata: ${JSON.stringify({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'a long visible reasoning passage' }
+    })}\n\n`,
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+  ].join('')
+}
+
 /** 一段**中途断掉**的 SSE:发了内容但没有 message_stop */
 function truncatedBody(text: string): string {
   return (
@@ -87,8 +175,10 @@ interface Rig {
   router: UpstreamRouter
   host: KernelHost
   calls: string[]
+  secretReads: string[]
   bodies: Array<Record<string, unknown>>
   headers: Array<Record<string, string>>
+  usageRecords: UnpricedUsageAttempt[]
   now: { t: number }
 }
 
@@ -100,8 +190,10 @@ function rig(opts: {
   responses: Array<Response | (() => Response) | Error>
 }): Rig {
   const calls: string[] = []
+  const secretReads: string[] = []
   const bodies: Array<Record<string, unknown>> = []
   const headers: Array<Record<string, string>> = []
+  const usageRecords: UnpricedUsageAttempt[] = []
   const now = { t: 1_000_000 }
   let i = 0
 
@@ -109,6 +201,7 @@ function rig(opts: {
     clock: { now: () => now.t },
     secrets: {
       get: async (ref) => {
+        secretReads.push(ref)
         const explicit = opts.keys?.[ref]
         return explicit === undefined ? 'sk-test' : explicit
       },
@@ -132,12 +225,34 @@ function rig(opts: {
     aliases: () => opts.aliases,
     failoverEnabled: () => opts.failover ?? true
   }
-  return { router: new UpstreamRouter(host, config, { baseDelayMs: 0 }), host, calls, bodies, headers, now }
+  return {
+    router: new UpstreamRouter(host, config, {
+      baseDelayMs: 0,
+      onUsageAttempt: (record) => usageRecords.push(record)
+    }),
+    host,
+    calls,
+    secretReads,
+    bodies,
+    headers,
+    usageRecords,
+    now
+  }
 }
 
 async function drain(r: UpstreamRouter, signal = new AbortController().signal): Promise<ProviderStreamEvent[]> {
   const out: ProviderStreamEvent[] = []
   for await (const ev of r.stream(REQ, signal, { workspaceId: 'ws-test' })) out.push(ev)
+  return out
+}
+
+async function drainRequest(
+  r: UpstreamRouter,
+  request: CanonicalRequest,
+  signal = new AbortController().signal
+): Promise<ProviderStreamEvent[]> {
+  const out: ProviderStreamEvent[] = []
+  for await (const ev of r.stream(request, signal, { workspaceId: 'ws-test' })) out.push(ev)
   return out
 }
 
@@ -163,6 +278,64 @@ describe('UpstreamRouter · 正常路径', () => {
     const out = await drain(router)
     expect(out.map((e) => e.type)).toEqual(['message_start', 'text_delta', 'message_end'])
     expect(calls).toEqual(['https://p1.example.com/v1/messages'])
+  })
+
+  it('每次上游尝试都记录路由、Token、状态和延迟元数据', async () => {
+    const { router, usageRecords, now } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))]
+    })
+
+    const out: ProviderStreamEvent[] = []
+    for await (const event of router.stream(REQ, new AbortController().signal, {
+      workspaceId: 'workspace-1',
+      runId: 'run-1',
+      sessionId: 'session-1'
+    })) {
+      out.push(event)
+      if (event.type === 'message_start') now.t += 40
+      if (event.type === 'text_delta') now.t += 60
+    }
+
+    expect(out.at(-1)?.type).toBe('message_end')
+    expect(usageRecords).toHaveLength(1)
+    expect(usageRecords[0]).toMatchObject({
+      runId: 'run-1',
+      workspaceId: 'workspace-1',
+      sessionId: 'session-1',
+      attempt: 1,
+      providerId: 'p1',
+      providerName: 'p1',
+      protocol: 'anthropic',
+      endpoint: 'https://p1.example.com/v1/messages',
+      alias: 'm',
+      upstreamModel: 'm-upstream',
+      responseModel: 'm-up',
+      inputTokens: 5,
+      outputTokens: 3,
+      ok: true,
+      httpStatus: 200,
+      stopReason: 'end_turn'
+    })
+    expect(usageRecords[0]?.latencyMs).toBe(100)
+    expect(usageRecords[0]?.timeToFirstTokenMs).toBe(40)
+  })
+
+  it('可见思考只记为明确标注的估算值，且不会超过总输出 Token', async () => {
+    const { router, usageRecords } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(thinkingSseBody())]
+    })
+
+    await drain(router)
+
+    expect(usageRecords[0]).toMatchObject({
+      outputTokens: 3,
+      thinkingTokens: 3,
+      thinkingTokensEstimated: true
+    })
   })
 
   /**
@@ -272,6 +445,55 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
     expect(bodies[0]).not.toHaveProperty('cache_control')
     expect(bodies[0]?.system).toEqual([{ type: 'text', text: 'should not become a breakpoint' }])
+  })
+
+  it('目录 ThinkingConfig 在 Anthropic 请求体上真实生效', async () => {
+    const a = alias('m', 'p1')
+    a.thinkingConfig = {
+      mode: 'effort',
+      defaultEnabled: true,
+      defaultEffort: 'medium',
+      parameterPath: 'reasoning_effort'
+    }
+    const { router, bodies } = rig({
+      providers: [provider('p1')],
+      aliases: [a],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drainRequest(router, {
+      ...REQ,
+      maxOutputTokens: 8_192,
+      reasoning: { mode: 'effort', enabled: true, explicit: true, effort: 'xhigh' }
+    })
+    expect(bodies[0]?.thinking).toEqual({ type: 'enabled', budget_tokens: 7_168 })
+    expect(bodies[0]).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('unsupported 模型即使 Patch 注入也不会发送 Think 字段', async () => {
+    const a = alias('m', 'p1')
+    a.thinkingConfig = { mode: 'unsupported', defaultEnabled: false }
+    a.requestAdapter = {
+      preset: 'custom',
+      patches: [{ op: 'add', path: '/thinking', value: { type: 'enabled' } }]
+    }
+    const { router, bodies } = rig({
+      providers: [provider('p1')], aliases: [a], responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drainRequest(router, { ...REQ, thinkingBudget: 4_096 })
+    expect(bodies[0]).not.toHaveProperty('thinking')
+  })
+
+  it('非法 Patch 在读取响应前失败且不重试 HTTP', async () => {
+    const a = alias('m', 'p1')
+    a.requestAdapter = {
+      preset: 'custom',
+      patches: [{ op: 'add', path: '/model', value: 'other-model' }]
+    }
+    const { router, calls } = rig({ providers: [provider('p1')], aliases: [a], responses: [] })
+    const out = await drain(router)
+    expect(calls).toEqual([])
+    expect(out.some((event) => event.type === 'provider_retry')).toBe(false)
+    expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'provider', retryable: false } })
   })
 
   /** Anthropic 用 x-api-key,不是 Authorization: Bearer —— 写错就是 401 */
@@ -456,15 +678,20 @@ describe('UpstreamRouter · 重试与切换', () => {
     expect(out.at(-1)?.type).toBe('message_end')
   })
 
-  it('未实现的上游协议给出明确说明而不是诡异的 400', async () => {
-    const { router } = rig({
+  it('OpenAI Chat 发送真实请求并解码响应', async () => {
+    const { router, calls, bodies, headers, usageRecords } = rig({
       providers: [provider('p1', { protocol: 'openai-chat' })],
       aliases: [alias('m', 'p1')],
-      responses: []
+      responses: [ok('data: {"model":"m-up","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')]
     })
     const out = await drain(router)
-    expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'provider' } })
-    expect((out.at(-1) as { error: { message: string } }).error.message).toContain('openai-chat')
+    expect(out.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+    expect(calls).toEqual(['https://p1.example.com/chat/completions'])
+    expect(headers[0]).toMatchObject({ authorization: 'Bearer sk-test' })
+    expect(headers[0]).not.toHaveProperty('x-api-key')
+    expect(bodies[0]).not.toHaveProperty('metadata')
+    expect(bodies[0]).not.toHaveProperty('cache_control')
+    expect(usageRecords[0]).toMatchObject({ protocol: 'openai-chat', endpoint: calls[0], ok: true })
   })
 })
 
@@ -501,7 +728,7 @@ describe('UpstreamRouter · Anthropic 缓存兼容性错误', () => {
   })
 
   it('空或超长 workspaceId 在读取密钥和发出 HTTP 前失败', async () => {
-    const { router, calls } = rig({
+    const { router, calls, secretReads } = rig({
       providers: [provider('p1')],
       aliases: [alias('m', 'p1')],
       responses: []
@@ -512,10 +739,11 @@ describe('UpstreamRouter · Anthropic 缓存兼容性错误', () => {
       expect(out[0]).toMatchObject({ type: 'error', error: { retryable: false } })
     }
     expect(calls).toEqual([])
+    expect(secretReads).toEqual([])
   })
 
   it('畸形运行时 context 不会抛异常或访问 Provider', async () => {
-    const { router, calls } = rig({
+    const { router, calls, secretReads } = rig({
       providers: [provider('p1')],
       aliases: [alias('m', 'p1')],
       responses: []
@@ -529,6 +757,7 @@ describe('UpstreamRouter · Anthropic 缓存兼容性错误', () => {
     expect(out).toHaveLength(1)
     expect(out[0]).toMatchObject({ type: 'error', error: { retryable: false } })
     expect(calls).toEqual([])
+    expect(secretReads).toEqual([])
   })
 })
 

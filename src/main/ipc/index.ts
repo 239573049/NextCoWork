@@ -22,7 +22,6 @@ import { INVOKE_CHANNELS, SEND_CHANNELS } from '../../shared/ipc/contract'
 import type { SessionInputState } from '../../shared/domain/queued-input'
 import { isValidSessionInput } from '../../shared/domain/queued-input'
 import {
-  EMPTY_INNER,
   EMPTY_OUTER,
   innerTabKey,
   outerTabKey,
@@ -38,8 +37,8 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, startChildRun, startRun } from './agent'
-import { installChildRunLauncher, setSessionChangeListener } from '../runtime'
+import { abortRun, attachRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
+import { getTools, installChildRunLauncher, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
@@ -51,6 +50,7 @@ import {
   setCredential,
   upsertProvider,
   updateModel,
+  renameModel,
   removeModel
 } from './provider'
 import {
@@ -88,6 +88,8 @@ import {
   pickWorkspace,
   updateWorkspace
 } from './workspace'
+import { mutateWorkspaceFile, readWorkspaceFile, revealWorkspaceFile, writeWorkspaceFile } from './workspace-files'
+import { listContextCheckpoints, updateContextCheckpoint } from './context'
 import {
   createSession,
   duplicateSession,
@@ -95,6 +97,7 @@ import {
   getSession,
   listSessions,
   renameSession,
+  replaceHistory,
   searchAll,
   setArchived,
   setFavorited
@@ -146,7 +149,11 @@ function todo<K extends InvokeChannel>(channel: K, step: string): Handler<K> {
 
 const handlers: HandlerMap = {
   // ── 已实现 ──
-  'app:getBootstrap': (_req, ctx) => getBootstrap(ctx.kind),
+  'app:getBootstrap': (_req, ctx) => {
+    // A renderer reload can arrive before the tab/input debounce expires.
+    flushPendingPersists()
+    return getBootstrap(ctx.kind)
+  },
   'app:openExternal': ({ url }) => openExternal(url),
   'app:copyText': ({ text }) => copyText(text),
   'app:openSessionWindow': (req) => openSessionWindow(req),
@@ -165,9 +172,13 @@ const handlers: HandlerMap = {
     return closeWorkspace(id)
   },
   'workspace:listDir': (req) => listDir(req),
+  'workspace:readFile': (req) => readWorkspaceFile(req),
+  'workspace:writeFile': (req) => writeWorkspaceFile(req),
+  'workspace:mutateFile': (req) => mutateWorkspaceFile(req),
+  'workspace:revealFile': (req) => revealWorkspaceFile(req),
   'browser:list': ({ workspaceId }) => browserManager.list(workspaceId),
-  'browser:open': ({ workspaceId, url, title, profileId }) =>
-    browserManager.open({ workspaceId, url, title, profileId, source: 'user' }),
+  'browser:open': ({ workspaceId, url, title, profileId, clientTabId }) =>
+    browserManager.open({ workspaceId, url, title, profileId, clientTabId, source: 'user' }),
   'browser:navigate': ({ workspaceId, tabId, url }) => {
     const tab = browserManager.get(tabId)
     if (tab?.workspaceId !== workspaceId) throw new Error('浏览器标签不属于当前工作区')
@@ -207,7 +218,11 @@ const handlers: HandlerMap = {
     if (profile.isDefault) throw new Error('默认浏览器不能清除登录态')
     return clearBrowserProfileState(workspaceId, profileId)
   },
-  'tabs:getInner': ({ workspaceId }) => store.getKv(innerTabKey(workspaceId), EMPTY_INNER),
+  'tabs:getInner': ({ workspaceId }) => {
+    const key = innerTabKey(workspaceId)
+    flushPendingPersists(key)
+    return store.getInnerTabs(workspaceId)
+  },
   'session:getInput': ({ sessionId }) => readSessionInput(sessionId),
 
   // ── 附件(读取走 ncw:// 协议,不占 IPC) ──
@@ -219,6 +234,7 @@ const handlers: HandlerMap = {
   // ── 会话 / SQLite ──
   'sessions:list': (req) => listSessions(req),
   'sessions:get': (req) => getSession(req),
+  'sessions:replaceHistory': (req) => replaceHistory(req),
   'sessions:create': (req) => createSession(req),
   'sessions:duplicate': (req) => duplicateSession(req),
   'sessions:rename': (req) => renameSession(req),
@@ -226,16 +242,18 @@ const handlers: HandlerMap = {
   'sessions:setFavorited': (req) => setFavorited(req),
   'sessions:delete': (req) => deleteSession(req),
   'conversations:searchAll': (req) => searchAll(req),
+  'context:list': (req) => listContextCheckpoints(req),
+  'context:updateCheckpoint': (req) => updateContextCheckpoint(req),
   'storage:getStats': () => getStats(),
   'storage:vacuum': () => vacuum(),
   'storage:openDataDirectory': () => openDataDirectory(),
   'storage:export': (req) => exportData(req),
-  'storage:importPreview': () => importPreview(),
-  'storage:importApply': (req) => importApply(req),
+  'storage:importPreview': (_req, ctx) => importPreview(ctx.sender.id),
+  'storage:importApply': (req, ctx) => importApply(req, ctx.sender.id),
   'storage:chooseBackupDirectory': () => chooseBackupDirectory(),
   'storage:getBackupStatus': () => getBackupStatus(),
   'storage:createBackup': (req) => createBackup(req),
-  'storage:restoreBackup': (req) => restoreBackup(req),
+  'storage:restoreBackup': (req, ctx) => restoreBackup(req, ctx.sender.id),
   'storage:cleanupPreview': (req) => cleanupPreview(req),
   'storage:cleanupAttachments': () => cleanupAttachments(),
   'storage:cleanupByAge': (req) => cleanupByAge(req),
@@ -246,9 +264,12 @@ const handlers: HandlerMap = {
   'agent:run': (req, ctx) => startRun(req, ctx),
   'agent:attach': (req, ctx) => attachRun(req, ctx),
   'agent:abort': (req) => abortRun(req),
-  'agent:respondInteraction': todo('agent:respondInteraction', '步骤 5'),
-  'agent:listInteractions': todo('agent:listInteractions', '步骤 5'),
-  'agent:listTools': todo('agent:listTools', '步骤 4'),
+  'agent:respondInteraction': respondInteraction,
+  'agent:listInteractions': listInteractions,
+  'agent:listTools': ({ workspaceId }) => {
+    if (store.getWorkspace(workspaceId) === undefined) throw new Error('Workspace does not exist')
+    return getTools().info()
+  },
 
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
@@ -291,18 +312,18 @@ const handlers: HandlerMap = {
   'provider:setAliases': ({ providerId, models }) => setAliases(providerId, models),
   'provider:setCredential': ({ providerId, apiKey }) => setCredential(providerId, apiKey),
   'provider:getCredentialInfo': ({ providerId }) => getCredentialInfo(providerId),
-  /**
-   * ★ `test` 单独留着 todo,**不是漏了**。它要真发一次请求,而非 Anthropic 协议的
-   * 编解码还没写(步骤 13,`router.ts:195` 那个 early-return)——
-   * 现在接上去,给 OpenAI 格式的供应商点「测试」必然失败,而报出来的是「连不通」,
-   * 用户会去查自己的地址和 key。那不是连不通,是我们还没实现。
-   */
-  'provider:test': todo('provider:test', '步骤 13(先要 OpenAI 编解码)'),
+  // Agent 上游已支持三种协议;独立连接测试入口仍待接入。
+  'provider:test': todo('provider:test', '步骤 13(独立连接测试入口)'),
   'model:update': (req) => updateModel(req),
+  'model:rename': ({ providerId, alias, nextAlias }) => renameModel(providerId, alias, nextAlias),
   'model:remove': ({ providerId, alias }) => removeModel(providerId, alias),
   'modelCatalog:list': () => listUserModelCatalog(),
   'modelCatalog:upsert': (req) => upsertUserModelCatalog(req),
   'modelCatalog:remove': ({ id }) => removeUserModelCatalog(id),
+  'usage:getSummary': (window) => store.getUsageSummary(window),
+  'usage:getRequestLogs': (query) => store.getUsageRequestLogs(query),
+  'usage:getProviderStats': (window) => store.getUsageProviderStats(window),
+  'usage:getModelStats': (window) => store.getUsageModelStats(window),
   'gateway:getStatus': todo('gateway:getStatus', '步骤 13'),
   'gateway:setEnabled': todo('gateway:setEnabled', '步骤 13'),
   'gateway:resetHealth': todo('gateway:resetHealth', '步骤 13')
@@ -353,6 +374,7 @@ function persistDebounced(key: string, value: unknown, immediate = false): void 
  */
 function readSessionInput(sessionId: string): SessionInputState | null {
   const key = sessionInputKey(sessionId)
+  flushPendingPersists(key)
   const raw = store.getKv<unknown>(key, null)
   if (raw === null) return null
   if (!isValidSessionInput(raw, Date.now())) {
@@ -362,13 +384,14 @@ function readSessionInput(sessionId: string): SessionInputState | null {
   return raw
 }
 
-/** app quit 前把挂着的写入落掉,否则最后一次拖动的顺序会丢。 */
-export function flushPendingPersists(): void {
+/** Flush before reads and app quit so pending UI state survives renderer reloads. */
+export function flushPendingPersists(onlyKey?: string): void {
   for (const [key, { timer, value }] of pendingPersists) {
+    if (onlyKey !== undefined && key !== onlyKey) continue
     clearTimeout(timer)
     store.setKv(key, value)
+    pendingPersists.delete(key)
   }
-  pendingPersists.clear()
 }
 
 const sendHandlers: SendHandlerMap = {
@@ -447,8 +470,8 @@ export function registerIpc(): void {
     里那次 `setMcpChangeListener` 是同一种接线。
   */
   installChildRunLauncher(startChildRun)
-  setSessionChangeListener((workspaceId) => {
-    windows.emitToAll('sessions:changed', { workspaceId })
+  setSessionChangeListener((workspaceId, renamed) => {
+    windows.emitToAll('sessions:changed', { workspaceId, ...(renamed === undefined ? {} : { renamed }) })
   })
 
   // 自动备份只在启动时按到期判断一次，不依赖渲染层计时器。

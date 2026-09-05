@@ -40,6 +40,25 @@ function sub(o: Record<string, unknown> | undefined, k: string): Record<string, 
   return rec(o?.[k])
 }
 
+const ERROR_BODY_SUMMARY_LIMIT = 4096
+const CACHE_FIELD_PATTERN =
+  /cache[_ -]?control|cache[_ -]?breakpoint|(?:^|[^a-z0-9])(ephemeral|ttl)(?:$|[^a-z0-9])/i
+
+function errorBodySummary(value: string): string {
+  if (value.length <= ERROR_BODY_SUMMARY_LIMIT) return value
+
+  // If a large relay response buries the useful field name in `details`, keep
+  // the bounded excerpt centred around that evidence instead of returning an
+  // unrelated 4 KB prefix.
+  const match = CACHE_FIELD_PATTERN.exec(value)
+  if (match === null) return `${value.slice(0, ERROR_BODY_SUMMARY_LIMIT)}…`
+  const before = Math.floor((ERROR_BODY_SUMMARY_LIMIT - match[0].length) / 3)
+  const start = Math.max(0, match.index - before)
+  const end = Math.min(value.length, start + ERROR_BODY_SUMMARY_LIMIT)
+  const adjustedStart = Math.max(0, end - ERROR_BODY_SUMMARY_LIMIT)
+  return `${adjustedStart > 0 ? '…' : ''}${value.slice(adjustedStart, end)}${end < value.length ? '…' : ''}`
+}
+
 /**
  * 错误响应不一定是 Anthropic 官方的 JSON 形状。
  *
@@ -53,7 +72,10 @@ function sub(o: Record<string, unknown> | undefined, k: string): Record<string, 
  * `cache_control is not supported` 的中转站会被误当成普通 400，随后触发
  * 重试/切换，既违背配置错误语义，也可能重复产生费用。
  */
-function errorDetails(body: unknown, status: number): { message: string; kind: string; searchable: string } {
+function errorDetails(
+  body: unknown,
+  status: number
+): { message: string; kind: string; mentionsCacheField: boolean; raw: string } {
   const root = rec(body)
   const nested = sub(root, 'error')
   const nestedMessage = str(nested, 'message')
@@ -70,18 +92,20 @@ function errorDetails(body: unknown, status: number): { message: string; kind: s
       // the structured message fallback if a custom relay violates that.
     }
   }
-  const message =
+  const raw = errorBodySummary(text !== '' ? text : serialized)
+  const unboundedMessage =
     nestedMessage ??
     rootMessage ??
     (errorText !== ''
       ? errorText
-      : text === ''
-        ? serialized === ''
-          ? `上游返回 ${status}`
-          : `上游返回 ${status}: ${serialized}`
-        : `上游返回 ${status}: ${text}`)
+      : raw === ''
+        ? `上游返回 ${status}`
+        : `上游返回 ${status}: ${raw}`)
+  const message = errorBodySummary(unboundedMessage)
   const kind = str(nested, 'type') ?? str(root, 'type') ?? ''
-  return { message, kind, searchable: `${message}\n${kind}\n${text}\n${serialized}` }
+  const mentionsCacheField = [message, kind, text, serialized]
+    .some((value) => CACHE_FIELD_PATTERN.test(value))
+  return { message, kind, mentionsCacheField, raw }
 }
 
 /**
@@ -116,23 +140,33 @@ export function anthropicErrorToAgentError(
   body: unknown,
   options: { cacheTtl?: AnthropicCacheTtl; providerName?: string } = {}
 ): AgentError {
-  const { message, kind, searchable } = errorDetails(body, status)
+  const { message, kind, mentionsCacheField, raw } = errorDetails(body, status)
   const cacheTtl = normalizeAnthropicCacheTtl(options.cacheTtl)
 
   if (
     (status === 400 || status === 422) &&
     cacheTtl !== 'off' &&
-    /cache[_ -]?control|cache[_ -]?breakpoint|(?:^|[^a-z0-9])(ephemeral|ttl)(?:$|[^a-z0-9])/i.test(searchable)
+    mentionsCacheField
   ) {
     const ttl = cacheTtl === '1h' ? '1 小时' : '5 分钟'
     const provider = options.providerName === undefined ? '当前供应商' : `供应商「${options.providerName}」`
     // Some relays provide only an error type (for example
     // `cache_control_not_supported`) and omit `message`. Keep that raw type in
     // the actionable error so the user can identify the upstream limitation.
-    const upstreamError =
+    const standardError =
       kind !== '' && !message.toLowerCase().includes(kind.toLowerCase())
         ? `${kind}: ${message}`
         : message
+    // A relay may put the useful cache rejection only in a non-standard
+    // `details` object while returning a generic official-looking message.
+    // The full body participates in classification; include a bounded raw
+    // summary as well so the actionable error does not discard that evidence.
+    const upstreamError =
+      raw !== '' &&
+      CACHE_FIELD_PATTERN.test(raw) &&
+      !CACHE_FIELD_PATTERN.test(`${message}\n${kind}`)
+        ? `${standardError}; ${raw}`
+        : standardError
     return agentError(
       'cache_unsupported',
       `${provider}拒绝了 Anthropic ${ttl}提示缓存配置：${upstreamError}。请在供应商设置中关闭或调整提示缓存。`,
@@ -213,6 +247,10 @@ export async function* decodeAnthropic(
         usage.inputTokens = num(u, 'input_tokens') ?? 0
         const cc = num(u, 'cache_creation_input_tokens')
         const cr = num(u, 'cache_read_input_tokens')
+        const reasoning =
+          num(u, 'thinking_tokens') ??
+          num(u, 'reasoning_tokens') ??
+          num(sub(u, 'output_tokens_details'), 'reasoning_tokens')
         const creation = sub(u, 'cache_creation')
         const write5m = num(creation, 'ephemeral_5m_input_tokens')
         const write1h = num(creation, 'ephemeral_1h_input_tokens')
@@ -222,6 +260,7 @@ export async function* decodeAnthropic(
         }
         if (write1h !== undefined) usage.cacheCreation1hInputTokens = write1h
         if (cr !== undefined) usage.cacheReadInputTokens = cr
+        if (reasoning !== undefined) usage.reasoningTokens = reasoning
         sawStart = true
         yield { type: 'message_start', model: str(msg, 'model') ?? '<unknown>' }
         break
@@ -327,6 +366,21 @@ export async function* decodeAnthropic(
         // 成本就翻倍了,而且是静默的。
         const out = num(sub(data, 'usage'), 'output_tokens')
         if (out !== undefined) usage.outputTokens = out
+        const deltaUsage = sub(data, 'usage')
+        // Some Anthropic-compatible gateways omit input usage from
+        // message_start and provide the complete accounting in the terminal
+        // message_delta instead. Preserve those API-reported fields.
+        const input = num(deltaUsage, 'input_tokens')
+        if (input !== undefined) usage.inputTokens = input
+        const cacheRead = num(deltaUsage, 'cache_read_input_tokens')
+        if (cacheRead !== undefined) usage.cacheReadInputTokens = cacheRead
+        const cacheCreate = num(deltaUsage, 'cache_creation_input_tokens')
+        if (cacheCreate !== undefined) usage.cacheCreationInputTokens = cacheCreate
+        const reasoning =
+          num(deltaUsage, 'thinking_tokens') ??
+          num(deltaUsage, 'reasoning_tokens') ??
+          num(sub(deltaUsage, 'output_tokens_details'), 'reasoning_tokens')
+        if (reasoning !== undefined) usage.reasoningTokens = reasoning
         break
       }
 

@@ -35,10 +35,8 @@ export interface Migration {
 }
 
 /**
- * 第 1 条:除会话转录外的全部持久化状态。
- *
- * `conversations` / `messages` / `runs` / `messages_fts` **不在这里** ——
- * 那是步骤 6,理由见 `index.ts` 文件头的划界表。
+ * 第 1 条:最初的核心配置状态。会话转录在后续第 4 条迁移中追加，历史迁移
+ * 本身保持不变；完整的当前结构以 `MIGRATIONS` 数组全部执行后的结果为准。
  */
 const V1_CORE = `
 -- 单例行。用 CHECK 把「只能有一行」写进表里,而不是靠每个写入点都记得用 id=1:
@@ -379,6 +377,101 @@ DROP INDEX IF EXISTS attachments_by_checksum;
 CREATE INDEX attachments_by_checksum ON attachments (checksum, scope, owner_id);
 `
 
+/**
+ * 第 8 条：让用量记录足以回答一次请求为什么慢、为什么失败、以及统计值是否精确。
+ *
+ * 仍然只存路由和计量元数据，不保存提示词、回复正文、请求头或密钥。思考 Token
+ * 可空是刻意的：不是每家供应商都会回传独立计数；从可见 thinking 文本推算时，
+ * `thinking_tokens_estimated` 会明确标出来，不能把估算冒充账单真值。
+ */
+const V8_USAGE_DETAILS = `
+ALTER TABLE usage_records ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN session_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE usage_records ADD COLUMN provider_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN protocol TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE usage_records ADD COLUMN endpoint TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN response_model TEXT;
+ALTER TABLE usage_records ADD COLUMN thinking_tokens INTEGER;
+ALTER TABLE usage_records ADD COLUMN thinking_tokens_estimated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage_records ADD COLUMN time_to_first_token_ms INTEGER;
+ALTER TABLE usage_records ADD COLUMN stop_reason TEXT;
+ALTER TABLE usage_records ADD COLUMN error_message TEXT;
+
+CREATE INDEX usage_records_by_run ON usage_records (run_id, at DESC, id DESC);
+CREATE INDEX usage_records_by_session ON usage_records (session_id, at DESC, id DESC);
+`
+
+/** 第 9 条：上下文窗口检查点。完整消息仍在 messages 表中，检查点只保存可编辑的派生笔记。 */
+const V9_CONTEXT_MANAGEMENT = `
+CREATE TABLE context_checkpoints (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+  window_index INTEGER NOT NULL,
+  note TEXT NOT NULL,
+  source TEXT NOT NULL,
+  covered_from_message_id TEXT,
+  covered_through_message_id TEXT,
+  input_tokens_before INTEGER,
+  input_tokens_after INTEGER,
+  search_hits TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (session_id, window_index)
+);
+CREATE INDEX context_checkpoints_by_session ON context_checkpoints (session_id, window_index);
+`
+
+/**
+ * 第 10 条：子代理转录不是一条对话。
+ *
+ * ## 这一列在挡什么
+ *
+ * 子代理 run 有自己的 sessionId(`runtime.childRequestFor`),于是每派一个子代理
+ * 就在 `sessions` 表里留下一条真行 —— workspace 和父一样,标题永远是「新对话」
+ * (标题生成只对 `depth === 0` 触发)。表现是:用户在侧边栏里数不清哪条是自己的对话。
+ *
+ * 它必须**留在表里**:`messages` / `runs` / `attachments` / `context_checkpoints`
+ * 都对 `sessions` 有外键,而子代理的转录要落盘。所以「落盘」和「出现在列表里」
+ * 得用一列分开,而不是靠不建行。
+ *
+ * ## 为什么判据是这一列,而不是 id 里的 `:sub:`
+ *
+ * 子会话 id 是**递归拼**出来的:`父.id || ':sub:' || 子runId`,而子 runId 自己
+ * 又是 `父runId || ':sub:' || 序号`。于是 depth-1 的 id 里有 2 个 `:sub:`、
+ * depth-2 有 5 个 —— 想从 id 反推父亲,第一个 `:sub:` 切出的是**爷爷**,
+ * 最后一个切出的是一个**根本不存在的 id**。两种都错,而且错在不同方向。
+ *
+ * 所以运行期一律读这一列(`RunRequest.parentSessionId` 一路传下来),
+ * 下面那几条 DELETE 是**唯一**一处解析 id 形状的地方,只用来认出存量脏行。
+ *
+ * ## 为什么不加真外键
+ *
+ * `REFERENCES sessions(id) ON DELETE CASCADE` 在 ADD COLUMN 上是合法的,也能白拿
+ * 一层级联。但 `mergeDataExport` 是按导出顺序逐条 `putSession` 的,子会话完全可能
+ * 排在父之前 —— 一次外键违反会让**整个导入事务回滚**。级联因此写在
+ * `repo.deleteSession` 里(它还要顺带收 `messages_fts` 和草稿附件,那两处本来
+ * 就没有外键管得着)。
+ */
+const V10_SUBAGENT_SESSIONS = `
+ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;
+-- 两种形状共用:过滤按 IS NULL 扫,级联按 = ? 查子。
+CREATE INDEX sessions_by_parent ON sessions (parent_session_id, updated_at DESC);
+
+-- 存量脏行连根删掉。顶层 id 是 ULID(不含冒号),「:sub:」 只可能来自
+-- childRequestFor,所以这条判据不会误伤用户自己的对话。
+--
+-- ★ 顺序不能换。messages_fts 是虚表、attachments 的草稿行挂的是 owner_id,
+--   这两处都没有外键管得着,必须赶在 DELETE FROM sessions 之前;
+--   messages / runs / context_checkpoints / 已提交附件由外键 CASCADE 带走
+--   (migrate() 全程开着 enableForeignKeyConstraints)。
+DELETE FROM messages_fts WHERE session_id IN (SELECT id FROM sessions WHERE instr(id, ':sub:') > 0);
+DELETE FROM attachments WHERE scope = 'session' AND owner_id IN (SELECT id FROM sessions WHERE instr(id, ':sub:') > 0);
+DELETE FROM kv WHERE key IN (SELECT 'session.input.' || id FROM sessions WHERE instr(id, ':sub:') > 0);
+DELETE FROM sessions WHERE instr(id, ':sub:') > 0;
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -386,5 +479,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 4, name: 'sessions-data', sql: V4_SESSIONS },
   { version: 5, name: 'attachment-scope', sql: V5_ATTACHMENT_SCOPE },
   { version: 6, name: 'attachment-display-name', sql: V6_ATTACHMENT_DISPLAY_NAME },
-  { version: 7, name: 'attachment-owner', sql: V7_ATTACHMENT_OWNER }
+  { version: 7, name: 'attachment-owner', sql: V7_ATTACHMENT_OWNER },
+  { version: 8, name: 'usage-details', sql: V8_USAGE_DETAILS },
+  { version: 9, name: 'context-management', sql: V9_CONTEXT_MANAGEMENT },
+  { version: 10, name: 'subagent-sessions', sql: V10_SUBAGENT_SESSIONS }
 ]

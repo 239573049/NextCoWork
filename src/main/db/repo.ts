@@ -14,11 +14,12 @@
  * (`ipc/workspace.ts` 的 `updateWorkspace` / `listDir`)都是展开取值,不改返回对象。
  */
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
+import type { ContextCheckpoint, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import { mcpSecretRef } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
-import { normalizeUpstreamProvider } from '../../shared/domain/provider'
+import { normalizeUpstreamProvider, providerCredentialRef } from '../../shared/domain/provider'
 import type { ModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import { isModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
@@ -27,8 +28,18 @@ import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings
 import { DEFAULT_SETTINGS, mergeSettings } from '../../shared/domain/settings'
 import { dataMergeDecision, type CleanupPreview, type CleanupResult, type DataExport, type ExportSession, type ImportApplyResult } from '../../shared/domain/data'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
+import { isDefaultSessionTitle } from '../../shared/domain/session'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import type { Workspace } from '../../shared/domain/workspace'
+import type {
+  UsageAttemptRecord,
+  UsageCostTotal,
+  UsageDimensionStat,
+  UsageRequestLogsPage,
+  UsageRequestLogsQuery,
+  UsageSummary,
+  UsageWindow
+} from '../../shared/domain/usage'
 import { fileStats, stmt, tx } from './index'
 import { ulid } from '../../shared/util/id'
 import { createHash } from 'node:crypto'
@@ -111,6 +122,8 @@ export function removeWorkspace(id: string): void {
 export interface SessionCreateInput {
   id?: string
   workspaceId: string
+  /** 非空 = 这是一次子代理 run 的转录,不进任何面向用户的枚举。见 `Session.parentSessionId`。 */
+  parentSessionId?: string
   title?: string
   model?: string
   mode?: SessionMode
@@ -129,7 +142,16 @@ function sessionFromRow(row: Record<string, unknown>): Session {
   return {
     id: String(row['id']),
     workspaceId: String(row['workspace_id']),
+    /*
+      ★ 只认真列,不走 `parsed` 兜底。json 里那份是 `sessionRowJson` 顺手写进去的
+      副本,而列是过滤和级联唯一读的地方 —— 两者不一致时必须以列为准,
+      否则一条 json 损坏的行会重新出现在侧边栏里。
+    */
+    ...(row['parent_session_id'] === null || row['parent_session_id'] === undefined
+      ? {} : { parentSessionId: String(row['parent_session_id']) }),
     title: String(row['title'] ?? parsed.title ?? '新对话'),
+    ...(parsed.titleSource === 'default' || parsed.titleSource === 'generated' || parsed.titleSource === 'manual'
+      ? { titleSource: parsed.titleSource } : {}),
     model: String(row['model'] ?? parsed.model ?? ''),
     mode: (row['mode'] ?? parsed.mode ?? 'normal') as SessionMode,
     thinking: (row['thinking'] ?? parsed.thinking ?? 'auto') as ThinkingLevel,
@@ -153,7 +175,9 @@ export function createSession(input: SessionCreateInput): Session {
   const session: Session = {
     id: input.id ?? ulid(now),
     workspaceId: input.workspaceId,
+    ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
     title: input.title?.trim() || '新对话',
+    titleSource: isDefaultSessionTitle(input.title ?? '') ? 'default' : 'manual',
     model: input.model ?? '',
     mode: input.mode ?? 'normal',
     thinking: input.thinking ?? 'auto',
@@ -171,7 +195,18 @@ export function createSession(input: SessionCreateInput): Session {
 export function ensureSession(input: SessionCreateInput): Session {
   if (input.id !== undefined) {
     const existing = getSession(input.id)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      /*
+        ★ 唯一一处「命中已有行还要写」的例外:这一行是在加上
+        `parent_session_id` 之前建的(或者由一份旧存档导入),而它决定这条转录
+        进不进侧边栏。不补的话,一条续跑的子代理会话会永远留在列表里,
+        且没有任何入口能修正它。其余字段照旧不覆盖 —— 用户改过的标题归用户。
+      */
+      if (input.parentSessionId !== undefined && existing.parentSessionId === undefined) {
+        return putSession({ ...existing, parentSessionId: input.parentSessionId })
+      }
+      return existing
+    }
   }
   return createSession(input)
 }
@@ -184,16 +219,23 @@ export function getSession(id: string): Session | undefined {
 export function putSession(session: Session): Session {
   const normalized: Session = {
     ...session,
+    /*
+      ★ 自环护栏。`parent_session_id = id` 会让 `sessionSubtreeIds` 的递归 CTE
+      在这一行上原地打转 —— `UNION` 去重能终止它,但整条级联删除会静默地
+      只删这一行。畸形导入和将来某个写错的派生都从这里挡掉。
+    */
+    ...(session.parentSessionId === session.id ? { parentSessionId: undefined } : {}),
     status: 'idle',
     title: session.title.trim() || '新对话'
   }
   stmt(
     `INSERT INTO sessions
-       (id, workspace_id, title, model, mode, thinking, root_path_at_creation, status,
+       (id, workspace_id, parent_session_id, title, model, mode, thinking, root_path_at_creation, status,
         archived, favorited, created_at, updated_at, json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET
        workspace_id = excluded.workspace_id,
+       parent_session_id = excluded.parent_session_id,
        title = excluded.title,
        model = excluded.model,
        mode = excluded.mode,
@@ -208,6 +250,7 @@ export function putSession(session: Session): Session {
   ).run(
     normalized.id,
     normalized.workspaceId,
+    normalized.parentSessionId ?? null,
     normalized.title,
     normalized.model,
     normalized.mode,
@@ -227,10 +270,17 @@ export function putSession(session: Session): Session {
   return normalized
 }
 
+/**
+ * 侧边栏的那张列表。
+ *
+ * ★ `parent_session_id IS NULL` 是**子代理转录的过滤口**:它们的行确实在表里
+ * (外键要求如此),但它们不是用户的对话 —— 少了这个条件,每派一个子代理
+ * 侧边栏就多一条永远叫「新对话」的条目(标题生成只对 depth 0 触发)。
+ */
 export function listSessions(workspaceId: string, archived?: boolean): SessionListItem[] {
   const rows = archived === undefined
-    ? stmt('SELECT id, title, updated_at, archived FROM sessions WHERE workspace_id = ? ORDER BY updated_at DESC, id DESC').all(workspaceId)
-    : stmt('SELECT id, title, updated_at, archived FROM sessions WHERE workspace_id = ? AND archived = ? ORDER BY updated_at DESC, id DESC').all(workspaceId, archived ? 1 : 0)
+    ? stmt('SELECT id, title, updated_at, archived FROM sessions WHERE workspace_id = ? AND parent_session_id IS NULL ORDER BY updated_at DESC, id DESC').all(workspaceId)
+    : stmt('SELECT id, title, updated_at, archived FROM sessions WHERE workspace_id = ? AND parent_session_id IS NULL AND archived = ? ORDER BY updated_at DESC, id DESC').all(workspaceId, archived ? 1 : 0)
   return rows.map((row) => {
     const r = row as Record<string, unknown>
     const id = String(r['id'])
@@ -248,21 +298,124 @@ export function listSessions(workspaceId: string, archived?: boolean): SessionLi
 export function getSessionDetail(id: string): SessionDetail | undefined {
   const session = getSession(id)
   if (session === undefined) return undefined
-  return { session, messages: getHistory(id) as AgentMessage[] }
+  return { session, messages: getHistory(id) as AgentMessage[], contextCheckpoints: listContextCheckpoints(id) }
 }
 
+/**
+ * 库里**全部**会话,子代理转录也算。
+ *
+ * ★ 这里**不能**加 `parent_session_id IS NULL`。它服务的是备份 manifest
+ * (`ipc/storage.ts` 的 `createBackup`),而 `validateBackupDatabase` 是拿
+ * **裸** `SELECT COUNT(*) FROM sessions` 跟 manifest 对账的 —— 两边不等就
+ * `manifest count mismatch`,后果是**每一个新建的备份都恢复不了**。
+ * 「导出给人看的那份」用下面那个函数。
+ */
 export function listAllSessionDetails(): ExportSession[] {
-  return stmt('SELECT id FROM sessions ORDER BY updated_at DESC, id DESC').all().flatMap((row) => {
+  return sessionDetailsOf(stmt('SELECT id FROM sessions ORDER BY updated_at DESC, id DESC').all())
+}
+
+/** 数据导出用:只给顶层对话。子代理转录是父对话的实现细节,导出它没有意义。 */
+export function listExportableSessionDetails(): ExportSession[] {
+  return sessionDetailsOf(
+    stmt('SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY updated_at DESC, id DESC').all()
+  )
+}
+
+function sessionDetailsOf(rows: readonly unknown[]): ExportSession[] {
+  return rows.flatMap((row) => {
     const id = String((row as Record<string, unknown>)['id'])
     const detail = getSessionDetail(id)
-    return detail === undefined ? [] : [{ session: detail.session, messages: [...detail.messages] }]
+    return detail === undefined ? [] : [{
+      session: detail.session,
+      messages: [...detail.messages],
+      contextCheckpoints: [...(detail.contextCheckpoints ?? [])]
+    }]
   })
+}
+
+function parseContextCheckpoint(row: Record<string, unknown>): ContextCheckpoint {
+  let searchHits: ContextSearchHit[] | undefined
+  try {
+    const parsed: unknown = row['search_hits'] === null || row['search_hits'] === undefined
+      ? undefined
+      : JSON.parse(String(row['search_hits']))
+    if (Array.isArray(parsed)) searchHits = parsed as ContextSearchHit[]
+  } catch {
+    searchHits = undefined
+  }
+  return {
+    id: String(row['id']),
+    sessionId: String(row['session_id']),
+    windowIndex: Number(row['window_index']),
+    note: String(row['note'] ?? ''),
+    source: String(row['source']) as ContextCheckpointSource,
+    ...(row['covered_from_message_id'] == null ? {} : { coveredFromMessageId: String(row['covered_from_message_id']) }),
+    ...(row['covered_through_message_id'] == null ? {} : { coveredThroughMessageId: String(row['covered_through_message_id']) }),
+    ...(row['input_tokens_before'] == null ? {} : { inputTokensBefore: Number(row['input_tokens_before']) }),
+    ...(row['input_tokens_after'] == null ? {} : { inputTokensAfter: Number(row['input_tokens_after']) }),
+    ...(searchHits === undefined ? {} : { searchHits }),
+    createdAt: Number(row['created_at']),
+    updatedAt: Number(row['updated_at']),
+    revision: Number(row['revision'] ?? 1)
+  }
+}
+
+export function listContextCheckpoints(sessionId: string): ContextCheckpoint[] {
+  return stmt('SELECT * FROM context_checkpoints WHERE session_id = ? ORDER BY window_index, id')
+    .all(sessionId)
+    .map((row) => parseContextCheckpoint(row as Record<string, unknown>))
+}
+
+export function getContextCheckpoint(id: string): ContextCheckpoint | undefined {
+  const row = stmt('SELECT * FROM context_checkpoints WHERE id = ?').get(id)
+  return row === undefined ? undefined : parseContextCheckpoint(row as Record<string, unknown>)
+}
+
+export function upsertContextCheckpoint(checkpoint: ContextCheckpoint): ContextCheckpoint {
+  tx(() => {
+    stmt(
+      `INSERT INTO context_checkpoints
+       (id, session_id, window_index, note, source, covered_from_message_id, covered_through_message_id,
+        input_tokens_before, input_tokens_after, search_hits, created_at, updated_at, revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET note = excluded.note, source = excluded.source,
+         covered_from_message_id = excluded.covered_from_message_id,
+         covered_through_message_id = excluded.covered_through_message_id,
+         input_tokens_before = excluded.input_tokens_before,
+         input_tokens_after = excluded.input_tokens_after,
+         search_hits = excluded.search_hits, updated_at = excluded.updated_at,
+         revision = excluded.revision`
+    ).run(
+      checkpoint.id,
+      checkpoint.sessionId,
+      checkpoint.windowIndex,
+      checkpoint.note,
+      checkpoint.source,
+      checkpoint.coveredFromMessageId ?? null,
+      checkpoint.coveredThroughMessageId ?? null,
+      checkpoint.inputTokensBefore ?? null,
+      checkpoint.inputTokensAfter ?? null,
+      checkpoint.searchHits === undefined ? null : JSON.stringify(checkpoint.searchHits),
+      checkpoint.createdAt,
+      checkpoint.updatedAt,
+      checkpoint.revision
+    )
+  })
+  return checkpoint
+}
+
+export function updateContextCheckpoint(id: string, note: string, revision: number, now: number): ContextCheckpoint {
+  const current = getContextCheckpoint(id)
+  if (current === undefined) throw new Error(`上下文检查点不存在: ${id}`)
+  if (current.revision !== revision) throw new Error('上下文检查点已被其它窗口更新，请重新加载后再保存')
+  const next = { ...current, note, updatedAt: now, revision: revision + 1 }
+  return upsertContextCheckpoint(next)
 }
 
 export function renameSession(id: string, title: string): void {
   const current = getSession(id)
   if (current === undefined) throw new Error(`会话不存在: ${id}`)
-  putSession({ ...current, title: title.trim() || '新对话', updatedAt: Date.now() })
+  putSession({ ...current, title: title.trim() || '新对话', titleSource: 'manual', updatedAt: Date.now() })
 }
 
 export function setSessionArchived(id: string, archived: boolean): void {
@@ -606,14 +759,49 @@ export function setRunRecord(id: string, sessionId: string, status: string, star
   ).run(id, sessionId, status, startedAt, endedAt ?? null)
 }
 
-export function deleteSession(id: string): void {
-  tx(() => {
-    stmt('DELETE FROM messages_fts WHERE session_id = ?').run(id)
-    stmt('DELETE FROM sessions WHERE id = ?').run(id)
-    // 草稿附件没有 session_id（外键要求上传时会话可以尚未创建），
-    // 因此不能只依赖 CASCADE；owner_id 是它们的会话归属。
-    stmt("DELETE FROM attachments WHERE scope = 'session' AND owner_id = ?").run(id)
-    removeKv(`session.input.${id}`)
+/**
+ * 一条会话 + 它派生出来的全部子代理转录(任意深度),root 在前。
+ *
+ * ★ 固定 SQL、单 root,多 root 由调用方在 JS 里循环。动态 `IN (?,?,…)` 会给
+ * **每一种长度**在 `db/index.ts` 的 prepared 缓存里留一条永不失效的语句。
+ *
+ * ★ `UNION` 而不是 `UNION ALL`:畸形数据造出的环会被去重终止,而 `UNION ALL`
+ * 会把同步的 `DatabaseSync` 转死 —— 也就是把整个主进程转死。
+ * `putSession` 里那道自环护栏是第一层,这是第二层。
+ */
+export function sessionSubtreeIds(rootId: string): string[] {
+  return stmt(
+    `WITH RECURSIVE subtree(id) AS (
+       SELECT id FROM sessions WHERE id = ?
+       UNION
+       SELECT s.id FROM sessions s JOIN subtree t ON s.parent_session_id = t.id
+     )
+     SELECT id FROM subtree`
+  ).all(rootId).map((row) => String((row as Record<string, unknown>)['id']))
+}
+
+/**
+ * 删一条会话,连同它派生出来的全部子代理转录。返回真正删掉的那些 id。
+ *
+ * ★ 级联写在 repo 而不是 `state/store.ts`:`deleteByAge` 和 `deleteAllHistory`
+ * 都是在**这个文件内部**调 `deleteSession` 的,级联放外面等于让那两条路径
+ * 继续留下子转录 —— 而子转录在过滤之后是**不朽的**:没有任何枚举看得见它,
+ * 也没有任何清理路径遍历得到它。
+ */
+export function deleteSession(id: string): string[] {
+  return tx(() => {
+    const ids = sessionSubtreeIds(id)
+    // 先叶后根。sessions 之间没有真外键(理由见 schema.ts 第 10 条),
+    // 顺序其实无所谓;保持和 CASCADE 同向,便于将来真加外键时不用重排。
+    for (const sid of [...ids].reverse()) {
+      stmt('DELETE FROM messages_fts WHERE session_id = ?').run(sid)
+      stmt('DELETE FROM sessions WHERE id = ?').run(sid)
+      // 草稿附件没有 session_id（外键要求上传时会话可以尚未创建），
+      // 因此不能只依赖 CASCADE；owner_id 是它们的会话归属。
+      stmt("DELETE FROM attachments WHERE scope = 'session' AND owner_id = ?").run(sid)
+      removeKv(`session.input.${sid}`)
+    }
+    return ids
   })
 }
 
@@ -644,7 +832,7 @@ export function exportDataSnapshot(): Omit<DataExport, 'encryptedCredentials'> {
     exportedAt: new Date().toISOString(),
     settings,
     workspaces: listWorkspaces(),
-    sessions: listAllSessionDetails(),
+    sessions: listExportableSessionDetails(),
     providers: listProviders(),
     aliases: listAliases(),
     mcpServers: listMcpServers(),
@@ -692,7 +880,17 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
     for (const p of data.providers) {
       const local = listProviders().find((x) => x.id === p.id)
       const decision = dataMergeDecision(local, p)
-      if (decision !== 'skip') { putProvider(p); imported++; if (decision === 'overwrite') overwritten++ } else skipped++
+      if (decision !== 'skip') {
+        // `credentialRef` is not trusted import data. Preserve a legacy ref
+        // already owned by this local provider; otherwise derive the same ref
+        // as the provider IPC write boundary.
+        putProvider({
+          ...p,
+          credentialRef: local?.credentialRef ?? providerCredentialRef(p.id)
+        })
+        imported++
+        if (decision === 'overwrite') overwritten++
+      } else skipped++
     }
     for (const a of data.aliases) {
       const local = listAliases().find((x) => x.providerId === a.providerId && x.alias === a.alias)
@@ -712,12 +910,26 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
     setKv('skills.disabled', data.disabledSkillIds)
 
     for (const item of data.sessions) {
+      /*
+        ★ 子代理转录一律丢弃,不计进 imported/skipped —— 它们不是用户实体。
+
+        新导出根本不含它们(`listExportableSessionDetails`),这一条挡的是**旧文件**:
+        那时候子会话既没有 `parentSessionId`、又确实被导了出去,原样写回库
+        就等于用一次导入把「侧边栏里一堆新对话」这个 bug 完整还原。
+        父转录里的子代理收据只带 `childRunId`(进程内路由键,重启即失效),
+        不引用会话 id,所以丢掉它们不会在任何地方留下悬空引用。
+      */
+      if (item.session.parentSessionId !== undefined || item.session.id.includes(':sub:')) continue
       const local = getSession(item.session.id)
       const decision = dataMergeDecision(local, item.session)
       if (decision === 'skip') { skipped++; continue }
       if (decision === 'overwrite') overwritten++
       putSession(item.session)
       replaceHistory(item.session.id, item.messages)
+      // 检查点与会话历史一起导入；旧导出没有该字段时按空数组处理。
+      for (const checkpoint of item.contextCheckpoints ?? []) {
+        upsertContextCheckpoint(checkpoint)
+      }
       imported++
       sessionsImported++
       messagesImported += item.messages.length
@@ -757,10 +969,24 @@ export function attachmentRows(): AttachmentReferenceRow[] {
   })
 }
 
-/** 返回指定会话的附件；包括尚未提交、只用 owner_id 归属的草稿。 */
+/**
+ * 返回指定会话的附件；包括尚未提交、只用 owner_id 归属的草稿。
+ *
+ * ★ 展开子代理转录,而且是在**这里**展开,不在调用方。
+ * `deleteSession` 是级联的,所以「会消失的附件」天然包含子会话那部分;
+ * 而 `cleanupPreview` 算字节数、`storage.ts` 的 `withActualAttachmentBytes`
+ * 换算真实大小、`sessionAttachmentPaths` 抢在级联之前记路径 —— 这三处**必须**
+ * 用同一个集合,否则预览的数字和实际删掉的量对不上,或者磁盘上留下永久孤儿文件。
+ * 收在这个函数里,四个调用点一行都不用改,也不会有人漏掉其中一个。
+ */
 export function attachmentRowsForSessions(sessionIds: readonly string[]): AttachmentReferenceRow[] {
   if (sessionIds.length === 0) return []
-  const wanted = new Set(sessionIds)
+  /*
+    ★ 传进来的 id **原样保留**,不能只用子树查询的结果:草稿附件可以早于
+    `sessions` 行存在(用户新建对话、传了图、还没点发送),那种 id 在表里查不到,
+    而它正是这个函数最要紧的一类归属。子树只负责**多**认一些,不负责筛。
+  */
+  const wanted = new Set([...sessionIds, ...sessionIds.flatMap((id) => sessionSubtreeIds(id))])
   return attachmentRows().filter((row) =>
     row.scope === 'session' &&
     ((row.sessionId !== null && wanted.has(row.sessionId)) ||
@@ -778,9 +1004,14 @@ export function allSessionAttachmentRows(): AttachmentReferenceRow[] {
   return attachmentRows().filter((row) => row.scope === 'session')
 }
 
-/** 按会话更新时间取待删 ID，避免 storage 层重复拼接 SQL。 */
+/**
+ * 按会话更新时间取待删 ID，避免 storage 层重复拼接 SQL。
+ *
+ * ★ 只取顶层。子代理转录不是「一条对话」,不该出现在「删除 N 天前的会话」
+ * 那个数字里 —— 它们由 `deleteSession` 跟着父一起走。
+ */
 export function sessionIdsBefore(cutoff: number): string[] {
-  return stmt('SELECT id FROM sessions WHERE updated_at < ?').all(cutoff)
+  return stmt('SELECT id FROM sessions WHERE updated_at < ? AND parent_session_id IS NULL').all(cutoff)
     .map((row) => String((row as Record<string, unknown>)['id']))
 }
 
@@ -1099,15 +1330,18 @@ export function searchAll(q: string, workspaceId?: string, limit = 50): SearchHi
   if (trimmed === '') return []
   const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
   // 以短语查询避免用户输入的 MATCH 运算符破坏 FTS 语法。
+  // 四条 SQL 都带 `s.parent_session_id IS NULL`:子代理转录不是用户的对话,
+  // 搜出来只会给出一条点不开、也没有上下文的命中。FTS 与 LIKE 兜底都要,
+  // 漏掉兜底那条的话,这个泄漏会在旧库/极端 Unicode 上悄悄复活。
   const phrase = `"${trimmed.replaceAll('"', '""')}"`
   try {
     const rows = workspaceId === undefined
       ? stmt(`SELECT f.session_id, f.message_id, s.workspace_id, s.title, snippet(messages_fts, 3, '<mark>', '</mark>', '…', 18) AS snippet, m.created_at
               FROM messages_fts f JOIN sessions s ON s.id = f.session_id JOIN messages m ON m.id = f.message_id
-              WHERE messages_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`).all(phrase, safeLimit)
+              WHERE s.parent_session_id IS NULL AND messages_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`).all(phrase, safeLimit)
       : stmt(`SELECT f.session_id, f.message_id, s.workspace_id, s.title, snippet(messages_fts, 3, '<mark>', '</mark>', '…', 18) AS snippet, m.created_at
               FROM messages_fts f JOIN sessions s ON s.id = f.session_id JOIN messages m ON m.id = f.message_id
-              WHERE s.workspace_id = ? AND messages_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`).all(workspaceId, phrase, safeLimit)
+              WHERE s.workspace_id = ? AND s.parent_session_id IS NULL AND messages_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`).all(workspaceId, phrase, safeLimit)
     return rows.map((row) => {
       const r = row as Record<string, unknown>
       return { sessionId: String(r['session_id']), workspaceId: String(r['workspace_id']), messageId: String(r['message_id']), title: String(r['title']), snippet: String(r['snippet'] ?? ''), createdAt: Number(r['created_at']) }
@@ -1117,10 +1351,48 @@ export function searchAll(q: string, workspaceId?: string, limit = 50): SearchHi
     const like = `%${trimmed}%`
     const rows = workspaceId === undefined
       ? stmt(`SELECT m.session_id, m.id AS message_id, s.workspace_id, s.title, substr(m.parts, 1, 240) AS snippet, m.created_at
-              FROM messages m JOIN sessions s ON s.id = m.session_id WHERE m.parts LIKE ? ORDER BY m.created_at DESC LIMIT ?`).all(like, safeLimit)
+              FROM messages m JOIN sessions s ON s.id = m.session_id WHERE s.parent_session_id IS NULL AND m.parts LIKE ? ORDER BY m.created_at DESC LIMIT ?`).all(like, safeLimit)
       : stmt(`SELECT m.session_id, m.id AS message_id, s.workspace_id, s.title, substr(m.parts, 1, 240) AS snippet, m.created_at
-              FROM messages m JOIN sessions s ON s.id = m.session_id WHERE s.workspace_id = ? AND m.parts LIKE ? ORDER BY m.created_at DESC LIMIT ?`).all(workspaceId, like, safeLimit)
+              FROM messages m JOIN sessions s ON s.id = m.session_id WHERE s.workspace_id = ? AND s.parent_session_id IS NULL AND m.parts LIKE ? ORDER BY m.created_at DESC LIMIT ?`).all(workspaceId, like, safeLimit)
     return rows.map((row) => { const r = row as Record<string, unknown>; return { sessionId: String(r['session_id']), workspaceId: String(r['workspace_id']), messageId: String(r['message_id']), title: String(r['title']), snippet: String(r['snippet'] ?? ''), createdAt: Number(r['created_at']) } })
+  }
+}
+
+/** 为上下文窗口提供当前会话范围的历史检索，复用 messages_fts，避免跨任务串入。 */
+export function searchSessionHistory(sessionId: string, q: string, limit = 5): ContextSearchHit[] {
+  const trimmed = q.trim()
+  if (trimmed === '') return []
+  const safeLimit = Math.max(1, Math.min(10, Math.floor(limit)))
+  const phrase = `"${trimmed.replaceAll('"', '""')}"`
+  try {
+    const rows = stmt(`SELECT f.message_id, m.role, m.created_at,
+              snippet(messages_fts, 3, '', '', '…', 10) AS snippet
+              FROM messages_fts f JOIN messages m ON m.id = f.message_id
+              WHERE f.session_id = ? AND messages_fts MATCH ?
+              ORDER BY m.created_at DESC LIMIT ?`).all(sessionId, phrase, safeLimit)
+    return rows.map((row) => {
+      const r = row as Record<string, unknown>
+      return {
+        messageId: String(r['message_id']),
+        role: String(r['role']) as ContextSearchHit['role'],
+        createdAt: Number(r['created_at']),
+        snippet: String(r['snippet'] ?? '').slice(0, 600)
+      }
+    })
+  } catch {
+    const like = `%${trimmed}%`
+    const rows = stmt(`SELECT id AS message_id, role, created_at, substr(parts, 1, 600) AS snippet
+              FROM messages WHERE session_id = ? AND parts LIKE ?
+              ORDER BY created_at DESC LIMIT ?`).all(sessionId, like, safeLimit)
+    return rows.map((row) => {
+      const r = row as Record<string, unknown>
+      return {
+        messageId: String(r['message_id']),
+        role: String(r['role']) as ContextSearchHit['role'],
+        createdAt: Number(r['created_at']),
+        snippet: String(r['snippet'] ?? '').slice(0, 600)
+      }
+    })
   }
 }
 
@@ -1167,18 +1439,32 @@ export function cleanupPreview(kind: 'attachments' | 'age' | 'history' | 'local-
     return { kind, sessionCount: 0, messageCount: 0, attachmentCount: rows.length, bytes: rows.reduce((n, r) => n + Number((r as Record<string, unknown>)['size'] ?? 0), 0), undeletable: [] }
   }
   if (kind === 'age') {
-    const rows = stmt(`SELECT s.id, COUNT(m.id) AS messages
-      FROM sessions s LEFT JOIN messages m ON m.session_id = s.id WHERE s.updated_at < ? GROUP BY s.id`).all(cutoff ?? 0)
-    const ids = rows.map((r) => String((r as Record<string, unknown>)['id']))
-    const attachmentRows = attachmentRowsForSessions(ids)
+    /*
+      ★ 两个集合,不是一个:
+
+      `sessionCount` 数**顶层** —— 确认框里那句话是「将删除 N 条对话」,
+      而子代理转录不是一条对话,算进去就是虚报。
+      `messageCount` / `bytes` 数**整棵子树** —— 这些是真正会消失的字节。
+      漏掉子会话的消息,预览数字就和 `deleteByAge` 实际删掉的量对不上,
+      而那个差额没有任何地方会解释。
+    */
+    const topIds = sessionIdsBefore(cutoff ?? 0)
+    const ids = topIds.flatMap((id) => sessionSubtreeIds(id))
+    // attachmentRowsForSessions 内部也会展开子树;传顶层即可,而且必须和
+    // storage.ts 的 withActualAttachmentBytes 走同一个函数(见那边的注释)。
+    const attachmentRows = attachmentRowsForSessions(topIds)
+    let messageCount = 0
     let messageBytes = 0
-    if (ids.length > 0) {
-      const parts = stmt(`SELECT parts FROM messages WHERE session_id IN (${ids.map(() => '?').join(',')})`).all(...ids)
-      messageBytes = parts.reduce((n, r) => n + Buffer.byteLength(String((r as Record<string, unknown>)['parts'] ?? ''), 'utf8'), 0)
+    for (const id of ids) {
+      for (const row of stmt('SELECT parts FROM messages WHERE session_id = ?').all(id)) {
+        messageCount += 1
+        messageBytes += Buffer.byteLength(String((row as Record<string, unknown>)['parts'] ?? ''), 'utf8')
+      }
     }
-    return { kind, sessionCount: rows.length, messageCount: rows.reduce((n, r) => n + Number((r as Record<string, unknown>)['messages']), 0), attachmentCount: attachmentRows.length, bytes: messageBytes + attachmentRows.reduce((n, row) => n + row.size, 0), undeletable: [] }
+    return { kind, sessionCount: topIds.length, messageCount, attachmentCount: attachmentRows.length, bytes: messageBytes + attachmentRows.reduce((n, row) => n + row.size, 0), undeletable: [] }
   }
-  const c = stmt(`SELECT COUNT(*) AS n FROM sessions`).get() as Record<string, unknown>
+  // 只有 sessionCount 过滤:清历史确实会连子转录一起删掉,所以字节数照全量算。
+  const c = stmt(`SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id IS NULL`).get() as Record<string, unknown>
   const m = messageBytes()
   const attachments = kind === 'history' ? allSessionAttachmentRows() : attachmentRows()
   return { kind, sessionCount: Number(c.n ?? 0), messageCount: m.count, attachmentCount: attachments.length, bytes: m.bytes + attachments.reduce((n, row) => n + row.size, 0), undeletable: [] }
@@ -1196,7 +1482,8 @@ export function deleteByAge(cutoff: number): CleanupResult {
 export function storageStats(dataDirectory: string, attachmentDirectory: string, lastBackupAt: number | null): import('../../shared/domain/settings').StorageStats {
   const files = fileStats()
   const c = messageBytes()
-  const s = stmt('SELECT COUNT(*) AS n FROM sessions').get() as Record<string, unknown>
+  // 「本机有几条对话」数的是顶层;子代理转录占的字节仍然照实计入下面的 messageBytes()。
+  const s = stmt('SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id IS NULL').get() as Record<string, unknown>
   const a = stmt('SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes FROM attachments').get() as Record<string, unknown>
   let attachmentBytes = 0
   try {
@@ -1336,6 +1623,350 @@ export function removeUserModelCatalog(id: string): void {
     if (next.length === rows.length) return
     setKv(USER_MODEL_CATALOG_KEY, next)
   })
+}
+
+// ── usage records ──────────────────────────────────────────────────────────
+
+const asNullableString = (value: unknown): string | null =>
+  value === null || value === undefined ? null : String(value)
+
+function usageRecordFromRow(row: Record<string, unknown>): UsageAttemptRecord {
+  return {
+    id: String(row['id']),
+    at: Number(row['at']),
+    runId: String(row['run_id']),
+    workspaceId: String(row['workspace_id'] ?? ''),
+    sessionId: String(row['session_id'] ?? ''),
+    attempt: Number(row['attempt'] ?? 1),
+    providerId: String(row['provider_id']),
+    providerName: String(row['provider_name'] || row['provider_id']),
+    protocol: String(row['protocol'] ?? 'unknown') as UsageAttemptRecord['protocol'],
+    endpoint: String(row['endpoint'] ?? ''),
+    alias: String(row['alias']),
+    upstreamModel: String(row['upstream_model']),
+    responseModel: asNullableString(row['response_model']),
+    inputTokens: Number(row['input_tokens'] ?? 0),
+    outputTokens: Number(row['output_tokens'] ?? 0),
+    cacheReadTokens: Number(row['cache_read_tokens'] ?? 0),
+    cacheWriteTokens: Number(row['cache_write_tokens'] ?? 0),
+    cacheWrite1hTokens: Number(row['cache_write_1h_tokens'] ?? 0),
+    thinkingTokens:
+      row['thinking_tokens'] === null || row['thinking_tokens'] === undefined
+        ? null
+        : Number(row['thinking_tokens']),
+    thinkingTokensEstimated: Number(row['thinking_tokens_estimated'] ?? 0) !== 0,
+    latencyMs: Number(row['latency_ms']),
+    timeToFirstTokenMs:
+      row['time_to_first_token_ms'] === null || row['time_to_first_token_ms'] === undefined
+        ? null
+        : Number(row['time_to_first_token_ms']),
+    ok: Number(row['ok']) !== 0,
+    httpStatus:
+      row['http_status'] === null || row['http_status'] === undefined
+        ? null
+        : Number(row['http_status']),
+    errorKind: asNullableString(row['error_kind']) as UsageAttemptRecord['errorKind'],
+    errorMessage: asNullableString(row['error_message']),
+    stopReason: asNullableString(row['stop_reason']) as UsageAttemptRecord['stopReason'],
+    costMicros:
+      row['cost_micros'] === null || row['cost_micros'] === undefined
+        ? null
+        : Number(row['cost_micros']),
+    currency: asNullableString(row['currency']) as UsageAttemptRecord['currency'],
+    pricingTier:
+      row['pricing_tier'] === null || row['pricing_tier'] === undefined
+        ? null
+        : Number(row['pricing_tier']),
+    pricingWindow: asNullableString(row['pricing_window']),
+    toolCalls: Number(row['tool_calls'] ?? 0),
+    toolErrors: Number(row['tool_errors'] ?? 0)
+  }
+}
+
+/**
+ * The initial write boundary for one upstream-attempt ledger row. Token,
+ * routing, latency, and pricing fields are frozen here. Tool execution happens
+ * after the upstream stream closes, so only its two outcome counters are
+ * finalized later by `updateUsageToolsForRun`.
+ */
+export function recordUsageAttempt(record: UsageAttemptRecord): void {
+  stmt(
+    `INSERT INTO usage_records
+       (id, at, run_id, workspace_id, session_id, attempt,
+        provider_id, provider_name, protocol, endpoint, alias, upstream_model, response_model,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        cache_write_1h_tokens, thinking_tokens, thinking_tokens_estimated,
+        latency_ms, time_to_first_token_ms, ok, http_status, error_kind, error_message,
+        stop_reason, cost_micros, currency, pricing_tier, pricing_window, tool_calls, tool_errors)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    record.id,
+    record.at,
+    record.runId,
+    record.workspaceId,
+    record.sessionId,
+    record.attempt,
+    record.providerId,
+    record.providerName,
+    record.protocol,
+    record.endpoint,
+    record.alias,
+    record.upstreamModel,
+    record.responseModel,
+    record.inputTokens,
+    record.outputTokens,
+    record.cacheReadTokens,
+    record.cacheWriteTokens,
+    record.cacheWrite1hTokens,
+    record.thinkingTokens,
+    record.thinkingTokensEstimated ? 1 : 0,
+    record.latencyMs,
+    record.timeToFirstTokenMs,
+    record.ok ? 1 : 0,
+    record.httpStatus,
+    record.errorKind,
+    record.errorMessage,
+    record.stopReason,
+    record.costMicros,
+    record.currency,
+    record.pricingTier,
+    record.pricingWindow,
+    record.toolCalls,
+    record.toolErrors
+  )
+}
+
+/**
+ * Attach post-response tool outcomes to the successful tool-use attempt that
+ * produced them. Retries share a run id, while only the winning attempt can
+ * reach tool execution; restricting by stop_reason keeps a later final text
+ * turn from receiving counters that belong to an earlier tool-use turn.
+ */
+export function updateUsageToolsForRun(
+  runId: string,
+  toolCalls: number,
+  toolErrors: number
+): boolean {
+  const result = stmt(
+    `UPDATE usage_records
+        SET tool_calls = ?, tool_errors = ?
+      WHERE id = (
+        SELECT id
+          FROM usage_records
+         WHERE run_id = ? AND ok = 1 AND stop_reason = 'tool_use'
+         ORDER BY at DESC, id DESC
+         LIMIT 1
+      )`
+  ).run(toolCalls, toolErrors, runId)
+  return Number(result.changes) > 0
+}
+
+function usageWindowWhere(window: UsageWindow): { sql: string; params: number[] } {
+  const clauses = ['at < ?']
+  const params = [window.to]
+  if (window.from !== undefined) {
+    clauses.unshift('at >= ?')
+    params.unshift(window.from)
+  }
+  return { sql: clauses.join(' AND '), params }
+}
+
+function usageCosts(window: UsageWindow): UsageCostTotal[] {
+  const where = usageWindowWhere(window)
+  return stmt(
+    `SELECT currency, SUM(cost_micros) AS micros
+       FROM usage_records
+      WHERE ${where.sql} AND cost_micros IS NOT NULL AND currency IS NOT NULL
+      GROUP BY currency
+      ORDER BY currency`
+  )
+    .all(...where.params)
+    .map((row) => ({
+      currency: String(row['currency']) as UsageCostTotal['currency'],
+      micros: Number(row['micros'] ?? 0)
+    }))
+}
+
+export function getUsageSummary(window: UsageWindow): UsageSummary {
+  const where = usageWindowWhere(window)
+  const row = stmt(
+    `SELECT
+       COUNT(*) AS request_count,
+       COALESCE(SUM(ok), 0) AS success_count,
+       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+       COALESCE(SUM(cache_write_1h_tokens), 0) AS cache_write_1h_tokens,
+       COALESCE(SUM(thinking_tokens), 0) AS thinking_tokens,
+       COALESCE(SUM(CASE WHEN thinking_tokens_estimated <> 0 THEN 1 ELSE 0 END), 0)
+         AS estimated_thinking_request_count,
+       AVG(latency_ms) AS average_latency_ms,
+       AVG(time_to_first_token_ms) AS average_ttft_ms,
+       COALESCE(SUM(tool_calls), 0) AS tool_calls,
+       COALESCE(SUM(tool_errors), 0) AS tool_errors
+     FROM usage_records
+     WHERE ${where.sql}`
+  ).get(...where.params) ?? {}
+
+  const requestCount = Number(row['request_count'] ?? 0)
+  const successCount = Number(row['success_count'] ?? 0)
+  const inputTokens = Number(row['input_tokens'] ?? 0)
+  const outputTokens = Number(row['output_tokens'] ?? 0)
+  const cacheReadTokens = Number(row['cache_read_tokens'] ?? 0)
+  const cacheWriteTokens = Number(row['cache_write_tokens'] ?? 0)
+  const cacheDenominator = inputTokens + cacheReadTokens
+
+  return {
+    requestCount,
+    successCount,
+    failedCount: requestCount - successCount,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    cacheWrite1hTokens: Number(row['cache_write_1h_tokens'] ?? 0),
+    thinkingTokens: Number(row['thinking_tokens'] ?? 0),
+    estimatedThinkingRequestCount: Number(row['estimated_thinking_request_count'] ?? 0),
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    cacheHitRate: cacheDenominator === 0 ? null : cacheReadTokens / cacheDenominator,
+    averageLatencyMs:
+      row['average_latency_ms'] === null || row['average_latency_ms'] === undefined
+        ? null
+        : Number(row['average_latency_ms']),
+    averageTimeToFirstTokenMs:
+      row['average_ttft_ms'] === null || row['average_ttft_ms'] === undefined
+        ? null
+        : Number(row['average_ttft_ms']),
+    toolCalls: Number(row['tool_calls'] ?? 0),
+    toolErrors: Number(row['tool_errors'] ?? 0),
+    costs: usageCosts(window)
+  }
+}
+
+function usageLogWhere(query: UsageRequestLogsQuery): {
+  sql: string
+  params: Array<string | number>
+} {
+  const window = usageWindowWhere(query)
+  const clauses = [window.sql]
+  const params: Array<string | number> = [...window.params]
+  const search = query.query?.trim()
+  if (search) {
+    clauses.push(
+      `instr(lower(provider_name || ' ' || provider_id || ' ' || alias || ' ' || upstream_model || ' ' || run_id), lower(?)) > 0`
+    )
+    params.push(search)
+  }
+  if (query.status === 'success') clauses.push('ok = 1')
+  else if (query.status === 'failed') clauses.push('ok = 0')
+  return { sql: clauses.join(' AND '), params }
+}
+
+export function getUsageRequestLogs(query: UsageRequestLogsQuery): UsageRequestLogsPage {
+  const limit = Math.max(1, Math.min(200, Math.trunc(query.limit ?? 50)))
+  const offset = Math.max(0, Math.trunc(query.offset ?? 0))
+  const where = usageLogWhere(query)
+  const total = Number(
+    stmt(`SELECT COUNT(*) AS count FROM usage_records WHERE ${where.sql}`)
+      .get(...where.params)?.['count'] ?? 0
+  )
+  const items = stmt(
+    `SELECT * FROM usage_records
+      WHERE ${where.sql}
+      ORDER BY at DESC, id DESC
+      LIMIT ? OFFSET ?`
+  )
+    .all(...where.params, limit, offset)
+    .map(usageRecordFromRow)
+  return { items, total, offset, limit }
+}
+
+type UsageDimension = 'provider' | 'model'
+
+function getUsageDimensionStats(
+  window: UsageWindow,
+  dimension: UsageDimension
+): UsageDimensionStat[] {
+  const where = usageWindowWhere(window)
+  const idColumn = dimension === 'provider' ? 'provider_id' : 'upstream_model'
+  const labelExpression =
+    dimension === 'provider'
+      ? `COALESCE(NULLIF(MAX(provider_name), ''), provider_id)`
+      : 'upstream_model'
+  const rows = stmt(
+    `SELECT
+       ${idColumn} AS dimension_id,
+       ${labelExpression} AS dimension_label,
+       COUNT(*) AS request_count,
+       COALESCE(SUM(ok), 0) AS success_count,
+       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+       COALESCE(SUM(thinking_tokens), 0) AS thinking_tokens,
+       AVG(latency_ms) AS average_latency_ms,
+       AVG(time_to_first_token_ms) AS average_ttft_ms,
+       COALESCE(SUM(tool_calls), 0) AS tool_calls,
+       COALESCE(SUM(tool_errors), 0) AS tool_errors
+     FROM usage_records
+     WHERE ${where.sql}
+     GROUP BY ${idColumn}
+     ORDER BY request_count DESC, dimension_label
+     LIMIT 200`
+  ).all(...where.params)
+
+  const stats = new Map<string, UsageDimensionStat>()
+  for (const row of rows) {
+    const id = String(row['dimension_id'])
+    stats.set(id, {
+      id,
+      label: String(row['dimension_label']),
+      requestCount: Number(row['request_count'] ?? 0),
+      successCount: Number(row['success_count'] ?? 0),
+      inputTokens: Number(row['input_tokens'] ?? 0),
+      outputTokens: Number(row['output_tokens'] ?? 0),
+      cacheReadTokens: Number(row['cache_read_tokens'] ?? 0),
+      cacheWriteTokens: Number(row['cache_write_tokens'] ?? 0),
+      thinkingTokens: Number(row['thinking_tokens'] ?? 0),
+      averageLatencyMs:
+        row['average_latency_ms'] === null || row['average_latency_ms'] === undefined
+          ? null
+          : Number(row['average_latency_ms']),
+      averageTimeToFirstTokenMs:
+        row['average_ttft_ms'] === null || row['average_ttft_ms'] === undefined
+          ? null
+          : Number(row['average_ttft_ms']),
+      toolCalls: Number(row['tool_calls'] ?? 0),
+      toolErrors: Number(row['tool_errors'] ?? 0),
+      costs: []
+    })
+  }
+
+  const costRows = stmt(
+    `SELECT ${idColumn} AS dimension_id, currency, SUM(cost_micros) AS micros
+       FROM usage_records
+      WHERE ${where.sql} AND cost_micros IS NOT NULL AND currency IS NOT NULL
+      GROUP BY ${idColumn}, currency
+      ORDER BY ${idColumn}, currency`
+  ).all(...where.params)
+  for (const row of costRows) {
+    const target = stats.get(String(row['dimension_id']))
+    if (target === undefined) continue
+    target.costs.push({
+      currency: String(row['currency']) as UsageCostTotal['currency'],
+      micros: Number(row['micros'] ?? 0)
+    })
+  }
+  return [...stats.values()]
+}
+
+export function getUsageProviderStats(window: UsageWindow): UsageDimensionStat[] {
+  return getUsageDimensionStats(window, 'provider')
+}
+
+export function getUsageModelStats(window: UsageWindow): UsageDimensionStat[] {
+  return getUsageDimensionStats(window, 'model')
 }
 
 // ── MCP 服务器 ──────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ export function TextInput({
   onChange,
   onCommit,
   onRevert,
+  onFocus,
   placeholder,
   icon,
   invalid = false,
@@ -35,6 +36,8 @@ export function TextInput({
   onCommit?: () => void
   /** Escape。不传时 Escape 交给上层(设置浮层用它关闭) */
   onRevert?: () => void
+  /** 走 `useDraft` 的调用点要用它标记「用户正在打字,别回灌」 */
+  onFocus?: () => void
   placeholder?: string
   /** 左侧那颗图标(搜索框的放大镜) */
   icon?: React.ReactNode
@@ -69,6 +72,7 @@ export function TextInput({
         placeholder={placeholder}
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
+        onFocus={onFocus}
         onBlur={onCommit}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {

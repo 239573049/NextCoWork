@@ -1,4 +1,5 @@
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../../shared/domain/session'
+import type { AgentMessage } from '../../../shared/agent/message'
 import { invoke } from './ipc'
 
 export function listSessions(workspaceId: string, archived?: boolean): Promise<SessionListItem[]> {
@@ -7,6 +8,10 @@ export function listSessions(workspaceId: string, archived?: boolean): Promise<S
 
 export function getSession(sessionId: string): Promise<SessionDetail> {
   return invoke('sessions:get', { sessionId })
+}
+
+export function replaceHistory(sessionId: string, messages: AgentMessage[]): Promise<void> {
+  return invoke('sessions:replaceHistory', { sessionId, messages })
 }
 
 export function createSession(workspaceId: string, title?: string, sessionId?: string): Promise<Session> {

@@ -7,12 +7,14 @@
  */
 import { z } from 'zod'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
+import { browserPartition } from '../../../../shared/domain/browser'
 import { browserManager } from '../../../browser/manager'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
 import { resolvedAddressRisk, ssrfRisk } from './ssrf'
 
 const MAX_SNAPSHOT_CHARS = 80_000
+const MAX_SNAPSHOT_BYTES = 1_000_000
 const MAX_REDIRECTS = 5
 
 function workspaceIdOf(ctx: { workspaceId?: string; workspaceRoot: string }): string {
@@ -41,17 +43,63 @@ function pageText(input: string, maxChars: number): string {
     .slice(0, maxChars)
 }
 
-async function fetchPublicPage(url: URL, ctx: { host: { fetch: typeof fetch }; signal: AbortSignal }): Promise<{ response: Response; url: URL }> {
+async function readPageText(response: Response, maxChars: number): Promise<string> {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_SNAPSHOT_BYTES) {
+    throw new Error(`Browser page is larger than ${String(MAX_SNAPSHOT_BYTES)} bytes.`)
+  }
+  if (response.body === null) return ''
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const chunks: string[] = []
+  let received = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      received += next.value.byteLength
+      if (received > MAX_SNAPSHOT_BYTES) {
+        await reader.cancel()
+        throw new Error(`Browser page is larger than ${String(MAX_SNAPSHOT_BYTES)} bytes.`)
+      }
+      chunks.push(decoder.decode(next.value, { stream: true }))
+    }
+    chunks.push(decoder.decode())
+  } finally {
+    reader.releaseLock()
+  }
+  return pageText(chunks.join(''), maxChars)
+}
+
+async function fetchPublicPage(
+  url: URL,
+  partition: string,
+  ctx: {
+    host: {
+      fetch: typeof fetch
+      browserFetch?: (partition: string, input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    }
+    signal: AbortSignal
+  }
+): Promise<{ response: Response; url: URL }> {
   let current = url
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const risk = ssrfRisk(current)
     if (risk !== null) throw new Error(risk)
     const dnsRisk = await resolvedAddressRisk(current.hostname)
     if (dnsRisk !== null) throw new Error(dnsRisk)
-    const response = await ctx.host.fetch(current.href, { signal: ctx.signal, redirect: 'manual' })
+    const response = ctx.host.browserFetch === undefined
+      ? await ctx.host.fetch(current.href, { signal: ctx.signal, redirect: 'manual' })
+      : await ctx.host.browserFetch(partition, current.href, {
+          signal: ctx.signal,
+          redirect: 'manual',
+          credentials: 'include'
+        })
     if (![301, 302, 303, 307, 308].includes(response.status)) return { response, url: current }
     const location = response.headers.get('location')
     if (location === null) throw new Error('浏览器页面返回了无效的重定向')
+    await response.body?.cancel().catch(() => undefined)
     current = new URL(location, current)
   }
   throw new Error(`页面重定向超过 ${String(MAX_REDIRECTS)} 次`)
@@ -76,16 +124,22 @@ const browserOpenTool: ToolRegistration = defineTool({
     const url = new URL(input.url)
     const risk = ssrfRisk(url)
     if (risk !== null) return toolFail(risk)
-    const tab = browserManager.open({
-      workspaceId: workspaceIdOf(ctx),
-      ownerRunId: ctx.runId,
-      source: 'agent',
-      url: url.href,
-      title: input.title,
-      profileId: input.profileId,
-      openRightPanel: true
-    })
-    return toolOk(`Opened browser tab ${tab.id} at ${tab.url}. Use browser_snapshot with tabId "${tab.id}" to inspect it.`)
+    const dnsRisk = await resolvedAddressRisk(url.hostname)
+    if (dnsRisk !== null) return toolFail(dnsRisk)
+    try {
+      const tab = browserManager.open({
+        workspaceId: workspaceIdOf(ctx),
+        ownerRunId: ctx.runId,
+        source: 'agent',
+        url: url.href,
+        title: input.title,
+        profileId: input.profileId,
+        openRightPanel: true
+      })
+      return toolOk(`Opened browser tab ${tab.id} at ${tab.url}. Use browser_snapshot with tabId "${tab.id}" to inspect it.`)
+    } catch (err) {
+      return toolFail(err instanceof Error ? err.message : String(err))
+    }
   }
 })
 
@@ -102,11 +156,22 @@ const browserNavigateTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: true,
   async run(input, ctx) {
+    const existing = browserManager.get(input.tabId)
+    if (existing === undefined) return toolFail(`Browser tab does not exist: ${input.tabId}`)
+    if (existing.workspaceId !== workspaceIdOf(ctx)) return toolFail('That browser tab belongs to another workspace.')
+    if (existing.source !== 'agent' || existing.ownerRunId !== ctx.runId) {
+      return toolFail('You can only navigate a browser tab opened by this Agent run.')
+    }
     const url = new URL(input.url)
     const risk = ssrfRisk(url)
     if (risk !== null) return toolFail(risk)
+    const dnsRisk = await resolvedAddressRisk(url.hostname)
+    if (dnsRisk !== null) return toolFail(dnsRisk)
     try {
-      const tab = browserManager.navigate(input.tabId, url.href, ctx.runId)
+      const tab = browserManager.navigate(input.tabId, url.href, {
+        workspaceId: workspaceIdOf(ctx),
+        runId: ctx.runId
+      })
       return toolOk(`Browser tab ${tab.id} is navigating to ${tab.url}.`)
     } catch (err) {
       return toolFail(err instanceof Error ? err.message : String(err))
@@ -136,18 +201,30 @@ const browserSnapshotTool: ToolRegistration = defineTool({
     const risk = ssrfRisk(url)
     if (risk !== null) return toolFail(risk)
     try {
-      const fetched = await fetchPublicPage(url, ctx)
+      const fetched = await fetchPublicPage(
+        url,
+        browserPartition(tab.workspaceId, tab.profileId),
+        ctx
+      )
       const response = fetched.response
       if (!response.ok) return toolFail(`Browser page returned HTTP ${String(response.status)}.`)
-      const contentType = response.headers.get('content-type') ?? ''
+      const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
       if (!contentType.startsWith('text/') && !contentType.includes('json') && !contentType.includes('xml')) {
         return toolFail(`This browser tool only reads text pages; received ${contentType || 'unknown content'}.`)
       }
-      const text = pageText(await response.text(), input.maxChars ?? MAX_SNAPSHOT_CHARS)
-      browserManager.update(tab.id, { status: 'ready' }, ctx.runId)
+      const text = await readPageText(response, input.maxChars ?? MAX_SNAPSHOT_CHARS)
+      browserManager.update(
+        tab.id,
+        { url: fetched.url.href, status: 'ready' },
+        { workspaceId: workspaceIdOf(ctx), runId: ctx.runId }
+      )
       return toolOk(`Page: ${tab.title}\nURL: ${fetched.url.href}\n\n${text || '(The page has no readable text.)'}`)
     } catch (err) {
-      browserManager.update(tab.id, { status: 'error' }, ctx.runId)
+      try {
+        browserManager.update(tab.id, { status: 'error' }, { workspaceId: workspaceIdOf(ctx), runId: ctx.runId })
+      } catch {
+        // The user may close the tab while a background snapshot is in flight.
+      }
       return toolFail(`Unable to read browser page: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
@@ -196,7 +273,7 @@ const browserCloseTool: ToolRegistration = defineTool({
   needsNetwork: false,
   async run(input, ctx) {
     try {
-      browserManager.close(input.tabId, ctx.runId)
+      browserManager.close(input.tabId, { workspaceId: workspaceIdOf(ctx), runId: ctx.runId })
       return toolOk(`Closed browser tab ${input.tabId}.`)
     } catch (err) {
       return toolFail(err instanceof Error ? err.message : String(err))

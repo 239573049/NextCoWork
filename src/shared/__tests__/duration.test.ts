@@ -4,6 +4,7 @@ import {
   elapsedOf,
   formatCallDuration,
   formatDuration,
+  runDurationOf,
   totalDuration
 } from '../agent/duration'
 import type { AgentEvent } from '../agent/event'
@@ -106,6 +107,25 @@ describe('totalDuration', () => {
 
   it('空组是 0', () => {
     expect(totalDuration([])).toBe(0)
+  })
+})
+
+describe('runDurationOf', () => {
+  it('prefers explicit run bounds, including time spent thinking or waiting', () => {
+    expect(runDurationOf({ runStartedAt: 1_000, runEndedAt: 12_000 }, [
+      { startedAt: 2_000, endedAt: 3_000 }
+    ])).toBe(11_000)
+  })
+
+  it('falls back to the first and last completed tool timestamps', () => {
+    expect(runDurationOf({}, [
+      { startedAt: 2_000, endedAt: 3_000 },
+      { startedAt: 4_000, endedAt: 8_500 }
+    ])).toBe(6_500)
+  })
+
+  it('returns undefined when an old run has no usable timing data', () => {
+    expect(runDurationOf({}, [{ startedAt: 2_000 }])).toBeUndefined()
   })
 })
 

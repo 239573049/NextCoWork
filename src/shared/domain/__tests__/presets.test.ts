@@ -58,6 +58,37 @@ describe('预设表 · 主键与完整性', () => {
       expect(() => new URL(p.docsUrl)).not.toThrow()
     }
   })
+
+  it('apiKeyUrl 若存在则必须是可解析的 https 地址', () => {
+    for (const p of PROVIDER_PRESETS) {
+      const apiKeyUrl = p.apiKeyUrl
+      if (apiKeyUrl === undefined) continue
+      expect(apiKeyUrl, p.id).toMatch(/^https:\/\//)
+      expect(() => new URL(apiKeyUrl)).not.toThrow()
+    }
+  })
+
+  it('本地运行时不声明外部 API Key 获取页面', () => {
+    for (const p of PROVIDER_PRESETS) {
+      if (p.category === 'local') expect(p.apiKeyUrl, p.id).toBeUndefined()
+    }
+  })
+
+  it('非标准凭证类型必须同时提供获取页面', () => {
+    for (const p of PROVIDER_PRESETS) {
+      if (p.credentialKind !== undefined) expect(p.apiKeyUrl, p.id).toBeDefined()
+    }
+  })
+
+  it.each([
+    ['kimi-coding', 'subscription-key'],
+    ['zhipu-coding', 'subscription-key'],
+    ['zai-coding', 'subscription-key'],
+    ['sensenova', 'access-key'],
+    ['spark', 'api-password']
+  ] as const)('%s 使用准确的凭证称呼', (id, kind) => {
+    expect(findPreset(id)?.credentialKind).toBe(kind)
+  })
 })
 
 describe('预设表 · baseUrl 形状', () => {

@@ -10,7 +10,7 @@ import type { ModelAlias, UpstreamProvider } from '../../../../../shared/domain/
 
 export interface ProviderEntry {
   provider: UpstreamProvider
-  /** 这家提供的别名,保持 store 的顺序(将来是 `ModelAlias.order`) */
+  /** 这家提供的别名，保持 store 的优先级顺序。 */
   aliases: readonly ModelAlias[]
   /** 副标题显示的那个。没有别名时为 null —— 显示成「未配置模型」而不是空一行 */
   primaryAlias: string | null

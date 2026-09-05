@@ -10,7 +10,9 @@
  */
 import type { AgentEvent, RunSnapshot } from '../../shared/agent/event'
 import type { RunRequest } from '../../shared/agent/run-request'
-import { IpcError } from './errors'
+import type { InteractionResponse, PendingInteraction } from '../../shared/agent/interaction'
+import { interactions } from '../kernel/interaction-gate'
+import { IpcError, toAgentError } from './errors'
 import { RunHandle, runs } from '../kernel/run-registry'
 import { runAgent } from '../runtime'
 import { runTopic, windows, type WindowContext } from '../window/registry'
@@ -134,7 +136,12 @@ export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver 
 function launch(req: RunRequest, driver: RunDriver): RunHandle {
   const handle = runs.create(req)
   pumps.set(req.runId, new RunPump(handle))
-  void driver(handle, req)
+  const failed = (error: unknown): void => {
+    if (handle.signal.aborted) handle.finish('aborted')
+    else handle.finish('error', toAgentError(error))
+  }
+  try { void Promise.resolve(driver(handle, req)).catch(failed) }
+  catch (error) { failed(error) }
   return handle
 }
 
@@ -177,7 +184,33 @@ export function attachRun(req: { runId: string; sinceSeq: number }, ctx: WindowC
 
   pumps.get(req.runId)?.flush()
   windows.subscribe(runTopic(req.runId), ctx.sender)
+  for (const childId of descendantRunIds(handle)) windows.subscribe(runTopic(childId), ctx.sender)
   return handle.snapshot(req.sinceSeq)
+}
+
+function descendantRunIds(handle: RunHandle): string[] {
+  const result: string[] = []
+  for (const id of handle.children) {
+    result.push(id)
+    const child = runs.get(id)
+    if (child !== undefined) result.push(...descendantRunIds(child))
+  }
+  return result
+}
+
+export function listInteractions(req: { runId?: string }, ctx: WindowContext): PendingInteraction[] {
+  const handle = req.runId === undefined ? undefined : runs.get(req.runId)
+  const allowed = handle === undefined ? undefined : new Set([handle.runId, ...descendantRunIds(handle)])
+  return interactions.list().filter((i) => windows.isSubscribed(runTopic(i.runId), ctx.sender)
+    && (req.runId === undefined || allowed?.has(i.runId) === true))
+}
+
+export function respondInteraction(response: InteractionResponse, ctx: WindowContext): void {
+  const pending = interactions.get(response?.id)
+  if (pending === undefined || !windows.isSubscribed(runTopic(pending.runId), ctx.sender)) {
+    throw new IpcError('unknown', 'Interaction is no longer pending in this window')
+  }
+  interactions.respond(response)
 }
 
 export function abortRun(req: { runId: string; cascade: boolean }): void {

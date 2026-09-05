@@ -108,7 +108,7 @@ export function validateAnthropicRequest(body: unknown): DemoHttpError | null {
    * 这条校验就是那段代码的看门人 —— 删掉它,那段代码退化成注释里的传说。
    */
   const thinking = rec(b.thinking)
-  if (thinking !== undefined) {
+  if (thinking !== undefined && thinking.type !== 'disabled') {
     const budget = num(thinking, 'budget_tokens')
     if (budget === undefined || budget <= 0) return bad('thinking.budget_tokens: 必须是正整数')
     if (maxTokens <= budget) {
@@ -295,7 +295,7 @@ export function planDemoReply(body: unknown, seq: number): DemoReply {
 
   // thinking 开着就先来一块。它顺带把 signature 的往返跑通:
   // decode 攒成 block_opaque → 落进 ContentPart.opaque → encode 再取出来回传。
-  if (rec(b.thinking) !== undefined) {
+  if (rec(b.thinking) !== undefined && rec(b.thinking)?.type !== 'disabled') {
     blocks.push({
       kind: 'thinking',
       text: '(演示)先看看用户要什么,再决定要不要动工具。',

@@ -18,6 +18,7 @@ import {
 } from "../../../../../shared/domain/proxy";
 import { Button } from "../../../components/ui/Button";
 import { Segmented } from "../../../components/ui/Segmented";
+import { TextArea } from "../../../components/ui/TextArea";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { useI18n } from "../../../i18n";
@@ -338,7 +339,7 @@ function PortInput({
   );
 }
 
-/** 白名单多行框。`TextInput` 是单行的,这里直接用 textarea */
+/** 白名单多行框。草稿与失焦提交都在 `TextArea` 里,这里只给文案 */
 function BypassInput({
   value,
   disabled,
@@ -349,34 +350,13 @@ function BypassInput({
   onCommit: (v: string) => void;
 }): ReactNode {
   const { t } = useI18n();
-  const [draft, setDraft] = useState(value);
-  const [seen, setSeen] = useState(value);
-  const focused = useRef(false);
-
-  if (value !== seen && !focused.current) {
-    setSeen(value);
-    setDraft(value);
-  }
-
   return (
-    <textarea
-      value={draft}
+    <TextArea
+      value={value}
       disabled={disabled}
-      aria-label={t("connection.network.bypass")}
-      spellCheck={false}
-      rows={4}
+      ariaLabel={t("connection.network.bypass")}
       placeholder={"*.example.com\n192.168.1.0/24"}
-      onFocus={() => (focused.current = true)}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        focused.current = false;
-        if (draft !== value) onCommit(draft);
-      }}
-      className={cn(
-        "app-no-drag selectable w-full resize-none rounded-[8px] border border-hairline",
-        "bg-surface-field px-2.5 py-2 text-[12.5px] leading-[1.6] text-fg outline-none",
-        "placeholder:text-fg-faint focus:border-accent disabled:opacity-40",
-      )}
+      onCommit={onCommit}
     />
   );
 }

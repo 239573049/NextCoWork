@@ -47,7 +47,20 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
       { id: 'task', label: '任务' }
     ]
   },
-  { id: 'preference', label: '偏好' },
+  {
+    id: 'preference',
+    label: '偏好',
+    /**
+     * ★ 前两个 Tab 是把**已有的两组**拆开,不是新加内容 —— 这一页原来就是
+     * 「主题三栏 + 快捷键一行」上下堆着,而快捷键那一行滚到屏幕外之后,
+     * 整页读起来就只剩主题。第三个才是新的。
+     */
+    subs: [
+      { id: 'theme', label: '主题' },
+      { id: 'shortcut', label: '快捷键' },
+      { id: 'personalization', label: '个性化' }
+    ]
+  },
   {
     id: 'model',
     label: '模型',
@@ -145,6 +158,8 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
     title: '默认权限档位',
     keywords: ['permission', '审批', '权限']
   },
+  { page: 'general', sub: 'agent', title: '智能上下文管理', keywords: ['context', 'memory', '上下文', '笔记'] },
+  { page: 'general', sub: 'agent', title: '自动上下文压缩', keywords: ['compact', 'compression', '压缩'] },
   {
     page: 'general',
     sub: 'task',
@@ -161,20 +176,49 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   // ── 偏好 ──
   {
     page: 'preference',
+    sub: 'theme',
     title: '外观模式',
     keywords: ['theme', 'dark', 'light', '深色', '浅色', '主题']
   },
   {
     page: 'preference',
+    sub: 'theme',
     title: '图片主题',
     keywords: ['image', 'wallpaper', 'theme', '图片', '壁纸', '主题']
   },
   {
     page: 'preference',
+    sub: 'theme',
     title: '颜色主题',
     keywords: ['color', 'palette', 'theme', '配色', '颜色', '主题']
   },
-  { page: 'preference', title: '打开设置', keywords: ['shortcut', 'keybinding', '快捷键'] },
+  {
+    page: 'preference',
+    sub: 'shortcut',
+    title: '打开设置',
+    keywords: ['shortcut', 'keybinding', '快捷键']
+  },
+  // ★ 这三行是**唯一**会被拼进系统提示词的设置项,所以关键词里要收
+  // 「prompt / 提示词 / 指令」—— 想改模型口吻的人搜的是这几个词,
+  // 而不是「偏好」或「个性化」。
+  {
+    page: 'preference',
+    sub: 'personalization',
+    title: '姓名',
+    keywords: ['name', 'profile', '姓名', '名字', '个性化']
+  },
+  {
+    page: 'preference',
+    sub: 'personalization',
+    title: '工作描述',
+    keywords: ['about', 'background', 'role', 'job', '背景', '职业', '工作', '个性化']
+  },
+  {
+    page: 'preference',
+    sub: 'personalization',
+    title: '全局提示词',
+    keywords: ['prompt', 'instruction', 'system', '提示词', '指令', '自定义', '个性化']
+  },
 
   // ── 模型 ──
   // ★ 只有「文本生成」这个子 Tab 有真行。其余五个今天是占位,**不给它们编行** ——

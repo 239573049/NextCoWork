@@ -47,7 +47,7 @@
 import type { Currency, ModelPricing, PriceTier, TokenRates } from './pricing'
 
 /** 全表统一的采集日期。改数据时**同时**改它,否则界面上显示的日期是假的 */
-const FETCHED_AT = '2026-09-04'
+const FETCHED_AT = '2026-09-05'
 
 /** 单档(绝大多数模型)。多于一档才是阶梯,见下面 OpenAI / Gemini / xAI */
 const one = (rate: TokenRates): readonly PriceTier[] => [{ upToInputTokens: null, rate }]
@@ -58,7 +58,14 @@ const one = (rate: TokenRates): readonly PriceTier[] => [{ upToInputTokens: null
  */
 const two = (upTo: number, low: TokenRates, high: TokenRates): readonly PriceTier[] => [
   { upToInputTokens: upTo, rate: low },
-  { upToInputTokens: null, rate: high }
+  { upToInputTokens: null, rate: high },
+]
+
+/** 三档长上下文；仍然是整次请求命中一套价格，不做累进分段。 */
+const three = (firstUpTo: number, low: TokenRates, secondUpTo: number, medium: TokenRates, high: TokenRates): readonly PriceTier[] => [
+  { upToInputTokens: firstUpTo, rate: low },
+  { upToInputTokens: secondUpTo, rate: medium },
+  { upToInputTokens: null, rate: high },
 ]
 
 /**
@@ -67,12 +74,7 @@ const two = (upTo: number, low: TokenRates, high: TokenRates): readonly PriceTie
  */
 const maker =
   (providerId: string | null, currency: Currency, source: string) =>
-  (
-    modelId: string,
-    displayName: string,
-    tiers: readonly PriceTier[],
-    extra: Partial<ModelPricing> = {}
-  ): ModelPricing => ({
+  (modelId: string, displayName: string, tiers: readonly PriceTier[], extra: Partial<ModelPricing> = {}): ModelPricing => ({
     providerId,
     modelId,
     displayName,
@@ -81,7 +83,7 @@ const maker =
     tiers,
     source,
     fetchedAt: FETCHED_AT,
-    ...extra
+    ...extra,
   })
 
 /* ══════════════════════════ Anthropic ══════════════════════════ */
@@ -107,25 +109,15 @@ const maker =
  * **不是算错价** —— 而且同族价格本来就一样(Opus 4.5–4.8 全是 5/25)。
  * 所以这里推比不收好:两者的失败表现相同,推对了还能省用户一次手工录入。
  */
-const anth = maker(
-  null,
-  'USD',
-  'https://www-cdn.anthropic.com/files/4zrzovbb/website/9e03129acc36d31970777d336f969bb53dc84355.pdf'
-)
+const anth = maker(null, 'USD', 'https://www-cdn.anthropic.com/files/4zrzovbb/website/9e03129acc36d31970777d336f969bb53dc84355.pdf')
 
 /** 五列一次写全,顺序同费率卡:输入 / 输出 / 5m 写 / 1h 写 / 读 */
-const claude = (
-  input: number,
-  output: number,
-  w5m: number,
-  w1h: number,
-  read: number
-): TokenRates => ({
+const claude = (input: number, output: number, w5m: number, w1h: number, read: number): TokenRates => ({
   input,
   output,
   cacheRead: read,
   cacheWrite: w5m,
-  cacheWrite1h: w1h
+  cacheWrite1h: w1h,
 })
 
 const ANTHROPIC: readonly ModelPricing[] = [
@@ -143,7 +135,7 @@ const ANTHROPIC: readonly ModelPricing[] = [
   anth('claude-sonnet-4-6', 'Claude Sonnet 4.6', one(claude(3, 15, 3.75, 6, 0.3))),
   anth('claude-opus-4-5', 'Claude Opus 4.5', one(claude(5, 25, 6.25, 10, 0.5))),
   anth('claude-sonnet-4-5', 'Claude Sonnet 4.5', one(claude(3, 15, 3.75, 6, 0.3))),
-  anth('claude-haiku-4-5-20251001', 'Claude Haiku 4.5', one(claude(1, 5, 1.25, 2, 0.1)))
+  anth('claude-haiku-4-5-20251001', 'Claude Haiku 4.5', one(claude(1, 5, 1.25, 2, 0.1))),
 ]
 
 /* ══════════════════════════ OpenAI ══════════════════════════ */
@@ -164,15 +156,7 @@ const ANTHROPIC: readonly ModelPricing[] = [
 const oai = maker(null, 'USD', 'https://openai.com/api/pricing')
 
 const OPENAI: readonly ModelPricing[] = [
-  oai(
-    'gpt-6-astra',
-    'GPT-6 Astra',
-    two(
-      272_000,
-      { input: 10, output: 50, cacheRead: 1.0, cacheWrite: 12.5 },
-      { input: 20, output: 75, cacheRead: 2.0, cacheWrite: 25 }
-    )
-  ),
+  oai('gpt-6-astra', 'GPT-6 Astra', two(272_000, { input: 10, output: 50, cacheRead: 1.0, cacheWrite: 12.5 }, { input: 20, output: 75, cacheRead: 2.0, cacheWrite: 25 })),
   /*
     ★ 收的是**促销价**($4/$20),不是业务页上那个 $5/$30 的标准价 ——
     收「实际被扣的那个」。促销据官方口径**至少**持续到 2026-11-21,
@@ -180,34 +164,9 @@ const OPENAI: readonly ModelPricing[] = [
     写了就等于替 OpenAI 宣布 11-22 涨价,而那是我们编的。
     促销真的结束时这一行会偏低,靠 `fetchedAt` 和顶部那句提示兜住。
   */
-  oai(
-    'gpt-5.6-sol',
-    'GPT-5.6 Sol(促销价,标准价 $5/$30)',
-    two(
-      272_000,
-      { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
-      { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 }
-    ),
-    { source: 'https://openai.com/api/pricing#promo-until-2026-11-21' }
-  ),
-  oai(
-    'gpt-5.6-terra',
-    'GPT-5.6 Terra',
-    two(
-      272_000,
-      { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
-      { input: 4, output: 18, cacheRead: 0.4, cacheWrite: 5 }
-    )
-  ),
-  oai(
-    'gpt-5.6-luna',
-    'GPT-5.6 Luna',
-    two(
-      272_000,
-      { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
-      { input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 }
-    )
-  ),
+  oai('gpt-5.6-sol', 'GPT-5.6 Sol(促销价,标准价 $5/$30)', two(272_000, { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }, { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 }), { source: 'https://openai.com/api/pricing#promo-until-2026-11-21' }),
+  oai('gpt-5.6-terra', 'GPT-5.6 Terra', two(272_000, { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 }, { input: 4, output: 18, cacheRead: 0.4, cacheWrite: 5 })),
+  oai('gpt-5.6-luna', 'GPT-5.6 Luna', two(272_000, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }, { input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 })),
   oai('gpt-5.5', 'GPT-5.5', one({ input: 5, output: 30, cacheRead: 0.5 })),
   oai('gpt-5.5-pro', 'GPT-5.5 Pro', one({ input: 30, output: 180 })),
   oai('gpt-5.4', 'GPT-5.4', one({ input: 2.5, output: 15, cacheRead: 0.25 })),
@@ -234,47 +193,76 @@ const OPENAI: readonly ModelPricing[] = [
   oai('o4-mini', 'o4-mini', one({ input: 1.1, output: 4.4, cacheRead: 0.275 })),
   oai('gpt-4-turbo-2024-04-09', 'GPT-4 Turbo', one({ input: 10, output: 30 })),
   oai('gpt-4-0613', 'GPT-4', one({ input: 30, output: 60 })),
-  oai('gpt-3.5-turbo', 'GPT-3.5 Turbo', one({ input: 0.5, output: 1.5 }))
+  oai('gpt-3.5-turbo', 'GPT-3.5 Turbo', one({ input: 0.5, output: 1.5 })),
 ]
 
 /* ══════════════════════════ Google Gemini ══════════════════════════ */
 
 /**
- * ★ **只收 Pro 两款。** Google 官方定价页在采集环境不可达(curl HTTP 000,
- * 子代理独立复现),这两行是靠 LiteLLM 与 OpenRouter **两个独立来源逐值吻合**
- * 才敢收的 —— 正好卡在文件头第 2 条的及格线上。
- *
- * Flash 全系不收,两个理由叠加(见 `NOT_SEEDED`)。
+ * ★ 下列 Standard Paid Tier 全部从 Google 官方定价页逐型号直接核实。
+ * Gemini 3.8 / 3.7 / 3.6 Flash 按公告中的 2026-12-31 / 2027-01-01
+ * 分界保存为互不重叠的生效区间。
  *
  * ★ 阈值是 **200K,不是 128K** —— 128K 是 Gemini 1.5 时代的,现行世代统一 200K。
  * 倍率:输入 ×2、缓存读 ×2、**输出 ×1.5**(又一处不对称)。
- * **只有 Pro 系列分档,Flash 全系不分档。**
+ * **只有 Pro 系列按输入长度分档,Flash 全系不按长度分档。**
+ * 3.1 Flash-Lite、3 Flash Preview、2.5 Flash / Flash-Lite 的音频输入
+ * 另有更高费率；当前文本请求链路使用这里保存的 text/image/video 费率，
+ * 音频差价在 `NOT_SEEDED` 留有显式记录，不能误当成同价。
  *
  * ★ 缓存写入**故意不写**:Google 是按「每百万 token 每小时」收**存储费**,
  * 那是一条量纲不同的计费线(费用 ∝ token × 持有小时数),塞进 `cacheWrite`
  * 只在「恰好持有 5 分钟」时才对,持有 1 小时会低估 12 倍。方案 §4.5 明确不建模它。
  */
-const gem = maker(
-  null,
-  'USD',
-  'https://cdn.jsdelivr.net/gh/BerriAI/litellm@v1.99.0/model_prices_and_context_window.json'
-)
+const gem = maker(null, 'USD', 'https://ai.google.dev/gemini-api/docs/pricing')
 
 const GEMINI: readonly ModelPricing[] = [
-  gem(
-    'gemini-2.5-pro',
-    'Gemini 2.5 Pro',
-    two(
-      200_000,
-      { input: 1.25, output: 10, cacheRead: 0.125 },
-      { input: 2.5, output: 15, cacheRead: 0.25 }
-    )
-  ),
-  gem(
-    'gemini-3.1-pro-preview',
-    'Gemini 3.1 Pro',
-    two(200_000, { input: 2, output: 12, cacheRead: 0.2 }, { input: 4, output: 18, cacheRead: 0.4 })
-  )
+  gem('gemini-3.8-flash', 'Gemini 3.8 Flash', one({ input: 0.75, output: 3.75, cacheRead: 0.075 }), {
+    effectiveUntil: '2026-12-31',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash',
+  }),
+  gem('gemini-3.8-flash', 'Gemini 3.8 Flash', one({ input: 1.5, output: 7.5, cacheRead: 0.15 }), {
+    effectiveFrom: '2027-01-01',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash',
+  }),
+  gem('gemini-3.7-flash', 'Gemini 3.7 Flash', one({ input: 0.75, output: 3.75, cacheRead: 0.075 }), {
+    effectiveUntil: '2026-12-31',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.7-flash',
+  }),
+  gem('gemini-3.7-flash', 'Gemini 3.7 Flash', one({ input: 1.5, output: 7.5, cacheRead: 0.15 }), {
+    effectiveFrom: '2027-01-01',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.7-flash',
+  }),
+  gem('gemini-3.6-flash', 'Gemini 3.6 Flash', one({ input: 0.75, output: 3.75, cacheRead: 0.075 }), {
+    effectiveUntil: '2026-12-31',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.6-flash',
+  }),
+  gem('gemini-3.6-flash', 'Gemini 3.6 Flash', one({ input: 1.5, output: 7.5, cacheRead: 0.15 }), {
+    effectiveFrom: '2027-01-01',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.6-flash',
+  }),
+  gem('gemini-3.5-flash', 'Gemini 3.5 Flash', one({ input: 1.5, output: 9, cacheRead: 0.15 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.5-flash',
+  }),
+  gem('gemini-3.5-flash-lite', 'Gemini 3.5 Flash-Lite', one({ input: 0.3, output: 2.5, cacheRead: 0.03 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.5-flash-lite',
+  }),
+  gem('gemini-3.1-flash-lite', 'Gemini 3.1 Flash-Lite', one({ input: 0.25, output: 1.5, cacheRead: 0.025 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-flash-lite',
+  }),
+  gem('gemini-3-flash-preview', 'Gemini 3 Flash Preview', one({ input: 0.5, output: 3, cacheRead: 0.05 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3-flash-preview',
+  }),
+  gem('gemini-2.5-pro', 'Gemini 2.5 Pro', two(200_000, { input: 1.25, output: 10, cacheRead: 0.125 }, { input: 2.5, output: 15, cacheRead: 0.25 }), { source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-pro' }),
+  gem('gemini-2.5-flash', 'Gemini 2.5 Flash', one({ input: 0.3, output: 2.5, cacheRead: 0.03 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-flash',
+  }),
+  gem('gemini-2.5-flash-lite', 'Gemini 2.5 Flash-Lite', one({ input: 0.1, output: 0.4, cacheRead: 0.01 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-flash-lite',
+  }),
+  gem('gemini-3.1-pro-preview', 'Gemini 3.1 Pro', two(200_000, { input: 2, output: 12, cacheRead: 0.2 }, { input: 4, output: 18, cacheRead: 0.4 }), {
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-pro-preview',
+  }),
 ]
 
 /* ══════════════════════════ xAI Grok ══════════════════════════ */
@@ -287,42 +275,20 @@ const GEMINI: readonly ModelPricing[] = [
  * 也点明了**缓存 token 计入阈值判定**:一个很大的缓存前缀会把请求推过 200K,
  * 导致整单涨价 —— 和「缓存应该省钱」的直觉正好相反。
  */
-const xai = maker(
-  null,
-  'USD',
-  'https://cdn.jsdelivr.net/gh/BerriAI/litellm@v1.99.0/model_prices_and_context_window.json'
-)
+const xai = maker(null, 'USD', 'https://cdn.jsdelivr.net/gh/BerriAI/litellm@v1.99.0/model_prices_and_context_window.json')
 
-const XAI: readonly ModelPricing[] = [
-  xai(
-    'grok-4.3',
-    'Grok 4.3',
-    two(
-      200_000,
-      { input: 1.25, output: 2.5, cacheRead: 0.2 },
-      { input: 2.5, output: 5, cacheRead: 0.4 }
-    )
-  ),
-  xai(
-    'grok-4.5',
-    'Grok 4.5',
-    two(200_000, { input: 2, output: 6, cacheRead: 0.3 }, { input: 4, output: 12, cacheRead: 0.6 })
-  ),
-  xai(
-    'grok-4.6',
-    'Grok 4.6',
-    two(200_000, { input: 2, output: 6, cacheRead: 0.5 }, { input: 4, output: 12, cacheRead: 1.0 })
-  )
-]
+const XAI: readonly ModelPricing[] = [xai('grok-4.3', 'Grok 4.3', two(200_000, { input: 1.25, output: 2.5, cacheRead: 0.2 }, { input: 2.5, output: 5, cacheRead: 0.4 })), xai('grok-4.5', 'Grok 4.5', two(200_000, { input: 2, output: 6, cacheRead: 0.3 }, { input: 4, output: 12, cacheRead: 0.6 })), xai('grok-4.6', 'Grok 4.6', two(200_000, { input: 2, output: 6, cacheRead: 0.5 }, { input: 4, output: 12, cacheRead: 1.0 }))]
 
 /* ══════════════════════════ 智谱 / Z.AI(USD) ══════════════════════════ */
 
 /**
- * ★ **只收美元价,挂在 `zai`(国际站)这个预设 id 下。**
+ * ★ **只收美元价,作为厂商通用官方价。** 模型目录独立于用户是否已经配置
+ * `zai` / `zhipu` 连接，所以不能把厂商价藏在某一条连接覆盖价下面。
  * 官方国际站页面明示 "All prices are in USD";而
  * `open.bigmodel.cn` 的人民币价走需要 `Authorization` 的接口,匿名一律
  * `1001 Header中未收到Authorization参数` —— **人民币价格完全未核实,一个数字都不收。**
- * 所以国内站预设 `zhipu` 下没有任何种子价,费用列显示「—」。
+ * 所以不为国内站预设 `zhipu` 猜人民币价格；运行时没有连接覆盖价时回退这里的
+ * 官方 USD 基础价。
  *
  * ★ 官方缓存文档写「通常为标准价格的 50%」,但价目表实际是输入价的 ~19%
  * ($0.26 vs $1.4)—— **以表为准**,这也是不照公式生成的又一个例子。
@@ -330,7 +296,7 @@ const XAI: readonly ModelPricing[] = [
  * ★ 智谱确实有峰谷定价,但**只作用于 GLM Coding Plan 订阅**(按积分计),
  * 与 API 现付无关,**不要混进 `windows`**。
  */
-const glm = maker('zai', 'USD', 'https://docs.z.ai/guides/overview/pricing.md')
+const glm = maker(null, 'USD', 'https://docs.z.ai/guides/overview/pricing.md')
 
 const ZHIPU: readonly ModelPricing[] = [
   glm('glm-5.3', 'GLM-5.3', one({ input: 1.4, output: 4.4, cacheRead: 0.26 })),
@@ -338,34 +304,37 @@ const ZHIPU: readonly ModelPricing[] = [
   glm('glm-5.1', 'GLM-5.1', one({ input: 1.4, output: 4.4, cacheRead: 0.26 })),
   glm('glm-5', 'GLM-5', one({ input: 1, output: 3.2, cacheRead: 0.2 })),
   glm('glm-4.7', 'GLM-4.7', one({ input: 0.6, output: 2.2, cacheRead: 0.11 })),
+  glm('glm-4.7-flashx', 'GLM-4.7-FlashX', one({ input: 0.07, output: 0.4, cacheRead: 0.01 })),
   glm('glm-4.6', 'GLM-4.6', one({ input: 0.6, output: 2.2, cacheRead: 0.11 })),
   glm('glm-4.5', 'GLM-4.5', one({ input: 0.6, output: 2.2, cacheRead: 0.11 })),
+  glm('glm-4.5-x', 'GLM-4.5-X', one({ input: 2.2, output: 8.9, cacheRead: 0.45 })),
   glm('glm-4.5-air', 'GLM-4.5-Air', one({ input: 0.2, output: 1.1, cacheRead: 0.03 })),
+  glm('glm-4.5-airx', 'GLM-4.5-AirX', one({ input: 1.1, output: 4.5, cacheRead: 0.22 })),
+  glm('glm-4-32b-0414-128k', 'GLM-4 32B 0414 128K', one({ input: 0.1, output: 0.1 })),
+  glm('glm-4.6v', 'GLM-4.6V', one({ input: 0.3, output: 0.9, cacheRead: 0.05 })),
+  glm('glm-ocr', 'GLM-OCR', one({ input: 0.03, output: 0.03 })),
+  glm('glm-4.6v-flashx', 'GLM-4.6V-FlashX', one({ input: 0.04, output: 0.4, cacheRead: 0.004 })),
+  glm('glm-4.5v', 'GLM-4.5V', one({ input: 0.6, output: 1.8, cacheRead: 0.11 })),
 
   /*
     ★★ **全表唯一一处用上 `effectiveFrom` / `effectiveUntil` 的地方,而且它是有据可查的**:
     官方页写明 GLM-5.3-Flash 的促销价于 **2026-09-09 24:00(UTC+8)** 结束,并同时印出原价。
     两行、日期区间不重叠 —— 到点自动切换,而不是等用户某天发现统计全错。
 
-    (Gemini Flash 那个「2027-01-01 起翻倍」的公告也是同一形状,但它只经搜索检索
-    未直接核实,所以那几行整个不收 —— 见 `NOT_SEEDED`。)
+    Gemini 3.8 Flash 的同类调价公告现已从 Google 官方定价页直接核实,
+    因而也以两行日期区间收录。
 
     ⚠️ 日期是**按 UTC+8 的自然日**记的,而 `effectiveAt` 比较的是 UTC 日期串。
     9 月 9 日 24:00(UTC+8)= 9 月 9 日 16:00 UTC,落在 UTC 的 9 月 9 日内,
     所以按 UTC 日期切在 09-09 / 09-10 之间只差最后那 8 小时 —— 那 8 小时会**按原价算**,
     偏贵。这是本表唯一一处方向偏贵的近似,记在这里免得被当成 bug 查。
   */
-  glm(
-    'glm-5.3-flash',
-    'GLM-5.3-Flash(促销价)',
-    one({ input: 0.075, output: 0.25, cacheRead: 0.015 }),
-    {
-      effectiveUntil: '2026-09-09'
-    }
-  ),
+  glm('glm-5.3-flash', 'GLM-5.3-Flash(促销价)', one({ input: 0.075, output: 0.25, cacheRead: 0.015 }), {
+    effectiveUntil: '2026-09-09',
+  }),
   glm('glm-5.3-flash', 'GLM-5.3-Flash', one({ input: 0.15, output: 0.5, cacheRead: 0.03 }), {
-    effectiveFrom: '2026-09-10'
-  })
+    effectiveFrom: '2026-09-10',
+  }),
 ]
 
 /* ══════════════════════════ DeepSeek(时段计费) ══════════════════════════ */
@@ -396,9 +365,12 @@ const ZHIPU: readonly ModelPricing[] = [
  * ★ **DeepSeek 没有缓存写入费** —— 价目表只有「命中 / 未命中」两档输入价。
  * 所以 `cacheWrite` **缺省不写**,不是填 0。
  *
- * 币种:只收人民币(官方中文页)。**不做换算** —— 实测同一张表内部就有两个不同的
- * 隐含汇率(6.818 与 7.143),两套价格是各自独立定价、独立取整的,
- * 任何自动换算都必然与至少一部分官方数字对不上。美元账户请用 provider 覆盖价。
+ * 币种:官方英文价目表直接提供 USD,因此这里保存为**通用美元价**。这也让尚未配置
+ * DeepSeek 连接的模型目录能够展示官方价格。中文站另有独立人民币报价,但预设连接
+ * 并不携带账户结算币种,不能把人民币价作为 `deepseek` 覆盖价强加给所有账户。
+ *
+ * 官方当前页未声明这些价格的 `effectiveFrom` / `effectiveUntil`,所以只用 `fetchedAt`
+ * 标记快照日期,不根据模型版本号猜一个生效日。
  */
 const PEAK_WINDOWS = [
   {
@@ -407,7 +379,7 @@ const PEAK_WINDOWS = [
     start: '01:00',
     end: '04:00',
     multiplier: 2,
-    label: '高峰时段(北京时间 09:00–12:00)'
+    label: '高峰时段(北京时间 09:00–12:00)',
   },
   {
     timezone: 'UTC',
@@ -415,26 +387,21 @@ const PEAK_WINDOWS = [
     start: '06:00',
     end: '10:00',
     multiplier: 2,
-    label: '高峰时段(北京时间 14:00–18:00)'
-  }
+    label: '高峰时段(北京时间 14:00–18:00)',
+  },
 ] as const
 
-const ds = maker('deepseek', 'CNY', 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing')
+const ds = maker(null, 'USD', 'https://api-docs.deepseek.com/quick_start/pricing/')
 
 /** 基准 = **空闲价**(见文件头那段论证) */
 const DEEPSEEK: readonly ModelPricing[] = [
-  ds('deepseek-v4-flash', 'DeepSeek V4 Flash', one({ input: 1.5, output: 4.5, cacheRead: 0.05 }), {
-    windows: PEAK_WINDOWS
+  ds('deepseek-v4-flash', 'DeepSeek V4 Flash', one({ input: 0.22, output: 0.66, cacheRead: 0.007 }), {
+    windows: PEAK_WINDOWS,
   }),
-  ds('deepseek-v4-pro', 'DeepSeek V4 Pro', one({ input: 4.5, output: 13.5, cacheRead: 0.15 }), {
-    windows: PEAK_WINDOWS
+  ds('deepseek-v4-pro', 'DeepSeek V4 Pro', one({ input: 0.66, output: 1.98, cacheRead: 0.022 }), {
+    windows: PEAK_WINDOWS,
   }),
-  ds(
-    'deepseek-v4-flash-vision-exp',
-    'DeepSeek V4 Flash Vision(实验)',
-    one({ input: 1.5, output: 4.5, cacheRead: 0.05 }),
-    { windows: PEAK_WINDOWS }
-  )
+  ds('deepseek-v4-flash-vision-exp', 'DeepSeek V4 Flash Vision(实验)', one({ input: 0.22, output: 0.66, cacheRead: 0.007 }), { windows: PEAK_WINDOWS }),
 ]
 
 /* ══════════════════════════ Moonshot / Kimi ══════════════════════════ */
@@ -444,68 +411,240 @@ const DEEPSEEK: readonly ModelPricing[] = [
  * 三个 SKU 不再存在,现在是每模型单一价 + 缓存命中/未命中输入价二分,
  * 结构和 DeepSeek 相同(但没有时段计费)。缓存自动、无写入费、无存储费。
  *
- * ★ 中美两站各录各的,**挂在两个不同的预设 id 下**(`moonshot` / `moonshot-global`)——
- * 这正是 `ModelPricing.providerId` 存在的理由。又一个「不是换算关系」的实证:
+ * ★ 中美两站各录各的：国际站 USD 作为模型目录稳定展示的通用官方价，国内站 CNY
+ * 作为 `moonshot` 连接覆盖价。又一个「不是换算关系」的实证:
  * k3 的中美比值恒为 6.667,而 k2.6 是 6.875 / 6.84 / 6.75。
  */
 const kimiCny = maker('moonshot', 'CNY', 'https://platform.moonshot.cn/docs/pricing')
-const kimiUsd = maker('moonshot-global', 'USD', 'https://platform.moonshot.ai/docs/pricing')
+const kimiUsd = maker(null, 'USD', 'https://platform.moonshot.ai/docs/pricing')
 
 const MOONSHOT: readonly ModelPricing[] = [
   kimiCny('kimi-k3', 'Kimi K3', one({ input: 20, output: 100, cacheRead: 2.0 })),
   kimiCny('kimi-k2.6', 'Kimi K2.6', one({ input: 6.5, output: 27, cacheRead: 1.1 })),
   kimiCny('kimi-k2.7-code', 'Kimi K2.7 Code', one({ input: 6.5, output: 27, cacheRead: 1.3 })),
   // `-highspeed` 是**同一个模型**卖吞吐,整体 2 倍价
-  kimiCny(
-    'kimi-k2.7-code-highspeed',
-    'Kimi K2.7 Code 高速版',
-    one({ input: 13, output: 54, cacheRead: 2.6 })
-  ),
+  kimiCny('kimi-k2.7-code-highspeed', 'Kimi K2.7 Code 高速版', one({ input: 13, output: 54, cacheRead: 2.6 })),
 
   kimiUsd('kimi-k3', 'Kimi K3', one({ input: 3.0, output: 15, cacheRead: 0.3 })),
   kimiUsd('kimi-k2.6', 'Kimi K2.6', one({ input: 0.95, output: 4.0, cacheRead: 0.16 })),
   kimiUsd('kimi-k2.7-code', 'Kimi K2.7 Code', one({ input: 0.95, output: 4.0, cacheRead: 0.19 })),
-  kimiUsd(
-    'kimi-k2.7-code-highspeed',
-    'Kimi K2.7 Code 高速版',
-    one({ input: 1.9, output: 8.0, cacheRead: 0.38 })
-  )
+  kimiUsd('kimi-k2.7-code-highspeed', 'Kimi K2.7 Code 高速版', one({ input: 1.9, output: 8.0, cacheRead: 0.38 })),
 ]
 
 /* ══════════════════════════ 阿里百炼 Qwen ══════════════════════════ */
 
 /**
- * ★ **只收无阶梯的那几款。** 官方中文页直读,证据够;但有阶梯的那些收不了:
- * 档位边界写作「0–32K / 32K–128K」,**「K」是 1000 还是 1024 无法从页面确定**,
- * 而边界猜错会让恰好落在附近的请求整单按错档重算(整单重定价,不是分段)。
- * 另外 `qwen-plus` / `qwen-turbo` 的输出价**按思考/非思考模式分两列**,
- * 而 `TokenRates` 里没有这一维 —— 硬选一列就是编。
+ * 国际站官方页明确写明 K = 1,000、M = 1,000,000，并明确说明命中档位后整次请求
+ * 全量按该档计费，因此可以无损录入 Qwen3 Max / Plus / Flash / Coder 的阶梯。
+ * 国际站 Standard USD 作为模型目录的通用官方价；百炼国内站已有的 CNY 数字继续
+ * 作为 `dashscope` 连接覆盖价保留。
+ *
+ * `qwen-plus` / `qwen-turbo` 的输出价仍按思考/非思考模式分两列，而 `TokenRates`
+ * 暂时没有这一维，所以这两款继续不录通用价，避免默认选一列造成静默错账。
  *
  * ★ 缓存也不收:Qwen 的缓存价是**以输入价的百分比**表达的(显式创建 ~125%、
  * 命中 ~10%;隐式创建 100%、命中 ~20%),而我们存绝对价。两套缓存机制取哪套
  * 取决于用户怎么调,应用无从得知。
  */
-const qwen = maker('dashscope', 'CNY', 'https://help.aliyun.com/zh/model-studio/model-pricing')
+const qwenUsd = maker(null, 'USD', 'https://www.alibabacloud.com/help/en/model-studio/model-pricing')
+const qwenCny = maker('dashscope', 'CNY', 'https://help.aliyun.com/zh/model-studio/model-pricing')
 
 const QWEN: readonly ModelPricing[] = [
-  qwen('qwen3.8-max', 'Qwen3.8-Max', one({ input: 12, output: 36 })),
-  qwen('qwen-max', 'Qwen-Max', one({ input: 2.4, output: 9.6 })),
-  qwen('qwen-long', 'Qwen-Long', one({ input: 0.5, output: 2 }))
+  qwenUsd('qwen3.8-max', 'Qwen3.8-Max', one({ input: 2, output: 6 })),
+  qwenUsd('qwen3.8-flash', 'Qwen3.8-Flash', one({ input: 0.15, output: 0.47 })),
+  qwenUsd('qwen3.7-max', 'Qwen3.7-Max', one({ input: 2.5, output: 7.5 })),
+  qwenUsd('qwen3.7-plus', 'Qwen3.7-Plus', two(256_000, { input: 0.4, output: 1.6 }, { input: 1.2, output: 4.8 })),
+  qwenUsd('qwen3.6-max-preview', 'Qwen3.6-Max Preview', two(128_000, { input: 1.3, output: 7.8 }, { input: 2, output: 12 })),
+  qwenUsd('qwen3-max', 'Qwen3-Max', [
+    { upToInputTokens: 32_000, rate: { input: 1.2, output: 6 } },
+    { upToInputTokens: 128_000, rate: { input: 2.4, output: 12 } },
+    { upToInputTokens: null, rate: { input: 3, output: 15 } },
+  ]),
+  qwenUsd('qwen3.6-plus', 'Qwen3.6-Plus', two(256_000, { input: 0.5, output: 3 }, { input: 2, output: 6 })),
+  qwenUsd('qwen3.5-plus', 'Qwen3.5-Plus', two(256_000, { input: 0.4, output: 2.4 }, { input: 0.5, output: 3 })),
+  qwenUsd('qwen3.7-flash', 'Qwen3.7-Flash', [
+    { upToInputTokens: 32_000, rate: { input: 0.03, output: 0.13 } },
+    { upToInputTokens: 256_000, rate: { input: 0.1, output: 0.4 } },
+    { upToInputTokens: null, rate: { input: 0.2, output: 0.8 } },
+  ]),
+  qwenUsd('qwen3.6-flash', 'Qwen3.6-Flash', two(256_000, { input: 0.25, output: 1.5 }, { input: 1, output: 4 })),
+  qwenUsd('qwen3.5-flash', 'Qwen3.5-Flash', one({ input: 0.1, output: 0.4 })),
+  qwenUsd('qwen3-coder-next', 'Qwen3-Coder-Next', [
+    { upToInputTokens: 32_000, rate: { input: 0.3, output: 1.5 } },
+    { upToInputTokens: 128_000, rate: { input: 0.5, output: 2.5 } },
+    { upToInputTokens: null, rate: { input: 0.8, output: 4 } },
+  ]),
+  qwenUsd('qwen3-coder-plus', 'Qwen3-Coder-Plus', [
+    { upToInputTokens: 32_000, rate: { input: 1, output: 5 } },
+    { upToInputTokens: 128_000, rate: { input: 1.8, output: 9 } },
+    { upToInputTokens: 256_000, rate: { input: 3, output: 15 } },
+    { upToInputTokens: null, rate: { input: 6, output: 60 } },
+  ]),
+  qwenUsd('qwen3-coder-flash', 'Qwen3-Coder-Flash', [
+    { upToInputTokens: 32_000, rate: { input: 0.3, output: 1.5 } },
+    { upToInputTokens: 128_000, rate: { input: 0.5, output: 2.5 } },
+    { upToInputTokens: 256_000, rate: { input: 0.8, output: 4 } },
+    { upToInputTokens: null, rate: { input: 1.6, output: 9.6 } },
+  ]),
+  qwenUsd('qwen3-coder-30b-a3b-instruct', 'Qwen3-Coder 30B-A3B Instruct', [
+    { upToInputTokens: 32_000, rate: { input: 0.45, output: 2.25 } },
+    { upToInputTokens: 128_000, rate: { input: 0.75, output: 3.75 } },
+    { upToInputTokens: null, rate: { input: 1.2, output: 6 } },
+  ]),
+  qwenUsd('qwen-max', 'Qwen-Max', one({ input: 1.6, output: 6.4 })),
+
+  qwenCny('qwen3.8-max', 'Qwen3.8-Max', one({ input: 12, output: 36 })),
+  qwenCny('qwen-max', 'Qwen-Max', one({ input: 2.4, output: 9.6 })),
+  qwenCny('qwen-long', 'Qwen-Long', one({ input: 0.5, output: 2 })),
 ]
+
+/* ══════════════════════════ MiniMax ══════════════════════════ */
+
+/** 国际站 Pay-as-you-go Standard USD；Priority 是请求级 service_tier，本轮不混入基础价。 */
+const minimax = maker(null, 'USD', 'https://platform.minimax.io/docs/guides/pricing-paygo')
+
+const MINIMAX: readonly ModelPricing[] = [
+  minimax('MiniMax-M3', 'MiniMax M3', two(512_000, { input: 0.3, output: 1.2, cacheRead: 0.06 }, { input: 0.6, output: 2.4, cacheRead: 0.12 })),
+  minimax('MiniMax-M2.7', 'MiniMax M2.7', one({ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 })),
+  minimax('MiniMax-M2.7-highspeed', 'MiniMax M2.7 Highspeed', one({ input: 0.6, output: 2.4, cacheRead: 0.06, cacheWrite: 0.375 })),
+  minimax('MiniMax-M2.5', 'MiniMax M2.5', one({ input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 })),
+  minimax('MiniMax-M2.5-highspeed', 'MiniMax M2.5 Highspeed', one({ input: 0.6, output: 2.4, cacheRead: 0.03, cacheWrite: 0.375 })),
+  minimax('MiniMax-M2.1', 'MiniMax M2.1', one({ input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 })),
+  minimax('MiniMax-M2.1-highspeed', 'MiniMax M2.1 Highspeed', one({ input: 0.6, output: 2.4, cacheRead: 0.03, cacheWrite: 0.375 })),
+  minimax('MiniMax-M2', 'MiniMax M2', one({ input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 })),
+]
+
+/* ══════════════════════════ Xiaomi MiMo ══════════════════════════ */
+
+/** 海外 Pay-as-you-go 官方 USD；国内 CNY 是独立区域价，不由汇率反推。 */
+const mimo = maker(null, 'USD', 'https://mimo.mi.com/docs/en-US/pricing')
+
+const MIMO: readonly ModelPricing[] = [mimo('mimo-v2.5-pro', 'MiMo V2.5 Pro', one({ input: 0.435, output: 0.87, cacheRead: 0.0036 })), mimo('mimo-v2.5', 'MiMo V2.5', one({ input: 0.14, output: 0.28, cacheRead: 0.0028 }))]
+
+/* ══════════════════════════ 字节跳动豆包 / Doubao ══════════════════════════ */
+
+/** 火山方舟常规在线推理官方 CNY；缓存存储按 Token×小时计费，未混入这里。 */
+const doubao = maker(null, 'CNY', 'https://docs.volcengine.com/docs/82379/1544106')
+
+const DOUBAO: readonly ModelPricing[] = [
+  doubao('doubao-seed-evolving', '豆包 Seed Evolving', one({ input: 6, output: 30, cacheRead: 1.2 })),
+  doubao('doubao-seed-2.1-pro', '豆包 Seed 2.1 Pro', one({ input: 6, output: 30, cacheRead: 1.2 })),
+  doubao('doubao-seed-2.1-turbo', '豆包 Seed 2.1 Turbo', one({ input: 3, output: 15, cacheRead: 0.6 })),
+  doubao('doubao-seed-2.0-pro', '豆包 Seed 2.0 Pro', three(32_000, { input: 3.2, output: 16, cacheRead: 0.64 }, 128_000, { input: 4.8, output: 24, cacheRead: 0.96 }, { input: 9.6, output: 48, cacheRead: 1.92 })),
+  doubao('doubao-seed-2.0-lite', '豆包 Seed 2.0 Lite', three(32_000, { input: 0.6, output: 3.6, cacheRead: 0.12 }, 128_000, { input: 0.9, output: 5.4, cacheRead: 0.18 }, { input: 1.8, output: 10.8, cacheRead: 0.36 })),
+  doubao('doubao-seed-2.0-mini', '豆包 Seed 2.0 Mini', three(32_000, { input: 0.2, output: 2, cacheRead: 0.04 }, 128_000, { input: 0.4, output: 4, cacheRead: 0.08 }, { input: 0.8, output: 8, cacheRead: 0.16 })),
+  doubao('doubao-seed-2.0-code', '豆包 Seed 2.0 Code', three(32_000, { input: 3.2, output: 16, cacheRead: 0.64 }, 128_000, { input: 4.8, output: 24, cacheRead: 0.96 }, { input: 9.6, output: 48, cacheRead: 1.92 })),
+  doubao('doubao-seed-character', '豆包 Seed Character', two(32_000, { input: 0.8, output: 2, cacheRead: 0.16 }, { input: 1.2, output: 6, cacheRead: 0.16 })),
+  doubao('doubao-seed-code', '豆包 Seed Code', three(32_000, { input: 1.2, output: 8, cacheRead: 0.24 }, 128_000, { input: 1.4, output: 12, cacheRead: 0.24 }, { input: 2.8, output: 16, cacheRead: 0.24 })),
+  doubao('doubao-seed-1.6-flash', '豆包 Seed 1.6 Flash', three(32_000, { input: 0.15, output: 1.5, cacheRead: 0.03 }, 128_000, { input: 0.3, output: 3, cacheRead: 0.03 }, { input: 0.6, output: 6, cacheRead: 0.03 })),
+  doubao('doubao-seed-1.6-vision', '豆包 Seed 1.6 Vision', three(32_000, { input: 0.8, output: 8, cacheRead: 0.16 }, 128_000, { input: 1.2, output: 16, cacheRead: 0.16 }, { input: 2.4, output: 24, cacheRead: 0.16 })),
+  doubao('doubao-seed-translation', '豆包 Seed Translation', one({ input: 1.2, output: 3.6 })),
+  doubao('doubao-1.5-pro-32k', '豆包 1.5 Pro 32K', one({ input: 0.8, output: 2, cacheRead: 0.16 })),
+  doubao('doubao-1.5-lite-32k', '豆包 1.5 Lite 32K', one({ input: 0.3, output: 0.6, cacheRead: 0.06 })),
+  doubao('doubao-1.5-vision-pro', '豆包 1.5 Vision Pro', one({ input: 3, output: 9 })),
+]
+
+/* ══════════════════════════ 百度千帆 / ERNIE ══════════════════════════ */
+
+/** 千帆预置服务常规在线推理官方 CNY；页面按千 Token 报价，统一换算为每百万。 */
+const baidu = maker(null, 'CNY', 'https://cloud.baidu.com/doc/qianfan/s/wmh4sv6ya')
+
+const BAIDU: readonly ModelPricing[] = [baidu('ernie-5.1', 'ERNIE 5.1', two(32_000, { input: 4, output: 18 }, { input: 6, output: 22 })), baidu('ernie-5.0', 'ERNIE 5.0', two(32_000, { input: 6, output: 24 }, { input: 10, output: 40 })), baidu('ernie-4.5-turbo', 'ERNIE 4.5 Turbo', one({ input: 0.8, output: 3.2, cacheRead: 0.2 })), baidu('ernie-4.5-turbo-vl', 'ERNIE 4.5 Turbo VL', one({ input: 3, output: 9, cacheRead: 0.75 })), baidu('ernie-x1.1-preview', 'ERNIE X1.1 Preview', one({ input: 1, output: 4 })), baidu('internvl3-38b', 'InternVL 3 38B', one({ input: 8, output: 24 }))]
+
+/* ══════════════════════════ 腾讯混元 / Hunyuan ══════════════════════════ */
+
+/** 腾讯云 TokenHub 当前语言模型常规在线推理官方 CNY。 */
+const hunyuan = maker(null, 'CNY', 'https://cloud.tencent.com/document/product/1823/130055')
+
+const HUNYUAN: readonly ModelPricing[] = [hunyuan('hy4-preview', 'HY 4 Preview', one({ input: 6, output: 18, cacheRead: 0.3 })), hunyuan('hy3', 'HY 3', one({ input: 1, output: 4, cacheRead: 0.25 })), hunyuan('hy-mt2-pro', 'HY-MT2 Pro', one({ input: 0.5, output: 2 })), hunyuan('hy-mt2-plus', 'HY-MT2 Plus', one({ input: 0.5, output: 2 })), hunyuan('hy-mt2-lite', 'HY-MT2 Lite', one({ input: 0.3, output: 1.2 })), hunyuan('hunyuan-role-latest', 'HY Role Latest', one({ input: 2.4, output: 9.6 })), hunyuan('hy-role', 'HY Role', one({ input: 2.4, output: 9.6 }))]
+
+/* ══════════════════════════ StepFun 阶跃星辰 ══════════════════════════ */
+
+/** 官方开放平台按量价；页面明确 1M = 1,000,000 tokens。 */
+const stepfun = maker(null, 'CNY', 'https://platform.stepfun.com/docs/zh/guides/pricing/details.md')
+
+const STEPFUN: readonly ModelPricing[] = [stepfun('step-3.7-flash', 'Step 3.7 Flash', one({ input: 1.35, output: 8.1, cacheRead: 0.27 })), stepfun('step-3.5-flash', 'Step 3.5 Flash', one({ input: 0.7, output: 2.1, cacheRead: 0.14 })), stepfun('step-3.5-flash-2603', 'Step 3.5 Flash 2603', one({ input: 0.7, output: 2.1, cacheRead: 0.14 })), stepfun('step-1o-turbo-vision', 'Step-1o Turbo Vision', one({ input: 2.5, output: 8, cacheRead: 0.5 }))]
+
+/* ══════════════════════════ 百川智能 ══════════════════════════ */
+
+/**
+ * 官方页以每千 tokens 报价；这里统一乘以 1,000，保存为领域模型要求的每百万 Token。
+ * 标注“包含输入和输出”的型号无法拆出不同单价，因而将同一官方费率分别保存到
+ * input/output。搜索增强和医疗搜索是按次收费，不混入 Token 费率。
+ */
+const baichuan = maker(null, 'CNY', 'https://platform.baichuan-ai.com/prices')
+
+const BAICHUAN: readonly ModelPricing[] = [baichuan('Baichuan4', 'Baichuan 4', one({ input: 100, output: 100 })), baichuan('Baichuan4-Turbo', 'Baichuan 4 Turbo', one({ input: 15, output: 15 })), baichuan('Baichuan4-Air', 'Baichuan 4 Air', one({ input: 0.98, output: 0.98 })), baichuan('Baichuan3-Turbo', 'Baichuan 3 Turbo', one({ input: 12, output: 12 })), baichuan('Baichuan3-Turbo-128k', 'Baichuan 3 Turbo 128K', one({ input: 24, output: 24 })), baichuan('Baichuan2-Turbo', 'Baichuan 2 Turbo', one({ input: 8, output: 8 })), baichuan('Baichuan-M3-Plus', 'Baichuan M3 Plus', one({ input: 5, output: 9 })), baichuan('Baichuan-M3', 'Baichuan M3', one({ input: 10, output: 30 })), baichuan('Baichuan-M2-Plus', 'Baichuan M2 Plus', one({ input: 10, output: 30 })), baichuan('Baichuan-M2', 'Baichuan M2', one({ input: 2, output: 20 }))]
+
+/* ══════════════════════════ 商汤 SenseNova ══════════════════════════ */
+
+/** 日日新主定价页当前 Tokens 按量后付费 CNY 价；未公布缓存价、阶梯或分时时段。 */
+const sensenova = maker(null, 'CNY', 'https://www.sensecore.cn/help/docs/model-as-a-service/nova/pricing')
+
+const SENSENOVA: readonly ModelPricing[] = [
+  sensenova('SenseNova-V6-5-Pro', 'SenseNova V6.5 Pro', one({ input: 3, output: 9 })),
+  sensenova('SenseNova-V6-5-Turbo', 'SenseNova V6.5 Turbo', one({ input: 1.5, output: 4.5 })),
+  sensenova('SenseNova-V6-Pro', 'SenseNova V6 Pro', one({ input: 3, output: 9 })),
+  sensenova('SenseNova-V6-Turbo', 'SenseNova V6 Turbo', one({ input: 1.5, output: 4.5 })),
+  sensenova('SenseNova-V6-Reasoner', 'SenseNova V6 Reasoner', one({ input: 4, output: 16 })),
+  sensenova('SenseChat-Vision', 'SenseChat Vision', one({ input: 10, output: 60 })),
+  sensenova('SenseChat-Character-Pro', 'SenseChat Character Pro', one({ input: 15, output: 15 })),
+  sensenova('SenseChat-Character', 'SenseChat Character', one({ input: 12, output: 12 })),
+]
+
+/* ══════════════════════════ 讯飞星火 / 星辰 MaaS ══════════════════════════ */
+
+/**
+ * 星辰 MaaS 当前公开的按量人民币价。X2 / X2 Flash 的 Token Plan 另按订阅积分
+ * 结算，不能把积分费率或 0.8 波谷系数混进这里。X2.5 两款的 0 元是当前官方页
+ * 明示价格；X2.5 4B 同时标注“限时免费”，但官方没有公布截止日期，所以不猜
+ * `effectiveUntil`，只通过逐行来源与抓取日期说明它是价格快照。
+ */
+const spark = maker(null, 'CNY', 'https://maas.xfyun.cn/modelSquare')
+
+const SPARK: readonly ModelPricing[] = [
+  spark('spark-x2', 'Spark X2', one({ input: 3, output: 3 }), {
+    source: 'https://maas.xfyun.cn/modelSquare/base/2610636408864769',
+  }),
+  spark('spark-x2-flash', 'Spark X2 Flash', one({ input: 1, output: 2 }), {
+    source: 'https://maas.xfyun.cn/modelSquare/base/2611845619399681',
+  }),
+  spark('spark-x2.5-4b', 'Spark X2.5 4B（当前限时免费）', one({ input: 0, output: 0, cacheRead: 0 }), {
+    source: 'https://maas.xfyun.cn/modelSquare/base/2624338172569611',
+  }),
+  spark('spark-x2.5-1.7b', 'Spark X2.5 1.7B（当前免费）', one({ input: 0, output: 0, cacheRead: 0 }), {
+    source: 'https://maas.xfyun.cn/modelSquare/base/2624338063517705',
+  }),
+]
+
+/* ══════════════════════════ 华为 openPangu ══════════════════════════ */
+
+/** 华为云 MaaS 官方人民币按量价；Pro 的阶梯维度当前无法无损表达，见 NOT_SEEDED。 */
+const pangu = maker(null, 'CNY', 'https://support.huaweicloud.com/price-maas/price-maas-0002.html')
+
+const PANGU: readonly ModelPricing[] = [
+  pangu('openpangu-2.0-flash', 'openPangu 2.0 Flash', one({ input: 0.8, output: 1.6, cacheRead: 0.2 })),
+]
+
+/* ══════════════════════════ 美团 LongCat ══════════════════════════ */
+
+/** 官方国际站 USD 限时折扣价；页面未公布结束日期，不能擅自填写 effectiveUntil。 */
+const longcat = maker(null, 'USD', 'https://longcat.chat/platform/docs/pricing/longcat-2.0')
+
+const LONGCAT: readonly ModelPricing[] = [longcat('LongCat-2.0', 'LongCat 2.0', one({ input: 0.3, output: 1.2, cacheRead: 0.006 }))]
+
+/* ══════════════════════════ Meta Muse / OpenCode Go ══════════════════════════ */
+
+/** Meta 官方基础价；OpenCode Go contributor SKU 是供应商专属覆盖价。 */
+const muse = maker(null, 'USD', 'https://ai.developer.meta.com/docs/models/muse-spark-1.3')
+const museGo = maker('opencode-go', 'USD', 'https://opencode.ai/docs/go/')
+
+const MUSE: readonly ModelPricing[] = [muse('muse-spark-1.3', 'Muse Spark 1.3', one({ input: 1.25, output: 4.25, cacheRead: 0.15 })), muse('muse-spark-1.2', 'Muse Spark 1.2', one({ input: 1.25, output: 4.25, cacheRead: 0.15 }), { source: 'https://ai.developer.meta.com/docs/models/muse-spark-1.2' }), museGo('muse-spark-1.3-contributor', 'Muse Spark 1.3 Contributor', one({ input: 0.1, output: 0.2, cacheRead: 0.002 })), museGo('muse-spark-1.2-contributor', 'Muse Spark 1.2 Contributor', one({ input: 0.1, output: 0.2, cacheRead: 0.002 }))]
 
 /**
  * 种子表全量。**顺序 = 界面默认顺序**(国际在前、国内在后,各自按厂商聚簇)。
  */
-export const PRICING_SEED: readonly ModelPricing[] = [
-  ...ANTHROPIC,
-  ...OPENAI,
-  ...GEMINI,
-  ...XAI,
-  ...ZHIPU,
-  ...DEEPSEEK,
-  ...MOONSHOT,
-  ...QWEN
-]
+export const PRICING_SEED: readonly ModelPricing[] = [...ANTHROPIC, ...OPENAI, ...GEMINI, ...XAI, ...ZHIPU, ...DEEPSEEK, ...MOONSHOT, ...QWEN, ...MINIMAX, ...MIMO, ...DOUBAO, ...BAIDU, ...HUNYUAN, ...STEPFUN, ...BAICHUAN, ...SENSENOVA, ...SPARK, ...PANGU, ...LONGCAT, ...MUSE]
 
 /**
  * ★★ **故意没收进来的东西,以及为什么。**
@@ -517,47 +656,79 @@ export const PRICING_SEED: readonly ModelPricing[] = [
  */
 export const NOT_SEEDED: readonly { what: string; why: string }[] = [
   {
+    what: '华为 openPangu 2.0 Pro 阶梯价',
+    why: '官方价格表公开了 0≤Token<32K 与 Token≥32K 两档费率，但档位维度写的是“单次请求的Token数”，没有明确等同于现有 PriceTier 只使用的输入 Token 数。即使把严格小于 32K 的整数边界写成含上界 31,999，也仍会在选档维度上产生未经证实的语义转换，因此在官方澄清前不启用自动计价。',
+  },
+  {
+    what: '上海人工智能实验室 InternLM 官方托管 API',
+    why: '当前官方目录公开了 Intern S2、Intern S1 与 InternVL 3.5 的可调用型号、上下文和月度 Token 配额，但没有公开按量输入、输出或缓存单价，也没有公布计费币种。不能把配额制公测服务推断为零价或沿用第三方托管价格。',
+  },
+  {
     what: 'Mistral 全系(8 款)',
-    why: '**仅 OpenRouter 单源**,未与官方页比对。而 OpenRouter 在本次调研里被抓到三个独立的价格错(其中一个是旗舰模型上 2 倍的误差),单源不够 —— 文件头第 2、3 条。'
+    why: '**仅 OpenRouter 单源**,未与官方页比对。而 OpenRouter 在本次调研里被抓到三个独立的价格错(其中一个是旗舰模型上 2 倍的误差),单源不够 —— 文件头第 2、3 条。',
   },
   {
-    what: 'Gemini Flash 全系(2.5 / 3 / 3.1-lite / 3.5 / 3.6 / 3.7 / 3.8)',
-    why: '两个理由叠加:① 摘要器实证会把 3.7 Flash 与 3.1 Flash-Lite 的查询都返回 3.8 Flash 那一段价格,报告里这几款本来就挤在同一行,正是混淆的签名;② 「介绍价 2026-12-31 结束、2027-01-01 翻倍」的公告仅经搜索检索、未直接核实 —— 照它写日期区间等于替 Google 宣布涨价。Pro 两款有双源吻合,所以收。'
+    what: 'Gemini 3.1 Flash-Lite / 3 Flash Preview / 2.5 Flash / 2.5 Flash-Lite 的音频输入差价',
+    why: 'Google 官方 Standard 价对 audio input 单独加价，而 `TokenRates` 目前不能按输入模态区分。本表只保存当前文本链路适用的 text/image/video 价；在增加输入模态计费维度前，绝不能用该基础价结算音频输入。',
   },
   {
-    what: 'MiniMax 全系',
-    why: '价格本身官方双页已核实(M3 单一阈值 512K,有缓存写入费 ¥2.625),但**模型 ID 的大小写无法确定**(官方页写 "MiniMax-M3",聚合平台写 `minimax-m3`)。ID 错 = 永远命不中定价,而这张表里没有第二个来源能对。'
+    what: 'MiniMax M2-her / M1 / abab / VL-01 / Text-01 / 01',
+    why: 'MiniMax 当前国际站 Pay-as-you-go 官方页只列 M3、M2.7、M2.5、M2.1、M2 及部分 highspeed SKU；这些旧型号没有当前可核实的标准 Token 价，不能沿用同族价格。',
   },
   {
-    what: '豆包 Doubao 全系',
-    why: '独有**第二个计费维度**:部分 SKU 按「输出长度」分档(200 token 阈值,输入价不变而输出价从 ¥2 跳到 ¥8)。`PriceTier` 只按输入 token 分档,表达不了。另外火山用「接入点 ID」而不是模型名,种子表也对不上。'
+    what: '豆包输出长度分档、音频输入、缓存存储与媒体生成费用',
+    why: '已收录当前可以按输入 Token 档位无损表达的豆包文本模型，并通过官方接入点 alias 映射价格。Seed 1.8、Seed 1.6 与 Seed 1.6 Lite 的首档还依赖输出是否超过 200 Token；音频输入有独立单价，缓存存储按 Token×小时，生图与视频又按张或秒计费，现有 TokenRates 无法准确表达这些维度。',
+  },
+  {
+    what: '百度千帆按次搜索、批量折扣、量包与未公开标准价型号',
+    why: '已收录 ERNIE 5.1、5.0、4.5 Turbo、4.5 Turbo VL、X1.1 Preview 和 InternVL3-38B 的常规在线推理 Token 价。搜索增强按次、批量推理和量包属于不同服务等级；ERNIE X1.1 正式版等型号未在当前标准按量表中单列价格，不能从 Preview 或旧型号推算。',
+  },
+  {
+    what: '腾讯混元旧平台型号、媒体与不同计费单位',
+    why: '已收录 TokenHub 当前七款混元语言模型的常规在线 Token 价。hunyuan-turbo、hunyuan-pro、hunyuan-large 与 hunyuan-t1 已停服，hunyuan-a13b 属于即将全面停服的旧平台，不能冒充当前 TokenHub 价格；图像、视频、语音和多模态向量模型还按张、秒、字符或输入模态计费，现有文本 TokenRates 无法无损表达。',
   },
   {
     what: '智谱人民币价格',
-    why: '`open.bigmodel.cn` 的价格接口要 `Authorization`,匿名探测一律 `1001 Header中未收到Authorization参数`,文档站索引里也没有价格页 —— **一个数字都没核实到**。美元价(国际站 docs.z.ai)已收,挂在 `zai` 下。'
+    why: '`open.bigmodel.cn` 的价格接口要 `Authorization`,匿名探测一律 `1001 Header中未收到Authorization参数`,文档站索引里也没有价格页 —— **一个数字都没核实到**。美元价(国际站 docs.z.ai)已收,挂在 `zai` 下。',
   },
   {
-    what: 'Qwen 的阶梯款(qwen3-max / qwen-plus / qwen-flash / qwen3.7-flash)与缓存价',
-    why: '档位边界的「K」是 1000 还是 1024 无法确定,而阶梯是整单重定价、边界猜错就整单算错;`qwen-plus` / `qwen-turbo` 的输出价还按思考/非思考分两列,`TokenRates` 没有这一维。'
+    what: 'Qwen Plus/Turbo 的模式差异价、上下文缓存价及未在国际站按量页列价的开放权重型号',
+    why: '阶梯款已依据国际站明确的 K=1000 规则录入；但 `qwen-plus` / `qwen-turbo` 输出价按思考/非思考模式分列，缓存还分显式与隐式创建，`TokenRates` 暂无这些维度。开放权重型号也不能拿托管别名价格代替。',
+  },
+  {
+    what: 'StepFun 旧型号与非 Token 计费能力',
+    why: '已收录官方当前页明确列价的 step-3.7-flash、两款 step-3.5-flash 与 step-1o-turbo-vision；旧目录型号没有当前同名价格。语音按小时或字符、生图按张、搜索与文件存储按次/容量计费，这些非 Token 费用不能塞入文本 Token 费率。',
+  },
+  {
+    what: '百川搜索费用、媒体与未建模型号',
+    why: '已收录官方价格页中能与目录精确对应的十个文本 Token 型号。搜索增强与医疗搜索按次收费，Baichuan-Omni-1.5 没有可无损对应的文本 Token 价，因此不并入基础输入输出费率。',
+  },
+  {
+    what: 'SenseNova 实时、语音、兼容页旧型号与未单列价能力',
+    why: '已收录日日新主定价页当前八个 Token 型号。SenseNova-V6-Omni 按分钟、Audio Fusion 按字符、nova-tts-1 仅写限时免费；兼容页四个旧/次级型号与 SenseChat-FunctionCall 未在主定价页单列当前价格，因此不能继承同族价格。',
+  },
+  {
+    what: '讯飞星火旧直连型号、Token Plan 与 Coding Plan',
+    why: '已收录星辰 MaaS 当前公开按量价的 X2、X2 Flash、X2.5 4B 与 X2.5 1.7B。旧直连 Lite/Pro/Max/Ultra 与星辰 MaaS 是不同渠道，官方当前页没有可无损对应的同渠道现行按量价；Token Plan 和 Coding Plan 使用订阅积分，也不是按量货币价格。',
   },
   {
     what: 'grok-4.20 系列 / grok-build-0.1',
-    why: '仅见于 OpenRouter,LiteLLM 里没有 —— 单源。4.3/4.5/4.6 是双源吻合才收的。'
+    why: '仅见于 OpenRouter,LiteLLM 里没有 —— 单源。4.3/4.5/4.6 是双源吻合才收的。',
   },
   {
-    what: '所有订阅制方案(Kimi / GLM / Z.AI Coding Plan、OpenCode Go)',
-    why: '按积分或按月额度计,不是按 token 计费,和这张表不是同一种东西。方案 §5.3:订阅额度不计入总费用。'
+    what: '订阅制额度(Kimi / GLM / Z.AI Coding Plan、OpenCode Go 月度额度)',
+    why: '按积分或按月额度计,不是按 token 计费,和这张表不是同一种东西。方案 §5.3:订阅额度不计入总费用；OpenCode Go 文档另行公开的 contributor token 参考价已作为 provider 覆盖价收录。',
   },
   {
     what: '批处理 / 服务等级 / 区域倍率',
-    why: '方案 §4.5 明确不建模。我们不发批处理请求;区域与优先级是**账户级**设置,应用无从得知。需要的用户走 provider 级覆盖价。'
+    why: '方案 §4.5 明确不建模。我们不发批处理请求;区域与优先级是**账户级**设置,应用无从得知。需要的用户走 provider 级覆盖价。',
   },
   {
     what: '按小时计费的缓存存储(Google / 豆包 / 智谱)',
-    why: '方案 §4.5:要算它得知道缓存条目建于何时、持有了多久,而流式响应里根本没有这个信息,硬凑一个持有时长等于编数字。★ OpenRouter 就是这么错的 —— 它把 Google 的每小时费率 ÷ 12 塞进了一次性写入费字段,**量纲错**,持有 1 小时会少收 12 倍。'
+    why: '方案 §4.5:要算它得知道缓存条目建于何时、持有了多久,而流式响应里根本没有这个信息,硬凑一个持有时长等于编数字。★ OpenRouter 就是这么错的 —— 它把 Google 的每小时费率 ÷ 12 塞进了一次性写入费字段,**量纲错**,持有 1 小时会少收 12 倍。',
   },
   {
     what: 'Claude Managed Agents 的 $0.08 / session-hour',
-    why: '一条**与 token 无关**的计费线。我们的统计只有 token,这部分本来就会漏算 —— 收进来也算不出。'
-  }
+    why: '一条**与 token 无关**的计费线。我们的统计只有 token,这部分本来就会漏算 —— 收进来也算不出。',
+  },
 ]

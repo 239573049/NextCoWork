@@ -7,9 +7,12 @@
  * `startAgentEventPump()` **不在这里** —— 它在 App 根部起一次。
  * 放这儿的话五个 chat Tab 就是五个泵,同一批事件被 apply 五次。
  */
+import { Check, ChevronDown, LoaderCircle } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { greetingOf } from '../../../../shared/domain/greeting'
 import { hasRun } from '../../../../shared/agent/transcript'
+import { latestTodosFrom, type TodoItem } from '../../../../main/kernel/tool/builtin/todo'
+import { useI18n } from '../../i18n'
 import type { ContentPart } from '../../../../shared/agent/message'
 import type { Attachment } from '../../../../shared/domain/attachment'
 import { isImageMime } from '../../../../shared/domain/attachment'
@@ -20,9 +23,10 @@ import { sessionStore, resumeQueue } from '../../stores/session'
 import { Composer } from './Composer'
 import { type TrayItem } from './AttachmentTray'
 import { PendingQueue } from './PendingQueue'
-import { StatusLine } from './StatusLine'
 import { Thread } from './Thread'
 import { useModelsStore } from '../../stores/models'
+import { useTabsStore } from '../../stores/tabs'
+import { WorkspaceMarkdownProvider } from '../../components/markdown'
 
 export function ChatView({
   sessionId,
@@ -45,14 +49,21 @@ export function ChatView({
     setDraft,
     promoteInput,
     editInput,
+    editMessage,
     dropInput,
     moveInputToDraft
   } = useSession()
   const providerOf = useModelsStore((s) => s.providerOf)
+  const openMarkdownFile = useCallback((path: string) => {
+    useTabsStore.getState().openPath(workspace.id, 'doc', path, path.split('/').pop() ?? path)
+  }, [workspace.id])
 
   const running = activeRunId !== null
   const provider = transcript.model === undefined ? undefined : providerOf(transcript.model)
   const started = hasRun(transcript, running)
+  const { t } = useI18n()
+  const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
+  const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
 
   useEffect(() => {
     void useModelsStore.getState().load()
@@ -266,6 +277,7 @@ export function ChatView({
         </h1>
         <div className="w-full">
           {queue}
+          {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
           {composer}
         </div>
       </div>
@@ -274,17 +286,37 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Thread transcript={transcript} running={running} providerName={provider?.name} />
-
-      <StatusLine
-        transcript={transcript}
-        running={running}
-        lastSeq={lastSeq}
-        queued={queuedInputs.length}
-      />
+      <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
+        <Thread
+          transcript={transcript}
+          runId={activeRunId}
+          providerName={provider?.name}
+          lastSeq={lastSeq}
+          queued={queuedInputs.length}
+          onEditMessage={(id, text, continueRun) => editMessage(id, text, continueRun, {
+            workspaceId: workspace.id,
+            depth: 0,
+            mode: workspace.settings.defaultMode,
+            thinking: workspace.settings.defaultThinking,
+            webSearch: workspace.settings.webSearch,
+            permissionMode: workspace.settings.permissionMode,
+            model: transcript.model ?? fallbackModel,
+            skillIds: workspace.settings.activeSkillIds
+          })}
+        />
+      </WorkspaceMarkdownProvider>
 
       {queue}
+      {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
       {composer}
     </div>
   )
+}
+
+function TaskChecklist({ todos, t }: { todos: readonly TodoItem[]; t: ReturnType<typeof useI18n>['t'] }): ReactNode {
+  const [collapsed, setCollapsed] = useState(false)
+  const done = todos.filter((item) => item.status === 'completed').length
+  const active = todos.find((item) => item.status === 'in_progress')
+  const progress = todos.length === 0 ? 0 : done / todos.length
+  return <div className="mx-auto w-full max-w-[760px] px-6 pb-2" data-testid="task-checklist"><div className="rounded-panel border border-border bg-surface/60 px-3 py-2"><button type="button" aria-expanded={!collapsed} aria-controls="task-checklist-items" className="flex w-full min-w-0 items-center gap-1.5 text-left text-[12px] font-medium text-fg" onClick={() => setCollapsed((value) => !value)}><ChevronDown size={13} className={`shrink-0 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`} /><span className="shrink-0">{t('chat.taskChecklist', { done, total: todos.length })}</span>{active !== undefined && <span className="ml-1 min-w-0 truncate font-normal text-fg-muted">· {active.activeForm}</span>}{active !== undefined && <LoaderCircle size={12} aria-label={t('chat.taskChecklistRunning')} className="ml-auto shrink-0 animate-spin text-accent motion-reduce:animate-none" />}{collapsed && <span className="ml-auto flex shrink-0 items-center gap-1.5"><span className="h-1.5 w-16 overflow-hidden rounded-pill bg-tint"><span className="block h-full rounded-pill bg-accent transition-[width] duration-500" style={{ width: `${progress * 100}%` }} /></span><span className="text-[10px] text-fg-faint">{Math.round(progress * 100)}%</span></span>}</button><div id="task-checklist-items" className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out ${collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100'}`}><div className="min-h-0 overflow-hidden"><ul className="scroll-thin mt-1.5 max-h-32 overflow-y-auto pl-5">{todos.map((item, i) => <li key={`${i}:${item.content}`} className={`flex gap-1.5 text-[12px] leading-relaxed ${item.status === 'completed' ? 'text-fg-faint line-through' : item.status === 'in_progress' ? 'text-fg' : 'text-fg-muted'}`}><span className="shrink-0 font-mono">{item.status === 'completed' ? <Check size={12} aria-hidden /> : item.status === 'in_progress' ? <LoaderCircle size={12} className="animate-spin text-accent motion-reduce:animate-none" /> : '○'}</span><span>{item.status === 'in_progress' ? item.activeForm : item.content}</span></li>)}</ul></div></div></div></div>
 }

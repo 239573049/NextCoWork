@@ -17,29 +17,42 @@
 import {
   ArrowUpDown,
   ChevronRight,
+  Copy,
   Eye,
   EyeOff,
+  FilePlus2,
   FolderOpen,
+  FolderPlus,
   ListCollapse,
+  Loader2,
   MoreHorizontal,
+  MoveRight,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
+  Trash2,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { DirListing, FileEntry, SortBy } from '../../../../shared/domain/file-tree'
 import type { InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
+import type { WorkspaceFileMutationRequest } from '../../../../shared/domain/workspace-file'
+import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { IconButton } from '../../components/ui/IconButton'
 import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
 import { listDir } from '../../services/app'
+import { mutateWorkspaceFile, revealWorkspaceFile, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
+import { confirmDocumentChanges } from '../../stores/documents'
 import { useTabsStore } from '../../stores/tabs'
 import { flatten } from './flatten'
-import { useI18n } from '../../i18n'
+import { useI18n, type TranslationKey } from '../../i18n'
+import { FileOperationDialog } from './FileOperationDialog'
+import { type FileOperationTarget } from './file-operations'
 
 type Scope = 'conversation' | 'all'
 
@@ -54,19 +67,25 @@ const TOOLBAR_FULL_WIDTH = 400
 /** 一层缩进。12 是让第 3 层还看得出层级、又不至于把长文件名挤没的那个值。 */
 const INDENT = 12
 
-export function FilesView({
+interface FilesViewProps {
+  workspace: Workspace
+  /** Workspace-relative subtree root; empty for the workspace root. */
+  rootPath: string
+  selectedPath: string | null
+  onOpenFile: (path: string, name: string) => void
+}
+
+export function FilesView(props: FilesViewProps): ReactNode {
+  // Scope the full state to the workspace and subtree, including pending dialogs.
+  return <WorkspaceFilesView key={`${props.workspace.id}:${props.rootPath}`} {...props} />
+}
+
+function WorkspaceFilesView({
   workspace,
   rootPath,
   selectedPath,
   onOpenFile
-}: {
-  workspace: Workspace
-  /** 子树根,工作区相对;`''` = 工作区根(见 InnerTab 的 files.ref.path) */
-  rootPath: string
-  /** 当前在主区打开的那个文件,用来画选中行 */
-  selectedPath: string | null
-  onOpenFile: (path: string, name: string) => void
-}): ReactNode {
+}: FilesViewProps): ReactNode {
   const { t } = useI18n()
   const scopes: readonly { id: Scope; label: string }[] = [
     { id: 'conversation', label: t('files.conversation') },
@@ -79,14 +98,32 @@ export function FilesView({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [listings, setListings] = useState<Readonly<Record<string, DirListing>>>({})
   const [failed, setFailed] = useState<ReadonlySet<string>>(new Set())
+  const [loading, setLoading] = useState<ReadonlySet<string>>(new Set())
+  const [operation, setOperation] = useState<FileOperationTarget | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [confirmingChanges, setConfirmingChanges] = useState(false)
+  const [operationError, setOperationError] = useState<TranslationKey | null>(null)
+  const [notice, setNotice] = useState<{ key: TranslationKey; path?: string; error?: boolean } | null>(null)
+  const generation = useRef(0)
+  const requests = useRef(new Map<string, number>())
+  const sequence = useRef(0)
+  const alive = useRef(true)
+  const operationRunning = useRef(false)
 
   const toolbar = useRef<HTMLDivElement>(null)
   const compact = useToolbarCompact(toolbar)
 
   const load = useCallback(
     (path: string): void => {
+      const epoch = generation.current
+      const request = ++sequence.current
+      requests.current.set(path, request)
+      const isCurrent = (): boolean =>
+        alive.current && generation.current === epoch && requests.current.get(path) === request
+      setLoading((prev) => new Set(prev).add(path))
       void listDir(workspace.id, path)
         .then((l) => {
+          if (!isCurrent()) return
           setListings((prev) => ({ ...prev, [path]: l }))
           setFailed((prev) => {
             if (!prev.has(path)) return prev
@@ -96,10 +133,19 @@ export function FilesView({
           })
         })
         .catch((err: unknown) => {
+          if (!isCurrent()) return
           // 目录读不到(权限 / 刚被删)只该让**那一行**显示读取失败,
           // 不该把整棵树打空 —— 树是一层一层来的,一层坏不等于整棵坏。
           console.error('[files] 列目录失败:', path, err)
           setFailed((prev) => new Set(prev).add(path))
+        })
+        .finally(() => {
+          if (!isCurrent()) return
+          setLoading((prev) => {
+            const next = new Set(prev)
+            next.delete(path)
+            return next
+          })
         })
     },
     [workspace.id]
@@ -108,30 +154,121 @@ export function FilesView({
   // 换工作区 / 换子树根:整棵重来。旧工作区的路径在新根下毫无意义,
   // 留着会让第一帧画出上一个项目的文件名。
   useEffect(() => {
+    alive.current = true
+    generation.current += 1
     setListings({})
     setFailed(new Set())
     setExpanded(new Set())
     load(rootPath)
+    return () => {
+      alive.current = false
+      generation.current += 1
+    }
   }, [load, rootPath])
 
   const toggleDir = (path: string): void => {
+    const wasExpanded = expanded.has(path)
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else {
-        next.add(path)
-        if (listings[path] === undefined) load(path)
-      }
+      if (wasExpanded && !failed.has(path)) next.delete(path)
+      else next.add(path)
       return next
     })
+    if (failed.has(path) || (!wasExpanded && listings[path] === undefined)) load(path)
   }
 
-  const refresh = (): void => {
-    setListings({})
+  const refresh = useCallback((paths: ReadonlySet<string> = expanded): void => {
+    generation.current += 1
+    // Only preserve visible listings while they reload; collapsed folders must
+    // read fresh data the next time they are expanded.
+    setListings((prev) => Object.fromEntries(
+      Object.entries(prev).filter(([path]) => path === rootPath || paths.has(path)),
+    ))
+    setLoading(new Set())
     setFailed(new Set())
     load(rootPath)
     // 展开状态**留着**:刷新是"重新读盘",不是"把我打开的目录都收起来"
-    for (const p of expanded) load(p)
+    for (const p of paths) if (p !== rootPath) load(p)
+  }, [expanded, load, rootPath])
+
+  useEffect(() => {
+    const onFilesChanged = (event: Event): void => {
+      const change = (event as CustomEvent<WorkspaceFilesChanged>).detail
+      if (change.workspaceId !== workspace.id) return
+      const paths = new Set<string>()
+      for (const path of expanded) {
+        const affected = path === change.path || path.startsWith(`${change.path}/`)
+        if (affected && change.operation === 'delete') continue
+        paths.add(
+          affected && (change.operation === 'move' || change.operation === 'rename') && change.destination
+            ? `${change.destination}${path.slice(change.path.length)}`
+            : path,
+        )
+      }
+      setExpanded(paths)
+      refresh(paths)
+    }
+    window.addEventListener('workspace-files-changed', onFilesChanged)
+    return () => window.removeEventListener('workspace-files-changed', onFilesChanged)
+  }, [expanded, refresh, workspace.id])
+
+  const beginOperation = (operation: FileOperationTarget): void => {
+    if (operationRunning.current) return
+    setOperationError(null)
+    setNotice(null)
+    setOperation(operation)
+  }
+
+  const submitOperation = async (request: WorkspaceFileMutationRequest): Promise<void> => {
+    if (operationRunning.current) return
+    operationRunning.current = true
+    setBusy(true)
+    setOperationError(null)
+    try {
+      if (request.operation === 'rename' || request.operation === 'move' || request.operation === 'delete') {
+        setConfirmingChanges(true)
+        const confirmed = await confirmDocumentChanges(workspace.id, request.path)
+        if (!alive.current) return
+        setConfirmingChanges(false)
+        if (!confirmed) return
+      }
+      const result = await mutateWorkspaceFile(request)
+      if (!alive.current) return
+      const noticeKeys: Record<FileOperationTarget['operation'], TranslationKey> = {
+        'create-file': 'files.manage.created',
+        'create-directory': 'files.manage.created',
+        rename: 'files.manage.renamed',
+        copy: 'files.manage.copied',
+        move: 'files.manage.moved',
+        delete: 'files.manage.deleted',
+      }
+      setNotice({ key: noticeKeys[request.operation], path: result.destination ?? result.path })
+      setOperation(null)
+      setScope('all')
+      if (request.operation === 'create-file') {
+        onOpenFile(result.path, result.path.split('/').at(-1) ?? result.path)
+      }
+    } catch (error) {
+      if (alive.current) {
+        const errorKey = workspaceFileErrorKey(error)
+        setOperationError(errorKey)
+        if (request.operation === 'delete') setNotice({ key: errorKey, error: true })
+      }
+    } finally {
+      operationRunning.current = false
+      if (alive.current) {
+        setBusy(false)
+        setConfirmingChanges(false)
+      }
+    }
+  }
+
+  const reveal = async (path: string): Promise<void> => {
+    try {
+      await revealWorkspaceFile(workspace.id, path)
+    } catch (error) {
+      if (alive.current) setNotice({ key: workspaceFileErrorKey(error), error: true })
+    }
   }
 
   const rows = useMemo(
@@ -174,6 +311,7 @@ export function FilesView({
               <input
                 autoFocus
                 value={query}
+                aria-label={t('files.search')}
                 placeholder={t('files.filterPlaceholder')}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Escape' && setQuery(null)}
@@ -195,12 +333,22 @@ export function FilesView({
                 label={t('files.moreActions')}
                 width={190}
                 trigger={<MoreHorizontal size={14} />}
+                disabled={busy}
                 triggerClassName="flex size-6 items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
               >
                 {(close) => (
                   <>
-                    <MenuItem icon={<Plus size={14} />} onSelect={close}>
-                      {t('files.new')}
+                    <MenuItem icon={<FilePlus2 size={14} />} onSelect={() => {
+                      beginOperation({ operation: 'create-file', path: rootPath, name: '' })
+                      close()
+                    }}>
+                      {t('files.manage.newFile')}
+                    </MenuItem>
+                    <MenuItem icon={<FolderPlus size={14} />} onSelect={() => {
+                      beginOperation({ operation: 'create-directory', path: rootPath, name: '' })
+                      close()
+                    }}>
+                      {t('files.manage.newDirectory')}
                     </MenuItem>
                     <MenuItem
                       icon={<ArrowUpDown size={14} />}
@@ -230,8 +378,11 @@ export function FilesView({
                     >
                       {t('files.collapseAll')}
                     </MenuItem>
-                    <MenuItem icon={<FolderOpen size={14} />} onSelect={close}>
-                      {t('files.showInFinder')}
+                    <MenuItem icon={<FolderOpen size={14} />} onSelect={() => {
+                      void reveal(rootPath)
+                      close()
+                    }}>
+                      {t('files.manage.reveal')}
                     </MenuItem>
                     <MenuItem
                       icon={<RefreshCw size={14} />}
@@ -247,9 +398,24 @@ export function FilesView({
               </Menu>
             ) : (
               <>
-                <IconButton label={t('files.new')} size={24}>
-                  <Plus size={14} />
-                </IconButton>
+                <Menu
+                  label={t('files.new')}
+                  trigger={<Plus size={14} />}
+                  width={190}
+                  disabled={busy}
+                  triggerClassName="flex size-6 items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
+                >
+                  {(close) => <>
+                    <MenuItem icon={<FilePlus2 size={14} />} onSelect={() => {
+                      beginOperation({ operation: 'create-file', path: rootPath, name: '' })
+                      close()
+                    }}>{t('files.manage.newFile')}</MenuItem>
+                    <MenuItem icon={<FolderPlus size={14} />} onSelect={() => {
+                      beginOperation({ operation: 'create-directory', path: rootPath, name: '' })
+                      close()
+                    }}>{t('files.manage.newDirectory')}</MenuItem>
+                  </>}
+                </Menu>
                 <IconButton
                   label={sortLabel(t, sortBy)}
                   size={24}
@@ -269,22 +435,44 @@ export function FilesView({
                 <IconButton label={t('files.collapseAll')} size={24} onClick={() => setExpanded(new Set())}>
                   <ListCollapse size={14} />
                 </IconButton>
-                <IconButton label={t('files.showInFinder')} size={24}>
+                <IconButton label={t('files.manage.reveal')} size={24} onClick={() => void reveal(rootPath)}>
                   <FolderOpen size={14} />
                 </IconButton>
-                <IconButton label={t('common.refresh')} size={24} onClick={refresh}>
-                  <RefreshCw size={14} />
+                <IconButton label={t('common.refresh')} size={24} onClick={() => refresh()} disabled={loading.size > 0}>
+                  <RefreshCw size={14} className={cn(loading.size > 0 && 'animate-spin')} />
                 </IconButton>
               </>
             ))}
         </div>
       </div>
 
+      {notice !== null && (
+        <div role={notice.error ? 'alert' : 'status'} className={cn(
+          'mx-2 mb-1.5 flex items-start gap-1 rounded-[7px] bg-tint px-2 py-1.5 text-[12px]',
+          notice.error ? 'text-danger' : 'text-fg-muted',
+        )}>
+          <span className="min-w-0 flex-1 break-words">{t(notice.key, { path: notice.path ?? '' })}</span>
+          <IconButton label={t('files.manage.dismissStatus')} size={18} onClick={() => setNotice(null)}>
+            <X size={11} />
+          </IconButton>
+        </div>
+      )}
+      {loading.size > 0 && listings[rootPath] !== undefined && (
+        <div role="status" className="flex items-center gap-1.5 px-3 py-1 text-[11.5px] text-fg-faint">
+          <Loader2 size={12} className="animate-spin" />
+          {t('files.manage.refreshing')}
+        </div>
+      )}
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
         {scope === 'conversation' ? (
           <EmptyState title={t('files.noConversation')} hint={t('files.noConversationHint')} className="py-10" />
         ) : failed.has(rootPath) ? (
-          <EmptyState title={t('files.unreadable')} hint={t('files.unreadableHint')} className="py-10" />
+          <div className="flex flex-col items-center py-8">
+            <EmptyState title={t('files.unreadable')} hint={t('files.unreadableHint')} className="pb-4" />
+            <Button size="sm" onClick={() => load(rootPath)} disabled={loading.has(rootPath)}>
+              {t(loading.has(rootPath) ? 'common.loading' : 'common.retry')}
+            </Button>
+          </div>
         ) : root === undefined ? (
           <EmptyState title={t('common.loading')} className="py-10" />
         ) : rows.length === 0 ? (
@@ -293,7 +481,7 @@ export function FilesView({
             className="py-10"
           />
         ) : (
-          <>
+          <div role="tree" aria-label={t('files.manage.tree')} aria-busy={loading.size > 0}>
             {rows.map(({ entry, depth }) => (
               <TreeRow
                 key={entry.path}
@@ -301,7 +489,15 @@ export function FilesView({
                 depth={depth}
                 expanded={expanded.has(entry.path)}
                 failed={failed.has(entry.path)}
+                loading={loading.has(entry.path)}
                 selected={entry.path === selectedPath}
+                busy={busy}
+                onOperation={(operation) => beginOperation({ operation, path: entry.path, name: entry.name })}
+                onDelete={() => {
+                  setNotice(null)
+                  void submitOperation({ workspaceId: workspace.id, operation: 'delete', path: entry.path })
+                }}
+                onReveal={() => void reveal(entry.path)}
                 onClick={() =>
                   entry.kind === 'dir' ? toggleDir(entry.path) : onOpenFile(entry.path, entry.name)
                 }
@@ -309,12 +505,24 @@ export function FilesView({
             ))}
             {root.truncated && (
               <p className="px-2 py-2 text-[11.5px] text-fg-faint">
-                目录太大,只列出了前 {root.entries.length} 项
+                {t('files.manage.truncated', { count: root.entries.length })}
               </p>
             )}
-          </>
+          </div>
         )}
       </div>
+      {operation !== null && operation.operation !== 'delete' && (
+        <FileOperationDialog
+          key={`${operation.operation}:${operation.path}`}
+          workspaceId={workspace.id}
+          target={operation}
+          busy={busy}
+          hidden={confirmingChanges}
+          failure={operationError}
+          onSubmit={(request) => void submitOperation(request)}
+          onClose={() => !busy && setOperation(null)}
+        />
+      )}
     </div>
   )
 }
@@ -324,54 +532,128 @@ function TreeRow({
   depth,
   expanded,
   failed,
+  loading,
   selected,
+  busy,
+  onOperation,
+  onDelete,
+  onReveal,
   onClick
 }: {
   entry: FileEntry
   depth: number
   expanded: boolean
   failed: boolean
+  loading: boolean
   selected: boolean
+  busy: boolean
+  onOperation: (operation: FileOperationTarget['operation']) => void
+  onDelete: () => void
+  onReveal: () => void
   onClick: () => void
 }): ReactNode {
+  const { t } = useI18n()
   const { Icon, className } = iconFor(entry.name, entry.kind, expanded)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   return (
     <div
       role="treeitem"
+      tabIndex={0}
+      aria-level={depth + 1}
+      aria-label={failed ? t('files.manage.readFailed') : entry.name}
+      aria-busy={loading}
       aria-expanded={entry.kind === 'dir' ? expanded : undefined}
       aria-selected={selected}
       title={entry.path}
       onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onClick()
+        }
+      }}
       // 缩进走 padding 而不是嵌套 div:树是**平铺**渲染的(见 flatten),
       // 这样虚拟化和键盘上下移动将来都只面对一维数组
       style={{ paddingLeft: 4 + depth * INDENT }}
       className={cn(
         'group flex h-[26px] cursor-default items-center gap-1.5 rounded-[7px] pr-1 text-[12.5px]',
-        'transition-colors select-none',
+        'transition-colors select-none outline-none focus-visible:ring-1 focus-visible:ring-accent',
         selected ? 'bg-surface-raised text-fg' : 'text-fg-muted hover:bg-tint-hover hover:text-fg'
       )}
     >
       {/* 占位一律画:没有它,文件名会比同级目录名左移 14px,一列名字就对不齐了 */}
       <span className="flex size-3.5 shrink-0 items-center justify-center text-fg-faint">
-        {entry.kind === 'dir' && (
+        {loading ? <Loader2 size={12} className="animate-spin" /> : entry.kind === 'dir' && (
           <ChevronRight size={12} className={cn('transition-transform', expanded && 'rotate-90')} />
         )}
       </span>
       <Icon size={14} className={cn('shrink-0', className)} />
       <span className={cn('min-w-0 flex-1 truncate', failed && 'text-danger')}>{entry.name}</span>
-      <button
-        type="button"
-        aria-label={`${entry.name} 的操作`}
-        onClick={(e) => e.stopPropagation()}
-        className={cn(
-          'flex size-[18px] shrink-0 items-center justify-center rounded-[5px]',
-          'text-fg-faint opacity-0 transition-opacity group-hover:opacity-100',
-          'hover:bg-tint-strong hover:text-fg focus-visible:opacity-100'
-        )}
-      >
-        <MoreHorizontal size={12} />
-      </button>
+      <div onClick={(e) => e.stopPropagation()}>
+        <Menu
+          label={t('files.manage.actions', { name: entry.name })}
+          trigger={<MoreHorizontal size={12} />}
+          disabled={busy}
+          onOpenChange={(open) => {
+            if (!open) setConfirmingDelete(false)
+          }}
+          align="end"
+          width={200}
+          triggerClassName={cn(
+            'flex size-[18px] shrink-0 items-center justify-center rounded-[5px]',
+            'text-fg-faint opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100',
+            'hover:bg-tint-strong hover:text-fg focus-visible:opacity-100 aria-expanded:opacity-100',
+          )}
+        >
+          {(close) => {
+            const act = (operation: Exclude<FileOperationTarget['operation'], 'delete'>): void => {
+              close()
+              onOperation(operation)
+            }
+            return <>
+              {entry.kind === 'dir' && <>
+                <MenuItem icon={<FilePlus2 size={14} />} onSelect={() => act('create-file')}>
+                  {t('files.manage.newFile')}
+                </MenuItem>
+                <MenuItem icon={<FolderPlus size={14} />} onSelect={() => act('create-directory')}>
+                  {t('files.manage.newDirectory')}
+                </MenuItem>
+                <MenuSeparator />
+              </>}
+              <MenuItem icon={<Pencil size={14} />} onSelect={() => act('rename')}>
+                {t('files.manage.rename')}
+              </MenuItem>
+              <MenuItem icon={<Copy size={14} />} onSelect={() => act('copy')}>
+                {t('files.manage.copy')}
+              </MenuItem>
+              <MenuItem icon={<MoveRight size={14} />} onSelect={() => act('move')}>
+                {t('files.manage.move')}
+              </MenuItem>
+              <MenuItem icon={<FolderOpen size={14} />} onSelect={() => { close(); onReveal() }}>
+                {t('files.manage.reveal')}
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem
+                danger
+                icon={<Trash2 size={14} />}
+                onSelect={() => {
+                  if (confirmingDelete) {
+                    setConfirmingDelete(false)
+                    close()
+                    onDelete()
+                  } else {
+                    setConfirmingDelete(true)
+                  }
+                }}
+              >
+                {confirmingDelete ? t('common.confirmDelete') : t('files.manage.delete')}
+              </MenuItem>
+            </>
+          }}
+        </Menu>
+      </div>
     </div>
   )
 }

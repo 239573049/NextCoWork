@@ -11,9 +11,10 @@
  * 换来的是一个能一眼看完的 reducer。
  */
 import type { AgentError } from './error'
-import type { AgentEvent, RunStatus } from './event'
-import type { AgentMessage, ToolOutput } from './message'
+import type { AgentEvent, RunStatus, SubagentPhase } from './event'
+import { visibleText, type AgentMessage, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
+import type { ContextCheckpoint, ContextStatus } from './context-management'
 
 /** 尚未提交的内容块。`index` 就是上游给的块序号(方案 §4.2)。 */
 export interface LiveBlock {
@@ -29,7 +30,7 @@ export interface ToolCallState {
   callId: string
   name: string
   input: unknown
-  status: 'running' | 'ok' | 'error'
+  status: 'pending' | 'running' | 'ok' | 'error'
   /** 易失,不进转录(方案 §4.3) */
   progress?: string
   output?: ToolOutput
@@ -46,21 +47,189 @@ export interface ToolCallState {
   endedAt?: number
 }
 
+export interface SubagentState {
+  callId: string
+  childRunId: string
+  status: RunStatus
+  description?: string
+  subagentType?: string
+  model?: string
+  background?: boolean
+  phase?: SubagentPhase
+  currentTool?: string
+  toolCalls: number
+  toolErrors: number
+  startedAt?: number
+  endedAt?: number
+  summary?: string
+  usage?: TokenUsage
+  contextUsage?: { used: number; window: number; shouldCompact: boolean }
+  /** Last child-run event sequence already reflected in this state. */
+  childSeq?: number
+}
+
 export interface TranscriptState {
   /** 已提交的消息 —— 落盘的就是这些(方案 §9:绝不在 delta 上写盘) */
   messages: AgentMessage[]
   /** 当前这条助手消息里还在流的块,按 index 升序 */
   live: LiveBlock[]
   tools: Record<string, ToolCallState>
+  /** Live and completed child agents keyed by their parent Task call id. */
+  subagents: Record<string, SubagentState>
   status: RunStatus
+  /** Wall-clock bounds for the currently displayed run. */
+  runStartedAt?: number
+  runEndedAt?: number
   model?: string
+  /** API-reported usage accumulated across completed requests in the current run. */
   usage?: TokenUsage
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
+  contextCheckpoints: ContextCheckpoint[]
+  contextStatus?: ContextStatus
   error?: AgentError
 }
 
 export function emptyTranscript(): TranscriptState {
-  return { messages: [], live: [], tools: {}, status: 'running' }
+  return { messages: [], live: [], tools: {}, subagents: {}, contextCheckpoints: [], status: 'running' }
+}
+
+/** Add one provider response's usage to a child-agent total. */
+function addUsage(previous: TokenUsage | undefined, delta: TokenUsage): TokenUsage {
+  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, ...previous }
+  for (const key of Object.keys(delta) as Array<keyof TokenUsage>) {
+    const value = delta[key]
+    if (value !== undefined) usage[key] = (usage[key] ?? 0) + value
+  }
+  return usage
+}
+
+/** Reconstruct durable Task-card metadata from persisted tool result messages. */
+function applySubagentMessage(
+  subagents: TranscriptState['subagents'],
+  message: AgentMessage
+): TranscriptState['subagents'] {
+  let next = subagents
+  for (const part of message.parts) {
+    if (part.type !== 'tool_result' || part.subagent === undefined) continue
+    if (next === subagents) next = { ...subagents }
+    const previous = next[part.callId]
+    const metadata: SubagentResult = part.subagent
+    const metadataStatus = metadata.status ?? (part.isError ? 'error' : 'done')
+    // A child can finish before its parent commits the background tool result;
+    // never let that late durable "running" marker downgrade a terminal state.
+    const status = metadataStatus === 'error'
+      ? 'error'
+      : previous !== undefined && previous.status !== 'running'
+        ? previous.status
+        : metadataStatus
+    next[part.callId] = {
+      ...(previous ?? {
+        callId: part.callId,
+        childRunId: metadata.childRunId,
+        toolCalls: 0,
+        toolErrors: 0
+      }),
+      childRunId: metadata.childRunId,
+      status,
+      ...(metadata.background === undefined ? {} : { background: metadata.background }),
+      phase: status === 'running' ? (metadata.background === true ? 'background' : 'starting') : 'finishing',
+      ...(metadata.summary === undefined ? {} : { summary: metadata.summary })
+    }
+  }
+  return next
+}
+
+/** Rebuild durable child-agent cards from session history, retaining live telemetry. */
+export function subagentsFromMessages(
+  messages: readonly AgentMessage[],
+  live: Readonly<TranscriptState['subagents']> = {}
+): TranscriptState['subagents'] {
+  let subagents: TranscriptState['subagents'] = {}
+  const taskCalls = new Map<string, { description?: string; subagentType?: string }>()
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== 'tool_call' || part.name.toLowerCase() !== 'task') continue
+      const input = part.input
+      const record = typeof input === 'object' && input !== null ? input as Record<string, unknown> : undefined
+      taskCalls.set(part.callId, {
+        ...(typeof record?.description === 'string' ? { description: record.description } : {}),
+        ...(typeof record?.subagent_type === 'string' ? { subagentType: record.subagent_type } : {})
+      })
+    }
+    subagents = applySubagentMessage(subagents, message)
+  }
+  for (const [callId, info] of taskCalls) {
+    const current = subagents[callId]
+    if (current === undefined) continue
+    subagents[callId] = {
+      ...current,
+      ...(info.description === undefined ? {} : { description: info.description }),
+      ...(info.subagentType === undefined ? {} : { subagentType: info.subagentType })
+    }
+  }
+  for (const [callId, saved] of Object.entries(subagents)) {
+    const current = live[callId]
+    if (current === undefined) continue
+    subagents[callId] = { ...saved, ...current, callId, childRunId: current.childRunId }
+  }
+  for (const [callId, current] of Object.entries(live)) {
+    if (subagents[callId] !== undefined) continue
+    subagents[callId] = current
+  }
+  return subagents
+}
+
+/** Committed calls/results are durable; progress and execution timestamps are not. */
+function applyToolMessage(tools: TranscriptState['tools'], message: AgentMessage): TranscriptState['tools'] {
+  let next = tools
+  for (const part of message.parts) {
+    if (part.type !== 'tool_call' && part.type !== 'tool_result') continue
+    if (next === tools) next = { ...tools }
+    const previous = next[part.callId]
+    if (part.type === 'tool_call') {
+      next[part.callId] = {
+        ...previous,
+        callId: part.callId,
+        name: part.name,
+        // Live tool_start can carry arguments edited during approval.
+        input: previous?.input ?? part.input,
+        status: previous?.status ?? 'pending'
+      }
+    } else {
+      next[part.callId] = {
+        ...previous,
+        callId: part.callId,
+        name: previous?.name ?? '(unknown)',
+        input: previous?.input,
+        status: part.isError ? 'error' : 'ok',
+        output: part.output,
+        progress: undefined
+      }
+    }
+  }
+  return next
+}
+
+/** Rebuild from saved messages, retaining available live details for matching calls only. */
+export function toolsFromMessages(
+  messages: readonly AgentMessage[],
+  live: Readonly<TranscriptState['tools']> = {}
+): TranscriptState['tools'] {
+  let tools: TranscriptState['tools'] = {}
+  for (const message of messages) tools = applyToolMessage(tools, message)
+  for (const [callId, saved] of Object.entries(tools)) {
+    const current = live[callId]
+    if (current === undefined) continue
+    tools[callId] = saved.status === 'pending'
+      // The history fetch may precede a more recent tool_start/tool_end event.
+      ? { ...saved, ...current, name: saved.name }
+      : {
+          ...current, ...saved,
+          name: saved.name === '(unknown)' ? current.name : saved.name,
+          input: current.input ?? saved.input
+        }
+  }
+  return tools
 }
 
 /**
@@ -147,8 +316,9 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
           // 而且流式中途的 JSON 一定非法。UI 拿到的 input 来自 tool_start。
           return s
 
-        case 'message_end':
-          return { ...s, usage: d.usage }
+        case 'message_end': {
+          return { ...s, usage: addUsage(s.usage, d.usage) }
+        }
 
         case 'error':
           return { ...s, error: d.error }
@@ -163,7 +333,19 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
 
     case 'message_commit':
       // ★ 提交即清空活跃块。漏掉这一句,已提交的内容会和活跃块同时显示 —— 全文重影。
-      return { ...s, messages: [...s.messages, e.message], live: [] }
+      {
+        const existing = s.messages.findIndex((message) => message.id === e.message.id)
+        const messages = existing < 0
+          ? [...s.messages, e.message]
+          : s.messages.map((message, index) => (index === existing ? e.message : message))
+        return {
+          ...s,
+          messages,
+          live: [],
+          tools: applyToolMessage(s.tools, e.message),
+          subagents: applySubagentMessage(s.subagents, e.message)
+        }
+      }
 
     case 'tool_start':
       return {
@@ -215,17 +397,168 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         contextUsage: { used: e.used, window: e.window, shouldCompact: e.shouldCompact }
       }
 
+    case 'context_status':
+      return { ...s, contextStatus: e.status }
+
+    case 'context_checkpoint': {
+      const existing = s.contextCheckpoints.findIndex((item) => item.id === e.checkpoint.id)
+      const checkpoints = existing < 0
+        ? [...s.contextCheckpoints, e.checkpoint]
+        : s.contextCheckpoints.map((item, index) => (index === existing ? e.checkpoint : item))
+      return { ...s, contextCheckpoints: checkpoints, contextStatus: { phase: 'ready', windowIndex: e.checkpoint.windowIndex } }
+    }
+
+    case 'subagent_start':
+      return {
+        ...s,
+        subagents: {
+          ...s.subagents,
+          [e.callId]: {
+            callId: e.callId,
+            childRunId: e.childRunId,
+            status: 'running',
+            ...(e.description === undefined ? {} : { description: e.description }),
+            ...(e.subagentType === undefined ? {} : { subagentType: e.subagentType }),
+            ...(e.model === undefined ? {} : { model: e.model }),
+            ...(e.background === undefined ? {} : { background: e.background }),
+            phase: e.background === true ? 'background' : 'starting',
+            toolCalls: 0,
+            toolErrors: 0,
+            ...(e.at === undefined ? {} : { startedAt: e.at })
+          }
+        }
+      }
+
+    case 'subagent_update': {
+      const previous = s.subagents[e.callId]
+      if (previous === undefined) return s
+      if (e.childSeq !== undefined && previous.childSeq !== undefined && e.childSeq <= previous.childSeq) return s
+      return {
+        ...s,
+        subagents: {
+          ...s.subagents,
+          [e.callId]: {
+            ...previous,
+            ...(e.phase === undefined ? {} : { phase: e.phase }),
+            // Presence matters here: `currentTool: undefined` is an explicit
+            // clear sent by `tool_end`, while an omitted field means "keep the
+            // last tool" for telemetry updates that do not change it.
+            ...('currentTool' in e ? { currentTool: e.currentTool } : {}),
+            ...(e.toolCalls === undefined ? {} : { toolCalls: e.toolCalls }),
+            ...(e.toolErrors === undefined ? {} : { toolErrors: e.toolErrors }),
+            ...(e.usage === undefined ? {} : { usage: addUsage(previous.usage, e.usage) }),
+            ...(e.contextUsage === undefined ? {} : { contextUsage: e.contextUsage }),
+            ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq })
+          }
+        }
+      }
+    }
+
+    case 'subagent_end': {
+      const previous = s.subagents[e.callId]
+      if (previous === undefined) return s
+      if (e.childSeq !== undefined && previous.childSeq !== undefined
+        && (e.childSeq < previous.childSeq || (e.childSeq === previous.childSeq && e.summary === undefined))) return s
+      return {
+        ...s,
+        subagents: {
+          ...s.subagents,
+          [e.callId]: {
+            ...previous,
+            status: e.status,
+            phase: 'finishing',
+            currentTool: undefined,
+            ...(e.summary === undefined ? {} : { summary: e.summary }),
+            ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq }),
+            ...(e.at === undefined ? {} : { endedAt: e.at })
+          }
+        }
+      }
+    }
+
     case 'run_end':
-      return { ...s, status: e.status, ...(e.error ? { error: e.error } : {}) }
+      return {
+        ...s,
+        status: e.status,
+        runEndedAt: e.at ?? Date.now(),
+        ...(e.error ? { error: e.error } : {})
+      }
 
     default:
-      // interaction_* / subagent_* 在步骤 5、11 接管。
+      // interaction_* 已由交互面板接管。
       return s
   }
 }
 
 export function applyEvents(s: TranscriptState, events: readonly AgentEvent[]): TranscriptState {
   return events.reduce(applyEvent, s)
+}
+
+/**
+ * Project a child run's own events onto the matching parent Task card. Child
+ * events arrive on the inherited IPC topic, so this keeps background runs
+ * observable even after the parent run has reached its terminal state.
+ */
+export function applyChildEvent(
+  s: TranscriptState,
+  childRunId: string,
+  e: AgentEvent,
+  childSeq?: number
+): TranscriptState {
+  const entry = Object.values(s.subagents).find((item) => item.childRunId === childRunId)
+  if (entry === undefined) return s
+  // Parent telemetry and the inherited child topic describe the same event.
+  // Whichever arrives first records the child sequence; the other is ignored.
+  if (childSeq !== undefined && entry.childSeq !== undefined && childSeq <= entry.childSeq) return s
+  const update = (patch: AgentEvent): TranscriptState => applyEvent(s, patch)
+  const childUpdate = (patch: Extract<AgentEvent, { type: 'subagent_update' | 'subagent_end' }>): TranscriptState => update(
+    childSeq === undefined ? patch : { ...patch, childSeq }
+  )
+
+  switch (e.type) {
+    case 'message_commit': {
+      // A detached/background child may finish after the parent run has ended,
+      // so there is no parent `subagent_end` event carrying the final text.
+      // Its committed assistant message is still enough to populate the card.
+      const text = visibleText(e.message).trim()
+      if (e.message.role !== 'assistant' || text === '') return s
+      return {
+        ...s,
+        subagents: {
+          ...s.subagents,
+          [entry.callId]: {
+            ...entry,
+            summary: text.slice(0, 240),
+            ...(childSeq === undefined ? {} : { childSeq })
+          }
+        }
+      }
+    }
+    case 'stream':
+      if (e.delta.type === 'message_start') {
+        return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+          phase: 'thinking', at: undefined })
+      }
+      if (e.delta.type === 'message_end') {
+        return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+          phase: 'finishing', usage: e.delta.usage })
+      }
+      return s
+    case 'tool_start':
+      return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+        phase: 'tool', currentTool: e.toolName, toolCalls: entry.toolCalls + 1 })
+    case 'tool_end':
+      return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+        phase: 'thinking', currentTool: undefined, toolErrors: entry.toolErrors + (e.isError ? 1 : 0) })
+    case 'context_usage':
+      return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+        contextUsage: { used: e.used, window: e.window, shouldCompact: e.shouldCompact } })
+    case 'run_end':
+      return childUpdate({ type: 'subagent_end', callId: entry.callId, childRunId,
+        status: e.status, at: e.at })
+    default:
+      return s
+  }
 }
 
 /** 活跃块里的纯文本 —— 「正在打字」的那一段。 */

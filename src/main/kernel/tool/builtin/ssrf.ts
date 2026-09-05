@@ -167,11 +167,15 @@ export function ssrfRisk(url: URL): string | null {
  * `127.0.0.1` 的情况。浏览器工具会在每一跳请求前调用这里；DNS 不可用时
  * 保持和 WebFetch 一致的可用性策略，交给底层请求自行失败。
  */
-export async function resolvedAddressRisk(hostname: string, timeoutMs = 1500): Promise<string | null> {
+export async function resolvedAddressRisk(
+  hostname: string,
+  timeoutMs = 1500,
+  lookup: (host: string, options: { all: true }) => Promise<Array<{ address: string }>> = dns.lookup
+): Promise<string | null> {
   let addresses: Array<{ address: string }>
   try {
     addresses = await Promise.race([
-      dns.lookup(hostname, { all: true }),
+      lookup(hostname, { all: true }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('dns timeout')), timeoutMs))
     ])
   } catch {

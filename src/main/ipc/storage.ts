@@ -14,6 +14,7 @@ import {
   constants,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -27,6 +28,7 @@ import {
   lstatSync,
   realpathSync
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
 import type {
@@ -52,6 +54,7 @@ import {
 import { DEFAULT_SETTINGS, mergeSettings, type StorageStats } from '../../shared/domain/settings'
 import { mcpSecretKind, mcpSecretRef } from '../../shared/domain/mcp'
 import { searchSecretRef } from '../../shared/domain/search'
+import { providerCredentialRef } from '../../shared/domain/provider'
 import { DRAFT_ATTACHMENT_TTL_MS } from '../../shared/domain/attachment'
 import { databaseDirectory, databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, openDatabase, txAsync, vacuumDatabase } from '../db'
 import { MIGRATIONS } from '../db/schema'
@@ -69,6 +72,10 @@ const BACKUP_EXT = '.ncwbackup'
 const AUTO_BACKUP_RE = /^nextcowork-auto\.ncwbackup$/
 const MAX_IMPORT_BYTES = 128 * 1024 * 1024
 const MAX_BACKUP_BYTES = 1024 * 1024 * 1024
+// Backup format v1 was introduced together with the session/message schema.
+// Earlier database versions do not contain the tables required by its
+// manifest counts and must be migrated by the old app before archiving.
+const MIN_BACKUP_SCHEMA_VERSION = 4
 /**
  * Electron keeps its profile caches beside our database because the app uses
  * the same project-level userData directory.  They are application-owned
@@ -107,9 +114,38 @@ const ELECTRON_PROFILE_PATHS = [
   'History-journal',
   'Crashpad'
 ] as const
+const MANAGED_LOCAL_PATHS = [
+  ATTACHMENTS_DIR,
+  'themes',
+  'skills',
+  'agents',
+  'plugins',
+  'plugin',
+  'logs',
+  'cache',
+  'workspaces',
+  // Migrated application instructions and Chromium's development/profile
+  // marker files also belong to this app-level userData tree.
+  'AGENTS.md',
+  'DevToolsActivePort',
+  ...ELECTRON_PROFILE_PATHS
+] as const
+/**
+ * Chromium and SQLite may append a numeric collision suffix to a top-level
+ * profile file (for example `DIPS-wal 3` or `nextcowork 2.db-shm`).  Keep the
+ * match deliberately narrow: delete-and-quit must remove every file the app
+ * owns without turning the data root into an arbitrary recursive delete.
+ */
+const MANAGED_LOCAL_FILE_PATTERNS = [
+  /^DIPS-(?:wal|shm)(?: [1-9]\d*)?$/u,
+  /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u,
+  /^nextcowork [1-9]\d*\.db(?:-(?:wal|shm))?$/u
+] as const
+// Confirmation state is scoped to the WebContents that opened the preview.
+// Otherwise a confirmation in window B could apply the file selected in A.
+// Direct unit tests use owner 0.
 const pendingImports = new Map<number, DataExport>()
-let importSeq = 0
-let pendingRestore: { path: string; preview: RestorePreview } | null = null
+const pendingRestores = new Map<number, { path: string; preview: RestorePreview }>()
 let backupRunning = false
 
 interface StoredBackupStatus {
@@ -120,6 +156,16 @@ interface StoredBackupStatus {
 
 function dataDirectory(): string {
   return databaseDirectory()
+}
+
+function managedLocalPaths(root: string): string[] {
+  const names = new Set<string>(MANAGED_LOCAL_PATHS)
+  try {
+    for (const name of readdirSync(root)) {
+      if (MANAGED_LOCAL_FILE_PATTERNS.some((pattern) => pattern.test(name))) names.add(name)
+    }
+  } catch { /* a missing/unreadable root is handled by each target operation */ }
+  return [...names].map((name) => join(root, name))
 }
 
 function attachmentDirectory(): string {
@@ -291,6 +337,10 @@ function atomicWrite(path: string, bytes: Uint8Array): void {
     fsyncSync(fd)
     closeSync(fd)
     fd = null
+    const persisted = readFileSync(tmp)
+    if (persisted.length !== bytes.length || sha256(persisted) !== sha256(bytes)) {
+      throw new IpcError('unknown', '临时文件写入校验失败')
+    }
     renameSync(tmp, path)
   } catch (err) {
     // A failed write/rename must never leave a file that looks like a usable
@@ -553,36 +603,94 @@ function credentialRefs(): string[] {
   return [...refs]
 }
 
+interface CredentialImportPlan {
+  /** Source archive ref -> local ref. null means the config lost its merge. */
+  destinations: Map<string, string | null>
+  /** Local refs made obsolete by an imported configuration change. */
+  removals: Set<string>
+}
+
 /**
- * The encrypted section travels with the configuration it belongs to.  The
- * old implementation checked it only against the *current* machine's
- * configuration, which made a perfectly valid export fail as soon as it
- * contained a provider/MCP/search service that had not been created locally
- * yet.  Build the allow-list from both sides before writing any credential.
+ * Build a credential allow-list from the imported records only.
  *
- * We intentionally use the provider's persisted `credentialRef` rather than
- * deriving `provider:${id}`: older installations and the built-in provider
- * can have stable refs that predate the current naming rule.
+ * An encrypted block must not gain permission to overwrite every credential
+ * already installed on this machine. A secret follows its configuration only
+ * when that record is new or wins the updatedAt comparison. Provider refs are
+ * also remapped: an archive is never allowed to choose a local provider's
+ * credential pointer.
  */
-function credentialRefsForData(data: DataExport): Set<string> {
-  const refs = new Set(credentialRefs())
-  for (const provider of data.providers) {
-    if (typeof provider.credentialRef === 'string' && provider.credentialRef !== '') {
-      refs.add(provider.credentialRef)
+function credentialImportPlan(data: DataExport): CredentialImportPlan {
+  const destinations = new Map<string, string | null>()
+  const removals = new Set<string>()
+  const add = (source: string, destination: string | null): void => {
+    if (source === '') throw new IpcError('unknown', '导入文件包含空凭证引用')
+    if (destinations.has(source) && destinations.get(source) !== destination) {
+      throw new IpcError('unknown', '导入文件包含冲突的凭证引用')
+    }
+    destinations.set(source, destination)
+  }
+
+  const localProviders = store.listProviders()
+  for (const incoming of data.providers) {
+    const local = localProviders.find((item) => item.id === incoming.id)
+    const decision = dataMergeDecision(local, incoming)
+    add(
+      incoming.credentialRef,
+      decision === 'skip'
+        ? null
+        : (local?.credentialRef ?? providerCredentialRef(incoming.id))
+    )
+  }
+
+  const localMcp = store.listMcpServers()
+  for (const incoming of data.mcpServers) {
+    const ref = mcpSecretRef(incoming.id, mcpSecretKind(incoming))
+    const local = localMcp.find((item) => item.id === incoming.id)
+    const decision = dataMergeDecision(local, incoming)
+    add(ref, decision === 'skip' ? null : ref)
+    if (
+      decision !== 'skip' &&
+      local !== undefined &&
+      mcpSecretKind(local) !== mcpSecretKind(incoming)
+    ) {
+      removals.add(mcpSecretRef(local.id, mcpSecretKind(local)))
     }
   }
-  for (const cfg of data.mcpServers) {
-    if (typeof cfg?.id !== 'string' || cfg.id === '') continue
-    const kind = cfg.transport === 'stdio' ? 'env' : 'headers'
-    refs.add(mcpSecretRef(cfg.id, kind))
+
+  const localSearch = repo.listStoredSearchProviders()
+  for (const incoming of data.searchProviders) {
+    const ref = searchSecretRef(incoming.id)
+    const local = localSearch.find((item) => item.id === incoming.id)
+    add(ref, dataMergeDecision(local, incoming) === 'skip' ? null : ref)
   }
-  for (const cfg of data.searchProviders) {
-    if (typeof cfg?.id === 'string') {
-      refs.add(searchSecretRef(cfg.id as Parameters<typeof searchSecretRef>[0]))
+
+  // Proxy settings are imported as one user-confirmed settings block and do
+  // not have a per-record updatedAt, so their optional password follows it.
+  add(PROXY_PASSWORD_REF, PROXY_PASSWORD_REF)
+  return { destinations, removals }
+}
+
+function mapImportedCredentials(
+  plan: CredentialImportPlan,
+  sourceValues: Record<string, string>
+): Record<string, string> {
+  const { destinations } = plan
+  const mapped = Object.create(null) as Record<string, string>
+  const destinationSources = new Map<string, string>()
+  for (const [source, value] of Object.entries(sourceValues)) {
+    if (!destinations.has(source)) {
+      throw new IpcError('unknown', '导入文件包含未知凭证引用')
     }
+    const destination = destinations.get(source) ?? null
+    if (destination === null) continue
+    const previous = destinationSources.get(destination)
+    if (previous !== undefined && previous !== source) {
+      throw new IpcError('unknown', '导入文件中的多个凭证会写入同一本机配置')
+    }
+    destinationSources.set(destination, source)
+    mapped[destination] = value
   }
-  refs.add(PROXY_PASSWORD_REF)
-  return refs
+  return mapped
 }
 
 function encryptCredentials(values: Record<string, string>, password: string): EncryptedCredentials {
@@ -614,7 +722,7 @@ function decryptCredentials(block: EncryptedCredentials, password: string): Reco
     const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
     const parsed: unknown = JSON.parse(plain)
     if (typeof parsed !== 'object' || parsed === null) throw new Error('credentials is not an object')
-    const out: Record<string, string> = {}
+    const out = Object.create(null) as Record<string, string>
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof k !== 'string' || typeof v !== 'string') throw new Error('credential value is not a string')
       out[k] = v
@@ -804,16 +912,15 @@ export async function exportData(req: { includeEncryptedKeys?: boolean; password
   return { path: result.filePath, encrypted: data.encryptedCredentials !== undefined, bytes: bytes.length }
 }
 
-export async function importPreview(): Promise<ImportPreview | null> {
+export async function importPreview(ownerId = 0): Promise<ImportPreview | null> {
+  // Starting a new chooser invalidates this window's previous confirmation.
+  pendingImports.delete(ownerId)
   const result = await dialog.showOpenDialog({ title: '导入 NextCoWork 数据', properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] })
   if (result.canceled || !result.filePaths[0]) return null
   const path = result.filePaths[0]
   const data = parseExport(path)
   const counts = compareCounts(data)
-  const id = ++importSeq
-  pendingImports.set(id, data)
-  // 只有一个待确认导入；旧预览失效，避免用户确认错文件。
-  for (const key of pendingImports.keys()) if (key !== id) pendingImports.delete(key)
+  pendingImports.set(ownerId, data)
   return {
     path,
     version: data.version,
@@ -830,21 +937,23 @@ export async function importPreview(): Promise<ImportPreview | null> {
   }
 }
 
-export async function importApply(req: { password?: string }): Promise<ImportApplyResult> {
-  const id = Math.max(...pendingImports.keys(), 0)
-  const data = pendingImports.get(id)
+export async function importApply(req: { password?: string }, ownerId = 0): Promise<ImportApplyResult> {
+  const data = pendingImports.get(ownerId)
   if (data === undefined) throw new IpcError('unknown', '没有待确认的导入预览')
+  const credentialPlan = credentialImportPlan(data)
   let credentialValues: Record<string, string> = {}
-  if (data.encryptedCredentials !== undefined) {
+  if (data.encryptedCredentials !== undefined && typeof data.encryptedCredentials !== 'boolean') {
     if (req.password === undefined) throw new IpcError('auth', '该导出包含加密密钥，需要输入密码')
     // 先验证密码，再开始事务；无效密码不会修改任何记录。
-    credentialValues = decryptCredentials(data.encryptedCredentials, req.password)
-    const allowed = credentialRefsForData(data)
-    for (const ref of Object.keys(credentialValues)) {
-      if (!allowed.has(ref)) throw new IpcError('unknown', '导入文件包含未知凭证引用')
-    }
+    credentialValues = mapImportedCredentials(
+      credentialPlan,
+      decryptCredentials(data.encryptedCredentials, req.password)
+    )
   }
-  const credentialRollback = await snapshotCredentialRollback(Object.keys(credentialValues))
+  const credentialRollback = await snapshotCredentialRollback([
+    ...Object.keys(credentialValues),
+    ...credentialPlan.removals
+  ])
   // 凭证写入使用 safeStorage，和数据库事务不是同一个同步 API。先保存数据库
   // 快照，任何一步失败都恢复整库，保证「导入失败 = 现有数据完全不变」。
   const dbPath = databaseFilePath()
@@ -859,12 +968,17 @@ export async function importApply(req: { password?: string }): Promise<ImportApp
     // 最终写回 credentials 表；如果任一 Promise 失败，数据库和凭证行一起回滚。
     const result = await txAsync(async () => {
       const merged = repo.mergeDataExport(data)
+      const secrets = getHost().secrets
+      for (const ref of credentialPlan.removals) {
+        if (secrets.remove !== undefined) await secrets.remove(ref)
+        else repo.removeCredential(ref)
+      }
       for (const [ref, value] of Object.entries(credentialValues)) {
-        await getHost().secrets.set(ref, value)
+        await secrets.set(ref, value)
       }
       return merged
     })
-    pendingImports.clear()
+    pendingImports.delete(ownerId)
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
     windows.emitToAll('sessions:changed', {})
@@ -1046,7 +1160,7 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
     !/^[a-f0-9]{64}$/.test(m.databaseSha256) ||
     typeof m.schemaVersion !== 'number' ||
     !Number.isInteger(m.schemaVersion) ||
-    m.schemaVersion < 1 ||
+    m.schemaVersion < MIN_BACKUP_SCHEMA_VERSION ||
     m.schemaVersion > latestSchema ||
     typeof m.sessionCount !== 'number' ||
     !Number.isInteger(m.sessionCount) ||
@@ -1086,13 +1200,17 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
  */
 function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>, expectedSettings: unknown): void {
   let temp: DatabaseSync | null = null
+  let validationDir: string | null = null
   try {
-    temp = new DatabaseSync(':memory:', { enableForeignKeyConstraints: true })
-    // `deserialize` is present in the Node runtime shipped with Electron,
-    // but older @types/node releases do not declare it yet.
-    const deserialize = (temp as DatabaseSync & { deserialize(data: Uint8Array): void }).deserialize
-    if (typeof deserialize !== 'function') throw new Error('当前运行时不支持 SQLite 归档校验')
-    deserialize.call(temp, raw)
+    // A database whose header is in WAL mode cannot reliably be deserialized
+    // into `:memory:`: SQLite may still try to open a sibling -wal file and
+    // fail with "unable to open database file". Validate an isolated copy in
+    // a private temporary directory instead. It may create WAL/SHM siblings,
+    // none of which can touch the live application database.
+    validationDir = mkdtempSync(join(tmpdir(), 'nextcowork-backup-validate-'))
+    const validationPath = join(validationDir, 'database.sqlite')
+    writeFileSync(validationPath, raw, { flag: 'wx' })
+    temp = new DatabaseSync(validationPath, { enableForeignKeyConstraints: true })
     const sessions = Number((temp.prepare('SELECT COUNT(*) AS n FROM sessions').get() as Record<string, unknown>)['n'] ?? -1)
     const messages = Number((temp.prepare('SELECT COUNT(*) AS n FROM messages').get() as Record<string, unknown>)['n'] ?? -1)
     const credentials = Number((temp.prepare('SELECT COUNT(*) AS n FROM credentials').get() as Record<string, unknown>)['n'] ?? -1)
@@ -1119,11 +1237,16 @@ function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>, 
     throw new IpcError('unknown', `备份数据库内容校验失败: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     try { temp?.close() } catch { /* best effort */ }
+    if (validationDir !== null) {
+      try { rmSync(validationDir, { recursive: true, force: true }) } catch { /* best effort */ }
+    }
   }
 }
 
-export async function restoreBackup(req: { confirm?: boolean }): Promise<RestoreResult | null> {
-  if (req.confirm !== true || pendingRestore === null) {
+export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Promise<RestoreResult | null> {
+  if (req.confirm !== true) {
+    // A canceled/replaced chooser must not leave an older file confirmable.
+    pendingRestores.delete(ownerId)
     const result = await dialog.showOpenDialog({ title: '从备份恢复', properties: ['openFile'], filters: [{ name: 'NextCoWork 备份', extensions: ['ncwbackup'] }] })
     if (result.canceled || !result.filePaths[0]) return null
     const path = result.filePaths[0]
@@ -1135,11 +1258,12 @@ export async function restoreBackup(req: { confirm?: boolean }): Promise<Restore
       messageCount: parsed.manifest.messageCount,
       settingsIncluded: true
     }
-    pendingRestore = { path, preview }
+    pendingRestores.set(ownerId, { path, preview })
     return { restored: false, preview }
   }
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再恢复')
-  const target = pendingRestore
+  const target = pendingRestores.get(ownerId)
+  if (target === undefined) throw new IpcError('unknown', '没有待确认的恢复预览')
   const parsed = parseBackup(target.path)
   const dbPath = databaseFilePath()
   if (dbPath === null) throw new IpcError('unknown', '当前数据库不是文件库')
@@ -1157,7 +1281,7 @@ export async function restoreBackup(req: { confirm?: boolean }): Promise<Restore
     // current device's backup directory and sanitize its status immediately
     // after reopening the replacement database.
     restoreLocalBackupState(localBackupState)
-    pendingRestore = null
+    pendingRestores.delete(ownerId)
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
     windows.emitToAll('sessions:changed', {})
@@ -1184,13 +1308,17 @@ function isWithin(root: string, path: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
-/** 普通会话附件的唯一受管理子树。themes/exports 等 scope 不属于清理范围。 */
-function sessionAttachmentDirectory(): string {
-  return join(attachmentDirectory(), 'sessions')
-}
-
 function isManagedSessionAttachment(path: string): boolean {
-  return isWithin(sessionAttachmentDirectory(), path) && resolve(path) !== resolve(sessionAttachmentDirectory())
+  const root = resolve(attachmentDirectory())
+  const target = resolve(path)
+  if (target === root || !isWithin(root, target)) return false
+  // Current non-session scopes have their own owners/cleanup rules. Everything
+  // else inside attachments is either the current sessions subtree or a
+  // pre-scope legacy session layout and is safe for session-orphan cleanup.
+  for (const scope of ['themes', 'exports']) {
+    if (isWithin(join(root, scope), target)) return false
+  }
+  return true
 }
 
 /** 删除受管理目录时保留用户选定的备份目录（无论它嵌套在哪一侧）。 */
@@ -1233,6 +1361,68 @@ function removeManagedPath(path: string, protectedPath: string | null): void {
   } catch (err) { throw new IpcError('unknown', `删除 ${path} 失败: ${String(err)}`) }
 }
 
+interface StagedManagedPath {
+  original: string
+  staged: string
+}
+
+/**
+ * Move a managed path into a same-filesystem staging tree before deleting it.
+ * Renames are atomic; if any later path cannot be staged, every prior rename
+ * can be reversed without having partially erased the user's database.
+ */
+function stageManagedPath(
+  path: string,
+  root: string,
+  stagingRoot: string,
+  protectedPath: string | null,
+  staged: StagedManagedPath[]
+): void {
+  let stat
+  try { stat = lstatSync(path) } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return
+    throw new IpcError('unknown', `读取 ${path} 失败: ${String(err)}`)
+  }
+
+  if (protectedPath !== null && isWithin(protectedPath, path)) return
+  if (
+    protectedPath !== null &&
+    isWithin(path, protectedPath) &&
+    stat.isDirectory() &&
+    !stat.isSymbolicLink()
+  ) {
+    for (const entry of readdirSync(path)) {
+      stageManagedPath(join(path, entry), root, stagingRoot, protectedPath, staged)
+    }
+    return
+  }
+
+  const rel = relative(resolve(root), resolve(path))
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new IpcError('unknown', '拒绝暂存数据目录边界之外的路径')
+  }
+  const destination = join(stagingRoot, rel)
+  mkdirSync(dirname(destination), { recursive: true })
+  try {
+    renameSync(path, destination)
+    staged.push({ original: path, staged: destination })
+  } catch (err) {
+    throw new IpcError('unknown', `暂存 ${path} 失败: ${String(err)}`)
+  }
+}
+
+function rollbackStagedPaths(staged: readonly StagedManagedPath[]): void {
+  for (const entry of [...staged].reverse()) {
+    try {
+      if (!existsSync(entry.staged)) continue
+      mkdirSync(dirname(entry.original), { recursive: true })
+      renameSync(entry.staged, entry.original)
+    } catch (err) {
+      console.error('[storage] 删除回滚失败:', entry.original, err)
+    }
+  }
+}
+
 function walkFiles(root: string): string[] {
   let rootStat
   try { rootStat = lstatSync(root) } catch (err) {
@@ -1252,6 +1442,26 @@ function walkFiles(root: string): string[] {
     else out.push(path)
   }
   return out
+}
+
+/**
+ * Current session files live below `attachments/sessions`. Before attachment
+ * scopes were introduced, files/directories could live directly below the
+ * attachment root. Scan both layouts while explicitly excluding the theme and
+ * export subtrees, whose authority is not the messages table.
+ */
+function reclaimableSessionFiles(): string[] {
+  const root = attachmentDirectory()
+  let names: string[]
+  try { names = readdirSync(root) } catch { return [] }
+  return names.flatMap((name) => {
+    if (name === 'themes' || name === 'exports') return []
+    const path = join(root, name)
+    let stat
+    try { stat = lstatSync(path) } catch { return [] }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return [path]
+    return walkFiles(path)
+  })
 }
 
 /**
@@ -1290,12 +1500,11 @@ function reclaimAttachmentCount(scan: ReclaimScan): number {
 }
 
 function scanReclaimable(now: number): ReclaimScan {
-  // V5 后附件根下还有 themes/exports 等其它 scope。只遍历 sessions 子树，
-  // 避免把主题图或导出资产误判成「表里没有的孤儿」。
-  const root = sessionAttachmentDirectory()
+  // V5 后附件根下还有 themes/exports 等其它 scope。候选扫描显式排除它们，
+  // 同时覆盖 sessions/ 和升级前留在附件根下的旧会话目录。
   const referenced = new Set(
     repo.attachmentRows()
-      .filter((row) => row.scope === 'session' && isManagedSessionAttachment(row.path))
+      .filter((row) => isManagedSessionAttachment(row.path))
       .map((row) => resolve(row.path))
   )
 
@@ -1307,16 +1516,10 @@ function scanReclaimable(now: number): ReclaimScan {
   }
 
   /*
-    ★ **只扫 sessions/ 子树,不扫整个附件根。**
-
-    附件根下不止会话附件:`themes/` 放主题图,它们由 `theme.ts` 的 index.json
-    管理、**不在 attachments 表里**。而这个函数的孤儿判据是「表里没有就删」——
-    对整个根跑一遍的话,用户传的每一张主题图都会在下一次清理时消失。
-
-    所以判据按子树分治:sessions/ 归这里,themes/ 归 `sweepOrphans`,
-    各自认自己的权威来源。判据的适用范围本身就是判据的一部分。
+    ★ themes/ 与 exports/ 绝不进入候选集。主题由 `theme.ts` 的 index.json
+    管理、导出资产也不属于会话历史；把整个附件根不加区分地扫一遍会误删。
   */
-  for (const path of walkFiles(root)) {
+  for (const path of reclaimableSessionFiles()) {
     // 上传中断留下的残片。以 `.` 开头 + `.tmp` 结尾，`ncw://` 也寻址不到它们
     if (basename(path).startsWith('.') && path.endsWith('.tmp')) { add(path); continue }
     // 真孤儿：磁盘上有、表里没有
@@ -1339,13 +1542,12 @@ function scanReclaimable(now: number): ReclaimScan {
   // 表里有、磁盘无 —— 只收行
   for (const row of repo.attachmentRows()) {
     // attachmentRows() 是兼容旧调用点的精简视图；路径边界仍由这里负责。
-    if (!isManagedSessionAttachment(row.path)) continue
+    if (row.scope !== 'session' || !isManagedSessionAttachment(row.path)) continue
     let present = true
     try { lstatSync(row.path) } catch { present = false }
     if (!present && !rowIds.includes(row.id)) {
       rowIds.push(row.id)
       rowPaths.set(row.id, row.path)
-      bytes += row.size
     }
   }
 
@@ -1366,7 +1568,7 @@ interface PhysicalCleanup {
 function removeUnreferencedManagedFiles(paths: readonly string[]): PhysicalCleanup {
   const referenced = new Set(
     repo.attachmentRows()
-      .filter((row) => row.scope === 'session' && isManagedSessionAttachment(row.path))
+      .filter((row) => isManagedSessionAttachment(row.path))
       .map((row) => resolve(row.path))
   )
   const undeletable: string[] = []
@@ -1414,10 +1616,10 @@ function attachmentCleanupPreview(): CleanupPreview {
   }
 }
 
-function likelyUndeletable(paths: readonly string[]): string[] {
+function likelyUndeletable(paths: readonly string[], sessionAttachmentsOnly = true): string[] {
   const result: string[] = []
   for (const raw of paths) {
-    if (!isManagedSessionAttachment(raw)) continue
+    if (sessionAttachmentsOnly && !isManagedSessionAttachment(raw)) continue
     try { lstatSync(raw) } catch { continue }
     try {
       // 删除权限由父目录决定；这里只做预览，不把文件内容或路径交给 renderer。
@@ -1429,17 +1631,107 @@ function likelyUndeletable(paths: readonly string[]): string[] {
   return [...new Set(result)]
 }
 
+/** Actual bytes that the cleanup boundary is permitted to unlink. */
+function managedAttachmentBytes(rows: readonly repo.AttachmentReferenceRow[]): number {
+  const seen = new Set<string>()
+  let bytes = 0
+  for (const row of rows) {
+    if (!isManagedSessionAttachment(row.path)) continue
+    const path = resolve(row.path)
+    if (seen.has(path)) continue
+    seen.add(path)
+    try {
+      const stat = lstatSync(path)
+      if (stat.isFile() || stat.isSymbolicLink()) bytes += stat.size
+    } catch { /* missing files release no physical bytes */ }
+  }
+  return bytes
+}
+
+function withActualAttachmentBytes(
+  preview: CleanupPreview,
+  rows: readonly repo.AttachmentReferenceRow[]
+): CleanupPreview {
+  const recorded = rows.reduce((total, row) => total + Math.max(0, row.size), 0)
+  return {
+    ...preview,
+    // Repository preview includes message JSON plus recorded attachment sizes.
+    // Replace the latter with real, in-boundary files so missing or external
+    // references are never advertised as disk space that will be freed.
+    bytes: Math.max(0, preview.bytes - recorded) + managedAttachmentBytes(rows),
+    undeletable: likelyUndeletable(rows.map((row) => row.path))
+  }
+}
+
+function managedPathSize(path: string): number {
+  let stat
+  try { stat = lstatSync(path) } catch { return 0 }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return stat.size
+  let total = stat.size
+  try {
+    for (const entry of readdirSync(path)) total += managedPathSize(join(path, entry))
+  } catch { /* a changing/unreadable subtree remains a best-effort estimate */ }
+  return total
+}
+
+/**
+ * Collapse a managed tree to the paths clearLocalData will actually remove.
+ * The recursive case is only needed for a legacy protected backup symlink
+ * inside the data tree; normal backup directories are required to be disjoint.
+ */
+function removableManagedEntries(path: string, protectedPath: string | null): string[] {
+  let stat
+  try { stat = lstatSync(path) } catch { return [] }
+  if (stat.isSymbolicLink()) {
+    return protectedPath !== null && isWithin(protectedPath, path) ? [] : [path]
+  }
+  if (protectedPath !== null && isWithin(protectedPath, path)) return []
+  if (protectedPath !== null && isWithin(path, protectedPath) && stat.isDirectory()) {
+    try {
+      return readdirSync(path).flatMap((name) => removableManagedEntries(join(path, name), protectedPath))
+    } catch {
+      return [path]
+    }
+  }
+  return [path]
+}
+
+function localDataPreview(): CleanupPreview {
+  const base = repo.cleanupPreview('local-data')
+  const root = dataDirectory()
+  const protectedPath = externalBackupPath(store.getSettings().data.backupDirectory)
+  const targets = managedLocalPaths(root).flatMap((path) =>
+    removableManagedEntries(path, protectedPath)
+  )
+  const dbPath = databaseFilePath()
+  if (dbPath !== null) {
+    for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      targets.push(...removableManagedEntries(path, protectedPath))
+    }
+  }
+  const unique = [...new Set(targets.map((path) => resolve(path)))]
+  return {
+    ...base,
+    bytes: unique.reduce((total, path) => total + managedPathSize(path), 0),
+    undeletable: likelyUndeletable(unique, false)
+  }
+}
+
 export function cleanupPreview(req: { kind: 'attachments' | 'age' | 'history' | 'local-data'; age?: CleanupAge }): CleanupPreview {
   if (req.kind === 'attachments') return attachmentCleanupPreview()
   if (req.kind === 'age') {
-    const ids = repo.sessionIdsBefore(cutoffForAge(Date.now(), req.age ?? 3))
-    const preview = repo.cleanupPreview('age', cutoffForAge(Date.now(), req.age ?? 3))
-    preview.undeletable = likelyUndeletable(repo.attachmentRowsForSessions(ids).map((row) => row.path))
-    return preview
+    const cutoff = cutoffForAge(Date.now(), req.age ?? 3)
+    const ids = repo.sessionIdsBefore(cutoff)
+    const rows = repo.attachmentRowsForSessions(ids)
+    return withActualAttachmentBytes(
+      repo.cleanupPreview('age', cutoff),
+      rows
+    )
   }
+  if (req.kind === 'local-data') return localDataPreview()
   const preview = repo.cleanupPreview(req.kind)
   if (req.kind === 'history') {
-    preview.undeletable = likelyUndeletable(repo.allSessionAttachmentRows().map((row) => row.path))
+    return withActualAttachmentBytes(preview, repo.allSessionAttachmentRows())
   }
   return preview
 }
@@ -1488,9 +1780,12 @@ export function cleanupByAge(req: { age: CleanupAge }): CleanupResult {
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再清理')
   const cutoff = cutoffForAge(Date.now(), req.age)
   const ids = repo.sessionIdsBefore(cutoff)
-  const paths = repo.attachmentRowsForSessions(ids).map((row) => row.path)
+  const rows = repo.attachmentRowsForSessions(ids)
+  const preview = withActualAttachmentBytes(repo.cleanupPreview('age', cutoff), rows)
+  const paths = rows.map((row) => row.path)
   const result = repo.deleteByAge(cutoff)
   const physical = removeUnreferencedManagedFiles(paths)
+  result.bytes = preview.bytes
   result.undeletable = physical.undeletable
   if (result.sessionCount > 0) windows.emitToAll('sessions:changed', {})
   return result
@@ -1498,9 +1793,12 @@ export function cleanupByAge(req: { age: CleanupAge }): CleanupResult {
 
 export function clearHistory(): CleanupResult {
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再清理')
-  const paths = repo.allSessionAttachmentRows().map((row) => row.path)
+  const rows = repo.allSessionAttachmentRows()
+  const preview = withActualAttachmentBytes(repo.cleanupPreview('history'), rows)
+  const paths = rows.map((row) => row.path)
   const result = repo.deleteAllHistory()
   const physical = removeUnreferencedManagedFiles(paths)
+  result.bytes = preview.bytes
   result.undeletable = physical.undeletable
   windows.emitToAll('sessions:changed', {})
   return result
@@ -1516,28 +1814,37 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   // to the process working directory.  Only a user-selected absolute path is
   // an external backup location worth preserving.
   const externalBackup = externalBackupPath(configuredBackup)
-  const managedNames = [
-    ATTACHMENTS_DIR,
-    'themes',
-    'skills',
-    'agents',
-    'plugins',
-    'plugin',
-    'logs',
-    'cache',
-    'workspaces',
-    ...ELECTRON_PROFILE_PATHS
-  ]
-  for (const name of managedNames) {
-    const path = join(root, name)
-    removeManagedPath(path, externalBackup)
-  }
   const dbPath = databaseFilePath()
-  if (dbPath !== null) {
-    closeDatabase()
-    for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-      try { unlinkSync(path) } catch { /* 已不存在 */ }
+  const stagingRoot = join(root, `.delete-safety-${process.pid}-${Date.now()}`)
+  const staged: StagedManagedPath[] = []
+  let databaseClosed = false
+  try {
+    // Move ordinary files first, then close and move SQLite as the commit
+    // point. Nothing is physically erased until every target is staged.
+    for (const path of managedLocalPaths(root)) {
+      stageManagedPath(path, root, stagingRoot, externalBackup, staged)
     }
+    if (dbPath !== null) {
+      checkpointDatabase()
+      closeDatabase()
+      databaseClosed = true
+      for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+        stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+      }
+    }
+    // The safety tree exists only long enough to make staging reversible.
+    // It is inside the managed data root and never includes an external backup
+    // target or the shared Claude CLI directory.
+    removeManagedPath(stagingRoot, null)
+  } catch (err) {
+    rollbackStagedPaths(staged)
+    try { removeManagedPath(stagingRoot, null) } catch { /* rollback diagnostics were already logged */ }
+    if (databaseClosed && dbPath !== null) {
+      try { openDatabase(dirname(dbPath)) } catch (openError) {
+        console.error('[storage] 删除失败后重新打开数据库失败:', openError)
+      }
+    }
+    throw err
   }
   // 保留 Claude CLI 共享目录和外部备份目录；应用退出后下次启动会重建数据库。
   app.quit()

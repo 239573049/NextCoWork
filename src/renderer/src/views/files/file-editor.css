@@ -1,0 +1,45 @@
+.file-code-editor {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+.file-code-editor > .cm-theme,
+.file-code-editor > [class^='cm-theme-'] {
+  height: 100%;
+}
+
+.file-code-editor .cm-scroller {
+  overflow: auto;
+}
+
+.file-code-editor .cm-search {
+  font-family: var(--font-sans);
+  padding: 8px 26px 8px 12px;
+}
+
+.file-code-editor .cm-textfield,
+.file-code-editor .cm-button {
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.file-code-editor-warning {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  left: 8px;
+  margin: 0;
+  padding: 4px 8px;
+  background: var(--color-surface-raised);
+  color: var(--color-fg-muted);
+  font: 11px/1.5 var(--font-sans);
+}
+
+.markdown-preview {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px clamp(20px, 5%, 64px) 48px;
+}

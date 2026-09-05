@@ -7,6 +7,7 @@
  */
 import { app, clipboard, nativeTheme, shell } from 'electron'
 import type { Bootstrap } from '../../shared/domain/bootstrap'
+import { runs } from '../kernel/run-registry'
 import type { ResolvedTheme, ThemePreference } from '../../shared/domain/settings'
 import type { WindowKind } from '../../shared/domain/tab'
 import { EMPTY_OUTER, outerTabKey, store } from '../state/store'
@@ -34,8 +35,27 @@ export function getBootstrap(windowKind: WindowKind): Bootstrap {
     tabState: store.getKv(outerTabKey(windowKind), EMPTY_OUTER),
     // ★ 正常冷启动一定是空的 ——「永不恢复运行中状态」(方案 §9)。
     //   非空只发生在渲染层重载(⌘R):主进程没重启,run 还活着。
-    //   步骤 3 接上 RunRegistry 后这里改成按 workspaceId 聚合查询。
-    activeRuns: [],
+    activeRuns: runs.activeRunIds().flatMap((id) => {
+      const run = runs.get(id)
+      return run === undefined || run.parentRunId !== undefined ? [] : [{
+        runId: run.runId, sessionId: run.sessionId, workspaceId: run.workspaceId, status: run.status
+      }]
+    }),
+    activeSubagents: runs.activeRunIds().flatMap((id) => {
+      const run = runs.get(id)
+      const parent = run?.parentRunId === undefined ? undefined : runs.get(run.parentRunId)
+      // The child uses an isolated derived session for its own transcript. The
+      // bootstrap route must carry the parent's session so the Task card can
+      // be restored into the conversation that launched it.
+      return run === undefined || run.parentRunId === undefined || parent === undefined ? [] : [{
+        runId: run.runId,
+        parentRunId: run.parentRunId,
+        sessionId: parent.sessionId,
+        workspaceId: parent.workspaceId,
+        status: run.status,
+        startedAt: run.startedAt
+      }]
+    }),
     versions: {
       app: app.getVersion(),
       electron: process.versions.electron,

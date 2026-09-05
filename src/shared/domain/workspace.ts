@@ -31,7 +31,8 @@ export interface WorkspaceSettings {
 }
 
 export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
-  permissionMode: 'auto',
+  // 新工作区继承“询问批准”，用户可在输入框或设置中主动放宽。
+  permissionMode: 'ask',
   defaultModel: '',
   defaultMode: 'normal',
   defaultThinking: 'auto',

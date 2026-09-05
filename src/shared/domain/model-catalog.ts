@@ -14,12 +14,19 @@ import type {
   RequestAdapterConfig,
   ThinkingConfig
 } from './provider'
+import { validateRequestPatches } from './request-patch'
 
 export interface ModelCatalogSource {
   url: string
   fetchedAt: string
   verifiedAt?: string
 }
+
+export type ModelCatalogVerificationStatus =
+  | 'official-api'
+  | 'official-model-card'
+  | 'aggregator-reference'
+  | 'unverified'
 
 /** The static metadata shipped with the application (or added by a user). */
 export interface ModelCatalogDefinition {
@@ -35,6 +42,8 @@ export interface ModelCatalogDefinition {
   thinkingConfig: ThinkingConfig
   requestAdapter?: RequestAdapterConfig
   source?: ModelCatalogSource
+  /** How strongly the canonical id and capability metadata were verified. */
+  verificationStatus?: ModelCatalogVerificationStatus
   /** ID used to look up a pricing row; defaults to `id`. */
   pricingModelId?: string
   /** Alternate vendor spellings accepted when matching a provider binding. */
@@ -76,6 +85,31 @@ export interface MergeModelCatalogOptions {
   bindings?: readonly ModelAlias[]
 }
 
+/** Prefer exact ids/aliases, then an unambiguous, longest gateway-prefixed match. */
+export function findCatalogModel<T extends ModelCatalogDefinition>(definitions: readonly T[], modelId: string): T | undefined {
+  const wanted = normalizeModelId(modelId)
+  const exact = definitions.find((row) => normalizeModelId(row.id) === wanted)
+  if (exact !== undefined) return exact
+  const aliases = definitions.filter((row) => row.aliases?.some((id) => normalizeModelId(id) === wanted))
+  if (aliases.length === 1) return aliases[0]
+  if (aliases.length > 1) return undefined
+  const matches = definitions.map((row) => ({ row, length: Math.max(0,
+    ...[row.id, ...(row.aliases ?? [])].map((id) => wanted.endsWith(`/${normalizeModelId(id)}`) ? id.trim().length : 0)
+  ) })).filter((match) => match.length > 0).sort((a, b) => b.length - a.length)
+  return matches[0]?.length === matches[1]?.length ? undefined : matches[0]?.row
+}
+
+function cloneCatalogDefinition<T extends ModelCatalogDefinition>(definition: T): T {
+  // Catalogue values are IPC-safe JSON data. `structuredClone` also copies
+  // nested patch values, toggle values and effort maps that a shallow spread
+  // would otherwise leave attached to the persisted/input object.
+  return structuredClone(definition)
+}
+
+function cloneModelAlias(alias: ModelAlias): ModelAlias {
+  return structuredClone(alias)
+}
+
 /**
  * Merge the independent catalogue with provider bindings.
  *
@@ -101,14 +135,14 @@ export function mergeModelCatalog({
     if (!validDefinition(definition)) continue
     const key = normalizeModelId(definition.id)
     if (definitions.has(key)) continue
-    definitions.set(key, { definition, builtin: true })
+    definitions.set(key, { definition: cloneCatalogDefinition(definition), builtin: true })
   }
   for (const definition of custom) {
     if (!validDefinition(definition)) continue
     const key = normalizeModelId(definition.id)
     const existing = definitions.get(key)
     if (existing === undefined) {
-      definitions.set(key, { definition, builtin: false })
+      definitions.set(key, { definition: cloneCatalogDefinition(definition), builtin: false })
       continue
     }
     // An explicit overlay is the only way a user record may edit a bundled
@@ -122,17 +156,18 @@ export function mergeModelCatalog({
   }
 
   const byModel = new Map<string, ModelAlias[]>()
+  const mergedDefinitions = [...definitions.values()].map(({ definition }) => definition)
   for (const binding of bindings) {
     if (!binding || typeof binding.upstreamModel !== 'string') continue
-    const rows = byModel.get(normalizeModelId(binding.upstreamModel)) ?? []
-    rows.push(binding)
-    byModel.set(normalizeModelId(binding.upstreamModel), rows)
+    const matched = findCatalogModel(mergedDefinitions, binding.upstreamModel)
+    const key = normalizeModelId(matched?.id ?? binding.upstreamModel)
+    const rows = byModel.get(key) ?? []
+    rows.push(cloneModelAlias(binding))
+    byModel.set(key, rows)
   }
 
   return [...definitions.values()].map(({ definition, builtin: isBuiltin }) => {
-    const rows = [definition.id, ...(definition.aliases ?? [])].flatMap(
-      (id) => byModel.get(normalizeModelId(id)) ?? []
-    )
+    const rows = byModel.get(normalizeModelId(definition.id)) ?? []
     const uniqueRows = [...new Map(rows.map((row) => [`${row.providerId}\u0000${row.alias}`, row])).values()]
     const providerIds = [...new Set(uniqueRows.map((row) => row.providerId))]
     // A disabled binding should not hide an enabled binding for the same model.
@@ -141,23 +176,13 @@ export function mergeModelCatalog({
     const customOverlay = custom.find(
       (row) => normalizeModelId(row.id) === normalizeModelId(definition.id) && row.overrideBuiltin === true
     )
+    const clonedDefinition = cloneCatalogDefinition(definition)
     return {
-      ...definition,
-      capabilities: { ...definition.capabilities },
-      thinkingConfig: { ...definition.thinkingConfig },
-      ...(definition.requestAdapter === undefined
-        ? {}
-        : {
-            requestAdapter: {
-              ...definition.requestAdapter,
-              patches: definition.requestAdapter.patches.map((patch) => ({ ...patch }))
-            }
-          }),
-      ...(definition.source === undefined ? {} : { source: { ...definition.source } }),
+      ...clonedDefinition,
       builtin: isBuiltin,
       custom: !isBuiltin,
       configured: uniqueRows.length > 0,
-      bindings: uniqueRows.slice(),
+      bindings: uniqueRows.map(cloneModelAlias),
       providerIds,
       ...(enabled === undefined ? {} : { enabled }),
       ...(customOverlay === undefined ? {} : { overridden: true })
@@ -174,29 +199,25 @@ export function catalogDefinitionFromAlias(
   alias: ModelAlias,
   manufacturer: Pick<ModelCatalogDefinition, 'manufacturerId' | 'manufacturerLabel'>
 ): UserModelCatalogDefinition {
-  return {
+  return cloneCatalogDefinition({
     id: alias.upstreamModel,
     manufacturerId: manufacturer.manufacturerId,
     manufacturerLabel: manufacturer.manufacturerLabel,
     displayName: alias.displayName ?? alias.alias,
     modality: alias.modality ?? 'text',
-    capabilities: { ...alias.capabilities },
+    capabilities: alias.capabilities,
     contextWindow: alias.contextWindow,
     maxOutputTokens: alias.maxOutputTokens,
     thinkingConfig: alias.thinkingConfig ?? {
       mode: alias.capabilities.thinking ? 'toggle' : 'unsupported',
       defaultEnabled: false
     },
-    ...(alias.requestAdapter === undefined
+    ...(alias.reasoningEfforts === undefined
       ? {}
-      : {
-          requestAdapter: {
-            ...alias.requestAdapter,
-            patches: alias.requestAdapter.patches.map((patch) => ({ ...patch }))
-          }
-        }),
-    ...(alias.source === undefined ? {} : { source: { ...alias.source } })
-  }
+      : { reasoningEfforts: alias.reasoningEfforts }),
+    ...(alias.requestAdapter === undefined ? {} : { requestAdapter: alias.requestAdapter }),
+    ...(alias.source === undefined ? {} : { source: alias.source })
+  })
 }
 
 /** Runtime guard for IPC/import boundaries. */
@@ -214,6 +235,7 @@ export function isModelCatalogDefinition(value: unknown): value is ModelCatalogD
   }
   for (const key of [
     'textInput',
+    'visionInput',
     'fileInput',
     'videoInput',
     'audioInput',
@@ -231,14 +253,49 @@ export function isModelCatalogDefinition(value: unknown): value is ModelCatalogD
   if (typeof thinking !== 'object' || thinking === null || Array.isArray(thinking)) return false
   const tc = thinking as Record<string, unknown>
   if (
-    !['unsupported', 'always', 'toggle', 'effort', 'budget'].includes(String(tc['mode'])) ||
+    typeof tc['mode'] !== 'string' ||
+    !['unsupported', 'always', 'toggle', 'effort', 'budget'].includes(tc['mode']) ||
     typeof tc['defaultEnabled'] !== 'boolean'
   ) {
     return false
   }
   if (
+    Object.hasOwn(tc, 'parameterPath') &&
+    (typeof tc['parameterPath'] !== 'string' || tc['parameterPath'].trim() === '')
+  ) {
+    return false
+  }
+  if (
+    (Object.hasOwn(tc, 'enabledValue') && !isCatalogJsonValue(tc['enabledValue'])) ||
+    (Object.hasOwn(tc, 'disabledValue') && !isCatalogJsonValue(tc['disabledValue']))
+  ) return false
+  const parameterPath = typeof tc['parameterPath'] === 'string' ? tc['parameterPath'].trim() : ''
+  const parameterLeaf = parameterPath.split('.').at(-1)
+  if (
+    tc['mode'] === 'budget' &&
+    (
+      parameterLeaf === 'enable_thinking' ||
+      parameterLeaf === 'thinking_mode' ||
+      parameterPath === 'thinking.enabled' ||
+      parameterPath === 'reasoning_split' ||
+      parameterPath === 'reasoning_effort' ||
+      parameterPath === 'reasoning.effort'
+    )
+  ) return false
+  if (tc['mode'] === 'toggle' && (parameterPath === 'thinking_budget' || parameterPath.endsWith('.budget_tokens'))) return false
+  if (Object.hasOwn(tc, 'effortMap')) {
+    const effortMap = tc['effortMap']
+    if (typeof effortMap !== 'object' || effortMap === null || Array.isArray(effortMap)) return false
+    for (const [effort, mapped] of Object.entries(effortMap)) {
+      if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort) || !isCatalogJsonValue(mapped)) return false
+    }
+  }
+  if (
     tc['defaultEffort'] !== undefined &&
-    !['minimal', 'low', 'medium', 'high', 'max'].includes(String(tc['defaultEffort']))
+    (typeof tc['defaultEffort'] !== 'string' ||
+      !['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(
+        tc['defaultEffort']
+      ))
   ) {
     return false
   }
@@ -248,54 +305,153 @@ export function isModelCatalogDefinition(value: unknown): value is ModelCatalogD
   ) {
     return false
   }
+  if (tc['mode'] === 'effort' && tc['defaultEffort'] === undefined) return false
+  if (tc['mode'] === 'unsupported' && tc['defaultEnabled'] !== false) return false
+  if (tc['mode'] === 'always' && tc['defaultEnabled'] !== true) return false
   const reasoningEfforts = row['reasoningEfforts']
   if (
     reasoningEfforts !== undefined &&
     (!Array.isArray(reasoningEfforts) ||
       reasoningEfforts.some(
-        (effort) => !['minimal', 'low', 'medium', 'high', 'max'].includes(String(effort))
+        (effort) =>
+          typeof effort !== 'string' ||
+          !['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)
       ))
   ) {
     return false
   }
+  if (Array.isArray(reasoningEfforts)) {
+    const normalizedEfforts = reasoningEfforts as string[]
+    if (new Set(normalizedEfforts).size !== normalizedEfforts.length) return false
+    if (
+      tc['mode'] === 'effort' &&
+      tc['defaultEffort'] !== undefined &&
+      !normalizedEfforts.includes(tc['defaultEffort'] as string)
+    ) {
+      return false
+    }
+  }
   const aliases = row['aliases']
   if (
     aliases !== undefined &&
-    (!Array.isArray(aliases) || aliases.some((alias) => typeof alias !== 'string'))
+    (
+      !Array.isArray(aliases) ||
+      aliases.some((alias) => typeof alias !== 'string' || alias.trim() === '') ||
+      new Set(aliases.map((alias) => alias.trim())).size !== aliases.length
+    )
   ) {
     return false
   }
+  if (
+    row['verificationStatus'] !== undefined &&
+    (typeof row['verificationStatus'] !== 'string' ||
+      !['official-api', 'official-model-card', 'aggregator-reference', 'unverified'].includes(
+        row['verificationStatus']
+      ))
+  ) {
+    return false
+  }
+  const requestAdapter = row['requestAdapter']
+  if (requestAdapter !== undefined) {
+    if (typeof requestAdapter !== 'object' || requestAdapter === null || Array.isArray(requestAdapter)) {
+      return false
+    }
+    const adapter = requestAdapter as Record<string, unknown>
+    if (
+      Object.keys(adapter).some((key) => key !== 'preset' && key !== 'patches') ||
+      typeof adapter['preset'] !== 'string' ||
+      !['auto', 'anthropic', 'openai-chat', 'openai-responses', 'custom'].includes(
+        adapter['preset']
+      ) ||
+      !Array.isArray(adapter['patches']) ||
+      !validateRequestPatches(adapter['patches']).ok
+    ) {
+      return false
+    }
+  }
+  const source = row['source']
+  if (source !== undefined) {
+    if (typeof source !== 'object' || source === null || Array.isArray(source)) return false
+    const sourceRecord = source as Record<string, unknown>
+    if (
+      typeof sourceRecord['url'] !== 'string' ||
+      sourceRecord['url'].trim() === '' ||
+      typeof sourceRecord['fetchedAt'] !== 'string' ||
+      sourceRecord['fetchedAt'].trim() === '' ||
+      (sourceRecord['verifiedAt'] !== undefined &&
+        typeof sourceRecord['verifiedAt'] !== 'string')
+    ) {
+      return false
+    }
+  }
+  if (
+    row['pricingModelId'] !== undefined &&
+    (typeof row['pricingModelId'] !== 'string' || row['pricingModelId'].trim() === '')
+  ) {
+    return false
+  }
+  if (row['overrideBuiltin'] !== undefined && typeof row['overrideBuiltin'] !== 'boolean') {
+    return false
+  }
   return validDefinition(value as ModelCatalogDefinition)
+}
+
+function isCatalogJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value !== 'object' || value === null) return false
+  if (
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) !== Object.prototype &&
+    Object.getPrototypeOf(value) !== null
+  ) {
+    return false
+  }
+  if (ancestors.has(value)) return false
+
+  ancestors.add(value)
+  const valid = Array.isArray(value)
+    ? value.every((item) => isCatalogJsonValue(item, ancestors))
+    : Object.entries(value).every(
+        ([key, item]) =>
+          !['__proto__', 'prototype', 'constructor'].includes(key.toLowerCase()) &&
+          isCatalogJsonValue(item, ancestors)
+      )
+  ancestors.delete(value)
+  return valid
 }
 
 function mergeDefinition(
   builtin: ModelCatalogDefinition,
   overlay: ModelCatalogDefinition
 ): ModelCatalogDefinition {
+  const base = cloneCatalogDefinition(builtin)
+  const custom = cloneCatalogDefinition(overlay)
   return {
-    ...builtin,
-    ...overlay,
+    ...base,
+    ...custom,
     // The canonical id and vendor identity come from the bundled record.
-    id: builtin.id,
-    manufacturerId: builtin.manufacturerId,
-    manufacturerLabel: builtin.manufacturerLabel,
-    capabilities: { ...builtin.capabilities, ...overlay.capabilities },
-    thinkingConfig: { ...builtin.thinkingConfig, ...overlay.thinkingConfig },
-    ...(overlay.reasoningEfforts === undefined
-      ? builtin.reasoningEfforts === undefined
+    id: base.id,
+    manufacturerId: base.manufacturerId,
+    manufacturerLabel: base.manufacturerLabel,
+    capabilities: { ...base.capabilities, ...custom.capabilities },
+    thinkingConfig: { ...base.thinkingConfig, ...custom.thinkingConfig },
+    ...(custom.reasoningEfforts === undefined
+      ? base.reasoningEfforts === undefined
         ? {}
-        : { reasoningEfforts: [...builtin.reasoningEfforts] }
-      : { reasoningEfforts: [...overlay.reasoningEfforts] }),
-    ...(overlay.requestAdapter === undefined
-      ? builtin.requestAdapter === undefined
+        : { reasoningEfforts: [...base.reasoningEfforts] }
+      : { reasoningEfforts: [...custom.reasoningEfforts] }),
+    ...(custom.requestAdapter === undefined
+      ? base.requestAdapter === undefined
         ? {}
-        : { requestAdapter: builtin.requestAdapter }
-      : { requestAdapter: overlay.requestAdapter }),
-    ...(overlay.source === undefined
-      ? builtin.source === undefined
-        ? {}
-        : { source: builtin.source }
-      : { source: overlay.source }),
+        : { requestAdapter: base.requestAdapter }
+      : { requestAdapter: custom.requestAdapter }),
+    // A user metadata overlay cannot rewrite the evidence shipped with a
+    // bundled record. User-created rows still own their own source normally.
+    ...(base.source === undefined ? {} : { source: base.source }),
+    ...(base.verificationStatus === undefined
+      ? {}
+      : { verificationStatus: base.verificationStatus }),
     overrideBuiltin: true
   }
 }
@@ -305,16 +461,28 @@ function normalizeModelId(value: string): string {
 }
 
 function validDefinition(value: ModelCatalogDefinition): boolean {
+  const modalities: readonly ModelCatalogDefinition['modality'][] = [
+    'text',
+    'image',
+    'video',
+    'speech',
+    'transcription'
+  ]
   return (
     typeof value.id === 'string' &&
     value.id.trim().length > 0 &&
     typeof value.manufacturerId === 'string' &&
     value.manufacturerId.trim().length > 0 &&
+    typeof value.manufacturerLabel === 'string' &&
+    value.manufacturerLabel.trim().length > 0 &&
     typeof value.displayName === 'string' &&
     value.displayName.trim().length > 0 &&
-    Number.isFinite(value.contextWindow) &&
-    value.contextWindow >= 0 &&
-    Number.isFinite(value.maxOutputTokens) &&
-    value.maxOutputTokens >= 0
+    modalities.includes(value.modality) &&
+    Number.isInteger(value.contextWindow) &&
+    value.contextWindow > 0 &&
+    Number.isInteger(value.maxOutputTokens) &&
+    value.maxOutputTokens > 0 &&
+    value.maxOutputTokens <= value.contextWindow &&
+    value.capabilities.thinking === (value.thinkingConfig.mode !== 'unsupported')
   )
 }

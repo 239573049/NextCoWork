@@ -36,6 +36,9 @@ export interface AgentError {
   status?: number
   /** 限流场景下上游给的 Retry-After,毫秒 */
   retryAfterMs?: number
+  /** Locally generated errors are translated in the renderer; upstream text stays verbatim. */
+  messageKey?: string
+  messageParams?: Record<string, string | number>
 }
 
 /** 只有这两类会终止整个 run;其余的要么进转录、要么只是提示。 */

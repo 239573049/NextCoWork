@@ -309,12 +309,22 @@ describe('父子两条转录互不相干', () => {
 
     const started = allEvents(wc).find((e) => e.type === 'subagent_start')
     const childRunId = started?.type === 'subagent_start' ? started.childRunId : ''
-    const child = store.getHistory(`${PARENT_SESSION}:sub:${childRunId}`)
+    const childSessionId = `${PARENT_SESSION}:sub:${childRunId}`
+    const child = store.getHistory(childSessionId)
 
     expect(child.length).toBeGreaterThan(0)
     // ★ 子代理**看不到父对话**:父那句原话一个字都不在它的窗口里
     expect(JSON.stringify(child)).not.toContain('帮我查一下配置在哪里读的')
     expect(JSON.stringify(child)).toContain(CHILD_MARK)
+
+    /*
+      ★ 派生的 id 只是惯例,`parent_session_id` 才是那条转录「不进侧边栏」的
+      **事实依据** —— 过滤和级联删除全读这一列,没有一处再去 parse 上面那个
+      `:sub:`(理由见 `db/schema.ts` 第 10 条迁移)。这一条钉住的是接线:
+      少了它,子会话又会以「新对话」的名义出现在最近对话里。
+    */
+    expect(store.getSession(childSessionId)?.parentSessionId).toBe(PARENT_SESSION)
+    expect(store.listSessions(r.workspaceId).map((s) => s.id)).not.toContain(childSessionId)
   })
 })
 

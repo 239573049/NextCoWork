@@ -14,7 +14,9 @@
  * 跑法:`npm run build && node scripts/screenshot.mjs`,图落在 /tmp/nextcowork-shots/
  */
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import electron from 'electron'
 
@@ -22,6 +24,8 @@ const PORT = 9334
 const OUT = '/tmp/nextcowork-shots'
 /** 参考截图的尺寸。并排比较的前提是同一个视口。 */
 const VIEWPORT = { width: 1264, height: 1141 }
+const DATA_VIEWPORT = { width: 1513, height: 1095 }
+const MIN_DATA_VIEWPORT = { width: 900, height: 600 }
 
 class Cdp {
   #ws
@@ -64,6 +68,13 @@ class Cdp {
     return r.result.value
   }
 
+  /** 走 preload 白名单修改截图状态，保留和真实设置页相同的数据链路。 */
+  invoke(channel, req) {
+    return this.eval(
+      `window.nextcowork.invoke(${JSON.stringify(channel)}, ${JSON.stringify(req ?? null)})`
+    )
+  }
+
   async shoot(name) {
     // `captureBeyondViewport` 是这里的关键:视口被 override 成比真窗口大之后,
     // 默认的截图只画得出真窗口那一块,剩下的填上一帧的残留 ——
@@ -91,6 +102,7 @@ async function until(label, fn, timeoutMs = 60_000) {
 
 let child = null
 let failed = false
+let testProject = null
 
 try {
   await mkdir(OUT, { recursive: true })
@@ -98,11 +110,14 @@ try {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_NO_ATTACH_CONSOLE
+  const projectRoot = process.cwd()
+  testProject = await mkdtemp(join(tmpdir(), 'nextcowork-shot-project-'))
+  const userData = join(testProject, '.electron-user-data')
 
   child = spawn(
     electron,
-    ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=/tmp/nextcowork-shot-${Date.now()}`],
-    { env, stdio: ['ignore', 'pipe', 'pipe'] }
+    [projectRoot, `--remote-debugging-port=${PORT}`, `--user-data-dir=${userData}`],
+    { cwd: testProject, env, stdio: ['ignore', 'pipe', 'pipe'] }
   )
 
   const target = await until('渲染进程 CDP target', async () => {
@@ -135,6 +150,31 @@ try {
 
   await until('对话输入框', () =>
     cdp.eval(`document.querySelector('[data-testid="composer-input"]') !== null`)
+  )
+  // 截图数据必须来自一条真的成功请求；生产默认的 RoutinAI 不带密钥，
+  // 会只生成一条 0 Token 鉴权失败记录。通过正式 IPC 建隔离的 demo provider，
+  // 和 e2e-probe 使用同一条受控演示上游，不影响真实用户配置。
+  for (const [channel, request] of [
+    ['provider:upsert', {
+      id: 'shot-demo',
+      name: 'RoutinAI',
+      protocol: 'anthropic',
+      baseUrl: 'https://demo.invalid',
+      credentialRef: 'ignored-by-main-process',
+      priority: 0,
+      enabled: true
+    }],
+    ['provider:setCredential', { providerId: 'shot-demo', apiKey: 'sk-demo-not-a-real-key' }],
+    ['provider:setAliases', { providerId: 'shot-demo', models: ['claude-fable-5-1'] }],
+    ['settings:update', { defaultModel: 'claude-fable-5-1' }]
+  ]) {
+    const result = await cdp.invoke(channel, request)
+    if (result?.ok !== true) {
+      throw new Error(`${channel} 失败:${result?.error?.message ?? JSON.stringify(result)}`)
+    }
+  }
+  await until('截图演示模型生效', () =>
+    cdp.eval(`document.querySelector('[data-testid="composer-send"]')?.title === 'claude-fable-5-1'`)
   )
   await sleep(400) // 让字体和过渡落定,否则截到半渲染的一帧
   await cdp.shoot('01-empty')
@@ -439,7 +479,206 @@ try {
   console.log('✓ 有草稿时「新建对话」照常新建')
   await cdp.shoot('14-new-chat-created')
 
-  console.log(`\n✅ 截完了,共 14 张,在 ${OUT}/`)
+  // 用户给出的「设置 › 数据」上下两张参考图是 1513×1095。切到同一
+  // viewport 和浅色外观后，分别截滚动区顶部、底部和两个关键确认弹窗。
+  // 参考图是浅色；如果继续跟随当前系统深色，布局虽相同也无法做有效视觉比较。
+  const light = await cdp.invoke('settings:update', { theme: 'light', locale: 'zh-CN' })
+  if (light?.ok !== true) {
+    throw new Error(`数据页截图无法切换浅色外观:${light?.error?.message ?? JSON.stringify(light)}`)
+  }
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    ...DATA_VIEWPORT,
+    deviceScaleFactor: 1,
+    mobile: false
+  })
+  await until('数据页浅色外观', () => cdp.eval(`document.documentElement.dataset.theme === 'light'`))
+  await sleep(300)
+  await clickLabel('设置')
+  await until('设置浮层', () =>
+    cdp.eval(`document.querySelector('[role="dialog"][aria-label="设置"]') !== null`)
+  )
+  await clickNav('数据')
+  await until('数据统计加载', () =>
+    cdp.eval(`
+      (() => {
+        const page = document.querySelector('[data-testid="data-page"]')
+        if (!page) return false
+        const values = [...page.querySelectorAll('strong')].slice(0, 4)
+        return values.length === 4 && values.every((value) => value.textContent.trim() !== '…')
+      })()
+    `)
+  )
+  await sleep(300)
+  await cdp.shoot('15-data-top')
+
+  await cdp.eval(`
+    (() => {
+      const page = document.querySelector('[data-testid="data-page"]')
+      if (!page || !page.parentElement) return false
+      page.parentElement.scrollTop = page.parentElement.scrollHeight
+      return true
+    })()
+  `)
+  await sleep(300)
+  await cdp.shoot('16-data-bottom')
+
+  await cdp.eval(`
+    (() => {
+      const page = document.querySelector('[data-testid="data-page"]')
+      if (!page || !page.parentElement) return false
+      page.parentElement.scrollTop = 0
+      const button = [...page.querySelectorAll('button')].find(
+        (item) => item.textContent.trim() === '导出'
+      )
+      if (!button) return false
+      button.click()
+      return true
+    })()
+  `)
+  await until('导出弹窗', () =>
+    cdp.eval(`document.querySelector('[role="dialog"][aria-label="导出数据"]') !== null`)
+  )
+  await sleep(200)
+  await cdp.shoot('17-data-export-dialog')
+  await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+  await sleep(200)
+
+  await cdp.eval(`
+    (() => {
+      const page = document.querySelector('[data-testid="data-page"]')
+      const button = [...(page?.querySelectorAll('button') ?? [])].find(
+        (item) => item.textContent.trim() === '清理'
+      )
+      if (!button) return false
+      button.click()
+      return true
+    })()
+  `)
+  await until('附件清理预览', () =>
+    cdp.eval(`document.querySelector('[role="dialog"][aria-label="清理附件目录"]') !== null`)
+  )
+  await sleep(200)
+  await cdp.shoot('18-data-cleanup-dialog')
+
+  // Electron 的真实最小窗口是 900×600。最后再钉住中英文在这个边界下
+  // 不重叠、不横向溢出；长文案可以自然换行，内容区继续纵向滚动。
+  await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    ...MIN_DATA_VIEWPORT,
+    deviceScaleFactor: 1,
+    mobile: false
+  })
+  await cdp.eval(`
+    (() => {
+      const page = document.querySelector('[data-testid="data-page"]')
+      if (!page || !page.parentElement) return false
+      page.parentElement.scrollTop = 0
+      return true
+    })()
+  `)
+  await sleep(300)
+  await cdp.shoot('19-data-min-window-zh')
+
+  const english = await cdp.invoke('settings:update', { locale: 'en-US' })
+  if (english?.ok !== true) {
+    throw new Error(`数据页截图无法切换英文:${english?.error?.message ?? JSON.stringify(english)}`)
+  }
+  await until('数据页英文文案', () =>
+    cdp.eval(`document.querySelector('[data-testid="data-page"]')?.textContent.includes('Cloud sync')`)
+  )
+  await sleep(300)
+  await cdp.shoot('20-data-min-window-en')
+
+  // 使用统计：前面的演示请求已经通过真实路由产生了用量记录。回到中文，
+  // 验证统计 IPC 的详细字段，并在最小窗口截一张与参考图同密度的界面。
+  const usageLocale = await cdp.invoke('settings:update', { locale: 'zh-CN' })
+  if (usageLocale?.ok !== true) {
+    throw new Error(`使用统计截图无法切回中文:${usageLocale?.error?.message ?? JSON.stringify(usageLocale)}`)
+  }
+  await until('使用统计中文文案', () =>
+    cdp.eval(`document.querySelector('[role="dialog"]')?.textContent.includes('数据')`)
+  )
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    ...DATA_VIEWPORT,
+    deviceScaleFactor: 1,
+    mobile: false
+  })
+  await clickNav('模型')
+  await clickSub('使用统计')
+  await until('使用统计加载', () =>
+    cdp.eval(`document.querySelector('[data-testid="usage-page"]')?.textContent.includes('请求日志')`)
+  )
+  const usageLogs = await cdp.invoke('usage:getRequestLogs', {
+    to: Date.now() + 1,
+    status: 'all',
+    limit: 10,
+    offset: 0
+  })
+  if (usageLogs?.ok !== true || usageLogs.data.total < 1) {
+    throw new Error(`真实演示请求没有生成用量记录:${JSON.stringify(usageLogs)}`)
+  }
+  const usageRow = usageLogs.data.items[0]
+  for (const field of [
+    'inputTokens',
+    'cacheReadTokens',
+    'cacheWriteTokens',
+    'cacheWrite1hTokens',
+    'outputTokens',
+    'thinkingTokens',
+    'thinkingTokensEstimated',
+    'latencyMs',
+    'timeToFirstTokenMs',
+    'costMicros',
+    'currency',
+    'toolCalls',
+    'toolErrors',
+    'httpStatus',
+    'stopReason',
+    'errorKind',
+    'errorMessage',
+    'endpoint',
+    'attempt'
+  ]) {
+    if (!(field in usageRow)) throw new Error(`用量记录缺少字段 ${field}`)
+  }
+  await sleep(300)
+  await cdp.shoot('21-usage-statistics')
+  const expandedUsage = await cdp.eval(`
+    (() => {
+      const button = document.querySelector('[data-testid="usage-request-row"] button[aria-label="展开请求详情"]')
+      if (!button) return false
+      button.click()
+      return true
+    })()
+  `)
+  if (!expandedUsage) throw new Error('使用统计第一条请求无法展开详情')
+  await until('使用统计详情展开', () =>
+    cdp.eval(`document.querySelector('[data-testid="usage-page"]')?.textContent.includes('输入 Token')`)
+  )
+  await sleep(200)
+  await cdp.shoot('22-usage-details')
+
+  // Expanded diagnostics are the densest state on this screen. Verify that
+  // both locales still wrap and scroll at Electron's true minimum viewport.
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    ...MIN_DATA_VIEWPORT,
+    deviceScaleFactor: 1,
+    mobile: false
+  })
+  await sleep(300)
+  await cdp.shoot('23-usage-min-window-zh')
+
+  const usageEnglish = await cdp.invoke('settings:update', { locale: 'en-US' })
+  if (usageEnglish?.ok !== true) {
+    throw new Error(`使用统计截图无法切换英文:${usageEnglish?.error?.message ?? JSON.stringify(usageEnglish)}`)
+  }
+  await until('使用统计英文文案', () =>
+    cdp.eval(`document.querySelector('[data-testid="usage-page"]')?.textContent.includes('Request logs')`)
+  )
+  await sleep(300)
+  await cdp.shoot('24-usage-min-window-en')
+
+  console.log(`\n✅ 截完了,共 24 张,在 ${OUT}/`)
 } catch (err) {
   failed = true
   console.error(`\n❌ 截图失败:${err.message}`)
@@ -447,6 +686,7 @@ try {
   child?.kill('SIGTERM')
   await sleep(500)
   if (child !== null && child.exitCode === null) child.kill('SIGKILL')
+  if (testProject !== null) await rm(testProject, { recursive: true, force: true })
 }
 
 process.exit(failed ? 1 : 0)

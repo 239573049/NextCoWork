@@ -22,7 +22,14 @@ import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import { closeDatabase, openDatabase } from '../../db/index'
 import { resetRuntimeForTest } from '../../runtime'
 import { store } from '../../state/store'
-import { listModels, listProviders, removeProvider, upsertProvider } from '../provider'
+import {
+  listModels,
+  listProviders,
+  removeProvider,
+  renameModel,
+  setAliases,
+  upsertProvider
+} from '../provider'
 import { BUILTIN_PROVIDER_ID } from '../../../shared/domain/presets'
 
 let dir = ''
@@ -287,5 +294,33 @@ describe('removeProvider 之后设置不许悬空', () => {
     const before = listProviders().length
     expect(() => removeProvider('nope')).not.toThrow()
     expect(listProviders()).toHaveLength(before)
+  })
+})
+
+describe('模型别名的逐行管理', () => {
+  it('保存的优先级顺序不会被数据库的字母序覆盖', () => {
+    upsertProvider(draft())
+
+    setAliases('acme', ['zeta', 'alpha', 'middle'])
+
+    expect(listModels('acme').map((model) => model.upstreamModel)).toEqual([
+      'zeta',
+      'alpha',
+      'middle'
+    ])
+  })
+
+  it('重命名最后一个同名别名时，默认模型和子代理模型跟着更新', () => {
+    upsertProvider(draft())
+    setAliases('acme', ['original'])
+    store.updateSettings({ defaultModel: 'original', subagent: { model: 'original' } })
+
+    renameModel('acme', 'original', 'renamed')
+
+    expect(listModels('acme')[0]?.alias).toBe('renamed')
+    expect(store.getSettings()).toMatchObject({
+      defaultModel: 'renamed',
+      subagent: { model: 'renamed' }
+    })
   })
 })

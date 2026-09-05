@@ -111,6 +111,10 @@ class WindowRegistry {
     return (this.topics.get(topic)?.size ?? 0) > 0
   }
 
+  isSubscribed(topic: string, sender: WebContents): boolean {
+    return this.topics.get(topic)?.has(sender.id) === true
+  }
+
   // ─── 推送 ───
 
   emitToTopic<K extends TargetedEventChannel>(

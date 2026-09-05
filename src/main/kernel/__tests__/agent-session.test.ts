@@ -8,11 +8,16 @@ import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ToolResult, ToolSource } from '../../../shared/agent/tool'
 import { toolOk } from '../../../shared/agent/tool'
 import type { ModelAlias } from '../../../shared/domain/provider'
-import { AgentSession, type ApproveFn, type SessionUpstream } from '../agent-session'
+import {
+  AgentSession,
+  type ApproveFn,
+  type SessionDeps,
+  type SessionUpstream
+} from '../agent-session'
 import { nodeHost } from '../host'
 import { collect, RunHandle } from '../run-registry'
 import { ToolRegistry, type ToolContext } from '../tool/registry'
-import type { CanonicalRequest } from '../upstream/canonical'
+import type { CanonicalRequest, UpstreamRequestContext } from '../upstream/canonical'
 
 // ─────────────────────────── 夹具 ───────────────────────────
 
@@ -52,6 +57,8 @@ function quietHost(): ReturnType<typeof nodeHost> {
 interface FakeUpstream extends SessionUpstream {
   /** 每一轮实际发出去的请求 —— 断言工具列表、消息累积都靠它 */
   readonly requests: CanonicalRequest[]
+  /** 每一轮独立传递的运行上下文 —— 不应混进 CanonicalRequest。 */
+  readonly contexts: UpstreamRequestContext[]
 }
 
 /**
@@ -65,12 +72,19 @@ function fakeUpstream(
   opts: { models?: ModelAlias[] } = {}
 ): FakeUpstream {
   const requests: CanonicalRequest[] = []
+  const contexts: UpstreamRequestContext[] = []
   let i = 0
   return {
     requests,
+    contexts,
     listModels: () => opts.models ?? [ALIAS],
-    async *stream(r): AsyncIterable<ProviderStreamEvent> {
+    async *stream(
+      r,
+      _signal,
+      context
+    ): AsyncIterable<ProviderStreamEvent> {
       requests.push(r)
+      contexts.push(context)
       // 轮次用尽就重复最后一段 —— MAX_TURNS 那条测试要跑满 25 轮
       const script = turns[Math.min(i, turns.length - 1)]
       i++
@@ -144,6 +158,7 @@ async function runSession(o: {
   request?: RunRequest
   history?: readonly AgentMessage[]
   approve?: ApproveFn
+  onToolUsage?: SessionDeps['onToolUsage']
 }): Promise<Ran> {
   const request = o.request ?? req()
   const handle = new RunHandle(request)
@@ -154,7 +169,8 @@ async function runSession(o: {
       tools: o.tools ?? registry(),
       workspaceRoot: '/ws',
       ...(o.history !== undefined ? { history: o.history } : {}),
-      ...(o.approve !== undefined ? { approve: o.approve } : {})
+      ...(o.approve !== undefined ? { approve: o.approve } : {}),
+      ...(o.onToolUsage !== undefined ? { onToolUsage: o.onToolUsage } : {})
     },
     handle,
     request
@@ -206,6 +222,31 @@ describe('单轮对话', () => {
       role: 'assistant',
       parts: [{ type: 'text', text: '你好呀' }]
     })
+  })
+
+  it('使用 RunRequest 提供的用户消息 ID提交首条输入', async () => {
+    const { events, history } = await runSession({
+      upstream: fakeUpstream([says('收到')]),
+      request: req({ inputMessageId: 'input-message-1' })
+    })
+
+    expect(history[0]?.id).toBe('input-message-1')
+    expect(commits(events)[0]?.id).toBe('input-message-1')
+  })
+
+  it('将 RunRequest 的运行标识原样放在独立上下文中传给上游', async () => {
+    const workspaceId = 'ws-opaque-tenant-123'
+    const runId = 'run-opaque-456'
+    const sessionId = 'session-opaque-789'
+    const { upstream } = await runSession({
+      upstream: fakeUpstream([says('收到')]),
+      request: req({ workspaceId, runId, sessionId })
+    })
+
+    expect(upstream.contexts).toEqual([{ workspaceId, runId, sessionId }])
+    expect(upstream.requests[0]).not.toHaveProperty('workspaceId')
+    expect(upstream.requests[0]).not.toHaveProperty('runId')
+    expect(upstream.requests[0]).not.toHaveProperty('sessionId')
   })
 
   it('每个上游事件都原样转发给 UI', async () => {
@@ -319,14 +360,16 @@ describe('think → tool → observe 循环', () => {
     expect(seen).toEqual([{ m: 'hi', n: 3 }])
   })
 
-  it('多个工具调用串行执行,结果合成一条消息', async () => {
-    const order: string[] = []
+  it('多个工具调用并行执行,结果仍按调用顺序合成一条消息', async () => {
+    let active = 0
+    let maxActive = 0
     const exec =
       (tag: string) =>
       async (): Promise<ReturnType<typeof toolOk>> => {
-        order.push(`${tag}:start`)
+        active++
+        maxActive = Math.max(maxActive, active)
         await Promise.resolve()
-        order.push(`${tag}:end`)
+        active--
         return toolOk(tag)
       }
 
@@ -347,7 +390,7 @@ describe('think → tool → observe 循环', () => {
       )
     })
 
-    expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end'])
+    expect(maxActive).toBe(2)
     const results = history[2]?.parts ?? []
     expect(results).toHaveLength(2)
     expect(results.every((p) => p.type === 'tool_result')).toBe(true)
@@ -514,6 +557,39 @@ describe('工具错误进转录并继续循环(方案 §4.11)', () => {
     expect(history[2]?.parts[0]).toMatchObject({ isError: true })
   })
 
+  it('将工具调用数和真实失败数回填到产生调用的用量记录', async () => {
+    const onToolUsage = vi.fn<NonNullable<SessionDeps['onToolUsage']>>()
+    const script: ProviderStreamEvent[] = [
+      { type: 'message_start', model: 'claude-sonnet-4' },
+      { type: 'tool_call_start', index: 0, callId: 'c1', name: 'ok' },
+      { type: 'tool_call_delta', index: 0, callId: 'c1', argsDelta: '{}' },
+      { type: 'tool_call_end', index: 0, callId: 'c1' },
+      { type: 'tool_call_start', index: 1, callId: 'c2', name: 'fails' },
+      { type: 'tool_call_delta', index: 1, callId: 'c2', argsDelta: '{}' },
+      { type: 'tool_call_end', index: 1, callId: 'c2' },
+      END('tool_use')
+    ]
+
+    await runSession({
+      upstream: fakeUpstream([script, says('知道了')]),
+      tools: registry(
+        { internalId: 'ok' },
+        {
+          internalId: 'fails',
+          execute: () => Promise.resolve({ output: { content: '失败' }, isError: true })
+        }
+      ),
+      onToolUsage
+    })
+
+    expect(onToolUsage).toHaveBeenCalledTimes(1)
+    expect(onToolUsage).toHaveBeenCalledWith({
+      runId: 'run-1',
+      toolCalls: 2,
+      toolErrors: 1
+    })
+  })
+
   /** 每一种工具错误都要发 tool_end,否则 UI 上那张卡片会永远转圈 */
   it('工具错误也发 tool_end', async () => {
     for (const script of [
@@ -676,6 +752,36 @@ describe('会话模式落在工具层,不靠提示词祈祷(方案 §4.8)', () =
   })
 })
 
+describe('从异常中断的转录恢复', () => {
+  it('在继续发送用户消息前补齐历史孤儿 tool_result，并保留可解释的错误原因', async () => {
+    const now = 100
+    const history = [
+      userMessage('u0', [{ type: 'text', text: '执行任务' }], now),
+      assistantMessage('a0', [{ type: 'tool_call', callId: 'call-orphan', name: 'read', input: {} }], now + 1)
+    ]
+
+    const { events, history: recovered, upstream } = await runSession({
+      history,
+      upstream: fakeUpstream([says('已恢复')]),
+      request: req({ input: [{ type: 'text', text: '继续' }] })
+    })
+
+    expect(recovered.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'user', 'assistant'])
+    expect(recovered[2]?.parts[0]).toMatchObject({
+      type: 'tool_result',
+      callId: 'call-orphan',
+      isError: true
+    })
+    expect(recovered[2]?.parts[0]?.type === 'tool_result'
+      && recovered[2].parts[0].output.content).toContain('previous run ended')
+    expect(upstream.requests[0]?.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'user'])
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_end', callId: 'call-orphan', isError: true
+    }))
+    expectNoOrphans(recovered)
+  })
+})
+
 // ─────────────────────────── 中断:方案 §4.8 第 4 件 ───────────────────────────
 
 describe('中断收尾', () => {
@@ -691,6 +797,7 @@ describe('中断收尾', () => {
   async function runWithAbortingTool(o: {
     upstream: FakeUpstream
     tools: (handle: () => RunHandle) => ToolRegistry
+    onToolUsage?: SessionDeps['onToolUsage']
   }): Promise<Ran> {
     const request = req()
     const handle = new RunHandle(request)
@@ -699,7 +806,8 @@ describe('中断收尾', () => {
         host: quietHost(),
         upstream: o.upstream,
         tools: o.tools(() => handle),
-        workspaceRoot: '/ws'
+        workspaceRoot: '/ws',
+        ...(o.onToolUsage !== undefined ? { onToolUsage: o.onToolUsage } : {})
       },
       handle,
       request
@@ -753,6 +861,7 @@ describe('中断收尾', () => {
    * 而模型下一轮会据此重做一遍。
    */
   it('中断时已完成的工具结果保留原值,只有真没跑完的那个被标为中断', async () => {
+    const onToolUsage = vi.fn<NonNullable<SessionDeps['onToolUsage']>>()
     const { history } = await runWithAbortingTool({
       upstream: fakeUpstream([
         [
@@ -767,7 +876,8 @@ describe('中断收尾', () => {
         registry(
           { internalId: 'fast', execute: () => Promise.resolve(toolOk('第一个工具真的做完了')) },
           { internalId: 'slow', execute: abortsDuringExecute(h) }
-        )
+        ),
+      onToolUsage
     })
 
     expectNoOrphans(history)
@@ -778,6 +888,11 @@ describe('中断收尾', () => {
       '第一个工具真的做完了'
     )
     expect(results[1]).toMatchObject({ callId: 'c2', isError: true })
+    expect(onToolUsage).toHaveBeenCalledWith({
+      runId: 'run-1',
+      toolCalls: 2,
+      toolErrors: 1
+    })
   })
 
   /** 用户已经在屏幕上读到的字,不能因为他点了停止就凭空消失 */
@@ -1124,6 +1239,79 @@ describe('每轮取一次工具快照(方案 §4.4)', () => {
     expect(history[2]?.parts[0]).toMatchObject({ callId: 'c1', isError: false })
     expect(history[4]?.parts[0]).toMatchObject({ callId: 'c2', isError: true })
     expectNoOrphans(history)
+  })
+})
+
+// ─────────────────────────── 模型声明运行时约束 ───────────────────────────
+
+describe('模型声明运行时约束', () => {
+  it('不支持工具的模型不会收到注册表工具定义', async () => {
+    const model: ModelAlias = {
+      ...ALIAS,
+      capabilities: { ...ALIAS.capabilities, tools: false }
+    }
+    const upstream = fakeUpstream([says('纯文本回答')], { models: [model] })
+    const result = await runSession({
+      upstream,
+      tools: registry({ internalId: 'echo' })
+    })
+    expect(runEnd(result.events).status).toBe('done')
+    expect(upstream.requests[0]?.tools).toEqual([])
+  })
+
+  it('图片输入在 HTTP 前按 Vision 能力拒绝', async () => {
+    const model: ModelAlias = {
+      ...ALIAS,
+      capabilities: { ...ALIAS.capabilities, vision: false, visionInput: false }
+    }
+    const upstream = fakeUpstream([says('不应请求')], { models: [model] })
+    const result = await runSession({
+      upstream,
+      request: req({ input: [{ type: 'image', mime: 'image/png', dataRef: 'ncw://attachments/themes/a.png' }] })
+    })
+    expect(runEnd(result.events)).toMatchObject({
+      status: 'error',
+      error: { code: 'provider', retryable: false }
+    })
+    expect(runEnd(result.events).error?.message).toContain('Vision')
+    expect(upstream.requests).toEqual([])
+  })
+
+  it('ThinkConfig 把 higher 解析为可移植的 xhigh', async () => {
+    const model: ModelAlias = {
+      ...ALIAS,
+      thinkingConfig: {
+        mode: 'effort',
+        defaultEnabled: true,
+        defaultEffort: 'medium',
+        parameterPath: 'reasoning_effort'
+      }
+    }
+    const upstream = fakeUpstream([says('好')], { models: [model] })
+    await runSession({ upstream, request: req({ thinking: 'higher' }) })
+    expect(upstream.requests[0]?.reasoning).toMatchObject({
+      mode: 'effort', enabled: true, explicit: true, effort: 'xhigh'
+    })
+    expect(upstream.requests[0]).not.toHaveProperty('thinkingBudget')
+  })
+
+  it('输入加预留输出超过上下文窗口时不调用上游', async () => {
+    const model: ModelAlias = { ...ALIAS, contextWindow: 1_200, maxOutputTokens: 1_000 }
+    const upstream = fakeUpstream([says('不应请求')], { models: [model] })
+    const result = await runSession({ upstream })
+    expect(runEnd(result.events)).toMatchObject({ status: 'error', error: { code: 'context_length' } })
+    expect(upstream.requests).toEqual([])
+  })
+
+  it('开启 Web Search 但模型既无内置搜索也无工具能力时明确失败', async () => {
+    const model: ModelAlias = {
+      ...ALIAS,
+      capabilities: { ...ALIAS.capabilities, tools: false, webSearch: false }
+    }
+    const upstream = fakeUpstream([says('不应请求')], { models: [model] })
+    const result = await runSession({ upstream, request: req({ webSearch: true }) })
+    expect(runEnd(result.events).error?.message).toContain('Web Search')
+    expect(upstream.requests).toEqual([])
   })
 })
 

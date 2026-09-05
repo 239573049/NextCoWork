@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { findPreset } from '../presets'
+import { BUILTIN_MODEL_CATALOG } from '../model-catalog-inventory'
 import type { ModelPricing, PriceTier, TokenRates } from '../pricing'
 import { findPricing, priceOf } from '../pricing'
 import { NOT_SEEDED, PRICING_SEED } from '../pricing-seed'
@@ -24,8 +25,7 @@ import { NOT_SEEDED, PRICING_SEED } from '../pricing-seed'
 
 const rows = PRICING_SEED
 const rateOf = (t: PriceTier): TokenRates => t.rate
-const numericRates = (r: TokenRates): number[] =>
-  Object.values(r).filter((v): v is number => typeof v === 'number')
+const numericRates = (r: TokenRates): number[] => Object.values(r).filter((v): v is number => typeof v === 'number')
 
 /** 每档都取到,包括阶梯的高档 */
 const allRates = (p: ModelPricing): TokenRates[] => p.tiers.map(rateOf)
@@ -55,7 +55,7 @@ describe('种子表 · 基本形状', () => {
 
   it('fetchedAt 全表一致,且是合法的 YYYY-MM-DD', () => {
     for (const p of rows) {
-      expect(p.fetchedAt, p.modelId).toBe('2026-09-04')
+      expect(p.fetchedAt, p.modelId).toBe('2026-09-05')
       expect(Number.isNaN(Date.parse(p.fetchedAt)), p.modelId).toBe(false)
     }
   })
@@ -66,6 +66,12 @@ describe('种子表 · 基本形状', () => {
       expect(() => new URL(p.source), p.modelId).not.toThrow()
       expect(new URL(p.source).protocol, p.modelId).toBe('https:')
     }
+  })
+
+  it('每个价格 modelId 都能从内置目录的 pricingModelId 命中', () => {
+    const reachable = new Set(BUILTIN_MODEL_CATALOG.map((row) => row.pricingModelId))
+    const orphaned = [...new Set(rows.map((row) => row.modelId))].filter((modelId) => !reachable.has(modelId)).sort()
+    expect(orphaned).toEqual([])
   })
 })
 
@@ -97,14 +103,17 @@ describe('种子表 · 阶梯结构', () => {
   })
 
   /**
-   * ★ **一个价都不能是 0。** 0 在 `costMicros` 里是个合法数字,会被当成「这项免费」
-   * 算进总额;而它真正的来源几乎总是「不知道,先填个 0」。
-   * 不知道的正确写法是**不写这个字段** —— 那样 `priceOf` 返回 null,界面显示「—」。
+   * ★ 0 只能表示官方明确公布的免费价格，不能表示“未知”。未知的正确写法是
+   * 不写该字段；否则 `costMicros` 会把它当作免费并静默低估成本。
    */
-  it('所有费率严格为正', () => {
+  it('只有官方明确免费的型号可以使用零费率，其余费率严格为正', () => {
+    const officiallyFree = new Set(['spark-x2.5-4b', 'spark-x2.5-1.7b'])
     for (const p of rows) {
       for (const r of allRates(p)) {
-        for (const v of numericRates(r)) expect(v, p.modelId).toBeGreaterThan(0)
+        for (const v of numericRates(r)) {
+          if (officiallyFree.has(p.modelId)) expect(v, p.modelId).toBe(0)
+          else expect(v, p.modelId).toBeGreaterThan(0)
+        }
       }
     }
   })
@@ -136,9 +145,7 @@ describe('种子表 · 主键与生效区间', () => {
     }
     for (const [key, g] of groups) {
       if (g.length < 2) continue
-      const sorted = [...g].sort((a, b) =>
-        (a.effectiveFrom ?? '').localeCompare(b.effectiveFrom ?? '')
-      )
+      const sorted = [...g].sort((a, b) => (a.effectiveFrom ?? '').localeCompare(b.effectiveFrom ?? ''))
       for (let i = 1; i < sorted.length; i++) {
         const prevEnd = sorted[i - 1]?.effectiveUntil
         const thisStart = sorted[i]?.effectiveFrom
@@ -169,8 +176,8 @@ describe('种子表 · 主键与生效区间', () => {
  * ★★ 跨模块契约:种子表的 `providerId` 必须是 `presets.ts` 里真实存在的 id。
  *
  * 对不上的后果是**静默**的:`findPricing` 查不到覆盖价就退回通用价 ——
- * 而国内几家根本没有通用价行,于是费用列变「—」;更糟的情况是退到了一条
- * **美元**的通用价上,把人民币的账算成美元的数。
+ * 某些国内型号没有通用价行时费用列会变「—」;更糟的情况是错误退到一条
+ * **美元**的通用价上,把人民币的账算成美元的数。因此通用价与连接覆盖价必须分开校验。
  */
 describe('种子表 × presets', () => {
   it('每个非空 providerId 都对应一条真实预设', () => {
@@ -180,18 +187,16 @@ describe('种子表 × presets', () => {
     }
   })
 
-  it('用到的 providerId 就是这五个 —— 加一家要连带补 presets 和币种', () => {
+  it('只有区域价或平台价使用 providerId，厂商通用官方价不依赖连接', () => {
     const ids = [...new Set(rows.map((p) => p.providerId).filter((x): x is string => x !== null))]
-    expect(ids.sort()).toEqual(['dashscope', 'deepseek', 'moonshot', 'moonshot-global', 'zai'])
+    expect(ids.sort()).toEqual(['dashscope', 'moonshot', 'opencode-go'])
   })
 
   it('国内站的行记人民币,国际站的行记美元 —— 不做换算(方案 §5.3)', () => {
     const expected: Record<string, 'USD' | 'CNY'> = {
-      deepseek: 'CNY',
       moonshot: 'CNY',
       dashscope: 'CNY',
-      'moonshot-global': 'USD',
-      zai: 'USD'
+      'opencode-go': 'USD',
     }
     for (const p of rows) {
       if (p.providerId === null) continue
@@ -199,9 +204,72 @@ describe('种子表 × presets', () => {
     }
   })
 
-  it('通用价(providerId === null)一律美元', () => {
+  it('通用价保留官方原币，人民币通用价只来自逐款核实的国内型号', () => {
+    const cnyGeneric = rows
+      .filter((p) => p.providerId === null && p.currency === 'CNY')
+      .map((p) => p.modelId)
+      .sort()
+    expect(cnyGeneric).toEqual([
+      'Baichuan-M2',
+      'Baichuan-M2-Plus',
+      'Baichuan-M3',
+      'Baichuan-M3-Plus',
+      'Baichuan2-Turbo',
+      'Baichuan3-Turbo',
+      'Baichuan3-Turbo-128k',
+      'Baichuan4',
+      'Baichuan4-Air',
+      'Baichuan4-Turbo',
+      'SenseChat-Character',
+      'SenseChat-Character-Pro',
+      'SenseChat-Vision',
+      'SenseNova-V6-5-Pro',
+      'SenseNova-V6-5-Turbo',
+      'SenseNova-V6-Pro',
+      'SenseNova-V6-Reasoner',
+      'SenseNova-V6-Turbo',
+      'doubao-1.5-lite-32k',
+      'doubao-1.5-pro-32k',
+      'doubao-1.5-vision-pro',
+      'doubao-seed-1.6-flash',
+      'doubao-seed-1.6-vision',
+      'doubao-seed-2.0-code',
+      'doubao-seed-2.0-lite',
+      'doubao-seed-2.0-mini',
+      'doubao-seed-2.0-pro',
+      'doubao-seed-2.1-pro',
+      'doubao-seed-2.1-turbo',
+      'doubao-seed-character',
+      'doubao-seed-code',
+      'doubao-seed-evolving',
+      'doubao-seed-translation',
+      'ernie-4.5-turbo',
+      'ernie-4.5-turbo-vl',
+      'ernie-5.0',
+      'ernie-5.1',
+      'ernie-x1.1-preview',
+      'hunyuan-role-latest',
+      'hy-mt2-lite',
+      'hy-mt2-plus',
+      'hy-mt2-pro',
+      'hy-role',
+      'hy3',
+      'hy4-preview',
+      'internvl3-38b',
+      'openpangu-2.0-flash',
+      'spark-x2',
+      'spark-x2-flash',
+      'spark-x2.5-1.7b',
+      'spark-x2.5-4b',
+      'step-1o-turbo-vision',
+      'step-3.5-flash',
+      'step-3.5-flash-2603',
+      'step-3.7-flash',
+    ])
     for (const p of rows) {
-      if (p.providerId === null) expect(p.currency, p.modelId).toBe('USD')
+      if (p.providerId === null && !cnyGeneric.includes(p.modelId)) {
+        expect(p.currency, p.modelId).toBe('USD')
+      }
     }
   })
 })
@@ -267,23 +335,17 @@ describe('抄写校验 · 长上下文档', () => {
     expect(hi.input, p.modelId).toBeCloseTo(lo.input * 2, 6)
     expect(hi.output, p.modelId).toBeCloseTo(lo.output * 1.5, 6)
     if (lo.cacheRead !== undefined) expect(hi.cacheRead, p.modelId).toBeCloseTo(lo.cacheRead * 2, 6)
-    if (lo.cacheWrite !== undefined)
-      expect(hi.cacheWrite, p.modelId).toBeCloseTo(lo.cacheWrite * 2, 6)
+    if (lo.cacheWrite !== undefined) expect(hi.cacheWrite, p.modelId).toBeCloseTo(lo.cacheWrite * 2, 6)
   }
 
   it('OpenAI:阈值 272K,输入/缓存 ×2、输出 ×1.5', () => {
     const tiered = rows.filter((p) => p.modelId.startsWith('gpt-') && p.tiers.length > 1)
-    expect(tiered.map((p) => p.modelId).sort()).toEqual([
-      'gpt-5.6-luna',
-      'gpt-5.6-sol',
-      'gpt-5.6-terra',
-      'gpt-6-astra'
-    ])
+    expect(tiered.map((p) => p.modelId).sort()).toEqual(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'])
     for (const p of tiered) asymmetric(p, 272_000)
   })
 
   it('Gemini:只有 Pro 两款,阈值 200K(不是 1.5 时代的 128K)', () => {
-    const gem = rows.filter((p) => p.modelId.startsWith('gemini-'))
+    const gem = rows.filter((p) => p.modelId.startsWith('gemini-') && p.tiers.length > 1)
     expect(gem.map((p) => p.modelId).sort()).toEqual(['gemini-2.5-pro', 'gemini-3.1-pro-preview'])
     for (const p of gem) asymmetric(p, 200_000)
   })
@@ -303,12 +365,23 @@ describe('抄写校验 · 长上下文档', () => {
   })
 
   /**
-   * ★ 反向断言:除了上面点名的九条,**别的行都必须是单档**。
+   * ★ 反向断言:所有已录入的阶梯模型都必须点名。
    * 没有它,给某一行悄悄加个档不会被任何测试注意到。
    */
   it('其余所有行都是单档', () => {
     const tiered = rows.filter((p) => p.tiers.length > 1).map((p) => p.modelId)
     expect(tiered.sort()).toEqual([
+      'MiniMax-M3',
+      'doubao-seed-1.6-flash',
+      'doubao-seed-1.6-vision',
+      'doubao-seed-2.0-code',
+      'doubao-seed-2.0-lite',
+      'doubao-seed-2.0-mini',
+      'doubao-seed-2.0-pro',
+      'doubao-seed-character',
+      'doubao-seed-code',
+      'ernie-5.0',
+      'ernie-5.1',
       'gemini-2.5-pro',
       'gemini-3.1-pro-preview',
       'gpt-5.6-luna',
@@ -317,7 +390,18 @@ describe('抄写校验 · 长上下文档', () => {
       'gpt-6-astra',
       'grok-4.3',
       'grok-4.5',
-      'grok-4.6'
+      'grok-4.6',
+      'qwen3-coder-30b-a3b-instruct',
+      'qwen3-coder-flash',
+      'qwen3-coder-next',
+      'qwen3-coder-plus',
+      'qwen3-max',
+      'qwen3.5-plus',
+      'qwen3.6-flash',
+      'qwen3.6-max-preview',
+      'qwen3.6-plus',
+      'qwen3.7-flash',
+      'qwen3.7-plus',
     ])
   })
 })
@@ -335,7 +419,7 @@ describe('抄写校验 · 长上下文档', () => {
  * 01:00–04:00 与 06:00–10:00,其余(含整个周末)全是空闲。
  */
 describe('DeepSeek · 时段计费', () => {
-  const ds = byId('deepseek-v4-flash', 'deepseek')
+  const ds = byId('deepseek-v4-flash')
   const use = { inputTokens: 1_000_000, outputTokens: 1_000_000 }
   const at = (iso: string): number => Date.parse(iso)
   const cost = (iso: string): number => {
@@ -381,25 +465,47 @@ describe('DeepSeek · 时段计费', () => {
     const peak = cost('2026-09-07T02:00:00Z')
     const off = cost('2026-09-07T05:00:00Z')
     expect(peak).toBe(off * 2)
-    // ¥1.5/M 输入 + ¥4.5/M 输出,各一百万 token = ¥6 = 6_000_000 micros
-    expect(off).toBe(6_000_000)
+    // $0.22/M 输入 + $0.66/M 输出,各一百万 token = $0.88 = 880_000 micros
+    expect(off).toBe(880_000)
   })
 
-  it('三条 DeepSeek 记录都挂了窗口', () => {
-    const all = rows.filter((p) => p.providerId === 'deepseek')
+  it('三条 DeepSeek 记录都是无需连接即可显示的通用 USD 单档价', () => {
+    const all = rows.filter((p) => p.modelId.startsWith('deepseek-v4-'))
     expect(all.length).toBe(3)
-    for (const p of all) expect(p.windows?.length, p.modelId).toBe(2)
+    for (const p of all) {
+      expect(p.providerId, p.modelId).toBeNull()
+      expect(p.currency, p.modelId).toBe('USD')
+      expect(p.tiers, p.modelId).toHaveLength(1)
+      expect(p.windows, p.modelId).toHaveLength(2)
+      expect(p.source, p.modelId).toBe('https://api-docs.deepseek.com/quick_start/pricing/')
+      expect(p.effectiveFrom, p.modelId).toBeUndefined()
+      expect(p.effectiveUntil, p.modelId).toBeUndefined()
+    }
+  })
+
+  it('逐项保存官方空闲时段输入、输出与缓存命中美元价', () => {
+    expect(byId('deepseek-v4-flash').tiers[0]?.rate).toEqual({
+      input: 0.22,
+      output: 0.66,
+      cacheRead: 0.007,
+    })
+    expect(byId('deepseek-v4-pro').tiers[0]?.rate).toEqual({
+      input: 0.66,
+      output: 1.98,
+      cacheRead: 0.022,
+    })
+    expect(byId('deepseek-v4-flash-vision-exp').tiers[0]?.rate).toEqual({
+      input: 0.22,
+      output: 0.66,
+      cacheRead: 0.007,
+    })
   })
 
   /** DeepSeek 没有缓存写入费 —— **缺省**,不是 0(0 会被算成「写入免费」) */
   it('无缓存写入价:写缓存的请求返回 null(无定价),而不是算成免费', () => {
-    for (const p of rows.filter((x) => x.providerId === 'deepseek')) {
+    for (const p of rows.filter((x) => x.modelId.startsWith('deepseek-v4-'))) {
       expect(p.tiers[0]?.rate.cacheWrite, p.modelId).toBeUndefined()
-      const got = priceOf(
-        p,
-        { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 50 },
-        at('2026-09-07T05:00:00Z')
-      )
+      const got = priceOf(p, { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 50 }, at('2026-09-07T05:00:00Z'))
       expect(got, p.modelId).toBeNull()
     }
   })
@@ -411,8 +517,7 @@ describe('DeepSeek · 时段计费', () => {
  */
 describe('GLM-5.3-Flash · 促销到期自动切换', () => {
   const at = (d: string): number => Date.parse(`${d}T12:00:00Z`)
-  const inputAt = (d: string): number | undefined =>
-    findPricing(rows, 'zai', 'glm-5.3-flash', at(d))?.tiers[0]?.rate.input
+  const inputAt = (d: string): number | undefined => findPricing(rows, null, 'glm-5.3-flash', at(d))?.tiers[0]?.rate.input
 
   it('促销期内是 $0.075', () => {
     expect(inputAt('2026-09-04')).toBe(0.075)
@@ -426,15 +531,386 @@ describe('GLM-5.3-Flash · 促销到期自动切换', () => {
 
   it('两段之间没有空档 —— 任何一天都查得到价', () => {
     for (const d of ['2026-09-08', '2026-09-09', '2026-09-10', '2026-09-11']) {
-      expect(findPricing(rows, 'zai', 'glm-5.3-flash', at(d)), d).not.toBeNull()
+      expect(findPricing(rows, null, 'glm-5.3-flash', at(d)), d).not.toBeNull()
     }
   })
 
-  it('这是全表唯一一组带日期区间的行', () => {
-    const dated = rows.filter(
-      (p) => p.effectiveFrom !== undefined || p.effectiveUntil !== undefined
-    )
-    expect(dated.map((p) => p.modelId)).toEqual(['glm-5.3-flash', 'glm-5.3-flash'])
+  it('与 Gemini 3.8/3.7/3.6 Flash 一起构成全表四组带日期区间的行', () => {
+    const dated = rows.filter((p) => p.effectiveFrom !== undefined || p.effectiveUntil !== undefined)
+    expect(dated.map((p) => p.modelId)).toEqual(['gemini-3.8-flash', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.6-flash', 'glm-5.3-flash', 'glm-5.3-flash'])
+  })
+})
+
+describe('国内厂商 · 通用官方价与区域覆盖价', () => {
+  it('GLM 的 Z.AI 官方美元价是无需绑定连接的通用价', () => {
+    for (const modelId of ['glm-5.3', 'glm-4.7-flashx', 'glm-4.6v', 'glm-4.5v']) {
+      expect(byId(modelId).providerId, modelId).toBeNull()
+      expect(byId(modelId).currency, modelId).toBe('USD')
+    }
+    expect(byId('glm-5.3').tiers[0]?.rate).toEqual({
+      input: 1.4,
+      output: 4.4,
+      cacheRead: 0.26,
+    })
+    expect(byId('glm-4.7-flashx').tiers[0]?.rate).toEqual({
+      input: 0.07,
+      output: 0.4,
+      cacheRead: 0.01,
+    })
+  })
+
+  it('Kimi 国际站 USD 是通用价，国内 Moonshot CNY 是连接覆盖价', () => {
+    expect(byId('kimi-k3').tiers[0]?.rate).toEqual({
+      input: 3,
+      output: 15,
+      cacheRead: 0.3,
+    })
+    expect(byId('kimi-k3').currency).toBe('USD')
+    expect(byId('kimi-k3', 'moonshot').tiers[0]?.rate).toEqual({
+      input: 20,
+      output: 100,
+      cacheRead: 2,
+    })
+    expect(byId('kimi-k3', 'moonshot').currency).toBe('CNY')
+  })
+
+  it('Qwen 保存官方 USD 阶梯，边界按 K=1000 且整单命中', () => {
+    const max = byId('qwen3-max')
+    expect(max.providerId).toBeNull()
+    expect(max.tiers).toEqual([
+      { upToInputTokens: 32_000, rate: { input: 1.2, output: 6 } },
+      { upToInputTokens: 128_000, rate: { input: 2.4, output: 12 } },
+      { upToInputTokens: null, rate: { input: 3, output: 15 } },
+    ])
+
+    const below = priceOf(max, { inputTokens: 32_000, outputTokens: 1_000 }, Date.UTC(2026, 8, 5))
+    const above = priceOf(max, { inputTokens: 32_001, outputTokens: 1_000 }, Date.UTC(2026, 8, 5))
+    expect(below?.tier).toBe(0)
+    expect(above?.tier).toBe(1)
+    expect(below?.micros).toBe(44_400)
+    expect(above?.micros).toBe(88_802)
+  })
+
+  it('MiniMax M3 在 512K 边界切换整套输入、输出和缓存读取价', () => {
+    const m3 = byId('MiniMax-M3')
+    expect(m3.providerId).toBeNull()
+    expect(m3.tiers).toEqual([
+      {
+        upToInputTokens: 512_000,
+        rate: { input: 0.3, output: 1.2, cacheRead: 0.06 },
+      },
+      {
+        upToInputTokens: null,
+        rate: { input: 0.6, output: 2.4, cacheRead: 0.12 },
+      },
+    ])
+    expect(priceOf(m3, { inputTokens: 512_000, outputTokens: 1_000 }, Date.UTC(2026, 8, 5))?.tier).toBe(0)
+    expect(priceOf(m3, { inputTokens: 512_001, outputTokens: 1_000 }, Date.UTC(2026, 8, 5))?.tier).toBe(1)
+  })
+
+  it('MiMo V2.5 两款保存海外官方美元价', () => {
+    expect(byId('mimo-v2.5-pro').tiers[0]?.rate).toEqual({
+      input: 0.435,
+      output: 0.87,
+      cacheRead: 0.0036,
+    })
+    expect(byId('mimo-v2.5').tiers[0]?.rate).toEqual({
+      input: 0.14,
+      output: 0.28,
+      cacheRead: 0.0028,
+    })
+    expect(byId('mimo-v2.5-pro').source).toBe('https://mimo.mi.com/docs/en-US/pricing')
+  })
+
+  it('LongCat 2.0 保存官方当前 USD 限时折扣价且不杜撰结束日期', () => {
+    const price = byId('LongCat-2.0')
+
+    expect(price).toMatchObject({
+      providerId: null,
+      currency: 'USD',
+      source: 'https://longcat.chat/platform/docs/pricing/longcat-2.0',
+    })
+    expect(price.tiers).toEqual([
+      {
+        upToInputTokens: null,
+        rate: { input: 0.3, output: 1.2, cacheRead: 0.006 },
+      },
+    ])
+    expect(price.effectiveUntil).toBeUndefined()
+  })
+
+  it('StepFun 当前四款模型保存无需连接绑定的官方人民币价', () => {
+    const expected: Record<string, TokenRates> = {
+      'step-3.7-flash': { input: 1.35, output: 8.1, cacheRead: 0.27 },
+      'step-3.5-flash': { input: 0.7, output: 2.1, cacheRead: 0.14 },
+      'step-3.5-flash-2603': { input: 0.7, output: 2.1, cacheRead: 0.14 },
+      'step-1o-turbo-vision': { input: 2.5, output: 8, cacheRead: 0.5 },
+    }
+
+    for (const [modelId, rate] of Object.entries(expected)) {
+      const price = byId(modelId)
+      expect(price.providerId, modelId).toBeNull()
+      expect(price.currency, modelId).toBe('CNY')
+      expect(price.tiers).toEqual([{ upToInputTokens: null, rate }])
+      expect(price.source, modelId).toBe('https://platform.stepfun.com/docs/zh/guides/pricing/details.md')
+    }
+  })
+
+  it('百川每千 Token 官方价正确换算为每百万 Token，合并价同时用于输入输出', () => {
+    const expected: Record<string, TokenRates> = {
+      Baichuan4: { input: 100, output: 100 },
+      'Baichuan4-Turbo': { input: 15, output: 15 },
+      'Baichuan4-Air': { input: 0.98, output: 0.98 },
+      'Baichuan3-Turbo': { input: 12, output: 12 },
+      'Baichuan3-Turbo-128k': { input: 24, output: 24 },
+      'Baichuan2-Turbo': { input: 8, output: 8 },
+      'Baichuan-M3-Plus': { input: 5, output: 9 },
+      'Baichuan-M3': { input: 10, output: 30 },
+      'Baichuan-M2-Plus': { input: 10, output: 30 },
+      'Baichuan-M2': { input: 2, output: 20 },
+    }
+
+    for (const [modelId, rate] of Object.entries(expected)) {
+      const price = byId(modelId)
+      expect(price.providerId, modelId).toBeNull()
+      expect(price.currency, modelId).toBe('CNY')
+      expect(price.tiers).toEqual([{ upToInputTokens: null, rate }])
+      expect(price.source, modelId).toBe('https://platform.baichuan-ai.com/prices')
+    }
+  })
+
+  it('SenseNova 主定价页八款 Token 模型保存通用人民币单档价', () => {
+    const expected: Record<string, TokenRates> = {
+      'SenseNova-V6-5-Pro': { input: 3, output: 9 },
+      'SenseNova-V6-5-Turbo': { input: 1.5, output: 4.5 },
+      'SenseNova-V6-Pro': { input: 3, output: 9 },
+      'SenseNova-V6-Turbo': { input: 1.5, output: 4.5 },
+      'SenseNova-V6-Reasoner': { input: 4, output: 16 },
+      'SenseChat-Vision': { input: 10, output: 60 },
+      'SenseChat-Character-Pro': { input: 15, output: 15 },
+      'SenseChat-Character': { input: 12, output: 12 },
+    }
+
+    for (const [modelId, rate] of Object.entries(expected)) {
+      const price = byId(modelId)
+      expect(price.providerId, modelId).toBeNull()
+      expect(price.currency, modelId).toBe('CNY')
+      expect(price.tiers).toEqual([{ upToInputTokens: null, rate }])
+      expect(price.source, modelId).toBe('https://www.sensecore.cn/help/docs/model-as-a-service/nova/pricing')
+      expect(price.windows, modelId).toBeUndefined()
+      expect(price.tiers[0]?.rate.cacheRead, modelId).toBeUndefined()
+      expect(price.tiers[0]?.rate.cacheWrite, modelId).toBeUndefined()
+    }
+
+    for (const secondary of ['SenseChat-5', 'SenseChat', 'SenseChat-Turbo', 'SenseChat-5-Cantonese', 'SenseChat-FunctionCall']) {
+      expect(rows.some((row) => row.modelId === secondary), secondary).toBe(false)
+    }
+  })
+
+  it('讯飞星火当前四款 MaaS 模型保存官方人民币按量价', () => {
+    const expected: Record<string, TokenRates> = {
+      'spark-x2': { input: 3, output: 3 },
+      'spark-x2-flash': { input: 1, output: 2 },
+      'spark-x2.5-4b': { input: 0, output: 0, cacheRead: 0 },
+      'spark-x2.5-1.7b': { input: 0, output: 0, cacheRead: 0 },
+    }
+
+    for (const [modelId, rate] of Object.entries(expected)) {
+      const price = byId(modelId)
+      expect(price.providerId, modelId).toBeNull()
+      expect(price.currency, modelId).toBe('CNY')
+      expect(price.tiers, modelId).toEqual([{ upToInputTokens: null, rate }])
+      expect(price.source, modelId).toMatch(/^https:\/\/maas\.xfyun\.cn\/modelSquare\/base\//)
+      expect(price.windows, modelId).toBeUndefined()
+    }
+
+    for (const legacy of ['spark-4.0-ultra', 'spark-x1', 'generalv3.5', 'max-32k', 'generalv3', 'pro-128k', 'spark-lite']) {
+      expect(rows.some((row) => row.modelId === legacy), legacy).toBe(false)
+    }
+  })
+
+  it('openPangu 2.0 Flash 保存可无损表达的官方人民币按量价', () => {
+    const price = byId('openpangu-2.0-flash')
+    expect(price).toMatchObject({
+      providerId: null,
+      currency: 'CNY',
+      source: 'https://support.huaweicloud.com/price-maas/price-maas-0002.html',
+      tiers: [
+        {
+          upToInputTokens: null,
+          rate: { input: 0.8, output: 1.6, cacheRead: 0.2 },
+        },
+      ],
+    })
+    expect(rows.some((row) => row.modelId === 'openpangu-2.0-pro')).toBe(false)
+  })
+
+  it('豆包常规在线推理价按官方 K=1000 阶梯整单命中', () => {
+    expect(byId('doubao-seed-2.1-pro').tiers).toEqual([{ upToInputTokens: null, rate: { input: 6, output: 30, cacheRead: 1.2 } }])
+    expect(byId('doubao-seed-2.1-turbo').tiers).toEqual([{ upToInputTokens: null, rate: { input: 3, output: 15, cacheRead: 0.6 } }])
+
+    const pro = byId('doubao-seed-2.0-pro')
+    expect(pro.providerId).toBeNull()
+    expect(pro.currency).toBe('CNY')
+    expect(pro.tiers).toEqual([
+      {
+        upToInputTokens: 32_000,
+        rate: { input: 3.2, output: 16, cacheRead: 0.64 },
+      },
+      {
+        upToInputTokens: 128_000,
+        rate: { input: 4.8, output: 24, cacheRead: 0.96 },
+      },
+      {
+        upToInputTokens: null,
+        rate: { input: 9.6, output: 48, cacheRead: 1.92 },
+      },
+    ])
+    expect(priceOf(pro, { inputTokens: 32_000, outputTokens: 1 }, Date.now())?.tier).toBe(0)
+    expect(priceOf(pro, { inputTokens: 32_001, outputTokens: 1 }, Date.now())?.tier).toBe(1)
+    expect(priceOf(pro, { inputTokens: 128_001, outputTokens: 1 }, Date.now())?.tier).toBe(2)
+    expect(pro.source).toBe('https://docs.volcengine.com/docs/82379/1544106')
+  })
+
+  it('百度千帆价格从每千 Token 正确换算为每百万 Token', () => {
+    expect(byId('ernie-5.1').tiers).toEqual([
+      { upToInputTokens: 32_000, rate: { input: 4, output: 18 } },
+      { upToInputTokens: null, rate: { input: 6, output: 22 } },
+    ])
+    expect(byId('ernie-5.0').tiers).toEqual([
+      { upToInputTokens: 32_000, rate: { input: 6, output: 24 } },
+      { upToInputTokens: null, rate: { input: 10, output: 40 } },
+    ])
+    expect(byId('ernie-4.5-turbo').tiers[0]?.rate).toEqual({
+      input: 0.8,
+      output: 3.2,
+      cacheRead: 0.2,
+    })
+    expect(byId('ernie-4.5-turbo-vl').tiers[0]?.rate).toEqual({
+      input: 3,
+      output: 9,
+      cacheRead: 0.75,
+    })
+    expect(byId('ernie-x1.1-preview').tiers[0]?.rate).toEqual({
+      input: 1,
+      output: 4,
+    })
+    expect(byId('internvl3-38b').tiers[0]?.rate).toEqual({
+      input: 8,
+      output: 24,
+    })
+    expect(byId('ernie-5.1').source).toBe('https://cloud.baidu.com/doc/qianfan/s/wmh4sv6ya')
+  })
+
+  it('腾讯 TokenHub 当前七款混元语言模型保存官方人民币价', () => {
+    const expected: Record<string, TokenRates> = {
+      'hy4-preview': { input: 6, output: 18, cacheRead: 0.3 },
+      hy3: { input: 1, output: 4, cacheRead: 0.25 },
+      'hy-mt2-pro': { input: 0.5, output: 2 },
+      'hy-mt2-plus': { input: 0.5, output: 2 },
+      'hy-mt2-lite': { input: 0.3, output: 1.2 },
+      'hunyuan-role-latest': { input: 2.4, output: 9.6 },
+      'hy-role': { input: 2.4, output: 9.6 },
+    }
+
+    for (const [modelId, rate] of Object.entries(expected)) {
+      const price = byId(modelId)
+      expect(price.providerId, modelId).toBeNull()
+      expect(price.currency, modelId).toBe('CNY')
+      expect(price.tiers).toEqual([{ upToInputTokens: null, rate }])
+      expect(price.source, modelId).toBe('https://cloud.tencent.com/document/product/1823/130055')
+    }
+  })
+})
+
+describe('Gemini 3.8/3.7/3.6 Flash · 官方调价自动切换', () => {
+  const datedFlashIds = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash']
+  const at = (d: string): number => Date.parse(`${d}T12:00:00Z`)
+  const rateAt = (modelId: string, d: string): TokenRates | undefined => findPricing(rows, null, modelId, at(d))?.tiers[0]?.rate
+
+  it('2026-12-31 前使用介绍价', () => {
+    for (const modelId of datedFlashIds) {
+      expect(rateAt(modelId, '2026-09-05'), modelId).toEqual({
+        input: 0.75,
+        output: 3.75,
+        cacheRead: 0.075,
+      })
+      expect(rateAt(modelId, '2026-12-31'), modelId).toEqual({
+        input: 0.75,
+        output: 3.75,
+        cacheRead: 0.075,
+      })
+    }
+  })
+
+  it('2027-01-01 起使用新价', () => {
+    for (const modelId of datedFlashIds) {
+      expect(rateAt(modelId, '2027-01-01'), modelId).toEqual({
+        input: 1.5,
+        output: 7.5,
+        cacheRead: 0.15,
+      })
+      expect(rateAt(modelId, '2027-06-01'), modelId).toEqual({
+        input: 1.5,
+        output: 7.5,
+        cacheRead: 0.15,
+      })
+    }
+  })
+
+  it('缓存小时存储费没有被错误写成一次性 cacheWrite', () => {
+    for (const p of rows.filter((row) => datedFlashIds.includes(row.modelId))) {
+      expect(p.tiers[0]?.rate.cacheWrite).toBeUndefined()
+      expect(p.source).toBe(`https://ai.google.dev/gemini-api/docs/pricing#${p.modelId}`)
+    }
+  })
+})
+
+describe('Gemini Flash · 官方 Standard 文本链路价格', () => {
+  const expected = new Map<string, TokenRates>([
+    ['gemini-3.5-flash', { input: 1.5, output: 9, cacheRead: 0.15 }],
+    ['gemini-3.5-flash-lite', { input: 0.3, output: 2.5, cacheRead: 0.03 }],
+    ['gemini-3.1-flash-lite', { input: 0.25, output: 1.5, cacheRead: 0.025 }],
+    ['gemini-3-flash-preview', { input: 0.5, output: 3, cacheRead: 0.05 }],
+    ['gemini-2.5-flash', { input: 0.3, output: 2.5, cacheRead: 0.03 }],
+    ['gemini-2.5-flash-lite', { input: 0.1, output: 0.4, cacheRead: 0.01 }],
+  ])
+
+  it('逐型号保存 Google 官方输入、输出与缓存读取价格', () => {
+    for (const [modelId, rate] of expected) {
+      expect(byId(modelId).tiers[0]?.rate, modelId).toEqual(rate)
+    }
+  })
+
+  it('所有 Gemini 行都链接到 Google 官方对应价格段落', () => {
+    const gemini = rows.filter((row) => row.modelId.startsWith('gemini-'))
+    for (const row of gemini) {
+      expect(row.source, row.modelId).toBe(`https://ai.google.dev/gemini-api/docs/pricing#${row.modelId}`)
+    }
+  })
+})
+
+describe('Meta Muse · 官方基础价与 OpenCode Go 覆盖价', () => {
+  it('基础模型使用 Meta 官方美元价', () => {
+    for (const id of ['muse-spark-1.3', 'muse-spark-1.2']) {
+      expect(byId(id).tiers[0]?.rate).toEqual({
+        input: 1.25,
+        output: 4.25,
+        cacheRead: 0.15,
+      })
+      expect(byId(id).providerId).toBeNull()
+    }
+  })
+
+  it('contributor SKU 使用 OpenCode Go 的供应商覆盖价', () => {
+    for (const id of ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor']) {
+      expect(byId(id, 'opencode-go').tiers[0]?.rate).toEqual({
+        input: 0.1,
+        output: 0.2,
+        cacheRead: 0.002,
+      })
+      expect(byId(id, 'opencode-go').source).toBe('https://opencode.ai/docs/go/')
+    }
   })
 })
 
@@ -455,7 +931,7 @@ describe('NOT_SEEDED · 排除项是决定,不是遗漏', () => {
 
   /** 被点名排除的厂商,不能同时出现在种子表里 —— 一处改了另一处必须跟着改 */
   it('被排除的厂商确实不在表里', () => {
-    const banned = ['mistral', 'magistral', 'doubao', 'minimax', 'ernie', 'hunyuan', 'step-']
+    const banned = ['mistral', 'magistral']
     for (const p of rows) {
       for (const b of banned) {
         expect(p.modelId.toLowerCase().includes(b), `${p.modelId} 命中排除项 ${b}`).toBe(false)
@@ -463,9 +939,63 @@ describe('NOT_SEEDED · 排除项是决定,不是遗漏', () => {
     }
   })
 
-  /** Gemini 只该有 Pro:Flash 全系因摘要器混淆 + 未核实的调价公告被排除 */
-  it('Gemini 的 Flash 全系不在表里', () => {
+  it('不把 InternLM 公测配额误写成零价或第三方托管价格', () => {
+    const internlm = NOT_SEEDED.find((row) => row.what.includes('InternLM'))
+    expect(internlm?.why).toContain('没有公开按量输入、输出或缓存单价')
+    expect(internlm?.why).toContain('不能把配额制公测服务推断为零价')
+    expect(rows.some((row) => row.modelId.startsWith('intern-s') || row.modelId.startsWith('internvl3.5'))).toBe(false)
+  })
+
+  it('不把 openPangu Pro 的单次请求 Token 阶梯猜成输入 Token 阶梯', () => {
+    const pangu = NOT_SEEDED.find((row) => row.what.includes('openPangu 2.0 Pro'))
+    expect(pangu?.why).toContain('单次请求的Token数')
+    expect(pangu?.why).toContain('输入 Token 数')
+    expect(pangu?.why).toContain('31,999')
+    expect(rows.some((row) => row.modelId === 'openpangu-2.0-pro')).toBe(false)
+  })
+
+  it('StepFun 与百川只保留精确缺口，不再按厂商全系排除', () => {
+    const stepfun = NOT_SEEDED.find((row) => row.what.startsWith('StepFun'))
+    expect(stepfun?.what).toContain('旧型号')
+    expect(stepfun?.why).toContain('step-3.7-flash')
+    expect(stepfun?.why).toContain('非 Token')
+
+    const baichuan = NOT_SEEDED.find((row) => row.what.startsWith('百川'))
+    expect(baichuan?.what).toContain('搜索费用')
+    expect(baichuan?.why).toContain('十个文本 Token 型号')
+    expect(baichuan?.why).toContain('Baichuan-Omni-1.5')
+  })
+
+  it('豆包与百度只保留现有计费结构无法无损表达的精确缺口', () => {
+    const doubao = NOT_SEEDED.find((row) => row.what.startsWith('豆包'))
+    expect(doubao?.why).toContain('已收录')
+    expect(doubao?.why).toContain('200 Token')
+    expect(doubao?.why).toContain('Token×小时')
+
+    const baidu = NOT_SEEDED.find((row) => row.what.startsWith('百度'))
+    expect(baidu?.why).toContain('已收录')
+    expect(baidu?.why).toContain('搜索增强按次')
+    expect(baidu?.why).toContain('ERNIE X1.1 正式版')
+  })
+
+  it('腾讯混元只保留旧平台与媒体等不同计费单位缺口', () => {
+    const hunyuan = NOT_SEEDED.find((row) => row.what.startsWith('腾讯混元'))
+    expect(hunyuan?.why).toContain('已收录 TokenHub 当前七款')
+    expect(hunyuan?.why).toContain('已停服')
+    expect(hunyuan?.why).toContain('按张、秒、字符')
+  })
+
+  /** 只允许已从 Google 官方页逐款核实并有明确 Standard 价的 Flash 型号。 */
+  it('Gemini Flash 收录当前逐款核实的完整 Standard 价格集合', () => {
     const flash = rows.filter((p) => p.modelId.startsWith('gemini') && p.modelId.includes('flash'))
-    expect(flash).toEqual([])
+    expect([...new Set(flash.map((p) => p.modelId))]).toEqual(['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'])
+    expect(flash).toHaveLength(12)
+  })
+
+  it('明确保留按音频输入模态区分价格的建模缺口', () => {
+    const gap = NOT_SEEDED.find((row) => row.what.includes('音频输入差价'))
+    expect(gap?.what).toContain('Gemini')
+    expect(gap?.why).toContain('TokenRates')
+    expect(gap?.why).toContain('text/image/video')
   })
 })

@@ -1,18 +1,9 @@
 /**
  * SQLite 地基。**全应用唯一持有数据库句柄的地方。**
  *
- * ## 划界:这里做完的**不是**步骤 6
- *
- * 步骤 6(会话持久化)只做了一半地基,另一半仍然空着。下一个人接手时先看这张表,
- * 别以为转录已经落盘了 —— 它现在还在 `state/store.ts` 的一个内存 Map 里:
- *
- * | 已经做了 | 仍然留给步骤 6 |
- * |---|---|
- * | 开库、WAL、`migrations` 表、`schema_version` | — |
- * | `settings` / `kv` / `workspaces` / `providers` / `model_aliases` / `credentials` | — |
- * | `model_pricing` / `usage_records`(第 3 条迁移) | — |
- * | — | `conversations` / `messages` / `runs` / `messages_fts` + 三个触发器 |
- * | — | `sessions:*` 七条、`conversations:searchAll` |
+ * 会话、消息、运行记录、附件和 FTS 也由这里的同一连接持久化。主进程的
+ * `message_commit` 会逐条写入，最终的 `replaceHistory` 只负责异常收敛与顺序校验；
+ * 不再存在独立的内存转录事实源。
  *
  * ## 规矩
  *

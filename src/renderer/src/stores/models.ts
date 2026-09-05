@@ -37,6 +37,8 @@ interface ModelsState {
 
 let inflight: Promise<void> | null = null
 let subscribed = false
+let revision = 0
+let fetchSequence = 0
 
 /**
  * 订阅装在第一次 `load()` 里,不在模块顶层 —— 顶层 `on(...)` 会在 import 那一刻
@@ -48,6 +50,7 @@ function subscribeOnce(): void {
   if (subscribed) return
   subscribed = true
   on('provider:changed', ({ providers, models }) => {
+    revision += 1
     useModelsStore.setState({ providers, models, loaded: true })
   })
 }
@@ -59,6 +62,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
   async load() {
     subscribeOnce()
+    if (get().loaded) return
     // 五个 Tab 同时挂载 = 五次并发请求。共享同一个 promise,只发一次。
     inflight ??= fetchAll(set)
     return inflight
@@ -71,23 +75,27 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   },
 
   providerOf(alias) {
-    const m = get().models.find((x) => x.alias === alias)
+    const { models, providers } = get()
+    const m = models.find((x) => x.alias === alias && x.enabled !== false &&
+      providers.some((p) => p.id === x.providerId && p.enabled))
     if (m === undefined) return undefined
     return get().providers.find((p) => p.id === m.providerId)
   }
 }))
 
 function fetchAll(set: (partial: Partial<ModelsState>) => void): Promise<void> {
+  const startedRevision = revision
+  const sequence = ++fetchSequence
   return Promise.all([listProviders(), listModels()])
     .then(([providers, models]) => {
-      set({ providers, models, loaded: true })
+      if (revision === startedRevision && sequence === fetchSequence) set({ providers, models, loaded: true })
     })
     .catch((err: unknown) => {
       console.error('[models] 模型列表加载失败:', err)
       // 仍然置 loaded:否则下拉框永远停在「加载中」,用户看不出是失败了
-      set({ loaded: true })
+      if (revision === startedRevision && sequence === fetchSequence) set({ loaded: true })
     })
     .finally(() => {
-      inflight = null
+      if (sequence === fetchSequence) inflight = null
     })
 }

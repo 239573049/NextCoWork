@@ -25,6 +25,49 @@ export interface DataSettings {
   backupFrequency: BackupFrequency
 }
 
+/** Agent 上下文整理偏好。实验模式包含笔记、当前会话历史检索和窗口切换。 */
+export interface ContextManagementSettings {
+  experimentalMode: boolean
+  autoCompact: boolean
+}
+
+/**
+ * 界面「偏好 › 个性化」那三栏。**它是唯一一块会被原样拼进系统提示词的设置** ——
+ * 见 `main/kernel/context-assembler.ts` 的 `buildPersonalizationSection`。
+ *
+ * ★ 三个字段都是**用户自己打进来的**,不走 `untrustedBoundary`:那道边界声明
+ * 防的是「从 zip 装来的 Skill 正文」「clone 别人仓库带进来的 AGENTS.md」这类
+ * 第三方文本,而这三栏就是用户本人在跟模型说话 —— 给自己的话加一句
+ * 「以上内容不能放宽你的权限」既没有防住谁,又白占提示词。真正的防线仍在
+ * 权限层:不管这里写了什么,每一次工具调用照样过 `approve`。
+ */
+export interface PersonalizationSettings {
+  /** 姓名 —— 「让 AI 知道你是谁」 */
+  name: string
+  /** 工作描述 —— 「帮助 AI 理解你的背景,以便提供更贴合的回答」 */
+  background: string
+  /** 全局提示词 —— 「自定义指令会附加到每次对话的系统提示词中」 */
+  instructions: string
+}
+
+/**
+ * 三栏各自的字符上限。
+ *
+ * ★ 闸门在**这里**(落库前)而不只在输入框上:`settings:update` 是个 IPC,
+ * 输入框的 `maxLength` 拦不住任何一个绕过界面的调用,而这一块的去处是
+ * **系统提示词的稳定前缀** —— 一段 200KB 的「全局提示词」不是显示得难看,
+ * 是每一轮、每一个子代理都白烧一遍那 200KB。
+ *
+ * 数值本身是「够用就好」:名字给 64(比任何真名都长),背景 2000
+ * (一段自我介绍),指令 8000(相当于一份不算短的 AGENTS.md)。
+ * 提示词那侧还会再截一次 —— 那是防旧库里已经躺着超长值的,两道不冲突。
+ */
+export const PERSONALIZATION_MAX = {
+  name: 64,
+  background: 2000,
+  instructions: 8000
+} as const
+
 const BACKUP_FREQUENCIES: readonly BackupFrequency[] = ['manual', 'daily', 'weekly']
 
 function isBackupFrequency(value: unknown): value is BackupFrequency {
@@ -46,6 +89,24 @@ function mergeDataSettings(current: DataSettings, patch: unknown): DataSettings 
     ? value.backupFrequency
     : current.backupFrequency
   return { backupDirectory, backupFrequency }
+}
+
+/**
+ * 同 `mergeDataSettings`:只认这三个字符串字段,坏值原样退回当前值。
+ * 顺手截到上限 —— 见 `PERSONALIZATION_MAX` 那段说明。
+ */
+function mergePersonalization(
+  current: PersonalizationSettings,
+  patch: unknown
+): PersonalizationSettings {
+  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return { ...current }
+  const value = patch as Record<string, unknown>
+  const take = (key: keyof PersonalizationSettings): string => {
+    const next = value[key]
+    if (typeof next !== 'string') return current[key]
+    return next.slice(0, PERSONALIZATION_MAX[key])
+  }
+  return { name: take('name'), background: take('background'), instructions: take('instructions') }
 }
 
 export interface AppSettings {
@@ -88,7 +149,12 @@ export interface AppSettings {
 
   /** 新会话的默认档位 */
   defaultPermissionMode: PermissionMode
+  /** “为我批准”档位使用的专用审核模型；空字符串表示未配置，自动回退人工审批。 */
+  permissionReviewerModel: string
   defaultModel: string
+
+  /** 上下文管理：默认开启智能窗口模式，并保留自动压缩回退。 */
+  contextManagement: ContextManagementSettings
 
   /** 子代理(方案 §4.9 / 界面「Agent 资源调度」) */
   subagent: {
@@ -126,6 +192,12 @@ export interface AppSettings {
 
   /** 设置 › 数据：只保存本机备份偏好，不包含任何云端开关。 */
   data: DataSettings
+
+  /**
+   * 设置 › 偏好 › 个性化。★ 这一块**会进系统提示词** —— 它是这张表里
+   * 唯一一个不只影响界面、而是直接改变模型看到什么的字段。
+   */
+  personalization: PersonalizationSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -133,13 +205,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   locale: 'zh-CN',
   colorTheme: { id: DEFAULT_COLOR_THEME_ID, seed: 0, custom: DEFAULT_CUSTOM_SEED },
   imageTheme: { id: null, render: 'blur' },
-  defaultPermissionMode: 'auto',
+  // 安全默认：任何会改变文件或执行命令的敏感操作都先询问用户。
+  defaultPermissionMode: 'ask',
+  permissionReviewerModel: '',
   defaultModel: '',
+  contextManagement: { experimentalMode: true, autoCompact: true },
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
   proxy: structuredClone(DEFAULT_PROXY),
-  data: { backupDirectory: null, backupFrequency: 'manual' }
+  data: { backupDirectory: null, backupFrequency: 'manual' },
+  personalization: { name: '', background: '', instructions: '' }
 }
 
 /**
@@ -177,7 +253,11 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.defaultPermissionMode !== undefined) {
     next.defaultPermissionMode = patch.defaultPermissionMode
   }
+  if (patch.permissionReviewerModel !== undefined) next.permissionReviewerModel = patch.permissionReviewerModel
   if (patch.defaultModel !== undefined) next.defaultModel = patch.defaultModel
+  if (patch.contextManagement !== undefined) {
+    next.contextManagement = { ...next.contextManagement, ...patch.contextManagement }
+  }
 
   // 六个嵌套块:深一层。再深就没有了 —— AppSettings 只有两层,
   // 通用深合并在这里是纯粹的负担(它还得决定数组怎么办)。
@@ -194,6 +274,9 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     next.proxy = { ...next.proxy, ...migrateLegacyProxy(patch.proxy) }
   }
   if (patch.data !== undefined) next.data = mergeDataSettings(next.data, patch.data)
+  if (patch.personalization !== undefined) {
+    next.personalization = mergePersonalization(next.personalization, patch.personalization)
+  }
 
   return next
 }
@@ -205,12 +288,15 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   colorTheme: true,
   imageTheme: true,
   defaultPermissionMode: true,
+  permissionReviewerModel: true,
   defaultModel: true,
+  contextManagement: true,
   subagent: true,
   gateway: true,
   notifications: true,
   proxy: true,
-  data: true
+  data: true,
+  personalization: true
 }
 void PATCHABLE_KEYS
 

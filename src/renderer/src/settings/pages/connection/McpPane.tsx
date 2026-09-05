@@ -126,6 +126,7 @@ function ServerRow({
   const { config, state, tools, toolCount } = status;
   const [testing, setTesting] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   /** 「测试连接」的结果。失败是正常返回值,不是异常 —— 见 services/mcp.ts */
   const [tested, setTested] = useState<string | null>(null);
 
@@ -236,7 +237,22 @@ function ServerRow({
           <IconButton label={t("connection.mcp.edit")} onClick={onEdit}>
             <Pencil size={14} />
           </IconButton>
-          <IconButton label={t("connection.mcp.delete")} onClick={onRemove}>
+          <IconButton
+            label={
+              confirmingDelete
+                ? t("common.confirmDelete")
+                : t("connection.mcp.delete")
+            }
+            onClick={() => {
+              if (confirmingDelete) {
+                setConfirmingDelete(false);
+                onRemove();
+              } else {
+                setConfirmingDelete(true);
+              }
+            }}
+            className={confirmingDelete ? "text-danger hover:bg-danger/10 hover:text-danger" : undefined}
+          >
             <Trash2 size={14} />
           </IconButton>
           <Toggle

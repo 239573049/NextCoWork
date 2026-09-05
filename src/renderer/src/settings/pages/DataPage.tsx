@@ -71,14 +71,14 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         ]);
         setStats(nextStats);
         setBackup(nextBackup);
-        if (nextBackup.lastError === null && busy === null) setError(null);
+        if (nextBackup.lastError === null) setError(null);
       } catch (err) {
         setError(errorMessage(err));
       } finally {
         if (initial) setLoading(false);
       }
     },
-    [busy],
+    [],
   );
 
   useEffect(() => {
@@ -285,11 +285,12 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
   ];
 
   return (
-    <div className="pb-1">
+    <div data-testid="data-page" className="pb-1">
       <DataSection title={t("data.cloudSync")} className="pt-2">
         <DataRow
           title={t("data.configureCloudSync")}
           description={t("data.cloudSyncHint")}
+          density="compact"
           last
         >
           <Toggle
@@ -302,7 +303,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
       </DataSection>
 
       <DataSection title={t("data.migration")}>
-        <DataRow title={t("data.export")} description={t("data.exportHint")}>
+        <DataRow title={t("data.export")} density="single">
           <div className="flex items-center gap-2">
             <SelectControl
               ariaLabel={t("data.exportScope")}
@@ -432,6 +433,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         <DataRow
           title={t("data.dataDirectory")}
           description={stats?.dataDirectory ?? t("data.dataDirectoryHint")}
+          density="compact"
         >
           <Button
             size="sm"
@@ -451,6 +453,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         <DataRow
           title={t("data.optimizeStorage")}
           description={t("data.optimizeStorageHint")}
+          density="compact"
         >
           <Button
             size="sm"
@@ -470,6 +473,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         <DataRow
           title={t("data.cleanupAttachments")}
           description={t("data.cleanupAttachmentsHint")}
+          density="compact"
         >
           <Button
             size="sm"
@@ -482,7 +486,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
             {t("data.cleanup")}
           </Button>
         </DataRow>
-        <DataRow title={t("data.cleanupRange")}>
+        <DataRow title={t("data.cleanupRange")} density="compact">
           <div className="flex items-center gap-2">
             <SelectControl
               ariaLabel={t("data.cleanupRange")}
@@ -510,6 +514,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
           title={t("data.clearHistory")}
           description={t("data.clearHistoryHint")}
           descriptionTone="danger"
+          density="compact"
           last
         >
           <Button
@@ -530,6 +535,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         <DataRow
           title={t("data.deleteAndQuit")}
           description={t("data.deleteAndQuitHint")}
+          density="compact"
           last
         >
           <Button
@@ -676,18 +682,25 @@ function DataRow({
   description,
   children,
   descriptionTone,
+  density = "default",
   last = false,
 }: {
   title: string;
   description?: ReactNode;
   children?: ReactNode;
   descriptionTone?: "danger";
+  density?: "default" | "compact" | "single";
   last?: boolean;
 }): ReactNode {
   return (
     <div
       className={cn(
-        "flex min-h-[62px] items-center gap-5 py-3",
+        "flex items-center gap-5",
+        density === "single"
+          ? "min-h-[48px] py-2"
+          : density === "compact"
+            ? "min-h-[58px] py-2.5"
+            : "min-h-[62px] py-3",
         !last && "border-b border-hairline",
       )}
     >

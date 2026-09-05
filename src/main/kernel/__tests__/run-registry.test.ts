@@ -279,6 +279,16 @@ describe('RunRegistry · 嵌套与中断', () => {
     expect(reg.runningIn('w1').map((r) => r.runId)).toEqual(['a'])
   })
 
+  it('activeSubagentCount 只统计仍在运行的子 run', () => {
+    const reg = new RunRegistry()
+    reg.create(req({ runId: 'root' }))
+    reg.create(req({ runId: 'child', parentRunId: 'root', depth: 1 }))
+    reg.create(req({ runId: 'done-child', parentRunId: 'root', depth: 1 })).finish('done')
+    reg.create(req({ runId: 'grandchild', parentRunId: 'child', depth: 2 }))
+
+    expect(reg.activeSubagentCount()).toBe(2)
+  })
+
   it('reap 只回收已结束且无人订阅的', () => {
     const reg = new RunRegistry()
     reg.create(req({ runId: 'done' })).finish('done')

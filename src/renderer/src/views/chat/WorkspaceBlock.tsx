@@ -17,7 +17,6 @@ import { formatDuration } from "../../../../shared/agent/duration";
 import type { ToolCallState } from "../../../../shared/agent/transcript";
 import {
   summarize,
-  workspaceTitleParts,
   type TimelineItem,
 } from "../../../../shared/domain/tool-timeline";
 import { cn } from "../../lib/cn";
@@ -95,7 +94,16 @@ export function WorkspaceBlock({
   }, [open, scrollRef]);
 
   const summary = summarize(items, tools, fileChangeCount);
-  const { normal, danger } = workspaceTitleParts(summary, formatDuration);
+  const normal = [t("chat.workspace.toolCount", { count: summary.toolCount })];
+  if (summary.totalMs > 0) {
+    normal.push(t("chat.workspace.totalTime", { duration: formatDuration(summary.totalMs) }));
+  }
+  if (summary.fileChangeCount > 0) {
+    normal.push(t("chat.workspace.fileChanges", { count: summary.fileChangeCount }));
+  }
+  const danger = summary.errorCount > 0
+    ? t("chat.failedCount", { count: summary.errorCount })
+    : undefined;
   const shownShapes = summary.shapes.slice(0, MAX_SHAPE_ICONS);
   const extraShapes = summary.shapes.length - shownShapes.length;
 
@@ -146,7 +154,7 @@ export function WorkspaceBlock({
             此时 L2 不该再按「最近 3 项」的窗口规则坍缩 —— 那个规则解决的是
             运行中的刷屏,而运行已经结束了。这里交给用户自己按组展开。
           */}
-          <ToolTimeline items={items} tools={tools} running={false} />
+          <ToolTimeline items={items} tools={tools} />
         </div>
       )}
     </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isPrivateAddress, ssrfRisk } from '../ssrf'
+import { isPrivateAddress, resolvedAddressRisk, ssrfRisk } from '../ssrf'
 
 /**
  * SSRF 筛查的边界表。纯函数,零 IO,所以能铺满。
@@ -213,5 +213,28 @@ describe('ssrfRisk · 主机名', () => {
     expect(r).toContain('127.0.0.1')
     expect(r).toContain('private-network')
     expect(r).toContain('user')
+  })
+})
+
+describe('resolvedAddressRisk · DNS 解析结果', () => {
+  it('拒绝解析到环回或私网地址的公网域名', async () => {
+    const lookup = async (): Promise<Array<{ address: string }>> => [
+      { address: '93.184.216.34' },
+      { address: '127.0.0.1' }
+    ]
+
+    const result = await resolvedAddressRisk('public.example.com', 100, lookup)
+
+    expect(result).toContain('127.0.0.1')
+    expect(result).toContain('private-network')
+  })
+
+  it('公网解析结果通过', async () => {
+    const lookup = async (): Promise<Array<{ address: string }>> => [
+      { address: '93.184.216.34' },
+      { address: '2606:2800:220:1:248:1893:25c8:1946' }
+    ]
+
+    await expect(resolvedAddressRisk('example.com', 100, lookup)).resolves.toBeNull()
   })
 })

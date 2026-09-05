@@ -144,6 +144,38 @@ describe('应该被回收的', () => {
     expect(existsSync(orphan)).toBe(false)
   })
 
+  it('升级前位于附件根下旧目录里的孤儿也会回收', () => {
+    const legacyDir = join(attachmentRoot(), 'legacy-session-S1')
+    mkdirSync(legacyDir, { recursive: true })
+    const orphan = join(legacyDir, 'legacy-orphan.png')
+    writeFileSync(orphan, 'O')
+
+    cleanupAttachments()
+
+    expect(existsSync(orphan)).toBe(false)
+  })
+
+  it('升级前旧目录里仍有数据库引用的文件必须保留', () => {
+    const legacyDir = join(attachmentRoot(), 'legacy-session-S1')
+    mkdirSync(legacyDir, { recursive: true })
+    const referenced = join(legacyDir, 'legacy-referenced.png')
+    writeFileSync(referenced, 'R')
+    repo.putDraftAttachment({
+      id: 'legacy-row',
+      scope: 'session',
+      ownerId: 'S1',
+      path: referenced,
+      size: 1,
+      checksum: 'legacy-checksum',
+      createdAt: Date.now()
+    })
+
+    cleanupAttachments()
+
+    expect(existsSync(referenced)).toBe(true)
+    expect(repo.getAttachmentRow('legacy-row')).toBeDefined()
+  })
+
   it('表里有、磁盘上没有的死记录被回收', () => {
     const a = uploadAttachment({
       scope: 'session', ownerId: 'S1', displayName: 'a.png', mime: 'image/png', bytes: bytesOf('A')

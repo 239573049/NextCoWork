@@ -29,6 +29,11 @@ export interface TokenUsage {
    * 而不是猜一个比例(猜错的方向是少收用户的钱,且没人看得出来)。
    */
   cacheCreation1hInputTokens?: number
+  /**
+   * Separate reasoning/thinking count when the upstream reports one. It is a
+   * subset of outputTokens and must never be added to the billable total again.
+   */
+  reasoningTokens?: number
 }
 
 export type ProviderStreamEvent =

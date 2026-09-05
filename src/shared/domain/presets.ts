@@ -69,6 +69,11 @@ export interface ProviderEndpoint {
  * 所以这里**故意偏离方案**,偏离的理由写在这。
  */
 export type PresetCategory = 'domestic' | 'aggregator' | 'overseas' | 'local'
+export type ProviderCredentialKind =
+  | 'api-key'
+  | 'access-key'
+  | 'api-password'
+  | 'subscription-key'
 
 export interface ProviderPreset {
   id: string
@@ -79,6 +84,10 @@ export interface ProviderPreset {
   /** 至少一条。翻「API 格式」开关时按 protocol 在这里查地址 */
   endpoints: readonly ProviderEndpoint[]
   docsUrl: string
+  /** 官方创建、查看或轮换 API Key 的控制台入口；没有可靠直达地址时不提供 */
+  apiKeyUrl?: string
+  /** 少数供应商使用 AK/SK、API Password 或订阅凭证，避免按钮给出错误称呼 */
+  credentialKind?: ProviderCredentialKind
   suggestedModels: readonly string[]
   /** 订阅制额度(Coding Plan 之类)—— 这类不计入总费用,见方案 §5.3 */
   subscription?: boolean
@@ -140,6 +149,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     recommended: true,
     endpoints: [oa('https://api.openai.com/v1', true), resp('https://api.openai.com/v1', true)],
     docsUrl: 'https://developers.openai.com/api/docs',
+    apiKeyUrl: 'https://platform.openai.com/api-keys',
     suggestedModels: ['gpt-5.6-luna-pro', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.5-pro'],
     verification: 'documented'
   },
@@ -150,6 +160,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     recommended: true,
     endpoints: [anth('https://api.anthropic.com', true)],
     docsUrl: 'https://platform.claude.com/docs/en/api/overview',
+    apiKeyUrl: 'https://platform.claude.com/settings/keys',
     suggestedModels: ['claude-opus-5', 'claude-sonnet-5', 'claude-fable-5.1', 'claude-opus-4.8'],
     verification: 'documented'
   },
@@ -165,6 +176,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     */
     endpoints: [oa('https://generativelanguage.googleapis.com/v1beta/openai/', true)],
     docsUrl: 'https://ai.google.dev/gemini-api/docs/openai',
+    apiKeyUrl: 'https://aistudio.google.com/app/apikey',
     suggestedModels: ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-pro'],
     notes:
       '兼容层不支持 Responses API。★ 流式响应的**每个 chunk 都带 usage**(官方 Current limitations),' +
@@ -187,6 +199,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'overseas',
     endpoints: [oa('https://api.mistral.ai/v1', true)],
     docsUrl: 'https://docs.mistral.ai/api',
+    apiKeyUrl: 'https://console.mistral.ai/api-keys/',
     suggestedModels: ['mistral-medium-3-5', 'mistral-large-2512', 'devstral-2512'],
     verification: 'documented'
   },
@@ -196,6 +209,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'overseas',
     endpoints: [oa('https://api.cohere.ai/compatibility/v1', false)],
     docsUrl: 'https://docs.cohere.com/docs/compatibility-api',
+    apiKeyUrl: 'https://dashboard.cohere.com/api-keys',
     suggestedModels: ['command-a-plus-05-2026', 'command-a-03-2025'],
     notes:
       '★ 三个 URL 三种组合:兼容层在 api.cohere.ai/compatibility/v1,原生 chat 在 ' +
@@ -220,6 +234,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.deepseek.com/anthropic')
     ],
     docsUrl: 'https://api-docs.deepseek.com/',
+    apiKeyUrl: 'https://platform.deepseek.com/api_keys',
     suggestedModels: ['deepseek-v4-pro', 'deepseek-v4-flash'],
     notes:
       '★ 老别名 deepseek-chat / deepseek-reasoner 已于 2026-07-24 下线,填了会直接 400。' +
@@ -236,6 +251,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.moonshot.cn/anthropic')
     ],
     docsUrl: 'https://platform.kimi.ai/docs/guide/claude-code-kimi',
+    apiKeyUrl: 'https://platform.kimi.com/console/api-keys',
     suggestedModels: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'],
     notes: '★ 按量 key 与 Coding Plan 订阅 key 不通用,地址也不是同一个(见「Kimi·Coding Plan」)。',
     verification: 'probed'
@@ -250,6 +266,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.moonshot.ai/anthropic')
     ],
     docsUrl: 'https://platform.kimi.ai/docs/guide/claude-code-kimi',
+    apiKeyUrl: 'https://platform.kimi.ai/console/api-keys',
     suggestedModels: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'],
     verification: 'probed'
   },
@@ -265,6 +282,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     */
     endpoints: [anth('https://api.kimi.com/coding'), oa('https://api.kimi.com/coding/v1', true)],
     docsUrl: 'https://www.kimi.com/coding/docs/en/',
+    apiKeyUrl: 'https://www.kimi.com/code/console',
+    credentialKind: 'subscription-key',
     suggestedModels: ['kimi-k3', 'kimi-k2.7-code'],
     notes:
       '★ 域名是 api.kimi.com,**不是** api.moonshot.cn —— 社区里大量「Coding Plan 配 ' +
@@ -277,6 +296,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://open.bigmodel.cn/api/paas/v4', false)],
     docsUrl: 'https://docs.bigmodel.cn/cn/guide/develop/claude',
+    apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
     suggestedModels: ['glm-5.3', 'glm-5.2', 'glm-4.7'],
     notes: '★ 按量 key 打不到 Coding Plan 的地址,反之亦然 —— 两套独立的鉴权域。',
     verification: 'probed'
@@ -292,6 +312,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       oa('https://open.bigmodel.cn/api/coding/paas/v4', false)
     ],
     docsUrl: 'https://docs.bigmodel.cn/cn/coding-plan/overview',
+    apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
+    credentialKind: 'subscription-key',
     suggestedModels: ['glm-5.3', 'glm-5.2'],
     notes: '★ 订阅 key 与按量 key 不通用。这是「配了半天 401」的头号原因。',
     verification: 'probed'
@@ -302,6 +324,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://api.z.ai/api/paas/v4', false)],
     docsUrl: 'https://docs.z.ai/devpack/quick-start',
+    apiKeyUrl: 'https://z.ai/manage-apikey/apikey-list',
     suggestedModels: ['glm-5.3', 'glm-5.2'],
     verification: 'probed'
   },
@@ -315,6 +338,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       oa('https://api.z.ai/api/coding/paas/v4', false)
     ],
     docsUrl: 'https://docs.z.ai/devpack/quick-start',
+    apiKeyUrl: 'https://z.ai/manage-apikey/apikey-list',
+    credentialKind: 'subscription-key',
     suggestedModels: ['glm-5.3', 'glm-5.2'],
     notes: '★ 订阅 key 与按量 key 不通用。',
     verification: 'probed'
@@ -329,6 +354,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.minimaxi.com/anthropic')
     ],
     docsUrl: 'https://platform.minimax.io/docs/token-plan/claude-code',
+    apiKeyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
     suggestedModels: ['minimax-m3', 'minimax-m2.7'],
     notes: '★ 国内是 minimaxi.com(多一个 i),国际是 minimax.io —— 两个域名都真实存在。',
     verification: 'probed'
@@ -339,6 +365,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://api.minimax.io/v1', true), anth('https://api.minimax.io/anthropic')],
     docsUrl: 'https://platform.minimax.io/docs/token-plan/claude-code',
+    apiKeyUrl: 'https://platform.minimax.io/user-center/basic-information/interface-key',
     suggestedModels: ['minimax-m3', 'minimax-m2.7'],
     verification: 'probed'
   },
@@ -375,6 +402,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://ark.cn-beijing.volces.com/api/compatible')
     ],
     docsUrl: 'https://www.volcengine.com/docs/82379',
+    apiKeyUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
     /* 报告没能核实到可用的模型 ID(火山用的是接入点 ID),宁可空着也不编 */
     suggestedModels: [],
     notes: '★ 火山用「接入点 ID」而不是模型名,需要先在控制台创建接入点,再把它的 ID 填成模型。',
@@ -386,6 +414,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://qianfan.baidubce.com/v2', false)],
     docsUrl: 'https://qianfan.baidubce.com',
+    apiKeyUrl: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
     suggestedModels: [],
     notes: '★ 千帆走 IAM AK/SK 鉴权,不一定吃 Bearer —— 配不通时先对一遍官方文档的鉴权方式。',
     verification: 'probed'
@@ -396,6 +425,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://api.hunyuan.cloud.tencent.com/v1', true)],
     docsUrl: 'https://cloud.tencent.com/document/product/1729',
+    apiKeyUrl: 'https://console.cloud.tencent.com/hunyuan/api-key',
     suggestedModels: [],
     notes: '实测**不提供** Anthropic 兼容端点。',
     verification: 'probed'
@@ -410,6 +440,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.stepfun.com')
     ],
     docsUrl: 'https://platform.stepfun.com/docs',
+    apiKeyUrl: 'https://platform.stepfun.com/interface-key',
     suggestedModels: [],
     verification: 'probed'
   },
@@ -428,6 +459,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://api.sensenova.cn/compatible-mode/v1', false)],
     docsUrl: 'https://console.sensecore.cn/help/docs/model-as-a-service/nova',
+    apiKeyUrl: 'https://console.sensecore.cn/iam/Security/access-key',
+    credentialKind: 'access-key',
     suggestedModels: [],
     notes: '实测没有 /models 接口,「拉取模型列表」用不了,模型 ID 需要手填。',
     verification: 'probed'
@@ -438,6 +471,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     endpoints: [oa('https://spark-api-open.xf-yun.com/v1', false)],
     docsUrl: 'https://www.xfyun.cn/doc/spark/Web.html',
+    apiKeyUrl: 'https://console.xfyun.cn/services/cbm',
+    credentialKind: 'api-password',
     suggestedModels: [],
     notes: '★ 地址未能实测核实(该网关对任意路径都 401),配不通时以官方文档为准。',
     verification: 'unverified'
@@ -468,6 +503,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     */
     endpoints: [anth('https://api.routin.ai', true), oa('https://api.routin.ai/v1', true)],
     docsUrl: 'https://api.routin.ai/',
+    apiKeyUrl: 'https://routin.ai/dashboard/api-keys',
     suggestedModels: ['claude-fable-5-1'],
     notes:
       '同一个域名下两种协议的地址不同(Anthropic 不带 /v1,OpenAI 带)——翻「API 格式」时地址会跟着换。',
@@ -484,6 +520,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://openrouter.ai/api')
     ],
     docsUrl: 'https://openrouter.ai/docs/api_reference/overview',
+    apiKeyUrl: 'https://openrouter.ai/settings/keys',
     suggestedModels: ['anthropic/claude-fable-5.1', 'moonshotai/kimi-k3', 'z-ai/glm-5.3'],
     notes: '模型 ID 带 vendor/ 前缀。模型列表免鉴权就能拉 —— 没填 key 也能先看有哪些模型。',
     verification: 'probed'
@@ -495,6 +532,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     recommended: true,
     endpoints: [oa('https://api.siliconflow.cn/v1', true), anth('https://api.siliconflow.cn')],
     docsUrl: 'https://docs.siliconflow.cn/cn/userguide/quickstart',
+    apiKeyUrl: 'https://cloud.siliconflow.cn/account/ak',
     suggestedModels: ['deepseek-ai/DeepSeek-V3.2', 'zai-org/GLM-5.2'],
     notes: '模型 ID 是 HuggingFace 的 Org/Name 形式,**大小写敏感**。不支持 Responses API。',
     verification: 'probed'
@@ -505,6 +543,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'aggregator',
     endpoints: [oa('https://api.siliconflow.com/v1', true), anth('https://api.siliconflow.com')],
     docsUrl: 'https://docs.siliconflow.com/en/userguide/quickstart',
+    apiKeyUrl: 'https://cloud.siliconflow.com/account/ak',
     suggestedModels: ['deepseek-ai/DeepSeek-V3.2', 'zai-org/GLM-5.2'],
     notes: '★ 国内站(.cn)与国际站(.com)的账号是否互通未核实,建议按两个供应商分别配 key。',
     verification: 'probed'
@@ -519,6 +558,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.together.xyz')
     ],
     docsUrl: 'https://docs.together.ai/docs/quickstart',
+    apiKeyUrl: 'https://api.together.ai/settings/projects/~current/api-keys',
     suggestedModels: [],
     verification: 'documented'
   },
@@ -532,6 +572,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.fireworks.ai/inference')
     ],
     docsUrl: 'https://docs.fireworks.ai/tools-sdks/anthropic-compatibility',
+    apiKeyUrl: 'https://app.fireworks.ai/api-keys',
     suggestedModels: ['accounts/fireworks/models/deepseek-v3p2'],
     notes:
       '模型 ID 形如 accounts/fireworks/models/<name>,且**点号写作 p**(v3.2 → v3p2)。' +
@@ -547,6 +588,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       anth('https://api.deepinfra.com/anthropic')
     ],
     docsUrl: 'https://docs.deepinfra.com/api-reference/introduction',
+    apiKeyUrl: 'https://deepinfra.com/dash/api_keys',
     suggestedModels: ['deepseek-ai/DeepSeek-V3.2'],
     notes:
       '★ **最容易配错的一家**:OpenAI 前缀是 /v1/openai,Anthropic 前缀是 /anthropic —— ' +
@@ -563,6 +605,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       resp('https://api.groq.com/openai/v1', true)
     ],
     docsUrl: 'https://console.groq.com/docs/openai',
+    apiKeyUrl: 'https://console.groq.com/keys',
     suggestedModels: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'],
     notes:
       '没有官方 Anthropic 端点。Responses API 是**子集**:previous_response_id / store / ' +
@@ -620,6 +663,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'aggregator',
     endpoints: [oa('https://api.ohmygpt.com/v1', false)],
     docsUrl: 'https://docs.ohmygpt.com/docs/api',
+    apiKeyUrl: 'https://www.ohmygpt.com/apis/keys',
     suggestedModels: [],
     notes: '★ 地址未能核实(采集环境不可达),以官方文档为准。',
     verification: 'unverified'

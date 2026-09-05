@@ -29,7 +29,8 @@ export function Segmented<T extends string>({
   onChange,
   size = 'md',
   className,
-  label
+  label,
+  disabled = false
 }: {
   value: T
   options: ReadonlyArray<{ value: T; label: string }>
@@ -37,6 +38,7 @@ export function Segmented<T extends string>({
   size?: 'sm' | 'md'
   className?: string
   label?: string
+  disabled?: boolean
 }): React.ReactNode {
   const slotRef = useRef<HTMLDivElement>(null)
   const btnRefs = useRef(new Map<T, HTMLButtonElement>())
@@ -69,6 +71,7 @@ export function Segmented<T extends string>({
       ref={slotRef}
       role="radiogroup"
       aria-label={label}
+      aria-disabled={disabled || undefined}
       className={cn('relative inline-flex rounded-[9px] bg-tint p-[3px]', className)}
     >
       {rect && (
@@ -91,6 +94,7 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={on}
+            disabled={disabled}
             onClick={() => onChange(o.value)}
             ref={(el) => {
               if (el) btnRefs.current.set(o.value, el)
@@ -100,7 +104,11 @@ export function Segmented<T extends string>({
               // z-10:压在指示器上面,否则文字被那块凹槽盖住
               'app-no-drag relative z-10 rounded-[7px] whitespace-nowrap transition-colors',
               size === 'sm' ? 'px-2.5 py-1 text-[12px]' : 'px-3.5 py-1.5 text-[13px]',
-              on ? 'text-fg' : 'text-fg-muted hover:text-fg'
+              disabled
+                ? 'cursor-not-allowed text-fg-faint'
+                : on
+                  ? 'text-fg'
+                  : 'text-fg-muted hover:text-fg'
             )}
           >
             {o.label}

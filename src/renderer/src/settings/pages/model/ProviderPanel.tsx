@@ -3,6 +3,7 @@ import {
   Brain,
   Check,
   CloudDownload,
+  ExternalLink,
   GripVertical,
   Loader2,
   Pencil,
@@ -14,10 +15,17 @@ import {
   normalizeBaseUrl,
   previewUrl,
 } from "../../../../../shared/domain/baseurl";
-import { BUILTIN_PROVIDER_ID } from "../../../../../shared/domain/presets";
+import {
+  BUILTIN_PROVIDER_ID,
+  findPreset,
+} from "../../../../../shared/domain/presets";
 import type {
   AnthropicCacheTtl,
   CredentialInfo,
+  ModelAlias,
+  ReasoningEffort,
+  ThinkingConfig,
+  ThinkingMode,
   UpstreamProvider,
 } from "../../../../../shared/domain/provider";
 import {
@@ -27,22 +35,39 @@ import {
   splitProtocol,
 } from "../../../../../shared/domain/provider";
 import { Button } from "../../../components/ui/Button";
+import { Dialog } from "../../../components/ui/Dialog";
 import { Segmented } from "../../../components/ui/Segmented";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
+import { openExternal } from "../../../services/app";
 import {
   getCredentialInfo,
+  removeModel,
   removeProvider,
+  renameModel,
   setCredential,
+  setProviderAliases,
+  updateModel,
   upsertProvider,
 } from "../../../services/provider";
+import { useDragReorder } from "../../../shell/useDragReorder";
 import { type ProviderEntry } from "./enabled-models";
 import { ImportModelsDialog } from "./ImportModelsDialog";
 import { modelListAvailability } from "./import-models";
 import { ProviderAvatar } from "./ProviderAvatar";
-import { baseUrlForProtocol, presetHasProtocol } from "./provider-edit";
+import { baseUrlForProtocol } from "./provider-edit";
 import { useI18n } from "../../../i18n";
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 /**
  * 参考图右边那张卡片。
@@ -84,6 +109,16 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const { t } = useI18n();
   const { provider: p, aliases } = entry;
   const { family, responses } = splitProtocol(p.protocol);
+  const preset = findPreset(p.id);
+  const apiKeyUrl = preset?.apiKeyUrl;
+  const apiKeyActionLabel =
+    preset?.credentialKind === "access-key"
+      ? t("provider.getAccessKey")
+      : preset?.credentialKind === "api-password"
+        ? t("provider.getApiPassword")
+        : preset?.credentialKind === "subscription-key"
+          ? t("provider.getSubscriptionKey")
+          : t("provider.getApiKey");
   /*
     ★ 置灰与否看的是**预设表 + 当前地址**,不是「试了再报错」:
     `supportsModelList: false` 的那几家(DeepSeek / Kimi 的 Anthropic 端等)
@@ -101,6 +136,9 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   /** 「地址跟着协议换了」的一次性提示。换供应商或再改一次就消失 */
   const [swapped, setSwapped] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [thinkingModel, setThinkingModel] = useState<ModelAlias | null>(null);
+  const [editingModel, setEditingModel] = useState<ModelAlias | null>(null);
+  const [deletingModel, setDeletingModel] = useState<ModelAlias | null>(null);
 
   const [importOpen, setImportOpen] = useState(false);
 
@@ -124,6 +162,9 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
     setEditingKey(false);
     setCred(null);
     setConfirmDelete(false);
+    setThinkingModel(null);
+    setEditingModel(null);
+    setDeletingModel(null);
     setCacheTtl(anthropicCacheTtlOf(p));
 
     let alive = true;
@@ -224,6 +265,96 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const warnings = baseUrlWarnings(baseUrl, p.protocol);
   const hasKey = cred?.hasKey ?? false;
 
+  const reorderAliases = (from: number, to: number): void => {
+    if (
+      busy ||
+      from === to ||
+      from < 0 ||
+      to < 0 ||
+      from >= aliases.length ||
+      to >= aliases.length
+    ) {
+      return;
+    }
+    const names = aliases.map((model) => model.upstreamModel);
+    const [moved] = names.splice(from, 1);
+    if (moved === undefined) return;
+    names.splice(to, 0, moved);
+
+    setBusy(true);
+    setError(null);
+    void setProviderAliases(p.id, names)
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
+  const aliasDrag = useDragReorder(reorderAliases, "y");
+
+  const saveModel = (
+    model: ModelAlias,
+    draft: Pick<
+      ModelAlias,
+      "alias" | "displayName" | "contextWindow" | "maxOutputTokens" | "capabilities"
+    >,
+  ): void => {
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      let target = model;
+      if (draft.alias !== model.alias) {
+        target = await renameModel(p.id, model.alias, draft.alias);
+      }
+      await updateModel({
+        ...target,
+        displayName: draft.displayName,
+        contextWindow: draft.contextWindow,
+        maxOutputTokens: draft.maxOutputTokens,
+        capabilities: { ...target.capabilities, ...draft.capabilities },
+      });
+      setEditingModel(null);
+    })()
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  const saveThinking = (
+    model: ModelAlias,
+    thinkingConfig: ThinkingConfig,
+    reasoningEfforts: readonly ReasoningEffort[] | undefined,
+  ): void => {
+    setBusy(true);
+    setError(null);
+    void updateModel({
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        thinking: thinkingConfig.mode !== "unsupported",
+      },
+      thinkingConfig,
+      ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
+    })
+      .then(() => setThinkingModel(null))
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  const deleteModel = (): void => {
+    if (deletingModel === null) return;
+    setBusy(true);
+    setError(null);
+    void removeModel(p.id, deletingModel.alias)
+      .then(() => setDeletingModel(null))
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => setBusy(false));
+  };
+
   return (
     <>
       <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas">
@@ -301,6 +432,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 { value: "openai", label: t("provider.openaiFormat") },
                 { value: "anthropic", label: t("provider.anthropicFormat") },
               ]}
+              disabled={busy}
               onChange={(f) =>
                 switchProtocol(joinProtocol(f, f === "openai" && responses))
               }
@@ -315,18 +447,6 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
                   {t("provider.responseApiHint")}
                 </p>
-                {responses && !presetHasProtocol(p.id, "openai-responses") && (
-                  /*
-                  ★ 提示而不是**禁掉**开关:预设表只是我们实测到的形状,
-                  厂商随时会加。禁掉等于拿一张快照锁死用户。
-                */
-                  <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-[1.6] text-danger">
-                    <AlertTriangle size={12} className="mt-[2px] shrink-0" />
-                    <span className="min-w-0">
-                      {t("provider.responseApiWarning")}
-                    </span>
-                  </p>
-                )}
               </div>
               <div className="shrink-0 pt-0.5">
                 <Toggle
@@ -353,12 +473,26 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   { value: "5m", label: t("provider.fiveMinutes") },
                   { value: "1h", label: t("provider.oneHour") },
                 ]}
+                disabled={busy}
                 onChange={changeCacheTtl}
               />
             </Field>
           )}
 
-          <Field label={t("provider.apiKey")}>
+          <Field
+            label={t("provider.apiKey")}
+            action={
+              apiKeyUrl !== undefined ? (
+                <Button
+                  size="sm"
+                  icon={<ExternalLink size={12} />}
+                  onClick={() => void openExternal(apiKeyUrl)}
+                >
+                  {apiKeyActionLabel}
+                </Button>
+              ) : undefined
+            }
+          >
             {editingKey || !hasKey ? (
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
@@ -465,21 +599,39 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               `provider:fetchModels` 和 `provider:setAliases` 现在都在契约里,
               整表的增删就走右上角那颗按钮(弹窗是替换语义:取消勾选 = 删掉)。
 
-              ★ 但**逐行的三个图标仍然不通**,而且不是同一件事:思考档位、改别名、
-              单删一行要的是「改一行的字段」,那需要另一条 upsert 频道和一个编辑态,
-              不是 `setAliases` 顺手能做的 —— 所以它们照旧置灰,下面那句话直说。
+              ★ 模型优先级通过拖动整行写回 `setAliases`;逐行操作则走模型专用频道:
+              推理能力、模型编辑和单条删除各自独立提交，不会把同一供应商下的其他模型
+              一并覆盖。
             */
               <ul className="overflow-hidden rounded-[8px] border border-border">
                 {aliases.map((m, i) => (
                   <li
                     key={m.alias}
-                    className="flex items-center gap-2 border-b border-hairline px-2.5 py-2 last:border-b-0"
+                    data-drag-item
+                    style={aliasDrag.styleFor(i)}
+                    className="flex items-center gap-2 border-b border-hairline bg-canvas px-2.5 py-2 transition-[transform,background-color,box-shadow] duration-200 ease-out last:border-b-0 motion-reduce:transition-none"
                   >
-                    <GripVertical
-                      size={13}
-                      className="shrink-0 text-fg-faint opacity-30"
-                      aria-hidden
-                    />
+                    <button
+                      type="button"
+                      aria-label={t("provider.dragToReorder")}
+                      aria-keyshortcuts="ArrowUp ArrowDown"
+                      title={t("provider.dragToReorder")}
+                      disabled={busy}
+                      onPointerDown={(event) => aliasDrag.onPointerDown(event, i)}
+                      onKeyDown={(event) => {
+                        if (event.key === "ArrowUp" && i > 0) {
+                          event.preventDefault();
+                          reorderAliases(i, i - 1);
+                        }
+                        if (event.key === "ArrowDown" && i < aliases.length - 1) {
+                          event.preventDefault();
+                          reorderAliases(i, i + 1);
+                        }
+                      }}
+                      className="app-no-drag -ml-1 flex size-6 shrink-0 cursor-grab items-center justify-center rounded-[6px] text-fg-faint transition-colors hover:bg-tint hover:text-fg active:cursor-grabbing disabled:cursor-default disabled:opacity-30"
+                    >
+                      <GripVertical size={14} aria-hidden />
+                    </button>
                     {i === 0 && (
                       <span className="shrink-0 rounded-[5px] bg-tint px-1.5 py-0.5 text-[10.5px] text-fg-muted">
                         {t("provider.primaryModel")}
@@ -488,15 +640,35 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                     <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg">
                       {m.alias}
                     </span>
-                    <RowIcon label={t("models.reasoning")}>
+                    <RowAction
+                      label={t("provider.configureReasoning")}
+                      disabled={busy}
+                      onClick={() => setThinkingModel(m)}
+                    >
                       <Brain size={13} />
-                    </RowIcon>
-                    <RowIcon label={t("chat.edit")}>
+                    </RowAction>
+                    <RowAction
+                      label={t("provider.editModel")}
+                      disabled={busy}
+                      onClick={() => setEditingModel(m)}
+                    >
                       <Pencil size={13} />
-                    </RowIcon>
-                    <RowIcon label={t("common.delete")}>
+                    </RowAction>
+                    <RowAction
+                      label={
+                        deletingModel?.alias === m.alias
+                          ? t("common.confirmDelete")
+                          : t("provider.deleteModel")
+                      }
+                      disabled={busy}
+                      danger
+                      onClick={() => {
+                        if (deletingModel?.alias === m.alias) deleteModel();
+                        else setDeletingModel(m);
+                      }}
+                    >
                       <Trash2 size={13} />
-                    </RowIcon>
+                    </RowAction>
                   </li>
                 ))}
               </ul>
@@ -508,11 +680,22 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
         </div>
 
         <div className="border-t border-hairline px-4 py-3">
-          {confirmDelete ? (
-            <div className="flex items-center gap-2">
-              <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-muted">
-                {t("provider.deleteHint")}
-              </p>
+          <div className="flex items-center gap-2">
+            {/*
+            ★ **两句话不是同一句的两种说法,是两种不同的后果,所以必须分开写。**
+            内置那条是种子数据:删了下次启动它自己回来 —— 不说的话用户重启看见它又在,
+            第一反应是「删除没生效」,而实际上删是生效了的(密钥就没回来)。
+            自己加的那条删了就真没了,得回目录重新添 —— 把「会回来」这句显示在它下面,
+            等于骗用户放心删。
+          */}
+            <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
+              {confirmDelete
+                ? t("provider.deleteHint")
+                : p.id === BUILTIN_PROVIDER_ID
+                  ? t("provider.builtinDeleteHint")
+                  : t("provider.customDeleteHint")}
+            </p>
+            {confirmDelete && (
               <Button
                 size="sm"
                 disabled={busy}
@@ -520,39 +703,20 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               >
                 {t("common.cancel")}
               </Button>
-              <Button
-                size="sm"
-                variant="danger"
-                disabled={busy}
-                onClick={remove}
-              >
-                {t("provider.confirmDelete")}
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              {/*
-              ★ **两句话不是同一句的两种说法,是两种不同的后果,所以必须分开写。**
-              内置那条是种子数据:删了下次启动它自己回来 —— 不说的话用户重启看见它又在,
-              第一反应是「删除没生效」,而实际上删是生效了的(密钥就没回来)。
-              自己加的那条删了就真没了,得回目录重新添 —— 把「会回来」这句显示在它下面,
-              等于骗用户放心删。
-            */}
-              <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
-                {p.id === BUILTIN_PROVIDER_ID
-                  ? t("provider.builtinDeleteHint")
-                  : t("provider.customDeleteHint")}
-              </p>
-              <Button
-                size="sm"
-                icon={<Trash2 size={12} />}
-                disabled={busy}
-                onClick={() => setConfirmDelete(true)}
-              >
-                {t("provider.delete")}
-              </Button>
-            </div>
-          )}
+            )}
+            <Button
+              size="sm"
+              variant={confirmDelete ? "danger" : undefined}
+              icon={<Trash2 size={12} />}
+              disabled={busy}
+              onClick={() => {
+                if (confirmDelete) remove();
+                else setConfirmDelete(true);
+              }}
+            >
+              {confirmDelete ? t("common.confirmDelete") : t("provider.delete")}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -563,6 +727,26 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
         aliases={aliases}
         onClose={() => setImportOpen(false)}
       />
+      {thinkingModel !== null && (
+        <ThinkingDialog
+          key={thinkingModel.alias}
+          model={thinkingModel}
+          busy={busy}
+          onClose={() => setThinkingModel(null)}
+          onSave={(thinkingConfig, reasoningEfforts) =>
+            saveThinking(thinkingModel, thinkingConfig, reasoningEfforts)
+          }
+        />
+      )}
+      {editingModel !== null && (
+        <ModelEditDialog
+          key={editingModel.alias}
+          model={editingModel}
+          busy={busy}
+          onClose={() => setEditingModel(null)}
+          onSave={(draft) => saveModel(editingModel, draft)}
+        />
+      )}
     </>
   );
 }
@@ -602,7 +786,357 @@ function Field({
   );
 }
 
-function RowIcon({
+function RowAction({
+  label,
+  children,
+  onClick,
+  disabled,
+  danger = false,
+}: {
+  label: string;
+  children: ReactNode;
+  onClick: () => void;
+  disabled: boolean;
+  danger?: boolean;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "app-no-drag flex size-6 shrink-0 items-center justify-center rounded-[6px] transition-colors disabled:opacity-35",
+        danger
+          ? "text-icon hover:bg-danger/10 hover:text-danger"
+          : "text-icon hover:bg-tint hover:text-fg",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+const modelDialogInputClass =
+  "h-8 w-full rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg outline-none focus:border-accent";
+
+function ModelEditDialog({
+  model,
+  busy,
+  onClose,
+  onSave,
+}: {
+  model: ModelAlias;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (
+    draft: Pick<
+      ModelAlias,
+      "alias" | "displayName" | "contextWindow" | "maxOutputTokens" | "capabilities"
+    >,
+  ) => void;
+}): ReactNode {
+  const { t } = useI18n();
+  const [alias, setAlias] = useState(model.alias);
+  const [displayName, setDisplayName] = useState(model.displayName ?? "");
+  const [contextWindow, setContextWindow] = useState(String(model.contextWindow));
+  const [maxOutputTokens, setMaxOutputTokens] = useState(
+    String(model.maxOutputTokens),
+  );
+  const [capabilities, setCapabilities] = useState({
+    tools: model.capabilities.tools,
+    vision: model.capabilities.vision,
+    caching: model.capabilities.caching,
+  });
+  const [invalid, setInvalid] = useState(false);
+
+  const save = (): void => {
+    const nextContextWindow = Number(contextWindow);
+    const nextMaxOutputTokens = Number(maxOutputTokens);
+    if (
+      alias.trim() === "" ||
+      !Number.isInteger(nextContextWindow) ||
+      nextContextWindow <= 0 ||
+      !Number.isInteger(nextMaxOutputTokens) ||
+      nextMaxOutputTokens <= 0 ||
+      nextMaxOutputTokens > nextContextWindow
+    ) {
+      setInvalid(true);
+      return;
+    }
+    onSave({
+      alias: alias.trim(),
+      displayName: displayName.trim() || undefined,
+      contextWindow: nextContextWindow,
+      maxOutputTokens: nextMaxOutputTokens,
+      capabilities: { ...model.capabilities, ...capabilities },
+    });
+  };
+
+  return (
+    <Dialog
+      title={t("provider.editModel")}
+      description={t("provider.editModelDescription")}
+      open
+      onClose={onClose}
+      width={460}
+      footer={
+        <>
+          <Button disabled={busy} onClick={onClose}>
+            {t("common.cancel")}
+          </Button>
+          <Button variant="accent" disabled={busy} onClick={save}>
+            {t("common.save")}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {invalid && (
+          <p className="rounded-[7px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11.5px] text-danger">
+            {t("models.modelInvalid")}
+          </p>
+        )}
+        <div className="grid grid-cols-2 gap-2.5">
+          <DialogField label={t("provider.modelAlias")}>
+            <input
+              value={alias}
+              onChange={(event) => setAlias(event.target.value)}
+              className={modelDialogInputClass}
+            />
+          </DialogField>
+          <DialogField label={t("provider.modelDisplayName")}>
+            <input
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              className={modelDialogInputClass}
+            />
+          </DialogField>
+          <DialogField label={t("models.fieldContextWindow")}>
+            <input
+              type="number"
+              min={1}
+              value={contextWindow}
+              onChange={(event) => setContextWindow(event.target.value)}
+              className={modelDialogInputClass}
+            />
+          </DialogField>
+          <DialogField label={t("models.fieldMaxOutputTokens")}>
+            <input
+              type="number"
+              min={1}
+              value={maxOutputTokens}
+              onChange={(event) => setMaxOutputTokens(event.target.value)}
+              className={modelDialogInputClass}
+            />
+          </DialogField>
+        </div>
+        <div className="rounded-[8px] border border-border px-3 py-2.5">
+          <p className="text-[11.5px] text-fg-muted">
+            {t("models.capabilities")}
+          </p>
+          <div className="mt-2 space-y-2">
+            <DialogToggle
+              label={t("models.capabilityTools")}
+              checked={capabilities.tools}
+              onChange={(tools) =>
+                setCapabilities((current) => ({ ...current, tools }))
+              }
+            />
+            <DialogToggle
+              label={t("models.capabilityVision")}
+              checked={capabilities.vision}
+              onChange={(vision) =>
+                setCapabilities((current) => ({ ...current, vision }))
+              }
+            />
+            <DialogToggle
+              label={t("models.capabilityCaching")}
+              checked={capabilities.caching}
+              onChange={(caching) =>
+                setCapabilities((current) => ({ ...current, caching }))
+              }
+            />
+          </div>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+function ThinkingDialog({
+  model,
+  busy,
+  onClose,
+  onSave,
+}: {
+  model: ModelAlias;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (
+    thinkingConfig: ThinkingConfig,
+    reasoningEfforts: readonly ReasoningEffort[] | undefined,
+  ) => void;
+}): ReactNode {
+  const { t } = useI18n();
+  const original = model.thinkingConfig;
+  const [mode, setMode] = useState<ThinkingMode>(
+    original?.mode ?? (model.capabilities.thinking ? "toggle" : "unsupported"),
+  );
+  const [defaultEnabled, setDefaultEnabled] = useState(
+    original?.defaultEnabled ?? false,
+  );
+  const [parameterPath, setParameterPath] = useState(
+    original?.parameterPath ?? "thinking",
+  );
+  const [defaultEffort, setDefaultEffort] = useState<ReasoningEffort>(
+    original?.defaultEffort ?? "medium",
+  );
+  const [efforts, setEfforts] = useState<readonly ReasoningEffort[]>(model.reasoningEfforts ?? REASONING_EFFORTS);
+  const [budget, setBudget] = useState(
+    original?.defaultBudgetTokens === undefined
+      ? ""
+      : String(original.defaultBudgetTokens),
+  );
+  const [invalid, setInvalid] = useState(false);
+
+  const save = (): void => {
+    const nextBudget = budget === "" ? undefined : Number(budget);
+    if (
+      (nextBudget !== undefined && (!Number.isInteger(nextBudget) || nextBudget < 0)) ||
+      (mode === 'effort' && !efforts.includes(defaultEffort))
+    ) {
+      setInvalid(true);
+      return;
+    }
+    onSave({
+      ...(original ?? {}),
+      mode,
+      defaultEnabled:
+        mode === "unsupported" ? false : mode === "always" || defaultEnabled,
+      ...(mode === "effort" ? { defaultEffort } : { defaultEffort: undefined }),
+      ...(mode === "toggle" || mode === "budget" || mode === "effort"
+        ? { parameterPath: parameterPath.trim() || undefined }
+        : { parameterPath: undefined }),
+      ...(mode === "toggle" || mode === "budget"
+        ? { defaultBudgetTokens: nextBudget }
+        : { defaultBudgetTokens: undefined }),
+    }, mode === 'effort' ? efforts : model.reasoningEfforts);
+  };
+
+  return (
+    <Dialog
+      title={t("provider.configureReasoning")}
+      description={t("provider.configureReasoningDescription")}
+      open
+      onClose={onClose}
+      width={440}
+      footer={
+        <>
+          <Button disabled={busy} onClick={onClose}>
+            {t("common.cancel")}
+          </Button>
+          <Button variant="accent" disabled={busy} onClick={save}>
+            {t("common.save")}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {invalid && (
+          <p className="rounded-[7px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11.5px] text-danger">
+            {t("models.modelInvalid")}
+          </p>
+        )}
+        <DialogField label={t("models.reasoning")}>
+          <select
+            value={mode}
+            onChange={(event) => {
+              const nextMode = event.target.value as ThinkingMode;
+              setMode(nextMode);
+              if (nextMode !== mode) setParameterPath(nextMode === 'effort' ? 'reasoning_effort'
+                : nextMode === 'budget' ? 'thinking.budget_tokens' : 'thinking.type');
+            }}
+            className={modelDialogInputClass}
+          >
+            <option value="unsupported">{t("models.unsupported")}</option>
+            <option value="always">{t("models.always")}</option>
+            <option value="toggle">{t("models.toggle")}</option>
+            <option value="effort">{t("models.effort")}</option>
+            <option value="budget">{t("models.budget")}</option>
+          </select>
+        </DialogField>
+        {(mode === "toggle" || mode === "budget" || mode === "effort") && (
+          <>
+            <DialogField label={t("models.fieldParameterPath")}>
+              <input
+                value={parameterPath}
+                onChange={(event) => setParameterPath(event.target.value)}
+                className={modelDialogInputClass}
+              />
+            </DialogField>
+            <DialogToggle
+              label={t("models.fieldDefaultEnabled")}
+              checked={defaultEnabled}
+              onChange={setDefaultEnabled}
+            />
+          </>
+        )}
+        {mode === "effort" && (
+          <>
+          <DialogField label={t("models.fieldDefaultEffort")}>
+            <select
+              value={defaultEffort}
+              onChange={(event) =>
+                setDefaultEffort(event.target.value as ReasoningEffort)
+              }
+              className={modelDialogInputClass}
+            >
+              {efforts.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort}
+                </option>
+              ))}
+            </select>
+          </DialogField>
+          <fieldset className="space-y-2">
+            <legend className="text-[11.5px] text-fg-muted">{t('models.supportedReasoningEfforts')}</legend>
+            <div className="flex flex-wrap gap-3">
+              {REASONING_EFFORTS.map((effort) => (
+                <label key={effort} className="flex items-center gap-1.5 text-[11.5px] text-fg-muted">
+                  <input type="checkbox" checked={efforts.includes(effort)} onChange={(event) => {
+                    const next = event.target.checked ? [...efforts, effort] : efforts.filter((item) => item !== effort);
+                    setEfforts(next);
+                    if (!next.includes(defaultEffort) && next[0] !== undefined) setDefaultEffort(next[0]);
+                  }} />
+                  {effort}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          </>
+        )}
+        {(mode === "toggle" || mode === "budget") && (
+          <DialogField label={t("models.fieldDefaultBudgetTokens")}>
+            <input
+              type="number"
+              min={0}
+              value={budget}
+              onChange={(event) => setBudget(event.target.value)}
+              className={modelDialogInputClass}
+            />
+          </DialogField>
+        )}
+        <p className="text-[11.5px] leading-[1.6] text-fg-faint">
+          {t("models.reasoningHint")}
+        </p>
+      </div>
+    </Dialog>
+  );
+}
+
+function DialogField({
   label,
   children,
 }: {
@@ -610,13 +1144,26 @@ function RowIcon({
   children: ReactNode;
 }): ReactNode {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      disabled
-      className="app-no-drag shrink-0 text-icon opacity-40"
-    >
+    <label className="block">
+      <span className="mb-1 block text-[11.5px] text-fg-muted">{label}</span>
       {children}
-    </button>
+    </label>
+  );
+}
+
+function DialogToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}): ReactNode {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-[7px] border border-border bg-surface-field px-2.5 py-1.5">
+      <span className="text-[11.5px] text-fg-muted">{label}</span>
+      <Toggle checked={checked} onChange={onChange} label={label} />
+    </div>
   );
 }

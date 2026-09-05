@@ -12,7 +12,7 @@
  * 其余端口(clock / logger / fs / spawn)在 Electron 里和在 Node 里是同一件事,
  * 覆盖它们只会多一份要同步维护的代码。
  */
-import { app, net, safeStorage } from 'electron'
+import { app, net, safeStorage, session } from 'electron'
 import { getCredential, putCredential, removeCredential } from '../db/repo'
 import { defaultDatabaseDirectory } from '../db'
 import type { KernelHost } from '../kernel/host'
@@ -68,6 +68,9 @@ function electronSecrets(): KernelHost['secrets'] {
 const electronFetch: typeof fetch = (input, init) =>
   net.fetch(input instanceof URL ? input.href : input, init)
 
+const electronBrowserFetch: NonNullable<KernelHost['browserFetch']> = (partition, input, init) =>
+  session.fromPartition(partition).fetch(input instanceof URL ? input.href : input, init)
+
 export function electronHost(): KernelHost {
   /**
    * ★ `safeStorage` 与 `net.fetch` 都要求 app ready(方案 §9)。早一步调用拿到的是
@@ -84,7 +87,8 @@ export function electronHost(): KernelHost {
         temp: () => app.getPath('temp')
       },
       secrets: electronSecrets(),
-      fetch: electronFetch
+      fetch: electronFetch,
+      browserFetch: electronBrowserFetch
     })
   )
 }

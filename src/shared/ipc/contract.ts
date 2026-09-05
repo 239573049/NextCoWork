@@ -13,6 +13,8 @@
  */
 import type { AgentError } from '../agent/error'
 import type { AgentEvent, RunSnapshot } from '../agent/event'
+import type { AgentMessage } from '../agent/message'
+import type { ContextCheckpoint } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { RunRequest } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
@@ -43,6 +45,14 @@ import type { ImageTheme } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
+import type {
+  WorkspaceFile,
+  WorkspaceFileMutationRequest,
+  WorkspaceFileMutationResult,
+  WorkspaceFileRequest,
+  WorkspaceFileWriteRequest,
+  WorkspaceTextFile
+} from '../domain/workspace-file'
 import type { BrowserChange, BrowserProfile, BrowserTab } from '../domain/browser'
 import type {
   BackupStatus,
@@ -53,6 +63,13 @@ import type {
   ImportPreview,
   RestoreResult
 } from '../domain/data'
+import type {
+  UsageDimensionStat,
+  UsageRequestLogsPage,
+  UsageRequestLogsQuery,
+  UsageSummary,
+  UsageWindow
+} from '../domain/usage'
 
 // ═══════════════════════════════════════════════════════════════
 // 一、信封
@@ -184,11 +201,15 @@ export interface IpcInvokeMap {
    * 它来自渲染层,是不可信输入,`../..` 会被拒。
    */
   'workspace:listDir': { req: { workspaceId: string; path: string }; res: DirListing }
+  'workspace:readFile': { req: WorkspaceFileRequest; res: WorkspaceFile }
+  'workspace:writeFile': { req: WorkspaceFileWriteRequest; res: WorkspaceTextFile }
+  'workspace:mutateFile': { req: WorkspaceFileMutationRequest; res: WorkspaceFileMutationResult }
+  'workspace:revealFile': { req: WorkspaceFileRequest; res: void }
 
   // ── 浏览器工作台 ──
   'browser:list': { req: { workspaceId: string }; res: BrowserTab[] }
   'browser:open': {
-    req: { workspaceId: string; url: string; title?: string; profileId?: string }
+    req: { workspaceId: string; url: string; title?: string; profileId?: string; clientTabId?: string }
     res: BrowserTab
   }
   'browser:navigate': { req: { workspaceId: string; tabId: string; url: string }; res: BrowserTab }
@@ -228,6 +249,7 @@ export interface IpcInvokeMap {
   // ── 会话 ──
   'sessions:list': { req: { workspaceId: string; archived?: boolean }; res: SessionListItem[] }
   'sessions:get': { req: { sessionId: string }; res: SessionDetail }
+  'sessions:replaceHistory': { req: { sessionId: string; messages: AgentMessage[] }; res: void }
   'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string }; res: Session }
   'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
@@ -238,6 +260,11 @@ export interface IpcInvokeMap {
   'conversations:searchAll': {
     req: { q: string; workspaceId?: string; limit: number }
     res: SearchHit[]
+  }
+  'context:list': { req: { sessionId: string }; res: ContextCheckpoint[] }
+  'context:updateCheckpoint': {
+    req: { checkpointId: string; note: string; revision: number }
+    res: ContextCheckpoint
   }
 
   // ── Agent ──
@@ -350,11 +377,18 @@ export interface IpcInvokeMap {
   'provider:test': { req: { providerId: string }; res: { ok: boolean; latencyMs?: number } }
   /** Model management console writes. */
   'model:update': { req: import('../domain/provider').ModelAlias; res: import('../domain/provider').ModelAlias }
+  'model:rename': { req: { providerId: string; alias: string; nextAlias: string }; res: import('../domain/provider').ModelAlias }
   'model:remove': { req: { providerId: string; alias: string }; res: void }
   /** User-created catalogue rows. Provider model discovery never writes here. */
   'modelCatalog:list': { req: void; res: ModelCatalogDefinition[] }
   'modelCatalog:upsert': { req: ModelCatalogDefinition; res: ModelCatalogDefinition }
   'modelCatalog:remove': { req: { id: string }; res: void }
+
+  // ── 使用统计 ──
+  'usage:getSummary': { req: UsageWindow; res: UsageSummary }
+  'usage:getRequestLogs': { req: UsageRequestLogsQuery; res: UsageRequestLogsPage }
+  'usage:getProviderStats': { req: UsageWindow; res: UsageDimensionStat[] }
+  'usage:getModelStats': { req: UsageWindow; res: UsageDimensionStat[] }
 
   // ── 本地网关 ──
   'gateway:getStatus': { req: void; res: GatewayStatus }
@@ -439,7 +473,7 @@ export interface IpcEventMap {
   'skills:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
-  'sessions:changed': { workspaceId?: string }
+  'sessions:changed': { workspaceId?: string; renamed?: { sessionId: string; title: string } }
   'browser:changed': BrowserChange
   'browser:profilesChanged': BrowserProfile[]
   /** The persisted user catalogue changed. Built-in rows are bundled code. */
@@ -485,6 +519,10 @@ export const INVOKE_CHANNELS = {
   'workspace:update': 1,
   'workspace:close': 1,
   'workspace:listDir': 1,
+  'workspace:readFile': 1,
+  'workspace:writeFile': 1,
+  'workspace:mutateFile': 1,
+  'workspace:revealFile': 1,
   'browser:list': 1,
   'browser:open': 1,
   'browser:navigate': 1,
@@ -503,6 +541,7 @@ export const INVOKE_CHANNELS = {
   'attachment:listBySession': 1,
   'sessions:list': 1,
   'sessions:get': 1,
+  'sessions:replaceHistory': 1,
   'sessions:create': 1,
   'sessions:duplicate': 1,
   'sessions:rename': 1,
@@ -548,10 +587,15 @@ export const INVOKE_CHANNELS = {
   'provider:setAliases': 1,
   'provider:test': 1,
   'model:update': 1,
+  'model:rename': 1,
   'model:remove': 1,
   'modelCatalog:list': 1,
   'modelCatalog:upsert': 1,
   'modelCatalog:remove': 1,
+  'usage:getSummary': 1,
+  'usage:getRequestLogs': 1,
+  'usage:getProviderStats': 1,
+  'usage:getModelStats': 1,
   'gateway:getStatus': 1,
   'gateway:setEnabled': 1,
   'gateway:resetHealth': 1,
@@ -570,6 +614,8 @@ export const INVOKE_CHANNELS = {
   'storage:cleanupByAge': 1,
   'storage:clearHistory': 1,
   'storage:clearLocalData': 1
+  , 'context:list': 1
+  , 'context:updateCheckpoint': 1
 } as const satisfies Record<keyof IpcInvokeMap, 1>
 
 export const SEND_CHANNELS = {

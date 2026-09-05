@@ -12,12 +12,15 @@
  */
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { AgentEvent } from '../../../shared/agent/event'
-import type { ContentPart } from '../../../shared/agent/message'
+import { userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions } from '../../../shared/agent/run-request'
 import {
   applyEvents,
+  applyChildEvent,
   emptyTranscript,
   hasRun,
+  subagentsFromMessages,
+  toolsFromMessages,
   type TranscriptState
 } from '../../../shared/agent/transcript'
 import type { QueuedInput } from '../../../shared/domain/queued-input'
@@ -37,6 +40,7 @@ import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
 import { abortRun, attachRun, onAgentEvent, startRun } from '../services/agent'
 import { getSessionInput, persistSessionInput } from '../services/app'
+import { replaceHistory } from '../services/sessions'
 import { getSession } from '../services/sessions'
 
 /**
@@ -75,11 +79,14 @@ export interface SessionState {
   /** 插话 —— toggle:pending ⇄ promoted。不发起任何请求 */
   promoteInput: (id: string) => void
   editInput: (id: string, text: string) => void
+  editMessage: (id: string, text: string, continueRun: boolean, fallbackOptions: SendOptions) => Promise<void>
   dropInput: (id: string) => void
   /** 「⋯ → 撤回到输入框」:出队并回填草稿 */
   moveInputToDraft: (id: string) => void
   applyEnvelope: (env: AgentEventEnvelope) => void
   applyEvents: (events: AgentEvent[]) => void
+  /** Apply a child run's telemetry to its parent Task card. */
+  applyChildEvents: (childRunId: string, events: AgentEvent[], firstSeq?: number) => void
 }
 
 type SessionStore = UseBoundStore<StoreApi<SessionState>>
@@ -126,6 +133,12 @@ function createSessionStore(sessionId: string): SessionStore {
       // registerRun 把 runId → sessionId 的映射登记好,这样第一个事件回来时
       // 泵知道该投给谁 —— 而 startRun 的 await 还没返回。
       const runId = ulid()
+      // 先把最终会发给主进程的 parts 固定下来。附件和纯文本都必须在这条
+      // 乐观消息里完整呈现,否则用户会先看到与实际请求不同的内容。
+      const input = parts ?? [{ type: 'text' as const, text }]
+      const inputMessageId = ulid()
+      const now = Date.now()
+      const inputMessage = userMessage(inputMessageId, [...input], now)
       registerRun(runId, sessionId, opts.workspaceId)
       set({
         activeRunId: runId,
@@ -134,12 +147,14 @@ function createSessionStore(sessionId: string): SessionStore {
         // 不是这一个 run 的产物。整个 `emptyTranscript()` 换上去的话,发第二条消息
         // 就会把第一轮的问答从屏幕上抹掉。
         //
-        // 用户这条消息不在这里补 —— 主进程会为它发 `message_commit`
-        // (见 AgentSession 构造函数),这边补一条就成了两条 id 不同的同一句话。
         transcript: {
           ...emptyTranscript(),
-          messages: s.transcript.messages,
-          tools: s.transcript.tools
+          messages: [...s.transcript.messages, inputMessage],
+          tools: s.transcript.tools,
+          // Background children can outlive the parent turn. Keep their cards
+          // visible when the user starts another parent turn in this session.
+          subagents: s.transcript.subagents,
+          runStartedAt: now
         },
         lastOptions: opts,
         draft: ''
@@ -147,12 +162,22 @@ function createSessionStore(sessionId: string): SessionStore {
       persistInput(sessionId, true)
 
       try {
-        // parts 缺省时退回原来的单段文本 —— 队列续跑要带附件才走这条路
-        const input = parts ?? [{ type: 'text' as const, text }]
-        await startRun({ ...opts, runId, sessionId, input })
+        await startRun({ ...opts, runId, sessionId, input, inputMessageId })
       } catch (err) {
         unregisterRun(runId)
-        set({ activeRunId: null })
+        set((state) => ({
+          activeRunId: null,
+          // IPC 启动失败时主进程不会确认这条消息,所以撤掉本地乐观副本。
+          // 用 ID 删除而不是按末尾位置删除,避免并发的历史刷新改变数组顺序。
+          transcript: {
+            ...state.transcript,
+            messages: state.transcript.messages.filter((message) => message.id !== inputMessageId),
+            live: [],
+            status: 'done',
+            runStartedAt: undefined,
+            runEndedAt: undefined
+          }
+        }))
         throw err
       }
     },
@@ -217,6 +242,41 @@ function createSessionStore(sessionId: string): SessionStore {
       persistInput(sessionId, true)
     },
 
+    async editMessage(id, text, continueRun, fallbackOptions) {
+      const s = get()
+      if (s.activeRunId !== null) return
+      const index = s.transcript.messages.findIndex((message) => message.id === id && message.role === 'user')
+      if (index < 0) return
+      const original = s.transcript.messages[index]
+      if (original === undefined) return
+      // Keep attachments and other structured parts, while replacing the
+      // visible text as one canonical part so stale text fragments cannot
+      // survive an edit.
+      const parts: ContentPart[] = [
+        ...(text === '' ? [] : [{ type: 'text' as const, text }]),
+        ...original.parts.filter((part) => part.type !== 'text')
+      ]
+      const edited = userMessage(original.id, parts, original.createdAt)
+      const messages = continueRun
+        ? s.transcript.messages.slice(0, index)
+        : s.transcript.messages.map((message, i) => i === index ? edited : message)
+      await replaceHistory(sessionId, messages)
+      set((state) => ({
+        transcript: {
+          ...state.transcript,
+          messages: continueRun ? messages : state.transcript.messages.map((message, i) => i === index ? edited : message),
+          live: continueRun ? [] : state.transcript.live,
+          tools: continueRun ? {} : state.transcript.tools,
+          subagents: continueRun ? {} : state.transcript.subagents,
+          ...(continueRun ? { status: 'done' as const, error: undefined, usage: undefined } : {})
+        }
+      }))
+      if (continueRun) {
+        const opts = s.lastOptions ?? fallbackOptions
+        await get().send(text, opts, parts)
+      }
+    },
+
     dropInput(id) {
       set({ queuedInputs: get().queuedInputs.filter((q) => q.id !== id) })
       persistInput(sessionId, true)
@@ -237,6 +297,7 @@ function createSessionStore(sessionId: string): SessionStore {
     applyEnvelope(env) {
       const s = get()
       if (env.runId !== s.activeRunId) return
+      if (env.seq <= s.lastSeq) return
 
       // ★ 防漂移(方案 §3 规则 1)。这个 ±1 不在这里手算 —— 它与合批泵
       // 造信封的那行是**一对**,两边对「seq 指哪个事件」的理解必须完全一致。
@@ -259,6 +320,20 @@ function createSessionStore(sessionId: string): SessionStore {
         ...settleRun(get().activeRunId, events)
       })
       if (endedCleanly(events)) drainQueue(sessionId)
+    },
+
+    applyChildEvents(childRunId, events, firstSeq) {
+      set((state) => ({
+        transcript: events.reduce(
+          (current, event, index) => applyChildEvent(
+            current,
+            childRunId,
+            event,
+            firstSeq === undefined ? undefined : firstSeq + index
+          ),
+          state.transcript
+        )
+      }))
     }
   }))
 }
@@ -405,7 +480,9 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
     store.setState((s) => {
       // IPC 往返期间可能刚好启动了新的 run；不要用旧数据库快照覆盖
       // 正在流式显示的内容。
-      if (s.activeRunId !== null || [...runIndex.values()].some((r) => r.sessionId === sessionId)) return s
+      if (s.activeRunId !== null
+        || [...runIndex.values()].some((r) => r.sessionId === sessionId)
+        || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return s
 
       const databaseIds = new Set(detail.messages.map((m) => m.id))
       // 正常情况下当前 renderer 消息都已经先于事件写入数据库；这里只
@@ -421,8 +498,12 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
           ...s.transcript,
           messages,
           live: [],
-          tools: {},
-          status: 'done'
+          tools: toolsFromMessages(messages, s.transcript.tools),
+          subagents: subagentsFromMessages(messages, s.transcript.subagents),
+          contextCheckpoints: detail.contextCheckpoints ?? s.transcript.contextCheckpoints,
+          status: 'done',
+          runStartedAt: undefined,
+          runEndedAt: undefined
         }
       }
     })
@@ -431,7 +512,9 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
     if (err instanceof Error && /会话不存在|不存在该会话|session.*not found/i.test(err.message)) {
       const store = stores.get(sessionId)
       store?.setState((s) => {
-        if (s.activeRunId !== null || [...runIndex.values()].some((r) => r.sessionId === sessionId)) return s
+        if (s.activeRunId !== null
+          || [...runIndex.values()].some((r) => r.sessionId === sessionId)
+          || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return s
         return {
           ...s,
           transcript: {
@@ -439,10 +522,13 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
             messages: [],
             live: [],
             tools: {},
+            subagents: {},
             status: 'done',
             error: undefined,
             usage: undefined,
-            contextUsage: undefined
+            contextUsage: undefined,
+            runStartedAt: undefined,
+            runEndedAt: undefined
           }
         }
       })
@@ -463,6 +549,11 @@ export function sessionStore(sessionId: string): SessionStore {
   if (!s) {
     s = createSessionStore(sessionId)
     stores.set(sessionId, s)
+    const active = [...runIndex.values()].find((run) => run.sessionId === sessionId)
+    if (active !== undefined) {
+      s.setState({ activeRunId: active.runId })
+      void ensureActiveRunRestored(sessionId, active.runId)
+    }
   }
   if (!hydrated.has(sessionId)) {
     hydrated.add(sessionId)
@@ -488,6 +579,7 @@ export function sessionStore(sessionId: string): SessionStore {
  */
 export function releaseSession(sessionId: string): boolean {
   for (const r of runIndex.values()) if (r.sessionId === sessionId) return false
+  for (const r of childRunIndex.values()) if (r.sessionId === sessionId) return false
   const deleted = stores.delete(sessionId)
   if (deleted) hydrated.delete(sessionId)
   return deleted
@@ -547,6 +639,8 @@ export interface RunIndexEntry {
 }
 
 const runIndex = new Map<string, RunIndexEntry>()
+/** Child run id → the parent session that owns the Task card. */
+const childRunIndex = new Map<string, RunIndexEntry>()
 
 /** 快照数组。zustand 靠引用比较,所以每次变更换一个新数组。 */
 export const useRunIndex = create<RunIndexEntry[]>(() => [])
@@ -564,14 +658,156 @@ function unregisterRun(runId: string): void {
   publishRunIndex()
 }
 
+function rememberChildRuns(
+  parentRunId: string,
+  events: readonly AgentEvent[],
+  owner?: RunIndexEntry
+): void {
+  const parent = runIndex.get(parentRunId) ?? owner
+  if (parent === undefined) return
+  for (const event of events) {
+    if (event.type !== 'subagent_start') continue
+    childRunIndex.set(event.childRunId, {
+      runId: event.childRunId,
+      sessionId: parent.sessionId,
+      workspaceId: parent.workspaceId
+    })
+  }
+}
+
 /**
  * 首屏把主进程还活着的 run 补回索引(`Bootstrap.activeRuns`)。
  * 冷启动是空的 —— 「永不恢复运行中状态」(方案 §9);非空只发生在 ⌘R 重载:
  * 主进程没重启,run 还在跑,而渲染层刚刚失忆。
  */
 export function adoptActiveRuns(runs: readonly RunIndexEntry[]): void {
-  for (const r of runs) runIndex.set(r.runId, r)
+  for (const r of runs) {
+    runIndex.set(r.runId, r)
+    const store = stores.get(r.sessionId)
+    if (store !== undefined && store.getState().activeRunId === null) {
+      store.setState({ activeRunId: r.runId })
+      void ensureActiveRunRestored(r.sessionId, r.runId)
+    }
+  }
   publishRunIndex()
+}
+
+export interface ActiveSubagentIndexEntry {
+  runId: string
+  parentRunId: string
+  sessionId: string
+  workspaceId: string
+  status?: 'running' | 'done' | 'error' | 'aborted'
+  startedAt?: number
+}
+
+/**
+ * Restore child-topic routing after a renderer reload. Top-level active runs
+ * are restored by `adoptActiveRuns`; this separate index deliberately does
+ * not feed the running indicators because a child is not a conversation run.
+ */
+export function adoptActiveSubagents(entries: readonly ActiveSubagentIndexEntry[]): void {
+  const detachedParents = new Map<string, ActiveSubagentIndexEntry>()
+  for (const entry of entries) {
+    childRunIndex.set(entry.runId, {
+      runId: entry.runId,
+      sessionId: entry.sessionId,
+      workspaceId: entry.workspaceId
+    })
+    if (!runIndex.has(entry.parentRunId)) detachedParents.set(entry.parentRunId, entry)
+  }
+
+  // A parent that is still running will be restored by adoptActiveRuns once
+  // its lazy session store is opened. Only ended parents need a detached
+  // attach here so their Task card can be reconstructed immediately.
+  for (const [parentRunId, entry] of detachedParents) {
+    const store = sessionStore(entry.sessionId)
+    if (store.getState().activeRunId !== null) continue
+    void restoreDetachedParent(entry.sessionId, parentRunId, entry).then(() => {
+      const children = entries.filter((child) => child.parentRunId === parentRunId)
+      return Promise.all(children.map((child) => restoreChildSnapshot(child)))
+    })
+  }
+
+  // Active parents are restored by the normal run path. Wait for that attach
+  // before replaying each child's own log, otherwise the parent Task card may
+  // not exist yet and the child telemetry would have nowhere to land.
+  for (const entry of entries) {
+    if (!detachedParents.has(entry.parentRunId)) {
+      sessionStore(entry.sessionId)
+      void ensureActiveRunRestored(entry.sessionId, entry.parentRunId).then(() => restoreChildSnapshot(entry))
+    }
+  }
+}
+
+async function restoreChildSnapshot(entry: ActiveSubagentIndexEntry): Promise<void> {
+  try {
+    const store = stores.get(entry.sessionId)
+    if (store === undefined) return
+    const existing = Object.values(store.getState().transcript.subagents)
+      .find((subagent) => subagent.childRunId === entry.runId)
+    // Parent telemetry already records the last child event it observed. Ask
+    // for only the tail after that cursor to avoid replaying the same tool
+    // calls and token usage a second time after a reload.
+    const sinceSeq = existing?.childSeq ?? 0
+    const snap = await attachRun(entry.runId, sinceSeq)
+    const firstSeq = snap.seq - snap.events.length + 1
+    store.getState().applyChildEvents(entry.runId, snap.events, firstSeq)
+    if (snap.status !== 'running') childRunIndex.delete(entry.runId)
+  } catch (err) {
+    // The child can finish and be reaped between bootstrap and this attach.
+    // The live route remains useful if a final envelope is still delivered.
+    console.warn(`[agent] child attach failed: ${entry.runId}`, err)
+  }
+}
+
+async function restoreDetachedParent(
+  sessionId: string,
+  parentRunId: string,
+  owner: ActiveSubagentIndexEntry
+): Promise<void> {
+  try {
+    const detail = await getSession(sessionId).catch(() => undefined)
+    const snap = await attachRun(parentRunId, 0)
+    const store = stores.get(sessionId)
+    if (store === undefined) return
+    store.setState((s) => {
+      // A user may have started a new turn while the detached snapshot was in
+      // flight. Preserve that live turn rather than replacing it with old data.
+      if (s.activeRunId !== null) return s
+      const base = {
+        ...emptyTranscript(),
+        messages: s.transcript.messages,
+        tools: s.transcript.tools,
+        subagents: s.transcript.subagents
+      }
+      const transcript = applyEvents(base, snap.events)
+      const messages = [...new Map([...(detail?.messages ?? []), ...transcript.messages]
+        .map((m) => [m.id, m])).values()]
+      return {
+        transcript: {
+          ...transcript,
+          messages,
+          tools: { ...transcript.tools, ...toolsFromMessages(messages, transcript.tools) },
+          subagents: subagentsFromMessages(messages, transcript.subagents),
+          ...(snap.startedAt === undefined ? {} : { runStartedAt: snap.startedAt }),
+          ...(snap.endedAt === undefined ? {} : { runEndedAt: snap.endedAt })
+        },
+        lastSeq: snap.seq,
+        activeRunId: null
+      }
+    })
+    rememberChildRuns(parentRunId, snap.events, {
+      runId: parentRunId,
+      sessionId: owner.sessionId,
+      workspaceId: owner.workspaceId
+    })
+  } catch (err) {
+    // The child may finish and be reaped between bootstrap and this attach.
+    // Its persisted parent history remains usable; leave the route in place
+    // until the next child envelope tells us it has ended.
+    console.warn(`[agent] detached parent attach failed: ${parentRunId}`, err)
+  }
 }
 
 /**
@@ -581,17 +817,67 @@ export function adoptActiveRuns(runs: readonly RunIndexEntry[]): void {
  * 所以这里绝不能对 snapshot.events 再跑一遍 gap 检查 —— 直接应用,
  * 然后把 lastSeq 置成 snapshot.seq。对它再查一次连续性会导致无限 resync。
  */
-async function resync(sessionId: string, runId: string, sinceSeq: number): Promise<void> {
+async function restoreActiveRun(sessionId: string, runId: string): Promise<void> {
+  const detail = await getSession(sessionId).catch(() => undefined)
+  await resync(sessionId, runId, 0, detail?.messages)
+}
+
+const restoreInFlight = new Map<string, Promise<void>>()
+
+function ensureActiveRunRestored(sessionId: string, runId: string): Promise<void> {
+  const existing = restoreInFlight.get(runId)
+  if (existing !== undefined) return existing
+  const pending = restoreActiveRun(sessionId, runId).finally(() => {
+    if (restoreInFlight.get(runId) === pending) restoreInFlight.delete(runId)
+  })
+  restoreInFlight.set(runId, pending)
+  return pending
+}
+
+async function resync(sessionId: string, runId: string, sinceSeq: number, history?: AgentMessage[]): Promise<void> {
   const store = stores.get(sessionId)
   if (!store) return
   console.warn(`[agent] seq 不连续,attach 补齐 · run=${runId} since=${sinceSeq}`)
   try {
     const snap = await attachRun(runId, sinceSeq)
-    store.setState((s) => ({
-      transcript: applyEvents(s.transcript, snap.events),
-      lastSeq: snap.seq,
-      activeRunId: snap.status === 'running' ? runId : null
-    }))
+    const current = store.getState()
+    if (current.activeRunId !== runId) return
+    // An incremental snapshot may overlap events received while attach was in
+    // flight. Ask again from the new cursor instead of counting usage twice.
+    if (sinceSeq !== 0 && current.lastSeq > sinceSeq && current.lastSeq < snap.seq) {
+      await resync(sessionId, runId, current.lastSeq, history)
+      return
+    }
+    store.setState((s) => {
+      if (s.activeRunId !== runId) return s
+      const base = sinceSeq === 0
+        ? {
+            ...emptyTranscript(),
+            messages: s.transcript.messages,
+            tools: s.transcript.tools,
+            subagents: s.transcript.subagents,
+            ...(s.transcript.runStartedAt === undefined ? {} : { runStartedAt: s.transcript.runStartedAt })
+          }
+        : s.transcript
+      const transcript = s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, snap.events)
+      const messages = [...new Map([...(history ?? []), ...transcript.messages].map((m) => [m.id, m])).values()]
+      return {
+        transcript: {
+          ...transcript, messages,
+          tools: { ...transcript.tools, ...toolsFromMessages(messages, transcript.tools) },
+          subagents: subagentsFromMessages(messages, transcript.subagents),
+          ...(transcript.runStartedAt === undefined && snap.startedAt !== undefined
+            ? { runStartedAt: snap.startedAt }
+            : {}),
+          ...(snap.endedAt !== undefined ? { runEndedAt: snap.endedAt } : {})
+        },
+        lastSeq: Math.max(s.lastSeq, snap.seq),
+        activeRunId: snap.status === 'running' ? runId : null
+      }
+    })
+    rememberChildRuns(runId, snap.events)
+    if (snap.status !== 'running') unregisterRun(runId)
+    if (snap.status === 'done') drainQueue(sessionId)
   } catch (err) {
     console.error('[agent] attach 失败:', err)
   }
@@ -632,8 +918,16 @@ function drain(): void {
   const batch = pending
   pending = []
   for (const env of batch) {
+    const child = childRunIndex.get(env.runId)
+    if (child !== undefined) {
+      const firstSeq = env.seq - env.events.length + 1
+      stores.get(child.sessionId)?.getState().applyChildEvents(env.runId, env.events, firstSeq)
+      if (env.events.some((event) => event.type === 'run_end')) childRunIndex.delete(env.runId)
+      continue
+    }
     const sessionId = runIndex.get(env.runId)?.sessionId
     if (sessionId === undefined) continue
+    rememberChildRuns(env.runId, env.events)
     stores.get(sessionId)?.getState().applyEnvelope(env)
   }
 }

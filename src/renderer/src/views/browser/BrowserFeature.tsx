@@ -1,18 +1,38 @@
-import { CircleHelp, Download, Globe2, Lightbulb, ListRestart, MoreHorizontal, Plus, Sparkles, Trash2, Unplug, Upload, X } from 'lucide-react'
+import {
+  ArrowLeft,
+  CircleHelp,
+  Download,
+  Globe2,
+  Lightbulb,
+  ListRestart,
+  MoreHorizontal,
+  Plus,
+  Sparkles,
+  Trash2,
+  Unplug,
+  Upload
+} from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { BrowserProfile } from '../../../../shared/domain/browser'
 import { Button } from '../../components/ui/Button'
 import { Dialog } from '../../components/ui/Dialog'
 import { IconButton } from '../../components/ui/IconButton'
 import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
-import { clearBrowserProfileState, createBrowserProfile, deleteBrowserProfile, exportBrowserCookies, importBrowserCookies, listBrowserProfiles } from '../../services/browser'
+import {
+  clearBrowserProfileState,
+  createBrowserProfile,
+  deleteBrowserProfile,
+  exportBrowserCookies,
+  importBrowserCookies,
+  listBrowserProfiles
+} from '../../services/browser'
 import { on } from '../../services/ipc'
 import { useI18n } from '../../i18n'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { cn } from '../../lib/cn'
 
-export function BrowserFeature(): ReactNode {
+export function BrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
   const { t } = useI18n()
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
   const [selectedId, setSelectedId] = useState<string>('default')
@@ -21,26 +41,43 @@ export function BrowserFeature(): ReactNode {
   const [domains, setDomains] = useState('')
   const [startUrl, setStartUrl] = useState('')
   const [busy, setBusy] = useState(false)
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
   const activeWorkspaceId = useWindowStore((state) => state.activeWorkspaceId)
+  const activeOuterId = useWindowStore((state) => state.activeOuterId)
   const activateOuter = useWindowStore((state) => state.activate)
   const outer = useWindowStore((state) => state.outer)
   const openTab = useTabsStore((state) => state.open)
 
   const refresh = (): void => {
-    void listBrowserProfiles().then((items) => {
-      setProfiles(items)
-      setSelectedId((current) => items.some((item) => item.id === current) ? current : items[0]?.id ?? 'default')
-    }).catch(() => setProfiles([]))
+    void listBrowserProfiles()
+      .then((items) => {
+        setProfiles(items)
+        setSelectedId((current) => (items.some((item) => item.id === current) ? current : (items[0]?.id ?? 'default')))
+      })
+      .catch(() => setProfiles([]))
   }
 
   useEffect(() => {
     refresh()
-    return on('browser:profilesChanged', setProfiles)
+    return on('browser:profilesChanged', (items) => {
+      setProfiles(items)
+      setSelectedId((current) => (items.some((item) => item.id === current) ? current : (items[0]?.id ?? 'default')))
+    })
   }, [])
 
   const selected = profiles.find((profile) => profile.id === selectedId) ?? profiles[0]
+
+  const returnToWorkspace = (): void => {
+    onClose?.()
+    // 兼容热更新前已经存在内存里的旧式 browser feature Tab；冷启动时 store
+    // 会迁移掉这类持久化记录，正常入口始终走上面的独立主内容模式。
+    const workspaceTab = outer.find((tab) => tab.kind === 'workspace' && tab.ref.workspaceId === activeWorkspaceId)
+    if (workspaceTab !== undefined && workspaceTab.id !== activeOuterId) {
+      activateOuter(workspaceTab.id)
+    }
+  }
 
   const create = async (): Promise<void> => {
     if (name.trim() === '' || busy) return
@@ -49,7 +86,10 @@ export function BrowserFeature(): ReactNode {
     try {
       const profile = await createBrowserProfile({
         name,
-        domains: domains.split(',').map((value) => value.trim()).filter(Boolean),
+        domains: domains
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean),
         ...(startUrl.trim() === '' ? {} : { startUrl: startUrl.trim() })
       })
       setProfiles((current) => [...current.filter((item) => item.id !== profile.id), profile])
@@ -67,10 +107,9 @@ export function BrowserFeature(): ReactNode {
 
   const openBrowser = (profile: BrowserProfile | undefined = selected): void => {
     if (activeWorkspaceId === null) return
-    const workspaceTab = outer.find((tab) => tab.kind === 'workspace' && tab.ref.workspaceId === activeWorkspaceId)
-    if (workspaceTab !== undefined) activateOuter(workspaceTab.id)
+    returnToWorkspace()
     openTab(activeWorkspaceId, 'browser', 'main', {
-      title: profile?.isDefault ? t('browser.defaultProfile') : profile?.name ?? t('browser.defaultProfile'),
+      title: profile?.isDefault ? t('browser.defaultProfile') : (profile?.name ?? t('browser.defaultProfile')),
       url: profile?.startUrl ?? '',
       profileId: profile?.id
     })
@@ -124,7 +163,8 @@ export function BrowserFeature(): ReactNode {
     try {
       await deleteBrowserProfile(profile.id)
       setProfiles((current) => current.filter((item) => item.id !== profile.id))
-      setSelectedId((current) => current === profile.id ? 'default' : current)
+      setSelectedId((current) => (current === profile.id ? 'default' : current))
+      setConfirmingDeleteId(null)
     } catch {
       setFeedback(t('browser.operationFailed'))
     } finally {
@@ -134,14 +174,16 @@ export function BrowserFeature(): ReactNode {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-canvas">
-      <header className="flex h-[52px] shrink-0 items-center gap-3 border-b border-hairline px-4">
-        <IconButton label={t('common.close')} size={28} onClick={() => {
-          const workspaceTab = outer.find((tab) => tab.kind === 'workspace' && tab.ref.workspaceId === activeWorkspaceId)
-          if (workspaceTab !== undefined) activateOuter(workspaceTab.id)
-        }}>
-          <X size={16} />
+      <header className="app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4">
+        <IconButton
+          label={t('browser.back')}
+          size={28}
+          width={40}
+          onClick={returnToWorkspace}
+          className="rounded-pill bg-tint"
+        >
+          <ArrowLeft size={15} />
         </IconButton>
-        <Globe2 size={17} className="text-fg" />
         <h1 className="text-[14px] font-medium text-fg">{t('browser.title')}</h1>
       </header>
 
@@ -154,12 +196,7 @@ export function BrowserFeature(): ReactNode {
             <p className="mt-1 text-[11px] leading-4 text-fg-faint">{t('browser.profileHint')}</p>
           </div>
 
-          <Button
-            size="sm"
-            icon={<Plus size={14} />}
-            onClick={() => setDialogOpen(true)}
-            className="mt-3 w-full"
-          >
+          <Button size="sm" icon={<Plus size={14} />} onClick={() => setDialogOpen(true)} className="mt-3 w-full">
             {t('browser.newProfile')}
           </Button>
 
@@ -177,7 +214,7 @@ export function BrowserFeature(): ReactNode {
                     if (event.key === 'Enter' || event.key === ' ') setSelectedId(profile.id)
                   }}
                   className={cn(
-                    'group flex w-full items-center gap-2 rounded-[10px] px-2.5 py-2 text-left transition-colors',
+                    'group relative flex w-full items-center gap-2 rounded-[10px] px-2.5 py-2 text-left transition-colors',
                     isSelected ? 'bg-tint-strong' : 'hover:bg-tint-hover'
                   )}
                 >
@@ -187,31 +224,92 @@ export function BrowserFeature(): ReactNode {
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1 truncate text-[12px] text-fg">
                       {displayName}
-                      {profile.isDefault && <span className="rounded bg-tint px-1 text-[10px] text-fg-faint">{t('common.default')}</span>}
+                      {profile.isDefault && (
+                        <span className="rounded bg-tint px-1 text-[10px] text-fg-faint">{t('common.default')}</span>
+                      )}
                     </span>
                     <span className="mt-0.5 block truncate text-[11px] text-fg-faint">
                       {profile.isDefault ? t('browser.defaultProfileHint') : t('browser.profileJustNow')}
                     </span>
                   </span>
+                  {isSelected && (
+                    <span className="shrink-0 rounded-[6px] bg-accent/10 px-1.5 py-1 text-[10px] text-accent transition-opacity group-hover:opacity-0">
+                      {t('browser.profileActive')}
+                    </span>
+                  )}
                   <Menu
                     label={`${displayName} ${t('browser.open')}`}
                     width={180}
                     align="end"
                     trigger={<MoreHorizontal size={14} />}
+                    onOpenChange={(open) => {
+                      if (!open) setConfirmingDeleteId(null)
+                    }}
+                    className={isSelected ? 'absolute right-2' : undefined}
                     triggerClassName="flex size-6 shrink-0 items-center justify-center rounded-[6px] text-icon opacity-0 group-hover:opacity-100 hover:bg-tint-hover hover:text-fg"
                   >
                     {(close) => (
                       <>
-                        <MenuItem icon={<Globe2 size={14} />} onSelect={() => { openBrowser(profile); close() }}>{t('browser.open')}</MenuItem>
+                        <MenuItem
+                          icon={<Globe2 size={14} />}
+                          onSelect={() => {
+                            openBrowser(profile)
+                            close()
+                          }}
+                        >
+                          {t('browser.open')}
+                        </MenuItem>
                         <MenuSeparator />
-                        <MenuItem icon={<Download size={14} />} disabled={busy} onSelect={() => { void exportCookies(profile); close() }}>{t('browser.exportCookie')}</MenuItem>
-                        <MenuItem icon={<Upload size={14} />} disabled={busy} onSelect={() => { void importCookies(profile); close() }}>{t('browser.importCookie')}</MenuItem>
+                        <MenuItem
+                          icon={<Download size={14} />}
+                          disabled={busy}
+                          onSelect={() => {
+                            void exportCookies(profile)
+                            close()
+                          }}
+                        >
+                          {t('browser.exportCookie')}
+                        </MenuItem>
+                        <MenuItem
+                          icon={<Upload size={14} />}
+                          disabled={busy}
+                          onSelect={() => {
+                            void importCookies(profile)
+                            close()
+                          }}
+                        >
+                          {t('browser.importCookie')}
+                        </MenuItem>
                         {!profile.isDefault && (
                           <>
                             <MenuSeparator />
-                            <MenuItem icon={<ListRestart size={14} />} disabled={busy} onSelect={() => { void clearState(profile); close() }}>{t('browser.clearState')}</MenuItem>
+                            <MenuItem
+                              icon={<ListRestart size={14} />}
+                              disabled={busy}
+                              onSelect={() => {
+                                void clearState(profile)
+                                close()
+                              }}
+                            >
+                              {t('browser.clearState')}
+                            </MenuItem>
                             <MenuSeparator />
-                            <MenuItem icon={<Trash2 size={14} />} onSelect={() => { void remove(profile); close() }}>{t('browser.deleteProfile')}</MenuItem>
+                            <MenuItem
+                              danger
+                              icon={<Trash2 size={14} />}
+                              onSelect={() => {
+                                if (confirmingDeleteId === profile.id) {
+                                  void remove(profile)
+                                  close()
+                                } else {
+                                  setConfirmingDeleteId(profile.id)
+                                }
+                              }}
+                            >
+                              {confirmingDeleteId === profile.id
+                                ? t('common.confirmDelete')
+                                : t('browser.deleteProfile')}
+                            </MenuItem>
                           </>
                         )}
                       </>
@@ -224,35 +322,46 @@ export function BrowserFeature(): ReactNode {
         </aside>
 
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-3">
-          {feedback !== null && <div className="mb-3 rounded-[8px] bg-tint px-3 py-2 text-[12px] text-fg-muted">{feedback}</div>}
+          {feedback !== null && (
+            <div className="mb-3 rounded-[8px] bg-tint px-3 py-2 text-[12px] text-fg-muted">{feedback}</div>
+          )}
           <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-[14px] font-medium text-fg">{t('browser.automationTitle')}</h2>
-              <p className="mt-0.5 text-[12px] text-fg-faint">{selected?.isDefault ? t('browser.defaultProfile') : selected?.name ?? t('browser.defaultProfile')}</p>
-            </div>
-            <Button size="sm" icon={<Plus size={14} />} onClick={openBrowser}>{t('browser.manualCreate')}</Button>
+            <h2 className="text-[14px] font-medium text-fg">{t('browser.automationTitle')}</h2>
+            <Button size="sm" icon={<Plus size={14} />} onClick={openBrowser}>
+              {t('browser.manualCreate')}
+            </Button>
           </div>
 
-          <section className="mt-4 rounded-[14px] border border-hairline bg-surface px-4 py-3">
+          <section className="mt-3 rounded-[18px] border border-hairline bg-surface px-4 py-4">
             <div className="flex items-center gap-3">
-              <span className="flex size-8 items-center justify-center rounded-pill bg-tint"><Lightbulb size={16} className="text-fg-muted" /></span>
+              <span className="flex size-8 items-center justify-center rounded-pill bg-tint">
+                <Lightbulb size={16} className="text-fg-muted" />
+              </span>
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] text-fg">{t('browser.switchChat')}</div>
                 <p className="mt-0.5 text-[11px] text-fg-faint">{t('browser.automationHint')}</p>
               </div>
-              <Button size="sm" onClick={openBrowser}>{t('browser.open')}</Button>
+              <Button size="sm" onClick={openBrowser}>
+                {t('browser.open')}
+              </Button>
             </div>
           </section>
 
-          <section className="mt-3 rounded-[14px] border border-hairline bg-surface px-4 py-3">
+          <section className="mt-3 rounded-[18px] border border-hairline bg-surface px-4 py-4">
             <div className="flex items-center gap-3">
-              <span className="flex size-8 items-center justify-center rounded-pill bg-tint"><Globe2 size={16} className="text-fg-muted" /></span>
+              <span className="flex size-8 items-center justify-center rounded-pill bg-tint">
+                <Globe2 size={16} className="text-fg-muted" />
+              </span>
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] text-fg">{t('browser.extension')}</div>
                 <p className="mt-0.5 text-[11px] text-fg-faint">{t('browser.extensionHint')}</p>
               </div>
-              <span className="rounded-pill bg-tint px-2 py-1 text-[11px] text-fg-faint">{t('browser.notConnected')}</span>
-              <Button size="sm" variant="ghost" icon={<Unplug size={13} />} disabled>{t('browser.connect')}</Button>
+              <span className="rounded-pill bg-tint px-2 py-1 text-[11px] text-fg-faint">
+                {t('browser.notConnected')}
+              </span>
+              <Button size="sm" variant="ghost" icon={<Unplug size={13} />} disabled>
+                {t('browser.connect')}
+              </Button>
             </div>
           </section>
 
@@ -270,21 +379,55 @@ export function BrowserFeature(): ReactNode {
         title={t('browser.createProfileTitle')}
         description={t('browser.createProfileHint')}
         width={420}
-        footer={<><Button size="sm" onClick={() => setDialogOpen(false)}>{t('common.cancel')}</Button><Button size="sm" variant="accent" disabled={name.trim() === '' || busy} onClick={() => { void create() }}>{t('browser.create')}</Button></>}
+        footer={
+          <>
+            <Button size="sm" onClick={() => setDialogOpen(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              size="sm"
+              variant="accent"
+              disabled={name.trim() === '' || busy}
+              onClick={() => {
+                void create()
+              }}
+            >
+              {t('browser.create')}
+            </Button>
+          </>
+        }
       >
         <div className="space-y-3">
-          {formError !== null && <div className="rounded-[8px] bg-danger/10 px-2.5 py-2 text-[12px] text-danger">{formError}</div>}
+          {formError !== null && (
+            <div className="rounded-[8px] bg-danger/10 px-2.5 py-2 text-[12px] text-danger">{formError}</div>
+          )}
           <label className="block text-[12px] text-fg-muted">
             {t('browser.profileName')}
-            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder={t('browser.profileNamePlaceholder')} className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-accent" />
+            <input
+              autoFocus
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder={t('browser.profileNamePlaceholder')}
+              className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-accent"
+            />
           </label>
           <label className="block text-[12px] text-fg-muted">
             {t('browser.profileDomains')}
-            <input value={domains} onChange={(event) => setDomains(event.target.value)} placeholder={t('browser.profileDomainsPlaceholder')} className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-accent" />
+            <input
+              value={domains}
+              onChange={(event) => setDomains(event.target.value)}
+              placeholder={t('browser.profileDomainsPlaceholder')}
+              className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-accent"
+            />
           </label>
           <label className="block text-[12px] text-fg-muted">
             {t('browser.profileStartUrl')}
-            <input value={startUrl} onChange={(event) => setStartUrl(event.target.value)} placeholder={t('browser.profileStartUrlPlaceholder')} className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-accent" />
+            <input
+              value={startUrl}
+              onChange={(event) => setStartUrl(event.target.value)}
+              placeholder={t('browser.profileStartUrlPlaceholder')}
+              className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-accent"
+            />
           </label>
         </div>
       </Dialog>

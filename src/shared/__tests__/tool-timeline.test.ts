@@ -5,9 +5,11 @@ import {
   computeAutoCollapsed,
   decideWorkspace,
   groupDuration,
+  groupConsecutiveTools,
   groupItems,
   groupKey,
   groupTitle,
+  isCompletedToolGroup,
   summarize,
   TOOL_WINDOW_SIZE,
   workspaceTitleParts,
@@ -86,6 +88,29 @@ describe('groupItems', () => {
     const b = tool('Read')
     expect(groupKey(groupItems([a], toolTable)[0]!)).toBe(a.key)
     expect(groupKey(groupItems([a, b], toolTable)[0]!)).toBe(a.key)
+  })
+})
+
+describe('groupConsecutiveTools', () => {
+  it('merges adjacent tools even when their display shapes differ', () => {
+    reset()
+    const items = [tool('Read'), tool('Bash'), tool('Grep')]
+    expect(groupConsecutiveTools(items).map((group) => group.length)).toEqual([3])
+  })
+
+  it('keeps thinking as a boundary between tool runs', () => {
+    reset()
+    const items = [tool('Read'), thinking('t'), tool('Bash')]
+    expect(groupConsecutiveTools(items).map((group) => group.length)).toEqual([1, 1, 1])
+  })
+
+  it('only collapses a multi-tool group after every call succeeds', () => {
+    reset()
+    const complete = groupConsecutiveTools([tool('Read'), tool('Bash')])[0]!
+    expect(isCompletedToolGroup(complete, toolTable)).toBe(true)
+    reset()
+    const pending = groupConsecutiveTools([tool('Read'), tool('Bash', 'running')])[0]!
+    expect(isCompletedToolGroup(pending, toolTable)).toBe(false)
   })
 })
 
@@ -262,10 +287,8 @@ describe('decideWorkspace', () => {
     )
   })
 
-  it('★ 只有一项时不收束 —— 为一次调用套外壳是层级浪费', () => {
-    expect(d({ outcome: 'ok', itemCount: 1, hasTrailingText: true, errorCount: 0 }).collapse).toBe(
-      false
-    )
+  it('★ 只有一项时也收束 —— 完成后的过程统一归入摘要行', () => {
+    expect(d({ outcome: 'ok', itemCount: 1, hasTrailingText: true, errorCount: 0 }).collapse).toBe(true)
   })
 
   it('有失败时收束但默认展开', () => {

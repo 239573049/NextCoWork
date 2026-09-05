@@ -6,6 +6,7 @@
  */
 import type { RunSnapshot } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
+import type { InteractionResponse, PendingInteraction } from '../../../shared/agent/interaction'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import type { Unsubscribe } from '../../../shared/ipc/contract'
 import { invoke, on } from './ipc'
@@ -32,4 +33,12 @@ export function abortRun(runId: string, cascade = true): Promise<void> {
 
 export function onAgentEvent(cb: (env: AgentEventEnvelope) => void): Unsubscribe {
   return on('agent:event', cb)
+}
+
+export function listInteractions(runId: string): Promise<PendingInteraction[]> {
+  return invoke('agent:listInteractions', { runId })
+}
+
+export function respondInteraction(response: InteractionResponse): Promise<void> {
+  return invoke('agent:respondInteraction', response)
 }

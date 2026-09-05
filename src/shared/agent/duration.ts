@@ -109,3 +109,33 @@ export function totalDuration(calls: readonly Pick<ToolCallState, 'startedAt' | 
   for (const c of calls) total += durationOf(c) ?? 0
   return total
 }
+
+/**
+ * Wall-clock duration for a whole run.
+ *
+ * The explicit run bounds are preferred because they include model thinking,
+ * network waits, and approval pauses. Older transcripts do not have those
+ * bounds, so completed tool timestamps provide a conservative fallback.
+ */
+export function runDurationOf(
+  run: Pick<TranscriptRunTiming, 'runStartedAt' | 'runEndedAt'>,
+  calls: readonly Pick<ToolCallState, 'startedAt' | 'endedAt'>[] = []
+): number | undefined {
+  if (run.runStartedAt !== undefined && run.runEndedAt !== undefined) {
+    return clampDuration(run.runEndedAt - run.runStartedAt)
+  }
+
+  const starts = calls.flatMap((call) => call.startedAt === undefined ? [] : [call.startedAt])
+  const ends = calls.flatMap((call) => call.endedAt === undefined ? [] : [call.endedAt])
+  if (starts.length === 0 || ends.length === 0) return undefined
+  return clampDuration(Math.max(...ends) - Math.min(...starts))
+}
+
+export interface TranscriptRunTiming {
+  runStartedAt?: number
+  runEndedAt?: number
+}
+
+function clampDuration(ms: number): number {
+  return Number.isFinite(ms) && ms > 0 ? ms : 0
+}

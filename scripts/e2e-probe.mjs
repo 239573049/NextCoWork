@@ -17,6 +17,9 @@
  * 跑法:`npm run build && node scripts/e2e-probe.mjs`
  */
 import { spawn } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import electron from 'electron'
 
@@ -65,6 +68,19 @@ class Cdp {
     }
     return r.result.value
   }
+
+  /** 走 preload 白名单和主进程 handler，返回完整 IpcResult 信封。 */
+  invoke(channel, req) {
+    return this.eval(
+      `window.nextcowork.invoke(${JSON.stringify(channel)}, ${JSON.stringify(req ?? null)})`
+    )
+  }
+}
+
+function expectInvokeOk(channel, result) {
+  if (result?.ok === true) return result.data
+  const detail = result?.error?.message ?? JSON.stringify(result)
+  throw new Error(`${channel} 失败:${detail}`)
 }
 
 /**
@@ -92,19 +108,24 @@ async function until(label, fn, { timeoutMs = DEADLINE_MS, bail = null } = {}) {
 const log = (s) => console.log(s)
 let child = null
 let failed = false
+let testProject = null
 
 try {
   // ── 起应用 ────────────────────────────────────────────────────────
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_NO_ATTACH_CONSOLE
-  // 别污染真实用户数据(方案 §9:dev 用不同的 userData 路径)
-  const userData = `/tmp/nextcowork-e2e-${Date.now()}`
+  // 数据库固定在 `<cwd>/.next-cowork`，所以真正的隔离边界必须是测试
+  // 工作目录。`--user-data-dir` 仍保留，用来在应用重设 userData 之前隔离
+  // Electron 的单实例锁与早期 profile 状态。
+  const projectRoot = process.cwd()
+  testProject = await mkdtemp(join(tmpdir(), 'nextcowork-e2e-project-'))
+  const userData = join(testProject, '.electron-user-data')
 
   child = spawn(
     electron,
-    ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${userData}`],
-    { env, stdio: ['ignore', 'pipe', 'pipe'] }
+    [projectRoot, `--remote-debugging-port=${PORT}`, `--user-data-dir=${userData}`],
+    { cwd: testProject, env, stdio: ['ignore', 'pipe', 'pipe'] }
   )
   const mainOut = []
   child.stdout.on('data', (b) => mainOut.push(String(b)))
@@ -131,8 +152,41 @@ try {
   await cdp.send('Runtime.enable')
 
   // ── 1. 握手 + preload 桥 ──────────────────────────────────────────
-  await until('contextBridge 注入', () => cdp.eval('typeof window.nextcowork'). then((t) => t === 'object'))
+  await until('contextBridge 注入', () => cdp.eval('typeof window.nextcowork').then((t) => t === 'object'))
   log('✓ contextBridge 到位(sandbox:true 下 preload 单文件打包是通的)')
+
+  // 生产的新安装不再默认种入 demo.invalid。E2E 自己经正式 IPC 建一条隔离的
+  // 演示供应商，既保留“真实打包产物完整跑一轮”的覆盖，也不改变用户默认配置。
+  const demoProviderId = 'e2e-demo'
+  const demoModel = 'demo-model'
+  expectInvokeOk(
+    'provider:upsert',
+    await cdp.invoke('provider:upsert', {
+      id: demoProviderId,
+      name: 'E2E demo provider',
+      protocol: 'anthropic',
+      baseUrl: 'https://demo.invalid',
+      credentialRef: 'ignored-by-main-process',
+      priority: 0,
+      enabled: true
+    })
+  )
+  expectInvokeOk(
+    'provider:setCredential',
+    await cdp.invoke('provider:setCredential', {
+      providerId: demoProviderId,
+      apiKey: 'sk-demo-not-a-real-key'
+    })
+  )
+  expectInvokeOk(
+    'provider:setAliases',
+    await cdp.invoke('provider:setAliases', { providerId: demoProviderId, models: [demoModel] })
+  )
+  expectInvokeOk(
+    'settings:update',
+    await cdp.invoke('settings:update', { defaultModel: demoModel })
+  )
+  log('✓ E2E 演示供应商经正式 IPC 显式建立（不进入生产默认数据）')
 
   // ── 2. 首屏真的落到了对话页 ────────────────────────────────────────
   // 这一条钉住三件事:`initRuntime` 在 `registerIpc` 之前(否则 bootstrap 里没有
@@ -143,13 +197,13 @@ try {
   )
   log('✓ 首屏直达对话页(默认工作区 → 外层 Tab → 内层对话 Tab)')
 
-  // 发送按钮的 title 就是**生效模型**(别名)。空模型时它是「还没有可用的模型」,
-  // 于是「bootstrap 带没带回 defaultModel」在这一个属性上看得见。
+  // 发送按钮的 title 就是**生效模型**。空模型时它是「还没有可用的模型」,
+  // 于是 settings:update 的广播有没有真的抵达渲染层，在这一个属性上看得见。
   const alias = await until('生效模型', () =>
     cdp.eval(`document.querySelector('[data-testid="composer-send"]')?.title ?? null`)
   )
-  if (alias !== 'nextcowork-demo') throw new Error(`默认模型不对:${alias}`)
-  log(`✓ bootstrap 带回默认模型 · ${alias}`)
+  if (alias !== demoModel) throw new Error(`E2E 模型没有生效:${alias}`)
+  log(`✓ 设置广播切换了生效模型 · ${alias}`)
 
   // ── 3. ★ 打字 + 点发送 ────────────────────────────────────────────
   // textarea 是受控的,直接改 `.value` React 看不见(它自己的 value tracker 会
@@ -236,12 +290,12 @@ try {
   }
   log(`✓ 工具调用 ${summary.tools.length} 个,全部 ok`)
 
-  // 别名解析这一跳在界面上看得见:请求写的是别名(发送按钮的 title),
-  // 而状态行上的 model 来自 `message_start.model` —— 是上游真名。两者不同才算翻译过。
-  if (summary.model !== 'demo-model') {
-    throw new Error(`状态行上的模型不是上游真名:${summary.model}`)
+  // 状态行上的 model 来自真实 SSE 的 `message_start.model`。这里钉住请求编码、
+  // demo.invalid 拦截和响应解码使用的是刚才显式配置的模型，而不是内置默认项。
+  if (summary.model !== demoModel) {
+    throw new Error(`状态行上的模型不对:${summary.model}`)
   }
-  log(`✓ 别名解析在界面上可见 · ${alias} → ${summary.model}`)
+  log(`✓ 显式配置模型贯穿请求与响应 · ${summary.model}`)
 
   log('\n✅ 端到端通过 —— 打包产物里点一下发送,真的能看到文字滚出来。')
 } catch (err) {
@@ -251,6 +305,7 @@ try {
   child?.kill('SIGTERM')
   await sleep(500)
   if (child !== null && child.exitCode === null) child.kill('SIGKILL')
+  if (testProject !== null) await rm(testProject, { recursive: true, force: true })
 }
 
 process.exit(failed ? 1 : 0)

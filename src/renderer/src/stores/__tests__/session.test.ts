@@ -164,7 +164,22 @@ describe('run 的两份状态必须同起同落', () => {
     await expect(s.getState().send('你好', OPTS)).rejects.toThrow('上游不可达')
 
     expect(s.getState().activeRunId).toBeNull()
+    expect(s.getState().transcript.messages).toEqual([])
     expect(indexed('s-fail')).toEqual([])
+  })
+
+  it('启动尚未完成时先显示用户消息,并让主进程复用它的消息 ID', async () => {
+    let release!: () => void
+    mockStartRun.mockImplementation(() => new Promise<void>((resolve) => { release = resolve }))
+    const s = session('s-optimistic')
+
+    const sending = s.getState().send('马上显示', OPTS)
+    const message = s.getState().transcript.messages[0]
+    expect(message).toMatchObject({ role: 'user', parts: [{ type: 'text', text: '马上显示' }] })
+    expect(mockStartRun).toHaveBeenCalledWith(expect.objectContaining({ inputMessageId: message?.id }))
+
+    release()
+    await sending
   })
 
   it('别的 run 的信封不动本会话的状态', async () => {

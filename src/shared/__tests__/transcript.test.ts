@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '../agent/event'
-import { assistantMessage } from '../agent/message'
-import { applyEvent, applyEvents, emptyTranscript, hasRun, liveText } from '../agent/transcript'
+import { assistantMessage, toolResultMessage, userMessage } from '../agent/message'
+import { applyChildEvent, applyEvent, applyEvents, emptyTranscript, hasRun, liveText, subagentsFromMessages } from '../agent/transcript'
 
 /**
  * 转录投影的 bug 有个共同特征:**在界面上是间歇性的**。
@@ -80,6 +80,17 @@ describe('applyEvent · 提交边界', () => {
     expect(s.messages).toHaveLength(1)
     expect(liveText(s)).toBe('第二条')
   })
+
+  it('同一个消息 ID 的确认提交替换乐观消息,不会产生重复气泡', () => {
+    const optimistic = userMessage('u1', [{ type: 'text', text: '发送中' }], 1)
+    const confirmed = userMessage('u1', [{ type: 'text', text: '发送中' }], 2)
+    const s = applyEvent({ ...emptyTranscript(), messages: [optimistic] }, {
+      type: 'message_commit',
+      message: confirmed
+    })
+
+    expect(s.messages).toEqual([confirmed])
+  })
 })
 
 describe('applyEvent · 工具状态', () => {
@@ -150,6 +161,11 @@ describe('applyEvent · 终局与元信息', () => {
     expect(s.error?.code).toBe('rate_limit')
   })
 
+  it('run_end 保存结束时间，供回合级耗时展示', () => {
+    const s = applyEvent(emptyTranscript(), { type: 'run_end', status: 'done', at: 4_200 })
+    expect(s.runEndedAt).toBe(4_200)
+  })
+
   it('中断是终局状态之一,且不算 error', () => {
     const s = applyEvent(emptyTranscript(), { type: 'run_end', status: 'aborted' })
     expect(s.status).toBe('aborted')
@@ -174,14 +190,184 @@ describe('applyEvent · 终局与元信息', () => {
     expect(s.contextUsage?.used).toBe(30)
   })
 
+  it('累加本次运行的 API 用量，流式文本与上下文估算不改变 token 数', () => {
+    const first: AgentEvent = { type: 'stream', delta: { type: 'message_end', stopReason: 'tool_use',
+      usage: { inputTokens: 1135, outputTokens: 144, cacheReadInputTokens: 500, reasoningTokens: 100 } } }
+    const before = applyEvent(emptyTranscript(), first)
+    const streaming = applyEvents(before, [
+      { type: 'stream', delta: { type: 'message_start', model: 'model' } },
+      t(0, '很长的输出'.repeat(100)),
+      { type: 'context_usage', used: 9999, window: 100000, shouldCompact: false }
+    ])
+    expect(streaming.usage).toEqual(before.usage)
+    const after = applyEvent(streaming, { type: 'stream', delta: { type: 'message_end', stopReason: 'end_turn',
+      usage: { inputTokens: 2000, outputTokens: 256, cacheCreationInputTokens: 50 } } })
+    expect(after.usage).toEqual({ inputTokens: 3135, outputTokens: 400, cacheReadInputTokens: 500,
+      cacheCreationInputTokens: 50, reasoningTokens: 100 })
+    expect(before.usage?.outputTokens).toBe(144)
+    expect(applyEvent(after, { type: 'run_end', status: 'done' }).usage).toEqual(after.usage)
+    expect(applyEvent(emptyTranscript(), first).usage?.outputTokens).toBe(144)
+  })
+
   it('未知/未接管的事件原样返回,不炸也不吞状态', () => {
     const before = applyEvents(emptyTranscript(), [t(0, 'x')])
     const after = applyEvent(before, {
-      type: 'subagent_start',
-      callId: 'c1',
-      childRunId: 'r2'
+      type: 'interaction_resolved',
+      id: 'ghost',
+      outcome: { status: 'aborted' }
     })
     expect(after).toEqual(before)
+  })
+
+  it('subagent_start 建立可观测状态', () => {
+    const s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start',
+      callId: 'c1',
+      childRunId: 'r2',
+      description: '查找配置读取处',
+      subagentType: 'researcher',
+      model: 'model-a',
+      background: true,
+      at: 100
+    })
+
+    expect(s.subagents.c1).toEqual({
+      callId: 'c1',
+      childRunId: 'r2',
+      status: 'running',
+      description: '查找配置读取处',
+      subagentType: 'researcher',
+      model: 'model-a',
+      background: true,
+      phase: 'background',
+      toolCalls: 0,
+      toolErrors: 0,
+      startedAt: 100
+    })
+  })
+
+  it('subagent_update 累积工具、上下文和 token 用量', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2'
+    })
+    s = applyEvent(s, {
+      type: 'subagent_update',
+      callId: 'c1',
+      childRunId: 'r2',
+      phase: 'tool',
+      currentTool: 'read_file',
+      toolCalls: 2,
+      toolErrors: 1,
+      usage: { inputTokens: 10, outputTokens: 4 },
+      contextUsage: { used: 100, window: 1000, shouldCompact: false }
+    })
+    s = applyEvent(s, {
+      type: 'subagent_update',
+      callId: 'c1',
+      childRunId: 'r2',
+      usage: { inputTokens: 3, outputTokens: 2, reasoningTokens: 1 }
+    })
+
+    expect(s.subagents.c1).toMatchObject({
+      phase: 'tool', currentTool: 'read_file', toolCalls: 2, toolErrors: 1,
+      contextUsage: { used: 100, window: 1000, shouldCompact: false },
+      usage: { inputTokens: 13, outputTokens: 6, reasoningTokens: 1 }
+    })
+
+    s = applyEvent(s, {
+      type: 'subagent_update',
+      callId: 'c1',
+      childRunId: 'r2',
+      phase: 'thinking',
+      currentTool: undefined,
+      toolCalls: 2,
+      toolErrors: 1
+    })
+    expect(s.subagents.c1?.currentTool).toBeUndefined()
+  })
+
+  it('subagent_end 保存终态、摘要和结束时间', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2', at: 100
+    })
+    s = applyEvent(s, {
+      type: 'subagent_end', callId: 'c1', childRunId: 'r2', status: 'done',
+      summary: '配置在 src/config.ts', at: 250
+    })
+
+    expect(s.subagents.c1).toMatchObject({
+      status: 'done', phase: 'finishing', summary: '配置在 src/config.ts', endedAt: 250
+    })
+    expect(s.subagents.c1?.currentTool).toBeUndefined()
+  })
+
+  it('applyChildEvent 把子 run 的工具和 run_end 投影到 Task 卡片', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2'
+    })
+    s = applyChildEvent(s, 'r2', {
+      type: 'tool_start', callId: 'tc1', toolName: 'read_file', input: {}
+    })
+    s = applyChildEvent(s, 'r2', {
+      type: 'tool_end', callId: 'tc1', output: { content: 'ok' }, isError: true
+    })
+    s = applyChildEvent(s, 'r2', {
+      type: 'run_end', status: 'error', at: 500
+    })
+
+    expect(s.subagents.c1).toMatchObject({
+      toolCalls: 1, toolErrors: 1, status: 'error', endedAt: 500
+    })
+  })
+
+  it('后台子 run 父回合已结束时，从子消息提交补出最终摘要', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2', background: true
+    })
+    s = applyChildEvent(s, 'r2', {
+      type: 'message_commit',
+      message: assistantMessage('child-m1', [{ type: 'text', text: '后台调查完成' }], 1)
+    })
+
+    expect(s.subagents.c1?.summary).toBe('后台调查完成')
+  })
+
+  it('父汇总遥测与继承的同一子事件只计算一次', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2'
+    })
+    // Parent monitor sees child seq=1 first.
+    s = applyEvent(s, {
+      type: 'subagent_update', callId: 'c1', childRunId: 'r2',
+      phase: 'tool', currentTool: 'read_file', toolCalls: 1, childSeq: 1,
+      usage: { inputTokens: 10, outputTokens: 2 }
+    })
+    // The inherited raw child event is the same seq and must be ignored.
+    s = applyChildEvent(s, 'r2', {
+      type: 'tool_start', callId: 'tc1', toolName: 'read_file', input: {}
+    }, 1)
+    expect(s.subagents.c1).toMatchObject({ toolCalls: 1, usage: { inputTokens: 10, outputTokens: 2 } })
+  })
+
+  it('从已保存的 Task 工具回执重建子 Agent 卡片和入参信息', () => {
+    const task = assistantMessage('task-message', [{
+      type: 'tool_call',
+      callId: 'c1',
+      name: 'Task',
+      input: { description: '查配置', subagent_type: 'researcher' }
+    }], 1)
+    const result = toolResultMessage('task-result', [{
+      type: 'tool_result',
+      callId: 'c1',
+      output: { content: '后台已启动' },
+      isError: false,
+      subagent: { childRunId: 'r2', status: 'done', summary: '后台结果', background: true }
+    }], 2)
+
+    expect(subagentsFromMessages([task, result]).c1).toMatchObject({
+      childRunId: 'r2', status: 'done', description: '查配置', subagentType: 'researcher',
+      summary: '后台结果', background: true
+    })
   })
 
   it('★ 永不原地修改入参 —— zustand 靠引用变化决定重渲染', () => {

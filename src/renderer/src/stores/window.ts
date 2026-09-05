@@ -26,6 +26,13 @@ interface WindowState {
   activeOuterId: string | null
   /** 见文件头:显式状态,不从 activeOuterId 派生 */
   activeWorkspaceId: string | null
+  /**
+   * 左侧全局入口占用主内容区时的瞬时模式。
+   *
+   * 浏览器管理页不是一个可持久化的外层 Tab：打开它不能改变当前工作区，
+   * 后台 Agent 也不能借此改动用户正在看的窗口布局。退出后继续显示原工作区。
+   */
+  activeStandaloneFeature: 'browser' | null
   sidebarCollapsed: boolean
   /**
    * 外层 Tab 条右端的右侧工作台开关。当前值是 active workspace 的投影；
@@ -35,6 +42,8 @@ interface WindowState {
   rightPanelOpen: boolean
   /** 右侧工作台展开态按工作区隔离；后台 Agent 的动作不会改当前工作区。 */
   rightPanelOpenByWorkspace: Record<string, boolean>
+  /** 底部 Dock 展开态按工作区隔离，避免切换工作区时串用上一个状态。 */
+  bottomPanelOpenByWorkspace: Record<string, boolean>
   bottomPanelOpen: boolean
   /**
    * 拖出来的面板尺寸。**和上面两个开关不同,这两个是落盘的** ——
@@ -65,6 +74,7 @@ interface WindowState {
   activate: (outerId: string) => void
   openWorkspace: (workspaceId: string) => void
   openFeature: (feature: FeatureKind) => void
+  closeStandaloneFeature: () => void
   close: (outerId: string) => void
   move: (from: number, to: number) => void
   toggleSidebar: () => void
@@ -117,14 +127,18 @@ const initialTabs = (workspaces: readonly Workspace[]): OuterTab[] => {
 const RIGHT_PANEL = { def: 300, min: 240, max: 720 } as const
 const BOTTOM_PANEL = { def: 220, min: 140, max: 640 } as const
 
-const clamp = (px: number, r: { min: number; max: number }): number =>
-  Math.round(Math.min(r.max, Math.max(r.min, px)))
+const clamp = (px: number, r: { min: number; max: number }): number => Math.round(Math.min(r.max, Math.max(r.min, px)))
 
 export const useWindowStore = create<WindowState>((set, get) => {
   /** 每次结构性变更都落盘。主进程侧防抖 500ms,这里不用自己攒。 */
   const persist = (outer: OuterTab[], activeOuterId: string | null): void => {
     const { windowKind, rightPanelWidth, bottomPanelHeight } = get()
-    persistOuterTabs(windowKind, { outer, activeOuterId, rightPanelWidth, bottomPanelHeight })
+    persistOuterTabs(windowKind, {
+      outer,
+      activeOuterId,
+      rightPanelWidth,
+      bottomPanelHeight
+    })
   }
 
   return {
@@ -132,9 +146,11 @@ export const useWindowStore = create<WindowState>((set, get) => {
     outer: [],
     activeOuterId: null,
     activeWorkspaceId: null,
+    activeStandaloneFeature: null,
     sidebarCollapsed: false,
     rightPanelOpen: false,
     rightPanelOpenByWorkspace: {},
+    bottomPanelOpenByWorkspace: {},
     bottomPanelOpen: false,
     rightPanelWidth: RIGHT_PANEL.def,
     bottomPanelHeight: BOTTOM_PANEL.def,
@@ -142,28 +158,33 @@ export const useWindowStore = create<WindowState>((set, get) => {
 
     hydrate(b) {
       /*
-        ★ 过滤掉持久化数据里的「设置」功能 Tab。`FeatureKind` 里有 `'settings'`
-        (`FEATURE_LABEL` / `FEATURE_ICON` 都给了它值),今天没人开它,但**类型允许**,
-        而旧版本留下的 kv 记录里完全可能躺着一条。放进来就出现了第二个设置入口,
-        正是 `AppShell` 文件头禁止的那件事:「关掉设置」和「关掉一个工作区」
-        会变成同一个动作。见下面 `openFeature` 里的那道拦截。
+        ★ 过滤不再属于外层 Tab 的功能。设置是模态浮层；浏览器是左侧入口切换出的
+        主内容模式。旧版本可能已经把它们写进 kv，升级后必须在恢复边界清掉，
+        否则用户仍会看见一个无法由当前交互创建、却会一直恢复出来的幽灵 Tab。
       */
       const persisted = b.tabState.outer.filter(
-        (t) => !(t.kind === 'feature' && t.ref.feature === 'settings')
+        (t) => !(t.kind === 'feature' && (t.ref.feature === 'settings' || t.ref.feature === 'browser'))
       )
       const outer = persisted.length > 0 ? persisted : initialTabs(b.workspaces)
-      const activeOuterId = b.tabState.activeOuterId ?? outer[0]?.id ?? null
+      const requestedActiveId = b.tabState.activeOuterId
+      const activeOuterId = outer.some((tab) => tab.id === requestedActiveId)
+        ? requestedActiveId
+        : (outer[0]?.id ?? null)
       set({
         windowKind: b.windowKind,
         outer,
         activeOuterId,
         activeWorkspaceId: firstWorkspaceId(outer, activeOuterId),
+        activeStandaloneFeature: null,
         rightPanelWidth: clamp(b.tabState.rightPanelWidth ?? RIGHT_PANEL.def, RIGHT_PANEL),
-        bottomPanelHeight: clamp(b.tabState.bottomPanelHeight ?? BOTTOM_PANEL.def, BOTTOM_PANEL)
+        bottomPanelHeight: clamp(b.tabState.bottomPanelHeight ?? BOTTOM_PANEL.def, BOTTOM_PANEL),
+        bottomPanelOpen: false,
+        bottomPanelOpenByWorkspace: {}
       })
-      // 自动开出来的这一个也要落盘,否则它每次启动都换一个新 id ——
-      // 内层 Tab 按 workspaceId 索引不受影响,但拖出来的顺序会莫名回退。
-      if (persisted.length === 0 && outer.length > 0) persist(outer, activeOuterId)
+      // 自动开出来的这一个也要落盘,否则它每次启动都换一个新 id。
+      // 迁移掉旧功能 Tab 时也立即回写，避免每次启动都重复修复同一份旧布局。
+      if ((persisted.length === 0 && outer.length > 0) || persisted.length !== b.tabState.outer.length)
+        persist(outer, activeOuterId)
     },
 
     activate(outerId) {
@@ -171,11 +192,13 @@ export const useWindowStore = create<WindowState>((set, get) => {
       if (tab === undefined) return
       set({
         activeOuterId: outerId,
+        activeStandaloneFeature: null,
         // 功能 Tab 不改工作区上下文 —— 侧边栏保持原样
         ...(tab.kind === 'workspace'
           ? {
               activeWorkspaceId: tab.ref.workspaceId,
-              rightPanelOpen: get().rightPanelOpenByWorkspace[tab.ref.workspaceId] ?? false
+              rightPanelOpen: get().rightPanelOpenByWorkspace[tab.ref.workspaceId] ?? false,
+              bottomPanelOpen: get().bottomPanelOpenByWorkspace[tab.ref.workspaceId] ?? false
             }
           : {})
       })
@@ -183,20 +206,24 @@ export const useWindowStore = create<WindowState>((set, get) => {
     },
 
     openWorkspace(workspaceId) {
-      const existing = get().outer.find(
-        (t) => t.kind === 'workspace' && t.ref.workspaceId === workspaceId
-      )
+      const existing = get().outer.find((t) => t.kind === 'workspace' && t.ref.workspaceId === workspaceId)
       if (existing !== undefined) {
         get().activate(existing.id)
         return
       }
-      const tab: OuterTab = { id: ulid(), kind: 'workspace', ref: { workspaceId } }
+      const tab: OuterTab = {
+        id: ulid(),
+        kind: 'workspace',
+        ref: { workspaceId }
+      }
       const outer = [...get().outer, tab]
       set({
         outer,
         activeOuterId: tab.id,
         activeWorkspaceId: workspaceId,
-        rightPanelOpen: get().rightPanelOpenByWorkspace[workspaceId] ?? false
+        activeStandaloneFeature: null,
+        rightPanelOpen: get().rightPanelOpenByWorkspace[workspaceId] ?? false,
+        bottomPanelOpen: get().bottomPanelOpenByWorkspace[workspaceId] ?? false
       })
       persist(outer, tab.id)
     },
@@ -207,6 +234,12 @@ export const useWindowStore = create<WindowState>((set, get) => {
         get().openSettings()
         return
       }
+      // 浏览器入口切换整块主内容区。它不是文档式工作内容，因此既不创建外层 Tab，
+      // 也不改变/持久化用户原本所在的工作区；关闭后自然回到原处。
+      if (feature === 'browser') {
+        set({ activeStandaloneFeature: 'browser' })
+        return
+      }
       const existing = get().outer.find((t) => t.kind === 'feature' && t.ref.feature === feature)
       if (existing !== undefined) {
         get().activate(existing.id)
@@ -214,8 +247,12 @@ export const useWindowStore = create<WindowState>((set, get) => {
       }
       const tab: OuterTab = { id: ulid(), kind: 'feature', ref: { feature } }
       const outer = [...get().outer, tab]
-      set({ outer, activeOuterId: tab.id })
+      set({ outer, activeOuterId: tab.id, activeStandaloneFeature: null })
       persist(outer, tab.id)
+    },
+
+    closeStandaloneFeature() {
+      set({ activeStandaloneFeature: null })
     },
 
     close(outerId) {
@@ -225,17 +262,14 @@ export const useWindowStore = create<WindowState>((set, get) => {
       const closed = outer[idx]
       const next = outer.filter((t) => t.id !== outerId)
       // 关掉的是当前 Tab 时,焦点给右邻;没有右邻给左邻 —— 浏览器的习惯
-      const nextActive =
-        activeOuterId === outerId ? (next[idx]?.id ?? next[idx - 1]?.id ?? null) : activeOuterId
+      const nextActive = activeOuterId === outerId ? (next[idx]?.id ?? next[idx - 1]?.id ?? null) : activeOuterId
       const nextWorkspaceId = firstWorkspaceId(next, nextActive)
       set({
         outer: next,
         activeOuterId: nextActive,
         activeWorkspaceId: nextWorkspaceId,
-        rightPanelOpen:
-          nextWorkspaceId === null
-            ? false
-            : get().rightPanelOpenByWorkspace[nextWorkspaceId] ?? false
+        rightPanelOpen: nextWorkspaceId === null ? false : (get().rightPanelOpenByWorkspace[nextWorkspaceId] ?? false),
+        bottomPanelOpen: nextWorkspaceId === null ? false : (get().bottomPanelOpenByWorkspace[nextWorkspaceId] ?? false)
       })
       persist(next, nextActive)
 
@@ -269,12 +303,20 @@ export const useWindowStore = create<WindowState>((set, get) => {
         rightPanelOpen: next,
         ...(workspaceId === null
           ? {}
-          : { rightPanelOpenByWorkspace: { ...get().rightPanelOpenByWorkspace, [workspaceId]: next } })
+          : {
+              rightPanelOpenByWorkspace: {
+                ...get().rightPanelOpenByWorkspace,
+                [workspaceId]: next
+              }
+            })
       })
     },
 
     setRightPanelForWorkspace(workspaceId, open) {
-      const byWorkspace = { ...get().rightPanelOpenByWorkspace, [workspaceId]: open }
+      const byWorkspace = {
+        ...get().rightPanelOpenByWorkspace,
+        [workspaceId]: open
+      }
       set({
         rightPanelOpenByWorkspace: byWorkspace,
         ...(get().activeWorkspaceId === workspaceId ? { rightPanelOpen: open } : {})
@@ -282,7 +324,19 @@ export const useWindowStore = create<WindowState>((set, get) => {
     },
 
     toggleBottomPanel() {
-      set({ bottomPanelOpen: !get().bottomPanelOpen })
+      const next = !get().bottomPanelOpen
+      const workspaceId = get().activeWorkspaceId
+      set({
+        bottomPanelOpen: next,
+        ...(workspaceId === null
+          ? {}
+          : {
+              bottomPanelOpenByWorkspace: {
+                ...get().bottomPanelOpenByWorkspace,
+                [workspaceId]: next
+              }
+            })
+      })
     },
 
     setRightPanelWidth(px) {
@@ -301,7 +355,9 @@ export const useWindowStore = create<WindowState>((set, get) => {
 
     openSettings(page) {
       // 已经开着时不给页码就停在原地 —— 再按一次 ⌘, 不该把用户翻回首页
-      set({ settingsPage: page ?? get().settingsPage ?? DEFAULT_SETTINGS_PAGE })
+      set({
+        settingsPage: page ?? get().settingsPage ?? DEFAULT_SETTINGS_PAGE
+      })
     },
 
     closeSettings() {

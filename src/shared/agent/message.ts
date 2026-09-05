@@ -15,11 +15,19 @@ export interface AgentMessage {
   schemaVersion: 1
 }
 
+/** Durable metadata attached to a Task tool result for UI reconstruction. */
+export interface SubagentResult {
+  childRunId: string
+  status?: 'running' | 'done' | 'error' | 'aborted'
+  summary?: string
+  background?: boolean
+}
+
 export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'thinking'; text: string; opaque?: unknown }
   | { type: 'tool_call'; callId: string; name: string; input: unknown }
-  | { type: 'tool_result'; callId: string; output: ToolOutput; isError: boolean }
+  | { type: 'tool_result'; callId: string; output: ToolOutput; isError: boolean; subagent?: SubagentResult }
   | { type: 'subagent'; callId: string; childRunId: string; summary?: string }
   | { type: 'image'; mime: string; dataRef: string }
   | { type: 'error'; error: AgentError }

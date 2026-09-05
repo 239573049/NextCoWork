@@ -100,11 +100,11 @@ describe('Task · 标记与形状', () => {
     expect(taskTool().needsNetwork).toBe(false)
   })
 
-  /** ★ 参数名逐字照搬 CC:用户粘过来的提示词、网上抄的例子里写的都是这三个 */
-  it('★ 三个参数,名字逐字照搬 Claude Code', () => {
+  /** ★ 核心参数名逐字照搬 CC,并额外支持后台执行开关 */
+  it('★ 参数名逐字照搬 Claude Code,并支持后台执行', () => {
     const props = taskTool().inputSchema.properties ?? {}
 
-    expect(Object.keys(props)).toEqual(['description', 'prompt', 'subagent_type'])
+    expect(Object.keys(props)).toEqual(['description', 'prompt', 'subagent_type', 'run_in_background'])
   })
 })
 
@@ -277,6 +277,30 @@ describe('Task · 传给启动器的东西', () => {
         callId: 'call_42'
       }
     ])
+  })
+
+  it('run_in_background=true 透传后台标记，并把后台结局映射为成功', async () => {
+    const spawn = fakeSpawn({ kind: 'background', childRunId: 'run_1:sub:1' })
+
+    const r = await taskTool().execute(
+      {
+        description: '查配置',
+        prompt: '找出配置读取处',
+        subagent_type: 'researcher',
+        run_in_background: true
+      },
+      ctx({ callId: 'call_bg', spawnSubagent: spawn.fn })
+    )
+
+    expect(r.isError).toBe(false)
+    expect(r.output.content).toContain('started in the background')
+    expect(spawn.seen).toEqual([{
+      subagentType: 'researcher',
+      prompt: '找出配置读取处',
+      description: '查配置',
+      callId: 'call_bg',
+      background: true
+    }])
   })
 
   it('★ 名字不做任何纠正,原样递过去 —— 回落到 general-purpose 是最坏的失败', async () => {

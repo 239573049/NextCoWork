@@ -5,8 +5,20 @@ export function listBrowserTabs(workspaceId: string): Promise<BrowserTab[]> {
   return invoke('browser:list', { workspaceId })
 }
 
-export function openBrowserTab(workspaceId: string, url: string, title?: string, profileId?: string): Promise<BrowserTab> {
-  return invoke('browser:open', { workspaceId, url, ...(title === undefined ? {} : { title }), ...(profileId === undefined ? {} : { profileId }) })
+export function openBrowserTab(
+  workspaceId: string,
+  url: string,
+  title?: string,
+  profileId?: string,
+  clientTabId?: string
+): Promise<BrowserTab> {
+  return invoke('browser:open', {
+    workspaceId,
+    url,
+    ...(title === undefined ? {} : { title }),
+    ...(profileId === undefined ? {} : { profileId }),
+    ...(clientTabId === undefined ? {} : { clientTabId })
+  })
 }
 
 export function navigateBrowserTab(workspaceId: string, tabId: string, url: string): Promise<BrowserTab> {

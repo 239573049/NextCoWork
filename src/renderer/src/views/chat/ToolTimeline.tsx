@@ -1,27 +1,25 @@
 /**
  * L2:运行中的分组折叠时间线。
  *
- * ★ 它**只负责一段连续的过程块**(`segmentize` 切出来的一个 `process` 段),
- * 不知道自己上方或下方有没有正文,也不知道 run 有没有结束 ——
- * 后者由 `running` 入参告知,前者根本不该由它关心。
+ * ★ 它**只负责一段连续的过程块**，不关心自己上方或下方有没有正文。
+ * 每个连续工具组在所有调用拿到成功结果后自动收起；运行中的组仍保持可见。
  * 这条边界让同一个组件能同时服务于「已提交消息」和「还在流的块」两条路径。
  */
 import { ChevronRight } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
 import { formatDuration } from "../../../../shared/agent/duration";
-import type { ToolCallState } from "../../../../shared/agent/transcript";
+import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
 import {
-  computeAutoCollapsed,
   groupDuration,
-  groupItems,
+  groupConsecutiveTools,
   groupKey,
-  groupTitle,
+  isCompletedToolGroup,
   shapeOfItem,
   statusOfItem,
   type TimelineItem,
 } from "../../../../shared/domain/tool-timeline";
 import { cn } from "../../lib/cn";
-import { useI18n } from "../../i18n";
+import { useI18n, type TranslationKey } from "../../i18n";
 import { SubagentNode, ThinkingBlock, ToolCallCard } from "./parts";
 import { ShapeStrip } from "./ToolIcon";
 import { useGroupCollapse } from "./useGroupCollapse";
@@ -29,19 +27,19 @@ import { useGroupCollapse } from "./useGroupCollapse";
 export function ToolTimeline({
   items,
   tools,
-  running,
+  subagents = {},
   focusCallId,
 }: {
   items: readonly TimelineItem[];
   tools: Readonly<Record<string, ToolCallState>>;
-  running: boolean;
+  subagents?: Readonly<Record<string, SubagentState>>;
   /** 从文件审查回跳时定位到的那一行;所在组强制展开并滚入视口 */
   focusCallId?: string | undefined;
 }): ReactNode {
   if (items.length === 0) return null;
 
-  const groups = groupItems(items, tools);
-  const autoCollapsed = computeAutoCollapsed({ groups, tools, running });
+  const groups = groupConsecutiveTools(items);
+  const autoCollapsed = groups.map((group) => isCompletedToolGroup(group, tools));
 
   return (
     <div className="flex flex-col gap-2" data-testid="tool-timeline">
@@ -52,6 +50,7 @@ export function ToolTimeline({
           key={groupKey(g)}
           items={g}
           tools={tools}
+          subagents={subagents}
           autoCollapsed={autoCollapsed[i] ?? false}
           focusCallId={focusCallId}
         />
@@ -63,11 +62,13 @@ export function ToolTimeline({
 function ToolGroup({
   items,
   tools,
+  subagents,
   autoCollapsed,
   focusCallId,
 }: {
   items: readonly TimelineItem[];
   tools: Readonly<Record<string, ToolCallState>>;
+  subagents: Readonly<Record<string, SubagentState>>;
   autoCollapsed: boolean;
   focusCallId: string | undefined;
 }): ReactNode {
@@ -95,7 +96,7 @@ function ToolGroup({
   if (items.length === 1 && !collapsed) {
     return (
       <div ref={ref}>
-        <TimelineRow item={items[0]!} tools={tools} />
+        <TimelineRow item={items[0]!} tools={tools} subagents={subagents} />
       </div>
     );
   }
@@ -118,7 +119,7 @@ function ToolGroup({
       />
       <div className="flex flex-col gap-1.5 pl-2">
         {items.map((it) => (
-          <TimelineRow key={it.key} item={it} tools={tools} />
+          <TimelineRow key={it.key} item={it} tools={tools} subagents={subagents} />
         ))}
       </div>
     </div>
@@ -154,6 +155,11 @@ function GroupHeader({
   const { t } = useI18n();
   const ms = groupDuration(items, tools);
   const shapes = [...new Set(items.map((it) => shapeOfItem(it, tools)))];
+  const counts = new Map<typeof shapes[number], number>();
+  for (const shape of items.map((item) => shapeOfItem(item, tools))) {
+    counts.set(shape, (counts.get(shape) ?? 0) + 1);
+  }
+  const title = shapes.map((shape) => t(groupTitleKey(shape), { count: counts.get(shape) ?? 0 })).join(" · ");
   const errorCount = items.filter(
     (it) => statusOfItem(it, tools) === "error",
   ).length;
@@ -178,7 +184,7 @@ function GroupHeader({
         )}
       />
       <ShapeStrip shapes={shapes} />
-      <span className="min-w-0 truncate">{groupTitle(items, tools)}</span>
+      <span className="min-w-0 truncate">{title}</span>
       {runningCount > 0 && (
         <span className="shrink-0 text-accent">
           {t("chat.tool.runningStatus")}
@@ -197,19 +203,36 @@ function GroupHeader({
   );
 }
 
+const GROUP_TITLE_KEYS = {
+  reasoning: "chat.tool.group.reasoning",
+  read: "chat.tool.group.read",
+  mutate: "chat.tool.group.mutate",
+  search: "chat.tool.group.search",
+  command: "chat.tool.group.command",
+  network: "chat.tool.group.network",
+  orchestration: "chat.tool.group.orchestration",
+  external: "chat.tool.group.external",
+} as const satisfies Record<ReturnType<typeof shapeOfItem>, TranslationKey>;
+
+function groupTitleKey(shape: ReturnType<typeof shapeOfItem>): TranslationKey {
+  return GROUP_TITLE_KEYS[shape];
+}
+
 /** 三种块的分派。与改造前 `Thread.tsx` 的 PartBlock 保持同构。 */
 function TimelineRow({
   item,
   tools,
+  subagents,
 }: {
   item: TimelineItem;
   tools: Readonly<Record<string, ToolCallState>>;
+  subagents: Readonly<Record<string, SubagentState>>;
 }): ReactNode {
   switch (item.kind) {
     case "thinking":
       return <ThinkingBlock text={item.text} streaming={item.streaming} />;
     case "subagent":
-      return <SubagentNode summary={item.summary} />;
+      return <SubagentNode summary={item.summary} state={item.state ?? subagents[item.callId]} />;
     case "tool":
       return (
         <ToolCallCard

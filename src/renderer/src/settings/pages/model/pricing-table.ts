@@ -17,9 +17,47 @@ import type {
   PriceTier,
   PriceWindow
 } from '../../../../../shared/domain/pricing'
+import { findPricing } from '../../../../../shared/domain/pricing'
 import { findPreset } from '../../../../../shared/domain/presets'
 
 const SYMBOL: Readonly<Record<Currency, string>> = { USD: '$', CNY: '¥' }
+
+export interface CatalogPricingTarget {
+  id: string
+  pricingModelId?: string
+  providerIds: readonly string[]
+}
+
+/**
+ * Pick the price that the model-management row should show at `at`.
+ *
+ * The catalogue is manufacturer-first and exists even when no AI provider is
+ * configured, so its stable headline price is the current generic official
+ * price.  A connection-specific row is only a fallback for models that do not
+ * have a generic price yet; otherwise binding two regional connections would
+ * make the displayed currency depend on incidental binding order.  Keeping the
+ * effective-date check here is important for announced transitions such as
+ * Gemini 3.8 Flash's 2027 price change.
+ */
+export function selectCatalogPricing(
+  rows: readonly ModelPricing[],
+  model: CatalogPricingTarget,
+  at: number
+): ModelPricing | undefined {
+  const modelId = model.pricingModelId ?? model.id
+
+  const genericRows = rows.filter((row) => row.providerId === null)
+  const generic = findPricing(genericRows, null, modelId, at)
+  if (generic !== null) return generic
+
+  for (const providerId of model.providerIds) {
+    const providerRows = rows.filter((row) => row.providerId === providerId)
+    const override = findPricing(providerRows, providerId, modelId, at)
+    if (override !== null) return override
+  }
+
+  return undefined
+}
 
 /**
  * 每百万 token 的费率。

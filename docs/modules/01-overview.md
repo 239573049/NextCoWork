@@ -135,7 +135,7 @@ send('agent:run', RunRequest)    ──┴──▶    ├─ runs.create(req) �
                                                             sseFromResponse → decodeAnthropic
                                                         BlockAccumulator.apply(逐事件)
                                                         commit(assistant)             落盘边界
-                                                        executeAll(串行) → tool_result
+                                                        executeAll(并行) → tool_result
 on('agent:event')  ◀── RunPump 合批发信封  ◀── handle.emit（seq 单调）
   hasSeqGap? → attachRun 重放
   rAF 再缓冲 → applyEnvelope

@@ -14,6 +14,7 @@
  */
 import type { AgentMessage } from '../../../shared/agent/message'
 import type { ToolInfo } from '../../../shared/agent/tool'
+import type { ResolvedModelThinking } from '../../../shared/domain/model-runtime'
 
 export interface CanonicalRequest {
   /** ★ ModelAlias.alias,**不是**上游真实模型名 —— 路由器负责翻译(方案 §5.2) */
@@ -29,6 +30,10 @@ export interface CanonicalRequest {
    * 「不支持该参数的模型将自动忽略此设置」。
    */
   thinkingBudget?: number
+  /** Provider-neutral Think/Reasoning settings resolved from the model declaration. */
+  reasoning?: ResolvedModelThinking
+  /** Original user choice, resolved again for each provider during failover. */
+  thinkingLevel?: import('../../../shared/agent/run-request').ThinkingLevel
   temperature?: number
   stopSequences?: string[]
 }
@@ -40,6 +45,10 @@ export interface CanonicalRequest {
  */
 export interface UpstreamRequestContext {
   workspaceId: string
+  /** Stable across retries/provider switches for one logical user run. */
+  runId?: string
+  /** Lets diagnostics connect an attempt to its transcript without storing content. */
+  sessionId?: string
 }
 
 /**

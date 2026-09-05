@@ -6,8 +6,6 @@
  * kind」这件事,不是各自的领域模型(方案 §十)。
  */
 import {
-  FileText,
-  Image as ImageIcon,
   PenTool,
   type LucideIcon,
 } from "lucide-react";
@@ -26,6 +24,7 @@ import { TerminalView } from "./terminal/TerminalView";
 import { BrowserView } from "./browser/BrowserView";
 import { useI18n } from "../i18n";
 import { BrowserFeature } from "./browser/BrowserFeature";
+import { DocumentView } from './files/DocumentView';
 
 export interface InnerViewProps {
   tab: InnerTab;
@@ -55,13 +54,7 @@ export function InnerView({
     case "terminal":
       return <TerminalView tab={tab} workspace={workspace} />;
     case "doc":
-      return (
-        <Placeholder
-          icon={FileText}
-          title={t("view.document")}
-          step={t("view.shellOnly")}
-        />
-      );
+      return <DocumentView key={`${workspace.id}:${tab.ref.path}`} workspaceId={workspace.id} path={tab.ref.path} />;
     case "draw":
       return (
         <Placeholder
@@ -73,13 +66,7 @@ export function InnerView({
     case "browser":
       return <BrowserView tab={tab} workspace={workspace} />;
     case "preview":
-      return (
-        <Placeholder
-          icon={ImageIcon}
-          title={t("view.preview")}
-          step={t("view.previewStep")}
-        />
-      );
+      return <DocumentView key={`${workspace.id}:${tab.ref.path}`} workspaceId={workspace.id} path={tab.ref.path} />;
     case "files":
       // key 挂子树根:换根等于换一棵树,展开状态和缓存都必须重来
       return <FilesTab key={tab.ref.path} tab={tab} workspace={workspace} />;

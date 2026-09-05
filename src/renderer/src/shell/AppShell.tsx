@@ -20,7 +20,6 @@ import { PanelLeft } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { Bootstrap } from "../../../shared/domain/bootstrap";
 import type { AppSettings } from "../../../shared/domain/settings";
-import { INNER_TAB_MENU, tabsInPane } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
 import type { SessionListItem } from "../../../shared/domain/session";
 import { IconButton } from "../components/ui/IconButton";
@@ -28,16 +27,19 @@ import { cn } from "../lib/cn";
 import { useI18n } from "../i18n";
 import { usePresence } from "../lib/usePresence";
 import { pickWorkspace } from "../services/app";
-import { listSessions } from "../services/sessions";
+import { deleteSession, listSessions } from "../services/sessions";
 import { on } from "../services/ipc";
 import { SettingsOverlay } from "../settings/SettingsOverlay";
 import { useTabsStore } from "../stores/tabs";
 import { useWindowStore } from "../stores/window";
-import { FeatureView, InnerView } from "../views/registry";
-import { AllTabsMenu, InnerTabBar } from "./InnerTabBar";
+import { FeatureView } from "../views/registry";
+import { BrowserFeature } from "../views/browser/BrowserFeature";
 import { OuterTabBar } from "./OuterTabBar";
-import { BottomPanel, RightPanel, useSeedPane } from "./Panels";
 import { Sidebar } from "./Sidebar";
+import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents';
+import { DocumentDialogs } from '../views/files/DocumentDialogs';
+import { DockRoot } from './Dock';
+import type { DockNode } from '../../../shared/domain/dock';
 
 /**
  * 三格面板开合的时长。**三处必须同一个数** —— 侧边栏收起的同时,主面板的左边界
@@ -71,17 +73,15 @@ export function AppShell({
     outer,
     activeOuterId,
     activeWorkspaceId,
+    activeStandaloneFeature,
     sidebarCollapsed,
     rightPanelOpen,
     bottomPanelOpen,
-    rightPanelWidth,
-    bottomPanelHeight,
     settingsPage,
   } = useWindowStore();
   const win = useWindowStore();
   const tabs = useTabsStore();
   const ensureTabs = useTabsStore((s) => s.ensure);
-  const openTab = useTabsStore((s) => s.open);
 
   /**
    * 三格面板都是条件挂载的,直接 `{open && <Panel/>}` 收起时节点当场消失,
@@ -90,12 +90,22 @@ export function AppShell({
    * 拖分隔条时是假的(否则每拖一帧都排一次插值,手感像拉皮筋)。
    */
   const sidebar = usePresence(!sidebarCollapsed, PANEL_MS);
-  const bottom = usePresence(bottomPanelOpen, PANEL_MS);
-  const right = usePresence(rightPanelOpen, PANEL_MS);
 
   const activeOuter = outer.find((t) => t.id === activeOuterId);
-  const workspaceSurface = activeOuter?.kind === "workspace";
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const firstGroupId = (node: DockNode): string | null => node.type === 'group' ? node.id : firstGroupId(node.first);
+  const toggleDockEdge = (edge: 'bottom' | 'right'): void => {
+    if (activeWorkspaceId === null) return;
+    const opening = edge === 'bottom' ? !bottomPanelOpen : !rightPanelOpen;
+    if (edge === 'bottom') win.toggleBottomPanel(); else win.toggleRightPanel();
+    if (!opening) return;
+    const dock = tabs.dockOf(activeWorkspaceId);
+    const hasEdge = dock.tabs.some((tab) => tab.pane === edge);
+    if (hasEdge) return;
+    const base = firstGroupId(dock.root);
+    if (base === null) return;
+    tabs.splitAndOpenDock(activeWorkspaceId, base, edge === 'bottom' ? 'down' : 'right', edge === 'bottom' ? 'terminal' : 'files', edge);
+  };
   const [sessionItems, setSessionItems] = useState<SessionListItem[]>([]);
 
   useEffect(() => {
@@ -104,10 +114,14 @@ export function AppShell({
       return;
     }
     let alive = true;
+    let latest = 0;
     const load = (): void => {
+      const request = ++latest;
       void listSessions(activeWorkspaceId)
         .then((items) => {
-          if (alive) setSessionItems(items);
+          if (!alive || request !== latest) return;
+          setSessionItems(items);
+          for (const item of items) useTabsStore.getState().syncSessionTitle(activeWorkspaceId, item.id, item.title);
         })
         .catch((err: unknown) => console.error("[sessions] 加载列表失败", err));
     };
@@ -156,33 +170,6 @@ export function AppShell({
     activeWorkspaceId === null ? null : tabs.stateOf(activeWorkspaceId);
   const activeInner = inner?.tabs.find((t) => t.id === inner.activeTabId);
 
-  /*
-    ★ 三条 Tab 条从**同一张表**里切出来(见 shared/domain/tab.ts 的 `InnerTabBase.pane`)。
-    过去这里直接把 `inner.tabs` 整个喂给主区那条 —— 现在底部和右边也有 Tab 了,
-    不切的话终端会跟对话挤在最上面那条里。
-  */
-  const mainTabs = inner === null ? [] : tabsInPane(inner.tabs, "main");
-  const bottomTabs = inner === null ? [] : tabsInPane(inner.tabs, "bottom");
-  const rightTabs = inner === null ? [] : tabsInPane(inner.tabs, "right");
-
-  // 面板掀开时那一格还空着,就按参考实现补上它默认那一个:底部是终端,右边是文件树
-  useSeedPane({
-    open: bottomPanelOpen,
-    workspaceId: activeWorkspaceId,
-    pane: "bottom",
-    kind: "terminal",
-    count: bottomTabs.length,
-    openTab,
-  });
-  useSeedPane({
-    open: rightPanelOpen,
-    workspaceId: activeWorkspaceId,
-    pane: "right",
-    kind: "files",
-    count: rightTabs.length,
-    openTab,
-  });
-
   /**
    * 关掉面板里的一个 Tab。**关掉最后一个 = 收起这个面板。**
    *
@@ -191,14 +178,16 @@ export function AppShell({
    * 用户的本意。两个 store 的写在同一个事件里,React 批成一次 render,
    * 所以 `useSeedPane` 那边看到的是「已经关了」,不会又补一个回来。
    */
-  const closePaneTab = (pane: "bottom" | "right", id: string): void => {
-    if (activeWorkspaceId === null) return;
-    const last = tabs.tabsOf(activeWorkspaceId, pane).length <= 1;
-    tabs.close(activeWorkspaceId, id);
-    if (!last) return;
-    if (pane === "bottom") win.toggleBottomPanel();
-    else win.toggleRightPanel();
+
+  const closeOuterTab = async (id: string): Promise<void> => {
+    const target = useWindowStore.getState().outer.find((tab) => tab.id === id);
+    if (target?.kind === 'workspace') {
+      if (!(await confirmDocumentChanges(target.ref.workspaceId))) return;
+      useDocumentsStore.getState().release(target.ref.workspaceId);
+    }
+    win.close(id);
   };
+
 
   return (
     <div className="app-ground flex h-full bg-app p-2">
@@ -226,7 +215,8 @@ export function AppShell({
             chatTabs={inner?.tabs.filter((t) => t.kind === "chat") ?? []}
             sessions={sessionItems}
             activeFeature={
-              activeOuter?.kind === "feature" ? activeOuter.ref.feature : null
+              activeStandaloneFeature ??
+              (activeOuter?.kind === "feature" ? activeOuter.ref.feature : null)
             }
             activeSessionId={
               activeInner?.kind === "chat" ? activeInner.ref.sessionId : null
@@ -254,34 +244,72 @@ export function AppShell({
                 tabs.openSession(activeWorkspaceId, sessionId, item?.title);
               }
             }}
+            onDeleteSession={async (sessionId) => {
+              if (activeWorkspaceId === null) return;
+
+              const before = tabs.stateOf(activeWorkspaceId);
+              const activeTab = before.tabs.find((tab) => tab.id === before.activeTabId);
+              const deletingActive =
+                activeTab?.kind === "chat" && activeTab.ref.sessionId === sessionId;
+
+              // listSessions 已按 updatedAt 倒序。删除当前项时优先取它下面一项，
+              // 没有则取上面一项；这样侧边栏焦点移动和列表视觉顺序一致。
+              const deletedIndex = sessionItems.findIndex((item) => item.id === sessionId);
+
+              await deleteSession(sessionId);
+
+              // 删除后重新读一次，而不是只信当前 render 的 sessionItems：创建/复制
+              // 会话的 sessions:changed 可能还在 IPC 往返中，旧闭包可能少一条。
+              const remaining = await listSessions(activeWorkspaceId);
+              const replacement =
+                remaining[Math.min(Math.max(deletedIndex, 0), remaining.length - 1)] ?? null;
+
+              // 先打开/激活替代会话，再关掉旧 Tab。这样 close() 永远能看到一个
+              // 可接棒的主区 Tab，不会触发“最后一个 Tab 自动补新对话”。
+              if (deletingActive && replacement !== null) {
+                tabs.openSession(activeWorkspaceId, replacement.id, replacement.title);
+              }
+
+              const staleTabIds = tabs
+                .stateOf(activeWorkspaceId)
+                .tabs.filter(
+                  (tab) => tab.kind === "chat" && tab.ref.sessionId === sessionId,
+                )
+                .map((tab) => tab.id);
+              for (const tabId of staleTabIds) tabs.close(activeWorkspaceId, tabId);
+            }}
             onCollapse={win.toggleSidebar}
           />
         </div>
       )}
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
-        {/*
+        {activeStandaloneFeature === "browser" ? (
+          <BrowserFeature onClose={win.closeStandaloneFeature} />
+        ) : (
+          <>
+            {/*
           34px 的条 + `items-end` 让 30px 的 Tab 顶边正好离条顶 4px —— 这两个数是
           量出来的,不是调出来的:参考图三张都是「窗口边 8px、条 8..41、激活 Tab 12..41」。
           原本这里是 38px,Tab 就沉到离条顶 8px,整条 Tab 看着比参考低一截。
           改这个数之前先去量图(scripts/crop.mjs + 竖线扫描),别凭手感。
           侧边栏表头是同一个数,两边必须一起改,否则红绿灯和 Tab 底边错位。
         */}
-        <div
-          className={cn(
-            // ★ `chrome` 不是 `surface`:深色下两者同值,浅色下外层 Tab 条(#e8e4dd)
-            // **比侧边栏(#f6f4ef)更暗** —— 量自 docs/image-new。用 surface 会让整条
-            // Tab 在浅色主题下浮起来,和参考实现的层次正好相反。
-            "app-drag flex h-[34px] shrink-0 items-end gap-1.5 bg-chrome px-2",
-            // 侧边栏收起时红绿灯落到这条上,得给它让出位置。
-            // 78 = 参考里按钮盒左边 x86 减去主面板左边 x8(见下面那段量数)
-            // 内边距和侧边栏宽度同时同速地走,红绿灯下面才不会先空出一块再被填上
-            "transition-[padding-left] duration-280 ease-panel",
-            sidebarCollapsed && "pl-[78px]",
-          )}
-        >
-          {sidebarCollapsed && (
-            /*
+            <div
+              className={cn(
+                // ★ `chrome` 不是 `surface`:深色下两者同值,浅色下外层 Tab 条(#e8e4dd)
+                // **比侧边栏(#f6f4ef)更暗** —— 量自 docs/image-new。用 surface 会让整条
+                // Tab 在浅色主题下浮起来,和参考实现的层次正好相反。
+                "app-drag flex h-[34px] shrink-0 items-end gap-1.5 bg-chrome px-2",
+                // 侧边栏收起时红绿灯落到这条上,得给它让出位置。
+                // 78 = 参考里按钮盒左边 x86 减去主面板左边 x8(见下面那段量数)
+                // 内边距和侧边栏宽度同时同速地走,红绿灯下面才不会先空出一块再被填上
+                "transition-[padding-left] duration-280 ease-panel",
+                sidebarCollapsed && "pl-[78px]",
+              )}
+            >
+              {sidebarCollapsed && (
+                /*
               ★ 这颗按钮的四个参数全是量出来的,别按手感调 —— 用户就是拿它跟参考对不齐
               提的意见。量 docs/image-new/image.png(收起态):
 
@@ -298,152 +326,66 @@ export function AppShell({
               对照组是同一套图里展开态的那颗(image copy 2.png x=274):无底色、
               笔画 #7e7f7e = `icon` —— 证明这套 token 的差别就是「开着 / 没开」。
             */
-            <IconButton
-              label={t("nav.expandSidebar")}
-              size={28}
-              width={38}
-              active
-              onClick={win.toggleSidebar}
-              // reveal-delayed:延迟到侧边栏收完再淡入,否则和侧边栏里那颗
-              // 「收起」按钮会同屏出现 280ms —— 它俩是同一个控件的两个位置。
-              className="reveal-delayed self-center rounded-pill"
-            >
-              <PanelLeft size={16} />
-            </IconButton>
-          )}
-          <OuterTabBar
-            tabs={outer}
-            activeId={activeOuterId}
-            workspaces={workspaces}
-            runningWorkspaceIds={runningWorkspaceIds}
-            onActivate={win.activate}
-            onClose={win.close}
-            onMove={win.move}
-            onOpenWorkspace={win.openWorkspace}
-            onPickWorkspace={() => {
-              void pickWorkspace().then((w) => {
-                if (w !== null) win.openWorkspace(w.id);
-              });
-            }}
-            onCreateWorkspace={() => {
-              // 「新建」和「打开」目前是同一个动作:工作区就是一个目录,
-              // 而目录选择必须走主进程 dialog(渲染层永不指定任意路径,方案 §9)
-              void pickWorkspace().then((w) => {
-                if (w !== null) win.openWorkspace(w.id);
-              });
-            }}
-            rightPanelOpen={rightPanelOpen}
-            bottomPanelOpen={bottomPanelOpen}
-            onToggleRightPanel={win.toggleRightPanel}
-            onToggleBottomPanel={win.toggleBottomPanel}
-          />
-        </div>
+                <IconButton
+                  label={t("nav.expandSidebar")}
+                  size={28}
+                  width={38}
+                  active
+                  onClick={win.toggleSidebar}
+                  // reveal-delayed:延迟到侧边栏收完再淡入,否则和侧边栏里那颗
+                  // 「收起」按钮会同屏出现 280ms —— 它俩是同一个控件的两个位置。
+                  className="reveal-delayed self-center rounded-pill"
+                >
+                  <PanelLeft size={16} />
+                </IconButton>
+              )}
+              <OuterTabBar
+                tabs={outer}
+                activeId={activeOuterId}
+                workspaces={workspaces}
+                runningWorkspaceIds={runningWorkspaceIds}
+                onActivate={win.activate}
+                onClose={(id) => { void closeOuterTab(id); }}
+                onMove={win.move}
+                onOpenWorkspace={win.openWorkspace}
+                onPickWorkspace={() => {
+                  void pickWorkspace().then((w) => {
+                    if (w !== null) win.openWorkspace(w.id);
+                  });
+                }}
+                onCreateWorkspace={() => {
+                  // 「新建」和「打开」目前是同一个动作:工作区就是一个目录,
+                  // 而目录选择必须走主进程 dialog(渲染层永不指定任意路径,方案 §9)
+                  void pickWorkspace().then((w) => {
+                    if (w !== null) win.openWorkspace(w.id);
+                  });
+                }}
+                rightPanelOpen={rightPanelOpen}
+                bottomPanelOpen={bottomPanelOpen}
+                onToggleRightPanel={() => toggleDockEdge('right')}
+                onToggleBottomPanel={() => toggleDockEdge('bottom')}
+              />
+            </div>
 
-        {/*
+            {/*
           内容区分成「左列 + 右栏」,底部面板只压在**左列**下面 ——
           和编辑器类应用一致:右侧文件栏是通栏的,终端不该把它顶掉。
         */}
-        <div className="flex min-h-0 flex-1">
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-            {activeOuter?.kind === "feature" ? (
-              // feature Tab 没有内层 Tab 条 —— 它不属于任何工作区
-              <FeatureView feature={activeOuter.ref.feature} />
-            ) : workspace === undefined ||
-              inner === null ||
-              activeWorkspaceId === null ? (
-              <div className="flex min-h-0 flex-1 items-center justify-center text-[13px] text-fg-faint">
-                {t("app.openWorkspace")}
-              </div>
-            ) : (
-              <>
-                <InnerTabBar
-                  tabs={mainTabs}
-                  activeId={inner.activeTabId}
-                  runningSessionIds={runningSessionIds}
-                  menu={INNER_TAB_MENU}
-                  trailing={
-                    <AllTabsMenu
-                      tabs={mainTabs}
-                      activeId={inner.activeTabId}
-                      onActivate={(id) => tabs.activate(activeWorkspaceId, id)}
-                    />
-                  }
-                  onActivate={(id) => tabs.activate(activeWorkspaceId, id)}
-                  onClose={(id) => tabs.close(activeWorkspaceId, id)}
-                  onMove={(from, to) =>
-                    tabs.move(activeWorkspaceId, from, to, "main")
-                  }
-                  onOpen={(kind) => tabs.open(activeWorkspaceId, kind, "main")}
-                />
-                {activeInner !== undefined && (
-                  <InnerView
-                    key={activeInner.id}
-                    tab={activeInner}
-                    workspace={workspace}
-                    fallbackModel={settings.defaultModel}
-                  />
-                )}
-              </>
-            )}
-
-            {workspaceSurface && bottom.mounted && (
-              <BottomPanel
-                open={bottom.shown}
-                animating={bottom.animating}
-                workspace={workspace ?? null}
-                tabs={bottomTabs}
-                activeId={inner?.bottomActiveTabId ?? null}
-                runningSessionIds={runningSessionIds}
-                fallbackModel={settings.defaultModel}
-                size={bottomPanelHeight}
-                onResize={win.setBottomPanelHeight}
-                onActivate={(id) =>
-                  activeWorkspaceId !== null &&
-                  tabs.activate(activeWorkspaceId, id)
-                }
-                onCloseTab={(id) => closePaneTab("bottom", id)}
-                onMove={(from, to) =>
-                  activeWorkspaceId !== null &&
-                  tabs.move(activeWorkspaceId, from, to, "bottom")
-                }
-                onOpen={(kind) =>
-                  activeWorkspaceId !== null &&
-                  tabs.open(activeWorkspaceId, kind, "bottom")
-                }
-                onClosePanel={win.toggleBottomPanel}
-              />
-            )}
-          </div>
-
-          {workspaceSurface && right.mounted && (
-            <RightPanel
-              open={right.shown}
-              animating={right.animating}
-              workspace={workspace ?? null}
-              tabs={rightTabs}
-              activeId={inner?.rightActiveTabId ?? null}
-              runningSessionIds={runningSessionIds}
-              fallbackModel={settings.defaultModel}
-              size={rightPanelWidth}
-              onResize={win.setRightPanelWidth}
-              onActivate={(id) =>
-                activeWorkspaceId !== null &&
-                tabs.activate(activeWorkspaceId, id)
-              }
-              onCloseTab={(id) => closePaneTab("right", id)}
-              onMove={(from, to) =>
-                activeWorkspaceId !== null &&
-                tabs.move(activeWorkspaceId, from, to, "right")
-              }
-              onOpen={(kind) =>
-                activeWorkspaceId !== null &&
-                tabs.open(activeWorkspaceId, kind, "right")
-              }
-              onClosePanel={win.toggleRightPanel}
-            />
-          )}
-        </div>
+            <div className="flex min-h-0 flex-1">
+              {activeOuter?.kind === "feature" ? (
+                <FeatureView feature={activeOuter.ref.feature} />
+              ) : workspace === undefined || activeWorkspaceId === null ? (
+                <div className="flex min-h-0 flex-1 items-center justify-center text-[13px] text-fg-faint">
+                  {t("app.openWorkspace")}
+                </div>
+              ) : (
+                <DockRoot workspace={workspace} fallbackModel={settings.defaultModel} runningSessionIds={runningSessionIds} rightVisible={rightPanelOpen} bottomVisible={bottomPanelOpen} />
+              )}
+            </div>
+          </>
+        )}
       </main>
+      <DocumentDialogs />
 
       {/*
         ★ 渲染在根 div **之内**,不 portal —— 见 SettingsOverlay 文件头:

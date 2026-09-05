@@ -243,9 +243,9 @@ describe('TOOLS_NEEDING_NETWORK', () => {
 describe('permissionFacts', () => {
   it('三档说三种话', () => {
     expect(permissionFacts('ask', true)).toContain('Permission mode: ask')
-    expect(permissionFacts('ask', true)).toContain('DENIED')
-    expect(permissionFacts('auto', true)).toContain('DENIED') // 破坏性操作那一档
-    expect(permissionFacts('full', true)).not.toContain('DENIED')
+    expect(permissionFacts('ask', true)).toContain('wait for user approval')
+    expect(permissionFacts('auto', true)).toContain('wait for user approval')
+    expect(permissionFacts('full', true)).not.toContain('wait for user approval')
   })
 
   it('★ 读永远放行 —— 三档都不能把读说成要审批', () => {
@@ -268,7 +268,7 @@ describe('permissionFacts', () => {
         const write = evaluate({ mode, readOnly: false, destructive: true, webSearch })
         const line = said.split('\n').find((l) => l.startsWith('- Writing files')) ?? ''
 
-        expect(line.includes('DENIED')).toBe(write.kind === 'ask')
+        expect(line.includes('wait for user approval')).toBe(write.kind === 'ask')
         expect(line.includes('run without asking')).toBe(write.kind === 'allow')
       }
     }

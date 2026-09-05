@@ -23,6 +23,7 @@ import { todoWriteTool } from './todo'
 import { webFetchTool } from './web'
 import { webSearchTool } from './web-search'
 import { browserTools } from './browser'
+import { askUserTool, planApprovalTool } from './interaction'
 
 export function builtinTools(): ToolRegistration[] {
   return [
@@ -39,6 +40,8 @@ export function builtinTools(): ToolRegistration[] {
     webFetchTool,
     skillTool,
     webSearchTool,
+    askUserTool,
+    planApprovalTool,
     ...browserTools,
     /*
       ★ `Task` 是唯一一个**每次现造**的内置工具:它的 description 里逐字带着

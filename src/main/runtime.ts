@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import type { RunRequest } from '../shared/agent/run-request'
 import { MAX_DEPTH } from '../shared/agent/run-request'
 import type { RunStatus } from '../shared/agent/event'
-import { visibleText } from '../shared/agent/message'
+import { userMessage, visibleText, type AgentMessage, type SubagentResult } from '../shared/agent/message'
 import type { AgentDefinition } from '../shared/domain/agent-def'
 import { minPermission } from '../shared/agent/permission'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../shared/domain/workspace'
@@ -25,7 +25,8 @@ import type { ApproveFn } from './kernel/agent-session'
 import { AgentSession } from './kernel/agent-session'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
-import { ASK_NOT_WIRED_YET, TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
+import { TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
+import { interactions } from './kernel/interaction-gate'
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
@@ -49,12 +50,21 @@ import { BUILTIN_PROVIDER_ID, endpointFor, findPreset } from '../shared/domain/p
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
+import { listResolvedModels } from './state/model-bindings'
+import { PRICING_SEED } from '../shared/domain/pricing-seed'
+import { findPricing, priceOf } from '../shared/domain/pricing'
+import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
+import type { UnpricedUsageAttempt } from '../shared/domain/usage'
+import { SessionTitleGenerator } from './session-title'
+import type { CanonicalRequest } from './kernel/upstream/canonical'
+import { ulid } from '../shared/util/id'
 
 let host: KernelHost | null = null
 let router: UpstreamRouter | null = null
 let tools: ToolRegistry | null = null
 let mcp: McpManager | null = null
 let seeded = false
+let sessionTitles: SessionTitleGenerator | null = null
 
 /**
  * 谁来广播 MCP 的状态变化。
@@ -74,13 +84,14 @@ let mcpOnChange: ((id: string) => void) | null = null
  * 会话持久化发生在 runtime，但广播属于 Electron IPC 层。和 MCP 状态
  * 广播一样用一个零 Electron 的注入回调，避免 runtime 反向依赖窗口模块。
  */
-let sessionOnChange: ((workspaceId: string) => void) | null = null
+let sessionOnChange: ((workspaceId: string, renamed?: { sessionId: string; title: string }) => void) | null = null
 
 /**
  * 装宿主。**必须在第一个 run 之前**,由 `main/index.ts` 在 `app.whenReady()` 里调用 ——
  * `safeStorage` 与 `net.fetch` 都要求 app ready。
  */
 export function installHost(h: KernelHost): void {
+  shutdownSessionTitles()
   host = h
   /*
     ★ 搜索服务的 Key 访问器。装在这里(而不是 `initRuntime`)是因为
@@ -115,7 +126,7 @@ export function getHost(): KernelHost {
  */
 const providerConfig: ProviderConfigSource = {
   providers: () => store.listProviders(),
-  aliases: () => store.listAliases(),
+  aliases: () => listResolvedModels(),
   failoverEnabled: () => store.getSettings().gateway.failover
 }
 
@@ -280,8 +291,74 @@ export function ensureSeeded(): void {
 
 export function getRouter(): UpstreamRouter {
   seed()
-  router ??= new UpstreamRouter(getHost(), providerConfig)
+  router ??= new UpstreamRouter(getHost(), providerConfig, {
+    onUsageAttempt: persistUsageAttempt
+  })
   return router
+}
+
+function getSessionTitles(): SessionTitleGenerator {
+  if (sessionTitles !== null) return sessionTitles
+  // Reuse protocol/configuration/usage handling with independent provider health:
+  // a failed auxiliary request must not affect the Agent's provider selection.
+  const generator = new SessionTitleGenerator({
+    upstream: new UpstreamRouter(getHost(), providerConfig, {
+      onUsageAttempt: (record) => {
+        if (sessionTitles === generator) persistUsageAttempt(record)
+      }
+    }),
+    getSession: store.getSession,
+    putSession: store.putSession,
+    onChange: (session) => sessionOnChange?.(session.workspaceId, { sessionId: session.id, title: session.title }),
+    logger: getHost().logger
+  })
+  sessionTitles = generator
+  return generator
+}
+
+export function shutdownSessionTitles(): void {
+  sessionTitles?.clear()
+  sessionTitles = null
+}
+
+/**
+ * Freeze pricing at the attempt boundary. Later seed updates must never change
+ * historical spend, and an unavailable rate remains NULL rather than silently
+ * turning into a plausible-looking zero.
+ */
+export function resolveUsagePricingModelId(upstreamModel: string): string {
+  const catalogModel = findBuiltinModel(upstreamModel)
+  return catalogModel?.pricingModelId ?? catalogModel?.id ?? upstreamModel
+}
+
+function persistUsageAttempt(record: UnpricedUsageAttempt): void {
+  const pricingModelId = resolveUsagePricingModelId(record.upstreamModel)
+  const pricing = findPricing(PRICING_SEED, record.providerId, pricingModelId, record.at)
+  const priced =
+    pricing === null
+      ? null
+      : priceOf(
+          pricing,
+          {
+            inputTokens: record.inputTokens,
+            outputTokens: record.outputTokens,
+            cacheReadInputTokens: record.cacheReadTokens,
+            cacheCreationInputTokens: record.cacheWriteTokens,
+            cacheCreation1hInputTokens: record.cacheWrite1hTokens,
+            ...(record.thinkingTokens !== null && !record.thinkingTokensEstimated
+              ? { reasoningTokens: record.thinkingTokens }
+              : {})
+          },
+          record.at
+        )
+
+  store.recordUsageAttempt({
+    ...record,
+    costMicros: priced?.micros ?? null,
+    currency: priced?.currency ?? null,
+    pricingTier: priced?.tier ?? null,
+    pricingWindow: priced?.window ?? null
+  })
 }
 
 export function getTools(): ToolRegistry {
@@ -320,7 +397,7 @@ export function setMcpChangeListener(fn: (id: string) => void): void {
 }
 
 /** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。 */
-export function setSessionChangeListener(fn: (workspaceId: string) => void): void {
+export function setSessionChangeListener(fn: NonNullable<typeof sessionOnChange>): void {
   sessionOnChange = fn
 }
 
@@ -469,8 +546,8 @@ export function installChildRunLauncher(fn: ChildRunLauncher): void {
   childRunLauncher = fn
 }
 
-/** 同一个父 run 名下最多同时跑几个子代理。超了直接拒,**不排队**(排队要配调度器和取消语义)。 */
-const MAX_CONCURRENT_SUBAGENTS = 4
+/** 配置损坏时的安全回退值。正常值来自 settings.subagent。 */
+const DEFAULT_CONCURRENT_SUBAGENTS = 4
 
 /** 子 runId 的序号。进程内单调递增就够 —— 它只需要在本进程里唯一。 */
 let childSeq = 0
@@ -497,6 +574,159 @@ function waitForEnd(handle: RunHandle): Promise<RunStatus> {
   })
 }
 
+interface ChildRunResult {
+  status: RunStatus
+  text: string
+  error?: string
+  endedAt?: number
+}
+
+/**
+ * 监听子 run 的低频状态，并把汇总写回父 run。原始子 run 事件仍会通过
+ * inherited topic 推给渲染层，后台子任务在父 run 结束后也能继续被观察。
+ */
+function monitorChildRun(
+  parent: RunHandle,
+  child: RunHandle,
+  childReq: RunRequest,
+  callId: string,
+  background: boolean,
+  finished?: Promise<void>
+): Promise<ChildRunResult> {
+  let toolCalls = 0
+  let toolErrors = 0
+  const off = child.on((event, childSeq) => {
+    if (event.type === 'tool_start') {
+      toolCalls++
+      if (parent.status === 'running') parent.emit({
+        type: 'subagent_update', callId, childRunId: child.runId,
+        phase: 'tool', currentTool: event.toolName, toolCalls, toolErrors, childSeq, at: event.at
+      })
+    } else if (event.type === 'tool_end') {
+      if (event.isError) toolErrors++
+      if (parent.status === 'running') parent.emit({
+        type: 'subagent_update', callId, childRunId: child.runId,
+        phase: 'thinking', currentTool: undefined, toolCalls, toolErrors, childSeq, at: event.at
+      })
+    } else if (event.type === 'context_usage' && parent.status === 'running') {
+      parent.emit({
+        type: 'subagent_update', callId, childRunId: child.runId,
+        contextUsage: { used: event.used, window: event.window, shouldCompact: event.shouldCompact },
+        toolCalls, toolErrors, childSeq
+      })
+    } else if (event.type === 'stream' && event.delta.type === 'message_end' && parent.status === 'running') {
+      parent.emit({
+        type: 'subagent_update', callId, childRunId: child.runId,
+        phase: 'finishing', usage: event.delta.usage, toolCalls, toolErrors, childSeq
+      })
+    }
+  })
+
+  return (async () => {
+    const status = await waitForEnd(child)
+    if (finished !== undefined) await finished.catch(() => {})
+    off()
+    const history = store.getHistory(childReq.sessionId)
+    const last = [...history].reverse().find((m) => m.role === 'assistant')
+    const text = last === undefined ? '' : visibleText(last)
+    const endedAt = child.endedAt
+    persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text)
+    if (parent.status === 'running') {
+      parent.emit({
+        type: 'subagent_end', callId, childRunId: child.runId, status,
+        childSeq: child.seq,
+        ...(text.trim() === '' ? {} : { summary: text.slice(0, 240) }),
+        ...(endedAt === undefined ? {} : { at: endedAt })
+      })
+    } else if (background) {
+      // The parent may have finished before this detached child. Its own run_end
+      // is still delivered through the inherited child topic for the renderer.
+      getHost().logger.info(`[subagent] background child finished after parent: ${child.runId}`)
+    }
+    return { status, text, ...(endedAt === undefined ? {} : { endedAt }) }
+  })()
+}
+
+/** Update the durable Task receipt when a detached/background child finishes. */
+function persistSubagentCompletion(
+  sessionId: string,
+  callId: string,
+  childRunId: string,
+  status: RunStatus,
+  text: string
+): void {
+  const history = store.getHistory(sessionId)
+  let changed = false
+  const summary = text.trim() === '' ? undefined : text.trim().slice(0, 240)
+  const messages = history.map((message) => {
+    let messageChanged = false
+    const parts = message.parts.map((part) => {
+      if (part.type !== 'tool_result' || part.callId !== callId || part.subagent?.childRunId !== childRunId) return part
+      messageChanged = true
+      changed = true
+      return {
+        ...part,
+        subagent: {
+          ...part.subagent,
+          status,
+          ...(summary === undefined ? {} : { summary })
+        }
+      }
+    })
+    return messageChanged ? { ...message, parts } : message
+  })
+  if (changed) store.setHistory(sessionId, messages)
+}
+
+/**
+ * A parent run writes its complete in-memory history in `finally`, while a
+ * detached child can update the durable Task receipt at the same time. Merge
+ * the latest receipt into that final write so the older parent snapshot cannot
+ * downgrade a completed child back to `running`.
+ */
+function mergeLatestSubagentReceipts(
+  messages: readonly AgentMessage[],
+  latest: readonly AgentMessage[]
+): AgentMessage[] {
+  const receipts = new Map<string, SubagentResult>()
+  for (const message of latest) {
+    for (const part of message.parts) {
+      if (part.type !== 'tool_result' || part.subagent === undefined) continue
+      receipts.set(part.callId, part.subagent)
+    }
+  }
+  if (receipts.size === 0) return [...messages]
+
+  const rank = (status: SubagentResult['status']): number => {
+    if (status === undefined) return 0
+    return status === 'running' ? 1 : 2
+  }
+  return messages.map((message) => {
+    let messageChanged = false
+    const parts = message.parts.map((part) => {
+      if (part.type !== 'tool_result' || part.subagent === undefined) return part
+      const current = receipts.get(part.callId)
+      if (current === undefined) return part
+      const status = rank(current.status) >= rank(part.subagent.status)
+        ? current.status
+        : part.subagent.status
+      const merged: SubagentResult = {
+        ...part.subagent,
+        ...(current.background === undefined
+          ? {}
+          : { background: current.background }),
+        ...(current.summary === undefined
+          ? {}
+          : { summary: current.summary }),
+        ...(status === undefined ? {} : { status })
+      }
+      messageChanged = true
+      return { ...part, subagent: merged }
+    })
+    return messageChanged ? { ...message, parts } : message
+  })
+}
+
 /**
  * 子 run 的 `RunRequest`。三处继承规则各自挡着一种真实的坏结果。
  */
@@ -519,6 +749,16 @@ function childRequestFor(
     // 同一个工作区 = 同一道路径围栏。子代理换不了工作区。
     workspaceId: parentReq.workspaceId,
     parentRunId: parent.runId,
+    /*
+      ★ 上面那个派生 id 只是**惯例**,这一项才是**事实**。
+
+      「这条转录不进侧边栏/搜索/导出」和「删父会话时跟着回收」全都读
+      `sessions.parent_session_id`,没有任何一处再去 parse 那个 `:sub:` ——
+      它是递归拼出来的(子 runId 自己也含 `:sub:`),想从里面反推父亲,
+      第一个切出的是**爷爷**、最后一个切出的是一个**不存在的 id**。
+      理由完整写在 `db/schema.ts` 第 10 条迁移上。
+    */
+    parentSessionId: parentReq.sessionId,
     depth: parentReq.depth + 1,
     input: [{ type: 'text', text: prompt }],
     /*
@@ -580,11 +820,30 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
       }
     }
 
-    if (runs.activeChildCount(parent.runId) >= MAX_CONCURRENT_SUBAGENTS) {
+    // 读取最新设置,让用户在运行期间调整并发上限也能影响下一次派发。
+    // 设置文件是用户可编辑输入,因此对异常值做一次防御性归一化。
+    const configured = store.getSettings().subagent
+    const perSessionLimit = Number.isInteger(configured.perSessionLimit) && configured.perSessionLimit >= 1
+      ? configured.perSessionLimit
+      : DEFAULT_CONCURRENT_SUBAGENTS
+    const globalLimit = Number.isInteger(configured.globalLimit) && configured.globalLimit >= 0
+      ? configured.globalLimit
+      : DEFAULT_CONCURRENT_SUBAGENTS
+
+    if (runs.activeChildCount(parent.runId) >= perSessionLimit) {
       return {
         kind: 'refused',
         reason:
-          `The concurrent subagent limit of ${String(MAX_CONCURRENT_SUBAGENTS)} has been reached. ` +
+          `The per-conversation concurrent subagent limit of ${String(perSessionLimit)} has been reached. ` +
+          `Wait for the running ones to finish before launching another, or carry on yourself.`
+      }
+    }
+
+    if (runs.activeSubagentCount() >= globalLimit) {
+      return {
+        kind: 'refused',
+        reason:
+          `The global concurrent subagent limit of ${String(globalLimit)} has been reached. ` +
           `Wait for the running ones to finish before launching another, or carry on yourself.`
       }
     }
@@ -592,7 +851,15 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
     const childRunId = `${parent.runId}:sub:${String(++childSeq)}`
     const childReq = childRequestFor(parentReq, parent, def, childRunId, sub.prompt)
 
-    parent.emit({ type: 'subagent_start', callId: sub.callId, childRunId })
+    const startedAt = getHost().clock.now()
+    parent.emit({
+      type: 'subagent_start', callId: sub.callId, childRunId,
+      description: sub.description,
+      subagentType: def.name,
+      model: childReq.model,
+      background: sub.background === true,
+      at: startedAt
+    })
 
     const launch =
       childRunLauncher ??
@@ -619,26 +886,16 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
       finished = runAgent(h, r, def)
       return finished
     })
-    const status = await waitForEnd(child)
-    // 失败已经体现在 status 里了,这里只是等 finally 跑完
-    if (finished !== undefined) await finished.catch(() => {})
-
-    parent.emit({ type: 'subagent_end', callId: sub.callId, childRunId, status })
-
-    /*
-      产出 = 子代理最后一条 assistant 消息的可见文字。
-      ★ 取的是转录而不是某个「结果」字段,因为子代理本来就没有别的出口 ——
-      它和主代理跑的是同一条循环,`agentPrompt` 里已经写明「只有最后一条消息
-      会被送回去」。
-    */
-    const history = store.getHistory(childReq.sessionId)
-    const last = [...history].reverse().find((m) => m.role === 'assistant')
-    return {
-      kind: 'finished',
-      childRunId,
-      status,
-      text: last === undefined ? '' : visibleText(last)
+    const result = monitorChildRun(parent, child, childReq, sub.callId, sub.background === true, finished)
+    if (sub.background === true) {
+      void result.catch((error: unknown) => {
+        getHost().logger.warn(`[subagent] background child failed: ${childRunId}`, error)
+      })
+      return { kind: 'background', childRunId }
     }
+
+    const completed = await result
+    return { kind: 'finished', childRunId, status: completed.status, text: completed.text }
   }
 }
 
@@ -646,18 +903,98 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
  * 权限闸门的**接线**处 —— 策略在 `kernel/permission-gate.ts`,这里只负责把
  * 一次 run 的档位、联网开关和被调工具的标记喂进去,再把结果翻译成 `PermissionDecision`。
  *
- * ★ 分成两段是有意的:`evaluate()` 是纯函数、可穷举测,而「`ask` 这一档暂时怎么办」
- * 是**产品决定**,会随审批对话框落地而变。让 `evaluate()` 直接返回 deny 的话,
- * 那张策略表就再也读不出「这里本该问用户」这件事了。
+ * `evaluate()` 是纯策略判断;`ask` 的异步审批由 InteractionGate 持有,
+ * 所以窗口重载不会丢掉待决项,中断也能结束等待。
  *
  * ★ `needsNetwork` 是**取或**,不是二选一:工具自己声明的那个字段,
  * 加上 `TOOLS_NEEDING_NETWORK` 这张下限表。表里的名字无论字段怎么填都算联网,
  * 所以一个字段被写错(或将来某个注册路径忘了填)也放不宽这道闸。
  * 为什么不只留表、也不只留字段,`TOOLS_NEEDING_NETWORK` 的注释写全了。
  */
-function approveWith(req: RunRequest): ApproveFn {
+type ReviewResult = 'allow' | 'deny' | 'unknown'
+
+/**
+ * “为我批准”的 AI 审核器。它是一个无工具、短输出的独立请求，不能继承
+ * 当前 agent 的权限，也不能通过审核器再次调用工具。任何网络/解析/模型错误
+ * 都返回 unknown，由调用方回退到人工审批，避免“审核器挂了却放行”。
+ */
+async function reviewSensitiveOperation(
+  req: RunRequest,
+  reviewerModel: string,
+  toolName: string,
+  input: unknown,
+  signal: AbortSignal
+): Promise<ReviewResult> {
+  reviewerModel = reviewerModel.trim()
+  if (reviewerModel === '') return 'unknown'
+  if (!getRouter().listModels().some((m) => m.alias === reviewerModel)) {
+    getHost().logger.warn(`[permission-review] configured model is unavailable: ${reviewerModel}`)
+    return 'unknown'
+  }
+  let payload: string
+  try {
+    payload = JSON.stringify(input) ?? '{}'
+  } catch {
+    return 'unknown'
+  }
+  const prompt = [
+    'You are a safety reviewer for an AI computer-use agent.',
+    'Decide whether the proposed tool call is safe and consistent with the user task.',
+    'Reply with exactly one JSON object and no markdown: {"decision":"allow"} or {"decision":"deny"}.',
+    `User task: ${req.input.filter((part) => part.type === 'text').map((part) => part.text).join('\n').slice(0, 8000)}`,
+    `Tool: ${toolName}`,
+    `Input: ${payload.slice(0, 12000)}`
+  ].join('\n')
+  const reviewRequest: CanonicalRequest = {
+    model: reviewerModel,
+    system: 'Be conservative. Deny destructive, irreversible, credential-related, or ambiguous actions.',
+    messages: [userMessage(ulid(getHost().clock.now()), [{ type: 'text', text: prompt }], getHost().clock.now())],
+    tools: [],
+    maxOutputTokens: 128,
+    thinkingLevel: 'off'
+  }
+  let text = ''
+  try {
+    for await (const event of getRouter().stream(reviewRequest, signal, {
+      workspaceId: req.workspaceId,
+      runId: `${req.runId}:permission-review`,
+      sessionId: req.sessionId
+    })) {
+      if (event.type === 'text_delta') text += event.text
+      if (event.type === 'error') return 'unknown'
+    }
+  } catch {
+    getHost().logger.warn(`[permission-review] model request failed for ${reviewerModel}`)
+    return 'unknown'
+  }
+  const normalized = text.trim()
+  // 兼容模型常见的 ```json 包裹、前后解释文字，以及中文“允许/拒绝”。
+  // 只接受明确的 decision 字段或整句明确答案；含糊内容仍然回退人工审批。
+  const candidates = [normalized]
+  const fenced = normalized.match(/```(?:json)?\s*([\s\S]*?)\s*```/iu)?.[1]
+  if (fenced !== undefined) candidates.push(fenced.trim())
+  const embedded = normalized.match(/\{\s*["']decision["']\s*:\s*["'](?:allow|deny)["']\s*\}/iu)?.[0]
+  if (embedded !== undefined) candidates.push(embedded)
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { decision?: unknown }
+      if (parsed.decision === 'allow') return 'allow'
+      if (parsed.decision === 'deny') return 'deny'
+    } catch {
+      // Try the next representation.
+    }
+  }
+  if (/\bdecision\s*[:=]\s*["']?allow\b|(?:^|\s)(?:allow|allowed|approve|approved|允许|同意)(?:[.!。]|$)/iu.test(normalized)) return 'allow'
+  if (/\bdecision\s*[:=]\s*["']?deny\b|(?:^|\s)(?:deny|denied|拒绝|禁止)(?:[.!。]|$)/iu.test(normalized)) return 'deny'
+  getHost().logger.warn(`[permission-review] model returned an unrecognized decision for ${reviewerModel}`)
+  return 'unknown'
+}
+
+function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
+  // 与 permissionMode 一样按 run 冻结，避免用户改设置后同一轮请求前后使用不同审核器。
+  const reviewerModel = store.getSettings().permissionReviewerModel
   // 契约要求返回 Promise;策略本身是同步的纯函数
-  return async ({ tool }) => {
+  return async ({ tool, callId, input }) => {
     const outcome = evaluate({
       mode: req.permissionMode,
       readOnly: tool.readOnly,
@@ -667,12 +1004,16 @@ function approveWith(req: RunRequest): ApproveFn {
     })
     if (outcome.kind === 'allow') return { kind: 'allow_once' }
     if (outcome.kind === 'deny') return { kind: 'deny', reason: outcome.reason }
-    /*
-      ★ 「需要询问」这一档在这个版本里统一降级为**拒绝**,理由和原文都在
-      `ASK_NOT_WIRED_YET` 那个常量上。这里不能返回 `allow_once` 兜底 ——
-      那等于「审批还没做好,所以先全放行」,恰好是这道闸门要防的事。
-    */
-    return { kind: 'deny', reason: ASK_NOT_WIRED_YET }
+    if (req.permissionMode === 'auto' && tool.destructive) {
+      const review = await reviewSensitiveOperation(req, reviewerModel, tool.externalName, input, handle.signal)
+      if (review === 'allow') return { kind: 'allow_once' }
+      if (review === 'deny') return { kind: 'deny', reason: 'The configured AI reviewer denied this potentially unsafe operation.' }
+    }
+    const response = await interactions.request(handle, {
+      kind: 'tool_permission', callId, toolName: tool.externalName,
+      input, readOnly: tool.readOnly, destructive: tool.destructive
+    }, getHost().clock.now())
+    return response.kind === 'tool_permission' ? response.decision : { kind: 'deny' }
   }
 }
 
@@ -694,19 +1035,15 @@ export async function runAgent(
   agent?: AgentDefinition
 ): Promise<void> {
   const existing = store.getSession(req.sessionId)
-  const firstText = req.input
-    .filter((p): p is Extract<typeof req.input[number], { type: 'text' }> => p.type === 'text')
-    .map((p) => p.text)
-    .join(' ')
-    .trim()
   const session = store.ensureSession({
     id: req.sessionId,
     workspaceId: req.workspaceId,
+    // 非空 = 这是子代理的转录:落盘照旧,但它从此不出现在任何面向用户的枚举里。
+    ...(req.parentSessionId === undefined ? {} : { parentSessionId: req.parentSessionId }),
     model: req.model,
     mode: req.mode,
     thinking: req.thinking,
-    rootPathAtCreation: workspaceRootFor(req.workspaceId),
-    ...(existing === undefined && firstText !== '' ? { title: firstText.slice(0, 80) } : {})
+    rootPathAtCreation: workspaceRootFor(req.workspaceId)
   })
   // 新会话第一次发送时把模型/模式冻结到元数据；后续 run 不覆盖用户改过的标题。
   if (existing !== undefined && (existing.model !== req.model || existing.mode !== req.mode || existing.thinking !== req.thinking)) {
@@ -747,6 +1084,7 @@ export async function runAgent(
     handle.signal
   )
 
+  const history = store.getHistory(req.sessionId)
   const agentSession = new AgentSession(
     {
       host: getHost(),
@@ -757,17 +1095,38 @@ export async function runAgent(
        * ★ 多轮的全部实现。缺省(空转录)意味着模型每轮都从零开始 ——
        * 界面上明明有三轮问答,它却只看得见最后一句。
        *
-       * 存储是 `state/store` 里的一个 Map,步骤 6 换成 SQLite;
-       * **接线不变**,换的只是 `getHistory`/`setHistory` 的实现。
+       * 存储由 `state/store` 收口到 SQLite；这里始终只依赖
+       * `getHistory`/`message_commit`，不接触数据库结构。
        */
-      history: store.getHistory(req.sessionId),
+      history,
+      contextManagement: store.getSettings().contextManagement,
+      contextCheckpoints: store.listContextCheckpoints(req.sessionId),
+      saveContextCheckpoint: (checkpoint) => {
+        store.upsertContextCheckpoint(checkpoint)
+      },
       onMessageCommit: (message) => {
         store.commitMessage(req.sessionId, message)
         // message_commit 已经完成 SQLite 写入，再通知渲染层刷新侧边栏
         // 的 updatedAt；事件泵随后仍会按原顺序接收 message_commit。
-        sessionOnChange?.(req.workspaceId)
+        //
+        /*
+          ★ 子 run 不广播。`commitMessage` 只 bump **它自己那条会话**的 updated_at,
+          父的一个字节没变;而子会话又不在 `listSessions` 里 —— 这次广播会让每个
+          窗口重拉一遍列表,然后渲染出和上一帧逐字相同的结果。一个跑 30 轮的
+          后台子代理就是 30 次这样的空转,且正好落在主进程最忙的时刻
+          (`listSessions` 对每一行还要多一次 `getSession` 去读 favorited,
+          而 `DatabaseSync` 是同步阻塞的)。
+
+          判据用 `parentSessionId` 而不是 `depth === 0`:让「这条会话是隐藏的」
+          和「不发侧边栏事件」共用同一个条件,将来多一种隐藏会话也自动跟上。
+        */
+        if (req.parentSessionId === undefined) sessionOnChange?.(req.workspaceId)
       },
-      approve: approveWith(req),
+      onToolUsage: ({ runId, toolCalls, toolErrors }) => {
+        store.updateUsageToolsForRun(runId, toolCalls, toolErrors)
+      },
+      approve: approveWith(req, handle),
+      interact: (draft) => interactions.request(handle, draft, getHost().clock.now()),
       /*
         ★ 这里给的是**目录**,不是正文。`context-assembler.ts` 只读
         name / description 两个字段拼成一行一条的清单,正文要模型自己调
@@ -789,7 +1148,16 @@ export async function runAgent(
         **自己的**聊天气泡里逐字读到整篇 AGENTS.md,而且旧会话会永远重放旧规矩。
       */
       ...(projectInstructions !== '' ? { projectInstructions } : {}),
-      ...(git !== undefined ? { git } : {})
+      ...(git !== undefined ? { git } : {}),
+      /*
+        ★ 和上面两项一样**照给子代理** —— 用户设的是「跟我说话时是什么样」,
+        而子代理写的代码、交回的结论最终都是给同一个人看的。
+
+        无条件给,不在这里判断三栏是不是全空:`buildPersonalizationSection`
+        对全空的那份返回空串,而空串会被 `buildSystemPrompt` 的 filter 丢掉 ——
+        「什么都没填」这件事只该有一个地方知道,多一处判断就多一处会漂移的判断。
+      */
+      personalization: store.getSettings().personalization
     },
     handle,
     req
@@ -800,15 +1168,33 @@ export async function runAgent(
    * 一堆没有配对 tool_result 的 tool_call 上行 —— 那正是方案 §4.8
    * 花了整节篇幅避免的 400。
    */
-  return agentSession.run().finally(() => {
+  const running = agentSession.run()
+  if (agent === undefined && req.depth === 0 && history.length === 0 && req.input.length > 0 && !handle.signal.aborted) {
+    // The primary stream has already started. Title generation is detached from
+    // its promise, and from tool calls, approval waits, and later user turns.
+    try {
+      const current = store.getSession(req.sessionId)
+      const firstMessage = agentSession.history[0]
+      if (current !== undefined && firstMessage !== undefined) getSessionTitles().start(current, firstMessage, req.model)
+    } catch {
+      getHost().logger.warn('[session-title] Could not start background title generation.')
+    }
+  }
+  return running.finally(() => {
     // message_commit 已逐条落盘；replaceHistory 是兼容旧调用/修复异常的最终校验。
-    store.setHistory(req.sessionId, agentSession.history)
+    // A detached child may have completed between the last commit and this
+    // final write. Preserve its newest durable metadata when replacing the
+    // parent's in-memory snapshot.
+    const latest = store.getHistory(req.sessionId)
+    store.setHistory(req.sessionId, mergeLatestSubagentReceipts(agentSession.history, latest))
     store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
   })
 }
 
 /** 测试专用:把单例清干净,让每个用例从同一个起点开始。 */
 export function resetRuntimeForTest(): void {
+  shutdownSessionTitles()
+  interactions.clear()
   host = null
   router = null
   tools = null

@@ -23,6 +23,15 @@ export interface Bootstrap {
    * 非空只发生在渲染层重载(⌘R)时:主进程没重启,run 还活着。
    */
   activeRuns: Array<{ runId: string; sessionId: string; workspaceId: string; status: RunStatus }>
+  /** Background child runs survive a renderer reload and are restored into their parent Task card. */
+  activeSubagents?: Array<{
+    runId: string
+    parentRunId: string
+    sessionId: string
+    workspaceId: string
+    status: RunStatus
+    startedAt?: number
+  }>
   versions: {
     app: string
     electron: string

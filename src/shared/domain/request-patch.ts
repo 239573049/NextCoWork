@@ -9,6 +9,33 @@ export class RequestPatchError extends Error {
   }
 }
 
+export type RequestPatchValidationCode =
+  | 'invalid_json'
+  | 'not_array'
+  | 'invalid_rule'
+  | 'unsupported_operation'
+  | 'invalid_path'
+  | 'missing_value'
+  | 'invalid_value'
+
+export interface RequestPatchValidationIssue {
+  code: RequestPatchValidationCode
+  /** Index in the patch array; absent for a document-level parse error. */
+  index?: number
+  message: string
+}
+
+export type RequestPatchValidationResult =
+  | { ok: true; patches: RequestPatchRule[] }
+  | { ok: false; issues: RequestPatchValidationIssue[] }
+
+class RequestPatchValidationFailure extends Error {
+  constructor(readonly validationIssue: RequestPatchValidationIssue) {
+    super(validationIssue.message)
+    this.name = 'RequestPatchValidationFailure'
+  }
+}
+
 /**
  * Top-level body parameters which a model adapter may customize.  This list
  * intentionally contains common vendor extensions, but never transport,
@@ -16,6 +43,7 @@ export class RequestPatchError extends Error {
  */
 const COMMON_ALLOWED_ROOTS = new Set([
   'cache_control',
+  'chat_template_kwargs',
   'enable_thinking',
   'extra_body',
   'frequency_penalty',
@@ -30,6 +58,7 @@ const COMMON_ALLOWED_ROOTS = new Set([
   'presence_penalty',
   'reasoning',
   'reasoning_effort',
+  'reasoning_split',
   'response_format',
   'seed',
   'service_tier',
@@ -40,6 +69,7 @@ const COMMON_ALLOWED_ROOTS = new Set([
   'temperature',
   'thinking',
   'thinking_budget',
+  'thinking_mode',
   'tool_choice',
   'top_k',
   'top_logprobs',
@@ -58,11 +88,21 @@ const FORBIDDEN_SEGMENTS = new Set([
   'tools',
   'authorization',
   'authentication',
+  'auth',
   'api_key',
   'apikey',
+  'api-key',
+  'x-api-key',
+  'x_api_key',
+  'credential',
+  'credentials',
   'headers',
+  'header',
+  'http_headers',
   'url',
-  'base_url'
+  'base_url',
+  'baseurl',
+  'access_token'
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -92,6 +132,155 @@ function assertAllowedPath(path: string, parts: readonly string[]): void {
   if (forbidden !== undefined) {
     throw new RequestPatchError(`请求 Patch 路径不允许修改「${forbidden}」: ${path}`)
   }
+}
+
+function isJsonValue(value: unknown, ancestors = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (!Array.isArray(value) && !isRecord(value)) return false
+  if (ancestors.has(value)) return false
+
+  ancestors.add(value)
+  const isValid = Array.isArray(value)
+    ? value.every((item) => isJsonValue(item, ancestors))
+    : Object.entries(value).every(
+        ([key, item]) =>
+          // Replacing an allowed container must not bypass the exact same
+          // segment policy (for example `/metadata` with an `authorization`
+          // key, or `/extra_body` with an `api_key` key in its value).
+          !FORBIDDEN_SEGMENTS.has(key.toLowerCase()) && isJsonValue(item, ancestors)
+      )
+  ancestors.delete(value)
+  return isValid
+}
+
+function issue(
+  code: RequestPatchValidationCode,
+  message: string,
+  index?: number
+): RequestPatchValidationIssue {
+  return index === undefined ? { code, message } : { code, index, message }
+}
+
+function normalizeRule(value: unknown, index: number): RequestPatchRule {
+  if (!isRecord(value)) {
+    throw new RequestPatchValidationFailure(
+      issue('invalid_rule', `第 ${String(index + 1)} 条请求 Patch 必须是对象。`, index)
+    )
+  }
+  const keys = Object.keys(value)
+  if (keys.some((key) => key !== 'op' && key !== 'path' && key !== 'value')) {
+    throw new RequestPatchValidationFailure(
+      issue('invalid_rule', `第 ${String(index + 1)} 条请求 Patch 包含未知字段。`, index)
+    )
+  }
+
+  const op = value['op']
+  if (op !== 'add' && op !== 'replace' && op !== 'remove') {
+    throw new RequestPatchValidationFailure(
+      issue(
+        'unsupported_operation',
+        `第 ${String(index + 1)} 条请求 Patch 操作不支持: ${String(op)}`,
+        index
+      )
+    )
+  }
+  const path = value['path']
+  if (typeof path !== 'string') {
+    throw new RequestPatchValidationFailure(
+      issue(
+        'invalid_path',
+        `第 ${String(index + 1)} 条请求 Patch 路径必须是字符串。`,
+        index
+      )
+    )
+  }
+  try {
+    const parts = decodePointer(path)
+    if (parts.at(-1) === '') {
+      throw new RequestPatchError(`请求 Patch 路径不能以空段结尾: ${path}`)
+    }
+    assertAllowedPath(path, parts)
+  } catch (error) {
+    throw new RequestPatchValidationFailure(
+      issue(
+        'invalid_path',
+        error instanceof Error ? error.message : String(error),
+        index
+      )
+    )
+  }
+
+  if (op !== 'remove' && !Object.hasOwn(value, 'value')) {
+    throw new RequestPatchValidationFailure(
+      issue(
+        'missing_value',
+        `第 ${String(index + 1)} 条请求 Patch 的 ${op} 操作缺少 value。`,
+        index
+      )
+    )
+  }
+  if (op !== 'remove' && !isJsonValue(value['value'])) {
+    throw new RequestPatchValidationFailure(
+      issue(
+        'invalid_value',
+        `第 ${String(index + 1)} 条请求 Patch 的 value 必须是有效 JSON 值。`,
+        index
+      )
+    )
+  }
+
+  return op === 'remove'
+    ? { op, path }
+    : { op, path, value: structuredClone(value['value']) }
+}
+
+/**
+ * Parse and validate either editor JSON text or an already-parsed value.
+ * This is the renderer-safe, side-effect-free entry point. Runtime application
+ * calls the same normalizer, so save-time and send-time security rules cannot
+ * drift apart.
+ */
+export function validateRequestPatches(input: unknown): RequestPatchValidationResult {
+  let value = input
+  if (typeof input === 'string') {
+    try {
+      value = JSON.parse(input)
+    } catch {
+      return {
+        ok: false,
+        issues: [issue('invalid_json', '请求 Patch 不是有效的 JSON。')]
+      }
+    }
+  }
+  if (!Array.isArray(value)) {
+    return {
+      ok: false,
+      issues: [issue('not_array', '请求 Patch 必须是 JSON 数组。')]
+    }
+  }
+
+  const patches: RequestPatchRule[] = []
+  const issues: RequestPatchValidationIssue[] = []
+  value.forEach((item, index) => {
+    try {
+      patches.push(normalizeRule(item, index))
+    } catch (error) {
+      if (error instanceof RequestPatchValidationFailure) {
+        issues.push(error.validationIssue)
+      } else {
+        issues.push(issue('invalid_rule', String(error), index))
+      }
+    }
+  })
+  return issues.length === 0 ? { ok: true, patches } : { ok: false, issues }
+}
+
+/** Throwing counterpart used by the request pipeline. */
+export function parseRequestPatches(input: unknown): RequestPatchRule[] {
+  const result = validateRequestPatches(input)
+  if (result.ok) return result.patches
+  throw new RequestPatchError(result.issues.map((item) => item.message).join('\n'))
 }
 
 function arrayIndex(segment: string, length: number, allowEnd: boolean): number {
@@ -126,9 +315,6 @@ function parentAt(root: Record<string, unknown>, parts: readonly string[], path:
 }
 
 function applyOne(root: Record<string, unknown>, patch: RequestPatchRule): void {
-  if (patch.op !== 'add' && patch.op !== 'replace' && patch.op !== 'remove') {
-    throw new RequestPatchError(`请求 Patch 操作不支持: ${String(patch.op)}`)
-  }
   const parts = decodePointer(patch.path)
   assertAllowedPath(patch.path, parts)
   const key = parts.at(-1)
@@ -167,11 +353,12 @@ export function applyRequestPatches(
   patches: readonly RequestPatchRule[] | undefined,
   _preset: RequestPatchPreset = 'auto'
 ): unknown {
-  if (patches === undefined || patches.length === 0) return body
-  if (!Array.isArray(patches)) throw new RequestPatchError('请求 Patch 必须是数组。')
+  if (patches === undefined) return body
+  const normalizedPatches = parseRequestPatches(patches)
+  if (normalizedPatches.length === 0) return body
   if (!isRecord(body)) throw new RequestPatchError('请求体必须是 JSON 对象。')
 
   const root = structuredClone(body)
-  for (const patch of patches) applyOne(root, patch)
+  for (const patch of normalizedPatches) applyOne(root, patch)
   return root
 }

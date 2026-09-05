@@ -3,11 +3,25 @@
  */
 import type { AgentMessage } from '../agent/message'
 import type { SessionMode, ThinkingLevel } from '../agent/run-request'
+import type { ContextCheckpoint } from '../agent/context-management'
 
 export interface Session {
   id: string
   workspaceId: string
+  /**
+   * ★ 非 undefined = 这条转录属于一次**子代理 run**,不是用户的一条对话。
+   *
+   * 它是所有「面向用户的枚举」的唯一判据:侧边栏、搜索、数据导出、存储统计、
+   * 按时长清理,一处都不出现;而 `getSession` / `getHistory` 照读不误 ——
+   * 子代理面板和续跑要用。
+   *
+   * 判据是这一列而**不是** id 里的 `:sub:`:子会话 id 是递归拼出来的,
+   * 从里面反推父亲一定会切错(理由写在 `db/schema.ts` 第 10 条迁移上)。
+   */
+  parentSessionId?: string
   title: string
+  /** Stored in session JSON; absent on older exports. Manual names are never auto-replaced. */
+  titleSource?: 'default' | 'generated' | 'manual'
   model: string
   mode: SessionMode
   thinking: ThinkingLevel
@@ -28,6 +42,11 @@ export interface Session {
   updatedAt: number
 }
 
+/** Legacy placeholder values are data; their display labels belong to renderer i18n. */
+export function isDefaultSessionTitle(title: string): boolean {
+  return ['', '新对话', 'New conversation', 'New chat'].includes(title.trim())
+}
+
 /** 左侧边栏下半部分按这个分组(今天 / 昨天 / 更早) */
 export type SessionGroup = 'today' | 'yesterday' | 'earlier'
 
@@ -44,6 +63,7 @@ export interface SessionListItem {
 export interface SessionDetail {
   session: Session
   messages: AgentMessage[]
+  contextCheckpoints?: ContextCheckpoint[]
 }
 
 /** conversations:searchAll 的命中项。FTS5 给出的 snippet 带高亮标记。 */

@@ -7,7 +7,8 @@ import { hasSeqGap, type AgentEventEnvelope } from '../../../shared/ipc/contract
 import { runFake } from '../../kernel/fake-emitter'
 import { runs } from '../../kernel/run-registry'
 import { windows, type WindowContext } from '../../window/registry'
-import { abortRun, attachRun, startRun } from '../agent'
+import { abortRun, attachRun, listInteractions, respondInteraction, startRun } from '../agent'
+import { interactions } from '../../kernel/interaction-gate'
 
 /**
  * 合批泵的验收(原步骤 3 的验收),跑在无头 Node 里。
@@ -115,6 +116,26 @@ afterEach(() => {
 })
 
 describe('步骤 3 端到端 · 假发射器 → 合批泵 → 信封 → 转录', () => {
+  it('only subscribed windows can read and answer a pending interaction, including after reattach', async () => {
+    const owner = fakeWindow()
+    const viewer = fakeWindow()
+    const request = req()
+    startRun(request, owner.ctx, () => {})
+    const handle = runs.get(request.runId)!
+    const pending = interactions.request(handle, { kind: 'ask_user', question: 'Choose', choices: ['A', 'B'], allowFreeform: false }, 1)
+    const [interaction] = listInteractions({ runId: request.runId }, owner.ctx)
+    expect(interaction).toBeDefined()
+    const response = { id: interaction!.id, kind: 'ask_user' as const, answer: 'B' }
+    expect(listInteractions({}, viewer.ctx)).toEqual([])
+    expect(() => respondInteraction(response, viewer.ctx)).toThrow('this window')
+    const restored = attachRun({ runId: request.runId, sinceSeq: 0 }, viewer.ctx)
+    expect(restored.pendingInteractions).toEqual([interaction])
+    respondInteraction(response, viewer.ctx)
+    expect(await pending).toEqual(response)
+    expect(listInteractions({}, owner.ctx)).toEqual([])
+    handle.finish('done')
+  })
+
   it('★ 流式跑完:信封 seq 全程连续,渲染层一次 attach 都不需要', async () => {
     const { wc, ctx } = fakeWindow()
     const r = req()

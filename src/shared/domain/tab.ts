@@ -117,6 +117,8 @@ export interface InnerTabState {
   bottomActiveTabId?: string | null
   /** 右边那条的激活项。同上。 */
   rightActiveTabId?: string | null
+  /** Version 2 recursive Dock layout. Kept optional for legacy snapshots. */
+  dock?: import('./dock').WorkspaceDockState
 }
 
 /** 窗口级状态:外层 Tab 条 + 当前激活的外层 Tab */

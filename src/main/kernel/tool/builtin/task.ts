@@ -49,7 +49,11 @@ const TaskInput = z.object({
     .string()
     .min(1)
     .max(64)
-    .describe('The name of the subagent to use, chosen from the list in this tool\'s description')
+    .describe('The name of the subagent to use, chosen from the list in this tool\'s description'),
+  run_in_background: z
+    .boolean()
+    .optional()
+    .describe('If true, start the subagent and continue this conversation without waiting for its report')
 })
 
 /** 清单里每个子代理占的那一行。`tools` 省略时照 CC 写成 `*`。 */
@@ -92,7 +96,9 @@ function buildDescription(agents: readonly AgentDefinition[]): string {
     'not say, a subagent with write access may well start editing\n' +
     '5. CHECK ITS OUTPUT before you act on it. Subagents make mistakes like you do, and all you get is the ' +
     'conclusion, never the reasoning behind it\n' +
-    `6. Nesting is capped at ${String(MAX_DEPTH)} levels — a subagent launching a subagent is refused`
+    `6. Nesting is capped at ${String(MAX_DEPTH)} levels — a subagent launching a subagent is refused\n` +
+    '7. Set run_in_background=true only when the parent conversation can continue without the result. ' +
+    'Background runs remain observable and can be stopped from the task panel.'
   )
 }
 
@@ -147,7 +153,8 @@ export function taskTool(): ToolRegistration {
         subagentType: input.subagent_type,
         prompt: input.prompt,
         description: input.description,
-        callId: ctx.callId
+        callId: ctx.callId,
+        ...(input.run_in_background === true ? { background: true } : {})
       })
 
       /*
@@ -159,6 +166,16 @@ export function taskTool(): ToolRegistration {
       */
       if (outcome.kind === 'refused') return toolFail(outcome.reason)
 
+      if (outcome.kind === 'background') {
+        return {
+          ...toolOk(
+            `The subagent started in the background (run ${outcome.childRunId}). ` +
+            'Continue with the parent task; its progress and final report remain available in the task panel.'
+          ),
+          subagent: { childRunId: outcome.childRunId, status: 'running', background: true }
+        }
+      }
+
       switch (outcome.status) {
         case 'done':
           /*
@@ -167,17 +184,28 @@ export function taskTool(): ToolRegistration {
             而真实情况是这次调查根本没发生。
           */
           if (outcome.text.trim() === '') {
-            return toolFail(
-              `The subagent ${input.subagent_type} finished without producing any text. ` +
-                `Retry once with a more specific prompt, or do this step yourself.`
-            )
+            return {
+              ...toolFail(
+                `The subagent ${input.subagent_type} finished without producing any text. ` +
+                  `Retry once with a more specific prompt, or do this step yourself.`
+              ),
+              subagent: { childRunId: outcome.childRunId, status: 'error' }
+            }
           }
-          return toolOk(outcome.text)
+          return {
+            ...toolOk(outcome.text),
+            subagent: {
+              childRunId: outcome.childRunId,
+              status: outcome.status,
+              summary: outcome.text.slice(0, 240)
+            }
+          }
 
         case 'error':
-          return toolFail(
-            `The subagent ${input.subagent_type} failed: ${outcome.error ?? 'unknown error'}`
-          )
+          return {
+            ...toolFail(`The subagent ${input.subagent_type} failed: ${outcome.error ?? 'unknown error'}`),
+            subagent: { childRunId: outcome.childRunId, status: 'error' }
+          }
 
         case 'aborted':
           /*

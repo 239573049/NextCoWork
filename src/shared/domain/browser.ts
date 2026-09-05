@@ -10,6 +10,8 @@ export type BrowserTabStatus = 'loading' | 'ready' | 'error'
 export interface BrowserTab {
   id: string
   workspaceId: string
+  /** Renderer tab identity used to reconcile IPC events with optimistic UI. */
+  clientTabId?: string
   ownerRunId?: string
   profileId?: string
   source: BrowserTabSource

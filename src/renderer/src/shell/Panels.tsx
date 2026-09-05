@@ -158,6 +158,7 @@ function PanelBody({
     <>
       <InnerTabBar
         tabs={tabs}
+        workspaceId={workspace?.id}
         activeId={activeId}
         runningSessionIds={runningSessionIds}
         menu={menu}

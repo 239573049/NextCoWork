@@ -1,9 +1,10 @@
 import type { AgentMessage } from '../agent/message'
 import {
   THINKING_BUDGET,
+  THINKING_LEVELS,
   type ThinkingLevel
 } from '../agent/run-request'
-import type { ModelAlias, ModelCapabilities, ThinkingConfig } from './provider'
+import type { ModelAlias, ModelCapabilities, ReasoningEffort, ThinkingConfig } from './provider'
 
 export type ModelReasoningEffort = NonNullable<ThinkingConfig['defaultEffort']>
 
@@ -24,6 +25,31 @@ export interface ResolvedModelThinking {
 const MIN_THINKING_BUDGET = 1024
 const MIN_OUTPUT_HEADROOM = 1024
 
+type ThinkingModel = Pick<ModelAlias, 'thinkingConfig' | 'reasoningEfforts' | 'capabilities'>
+
+/** UI choices describe the selected binding, including provider overrides. */
+export function modelThinkingLevels(model: ThinkingModel | undefined): readonly ThinkingLevel[] {
+  if (model === undefined) return ['auto']
+  const mode = model.thinkingConfig?.mode
+  if (mode === 'unsupported' || mode === 'always') return ['auto']
+  if (mode === 'toggle') return ['auto', 'medium', 'off'] // medium is the legacy enabled value; UI labels it On.
+  if (mode === 'effort') {
+    const efforts = model.reasoningEfforts
+    if (efforts === undefined) return THINKING_LEVELS
+    return THINKING_LEVELS.filter((level) => level === 'auto' || efforts.includes(
+      level === 'off' ? 'none' : level === 'higher' ? 'xhigh' : level
+    ))
+  }
+  if (mode === 'budget' || model.capabilities.thinking) return THINKING_LEVELS
+  // Unknown legacy imports can still explicitly disable protocol defaults.
+  return ['auto', 'off']
+}
+
+export function normalizeModelThinkingLevel(level: ThinkingLevel, model: ThinkingModel | undefined): ThinkingLevel {
+  const levels = modelThinkingLevels(model)
+  return levels.includes(level) ? level : 'auto'
+}
+
 function effortFor(level: ThinkingLevel, fallback: ModelReasoningEffort): ModelReasoningEffort {
   switch (level) {
     case 'minimal':
@@ -33,9 +59,7 @@ function effortFor(level: ThinkingLevel, fallback: ModelReasoningEffort): ModelR
     case 'max':
       return level
     case 'higher':
-      // The persisted model schema intentionally has five portable levels.
-      // `higher` is a UI-only notch, so map it to the nearest portable value.
-      return 'high'
+      return 'xhigh'
     default:
       return fallback
   }
@@ -61,17 +85,21 @@ function clampBudget(wanted: number, maxOutputTokens: number): number | undefine
 export function resolveModelThinking(
   level: ThinkingLevel,
   config: ThinkingConfig | undefined,
-  maxOutputTokens: number
+  maxOutputTokens: number,
+  reasoningEfforts?: readonly ReasoningEffort[]
 ): ResolvedModelThinking | undefined {
   if (config === undefined || config.mode === 'unsupported') return undefined
 
   const explicit = level !== 'auto'
+  const defaultEffort = config.defaultEffort !== undefined &&
+    (reasoningEfforts === undefined || reasoningEfforts.includes(config.defaultEffort))
+    ? config.defaultEffort : reasoningEfforts?.find((effort) => effort !== 'none') ?? 'medium'
   const enabled = config.mode === 'always'
     ? true
     : level === 'off'
       ? false
       : level === 'auto'
-        ? config.defaultEnabled
+        ? config.defaultEnabled && !(config.mode === 'effort' && defaultEffort === 'none')
         : true
 
   const base: ResolvedModelThinking = { mode: config.mode, enabled, explicit }
@@ -80,7 +108,7 @@ export function resolveModelThinking(
   if (config.mode === 'effort') {
     return {
       ...base,
-      effort: effortFor(level, config.defaultEffort ?? 'medium')
+      effort: effortFor(level, defaultEffort)
     }
   }
 
@@ -88,7 +116,7 @@ export function resolveModelThinking(
   // describes a simple toggle rather than exposing a budget in the UI.
   if (config.mode === 'budget' || config.mode === 'toggle') {
     const wanted = budgetFor(
-      level,
+      config.mode === 'toggle' ? 'auto' : level,
       config.defaultBudgetTokens ?? THINKING_BUDGET.medium
     )
     const budgetTokens = clampBudget(wanted, maxOutputTokens)

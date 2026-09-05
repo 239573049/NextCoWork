@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { AgentMessage } from '../../../shared/agent/message'
 import type { McpServerConfig } from '../../../shared/domain/mcp'
 import { mcpSecretRef } from '../../../shared/domain/mcp'
 import { SEARCH_PROVIDER_IDS, searchSecretRef } from '../../../shared/domain/search'
@@ -184,6 +185,98 @@ describe('★ 关库重开之后,配置一样都不少', () => {
   })
 })
 
+describe('会话、完整内容块与全文索引', () => {
+  const transcript = (): AgentMessage[] => [
+    {
+      id: 'm-assistant',
+      role: 'assistant',
+      createdAt: 1_700_000_000_200,
+      schemaVersion: 1,
+      parts: [
+        { type: 'thinking', text: 'private reasoning', opaque: { signature: 'sig-1' } },
+        { type: 'text', text: 'persistneedle answer' },
+        { type: 'tool_call', callId: 'call-1', name: 'Read', input: { path: 'README.md' } },
+        { type: 'subagent', callId: 'call-2', childRunId: 'child-1', summary: 'child summary' },
+        { type: 'image', mime: 'image/png', dataRef: '/missing/imported-image.png' },
+        {
+          type: 'error',
+          error: { code: 'tool_failed', message: 'tool failed safely', retryable: false }
+        }
+      ]
+    },
+    {
+      id: 'm-tool-result',
+      role: 'user',
+      createdAt: 1_700_000_000_100,
+      schemaVersion: 1,
+      parts: [
+        {
+          type: 'tool_result',
+          callId: 'call-1',
+          output: { content: 'tool output', truncated: true, originalBytes: 100_000 },
+          isError: false
+        }
+      ]
+    }
+  ]
+
+  it('重启后仍按提交顺序恢复每一种 ContentPart，时间戳不会重排消息', () => {
+    repo.ensureSession({ id: 'session-parts', workspaceId: 'workspace-1', title: 'OriginalTitle' })
+    const messages = transcript()
+    for (const message of messages) repo.commitMessage('session-parts', message)
+    repo.setRunRecord('run-1', 'session-parts', 'completed', 10, 20)
+
+    restart()
+
+    expect(repo.getHistory('session-parts')).toEqual(messages)
+    expect(repo.getSessionDetail('session-parts')?.messages).toEqual(messages)
+    const raw = new DatabaseSync(join(dir, DB_FILENAME), { readOnly: true })
+    expect(raw.prepare('SELECT status, ended_at FROM runs WHERE id = ?').get('run-1')).toMatchObject({
+      status: 'completed',
+      ended_at: 20
+    })
+    raw.close()
+  })
+
+  it('正文与新标题可搜索，删除会话后 FTS 不留幽灵结果', () => {
+    repo.ensureSession({ id: 'session-search', workspaceId: 'workspace-1', title: 'OriginalTitle' })
+    for (const message of transcript()) repo.commitMessage('session-search', message)
+
+    expect(repo.searchAll('persistneedle').map((hit) => hit.sessionId)).toEqual(['session-search'])
+    repo.renameSession('session-search', 'RenamedOrbit')
+    expect(new Set(repo.searchAll('RenamedOrbit').map((hit) => hit.sessionId)))
+      .toEqual(new Set(['session-search']))
+    expect(repo.searchAll('OriginalTitle')).toEqual([])
+
+    repo.deleteSession('session-search')
+    expect(repo.searchAll('persistneedle')).toEqual([])
+    expect(repo.searchAll('RenamedOrbit')).toEqual([])
+  })
+
+  it('归档、收藏与清空历史都持久化，且不删除配置', () => {
+    store.putProvider(provider('keep-provider', 0))
+    repo.ensureSession({ id: 'session-flags', workspaceId: 'workspace-1', title: 'Flags' })
+    repo.commitMessage('session-flags', transcript()[0]!)
+    repo.setSessionArchived('session-flags', true)
+    repo.setSessionFavorited('session-flags', true)
+
+    restart()
+    expect(repo.getSession('session-flags')).toMatchObject({ archived: true, favorited: true })
+    expect(repo.listSessions('workspace-1', true)[0]).toMatchObject({
+      id: 'session-flags',
+      archived: true,
+      favorited: true
+    })
+
+    repo.deleteAllHistory()
+    restart()
+    expect(repo.getSession('session-flags')).toBeUndefined()
+    expect(repo.getHistory('session-flags')).toEqual([])
+    expect(repo.searchAll('persistneedle')).toEqual([])
+    expect(store.listProviders().map((item) => item.id)).toContain('keep-provider')
+  })
+})
+
 describe('密钥:数据库这一层只认字节', () => {
   /**
    * 存进去的是 `safeStorage.encryptString` 的产物 —— 密文里必然有非 UTF-8 的字节。
@@ -209,6 +302,38 @@ describe('密钥:数据库这一层只认字节', () => {
     repo.removeCredential('r')
     restart()
     expect(repo.getCredential('r')).toBeUndefined()
+  })
+})
+
+describe('导入供应商的凭证引用边界', () => {
+  it('新记录不采信归档中的 credentialRef，按供应商 ID 派生', () => {
+    const snapshot = repo.exportDataSnapshot()
+    repo.mergeDataExport({
+      ...snapshot,
+      providers: [{ ...provider('imported', 0), credentialRef: 'provider:someone-else' }]
+    })
+
+    expect(store.listProviders().find((item) => item.id === 'imported')?.credentialRef)
+      .toBe('provider:imported')
+  })
+
+  it('较新的导入记录覆盖配置时仍保留本机已有的 legacy ref', () => {
+    store.putProvider({ ...provider('existing', 0), credentialRef: 'legacy:key', updatedAt: 10 } as UpstreamProvider)
+    const snapshot = repo.exportDataSnapshot()
+    repo.mergeDataExport({
+      ...snapshot,
+      providers: [{
+        ...provider('existing', 0),
+        name: 'newer name',
+        credentialRef: 'provider:hijack',
+        updatedAt: 20
+      } as UpstreamProvider]
+    })
+
+    expect(store.listProviders().find((item) => item.id === 'existing')).toMatchObject({
+      name: 'newer name',
+      credentialRef: 'legacy:key'
+    })
   })
 })
 
@@ -329,6 +454,51 @@ describe('迁移', () => {
       MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0)
     )
     expect(store.listProviders()).toHaveLength(1)
+  })
+
+  it('真实的 V1–V3 数据库会追加升级到会话迁移并可立即写入全文索引', () => {
+    const v3Dir = mkdtempSync(join(tmpdir(), 'nextcowork-v3-'))
+    const v3Path = join(v3Dir, DB_FILENAME)
+    const raw = new DatabaseSync(v3Path)
+    raw.exec('CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)')
+    const insert = raw.prepare('INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)')
+    for (const migration of MIGRATIONS.slice(0, 3)) {
+      raw.exec(migration.sql)
+      insert.run(migration.version, migration.name, Date.now())
+    }
+    raw.exec('PRAGMA user_version = 3')
+    raw.close()
+
+    closeDatabase()
+    openDatabase(v3Dir)
+    repo.ensureSession({ id: 'upgraded-session', workspaceId: 'w', title: 'Migrated' })
+    repo.commitMessage('upgraded-session', {
+      id: 'upgraded-message',
+      role: 'user',
+      parts: [{ type: 'text', text: 'migrationneedle' }],
+      createdAt: 100,
+      schemaVersion: 1
+    })
+
+    expect(repo.searchAll('migrationneedle')[0]?.sessionId).toBe('upgraded-session')
+    const upgraded = new DatabaseSync(v3Path, { readOnly: true })
+    const tables = upgraded
+      .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")
+      .all()
+      .map((row) => String(row['name']))
+    const versions = upgraded
+      .prepare('SELECT version FROM migrations ORDER BY version')
+      .all()
+      .map((row) => Number(row['version']))
+    expect(tables).toEqual(expect.arrayContaining(['sessions', 'messages', 'runs', 'attachments', 'messages_fts']))
+    expect(versions).toEqual(MIGRATIONS.map((migration) => migration.version))
+    expect(Number(upgraded.prepare('PRAGMA user_version').get()?.['user_version'])).toBe(
+      MIGRATIONS.at(-1)?.version
+    )
+    upgraded.close()
+    closeDatabase()
+    rmSync(v3Dir, { recursive: true, force: true })
+    openDatabase(dir)
   })
 
   it('从旧版第 6 版升级时补 owner_id,并修复去重索引', () => {

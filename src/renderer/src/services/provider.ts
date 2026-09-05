@@ -77,6 +77,14 @@ export function updateModel(model: ModelAlias): Promise<ModelAlias> {
   return invoke('model:update', model)
 }
 
+export function renameModel(
+  providerId: string,
+  alias: string,
+  nextAlias: string,
+): Promise<ModelAlias> {
+  return invoke('model:rename', { providerId, alias, nextAlias })
+}
+
 export function removeModel(providerId: string, alias: string): Promise<void> {
   return invoke('model:remove', { providerId, alias })
 }

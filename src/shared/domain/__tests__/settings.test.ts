@@ -5,11 +5,42 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PROXY } from '../proxy'
 import { DEFAULT_CUSTOM_SEED } from '../theme'
-import { DEFAULT_SETTINGS, mergeSettings, type AppSettings } from '../settings'
+import {
+  DEFAULT_SETTINGS,
+  PERSONALIZATION_MAX,
+  mergeSettings,
+  type AppSettings
+} from '../settings'
 
 const base = (): AppSettings => structuredClone(DEFAULT_SETTINGS)
 
 describe('mergeSettings', () => {
+  it('旧设置缺少 data 时自动补默认本地备份设置', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.data
+    const restored = mergeSettings(DEFAULT_SETTINGS, legacy)
+    expect(restored.data).toEqual({ backupDirectory: null, backupFrequency: 'manual' })
+  })
+
+  it('data 深合并：改频率不丢目录，改目录不丢频率', () => {
+    let settings = mergeSettings(base(), { data: { backupDirectory: '/tmp/ncw-backups' } })
+    settings = mergeSettings(settings, { data: { backupFrequency: 'weekly' } })
+    expect(settings.data).toEqual({
+      backupDirectory: '/tmp/ncw-backups',
+      backupFrequency: 'weekly'
+    })
+  })
+
+  it('损坏的 data 字段逐项回退，不让旧设置把页面变成 undefined', () => {
+    const settings = mergeSettings(base(), {
+      data: {
+        backupDirectory: 42,
+        backupFrequency: 'hourly'
+      } as unknown as AppSettings['data']
+    })
+    expect(settings.data).toEqual(DEFAULT_SETTINGS.data)
+  })
+
   it('嵌套块只给一个属性时,兄弟属性保留', () => {
     const s = mergeSettings(base(), { gateway: { preferredPort: 19837 } })
     expect(s.gateway).toEqual({ enabled: false, preferredPort: 19837, failover: false })
@@ -169,5 +200,44 @@ describe('mergeSettings · 代理', () => {
     expect(s.proxy.host).toBe('p.example')
     expect(s.proxy.port).toBe(1080)
     expect(s.proxy.mode).toBe('manual')
+  })
+})
+
+/**
+ * 个性化那三栏是**唯一**会被原样拼进系统提示词的设置(见
+ * `main/kernel/context-assembler.ts` 的 `buildPersonalizationSection`),
+ * 所以这一节守的不是「存得下」,是「存进去的东西有边界」。
+ */
+describe('mergeSettings · 个性化', () => {
+  it('三栏深合并:改全局提示词不擦掉姓名', () => {
+    let s = mergeSettings(base(), { personalization: { name: '张三' } })
+    s = mergeSettings(s, { personalization: { instructions: '请用中文回答' } })
+    expect(s.personalization).toEqual({
+      name: '张三',
+      background: '',
+      instructions: '请用中文回答'
+    })
+  })
+
+  it('★ 超长的值在**落库前**就被截断 —— 输入框的 maxLength 拦不住 IPC', () => {
+    const s = mergeSettings(base(), {
+      personalization: { instructions: 'x'.repeat(PERSONALIZATION_MAX.instructions + 500) }
+    })
+    expect(s.personalization.instructions).toHaveLength(PERSONALIZATION_MAX.instructions)
+  })
+
+  it('非字符串逐项回退,不让一个坏字段把整页变成 undefined', () => {
+    const s = mergeSettings(base(), {
+      personalization: { name: 42, background: null, instructions: '好的' } as unknown as
+        AppSettings['personalization']
+    })
+    expect(s.personalization).toEqual({ name: '', background: '', instructions: '好的' })
+  })
+
+  it('旧库里缺这一块时补默认空值', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.personalization
+    const restored = mergeSettings(DEFAULT_SETTINGS, legacy)
+    expect(restored.personalization).toEqual({ name: '', background: '', instructions: '' })
   })
 })

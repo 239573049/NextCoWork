@@ -124,6 +124,18 @@ export interface UpstreamProvider {
   protocolOptions?: ProviderProtocolOptions
 }
 
+/**
+ * Canonical credential reference for a user-configured provider.
+ *
+ * The value is security-sensitive metadata even though it is not the secret
+ * itself: accepting it from a renderer or import file would let one provider
+ * point at another provider's encrypted key. Untrusted write paths derive it
+ * here; updates to an existing legacy provider preserve its local ref.
+ */
+export function providerCredentialRef(id: string): string {
+  return `provider:${id}`
+}
+
 /** 设置页对密钥**只写不读**:返回这个,永不回传明文。 */
 export interface CredentialInfo {
   hasKey: boolean
@@ -140,6 +152,8 @@ export interface ModelCapabilities {
   caching: boolean
   /** Extended capability matrix used by the model management console. */
   textInput?: boolean
+  /** Explicit input-side name; legacy records use `vision`. */
+  visionInput?: boolean
   fileInput?: boolean
   videoInput?: boolean
   audioInput?: boolean
@@ -155,13 +169,19 @@ export interface ModelCapabilities {
 
 export type ModelModality = 'text' | 'image' | 'video' | 'speech' | 'transcription'
 export type ThinkingMode = 'unsupported' | 'always' | 'toggle' | 'effort' | 'budget'
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface ThinkingConfig {
   mode: ThinkingMode
   defaultEnabled: boolean
-  defaultEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'max'
+  defaultEffort?: ReasoningEffort
   defaultBudgetTokens?: number
   parameterPath?: string
+  /** Optional provider-specific JSON values for a toggle field. */
+  enabledValue?: unknown
+  disabledValue?: unknown
+  /** Optional wire-value mapping when provider labels differ from our levels. */
+  effortMap?: Partial<Record<ReasoningEffort, unknown>>
 }
 
 export interface RequestPatchRule {
@@ -181,6 +201,8 @@ export interface ModelAlias {
   providerId: string
   /** 实际下发给上游的名字 */
   upstreamModel: string
+  /** 同一供应商内的优先级；数字越小越靠前。旧记录缺失时按别名稳定排序。 */
+  priority?: number
   capabilities: ModelCapabilities
   contextWindow: number
   maxOutputTokens: number
@@ -188,8 +210,29 @@ export interface ModelAlias {
   modality?: ModelModality
   enabled?: boolean
   thinkingConfig?: ThinkingConfig
+  /** Exact strengths accepted by this provider×model binding, when known. */
+  reasoningEfforts?: readonly ReasoningEffort[]
   requestAdapter?: RequestAdapterConfig
   source?: { url: string; fetchedAt: string; verifiedAt?: string }
+  /** Fields explicitly customized for this binding. Other fields follow the catalogue.
+   * Missing on legacy records; an empty list explicitly opts into all catalogue defaults. */
+  catalogOverrides?: readonly ModelCatalogOverride[]
+}
+
+export const MODEL_METADATA_FIELDS = [
+  'displayName', 'modality', 'contextWindow', 'maxOutputTokens',
+  'thinkingConfig', 'reasoningEfforts', 'requestAdapter', 'source'
+] as const
+
+export type ModelCatalogOverride = typeof MODEL_METADATA_FIELDS[number] | `capabilities.${keyof ModelCapabilities}`
+
+export function isModelCatalogOverride(value: unknown): value is ModelCatalogOverride {
+  return typeof value === 'string' && (
+    (MODEL_METADATA_FIELDS as readonly string[]).includes(value) ||
+    ['tools', 'vision', 'thinking', 'caching', 'textInput', 'visionInput', 'fileInput',
+      'videoInput', 'audioInput', 'textOutput', 'imageOutput', 'videoOutput', 'audioOutput',
+      'webSearch', 'structuredOutput', 'streaming', 'batch'].some((key) => value === `capabilities.${key}`)
+  )
 }
 
 /**

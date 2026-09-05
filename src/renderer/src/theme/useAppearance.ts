@@ -30,5 +30,5 @@ function snapshot(): ResolvedTheme {
 }
 
 export function useAppearance(): ResolvedTheme {
-  return useSyncExternalStore(subscribe, snapshot)
+  return useSyncExternalStore(subscribe, snapshot, () => 'dark')
 }

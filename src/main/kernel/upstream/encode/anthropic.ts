@@ -75,10 +75,12 @@ function toBlock(p: ContentPart): unknown | null {
       // tool_result 了。这个 part 只存在于 UI 那一轨(可展开节点)。
       return null
 
-    case 'image':
-      // 步骤 9 才有 dataRef 的解析能力(要读文件)。现在没有任何东西产出 image part,
-      // 所以这里返回 null 是「还没到」,不是「不支持」。
-      return null
+    case 'image': {
+      // The router resolves ncw:// attachments into an outgoing-only data URL.
+      const prefix = `data:${p.mime};base64,`
+      if (!p.dataRef.startsWith(prefix)) return null
+      return { type: 'image', source: { type: 'base64', media_type: p.mime, data: p.dataRef.slice(prefix.length) } }
+    }
 
     case 'error':
       // 错误只属于 UI 那一轨。把它回传给模型,模型就会开始为我们的 bug 道歉。

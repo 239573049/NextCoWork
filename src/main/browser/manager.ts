@@ -5,14 +5,20 @@ import { store } from '../state/store'
 const PROFILES_KEY = 'browser.profiles'
 const DEFAULT_PROFILE_ID = 'default'
 
-export interface BrowserOpenInput {
+export type BrowserOpenInput = {
   workspaceId: string
   url: string
   title?: string
-  source: 'user' | 'agent'
-  ownerRunId?: string
   profileId?: string
   openRightPanel?: boolean
+} & (
+  | { source: 'user'; ownerRunId?: never; clientTabId?: string }
+  | { source: 'agent'; ownerRunId: string; clientTabId?: never }
+)
+
+export interface BrowserActor {
+  workspaceId: string
+  runId: string
 }
 
 export interface BrowserManagerListener {
@@ -36,11 +42,15 @@ function normalizeUrl(raw: string): string {
   return parsed.href
 }
 
+function copyTab(tab: BrowserTab): BrowserTab {
+  return { ...tab }
+}
+
 /**
  * 进程内浏览器会话目录。它不持有 Electron BrowserWindow，因此 Agent 工具
  * 和渲染层可以共享同一份可验证状态，而不会把 webContents 泄露给工具层。
  */
-class BrowserManager {
+export class BrowserManager {
   private readonly tabs = new Map<string, BrowserTab>()
   private profiles: BrowserProfile[] | null = null
   private listener: BrowserManagerListener | null = null
@@ -101,10 +111,12 @@ class BrowserManager {
     return [...this.tabs.values()]
       .filter((tab) => tab.workspaceId === workspaceId)
       .sort((a, b) => a.createdAt - b.createdAt)
+      .map(copyTab)
   }
 
   get(id: string): BrowserTab | undefined {
-    return this.tabs.get(id)
+    const tab = this.tabs.get(id)
+    return tab === undefined ? undefined : copyTab(tab)
   }
 
   open(input: BrowserOpenInput): BrowserTab {
@@ -113,6 +125,15 @@ class BrowserManager {
     }
     const now = Date.now()
     const url = normalizeUrl(input.url)
+    if (input.source === 'user' && input.clientTabId !== undefined) {
+      const existing = [...this.tabs.values()].find(
+        (tab) =>
+          tab.source === 'user' &&
+          tab.workspaceId === input.workspaceId &&
+          tab.clientTabId === input.clientTabId
+      )
+      if (existing !== undefined) return copyTab(existing)
+    }
     if (input.profileId !== undefined) {
       this.ensureProfiles()
       this.profiles = this.profiles!.map((profile) =>
@@ -123,6 +144,7 @@ class BrowserManager {
     const tab: BrowserTab = {
       id: ulid(),
       workspaceId: input.workspaceId,
+      ...(input.clientTabId === undefined ? {} : { clientTabId: input.clientTabId }),
       ...(input.ownerRunId === undefined ? {} : { ownerRunId: input.ownerRunId }),
       ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
       source: input.source,
@@ -134,11 +156,11 @@ class BrowserManager {
     }
     this.tabs.set(tab.id, tab)
     this.emit(tab.workspaceId, input.openRightPanel === true)
-    return tab
+    return copyTab(tab)
   }
 
-  navigate(id: string, url: string, actorRunId?: string): BrowserTab {
-    const tab = this.requireOwned(id, actorRunId)
+  navigate(id: string, url: string, actor?: BrowserActor): BrowserTab {
+    const tab = this.requireOwned(id, actor)
     const next: BrowserTab = {
       ...tab,
       url: normalizeUrl(url),
@@ -147,11 +169,11 @@ class BrowserManager {
     }
     this.tabs.set(id, next)
     this.emit(next.workspaceId)
-    return next
+    return copyTab(next)
   }
 
-  update(id: string, patch: { url?: string; title?: string; status?: BrowserTab['status'] }, actorRunId?: string): BrowserTab {
-    const tab = this.requireOwned(id, actorRunId)
+  update(id: string, patch: { url?: string; title?: string; status?: BrowserTab['status'] }, actor?: BrowserActor): BrowserTab {
+    const tab = this.requireOwned(id, actor)
     const next: BrowserTab = {
       ...tab,
       ...(patch.url === undefined ? {} : { url: normalizeUrl(patch.url) }),
@@ -161,11 +183,11 @@ class BrowserManager {
     }
     this.tabs.set(id, next)
     this.emit(next.workspaceId)
-    return next
+    return copyTab(next)
   }
 
-  close(id: string, actorRunId?: string): void {
-    const tab = this.requireOwned(id, actorRunId)
+  close(id: string, actor?: BrowserActor): void {
+    const tab = this.requireOwned(id, actor)
     this.tabs.delete(id)
     this.emit(tab.workspaceId)
   }
@@ -181,10 +203,13 @@ class BrowserManager {
     if (changed) this.emit(workspaceId)
   }
 
-  private requireOwned(id: string, actorRunId?: string): BrowserTab {
+  private requireOwned(id: string, actor?: BrowserActor): BrowserTab {
     const tab = this.tabs.get(id)
     if (tab === undefined) throw new Error(`浏览器标签不存在: ${id}`)
-    if (actorRunId !== undefined && (tab.source !== 'agent' || tab.ownerRunId !== actorRunId)) {
+    if (
+      actor !== undefined &&
+      (tab.workspaceId !== actor.workspaceId || tab.source !== 'agent' || tab.ownerRunId !== actor.runId)
+    ) {
       throw new Error('只能操作当前 Agent 打开的浏览器标签')
     }
     return tab

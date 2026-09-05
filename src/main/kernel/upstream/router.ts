@@ -9,19 +9,34 @@
  */
 import type { AgentError } from '../../../shared/agent/error'
 import { agentError } from '../../../shared/agent/error'
-import type { ProviderStreamEvent } from '../../../shared/agent/stream'
-import type { ModelAlias, ProviderHealth, RequestPatchRule, UpstreamProvider } from '../../../shared/domain/provider'
+import type { ProviderStreamEvent, StopReason, TokenUsage } from '../../../shared/agent/stream'
+import type { ResolvedModelThinking } from '../../../shared/domain/model-runtime'
+import { resolveModelThinking } from '../../../shared/domain/model-runtime'
+import { REQUEST_PATH } from '../../../shared/domain/baseurl'
+import type { ModelAlias, ProviderHealth, ThinkingConfig, UpstreamProvider } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
+import { applyRequestPatches, RequestPatchError } from '../../../shared/domain/request-patch'
+import {
+  applyThinkingAdapter,
+  enforceThinkingPreference,
+  ThinkingAdapterError,
+  type ThinkingAdapterInput
+} from '../../../shared/domain/thinking-adapter'
 import { abortableSleep, isAbortError } from '../abort'
+import { estimateTokens } from '../context-assembler'
 import type { KernelHost } from '../host'
+import type { UnpricedUsageAttempt } from '../../../shared/domain/usage'
+import { ulid } from '../../../shared/util/id'
 import {
   joinUpstreamUrl,
   type CanonicalRequest,
   type UpstreamRequestContext
 } from './canonical'
-import { anthropicErrorToAgentError, decodeAnthropic } from './decode/anthropic'
-import { applyAnthropicRequestOptions, encodeAnthropic } from './encode/anthropic'
-import { sseFromResponse } from './sse'
+import { anthropicErrorToAgentError } from './decode/anthropic'
+import { interruptedResponse, openAIErrorToAgentError } from './decode/openai-common'
+import { applyAnthropicRequestOptions } from './encode/anthropic'
+import { decodeUpstream, encodeUpstream } from './codec'
+import { ImageInputError, prepareRequestImages } from './images'
 
 /** 每个 provider 最多试几次(含首次)。第 3 次还不行,换下一个 provider 比继续磕更有用。 */
 const MAX_ATTEMPTS = 3
@@ -46,6 +61,33 @@ export interface ProviderConfigSource {
 interface Candidate {
   provider: UpstreamProvider
   alias: ModelAlias
+}
+
+function thinkingConfigFor(req: CanonicalRequest, c: Candidate): ThinkingConfig | undefined {
+  if (c.alias.thinkingConfig !== undefined) return c.alias.thinkingConfig
+  if (req.thinkingBudget !== undefined) return { mode: 'budget', defaultEnabled: true }
+  if (req.reasoning?.explicit !== true || req.reasoning.enabled) return undefined
+  // Old model imports defaulted capabilities.thinking to false and had no
+  // ThinkingConfig. Known toggle protocols still support an explicit Off.
+  if (c.provider.protocol === 'anthropic'
+    || /(?:^|\/)(?:deepseek|deep-seek|glm|chatglm|hy3|hy4)[/:._-]/iu.test(c.alias.upstreamModel)
+    || c.alias.capabilities.thinking) return { mode: 'toggle', defaultEnabled: false }
+  return undefined
+}
+
+function reasoningFor(req: CanonicalRequest, alias: ModelAlias): ResolvedModelThinking | undefined {
+  if (req.thinkingLevel !== undefined && alias.thinkingConfig !== undefined) {
+    return resolveModelThinking(req.thinkingLevel, alias.thinkingConfig,
+      Math.min(req.maxOutputTokens, alias.maxOutputTokens), alias.reasoningEfforts)
+  }
+  if (req.reasoning !== undefined) return req.reasoning
+  if (req.thinkingBudget === undefined || alias.thinkingConfig?.mode === 'unsupported') return undefined
+  return {
+    mode: alias.thinkingConfig?.mode ?? 'budget',
+    enabled: true,
+    explicit: true,
+    budgetTokens: req.thinkingBudget
+  }
 }
 
 /**
@@ -91,16 +133,24 @@ type Outcome =
   /** 失败。`sawContent` 决定还能不能重试/切换 —— §5.3 那条边界 */
   | { kind: 'failed'; error: AgentError; sawContent: boolean }
 
+export interface UpstreamRouterOptions {
+  baseDelayMs?: number
+  /** Synchronous sink; failures are isolated so telemetry can never fail a request. */
+  onUsageAttempt?: (record: UnpricedUsageAttempt) => void
+}
+
 export class UpstreamRouter {
   private readonly healthMap = new Map<string, ProviderHealth>()
   private readonly baseDelayMs: number
+  private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
 
   constructor(
     private readonly host: KernelHost,
     private readonly config: ProviderConfigSource,
-    opts: { baseDelayMs?: number } = {}
+    opts: UpstreamRouterOptions = {}
   ) {
     this.baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
+    this.onUsageAttempt = opts.onUsageAttempt
   }
 
   listModels(): ModelAlias[] {
@@ -193,52 +243,129 @@ export class UpstreamRouter {
     c: Candidate,
     req: CanonicalRequest,
     signal: AbortSignal,
-    context: UpstreamRequestContext
+    context: UpstreamRequestContext,
+    attemptNumber: number
   ): AsyncGenerator<ProviderStreamEvent, Outcome> {
     let sawContent = false
     const startedAt = this.host.clock.now()
+    const endpoint = joinUpstreamUrl(c.provider.baseUrl, REQUEST_PATH[c.provider.protocol])
+    let httpStatus: number | null = null
+    let responseModel: string | null = null
+    let stopReason: StopReason | null = null
+    let timeToFirstTokenMs: number | null = null
+    let thinkingText = ''
+    let toolCalls = 0
+    let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+    let recorded = false
+
+    const finish = (outcome: Outcome): Outcome => {
+      if (recorded) return outcome
+      recorded = true
+      const endedAt = this.host.clock.now()
+      const explicitThinking = usage.reasoningTokens
+      const rawThinkingEstimate =
+        explicitThinking === undefined && thinkingText !== ''
+          ? estimateTokens(thinkingText)
+          : null
+      // Reasoning is a subset of outputTokens. Text-based estimation can be
+      // higher than the provider tokenizer, so never let the diagnostic
+      // breakdown contradict the provider's billable output total.
+      const estimatedThinking =
+        rawThinkingEstimate === null
+          ? null
+          : usage.outputTokens > 0
+            ? Math.min(rawThinkingEstimate, usage.outputTokens)
+            : rawThinkingEstimate
+      const error = outcome.kind === 'failed' ? outcome.error : null
+      try {
+        this.onUsageAttempt?.({
+          id: ulid(endedAt),
+          at: startedAt,
+          runId: context.runId ?? `run_${ulid(startedAt)}`,
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId ?? '',
+          attempt: attemptNumber,
+          providerId: c.provider.id,
+          providerName: c.provider.name,
+          protocol: c.provider.protocol,
+          endpoint,
+          alias: req.model,
+          upstreamModel: c.alias.upstreamModel,
+          responseModel,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadInputTokens ?? 0,
+          cacheWriteTokens: usage.cacheCreationInputTokens ?? 0,
+          cacheWrite1hTokens: usage.cacheCreation1hInputTokens ?? 0,
+          thinkingTokens: explicitThinking ?? estimatedThinking,
+          thinkingTokensEstimated: explicitThinking === undefined && estimatedThinking !== null,
+          latencyMs: Math.max(0, endedAt - startedAt),
+          timeToFirstTokenMs,
+          ok: outcome.kind === 'ok',
+          httpStatus: httpStatus ?? error?.status ?? null,
+          errorKind: error?.code ?? null,
+          errorMessage: error?.message.slice(0, 4096) ?? null,
+          stopReason,
+          toolCalls,
+          toolErrors: 0
+        })
+      } catch (error) {
+        this.host.logger.warn('[usage] 写入请求记录失败，请求本身不受影响', error)
+      }
+      return outcome
+    }
 
     try {
-      if (c.provider.protocol !== 'anthropic') {
-        // openai-chat / openai-responses 的编解码属于步骤 13(网关)。
-        // 明确报「未实现」,而不是让它以一个诡异的 400 出现在用户面前。
-        return {
-          kind: 'failed',
-          sawContent,
-          error: agentError('provider', `协议 ${c.provider.protocol} 的上游编解码尚未实现(步骤 13)`)
-        }
-      }
-
+      signal.throwIfAborted()
       const apiKey = await this.host.secrets.get(c.provider.credentialRef)
       if (apiKey === null || apiKey === '') {
-        return {
+        return finish({
           kind: 'failed',
           sawContent,
           error: agentError('auth', `供应商「${c.provider.name}」还没有配置密钥`, { retryable: false })
-        }
+        })
       }
 
       const cacheTtl = anthropicCacheTtlOf(c.provider)
-      const enc = encodeAnthropic(req, c.alias.upstreamModel, apiKey, {
+      const prepared = await prepareRequestImages(req, this.host, context, signal)
+      const enc = encodeUpstream(c.provider.protocol, prepared, c.alias.upstreamModel, apiKey, {
         userId: context.workspaceId,
         cacheTtl
       })
-      const patchedBody = applyRequestPatches(enc.body, c.alias.requestAdapter?.patches)
+      const thinkingInput: ThinkingAdapterInput = {
+        protocol: c.provider.protocol,
+        upstreamModel: c.alias.upstreamModel,
+        config: thinkingConfigFor(req, c),
+        reasoning: reasoningFor(req, c.alias),
+        maxOutputTokens: req.maxOutputTokens,
+        preset: c.alias.requestAdapter?.preset ?? 'auto',
+        ...(c.alias.reasoningEfforts !== undefined
+          ? { reasoningEfforts: c.alias.reasoningEfforts }
+          : {})
+      }
+      const adaptedBody = applyThinkingAdapter(enc.body, thinkingInput)
+      const patchedBody = applyRequestPatches(
+        adaptedBody,
+        c.alias.requestAdapter?.patches,
+        c.alias.requestAdapter?.preset ?? c.provider.protocol
+      )
+      const guardedBody = enforceThinkingPreference(patchedBody, thinkingInput)
       // Model-level patches are allowed to customise ordinary parameters, but
       // Provider-owned Anthropic identity/cache fields are re-applied at the
       // final wire boundary. This keeps metadata.user_id mandatory and makes a
       // Provider's off/5m/1h choice authoritative even for legacy aliases with
       // broad custom patches.
-      const body = applyAnthropicRequestOptions(patchedBody, {
+      const body = c.provider.protocol === 'anthropic' ? applyAnthropicRequestOptions(guardedBody, {
         userId: context.workspaceId,
         cacheTtl
-      })
+      }) : guardedBody
       const res = await this.host.fetch(joinUpstreamUrl(c.provider.baseUrl, enc.path), {
         method: 'POST',
         headers: { ...enc.headers, accept: 'text/event-stream' },
         body: JSON.stringify(body),
         signal
       })
+      httpStatus = res.status
 
       if (!res.ok) {
         // 必须把 body 读完(或 cancel),否则连接不会被释放
@@ -249,32 +376,68 @@ export class UpstreamRouter {
         } catch {
           /* 非 JSON 的错误体(网关的 HTML 页)—— 原样交给分类器 */
         }
-        const error = anthropicErrorToAgentError(res.status, parsed, {
+        const error = c.provider.protocol === 'anthropic' ? anthropicErrorToAgentError(res.status, parsed, {
           cacheTtl,
           providerName: c.provider.name
-        })
+        }) : openAIErrorToAgentError(res.status, parsed)
         const after = parseRetryAfter(res.headers.get('retry-after'), this.host.clock.now())
         if (after !== undefined) error.retryAfterMs = after
-        return { kind: 'failed', sawContent, error }
+        return finish({ kind: 'failed', sawContent, error })
       }
 
-      for await (const ev of decodeAnthropic(sseFromResponse(res, signal))) {
+      for await (const ev of decodeUpstream(c.provider.protocol, res, signal)) {
         if (ev.type === 'error') {
-          return { kind: 'failed', sawContent, error: ev.error }
+          return finish({ kind: 'failed', sawContent, error: ev.error })
+        }
+        if (ev.type === 'message_start') responseModel = ev.model
+        if (ev.type === 'message_end') {
+          usage = ev.usage
+          stopReason = ev.stopReason
+        }
+        if (ev.type === 'thinking_delta') thinkingText += ev.text
+        if (ev.type === 'tool_call_start') toolCalls += 1
+        if (
+          timeToFirstTokenMs === null &&
+          (ev.type === 'text_delta' ||
+            ev.type === 'thinking_delta' ||
+            ev.type === 'tool_call_start' ||
+            ev.type === 'block_opaque')
+        ) {
+          timeToFirstTokenMs = Math.max(0, this.host.clock.now() - startedAt)
         }
         if (isContent(ev)) sawContent = true
         yield ev
       }
 
+      if (stopReason === null) {
+        return finish({ kind: 'failed', sawContent, error: interruptedResponse() })
+      }
       this.recordSuccess(c.provider.id, this.host.clock.now() - startedAt)
-      return { kind: 'ok' }
+      return finish({ kind: 'ok' })
     } catch (err) {
-      if (isAbortError(err)) throw err
-      return {
+      if (isAbortError(err)) {
+        finish({
+          kind: 'failed',
+          sawContent,
+          error: agentError('aborted', '已中断', { retryable: false })
+        })
+        throw err
+      }
+      if (err instanceof RequestPatchError || err instanceof ThinkingAdapterError) {
+        return finish({
+          kind: 'failed',
+          sawContent,
+          error: agentError('provider', err.message, { retryable: false })
+        })
+      }
+      if (err instanceof ImageInputError) {
+        return finish({ kind: 'failed', sawContent, error: err.error })
+      }
+      return finish({
         kind: 'failed',
         sawContent,
         error: agentError('network', `连接「${c.provider.name}」失败:${(err as Error).message}`)
-      }
+      })
     }
   }
 
@@ -314,6 +477,13 @@ export class UpstreamRouter {
       return
     }
 
+    const runContext: UpstreamRequestContext = {
+      ...context,
+      workspaceId,
+      runId: context.runId ?? `run_${ulid(this.host.clock.now())}`,
+      sessionId: context.sessionId ?? ''
+    }
+
     const candidates = this.candidates(req.model)
     if (candidates.length === 0) {
       yield { type: 'error', error: this.noCandidateError(req.model) }
@@ -322,6 +492,7 @@ export class UpstreamRouter {
 
     let lastError: AgentError | undefined
     let authError: AgentError | undefined
+    let attemptOrdinal = 0
 
     for (let ci = 0; ci < candidates.length; ci++) {
       const c = candidates[ci]
@@ -338,7 +509,14 @@ export class UpstreamRouter {
       }
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const outcome = yield* this.attempt(c, req, signal, { workspaceId })
+        attemptOrdinal += 1
+        const outcome = yield* this.attempt(
+          c,
+          req,
+          signal,
+          runContext,
+          attemptOrdinal
+        )
         if (outcome.kind === 'ok') return
 
         // A cache compatibility error is a configuration mismatch, not an
@@ -397,27 +575,4 @@ export class UpstreamRouter {
       { retryable: cooling }
     )
   }
-}
-
-/** Apply the model-level, deliberately narrow request customisation surface. */
-function applyRequestPatches(body: unknown, patches: readonly RequestPatchRule[] | undefined): unknown {
-  if (!patches || !Array.isArray(patches) || patches.length === 0) return body
-  const root = structuredClone(body) as Record<string, unknown>
-  const forbidden = new Set(['/model', '/messages', '/stream'])
-  for (const patch of patches) {
-    if (patch.op !== 'add' && patch.op !== 'replace' && patch.op !== 'remove') throw new Error(`请求 Patch 操作不支持: ${String(patch.op)}`)
-    if (!patch.path.startsWith('/') || forbidden.has(patch.path) || /\/(?:model|messages|stream)(?:\/|$)/.test(patch.path)) throw new Error(`请求 Patch 路径不允许: ${patch.path}`)
-    const parts = patch.path.slice(1).split('/').map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
-    let cursor: Record<string, unknown> = root
-    for (const part of parts.slice(0, -1)) {
-      const next = cursor[part]
-      if (typeof next !== 'object' || next === null || Array.isArray(next)) throw new Error(`请求 Patch 父路径不存在: ${patch.path}`)
-      cursor = next as Record<string, unknown>
-    }
-    const key = parts[parts.length - 1]
-    if (!key) throw new Error(`请求 Patch 路径为空: ${patch.path}`)
-    if (patch.op === 'remove') delete cursor[key]
-    else cursor[key] = patch.value
-  }
-  return root
 }

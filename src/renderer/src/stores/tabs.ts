@@ -18,6 +18,9 @@ import { createSession } from '../services/sessions'
 import { killTerminal } from '../services/terminal'
 import { closeBrowserTab } from '../services/browser'
 import { isSessionUntouched, releaseSession } from './session'
+import type { WorkspaceFileMutationRequest } from '../../../shared/domain/workspace-file'
+import { isWithinPath } from './documents'
+import { findGroup, migrateLegacyInnerTabs, normalizeDockState, splitGroup, moveTab as moveDockTab, reorderTab as reorderDockTab, resizeSplit, closeTab as closeDockTab, closeGroup as closeDockGroupState, addTabToGroup, type DockDirection, type DockNode } from '../../../shared/domain/dock'
 
 const EMPTY: InnerTabState = {
   tabs: [],
@@ -28,6 +31,7 @@ const EMPTY: InnerTabState = {
 
 interface BrowserTabSyncItem {
   id: string
+  clientTabId?: string
   url: string
   title: string
   source: 'user' | 'agent'
@@ -99,6 +103,17 @@ interface TabsState {
   tabsOf: (workspaceId: string, pane: TabPane) => InnerTab[]
   /** 某一格当前激活的 Tab id —— 两格各存各的 */
   activeIdOf: (workspaceId: string, pane: TabPane) => string | null
+  dockOf: (workspaceId: string) => ReturnType<typeof migrateLegacyInnerTabs>
+  activateDockGroup: (workspaceId: string, groupId: string) => void
+  activateDockTab: (workspaceId: string, groupId: string, tabId: string) => void
+  splitAndOpenDock: (workspaceId: string, groupId: string, direction: DockDirection, kind: InnerTabKind, pane?: TabPane) => void
+  splitAndMoveDockTab: (workspaceId: string, tabId: string, fromGroupId: string, targetGroupId: string, direction: DockDirection) => void
+  openDock: (workspaceId: string, groupId: string, kind: InnerTabKind, init?: TabInit, pane?: TabPane) => void
+  moveDockTab: (workspaceId: string, tabId: string, fromGroupId: string, toGroupId: string, index?: number) => void
+  reorderDockTab: (workspaceId: string, groupId: string, from: number, to: number) => void
+  resizeDock: (workspaceId: string, splitId: string, ratio: number) => void
+  closeDockTab: (workspaceId: string, groupId: string, tabId: string) => void
+  closeDockGroup: (workspaceId: string, groupId: string) => void
   hydrate: (workspaceId: string, s: InnerTabState) => void
   /**
    * 工作区第一次被看到时:先取回上次的 Tab 布局,没有才开一个新对话
@@ -129,13 +144,23 @@ interface TabsState {
   newChat: (workspaceId: string) => void
   activate: (workspaceId: string, tabId: string) => void
   close: (workspaceId: string, tabId: string) => void
+  applyFileMutation: (req: WorkspaceFileMutationRequest) => void
   /** `from`/`to` 是**该格内**的下标,见 shared/domain/tab.ts 的 reorderInPane */
   move: (workspaceId: string, from: number, to: number, pane?: TabPane) => void
   rename: (workspaceId: string, tabId: string, title: string) => void
+  /** Session metadata is authoritative across windows; updating it never changes focus/layout. */
+  syncSessionTitle: (workspaceId: string, sessionId: string, title: string) => void
   setBrowser: (workspaceId: string, tabId: string, patch: { url?: string; title?: string; browserId?: string; profileId?: string }) => void
   syncBrowserTabs: (
     workspaceId: string,
-    tabs: ReadonlyArray<{ id: string; url: string; title: string; source: 'user' | 'agent'; profileId?: string }>
+    tabs: ReadonlyArray<{
+      id: string
+      clientTabId?: string
+      url: string
+      title: string
+      source: 'user' | 'agent'
+      profileId?: string
+    }>
   ) => void
   /** 工作区关闭时销毁:Tab 表和它那些会话的转录一起放掉(正在跑的除外) */
   forget: (workspaceId: string) => void
@@ -160,14 +185,85 @@ function activeIn(s: InnerTabState, pane: TabPane): string | null {
   return s.activeTabId
 }
 
+function groupForPane(dock: ReturnType<typeof migrateLegacyInnerTabs>, pane: TabPane): string | null {
+  const visit = (node: DockNode): string | null => {
+    if (node.type === 'group') {
+      const members = dock.tabs.filter((tab) => node.tabIds.includes(tab.id))
+      if (members.length > 0 && members.every((tab) => paneOf(tab) === pane)) return node.id
+      return null
+    }
+    return visit(node.first) ?? visit(node.second)
+  }
+  return visit(dock.root)
+}
+
+function groupContainingTab(dock: ReturnType<typeof migrateLegacyInnerTabs>, tabId: string): string | null {
+  const visit = (node: DockNode): string | null => {
+    if (node.type === 'group') return node.tabIds.includes(tabId) ? node.id : null
+    return visit(node.first) ?? visit(node.second)
+  }
+  return visit(dock.root)
+}
+
 export const useTabsStore = create<TabsState>((set, get) => {
+  const dockCache = new Map<string, { source: InnerTabState; dock: ReturnType<typeof migrateLegacyInnerTabs> }>()
+  const withDock = (state: InnerTabState): InnerTabState => {
+    let dock = normalizeDockState(state.dock ?? migrateLegacyInnerTabs(state), state.tabs)
+    const present = new Set<string>()
+    const collect = (node: DockNode): void => {
+      if (node.type === 'group') { node.tabIds.forEach((id) => present.add(id)); return }
+      collect(node.first); collect(node.second)
+    }
+    collect(dock.root)
+    // Legacy callers and browser events can add a tab to `tabs` before the
+    // Dock tree knows about it. Attach those orphans to the matching pane
+    // group so the next render never leaves a tab unmounted.
+    for (const tab of state.tabs) {
+      if (present.has(tab.id)) continue
+      const wanted = paneOf(tab)
+      const groups: Array<{ id: string; pane: TabPane | null }> = []
+      const visit = (node: DockNode): void => {
+        if (node.type === 'group') {
+          const members = state.tabs.filter((item) => node.tabIds.includes(item.id))
+          groups.push({ id: node.id, pane: members[0] && members.every((item) => paneOf(item) === paneOf(members[0]!)) ? paneOf(members[0]!) : null })
+          return
+        }
+        visit(node.first); visit(node.second)
+      }
+      visit(dock.root)
+      const target = groups.find((group) => group.pane === wanted)?.id ?? groups.find((group) => group.pane === 'main')?.id
+      if (target === undefined) continue
+      const add = (node: DockNode): DockNode => {
+        if (node.type === 'group') return node.id === target ? { ...node, tabIds: [...node.tabIds, tab.id], activeTabId: node.activeTabId ?? tab.id, hidden: false } : node
+        return { ...node, first: add(node.first), second: add(node.second) }
+      }
+      dock = { ...dock, root: add(dock.root) }
+      present.add(tab.id)
+    }
+    // Old activation fields are still accepted during migration. Once a
+    // Dock snapshot exists, the Dock group's active id is authoritative.
+    if (state.dock === undefined) {
+      const activeIds = [state.activeTabId, state.bottomActiveTabId ?? null, state.rightActiveTabId ?? null].filter((id): id is string => id !== null)
+      const activate = (node: DockNode): DockNode => {
+        if (node.type === 'group') {
+          const id = activeIds.find((candidate) => node.tabIds.includes(candidate))
+          return id === undefined ? node : { ...node, activeTabId: id }
+        }
+        return { ...node, first: activate(node.first), second: activate(node.second) }
+      }
+      dock = { ...dock, root: activate(dock.root) }
+    }
+    return { ...state, tabs: dock.tabs, dock }
+  }
   const write = (workspaceId: string, next: InnerTabState): void => {
-    set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: next } })
-    persistInnerTabs(workspaceId, next)
+    const normalized = withDock(next)
+    set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: normalized } })
+    persistInnerTabs(workspaceId, normalized)
   }
 
   /** 正在取持久化布局的工作区。`ensure` 挂在 effect 上,会被重入。 */
   const loading = new Set<string>()
+  const pendingTitles = new Map<string, Map<string, string>>()
   // Agent events can arrive for a workspace that is not currently visible.
   // Keep them pending until that workspace's persisted inner tabs are hydrated,
   // otherwise a background browser event could overwrite its chat tabs.
@@ -181,11 +277,18 @@ export const useTabsStore = create<TabsState>((set, get) => {
   }
 
   async function loadOrSeed(workspaceId: string): Promise<void> {
-    const persisted = await getInnerTabs(workspaceId)
+    const snapshot = await getInnerTabs(workspaceId)
+    const renamed = pendingTitles.get(workspaceId)
+    const persisted = withDock({ ...snapshot, tabs: snapshot.tabs.map((tab) => {
+      const title = tab.kind === 'chat' ? renamed?.get(tab.ref.sessionId) : undefined
+      return title === undefined ? tab : { ...tab, title }
+    }) })
     // 这一趟 IPC 期间用户可能已经自己开了一个 Tab —— 那份是新的,别覆盖它
-    if (get().byWorkspace[workspaceId] !== undefined) return
+    if (get().byWorkspace[workspaceId] !== undefined) {
+      applyPendingBrowser(workspaceId)
+      return
+    }
     if (persisted.tabs.length > 0) {
-      // 读回来的和写出去的是同一份,不回写 —— 否则每次启动都白打一次盘
       set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: persisted } })
       applyPendingBrowser(workspaceId)
       return
@@ -216,8 +319,135 @@ export const useTabsStore = create<TabsState>((set, get) => {
       return activeIn(get().stateOf(workspaceId), pane)
     },
 
+    dockOf(workspaceId) {
+      const state = get().stateOf(workspaceId)
+      const cached = dockCache.get(workspaceId)
+      if (cached?.source === state) return cached.dock
+      const dock = normalizeDockState(state.dock ?? migrateLegacyInnerTabs(state), state.tabs)
+      dockCache.set(workspaceId, { source: state, dock })
+      return dock
+    },
+
+    activateDockGroup(workspaceId, groupId) {
+      const cur = get().stateOf(workspaceId)
+      const dock = get().dockOf(workspaceId)
+      const visit = (node: import('../../../shared/domain/dock').DockNode): boolean =>
+        node.type === 'group' ? node.id === groupId : visit(node.first) || visit(node.second)
+      if (!visit(dock.root)) return
+      if (dock.activeGroupId === groupId) return
+      write(workspaceId, { ...cur, dock: { ...dock, activeGroupId: groupId } })
+    },
+
+    activateDockTab(workspaceId, groupId, tabId) {
+      const cur = get().stateOf(workspaceId)
+      const dock = get().dockOf(workspaceId)
+      const target = dock.root && (() => {
+        const visit = (node: import('../../../shared/domain/dock').DockNode): boolean => {
+          if (node.type === 'group') {
+            if (node.id !== groupId) return false
+            return node.tabIds.includes(tabId)
+          }
+          return visit(node.first) || visit(node.second)
+        }
+        return visit(dock.root)
+      })()
+      if (!target) return
+      const update = (node: import('../../../shared/domain/dock').DockNode): import('../../../shared/domain/dock').DockNode => {
+        if (node.type === 'group') return node.id === groupId ? { ...node, activeTabId: tabId } : node
+        return { ...node, first: update(node.first), second: update(node.second) }
+      }
+      write(workspaceId, { ...cur, dock: { ...dock, root: update(dock.root), activeGroupId: groupId } })
+    },
+
+    splitAndOpenDock(workspaceId, groupId, direction, kind, pane = 'main') {
+      const cur = get().stateOf(workspaceId)
+      const dock = get().dockOf(workspaceId)
+      if (!findGroup(dock.root, groupId)) return
+      const split = splitGroup(dock, groupId, direction)
+      if (split.activeGroupId === null) return
+      const tab = makeTab(kind, pane)
+      registerChat(workspaceId, tab)
+      const next = addTabToGroup(split, split.activeGroupId, tab)
+      write(workspaceId, { ...cur, tabs: next.tabs, dock: next })
+    },
+
+    splitAndMoveDockTab(workspaceId, tabId, fromGroupId, targetGroupId, direction) {
+      const cur = get().stateOf(workspaceId)
+      const dock = get().dockOf(workspaceId)
+      if (!findGroup(dock.root, fromGroupId)?.tabIds.includes(tabId) || !findGroup(dock.root, targetGroupId)) return
+      const split = splitGroup(dock, targetGroupId, direction)
+      const destination = split.activeGroupId
+      if (destination === null) return
+      const next = moveDockTab(split, tabId, fromGroupId, destination)
+      write(workspaceId, { ...cur, tabs: next.tabs, dock: next })
+    },
+
+    openDock(workspaceId, groupId, kind, init, pane = 'main') {
+      const cur = get().stateOf(workspaceId)
+      const tab = makeTab(kind, pane, init)
+      registerChat(workspaceId, tab)
+      write(workspaceId, { ...cur, dock: addTabToGroup(get().dockOf(workspaceId), groupId, tab), tabs: [...cur.tabs, tab] })
+    },
+
+    moveDockTab(workspaceId, tabId, fromGroupId, toGroupId, index) {
+      const cur = get().stateOf(workspaceId)
+      const dock = moveDockTab(get().dockOf(workspaceId), tabId, fromGroupId, toGroupId, index)
+      write(workspaceId, { ...cur, tabs: dock.tabs, dock })
+    },
+
+    reorderDockTab(workspaceId, groupId, from, to) {
+      const cur = get().stateOf(workspaceId)
+      write(workspaceId, { ...cur, dock: reorderDockTab(get().dockOf(workspaceId), groupId, from, to) })
+    },
+
+    resizeDock(workspaceId, splitId, ratio) {
+      const cur = get().stateOf(workspaceId)
+      write(workspaceId, { ...cur, dock: resizeSplit(get().dockOf(workspaceId), splitId, ratio) })
+    },
+
+    closeDockTab(workspaceId, groupId, tabId) {
+      const cur = get().stateOf(workspaceId)
+      if (!findGroup(get().dockOf(workspaceId).root, groupId)?.tabIds.includes(tabId)) return
+      const target = cur.tabs.find((tab) => tab.id === tabId)
+      if (target?.kind === 'terminal') void killTerminal(target.ref.terminalId).catch(() => undefined)
+      if (target?.kind === 'browser' && target.ref.browserId !== undefined) void closeBrowserTab(workspaceId, target.ref.browserId).catch(() => undefined)
+      const dock = closeDockTab(get().dockOf(workspaceId), groupId, tabId)
+      if (dock.tabs.length === 0) {
+        const chat = makeTab('chat', 'main')
+        registerChat(workspaceId, chat)
+        write(workspaceId, { ...cur, tabs: [chat], activeTabId: chat.id, dock: addTabToGroup({ ...dock, tabs: [] }, dock.activeGroupId ?? groupId, chat) })
+        return
+      }
+      write(workspaceId, { ...cur, tabs: dock.tabs, dock })
+    },
+
+    closeDockGroup(workspaceId, groupId) {
+      const cur = get().stateOf(workspaceId)
+      const target = get().dockOf(workspaceId).root
+      const ids: string[] = []
+      const visit = (node: import('../../../shared/domain/dock').DockNode): void => {
+        if (node.type === 'group') { if (node.id === groupId) ids.push(...node.tabIds); return }
+        visit(node.first); visit(node.second)
+      }
+      visit(target)
+      for (const id of ids) {
+        const tab = cur.tabs.find((item) => item.id === id)
+        if (tab?.kind === 'terminal') void killTerminal(tab.ref.terminalId).catch(() => undefined)
+        if (tab?.kind === 'browser' && tab.ref.browserId !== undefined) void closeBrowserTab(workspaceId, tab.ref.browserId).catch(() => undefined)
+      }
+      const dock = closeDockGroupState(get().dockOf(workspaceId), groupId)
+      if (dock.tabs.length === 0) {
+        const chat = makeTab('chat', 'main')
+        registerChat(workspaceId, chat)
+        write(workspaceId, { ...cur, tabs: [chat], activeTabId: chat.id, dock: addTabToGroup({ ...dock, tabs: [] }, dock.activeGroupId ?? groupId, chat) })
+      } else write(workspaceId, { ...cur, tabs: dock.tabs, dock })
+    },
+
     hydrate(workspaceId, s) {
+      // Keep hydrate's object identity for callers that use it as an in-memory
+      // snapshot (and let dockOf cache/normalize the derived Dock view).
       set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: s } })
+      applyPendingBrowser(workspaceId)
     },
 
     ensure(workspaceId) {
@@ -238,21 +468,30 @@ export const useTabsStore = create<TabsState>((set, get) => {
             })
           }
         })
-        .finally(() => loading.delete(workspaceId))
+        .finally(() => {
+          loading.delete(workspaceId)
+          pendingTitles.delete(workspaceId)
+          applyPendingBrowser(workspaceId)
+        })
     },
 
     open(workspaceId, kind, pane = 'main', init) {
       const cur = get().stateOf(workspaceId)
       const tab = makeTab(kind, pane, init)
       registerChat(workspaceId, tab)
-      write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, tab] }, pane, tab.id))
+      const dock = get().dockOf(workspaceId)
+      const groupId = groupForPane(dock, pane) ?? dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+      if (groupId === null) return
+      const nextDock = addTabToGroup(dock, groupId, tab)
+      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, pane, tab.id))
     },
 
     openSession(workspaceId, sessionId, title) {
       const cur = get().stateOf(workspaceId)
       const existing = cur.tabs.find((t) => t.kind === 'chat' && t.ref.sessionId === sessionId)
       if (existing !== undefined) {
-        write(workspaceId, withActive(cur, 'main', existing.id))
+        const groupId = groupContainingTab(get().dockOf(workspaceId), existing.id)
+        if (groupId) get().activateDockTab(workspaceId, groupId, existing.id)
         return
       }
       // Build the tab directly from the existing session id. Calling makeTab
@@ -265,7 +504,11 @@ export const useTabsStore = create<TabsState>((set, get) => {
         title: title?.trim() ?? '',
         ref: { sessionId }
       }
-      write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, chat] }, 'main', chat.id))
+      const dock = get().dockOf(workspaceId)
+      const groupId = groupForPane(dock, 'main') ?? dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+      if (groupId === null) return
+      const nextDock = addTabToGroup(dock, groupId, chat)
+      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'main', chat.id))
     },
 
     openPath(workspaceId, kind, path, title) {
@@ -278,11 +521,16 @@ export const useTabsStore = create<TabsState>((set, get) => {
         (t) => t.kind === kind && 'path' in t.ref && t.ref.path === path && paneOf(t) === 'main'
       )
       if (existing !== undefined) {
-        if (activeIn(cur, 'main') !== existing.id) write(workspaceId, withActive(cur, 'main', existing.id))
+        const groupId = groupContainingTab(get().dockOf(workspaceId), existing.id)
+        if (groupId) get().activateDockTab(workspaceId, groupId, existing.id)
         return
       }
       const tab = makeTab(kind, 'main', { path, title })
-      write(workspaceId, withActive({ ...cur, tabs: [...cur.tabs, tab] }, 'main', tab.id))
+      const dock = get().dockOf(workspaceId)
+      const groupId = groupForPane(dock, 'main') ?? dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+      if (groupId === null) return
+      const nextDock = addTabToGroup(dock, groupId, tab)
+      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'main', tab.id))
     },
 
     newChat(workspaceId) {
@@ -312,9 +560,14 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const cur = get().stateOf(workspaceId)
       const tab = cur.tabs.find((t) => t.id === tabId)
       if (tab === undefined) return
-      const pane = paneOf(tab)
-      if (activeIn(cur, pane) === tabId) return
-      write(workspaceId, withActive(cur, pane, tabId))
+      const groupId = groupContainingTab(get().dockOf(workspaceId), tabId)
+      if (groupId === null) return
+      const dock = get().dockOf(workspaceId)
+      const activate = (node: DockNode): DockNode => {
+        if (node.type === 'group') return node.id === groupId ? { ...node, activeTabId: tabId } : node
+        return { ...node, first: activate(node.first), second: activate(node.second) }
+      }
+      write(workspaceId, withActive({ ...cur, dock: { ...dock, root: activate(dock.root), activeGroupId: groupId } }, paneOf(tab), tabId))
     },
 
     close(workspaceId, tabId) {
@@ -367,6 +620,25 @@ export const useTabsStore = create<TabsState>((set, get) => {
       write(workspaceId, { ...cur, tabs })
     },
 
+    syncSessionTitle(workspaceId, sessionId, title) {
+      if (loading.has(workspaceId)) {
+        const pending = pendingTitles.get(workspaceId) ?? new Map<string, string>()
+        pending.set(sessionId, title)
+        pendingTitles.set(workspaceId, pending)
+      }
+      const current = get().byWorkspace[workspaceId]
+      if (current === undefined) return
+      let changed = false
+      const tabs = current.tabs.map((tab) => {
+        if (tab.kind !== 'chat' || tab.ref.sessionId !== sessionId || tab.title === title) return tab
+        changed = true
+        return { ...tab, title }
+      })
+      // No layout write: another window may have a newer tab order. Reloads
+      // resolve titles from sessions through tabs:getInner instead.
+      if (changed) set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: { ...current, tabs } } })
+    },
+
     setBrowser(workspaceId, tabId, patch) {
       const cur = get().stateOf(workspaceId)
       const tabs = cur.tabs.map((tab) => {
@@ -393,11 +665,9 @@ export const useTabsStore = create<TabsState>((set, get) => {
       }
       const cur = get().stateOf(workspaceId)
       const remoteIds = new Set(remoteTabs.map((tab) => tab.id))
-      let tabs = cur.tabs.filter(
-        (tab) => tab.kind !== 'browser' || tab.ref.browserId === undefined || remoteIds.has(tab.ref.browserId)
-      )
+      let tabs = [...cur.tabs]
       let changed = false
-      if (tabs.length !== cur.tabs.length) changed = true
+      let activatedAgentTabId: string | null = null
       for (const remote of remoteTabs) {
         const existing = tabs.find(
           (tab): tab is Extract<InnerTab, { kind: 'browser' }> =>
@@ -405,16 +675,9 @@ export const useTabsStore = create<TabsState>((set, get) => {
             (
               tab.ref.browserId === remote.id ||
               (
-                tab.ref.browserId === undefined &&
-                (
-                  tab.ref.url === remote.url ||
-                  // A user-created browser tab is registered in the main
-                  // process just before the invoke promise resolves. Its
-                  // change event can therefore arrive before BrowserView
-                  // has attached the returned browserId. Reconcile that
-                  // optimistic blank tab instead of creating a duplicate.
-                  (remote.source === 'user' && paneOf(tab) === 'main' && tab.ref.url === '')
-                )
+                remote.source === 'user' &&
+                remote.clientTabId !== undefined &&
+                tab.id === remote.clientTabId
               )
             )
         )
@@ -445,8 +708,11 @@ export const useTabsStore = create<TabsState>((set, get) => {
         }
         // Agent tabs live in the right workbench so they never replace the
         // conversation currently being edited in the main pane.
+        const id = remote.source === 'user' && remote.clientTabId !== undefined
+          ? remote.clientTabId
+          : ulid()
         tabs.push({
-          id: ulid(),
+          id,
           kind: 'browser',
           pane: remote.source === 'agent' ? 'right' : 'main',
           title: remote.title,
@@ -456,16 +722,60 @@ export const useTabsStore = create<TabsState>((set, get) => {
             ...(remote.profileId === undefined ? {} : { profileId: remote.profileId })
           }
         })
+        if (remote.source === 'agent') activatedAgentTabId = id
         changed = true
       }
+      const beforePrune = tabs.length
+      tabs = tabs.filter(
+        (tab) =>
+          tab.kind !== 'browser' ||
+          tab.ref.browserId === undefined ||
+          remoteIds.has(tab.ref.browserId)
+      )
+      if (tabs.length !== beforePrune) changed = true
       if (changed) {
-        const right = tabs.filter((tab) => tab.kind === 'browser' && tab.ref.browserId !== undefined && tab.pane === 'right')
+        if (tabsInPane(tabs, 'main').length === 0) {
+          const chat = makeTab('chat', 'main')
+          registerChat(workspaceId, chat)
+          tabs = [...tabs, chat]
+        }
+        const main = tabsInPane(tabs, 'main')
+        const bottom = tabsInPane(tabs, 'bottom')
+        const right = tabsInPane(tabs, 'right')
+        const nextMain = main.some((tab) => tab.id === cur.activeTabId) ? cur.activeTabId : main[0]?.id ?? null
+        const nextBottom = bottom.some((tab) => tab.id === cur.bottomActiveTabId)
+          ? cur.bottomActiveTabId ?? null
+          : bottom[0]?.id ?? null
+        const nextRight = right.some((tab) => tab.id === cur.rightActiveTabId)
+          ? cur.rightActiveTabId ?? null
+          : right[0]?.id ?? null
         write(workspaceId, {
           ...cur,
           tabs,
-          rightActiveTabId: cur.rightActiveTabId ?? right[0]?.id ?? null
+          activeTabId: nextMain,
+          bottomActiveTabId: nextBottom,
+          rightActiveTabId: activatedAgentTabId ?? nextRight
         })
       }
+    },
+
+    applyFileMutation(req) {
+      if (!['rename', 'move', 'delete'].includes(req.operation)) return
+      const cur = get().stateOf(req.workspaceId)
+      if (req.operation === 'delete') {
+        for (const tab of cur.tabs) {
+          if ('path' in tab.ref && isWithinPath(tab.ref.path, req.path)) get().close(req.workspaceId, tab.id)
+        }
+        return
+      }
+      if (!req.destination) return
+      const destination = req.destination
+      const tabs = cur.tabs.map((tab): InnerTab => {
+        if (!('path' in tab.ref) || !isWithinPath(tab.ref.path, req.path)) return tab
+        const path = destination + tab.ref.path.slice(req.path.length)
+        return { ...tab, ref: { path }, title: path.split('/').pop() ?? path } as InnerTab
+      })
+      if (tabs.some((tab, i) => tab !== cur.tabs[i])) write(req.workspaceId, { ...cur, tabs })
     },
 
     forget(workspaceId) {
@@ -481,6 +791,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
       }
       const next = { ...get().byWorkspace }
       delete next[workspaceId]
+      dockCache.delete(workspaceId)
       set({ byWorkspace: next })
     }
   }

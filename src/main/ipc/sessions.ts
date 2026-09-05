@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import type { Session } from '../../shared/domain/session'
+import type { AgentMessage } from '../../shared/agent/message'
 import { mimeOfExt, parseNcwUrl } from '../../shared/domain/attachment'
 import { ulid } from '../../shared/util/id'
 import { runs } from '../kernel/run-registry'
@@ -30,9 +31,19 @@ export function getSession(req: { sessionId: string }) {
   return detail
 }
 
+/** Replace a session transcript after an intentional user edit. */
+export function replaceHistory(req: { sessionId: string; messages: AgentMessage[] }): void {
+  if (runs.activeRunIds().some((id) => runs.get(id)?.sessionId === req.sessionId)) {
+    throw new Error('有运行中的 Agent，请先停止任务后再编辑消息')
+  }
+  store.replaceHistory(req.sessionId, req.messages)
+  const session = store.getSession(req.sessionId)
+  changed(session?.workspaceId)
+}
+
 export function createSession(req: { workspaceId: string; title?: string; sessionId?: string }): Session {
   const ws = store.getWorkspace(req.workspaceId)
-  const session = store.createSession({
+  const session = store.ensureSession({
     id: req.sessionId,
     workspaceId: req.workspaceId,
     title: req.title,
@@ -91,7 +102,10 @@ export function duplicateSession(req: { sessionId: string; title: string }): Ses
 
 export function renameSession(req: { sessionId: string; title: string }): void {
   store.renameSession(req.sessionId, req.title)
-  changed()
+  const session = store.getSession(req.sessionId)!
+  windows.emitToAll('sessions:changed', {
+    workspaceId: session.workspaceId, renamed: { sessionId: session.id, title: session.title }
+  })
 }
 
 export function setArchived(req: { sessionId: string; archived: boolean }): void {

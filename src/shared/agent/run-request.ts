@@ -87,10 +87,21 @@ export interface RunRequest {
 
   /** 子代理:父 run 的 id 与深度。depth 0 = 主 run */
   parentRunId?: string
+  /**
+   * ★ 父**会话**,不是父 run —— 两者生命周期差得很远:run 结束就被 reap,
+   * 而这一项要一路写进 `sessions.parent_session_id`,活到用户删掉那条对话为止。
+   * 它是「这条转录不进任何列表」和「删父会话时跟着回收」的唯一依据。
+   */
+  parentSessionId?: string
   depth: number
 
   /** 本轮用户输入。空数组 = 继续跑(排队消息之外的续跑场景) */
   input: ContentPart[]
+  /**
+   * 渲染层先显示的用户消息 ID。主进程提交同一个 ID,
+   * 这样确认事件会替换乐观消息,而不会在转录里产生重复内容。
+   */
+  inputMessageId?: string
 
   mode: SessionMode
   thinking: ThinkingLevel
@@ -120,7 +131,7 @@ export interface RunRequest {
  * (`QueuedInput.options`),而 `shared/domain/queued-input.ts` 不能反向依赖渲染层。
  * `session.ts` 仍然 re-export 同名类型,既有引用点不受影响。
  */
-export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input'>
+export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'inputMessageId'>
 
 /** 常量就是常量,不做配置项(方案 §10)。 */
 export const MAX_TURNS = 25

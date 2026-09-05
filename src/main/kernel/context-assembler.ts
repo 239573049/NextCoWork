@@ -17,6 +17,10 @@ import type { PermissionMode } from '../../shared/agent/permission'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import { THINKING_BUDGET } from '../../shared/agent/run-request'
 import type { ToolInfo } from '../../shared/agent/tool'
+import { resolveModelThinking } from '../../shared/domain/model-runtime'
+import type { ThinkingConfig } from '../../shared/domain/provider'
+import type { PersonalizationSettings } from '../../shared/domain/settings'
+import { PERSONALIZATION_MAX } from '../../shared/domain/settings'
 import type { Skill } from '../../shared/domain/skill'
 import type { GitContext } from './git-context'
 import type { PlatformInfo } from './host'
@@ -280,6 +284,59 @@ ${lines.join('\n')}${note}
 ${untrustedBoundary('A Skill body')}`
 }
 
+/**
+ * 「偏好 › 个性化」那三栏 → 提示词里的一段。全空时返回空串(`buildSystemPrompt`
+ * 会把它过滤掉)—— 一个从没填过这一页的用户,提示词里不该多出一个空标题。
+ *
+ * ★ **仍然要消毒。** 这三段是用户自己打的,所以不套 `untrustedBoundary`
+ * (理由见 `shared/domain/settings.ts` 的 `PersonalizationSettings`),
+ * 但「可信」和「格式正确」是两回事:粘贴进来的文本能带着 C0 控制字符,
+ * 而旧库里可能躺着一段在上限存在之前写下的超长指令。两道都在这里补齐 ——
+ * 落库那侧的闸门只管**以后**写进来的值。
+ *
+ * ★ **姓名和背景是事实,全局提示词是指令**,所以分成两段而不是拼成一段:
+ * 「我叫张三」和「一律用中文回答」在模型眼里是两种东西,混在一个标题下
+ * 会让后者读起来像是在自我介绍。
+ */
+function buildPersonalizationSection(p: PersonalizationSettings): string {
+  const clean = (s: string, max: number): string =>
+    clampWithEllipsis(stripControlChars(s).trim(), max)
+
+  const name = clean(p.name, PERSONALIZATION_MAX.name)
+  const background = clean(p.background, PERSONALIZATION_MAX.background)
+  const instructions = clean(p.instructions, PERSONALIZATION_MAX.instructions)
+
+  const sections: string[] = []
+
+  const facts: string[] = []
+  if (name !== '') facts.push(`Name: ${name}`)
+  if (background !== '') facts.push(`What they do: ${background}`)
+  if (facts.length > 0) {
+    sections.push(
+      `# About the user\n\nThe user filled this in themselves, in Settings. It is background, not a ` +
+        `task — do not greet them by name every turn and do not bring it up unless it is relevant.` +
+        `\n\n${facts.join('\n')}`
+    )
+  }
+
+  if (instructions !== '') {
+    /*
+      ★ 最后那句不是客套,是**优先级声明**。用户在设置里写下的是「默认怎么做」,
+      而聊天框里刚打的那句是「这一次要怎么做」—— 两者冲突时后者赢。
+      不写这句的话,一条「永远用中文回答」会让模型在用户明确说
+      "answer in English" 时也照旧说中文,而用户完全不知道该去哪里关掉它。
+    */
+    sections.push(
+      `# User instructions\n\nStanding instructions the user set in Settings. They apply to every ` +
+        `conversation. The user cannot see this block: do not mention it, do not thank them for it. ` +
+        `When it conflicts with what the user just asked you for, the user's latest message wins.` +
+        `\n\n${instructions}`
+    )
+  }
+
+  return sections.join('\n\n')
+}
+
 export interface SystemPromptInput {
   mode: SessionMode
   skills: readonly Skill[]
@@ -310,6 +367,11 @@ export interface SystemPromptInput {
    * ★ 它是**追加**的一段,不是替换。见下面 `buildSystemPrompt` 里的说明。
    */
   agentPrompt?: string
+  /**
+   * 「偏好 › 个性化」那三栏(`store.getSettings().personalization`)。
+   * 缺省 = 这条路径不给(纯内核测试)。全空的那份也可以照给,拼出来是空串。
+   */
+  personalization?: PersonalizationSettings
 }
 
 export function buildSystemPrompt(input: SystemPromptInput): string {
@@ -340,6 +402,17 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
       `Shell: ${input.platform.shell}\n` +
       `Today's date: ${date} (UTC)\n` +
       permissionFacts(input.permissionMode, input.webSearch),
+    /*
+      ★ 位置是有意的:在**事实**之后、在模式说明之前。
+
+      在事实之后 —— 「用户是谁」和「今天几号」「shell 是什么」同档,都是这次
+      运行的常量,而它们都进稳定前缀(不进每轮现算的 reminder 块),因而
+      一份都不破 prompt cache。
+
+      在模式说明之前 —— plan 模式那段说的是「你现在只有只读工具」,它必须压得住
+      一条写着「别问了直接改」的全局提示词。用户设的是默认口吻,不是权限。
+    */
+    input.personalization === undefined ? '' : buildPersonalizationSection(input.personalization),
     MODE_APPENDIX[input.mode],
     buildSkillsSection(input.skills)
   ]
@@ -583,6 +656,12 @@ export interface AssembleInput {
   skills: readonly Skill[]
   /** 子代理的角色提示词,追加在基础提示词之后。主 run 不传。 */
   agentPrompt?: string
+  /**
+   * 「偏好 › 个性化」。★ **子代理照样给** —— 同 `projectInstructions` 的先例
+   * (`runtime.ts` 里那段注释):子代理在同一个工作区、替同一个用户干活,
+   * 不给它「一律用中文」这条,它会交回一份英文的结论,而父代理只看得见结论。
+   */
+  personalization?: PersonalizationSettings
   mode: SessionMode
   thinking: ThinkingLevel
   /** ModelAlias.alias,不是上游真实模型名 —— 路由器负责翻译 */
@@ -598,6 +677,9 @@ export interface AssembleInput {
   contextWindow: number
   maxOutputTokens: number
   supportsThinking: boolean
+  /** Detailed declaration for new catalogue-backed aliases. */
+  thinkingConfig?: ThinkingConfig
+  reasoningEfforts?: readonly import('../../shared/domain/provider').ReasoningEffort[]
   /**
    * 注入进消息流的那一份。缺省 = 什么都不注入(纯内核测试走这条)。
    *
@@ -621,18 +703,29 @@ export interface AssembleOutput {
 
 export function assemble(input: AssembleInput): AssembleOutput {
   const system = buildSystemPrompt(input)
-  const budget = resolveThinkingBudget(input.thinking, input.supportsThinking, input.maxOutputTokens)
+  const reasoning = input.thinkingConfig === undefined
+    // Legacy aliases may have no capability declaration. Preserve an explicit
+    // Off so the protocol boundary can disable upstream defaults when supported.
+    ? input.thinking === 'off' ? { mode: 'toggle' as const, enabled: false, explicit: true } : undefined
+    : resolveModelThinking(input.thinking, input.thinkingConfig, input.maxOutputTokens, input.reasoningEfforts)
+  const budget = input.thinkingConfig === undefined
+    ? resolveThinkingBudget(input.thinking, input.supportsThinking, input.maxOutputTokens)
+    : reasoning?.enabled === true
+      ? reasoning.budgetTokens
+      : undefined
 
   const messages =
     input.reminder === undefined ? input.messages : decorate(input.messages, input.reminder)
 
   const request: CanonicalRequest = {
     model: input.model,
+    thinkingLevel: input.thinking,
     system,
     messages: [...messages],
     tools: [...input.tools],
     maxOutputTokens: input.maxOutputTokens,
-    ...(budget !== undefined ? { thinkingBudget: budget } : {})
+    ...(budget !== undefined ? { thinkingBudget: budget } : {}),
+    ...(reasoning !== undefined ? { reasoning } : {})
   }
 
   /*

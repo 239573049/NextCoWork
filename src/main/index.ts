@@ -14,7 +14,7 @@ import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } from './ipc'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
-import { initRuntime, shutdownMcp } from './runtime'
+import { initRuntime, shutdownMcp, shutdownSessionTitles } from './runtime'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
@@ -61,6 +61,19 @@ function logStartupProbe(): void {
       `[app] electron ${process.versions.electron} · node ${process.versions.node} · chrome ${process.versions.chrome}`
     )
   })
+}
+
+function isSafeBrowserUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw)
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.username === '' &&
+      parsed.password === ''
+    )
+  } catch {
+    return false
+  }
 }
 
 function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: string }): BrowserWindow {
@@ -113,17 +126,24 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
     webPreferences.nodeIntegration = false
     webPreferences.contextIsolation = true
     webPreferences.sandbox = true
-    if (typeof params.src === 'string' && params.src !== '' && !/^https?:\/\//i.test(params.src)) event.preventDefault()
+    webPreferences.disableDialogs = true
+    webPreferences.webSecurity = true
+    webPreferences.allowRunningInsecureContent = false
+    if (typeof params.src === 'string' && params.src !== '' && !isSafeBrowserUrl(params.src)) event.preventDefault()
   })
 
   win.webContents.on('did-attach-webview', (_event, contents) => {
     contents.setWindowOpenHandler(({ url }) => {
-      if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+      if (isSafeBrowserUrl(url)) void shell.openExternal(url)
       return { action: 'deny' }
     })
-    contents.on('will-navigate', (event, url) => {
-      if (!/^https?:\/\//i.test(url)) event.preventDefault()
-    })
+    const guardNavigation = (event: Electron.Event, url: string): void => {
+      if (!isSafeBrowserUrl(url)) event.preventDefault()
+    }
+    contents.on('will-navigate', guardNavigation)
+    contents.on('will-redirect', guardNavigation)
+    contents.session.setPermissionCheckHandler(() => false)
+    contents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
   })
 
   // 阻止渲染层被导航到站外(拖入链接、意外的 location 赋值)。
@@ -246,9 +266,8 @@ void app.whenReady().then(() => {
   openDatabase(prepareProjectDatabaseDirectory())
 
   /*
-    ★ 第二段。必须排在 `openDatabase` 之后 —— 附件根目录取的是同一个
-    附件协议仍使用 Electron 的 `userData` 路径；数据库位置的切换不会改变
-    已有附件目录和主题资源的寻址。
+    ★ 第二段。必须排在 `openDatabase` 之后 —— 附件根目录由当前数据库目录
+    派生，协议读取、上传和 storage 清理必须始终指向同一棵项目级数据树。
   */
   installAttachmentProtocol()
 
@@ -316,6 +335,7 @@ app.on('before-quit', () => {
   destroyTray()
   flushPendingPersists()
   shutdownRuns()
+  shutdownSessionTitles()
   shutdownTerminals()
   /*
     MCP 的 stdio 传输背后是**真的子进程**。不关的话它们会活过主进程 ——

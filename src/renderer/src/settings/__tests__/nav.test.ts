@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { messagesFor } from '../../i18n'
 import {
   DEFAULT_SETTINGS_PAGE,
   matchPages,
@@ -39,6 +40,25 @@ describe('导航表与行目录的自洽', () => {
 
   it('默认页在表里', () => {
     expect(PAGE_IDS.has(DEFAULT_SETTINGS_PAGE)).toBe(true)
+  })
+
+  /**
+   * ★ `SettingsOverlay` 的 `pageLabel` / `subLabel` 是**拼字符串**取键的
+   * (`t(\`settings.sub.${id}\`)`),而 `t()` 查不到时返回键本身 —— 漏一条翻译
+   * 不会报错,只会让那颗药丸上写着 `settings.sub.personalization`。
+   * 加一页、加一个子 Tab 却忘了配文案,是这里唯一会发生的事故。
+   */
+  it('★ 每一页、每一个子 Tab 都有中英文案', () => {
+    const zh = messagesFor('zh-CN')
+    const en = messagesFor('en-US')
+    for (const p of SETTINGS_PAGES) {
+      expect(zh[`settings.page.${p.id}`], p.id).toBeDefined()
+      expect(en[`settings.page.${p.id}`], p.id).toBeDefined()
+      for (const s of p.subs ?? []) {
+        expect(zh[`settings.sub.${s.id}`], `${p.id}/${s.id}`).toBeDefined()
+        expect(en[`settings.sub.${s.id}`], `${p.id}/${s.id}`).toBeDefined()
+      }
+    }
   })
 })
 

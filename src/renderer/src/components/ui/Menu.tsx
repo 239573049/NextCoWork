@@ -40,6 +40,7 @@ export function Menu({
   label,
   className,
   triggerClassName,
+  panelClassName,
   disabled = false,
   onOpenChange,
   containsTarget
@@ -52,6 +53,7 @@ export function Menu({
   label: string
   className?: string
   triggerClassName?: string
+  panelClassName?: string
   disabled?: boolean
   /** 在菜单打开/关闭时通知调用方，用于重置多级菜单的临时视图状态。 */
   onOpenChange?: (open: boolean) => void
@@ -182,7 +184,8 @@ export function Menu({
           }}
           className={cn(
             'app-no-drag scroll-thin fixed z-50 overflow-y-auto rounded-card',
-            'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40'
+            'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40',
+            panelClassName
           )}
         >
           {children(() => {

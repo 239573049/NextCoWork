@@ -158,6 +158,8 @@ export async function* sseFromResponse(
   const reader = body.getReader()
   const decoder = new TextDecoder('utf-8')
   const parser = new SseParser()
+  const onAbort = (): void => { void reader.cancel().catch(() => {}) }
+  signal.addEventListener('abort', onAbort, { once: true })
 
   try {
     while (true) {
@@ -165,6 +167,7 @@ export async function* sseFromResponse(
       // 显式检查一次,让中断在两次 read 之间也能生效
       if (signal.aborted) throw new DOMException('aborted', 'AbortError')
       const { done, value } = await reader.read()
+      if (signal.aborted) throw new DOMException('aborted', 'AbortError')
       if (done) break
       for (const ev of parser.feed(decoder.decode(value, { stream: true }))) yield ev
     }
@@ -172,8 +175,10 @@ export async function* sseFromResponse(
     for (const ev of parser.feed(decoder.decode())) yield ev
     for (const ev of parser.flush()) yield ev
   } finally {
+    signal.removeEventListener('abort', onAbort)
     // ★ 不 cancel 的话底层 socket 会一直挂着 —— 中断一个长回复后
     // 上游仍在给我们发 token,只是没人读了(方案 §4.7 末尾那条注释的同一个坑)
     await reader.cancel().catch(() => {})
+    reader.releaseLock()
   }
 }
