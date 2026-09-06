@@ -28,7 +28,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20.19.0
+          # The main process uses the built-in node:sqlite module.
+          node-version: 22.12.0
           cache: npm
 
       - name: Install dependencies
