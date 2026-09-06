@@ -774,8 +774,13 @@ const ZH: Messages = {
   "preference.colorThemeHint":
     "选了图片主题时这一栏不生效；两种主题都会改整套界面色彩。",
   "preference.shortcuts": "快捷键",
+  "preference.shortcutGroup": "应用快捷键",
   "preference.openSettings": "打开设置",
   "preference.openSettingsHint": "此快捷键仅在应用窗口聚焦时生效。",
+  "preference.shortcutModifierHint": "请使用至少一个修饰键，例如 ⌘K 或 Ctrl+K。",
+  "preference.recordShortcut": "录制打开设置快捷键",
+  "preference.pressShortcut": "请按下组合键",
+  "preference.resetShortcut": "恢复默认快捷键",
   "preference.deleteImage": ({ name }) => `删除 ${name}`,
   "preference.pickAccent": "挑一个强调色",
   "preference.customAccent": "自定义强调色",
@@ -1885,9 +1890,14 @@ const EN: Messages = {
   "preference.colorThemeHint":
     "This setting is inactive while an image theme is selected; both kinds of theme control the interface colors.",
   "preference.shortcuts": "Keyboard shortcuts",
+  "preference.shortcutGroup": "Application shortcuts",
   "preference.openSettings": "Open settings",
   "preference.openSettingsHint":
     "This shortcut works only while the app window is focused.",
+  "preference.shortcutModifierHint": "Use at least one modifier, such as ⌘K or Ctrl+K.",
+  "preference.recordShortcut": "Record the open settings shortcut",
+  "preference.pressShortcut": "Press a key combination",
+  "preference.resetShortcut": "Reset to default shortcut",
   "preference.deleteImage": ({ name }) => `Delete ${name}`,
   "preference.pickAccent": "Pick an accent color",
   "preference.customAccent": "Custom accent color",

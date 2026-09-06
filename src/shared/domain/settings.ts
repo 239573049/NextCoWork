@@ -50,6 +50,11 @@ export interface PersonalizationSettings {
   instructions: string
 }
 
+/** 应用级快捷键。值使用 Electron accelerator 格式，例如 `CmdOrCtrl+,`。 */
+export interface ShortcutSettings {
+  openSettings: string
+}
+
 /**
  * 三栏各自的字符上限。
  *
@@ -198,6 +203,9 @@ export interface AppSettings {
    * 唯一一个不只影响界面、而是直接改变模型看到什么的字段。
    */
   personalization: PersonalizationSettings
+
+  /** 偏好 › 快捷键。 */
+  shortcuts: ShortcutSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -215,7 +223,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
   proxy: structuredClone(DEFAULT_PROXY),
   data: { backupDirectory: null, backupFrequency: 'manual' },
-  personalization: { name: '', background: '', instructions: '' }
+  personalization: { name: '', background: '', instructions: '' },
+  shortcuts: { openSettings: 'CmdOrCtrl+,' }
 }
 
 /**
@@ -277,6 +286,15 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.personalization !== undefined) {
     next.personalization = mergePersonalization(next.personalization, patch.personalization)
   }
+  if (patch.shortcuts !== undefined) {
+    const candidate = patch.shortcuts
+    if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) {
+      const openSettings = candidate.openSettings
+      if (typeof openSettings === 'string' && openSettings.trim().length > 0) {
+        next.shortcuts = { openSettings: openSettings.trim() }
+      }
+    }
+  }
 
   return next
 }
@@ -296,7 +314,8 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   notifications: true,
   proxy: true,
   data: true,
-  personalization: true
+  personalization: true,
+  shortcuts: true
 }
 void PATCHABLE_KEYS
 

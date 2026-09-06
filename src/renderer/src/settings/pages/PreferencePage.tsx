@@ -17,8 +17,8 @@
  * 它落在「偏好」而不是「通用 › Agent」,是因为参考图这么放,而参考图是对的:
  * 用户找的是「怎么让它按我的方式说话」,那和挑配色是同一种心情。
  */
-import { Check, Pipette, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Pipette, Trash2, Upload, RotateCcw, Keyboard } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type {
   ResolvedTheme,
   ThemePreference,
@@ -43,7 +43,7 @@ import { TextArea } from "../../components/ui/TextArea";
 import { TextInput } from "../../components/ui/TextInput";
 import { useDraft } from "../../components/ui/useDraft";
 import { useI18n } from "../../i18n";
-import { prettyAccelerator } from "../../lib/accelerator";
+import { acceleratorFromKeyboardEvent, prettyAccelerator } from "../../lib/accelerator";
 import { cn } from "../../lib/cn";
 import { useImageThemes } from "../../stores/imageTheme";
 import { useAppearance } from "../../theme/useAppearance";
@@ -55,7 +55,7 @@ export function PreferencePage({
   sub,
   patch,
 }: SettingsPageProps): ReactNode {
-  if (sub === "shortcut") return <ShortcutPane />;
+  if (sub === "shortcut") return <ShortcutPane settings={settings} patch={patch} />;
   if (sub === "personalization") {
     return <PersonalizationPane settings={settings} patch={patch} />;
   }
@@ -265,19 +265,62 @@ function ThemePane({
   );
 }
 
-/** 快捷键。今天只有一条,而它是**只读**的 —— 重绑是另一件事,不在这一步。 */
-function ShortcutPane(): ReactNode {
+/** 快捷键。当前提供打开设置这一条，后续动作可沿同一结构继续扩展。 */
+function ShortcutPane({ settings, patch }: Omit<SettingsPageProps, "sub">): ReactNode {
   const { t } = useI18n();
+  const [recording, setRecording] = useState(false);
+  const shortcut = settings.shortcuts.openSettings;
+
+  const onRecord = (event: ReactKeyboardEvent<HTMLButtonElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = acceleratorFromKeyboardEvent(event.nativeEvent);
+    if (next !== undefined) {
+      patch({ shortcuts: { openSettings: next } });
+      setRecording(false);
+    }
+  };
+
   return (
-    <SettingGroup>
+    <SettingGroup title={t("preference.shortcutGroup")}>
       <SettingRow
         title={t("preference.openSettings")}
-        description={t("preference.openSettingsHint")}
+        description={
+          <>
+            {t("preference.openSettingsHint")} {t("preference.shortcutModifierHint")}
+          </>
+        }
         last
       >
-        <kbd className="rounded-[6px] bg-tint px-2 py-1 font-sans text-[12px] text-fg">
-          {prettyAccelerator("CmdOrCtrl+,")}
-        </kbd>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-label={t("preference.recordShortcut")}
+            aria-keyshortcuts={shortcut}
+            aria-pressed={recording}
+            onClick={() => setRecording(true)}
+            onKeyDown={recording ? onRecord : undefined}
+            onBlur={() => setRecording(false)}
+            className={cn(
+              "app-no-drag inline-flex h-9 min-w-[92px] items-center justify-center gap-2 rounded-[8px] px-3 font-sans text-[12px] transition",
+              recording
+                ? "bg-accent text-accent-fg ring-2 ring-accent/40"
+                : "bg-tint text-fg hover:bg-tint-strong"
+            )}
+          >
+            {recording ? <Keyboard size={13} /> : null}
+            {recording ? t("preference.pressShortcut") : prettyAccelerator(shortcut)}
+          </button>
+          <button
+            type="button"
+            aria-label={t("preference.resetShortcut")}
+            title={t("preference.resetShortcut")}
+            onClick={() => patch({ shortcuts: { openSettings: "CmdOrCtrl+," } })}
+            className="app-no-drag grid size-8 place-items-center rounded-[8px] text-fg-faint transition hover:bg-tint hover:text-fg"
+          >
+            <RotateCcw size={14} />
+          </button>
+        </div>
       </SettingRow>
     </SettingGroup>
   );

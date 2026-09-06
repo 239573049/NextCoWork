@@ -24,6 +24,7 @@ import type { Workspace } from "../../../shared/domain/workspace";
 import type { SessionListItem } from "../../../shared/domain/session";
 import { IconButton } from "../components/ui/IconButton";
 import { cn } from "../lib/cn";
+import { matchesAccelerator } from "../lib/accelerator";
 import { useI18n } from "../i18n";
 import { usePresence } from "../lib/usePresence";
 import { pickWorkspace } from "../services/app";
@@ -146,25 +147,25 @@ export function AppShell({
   }, [activeWorkspaceId, ensureTabs]);
 
   /*
-    ⌘, —— 走渲染层的全局 keydown,不走主进程应用菜单。
+    打开设置 —— 走渲染层的全局 keydown,不走主进程应用菜单；组合键由设置页配置。
     主进程现在**完全没有** `Menu` / `globalShortcut`,为一个快捷键就得补一整套
     菜单模板 + 一条 main→renderer 命令频道 + 契约白名单条目,不划算。
     代价照实记:窗口没聚焦时不响应,也不出现在 macOS 菜单栏里
     (「偏好」页那一行的描述文字就是这句话,别只写在这儿)。
 
-    依赖取 action 不取整个 store —— `openSettings` 引用是稳定的,
-    取 `win` 的话每次任意窗口状态变更都会拆装一遍监听器。
+    依赖取 action 和当前组合键，不取整个 store —— `openSettings` 引用是稳定的。
   */
   const openSettings = useWindowStore((s) => s.openSettings);
+  const openSettingsShortcut = settings.shortcuts.openSettings;
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (!(e.metaKey || e.ctrlKey) || e.key !== ",") return;
+      if (!matchesAccelerator(openSettingsShortcut, e)) return;
       e.preventDefault();
       openSettings();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [openSettings]);
+  }, [openSettings, openSettingsShortcut]);
 
   const inner =
     activeWorkspaceId === null ? null : tabs.stateOf(activeWorkspaceId);

@@ -138,7 +138,7 @@ export function SettingsOverlay({
           <div className="flex h-[44px] shrink-0 items-center px-3">
             <span className="flex-1 text-[13px] text-fg">{t('common.settings')}</span>
             <kbd className="font-sans text-[11px] text-fg-faint">
-              {prettyAccelerator('CmdOrCtrl+,')}
+              {prettyAccelerator(settings.shortcuts.openSettings)}
             </kbd>
           </div>
 

@@ -15,6 +15,16 @@ import {
 const base = (): AppSettings => structuredClone(DEFAULT_SETTINGS)
 
 describe('mergeSettings', () => {
+  it('快捷键缺席时回退默认值，并允许单独更新', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.shortcuts
+    expect(mergeSettings(DEFAULT_SETTINGS, legacy).shortcuts).toEqual({ openSettings: 'CmdOrCtrl+,' })
+    expect(mergeSettings(base(), { shortcuts: { openSettings: 'CmdOrCtrl+K' } }).shortcuts.openSettings).toBe('CmdOrCtrl+K')
+  })
+
+  it('拒绝空快捷键，避免设置后无法打开设置', () => {
+    expect(mergeSettings(base(), { shortcuts: { openSettings: '  ' } }).shortcuts.openSettings).toBe('CmdOrCtrl+,')
+  })
   it('旧设置缺少 data 时自动补默认本地备份设置', () => {
     const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
     delete legacy.data

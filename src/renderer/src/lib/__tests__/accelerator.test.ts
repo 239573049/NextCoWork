@@ -3,7 +3,7 @@
  * 所以它同时是回归测试和那个 bug 的墓志铭。
  */
 import { describe, expect, it } from 'vitest'
-import { prettyAccelerator } from '../accelerator'
+import { acceleratorFromKeyboardEvent, matchesAccelerator, prettyAccelerator } from '../accelerator'
 
 describe('prettyAccelerator', () => {
   it('mac 上修饰键紧贴,不留 +', () => {
@@ -27,5 +27,20 @@ describe('prettyAccelerator', () => {
   it('未知词原样透传,undefined 透传', () => {
     expect(prettyAccelerator('CmdOrCtrl+Enter', true)).toBe('⌘Enter')
     expect(prettyAccelerator(undefined)).toBeUndefined()
+  })
+})
+
+describe('keyboard accelerator recording', () => {
+  const event = (overrides: Partial<KeyboardEvent>): KeyboardEvent =>
+    ({ key: '', code: '', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...overrides }) as KeyboardEvent
+
+  it('records punctuation from the physical key code', () => {
+    expect(acceleratorFromKeyboardEvent(event({ key: ',', code: 'Comma', metaKey: true }))).toBe('CmdOrCtrl+,')
+    expect(acceleratorFromKeyboardEvent(event({ key: '<', code: 'Comma', metaKey: true, shiftKey: true }))).toBe('CmdOrCtrl+Shift+,')
+  })
+
+  it('matches the saved accelerator', () => {
+    expect(matchesAccelerator('CmdOrCtrl+,', event({ key: ',', code: 'Comma', ctrlKey: true }))).toBe(true)
+    expect(matchesAccelerator('CmdOrCtrl+,', event({ key: '.', code: 'Period', ctrlKey: true }))).toBe(false)
   })
 })

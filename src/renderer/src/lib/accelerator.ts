@@ -57,3 +57,51 @@ export function prettyAccelerator(
   const mapped = parts.map((p) => (p === '' ? '+' : (table[p] ?? p)))
   return mapped.join(isMac ? '' : '+')
 }
+
+/** 将用户在设置页按下的组合键转为 Electron accelerator。 */
+export function acceleratorFromKeyboardEvent(e: KeyboardEvent): string | undefined {
+  if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) return undefined
+  const modifiers: string[] = []
+  if (e.metaKey || e.ctrlKey) modifiers.push('CmdOrCtrl')
+  if (e.altKey) modifiers.push('Alt')
+  if (e.shiftKey) modifiers.push('Shift')
+  if (modifiers.length === 0) return undefined
+
+  const keyMap: Record<string, string> = {
+    ' ': 'Space',
+    ArrowUp: 'Up',
+    ArrowDown: 'Down',
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    Escape: 'Esc',
+    Backspace: 'Backspace',
+    Delete: 'Delete',
+    Enter: 'Enter',
+    Tab: 'Tab'
+  }
+  const codeMap: Record<string, string> = {
+    Comma: ',',
+    Period: '.',
+    Slash: '/',
+    Semicolon: ';',
+    Quote: "'",
+    BracketLeft: '[',
+    BracketRight: ']',
+    Backslash: '\\',
+    Minus: '-',
+    Equal: '=',
+    Backquote: '`'
+  }
+  const codeKey =
+    codeMap[e.code] ??
+    (e.code.startsWith('Key') ? e.code.slice(3).toUpperCase() : undefined) ??
+    (e.code.startsWith('Digit') ? e.code.slice(5) : undefined)
+  const key = codeKey ?? keyMap[e.key] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key)
+  if (!key || key === 'Meta' || key === 'Control') return undefined
+  return `${modifiers.join('+')}+${key}`
+}
+
+export function matchesAccelerator(accelerator: string, e: KeyboardEvent): boolean {
+  const pressed = acceleratorFromKeyboardEvent(e)
+  return pressed !== undefined && pressed.toLowerCase() === accelerator.toLowerCase()
+}
