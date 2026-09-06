@@ -18,6 +18,7 @@ import { initRuntime, shutdownMcp, shutdownSessionTitles } from './runtime'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
+import { titleBarOptions } from './window/title-bar'
 import { setSessionWindowOpener } from './ipc/app'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,8 +88,9 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
     backgroundColor: '#1c1b19',
     // Windows/Linux 的任务栏与窗口图标(macOS 忽略,那边走下面的 app.dock.setIcon)
     icon: nativeImage.createFromPath(appIconPath),
-    // macOS:红绿灯嵌进侧边栏(方案 §8)
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    // macOS:红绿灯嵌进侧边栏(方案 §8)。Windows/Linux:自绘标题栏 + 系统按钮
+    // 画在 overlay 里 —— 两边的取舍写在 window/title-bar.ts 的文件头。
+    ...titleBarOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       // ★ 三件套。sandbox: true 是本项目 preload 必须完整打包成单文件的原因

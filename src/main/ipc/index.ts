@@ -29,6 +29,7 @@ import {
   store
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
+import { applyTitleBarColors } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
 import { copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge } from './app'
 import {
@@ -401,6 +402,7 @@ const sendHandlers: SendHandlerMap = {
     // 在主进程侧唯一的可观测证据 —— 渲染层的 console 不进这个 stdout。
     console.log(`[ipc] 窗口就绪 · kind=${kind}`)
   },
+  'window:titleBarOverlay': (colors, ctx) => applyTitleBarColors(ctx.sender, colors),
   'tabs:persistOuter': ({ kind, state }) => persistDebounced(outerTabKey(kind), state),
   'tabs:persistInner': ({ workspaceId, state }) =>
     persistDebounced(innerTabKey(workspaceId), state),

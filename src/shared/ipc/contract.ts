@@ -429,6 +429,18 @@ export interface IpcSendMap {
   'window:ready': { kind: WindowKind }
 
   /**
+   * Windows/Linux 自绘标题栏上那三颗系统按钮(Window Controls Overlay)的配色。
+   *
+   * ★ **方向是渲染 → 主,不是反过来。** 整套 token 由 `tokensOf` 现算,而它三路
+   * 输入里的图片主题只存在于渲染层那张异步拉来的表 —— 主进程算不全。所以每次
+   * `applyTheme` 落地后顺手推一次,主进程只管转成 `setTitleBarOverlay`。
+   *
+   * 用 send 不用 invoke:没有返回值,失败了也没有任何一个界面分支要走。
+   * macOS 上主进程侧直接短路(那边是 hiddenInset,没有 overlay)。
+   */
+  'window:titleBarOverlay': { color: string; symbolColor: string }
+
+  /**
    * Tab 布局持久化。★ 用 send 不用 invoke:拖动排序时每帧都在变,
    * 而渲染层不需要任何返回值。主进程侧防抖 500ms 再落 kv 表(方案 §9)。
    */
@@ -622,6 +634,7 @@ export const SEND_CHANNELS = {
   'terminal:write': 1,
   'terminal:resize': 1,
   'window:ready': 1,
+  'window:titleBarOverlay': 1,
   'tabs:persistOuter': 1,
   'tabs:persistInner': 1,
   'session:persistInput': 1

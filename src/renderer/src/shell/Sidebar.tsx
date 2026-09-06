@@ -28,6 +28,7 @@ import { Mark } from '../components/brand/Mark'
 import { EmptyState } from '../components/ui/EmptyState'
 import { IconButton } from '../components/ui/IconButton'
 import { cn } from '../lib/cn'
+import { IS_MAC } from '../lib/platform'
 import { ChevronRight, PanelLeft } from 'lucide-react'
 import { FEATURE_ICON } from './icons'
 import { useI18n, type Translate } from '../i18n'
@@ -76,11 +77,18 @@ export function Sidebar({
     <aside className="flex w-[297px] shrink-0 flex-col overflow-hidden rounded-panel bg-surface">
       {/*
         macOS hiddenInset 把红绿灯放在窗口左上角,而侧边栏面板正好在那里 ——
-        `pl-[74px]` 是给它们让出来的位置,不是随手写的边距。
+        `pl-[74px]` 是给它们让出来的位置,不是随手写的边距。**所以它只给 macOS**:
+        Windows/Linux 的三颗按钮在右上角(见 main/window/title-bar.ts),
+        这里再留 74px 就是个空洞。收起按钮本来就右对齐,换成常规内边距即可。
         整条 app-drag:这一行没有别的可点内容,让它可以拖窗口。
         高度必须和 AppShell 的外层 Tab 条一致(34px,量自参考图),否则红绿灯和 Tab 底边错位。
       */}
-      <div className="app-drag flex h-[34px] shrink-0 items-center justify-end pr-1 pl-[74px]">
+      <div
+        className={cn(
+          'app-drag flex h-[34px] shrink-0 items-center justify-end pr-1',
+          IS_MAC ? 'pl-[74px]' : 'pl-2'
+        )}
+      >
         {/*
           和 AppShell 收起态那颗是**同一个控件的两个状态**,所以尺寸必须一样,
           否则一收一放图标会跳一下大小。量 image copy 2.png(展开态):

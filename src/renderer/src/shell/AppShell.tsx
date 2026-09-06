@@ -13,6 +13,11 @@
  * 表现是「Tab 拖不动,整个窗口跟着鼠标跑」。所以 drag 只给 Tab **之间的空白**,
  * 每个 Tab 元素自己显式 `app-no-drag`(见 OuterTabBar)。
  *
+ * ★ Windows/Linux 这条同样是标题栏,只是系统按钮画在**右端**
+ * (Window Controls Overlay,见 main/window/title-bar.ts)。那块也是原生区域、
+ * 同样吞事件,但它连 `app-no-drag` 都救不回来 —— 只能实打实地让出宽度,
+ * 见下面那条 `pr-[max(...)]`。
+ *
  * ★ **设置是模态浮层,不是一个 Tab**(截图 06cd7b3c 是盖在界面上的面板)。
  * 做成 feature Tab 的话,「关掉设置」和「关掉一个工作区」就成了同一个动作。
  */
@@ -24,6 +29,7 @@ import type { Workspace } from "../../../shared/domain/workspace";
 import type { SessionListItem } from "../../../shared/domain/session";
 import { IconButton } from "../components/ui/IconButton";
 import { cn } from "../lib/cn";
+import { IS_MAC } from "../lib/platform";
 import { matchesAccelerator } from "../lib/accelerator";
 import { useI18n } from "../i18n";
 import { usePresence } from "../lib/usePresence";
@@ -301,12 +307,22 @@ export function AppShell({
                 // ★ `chrome` 不是 `surface`:深色下两者同值,浅色下外层 Tab 条(#e8e4dd)
                 // **比侧边栏(#f6f4ef)更暗** —— 量自 docs/image-new。用 surface 会让整条
                 // Tab 在浅色主题下浮起来,和参考实现的层次正好相反。
-                "app-drag flex h-[34px] shrink-0 items-end gap-1.5 bg-chrome px-2",
-                // 侧边栏收起时红绿灯落到这条上,得给它让出位置。
+                "app-drag flex h-[34px] shrink-0 items-end gap-1.5 bg-chrome pl-2",
+                /*
+                  ★ 右内边距不是常数。Windows/Linux 上系统的最小化/最大化/关闭三颗按钮
+                  画在这条的右端(Window Controls Overlay,见 main/window/title-bar.ts),
+                  那是**原生区域,盖在它下面的 DOM 收不到 pointer 事件** —— 不让位的话,
+                  「工作区文件」和「底部面板」两颗开关会看得见、点不着。
+                  宽度由 WCO 自己报(theme.css 的 `--window-controls-w`),减 8 是因为
+                  这条的右边缘本来就离窗口右边 8px。macOS 没有 WCO,max() 取回 8px。
+                */
+                "pr-[max(8px,calc(var(--window-controls-w)-8px))]",
+                // 侧边栏收起时红绿灯落到这条上,得给它让出位置。**仅 macOS** ——
+                // 别的平台按钮在右上角,这里再留 78px 就是个空洞。
                 // 78 = 参考里按钮盒左边 x86 减去主面板左边 x8(见下面那段量数)
                 // 内边距和侧边栏宽度同时同速地走,红绿灯下面才不会先空出一块再被填上
                 "transition-[padding-left] duration-280 ease-panel",
-                sidebarCollapsed && "pl-[78px]",
+                IS_MAC && sidebarCollapsed && "pl-[78px]",
               )}
             >
               {sidebarCollapsed && (

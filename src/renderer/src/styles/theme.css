@@ -255,6 +255,20 @@ body {
 }
 
 /*
+  Windows/Linux 的 Window Controls Overlay —— 系统的最小化/最大化/关闭三颗按钮
+  画在窗口右上角(见 main/window/title-bar.ts)。它是**原生区域**:盖在它下面的
+  DOM 既收不到 pointer 事件,也不受 .app-no-drag 影响 —— 唯一的办法是让出宽度。
+
+  ★ 宽度**问 WCO 自己要**,不按平台猜。`env(titlebar-area-width)` 是可拖拽区的宽,
+    窗口宽减掉它就是那三颗按钮占的量(RTL 下按钮在左边,`titlebar-area-x` 这一项
+    才是对的那个补正)。macOS 没有 WCO,两个 env() 都落到兜底值,整条 calc 恒为 0
+    —— 所以用到它的地方一律不需要平台判断。
+*/
+:root {
+  --window-controls-w: calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px));
+}
+
+/*
   滚动条:细、无轨道背景、悬停才明显 —— 截图里滚动条几乎看不见。
 
   ★ **这是全局默认,不是 opt-in。** 以前只有 `.scroll-thin` 才生效,于是每个新写的

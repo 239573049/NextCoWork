@@ -15,7 +15,7 @@
  * 测试环境是 node,没有 document)。
  */
 import type { AppSettings, ResolvedTheme } from '../../../shared/domain/settings'
-import type { ImageTheme } from '../../../shared/domain/theme'
+import type { ImageTheme, ThemeTokens } from '../../../shared/domain/theme'
 import { THEME_TOKENS, resolveImageTheme, tokensOf } from '../../../shared/domain/theme'
 
 /**
@@ -24,12 +24,18 @@ import { THEME_TOKENS, resolveImageTheme, tokensOf } from '../../../shared/domai
  */
 const IMAGE_VAR = '--theme-image'
 
+/**
+ * 返回**这一次写下去的那 22 个值**。不是顺手加的:Windows/Linux 标题栏那三颗
+ * 系统按钮不是 DOM,颜色只能经 IPC 推给主进程,而调用点要拿到 `chrome` / `icon`
+ * 就得再算一次 `tokensOf` —— 同一份输入算两遍,迟早有一遍的参数会漏掉更新
+ * (`uploaded` 这一路尤其容易忘)。这里原样交出去,两边永远是同一个结果。
+ */
 export function applyTheme(
   root: HTMLElement,
   appearance: ResolvedTheme,
   settings: AppSettings,
   uploaded: readonly ImageTheme[] = []
-): void {
+): ThemeTokens {
   root.dataset['theme'] = appearance
 
   const image = resolveImageTheme(settings.imageTheme.id, uploaded)
@@ -43,10 +49,11 @@ export function applyTheme(
   if (backdrop === null) {
     root.style.removeProperty(IMAGE_VAR)
     delete root.dataset['imageRender']
-    return
+    return tokens
   }
   root.style.setProperty(IMAGE_VAR, backdrop)
   root.dataset['imageRender'] = settings.imageTheme.render
+  return tokens
 }
 
 /**

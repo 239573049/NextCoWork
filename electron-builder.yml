@@ -7,6 +7,12 @@ directories:
 files:
   - '!**/.vscode/*'
   - '!src/*'
+  # ★ userData 被指到 `<cwd>/.next-cowork`(src/main/index.ts),所以开发机上
+  # 整个 Chromium profile —— Cookies、Local Storage、连同 SQLite 主库 ——
+  # 就躺在项目根。electron-builder **不读 .gitignore**,不写这一行的话
+  # `npm run dist` 会把开发者的会话和密钥一起打进发行包;而且 profile 里的
+  # `-wal` 是易失文件,收集到一半消失就是一个 ENOENT 的打包失败。
+  - '!.next-cowork'
   - '!docs/*'
   - '!test/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'

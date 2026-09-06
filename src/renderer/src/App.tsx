@@ -16,6 +16,7 @@ import type { AppSettings, ResolvedTheme } from '../../shared/domain/settings'
 import type { Workspace } from '../../shared/domain/workspace'
 import { announceReady, getBootstrap } from './services/app'
 import { on } from './services/ipc'
+import { setTitleBarOverlay } from './services/theme'
 import { AppShell } from './shell/AppShell'
 import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
@@ -119,7 +120,15 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     if (appearance === null || settings === null) return
-    applyTheme(document.documentElement, appearance, settings, uploadedThemes)
+    const tokens = applyTheme(document.documentElement, appearance, settings, uploadedThemes)
+    /*
+      Windows/Linux 标题栏右上角那三颗系统按钮**不是 DOM**,上面那 22 个 CSS 变量
+      到不了它们 —— 只能推给主进程走 setTitleBarOverlay。跟在同一个 effect 里,
+      三路输入(外观 / 颜色主题 / 上传图)的任何一路变化都会带上它。
+      `chrome` 是 Tab 条的底、`icon` 是条右端那两颗面板开关的笔画,按钮和它们同色。
+      macOS 上主进程侧短路。
+    */
+    setTitleBarOverlay({ color: tokens.chrome, symbolColor: tokens.icon })
   }, [appearance, settings, uploadedThemes])
 
   // 运行中角标的数据源是 RunRegistry 的投影,不是任何 UI 状态(方案 §8)

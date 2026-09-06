@@ -65,7 +65,16 @@ const api = {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node
-  }
+  },
+
+  /**
+   * 渲染层唯一的平台来源。**只有 macOS 有红绿灯**,而侧边栏表头和外层 Tab 条
+   * 都为它们硬留了一块位置(`pl-[74px]` / `pl-[78px]`)—— 别的平台上那是空洞。
+   *
+   * 沙箱 preload 的 `process` 是个 polyfill,但 `platform` 在里面
+   * (`versions` / `contextIsolated` 也来自同一份,上面已经在用)。
+   */
+  platform: process.platform
 } as const
 
 export type NextCoWorkApi = typeof api
