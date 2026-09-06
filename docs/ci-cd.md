@@ -13,6 +13,6 @@ git push origin v0.1.0
 
 - Windows：NSIS 安装程序（`.exe`）
 - Ubuntu：AppImage（`.AppImage`）
-- macOS：DMG 和 ZIP（`.dmg`、`.zip`）
+- macOS：Apple Silicon（arm64）和 Intel（x64）各自生成 DMG 和 ZIP（`.dmg`、`.zip`）
 
 也可以从 GitHub Actions 手动运行该工作流来验证三平台构建；手动运行只上传 Actions artifacts，不会创建 Release。当前构建不依赖代码签名，Windows 安装程序和 macOS 安装包都会正常生成并上传。macOS 用户首次打开未签名应用时，按系统提示在“系统设置 → 隐私与安全性”中允许打开即可。

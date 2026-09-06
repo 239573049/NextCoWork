@@ -25,17 +25,27 @@ jobs:
           - name: Windows
             id: windows
             runner: windows-latest
+            arch: x64
             artifact_path: dist/*.exe
           - name: Ubuntu
             id: linux
             runner: ubuntu-latest
+            arch: x64
             artifact_path: dist/*.AppImage
-          - name: macOS
-            id: macos
-            runner: macos-latest
+          - name: macOS Apple Silicon
+            id: macos-arm64
+            runner: macos-15
+            arch: arm64
             artifact_path: |
-              dist/*.dmg
-              dist/*.zip
+              dist/*-arm64.dmg
+              dist/*-arm64-mac.zip
+          - name: macOS Intel
+            id: macos-x64
+            runner: macos-15-intel
+            arch: x64
+            artifact_path: |
+              dist/*-x64.dmg
+              dist/*-x64-mac.zip
 
     steps:
       - name: Check out source
@@ -52,7 +62,7 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Build application
-        run: npm run dist:ci
+        run: npm run dist:ci -- --${{ matrix.arch }}
         env:
           # Unsigned Windows and macOS artifacts are intentional for this release flow.
           CSC_IDENTITY_AUTO_DISCOVERY: false

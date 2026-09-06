@@ -37,6 +37,7 @@ electronFuses:
 
 mac:
   category: public.app-category.developer-tools
+  artifactName: ${productName}-${version}-${arch}-mac.${ext}
   target:
     - dmg
     - zip
@@ -44,6 +45,9 @@ mac:
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
     - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
 
 win:
   target:
