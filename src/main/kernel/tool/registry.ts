@@ -8,6 +8,7 @@
 import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../shared/agent/tool'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { RunStatus } from '../../../shared/agent/event'
+import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost } from '../host'
 import type { InteractFn } from '../interaction-gate'
 import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
@@ -65,7 +66,7 @@ export type SubagentOutcome =
       /** 子代理最后一条助手消息的可见文字。`status !== 'done'` 时可能是空串 */
       text: string
       /** `status === 'error'` 时的原因 */
-      error?: string
+      error?: AgentError | string
     }
   | {
       kind: 'background'

@@ -16,7 +16,8 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { RunRequest } from '../shared/agent/run-request'
 import { MAX_DEPTH } from '../shared/agent/run-request'
-import type { RunStatus } from '../shared/agent/event'
+import type { AgentEvent, RunStatus } from '../shared/agent/event'
+import type { AgentError } from '../shared/agent/error'
 import { userMessage, visibleText, type AgentMessage, type SubagentResult } from '../shared/agent/message'
 import type { AgentDefinition } from '../shared/domain/agent-def'
 import { minPermission } from '../shared/agent/permission'
@@ -560,16 +561,17 @@ let childSeq = 0
  * 表现是这个 Promise 永远不 resolve —— 父代理就卡在那次工具调用上,
  * 直到用户点停止。
  */
-function waitForEnd(handle: RunHandle): Promise<RunStatus> {
+function waitForEnd(handle: RunHandle): Promise<Extract<AgentEvent, { type: 'run_end' }>> {
   return new Promise((resolve) => {
     if (handle.status !== 'running') {
-      resolve(handle.status)
+      const end = handle.since(handle.seq - 1)[0]
+      resolve(end?.type === 'run_end' ? end : { type: 'run_end', status: handle.status })
       return
     }
     const off = handle.on((ev) => {
       if (ev.type !== 'run_end') return
       off()
-      resolve(ev.status)
+      resolve(ev)
     })
   })
 }
@@ -577,7 +579,7 @@ function waitForEnd(handle: RunHandle): Promise<RunStatus> {
 interface ChildRunResult {
   status: RunStatus
   text: string
-  error?: string
+  error?: AgentError
   endedAt?: number
 }
 
@@ -623,19 +625,20 @@ function monitorChildRun(
   })
 
   return (async () => {
-    const status = await waitForEnd(child)
+    const { status, error } = await waitForEnd(child)
     if (finished !== undefined) await finished.catch(() => {})
     off()
     const history = store.getHistory(childReq.sessionId)
     const last = [...history].reverse().find((m) => m.role === 'assistant')
     const text = last === undefined ? '' : visibleText(last)
     const endedAt = child.endedAt
-    persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text)
+    persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text, error)
     if (parent.status === 'running') {
       parent.emit({
         type: 'subagent_end', callId, childRunId: child.runId, status,
         childSeq: child.seq,
         ...(text.trim() === '' ? {} : { summary: text.slice(0, 240) }),
+        ...(error === undefined ? {} : { error }),
         ...(endedAt === undefined ? {} : { at: endedAt })
       })
     } else if (background) {
@@ -643,7 +646,7 @@ function monitorChildRun(
       // is still delivered through the inherited child topic for the renderer.
       getHost().logger.info(`[subagent] background child finished after parent: ${child.runId}`)
     }
-    return { status, text, ...(endedAt === undefined ? {} : { endedAt }) }
+    return { status, text, ...(error === undefined ? {} : { error }), ...(endedAt === undefined ? {} : { endedAt }) }
   })()
 }
 
@@ -653,7 +656,8 @@ function persistSubagentCompletion(
   callId: string,
   childRunId: string,
   status: RunStatus,
-  text: string
+  text: string,
+  error?: AgentError
 ): void {
   const history = store.getHistory(sessionId)
   let changed = false
@@ -669,7 +673,8 @@ function persistSubagentCompletion(
         subagent: {
           ...part.subagent,
           status,
-          ...(summary === undefined ? {} : { summary })
+          ...(summary === undefined ? {} : { summary }),
+          ...(error === undefined ? {} : { error })
         }
       }
     })
@@ -718,6 +723,9 @@ function mergeLatestSubagentReceipts(
         ...(current.summary === undefined
           ? {}
           : { summary: current.summary }),
+        ...(current.error === undefined
+          ? {}
+          : { error: current.error }),
         ...(status === undefined ? {} : { status })
       }
       messageChanged = true
@@ -895,7 +903,10 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
     }
 
     const completed = await result
-    return { kind: 'finished', childRunId, status: completed.status, text: completed.text }
+    return {
+      kind: 'finished', childRunId, status: completed.status, text: completed.text,
+      ...(completed.error === undefined ? {} : { error: completed.error })
+    }
   }
 }
 

@@ -64,6 +64,8 @@ export type AgentEvent =
       childRunId: string
       status: RunStatus
       summary?: string
+      /** Terminal error, including localization metadata, copied from the child run. */
+      error?: AgentError
       /** Sequence of the child run_end event, used to deduplicate the inherited raw event. */
       childSeq?: number
       at?: number

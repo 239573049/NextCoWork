@@ -18,6 +18,7 @@ import type { SubagentState, ToolCallState } from "../../../../shared/agent/tran
 import { presenterOf } from "../../../../shared/domain/tool-presenter";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
+import { agentErrorText } from "../../i18n/agent";
 import { AgentMarkdown } from "../../components/markdown";
 import { ToolDetail } from "./ToolDetail";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
@@ -227,7 +228,7 @@ export function SubagentNode({
   state?: SubagentState;
 }): ReactNode {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
+  const [manual, setManual] = useState<boolean | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const running = state?.status === 'running';
 
@@ -238,6 +239,9 @@ export function SubagentNode({
   }, [running])
 
   const status = state?.status ?? 'done';
+  const errorText = state?.error === undefined ? undefined : agentErrorText(state.error, t);
+  // Failed subagents expose their diagnostic automatically; users can still collapse it.
+  const open = manual ?? status === 'error';
   const duration = state?.startedAt === undefined
     ? undefined
     : formatDuration(elapsedOf({ startedAt: state.startedAt, endedAt: state.endedAt }, now) ?? 0)
@@ -262,7 +266,7 @@ export function SubagentNode({
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setManual(!open)}
         className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-tint-hover/40"
       >
         <ChevronRight size={13} className={cn("shrink-0 text-fg-faint transition-transform", open && "rotate-90")} />
@@ -294,6 +298,13 @@ export function SubagentNode({
           {state?.currentTool !== undefined && (
             <div className="mt-2 truncate rounded-[5px] bg-tint px-2 py-1 text-[11px] text-fg">
               {t('chat.subagent.detail.currentTool', { tool: state.currentTool })}
+            </div>
+          )}
+          {status === 'error' && (
+            <div className="selectable mt-2 whitespace-pre-wrap break-words rounded-[5px] border border-danger/30 bg-danger/10 px-2 py-1.5 text-[11.5px] leading-relaxed text-danger">
+              {errorText === undefined || errorText.trim() === ''
+                ? t('chat.subagent.detail.errorUnknown')
+                : t('chat.subagent.detail.errorMessage', { error: errorText })}
             </div>
           )}
           {state?.summary !== undefined && state.summary !== summary && (

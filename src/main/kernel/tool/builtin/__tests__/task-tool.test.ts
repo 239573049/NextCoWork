@@ -241,6 +241,11 @@ describe('Task · 三种结局映射成三种不同的东西', () => {
     expect(r.isError).toBe(true)
     expect(r.output.content).toContain('researcher')
     expect(r.output.content).toContain('上游 429')
+    expect(r.subagent).toMatchObject({
+      childRunId: 'run_1:sub:1',
+      status: 'error',
+      error: { message: '上游 429' }
+    })
   })
 
   /**

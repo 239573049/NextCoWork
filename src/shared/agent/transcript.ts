@@ -62,6 +62,7 @@ export interface SubagentState {
   startedAt?: number
   endedAt?: number
   summary?: string
+  error?: AgentError
   usage?: TokenUsage
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
   /** Last child-run event sequence already reflected in this state. */
@@ -133,7 +134,8 @@ function applySubagentMessage(
       status,
       ...(metadata.background === undefined ? {} : { background: metadata.background }),
       phase: status === 'running' ? (metadata.background === true ? 'background' : 'starting') : 'finishing',
-      ...(metadata.summary === undefined ? {} : { summary: metadata.summary })
+      ...(metadata.summary === undefined ? {} : { summary: metadata.summary }),
+      ...(metadata.error === undefined ? {} : { error: metadata.error })
     }
   }
   return next
@@ -469,6 +471,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             phase: 'finishing',
             currentTool: undefined,
             ...(e.summary === undefined ? {} : { summary: e.summary }),
+            ...(e.error === undefined ? {} : { error: e.error }),
             ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq }),
             ...(e.at === undefined ? {} : { endedAt: e.at })
           }
@@ -555,7 +558,7 @@ export function applyChildEvent(
         contextUsage: { used: e.used, window: e.window, shouldCompact: e.shouldCompact } })
     case 'run_end':
       return childUpdate({ type: 'subagent_end', callId: entry.callId, childRunId,
-        status: e.status, at: e.at })
+        status: e.status, ...(e.error === undefined ? {} : { error: e.error }), at: e.at })
     default:
       return s
   }

@@ -312,11 +312,12 @@ describe('applyEvent · 终局与元信息', () => {
       type: 'tool_end', callId: 'tc1', output: { content: 'ok' }, isError: true
     })
     s = applyChildEvent(s, 'r2', {
-      type: 'run_end', status: 'error', at: 500
+      type: 'run_end', status: 'error', error: { code: 'network', message: '上游连接失败', retryable: true }, at: 500
     })
 
     expect(s.subagents.c1).toMatchObject({
-      toolCalls: 1, toolErrors: 1, status: 'error', endedAt: 500
+      toolCalls: 1, toolErrors: 1, status: 'error', endedAt: 500,
+      error: { code: 'network', message: '上游连接失败' }
     })
   })
 

@@ -20,6 +20,8 @@ export interface SubagentResult {
   childRunId: string
   status?: 'running' | 'done' | 'error' | 'aborted'
   summary?: string
+  /** Terminal error, including localization metadata, retained for UI diagnostics. */
+  error?: AgentError
   background?: boolean
 }
 

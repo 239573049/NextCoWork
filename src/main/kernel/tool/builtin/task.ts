@@ -24,6 +24,7 @@
  */
 import { z } from 'zod'
 import { MAX_DEPTH } from '../../../../shared/agent/run-request'
+import { agentError } from '../../../../shared/agent/error'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import type { AgentDefinition } from '../../../../shared/domain/agent-def'
 import { abortError } from '../../abort'
@@ -184,12 +185,14 @@ export function taskTool(): ToolRegistration {
             而真实情况是这次调查根本没发生。
           */
           if (outcome.text.trim() === '') {
+            const error = agentError('unknown',
+              `The subagent ${input.subagent_type} finished without producing any text. ` +
+                'Retry once with a more specific prompt, or do this step yourself.',
+              { messageKey: 'chat.subagent.error.noOutput', messageParams: { agent: input.subagent_type } }
+            )
             return {
-              ...toolFail(
-                `The subagent ${input.subagent_type} finished without producing any text. ` +
-                  `Retry once with a more specific prompt, or do this step yourself.`
-              ),
-              subagent: { childRunId: outcome.childRunId, status: 'error' }
+              ...toolFail(error.message),
+              subagent: { childRunId: outcome.childRunId, status: 'error', error }
             }
           }
           return {
@@ -201,11 +204,19 @@ export function taskTool(): ToolRegistration {
             }
           }
 
-        case 'error':
+        case 'error': {
+          const error = typeof outcome.error === 'string'
+            ? agentError('unknown', outcome.error)
+            : outcome.error
           return {
-            ...toolFail(`The subagent ${input.subagent_type} failed: ${outcome.error ?? 'unknown error'}`),
-            subagent: { childRunId: outcome.childRunId, status: 'error' }
+            ...toolFail(`The subagent ${input.subagent_type} failed: ${error?.message ?? 'unknown error'}`),
+            subagent: {
+              childRunId: outcome.childRunId,
+              status: 'error',
+              ...(error === undefined ? {} : { error })
+            }
           }
+        }
 
         case 'aborted':
           /*
