@@ -30,10 +30,27 @@ if (!gotTheLock) {
   app.quit()
 }
 
-// 应用数据、附件和 Electron profile 统一落在项目级 `.next-cowork/`。
+/**
+ * 数据根 —— userData、SQLite 主库、附件、skills/agents 文件树全部从这里派生。
+ *
+ * 开发时是 `<cwd>/.next-cowork`:项目级携带、备份方便,仓库里的探针也都假设在这儿。
+ *
+ * ★ 打包后**必须换成系统的 per-user 目录**。发行版的 `process.cwd()` 是没有意义的:
+ * Windows 从快捷方式启动时它是**安装目录**,数据会在卸载/升级时被一起清掉;而从
+ * 别的目录双击 exe,又会凭空开出一个空库 —— 用户看到的是「我的会话全没了」,
+ * 而不是任何一条能指向工作目录的线索。
+ *
+ * 打包分支直接用 Electron 默认的 userData(`%APPDATA%\NextCoWork` /
+ * `~/Library/Application Support/NextCoWork`),所以那条路径下面就不再 setPath 了。
+ */
+function resolveDataRoot(): string {
+  return app.isPackaged ? app.getPath('userData') : defaultDatabaseDirectory()
+}
+
+// 应用数据、附件和 Electron profile 统一落在数据根下。
 // 必须在 app ready 之前设置才生效。
 const legacyUserDataPath = app.getPath('userData')
-app.setPath('userData', defaultDatabaseDirectory())
+if (!app.isPackaged) app.setPath('userData', defaultDatabaseDirectory())
 
 /*
   ★ **必须在 `app.whenReady()` 之前** —— 与单实例锁、userData 改路径同属
@@ -171,11 +188,14 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
 }
 
 /**
- * 首次切换到项目级目录时保留旧版 Electron userData 数据库。
- * 只在目标库不存在时复制，不覆盖用户已经在 `.next-cowork` 中生成的库。
+ * 首次切换到新数据根时保留旧版 Electron userData 数据库。
+ * 只在目标库不存在时复制，不覆盖用户已经生成的库。
+ *
+ * 打包后 `resolveDataRoot()` 就是 `legacyUserDataPath` 本身,两条路径相同,
+ * 下面的 `existsSync` 判断自然退化成 no-op —— 不需要额外分支。
  */
 function prepareProjectDatabaseDirectory(): string {
-  const targetDir = defaultDatabaseDirectory()
+  const targetDir = resolveDataRoot()
   const targetPath = join(targetDir, DB_FILENAME)
   const legacyPath = join(legacyUserDataPath, DB_FILENAME)
   if (!existsSync(targetPath) && existsSync(legacyPath)) {

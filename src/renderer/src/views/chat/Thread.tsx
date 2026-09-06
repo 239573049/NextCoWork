@@ -53,6 +53,13 @@ export function Thread({
   const viewport = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const followBottom = useRef(true)
+  /**
+   * 上一次**我们自己**把 scrollTop 写到的位置;`-1` = 没有待确认的程序化滚动。
+   * 一次程序化写入最多派发一个 scroll 事件,认领掉就把它清空。
+   */
+  const selfScrolled = useRef(-1)
+  /** 上一次看到的几何量。判断「这一下是谁滚的」靠的是它的**变化方向**,不是离底距离。 */
+  const lastSeen = useRef({ top: 0, height: 0 })
   const needsReply = live.length === 0 && visible.at(-1)?.role !== 'assistant'
 
   // Follow growing replies and newly arriving interactions only while the user
@@ -62,7 +69,16 @@ export function Thread({
     const body = content.current
     if (scroller === null || body === null) return
     const follow = (): void => {
-      if (followBottom.current) scroller.scrollTop = scroller.scrollHeight
+      if (followBottom.current) {
+        const bottom = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+        // 已经在底就**不写**。写了也不会派发 scroll 事件,却会留下一个永远等不到
+        // 确认的 token —— 而那个 token 会把用户「滚回底部」的那一下吃掉。
+        if (scroller.scrollTop !== bottom) {
+          scroller.scrollTop = bottom
+          selfScrolled.current = scroller.scrollTop
+        }
+      }
+      lastSeen.current = { top: scroller.scrollTop, height: scroller.scrollHeight }
     }
     const observer = new ResizeObserver(follow)
     observer.observe(body)
@@ -90,7 +106,35 @@ export function Thread({
     <div ref={viewport} className="scroll-thin fade-top min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]" data-testid="thread"
       onScroll={() => {
         const el = viewport.current
-        if (el !== null) followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+        if (el === null) return
+        const top = el.scrollTop
+        const height = el.scrollHeight
+        const seen = lastSeen.current
+        /*
+          ★ **不能拿「离底距离」反推「用户是不是滚走了」。**
+
+          scroll 事件是异步派发的:`follow()` 在 ResizeObserver 回调里写 scrollTop,
+          事件要等下一帧的 scroll steps 才送到 —— 而按 HTML「更新渲染」的步骤,
+          **scroll steps 排在 ResizeObserver steps 前面**。只要这中间又有东西把内容
+          撑高(mermaid 图渲完、图片解码完、代码高亮回来),处理器量到的就是
+          「离底 2700px」,读成「用户滚上去了」→ 后面所有 `follow()` 全部空转,
+          滚动条永久停在半路。带 mermaid 的会话里内容会断断续续长好几秒、
+          派发上百次 scroll 事件,撞中几乎是必然的。
+
+          改成看**变化方向**,它不受内容长高影响:
+          - `follow()` 只会把视图往**下**带;
+          - 浏览器的夹取只在内容**变矮**时把 scrollTop 往上拽。
+          所以「位置往上走了、而且高度没变矮」这件事只有用户做得到。
+          反过来要恢复跟随,则要求高度没动 —— 那一下才确定是用户自己滚的。
+        */
+        if (top === selfScrolled.current) {
+          selfScrolled.current = -1
+        } else if (top < seen.top && height >= seen.height) {
+          followBottom.current = false
+        } else if (height === seen.height) {
+          followBottom.current = height - top - el.clientHeight < 80
+        }
+        lastSeen.current = { top, height }
       }}>
       <div ref={content} className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
         <ContextCheckpointPanel checkpoints={transcript.contextCheckpoints} />

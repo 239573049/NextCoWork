@@ -39,7 +39,15 @@ electronFuses:
   enableEmbeddedAsarIntegrityValidation: false
   onlyLoadAppFromAsar: false
   loadBrowserProcessSpecificV8Snapshot: false
-  grantFileProtocolExtraPrivileges: false
+  # ★ 必须是 true(也是 Electron 的默认值)。生产走 `win.loadFile()`,即 `file://`,
+  # 而构建产物的入口是 `<script type="module" crossorigin src="./assets/…">` ——
+  # module script 的加载**强制走 CORS**。关掉这个 fuse 会让 file:// 页面的 origin
+  # 退化成 opaque,入口 chunk 被直接拦下,React 根本没机会挂载。
+  #
+  # 症状是**整个窗口只剩 BrowserWindow 的 backgroundColor**,一片纯黑,而且生产下
+  # `optimizer.watchWindowShortcuts` 屏蔽了 F12,连报错都看不到。dev 完全照不出来:
+  # 那边走的是 `http://localhost`,而 fuse 只在 electron-builder 打包时才烧进二进制。
+  grantFileProtocolExtraPrivileges: true
 
 mac:
   category: public.app-category.developer-tools

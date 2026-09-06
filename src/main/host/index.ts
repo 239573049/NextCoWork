@@ -14,7 +14,7 @@
  */
 import { app, net, safeStorage, session } from 'electron'
 import { getCredential, putCredential, removeCredential } from '../db/repo'
-import { defaultDatabaseDirectory } from '../db'
+import { databaseDirectory } from '../db'
 import type { KernelHost } from '../kernel/host'
 import { nodeHost } from '../kernel/host'
 import { withDemo } from '../kernel/upstream/demo'
@@ -83,7 +83,10 @@ export function electronHost(): KernelHost {
   return withDemo(
     nodeHost({
       paths: {
-        userData: () => defaultDatabaseDirectory(),
+        // ★ 必须是 `databaseDirectory()`(已打开的库所在目录)而不是 cwd 派生的默认值 ——
+        // 打包后数据根是系统 userData,两者会分叉,skills/agents 的文件树就会写到
+        // 一个跟数据库无关的目录里去。这个函数是 lazy 的,调用时库一定已经打开。
+        userData: () => databaseDirectory(),
         temp: () => app.getPath('temp')
       },
       secrets: electronSecrets(),
