@@ -28,7 +28,7 @@ export function MermaidBlock({ code, language }: MarkdownCodeProps): ReactNode {
   const { t } = useI18n()
   const appearance = useAppearance()
   const id = `diagram-${useId().replace(/[^a-zA-Z0-9-]/g, '')}`
-  const [result, setResult] = useState<{ code: string; appearance: string; url?: string; failed?: boolean; size?: { width: number; height: number } } | null>(null)
+  const [result, setResult] = useState<{ url?: string; failed?: boolean; size?: { width: number; height: number } } | null>(null)
   useEffect(() => {
     let active = true
     let objectUrl: string | undefined
@@ -58,9 +58,9 @@ export function MermaidBlock({ code, language }: MarkdownCodeProps): ReactNode {
         if (!active) return
         // An image, not live SVG/HTML: no scripts, click handlers, or bound callbacks.
         objectUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
-        setResult({ code, appearance, url: objectUrl, size: sizeOf(svg) ?? undefined })
+        setResult({ url: objectUrl, size: sizeOf(svg) ?? undefined })
       } catch {
-        if (active) setResult({ code, appearance, failed: true })
+        if (active) setResult({ failed: true })
       }
     }
     renderQueue = renderQueue.then(render, render)
