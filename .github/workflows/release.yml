@@ -90,7 +90,11 @@ jobs:
             echo "No release artifacts were downloaded" >&2
             exit 1
           fi
-          gh release create "$TAG_NAME" "${assets[@]}" \
-            --verify-tag \
-            --title "$TAG_NAME" \
-            --generate-notes
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG_NAME" "${assets[@]}" \
+              --verify-tag \
+              --title "$TAG_NAME" \
+              --generate-notes
+          fi
