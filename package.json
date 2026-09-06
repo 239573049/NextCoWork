@@ -23,6 +23,7 @@
     "review": "node scripts/inline-shots.mjs docs/design-review.standalone.html",
     "test:watch": "vitest",
     "dist": "npm run build && electron-builder",
+    "dist:ci": "npm run build && electron-builder --publish never",
     "dist:dir": "npm run build && electron-builder --dir",
     "postinstall": "electron-builder install-app-deps"
   },

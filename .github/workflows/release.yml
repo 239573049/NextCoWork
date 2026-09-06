@@ -1,0 +1,92 @@
+name: Build desktop releases
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            id: windows
+            runner: windows-latest
+          - name: Ubuntu
+            id: linux
+            runner: ubuntu-latest
+          - name: macOS
+            id: macos
+            runner: macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build application
+        run: npm run dist:ci
+        env:
+          # Unsigned Windows and macOS artifacts are intentional for this release flow.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextcowork-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: nextcowork-*
+          merge-multiple: true
+
+      - name: Create release and upload artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release-assets -type f -print0)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release artifacts were downloaded" >&2
+            exit 1
+          fi
+          gh release create "$TAG_NAME" "${assets[@]}" \
+            --verify-tag \
+            --title "$TAG_NAME" \
+            --generate-notes

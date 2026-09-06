@@ -6,6 +6,7 @@ export function listContextCheckpoints(req: { sessionId: string }): ContextCheck
 }
 
 export function updateContextCheckpoint(req: { checkpointId: string; note: string; revision: number }): ContextCheckpoint {
+  // eslint-disable-next-line no-control-regex -- intentionally strip control characters from persisted notes
   const note = req.note.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32_000)
   if (note === '') throw new Error('上下文笔记不能为空')
   return store.updateContextCheckpoint(req.checkpointId, note, req.revision, Date.now())

@@ -504,6 +504,7 @@ export class AgentSession {
     } catch {
       return undefined
     }
+    // eslint-disable-next-line no-control-regex -- intentionally strip control characters from model output
     note = note.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32_000)
     if (note === '') return undefined
     const now = this.deps.host.clock.now()
