@@ -40,7 +40,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           # Keep CI and packaging on a runtime that provides node:sqlite.
-          node-version: 22.12.0
+          node-version: 24.16.0
           cache: npm
 
       - name: Install dependencies
