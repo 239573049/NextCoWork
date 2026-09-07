@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Pencil } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
-import { isToolResultOnly } from '../../../../shared/agent/message'
+import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
 import { runDurationOf } from '../../../../shared/agent/duration'
 import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
@@ -27,7 +27,8 @@ import { StatusLine } from './StatusLine'
 import { ToolTimeline } from './ToolTimeline'
 import { RunProcessBlock } from './RunProcessBlock'
 import { ContextCheckpointPanel } from './ContextCheckpointPanel'
-import { assistantSegments, isAssistantTextBlock, threadRows, type AssistantBlock } from './thread-content'
+import { assistantSegments, assistantText, isAssistantTextBlock, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
+import { TurnActions, type TurnPrompt } from './TurnActions'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
 
 export function Thread({
@@ -36,13 +37,16 @@ export function Thread({
   providerName,
   lastSeq,
   queued,
-  onEditMessage
+  onEditMessage,
+  onDeleteTurn
 }: {
   transcript: TranscriptState
   runId: string | null
   lastSeq: number
   queued: number
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
+  /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
+  onDeleteTurn?: (userMessageId: string) => Promise<void>
   /** 助手消息上方那行 `供应商 / 模型`(截图:`RoutinAI / claude-fable-5-1`) */
   providerName: string | undefined
 }): ReactNode {
@@ -96,7 +100,6 @@ export function Thread({
         </p>
       )}
       {runId !== null && <InteractionPanel key={runId} runId={runId} />}
-      {runId === null && usage !== undefined && <TaskUsage usage={usage} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
         lastSeq={lastSeq} queued={queued} />
     </div>
@@ -138,8 +141,9 @@ export function Thread({
       }}>
       <div ref={content} className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
         <ContextCheckpointPanel checkpoints={transcript.contextCheckpoints} />
-        {threadRows(messages, live, running).map((row, index, rows) =>
-          row.kind === 'user' ? (
+        {threadRows(messages, live, running).map((row, index, rows) => {
+          const isLast = index === rows.length - 1
+          return row.kind === 'user' ? (
             <UserBubble key={row.key} message={row.message} onEdit={onEditMessage} disabled={running} />
           ) : (
             <AssistantTurn
@@ -150,16 +154,49 @@ export function Thread({
               model={model}
               providerName={providerName}
               runStatus={transcript.status}
-              runStartedAt={transcript.runStartedAt ?? row.startedAt}
-              runEndedAt={transcript.runEndedAt ?? row.endedAt}
-              collapseEnabled={index === rows.length - 1}
-              feedback={index === rows.length - 1 ? feedback : undefined}
+              /*
+                ★ **run 级的起止只属于最后一轮。** `transcript.runStartedAt` 说的是
+                「当前(或刚结束的)那一次 run」,历史回合与它无关。以前无条件优先于
+                `row.startedAt` 也看不出问题 —— 用时只在 RunProcessBlock 里显示,
+                而那个块只对末轮渲染。一旦把用时铺到每一轮,满屏回合就会显示同一个数字。
+                更早的回合只能用自己那段「提问 → 收尾发言」的时间差。
+              */
+              runStartedAt={isLast ? transcript.runStartedAt ?? row.startedAt : row.startedAt}
+              runEndedAt={isLast ? transcript.runEndedAt ?? row.endedAt : row.endedAt}
+              collapseEnabled={isLast}
+              feedback={isLast ? feedback : undefined}
+              // 助手回合永远紧跟在引出它的提问之后 —— threadRows 会把连续的模型
+              // 回复并成一行,所以前一行要么是那条提问,要么(开局补的空回合)什么都没有。
+              prompt={promptOf(rows[index - 1])}
+              isLast={isLast}
+              running={running}
+              // 用量是**整个 run** 的累计,不是逐轮的 —— 只能挂在最后一轮,
+              // 挂到每一轮上就是把同一个数字重复报四遍。
+              usage={isLast && runId === null && usage !== undefined
+                ? <TaskUsage usage={usage} /> : undefined}
+              onRegenerate={onEditMessage === undefined
+                ? undefined
+                : (id, text) => onEditMessage(id, text, true)}
+              onDeleteTurn={onDeleteTurn}
             />
           )
-        )}
+        })}
       </div>
     </div>
   )
+}
+
+/**
+ * 引出某个助手回合的提问。
+ *
+ * 「重新生成」和「删除这一轮」都以它为锚点:前者把历史截断到这条提问之前再发一次,
+ * 后者删掉从它开始的整段。所以拿不到提问的回合(会话开头补出来的空回合)
+ * 两个操作都不提供 —— 没有可以退回去的地方。
+ */
+function promptOf(previous: ThreadRow | undefined): TurnPrompt | undefined {
+  if (previous?.kind !== 'user') return undefined
+  const text = visibleText(previous.message).trim()
+  return { id: previous.message.id, text }
 }
 
 function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
@@ -323,7 +360,13 @@ function AssistantTurn({
   runStartedAt,
   runEndedAt,
   collapseEnabled,
-  feedback
+  feedback,
+  prompt,
+  isLast,
+  running,
+  usage,
+  onRegenerate,
+  onDeleteTurn
 }: {
   blocks: readonly AssistantBlock[]
   tools: TranscriptState['tools']
@@ -335,6 +378,12 @@ function AssistantTurn({
   runEndedAt?: number
   collapseEnabled: boolean
   feedback?: ReactNode
+  prompt?: TurnPrompt
+  isLast: boolean
+  running: boolean
+  usage?: ReactNode
+  onRegenerate?: (id: string, text: string) => Promise<void>
+  onDeleteTurn?: (userMessageId: string) => Promise<void>
 }): ReactNode {
   const { t } = useI18n()
   const segments = assistantSegments(blocks, t('chat.tool.name'), subagents)
@@ -390,9 +439,25 @@ function AssistantTurn({
   )
 
   return (
-    <div className="flex flex-col gap-2.5" data-testid="assistant-turn">
+    <div className="group/turn flex flex-col gap-2.5" data-testid="assistant-turn">
       <TurnHeader model={model} providerName={providerName} />
       {body}
+      {/*
+        操作条要等这一轮跑完再出现。流式过程中「复制」拿到的是半句话,
+        「重新生成」更是要先中断当前 run —— 那是另一件事,输入框旁边的停止键管它。
+      */}
+      {!(isLast && running) && (
+        <TurnActions
+          text={assistantText(blocks)}
+          prompt={prompt}
+          alwaysVisible={isLast}
+          disabled={running}
+          durationMs={durationMs}
+          usage={usage}
+          onRegenerate={onRegenerate}
+          onDelete={onDeleteTurn}
+        />
+      )}
       {feedback}
     </div>
   )

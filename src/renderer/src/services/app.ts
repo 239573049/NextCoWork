@@ -30,6 +30,11 @@ export function copyText(text: string): Promise<void> {
   return invoke('app:copyText', { text })
 }
 
+/** 另存为。`defaultName` 只是建议名,落点由主进程弹出的系统对话框决定;取消返回 null。 */
+export function saveTextFile(defaultName: string, text: string): Promise<{ path: string } | null> {
+  return invoke('app:saveTextFile', { defaultName, text })
+}
+
 export function openSessionWindow(workspaceId: string, sessionId: string): Promise<void> {
   return invoke('app:openSessionWindow', { workspaceId, sessionId })
 }

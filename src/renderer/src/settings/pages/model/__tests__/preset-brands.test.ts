@@ -1,9 +1,9 @@
 /**
- * 43 个内置预设各自该显示**谁**的 logo —— 一张钉死的对照表。
+ * 44 个内置预设各自该显示**谁**的 logo —— 一张钉死的对照表。
  *
  * **为什么值得单独一个文件:** `brands.test.ts` 守的是规则表本身自洽
  * (每个牌子有样本、顺序不打架),但它不知道「添加供应商」目录里到底摆着
- * 哪 43 个名字。而两张表是**分开演进**的:presets.ts 加一家、或者给某家改个
+ * 哪 44 个名字。而两张表是**分开演进**的:presets.ts 加一家、或者给某家改个
  * 更好听的名字,`brands.ts` 一个字都不用动就能悄悄错掉一个 logo。
  *
  * ★★ 这不是假想。这张表第一次跑出来时,43 家里 **13 家没有图标、3 家挂着
@@ -71,6 +71,10 @@ const EXPECTED: Readonly<Record<string, Brand | null>> = {
   // ── 聚合 ──
   // 内置上游,自家的 webp,不是 lobehub 的字形
   routin: 'routin',
+  // 订阅制那条(/plan/v1,Codex 系模型)—— 同一家,同一张 webp。
+  // 它的 id 不是光秃秃的 `routin`,靠**名字**里的 RoutinAI 命中;
+  // `brands.ts` 的 `^routin(-plan)?$` 是给用户改名之后兜底的第二条路。
+  'routin-plan': 'routin',
   openrouter: 'openrouter',
   siliconflow: 'siliconcloud',
   'siliconflow-intl': 'siliconcloud',

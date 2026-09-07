@@ -7,7 +7,7 @@
  * (量自 docs/image-new/image.png:激活 Tab x752..870 是 #faf9f5 = canvas,
  *  未激活那几张所在处一律是 #e8e4dd = chrome,没有任何中间色块。)
  *
- * ⚠️ 整条落在 `.app-drag` 里(macOS hiddenInset 的自绘标题栏)。**每个可点元素都必须
+ * ⚠️ 整条落在 `.app-drag` 里(两个平台的自绘标题栏)。**每个可点元素都必须
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */

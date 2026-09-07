@@ -504,9 +504,79 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     endpoints: [anth('https://api.routin.ai', true), oa('https://api.routin.ai/v1', true)],
     docsUrl: 'https://api.routin.ai/',
     apiKeyUrl: 'https://routin.ai/dashboard/api-keys',
-    suggestedModels: ['claude-fable-5-1'],
+    /*
+      ★ 顺序有意义:`runtime.ts` 的 seed 按这张表种别名,**第一条是全新安装的
+      `defaultModel`,第二条是 `subagent.model`**。deepseek 那两条排在前面不是偏好,
+      是那两个设置项要指的东西。
+      `claude-fable-5-1` 留在末位 —— 参考图那颗药丸(`brands.ts`、`Thread.tsx` 都引了
+      `RoutinAI / claude-fable-5-1` 这一对)说的是它,删掉那些注释就成了悬空引用。
+    */
+    suggestedModels: ['deepseek-v4-pro', 'deepseek-v4-flash', 'claude-fable-5-1'],
     notes:
       '同一个域名下两种协议的地址不同(Anthropic 不带 /v1,OpenAI 带)——翻「API 格式」时地址会跟着换。',
+    verification: 'probed'
+  },
+  {
+    id: 'routin-plan',
+    name: 'RoutinAI·Plan(订阅制)',
+    category: 'aggregator',
+    recommended: true,
+    subscription: true,
+    /*
+      探针(2026-09-07,真路径 + 同前缀假路径对照,**GET 与 POST 各打一遍**):
+        POST /plan/v1/responses        → 401 {"error":{"type":"unauthorized",…}}         ← OpenAI 信封
+        POST /plan/v1/messages         → 401 {"type":"error","error":{"type":"authentication_error"…}}
+        GET  /plan/v1/models           → 401
+        POST /plan/v1/chat/completions → 404   ← **这条不存在**,所以下面没有 openai-chat
+        POST /plan/v1/nc-decoy-9x      → 404   ← 对照,证明上面不是 catch-all
+
+      ★★ **必须用 POST 探,只 GET 会把这条线整个判死。**
+      上面 `routin` 那段注释从「GET /v1/responses → 426 WebSocket upgrade」推出
+      「那是个同名的 WebSocket 端点」—— 而 `/plan/v1/responses` 的 GET **也**回 426,
+      POST 过去却是标准 OpenAI 401。426 是这个网关对 GET 的统一回法,不是端点性质。
+
+      ★ 即便如此,`/v1` 那条**仍然不给** openai-responses:它 POST 回的是网关自己的
+      信封(`{"code":401,…,"title":"未授权访问"}`),而这里回的是 OpenAI 信封 ——
+      两个不同的后端。按量那条背后有没有真的接着 Responses API,证据不足,不录。
+
+      ★ 两个协议的 base 差一段 `/v1`,还是 `REQUEST_PATH` 那条两族相反的约定:
+      Anthropic 自己补 `/v1/messages`(base 到 `/plan` 为止),OpenAI 族的 `/v1` 在 base 里。
+      两条拼出来的模型列表地址正好都是 `/plan/v1/models`,所以两条都能拉。
+    */
+    endpoints: [
+      resp('https://api.routin.ai/plan/v1', true),
+      anth('https://api.routin.ai/plan', true)
+    ],
+    docsUrl: 'https://api.routin.ai/',
+    apiKeyUrl: 'https://routin.ai/dashboard/api-keys',
+    credentialKind: 'subscription-key',
+    /*
+      ★ 顺序即优先级:`runtime.ts` 的 seed 按下标算别名的 `priority`,而
+      `enabled-models.ts` 拿这家的 `aliases[0]` 当副标题那个「主模型」。
+      所以 `gpt-5.6-sol` 排第一不是审美,是「这条线默认用哪个」的落地方式;
+      `gpt-5.6-terra` 跟在后面是同一个理由的子代理版。
+
+      ★ 注意**这两个设置项本身是全局的**(`settings.defaultModel` /
+      `settings.subagent.model`,见截图里那两个下拉框),按量那条线才是它们的来源
+      (deepseek-v4-pro / -flash)。这里的顺序只决定**这一家在列表里显示哪个模型**,
+      不会去抢那两个全局值 —— 两者容易混,搞反了的表现是用户一打开就在用订阅额度。
+    */
+    suggestedModels: [
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.3-codex-spark',
+      'gpt-5.4',
+      'gpt-5.4-mini',
+      'gpt-5.5',
+      'gpt-5.6-luna',
+      'gpt-6-astra'
+    ],
+    notes:
+      '★ 订阅 key 与按量 key 不通用,地址前缀也不同(/plan/v1 与 /v1)—— 拿按量 key 打这里只会 401。' +
+      '★ 这条线**没有 chat/completions**(实测 404),只有 Responses 与 Anthropic 两种格式,' +
+      '「API 格式」里选不到 OpenAI Chat 是对的,不是漏配。' +
+      '额度按倍率扣:gpt-5.3-codex-spark 0.5x,gpt-5.4 / 5.4-mini / 5.5 / 5.6-sol / 5.6-terra / ' +
+      '5.6-luna 均 1x(gpt-6-astra 的倍率未核实)。',
     verification: 'probed'
   },
   {
@@ -750,6 +820,31 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
  * 另一边不报错,只是从此判断恒为 false。
  */
 export const BUILTIN_PROVIDER_ID = 'routin'
+
+/**
+ * 同一家的订阅线(`/plan/v1`,Codex 系模型走 Responses)。也种,理由同上。
+ *
+ * ★ 它和 `BUILTIN_PROVIDER_ID` 是**两条供应商记录**,不是一条的两种协议 ——
+ * 两边的 key 不通用,地址前缀也不同。合成一条的话用户填了订阅 key,
+ * 按量那半会全部 401。
+ */
+export const BUILTIN_PLAN_PROVIDER_ID = 'routin-plan'
+
+/**
+ * 全新安装会被种进供应商表的那些(`main/runtime.ts` 的 `seedBuiltinUpstream`)。
+ *
+ * ★★ 设置页靠它选删除提示的措辞:内置那条**删了下次启动会回来**,自己加的删了就真没了。
+ * 少一个 id,那条供应商就会显示「删了就真没了」,而它下次启动又出现 ——
+ * 正是 `ProviderPanel` 里那段注释点名要避免的误导,反过来的版本。
+ */
+export const BUILTIN_PROVIDER_IDS: readonly string[] = [
+  BUILTIN_PROVIDER_ID,
+  BUILTIN_PLAN_PROVIDER_ID
+]
+
+export function isBuiltinProvider(id: string): boolean {
+  return BUILTIN_PROVIDER_IDS.includes(id)
+}
 
 /** 按分类取,保持表内顺序 */
 export function presetsByCategory(category: PresetCategory): ProviderPreset[] {

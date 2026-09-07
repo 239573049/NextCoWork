@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { ModelAlias, UpstreamProvider } from '../../../../../../shared/domain/provider'
+import {
+  BUILTIN_PLAN_PROVIDER_ID,
+  BUILTIN_PROVIDER_ID,
+  findPreset
+} from '../../../../../../shared/domain/presets'
 import { avatarInitial, providerEntries } from '../enabled-models'
 
 const prov = (id: string, name = id): UpstreamProvider => ({
@@ -70,6 +75,32 @@ describe('providerEntries', () => {
 
   it('没有供应商时是空数组', () => {
     expect(providerEntries([], [], '')).toEqual([])
+  })
+})
+
+/**
+ * ★★ 内置那两条上游的「主模型」—— 副标题显示谁,由**预设表的 `suggestedModels` 顺序**
+ * 决定(`main/runtime.ts` 的 seed 按下标算 `priority`,这里取 `aliases[0]`)。
+ *
+ * 单独钉一条,是因为这层耦合隔了两个模块、跨了主/渲染进程,而它断掉不会报错:
+ * 有人「顺手」把订阅线的模型列表按字母排一下,左列副标题就从 `gpt-5.6-sol`
+ * 变成 `gpt-5.3-codex-spark` —— 界面照常渲染,只是显示的不再是那条线该用的模型。
+ */
+describe('内置上游的主模型', () => {
+  const primaryOf = (presetId: string): string | null => {
+    const models = findPreset(presetId)?.suggestedModels ?? []
+    const aliases = models.map((m) => alias(m, presetId))
+    return providerEntries([prov(presetId)], aliases, '')[0]?.primaryAlias ?? null
+  }
+
+  it('按量线显示 deepseek-v4-pro,订阅线显示 gpt-5.6-sol', () => {
+    expect(primaryOf(BUILTIN_PROVIDER_ID)).toBe('deepseek-v4-pro')
+    expect(primaryOf(BUILTIN_PLAN_PROVIDER_ID)).toBe('gpt-5.6-sol')
+  })
+
+  /** 两条线各显示各的 —— 混在一起就说明 providerId 归属错了 */
+  it('两条线的主模型不是同一个', () => {
+    expect(primaryOf(BUILTIN_PROVIDER_ID)).not.toBe(primaryOf(BUILTIN_PLAN_PROVIDER_ID))
   })
 })
 

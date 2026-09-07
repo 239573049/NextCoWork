@@ -44,7 +44,11 @@ import {
   demoHost,
   withDemo
 } from '../../kernel/upstream/demo'
-import { BUILTIN_PROVIDER_ID } from '../../../shared/domain/presets'
+import {
+  BUILTIN_PLAN_PROVIDER_ID,
+  BUILTIN_PROVIDER_ID,
+  findPreset
+} from '../../../shared/domain/presets'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import { getRouter, getTools, installHost, resetRuntimeForTest } from '../../runtime'
 import { store } from '../../state/store'
@@ -380,6 +384,188 @@ describe('运行时自播种', () => {
     // defaultModel 必须指向一条**真的存在**的别名,而且是内置上游那家的
     const target = store.listAliases().find((a) => a.alias === store.getSettings().defaultModel)
     expect(target?.providerId).toBe(BUILTIN_PROVIDER_ID)
+  })
+
+  /**
+   * ★★ 订阅线(`/plan/v1`)也是种子数据 —— 用户不该自己去目录里加它。
+   *
+   * 它和按量那条是**两条独立记录**:协议不同(Responses vs Anthropic)、地址前缀不同
+   * (`/plan/v1` vs 裸域名)、key 不通用。合成一条的话用户填了订阅 key,
+   * 按量那半会全部 401,而界面上完全看不出问题。
+   */
+  it('★ 订阅线 routin-plan 也被种进供应商表,且与按量那条互不干扰', async () => {
+    getRouter() // 触发 seed
+    const { store } = await import('../../state/store')
+
+    const pay = store.listProviders().find((p) => p.id === BUILTIN_PROVIDER_ID)
+    const plan = store.listProviders().find((p) => p.id === BUILTIN_PLAN_PROVIDER_ID)
+    expect(plan, '订阅线没被种进去,用户得自己添加').toBeDefined()
+
+    expect(plan?.protocol).toBe('openai-responses')
+    expect(plan?.baseUrl).toBe('https://api.routin.ai/plan/v1')
+    expect(pay?.protocol).toBe('anthropic')
+    expect(pay?.baseUrl).toBe('https://api.routin.ai')
+
+    // 两条各自独立的凭证槽 —— 共用一个 credentialRef 就是「填一个 key 另一条也401」
+    expect(plan?.credentialRef).not.toBe(pay?.credentialRef)
+
+    // 订阅线的别名确实挂在订阅线上,没有串到按量那条
+    const planAliases = store.listAliases().filter((a) => a.providerId === BUILTIN_PLAN_PROVIDER_ID)
+    const suggested = findPreset(BUILTIN_PLAN_PROVIDER_ID)?.suggestedModels ?? []
+    expect(suggested.length).toBeGreaterThan(0)
+    // 比集合不比数组:`listAliases()` 按别名排序,不是按 seed 的插入顺序
+    expect(new Set(planAliases.map((a) => a.alias))).toEqual(new Set(suggested))
+
+    /*
+      ★ 预设表里的顺序靠 `priority` 落地,不靠 `listAliases()` 的返回顺序 ——
+      后者是按名字排的,而 gpt-5.6-luna 排在 gpt-5.6-sol 前面纯属字典序巧合。
+    */
+    for (const [i, model] of suggested.entries()) {
+      expect(planAliases.find((a) => a.alias === model)?.priority, model).toBe(i * 10)
+    }
+
+    /*
+      ★ 订阅线排第一的那个就是它在左列显示的「主模型」(`enabled-models.ts` 取
+      `aliases[0]`)。这里只钉 seed 这一侧的事实 —— 显示那一侧由
+      `enabled-models.test.ts` 接着,两边都不 import 对方。
+    */
+    expect(suggested[0]).toBe('gpt-5.6-sol')
+    expect(suggested[1]).toBe('gpt-5.6-terra')
+  })
+
+  /**
+   * ★★ 订阅线有自己的主模型,但**全局默认只有一个**,而且归按量线。
+   *
+   * 搞反了不会报错:订阅线的 sol/terra 要是爬进了 `settings.defaultModel`,
+   * 用户一打开应用就在烧订阅额度,而界面上什么都看不出来。
+   */
+  it('★ 全局默认归按量线,订阅线的模型一个都不该爬进去', async () => {
+    getRouter()
+    const { store } = await import('../../state/store')
+    const settings = store.getSettings()
+
+    expect(settings.defaultModel).toBe('deepseek-v4-pro')
+    expect(settings.subagent.model).toBe('deepseek-v4-flash')
+
+    const planModels = new Set(findPreset(BUILTIN_PLAN_PROVIDER_ID)?.suggestedModels ?? [])
+    expect(planModels.has(settings.defaultModel), '订阅线抢走了全局默认').toBe(false)
+    expect(planModels.has(settings.subagent.model), '订阅线抢走了子代理默认').toBe(false)
+  })
+
+  /**
+   * ★★ 别名的主键是 `(provider_id, alias)` —— 同一个别名**可以**挂在多家上,
+   * 那正是故障切换的轴(`router.ts` 的候选链)。
+   *
+   * 所以 seed 的判重必须带 providerId。只按名字判的话,一个已经配了 DeepSeek 官方
+   * 的用户会让内置上游**永远拿不到** `deepseek-v4-pro`:`defaultModel` 指着的名字
+   * 确实存在,不报错,只是默认悄悄走了另一家,而内置上游从此不参与这条别名的切换。
+   */
+  it('★ 别名判重带 providerId:别家已有同名别名,不该挡住内置上游种自己那份', async () => {
+    const { store } = await import('../../state/store')
+
+    // 先造一个「用户已经配了 DeepSeek 官方」的局面
+    store.putProvider({
+      id: 'deepseek',
+      name: 'DeepSeek',
+      protocol: 'openai-chat',
+      baseUrl: 'https://api.deepseek.com/v1',
+      credentialRef: 'provider:deepseek',
+      priority: 60,
+      enabled: true
+    })
+    store.putAlias({
+      alias: 'deepseek-v4-pro',
+      providerId: 'deepseek',
+      upstreamModel: 'deepseek-v4-pro',
+      capabilities: { tools: true, vision: false, thinking: true, caching: true },
+      contextWindow: 1_000_000,
+      maxOutputTokens: 64_000
+    })
+
+    getRouter() // 触发 seed
+
+    const owners = store
+      .listAliases()
+      .filter((a) => a.alias === 'deepseek-v4-pro')
+      .map((a) => a.providerId)
+    expect(new Set(owners)).toEqual(new Set(['deepseek', BUILTIN_PROVIDER_ID]))
+
+    // 这个文件的 store 在用例之间是共享的 —— 自己造的东西自己收走
+    store.removeAlias('deepseek', 'deepseek-v4-pro')
+    store.removeProvider('deepseek')
+  })
+
+  /**
+   * ★ 反过来:已经存在的那份**不能被顶掉**。无条件 `putAlias` 会把用户改过的
+   * 上下文长度、显示名、思考档位全部写回种子值,而且悄无声息。
+   *
+   * 拿订阅线的 `gpt-6-astra` 做样本,而不是 `deepseek-v4-pro` —— 后者的元数据
+   * 被上面那条 catalog 断言盯着,在共享 store 里改坏它就成了跨用例的污染。
+   */
+  it('★ 内置上游自己那条别名被用户改过时,seed 不覆盖它', async () => {
+    const { store } = await import('../../state/store')
+    store.putAlias({
+      alias: 'gpt-6-astra',
+      providerId: BUILTIN_PLAN_PROVIDER_ID,
+      upstreamModel: 'gpt-6-astra',
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+      contextWindow: 42_000,
+      maxOutputTokens: 4096
+    })
+
+    getRouter() // 触发 seed
+
+    const mine = store
+      .listAliases()
+      .find((a) => a.alias === 'gpt-6-astra' && a.providerId === BUILTIN_PLAN_PROVIDER_ID)
+    expect(mine?.contextWindow, 'seed 把用户改过的上下文长度顶回去了').toBe(42_000)
+  })
+
+  /**
+   * ★★ 正文和子代理指**两个不同的模型**,而且都必须是真的存在的别名。
+   *
+   * 子代理是被批量拉起的(`subagent.perSessionLimit` 默认 4),拿主力模型跑它们
+   * 既慢又贵。两个设置项指同一个模型不会报错 —— 它只是悄悄贵四倍。
+   *
+   * ★ 顺带守住「别名真的存在」:名字的唯一出处是预设的 `suggestedModels`,
+   * 在 seed 里写第二遍的话,总有一天它们对不上,而症状是设置里指着一条不存在的别名,
+   * 到**下一次发送**才在路由器里炸。
+   */
+  it('★ 全新安装:默认模型 deepseek-v4-pro,子代理 deepseek-v4-flash,两条都真的存在', async () => {
+    getRouter() // 触发 seed
+    const { store } = await import('../../state/store')
+    const settings = store.getSettings()
+
+    expect(settings.defaultModel).toBe('deepseek-v4-pro')
+    expect(settings.subagent.model).toBe('deepseek-v4-flash')
+    expect(settings.subagent.model).not.toBe(settings.defaultModel)
+
+    /*
+      ★ 查别名必须带 providerId —— 主键是 `(provider_id, alias)`,同名别名可以
+      挂在多家上。只按名字 `find` 拿到的是 `listAliases()` 排序里的第一家
+      (它按 provider_id 排),而那家未必是内置上游。
+    */
+    const aliases = store.listAliases()
+    for (const alias of [settings.defaultModel, settings.subagent.model]) {
+      const row = aliases.find((a) => a.alias === alias && a.providerId === BUILTIN_PROVIDER_ID)
+      expect(row, `内置上游上没有 ${alias} 这条别名`).toBeDefined()
+    }
+  })
+
+  /**
+   * ★ 别名的上下文长度从内置 catalog 取,不是手写的常量。
+   *
+   * 以前这里种的是写死的 `200_000` —— 对 deepseek(1M 上下文)差了五倍,
+   * 表现是上下文进度条和「即将超长」的判断全错,且不报错。
+   */
+  it('★ 种出来的别名带着 catalog 的真元数据,不是写死的 200k', async () => {
+    getRouter()
+    const { store } = await import('../../state/store')
+    const pro = store
+      .listAliases()
+      .find((a) => a.alias === 'deepseek-v4-pro' && a.providerId === BUILTIN_PROVIDER_ID)
+    expect(pro?.contextWindow).toBe(1_000_000)
+    expect(pro?.displayName).toBe('DeepSeek V4 Pro')
   })
 
   it('★ 演示上游**不再**被种进供应商表 —— 它是测试夹具,不是用户该看见的一条配置', async () => {

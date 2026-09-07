@@ -2,8 +2,8 @@
  * 供应商列表里那个方块头像。
  *
  * 之前三处(目录卡片 / 启用列表 / 右侧面板抬头)各写了一遍同样的
- * `avatarInitial(p.name)` 方块 —— 里面是一个字母。43 个内置预设摆在
- * 「添加供应商」网格里,就是 43 个灰色字母,而 O 有两家、M 有三家、
+ * `avatarInitial(p.name)` 方块 —— 里面是一个字母。44 个内置预设摆在
+ * 「添加供应商」网格里,就是 44 个灰色字母,而 O 有两家、M 有三家、
  * 「智」有两家:**用户没法一眼认出哪张卡是哪家**,而这正是那个网格的全部作用。
  *
  * 所以这里换成 lobehub 的品牌字形(`ProviderIcon`),**认不出时退回原来那个
@@ -14,7 +14,7 @@
  *
  * ★ 候选顺序是 `[name, id]`,**名字在前**:`gemini-openai` 这个 id 里含着
  * `openai`,先拿 id 匹配就会给 Gemini 挂上 OpenAI 的 logo。
- * `__tests__/preset-brands.test.ts` 用同样的顺序钉死了全部 43 家。
+ * `__tests__/preset-brands.test.ts` 用同样的顺序钉死了全部 44 家。
  */
 import type { ReactNode } from 'react'
 import { ProviderIcon } from '../../../components/brand/ProviderIcon'

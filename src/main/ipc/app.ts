@@ -5,7 +5,9 @@
  * Bootstrap **一次拿全**,而不是让渲染层开局打七八个 invoke —— 那样会出现
  * 「设置到了但工作区还没到」的中间态,每个组件都得写一遍 loading 分支。
  */
-import { app, clipboard, nativeTheme, shell } from 'electron'
+import { app, clipboard, dialog, nativeTheme, shell } from 'electron'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Bootstrap } from '../../shared/domain/bootstrap'
 import { runs } from '../kernel/run-registry'
 import type { ResolvedTheme, ThemePreference } from '../../shared/domain/settings'
@@ -85,6 +87,26 @@ export function setSessionWindowOpener(opener: (workspaceId: string, sessionId: 
 
 export function copyText(text: string): void {
   clipboard.writeText(text)
+}
+
+/**
+ * 另存为。渲染层给的是**文件名建议**,不是路径 —— 落点由用户在系统对话框里定,
+ * 所以这条通道不需要工作区边界校验:能写到哪儿是系统对话框说了算。
+ *
+ * ★ 建议名要过一遍清洗。它来自模型输出(导出时取回复首行当标题),里面出现
+ * `/` 或 `..` 时 `join` 会把默认落点悄悄挪到别的目录 —— 用户在对话框里
+ * 未必看得出来自己正要存到哪。取消返回 null,调用方据此区分「没存」和「存失败」。
+ */
+export async function saveTextFile(req: { defaultName: string; text: string }): Promise<{ path: string } | null> {
+  const safeName = req.defaultName.replace(/[/\\:*?"<>|]/g, '_').slice(0, 120) || 'export.md'
+  const result = await dialog.showSaveDialog({
+    title: '导出为 Markdown',
+    defaultPath: join(app.getPath('downloads'), safeName),
+    filters: [{ name: 'Markdown', extensions: ['md'] }]
+  })
+  if (result.canceled || !result.filePath) return null
+  await writeFile(result.filePath, req.text, 'utf8')
+  return { path: result.filePath }
 }
 
 export function openSessionWindow(req: { workspaceId: string; sessionId: string }): void {

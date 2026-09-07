@@ -150,12 +150,13 @@ const RULES: readonly (readonly [RegExp, Brand | null])[] = [
   [/\bjan\b/i, 'menlo'],
   [/opencode/i, 'opencode'],
   // 内置上游(`BUILTIN_PROVIDER_ID`),字形不在 lobehub 里,是我们自己的一张 webp。
-  // `^routin$` 是为了让**预设 id** 也能命中 ——`ProviderAvatar` 传的是 `[名字, id]`,
-  // 用户把它改名之后就只剩 id 认得出来了。收尾的 `ai\b` 是为了躲开「routing」:
-  // 那个词里 routin 后面接的是 g,配不上 `[\s_-]*ai`。
+  // `^routin(-plan)?$` 是为了让**预设 id** 也能命中 ——`ProviderAvatar` 传的是
+  // `[名字, id]`,用户把它改名之后就只剩 id 认得出来了。`routin-plan` 是订阅制那条
+  // (`/plan/v1`,Codex 系模型),和按量那条**共用同一个 logo** —— 它们是同一家。
+  // 收尾的 `ai\b` 是为了躲开「routing」:那个词里 routin 后面接的是 g,配不上 `[\s_-]*ai`。
   // ★ 排在这里不是顺序需要 —— 上面没有一条规则会命中 RoutinAI。它在聚合商这一簇里,
   // 因为它就是一家聚合商。
-  [/\broutin[\s_-]*ai\b|^routin$/i, 'routin'],
+  [/\broutin[\s_-]*ai\b|^routin(-plan)?$/i, 'routin'],
   [/aihubmix/i, 'aihubmix'],
   [/\b302\.?ai\b/i, 'ai302'],
   [/groq/i, 'groq'],

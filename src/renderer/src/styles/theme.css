@@ -136,6 +136,18 @@
   --radius-card: 10px;
   --radius-pill: 999px;
 
+  /*
+    自绘的三颗窗口按钮(shell/WindowControls.tsx)要占的宽 —— 顶栏用
+    `pr-window-controls` 给它让位。它是**悬浮层**,不占顶栏的流,所以这里必须
+    是个内边距,靠 flex 挤不出来。
+
+    128 = 3 × 38(按钮)+ 2 × 4(按钮间的 gap-1)+ 8(离窗口右边缘)
+        + 6(和左邻那颗面板开关的缝,同外层 Tab 条的 gap-1.5)
+    改 WindowControls 的按钮尺寸就得同步改这个数,否则两边会撞上或空一块。
+    ★ 只在非 macOS 挂这个类(那边右上角什么都没有,留 128px 就是个空洞)。
+  */
+  --spacing-window-controls: 128px;
+
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
@@ -243,8 +255,9 @@ body {
   opacity: 0.55;
 }
 
-/* macOS titleBarStyle: 'hiddenInset' —— 自绘标题栏区要显式声明可拖拽,
-   其中的按钮再各自声明 no-drag,否则点不动。
+/* 自绘标题栏区要显式声明可拖拽,其中的按钮再各自声明 no-drag,否则点不动。
+   两个平台都有这样一条:macOS 是 titleBarStyle: 'hiddenInset',Windows/Linux 是
+   'hidden' + 自绘的三颗窗口按钮(见 main/window/title-bar.ts)。
    ★ 外层 Tab 条整条落在这个区域里,每个 Tab 都必须 .app-no-drag,
      否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。 */
 .app-drag {
@@ -252,20 +265,6 @@ body {
 }
 .app-no-drag {
   -webkit-app-region: no-drag;
-}
-
-/*
-  Windows/Linux 的 Window Controls Overlay —— 系统的最小化/最大化/关闭三颗按钮
-  画在窗口右上角(见 main/window/title-bar.ts)。它是**原生区域**:盖在它下面的
-  DOM 既收不到 pointer 事件,也不受 .app-no-drag 影响 —— 唯一的办法是让出宽度。
-
-  ★ 宽度**问 WCO 自己要**,不按平台猜。`env(titlebar-area-width)` 是可拖拽区的宽,
-    窗口宽减掉它就是那三颗按钮占的量(RTL 下按钮在左边,`titlebar-area-x` 这一项
-    才是对的那个补正)。macOS 没有 WCO,两个 env() 都落到兜底值,整条 calc 恒为 0
-    —— 所以用到它的地方一律不需要平台判断。
-*/
-:root {
-  --window-controls-w: calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px));
 }
 
 /*
@@ -385,11 +384,15 @@ body {
 }
 
 /*
-  ── z 轴一共只有三层,写在这里免得下一个人再发明一层 ──
+  ── z 轴一共只有四层,写在这里免得下一个人再发明一层 ──
 
     0    正常内容流(面板、Tab 条、侧边栏 —— 全靠底色差分层,不用 z)
     50   **面板内部**的浮层:Menu / 下拉。它相对自己的定位祖先浮起来
-    100  模态浮层(设置)。它自己建立层叠上下文,所以它**内部**的 z-50 菜单
-         天然在它的遮罩之上 —— 不要为了让菜单显示出来去把 Menu 提到 z-200,
+    100  模态浮层(设置、Dialog)。它自己建立层叠上下文,所以它**内部**的 z-50 菜单
+         天然在它的遮罩之上 —— 不要为了让菜单显示出来去把 Menu 提到 100 以上,
          那只会让菜单反过来盖住别的模态。
+    200  自绘的三颗窗口按钮(shell/WindowControls.tsx,仅 Windows/Linux)。
+         **只有它可以压住模态**,而且必须压住:macOS 的红绿灯是原生层、模态开着
+         照样能点,这一档就是为了让另外两个平台不比它差 —— 否则设置面板一开
+         就没法最小化/关窗。别往这一档里放第二样东西。
 */

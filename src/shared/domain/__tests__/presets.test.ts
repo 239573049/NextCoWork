@@ -84,6 +84,7 @@ describe('预设表 · 主键与完整性', () => {
     ['kimi-coding', 'subscription-key'],
     ['zhipu-coding', 'subscription-key'],
     ['zai-coding', 'subscription-key'],
+    ['routin-plan', 'subscription-key'],
     ['sensenova', 'access-key'],
     ['spark', 'api-password']
   ] as const)('%s 使用准确的凭证称呼', (id, kind) => {
@@ -187,12 +188,61 @@ describe('预设表 × joinUpstreamUrl:拼出来的 URL 没有畸形', () => {
     ['openrouter', 'anthropic', 'https://openrouter.ai/api/v1/messages'],
     ['kimi-coding', 'anthropic', 'https://api.kimi.com/coding/v1/messages'],
     ['kimi-coding', 'openai-chat', 'https://api.kimi.com/coding/v1/chat/completions'],
+    ['routin-plan', 'openai-responses', 'https://api.routin.ai/plan/v1/responses'],
+    ['routin-plan', 'anthropic', 'https://api.routin.ai/plan/v1/messages'],
     ['xai', 'openai-responses', 'https://api.x.ai/v1/responses'],
     ['ollama', 'anthropic', 'http://127.0.0.1:11434/v1/messages']
   ] as const)('%s / %s', (id, protocol, expected) => {
     const e = endpointFor(findPreset(id)!, protocol)
     expect(e, `${id} 没有 ${protocol} 端点`).not.toBeNull()
     expect(previewUrl(e!.baseUrl, protocol)).toBe(expected)
+  })
+
+  /**
+   * ★★ RoutinAI 的两条线**是两家**,合并它们会静默打错服务。
+   *
+   * 按量走 `api.routin.ai` 裸域名 + `/v1`,订阅(Plan)走 `/plan` + `/plan/v1`;
+   * 两边的 401 信封都不一样(订阅是标准 OpenAI/Anthropic 信封,按量是网关自己的
+   * `{"code":401,…,"title":"未授权访问"}`)。真正会咬人的是这两条:
+   *
+   * - **订阅线没有 chat/completions**(实测 404)。哪天有人「顺手补齐三种协议」,
+   *   用户在「API 格式」里翻到 OpenAI Chat 会得到一个必然 404 的配置。
+   * - **按量线没有 openai-responses**,理由见 `presets.ts` 里那段注释 —— 证据不足,
+   *   不是漏写。加上它同样是个永远连不上的开关。
+   *
+   * 两条都不报错,都只表现为「表单看着正常、请求失败」。
+   */
+  it('★ RoutinAI 按量与订阅是两条独立的线,协议集合不能互相污染', () => {
+    const pay = findPreset('routin')!
+    const plan = findPreset('routin-plan')!
+
+    expect(plan.endpoints.map((e) => e.protocol).sort()).toEqual(['anthropic', 'openai-responses'])
+    expect(pay.endpoints.map((e) => e.protocol).sort()).toEqual(['anthropic', 'openai-chat'])
+
+    // 两家的 baseUrl 没有任何重叠 —— 订阅 key 打按量地址(或反过来)只会 401
+    const payBases = new Set(pay.endpoints.map((e) => e.baseUrl))
+    for (const e of plan.endpoints) expect(payBases.has(e.baseUrl), e.baseUrl).toBe(false)
+
+    // 只有订阅那条是订阅制,按量那条不是 —— 它还关系到费用统计(方案 §5.3)
+    expect(plan.subscription).toBe(true)
+    expect(pay.subscription).toBeUndefined()
+  })
+
+  /**
+   * ★ 两个协议的 base 差一段 `/v1`,但模型列表要拼到**同一个** `/plan/v1/models`
+   * (实测 401,端点存在)。这条对的是 `model-list.ts` 的 `LIST_PATH`:
+   * Anthropic 是 `/v1/models`,OpenAI 族是 `/models`。哪天有人「统一」成一种,
+   * 两条里必然有一条拼歪,而症状是「拉取模型列表」按钮点下去 404。
+   */
+  it('★ RoutinAI Plan:两种协议拼出同一个模型列表地址', () => {
+    const plan = findPreset('routin-plan')!
+    const resp = endpointFor(plan, 'openai-responses')!
+    const anth = endpointFor(plan, 'anthropic')!
+    expect(joinUpstreamUrl(resp.baseUrl, '/models')).toBe('https://api.routin.ai/plan/v1/models')
+    expect(joinUpstreamUrl(anth.baseUrl, '/v1/models')).toBe('https://api.routin.ai/plan/v1/models')
+    // 两条都声称能拉,上面那两个地址就是它们的依据
+    expect(resp.supportsModelList).toBe(true)
+    expect(anth.supportsModelList).toBe(true)
   })
 
   /**

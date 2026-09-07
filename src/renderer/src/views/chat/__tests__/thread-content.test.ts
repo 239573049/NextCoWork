@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage } from '../../../../../shared/agent/message'
-import { assistantSegments, isAssistantTextBlock, threadRows } from '../thread-content'
+import { assistantSegments, assistantText, isAssistantTextBlock, threadRows } from '../thread-content'
 
 describe('thread content grouping', () => {
   it('joins consecutive assistant tool messages across hidden tool receipts', () => {
@@ -86,5 +86,41 @@ describe('thread content grouping', () => {
     expect(row?.kind).toBe('assistant')
     if (row?.kind !== 'assistant') return
     expect(isAssistantTextBlock(row.blocks[0]!)).toBe(false)
+  })
+})
+
+describe('assistant turn plain text', () => {
+  it('copies prose only, leaving thinking and tool calls out', () => {
+    const row = threadRows([
+      userMessage('u', [{ type: 'text', text: 'Inspect' }], 1),
+      assistantMessage('a', [
+        { type: 'thinking', text: 'Let me look around first' },
+        { type: 'text', text: 'Checked the config.' },
+        { type: 'tool_call', callId: 'read', name: 'Read', input: {} }
+      ], 2),
+      toolResultMessage('r', [{ type: 'tool_result', callId: 'read', output: { content: 'ok' }, isError: false }], 3),
+      assistantMessage('a2', [{ type: 'text', text: 'It is fine.' }], 4)
+    ], [], false)[1]
+    expect(row?.kind).toBe('assistant')
+    if (row?.kind !== 'assistant') return
+    expect(assistantText(row.blocks)).toBe('Checked the config.\n\nIt is fine.')
+  })
+
+  it('reads a still-streaming reply', () => {
+    const row = threadRows([userMessage('u', [{ type: 'text', text: 'Hi' }], 1)],
+      [{ index: 0, kind: 'text', text: 'Half a sen' }], true)[1]
+    expect(row?.kind).toBe('assistant')
+    if (row?.kind !== 'assistant') return
+    expect(assistantText(row.blocks)).toBe('Half a sen')
+  })
+
+  it('is empty for a turn that only ran tools', () => {
+    const row = threadRows([
+      userMessage('u', [{ type: 'text', text: 'Run it' }], 1),
+      assistantMessage('a', [{ type: 'tool_call', callId: 'bash', name: 'Bash', input: {} }], 2)
+    ], [], false)[1]
+    expect(row?.kind).toBe('assistant')
+    if (row?.kind !== 'assistant') return
+    expect(assistantText(row.blocks)).toBe('')
   })
 })

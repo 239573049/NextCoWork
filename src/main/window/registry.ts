@@ -6,6 +6,7 @@
  *
  * 规则在这里是**类型级**的,不是约定:
  * - `emitToTopic` 只接受 TargetedEventChannel(run / 终端流)
+ * - `emitTo`      也接受它 —— 窗口自身状态(最大化)是「一个窗口一份」,同样不能广播
  * - `emitToAll`   只接受 GlobalEventChannel(设置、主题、工作区列表这类真·全局变更)
  * 想拿 emitToAll 推 agent:event,编译期就过不去。
  */
@@ -13,8 +14,16 @@ import type { WebContents } from 'electron'
 import type { EventChannel, IpcEventMap } from '../../shared/ipc/contract'
 import type { WindowKind } from '../../shared/domain/tab'
 
-/** 必须按订阅推送的频道:一个窗口只该收到它自己在看的那个 run / 终端 */
-export type TargetedEventChannel = 'agent:event' | 'terminal:data' | 'terminal:exit'
+/**
+ * 必须定向推送的频道:一个窗口只该收到它自己在看的那个 run / 终端,
+ * 以及**它自己的**窗口状态(`window:maximized` —— 主窗最大化了,
+ * ⌥Space 快捷窗的还原按钮不该跟着换字形)。
+ */
+export type TargetedEventChannel =
+  | 'agent:event'
+  | 'terminal:data'
+  | 'terminal:exit'
+  | 'window:maximized'
 /** 真·全局状态变更,所有窗口都该知道 */
 export type GlobalEventChannel = Exclude<EventChannel, TargetedEventChannel>
 

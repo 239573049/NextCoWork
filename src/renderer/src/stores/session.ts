@@ -12,7 +12,7 @@
  */
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { AgentEvent } from '../../../shared/agent/event'
-import { userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
+import { isToolResultOnly, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions } from '../../../shared/agent/run-request'
 import {
   applyEvents,
@@ -80,6 +80,8 @@ export interface SessionState {
   promoteInput: (id: string) => void
   editInput: (id: string, text: string) => void
   editMessage: (id: string, text: string, continueRun: boolean, fallbackOptions: SendOptions) => Promise<void>
+  /** 删掉一整轮问答(user 消息 + 它引出的全部回复与工具回执)。 */
+  deleteTurn: (userMessageId: string) => Promise<void>
   dropInput: (id: string) => void
   /** 「⋯ → 撤回到输入框」:出队并回填草稿 */
   moveInputToDraft: (id: string) => void
@@ -275,6 +277,43 @@ function createSessionStore(sessionId: string): SessionStore {
         const opts = s.lastOptions ?? fallbackOptions
         await get().send(text, opts, parts)
       }
+    },
+
+    /**
+     * 删掉一整轮。
+     *
+     * ★ **删除的单位是「跨度」,不是「一条消息」。** 一轮问答在存储里是
+     * `user` → `assistant`(含 tool_call)→ `user`(其实是 tool_result 回执)
+     * → `assistant` … 这样一长串。只删可见的那两条,留下来的 tool_result
+     * 会失去与之配对的 tool_call —— 那对 Anthropic 形状是**非法请求**,
+     * 下一次发消息才会炸,而那时早已看不出是这次删除干的。
+     *
+     * 所以跨度从这条 user 消息起,一直吃到**下一条可见的 user 消息之前**。
+     * `isToolResultOnly` 正是「可见」的判据,与 Thread 的过滤同源。
+     */
+    async deleteTurn(userMessageId) {
+      const s = get()
+      if (s.activeRunId !== null) return
+      const messages = s.transcript.messages
+      const start = messages.findIndex((m) => m.id === userMessageId && m.role === 'user')
+      if (start < 0) return
+      let end = start + 1
+      while (end < messages.length) {
+        const m = messages[end]
+        if (m !== undefined && m.role === 'user' && !isToolResultOnly(m)) break
+        end += 1
+      }
+      const next = [...messages.slice(0, start), ...messages.slice(end)]
+      await replaceHistory(sessionId, next)
+      // 删到尾巴时,残留的 usage/error 说的是一个已经不存在的回合。
+      const trailing = end >= messages.length
+      set((state) => ({
+        transcript: {
+          ...state.transcript,
+          messages: next,
+          ...(trailing ? { error: undefined, usage: undefined, runStartedAt: undefined, runEndedAt: undefined } : {})
+        }
+      }))
     },
 
     dropInput(id) {

@@ -47,7 +47,13 @@ import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
-import { BUILTIN_PROVIDER_ID, endpointFor, findPreset } from '../shared/domain/presets'
+import {
+  BUILTIN_PLAN_PROVIDER_ID,
+  BUILTIN_PROVIDER_ID,
+  endpointFor,
+  findPreset
+} from '../shared/domain/presets'
+import type { ModelAlias, UpstreamProtocol } from '../shared/domain/provider'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
@@ -151,29 +157,42 @@ const providerConfig: ProviderConfigSource = {
 function seed(): void {
   if (seeded) return
   seeded = true
-  const builtinAlias = seedBuiltinUpstream()
+  seedBuiltinUpstream()
 
   /**
-   * 没配过模型 = 全新安装,指向内置上游那条别名。
+   * 没配过 = 全新安装,指向内置上游的别名。**两个设置项指两个不同的模型:**
+   * 正文用 `deepseek-v4-pro`,子代理用 `deepseek-v4-flash` —— 子代理是被批量拉起的
+   * (`subagent.perSessionLimit` 默认 4),拿主力模型跑它们既慢又贵。
    *
-   * ★ 这条别名**没有密钥**(见 `seedBuiltinUpstream`),所以第一次发送会得到一个
+   * ★ 名字不在这里写死,从预设的 `suggestedModels` 里按位置取 ——
+   * 那张表是这两个模型唯一的出处,写第二遍就会有一天它们对不上,
+   * 而症状是 `defaultModel` 指着一条**不存在的别名**:不报错,下一次发送才在路由器里炸。
+   *
+   * ★ 这两条别名**都没有密钥**(见 `seedBuiltinUpstream`),所以第一次发送会得到一个
    * 鉴权错误而不是一段回答 —— 这是拿掉演示上游换来的代价,是清楚的:
    * 一个「填 key」的提示,比一条地址写着 `demo.invalid` 的假供应商更好解释。
    *
    * 常量留在 main 侧而不是写进 `DEFAULT_SETTINGS`:`src/shared/` 不能
    * 反向 import `src/main/`,而上游是 main 的东西。
    */
-  if (builtinAlias !== null && store.getSettings().defaultModel === '') {
-    store.updateSettings({ defaultModel: builtinAlias })
+  const builtin = findPreset(BUILTIN_PROVIDER_ID)?.suggestedModels ?? []
+  const settings = store.getSettings()
+  const [defaultModel, subagentModel] = [builtin[0], builtin[1]]
+
+  if (defaultModel !== undefined && settings.defaultModel === '') {
+    store.updateSettings({ defaultModel })
+  }
+  if (subagentModel !== undefined && settings.subagent.model === '') {
+    store.updateSettings({ subagent: { model: subagentModel } })
   }
 
   seedDefaultWorkspace()
 }
 
 /**
- * 内置上游 RoutinAI(`https://api.routin.ai`)。**全新安装唯一被种进供应商表的一条。**
+ * 内置上游 RoutinAI —— **全新安装被种进供应商表的那两条。**
  *
- * ★★ **它和演示上游是两个东西,而且现在只种它一个。**
+ * ★★ **它们和演示上游是两个东西。**
  * 演示上游(`demo.invalid`)是**假网络**:`withDemoUpstream` 按主机名把它的请求
  * 截下来喂罐头 SSE。那套机器整个还在(见上面 `seed` 的文件头),只是不再替用户
  * 建好那条配置。内置上游是**真网络**,要真 key。
@@ -185,55 +204,105 @@ function seed(): void {
  * **每一个发往 api.routin.ai 的真请求都会收到罐头假回复**,而且看起来完全正常 ——
  * 正是 demo.ts 文件头那句「dev 里一切正常,因为根本没有请求出去过」的最坏版本。
  *
- * 地址从预设表取,不在这里写第二遍:两处各写一份的话,改了预设而没改这里,
+ * ★★ **两条是两条,不是一条的两种协议。** 按量走 `api.routin.ai` + Anthropic,
+ * 订阅(Plan)走 `api.routin.ai/plan/v1` + Responses。两边的 key 不通用 ——
+ * 合成一条记录再让用户翻「API 格式」开关,填了哪种 key 另一半就全 401。
+ *
+ * 地址和模型都从预设表取,不在这里写第二遍:两处各写一份的话,改了预设而没改这里,
  * 内置上游会停在一个旧地址上,而界面显示的是预设那条。
  *
  * ★ 不种密钥。演示上游有一个常量假 key(走的是 safeStorage 同一条取值路径),
  * 这里**没有** —— 往一个真服务发 `sk-demo-not-a-real-key` 只会换回一个 401,
  * 而那句「未授权访问」会让用户以为是自己填错了。没有 key 就显示「未配置」。
  */
-function seedBuiltinUpstream(): string | null {
-  const preset = findPreset(BUILTIN_PROVIDER_ID)
-  if (preset === null) return null
-  const endpoint = endpointFor(preset, 'anthropic')
-  if (endpoint === null) return null
+const BUILTIN_UPSTREAMS: readonly {
+  presetId: string
+  protocol: UpstreamProtocol
+  priority: number
+}[] = [
+  // 50 / 51:都让位给用户自己配的(预设建出来是 `PRESET_PRIORITY` 60)。
+  // 手工建的演示上游仍是 100 —— 全表最低,谁都排在它前面
+  { presetId: BUILTIN_PROVIDER_ID, protocol: 'anthropic', priority: 50 },
+  { presetId: BUILTIN_PLAN_PROVIDER_ID, protocol: 'openai-responses', priority: 51 }
+]
 
-  // Seeding runs once per process, including after a database restart. Never
-  // overwrite an existing provider: doing so would erase protocolOptions
-  // (including the user's Anthropic cache TTL), a protocol switch, or an
-  // explicit disabled state. A deleted built-in provider is still recreated.
-  const existing = store.listProviders().find((p) => p.id === BUILTIN_PROVIDER_ID)
-  if (existing === undefined) {
-    store.putProvider({
-      id: BUILTIN_PROVIDER_ID,
-      name: preset.name,
-      protocol: endpoint.protocol,
-      baseUrl: endpoint.baseUrl,
-      credentialRef: `provider:${BUILTIN_PROVIDER_ID}`,
-      // 50:让位给用户自己配的(预设建出来是 `PRESET_PRIORITY` 60)。
-      // 手工建的演示上游仍是 100 —— 全表最低,谁都排在它前面
-      priority: 50,
-      enabled: true
+/**
+ * 预设里的 `suggestedModels` → 一条可用的别名(`alias === upstreamModel`)。
+ *
+ * ★ 元数据**从内置 catalog 取,不在这里手写**。以前这里写死
+ * `200_000 / 64_000 + 四个 true`,而那串数字对 `claude-fable-5-1` 都不准,
+ * 对 deepseek(1M 上下文)差了五倍 —— 表现是上下文条和「即将超长」的判断全是错的,
+ * 且不报错。catalog 里查不到的(比如 `gpt-5.3-codex-spark`,订阅线独有)才退回保守值。
+ */
+function builtinAlias(providerId: string, model: string, index: number): ModelAlias {
+  const known = findBuiltinModel(model)
+  return {
+    alias: model,
+    providerId,
+    upstreamModel: model,
+    // 表内顺序即优先级 —— 预设里 deepseek 排在前面是因为设置项要指它们
+    priority: index * 10,
+    capabilities: known?.capabilities ?? {
+      tools: true,
+      vision: false,
+      thinking: true,
+      caching: true
+    },
+    contextWindow: known?.contextWindow ?? 200_000,
+    maxOutputTokens: known?.maxOutputTokens ?? 64_000,
+    ...(known === undefined
+      ? {}
+      : {
+          displayName: known.displayName,
+          modality: known.modality,
+          thinkingConfig: known.thinkingConfig
+        })
+  }
+}
+
+function seedBuiltinUpstream(): void {
+  for (const spec of BUILTIN_UPSTREAMS) {
+    const preset = findPreset(spec.presetId)
+    if (preset === null) continue
+    const endpoint = endpointFor(preset, spec.protocol)
+    if (endpoint === null) continue
+
+    // Seeding runs once per process, including after a database restart. Never
+    // overwrite an existing provider: doing so would erase protocolOptions
+    // (including the user's Anthropic cache TTL), a protocol switch, or an
+    // explicit disabled state. A deleted built-in provider is still recreated.
+    const existing = store.listProviders().find((p) => p.id === preset.id)
+    if (existing === undefined) {
+      store.putProvider({
+        id: preset.id,
+        name: preset.name,
+        protocol: endpoint.protocol,
+        baseUrl: endpoint.baseUrl,
+        credentialRef: `provider:${preset.id}`,
+        priority: spec.priority,
+        enabled: true
+      })
+    }
+
+    /*
+      ★ 别名也按「不存在才种」,和上面那条供应商同一个理由 ——
+      每次启动无条件 `putAlias` 会把用户改过的上下文长度、显示名、思考档位
+      全部顶回种子值,而且悄无声息。
+
+      ★★ **判重必须带 providerId。** 别名的主键是 `(provider_id, alias)`
+      (`repo.ts` 的 `ON CONFLICT`),同一个别名**可以**挂在多家上 ——
+      那正是故障切换的轴(`router.ts` 的候选链、`enabled-models.ts` 的 `isDefault`
+      都建立在「同一个别名、多个供应商」上)。
+      只按名字判重的话:用户已经配了 DeepSeek 官方那家、上面有 `deepseek-v4-pro`,
+      内置上游就**永远拿不到**这条别名 —— 而 `defaultModel` 指着的那个名字确实存在,
+      于是不报错,只是默认走了另一家,且内置上游从此不参与这条别名的故障切换。
+    */
+    const seeded = new Set(store.listAliases().map((a) => `${a.providerId} ${a.alias}`))
+    preset.suggestedModels.forEach((model, i) => {
+      if (seeded.has(`${preset.id} ${model}`)) return
+      store.putAlias(builtinAlias(preset.id, model, i))
     })
   }
-
-  /**
-   * ★ 别名只种预设里 `suggestedModels` 的第一条,而且 `alias === upstreamModel`。
-   * 参考图那颗药丸写的就是 `RoutinAI / claude-fable-5-1`(`brands.ts:80`、
-   * `Thread.tsx:27` 都引了这一对),所以这不是编的。真实的模型全集要
-   * `GET /v1/models`,那个端点 401 —— 没 key 拉不到,也就不该在这里猜。
-   */
-  const first = preset.suggestedModels[0]
-  if (first === undefined) return null
-  store.putAlias({
-    alias: first,
-    providerId: BUILTIN_PROVIDER_ID,
-    upstreamModel: first,
-    capabilities: { tools: true, vision: true, thinking: true, caching: true },
-    contextWindow: 200_000,
-    maxOutputTokens: 64_000
-  })
-  return first
 }
 
 /**

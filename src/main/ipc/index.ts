@@ -29,9 +29,9 @@ import {
   store
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
-import { applyTitleBarColors } from '../window/title-bar'
+import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
-import { copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge } from './app'
+import { copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
 import {
   listSessionAttachments,
   pickAttachments,
@@ -157,6 +157,7 @@ const handlers: HandlerMap = {
   },
   'app:openExternal': ({ url }) => openExternal(url),
   'app:copyText': ({ text }) => copyText(text),
+  'app:saveTextFile': (req) => saveTextFile(req),
   'app:openSessionWindow': (req) => openSessionWindow(req),
   'settings:get': () => getSettings(),
   'settings:update': (patch) => updateSettings(patch),
@@ -398,11 +399,14 @@ export function flushPendingPersists(onlyKey?: string): void {
 const sendHandlers: SendHandlerMap = {
   'window:ready': ({ kind }, ctx) => {
     windows.markReady(ctx.sender, kind)
+    // 自绘的中间那颗按钮首帧就得画对字形。这一条**同步**回推,而渲染层那个订阅块
+    // 里所有 on(...) 都排在 announceReady() 之前(App.tsx),所以它不会落进空窗。
+    pushMaximized(ctx.sender)
     // 握手第一条腿(协议 §7)。一行日志,但它是「渲染层真的跑起来了」
     // 在主进程侧唯一的可观测证据 —— 渲染层的 console 不进这个 stdout。
     console.log(`[ipc] 窗口就绪 · kind=${kind}`)
   },
-  'window:titleBarOverlay': (colors, ctx) => applyTitleBarColors(ctx.sender, colors),
+  'window:control': ({ action }, ctx) => applyWindowControl(ctx.sender, action),
   'tabs:persistOuter': ({ kind, state }) => persistDebounced(outerTabKey(kind), state),
   'tabs:persistInner': ({ workspaceId, state }) =>
     persistDebounced(innerTabKey(workspaceId), state),

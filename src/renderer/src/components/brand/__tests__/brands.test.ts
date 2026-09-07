@@ -165,6 +165,11 @@ describe('resolveBrand', () => {
       expect(resolveBrand('routin-ai')).toBe('routin')
       // 光秃秃的预设 id 也要认得 —— 用户把它改名之后就只剩这个
       expect(resolveBrand('routin')).toBe('routin')
+      // 订阅制那条(/plan/v1)是同一家,同一张 webp
+      expect(resolveBrand('RoutinAI·Plan(订阅制)')).toBe('routin')
+      expect(resolveBrand('routin-plan')).toBe('routin')
+      // ★ 但别把 `^routin(-plan)?$` 放宽成前缀匹配 —— 那样会认下任何 routin- 开头的名字
+      expect(resolveBrand('routin-gateway')).toBeNull()
     })
   })
 

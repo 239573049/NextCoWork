@@ -6,18 +6,7 @@
  */
 import type { ImageTheme } from '../../../shared/domain/theme'
 import type { ImportedImage } from '../../../shared/ipc/contract'
-import { invoke, send } from './ipc'
-
-/**
- * 把标题栏那三颗系统按钮(Windows/Linux 的 Window Controls Overlay)染成当前配色。
- *
- * ★ **每次 `applyTheme` 落地后都要跟着推一次。** 主进程只在开窗时按 `colorTheme`
- * 算了一个首帧值 —— 它算不到图片主题(那张表只在这一侧)。macOS 上主进程会短路,
- * 所以这里不做平台判断。
- */
-export function setTitleBarOverlay(colors: { color: string; symbolColor: string }): void {
-  send('window:titleBarOverlay', colors)
-}
+import { invoke } from './ipc'
 
 /** 主进程弹文件选择框;渲染层永不指定路径(方案 §9)。取消时返回 null。 */
 export function importImage(): Promise<ImportedImage | null> {

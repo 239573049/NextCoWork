@@ -18,7 +18,7 @@ import { initRuntime, shutdownMcp, shutdownSessionTitles } from './runtime'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
-import { titleBarOptions } from './window/title-bar'
+import { titleBarOptions, watchMaximized } from './window/title-bar'
 import { setSessionWindowOpener } from './ipc/app'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,6 +29,13 @@ const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 }
+
+// 标题栏关闭按钮不再等于退出进程 —— 只隐藏窗口,真正退出只能走托盘的
+// 「退出 NextCoWork」(或系统层面的 Cmd+Q/kill)。这两条路径都会先触发
+// `before-quit`,所以在那里把这个标记置 true,窗口的 `close` 处理器
+// 才放行真正的销毁;不然每个窗口都会在 `before-quit` 之后各自 preventDefault
+// 一次,进程永远退不掉。
+let isQuitting = false
 
 /**
  * 数据根 —— userData、SQLite 主库、附件、skills/agents 文件树全部从这里派生。
@@ -105,8 +112,8 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
     backgroundColor: '#1c1b19',
     // Windows/Linux 的任务栏与窗口图标(macOS 忽略,那边走下面的 app.dock.setIcon)
     icon: nativeImage.createFromPath(appIconPath),
-    // macOS:红绿灯嵌进侧边栏(方案 §8)。Windows/Linux:自绘标题栏 + 系统按钮
-    // 画在 overlay 里 —— 两边的取舍写在 window/title-bar.ts 的文件头。
+    // macOS:红绿灯嵌进侧边栏(方案 §8)。Windows/Linux:只去掉系统标题栏,
+    // 三颗按钮由渲染层自绘 —— 两边的取舍写在 window/title-bar.ts 的文件头。
     ...titleBarOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -123,6 +130,14 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
   })
 
   win.on('ready-to-show', () => win.show())
+
+  // 关闭按钮只隐藏,不销毁窗口——保留页面状态(当前会话/滚动位置/未保存的输入),
+  // 靠托盘图标唤回。真正退出时 `isQuitting` 已经在 `before-quit` 里置位,这里放行。
+  win.on('close', (event) => {
+    if (isQuitting) return
+    event.preventDefault()
+    win.hide()
+  })
 
   // 任何 window.open / target=_blank 一律不在应用内开新窗口,交给系统浏览器。
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -175,6 +190,10 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
   // 先登记再加载:渲染层的 window:ready 一到就要能查到 kind。
   // 登记晚了,markReady 会走 of() 的兜底分支,kind 判断不准。
   windows.register(win.webContents, 'main')
+
+  // 自绘的最大化/还原按钮要跟着窗口的**真实**状态走 —— 用户也可能拖窗口边缘、
+  // 双击 Tab 条、按 Win+↑。挂在 register 之后:push 走的就是 registry。
+  watchMaximized(win)
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     const hash = sessionRoute === undefined ? '' : `#session=${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
@@ -320,12 +339,12 @@ void app.whenReady().then(() => {
   // 菜单栏托盘。放在建窗之后:它的「显示窗口」要能拿到已经存在的那个窗口。
   initTray(showMainWindow)
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
-  })
+  // dock 图标点击也走同一套「唤回」逻辑——窗口关闭后是隐藏不是销毁,
+  // 所以这里几乎不会撞见 `length === 0` 的分支,但保留它兜底手动 destroy() 的情况。
+  app.on('activate', showMainWindow)
 })
 
-/** 从托盘唤起:已有窗口就还原并聚焦,一个都没有(mac 关窗不退出)就新建一个。 */
+/** 从托盘/dock/第二实例唤起:已有窗口就还原、显示并聚焦,一个都没有就新建一个。 */
 function showMainWindow(): void {
   const [win] = BrowserWindow.getAllWindows()
   if (win) {
@@ -337,13 +356,9 @@ function showMainWindow(): void {
   }
 }
 
-// 第二个实例被拉起时,聚焦已有窗口而不是新开一个。
+// 第二个实例被拉起时,唤回已有窗口(可能正隐藏在托盘里)而不是新开一个。
 app.on('second-instance', () => {
-  const [win] = BrowserWindow.getAllWindows()
-  if (win) {
-    if (win.isMinimized()) win.restore()
-    win.focus()
-  }
+  showMainWindow()
 })
 
 app.on('window-all-closed', () => {
@@ -354,6 +369,7 @@ app.on('window-all-closed', () => {
 // 用户最后一次拖出来的顺序就丢了 —— 而那正是他最可能记得的一次操作。
 // 顺带停掉所有在跑的 run:它们的定时器/上游流会拖住退出。
 app.on('before-quit', () => {
+  isQuitting = true
   destroyTray()
   flushPendingPersists()
   shutdownRuns()

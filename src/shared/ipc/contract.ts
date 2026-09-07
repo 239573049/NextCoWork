@@ -153,6 +153,11 @@ export interface IpcInvokeMap {
   'app:getBootstrap': { req: void; res: Bootstrap }
   'app:openExternal': { req: { url: string }; res: void }
   'app:copyText': { req: { text: string }; res: void }
+  /**
+   * 存一段文本到用户挑的位置。路径由主进程的 showSaveDialog 产出 ——
+   * 渲染层只给**文件名建议**,永不指定任意路径(方案 §9)。取消时返回 null。
+   */
+  'app:saveTextFile': { req: { defaultName: string; text: string }; res: { path: string } | null }
   'app:openSessionWindow': { req: { workspaceId: string; sessionId: string }; res: void }
 
   // ── 设置 ──
@@ -429,16 +434,17 @@ export interface IpcSendMap {
   'window:ready': { kind: WindowKind }
 
   /**
-   * Windows/Linux 自绘标题栏上那三颗系统按钮(Window Controls Overlay)的配色。
+   * Windows/Linux 自绘的最小化 / 最大化 / 关闭。三颗按钮画在渲染层
+   * (`shell/WindowControls.tsx`),这里只把动作递给主进程。
    *
-   * ★ **方向是渲染 → 主,不是反过来。** 整套 token 由 `tokensOf` 现算,而它三路
-   * 输入里的图片主题只存在于渲染层那张异步拉来的表 —— 主进程算不全。所以每次
-   * `applyTheme` 落地后顺手推一次,主进程只管转成 `setTitleBarOverlay`。
+   * ★ `close` 走 `win.close()`,而这个托盘应用的 `win.on('close')` 把它拦成隐藏
+   *   —— 语义和过去那三颗系统按钮完全一致,渲染层不必知道这件事。
    *
-   * 用 send 不用 invoke:没有返回值,失败了也没有任何一个界面分支要走。
-   * macOS 上主进程侧直接短路(那边是 hiddenInset,没有 overlay)。
+   * 用 send 不用 invoke:没有返回值。**最大化状态不靠这条的回执**,靠
+   * `window:maximized` 回推 —— 用户还能拖窗口边缘、双击拖动区、按 Win+↑ 改变它。
+   * macOS 不发这条(那边是 hiddenInset 红绿灯)。
    */
-  'window:titleBarOverlay': { color: string; symbolColor: string }
+  'window:control': { action: 'minimize' | 'toggleMaximize' | 'close' }
 
   /**
    * Tab 布局持久化。★ 用 send 不用 invoke:拖动排序时每帧都在变,
@@ -477,6 +483,12 @@ export interface IpcEventMap {
   'agent:event': AgentEventEnvelope
   'terminal:data': { id: string; seq: number; chunk: string }
   'terminal:exit': { id: string; code: number }
+  /**
+   * 最大化状态。**每窗口一份**,所以走 `windows.emitTo` 定向推 —— 它被登记进
+   * `TargetedEventChannel`,`emitToAll` 在编译期就拿不到它。自绘的中间那颗按钮
+   * (`shell/WindowControls.tsx`)据此在「□」和「双叠框」之间换字形。
+   */
+  'window:maximized': { maximized: boolean }
   'gateway:status': GatewayStatus
   'gateway:failover': FailoverEvent
   'settings:changed': AppSettings
@@ -518,6 +530,7 @@ export const INVOKE_CHANNELS = {
   'app:getBootstrap': 1,
   'app:openExternal': 1,
   'app:copyText': 1,
+  'app:saveTextFile': 1,
   'app:openSessionWindow': 1,
   'settings:get': 1,
   'settings:update': 1,
@@ -634,7 +647,7 @@ export const SEND_CHANNELS = {
   'terminal:write': 1,
   'terminal:resize': 1,
   'window:ready': 1,
-  'window:titleBarOverlay': 1,
+  'window:control': 1,
   'tabs:persistOuter': 1,
   'tabs:persistInner': 1,
   'session:persistInput': 1
@@ -644,6 +657,7 @@ export const EVENT_CHANNELS = {
   'agent:event': 1,
   'terminal:data': 1,
   'terminal:exit': 1,
+  'window:maximized': 1,
   'gateway:status': 1,
   'gateway:failover': 1,
   'settings:changed': 1,

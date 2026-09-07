@@ -63,6 +63,11 @@ const ZH: Messages = {
   "nav.createWorkspace": "创建新工作区",
   "nav.bottomPanel": "底部面板",
   "nav.workspaceFiles": "工作区文件",
+  // 自绘的窗口按钮(仅 Windows/Linux,见 shell/WindowControls.tsx)。
+  // 关闭那颗复用 common.close —— 这三条是窗口装饰,不归 nav.*
+  "window.minimize": "最小化",
+  "window.maximize": "最大化",
+  "window.restore": "向下还原",
   "feature.scheduled": "定时任务",
   "feature.browser": "浏览器",
   "feature.skills": "Skills",
@@ -1155,6 +1160,9 @@ const EN: Messages = {
   "nav.createWorkspace": "Create new workspace",
   "nav.bottomPanel": "Bottom panel",
   "nav.workspaceFiles": "Workspace files",
+  "window.minimize": "Minimize",
+  "window.maximize": "Maximize",
+  "window.restore": "Restore",
   "feature.scheduled": "Scheduled tasks",
   "feature.browser": "Browser",
   "feature.skills": "Skills",

@@ -50,6 +50,7 @@ export function ChatView({
     promoteInput,
     editInput,
     editMessage,
+    deleteTurn,
     dropInput,
     moveInputToDraft
   } = useSession()
@@ -303,6 +304,7 @@ export function ChatView({
             model: transcript.model ?? fallbackModel,
             skillIds: workspace.settings.activeSkillIds
           })}
+          onDeleteTurn={deleteTurn}
         />
       </WorkspaceMarkdownProvider>
 

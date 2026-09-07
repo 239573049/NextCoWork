@@ -16,8 +16,8 @@ import type { AppSettings, ResolvedTheme } from '../../shared/domain/settings'
 import type { Workspace } from '../../shared/domain/workspace'
 import { announceReady, getBootstrap } from './services/app'
 import { on } from './services/ipc'
-import { setTitleBarOverlay } from './services/theme'
 import { AppShell } from './shell/AppShell'
+import { WindowControls } from './shell/WindowControls'
 import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
 import { useWindowStore } from './stores/window'
@@ -37,6 +37,7 @@ export default function App(): React.JSX.Element {
   const syncBrowserTabs = useTabsStore((s) => s.syncBrowserTabs)
   const syncSessionTitle = useTabsStore((s) => s.syncSessionTitle)
   const setRightPanelForWorkspace = useWindowStore((s) => s.setRightPanelForWorkspace)
+  const setMaximized = useWindowStore((s) => s.setMaximized)
   const { setLocale, t } = useI18n()
 
   useEffect(() => {
@@ -60,6 +61,12 @@ export default function App(): React.JSX.Element {
       syncBrowserTabs(change.workspaceId, change.tabs)
       if (change.rightPanelOpen === true) setRightPanelForWorkspace(change.workspaceId, true)
     })
+    /*
+      ★ **必须排在 announceReady() 之前。** 主进程在 `window:ready` 的 handler 里
+      **同步**回推首帧最大化状态(见 main/ipc/index.ts),监听器晚一步登记就收不到,
+      表现是 Windows 上从最大化态启动时中间那颗按钮画着「□」而不是还原字形。
+    */
+    const offMaximized = on('window:maximized', ({ maximized }) => setMaximized(maximized))
 
     announceReady('main')
     void getBootstrap()
@@ -85,15 +92,16 @@ export default function App(): React.JSX.Element {
       })
       .catch((e: unknown) => setFatal(e instanceof Error ? e.message : String(e)))
 
-    // ★ 三个退订必须都调用,否则每次 HMR 叠一层监听器
+    // ★ **每一个**退订都必须调用,否则每次 HMR 叠一层监听器
     return () => {
       offSettings()
       offTheme()
       offWorkspaces()
       offSessions()
       offBrowser()
+      offMaximized()
     }
-  }, [hydrate, openSession, openWorkspace, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
+  }, [hydrate, openSession, openWorkspace, setMaximized, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
 
   /**
    * ★ **深浅和颜色是两路来的,必须汇到一处再落地。**
@@ -120,15 +128,7 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     if (appearance === null || settings === null) return
-    const tokens = applyTheme(document.documentElement, appearance, settings, uploadedThemes)
-    /*
-      Windows/Linux 标题栏右上角那三颗系统按钮**不是 DOM**,上面那 22 个 CSS 变量
-      到不了它们 —— 只能推给主进程走 setTitleBarOverlay。跟在同一个 effect 里,
-      三路输入(外观 / 颜色主题 / 上传图)的任何一路变化都会带上它。
-      `chrome` 是 Tab 条的底、`icon` 是条右端那两颗面板开关的笔画,按钮和它们同色。
-      macOS 上主进程侧短路。
-    */
-    setTitleBarOverlay({ color: tokens.chrome, symbolColor: tokens.icon })
+    applyTheme(document.documentElement, appearance, settings, uploadedThemes)
   }, [appearance, settings, uploadedThemes])
 
   // 运行中角标的数据源是 RunRegistry 的投影,不是任何 UI 状态(方案 §8)
@@ -136,26 +136,42 @@ export default function App(): React.JSX.Element {
   const runningSessionIds = useMemo(() => new Set(runIndex.map((r) => r.sessionId)), [runIndex])
   const runningWorkspaceIds = useMemo(() => new Set(runIndex.map((r) => r.workspaceId)), [runIndex])
 
+  /*
+    ★ 三颗自绘窗口按钮(仅 Windows/Linux)挂在**这里**,而且在下面两个早退分支
+    之外 —— 握手失败或者卡在首屏之前时,用户同样得能最小化/关掉这个窗口。
+    它自己 portal 到 body 并 fixed 定位,所以放在哪个分支里都不影响布局。
+  */
   if (fatal !== null) {
     return (
-      <div className="flex h-full items-center justify-center bg-app p-8">
-        <p className="selectable max-w-lg font-mono text-[13px] text-danger">{t('app.handshakeFailed', { error: fatal })}</p>
-      </div>
+      <>
+        <WindowControls />
+        <div className="flex h-full items-center justify-center bg-app p-8">
+          <p className="selectable max-w-lg font-mono text-[13px] text-danger">{t('app.handshakeFailed', { error: fatal })}</p>
+        </div>
+      </>
     )
   }
 
   // 首屏之前不渲染外壳 —— 渲染一个空 Tab 条再让它跳成有内容的,比空一瞬间更难看
   if (boot === null || settings === null) {
-    return <div className="h-full bg-app" />
+    return (
+      <>
+        <WindowControls />
+        <div className="h-full bg-app" />
+      </>
+    )
   }
 
   return (
-    <AppShell
-      settings={settings}
-      versions={boot.versions}
-      workspaces={workspaces}
-      runningSessionIds={runningSessionIds}
-      runningWorkspaceIds={runningWorkspaceIds}
-    />
+    <>
+      <WindowControls />
+      <AppShell
+        settings={settings}
+        versions={boot.versions}
+        workspaces={workspaces}
+        runningSessionIds={runningSessionIds}
+        runningWorkspaceIds={runningWorkspaceIds}
+      />
+    </>
   )
 }

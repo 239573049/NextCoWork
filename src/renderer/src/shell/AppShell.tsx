@@ -7,16 +7,15 @@
  * 上下同样 8..1132,窗口边框自己占 1px。这不是装饰:面板边缘就是分区边界,
  * 所以全局基本不用 box-shadow,靠底色差分层。
  *
- * ★ **`app-drag` 与 Tab 拖动排序正面冲突**(方案 §8)。macOS 用
- * `titleBarStyle: 'hiddenInset'`,顶部这条 34px 落在自绘标题栏里,而那块是
- * `-webkit-app-region: drag` —— **OS 会吞掉这个区域里所有 pointer 事件**,
+ * ★ **`app-drag` 与 Tab 拖动排序正面冲突**(方案 §8)。两个平台顶部这条 34px 都落在
+ * 自绘标题栏里(macOS 是 `titleBarStyle: 'hiddenInset'`,Windows/Linux 是 `'hidden'`),
+ * 而那块是 `-webkit-app-region: drag` —— **OS 会吞掉这个区域里所有 pointer 事件**,
  * 表现是「Tab 拖不动,整个窗口跟着鼠标跑」。所以 drag 只给 Tab **之间的空白**,
  * 每个 Tab 元素自己显式 `app-no-drag`(见 OuterTabBar)。
  *
- * ★ Windows/Linux 这条同样是标题栏,只是系统按钮画在**右端**
- * (Window Controls Overlay,见 main/window/title-bar.ts)。那块也是原生区域、
- * 同样吞事件,但它连 `app-no-drag` 都救不回来 —— 只能实打实地让出宽度,
- * 见下面那条 `pr-[max(...)]`。
+ * ★ Windows/Linux 那三颗窗口按钮画在这条的**右端**,但它们是自绘的普通 DOM
+ * (`WindowControls`,portal 到 body 的悬浮层),不是原生区域 —— 所以不存在
+ * 「看得见点不着」那类坑,这条只需要用 `pr-window-controls` 让出宽度。
  *
  * ★ **设置是模态浮层,不是一个 Tab**(截图 06cd7b3c 是盖在界面上的面板)。
  * 做成 feature Tab 的话,「关掉设置」和「关掉一个工作区」就成了同一个动作。
@@ -307,18 +306,18 @@ export function AppShell({
                 // ★ `chrome` 不是 `surface`:深色下两者同值,浅色下外层 Tab 条(#e8e4dd)
                 // **比侧边栏(#f6f4ef)更暗** —— 量自 docs/image-new。用 surface 会让整条
                 // Tab 在浅色主题下浮起来,和参考实现的层次正好相反。
-                "app-drag flex h-[34px] shrink-0 items-end gap-1.5 bg-chrome pl-2",
+                "app-drag flex h-[34px] shrink-0 items-end gap-1.5 bg-chrome px-2",
                 /*
-                  ★ 右内边距不是常数。Windows/Linux 上系统的最小化/最大化/关闭三颗按钮
-                  画在这条的右端(Window Controls Overlay,见 main/window/title-bar.ts),
-                  那是**原生区域,盖在它下面的 DOM 收不到 pointer 事件** —— 不让位的话,
-                  「工作区文件」和「底部面板」两颗开关会看得见、点不着。
-                  宽度由 WCO 自己报(theme.css 的 `--window-controls-w`),减 8 是因为
-                  这条的右边缘本来就离窗口右边 8px。macOS 没有 WCO,max() 取回 8px。
+                  ★ Windows/Linux 上自绘的三颗窗口按钮(WindowControls)悬浮在这条的
+                  右端 —— 它 portal 到 body、fixed 定位,**不占这条的流**,所以得靠
+                  内边距实打实地让出宽度,否则「工作区文件」和「底部面板」两颗开关
+                  会被压在按钮下面。宽度那个 128 的推导在 theme.css 的 token 上。
+                  macOS 右上角什么都没有,留这块就是个空洞,所以只给非 mac。
                 */
-                "pr-[max(8px,calc(var(--window-controls-w)-8px))]",
+                !IS_MAC && "pr-window-controls",
                 // 侧边栏收起时红绿灯落到这条上,得给它让出位置。**仅 macOS** ——
-                // 别的平台按钮在右上角,这里再留 78px 就是个空洞。
+                // 别的平台左上角是空的(按钮在右上角,见 WindowControls),
+                // 这里再留 78px 就是个空洞。
                 // 78 = 参考里按钮盒左边 x86 减去主面板左边 x8(见下面那段量数)
                 // 内边距和侧边栏宽度同时同速地走,红绿灯下面才不会先空出一块再被填上
                 "transition-[padding-left] duration-280 ease-panel",

@@ -16,8 +16,8 @@ import {
   previewUrl,
 } from "../../../../../shared/domain/baseurl";
 import {
-  BUILTIN_PROVIDER_ID,
   findPreset,
+  isBuiltinProvider,
 } from "../../../../../shared/domain/presets";
 import type {
   AnthropicCacheTtl,
@@ -691,7 +691,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
               {confirmDelete
                 ? t("provider.deleteHint")
-                : p.id === BUILTIN_PROVIDER_ID
+                : isBuiltinProvider(p.id)
                   ? t("provider.builtinDeleteHint")
                   : t("provider.customDeleteHint")}
             </p>

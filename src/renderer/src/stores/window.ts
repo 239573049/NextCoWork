@@ -70,6 +70,19 @@ interface WindowState {
    */
   settingsPage: SettingsPageId | null
 
+  /**
+   * 窗口是不是最大化的 —— 自绘的中间那颗窗口按钮据此在「□」和「双叠框」之间换字形
+   * (`shell/WindowControls.tsx`,仅 Windows/Linux)。
+   *
+   * ★ **权威值在主进程**(`win.isMaximized()`),这里只是它经 `window:maximized`
+   * 推过来的投影。渲染层不能按自己发出去的 `toggleMaximize` 记账:用户还能拖窗口
+   * 边缘、双击拖动区、按 Win+↑,那样迟早对不上。
+   *
+   * ★ **不落盘。** 和 `settingsPage`、`sidebarCollapsed` 同类,是此刻的呈现状态。
+   * macOS 上永远是 false(那边没有这条推送,也没有那三颗按钮)。
+   */
+  maximized: boolean
+
   hydrate: (b: Bootstrap) => void
   activate: (outerId: string) => void
   openWorkspace: (workspaceId: string) => void
@@ -86,6 +99,7 @@ interface WindowState {
   setBottomPanelHeight: (px: number) => void
   openSettings: (page?: SettingsPageId) => void
   closeSettings: () => void
+  setMaximized: (maximized: boolean) => void
 }
 
 const firstWorkspaceId = (tabs: readonly OuterTab[], activeId: string | null): string | null => {
@@ -155,6 +169,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
     rightPanelWidth: RIGHT_PANEL.def,
     bottomPanelHeight: BOTTOM_PANEL.def,
     settingsPage: null,
+    maximized: false,
 
     hydrate(b) {
       /*
@@ -362,6 +377,10 @@ export const useWindowStore = create<WindowState>((set, get) => {
 
     closeSettings() {
       set({ settingsPage: null })
+    },
+
+    setMaximized(maximized) {
+      set({ maximized })
     }
   }
 })

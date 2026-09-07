@@ -31,6 +31,7 @@ import { useI18n } from '../../i18n'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { cn } from '../../lib/cn'
+import { IS_MAC } from '../../lib/platform'
 
 export function BrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
   const { t } = useI18n()
@@ -174,7 +175,19 @@ export function BrowserFeature({ onClose }: { onClose?: () => void }): ReactNode
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-canvas">
-      <header className="app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4">
+      {/*
+        这条 52px 是浏览器管理页**自己的**标题栏 —— 它整体替换掉外层那条 34px
+        (AppShell 里 activeStandaloneFeature === 'browser' 的分支)。所以右端同样
+        要给自绘的三颗窗口按钮让位:它们是 fixed 悬浮层,在这一页照样浮在右上角
+        (比这条的垂直中线高 9px,已知取舍,见 shell/WindowControls.tsx)。
+        今天右端还是空的,让位没有视觉变化 —— 但往这儿放任何东西之前它必须在。
+      */}
+      <header
+        className={cn(
+          'app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4',
+          !IS_MAC && 'pr-window-controls'
+        )}
+      >
         <IconButton
           label={t('browser.back')}
           size={28}

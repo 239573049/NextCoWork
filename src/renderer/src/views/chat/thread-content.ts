@@ -68,6 +68,21 @@ export type AssistantSegment =
   | { kind: 'block'; key: string; block: AssistantBlock }
   | { kind: 'process'; key: string; items: TimelineItem[] }
 
+/**
+ * 一个助手回合的散文正文,用于复制和导出。
+ *
+ * ★ **只取 text,思考过程和工具调用一律不要。** 用户点「复制」想要的是那段回答本身
+ * —— 把 thinking 拼进去,粘到别处就是一大段自言自语,而它在界面上本来是折叠的。
+ * 空块跳过,否则块与块之间会攒出成片的空行。
+ */
+export function assistantText(blocks: readonly AssistantBlock[]): string {
+  return blocks
+    .map((b) => b.part?.type === 'text' ? b.part.text : b.liveBlock?.kind === 'text' ? b.liveBlock.text : '')
+    .filter((text) => text.trim() !== '')
+    .join('\n\n')
+    .trim()
+}
+
 /** A visible assistant text block that can safely remain outside a process summary. */
 export function isAssistantTextBlock(block: AssistantBlock): boolean {
   if (block.part?.type === 'text') return block.part.text.trim() !== ''
