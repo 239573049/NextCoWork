@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -70,6 +71,20 @@ import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
 import { useModelsStore } from "../../stores/models";
 import { AttachmentTray, type TrayItem } from "./AttachmentTray";
+import { MentionInput, type MentionInputHandle } from "./MentionInput";
+import { MentionPopup } from "./MentionPopup";
+import type { MentionQuery } from "../../../../shared/domain/file-mention";
+import { insertMention, mentionQueryAt } from "../../../../shared/domain/file-mention";
+import type { FileSuggestion } from "../../../../shared/domain/file-tree";
+import { searchWorkspaceFiles } from "../../services/app";
+
+/**
+ * 可编辑区和它的占位符**共用**的度量类:内边距、字号、行高。
+ *
+ * ★ 常量而不是两处各写一遍 —— 两层是叠在一起的,任何一处单独改了 `px-4`,
+ * 占位符从此偏移四个像素,而那看起来像是渲染 bug 不像是笔误。
+ */
+const DRAFT_METRICS = "px-4 pt-3.5 pb-1 text-[13.5px] leading-relaxed";
 
 export interface ComposerValue {
   permissionMode: PermissionMode;
@@ -132,7 +147,7 @@ export function Composer({
   const [value, setValue] = useState<ComposerValue>(() =>
     fromSettings(workspace.settings),
   );
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const input = useRef<MentionInputHandle | null>(null);
 
   useEffect(() => {
     void load();
@@ -151,18 +166,134 @@ export function Composer({
   const [seenWorkspace, setSeenWorkspace] = useState(workspace.id);
   /** 拖拽悬停高亮。★ 纯视觉状态,不影响任何数据流 */
   const [dragging, setDragging] = useState(false);
+
+  /*
+    ── `@` 文件引用 ──
+
+    ★ `mention` 是从「草稿 + 光标位置」算出来的,不是「刚才敲了 `@`」这个事件。
+      于是用户点回一个写了一半的 `@comp` 中间时,列表会重新出现 ——
+      而按事件记的话,那次点击之后就再也弹不出来了。
+  */
+  const [mention, setMention] = useState<MentionQuery | null>(null);
+  const [suggestions, setSuggestions] = useState<FileSuggestion[]>([]);
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  /**
+   * 按过 Esc 的那个 `@` 的下标。★ 记**位置**而不是布尔:记布尔的话,
+   * 用户接着往下打字会立刻又弹出来,Esc 等于没按。
+   */
+  const dismissedAt = useRef<number | null>(null);
+  /**
+   * 输入法组词中。★ 组词串**不在 `value` 里**,此刻算出来的 query 是残缺的
+   * (打「文件」的过程中 value 里可能还是空的),据此去检索只会闪一串错的结果。
+   */
+  const composing = useRef(false);
+  const mentionListId = useId();
   if (seenWorkspace !== workspace.id) {
     setSeenWorkspace(workspace.id);
     setValue(fromSettings(workspace.settings));
   }
 
-  // 自动增高。max-height 在 className 里,超过就滚动
+  /**
+   * 光标此刻是不是落在一个 `@查询` 里。文本变化和光标移动都过它。
+   *
+   * ★ `caret` 为 null 表示「此刻没有折叠光标」—— 有选区(用户在选文字)
+   * 或者正在组词。两种情况都不该弹列表。
+   */
+  function syncMention(text: string, caret: number | null): void {
+    if (composing.current) return;
+    const q = caret === null ? null : mentionQueryAt(text, caret);
+    if (q === null) {
+      // 那个 `@` 已经不在了 —— 连同它的「按过 Esc」一起忘掉
+      dismissedAt.current = null;
+      setMention(null);
+      return;
+    }
+    if (q.start === dismissedAt.current) {
+      setMention(null);
+      return;
+    }
+    setMention(q);
+  }
+
+  /*
+    查询 → 候选。★ **排序在主进程做**,这里拿到的已经是最终顺序
+    (见 `shared/domain/fuzzy-path.ts`);渲染层再排一遍就有两套顺序了。
+
+    ★ 失败静默吞掉:`@` 只是个便利入口,工作区根被删掉时它给不出结果是对的,
+      但不该在输入框上弹一个错误 —— 用户照样可以把路径直接打出来。
+  */
+  const mentionQuery = mention?.query ?? null;
   useEffect(() => {
-    const el = ref.current;
-    if (el === null) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, [draft]);
+    if (mentionQuery === null) return;
+    let cancelled = false;
+    setLoadingFiles(true);
+    void searchWorkspaceFiles(workspace.id, mentionQuery)
+      .then((r) => {
+        if (cancelled) return;
+        setSuggestions(r);
+        setActiveSuggestion(0);
+      })
+      .catch(() => {
+        if (!cancelled) setSuggestions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFiles(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mentionQuery, workspace.id]);
+
+  /**
+   * 选中一个文件:把 `@查询` 换成 `[名字](工作区相对路径)`。
+   *
+   * ★ 走输入框的 `replace` 而不是只 `onDraft`:草稿要经过 session store 才回来,
+   * 等它回来再摆光标已经晚了一帧,而且那一帧里 tag 是「跳」出来的。
+   * `replace` 当场把 DOM 和光标都摆好,`onDraft` 只是随后追平数据。
+   */
+  function pickFile(file: FileSuggestion): void {
+    if (mention === null) return;
+    const r = insertMention(draft, mention, file);
+    dismissedAt.current = null;
+    setMention(null);
+    input.current?.replace(r.text, r.caret);
+  }
+
+  /**
+   * 弹层开着时,方向键 / Enter / Tab / Esc 归它。**返回 true = 这一下已经用掉了。**
+   *
+   * ★ 必须在输入框的 `onKeyDown` 里截,不能让弹层自己收键:
+   * 焦点一旦移出输入框,输入法组词就会被打断。
+   */
+  function handleMentionKey(e: React.KeyboardEvent<HTMLDivElement>): boolean {
+    if (mention === null || e.nativeEvent.isComposing) return false;
+    const n = suggestions.length;
+    if (e.key === "ArrowDown" && n > 0) {
+      e.preventDefault();
+      setActiveSuggestion((i) => (i + 1) % n);
+      return true;
+    }
+    if (e.key === "ArrowUp" && n > 0) {
+      e.preventDefault();
+      setActiveSuggestion((i) => (i - 1 + n) % n);
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      dismissedAt.current = mention.start;
+      setMention(null);
+      return true;
+    }
+    // ★ 没有候选时 Enter **不拦** —— 用户打了个 `@zzz` 没找到东西,
+    //   这时按回车的意思是「把这句话发出去」,不是「选中那个不存在的文件」。
+    if ((e.key === "Enter" || e.key === "Tab") && n > 0) {
+      e.preventDefault();
+      pickFile(suggestions[activeSuggestion] ?? (suggestions[0] as FileSuggestion));
+      return true;
+    }
+    return false;
+  }
 
   function patch(p: Partial<ComposerValue>): void {
     const next = { ...value, ...p };
@@ -217,6 +348,9 @@ export function Composer({
     //   只覆盖一半就会把「兜底的别名」配上「value 里那个陈旧的供应商」。
     onSend(text, { ...value, model, modelProviderId, thinking });
     onDraft("");
+    // 草稿清空了,弹层也得跟着走 —— 不清的话它会挂在一个已经不存在的查询上
+    dismissedAt.current = null;
+    setMention(null);
   }
 
   /**
@@ -252,7 +386,7 @@ export function Composer({
       */}
       <div
         className={cn(
-          "mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors",
+          "relative mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors",
           dragging ? "border-accent" : "border-border",
         )}
         onDragOver={(e) => {
@@ -265,35 +399,58 @@ export function Composer({
         }}
         onDrop={handleDrop}
       >
+        {mention !== null && (
+          <MentionPopup
+            id={mentionListId}
+            items={suggestions}
+            active={activeSuggestion}
+            loading={loadingFiles}
+            onPick={pickFile}
+            onHover={setActiveSuggestion}
+          />
+        )}
+
         <AttachmentTray
           items={attachments}
           onRemove={(k) => onRemoveAttachment?.(k)}
           onRetry={(k) => onRetryAttachment?.(k)}
         />
 
-        <textarea
-          ref={ref}
-          data-testid="composer-input"
+        <MentionInput
           value={draft}
-          onChange={(e) => onDraft(e.target.value)}
+          handle={input}
+          metrics={DRAFT_METRICS}
+          placeholder={running ? t("chat.queuePlaceholder") : t("chat.placeholder")}
+          aria-expanded={mention !== null}
+          aria-controls={mention !== null ? mentionListId : undefined}
+          aria-activedescendant={
+            mention !== null && suggestions.length > 0
+              ? `${mentionListId}-${String(activeSuggestion)}`
+              : undefined
+          }
+          onChange={(text, caret) => {
+            onDraft(text);
+            syncMention(text, caret);
+          }}
+          // 点击 / 方向键挪动光标也要重算 —— `@` 的判据是位置不是按键
+          onCaret={(text, caret) => {
+            syncMention(text, caret);
+          }}
+          onComposing={(v) => {
+            composing.current = v;
+          }}
+          onBlur={() => setMention(null)}
           onPaste={handlePaste}
           onKeyDown={(e) => {
+            // 弹层开着时方向键 / Enter / Tab / Esc 归它,先问一句
+            if (handleMentionKey(e)) return;
             // Enter 发送,Shift+Enter 换行。输入法组词期间的 Enter 是「上屏」,
             // 不是「发送」—— 少了 isComposing 这个判断,中文用户每打一个词就发一次。
-            if (
-              e.key === "Enter" &&
-              !e.shiftKey &&
-              !e.nativeEvent.isComposing
-            ) {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               submit();
             }
           }}
-          rows={1}
-          placeholder={
-            running ? t("chat.queuePlaceholder") : t("chat.placeholder")
-          }
-          className="scroll-thin selectable max-h-[280px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[13.5px] leading-relaxed text-fg placeholder:text-fg-faint focus:outline-none"
         />
 
         <div className="flex items-center gap-1 px-2.5 pt-1 pb-2.5">

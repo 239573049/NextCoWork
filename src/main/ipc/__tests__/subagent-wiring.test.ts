@@ -29,10 +29,16 @@ import {
   DEMO_ALIAS,
   DEMO_ALIASES,
   DEMO_PROVIDER,
+  DEMO_PROVIDER_ID,
   demoHost,
   renderDemoSse
 } from '../../kernel/upstream/demo'
-import { installChildRunLauncher, installHost, resetRuntimeForTest } from '../../runtime'
+import {
+  ensureSeeded,
+  installChildRunLauncher,
+  installHost,
+  resetRuntimeForTest
+} from '../../runtime'
 import { store } from '../../state/store'
 import type { WindowContext } from '../../window/registry'
 import { startChildRun, startRun } from '../agent'
@@ -40,6 +46,8 @@ import { startChildRun, startRun } from '../agent'
 /** 只出现在**交给子代理的 prompt** 里的记号 —— 假上游靠它区分父子两条 run */
 const CHILD_MARK = 'SUBTASK-MARK'
 const CHILD_REPORT = '子代理报告:配置读取在 src/config.ts:12。'
+/** 演示上游底下的第二条别名 —— 「默认子代理」那一栏指的那个,好和父 run 分得开 */
+const SUB_ALIAS = 'nextcowork-demo-fast'
 
 /** 假上游要派给谁。用例里改它,就等于改模型填进 `subagent_type` 的那个字符串。 */
 let subagentType = 'general-purpose'
@@ -195,6 +203,17 @@ beforeEach(() => {
   // 全程用 DEMO_ALIAS 发 run —— 自己种两行,机器本身一点没变
   store.putProvider(DEMO_PROVIDER)
   for (const alias of DEMO_ALIASES) store.putAlias(alias)
+  /*
+    ★ `seed()` 会给全新安装种一个「默认子代理」(内置上游的 flash),而它**排在
+    父 run 前面**(见 `subagentModelSelection`)。这份测试断言的是**继承**那一档,
+    所以要把那一栏清成「跟随对话」—— 不清的话每条用例都在测种子,而不是接线。
+
+    ★★ 顺序不能反:`seed()` 是**懒的**(第一次 `getRouter()` 才跑),而它只在
+    这一栏为空时才种。先清后种的话种子照样落回来,清了等于没清。
+    `ensureSeeded()` 就是为「先把种子跑完」准备的那个入口。
+  */
+  ensureSeeded()
+  store.updateSettings({ subagent: { model: '', modelProviderId: undefined } })
 })
 
 afterEach(() => {
@@ -397,5 +416,36 @@ describe('子代理继承模型时的别名/供应商配对', () => {
 
     expect(seen[0]?.model).toBe(DEMO_ALIAS)
     expect(seen[0]?.modelProviderId).toBeUndefined()
+  })
+
+  /**
+   * ★★ 设置页那一栏**真的会落到子 run 上**。
+   *
+   * 它以前是死配置:界面能选、能存,而 `childRequestFor` 只在「子代理自己声明的」
+   * 和「父 run 的」之间二选一,那一栏一次都没被读过 —— 用户把子代理配成便宜模型,
+   * 账单照着主力模型走,而且没有任何迹象。这条用例就是钉住它不再退化回去。
+   */
+  it('★ 设置里配了「默认子代理」时,子 run 用它 —— 别名和供应商成对', async () => {
+    store.putAlias({ ...DEMO_ALIASES[0]!, alias: SUB_ALIAS })
+    store.updateSettings({ subagent: { model: SUB_ALIAS, modelProviderId: DEMO_PROVIDER_ID } })
+    const seen = captureChildReq()
+    const r = req({ modelProviderId: DEMO_PROVIDER_ID })
+
+    startRun(r, fakeWindow().ctx)
+    await waitForEnd(r.runId)
+
+    // 父 run 用的是 DEMO_ALIAS,子 run 必须换成设置里那个
+    expect(seen[0]).toMatchObject({ model: SUB_ALIAS, modelProviderId: DEMO_PROVIDER_ID })
+  })
+
+  it('设置里那一对悬空时退回父 run —— 而不是拿一个查不到的别名去发请求', async () => {
+    store.updateSettings({ subagent: { model: 'ghost-model', modelProviderId: 'no-such-provider' } })
+    const seen = captureChildReq()
+    const r = req({ modelProviderId: DEMO_PROVIDER_ID })
+
+    startRun(r, fakeWindow().ctx)
+    await waitForEnd(r.runId)
+
+    expect(seen[0]).toMatchObject({ model: DEMO_ALIAS, modelProviderId: DEMO_PROVIDER_ID })
   })
 })

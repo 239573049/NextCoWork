@@ -159,7 +159,7 @@ export function estimateTools(tools: readonly ToolInfo[]): number {
  *    这三条的共同点:提示词是**最贵也最容易被忽略**的那个位置,排在最后选。
  * 4. **对着真实的失败写**,不是对着「理想的助手」写。下面
  *    `# When things go wrong` 整节的存在理由,就是模型会把同一个失败的调用
- *    原样重试到轮次耗尽 —— 那是我们真的会撞上的事。
+ *    原样重试直到用户中断 —— 运行不会因为固定轮次数耗尽而停止。
  */
 const BASE_PROMPT = `You are the coding assistant in NextCoWork, a desktop app running on the user's own machine.
 

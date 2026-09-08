@@ -97,6 +97,7 @@ import {
   updateWorkspace
 } from './workspace'
 import { mutateWorkspaceFile, readWorkspaceFile, revealWorkspaceFile, writeWorkspaceFile } from './workspace-files'
+import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
 import { listContextCheckpoints, updateContextCheckpoint } from './context'
 import {
   createSession,
@@ -178,9 +179,11 @@ const handlers: HandlerMap = {
   'workspace:update': (req) => updateWorkspace(req),
   'workspace:close': ({ id }) => {
     browserManager.closeWorkspace(id)
+    forgetFileIndex(id)
     return closeWorkspace(id)
   },
   'workspace:listDir': (req) => listDir(req),
+  'workspace:searchFiles': (req) => searchWorkspaceFiles(req),
   'workspace:readFile': (req) => readWorkspaceFile(req),
   'workspace:writeFile': (req) => writeWorkspaceFile(req),
   'workspace:mutateFile': (req) => mutateWorkspaceFile(req),

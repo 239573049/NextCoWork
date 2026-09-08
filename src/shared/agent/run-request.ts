@@ -14,7 +14,7 @@ import type { PermissionMode } from './permission'
  *
  * ★ 会话模式必须落在**工具层**,不能只靠提示词祈祷(方案 §4.8):
  * - plan → snapshot({ readOnlyOnly: true }) 过滤掉所有写工具 + 提示词追加 + 产出待确认方案
- * - goal → 提高 MAX_TURNS,提示词禁止「我做完了吗」式提前退出
+ * - goal → 提示词禁止「我做完了吗」式提前退出
  */
 export type SessionMode = 'normal' | 'plan' | 'goal'
 
@@ -143,12 +143,21 @@ export interface RunRequest {
  */
 export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'inputMessageId'>
 
-/** 常量就是常量,不做配置项(方案 §10)。 */
+/**
+ * Deprecated compatibility exports. AgentSession no longer uses a fixed turn
+ * count to terminate runs.
+ */
+/** @deprecated Runs are no longer stopped after a fixed number of turns. */
 export const MAX_TURNS = 25
+/** @deprecated Runs are no longer stopped after a fixed number of turns. */
 export const MAX_TURNS_GOAL = 60
+/** A run has no application-imposed turn limit. */
+export const UNLIMITED_TURNS = Number.POSITIVE_INFINITY
 /** 没有深度上限的子代理会指数级烧钱(方案 §4.9) */
 export const MAX_DEPTH = 2
 
+/** @deprecated Use the run lifecycle/abort signal; retained for API compatibility. */
 export function maxTurnsFor(mode: SessionMode): number {
-  return mode === 'goal' ? MAX_TURNS_GOAL : MAX_TURNS
+  void mode
+  return UNLIMITED_TURNS
 }

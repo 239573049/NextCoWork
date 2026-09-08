@@ -7,9 +7,11 @@ import {
   GripVertical,
   Loader2,
   Pencil,
+  Plus,
   Trash2,
+  X,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   baseUrlWarnings,
   normalizeBaseUrl,
@@ -148,6 +150,9 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const [thinkingModel, setThinkingModel] = useState<ModelAlias | null>(null);
   const [editingModel, setEditingModel] = useState<ModelAlias | null>(null);
   const [deletingModel, setDeletingModel] = useState<ModelAlias | null>(null);
+  const [addingModel, setAddingModel] = useState(false);
+  const [modelDraft, setModelDraft] = useState("");
+  const addingModelRequest = useRef(false);
 
   const [importOpen, setImportOpen] = useState(false);
 
@@ -180,6 +185,9 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
     setThinkingModel(null);
     setEditingModel(null);
     setDeletingModel(null);
+    setAddingModel(false);
+    setModelDraft("");
+    addingModelRequest.current = false;
     setCacheTtl(anthropicCacheTtlOf(p));
 
     let alive = true;
@@ -420,6 +428,34 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
         setError(e instanceof Error ? e.message : String(e)),
       )
       .finally(() => setBusy(false));
+  };
+
+  const addModel = (): void => {
+    const modelId = modelDraft.trim();
+    if (modelId === "" || busy || addingModelRequest.current) return;
+    if (aliases.some((model) => model.upstreamModel === modelId)) {
+      setError(t("provider.modelAlreadyAdded"));
+      return;
+    }
+
+    addingModelRequest.current = true;
+    setBusy(true);
+    setError(null);
+    void setProviderAliases(p.id, [
+      ...aliases.map((model) => model.upstreamModel),
+      modelId,
+    ])
+      .then(() => {
+        setModelDraft("");
+        setAddingModel(false);
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => {
+        addingModelRequest.current = false;
+        setBusy(false);
+      });
   };
 
   return (
@@ -681,11 +717,68 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               </>
             }
           >
-            {aliases.length === 0 ? (
-              <p className="rounded-[8px] border border-dashed border-border px-2.5 py-3 text-[12px] text-fg-faint">
-                {t("provider.noModels")}
-              </p>
-            ) : (
+            <>
+              {addingModel ? (
+                <div className="flex items-center gap-2 rounded-[16px] border border-border bg-tint px-2 py-1">
+                  <Plus size={14} className="shrink-0 text-fg-faint" aria-hidden />
+                  <input
+                    autoFocus
+                    value={modelDraft}
+                    onChange={(event) => setModelDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addModel();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        setModelDraft("");
+                        setAddingModel(false);
+                      }
+                    }}
+                    aria-label={t("provider.modelIdLabel")}
+                    placeholder={t("provider.modelIdPlaceholder")}
+                    disabled={busy}
+                    className="selectable min-w-0 flex-1 rounded-[7px] border border-border bg-canvas px-2 text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-accent"
+                  />
+                  <button
+                    type="button"
+                    aria-label={t("provider.confirmAddModel")}
+                    title={t("provider.confirmAddModel")}
+                    disabled={busy || modelDraft.trim() === ""}
+                    onClick={addModel}
+                    className="flex size-7 shrink-0 items-center justify-center rounded-full bg-accent text-accent-fg transition-opacity hover:opacity-90 disabled:opacity-40"
+                  >
+                    <Check size={14} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("provider.cancelAddModel")}
+                    title={t("provider.cancelAddModel")}
+                    disabled={busy}
+                    onClick={() => {
+                      setModelDraft("");
+                      setAddingModel(false);
+                    }}
+                    className="flex size-7 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg disabled:opacity-40"
+                  >
+                    <X size={14} aria-hidden />
+                  </button>
+                </div>
+              ) : (
+                <Button
+                  size="sm"
+                  icon={<Plus size={14} />}
+                  onClick={() => {
+                    setError(null);
+                    setModelDraft("");
+                    setAddingModel(true);
+                  }}
+                  className="w-full justify-start rounded-[16px]"
+                >
+                  {t("provider.addModel")}
+                </Button>
+              )}
+              {aliases.length === 0 ? null : (
               /*
               ★★ **前一版这里写着「别名的写入频道契约里根本没有」—— 那句已经不成立了。**
               `provider:fetchModels` 和 `provider:setAliases` 现在都在契约里,
@@ -764,7 +857,8 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                   </li>
                 ))}
               </ul>
-            )}
+              )}
+            </>
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
               {listAvail.hint ?? t("provider.rowActionsHint")}
             </p>

@@ -334,7 +334,7 @@ export function AppShell({
         </div>
       )}
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
+      <main className="app-canvas flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
         {activeStandaloneFeature === "browser" ? (
           <BrowserFeature onClose={win.closeStandaloneFeature} />
         ) : (

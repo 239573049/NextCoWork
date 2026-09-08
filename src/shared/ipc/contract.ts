@@ -20,13 +20,14 @@ import type { InterjectItem } from '../agent/interject'
 import type { RunRequest } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
-import type { DirListing } from '../domain/file-tree'
+import type { DirListing, FileSuggestion } from '../domain/file-tree'
 import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
 import type { ProxyPasswordInfo } from '../domain/proxy'
 import type {
   Attachment,
   AttachmentScope,
-  AttachmentUploadRequest
+  AttachmentUploadRequest,
+  PickedAttachment
 } from '../domain/attachment'
 import type { SessionInputState } from '../domain/queued-input'
 import type { SearchProviderId, SearchProviderStatus } from '../domain/search'
@@ -208,6 +209,20 @@ export interface IpcInvokeMap {
    * 一律经 `resolveAnywhere` 归一化(方案 §9)。
    */
   'workspace:listDir': { req: { workspaceId: string; path: string }; res: DirListing }
+  /**
+   * 输入框 `@` 的文件检索。**打分在主进程做,回来的只有十几条。**
+   *
+   * ★ 不提供「把整份清单拉过来」的通道:一个中等仓库是上万条路径,
+   * 整批过结构化克隆的代价,加上「渲染层那份缓存什么时候失效」这个问题,
+   * 都比在主进程排个序贵(见 `ipc/workspace-search.ts` 文件头)。
+   *
+   * `query` 是不可信输入,但它**不参与任何路径拼接** —— 只拿去和一份
+   * 已经遍历好的索引做字符串匹配,所以这里没有 §9 的那道解析。
+   */
+  'workspace:searchFiles': {
+    req: { workspaceId: string; query: string; limit?: number }
+    res: FileSuggestion[]
+  }
   'workspace:readFile': { req: WorkspaceFileRequest; res: WorkspaceFile }
   'workspace:writeFile': { req: WorkspaceFileWriteRequest; res: WorkspaceTextFile }
   'workspace:mutateFile': { req: WorkspaceFileMutationRequest; res: WorkspaceFileMutationResult }
@@ -244,10 +259,16 @@ export interface IpcInvokeMap {
    * 返回的 `Attachment.url` 是 `ncw://` 地址 —— **绝对路径不出主进程**。
    */
   'attachment:upload': { req: AttachmentUploadRequest; res: Attachment }
-  /** ★ 走主进程 dialog,渲染层永不指定任意路径(方案 §9)。取消返回空数组 */
+  /**
+   * ★ 走主进程 dialog,渲染层永不指定任意路径(方案 §9)。取消返回空数组。
+   *
+   * ★ 返回的是 `PickedAttachment` 而不是 `Attachment`:图片落盘、非图片回传
+   * 真实路径,与拖拽/粘贴同一套分流规则。回传路径不破坏 §9 —— 路径是用户在
+   * 系统对话框里定的既成事实,渲染层仍然没有「指定」任何路径的能力。
+   */
   'attachment:pick': {
     req: { scope: AttachmentScope; ownerId?: string }
-    res: Attachment[]
+    res: PickedAttachment[]
   }
   'attachment:remove': { req: { id: string }; res: void }
   /** 已上传但还没发出去的 —— 重启后恢复草稿附件区 */
@@ -598,6 +619,7 @@ export const INVOKE_CHANNELS = {
   'workspace:update': 1,
   'workspace:close': 1,
   'workspace:listDir': 1,
+  'workspace:searchFiles': 1,
   'workspace:readFile': 1,
   'workspace:writeFile': 1,
   'workspace:mutateFile': 1,

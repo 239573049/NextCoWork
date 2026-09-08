@@ -9,7 +9,7 @@
 import { isAbsolute, join } from 'node:path'
 import type { ToolResult } from '../../../../shared/agent/tool'
 import { toolFail } from '../../../../shared/agent/tool'
-import { resolveAnywhere, toWorkspaceRelative } from '../path-guard'
+import { displayPath, resolveAnywhere } from '../path-guard'
 import type { ToolContext } from '../registry'
 
 /**
@@ -62,18 +62,13 @@ export function resolvePath(ctx: ToolContext, p: string): Resolved {
 /**
  * 绝对路径压成**展示形式**:工作区内的压回工作区相对,工作区外的原样保留绝对路径。
  *
- * ★ 绝不产出 `../../x`。那种形式对不上任何一个根 —— 模型把它再喂回来时基准是谁全看运气,
- * 而 `walk()` 的 `join(root, start)` 会被它直接带偏。
+ * ★ 规则本体在 `displayPath` —— 用户拖/选进来的 `file_ref` 走的是同一个函数,
+ * 两处各写一遍就会让模型在附件里和 grep 回执里看到同一个文件的两种写法。
+ * 绝不产出 `../../x`:那种形式对不上任何一个根,而 `walk()` 的 `join(root, start)`
+ * 会被它直接带偏。
  */
 export function relOf(ctx: ToolContext, abs: string): string {
-  if (ctx.workspaceRoot === '') return abs
-  try {
-    const rel = toWorkspaceRelative(ctx.workspaceRoot, abs)
-    if (rel === '') return '.'
-    return rel.startsWith('../') || rel === '..' ? abs : rel
-  } catch {
-    return abs
-  }
+  return displayPath(ctx.workspaceRoot, abs)
 }
 
 /**

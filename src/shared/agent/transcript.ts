@@ -11,7 +11,7 @@
  * 换来的是一个能一眼看完的 reducer。
  */
 import type { AgentError } from './error'
-import type { AgentEvent, RunStatus, SubagentPhase } from './event'
+import type { AgentEvent, RunNotice, RunStatus, SubagentPhase } from './event'
 import { visibleText, type AgentMessage, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
 import type { ContextCheckpoint, ContextStatus } from './context-management'
@@ -65,6 +65,14 @@ export interface SubagentState {
   error?: AgentError
   usage?: TokenUsage
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
+  /**
+   * 和上面 `TranscriptState.notice` 是同一件事,只不过说的是**这个子代理**。
+   *
+   * ★★ 主线路的重试提示当初只接到了状态行上,而子代理有自己的卡片、不看状态行 ——
+   * 于是「限流了,正在退避」在卡片上的样子和「跑得慢」完全一样,退避几次全失败之后
+   * 只剩一句冷冰冰的错误,看起来就像**子代理压根没有重试**(它其实重试过)。
+   */
+  notice?: RunNotice
   /** Last child-run event sequence already reflected in this state. */
   childSeq?: number
 }
@@ -111,9 +119,9 @@ export interface TranscriptState {
   error?: AgentError
 }
 
-export type RunNotice =
-  | { kind: 'retry'; attempt: number; reason: string }
-  | { kind: 'switch'; to: string; reason: string }
+// 定义搬到了 `event.ts`(子代理卡片也要用它,而依赖只能是 transcript → event)。
+// 这里原样再导出:`RunNotice` 是转录层词汇的一部分,调用方不必知道它住在哪。
+export type { RunNotice }
 
 export function emptyTranscript(): TranscriptState {
   return { messages: [], live: [], tools: {}, subagents: {}, contextCheckpoints: [], status: 'running' }
@@ -480,6 +488,8 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             ...(e.toolErrors === undefined ? {} : { toolErrors: e.toolErrors }),
             ...(e.usage === undefined ? {} : { usage: addUsage(previous.usage, e.usage) }),
             ...(e.contextUsage === undefined ? {} : { contextUsage: e.contextUsage }),
+            // 同 `currentTool`:键在 = 显式设置或清除,键不在 = 保持原样
+            ...('notice' in e ? { notice: e.notice } : {}),
             ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq })
           }
         }
@@ -500,6 +510,9 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             status: e.status,
             phase: 'finishing',
             currentTool: undefined,
+            // 终态下错误框会把话说全,顶上再挂一句过期的「正在重试」只会误导
+            // —— 和 `applyEvent` 里 `error` 分支清 `notice` 是同一条理由
+            notice: undefined,
             ...(e.summary === undefined ? {} : { summary: e.summary }),
             ...(e.error === undefined ? {} : { error: e.error }),
             ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq }),
@@ -569,12 +582,27 @@ export function applyChildEvent(
     }
     case 'stream':
       if (e.delta.type === 'message_start') {
+        // 上游开始回话了 = 刚才那次退避成功了,提示到此为止(显式清除)
         return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
-          phase: 'thinking', at: undefined })
+          phase: 'thinking', notice: undefined, at: undefined })
       }
       if (e.delta.type === 'message_end') {
         return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
           phase: 'finishing', usage: e.delta.usage })
+      }
+      /*
+        ★★ 这两条以前落在下面那个 `return s` 上,于是**子代理的重试全程不可见**:
+        卡片上只有一个转圈的「运行中」,退避几次全失败之后直接跳到错误框 ——
+        看起来像它一次都没重试过。而重试就发生在 `router.ts` 那两层循环里,
+        主代理和子代理走的是同一份代码,区别只在于当时没人画子代理这一份。
+      */
+      if (e.delta.type === 'provider_retry') {
+        return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+          notice: { kind: 'retry', attempt: e.delta.attempt, reason: e.delta.reason } })
+      }
+      if (e.delta.type === 'provider_switch') {
+        return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
+          notice: { kind: 'switch', to: e.delta.to, reason: e.delta.reason } })
       }
       return s
     case 'tool_start':

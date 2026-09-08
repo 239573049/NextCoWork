@@ -54,7 +54,7 @@ import {
   findPreset
 } from '../shared/domain/presets'
 import type { ModelAlias, UpstreamProtocol } from '../shared/domain/provider'
-import { inheritModelSelection } from '../shared/domain/model-selection'
+import { subagentModelSelection } from '../shared/domain/model-selection'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
@@ -704,8 +704,11 @@ function monitorChildRun(
       })
     } else if (event.type === 'stream' && event.delta.type === 'message_end' && parent.status === 'running') {
       parent.emit({
+        // ★ 一轮回复完整结束 = 之前那句「正在退避重试」必然已经过期。清除走的是
+        //   和 `currentTool` 同一个约定(键在即清),所以哪怕这条遥测抢在继承事件
+        //   前头到达,卡片上也不会挂着一句过期的重试提示。
         type: 'subagent_update', callId, childRunId: child.runId,
-        phase: 'finishing', usage: event.delta.usage, toolCalls, toolErrors, childSeq
+        phase: 'finishing', notice: undefined, usage: event.delta.usage, toolCalls, toolErrors, childSeq
       })
     }
   })
@@ -829,7 +832,8 @@ function childRequestFor(
   parent: RunHandle,
   def: AgentDefinition,
   childRunId: string,
-  prompt: string
+  prompt: string,
+  configuredModel: { model: string; modelProviderId?: string }
 ): RunRequest {
   return {
     runId: childRunId,
@@ -870,11 +874,37 @@ function childRequestFor(
       这是**真实的提权路径**,不是理论风险(见 `minPermission` 的注释)。
     */
     permissionMode: minPermission(parentReq.permissionMode, def.permissionMode ?? 'full'),
-    // ★ 别名和供应商必须成对决定 —— 规则连同理由都在 `inheritModelSelection` 里
-    ...inheritModelSelection(def.model, parentReq),
+    // ★ 别名和供应商必须成对决定 —— 三档来源的优先级连同理由都在
+    //   `subagentModelSelection` 里。`configuredModel` 已经过可用性校验(见调用点)。
+    ...subagentModelSelection(def.model, configuredModel, parentReq),
     skillIds: parentReq.skillIds,
     agentType: def.name
   }
+}
+
+/**
+ * 设置页那个「默认子代理」当前**还指得到一条绑定吗**。
+ *
+ * ★ 这道校验不能省,也不能挪进 `subagentModelSelection`(那是个纯函数,够不着
+ * 路由器)。`settings.subagent.model` 是一个别名字符串,而供应商随时会被删、
+ * 别名随时会被改名 —— `ipc/provider.ts` 的 `repairModelSelection` 会在那些写入
+ * 之后修好它,但**中间存在窗口期**,而且用户手动改设置文件也绕得过去。
+ * 悬空时的表现不是报错,是子代理在路由器里拿到空候选集然后整条失败 ——
+ * 而父代理只会转述一句「子代理失败了」,用户无从知道是这一栏的锅。
+ *
+ * 查不到就退回 `{ model: '' }`,让 `subagentModelSelection` 落到下一档(父 run)。
+ * 静默降级是对的:这一栏是**偏好**,不是硬约束;硬约束是药丸上那个显式选择。
+ */
+function availableSubagentModel(configured: { model: string; modelProviderId?: string }):
+  { model: string; modelProviderId?: string } {
+  const model = configured.model.trim()
+  if (model === '') return { model: '' }
+  if (getRouter().resolveModel(model, configured.modelProviderId) === undefined) {
+    getHost().logger.warn(`[subagent] configured default model is unavailable: ${model}`)
+    return { model: '' }
+  }
+  const providerId = configured.modelProviderId
+  return { model, ...(providerId === undefined ? {} : { modelProviderId: providerId }) }
 }
 
 /**
@@ -944,7 +974,9 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
     }
 
     const childRunId = `${parent.runId}:sub:${String(++childSeq)}`
-    const childReq = childRequestFor(parentReq, parent, def, childRunId, sub.prompt)
+    const childReq = childRequestFor(
+      parentReq, parent, def, childRunId, sub.prompt, availableSubagentModel(configured)
+    )
 
     const startedAt = getHost().clock.now()
     parent.emit({

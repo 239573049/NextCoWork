@@ -7,7 +7,15 @@
  * ★ `electron` 整个替掉:`app.getPath` 与 `dialog` 在 node 环境不存在。
  * 附件根指向临时目录,于是 `attachmentRoot()` 跟着走。
  */
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  truncateSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -19,10 +27,12 @@ vi.mock('electron', () => ({
   dialog: { showOpenDialog: vi.fn() }
 }))
 
+import { dialog } from 'electron'
+import { MAX_ATTACHMENT_BYTES } from '../../../shared/domain/attachment'
 import { closeDatabase, openDatabase } from '../../db'
 import * as repo from '../../db/repo'
 import { attachmentRoot } from '../../net/attachment-protocol'
-import { listSessionAttachments, removeAttachment, uploadAttachment } from '../attachment'
+import { listSessionAttachments, pickAttachments, removeAttachment, uploadAttachment } from '../attachment'
 
 const bytesOf = (s: string): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Buffer.from(s, 'utf8')) as Uint8Array<ArrayBuffer>
@@ -256,5 +266,90 @@ describe('会话行不存在时也能上传', () => {  /**
     ).not.toThrow()
 
     expect(listSessionAttachments({ sessionId: 'BRAND-NEW-SESSION' })).toHaveLength(1)
+  })
+})
+
+/**
+ * ★ 这一组锁的是**两个入口的行为等价**,不是 dialog 本身。
+ *
+ * 菜单「添加附件」与拖拽/粘贴必须给出同形的托盘项:图片落盘、非图片只带路径。
+ * 曾经不是这样 —— 菜单一律落盘,而非图片落盘后在 `partsOf` 那边退化成一句
+ * 「[附件] 名字」,于是同一个 PDF 从菜单进来模型读不到,从拖拽进来能读到。
+ */
+describe('pickAttachments —— 与拖拽/粘贴同一套分流', () => {
+  const showOpenDialog = vi.mocked(dialog.showOpenDialog)
+
+  /** 在临时目录里造一个真文件,返回它的绝对路径 */
+  function fixture(name: string, content: string): string {
+    const path = join(userDataDir, name)
+    writeFileSync(path, content)
+    return path
+  }
+
+  beforeEach(() => {
+    showOpenDialog.mockReset()
+  })
+
+  it('★ 非图片不落盘,只回传用户选中的真实路径', async () => {
+    const path = fixture('说明.pdf', 'PDFDATA')
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path] })
+
+    const out = await pickAttachments({ scope: 'session', ownerId: 'S1' })
+
+    expect(out).toEqual([{ kind: 'path', path, name: '说明.pdf' }])
+    // 一个字节都不该被复制到附件根下
+    expect(existsSync(join(attachmentRoot(), 'sessions', 'S1'))).toBe(false)
+    expect(repo.listDraftAttachments('S1')).toHaveLength(0)
+  })
+
+  it('图片仍走落盘 —— 内联展示要有 ncw:// 地址', async () => {
+    const path = fixture('截图.png', 'PNGDATA')
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path] })
+
+    const out = await pickAttachments({ scope: 'session', ownerId: 'S1' })
+
+    expect(out).toHaveLength(1)
+    expect(out[0]?.kind).toBe('attachment')
+    const a = out[0]?.kind === 'attachment' ? out[0].attachment : undefined
+    expect(a?.url).toMatch(/^ncw:\/\/attachments\/sessions\/S1\/[0-9A-Z]+\.png$/)
+    expect(a?.displayName).toBe('截图.png')
+    // ★ 绝对路径不出主进程,这一支的约束没有被放松
+    expect(JSON.stringify(a)).not.toContain(userDataDir)
+  })
+
+  it('★ 超限的非图片仍然回传,超限的图片仍然被跳过', async () => {
+    // 稀疏文件:声明 33MB 但不占磁盘,跑得比写 33MB 快得多
+    const big = fixture('巨大.log', '')
+    truncateSync(big, MAX_ATTACHMENT_BYTES + 1)
+    const bigPng = fixture('巨图.png', '')
+    truncateSync(bigPng, MAX_ATTACHMENT_BYTES + 1)
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [big, bigPng] })
+
+    const out = await pickAttachments({ scope: 'session', ownerId: 'S1' })
+
+    // 上限存在的理由是结构化克隆的卡顿,而路径这一支根本不读字节 ——
+    // 拖一个 200MB 的日志进来是可以的,菜单选同一个文件没有理由被静默丢掉。
+    expect(out).toEqual([{ kind: 'path', path: big, name: '巨大.log' }])
+  })
+
+  it('单个文件失败不拖垮整批', async () => {
+    const ok = fixture('好.pdf', 'A')
+    showOpenDialog.mockResolvedValue({
+      canceled: false,
+      filePaths: [join(userDataDir, '不存在.pdf'), ok]
+    })
+
+    const out = await pickAttachments({ scope: 'session', ownerId: 'S1' })
+    expect(out).toEqual([{ kind: 'path', path: ok, name: '好.pdf' }])
+  })
+
+  it('目录被跳过 —— 不递归展开', async () => {
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [userDataDir] })
+    expect(await pickAttachments({ scope: 'session', ownerId: 'S1' })).toEqual([])
+  })
+
+  it('取消返回空数组', async () => {
+    showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] })
+    expect(await pickAttachments({ scope: 'session' })).toEqual([])
   })
 })

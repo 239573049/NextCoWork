@@ -240,6 +240,25 @@ export function SubagentNode({
 
   const status = state?.status ?? 'done';
   const errorText = state?.error === undefined ? undefined : agentErrorText(state.error, t);
+  /*
+    ★★ 「正在退避重试」以前**只画在主对话的状态行上**,而子代理不看状态行 ——
+    于是限流退避在这张卡片上和「跑得慢」一模一样,几次退避全失败之后直接跳到
+    错误框,看起来就像子代理根本没重试(它和主代理走的是同一份 `router.ts`)。
+
+    ★ 卡片默认折叠(只有失败才自动展开),所以标题行那一格必须先说一句短的;
+    带原因的完整句子放在展开后的横幅里,复用状态行那两条文案。
+  */
+  const notice = running ? state?.notice : undefined;
+  const noticeLabel = notice === undefined
+    ? undefined
+    : notice.kind === 'retry'
+      ? t('chat.subagent.notice.retry', { attempt: notice.attempt })
+      : t('chat.subagent.notice.switch', { to: notice.to });
+  const noticeDetail = notice === undefined
+    ? undefined
+    : notice.kind === 'retry'
+      ? t('chat.status.retrying', { attempt: notice.attempt, reason: notice.reason })
+      : t('chat.status.providerSwitched', { to: notice.to, reason: notice.reason });
   // Failed subagents expose their diagnostic automatically; users can still collapse it.
   const open = manual ?? status === 'error';
   const duration = state?.startedAt === undefined
@@ -275,8 +294,9 @@ export function SubagentNode({
         <span className="min-w-0 flex-1 truncate text-fg">{title}</span>
         {state?.subagentType !== undefined && <span className="max-w-[24%] truncate text-[11px] text-fg-faint">{state.subagentType}</span>}
         {state?.background === true && <span className="shrink-0 text-[11px] text-accent-soft">{t('chat.subagent.mode.background')}</span>}
-        <span className={cn("shrink-0 text-[11px]", running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}>
-          {t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
+        <span className={cn("shrink-0 text-[11px]",
+          noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}>
+          {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
         </span>
         {duration !== undefined && <span className="shrink-0 font-mono text-[11px] text-fg-faint">{duration}</span>}
       </button>
@@ -295,6 +315,14 @@ export function SubagentNode({
             </>}
             <span>{t('chat.subagent.detail.runId')}</span><code className="truncate text-right text-fg-faint">{state?.childRunId ?? t('chat.subagent.unavailable')}</code>
           </div>
+          {noticeDetail !== undefined && (
+            <div
+              data-testid="subagent-notice"
+              className="selectable mt-2 whitespace-pre-wrap break-words rounded-[5px] border border-danger/30 bg-danger/10 px-2 py-1 text-[11px] leading-relaxed text-danger"
+            >
+              {noticeDetail}
+            </div>
+          )}
           {state?.currentTool !== undefined && (
             <div className="mt-2 truncate rounded-[5px] bg-tint px-2 py-1 text-[11px] text-fg">
               {t('chat.subagent.detail.currentTool', { tool: state.currentTool })}

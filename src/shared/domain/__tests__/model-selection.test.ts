@@ -5,7 +5,7 @@ import {
   modelSelectionKey,
   parseModelSelectionKey,
   selectModelBinding,
-  inheritModelSelection
+  subagentModelSelection
 } from '../model-selection'
 
 function provider(id: string, priority: number, enabled = true): UpstreamProvider {
@@ -73,23 +73,45 @@ describe('下拉框复合键', () => {
   })
 })
 
-describe('子代理继承模型', () => {
+describe('子代理选模型', () => {
   const parent = { model: 'gpt-5.6-sol', modelProviderId: 'codex' }
+  const none = { model: '' }
 
-  it('没声明模型时连供应商一起继承', () => {
-    expect(inheritModelSelection(undefined, parent))
+  it('三档都空不下来时连供应商一起继承父亲', () => {
+    expect(subagentModelSelection(undefined, none, parent))
       .toEqual({ model: 'gpt-5.6-sol', modelProviderId: 'codex' })
   })
 
   it('★ 自己声明了别名时供应商必须是「没指定」,不能沿用父亲那家', () => {
     // frontmatter 里只写得下裸别名。沿用父亲的锁会拼出「A 家的别名 + B 家的锁」,
     // 候选集为空,报错还指着一个跟这次调用无关的供应商。
-    expect(inheritModelSelection('claude-fable-5', parent))
+    expect(subagentModelSelection('claude-fable-5', none, parent))
       .toEqual({ model: 'claude-fable-5', modelProviderId: undefined })
   })
 
   it('父亲没锁时不凭空多出一个锁', () => {
-    expect(inheritModelSelection(undefined, { model: 'gpt-5.5' }))
+    expect(subagentModelSelection(undefined, none, { model: 'gpt-5.5' }))
       .toEqual({ model: 'gpt-5.5', modelProviderId: undefined })
+  })
+
+  it('★★ 设置里配了「默认子代理」时它盖过父亲 —— 这一栏就是为了别跟着主力模型走', () => {
+    expect(subagentModelSelection(undefined, { model: 'deepseek-v4-flash', modelProviderId: 'routin' }, parent))
+      .toEqual({ model: 'deepseek-v4-flash', modelProviderId: 'routin' })
+  })
+
+  it('设置里的别名和供应商成对生效,不会拼出「配置的别名 + 父亲的锁」', () => {
+    expect(subagentModelSelection(undefined, { model: 'deepseek-v4-flash' }, parent))
+      .toEqual({ model: 'deepseek-v4-flash', modelProviderId: undefined })
+  })
+
+  it('子代理自己声明的别名盖过设置 —— 越具体的越优先', () => {
+    expect(
+      subagentModelSelection('claude-fable-5', { model: 'deepseek-v4-flash', modelProviderId: 'routin' }, parent)
+    ).toEqual({ model: 'claude-fable-5', modelProviderId: undefined })
+  })
+
+  it('设置里是空白串时当作没配,而不是拿一个空别名去发请求', () => {
+    expect(subagentModelSelection(undefined, { model: '  ' }, parent))
+      .toEqual({ model: 'gpt-5.6-sol', modelProviderId: 'codex' })
   })
 })

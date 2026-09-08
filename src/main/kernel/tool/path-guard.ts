@@ -157,3 +157,38 @@ export function resolveInWorkspace(root: string, p: string): string {
 export function toWorkspaceRelative(root: string, abs: string): string {
   return relative(realpathSync.native(root), abs).split(sep).join('/')
 }
+
+/**
+ * 绝对路径 → **说给模型听的那一种形式**:工作区内的压成工作区相对,
+ * 工作区外的保留绝对路径(与工具回执同形,即 realpath 之后的那一种)。
+ * 没有工作区时一律绝对。
+ *
+ * ★ 这是全项目对「一条路径怎么写给模型」的**唯一**答案 —— 工具回执(`relOf`)
+ * 和用户拖/选进来的文件引用(`file_ref`)都走它。两处各写一遍的后果是:模型从
+ * 附件里读到 `/Users/x/proj/a.ts`,从 grep 回执里读到 `src/a.ts`,于是把同一个
+ * 文件当成两个。
+ *
+ * ★ **绝不产出 `../../x`**。那种形式对不上任何一个根,模型再喂回来时基准全看运气。
+ * 判定走 `resolveAnywhere` 而不是字符串前缀:macOS 上 `/var` 与 `/private/var`
+ * 是同一个目录,词法比较会把工作区内的文件判到外面去(见本函数上方那段注释)。
+ */
+export function displayPath(root: string, abs: string): string {
+  if (root === '') return abs
+  try {
+    /*
+      ★ **比较之前两边都得 realpath**,而这里只有 `resolveAnywhere` 做得到 ——
+      它返回的 `r.abs` 才是能和 `toWorkspaceRelative` 里那个 realpath 过的根对齐的
+      形式。直接把入参喂给 `toWorkspaceRelative` 的话,根是 `/private/var/…`、
+      入参是 `/var/…`,`relative()` 算出一串 `../..` 于是判定成「工作区外」——
+      而调用方(`file_ref`)给的恰恰就是没折算过的那种路径。
+    */
+    const r = resolveAnywhere(root, abs)
+    if (r.outside) return r.abs
+    const rel = toWorkspaceRelative(root, r.abs)
+    if (rel === '') return '.'
+    return rel.startsWith('../') || rel === '..' ? r.abs : rel
+  } catch {
+    // 根读不到(工作区被删/改名)。绝对路径本身仍然成立,原样给出去。
+    return abs
+  }
+}

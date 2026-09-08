@@ -5,7 +5,7 @@
  *   send('window:ready') → invoke('app:getBootstrap') → 首屏 → on('...') 增量
  */
 import type { Bootstrap } from '../../../shared/domain/bootstrap'
-import type { DirListing } from '../../../shared/domain/file-tree'
+import type { DirListing, FileSuggestion } from '../../../shared/domain/file-tree'
 import type { SessionInputState } from '../../../shared/domain/queued-input'
 import type { AppSettings, AppSettingsPatch } from '../../../shared/domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../../../shared/domain/tab'
@@ -83,6 +83,18 @@ export function closeWorkspace(id: string): Promise<void> {
  */
 export function listDir(workspaceId: string, path: string): Promise<DirListing> {
   return invoke('workspace:listDir', { workspaceId, path })
+}
+
+/**
+ * 输入框 `@` 的文件检索。**排序在主进程做**,回来的已经是排好序的十几条 ——
+ * 渲染层不该自己再排一遍(那就有两套顺序了,见 `shared/domain/fuzzy-path.ts`)。
+ */
+export function searchWorkspaceFiles(
+  workspaceId: string,
+  query: string,
+  limit?: number
+): Promise<FileSuggestion[]> {
+  return invoke('workspace:searchFiles', { workspaceId, query, limit })
 }
 
 // ─── Tab 布局 ───

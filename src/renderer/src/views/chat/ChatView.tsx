@@ -224,12 +224,27 @@ export function ChatView({
       : { key, name, status: 'done', path }
   }
 
+  /**
+   * 菜单里的「添加附件」。★ **落进托盘的东西与拖拽/粘贴完全同形** ——
+   * 图片是落好盘的 `attachment`,非图片是一条 `path`。分流本身在主进程做
+   * (只有它拿得到 dialog 选中的真实路径),这里只是把两种形态摊成 chip。
+   */
   const pickAttachment = useCallback(() => {
-    // 走主进程 dialog —— 渲染层不指定路径,回来的已经是落好盘的附件
+    // 走主进程 dialog —— 渲染层不指定路径,路径是用户在系统对话框里选定的
     void pickAttachments('session', ensureSessionId()).then((list) => {
       setTray((t) => [
         ...t,
-        ...list.map((a) => ({ key: a.id, name: a.displayName, status: 'done' as const, attachment: a }))
+        ...list.map((p) =>
+          p.kind === 'path'
+            ? // key 只是 chip 的本地身份,路径型的没有附件 id 可用
+              { key: ulid(), name: p.name, status: 'done' as const, path: p.path }
+            : {
+                key: p.attachment.id,
+                name: p.attachment.displayName,
+                status: 'done' as const,
+                attachment: p.attachment
+              }
+        )
       ])
     })
   }, [ensureSessionId])
@@ -397,8 +412,12 @@ export function ChatView({
   )
 }
 
+/**
+ * 输入框上方的任务清单。默认折叠 —— 展开态会顶掉输入框上方的空间,而清单标题行
+ * 里已经带了「已完成 x/y」、当前进行项和进度条,不展开也够看。想看全部再点开。
+ */
 function TaskChecklist({ todos, t }: { todos: readonly TodoItem[]; t: ReturnType<typeof useI18n>['t'] }): ReactNode {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(true)
   const done = todos.filter((item) => item.status === 'completed').length
   const active = todos.find((item) => item.status === 'in_progress')
   const progress = todos.length === 0 ? 0 : done / todos.length

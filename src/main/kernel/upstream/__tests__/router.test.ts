@@ -187,6 +187,7 @@ function rig(opts: {
   aliases: ModelAlias[]
   failover?: boolean
   keys?: Record<string, string | null>
+  rateLimitFloorMs?: number
   responses: Array<Response | (() => Response) | Error>
 }): Rig {
   const calls: string[] = []
@@ -228,6 +229,9 @@ function rig(opts: {
   return {
     router: new UpstreamRouter(host, config, {
       baseDelayMs: 0,
+      // 限流退避的默认基数是秒级(生产上必须如此),测试里压成 0 —— 否则每个
+      // 429 用例都要真的睡上几秒。要断言退避本身的用例自己传一个小的非零值。
+      rateLimitFloorMs: opts.rateLimitFloorMs ?? 0,
       onUsageAttempt: (record) => usageRecords.push(record)
     }),
     host,
@@ -668,6 +672,48 @@ describe('UpstreamRouter · 重试与切换', () => {
     const out = await drain(router)
     // reason 带着上游原话 —— 状态行要靠它说明「为什么在等」,而不是只说「正在重试」
     expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0, reason: 'slow' })
+  })
+
+  it('限流没给 Retry-After 时,退避走秒级的那条路,不是 500ms 那张表', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      rateLimitFloorMs: 40,
+      responses: [fail(429, 'rate_limit_error', 'quota'), ok(sseBody({ text: 'x' }))]
+    })
+    const out = await drain(router)
+    // rig 的 baseDelayMs 是 0,所以这个 40 只可能来自限流专用的那条计算
+    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 40, reason: 'quota' })
+    expect(out.at(-1)?.type).toBe('message_end')
+  })
+
+  it('一条流吃到限流,同一个路由器上的其它流在发请求之前就被挡住', async () => {
+    const { router, calls } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      // 旁路模式(出厂默认):候选不做健康过滤,于是这里量的确实是闸门本身,
+      // 而不是「连挂三次被判不健康」那条另一码事的路径
+      failover: false,
+      rateLimitFloorMs: 20,
+      responses: [
+        fail(429, 'rate_limit_error', 'quota'),
+        fail(429, 'rate_limit_error', 'quota'),
+        fail(429, 'rate_limit_error', 'quota'),
+        ok(sseBody({ text: 'x' }))
+      ]
+    })
+    // 第一条流把三次机会用光,并留下闸门(假时钟不推进,所以它必然还没到期)
+    expect((await drain(router)).at(-1)).toMatchObject({ type: 'error', error: { code: 'rate_limit' } })
+    expect(calls).toHaveLength(3)
+
+    const second = await drain(router)
+    /*
+      ★ 断言的是**第一个**事件:第二条流一个请求都还没发就先等 ——
+      并发子代理互相把配额打光,靠的正是这一下拦截,而不是各自事后重试。
+    */
+    expect(second[0]).toMatchObject({ type: 'provider_retry', reason: 'quota' })
+    expect(calls).toHaveLength(4)
+    expect(second.at(-1)?.type).toBe('message_end')
   })
 
   it('fetch 抛出被归一化成可重试的 network 错误', async () => {

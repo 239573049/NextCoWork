@@ -35,6 +35,18 @@ export interface DirListing {
 
 export const DIR_LISTING_LIMIT = 2000
 
+/**
+ * 输入框 `@` 检索回来的一条候选。
+ *
+ * ★ 只有 `path` 和 `name`,**没有 kind/size/mtime** —— 它不是树里的一项,
+ * 而是「一条能落进草稿的引用」。`path` 是工作区相对、`/` 分隔的,
+ * 因为它会原样写进 `[name](path)` 发给模型,而那正是 `displayPath` 认的写法。
+ */
+export interface FileSuggestion {
+  path: string
+  name: string
+}
+
 /** 工具条上那个「↑↓」的三档。**目录永远在前**,排序只作用在两组各自内部。 */
 export type SortBy = 'name' | 'mtime' | 'size'
 

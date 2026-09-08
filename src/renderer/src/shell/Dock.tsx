@@ -114,6 +114,11 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
   return (
     <section data-dock-group-id={node.id} className={cn('app-no-drag relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-hairline', node.id === dock.activeGroupId && 'outline outline-1 outline-accent/30')} onMouseDown={() => useTabsStore.getState().activateDockGroup(workspace.id, node.id)} onDragOver={(event) => { if (!event.dataTransfer.types.includes(DOCK_TAB_MIME)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDragZone(zoneAt(event)) }} onDragLeave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragZone(null) }} onDrop={onDrop}>
       <InnerTabBar
+        // ★ 实色,不能让图片主题的底图透上来 —— 这条 Tab 条和内容区是两层
+        //   (参考实现里图是从这条下面那道 hairline 开始铺的)。写在这里而不是
+        //   InnerTabBar 内部:左右/底部面板里的同一条坐在 `bg-surface` 上,
+        //   钉死 canvas 会让那三格的 Tab 条比面板亮一格。
+        className="bg-canvas"
         tabs={tabs}
         groupId={node.id}
         workspaceId={workspace.id}

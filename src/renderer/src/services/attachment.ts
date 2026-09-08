@@ -7,7 +7,8 @@
 import type {
   Attachment,
   AttachmentScope,
-  AttachmentUploadRequest
+  AttachmentUploadRequest,
+  PickedAttachment
 } from '../../../shared/domain/attachment'
 import { MAX_ATTACHMENT_BYTES, mimeOfExt } from '../../../shared/domain/attachment'
 import { invoke } from './ipc'
@@ -16,11 +17,16 @@ export function uploadAttachment(req: AttachmentUploadRequest): Promise<Attachme
   return invoke('attachment:upload', req)
 }
 
-/** 走主进程 dialog。取消时返回空数组,不是 null —— 调用点不必分两种空 */
+/**
+ * 走主进程 dialog。取消时返回空数组,不是 null —— 调用点不必分两种空。
+ *
+ * ★ 回来的是**两种形态的联合**:图片已落盘(`kind: 'attachment'`),
+ * 非图片只有路径(`kind: 'path'`)—— 与拖拽/粘贴同规则,见主进程侧注释。
+ */
 export function pickAttachments(
   scope: AttachmentScope,
   ownerId?: string
-): Promise<Attachment[]> {
+): Promise<PickedAttachment[]> {
   return invoke('attachment:pick', { scope, ownerId })
 }
 

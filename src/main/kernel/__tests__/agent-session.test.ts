@@ -1,10 +1,13 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
 import { assistantMessage, userMessage } from '../../../shared/agent/message'
 import type { RunRequest } from '../../../shared/agent/run-request'
-import { MAX_TURNS } from '../../../shared/agent/run-request'
+import { MAX_TURNS, MAX_TURNS_GOAL } from '../../../shared/agent/run-request'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ToolResult, ToolSource } from '../../../shared/agent/tool'
 import { toolOk } from '../../../shared/agent/tool'
@@ -89,7 +92,7 @@ function fakeUpstream(
     ): AsyncIterable<ProviderStreamEvent> {
       requests.push(r)
       contexts.push(context)
-      // 轮次用尽就重复最后一段 —— MAX_TURNS 那条测试要跑满 25 轮
+      // 脚本用尽就重复最后一段；需要时测试可验证运行跨过旧轮次默认值。
       const script = turns[Math.min(i, turns.length - 1)]
       i++
       for (const ev of script ?? []) yield ev
@@ -1078,32 +1081,34 @@ describe('错误与边界', () => {
     expect(upstream.requests).toHaveLength(1)
   })
 
-  /**
-   * ★ 轮次耗尽时**不伪造一条「我做完了」的助手消息** ——
-   * 那会让用户以为模型给出了结论,而实际上它只是被我们掐断了。
-   */
-  it('轮次耗尽时以 error 收尾,不伪造模型输出', async () => {
+  /** Runs may continue beyond the legacy 25-turn default until the model ends. */
+  it('超过旧轮次上限后仍继续,直到模型正常收尾', async () => {
+    const turns = Array.from({ length: MAX_TURNS + 2 }, (_, i) => callsTool(`c${i}`, 'echo'))
+    turns.push(says('完成'))
     const { events, upstream, history } = await runSession({
-      upstream: fakeUpstream([callsTool('c1', 'echo')]),
+      upstream: fakeUpstream(turns),
       tools: registry({ internalId: 'echo' })
     })
 
     const end = runEnd(events)
-    expect(end.status).toBe('error')
-    expect(end.error?.message).toContain('最大轮次')
-    expect(upstream.requests).toHaveLength(MAX_TURNS)
-    expect(history.at(-1)?.role).toBe('user') // 停在最后一条工具结果上
+    expect(end.status).toBe('done')
+    expect(upstream.requests.length).toBe(MAX_TURNS + 3)
+    expect(history.at(-1)?.role).toBe('assistant')
     expectNoOrphans(history)
   })
 
-  /** goal 模式「持续推进直到目标完成」= 更高的轮次上限 */
-  it('goal 模式的轮次上限更高', async () => {
-    const { upstream } = await runSession({
-      upstream: fakeUpstream([callsTool('c1', 'echo')]),
+  /** goal mode also has no fixed turn ceiling. */
+  it('goal 模式不会被固定轮次上限截断', async () => {
+    const turns = Array.from({ length: MAX_TURNS_GOAL + 1 }, (_, i) => callsTool(`c${i}`, 'echo'))
+    turns.push(says('完成'))
+    const { events, upstream, history } = await runSession({
+      upstream: fakeUpstream(turns),
       request: req({ mode: 'goal' }),
       tools: registry({ internalId: 'echo' })
     })
-    expect(upstream.requests.length).toBeGreaterThan(MAX_TURNS)
+    expect(runEnd(events).status).toBe('done')
+    expect(upstream.requests.length).toBe(MAX_TURNS_GOAL + 2)
+    expectNoOrphans(history)
   })
 
   /**
@@ -1483,5 +1488,126 @@ describe('插话', () => {
     })
     const ids = history.map((m) => m.id)
     expect(ids.indexOf('q1')).toBeLessThan(ids.indexOf('q2'))
+  })
+})
+
+/**
+ * 用户拖/选进来的文件引用,路径写成什么形式发给模型。
+ *
+ * ★ 测的是**两个入口给出同一种写法**:工作区内 → `src/a.ts`,工作区外 → 绝对路径。
+ * 不一致的后果是模型把同一个文件当成两个 —— 它从 grep 回执里看到 `src/a.ts`,
+ * 从附件里看到 `/Users/…/src/a.ts`,于是读两遍、改两遍。
+ *
+ * 用真实临时目录而不是 `/ws`:判定要经过 realpath(macOS 上 `/var` 与 `/private/var`),
+ * 假根一律判成「工作区外」,那样这组测试会全绿地什么都没测到。
+ */
+describe('file_ref 路径归一化', () => {
+  let base = ''
+  let root = ''
+  let outside = ''
+
+  beforeAll(() => {
+    base = mkdtempSync(join(tmpdir(), 'nextcowork-fileref-'))
+    root = join(base, 'ws')
+    outside = join(base, 'outside')
+    mkdirSync(join(root, 'src'), { recursive: true })
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(root, 'src', 'a.ts'), '')
+    writeFileSync(join(outside, 'notes.md'), '')
+  })
+
+  afterAll(() => {
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  function runIn(input: ContentPart[]): Promise<Ran> {
+    const request = req({ input })
+    const handle = new RunHandle(request)
+    const upstream = fakeUpstream([says('好')])
+    const session = new AgentSession(
+      { host: quietHost(), upstream, tools: registry(), workspaceRoot: root },
+      handle,
+      request
+    )
+    const events = collect(handle)
+    return session.run().then(async () => ({
+      events: await events,
+      history: session.history,
+      handle,
+      upstream
+    }))
+  }
+
+  const refs = (ms: readonly AgentMessage[]): ContentPart[] =>
+    partsOf(ms).filter((p) => p.type === 'file_ref')
+
+  it('★ 工作区内的文件 → 工作区相对路径,与工具回执同一种写法', async () => {
+    const { history } = await runIn([
+      { type: 'file_ref', path: join(root, 'src', 'a.ts'), name: 'a.ts' }
+    ])
+    expect(refs(history)).toEqual([{ type: 'file_ref', path: 'src/a.ts', name: 'a.ts' }])
+  })
+
+  it('★ 工作区外的文件 → 绝对路径,模型没有别的办法定位它', async () => {
+    const { history } = await runIn([
+      { type: 'file_ref', path: join(outside, 'notes.md'), name: 'notes.md' }
+    ])
+    const [ref] = refs(history)
+    expect(ref).toMatchObject({ type: 'file_ref', name: 'notes.md' })
+    expect(ref?.type === 'file_ref' && ref.path.endsWith('/outside/notes.md')).toBe(true)
+    expect(ref?.type === 'file_ref' && ref.path.startsWith('/')).toBe(true)
+  })
+
+  it('归一化后的路径就是发给模型的那一个(转录与请求不分叉)', async () => {
+    const { upstream } = await runIn([
+      { type: 'file_ref', path: join(root, 'src', 'a.ts'), name: 'a.ts' }
+    ])
+    const sent = upstream.requests[0]?.messages.flatMap((m) => m.parts) ?? []
+    expect(sent).toContainEqual({ type: 'file_ref', path: 'src/a.ts', name: 'a.ts' })
+  })
+
+  it('其他 part 一个字节都不动', async () => {
+    const { history } = await runIn([
+      { type: 'text', text: `看看 ${join(root, 'src', 'a.ts')}` },
+      { type: 'image', mime: 'image/png', dataRef: 'ncw://attachments/sessions/S1/X.png' }
+    ])
+    expect(partsOf(history)[0]).toEqual({ type: 'text', text: `看看 ${join(root, 'src', 'a.ts')}` })
+    expect(partsOf(history)[1]).toEqual({
+      type: 'image',
+      mime: 'image/png',
+      dataRef: 'ncw://attachments/sessions/S1/X.png'
+    })
+  })
+
+  /** ★ 生成中排队的那条走的是另一个提交点 —— 它漏掉的话两个入口又不一致了 */
+  it('插队进来的消息同样归一化', async () => {
+    const request = req()
+    const handle = new RunHandle(request)
+    const tools = registry({
+      internalId: 'echo',
+      execute: (input) => {
+        handle.setInterject([
+          {
+            id: 'q1',
+            parts: [{ type: 'file_ref', path: join(root, 'src', 'a.ts'), name: 'a.ts' }]
+          }
+        ])
+        return Promise.resolve(toolOk(JSON.stringify(input)))
+      }
+    })
+    const session = new AgentSession(
+      {
+        host: quietHost(),
+        upstream: fakeUpstream([callsTool('c1', 'echo'), says('好')]),
+        tools,
+        workspaceRoot: root
+      },
+      handle,
+      request
+    )
+    await session.run()
+
+    const injected = session.history.find((m) => m.id === 'q1')
+    expect(injected?.parts).toEqual([{ type: 'file_ref', path: 'src/a.ts', name: 'a.ts' }])
   })
 })

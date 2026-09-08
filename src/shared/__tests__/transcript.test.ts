@@ -321,6 +321,41 @@ describe('applyEvent · 终局与元信息', () => {
     })
   })
 
+  it('★ 子代理的退避重试投影到卡片上 —— 主对话的状态行看不到它', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2'
+    })
+    s = applyChildEvent(s, 'r2', {
+      type: 'stream',
+      delta: { type: 'provider_retry', attempt: 2, delayMs: 8000, reason: 'exceeded rate limit' }
+    })
+    expect(s.subagents.c1?.notice).toEqual({ kind: 'retry', attempt: 2, reason: 'exceeded rate limit' })
+
+    // 上游开口了 = 这次退避成功了。提示必须消失,否则卡片会一直挂着一句
+    // 「正在重试」直到跑完 —— 那比不显示更误导
+    s = applyChildEvent(s, 'r2', { type: 'stream', delta: { type: 'message_start', model: 'm' } })
+    expect(s.subagents.c1?.notice).toBeUndefined()
+    expect(s.subagents.c1?.phase).toBe('thinking')
+  })
+
+  it('子代理终态清掉重试提示 —— 错误框里已经把话说全了', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2'
+    })
+    s = applyChildEvent(s, 'r2', {
+      type: 'stream',
+      delta: { type: 'provider_switch', from: 'p1', to: 'p2', reason: 'exceeded rate limit' }
+    })
+    expect(s.subagents.c1?.notice).toEqual({ kind: 'switch', to: 'p2', reason: 'exceeded rate limit' })
+
+    s = applyChildEvent(s, 'r2', {
+      type: 'run_end', status: 'error',
+      error: { code: 'rate_limit', message: 'exceeded rate limit', retryable: true }, at: 500
+    })
+    expect(s.subagents.c1?.notice).toBeUndefined()
+    expect(s.subagents.c1?.status).toBe('error')
+  })
+
   it('后台子 run 父回合已结束时，从子消息提交补出最终摘要', () => {
     let s = applyEvent(emptyTranscript(), {
       type: 'subagent_start', callId: 'c1', childRunId: 'r2', background: true

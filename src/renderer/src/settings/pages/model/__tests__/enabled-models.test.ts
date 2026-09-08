@@ -5,7 +5,14 @@ import {
   BUILTIN_PROVIDER_ID,
   findPreset
 } from '../../../../../../shared/domain/presets'
-import { avatarInitial, modelOptions, providerEntries } from '../enabled-models'
+import {
+  avatarInitial,
+  modelOptions,
+  providerAliasOptions,
+  providerEntries,
+  roleModelChoice,
+  selectableProviders
+} from '../enabled-models'
 import { parseModelSelectionKey } from '../../../../../../shared/domain/model-selection'
 
 const prov = (id: string, name = id): UpstreamProvider => ({
@@ -182,5 +189,60 @@ describe('avatarInitial', () => {
   it('空名字有兜底,不返回空串', () => {
     expect(avatarInitial('')).toBe('?')
     expect(avatarInitial('   ')).toBe('?')
+  })
+})
+
+// ── 「默认模型」/「默认子代理」那两栏的两级下拉 ──
+
+describe('两级下拉:先供应商,再它的模型', () => {
+  const a = prov('a', 'A 家')
+  const b = prov('b', 'B 家')
+  const models = [alias('m1', 'a'), alias('m2', 'a'), alias('m1', 'b')]
+
+  it('只列出挑得出模型的供应商 —— 空的那家点进去是死路', () => {
+    expect(selectableProviders(models, [a, b, prov('c')], '').map((p) => p.id)).toEqual(['a', 'b'])
+  })
+
+  it('停用的供应商不进第一级', () => {
+    expect(selectableProviders(models, [a, { ...b, enabled: false }], '').map((p) => p.id))
+      .toEqual(['a'])
+  })
+
+  it('★ 已经存着的那一家即使不可选也留着 —— 抹掉它那一格会显示成「没配过」', () => {
+    const gone = { ...b, enabled: false }
+    expect(selectableProviders(models, [a, gone], 'b').map((p) => p.id)).toEqual(['a', 'b'])
+  })
+
+  it('第二级只给这一家的别名,且是裸别名', () => {
+    expect(providerAliasOptions(models, 'a')).toEqual([
+      { value: 'm1', label: 'm1' },
+      { value: 'm2', label: 'm2' }
+    ])
+  })
+
+  it('没选供应商时第二级为空', () => {
+    expect(providerAliasOptions(models, '')).toEqual([])
+  })
+
+  it('停用的别名不进第二级 —— 和 modelBindingsFor 的过滤保持一致', () => {
+    expect(providerAliasOptions([alias('m1', 'a'), { ...alias('m2', 'a'), enabled: false }], 'a'))
+      .toEqual([{ value: 'm1', label: 'm1' }])
+  })
+
+  it('钉住了供应商时两级各显示各的', () => {
+    expect(roleModelChoice(models, [a, b], 'm1', 'b')).toEqual({ providerId: 'b', alias: 'm1' })
+  })
+
+  it('空别名 = 跟随对话,两级都空', () => {
+    expect(roleModelChoice(models, [a, b], '', undefined)).toEqual({ providerId: '', alias: '' })
+  })
+
+  it('★ 没钉供应商时显示解析出来的那一家 —— 那就是此刻真会收到请求的那家', () => {
+    // a.priority 与 b 同分,靠 sort 的稳定性保留输入顺序 → 落在 a
+    expect(roleModelChoice(models, [a, b], 'm1', undefined)).toEqual({ providerId: 'a', alias: 'm1' })
+  })
+
+  it('悬空的一对原样显示,不装作没配过', () => {
+    expect(roleModelChoice(models, [a, b], 'ghost', 'b')).toEqual({ providerId: 'b', alias: 'ghost' })
   })
 })

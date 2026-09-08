@@ -46,6 +46,22 @@ import { ImageInputError, prepareRequestImages } from './images'
 /** 每个 provider 最多试几次(含首次)。第 3 次还不行,换下一个 provider 比继续磕更有用。 */
 const MAX_ATTEMPTS = 3
 const DEFAULT_BASE_DELAY_MS = 500
+/**
+ * 限流(429)专用的退避基数,和上面那个**刻意不是一个数**。
+ *
+ * ★★ 500ms 起步的指数退避对 5xx / 网络抖动是对的 —— 那类故障是瞬时的,退得越快
+ * 恢复越快。**限流不是**:配额窗口是分钟级的,0.5s、1s 退回去只是再撞两次墙,
+ * 三次机会两秒内用光,然后报一条「超出速率限制」——用户看到的是「重试根本没发生」。
+ * 上游给了 `Retry-After` 就一切以它为准(见 `retryDelayFor`),这个数只在**没给**
+ * 的时候兜底,而 Azure / 各家网关经常不给。
+ */
+const DEFAULT_RATE_LIMIT_FLOOR_MS = 4_000
+/**
+ * 退避的硬上限。`Retry-After: 3600` 是真会出现的(配额按小时重置),照着睡
+ * 一小时和卡死没有区别 —— 截断到一分钟,让用户在状态行上看见还在退避,
+ * 再由他决定要不要换一家或者停掉。
+ */
+const MAX_RETRY_DELAY_MS = 60_000
 /** 连续失败到这个数就判不健康 */
 const UNHEALTHY_AFTER = 3
 const COOLDOWN_MS = 30_000
@@ -140,6 +156,8 @@ type Outcome =
 
 export interface UpstreamRouterOptions {
   baseDelayMs?: number
+  /** 限流退避的基数。见 `DEFAULT_RATE_LIMIT_FLOOR_MS`;测试压成 0 就不会真的睡。 */
+  rateLimitFloorMs?: number
   /** Synchronous sink; failures are isolated so telemetry can never fail a request. */
   onUsageAttempt?: (record: UnpricedUsageAttempt) => void
   /**
@@ -154,7 +172,21 @@ export interface UpstreamRouterOptions {
 
 export class UpstreamRouter {
   private readonly healthMap = new Map<string, ProviderHealth>()
+  /**
+   * 「这一家在这个时刻之前别再发请求了」—— 被限流之后立起来的闸门。
+   *
+   * ★★ 它的价值**整个在于这个类是进程内单例**(`runtime.ts` 的 `getRouter()`):
+   * 主代理和它派出去的每一个子代理共用同一个实例,于是任意一条流吃到 429,
+   * 其余几条**在发请求之前**就会被挡住。没有它,四个并发子代理是各自独立退避的:
+   * 同时撞、同时退、再同时撞,把本来够用的配额彼此打光,而每一条看到的都只是
+   * 「我被限流了」,没有任何一条知道是自己人干的。
+   *
+   * ★ 只记 `rate_limit`。5xx / 网络错误是**这一条请求**的事,拿它去挡住别的流
+   * 会把一次偶发抖动放大成全局停顿。
+   */
+  private readonly rateLimitGate = new Map<string, { until: number; reason: string }>()
   private readonly baseDelayMs: number
+  private readonly rateLimitFloorMs: number
   private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
   /**
    * ★ 在构造函数里自己建,**不作为必填参数** —— 于是 gateway 和现有全部测试里那些
@@ -168,6 +200,7 @@ export class UpstreamRouter {
     opts: UpstreamRouterOptions = {}
   ) {
     this.baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
+    this.rateLimitFloorMs = opts.rateLimitFloorMs ?? DEFAULT_RATE_LIMIT_FLOOR_MS
     this.onUsageAttempt = opts.onUsageAttempt
     this.credentials = new CredentialResolver(host, opts.onCredentialChanged)
   }
@@ -203,8 +236,15 @@ export class UpstreamRouter {
   }
 
   resetHealth(providerId?: string): void {
-    if (providerId === undefined) this.healthMap.clear()
-    else this.healthMap.delete(providerId)
+    if (providerId === undefined) {
+      this.healthMap.clear()
+      this.rateLimitGate.clear()
+    } else {
+      this.healthMap.delete(providerId)
+      // 「重置健康状态」在用户眼里就是「当它没挂过,现在就重试」——
+      // 留着限流闸门会让那一下点击看起来毫无反应(它会安静地睡满剩下的退避)。
+      this.rateLimitGate.delete(providerId)
+    }
   }
 
   /**
@@ -280,6 +320,32 @@ export class UpstreamRouter {
     h.lastCheckedAt = this.host.clock.now()
     delete h.cooldownUntil
     delete h.lastError
+    // 一次成功 = 配额确实回来了。留着闸门只会让后面那几条流白等一场。
+    this.rateLimitGate.delete(id)
+  }
+
+  /**
+   * 这次失败该退避多久。
+   *
+   * ★ 上游给了 `Retry-After` 就**只听它的**,不套下面那个下限:它知道配额窗口
+   * 什么时候重置,我们不知道。(`retry-after: 0` 是合法的「立刻再来」,别抬成 4 秒。)
+   */
+  private retryDelayFor(err: AgentError, attempt: number): number {
+    if (err.retryAfterMs !== undefined) return Math.min(err.retryAfterMs, MAX_RETRY_DELAY_MS)
+    const base = err.code === 'rate_limit' ? this.rateLimitFloorMs : this.baseDelayMs
+    return Math.min(base * 2 ** attempt, MAX_RETRY_DELAY_MS)
+  }
+
+  /** 闸门还剩多久;没被挡住就是 0。 */
+  private gateWaitFor(providerId: string): { waitMs: number; reason: string } {
+    const gate = this.rateLimitGate.get(providerId)
+    if (gate === undefined) return { waitMs: 0, reason: '' }
+    const waitMs = gate.until - this.host.clock.now()
+    if (waitMs <= 0) {
+      this.rateLimitGate.delete(providerId)
+      return { waitMs: 0, reason: '' }
+    }
+    return { waitMs, reason: gate.reason }
   }
 
   private recordFailure(id: string, err: AgentError): void {
@@ -642,6 +708,22 @@ export class UpstreamRouter {
       }
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        /*
+          ★ 别人刚在这一家上吃了 429 —— **在发请求之前**先把这次退避等掉。
+
+          等待不消耗 `attempt`:被别的流连累而推迟,不该算这条流自己的重试次数,
+          否则四个并发子代理里最后醒来的那个,机会已经被闸门吃光了。
+
+          复用 `provider_retry` 事件而不是新造一个:界面上要说的话是同一句
+          (「在等,因为上游限流」),而新增事件类型意味着 `stream.ts`、转录、
+          `block-accumulator` 各改一遍,换不来任何新信息。
+        */
+        const gate = this.gateWaitFor(c.provider.id)
+        if (gate.waitMs > 0) {
+          yield { type: 'provider_retry', attempt: attempt + 1, delayMs: gate.waitMs, reason: gate.reason }
+          await abortableSleep(gate.waitMs, signal)
+        }
+
         attemptOrdinal += 1
         const outcome = yield* this.attempt(
           c,
@@ -664,6 +746,20 @@ export class UpstreamRouter {
         lastError = outcome.error
         if (outcome.error.code === 'auth' && authError === undefined) authError = outcome.error
 
+        /*
+          ★ 退避时长在这里就算出来,**早于**下面那两个 return/break —— 因为闸门
+          要在「这条流自己还重不重试」之前立起来。这次尝试是这条流的最后一次
+          (或者内容已经吐出去了、只能放弃),对**其它并发流**来说配额照样是空的,
+          那一句「等一下再发」依旧成立。
+        */
+        const delayMs = this.retryDelayFor(outcome.error, attempt)
+        if (outcome.error.code === 'rate_limit') {
+          this.rateLimitGate.set(c.provider.id, {
+            until: this.host.clock.now() + delayMs,
+            reason: outcome.error.message
+          })
+        }
+
         /**
          * ★ §5.3 的那条边界:**只能在收到第一个内容字节之前切换或重试**。
          *
@@ -679,7 +775,6 @@ export class UpstreamRouter {
         const canRetry = outcome.error.retryable && attempt < MAX_ATTEMPTS - 1
         if (!canRetry) break
 
-        const delayMs = outcome.error.retryAfterMs ?? this.baseDelayMs * 2 ** attempt
         // 没有这条事件,用户看到的就是白白冻结 30 秒(方案 §4.2)
         yield { type: 'provider_retry', attempt: attempt + 1, delayMs, reason: outcome.error.message }
         await abortableSleep(delayMs, signal)

@@ -21,6 +21,7 @@ import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
 import { MessageImage } from './MessageImage'
+import { MentionText } from './MentionText'
 import { MessageFileRef } from './MessageFileRef'
 import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
 import { InteractionPanel } from './InteractionPanel'
@@ -295,8 +296,14 @@ function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEd
     <div className="flex justify-end">
       <div className="group relative max-w-[85%] rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5">
         {text !== '' && (
+          /*
+            ★ 用 `MentionText` 而不是直接铺 `{text}`:输入框里 `@` 选出来的
+            文件在草稿里是一段 markdown 链接,它在气泡里也得是同一个 chip ——
+            否则发送那一下,用户眼里的 chip 会「变回」一串方括号,
+            看起来像是发错了(而其实发出去的一直是同一个字符串)。
+          */
           <p className="selectable text-[13.5px] leading-relaxed whitespace-pre-wrap text-fg">
-            {text}
+            <MentionText text={text} />
           </p>
         )}
         {fileRefs.length > 0 && (

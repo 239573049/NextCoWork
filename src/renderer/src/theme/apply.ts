@@ -25,6 +25,20 @@ import { THEME_TOKENS, resolveImageTheme, tokensOf } from '../../../shared/domai
 const IMAGE_VAR = '--theme-image'
 
 /**
+ * ★ **渐变和位图在面板上不是一回事,所以得分开写。**
+ *
+ * 六张内置图是 CSS 渐变 —— 它们**没有纹理**,放大、模糊、压色都变不出细节。
+ * 这一层还挂在窗口底层的时候无所谓:只有 8px 的缝会露出来,一道饱和的渐变
+ * 当环境光正好。铺满 959×804 的面板之后同一个值就成了一整块平的实色 ——
+ * 看着不像壁纸,像给面板刷了个背景色。上传的位图没有这个问题,它自带纹理。
+ *
+ * 这个差别 CSS 判断不了,只能由这里把源的种类交出去(`builtin` / `uploaded`),
+ * 让 `theme.css` 给渐变那一档单独压一个不透明度。实测两档的分界很清楚:
+ * 位图 0.55 是壁纸、0.30 就快没了;渐变 0.55 是色块、0.30 才退成一层染色。
+ */
+const SOURCE_ATTR = 'imageSource'
+
+/**
  * 返回**这一次写下去的那 22 个值**。不是顺手加的:Windows/Linux 标题栏那三颗
  * 系统按钮不是 DOM,颜色只能经 IPC 推给主进程,而调用点要拿到 `chrome` / `icon`
  * 就得再算一次 `tokensOf` —— 同一份输入算两遍,迟早有一遍的参数会漏掉更新
@@ -49,10 +63,13 @@ export function applyTheme(
   if (backdrop === null) {
     root.style.removeProperty(IMAGE_VAR)
     delete root.dataset['imageRender']
+    delete root.dataset[SOURCE_ATTR]
     return tokens
   }
   root.style.setProperty(IMAGE_VAR, backdrop)
   root.dataset['imageRender'] = settings.imageTheme.render
+  // `image` 在这条分支上一定不是 null —— `backdropOf` 只对 null 返回 null
+  root.dataset[SOURCE_ATTR] = image?.source.kind ?? 'builtin'
   return tokens
 }
 

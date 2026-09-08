@@ -80,6 +80,19 @@ export interface Attachment {
   url: string
 }
 
+/**
+ * `attachment:pick` 的一项。★ **两种形态不是实现细节,是产品行为的分叉**:
+ * 图片要落盘(内联展示得有 `ncw://` 地址),非图片只回传用户选中的真实路径 ——
+ * 与拖拽/粘贴那条路完全同规则(见 ChatView 的 `attachFiles`)。
+ *
+ * 拆成联合而不是「`Attachment` 上多一个可选 `path`」:后者允许出现
+ * 两个字段都有或都没有的值,而这两种状态在下游(`partsOf`)没有任何含义。
+ */
+export type PickedAttachment =
+  | { kind: 'attachment'; attachment: Attachment }
+  /** `path` 是绝对路径。★ 它由用户在系统对话框里选定,与他拖进来的文件同源 */
+  | { kind: 'path'; path: string; name: string }
+
 export interface AttachmentUploadRequest {
   scope: AttachmentScope
   ownerId?: string

@@ -41,7 +41,7 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
   }
 
   return (
-    <section data-testid="document-view" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label={path} onKeyDownCapture={(event) => {
+    <section data-testid="document-view" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas" aria-label={path} onKeyDownCapture={(event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
         event.stopPropagation()

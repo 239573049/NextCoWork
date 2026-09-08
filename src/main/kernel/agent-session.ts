@@ -23,7 +23,6 @@ import {
 } from '../../shared/agent/message'
 import type { PermissionDecision } from '../../shared/agent/permission'
 import type { RunRequest } from '../../shared/agent/run-request'
-import { maxTurnsFor } from '../../shared/agent/run-request'
 import type { ProviderStreamEvent, StopReason } from '../../shared/agent/stream'
 import type { ToolInfo, ToolResult } from '../../shared/agent/tool'
 import type { ModelAlias } from '../../shared/domain/provider'
@@ -46,6 +45,7 @@ import type { GitContext } from './git-context'
 import type { KernelHost } from './host'
 import type { InteractFn } from './interaction-gate'
 import type { RunHandle } from './run-registry'
+import { displayPath } from './tool/path-guard'
 import type { SpawnSubagentFn, Tool, ToolContext, ToolRegistry } from './tool/registry'
 import type { CanonicalRequest, UpstreamRequestContext } from './upstream/canonical'
 
@@ -208,7 +208,7 @@ export class AgentSession {
        * 这里 emit 得到的时机是安全的:`startRun` 先建 handle 与泵、再调驱动,
        * 构造函数跑到这一行时事件已经有人接了。
        */
-      this.commit(userMessage(req.inputMessageId ?? ulid(now), [...req.input], now))
+      this.commit(userMessage(req.inputMessageId ?? ulid(now), this.normalizePaths(req.input), now))
     }
   }
 
@@ -247,9 +247,9 @@ export class AgentSession {
   // ─────────────────────────── 主循环 ───────────────────────────
 
   private async loop(): Promise<void> {
-    const maxTurns = maxTurnsFor(this.req.mode)
-
-    for (let turn = 0; turn < maxTurns; turn++) {
+    // Long tasks are not stopped at an arbitrary model/tool turn count. The
+    // run handle's abort signal remains the explicit way to stop a run.
+    for (;;) {
       const outcome = await this.turn()
       if (outcome === null) return // 这一轮已经把 run 收尾了
       await this.executeAll(outcome.calls, outcome.tools)
@@ -269,16 +269,6 @@ export class AgentSession {
        */
       this.injectInterjections()
     }
-
-    /**
-     * 轮次耗尽。**不伪造一条「我做完了」的助手消息** —— 那会让用户以为
-     * 模型给出了结论,而实际上它只是被我们掐断了。转录停在最后一条工具结果上,
-     * 用户再发一条消息就能接着跑。
-     */
-    this.handle.finish(
-      'error',
-      agentError('unknown', `已达到最大轮次上限(${maxTurns} 轮),运行已停止。`)
-    )
   }
 
   /**
@@ -786,13 +776,37 @@ export class AgentSession {
    * `all messages must have non-empty content` 拒掉,而渲染层那边它已经因为
    * 收到 commit 而离开了队列 —— 消息既没发出去、也回不来了。
    */
+  /**
+   * 用户拖/选进来的文件引用,路径改写成**说给模型听的那一种形式**:
+   * 工作区内的压成工作区相对(`src/a.ts`),工作区外的保留绝对路径。
+   *
+   * ## 为什么归一化在这里,而不在渲染层或编码层
+   *
+   * - 渲染层没有 realpath:macOS 上工作区根记录的是 `showOpenDialog` 原样返回的
+   *   `/var/…`,而拖进来的文件路径是 `/private/var/…`,词法比较会把工作区**内**的
+   *   文件判到外面去,于是一条本该是 `src/a.ts` 的引用写成了长绝对路径。
+   * - 编码层没有 `workspaceRoot`,而且改写发生在编码层的话,转录里存的与发出去的
+   *   就成了两个字符串 —— UI 悬浮提示说一套,模型看到另一套。
+   * - 这里是**两个入口的汇合点**:构造函数那条(拖拽/菜单/粘贴发出的第一句)和
+   *   插队那条(生成中排队的消息)都从这里落进转录。改一处就够。
+   *
+   * ★ 相对形式不是为了好看:模型的文件工具以工作区根为 cwd,`src/a.ts` 可以直接
+   * 喂回 `read_file`,而它在 grep 回执里看到的也正是这个写法(同一个 `displayPath`)。
+   * 两边不一致时,模型会把同一个文件当成两个。
+   */
+  private normalizePaths(parts: readonly ContentPart[]): ContentPart[] {
+    return parts.map((p) =>
+      p.type === 'file_ref' ? { ...p, path: displayPath(this.deps.workspaceRoot, p.path) } : p
+    )
+  }
+
   private injectInterjections(): void {
     const items = this.handle.takeInterject()
     if (items.length === 0) return
     for (const item of items) {
       if (item.parts.length === 0) continue
       const now = this.deps.host.clock.now()
-      this.commit(userMessage(item.id, [...item.parts], now))
+      this.commit(userMessage(item.id, this.normalizePaths(item.parts), now))
     }
   }
 

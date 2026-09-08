@@ -220,20 +220,39 @@ body {
    **只在选了图时存在** —— 所以 `:root[data-image-render]` 就是「选了图」这个条件,
    不需要再多一个标志位。
 
-   ★ **图片主题的主效果是整套 token 被重新配色,不是这一层。** 面板全是不透明的,
-     所以底图露出来的是 `.app-ground` 那圈 8px 的边框和面板之间的缝 —— 它是一层
-     环境光,不是壁纸。想让它大面积露出来得先给每一层面板加透明度,而那会毁掉
-     `theme.css` §1 那四层底色的层次关系(那是整个界面的地基)。
+   ★ **这一层铺的是工作区面板(`<main>`),不是窗口底层。** 早先它挂在 `.app-ground`
+     上 —— 那是根 `p-2` 的那圈壳,而 `<main>` 自己是不透明的 `bg-canvas`,于是图只能
+     从那 8px 边框和面板之间的缝里漏出来,是一层环境光而不是壁纸。参考实现里它是
+     **面板自己的背景**:内层 Tab 条以下整块都是图,消息气泡、输入框这些各自带底色的
+     东西浮在上面。
 
-   `z-index: -1` + `isolation: isolate`:负层级只在 `.app-ground` 自己的层叠上下文里
-   往下沉,于是它盖在 `bg-app` 之上、在所有面板之下。不加 isolate 的话它会一路沉到
-   根上下文,被 body 那层不透明底色挡住。 */
+   ★ **换位不需要给任何面板加透明度**,§1 那四层底色的层次关系原样保留:`bg-app`
+     (窗口底)、`bg-surface`(侧边栏 / 左右面板)、`bg-chrome`(外层 Tab 条)都还是实色,
+     它们要么在这一层之外、要么盖在它上面。图只出现在 `<main>` 里本来就没底色的地方。
+
+   ★ 于是**没有自己底色的内层视图会坐在图上**。聊天是故意的(参考实现就是这样);
+     终端(`.terminal-surface`)、浏览器、文件树、文档视图都显式带底色把图挡住 ——
+     代码和终端要的是对比度,不是氛围。新写内层视图时如果不想被图透上来,
+     记得给根节点一个 `bg-canvas`。
+
+   `z-index: -1` + `isolation: isolate`:负层级只在 `.app-canvas` 自己的层叠上下文里
+   往下沉,于是它盖在 `bg-canvas` 之上、在所有子节点之下。不加 isolate 的话它会一路
+   沉到根上下文,被 body 那层不透明底色挡住。
+
+   `.app-ground` 那个 isolate 留着 —— 它和底图无关:`WindowControls` / `Dialog` 是
+   portal 到 body 的,靠这个层叠上下文把界面内部的 z-index 关在里面
+   (见 `shell/WindowControls.tsx` 的文件头)。 */
 .app-ground {
   position: relative;
   isolation: isolate;
 }
 
-:root[data-image-render] .app-ground::before {
+.app-canvas {
+  position: relative;
+  isolation: isolate;
+}
+
+:root[data-image-render] .app-canvas::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -245,14 +264,35 @@ body {
 
 /* 模糊:整张图糊成一团环境光。放大 1.3 是因为 blur 会把边缘吸淡,
    不放大的话四周会出现一圈明显的透明带。 */
-:root[data-image-render='blur'] .app-ground::before {
+:root[data-image-render='blur'] .app-canvas::before {
   filter: blur(44px) saturate(1.15);
   transform: scale(1.3);
 }
 
-/* 覆盖色:图不糊,但让 `--color-app` 从下面透上来,压成一层同色系的底 */
-:root[data-image-render='overlay'] .app-ground::before {
+/* 覆盖色:图不糊,但让底色从下面透上来,压成一层同色系的底。
+   ★ 透上来的现在是**面板底色** `--color-canvas`(以前是窗口底 `--color-app`)——
+     同一个手法,但值换了,别把这两处当成同一句话。 */
+:root[data-image-render='overlay'] .app-canvas::before {
   opacity: 0.55;
+}
+
+/* ── 内置的六张要单独压一档 ──────────────────────────────────────
+   `data-image-source` 由 `theme/apply.ts` 写(那边有为什么要分的完整说明)。
+   一句话:**内置的六张是 CSS 渐变,没有纹理**。挂在窗口底层的时候只露 8px,
+   一道饱和渐变当环境光正好;铺满面板之后同一个值就是一整块平的实色。
+
+   实拍的分界(jade-wave,深色,959×804 的面板):
+     0.55 → 一整块饱和青,看着像给面板刷了背景色
+     0.30 → 退成一层染色,渐变的方向还看得出来  ← 取这个
+     0.18 → 基本看不见了,等于没选主题
+
+   位图不走这条:同一组图里合成照片 0.55 是壁纸、0.30 就快没了 ——
+   它自带纹理,压下去反而只剩一片灰绿。所以**别把这两个数合并成一个**。
+
+   `blur` 那一档也得压:糊一张渐变还是同一张渐变,它默认满不透明度,
+   不压的话是这里最重的一种组合(而 `render` 的默认值恰好就是 `blur`)。 */
+:root[data-image-source='builtin'] .app-canvas::before {
+  opacity: 0.3;
 }
 
 /* 自绘标题栏区要显式声明可拖拽,其中的按钮再各自声明 no-drag,否则点不动。

@@ -285,7 +285,7 @@ function lastUserText(messages: unknown[]): string {
  * 决定这一轮回什么。
  *
  * ★ **有 tool_result 就收工**,这不是随便定的:演示上游要是每轮都调工具,
- * dev 里的每次发送都会一路撞到 `MAX_TURNS`(25 轮),而那看起来像死循环。
+ * dev 里的每次发送都会持续调用工具,看起来像死循环。
  */
 export function planDemoReply(body: unknown, seq: number): DemoReply {
   const b = rec(body) ?? {}

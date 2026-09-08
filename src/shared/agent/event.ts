@@ -17,6 +17,17 @@ export type RunStatus = 'running' | 'done' | 'error' | 'aborted'
 
 export type SubagentPhase = 'starting' | 'thinking' | 'tool' | 'finishing' | 'background'
 
+/**
+ * 「正在退避重试 / 已经切到另一家」的**瞬时**提示。
+ *
+ * ★ 定义在事件层而不是转录层,因为它现在有两个消费者:主对话的状态行,
+ * 和子代理卡片(`subagent_update.notice`)。放在 `transcript.ts` 的话,
+ * `event.ts` 要反过来 import 它 —— 而依赖方向是 transcript → event,不能成环。
+ */
+export type RunNotice =
+  | { kind: 'retry'; attempt: number; reason: string }
+  | { kind: 'switch'; to: string; reason: string }
+
 export type AgentEvent =
   | { type: 'stream'; delta: ProviderStreamEvent }
   /** ★ 落盘边界 —— db 只在这里写,绝不在 delta 上写(方案 §9) */
@@ -54,6 +65,13 @@ export type AgentEvent =
       toolErrors?: number
       usage?: TokenUsage
       contextUsage?: { used: number; window: number; shouldCompact: boolean }
+      /**
+       * 子代理正在退避重试 / 刚切了供应商。
+       *
+       * ★ 和上面的 `currentTool` 同一个约定:**看的是键在不在**。
+       * `notice: undefined` 是一次显式清除(重试成功了),整个键不写则是「别动它」。
+       */
+      notice?: RunNotice
       /** Sequence of the corresponding child-run event, used to deduplicate the inherited raw event. */
       childSeq?: number
       at?: number

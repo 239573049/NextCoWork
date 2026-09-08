@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { PathEscapeError, resolveAnywhere, resolveInWorkspace, toWorkspaceRelative } from '../path-guard'
+import {
+  PathEscapeError,
+  displayPath,
+  resolveAnywhere,
+  resolveInWorkspace,
+  toWorkspaceRelative
+} from '../path-guard'
 
 /**
  * 路径解析是方案 §9 的收口点 —— **整个应用里唯一一个把不可信路径变成真实路径的地方**。
@@ -262,5 +268,55 @@ describe('resolveAnywhere', () => {
       outside: true
     })
     expect(() => resolveAnywhere('', 'src/index.ts')).toThrow()
+  })
+})
+
+/**
+ * ★ 这一组测的是「一条路径**怎么写给模型**」—— 工具回执(`relOf`)和用户拖/选进来的
+ * 文件引用(`file_ref`)共用它。工作区内压成相对、工作区外保留绝对,两种形式都得对,
+ * 因为模型是照着这个字符串决定下一步喂什么参数的。
+ */
+describe('displayPath', () => {
+  it('工作区内 → 工作区相对', () => {
+    expect(displayPath(root, join(root, 'src', 'index.ts'))).toBe('src/index.ts')
+  })
+
+  it('工作区外 → 保留绝对路径(与工具回执同形,realpath 过)', () => {
+    expect(displayPath(root, join(outside, 'secret.txt'))).toBe(
+      realpathSync.native(join(outside, 'secret.txt'))
+    )
+  })
+
+  /**
+   * ★ 这一条是这个函数存在的理由。macOS 上工作区根记录的是 `showOpenDialog`
+   * 原样返回的没折算过的路径,而拖进来的文件路径已经是 realpath 过的 ——
+   * 拿字符串前缀比的话,工作区**内**的文件会被判到外面去,一条本该是
+   * `src/index.ts` 的引用于是写成了一长串绝对路径。
+   */
+  it('★ 根是软链别名时仍判为工作区内', () => {
+    const linked = join(base, 'ws-link')
+    expect(displayPath(linked, realpathSync.native(join(root, 'src', 'index.ts')))).toBe('src/index.ts')
+  })
+
+  it('根本身 → `.`,不是空串', () => {
+    expect(displayPath(root, root)).toBe('.')
+  })
+
+  it('★ 绝不产出 ../ —— 那种形式对不上任何一个根', () => {
+    // 兄弟目录:词法上正是 `../outside/secret.txt` 那一类
+    const out = displayPath(root, join(base, 'outside', 'secret.txt'))
+    expect(out.startsWith('..')).toBe(false)
+    expect(out).toBe(realpathSync.native(join(outside, 'secret.txt')))
+  })
+
+  it('没有工作区 → 绝对路径原样给出', () => {
+    const abs = join(outside, 'secret.txt')
+    expect(displayPath('', abs)).toBe(abs)
+  })
+
+  it('根已被删除 → 不抛,退回绝对路径', () => {
+    expect(displayPath(join(base, '早就没了'), join(outside, 'secret.txt'))).toBe(
+      realpathSync.native(join(outside, 'secret.txt'))
+    )
   })
 })
