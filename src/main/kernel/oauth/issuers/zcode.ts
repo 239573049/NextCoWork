@@ -67,6 +67,20 @@ export interface ZcodeChannel {
   /** ② body 里那个 `provider` 字段的值 */
   provider: string
   /**
+   * ② body 里 `redirect_uri` 发的值。**省略 = 本次授权真正用的那个**(标准做法,
+   * 也是 Z.AI 那条验证过的行为)。
+   *
+   * ★★ 智谱那条要覆盖它。原因是那条链路的授权和换码**不在同一家**:授权在
+   * `bigmodel.cn`,换码在 `zcode.z.ai`(它再转发给 bigmodel —— 2007 的 msg 是字面的
+   * `http error`,即上游那一跳失败)。而 `bigmodel.cn` 的前端对 `redirect` 只有一条
+   * XSS 黑名单、压根不记录我们发的地址,所以上游能比对的只有**注册值**
+   * `zcode://oauth/callback`。发我们自己的回环地址在那边匹配不上。
+   *
+   * ★ 探针证明这个字段只查存在性、不当场校验值(乱填也返回同样的 2007),
+   * 所以它错了的表现不是一句「redirect_uri 不对」,而是和「code 无效」一模一样。
+   */
+  tokenRedirectUri?: string
+  /**
    * ② 响应里包着 access_token 的那一层子对象的键。Z.AI 那条是 `zai`。
    * ★ 找不到这一层时会退回到 `data.access_token`(平铺形态),两种都试是因为
    * 只有 Z.AI 那条的响应体被真正抓到过。
@@ -286,7 +300,8 @@ export function createZcodeSpec(channel: ZcodeChannel): OAuthProviderSpec {
       body: {
         provider: channel.provider,
         code: args.code,
-        redirect_uri: args.redirectUri,
+        // ★ 省略时用本次真正的回调地址 —— Z.AI 那条走的就是这条，行为一个字没变
+        redirect_uri: channel.tokenRedirectUri ?? args.redirectUri,
         state: args.state
       },
       headers: ZCODE_HEADERS

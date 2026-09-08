@@ -115,6 +115,14 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
   tokenKey: 'bigmodel',
   clientId: APP_ID,
   redirect: { kind: 'loopback-ephemeral', path: CALLBACK_PATH, host: '127.0.0.1' },
+  /*
+    ★★ **换码那跳发的是 ZCode 注册的那个地址,不是我们真用的回环地址。**
+    授权在 bigmodel.cn、换码在 zcode.z.ai,而 bigmodel 那边只认 appId=zcode 的注册值。
+    详见 `zcode.ts` 里 `tokenRedirectUri` 的注释。
+    ★ 如果还是换不到码,第二个候选值是逆向文档记的旧地址
+    `zcode://bigmodel-auth/callback`。
+  */
+  tokenRedirectUri: 'zcode://oauth/callback',
   userinfoUrl: 'https://zcode.z.ai/api/oauth/userinfo',
   /*
     ★★ 标准那三个参数(`response_type` / `client_id` / `redirect_uri`)一个都不发 ——

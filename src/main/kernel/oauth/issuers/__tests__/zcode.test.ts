@@ -63,6 +63,18 @@ describe('ZCODE_ZAI_OAUTH · 授权请求的形状', () => {
     })
     expect(req.headers?.['user-agent']).toMatch(/^ZCode\//u)
   })
+  it('★ 省略 tokenRedirectUri 时发的是本次真正的回调地址（Z.AI 走这条，行为不变）', () => {
+    const req = ZCODE_ZAI_OAUTH.tokenRequest!({
+      code: 'c',
+      redirectUri: 'http://127.0.0.1:9999/callback',
+      verifier: 'v',
+      state: 's',
+      clientId: 'client_x'
+    })
+    expect((req.body as Record<string, unknown>)['redirect_uri']).toBe(
+      'http://127.0.0.1:9999/callback'
+    )
+  })
 })
 
 describe('ZCODE_ZAI_OAUTH · identity 的字段映射', () => {
@@ -276,6 +288,23 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
     */
     expect((req.body as Record<string, unknown>)['provider']).toBe('bigmodel')
     expect(req.body).not.toMatchObject({ provider: 'zcode' })
+  })
+
+  it('★★★ 换码发的 redirect_uri 是 ZCode 的注册值，不是我们真用的回环地址', () => {
+    const req = ZCODE_BIGMODEL_OAUTH.tokenRequest!({
+      code: 'c',
+      redirectUri: 'http://127.0.0.1:53124/callback',
+      verifier: 'v',
+      state: 's',
+      clientId: 'zcode'
+    })
+    /*
+      ★ 这条渠道的授权在 bigmodel.cn、换码在 zcode.z.ai（它再转发给 bigmodel），
+      而 bigmodel 只认 appId=zcode 的注册值。服务端不当场校验这个字段的值，
+      所以发错了的表现和「code 无效」完全一样（都是 2007 http error）——
+      正因为分不出来，才要把它钉死在这里。
+    */
+    expect((req.body as Record<string, unknown>)['redirect_uri']).toBe('zcode://oauth/callback')
   })
 
   it('★★ 没有第三跳端点 → refresh 返回 null（= 请用户重新登录），不假装刷新成功', async () => {
