@@ -40,6 +40,7 @@ import {
   modelListRequest,
   parseModelList
 } from '../kernel/upstream/model-list'
+import { userAgent } from '../kernel/user-agent'
 import { ensureSeeded, getHost } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
@@ -441,7 +442,11 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
       导入弹窗一直转下去 —— 用户唯一的出路是关掉应用。20 秒足够慢网络拉一页,
       又短到不至于让人以为卡死了。
     */
-    res = await getHost().fetch(url, { headers, signal: AbortSignal.timeout(20_000) })
+    res = await getHost().fetch(url, {
+      // `modelListRequest` 是纯函数、拿不到版本号,自报家门在调用点补(kernel/user-agent.ts)
+      headers: { ...headers, 'user-agent': userAgent() },
+      signal: AbortSignal.timeout(20_000)
+    })
   } catch (e) {
     const reason = e instanceof Error && e.name === 'TimeoutError' ? '超时(20 秒)' : String(e)
     // cause 留着原始的 fetch 错误:上面那句是给用户看的,而 ECONNREFUSED / 证书失败

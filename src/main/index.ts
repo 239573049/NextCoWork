@@ -15,6 +15,7 @@ import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } fr
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles } from './runtime'
+import { installUserAgent } from './kernel/user-agent'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
@@ -29,6 +30,10 @@ const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 }
+
+// 出站 API 请求的自报家门。哪些请求带、哪些**刻意不带**,那张表在 kernel/user-agent.ts。
+// 版本号只有主进程拿得到,所以装配点在这里;`app.getVersion()` 不要求 ready。
+installUserAgent(app.getVersion())
 
 // 标题栏关闭按钮不再等于退出进程 —— 只隐藏窗口,真正退出只能走托盘的
 // 「退出 NextCoWork」(或系统层面的 Cmd+Q/kill)。这两条路径都会先触发

@@ -27,6 +27,7 @@ import {
 } from '../../../shared/domain/thinking-adapter'
 import { abortableSleep, isAbortError } from '../abort'
 import { estimateTokens } from '../context-assembler'
+import { userAgent } from '../user-agent'
 import type { KernelHost } from '../host'
 import type { UnpricedUsageAttempt } from '../../../shared/domain/usage'
 import { ulid } from '../../../shared/util/id'
@@ -437,7 +438,14 @@ export class UpstreamRouter {
       const send = (extraHeaders: Record<string, string>): Promise<Response> =>
         this.host.fetch(url, {
           method: 'POST',
-          headers: { ...enc.headers, ...transport.headers, ...extraHeaders, accept: 'text/event-stream' },
+          headers: {
+            // 自报家门排在最前面:任何一个 encode / transport 想自己写 UA 都压得过它
+            'user-agent': userAgent(),
+            ...enc.headers,
+            ...transport.headers,
+            ...extraHeaders,
+            accept: 'text/event-stream'
+          },
           body: payload,
           signal
         })

@@ -22,6 +22,7 @@ import type {
 } from '../../shared/domain/search'
 import { searchChain, searchMeta } from '../../shared/domain/search'
 import { ADAPTERS } from './adapters'
+import { withUserAgent } from './adapters/http'
 import type { AdapterDeps } from './types'
 
 /** 一家最多等多久。全败的上限是这个数乘以链长,所以不能松。 */
@@ -129,7 +130,7 @@ export async function runSearch(
 
     try {
       const results = await withTimeout(deps.signal, PER_PROVIDER_TIMEOUT_MS, (signal) =>
-        adapter({ query, count }, key, { fetch: deps.fetch, signal })
+        adapter({ query, count }, key, { fetch: withUserAgent(deps.fetch), signal })
       )
       if (results.length > 0) return { results: results.slice(0, count), provider: id, failures }
       failures.push({ id, message: `${label(id)} 没有返回任何结果。` })
@@ -173,7 +174,7 @@ export async function testProvider(
   try {
     // 只要 1 条:这是连通性测试,不是搜索,没必要为它花一次完整额度
     const results = await withTimeout(deps.signal, PER_PROVIDER_TIMEOUT_MS, (signal) =>
-      adapter({ query: 'hello', count: 1 }, key, { fetch: deps.fetch, signal })
+      adapter({ query: 'hello', count: 1 }, key, { fetch: withUserAgent(deps.fetch), signal })
     )
     const latencyMs = now() - started
     return results.length > 0

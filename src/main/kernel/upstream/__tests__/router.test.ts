@@ -506,6 +506,8 @@ describe('UpstreamRouter · 正常路径', () => {
     await drain(router)
     expect(headers[0]).toMatchObject({ 'x-api-key': 'sk-test', 'anthropic-version': '2023-06-01' })
     expect(headers[0]?.authorization).toBeUndefined()
+    // 自报家门(kernel/user-agent.ts)——漏了不会报错,只是请求匿名发出去
+    expect(headers[0]?.['user-agent']).toMatch(/^NextCoWork\//)
   })
 
   it('成功后健康度上升、连败清零', async () => {
