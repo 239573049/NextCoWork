@@ -1,0 +1,39 @@
+﻿name: Upload v0.1.4 to client update API
+
+on:
+  push:
+    branches:
+      - release/v0.1.4-upload-20260908
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    name: Upload existing v0.1.4 artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out upload script
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+
+      - name: Download GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-assets
+          gh release download v0.1.4 --dir release-assets
+
+      - name: Verify release artifacts
+        run: node scripts/upload-client-release.mjs --dir release-assets --version 0.1.4 --channel stable --require-all --dry-run
+
+      - name: Upload release artifacts to client update API
+        env:
+          CLIENT_UPLOAD_TOKEN: ${{ secrets.CLIENT_UPLOAD_TOKEN }}
+        run: node scripts/upload-client-release.mjs --dir release-assets --version 0.1.4 --base-url https://nextco.work --channel stable --require-all --ignore-duplicates
