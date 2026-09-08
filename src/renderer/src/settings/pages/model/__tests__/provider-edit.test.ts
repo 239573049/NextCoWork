@@ -163,7 +163,7 @@ describe('isPresetAdded', () => {
 
 describe('seedModelsForPreset', () => {
   it('★ 拉不动模型列表的,种建议模型 —— 否则用户添加完是一家零模型的死路', () => {
-    // codex 的 supportsModelList 是 false，且「从服务商拉取」按钮因此是灰的
+    // codex 的 supportsModelList 是 false —— 按钮现在能点,但实测拉不到,得有种子兜底
     expect(seedModelsForPreset(preset('codex'), 'openai-responses')).toEqual([
       ...preset('codex').suggestedModels
     ])
