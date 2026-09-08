@@ -82,13 +82,38 @@ export interface TranscriptState {
   runStartedAt?: number
   runEndedAt?: number
   model?: string
+  /**
+   * 这次回复**实际由哪家给的**。★ 和 `RunRequest.modelProviderId`(用户选的那家)
+   * 不是一回事:故障切换真的换了家时,这里跟着变,而那边不变。抬头显示的应该是
+   * 这一个 —— 说的是既成事实,不是意图。
+   *
+   * 同理,上面那个 `model` 是上游回包里的**真实模型名**,不是别名。别拿它去查别名表。
+   */
+  providerId?: string
   /** API-reported usage accumulated across completed requests in the current run. */
   usage?: TokenUsage
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
   contextCheckpoints: ContextCheckpoint[]
   contextStatus?: ContextStatus
+  /**
+   * 重试 / 故障切换的**瞬时**提示,活到下一次 `message_start` 或 `error` 为止。
+   *
+   * ★★ `provider_retry` 和 `provider_switch` 以前发了**没人画**(见 `applyEvent`
+   * 那个 default 分支的旧注释)。于是「上游繁忙、正在退避重试」在界面上和「卡死了」
+   * 长得一模一样:一个转圈,几十秒不动,而且重试成功的话用户永远不知道刚才发生过什么。
+   * `router.ts` 那句「没有这条事件,用户看到的就是白白冻结 30 秒」说的就是这个 ——
+   * 发射端当初做完了,消费端一直空着。
+   *
+   * ★ 不进 `messages`:它不是对话内容,重试成功之后没有任何留存价值,
+   * 留在对话流里只会变成噪声。
+   */
+  notice?: RunNotice
   error?: AgentError
 }
+
+export type RunNotice =
+  | { kind: 'retry'; attempt: number; reason: string }
+  | { kind: 'switch'; to: string; reason: string }
 
 export function emptyTranscript(): TranscriptState {
   return { messages: [], live: [], tools: {}, subagents: {}, contextCheckpoints: [], status: 'running' }
@@ -275,7 +300,8 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
       const d = e.delta
       switch (d.type) {
         case 'message_start':
-          return { ...s, model: d.model }
+          // ★ 内容开始流了 = 重试成功,提示到此为止。见 TranscriptState.notice
+          return { ...s, model: d.model, providerId: d.providerId, notice: undefined }
 
         case 'text_delta':
         case 'thinking_delta': {
@@ -322,13 +348,17 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
           return { ...s, usage: addUsage(s.usage, d.usage) }
         }
 
+        case 'provider_retry':
+          return { ...s, notice: { kind: 'retry', attempt: d.attempt, reason: d.reason } }
+
+        case 'provider_switch':
+          return { ...s, notice: { kind: 'switch', to: d.to, reason: d.reason } }
+
         case 'error':
-          return { ...s, error: d.error }
+          // 错误框里会写全,状态行不必再挂着一句过期的「正在重试」
+          return { ...s, error: d.error, notice: undefined }
 
         default:
-          // provider_retry / provider_switch:UI 层在这一步先不画,
-          // 但它们**已经在事件流里**了(方案 §4.2)—— 第 4 步接上真上游时
-          // 只需在这里加一个分支,不必回头改发射端。
           return s
       }
     }

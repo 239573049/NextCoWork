@@ -11,8 +11,8 @@
  *
  * 四个工具共同守着三条线:
  *
- * - **路径一律过 `resolvePath`**(里面是 `resolveInWorkspace`)。这是模型唯一能
- *   碰到磁盘的合法入口,围栏漏在这里就等于没有围栏。
+ * - **路径一律过 `resolvePath`**。工作区不是围栏 —— 「谁能碰哪个文件」由权限档位决定
+ *   (见 `path-guard.ts` 文件头),但归一化(`..`、软链、大小写、`/var`)只有那一份实现。
  * - **已有文件必须先 `Read` 过才能写**(见 `read-tracker.ts`)。
  * - **失败要说清楚下一步做什么**。模型是照着 `toolFail` 的正文决定怎么重试的:
  *   「文件不存在」和「文件不存在,先用 Glob 找找」产出的后续行为完全不同。
@@ -50,7 +50,7 @@ const ReadInput = z.object({
     .string()
     .min(1)
     .describe(
-      'Absolute path of the file to read (must be inside the workspace). A relative path is resolved against the workspace root'
+      'Absolute path of the file to read. A relative path is resolved against the workspace root; an absolute path may point outside the workspace'
     ),
   offset: z
     .number()
@@ -87,7 +87,8 @@ function withLineNumbers(lines: string[], startLine: number): string {
 export const readTool: ToolRegistration = defineTool({
   internalId: 'Read',
   description:
-    'Reads a file from the workspace.\n\n' +
+    'Reads a file from disk. Paths inside the workspace are the normal case, but an absolute path ' +
+    'outside it works too.\n\n' +
     'Usage:\n' +
     '- file_path must be an absolute path, not a relative one\n' +
     '- By default it reads up to 2000 lines from the start of the file\n' +
@@ -160,7 +161,7 @@ const WriteInput = z.object({
     .string()
     .min(1)
     .describe(
-      'Absolute path of the file to write (must be inside the workspace). Parent directories are created for you'
+      'Absolute path of the file to write. Parent directories are created for you. It may point outside the workspace'
     ),
   content: z.string().describe('The complete contents to write. This OVERWRITES the existing file in full')
 })
@@ -168,7 +169,8 @@ const WriteInput = z.object({
 export const writeTool: ToolRegistration = defineTool({
   internalId: 'Write',
   description:
-    'Writes a file to the workspace.\n\n' +
+    'Writes a file to disk. Paths inside the workspace are the normal case, but an absolute path ' +
+    'outside it works too.\n\n' +
     'Usage:\n' +
     '- If a file already exists at that path, this tool OVERWRITES it completely\n' +
     '- You MUST read an existing file with Read before writing over it, or this call fails\n' +
@@ -209,7 +211,7 @@ export const writeTool: ToolRegistration = defineTool({
 // ────────────────────────────── Edit ──────────────────────────────
 
 const EditInput = z.object({
-  file_path: z.string().min(1).describe('Absolute path of the file to edit (must be inside the workspace)'),
+  file_path: z.string().min(1).describe('Absolute path of the file to edit. It may point outside the workspace'),
   old_string: z.string().min(1).describe('The exact text to replace'),
   new_string: z
     .string()
@@ -295,7 +297,7 @@ const LsInput = z.object({
   path: z
     .string()
     .min(1)
-    .describe('Absolute path of the directory to list (must be inside the workspace), not a relative path'),
+    .describe('Absolute path of the directory to list, not a relative path. It may point outside the workspace'),
   ignore: z
     .array(z.string())
     .max(64)

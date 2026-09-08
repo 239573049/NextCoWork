@@ -13,6 +13,7 @@
  */
 import { create } from 'zustand'
 import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
+import { selectModelBinding } from '../../../shared/domain/model-selection'
 import { on } from '../services/ipc'
 import { listModels, listProviders } from '../services/provider'
 
@@ -31,8 +32,15 @@ interface ModelsState {
    * 「我怀疑不同步了」的显式重取。
    */
   reload: () => Promise<void>
-  /** 别名 → 提供它的 provider。模型药丸上要显示 `供应商 / 模型` 两段 */
-  providerOf: (alias: string) => UpstreamProvider | undefined
+  /**
+   * 别名 → 提供它的 provider。模型药丸上要显示 `供应商 / 模型` 两段。
+   *
+   * ★ 第二个参数是用户显式选定的那一家。不传 = 历史数据(那时只存得下别名),
+   * 退化成按 priority 择优 —— 也就是引入这个参数之前的行为。
+   */
+  providerOf: (alias: string, modelProviderId?: string) => UpstreamProvider | undefined
+  /** 按 id 直取。给「这段回复实际是谁给的」用 —— 那条路径不该再过别名表 */
+  providerById: (id: string) => UpstreamProvider | undefined
 }
 
 let inflight: Promise<void> | null = null
@@ -74,12 +82,16 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     return inflight
   },
 
-  providerOf(alias) {
+  providerOf(alias, modelProviderId) {
     const { models, providers } = get()
-    const m = models.find((x) => x.alias === alias && x.enabled !== false &&
-      providers.some((p) => p.id === x.providerId && p.enabled))
+    // ★ 和主进程路由器共用同一个选择器 —— 药丸上显示的那家必须就是实际发请求的那家。
+    const m = selectModelBinding(models, providers, alias, modelProviderId)
     if (m === undefined) return undefined
-    return get().providers.find((p) => p.id === m.providerId)
+    return providers.find((p) => p.id === m.providerId)
+  },
+
+  providerById(id) {
+    return get().providers.find((p) => p.id === id)
   }
 }))
 

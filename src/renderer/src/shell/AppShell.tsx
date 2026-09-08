@@ -175,6 +175,49 @@ export function AppShell({
   const inner =
     activeWorkspaceId === null ? null : tabs.stateOf(activeWorkspaceId);
   const activeInner = inner?.tabs.find((t) => t.id === inner.activeTabId);
+  const routeSessionId =
+    activeInner?.kind === "chat" ? activeInner.ref.sessionId : null;
+
+  /*
+    地址栏跟着主区走。`#/{workspaceId}` = 这个工作区,`#/{workspaceId}/{sessionId}`
+    = 正在看的那一段会话。
+
+    ★ **只有主区绑定了会话的 chat Tab 才带 sessionId。** 草稿对话还没有 id
+    (那正是「新对话不落库」的可见证据)、终端/文档/浏览器压根不是会话 ——
+    这几种一律只写工作区那一段。
+
+    ★ **replaceState,不是 pushState。** 这个应用里没有前进/后退入口,push 只会
+    在窗口的历史里攒出一串谁也走不回去的条目,还会让 ⌘R 落在中途某一格上。
+  */
+  useEffect(() => {
+    if (activeWorkspaceId === null) return;
+    const next =
+      `#/${encodeURIComponent(activeWorkspaceId)}` +
+      (routeSessionId === null ? "" : `/${encodeURIComponent(routeSessionId)}`);
+    if (window.location.hash === next) return;
+    window.history.replaceState(null, "", next);
+  }, [activeWorkspaceId, routeSessionId]);
+
+  /**
+   * 把主区拉回当前工作区 —— **侧边栏下半每一个「带我去这段对话」的动作都得先走这里。**
+   *
+   * 主区的渲染是三层优先级(见下面 `<main>`):`activeStandaloneFeature`(浏览器页)
+   * 盖过外层功能 Tab(定时任务 / Skills / 每日回顾),后者又盖过工作区内容。而会话区
+   * 操作的是**内层** Tab —— 两套状态各管各的,谁也不会顺手清掉谁。
+   *
+   * 于是曾经的表现是:浏览器页开着的时候点左边一条会话,列表那一行**高亮跟着变了**
+   * (`activeSessionId` 从内层派生),主区却纹丝不动还是浏览器 —— 看着就像点击丢了。
+   * 高亮和主区是同一个意图的两处呈现,不能只动一处。
+   *
+   * 用 `openWorkspace` 而不是只 `closeStandaloneFeature()`:后者只解开第一层,
+   * 停在「定时任务」Tab 上时照样不动。`openWorkspace` 会激活这个工作区的外层 Tab
+   * (已存在就复用),两层一起归位。
+   */
+  const revealWorkspace = (): void => {
+    if (activeWorkspaceId === null) return;
+    if (activeStandaloneFeature === null && activeOuter?.kind === "workspace") return;
+    win.openWorkspace(activeWorkspaceId);
+  };
 
   /**
    * 关掉面板里的一个 Tab。**关掉最后一个 = 收起这个面板。**
@@ -224,16 +267,16 @@ export function AppShell({
               activeStandaloneFeature ??
               (activeOuter?.kind === "feature" ? activeOuter.ref.feature : null)
             }
-            activeSessionId={
-              activeInner?.kind === "chat" ? activeInner.ref.sessionId : null
-            }
+            activeSessionId={routeSessionId}
             runningSessionIds={runningSessionIds}
             // ★ `newChat` 不是 `open`:已经有一个没用过的对话就切过去,不再攒一排
             // 一模一样的「新对话」。Tab 条上那颗 `+` 仍走 `open`,它问的是
             // 「再给我一个」—— 见 stores/tabs.ts 的 newChat
-            onNewChat={() =>
-              activeWorkspaceId !== null && tabs.newChat(activeWorkspaceId)
-            }
+            onNewChat={() => {
+              if (activeWorkspaceId === null) return;
+              revealWorkspace();
+              tabs.newChat(activeWorkspaceId);
+            }}
             onSearch={() => {
               /* 步骤 14:cmdk 命令面板 */
             }}
@@ -241,6 +284,8 @@ export function AppShell({
             onOpenSettings={() => win.openSettings()}
             onSelectSession={(sessionId) => {
               if (activeWorkspaceId === null || inner === null) return;
+              // 先归位主区,再切内层 Tab —— 见 revealWorkspace
+              revealWorkspace();
               const t = inner.tabs.find(
                 (x) => x.kind === "chat" && x.ref.sessionId === sessionId,
               );
@@ -395,7 +440,7 @@ export function AppShell({
                   {t("app.openWorkspace")}
                 </div>
               ) : (
-                <DockRoot workspace={workspace} fallbackModel={settings.defaultModel} runningSessionIds={runningSessionIds} rightVisible={rightPanelOpen} bottomVisible={bottomPanelOpen} />
+                <DockRoot workspace={workspace} fallbackModel={{ model: settings.defaultModel, modelProviderId: settings.defaultModelProviderId }} runningSessionIds={runningSessionIds} rightVisible={rightPanelOpen} bottomVisible={bottomPanelOpen} />
               )}
             </div>
           </>

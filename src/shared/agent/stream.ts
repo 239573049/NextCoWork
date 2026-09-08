@@ -37,7 +37,12 @@ export interface TokenUsage {
 }
 
 export type ProviderStreamEvent =
-  | { type: 'message_start'; model: string }
+  /**
+   * `model` 是上游回包里的**真实模型名**(不是别名);`providerId` 由
+   * `upstream/router.ts` 在转发这个事件时补上,decoder 自己不知道也不该知道。
+   * 两者合起来才说得清「这段回复到底是谁给的」。
+   */
+  | { type: 'message_start'; model: string; providerId?: string }
   | { type: 'text_delta'; index: number; text: string }
   | { type: 'thinking_delta'; index: number; text: string }
   | { type: 'tool_call_start'; index: number; callId: string; name: string }
@@ -54,7 +59,12 @@ export type ProviderStreamEvent =
    * 内核不解释 opaque,只负责搬:decode → 这个事件 → ContentPart.opaque → encode。
    */
   | { type: 'block_opaque'; index: number; opaque: unknown }
-  | { type: 'provider_retry'; attempt: number; delayMs: number }
+  /**
+   * ★ `reason` 是给用户看的那句话(上游的原文,例如「Our servers are currently
+   * overloaded」)。没有它,状态行只能说「正在重试」—— 而用户真正想知道的是
+   * **为什么**:上游繁忙可以等,配置错了等一万年也没用。
+   */
+  | { type: 'provider_retry'; attempt: number; delayMs: number; reason: string }
   | { type: 'provider_switch'; from: string; to: string; reason: string }
   | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage }
   | { type: 'error'; error: AgentError }

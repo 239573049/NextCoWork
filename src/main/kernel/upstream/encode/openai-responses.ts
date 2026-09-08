@@ -1,4 +1,5 @@
 import type { AgentMessage } from '../../../../shared/agent/message'
+import { fileRefMarkdown } from '../../../../shared/agent/message'
 import { REQUEST_PATH } from '../../../../shared/domain/baseurl'
 import type { CanonicalRequest } from '../canonical'
 import { record } from '../decode/openai-common'
@@ -21,6 +22,10 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
           break
         case 'image':
           content.push({ type: 'input_image', image_url: part.dataRef, detail: 'auto' })
+          break
+        case 'file_ref':
+          // ★ 不读文件、不传字节 —— 只把路径当 markdown 链接告诉模型,它自己用工具去读。
+          content.push({ type: message.role === 'user' ? 'input_text' : 'output_text', text: fileRefMarkdown(part) })
           break
         case 'thinking': {
           const opaque = record(part.opaque)

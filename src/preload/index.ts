@@ -13,7 +13,7 @@
  * (electron.vite.config.ts 里的 `isolatedEntries: true` + `externalizeDeps: false`)。
  * 所以这里只 import 类型和三个纯常量,不 import 任何 node 内置模块。
  */
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import {
   isEventChannel,
   isInvokeChannel,
@@ -76,7 +76,18 @@ const api = {
    * 沙箱 preload 的 `process` 是个 polyfill,但 `platform` 在里面
    * (`versions` / `contextIsolated` 也来自同一份,上面已经在用)。
    */
-  platform: process.platform
+  platform: process.platform,
+
+  /**
+   * 渲染层拖拽/粘贴拿到的 `File` 早就没有 `.path` 了(Electron 移除了这个字段)。
+   * `webUtils.getPathForFile` 是官方补的替代——同步、不经 invoke 白名单,
+   * 因为它不是"渲染层指定任意路径"(那条禁令针对的是渲染层拼路径去读写文件),
+   * 这里只是把用户自己拖进来的这个 File 对应的磁盘路径读回来,给聊天文本用。
+   * 解析不出真实路径(比如某些合成的剪贴板文件)时返回空串。
+   */
+  getPathForFile(file: File): string {
+    return webUtils.getPathForFile(file)
+  }
 } as const
 
 export type NextCoWorkApi = typeof api

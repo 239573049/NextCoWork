@@ -563,7 +563,7 @@ describe('UpstreamRouter · 首字节边界(§5.3)', () => {
       responses: [fail(503), ok(sseBody({ text: '好' }))]
     })
     const out = await drain(router)
-    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0 })
+    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0, reason: 'boom' })
     expect(out.at(-1)?.type).toBe('message_end')
     expect(calls).toHaveLength(2)
   })
@@ -664,7 +664,8 @@ describe('UpstreamRouter · 重试与切换', () => {
       responses: [fail(429, 'rate_limit_error', 'slow', { 'retry-after': '0' }), ok(sseBody({ text: 'x' }))]
     })
     const out = await drain(router)
-    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0 })
+    // reason 带着上游原话 —— 状态行要靠它说明「为什么在等」,而不是只说「正在重试」
+    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 0, reason: 'slow' })
   })
 
   it('fetch 抛出被归一化成可重试的 network 错误', async () => {
@@ -909,5 +910,107 @@ describe('parseRetryAfter', () => {
     expect(parseRetryAfter(null, 0)).toBeUndefined()
     expect(parseRetryAfter('  ', 0)).toBeUndefined()
     expect(parseRetryAfter('soon', 0)).toBeUndefined()
+  })
+})
+
+/**
+ * 用户报的原始场景:RoutinAI(priority 0)和 Codex(priority 10)都提供
+ * `gpt-5.6-sol`,他在药丸里选了 Codex,请求却发给了 RoutinAI。
+ */
+describe('显式选定供应商后锁死', () => {
+  const twoHouses = {
+    providers: [provider('routin'), provider('codex', { priority: 10 })],
+    aliases: [alias('m', 'routin'), alias('m', 'codex')]
+  }
+
+  it('不指定时仍按 priority 择优 —— 老行为逐字保留', async () => {
+    const r = rig({ ...twoHouses, responses: [ok(sseBody({ text: 'hi' }))] })
+    await drainRequest(r.router, REQ)
+    expect(r.calls[0]).toContain('routin.example.com')
+  })
+
+  it('指定 priority 更大的那家时发给它,而不是被优先级推翻', async () => {
+    const r = rig({ ...twoHouses, responses: [ok(sseBody({ text: 'hi' }))] })
+    await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+    expect(r.calls).toEqual(['https://codex.example.com/v1/messages'])
+  })
+
+  /**
+   * ★ 出厂就是这条路径(`gateway.failover` 默认 false),也就是用户实际撞上的那条。
+   * 旁路模式下 `candidates()` 直接 `slice(0, 1)`,provider 过滤必须在它之前发生。
+   */
+  it('故障切换关闭时也照样锁死,不退回优先级最高的那家', async () => {
+    const r = rig({ ...twoHouses, failover: false, responses: [ok(sseBody({ text: 'hi' }))] })
+    await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+    expect(r.calls).toEqual(['https://codex.example.com/v1/messages'])
+  })
+
+  it('选定的那家连挂三次:重试全在它身上,绝不切到同名的另一家', async () => {
+    const r = rig({ ...twoHouses, responses: [fail(503), fail(503), fail(503)] })
+    const output = await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+    expect(r.calls).toEqual(Array(3).fill('https://codex.example.com/v1/messages'))
+    expect(output.filter((e) => e.type === 'provider_switch')).toHaveLength(0)
+    expect(output.at(-1)).toMatchObject({ type: 'error' })
+  })
+
+  /**
+   * 冷却是用来「绕开一家坏的」的,锁死之后无处可绕。此时还过滤掉唯一那条候选,
+   * 用户会收到「所有供应商都在冷却中」,而他明明只选了一家、界面上也没有重试入口。
+   */
+  it('选定的那家在冷却中仍然发请求,而不是报「所有供应商都在冷却中」', async () => {
+    const r = rig({ ...twoHouses,
+      responses: [fail(503), fail(503), fail(503), ok(sseBody({ text: 'hi' }))] })
+    await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+    expect(r.router.health().find((h) => h.providerId === 'codex')?.cooldownUntil).toBeGreaterThan(r.now.t)
+    const output = await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+    expect(r.calls).toHaveLength(4)
+    expect(output.at(-1)).toMatchObject({ type: 'message_end' })
+  })
+
+  it('message_start 带上实际给出这段回复的那家', async () => {
+    const r = rig({ ...twoHouses, responses: [ok(sseBody({ text: 'hi' }))] })
+    const output = await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+    expect(output.find((e) => e.type === 'message_start'))
+      .toMatchObject({ type: 'message_start', providerId: 'codex' })
+  })
+
+  it('未锁定而真的切了家时,message_start 报的是接手的那家,不是优先级最高的那家', async () => {
+    const r = rig({ ...twoHouses,
+      responses: [fail(503), fail(503), fail(503), ok(sseBody({ text: 'hi' }))] })
+    const output = await drainRequest(r.router, REQ)
+    expect(output.filter((e) => e.type === 'message_start'))
+      .toEqual([expect.objectContaining({ providerId: 'codex' })])
+  })
+
+  describe('选定的那家用不了时,错误要指名道姓', () => {
+    it('那家已被删除', async () => {
+      const r = rig({ ...twoHouses, responses: [] })
+      const output = await drainRequest(r.router, { ...REQ, modelProviderId: 'gone' })
+      expect(output.at(-1)).toMatchObject({ type: 'error', error: {
+        code: 'no_healthy_provider', retryable: false,
+        messageKey: 'agent.error.pinnedProviderMissing'
+      } })
+    })
+
+    it('那家已停用 —— 不静默走另一家', async () => {
+      const r = rig({
+        providers: [provider('routin'), provider('codex', { priority: 10, enabled: false })],
+        aliases: twoHouses.aliases, responses: []
+      })
+      const output = await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+      expect(output.at(-1)).toMatchObject({ type: 'error', error: {
+        code: 'no_healthy_provider', retryable: false,
+        messageKey: 'agent.error.pinnedProviderDisabled', messageParams: { provider: 'codex', model: 'm' }
+      } })
+    })
+
+    it('那家下已经没有这个别名', async () => {
+      const r = rig({ ...twoHouses, aliases: [alias('m', 'routin')], responses: [] })
+      const output = await drainRequest(r.router, { ...REQ, modelProviderId: 'codex' })
+      expect(output.at(-1)).toMatchObject({ type: 'error', error: {
+        code: 'no_healthy_provider', retryable: false,
+        messageKey: 'agent.error.pinnedModelMissing'
+      } })
+    })
   })
 })

@@ -104,6 +104,8 @@ export function permissionFacts(mode: PermissionMode, webSearch: boolean): strin
     `Permission mode: ${mode}\n` +
     `- Reading and searching: ${say(true, false)}\n` +
     `- Writing files and running commands: ${say(false, true)}\n` +
+    `- File tools are not fenced to the workspace: an absolute path anywhere on this machine resolves, ` +
+    `and the rules above are what governs it\n` +
     `- Tools that need the network: ${net}`
   )
 }

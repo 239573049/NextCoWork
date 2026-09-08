@@ -73,6 +73,27 @@ export function getCredentialInfo(providerId: string): Promise<CredentialInfo> {
   return invoke('provider:getCredentialInfo', { providerId })
 }
 
+/**
+ * 走一遍账号登录。**这条 promise 可能要等好几分钟**(用户要在浏览器里授权),
+ * 中间进度靠订阅 `provider:authProgress` 拿 —— 只 await 这一条的话,
+ * 按钮上会有一大段时间没有任何反馈。
+ */
+export function startOAuth(providerId: string): Promise<CredentialInfo> {
+  return invoke('provider:startOAuth', { providerId })
+}
+
+export function cancelOAuth(providerId: string): Promise<void> {
+  return invoke('provider:cancelOAuth', { providerId })
+}
+
+export function submitOAuthCode(providerId: string, code: string): Promise<CredentialInfo> {
+  return invoke('provider:submitOAuthCode', { providerId, code })
+}
+
+export function signOut(providerId: string): Promise<CredentialInfo> {
+  return invoke('provider:signOut', { providerId })
+}
+
 export function updateModel(model: ModelAlias): Promise<ModelAlias> {
   return invoke('model:update', model)
 }

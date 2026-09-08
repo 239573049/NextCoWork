@@ -30,6 +30,8 @@ export interface TrayItem {
   name: string;
   status: "uploading" | "done" | "error";
   attachment?: Attachment;
+  /** 非图片文件的真实磁盘路径——不经过上传，与 attachment 二选一 */
+  path?: string;
   error?: string;
 }
 

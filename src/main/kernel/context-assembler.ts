@@ -97,6 +97,9 @@ function estimatePart(p: ContentPart): number {
       case 'image':
         // dataRef 是个引用,但上游收到的是真图 —— 按图算,不按引用字符串算
         return IMAGE_TOKENS
+      case 'file_ref':
+        // 只把路径当文本发给模型,按路径字符串本身估算即可
+        return estimateTokens(p.path)
       case 'error':
         return estimateTokens(p.error.message)
     }
@@ -666,6 +669,8 @@ export interface AssembleInput {
   thinking: ThinkingLevel
   /** ModelAlias.alias,不是上游真实模型名 —— 路由器负责翻译 */
   model: string
+  /** 用户显式选定的供应商(硬约束),原样带给路由器。见 `RunRequest.modelProviderId` */
+  modelProviderId?: string
   workspaceRoot: string
   now: number
   /** host.platform */
@@ -719,6 +724,7 @@ export function assemble(input: AssembleInput): AssembleOutput {
 
   const request: CanonicalRequest = {
     model: input.model,
+    ...(input.modelProviderId === undefined ? {} : { modelProviderId: input.modelProviderId }),
     thinkingLevel: input.thinking,
     system,
     messages: [...messages],

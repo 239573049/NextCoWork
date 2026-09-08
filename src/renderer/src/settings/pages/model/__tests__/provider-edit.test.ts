@@ -16,6 +16,7 @@ import {
   isPresetAdded,
   presetHasProtocol,
   providerFromPreset,
+  seedModelsForPreset,
   PRESET_PRIORITY
 } from '../provider-edit'
 
@@ -157,5 +158,42 @@ describe('isPresetAdded', () => {
     expect(isPresetAdded(preset('routin'), [{ id: 'routin' }])).toBe(true)
     expect(isPresetAdded(preset('routin'), [{ id: 'demo' }])).toBe(false)
     expect(isPresetAdded(preset('routin'), [])).toBe(false)
+  })
+})
+
+describe('seedModelsForPreset', () => {
+  it('★ 拉不动模型列表的,种建议模型 —— 否则用户添加完是一家零模型的死路', () => {
+    // codex 的 supportsModelList 是 false，且「从服务商拉取」按钮因此是灰的
+    expect(seedModelsForPreset(preset('codex'), 'openai-responses')).toEqual([
+      ...preset('codex').suggestedModels
+    ])
+  })
+
+  it('★ 拉得动的一律不种 —— suggestedModels 是会腐烂的快照，别覆盖实时路径', () => {
+    expect(seedModelsForPreset(preset('openai'), 'openai-chat')).toEqual([])
+  })
+
+  it('同一家两个协议可以有不同答案，按那条端点自己的标记算', () => {
+    for (const p of PROVIDER_PRESETS) {
+      for (const e of p.endpoints) {
+        // ★ 断言盯的是规则本身，不是「长度是否为 0」——
+        //   suggestedModels 本来就是空的那几家（jan），两种情况下都返回空数组
+        expect(seedModelsForPreset(p, e.protocol), `${p.id}/${e.protocol}`).toEqual(
+          e.supportsModelList ? [] : [...p.suggestedModels]
+        )
+      }
+    }
+  })
+
+  it('认不出协议的端点按「拉不动」处理，宁可多种两个能删的名字', () => {
+    expect(seedModelsForPreset(preset('anthropic'), 'openai-responses')).toEqual([
+      ...preset('anthropic').suggestedModels
+    ])
+  })
+
+  it('返回的是副本，改它不会污染预设表', () => {
+    const seeds = seedModelsForPreset(preset('codex'), 'openai-responses')
+    seeds.push('injected')
+    expect(preset('codex').suggestedModels).not.toContain('injected')
   })
 })

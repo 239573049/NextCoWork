@@ -8,6 +8,11 @@ import { Slider } from '../../components/ui/Slider'
 import { Toggle } from '../../components/ui/Toggle'
 import { Select } from '../../components/ui/Select'
 import { useModelsStore } from '../../stores/models'
+import { modelOptions } from './model/enabled-models'
+import {
+  modelSelectionKey,
+  parseModelSelectionKey
+} from '../../../../shared/domain/model-selection'
 import { LandsAt, SettingGroup, SettingRow } from '../Row'
 import type { SettingsPageProps } from '../props'
 import { useI18n } from '../../i18n'
@@ -15,16 +20,17 @@ import { useI18n } from '../../i18n'
 export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
   const { t } = useI18n()
   const models = useModelsStore((s) => s.models)
+  const providers = useModelsStore((s) => s.providers)
   const loaded = useModelsStore((s) => s.loaded)
   const load = useModelsStore((s) => s.load)
   useEffect(() => {
     if (sub === 'agent' && !loaded) void load()
   }, [sub, loaded, load])
   if (sub === 'agent') {
-    const reviewerModels = [...new Set(models.filter((m) => m.enabled !== false).map((m) => m.alias))]
-    const modelOptions = [
+    // 一条绑定一个选项 —— 同一别名挂在多家上时,「用哪一家审核」是用户要选的东西
+    const reviewerOptions = [
       { value: '', label: t('general.permissionReviewerModelEmpty') },
-      ...reviewerModels.map((alias) => ({ value: alias, label: alias }))
+      ...modelOptions(models.filter((m) => m.enabled !== false), providers)
     ]
       return (
         <SettingGroup>
@@ -53,10 +59,13 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           last
         >
           <Select
-            value={settings.permissionReviewerModel}
-            options={modelOptions}
+            value={modelSelectionKey(settings.permissionReviewerModelProviderId, settings.permissionReviewerModel)}
+            options={reviewerOptions}
             ariaLabel={t('general.permissionReviewerModel')}
-            onValueChange={(permissionReviewerModel) => patch({ permissionReviewerModel })}
+            onValueChange={(key) => {
+              const { alias, modelProviderId } = parseModelSelectionKey(key)
+              patch({ permissionReviewerModel: alias, permissionReviewerModelProviderId: modelProviderId })
+            }}
           />
         </SettingRow>
         <SettingRow title={t('general.contextManagement')} description={t('general.contextManagementHint')}>

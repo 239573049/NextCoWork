@@ -42,12 +42,15 @@ import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
 import { openExternal } from "../../../services/app";
 import {
+  cancelOAuth,
   getCredentialInfo,
   removeModel,
   removeProvider,
   renameModel,
   setCredential,
   setProviderAliases,
+  signOut,
+  startOAuth,
   updateModel,
   upsertProvider,
 } from "../../../services/provider";
@@ -57,6 +60,13 @@ import { ImportModelsDialog } from "./ImportModelsDialog";
 import { modelListAvailability } from "./import-models";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { baseUrlForProtocol } from "./provider-edit";
+import {
+  oauthView,
+  providerAuthMode,
+  providerOAuthIssuer,
+  type OAuthPhase,
+  type OAuthView,
+} from "./provider-auth";
 import { useI18n } from "../../../i18n";
 
 const REASONING_EFFORTS: readonly ReasoningEffort[] = [
@@ -120,12 +130,11 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           ? t("provider.getSubscriptionKey")
           : t("provider.getApiKey");
   /*
-    ★ 置灰与否看的是**预设表 + 当前地址**,不是「试了再报错」:
-    `supportsModelList: false` 的那几家(DeepSeek / Kimi 的 Anthropic 端等)
-    实测没有列表端点,点下去只会拿到一个 404。
-
-    ★ 但地址被改过就照常放行 —— 那张快照描述的已经不是用户那个端点了。
-    判据和三条分支写在 `import-models.ts` 的 modelListAvailability,那边有测试。
+    ★ 这里**只取提示文案,不再有置灰**。曾经的 `supportsModelList: false` 置灰
+    是照一张不可靠的快照下禁令 —— 多数国内网关先验鉴权再路由,没有效 key 时
+    401 会被误读成「这家没有列表端点」(千帆就是被标错的那个)。而且主进程的
+    `fetchModels` 本来就写明了「试了再说」,前端焊死按钮等于把那条路又堵上。
+    判据和三条提示分支在 `import-models.ts` 的 modelListAvailability,那边有测试。
   */
   const listAvail = modelListAvailability(p);
 
@@ -145,9 +154,14 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const [cred, setCred] = useState<CredentialInfo | null>(null);
   const [keyDraft, setKeyDraft] = useState("");
   const [editingKey, setEditingKey] = useState(false);
+  /** 登录流程的阶段。`null` = 现在没有登录在跑 */
+  const [authFlow, setAuthFlow] = useState<{ phase: OAuthPhase } | null>(null);
   const [cacheTtl, setCacheTtl] = useState<AnthropicCacheTtl>(() =>
     anthropicCacheTtlOf(p),
   );
+
+  const authMode = providerAuthMode(p.id);
+  const authView = oauthView(cred, authFlow);
 
   /*
     ★ 只认 `p.id`,不认 `p`。挂上 `p` 的话,保存成功后广播回来会再跑一次 ——
@@ -161,6 +175,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
     setKeyDraft("");
     setEditingKey(false);
     setCred(null);
+    setAuthFlow(null);
     setConfirmDelete(false);
     setThinkingModel(null);
     setEditingModel(null);
@@ -184,6 +199,58 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   useEffect(() => {
     setCacheTtl(anthropicCacheTtlOf(p));
   }, [p.protocolOptions?.anthropic?.cacheTtl]);
+
+  /*
+    登录态的两条推送。
+
+    ★ `authChanged` **不只在登录/退出时来** —— 刷新 token 失败把凭证标成
+    「需要重新登录」时主进程也推它。不订的话,用户面前那句「已登录」会一直挂着,
+    直到他关掉设置页再打开。
+
+    ★ 退订函数必须返回(preload 的协议),否则 HMR 下监听器会叠加。
+  */
+  useEffect(() => {
+    const offChanged = window.nextcowork.on("provider:authChanged", (e) => {
+      if (e.providerId === p.id) setCred(e.info);
+    });
+    const offProgress = window.nextcowork.on("provider:authProgress", (e) => {
+      if (e.providerId !== p.id) return;
+      // 终态由 startOAuth 那条 invoke 的返回值给,这里只驱动中间的三个阶段
+      setAuthFlow(
+        e.phase === "opening" || e.phase === "waiting" || e.phase === "exchanging"
+          ? { phase: e.phase }
+          : null,
+      );
+    });
+    return () => {
+      offChanged();
+      offProgress();
+    };
+  }, [p.id]);
+
+  const doSignIn = (): void => {
+    setError(null);
+    setAuthFlow({ phase: "opening" });
+    void startOAuth(p.id)
+      .then(setCred)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setAuthFlow(null));
+  };
+
+  const doCancelSignIn = (): void => {
+    void cancelOAuth(p.id).catch(() => {
+      /* 取消失败没什么可做的 —— 那条流程要么已经结束，要么马上超时 */
+    });
+  };
+
+  const doSignOut = (): void => {
+    setBusy(true);
+    setError(null);
+    void signOut(p.id)
+      .then(setCred)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
 
   const save = (patch: Partial<UpstreamProvider>): void => {
     setBusy(true);
@@ -423,40 +490,56 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             ))}
           </Field>
 
-          <Field label={t("provider.apiFormat")}>
-            <Segmented
-              label={t("provider.apiFormat")}
-              className="w-full"
-              value={family}
-              options={[
-                { value: "openai", label: t("provider.openaiFormat") },
-                { value: "anthropic", label: t("provider.anthropicFormat") },
-              ]}
-              disabled={busy}
-              onChange={(f) =>
-                switchProtocol(joinProtocol(f, f === "openai" && responses))
-              }
-            />
-          </Field>
-
-          {/* ★ 只在 OpenAI 族下出现 —— 三个协议值到「两控件」的投影,见 provider.ts */}
-          {family === "openai" && (
-            <div className="flex items-start gap-4">
-              <div className="min-w-0 flex-1">
-                <p className="text-[13px] text-fg">{t("provider.responsesApi")}</p>
-                <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
-                  {t("provider.responseApiHint")}
-                </p>
-              </div>
-              <div className="shrink-0 pt-0.5">
-                <Toggle
-                  checked={responses}
+          {/*
+            ★★ **走账号登录的供应商藏掉这两个控件。**
+            不藏的话:用户翻一下「使用 Responses API」→ 协议变成 openai-chat →
+            `baseUrlForProtocol` 因为预设里没有那条端点而**保留原地址** →
+            请求打到 `…/codex/chat/completions` → 404,而表单看着完全正常。
+            这正是 `provider-edit.ts` 文件头点名要防的那类静默失效。
+            (预设那边只给一条 endpoint 是第一道防线,这里是第二道。)
+          */}
+          {authMode === "oauth" ? (
+            <p className="text-[11.5px] leading-[1.6] text-fg-faint">
+              {t("provider.oauthFixedChannel")}
+            </p>
+          ) : (
+            <>
+              <Field label={t("provider.apiFormat")}>
+                <Segmented
+                  label={t("provider.apiFormat")}
+                  className="w-full"
+                  value={family}
+                  options={[
+                    { value: "openai", label: t("provider.openaiFormat") },
+                    { value: "anthropic", label: t("provider.anthropicFormat") },
+                  ]}
                   disabled={busy}
-                  onChange={(on) => switchProtocol(joinProtocol("openai", on))}
-                  label={t("provider.responsesApi")}
+                  onChange={(f) =>
+                    switchProtocol(joinProtocol(f, f === "openai" && responses))
+                  }
                 />
-              </div>
-            </div>
+              </Field>
+
+              {/* ★ 只在 OpenAI 族下出现 —— 三个协议值到「两控件」的投影,见 provider.ts */}
+              {family === "openai" && (
+                <div className="flex items-start gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] text-fg">{t("provider.responsesApi")}</p>
+                    <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
+                      {t("provider.responseApiHint")}
+                    </p>
+                  </div>
+                  <div className="shrink-0 pt-0.5">
+                    <Toggle
+                      checked={responses}
+                      disabled={busy}
+                      onChange={(on) => switchProtocol(joinProtocol("openai", on))}
+                      label={t("provider.responsesApi")}
+                    />
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           {family === "anthropic" && (
@@ -480,9 +563,10 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           )}
 
           <Field
-            label={t("provider.apiKey")}
+            label={authMode === "oauth" ? t("provider.account") : t("provider.apiKey")}
             action={
-              apiKeyUrl !== undefined ? (
+              /* ★ 走登录的那家没有「创建 API Key」页面，预设里也没给 apiKeyUrl */
+              authMode !== "oauth" && apiKeyUrl !== undefined ? (
                 <Button
                   size="sm"
                   icon={<ExternalLink size={12} />}
@@ -493,7 +577,16 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               ) : undefined
             }
           >
-            {editingKey || !hasKey ? (
+            {authMode === "oauth" ? (
+              <ProviderAuthField
+                providerId={p.id}
+                view={authView}
+                busy={busy}
+                onSignIn={doSignIn}
+                onCancel={doCancelSignIn}
+                onSignOut={doSignOut}
+              />
+            ) : editingKey || !hasKey ? (
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
                   <TextInput
@@ -555,7 +648,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               </div>
             )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              {t("provider.keySavedHint")}
+              {authMode === "oauth" ? t("provider.signInHint") : t("provider.keySavedHint")}
             </p>
             {cred !== null && !cred.encryptionAvailable && (
               /* ★ 不做明文降级,所以这里会真的存不进去 —— 提前说,别等他填完才报错 */
@@ -573,14 +666,13 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             hint={t("provider.modelPriorityHint")}
             action={
               <>
-                {listAvail.enabled && aliases.length > 0 && (
+                {aliases.length > 0 && (
                   <span className="shrink-0 text-[11px] text-fg-faint">
                     {aliases.length}/{MAX_ALIASES_PER_PROVIDER}
                   </span>
                 )}
                 <Button
                   size="sm"
-                  disabled={!listAvail.enabled}
                   icon={<CloudDownload size={13} />}
                   onClick={() => setImportOpen(true)}
                 >
@@ -783,6 +875,114 @@ function Field({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * 账号登录那一格 —— 四态各一种样子。
+ *
+ * ★ 不新开文件:它只是那块 JSX 的一个名字,四态的**判断**在
+ * `provider-auth.ts` 的 `oauthView` 里(那边有测试)。这里只负责画。
+ *
+ * ★ 「退出登录」是**就地两步**,和删除供应商同一套:退出之后要重走一遍
+ * 浏览器授权才能回来,代价不对称,值得挡一次误触。
+ */
+function ProviderAuthField({
+  providerId,
+  view,
+  busy,
+  onSignIn,
+  onCancel,
+  onSignOut,
+}: {
+  providerId: string;
+  view: OAuthView;
+  busy: boolean;
+  onSignIn: () => void;
+  onCancel: () => void;
+  onSignOut: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+  const [confirmOut, setConfirmOut] = useState(false);
+  const issuer = providerOAuthIssuer(providerId);
+  const signInLabel = t("provider.signInWith", { name: issuer === "chatgpt" ? "ChatGPT" : "" });
+
+  if (view.state === "signing-in") {
+    const phaseLabel =
+      view.phase === "opening"
+        ? t("provider.authOpeningBrowser")
+        : view.phase === "waiting"
+          ? t("provider.authWaiting")
+          : t("provider.authExchanging");
+    return (
+      <div className="flex items-center gap-2">
+        <div className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border bg-surface-field px-2.5">
+          <Loader2 size={12} className="shrink-0 animate-spin text-fg-muted" />
+          <span className="min-w-0 flex-1 truncate text-[13px] text-fg-muted">
+            {phaseLabel}
+          </span>
+        </div>
+        <Button size="sm" onClick={onCancel}>
+          {t("common.cancel")}
+        </Button>
+      </div>
+    );
+  }
+
+  if (view.state === "signed-out") {
+    return (
+      <Button size="sm" variant="accent" icon={<ExternalLink size={12} />} onClick={onSignIn}>
+        {signInLabel}
+      </Button>
+    );
+  }
+
+  const expired = view.state === "expired";
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <div
+          className={cn(
+            "flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border px-2.5",
+            "bg-surface-field",
+            expired ? "border-danger/50" : "border-border",
+          )}
+        >
+          <span className="min-w-0 flex-1 truncate text-[13px] text-fg-muted">
+            {view.email ?? t("provider.authAccountFallback")}
+          </span>
+          {view.state === "signed-in" && view.plan !== null && (
+            <span className="shrink-0 text-[11px] text-fg-faint">{view.plan}</span>
+          )}
+          {expired ? (
+            <span className="flex shrink-0 items-center gap-1 text-[11px] text-danger">
+              <AlertTriangle size={11} />
+              {t("provider.signInExpired")}
+            </span>
+          ) : (
+            <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
+              <Check size={11} />
+              {t("provider.signedIn")}
+            </span>
+          )}
+        </div>
+        {expired && (
+          <Button size="sm" variant="accent" disabled={busy} onClick={onSignIn}>
+            {t("provider.reSignIn")}
+          </Button>
+        )}
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            if (confirmOut) onSignOut();
+            else setConfirmOut(true);
+          }}
+        >
+          {confirmOut ? t("provider.confirmSignOut") : t("provider.signOut")}
+        </Button>
+      </div>
+    </>
   );
 }
 

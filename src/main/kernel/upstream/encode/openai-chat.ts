@@ -1,4 +1,5 @@
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
+import { fileRefMarkdown } from '../../../../shared/agent/message'
 import { REQUEST_PATH } from '../../../../shared/domain/baseurl'
 import type { CanonicalRequest } from '../canonical'
 import type { EncodedRequest } from './anthropic'
@@ -32,6 +33,9 @@ export function toOpenAIChatMessages(messages: readonly AgentMessage[]): ChatMes
         content.push({ type: 'text', text: part.text })
       } else if (part.type === 'image') {
         content.push({ type: 'image_url', image_url: { url: part.dataRef } })
+      } else if (part.type === 'file_ref') {
+        // ★ 不读文件、不传字节 —— 只把路径当 markdown 链接告诉模型,它自己用工具去读。
+        content.push({ type: 'text', text: fileRefMarkdown(part) })
       } else if (part.type === 'tool_call' && message.role === 'assistant') {
         calls.push({
           id: part.callId,

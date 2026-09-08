@@ -74,9 +74,20 @@ import { AttachmentTray, type TrayItem } from "./AttachmentTray";
 export interface ComposerValue {
   permissionMode: PermissionMode;
   model: string;
+  /**
+   * 用户显式选定的供应商。★ 和 `model` 是**一对**,任何一处写 `model` 的地方
+   * 都必须同时写它(哪怕是 `undefined`),否则会留下「新别名 + 旧供应商」。
+   */
+  modelProviderId?: string;
   mode: SessionMode;
   thinking: ThinkingLevel;
   webSearch: boolean;
+}
+
+/** 应用级默认模型(设置页那个)。别名和供应商必须一起传,拆成两个 prop 必漏 */
+export interface FallbackModel {
+  model: string;
+  modelProviderId?: string;
 }
 
 export function Composer({
@@ -95,7 +106,7 @@ export function Composer({
 }: {
   workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
-  fallbackModel: string;
+  fallbackModel: FallbackModel;
   draft: string;
   onDraft: (v: string) => void;
   running: boolean;
@@ -172,14 +183,17 @@ export function Composer({
    * **兜底结果不写回工作区**:用户没选过,那 `defaultModel` 就该继续是空的。
    * 静默替他做主的话,以后他在设置页改了应用默认模型,这个工作区却不跟着变,
    * 而他并不知道自己什么时候「选」过。
+   *
+   * ★ 别名和供应商**整对**地兜底,不能各挑各的:三档来源里挑出别名 A、又从
+   * 另一档挑出供应商 B 的话,拼出来的是一个谁也没配过的组合,候选集直接为空。
    */
-  const model =
+  const { model, modelProviderId } =
     value.model !== ""
-      ? value.model
-      : fallbackModel !== ""
-        ? fallbackModel
-        : (models[0]?.alias ?? "");
-  const provider = providerOf(model);
+      ? { model: value.model, modelProviderId: value.modelProviderId }
+      : fallbackModel.model !== ""
+        ? { model: fallbackModel.model, modelProviderId: fallbackModel.modelProviderId }
+        : { model: models[0]?.alias ?? "", modelProviderId: models[0]?.providerId };
+  const provider = providerOf(model, modelProviderId);
   const selectedModel = models.find((m) => m.alias === model && m.providerId === provider?.id);
   const thinking = loaded ? normalizeModelThinkingLevel(value.thinking, selectedModel) : value.thinking;
   useEffect(() => {
@@ -199,7 +213,9 @@ export function Composer({
     if (pending) return;
     if ((text === "" && !hasReady) || model === "") return;
     // 发送时打快照:药丸此刻的值进 RunRequest,run 跑起来后再改药丸不影响它
-    onSend(text, { ...value, model, thinking });
+    // ★ `modelProviderId` 必须和 `model` 一起覆盖:两者都可能来自兜底而不在 `value` 里,
+    //   只覆盖一半就会把「兜底的别名」配上「value 里那个陈旧的供应商」。
+    onSend(text, { ...value, model, modelProviderId, thinking });
     onDraft("");
   }
 
@@ -403,15 +419,21 @@ export function Composer({
           */}
           <ModelPicker
             model={model}
+            modelProviderId={modelProviderId}
             modelLabel={modelLabel}
             provider={provider}
             providers={providers}
             models={models}
             loaded={loaded}
             thinking={thinking}
-            onModel={(nextModel) => patch({ model: nextModel, thinking: normalizeModelThinkingLevel(
-              thinking, models.find((m) => m.alias === nextModel)
-            ) })}
+            onModel={(nextModel, nextProviderId) => patch({
+              model: nextModel,
+              // 用户从菜单里点选是**唯一**会把供应商写进工作区的时机(兜底不写回)。
+              modelProviderId: nextProviderId,
+              thinking: normalizeModelThinkingLevel(thinking, models.find(
+                (m) => m.alias === nextModel && m.providerId === nextProviderId
+              ))
+            })}
             onThinking={(thinking) => patch({ thinking })}
           />
 
@@ -544,6 +566,7 @@ function Pill({
  */
 function ModelPicker({
   model,
+  modelProviderId,
   modelLabel,
   provider,
   providers,
@@ -554,13 +577,14 @@ function ModelPicker({
   onThinking,
 }: {
   model: string;
+  modelProviderId?: string;
   modelLabel: string;
   provider?: UpstreamProvider;
   providers: UpstreamProvider[];
   models: ModelAlias[];
   loaded: boolean;
   thinking: ThinkingLevel;
-  onModel: (model: string) => void;
+  onModel: (model: string, modelProviderId: string) => void;
   onThinking: (thinking: ThinkingLevel) => void;
 }): ReactNode {
   const { t } = useI18n();
@@ -730,8 +754,9 @@ function ModelPicker({
               provider={providers.find((p) => p.id === providerId)}
               models={models.filter((m) => m.providerId === providerId)}
               model={model}
-              onSelect={(alias) => {
-                onModel(alias);
+              modelProviderId={modelProviderId}
+              onSelect={(alias, selectedProviderId) => {
+                onModel(alias, selectedProviderId);
                 closeMenuRef.current();
                 setSubmenuAnchor(null);
                 setProviderId(null);
@@ -750,6 +775,7 @@ function ModelSubmenu({
   provider,
   models,
   model,
+  modelProviderId,
   onSelect,
 }: {
   anchor: HTMLElement;
@@ -757,7 +783,8 @@ function ModelSubmenu({
   provider?: UpstreamProvider;
   models: ModelAlias[];
   model: string;
-  onSelect: (alias: string) => void;
+  modelProviderId?: string;
+  onSelect: (alias: string, modelProviderId: string) => void;
 }): ReactNode {
   const { t } = useI18n();
   const [position, setPosition] = useState({ top: 0, left: 0 });
@@ -820,8 +847,10 @@ function ModelSubmenu({
         return (
           <MenuItem
             key={`${m.providerId}/${m.alias}`}
-            checked={m.alias === model}
-            onSelect={() => onSelect(m.alias)}
+            // ★ 必须带上 providerId:同一个别名在两家的子菜单里都会出现,只比别名的话
+            //   **两边同时打勾**,用户会以为自己选了两个。
+            checked={m.alias === model && m.providerId === modelProviderId}
+            onSelect={() => onSelect(m.alias, m.providerId)}
           >
             {m.alias}
           </MenuItem>
@@ -838,6 +867,7 @@ function fromSettings(s: WorkspaceSettings): ComposerValue {
   return {
     permissionMode: s.permissionMode,
     model: s.defaultModel,
+    modelProviderId: s.defaultModelProviderId,
     mode: s.defaultMode,
     thinking: s.defaultThinking,
     webSearch: s.webSearch,
@@ -848,6 +878,9 @@ function toSettings(v: ComposerValue): Partial<WorkspaceSettings> {
   return {
     permissionMode: v.permissionMode,
     defaultModel: v.model,
+    // ★ **无条件**写,不能条件展开:主进程那边是深合并,漏写这一项时旧的供应商
+    //   会原样留下,于是得到「新别名 + 旧供应商」—— 正是这次修复要消灭的那个形状。
+    defaultModelProviderId: v.modelProviderId,
     defaultMode: v.mode,
     defaultThinking: v.thinking,
     webSearch: v.webSearch,

@@ -24,12 +24,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '../../../../shared/agent/event'
+import { userMessage } from '../../../../shared/agent/message'
 import type { AgentEventEnvelope } from '../../../../shared/ipc/contract'
 
 vi.mock('../../services/agent', () => ({
   startRun: vi.fn(),
   attachRun: vi.fn(),
   abortRun: vi.fn(),
+  // ★ 必须返回 promise:store 里是 `void interjectRun(...).catch(...)`,
+  //   返回 undefined 的话每一次插话同步都会当场 TypeError。
+  interjectRun: vi.fn(async () => {}),
   onAgentEvent: vi.fn(() => () => {})
 }))
 
@@ -45,13 +49,14 @@ vi.mock('../../services/app', () => ({
   persistSessionInput: vi.fn()
 }))
 
-import { abortRun, startRun } from '../../services/agent'
+import { abortRun, interjectRun, startRun } from '../../services/agent'
 import type { SendOptions } from '../session'
 import { adoptActiveRuns, releaseSession, resumeQueue, sessionStore, useRunIndex } from '../session'
 import { useTabsStore } from '../tabs'
 
 const mockStartRun = vi.mocked(startRun)
 const mockAbortRun = vi.mocked(abortRun)
+const mockInterjectRun = vi.mocked(interjectRun)
 
 /**
  * ★ **标注成 `SendOptions`,不要写 `as const`。** `as const` 会把 `skillIds`
@@ -366,6 +371,115 @@ describe('排队续跑', () => {
         input: [{ type: 'text', text: '乙\n\n甲' }]
       })
       expect(s.getState().queuedInputs).toEqual([])
+    })
+
+    /**
+     * ★★ 这一组钉的是截图里那个 bug:用户点了「插话」,按钮变成「已插话」,
+     * 然后**什么都没发生** —— 模型继续跑它的工具,那句话一个字都没进去。
+     *
+     * 原因是 promote 当时只是本地排序,真正发出去要等整个 run 跑完。
+     * 界面承诺了插入,实现做的是排队。
+     */
+    it('★ 运行中点插话:立刻推给主进程,而不是等 run 跑完', async () => {
+      const s = session('s-interject')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('插一句', OPTS)
+
+      const 条目 = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(条目.id)
+
+      expect(mockInterjectRun).toHaveBeenCalledTimes(1)
+      const [runId, items] = mockInterjectRun.mock.calls[0]!
+      expect(runId).toBe(s.getState().activeRunId)
+      expect(items).toEqual([{ id: 条目.id, parts: [{ type: 'text', text: '插一句' }] }])
+      // 仍在队列里 —— 主进程确认注入之前不能移走(否则 run 半路挂了消息就没了)
+      expect(s.getState().queuedInputs).toHaveLength(1)
+    })
+
+    /** 取消引入 = 重发一份不含它的全集。全量替换语义就是靠这条兑现的 */
+    it('取消插话时重发空列表,把它从主进程信箱里撤回', async () => {
+      const s = session('s-interject-cancel')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('插一句', OPTS)
+
+      const 条目 = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(条目.id)
+      s.getState().promoteInput(条目.id)
+
+      expect(mockInterjectRun).toHaveBeenCalledTimes(2)
+      expect(mockInterjectRun.mock.calls[1]?.[1]).toEqual([])
+    })
+
+    /** pending 不是插话。灌进去等于任何人排队都能打断当前执行,队列就没意义了 */
+    it('只推 promoted,pending 一条都不捎带', async () => {
+      const s = session('s-interject-pending')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('甲', OPTS)
+      await s.getState().send('乙', OPTS)
+
+      const 乙 = s.getState().queuedInputs[1]!
+      s.getState().promoteInput(乙.id)
+
+      expect(mockInterjectRun.mock.calls[0]?.[1]).toEqual([
+        { id: 乙.id, parts: [{ type: 'text', text: '乙' }] }
+      ])
+    })
+
+    /**
+     * ★ 「恰好一次」的渲染层那一半:主进程复用条目 id 当消息 id,
+     * 于是一条 `message_commit` 就是回执,不需要任何新事件类型。
+     */
+    it('收到同 id 的 message_commit 后把条目移出队列', async () => {
+      const s = session('s-interject-reap')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('插一句', OPTS)
+
+      const 条目 = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(条目.id)
+
+      s.getState().applyEvents([
+        { type: 'message_commit', message: userMessage(条目.id, [{ type: 'text', text: '插一句' }], 1) }
+      ])
+
+      expect(s.getState().queuedInputs).toEqual([])
+      // ★ run 还在跑,不该被当成「结束了,发下一批」
+      expect(mockStartRun).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * ★ 注入过的条目**绝不能**再被 `drainQueue` 发一遍。
+     * 收队列必须排在续跑之前,否则 commit 与 run_end 落在同一批事件里时,
+     * 同一句话会被发两次。
+     */
+    it('注入过的条目不会在 run 结束时被再发一次', async () => {
+      const s = session('s-interject-once')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('插一句', OPTS)
+
+      const 条目 = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(条目.id)
+
+      s.getState().applyEvents([
+        { type: 'message_commit', message: userMessage(条目.id, [{ type: 'text', text: '插一句' }], 1) },
+        runEnd
+      ])
+
+      expect(mockStartRun).toHaveBeenCalledTimes(1)
+      expect(s.getState().queuedInputs).toEqual([])
+    })
+
+    /** 空闲时点插话仍然是「立即发送」,不该顺手往一个不存在的 run 里塞 */
+    it('空闲时不推插话,直接发出去', async () => {
+      const s = session('s-interject-idle')
+      await s.getState().send('第一条', OPTS)
+      await s.getState().send('排队的', OPTS)
+      s.getState().applyEvents([{ type: 'run_end', status: 'aborted' }])
+
+      const 条目 = s.getState().queuedInputs[0]!
+      s.getState().promoteInput(条目.id)
+
+      expect(mockInterjectRun).not.toHaveBeenCalled()
+      await vi.waitFor(() => expect(mockStartRun).toHaveBeenCalledTimes(2))
     })
   })
 

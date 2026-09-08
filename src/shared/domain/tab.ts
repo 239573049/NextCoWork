@@ -24,7 +24,7 @@ export const FEATURE_LABEL: Record<FeatureKind, string> = {
 
 /**
  * ★ 内层 Tab 属于**工作区**,不属于窗口(切换外层 Tab 时该工作区的内层 Tab 集自动恢复)。
- * ★ 会话不是 Tab,Tab 只**引用**一个 sessionId。
+ * ★ 会话不是 Tab,Tab 只**引用**一个 sessionId,而且**可以一个都不引用**(见 `chatKey`)。
  *
  * 这样才能:关掉聊天 Tab 而不杀死正在跑的 run、在新 Tab 里重开历史会话、
  * 两个 Tab 看同一会话。
@@ -52,7 +52,16 @@ interface InnerTabBase {
 export type TabPane = 'main' | 'bottom' | 'right'
 
 export type InnerTab =
-  | (InnerTabBase & { kind: 'chat'; ref: { sessionId: string } })
+  /**
+   * ★ `sessionId` 可以是 `null` —— 那是一个**还没有会话的对话 Tab**(草稿)。
+   *
+   * 「新建对话」不该在库里留下任何东西:它给的是一张白纸,而白纸攒多了就是
+   * 侧边栏里一排一模一样的「新对话」,用户以为自己什么也没做成。所以 id 在
+   * **需要一个归属**的那一刻才铸出来(发出第一条消息,或者贴上第一个附件),
+   * 见 `stores/tabs.ts` 的 `bindChatSession`;库里那一行更晚,由主进程
+   * `runAgent` 的 `ensureSession` 建。
+   */
+  | (InnerTabBase & { kind: 'chat'; ref: { sessionId: string | null } })
   | (InnerTabBase & { kind: 'terminal'; ref: { terminalId: string } })
   | (InnerTabBase & { kind: 'doc'; ref: { path: string } })
   | (InnerTabBase & { kind: 'draw'; ref: { path: string } })
@@ -69,6 +78,21 @@ export type InnerTabKind = InnerTab['kind']
 
 export function paneOf(tab: InnerTab): TabPane {
   return tab.pane ?? 'main'
+}
+
+/**
+ * 这个聊天 Tab 在**渲染层各注册表**里的键 —— 转录 store、未发出输入的存档,
+ * 都按它索引。
+ *
+ * 已绑定会话的用 sessionId;草稿用 tabId(它本来就是个 ULID,不会撞)。
+ * 存在的理由是那两张表在草稿期也得有得用:白纸上打了半句话、贴了张图,
+ * 关掉应用再回来还得在 —— 而这时候还没有会话 id 可以拿。
+ *
+ * ★ **拿它去调主进程是错的**:草稿键不是会话 id,`sessions:get` 只会告诉你
+ * 会话不存在。凡是要往 IPC 送的,都必须先 `bindChatSession` 换一个真 id。
+ */
+export function chatKey(tab: Extract<InnerTab, { kind: 'chat' }>): string {
+  return tab.ref.sessionId ?? tab.id
 }
 
 export interface InnerTabMenuItem {

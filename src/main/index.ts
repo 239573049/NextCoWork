@@ -195,12 +195,19 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
   // 双击 Tab 条、按 Win+↑。挂在 register 之后:push 走的就是 registry。
   watchMaximized(win)
 
+  /*
+    路由写在 hash 里:`#/{workspaceId}` 是「这个工作区,新对话」,
+    `#/{workspaceId}/{sessionId}` 是「这一段会话」。渲染层进来后按它落位,
+    之后 hash 一直跟着激活的 Tab 走(见 `renderer/shell/AppShell.tsx`)。
+    ★ `loadFile` 的 hash 参数**不带 `#`**,Electron 自己加。
+  */
+  const route = sessionRoute === undefined
+    ? undefined
+    : `/${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    const hash = sessionRoute === undefined ? '' : `#session=${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
-    void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}${hash}`)
+    void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}${route === undefined ? '' : `#${route}`}`)
   } else {
-    const hash = sessionRoute === undefined ? undefined : `session=${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
-    void win.loadFile(join(__dirname, '../renderer/index.html'), hash === undefined ? undefined : { hash })
+    void win.loadFile(join(__dirname, '../renderer/index.html'), route === undefined ? undefined : { hash: route })
   }
 
   return win

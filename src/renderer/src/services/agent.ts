@@ -7,6 +7,7 @@
 import type { RunSnapshot } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../../shared/agent/interaction'
+import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import type { Unsubscribe } from '../../../shared/ipc/contract'
 import { invoke, on } from './ipc'
@@ -29,6 +30,17 @@ export function attachRun(runId: string, sinceSeq: number): Promise<RunSnapshot>
 
 export function abortRun(runId: string, cascade = true): Promise<void> {
   return invoke('agent:abort', { runId, cascade })
+}
+
+/**
+ * 把当前**全部**已引入(promoted)的排队条目同步给正在跑的 run。
+ *
+ * ★ 全量而不是增量 —— 见 `agent:interject` 的契约注释。调用点因此可以粗放:
+ * 任何会改变 promoted 集合的操作(引入、取消、编辑、删除)结束后调一次即可,
+ * 不必各自算出「这次变了哪一条」。
+ */
+export function interjectRun(runId: string, items: InterjectItem[]): Promise<void> {
+  return invoke('agent:interject', { runId, items })
 }
 
 export function onAgentEvent(cb: (env: AgentEventEnvelope) => void): Unsubscribe {

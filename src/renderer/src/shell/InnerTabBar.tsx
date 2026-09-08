@@ -85,7 +85,9 @@ export function InnerTabBar({
         {tabs.map((tab, i) => {
           const active = tab.id === activeId;
           const running =
-            tab.kind === "chat" && runningSessionIds.has(tab.ref.sessionId);
+            tab.kind === "chat" &&
+            tab.ref.sessionId !== null &&
+            runningSessionIds.has(tab.ref.sessionId);
           const Icon = INNER_TAB_ICON[tab.kind];
           const draft = workspaceId && (tab.kind === 'doc' || tab.kind === 'preview') ? drafts[documentKey(workspaceId, tab.ref.path)] : undefined;
           const dirty = draft !== undefined && isDocumentDirty(draft);

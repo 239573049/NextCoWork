@@ -102,13 +102,29 @@ describe('proxyBypassRules', () => {
 })
 
 describe('proxyConfigFor', () => {
-  it('关掉 = 直连', () => {
-    expect(proxyConfigFor(p({ enabled: false }))).toEqual({ mode: 'direct' })
+  /**
+   * ★★ **「关闭」= 跟随系统,不是强制直连。**
+   *
+   * `mode: 'direct'` 是一个主动要求(绕过操作系统那份设置),而 Chromium 在没人
+   * 调 `setProxy` 时本来就跟随系统。以前这里返回 `direct`,等于把「用户没开这个
+   * 开关」翻译成「用户要求无视系统代理」—— 开箱即用状态下每一个出站请求都绕过
+   * 系统代理,实测撞出的是一个和代理毫无关联的 403 unsupported_country_region。
+   */
+  it('★★ 关掉 = 跟随系统（不是强制直连）', () => {
+    expect(proxyConfigFor(p({ enabled: false }))).toEqual({ mode: 'system' })
   })
 
-  /** ★ 关掉时必须给出 `direct` 而不是「什么都不给」—— 见 `applyProxy` 里的说明 */
-  it('从手动改成关掉时也是直连,不留下旧规则', () => {
-    expect(proxyConfigFor(manual({ enabled: false }))).toEqual({ mode: 'direct' })
+  /** ★ 关掉时必须显式给出配置而不是「什么都不给」—— 见 `applyProxy` 里的说明 */
+  it('从手动改成关掉时不留下旧规则', () => {
+    const cfg = proxyConfigFor(manual({ enabled: false }))
+    expect(cfg).toEqual({ mode: 'system' })
+    expect(cfg.proxyRules).toBeUndefined()
+  })
+
+  it('「开 + 跟随系统」和「关闭」同结果 —— 那个开关的含义是「我要自己指定代理」', () => {
+    expect(proxyConfigFor(p({ enabled: true, mode: 'system' }))).toEqual(
+      proxyConfigFor(p({ enabled: false }))
+    )
   })
 
   it('跟随系统', () => {
@@ -131,9 +147,9 @@ describe('proxyConfigFor', () => {
   /**
    * ★ **「开了但地址没填完」走直连,不退回系统代理。**
    *
-   * 退回系统代理更宽容,但那样用户会在「我明明配了自己的代理」的同时
-   * 走着另一条线路,而界面上这两种情况长得一模一样。直连至少和「关掉」
-   * 是同一个可观察行为。
+   * 注意这**不是**上面那条的反例:用户明确选了「手动」,此时静默退回系统代理,
+   * 会让他在「我明明填了自定义代理」的同时走着另一条完全不同的线路,而界面上
+   * 两种情况长得一模一样。半截配置就该是明显坏掉的,而不是悄悄换一条路。
    */
   it('开了但地址是空的 → 直连,而不是系统代理', () => {
     expect(proxyConfigFor(manual({ host: '' }))).toEqual({ mode: 'direct' })

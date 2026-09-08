@@ -3,7 +3,7 @@ import { BlockAccumulator } from '../../block-accumulator'
 import { decodeOpenAIChat } from '../decode/openai-chat'
 import { decodeOpenAIResponses } from '../decode/openai-responses'
 import { openAIErrorToAgentError } from '../decode/openai-common'
-import { chunk, collect, events, functionItem, messageItem, reasoningItem, responseDone } from './openai-fixtures'
+import { chunk, collect, events, functionItem, messageItem, reasoningContentItem, reasoningItem, responseDone } from './openai-fixtures'
 import type { ProviderStreamEvent } from '../../../../shared/agent/stream'
 
 function accumulated(output: ProviderStreamEvent[]): ReturnType<BlockAccumulator['finalize']> {
@@ -197,6 +197,116 @@ describe('OpenAI Responses decoding', () => {
     expect(accumulated(output).calls).toEqual([])
     expect((await collect(decodeOpenAIResponses(events()))).at(-1)).toMatchObject({ type: 'error' })
   })
+
+  // 规范的 incomplete_details.reason 枚举有四个值,以前只放行两个 ——
+  // max_messages 和 steered 被当成协议违规中止整轮,而 steered 是正常终止
+  it.each([
+    ['max_output_tokens', 'max_tokens'], ['content_filter', 'refusal'],
+    ['max_messages', 'end_turn'], ['steered', 'end_turn'], [undefined, 'end_turn']
+  ] as const)('treats incomplete reason %s as %s instead of a protocol violation', async (reason, stopReason) => {
+    const output = await collect(decodeOpenAIResponses(events(responseDone([messageItem], 'incomplete', reason))))
+    expect(output.some((e) => e.type === 'error')).toBe(false)
+    expect(output.at(-1)).toMatchObject({ type: 'message_end', stopReason })
+  })
+
+  it('decodes reasoning text and prefers it over the summary', async () => {
+    const snapshot = await collect(decodeOpenAIResponses(events(responseDone([reasoningContentItem]))))
+    expect(accumulated(snapshot).parts).toEqual([
+      { type: 'thinking', text: '先看参数是否齐全。', opaque: { protocol: 'openai-responses', item: reasoningContentItem } }
+    ])
+
+    const streamed = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs-1', summary: [] } },
+      { type: 'response.reasoning_text.delta', output_index: 0, content_index: 0, delta: '先看参数' },
+      { type: 'response.reasoning_text.delta', output_index: 0, content_index: 0, delta: '是否齐全。' },
+      { type: 'response.reasoning_text.done', output_index: 0, content_index: 0, text: '先看参数是否齐全。' },
+      { type: 'response.output_item.done', output_index: 0, item: reasoningContentItem },
+      responseDone([reasoningContentItem])
+    )))
+    expect(accumulated(streamed).parts).toEqual([
+      { type: 'thinking', text: '先看参数是否齐全。', opaque: { protocol: 'openai-responses', item: reasoningContentItem } }
+    ])
+  })
+
+  it('rejects client-executed tool items but ignores hosted ones', async () => {
+    const shell = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'local_shell_call', id: 'ls-1' } }
+    )))
+    expect(shell.at(-1)).toMatchObject({ type: 'error', error: {
+      code: 'provider', messageParams: { detail: 'unsupported output item: local_shell_call' }
+    } })
+
+    const searchCall = { type: 'web_search_call', id: 'ws-1', status: 'completed' }
+    const hosted = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: searchCall },
+      { type: 'response.output_item.done', output_index: 1, item: messageItem },
+      responseDone([searchCall, messageItem])
+    )))
+    expect(accumulated(hosted).parts).toEqual([{ type: 'text', text: '完成' }])
+    expect(hosted.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+  })
+
+  it('reconciles the terminal output by item id rather than array position', async () => {
+    const output = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs-1', summary: [] } },
+      { type: 'response.output_item.done', output_index: 0, item: reasoningItem },
+      { type: 'response.output_item.added', output_index: 1, item: { ...messageItem, content: [] } },
+      { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: '完成' },
+      // ★ 终局数组里没有 reasoning:下标 0 现在是 message,按位置对齐就会撞出「类型变了」
+      responseDone([messageItem])
+    )))
+    expect(output.some((e) => e.type === 'error')).toBe(false)
+    expect(accumulated(output).parts).toEqual([
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'text', text: '完成' }
+    ])
+  })
+
+  it('tolerates an id the gateway regenerated in the terminal output', async () => {
+    const output = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs-1', summary: [] } },
+      { type: 'response.reasoning_summary_text.delta', output_index: 0, summary_index: 0, delta: '检查参数。' },
+      { type: 'response.output_item.done', output_index: 0, item: reasoningItem },
+      // ★ 网关在终局给同一条 reasoning 换了个 id —— 以前这里抛 output item identity changed
+      responseDone([{ ...reasoningItem, id: 'rs-regenerated' }, messageItem])
+    )))
+    expect(output.some((e) => e.type === 'error')).toBe(false)
+    expect(accumulated(output).parts).toEqual([
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'text', text: '完成' }
+    ])
+  })
+
+  it('opens a new slot when a gateway reuses output_index for another item type', async () => {
+    const output = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs-1', summary: [] } },
+      { type: 'response.reasoning_summary_text.delta', output_index: 0, summary_index: 0, delta: '检查参数。' },
+      // ★ 同一个 output_index 又来一条 message —— 以前抛 output item type changed
+      { type: 'response.output_item.added', output_index: 0, item: { ...messageItem, content: [] } },
+      { type: 'response.output_text.delta', output_index: 0, item_id: 'msg-1', content_index: 0, delta: '完成' },
+      responseDone([reasoningItem, messageItem])
+    )))
+    expect(output.some((e) => e.type === 'error')).toBe(false)
+    expect(accumulated(output).parts).toEqual([
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'text', text: '完成' }
+    ])
+  })
+
+  it('keeps streamed text when a done snapshot disagrees or omits the field', async () => {
+    for (const done of [
+      { type: 'response.output_text.done', output_index: 0, content_index: 0, text: '完全不同的收尾' },
+      { type: 'response.output_text.done', output_index: 0, content_index: 0 }
+    ]) {
+      const output = await collect(decodeOpenAIResponses(events(
+        { type: 'response.output_item.added', output_index: 0, item: { ...messageItem, content: [] } },
+        { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: '已收到' },
+        done, responseDone([messageItem])
+      )))
+      expect(output.some((e) => e.type === 'error')).toBe(false)
+      expect(accumulated(output).parts).toEqual([{ type: 'text', text: '已收到' }])
+    }
+  })
 })
 
 describe('OpenAI error classification', () => {
@@ -208,5 +318,22 @@ describe('OpenAI error classification', () => {
   ] as const)('maps HTTP %s / %s', (status, code, expected, retryable) => {
     expect(openAIErrorToAgentError(status, { error: { code, message: 'upstream detail' } }))
       .toEqual({ code: expected, message: 'upstream detail', retryable, status })
+  })
+
+  // 认不出形状时以前只说「Upstream request failed (HTTP 400)」—— 上游抱怨什么一个字都不说
+  it.each([
+    [{ detail: 'Model not supported' }, 'Model not supported'],
+    [{ detail: { message: 'nested detail' } }, 'nested detail'],
+    [{ message: 'bare message' }, 'bare message'],
+    [{ error: 'plain error string' }, 'plain error string'],
+    [{ unexpected: 'shape', nested: { n: 1 } }, '{"unexpected":"shape","nested":{"n":1}}'],
+    ['<html>gateway</html>', '<html>gateway</html>']
+  ])('extracts a usable message from %j', (body, message) => {
+    expect(openAIErrorToAgentError(400, body).message).toBe(message)
+  })
+
+  it('falls back to the generic message only when there is no body at all', () => {
+    expect(openAIErrorToAgentError(400, '').message).toBe('Upstream request failed (HTTP 400)')
+    expect(openAIErrorToAgentError(400, {}).message).toBe('Upstream request failed (HTTP 400)')
   })
 })

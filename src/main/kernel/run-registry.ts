@@ -15,6 +15,7 @@
 import type { AgentError } from '../../shared/agent/error'
 import type { AgentEvent, RunSnapshot, RunStatus } from '../../shared/agent/event'
 import type { PendingInteraction } from '../../shared/agent/interaction'
+import type { InterjectItem } from '../../shared/agent/interject'
 import type { RunRequest } from '../../shared/agent/run-request'
 
 export type RunListener = (event: AgentEvent, seq: number) => void
@@ -56,6 +57,15 @@ export class RunHandle {
   private readonly log: LogEntry[] = []
   private readonly listeners = new Set<RunListener>()
   private readonly controller = new AbortController()
+  /**
+   * 插话信箱 —— 渲染层放进来,`AgentSession` 在轮次边界取走(见 `takeInterject`)。
+   *
+   * ★ 为什么挂在 handle 上,而不是 `AgentSession` 上:handle 是 IPC 层**唯一**
+   * 能按 runId 找到的那个对象(`runs.get`),而 session 实例连注册表都不进。
+   * 想让 IPC 直接够到 session 就得再维护一张 runId → session 的表,
+   * 那张表的生命周期与 handle 完全重合 —— 两份状态,同一条命,迟早对不上。
+   */
+  private interject: InterjectItem[] = []
 
   constructor(req: RunRequest) {
     this.runId = req.runId
@@ -177,6 +187,27 @@ export class RunHandle {
       pendingInteractions: [...this.pendingInteractions],
       children: [...this.children]
     }
+  }
+
+  // ─── 插话信箱 ───
+
+  /**
+   * ★ **整份替换**,与 `agent:interject` 的契约一致。理由见那条频道的注释:
+   * 取消/编辑/删除全都退化成「重发一次当前全集」,乱序到达也收敛。
+   */
+  setInterject(items: readonly InterjectItem[]): void {
+    this.interject = items.map((item) => ({ id: item.id, parts: [...item.parts] }))
+  }
+
+  /**
+   * 取走并清空。**take 而不是 get** —— 读取即消费是这里唯一能防重复注入的机制:
+   * 留一份在信箱里,下一个轮次边界会把同一条消息再注入一遍,而两条 id 相同的
+   * 用户消息进同一份转录,上游看到的是一个自相矛盾的历史。
+   */
+  takeInterject(): InterjectItem[] {
+    const taken = this.interject
+    this.interject = []
+    return taken
   }
 
   // ─── 中断 ───

@@ -18,10 +18,10 @@ import { Segmented } from "../../../components/ui/Segmented";
 import { TextInput } from "../../../components/ui/TextInput";
 import { cn } from "../../../lib/cn";
 import { openExternal } from "../../../services/app";
-import { upsertProvider } from "../../../services/provider";
+import { upsertProvider, setProviderAliases } from "../../../services/provider";
 import { useModelsStore } from "../../../stores/models";
 import { ProviderAvatar } from "./ProviderAvatar";
-import { isPresetAdded, providerFromPreset } from "./provider-edit";
+import { isPresetAdded, providerFromPreset, seedModelsForPreset } from "./provider-edit";
 import { useI18n } from "../../../i18n";
 import {
   CATALOG_TABS,
@@ -172,7 +172,19 @@ function PresetCard({
     setBusy(true);
     setError(null);
     void upsertProvider(draft)
-      .then(() => onAdded?.(draft.id))
+      .then(async () => {
+        /*
+          ★ 拉不动模型列表的那几家,顺手把建议模型种进去 —— 否则用户添加完
+          得到的是一家零模型、且「从服务商拉取」按钮是灰的供应商,一条死路。
+          判据在 `seedModelsForPreset` 里(是 supportsModelList,不是哪一家)。
+
+          ★ 种失败**不阻断**:供应商已经建出来了,模型还能手动加。
+          在这里把整个「添加」判失败,用户会以为没建成而再点一次。
+        */
+        const seeds = seedModelsForPreset(p, draft.protocol);
+        if (seeds.length > 0) await setProviderAliases(draft.id, seeds).catch(() => {});
+        onAdded?.(draft.id);
+      })
       .catch((e: unknown) =>
         setError(e instanceof Error ? e.message : String(e)),
       )

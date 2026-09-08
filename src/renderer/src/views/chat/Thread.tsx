@@ -21,6 +21,7 @@ import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
 import { MessageImage } from './MessageImage'
+import { MessageFileRef } from './MessageFileRef'
 import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
 import { InteractionPanel } from './InteractionPanel'
 import { StatusLine } from './StatusLine'
@@ -246,9 +247,12 @@ function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEd
   const images = message.parts.filter(
     (p): p is Extract<ContentPart, { type: 'image' }> => p.type === 'image'
   )
+  const fileRefs = message.parts.filter(
+    (p): p is Extract<ContentPart, { type: 'file_ref' }> => p.type === 'file_ref'
+  )
 
-  // 文本与图片都没有才是真的空
-  if (text === '' && images.length === 0) return null
+  // 文本、图片、文件引用都没有才是真的空
+  if (text === '' && images.length === 0 && fileRefs.length === 0) return null
 
   if (editing) {
     return (
@@ -295,8 +299,15 @@ function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEd
             {text}
           </p>
         )}
+        {fileRefs.length > 0 && (
+          <div className={cn('flex flex-col gap-1', text !== '' && 'mt-2')}>
+            {fileRefs.map((f, i) => (
+              <MessageFileRef key={`${f.path}:${String(i)}`} name={f.name} path={f.path} />
+            ))}
+          </div>
+        )}
         {images.length > 0 && (
-          <div className={cn('flex flex-wrap gap-1.5', text !== '' && 'mt-2')}>
+          <div className={cn('flex flex-wrap gap-1.5', (text !== '' || fileRefs.length > 0) && 'mt-2')}>
             {images.map((img, i) => (
               <MessageImage
                 key={`${img.dataRef}:${String(i)}`}
@@ -505,6 +516,9 @@ function PartBlock({
       return <SubagentNode summary={part.summary} />
     case 'image':
       return <MessageImage mime={part.mime} dataRef={part.dataRef} />
+    // 只出现在用户消息里(ChatView 的 partsOf),渲染由 UserBubble 负责
+    case 'file_ref':
+      return null
     case 'error':
       return (
         <p className="selectable font-mono text-[12.5px] text-danger">

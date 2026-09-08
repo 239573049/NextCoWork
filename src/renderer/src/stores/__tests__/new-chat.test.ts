@@ -18,6 +18,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { userMessage } from '../../../../shared/agent/message'
 import type { InnerTab } from '../../../../shared/domain/tab'
+import { chatKey } from '../../../../shared/domain/tab'
 
 vi.mock('../../services/app', () => ({
   getInnerTabs: vi.fn(async () => ({ tabs: [], activeTabId: null })),
@@ -81,7 +82,7 @@ describe('侧边栏「新建对话」', () => {
     const tabs = useTabsStore.getState()
     tabs.newChat(WS)
     const first = chats()[0]!
-    useSession(first.ref.sessionId)
+    useSession(chatKey(first))
 
     tabs.newChat(WS)
     expect(chats()).toHaveLength(2)
@@ -92,7 +93,7 @@ describe('侧边栏「新建对话」', () => {
     const tabs = useTabsStore.getState()
     tabs.newChat(WS)
     const first = chats()[0]!
-    sessionStore(first.ref.sessionId).getState().setDraft('写了一半')
+    sessionStore(chatKey(first)).getState().setDraft('写了一半')
 
     tabs.newChat(WS)
     expect(chats()).toHaveLength(2)

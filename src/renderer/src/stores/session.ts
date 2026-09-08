@@ -38,7 +38,7 @@ import {
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
-import { abortRun, attachRun, onAgentEvent, startRun } from '../services/agent'
+import { abortRun, attachRun, interjectRun, onAgentEvent, startRun } from '../services/agent'
 import { getSessionInput, persistSessionInput } from '../services/app'
 import { replaceHistory } from '../services/sessions'
 import { getSession } from '../services/sessions'
@@ -67,7 +67,10 @@ export interface SessionState {
    * 上一次发送用的档位/模型/模式。
    *
    * ★ 队列条目现在**各自带 `options`**,续跑读的是条目自己的快照,不是这个字段。
-   * 它保留下来是给「空队列时的续跑」和 UI 回显用的。
+   * 它只剩两个用途:队列条目意外没有快照时的兜底,以及 UI 回显。
+   *
+   * ★★ **「重新生成」不读它** —— 那是用户此刻发起的新 run,该用此刻的药丸值。
+   * 曾经读过,症状是:切了模型再点重新生成,跑的还是上一次那个模型。
    */
   lastOptions: SendOptions | null
   /** 输入框草稿 —— 切 Tab 不能丢,**进程重启也不能丢**(落盘,见 §8) */
@@ -79,7 +82,13 @@ export interface SessionState {
   /** 插话 —— toggle:pending ⇄ promoted。不发起任何请求 */
   promoteInput: (id: string) => void
   editInput: (id: string, text: string) => void
-  editMessage: (id: string, text: string, continueRun: boolean, fallbackOptions: SendOptions) => Promise<void>
+  /**
+   * 编辑一条用户消息。`continueRun` = 从这条起重跑(界面上的「重新生成」)。
+   *
+   * ★ `options` 是**此刻**药丸上的档位/模型,不是这条消息当初发送时的那份 ——
+   * 见实现里的注释。
+   */
+  editMessage: (id: string, text: string, continueRun: boolean, options: SendOptions) => Promise<void>
   /** 删掉一整轮问答(user 消息 + 它引出的全部回复与工具回执)。 */
   deleteTurn: (userMessageId: string) => Promise<void>
   dropInput: (id: string) => void
@@ -230,6 +239,9 @@ function createSessionStore(sessionId: string): SessionStore {
       // ★ 空闲态被点插话:条目本不该存在于队列(空闲时 send 直接发)。
       //   若因竞态残留,等价于「立即发送」,而不是让它永远躺在那儿。
       if (s.activeRunId === null) drainQueue(sessionId)
+      // ★ 运行中才是插话的正题:推给主进程,由它在下一个轮次边界注入。
+      //   取消引入走的也是这一句 —— 全量替换,少了那条就等于撤回。
+      else syncInterject(sessionId)
     },
 
     editInput(id, text) {
@@ -242,9 +254,11 @@ function createSessionStore(sessionId: string): SessionStore {
         )
       })
       persistInput(sessionId, true)
+      // 编辑一条已引入的条目:主进程信箱里存的是旧文本,必须重发覆盖。
+      syncInterject(sessionId)
     },
 
-    async editMessage(id, text, continueRun, fallbackOptions) {
+    async editMessage(id, text, continueRun, options) {
       const s = get()
       if (s.activeRunId !== null) return
       const index = s.transcript.messages.findIndex((message) => message.id === id && message.role === 'user')
@@ -274,8 +288,14 @@ function createSessionStore(sessionId: string): SessionStore {
         }
       }))
       if (continueRun) {
-        const opts = s.lastOptions ?? fallbackOptions
-        await get().send(text, opts, parts)
+        /*
+          ★★ 用**调用方此刻传进来的**档位,不是 `lastOptions`。
+          「重新生成」/「编辑后续跑」是用户**此刻发起的一次新 run**,不是重放
+          过去那次的意图 —— 而"换个模型再试一次"恰恰是按重新生成最主要的理由。
+          这里读 `lastOptions` 的话,用户切了模型再点重新生成,跑的还是上一次
+          那个模型,且界面上没有任何迹象说明为什么。
+        */
+        await get().send(text, options, parts)
       }
     },
 
@@ -319,6 +339,8 @@ function createSessionStore(sessionId: string): SessionStore {
     dropInput(id) {
       set({ queuedInputs: get().queuedInputs.filter((q) => q.id !== id) })
       persistInput(sessionId, true)
+      // 删掉一条已引入的条目 = 从主进程信箱里撤回它。
+      syncInterject(sessionId)
     },
 
     moveInputToDraft(id) {
@@ -331,6 +353,8 @@ function createSessionStore(sessionId: string): SessionStore {
         draft: s.draft === '' ? item.text : `${s.draft}\n\n${item.text}`
       })
       persistInput(sessionId, true)
+      // 撤回到草稿同样是「它不再是插话了」。
+      syncInterject(sessionId)
     },
 
     applyEnvelope(env) {
@@ -350,6 +374,9 @@ function createSessionStore(sessionId: string): SessionStore {
         lastSeq: env.seq,
         ...settleRun(env.runId, env.events)
       })
+      // ★ 先收队列再续跑。反过来的话,`drainQueue` 会看见一条刚刚已经被注入、
+      //   只是还没从队列里摘掉的条目,把同一句话再发一遍。
+      reapInjected(sessionId, env.events)
       if (endedCleanly(env.events)) drainQueue(sessionId)
     },
 
@@ -358,6 +385,7 @@ function createSessionStore(sessionId: string): SessionStore {
         transcript: applyEvents(get().transcript, events),
         ...settleRun(get().activeRunId, events)
       })
+      reapInjected(sessionId, events)
       if (endedCleanly(events)) drainQueue(sessionId)
     },
 
@@ -452,6 +480,83 @@ function drainQueue(sessionId: string): void {
  */
 export function resumeQueue(sessionId: string): void {
   drainQueue(sessionId)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 插话 —— run 跑着的时候把消息塞进去
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * 把当前全部 promoted 条目推给正在跑的 run。
+ *
+ * ## 为什么「插话」必须走这条路,而不是只改本地状态
+ *
+ * 原实现里 promote 是**纯本地**的:它只把条目排到 `pickNextBatch` 的最前面,
+ * 真正发出去要等当前 run 整个跑完。用户看到的却是一颗写着「已插话」的按钮 ——
+ * 于是点完之后一切照旧,模型继续跑它的工具,那句话一个字都没进去。
+ * **界面承诺了插入,实现做的是排序。**
+ *
+ * 现在 promote 会把条目送到主进程的信箱,由 `AgentSession` 在下一个轮次边界
+ * (一次 API 响应 + 它的工具全部执行完)注入成用户消息,然后带着它再请求一次。
+ *
+ * ## 仍然只发 promoted,不捎带 pending
+ *
+ * 与 `pickNextBatch` 同一条规矩,理由也一样:pending 是「排队等着」,
+ * 用户没有表达「现在就说」。这里再加一层 —— 把 pending 也灌进去等于
+ * 任何人排队都会打断当前执行,那就没有队列可言了。
+ *
+ * ## 失败只记日志
+ *
+ * 主进程侧 run 已结束时会静默忽略(见 `interjectRun`),条目原样留在队列里,
+ * 由 run 结束后的 `drainQueue` 发出去 —— 没有任何东西丢失,不值得打扰用户。
+ */
+function syncInterject(sessionId: string): void {
+  const store = stores.get(sessionId)
+  if (!store) return
+  const s = store.getState()
+  const runId = s.activeRunId
+  if (runId === null) return
+
+  // ★ 用 `pickNextBatch` 而不是自己 filter:promoted 的取用顺序(promotedAt 升序、
+  //   缺失时退化成入队序)只该有一个定义。但空闲态那条 pending 兜底在这里
+  //   **必须排除** —— 那条兜底属于「run 结束后发下一条」,不属于插话。
+  const items = pickNextBatch(s.queuedInputs)
+    .filter((q) => q.status === 'promoted')
+    .map((q) => ({ id: q.id, parts: batchToParts(mergeBatch([q])) }))
+    .filter((item) => item.parts.length > 0)
+
+  void interjectRun(runId, items).catch((err: unknown) => {
+    console.error('[agent] 同步插话失败:', err)
+  })
+}
+
+/**
+ * 主进程确认注入之后,把对应条目移出队列。
+ *
+ * ★ **判据是「提交的用户消息 id 等于队列条目 id」** —— 注入时刻主进程复用了
+ * 条目 id 当消息 id,正是为了让这个判据存在(见 `shared/agent/interject.ts`)。
+ * 于是「恰好一次」不依赖任何新事件、任何新状态:
+ * 收到 commit 才移出,没收到就还在队列里等 `drainQueue`。
+ *
+ * 重放同样安全:⌘R 之后 attach 把 `message_commit` 重发一遍,队列再收敛一次,
+ * 而第二次是 no-op(条目早已不在)。
+ */
+function reapInjected(sessionId: string, events: readonly AgentEvent[]): void {
+  const store = stores.get(sessionId)
+  if (!store) return
+  const s = store.getState()
+  if (s.queuedInputs.length === 0) return
+
+  const committed = new Set(
+    events
+      .filter((e) => e.type === 'message_commit' && e.message.role === 'user')
+      .map((e) => (e.type === 'message_commit' ? e.message.id : ''))
+  )
+  const next = s.queuedInputs.filter((q) => !committed.has(q.id))
+  if (next.length === s.queuedInputs.length) return
+
+  store.setState({ queuedInputs: next })
+  persistInput(sessionId, true)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -622,6 +727,29 @@ export function releaseSession(sessionId: string): boolean {
   const deleted = stores.delete(sessionId)
   if (deleted) hydrated.delete(sessionId)
   return deleted
+}
+
+/**
+ * 草稿 Tab 铸出真 sessionId 那一刻,把它在渲染层的家当搬过去。
+ *
+ * ★ **搬的是草稿文本,而这不是整洁癖。** 触发绑定的两件事之一是「贴第一个附件」,
+ * 而绑定会改 `tab.ref.sessionId` → `views/registry.tsx` 的 key 跟着 `chatKey` 变
+ * → ChatView 整棵子树重挂,输入框从新键的 store 里取 draft。不搬的话,用户
+ * 刚打的半句话会在贴图那一瞬间凭空消失,而屏幕上没有任何东西解释发生了什么。
+ *
+ * 队列不用搬:草稿没有 run,`send` 在空闲态直接发,`queuedInputs` 必然是空的。
+ *
+ * ★ 旧存档要**立即**清(`immediate = true`)。留着的话,下一个恰好复用这个 tabId
+ * 的草稿(重启后 Tab id 是从盘里读回来的,它会一直是同一个)会把这段文字捡回来,
+ * 表现是一张本该干净的白纸上莫名其妙有半句上辈子的话。
+ */
+export function adoptDraftSession(draftKey: string, sessionId: string): void {
+  if (draftKey === sessionId) return
+  const draftStore = stores.get(draftKey)
+  const draft = draftStore?.getState().draft ?? ''
+  if (draft !== '') sessionStore(sessionId).setState({ draft })
+  persistSessionInput(draftKey, { v: SESSION_INPUT_VERSION, draft: '', queued: [], savedAt: Date.now() }, true)
+  releaseSession(draftKey)
 }
 
 /**
@@ -915,7 +1043,13 @@ async function resync(sessionId: string, runId: string, sinceSeq: number, histor
       }
     })
     rememberChildRuns(runId, snap.events)
+    reapInjected(sessionId, snap.events)
     if (snap.status !== 'running') unregisterRun(runId)
+    // ★ 重载后主进程的信箱仍然是对的(它没死),但**这个渲染层的队列刚从
+    //   kv 里回填出来**,两边可能已经不一致(重载前那一瞬间的取消/编辑)。
+    //   重发一次当前全集,让主进程以渲染层为准 —— 全量替换语义在这里第二次
+    //   还本:恢复路径不需要任何专门的对账逻辑。
+    else syncInterject(sessionId)
     if (snap.status === 'done') drainQueue(sessionId)
   } catch (err) {
     console.error('[agent] attach 失败:', err)

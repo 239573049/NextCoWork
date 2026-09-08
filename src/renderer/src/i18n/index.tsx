@@ -687,6 +687,21 @@ const ZH: Messages = {
   "provider.pasteKey": "粘贴 API Key",
   "provider.replace": "更换",
   "provider.configured": "已配置",
+  // ── 账号登录（OAuth）──
+  // ★ 登录按钮的文案带 issuer 参数，加第二家（Claude Code / Gemini CLI）不用加新键
+  "provider.account": "账号",
+  "provider.signInWith": ({ name }) => `使用 ${name} 账号登录`,
+  "provider.signInHint": "会打开浏览器完成授权，授权后关掉那个标签页即可。",
+  "provider.signedIn": "已登录",
+  "provider.signOut": "退出登录",
+  "provider.confirmSignOut": "确认退出",
+  "provider.signInExpired": "登录已失效，请重新登录",
+  "provider.reSignIn": "重新登录",
+  "provider.authOpeningBrowser": "正在打开浏览器…",
+  "provider.authWaiting": "等待在浏览器中完成授权…",
+  "provider.authExchanging": "正在获取凭证…",
+  "provider.authAccountFallback": "已登录（未获取到邮箱）",
+  "provider.oauthFixedChannel": "这条通道的协议由订阅决定，不需要选择 API 格式。",
   "provider.modelPriority": "模型优先级（至少添加一个）",
   "provider.fetchModels": "从服务商拉取模型列表",
   "provider.noModels": "这家还没有配置任何模型，请从右上角拉取一份列表。",
@@ -1012,7 +1027,7 @@ const ZH: Messages = {
   "connection.search.failed": "没通",
   "connection.search.enable": ({ name }) => `启用 ${name}`,
   "connection.network.enableHint":
-    "对模型请求、MCP 的 HTTP 传输、以及所有搜索服务一起生效，它们都走同一条 Chromium 网络栈。",
+    "关着时跟随操作系统的代理设置；打开后由下面这一栏说了算。对模型请求、MCP 的 HTTP 传输、以及所有搜索服务一起生效，它们都走同一条 Chromium 网络栈。",
   "connection.network.mode": "代理方式",
   "connection.network.modeHint": "跟随系统 = 使用操作系统的代理设置。",
   "connection.network.followSystem": "跟随系统",
@@ -1043,6 +1058,7 @@ const ZH: Messages = {
   "connection.network.keyringUnavailable":
     "系统密钥环不可用，密码无法安全存储。",
   "chat.uploading": "上传中…",
+  "chat.pathUnavailable": "无法获取该文件的路径",
   "chat.imageMissing": "图片已不存在",
   "chat.externalFile": "外部文件",
   "chat.zoomImage": "放大查看图片",
@@ -1807,6 +1823,21 @@ const EN: Messages = {
   "provider.pasteKey": "Paste API key",
   "provider.replace": "Replace",
   "provider.configured": "Configured",
+  "provider.account": "Account",
+  "provider.signInWith": ({ name }) => `Sign in with ${name}`,
+  "provider.signInHint":
+    "This opens your browser to authorize. Close that tab once it is done.",
+  "provider.signedIn": "Signed in",
+  "provider.signOut": "Sign out",
+  "provider.confirmSignOut": "Confirm sign out",
+  "provider.signInExpired": "Your sign-in expired — please sign in again",
+  "provider.reSignIn": "Sign in again",
+  "provider.authOpeningBrowser": "Opening your browser…",
+  "provider.authWaiting": "Waiting for authorization in your browser…",
+  "provider.authExchanging": "Retrieving credentials…",
+  "provider.authAccountFallback": "Signed in (no email available)",
+  "provider.oauthFixedChannel":
+    "The protocol for this channel is fixed by the subscription; no API format to choose.",
   "provider.modelPriority": "Model priority (add at least one)",
   "provider.fetchModels": "Fetch model list from provider",
   "provider.noModels":
@@ -2150,7 +2181,7 @@ const EN: Messages = {
   "connection.search.failed": "Not working",
   "connection.search.enable": ({ name }) => `Enable ${name}`,
   "connection.network.enableHint":
-    "Applies to model requests, HTTP MCP transports, and all search services through the same Chromium network stack.",
+    "While off, the operating system proxy settings are used; turn it on to override them below. Applies to model requests, HTTP MCP transports, and all search services through the same Chromium network stack.",
   "connection.network.mode": "Proxy mode",
   "connection.network.modeHint":
     "Follow system uses the operating system proxy settings.",
@@ -2182,6 +2213,7 @@ const EN: Messages = {
   "connection.network.keyringUnavailable":
     "The system keychain is unavailable; the password cannot be stored safely.",
   "chat.uploading": "Uploading…",
+  "chat.pathUnavailable": "Couldn't resolve this file's path",
   "chat.imageMissing": "Image no longer exists",
   "chat.externalFile": "External file",
   "chat.zoomImage": "Zoom image",

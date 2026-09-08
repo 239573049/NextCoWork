@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '../../../shared/agent/event'
+import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
 import { assistantMessage, userMessage } from '../../../shared/agent/message'
 import type { RunRequest } from '../../../shared/agent/run-request'
@@ -78,6 +79,9 @@ function fakeUpstream(
     requests,
     contexts,
     listModels: () => opts.models ?? [ALIAS],
+    resolveModel: (model, providerId) => (opts.models ?? [ALIAS]).find(
+      (m) => m.alias === model && (providerId === undefined || m.providerId === providerId)
+    ),
     async *stream(
       r,
       _signal,
@@ -901,6 +905,7 @@ describe('中断收尾', () => {
     const handle = new RunHandle(request)
     const upstream: SessionUpstream = {
       listModels: () => [ALIAS],
+      resolveModel: (model) => (model === ALIAS.alias ? ALIAS : undefined),
       async *stream(): AsyncIterable<ProviderStreamEvent> {
         yield { type: 'message_start', model: 'm' }
         yield { type: 'text_delta', index: 0, text: '我正在写一段' }
@@ -933,6 +938,7 @@ describe('中断收尾', () => {
     const handle = new RunHandle(request)
     const upstream: SessionUpstream = {
       listModels: () => [ALIAS],
+      resolveModel: (model) => (model === ALIAS.alias ? ALIAS : undefined),
       async *stream(): AsyncIterable<ProviderStreamEvent> {
         yield { type: 'text_delta', index: 0, text: '我来删掉它' }
         yield { type: 'tool_call_start', index: 1, callId: 'c1', name: 'rm' }
@@ -961,6 +967,7 @@ describe('中断收尾', () => {
     const handle = new RunHandle(request)
     const upstream: SessionUpstream = {
       listModels: () => [ALIAS],
+      resolveModel: (model) => (model === ALIAS.alias ? ALIAS : undefined),
       async *stream(): AsyncIterable<ProviderStreamEvent> {
         yield { type: 'text_delta', index: 0, text: 'x' }
         handle.abort({ by: 'user' })
@@ -1034,6 +1041,7 @@ describe('错误与边界', () => {
   it('上游直接抛异常时 run 以 error 收尾,不逃出 run()', async () => {
     const upstream: SessionUpstream = {
       listModels: () => [ALIAS],
+      resolveModel: (model) => (model === ALIAS.alias ? ALIAS : undefined),
       // eslint-disable-next-line require-yield
       async *stream(): AsyncIterable<ProviderStreamEvent> {
         throw new Error('上游炸了')
@@ -1352,5 +1360,128 @@ describe('转录不变式', () => {
       tools: registry({ internalId: 'echo' })
     })
     expect(new Set(history.map((m) => m.id)).size).toBe(history.length)
+  })
+})
+
+// ─────────────────────────── 插话 ───────────────────────────
+
+describe('插话', () => {
+  /**
+   * 「用户在工具跑着的时候点了插话」—— 这是这套机制唯一真实的时序。
+   * 用工具的 execute 当注入时机,是因为它正好落在**一轮之内**:
+   * 上游已经答完、工具结果还没落盘,与用户盯着转圈的那几秒完全对应。
+   */
+  async function runWithInterjection(o: {
+    upstream: FakeUpstream
+    items: (handle: RunHandle) => InterjectItem[]
+  }): Promise<Ran> {
+    const request = req()
+    const handle = new RunHandle(request)
+    const tools = registry({
+      internalId: 'echo',
+      execute: (input) => {
+        handle.setInterject(o.items(handle))
+        return Promise.resolve(toolOk(JSON.stringify(input)))
+      }
+    })
+    const session = new AgentSession(
+      { host: quietHost(), upstream: o.upstream, tools, workspaceRoot: '/ws' },
+      handle,
+      request
+    )
+    const events = collect(handle)
+    await session.run()
+    return { events: await events, history: session.history, handle, upstream: o.upstream }
+  }
+
+  const TEXT: InterjectItem[] = [{ id: 'q1', parts: [{ type: 'text', text: '先看缓存命中率' }] }]
+
+  /**
+   * ★★ 本组的核心断言:插话**在同一个 run 里**被发出去了。
+   *
+   * 改造前 promote 是纯本地排序,这条消息要等整个 run 跑完才进第二个 run ——
+   * 用户点了「插话」却什么都没发生,正是那个 bug 的样子。
+   */
+  it('在下一轮请求里带上插话消息', async () => {
+    const { upstream } = await runWithInterjection({
+      upstream: fakeUpstream([callsTool('c1', 'echo'), says('好')]),
+      items: () => TEXT
+    })
+    const second = upstream.requests[1]
+    expect(second).toBeDefined()
+    expect(second?.messages.some((m) => m.id === 'q1')).toBe(true)
+  })
+
+  /**
+   * ★ 顺序是**硬约束**,不是美观问题:用户消息插在 tool_call 与 tool_result
+   * 之间的话,Anthropic 会以「tool_result 必须紧邻」返回 400。
+   */
+  it('插在工具结果之后,而不是 tool_call 与 tool_result 之间', async () => {
+    const { history } = await runWithInterjection({
+      upstream: fakeUpstream([callsTool('c1', 'echo'), says('好')]),
+      items: () => TEXT
+    })
+    const ids = history.map((m) => m.id)
+    const injected = ids.indexOf('q1')
+    const toolResult = history.findIndex((m) =>
+      m.parts.some((p) => p.type === 'tool_result' && p.callId === 'c1')
+    )
+    expect(injected).toBeGreaterThan(-1)
+    expect(injected).toBe(toolResult + 1)
+  })
+
+  /** id 相等是渲染层收敛队列的唯一判据(见 shared/agent/interject.ts) */
+  it('用条目自己的 id 作为消息 id,并提交给渲染层', async () => {
+    const { events } = await runWithInterjection({
+      upstream: fakeUpstream([callsTool('c1', 'echo'), says('好')]),
+      items: () => TEXT
+    })
+    const injected = commits(events).find((m) => m.id === 'q1')
+    expect(injected?.role).toBe('user')
+  })
+
+  /**
+   * ★ 读取即消费。留一份在信箱里,下一个轮次边界会把同一条消息再注入一遍 ——
+   * 两条 id 相同的用户消息进同一份转录,上游看到的是自相矛盾的历史。
+   */
+  it('只注入一次', async () => {
+    // 三轮工具调用 = 三个轮次边界,但只在第一次 execute 时投信
+    let delivered = false
+    const { history, handle } = await runWithInterjection({
+      upstream: fakeUpstream([
+        callsTool('c1', 'echo'),
+        callsTool('c2', 'echo'),
+        says('好')
+      ]),
+      items: () => {
+        if (delivered) return []
+        delivered = true
+        return TEXT
+      }
+    })
+    expect(history.filter((m) => m.id === 'q1')).toHaveLength(1)
+    expect(handle.takeInterject()).toEqual([])
+  })
+
+  /** 空 parts 提交上去,下一轮就是 `all messages must have non-empty content` */
+  it('丢弃 parts 为空的条目', async () => {
+    const { history } = await runWithInterjection({
+      upstream: fakeUpstream([callsTool('c1', 'echo'), says('好')]),
+      items: () => [{ id: 'q-empty', parts: [] }]
+    })
+    expect(history.some((m) => m.id === 'q-empty')).toBe(false)
+  })
+
+  /** 多条按投递顺序注入 —— 用户排的顺序就是他要说话的顺序 */
+  it('多条插话按顺序注入', async () => {
+    const { history } = await runWithInterjection({
+      upstream: fakeUpstream([callsTool('c1', 'echo'), says('好')]),
+      items: () => [
+        { id: 'q1', parts: [{ type: 'text', text: '一' }] },
+        { id: 'q2', parts: [{ type: 'text', text: '二' }] }
+      ]
+    })
+    const ids = history.map((m) => m.id)
+    expect(ids.indexOf('q1')).toBeLessThan(ids.indexOf('q2'))
   })
 })

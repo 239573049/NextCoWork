@@ -15,6 +15,7 @@
  * 否则全新安装点开下拉框是空的,而内置上游明明已经在设置里被指成默认模型了。
  */
 import type { AppSettingsPatch } from '../../shared/domain/settings'
+import { modelSelectionKey } from '../../shared/domain/model-selection'
 import type {
   AnthropicCacheTtl,
   CredentialInfo,
@@ -30,6 +31,7 @@ import {
   PROTOCOL_LABEL
 } from '../../shared/domain/provider'
 import { removeCredential } from '../db/repo'
+import { bearerOf, parseCredential } from '../../shared/domain/credential'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { catalogDefinitionFromAlias, isModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import { listResolvedModels } from '../state/model-bindings'
@@ -111,15 +113,28 @@ export function renameModel(
   store.removeAlias(providerId, alias)
   const renamed = store.putAlias({ ...existing, alias: next })
 
-  // 只有旧别名完全消失时才跟着改默认值。若还有另一家提供同名别名，保持原选择。
-  if (!hasAnotherOriginalAlias) {
-    const settings = store.getSettings()
-    const patch: AppSettingsPatch = {}
-    if (settings.defaultModel === alias) patch.defaultModel = next
-    if (settings.subagent.model === alias) patch.subagent = { model: next }
-    if (Object.keys(patch).length > 0) {
-      windows.emitToAll("settings:changed", store.updateSettings(patch))
-    }
+  const settings = store.getSettings()
+  const patch: AppSettingsPatch = {}
+  /*
+    ★ 设置项**锁定了正是这一家**时,无条件跟着改名 —— 用户改的就是他选中的那一条,
+    别处有没有同名别名根本不相干。以前只能靠 `hasAnotherOriginalAlias` 那个折中,
+    是因为设置里只存得下一个裸别名、分不出锁的是谁。
+  */
+  const renames = (model: string, boundTo: string | undefined): boolean =>
+    model === alias && (boundTo === providerId || (boundTo === undefined && !hasAnotherOriginalAlias))
+  if (renames(settings.defaultModel, settings.defaultModelProviderId)) {
+    patch.defaultModel = next
+    patch.defaultModelProviderId = settings.defaultModelProviderId
+  }
+  if (renames(settings.subagent.model, settings.subagent.modelProviderId)) {
+    patch.subagent = { model: next, modelProviderId: settings.subagent.modelProviderId }
+  }
+  if (renames(settings.permissionReviewerModel, settings.permissionReviewerModelProviderId)) {
+    patch.permissionReviewerModel = next
+    patch.permissionReviewerModelProviderId = settings.permissionReviewerModelProviderId
+  }
+  if (Object.keys(patch).length > 0) {
+    windows.emitToAll("settings:changed", store.updateSettings(patch))
   }
 
   broadcast()
@@ -249,6 +264,13 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
   ensureSeeded()
   const id = input.id.trim()
   if (id === '') throw new Error('供应商 id 不能为空')
+  /*
+    ★ 斜杠会让 `modelSelectionKey`(`providerId/alias`)歧义:那个复合键靠
+    「第一个斜杠是分隔符」来解析,而别名里的斜杠(`openrouter/claude-sonnet-4`)
+    正是靠这条规矩才得以保留。id 里再有一个的话,parse 出来的供应商就是半截。
+    今天所有 id 都来自预设表的 slug,这一行是把那个隐含前提**变成硬约束**。
+  */
+  if (id.includes('/')) throw new Error('供应商 id 不能包含斜杠')
   const name = input.name.trim()
   if (name === '') throw new Error('供应商名称不能为空')
   // 合法协议 = `PROTOCOL_LABEL` 的键。不另立一个 UPSTREAM_PROTOCOLS 数组:
@@ -316,17 +338,66 @@ export function removeProvider(id: string): void {
  * 广播在 `ipc/settings.ts` 那个 handler 里,而这条写入不走它。少了这一句,
  * 库里已经接好了、而设置页和输入框那颗药丸还显示着删掉的那个别名。
  */
+/**
+ * 一个「模型别名 + 供应商」配对在别名表变动之后该怎么修。纯函数,好单测。
+ *
+ * ★★ **一次都不做跨供应商的静默回退。** 用户选的那家没了,唯一允许的降级是把
+ * 供应商抹成 `undefined` —— 那不是「换一家给你」,是回到「没有指定」这个明确状态,
+ * 而这个状态的语义(按 priority 择优)全系统只有一份定义。静默换家正是这整套
+ * 改动要消灭的那个 bug。
+ *
+ * ★ 判据用的是 `listAliases()`(**不看供应商启没启用**):停用是可逆的,用户
+ * 明天会开回来。这时改写他的选择,等于他重新启用之后发现自己选的东西没了。
+ *
+ * @returns undefined = 不用改。否则是要写进设置的新配对。
+ */
+export function repairModelSelection(
+  alias: string,
+  providerId: string | undefined,
+  aliveBindings: ReadonlySet<string>,
+  aliveAliases: ReadonlySet<string>,
+  fallback: { model: string; modelProviderId: string | undefined }
+): { model: string; modelProviderId: string | undefined } | undefined {
+  if (alias === '') return undefined
+  if (providerId !== undefined) {
+    if (aliveBindings.has(modelSelectionKey(providerId, alias))) return undefined
+    // 那家没了,但别名还在别处 —— 只解锁,不改名。
+    if (aliveAliases.has(alias)) return { model: alias, modelProviderId: undefined }
+    return fallback
+  }
+  return aliveAliases.has(alias) ? undefined : fallback
+}
+
 function repointDanglingDefaults(): void {
-  const alive = new Set(store.listAliases().map((a) => a.alias))
+  const aliases = store.listAliases()
+  const aliveAliases = new Set(aliases.map((a) => a.alias))
+  const aliveBindings = new Set(aliases.map((a) => modelSelectionKey(a.providerId, a.alias)))
   const before = store.getSettings()
   const patch: AppSettingsPatch = {}
 
-  if (before.defaultModel !== '' && !alive.has(before.defaultModel)) {
-    patch.defaultModel = listModels()[0]?.alias ?? ''
+  const first = listModels()[0]
+  const fixed = repairModelSelection(before.defaultModel, before.defaultModelProviderId,
+    aliveBindings, aliveAliases, { model: first?.alias ?? '', modelProviderId: first?.providerId })
+  if (fixed !== undefined) {
+    patch.defaultModel = fixed.model
+    patch.defaultModelProviderId = fixed.modelProviderId
   }
   // 子代理模型的空串是「跟随主对话」,本来就是合法的,所以悬空时置空即可
-  if (before.subagent.model !== '' && !alive.has(before.subagent.model)) {
-    patch.subagent = { model: '' }
+  const sub = repairModelSelection(before.subagent.model, before.subagent.modelProviderId,
+    aliveBindings, aliveAliases, { model: '', modelProviderId: undefined })
+  if (sub !== undefined) patch.subagent = { model: sub.model, modelProviderId: sub.modelProviderId }
+  /*
+    ★ 审核模型以前**根本没被这个函数照顾**,是个存量漏洞:删掉它所属的供应商之后
+    它一样悬空,而症状更隐蔽 —— 「为我批准」档位会静默退回人工审批
+    (`reviewSensitiveOperation` 查不到模型就返回 unknown),用户只会觉得
+    「怎么又开始问我了」,不会联想到几天前删过一个供应商。
+  */
+  const reviewer = repairModelSelection(before.permissionReviewerModel,
+    before.permissionReviewerModelProviderId, aliveBindings, aliveAliases,
+    { model: '', modelProviderId: undefined })
+  if (reviewer !== undefined) {
+    patch.permissionReviewerModel = reviewer.model
+    patch.permissionReviewerModelProviderId = reviewer.modelProviderId
   }
   if (Object.keys(patch).length === 0) return
 
@@ -353,8 +424,15 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
   const p = store.listProviders().find((x) => x.id === providerId)
   if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
 
-  const apiKey = await getHost().secrets.get(p.credentialRef)
-  const { url, headers } = modelListRequest(p.protocol, p.baseUrl, apiKey === '' ? null : apiKey)
+  /*
+    ★ 必须过 `parseCredential`,不能把库里的原始字符串直接当 key 用。
+    OAuth 凭证在库里是一段 JSON —— 直接拼进 `Bearer` 会发出一整个 JSON 对象。
+    今天走 OAuth 的那家 `supportsModelList` 是 false、走不到这里,但正确性
+    不能只在「今天用得到的路径」上成立:哪天多一家 OAuth 且有模型列表端点,
+    这里会安静地发出一个畸形请求,而症状是一个看不懂的 401。
+  */
+  const cred = parseCredential(await getHost().secrets.get(p.credentialRef))
+  const { url, headers } = modelListRequest(p.protocol, p.baseUrl, cred === null ? null : bearerOf(cred))
 
   let res: Response
   try {
@@ -443,13 +521,38 @@ export function setAliases(providerId: string, models: readonly string[]): Model
   return listModels(providerId)
 }
 
+/**
+ * 把库里那个字符串翻译成设置页能看的东西。
+ *
+ * ★ OAuth 凭证的 `last4` 是 **null**。access token 的后四位每小时都变,
+ * 对用户零识别价值,而「只写不读」这条线的边界值得守死:能不回传的字符
+ * 一个都不回传。那种凭证靠 `auth.email` 认。
+ */
 function infoFor(plaintext: string | null): CredentialInfo {
   const available = getHost().secrets.available()
-  if (plaintext === null || plaintext === '') {
+  const cred = parseCredential(plaintext)
+  if (cred === null) {
     return { hasKey: false, last4: null, encryptionAvailable: available }
   }
-  // ★ 只回后四位。整串明文到这里就止步了 —— 「只写不读」就是这一行
-  return { hasKey: true, last4: plaintext.slice(-4), encryptionAvailable: available }
+  if (cred.kind === 'api-key') {
+    // ★ 只回后四位。整串明文到这里就止步了 —— 「只写不读」就是这一行
+    return { hasKey: true, last4: cred.apiKey.slice(-4), encryptionAvailable: available }
+  }
+  return {
+    hasKey: true,
+    last4: null,
+    encryptionAvailable: available,
+    auth: {
+      issuer: cred.issuer,
+      accountId: cred.accountId,
+      ...(cred.email === undefined ? {} : { email: cred.email }),
+      ...(cred.planType === undefined ? {} : { planType: cred.planType }),
+      expiresAt: cred.expiresAt,
+      // ★ 过期与否在这里算完再回传,渲染层不碰时钟(见 CredentialAuthInfo 的注释)
+      expired: cred.expiresAt <= getHost().clock.now(),
+      needsReauth: cred.needsReauth === true
+    }
+  }
 }
 
 /** 存一把密钥。`isEncryptionAvailable() === false` 时 host 会抛错拒绝,不做明文降级 */

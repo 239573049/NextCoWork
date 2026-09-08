@@ -4,6 +4,7 @@
  * ★ 别名表是故障切换的前提:同一个 alias 可以由多个 provider 提供,
  * 才谈得上「切到下一个」。它同时是网关 GET /v1/models 的数据源。
  */
+import type { OAuthIssuerId } from './oauth-issuer'
 
 export type UpstreamProtocol = 'anthropic' | 'openai-chat' | 'openai-responses'
 
@@ -136,12 +137,38 @@ export function providerCredentialRef(id: string): string {
   return `provider:${id}`
 }
 
+/**
+ * OAuth 登录态里**可以给渲染层看**的那部分。
+ *
+ * ★ 这里一个 token 字符都没有,是刻意的:`accessToken` 每小时都换,回传它
+ * 既没有识别价值又把「只写不读」那条线弄出一个缺口。用户认自己的账号靠 `email`。
+ */
+export interface CredentialAuthInfo {
+  issuer: OAuthIssuerId
+  accountId: string
+  email?: string
+  planType?: string
+  expiresAt: number
+  /**
+   * ★ **由主进程按 `host.clock` 算好**,不让渲染层自己拿 `Date.now()` 去比。
+   * 两个进程不是同一个时钟源,而「过期了没有」这件事只能有一个答案。
+   */
+  expired: boolean
+  needsReauth: boolean
+}
+
 /** 设置页对密钥**只写不读**:返回这个,永不回传明文。 */
 export interface CredentialInfo {
   hasKey: boolean
   last4: string | null
   /** Linux 无 keyring 时 safeStorage.isEncryptionAvailable() 为 false —— 必须有明确降级路径 */
   encryptionAvailable: boolean
+  /**
+   * ★ **缺失 ≠ 未登录**,而是「这条凭证不是 OAuth」(绝大多数供应商)。
+   * 界面该画登录按钮还是画密钥输入框,判据是预设的 `oauthIssuer`,不是这个字段 ——
+   * 否则一家 OAuth 供应商在**还没登录**时会退化成 API Key 表单。
+   */
+  auth?: CredentialAuthInfo
 }
 
 export interface ModelCapabilities {

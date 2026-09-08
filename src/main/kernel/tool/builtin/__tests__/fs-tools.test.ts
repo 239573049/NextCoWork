@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -330,73 +330,83 @@ describe('LS', () => {
   })
 })
 
-// ────────────────────────────── 路径围栏 ──────────────────────────────
+// ────────────────────────────── 工作区外的路径 ──────────────────────────────
 
 /**
- * ★ 每个碰路径的工具都要有逃逸用例,而且断言的**不只是被拒绝**,
- * 还有「拒绝信息里没有目标文件的任何内容」—— 越界尝试的回执不该变成信息泄露。
+ * ★ 工作区**不再是围栏** —— 「谁能碰哪个文件」由权限档位决定(见 `path-guard.ts` 文件头)。
+ *
+ * 这一组钉的是放开之后仍然必须成立的三件事:真的能碰到、**回执里的路径一律是绝对形式**
+ * (相对形式对不上任何一个根,模型再喂回来时基准全看运气)、没有工作区时绝对路径照样能用。
  */
-describe('★ 路径逃逸', () => {
+describe('★ 工作区外的路径', () => {
   const escapes = (): Array<[string, string]> => [
     ['相对路径向上', '../outside/secret.txt'],
     ['绝对路径', join(outside, 'secret.txt')]
   ]
 
-  it('Read 拒绝逃逸,且不回显目标内容', async () => {
+  it('Read 读得到,且回执里的路径是绝对形式', async () => {
     for (const [why, p] of escapes()) {
       const r = await readTool.execute({ file_path: p }, ctx())
-      expect(r.isError, why).toBe(true)
-      expect(r.output.content, why).not.toContain(SECRET)
-      expect(r.output.content, why).toContain('workspace')
+      expect(r.isError, why).toBeFalsy()
+      expect(r.output.content, why).toContain(SECRET)
     }
   })
 
-  it('Write 拒绝逃逸,且没有真的写出去', async () => {
+  it('Write 写得出去', async () => {
     const target = join(outside, 'planted.txt')
     const r = await writeTool.execute({ file_path: target, content: 'x' }, ctx())
-    expect(r.isError).toBe(true)
-    expect(() => realpathSync.native(target)).toThrow()
+    expect(r.isError).toBeFalsy()
+    expect(readFileSync(target, 'utf8')).toBe('x')
+    // ★ 路径按绝对形式回报,不是 `../outside/planted.txt`
+    expect(r.output.content).toContain(target)
   })
 
-  it('Edit 拒绝逃逸', async () => {
-    const r = await editTool.execute(
-      { file_path: join(outside, 'secret.txt'), old_string: 'A', new_string: 'B' },
-      ctx()
-    )
-    expect(r.isError).toBe(true)
-    expect(r.output.content).not.toContain(SECRET)
+  it('Edit 改得动,但仍然要先 Read', async () => {
+    const target = join(outside, 'secret.txt')
+    const before = await editTool.execute({ file_path: target, old_string: 'AKIA', new_string: 'B' }, ctx())
+    expect(before.isError, '没读过就编辑必须被拒').toBe(true)
+
+    const c = ctx()
+    expect((await readTool.execute({ file_path: target }, c)).isError).toBeFalsy()
+    const r = await editTool.execute({ file_path: target, old_string: 'AKIA', new_string: 'B' }, c)
+    expect(r.isError).toBeFalsy()
+    expect(readFileSync(target, 'utf8')).toContain('B-TOTALLY-SECRET')
   })
 
-  it('LS 拒绝逃逸', async () => {
+  it('LS 列得出来', async () => {
     const r = await lsTool.execute({ path: outside }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).not.toContain('secret.txt')
+    expect(r.isError).toBeFalsy()
+    expect(r.output.content).toContain('secret.txt')
   })
 
-  /** 词法上完全在根里面,realpath 之后在外面 —— 这是 path-guard 存在的理由 */
-  it('★ 软链出界也拦得住', async () => {
+  /** 词法上完全在根里面,realpath 之后在外面 —— 现在跟着目标走,而不是被拦下 */
+  it('★ 软链指到外面也跟着走', async () => {
     symlinkSync(outside, join(root, 'link'))
     const r = await readTool.execute({ file_path: join(root, 'link/secret.txt') }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).not.toContain(SECRET)
+    expect(r.isError).toBeFalsy()
+    expect(r.output.content).toContain(SECRET)
   })
 
   /**
-   * ★ 没绑定工作区时每个碰路径的工具都必须**直接拒绝**。
+   * ★ 没绑定工作区时,**相对路径**才没有基准。绝对路径本来就不需要基准,照样能用。
    * `runtime.ts` 的 `workspaceRootFor` 查不到时给的就是空串。
    */
-  it('★ 空工作区根时四个工具全部拒绝,并让用户先打开工作区', async () => {
+  it('★ 空工作区根:相对路径被拒,绝对路径可用', async () => {
     const c = ctx({ workspaceRoot: '' })
-    const calls: Array<[string, Promise<{ isError?: boolean; output: { content: string } }>]> = [
-      ['Read', readTool.execute({ file_path: '/x' }, c)],
-      ['Write', writeTool.execute({ file_path: '/x', content: 'y' }, c)],
-      ['Edit', editTool.execute({ file_path: '/x', old_string: 'a', new_string: 'b' }, c)],
-      ['LS', lsTool.execute({ path: '/x' }, c)]
+    const rejected: Array<[string, Promise<{ isError?: boolean; output: { content: string } }>]> = [
+      ['Read', readTool.execute({ file_path: 'x.txt' }, c)],
+      ['Write', writeTool.execute({ file_path: 'x.txt', content: 'y' }, c)],
+      ['Edit', editTool.execute({ file_path: 'x.txt', old_string: 'a', new_string: 'b' }, c)],
+      ['LS', lsTool.execute({ path: 'x' }, c)]
     ]
-    for (const [name, p] of calls) {
+    for (const [name, p] of rejected) {
       const r = await p
       expect(r.isError, name).toBe(true)
       expect(r.output.content, name).toContain('workspace')
     }
+
+    const r = await readTool.execute({ file_path: join(outside, 'secret.txt') }, c)
+    expect(r.isError, r.output.content).toBeFalsy()
+    expect(r.output.content).toContain(SECRET)
   })
 })

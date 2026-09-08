@@ -15,10 +15,12 @@ import type {
   InnerTab,
   InnerTabKind,
 } from "../../../shared/domain/tab";
+import { chatKey } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FEATURE_ICON } from "../shell/icons";
 import { ChatView } from "./chat/ChatView";
+import type { FallbackModel } from "./chat/Composer";
 import { FilesTab } from "./files/FilesView";
 import { TerminalView } from "./terminal/TerminalView";
 import { BrowserView } from "./browser/BrowserView";
@@ -30,7 +32,7 @@ export interface InnerViewProps {
   tab: InnerTab;
   workspace: Workspace;
   /** 应用级默认模型;工作区没选过时兜底 */
-  fallbackModel: string;
+  fallbackModel: FallbackModel;
 }
 
 export function InnerView({
@@ -43,10 +45,13 @@ export function InnerView({
     case "chat":
       return (
         <ChatView
-          // ★ key 挂 sessionId 而不是 tab.id:同一个 Tab 换会话时必须重建
+          // ★ key 挂 chatKey 而不是 tab.id:同一个 Tab 换会话时必须重建
           // per-session store 的订阅,否则新会话会继续画上一个会话的转录。
-          key={tab.ref.sessionId}
+          // 草稿期 chatKey 是 tabId,绑定 sessionId 的那一刻它变一次 —— 那次
+          // 重挂是**故意**的,同一个理由:store 换了,订阅必须跟着换。
+          key={chatKey(tab)}
           sessionId={tab.ref.sessionId}
+          tabId={tab.id}
           workspace={workspace}
           fallbackModel={fallbackModel}
         />

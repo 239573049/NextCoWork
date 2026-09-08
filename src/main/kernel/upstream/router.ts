@@ -9,9 +9,12 @@
  */
 import type { AgentError } from '../../../shared/agent/error'
 import { agentError } from '../../../shared/agent/error'
+import { bearerOf } from '../../../shared/domain/credential'
+import { CredentialAuthError, CredentialResolver } from './credential-resolver'
 import type { ProviderStreamEvent, StopReason, TokenUsage } from '../../../shared/agent/stream'
 import type { ResolvedModelThinking } from '../../../shared/domain/model-runtime'
 import { resolveModelThinking } from '../../../shared/domain/model-runtime'
+import { modelBindingsFor } from '../../../shared/domain/model-selection'
 import { REQUEST_PATH } from '../../../shared/domain/baseurl'
 import type { ModelAlias, ProviderHealth, ThinkingConfig, UpstreamProvider } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
@@ -36,6 +39,7 @@ import { anthropicErrorToAgentError } from './decode/anthropic'
 import { interruptedResponse, openAIErrorToAgentError } from './decode/openai-common'
 import { applyAnthropicRequestOptions } from './encode/anthropic'
 import { decodeUpstream, encodeUpstream } from './codec'
+import { upstreamTransport, authHeader } from './transport'
 import { ImageInputError, prepareRequestImages } from './images'
 
 /** 每个 provider 最多试几次(含首次)。第 3 次还不行,换下一个 provider 比继续磕更有用。 */
@@ -137,12 +141,25 @@ export interface UpstreamRouterOptions {
   baseDelayMs?: number
   /** Synchronous sink; failures are isolated so telemetry can never fail a request. */
   onUsageAttempt?: (record: UnpricedUsageAttempt) => void
+  /**
+   * 某条凭证被刷新(或被标成需要重新登录)了。
+   *
+   * ★ 内核拿不到窗口,所以这是**注入回调**,和上面 `onUsageAttempt` 同一个套路。
+   * 设置页据此把「已登录」改成「登录已失效」—— 不推的话,用户要关掉再打开设置页
+   * 才知道自己已经掉线了。
+   */
+  onCredentialChanged?: (credentialRef: string) => void
 }
 
 export class UpstreamRouter {
   private readonly healthMap = new Map<string, ProviderHealth>()
   private readonly baseDelayMs: number
   private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
+  /**
+   * ★ 在构造函数里自己建,**不作为必填参数** —— 于是 gateway 和现有全部测试里那些
+   * `new UpstreamRouter(host, config)` 一行都不用改。
+   */
+  private readonly credentials: CredentialResolver
 
   constructor(
     private readonly host: KernelHost,
@@ -151,6 +168,7 @@ export class UpstreamRouter {
   ) {
     this.baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
     this.onUsageAttempt = opts.onUsageAttempt
+    this.credentials = new CredentialResolver(host, opts.onCredentialChanged)
   }
 
   listModels(): ModelAlias[] {
@@ -158,6 +176,25 @@ export class UpstreamRouter {
       this.config.providers().filter((p) => p.enabled).map((p) => p.id)
     )
     return this.config.aliases().filter((a) => enabled.has(a.providerId) && a.enabled !== false)
+  }
+
+  /**
+   * 「这个别名 + 这个供应商」最终落在哪一条绑定上 —— 路由器之外的调用方
+   * (`agent-session` 校验上下文、`session-title` 挑思考档、`runtime` 校验
+   * 审核模型)都必须走这里,而不是自己 `listModels().find((m) => m.alias === x)`。
+   *
+   * ★ 自己 find 的话取的是数组第一条,而路由器取的是 priority 最小的那条 ——
+   * 两者只是碰巧一致。分家之后的症状是:界面按 A 的上下文窗口做校验,
+   * 请求却发给了 B,而且不报错。
+   *
+   * ★★ **不过健康冷却**(所以不复用 `candidates()`):它回答的是「这个选择指向
+   * 哪一条绑定」,不是「现在该试谁」。冷却期内返回 undefined 会让上下文长度校验
+   * 被静默跳过 —— 那是个只在供应商刚挂过之后才复现的幽灵 bug。
+   */
+  resolveModel(model: string, modelProviderId?: string): ModelAlias | undefined {
+    return modelBindingsFor(
+      this.config.aliases(), this.config.providers(), model, modelProviderId
+    )[0]
   }
 
   health(): ProviderHealth[] {
@@ -172,19 +209,42 @@ export class UpstreamRouter {
   /**
    * 候选集:同一个 alias 可能由多个 provider 提供 —— **这正是别名表存在的理由**,
    * 没有它就谈不上「切到下一个」。
+   *
+   * ★★ `modelProviderId` 有值 = 用户在药丸里**显式选了那一家**,这是一条**硬约束**:
+   * 候选集被压到最多一条,于是下面那两层 for(换供应商 / 重试)天然只在这一家里
+   * 打转,`provider_switch` 也永远不会发出来。**锁死语义整个由候选集表达**,
+   * 不要去 `stream()` 里加 `if (pinned)` 分支 —— 那会造出第二个真相来源。
    */
-  private candidates(model: string): Candidate[] {
+  private candidates(model: string, modelProviderId?: string): Candidate[] {
     const byId = new Map(this.config.providers().map((p) => [p.id, p]))
-    const list: Candidate[] = []
-    for (const alias of this.config.aliases()) {
-      if (alias.alias !== model) continue
-      const provider = byId.get(alias.providerId)
-      if (provider?.enabled === true && alias.enabled !== false) list.push({ provider, alias })
-    }
-    list.sort((a, b) => a.provider.priority - b.provider.priority)
+    /*
+      ★★ 收集与排序**整个借给** `model-selection.ts` —— 渲染层的药丸用的是同一个
+      函数。这是整套设计的支点:药丸上显示的那家,和这里真正发请求的那家,由同一段
+      代码算出。以前两边各写一遍(那边取数组第一条、这边按 priority 排),只是碰巧
+      一致,一旦分家就是「界面说 A、请求发给 B」且不报任何错 —— 正是用户报的那个 bug。
+
+      `modelProviderId` 有值 = 用户显式选了那一家,那边会把候选压到最多一条,
+      于是下面两层 for(换供应商 / 重试)天然只在这一家里打转,`provider_switch`
+      也永远不会发出来。**锁死语义整个由候选集表达**,不要去 `stream()` 里加
+      `if (pinned)` 分支 —— 那会造出第二个真相来源。
+    */
+    const list: Candidate[] = modelBindingsFor(
+      this.config.aliases(), this.config.providers(), model, modelProviderId
+    ).map((alias) => ({ provider: byId.get(alias.providerId)!, alias }))
 
     // 旁路模式:直取优先级最高的一个,不做健康评分、不做切换。延迟最低、路径最短。
+    // ★ `failoverEnabled` 出厂就是 false,所以这条短路才是绝大多数用户实际走的
+    //   路径 —— provider 过滤必须发生在它**之前**(已经在上面那个函数里了)。
     if (!this.config.failoverEnabled()) return list.slice(0, 1)
+
+    /*
+      ★ 钉住时跳过冷却过滤。冷却的意义是「绕开一家坏的」,而锁死之后**无处可绕**:
+      过滤掉唯一那条候选,用户会收到「所有供应商都在冷却中」—— 他明明只选了一家,
+      而且界面上没有任何「再试一次」的入口,看起来就是应用坏了。
+      `MAX_ATTEMPTS` 加指数退避已经护得住配额。健康分照常记(`recordFailure` 不动),
+      设置页那个健康指示器仍然准确。
+    */
+    if (modelProviderId !== undefined) return list
 
     const now = this.host.clock.now()
     const usable = list.filter((c) => {
@@ -317,15 +377,21 @@ export class UpstreamRouter {
 
     try {
       signal.throwIfAborted()
-      const apiKey = await this.host.secrets.get(c.provider.credentialRef)
-      if (apiKey === null || apiKey === '') {
+      const cred = await this.credentials.resolve(c.provider.credentialRef, signal)
+      if (cred === null) {
         return finish({
           kind: 'failed',
           sawContent,
           error: agentError('auth', `供应商「${c.provider.name}」还没有配置密钥`, { retryable: false })
         })
       }
-
+      /*
+        ★ 两种凭证在**鉴权头这一点上是同构的**:OAuth 的 access token 就是塞进
+        `Authorization: Bearer` 的那个串,正是 `encodeOpenAIResponses` 已经在写的头。
+        所以 `encodeUpstream` 的签名一个字不用改 —— OAuth 多出来的那些东西
+        (账号头、body 强制字段)走 `transport`,在最终线上边界合并。
+      */
+      const apiKey = bearerOf(cred)
       const cacheTtl = anthropicCacheTtlOf(c.provider)
       const prepared = await prepareRequestImages(req, this.host, context, signal)
       const enc = encodeUpstream(c.provider.protocol, prepared, c.alias.upstreamModel, apiKey, {
@@ -355,21 +421,59 @@ export class UpstreamRouter {
       // final wire boundary. This keeps metadata.user_id mandatory and makes a
       // Provider's off/5m/1h choice authoritative even for legacy aliases with
       // broad custom patches.
-      const body = c.provider.protocol === 'anthropic' ? applyAnthropicRequestOptions(guardedBody, {
+      const anthropicBody = c.provider.protocol === 'anthropic' ? applyAnthropicRequestOptions(guardedBody, {
         userId: context.workspaceId,
         cacheTtl
       }) : guardedBody
-      const res = await this.host.fetch(joinUpstreamUrl(c.provider.baseUrl, enc.path), {
-        method: 'POST',
-        headers: { ...enc.headers, accept: 'text/event-stream' },
-        body: JSON.stringify(body),
-        signal
-      })
+      /*
+        ★ 凭证决定的那部分请求形状(额外的头、被钉死的 body 字段)在这里合并 ——
+        和上面那段英文注释是**同一条规矩的第二个实例**:供应商自己的硬约束
+        压过模型级自定义。API Key 凭证走的是恒等变换,老供应商逐字节不变。
+      */
+      const transport = upstreamTransport(c.provider, cred, { ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }) })
+      const body = transport.body(anthropicBody)
+      const url = joinUpstreamUrl(c.provider.baseUrl, enc.path)
+      const payload = JSON.stringify(body)
+      const send = (extraHeaders: Record<string, string>): Promise<Response> =>
+        this.host.fetch(url, {
+          method: 'POST',
+          headers: { ...enc.headers, ...transport.headers, ...extraHeaders, accept: 'text/event-stream' },
+          body: payload,
+          signal
+        })
+
+      let res = await send({})
+      /*
+        ★★ **401 之后强制刷新一次,就一次。**
+
+        主动的过期检查(`CredentialResolver` 的 SKEW)覆盖不了两种情况:本机时钟偏,
+        以及服务端**主动吊销**。两者的表现都是一个「凭证看着没过期却 401」。
+
+        ★ 为什么不交给外层那个重试循环:`openAIErrorToAgentError` 把 401 归为
+        `auth` 且 `retryable: false`(见 `decode/openai-common.ts`),外层于是会
+        **切到下一个 provider** —— 而下一家根本不提供这个别名的话,最终错误是
+        `no_healthy_provider`,一句和真实原因(token 过期)毫无关系的话。
+
+        ★ 只在 oauth 凭证上做,且此刻 `sawContent` 必然为 false(流还没开始),
+        所以不存在「重发导致重复输出」的问题 —— 那正是 §5.3 那条判断守的东西。
+      */
+      if (res.status === 401 && cred.kind === 'oauth') {
+        // 必须读完,否则这条连接不会被释放
+        await res.text().catch(() => '')
+        const fresh = await this.credentials.refreshNow(c.provider.credentialRef, signal)
+        res = await send(authHeader(c.provider.protocol, fresh.accessToken))
+      }
       httpStatus = res.status
 
       if (!res.ok) {
         // 必须把 body 读完(或 cancel),否则连接不会被释放
         const text = await res.text().catch(() => '')
+        /*
+          ★ 原始 body 只在这一刻存在过。分类器认不出形状时给出的是一句
+          「Upstream request failed (HTTP 400)」—— 上游到底抱怨什么一个字都不说。
+          记下来,排查时不必让用户再复现一次。
+        */
+        this.host.logger.warn(`[upstream] ${c.provider.name} HTTP ${res.status}`, text.slice(0, 2048))
         let parsed: unknown = text
         try {
           parsed = JSON.parse(text)
@@ -387,6 +491,12 @@ export class UpstreamRouter {
 
       for await (const ev of decodeUpstream(c.provider.protocol, res, signal)) {
         if (ev.type === 'error') {
+          /*
+            ★ 流内错误在这里留一条痕迹。界面上只看得到翻译过的那一句,而
+            `error.message` 带着解码器给出的原始原因(`Invalid upstream response: …`)——
+            用户把日志发过来时,这一行往往是唯一能定位到具体哪条协议检查的东西。
+          */
+          this.host.logger.warn(`[upstream] ${c.provider.name} 返回错误`, ev.error.code, ev.error.message)
           return finish({ kind: 'failed', sawContent, error: ev.error })
         }
         if (ev.type === 'message_start') responseModel = ev.model
@@ -406,7 +516,14 @@ export class UpstreamRouter {
           timeToFirstTokenMs = Math.max(0, this.host.clock.now() - startedAt)
         }
         if (isContent(ev)) sawContent = true
-        yield ev
+        /*
+          ★ 给 message_start 补上「这一段是谁给的」。这里是唯一的 choke point:
+          三条解码路径(anthropic / openai-chat / openai-responses)都从这过,
+          于是 decoder 一个都不用改 —— 它们本来也不知道自己在为哪家解码。
+          抬头那行「Codex / gpt-5.6-sol」显示的就是这个值,故障切换真换了家时
+          它跟着变,说的是既成事实而不是用户的意图。
+        */
+        yield ev.type === 'message_start' ? { ...ev, providerId: c.provider.id } : ev
       }
 
       if (stopReason === null) {
@@ -431,6 +548,14 @@ export class UpstreamRouter {
         })
       }
       if (err instanceof ImageInputError) {
+        return finish({ kind: 'failed', sawContent, error: err.error })
+      }
+      /*
+        ★ 刷新凭证失败。`error` 已经在 resolver 里分好类了(网络故障 retryable、
+        上游明确拒绝 not retryable)—— 这里原样用,不要在这一层重新猜一遍。
+        `auth` 在 `FATAL_ERROR_CODES` 里,于是整个 run 会终止并让界面跳设置页。
+      */
+      if (err instanceof CredentialAuthError) {
         return finish({ kind: 'failed', sawContent, error: err.error })
       }
       return finish({
@@ -484,9 +609,9 @@ export class UpstreamRouter {
       sessionId: context.sessionId ?? ''
     }
 
-    const candidates = this.candidates(req.model)
+    const candidates = this.candidates(req.model, req.modelProviderId)
     if (candidates.length === 0) {
-      yield { type: 'error', error: this.noCandidateError(req.model) }
+      yield { type: 'error', error: this.noCandidateError(req.model, req.modelProviderId) }
       return
     }
 
@@ -548,7 +673,7 @@ export class UpstreamRouter {
 
         const delayMs = outcome.error.retryAfterMs ?? this.baseDelayMs * 2 ** attempt
         // 没有这条事件,用户看到的就是白白冻结 30 秒(方案 §4.2)
-        yield { type: 'provider_retry', attempt: attempt + 1, delayMs }
+        yield { type: 'provider_retry', attempt: attempt + 1, delayMs, reason: outcome.error.message }
         await abortableSleep(delayMs, signal)
       }
     }
@@ -558,7 +683,30 @@ export class UpstreamRouter {
     yield { type: 'error', error: authError ?? lastError ?? agentError('unknown', '上游请求失败') }
   }
 
-  private noCandidateError(model: string): AgentError {
+  /**
+   * ★ 钉住时的三条分支都必须**明说「不会自动切到其它供应商」**。
+   * 用户对这个应用的既有心智是「配了多家就会自动兜底」,不写这句,他看到
+   * 「Codex 已停用」只会理解成「切换也挂了」,然后去查网络而不是去启用那一家。
+   */
+  private noCandidateError(model: string, modelProviderId?: string): AgentError {
+    if (modelProviderId !== undefined) {
+      const provider = this.config.providers().find((p) => p.id === modelProviderId)
+      if (provider === undefined) {
+        return agentError('no_healthy_provider',
+          `你选择的供应商已被删除,「${model}」不会自动切到其它供应商。请在模型菜单里重新选择。`,
+          { retryable: false, messageKey: 'agent.error.pinnedProviderMissing', messageParams: { model } })
+      }
+      if (!provider.enabled) {
+        return agentError('no_healthy_provider',
+          `供应商「${provider.name}」已停用,「${model}」不会自动切到其它供应商。请启用它,或另选一个模型。`,
+          { retryable: false, messageKey: 'agent.error.pinnedProviderDisabled',
+            messageParams: { model, provider: provider.name } })
+      }
+      return agentError('no_healthy_provider',
+        `供应商「${provider.name}」下已经没有可用的模型「${model}」,请重新选择。`,
+        { retryable: false, messageKey: 'agent.error.pinnedModelMissing',
+          messageParams: { model, provider: provider.name } })
+    }
     const anyAlias = this.config.aliases().some((a) => a.alias === model)
     if (!anyAlias) {
       return agentError('no_healthy_provider', `没有配置模型别名「${model}」`, { retryable: false })

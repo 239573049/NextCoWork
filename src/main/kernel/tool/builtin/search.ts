@@ -34,7 +34,7 @@ import { defineTool } from '../define'
 import type { ToolContext, ToolRegistration } from '../registry'
 import { compileGlob, normalizeGlobPath } from './glob-match'
 import { defaultSkip } from './ignore'
-import { looksBinary, relOf, resolvePath } from './paths'
+import { looksBinary, relOf, resolvePath, walkBaseOf } from './paths'
 import { redosRisk } from './redos'
 import { walk } from './walk'
 
@@ -107,7 +107,7 @@ const GlobInput = z.object({
     .string()
     .optional()
     .describe(
-      'Directory to search in (absolute path). Omit it to search the whole workspace. ' +
+      'Directory to search in (absolute path; it may be outside the workspace). Omit it to search the whole workspace. ' +
         'IMPORTANT: to use the default, OMIT this field entirely — do not pass "undefined" or "null"'
     )
 })
@@ -130,13 +130,14 @@ export const globTool: ToolRegistration = defineTool({
   async run(input, ctx) {
     const r = resolvePath(ctx, input.path ?? '')
     if (!r.ok) return r.result
-    const base = relOf(ctx, r.abs)
+    const walkBase = walkBaseOf(ctx, r)
+    const base = walkBase.label
 
     const re = compileGlob(input.pattern)
     const res = await walk({
       fs: ctx.host.fs,
-      root: ctx.workspaceRoot,
-      start: base === '.' ? '' : base,
+      root: walkBase.root,
+      start: walkBase.start,
       signal: ctx.signal,
       now: () => ctx.host.clock.now(),
       deadlineMs: SEARCH_BUDGET_MS,
@@ -155,10 +156,11 @@ export const globTool: ToolRegistration = defineTool({
     // ★ 只对命中的文件 stat。对全部遍历结果 stat 的话,一个大仓库要多几万次系统调用
     const withTime = await Promise.all(
       hits.slice(0, MAX_GLOB_RESULTS * 4).map(async (e) => {
+        const rel = walkBase.display(e.rel)
         try {
-          return { rel: e.rel, mtime: (await ctx.host.fs.stat(e.abs)).mtimeMs }
+          return { rel, mtime: (await ctx.host.fs.stat(e.abs)).mtimeMs }
         } catch {
-          return { rel: e.rel, mtime: 0 }
+          return { rel, mtime: 0 }
         }
       })
     )
@@ -187,7 +189,7 @@ const GrepInput = z.object({
   path: z
     .string()
     .optional()
-    .describe('File or directory to search (absolute path). Omit it to search the whole workspace'),
+    .describe('File or directory to search (absolute path; it may be outside the workspace). Omit it to search the whole workspace'),
   glob: z
     .string()
     .optional()
@@ -411,7 +413,8 @@ export const grepTool: ToolRegistration = defineTool({
 
     const st = await ctx.host.fs.stat(r.abs).catch(() => null)
     if (st === null) return toolFail(`Path does not exist: ${relOf(ctx, r.abs)}`)
-    const base = relOf(ctx, r.abs)
+    const walkBase = walkBaseOf(ctx, r)
+    const base = walkBase.label
 
     const nameFilterPattern = input.glob ?? (input.type === undefined ? undefined : TYPE_GLOBS[input.type])
     const nameFilter = nameFilterPattern === undefined ? null : compileGlob(nameFilterPattern)
@@ -422,12 +425,12 @@ export const grepTool: ToolRegistration = defineTool({
     let walkTruncated = false
     let walkTimedOut = false
     if (!st.isDir) {
-      files = [{ rel: base, abs: r.abs }]
+      files = [{ rel: relOf(ctx, r.abs), abs: r.abs }]
     } else {
       const res = await walk({
         fs: ctx.host.fs,
-        root: ctx.workspaceRoot,
-        start: base === '.' ? '' : base,
+        root: walkBase.root,
+        start: walkBase.start,
         signal: ctx.signal,
         now: () => ctx.host.clock.now(),
         deadlineMs: SEARCH_BUDGET_MS,
@@ -435,9 +438,9 @@ export const grepTool: ToolRegistration = defineTool({
       })
       walkTruncated = res.truncated
       walkTimedOut = res.timedOut
-      files = res.entries.filter(
-        (e) => !e.isDir && (nameFilter === null || nameFilter.test(normalizeGlobPath(e.rel)))
-      )
+      files = res.entries
+        .filter((e) => !e.isDir && (nameFilter === null || nameFilter.test(normalizeGlobPath(e.rel))))
+        .map((e) => ({ rel: walkBase.display(e.rel), abs: e.abs }))
     }
 
     const hits: FileHits[] = []

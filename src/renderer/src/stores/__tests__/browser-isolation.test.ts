@@ -7,10 +7,6 @@ vi.mock('../../services/app', () => ({
   persistOuterTabs: vi.fn()
 }))
 
-vi.mock('../../services/sessions', () => ({
-  createSession: vi.fn(async () => undefined)
-}))
-
 vi.mock('../../services/browser', () => ({
   closeBrowserTab: vi.fn(async () => undefined)
 }))

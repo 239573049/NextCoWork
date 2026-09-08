@@ -16,6 +16,7 @@ import type { AgentEvent, RunSnapshot } from '../agent/event'
 import type { AgentMessage } from '../agent/message'
 import type { ContextCheckpoint } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
+import type { InterjectItem } from '../agent/interject'
 import type { RunRequest } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
@@ -202,8 +203,9 @@ export interface IpcInvokeMap {
    * 右侧文件树列一层。**懒加载**:展开一个目录才拉它,不递归 ——
    * 一次把 `node_modules` 整棵树拉回来,IPC 那一下就够卡半秒。
    *
-   * `path` 是**工作区相对**路径且经 `resolveInWorkspace` 校验(方案 §9):
-   * 它来自渲染层,是不可信输入,`../..` 会被拒。
+   * `path` 是**工作区相对**路径,或一条绝对路径(工具卡片和 Markdown 链接会给出
+   * 工作区外的绝对路径,点开要落得到)。它来自渲染层,是不可信输入,
+   * 一律经 `resolveAnywhere` 归一化(方案 §9)。
    */
   'workspace:listDir': { req: { workspaceId: string; path: string }; res: DirListing }
   'workspace:readFile': { req: WorkspaceFileRequest; res: WorkspaceFile }
@@ -277,6 +279,17 @@ export interface IpcInvokeMap {
   'agent:run': { req: RunRequest; res: void }
   'agent:attach': { req: { runId: string; sinceSeq: number }; res: RunSnapshot }
   'agent:abort': { req: { runId: string; cascade: boolean }; res: void }
+  /**
+   * 插话 —— 把这些条目排进正在跑的那个 run,由它在**下一个轮次边界**注入。
+   *
+   * ★ **全量替换,不是追加。** 渲染层每次「引入/取消引入/编辑/删除」都把当前
+   * 全部 promoted 条目重发一遍,主进程整个换掉自己那份。追加语义要为
+   * 取消、编辑、删除各配一条频道,而三条频道之间的到达顺序无法保证 ——
+   * 全量替换让「最后一次发的就是真相」,乱序也收敛到同一个结果。
+   *
+   * ★ 空数组是合法且有意义的载荷:它就是「取消全部插话」。
+   */
+  'agent:interject': { req: { runId: string; items: InterjectItem[] }; res: void }
   /** ★ 审批 / 反问 / 计划确认三种 kind 共用这一个(方案 §4.6) */
   'agent:respondInteraction': { req: InteractionResponse; res: void }
   'agent:listInteractions': { req: { runId?: string }; res: PendingInteraction[] }
@@ -356,6 +369,27 @@ export interface IpcInvokeMap {
   /** ★ 只写不读:返回 { hasKey, last4 },永不回传明文(方案 §9) */
   'provider:setCredential': { req: { providerId: string; apiKey: string }; res: CredentialInfo }
   'provider:getCredentialInfo': { req: { providerId: string }; res: CredentialInfo }
+  /**
+   * 走一遍账号登录(OAuth 授权码 + PKCE),成功后凭证落进和 API Key 同一个槽。
+   *
+   * ★★ **这是一条「长 invoke」**:里面要打开浏览器、等用户授权,最长 5 分钟。
+   * 做成 invoke 而不是「send + 纯事件」,是因为界面上那颗按钮需要一个**确定的终态**
+   * 才能退出 loading —— 而 `IpcResult` 信封顺带把失败原因免费带回来了。
+   * 中间进度靠 `provider:authProgress` 补,终态靠这条的返回值。
+   *
+   * ★ **不复用 `provider:setCredential`。** 那条频道的契约就是「只写不读一把 key」,
+   * 让它同时表示「打开浏览器走一遍 OAuth」,等于让一条安全敏感频道做两件不相干的事,
+   * 而它的校验只按其中一件写过。
+   */
+  'provider:startOAuth': { req: { providerId: string }; res: CredentialInfo }
+  'provider:cancelOAuth': { req: { providerId: string }; res: void }
+  /** 手动粘贴授权码的那种形态(部分厂商的授权页把 code 显示出来让用户复制) */
+  'provider:submitOAuthCode': {
+    req: { providerId: string; code: string }
+    res: CredentialInfo
+  }
+  /** 退出登录。★ 一定成功 —— 删密文不需要系统密钥环,见 `signOut` 的注释 */
+  'provider:signOut': { req: { providerId: string }; res: CredentialInfo }
   'provider:listModels': { req: { providerId?: string }; res: ModelAlias[] }
   /**
    * ★★ **叫 `fetchModels` 而不是 `listModels`,因为那个名字已经被上面那条占了 ——
@@ -508,6 +542,26 @@ export interface IpcEventMap {
    * 而那需要渲染层再发一次 `provider:listModels` 才补得回来。
    */
   'provider:changed': { providers: UpstreamProvider[]; models: ModelAlias[] }
+  /**
+   * 登录流程走到哪一步了。**只在一次登录期间推**,终态由 `provider:startOAuth`
+   * 的返回值给 —— 这条只负责让按钮上的字从「正在打开浏览器」变成「等待授权」。
+   */
+  'provider:authProgress': {
+    providerId: string
+    phase: 'opening' | 'waiting' | 'exchanging' | 'done' | 'failed' | 'cancelled'
+    message?: string
+  }
+  /**
+   * 某家的登录态变了。
+   *
+   * ★★ **刷新 token 失败、把凭证标成 `needsReauth` 时也推这条** —— 那一刻用户
+   * 可能正开着设置页,而他看到的还是「已登录」。不推的话,他要关掉再打开设置页
+   * 才知道自己已经掉线了。
+   *
+   * ★ 不并进 `provider:changed`:登录态不是 providers / aliases 两张表的一部分,
+   * 混进去会让每一次登录都触发一遍全应用的模型列表重算。
+   */
+  'provider:authChanged': { providerId: string; info: CredentialInfo }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -577,6 +631,7 @@ export const INVOKE_CHANNELS = {
   'agent:run': 1,
   'agent:attach': 1,
   'agent:abort': 1,
+  'agent:interject': 1,
   'agent:respondInteraction': 1,
   'agent:listInteractions': 1,
   'agent:listTools': 1,
@@ -607,6 +662,10 @@ export const INVOKE_CHANNELS = {
   'provider:remove': 1,
   'provider:setCredential': 1,
   'provider:getCredentialInfo': 1,
+  'provider:startOAuth': 1,
+  'provider:cancelOAuth': 1,
+  'provider:submitOAuthCode': 1,
+  'provider:signOut': 1,
   'provider:listModels': 1,
   'provider:fetchModels': 1,
   'provider:setAliases': 1,
@@ -666,6 +725,8 @@ export const EVENT_CHANNELS = {
   'skills:changed': 1,
   'mcp:changed': 1,
   'provider:changed': 1,
+  'provider:authProgress': 1,
+  'provider:authChanged': 1,
   'websearch:changed': 1,
   'sessions:changed': 1,
   'browser:changed': 1,

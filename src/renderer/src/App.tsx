@@ -81,13 +81,20 @@ export default function App(): React.JSX.Element {
         // A background child may outlive its parent run and still needs a
         // route back to the parent Task card after this renderer reloads.
         adoptActiveSubagents(b.activeSubagents ?? [])
-        const raw = window.location.hash.match(/^#session=([^/]+)\/([^/]+)$/)
+        /*
+          路由在 hash 里:`#/{workspaceId}` = 这个工作区(新对话),
+          `#/{workspaceId}/{sessionId}` = 指定会话。
+
+          ★ **不再把 hash 清掉。** 它以前是一次性入参(「在新窗口打开这段会话」
+          用完即弃),现在是常驻状态 —— 激活哪个 Tab 它就写成什么,见 AppShell
+          里那个同步 effect。清掉的话下一帧就被同步回来,中间白闪一次。
+        */
+        const raw = window.location.hash.match(/^#\/([^/]+)(?:\/([^/]+))?$/)
         if (raw !== null) {
           const workspaceId = decodeURIComponent(raw[1]!)
-          const sessionId = decodeURIComponent(raw[2]!)
           openWorkspace(workspaceId)
-          openSession(workspaceId, sessionId)
-          window.history.replaceState(null, '', window.location.pathname + window.location.search)
+          const sessionId = raw[2] === undefined ? null : decodeURIComponent(raw[2])
+          if (sessionId !== null) openSession(workspaceId, sessionId)
         }
       })
       .catch((e: unknown) => setFatal(e instanceof Error ? e.message : String(e)))

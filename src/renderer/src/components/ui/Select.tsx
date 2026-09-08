@@ -53,7 +53,17 @@ export function Select({
           className,
         )}
       >
-        <SelectPrimitive.Value className="min-w-0 flex-1 truncate" />
+        {/*
+          ★ 截断的类名必须挂在**外面这个 span** 上,不能挂在 `Select.Value` 上。
+          Radix 的 `SelectValue` 把 `className` 和 `style` 解构出去之后就再也没用上
+          (`react-select/dist/index.mjs`:`const { …, className, style, … } = props`,
+          随后只展开剩下的 `valueProps`,并把 style 写死成 `pointerEvents: 'none'`)——
+          写在它身上的样式是**静默失效**的,不报错、不警告,只是长模型名会换行,
+          把 h-7 的触发器撑出两三行。
+        */}
+        <span className="min-w-0 flex-1 truncate">
+          <SelectPrimitive.Value />
+        </span>
         <SelectPrimitive.Icon className="shrink-0 text-fg-faint transition-transform duration-150 group-data-[state=open]:rotate-180">
           <ChevronDown aria-hidden size={12} />
         </SelectPrimitive.Icon>

@@ -113,16 +113,26 @@ describe('Glob', () => {
     expect(r.output.content).not.toContain('.git/')
   })
 
-  it('拒绝逃逸,且不回显目标内容', async () => {
+  /**
+   * ★ 遍历基准要跟着目标走。目标在工作区外时,`walk()` 的 `root` 必须换成目标本身 ——
+   * 继续拿工作区当 root、拿绝对路径当 start 的话,`join(root, start)` 会拼出一个谁也没要求的目录。
+   */
+  it('工作区外的目录也能列,路径按绝对形式给出', async () => {
     const r = await globTool.execute({ pattern: '*', path: outside }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).not.toContain(SECRET)
+    expect(r.isError, r.output.content).toBeFalsy()
+    expect(r.output.content).toContain(join(outside, 'secret.txt'))
   })
 
-  it('没有工作区时直接拒绝', async () => {
+  it('没有工作区时,相对起点无处可算', async () => {
     const r = await globTool.execute({ pattern: '*' }, ctx({ workspaceRoot: '' }))
     expect(r.isError).toBe(true)
     expect(r.output.content).toContain('workspace')
+  })
+
+  it('没有工作区时,绝对起点照样能搜', async () => {
+    const r = await globTool.execute({ pattern: '*', path: outside }, ctx({ workspaceRoot: '' }))
+    expect(r.isError, r.output.content).toBeFalsy()
+    expect(r.output.content).toContain(join(outside, 'secret.txt'))
   })
 })
 
@@ -296,13 +306,13 @@ describe('Grep · 过滤与选项', () => {
     expect(r.output.content).toContain('JavaScript')
   })
 
-  it('拒绝逃逸,且不回显目标内容', async () => {
+  it('工作区外的目录也能搜,命中路径按绝对形式给出', async () => {
     const r = await grepTool.execute({ pattern: 'AKIA', path: outside }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).not.toContain(SECRET)
+    expect(r.isError, r.output.content).toBeFalsy()
+    expect(r.output.content).toContain(join(outside, 'secret.txt'))
   })
 
-  it('没有工作区时直接拒绝', async () => {
+  it('没有工作区时,相对起点无处可算', async () => {
     const r = await grepTool.execute({ pattern: 'x' }, ctx({ workspaceRoot: '' }))
     expect(r.isError).toBe(true)
     expect(r.output.content).toContain('workspace')

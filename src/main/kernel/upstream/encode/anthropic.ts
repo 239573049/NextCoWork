@@ -5,6 +5,7 @@
  * 网关四组全用。
  */
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
+import { fileRefMarkdown } from '../../../../shared/agent/message'
 import type { ToolInfo } from '../../../../shared/agent/tool'
 import {
   normalizeAnthropicCacheTtl,
@@ -81,6 +82,10 @@ function toBlock(p: ContentPart): unknown | null {
       if (!p.dataRef.startsWith(prefix)) return null
       return { type: 'image', source: { type: 'base64', media_type: p.mime, data: p.dataRef.slice(prefix.length) } }
     }
+
+    case 'file_ref':
+      // ★ 不读文件、不传字节 —— 只把路径当 markdown 链接告诉模型,它自己用工具去读。
+      return { type: 'text', text: fileRefMarkdown(p) }
 
     case 'error':
       // 错误只属于 UI 那一轨。把它回传给模型,模型就会开始为我们的 bug 道歉。

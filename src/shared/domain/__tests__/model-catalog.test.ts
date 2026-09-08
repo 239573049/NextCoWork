@@ -214,8 +214,11 @@ describe('vendor-first model catalogue', () => {
   it('keeps conservative defaults and models Vision independently from File', () => {
     const conservative = BUILTIN_MODEL_CATALOG.find((row) => row.id === 'gpt-3.5-turbo')
     expect(conservative?.verificationStatus).toBe('unverified')
+    // `tools` is deliberately absent here: it is the one capability that does
+    // not follow the conservative default, because a false negative silently
+    // strips the agent's whole tool schema rather than hiding a control.
+    // See __tests__/model-catalog-tools.test.ts for that rule and its evidence.
     expect(conservative?.capabilities).toMatchObject({
-      tools: false,
       caching: false,
       structuredOutput: false,
       streaming: false,

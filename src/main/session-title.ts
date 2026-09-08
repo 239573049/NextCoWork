@@ -52,7 +52,7 @@ export class SessionTitleGenerator {
 
   constructor(private readonly deps: TitleDeps) {}
 
-  start(session: Session, message: AgentMessage, model: string): void {
+  start(session: Session, message: AgentMessage, model: string, modelProviderId?: string): void {
     if (this.jobs.has(session.id)
       || (session.titleSource !== 'default'
         && !(session.titleSource === undefined && isDefaultSessionTitle(session.title)))) return
@@ -73,7 +73,7 @@ export class SessionTitleGenerator {
     const job = { controller, timer }
     this.jobs.set(session.id, job)
     // Return immediately; neither the model response nor its persistence gates the conversation.
-    void this.generate(preview, message, parts, model, job).catch(() => {
+    void this.generate(preview, message, parts, model, modelProviderId, job).catch(() => {
       if (!controller.signal.aborted) this.deps.logger.warn('[session-title] Generation failed; keeping the message preview.')
     }).finally(() => {
       clearTimeout(timer)
@@ -90,8 +90,8 @@ export class SessionTitleGenerator {
     this.jobs.clear()
   }
 
-  private async generate(session: Session, message: AgentMessage, parts: ContentPart[], model: string, job: TitleJob): Promise<void> {
-    const alias = this.deps.upstream.listModels().find((item) => item.alias === model)
+  private async generate(session: Session, message: AgentMessage, parts: ContentPart[], model: string, modelProviderId: string | undefined, job: TitleJob): Promise<void> {
+    const alias = this.deps.upstream.resolveModel(model, modelProviderId)
     if (alias === undefined) return
     const levels = modelThinkingLevels(alias)
     // Auxiliary requests follow the same accepted strengths. Prefer Off, then
@@ -105,6 +105,9 @@ export class SessionTitleGenerator {
     let complete = false
     for await (const event of this.deps.upstream.stream({
       model,
+      // ★ 标题请求必须跟着正文走同一家。漂到另一家是**钱包问题**:用户把订阅制的
+      //   Codex 选出来正是为了不按量计费,而标题是每开一个新会话就发一次。
+      ...(modelProviderId === undefined ? {} : { modelProviderId }),
       system: SESSION_TITLE_PROMPT,
       messages: [userMessage(message.id, parts, message.createdAt)],
       tools: [],

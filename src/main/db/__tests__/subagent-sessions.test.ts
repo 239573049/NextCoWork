@@ -241,3 +241,34 @@ describe('第 10 条迁移:把已经泄漏进侧边栏的存量脏行清掉', ()
     }
   })
 })
+
+/**
+ * `modelProviderId` **只活在 json 列里**,没有提列 —— 照 `titleSource` 的先例。
+ * 提列的判据是「要不要被 WHERE / ORDER BY / 级联删除读到」,而它一样都不沾。
+ */
+describe('会话上的 modelProviderId', () => {
+  it('往返读得回来', () => {
+    repo.createSession({ id: 's1', workspaceId: 'w', model: 'shared', modelProviderId: 'codex' })
+    expect(repo.getSession('s1')).toMatchObject({ model: 'shared', modelProviderId: 'codex' })
+  })
+
+  it('没给时读回 undefined,不是空串', () => {
+    repo.createSession({ id: 's2', workspaceId: 'w', model: 'shared' })
+    expect(repo.getSession('s2')?.modelProviderId).toBeUndefined()
+  })
+
+  /** 旧库里的每一行 json 都没有这个字段 —— 读到它们时不许抛 */
+  it('json 里缺这个字段时照常读出会话', () => {
+    repo.createSession({ id: 's3', workspaceId: 'w', model: 'shared', modelProviderId: 'codex' })
+    const db = new DatabaseSync(join(dir, DB_FILENAME))
+    const row = db.prepare('SELECT json FROM sessions WHERE id = ?').get('s3') as { json: string }
+    const stripped = JSON.parse(row.json) as Record<string, unknown>
+    delete stripped.modelProviderId
+    db.prepare('UPDATE sessions SET json = ? WHERE id = ?').run(JSON.stringify(stripped), 's3')
+    db.close()
+
+    const after = repo.getSession('s3')
+    expect(after?.model).toBe('shared')
+    expect(after?.modelProviderId).toBeUndefined()
+  })
+})

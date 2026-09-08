@@ -34,7 +34,9 @@ function setup(options: { events?: ProviderStreamEvent[]; timeoutMs?: number; mo
   const onChange = vi.fn()
   const logger = { ...nodeHost().logger, warn: vi.fn() }
   generator = new SessionTitleGenerator({
-    upstream: { stream, listModels: () => [options.model ?? alias] }, getSession: store.getSession,
+    upstream: { stream, listModels: () => [options.model ?? alias],
+      resolveModel: (model) => [options.model ?? alias].find((m) => m.alias === model) },
+    getSession: store.getSession,
     putSession: store.putSession, onChange, logger, ...('timeoutMs' in options ? { timeoutMs: options.timeoutMs } : {})
   })
   const session = store.createSession({ id: 'session', workspaceId: 'workspace' })

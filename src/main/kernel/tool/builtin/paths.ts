@@ -1,18 +1,19 @@
 /**
  * 每个碰路径的内置工具都要做的那几件事,收口成一处。
  *
- * ★ 存在的理由和 `path-guard.ts` 一样,只是低一层:围栏本身只有一个入口了,
- * 但「围栏抛出来之后跟模型怎么说」如果每个工具各写一遍,就会出现
- * 「read_file 越界时说人话、grep 越界时甩一个 Error.message」这种不一致 ——
- * 而模型是照着错误消息决定下一步做什么的。
+ * ★ 存在的理由和 `path-guard.ts` 一样,只是低一层:解析本身只有一个入口了,
+ * 但「解析完之后跟模型怎么说这条路径」如果每个工具各写一遍,就会出现
+ * 「read_file 报的是相对路径、grep 报的是绝对路径」这种不一致 ——
+ * 而模型是照着回执里的路径决定下一步喂什么参数的。
  */
+import { isAbsolute, join } from 'node:path'
 import type { ToolResult } from '../../../../shared/agent/tool'
 import { toolFail } from '../../../../shared/agent/tool'
-import { PathEscapeError, resolveInWorkspace, toWorkspaceRelative } from '../path-guard'
+import { resolveAnywhere, toWorkspaceRelative } from '../path-guard'
 import type { ToolContext } from '../registry'
 
 /**
- * 没有工作区时的说辞。
+ * 没有工作区时的说辞。`Bash` 用它 —— 没有工作区就没有 cwd,一条命令无处可跑。
  *
  * ★ `runtime.ts` 的 `workspaceRootFor` 查不到工作区时给的是**空串**,而不是
  * 一个临时目录 —— 给临时目录的话,模型会以为自己在用户的项目里干活,
@@ -22,28 +23,34 @@ export const NO_WORKSPACE =
   'This session has no workspace bound, so file tools are unavailable. Ask the user to open a workspace ' +
   'directory first, then retry this step.'
 
-export type Resolved = { ok: true; abs: string } | { ok: false; result: ToolResult }
+/**
+ * 没有工作区、而且给的是**相对**路径时的说辞。
+ *
+ * ★ 绝对路径不受这条限制:没有工作区也照样能读写它,因为它本来就不需要基准。
+ * 所以这条不能说成「文件工具不可用」—— 那会让模型连试都不试。
+ */
+export const NO_WORKSPACE_RELATIVE =
+  'This session has no workspace bound, so a relative path has nothing to resolve against. Pass an ' +
+  'absolute path instead, or ask the user to open a workspace directory first.'
+
+export type Resolved =
+  | { ok: true; abs: string; outside: boolean }
+  | { ok: false; result: ToolResult }
 
 /**
- * 把模型给的路径解析成工作区内的绝对路径。**所有碰路径的工具的第一行。**
+ * 把模型给的路径解析成绝对路径。**所有碰路径的工具的第一行。**
  *
- * ★ 失败信息里**只出现模型自己传进来的那个路径**,不出现工作区根、
- * 也不出现目标文件的任何内容 —— 越界尝试的回执不该变成一次信息泄露。
+ * ★ 落在工作区外面**不是错误** —— 用户按权限档位决定 agent 能碰什么(见 `path-guard.ts`
+ * 文件头)。`outside` 只影响这条路径怎么展示(见 `relOf`)和搜索工具从哪个根开始遍历。
+ *
+ * ★ 失败信息里**只出现模型自己传进来的那个路径**,不出现目标文件的任何内容。
  */
 export function resolvePath(ctx: ToolContext, p: string): Resolved {
-  if (ctx.workspaceRoot === '') return { ok: false, result: toolFail(NO_WORKSPACE) }
+  if (ctx.workspaceRoot === '' && !isAbsolute(p)) return { ok: false, result: toolFail(NO_WORKSPACE_RELATIVE) }
   try {
-    return { ok: true, abs: resolveInWorkspace(ctx.workspaceRoot, p) }
+    const r = resolveAnywhere(ctx.workspaceRoot, p)
+    return { ok: true, abs: r.abs, outside: r.outside }
   } catch (err) {
-    if (err instanceof PathEscapeError) {
-      return {
-        ok: false,
-        result: toolFail(
-          `The path "${p}" is outside the workspace. File tools can only reach files inside the workspace ` +
-            `directory. Use a workspace-relative path instead, e.g. src/main/index.ts.`
-        )
-      }
-    }
     // 根本身不存在(工作区被删了/改名了)。这是环境问题,不是模型的错。
     return {
       ok: false,
@@ -52,12 +59,55 @@ export function resolvePath(ctx: ToolContext, p: string): Resolved {
   }
 }
 
-/** 绝对路径压回工作区相对形式。展示给模型的路径**一律**是这一种。 */
+/**
+ * 绝对路径压成**展示形式**:工作区内的压回工作区相对,工作区外的原样保留绝对路径。
+ *
+ * ★ 绝不产出 `../../x`。那种形式对不上任何一个根 —— 模型把它再喂回来时基准是谁全看运气,
+ * 而 `walk()` 的 `join(root, start)` 会被它直接带偏。
+ */
 export function relOf(ctx: ToolContext, abs: string): string {
+  if (ctx.workspaceRoot === '') return abs
   try {
-    return toWorkspaceRelative(ctx.workspaceRoot, abs) || '.'
+    const rel = toWorkspaceRelative(ctx.workspaceRoot, abs)
+    if (rel === '') return '.'
+    return rel.startsWith('../') || rel === '..' ? abs : rel
   } catch {
     return abs
+  }
+}
+
+/**
+ * 一次目录遍历的基准 —— `walk()` 从哪儿起步,以及它产出的 `rel` 怎么变成展示形式。
+ *
+ * ★ `walk()` 的 `rel` 是**相对 `root`** 算的,而 `root` 同时还是它内部挡软链成环、
+ * 挡越界的信任基点。所以目标落在工作区外时,不能继续把 `root` 钉死在工作区根上再
+ * 拿绝对路径当 `start` —— `join(root, start)` 会把绝对路径当成新根,遍历结果要么为空
+ * 要么指向一个谁也没要求的目录。正确的做法是**把基准整个换过去**。
+ */
+export interface WalkBase {
+  root: string
+  start: string
+  /** 起点本身的展示形式,用在「在 X 下面没找到」这类话里 */
+  label: string
+  /** 把 `walk()` 产出的 `rel` 变成展示形式 */
+  display(rel: string): string
+}
+
+export function walkBaseOf(ctx: ToolContext, target: { abs: string; outside: boolean }): WalkBase {
+  if (target.outside) {
+    return {
+      root: target.abs,
+      start: '',
+      label: target.abs,
+      display: (rel) => (rel === '' ? target.abs : join(target.abs, rel))
+    }
+  }
+  const rel = relOf(ctx, target.abs)
+  return {
+    root: ctx.workspaceRoot,
+    start: rel === '.' ? '' : rel,
+    label: rel,
+    display: (r) => r
   }
 }
 

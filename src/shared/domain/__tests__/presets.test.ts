@@ -76,7 +76,22 @@ describe('预设表 · 主键与完整性', () => {
 
   it('非标准凭证类型必须同时提供获取页面', () => {
     for (const p of PROVIDER_PRESETS) {
-      if (p.credentialKind !== undefined) expect(p.apiKeyUrl, p.id).toBeDefined()
+      /*
+        ★ `oauth` 是这条规则的**真例外**,不是漏填。
+        这条规则守的是「按钮说『获取 Access Key』,就得真能点过去拿到」;
+        而 OAuth 那家根本没有「创建密钥」这个页面 —— 拿凭证的方式就是登录本身。
+        硬给一个近似链接会把人送到 platform.openai.com 去建一把**用不上**的 key。
+      */
+      if (p.credentialKind !== undefined && p.credentialKind !== 'oauth') {
+        expect(p.apiKeyUrl, p.id).toBeDefined()
+      }
+    }
+  })
+
+  it('★ oauth 预设必须声明 issuer —— 否则界面画不出登录按钮，退化成一个填不了的密钥框', () => {
+    for (const p of PROVIDER_PRESETS) {
+      if (p.credentialKind === 'oauth') expect(p.oauthIssuer, p.id).toBeDefined()
+      if (p.oauthIssuer !== undefined) expect(p.credentialKind, p.id).toBe('oauth')
     }
   })
 

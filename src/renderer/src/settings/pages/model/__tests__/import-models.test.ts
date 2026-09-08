@@ -206,10 +206,10 @@ describe('modelListAvailability', () => {
     return e
   }
 
-  it('支持拉列表的照常放行', () => {
+  it('支持拉列表的照常放行,且不废话', () => {
     const e = ep('routin', 'anthropic')
     const r = modelListAvailability({ id: 'routin', protocol: 'anthropic', baseUrl: e.baseUrl })
-    expect(r.enabled).toBe(true)
+    expect(r.hint).toBeNull()
   })
 
   it('免鉴权的那几家:needsKey 为 false,并提示可以先看看', () => {
@@ -223,25 +223,33 @@ describe('modelListAvailability', () => {
     expect(r.hint).not.toBeNull()
   })
 
-  it('地址原封不动时,实测没有列表端点的那个协议置灰', () => {
+  /**
+   * ★★ 这条是本文件的重点:**没有任何输入能让按钮消失**。
+   * 曾经 `supportsModelList: false` + 地址没改过会返回 enabled:false,
+   * 前端据此把按钮焊死。但那批标记是拿没有有效 key 的请求探的 —— 先验鉴权
+   * 再路由的网关一律回 401,于是「key 不对」被记成了「没有列表端点」。
+   * 标错成 false 的代价是用户完全没有绕过办法,所以这条禁令整个删掉了。
+   */
+  it('★ 实测没有列表端点的那家,也只出提示、不再置灰', () => {
     const e = ep('deepseek', 'anthropic')
     const r = modelListAvailability({ id: 'deepseek', protocol: 'anthropic', baseUrl: e.baseUrl })
-    expect(r.enabled).toBe(false)
-    expect(r.hint).toContain('手动')
+    expect(r).not.toHaveProperty('enabled')
+    expect(r.hint).toContain('可以试')
   })
 
-  /**
-   * ★★ 预设表是我们某一天实测到的快照。用户把地址换成自己的中转之后,
-   * 这张快照描述的就不再是他的端点 —— 照它置灰等于让一个明明能用的端点
-   * 永远拉不了,而且没有任何绕过办法。
-   */
-  it('★ 但地址被改过就放行 —— 快照描述的已经不是他那个端点了', () => {
+  it('★ 千帆(被标错成没有列表端点的那家)照样能点', () => {
+    const e = ep('qianfan', 'openai-chat')
+    const r = modelListAvailability({ id: 'qianfan', protocol: 'openai-chat', baseUrl: e.baseUrl })
+    expect(r).not.toHaveProperty('enabled')
+    expect(r.hint).toContain('可以试')
+  })
+
+  it('地址被改过时,提示换成「你改过地址」那条', () => {
     const r = modelListAvailability({
       id: 'deepseek',
       protocol: 'anthropic',
       baseUrl: 'https://my-relay.example.com/anthropic'
     })
-    expect(r.enabled).toBe(true)
     expect(r.hint).toContain('改过地址')
   })
 
@@ -252,20 +260,20 @@ describe('modelListAvailability', () => {
         id: 'deepseek',
         protocol: 'anthropic',
         baseUrl: `${e.baseUrl}/`
-      }).enabled
-    ).toBe(false)
+      }).hint
+    ).not.toContain('改过地址')
   })
 
-  it('★ 预设里没有这家 = 未知,不是不支持 —— 自建供应商一律放行', () => {
+  it('★ 预设里没有这家 = 未知 —— 自建供应商连提示都不给', () => {
     const r = modelListAvailability({
       id: '我司内部网关',
       protocol: 'openai-chat',
       baseUrl: 'https://gw.corp/v1'
     })
-    expect(r).toEqual({ enabled: true, hint: null, needsKey: true })
+    expect(r).toEqual({ hint: null, needsKey: true })
   })
 
-  it('预设有、但没有当前这个协议的端点时也放行(同一个「未知」)', () => {
+  it('预设有、但没有当前这个协议的端点时也算「未知」', () => {
     // RoutinAI 刻意没有 openai-responses
     expect(
       findPreset('routin') !== null && endpointFor(findPreset('routin')!, 'openai-responses')
@@ -275,7 +283,7 @@ describe('modelListAvailability', () => {
         id: 'routin',
         protocol: 'openai-responses',
         baseUrl: 'https://api.routin.ai/v1'
-      }).enabled
-    ).toBe(true)
+      }).hint
+    ).toBeNull()
   })
 })

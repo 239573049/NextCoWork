@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InnerTabState } from '../../../../shared/domain/tab'
 
 vi.mock('../../services/app', () => ({ getInnerTabs: vi.fn(), persistInnerTabs: vi.fn() }))
-vi.mock('../../services/sessions', () => ({ createSession: vi.fn(async () => undefined) }))
 
 import { getInnerTabs, persistInnerTabs } from '../../services/app'
 import { useTabsStore } from '../tabs'

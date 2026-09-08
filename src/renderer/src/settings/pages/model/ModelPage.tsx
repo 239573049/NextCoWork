@@ -60,7 +60,11 @@ import { UsageTab } from "./UsageTab";
 import { StubModalityPage } from "./StubModalityPage";
 import { EnabledModelList } from "./EnabledModelList";
 import { ProviderPanel } from "./ProviderPanel";
-import { providerEntries } from "./enabled-models";
+import { modelOptions, providerEntries } from "./enabled-models";
+import {
+  modelSelectionKey,
+  parseModelSelectionKey,
+} from "../../../../../shared/domain/model-selection";
 import { formatRate, selectCatalogPricing } from "./pricing-table";
 import { parseModelTab } from "./tabs";
 import { useI18n, type TranslationKey } from "../../../i18n";
@@ -92,8 +96,16 @@ function LegacyTextTab({
     void load();
   }, [load]);
   const entries = useMemo(
-    () => providerEntries(providers, models, ""),
-    [providers, models],
+    () => providerEntries(providers, models, settings.defaultModel, settings.defaultModelProviderId),
+    [providers, models, settings.defaultModel, settings.defaultModelProviderId],
+  );
+  // 一条绑定一个选项：同一个别名可以挂在多家上（故障切换轴），而「哪一家」正是要选的
+  const options = useMemo(
+    () => [
+      { value: "", label: t("models.followConversation") },
+      ...modelOptions(models, providers),
+    ],
+    [models, providers, t],
   );
   const selected =
     entries.find((e) => e.provider.id === selectedId) ?? entries[0] ?? null;
@@ -113,17 +125,14 @@ function LegacyTextTab({
                   {t("models.default")}
                 </span>
                 <Select
-                  value={settings.defaultModel}
-                  onValueChange={(defaultModel) => patch({ defaultModel })}
+                  value={modelSelectionKey(settings.defaultModelProviderId, settings.defaultModel)}
+                  onValueChange={(key) => {
+                    const { alias, modelProviderId } = parseModelSelectionKey(key);
+                    patch({ defaultModel: alias, defaultModelProviderId: modelProviderId });
+                  }}
                   ariaLabel={t("models.default")}
                   className="w-[116px] shrink-0"
-                  options={[
-                    { value: "", label: t("models.followConversation") },
-                    ...models.map((model) => ({
-                      value: model.alias,
-                      label: model.alias,
-                    })),
-                  ]}
+                  options={options}
                 />
               </label>
               <label className="flex min-h-10 items-center justify-between gap-3 border-t border-hairline px-2.5 py-1.5">
@@ -131,17 +140,14 @@ function LegacyTextTab({
                   {t("models.defaultSubagent")}
                 </span>
                 <Select
-                  value={settings.subagent.model}
-                  onValueChange={(model) => patch({ subagent: { model } })}
+                  value={modelSelectionKey(settings.subagent.modelProviderId, settings.subagent.model)}
+                  onValueChange={(key) => {
+                    const { alias, modelProviderId } = parseModelSelectionKey(key);
+                    patch({ subagent: { model: alias, modelProviderId } });
+                  }}
                   ariaLabel={t("models.defaultSubagent")}
                   className="w-[116px] shrink-0"
-                  options={[
-                    { value: "", label: t("models.followConversation") },
-                    ...models.map((model) => ({
-                      value: model.alias,
-                      label: model.alias,
-                    })),
-                  ]}
+                  options={options}
                 />
               </label>
             </div>
@@ -208,7 +214,9 @@ function blankCatalogModel(): CatalogDraft {
     displayName: "",
     modality: "text",
     capabilities: {
-      tools: false,
+      // 和目录的默认值保持一致：标错成 false 不会报错，只会让 Agent 静默失去全部工具
+      // （见 shared/domain/model-catalog-inventory.ts 的 textCapabilities）
+      tools: true,
       vision: false,
       thinking: false,
       caching: false,

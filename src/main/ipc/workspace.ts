@@ -1,9 +1,9 @@
 /**
  * 工作区 handler。
  *
- * ★ 选目录走主进程 dialog.showOpenDialog —— **渲染层永不指定任意路径**(方案 §9)。
- * 这条不是洁癖:一旦渲染层能传路径进来,它就能传 `/`,而工作区根是
- * resolveInWorkspace 的信任基点,根被污染整条路径围栏就失效了。
+ * ★ 选目录走主进程 dialog.showOpenDialog —— **渲染层永不指定工作区根**(方案 §9)。
+ * 这条不是洁癖:工作区根是「哪些路径算在工作区内」的基点,渲染层能改它,
+ * 树、文档、以及所有按根算相对路径的地方就一起跟着漂。
  */
 import { dialog } from 'electron'
 import { basename } from 'node:path'
@@ -13,7 +13,7 @@ import { DIR_LISTING_LIMIT, sortEntries } from '../../shared/domain/file-tree'
 import type { Workspace, WorkspaceSettings } from '../../shared/domain/workspace'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../shared/domain/workspace'
 import { prefixedId } from '../../shared/util/id'
-import { resolveInWorkspace } from '../kernel/tool/path-guard'
+import { resolveAnywhere } from '../kernel/tool/path-guard'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { IpcError } from './errors'
@@ -88,8 +88,10 @@ export function closeWorkspace(id: string): void {
  *
  * 三件事值得写下来:
  *
- * 1. **`req.path` 是不可信输入**。它来自渲染层,所以一律经 `resolveInWorkspace`
- *    (方案 §9 的唯一入口)。`../../etc` 在那里被拒,不在这里。
+ * 1. **`req.path` 是不可信输入**。它来自渲染层,所以一律经 `resolveAnywhere`
+ *    (方案 §9 的唯一入口)。它不再把工作区外的路径判成错误 —— 工具卡片和
+ *    Markdown 链接现在会给出工作区外的绝对路径,点开它们要能落到这儿。
+ *    树本身仍然从工作区根起步,UI 上没有「往上走」的入口。
  * 2. **不递归**。参考实现的目录默认是收起的(`>`),展开一个才拉一层 ——
  *    这不只是交互,它是让 `node_modules` 不会一次性把 IPC 撑爆的原因。
  * 3. **`withFileTypes` + 逐项 `statSync` 分开**。`stat` 会跟随符号链接,
@@ -99,7 +101,7 @@ export function listDir(req: { workspaceId: string; path: string }): DirListing 
   const ws = store.getWorkspace(req.workspaceId)
   if (!ws) throw new IpcError('unknown', `工作区不存在: ${req.workspaceId}`)
 
-  const dir = resolveInWorkspace(ws.rootPath, req.path)
+  const dir = resolveAnywhere(ws.rootPath, req.path).abs
 
   const raw = readdirSync(dir, { withFileTypes: true })
   const truncated = raw.length > DIR_LISTING_LIMIT

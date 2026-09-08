@@ -111,6 +111,16 @@ export interface RunRequest {
   permissionMode: PermissionMode
   /** ModelAlias.alias,不是上游真实模型名 */
   model: string
+  /**
+   * ★ 用户在药丸里**显式选定**的供应商,是一条**硬约束**:路由器只在这一家里
+   * 重试,失败就报错,**不会切到同名别名的另一家**。理由是别名撞名很常见
+   * (两家都叫 `gpt-5.6-sol`),而「我选了 Codex 结果发给了 RoutinAI」既看不出来
+   * 也算不清账。
+   *
+   * 缺席 = 没指定过(历史 run、子代理 frontmatter 里的裸别名),此时按
+   * `provider.priority` 择优 —— 也就是这个字段引入之前的全局行为。
+   */
+  modelProviderId?: string
   /** 本轮激活的 Skill */
   skillIds: string[]
 

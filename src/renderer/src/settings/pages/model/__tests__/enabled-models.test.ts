@@ -5,7 +5,8 @@ import {
   BUILTIN_PROVIDER_ID,
   findPreset
 } from '../../../../../../shared/domain/presets'
-import { avatarInitial, providerEntries } from '../enabled-models'
+import { avatarInitial, modelOptions, providerEntries } from '../enabled-models'
+import { parseModelSelectionKey } from '../../../../../../shared/domain/model-selection'
 
 const prov = (id: string, name = id): UpstreamProvider => ({
   id,
@@ -58,9 +59,15 @@ describe('providerEntries', () => {
    * 所以能提供默认别名的可能不止一家。只给第一家挂徽章等于宣称另一家跟这次请求
    * 无关,而它随时会接手。
    */
-  it('同一别名有多家提供时,每一家都算默认', () => {
+  it('同一别名有多家提供、且没锁定供应商时,每一家都算默认', () => {
     const e = providerEntries([prov('a'), prov('b')], [alias('m1', 'a'), alias('m1', 'b')], 'm1')
     expect(e.map((x) => x.isDefault)).toEqual([true, true])
+  })
+
+  /** 锁定之后请求只会发给那一家,别家再挂徽章就是假话 */
+  it('★ 锁定了供应商时只有那一家挂徽章', () => {
+    const e = providerEntries([prov('a'), prov('b')], [alias('m1', 'a'), alias('m1', 'b')], 'm1', 'b')
+    expect(e.map((x) => x.isDefault)).toEqual([false, true])
   })
 
   it('默认模型为空串(跟随对话)时没有任何一家是默认', () => {
@@ -101,6 +108,59 @@ describe('内置上游的主模型', () => {
   /** 两条线各显示各的 —— 混在一起就说明 providerId 归属错了 */
   it('两条线的主模型不是同一个', () => {
     expect(primaryOf(BUILTIN_PROVIDER_ID)).not.toBe(primaryOf(BUILTIN_PLAN_PROVIDER_ID))
+  })
+})
+
+/**
+ * ★★ 下拉框的选项 —— **一条绑定一个,`value` 是 `providerId/alias`。**
+ *
+ * 别名的主键是 `(provider_id, alias)`,同一个别名可以挂在多家上(故障切换轴),
+ * 而这几个设置项现在存的是**别名 + 供应商**一对 —— 「哪一家」正是用户要选的。
+ *
+ * ★ 曾经必须按别名去重,是因为那时 `value` 就是裸别名:两个 `value` 相同的
+ * `Select.Item` 都认为自己被选中,各自把文本 portal 进触发器的 value 节点,
+ * 那一格显示成 `gpt-6-astragpt-6-astra`(实测)。现在 `value` 天然唯一,
+ * 重复项不存在了。下面第一条用例就是钉住这一点:**别把去重加回来**。
+ */
+describe('modelOptions', () => {
+  it('★ 同一别名挂在两家上时,两条都出现 —— 「选哪一家」是用户的选项', () => {
+    const options = modelOptions([alias('gpt-6-astra', 'a'), alias('gpt-6-astra', 'b')],
+      [prov('a', 'Acme'), prov('b', 'Beta')])
+    expect(options).toEqual([
+      { value: 'a/gpt-6-astra', label: 'gpt-6-astra · Acme' },
+      { value: 'b/gpt-6-astra', label: 'gpt-6-astra · Beta' }
+    ])
+  })
+
+  it('value 唯一 —— 这正是去重曾经要解决的那个问题', () => {
+    const options = modelOptions([alias('gpt-6-astra', 'a'), alias('gpt-6-astra', 'b')])
+    expect(new Set(options.map((o) => o.value)).size).toBe(options.length)
+  })
+
+  it('只有一家提供时标签保持裸别名,不加供应商后缀制造噪音', () => {
+    expect(modelOptions([alias('solo', 'a')], [prov('a', 'Acme')]))
+      .toEqual([{ value: 'a/solo', label: 'solo' }])
+  })
+
+  it('不同别名一个都不少', () => {
+    const options = modelOptions([alias('x', 'a'), alias('y', 'a'), alias('z', 'b')])
+    expect(options.map((o) => o.value)).toEqual(['a/x', 'a/y', 'b/z'])
+  })
+
+  /** 上游已按「供应商顺序 → priority」排好,这里不重排 */
+  it('保序', () => {
+    const options = modelOptions([alias('b', 'p1'), alias('a', 'p1'), alias('b', 'p2')])
+    expect(options.map((o) => o.value)).toEqual(['p1/b', 'p1/a', 'p2/b'])
+  })
+
+  it('别名里的斜杠不会把 value 切错', () => {
+    const [option] = modelOptions([alias('openrouter/claude-sonnet-4', 'p1')])
+    expect(parseModelSelectionKey(option!.value))
+      .toEqual({ modelProviderId: 'p1', alias: 'openrouter/claude-sonnet-4' })
+  })
+
+  it('空列表返回空数组,不返回 undefined', () => {
+    expect(modelOptions([])).toEqual([])
   })
 })
 

@@ -217,10 +217,29 @@ const openAiModernEfforts = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as
 const openAiAstraEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 const textCapabilities = (overrides: Partial<ModelCapabilities> = {}): ModelCapabilities => ({
-  // Catalogue defaults are deliberately conservative. A false negative only
-  // hides an optional control until the row is verified; a false positive can
-  // make the runtime send an unsupported field and fail the whole request.
-  tools: false,
+  // `tools` is the one flag where the conservative default below is wrong,
+  // because for this one the asymmetry runs the other way. AgentSession throws
+  // away the whole tool schema when a model reports tools: false (see
+  // `modelSupportsTools` in model-runtime.ts), so a false negative silently
+  // demotes the agent to a chat box: no error, no log, just a model that
+  // answers "give me the file path" instead of reading the file. A false
+  // positive sends a `tools` array the upstream either ignores or rejects with
+  // a 400 you can actually read.
+  //
+  // Defaulting to false also made the column rot: it was filled in for ~25% of
+  // rows at random, so ernie-5.0 had tools while ernie-5.1 did not, and no
+  // Claude or GPT row had them at all. Defaulting to true means a newly added
+  // row is right unless the vendor is unusual, instead of wrong until someone
+  // notices the agent went quiet.
+  //
+  // Every row that overrides this back to false was checked against that
+  // vendor's own docs on 2026-09-08; the evidence table is in
+  // __tests__/model-catalog-tools.test.ts, which also pins the list.
+  tools: true,
+  // The remaining defaults stay conservative. For them a false negative only
+  // hides an optional control until the row is verified, while a false
+  // positive can make the runtime send an unsupported field and fail the
+  // whole request.
   vision: false,
   visionInput: false,
   thinking: false,
@@ -547,7 +566,7 @@ const OPENAI: readonly BuiltinModelRecord[] = [
     reasoningEfforts: efforts,
   }),
   model('openai', 'o3-deep-research', 'o3 Deep Research', {
-    capabilities: visionCapabilities({ thinking: true, webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, thinking: true, webSearch: true }),
     thinkingConfig: effortThinking('reasoning.effort'),
     reasoningEfforts: efforts,
   }),
@@ -557,12 +576,12 @@ const OPENAI: readonly BuiltinModelRecord[] = [
     reasoningEfforts: efforts,
   }),
   model('openai', 'o4-mini-deep-research', 'o4 Mini Deep Research', {
-    capabilities: visionCapabilities({ thinking: true, webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, thinking: true, webSearch: true }),
     thinkingConfig: effortThinking('reasoning.effort'),
     reasoningEfforts: efforts,
   }),
   model('openai', 'o1-mini', 'o1 Mini', {
-    capabilities: textCapabilities({ thinking: true }),
+    capabilities: textCapabilities({ tools: false, thinking: true }),
     thinkingConfig: effortThinking('reasoning_effort'),
     reasoningEfforts: efforts,
   }),
@@ -599,10 +618,10 @@ const OPENAI: readonly BuiltinModelRecord[] = [
     capabilities: visionCapabilities({ tools: true }),
   }),
   model('openai', 'gpt-4o-search-preview', 'GPT-4o Search Preview', {
-    capabilities: visionCapabilities({ webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, webSearch: true }),
   }),
   model('openai', 'gpt-4o-mini-search-preview', 'GPT-4o Mini Search Preview', {
-    capabilities: visionCapabilities({ webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, webSearch: true }),
   }),
 ]
 
@@ -861,17 +880,17 @@ const GOOGLE: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('google', 'gemma-3-27b-it', 'Gemma 3 27B', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
     source: source('https://ai.google.dev/gemma/docs/core/model_card_3'),
     verificationStatus: 'official-model-card',
   }),
   model('google', 'gemma-3-12b-it', 'Gemma 3 12B', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
     source: source('https://ai.google.dev/gemma/docs/core/model_card_3'),
     verificationStatus: 'official-model-card',
   }),
   model('google', 'gemma-3-4b-it', 'Gemma 3 4B', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
     source: source('https://ai.google.dev/gemma/docs/core/model_card_3'),
     verificationStatus: 'official-model-card',
   }),
@@ -1061,6 +1080,7 @@ const ZHIPU: readonly BuiltinModelRecord[] = [
   }),
   model('zhipu', 'glm-ocr', 'GLM-OCR', {
     capabilities: visionCapabilities({
+      tools: false,
       fileInput: true,
       structuredOutput: true,
       streaming: true,
@@ -1083,11 +1103,11 @@ const ZHIPU: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('zhipu', 'glm-4.5v', 'GLM-4.5V', {
-    capabilities: visionCapabilities({ thinking: true }),
+    capabilities: visionCapabilities({ tools: false, thinking: true }),
     thinkingConfig: toggleThinking('thinking.type'),
   }),
   model('zhipu', 'glm-4v-plus', 'GLM-4V-Plus', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('zhipu', 'glm-4-air', 'GLM-4-Air', {
     capabilities: textCapabilities(),
@@ -1324,7 +1344,7 @@ const QWEN: readonly BuiltinModelRecord[] = [
   }),
   model('qwen', 'qwen-max', 'Qwen-Max', { capabilities: visionCapabilities() }),
   model('qwen', 'qwen-long', 'Qwen-Long', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('qwen', 'qwen2.5-max', 'Qwen2.5-Max', {
     capabilities: visionCapabilities(),
@@ -1337,20 +1357,20 @@ const QWEN: readonly BuiltinModelRecord[] = [
     aliases: ['qwen-2.5-7b-instruct'],
   }),
   model('qwen', 'qwen2.5-vl-72b-instruct', 'Qwen2.5 VL 72B Instruct', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('qwen', 'qwen2.5-coder-32b-instruct', 'Qwen2.5 Coder 32B Instruct', {
     capabilities: textCapabilities({ tools: true }),
   }),
   model('qwen', 'qwen2-vl-72b-instruct', 'Qwen2 VL 72B Instruct', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('qwen', 'qwq-32b', 'QwQ 32B', {
     capabilities: textCapabilities({ thinking: true }),
     thinkingConfig: { mode: 'always', defaultEnabled: true },
   }),
   model('qwen', 'qwen-math-plus', 'Qwen-Math-Plus', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
 ]
 
@@ -1385,14 +1405,14 @@ const MOONSHOT: readonly BuiltinModelRecord[] = [
     thinkingConfig: toggleThinking('thinking'),
   }),
   model('moonshot', 'moonshot-v1-8k', 'Moonshot V1 8K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     aliases: ['moonshot-v1-8k-vision-preview'],
   }),
   model('moonshot', 'moonshot-v1-32k', 'Moonshot V1 32K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('moonshot', 'moonshot-v1-128k', 'Moonshot V1 128K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
 ]
 
@@ -1487,7 +1507,7 @@ const COHERE: readonly BuiltinModelRecord[] = [
     capabilities: textCapabilities({ tools: true }),
   }),
   model('cohere', 'command-light', 'Command Light', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
 ]
 
@@ -1555,7 +1575,7 @@ const MINIMAX: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('minimax', 'MiniMax-M2-her', 'MiniMax M2 her', {
-    capabilities: textCapabilities({ thinking: true }),
+    capabilities: textCapabilities({ tools: false, thinking: true }),
     thinkingConfig: { mode: 'always', defaultEnabled: true },
     aliases: ['minimax-m2-her'],
   }),
@@ -1569,7 +1589,7 @@ const MINIMAX: readonly BuiltinModelRecord[] = [
     aliases: ['abab6.5s'],
   }),
   model('minimax', 'abab6.5-chat', 'abab 6.5', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('minimax', 'MiniMax-VL-01', 'MiniMax VL 01', {
     capabilities: visionCapabilities(),
@@ -1578,7 +1598,7 @@ const MINIMAX: readonly BuiltinModelRecord[] = [
     capabilities: textCapabilities(),
   }),
   model('minimax', 'MiniMax-01', 'MiniMax 01', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
 ]
 
@@ -1591,7 +1611,7 @@ const HUNYUAN: readonly BuiltinModelRecord[] = [
     capabilities: textCapabilities(),
   }),
   model('hunyuan', 'hunyuan-large', '混元 Large', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('hunyuan', 'hunyuan-a13b', '混元 A13B', {
     capabilities: textCapabilities({ thinking: true }),
@@ -1646,46 +1666,46 @@ const HUNYUAN: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('hunyuan', 'hy-mt2-pro', 'HY-MT2 Pro', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://cloud.tencent.com/document/product/1823/130051'),
     verificationStatus: 'official-api',
   }),
   model('hunyuan', 'hy-mt2-plus', 'HY-MT2 Plus', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://cloud.tencent.com/document/product/1823/130051'),
     verificationStatus: 'official-api',
   }),
   model('hunyuan', 'hy-mt2-lite', 'HY-MT2 Lite', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://cloud.tencent.com/document/product/1823/130051'),
     verificationStatus: 'official-api',
   }),
   model('hunyuan', 'hunyuan-role-latest', 'HY Role Latest', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://cloud.tencent.com/document/product/1823/130051'),
     verificationStatus: 'official-api',
   }),
   model('hunyuan', 'hy-role', 'HY Role', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://cloud.tencent.com/document/product/1823/130051'),
     verificationStatus: 'official-api',
   }),
   model('hunyuan', 'hy-mt2-30b-a3b', 'HY-MT2 30B-A3B', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('hunyuan', 'hy-mt2-7b', 'HY-MT2 7B', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('hunyuan', 'hy-mt2-1.8b', 'HY-MT2 1.8B', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('hunyuan', 'hunyuan-vision', '混元 Vision', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('hunyuan', 'hunyuan-muse', '混元 Muse', {
     modality: 'image',
@@ -1693,7 +1713,7 @@ const HUNYUAN: readonly BuiltinModelRecord[] = [
     aliases: ['hy-muse', 'HY-Muse'],
   }),
   model('hunyuan', 'hunyuan-muse-vision', '混元 Muse Vision', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
     aliases: ['hy-muse-vision'],
   }),
   model('hunyuan', 'hunyuan-image', '混元生图', {
@@ -2062,7 +2082,7 @@ const DOUBAO: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('doubao', 'doubao-seed-translation-250915', '豆包 Seed Translation', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 4_096,
     maxOutputTokens: 3_072,
     aliases: ['doubao-seed-translation'],
@@ -2146,7 +2166,7 @@ const BAIDU: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('baidu', 'ernie-4.5-turbo-128k', 'ERNIE 4.5 Turbo 128K', {
-    capabilities: textCapabilities({ caching: true, webSearch: true }),
+    capabilities: textCapabilities({ tools: false, caching: true, webSearch: true }),
     contextWindow: 131_072,
     maxOutputTokens: 12_288,
     aliases: ['ernie-4.5-turbo'],
@@ -2154,28 +2174,28 @@ const BAIDU: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('baidu', 'ernie-4.5-turbo-32k', 'ERNIE 4.5 Turbo 32K', {
-    capabilities: textCapabilities({ caching: true, webSearch: true }),
+    capabilities: textCapabilities({ tools: false, caching: true, webSearch: true }),
     contextWindow: 32_768,
     maxOutputTokens: 12_288,
     pricingModelId: 'ernie-4.5-turbo',
     verificationStatus: 'official-api',
   }),
   model('baidu', 'ernie-4.5-turbo-20260402', 'ERNIE 4.5 Turbo 20260402', {
-    capabilities: textCapabilities({ caching: true, webSearch: true }),
+    capabilities: textCapabilities({ tools: false, caching: true, webSearch: true }),
     contextWindow: 131_072,
     maxOutputTokens: 12_288,
     pricingModelId: 'ernie-4.5-turbo',
     verificationStatus: 'official-api',
   }),
   model('baidu', 'ernie-4.5-turbo-vl', 'ERNIE 4.5 Turbo VL', {
-    capabilities: visionCapabilities({ caching: true, webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, caching: true, webSearch: true }),
     contextWindow: 131_072,
     maxOutputTokens: 16_384,
     pricingModelId: 'ernie-4.5-turbo-vl',
     verificationStatus: 'official-api',
   }),
   model('baidu', 'ernie-4.5-turbo-vl-32k', 'ERNIE 4.5 Turbo VL 32K', {
-    capabilities: visionCapabilities({ caching: true, webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, caching: true, webSearch: true }),
     contextWindow: 32_768,
     maxOutputTokens: 12_288,
     pricingModelId: 'ernie-4.5-turbo-vl',
@@ -2196,20 +2216,20 @@ const BAIDU: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('baidu', 'ernie-4.0-turbo', 'ERNIE 4.0 Turbo', {
-    capabilities: visionCapabilities({ webSearch: true }),
+    capabilities: visionCapabilities({ tools: false, webSearch: true }),
   }),
   model('baidu', 'ernie-speed-128k', 'ERNIE Speed 128K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('baidu', 'ernie-lite-8k', 'ERNIE Lite 8K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('baidu', 'ernie-x1-turbo', 'ERNIE X1 Turbo', {
     capabilities: textCapabilities({ thinking: true }),
     thinkingConfig: budgetThinking('thinking_budget', 32_768),
   }),
   model('baidu', 'ernie-vl-1.0', 'ERNIE-VL 1.0', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('baidu', 'ernie-image', 'ERNIE Image', {
     modality: 'image',
@@ -2252,22 +2272,22 @@ const STEPFUN: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('stepfun', 'step-3', 'Step-3', {
-    capabilities: visionCapabilities({ thinking: true }),
+    capabilities: visionCapabilities({ tools: false, thinking: true }),
     thinkingConfig: effortThinking('reasoning_effort'),
     reasoningEfforts: efforts,
   }),
   model('stepfun', 'step-2-16k', 'Step-2 16K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('stepfun', 'step-1v-8k', 'Step-1V 8K', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
   }),
   model('stepfun', 'step-1o-vision-32k', 'Step-1o Vision 32K', {
-    capabilities: visionCapabilities({ thinking: true }),
+    capabilities: visionCapabilities({ tools: false, thinking: true }),
     thinkingConfig: toggleThinking('thinking'),
   }),
   model('stepfun', 'step-1-flash', 'Step-1 Flash', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
 ]
 
@@ -2297,7 +2317,7 @@ const BAICHUAN: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('baichuan', 'Baichuan3-Turbo-128k', 'Baichuan 3 Turbo 128K', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 131_072,
     source: source('https://platform.baichuan-ai.com/prices'),
     verificationStatus: 'official-api',
@@ -2309,28 +2329,28 @@ const BAICHUAN: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('baichuan', 'Baichuan-M3-Plus', 'Baichuan M3 Plus', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://platform.baichuan-ai.com/prices'),
     verificationStatus: 'official-api',
   }),
   model('baichuan', 'Baichuan-M3', 'Baichuan M3', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://platform.baichuan-ai.com/prices'),
     verificationStatus: 'official-api',
   }),
   model('baichuan', 'Baichuan-M2-Plus', 'Baichuan M2 Plus', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     source: source('https://platform.baichuan-ai.com/prices'),
     verificationStatus: 'official-api',
   }),
   model('baichuan', 'Baichuan-Omni-1.5', 'Baichuan Omni 1.5', {
-    capabilities: visionCapabilities({ audioInput: true }),
+    capabilities: visionCapabilities({ tools: false, audioInput: true }),
   }),
   model('baichuan', 'Baichuan-M2', 'Baichuan M2', {
-    capabilities: textCapabilities({ thinking: true }),
+    capabilities: textCapabilities({ tools: false, thinking: true }),
     contextWindow: 32_768,
     thinkingConfig: budgetThinking('thinking_budget', 16_384),
     source: source('https://platform.baichuan-ai.com/prices'),
@@ -2340,7 +2360,7 @@ const BAICHUAN: readonly BuiltinModelRecord[] = [
 
 const SENSENOVA: readonly BuiltinModelRecord[] = [
   model('sensenova', 'SenseNova-V6-5-Pro', 'SenseNova V6.5 Pro', {
-    capabilities: visionCapabilities({ videoInput: true, thinking: true, streaming: true }),
+    capabilities: visionCapabilities({ tools: false, videoInput: true, thinking: true, streaming: true }),
     contextWindow: 131_072,
     maxOutputTokens: 16_384,
     thinkingConfig: toggleThinking('thinking.enabled'),
@@ -2349,7 +2369,7 @@ const SENSENOVA: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseNova-V6-5-Turbo', 'SenseNova V6.5 Turbo', {
-    capabilities: visionCapabilities({ videoInput: true, thinking: true, streaming: true }),
+    capabilities: visionCapabilities({ tools: false, videoInput: true, thinking: true, streaming: true }),
     contextWindow: 131_072,
     maxOutputTokens: 16_384,
     thinkingConfig: toggleThinking('thinking.enabled'),
@@ -2358,21 +2378,21 @@ const SENSENOVA: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseNova-V6-Pro', 'SenseNova V6 Pro', {
-    capabilities: visionCapabilities({ streaming: true }),
+    capabilities: visionCapabilities({ tools: false, streaming: true }),
     contextWindow: 32_768,
     maxOutputTokens: 16_384,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/model/fusionllm/FusionLLMs'),
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseNova-V6-Turbo', 'SenseNova V6 Turbo', {
-    capabilities: visionCapabilities({ videoInput: true, streaming: true }),
+    capabilities: visionCapabilities({ tools: false, videoInput: true, streaming: true }),
     contextWindow: 32_768,
     maxOutputTokens: 16_384,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/model/fusionllm/FusionLLMs'),
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseNova-V6-Reasoner', 'SenseNova V6 Reasoner', {
-    capabilities: visionCapabilities({ thinking: true, streaming: true }),
+    capabilities: visionCapabilities({ tools: false, thinking: true, streaming: true }),
     contextWindow: 32_768,
     maxOutputTokens: 16_384,
     thinkingConfig: alwaysThinking('thinking.enabled'),
@@ -2380,21 +2400,21 @@ const SENSENOVA: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseChat-Vision', 'SenseChat Vision', {
-    capabilities: visionCapabilities({ streaming: true }),
+    capabilities: visionCapabilities({ tools: false, streaming: true }),
     contextWindow: 16_384,
     maxOutputTokens: 16_384,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/model/mllm'),
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseChat-Character-Pro', 'SenseChat Character Pro', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 32_768,
     maxOutputTokens: 4_096,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/model/llm/CharacterLLM'),
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseChat-Character', 'SenseChat Character', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
     contextWindow: 8_192,
     maxOutputTokens: 1_024,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/model/llm/CharacterLLM'),
@@ -2410,21 +2430,21 @@ const SENSENOVA: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseChat', 'SenseChat', {
-    capabilities: textCapabilities({ streaming: true }),
+    capabilities: textCapabilities({ tools: false, streaming: true }),
     contextWindow: 4_096,
     maxOutputTokens: 2_048,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/overview/compatible-mode'),
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseChat-Turbo', 'SenseChat Turbo', {
-    capabilities: textCapabilities({ streaming: true }),
+    capabilities: textCapabilities({ tools: false, streaming: true }),
     contextWindow: 32_768,
     maxOutputTokens: 2_048,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/overview/compatible-mode'),
     verificationStatus: 'official-api',
   }),
   model('sensenova', 'SenseChat-5-Cantonese', 'SenseChat 5 Cantonese', {
-    capabilities: textCapabilities({ streaming: true }),
+    capabilities: textCapabilities({ tools: false, streaming: true }),
     contextWindow: 32_768,
     maxOutputTokens: 2_048,
     source: source('https://www.sensecore.cn/help/docs/model-as-a-service/nova/overview/compatible-mode'),
@@ -2517,21 +2537,21 @@ const SPARK: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('spark', 'generalv3', '讯飞星火 Pro', {
-    capabilities: textCapabilities({ webSearch: true, streaming: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true, streaming: true }),
     contextWindow: 8_192,
     maxOutputTokens: 8_192,
     source: source('https://www.xfyun.cn/doc/spark/HTTP%E8%B0%83%E7%94%A8%E6%96%87%E6%A1%A3.html'),
     verificationStatus: 'official-api',
   }),
   model('spark', 'pro-128k', '讯飞星火 Pro 128K', {
-    capabilities: textCapabilities({ webSearch: true, streaming: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true, streaming: true }),
     contextWindow: 131_072,
     maxOutputTokens: 32_768,
     source: source('https://www.xfyun.cn/doc/spark/HTTP%E8%B0%83%E7%94%A8%E6%96%87%E6%A1%A3.html'),
     verificationStatus: 'official-api',
   }),
   model('spark', 'spark-lite', '讯飞星火 Lite', {
-    capabilities: textCapabilities({ streaming: true }),
+    capabilities: textCapabilities({ tools: false, streaming: true }),
     contextWindow: 8_192,
     maxOutputTokens: 4_096,
     aliases: ['lite'],
@@ -2581,19 +2601,19 @@ const PANGU: readonly BuiltinModelRecord[] = [
 
 const YI: readonly BuiltinModelRecord[] = [
   model('yi', 'yi-large', 'Yi Large', {
-    capabilities: textCapabilities({ thinking: true }),
+    capabilities: textCapabilities({ tools: false, thinking: true }),
     thinkingConfig: effortThinking('reasoning_effort'),
     reasoningEfforts: efforts,
   }),
   model('yi', 'yi-large-turbo', 'Yi Large Turbo', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
   model('yi', 'yi-lightning', 'Yi Lightning', {
     capabilities: textCapabilities(),
   }),
-  model('yi', 'yi-vision', 'Yi Vision', { capabilities: visionCapabilities() }),
+  model('yi', 'yi-vision', 'Yi Vision', { capabilities: visionCapabilities({ tools: false }) }),
   model('yi', 'yi-1.5-34b-chat', 'Yi 1.5 34B Chat', {
-    capabilities: textCapabilities(),
+    capabilities: textCapabilities({ tools: false }),
   }),
 ]
 
@@ -2621,7 +2641,7 @@ const META: readonly BuiltinModelRecord[] = [
 ]
 
 const MICROSOFT: readonly BuiltinModelRecord[] = [
-  model('microsoft', 'phi-4', 'Phi-4', { capabilities: textCapabilities() }),
+  model('microsoft', 'phi-4', 'Phi-4', { capabilities: textCapabilities({ tools: false }) }),
   model('microsoft', 'phi-4-mini-instruct', 'Phi-4 Mini Instruct', {
     capabilities: textCapabilities(),
   }),
@@ -2684,6 +2704,7 @@ const AUDIO_MODELS: readonly BuiltinModelRecord[] = [
       audioInput: true,
       textInput: true,
       textOutput: true,
+      tools: true,
     }),
   }),
   model('openai', 'gpt-4o-mini-audio-preview', 'GPT-4o Mini Audio Preview', {
@@ -2692,6 +2713,7 @@ const AUDIO_MODELS: readonly BuiltinModelRecord[] = [
       audioInput: true,
       textInput: true,
       textOutput: true,
+      tools: true,
     }),
   }),
   model('openai', 'gpt-realtime-2.1', 'GPT Realtime 2.1', {
@@ -2903,23 +2925,23 @@ const AI21: readonly BuiltinModelRecord[] = [
 
 const PERPLEXITY: readonly BuiltinModelRecord[] = [
   model('perplexity', 'sonar', 'Sonar', {
-    capabilities: textCapabilities({ webSearch: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true }),
   }),
   model('perplexity', 'sonar-pro', 'Sonar Pro', {
-    capabilities: textCapabilities({ webSearch: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true }),
   }),
   model('perplexity', 'sonar-reasoning', 'Sonar Reasoning', {
-    capabilities: textCapabilities({ webSearch: true, thinking: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true, thinking: true }),
     thinkingConfig: effortThinking('reasoning_effort'),
     reasoningEfforts: efforts,
   }),
   model('perplexity', 'sonar-reasoning-pro', 'Sonar Reasoning Pro', {
-    capabilities: textCapabilities({ webSearch: true, thinking: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true, thinking: true }),
     thinkingConfig: effortThinking('reasoning_effort'),
     reasoningEfforts: efforts,
   }),
   model('perplexity', 'sonar-deep-research', 'Sonar Deep Research', {
-    capabilities: textCapabilities({ webSearch: true, thinking: true }),
+    capabilities: textCapabilities({ tools: false, webSearch: true, thinking: true }),
     thinkingConfig: effortThinking('reasoning_effort'),
     reasoningEfforts: efforts,
   }),
@@ -2989,13 +3011,13 @@ const INTERNLM: readonly BuiltinModelRecord[] = [
     verificationStatus: 'official-api',
   }),
   model('internlm', 'internvl3.5-241b-a28b', 'InternVL3.5-241B-A28B', {
-    capabilities: visionCapabilities({ streaming: true }),
+    capabilities: visionCapabilities({ tools: false, streaming: true }),
     contextWindow: 32_768,
     aliases: ['internvl3.5-latest', 'internvl-latest'],
     verificationStatus: 'official-api',
   }),
   model('internlm', 'internvl3-38b', 'InternVL 3 38B', {
-    capabilities: visionCapabilities(),
+    capabilities: visionCapabilities({ tools: false }),
     contextWindow: 32_768,
     maxOutputTokens: 8_192,
     source: source('https://cloud.baidu.com/doc/qianfan/s/rmh4stp0j'),

@@ -54,6 +54,7 @@ import {
   findPreset
 } from '../shared/domain/presets'
 import type { ModelAlias, UpstreamProtocol } from '../shared/domain/provider'
+import { inheritModelSelection } from '../shared/domain/model-selection'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
@@ -92,6 +93,15 @@ let mcpOnChange: ((id: string) => void) | null = null
  * 广播一样用一个零 Electron 的注入回调，避免 runtime 反向依赖窗口模块。
  */
 let sessionOnChange: ((workspaceId: string, renamed?: { sessionId: string; title: string }) => void) | null = null
+
+/**
+ * 某条凭证被刷新、或者被标成需要重新登录了。
+ *
+ * ★ 和上面那个 sink 是同一个套路、同一个理由:内核里的 `CredentialResolver`
+ * 拿不到窗口,而 runtime 又不能反向依赖窗口模块(**零 Electron import** 是
+ * 无头测试能跑通的前提)。真正的广播器由 `ipc/index.ts` 在启动时装上。
+ */
+let credentialOnChange: ((credentialRef: string) => void) | null = null
 
 /**
  * 装宿主。**必须在第一个 run 之前**,由 `main/index.ts` 在 `app.whenReady()` 里调用 ——
@@ -180,10 +190,11 @@ function seed(): void {
   const [defaultModel, subagentModel] = [builtin[0], builtin[1]]
 
   if (defaultModel !== undefined && settings.defaultModel === '') {
-    store.updateSettings({ defaultModel })
+    // 种子时把供应商一并写死是对的:这一刻只有内置上游一家,不存在「按优先级择优」的余地。
+    store.updateSettings({ defaultModel, defaultModelProviderId: BUILTIN_PROVIDER_ID })
   }
   if (subagentModel !== undefined && settings.subagent.model === '') {
-    store.updateSettings({ subagent: { model: subagentModel } })
+    store.updateSettings({ subagent: { model: subagentModel, modelProviderId: BUILTIN_PROVIDER_ID } })
   }
 
   seedDefaultWorkspace()
@@ -362,7 +373,8 @@ export function ensureSeeded(): void {
 export function getRouter(): UpstreamRouter {
   seed()
   router ??= new UpstreamRouter(getHost(), providerConfig, {
-    onUsageAttempt: persistUsageAttempt
+    onUsageAttempt: persistUsageAttempt,
+    onCredentialChanged: (ref) => credentialOnChange?.(ref)
   })
   return router
 }
@@ -469,6 +481,11 @@ export function setMcpChangeListener(fn: (id: string) => void): void {
 /** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。 */
 export function setSessionChangeListener(fn: NonNullable<typeof sessionOnChange>): void {
   sessionOnChange = fn
+}
+
+/** 同上。刷新 token 改写凭证后，把新的登录态推给可能正开着设置页的窗口。 */
+export function setCredentialChangeListener(fn: NonNullable<typeof credentialOnChange>): void {
+  credentialOnChange = fn
 }
 
 /**
@@ -853,7 +870,8 @@ function childRequestFor(
       这是**真实的提权路径**,不是理论风险(见 `minPermission` 的注释)。
     */
     permissionMode: minPermission(parentReq.permissionMode, def.permissionMode ?? 'full'),
-    model: def.model ?? parentReq.model,
+    // ★ 别名和供应商必须成对决定 —— 规则连同理由都在 `inheritModelSelection` 里
+    ...inheritModelSelection(def.model, parentReq),
     skillIds: parentReq.skillIds,
     agentType: def.name
   }
@@ -1001,13 +1019,14 @@ type ReviewResult = 'allow' | 'deny' | 'unknown'
 async function reviewSensitiveOperation(
   req: RunRequest,
   reviewerModel: string,
+  reviewerModelProviderId: string | undefined,
   toolName: string,
   input: unknown,
   signal: AbortSignal
 ): Promise<ReviewResult> {
   reviewerModel = reviewerModel.trim()
   if (reviewerModel === '') return 'unknown'
-  if (!getRouter().listModels().some((m) => m.alias === reviewerModel)) {
+  if (getRouter().resolveModel(reviewerModel, reviewerModelProviderId) === undefined) {
     getHost().logger.warn(`[permission-review] configured model is unavailable: ${reviewerModel}`)
     return 'unknown'
   }
@@ -1027,6 +1046,7 @@ async function reviewSensitiveOperation(
   ].join('\n')
   const reviewRequest: CanonicalRequest = {
     model: reviewerModel,
+    ...(reviewerModelProviderId === undefined ? {} : { modelProviderId: reviewerModelProviderId }),
     system: 'Be conservative. Deny destructive, irreversible, credential-related, or ambiguous actions.',
     messages: [userMessage(ulid(getHost().clock.now()), [{ type: 'text', text: prompt }], getHost().clock.now())],
     tools: [],
@@ -1072,7 +1092,10 @@ async function reviewSensitiveOperation(
 
 function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
   // 与 permissionMode 一样按 run 冻结，避免用户改设置后同一轮请求前后使用不同审核器。
-  const reviewerModel = store.getSettings().permissionReviewerModel
+  // ★ 别名和供应商必须在**同一刻**冻结:一个冻结一个现取的话,用户中途换了供应商
+  //   就会拼出「旧别名 + 新供应商」,而这一轮的审核器是谁将无从解释。
+  const { permissionReviewerModel: reviewerModel,
+    permissionReviewerModelProviderId: reviewerModelProviderId } = store.getSettings()
   // 契约要求返回 Promise;策略本身是同步的纯函数
   return async ({ tool, callId, input }) => {
     const outcome = evaluate({
@@ -1085,7 +1108,7 @@ function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
     if (outcome.kind === 'allow') return { kind: 'allow_once' }
     if (outcome.kind === 'deny') return { kind: 'deny', reason: outcome.reason }
     if (req.permissionMode === 'auto' && tool.destructive) {
-      const review = await reviewSensitiveOperation(req, reviewerModel, tool.externalName, input, handle.signal)
+      const review = await reviewSensitiveOperation(req, reviewerModel, reviewerModelProviderId, tool.externalName, input, handle.signal)
       if (review === 'allow') return { kind: 'allow_once' }
       if (review === 'deny') return { kind: 'deny', reason: 'The configured AI reviewer denied this potentially unsafe operation.' }
     }
@@ -1121,14 +1144,34 @@ export async function runAgent(
     // 非空 = 这是子代理的转录:落盘照旧,但它从此不出现在任何面向用户的枚举里。
     ...(req.parentSessionId === undefined ? {} : { parentSessionId: req.parentSessionId }),
     model: req.model,
+    ...(req.modelProviderId === undefined ? {} : { modelProviderId: req.modelProviderId }),
     mode: req.mode,
     thinking: req.thinking,
     rootPathAtCreation: workspaceRootFor(req.workspaceId)
   })
   // 新会话第一次发送时把模型/模式冻结到元数据；后续 run 不覆盖用户改过的标题。
-  if (existing !== undefined && (existing.model !== req.model || existing.mode !== req.mode || existing.thinking !== req.thinking)) {
-    store.putSession({ ...session, model: req.model, mode: req.mode, thinking: req.thinking, updatedAt: Date.now() })
+  // ★ 比较里必须带上 modelProviderId:同一个会话里从 RoutinAI 切到 Codex 时别名没变,
+  //   漏了这一项的话会话元数据会一直停在旧供应商上。
+  if (existing !== undefined && (existing.model !== req.model
+    || existing.modelProviderId !== req.modelProviderId
+    || existing.mode !== req.mode || existing.thinking !== req.thinking)) {
+    store.putSession({ ...session, model: req.model,
+      // ★ 无条件写,不能用条件展开:req 这次没锁供应商而会话上还留着上次那个的话,
+      //   条件展开清不掉它,于是会话永远停在旧供应商上 —— 又是「只改一半」。
+      modelProviderId: req.modelProviderId,
+      mode: req.mode, thinking: req.thinking, updatedAt: Date.now() })
   }
+  /*
+    ★ 这一行是**这条会话在侧边栏里出生的那一刻**。
+
+    渲染层不再抢先建会话(白纸不落库,见 `renderer/stores/tabs.ts` 的 `makeTab`),
+    所以「最近对话」里这一条只能等这里广播。不广播的话,它要拖到标题生成器
+    跑完第一次 `putSession` 才冒出来 —— 中间那几秒用户看着自己的消息在流式,
+    左边却什么都没有,像是发进了黑洞。
+
+    子代理的转录不算:`parentSessionId` 非空的那些从来不进面向用户的枚举。
+  */
+  if (existing === undefined && req.parentSessionId === undefined) sessionOnChange?.(req.workspaceId)
   const startedAt = getHost().clock.now()
   store.setRunRecord(req.runId, req.sessionId, 'running', startedAt)
   /*
@@ -1255,7 +1298,7 @@ export async function runAgent(
     try {
       const current = store.getSession(req.sessionId)
       const firstMessage = agentSession.history[0]
-      if (current !== undefined && firstMessage !== undefined) getSessionTitles().start(current, firstMessage, req.model)
+      if (current !== undefined && firstMessage !== undefined) getSessionTitles().start(current, firstMessage, req.model, req.modelProviderId)
     } catch {
       getHost().logger.warn('[session-title] Could not start background title generation.')
     }

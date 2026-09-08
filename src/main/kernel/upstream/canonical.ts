@@ -19,6 +19,11 @@ import type { ResolvedModelThinking } from '../../../shared/domain/model-runtime
 export interface CanonicalRequest {
   /** ★ ModelAlias.alias,**不是**上游真实模型名 —— 路由器负责翻译(方案 §5.2) */
   model: string
+  /**
+   * 用户显式选定的供应商,**硬约束**:路由器只在这一家里重试,不跨家兜底。
+   * 缺席 = 没指定过,按 `provider.priority` 择优。详见 `RunRequest.modelProviderId`。
+   */
+  modelProviderId?: string
   /** 系统提示词。ContextAssembler 拼好后原样带过来 */
   system: string
   messages: AgentMessage[]

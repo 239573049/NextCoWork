@@ -11,13 +11,12 @@
  */
 import { create } from 'zustand'
 import type { InnerTab, InnerTabKind, InnerTabState, TabPane } from '../../../shared/domain/tab'
-import { paneOf, reorderInPane, tabsInPane } from '../../../shared/domain/tab'
+import { chatKey, paneOf, reorderInPane, tabsInPane } from '../../../shared/domain/tab'
 import { ulid } from '../../../shared/util/id'
 import { getInnerTabs, persistInnerTabs } from '../services/app'
-import { createSession } from '../services/sessions'
 import { killTerminal } from '../services/terminal'
 import { closeBrowserTab } from '../services/browser'
-import { isSessionUntouched, releaseSession } from './session'
+import { adoptDraftSession, isSessionUntouched, releaseSession } from './session'
 import type { WorkspaceFileMutationRequest } from '../../../shared/domain/workspace-file'
 import { isWithinPath } from './documents'
 import { findGroup, migrateLegacyInnerTabs, normalizeDockState, splitGroup, moveTab as moveDockTab, reorderTab as reorderDockTab, resizeSplit, closeTab as closeDockTab, closeGroup as closeDockGroupState, addTabToGroup, type DockDirection, type DockNode } from '../../../shared/domain/dock'
@@ -62,7 +61,19 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
   const path = init.path ?? ''
   switch (kind) {
     case 'chat':
-      return { id, kind, pane, title: init.title ?? '新对话', ref: { sessionId: ulid() } }
+      /*
+        ★ **`sessionId` 是 null,而且这里绝不发 `sessions:create`。**
+
+        以前这行铸一个 ULID、紧接着一次 IPC 把它插进库,于是「新建对话」「关掉主区
+        最后一个 Tab」「工作区第一次露面」各自都会在库里留下一条零消息的「新对话」。
+        用户什么也没做,侧边栏却在涨 —— 而那条记录连一句话都没有,谁也认不出它是什么。
+
+        真正需要它的时刻在别处:主进程 `runAgent` 发第一条消息时就会
+        `store.ensureSession(...)`(`main/runtime.ts`),而且带的信息比这里全
+        (model / mode / thinking / rootPathAtCreation)。这里那次抢跑只是让一条
+        空记录提前几分钟出生。id 由 `bindChatSession` 在需要归属时才铸。
+      */
+      return { id, kind, pane, title: init.title ?? '新对话', ref: { sessionId: null } }
     case 'terminal':
       return { id, kind, pane, title: init.title ?? '终端', ref: { terminalId: ulid() } }
     case 'doc':
@@ -86,13 +97,6 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
     case 'files':
       return { id, kind, pane, title: init.title ?? '工作区文件', ref: { path } }
   }
-}
-
-function registerChat(workspaceId: string, tab: InnerTab): void {
-  if (tab.kind !== 'chat') return
-  void createSession(workspaceId, tab.title, tab.ref.sessionId).catch(() => {
-    // 主进程会在第一次发送时再次 ensure；离线/测试环境不阻断 Tab 创建。
-  })
 }
 
 interface TabsState {
@@ -142,6 +146,27 @@ interface TabsState {
    * 问候语那一屏的是同一个 —— 屏幕上是白纸的,这里就当白纸。
    */
   newChat: (workspaceId: string) => void
+  /**
+   * 给一个草稿聊天 Tab 铸出真正的 sessionId。**这是「白纸」变成「一段会话」的唯一入口。**
+   *
+   * 调它的只有两处,而且都在 `ChatView`:发出第一条消息、贴上第一个附件。
+   * 前者显然;后者是被逼的 —— `main/db/repo.ts` 的 `recordMessageAttachments` 里
+   * 有一句 `if (loc.scope !== 'session' || loc.ownerId !== session.id) return`,
+   * 那是一道安全边界(渲染层不能把别的会话的图 re-home 到这条消息上)。附件在
+   * 草稿键下上传的话,它的 `ncw://` owner 就永远不等于后来的会话 id,于是这张图
+   * **被静默丢弃**:发送时看着好好的,重启后历史里那张图凭空消失,且没有任何报错。
+   * 要么绑定时把文件和表行整体搬家(一套会部分失败的机器),要么贴图那一刻就铸 id。
+   *
+   * ★ **必须幂等。** 上面两条路径可能先后发生(先贴图再发送),第二次调用要拿到
+   * 同一个 id,否则第二次会把第一次的附件甩掉。
+   *
+   * ★ 铸了 id **不等于**库里有了记录。那一行仍然只由主进程 `runAgent` 的
+   * `ensureSession` 建 —— 所以「贴了图但没发送」的 Tab 有 id、有 URL、
+   * 有磁盘上的草稿附件,而侧边栏里没有它。这正是我们要的。
+   *
+   * 返回 null = 这个 tabId 不存在或者不是 chat。
+   */
+  bindChatSession: (workspaceId: string, tabId: string) => string | null
   activate: (workspaceId: string, tabId: string) => void
   close: (workspaceId: string, tabId: string) => void
   applyFileMutation: (req: WorkspaceFileMutationRequest) => void
@@ -280,7 +305,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
     const snapshot = await getInnerTabs(workspaceId)
     const renamed = pendingTitles.get(workspaceId)
     const persisted = withDock({ ...snapshot, tabs: snapshot.tabs.map((tab) => {
-      const title = tab.kind === 'chat' ? renamed?.get(tab.ref.sessionId) : undefined
+      const title = tab.kind === 'chat' && tab.ref.sessionId !== null ? renamed?.get(tab.ref.sessionId) : undefined
       return title === undefined ? tab : { ...tab, title }
     }) })
     // 这一趟 IPC 期间用户可能已经自己开了一个 Tab —— 那份是新的,别覆盖它
@@ -294,7 +319,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
       return
     }
     const tab = makeTab('chat', 'main')
-    registerChat(workspaceId, tab)
     write(workspaceId, {
       tabs: [tab],
       activeTabId: tab.id,
@@ -366,7 +390,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const split = splitGroup(dock, groupId, direction)
       if (split.activeGroupId === null) return
       const tab = makeTab(kind, pane)
-      registerChat(workspaceId, tab)
       const next = addTabToGroup(split, split.activeGroupId, tab)
       write(workspaceId, { ...cur, tabs: next.tabs, dock: next })
     },
@@ -385,7 +408,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
     openDock(workspaceId, groupId, kind, init, pane = 'main') {
       const cur = get().stateOf(workspaceId)
       const tab = makeTab(kind, pane, init)
-      registerChat(workspaceId, tab)
       write(workspaceId, { ...cur, dock: addTabToGroup(get().dockOf(workspaceId), groupId, tab), tabs: [...cur.tabs, tab] })
     },
 
@@ -414,7 +436,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const dock = closeDockTab(get().dockOf(workspaceId), groupId, tabId)
       if (dock.tabs.length === 0) {
         const chat = makeTab('chat', 'main')
-        registerChat(workspaceId, chat)
         write(workspaceId, { ...cur, tabs: [chat], activeTabId: chat.id, dock: addTabToGroup({ ...dock, tabs: [] }, dock.activeGroupId ?? groupId, chat) })
         return
       }
@@ -438,7 +459,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const dock = closeDockGroupState(get().dockOf(workspaceId), groupId)
       if (dock.tabs.length === 0) {
         const chat = makeTab('chat', 'main')
-        registerChat(workspaceId, chat)
         write(workspaceId, { ...cur, tabs: [chat], activeTabId: chat.id, dock: addTabToGroup({ ...dock, tabs: [] }, dock.activeGroupId ?? groupId, chat) })
       } else write(workspaceId, { ...cur, tabs: dock.tabs, dock })
     },
@@ -459,7 +479,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
           console.error('[tabs] 内层 Tab 布局读取失败,按新工作区处理:', err)
           if (get().byWorkspace[workspaceId] === undefined) {
             const tab = makeTab('chat', 'main')
-            registerChat(workspaceId, tab)
             write(workspaceId, {
               tabs: [tab],
               activeTabId: tab.id,
@@ -478,7 +497,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
     open(workspaceId, kind, pane = 'main', init) {
       const cur = get().stateOf(workspaceId)
       const tab = makeTab(kind, pane, init)
-      registerChat(workspaceId, tab)
       const dock = get().dockOf(workspaceId)
       const groupId = groupForPane(dock, pane) ?? dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
       if (groupId === null) return
@@ -546,14 +564,32 @@ export const useTabsStore = create<TabsState>((set, get) => {
       */
       const active = activeIn(cur, 'main')
       const reusable =
-        chats.find((t) => t.id === active && isSessionUntouched(t.ref.sessionId)) ??
-        [...chats].reverse().find((t) => isSessionUntouched(t.ref.sessionId))
+        chats.find((t) => t.id === active && isSessionUntouched(chatKey(t))) ??
+        [...chats].reverse().find((t) => isSessionUntouched(chatKey(t)))
 
       if (reusable === undefined) {
         get().open(workspaceId, 'chat')
         return
       }
       get().activate(workspaceId, reusable.id)
+    },
+
+    bindChatSession(workspaceId, tabId) {
+      const cur = get().stateOf(workspaceId)
+      const target = cur.tabs.find((t) => t.id === tabId)
+      if (target === undefined || target.kind !== 'chat') return null
+      if (target.ref.sessionId !== null) return target.ref.sessionId
+
+      const sessionId = ulid()
+      // 搬家在写 ref **之前**:写完 ref 会触发一轮渲染,而 `views/registry.tsx`
+      // 的 key 挂在 chatKey 上 —— ChatView 重挂时新键的 store 里必须已经有草稿了,
+      // 否则输入框会先闪一帧空白。
+      adoptDraftSession(tabId, sessionId)
+      const tabs = cur.tabs.map((t) =>
+        t.id === tabId && t.kind === 'chat' ? { ...t, ref: { sessionId } } : t
+      )
+      write(workspaceId, { ...cur, tabs })
+      return sessionId
     },
 
     activate(workspaceId, tabId) {
@@ -602,7 +638,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
       */
       if (pane === 'main' && rest.length === 0) {
         const tab = makeTab('chat', 'main')
-        registerChat(workspaceId, tab)
         write(workspaceId, { ...cur, tabs: [...tabs, tab], activeTabId: tab.id })
         return
       }
@@ -736,7 +771,6 @@ export const useTabsStore = create<TabsState>((set, get) => {
       if (changed) {
         if (tabsInPane(tabs, 'main').length === 0) {
           const chat = makeTab('chat', 'main')
-          registerChat(workspaceId, chat)
           tabs = [...tabs, chat]
         }
         const main = tabsInPane(tabs, 'main')
@@ -787,7 +821,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
         run 活在主进程,关掉工作区不该把它从渲染层的账上抹掉。
       */
       for (const t of get().stateOf(workspaceId).tabs) {
-        if (t.kind === 'chat') releaseSession(t.ref.sessionId)
+        if (t.kind === 'chat') releaseSession(chatKey(t))
       }
       const next = { ...get().byWorkspace }
       delete next[workspaceId]

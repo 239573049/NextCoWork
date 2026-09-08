@@ -25,7 +25,13 @@ export interface DataSettings {
   backupFrequency: BackupFrequency
 }
 
-/** Agent 上下文整理偏好。实验模式包含笔记、当前会话历史检索和窗口切换。 */
+/**
+ * Agent 上下文整理偏好。实验模式包含笔记、当前会话历史检索和窗口切换。
+ *
+ * ★ 两个开关不是并列的:`autoCompact` 是总闸,关掉它 `experimentalMode` 也不会
+ * 触发(见 `agent-session.ts` 到达阈值那一段)。默认给的是「只开总闸」——
+ * 到阈值走机械压缩,实验模式留给用户自己开。
+ */
 export interface ContextManagementSettings {
   experimentalMode: boolean
   autoCompact: boolean
@@ -156,15 +162,27 @@ export interface AppSettings {
   defaultPermissionMode: PermissionMode
   /** “为我批准”档位使用的专用审核模型；空字符串表示未配置，自动回退人工审批。 */
   permissionReviewerModel: string
+  /** 与 `permissionReviewerModel` 成对,见 `defaultModelProviderId` */
+  permissionReviewerModelProviderId?: string
   defaultModel: string
+  /**
+   * 与 `defaultModel` 成对:同一个别名可以挂在多家上,光凭别名定不下发给谁。
+   * 缺席 = 没指定过,按 `provider.priority` 择优(引入这个字段之前的行为)。
+   *
+   * ★ 改 `defaultModel` 的 patch **必须**同时给出这个字段(哪怕是 `undefined`)——
+   * `mergeSettings` 按这条规则成对写入,否则会留下「新别名 + 旧供应商」的脏配对。
+   */
+  defaultModelProviderId?: string
 
-  /** 上下文管理：默认开启智能窗口模式，并保留自动压缩回退。 */
+  /** 上下文管理：默认只开自动压缩，智能窗口模式要用户自己打开。 */
   contextManagement: ContextManagementSettings
 
   /** 子代理(方案 §4.9 / 界面「Agent 资源调度」) */
   subagent: {
     /** 界面:「默认子代理模型」 */
     model: string
+    /** 与 `model` 成对,见 `defaultModelProviderId` */
+    modelProviderId?: string
     /** 界面:「单对话子代理上限(推荐 4)」 */
     perSessionLimit: number
     /** 全局子代理池,对应界面「并发上限 0–10」 */
@@ -217,7 +235,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultPermissionMode: 'ask',
   permissionReviewerModel: '',
   defaultModel: '',
-  contextManagement: { experimentalMode: true, autoCompact: true },
+  contextManagement: { experimentalMode: false, autoCompact: true },
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
@@ -262,8 +280,20 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.defaultPermissionMode !== undefined) {
     next.defaultPermissionMode = patch.defaultPermissionMode
   }
-  if (patch.permissionReviewerModel !== undefined) next.permissionReviewerModel = patch.permissionReviewerModel
-  if (patch.defaultModel !== undefined) next.defaultModel = patch.defaultModel
+  // ★★ 三个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
+  //    供应商就跟着 patch 走,哪怕 patch 里它是 `undefined`(那是「取消锁定」,
+  //    供应商被删时的降级路径就靠这个)。
+  //    只写别名、让旧 providerId 留下来的话,就会得到「新别名 + 旧供应商」——
+  //    正是 `model-selection.ts` 那一整个模块要消灭的那个 bug,在它自己的
+  //    合并函数里复活一次。这三处一个都不能漏。
+  if (patch.permissionReviewerModel !== undefined) {
+    next.permissionReviewerModel = patch.permissionReviewerModel
+    next.permissionReviewerModelProviderId = patch.permissionReviewerModelProviderId
+  }
+  if (patch.defaultModel !== undefined) {
+    next.defaultModel = patch.defaultModel
+    next.defaultModelProviderId = patch.defaultModelProviderId
+  }
   if (patch.contextManagement !== undefined) {
     next.contextManagement = { ...next.contextManagement, ...patch.contextManagement }
   }
@@ -272,7 +302,12 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   // 通用深合并在这里是纯粹的负担(它还得决定数组怎么办)。
   if (patch.colorTheme !== undefined) next.colorTheme = { ...next.colorTheme, ...patch.colorTheme }
   if (patch.imageTheme !== undefined) next.imageTheme = { ...next.imageTheme, ...patch.imageTheme }
-  if (patch.subagent !== undefined) next.subagent = { ...next.subagent, ...patch.subagent }
+  if (patch.subagent !== undefined) {
+    next.subagent = { ...next.subagent, ...patch.subagent }
+    // ★ 这一行是那条「成对写」规则在**浅合并**下的补丁:上面的 spread 只覆盖
+    //   patch 里出现过的键,于是只给 `model` 时旧的 `modelProviderId` 会原样留下。
+    if (patch.subagent.model !== undefined) next.subagent.modelProviderId = patch.subagent.modelProviderId
+  }
   if (patch.gateway !== undefined) next.gateway = { ...next.gateway, ...patch.gateway }
   if (patch.notifications !== undefined) {
     next.notifications = { ...next.notifications, ...patch.notifications }
@@ -307,7 +342,9 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   imageTheme: true,
   defaultPermissionMode: true,
   permissionReviewerModel: true,
+  permissionReviewerModelProviderId: true,
   defaultModel: true,
+  defaultModelProviderId: true,
   contextManagement: true,
   subagent: true,
   gateway: true,

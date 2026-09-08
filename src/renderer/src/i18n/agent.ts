@@ -4,6 +4,9 @@ import type { Translate } from './index'
 export const agentZh = {
   'chat.status.running': '运行中',
   'chat.status.waitingResponse': '正在等待回复…',
+  // 只说「正在重试」没用 —— 用户想知道的是为什么:上游繁忙可以等,配置错了等多久都没用
+  'chat.status.retrying': '第 {attempt} 次重试：{reason}',
+  'chat.status.providerSwitched': '已切换到「{to}」：{reason}',
   'chat.thinkingLevel.auto': '自动',
   'chat.thinkingOn': '开启',
   'models.supportedReasoningEfforts': '支持的思考强度',
@@ -46,7 +49,7 @@ export const agentZh = {
   'chat.turn.copied': '已复制',
   'chat.turn.copyFailed': '复制失败，请重试',
   'chat.turn.regenerate': '重新生成',
-  'chat.turn.regenerateConfirm': '重新生成会丢弃后续对话，再点一次确认',
+  'chat.turn.regenerateConfirm': '丢弃后续对话，再点确认',
   'chat.turn.export': '导出为 Markdown',
   'chat.turn.exported': '已导出',
   'chat.turn.exportFailed': '导出失败，请重试',
@@ -69,15 +72,25 @@ export const agentZh = {
   'agent.interaction.failed': '未能提交，交互可能已结束。请检查运行状态后重试。',
   'agent.interaction.loadFailed': '无法读取待处理交互，点击重试。',
   'agent.interaction.invalidJson': '参数不是有效的 JSON，请修改后重试。',
-  'agent.error.invalidResponse': '上游返回的响应格式不完整或不符合协议，本轮已停止。',
+  // {detail} 是解码器给出的具体原因(十几种),不带上的话这些原因在界面上无从区分
+  'agent.error.invalidResponse': '上游返回的响应格式不完整或不符合协议，本轮已停止。（{detail}）',
   'agent.error.incompleteResponse': '上游连接在回复完成前断开，请重试。',
   'agent.error.outputLimit': '回复达到模型的输出上限，已保留收到的内容。可以继续对话或提高输出上限。',
   'agent.error.imageInput': '无法读取本轮图片附件，请重新添加图片后重试。',
+  // 三条都点明「不会自动切到其它供应商」：用户的既有心智是「配了多家就会兜底」，
+  // 不写这句，他会把「已停用」理解成「连兜底也挂了」，然后去查网络而不是去启用那一家。
+  'agent.error.pinnedProviderMissing':
+    '你选择的供应商已被删除，「{model}」不会自动切到其它供应商。请在模型菜单里重新选择。',
+  'agent.error.pinnedProviderDisabled':
+    '供应商「{provider}」已停用，「{model}」不会自动切到其它供应商。请启用它，或另选一个模型。',
+  'agent.error.pinnedModelMissing': '供应商「{provider}」下已经没有可用的模型「{model}」，请重新选择。',
 }
 
 export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.status.running': 'Running',
   'chat.status.waitingResponse': 'Waiting for a response…',
+  'chat.status.retrying': 'Retry {attempt}: {reason}',
+  'chat.status.providerSwitched': 'Switched to "{to}": {reason}',
   'chat.thinkingLevel.auto': 'Auto',
   'chat.thinkingOn': 'On',
   'models.supportedReasoningEfforts': 'Supported reasoning efforts',
@@ -143,10 +156,16 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'agent.interaction.failed': 'Unable to submit. This interaction may have ended. Check the run status and retry.',
   'agent.interaction.loadFailed': 'Unable to load pending interactions. Click to retry.',
   'agent.interaction.invalidJson': 'The arguments are not valid JSON. Edit them and retry.',
-  'agent.error.invalidResponse': 'The upstream response was incomplete or did not match the protocol. This run has stopped.',
+  'agent.error.invalidResponse': 'The upstream response was incomplete or did not match the protocol. This run has stopped. ({detail})',
   'agent.error.incompleteResponse': 'The upstream connection closed before the reply finished. Please retry.',
   'agent.error.outputLimit': 'The reply reached the model output limit. Received content has been saved. Continue the conversation or increase the output limit.',
   'agent.error.imageInput': 'Unable to read an image attachment for this request. Attach the image again and retry.',
+  'agent.error.pinnedProviderMissing':
+    'The provider you selected has been deleted. “{model}” will not fall back to another provider. Pick a model again from the model menu.',
+  'agent.error.pinnedProviderDisabled':
+    'Provider “{provider}” is disabled. “{model}” will not fall back to another provider. Enable it, or pick a different model.',
+  'agent.error.pinnedModelMissing':
+    'Provider “{provider}” no longer offers the model “{model}”. Pick a model again.',
 }
 
 export function agentErrorText(error: AgentError, t: Translate): string {

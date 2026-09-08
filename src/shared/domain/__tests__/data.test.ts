@@ -86,6 +86,36 @@ describe('isDataExport', () => {
     expect(isDataExport(legacy)).toBe(true)
   })
 
+  /**
+   * 存量存档里**一个 `*ProviderId` 都没有** —— 那三对字段是后加的。
+   * 校验器把它们当必填的话,每一份旧存档都会在导入时被整份拒绝。
+   */
+  it('接受不带任何模型供应商字段的旧存档', () => {
+    const old = minimalExport()
+    old.workspaces = [{
+      id: 'w', name: 'A', rootPath: '/a', settings: {
+        permissionMode: 'auto', defaultModel: 'gpt-5.5', defaultMode: 'normal',
+        defaultThinking: 'auto', webSearch: true, activeSkillIds: []
+      }, createdAt: 1, lastOpenedAt: 1
+    }]
+    expect(isDataExport(old)).toBe(true)
+  })
+
+  it('带了但类型不对的一律拒掉,而不是存进去等以后炸', () => {
+    const bad = minimalExport()
+    ;(bad.settings as Record<string, unknown>).defaultModelProviderId = 123
+    expect(isDataExport(bad)).toBe(false)
+
+    const badWorkspace = minimalExport()
+    badWorkspace.workspaces = [{
+      id: 'w', name: 'A', rootPath: '/a', settings: {
+        permissionMode: 'auto', defaultModel: 'gpt-5.5', defaultModelProviderId: 7,
+        defaultMode: 'normal', defaultThinking: 'auto', webSearch: true, activeSkillIds: []
+      }, createdAt: 1, lastOpenedAt: 1
+    }]
+    expect(isDataExport(badWorkspace)).toBe(false)
+  })
+
   it('拒绝未来版本以外的结构损坏、重复主键与空凭证引用', () => {
     const duplicate = minimalExport()
     duplicate.workspaces = [

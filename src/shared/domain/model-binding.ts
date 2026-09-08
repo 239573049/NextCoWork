@@ -15,6 +15,21 @@ function same(a: unknown, b: unknown): boolean {
   return left.length === right.length && left.every(([key, v]) => same(v, (b as Record<string, unknown>)[key]))
 }
 
+/**
+ * 某个能力位取这个值时,**不能当成「用户显式设过」** —— 它可能只是从旧版目录抄来的。
+ *
+ * ★★ 下面那段推断的判据是「这个值和它可能继承来的**任何**默认值都不同,所以只能是人设的」。
+ * 这条判据依赖一份完整的「可能来源」清单,而**目录默认值改过之后,旧的那个值也得留在清单里**。
+ *
+ * `tools` 的目录默认值从 `false` 翻成了 `true`(理由见 `model-catalog-inventory.ts`)。
+ * 不登记这条历史默认值的话,当年照着旧默认抄下 `false` 的每一条旧记录,都会在升级后
+ * 被读成「用户特意关掉了工具」,并被永久写进 `catalogOverrides` —— 症状是升级完
+ * Agent 照样没有工具,而且**再也修不回来了**,因为它此刻已经算用户设置,目录再也压不过它。
+ */
+const HISTORICAL_CATALOG_DEFAULTS: Partial<Record<keyof ModelCapabilities, boolean>> = {
+  tools: false
+}
+
 /** One resolver for imports, settings, the composer and the runtime router. */
 export function modelBindingResolver(custom: readonly ModelCatalogDefinition[] = []) {
   const catalog = mergeModelCatalog({ builtin: BUILTIN_MODEL_CATALOG, custom })
@@ -36,6 +51,7 @@ export function modelBindingResolver(custom: readonly ModelCatalogDefinition[] =
       for (const key of Object.keys(raw.capabilities) as (keyof ModelCapabilities)[]) {
         const value = raw.capabilities[key]
         if (value !== undefined && value !== IMPORTED_ALIAS_DEFAULTS.capabilities[key] &&
+          value !== HISTORICAL_CATALOG_DEFAULTS[key] &&
           value !== definition?.capabilities[key] && value !== builtin?.capabilities[key]) {
           overrides.add(`capabilities.${key}`)
         }

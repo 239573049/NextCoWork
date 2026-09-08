@@ -158,7 +158,7 @@ describe('畸形流不破坏已有块', () => {
   it('未知事件类型不产生块', () => {
     const { parts } = run([
       { type: 'message_start', model: 'claude-sonnet-4' },
-      { type: 'provider_retry', attempt: 1, delayMs: 100 },
+      { type: 'provider_retry', attempt: 1, delayMs: 100, reason: 'overloaded' },
       { type: 'text_delta', index: 0, text: 'ok' },
       { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
     ])

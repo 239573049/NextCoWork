@@ -25,15 +25,46 @@ describe('catalogue-backed provider metadata', () => {
   })
 
   it('keeps identifiable legacy provider customizations while filling other metadata', () => {
+    // ★ 这里用 caching 而不是 tools 举例:`tools: false` 曾经是目录默认值,
+    // 于是旧记录上的它**无法**和「从没设过」区分开(见下一条测试)。caching 没这个历史包袱。
     const model = modelBindingResolver().resolve(imported({
       contextWindow: 64_000, maxOutputTokens: 4_000,
-      capabilities: { ...IMPORTED_ALIAS_DEFAULTS.capabilities, tools: false },
+      capabilities: { ...IMPORTED_ALIAS_DEFAULTS.capabilities, caching: false },
       thinkingConfig: { mode: 'toggle', defaultEnabled: false, parameterPath: 'enable_thinking' }
     }))
     expect(model).toMatchObject({ contextWindow: 64_000, maxOutputTokens: 4_000,
-      capabilities: { tools: false, vision: true, thinking: true }, thinkingConfig: { mode: 'toggle' } })
+      capabilities: { caching: false, vision: true, thinking: true }, thinkingConfig: { mode: 'toggle' } })
     expect(model.reasoningEfforts).toBeUndefined()
     expect(model.catalogOverrides).toEqual(expect.arrayContaining(['contextWindow', 'maxOutputTokens', 'thinkingConfig']))
+  })
+
+  /*
+    ★★ **升级路径,不是理论问题。**
+    `tools` 的目录默认值从 false 翻成了 true。旧库里每一条别名都带着按旧默认抄下的
+    `tools: false`,而推断「这是不是用户自定义」的判据是「和任何默认值都不同」——
+    少登记一个历史默认值,这些旧记录就会被读成「用户特意关掉了工具」并**永久钉死**,
+    症状是升级完 Agent 依然没有工具,且从界面上再也改不回来。
+  */
+  it('不把旧目录默认值 tools:false 当成用户显式关闭', () => {
+    const legacy = imported({ capabilities: { ...IMPORTED_ALIAS_DEFAULTS.capabilities, tools: false } })
+    // 旧记录的判据是「catalogOverrides 缺失」
+    expect(legacy.catalogOverrides).toBeUndefined()
+    const model = modelBindingResolver().resolve(legacy)
+    expect(model.capabilities.tools).toBe(true)
+    expect(model.catalogOverrides).not.toContain('capabilities.tools')
+  })
+
+  it('用户在界面上真的关掉工具时仍然生效', () => {
+    const resolver = modelBindingResolver()
+    const inherited = resolver.resolve(imported({ catalogOverrides: [] }))
+    expect(inherited.capabilities.tools).toBe(true)
+    const edited = resolver.update(inherited, {
+      ...inherited, capabilities: { ...inherited.capabilities, tools: false }
+    })
+    expect(edited.capabilities.tools).toBe(false)
+    expect(edited.catalogOverrides).toContain('capabilities.tools')
+    // 再 resolve 一次不会被目录冲掉 —— 显式设置压过目录,这正是上一条不该误判的原因
+    expect(resolver.resolve(edited).capabilities.tools).toBe(false)
   })
 
   it('pins only edited fields and keeps thinking configuration and accepted efforts together', () => {

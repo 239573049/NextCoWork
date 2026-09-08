@@ -472,6 +472,40 @@ DELETE FROM kv WHERE key IN (SELECT 'session.input.' || id FROM sessions WHERE i
 DELETE FROM sessions WHERE instr(id, ':sub:') > 0;
 `
 
+/**
+ * 第 11 条：智能上下文管理改为默认关闭,存量库一起翻过来。
+ *
+ * ## 为什么非得动库,而不是只改 `DEFAULT_SETTINGS`
+ *
+ * `repo.updateSettings` 每次都把**整份合并后的 AppSettings** 序列化回这一行,
+ * 而 `runtime.ts` 首次落默认模型时就会触发一次写入 —— 于是几乎每个老用户
+ * 库里都存着 `experimentalMode: true`,哪怕他从没碰过那个开关。
+ * `mergeSettings` 只在字段**缺席**时才铺新默认值,对这些行是彻底的空操作。
+ *
+ * ## 为什么不能学 `migrateLegacyProxy` 那套「只在缺失时才动」
+ *
+ * 学不了:字段从来不缺席,所以库里的 `true` **区分不出**「用户主动打开的」
+ * 和「当年默认值被顺手写进来的」。这条迁移因此是无条件的,主动开过的人会被
+ * 一起关掉 —— 这是明知的代价,换的是绝大多数从没做过选择的人拿到新默认值。
+ *
+ * ★ 一次性**由迁移表保证**,不是靠这条 SQL 自己幂等:版本号记进 `migrations`
+ * 之后就不再执行。这一点是必须的 —— 每次启动都跑的话,用户在设置里重新打开,
+ * 下次启动又被关上,正是 `mergeSettings` 那段注释里骂过的「我明明打开了,
+ * 它自己关了」。
+ *
+ * `json('false')` 而不是 `0`:后者写进去是**数字**。读路径上它恰好也是假值,
+ * 所以本地看不出任何异样 —— 但 `isContextManagementSettings` 要的是 `isBoolean`,
+ * 而它一路挂在 `isAppSettings` → `isDataExport` 下面(`shared/domain/data.ts`)。
+ * 于是这台机器导出的备份**整份**过不了校验,导入端拒绝的是整个文件,不是这一个
+ * 字段。症状离这条 SQL 有十万八千里,所以这里必须一次写对。
+ */
+const V11_CONTEXT_EXPERIMENTAL_OFF = `
+UPDATE settings
+   SET json = json_set(json, '$.contextManagement.experimentalMode', json('false'))
+ WHERE id = 1
+   AND json_extract(json, '$.contextManagement.experimentalMode') = 1;
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -482,5 +516,6 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 7, name: 'attachment-owner', sql: V7_ATTACHMENT_OWNER },
   { version: 8, name: 'usage-details', sql: V8_USAGE_DETAILS },
   { version: 9, name: 'context-management', sql: V9_CONTEXT_MANAGEMENT },
-  { version: 10, name: 'subagent-sessions', sql: V10_SUBAGENT_SESSIONS }
+  { version: 10, name: 'subagent-sessions', sql: V10_SUBAGENT_SESSIONS },
+  { version: 11, name: 'context-experimental-off', sql: V11_CONTEXT_EXPERIMENTAL_OFF }
 ]

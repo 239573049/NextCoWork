@@ -414,3 +414,48 @@ describe('hasRun · 空会话首屏不该写着「生成中」', () => {
     expect(hasRun(s, false)).toBe(true)
   })
 })
+
+/**
+ * ★ 这两个事件以前发了没人画,于是「上游繁忙、正在退避重试」和「卡死了」在界面上
+ * 长得一模一样:一个转圈,几十秒不动。测的是它们确实到得了状态行,以及**确实是瞬时的** ——
+ * 留着不清会让重试成功之后状态行永远挂着一句过期的「正在重试」。
+ */
+describe('applyEvent · 重试与切换提示', () => {
+  it('provider_retry 带着上游原话进状态行', () => {
+    const s = applyEvent(emptyTranscript(), {
+      type: 'stream',
+      delta: { type: 'provider_retry', attempt: 2, delayMs: 800, reason: 'Our servers are currently overloaded.' }
+    })
+    expect(s.notice).toEqual({ kind: 'retry', attempt: 2, reason: 'Our servers are currently overloaded.' })
+  })
+
+  it('provider_switch 说清换到了哪一家', () => {
+    const s = applyEvent(emptyTranscript(), {
+      type: 'stream',
+      delta: { type: 'provider_switch', from: 'A', to: 'B', reason: '上游不可用' }
+    })
+    expect(s.notice).toEqual({ kind: 'switch', to: 'B', reason: '上游不可用' })
+  })
+
+  it('★ 内容一开始流就清掉 —— 重试成功后不该继续挂着「正在重试」', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'stream',
+      delta: { type: 'provider_retry', attempt: 1, delayMs: 0, reason: 'boom' }
+    })
+    s = applyEvent(s, { type: 'stream', delta: { type: 'message_start', model: 'm' } })
+    expect(s.notice).toBeUndefined()
+  })
+
+  it('★ 出错也清掉 —— 错误框里会写全,状态行不必再挂一句过期的', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'stream',
+      delta: { type: 'provider_retry', attempt: 1, delayMs: 0, reason: 'boom' }
+    })
+    s = applyEvent(s, {
+      type: 'stream',
+      delta: { type: 'error', error: { code: 'provider', message: 'boom', retryable: false } }
+    })
+    expect(s.notice).toBeUndefined()
+    expect(s.error?.message).toBe('boom')
+  })
+})

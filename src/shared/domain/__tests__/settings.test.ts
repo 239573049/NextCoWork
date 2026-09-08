@@ -251,3 +251,52 @@ describe('mergeSettings · 个性化', () => {
     expect(restored.personalization).toEqual({ name: '', background: '', instructions: '' })
   })
 })
+
+/**
+ * ★★ 「模型别名 + 供应商」三个配对必须**成对写**。
+ *
+ * 这一组是防**同一个 bug 在它自己的修复里复活**:只写别名、让旧 providerId
+ * 留下来,得到的就是「新别名 + 旧供应商」—— 和用户报的「选了 Codex 却发给
+ * RoutinAI」是同一个形状。三处里 `subagent` 最险,因为它走的是浅合并
+ * (`{ ...next.subagent, ...patch.subagent }`),**默认行为恰恰就是保留旧值**。
+ */
+describe('mergeSettings 的模型配对', () => {
+  const pinned = (): AppSettings => ({
+    ...base(),
+    defaultModel: 'shared', defaultModelProviderId: 'codex',
+    permissionReviewerModel: 'shared', permissionReviewerModelProviderId: 'codex',
+    subagent: { ...base().subagent, model: 'shared', modelProviderId: 'codex' }
+  })
+
+  it('★ 只给 defaultModel 时,旧的供应商被清掉而不是留下', () => {
+    const next = mergeSettings(pinned(), { defaultModel: 'other' })
+    expect(next.defaultModel).toBe('other')
+    expect(next.defaultModelProviderId).toBeUndefined()
+  })
+
+  it('★ subagent 的浅合并不能把旧供应商漏下来', () => {
+    const next = mergeSettings(pinned(), { subagent: { model: 'other' } })
+    expect(next.subagent.model).toBe('other')
+    expect(next.subagent.modelProviderId).toBeUndefined()
+    // 兄弟属性照旧不受影响 —— 那是这个函数本来的职责
+    expect(next.subagent.perSessionLimit).toBe(DEFAULT_SETTINGS.subagent.perSessionLimit)
+  })
+
+  it('★ 审核模型同理', () => {
+    const next = mergeSettings(pinned(), { permissionReviewerModel: 'other' })
+    expect(next.permissionReviewerModel).toBe('other')
+    expect(next.permissionReviewerModelProviderId).toBeUndefined()
+  })
+
+  it('成对给出时两个都写进去', () => {
+    const next = mergeSettings(pinned(), { defaultModel: 'other', defaultModelProviderId: 'routin' })
+    expect(next).toMatchObject({ defaultModel: 'other', defaultModelProviderId: 'routin' })
+  })
+
+  it('没提到模型的 patch 不动这三对', () => {
+    const next = mergeSettings(pinned(), { theme: 'dark' })
+    expect(next.defaultModelProviderId).toBe('codex')
+    expect(next.subagent.modelProviderId).toBe('codex')
+    expect(next.permissionReviewerModelProviderId).toBe('codex')
+  })
+})

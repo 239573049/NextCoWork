@@ -142,42 +142,48 @@ export function submitOrder(rows: readonly ImportRow[], selected: ReadonlySet<st
 }
 
 /**
- * 这家能不能拉模型列表。
+ * 这家拉模型列表大概是什么光景 —— 只出提示,**不出禁令**。
  *
- * ★★ **`supportsModelList: false` 只在地址没被改过时才置灰。**
- * 那个标记是我们某一天实测到的形状。用户把地址换成自己的中转之后,这张快照
- * 描述的就不再是他的端点了 —— 照它置灰等于让一个明明能用的端点永远拉不了,
- * 而且没有任何绕过办法。这和表单里 Responses 开关那条是同一个判断
- * (`ProviderPanel.tsx`:提示而不是禁掉)。
+ * ★★ **没有「不给拉」这条分支,`enabled` 字段也已经删掉了。**
+ * 曾经的判据是 `supportsModelList: false` 且地址没改过就置灰。两个问题:
  *
- * ★ 预设里查不到这家(用户自建的)= **未知,不是不支持** —— 一律放行。
+ *   1. 那批标记的探测方法本身不可靠。多数国内网关(智谱 / 火山 / 讯飞)是
+ *      **先验鉴权再路由**,没有有效 key 时 `/models` 和一个乱编的路径返回的
+ *      都是同一个 401 —— 于是「key 不对」被记成了「这家没有列表端点」。
+ *      千帆是能分辨的那个反例:`/v2/models` 给 403、`/v2/model/list` 给 404,
+ *      路由明明存在,却被标成了 false。
+ *   2. 标错的代价是不对称的。标错成 false = 用户看到一个焊死的按钮,没有任何
+ *      绕过办法;标错成 true = 点一下收个 404,自己再手动填。
+ *
+ * 而且置灰这件事本身就和主进程对不上:`main/ipc/provider.ts` 的 `fetchModels`
+ * 明确写了不照这张快照拒绝、「试了再说」。前端焊死按钮等于把后端刻意留的那条
+ * 路又堵上了。现在两边一致:**都让它试,失败了给人话报错。**
+ *
+ * ★ 预设里查不到这家(用户自建的)= 未知,连提示都不给。
  */
 export function modelListAvailability(p: {
   id: string
   protocol: UpstreamProtocol
   baseUrl: string
-}): { enabled: boolean; hint: string | null; needsKey: boolean } {
+}): { hint: string | null; needsKey: boolean } {
   const preset = findPreset(p.id)
   const endpoint = preset === null ? null : endpointFor(preset, p.protocol)
-  if (endpoint === null) return { enabled: true, hint: null, needsKey: true }
+  if (endpoint === null) return { hint: null, needsKey: true }
 
   const needsKey = endpoint.modelListPublic !== true
   if (endpoint.supportsModelList) {
     return {
-      enabled: true,
       hint: needsKey ? null : '这家免鉴权就能拉列表,密钥还没填也可以先看看有哪些模型。',
       needsKey
     }
   }
   if (p.baseUrl.replace(/\/+$/, '') === endpoint.baseUrl.replace(/\/+$/, '')) {
     return {
-      enabled: false,
-      hint: '我们实测这家的这个端点没有模型列表,只能手动填模型名。',
+      hint: '我们上次实测这家的这个端点没有模型列表 —— 可以试,拉不到就手动填模型名。',
       needsKey
     }
   }
   return {
-    enabled: true,
     hint: '预设里这家没有模型列表端点,但你改过地址 —— 可以试一下。',
     needsKey
   }

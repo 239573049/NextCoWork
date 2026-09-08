@@ -1,5 +1,5 @@
 /**
- * 44 个内置预设各自该显示**谁**的 logo —— 一张钉死的对照表。
+ * 45 个内置预设各自该显示**谁**的 logo —— 一张钉死的对照表。
  *
  * **为什么值得单独一个文件:** `brands.test.ts` 守的是规则表本身自洽
  * (每个牌子有样本、顺序不打架),但它不知道「添加供应商」目录里到底摆着
@@ -37,6 +37,8 @@ import { resolveBrand, type Brand } from '../../../../components/brand/brands'
 const EXPECTED: Readonly<Record<string, Brand | null>> = {
   // ── 海外 ──
   openai: 'openai',
+  // ★ Codex 是 OpenAI 的产品线，走的是 ChatGPT 订阅账号 —— 图标仍是 OpenAI 那个
+  codex: 'openai',
   anthropic: 'anthropic',
   // ★ 名字里那个「(OpenAI 兼容)」说的是端点形状,不是这家公司
   'gemini-openai': 'gemini',

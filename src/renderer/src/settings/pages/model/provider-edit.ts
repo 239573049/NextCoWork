@@ -110,3 +110,28 @@ export function isPresetAdded(
 ): boolean {
   return existing.some((p) => p.id === preset.id)
 }
+
+/**
+ * 从目录添加这家时,该顺手种进去的模型名。
+ *
+ * ★★ **判据是 `supportsModelList === false`,不是「是不是某一家」。**
+ * 那个标记为 false 的供应商,「从服务商拉取模型列表」按钮是**灰的** ——
+ * 不种的话,用户添加完得到的是一家零模型、且没有第二条路的供应商,一条死路。
+ * (`ProviderCatalog.add()` 以前只建供应商、从不种别名,对拉得动列表的那些
+ * 没问题,对这些就是死路。)
+ *
+ * ★★ **`supportsModelList` 为 true 的一律不种。** 那些的真实列表随时能拉,
+ * 而 `suggestedModels` 是一张**会腐烂**的快照(本文件头写着:调研当场就实测到
+ * 老别名 `deepseek-chat` / `deepseek-reasoner` 已经下线)。拿一张旧快照去覆盖
+ * 一条通着的实时路径,是用过期数据换一次少点的鼠标 —— 不划算。
+ *
+ * 认不出协议对应的端点时按「拉不动」处理:宁可多种两个能删的名字,
+ * 也不要给出一家点什么都没有的供应商。
+ */
+export function seedModelsForPreset(
+  preset: ProviderPreset,
+  protocol: UpstreamProtocol
+): string[] {
+  if (endpointFor(preset, protocol)?.supportsModelList === true) return []
+  return [...preset.suggestedModels]
+}

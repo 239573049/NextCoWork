@@ -32,7 +32,23 @@ export type ContentPart =
   | { type: 'tool_result'; callId: string; output: ToolOutput; isError: boolean; subagent?: SubagentResult }
   | { type: 'subagent'; callId: string; childRunId: string; summary?: string }
   | { type: 'image'; mime: string; dataRef: string }
+  /**
+   * 拖入输入框的非图片文件。★ 不落盘、不经过 attachment 表 ——
+   * `path` 是用户机器上的真实绝对路径,只给模型的文件读取工具用,
+   * 渲染层把它当成一张只读 chip 显示,**不**当文本塞进气泡里
+   * (那会把一整条长路径糊进 `<p>`,撑出横向滚动条)。
+   */
+  | { type: 'file_ref'; path: string; name: string }
   | { type: 'error'; error: AgentError }
+
+/**
+ * `file_ref` → 发给模型的那句话。★ 用标准 markdown 链接语法而不是
+ * `[附件] path` 这种自造的方括号提示 —— 模型对 `[text](target)` 训练得多,
+ * 括号包住路径也让它在正文里视觉上是一个独立单元,不会跟前后的普通文字粘连。
+ */
+export function fileRefMarkdown(p: { name: string; path: string }): string {
+  return `[${p.name}](${p.path})`
+}
 
 /**
  * 工具输出在**工具边界**截断并留明确标记 —— 不要让一个返回 40MB 文件的工具

@@ -9,6 +9,20 @@
  * 交给它。用户在设置页填了地址、开了开关,请求照旧直连,而界面上一切正常。
  * 这个文件是那句注释的兑现。
  *
+ * ## ★★ 「关闭」曾经比「什么都不做」更糟
+ *
+ * 兑现那句注释的第一版有个反向的错:`proxyConfigFor` 在开关关着时返回
+ * `{ mode: 'direct' }`。而上一段刚说过 —— Chromium **默认就跟随系统代理**。
+ * 于是那一版做的事情是:把「用户没开这个开关」翻译成「用户要求无视系统代理」,
+ * 主动关掉了一个本来好好的默认行为。
+ *
+ * 症状离原因非常远:开箱即用状态下每一个出站请求都绕过系统代理,而设置页上
+ * 那个开关关着、界面一切正常。实测撞到的是换取 OAuth 凭证时的
+ * `HTTP 403 unsupported_country_region_territory` —— 一句完全不提代理的话。
+ *
+ * 现在「关闭」= `{ mode: 'system' }`,理由与「开了但地址没填完仍走直连」的
+ * 例外都写在 `shared/domain/proxy.ts` 的 `proxyConfigFor` 上。
+ *
  * ## 为什么一次 `setProxy` 就够
  *
  * 全应用的出站请求只有一条路:`KernelHost.fetch` → `net.fetch` → `defaultSession`。
@@ -67,7 +81,11 @@ export async function applyProxy(p: ProxySettings): Promise<void> {
   session.defaultSession.closeAllConnections()
 
   getHost().logger.info(
-    `[proxy] ${p.enabled ? (p.mode === 'system' ? '跟随系统' : (cfg.proxyRules ?? '(地址没填完,按直连处理)')) : '已关闭'}`
+    `[proxy] ${
+      !p.enabled || p.mode === 'system'
+        ? '跟随系统'
+        : (cfg.proxyRules ?? '(地址没填完,按直连处理)')
+    }`
   )
 }
 

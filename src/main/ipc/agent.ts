@@ -11,6 +11,7 @@
 import type { AgentEvent, RunSnapshot } from '../../shared/agent/event'
 import type { RunRequest } from '../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../shared/agent/interaction'
+import type { InterjectItem } from '../../shared/agent/interject'
 import { interactions } from '../kernel/interaction-gate'
 import { IpcError, toAgentError } from './errors'
 import { RunHandle, runs } from '../kernel/run-registry'
@@ -215,6 +216,29 @@ export function respondInteraction(response: InteractionResponse, ctx: WindowCon
 
 export function abortRun(req: { runId: string; cascade: boolean }): void {
   runs.abort(req.runId, req.cascade, { by: 'user' })
+}
+
+/**
+ * 插话入队。
+ *
+ * ★ **run 不在、或已经跑完时静默返回**,不抛错。渲染层是在用户点「插话」的
+ * 瞬间发这条消息的,而那一刻 run 正好收尾是一个完全正常的竞态 ——
+ * 报错会在界面上弹出一个「插话失败」,可实际上什么都没坏:条目还在队列里,
+ * run 结束后的 `drainQueue` 会照常把它发出去。
+ *
+ * ★ 订阅校验与 `respondInteraction` 同源:没订阅这个 run 的窗口不能往它的
+ * 转录里塞消息。这条 run 的 id 是渲染层 mint 的,光有 id 不构成授权。
+ */
+export function interjectRun(
+  req: { runId: string; items: InterjectItem[] },
+  ctx: WindowContext
+): void {
+  const handle = runs.get(req.runId)
+  if (handle === undefined || handle.status !== 'running') return
+  if (!windows.isSubscribed(runTopic(req.runId), ctx.sender)) {
+    throw new IpcError('unknown', '当前窗口没有订阅这个运行')
+  }
+  handle.setInterject(req.items)
 }
 
 /** app 退出前:停掉所有 run,冲掉所有泵。留着的 setTimeout 会拖住退出。 */

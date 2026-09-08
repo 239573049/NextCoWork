@@ -217,7 +217,8 @@ export const store = {
   getInnerTabs(workspaceId: string): InnerTabState {
     const state = repo.getKv<InnerTabState>(innerTabKey(workspaceId), EMPTY_INNER)
     return { ...state, tabs: state.tabs.map((tab) => {
-      const session = tab.kind === 'chat' ? repo.getSession(tab.ref.sessionId) : undefined
+      // sessionId 为 null = 还没发过消息的草稿 Tab,库里没有它,标题就用 Tab 自己的
+      const session = tab.kind === 'chat' && tab.ref.sessionId !== null ? repo.getSession(tab.ref.sessionId) : undefined
       const title = session?.workspaceId === workspaceId ? session.title : undefined
       return title === undefined || title === tab.title ? tab : { ...tab, title }
     }) }

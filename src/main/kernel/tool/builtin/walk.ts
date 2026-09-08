@@ -1,17 +1,22 @@
 /**
- * 工作区遍历 —— `glob` / `grep` 共用的那一趟走。
+ * 目录遍历 —— `glob` / `grep` 共用的那一趟走。
  *
  * ★ **不做成 `KernelHost` 的端口**。遍历带着忽略规则,而忽略规则是**策略**;
  * `KernelHost` 是**能力**。一旦 `walk` 端口开始长 `ignore` 参数,端口就变成了
  * 半个业务层,而「换一套忽略规则」这种事就得去改宿主。
+ *
+ * ★ `root` 是**这一趟的基点**,不一定是工作区根:模型指到工作区外的目录时,
+ * 基点就换成那个目录(见 `paths.ts` 的 `walkBaseOf`)。`rel` 一律相对 `root` 算。
  *
  * 这里有三道闸门,每一道都对应一种真实的挂死方式:
  *
  * 1. **软链成环**。`a/link -> ..` 在词法上完全正常,遍历会无限深下去。
  *    按目录的 realpath 去重,进过的目录不再进。
  * 2. **软链出界**。`ws/link -> /` 会让 grep 把用户的整个磁盘搜一遍并塞进上下文。
- *    每个要进的目录都过一次 `resolveInWorkspace`,越界的直接跳过 —— 不是报错,
- *    因为一个越界的软链不该让整次搜索失败。
+ *    每个要进的目录都过一次 `resolveInWorkspace`(基点是这一趟的 `root`),
+ *    出了这一趟范围的直接跳过 —— 不是报错,因为一条这样的软链不该让整次搜索失败。
+ *    注意这**不是**权限边界:模型可以直接把 `root` 指到那个目录去。它拦的是
+ *    「你只要了一个目录,却顺着一条链把半个磁盘搜了」。
  * 3. **量与时间**。`maxEntries` / `maxDepth` / `deadlineMs` 三条都必须有,
  *    而且超了要**照实说**(`truncated` / `timedOut`)—— 静默的部分结果
  *    会让模型断言「仓库里没有」。
@@ -22,7 +27,7 @@ import type { KernelFs } from '../../host'
 import { PathEscapeError, resolveInWorkspace } from '../path-guard'
 
 export interface WalkEntry {
-  /** 工作区相对、始终用 `/` 分隔 —— 和 `FileEntry.path` 同一种形式 */
+  /** 相对这一趟的 `root`、始终用 `/` 分隔 —— 和 `FileEntry.path` 同一种形式 */
   rel: string
   abs: string
   isDir: boolean
@@ -30,9 +35,9 @@ export interface WalkEntry {
 
 export interface WalkOptions {
   fs: Pick<KernelFs, 'readDir'>
-  /** 工作区根。围栏的信任基点,必须是已经 realpath 过的。 */
+  /** 这一趟的基点(工作区根,或模型指定的那个工作区外的目录)。必须是已经 realpath 过的。 */
   root: string
-  /** 从根下的哪个子目录开始。`''` = 根本身。 */
+  /** 从基点下的哪个子目录开始。`''` = 基点本身。 */
   start?: string
   signal: AbortSignal
   now(): number

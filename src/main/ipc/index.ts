@@ -38,8 +38,8 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
-import { getTools, installChildRunLauncher, setSessionChangeListener } from '../runtime'
+import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
+import { getTools, installChildRunLauncher, setCredentialChangeListener, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
@@ -54,6 +54,13 @@ import {
   renameModel,
   removeModel
 } from './provider'
+import {
+  announceCredentialRef,
+  cancelOAuth,
+  signOut,
+  startOAuth,
+  submitOAuthCode
+} from './provider-auth'
 import {
   listUserModelCatalog,
   removeUserModelCatalog,
@@ -266,6 +273,7 @@ const handlers: HandlerMap = {
   'agent:run': (req, ctx) => startRun(req, ctx),
   'agent:attach': (req, ctx) => attachRun(req, ctx),
   'agent:abort': (req) => abortRun(req),
+  'agent:interject': (req, ctx) => interjectRun(req, ctx),
   'agent:respondInteraction': respondInteraction,
   'agent:listInteractions': listInteractions,
   'agent:listTools': ({ workspaceId }) => {
@@ -314,6 +322,10 @@ const handlers: HandlerMap = {
   'provider:setAliases': ({ providerId, models }) => setAliases(providerId, models),
   'provider:setCredential': ({ providerId, apiKey }) => setCredential(providerId, apiKey),
   'provider:getCredentialInfo': ({ providerId }) => getCredentialInfo(providerId),
+  'provider:startOAuth': ({ providerId }) => startOAuth(providerId),
+  'provider:cancelOAuth': ({ providerId }) => cancelOAuth(providerId),
+  'provider:submitOAuthCode': ({ providerId, code }) => submitOAuthCode(providerId, code),
+  'provider:signOut': ({ providerId }) => signOut(providerId),
   // Agent 上游已支持三种协议;独立连接测试入口仍待接入。
   'provider:test': todo('provider:test', '步骤 13(独立连接测试入口)'),
   'model:update': (req) => updateModel(req),
@@ -479,6 +491,8 @@ export function registerIpc(): void {
   setSessionChangeListener((workspaceId, renamed) => {
     windows.emitToAll('sessions:changed', { workspaceId, ...(renamed === undefined ? {} : { renamed }) })
   })
+  // 刷新 token 之后（含刷失败标记 needsReauth）把新的登录态推给设置页
+  setCredentialChangeListener(announceCredentialRef)
 
   // 自动备份只在启动时按到期判断一次，不依赖渲染层计时器。
   scheduleAutomaticBackup()

@@ -63,6 +63,12 @@ export interface SessionUpstream {
     context: UpstreamRequestContext
   ): AsyncIterable<ProviderStreamEvent>
   listModels(): ModelAlias[]
+  /**
+   * 「这个别名 + 这个供应商」落在哪一条绑定上。★ 别用 `listModels().find(...)`
+   * 自己查 —— 那取的是数组第一条,而路由器取的是 priority 最小的那条,撞名时
+   * 会得到不同的答案(于是按 A 的上下文窗口校验、把请求发给 B,还不报错)。
+   */
+  resolveModel(model: string, modelProviderId?: string): ModelAlias | undefined
 }
 
 /**
@@ -247,6 +253,21 @@ export class AgentSession {
       const outcome = await this.turn()
       if (outcome === null) return // 这一轮已经把 run 收尾了
       await this.executeAll(outcome.calls, outcome.tools)
+      /**
+       * ★ 插话的注入点 —— **在工具结果落进转录之后、下一次请求组装之前**。
+       *
+       * 这个位置是被两头夹死的,不是随便选的:
+       * - 放在 `executeAll` **之前**,用户消息会插在 `tool_call` 与 `tool_result`
+       *   之间。Anthropic 要求 tool_result 紧邻它的 tool_call,那是一个 400 ——
+       *   与构造函数里 `closeUnexecutedCalls` 那段注释说的是同一件事。
+       * - 放在 `turn()` **之后**才有意义:模型必须先看见工具结果,插话才是
+       *   「在他做完这一步之后补一句」,而不是凭空打断。
+       *
+       * Anthropic 编码器会把相邻的同角色消息并成一轮(`encode/anthropic.ts`),
+       * 所以模型看到的是一条 `[tool_result…, 插话文本]` 的用户消息 ——
+       * tool_result 仍在最前,形状合法。
+       */
+      this.injectInterjections()
     }
 
     /**
@@ -328,6 +349,7 @@ export class AgentSession {
       mode: this.req.mode,
       thinking: this.req.thinking,
       model: this.req.model,
+      ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
       workspaceRoot: this.deps.workspaceRoot,
       now: this.deps.host.clock.now(),
       platform: this.deps.host.platform,
@@ -487,6 +509,8 @@ export class AgentSession {
     const prompt = `${prior}\nConversation history:\n${history.map((m) => `${m.role}: ${m.parts.map((p) => p.type === 'text' ? p.text : p.type === 'tool_call' ? `${p.name} ${JSON.stringify(p.input)}` : p.type === 'tool_result' ? p.output.content : '').join(' ')}`).join('\n')}`
     const request = {
       model: this.req.model,
+      // 压缩摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
+      ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
       system,
       messages: [userMessage(`${this.req.runId}:context-input`, [{ type: 'text', text: prompt }], this.deps.host.clock.now())],
       tools: [],
@@ -749,6 +773,30 @@ export class AgentSession {
   // ─────────────────────────── 小工具 ───────────────────────────
 
   /**
+   * 把渲染层排进来的插话变成用户消息。
+   *
+   * ★ **一条一条提交,不合并成一条。** 合并省不下任何请求(编码器反正会把
+   * 相邻用户消息并成一轮),却要为「N 个排队条目 ↔ 1 条消息 id」再发明一套
+   * 回执 —— 而 id 一一对应正是渲染层能靠 `message_commit` 收敛队列的全部理由
+   * (见 `shared/agent/interject.ts`)。
+   *
+   * ★ 用条目自带的 id 而不是新 mint 一个,同上。
+   *
+   * ★ 空 parts 的条目**直接跳过**:提交一条空消息,下一次请求就会被上游以
+   * `all messages must have non-empty content` 拒掉,而渲染层那边它已经因为
+   * 收到 commit 而离开了队列 —— 消息既没发出去、也回不来了。
+   */
+  private injectInterjections(): void {
+    const items = this.handle.takeInterject()
+    if (items.length === 0) return
+    for (const item of items) {
+      if (item.parts.length === 0) continue
+      const now = this.deps.host.clock.now()
+      this.commit(userMessage(item.id, [...item.parts], now))
+    }
+  }
+
+  /**
    * ★ 查不到别名时**不在这里报错**,用兜底参数照常组装。
    *
    * 让 `UpstreamRouter` 的 `noCandidateError` 成为唯一的权威错误:它分得清
@@ -756,7 +804,7 @@ export class AgentSession {
    * 而 session 只知道「表里没有」。两处都报的话,用户会随机收到信息量少的那一条。
    */
   private aliasFor(model: string): ModelAlias | undefined {
-    return this.deps.upstream.listModels().find((m) => m.alias === model)
+    return this.deps.upstream.resolveModel(model, this.req.modelProviderId)
   }
 
   private commitAssistant(parts: ContentPart[]): void {

@@ -357,3 +357,45 @@ describe('派不出去的时候', () => {
     expect(runs.get(r.runId)?.children.size ?? 0).toBe(0)
   })
 })
+
+/**
+ * ★★ 别名和供应商必须**成对**决定。
+ *
+ * `agents/<name>.md` 的 frontmatter 只写得下一个裸别名、没有供应商的概念,
+ * 所以子代理声明了别名时,供应商就该是「没指定」(按优先级择优),
+ * 而**不是**继承父亲锁的那家。写成两条独立的 `??` 就会拼出
+ * 「A 家的别名 + B 家的锁」—— 候选集返回空,然后报一条指着 B 的错,
+ * 而 B 跟这次调用根本没关系,无从排查。
+ */
+describe('子代理继承模型时的别名/供应商配对', () => {
+  /** 装一个探针启动器:先记下子 RunRequest,再照常交给真启动器 */
+  const captureChildReq = (): RunRequest[] => {
+    const seen: RunRequest[] = []
+    installChildRunLauncher((parent, childReq, driver) => {
+      seen.push(childReq)
+      return startChildRun(parent, childReq, driver)
+    })
+    return seen
+  }
+
+  it('子代理没声明模型时,连供应商一起继承父亲的', async () => {
+    const seen = captureChildReq()
+    const r = req({ modelProviderId: DEMO_PROVIDER.id })
+
+    startRun(r, fakeWindow().ctx)
+    await waitForEnd(r.runId)
+
+    expect(seen[0]).toMatchObject({ model: DEMO_ALIAS, modelProviderId: DEMO_PROVIDER.id })
+  })
+
+  it('父亲没锁供应商时子代理也没有 —— 不凭空多出一个锁', async () => {
+    const seen = captureChildReq()
+    const r = req()
+
+    startRun(r, fakeWindow().ctx)
+    await waitForEnd(r.runId)
+
+    expect(seen[0]?.model).toBe(DEMO_ALIAS)
+    expect(seen[0]?.modelProviderId).toBeUndefined()
+  })
+})

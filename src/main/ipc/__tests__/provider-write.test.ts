@@ -324,3 +324,122 @@ describe('模型别名的逐行管理', () => {
     })
   })
 })
+
+/**
+ * 设置项从「一个裸别名」变成「别名 + 供应商」之后,别名表变动时的修复规则。
+ * ★ 核心不变式:**一次都不做跨供应商的静默回退**。
+ */
+describe('锁定了供应商的设置项在别名表变动后怎么修', () => {
+  /** 两家都提供同一个别名 —— 就是用户报的那个撞名场景 */
+  const bothOffer = (alias: string): void => {
+    for (const [id, priority] of [['routin', 1], ['codex', 2]] as const) {
+      upsertProvider(draft({ id, name: id, baseUrl: `https://${id}.invalid`, priority }))
+      store.putAlias({
+        alias, providerId: id, upstreamModel: alias,
+        capabilities: { tools: true, vision: false, thinking: false, caching: false },
+        contextWindow: 1000, maxOutputTokens: 100
+      })
+    }
+  }
+
+  it('删掉的是没锁定的那家时,设置一个字都不动', () => {
+    bothOffer('shared')
+    store.updateSettings({ defaultModel: 'shared', defaultModelProviderId: 'codex' })
+
+    removeProvider('routin')
+
+    expect(store.getSettings()).toMatchObject({
+      defaultModel: 'shared', defaultModelProviderId: 'codex'
+    })
+  })
+
+  it('★ 锁定的那家被删而别名还在别处:只解锁,不改名、也不换成另一家', () => {
+    bothOffer('shared')
+    store.updateSettings({ defaultModel: 'shared', defaultModelProviderId: 'codex' })
+
+    removeProvider('codex')
+
+    const after = store.getSettings()
+    expect(after.defaultModel).toBe('shared')
+    expect(after.defaultModelProviderId).toBeUndefined()
+  })
+
+  it('锁定的那家是唯一提供者时才接到别的别名,且供应商跟着一起写上', () => {
+    bothOffer('shared')
+    upsertProvider(draft({ id: 'solo', name: 'solo', baseUrl: 'https://solo.invalid', priority: 3 }))
+    store.putAlias({
+      alias: 'only-here', providerId: 'solo', upstreamModel: 'only-here',
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+      contextWindow: 1000, maxOutputTokens: 100
+    })
+    store.updateSettings({ defaultModel: 'only-here', defaultModelProviderId: 'solo' })
+
+    removeProvider('solo')
+
+    const after = store.getSettings()
+    expect(after.defaultModel).not.toBe('only-here')
+    const alive = listModels()
+    expect(alive.map((m) => m.alias)).toContain(after.defaultModel)
+    // 接过去时必须**同时**写上供应商,否则又留下一个只有别名的悬空配对
+    expect(alive.some((m) => m.alias === after.defaultModel
+      && m.providerId === after.defaultModelProviderId)).toBe(true)
+  })
+
+  it('供应商只是被**停用**时不改写 —— 停用可逆,改了他开回来就发现选择没了', () => {
+    bothOffer('shared')
+    store.updateSettings({ defaultModel: 'shared', defaultModelProviderId: 'codex' })
+
+    upsertProvider(draft({ id: 'codex', name: 'codex', baseUrl: 'https://codex.invalid',
+      priority: 2, enabled: false }))
+
+    expect(store.getSettings()).toMatchObject({
+      defaultModel: 'shared', defaultModelProviderId: 'codex'
+    })
+  })
+
+  it('审核模型也被照顾到 —— 以前它根本不在这个函数的视野里', () => {
+    bothOffer('shared')
+    upsertProvider(draft({ id: 'solo', name: 'solo', baseUrl: 'https://solo.invalid', priority: 3 }))
+    store.putAlias({
+      alias: 'reviewer', providerId: 'solo', upstreamModel: 'reviewer',
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+      contextWindow: 1000, maxOutputTokens: 100
+    })
+    store.updateSettings({ permissionReviewerModel: 'reviewer', permissionReviewerModelProviderId: 'solo' })
+
+    removeProvider('solo')
+
+    const after = store.getSettings()
+    expect(after.permissionReviewerModel).toBe('')
+    expect(after.permissionReviewerModelProviderId).toBeUndefined()
+  })
+
+  it('改名:锁定的正是这一家时无条件跟着改,哪怕别家还有同名别名', () => {
+    bothOffer('shared')
+    store.updateSettings({ defaultModel: 'shared', defaultModelProviderId: 'codex' })
+
+    renameModel('codex', 'shared', 'shared-v2')
+
+    expect(store.getSettings()).toMatchObject({
+      defaultModel: 'shared-v2', defaultModelProviderId: 'codex'
+    })
+  })
+
+  it('改名:锁定的是另一家时不动', () => {
+    bothOffer('shared')
+    store.updateSettings({ defaultModel: 'shared', defaultModelProviderId: 'routin' })
+
+    renameModel('codex', 'shared', 'shared-v2')
+
+    expect(store.getSettings()).toMatchObject({
+      defaultModel: 'shared', defaultModelProviderId: 'routin'
+    })
+  })
+})
+
+describe('供应商 id 的字符约束', () => {
+  it('拒收带斜杠的 id —— 它会让 providerId/alias 复合键歧义', () => {
+    expect(() => upsertProvider(draft({ id: 'a/b', name: 'x', baseUrl: 'https://x.invalid' })))
+      .toThrow(/斜杠/u)
+  })
+})

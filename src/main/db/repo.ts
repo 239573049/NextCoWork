@@ -126,6 +126,7 @@ export interface SessionCreateInput {
   parentSessionId?: string
   title?: string
   model?: string
+  modelProviderId?: string
   mode?: SessionMode
   thinking?: ThinkingLevel
   rootPathAtCreation?: string
@@ -153,6 +154,14 @@ function sessionFromRow(row: Record<string, unknown>): Session {
     ...(parsed.titleSource === 'default' || parsed.titleSource === 'generated' || parsed.titleSource === 'manual'
       ? { titleSource: parsed.titleSource } : {}),
     model: String(row['model'] ?? parsed.model ?? ''),
+    /*
+      ★ 只活在 json 里,**没有提列** —— 照 `titleSource` 的先例。
+      提列的判据是「要不要被 WHERE / ORDER BY / 级联删除读到」,而这个字段
+      一样都不沾(用量统计走 `usage_records` 自己的 provider_id 真列)。
+      为它加一列只会多制造一对「列和 json 可能不一致」,而上面那段注释
+      正说明了这种不一致要用硬规则去压。
+    */
+    ...(typeof parsed.modelProviderId === 'string' ? { modelProviderId: parsed.modelProviderId } : {}),
     mode: (row['mode'] ?? parsed.mode ?? 'normal') as SessionMode,
     thinking: (row['thinking'] ?? parsed.thinking ?? 'auto') as ThinkingLevel,
     rootPathAtCreation: String(row['root_path_at_creation'] ?? parsed.rootPathAtCreation ?? ''),
@@ -179,6 +188,7 @@ export function createSession(input: SessionCreateInput): Session {
     title: input.title?.trim() || '新对话',
     titleSource: isDefaultSessionTitle(input.title ?? '') ? 'default' : 'manual',
     model: input.model ?? '',
+    ...(input.modelProviderId === undefined ? {} : { modelProviderId: input.modelProviderId }),
     mode: input.mode ?? 'normal',
     thinking: input.thinking ?? 'auto',
     rootPathAtCreation: input.rootPathAtCreation ?? '',

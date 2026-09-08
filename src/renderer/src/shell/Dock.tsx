@@ -4,6 +4,7 @@ import type { InnerTabKind } from '../../../shared/domain/tab'
 import { BOTTOM_TAB_MENU, INNER_TAB_MENU, RIGHT_TAB_MENU } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
 import { EmptyState } from '../components/ui/EmptyState'
+import type { FallbackModel } from '../views/chat/Composer'
 import { cn } from '../lib/cn'
 import { useI18n } from '../i18n'
 import { InnerView } from '../views/registry'
@@ -12,14 +13,14 @@ import { useTabsStore } from '../stores/tabs'
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents'
 import { DOCK_TAB_MIME, dockDropZone, groupPane, groupTabs, visibleDockNode, type DockDropZone } from './dock-layout'
 
-export function DockRoot({ workspace, fallbackModel, runningSessionIds, rightVisible = true, bottomVisible = true }: { workspace: Workspace; fallbackModel: string; runningSessionIds: ReadonlySet<string>; rightVisible?: boolean; bottomVisible?: boolean }): ReactNode {
+export function DockRoot({ workspace, fallbackModel, runningSessionIds, rightVisible = true, bottomVisible = true }: { workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string>; rightVisible?: boolean; bottomVisible?: boolean }): ReactNode {
   const dock = useTabsStore((state) => state.dockOf(workspace.id))
   const root = visibleDockNode(dock.root, dock.tabs, rightVisible, bottomVisible)
   const { t } = useI18n()
   return <div data-dock-root className="flex min-h-0 min-w-0 flex-1 overflow-hidden">{root ? <DockNodeView key={root.id} node={root} workspace={workspace} fallbackModel={fallbackModel} runningSessionIds={runningSessionIds} /> : <EmptyState title={t('common.empty')} />}</div>
 }
 
-function DockNodeView({ node, workspace, fallbackModel, runningSessionIds }: { node: DockNode; workspace: Workspace; fallbackModel: string; runningSessionIds: ReadonlySet<string> }): ReactNode {
+function DockNodeView({ node, workspace, fallbackModel, runningSessionIds }: { node: DockNode; workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string> }): ReactNode {
   if (node.type === 'split') {
     const horizontal = node.direction === 'horizontal'
     return (
@@ -39,7 +40,7 @@ function DockNodeView({ node, workspace, fallbackModel, runningSessionIds }: { n
   return <DockGroup key={node.id} node={node} workspace={workspace} fallbackModel={fallbackModel} runningSessionIds={runningSessionIds} />
 }
 
-function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node: Extract<DockNode, { type: 'group' }>; workspace: Workspace; fallbackModel: string; runningSessionIds: ReadonlySet<string> }): ReactNode {
+function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node: Extract<DockNode, { type: 'group' }>; workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string> }): ReactNode {
   const { t } = useI18n()
   const dock = useTabsStore((state) => state.dockOf(workspace.id))
   const tabs = groupTabs(node, dock.tabs)

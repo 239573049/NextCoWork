@@ -90,6 +90,50 @@ describe('ProviderPanel · 协议专属配置', () => {
   })
 })
 
+describe('ProviderPanel · 账号登录的供应商', () => {
+  const codex = (locale: Locale = 'zh-CN'): string =>
+    renderPanel('openai-responses', undefined, locale, 'codex')
+
+  it('★ 未登录时画的是登录按钮，不是一个填了也没用的密钥框', () => {
+    const html = codex()
+    expect(html).toContain('使用 ChatGPT 账号登录')
+    expect(html).not.toContain('粘贴 API Key')
+    expect(html).toContain('账号')
+  })
+
+  it('★★ 「API 格式」和「Responses API」两个控件整个不出现', () => {
+    // 留着的话：翻一下开关 → 协议变 openai-chat → 地址不跟着换 →
+    // 打到 …/codex/chat/completions → 404，而表单看着完全正常
+    //
+    // ★ 断言盯的是那两个控件自己的**选项标签**，不是「API 格式」这个词 ——
+    //   替代它的那句提示文案里也含这个词，拿它断言等于自我否定
+    const html = codex()
+    expect(html).not.toContain('OpenAI 格式')
+    expect(html).not.toContain('Anthropic 格式')
+    expect(html).not.toContain('使用 Responses API')
+    expect(html).toContain('这条通道的协议由订阅决定')
+  })
+
+  it('不显示「获取 API Key」入口 —— 这家根本没有那个页面', () => {
+    expect(codex()).not.toContain('获取 API Key')
+  })
+
+  it('英文 locale 下文案跟着切', () => {
+    const html = codex('en-US')
+    expect(html).toContain('Sign in with ChatGPT')
+    expect(html).not.toContain('OpenAI format')
+    expect(html).not.toContain('Use Responses API')
+  })
+
+  it('普通供应商完全不受影响，两个协议控件照常在', () => {
+    const html = renderPanel('openai-chat')
+    expect(html).toContain('OpenAI 格式')
+    expect(html).toContain('使用 Responses API')
+    expect(html).toContain('粘贴 API Key')
+    expect(html).not.toContain('使用 ChatGPT 账号登录')
+  })
+})
+
 describe('Segmented · 保存期间禁用', () => {
   it('禁用状态传递给分段控件内的每一个原生按钮', () => {
     const html = renderToStaticMarkup(

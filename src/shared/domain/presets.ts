@@ -11,6 +11,7 @@
  * `suggestedModels` 只是**冷启动兜底**,真正的模型列表靠运行时 `GET {base}/models` 拉。
  */
 import type { UpstreamProtocol } from './provider'
+import type { OAuthIssuerId } from './oauth-issuer'
 
 /**
  * ★★ **baseUrl 挂在 endpoint 上,不挂在预设上。** 这是本文件的核心结构,
@@ -74,6 +75,14 @@ export type ProviderCredentialKind =
   | 'access-key'
   | 'api-password'
   | 'subscription-key'
+  /**
+   * ★ 没有可粘贴的密钥,整个字段换成一颗登录按钮(见 `ProviderPanel`)。
+   *
+   * 不复用 `subscription-key`:今天 `credentialKind` 只决定「获取 xxx」那颗按钮的
+   * **措辞**,而这个值还要**把输入框整个换掉**。复用的话,现有那几家
+   * `subscription-key` 的供应商会莫名其妙失去输入框。
+   */
+  | 'oauth'
 
 export interface ProviderPreset {
   id: string
@@ -88,6 +97,17 @@ export interface ProviderPreset {
   apiKeyUrl?: string
   /** 少数供应商使用 AK/SK、API Password 或订阅凭证，避免按钮给出错误称呼 */
   credentialKind?: ProviderCredentialKind
+  /**
+   * ★★ **有它 = 这家走账号登录,值决定用哪套 OAuth 流程;没有 = 老样子粘 API Key。**
+   *
+   * 这条映射必须是**数据**,不能是 `if (id === 'codex')`:登录、刷新、发请求
+   * 三处都要知道「这家怎么登」,写成分支就要在三个文件里各加一次,而漏掉第三处的
+   * 表现是登录成功、第一次对话 403。
+   *
+   * ★ 只有**界面**查这个字段(该画登录按钮还是画输入框)。运行时(router 发请求、
+   * resolver 刷 token)读的是凭证自带的 `issuer` —— 凭证自解释,用户改名换地址都不影响。
+   */
+  oauthIssuer?: OAuthIssuerId
   suggestedModels: readonly string[]
   /** 订阅制额度(Coding Plan 之类)—— 这类不计入总费用,见方案 §5.3 */
   subscription?: boolean
@@ -151,6 +171,39 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     docsUrl: 'https://developers.openai.com/api/docs',
     apiKeyUrl: 'https://platform.openai.com/api-keys',
     suggestedModels: ['gpt-5.6-luna-pro', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.5-pro'],
+    verification: 'documented'
+  },
+  {
+    /*
+      Codex —— **第一家走账号登录的供应商。** 用 ChatGPT 账号登录,请求走订阅额度,
+      不计入 API 账单。
+
+      ★★ **只有一条 endpoint,而且故意不给 `openai-chat`。**
+      `chatgpt.com/backend-api/codex` 下**没有** `/chat/completions`。给了的话,
+      用户在设置页翻一下「使用 Responses API」开关,协议就变成 openai-chat、
+      地址原样留着,请求打到 `…/codex/chat/completions` → 404,而表单看着完全正常。
+      这正是 `provider-edit.ts` 文件头点名要防的那类静默失效。
+      (界面那边还会把这两个协议控件整个藏起来,双保险。)
+
+      ★ 没有 `apiKeyUrl`:这家根本没有「创建 API Key」这个页面。给一个近似链接
+      会把人送到 platform.openai.com 去建一把**用不上**的 key。
+
+      ★ 不进「推荐服务」:推荐位是首屏那几张卡,而这条要走完一次浏览器授权才有用。
+      把一个「点进去还得登录」的卡片放首位,对第一次打开设置的人是负担。
+    */
+    id: 'codex',
+    name: 'Codex(ChatGPT 订阅)',
+    category: 'overseas',
+    endpoints: [resp('https://chatgpt.com/backend-api/codex', false)],
+    docsUrl: 'https://developers.openai.com/codex/cli',
+    credentialKind: 'oauth',
+    oauthIssuer: 'chatgpt',
+    suggestedModels: ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.5','gpt-6-astra'],
+    subscription: true,
+    notes:
+      '用 ChatGPT 账号登录，走订阅额度，不计入 API 账单。' +
+      '★ 需要付费 ChatGPT 计划：免费账号能登录成功，但第一次对话会返回 403。' +
+      '★ 这条通道没有模型列表端点，模型名来自内置建议表，可以手动增删。',
     verification: 'documented'
   },
   {
@@ -518,7 +571,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   },
   {
     id: 'routin-plan',
-    name: 'RoutinAI·Plan(订阅制)',
+    name: 'RoutinAI(订阅)',
     category: 'aggregator',
     recommended: true,
     subscription: true,

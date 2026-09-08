@@ -35,6 +35,13 @@ export function sse(...data: unknown[]): Response {
 export const reasoningItem = {
   type: 'reasoning', id: 'rs-1', summary: [{ type: 'summary_text', text: '检查参数。' }], encrypted_content: 'encrypted-reasoning'
 }
+/** summary 与 content 并列且都有值 —— 规范允许,解码器只应吐出 content */
+export const reasoningContentItem = {
+  type: 'reasoning', id: 'rs-1',
+  summary: [{ type: 'summary_text', text: '检查参数。' }],
+  content: [{ type: 'reasoning_text', text: '先看参数是否齐全。' }],
+  encrypted_content: 'encrypted-reasoning'
+}
 export const functionItem = { type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'Echo', arguments: '{"text":"hello"}' }
 export const messageItem = { type: 'message', id: 'msg-1', role: 'assistant', content: [{ type: 'output_text', text: '完成', annotations: [] }] }
 

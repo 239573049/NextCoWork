@@ -205,12 +205,33 @@ describe('workspace file management and path boundaries', () => {
     }
   )
 
-  it.each(['', '.', '..', '../outside/file.txt', '/etc/passwd', 'folder/../../outside/file.txt', 'C:\\external.txt', 'a\0b'])(
-    'refuses root or escaping file paths: %j', async (path) => {
+  it.each(['', '.', '..', '../outside/file.txt', 'folder/../../outside/file.txt', 'C:\\external.txt', 'a\0b'])(
+    'refuses root or malformed relative file paths: %j', async (path) => {
       await expect(mutateWorkspaceFile({ ...request(path), operation: 'create-file' })).rejects.toThrow('workspace_file:invalid-path')
       expect(() => readWorkspaceFile(request(path))).toThrow('workspace_file:invalid-path')
     }
   )
+
+  /**
+   * ★ 工作区外的绝对路径是**合法输入**:工具卡片和 Markdown 链接会给出这种路径,
+   * 点开要能落到这儿。相对路径仍然只能在工作区内 —— 它的基点就是工作区根。
+   */
+  it('accepts absolute paths outside the workspace', async () => {
+    writeFileSync(join(outside, 'note.txt'), 'from outside')
+    expect(readWorkspaceFile(request(join(outside, 'note.txt')))).toMatchObject({
+      kind: 'text', content: 'from outside'
+    })
+    await expect(mutateWorkspaceFile({ ...request(join(outside, 'made.txt')), operation: 'create-file' }))
+      .resolves.toBeDefined()
+    expect(readFileSync(join(outside, 'made.txt'), 'utf8')).toBe('')
+  })
+
+  /** 绝对路径不逐段审计祖先(`/tmp` 自己就是软链),但目标本身是软链仍然拒 —— 编辑不写穿链 */
+  it('still refuses an absolute path whose own last segment is a symbolic link', () => {
+    writeFileSync(join(outside, 'target.txt'), 'secret')
+    symlinkSync(join(outside, 'target.txt'), join(outside, 'link.txt'))
+    expect(() => readWorkspaceFile(request(join(outside, 'link.txt')))).toThrow('workspace_file:symlink')
+  })
 
   it('refuses mutations and reads through internal and external symbolic links', async () => {
     mkdirSync(join(mocks.root, 'real'))

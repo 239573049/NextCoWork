@@ -32,6 +32,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { IconButton } from "../components/ui/IconButton";
 import { cn } from "../lib/cn";
 import { InnerView } from "../views/registry";
+import type { FallbackModel } from "../views/chat/Composer";
 import { InnerTabBar } from "./InnerTabBar";
 import { useI18n } from "../i18n";
 
@@ -40,7 +41,7 @@ interface PanelProps {
   tabs: readonly InnerTab[];
   activeId: string | null;
   runningSessionIds: ReadonlySet<string>;
-  fallbackModel: string;
+  fallbackModel: FallbackModel;
   /** 拖出来的尺寸(右侧是宽、底部是高),由 useWindowStore 持有并落盘 */
   size: number;
   /**

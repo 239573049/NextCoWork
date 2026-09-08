@@ -285,7 +285,9 @@ function isAppSettings(value: unknown): boolean {
     !isImageThemeChoice(v.imageTheme) ||
     !enumValue(v.defaultPermissionMode, PERMISSION_MODES) ||
     (has(v, 'permissionReviewerModel') && typeof v.permissionReviewerModel !== 'string') ||
+    !optionalString(v, 'permissionReviewerModelProviderId') ||
     typeof v.defaultModel !== 'string' ||
+    !optionalString(v, 'defaultModelProviderId') ||
     (has(v, 'contextManagement') && !isContextManagementSettings(v.contextManagement)) ||
     !isSubagentSettings(v.subagent) ||
     !isGatewaySettings(v.gateway) ||
@@ -315,6 +317,7 @@ function isSubagentSettings(value: unknown): boolean {
   if (!isRecord(value)) return false
   return (
     typeof value.model === 'string' &&
+    optionalString(value, 'modelProviderId') &&
     isIntegerAtLeast(value.perSessionLimit, 1) &&
     isIntegerAtLeast(value.globalLimit, 0)
   )
@@ -373,6 +376,7 @@ function isWorkspaceSettings(value: unknown): boolean {
   return (
     enumValue(value.permissionMode, PERMISSION_MODES) &&
     typeof value.defaultModel === 'string' &&
+    optionalString(value, 'defaultModelProviderId') &&
     enumValue(value.defaultMode, SESSION_MODES) &&
     enumValue(value.defaultThinking, THINKING_LEVELS) &&
     isBoolean(value.webSearch) &&
@@ -388,6 +392,7 @@ function isSession(value: unknown): value is Session {
     typeof value.title === 'string' &&
     (value.titleSource === undefined || enumValue(value.titleSource, ['default', 'generated', 'manual'])) &&
     typeof value.model === 'string' &&
+    optionalString(value, 'modelProviderId') &&
     enumValue(value.mode, SESSION_MODES) &&
     enumValue(value.thinking, THINKING_LEVELS) &&
     typeof value.rootPathAtCreation === 'string' &&

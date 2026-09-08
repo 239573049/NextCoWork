@@ -23,6 +23,11 @@ export interface Session {
   /** Stored in session JSON; absent on older exports. Manual names are never auto-replaced. */
   titleSource?: 'default' | 'generated' | 'manual'
   model: string
+  /**
+   * 发起这个会话时选定的供应商。★ **这是历史事实,不是待执行的配置** ——
+   * 那家后来被删了也不改写它,否则「当时用的哪家」就失真了。
+   */
+  modelProviderId?: string
   mode: SessionMode
   thinking: ThinkingLevel
   /**

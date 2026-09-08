@@ -23,6 +23,8 @@ export interface WorkspaceSettings {
   /** 该工作区的默认档位;每次发送时可临时改(输入框左下角那个下拉) */
   permissionMode: PermissionMode
   defaultModel: string
+  /** 与 `defaultModel` 成对:别名撞名时锁定是哪一家。缺席 = 按优先级择优 */
+  defaultModelProviderId?: string
   defaultMode: SessionMode
   defaultThinking: ThinkingLevel
   webSearch: boolean

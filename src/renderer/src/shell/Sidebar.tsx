@@ -301,19 +301,18 @@ function SessionGroupList({
   onDeleteSession: (sessionId: string) => Promise<void>
   t: SidebarI18n
 }): ReactNode {
-  const known = new Map(sessions.map((session) => [session.id, session]))
+  /*
+    ★ **只列库里真有的会话。**
+
+    这里曾经还有一段「Tab 里有、但库里没有 → 合成一条列表项」的补丁,那是
+    `sessions:create` IPC 往返期间的兜底。现在渲染层根本不建会话了(白纸不落库,
+    见 `stores/tabs.ts` 的 `makeTab`),那段补丁就成了草稿垃圾的唯一来源 ——
+    每开一个空 Tab 这里就凭空多一行「新对话」,而库里什么都没有,右键删也删不掉。
+
+    草稿的去处是顶部那条 Tab 栏,它本来就在那儿。发出第一条消息之后主进程
+    `runAgent` 才 `ensureSession`,广播 `sessions:changed`,这一行才出现。
+  */
   const allSessions: SessionListItem[] = sessions.filter((session) => !session.archived)
-  for (const tab of chatTabs) {
-    if (tab.kind !== 'chat' || known.has(tab.ref.sessionId)) continue
-    allSessions.push({
-      id: tab.ref.sessionId,
-      title: tab.title,
-      updatedAt: Date.now(),
-      archived: false,
-      favorited: false,
-      running: runningSessionIds.has(tab.ref.sessionId)
-    })
-  }
   const startOfToday = new Date().setHours(0, 0, 0, 0)
   const startOfRecent = startOfToday - 6 * 86_400_000
   const [multiSelect, setMultiSelect] = useState(false)

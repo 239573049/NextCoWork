@@ -30,7 +30,7 @@ import {
   type WorkspaceFileWriteRequest,
   type WorkspaceTextFile
 } from '../../shared/domain/workspace-file'
-import { PathEscapeError, resolveInWorkspace } from '../kernel/tool/path-guard'
+import { PathEscapeError, resolveAnywhere } from '../kernel/tool/path-guard'
 import { store } from '../state/store'
 import { IpcError } from './errors'
 
@@ -95,16 +95,35 @@ function statIfPresent(path: string): Stats | undefined {
 }
 
 /**
- * 在共用 realpath 围栏之外逐段 lstat。文件编辑不能跟随任何软链：否则一次
- * “重命名 link”可能悄悄改的是其目标，也可能在读取和保存之间被换成外部链接。
+ * 解析一条来自渲染层的文档路径。**读/写/新建/复制/移动/删除共用这一处。**
+ *
+ * 两种形态:
+ *
+ * 1. **工作区相对路径**(常态,文件树给出的就是这种)。逐段 lstat,任何一段是软链都拒 ——
+ *    否则一次「重命名 link」可能悄悄改的是它的目标,也可能在读取和保存之间被换成外部链接。
+ * 2. **绝对路径**。工具卡片和 Markdown 链接现在会给出工作区外的绝对路径,点开要能落到这儿。
+ *    ★ 这种形态**只检查最后一段**不是软链,不逐段审计祖先:macOS 上 `/tmp` 本身就是
+ *    指向 `/private/tmp` 的软链,逐段审计会把 `/tmp/x` 这类完全正常的路径判成 `symlink`。
+ *    「编辑不会写穿一条链」这个性质对目标文件本身仍然成立。
  */
 function checkedPath(root: string, path: string, allowRoot = false): string {
-  if (typeof path !== 'string' || path.includes('\0') || path.includes('\\') ||
-    isAbsolute(path) || /^[a-z]:/i.test(path)) fail('invalid-path')
+  if (typeof path !== 'string' || path.includes('\0')) fail('invalid-path')
   if (path === '' && allowRoot) return root
+
+  if (isAbsolute(path)) {
+    // ★ lstat 的是**词法形式**,不是 resolveAnywhere 返回的 realpath ——
+    //   后者已经把软链解开了,拿它去问"是不是软链"永远得到否。
+    const lexical = resolve(path)
+    if (statIfPresent(lexical)?.isSymbolicLink() === true) fail('symlink')
+    const target = resolveAnywhere(root, path).abs
+    if (target === root) fail('invalid-path')
+    return target
+  }
+
+  if (path.includes('\\') || /^[a-z]:/i.test(path)) fail('invalid-path')
   const segments = path.split('/')
   if (segments.some((part) => part === '' || part === '.' || part === '..')) fail('invalid-path')
-  const target = resolveInWorkspace(root, path)
+  const target = resolveAnywhere(root, path).abs
   if (target === root) fail('invalid-path')
   for (let index = 1; index <= segments.length; index++) {
     const component = resolve(root, ...segments.slice(0, index))

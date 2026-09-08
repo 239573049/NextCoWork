@@ -1,16 +1,29 @@
 /**
- * 路径围栏 —— **任何工具、任何 handler 碰工作区里的路径,唯一的入口**(方案 §9)。
+ * 路径归一化与围栏 —— **任何工具、任何 handler 碰路径,唯一的入口**(方案 §9)。
  *
- * 路径逃逸是那种真的会发布出去的安全 bug,而朴素的 `path.join` 一个都拦不住:
+ * 朴素的 `path.join` 在这五件事上一件都做不对:
  *
  *   - `../../etc/passwd`      —— 词法逃逸
- *   - `/etc/passwd`           —— 模型直接给绝对路径,join 会把它当成新根
+ *   - `/etc/passwd`           —— 给绝对路径时 join 会把它当成新根
  *   - `link -> /etc`          —— 词法上在根里面,realpath 之后在外面
  *   - `/var` vs `/private/var`—— macOS 上同一个目录的两个"正确"写法
  *   - `/Users/x/WS` vs `/users/x/ws` —— macOS/Windows 大小写不敏感
  *
- * 每个工具各自拼路径的话,这五个点会遍地都是,且**无法在一个地方修好**。
- * 所以这里只导出一个函数,别在别处 `path.join(root, ...)`。
+ * 每个调用方各自拼路径的话,这五个点会遍地都是,且**无法在一个地方修好**。
+ * 所以归一化只有一份实现:`resolveAnywhere`。
+ *
+ * ★ 「解析」和「围栏」是两件事,现在分开了。
+ *
+ * `resolveAnywhere` 解析并**报告**落点在不在根里面;`resolveInWorkspace` 是它上面
+ * 一层薄壳,落在外面就抛。两者共用同一套归一化 —— 分成两份实现的话,
+ * 上面那五条里迟早有一条只在其中一份里修好。
+ *
+ * 谁该用哪个:
+ *   - 内置文件工具、文件树、文档读写 → `resolveAnywhere`。用户按权限档位决定
+ *     agent 能碰什么,不再由一道写死的目录边界决定。
+ *   - Skill / 子代理 / `AGENTS.md` 的加载 → 仍然是 `resolveInWorkspace`。那三处读到的
+ *     东西**自动进系统提示词**,一条指向 `~/.ssh/id_rsa` 的软链就是一次静默外泄,
+ *     和「模型明着读一个文件」不是同一类事。
  */
 import { realpathSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -73,35 +86,66 @@ function realpathOfDeepestExisting(p: string): string {
   }
 }
 
+/** 一次解析的结果。`abs` 永远是 realpath 之后的真实路径,调用方直接拿去用。 */
+export interface Resolution {
+  abs: string
+  /** 落点在 `root` 外面。根解析不出来(空串 / 工作区被删)时恒为 `true` */
+  outside: boolean
+}
+
 /**
- * 把一个**不可信**的路径解析成工作区内的绝对路径,越界就抛 `PathEscapeError`。
+ * 把一个**不可信**的路径解析成绝对路径,并报告它落在工作区里面还是外面。**不抛越界。**
  *
- * `p` 可以是相对工作区的(`src/main`)也可以是绝对的 —— 绝对路径不特殊照顾,
- * 一样要落在根里面才放行。返回值是 realpath 之后的真实路径,调用方直接拿去用。
+ * `p` 可以是相对工作区的(`src/main`)也可以是绝对的。绝对路径不需要工作区就能解析 ——
+ * 工作区没绑定或者被删掉时,`{ outside: true }`,而不是失败。相对路径没有基准,那时才抛。
+ *
+ * ★ 内外**只比一次**,而且两边都是 realpath 之后的形式。
+ *
+ * 这里曾经先拿词法形式比一道再拿 real 比第二道,那是错的:`realRoot` 是 realpath 过的、
+ * `joined` 没有,macOS 上工作区落在 `/var`(或用户自己建的软链,把 `~/code` 指到外置卷
+ * 是常见做法)时,根是 `/private/var/…` 而调用方给的绝对路径是 `/var/…` ——
+ * **两个字符串指同一个目录,词法那道却判它在外面**。工作区记录里的 `rootPath` 就是
+ * `showOpenDialog` 原样返回的没折算过的那种,所以这不是理论情况,是自家代码就会踩的。
+ *
+ * 去掉那道也不会变松:`resolve()` 在 realpath 之前就把 `..` 折叠掉了,
+ * 而 `realpathOfDeepestExisting` 本来就处理"目标还不存在"。
+ */
+export function resolveAnywhere(root: string, p: string): Resolution {
+  if (isAbsolute(p)) {
+    const abs = realpathOfDeepestExisting(resolve(p))
+    let realRoot: string
+    try {
+      realRoot = realpathSync.native(root)
+    } catch {
+      // 根读不到(没绑工作区 / 目录被删)。绝对路径本身照样成立,只是无从判断内外。
+      return { abs, outside: true }
+    }
+    return { abs, outside: !contains(realRoot, abs) }
+  }
+
+  // 相对路径必须有基准。★ 根不存在时照抛,那是环境问题,调用方要能分辨出来。
+  if (root === '') throw new Error(`没有工作区根,无法解析相对路径: ${p}`)
+  const realRoot = realpathSync.native(root)
+  const real = realpathOfDeepestExisting(resolve(realRoot, p))
+  return { abs: real, outside: !contains(realRoot, real) }
+}
+
+/**
+ * 同上,但**落在根外面就抛 `PathEscapeError`**。
+ *
+ * 用在那些「读到的东西会自动进系统提示词」的地方(见文件头)。内置文件工具**不**走这个。
  */
 export function resolveInWorkspace(root: string, p: string): string {
-  const realRoot = realpathSync.native(root)
-  const joined = isAbsolute(p) ? resolve(p) : resolve(realRoot, p)
+  const r = resolveAnywhere(root, p)
+  if (!r.outside) return r.abs
 
-  /*
-    ★ 只比一次,而且**两边都必须是 realpath 之后的形式**。
-
-    这里曾经先拿 `joined` 词法比一道再拿 `real` 比第二道,那是错的:
-    `realRoot` 是 realpath 过的、`joined` 没有,macOS 上工作区落在 `/var`
-    (或用户自己建的软链,把 `~/code` 指到外置卷是常见做法)时,
-    根是 `/private/var/…` 而调用方给的绝对路径是 `/var/…` ——
-    **两个字符串指同一个目录,词法那道却判它越界**。
-    工作区记录里的 `rootPath` 就是 `showOpenDialog` 原样返回的没折算过的那种,
-    所以这不是理论情况,是自家代码就会踩的。
-
-    去掉那道也不会变松:`resolve()` 在 realpath 之前就把 `..` 折叠掉了,
-    而 `realpathOfDeepestExisting` 本来就处理"目标还不存在"。
-    词法能拦的每一种,realpath 这道都拦得住,并且它还多拦一种(软链)。
-  */
-  const real = realpathOfDeepestExisting(joined)
-  if (!contains(realRoot, real)) throw new PathEscapeError(p, realRoot)
-
-  return real
+  let realRoot = root
+  try {
+    realRoot = realpathSync.native(root)
+  } catch {
+    // 根都读不到就用原样的根报错 —— 这条信息只进日志,不进模型的回执
+  }
+  throw new PathEscapeError(p, realRoot)
 }
 
 /**

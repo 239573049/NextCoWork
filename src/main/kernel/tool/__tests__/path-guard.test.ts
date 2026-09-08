@@ -1,13 +1,17 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { PathEscapeError, resolveInWorkspace, toWorkspaceRelative } from '../path-guard'
+import { PathEscapeError, resolveAnywhere, resolveInWorkspace, toWorkspaceRelative } from '../path-guard'
 
 /**
- * 路径围栏是方案 §9 的安全收口点 —— **整个应用里唯一一个把不可信路径变成真实路径的地方**。
- * 它漏了就等于模型可以读写用户全盘,所以这里测的每一条都对应一种真实的逃逸手法,
+ * 路径解析是方案 §9 的收口点 —— **整个应用里唯一一个把不可信路径变成真实路径的地方**。
+ * 这里测的每一条都对应一种真实的手法(词法逃逸、绝对路径、软链、`/var`、大小写),
  * 而不是覆盖率。
+ *
+ * ★ 两个出口的分工别混:`resolveAnywhere` **报告**落点在根内还是根外,内置文件工具用它;
+ * `resolveInWorkspace` 在它之上落在根外就抛,只留给「读到的东西自动进系统提示词」的那几处
+ * (Skill / 子代理 / `AGENTS.md`)。所以下面「拦截」那一组仍然是有效断言。
  *
  * 用真实文件系统而不是打桩:要挡的三样里有两样(符号链接、macOS 的 `/var` →
  * `/private/var`)**只有真 realpath 才看得见**,桩掉 `fs` 就把被测的东西一起桩掉了。
@@ -210,5 +214,53 @@ describe('toWorkspaceRelative', () => {
     for (const p of ['src/index.ts', 'a/b/c', 'src/brand-new.ts']) {
       expect(toWorkspaceRelative(root, resolveInWorkspace(root, p)), p).toBe(p)
     }
+  })
+})
+
+/**
+ * ★ 同一套归一化,只是不抛。这一组和上面「拦截」那一组是**同样的输入**,
+ * 断言的是同一件事的另一面:那些路径确实被认出在根外,而不是被拒绝。
+ */
+describe('resolveAnywhere', () => {
+  it('根内:outside 为假,路径和 resolveInWorkspace 一致', () => {
+    for (const p of ['src/index.ts', 'a/b/c', '.', join(root, 'src', 'index.ts')]) {
+      const r = resolveAnywhere(root, p)
+      expect(r.outside, p).toBe(false)
+      expect(r.abs, p).toBe(resolveInWorkspace(root, p))
+    }
+  })
+
+  it('根外:outside 为真,且给出目标的真实路径', () => {
+    for (const p of ['../outside/secret.txt', 'src/../../outside/secret.txt', join(outside, 'secret.txt')]) {
+      const r = resolveAnywhere(root, p)
+      expect(r.outside, p).toBe(true)
+      expect(r.abs, p).toBe(realpathSync.native(join(outside, 'secret.txt')))
+    }
+  })
+
+  /** 软链是词法检查看不见的那一种 —— 现在跟着它走,并如实报告落到了根外 */
+  it('指向根外的符号链接:跟着走,报告在外面', () => {
+    const r = resolveAnywhere(root, 'escape/secret.txt')
+    expect(r.outside).toBe(true)
+    expect(r.abs).toBe(realpathSync.native(join(outside, 'secret.txt')))
+  })
+
+  /** 目标还不存在也要能解析,否则往工作区外写一个新文件永远失败 */
+  it('根外还不存在的目标', () => {
+    const r = resolveAnywhere(root, join(outside, 'brand-new.txt'))
+    expect(r.outside).toBe(true)
+    expect(r.abs).toBe(join(realpathSync.native(outside), 'brand-new.txt'))
+  })
+
+  /**
+   * ★ 没有工作区根时,绝对路径照样成立 —— 它本来就不需要基准。
+   * 相对路径没有基准,那时才抛(调用方据此给出「先打开一个工作区」的说法)。
+   */
+  it('空的根:绝对路径可解析,相对路径抛', () => {
+    expect(resolveAnywhere('', join(outside, 'secret.txt'))).toEqual({
+      abs: realpathSync.native(join(outside, 'secret.txt')),
+      outside: true
+    })
+    expect(() => resolveAnywhere('', 'src/index.ts')).toThrow()
   })
 })
