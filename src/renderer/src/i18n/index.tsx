@@ -33,12 +33,11 @@ const ZH: Messages = {
   ...editorZh,
   ...markdownZh,
   "app.handshakeFailed": "首屏握手失败：{error}",
-  "auth.tagline": "让时间，重新属于你",
+  "auth.tagline": "把重复的交给它，时间留给你",
   "auth.login": "登录",
   "auth.openingBrowser": "正在打开浏览器…",
   "auth.useOffline": "免登录使用",
-  "auth.localHint": "本地功能全部可用",
-  "auth.offlineHint": "云同步、钱包等账号功能登录后开启",
+  "auth.localHint": "会话与文件都存在本机，登录后可开云同步",
   "auth.loginFailed": "登录失败，请重试",
   "auth.offlineFailed": "无法切换到离线模式，请重试",
   "auth.notSignedIn": "尚未登录",
@@ -713,6 +712,7 @@ const ZH: Messages = {
   "provider.openaiFormat": "OpenAI 格式",
   "provider.anthropicFormat": "Anthropic 格式",
   "provider.responsesApi": "使用 Responses API",
+  "provider.subscription": "订阅制额度",
   "provider.cache": "提示缓存",
   "provider.off": "关闭",
   "provider.fiveMinutes": "5 分钟",
@@ -787,6 +787,8 @@ const ZH: Messages = {
     "强制走 /v1/responses。仅当供应商支持 Responses 端点时开启，否则会 404。",
   "provider.responseApiWarning":
     "我们实测这家没有可用的 Responses 端点，开着大概率 404。",
+  "provider.subscriptionHint":
+    "这家按月或按积分计费（Coding Plan 之类），不按 token 计费。开启后它的用量不再折算金额，费用列显示「—」。",
   "provider.cacheHint":
     "一般情况下保持关闭。缓存适合长且重复的上下文；1 小时写入通常更贵，且部分 Anthropic 兼容中转站不支持。",
   "provider.keyringWarning":
@@ -796,7 +798,10 @@ const ZH: Messages = {
   "provider.modelPriorityHint":
     "这家自己的模型顺序。切到别的供应商是另一条轴，由左列同名别名的候选链决定。",
   "provider.deleteHint": "连同这家的模型别名和已保存的密钥一起删掉，不能撤销。",
-  "provider.builtinHint": "这是 NextCoWork 内置供应商。模型列表会自动同步，配置由客户端管理。",
+  "provider.builtinHint":
+    "这是 NextCoWork 内置供应商。账号、名称和 API 地址由客户端管理；请求协议格式和模型列表可以自行调整。",
+  "provider.managedKeyHint":
+    "凭证由 NextCoWork 账号登录发放并自动续期，不需要也不能手动填写。",
   "provider.builtinDeleteHint":
     "内置的 RoutinAI 是种子数据，删掉后下次启动会重新出现（密钥不会回来）。",
   "provider.customDeleteHint":
@@ -1202,12 +1207,11 @@ const EN: Messages = {
   ...editorEn,
   ...markdownEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
-  "auth.tagline": "Put your time back in your hands",
+  "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",
   "auth.openingBrowser": "Opening browser…",
   "auth.useOffline": "Continue offline",
-  "auth.localHint": "All local features stay available",
-  "auth.offlineHint": "Cloud sync, wallet, and account features unlock after sign-in",
+  "auth.localHint": "Sessions and files stay on this machine — sign in for cloud sync",
   "auth.loginFailed": "Sign-in failed. Please try again.",
   "auth.offlineFailed": "Could not switch to offline mode. Please try again.",
   "auth.notSignedIn": "Not signed in",
@@ -1903,6 +1907,7 @@ const EN: Messages = {
   "provider.openaiFormat": "OpenAI format",
   "provider.anthropicFormat": "Anthropic format",
   "provider.responsesApi": "Use Responses API",
+  "provider.subscription": "Subscription plan",
   "provider.cache": "Prompt caching",
   "provider.off": "Off",
   "provider.fiveMinutes": "5 minutes",
@@ -1979,6 +1984,8 @@ const EN: Messages = {
     "Forces /v1/responses. Enable only when the provider supports the Responses endpoint, or it may return 404.",
   "provider.responseApiWarning":
     "This provider has no verified Responses endpoint; enabling it will likely return 404.",
+  "provider.subscriptionHint":
+    "This provider bills by month or credits (a Coding Plan and the like), not per token. When enabled, its usage is no longer priced and the cost column shows “—”.",
   "provider.cacheHint":
     "Usually keep this off. Caching helps with long, repeated context; one-hour writes usually cost more and some Anthropic-compatible relays do not support it.",
   "provider.keyringWarning":
@@ -1989,7 +1996,10 @@ const EN: Messages = {
     "The model order for this provider. Switching providers is a separate axis controlled by the candidate chain in the left column.",
   "provider.deleteHint":
     "Deletes this provider’s model aliases and saved key. This cannot be undone.",
-  "provider.builtinHint": "This is the built-in NextCoWork provider. Models sync automatically and its configuration is managed by the client.",
+  "provider.builtinHint":
+    "This is the built-in NextCoWork provider. Its account, name and API address are managed by the client; the request protocol and model list are yours to change.",
+  "provider.managedKeyHint":
+    "The credential is issued and refreshed by your NextCoWork account sign-in; it cannot be entered by hand.",
   "provider.builtinDeleteHint":
     "Built-in RoutinAI is seed data and will return on the next launch (the key will not return).",
   "provider.customDeleteHint":

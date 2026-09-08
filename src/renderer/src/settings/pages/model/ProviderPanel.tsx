@@ -480,7 +480,13 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           </p>
         )}
 
-        <fieldset disabled={managed} className="space-y-4 px-4 py-4 disabled:opacity-80">
+        {/*
+          ★ **禁用是逐个字段给的,不是整块给的。** 内置的 NextCoWork 那条只托管
+          「身份」——名称 / 地址 / 密钥归登录流程(主进程 `upsertProvider` 那边也是
+          按字段回落的,不是整条拒绝);协议格式和模型列表归用户。整块 `disabled`
+          会把那两样一起焊死,而它们正是用户要改的。
+        */}
+        <fieldset className="space-y-4 px-4 py-4">
           {managed && <p className="rounded-[8px] bg-accent/10 px-3 py-2 text-[11.5px] leading-[1.6] text-accent">{t("provider.builtinHint")}</p>}
           <Field label={t("provider.name")}>
             <TextInput
@@ -488,7 +494,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               onChange={setName}
               onCommit={commitName}
               ariaLabel={t("provider.name")}
-              disabled={busy}
+              disabled={busy || managed}
             />
           </Field>
 
@@ -502,7 +508,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               onCommit={commitUrl}
               ariaLabel={t("provider.apiAddress")}
               inputMode="url"
-              disabled={busy}
+              disabled={busy || managed}
             />
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
               {t("provider.actualRequest")} {" "}
@@ -599,6 +605,29 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             </Field>
           )}
 
+          {/*
+            ★ 放在协议之外 —— 计费方式和用哪个协议没关系,两族协议下都要能改。
+            ★ **不本地 set 状态**,写完靠 `provider:changed` 广播把 `p` 换掉:
+              主进程那边一旦漏了这个字段(它是显式白名单,不是 spread),
+              开关会自己跳回去 —— 这正是我们要看见的,而不是被本地状态盖住。
+          */}
+          <div className="flex items-start gap-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] text-fg">{t("provider.subscription")}</p>
+              <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
+                {t("provider.subscriptionHint")}
+              </p>
+            </div>
+            <div className="shrink-0 pt-0.5">
+              <Toggle
+                checked={p.subscription === true}
+                disabled={busy}
+                onChange={(on) => save({ subscription: on })}
+                label={t("provider.subscription")}
+              />
+            </div>
+          </div>
+
           <Field
             label={authMode === "oauth" ? t("provider.account") : t("provider.apiKey")}
             action={
@@ -623,6 +652,27 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 onCancel={doCancelSignIn}
                 onSignOut={doSignOut}
               />
+            ) : managed ? (
+              /*
+                ★ 托管那条的「密钥」是登录发的 access token,`setCredential` 对它是
+                拒绝的 —— 所以这里**没有「更换」按钮**,不是漏了。给一颗点下去必然
+                报错的按钮,比不给更糟。
+              */
+              <div
+                className={cn(
+                  "flex h-8 min-w-0 items-center gap-2 rounded-[8px] border border-border",
+                  "bg-surface-field px-2.5",
+                )}
+              >
+                <span className="min-w-0 flex-1 truncate text-[13px] tracking-[0.18em] text-fg-muted">
+                  {"••••••••••••"}
+                  {cred?.last4 ?? ""}
+                </span>
+                <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
+                  <Check size={11} />
+                  {t("provider.configured")}
+                </span>
+              </div>
             ) : editingKey || !hasKey ? (
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
@@ -685,7 +735,11 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               </div>
             )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
-              {authMode === "oauth" ? t("provider.signInHint") : t("provider.keySavedHint")}
+              {authMode === "oauth"
+                ? t("provider.signInHint")
+                : managed
+                  ? t("provider.managedKeyHint")
+                  : t("provider.keySavedHint")}
             </p>
             {cred !== null && !cred.encryptionAvailable && (
               /* ★ 不做明文降级,所以这里会真的存不进去 —— 提前说,别等他填完才报错 */

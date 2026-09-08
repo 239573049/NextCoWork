@@ -334,10 +334,30 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       Anthropic 族的不在。实测存在的是 `/coding/v1/messages` 与 `/coding/v1/chat/completions`。
     */
     endpoints: [anth('https://api.kimi.com/coding'), oa('https://api.kimi.com/coding/v1', true)],
-    docsUrl: 'https://www.kimi.com/coding/docs/en/',
+    // ★ /coding/docs 会 302 到这里(2026-09-09 实测),直接写终点少一跳
+    docsUrl: 'https://www.kimi.com/code/docs/en/',
     apiKeyUrl: 'https://www.kimi.com/code/console',
     credentialKind: 'subscription-key',
-    suggestedModels: ['kimi-k3', 'kimi-k2.7-code'],
+    /*
+      ★★ **这里填的是 Model ID,不是版本名 —— 填错不是「查不到」,是直接调用失败。**
+      官方那页把话说死了(2026-09-09 核对):可用的 Model ID 只有下面四个,
+      「填 `Kimi K3` / `K2.7 Code` 这类版本名会导致调用失败」。而这条 preset 的
+      `endpoints[0]` 是 Anthropic 端点、`supportsModelList` 为 false —— 拉不了
+      真实列表,种进去什么用户就只有什么,种错了就是开箱即坏。
+
+      四个的对应关系(同一页的表):
+        k3                        Kimi K3,旗舰,最高 1M 上下文(Moderato 及以上)
+        k3-256k                   K3 的 256K 版,省额度
+        kimi-for-coding           K2.7 Code,全会员可用
+        kimi-for-coding-highspeed K2.7 Code 高速版,~5-6× 输出速度、3× 额度消耗
+                                  (Allegretto 及以上)
+
+      ★ 后两个按会员档位可能无权调用。**仍然种**:那种情况上游回的是明确的权限
+      错误,用户看得懂也改得动;而漏种的表现是「这个模型根本不存在」——
+      他连自己买的档位包含它都不会知道。同 `provider-edit.ts` 那句「宁可多种
+      两个能删的名字,也不要给出一家点什么都没有的供应商」。
+    */
+    suggestedModels: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'],
     notes:
       '★ 域名是 api.kimi.com,**不是** api.moonshot.cn —— 社区里大量「Coding Plan 配 ' +
       'api.moonshot.cn/anthropic 报 401」都出在这里。api.kimi.com 上只有 /coding 前缀可用。',
@@ -360,15 +380,49 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     category: 'domestic',
     recommended: true,
     subscription: true,
+    /*
+      ★★ **Coding 端点排第一,Anthropic 端点排第二 —— 顺序是结论,不是随手写的。**
+      `endpoints[0]` 是 `providerFromPreset` 取的那条主推形态(见 `provider-edit.ts`),
+      而官方 FAQ 把 `…/api/anthropic` 限定成**仅限从未买过 Coding Plan 且额外加白的账号**
+      (2026-09-08 核对)。anth 排第一的话,买了套餐的用户开箱第一次请求就是 401,
+      而上游回的那句「令牌已过期或验证不正确」**一个字都不提端点选错了** ——
+      他只会去反复检查自己那把 key,而 key 是好的。
+
+      ★ anth 仍然留着,只是降到第二位:加白账号确实用得上,而 `endpoints` 同时是
+      「API 格式」开关的候选池,删掉等于那些账号没法切过去。
+
+      ★ 两个地址 2026-09-08 探针验证存活(真路径 401、同前缀假路径 `/api/NOPE/v4` 404)。
+      探针只证明地址在,证不了端点与套餐的匹配关系 —— 那条靠上面的官方 FAQ。
+    */
     endpoints: [
-      anth('https://open.bigmodel.cn/api/anthropic'),
-      oa('https://open.bigmodel.cn/api/coding/paas/v4', false)
+      oa('https://open.bigmodel.cn/api/coding/paas/v4', false),
+      anth('https://open.bigmodel.cn/api/anthropic')
     ],
     docsUrl: 'https://docs.bigmodel.cn/cn/coding-plan/overview',
     apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
     credentialKind: 'subscription-key',
-    suggestedModels: ['glm-5.3', 'glm-5.2'],
-    notes: '★ 订阅 key 与按量 key 不通用。这是「配了半天 401」的头号原因。',
+    /*
+      ★★ **只有这两个,而且 `glm-5.2` 不在其中。**
+      官方「可用模型」原话(2026-09-09 核对,中英两站一致):所有套餐均支持
+      GLM-5.3、GLM-5.3-Flash;**调用 GLM-5.2 / GLM-5.1 会被自动切换到 GLM-5.3**,
+      GLM-5-Turbo / GLM-4.7 会被自动切换到 GLM-5.3-Flash。
+      写 `glm-5.2` 不报错 —— 它只是让用户在模型下拉里选一个到不了的名字,
+      而积分照着 5.3 扣。这种「能用,但不是你选的那个」比 404 难查得多。
+
+      ★★ **flash 必须种进来。** 这条 preset 的端点 `supportsModelList: false`,
+      「从服务商拉取模型列表」按钮是灰的(见 `seedModelsForPreset`),
+      所以这张表就是用户能拿到的**全部**。漏了 flash,他就用不上套餐里抵扣系数
+      低两三倍的那一半(积分系数 6.9/1.7/24 对 2.3/0.56/8),而界面上没有任何
+      一处会告诉他还存在这个模型。
+
+      ★ 官方另给了 `glm-5.3-flash[1m]` 这种 1M 上下文变体写法。**不种**:
+      它是同一个模型的参数形态而不是另一个模型,种进来这张表里就会有两个
+      看不出区别的名字。要用的人在别名里手填即可。
+    */
+    suggestedModels: ['glm-5.3', 'glm-5.3-flash'],
+    notes:
+      '★ 订阅 key 与按量 key 不通用。这是「配了半天 401」的头号原因。' +
+      '★ 翻到 Anthropic 格式前先确认账号已加白 —— 已购 Coding Plan 的账号用不了那条。',
     verification: 'probed'
   },
   {
@@ -386,15 +440,19 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     name: 'Z.AI Coding Plan(订阅制)',
     category: 'domestic',
     subscription: true,
+    /* ★ 顺序与理由同 `zhipu-coding` —— 海外站只是把域名换成 api.z.ai,路径规则一样 */
     endpoints: [
-      anth('https://api.z.ai/api/anthropic'),
-      oa('https://api.z.ai/api/coding/paas/v4', false)
+      oa('https://api.z.ai/api/coding/paas/v4', false),
+      anth('https://api.z.ai/api/anthropic')
     ],
     docsUrl: 'https://docs.z.ai/devpack/quick-start',
     apiKeyUrl: 'https://z.ai/manage-apikey/apikey-list',
     credentialKind: 'subscription-key',
-    suggestedModels: ['glm-5.3', 'glm-5.2'],
-    notes: '★ 订阅 key 与按量 key 不通用。',
+    /* ★ 可用模型同 `zhipu-coding` —— 官方英文站是同一句:GLM-5.2/5.1 自动路由到 5.3 */
+    suggestedModels: ['glm-5.3', 'glm-5.3-flash'],
+    notes:
+      '★ 订阅 key 与按量 key 不通用。' +
+      '★ 翻到 Anthropic 格式前先确认账号已加白 —— 已购 Coding Plan 的账号用不了那条。',
     verification: 'probed'
   },
   {

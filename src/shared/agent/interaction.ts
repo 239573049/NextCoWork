@@ -11,6 +11,38 @@
  */
 import type { PermissionDecision } from './permission'
 
+/** 一道题里的一个候选项。`description` 是选项下面那行小字,模型可以不给。 */
+export interface AskUserOption {
+  label: string
+  description?: string
+}
+
+/**
+ * ★ **一次交互承载多道题,而不是一道** —— 模型在一个决策点上要问的往往不止一件事
+ * (「改哪个模块」+「要不要顺带加测试」)。一道一问的话,内核会连续挂起两次,
+ * 用户答完第一道才看到第二道,而这两道题本来是同一个决策;中间还夹着一次模型往返,
+ * 用户改主意时已经无从回退。
+ *
+ * 三种题型压在同一个结构里,靠两个布尔量区分,而不是再开一个 union:
+ * - 单选:`multiSelect: false` + `options`
+ * - 多选:`multiSelect: true` + `options`
+ * - 纯问答:`options` 为空(此时 `allowFreeform` 必须为真,否则这道题无法回答)
+ *
+ * `allowFreeform` 和 `options` 正交 —— 「给了选项,但也允许自己写」是最常用的一档,
+ * 也就是界面上的「其它」。
+ */
+export interface AskUserQuestion {
+  /**
+   * 短标签(如「修复范围」),界面上是这道题的角标,回答回给模型时也用它作键 ——
+   * 多道题的回答必须能被模型对上号,靠下标对是脆的(模型会重排)。
+   */
+  header: string
+  question: string
+  options: AskUserOption[]
+  multiSelect: boolean
+  allowFreeform: boolean
+}
+
 export type InteractionKind = PendingInteraction['kind']
 
 export type PendingInteraction =
@@ -29,9 +61,8 @@ export type PendingInteraction =
       kind: 'ask_user'
       id: string
       runId: string
-      question: string
-      choices?: string[]
-      allowFreeform: boolean
+      /** 一次可以问多道题 —— 见 `AskUserQuestion` 上的注释 */
+      questions: AskUserQuestion[]
       createdAt: number
     }
   | {
@@ -44,8 +75,12 @@ export type PendingInteraction =
 
 export type InteractionResponse =
   | { id: string; kind: 'tool_permission'; decision: PermissionDecision }
-  /** null = dismiss(用户关掉了框,不是回答) */
-  | { id: string; kind: 'ask_user'; answer: string | null }
+  /**
+   * null = dismiss(用户关掉了框,不是回答)。
+   * 否则**每道题一组回答**,顺序与 `questions` 一一对应;单选题也是长度为 1 的数组,
+   * 而不是裸字符串 —— 两种形状会让下游每处都得先判类型。
+   */
+  | { id: string; kind: 'ask_user'; answers: string[][] | null }
   | { id: string; kind: 'plan_approval'; approved: boolean; feedback?: string }
 
 /** 待决项的最终去向。`aborted` 是中断路径写进去的(方案 §4.8 第 2 步)。 */
@@ -75,7 +110,7 @@ export function interactionTitle(i: PendingInteraction): string {
     case 'tool_permission':
       return `允许执行 ${i.toolName}?`
     case 'ask_user':
-      return i.question
+      return i.questions[0]?.question ?? '需要你的回答'
     case 'plan_approval':
       return '确认执行方案?'
   }

@@ -145,6 +145,35 @@ describe('★ 关库重开之后,配置一样都不少', () => {
     ).toEqual({ 关闭: 'off', 五分钟: '5m', 一小时: '1h' })
   })
 
+  /**
+   * ★★ 订阅制标记决定这条供应商的用量**参不参与计价**(`runtime.ts`
+   * 的 `persistUsageAttempt`)。它是 `providers.json` 里的一个可选字段,
+   * 没有真列也没有迁移 —— 所以「跨重启」和「经导出导入」这两步必须钉住:
+   * 丢了不会报错,只会让用户在费用页看到一笔他早就按月付过的开销。
+   *
+   * ★ 老库的行没有这个键,读回来是 `undefined`(≠ false)—— 行为与加这个字段
+   * 之前一致,这是刻意的:见 `provider-edit.ts` 里「老库不回填」那段。
+   */
+  it('订阅制标记跨重启并经导出导入保留；老行缺这个键读回 undefined', () => {
+    store.putProvider({ ...provider('订阅', 0), subscription: true })
+    store.putProvider({ ...provider('按量', 1), subscription: false })
+    store.putProvider(provider('老行', 2)) // 根本没有这个键
+
+    restart()
+
+    const read = (): Record<string, boolean | undefined> =>
+      Object.fromEntries(store.listProviders().map((p) => [p.id, p.subscription]))
+    expect(read()).toEqual({ 订阅: true, 按量: false, 老行: undefined })
+
+    const exported = repo.exportDataSnapshot()
+    for (const id of ['订阅', '按量', '老行']) store.removeProvider(id)
+    expect(store.listProviders()).toEqual([])
+    repo.mergeDataExport(exported)
+    restart()
+
+    expect(read()).toEqual({ 订阅: true, 按量: false, 老行: undefined })
+  })
+
   it('别名带着能力位和数字字段一起回来,不是只剩个名字', () => {
     store.putProvider(provider('主', 0))
     store.putAlias(alias('主', 'm'))

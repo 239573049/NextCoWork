@@ -121,6 +121,20 @@ export interface UpstreamProvider {
   /** 故障切换顺序,小的优先 */
   priority: number
   enabled: boolean
+  /**
+   * 订阅制额度(Coding Plan 之类)—— 按月或按积分计,不按 token 计费。
+   *
+   * ★★ **有它 = 这条供应商的用量不参与计价**(`runtime.ts` 的 `persistUsageAttempt`)。
+   * 在此之前,「订阅制不计入总费用」只是一个巧合:`PRICING_SEED` 里恰好没收录这几家
+   * (`pricing-seed.ts` 的 EXCLUDED 清单),于是 `findPricing` 返回 null。
+   * 而那个巧合**对用户自建的供应商不成立** —— `findPricing` 查不到
+   * `(providerId, modelId)` 时会退回 `(null, modelId)` 那条**通用价**,
+   * 于是一个自建的订阅制中转,只要模型名叫 `claude-sonnet-4` 这类通用名,
+   * 就会被按 token 算出一笔真金白银的假账单。这个字段是那件事的唯一修法。
+   *
+   * ★ 可选:老库里的记录没有它,读回来是 `undefined`,行为与今天一致。
+   */
+  subscription?: boolean
   /** Protocol-specific settings. Missing on legacy provider JSON. */
   protocolOptions?: ProviderProtocolOptions
 }

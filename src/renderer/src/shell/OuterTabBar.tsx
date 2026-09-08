@@ -58,7 +58,18 @@ export function OuterTabBar({
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
 
   return (
-    <div className="flex min-w-0 flex-1 items-end gap-0.5">
+    /*
+      ★ `self-stretch` 是**几何要件**,不是随手加的。没有它,这个根 div 的交叉轴尺寸
+      = 内容高 = 30px(最高的是 Tab),而不是外面那条 34px。于是右端那两颗面板开关的
+      `self-center` 就居中在 30px 里,落到窗口 y13..40、盒心 y27 ——
+      比左上角那颗「展开侧边栏」和 Windows 那三颗窗口按钮(都是盒心 y25)**低 2px**。
+      量参考图 docs/image-new/image copy.png 也是 y25:
+        x=997 竖扫 → 药丸底 #dbd8d1 起于 y11 止于 y38,(11+39)/2 = 25
+        x=104  竖扫(image.png 收起态的展开键)→ 同样 y11..38
+      拉伸到 34px 后 `items-end` 照旧把 Tab / `+` / 拖动空白压在底边(rel y4..34,
+      和以前逐像素相同),只有 `self-center` 的那一组挪回真正的条心。
+    */
+    <div className="flex min-w-0 flex-1 self-stretch items-end gap-0.5">
       {tabs.map((tab, i) => {
         const active = tab.id === activeId;
         const running =
@@ -187,6 +198,16 @@ export function OuterTabBar({
         同一张图里 `PanelRight` 是 底 #dbd8d1 + 图标 #2d4739,
         而 `PanelBottom` 还是 底 #e8e4dd + 图标 #7e7f7e。
 
+        ★ `strokeWidth={1.5}` 也是量出来的,别删回 lucide 的默认 2。笔画粗细是
+        **viewBox 单位**,size=16 时实际渲染 = 2 × 16/24 = 1.33px —— 落不到整数设备
+        像素上,1x DPI 下被抹成两列灰,看着比旁边的东西「脏一档」。1.5 × 16/24 = 1.0px,
+        正好一列。参考图里这几颗也确实是**单像素**笔画:
+          image copy.png y=25 横扫 → PanelBottom 左右边框各只有 x=949 / x=962 一个
+          #7e7f7e 像素,下一列就回到底色;image.png x=98 / x=111 同理(#2d4739)。
+        在 Windows 上这条尤其要紧:右边紧挨着的三颗窗口按钮是手写 SVG、`strokeWidth: 1`
+        配 10×10 viewBox = 实打实 1px 方头(见 WindowControls.tsx 文件头),
+        默认 2 的 lucide 摆在它旁边就是两种笔法拼在一行。
+
         它们**是窗口级的**(见 stores/window.ts 的注释),所以不接受 Tab 参数。
       */}
       <div className="flex shrink-0 items-center gap-1 self-center">
@@ -198,7 +219,7 @@ export function OuterTabBar({
           onClick={onToggleBottomPanel}
           className="rounded-pill"
         >
-          <PanelBottom size={16} />
+          <PanelBottom size={16} strokeWidth={1.5} />
         </IconButton>
         <IconButton
           label={t("nav.workspaceFiles")}
@@ -208,7 +229,7 @@ export function OuterTabBar({
           onClick={onToggleRightPanel}
           className="rounded-pill"
         >
-          <PanelRight size={16} />
+          <PanelRight size={16} strokeWidth={1.5} />
         </IconButton>
       </div>
     </div>

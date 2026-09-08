@@ -1,7 +1,6 @@
 import { ArrowRight, ShieldCheck } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { Mark } from '../components/brand/Mark'
-import { cn } from '../lib/cn'
 import { startClientLogin, useOffline } from '../services/client-auth'
 import { useI18n } from '../i18n'
 
@@ -28,9 +27,15 @@ export function WelcomeView({ onComplete }: { onComplete: () => void }): ReactNo
           {!busy && <ArrowRight size={16} className="transition-transform group-hover:translate-x-0.5" />}
         </button>
         <button type="button" disabled={busy} onClick={() => void offline()} className="mt-5 text-[13px] text-accent transition hover:text-white disabled:opacity-60">{t('auth.useOffline')}</button>
+        {/*
+          ★ 只留**一行**提示。原先是两行:「本地功能全部可用」+「云同步、钱包等
+          账号功能登录后开启」—— 那是同一件事的正反面,连标题、tagline 一起占了
+          首屏五行去说一个取舍。而且盾牌图标配的是「功能完整度」那句,语义对不上:
+          ShieldCheck 承诺的是**数据在哪**,不是**功能全不全**。合成一句之后图标
+          终于名副其实,「登录换来什么」也顺着同一句话说完了。
+        */}
         <div className="mt-7 flex items-center gap-2 text-[11px] text-white/30"><ShieldCheck size={14} />{t('auth.localHint')}</div>
         {error && <p className="mt-4 text-[12px] text-danger">{error}</p>}
-        <p className={cn('mt-3 text-[11px] text-white/25', error && 'mt-2')}>{t('auth.offlineHint')}</p>
       </div>
     </main>
   )

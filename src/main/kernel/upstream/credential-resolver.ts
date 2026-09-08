@@ -13,7 +13,7 @@ import {
   type ProviderCredential
 } from '../../../shared/domain/credential'
 import { postToken } from '../oauth/flow'
-import { oauthSpecOf } from '../oauth/registry'
+import { oauthSpecOf, type OAuthIdentity, type OAuthProviderSpec } from '../oauth/registry'
 import type { KernelHost } from '../host'
 
 /**
@@ -32,8 +32,17 @@ export class CredentialAuthError extends Error {
   }
 }
 
+/**
+ * 该不该现在就刷。
+ *
+ * ★★ `expiresAt` 为 `null` = **不知道什么时候过期**,一律答「先别刷」。
+ * 反过来把未知当成「已过期」的话,每一次请求前都会先刷一遍 —— 那不只是慢,
+ * 对 refresh token 会轮换的家来说还是一条自己给自己制造并发的路。
+ * 未知时真正的兜底是 401 之后的 `refreshNow`(`router.ts` 的 401 重试),
+ * 那条路径覆盖的本来就是「凭证明明没过期却 401」这类情况。
+ */
 function expiringSoon(cred: OAuthCredential, now: number): boolean {
-  return cred.expiresAt - now < SKEW_MS
+  return cred.expiresAt !== null && cred.expiresAt - now < SKEW_MS
 }
 
 export class CredentialResolver {
@@ -103,16 +112,62 @@ export class CredentialResolver {
   private async doRefresh(ref: string, cred: OAuthCredential): Promise<OAuthCredential> {
     const spec = oauthSpecOf(cred.issuer)
 
+    // ★ 先取出来再判,而不是 `spec.refresh!` —— 非空断言等于把这处的正确性
+    //   从编译器手里拿回自己手上,而它并不比编译器可靠
+    const hook = spec.refresh
+    const identity =
+      hook === undefined
+        ? await this.standardRefresh(ref, cred, spec)
+        : await this.customRefresh(hook, cred)
+
+    if (identity === null) {
+      throw this.markReauth(ref, cred, '刷新回来的凭证不完整，请重新登录')
+    }
+
+    const next: OAuthCredential = {
+      ...cred,
+      accessToken: identity.accessToken,
+      // ★ 轮换后的 refresh token 必须存下来。上游有的家刷新时不回新的,那就沿用旧的
+      refreshToken: identity.refreshToken,
+      expiresAt: identity.expiresAt,
+      accountId: identity.accountId,
+      ...(identity.email === undefined ? {} : { email: identity.email }),
+      ...(identity.planType === undefined ? {} : { planType: identity.planType }),
+      refreshedAt: this.host.clock.now()
+    }
+    delete next.needsReauth
+
+    /*
+      ★★ **写回必须在返回之前完成。** 轮换后的 refresh token 只存在于这一次响应里 ——
+      进程如果崩在写回之前,库里那把旧的已经被上游作废了,用户下次启动直接掉线。
+    */
+    await this.host.secrets.set(ref, serializeCredential(next))
+    this.onChanged?.(ref)
+    return next
+  }
+
+  /** 标准 `grant_type=refresh_token`。**没有声明 `refresh` 钩子的家走的都是这里。** */
+  private async standardRefresh(
+    ref: string,
+    cred: OAuthCredential,
+    spec: OAuthProviderSpec
+  ): Promise<OAuthIdentity | null> {
     let result: Awaited<ReturnType<typeof postToken>>
     try {
       result = await postToken(
         spec,
         this.host.fetch,
         {
-          grant_type: 'refresh_token',
-          refresh_token: cred.refreshToken,
-          client_id: spec.clientId,
-          scope: spec.scope
+          contentType: 'form',
+          body: {
+            grant_type: 'refresh_token',
+            refresh_token: cred.refreshToken,
+            client_id: spec.clientId,
+            // ★ `scope` 现在是可选的 —— 没声明的家**一个字都不能写**。
+            //   直接写 `scope: spec.scope` 的话,URLSearchParams 会把它编成
+            //   字面量 `scope=undefined` 发出去,而那个 400 不会提到 scope。
+            ...(spec.scope === undefined ? {} : { scope: spec.scope })
+          }
         },
         AbortSignal.timeout(30_000)
       )
@@ -141,31 +196,36 @@ export class CredentialResolver {
       throw this.markReauth(ref, cred, `登录已失效（HTTP ${result.status}），请重新登录`)
     }
 
-    const identity = spec.identity(result.json, this.host.clock.now())
-    if (identity === null) {
-      throw this.markReauth(ref, cred, '刷新回来的凭证不完整，请重新登录')
-    }
+    return spec.identity(result.json, this.host.clock.now())
+  }
 
-    const next: OAuthCredential = {
-      ...cred,
-      accessToken: identity.accessToken,
-      // ★ 轮换后的 refresh token 必须存下来。上游有的家刷新时不回新的,那就沿用旧的
-      refreshToken: identity.refreshToken,
-      expiresAt: identity.expiresAt,
-      accountId: identity.accountId,
-      ...(identity.email === undefined ? {} : { email: identity.email }),
-      ...(identity.planType === undefined ? {} : { planType: identity.planType }),
-      refreshedAt: this.host.clock.now()
+  /**
+   * 这家自己实现的刷新(不是标准 OAuth 刷新的那些)。
+   *
+   * ★★ **任何非 `CredentialAuthError` 的异常一律按网络故障处理,不动库。**
+   * 钩子里通常要自己发一两个请求,而它抛出来的多半是 fetch 的错。把它当成
+   * 「登录失效」会因为一次断网就把用户踢下线;反过来,钩子如果**确知**是失效
+   * (上游明确拒了),它自己抛 `CredentialAuthError`,这里原样放行。
+   */
+  private async customRefresh(
+    hook: NonNullable<OAuthProviderSpec['refresh']>,
+    cred: OAuthCredential
+  ): Promise<OAuthIdentity | null> {
+    try {
+      return await hook(cred, {
+        fetch: this.host.fetch,
+        // ★ 和标准路径同一条规矩:调用方的 signal 不下传,只用独立超时兜底
+        signal: AbortSignal.timeout(30_000),
+        now: this.host.clock.now()
+      })
+    } catch (err) {
+      if (err instanceof CredentialAuthError) throw err
+      throw new CredentialAuthError(
+        agentError('network', `刷新登录凭证失败：${err instanceof Error ? err.message : String(err)}`, {
+          retryable: true
+        })
+      )
     }
-    delete next.needsReauth
-
-    /*
-      ★★ **写回必须在返回之前完成。** 轮换后的 refresh token 只存在于这一次响应里 ——
-      进程如果崩在写回之前,库里那把旧的已经被上游作废了,用户下次启动直接掉线。
-    */
-    await this.host.secrets.set(ref, serializeCredential(next))
-    this.onChanged?.(ref)
-    return next
   }
 
   /**

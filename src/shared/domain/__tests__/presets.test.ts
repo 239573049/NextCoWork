@@ -105,6 +105,31 @@ describe('预设表 · 主键与完整性', () => {
   ] as const)('%s 使用准确的凭证称呼', (id, kind) => {
     expect(findPreset(id)?.credentialKind).toBe(kind)
   })
+
+  /**
+   * ★★ **GLM 两条 Coding Plan 的首选端点必须是 coding 端点。**
+   *
+   * `endpoints[0]` 就是 `providerFromPreset` 取的那条(见 `provider-edit.ts`),
+   * 而智谱官方 FAQ 把 `…/api/anthropic` 限定成**仅限从未购买过 Coding Plan
+   * 且额外加白的账号**(2026-09-08 核对)。排反了的表现是:买了套餐的用户
+   * 添加完第一次请求就 401,而上游回的「令牌已过期或验证不正确」**一个字
+   * 都不提端点选错了** —— 他只会去反复检查那把其实没问题的 key。
+   *
+   * ⚠️ **不要把这条改写成「订阅制预设的 endpoints[0] 不能是 anthropic」这类
+   * 通用不变量** —— Kimi Coding Plan 的首选端点就是 `api.kimi.com/coding`
+   * 那条 anthropic 端点(它的 notes 写明该域名下只有 /coding 前缀可用),
+   * 通用不变量会误伤它。这里只钉这两家。
+   */
+  it.each([
+    ['zhipu-coding', 'https://open.bigmodel.cn/api/coding/paas/v4'],
+    ['zai-coding', 'https://api.z.ai/api/coding/paas/v4']
+  ] as const)('%s 的首选端点是 coding 端点,不是仅限加白账号的 anthropic 端点', (id, baseUrl) => {
+    const first = findPreset(id)?.endpoints[0]
+    expect(first?.baseUrl).toBe(baseUrl)
+    expect(first?.protocol).toBe('openai-chat')
+    // ★ anth 端点不删,只是降到第二位:加白账号用得上,它同时是「API 格式」开关的候选池
+    expect(findPreset(id)?.endpoints.some((e) => e.protocol === 'anthropic')).toBe(true)
+  })
 })
 
 describe('预设表 · baseUrl 形状', () => {

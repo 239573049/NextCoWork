@@ -192,8 +192,7 @@ describe('RunHandle · 待决交互与快照', () => {
       kind: 'ask_user',
       id,
       runId: 'r1',
-      question: 'q',
-      allowFreeform: true,
+      questions: [{ header: 'q', question: 'q', options: [], multiSelect: false, allowFreeform: true }],
       createdAt: 1
     }
   })

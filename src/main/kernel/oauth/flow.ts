@@ -9,8 +9,8 @@
  */
 import type { OAuthCredential } from '../../../shared/domain/credential'
 import { awaitOAuthCallback, type LoopbackResult } from '../../net/oauth-loopback'
-import { createPkce, randomState } from './pkce'
-import { redirectUriOf, type OAuthProviderSpec } from './registry'
+import { createPkce, randomState, stateMatches } from './pkce'
+import { redirectUriOf, type OAuthProviderSpec, type OAuthTokenRequest, type OAuthTokenRequestArgs } from './registry'
 
 export type OAuthPhase =
   | 'opening'
@@ -60,10 +60,14 @@ function authorizeUrl(
   u.searchParams.set('response_type', 'code')
   u.searchParams.set('client_id', spec.clientId)
   u.searchParams.set('redirect_uri', args.redirectUri)
-  u.searchParams.set('scope', spec.scope)
+  // ★ 没声明 scope 的家**一个字都不写**,而不是写成空串 —— 有的服务端对
+  //   `scope=` 和「没有 scope」的反应不一样
+  if (spec.scope !== undefined) u.searchParams.set('scope', spec.scope)
   u.searchParams.set('state', args.state)
-  u.searchParams.set('code_challenge', args.challenge)
-  u.searchParams.set('code_challenge_method', 'S256')
+  if (spec.pkce !== false) {
+    u.searchParams.set('code_challenge', args.challenge)
+    u.searchParams.set('code_challenge_method', 'S256')
+  }
   for (const [k, v] of Object.entries(spec.extraAuthorizeParams ?? {})) {
     u.searchParams.set(k, v)
   }
@@ -73,18 +77,28 @@ function authorizeUrl(
 /**
  * 换 token。授权码流程和刷新流程共用这一个 —— 两边的差别只有 body 里那几个字段,
  * 而**错误处理、超时、内容类型这些坑是同一批**,写两遍就会有一遍漏掉。
+ *
+ * ★ body 的**形状**由调用方给(`OAuthTokenRequest`),因为标准 OAuth 是表单
+ * 而有的家(ZCode)要 JSON;但上面那批坑仍然只有这一份。
  */
 export async function postToken(
   spec: OAuthProviderSpec,
   fetchImpl: typeof globalThis.fetch,
-  form: Record<string, string>,
+  request: OAuthTokenRequest,
   signal: AbortSignal
 ): Promise<{ ok: true; json: unknown } | { ok: false; status: number; body: string }> {
-  const body = new URLSearchParams({ ...form, ...(spec.extraTokenParams ?? {}) })
+  const merged: Record<string, unknown> = { ...request.body, ...(spec.extraTokenParams ?? {}) }
+  const asJson = request.contentType === 'json'
   const res = await fetchImpl(spec.tokenUrl, {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: body.toString(),
+    headers: {
+      'content-type': asJson ? 'application/json' : 'application/x-www-form-urlencoded',
+      accept: 'application/json',
+      ...(request.headers ?? {})
+    },
+    body: asJson
+      ? JSON.stringify(merged)
+      : new URLSearchParams(merged as Record<string, string>).toString(),
     signal
   })
   const text = await res.text()
@@ -96,18 +110,122 @@ export async function postToken(
   }
 }
 
+/**
+ * 标准授权码换 token 的请求体 —— **`tokenRequest` 缺省时的那一份。**
+ *
+ * ★ 单独导出,是为了让「默认值等于今天的行为」这句话有个可以直接对照的实体:
+ * 加了钩子之后 ChatGPT 那条路径走的仍然是这里,一个字节都没变。
+ */
+export function defaultTokenRequest(args: OAuthTokenRequestArgs): OAuthTokenRequest {
+  return {
+    contentType: 'form',
+    body: {
+      grant_type: 'authorization_code',
+      code: args.code,
+      client_id: args.clientId,
+      // ★ 这里的 redirect_uri 必须和授权请求里那个**逐字相同** —— 服务端会比对,
+      //   不一致就是一个不说明原因的 invalid_grant。所以两处都从 redirectUriOf 来
+      redirect_uri: args.redirectUri,
+      code_verifier: args.verifier
+    }
+  }
+}
+
+/**
+ * 手动粘贴形态下等用户的时长。
+ *
+ * ★★ 在此之前这条路径**根本没有超时** —— `await deps.awaitPastedCode()` 只能被
+ * abort 或者一次 submitCode 唤醒,于是用户关掉授权页什么也不做,登录就永远挂在
+ * 「等待授权中」,连一句「超时」都等不到。回环那条路径有五分钟兜底(见
+ * `oauth-loopback.ts` 的 `DEFAULT_TIMEOUT_MS`),这里对齐它。
+ */
+const MANUAL_PASTE_TIMEOUT_MS = 5 * 60_000
+
+/** 等用户粘贴,但**带上超时和取消** —— 三条路都收敛,不会留下一个吊着的 Promise */
+async function awaitPasteWithDeadline(await_: () => Promise<string>, signal: AbortSignal): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+  try {
+    return await Promise.race([
+      await_(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new OAuthAbandonedError('timeout'))
+        }, MANUAL_PASTE_TIMEOUT_MS)
+        onAbort = (): void => {
+          reject(new OAuthAbandonedError('cancelled'))
+        }
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+      })
+    ])
+  } finally {
+    // ★ 赢家出来之后必须把输家拆干净:留着定时器会在五分钟后 reject 一个
+    //   已经没人接的 Promise,那就是一次 unhandled rejection
+    if (timer !== undefined) clearTimeout(timer)
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
+ * 从用户粘回来的东西里取出授权码,并**校验 state**。
+ *
+ * ★★ **这里必须和回环那条路径一样校验 state。** 之前粘贴路径是直接把用户
+ * 输入当 code 用的 —— 而 state 正是 CSRF 防线本身:没有它,一个「你的授权码是
+ * xxx,请粘进应用」的钓鱼页就能把攻击者的账号绑到用户的应用上。回环那条早就
+ * 校验了(`oauth-loopback.ts` 里那段注释),粘贴这条不能是个缺口。
+ *
+ * ★ 所以收的是**整条回调地址**,不是光秃秃一个 code:地址栏里一次全选复制,
+ * code 不会被手抖截断,state 也跟着一起回来了。`zcode://oauth/callback?...`
+ * 这种自定义 scheme 一样能被 `new URL` 解析。
+ */
+export function pastedCallbackCode(
+  pasted: string,
+  expectedState: string
+): { ok: true; code: string } | { ok: false; reason: string } {
+  const text = pasted.trim()
+  if (text === '') return { ok: false, reason: '没有粘贴任何内容' }
+
+  let params: URLSearchParams
+  try {
+    params = new URL(text).searchParams
+  } catch {
+    // 只复制了 `?` 后面那一段的情况
+    params = new URLSearchParams(text.startsWith('?') ? text.slice(1) : text)
+  }
+
+  const error = params.get('error')
+  if (error !== null) {
+    return { ok: false, reason: params.get('error_description') ?? error }
+  }
+
+  const code = params.get('code')
+  if (code === null || code === '') {
+    return { ok: false, reason: '这段内容里没有授权码，请把浏览器地址栏里完整的回调地址复制过来' }
+  }
+  if (!stateMatches(expectedState, params.get('state'))) {
+    return { ok: false, reason: 'state 不匹配，请重新发起登录（不要使用旧的回调地址）' }
+  }
+  return { ok: true, code }
+}
+
 async function collectCode(
   deps: OAuthFlowDeps,
   args: { challenge: string; state: string; redirectUri: string }
 ): Promise<string> {
   await deps.openBrowser(authorizeUrl(deps.spec, args))
   deps.onPhase?.('waiting')
-  if (deps.awaitPastedCode === undefined) {
+  const awaitPastedCode = deps.awaitPastedCode
+  if (awaitPastedCode === undefined) {
     throw new OAuthFailedError('这家需要手动粘贴授权码，但没有提供输入通道')
   }
-  const pasted = (await deps.awaitPastedCode()).trim()
-  if (pasted === '') throw new OAuthAbandonedError('cancelled')
-  return pasted
+  const pasted = await awaitPasteWithDeadline(awaitPastedCode, deps.signal)
+  // 空输入 = 用户在输入框里点了确定但没填,按放弃处理(和关掉授权页同一个结局)
+  if (pasted.trim() === '') throw new OAuthAbandonedError('cancelled')
+
+  const parsed = pastedCallbackCode(pasted, args.state)
+  if (!parsed.ok) throw new OAuthFailedError(parsed.reason)
+  return parsed.code
 }
 
 function describe(result: LoopbackResult): never {
@@ -193,25 +311,37 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
   }
 
   deps.onPhase?.('exchanging')
+  const args: OAuthTokenRequestArgs = {
+    code,
+    redirectUri,
+    verifier: pkce.verifier,
+    state,
+    clientId: spec.clientId
+  }
   const token = await postToken(
     spec,
     deps.fetch,
-    {
-      grant_type: 'authorization_code',
-      code,
-      client_id: spec.clientId,
-      // ★ 这里的 redirect_uri 必须和授权请求里那个**逐字相同** —— 服务端会比对,
-      //   不一致就是一个不说明原因的 invalid_grant。所以两处都从 redirectUriOf 来
-      redirect_uri: redirectUri,
-      code_verifier: pkce.verifier
-    },
+    spec.tokenRequest?.(args) ?? defaultTokenRequest(args),
     signal
   )
   if (!token.ok) {
     throw new OAuthFailedError(`换取凭证失败（HTTP ${token.status}）：${token.body.slice(0, 300)}`)
   }
 
-  const identity = spec.identity(token.json, deps.now())
+  /*
+    ★ 第二跳(有的家 token 端点给的还不是能发请求的令牌)。缺省是恒等,
+    所以 ChatGPT 那条路径走到这里等于什么都没发生。
+  */
+  const exchanged =
+    spec.finishExchange === undefined
+      ? token.json
+      : await spec.finishExchange(token.json, {
+          fetch: deps.fetch,
+          signal,
+          now: deps.now()
+        })
+
+  const identity = spec.identity(exchanged, deps.now())
   if (identity === null) {
     throw new OAuthFailedError('授权信息不完整（缺少账号 id 或令牌），请重试登录')
   }

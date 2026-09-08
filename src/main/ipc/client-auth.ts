@@ -89,23 +89,55 @@ async function refreshAccessToken(): Promise<void> {
   return refreshInFlight
 }
 
+/**
+ * 保证这条供应商记录在，且**身份字段**是平台那份。
+ *
+ * ★★ **只钉身份,不钉配置。** 名称 / 地址 / 凭证引用归登录流程(access token 是发往
+ * 平台域名的凭证,地址一旦被改走就等于把它送到别处去);而 `protocol` /
+ * `protocolOptions` / `priority` / `enabled` 是**用户在设置页改的**,这里必须原样留着 ——
+ * 以前整条重写,表现是用户翻完「API 格式」开关,下一次读登录态就被静默改回 openai-chat。
+ */
 function ensureClientProvider(): void {
+  const identity = {
+    id: CLIENT_PROVIDER_ID,
+    name: 'NextCoWork',
+    baseUrl: `${API_ROOT}/v1`,
+    credentialRef: ACCESS_REF
+  } as const
   const current = store.listProviders().find((p) => p.id === CLIENT_PROVIDER_ID)
-  if (!current || current.name !== 'NextCoWork' || current.baseUrl !== `${API_ROOT}/v1` || current.protocol !== 'openai-chat' || current.credentialRef !== ACCESS_REF || current.enabled !== true) {
-    store.putProvider({ id: CLIENT_PROVIDER_ID, name: 'NextCoWork', protocol: 'openai-chat', baseUrl: `${API_ROOT}/v1`, credentialRef: ACCESS_REF, priority: 1, enabled: true })
+  if (current === undefined) {
+    store.putProvider({ ...identity, protocol: 'openai-chat', priority: 1, enabled: true })
+    return
+  }
+  if (
+    current.name !== identity.name ||
+    current.baseUrl !== identity.baseUrl ||
+    current.credentialRef !== identity.credentialRef
+  ) {
+    store.putProvider({ ...current, ...identity })
   }
 }
 
+/**
+ * 首次登录时把平台的模型列表灌进去。
+ *
+ * ★★ **已经有别名就一步都不做** —— 这张表在设置页是可编辑的(增删、改名、排序),
+ * 而这个函数每次读登录态都会跑。不早退的话它就是一次**整表覆盖**:用户删掉的模型
+ * 下次启动自己回来,改过的顺序被重排。自动同步因此只服务冷启动,之后靠设置页
+ * 那颗「从服务商拉取模型列表」按钮刷新(它走 `provider:fetchModels` + `provider:setAliases`,
+ * 是替换语义、可勾选)。
+ *
+ * 代价:平台以后新增的模型不会再自动出现在老用户的列表里。这是「删掉的不许自己回来」
+ * 的必然对价 —— 两者不可能同时成立,而后者是用户明确要的。
+ */
 async function syncClientModels(access: string): Promise<void> {
+  if (store.listAliases().some((a) => a.providerId === CLIENT_PROVIDER_ID)) return
   try {
     const response = await getHost().fetch(`${API_ROOT}/v1/models`, { headers: { Authorization: `Bearer ${access}` } })
     if (!response.ok) return
     if (meta()?.mode !== 'authenticated') return
     const body = await response.json() as { data?: Array<{ id: string; display_name?: string; displayName?: string; context_window?: number; max_output_tokens?: number; capabilities?: string[] }> }
     const remote = body.data ?? []
-    const existing = store.listAliases().filter((a) => a.providerId === CLIENT_PROVIDER_ID)
-    const ids = new Set(remote.map((m) => m.id))
-    for (const alias of existing) if (!ids.has(alias.alias)) store.removeAlias(CLIENT_PROVIDER_ID, alias.alias)
     remote.forEach((m, index) => {
       const caps = new Set((m.capabilities ?? []).map((x) => x.toLowerCase()))
       store.putAlias({ alias: m.id, providerId: CLIENT_PROVIDER_ID, upstreamModel: m.id, priority: index * 10,

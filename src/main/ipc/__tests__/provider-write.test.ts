@@ -25,12 +25,13 @@ import { store } from '../../state/store'
 import {
   listModels,
   listProviders,
+  removeModel,
   removeProvider,
   renameModel,
   setAliases,
   upsertProvider
 } from '../provider'
-import { BUILTIN_PROVIDER_ID } from '../../../shared/domain/presets'
+import { BUILTIN_PROVIDER_ID, CLIENT_PROVIDER_ID } from '../../../shared/domain/presets'
 
 let dir = ''
 
@@ -151,6 +152,27 @@ describe('upsertProvider', () => {
         transport: { region: 'cn-east', timeoutMs: 30_000 }
       }
     })
+  })
+
+  /**
+   * ★★ 订阅制标记走的是 `upsertProvider` 里那张**显式白名单**,不是 spread。
+   * 漏一行的表现不是报错,而是:用户打开开关 → 界面跳回去;更糟的是他先打开、
+   * 之后随便改个名字,`ProviderPanel.save()` 发的是全量 `{...p, ...patch}`,
+   * 而主进程那边一声不吭地把标记丢了 —— 账单里于是凭空多出一笔本不该计价的开销。
+   */
+  it('订阅制标记能存进去，改名不抹掉它，显式 false 能关掉', () => {
+    expect(upsertProvider(draft()).subscription).toBeUndefined()
+
+    expect(upsertProvider(draft({ subscription: true })).subscription).toBe(true)
+
+    // ★ 「省略 = 保留库里那条」:旧版导出的 JSON 里根本没有这个键,
+    //   取「省略 = false」的话导入一次就静默抹掉
+    const renamed = upsertProvider(draft({ name: 'Acme 新名字' }))
+    expect(renamed.subscription).toBe(true)
+    expect(store.listProviders().find((p) => p.id === 'acme')?.subscription).toBe(true)
+
+    // ★ `false ?? x` 求值为 false —— 显式关闭必须真的关掉,不能被回落吃掉
+    expect(upsertProvider(draft({ subscription: false })).subscription).toBe(false)
   })
 
   it('空的嵌套更新保留已有档位；显式 undefined/null 不能清空或绕过校验', () => {
@@ -441,5 +463,82 @@ describe('供应商 id 的字符约束', () => {
   it('拒收带斜杠的 id —— 它会让 providerId/alias 复合键歧义', () => {
     expect(() => upsertProvider(draft({ id: 'a/b', name: 'x', baseUrl: 'https://x.invalid' })))
       .toThrow(/斜杠/u)
+  })
+})
+
+/**
+ * 内置 NextCoWork 那条是**字段级托管**,不是整条只读。
+ *
+ * 边界:名称 / 地址 / 凭证归登录流程(`client-auth.ts`),协议格式和模型列表归用户。
+ * 两侧都是无声失败的那类 —— 托管字段被采信了,平台 access token 就会被发到
+ * 用户填的那个地址去;而模型别名要是仍然拒写,设置页上的按钮点了只会弹一句报错。
+ */
+describe('内置 NextCoWork 供应商:哪些能改,哪些不能', () => {
+  const PLATFORM_URL = 'https://nextco.work/v1'
+
+  /** 登录流程建出来的那条(`ensureClientProvider`)。这里直接落库,不经过 upsert */
+  const seedClient = (): void => {
+    store.putProvider({
+      id: CLIENT_PROVIDER_ID,
+      name: 'NextCoWork',
+      protocol: 'openai-chat',
+      baseUrl: PLATFORM_URL,
+      credentialRef: 'nextcowork:client-access-token',
+      priority: 1,
+      enabled: true
+    })
+  }
+
+  const client = (): UpstreamProvider | undefined =>
+    listProviders().find((p) => p.id === CLIENT_PROVIDER_ID)
+
+  it('协议格式能改', () => {
+    seedClient()
+
+    upsertProvider({ ...draft(), id: CLIENT_PROVIDER_ID, name: 'NextCoWork', baseUrl: PLATFORM_URL, protocol: 'anthropic' })
+
+    expect(client()?.protocol).toBe('anthropic')
+  })
+
+  it('同一次调用里改名称和地址会被忽略 —— 那两个字段归登录流程', () => {
+    seedClient()
+
+    upsertProvider({
+      ...draft(),
+      id: CLIENT_PROVIDER_ID,
+      name: '我的中转',
+      baseUrl: 'https://evil.invalid/v1',
+      protocol: 'anthropic'
+    })
+
+    expect(client()).toMatchObject({
+      name: 'NextCoWork',
+      baseUrl: PLATFORM_URL,
+      credentialRef: 'nextcowork:client-access-token',
+      // 托管字段被挡住,不该连带把用户真正改的那个也丢掉
+      protocol: 'anthropic'
+    })
+  })
+
+  it('模型列表能整表替换,也能逐条删', () => {
+    seedClient()
+
+    setAliases(CLIENT_PROVIDER_ID, ['gpt-a', 'gpt-b'])
+    expect(listModels(CLIENT_PROVIDER_ID).map((m) => m.upstreamModel)).toEqual(['gpt-a', 'gpt-b'])
+
+    removeModel(CLIENT_PROVIDER_ID, 'gpt-a')
+    expect(listModels(CLIENT_PROVIDER_ID).map((m) => m.upstreamModel)).toEqual(['gpt-b'])
+  })
+
+  it('还没登录时凭空建一条会被拒 —— 那样建出来的拿不到 access token', () => {
+    expect(() => upsertProvider({ ...draft(), id: CLIENT_PROVIDER_ID }))
+      .toThrow(/登录/u)
+  })
+
+  it('仍然不能删', () => {
+    seedClient()
+
+    expect(() => removeProvider(CLIENT_PROVIDER_ID)).toThrow(/不能删除/u)
+    expect(client()).toBeDefined()
   })
 })

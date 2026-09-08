@@ -13,6 +13,7 @@
  * 那个字符串的两种形状。safeStorage 加密的是什么它并不关心。
  */
 import type { OAuthIssuerId } from './oauth-issuer'
+import { OAUTH_ISSUER_IDS } from './oauth-issuer'
 
 export type { OAuthIssuerId }
 
@@ -34,8 +35,13 @@ export interface OAuthCredential {
   /**
    * ★ **绝对毫秒时间戳,不存 `expires_in`。**
    * 相对值一旦落盘就开始腐烂:重启后没人知道那 3600 秒是从哪一刻算起的。
+   *
+   * ★★ `null` = **过期时间未知**,不是「永不过期」。有的家(z.ai)`expires_in`
+   * 回的就是 null,而**编一个假的过期时间比承认不知道更糟**:猜短了平白多刷几次,
+   * 猜长了会拿一把已经死掉的 token 去撞 401 并废掉那次对话。未知时的策略是
+   * 不主动刷新、靠 401 触发刷新 —— 那条路径本来就在(`router.ts` 的 401 重试)。
    */
-  expiresAt: number
+  expiresAt: number | null
   /** 各家 API 要求带的账号标识(ChatGPT 是 `chatgpt-account-id` 头的值) */
   accountId: string
   /** 只给设置页显示用。缺失不影响请求能不能发出去 */
@@ -51,8 +57,17 @@ export interface OAuthCredential {
 
 export type ProviderCredential = ApiKeyCredential | OAuthCredential
 
+/**
+ * ★★ **照 `OAUTH_ISSUER_IDS` 判,不要写成 `value === 'chatgpt'` 这样的硬编码。**
+ *
+ * 硬编码的版本有一个**编译期抓不到**的陷阱:给 `OAuthIssuerId` 加一个值时,
+ * `value === 'chatgpt'` 依然是合法的收窄断言,一个错都不报。而漏掉的表现是
+ * **登录成功、下一秒显示未登录** —— 凭证写进 secrets 了,读回来在这里判残缺
+ * 返回 null,界面说「未登录」、发请求说「还没有配置密钥」,
+ * 没有任何一句话指向 issuer。
+ */
 function isIssuer(value: unknown): value is OAuthIssuerId {
-  return value === 'chatgpt'
+  return OAUTH_ISSUER_IDS.includes(value as OAuthIssuerId)
 }
 
 function str(value: unknown): string | undefined {
@@ -97,14 +112,26 @@ export function parseCredential(raw: string | null | undefined): ProviderCredent
   const accessToken = str(o['accessToken'])
   const refreshToken = str(o['refreshToken'])
   const accountId = str(o['accountId'])
-  const expiresAt = o['expiresAt']
+  /*
+    ★ `expiresAt` 有**三**种合法情况:一个有限数字、显式 `null`、以及整个键缺失 ——
+    后两种都归到「不知道什么时候过期」。写成 null 而不是留 undefined,是因为
+    `OAuthCredential` 里它是必需字段,一个 `undefined` 在 `serializeCredential`
+    往返之后会变成键缺失,于是「往返不丢字段」那条断言就不成立了。
+    只有**是个东西但不是数字**(比如字符串 `'soon'`)才判记录坏掉。
+  */
+  const rawExpiresAt = o['expiresAt']
+  const expiresAt =
+    rawExpiresAt === null || rawExpiresAt === undefined
+      ? null
+      : typeof rawExpiresAt === 'number' && Number.isFinite(rawExpiresAt)
+        ? rawExpiresAt
+        : undefined
   if (
     !isIssuer(issuer) ||
     accessToken === undefined ||
     refreshToken === undefined ||
     accountId === undefined ||
-    typeof expiresAt !== 'number' ||
-    !Number.isFinite(expiresAt)
+    expiresAt === undefined
   ) {
     return null
   }

@@ -67,6 +67,14 @@ export const agentZh = {
   'agent.interaction.deny': '拒绝',
   'agent.interaction.allowOnce': '允许这一次',
   'agent.interaction.submit': '提交回答',
+  // 多道题时按钮上带进度:两道题只答了一道时,按钮是灰的,不写清楚缺哪一道
+  // 用户只会反复点它
+  'agent.interaction.submitProgress': '提交回答（{done}/{total}）',
+  'agent.interaction.other': '其它（自行填写）',
+  // 多题时主按钮在「下一题」和「提交回答」之间切换 —— 见 `InteractionPanel` 里的注释
+  'agent.interaction.nextQuestion': '下一题',
+  'agent.interaction.answeredMark': '已答',
+  'agent.interaction.multiSelect': '可多选',
   'agent.interaction.approvePlan': '批准方案',
   'agent.interaction.sending': '正在提交…',
   'agent.interaction.failed': '未能提交，交互可能已结束。请检查运行状态后重试。',
@@ -151,6 +159,11 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'agent.interaction.deny': 'Deny',
   'agent.interaction.allowOnce': 'Allow once',
   'agent.interaction.submit': 'Submit answer',
+  'agent.interaction.submitProgress': 'Submit answers ({done}/{total})',
+  'agent.interaction.other': 'Something else (type it)',
+  'agent.interaction.nextQuestion': 'Next question',
+  'agent.interaction.answeredMark': 'Answered',
+  'agent.interaction.multiSelect': 'Choose any',
   'agent.interaction.approvePlan': 'Approve plan',
   'agent.interaction.sending': 'Submitting…',
   'agent.interaction.failed': 'Unable to submit. This interaction may have ended. Check the run status and retry.',

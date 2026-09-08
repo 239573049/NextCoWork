@@ -118,4 +118,32 @@ describe('customProviderDraft', () => {
     )
     expect(d.id).toBe('custom-gw-2')
   })
+
+  /**
+   * ★ 自建的订阅制中转正是这个字段存在的理由:`findPricing` 查不到
+   * `(providerId, modelId)` 会退回通用价,于是一个模型名叫 `claude-sonnet-4`
+   * 的自建订阅中转,会被按 token 算出一笔真金白银的假账单。
+   *
+   * ★ 不打标记时**不落这个键**(不是落 false)—— 库里干净些,也和
+   * `providerFromPreset` 同一条规矩。
+   */
+  it('订阅制标记带得过去；不打标记时不落这个键', () => {
+    const marked = customProviderDraft(
+      { name: '中转', baseUrl: 'api.x.com', protocol: 'openai-chat', subscription: true },
+      []
+    )
+    expect(marked.subscription).toBe(true)
+
+    const plain = customProviderDraft(
+      { name: '中转', baseUrl: 'api.x.com', protocol: 'openai-chat' },
+      []
+    )
+    expect(Object.hasOwn(plain, 'subscription')).toBe(false)
+
+    const off = customProviderDraft(
+      { name: '中转', baseUrl: 'api.x.com', protocol: 'openai-chat', subscription: false },
+      []
+    )
+    expect(Object.hasOwn(off, 'subscription')).toBe(false)
+  })
 })

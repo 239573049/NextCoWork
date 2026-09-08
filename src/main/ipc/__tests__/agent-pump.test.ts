@@ -122,10 +122,11 @@ describe('步骤 3 端到端 · 假发射器 → 合批泵 → 信封 → 转录
     const request = req()
     startRun(request, owner.ctx, () => {})
     const handle = runs.get(request.runId)!
-    const pending = interactions.request(handle, { kind: 'ask_user', question: 'Choose', choices: ['A', 'B'], allowFreeform: false }, 1)
+    const pending = interactions.request(handle, { kind: 'ask_user', questions: [{ header: 'Choose', question: 'Choose one',
+      options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowFreeform: false }] }, 1)
     const [interaction] = listInteractions({ runId: request.runId }, owner.ctx)
     expect(interaction).toBeDefined()
-    const response = { id: interaction!.id, kind: 'ask_user' as const, answer: 'B' }
+    const response = { id: interaction!.id, kind: 'ask_user' as const, answers: [['B']] }
     expect(listInteractions({}, viewer.ctx)).toEqual([])
     expect(() => respondInteraction(response, viewer.ctx)).toThrow('this window')
     const restored = attachRun({ runId: request.runId, sinceSeq: 0 }, viewer.ctx)

@@ -66,7 +66,6 @@ export function listModels(providerId?: string): ModelAlias[] {
 /** Update one configured model while preserving provider/alias identity. */
 export function updateModel(input: ModelAlias): ModelAlias {
   ensureSeeded()
-  if (input.providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   const existing = store.listAliases().find(
     (m) => m.providerId === input.providerId && m.alias === input.alias
   )
@@ -82,7 +81,6 @@ export function updateModel(input: ModelAlias): ModelAlias {
 
 export function removeModel(providerId: string, alias: string): void {
   ensureSeeded()
-  if (providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   store.removeAlias(providerId, alias)
   repointDanglingDefaults()
   broadcast()
@@ -95,7 +93,6 @@ export function renameModel(
   nextAlias: string,
 ): ModelAlias {
   ensureSeeded()
-  if (providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   const existing = store
     .listAliases()
     .find((model) => model.providerId === providerId && model.alias === alias)
@@ -264,11 +261,20 @@ function mergeProtocolOptions(
  * - 新建的:主进程自己派生 `provider:<id>`。
  *
  * 内置上游的 ref 因此也稳得住 —— 它建表时用的是别的前缀,改地址不会把它冲掉。
+ *
+ * ★★ **NextCoWork 那条走「字段级托管」,不是整条拒绝。**
+ * 它的 `name` / `baseUrl` / `credentialRef` 归登录流程(`client-auth.ts`),
+ * 而 `protocol` / `protocolOptions` / `priority` / `enabled` / `subscription` 归用户 ——
+ * 用户要能翻「API 格式」那个开关。地址锁死不是保守:`credentialRef` 里存的是
+ * **平台发的 access token**,放开地址等于允许把它发到任意主机去。
+ *
+ * 托管值取自**库里那条**,不是从 `client-auth.ts` import 常量:那个模块
+ * `import { shell } from 'electron'` 是值导入,而本文件被 `provider-write.test.ts`
+ * 直接 import、跑在 node 环境里 —— 拉进来整个测试文件就起不来了。
  */
 export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
   ensureSeeded()
   const id = input.id.trim()
-  if (id === CLIENT_PROVIDER_ID) throw new Error('内置供应商由 NextCoWork 管理，不能修改')
   if (id === '') throw new Error('供应商 id 不能为空')
   /*
     ★ 斜杠会让 `modelSelectionKey`(`providerId/alias`)歧义:那个复合键靠
@@ -277,8 +283,6 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
     今天所有 id 都来自预设表的 slug,这一行是把那个隐含前提**变成硬约束**。
   */
   if (id.includes('/')) throw new Error('供应商 id 不能包含斜杠')
-  const name = input.name.trim()
-  if (name === '') throw new Error('供应商名称不能为空')
   // 合法协议 = `PROTOCOL_LABEL` 的键。不另立一个 UPSTREAM_PROTOCOLS 数组:
   // 两份全集迟早漂开,而漏掉的那个协议会在这里被当成非法值拒掉
   if (!Object.hasOwn(PROTOCOL_LABEL, input.protocol)) {
@@ -286,15 +290,41 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
   }
 
   const existing = store.listProviders().find((p) => p.id === id)
+  /*
+    ★ 这条只能由登录流程建出来。渲染层凭空 PUT 一个 `nextcowork` 的话,
+    它的 `credentialRef` 会被派生成 `provider:nextcowork` —— 一条永远拿不到
+    access token、却顶着内置身份(删不掉、密钥栏没有输入框)的死记录。
+  */
+  const managed = id === CLIENT_PROVIDER_ID
+  if (managed && existing === undefined) throw new Error('请先登录 NextCoWork 账号')
+  // 托管那条的三个字段一律回落到库里那份;别的供应商 `platform` 是 undefined,照常走入参
+  const platform = managed ? existing : undefined
+  const name = platform?.name ?? input.name.trim()
+  if (name === '') throw new Error('供应商名称不能为空')
+  const baseUrl = platform?.baseUrl ?? normalizeBaseUrl(input.baseUrl)
+
   const protocolOptions = mergeProtocolOptions(existing?.protocolOptions, input.protocolOptions)
+  /*
+    ★★ **省略 = 保留库里那条,不是关掉。**
+    这个函数是全量 PUT(`ProviderPanel.save()` 发的是 `{...p, ...patch}`),而
+    「省略」有两个来源:一个是 UI 正常提交(它总带着这个字段,两种语义等价),
+    另一个是**导入旧版本导出的 JSON** —— 那份文件里根本没有这个键。
+    取「省略 = false」的话,导入一次就把用户标好的订阅制静默抹掉,
+    表现是账单里凭空多出一笔本该不计价的开销,而没有任何一处报错。
+
+    ★ `false ?? x` 求值为 `false`,所以显式关闭照常生效 —— 只有 `undefined` 才回落。
+  */
+  const subscription = input.subscription ?? existing?.subscription
   const saved = store.putProvider({
     id,
     name,
     protocol: input.protocol,
-    baseUrl: normalizeBaseUrl(input.baseUrl),
+    baseUrl,
     credentialRef: existing?.credentialRef ?? providerCredentialRef(id),
     priority: Number.isFinite(input.priority) ? input.priority : 50,
     enabled: input.enabled,
+    // ★ 和 protocolOptions 一样,undefined 时不写这个键 —— 别在库里留一地 `"subscription": null`
+    ...(subscription === undefined ? {} : { subscription }),
     ...(protocolOptions === undefined ? {} : { protocolOptions })
   })
   broadcast()
@@ -492,7 +522,6 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
  */
 export function setAliases(providerId: string, models: readonly string[]): ModelAlias[] {
   ensureSeeded()
-  if (providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   const p = store.listProviders().find((x) => x.id === providerId)
   if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
 

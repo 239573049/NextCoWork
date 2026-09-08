@@ -24,9 +24,21 @@ function validResponse(pending: PendingInteraction, response: InteractionRespons
         || (decision.kind === 'deny' && (decision.reason === undefined || typeof decision.reason === 'string'))
       // Persistent permission grants are deliberately not accepted without a rule store.
     }
-    case 'ask_user':
-      return response.answer === null || (typeof response.answer === 'string' && response.answer.length <= 32768
-        && pending.kind === 'ask_user' && (pending.allowFreeform || pending.choices?.includes(response.answer) === true))
+    case 'ask_user': {
+      if (pending.kind !== 'ask_user') return false
+      if (response.answers === null) return true
+      // 长度必须严格等于题数:少一项说明渲染层和待决表已经不是同一份题面
+      // (窗口重载时抢答),这时按下标对齐会把答案安到别的题上。
+      if (!Array.isArray(response.answers) || response.answers.length !== pending.questions.length) return false
+      return response.answers.every((answer, index) => {
+        const question = pending.questions[index]!
+        if (!Array.isArray(answer) || answer.length === 0) return false
+        if (!question.multiSelect && answer.length > 1) return false
+        if (new Set(answer).size !== answer.length) return false
+        return answer.every((value) => typeof value === 'string' && value.length > 0 && value.length <= 32768
+          && (question.allowFreeform || question.options.some((option) => option.label === value)))
+      })
+    }
     case 'plan_approval':
       return typeof response.approved === 'boolean' && (response.feedback === undefined || typeof response.feedback === 'string')
   }

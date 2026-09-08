@@ -401,7 +401,8 @@ export function AppShell({
                   // 「收起」按钮会同屏出现 280ms —— 它俩是同一个控件的两个位置。
                   className="reveal-delayed self-center rounded-pill"
                 >
-                  <PanelLeft size={16} />
+                  {/* 笔画 1.5 —— 和 Tab 条右端那两颗同一条理由,见 OuterTabBar 那段注释 */}
+                  <PanelLeft size={16} strokeWidth={1.5} />
                 </IconButton>
               )}
               <OuterTabBar

@@ -139,11 +139,11 @@ describe.each(protocols)('%s real router → agent → interaction → tool → 
   })
 
   it('asks the user and sends the actual answer back as a tool result', async () => {
-    const r = rig(protocol, [callResponse(protocol, 'AskUserQuestion', '{"question":"Choose","choices":["A","B"],"allowFreeform":false}'), finalResponse(protocol)])
+    const r = rig(protocol, [callResponse(protocol, 'AskUserQuestion', '{"questions":[{"header":"Choose","question":"Choose one","options":[{"label":"A"},{"label":"B"}],"multiSelect":false,"allowFreeform":false}]}'), finalResponse(protocol)])
     await r.ready
     const running = r.session.run()
     await vi.waitFor(() => expect(r.gate.list()[0]?.kind).toBe('ask_user'))
-    r.gate.respond({ id: r.gate.list()[0]!.id, kind: 'ask_user', answer: 'B' })
+    r.gate.respond({ id: r.gate.list()[0]!.id, kind: 'ask_user', answers: [['B']] })
     await running
     expect(r.handle.status).toBe('done')
     expect(JSON.stringify(r.bodies[1])).toContain('answer')
