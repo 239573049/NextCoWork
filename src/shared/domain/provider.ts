@@ -162,10 +162,17 @@ export interface CredentialAuthInfo {
   accountId: string
   email?: string
   planType?: string
-  expiresAt: number
+  /**
+   * ★★ `null` = **过期时间未知**(有的家 `expires_in` 就是 null),不是永不过期。
+   * 界面上不该把它渲染成一个日期,更不该当成「已过期」。
+   */
+  expiresAt: number | null
   /**
    * ★ **由主进程按 `host.clock` 算好**,不让渲染层自己拿 `Date.now()` 去比。
    * 两个进程不是同一个时钟源,而「过期了没有」这件事只能有一个答案。
+   *
+   * ★★ `expiresAt` 未知时这里恒为 `false` —— 「不知道」必须落到「先当它有效」,
+   * 落到 `true` 的话界面会对一把完全好用的凭证常年显示「已过期，请重新登录」。
    */
   expired: boolean
   needsReauth: boolean

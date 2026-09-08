@@ -5,6 +5,7 @@
  * 它守的是**降级兼容**:用户退回旧版本时,库里那把 API Key 必须还能用。
  */
 import { describe, expect, it } from 'vitest'
+import { OAUTH_ISSUER_IDS } from '../oauth-issuer'
 import {
   bearerOf,
   parseCredential,
@@ -92,6 +93,48 @@ describe('parseCredential · OAuth 记录残缺', () => {
     ['expiresAt 不是数字', { ...oauth, expiresAt: 'soon' }]
   ])('%s → null', (_label, record) => {
     expect(parseCredential(JSON.stringify(record))).toBeNull()
+  })
+})
+
+describe('parseCredential · expiresAt 的三种合法情况', () => {
+  /*
+    ★★ 这三条钉的是一次**故意的语义变更**:`expiresAt` 从「必须是数字」放宽成
+    「数字 / null / 整个键缺失」,后两种都读作**过期时间未知**。
+    起因是 z.ai 那条链路的 `expires_in` 上游回的就是 null,而**编一个假的过期时间
+    比承认不知道更糟**:猜短了平白多刷几次,猜长了会拿一把死 token 去撞 401
+    并废掉那次对话。未知时的策略是不主动刷新、靠 401 触发。
+
+    ★ 「不是数字」(比如字符串 'soon')仍然判记录坏掉 —— 见上面那组残缺用例。
+    「未知」和「坏掉」不能合并:前者是正常状态,后者说明存进去的东西不对。
+  */
+  it('显式 null → 解析成功且为 null', () => {
+    const cred = { ...oauth, expiresAt: null }
+    expect(parseCredential(JSON.stringify(cred))).toEqual(cred)
+  })
+
+  it('整个键缺失 → 解析成功且补成 null', () => {
+    const { expiresAt: _drop, ...withoutKey } = oauth
+    expect(parseCredential(JSON.stringify(withoutKey))).toEqual({ ...oauth, expiresAt: null })
+  })
+
+  it('★ 补成 null 而不是留 undefined —— 否则往返一次就会丢掉这个键', () => {
+    const parsed = parseCredential(JSON.stringify({ ...oauth, expiresAt: null }))
+    expect(parseCredential(serializeCredential(parsed!))).toEqual(parsed)
+  })
+})
+
+describe('parseCredential · issuer 白名单', () => {
+  /*
+    ★★ 这条是**正向**断言,防的是一个编译期完全抓不到的静默故障:
+    `isIssuer` 如果写成 `value === 'chatgpt'` 这种硬编码,给 OAuthIssuerId 加一个值
+    不会有任何编译错误(收窄断言合法),而症状是**登录成功、下一秒显示未登录** ——
+    凭证明明写进 secrets 了,读回来判残缺返回 null,界面说「未登录」、
+    发请求说「还没有配置密钥」,没有任何一句话指向 issuer。
+    照 OAUTH_ISSUER_IDS 遍历,加 issuer 时这条自动覆盖到。
+  */
+  it.each(OAUTH_ISSUER_IDS)('%s 的凭证能被解析出来', (issuer) => {
+    const cred: OAuthCredential = { ...oauth, issuer }
+    expect(parseCredential(serializeCredential(cred))).toEqual(cred)
   })
 })
 

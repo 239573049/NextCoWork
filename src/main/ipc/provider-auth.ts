@@ -56,11 +56,16 @@ function resolveSpec(providerId: string): { spec: OAuthProviderSpec; credentialR
   return { spec: oauthSpecOf(issuer), credentialRef: provider.credentialRef }
 }
 
-function emitPhase(providerId: string, phase: OAuthPhase, message?: string): void {
+function emitPhase(
+  providerId: string,
+  phase: OAuthPhase,
+  extra: { message?: string; needsPastedCode?: boolean } = {}
+): void {
   windows.emitToAll('provider:authProgress', {
     providerId,
     phase,
-    ...(message === undefined ? {} : { message })
+    ...(extra.message === undefined ? {} : { message: extra.message }),
+    ...(extra.needsPastedCode === true ? { needsPastedCode: true } : {})
   })
 }
 
@@ -115,7 +120,15 @@ export async function startOAuth(providerId: string): Promise<CredentialInfo> {
         CSRF 防线交给了它。这里直接用 shell,`src/main/ipc/` 本来就允许碰 Electron。
       */
       openBrowser: (url) => shell.openExternal(url),
-      onPhase: (phase) => emitPhase(providerId, phase),
+      /*
+        ★ 「这次要不要粘」是从 `spec.redirect.kind` 现算的,不是渲染层猜的。
+        渲染层拿它决定 `waiting` 阶段画输入框还是画 spinner —— 猜错的表现是
+        用户对着一个永远转下去的圈,而他手里正拿着那条回调地址无处可放。
+      */
+      onPhase: (phase) =>
+        emitPhase(providerId, phase, {
+          needsPastedCode: spec.redirect.kind === 'manual-paste'
+        }),
       signal: abort.signal,
       awaitPastedCode: () =>
         new Promise<string>((resolve) => {
@@ -134,11 +147,9 @@ export async function startOAuth(providerId: string): Promise<CredentialInfo> {
     return await announce(providerId)
   } catch (err) {
     const translated = translate(err)
-    emitPhase(
-      providerId,
-      err instanceof OAuthAbandonedError ? 'cancelled' : 'failed',
-      translated.message
-    )
+    emitPhase(providerId, err instanceof OAuthAbandonedError ? 'cancelled' : 'failed', {
+      message: translated.message
+    })
     throw translated
   } finally {
     if (active === flow) active = null

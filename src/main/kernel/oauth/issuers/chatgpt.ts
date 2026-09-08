@@ -9,6 +9,7 @@ import type { OAuthCredential } from '../../../../shared/domain/credential'
 import type { TransportContext, UpstreamTransport } from '../../upstream/transport'
 import { sessionUuid } from '../../upstream/transport'
 import type { OAuthIdentity, OAuthProviderSpec } from '../registry'
+import { decodeJwtPayload, record, str } from './shared'
 
 /**
  * ★★ **这个值是兼容性风险面。** 上游很可能对它做白名单校验(Codex CLI 自己发的是
@@ -37,16 +38,6 @@ const REDIRECT_PATH = '/auth/callback'
 /** id_token 里那些 claim 挂在这个命名空间下 */
 const CLAIM_NS = 'https://api.openai.com/auth'
 
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
-}
-
-function str(value: unknown): string | undefined {
-  return typeof value === 'string' && value !== '' ? value : undefined
-}
-
 /**
  * 读 id_token 的 payload。
  *
@@ -64,15 +55,7 @@ export function parseIdTokenClaims(idToken: string | undefined): {
   email?: string
   planType?: string
 } {
-  if (idToken === undefined) return {}
-  const payload = idToken.split('.')[1]
-  if (payload === undefined) return {}
-  let claims: Record<string, unknown> | undefined
-  try {
-    claims = record(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')))
-  } catch {
-    return {}
-  }
+  const claims = decodeJwtPayload(idToken)
   if (claims === undefined) return {}
 
   const ns = record(claims[CLAIM_NS]) ?? {}

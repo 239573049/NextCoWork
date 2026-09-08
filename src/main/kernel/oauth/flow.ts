@@ -8,6 +8,7 @@
  * `fetch` 和 `now` 也是 —— 于是整条流程可以在纯 Node 里用假上游跑完。
  */
 import type { OAuthCredential } from '../../../shared/domain/credential'
+import { OAuthAbandonedError, OAuthFailedError } from './errors'
 import { awaitOAuthCallback, type LoopbackResult } from '../../net/oauth-loopback'
 import { createPkce, randomState, stateMatches } from './pkce'
 import { redirectUriOf, type OAuthProviderSpec, type OAuthTokenRequest, type OAuthTokenRequestArgs } from './registry'
@@ -20,21 +21,9 @@ export type OAuthPhase =
   | 'failed'
   | 'cancelled'
 
-/** 用户放弃(关掉授权页 / 点了取消 / 超时)。**不是故障**,上层据此不报错误红条 */
-export class OAuthAbandonedError extends Error {
-  constructor(readonly kind: 'cancelled' | 'timeout') {
-    super(kind === 'timeout' ? '授权超时' : '已取消登录')
-    this.name = 'OAuthAbandonedError'
-  }
-}
-
-/** 授权服务器明确拒绝,或者回来的东西不对 */
-export class OAuthFailedError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'OAuthFailedError'
-  }
-}
+// ★ 定义挪到了 `errors.ts`(见那边的文件头:issuer 要抛它们,留在这里会成环),
+// 这里原样 re-export —— 既有的 `from './flow'` 一个都不用改
+export { OAuthAbandonedError, OAuthFailedError }
 
 export interface OAuthFlowDeps {
   spec: OAuthProviderSpec
@@ -57,16 +46,22 @@ function authorizeUrl(
   args: { challenge: string; state: string; redirectUri: string }
 ): string {
   const u = new URL(spec.authorizeUrl)
-  u.searchParams.set('response_type', 'code')
-  u.searchParams.set('client_id', spec.clientId)
-  u.searchParams.set('redirect_uri', args.redirectUri)
-  // ★ 没声明 scope 的家**一个字都不写**,而不是写成空串 —— 有的服务端对
-  //   `scope=` 和「没有 scope」的反应不一样
-  if (spec.scope !== undefined) u.searchParams.set('scope', spec.scope)
-  u.searchParams.set('state', args.state)
-  if (spec.pkce !== false) {
-    u.searchParams.set('code_challenge', args.challenge)
-    u.searchParams.set('code_challenge_method', 'S256')
+  const custom = spec.authorizeParams?.({ ...args, clientId: spec.clientId })
+  if (custom === undefined) {
+    u.searchParams.set('response_type', 'code')
+    u.searchParams.set('client_id', spec.clientId)
+    u.searchParams.set('redirect_uri', args.redirectUri)
+    // ★ 没声明 scope 的家**一个字都不写**,而不是写成空串 —— 有的服务端对
+    //   `scope=` 和「没有 scope」的反应不一样
+    if (spec.scope !== undefined) u.searchParams.set('scope', spec.scope)
+    u.searchParams.set('state', args.state)
+    if (spec.pkce !== false) {
+      u.searchParams.set('code_challenge', args.challenge)
+      u.searchParams.set('code_challenge_method', 'S256')
+    }
+  } else {
+    // ★ 整体替换:标准那几个参数一个都不写(见 `authorizeParams` 的注释)
+    for (const [k, v] of Object.entries(custom)) u.searchParams.set(k, v)
   }
   for (const [k, v] of Object.entries(spec.extraAuthorizeParams ?? {})) {
     u.searchParams.set(k, v)
@@ -181,7 +176,8 @@ async function awaitPasteWithDeadline(await_: () => Promise<string>, signal: Abo
  */
 export function pastedCallbackCode(
   pasted: string,
-  expectedState: string
+  expectedState: string,
+  codeParam = 'code'
 ): { ok: true; code: string } | { ok: false; reason: string } {
   const text = pasted.trim()
   if (text === '') return { ok: false, reason: '没有粘贴任何内容' }
@@ -199,7 +195,8 @@ export function pastedCallbackCode(
     return { ok: false, reason: params.get('error_description') ?? error }
   }
 
-  const code = params.get('code')
+  // ★ 参数名不一定是 `code` —— 智谱那条回的是 `authCode`(2026-09-09 实测)
+  const code = params.get(codeParam)
   if (code === null || code === '') {
     return { ok: false, reason: '这段内容里没有授权码，请把浏览器地址栏里完整的回调地址复制过来' }
   }
@@ -223,7 +220,7 @@ async function collectCode(
   // 空输入 = 用户在输入框里点了确定但没填,按放弃处理(和关掉授权页同一个结局)
   if (pasted.trim() === '') throw new OAuthAbandonedError('cancelled')
 
-  const parsed = pastedCallbackCode(pasted, args.state)
+  const parsed = pastedCallbackCode(pasted, args.state, deps.spec.callbackCodeParam)
   if (!parsed.ok) throw new OAuthFailedError(parsed.reason)
   return parsed.code
 }

@@ -590,7 +590,8 @@ function infoFor(plaintext: string | null): CredentialInfo {
       ...(cred.planType === undefined ? {} : { planType: cred.planType }),
       expiresAt: cred.expiresAt,
       // ★ 过期与否在这里算完再回传,渲染层不碰时钟(见 CredentialAuthInfo 的注释)
-      expired: cred.expiresAt <= getHost().clock.now(),
+      // ★★ 过期时间未知(null)时一律答「没过期」—— 见那边关于「不知道」的注释
+      expired: cred.expiresAt !== null && cred.expiresAt <= getHost().clock.now(),
       needsReauth: cred.needsReauth === true
     }
   }

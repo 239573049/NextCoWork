@@ -740,6 +740,21 @@ const ZH: Messages = {
   "provider.authExchanging": "正在获取凭证…",
   "provider.authAccountFallback": "已登录（未获取到邮箱）",
   "provider.oauthFixedChannel": "这条通道的协议由订阅决定，不需要选择 API 格式。",
+  // ── 两种凭证并存（GLM Coding Plan）──
+  // ★ 一个槽只装一样东西，所以这几句的重点全是「后配置的会盖掉先配置的」
+  "provider.accountOrKey": "账号 / 密钥",
+  "provider.credentialInUseOAuth": ({ name }) => `当前使用：${name} 账号登录`,
+  "provider.credentialInUseKey": "当前使用：API 密钥",
+  "provider.bothCredentialHint":
+    "这家两种方式都能用，但只保留最后配置的那一种：填入密钥会退出登录，登录会覆盖已填的密钥。",
+  "provider.signOutClearsSlot": "退出登录会清空这一栏，已填的密钥也会一起删掉。",
+  "provider.authEndpointSwitched": ({ url }) => `登录成功，接口地址已切换到 ${url}`,
+  // ── 手动粘贴回调地址 ──
+  "provider.authPasteLabel": "粘贴回调地址",
+  "provider.authPastePlaceholder": "把浏览器地址栏里完整的地址粘到这里",
+  "provider.authPasteHint":
+    "授权完成后浏览器会跳到一个打不开的地址——把地址栏里那一整条复制过来即可（5 分钟内有效）。",
+  "provider.authPasteSubmit": "提交",
   "provider.modelPriority": "模型优先级（至少添加一个）",
   "provider.addModel": "添加模型",
   "provider.modelIdLabel": "模型 ID",
@@ -1935,6 +1950,19 @@ const EN: Messages = {
   "provider.authAccountFallback": "Signed in (no email available)",
   "provider.oauthFixedChannel":
     "The protocol for this channel is fixed by the subscription; no API format to choose.",
+  "provider.accountOrKey": "Account / key",
+  "provider.credentialInUseOAuth": ({ name }) => `In use: ${name} sign-in`,
+  "provider.credentialInUseKey": "In use: API key",
+  "provider.bothCredentialHint":
+    "Either method works here, but only the most recent one is kept: saving a key signs you out, and signing in replaces the key.",
+  "provider.signOutClearsSlot":
+    "Signing out clears this field — any saved API key is deleted along with it.",
+  "provider.authEndpointSwitched": ({ url }) => `Signed in. Endpoint switched to ${url}`,
+  "provider.authPasteLabel": "Paste the callback URL",
+  "provider.authPastePlaceholder": "Paste the full URL from your browser's address bar",
+  "provider.authPasteHint":
+    "After authorizing, your browser lands on a page that will not open — copy that entire address here (valid for 5 minutes).",
+  "provider.authPasteSubmit": "Submit",
   "provider.modelPriority": "Model priority (add at least one)",
   "provider.addModel": "Add model",
   "provider.modelIdLabel": "Model ID",

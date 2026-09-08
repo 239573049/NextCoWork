@@ -402,6 +402,17 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
     credentialKind: 'subscription-key',
     /*
+      ★★ **`credentialKind` 和 `oauthIssuer` 同时存在 = 这家两种凭证都能用。**
+      前者管「获取订阅密钥」那颗按钮的措辞,后者管「还画一颗登录按钮」——
+      两者不再互斥(见 `provider-auth.ts` 的三态 `providerAuthMode`)。
+      写成互斥的话,接了登录就等于把已经在用订阅 key 的用户的输入框拿走。
+
+      ★ 这条(智谱/BigModel)的登录链路是**探索性**的,见 `issuers/zcode-bigmodel.ts`
+      的文件头:授权那一跳 2026-09-09 有实测数据,换 token 那一跳还没抓到。
+      做不通时的修法是改那个文件里的数据,不是把这一行删掉。
+    */
+    oauthIssuer: 'zcode-bigmodel',
+    /*
       ★★ **只有这两个,而且 `glm-5.2` 不在其中。**
       官方「可用模型」原话(2026-09-09 核对,中英两站一致):所有套餐均支持
       GLM-5.3、GLM-5.3-Flash;**调用 GLM-5.2 / GLM-5.1 会被自动切换到 GLM-5.3**,
@@ -448,6 +459,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     docsUrl: 'https://docs.z.ai/devpack/quick-start',
     apiKeyUrl: 'https://z.ai/manage-apikey/apikey-list',
     credentialKind: 'subscription-key',
+    /* ★ 两种凭证都能用,理由见 `zhipu-coding` 那条;这一条的链路已实测走通 */
+    oauthIssuer: 'zcode-zai',
     /* ★ 可用模型同 `zhipu-coding` —— 官方英文站是同一句:GLM-5.2/5.1 自动路由到 5.3 */
     suggestedModels: ['glm-5.3', 'glm-5.3-flash'],
     notes:

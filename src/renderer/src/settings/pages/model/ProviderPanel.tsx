@@ -52,6 +52,7 @@ import {
   setProviderAliases,
   signOut,
   startOAuth,
+  submitOAuthCode,
   updateModel,
   upsertProvider,
 } from "../../../services/provider";
@@ -62,9 +63,12 @@ import { modelListAvailability } from "./import-models";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { baseUrlForProtocol } from "./provider-edit";
 import {
+  credentialInUse,
+  oauthIssuerLabel,
   oauthView,
   providerAuthMode,
   providerOAuthIssuer,
+  signInEndpointSwitch,
   type OAuthPhase,
   type OAuthView,
 } from "./provider-auth";
@@ -145,7 +149,17 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 「地址跟着协议换了」的一次性提示。换供应商或再改一次就消失 */
-  const [swapped, setSwapped] = useState<string | null>(null);
+  /**
+   * 地址刚刚被我们自己换掉了。
+   *
+   * ★ 带 `reason`:换地址有两个触发点(翻 API 格式开关 / 登录成功切端点),
+   * 而两句提示说的不是一回事 —— 只给一句通用的「地址跟着换了」,
+   * 登录那次用户会以为是自己不小心碰到了开关。
+   */
+  const [swapped, setSwapped] = useState<{
+    url: string;
+    reason: "protocol" | "sign-in";
+  } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [thinkingModel, setThinkingModel] = useState<ModelAlias | null>(null);
   const [editingModel, setEditingModel] = useState<ModelAlias | null>(null);
@@ -160,12 +174,16 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const [keyDraft, setKeyDraft] = useState("");
   const [editingKey, setEditingKey] = useState(false);
   /** 登录流程的阶段。`null` = 现在没有登录在跑 */
-  const [authFlow, setAuthFlow] = useState<{ phase: OAuthPhase } | null>(null);
+  const [authFlow, setAuthFlow] = useState<{
+    phase: OAuthPhase;
+    needsPastedCode?: boolean;
+  } | null>(null);
   const [cacheTtl, setCacheTtl] = useState<AnthropicCacheTtl>(() =>
     anthropicCacheTtlOf(p),
   );
 
   const authMode = providerAuthMode(p.id);
+  const issuer = providerOAuthIssuer(p.id);
   const authView = oauthView(cred, authFlow);
 
   /*
@@ -226,7 +244,10 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
       // 终态由 startOAuth 那条 invoke 的返回值给,这里只驱动中间的三个阶段
       setAuthFlow(
         e.phase === "opening" || e.phase === "waiting" || e.phase === "exchanging"
-          ? { phase: e.phase }
+          ? {
+              phase: e.phase,
+              ...(e.needsPastedCode === true ? { needsPastedCode: true } : {}),
+            }
           : null,
       );
     });
@@ -240,9 +261,32 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
     setError(null);
     setAuthFlow({ phase: "opening" });
     void startOAuth(p.id)
-      .then(setCred)
+      .then((info) => {
+        setCred(info);
+        /*
+          ★★ **两种凭证打的不是同一个地址。** 订阅 key 走 coding 端点，
+          登录换来的令牌走 anthropic 端点。不挪的话，用户会在一个写着
+          「已登录」的界面上发出第一条消息，然后撞上一个不解释原因的错误 ——
+          而表单从头到尾看着都是对的。判断在 `signInEndpointSwitch` 里
+          （那边有测试），它对「用户自己改过地址」一律返回 null。
+        */
+        const next = signInEndpointSwitch(p);
+        if (next === null) return;
+        setBaseUrl(next.baseUrl);
+        // ★ 静默换地址是这一整块最不该有的行为
+        setSwapped({ url: next.baseUrl, reason: "sign-in" });
+        save({ protocol: next.protocol, baseUrl: next.baseUrl });
+      })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setAuthFlow(null));
+  };
+
+  /** 手动粘贴形态下把回调地址交回主进程。终态由那条还在跑的 startOAuth 给 */
+  const doSubmitCode = (pasted: string): void => {
+    setError(null);
+    void submitOAuthCode(p.id, pasted).catch((e: unknown) =>
+      setError(e instanceof Error ? e.message : String(e)),
+    );
   };
 
   const doCancelSignIn = (): void => {
@@ -291,7 +335,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const switchProtocol = (next: UpstreamProvider["protocol"]): void => {
     const r = baseUrlForProtocol(p, next);
     setBaseUrl(r.baseUrl);
-    setSwapped(r.changed ? r.baseUrl : null);
+    setSwapped(r.changed ? { url: r.baseUrl, reason: "protocol" } : null);
     save({ protocol: next, baseUrl: r.baseUrl });
   };
 
@@ -338,7 +382,15 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   };
 
   const warnings = baseUrlWarnings(baseUrl, p.protocol);
-  const hasKey = cred?.hasKey ?? false;
+  /**
+   * 槽里装的是哪一种凭证。
+   *
+   * ★★ **`cred.hasKey` 对两种凭证都为真** —— 它的意思是「槽里有东西」。
+   * 直接拿它当「已填密钥」用的话,登录成功之后密钥框会显示一串掩码点,
+   * 而那串点背后是一个登录令牌;用户会以为自己那把 key 还在。
+   */
+  const inUse = credentialInUse(cred);
+  const hasKey = inUse === "api-key";
 
   const reorderAliases = (from: number, to: number): void => {
     if (
@@ -517,9 +569,11 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               </code>
             </p>
             {swapped !== null && (
-              /* ★ 地址被开关改掉了就说一声。静默换掉是这一整块最不该有的行为 */
+              /* ★ 地址被我们改掉了就说一声。静默换掉是这一整块最不该有的行为 */
               <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-muted">
-                {t("provider.addressSwapped")}
+                {swapped.reason === "sign-in"
+                  ? t("provider.authEndpointSwitched", { url: swapped.url })
+                  : t("provider.addressSwapped")}
               </p>
             )}
             {warnings.map((w) => (
@@ -629,9 +683,15 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           </div>
 
           <Field
-            label={authMode === "oauth" ? t("provider.account") : t("provider.apiKey")}
+            label={
+              authMode === "oauth"
+                ? t("provider.account")
+                : authMode === "both"
+                  ? t("provider.accountOrKey")
+                  : t("provider.apiKey")
+            }
             action={
-              /* ★ 走登录的那家没有「创建 API Key」页面，预设里也没给 apiKeyUrl */
+              /* ★ 纯走登录的那家没有「创建 API Key」页面，预设里也没给 apiKeyUrl */
               authMode !== "oauth" && apiKeyUrl !== undefined ? (
                 <Button
                   size="sm"
@@ -643,16 +703,27 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               ) : undefined
             }
           >
-            {authMode === "oauth" ? (
-              <ProviderAuthField
-                providerId={p.id}
-                view={authView}
-                busy={busy}
-                onSignIn={doSignIn}
-                onCancel={doCancelSignIn}
-                onSignOut={doSignOut}
-              />
-            ) : managed ? (
+            {/*
+              ★★ **`both` 下两样同时画,而不是让用户先选一种。**
+              先选一种就得给一个「你想怎么登录」的开关,而那个开关本身要有默认值 ——
+              默认给错的那一半用户会以为这家不支持他手里那种凭证。同时画出来,
+              「哪一种正在用」由下面 `inUse` 那行说清楚。
+            */}
+            {authMode !== "api-key" && (
+              <div className={cn(authMode === "both" && "mb-2")}>
+                <ProviderAuthField
+                  providerId={p.id}
+                  view={authView}
+                  busy={busy}
+                  onSignIn={doSignIn}
+                  onCancel={doCancelSignIn}
+                  onSignOut={doSignOut}
+                  onSubmitCode={doSubmitCode}
+                  clearsSlot={authMode === "both"}
+                />
+              </div>
+            )}
+            {authMode === "oauth" ? null : managed ? (
               /*
                 ★ 托管那条的「密钥」是登录发的 access token,`setCredential` 对它是
                 拒绝的 —— 所以这里**没有「更换」按钮**,不是漏了。给一颗点下去必然
@@ -734,12 +805,32 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
                 </Button>
               </div>
             )}
+            {/*
+              ★ `both` 下先说「现在用的是哪一种」。一个槽只装一样东西,
+              而两个控件并排画着,不说的话用户没法知道刚才那次登录
+              是不是把他的密钥顶掉了。
+            */}
+            {authMode === "both" && inUse !== null && (
+              <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] leading-[1.6] text-accent">
+                <Check size={11} className="shrink-0" />
+                <span className="min-w-0">
+                  {inUse === "oauth"
+                    ? t("provider.credentialInUseOAuth", {
+                        name:
+                          issuer === null ? t("provider.account") : oauthIssuerLabel(issuer),
+                      })
+                    : t("provider.credentialInUseKey")}
+                </span>
+              </p>
+            )}
             <p className="mt-1.5 text-[11.5px] leading-[1.6] text-fg-faint">
               {authMode === "oauth"
                 ? t("provider.signInHint")
-                : managed
-                  ? t("provider.managedKeyHint")
-                  : t("provider.keySavedHint")}
+                : authMode === "both"
+                  ? t("provider.bothCredentialHint")
+                  : managed
+                    ? t("provider.managedKeyHint")
+                    : t("provider.keySavedHint")}
             </p>
             {cred !== null && !cred.encryptionAvailable && (
               /* ★ 不做明文降级,所以这里会真的存不进去 —— 提前说,别等他填完才报错 */
@@ -1043,6 +1134,8 @@ function ProviderAuthField({
   onSignIn,
   onCancel,
   onSignOut,
+  onSubmitCode,
+  clearsSlot,
 }: {
   providerId: string;
   view: OAuthView;
@@ -1050,13 +1143,68 @@ function ProviderAuthField({
   onSignIn: () => void;
   onCancel: () => void;
   onSignOut: () => void;
+  onSubmitCode: (pasted: string) => void;
+  /** 这一栏还兼着密钥 —— 退出登录会把密钥一起删掉，确认文案得说清楚 */
+  clearsSlot: boolean;
 }): ReactNode {
   const { t } = useI18n();
   const [confirmOut, setConfirmOut] = useState(false);
+  const [pasteDraft, setPasteDraft] = useState("");
   const issuer = providerOAuthIssuer(providerId);
-  const signInLabel = t("provider.signInWith", { name: issuer === "chatgpt" ? "ChatGPT" : "" });
+  /*
+    ★★ 名字来自一张**穷尽的** Record(`provider-auth.ts` 的 `oauthIssuerLabel`),
+    不是 `issuer === "chatgpt" ? "ChatGPT" : ""`。后者在加 issuer 时一个编译错
+    都不报,表现是按钮上写着「使用  账号登录」—— 中间空一个词,
+    而界面上没有任何一处指向 issuer 漏登记了。
+  */
+  const signInLabel = t("provider.signInWith", {
+    name: issuer === null ? "" : oauthIssuerLabel(issuer),
+  });
 
   if (view.state === "signing-in") {
+    /*
+      ★★ **这条流程要用户自己把回调地址粘回来。**
+      没有这个分支时,粘贴形态的登录在界面上是一个转到超时为止的 spinner ——
+      而用户手里正拿着那条回调地址无处可放。
+    */
+    if (view.phase === "waiting" && view.needsPaste) {
+      const submit = (): void => {
+        const v = pasteDraft.trim();
+        if (v === "") return;
+        setPasteDraft(""); // ★ 提交完就抹掉:里面带着授权码
+        onSubmitCode(v);
+      };
+      return (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <TextInput
+                value={pasteDraft}
+                onChange={setPasteDraft}
+                onCommit={submit}
+                ariaLabel={t("provider.authPasteLabel")}
+                placeholder={t("provider.authPastePlaceholder")}
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="accent"
+              disabled={pasteDraft.trim() === ""}
+              onClick={submit}
+            >
+              {t("provider.authPasteSubmit")}
+            </Button>
+            <Button size="sm" onClick={onCancel}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+          <p className="text-[11.5px] leading-[1.6] text-fg-faint">
+            {t("provider.authPasteHint")}
+          </p>
+        </div>
+      );
+    }
+
     const phaseLabel =
       view.phase === "opening"
         ? t("provider.authOpeningBrowser")
@@ -1131,6 +1279,17 @@ function ProviderAuthField({
           {confirmOut ? t("provider.confirmSignOut") : t("provider.signOut")}
         </Button>
       </div>
+      {/*
+        ★★ 一个凭证槽装两种凭证,所以「退出登录」在这些家会把**密钥一起删掉**
+        (走的是 `removeCredential`,整条 ref 删干净)。等他点完确认才发现
+        key 也没了 —— 那一步是不可逆的,提示必须在确认之前。
+      */}
+      {clearsSlot && confirmOut && (
+        <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-[1.6] text-danger">
+          <AlertTriangle size={12} className="mt-[2px] shrink-0" />
+          <span className="min-w-0">{t("provider.signOutClearsSlot")}</span>
+        </p>
+      )}
     </>
   );
 }

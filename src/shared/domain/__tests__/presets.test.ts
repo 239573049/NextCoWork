@@ -88,10 +88,37 @@ describe('预设表 · 主键与完整性', () => {
     }
   })
 
-  it('★ oauth 预设必须声明 issuer —— 否则界面画不出登录按钮，退化成一个填不了的密钥框', () => {
+  /*
+    ★★ **这条配对从「双向」放宽成了「单向」,是一次故意的语义变更。**
+
+    原来的第二句(`oauthIssuer` ⇒ `credentialKind === 'oauth'`)把「能登录」和
+    「没有可粘贴的密钥」焊成了同一件事。而 GLM Coding Plan 这两家**两样都有**:
+    官方既发订阅 key、也能用账号登录。焊在一起的后果是接了登录就得把
+    `credentialKind` 改成 `'oauth'`,于是**已经在用订阅 key 的用户的输入框会消失**,
+    而他手里那把 key 还是好的 —— 一次纯粹由我们的数据模型造成的功能倒退。
+
+    ★ 第一句必须留着:它守的是「画得出登录按钮」。没有 issuer 的 `'oauth'` 预设
+    会退化成一个填不了的密钥框,那才是真的漏填。
+  */
+  it('★ credentialKind 为 oauth 的预设必须声明 issuer —— 否则退化成一个填不了的密钥框', () => {
     for (const p of PROVIDER_PRESETS) {
       if (p.credentialKind === 'oauth') expect(p.oauthIssuer, p.id).toBeDefined()
-      if (p.oauthIssuer !== undefined) expect(p.credentialKind, p.id).toBe('oauth')
+    }
+  })
+
+  it('★ 声明了 oauthIssuer 但仍有密钥的预设，必须给得出拿密钥的地址（两种凭证都得能拿到）', () => {
+    for (const p of PROVIDER_PRESETS) {
+      if (p.oauthIssuer !== undefined && p.credentialKind !== 'oauth') {
+        expect(p.apiKeyUrl, p.id).toBeDefined()
+      }
+    }
+  })
+
+  it('★ GLM Coding Plan 两条：订阅密钥与账号登录并存', () => {
+    for (const id of ['zai-coding', 'zhipu-coding'] as const) {
+      const p = PROVIDER_PRESETS.find((x) => x.id === id)
+      expect(p?.credentialKind, id).toBe('subscription-key')
+      expect(p?.oauthIssuer, id).toBeDefined()
     }
   })
 

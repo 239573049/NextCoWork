@@ -70,6 +70,15 @@ export interface OAuthIdentity {
   planType?: string
 }
 
+/** 拼授权 URL 时,流程能提供给 spec 的全部素材 */
+export interface OAuthAuthorizeArgs {
+  clientId: string
+  redirectUri: string
+  state: string
+  /** PKCE challenge。`pkce: false` 的家用不上 */
+  challenge: string
+}
+
 /** 换 token 时,流程能提供给 spec 的全部素材 */
 export interface OAuthTokenRequestArgs {
   code: string
@@ -119,6 +128,26 @@ export interface OAuthProviderSpec {
   redirect: OAuthRedirect
   /** 各家在授权 URL 上的私货(`access_type=offline` / `code=true` / …) */
   extraAuthorizeParams?: Readonly<Record<string, string>>
+  /**
+   * 授权 URL 上的**全部**查询参数。省略 = 标准的
+   * `response_type` / `client_id` / `redirect_uri` / `scope` / `state` / PKCE 那一套。
+   *
+   * ★★ 整体替换而不是「加几个字段」,和 `tokenRequest` 同一个理由:有的家(智谱)
+   * 的授权入口压根不是 OAuth 授权端点,而是一个登录页,吃的是
+   * `appId` / `redirect` / `state` —— 标准那三个参数一个都不认。增量式的接口
+   * 表达不了「删掉标准字段」,而 `extraAuthorizeParams` 只能覆盖不能删。
+   *
+   * ★ `extraAuthorizeParams` 仍然会在这之后叠加,两者不互斥。
+   */
+  authorizeParams?(args: OAuthAuthorizeArgs): Readonly<Record<string, string>>
+  /**
+   * 回调里装授权码的那个查询参数名。**省略 = `code`(标准)。**
+   *
+   * ★ 2026-09-09 实测:智谱那条回调回来的是 `zcode://oauth/callback?authCode=…&state=…`
+   * —— 参数名是 `authCode`。按 `code` 去取的表现是一句「这段内容里没有授权码」,
+   * 而用户手里明明有一条带着授权码的回调地址。
+   */
+  callbackCodeParam?: string
   extraTokenParams?: Readonly<Record<string, string>>
   /**
    * 换 token 的请求体。**省略 = 标准的 `grant_type=authorization_code` 表单。**

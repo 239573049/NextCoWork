@@ -582,6 +582,17 @@ export interface IpcEventMap {
     providerId: string
     phase: 'opening' | 'waiting' | 'exchanging' | 'done' | 'failed' | 'cancelled'
     message?: string
+    /**
+     * ★★ 这次登录要用户**自己把回调地址粘回来**(没有回环端口可接)。
+     *
+     * 渲染层据此在 `waiting` 阶段画输入框而不是一个转圈的 spinner ——
+     * 不给这个标志的话,它只能靠 issuer 去猜「哪几家要粘」,而那是
+     * 规格表的知识,整张表是**故意**留在 main 的(见 `oauth/registry.ts` 文件头)。
+     *
+     * ★ 它描述的是**这一次流程**,不是那家供应商的静态属性 —— 所以走事件,
+     * 不走 preset。
+     */
+    needsPastedCode?: boolean
   }
   /**
    * 某家的登录态变了。
