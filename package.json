@@ -1,6 +1,6 @@
 {
   "name": "nextcowork",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "NextCoWork — 编码型 Agent 桌面端",
   "main": "./out/main/index.js",
   "author": "NextCoWork",
