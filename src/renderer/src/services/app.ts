@@ -8,6 +8,7 @@ import type { Bootstrap } from '../../../shared/domain/bootstrap'
 import type { DirListing, FileSuggestion } from '../../../shared/domain/file-tree'
 import type { SessionInputState } from '../../../shared/domain/queued-input'
 import type { AppSettings, AppSettingsPatch } from '../../../shared/domain/settings'
+import type { UpdateState } from '../../../shared/domain/update'
 import type { InnerTabState, WindowKind, WindowTabState } from '../../../shared/domain/tab'
 import type { Workspace, WorkspaceSettings } from '../../../shared/domain/workspace'
 import { invoke, send } from './ipc'
@@ -28,6 +29,22 @@ export function openExternal(url: string): Promise<void> {
 
 export function checkForUpdates() {
   return invoke('app:checkForUpdates', undefined)
+}
+
+export function updateCheck(): Promise<UpdateState> {
+  return invoke('app:updateCheck', undefined)
+}
+
+export function updateDownload(): Promise<UpdateState> {
+  return invoke('app:updateDownload', undefined)
+}
+
+export function updateInstall(): Promise<void> {
+  return invoke('app:updateInstall', undefined)
+}
+
+export function updateGetState(): Promise<UpdateState> {
+  return invoke('app:updateGetState', undefined)
 }
 
 export function copyText(text: string): Promise<void> {

@@ -27,6 +27,7 @@ import { useI18n } from './i18n'
 import type { ClientAuthState } from '../../shared/domain/client-auth'
 import { getClientAuthState } from './services/client-auth'
 import { WelcomeView } from './views/WelcomeView'
+import { UpdateBanner } from './components/UpdateBanner'
 
 export default function App(): React.JSX.Element {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
@@ -194,6 +195,7 @@ export default function App(): React.JSX.Element {
         runningWorkspaceIds={runningWorkspaceIds}
         auth={auth}
       />
+      <UpdateBanner />
     </>
   )
 }

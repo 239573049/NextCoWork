@@ -17,6 +17,7 @@ import { IpcError, toAgentError } from './errors'
 import { RunHandle, runs } from '../kernel/run-registry'
 import { runAgent } from '../runtime'
 import { runTopic, windows, type WindowContext } from '../window/registry'
+import { updateService } from '../update/update-service'
 
 /**
  * 16ms ≈ 一帧。方案 §8 给的是 16–33ms:再快没意义(渲染层反正等 rAF),
@@ -123,6 +124,8 @@ export type RunDriver = (handle: RunHandle, req: RunRequest) => void | Promise<v
  * 而那时首批事件早发完了。
  */
 export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver = runAgent): void {
+  updateService.configure()
+  if (!updateService.canStartNewRuns()) throw new IpcError('unknown', '必须安装客户端更新后才能开始新的任务')
   windows.subscribe(runTopic(req.runId), ctx.sender)
   launch(req, driver)
 }

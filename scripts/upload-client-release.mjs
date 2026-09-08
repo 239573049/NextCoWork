@@ -22,8 +22,10 @@ const DEFAULT_BASE_URL = 'https://nextco.work'
 export const ARTIFACTS = [
   { platform: 'windows', architecture: 'x64', extension: '.exe' },
   { platform: 'linux', architecture: 'x64', extension: '.AppImage' },
-  { platform: 'macos', architecture: 'arm64', extension: '.dmg', marker: 'arm64' },
-  { platform: 'macos', architecture: 'x64', extension: '.dmg', marker: 'x64' }
+  { platform: 'macos', architecture: 'arm64', extension: '.dmg', marker: 'arm64', artifactType: 'installer' },
+  { platform: 'macos', architecture: 'x64', extension: '.dmg', marker: 'x64', artifactType: 'installer' },
+  { platform: 'macos', architecture: 'arm64', extension: '.zip', marker: 'arm64', artifactType: 'update' },
+  { platform: 'macos', architecture: 'x64', extension: '.zip', marker: 'x64', artifactType: 'update' }
 ]
 
 function usage() {
@@ -36,14 +38,17 @@ Options:
   --channel <channel>     Release channel (default: stable, beta for prereleases)
   --notes <text>          Release notes sent to the API
   --prerelease             Mark the release as a prerelease
+  --mandatory              Mark the release as a mandatory update
+  --minimum-supported-version <version>
+  --grace-until <ISO date> Grace period for mandatory updates
   --require-all            Fail when one of the four platform artifacts is absent
   --ignore-duplicates      Treat the API's 409 (already uploaded) as success
   --dry-run               Validate and print uploads without sending them
 `
 }
 
-function parseArgs(argv) {
-  const options = { dir: 'dist', version: packageJson.version, baseUrl: DEFAULT_BASE_URL, notes: '', prerelease: false, requireAll: false, ignoreDuplicates: false, dryRun: false }
+export function parseArgs(argv) {
+  const options = { dir: 'dist', version: packageJson.version, baseUrl: DEFAULT_BASE_URL, channel: 'stable', notes: '', prerelease: false, mandatory: false, minimumSupportedVersion: '', graceUntil: '', requireAll: false, ignoreDuplicates: false, dryRun: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { help: true, options }
@@ -51,7 +56,8 @@ function parseArgs(argv) {
     if (arg === '--require-all') { options.requireAll = true; continue }
     if (arg === '--ignore-duplicates') { options.ignoreDuplicates = true; continue }
     if (arg === '--prerelease') { options.prerelease = true; continue }
-    const key = { '--dir': 'dir', '--version': 'version', '--base-url': 'baseUrl', '--channel': 'channel', '--notes': 'notes' }[arg]
+    if (arg === '--mandatory') { options.mandatory = true; continue }
+    const key = { '--dir': 'dir', '--version': 'version', '--base-url': 'baseUrl', '--channel': 'channel', '--notes': 'notes', '--minimum-supported-version': 'minimumSupportedVersion', '--grace-until': 'graceUntil' }[arg]
     if (!key || i + 1 >= argv.length) throw new Error(`Unknown or incomplete option: ${arg}`)
     options[key] = argv[++i]
   }
@@ -133,7 +139,11 @@ export async function uploadArtifacts(options, token) {
       'X-Client-File-Name': basename(artifact.fileName),
       'X-Client-Sha256': hash,
       'X-Client-Release-Notes': options.notes,
-      'X-Client-Prerelease': String(options.prerelease)
+      'X-Client-Prerelease': String(options.prerelease),
+      'X-Client-Artifact-Type': artifact.artifactType ?? 'installer',
+      'X-Client-Mandatory': String(options.mandatory),
+      'X-Client-Minimum-Supported-Version': options.minimumSupportedVersion ?? '',
+      'X-Client-Grace-Until': options.graceUntil ?? ''
     }
     if (options.dryRun) {
       console.log(`dry-run: ${artifact.platform}/${artifact.architecture} ${artifact.fileName} (${info.size} bytes, ${hash})`)

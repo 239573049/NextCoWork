@@ -88,6 +88,7 @@ import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../n
 import { getClientAuthState, startClientLogin, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
+import { updateService } from '../update/update-service'
 import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans } from './theme'
 import {
@@ -166,6 +167,10 @@ const handlers: HandlerMap = {
   },
   'app:openExternal': ({ url }) => openExternal(url),
   'app:checkForUpdates': () => checkForUpdates(),
+  'app:updateCheck': () => updateService.check(),
+  'app:updateDownload': () => updateService.download(),
+  'app:updateInstall': () => updateService.install(),
+  'app:updateGetState': () => updateService.getState(),
   'app:copyText': ({ text }) => copyText(text),
   'app:saveTextFile': (req) => saveTextFile(req),
   'app:openSessionWindow': (req) => openSessionWindow(req),

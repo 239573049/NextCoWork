@@ -3,15 +3,9 @@ productName: NextCoWork
 directories:
   buildResources: build
   output: dist
-
 files:
   - '!**/.vscode/*'
   - '!src/*'
-  # ★ userData 被指到 `<cwd>/.next-cowork`(src/main/index.ts),所以开发机上
-  # 整个 Chromium profile —— Cookies、Local Storage、连同 SQLite 主库 ——
-  # 就躺在项目根。electron-builder **不读 .gitignore**,不写这一行的话
-  # `npm run dist` 会把开发者的会话和密钥一起打进发行包;而且 profile 里的
-  # `-wal` 是易失文件,收集到一半消失就是一个 ENOENT 的打包失败。
   - '!.next-cowork'
   - '!docs/*'
   - '!test/*'
@@ -19,36 +13,25 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierrc,.prettierignore}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
-
-# ★ node-pty 在 macOS 依赖 spawn-helper 可执行文件、Windows 依赖 conpty.dll。
-# asar 内的二进制无法 exec —— 不 unpack 就是「dev 好好的,打包后开终端报错」。
 asarUnpack:
   - '**/node_modules/node-pty/**'
-  - resources/**
-
-# 原生模块按 Electron 的 ABI 重建(内部走 @electron/rebuild)
+  - 'resources/**'
 npmRebuild: true
-
 electronFuses:
   runAsNode: false
   enableCookieEncryption: true
   enableNodeOptionsEnvironmentVariable: false
   enableNodeCliInspectArguments: false
-  # 下面两项需要正确的代码签名才能生效;未签名的本地构建会直接崩在完整性校验上。
-  # 正式发布(配好签名)时打开。
   enableEmbeddedAsarIntegrityValidation: false
   onlyLoadAppFromAsar: false
   loadBrowserProcessSpecificV8Snapshot: false
-  # ★ 必须是 true(也是 Electron 的默认值)。生产走 `win.loadFile()`,即 `file://`,
-  # 而构建产物的入口是 `<script type="module" crossorigin src="./assets/…">` ——
-  # module script 的加载**强制走 CORS**。关掉这个 fuse 会让 file:// 页面的 origin
-  # 退化成 opaque,入口 chunk 被直接拦下,React 根本没机会挂载。
-  #
-  # 症状是**整个窗口只剩 BrowserWindow 的 backgroundColor**,一片纯黑,而且生产下
-  # `optimizer.watchWindowShortcuts` 屏蔽了 F12,连报错都看不到。dev 完全照不出来:
-  # 那边走的是 `http://localhost`,而 fuse 只在 electron-builder 打包时才烧进二进制。
   grantFileProtocolExtraPrivileges: true
-
+publish:
+  provider: generic
+  url: https://nextco.work/api/client/updates/feed/stable/
+win:
+  target:
+    - nsis
 mac:
   category: public.app-category.developer-tools
   artifactName: ${productName}-${version}-${arch}-mac.${ext}
@@ -59,20 +42,12 @@ mac:
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
     - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
-
-dmg:
-  artifactName: ${productName}-${version}-${arch}.${ext}
-
-win:
-  target:
-    - nsis
-
 linux:
   target:
     - AppImage
-  category: Development
-
 nsis:
+  oneClick: false
+  perMachine: false
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   createDesktopShortcut: always

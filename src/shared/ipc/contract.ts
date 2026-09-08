@@ -47,7 +47,7 @@ import type { ImageTheme } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
-import type { UpdateCheckResult } from '../domain/update'
+import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type {
   WorkspaceFile,
@@ -157,6 +157,10 @@ export interface IpcInvokeMap {
   'app:getBootstrap': { req: void; res: Bootstrap }
   'app:openExternal': { req: { url: string }; res: void }
   'app:checkForUpdates': { req: void; res: UpdateCheckResult }
+  'app:updateCheck': { req: void; res: UpdateState }
+  'app:updateDownload': { req: void; res: UpdateState }
+  'app:updateInstall': { req: void; res: void }
+  'app:updateGetState': { req: void; res: UpdateState }
   'app:copyText': { req: { text: string }; res: void }
   /**
    * 存一段文本到用户挑的位置。路径由主进程的 showSaveDialog 产出 ——
@@ -606,6 +610,7 @@ export interface IpcEventMap {
    */
   'provider:authChanged': { providerId: string; info: CredentialInfo }
   'clientAuth:changed': ClientAuthState
+  'app:updateChanged': UpdateState
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -628,6 +633,10 @@ export const INVOKE_CHANNELS = {
   'app:getBootstrap': 1,
   'app:openExternal': 1,
   'app:checkForUpdates': 1,
+  'app:updateCheck': 1,
+  'app:updateDownload': 1,
+  'app:updateInstall': 1,
+  'app:updateGetState': 1,
   'app:copyText': 1,
   'app:saveTextFile': 1,
   'app:openSessionWindow': 1,
@@ -785,6 +794,7 @@ export const EVENT_CHANNELS = {
   'browser:profilesChanged': 1,
   'modelCatalog:changed': 1,
   'clientAuth:changed': 1
+  ,'app:updateChanged': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

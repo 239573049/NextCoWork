@@ -21,6 +21,7 @@ import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
 import { titleBarOptions, watchMaximized } from './window/title-bar'
 import { setSessionWindowOpener } from './ipc/app'
+import { updateService } from './update/update-service'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 单实例锁 —— 必须在 whenReady 之前。方案 §9:两个实例开同一个 SQLite 文件,
@@ -345,6 +346,12 @@ void app.whenReady().then(() => {
     child.once('ready-to-show', () => child.focus())
   })
   registerIpc()
+
+  updateService.configure()
+  if (app.isPackaged) {
+    setTimeout(() => { void updateService.check() }, 30_000)
+    setInterval(() => { void updateService.check() }, 24 * 60 * 60 * 1000)
+  }
 
   createMainWindow()
 
