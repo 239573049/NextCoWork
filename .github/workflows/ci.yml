@@ -44,3 +44,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Test release uploader
+        run: npm run test:release

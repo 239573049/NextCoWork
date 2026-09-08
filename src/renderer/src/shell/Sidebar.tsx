@@ -24,6 +24,7 @@ import { useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
 import type { SessionListItem } from '../../../shared/domain/session'
+import type { ClientAuthState } from '../../../shared/domain/client-auth'
 import { Mark } from '../components/brand/Mark'
 import { EmptyState } from '../components/ui/EmptyState'
 import { IconButton } from '../components/ui/IconButton'
@@ -53,7 +54,8 @@ export function Sidebar({
   onOpenSettings,
   onSelectSession,
   onDeleteSession,
-  onCollapse
+  onCollapse,
+  auth
 }: {
   /** 当前工作区。null = 一个都没打开(下半整体降级为空态) */
   workspace: Workspace | null
@@ -71,6 +73,7 @@ export function Sidebar({
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>
   onCollapse: () => void
+  auth: ClientAuthState
 }): ReactNode {
   const { t } = useI18n()
   return (
@@ -229,8 +232,8 @@ export function Sidebar({
           <Mark size={16} />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[12.5px] text-fg">{t('sidebar.localMode')}</p>
-          <p className="truncate text-[11px] text-fg-faint">{t('sidebar.localModeHint')}</p>
+          <p className="truncate text-[12.5px] text-fg">{auth.mode === 'authenticated' ? (auth.user?.displayName || auth.user?.username || auth.user?.email || t('sidebar.signedIn')) : t('sidebar.localMode')}</p>
+          <p className="truncate text-[11px] text-fg-faint">{auth.mode === 'authenticated' ? t('sidebar.signedInHint') : t('sidebar.localModeHint')}</p>
         </div>
         <IconButton label={t('common.settings')} onClick={onOpenSettings}>
           <Settings size={15} />

@@ -27,6 +27,7 @@ export default tseslint.config(
         fetch: 'readonly',
         WebSocket: 'readonly',
         JSON: 'readonly',
+        URL: 'readonly',
         Buffer: 'readonly'
       }
     }

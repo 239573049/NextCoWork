@@ -17,6 +17,8 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:release": "node --test scripts/upload-client-release.test.mjs",
+    "release:upload": "node scripts/upload-client-release.mjs",
     "e2e": "npm run build && node scripts/e2e-probe.mjs",
     "e2e:theme": "npm run build && node scripts/theme-probe.mjs",
     "shot": "npm run build && node scripts/screenshot.mjs",

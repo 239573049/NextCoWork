@@ -26,6 +26,10 @@ export function openExternal(url: string): Promise<void> {
   return invoke('app:openExternal', { url })
 }
 
+export function checkForUpdates() {
+  return invoke('app:checkForUpdates', undefined)
+}
+
 export function copyText(text: string): Promise<void> {
   return invoke('app:copyText', { text })
 }

@@ -843,8 +843,8 @@ export function exportDataSnapshot(): Omit<DataExport, 'encryptedCredentials'> {
     settings,
     workspaces: listWorkspaces(),
     sessions: listExportableSessionDetails(),
-    providers: listProviders(),
-    aliases: listAliases(),
+    providers: listProviders().filter((p) => p.id !== 'nextcowork'),
+    aliases: listAliases().filter((a) => a.providerId !== 'nextcowork'),
     mcpServers: listMcpServers(),
     // 导出的是实际配置行，不把目录里的默认项伪造成用户配置。
     searchProviders: listStoredSearchProviders(),
@@ -888,6 +888,7 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
       } else skipped++
     }
     for (const p of data.providers) {
+      if (p.id === 'nextcowork') continue
       const local = listProviders().find((x) => x.id === p.id)
       const decision = dataMergeDecision(local, p)
       if (decision !== 'skip') {
@@ -903,6 +904,7 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
       } else skipped++
     }
     for (const a of data.aliases) {
+      if (a.providerId === 'nextcowork') continue
       const local = listAliases().find((x) => x.providerId === a.providerId && x.alias === a.alias)
       const decision = dataMergeDecision(local, a)
       if (decision !== 'skip') { putAlias(a); imported++; if (decision === 'overwrite') overwritten++ } else skipped++

@@ -47,6 +47,7 @@ import { ModelPage } from './pages/model/ModelPage'
 import { PreferencePage } from './pages/PreferencePage'
 import { StubPage } from './pages/StubPage'
 import { useI18n, type Translate } from '../i18n'
+import { AccountPage } from './pages/AccountPage'
 
 
 export function SettingsOverlay({
@@ -259,6 +260,8 @@ function PageBody({
     case 'about':
       return <AboutPage versions={versions} />
     default:
+      if (page === 'account') return <AccountPage settings={settings} sub={sub} patch={patch} walletOnly={false} />
+      if (page === 'wallet') return <AccountPage settings={settings} sub={sub} patch={patch} walletOnly />
       return <StubPage page={page} />
   }
 }

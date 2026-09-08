@@ -47,6 +47,8 @@ import type { ImageTheme } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
+import type { UpdateCheckResult } from '../domain/update'
+import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
@@ -154,6 +156,7 @@ export interface IpcInvokeMap {
   // ── 应用 ──
   'app:getBootstrap': { req: void; res: Bootstrap }
   'app:openExternal': { req: { url: string }; res: void }
+  'app:checkForUpdates': { req: void; res: UpdateCheckResult }
   'app:copyText': { req: { text: string }; res: void }
   /**
    * 存一段文本到用户挑的位置。路径由主进程的 showSaveDialog 产出 ——
@@ -161,6 +164,14 @@ export interface IpcInvokeMap {
    */
   'app:saveTextFile': { req: { defaultName: string; text: string }; res: { path: string } | null }
   'app:openSessionWindow': { req: { workspaceId: string; sessionId: string }; res: void }
+
+  // ── NextCoWork 账户 ──
+  'clientAuth:getState': { req: void; res: ClientAuthState }
+  'clientAuth:startLogin': { req: void; res: ClientAuthState }
+  'clientAuth:useOffline': { req: void; res: ClientAuthState }
+  'clientAuth:signOut': { req: void; res: ClientAuthState }
+  'clientAuth:getUser': { req: void; res: ClientAuthUser | null }
+  'clientAuth:getUsage': { req: { from?: string; to?: string }; res: ClientUsageEntry[] }
 
   // ── 设置 ──
   'settings:get': { req: void; res: AppSettings }
@@ -583,6 +594,7 @@ export interface IpcEventMap {
    * 混进去会让每一次登录都触发一遍全应用的模型列表重算。
    */
   'provider:authChanged': { providerId: string; info: CredentialInfo }
+  'clientAuth:changed': ClientAuthState
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -604,9 +616,16 @@ export interface IpcEventMap {
 export const INVOKE_CHANNELS = {
   'app:getBootstrap': 1,
   'app:openExternal': 1,
+  'app:checkForUpdates': 1,
   'app:copyText': 1,
   'app:saveTextFile': 1,
   'app:openSessionWindow': 1,
+  'clientAuth:getState': 1,
+  'clientAuth:startLogin': 1,
+  'clientAuth:useOffline': 1,
+  'clientAuth:signOut': 1,
+  'clientAuth:getUser': 1,
+  'clientAuth:getUsage': 1,
   'settings:get': 1,
   'settings:update': 1,
   'theme:importImage': 1,
@@ -753,7 +772,8 @@ export const EVENT_CHANNELS = {
   'sessions:changed': 1,
   'browser:changed': 1,
   'browser:profilesChanged': 1,
-  'modelCatalog:changed': 1
+  'modelCatalog:changed': 1,
+  'clientAuth:changed': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

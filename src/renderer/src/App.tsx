@@ -24,6 +24,9 @@ import { useWindowStore } from './stores/window'
 import { useTabsStore } from './stores/tabs'
 import { applyTheme } from './theme/apply'
 import { useI18n } from './i18n'
+import type { ClientAuthState } from '../../shared/domain/client-auth'
+import { getClientAuthState } from './services/client-auth'
+import { WelcomeView } from './views/WelcomeView'
 
 export default function App(): React.JSX.Element {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
@@ -31,6 +34,7 @@ export default function App(): React.JSX.Element {
   const [appearance, setAppearance] = useState<ResolvedTheme | null>(null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [fatal, setFatal] = useState<string | null>(null)
+  const [auth, setAuth] = useState<ClientAuthState | null>(null)
   const hydrate = useWindowStore((s) => s.hydrate)
   const openWorkspace = useWindowStore((s) => s.openWorkspace)
   const openSession = useTabsStore((s) => s.openSession)
@@ -67,6 +71,7 @@ export default function App(): React.JSX.Element {
       表现是 Windows 上从最大化态启动时中间那颗按钮画着「□」而不是还原字形。
     */
     const offMaximized = on('window:maximized', ({ maximized }) => setMaximized(maximized))
+    const offClientAuth = on('clientAuth:changed', setAuth)
 
     announceReady('main')
     void getBootstrap()
@@ -75,6 +80,7 @@ export default function App(): React.JSX.Element {
         setSettings(b.settings)
         setWorkspaces(b.workspaces)
         setAppearance(b.resolvedTheme)
+        void getClientAuthState().then(setAuth).catch((error: unknown) => setFatal(error instanceof Error ? error.message : String(error)))
         hydrate(b)
         // ⌘R 重载后主进程里还活着的 run —— 角标要立刻正确,不能等下一个事件
         adoptActiveRuns(b.activeRuns)
@@ -107,6 +113,7 @@ export default function App(): React.JSX.Element {
       offSessions()
       offBrowser()
       offMaximized()
+      offClientAuth()
     }
   }, [hydrate, openSession, openWorkspace, setMaximized, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
 
@@ -169,6 +176,13 @@ export default function App(): React.JSX.Element {
     )
   }
 
+  if (auth === null) {
+    return <><WindowControls /><div className="h-full bg-app" /></>
+  }
+  if (auth.mode === 'undecided') {
+    return <><WindowControls /><WelcomeView onComplete={() => { void getClientAuthState().then(setAuth) }} /></>
+  }
+
   return (
     <>
       <WindowControls />
@@ -178,6 +192,7 @@ export default function App(): React.JSX.Element {
         workspaces={workspaces}
         runningSessionIds={runningSessionIds}
         runningWorkspaceIds={runningWorkspaceIds}
+        auth={auth}
       />
     </>
   )

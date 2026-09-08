@@ -15,6 +15,51 @@ import type { WindowKind } from '../../shared/domain/tab'
 import { EMPTY_OUTER, outerTabKey, store } from '../state/store'
 import { windows } from '../window/registry'
 import { IpcError } from './errors'
+import type { ClientUpdateInfo, UpdateCheckResult } from '../../shared/domain/update'
+
+const UPDATE_API = 'https://nextco.work/api/client/updates/latest'
+
+function compareVersions(left: string, right: string): number {
+  const parse = (value: string) => {
+    const [withoutBuild = '0.0.0', build] = value.replace(/^v/, '').split('+')
+    const [core = '0.0.0', pre = ''] = withoutBuild.split('-')
+    return { core: core.split('.').map(Number), pre: pre ? pre.split('.') : [], build }
+  }
+  const a = parse(left); const b = parse(right)
+  for (let i = 0; i < 3; i += 1) { const diff = (a.core[i] ?? 0) - (b.core[i] ?? 0); if (diff !== 0) return diff }
+  if (!a.pre.length || !b.pre.length) return a.pre.length === b.pre.length ? 0 : a.pre.length ? -1 : 1
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i += 1) {
+    const av = a.pre[i]; const bv = b.pre[i]
+    if (av === undefined || bv === undefined) return av === undefined ? -1 : 1
+    const an = /^\d+$/.test(av); const bn = /^\d+$/.test(bv)
+    if (an && bn && av !== bv) return Number(av) - Number(bv)
+    if (an !== bn) return an ? -1 : 1
+    if (av !== bv) return av < bv ? -1 : 1
+  }
+  return 0
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  const currentVersion = app.getVersion()
+  const platform = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux'
+  const architecture = process.arch === 'arm64' ? 'arm64' : 'x64'
+  try {
+    const response = await fetch(`${UPDATE_API}?platform=${platform}&architecture=${architecture}&channel=stable`, { signal: AbortSignal.timeout(10_000) })
+    if (response.status === 404) return { status: 'current', currentVersion }
+    if (!response.ok) return { status: 'unavailable', currentVersion, message: `HTTP ${response.status}` }
+    const envelope = await response.json() as { data?: ClientUpdateInfo } | ClientUpdateInfo
+    const candidate = 'data' in envelope ? envelope.data : envelope
+    const update = candidate !== undefined && typeof candidate === 'object' && 'version' in candidate
+      ? candidate as ClientUpdateInfo
+      : undefined
+    if (!update || typeof update.version !== 'string' || typeof update.downloadUrl !== 'string') return { status: 'unavailable', currentVersion, message: 'Invalid update response' }
+    if (compareVersions(update.version, currentVersion) <= 0) return { status: 'current', currentVersion }
+    if (!update.downloadUrl.startsWith('https://')) return { status: 'unavailable', currentVersion, message: 'Invalid download URL' }
+    return { status: 'available', currentVersion, update }
+  } catch (error) {
+    return { status: 'unavailable', currentVersion, message: error instanceof Error ? error.message : 'Network error' }
+  }
+}
 
 export function resolveTheme(pref: ThemePreference): ResolvedTheme {
   if (pref === 'system') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'

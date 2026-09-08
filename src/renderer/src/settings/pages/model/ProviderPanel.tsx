@@ -19,7 +19,6 @@ import {
 } from "../../../../../shared/domain/baseurl";
 import {
   findPreset,
-  isBuiltinProvider,
 } from "../../../../../shared/domain/presets";
 import type {
   AnthropicCacheTtl,
@@ -120,6 +119,7 @@ const REASONING_EFFORTS: readonly ReasoningEffort[] = [
 export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
   const { t } = useI18n();
   const { provider: p, aliases } = entry;
+  const managed = p.id === "nextcowork";
   const { family, responses } = splitProtocol(p.protocol);
   const preset = findPreset(p.id);
   const apiKeyUrl = preset?.apiKeyUrl;
@@ -480,7 +480,8 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           </p>
         )}
 
-        <div className="space-y-4 px-4 py-4">
+        <fieldset disabled={managed} className="space-y-4 px-4 py-4 disabled:opacity-80">
+          {managed && <p className="rounded-[8px] bg-accent/10 px-3 py-2 text-[11.5px] leading-[1.6] text-accent">{t("provider.builtinHint")}</p>}
           <Field label={t("provider.name")}>
             <TextInput
               value={name}
@@ -863,7 +864,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               {listAvail.hint ?? t("provider.rowActionsHint")}
             </p>
           </Field>
-        </div>
+        </fieldset>
 
         <div className="border-t border-hairline px-4 py-3">
           <div className="flex items-center gap-2">
@@ -877,7 +878,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
             <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
               {confirmDelete
                 ? t("provider.deleteHint")
-                : isBuiltinProvider(p.id)
+                : managed
                   ? t("provider.builtinDeleteHint")
                   : t("provider.customDeleteHint")}
             </p>
@@ -894,7 +895,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               size="sm"
               variant={confirmDelete ? "danger" : undefined}
               icon={<Trash2 size={12} />}
-              disabled={busy}
+              disabled={busy || managed}
               onClick={() => {
                 if (confirmDelete) remove();
                 else setConfirmDelete(true);

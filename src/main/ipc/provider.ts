@@ -30,6 +30,7 @@ import {
   providerCredentialRef,
   PROTOCOL_LABEL
 } from '../../shared/domain/provider'
+import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { removeCredential } from '../db/repo'
 import { bearerOf, parseCredential } from '../../shared/domain/credential'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
@@ -65,6 +66,7 @@ export function listModels(providerId?: string): ModelAlias[] {
 /** Update one configured model while preserving provider/alias identity. */
 export function updateModel(input: ModelAlias): ModelAlias {
   ensureSeeded()
+  if (input.providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   const existing = store.listAliases().find(
     (m) => m.providerId === input.providerId && m.alias === input.alias
   )
@@ -80,6 +82,7 @@ export function updateModel(input: ModelAlias): ModelAlias {
 
 export function removeModel(providerId: string, alias: string): void {
   ensureSeeded()
+  if (providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   store.removeAlias(providerId, alias)
   repointDanglingDefaults()
   broadcast()
@@ -92,6 +95,7 @@ export function renameModel(
   nextAlias: string,
 ): ModelAlias {
   ensureSeeded()
+  if (providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   const existing = store
     .listAliases()
     .find((model) => model.providerId === providerId && model.alias === alias)
@@ -264,6 +268,7 @@ function mergeProtocolOptions(
 export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
   ensureSeeded()
   const id = input.id.trim()
+  if (id === CLIENT_PROVIDER_ID) throw new Error('内置供应商由 NextCoWork 管理，不能修改')
   if (id === '') throw new Error('供应商 id 不能为空')
   /*
     ★ 斜杠会让 `modelSelectionKey`(`providerId/alias`)歧义:那个复合键靠
@@ -304,6 +309,7 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
  */
 export function removeProvider(id: string): void {
   ensureSeeded()
+  if (id === CLIENT_PROVIDER_ID) throw new Error('内置供应商不能删除')
   const target = store.listProviders().find((p) => p.id === id)
   if (target === undefined) return
   for (const a of store.listAliases().filter((a) => a.providerId === id)) {
@@ -486,6 +492,7 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
  */
 export function setAliases(providerId: string, models: readonly string[]): ModelAlias[] {
   ensureSeeded()
+  if (providerId === CLIENT_PROVIDER_ID) throw new Error('内置供应商的模型由 NextCoWork 管理')
   const p = store.listProviders().find((x) => x.id === providerId)
   if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
 
@@ -565,6 +572,7 @@ export async function setCredential(providerId: string, apiKey: string): Promise
   ensureSeeded()
   const p = store.listProviders().find((x) => x.id === providerId)
   if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
+  if (providerId === CLIENT_PROVIDER_ID) throw new Error('NextCoWork 内置提供商的登录凭证不能手动修改')
   const key = apiKey.trim()
   if (key === '') throw new Error('密钥不能为空')
   await getHost().secrets.set(p.credentialRef, key)

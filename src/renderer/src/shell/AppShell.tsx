@@ -26,6 +26,7 @@ import type { Bootstrap } from "../../../shared/domain/bootstrap";
 import type { AppSettings } from "../../../shared/domain/settings";
 import type { Workspace } from "../../../shared/domain/workspace";
 import type { SessionListItem } from "../../../shared/domain/session";
+import type { ClientAuthState } from "../../../shared/domain/client-auth";
 import { IconButton } from "../components/ui/IconButton";
 import { cn } from "../lib/cn";
 import { IS_MAC } from "../lib/platform";
@@ -65,6 +66,7 @@ export function AppShell({
   workspaces,
   runningSessionIds,
   runningWorkspaceIds,
+  auth,
 }: {
   settings: AppSettings;
   /** 「关于」页那四个版本号。来自 bootstrap,不是 preload 的 `versions()` */
@@ -73,6 +75,7 @@ export function AppShell({
   /** 来自 RunRegistry 的聚合,不是任何 UI 状态(方案 §8) */
   runningSessionIds: ReadonlySet<string>;
   runningWorkspaceIds: ReadonlySet<string>;
+  auth: ClientAuthState;
 }): ReactNode {
   const { t } = useI18n();
   const {
@@ -260,6 +263,7 @@ export function AppShell({
           )}
         >
           <Sidebar
+            auth={auth}
             workspace={workspace ?? null}
             chatTabs={inner?.tabs.filter((t) => t.kind === "chat") ?? []}
             sessions={sessionItems}

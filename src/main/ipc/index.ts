@@ -31,7 +31,7 @@ import {
 import { windows, type WindowContext } from '../window/registry'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
-import { copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
+import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
 import {
   listSessionAttachments,
   pickAttachments,
@@ -85,6 +85,7 @@ import {
   testSearchProvider
 } from './websearch'
 import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
+import { getClientAuthState, startClientLogin, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
 import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
@@ -164,9 +165,16 @@ const handlers: HandlerMap = {
     return getBootstrap(ctx.kind)
   },
   'app:openExternal': ({ url }) => openExternal(url),
+  'app:checkForUpdates': () => checkForUpdates(),
   'app:copyText': ({ text }) => copyText(text),
   'app:saveTextFile': (req) => saveTextFile(req),
   'app:openSessionWindow': (req) => openSessionWindow(req),
+  'clientAuth:getState': () => getClientAuthState(),
+  'clientAuth:startLogin': () => startClientLogin(),
+  'clientAuth:useOffline': () => useOffline(),
+  'clientAuth:signOut': () => signOutClient(),
+  'clientAuth:getUser': () => getClientUser(),
+  'clientAuth:getUsage': (req) => getClientUsage(req),
   'settings:get': () => getSettings(),
   'settings:update': (patch) => updateSettings(patch),
   'theme:importImage': () => importImage(),

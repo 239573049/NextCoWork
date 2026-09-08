@@ -882,6 +882,8 @@ export const BUILTIN_PROVIDER_ID = 'routin'
  * 按量那半会全部 401。
  */
 export const BUILTIN_PLAN_PROVIDER_ID = 'routin-plan'
+/** Platform hosted provider, unlocked after desktop account sign-in. */
+export const CLIENT_PROVIDER_ID = 'nextcowork'
 
 /**
  * 全新安装会被种进供应商表的那些(`main/runtime.ts` 的 `seedBuiltinUpstream`)。
@@ -892,7 +894,8 @@ export const BUILTIN_PLAN_PROVIDER_ID = 'routin-plan'
  */
 export const BUILTIN_PROVIDER_IDS: readonly string[] = [
   BUILTIN_PROVIDER_ID,
-  BUILTIN_PLAN_PROVIDER_ID
+  BUILTIN_PLAN_PROVIDER_ID,
+  CLIENT_PROVIDER_ID
 ]
 
 export function isBuiltinProvider(id: string): boolean {
