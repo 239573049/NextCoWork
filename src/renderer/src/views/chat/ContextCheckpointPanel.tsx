@@ -60,7 +60,7 @@ function CheckpointRow({ checkpoint, onRefresh }: { checkpoint: ContextCheckpoin
         <div className="mt-2 flex flex-col gap-2">
           {editing ? (
             <textarea value={note} onChange={(event) => setNote(event.target.value)} className="min-h-28 w-full resize-y rounded border border-border bg-surface-input p-2 text-[12px] text-fg outline-none focus:border-accent" aria-label={t('chat.contextNote')} />
-          ) : <p className="whitespace-pre-wrap text-[12px] leading-[1.5] text-fg-muted">{checkpoint.note}</p>}
+          ) : <p className="break-words whitespace-pre-wrap text-[12px] leading-[1.5] text-fg-muted">{checkpoint.note}</p>}
           <div className="flex items-center justify-end gap-1.5">
             {editing ? (
               <button type="button" className="inline-flex items-center gap-1 text-[11px] text-accent" onClick={() => void save()} disabled={saving}><Save size={12} aria-hidden />{t('chat.contextSave')}</button>

@@ -301,8 +301,13 @@ function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEd
             文件在草稿里是一段 markdown 链接,它在气泡里也得是同一个 chip ——
             否则发送那一下,用户眼里的 chip 会「变回」一串方括号,
             看起来像是发错了(而其实发出去的一直是同一个字符串)。
+
+            ★ `break-words`:`whitespace-pre-wrap` 只在空白处断行,一段没有空格的
+            长串(粘进来的 SQL、URL、base64)会整条冲出气泡右边被切掉。输入框
+            (`MentionInput`)本来就带 `break-words`,这里不带的话,同一段文字在
+            草稿里好好的、一发出去就断头 —— 又是那种「像是发错了」的错觉。
           */
-          <p className="selectable text-[13.5px] leading-relaxed whitespace-pre-wrap text-fg">
+          <p className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
             <MentionText text={text} />
           </p>
         )}
