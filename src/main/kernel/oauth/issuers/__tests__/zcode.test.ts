@@ -197,17 +197,25 @@ describe('ZCODE_ZAI_OAUTH · refresh（重跑第三跳）', () => {
 })
 
 describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
-  it('走手动粘贴（zcode:// 自定义协议我们不注册）', () => {
+  it('★★★ 走回环，不走 zcode:// 自定义协议', () => {
+    /*
+      ★ 这条不是「配置偏好」，是这条渠道能不能拿到码的全部关键。
+      照抄 ZCode 的 `zcode://oauth/callback` 会被系统直接交给已装的 ZCode，
+      浏览器地址栏里留不下东西 —— 用户实测就是这么失败的。
+      `bigmodel.cn` 对 redirect 只有一条 `/^(javascript|data|vbscript):/i` 黑名单，
+      没有白名单，所以回环地址是合法的。推导见 `zcode-bigmodel.ts` 文件头。
+    */
     expect(ZCODE_BIGMODEL_OAUTH.redirect).toEqual({
-      kind: 'manual-paste',
-      redirectUri: 'zcode://oauth/callback'
+      kind: 'loopback-ephemeral',
+      path: '/callback',
+      host: '127.0.0.1'
     })
   })
 
   /*
     下面三条钉的是 2026-09-09 抓到的**真实**授权链接与回调:
-      https://bigmodel.cn/login?appId=zcode&redirect=<中转地址>&state=<state>
-      zcode://oauth/callback?authCode=…&state=…
+      https://bigmodel.cn/login?appId=zcode&redirect=<回调地址>&state=<state>
+      <回调地址>?authCode=…&state=…
     它们和标准 OAuth 差得足够远,写死在这里才不会被后人「顺手改回标准写法」。
   */
   it('★★ 授权参数是 appId / redirect / state —— 标准那三个一个都不发', () => {
@@ -222,37 +230,22 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
     expect(params['state']).toBe('st-1')
   })
 
-  it('★★★ redirect 是**削光的**中转地址：一个 query 参数都不带', () => {
+  it('★★★ redirect 直接装我们自己的回环地址，中转页一个字都不出现', () => {
     const params = ZCODE_BIGMODEL_OAUTH.authorizeParams!({
       clientId: 'zcode',
-      redirectUri: 'zcode://oauth/callback',
+      redirectUri: 'http://127.0.0.1:53124/callback',
       state: 'st-1',
       challenge: 'x'
     })
-    const bounce = new URL(params['redirect'] as string)
-    expect(bounce.origin + bounce.pathname).toBe('https://zcode.z.ai/app/oauth/login')
+    expect(params['redirect']).toBe('http://127.0.0.1:53124/callback')
 
     /*
-      ★★ 这两条不是「顺手多断言一句」，是这条渠道能不能拿到码的全部关键。
-      中转页的 JS 读下来：`redirect` 合法它就 `window.location.assign('zcode://…')`
-      把码交给已装的 ZCode；`app_version > 3.9.1` 它就再打一次自己的 CLI 桥。
-      两条都会把码从我们手里拿走 —— 用户实测就是这么失败的。削光之后页面显示
-      「登录回调地址无效」，那是**预期结果**。谁想把这两个参数加回来，先读
-      `zcode-bigmodel.ts` 的文件头。
+      ★★ ZCode 自己那个中转页（zcode.z.ai/app/oauth/login）**不能用**：
+      它拿到码之后会 `location.assign('zcode://…')` 交给已装的 ZCode，
+      `app_version > 3.9.1` 时还会再打一次它自己的 CLI 桥 —— 两条都抢码。
+      谁想把它加回来，先读 `zcode-bigmodel.ts` 的文件头。
     */
-    expect(bounce.searchParams.get('redirect')).toBeNull()
-    expect(bounce.searchParams.get('app_version')).toBeNull()
-    expect([...bounce.searchParams.keys()]).toEqual([])
-  })
-
-  it('★★ 用户实际要粘的是中转页那条 https 地址（zcode:// 根本进不了地址栏）', () => {
-    expect(
-      pastedCallbackCode(
-        'https://zcode.z.ai/app/oauth/login?authCode=FaYz_7QT6UA-Kneaez&state=st',
-        'st',
-        ZCODE_BIGMODEL_OAUTH.callbackCodeParam
-      )
-    ).toEqual({ ok: true, code: 'FaYz_7QT6UA-Kneaez' })
+    expect(params['redirect']).not.toContain('zcode.z.ai')
   })
 
   it('★★ 回调里的授权码参数名是 authCode —— 按 code 取的话用户会被告知「没有授权码」', () => {

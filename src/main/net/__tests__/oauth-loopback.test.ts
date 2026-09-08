@@ -15,7 +15,7 @@ const PATH = '/auth/callback'
  * 而且是**偶发**的(取决于两个微任务谁先跑完)。
  */
 async function withServer(
-  opts: { state: string; signal?: AbortSignal; timeoutMs?: number },
+  opts: { state: string; signal?: AbortSignal; timeoutMs?: number; codeParam?: string },
   hit: (port: number) => Promise<unknown>
 ): Promise<Awaited<ReturnType<typeof awaitOAuthCallback>>> {
   const ctrl = new AbortController()
@@ -26,6 +26,7 @@ async function withServer(
     path: PATH,
     port: 0,
     ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+    ...(opts.codeParam === undefined ? {} : { codeParam: opts.codeParam }),
     onListening: (port) => {
       hitDone = hit(port)
     }
@@ -41,6 +42,25 @@ describe('awaitOAuthCallback · 正常回调', () => {
       await fetch(`http://127.0.0.1:${port}${PATH}?code=the-code&state=s-1`)
     })
     expect(r).toEqual({ status: 'ok', code: 'the-code' })
+  })
+
+  it('★★ codeParam 可以换名字 —— 智谱回的是 authCode 而不是 code', async () => {
+    const r = await withServer({ state: 's-1', codeParam: 'authCode' }, async (port) => {
+      await fetch(`http://127.0.0.1:${port}${PATH}?authCode=the-code&state=s-1`)
+    })
+    expect(r).toEqual({ status: 'ok', code: 'the-code' })
+  })
+
+  it('★ 换了名字之后，标准的 code 参数就**不再**被接受（不是「两个都认」）', async () => {
+    /*
+      两个都认看着更宽容，实际是把一个安全判断变成了猜：同一次回调里若两个参数
+      都在，取哪个？这里的选择是「说好读哪个就只读哪个」，读不到就按 denied 走。
+    */
+    const r = await withServer({ state: 's-1', codeParam: 'authCode' }, async (port) => {
+      await fetch(`http://127.0.0.1:${port}${PATH}?code=the-code&state=s-1`)
+    })
+    expect(r.status).toBe('denied')
+    expect(r.code).toBeUndefined()
   })
 
   it('回的是一张自包含的 HTML 页 —— 用户唯一能看到结果的地方就是那个标签页', async () => {

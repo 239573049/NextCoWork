@@ -4,6 +4,7 @@
 import type { AgentMessage } from '../agent/message'
 import type { SessionMode, ThinkingLevel } from '../agent/run-request'
 import type { ContextCheckpoint } from '../agent/context-management'
+import type { TokenUsage } from '../agent/stream'
 
 export interface Session {
   id: string
@@ -69,6 +70,18 @@ export interface SessionDetail {
   session: Session
   messages: AgentMessage[]
   contextCheckpoints?: ContextCheckpoint[]
+  /**
+   * 消息 → 产出它的 run。只有第 12 条迁移之后落盘的消息有归属,老对话这张表是空的。
+   */
+  messageRuns?: Record<string, string>
+  /**
+   * run → 该 run 的累计用量,从 `usage_records` 聚合而来。
+   *
+   * ★ 这是**重启之后**唯一能拿到逐轮用量的地方:流式过程中累加出来的那份
+   * 只活在渲染进程内存里,进程一没就没了。两者形状相同,展示层因此不必分辨
+   * 手上这份是实时的还是回填的。
+   */
+  runUsage?: Record<string, TokenUsage>
 }
 
 /** conversations:searchAll 的命中项。FTS5 给出的 snippet 带高亮标记。 */

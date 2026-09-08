@@ -282,8 +282,8 @@ export const store = {
   searchSessionHistory(sessionId: string, q: string, limit = 5): ContextSearchHit[] {
     return repo.searchSessionHistory(sessionId, q, limit)
   },
-  commitMessage(sessionId: string, message: AgentMessage): void {
-    repo.commitMessage(sessionId, message)
+  commitMessage(sessionId: string, message: AgentMessage, runId?: string): void {
+    repo.commitMessage(sessionId, message, runId)
   },
   setRunRecord(id: string, sessionId: string, status: string, startedAt: number, endedAt?: number): void {
     repo.setRunRecord(id, sessionId, status, startedAt, endedAt)

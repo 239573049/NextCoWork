@@ -276,6 +276,8 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
         signal: inner.signal,
         path: spec.redirect.path,
         port: fixedPort,
+        // ★ 省略即 `code`,所以 ChatGPT / Z.AI 那两条的行为一个字都没变
+        codeParam: spec.callbackCodeParam,
         onListening: (bound) => {
           if (opened) return
           opened = true

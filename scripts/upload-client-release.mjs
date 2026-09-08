@@ -63,7 +63,7 @@ export function parseArgs(argv) {
   }
   options.version = options.version.trim().replace(/^v/, '')
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(options.version)) throw new Error(`Invalid SemVer: ${options.version}`)
-  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(options.channel)) throw new Error(`Invalid channel: ${options.channel}`)
+  if (typeof options.channel !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(options.channel)) throw new Error(`Invalid channel: ${options.channel}`)
   options.prerelease ||= options.version.includes('-')
   if (options.prerelease && options.channel === 'stable') options.channel = 'beta'
   return { help: false, options }
@@ -124,6 +124,8 @@ function postFile(url, headers, path, size) {
 
 export async function uploadArtifacts(options, token) {
   if (!token && !options.dryRun) throw new Error('CLIENT_UPLOAD_TOKEN is required (the token is never printed)')
+  // 空 channel 会一路带到请求头，被 Node 以 "Invalid value" 拒掉，报错完全看不出是这里漏了默认值。
+  if (!options.channel) throw new Error('A release channel is required (e.g. --channel stable)')
   const { found, missing } = await collectArtifacts(options.dir, options.requireAll, options.version)
   if (!found.length) throw new Error(`No release artifacts found in ${resolve(options.dir)}`)
   const endpoint = new URL('/api/client/updates/upload', options.baseUrl).toString()

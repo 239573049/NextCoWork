@@ -14,6 +14,7 @@
  * (`ipc/workspace.ts` 的 `updateWorkspace` / `listDir`)都是展开取值,不改返回对象。
  */
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
+import type { TokenUsage } from '../../shared/agent/stream'
 import type { ContextCheckpoint, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
@@ -308,7 +309,67 @@ export function listSessions(workspaceId: string, archived?: boolean): SessionLi
 export function getSessionDetail(id: string): SessionDetail | undefined {
   const session = getSession(id)
   if (session === undefined) return undefined
-  return { session, messages: getHistory(id) as AgentMessage[], contextCheckpoints: listContextCheckpoints(id) }
+  return {
+    session,
+    messages: getHistory(id) as AgentMessage[],
+    contextCheckpoints: listContextCheckpoints(id),
+    messageRuns: messageRunsOf(id),
+    runUsage: runUsageOf(id)
+  }
+}
+
+/**
+ * 消息 → 产出它的 run。第 12 条迁移之前的消息没有归属,直接不出现在这张表里
+ * (而不是给一个占位 id ——「不知道」和「属于某个 run」在界面上是两件事:
+ * 前者不显示用量,后者会去查一个查不到的 run 然后显示 0 token)。
+ */
+export function messageRunsOf(sessionId: string): Record<string, string> {
+  const runs: Record<string, string> = {}
+  for (const row of stmt('SELECT id, run_id FROM messages WHERE session_id = ? AND run_id IS NOT NULL').all(sessionId)) {
+    const r = row as Record<string, unknown>
+    runs[String(r['id'])] = String(r['run_id'])
+  }
+  return runs
+}
+
+/**
+ * 一条会话里每个 run 的累计用量,直接从落盘的 `usage_records` 聚合。
+ *
+ * ★ **失败的尝试也算进来。** 一次被限流打回的请求照样把 prompt 发上去了、
+ * 照样计了费;把它们排除掉,界面上的数字就会比账单小,而差额没有任何地方交代。
+ * 这也和 `usageSummary` 的口径一致 —— 两处报同一笔账,不能一处含重试一处不含。
+ *
+ * ★ 思考 Token 用 `COALESCE(...,0)` 求和是安全的:它是 `outputTokens` 的子集,
+ * 只用于展示,不参与任何合计。拿不到独立计数的供应商聚出来就是 0,
+ * 而 0 在这里的含义正是「没有单独报」—— 展示层照样不显示它。
+ */
+export function runUsageOf(sessionId: string): Record<string, TokenUsage> {
+  const usage: Record<string, TokenUsage> = {}
+  const rows = stmt(
+    `SELECT run_id,
+            SUM(input_tokens)          AS input_tokens,
+            SUM(output_tokens)         AS output_tokens,
+            SUM(cache_read_tokens)     AS cache_read_tokens,
+            SUM(cache_write_tokens)    AS cache_write_tokens,
+            SUM(cache_write_1h_tokens) AS cache_write_1h_tokens,
+            SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens
+       FROM usage_records
+      WHERE session_id = ?
+      GROUP BY run_id`
+  ).all(sessionId)
+  for (const row of rows) {
+    const r = row as Record<string, unknown>
+    const reasoning = Number(r['thinking_tokens'] ?? 0)
+    usage[String(r['run_id'])] = {
+      inputTokens: Number(r['input_tokens'] ?? 0),
+      outputTokens: Number(r['output_tokens'] ?? 0),
+      cacheReadInputTokens: Number(r['cache_read_tokens'] ?? 0),
+      cacheCreationInputTokens: Number(r['cache_write_tokens'] ?? 0),
+      cacheCreation1hInputTokens: Number(r['cache_write_1h_tokens'] ?? 0),
+      ...(reasoning > 0 ? { reasoningTokens: reasoning } : {})
+    }
+  }
+  return usage
 }
 
 /**
@@ -660,17 +721,25 @@ function attachmentIdOfFileName(fileName: string): string {
   return i <= 0 ? fileName : fileName.slice(0, i)
 }
 
-/** message_commit 的唯一落盘入口；同一 message id 重放时幂等。 */
-function writeMessage(session: Session, message: AgentMessage, ordinal: number): void {
+/**
+ * message_commit 的唯一落盘入口；同一 message id 重放时幂等。
+ *
+ * ★ `run_id` 用 `COALESCE(excluded.run_id, messages.run_id)` 合并,不能直接
+ * `= excluded.run_id`。`replaceHistory` 会把整段历史原样重写一遍(编辑消息、
+ * 与渲染层对账都走它),而它手上只有 `AgentMessage`,没有 run 归属 ——
+ * 直接赋值的话,用户改一个错别字就会把这条会话**所有**历史轮次的用量读数抹成空。
+ */
+function writeMessage(session: Session, message: AgentMessage, ordinal: number, runId?: string): void {
   const existing = stmt('SELECT session_id FROM messages WHERE id = ?').get(message.id) as Record<string, unknown> | undefined
   if (existing !== undefined && String(existing['session_id']) !== session.id) {
     throw new Error(`消息 ${message.id} 已属于另一个会话`)
   }
   stmt(
-    `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at, run_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET ordinal = excluded.ordinal, parts = excluded.parts, role = excluded.role,
-       schema_version = excluded.schema_version, created_at = excluded.created_at`
+       schema_version = excluded.schema_version, created_at = excluded.created_at,
+       run_id = COALESCE(excluded.run_id, messages.run_id)`
   ).run(
     message.id,
     session.id,
@@ -678,14 +747,15 @@ function writeMessage(session: Session, message: AgentMessage, ordinal: number):
     message.role,
     JSON.stringify(message.parts),
     message.schemaVersion,
-    message.createdAt
+    message.createdAt,
+    runId ?? null
   )
   upsertFts(session, message)
   recordMessageAttachments(session, message)
   putSession({ ...session, updatedAt: Math.max(session.updatedAt, message.createdAt) })
 }
 
-export function commitMessage(sessionId: string, message: AgentMessage): void {
+export function commitMessage(sessionId: string, message: AgentMessage, runId?: string): void {
   tx(() => {
     const session = getSession(sessionId)
     if (session === undefined) throw new Error(`会话不存在: ${sessionId}`)
@@ -696,7 +766,7 @@ export function commitMessage(sessionId: string, message: AgentMessage): void {
     const ordinal = existing === undefined
       ? Number((stmt('SELECT COALESCE(MAX(ordinal), -1) AS n FROM messages WHERE session_id = ?').get(sessionId) as Record<string, unknown>)['n'] ?? -1) + 1
       : Number(existing['ordinal'])
-    writeMessage(session, message, ordinal)
+    writeMessage(session, message, ordinal, runId)
   })
 }
 

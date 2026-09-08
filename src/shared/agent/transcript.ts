@@ -100,6 +100,22 @@ export interface TranscriptState {
   providerId?: string
   /** API-reported usage accumulated across completed requests in the current run. */
   usage?: TokenUsage
+  /**
+   * 历史轮次的用量,从 SQLite 回填(`SessionDetail.runUsage` / `messageRuns`)。
+   *
+   * ★ 和上面那个 `usage` 是**两份不同来源的同一种数**,刻意不合并:
+   * `usage` 是本次 run 流式累加出来的,进程一没就没了;这两张表是落盘的账,
+   * 重启后照样在。合并成一份的话,就得在每次 run_end 时把内存那份写回表里 ——
+   * 而那正是「同一笔账记两遍、两遍还可能不一致」的开始。展示层按
+   * 「当前 run 用 `usage`,历史轮次查表」取用,两条路径各自都是单一事实源。
+   *
+   * ★ 它们描述的是**整段对话**,不是某一个 run。所以每次开新一轮时,
+   * 它们和 `messages` / `tools` 一样必须从上一份状态里带过来,
+   * 不能被 `emptyTranscript()` 清掉。
+   */
+  runUsage?: Record<string, TokenUsage>
+  /** 消息 → 产出它的 run。老对话(第 12 条迁移之前)为空。 */
+  messageRuns?: Record<string, string>
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
   contextCheckpoints: ContextCheckpoint[]
   contextStatus?: ContextStatus

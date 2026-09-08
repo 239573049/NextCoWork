@@ -35,6 +35,14 @@ export interface LoopbackOptions {
   timeoutMs?: number
   /** bind 成功后回调,把真实端口告诉调用方 —— 临时端口形态要用它拼 redirect_uri */
   onListening?: (port: number) => void
+  /**
+   * 回调里装授权码的查询参数名。**省略 = `code`(标准)。**
+   *
+   * ★ 和 `OAuthProviderSpec.callbackCodeParam` 是同一件事,只是那边管粘贴路径、
+   * 这边管回环路径。智谱回的是 `authCode`,写死 `code` 的表现是**回调打进来了、
+   * 页面也显示成功了,然后判 state 不匹配走 denied** —— 错误信息一个字都不提参数名。
+   */
+  codeParam?: string
 }
 
 /** 五分钟。用户要开浏览器、可能还要先登一次 ChatGPT、可能还要过一次两步验证 */
@@ -93,6 +101,7 @@ function listenOn(server: Server, port: number, host: string): Promise<number> {
  */
 export async function awaitOAuthCallback(opts: LoopbackOptions): Promise<LoopbackResult> {
   const { expectedState, signal, path, port } = opts
+  const codeParam = opts.codeParam ?? 'code'
   let settle: ((r: LoopbackResult) => void) | null = null
   const done = new Promise<LoopbackResult>((resolve) => {
     settle = resolve
@@ -116,7 +125,7 @@ export async function awaitOAuthCallback(opts: LoopbackOptions): Promise<Loopbac
 
     const params = url.searchParams
     const error = params.get('error')
-    const code = params.get('code')
+    const code = params.get(codeParam)
     const state = params.get('state')
 
     /*

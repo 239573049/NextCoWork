@@ -48,6 +48,8 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
         {result?.state === 'downloading' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.downloading', { percent: Math.round(result.progress?.percent ?? 0) })}</div>}
         {result?.state === 'downloaded' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.downloaded')}</div>}
         {result?.state === 'installing' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.installing')}</div>}
+        {result?.state === 'disabled' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.devDisabled')}</div>}
+        {result?.state === 'idle' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.ready')}</div>}
         {result?.state === 'error' && <div className="mt-1 text-[12px] text-danger">{t(`about.updates.error.${result.code}` as 'about.updates.error.network')}</div>}
         {result?.state === 'available' && result.update.releaseNotes && <div className="mt-2 whitespace-pre-wrap text-[12px] text-fg-muted">{result.update.releaseNotes}</div>}
       </SettingRow>

@@ -27,45 +27,54 @@
  * `{"code":2007,"msg":"http error"}`,即「走到了换码那一步」)。说明**服务端确有这条
  * 分支,但它要的东西和 zai 那条不同** —— 也可能只是因为我那个 code 是编的。
  *
- * `redirect_uri` 这一跳该发什么同样未知:授权阶段真正出现的是那个**中转地址**,
- * 而不是 `zcode://oauth/callback` 本身。这里发的是后者(`manual-paste` 的 redirectUri)。
- * 换不到 token 时,这是第一个该试的变量。
+ * `redirect_uri` 这一跳该发什么同样未知。这里发的是我们自己那个回环地址 ——
+ * 好处是它和授权请求里的 `redirect` **逐字相同**,符合 OAuth 对这两处的一般要求。
+ * 但 ZCode 桌面端发的多半是 `zcode://oauth/callback` 字面量,如果服务端比的是
+ * 「注册值」而不是「本次授权用的值」,那就得改发它。**换不到 token 时这是第一个
+ * 该试的变量**:给 `createZcodeSpec` 传一个固定的 `redirect_uri` 即可,不要动流程。
  *
  * **第三跳(换业务令牌)的端点也未知**,所以省略了 `businessLoginUrl` —— 即
  * 「拿 ② 的 access_token 直接当 API key」。逆向报告里 BigModel 的 AI 端点
  * (`open.bigmodel.cn/api/anthropic`)吃的确实是 `x-api-key`,但那说的是用户自己
  * 填的那把 key。
  *
- * ============================ 交互上的坑(2026-09-09 读中转页源码定案) ============================
- * 回调是 `zcode://` 自定义协议。注册系统级协议处理器
- * (`app.setAsDefaultProtocolClient`)**本计划不做** —— 那会影响没装 ZCode 的用户。
- * 所以走手动粘贴。但「让用户复制那条 `zcode://…` 」这个做法是**行不通**的:自定义协议
- * 会被系统直接交给已装的 ZCode,浏览器地址栏里根本留不下东西给用户复制
- * —— 用户实测反馈:「拿不到返回的 token,因为他固定打开他的软连接程序」。
+ * ============================ 回调策略(2026-09-09 读双方前端源码定案) ============================
+ * ZCode 桌面端的回调是 `zcode://oauth/callback` 这个自定义协议,而**我们不注册协议**
+ * (`app.setAsDefaultProtocolClient` 会影响没装 ZCode 的用户)。照抄它的参数会得到一个
+ * 死局:系统把回调直接交给已装的 ZCode,浏览器地址栏里留不下任何东西
+ * —— 用户实测:「拿不到返回的 token,因为他固定打开他的软连接程序」。
  *
- * 真正能拿到码的地方是**中转页自己的地址**:`bigmodel.cn` 是往
- * `https://zcode.z.ai/app/oauth/login?…&authCode=…&state=…` 跳的,由那个页面再往
- * `zcode://` 跳。所以要粘的是**中转页那一条 https 地址**,它一直留在地址栏里。
+ * 于是去读了链路两头的前端代码,发现**根本不必照抄**:
  *
- * 中转页的 JS(`_next/static/chunks/app/app/oauth/login/page-*.js`)读下来,它只做两件事,
- * 而**这两件事都会把我们的 authCode 抢走**,所以下面那个 `BOUNCE_URL` 是精心削光的:
+ * ① `bigmodel.cn/login` 对 `redirect` **没有白名单**。整个校验就一条 XSS 黑名单
+ *    (`static.bigmodel.cn/wd-paas-front/js/app.*.js`):
  *
- * 1. 跳 deep link。跳之前会校验 `redirect` 参数:
- *    `if (protocol !== 'zcode:' || hostname !== 'oauth' || pathname !== '/callback') return null`
- *    —— **写死的三段校验**,所以「把 `redirect` 指向我们自己的回环端口来全自动接码」
- *    这条路是死的,不用再试。反过来用:`redirect` 校验不过时它 `return null`,
- *    `window.location.assign` 那一句就不执行,**ZCode 不会被拉起,码也就不会被它换掉**。
- *    我们干脆一个 `redirect` 都不传(`if(!e.redirect) return null`,同一个分支)。
- * 2. 打自己的「CLI 桥」:`GET /api/v1/oauth/cli/callback/bigmodel?authCode=…&state=…`
- *    (探过,活的:假码返回一张 `<title>Authorization Failed / 授权失败</title>` 的页面)。
- *    这一步只在 `app_version > 3.9.1` 时才做(源码里 `f=[3,9,1]` 的版本比较)。
- *    服务端会不会把码标记成已用未知,**不赌** —— 所以 `app_version` 也不传,
- *    版本号正则匹配不上 → 桥关闭。
+ *    ```js
+ *    s = /^(javascript|data|vbscript):/i
+ *    function u(e, {authCode, error, state}) {
+ *      if (!e) return ''
+ *      var o = decodeURIComponent(e)
+ *      if (s.test(o.trim())) return ''            // ← 唯一的一道关
+ *      return l(o, [['authCode', n], ['state', i]])   // new URL() + searchParams.set
+ *    }
+ *    // handleOAuthLoginSuccess: r ? window.location.replace(r) : 警告('跳转失败')
+ *    ```
  *
- * 削光之后页面会显示「无法打开 ZCode / 登录回调地址无效,请重新从 ZCode 桌面端发起登录」。
- * ★ **这句话是预期结果,不是故障** —— 它恰恰说明 deep link 没跳、码还是我们的。
- * 地址栏里那条 `https://zcode.z.ai/app/oauth/login?authCode=…&state=…` 就是要粘的东西,
- * `pastedCallbackCode` 认 `authCode` 参数,不关心主机名和协议。
+ *    登录成功的两条路径(`handleOAuthLoginSuccess` / `jumpBackAccessParty`)都汇到这里。
+ *    所以 `redirect` 填我们自己的 `http://127.0.0.1:<临时端口>/callback` 是合法的,
+ *    它会原样 `location.replace` 过来,并把 `authCode` / `state` 拼在后面。
+ *
+ * ② ZCode 的中转页(`zcode.z.ai/app/oauth/login`)**不能用**,而且不只是「多此一举」:
+ *    它拿到码之后会主动送走两次 —— 校验 `redirect` 合法就
+ *    `window.location.assign('zcode://…')` 把码交给已装的 ZCode;`app_version > 3.9.1`
+ *    还会再打一次它自己的 CLI 桥 `GET /api/v1/oauth/cli/callback/bigmodel?authCode=…`。
+ *    顺带一提,它那个 `redirect` 校验是写死的三段
+ *    (`protocol==='zcode:' && hostname==='oauth' && pathname==='/callback'`),
+ *    **指不到我们的回环端口上** —— 这条路试过了,是死的,不用再试。
+ *
+ * 结论:**绕开中转页,直接走回环。** 全自动,不用粘贴,也没有任何东西来抢这个码。
+ * 端口用临时的而不是 ZCode 那个 9999 —— 既然没有白名单就没必要占固定端口,
+ * 还能避开用户机器上真在跑的 ZCode。
  *
  * ★★ **做不通时的修法是改这个文件里的数据,不是改流程代码。** 流程那边
  * (`zcode.ts` / `flow.ts` / `registry.ts`)已经为这条链路撑开过两次;再为它加分支
@@ -78,26 +87,10 @@ import type { OAuthProviderSpec } from '../registry'
 const APP_ID = 'zcode'
 
 /**
- * ★ ZCode 自己注册的自定义协议回调。我们不注册协议。
- *
- * 削光 `BOUNCE_URL` 之后,这个值**只在换码那一跳当 `redirect_uri` 发出去**,
- * 授权 URL 里一个字都不出现了(出现就等于请系统把码交给已装的 ZCode)。
+ * ★ 回调路径。端口是临时的,由回环服务器 bind 完才知道,`flow.ts` 会用它回填
+ * `redirect_uri` —— 所以这里只写路径。
  */
-const REDIRECT_URI = 'zcode://oauth/callback'
-
-/**
- * 中转页 —— **`redirect` 参数里装的是它,不是最终那个 `zcode://` 地址。**
- *
- * ★ 这一层不能省:`bigmodel.cn/login` 授权完是往这个 https 地址跳的,由它把
- * `authCode` / `state` 拼在自己的地址栏上。这条地址就是用户要复制的东西。
- *
- * ★★ **一个 query 参数都不带,是故意的。** ZCode 自己发的是
- * `?redirect=zcode%3A%2F%2Foauth%2Fcallback&app_version=3.10.2`,那两个参数会让中转页
- * 分别去拉起 ZCode、去打它自己的 CLI 桥 —— 两条都会把我们刚拿到的 authCode 抢走。
- * 削光之后页面显示「登录回调地址无效」,**那正是我们要的状态**。
- * 完整推导见文件头「交互上的坑」。
- */
-const BOUNCE_URL = 'https://zcode.z.ai/app/oauth/login'
+const CALLBACK_PATH = '/callback'
 
 export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
   id: 'zcode-bigmodel',
@@ -107,7 +100,7 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
   provider: 'zcode',
   tokenKey: 'zcode',
   clientId: APP_ID,
-  redirect: { kind: 'manual-paste', redirectUri: REDIRECT_URI },
+  redirect: { kind: 'loopback-ephemeral', path: CALLBACK_PATH, host: '127.0.0.1' },
   userinfoUrl: 'https://zcode.z.ai/api/oauth/userinfo',
   /*
     ★★ 标准那三个参数(`response_type` / `client_id` / `redirect_uri`)一个都不发 ——
@@ -116,7 +109,7 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
   */
   authorizeParams: (args) => ({
     appId: args.clientId,
-    redirect: BOUNCE_URL,
+    redirect: args.redirectUri,
     state: args.state
   }),
   callbackCodeParam: 'authCode'

@@ -506,6 +506,24 @@ UPDATE settings
    AND json_extract(json, '$.contextManagement.experimentalMode') = 1;
 `
 
+/**
+ * 第 12 条：把每条消息归属到产出它的那一次 run。
+ *
+ * ★ 用量一直是落盘的(`usage_records` 有 `run_id`),缺的只是「哪一轮对应哪个 run」——
+ * 少了这一跳,重启之后界面就只能显示本进程内存里攒出来的那个数,于是每一轮的
+ * Token 读数在重启后集体消失,看着像是从来没记过账。
+ *
+ * ★ 可空,且**不回填**。历史消息无从知道自己属于哪个 run(usage_records 只有
+ * session_id 和时间戳,按时间窗猜会把重试、并发子代理的账算到别人头上 ——
+ * 错的数字比没有数字更糟)。旧对话继续不显示用量,新对话从此有。
+ *
+ * ★ 不建索引:读路径只有「按 session 拉全部消息」这一条,run_id 是随行读出的
+ * 一个字段,从不作为查询条件。为它建索引只是给每次写多一棵 B 树要维护。
+ */
+const V12_MESSAGE_RUN = `
+ALTER TABLE messages ADD COLUMN run_id TEXT;
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -517,5 +535,6 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 8, name: 'usage-details', sql: V8_USAGE_DETAILS },
   { version: 9, name: 'context-management', sql: V9_CONTEXT_MANAGEMENT },
   { version: 10, name: 'subagent-sessions', sql: V10_SUBAGENT_SESSIONS },
-  { version: 11, name: 'context-experimental-off', sql: V11_CONTEXT_EXPERIMENTAL_OFF }
+  { version: 11, name: 'context-experimental-off', sql: V11_CONTEXT_EXPERIMENTAL_OFF },
+  { version: 12, name: 'message-run', sql: V12_MESSAGE_RUN }
 ]

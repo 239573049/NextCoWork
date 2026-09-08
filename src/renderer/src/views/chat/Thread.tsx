@@ -143,7 +143,7 @@ export function Thread({
       }}>
       <div ref={content} className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
         <ContextCheckpointPanel checkpoints={transcript.contextCheckpoints} />
-        {threadRows(messages, live, running).map((row, index, rows) => {
+        {threadRows(messages, live, running, transcript.messageRuns).map((row, index, rows) => {
           const isLast = index === rows.length - 1
           return row.kind === 'user' ? (
             <UserBubble key={row.key} message={row.message} onEdit={onEditMessage} disabled={running} />
@@ -172,10 +172,18 @@ export function Thread({
               prompt={promptOf(rows[index - 1])}
               isLast={isLast}
               running={running}
-              // 用量是**整个 run** 的累计,不是逐轮的 —— 只能挂在最后一轮,
-              // 挂到每一轮上就是把同一个数字重复报四遍。
-              usage={isLast && runId === null && usage !== undefined
-                ? <TaskUsage usage={usage} /> : undefined}
+              /*
+                ★ **两个来源,按轮次各取各的。** `transcript.usage` 是**当前**这一次
+                run 流式累加出来的,只对最后一轮成立 —— 挂到每一轮上就是把同一个
+                数字重复报四遍。更早的回合查 `runUsage`:那是从 `usage_records`
+                聚合回来的落盘账,每个 run 一份,所以逐轮显示是准的。
+
+                ★ 顺带这也是「重启后用量消失」的修法:内存里那份随进程一起没了,
+                查表这条路不受重启影响。老对话(第 12 条迁移之前)的消息没有 run
+                归属,`row.runId` 是 undefined,照旧不显示 —— 宁可不显示,
+                也不按时间窗去猜它属于哪个 run。
+              */
+              usage={turnUsage(row, isLast && runId === null ? usage : undefined, transcript.runUsage)}
               onRegenerate={onEditMessage === undefined
                 ? undefined
                 : (id, text) => onEditMessage(id, text, true)}
@@ -186,6 +194,22 @@ export function Thread({
       </div>
     </div>
   )
+}
+
+/**
+ * 这一轮该显示哪份用量。
+ *
+ * 实时那份优先:当前 run 刚跑完时,它比数据库更全 —— `usage_records` 是按
+ * **上游请求**记的,而一轮里最后那次请求的记录与 run 结束几乎同时落盘,
+ * 抢在前面读表可能少算一次。历史轮次没有这个问题,直接查表。
+ */
+function turnUsage(
+  row: Extract<ThreadRow, { kind: 'assistant' }>,
+  live: TranscriptState['usage'],
+  persisted: TranscriptState['runUsage']
+): ReactNode {
+  const usage = live ?? (row.runId === undefined ? undefined : persisted?.[row.runId])
+  return usage === undefined ? undefined : <TaskUsage usage={usage} />
 }
 
 /**

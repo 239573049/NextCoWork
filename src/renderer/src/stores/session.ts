@@ -165,6 +165,8 @@ function createSessionStore(sessionId: string): SessionStore {
           // Background children can outlive the parent turn. Keep their cards
           // visible when the user starts another parent turn in this session.
           subagents: s.transcript.subagents,
+          // 历史轮次的账,和 `messages` 一样属于整段对话而不是这一个 run。
+          ...conversationScoped(s.transcript),
           runStartedAt: now
         },
         lastOptions: opts,
@@ -615,6 +617,21 @@ async function hydrateInput(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * 会话级(而非 run 级)的转录状态。
+ *
+ * ★ 每一处 `...emptyTranscript()` 都是在「只清本轮」,而这两张表和 `messages`
+ * 一样是**整段对话**的属性 —— 漏带一处,症状是发下一条消息、或者重挂一次快照
+ * 之后,上面所有历史轮次的用量读数**一起消失**,而当前这一轮是好的。
+ * 抽成函数就是不想在三个地方各记一次。
+ */
+function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage' | 'messageRuns'> {
+  return {
+    ...(t.runUsage === undefined ? {} : { runUsage: t.runUsage }),
+    ...(t.messageRuns === undefined ? {} : { messageRuns: t.messageRuns })
+  }
+}
+
 /** 重启后从 SQLite 回填已提交消息；流式 run 期间只合并缺少的 id。 */
 async function hydrateHistory(sessionId: string, authoritative = false): Promise<void> {
   try {
@@ -645,6 +662,10 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
           tools: toolsFromMessages(messages, s.transcript.tools),
           subagents: subagentsFromMessages(messages, s.transcript.subagents),
           contextCheckpoints: detail.contextCheckpoints ?? s.transcript.contextCheckpoints,
+          // 重启之后逐轮用量的唯一来源。内存里那份 `usage` 只说得清当前 run,
+          // 这两张表说的是整段对话的账,来自 SQLite。
+          runUsage: detail.runUsage ?? s.transcript.runUsage,
+          messageRuns: detail.messageRuns ?? s.transcript.messageRuns,
           status: 'done',
           runStartedAt: undefined,
           runEndedAt: undefined
@@ -946,7 +967,8 @@ async function restoreDetachedParent(
         ...emptyTranscript(),
         messages: s.transcript.messages,
         tools: s.transcript.tools,
-        subagents: s.transcript.subagents
+        subagents: s.transcript.subagents,
+        ...conversationScoped(s.transcript)
       }
       const transcript = applyEvents(base, snap.events)
       const messages = [...new Map([...(detail?.messages ?? []), ...transcript.messages]
@@ -1023,6 +1045,7 @@ async function resync(sessionId: string, runId: string, sinceSeq: number, histor
             messages: s.transcript.messages,
             tools: s.transcript.tools,
             subagents: s.transcript.subagents,
+            ...conversationScoped(s.transcript),
             ...(s.transcript.runStartedAt === undefined ? {} : { runStartedAt: s.transcript.runStartedAt })
           }
         : s.transcript

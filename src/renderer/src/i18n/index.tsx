@@ -353,6 +353,8 @@ const ZH: Messages = {
   "about.updates.error.install": "更新安装失败，请稍后重试。",
   "about.updates.banner": ({ version }) => `NextCoWork ${version} 已可用`,
   "about.updates.dismiss": "暂不处理",
+  "about.updates.devDisabled": "开发模式下不会检查更新。请使用打包版本验证更新。",
+  "about.updates.ready": "点击“检查更新”开始检查。",
   "stub.account.title": "没有账户体系",
   "stub.account.hint":
     "方案 §10 砍掉了账户 / 云同步那一整块——NextCoWork 是本地模式，数据只存在这台电脑上。",
@@ -770,11 +772,13 @@ const ZH: Messages = {
   // ── 手动粘贴回调地址 ──
   "provider.authPasteLabel": "粘贴回调地址",
   "provider.authPastePlaceholder": "把浏览器地址栏里完整的地址粘到这里",
-  // ★ 别写成「跳到一个打不开的地址」：智谱那条会停在一张写着「登录回调地址无效」的
-  //   正常页面上，那是我们故意削掉回调参数换来的（见 `zcode-bigmodel.ts` 文件头），
-  //   用户看到报错会以为失败了而不去复制地址栏。
+  /*
+    ★ 今天没有任何一家走这条路（智谱那条 2026-09-09 改成了全自动回环，见
+    `zcode-bigmodel.ts` 文件头）。文案保持**不提具体某一家**：粘贴通道是留给
+    将来「回调进不了地址栏」的渠道的，写死某家的页面长相只会误导下一家。
+  */
   "provider.authPasteHint":
-    "授权完成后浏览器会停在一个提示页，可能写着「无法打开」或「回调地址无效」——那是正常的。直接把地址栏里那一整条复制过来即可（5 分钟内有效）。",
+    "授权完成后浏览器会停在一个提示页——把地址栏里那一整条复制过来即可（5 分钟内有效）。",
   "provider.authPasteSubmit": "提交",
   "provider.modelPriority": "模型优先级（至少添加一个）",
   "provider.addModel": "添加模型",
@@ -1570,6 +1574,8 @@ const EN: Messages = {
   "about.updates.error.install": "The update could not be installed. Try again later.",
   "about.updates.banner": ({ version }) => `NextCoWork ${version} is available`,
   "about.updates.dismiss": "Dismiss",
+  "about.updates.devDisabled": "Updates are disabled in development mode. Use a packaged build to test updates.",
+  "about.updates.ready": "Click “Check for updates” to start.",
   "stub.account.title": "No account system",
   "stub.account.hint":
     "Plan §10 removes accounts and cloud sync. NextCoWork runs locally and data stays on this computer.",
@@ -2000,7 +2006,7 @@ const EN: Messages = {
   "provider.authPasteLabel": "Paste the callback URL",
   "provider.authPastePlaceholder": "Paste the full URL from your browser's address bar",
   "provider.authPasteHint":
-    "After authorizing, your browser stops on a notice page that may say the callback could not be opened — that is expected. Copy the entire address from the address bar here (valid for 5 minutes).",
+    "After authorizing, your browser stops on a notice page — copy that entire address from the address bar here (valid for 5 minutes).",
   "provider.authPasteSubmit": "Submit",
   "provider.modelPriority": "Model priority (add at least one)",
   "provider.addModel": "Add model",

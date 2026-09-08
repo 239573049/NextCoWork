@@ -13,10 +13,23 @@ export type AssistantBlock = {
 
 export type ThreadRow =
   | { kind: 'user'; key: string; message: AgentMessage }
-  | { kind: 'assistant'; key: string; blocks: AssistantBlock[]; startedAt?: number; endedAt?: number }
+  | {
+      kind: 'assistant'
+      key: string
+      blocks: AssistantBlock[]
+      startedAt?: number
+      endedAt?: number
+      /** 产出这一轮的 run。用来查它落盘的用量;老对话没有归属,留 undefined。 */
+      runId?: string
+    }
 
 /** Tool receipts are invisible boundaries; consecutive model replies form one assistant turn. */
-export function threadRows(messages: readonly AgentMessage[], live: readonly LiveBlock[], running: boolean): ThreadRow[] {
+export function threadRows(
+  messages: readonly AgentMessage[],
+  live: readonly LiveBlock[],
+  running: boolean,
+  messageRuns: Readonly<Record<string, string>> = {}
+): ThreadRow[] {
   const rows: ThreadRow[] = []
   let preceding = 'start'
   let precedingAt: number | undefined
@@ -45,6 +58,13 @@ export function threadRows(messages: readonly AgentMessage[], live: readonly Liv
         row.blocks.push({ key: `${keyPrefix}:${index}`, part, streaming: false, cursor: false })
       })
       row.endedAt = message.createdAt
+      /*
+        ★ 一整轮的消息同属一个 run,所以取哪一条都一样 —— 但**不能只取第一条**:
+        一轮里最早那条 assistant 消息可能是迁移之前落盘的(没有归属),
+        而后面的有。取最后一个非空值,只要这一轮里有任何一条带了归属就查得到账。
+      */
+      const owner = messageRuns[message.id]
+      if (owner !== undefined) row.runId = owner
     }
     preceding = message.id
     precedingAt = message.createdAt

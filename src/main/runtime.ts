@@ -1296,7 +1296,9 @@ export async function runAgent(
         store.upsertContextCheckpoint(checkpoint)
       },
       onMessageCommit: (message) => {
-        store.commitMessage(req.sessionId, message)
+        // ★ 带上 runId:重启之后逐轮用量全靠这一跳把消息接回 `usage_records`
+        // (那张表一直有 run_id,缺的一直是反向的归属)。
+        store.commitMessage(req.sessionId, message, req.runId)
         // message_commit 已经完成 SQLite 写入，再通知渲染层刷新侧边栏
         // 的 updatedAt；事件泵随后仍会按原顺序接收 message_commit。
         //
