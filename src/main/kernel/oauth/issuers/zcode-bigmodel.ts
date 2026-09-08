@@ -21,11 +21,9 @@
  *    「这段内容里没有授权码」—— 而用户手里明明有一条带着授权码的回调地址。
  *
  * ============================ 仍然未知的部分 ============================
- * **换码那一跳没有被抓到过。** 这里沿用逆向文档的写法(打 `zcode.z.ai` 的 token
- * 端点、`provider: 'zcode'`),而我 2026-09-09 拿一个无效 code 探到的是
- * `{"code":1000,"msg":"something went wrong"}`(同样的请求带 `provider:"zai"` 返回
- * `{"code":2007,"msg":"http error"}`,即「走到了换码那一步」)。说明**服务端确有这条
- * 分支,但它要的东西和 zai 那条不同** —— 也可能只是因为我那个 code 是编的。
+ * **换码那一跳的响应体没有被抓到过**,但它的请求形状 2026-09-09 已经用错误码分层
+ * 定下来了(见下面 `provider` 字段那段注释):端点、body 形状、`provider: 'bigmodel'`
+ * 都能让服务端走到「验码」那一步。剩下未知的只有**成功响应长什么样**。
  *
  * `redirect_uri` 这一跳该发什么同样未知。这里发的是我们自己那个回环地址 ——
  * 好处是它和授权请求里的 `redirect` **逐字相同**,符合 OAuth 对这两处的一般要求。
@@ -97,8 +95,24 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
   label: '智谱 BigModel',
   authorizeUrl: 'https://bigmodel.cn/login',
   tokenUrl: 'https://zcode.z.ai/api/v1/oauth/token',
-  provider: 'zcode',
-  tokenKey: 'zcode',
+  /*
+    ★★★ **`bigmodel`,不是逆向文档写的 `zcode`。** 2026-09-09 用户实测到
+    `{"code":1000,"msg":"something went wrong"}`,和我拿**假 code** 探到的一模一样
+    —— 说明它压根没走到验码那一步。把 provider 名当变量扫一遍,错误码干净地分成两层:
+
+      zai / bigmodel / ''                          → 2007 `http error`（认识，在验码）
+      zcode / zhipu / BigModel / qqqqqq-not-a-…    → 1000 `something went wrong`（不认识）
+
+    独立佐证:ZCode 中转页里那个 CLI 桥的路径段也是
+    `/api/v1/oauth/cli/callback/bigmodel`(zai 那条是 `/zai`)。
+    `zcode` 是**桌面端的 appId**,和这个字段不是一回事 —— 逆向文档把两者混了。
+  */
+  provider: 'bigmodel',
+  /*
+    ★ 响应体没被抓到过,这里赌它和 zai 那条同构(`data.bigmodel.access_token`)。
+    赌错也不致命:`finishExchange` 会退回到平铺的 `data.access_token`。
+  */
+  tokenKey: 'bigmodel',
   clientId: APP_ID,
   redirect: { kind: 'loopback-ephemeral', path: CALLBACK_PATH, host: '127.0.0.1' },
   userinfoUrl: 'https://zcode.z.ai/api/oauth/userinfo',

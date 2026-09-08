@@ -17,6 +17,40 @@ describe('thread content grouping', () => {
     expect(rows[1]?.kind === 'assistant' ? rows[1].blocks.length : 0).toBe(3)
   })
 
+  it('tags a merged assistant turn with the run that produced it', () => {
+    const messages = [
+      userMessage('u', [{ type: 'text', text: 'Inspect' }], 1),
+      assistantMessage('a1', [{ type: 'tool_call', callId: 'read', name: 'Read', input: {} }], 2),
+      toolResultMessage('r1', [{ type: 'tool_result', callId: 'read', output: { content: 'ok' }, isError: false }], 3),
+      assistantMessage('a2', [{ type: 'text', text: 'Done' }], 4)
+    ]
+    // The whole turn belongs to one run, so either committed message can carry it.
+    const rows = threadRows(messages, [], false, { a1: 'run-1', a2: 'run-1' })
+    expect(rows[1]?.kind === 'assistant' ? rows[1].runId : undefined).toBe('run-1')
+  })
+
+  it('carries a run recorded only on the tail of a partially migrated turn', () => {
+    const messages = [
+      userMessage('u', [{ type: 'text', text: 'Inspect' }], 1),
+      assistantMessage('a1', [{ type: 'tool_call', callId: 'read', name: 'Read', input: {} }], 2),
+      toolResultMessage('r1', [{ type: 'tool_result', callId: 'read', output: { content: 'ok' }, isError: false }], 3),
+      assistantMessage('a2', [{ type: 'text', text: 'Done' }], 4)
+    ]
+    expect(threadRows(messages, [], false, { a2: 'run-1' })[1])
+      .toMatchObject({ kind: 'assistant', runId: 'run-1' })
+  })
+
+  it('leaves a turn from before the migration without a run', () => {
+    const messages = [
+      userMessage('u', [{ type: 'text', text: 'Inspect' }], 1),
+      assistantMessage('a', [{ type: 'text', text: 'Done' }], 2)
+    ]
+    // Undefined means "unknown", which renders no usage at all — a placeholder
+    // run id would instead render a confident, wrong zero.
+    const rows = threadRows(messages, [], false)
+    expect(rows[1]?.kind === 'assistant' ? rows[1].runId : 'set').toBeUndefined()
+  })
+
   it('keeps the live reply keys aligned with the eventual committed parts', () => {
     const user = userMessage('u', [{ type: 'text', text: 'Inspect' }], 1)
     const live = threadRows([user], [{ index: 0, kind: 'text', text: 'Working' }], true)

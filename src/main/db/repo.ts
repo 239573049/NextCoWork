@@ -395,11 +395,14 @@ export function listExportableSessionDetails(): ExportSession[] {
 function sessionDetailsOf(rows: readonly unknown[]): ExportSession[] {
   return rows.flatMap((row) => {
     const id = String((row as Record<string, unknown>)['id'])
-    const detail = getSessionDetail(id)
-    return detail === undefined ? [] : [{
-      session: detail.session,
-      messages: [...detail.messages],
-      contextCheckpoints: [...(detail.contextCheckpoints ?? [])]
+    const session = getSession(id)
+    // ★ 刻意不走 `getSessionDetail`:它比这里多查两样(run 归属与逐轮用量),
+    // 而导出格式一个都不含 —— 备份要遍历**全库**的会话,白搭的每会话两次查询
+    // 在这条路径上是按会话数乘出去的。
+    return session === undefined ? [] : [{
+      session,
+      messages: [...getHistory(id)],
+      contextCheckpoints: [...listContextCheckpoints(id)]
     }]
   })
 }

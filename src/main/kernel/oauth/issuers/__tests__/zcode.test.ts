@@ -259,15 +259,23 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
     ).toEqual({ ok: true, code: 'FaYz_7QT6UA-KneaezNiEUsp6GidGPg2h0Buk3ieIPM' })
   })
 
-  it('provider 是 zcode，和 Z.AI 那条不是同一个值', () => {
+  it('★★★ provider 是 bigmodel —— appId 才叫 zcode，两者不是一回事', () => {
     const req = ZCODE_BIGMODEL_OAUTH.tokenRequest!({
       code: 'c',
-      redirectUri: 'zcode://oauth/callback',
+      redirectUri: 'http://127.0.0.1:53124/callback',
       verifier: 'v',
       state: 's',
       clientId: 'zcode'
     })
-    expect((req.body as Record<string, unknown>)['provider']).toBe('zcode')
+    /*
+      ★ 逆向文档写的是 `zcode`，那是错的：发 `zcode` 服务端回
+      `{"code":1000,"msg":"something went wrong"}`（= 不认识这个 provider，
+      连验码都没走到），发 `bigmodel` 才会走到验码那步。2026-09-09 扫过一轮
+      provider 名，错误码分层见 `zcode-bigmodel.ts`。
+      ★ clientId 仍然是 `zcode`，别把这两个值合并成一个常量。
+    */
+    expect((req.body as Record<string, unknown>)['provider']).toBe('bigmodel')
+    expect(req.body).not.toMatchObject({ provider: 'zcode' })
   })
 
   it('★★ 没有第三跳端点 → refresh 返回 null（= 请用户重新登录），不假装刷新成功', async () => {
