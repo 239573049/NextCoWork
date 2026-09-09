@@ -109,20 +109,39 @@ describe('browser management navigation', () => {
   })
 
   it('其他功能仍按原行为创建外层标签', () => {
-    useWindowStore.getState().openFeature('skills')
+    useWindowStore.getState().openFeature('scheduled')
 
     const state = useWindowStore.getState()
     expect(state.activeStandaloneFeature).toBeNull()
     expect(state.outer).toHaveLength(1)
     expect(state.outer[0]).toMatchObject({
       kind: 'feature',
-      ref: { feature: 'skills' }
+      ref: { feature: 'scheduled' }
     })
     expect(mockPersistOuter).toHaveBeenCalledTimes(1)
+  })
+
+  it('Skills 和浏览器共用独立模式，退出后保留工作区及面板', () => {
+    const outer = [workspaceTab()]
+    useWindowStore.setState({ outer, activeOuterId: 'outer-a', activeWorkspaceId: 'workspace-a', rightPanelOpen: true, bottomPanelOpen: true })
+    useWindowStore.getState().openFeature('skills')
+    expect(useWindowStore.getState().activeStandaloneFeature).toBe('skills')
+    expect(useWindowStore.getState().outer).toBe(outer)
+    useWindowStore.getState().openFeature('browser')
+    expect(useWindowStore.getState().activeStandaloneFeature).toBe('browser')
+    useWindowStore.getState().openFeature('skills')
+    useWindowStore.getState().closeStandaloneFeature()
+    expect(useWindowStore.getState()).toMatchObject({ activeStandaloneFeature: null, activeOuterId: 'outer-a', activeWorkspaceId: 'workspace-a', rightPanelOpen: true, bottomPanelOpen: true })
+    expect(mockPersistOuter).not.toHaveBeenCalled()
   })
 })
 
 describe('browser feature-tab migration', () => {
+  it('清理旧 Skills 标签并保留原工作区', () => {
+    useWindowStore.getState().hydrate(boot([workspaceTab(), { id: 'legacy-skills', kind: 'feature', ref: { feature: 'skills' } }], 'legacy-skills'))
+    expect(useWindowStore.getState().outer).toEqual([workspaceTab()])
+    expect(useWindowStore.getState().activeOuterId).toBe('outer-a')
+  })
   it('清理旧浏览器外层标签，并将失效的活动项修复到工作区', () => {
     useWindowStore.getState().hydrate(
       boot(

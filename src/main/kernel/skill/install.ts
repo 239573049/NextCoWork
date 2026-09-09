@@ -1,0 +1,184 @@
+import { createReadStream } from "node:fs";
+import { promises as fs } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import unzipper from "unzipper";
+import {
+  SKILL_BODY_MAX,
+  SKILL_NAME_RE,
+  type SkillInstallScope,
+} from "../../../shared/domain/skill";
+import { SKILL_DESCRIPTION_MAX } from "./load";
+import { parseFrontmatter, fmString } from "../frontmatter";
+
+const MAX_ZIP = 20 * 1024 * 1024;
+const MAX_EXPANDED = 50 * 1024 * 1024;
+const MAX_ENTRIES = 1000;
+const MAX_DEPTH = 12;
+
+export interface InstalledPackage {
+  name: string;
+  version?: string;
+  sha256: string;
+  target: string;
+}
+
+function safeEntry(name: string): boolean {
+  return (
+    name !== "" &&
+    !name.includes("\\") &&
+    !name.startsWith("/") &&
+    !/^[A-Za-z]:/.test(name) &&
+    name
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== "..") &&
+    name.split("/").length <= MAX_DEPTH
+  );
+}
+
+async function readEntry(entry: unzipper.File, limit: number): Promise<Buffer> {
+  const stream = entry.stream();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const part of stream) {
+      const chunk = Buffer.isBuffer(part)
+        ? part
+        : Buffer.from(part as Uint8Array);
+      total += chunk.length;
+      if (total > limit) throw new Error("ZIP 解压后体积过大");
+      chunks.push(chunk);
+    }
+    if (total !== entry.uncompressedSize) throw new Error("ZIP 条目大小不一致");
+    return Buffer.concat(chunks, total);
+  } finally {
+    stream.destroy();
+  }
+}
+
+export async function installSkillZip(
+  zipPath: string,
+  root: string,
+  _scope: SkillInstallScope,
+  expectedSha256?: string,
+): Promise<InstalledPackage> {
+  const stat = await fs.stat(zipPath);
+  if (!stat.isFile() || stat.size > MAX_ZIP) throw new Error("ZIP 文件过大");
+  const hash = createHash("sha256");
+  await new Promise<void>((resolvePromise, reject) => {
+    const stream = createReadStream(zipPath);
+    stream.on("data", (chunk: string | Buffer) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolvePromise());
+  });
+  const sha256 = hash.digest("hex");
+  if (expectedSha256 && expectedSha256.toLowerCase() !== sha256)
+    throw new Error("ZIP 摘要校验失败");
+  const directory = await unzipper.Open.file(zipPath);
+  if (directory.files.length === 0 || directory.files.length > MAX_ENTRIES)
+    throw new Error("ZIP 文件数量无效");
+  let expanded = 0;
+  let top: string | null = null;
+  let skillEntry: unzipper.File | null = null;
+  const seen = new Set<string>();
+  for (const entry of directory.files) {
+    const name = entry.path.replace(/\/$/, "");
+    if (!safeEntry(name)) throw new Error("ZIP 包含非法路径");
+    const parts = name.split("/");
+    if (top === null) top = parts[0] ?? "";
+    if (parts[0] !== top) throw new Error("ZIP 必须只有一个顶层目录");
+    const normalized = name.toLocaleLowerCase();
+    if (seen.has(normalized)) throw new Error("ZIP 包含重复路径");
+    seen.add(normalized);
+    if (!Number.isFinite(entry.uncompressedSize) || entry.uncompressedSize < 0)
+      throw new Error("ZIP 条目大小无效");
+    // Unix mode 0120000 marks symbolic links. Never materialize links from an
+    // untrusted archive, even when their target appears to stay under root.
+    const unixMode = (entry.externalFileAttributes >>> 16) & 0xffff;
+    if ((unixMode & 0xf000) === 0xa000)
+      throw new Error("ZIP 不允许包含符号链接");
+    expanded += entry.uncompressedSize;
+    if (expanded > MAX_EXPANDED) throw new Error("ZIP 解压后体积过大");
+    if (name === `${top}/SKILL.md`) {
+      if (skillEntry !== null) throw new Error("ZIP 必须包含唯一的 SKILL.md");
+      skillEntry = entry;
+    }
+    if (name === `${top}/.nextcowork-package.json`)
+      throw new Error("ZIP 使用了保留的元数据文件名");
+  }
+  if (!top || !SKILL_NAME_RE.test(top) || skillEntry === null)
+    throw new Error("ZIP 顶层目录或 SKILL.md 无效");
+  const raw = (await readEntry(skillEntry, 256 * 1024)).toString("utf8");
+  if (Buffer.byteLength(raw) > 256 * 1024) throw new Error("SKILL.md 文件过大");
+  const fm = parseFrontmatter(raw);
+  if (fm.skipped.length > 0) throw new Error("SKILL.md frontmatter 无法识别");
+  const name = fmString(fm, "name");
+  const description = fmString(fm, "description");
+  if (
+    !name ||
+    name !== top ||
+    !SKILL_NAME_RE.test(name) ||
+    !description ||
+    description.length > SKILL_DESCRIPTION_MAX ||
+    fm.body.trim() === "" ||
+    fm.body.length > SKILL_BODY_MAX
+  )
+    throw new Error("SKILL.md 元数据无效");
+  const target = resolve(root, top);
+  const version =
+    fmString(fm, "version") ??
+    basename(zipPath).match(/v?(\d+\.\d+\.\d+)/)?.[1];
+  const rootResolved = resolve(root);
+  if (!(target === rootResolved || target.startsWith(rootResolved + sep)))
+    throw new Error("安装路径无效");
+  const staging = `${target}.installing-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const backup = `${target}.backup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let backedUp = false;
+  await fs.mkdir(dirname(staging), { recursive: true });
+  try {
+    let actualExpanded = 0;
+    for (const entry of directory.files) {
+      const parts = entry.path.replace(/\/$/, "").split("/");
+      const child = parts.slice(1).join("/");
+      if (child === "") continue;
+      const destination = join(staging, child);
+      if (entry.path.endsWith("/")) {
+        await fs.mkdir(destination, { recursive: true });
+        continue;
+      }
+      await fs.mkdir(dirname(destination), { recursive: true });
+      const bytes = await readEntry(entry, MAX_EXPANDED - actualExpanded);
+      actualExpanded += bytes.length;
+      await fs.writeFile(destination, bytes, { flag: "wx" });
+    }
+    await fs.writeFile(
+      join(staging, ".nextcowork-package.json"),
+      JSON.stringify({
+        sourceKind: "zip",
+        sha256,
+        ...(version ? { version } : {}),
+      }),
+      { flag: "wx" },
+    );
+    try {
+      await fs.rename(target, backup);
+      backedUp = true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw error;
+    }
+    await fs.rename(staging, target);
+    if (backedUp)
+      await fs
+        .rm(backup, { recursive: true, force: true })
+        .catch(() => undefined);
+  } catch (error) {
+    await fs
+      .rm(staging, { recursive: true, force: true })
+      .catch(() => undefined);
+    // If activation failed after moving the old package aside, put it back.
+    if (backedUp) await fs.rename(backup, target).catch(() => undefined);
+    throw error;
+  }
+  return { name, sha256, target, version };
+}

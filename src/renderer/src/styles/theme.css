@@ -265,7 +265,7 @@ body {
 /* 模糊:整张图糊成一团环境光。放大 1.3 是因为 blur 会把边缘吸淡,
    不放大的话四周会出现一圈明显的透明带。 */
 :root[data-image-render='blur'] .app-canvas::before {
-  filter: blur(44px) saturate(1.15);
+  filter: blur(var(--theme-image-blur, 44px)) saturate(var(--theme-image-saturation, 1.15)) brightness(var(--theme-image-brightness, 1));
   transform: scale(1.3);
 }
 
@@ -273,8 +273,81 @@ body {
    ★ 透上来的现在是**面板底色** `--color-canvas`(以前是窗口底 `--color-app`)——
      同一个手法,但值换了,别把这两处当成同一句话。 */
 :root[data-image-render='overlay'] .app-canvas::before {
-  opacity: 0.55;
+  opacity: var(--theme-image-opacity, 0.55);
+  filter: saturate(var(--theme-image-saturation, 1.15)) brightness(var(--theme-image-brightness, 1));
 }
+
+:root[data-image-render] .app-canvas::before {
+  background-position: var(--theme-image-position, center);
+}
+
+/* Theme Studio material controls. Panels stay readable while the wallpaper
+   can flow through the desktop atmosphere. Content views may opt into an
+   opaque surface (terminal/editor/browser) as they already do today. */
+:root[data-image-render] .app-ground {
+  background-image: var(--theme-image);
+  background-size: cover;
+  background-position: var(--theme-image-position, center);
+}
+:root[data-image-render] .app-ground > aside {
+  background-color: color-mix(in srgb, var(--color-surface) calc(var(--theme-sidebar-opacity, .88) * 100%), transparent);
+  backdrop-filter: blur(18px);
+}
+:root[data-image-render] .app-canvas > .flex.min-h-0 {
+  background-color: color-mix(in srgb, var(--color-canvas) calc(var(--theme-panel-opacity, .9) * 100%), transparent);
+}
+
+:root[data-theme-motion='reduced'] *,
+:root[data-theme-motion='off'] * {
+  transition-duration: 0ms !important;
+  animation-duration: 0ms !important;
+  animation-iteration-count: 1 !important;
+}
+:root[data-theme-motion='soft'] * {
+  transition-duration: 180ms;
+}
+:root[data-theme-font='system-rounded'] { --font-sans: ui-rounded, 'SF Pro Rounded', system-ui, sans-serif; }
+:root[data-theme-font='system-serif'] { --font-sans: ui-serif, Georgia, serif; }
+:root[data-theme-scale='small'] { font-size: 95%; }
+:root[data-theme-scale='large'] { font-size: 105%; }
+:root[data-theme-weight='compact'] { --font-weight-normal: 450; letter-spacing: -0.01em; }
+:root[data-theme-weight='comfortable'] { --font-weight-normal: 400; letter-spacing: 0.01em; }
+:root[data-theme-image-fit='contain'] .app-canvas::before { background-size: contain; background-repeat: no-repeat; }
+:root[data-image-scope='workspace'] .app-ground { background-image: none; }
+:root[data-image-positioning='region'] .app-ground { background-image: none; }
+:root[data-image-scope='desktop'] [data-theme-region='sidebar'] { background-color: color-mix(in srgb, var(--color-surface) calc(var(--theme-sidebar-opacity, .88) * 100%), transparent); backdrop-filter: blur(var(--theme-sidebar-blur, 14px)); }
+:root[data-image-scope='desktop'] [data-theme-region='rightPanel'] { background-color: color-mix(in srgb, var(--color-surface) calc(var(--theme-rightPanel-opacity, .92) * 100%), transparent); backdrop-filter: blur(var(--theme-rightPanel-blur, 14px)); }
+:root[data-image-scope='desktop'] [data-theme-region='bottomPanel'] { background-color: color-mix(in srgb, var(--color-surface) calc(var(--theme-bottomPanel-opacity, .92) * 100%), transparent); backdrop-filter: blur(var(--theme-bottomPanel-blur, 14px)); }
+:root[data-image-scope='desktop'] [data-theme-region='content'] { background-color: color-mix(in srgb, var(--color-canvas) calc(var(--theme-content-opacity, 1) * 100%), transparent); }
+:root[data-theme-protected='true'] [data-theme-region='content'] { background-color: var(--color-canvas); }
+
+.theme-studio-layout { display: grid; grid-template-columns: 190px minmax(300px, 1fr) minmax(280px, 340px); gap: 16px; min-height: 0; flex: 1; }
+.theme-studio-library, .theme-studio-inspector { min-height: 0; overflow: auto; }
+.theme-studio-center { min-width: 0; display: flex; flex-direction: column; }
+.studio-select { width: 100%; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-surface-field); color: var(--color-fg); padding: 7px 9px; font-size: 12px; }
+.theme-preview-frame { position: relative; display: flex; min-height: 390px; overflow: hidden; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-canvas); background-size: cover; isolation: isolate; }
+.theme-preview-sidebar { width: 22%; min-width: 82px; display: flex; flex-direction: column; gap: 13px; padding: 14px 10px; background: color-mix(in srgb, var(--color-surface) 90%, transparent); backdrop-filter: blur(16px); }
+.theme-preview-logo { width: 56px; height: 8px; border-radius: 999px; background: var(--color-accent); }
+.theme-preview-nav { display: grid; gap: 8px; color: var(--color-fg-muted); font-size: 12px; }
+.theme-preview-user { margin-top: auto; height: 24px; border-radius: 7px; background: var(--color-surface-raised); }
+.theme-preview-main { min-width: 0; display: flex; flex: 1; flex-direction: column; background: color-mix(in srgb, var(--color-canvas) 74%, transparent); }
+.theme-preview-tabs { display: flex; height: 34px; align-items: end; gap: 4px; padding: 0 8px; background: var(--color-chrome); }
+.theme-preview-tab { padding: 8px 10px; color: var(--color-fg-muted); font-size: 10px; }
+.theme-preview-tab.active { border-radius: 7px 7px 0 0; background: var(--color-canvas); color: var(--color-fg); }
+.theme-preview-chat { display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: end; gap: 14px; padding: 20px; }
+.theme-preview-message { align-self: end; max-width: 80%; border-radius: 10px; padding: 9px 12px; background: var(--color-accent); color: var(--color-accent-fg); font-size: 10px; }
+.theme-preview-composer { display: flex; align-items: center; gap: 8px; border: 1px solid var(--color-border); border-radius: 9px; padding: 8px; background: var(--color-surface-input); color: var(--color-icon); }
+.theme-preview-composer i { height: 8px; flex: 1; border-radius: 999px; background: var(--color-fg-faint); opacity: .35; }.theme-preview-composer b { color: var(--color-accent); }
+.theme-preview-panel { width: 19%; min-width: 84px; display: grid; align-content: start; gap: 12px; padding: 16px 10px; border-left: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-surface) 94%, transparent); }
+.theme-preview-panel div { height: 7px; border-radius: 999px; background: var(--color-fg-faint); opacity: .35; }.theme-preview-panel div:first-child { width: 70%; background: var(--color-fg-muted); opacity: .6; }
+.theme-preview-bottom { position: absolute; right: 19%; bottom: 0; left: 22%; display: flex; gap: 12px; padding: 6px 10px; border-top: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-surface) 90%, transparent); color: var(--color-fg-muted); font-size: 9px; }.theme-preview-bottom.solid { background: var(--color-surface); }
+.theme-preview-real { position: relative; display: flex; overflow: hidden; isolation: isolate; background: var(--color-app); color: var(--color-fg); }
+.theme-preview-real::before { content: ''; position: absolute; inset: -10%; z-index: -1; background-image: var(--theme-image); background-size: var(--theme-image-fit, cover); background-position: var(--theme-image-position, center); opacity: var(--theme-image-opacity, 0); filter: blur(var(--theme-image-blur, 0px)) saturate(var(--theme-image-saturation, 1)) brightness(var(--theme-image-brightness, 1)); }
+.preview-sidebar { width: 250px; display: flex; flex-direction: column; gap: 24px; padding: 28px 20px; background: color-mix(in srgb, var(--color-surface) 90%, transparent); backdrop-filter: blur(16px); }
+.preview-logo { width: 90px; height: 12px; border-radius: 99px; background: var(--color-accent); }.preview-sidebar nav { display: grid; gap: 13px; font-size: 15px; color: var(--color-fg-muted); }.preview-user { margin-top: auto; height: 38px; border-radius: 9px; background: var(--color-surface-raised); }
+.preview-main { position: relative; display: flex; min-width: 0; flex: 1; flex-direction: column; background: color-mix(in srgb, var(--color-canvas) 80%, transparent); }.preview-chrome { display: flex; height: 52px; align-items: end; gap: 5px; padding: 0 14px; background: var(--color-chrome); }.preview-tab { padding: 12px 16px; color: var(--color-fg-muted); font-size: 14px; }.preview-tab.active { border-radius: 9px 9px 0 0; background: var(--color-canvas); color: var(--color-fg); }.preview-chat { display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: end; gap: 18px; padding: 28px; }.preview-bubble { align-self: end; max-width: 72%; border-radius: 12px; padding: 13px 17px; background: var(--color-accent); color: var(--color-accent-fg); font-size: 14px; }.preview-card { border-radius: 11px; padding: 17px; background: color-mix(in srgb, var(--color-surface) 84%, transparent); }.preview-card b { font-size: 15px; }.preview-card p { margin-top: 8px; color: var(--color-fg-muted); font-size: 13px; }.preview-file { display: flex; align-items: center; gap: 12px; border-radius: 10px; padding: 13px; background: var(--color-surface-raised); }.preview-file span { display: grid; gap: 4px; font-size: 14px; }.preview-file small { color: var(--color-fg-muted); font-size: 11px; }.preview-file em { margin-left: auto; border-radius: 5px; padding: 5px 8px; background: var(--color-accent); color: var(--color-accent-fg); font-size: 11px; font-style: normal; }.preview-input { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--color-border); border-radius: 10px; padding: 12px 14px; color: var(--color-fg-muted); font-size: 13px; }.preview-bottom { position: absolute; right: 0; bottom: 0; left: 0; display: flex; gap: 15px; border-top: 1px solid var(--color-border); padding: 8px 14px; background: var(--color-surface); color: var(--color-fg-muted); font-size: 11px; }.preview-right { width: 225px; display: grid; align-content: start; gap: 14px; border-left: 1px solid var(--color-border); padding: 24px 18px; background: color-mix(in srgb, var(--color-surface) 95%, transparent); }.preview-right strong { font-size: 14px; }.preview-right span { display: flex; align-items: center; gap: 9px; color: var(--color-fg-muted); font-size: 13px; }
+@media (max-width: 980px) { .theme-studio-layout { grid-template-columns: 150px minmax(260px, 1fr); }.theme-studio-inspector { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--color-hairline); padding: 12px 0 0; } }
+@media (max-width: 700px) { .theme-studio-layout { grid-template-columns: 1fr; }.theme-studio-library, .theme-studio-inspector { max-height: 280px; } }
 
 /* ── 内置的六张要单独压一档 ──────────────────────────────────────
    `data-image-source` 由 `theme/apply.ts` 写(那边有为什么要分的完整说明)。
@@ -408,12 +481,55 @@ body {
   animation: reveal-delayed 160ms ease-out 250ms both;
 }
 
+@keyframes skills-view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes skills-card-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.skills-view-enter {
+  animation: skills-view-enter 220ms var(--ease-panel) both;
+}
+
+.skills-card-enter {
+  animation: skills-card-enter 260ms var(--ease-panel) both;
+}
+
+:root[data-theme-motion='reduced'] :is(.skills-view-enter, .skills-card-enter),
+:root[data-theme-motion='off'] :is(.skills-view-enter, .skills-card-enter) {
+  animation: none;
+}
+
+:root[data-theme-motion='reduced'] :is(.skills-category, .skills-card-enter),
+:root[data-theme-motion='off'] :is(.skills-category, .skills-card-enter) {
+  translate: none;
+}
+
 /*
   系统里勾了「减弱动态效果」就别播 —— 前庭功能敏感的人看这类大块位移会晕。
   不写 0 而写 0.01ms:`transitionend` / `animationend` 照常触发,靠事件收尾的
   逻辑不会因为「动画从来没开始过」而卡住。usePresence 用的是定时器,不受影响。
 */
 @media (prefers-reduced-motion: reduce) {
+  .skills-view-enter,
+  .skills-card-enter {
+    animation: none;
+  }
+
   *,
   *::before,
   *::after {

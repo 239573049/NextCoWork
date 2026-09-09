@@ -30,6 +30,10 @@ function ctx(): ToolContext {
   }
 }
 
+function ctxWithSkills(skills: readonly Skill[]): ToolContext {
+  return { ...ctx(), skills }
+}
+
 const skill = (over: Partial<Skill> = {}): Skill => ({
   id: over.name ?? 'commit',
   name: 'commit',
@@ -125,6 +129,13 @@ describe('Skill · 取回正文', () => {
 })
 
 describe('Skill · 找不到', () => {
+  it('run 快照存在时不回退全局注册表', async () => {
+    const isolated = skill({ id: 'isolated', name: 'isolated', body: '隔离正文' })
+    const r = await skillTool.execute({ name: 'commit' }, ctxWithSkills([isolated]))
+    expect(r.isError).toBe(true)
+    expect(r.output.content).not.toContain('按 Conventional Commits 写。')
+    expect(r.output.content).toContain('isolated')
+  })
   /**
    * ★ 把可用清单**再列一遍**,而不是只说「没有这个 Skill」。
    *

@@ -331,6 +331,7 @@ export function ChatView({
               所以新建的工作区不需要用户先去哪里勾一遍。
             */
             skillIds: workspace.settings.activeSkillIds
+            ,skillSelectionMode: workspace.settings.skillSelectionMode
           },
           parts
         )
@@ -400,6 +401,7 @@ export function ChatView({
             model: editModel.model,
             modelProviderId: editModel.modelProviderId,
             skillIds: workspace.settings.activeSkillIds
+            ,skillSelectionMode: workspace.settings.skillSelectionMode
           })}
           onDeleteTurn={deleteTurn}
         />

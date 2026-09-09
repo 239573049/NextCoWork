@@ -524,6 +524,62 @@ const V12_MESSAGE_RUN = `
 ALTER TABLE messages ADD COLUMN run_id TEXT;
 `
 
+/** 第 13 条：基础配置云同步的本地 outbox。会话/消息刻意不进入此表。 */
+const V13_CONFIG_SYNC = `
+CREATE TABLE sync_account (
+  account_id TEXT PRIMARY KEY,
+  device_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  initial_sync_completed INTEGER NOT NULL DEFAULT 0,
+  last_pull_cursor INTEGER NOT NULL DEFAULT 0,
+  last_server_cursor INTEGER NOT NULL DEFAULT 0,
+  last_success_at INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE sync_outbox (
+  mutation_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  client_seq INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  base_revision INTEGER NOT NULL DEFAULT 0,
+  workspace_id TEXT,
+  created_at INTEGER NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL,
+  acked_at INTEGER,
+  last_error TEXT
+);
+CREATE UNIQUE INDEX sync_outbox_sequence ON sync_outbox(account_id, client_seq);
+CREATE INDEX sync_outbox_pending ON sync_outbox(account_id, acked_at, next_attempt_at, client_seq);
+CREATE TABLE sync_conflict (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  local_revision INTEGER NOT NULL,
+  remote_revision INTEGER NOT NULL,
+  local_payload TEXT NOT NULL,
+  remote_payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX sync_conflict_pending ON sync_conflict(account_id, status, created_at);
+CREATE TABLE sync_revisions (
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, kind, entity_id)
+);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -537,4 +593,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 10, name: 'subagent-sessions', sql: V10_SUBAGENT_SESSIONS },
   { version: 11, name: 'context-experimental-off', sql: V11_CONTEXT_EXPERIMENTAL_OFF },
   { version: 12, name: 'message-run', sql: V12_MESSAGE_RUN }
+  ,{ version: 13, name: 'config-sync', sql: V13_CONFIG_SYNC }
 ]

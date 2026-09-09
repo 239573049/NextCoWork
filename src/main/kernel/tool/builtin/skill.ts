@@ -23,6 +23,7 @@ import { z } from 'zod'
 import { SKILL_BODY_MAX } from '../../../../shared/domain/skill'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import { skillRegistry } from '../../skill/registry'
+import { store } from '../../../state/store'
 import { clampWithEllipsis, stripControlChars } from '../../text'
 import { untrustedBoundary } from '../../untrusted'
 import { defineTool } from '../define'
@@ -66,12 +67,14 @@ export const skillTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: false,
   // 契约要求返回 Promise;注册表是进程内的,没有异步的事要做
-  async run(input) {
-    const reg = skillRegistry()
-    const hit = reg.get(input.name)
+  async run(input, ctx) {
+    const snapshot = ctx.skills
+    const hit = snapshot === undefined
+      ? skillRegistry().get(input.name)
+      : snapshot.find((s) => s.name === input.name)
 
     if (hit === undefined) {
-      const all = reg.list()
+      const all = snapshot === undefined ? skillRegistry().list() : snapshot
       /*
         ★ 把可用清单**再列一遍**,而不是只说「没有这个 Skill」。
         只说不行的话,模型会把名字改一改再试一次(`commit` → `git-commit` → `commits`),
@@ -87,6 +90,7 @@ export const skillTool: ToolRegistration = defineTool({
 
     // 正文在加载时已经消毒过一次;这里再来一次是因为「谁消的毒」不该由调用方记着
     const body = clampWithEllipsis(stripControlChars(hit.body), SKILL_BODY_MAX)
+    try { store.recordSkillTrigger(hit.id, ctx.workspaceId) } catch { /* telemetry must never break Skill */ }
     const tools = hit.frontmatter.allowedTools
     /*
       ★ 只展示,不强制收窄。CC 自己的 `allowed-tools` 在运行时也不真的限制工具,

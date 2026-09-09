@@ -43,12 +43,13 @@ import type { ModelCatalogDefinition } from '../domain/model-catalog'
 import type { SearchHit, Session, SessionDetail, SessionListItem } from '../domain/session'
 import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
-import type { ImageTheme } from '../domain/theme'
+import type { ImageTheme, ThemeProfile } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
-import type { SkillListItem } from '../domain/skill'
+import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
+import type { SyncConflict, SyncPreview, SyncStatus } from '../domain/config-sync'
 import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
@@ -148,6 +149,13 @@ export interface ImportedImage {
   bytes: Uint8Array<ArrayBuffer>
 }
 
+export interface ThemeImageMetadata {
+  width: number
+  height: number
+  thumbnail: Uint8Array<ArrayBuffer>
+  animated: boolean
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 二、渲染 → 主,要返回值(invoke)
 // ═══════════════════════════════════════════════════════════════
@@ -176,6 +184,11 @@ export interface IpcInvokeMap {
   'clientAuth:signOut': { req: void; res: ClientAuthState }
   'clientAuth:getUser': { req: void; res: ClientAuthUser | null }
   'clientAuth:getUsage': { req: { from?: string; to?: string }; res: ClientUsageEntry[] }
+  'configSync:getStatus': { req: void; res: SyncStatus }
+  'configSync:getConflicts': { req: void; res: SyncConflict[] }
+  'configSync:getPreview': { req: void; res: SyncPreview }
+  'configSync:confirmInitial': { req: void; res: void }
+  'configSync:resolve': { req: { id: string; useRemote: boolean }; res: void }
 
   // ── 设置 ──
   'settings:get': { req: void; res: AppSettings }
@@ -191,7 +204,7 @@ export interface IpcInvokeMap {
    * 界面上的列表和磁盘上的表是两回事)。
    */
   'theme:saveImage': {
-    req: { id: string; name: string; seed: string; palette: string[] }
+    req: { id: string; name: string; seed: string; palette: string[]; metadata?: ThemeImageMetadata }
     res: ImageTheme[]
   }
   'theme:listImages': { req: void; res: ImageTheme[] }
@@ -204,6 +217,10 @@ export interface IpcInvokeMap {
     res: { mime: string; bytes: Uint8Array<ArrayBuffer> }
   }
   'theme:deleteImage': { req: { id: string }; res: ImageTheme[] }
+  'theme:listProfiles': { req: void; res: ThemeProfile[] }
+  'theme:saveProfile': { req: ThemeProfile; res: ThemeProfile[] }
+  'theme:deleteProfile': { req: { id: string }; res: ThemeProfile[] }
+  'theme:renameProfile': { req: { id: string; name: string }; res: ThemeProfile[] }
 
   // ── 工作区 ──
   'workspace:list': { req: void; res: Workspace[] }
@@ -392,6 +409,14 @@ export interface IpcInvokeMap {
 
   // ── Skill ──
   'skills:list': { req: { workspaceId?: string }; res: SkillListItem[] }
+  'skills:pickZip': { req: void; res: { path: string; name: string } | null }
+  'skills:installZip': { req: { path: string; workspaceId?: string; scope?: SkillInstallScope }; res: SkillListItem }
+  'skills:installMarket': { req: { slug: string; version?: string; workspaceId?: string; scope?: SkillInstallScope }; res: SkillListItem }
+  'skills:uninstall': { req: { skillId: string; workspaceId?: string; scope?: SkillInstallScope }; res: void }
+  'skills:marketList': { req: { q?: string; category?: string }; res: SkillMarketItem[] }
+  'skills:marketCategories': { req: void; res: string[] }
+  'skills:marketDetail': { req: { slug: string }; res: SkillMarketItem & { versions?: Array<{ version: string; changelog?: string; sha256?: string; fileSize?: number }> } }
+  'skills:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
   'skills:setGlobalEnabled': { req: { skillId: string; enabled: boolean }; res: void }
   'skills:setWorkspaceActive': {
     req: { skillId: string; workspaceId: string; active: boolean }
@@ -563,6 +588,7 @@ export interface IpcEventMap {
   'gateway:failover': FailoverEvent
   'settings:changed': AppSettings
   'theme:changed': { resolved: ResolvedTheme }
+  'theme:libraryChanged': { profiles: ThemeProfile[]; images: ImageTheme[] }
   'workspace:changed': { workspaces: Workspace[] }
   'skills:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
@@ -610,6 +636,7 @@ export interface IpcEventMap {
    */
   'provider:authChanged': { providerId: string; info: CredentialInfo }
   'clientAuth:changed': ClientAuthState
+  'configSync:changed': SyncStatus
   'app:updateChanged': UpdateState
 }
 
@@ -646,6 +673,11 @@ export const INVOKE_CHANNELS = {
   'clientAuth:signOut': 1,
   'clientAuth:getUser': 1,
   'clientAuth:getUsage': 1,
+  'configSync:getStatus': 1,
+  'configSync:getConflicts': 1,
+  'configSync:getPreview': 1,
+  'configSync:confirmInitial': 1,
+  'configSync:resolve': 1,
   'settings:get': 1,
   'settings:update': 1,
   'theme:importImage': 1,
@@ -653,6 +685,10 @@ export const INVOKE_CHANNELS = {
   'theme:listImages': 1,
   'theme:readImage': 1,
   'theme:deleteImage': 1,
+  'theme:listProfiles': 1,
+  'theme:saveProfile': 1,
+  'theme:deleteProfile': 1,
+  'theme:renameProfile': 1,
   'workspace:list': 1,
   'workspace:pick': 1,
   'workspace:update': 1,
@@ -716,6 +752,14 @@ export const INVOKE_CHANNELS = {
   'proxy:clearPassword': 1,
   'proxy:getPasswordInfo': 1,
   'skills:list': 1,
+  'skills:pickZip': 1,
+  'skills:installZip': 1,
+  'skills:installMarket': 1,
+  'skills:uninstall': 1,
+  'skills:marketList': 1,
+  'skills:marketCategories': 1,
+  'skills:marketDetail': 1,
+  'skills:diagnostics': 1,
   'skills:setGlobalEnabled': 1,
   'skills:setWorkspaceActive': 1,
   'provider:list': 1,
@@ -782,6 +826,7 @@ export const EVENT_CHANNELS = {
   'gateway:failover': 1,
   'settings:changed': 1,
   'theme:changed': 1,
+  'theme:libraryChanged': 1,
   'workspace:changed': 1,
   'skills:changed': 1,
   'mcp:changed': 1,
@@ -794,6 +839,7 @@ export const EVENT_CHANNELS = {
   'browser:profilesChanged': 1,
   'modelCatalog:changed': 1,
   'clientAuth:changed': 1
+  ,'configSync:changed': 1
   ,'app:updateChanged': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 

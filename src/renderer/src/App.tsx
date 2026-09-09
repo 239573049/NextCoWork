@@ -28,6 +28,7 @@ import type { ClientAuthState } from '../../shared/domain/client-auth'
 import { getClientAuthState } from './services/client-auth'
 import { WelcomeView } from './views/WelcomeView'
 import { UpdateBanner } from './components/UpdateBanner'
+import { useThemeProfiles } from './stores/themeProfiles'
 
 export default function App(): React.JSX.Element {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
@@ -54,6 +55,10 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     const offSettings = on('settings:changed', setSettings)
     const offTheme = on('theme:changed', ({ resolved }) => setAppearance(resolved))
+    const offLibrary = on('theme:libraryChanged', ({ profiles, images }) => {
+      useThemeProfiles.setState({ profiles })
+      useImageThemes.setState({ uploaded: images })
+    })
     const offWorkspaces = on('workspace:changed', ({ workspaces: ws }) => setWorkspaces(ws))
     const offSessions = on('sessions:changed', ({ workspaceId, renamed }) => {
       if (workspaceId !== undefined && renamed !== undefined) {
@@ -110,6 +115,7 @@ export default function App(): React.JSX.Element {
     return () => {
       offSettings()
       offTheme()
+      offLibrary()
       offWorkspaces()
       offSessions()
       offBrowser()
@@ -136,15 +142,20 @@ export default function App(): React.JSX.Element {
    * 原先那套「按需兑现 blob URL」的机制随协议迁移一起删掉了。
    */
   const uploadedThemes = useImageThemes((s) => s.uploaded)
+  const profiles = useThemeProfiles((s) => s.profiles)
+  const draft = useThemeProfiles((s) => s.draft)
+  const fullPreview = useThemeProfiles((s) => s.fullPreview)
 
   useEffect(() => {
     void useImageThemes.getState().load()
+    void useThemeProfiles.getState().load().catch(console.error)
   }, [])
 
   useEffect(() => {
     if (appearance === null || settings === null) return
-    applyTheme(document.documentElement, appearance, settings, uploadedThemes)
-  }, [appearance, settings, uploadedThemes])
+    const profile = fullPreview && draft ? draft : profiles.find((p) => p.id === settings.activeThemeProfileId)
+    applyTheme(document.documentElement, appearance, settings, uploadedThemes, profile)
+  }, [appearance, settings, uploadedThemes, profiles, draft, fullPreview])
 
   // 运行中角标的数据源是 RunRegistry 的投影,不是任何 UI 状态(方案 §8)
   const runIndex = useRunIndex()

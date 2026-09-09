@@ -440,6 +440,13 @@ describe('SkillRegistry', () => {
     expect(reg.resolve(['b', '不存在的']).map((s) => s.name)).toEqual(['b'])
   })
 
+  it('explicit 模式下空清单保持空,不会退回全部 Skill', () => {
+    const reg = new SkillRegistry()
+    reg.replaceAll({ skills: [skill('a'), skill('b')], diagnostics: [] })
+    expect(reg.resolve([], 'explicit')).toEqual([])
+    expect(reg.resolve([], 'all').map((s) => s.name)).toEqual(['a', 'b'])
+  })
+
   it('诊断跟着一起换,不会留着上一次扫描的', () => {
     const reg = new SkillRegistry()
     reg.replaceAll({ skills: [], diagnostics: [{ path: 'p', message: 'm' }] })

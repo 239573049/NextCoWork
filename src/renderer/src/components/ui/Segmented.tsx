@@ -20,7 +20,7 @@
  *    0;字体加载完宽度也会变。`ResizeObserver` 兜住这两种,并且宽度为 0 时不
  *    置 `ready`,免得浮层一打开指示器从 0 展开一次。
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { cn } from '../../lib/cn'
 
 export function Segmented<T extends string>({
@@ -28,14 +28,16 @@ export function Segmented<T extends string>({
   options,
   onChange,
   size = 'md',
+  shape = 'rounded',
   className,
   label,
   disabled = false
 }: {
   value: T
-  options: ReadonlyArray<{ value: T; label: string }>
+  options: ReadonlyArray<{ value: T; label: ReactNode }>
   onChange: (v: T) => void
   size?: 'sm' | 'md'
+  shape?: 'rounded' | 'pill'
   className?: string
   label?: string
   disabled?: boolean
@@ -72,7 +74,7 @@ export function Segmented<T extends string>({
       role="radiogroup"
       aria-label={label}
       aria-disabled={disabled || undefined}
-      className={cn('relative inline-flex rounded-[9px] bg-tint p-[3px]', className)}
+      className={cn('relative inline-flex rounded-[9px] bg-tint p-[3px]', shape === 'pill' && 'rounded-pill', className)}
     >
       {rect && (
         <div
@@ -80,6 +82,7 @@ export function Segmented<T extends string>({
           className={cn(
             'pointer-events-none absolute top-[3px] bottom-[3px] left-0 rounded-[7px]',
             'bg-surface-sunken shadow-sm shadow-black/20',
+            shape === 'pill' && 'rounded-pill bg-canvas shadow-none',
             // 首帧、以及 prefers-reduced-motion 下不滑,直接到位
             ready && 'transition-[transform,width] duration-200 ease-out motion-reduce:transition-none'
           )}
@@ -103,6 +106,8 @@ export function Segmented<T extends string>({
             className={cn(
               // z-10:压在指示器上面,否则文字被那块凹槽盖住
               'app-no-drag relative z-10 rounded-[7px] whitespace-nowrap transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
+              shape === 'pill' && 'rounded-pill',
               size === 'sm' ? 'px-2.5 py-1 text-[12px]' : 'px-3.5 py-1.5 text-[13px]',
               disabled
                 ? 'cursor-not-allowed text-fg-faint'

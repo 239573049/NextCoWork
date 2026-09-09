@@ -27,6 +27,7 @@ import { BrowserView } from "./browser/BrowserView";
 import { useI18n } from "../i18n";
 import { BrowserFeature } from "./browser/BrowserFeature";
 import { DocumentView } from './files/DocumentView';
+import { SkillsFeature } from './skills/SkillsFeature';
 
 export interface InnerViewProps {
   tab: InnerTab;
@@ -79,9 +80,10 @@ export function InnerView({
 }
 
 /** 外层 feature Tab 的内容。设置**不走这里** —— 它是模态浮层,见 AppShell。 */
-export function FeatureView({ feature }: { feature: FeatureKind }): ReactNode {
+export function FeatureView({ feature, onClose }: { feature: FeatureKind; onClose?: () => void }): ReactNode {
   const { t } = useI18n();
   if (feature === "browser") return <BrowserFeature />;
+  if (feature === "skills") return <SkillsFeature onClose={onClose} />;
   const Icon = FEATURE_ICON[feature];
   const key = feature as "scheduled" | "skills" | "review" | "settings";
   return (

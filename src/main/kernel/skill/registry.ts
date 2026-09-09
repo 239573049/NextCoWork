@@ -44,8 +44,9 @@ export class SkillRegistry {
    * 渐进披露之后每条 Skill 在提示词里只占一行,没有任何成本上的理由默认关掉。
    * 于是这里的语义是:**列了就是白名单,没列就是全都要**。
    */
-  resolve(ids: readonly string[] | undefined): readonly Skill[] {
-    if (ids === undefined || ids.length === 0) return this.skills
+  resolve(ids: readonly string[] | undefined, mode: 'all' | 'explicit' = 'all'): readonly Skill[] {
+    if (ids === undefined) return this.skills
+    if (ids.length === 0) return mode === 'explicit' ? [] : this.skills
     const want = new Set(ids)
     return this.skills.filter((s) => want.has(s.id))
   }

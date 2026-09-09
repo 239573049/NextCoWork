@@ -16,6 +16,7 @@ import { parseMentions } from '../../../../shared/domain/file-mention'
 
 /** chip 的标记属性。`data-raw` 是它在纯文本里的原样 —— 读回时用的就是它。 */
 const CHIP = 'data-mention'
+const SKILL_CHIP = 'data-skill'
 
 /** chip 的外观。★ 与转录气泡里的那枚共用,两处分开写迟早长歪。 */
 export const MENTION_CHIP_CLASS =
@@ -57,6 +58,18 @@ function chipElement(name: string, path: string, raw: string): HTMLElement {
   return el
 }
 
+function skillChipElement(name: string, raw: string): HTMLElement {
+  const el = document.createElement('span')
+  el.setAttribute(SKILL_CHIP, '')
+  el.dataset.raw = raw
+  el.dataset.name = name
+  el.setAttribute('contenteditable', 'false')
+  el.title = name
+  el.className = `${MENTION_CHIP_CLASS} mx-[1px] cursor-default select-none`
+  el.textContent = `✦ ${name}`
+  return el
+}
+
 /** DOM → 纯文本。chip 还原成它的 `data-raw`,也就是当初那段 markdown。 */
 export function readDraft(root: HTMLElement): string {
   const out: string[] = []
@@ -74,7 +87,7 @@ function collect(parent: Node, out: string[], root: Node): void {
       continue
     }
     if (!(n instanceof HTMLElement)) continue
-    if (n.hasAttribute(CHIP)) {
+    if (n.hasAttribute(CHIP) || n.hasAttribute(SKILL_CHIP)) {
       out.push(n.dataset.raw ?? '')
       continue
     }
@@ -154,7 +167,7 @@ function locate(root: HTMLElement, offset: number): { node: Node; offset: number
       continue
     }
     if (!(n instanceof HTMLElement)) continue
-    if (n.hasAttribute(CHIP)) {
+    if (n.hasAttribute(CHIP) || n.hasAttribute(SKILL_CHIP)) {
       const len = (n.dataset.raw ?? '').length
       // ★ chip 内部不是合法落点(整枚 contenteditable=false),
       //   落在它中间的偏移一律推到它后面 —— 否则光标会凭空消失。
@@ -178,7 +191,9 @@ export function renderDraft(root: HTMLElement, text: string): void {
     kids.push(
       seg.kind === 'text'
         ? document.createTextNode(seg.raw)
-        : chipElement(seg.name, seg.path, seg.raw)
+        : seg.kind === 'mention'
+          ? chipElement(seg.name, seg.path, seg.raw)
+          : skillChipElement(seg.name, seg.raw)
     )
   }
   const last = kids.at(-1)
@@ -204,13 +219,13 @@ export function renderDraft(root: HTMLElement, text: string): void {
  * 只在脏的时候重画 —— 重画要动光标,能不动就不动。
  */
 export function domDirty(root: HTMLElement, text: string): boolean {
-  const want = parseMentions(text).flatMap((s) => (s.kind === 'mention' ? [s] : []))
+  const want = parseMentions(text).filter((s) => s.kind !== 'text')
   const have: HTMLElement[] = []
   let brs = 0
   for (const n of root.childNodes) {
     if (n.nodeType === Node.TEXT_NODE) continue
     if (!(n instanceof HTMLElement)) return true
-    if (n.hasAttribute(CHIP)) {
+    if (n.hasAttribute(CHIP) || n.hasAttribute(SKILL_CHIP)) {
       have.push(n)
       continue
     }
@@ -229,5 +244,5 @@ export function domDirty(root: HTMLElement, text: string): boolean {
   if (trailingBr !== (text === '' || text.endsWith('\n'))) return true
 
   if (have.length !== want.length) return true
-  return have.some((el, i) => el.dataset.raw !== want[i]?.raw || el.textContent !== el.dataset.name)
+  return have.some((el, i) => el.dataset.raw !== want[i]?.raw || (!el.hasAttribute(SKILL_CHIP) && el.textContent !== el.dataset.name))
 }

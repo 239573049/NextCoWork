@@ -144,3 +144,22 @@ describe('insertMention', () => {
     ])
   })
 })
+
+describe('skills in drafts', () => {
+  it('parses skill tags while preserving raw text', async () => {
+    const { parseMentions } = await import('../file-mention')
+    expect(parseMentions('用 <skill name="data-analysis" /> 完成')).toEqual([
+      { kind: 'text', raw: '用 ' },
+      { kind: 'skill', raw: '<skill name="data-analysis" />', name: 'data-analysis' },
+      { kind: 'text', raw: ' 完成' }
+    ])
+  })
+
+  it('detects slash queries and inserts a skill tag', async () => {
+    const { skillQueryAt, insertSkill } = await import('../file-mention')
+    expect(skillQueryAt('/data', 5)).toEqual({ start: 0, end: 5, query: 'data' })
+    expect(skillQueryAt('https://x/y', 10)).toBeNull()
+    expect(skillQueryAt('/usr', 4)).toBeNull()
+    expect(insertSkill('/data', { start: 0, end: 5 }, 'data-analysis').text).toBe('<skill name="data-analysis" /> ')
+  })
+})

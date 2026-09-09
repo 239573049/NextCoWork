@@ -9,6 +9,7 @@
  * 那边是纯函数,有测试。这里多写一行逻辑,就多一行没人验证的逻辑。
  */
 import { extractPalette } from '../../../shared/domain/theme'
+import type { ThemeImageMetadata } from '../../../shared/ipc/contract'
 
 /**
  * 缩到多大再取色。`extractPalette` 的文档说 ~64,这里取 128 ——
@@ -23,6 +24,7 @@ export interface DecodedColors {
   seed: string
   /** 卡片下面那几颗色点 */
   palette: string[]
+  metadata: ThemeImageMetadata
 }
 
 export async function decodeColors(
@@ -45,7 +47,14 @@ export async function decodeColors(
     // 实际到不了这里(`extractPalette` 灰度图也会补齐到 count 个),
     // 但 seed 是要写进 CSS 变量的,不给它留一条 undefined 的路
     if (seed === undefined) throw new Error('这张图里取不出颜色')
-    return { seed, palette }
+    const thumbScale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height))
+    const thumbnail = new OffscreenCanvas(Math.max(1, Math.round(bitmap.width * thumbScale)), Math.max(1, Math.round(bitmap.height * thumbScale)))
+    thumbnail.getContext('2d')!.drawImage(bitmap, 0, 0, thumbnail.width, thumbnail.height)
+    const png = await thumbnail.convertToBlob({ type: 'image/png' })
+    const signature = new TextDecoder('latin1').decode(bytes)
+    const animated = mime === 'image/gif' ? signature.split('\u0021\u00f9\u0004').length > 2 : mime === 'image/webp' ? signature.includes('ANIM') : mime === 'image/png' && signature.includes('acTL')
+    return { seed, palette, metadata: { width: bitmap.width, height: bitmap.height,
+      thumbnail: new Uint8Array(await png.arrayBuffer()), animated } }
   } finally {
     // 不 close 的话这块解码后的位图要等 GC —— 4K 图就是几十 MB
     bitmap.close()

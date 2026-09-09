@@ -16,12 +16,14 @@
  */
 import { useEffect, useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react'
 import { cn } from '../../lib/cn'
-import { caretOf, domDirty, placeCaret, readDraft, renderDraft, selectionOf } from './rich-draft'
+import { caretOf, domDirty, placeCaret, readDraft, renderDraft, selectionOf, type DraftSelection } from './rich-draft'
 
 export interface MentionInputHandle {
   focus: () => void
   /** 整段换掉草稿并把光标放到 `caret`。插入 `@` 引用走这条。 */
   replace: (text: string, caret: number) => void
+  /** 菜单移走焦点后，仍能取回用户最后的输入选区。 */
+  selection: () => DraftSelection | null
 }
 
 export function MentionInput({
@@ -35,6 +37,7 @@ export function MentionInput({
   placeholder,
   metrics,
   handle,
+  skillDescriptions,
   ...aria
 }: {
   value: string
@@ -56,6 +59,7 @@ export function MentionInput({
   /** 内边距 / 字号 / 行高。与占位符共用,两者必须逐像素对齐 */
   metrics: string
   handle: RefObject<MentionInputHandle | null>
+  skillDescriptions?: Readonly<Record<string, string>>
   'aria-expanded': boolean
   'aria-controls': string | undefined
   'aria-activedescendant': string | undefined
@@ -64,6 +68,7 @@ export function MentionInput({
   /** DOM 里此刻画的是哪段文本。★ 判断「要不要重画」的依据,不能用 `value`(它慢一拍) */
   const shown = useRef<string | null>(null)
   const composing = useRef(false)
+  const lastSelection = useRef<DraftSelection | null>(null)
   /** 事件回调放进 ref:否则 `selectionchange` 的订阅每渲染一次就要重挂一次 */
   const onCaretRef = useRef(onCaret)
   onCaretRef.current = onCaret
@@ -75,12 +80,14 @@ export function MentionInput({
     shown.current = text
     el.focus()
     placeCaret(el, caret)
+    lastSelection.current = { start: caret, end: caret }
     onChange(text, caret)
   }
 
   handle.current = {
     focus: () => root.current?.focus(),
-    replace: apply
+    replace: apply,
+    selection: () => (root.current === null ? null : selectionOf(root.current)) ?? lastSelection.current
   }
 
   /*
@@ -98,6 +105,12 @@ export function MentionInput({
     if (focused) placeCaret(el, Math.min(caret ?? value.length, value.length))
   }, [value])
 
+  useEffect(() => {
+    for (const chip of root.current?.querySelectorAll<HTMLElement>('[data-skill]') ?? []) {
+      chip.title = skillDescriptions?.[chip.dataset.name ?? ''] ?? chip.dataset.name ?? ''
+    }
+  }, [value, skillDescriptions])
+
   /*
     ★ 光标移动只能靠 document 上的 `selectionchange` —— contentEditable 不发
     `onSelect`。少了它,用户用鼠标点回一个写了一半的 `@comp` 中间时,列表不会回来。
@@ -107,6 +120,7 @@ export function MentionInput({
       const el = root.current
       if (el === null || composing.current) return
       if (document.activeElement !== el) return
+      lastSelection.current = selectionOf(el)
       onCaretRef.current(readDraft(el), caretOf(el))
     }
     document.addEventListener('selectionchange', onSelectionChange)
@@ -119,6 +133,7 @@ export function MentionInput({
     const el = root.current
     if (el === null) return
     const text = readDraft(el)
+    if (!composing.current) lastSelection.current = selectionOf(el)
     shown.current = text
     if (!composing.current && domDirty(el, text)) {
       const caret = caretOf(el)
@@ -163,7 +178,27 @@ export function MentionInput({
           'scroll-thin selectable max-h-[280px] w-full cursor-text overflow-y-auto break-words whitespace-pre-wrap text-fg focus:outline-none'
         )}
         onInput={sync}
-        onBlur={onBlur}
+        onBlur={() => {
+          const el = root.current
+          if (el !== null) lastSelection.current = selectionOf(el) ?? lastSelection.current
+          onBlur()
+        }}
+        onCopy={(e) => {
+          const el = root.current
+          const selected = el === null ? null : selectionOf(el)
+          if (selected === null || selected.start === selected.end) return
+          e.preventDefault()
+          e.clipboardData.setData('text/plain', readDraft(el!).slice(selected.start, selected.end))
+        }}
+        onCut={(e) => {
+          const el = root.current
+          const selected = el === null ? null : selectionOf(el)
+          if (el === null || selected === null || selected.start === selected.end) return
+          const text = readDraft(el)
+          e.preventDefault()
+          e.clipboardData.setData('text/plain', text.slice(selected.start, selected.end))
+          apply(text.slice(0, selected.start) + text.slice(selected.end), selected.start)
+        }}
         onCompositionStart={() => {
           composing.current = true
           onComposing(true)

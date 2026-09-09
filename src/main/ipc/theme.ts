@@ -12,12 +12,15 @@
  * 索引是一个 JSON 文件,不是 SQLite —— 这坨数据五个字段、几十条上限、
  * 只在设置页读写。为它加一张表加一条迁移,换来的还是同样一次 `readFileSync`。
  */
-import { app, dialog } from 'electron'
+import { app, dialog, nativeImage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
-import type { ImageTheme } from '../../shared/domain/theme'
+import { resolveImageTheme, type ImageTheme, type ThemeProfile } from '../../shared/domain/theme'
+import { builtinProfiles, DEFAULT_PROFILE_ID, isThemeProfile, legacyStudioOf, migrateThemeProfile, wallpaperFor } from '../../shared/domain/theme-profile'
+import { store } from '../state/store'
+import { windows } from '../window/registry'
 import { buildNcwUrl } from '../../shared/domain/attachment'
-import type { ImportedImage } from '../../shared/ipc/contract'
+import type { ImportedImage, ThemeImageMetadata } from '../../shared/ipc/contract'
 import { prefixedId } from '../../shared/util/id'
 import { attachmentRoot } from '../net/attachment-protocol'
 import { getHost } from '../runtime'
@@ -72,6 +75,14 @@ interface StoredItem {
   mime: string
   seed: string
   palette: string[]
+  width?: number
+  height?: number
+  bytes?: number
+  animated?: boolean
+  thumbnail?: boolean
+  fileName?: string
+  createdAt?: number
+  lastUsedAt?: number
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -114,6 +125,97 @@ function indexFile(): string {
   return join(themesDir(), 'index.json')
 }
 
+function profilesFile(): string { return join(themesDir(), 'profiles.json') }
+function readProfiles(): ThemeProfile[] {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(profilesFile(), 'utf8'))
+    return Array.isArray(raw) ? raw.filter(isThemeProfile) : []
+  } catch { return [] }
+}
+function writeProfiles(items: readonly ThemeProfile[]): void {
+  const tmp = `${profilesFile()}.tmp`
+  writeFileSync(tmp, JSON.stringify(items, null, 2), 'utf8')
+  renameSync(tmp, profilesFile())
+}
+
+export function listProfiles(): ThemeProfile[] { return readProfiles() }
+export function initializeThemeLibrary(): void {
+  let profiles = readProfiles()
+  const settings = store.getSettings()
+  if (!profiles.some((p) => p.id === DEFAULT_PROFILE_ID)) {
+    profiles = [...builtinProfiles(), ...profiles.filter((p) => !p.id.startsWith('builtin-'))]
+    if (settings.activeThemeProfileId === null && !profiles.some((p) => p.id === 'migrated-theme')) {
+      profiles.push(migrateThemeProfile(settings, listImages()))
+      store.updateSettings({ activeThemeProfileId: 'migrated-theme' })
+    }
+    writeProfiles(profiles)
+  }
+  const active = store.getSettings().activeThemeProfileId
+  if (!profiles.some((p) => p.id === active)) store.updateSettings({ activeThemeProfileId: DEFAULT_PROFILE_ID })
+}
+export function profileSettings(id: string | null): { activeThemeProfileId: string; themeStudio: ReturnType<typeof legacyStudioOf>; imageTheme: { id: string | null; render: 'blur' | 'overlay' } } {
+  initializeThemeLibrary()
+  const profile = readProfiles().find((p) => p.id === id) ?? readProfiles().find((p) => p.id === DEFAULT_PROFILE_ID)!
+  const themeStudio = legacyStudioOf(profile)
+  return { activeThemeProfileId: profile.id, themeStudio, imageTheme: { id: themeStudio.wallpaperAssetId, render: themeStudio.render } }
+}
+function broadcastLibrary(): void {
+  windows.emitToAll('theme:libraryChanged', { profiles: readProfiles(), images: listImages() })
+}
+/** Keep legacy settings callers (including older windows and integrations) reflected in the active profile. */
+export function syncLegacyProfile(settings: ReturnType<typeof store.getSettings>, patch: { colorTheme?: unknown; imageTheme?: unknown }): void {
+  if (patch.colorTheme === undefined && patch.imageTheme === undefined) return
+  const items = readProfiles(); const active = items.find((p) => p.id === settings.activeThemeProfileId)
+  if (!active || active.builtin === true) return
+  if (patch.colorTheme !== undefined) {
+    active.palette.base = { ...settings.colorTheme }
+    if (active.wallpaper === null) active.palette.seed = settings.colorTheme.custom
+  }
+  if (patch.imageTheme !== undefined) {
+    const image = resolveImageTheme(settings.imageTheme.id, listImages())
+    active.wallpaper = image ? { ...wallpaperFor(image.id), render: settings.imageTheme.render } : null
+    if (image) active.palette.seed = image.seed
+  }
+  active.updatedAt = Date.now(); writeProfiles(items); broadcastLibrary()
+}
+export function saveProfile(profile: ThemeProfile): ThemeProfile[] {
+  if (!isThemeProfile(profile)) throw new IpcError('unknown', '主题配置无效')
+  const items = readProfiles()
+  if (profile.builtin || profile.id.startsWith('builtin-') || items.find((p) => p.id === profile.id)?.builtin) throw new IpcError('unknown', '内置主题不能修改')
+  if (!items.some((p) => p.id === profile.id) && items.length >= 100) throw new IpcError('unknown', '主题库已满')
+  if (profile.wallpaper && !listImages().some((i) => i.id === profile.wallpaper?.assetId) && !builtinProfiles().some((p) => p.wallpaper?.assetId === profile.wallpaper?.assetId)) throw new IpcError('unknown', '图片资产不存在')
+  const now = Date.now()
+  const next = { ...profile, updatedAt: now, createdAt: profile.createdAt || now }
+  const index = items.findIndex((item) => item.id === profile.id)
+  if (index >= 0) items[index] = next
+  else items.unshift(next)
+  writeProfiles(items)
+  broadcastLibrary()
+  if (store.getSettings().activeThemeProfileId === profile.id) {
+    const selected = profileSettings(profile.id)
+    windows.emitToAll('settings:changed', store.updateSettings(selected))
+  }
+  return readProfiles()
+}
+export function deleteProfile(id: string): ThemeProfile[] {
+  const item = readProfiles().find((profile) => profile.id === id)
+  if (item?.builtin === true) throw new IpcError('unknown', '内置主题不能删除')
+  const rest = readProfiles().filter((profile) => profile.id !== id)
+  writeProfiles(rest)
+  if (store.getSettings().activeThemeProfileId === id) {
+    const selected = profileSettings(DEFAULT_PROFILE_ID)
+    windows.emitToAll('settings:changed', store.updateSettings(selected))
+  }
+  broadcastLibrary()
+  return rest
+}
+export function renameProfile(req: { id: string; name: string }): ThemeProfile[] {
+  const items = readProfiles(); const item = items.find((profile) => profile.id === req.id)
+  if (item === undefined) throw new IpcError('unknown', '找不到主题')
+  if (item.builtin === true) throw new IpcError('unknown', '内置主题不能重命名')
+  item.name = cleanName(req.name); item.updatedAt = Date.now(); writeProfiles(items); broadcastLibrary(); return items
+}
+
 /**
  * 逐条校验后再收下。**磁盘上的东西是不可信输入** —— 它可能被手改过、
  * 被半截写坏过、也可能是上一个版本写的。一条坏记录不该带走整张表,
@@ -139,7 +241,14 @@ function readIndex(): StoredItem[] {
     const palette = Array.isArray(item.palette)
       ? item.palette.filter((c): c is string => typeof c === 'string' && HEX_RE.test(c))
       : []
-    out.push({ id: item.id, name: cleanName(item.name), mime: item.mime, seed: item.seed, palette })
+    out.push({ id: item.id, name: cleanName(item.name), mime: item.mime, seed: item.seed, palette,
+      width: typeof item.width === 'number' && item.width > 0 ? item.width : undefined,
+      height: typeof item.height === 'number' && item.height > 0 ? item.height : undefined,
+      bytes: typeof item.bytes === 'number' && item.bytes >= 0 ? item.bytes : undefined,
+      animated: item.animated === true, thumbnail: item.thumbnail === true,
+      fileName: typeof item.fileName === 'string' ? basename(item.fileName) : undefined,
+      createdAt: typeof item.createdAt === 'number' ? item.createdAt : undefined,
+      lastUsedAt: typeof item.lastUsedAt === 'number' ? item.lastUsedAt : undefined })
   }
   return out
 }
@@ -163,7 +272,11 @@ function toTheme(item: StoredItem): ImageTheme {
     // ★ url 由主进程给,渲染层不拼 —— 目录结构不该变成跨进程契约
     source: { kind: 'uploaded', assetId: item.id, url: url ?? '' },
     seed: item.seed,
-    palette: item.palette
+    palette: item.palette,
+    width: item.width, height: item.height, bytes: item.bytes, animated: item.animated,
+    mime: item.mime, fileName: item.fileName, createdAt: item.createdAt, lastUsedAt: item.lastUsedAt,
+    thumbnailUrl: item.thumbnail && existsSync(join(themesDir(), `${item.id}-thumb.png`)) ? buildNcwUrl({ scope: 'theme', fileName: `${item.id}-thumb.png` }) ?? undefined : undefined,
+    unavailable: !existsSync(fileOf(item))
   }
 }
 
@@ -199,7 +312,7 @@ function toBytes(buf: Uint8Array): Uint8Array<ArrayBuffer> {
  * 于是「渲染层递一个 id 进来要求登记」这条路,天然只能落在
  * 主进程刚刚自己发出去的那个 id 上。
  */
-const pending = new Map<string, { path: string; mime: string }>()
+const pending = new Map<string, { path: string; mime: string; fileName: string }>()
 /** 同时挂着的导入不该超过这么多 —— 它只由用户一次次点开对话框推进 */
 const MAX_PENDING = 8
 
@@ -227,12 +340,19 @@ export async function importImage(): Promise<ImportedImage | null> {
   // 读一次、写一次,而不是 copyFile 之后再读 —— 中间隔着的那一下,
   // 源文件可能已经被别的进程换掉了,于是回给渲染层的字节和落盘的不是同一张图
   const bytes = readFileSync(picked)
+  if (bytes.length > MAX_BYTES) throw new IpcError('unknown', '图片过大')
+  const signature = bytes.subarray(0, 12)
+  const valid = mime === 'image/png' ? signature.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) :
+    mime === 'image/jpeg' ? signature[0] === 255 && signature[1] === 216 :
+    mime === 'image/gif' ? /^GIF8[79]a/.test(signature.toString('ascii')) :
+    mime === 'image/webp' ? signature.toString('ascii', 0, 4) === 'RIFF' && signature.toString('ascii', 8, 12) === 'WEBP' : signature.toString('ascii', 0, 2) === 'BM'
+  if (!valid) throw new IpcError('unknown', '图片格式与文件内容不一致')
   const id = prefixedId('img')
   const path = join(themesDir(), `${id}${EXT_OF[mime] ?? '.png'}`)
   writeFileSync(path, bytes)
 
   evictPending()
-  pending.set(id, { path, mime })
+  pending.set(id, { path, mime, fileName: basename(picked) })
 
   return {
     id,
@@ -262,6 +382,7 @@ export function saveImage(req: {
   name: string
   seed: string
   palette: string[]
+  metadata?: ThemeImageMetadata
 }): ImageTheme[] {
   // ★ 只认刚刚由 importImage 发出去的 id。渲染层编不出一个能通过这一句的 id ——
   //   它不知道我们生成了什么,而这张表在进程内存里
@@ -272,16 +393,28 @@ export function saveImage(req: {
   if (!HEX_RE.test(req.seed)) throw new IpcError('unknown', '种子色不是合法的 #rrggbb')
   const palette = req.palette.filter((c) => HEX_RE.test(c)).slice(0, 8)
 
-  pending.delete(req.id)
   const items = readIndex()
+  if (items.length >= MAX_ITEMS) throw new IpcError('unknown', '图片资产库已满')
+  const meta = req.metadata
+  if (meta) {
+    if (!Number.isInteger(meta.width) || !Number.isInteger(meta.height) || meta.width < 1 || meta.height < 1 || meta.width * meta.height > 200_000_000 ||
+        !(meta.thumbnail instanceof Uint8Array) || meta.thumbnail.length > 2 * 1024 * 1024) throw new IpcError('unknown', '图片元数据无效')
+    const image = nativeImage.createFromBuffer(Buffer.from(meta.thumbnail))
+    if (image.isEmpty() || image.getSize().width > 512 || image.getSize().height > 512) throw new IpcError('unknown', '缩略图无效')
+    writeFileSync(join(themesDir(), `${req.id}-thumb.png`), image.toPNG())
+  }
   items.unshift({
     id: req.id,
     name: cleanName(req.name),
     mime: entry.mime,
     seed: req.seed.toLowerCase(),
-    palette
+    palette,
+    width: meta?.width, height: meta?.height, animated: meta?.animated ?? false, thumbnail: !!meta,
+    bytes: statSync(entry.path).size, fileName: entry.fileName, createdAt: Date.now(), lastUsedAt: Date.now()
   })
   writeIndex(items)
+  pending.delete(req.id)
+  broadcastLibrary()
   return items.map(toTheme)
 }
 
@@ -298,7 +431,6 @@ export function readImage(req: { id: string }): { mime: string; bytes: Uint8Arra
   } catch {
     // 文件被人从 userData 里删了。表还在,但这条已经没有内容了 —— 顺手清掉,
     // 否则这张卡会一直挂在设置页上,点一次报一次错
-    writeIndex(readIndex().filter((t) => t.id !== req.id))
     throw new IpcError('unknown', '这张背景图的文件已经不在了')
   }
 }
@@ -313,6 +445,14 @@ export function deleteImage(req: { id: string }): ImageTheme[] {
   // 读不出内容的记录 —— 而现在留下的是一个没人引用的文件,下次启动扫掉
   writeIndex(rest)
   rmSync(fileOf(item), { force: true })
+  rmSync(join(themesDir(), `${item.id}-thumb.png`), { force: true })
+  const profiles = readProfiles()
+  const active = profiles.find((p) => p.id === store.getSettings().activeThemeProfileId)
+  const activeDeleted = active?.wallpaper?.assetId === req.id
+  for (const p of profiles) if (p.wallpaper?.assetId === req.id) { p.wallpaper = null; p.updatedAt = Date.now() }
+  writeProfiles(profiles)
+  if (activeDeleted || store.getSettings().imageTheme.id === req.id) windows.emitToAll('settings:changed', store.updateSettings(profileSettings(DEFAULT_PROFILE_ID)))
+  broadcastLibrary()
   return rest.map(toTheme)
 }
 
@@ -369,9 +509,9 @@ export function migrateLegacyThemesDir(): void {
 }
 
 export function sweepOrphans(): void {  try {
-    const keep = new Set(readIndex().map((t) => basename(fileOf(t))))
+    const keep = new Set(readIndex().flatMap((t) => [basename(fileOf(t)), `${t.id}-thumb.png`]))
     for (const name of readdirSync(themesDir())) {
-      if (name === 'index.json' || keep.has(name)) continue
+      if (name === 'index.json' || name === 'profiles.json' || keep.has(name)) continue
       rmSync(join(themesDir(), name), { force: true })
     }
   } catch (err) {

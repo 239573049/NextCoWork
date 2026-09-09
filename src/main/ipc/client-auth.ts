@@ -6,6 +6,7 @@ import { getHost } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
+import { startConfigSync, stopConfigSync } from './config-sync'
 
 const API_ROOT = 'https://nextco.work'
 const CLIENT_ID = 'nextcowork-desktop'
@@ -16,6 +17,12 @@ type Meta = { mode: 'offline' | 'authenticated'; user: ClientAuthUser | null; ex
 let callbackServer: Server | null = null
 let refreshTimer: NodeJS.Timeout | null = null
 let refreshInFlight: Promise<void> | null = null
+
+/** Return the short-lived desktop access token for scoped API calls. */
+export async function getClientAccessToken(): Promise<string | null> {
+  await refreshAccessToken()
+  return getHost().secrets.get(ACCESS_REF)
+}
 
 function callbackPage(success: boolean): string {
   const title = success ? '登录成功' : '登录未完成'
@@ -65,6 +72,7 @@ async function saveTokens(access: string, refresh: string, m: Meta): Promise<voi
   store.setKv(META_KEY, m)
   ensureClientProvider()
   void syncClientModels(access)
+  if (m.user?.id) startConfigSync(m.user.id)
   ensureRefreshTimer()
   announce(m)
 }
@@ -180,6 +188,7 @@ export async function useOffline(): Promise<ClientAuthState> {
 }
 
 export async function signOutClient(): Promise<ClientAuthState> {
+  stopConfigSync()
   const refresh = await getHost().secrets.get(REFRESH_REF)
   if (refresh) {
     await getHost().fetch(`${API_ROOT}/api/client/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: CLIENT_ID, refresh_token: refresh }) }).catch(() => undefined)
@@ -240,7 +249,7 @@ export async function startClientLogin(): Promise<ClientAuthState> {
       authorize.searchParams.set('state', stateToken)
       authorize.searchParams.set('code_challenge', challenge)
       authorize.searchParams.set('code_challenge_method', 'S256')
-      authorize.searchParams.set('scope', 'profile:read wallet:read usage:read models:read inference:write')
+      authorize.searchParams.set('scope', 'profile:read wallet:read usage:read models:read inference:write config:read config:write config:secret:read config:secret:write skills:read skills:install')
       void shell.openExternal(authorize.toString()).catch(fail)
     })
   })

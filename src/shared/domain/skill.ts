@@ -21,7 +21,7 @@ export interface Skill {
   description: string
   /** 开发工具 / 文档助手 / 数据分析 / … */
   category: string
-  source: { kind: SkillSourceKind; path: string }
+  source: { kind: SkillSourceKind; path: string; version?: string; sha256?: string }
   /** 全局装的还是这个项目里装的。同名时项目胜出。 */
   scope?: SkillScope
   /** 全局开关;还要在工作区里单独启用才生效(界面「Skill 工作区选装模式」) */
@@ -47,13 +47,43 @@ export interface SkillFrontmatter {
 export interface SkillListItem {
   id: string
   name: string
+  displayName?: string
   description: string
   category: string
+  author?: string
   sourceKind: SkillSourceKind
   scope?: SkillScope
   globalEnabled: boolean
   /** 在**当前**工作区是否激活 */
   activeInWorkspace: boolean
+  /** Local package metadata, when available. */
+  version?: string
+  sha256?: string
+  sourcePath?: string
+  usageCount?: number
+  lastUsedAt?: number
+  diagnostics?: string[]
+  downloadCount?: number
+  /** Optional marketplace/local icon used by the skills gallery. */
+  iconUrl?: string | null
+}
+
+export type SkillInstallScope = 'global' | 'project'
+
+export interface SkillMarketItem {
+  slug: string
+  name: string
+  displayName: string
+  description: string
+  category: string
+  iconUrl?: string | null
+  author?: string
+  version?: string
+  sha256?: string
+  fileSize?: number
+  downloadUrl?: string
+  downloadCount?: number
+  triggerCount?: number
 }
 
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/

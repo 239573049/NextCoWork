@@ -4,8 +4,8 @@
  * 导入是两相的,理由在契约的 `ImportedImage` 上:主进程没有 canvas,
  * 所以 `importImage` 只把字节递过来,颜色由这一侧算完再 `saveImage` 落表。
  */
-import type { ImageTheme } from '../../../shared/domain/theme'
-import type { ImportedImage } from '../../../shared/ipc/contract'
+import type { ImageTheme, ThemeProfile } from '../../../shared/domain/theme'
+import type { ImportedImage, ThemeImageMetadata } from '../../../shared/ipc/contract'
 import { invoke } from './ipc'
 
 /** 主进程弹文件选择框;渲染层永不指定路径(方案 §9)。取消时返回 null。 */
@@ -19,6 +19,7 @@ export function saveImage(req: {
   name: string
   seed: string
   palette: string[]
+  metadata?: ThemeImageMetadata
 }): Promise<ImageTheme[]> {
   return invoke('theme:saveImage', req)
 }
@@ -36,3 +37,7 @@ export function readImage(id: string): Promise<{ mime: string; bytes: Uint8Array
 export function deleteImage(id: string): Promise<ImageTheme[]> {
   return invoke('theme:deleteImage', { id })
 }
+export function listProfiles(): Promise<ThemeProfile[]> { return invoke('theme:listProfiles', undefined) }
+export function saveProfile(profile: ThemeProfile): Promise<ThemeProfile[]> { return invoke('theme:saveProfile', profile) }
+export function deleteProfile(id: string): Promise<ThemeProfile[]> { return invoke('theme:deleteProfile', { id }) }
+export function renameProfile(id: string, name: string): Promise<ThemeProfile[]> { return invoke('theme:renameProfile', { id, name }) }

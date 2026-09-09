@@ -30,6 +30,8 @@ export interface WorkspaceSettings {
   webSearch: boolean
   /** 按工作区单独启用的 Skill(界面:「Skill 工作区选装模式」) */
   activeSkillIds: string[]
+  /** 空清单的含义；缺省兼容旧数据并表示全部可用。 */
+  skillSelectionMode?: 'all' | 'explicit'
 }
 
 export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
@@ -45,7 +47,8 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
     这不是把权限放宽 —— 用户随时能关,而关掉的效果是硬拒,不是「问一下」。
   */
   webSearch: true,
-  activeSkillIds: []
+  activeSkillIds: [],
+  skillSelectionMode: 'all'
 }
 
 /**

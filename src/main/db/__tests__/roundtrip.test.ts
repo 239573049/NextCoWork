@@ -214,6 +214,29 @@ describe('★ 关库重开之后,配置一样都不少', () => {
   })
 })
 
+describe('基础配置同步边界', () => {
+  it('配置写入与 outbox 同事务提交，且不携带本机凭证引用', () => {
+    repo.configureSyncAccount('account-a')
+    repo.putProvider(provider('cloud-provider', 0))
+
+    const pending = repo.listPendingSyncMutations('account-a')
+    expect(pending).toHaveLength(1)
+    expect(pending[0]?.kind).toBe('provider')
+    expect(pending[0]?.accountId).toBe('account-a')
+    expect(pending[0]?.payload).not.toHaveProperty('credentialRef')
+    expect(pending[0]?.mutationId).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('远端应用不会再次写入 outbox，会话数据也不进入同步表', () => {
+    repo.configureSyncAccount('account-a')
+    repo.withSyncApply(() => repo.putProvider(provider('remote-provider', 0)))
+    expect(repo.listPendingSyncMutations('account-a')).toHaveLength(0)
+
+    store.createSession({ workspaceId: 'local', title: 'local session' })
+    expect(repo.listPendingSyncMutations('account-a')).toHaveLength(0)
+  })
+})
+
 describe('会话、完整内容块与全文索引', () => {
   const transcript = (): AgentMessage[] => [
     {

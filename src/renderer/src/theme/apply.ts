@@ -14,8 +14,9 @@
  * `shared/domain/theme.ts` 里(那边在 vitest 里跑得起来,这边不行:
  * 测试环境是 node,没有 document)。
  */
-import type { AppSettings, ResolvedTheme } from '../../../shared/domain/settings'
-import type { ImageTheme, ThemeTokens } from '../../../shared/domain/theme'
+import { DEFAULT_THEME_STUDIO, type AppSettings, type ResolvedTheme } from '../../../shared/domain/settings'
+import type { ImageTheme, ThemeTokens, ThemeProfile } from '../../../shared/domain/theme'
+import { migrateThemeProfile, resolveProfile, SURFACE_REGIONS } from '../../../shared/domain/theme-profile'
 import { THEME_TOKENS, resolveImageTheme, tokensOf } from '../../../shared/domain/theme'
 
 /**
@@ -48,18 +49,83 @@ export function applyTheme(
   root: HTMLElement,
   appearance: ResolvedTheme,
   settings: AppSettings,
-  uploaded: readonly ImageTheme[] = []
+  uploaded: readonly ImageTheme[] = [],
+  profile?: ThemeProfile
 ): ThemeTokens {
+  return applyProfile(root, appearance, profile ?? migrateThemeProfile(settings, uploaded), uploaded)
+}
+
+export function applyProfile(root: HTMLElement, appearance: ResolvedTheme, profile: ThemeProfile, uploaded: readonly ImageTheme[] = []): ThemeTokens {
+  const { tokens, protected: protect } = resolveProfile(profile, appearance)
+  root.dataset.theme = appearance
+  root.dataset.themeProfile = profile.id
+  root.dataset.themeMotion = profile.motion.level
+  root.dataset.themeFont = profile.typography.uiFont
+  root.dataset.themeScale = profile.typography.scale
+  root.dataset.themeWeight = profile.typography.weight
+  root.dataset.themeProtected = String(protect)
+  for (const k of THEME_TOKENS) root.style.setProperty(`--color-${k}`, tokens[k])
+  const wallpaper = profile.wallpaper
+  const selected = resolveImageTheme(wallpaper?.assetId ?? null, uploaded)
+  const staticImage = wallpaper?.animation === 'static' || root.ownerDocument.defaultView?.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const backdrop = staticImage && selected?.thumbnailUrl ? `url("${selected.thumbnailUrl}")` : backdropOf(selected)
+  root.style.setProperty(IMAGE_VAR, backdrop ?? 'none')
+  root.dataset.imageRender = wallpaper?.render ?? 'overlay'
+  root.dataset.imageScope = wallpaper?.scope ?? 'desktop'
+  root.dataset.imagePositioning = wallpaper?.positioning ?? 'viewport'
+  root.dataset.imageSource = selected?.source.kind ?? 'builtin'
+  root.style.setProperty('--theme-image-opacity', String(wallpaper?.opacity ?? 0))
+  root.style.setProperty('--theme-image-blur', `${wallpaper?.blur ?? 0}px`)
+  root.style.setProperty('--theme-image-brightness', String(wallpaper?.brightness ?? 1))
+  root.style.setProperty('--theme-image-saturation', String(wallpaper?.saturation ?? 1))
+  root.style.setProperty('--theme-image-position', `${wallpaper?.position.x ?? 50}% ${wallpaper?.position.y ?? 50}%`)
+  root.style.setProperty('--theme-image-scale', String(wallpaper?.scale ?? 1))
+  root.style.setProperty('--theme-image-fit', wallpaper?.fit ?? 'cover')
+  for (const region of SURFACE_REGIONS) {
+    const material = profile.surfaces[region]
+    // Protected regions use opaque text surfaces; imagery lives beneath these boundaries.
+    const opacity = protect && region !== 'window' ? 1 : material.solid ? 1 : 1 - (1 - material.opacity) * (1 - material.mask) * material.wallpaper
+    root.style.setProperty(`--theme-${region}-opacity`, String(opacity))
+    root.style.setProperty(`--theme-${region}-blur`, material.blur ? '12px' : '0px')
+  }
+  return tokens
+}
+
+/** Kept for legacy callers during migration. */
+export function applyLegacyTheme(root: HTMLElement, appearance: ResolvedTheme, settings: AppSettings, uploaded: readonly ImageTheme[] = []): ThemeTokens {
   root.dataset['theme'] = appearance
 
   const image = resolveImageTheme(settings.imageTheme.id, uploaded)
-  const tokens = tokensOf(appearance, settings.colorTheme, image)
+  const studio = settings.themeStudio ?? DEFAULT_THEME_STUDIO
+  const studioImage = resolveImageTheme(studio.wallpaperAssetId, uploaded)
+  const activeImage = settings.themeStudio === undefined
+    ? image
+    : studio.wallpaperAssetId === null
+      ? null
+      : studioImage
+  const baseTokens = tokensOf(appearance, settings.colorTheme, activeImage)
+  const tokens = { ...baseTokens }
+  for (const [key, value] of Object.entries(studio.overrides ?? {})) {
+    if (value && key in tokens) tokens[key as keyof typeof tokens] = value
+  }
 
   // 22 个全写一遍,不做差量:上一次写的值总会被这一次盖掉,
   // 也就不存在「换主题之后还剩一个旧色」这种半截状态。
   for (const k of THEME_TOKENS) root.style.setProperty(`--color-${k}`, tokens[k])
 
-  const backdrop = backdropOf(image)
+  root.dataset['themeMotion'] = studio.motion
+  root.dataset['themeFont'] = studio.uiFont
+  root.dataset['themeScale'] = studio.uiScale
+  root.style.setProperty('--theme-image-opacity', String(studio.opacity))
+  root.style.setProperty('--theme-image-blur', `${studio.blur}px`)
+  root.style.setProperty('--theme-image-brightness', String(studio.brightness))
+  root.style.setProperty('--theme-image-saturation', String(studio.saturation))
+  root.style.setProperty('--theme-image-position', `${studio.positionX}% ${studio.positionY}%`)
+  root.style.setProperty('--theme-sidebar-opacity', String(studio.sidebarOpacity))
+  root.style.setProperty('--theme-panel-opacity', String(studio.panelOpacity))
+  root.style.setProperty('--theme-mask-opacity', String(studio.mask))
+
+  const backdrop = backdropOf(activeImage)
   if (backdrop === null) {
     root.style.removeProperty(IMAGE_VAR)
     delete root.dataset['imageRender']
@@ -67,9 +133,9 @@ export function applyTheme(
     return tokens
   }
   root.style.setProperty(IMAGE_VAR, backdrop)
-  root.dataset['imageRender'] = settings.imageTheme.render
+  root.dataset['imageRender'] = studioImage ? studio.render : settings.imageTheme.render
   // `image` 在这条分支上一定不是 null —— `backdropOf` 只对 null 返回 null
-  root.dataset[SOURCE_ATTR] = image?.source.kind ?? 'builtin'
+  root.dataset[SOURCE_ATTR] = activeImage?.source.kind ?? 'builtin'
   return tokens
 }
 

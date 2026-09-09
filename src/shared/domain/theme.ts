@@ -377,7 +377,7 @@ function relLuminance(hex: string): number {
   return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255)
 }
 
-function contrastRatio(a: string, b: string): number {
+export function contrastRatio(a: string, b: string): number {
   const la = relLuminance(a)
   const lb = relLuminance(b)
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
@@ -771,6 +771,84 @@ export function resolveColorTheme(choice: ColorThemeChoiceLike): ColorTheme {
 /** 图片怎么进到界面里。界面上是卡片下面那两个小药丸。 */
 export type ImageRender = 'blur' | 'overlay'
 
+export interface ThemeWallpaper {
+  assetId: string
+  thumbnailAssetId?: string
+  fit: 'cover' | 'contain'
+  position: { x: number; y: number }
+  scale: number
+  brightness: number
+  saturation: number
+  blur: number
+  opacity: number
+  animation: 'auto' | 'static'
+  render: ImageRender
+  scope: 'desktop' | 'workspace'
+  positioning: 'viewport' | 'region'
+  crop: 'original' | '16:9' | '4:3' | '1:1'
+}
+
+export interface ThemePalette {
+  source: 'auto' | 'manual'
+  seed: string
+  tokens: Partial<Record<ThemeToken, string>>
+  light?: Partial<Record<ThemeToken, string>>
+  dark?: Partial<Record<ThemeToken, string>>
+  /** Preserve the exact legacy engine, including neutral and two-family palettes. */
+  base?: ColorThemeChoice
+}
+
+export interface SurfaceThemeConfig {
+  opacity: number
+  mask: number
+  solid: boolean
+  wallpaper: number
+  blur: boolean
+}
+
+export interface ThemeSurfaceConfig {
+  window: SurfaceThemeConfig
+  chrome: SurfaceThemeConfig
+  sidebar: SurfaceThemeConfig
+  canvas: SurfaceThemeConfig
+  rightPanel: SurfaceThemeConfig
+  bottomPanel: SurfaceThemeConfig
+  content: SurfaceThemeConfig
+}
+
+export interface ThemeTypography {
+  uiFont: 'system' | 'system-rounded' | 'system-serif'
+  codeFont: 'system-mono'
+  scale: 'small' | 'standard' | 'large'
+  weight: 'standard' | 'compact' | 'comfortable'
+}
+
+export interface ThemeMotionConfig {
+  level: 'standard' | 'soft' | 'reduced' | 'off'
+}
+
+export interface ThemeReadabilityConfig {
+  guardrails: boolean
+  allowLowContrast: boolean
+  textContrast: 'auto' | 'strict' | 'relaxed'
+}
+
+/** 独立于 AppSettings 的可复用主题资产。 */
+export interface ThemeProfile {
+  id: string
+  name: string
+  version: number
+  wallpaper: ThemeWallpaper | null
+  palette: ThemePalette
+  surfaces: ThemeSurfaceConfig
+  typography: ThemeTypography
+  motion: ThemeMotionConfig
+  readability: ThemeReadabilityConfig
+  createdAt: number
+  updatedAt: number
+  builtin?: boolean
+}
+
 export interface ImageTheme {
   id: string
   name: string
@@ -798,6 +876,17 @@ export interface ImageTheme {
    * 色点照样画得出来。
    */
   palette?: readonly string[]
+  /** Metadata used by the theme library without decoding the original again. */
+  width?: number
+  height?: number
+  bytes?: number
+  animated?: boolean
+  thumbnailUrl?: string
+  mime?: string
+  fileName?: string
+  createdAt?: number
+  lastUsedAt?: number
+  unavailable?: boolean
 }
 
 export const IMAGE_THEMES: readonly ImageTheme[] = [

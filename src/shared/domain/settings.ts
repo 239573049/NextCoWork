@@ -8,7 +8,8 @@ import {
   DEFAULT_COLOR_THEME_ID,
   DEFAULT_CUSTOM_SEED,
   type ColorThemeChoice,
-  type ImageRender
+  type ImageRender,
+  type ThemeToken
 } from './theme'
 
 /** 三态,默认跟随系统(方案 §8:深浅两套对等)。 */
@@ -59,6 +60,50 @@ export interface PersonalizationSettings {
 /** 应用级快捷键。值使用 Electron accelerator 格式，例如 `CmdOrCtrl+,`。 */
 export interface ShortcutSettings {
   openSettings: string
+}
+
+/**
+ * 主题工作室的可持久化草稿。它只保存用户对现有语义 token 的覆盖，
+ * 其余颜色仍由 shared/domain/theme.ts 的派生器负责生成。
+ */
+export interface ThemeStudioSettings {
+  name: string
+  wallpaperAssetId: string | null
+  render: ImageRender
+  opacity: number
+  blur: number
+  brightness: number
+  saturation: number
+  positionX: number
+  positionY: number
+  sidebarOpacity: number
+  panelOpacity: number
+  mask: number
+  uiFont: 'system' | 'system-rounded' | 'system-serif'
+  uiScale: 'small' | 'standard' | 'large'
+  motion: 'standard' | 'soft' | 'reduced' | 'off'
+  guardrails: boolean
+  overrides: Partial<Record<ThemeToken, string>>
+}
+
+export const DEFAULT_THEME_STUDIO: ThemeStudioSettings = {
+  name: '默认主题',
+  wallpaperAssetId: null,
+  render: 'blur',
+  opacity: 0.55,
+  blur: 44,
+  brightness: 1,
+  saturation: 1.15,
+  positionX: 50,
+  positionY: 50,
+  sidebarOpacity: 0.88,
+  panelOpacity: 0.9,
+  mask: 0.28,
+  uiFont: 'system',
+  uiScale: 'standard',
+  motion: 'standard',
+  guardrails: true,
+  overrides: {}
 }
 
 /**
@@ -126,6 +171,7 @@ export interface AppSettings {
    * 颜色在下面 `colorTheme` / `imageTheme` 两栏,三者一起喂给 `tokensOf`。
    */
   theme: ThemePreference
+  activeThemeProfileId: string | null
   locale: 'zh-CN' | 'en-US'
 
   /**
@@ -224,10 +270,14 @@ export interface AppSettings {
 
   /** 偏好 › 快捷键。 */
   shortcuts: ShortcutSettings
+
+  /** 主题工作室设置；旧数据库缺席时由 mergeSettings 铺默认值。 */
+  themeStudio: ThemeStudioSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
+  activeThemeProfileId: null,
   locale: 'zh-CN',
   colorTheme: { id: DEFAULT_COLOR_THEME_ID, seed: 0, custom: DEFAULT_CUSTOM_SEED },
   imageTheme: { id: null, render: 'blur' },
@@ -242,7 +292,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   proxy: structuredClone(DEFAULT_PROXY),
   data: { backupDirectory: null, backupFrequency: 'manual' },
   personalization: { name: '', background: '', instructions: '' },
-  shortcuts: { openSettings: 'CmdOrCtrl+,' }
+  shortcuts: { openSettings: 'CmdOrCtrl+,' },
+  themeStudio: structuredClone(DEFAULT_THEME_STUDIO)
 }
 
 /**
@@ -276,6 +327,7 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   const next: AppSettings = structuredClone(current)
 
   if (patch.theme !== undefined) next.theme = patch.theme
+  if (patch.activeThemeProfileId !== undefined) next.activeThemeProfileId = patch.activeThemeProfileId
   if (patch.locale !== undefined) next.locale = patch.locale
   if (patch.defaultPermissionMode !== undefined) {
     next.defaultPermissionMode = patch.defaultPermissionMode
@@ -302,6 +354,16 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   // 通用深合并在这里是纯粹的负担(它还得决定数组怎么办)。
   if (patch.colorTheme !== undefined) next.colorTheme = { ...next.colorTheme, ...patch.colorTheme }
   if (patch.imageTheme !== undefined) next.imageTheme = { ...next.imageTheme, ...patch.imageTheme }
+  // Legacy imageTheme selections are promoted into the studio on first read.
+  // A missing themeStudio field means this is an old persisted settings blob;
+  // explicit studio patches always win.
+  if (patch.themeStudio === undefined && patch.imageTheme?.id !== undefined) {
+    next.themeStudio = {
+      ...next.themeStudio,
+      wallpaperAssetId: patch.imageTheme.id,
+      render: patch.imageTheme.render ?? next.themeStudio.render
+    }
+  }
   if (patch.subagent !== undefined) {
     next.subagent = { ...next.subagent, ...patch.subagent }
     // ★ 这一行是那条「成对写」规则在**浅合并**下的补丁:上面的 spread 只覆盖
@@ -330,6 +392,13 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
       }
     }
   }
+  if (patch.themeStudio !== undefined) {
+    next.themeStudio = {
+      ...next.themeStudio,
+      ...patch.themeStudio,
+      overrides: patch.themeStudio.overrides ?? next.themeStudio.overrides
+    }
+  }
 
   return next
 }
@@ -337,6 +406,7 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
 /** 见 `mergeSettings`:漏掉一个字段就编译不过。运行时不用它。 */
 const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   theme: true,
+  activeThemeProfileId: true,
   locale: true,
   colorTheme: true,
   imageTheme: true,
@@ -352,7 +422,8 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   proxy: true,
   data: true,
   personalization: true,
-  shortcuts: true
+  shortcuts: true,
+  themeStudio: true
 }
 void PATCHABLE_KEYS
 

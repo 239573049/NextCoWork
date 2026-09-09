@@ -256,6 +256,7 @@ export function AppShell({
       */}
       {sidebar.mounted && (
         <div
+          data-theme-region="sidebar"
           className={cn(
             "flex shrink-0 overflow-hidden rounded-panel",
             "transition-[width,margin-right] duration-280 ease-panel",
@@ -338,9 +339,11 @@ export function AppShell({
         </div>
       )}
 
-      <main className="app-canvas flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
+      <main data-theme-region="canvas" className="app-canvas flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
         {activeStandaloneFeature === "browser" ? (
           <BrowserFeature onClose={win.closeStandaloneFeature} />
+        ) : activeStandaloneFeature === "skills" ? (
+          <FeatureView feature="skills" onClose={win.closeStandaloneFeature} />
         ) : (
           <>
             {/*
@@ -437,7 +440,7 @@ export function AppShell({
           内容区分成「左列 + 右栏」,底部面板只压在**左列**下面 ——
           和编辑器类应用一致:右侧文件栏是通栏的,终端不该把它顶掉。
         */}
-            <div className="flex min-h-0 flex-1">
+            <div data-theme-region="content" className="flex min-h-0 flex-1">
               {activeOuter?.kind === "feature" ? (
                 <FeatureView feature={activeOuter.ref.feature} />
               ) : workspace === undefined || activeWorkspaceId === null ? (

@@ -23,11 +23,22 @@ export function MentionText({ text }: { text: string }): ReactNode {
       {segments.map((s, i) =>
         s.kind === 'text' ? (
           <span key={i}>{s.raw}</span>
-        ) : (
+        ) : s.kind === 'mention' ? (
           <MentionChip key={i} name={s.name} path={s.path} />
+        ) : (
+          <SkillChip key={i} name={s.name} />
         )
       )}
     </>
+  )
+}
+
+function SkillChip({ name }: { name: string }): ReactNode {
+  return (
+    <span data-testid="skill-chip" className={cn(MENTION_CHIP_CLASS, 'mx-[1px]')}>
+      <span aria-hidden className="shrink-0 text-accent">✦</span>
+      <span className="min-w-0 truncate">{name}</span>
+    </span>
   )
 }
 

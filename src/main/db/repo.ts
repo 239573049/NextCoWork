@@ -43,14 +43,159 @@ import type {
 } from '../../shared/domain/usage'
 import { fileStats, stmt, tx } from './index'
 import { ulid } from '../../shared/util/id'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import type { SyncConfigKind, SyncConflict, SyncMutation } from '../../shared/domain/config-sync'
+
+const SYNC_ACCOUNT_KEY = 'config-sync.account'
+const SYNC_DEVICE_KEY = 'config-sync.device'
+let syncApplying = false
 
 export { tx } from './index'
 
 /** 列里存的是 JSON 文本;`String()` 是给 `SQLOutputValue` 那个联合类型收窄用的。 */
 const parse = <T>(json: unknown): T => JSON.parse(String(json)) as T
+
+/** ── 基础配置同步 outbox ─────────────────────────────────────────────── */
+function syncAccount(): { accountId: string; deviceId: string } | undefined {
+  const raw = getKv<unknown>(SYNC_ACCOUNT_KEY, null)
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const value = raw as Record<string, unknown>
+  return typeof value.accountId === 'string' && typeof value.deviceId === 'string'
+    ? { accountId: value.accountId, deviceId: value.deviceId } : undefined
+}
+
+export function ensureSyncDeviceId(): string {
+  const current = getKv<unknown>(SYNC_DEVICE_KEY, null)
+  if (typeof current === 'string' && current.length >= 16) return current
+  const next = ulid()
+  setKv(SYNC_DEVICE_KEY, next)
+  return next
+}
+
+export function configureSyncAccount(accountId: string | null, enabled = true): void {
+  tx(() => {
+    if (accountId === null) {
+      removeKv(SYNC_ACCOUNT_KEY)
+      return
+    }
+    const now = Date.now()
+    const deviceId = ensureSyncDeviceId()
+    setKv(SYNC_ACCOUNT_KEY, { accountId, deviceId, enabled })
+    stmt(`INSERT INTO sync_account (account_id, device_id, enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET device_id=excluded.device_id, enabled=excluded.enabled, updated_at=excluded.updated_at`)
+      .run(accountId, deviceId, enabled ? 1 : 0, now, now)
+  })
+}
+
+/** 首次登录时把当前设备的可同步配置排入 outbox；会话数据绝不在这里读取。 */
+export function enqueueInitialSyncSnapshot(accountId: string): void {
+  const account = syncAccount()
+  if (account?.accountId !== accountId) return
+  const pending = Number((stmt('SELECT COUNT(*) AS n FROM sync_outbox WHERE account_id = ?').get(accountId) as Record<string, unknown>)['n'] ?? 0)
+  if (pending > 0) return
+  for (const provider of listProviders()) {
+    if (provider.id === 'nextcowork') continue
+    const { credentialRef: _credentialRef, ...payload } = provider
+    enqueueSyncMutation('provider', provider.id, payload)
+  }
+  for (const alias of listAliases()) if (alias.providerId !== 'nextcowork') enqueueSyncMutation('modelAlias', `${alias.providerId}/${alias.alias}`, alias)
+  for (const server of listMcpServers()) enqueueSyncMutation('mcpServer', server.id, server)
+  for (const search of listStoredSearchProviders()) enqueueSyncMutation('searchProvider', search.id, search)
+  const settings = getSettings()
+  const { personalization: _personalization, ...preferences } = settings
+  enqueueSyncMutation('appPreferences', 'global', { ...preferences, data: { ...settings.data, backupDirectory: null } })
+  enqueueSyncMutation('appPersonalization', 'global', settings.personalization)
+  for (const workspace of listWorkspaces()) {
+    const { rootPath: _rootPath, unavailable: _unavailable, lastOpenedAt: _lastOpenedAt, ...payload } = workspace
+    enqueueSyncMutation('workspacePreferences', workspace.id, payload)
+  }
+}
+
+export function setInitialSyncCompleted(accountId: string, completed = true): void {
+  stmt('UPDATE sync_account SET initial_sync_completed = ?, updated_at = ? WHERE account_id = ?')
+    .run(completed ? 1 : 0, Date.now(), accountId)
+}
+
+export function enqueueSyncMutation(kind: SyncConfigKind, entityId: string, payload: unknown, operation: SyncMutation['operation'] = 'upsert', workspaceId?: string): void {
+  if (syncApplying) return
+  const account = syncAccount()
+  if (account === undefined) return
+  const next = Number((stmt('SELECT COALESCE(MAX(client_seq), 0) AS n FROM sync_outbox WHERE account_id = ?').get(account.accountId) as Record<string, unknown>)['n'] ?? 0) + 1
+  const mutationId = randomUUID()
+  const revision = Number((stmt('SELECT revision FROM sync_revisions WHERE account_id = ? AND kind = ? AND entity_id = ?').get(account.accountId, kind, entityId) as Record<string, unknown> | undefined)?.revision ?? 0)
+  stmt(`INSERT INTO sync_outbox
+    (mutation_id, account_id, device_id, client_seq, kind, entity_id, operation, payload, base_revision, workspace_id, created_at, next_attempt_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(mutationId, account.accountId, account.deviceId, next, kind, entityId, operation, JSON.stringify(payload ?? {}), revision, workspaceId ?? null, Date.now(), Date.now())
+}
+
+export function withSyncApply<T>(fn: () => T): T {
+  const previous = syncApplying
+  syncApplying = true
+  try { return fn() } finally { syncApplying = previous }
+}
+
+export function saveSyncConflict(conflict: Omit<SyncConflict, 'status'>): void {
+  stmt(`INSERT INTO sync_conflict (id, account_id, kind, entity_id, local_revision, remote_revision, local_payload, remote_payload, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET remote_revision=excluded.remote_revision, remote_payload=excluded.remote_payload`)
+    .run(conflict.id, syncAccount()?.accountId ?? '', conflict.kind, conflict.entityId, conflict.localRevision, conflict.remoteRevision, JSON.stringify(conflict.localPayload), JSON.stringify(conflict.remotePayload), conflict.createdAt)
+}
+
+export function listPendingSyncMutations(accountId: string, limit = 50): SyncMutation[] {
+  return stmt(`SELECT mutation_id, account_id, device_id, client_seq, kind, entity_id, operation, payload, base_revision, workspace_id
+    FROM sync_outbox WHERE account_id = ? AND acked_at IS NULL AND next_attempt_at <= ? ORDER BY client_seq LIMIT ?`)
+    .all(accountId, Date.now(), Math.min(Math.max(limit, 1), 100)).map((row) => {
+      const r = row as Record<string, unknown>
+      return { mutationId: String(r.mutation_id), accountId: String(r.account_id), deviceId: String(r.device_id), clientSeq: Number(r.client_seq), kind: String(r.kind) as SyncConfigKind, entityId: String(r.entity_id), operation: String(r.operation) as SyncMutation['operation'], payload: parse(r.payload), baseRevision: Number(r.base_revision), ...(r.workspace_id == null ? {} : { workspaceId: String(r.workspace_id) }) }
+    })
+}
+
+export function ackSyncMutation(accountId: string, mutationId: string): void {
+  stmt('UPDATE sync_outbox SET acked_at = ?, last_error = NULL WHERE account_id = ? AND mutation_id = ?').run(Date.now(), accountId, mutationId)
+}
+
+export function setSyncRevision(accountId: string, kind: string, entityId: string, revision: number): void {
+  stmt(`INSERT INTO sync_revisions(account_id, kind, entity_id, revision) VALUES (?, ?, ?, ?)
+    ON CONFLICT(account_id, kind, entity_id) DO UPDATE SET revision = MAX(sync_revisions.revision, excluded.revision)`)
+    .run(accountId, kind, entityId, revision)
+}
+
+export function rebasePendingSyncMutations(accountId: string, kind: string, entityId: string, revision: number, afterSeq: number): void {
+  stmt('UPDATE sync_outbox SET base_revision = ? WHERE account_id = ? AND kind = ? AND entity_id = ? AND client_seq > ? AND acked_at IS NULL')
+    .run(revision, accountId, kind, entityId, afterSeq)
+}
+
+export function updateSyncServerCursor(accountId: string, cursor: number): void {
+  stmt('UPDATE sync_account SET last_server_cursor = MAX(last_server_cursor, ?), updated_at = ? WHERE account_id = ?')
+    .run(cursor, Date.now(), accountId)
+}
+
+export function failSyncMutations(accountId: string, mutationIds: readonly string[], error: string): void {
+  for (const id of mutationIds) stmt('UPDATE sync_outbox SET attempt_count = attempt_count + 1, next_attempt_at = ?, last_error = ? WHERE account_id = ? AND mutation_id = ?').run(Date.now() + 5000, error.slice(0, 500), accountId, id)
+}
+
+export function syncAccountState(accountId: string): Record<string, unknown> | undefined {
+  const row = stmt('SELECT * FROM sync_account WHERE account_id = ?').get(accountId)
+  return row === undefined ? undefined : row as Record<string, unknown>
+}
+
+export function updateSyncCursor(accountId: string, cursor: number, error: string | null = null): void {
+  stmt('UPDATE sync_account SET last_pull_cursor = ?, last_server_cursor = ?, last_success_at = ?, last_error = ?, updated_at = ? WHERE account_id = ?').run(cursor, cursor, error === null ? Date.now() : null, error, Date.now(), accountId)
+}
+
+export function listSyncConflicts(accountId: string): SyncConflict[] {
+  return stmt('SELECT * FROM sync_conflict WHERE account_id = ? AND status = \'pending\' ORDER BY created_at').all(accountId).map((row) => {
+    const r = row as Record<string, unknown>
+    return { id: String(r.id), kind: String(r.kind) as SyncConfigKind, entityId: String(r.entity_id), localRevision: Number(r.local_revision), remoteRevision: Number(r.remote_revision), localPayload: parse(r.local_payload), remotePayload: parse(r.remote_payload), status: 'pending', createdAt: Number(r.created_at) }
+  })
+}
+
+export function markSyncConflictResolved(accountId: string, id: string): void {
+  stmt('UPDATE sync_conflict SET status = \'resolved\', resolved_at = ? WHERE account_id = ? AND id = ?')
+    .run(Date.now(), accountId, id)
+}
 
 // ── settings ────────────────────────────────────────────────────────────────
 
@@ -89,6 +234,9 @@ export function updateSettings(patch: AppSettingsPatch): AppSettings {
     stmt(
       'INSERT INTO settings (id, json) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json'
     ).run(JSON.stringify(next))
+    const { personalization: _personalization, ...preferences } = next
+    enqueueSyncMutation('appPreferences', 'global', { ...preferences, data: { ...next.data, backupDirectory: null } })
+    enqueueSyncMutation('appPersonalization', 'global', next.personalization)
     return next
   })
 }
@@ -107,15 +255,21 @@ export function getWorkspace(id: string): Workspace | undefined {
 }
 
 export function putWorkspace(w: Workspace): Workspace {
-  stmt(
+  tx(() => { stmt(
     `INSERT INTO workspaces (id, last_opened_at, json) VALUES (?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET last_opened_at = excluded.last_opened_at, json = excluded.json`
   ).run(w.id, w.lastOpenedAt, JSON.stringify(w))
+    const { rootPath: _rootPath, unavailable: _unavailable, lastOpenedAt: _lastOpenedAt, ...payload } = w
+    enqueueSyncMutation('workspacePreferences', w.id, payload)
+  })
   return w
 }
 
 export function removeWorkspace(id: string): void {
-  stmt('DELETE FROM workspaces WHERE id = ?').run(id)
+  tx(() => {
+    stmt('DELETE FROM workspaces WHERE id = ?').run(id)
+    enqueueSyncMutation('workspacePreferences', id, { id }, 'delete')
+  })
 }
 
 // ── sessions / messages / runs ─────────────────────────────────────────────
@@ -1616,10 +1770,15 @@ export function listProviders(): UpstreamProvider[] {
 
 export function putProvider(p: UpstreamProvider): UpstreamProvider {
   const normalized = normalizeUpstreamProvider(p)
-  stmt(
+  tx(() => { stmt(
     `INSERT INTO providers (id, priority, json) VALUES (?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET priority = excluded.priority, json = excluded.json`
   ).run(normalized.id, normalized.priority, JSON.stringify(normalized))
+    if (normalized.id !== 'nextcowork') {
+      const { credentialRef: _credentialRef, ...cloud } = normalized
+      enqueueSyncMutation('provider', normalized.id, cloud)
+    }
+  })
   return normalized
 }
 
@@ -1629,7 +1788,7 @@ export function putProvider(p: UpstreamProvider): UpstreamProvider {
  * —— `index.ts` 的 `openAt()` 用构造参数打开的。
  */
 export function removeProvider(id: string): void {
-  stmt('DELETE FROM providers WHERE id = ?').run(id)
+  tx(() => { stmt('DELETE FROM providers WHERE id = ?').run(id); if (id !== 'nextcowork') enqueueSyncMutation('provider', id, { id }, 'delete') })
 }
 
 export function listAliases(): ModelAlias[] {
@@ -1639,15 +1798,15 @@ export function listAliases(): ModelAlias[] {
 }
 
 export function putAlias(a: ModelAlias): ModelAlias {
-  stmt(
+  tx(() => { stmt(
     `INSERT INTO model_aliases (provider_id, alias, json) VALUES (?, ?, ?)
      ON CONFLICT (provider_id, alias) DO UPDATE SET json = excluded.json`
-  ).run(a.providerId, a.alias, JSON.stringify(a))
+  ).run(a.providerId, a.alias, JSON.stringify(a)); if (a.providerId !== 'nextcowork') enqueueSyncMutation('modelAlias', `${a.providerId}/${a.alias}`, a) })
   return a
 }
 
 export function removeAlias(providerId: string, alias: string): void {
-  stmt('DELETE FROM model_aliases WHERE provider_id = ? AND alias = ?').run(providerId, alias)
+  tx(() => { stmt('DELETE FROM model_aliases WHERE provider_id = ? AND alias = ?').run(providerId, alias); if (providerId !== 'nextcowork') enqueueSyncMutation('modelAlias', `${providerId}/${alias}`, { providerId, alias }, 'delete') })
 }
 
 // ── kv ──────────────────────────────────────────────────────────────────────
@@ -2073,10 +2232,10 @@ export function getMcpServer(id: string): McpServerConfig | undefined {
 }
 
 export function putMcpServer(c: McpServerConfig): McpServerConfig {
-  stmt(
+  tx(() => { stmt(
     `INSERT INTO mcp_servers (id, json) VALUES (?, ?)
      ON CONFLICT (id) DO UPDATE SET json = excluded.json`
-  ).run(c.id, JSON.stringify(c))
+  ).run(c.id, JSON.stringify(c)); enqueueSyncMutation('mcpServer', c.id, c) })
   return c
 }
 
@@ -2096,6 +2255,7 @@ export function removeMcpServer(id: string): void {
     stmt('DELETE FROM mcp_servers WHERE id = ?').run(id)
     stmt('DELETE FROM credentials WHERE ref = ?').run(mcpSecretRef(id, 'env'))
     stmt('DELETE FROM credentials WHERE ref = ?').run(mcpSecretRef(id, 'headers'))
+    enqueueSyncMutation('mcpServer', id, { id }, 'delete')
   })
 }
 
@@ -2133,11 +2293,20 @@ export function listSearchProviders(): SearchProviderConfig[] {
 }
 
 export function putSearchProvider(c: SearchProviderConfig): SearchProviderConfig {
-  stmt(
+  tx(() => { stmt(
     `INSERT INTO search_providers (id, priority, json) VALUES (?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET priority = excluded.priority, json = excluded.json`
-  ).run(c.id, c.priority, JSON.stringify(c))
+  ).run(c.id, c.priority, JSON.stringify(c)); enqueueSyncMutation('searchProvider', c.id, c) })
   return c
+}
+
+/** Remove a user override; the built-in catalog remains available locally. */
+export function removeSearchProvider(id: SearchProviderId): void {
+  tx(() => {
+    stmt('DELETE FROM search_providers WHERE id = ?').run(id)
+    clearSearchCredential(id)
+    enqueueSyncMutation('searchProvider', id, { id }, 'delete')
+  })
 }
 
 /**

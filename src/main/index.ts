@@ -16,6 +16,8 @@ import { installAttachmentProtocol, registerAttachmentScheme } from './net/attac
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles } from './runtime'
 import { installUserAgent } from './kernel/user-agent'
+import { installBundledSkills } from './kernel/skill/bundled'
+import { SKILLS_DIR } from './kernel/skill/load'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
@@ -325,7 +327,14 @@ void app.whenReady().then(() => {
   */
   installAttachmentProtocol()
 
-  initRuntime(electronHost())
+  const host = electronHost()
+  const bundledSkillsRoot = app.isPackaged
+    ? join(process.resourcesPath, SKILLS_DIR)
+    : join(app.getAppPath(), 'resources', SKILLS_DIR)
+  for (const diagnostic of installBundledSkills(bundledSkillsRoot, join(host.paths.userData(), SKILLS_DIR))) {
+    host.logger.warn(`[skill:bundled] ${diagnostic.path}: ${diagnostic.message}`)
+  }
+  initRuntime(host)
 
   /*
     ★ 代理必须在**任何一次出站请求之前**装好。`initRuntime` 已经把 host 装上了,

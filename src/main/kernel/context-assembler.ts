@@ -282,6 +282,12 @@ themselves are not here. When one description matches the task in front of you, 
 tool with that name to fetch its body, then follow it. NEVER guess what a Skill contains from its
 name; the description tells you whether to open it, not what is inside.
 
+The user may explicitly name a Skill in their message with a tag such as
+<skill name="algorithmic-art" />. Treat that tag as an explicit request: before doing the
+task, call the Skill tool with the exact name from the tag and follow the returned body. Keep
+the full enabled catalog available for other Skills as well; an explicit tag does not remove or
+replace the workspace Skill allow-list.
+
 ${lines.join('\n')}${note}
 
 ${untrustedBoundary('A Skill body')}`

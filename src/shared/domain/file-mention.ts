@@ -33,6 +33,7 @@
 export type MentionSegment =
   | { kind: 'text'; raw: string }
   | { kind: 'mention'; raw: string; name: string; path: string }
+  | { kind: 'skill'; raw: string; name: string }
 
 /**
  * `[name](target)`。
@@ -42,6 +43,7 @@ export type MentionSegment =
  * 放宽它需要一个真正的 markdown 行内解析器,而那东西的输出还得能逐字拼回原文。
  */
 const LINK = /\[([^\]\n]*)\]\(([^)\n]*)\)/g
+const SKILL = /<skill\s+name="([a-z0-9][a-z0-9-]{0,63})"\s*\/>/g
 
 /**
  * 链接目标是不是一个 URL 而非路径。
@@ -66,17 +68,27 @@ export function isFilePath(target: string): boolean {
  * 就该是它写的样子,画成一个文件 chip 是在撒谎。
  */
 export function parseMentions(text: string): MentionSegment[] {
+  const matches: Array<{ index: number; raw: string; segment: MentionSegment }> = []
+  LINK.lastIndex = 0
+  for (let m = LINK.exec(text); m !== null; m = LINK.exec(text)) {
+    const [raw, name = '', target = ''] = m
+    if (isFilePath(target)) matches.push({ index: m.index, raw, segment: { kind: 'mention', raw, name, path: target } })
+  }
+  SKILL.lastIndex = 0
+  for (let m = SKILL.exec(text); m !== null; m = SKILL.exec(text)) {
+    const [raw, name = ''] = m
+    matches.push({ index: m.index, raw, segment: { kind: 'skill', raw, name } })
+  }
+  matches.sort((a, b) => a.index - b.index)
   const out: MentionSegment[] = []
   let last = 0
   // 正则带 `g`,而它是模块级常量 —— 每次进来必须把 lastIndex 归零,
   // 否则第二次调用会从上一次停的地方开始找。
-  LINK.lastIndex = 0
-  for (let m = LINK.exec(text); m !== null; m = LINK.exec(text)) {
-    const [raw, name = '', target = ''] = m
-    if (!isFilePath(target)) continue
+  for (const m of matches) {
+    if (m.index < last) continue
     if (m.index > last) out.push({ kind: 'text', raw: text.slice(last, m.index) })
-    out.push({ kind: 'mention', raw, name, path: target })
-    last = m.index + raw.length
+    out.push(m.segment)
+    last = m.index + m.raw.length
   }
   if (last < text.length) out.push({ kind: 'text', raw: text.slice(last) })
   return out
@@ -85,6 +97,33 @@ export function parseMentions(text: string): MentionSegment[] {
 /** 草稿里有没有文件引用。只为让调用方跳过那一层高亮 DOM。 */
 export function hasMention(text: string): boolean {
   return parseMentions(text).some((s) => s.kind === 'mention')
+}
+
+export interface SkillQuery { start: number; end: number; query: string }
+const MAX_SKILL_QUERY = 64
+function canTriggerSkillAfter(ch: string): boolean { return /[\s([{<'"`,;:]/.test(ch) }
+
+export function skillQueryAt(text: string, caret: number): SkillQuery | null {
+  if (caret < 0 || caret > text.length) return null
+  for (let i = caret - 1; i >= 0 && caret - i <= MAX_SKILL_QUERY + 1; i--) {
+    const ch = text[i] as string
+    if (ch === '/') {
+      if (i > 0 && !canTriggerSkillAfter(text[i - 1] as string)) return null
+      const query = text.slice(i + 1, caret)
+      if (/^(?:usr|var|tmp|home|Users|Library|opt)(?:\/|$)/.test(query)) return null
+      return { start: i, end: caret, query }
+    }
+    if (/[\s()[\]<>]/.test(ch)) return null
+  }
+  return null
+}
+
+export interface SkillInsertion { text: string; caret: number }
+export function insertSkill(text: string, range: { start: number; end: number }, name: string): SkillInsertion {
+  const raw = `<skill name="${name}" />`
+  const after = text.slice(range.end)
+  const pad = after.startsWith(' ') || after.startsWith('\n') ? '' : ' '
+  return { text: `${text.slice(0, range.start)}${raw}${pad}${after}`, caret: range.start + raw.length + pad.length }
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@
  */
 import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../shared/agent/tool'
 import type { PermissionMode } from '../../../shared/agent/permission'
+import type { Skill } from '../../../shared/domain/skill'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost } from '../host'
@@ -94,6 +95,8 @@ export interface ToolContext {
   callId: string
   /** 所属 run。子代理要用它当 parentRunId,日志也靠它把工具调用归到某次运行 */
   runId: string
+  /** 本次 run 冻结的 Skill 快照，避免全局注册表重扫后串工作区。 */
+  skills?: readonly Skill[]
   /**
    * ★ 宿主**从 ctx 传进来,不在工具里闭包捕获**。
    *

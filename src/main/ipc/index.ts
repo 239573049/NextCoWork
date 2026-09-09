@@ -86,11 +86,12 @@ import {
 } from './websearch'
 import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
 import { getClientAuthState, startClientLogin, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
+import { confirmInitialConfigSync, getConfigSyncPreview, getConfigSyncStatus, getConfigSyncConflicts, resolveConfigSyncConflict } from './config-sync'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
 import { updateService } from '../update/update-service'
-import { listSkills, setSkillGlobalEnabled, setSkillWorkspaceActive } from './skills'
-import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans } from './theme'
+import { installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
+import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
   listDir,
@@ -163,6 +164,7 @@ const handlers: HandlerMap = {
   'app:getBootstrap': (_req, ctx) => {
     // A renderer reload can arrive before the tab/input debounce expires.
     flushPendingPersists()
+    initializeThemeLibrary()
     return getBootstrap(ctx.kind)
   },
   'app:openExternal': ({ url }) => openExternal(url),
@@ -180,6 +182,11 @@ const handlers: HandlerMap = {
   'clientAuth:signOut': () => signOutClient(),
   'clientAuth:getUser': () => getClientUser(),
   'clientAuth:getUsage': (req) => getClientUsage(req),
+  'configSync:getStatus': () => getConfigSyncStatus(),
+  'configSync:getConflicts': () => getConfigSyncConflicts(),
+  'configSync:getPreview': () => getConfigSyncPreview(),
+  'configSync:confirmInitial': () => confirmInitialConfigSync(),
+  'configSync:resolve': (req) => resolveConfigSyncConflict(req.id, req.useRemote),
   'settings:get': () => getSettings(),
   'settings:update': (patch) => updateSettings(patch),
   'theme:importImage': () => importImage(),
@@ -187,6 +194,10 @@ const handlers: HandlerMap = {
   'theme:listImages': () => listImages(),
   'theme:readImage': (req) => readImage(req),
   'theme:deleteImage': (req) => deleteImage(req),
+  'theme:listProfiles': () => { initializeThemeLibrary(); return listProfiles() },
+  'theme:saveProfile': (req) => saveProfile(req),
+  'theme:deleteProfile': (req) => deleteProfile(req.id),
+  'theme:renameProfile': (req) => renameProfile(req),
   'workspace:list': () => listWorkspaces(),
   'workspace:pick': () => pickWorkspace(),
   'workspace:update': (req) => updateWorkspace(req),
@@ -326,6 +337,14 @@ const handlers: HandlerMap = {
 
   // ── Skill(渐进披露:提示词里只有目录,正文经 `Skill` 工具取)──
   'skills:list': (req) => listSkills(req),
+  'skills:pickZip': () => pickSkillZip(),
+  'skills:installZip': (req) => installZip(req),
+  'skills:installMarket': (req) => installMarketSkill(req),
+  'skills:uninstall': (req) => uninstallSkill(req),
+  'skills:marketList': (req) => listMarketSkills(req),
+  'skills:marketCategories': () => listMarketCategories(),
+  'skills:marketDetail': (req) => marketSkillDetail(req),
+  'skills:diagnostics': (req) => skillDiagnostics(req),
   'skills:setGlobalEnabled': (req) => setSkillGlobalEnabled(req),
   'skills:setWorkspaceActive': (req) => setSkillWorkspaceActive(req),
 

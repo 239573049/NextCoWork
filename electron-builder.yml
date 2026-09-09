@@ -6,6 +6,7 @@ directories:
 files:
   - '!**/.vscode/*'
   - '!src/*'
+  - '!resources/skills/**/*'
   - '!.next-cowork'
   - '!docs/*'
   - '!test/*'
@@ -13,6 +14,11 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierrc,.prettierignore}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
+extraResources:
+  - from: resources/skills
+    to: skills
+    filter:
+      - '**/*'
 asarUnpack:
   - '**/node_modules/node-pty/**'
   - 'resources/**'

@@ -683,6 +683,7 @@ export class AgentSession {
       depth: this.req.depth,
       callId,
       runId: this.req.runId,
+      skills: this.deps.skills,
       // ★ 递的是 deps.host 本身(结构上满足 ToolHost),不是拷贝出来的五个字段 ——
       //   拷贝会在换宿主后留下一份旧引用,正是 ctx 传递想避免的那件事
       host: this.deps.host,

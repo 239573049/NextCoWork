@@ -295,7 +295,35 @@ function isAppSettings(value: unknown): boolean {
     !isProxySettings(v.proxy)
   ) return false
   if (has(v, 'data') && !isDataSettings(v.data)) return false
+  if (has(v, 'themeStudio') && !isThemeStudioSettings(v.themeStudio)) return false
+  if (has(v, 'activeThemeProfileId') && v.activeThemeProfileId !== null &&
+      (typeof v.activeThemeProfileId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(v.activeThemeProfileId))) return false
   return true
+}
+
+function isThemeStudioSettings(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const v = value
+  return (
+    typeof v.name === 'string' &&
+    (v.wallpaperAssetId === null || typeof v.wallpaperAssetId === 'string') &&
+    enumValue(v.render, ['blur', 'overlay']) &&
+    isFiniteNumber(v.opacity) && v.opacity >= 0 && v.opacity <= 1 &&
+    isFiniteNumber(v.blur) && v.blur >= 0 && v.blur <= 120 &&
+    isFiniteNumber(v.brightness) && v.brightness >= 0.4 && v.brightness <= 1.6 &&
+    isFiniteNumber(v.saturation) && v.saturation >= 0 && v.saturation <= 2 &&
+    isFiniteNumber(v.positionX) && v.positionX >= 0 && v.positionX <= 100 &&
+    isFiniteNumber(v.positionY) && v.positionY >= 0 && v.positionY <= 100 &&
+    isFiniteNumber(v.sidebarOpacity) && v.sidebarOpacity >= 0 && v.sidebarOpacity <= 1 &&
+    isFiniteNumber(v.panelOpacity) && v.panelOpacity >= 0 && v.panelOpacity <= 1 &&
+    isFiniteNumber(v.mask) && v.mask >= 0 && v.mask <= 1 &&
+    enumValue(v.uiFont, ['system', 'system-rounded', 'system-serif']) &&
+    enumValue(v.uiScale, ['small', 'standard', 'large']) &&
+    enumValue(v.motion, ['standard', 'soft', 'reduced', 'off']) &&
+    isBoolean(v.guardrails) &&
+    isRecord(v.overrides) &&
+    Object.values(v.overrides).every((c) => typeof c === 'string')
+  )
 }
 
 function isContextManagementSettings(value: unknown): boolean {
@@ -380,7 +408,8 @@ function isWorkspaceSettings(value: unknown): boolean {
     enumValue(value.defaultMode, SESSION_MODES) &&
     enumValue(value.defaultThinking, THINKING_LEVELS) &&
     isBoolean(value.webSearch) &&
-    stringArray(value.activeSkillIds)
+    stringArray(value.activeSkillIds) &&
+    (value.skillSelectionMode === undefined || enumValue(value.skillSelectionMode, ['all', 'explicit'] as const))
   )
 }
 

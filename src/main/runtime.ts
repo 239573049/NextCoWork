@@ -310,9 +310,9 @@ function seedBuiltinUpstream(): void {
       内置上游就**永远拿不到**这条别名 —— 而 `defaultModel` 指着的那个名字确实存在,
       于是不报错,只是默认走了另一家,且内置上游从此不参与这条别名的故障切换。
     */
-    const seeded = new Set(store.listAliases().map((a) => `${a.providerId} ${a.alias}`))
+    const seeded = new Set(store.listAliases().map((a) => `${a.providerId}\u0000${a.alias}`))
     preset.suggestedModels.forEach((model, i) => {
-      if (seeded.has(`${preset.id} ${model}`)) return
+      if (seeded.has(`${preset.id}\u0000${model}`)) return
       store.putAlias(builtinAlias(preset.id, model, i))
     })
   }
@@ -573,7 +573,7 @@ function workspaceRootFor(workspaceId: string): string {
  * ★ 这个函数住在 runtime 而不是 `ipc/skills.ts`:它只需要 `getHost().paths`
  * 和 `store`,两样这里都有,而反过来会让内核的装配依赖 IPC 层。
  */
-export async function refreshSkills(workspaceId: string): Promise<void> {
+export async function refreshSkills(workspaceId: string): Promise<readonly Skill[]> {
   const h = getHost()
   const root = workspaceRootFor(workspaceId)
   const result = await scanSkills({
@@ -584,6 +584,7 @@ export async function refreshSkills(workspaceId: string): Promise<void> {
   // 诊断只记日志,不阻断:一条坏掉的 SKILL.md 不该让别的都用不了
   for (const d of result.diagnostics) h.logger.warn(`[skill] ${d.path}: ${d.message}`)
   skillRegistry().replaceAll(result)
+  return result.skills
 }
 
 /**
@@ -613,11 +614,17 @@ export async function loadInstructions(workspaceId: string): Promise<string> {
  * (空清单 = 全都要,理由在 `SkillRegistry.resolve` 上),
  * `globalEnabled` 回答「用户有没有在设置里把它整个关掉」。
  */
-function activeSkills(req: RunRequest): readonly Skill[] {
+function activeSkills(req: RunRequest, snapshot?: readonly Skill[]): readonly Skill[] {
   const disabled = new Set(store.getDisabledSkillIds())
-  return skillRegistry()
-    .resolve(req.skillIds)
+  const source = snapshot ?? skillRegistry().list()
+  return (snapshot === undefined ? skillRegistry().resolve(req.skillIds, req.skillSelectionMode ?? 'all') : resolveSkillsSnapshot(source, req))
     .filter((s) => !disabled.has(s.id))
+}
+
+function resolveSkillsSnapshot(skills: readonly Skill[], req: RunRequest): readonly Skill[] {
+  if (req.skillIds.length === 0) return req.skillSelectionMode === 'explicit' ? [] : skills
+  const ids = new Set(req.skillIds)
+  return skills.filter((s) => ids.has(s.id))
 }
 
 /**
@@ -914,6 +921,7 @@ function childRequestFor(
     //   `subagentModelSelection` 里。`configuredModel` 已经过可用性校验(见调用点)。
     ...subagentModelSelection(def.model, configuredModel, parentReq),
     skillIds: parentReq.skillIds,
+    skillSelectionMode: parentReq.skillSelectionMode,
     agentType: def.name
   }
 }
@@ -950,7 +958,7 @@ function availableSubagentModel(configured: { model: string; modelProviderId?: s
  * (要在它身上发 `subagent_start/end`)和 store(要取子代理的产出)。
  * `ctx.emit` 只会发 `tool_progress`,发不了子代理事件。
  */
-function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubagentFn {
+function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills?: readonly Skill[]): SpawnSubagentFn {
   return async (sub) => {
     /*
       ★ 深度在这里**再断言一次**,尽管 `Task.run` 第一行已经判过。
@@ -1046,7 +1054,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest): SpawnSubage
     */
     let finished: Promise<void> | undefined
     const child = launch(parent, childReq, (h, r) => {
-      finished = runAgent(h, r, def)
+      finished = runAgent(h, r, def, parentSkills)
       return finished
     })
     const result = monitorChildRun(parent, child, childReq, sub.callId, sub.background === true, finished)
@@ -1203,7 +1211,8 @@ export async function runAgent(
    * 查的话,派出去和真的跑起来之间夹着一次目录重扫,拿到的可能已经是
    * 另一份定义了 —— 而模型看到的工具清单还是派出去那一刻的。
    */
-  agent?: AgentDefinition
+  agent?: AgentDefinition,
+  inheritedSkills?: readonly Skill[]
 ): Promise<void> {
   const existing = store.getSession(req.sessionId)
   const session = store.ensureSession({
@@ -1250,8 +1259,9 @@ export async function runAgent(
     ★ 子 run **不重扫**:它的定义在派出去那一刻就定死了(见上面的 `agent` 参数),
     而重扫会在父代理正跑着的时候把 `Task` 的 description 换掉。
   */
+  let runSkills: readonly Skill[] | undefined = inheritedSkills
   if (agent === undefined) {
-    await refreshSkills(req.workspaceId)
+    runSkills = await refreshSkills(req.workspaceId)
     await refreshAgents(req.workspaceId)
   }
 
@@ -1326,7 +1336,7 @@ export async function runAgent(
         `Skill` 工具去取(渐进披露)。传的仍然是完整的 `Skill` 对象,
         是因为注册表本来就有它,而多一份裁剪过的类型只会多一处要同步的地方。
       */
-      skills: activeSkills(req),
+      skills: activeSkills(req, runSkills),
       /*
         ★ 角色提示词是**追加**的(见 `buildSystemPrompt` 里那段),
         工具清单是**收窄**的(`snapshot` 只过滤不新增)。两个方向都只能变严,
@@ -1334,7 +1344,7 @@ export async function runAgent(
       */
       ...(agent !== undefined ? { agentPrompt: agent.prompt } : {}),
       ...(agent?.tools !== undefined ? { allowedTools: agent.tools } : {}),
-      spawnSubagent: spawnSubagentFor(handle, req),
+      spawnSubagent: spawnSubagentFor(handle, req, runSkills),
       /*
         ★ 这两项注入的是**发出去的那份消息流**,转录一个字都不动
         (`context-assembler.ts` 的 `decorate`)。commit 进转录的话,用户会在

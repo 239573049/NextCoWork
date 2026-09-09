@@ -34,15 +34,19 @@ import { Toggle } from "../../components/ui/Toggle";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import * as dataService from "../../services/data";
+import * as configSyncService from "../../services/config-sync";
+import type { SyncPreview, SyncStatus } from "../../../../shared/domain/config-sync";
 import { useRunIndex } from "../../stores/session";
 import type { SettingsPageProps } from "../props";
 import { formatBytes, formatCount } from "../format";
+import { on } from "../../services/ipc";
 
 type ModalState =
   | { kind: "export" }
   | { kind: "import"; preview: ImportPreview }
   | { kind: "restore"; preview: RestorePreview }
-  | { kind: "cleanup"; preview: CleanupPreview; age?: CleanupAge };
+  | { kind: "cleanup"; preview: CleanupPreview; age?: CleanupAge }
+  | { kind: "syncPreview"; preview: SyncPreview };
 
 /** 设置 › 数据：所有结果都来自主进程数据服务，不在页面里模拟成功状态。 */
 export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
@@ -56,6 +60,8 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
   const [modal, setModal] = useState<ModalState | null>(null);
   const [age, setAge] = useState<CleanupAge>(3);
   const [includeKeys, setIncludeKeys] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [syncConflicts, setSyncConflicts] = useState<Awaited<ReturnType<typeof configSyncService.getConflicts>>>([]);
   const [exportPassword, setExportPassword] = useState("");
   const [exportPasswordAgain, setExportPasswordAgain] = useState("");
   const [importPassword, setImportPassword] = useState("");
@@ -65,12 +71,16 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
     async (initial = false): Promise<void> => {
       if (initial) setLoading(true);
       try {
-        const [nextStats, nextBackup] = await Promise.all([
+        const [nextStats, nextBackup, nextSync, nextConflicts] = await Promise.all([
           dataService.getStats(),
           dataService.getBackupStatus(),
+          configSyncService.getStatus(),
+          configSyncService.getConflicts(),
         ]);
         setStats(nextStats);
         setBackup(nextBackup);
+        setSyncStatus(nextSync);
+        setSyncConflicts(nextConflicts);
         if (nextBackup.lastError === null) setError(null);
       } catch (err) {
         setError(errorMessage(err));
@@ -83,6 +93,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
 
   useEffect(() => {
     void refresh(true);
+    return on("configSync:changed", setSyncStatus);
   }, [refresh]);
 
   const closeModal = useCallback((): void => {
@@ -158,6 +169,18 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         preview,
         ...(selectedAge === undefined ? {} : { age: selectedAge }),
       });
+  };
+
+  const openSyncPreview = async (): Promise<void> => {
+    const preview = await run("sync-preview", () => configSyncService.getPreview());
+    if (preview !== null) setModal({ kind: "syncPreview", preview });
+  };
+
+  const confirmSync = async (): Promise<void> => {
+    const result = await run("sync-confirm", () => configSyncService.confirmInitial(), undefined, false);
+    if (result === null) return;
+    closeModal();
+    await refresh();
   };
 
   const executeImport = async (): Promise<void> => {
@@ -289,17 +312,48 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
       <DataSection title={t("data.cloudSync")} className="pt-2">
         <DataRow
           title={t("data.configureCloudSync")}
-          description={t("data.cloudSyncHint")}
+          description={syncStatus?.lastError ?? (syncStatus?.enabled ? t("data.cloudSyncEnabled") : t("data.cloudSyncHint"))}
           density="compact"
           last
         >
-          <Toggle
-            checked={false}
-            onChange={() => undefined}
-            label={t("data.configureCloudSync")}
-            disabled
-          />
+          <span className="text-[12px] text-muted-fg">
+            {syncStatus?.accountId === null || syncStatus === null
+              ? t("data.cloudSyncSignedOut")
+              : syncStatus.enabled
+                ? t("data.cloudSyncEnabled")
+                : t("data.cloudSyncHint")}
+          </span>
         </DataRow>
+        {syncConflicts.length > 0 && (
+          <DataRow
+            title={t("data.cloudSyncConflicts", { count: syncConflicts.length })}
+            description={syncConflicts
+              .slice(0, 3)
+              .map((conflict) =>
+                t("data.cloudSyncConflictDetail", {
+                  kind: conflict.kind,
+                  entity: conflict.entityId,
+                }),
+              )
+              .join(" · ")}
+          >
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" className="border border-border bg-transparent" onClick={() => { void run("sync-resolve-local", () => configSyncService.resolve(syncConflicts[0]!.id, false)); }} disabled={busyNow}>{t("data.cloudSyncKeepLocal")}</Button>
+              <Button size="sm" onClick={() => { void run("sync-resolve-remote", () => configSyncService.resolve(syncConflicts[0]!.id, true)); }} disabled={busyNow}>{t("data.cloudSyncUseRemote")}</Button>
+            </div>
+          </DataRow>
+        )}
+        {syncStatus?.needsInitialReview && syncStatus.accountId !== null && (
+          <DataRow
+            title={t("data.cloudSyncReview")}
+            description={t("data.cloudSyncReviewHint")}
+            last
+          >
+            <Button size="sm" onClick={() => { void openSyncPreview(); }} disabled={busyNow}>
+              {t("data.cloudSyncReviewAction")}
+            </Button>
+          </DataRow>
+        )}
       </DataSection>
 
       <DataSection title={t("data.migration")}>
@@ -632,6 +686,13 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
           void executeCleanup();
         }}
       />
+      <SyncPreviewDialog
+        open={modal?.kind === "syncPreview"}
+        preview={modal?.kind === "syncPreview" ? modal.preview : null}
+        busy={busyNow}
+        onClose={closeModal}
+        onConfirm={() => { void confirmSync(); }}
+      />
     </div>
   );
 }
@@ -653,6 +714,49 @@ function formatDate(
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+function SyncPreviewDialog({
+  open,
+  preview,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  preview: SyncPreview | null;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={t("data.cloudSyncPreviewTitle")}
+      description={t("data.cloudSyncPreviewHint")}
+      width={520}
+      footer={(
+        <div className="flex justify-end gap-2">
+          <Button size="sm" className="border border-border bg-transparent" onClick={onClose} disabled={busy}>{t("data.cancel")}</Button>
+          <Button size="sm" onClick={onConfirm} disabled={busy}>{t("data.cloudSyncConfirm")}</Button>
+        </div>
+      )}
+    >
+      <div className="space-y-2 text-[12px] text-fg-muted">
+        <p>{t("data.cloudSyncPreviewCount", { count: preview?.count ?? 0 })}</p>
+        <p>{t("data.cloudSyncSecretHint")}</p>
+        <div className="max-h-48 overflow-auto rounded border border-border p-2">
+          {(preview?.items ?? []).slice(0, 50).map((item) => (
+            <div key={`${item.kind}:${item.entityId}`} className="flex justify-between py-1">
+              <span>{item.kind}</span><span className="text-fg">{item.entityId}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Dialog>
+  );
 }
 
 function DataSection({

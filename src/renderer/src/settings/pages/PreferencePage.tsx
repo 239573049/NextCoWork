@@ -47,6 +47,7 @@ import { acceleratorFromKeyboardEvent, prettyAccelerator } from "../../lib/accel
 import { cn } from "../../lib/cn";
 import { useImageThemes } from "../../stores/imageTheme";
 import { useAppearance } from "../../theme/useAppearance";
+import { ThemeStudioPane } from "../theme-studio/ThemeStudioPane";
 import { SettingField, SettingGroup, SettingRow } from "../Row";
 import type { SettingsPageProps } from "../props";
 
@@ -59,10 +60,10 @@ export function PreferencePage({
   if (sub === "personalization") {
     return <PersonalizationPane settings={settings} patch={patch} />;
   }
-  return <ThemePane settings={settings} patch={patch} />;
+  return <ThemeStudioPane settings={settings} patch={patch} />;
 }
 
-function ThemePane({
+export function ThemePane({
   settings,
   patch,
 }: Omit<SettingsPageProps, "sub">): ReactNode {

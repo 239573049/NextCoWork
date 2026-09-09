@@ -18,48 +18,48 @@
  * 一份语法完全正确、却没有 `description` 的 SKILL.md,解析得漂漂亮亮,
  * 但它进了目录之后模型根本不知道什么时候该调它。
  */
-import type { Skill, SkillScope } from '../../../shared/domain/skill'
-import { SKILL_BODY_MAX, SKILL_NAME_RE } from '../../../shared/domain/skill'
-import { fmList, fmString, parseFrontmatter } from '../frontmatter'
-import type { KernelFs } from '../host'
-import { PathEscapeError, resolveInWorkspace } from '../tool/path-guard'
-import { clampWithEllipsis, stripControlChars } from '../text'
+import type { Skill, SkillScope } from "../../../shared/domain/skill";
+import { SKILL_BODY_MAX, SKILL_NAME_RE } from "../../../shared/domain/skill";
+import { fmList, fmString, parseFrontmatter } from "../frontmatter";
+import type { KernelFs } from "../host";
+import { PathEscapeError, resolveInWorkspace } from "../tool/path-guard";
+import { clampWithEllipsis, stripControlChars } from "../text";
 
 /**
  * 描述的字符上限。★ 和 CC 对齐,也和「目录里每条只占一行」这个设计一致 ——
  * 描述是**唯一**进系统提示词的部分,它长成什么样,提示词就贵成什么样。
  */
-export const SKILL_DESCRIPTION_MAX = 1024
+export const SKILL_DESCRIPTION_MAX = 1024;
 
 /** SKILL.md 读进内存的字节上限。正文本身还会再被 `SKILL_BODY_MAX` 截一次。 */
-const SKILL_FILE_MAX_BYTES = 256 * 1024
+const SKILL_FILE_MAX_BYTES = 256 * 1024;
 
 /** 一次扫描最多认多少条。防一个被塞了几千个目录的 skills/ 把启动拖住。 */
-const MAX_SKILLS = 200
+const MAX_SKILLS = 200;
 
 /** 目录名 —— 和 CC 一致 */
-export const SKILLS_DIR = 'skills'
-export const PROJECT_SKILLS_PREFIX = '.next-cowork'
+export const SKILLS_DIR = "skills";
+export const PROJECT_SKILLS_PREFIX = ".next-cowork";
 
-export type { SkillScope }
+export type { SkillScope };
 
 export interface SkillDiagnostic {
   /** 出问题的那个路径,给用户看的 */
-  path: string
-  message: string
+  path: string;
+  message: string;
 }
 
 export interface SkillScanResult {
-  skills: Skill[]
-  diagnostics: SkillDiagnostic[]
+  skills: Skill[];
+  diagnostics: SkillDiagnostic[];
 }
 
 export interface SkillScanInput {
-  fs: KernelFs
+  fs: KernelFs;
   /** `<appData>/skills`。空串 = 跳过全局这一层。 */
-  globalRoot: string
+  globalRoot: string;
   /** `<workspaceRoot>/.nextcowork/skills`。空串 = 没有工作区。 */
-  projectRoot: string
+  projectRoot: string;
 }
 
 /**
@@ -69,19 +69,21 @@ export interface SkillScanInput {
  * `diagnostics` 里的一行。一次扫描因为某台机器上一个坏文件而整体失败的话,
  * 用户看到的是「所有 Skill 都不见了」,而真正坏掉的只有一条。
  */
-export async function scanSkills(input: SkillScanInput): Promise<SkillScanResult> {
-  const diagnostics: SkillDiagnostic[] = []
-  const byName = new Map<string, Skill>()
+export async function scanSkills(
+  input: SkillScanInput,
+): Promise<SkillScanResult> {
+  const diagnostics: SkillDiagnostic[] = [];
+  const byName = new Map<string, Skill>();
 
   // ★ 顺序即优先级:全局先进,项目后进覆盖同名。反过来写,项目里那条
   //   「这个仓库要用我们自己的提交规范」的 Skill 就永远压不过全局那条。
-  for (const scope of ['global', 'project'] as const) {
-    const root = scope === 'global' ? input.globalRoot : input.projectRoot
-    if (root === '') continue
-    await scanOneRoot(input.fs, root, scope, byName, diagnostics)
+  for (const scope of ["global", "project"] as const) {
+    const root = scope === "global" ? input.globalRoot : input.projectRoot;
+    if (root === "") continue;
+    await scanOneRoot(input.fs, root, scope, byName, diagnostics);
   }
 
-  return { skills: [...byName.values()], diagnostics }
+  return { skills: [...byName.values()], diagnostics };
 }
 
 async function scanOneRoot(
@@ -89,22 +91,25 @@ async function scanOneRoot(
   root: string,
   scope: SkillScope,
   out: Map<string, Skill>,
-  diagnostics: SkillDiagnostic[]
+  diagnostics: SkillDiagnostic[],
 ): Promise<void> {
-  let entries: Array<{ name: string; isDir: boolean }>
+  let entries: Array<{ name: string; isDir: boolean }>;
   try {
-    if (!(await fs.exists(root))) return // 没有 skills 目录是常态,不是错误
-    entries = await fs.readDir(root)
+    if (!(await fs.exists(root))) return; // 没有 skills 目录是常态,不是错误
+    entries = await fs.readDir(root);
   } catch (err) {
-    diagnostics.push({ path: root, message: `读不了这个目录:${msg(err)}` })
-    return
+    diagnostics.push({ path: root, message: `读不了这个目录:${msg(err)}` });
+    return;
   }
 
   for (const e of entries) {
-    if (!e.isDir) continue
+    if (!e.isDir) continue;
     if (out.size >= MAX_SKILLS) {
-      diagnostics.push({ path: root, message: `Skill 数量超过 ${String(MAX_SKILLS)} 条,其余未加载` })
-      return
+      diagnostics.push({
+        path: root,
+        message: `Skill 数量超过 ${String(MAX_SKILLS)} 条,其余未加载`,
+      });
+      return;
     }
     /*
       ★ 目录名先过 `SKILL_NAME_RE`。这不只是「规范一下命名」:名字会进
@@ -112,30 +117,36 @@ async function scanOneRoot(
       `../../etc` 或者带换行的目录名两样都能搞坏。
     */
     if (!SKILL_NAME_RE.test(e.name)) {
-      diagnostics.push({ path: `${root}/${e.name}`, message: `目录名不合法,已跳过` })
-      continue
+      diagnostics.push({
+        path: `${root}/${e.name}`,
+        message: `目录名不合法,已跳过`,
+      });
+      continue;
     }
 
-    let dir: string
+    let dir: string;
     try {
       /*
         ★ 这一步挡的是软链逃逸:`~/.nextcowork/skills/evil -> /` 之后,
         「扫描 skills 目录」就变成了「扫描整个磁盘」。`resolveInWorkspace`
         会 realpath 之后做包含判断,所以逃出去的目录在这里就死了。
       */
-      dir = resolveInWorkspace(root, e.name)
+      dir = resolveInWorkspace(root, e.name);
     } catch (err) {
       if (err instanceof PathEscapeError) {
-        diagnostics.push({ path: `${root}/${e.name}`, message: '这个目录指向了 skills 之外,已跳过' })
-        continue
+        diagnostics.push({
+          path: `${root}/${e.name}`,
+          message: "这个目录指向了 skills 之外,已跳过",
+        });
+        continue;
       }
-      diagnostics.push({ path: `${root}/${e.name}`, message: msg(err) })
-      continue
+      diagnostics.push({ path: `${root}/${e.name}`, message: msg(err) });
+      continue;
     }
 
-    const file = `${dir}/SKILL.md`
-    const loaded = await loadOne(fs, file, e.name, scope, diagnostics)
-    if (loaded !== null) out.set(loaded.name, loaded)
+    const file = `${dir}/SKILL.md`;
+    const loaded = await loadOne(fs, file, e.name, scope, diagnostics);
+    if (loaded !== null) out.set(loaded.name, loaded);
   }
 }
 
@@ -144,39 +155,45 @@ async function loadOne(
   file: string,
   dirName: string,
   scope: SkillScope,
-  diagnostics: SkillDiagnostic[]
+  diagnostics: SkillDiagnostic[],
 ): Promise<Skill | null> {
-  let raw: string
+  let raw: string;
   try {
     if (!(await fs.exists(file))) {
-      diagnostics.push({ path: file, message: '这个目录里没有 SKILL.md,已跳过' })
-      return null
+      diagnostics.push({
+        path: file,
+        message: "这个目录里没有 SKILL.md,已跳过",
+      });
+      return null;
     }
-    const bytes = await fs.readFileBytes(file, SKILL_FILE_MAX_BYTES)
-    raw = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+    const bytes = await fs.readFileBytes(file, SKILL_FILE_MAX_BYTES);
+    raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch (err) {
-    diagnostics.push({ path: file, message: `读不了这个文件:${msg(err)}` })
-    return null
+    diagnostics.push({ path: file, message: `读不了这个文件:${msg(err)}` });
+    return null;
   }
 
-  const fm = parseFrontmatter(raw)
-  for (const s of fm.skipped) diagnostics.push({ path: file, message: s })
+  const fm = parseFrontmatter(raw);
+  for (const s of fm.skipped) diagnostics.push({ path: file, message: s });
 
   /*
     ★ frontmatter 里的 name 胜过目录名,但**不一致时要说一声**。
     不说的话,用户把目录改名之后会发现 `/old-name` 还在,而目录里明明写着新名字。
   */
-  const declared = fmString(fm, 'name')
-  const name = declared ?? dirName
+  const declared = fmString(fm, "name");
+  const name = declared ?? dirName;
   if (declared !== undefined && declared !== dirName) {
     diagnostics.push({
       path: file,
-      message: `frontmatter 里的 name "${declared}" 和目录名 "${dirName}" 不一致,以 name 为准`
-    })
+      message: `frontmatter 里的 name "${declared}" 和目录名 "${dirName}" 不一致,以 name 为准`,
+    });
   }
   if (!SKILL_NAME_RE.test(name)) {
-    diagnostics.push({ path: file, message: `name "${name}" 不合法,这条 Skill 已作废` })
-    return null
+    diagnostics.push({
+      path: file,
+      message: `name "${name}" 不合法,这条 Skill 已作废`,
+    });
+    return null;
   }
 
   /*
@@ -184,19 +201,40 @@ async function loadOne(
     渐进披露里,描述是模型**唯一**的判断依据 —— 目录里只有名字的话,
     模型要么永远不调它,要么见什么都调它。两种都比「这条没装上」更糟。
   */
-  const description = fmString(fm, 'description')
+  const description = fmString(fm, "description");
   if (description === undefined) {
     diagnostics.push({
       path: file,
-      message: 'frontmatter 里缺 description —— 没有描述,模型无从判断什么时候该用它,这条 Skill 已作废'
-    })
-    return null
+      message:
+        "frontmatter 里缺 description —— 没有描述,模型无从判断什么时候该用它,这条 Skill 已作废",
+    });
+    return null;
   }
 
-  const body = clampWithEllipsis(stripControlChars(fm.body).trim(), SKILL_BODY_MAX)
-  if (body === '') {
-    diagnostics.push({ path: file, message: '正文是空的,这条 Skill 已作废' })
-    return null
+  const body = clampWithEllipsis(
+    stripControlChars(fm.body).trim(),
+    SKILL_BODY_MAX,
+  );
+  if (body === "") {
+    diagnostics.push({ path: file, message: "正文是空的,这条 Skill 已作废" });
+    return null;
+  }
+
+  let packageMeta: {
+    sourceKind?: Skill["source"]["kind"];
+    version?: string;
+    sha256?: string;
+  } = {};
+  try {
+    const metaPath = `${dirName === "" ? file : file.slice(0, Math.max(0, file.length - "SKILL.md".length))}.nextcowork-package.json`;
+    const rawMeta = new TextDecoder().decode(
+      await fs.readFileBytes(metaPath, 4096),
+    );
+    const parsed = JSON.parse(rawMeta) as typeof packageMeta;
+    if (parsed.sourceKind === "zip" && typeof parsed.sha256 === "string")
+      packageMeta = parsed;
+  } catch {
+    /* folder installs and older packages have no metadata sidecar */
   }
 
   return {
@@ -206,25 +244,40 @@ async function loadOne(
     id: name,
     name,
     description: clampWithEllipsis(description, SKILL_DESCRIPTION_MAX),
-    category: fmString(fm, 'category') ?? '未分类',
-    source: { kind: 'folder', path: file },
+    category: fmString(fm, "category") ?? "未分类",
+    source: {
+      kind: packageMeta.sourceKind ?? "folder",
+      path: file,
+      ...(packageMeta.version ? { version: packageMeta.version } : {}),
+      ...(packageMeta.sha256 ? { sha256: packageMeta.sha256 } : {}),
+    },
     scope,
     globalEnabled: true,
     frontmatter: {
-      ...(fmString(fm, 'model') !== undefined ? { model: fmString(fm, 'model') } : {}),
+      ...(fmString(fm, "model") !== undefined
+        ? { model: fmString(fm, "model") }
+        : {}),
       // `allowed-tools` 是 CC 的写法;`allowedTools` 是有人会顺手写的那个变体
-      ...(allowedTools(fm) !== undefined ? { allowedTools: allowedTools(fm) } : {})
+      ...(allowedTools(fm) !== undefined
+        ? { allowedTools: allowedTools(fm) }
+        : {}),
     },
-    body
-  }
+    body,
+  };
 }
 
-function allowedTools(fm: ReturnType<typeof parseFrontmatter>): string[] | undefined {
-  return fmList(fm, 'allowed-tools') ?? fmList(fm, 'allowedTools')
+function allowedTools(
+  fm: ReturnType<typeof parseFrontmatter>,
+): string[] | undefined {
+  return fmList(fm, "allowed-tools") ?? fmList(fm, "allowedTools");
 }
 
 function msg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+  return err instanceof Error ? err.message : String(err);
 }
 
-export const SKILL_LIMITS = { SKILL_DESCRIPTION_MAX, SKILL_FILE_MAX_BYTES, MAX_SKILLS } as const
+export const SKILL_LIMITS = {
+  SKILL_DESCRIPTION_MAX,
+  SKILL_FILE_MAX_BYTES,
+  MAX_SKILLS,
+} as const;

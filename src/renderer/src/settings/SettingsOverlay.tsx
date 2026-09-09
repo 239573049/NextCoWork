@@ -48,6 +48,8 @@ import { PreferencePage } from './pages/PreferencePage'
 import { StubPage } from './pages/StubPage'
 import { useI18n, type Translate } from '../i18n'
 import { AccountPage } from './pages/AccountPage'
+import { Dialog } from '../components/ui/Dialog'
+import { themeDraftDirty, useThemeProfiles } from '../stores/themeProfiles'
 
 
 export function SettingsOverlay({
@@ -69,6 +71,12 @@ export function SettingsOverlay({
   const [sub, setSub] = useState<string>('')
   const [seenPage, setSeenPage] = useState(page)
   const { t } = useI18n()
+  const [confirmClose, setConfirmClose] = useState(false)
+  const discardThemeDraft = useThemeProfiles((state) => state.discard)
+  const requestClose = (): void => {
+    if (page === 'preference' && themeDraftDirty()) setConfirmClose(true)
+    else onClose()
+  }
 
   const def = SETTINGS_PAGES.find((p) => p.id === page)
   const subs = def?.subs
@@ -124,7 +132,7 @@ export function SettingsOverlay({
       aria-label={t('common.settings')}
     >
       {/* 纯黑 35% —— 这个数是从参考图反解出来的,见 theme.css 的 --color-scrim */}
-      <div className="absolute inset-0 bg-scrim/35 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="absolute inset-0 bg-scrim/35 backdrop-blur-[2px]" onClick={requestClose} />
 
       <div
         ref={panelRef}
@@ -202,7 +210,7 @@ export function SettingsOverlay({
               />
             )}
             <span className="flex-1" />
-            <IconButton label={t('accessibility.closeSettings')} onClick={onClose}>
+            <IconButton label={t('accessibility.closeSettings')} onClick={requestClose}>
               <X size={15} />
             </IconButton>
           </header>
@@ -222,12 +230,15 @@ export function SettingsOverlay({
           </div>
 
           <footer className="flex h-[82px] shrink-0 items-center justify-end px-6">
-            <Button variant="accent" onClick={onClose}>
+            <Button variant="accent" onClick={requestClose}>
               {t('common.done')}
             </Button>
           </footer>
         </div>
       </div>
+      <Dialog open={confirmClose} title={t('themeStudio.unsaved')} onClose={() => setConfirmClose(false)} footer={<><Button variant="ghost" onClick={() => setConfirmClose(false)}>{t('common.cancel')}</Button><Button onClick={() => { discardThemeDraft(); setConfirmClose(false); onClose() }}>{t('themeStudio.discard')}</Button></>}>
+        <p>{t('themeStudio.discardHint')}</p>
+      </Dialog>
     </div>
   )
 }

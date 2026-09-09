@@ -36,6 +36,8 @@ import * as repo from '../db/repo'
 
 /** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
 const DISABLED_SKILLS_KEY = 'skills.disabled'
+const SKILL_STATS_KEY = 'skills.stats'
+export interface SkillUsageStat { count: number; lastTriggeredAt: number; workspaces: Record<string, number>; lastTriggeredAtByWorkspace?: Record<string, number> }
 
 export const store = {
   // ── settings ──
@@ -198,6 +200,26 @@ export const store = {
     if (enabled) now.delete(skillId)
     else now.add(skillId)
     repo.setKv(DISABLED_SKILLS_KEY, [...now])
+  },
+  recordSkillTrigger(skillId: string, workspaceId?: string): void {
+    const raw = repo.getKv<Record<string, SkillUsageStat>>(SKILL_STATS_KEY, {})
+    const current = raw && typeof raw === 'object' ? raw : {}
+    const prev = current[skillId] ?? { count: 0, lastTriggeredAt: 0, workspaces: {} }
+    const workspaces = { ...(prev.workspaces ?? {}) }
+    const times = { ...(prev.lastTriggeredAtByWorkspace ?? {}) }
+    const now = Date.now()
+    if (workspaceId !== undefined && workspaceId !== '') { workspaces[workspaceId] = (workspaces[workspaceId] ?? 0) + 1; times[workspaceId] = now }
+    current[skillId] = { count: prev.count + 1, lastTriggeredAt: now, workspaces, lastTriggeredAtByWorkspace: times }
+    repo.setKv(SKILL_STATS_KEY, current)
+  },
+  getSkillStats(workspaceId?: string): Record<string, SkillUsageStat> {
+    const raw = repo.getKv<Record<string, SkillUsageStat>>(SKILL_STATS_KEY, {})
+    if (workspaceId === undefined) return raw ?? {}
+    return Object.fromEntries(Object.entries(raw ?? {}).map(([id, stat]) => [id, {
+      ...stat,
+      count: stat.workspaces?.[workspaceId] ?? 0,
+      lastTriggeredAt: stat.lastTriggeredAtByWorkspace?.[workspaceId] ?? 0
+    }]))
   },
 
   // ── 会话转录(步骤 6 迁到 messages 表) ──

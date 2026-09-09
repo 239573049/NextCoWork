@@ -80,7 +80,7 @@ describe('设置浮层的开关状态', () => {
   })
 
   it('别的功能 Tab 照常建', () => {
-    useWindowStore.getState().openFeature('skills')
+    useWindowStore.getState().openFeature('scheduled')
     expect(useWindowStore.getState().outer).toHaveLength(1)
     expect(useWindowStore.getState().settingsPage).toBeNull()
   })
@@ -89,7 +89,7 @@ describe('设置浮层的开关状态', () => {
     useWindowStore.getState().hydrate(
       boot([
         { id: 't1', kind: 'feature', ref: { feature: 'settings' } },
-        { id: 't2', kind: 'feature', ref: { feature: 'skills' } }
+        { id: 't2', kind: 'feature', ref: { feature: 'scheduled' } }
       ])
     )
     const outer = useWindowStore.getState().outer

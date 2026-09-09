@@ -123,6 +123,8 @@ export interface RunRequest {
   modelProviderId?: string
   /** 本轮激活的 Skill */
   skillIds: string[]
+  /** 工作区 Skill 白名单语义的 run 快照；缺省按旧版 all 处理。 */
+  skillSelectionMode?: 'all' | 'explicit'
 
   /**
    * 这个 run 是哪个子代理在跑(`agents/<name>.md` 的 name)。缺省 = 主 run。

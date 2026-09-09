@@ -46,8 +46,8 @@ export const useImageThemes = create<ImageThemeStore>((set) => ({
     // 解码在这一侧(主进程没有 canvas)。抛在这里是**对的** ——
     // 主进程那边留下的是一个没进表的孤儿文件,下次启动扫掉;
     // 而写进表的每一条都保证颜色是算出来的,不是猜的
-    const { seed, palette } = await decodeColors(picked.bytes, picked.mime)
-    const uploaded = await saveImage({ id: picked.id, name: picked.name, seed, palette })
+    const { seed, palette, metadata } = await decodeColors(picked.bytes, picked.mime)
+    const uploaded = await saveImage({ id: picked.id, name: picked.name, seed, palette, metadata })
 
     // ★ 落表之后这张图立刻可以用 url 显示 —— 不必再把手上的字节转成 blob URL,
     //   也就不必记着将来 revoke 它

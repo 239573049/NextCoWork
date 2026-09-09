@@ -10,14 +10,21 @@ import { applyProxy } from '../net/proxy'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { applyThemePreference } from './app'
+import { profileSettings, syncLegacyProfile } from './theme'
 
 export function getSettings(): AppSettings {
   return store.getSettings()
 }
 
 export function updateSettings(patch: AppSettingsPatch): AppSettings {
+  if (patch.activeThemeProfileId !== undefined && patch.themeStudio === undefined && patch.imageTheme === undefined) {
+    const selected = profileSettings(patch.activeThemeProfileId)
+    // Keep the requested ID in the patch; profileSettings only supplies legacy fields.
+    patch = { ...patch, themeStudio: selected.themeStudio, imageTheme: selected.imageTheme }
+  }
   const before = store.getSettings()
   const next = store.updateSettings(patch)
+  syncLegacyProfile(next, patch)
 
   if (patch.theme !== undefined && patch.theme !== before.theme) {
     const resolved = applyThemePreference(next.theme)

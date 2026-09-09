@@ -32,7 +32,7 @@ interface WindowState {
    * 浏览器管理页不是一个可持久化的外层 Tab：打开它不能改变当前工作区，
    * 后台 Agent 也不能借此改动用户正在看的窗口布局。退出后继续显示原工作区。
    */
-  activeStandaloneFeature: 'browser' | null
+  activeStandaloneFeature: 'browser' | 'skills' | null
   sidebarCollapsed: boolean
   /**
    * 外层 Tab 条右端的右侧工作台开关。当前值是 active workspace 的投影；
@@ -178,7 +178,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
         否则用户仍会看见一个无法由当前交互创建、却会一直恢复出来的幽灵 Tab。
       */
       const persisted = b.tabState.outer.filter(
-        (t) => !(t.kind === 'feature' && (t.ref.feature === 'settings' || t.ref.feature === 'browser'))
+        (t) => !(t.kind === 'feature' && (t.ref.feature === 'settings' || t.ref.feature === 'browser' || t.ref.feature === 'skills'))
       )
       const outer = persisted.length > 0 ? persisted : initialTabs(b.workspaces)
       const requestedActiveId = b.tabState.activeOuterId
@@ -251,8 +251,8 @@ export const useWindowStore = create<WindowState>((set, get) => {
       }
       // 浏览器入口切换整块主内容区。它不是文档式工作内容，因此既不创建外层 Tab，
       // 也不改变/持久化用户原本所在的工作区；关闭后自然回到原处。
-      if (feature === 'browser') {
-        set({ activeStandaloneFeature: 'browser' })
+      if (feature === 'browser' || feature === 'skills') {
+        set({ activeStandaloneFeature: feature })
         return
       }
       const existing = get().outer.find((t) => t.kind === 'feature' && t.ref.feature === feature)

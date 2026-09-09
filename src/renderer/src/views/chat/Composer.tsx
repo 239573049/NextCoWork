@@ -30,6 +30,7 @@ import {
   Target,
   Unlock,
   Wrench,
+  Sparkles,
 } from "lucide-react";
 import {
   useEffect,
@@ -75,8 +76,13 @@ import { MentionInput, type MentionInputHandle } from "./MentionInput";
 import { MentionPopup } from "./MentionPopup";
 import type { MentionQuery } from "../../../../shared/domain/file-mention";
 import { insertMention, mentionQueryAt } from "../../../../shared/domain/file-mention";
+import { insertSkill, skillQueryAt, type SkillQuery } from "../../../../shared/domain/file-mention";
 import type { FileSuggestion } from "../../../../shared/domain/file-tree";
 import { searchWorkspaceFiles } from "../../services/app";
+import { listSkills, onSkillsChanged } from "../../services/skills";
+import type { SkillListItem } from "../../../../shared/domain/skill";
+import { SkillPopup } from './SkillPopup';
+import type { DraftSelection } from './rich-draft';
 
 /**
  * 可编辑区和它的占位符**共用**的度量类:内边距、字号、行高。
@@ -148,10 +154,31 @@ export function Composer({
     fromSettings(workspace.settings),
   );
   const input = useRef<MentionInputHandle | null>(null);
+  const lastCaret = useRef<number | null>(null);
+  const [skills, setSkills] = useState<SkillListItem[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(true);
+  const [skillsError, setSkillsError] = useState(false);
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  const [skillPickerQuery, setSkillPickerQuery] = useState('');
+  const skillInsertRange = useRef<DraftSelection | null>(null);
+  const skillListId = useId();
 
   useEffect(() => {
     void load();
   }, [load]);
+  useEffect(() => {
+    let cancelled = false;
+    const refreshSkills = (): void => {
+      setSkillsLoading(true);
+      setSkillsError(false);
+      void listSkills(workspace.id).then((items) => { if (!cancelled) setSkills(items.filter((s) => s.globalEnabled && s.activeInWorkspace)); }).catch(() => {
+        if (!cancelled) { setSkills([]); setSkillsError(true); }
+      }).finally(() => { if (!cancelled) setSkillsLoading(false); });
+    };
+    refreshSkills();
+    const unsubscribe = onSkillsChanged(refreshSkills);
+    return () => { cancelled = true; unsubscribe() };
+  }, [workspace.id]);
 
   /**
    * 切工作区 = 换一套默认值。
@@ -178,6 +205,9 @@ export function Composer({
   const [suggestions, setSuggestions] = useState<FileSuggestion[]>([]);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [skillQuery, setSkillQuery] = useState<SkillQuery | null>(null);
+  const [activeSkill, setActiveSkill] = useState(0);
+  const dismissedSkillAt = useRef<number | null>(null);
   /**
    * 按过 Esc 的那个 `@` 的下标。★ 记**位置**而不是布尔:记布尔的话,
    * 用户接着往下打字会立刻又弹出来,Esc 等于没按。
@@ -214,6 +244,21 @@ export function Composer({
       return;
     }
     setMention(q);
+    setSkillQuery(null);
+  }
+
+  function syncSkill(text: string, caret: number | null): void {
+    if (composing.current) return;
+    const q = caret === null ? null : skillQueryAt(text, caret);
+    // 斜杠路径/URL（`/usr/bin`、`http://…`）永远不弹 Skill 候选。
+    if (q === null || q.query.includes('/') || q.query.includes('.') || q.start === dismissedSkillAt.current) {
+      if (q === null) dismissedSkillAt.current = null;
+      setSkillQuery(null);
+      return;
+    }
+    setSkillQuery(q);
+    setMention(null);
+    setActiveSkill(0);
   }
 
   /*
@@ -260,6 +305,30 @@ export function Composer({
     input.current?.replace(r.text, r.caret);
   }
 
+  const skillNeedle = skillPickerOpen ? skillPickerQuery : skillQuery?.query ?? '';
+  const filteredSkills = skills.filter((s) =>
+    `${s.name} ${s.description} ${s.category}`.toLocaleLowerCase().includes(skillNeedle.toLocaleLowerCase())
+  );
+
+  function pickSkill(skill: SkillListItem): void {
+    const range = skillQuery ?? skillInsertRange.current ?? input.current?.selection() ?? { start: lastCaret.current ?? draft.length, end: lastCaret.current ?? draft.length };
+    const r = insertSkill(draft, range, skill.name);
+    dismissedSkillAt.current = null;
+    setSkillQuery(null);
+    setSkillPickerOpen(false);
+    input.current?.replace(r.text, r.caret);
+  }
+
+  useEffect(() => {
+    const onSkillUse = (event: Event): void => {
+      const name = (event as CustomEvent<{ name?: string }>).detail?.name;
+      const skill = name === undefined ? undefined : skills.find((item) => item.name === name);
+      if (skill !== undefined) pickSkill(skill);
+    };
+    window.addEventListener('nextcowork:skill-use', onSkillUse);
+    return () => window.removeEventListener('nextcowork:skill-use', onSkillUse);
+  }, [skills, draft, skillQuery]);
+
   /**
    * 弹层开着时,方向键 / Enter / Tab / Esc 归它。**返回 true = 这一下已经用掉了。**
    *
@@ -292,6 +361,17 @@ export function Composer({
       pickFile(suggestions[activeSuggestion] ?? (suggestions[0] as FileSuggestion));
       return true;
     }
+    return false;
+  }
+
+  function handleSkillKey(e: React.KeyboardEvent<HTMLElement>): boolean {
+    if ((skillQuery === null && !skillPickerOpen) || e.nativeEvent.isComposing) return false;
+    const n = filteredSkills.length;
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n > 0) {
+      e.preventDefault(); setActiveSkill((i) => e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n); return true;
+    }
+    if (e.key === 'Escape') { e.preventDefault(); dismissedSkillAt.current = skillQuery?.start ?? null; setSkillQuery(null); setSkillPickerOpen(false); input.current?.focus(); return true; }
+    if ((e.key === 'Enter' || e.key === 'Tab') && n > 0) { e.preventDefault(); pickSkill(filteredSkills[activeSkill] ?? filteredSkills[0]!); return true; }
     return false;
   }
 
@@ -409,6 +489,13 @@ export function Composer({
             onHover={setActiveSuggestion}
           />
         )}
+        {(skillQuery !== null || skillPickerOpen) && (
+          <SkillPopup id={skillListId} items={filteredSkills} active={activeSkill} loading={skillsLoading} error={skillsError}
+            search={skillPickerOpen ? skillPickerQuery : undefined}
+            onSearch={(query) => { setSkillPickerQuery(query); setActiveSkill(0); }} onPick={pickSkill} onHover={setActiveSkill}
+            labels={{ search: t('skills.searchPlaceholder'), loading: t('common.loading'), error: t('skills.loadFailed'), empty: t('skills.empty') }}
+            onKeyDown={handleSkillKey} />
+        )}
 
         <AttachmentTray
           items={attachments}
@@ -421,29 +508,35 @@ export function Composer({
           handle={input}
           metrics={DRAFT_METRICS}
           placeholder={running ? t("chat.queuePlaceholder") : t("chat.placeholder")}
-          aria-expanded={mention !== null}
-          aria-controls={mention !== null ? mentionListId : undefined}
+          skillDescriptions={Object.fromEntries(skills.map((skill) => [skill.name, skill.description]))}
+          aria-expanded={mention !== null || skillQuery !== null}
+          aria-controls={mention !== null ? mentionListId : skillQuery !== null ? skillListId : undefined}
           aria-activedescendant={
             mention !== null && suggestions.length > 0
               ? `${mentionListId}-${String(activeSuggestion)}`
-              : undefined
+              : skillQuery !== null && filteredSkills.length > 0 ? `${skillListId}-${activeSkill}` : undefined
           }
           onChange={(text, caret) => {
             onDraft(text);
+            lastCaret.current = caret;
             syncMention(text, caret);
+            syncSkill(text, caret);
           }}
           // 点击 / 方向键挪动光标也要重算 —— `@` 的判据是位置不是按键
           onCaret={(text, caret) => {
+            lastCaret.current = caret;
             syncMention(text, caret);
+            syncSkill(text, caret);
           }}
           onComposing={(v) => {
             composing.current = v;
           }}
-          onBlur={() => setMention(null)}
+          onBlur={() => { setMention(null); setSkillQuery(null) }}
           onPaste={handlePaste}
           onKeyDown={(e) => {
             // 弹层开着时方向键 / Enter / Tab / Esc 归它,先问一句
             if (handleMentionKey(e)) return;
+            if (handleSkillKey(e)) return;
             // Enter 发送,Shift+Enter 换行。输入法组词期间的 Enter 是「上屏」,
             // 不是「发送」—— 少了 isComposing 这个判断,中文用户每打一个词就发一次。
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -524,6 +617,12 @@ export function Composer({
                 >
                   {t("composer.addAttachment")}
                 </ComposerMenuItem>
+                <ComposerMenuItem icon={<Sparkles size={16} />} description={t('composer.skillsHint')}
+                  onSelect={() => {
+                    skillInsertRange.current = input.current?.selection() ?? { start: draft.length, end: draft.length };
+                    setSkillQuery(null); setMention(null); setSkillPickerQuery(''); setActiveSkill(0);
+                    close(); setSkillPickerOpen(true);
+                  }}>{t('composer.skills')}</ComposerMenuItem>
                 <ComposerMenuItem
                   icon={<Lightbulb size={16} />}
                   checked={value.mode === "plan"}
