@@ -897,6 +897,27 @@ const GOOGLE: readonly BuiltinModelRecord[] = [
 ]
 
 const DEEPSEEK: readonly BuiltinModelRecord[] = [
+  // DeepSeek announced this as a time-limited preview on 2026-09-08. Its
+  // public announcement confirms native multimodal input and says billing
+  // follows V4 Flash, but does not publish independent limits. Keep the
+  // compatible V4 Flash limits below until an official model card exists.
+  model('deepseek', 'deepseek-v4.1-flash-expires-on-0910', 'DeepSeek V4.1 Flash', {
+    capabilities: visionCapabilities({
+      thinking: true,
+      tools: true,
+      caching: true,
+      structuredOutput: true,
+      streaming: true,
+    }),
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
+    thinkingConfig: effortThinking('reasoning_effort', 'high'),
+    reasoningEfforts: ['none', 'low', 'high', 'max'],
+    aliases: ['deepseek-v4.1-flash', 'deepseek-v4.1-flash-beta'],
+    pricingModelId: 'deepseek-v4-flash',
+    source: source('https://api-docs.deepseek.com/'),
+    verificationStatus: 'unverified',
+  }),
   model('deepseek', 'deepseek-v4-pro', 'DeepSeek V4 Pro', {
     capabilities: textCapabilities({
       thinking: true,

@@ -129,6 +129,20 @@ export function moveTab(state: WorkspaceDockState, tabId: string, fromGroupId: s
   const source = findGroup(state.root, fromGroupId)
   const target = findGroup(state.root, toGroupId)
   if (source === null || target === null || !source.tabIds.includes(tabId)) return state
+  const moving = state.tabs.find((tab) => tab.id === tabId)
+  const targetTabs = state.tabs.filter((tab) => target.tabIds.includes(tab.id))
+  const targetPane = target.pinned === 'right'
+    ? 'right'
+    : targetTabs.length > 0 && targetTabs.every((tab) => paneOf(tab) === paneOf(targetTabs[0]!))
+      ? paneOf(targetTabs[0]!)
+      : null
+  // Keep one chat in the main pane. Without this guard, collapsing the right
+  // workbench can leave every session hidden and the sidebar has nowhere to
+  // activate a conversation.
+  if (moving?.kind === 'chat' && paneOf(moving) === 'main' && targetPane !== null && targetPane !== 'main') {
+    const mainChats = state.tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main')
+    if (mainChats.length <= 1) return state
+  }
   const nextSource = { ...source, tabIds: source.tabIds.filter((id) => id !== tabId), activeTabId: source.activeTabId === tabId ? null : source.activeTabId }
   const nextIds = [...target.tabIds]
   nextIds.splice(Math.max(0, Math.min(index ?? nextIds.length, nextIds.length)), 0, tabId)
@@ -138,7 +152,6 @@ export function moveTab(state: WorkspaceDockState, tabId: string, fromGroupId: s
   root = mapNode(root, target.id, () => nextTarget)
   // pane is only a legacy compatibility hint. A dragged tab takes the target
   // group's hint; a new arbitrary Dock group must not inherit a hidden panel.
-  const targetTabs = state.tabs.filter((tab) => target.tabIds.includes(tab.id))
   const pane = targetTabs[0] && targetTabs.every((tab) => paneOf(tab) === paneOf(targetTabs[0]!))
     ? paneOf(targetTabs[0]) : 'main'
   const tabs = state.tabs.map((tab) => tab.id === tabId ? { ...tab, pane } : tab)

@@ -860,6 +860,38 @@ describe('vendor-first model catalogue', () => {
     expect(findBuiltinModel('DeepSeek-V4-Flash-0731')).toBe(flash)
   })
 
+  it('includes the temporary DeepSeek V4.1 Flash preview with its V4 Flash runtime limits', () => {
+    const preview = findBuiltinModel('deepseek-v4.1-flash-expires-on-0910')
+
+    expect(preview).toMatchObject({
+      id: 'deepseek-v4.1-flash-expires-on-0910',
+      displayName: 'DeepSeek V4.1 Flash',
+      manufacturerId: 'deepseek',
+      contextWindow: 1_000_000,
+      maxOutputTokens: 384_000,
+      capabilities: {
+        vision: true,
+        visionInput: true,
+        thinking: true,
+        tools: true,
+        caching: true,
+        structuredOutput: true,
+        streaming: true,
+      },
+      thinkingConfig: {
+        mode: 'effort',
+        defaultEnabled: true,
+        defaultEffort: 'high',
+        parameterPath: 'reasoning_effort',
+      },
+      reasoningEfforts: ['none', 'low', 'high', 'max'],
+      pricingModelId: 'deepseek-v4-flash',
+      aliases: ['deepseek-v4.1-flash', 'deepseek-v4.1-flash-beta'],
+    })
+    expect(findBuiltinModel('deepseek-v4.1-flash')).toBe(preview)
+    expect(findBuiltinModel('deepseek-v4.1-flash-beta')).toBe(preview)
+  })
+
   it('includes the current Spark X2 family and keeps legacy direct API ids separate', () => {
     const x2 = findBuiltinModel('spark-x2')
     const flash = findBuiltinModel('spark-x2-flash')

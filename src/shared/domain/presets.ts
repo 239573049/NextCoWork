@@ -288,7 +288,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     ],
     docsUrl: 'https://api-docs.deepseek.com/',
     apiKeyUrl: 'https://platform.deepseek.com/api_keys',
-    suggestedModels: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+    suggestedModels: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4.1-flash-expires-on-0910'],
     notes:
       '★ 老别名 deepseek-chat / deepseek-reasoner 已于 2026-07-24 下线,填了会直接 400。' +
       '官方注明地址里的 v1 与模型版本无关,带不带都通。',

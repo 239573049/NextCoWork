@@ -64,7 +64,7 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
   }, [dragZone])
   const active = tabs.find((tab) => tab.id === node.activeTabId)
   const menu = edgePane === 'bottom' ? BOTTOM_TAB_MENU : edgePane === 'right' ? RIGHT_TAB_MENU : INNER_TAB_MENU
-  const open = (kind: InnerTabKind): void => openDock(workspace.id, node.id, kind)
+  const open = (kind: InnerTabKind): void => openDock(workspace.id, node.id, kind, undefined, edgePane)
   const onClose = async (id: string): Promise<void> => {
     const target = tabs.find((tab) => tab.id === id)
     if (target?.kind === 'doc' || target?.kind === 'preview') {

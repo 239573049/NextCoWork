@@ -20,6 +20,7 @@ import { adoptDraftSession, isSessionUntouched, releaseSession } from './session
 import type { WorkspaceFileMutationRequest } from '../../../shared/domain/workspace-file'
 import { isWithinPath } from './documents'
 import { findGroup, migrateLegacyInnerTabs, normalizeDockState, splitGroup, moveTab as moveDockTab, reorderTab as reorderDockTab, resizeSplit, closeTab as closeDockTab, closeGroup as closeDockGroupState, addTabToGroup, type DockDirection, type DockNode } from '../../../shared/domain/dock'
+import { useWindowStore } from './window'
 
 const EMPTY: InnerTabState = {
   tabs: [],
@@ -128,9 +129,10 @@ interface TabsState {
   /** 在已有会话上打开一个新 Tab（侧边栏历史会话使用）。 */
   openSession: (workspaceId: string, sessionId: string, title?: string) => void
   /**
-   * 在文件树里点一个文件时走这条,**不是 `open`**:同一个文件已经开着就切过去,
-   * 不再开第二个。`open` 反过来必须每次都新建(连点两次 `+ 新建对话`
-   * 要得到两个对话),所以去重不能塞进它里面。
+   * 在文件树或 Markdown 链接里点一个文件时走这条,**不是 `open`**:文件会进入
+   * 当前工作区的右侧工作台；同一个文件已经开着就切过去,不再开第二个。
+   * `open` 反过来必须每次都新建(连点两次 `+ 新建对话`要得到两个对话),
+   * 所以去重不能塞进它里面。
    */
   openPath: (workspaceId: string, kind: InnerTabKind, path: string, title: string) => void
   /**
@@ -278,6 +280,23 @@ export const useTabsStore = create<TabsState>((set, get) => {
       }
       dock = { ...dock, root: activate(dock.root) }
     }
+    // Recover older layouts where every chat was moved into a collapsible
+    // panel. Reuse one of those sessions in the main pane so hiding the right
+    // workbench cannot hide the entire conversation area.
+    const chats = dock.tabs.filter((tab) => tab.kind === 'chat')
+    if (chats.length > 0 && !chats.some((tab) => paneOf(tab) === 'main')) {
+      const chat = chats[0]!
+      const source = groupContainingTab(dock, chat.id)
+      let destination = groupForPane(dock, 'main')
+      if (source !== null && destination === null) {
+        dock = splitGroup(dock, source, 'left')
+        destination = dock.activeGroupId
+      }
+      if (source !== null && destination !== null) {
+        dock = moveDockTab(dock, chat.id, source, destination)
+        return { ...state, activeTabId: chat.id, tabs: dock.tabs, dock }
+      }
+    }
     return { ...state, tabs: dock.tabs, dock }
   }
   const write = (workspaceId: string, next: InnerTabState): void => {
@@ -380,7 +399,8 @@ export const useTabsStore = create<TabsState>((set, get) => {
         if (node.type === 'group') return node.id === groupId ? { ...node, activeTabId: tabId } : node
         return { ...node, first: update(node.first), second: update(node.second) }
       }
-      write(workspaceId, { ...cur, dock: { ...dock, root: update(dock.root), activeGroupId: groupId } })
+      const tab = cur.tabs.find((item) => item.id === tabId)
+      write(workspaceId, withActive({ ...cur, dock: { ...dock, root: update(dock.root), activeGroupId: groupId } }, tab === undefined ? 'main' : paneOf(tab), tabId))
     },
 
     splitAndOpenDock(workspaceId, groupId, direction, kind, pane = 'main') {
@@ -398,10 +418,20 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const cur = get().stateOf(workspaceId)
       const dock = get().dockOf(workspaceId)
       if (!findGroup(dock.root, fromGroupId)?.tabIds.includes(tabId) || !findGroup(dock.root, targetGroupId)) return
+      const moving = dock.tabs.find((tab) => tab.id === tabId)
+      const destinationPane: TabPane = direction === 'right' ? 'right' : direction === 'down' ? 'bottom' : 'main'
+      if (moving?.kind === 'chat' && paneOf(moving) === 'main' && destinationPane !== 'main') {
+        const mainChats = dock.tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main')
+        if (mainChats.length <= 1) return
+      }
       const split = splitGroup(dock, targetGroupId, direction)
       const destination = split.activeGroupId
       if (destination === null) return
-      const next = moveDockTab(split, tabId, fromGroupId, destination)
+      const moved = moveDockTab(split, tabId, fromGroupId, destination)
+      const next = {
+        ...moved,
+        tabs: moved.tabs.map((tab) => tab.id === tabId ? { ...tab, pane: destinationPane } : tab)
+      }
       write(workspaceId, { ...cur, tabs: next.tabs, dock: next })
     },
 
@@ -414,6 +444,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
     moveDockTab(workspaceId, tabId, fromGroupId, toGroupId, index) {
       const cur = get().stateOf(workspaceId)
       const dock = moveDockTab(get().dockOf(workspaceId), tabId, fromGroupId, toGroupId, index)
+      if (dock === get().dockOf(workspaceId)) return
       write(workspaceId, { ...cur, tabs: dock.tabs, dock })
     },
 
@@ -431,6 +462,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const cur = get().stateOf(workspaceId)
       if (!findGroup(get().dockOf(workspaceId).root, groupId)?.tabIds.includes(tabId)) return
       const target = cur.tabs.find((tab) => tab.id === tabId)
+      if (target?.kind === 'chat' && paneOf(target) === 'main' && cur.tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main').length <= 1) return
       if (target?.kind === 'terminal') void killTerminal(target.ref.terminalId).catch(() => undefined)
       if (target?.kind === 'browser' && target.ref.browserId !== undefined) void closeBrowserTab(workspaceId, target.ref.browserId).catch(() => undefined)
       const dock = closeDockTab(get().dockOf(workspaceId), groupId, tabId)
@@ -451,6 +483,8 @@ export const useTabsStore = create<TabsState>((set, get) => {
         visit(node.first); visit(node.second)
       }
       visit(target)
+      const remainingMainChats = cur.tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main' && !ids.includes(tab.id))
+      if (remainingMainChats.length === 0) return
       for (const id of ids) {
         const tab = cur.tabs.find((item) => item.id === id)
         if (tab?.kind === 'terminal') void killTerminal(tab.ref.terminalId).catch(() => undefined)
@@ -466,7 +500,9 @@ export const useTabsStore = create<TabsState>((set, get) => {
     hydrate(workspaceId, s) {
       // Keep hydrate's object identity for callers that use it as an in-memory
       // snapshot (and let dockOf cache/normalize the derived Dock view).
-      set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: s } })
+      const chats = s.tabs.filter((tab) => tab.kind === 'chat')
+      const state = chats.length > 0 && !chats.some((tab) => paneOf(tab) === 'main') ? withDock(s) : s
+      set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: state } })
       applyPendingBrowser(workspaceId)
     },
 
@@ -508,6 +544,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const cur = get().stateOf(workspaceId)
       const existing = cur.tabs.find((t) => t.kind === 'chat' && t.ref.sessionId === sessionId)
       if (existing !== undefined) {
+        if (paneOf(existing) === 'right') useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
         const groupId = groupContainingTab(get().dockOf(workspaceId), existing.id)
         if (groupId) get().activateDockTab(workspaceId, groupId, existing.id)
         return
@@ -531,24 +568,54 @@ export const useTabsStore = create<TabsState>((set, get) => {
 
     openPath(workspaceId, kind, path, title) {
       const cur = get().stateOf(workspaceId)
-      /*
-        文件树里点的文件**一律开在主区**(参考截图:点 `bun.lock`,Tab 出现在
-        最上面那条,不是在右边那条)。右侧那格是导航,主区才是内容。
-      */
+      // 文件打开属于当前工作区的右侧工作台。后台工作区也只展开自己的面板，
+      // 不会改变窗口当前正在看的工作区。
+      useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
+      let dock = get().dockOf(workspaceId)
       const existing = cur.tabs.find(
-        (t) => t.kind === kind && 'path' in t.ref && t.ref.path === path && paneOf(t) === 'main'
+        (t) => t.kind === kind && 'path' in t.ref && t.ref.path === path
       )
       if (existing !== undefined) {
-        const groupId = groupContainingTab(get().dockOf(workspaceId), existing.id)
-        if (groupId) get().activateDockTab(workspaceId, groupId, existing.id)
+        const sourceGroupId = groupContainingTab(dock, existing.id)
+        if (sourceGroupId === null) return
+        if (paneOf(existing) === 'right') {
+          get().activateDockTab(workspaceId, sourceGroupId, existing.id)
+          return
+        }
+        // Layouts persisted before file tabs moved to the right may still
+        // contain this document in the main pane. Move that existing tab so
+        // opening it again does not leave a duplicate behind.
+        let targetGroupId = groupForPane(dock, 'right')
+        if (targetGroupId === null) {
+          const base = dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+          if (base === null) return
+          dock = splitGroup(dock, base, 'right')
+          targetGroupId = dock.activeGroupId
+        }
+        if (targetGroupId === null) return
+        const movedDock = moveDockTab(dock, existing.id, sourceGroupId, targetGroupId)
+        // An empty group has no pane hint for the shared move helper to infer;
+        // this destination is explicitly the right workbench.
+        const nextDock = {
+          ...movedDock,
+          tabs: movedDock.tabs.map((tab) => tab.id === existing.id ? { ...tab, pane: 'right' as const } : tab)
+        }
+        write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', existing.id))
         return
       }
-      const tab = makeTab(kind, 'main', { path, title })
-      const dock = get().dockOf(workspaceId)
-      const groupId = groupForPane(dock, 'main') ?? dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+      const tab = makeTab(kind, 'right', { path, title })
+      let groupId = groupForPane(dock, 'right')
+      // If the right side has never been created, split it now so a file link
+      // opened from a chat is immediately visible in the right workbench.
+      if (groupId === null) {
+        const base = dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+        if (base === null) return
+        dock = splitGroup(dock, base, 'right')
+        groupId = dock.activeGroupId
+      }
       if (groupId === null) return
       const nextDock = addTabToGroup(dock, groupId, tab)
-      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'main', tab.id))
+      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', tab.id))
     },
 
     newChat(workspaceId) {
@@ -636,8 +703,10 @@ export const useTabsStore = create<TabsState>((set, get) => {
         它对应「把底部面板关掉」这个动作(AppShell 看到最后一个被关就收起面板)。
         照搬到底部的话,面板就永远关不掉:关一个补一个。
       */
-      if (pane === 'main' && rest.length === 0) {
+      if (pane === 'main' && !tabs.some((tab) => tab.kind === 'chat' && paneOf(tab) === 'main')) {
         const tab = makeTab('chat', 'main')
+        // Session cleanup can close a chat while document tabs remain. Keep
+        // the main pane usable by replacing the removed session with a draft.
         write(workspaceId, { ...cur, tabs: [...tabs, tab], activeTabId: tab.id })
         return
       }

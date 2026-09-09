@@ -23,6 +23,7 @@ import type {
   InnerTabKind,
   InnerTabMenuItem,
 } from "../../../shared/domain/tab";
+import { paneOf } from "../../../shared/domain/tab";
 import {
   Menu,
   MenuItem,
@@ -72,6 +73,7 @@ export function InnerTabBar({
   const { t } = useI18n();
   const drafts = useDocumentsStore((state) => state.entries);
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
+  const mainChatCount = tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main').length;
 
   return (
     <div
@@ -81,7 +83,7 @@ export function InnerTabBar({
         className,
       )}
     >
-      <div className="flex min-w-0 flex-1 items-center gap-1">
+      <div className="scroll-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
         {tabs.map((tab, i) => {
           const active = tab.id === activeId;
           const running =
@@ -91,6 +93,7 @@ export function InnerTabBar({
           const Icon = INNER_TAB_ICON[tab.kind];
           const draft = workspaceId && (tab.kind === 'doc' || tab.kind === 'preview') ? drafts[documentKey(workspaceId, tab.ref.path)] : undefined;
           const dirty = draft !== undefined && isDocumentDirty(draft);
+          const closeDisabled = tab.kind === 'chat' && paneOf(tab) === 'main' && mainChatCount <= 1;
           return (
             <div
               key={tab.id}
@@ -128,6 +131,7 @@ export function InnerTabBar({
               )}
               <button
                 type="button"
+                disabled={closeDisabled}
                 aria-label={t("nav.closeTab", { label: tab.title })}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -137,7 +141,7 @@ export function InnerTabBar({
                 className={cn(
                   "flex size-[17px] shrink-0 items-center justify-center rounded-[5px]",
                   "text-fg-faint opacity-0 transition-opacity group-hover:opacity-100",
-                  "hover:bg-tint-strong hover:text-fg focus-visible:opacity-100",
+                  "hover:bg-tint-strong hover:text-fg focus-visible:opacity-100 disabled:pointer-events-none disabled:opacity-0",
                 )}
               >
                 <X size={11} />

@@ -11,8 +11,8 @@
  * 4. **目录在前、文件在后**(见 shared 的 `sortEntries`),文件图标按类型上色。
  * 5. **行有三态**:普通 / 悬停(浅底 + 右端冒出 `…`)/ 选中(挖亮底,即当前打开的那个文件)。
  *
- * 点一个文件 → 在**主区**开一个 doc Tab(截图里 `bun.lock` 就是这么进主区的),
- * 所以这个组件不自己渲染文件内容,它只发 `onOpenFile`。
+ * 点一个文件 → 在**右侧工作台**新增一个 doc Tab,所以这个组件不自己渲染文件内容,
+ * 它只发 `onOpenFile`。
  */
 import {
   ArrowUpDown,
@@ -36,9 +36,10 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { DirListing, FileEntry, SortBy } from '../../../../shared/domain/file-tree'
-import type { InnerTab } from '../../../../shared/domain/tab'
+import { paneOf, type InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
 import type { WorkspaceFileMutationRequest } from '../../../../shared/domain/workspace-file'
+import type { DockNode } from '../../../../shared/domain/dock'
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { IconButton } from '../../components/ui/IconButton'
@@ -694,12 +695,20 @@ export function FilesTab({ tab, workspace }: { tab: InnerTab; workspace: Workspa
   const openPath = useTabsStore((s) => s.openPath)
 
   /*
-    选中行 = **主区**正在看的那个文件。选择器只回一个字符串,
+    选中行 = **右侧工作台**正在看的那个文件。选择器只回一个字符串,
     不回对象 —— 回对象的话每次 render 都是新引用,zustand 会认为状态变了。
   */
   const selectedPath = useTabsStore((s) => {
     const st = s.stateOf(workspace.id)
-    const active = st.tabs.find((t) => t.id === st.activeTabId)
+    const dock = s.dockOf(workspace.id)
+    const rightActiveId = (node: DockNode): string | null => {
+      if (node.type === 'group') {
+        const rightTabs = st.tabs.filter((item) => node.tabIds.includes(item.id) && paneOf(item) === 'right')
+        return rightTabs.length > 0 ? node.activeTabId : null
+      }
+      return rightActiveId(node.first) ?? rightActiveId(node.second)
+    }
+    const active = st.tabs.find((t) => t.id === rightActiveId(dock.root))
     return active !== undefined && 'path' in active.ref ? active.ref.path : null
   })
 
