@@ -117,13 +117,34 @@ export function credentialInUse(info: CredentialInfo | null): 'oauth' | 'api-key
 }
 
 /**
- * 登录成功之后要不要把接口地址挪到另一个端点。
+ * 登录成功之后要把接口地址挪到哪个端点。**`null` = 不挪。**
  *
- * ★★ **两种凭证打的不是同一个地址。** GLM Coding Plan:订阅 key 走
- * `…/api/coding/paas/v4`(openai-chat),而登录换来的 JWT 走 `…/api/anthropic`。
- * 不挪的话,用户会在「已登录」的界面上发出第一条消息,然后撞上一个
- * **不解释原因**的错误 —— 而表单从头到尾看着都是对的。
+ * ★★ **这件事按 issuer 走,不是所有家都一样。** 原来写死切 `anthropic`,那是照
+ * Z.AI 那条想的 —— 它的订阅 key 走 `…/api/coding/paas/v4`(openai-chat),
+ * 而登录换来的业务 JWT 只在 `…/api/anthropic` 上认。
  *
+ * ★★★ **智谱那条正好相反,写死切 anthropic 会把用户推进坑里。**
+ * `zhipu-coding` 的 `endpoints[0]` 是 coding 端点、anth 被**故意降到第二位**,理由是
+ * 官方 FAQ 把 `open.bigmodel.cn/api/anthropic` 限定成「仅限从未买过 Coding Plan 且
+ * 额外加白的账号」(见 `presets.ts` 那条注释)。自动切过去等于跟那个结论对着干。
+ * 2026-09-09 用户实测:登录成功、发消息回
+ * `[1234][网络错误，错误id：…]` —— 注意**这不是 401**:同一个端点喂一把假令牌回的是
+ * `401 令牌已过期或验证不正确`。两者不同说明令牌过了鉴权、是**后面的路由**拒的,
+ * 正好对上「这个账号不在白名单里」。
+ *
+ * ★ 穷尽的 `Record<OAuthIssuerId, …>`:加一家 issuer 不在这里补一行就是编译错误。
+ * 这件事漏掉的表现是「登录显示成功,第一条消息失败」,而错误信息不提端点。
+ */
+const SIGN_IN_PROTOCOL: Readonly<Record<OAuthIssuerId, UpstreamProtocol | null>> = {
+  /* codex 是纯 OAuth 预设,端点本来就只有 anthropic 一条 —— 这里给 null 与今天等价 */
+  chatgpt: null,
+  /* ★ 已实测:业务 JWT 走 `api.z.ai/api/anthropic` */
+  'zcode-zai': 'anthropic',
+  /* ★★ **不挪**。理由见上面那段;换回 anthropic 前先拿到「这个账号加白了」的证据 */
+  'zcode-bigmodel': null
+}
+
+/**
  * ★ 复用 `baseUrlForProtocol` 而不是自己拼地址,是为了白拿它那条规则:
  * **用户自己改过地址就一个字都不动**(`provider-edit.ts` 文件头)。
  * 而 `changed === false` 时这里返回 `null` 而不是「只换协议」——
@@ -131,9 +152,10 @@ export function credentialInUse(info: CredentialInfo | null): 'oauth' | 'api-key
  */
 export function signInEndpointSwitch(
   provider: Pick<UpstreamProvider, 'id' | 'baseUrl' | 'protocol'>,
-  target: UpstreamProtocol = 'anthropic'
+  issuer: OAuthIssuerId
 ): { protocol: UpstreamProtocol; baseUrl: string } | null {
-  if (provider.protocol === target) return null
+  const target = SIGN_IN_PROTOCOL[issuer]
+  if (target === null || provider.protocol === target) return null
   const r = baseUrlForProtocol(provider, target)
   return r.changed ? { protocol: target, baseUrl: r.baseUrl } : null
 }

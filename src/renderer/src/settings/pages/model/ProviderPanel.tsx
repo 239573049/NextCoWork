@@ -264,13 +264,15 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
       .then((info) => {
         setCred(info);
         /*
-          ★★ **两种凭证打的不是同一个地址。** 订阅 key 走 coding 端点，
-          登录换来的令牌走 anthropic 端点。不挪的话，用户会在一个写着
-          「已登录」的界面上发出第一条消息，然后撞上一个不解释原因的错误 ——
-          而表单从头到尾看着都是对的。判断在 `signInEndpointSwitch` 里
-          （那边有测试），它对「用户自己改过地址」一律返回 null。
+          ★★ **两种凭证不一定打同一个地址。** 判断在 `signInEndpointSwitch` 里
+          （那边有测试）：它按 issuer 查一张穷尽的表 —— Z.AI 那条登录换来的
+          令牌确实要切到 anthropic 端点，智谱那条**不切**（见那张表上的注释）。
+          不该切却切了的表现，和该切没切一样难查：用户在一个写着「已登录」的
+          界面上发出第一条消息，撞上一个不解释原因的错误，而表单从头到尾
+          看着都是对的。它对「用户自己改过地址」一律返回 null。
         */
-        const next = signInEndpointSwitch(p);
+        if (issuer === null) return;
+        const next = signInEndpointSwitch(p, issuer);
         if (next === null) return;
         setBaseUrl(next.baseUrl);
         // ★ 静默换地址是这一整块最不该有的行为

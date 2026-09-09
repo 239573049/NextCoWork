@@ -170,7 +170,7 @@ describe('signInEndpointSwitch', () => {
   const zai = { id: 'zai-coding', baseUrl: 'https://api.z.ai/api/coding/paas/v4' } as const
 
   it('★★ 停在 coding 端点上登录 → 挪到 anthropic 端点（否则第一条消息必失败）', () => {
-    expect(signInEndpointSwitch({ ...zai, protocol: 'openai-chat' })).toEqual({
+    expect(signInEndpointSwitch({ ...zai, protocol: 'openai-chat' }, 'zcode-zai')).toEqual({
       protocol: 'anthropic',
       baseUrl: 'https://api.z.ai/api/anthropic'
     })
@@ -178,7 +178,10 @@ describe('signInEndpointSwitch', () => {
 
   it('已经在目标协议上 → 不动', () => {
     expect(
-      signInEndpointSwitch({ id: 'zai-coding', baseUrl: 'https://api.z.ai/api/anthropic', protocol: 'anthropic' })
+      signInEndpointSwitch(
+        { id: 'zai-coding', baseUrl: 'https://api.z.ai/api/anthropic', protocol: 'anthropic' },
+        'zcode-zai'
+      )
     ).toBeNull()
   })
 
@@ -188,13 +191,39 @@ describe('signInEndpointSwitch', () => {
       比不换更坏 —— 不换他至少还在原来能用的状态上。
     */
     expect(
-      signInEndpointSwitch({ ...zai, baseUrl: 'https://my-relay.test/v1', protocol: 'openai-chat' })
+      signInEndpointSwitch(
+        { ...zai, baseUrl: 'https://my-relay.test/v1', protocol: 'openai-chat' },
+        'zcode-zai'
+      )
     ).toBeNull()
   })
 
   it('预设里没有那条端点（纯 OAuth 的 codex）→ 不动', () => {
     expect(
-      signInEndpointSwitch({ id: 'codex', baseUrl: 'https://chatgpt.com/backend-api/codex', protocol: 'openai-responses' })
+      signInEndpointSwitch(
+        { id: 'codex', baseUrl: 'https://chatgpt.com/backend-api/codex', protocol: 'openai-responses' },
+        'chatgpt'
+      )
+    ).toBeNull()
+  })
+
+  it('★★★ 智谱那条登录后**不换端点** —— 它的订阅端点就是 coding 端点', () => {
+    /*
+      2026-09-09 实测:登录成功之后被自动推到 `open.bigmodel.cn/api/anthropic`,
+      发请求回 `1234 网络错误`。同一个端点上塞一个假令牌回的是
+      `401 令牌已过期或验证不正确` —— 两者不同,说明令牌过了鉴权那层,
+      是**路由**拒的,对上预设注释里那句官方 FAQ:该端点仅限加白账号。
+      所以这条要停在 coding 端点上,别动。
+    */
+    expect(
+      signInEndpointSwitch(
+        {
+          id: 'zhipu-coding',
+          baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+          protocol: 'openai-chat'
+        },
+        'zcode-bigmodel'
+      )
     ).toBeNull()
   })
 })

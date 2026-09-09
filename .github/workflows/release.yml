@@ -37,14 +37,14 @@ jobs:
             runner: macos-15
             arch: arm64
             artifact_path: |
-              dist/*-arm64.dmg
+              dist/*-arm64-mac.dmg
               dist/*-arm64-mac.zip
           - name: macOS Intel
             id: macos-x64
             runner: macos-15-intel
             arch: x64
             artifact_path: |
-              dist/*-x64.dmg
+              dist/*-x64-mac.dmg
               dist/*-x64-mac.zip
 
     steps:

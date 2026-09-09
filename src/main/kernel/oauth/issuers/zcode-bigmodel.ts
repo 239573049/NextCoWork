@@ -20,21 +20,30 @@
  * 2. **回调里的授权码参数名是 `authCode`,不是 `code`**。按 `code` 取的表现是一句
  *    「这段内容里没有授权码」—— 而用户手里明明有一条带着授权码的回调地址。
  *
- * ============================ 仍然未知的部分 ============================
- * **换码那一跳的响应体没有被抓到过**,但它的请求形状 2026-09-09 已经用错误码分层
- * 定下来了(见下面 `provider` 字段那段注释):端点、body 形状、`provider: 'bigmodel'`
- * 都能让服务端走到「验码」那一步。剩下未知的只有**成功响应长什么样**。
+ * ============================ 实测进展(2026-09-09) ============================
+ * **登录整条链路已经打通** —— 用户实测确认「登陆成功了」。走到这一步改了三处**数据**:
+ * `provider: 'bigmodel'`(见下)、`tokenRedirectUri`(见下)、`callbackCodeParam: 'authCode'`。
+ * 流程代码一处分支都没加。换码的响应体仍然没被抓到,但既然凭证落库了,
+ * `tokenKey: 'bigmodel'` 那条(或它的平铺回退)至少有一条是对的。
  *
- * `redirect_uri` 这一跳该发什么同样未知。这里发的是我们自己那个回环地址 ——
- * 好处是它和授权请求里的 `redirect` **逐字相同**,符合 OAuth 对这两处的一般要求。
- * 但 ZCode 桌面端发的多半是 `zcode://oauth/callback` 字面量,如果服务端比的是
- * 「注册值」而不是「本次授权用的值」,那就得改发它。**换不到 token 时这是第一个
- * 该试的变量**:给 `createZcodeSpec` 传一个固定的 `redirect_uri` 即可,不要动流程。
+ * 登录之后发 AI 请求一度回 `[1234][网络错误…]`,原因是**少了第三跳**:那时省略了
+ * `businessLoginUrl`,等于拿 ② 的 OAuth token 直接当 API key。端点已探到并填上,
+ * 证据写在下面 `businessLoginUrl` 那段注释里。
  *
- * **第三跳(换业务令牌)的端点也未知**,所以省略了 `businessLoginUrl` —— 即
- * 「拿 ② 的 access_token 直接当 API key」。逆向报告里 BigModel 的 AI 端点
- * (`open.bigmodel.cn/api/anthropic`)吃的确实是 `x-api-key`,但那说的是用户自己
- * 填的那把 key。
+ * ============================ 排查时少走的两条弯路 ============================
+ * ① **1234 不是端点选错。** 先怀疑过是登录后被自动切到了
+ *    `open.bigmodel.cn/api/anthropic`(预设注释记着官方 FAQ:该端点仅限加白账号),
+ *    切回 coding 端点后**同样是 1234**。那次自动切换的行为仍然改掉了 ——
+ *    按 issuer 查表(`renderer/.../provider-auth.ts` 的 `SIGN_IN_PROTOCOL`),
+ *    Z.AI 那条要切、这条不切 —— 但它不是 1234 的原因。
+ *
+ * ② **`zcode.z.ai` 上没有任何 AI 代理**(`/api/anthropic`、`/api/v1/anthropic`、
+ *    `/api/v1/proxy/anthropic`、`/api/coding/paas/v4` 一律 404),别再往那边找端点。
+ *    AI 端点只在 `open.bigmodel.cn` 和 `api.z.ai` 上。
+ *
+ * ★ 探路方法记一笔:`open.bigmodel.cn` 的 `/api/paas/*` 和 `bigmodel.cn` 的 `/api/biz/*`
+ *   **鉴权跑在路由之前**,乱码路径也回鉴权错误 —— 在这两个前缀下扫路径是白费。
+ *   其他前缀(如 `/api/auth/*` 里公开的那几条)才会干净地回 `404 NOT_FOUND`。
  *
  * ============================ 回调策略(2026-09-09 读双方前端源码定案) ============================
  * ZCode 桌面端的回调是 `zcode://oauth/callback` 这个自定义协议,而**我们不注册协议**
@@ -123,7 +132,31 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
     `zcode://bigmodel-auth/callback`。
   */
   tokenRedirectUri: 'zcode://oauth/callback',
-  userinfoUrl: 'https://zcode.z.ai/api/oauth/userinfo',
+  /*
+    ★★★ **第三跳。2026-09-09 探到,和 Z.AI 那条已验证的端点逐字同构。**
+
+    先前省略了它(= 拿 ② 的 OAuth token 直接当 API key),表现是登录成功、
+    发请求回 `[1234][网络错误…]`。三种**形状合法**的假令牌
+    (`id.secret` / 假 JWT / 无点长串)在同一端点上一律 401,所以 1234 不是鉴权失败
+    —— 令牌过了那一层,是后面没有推理权限。缺的正是这一跳。
+
+    端点是这么找到的:`open.bigmodel.cn` 上 `/api/zzz-not-a-route` 会干净地回
+    `404 NOT_FOUND`,所以在没被网关吃掉的前缀上「存不存在」是可测的。按 Z.AI 那条
+    的对称性一扫就中,契约完全一致:
+
+      POST https://open.bigmodel.cn/api/auth/z/login   {token: <②的 access_token>}
+        不带 token → {"code":1002,"msg":"token is empty"}          ← 与 api.z.ai 逐字相同
+        token 无效 → {"code":500,"msg":"z.ai用户信息异常"}          ← api.z.ai 是同一句的英文
+
+    ★ 路径里那个 `z` 不是笔误,智谱这条的端点名就叫 `z/login`。
+  */
+  businessLoginUrl: 'https://open.bigmodel.cn/api/auth/z/login',
+  /*
+    ★ **不填 `userinfoUrl`。** 逆向文档记的 `zcode.z.ai/api/oauth/userinfo`
+    2026-09-09 实测是 404(Z.AI 那条 `chat.z.ai/api/oauth/userinfo` 回 401,是活的)。
+    它只用来在设置页显示邮箱,失败本来就不致命 —— 但留着一个已知 404 的地址,
+    只会让下一个排查的人以为这里还有一条没走通的链路。
+  */
   /*
     ★★ 标准那三个参数(`response_type` / `client_id` / `redirect_uri`)一个都不发 ——
     这是抓到的真实链接的形状。多发不是「无害的冗余」:这是一个登录页而不是授权端点,

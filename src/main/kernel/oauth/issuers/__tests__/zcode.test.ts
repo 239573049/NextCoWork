@@ -307,20 +307,56 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
     expect((req.body as Record<string, unknown>)['redirect_uri']).toBe('zcode://oauth/callback')
   })
 
-  it('★★ 没有第三跳端点 → refresh 返回 null（= 请用户重新登录），不假装刷新成功', async () => {
-    const fetchImpl = vi.fn() as unknown as typeof globalThis.fetch
+  it('★★★ 第三跳打的是 open.bigmodel.cn/api/auth/z/login，不是 api.z.ai 那条', async () => {
+    /*
+      ★★ 少了这一跳的表现**不是 401**:登录成功、凭证落库、界面显示已登录,
+      然后每条消息都回 `[1234][网络错误…]`。2026-09-09 实测,三种形状合法的假令牌
+      (`id.secret` / 假 JWT / 无点长串)在同一端点上一律 401 —— 所以 1234 是
+      「过了鉴权、没有推理权限」,而不是令牌不对。推导见 `zcode-bigmodel.ts`。
+
+      ★ 域名钉死:两条渠道的第三跳路径**同名**(`/api/auth/z/login`),
+      发到 api.z.ai 去的话错误信息只会说「用户信息异常」,不指向域名。
+    */
+    const fresh = jwt({ user_id: 'u-9' })
+    const seen: string[] = []
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      seen.push(String(url))
+      return jsonResponse({ code: 0, data: { access_token: fresh } })
+    }) as unknown as typeof globalThis.fetch
+
     const id = await ZCODE_BIGMODEL_OAUTH.refresh!(
       {
         kind: 'oauth',
         issuer: 'zcode-bigmodel',
-        accessToken: 'at',
-        refreshToken: 'rt',
+        accessToken: '旧 JWT',
+        refreshToken: 'oauth-at',
         expiresAt: null,
-        accountId: 'u'
+        accountId: 'u-9'
       },
       ctxWith(fetchImpl)
     )
-    expect(id).toBeNull()
-    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(seen).toEqual(['https://open.bigmodel.cn/api/auth/z/login'])
+    expect(id?.accessToken).toBe(fresh)
+    expect(id?.refreshToken).toBe('oauth-at')
+  })
+
+  it('★ 换码之后只打第三跳一个地址 —— 不去碰那条实测 404 的 userinfo', async () => {
+    /*
+      逆向文档记的 `zcode.z.ai/api/oauth/userinfo` 2026-09-09 实测是 404
+      (Z.AI 那条 `chat.z.ai/api/oauth/userinfo` 回 401,是活的),所以这条渠道
+      没有填 `userinfoUrl`。它只用来显示邮箱、失败不致命 —— 钉这一条不是怕它出错,
+      是怕后人照着 Z.AI 那条「补齐」时把一个已知 404 的地址加回来。
+    */
+    const seen: string[] = []
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      seen.push(String(url))
+      return jsonResponse({ code: 0, data: { access_token: jwt({ user_id: 'u-9' }) } })
+    }) as unknown as typeof globalThis.fetch
+
+    await ZCODE_BIGMODEL_OAUTH.finishExchange!(
+      { code: 0, data: { bigmodel: { access_token: 'oauth-at' }, user: { id: 9 } } },
+      ctxWith(fetchImpl)
+    )
+    expect(seen).toEqual(['https://open.bigmodel.cn/api/auth/z/login'])
   })
 })

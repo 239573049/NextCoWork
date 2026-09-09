@@ -547,7 +547,16 @@ export class UpstreamRouter {
           「Upstream request failed (HTTP 400)」—— 上游到底抱怨什么一个字都不说。
           记下来,排查时不必让用户再复现一次。
         */
-        this.host.logger.warn(`[upstream] ${c.provider.name} HTTP ${res.status}`, text.slice(0, 2048))
+        /*
+          ★ 连 URL 和模型一起记。只记供应商名的话,用户把这一行发过来时
+          「打的哪个端点」仍然要靠猜 —— 而同一家供应商换个 baseUrl 就是完全不同的
+          一条链路(GLM Coding Plan 那两家 coding / anthropic 两条端点的错误体形状
+          都不一样,谁也认不出对方)。
+        */
+        this.host.logger.warn(
+          `[upstream] ${c.provider.name} HTTP ${res.status} ${url} model=${c.alias.upstreamModel}`,
+          text.slice(0, 2048)
+        )
         let parsed: unknown = text
         try {
           parsed = JSON.parse(text)
