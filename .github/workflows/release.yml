@@ -5,17 +5,80 @@ on:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing version tag to publish (leave empty for a build-only run)'
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      source_sha: ${{ steps.target.outputs.source_sha }}
+      publish: ${{ steps.target.outputs.publish }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Resolve and validate release target
+        id: target
+        env:
+          TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+          import { join } from 'node:path'
+          const tag = process.env.TAG_NAME
+          const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+          if (tag) {
+            const { version } = JSON.parse(readFileSync('package.json', 'utf8'))
+            if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag) || tag !== `v${version}`) {
+              throw new Error(`Release tag ${tag} does not match package version ${version}`)
+            }
+            const tagSha = execFileSync('git', ['rev-parse', `refs/tags/${tag}^{commit}`], { encoding: 'utf8' }).trim()
+            if (tagSha !== sha) throw new Error('The checked-out commit does not match the release tag')
+            const lines = readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/)
+            const start = lines.indexOf(`## ${tag}`)
+            if (start < 0) throw new Error(`No changelog entry found for ${tag}`)
+            const rest = lines.slice(start + 1)
+            const end = rest.findIndex(line => line.startsWith('## '))
+            const notes = rest.slice(0, end < 0 ? undefined : end).join('\n').trim()
+            if (!notes) throw new Error(`Empty changelog entry for ${tag}`)
+            writeFileSync(join(process.env.RUNNER_TEMP, 'release-notes.md'), `${notes}\n`)
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nsource_sha=${sha}\npublish=${Boolean(tag)}\n`)
+          NODE
+
+      - name: Prepare draft Release
+        if: steps.target.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.target.outputs.tag }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --title "$TAG_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$TAG_NAME" --verify-tag --draft \
+              --title "$TAG_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+
   build:
     name: Build ${{ matrix.name }}
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -24,16 +87,19 @@ jobs:
         include:
           - name: Windows
             id: windows
+            platform: windows
             runner: windows-latest
             arch: x64
             artifact_path: dist/*.exe
           - name: Ubuntu
             id: linux
+            platform: linux
             runner: ubuntu-latest
             arch: x64
             artifact_path: dist/*.AppImage
           - name: macOS Apple Silicon
             id: macos-arm64
+            platform: macos
             runner: macos-15
             arch: arm64
             artifact_path: |
@@ -41,6 +107,7 @@ jobs:
               dist/*-arm64-mac.zip
           - name: macOS Intel
             id: macos-x64
+            platform: macos
             runner: macos-15-intel
             arch: x64
             artifact_path: |
@@ -50,6 +117,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -67,24 +136,52 @@ jobs:
           # Unsigned Windows and macOS artifacts are intentional for this release flow.
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      - name: Upload platform artifacts
+      - name: Upload platform assets to Release
+        if: needs.prepare.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process'
+          import { ARTIFACTS, collectArtifacts } from './scripts/upload-client-release.mjs'
+          const { TAG_NAME: tag, BUILD_PLATFORM: platform, BUILD_ARCH: architecture } = process.env
+          const { found } = await collectArtifacts('dist', false, tag.slice(1))
+          const expected = ARTIFACTS.filter(item => item.platform === platform && item.architecture === architecture)
+          const assets = found.filter(item => item.platform === platform && item.architecture === architecture)
+          if (expected.length === 0 || assets.length !== expected.length) {
+            throw new Error(`Missing release assets for ${platform}/${architecture}`)
+          }
+          execFileSync('gh', ['release', 'upload', tag, ...assets.map(item => item.path), '--clobber'], { stdio: 'inherit' })
+          NODE
+
+      - name: Upload build-only artifacts
+        if: needs.prepare.outputs.publish != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: nextcowork-${{ matrix.id }}
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   publish:
     name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG_NAME: ${{ needs.prepare.outputs.tag }}
 
     steps:
       - name: Check out release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -92,27 +189,15 @@ jobs:
           node-version: 24.16.0
 
       - name: Download platform artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          pattern: nextcowork-*
-          merge-multiple: true
+        run: gh release download "$TAG_NAME" --dir release-assets --pattern '*.exe' --pattern '*.AppImage' --pattern '*-mac.dmg' --pattern '*-mac.zip'
 
       - name: Verify client artifacts before publishing
-        run: node scripts/upload-client-release.mjs --dir release-assets --version "${GITHUB_REF_NAME#v}" --require-all --dry-run
+        run: node scripts/upload-client-release.mjs --dir release-assets --version "${TAG_NAME#v}" --require-all --dry-run
 
-      - name: Create release and upload artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
+      - name: Publish complete Release
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -d '' assets < <(find release-assets -type f -print0)
-          if (( ${#assets[@]} == 0 )); then
-            echo "No release artifacts were downloaded" >&2
-            exit 1
-          fi
           awk -v tag="$TAG_NAME" '
             $0 == "## " tag { found = 1; next }
             found && /^## / { exit }
@@ -122,18 +207,11 @@ jobs:
             echo "No changelog entry found for $TAG_NAME" >&2
             exit 1
           fi
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
-            gh release edit "$TAG_NAME" --title "$TAG_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
-          else
-            gh release create "$TAG_NAME" "${assets[@]}" \
-              --verify-tag \
-              --title "$TAG_NAME" \
-              --notes-file "$RUNNER_TEMP/release-notes.md"
-          fi
+          gh release edit "$TAG_NAME" --draft=false --title "$TAG_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
 
       - name: Upload client artifacts to NextCoWork API
         env:
           CLIENT_UPLOAD_TOKEN: ${{ secrets.CLIENT_UPLOAD_TOKEN }}
           CLIENT_UPDATE_BASE_URL: https://nextco.work
-        run: node scripts/upload-client-release.mjs --dir release-assets --version "${GITHUB_REF_NAME#v}" --base-url "$CLIENT_UPDATE_BASE_URL" --notes "$(cat "$RUNNER_TEMP/release-notes.md")" --require-all --ignore-duplicates
+        # The API stores notes from an HTTP header, which cannot carry multiline Chinese text.
+        run: node scripts/upload-client-release.mjs --dir release-assets --version "${TAG_NAME#v}" --base-url "$CLIENT_UPDATE_BASE_URL" --notes "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG_NAME" --require-all --ignore-duplicates
