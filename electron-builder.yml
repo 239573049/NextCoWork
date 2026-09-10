@@ -32,6 +32,10 @@ electronFuses:
   onlyLoadAppFromAsar: false
   loadBrowserProcessSpecificV8Snapshot: false
   grantFileProtocolExtraPrivileges: true
+# Ad-hoc signs the macOS app so an unsigned arm64 build doesn't show as
+# "damaged" by Gatekeeper after download quarantines it. See the hook file
+# for details.
+afterPack: scripts/mac-adhoc-sign.mjs
 publish:
   provider: generic
   url: https://nextco.work/api/client/updates/feed/stable/

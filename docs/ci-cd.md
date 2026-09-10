@@ -33,4 +33,4 @@ CLIENT_UPLOAD_TOKEN=... npm run release:upload -- --version 0.1.3 --require-all
 gh workflow run release.yml --ref main -f release_tag=v0.1.6
 ```
 
-构建或上传失败时，尚未公开的 Release 保持草稿，可重跑失败的 job；已经上传的同名资源会被替换。当前构建不依赖代码签名，Windows 安装程序和 macOS 安装包都会正常生成并上传。macOS 用户首次打开未签名应用时，按系统提示在“系统设置 → 隐私与安全性”中允许打开即可。
+构建或上传失败时，尚未公开的 Release 保持草稿，可重跑失败的 job；已经上传的同名资源会被替换。当前构建不依赖付费的 Apple Developer 证书或 Windows 签名证书，Windows 安装程序和 macOS 安装包都会正常生成并上传。macOS 安装包在打包阶段会自动做 ad-hoc 签名（`scripts/mac-adhoc-sign.mjs`），避免 Apple Silicon 上未签名 arm64 应用被 Gatekeeper 判定为“已损坏”；用户首次打开时仍会看到“未知开发者”提示，按系统提示在“系统设置 → 隐私与安全性”中允许打开即可。
