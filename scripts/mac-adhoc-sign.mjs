@@ -17,6 +17,12 @@ export default async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)
   const entitlements = path.join(context.packager.projectDir, 'build/entitlements.mac.plist')
+  // The Electron.app framework tree ships nested items (PkgInfo files,
+  // "Versions/Current" symlinks) carrying a `com.apple.FinderInfo` xattr.
+  // codesign refuses to sign anything under a path with that xattr present,
+  // and `xattr -cr` alone does not reliably strip it from every nested entry,
+  // so clear each path individually first.
+  execFileSync(`find "${appPath}" -print0 | xargs -0 xattr -c`, { shell: true, stdio: 'inherit' })
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', entitlements, appPath], {
     stdio: 'inherit',
   })
