@@ -71,9 +71,13 @@ describe('OpenAI protocol routing and recovery', () => {
   })
 
   it('does not count an empty decoded response as a successful request', async () => {
-    const r = rig({ providers: [provider('a')], aliases: [alias('m', 'a')], responses: [ok(''), ok(''), ok('')] })
+    // network 错误的重试上限是 MAX_NETWORK_ATTEMPTS(6),不是通用的 MAX_ATTEMPTS(3)
+    const r = rig({
+      providers: [provider('a')], aliases: [alias('m', 'a')],
+      responses: [ok(''), ok(''), ok(''), ok(''), ok(''), ok('')]
+    })
     expect((await drain(r.router)).at(-1)).toMatchObject({ type: 'error', error: { code: 'network' } })
-    expect(r.usageRecords).toHaveLength(3)
+    expect(r.usageRecords).toHaveLength(6)
     expect(r.usageRecords.every((attempt) => !attempt.ok)).toBe(true)
     expect(r.router.health()[0]?.healthy).toBe(false)
   })
@@ -637,7 +641,8 @@ describe('UpstreamRouter · 首字节边界(§5.3)', () => {
     const { router, calls } = rig({
       providers: [provider('p1', { priority: 0 }), provider('p2', { priority: 1 })],
       aliases: [alias('m', 'p1'), alias('m', 'p2')],
-      responses: [ok(bare), ok(bare), ok(bare), ok(sseBody({ text: '来自 p2' }))]
+      // p1 是这类 network 错误,MAX_NETWORK_ATTEMPTS(6)次都吃了以后才会换供应商
+      responses: [ok(bare), ok(bare), ok(bare), ok(bare), ok(bare), ok(bare), ok(sseBody({ text: '来自 p2' }))]
     })
     const out = await drain(router)
     expect(out.some((e) => e.type === 'provider_switch')).toBe(true)

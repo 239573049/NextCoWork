@@ -117,6 +117,13 @@ export interface TranscriptState {
   /** 消息 → 产出它的 run。老对话(第 12 条迁移之前)为空。 */
   messageRuns?: Record<string, string>
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
+  /**
+   * 最近一次上游请求**这一次**报回来的输入 token —— 缓存读写也算,它们同样占着窗口。
+   *
+   * ★ 和 `usage.inputTokens` 的区别是全部:那一个是整轮累加的账(问三次就是三次之和),
+   * 拿它除以窗口很快就会超过 100%。上下文占用是个**瞬时量**,只能看最后一次。
+   */
+  lastInputTokens?: number
   contextCheckpoints: ContextCheckpoint[]
   contextStatus?: ContextStatus
   /**
@@ -159,6 +166,18 @@ export interface RunUsage extends TokenUsage {
    * 展示层据此不显示 TPS,而不是显示一个 0。
    */
   upstreamMs?: number
+}
+
+/**
+ * 这一次请求实际送上去的提示词有多大。
+ *
+ * ★ 三项都要加:Anthropic 的 `input_tokens` **不含**命中缓存和写入缓存的那部分,
+ * 只看它的话,一段被缓存住的长对话会显示成「几乎没占上下文」。
+ */
+export function promptTokensOf(usage: TokenUsage): number {
+  return usage.inputTokens
+    + (usage.cacheReadInputTokens ?? 0)
+    + (usage.cacheCreationInputTokens ?? 0)
 }
 
 /** Add one provider response's usage to a child-agent total. */
@@ -392,7 +411,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
           const delta: RunUsage = d.latencyMs === undefined
             ? d.usage
             : { ...d.usage, upstreamMs: d.latencyMs }
-          return { ...s, usage: addUsage(s.usage, delta) }
+          return { ...s, usage: addUsage(s.usage, delta), lastInputTokens: promptTokensOf(d.usage) }
         }
 
         case 'provider_retry':

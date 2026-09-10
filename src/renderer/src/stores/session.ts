@@ -11,6 +11,7 @@
  * 不做 ack/流控 —— 真背压是研究课题(方案 §10)。
  */
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
+import type { PermissionMode } from '../../../shared/agent/permission'
 import type { AgentEvent } from '../../../shared/agent/event'
 import { isToolResultOnly, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions } from '../../../shared/agent/run-request'
@@ -40,6 +41,7 @@ import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
 import { abortRun, attachRun, interjectRun, onAgentEvent, startRun } from '../services/agent'
 import { getSessionInput, persistSessionInput } from '../services/app'
+import { compactContext as compactSessionContext } from '../services/context'
 import { replaceHistory } from '../services/sessions'
 import { getSession } from '../services/sessions'
 
@@ -75,13 +77,34 @@ export interface SessionState {
   lastOptions: SendOptions | null
   /** 输入框草稿 —— 切 Tab 不能丢,**进程重启也不能丢**(落盘,见 §8) */
   draft: string
+  /** 手动压缩上下文进行中。圆环据此转圈,并挡住第二次双击。 */
+  compacting: boolean
+  /** 上一次手动压缩的失败原因,成功或再次发起时清掉。 */
+  compactError: string | null
 
   send: (text: string, opts: SendOptions, parts?: ContentPart[]) => Promise<void>
   stop: () => Promise<void>
+  /**
+   * 手动压缩上下文(输入框那个圆环双击)。
+   *
+   * ★ **只在空闲时可用**:正在跑的那个 run 已经把自己的上下文投影冻在主进程里,
+   * 此刻落检查点它不会读到,界面读数却已经跳了 —— 两边从此对不上。
+   */
+  compactContext: () => Promise<void>
   setDraft: (v: string) => void
   /** 插话 —— toggle:pending ⇄ promoted。不发起任何请求 */
   promoteInput: (id: string) => void
   editInput: (id: string, text: string) => void
+  /**
+   * 权限档位药丸切换时调用:还没被消费的排队消息**改用新档位**,
+   * 而不是继续背着入队那一刻冻结的旧档位。
+   *
+   * ★ 只改 `permissionMode` 这一个字段,不动 `options` 里的模型/思考强度/联网开关 ——
+   * 那几个字段「逐条冻结」的既有设计(见 `queued-input.ts` 头注)仍然成立,
+   * 这里是刻意为「审批档位」单独开的例外:用户切到完全访问,图的就是不想再被后面
+   * 排着的每一条追问打断,那份意图理应立刻覆盖到整条队列,而不是只对新排的消息生效。
+   */
+  retagQueuedPermission: (mode: PermissionMode) => void
   /**
    * 编辑一条用户消息。`continueRun` = 从这条起重跑(界面上的「重新生成」)。
    *
@@ -111,6 +134,8 @@ function createSessionStore(sessionId: string): SessionStore {
     queuedInputs: [],
     lastOptions: null,
     draft: '',
+    compacting: false,
+    compactError: null,
 
     async send(text, opts, parts) {
       const s = get()
@@ -203,6 +228,35 @@ function createSessionStore(sessionId: string): SessionStore {
       await abortRun(runId, true)
     },
 
+    async compactContext() {
+      const s = get()
+      if (s.activeRunId !== null || s.compacting) return
+      set({ compacting: true, compactError: null })
+      try {
+        const { checkpoint, inputTokens } = await compactSessionContext(s.sessionId)
+        set((st) => ({
+          transcript: {
+            ...st.transcript,
+            contextCheckpoints: [
+              ...st.transcript.contextCheckpoints.filter((c) => c.id !== checkpoint.id),
+              checkpoint
+            ],
+            /*
+              ★ 换成**估算值**,而不是等下一轮真实 usage 回来。
+              等的话,用户压完看到读数纹丝不动,只会再点两次 ——
+              而每一次都是一次真实的摘要请求。估算与真实的差距(系统提示词、
+              工具 schema 不在内)远小于「界面看起来没反应」的代价。
+            */
+            lastInputTokens: inputTokens
+          }
+        }))
+      } catch (err) {
+        set({ compactError: err instanceof Error ? err.message : String(err) })
+      } finally {
+        set({ compacting: false })
+      }
+    },
+
     setDraft(v) {
       set({ draft: v })
       // ★ 按键级频率,走防抖。丢失窗口 ≤500ms,代价是半个词
@@ -258,6 +312,17 @@ function createSessionStore(sessionId: string): SessionStore {
       persistInput(sessionId, true)
       // 编辑一条已引入的条目:主进程信箱里存的是旧文本,必须重发覆盖。
       syncInterject(sessionId)
+    },
+
+    retagQueuedPermission(mode) {
+      const s = get()
+      if (s.queuedInputs.length === 0) return
+      set({
+        queuedInputs: s.queuedInputs.map((q) =>
+          q.options.permissionMode === mode ? q : { ...q, options: { ...q.options, permissionMode: mode } }
+        )
+      })
+      persistInput(sessionId, true)
     },
 
     async editMessage(id, text, continueRun, options) {
@@ -625,10 +690,13 @@ async function hydrateInput(sessionId: string): Promise<void> {
  * 之后,上面所有历史轮次的用量读数**一起消失**,而当前这一轮是好的。
  * 抽成函数就是不想在三个地方各记一次。
  */
-function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage' | 'messageRuns'> {
+function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage' | 'messageRuns' | 'lastInputTokens'> {
   return {
     ...(t.runUsage === undefined ? {} : { runUsage: t.runUsage }),
-    ...(t.messageRuns === undefined ? {} : { messageRuns: t.messageRuns })
+    ...(t.messageRuns === undefined ? {} : { messageRuns: t.messageRuns }),
+    // 上下文占用是**整段对话**的属性:新一轮还没发出请求之前,
+    // 圆环该继续显示上一轮结束时的读数,而不是空着。
+    ...(t.lastInputTokens === undefined ? {} : { lastInputTokens: t.lastInputTokens })
   }
 }
 

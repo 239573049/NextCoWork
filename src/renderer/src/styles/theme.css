@@ -152,6 +152,8 @@
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
   --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  /* 品牌字标专用 —— 圆润几何感,和正文的 --font-sans 拉开区分度,只用在「NextCoWork」标题上 */
+  --font-brand: 'SF Pro Rounded', 'Avenir Next', 'PingFang SC', var(--font-sans);
 }
 
 /*

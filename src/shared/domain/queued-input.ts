@@ -58,7 +58,13 @@ export interface QueuedInput {
   text: string
   attachments: QueuedAttachment[]
   status: QueuedInputStatus
-  /** ★ 入队瞬间冻结的档位,后续改 UI 不影响它 */
+  /**
+   * ★ 入队瞬间冻结的档位,后续改 UI 不影响它 —— **唯一的例外是
+   * `permissionMode`**:切换权限档位药丸时,`retagQueuedPermission`(见
+   * `stores/session.ts`)会把队列里还没被消费的条目原地改成新档位。用户切到
+   * 「完全访问」图的就是接下来都不用再被打断,如果排在后面的追问还要
+   * 背着旧档位继续走审批,这条切换就等于没生效。
+   */
   options: SendOptions
   enqueuedAt: number
   /** 点「插话」的时刻。多条同时被引入时,它是唯一的排序依据 */

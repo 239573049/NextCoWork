@@ -234,6 +234,16 @@ function groupContainingTab(dock: ReturnType<typeof migrateLegacyInnerTabs>, tab
   return visit(dock.root)
 }
 
+/** A split inherits the pane its anchor group sits in, never the drag direction. */
+function paneOfGroup(dock: ReturnType<typeof migrateLegacyInnerTabs>, groupId: string): TabPane {
+  const node = findGroup(dock.root, groupId)
+  if (node === null) return 'main'
+  if (node.pinned === 'right') return 'right'
+  const members = dock.tabs.filter((tab) => node.tabIds.includes(tab.id))
+  const head = members[0]
+  return head !== undefined && members.every((tab) => paneOf(tab) === paneOf(head)) ? paneOf(head) : 'main'
+}
+
 export const useTabsStore = create<TabsState>((set, get) => {
   const dockCache = new Map<string, { source: InnerTabState; dock: ReturnType<typeof migrateLegacyInnerTabs> }>()
   const withDock = (state: InnerTabState): InnerTabState => {
@@ -421,7 +431,12 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const dock = get().dockOf(workspaceId)
       if (!findGroup(dock.root, fromGroupId)?.tabIds.includes(tabId) || !findGroup(dock.root, targetGroupId)) return
       const moving = dock.tabs.find((tab) => tab.id === tabId)
-      const destinationPane: TabPane = direction === 'right' ? 'right' : direction === 'down' ? 'bottom' : 'main'
+      /*
+        ★ 新格属于**目标格所在的那一面板**,不是拖动方向。按方向推 pane 的话,
+        在主区往下拖会把这个 Tab 标成 `bottom`,而底部面板默认是收起的 ——
+        `visibleDockNode` 会把整格滤掉,表现是「会话拖完就没了,侧栏点它也没反应」。
+      */
+      const destinationPane: TabPane = paneOfGroup(dock, targetGroupId)
       if (moving?.kind === 'chat' && paneOf(moving) === 'main' && destinationPane !== 'main') {
         const mainChats = dock.tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main')
         if (mainChats.length <= 1) return
@@ -546,7 +561,10 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const cur = get().stateOf(workspaceId)
       const existing = cur.tabs.find((t) => t.kind === 'chat' && t.ref.sessionId === sessionId)
       if (existing !== undefined) {
+        // The conversation may live in a collapsed panel; activating it alone
+        // would look like the sidebar click did nothing.
         if (paneOf(existing) === 'right') useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
+        if (paneOf(existing) === 'bottom') useWindowStore.getState().setBottomPanelForWorkspace(workspaceId, true)
         const groupId = groupContainingTab(get().dockOf(workspaceId), existing.id)
         if (groupId) get().activateDockTab(workspaceId, groupId, existing.id)
         return

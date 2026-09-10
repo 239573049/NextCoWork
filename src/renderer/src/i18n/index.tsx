@@ -323,6 +323,12 @@ const ZH: Messages = {
   "composer.approvalHint": "AI 操作如何审批？更改会在下一次新回复生效",
   "composer.stopGeneration": "停止生成",
   "composer.noAvailableModel": "还没有可用的模型",
+  "composer.contextUsage": ({ percent }) => `上下文已用 ${percent}%`,
+  "composer.contextUsageDetail": ({ used, window, remaining }) =>
+    `上下文 ${Number(used).toLocaleString()} / ${Number(window).toLocaleString()} tokens（剩余 ${remaining}%）`,
+  "composer.contextCompactHint": "双击手动压缩上下文",
+  "composer.contextCompactBusy": "生成中无法压缩，先停止再双击",
+  "composer.contextCompacting": "正在压缩上下文…",
   "chat.deleteQueued": "删除",
   "chat.edit": "编辑",
   "chat.editMessage": "编辑消息",
@@ -1812,6 +1818,12 @@ const EN: Messages = {
     "How should AI actions be approved? Changes apply to the next reply",
   "composer.stopGeneration": "Stop generation",
   "composer.noAvailableModel": "No models available",
+  "composer.contextUsage": ({ percent }) => `Context ${percent}% used`,
+  "composer.contextUsageDetail": ({ used, window, remaining }) =>
+    `Context ${Number(used).toLocaleString()} / ${Number(window).toLocaleString()} tokens (${remaining}% left)`,
+  "composer.contextCompactHint": "Double-click to compact the context",
+  "composer.contextCompactBusy": "Stop the current reply before compacting",
+  "composer.contextCompacting": "Compacting context…",
   "chat.emptyMessage": "(Empty message)",
   "chat.images": ({ count }) => ` · ${count} image${count === 1 ? "" : "s"}`,
   "chat.attachments": ({ count }) =>

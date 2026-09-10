@@ -111,8 +111,9 @@ export function Sidebar({
         </IconButton>
       </div>
 
-      <div className="px-4 pt-1 pb-4 text-fg">
+      <div className="flex items-center gap-2 px-4 pt-1 pb-4 text-fg">
         <Mark />
+        <span className="font-brand text-[15px] font-bold tracking-tight">NextCoWork</span>
       </div>
 
       {/* ── 上半:全局 ── */}
@@ -186,16 +187,14 @@ export function Sidebar({
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
                   {sessions.filter((s) => s.archived).map((s) => (
-                    <li key={`archived-${s.id}`}>
-                      <button
-                        type="button"
-                        onClick={() => onSelectSession(s.id)}
-                        className="flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
-                      >
-                        <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                        {s.favorited && <span className="shrink-0 text-accent">★</span>}
-                      </button>
-                    </li>
+                    <ArchivedSessionItem
+                      key={s.id}
+                      session={s}
+                      workspaceId={workspace.id}
+                      onSelectSession={onSelectSession}
+                      onDeleteSession={onDeleteSession}
+                      t={t}
+                    />
                   ))}
                 </ul>
               )}
@@ -521,6 +520,79 @@ function SessionGroupBlock({
 
 function MenuAction({ icon, label, danger = false, onSelect }: { icon: ReactNode; label: string; danger?: boolean; onSelect: () => void }): ReactNode {
   return <button type="button" role="menuitem" onClick={onSelect} className={cn('flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[13px] transition-colors hover:bg-tint-strong', danger ? 'text-danger' : 'text-fg')}><span className={danger ? 'text-danger' : 'text-accent-soft'}>{icon}</span><span className="truncate">{label}</span></button>
+}
+
+/**
+ * 归档列表里的一行。曾经这里只是个裸 `<button>`,没有右键菜单 ——
+ * 「取消归档」「删除」两个动作都挂在 `SessionGroupBlock` 的上下文菜单里,
+ * 而归档区渲染的是另一段 JSX,压根没接那套菜单,于是归档会话删不掉、
+ * 也无法一键恢复回「最近对话」。这里补一份缩小版菜单,复用同样的 IPC。
+ */
+function ArchivedSessionItem({
+  session,
+  workspaceId,
+  onSelectSession,
+  onDeleteSession,
+  t
+}: {
+  session: SessionListItem
+  workspaceId: string
+  onSelectSession: (sessionId: string) => void
+  onDeleteSession: (sessionId: string) => Promise<void>
+  t: SidebarI18n
+}): ReactNode {
+  const [menu, setMenu] = useState<ContextMenuPosition | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const run = async (action: () => Promise<void>): Promise<void> => {
+    try { await action() } catch (error) { console.error('[sessions] 操作失败', error) }
+    setMenu(null)
+    setConfirmingDelete(false)
+  }
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelectSession(session.id)}
+        onContextMenu={(event) => {
+          event.preventDefault()
+          setMenu({ x: event.clientX, y: event.clientY })
+        }}
+        className="flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
+      >
+        <span className="min-w-0 flex-1 truncate">{session.title}</span>
+        {session.favorited && <span className="shrink-0 text-accent">★</span>}
+      </button>
+      {menu !== null && (
+        <ContextMenu position={menu} label={t('session.menu')} onClose={() => { setMenu(null); setConfirmingDelete(false) }} width={220}>
+          {() => (
+            <>
+              <MenuAction icon={<ExternalLink size={15} />} label={t('session.openNewWindow')} onSelect={() => {
+                void run(() => openSessionWindow(workspaceId, session.id))
+              }} />
+              <MenuAction icon={<Copy size={15} />} label={t('session.copy')} onSelect={() => {
+                void run(async () => { await duplicateSession(session.id, t('session.copyTitle', { title: session.title })) })
+              }} />
+              <div role="separator" className="my-1 h-px bg-border" />
+              <MenuAction icon={<Archive size={15} />} label={t('session.unarchive')} onSelect={() => void run(() => setArchived(session.id, false))} />
+              <div role="separator" className="my-1 h-px bg-border" />
+              <MenuAction
+                danger
+                icon={<Trash2 size={15} />}
+                label={confirmingDelete ? t('common.confirmDelete') : t('session.delete')}
+                onSelect={() => {
+                  if (confirmingDelete) {
+                    void run(() => onDeleteSession(session.id))
+                  } else {
+                    setConfirmingDelete(true)
+                  }
+                }}
+              />
+            </>
+          )}
+        </ContextMenu>
+      )}
+    </li>
+  )
 }
 
 /** 可折叠卡片 —— 截图里下半三块都是这个形状 */

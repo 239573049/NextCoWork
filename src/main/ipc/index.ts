@@ -102,7 +102,7 @@ import {
 } from './workspace'
 import { mutateWorkspaceFile, readWorkspaceFile, revealWorkspaceFile, writeWorkspaceFile } from './workspace-files'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
-import { listContextCheckpoints, updateContextCheckpoint } from './context'
+import { compactContext, listContextCheckpoints, updateContextCheckpoint } from './context'
 import {
   createSession,
   duplicateSession,
@@ -281,6 +281,7 @@ const handlers: HandlerMap = {
   'conversations:searchAll': (req) => searchAll(req),
   'context:list': (req) => listContextCheckpoints(req),
   'context:updateCheckpoint': (req) => updateContextCheckpoint(req),
+  'context:compact': (req) => compactContext(req),
   'storage:getStats': () => getStats(),
   'storage:vacuum': () => vacuum(),
   'storage:openDataDirectory': () => openDataDirectory(),

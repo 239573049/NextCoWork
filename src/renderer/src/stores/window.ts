@@ -94,6 +94,7 @@ interface WindowState {
   toggleRightPanel: () => void
   setRightPanelForWorkspace: (workspaceId: string, open: boolean) => void
   toggleBottomPanel: () => void
+  setBottomPanelForWorkspace: (workspaceId: string, open: boolean) => void
   /** 拖动分隔条时每帧都在调 —— 落盘那侧防抖 500ms,这里不用自己攒 */
   setRightPanelWidth: (px: number) => void
   setBottomPanelHeight: (px: number) => void
@@ -351,6 +352,17 @@ export const useWindowStore = create<WindowState>((set, get) => {
                 [workspaceId]: next
               }
             })
+      })
+    },
+
+    setBottomPanelForWorkspace(workspaceId, open) {
+      const byWorkspace = {
+        ...get().bottomPanelOpenByWorkspace,
+        [workspaceId]: open
+      }
+      set({
+        bottomPanelOpenByWorkspace: byWorkspace,
+        ...(get().activeWorkspaceId === workspaceId ? { bottomPanelOpen: open } : {})
       })
     },
 

@@ -19,6 +19,7 @@ import { isImageMime, mimeOfExt } from '../../../../shared/domain/attachment'
 import type { Workspace } from '../../../../shared/domain/workspace'
 import { ulid } from '../../../../shared/util/id'
 import { listSessionAttachments, pickAttachments, removeAttachment, uploadFile } from '../../services/attachment'
+import { updateWorkspace } from '../../services/app'
 import { sessionStore, resumeQueue } from '../../stores/session'
 import { Composer, type FallbackModel } from './Composer'
 import { type TrayItem } from './AttachmentTray'
@@ -60,7 +61,10 @@ export function ChatView({
     editMessage,
     deleteTurn,
     dropInput,
-    moveInputToDraft
+    moveInputToDraft,
+    retagQueuedPermission,
+    compactContext,
+    compacting
   } = useSession()
   const providerById = useModelsStore((s) => s.providerById)
   const openMarkdownFile = useCallback((path: string) => {
@@ -98,6 +102,9 @@ export function ChatView({
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
 
+  /** 批准执行后计划模式已经完成使命 —— 药丸和工作区默认值都要跟着退回普通模式,否则下一句话还得再走一遍只读审批。 */
+  const [planExitSignal, setPlanExitSignal] = useState(0)
+
   const executePlan = useCallback((plan: string, newSession: boolean, planId?: string, planVersion?: number): void => {
     const options = {
       workspaceId: workspace.id,
@@ -115,6 +122,10 @@ export function ChatView({
     }
     const start = (targetSessionId: string): void => {
       void sessionStore(targetSessionId).getState().send(`Execute the approved plan:\n\n${plan}`, options)
+    }
+    setPlanExitSignal((v) => v + 1)
+    if (workspace.settings.defaultMode === 'plan') {
+      void updateWorkspace({ id: workspace.id, settings: { defaultMode: 'normal' } }).catch(() => undefined)
     }
     if (!newSession) { start(ensureSessionId()); return }
     void createSession(workspace.id, t('composer.planExecutionTitle')).then((session) => {
@@ -320,12 +331,17 @@ export function ChatView({
       fallbackModel={fallbackModel}
       draft={draft}
       onDraft={setDraft}
+      onPermissionModeChange={retagQueuedPermission}
       running={running}
+      planExitSignal={planExitSignal}
       attachments={tray}
       onAttachFiles={attachFiles}
       onPickAttachment={pickAttachment}
       onRemoveAttachment={removeFromTray}
       onRetryAttachment={retryUpload}
+      contextTokens={transcript.lastInputTokens}
+      contextCompacting={compacting}
+      onCompactContext={compactContext}
       onSend={(text, v) => {
         const parts = partsOf(text)
         /*

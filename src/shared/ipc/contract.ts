@@ -327,6 +327,16 @@ export interface IpcInvokeMap {
     req: { checkpointId: string; note: string; revision: number }
     res: ContextCheckpoint
   }
+  /**
+   * 手动压缩上下文 —— 让模型总结一遍旧历史,落一个新检查点。
+   *
+   * ★ 只在会话**空闲**时可用:跑着的那个 run 已经把自己的投影冻在内存里,
+   * 此时落检查点不会影响它,却会让界面上的读数和模型实际看到的对不上。
+   */
+  'context:compact': {
+    req: { sessionId: string }
+    res: { checkpoint: ContextCheckpoint; inputTokens: number }
+  }
 
   // ── Agent ──
   /** ★ runId 由调用方传入,不由这里返回(方案 §3 规则 2) */
@@ -810,6 +820,7 @@ export const INVOKE_CHANNELS = {
   'storage:clearLocalData': 1
   , 'context:list': 1
   , 'context:updateCheckpoint': 1
+  , 'context:compact': 1
   , 'plans:list': 1
   , 'plans:get': 1
   , 'plans:update': 1

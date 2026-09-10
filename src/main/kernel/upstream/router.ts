@@ -45,6 +45,14 @@ import { ImageInputError, prepareRequestImages } from './images'
 
 /** 每个 provider 最多试几次(含首次)。第 3 次还不行,换下一个 provider 比继续磕更有用。 */
 const MAX_ATTEMPTS = 3
+/**
+ * 纯连接层错误(fetch 本身抛出,比如 `net::ERR_HTTP2_PROTOCOL_ERROR`、DNS 失败、
+ * 握手中断)不是「这家供应商不行」,是「这台机器这一刻连不上网」——换下一个 provider
+ * 大概率也是同一个病因,真正管用的是**多等一会儿再碰**。所以给它比 `MAX_ATTEMPTS`
+ * 更多的机会,而不是三次就判它「换家」或者干脆报错干瞪眼(方案 §4.2 的失败态本该
+ * 是「明确没救了」,一次 HTTP2 协议错误显然算不上)。
+ */
+const MAX_NETWORK_ATTEMPTS = 6
 const DEFAULT_BASE_DELAY_MS = 500
 /**
  * 限流(429)专用的退避基数,和上面那个**刻意不是一个数**。
@@ -735,7 +743,7 @@ export class UpstreamRouter {
         }
       }
 
-      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      for (let attempt = 0; attempt < MAX_NETWORK_ATTEMPTS; attempt++) {
         /*
           ★ 别人刚在这一家上吃了 429 —— **在发请求之前**先把这次退避等掉。
 
@@ -800,7 +808,9 @@ export class UpstreamRouter {
           return
         }
 
-        const canRetry = outcome.error.retryable && attempt < MAX_ATTEMPTS - 1
+        // network 借用更宽的上限,其余可重试错误(限流、5xx …)维持原来的 3 次
+        const attemptLimit = outcome.error.code === 'network' ? MAX_NETWORK_ATTEMPTS : MAX_ATTEMPTS
+        const canRetry = outcome.error.retryable && attempt < attemptLimit - 1
         if (!canRetry) break
 
         // 没有这条事件,用户看到的就是白白冻结 30 秒(方案 §4.2)

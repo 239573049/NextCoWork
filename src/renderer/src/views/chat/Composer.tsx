@@ -51,6 +51,7 @@ import type {
 } from "../../../../shared/agent/run-request";
 import {
 } from "../../../../shared/agent/run-request";
+import { DEFAULT_CONTEXT_WINDOW } from "../../../../shared/agent/context-management";
 import { modelThinkingLevels, normalizeModelThinkingLevel } from "../../../../shared/domain/model-runtime";
 import type {
   Workspace,
@@ -116,6 +117,7 @@ export function Composer({
   fallbackModel,
   draft,
   onDraft,
+  onPermissionModeChange,
   running,
   onSend,
   onStop,
@@ -124,12 +126,21 @@ export function Composer({
   onPickAttachment,
   onRemoveAttachment,
   onRetryAttachment,
+  planExitSignal,
+  contextTokens,
+  contextCompacting = false,
+  onCompactContext,
 }: {
   workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
   fallbackModel: FallbackModel;
   draft: string;
   onDraft: (v: string) => void;
+  /**
+   * 权限档位药丸被用户切换时回调。用于把还没被消费的排队消息改标成新档位 ——
+   * 否则切到「完全访问」只对之后新敲的消息生效,已经排在队列里的那些还得继续按旧档位跟审批。
+   */
+  onPermissionModeChange?: (mode: PermissionMode) => void;
   running: boolean;
   onSend: (text: string, value: ComposerValue) => void;
   onStop: () => void;
@@ -145,6 +156,22 @@ export function Composer({
   onPickAttachment?: () => void;
   onRemoveAttachment?: (key: string) => void;
   onRetryAttachment?: (key: string) => void;
+  /**
+   * 方案获批并开始执行时,ChatView 把这个计数加一。
+   *
+   * ★ 不能用 `workspace.settings.defaultMode` 直接同步 —— 药丸是本地权威,
+   * 工作区设置改变不应该把用户刚选的值冲掉(见 `fromSettings`/`patch` 那段注释)。
+   * 这个计数是专门为“退出计划模式”这一件事开的侧门,不走那条拦置。
+   */
+  planExitSignal?: number;
+  /**
+   * 最近一次上游请求实际吃掉的输入 token。★ 是**瞬时量**不是累计量 ——
+   * 传 `transcript.usage.inputTokens`(整轮之和)的话,聊到第三轮就会显示 200%。
+   */
+  contextTokens?: number;
+  contextCompacting?: boolean;
+  /** 双击圆环触发。生成中不给触发,由这里的按钮自己拦。 */
+  onCompactContext?: () => void;
 }): ReactNode {
   const { t } = useI18n();
   const { models: configuredModels, providers, loaded, providerOf, load } = useModelsStore();
@@ -153,6 +180,13 @@ export function Composer({
   const [value, setValue] = useState<ComposerValue>(() =>
     fromSettings(workspace.settings),
   );
+  /** 只在 `planExitSignal` **变化**时把药丸拨回普通模式 —— 挂载那一次不算数。 */
+  const lastPlanExit = useRef(planExitSignal);
+  useEffect(() => {
+    if (planExitSignal === lastPlanExit.current) return;
+    lastPlanExit.current = planExitSignal;
+    setValue((v) => (v.mode === "normal" ? v : { ...v, mode: "normal" }));
+  }, [planExitSignal]);
   const input = useRef<MentionInputHandle | null>(null);
   const lastCaret = useRef<number | null>(null);
   const [skills, setSkills] = useState<SkillListItem[]>([]);
@@ -572,6 +606,7 @@ export function Composer({
                     description={t(`permission.${m}Hint` as "permission.askHint" | "permission.autoHint" | "permission.fullHint")}
                     onSelect={() => {
                       patch({ permissionMode: m });
+                      onPermissionModeChange?.(m);
                       close();
                     }}
                   >
@@ -665,6 +700,19 @@ export function Composer({
           )}
 
           <div className="flex-1" />
+
+          {/*
+            ── 上下文余量:紧挨模型选择器的左边 ──
+            它说的是「发给谁」之前的那个前提 —— 这一次还装得下多少。
+            双击 = 手动压缩,只在停止状态可用。
+          */}
+          <ContextRing
+            used={contextTokens}
+            window={selectedModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW}
+            running={running}
+            compacting={contextCompacting}
+            onCompact={onCompactContext}
+          />
 
           {/*
             ── 模型选择器:靠右,紧挨发送按钮 ──
@@ -814,6 +862,111 @@ function Pill({
     </span>
   );
 }
+
+/** 超过它就换成告警色 —— 和状态行那根压力条同一个判据。 */
+const CONTEXT_WARN = 0.75;
+
+/**
+ * 上下文余量圆环。
+ *
+ * ★ 分子是**最近一次请求**报回来的输入 token,不是整轮累加 ——
+ * 上下文占用是个瞬时量,累加出来的那个数几轮之内必然冲破 100%。
+ * 分母优先用当前模型别名的窗口,查不到才退到默认的 272K。
+ */
+function ContextRing({
+  used,
+  window: total,
+  running,
+  compacting,
+  onCompact,
+}: {
+  used?: number;
+  window: number;
+  running: boolean;
+  compacting: boolean;
+  onCompact?: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+  // 还没发生过一次真实请求时不画:一个恒为 0 的圆环只是个渲染残留。
+  if (used === undefined || total <= 0) return null;
+  const ratio = Math.min(1, Math.max(0, used / total));
+  const percent = Math.round(ratio * 100);
+  const radius = 6;
+  const circumference = 2 * Math.PI * radius;
+  const blocked = running || compacting || onCompact === undefined;
+  const color = ratio >= CONTEXT_WARN ? "var(--color-danger)" : "var(--color-accent)";
+  return (
+    // `group` 挂在这一层:圆环按钮和悬浮说明是兄弟节点,说明的显隐靠
+    // `group-hover` 而不是按钮自己的 hover —— 按钮上还叠着圆环与百分比两层东西。
+    <div className="group relative">
+      <button
+        type="button"
+        data-testid="composer-context-ring"
+        data-context-percent={percent}
+        aria-label={t("composer.contextUsage", { percent })}
+        // 单击什么都不做:压缩会真的发一次请求,不该被一次误触点掉。
+        onDoubleClick={() => {
+          if (!blocked) onCompact?.();
+        }}
+        className={cn(
+          "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors",
+          blocked ? "cursor-default" : "hover:bg-tint-hover",
+        )}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          className={cn(
+            "h-4 w-4 -rotate-90",
+            compacting && "animate-spin motion-reduce:animate-none",
+          )}
+        >
+          <circle cx="8" cy="8" r={radius} fill="none" strokeWidth="2.5" stroke="var(--color-tint-strong)" />
+          <circle
+            cx="8"
+            cy="8"
+            r={radius}
+            fill="none"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            stroke={color}
+            strokeDasharray={circumference}
+            strokeDashoffset={circumference * (1 - ratio)}
+          />
+        </svg>
+        {/* 默认就显示的百分比,不是只在悬浮时才有 —— 圆环本身太小,弧长读不出精确数字。 */}
+        {!compacting && (
+          <span
+            aria-hidden="true"
+            style={{ color }}
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-[8px] font-semibold tabular-nums"
+          >
+            {percent}
+          </span>
+        )}
+      </button>
+      <div
+        role="tooltip"
+        className="pointer-events-none invisible absolute bottom-full right-0 z-20 mb-2 w-max max-w-[240px] rounded-card border border-border bg-surface-raised px-3 py-2 text-[11px] text-fg opacity-0 shadow-lg transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100"
+      >
+        <div className="mb-1 font-medium">{t("composer.contextUsage", { percent })}</div>
+        <div className="text-fg-muted">
+          {t("composer.contextUsageDetail", { used, window: total, remaining: 100 - percent })}
+        </div>
+        <div className="mt-1 text-fg-faint">
+          {t(
+            compacting
+              ? "composer.contextCompacting"
+              : running
+                ? "composer.contextCompactBusy"
+                : "composer.contextCompactHint",
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 /**
  * 模型选择采用两级结构：第一次打开先选供应商，进入供应商后再选模型。
