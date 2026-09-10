@@ -1,3 +1,5 @@
+import { rename } from 'node:fs/promises'
+import { extname } from 'node:path'
 import { app } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import type { UpdateInfo, UpdateProgress, UpdateState } from '../../shared/domain/update'
@@ -67,11 +69,17 @@ class UpdateService {
       this.publish({ state: 'downloading', currentVersion: currentVersion(), update: previous.update, progress: p })
     })
     autoUpdater.on('update-downloaded', (raw) => {
+      const event = raw as unknown as Record<string, unknown>
+      let info: UpdateInfo
       try {
-        this.publish({ state: 'downloaded', currentVersion: currentVersion(), update: asUpdateInfo(raw as unknown as Record<string, unknown>) })
+        info = asUpdateInfo(event)
       } catch {
         this.publish({ state: 'error', currentVersion: currentVersion(), code: 'invalid-metadata' })
+        return
       }
+      void ensureInstallerExtension(typeof event.downloadedFile === 'string' ? event.downloadedFile : '')
+        .then(() => this.publish({ state: 'downloaded', currentVersion: currentVersion(), update: info }))
+        .catch(() => this.publish({ state: 'error', currentVersion: currentVersion(), code: 'download-failed' }))
     })
     autoUpdater.on('error', (error) => {
       const text = error instanceof Error ? error.message.toLowerCase() : ''
@@ -139,6 +147,19 @@ class UpdateService {
     this.state = state
     windows.emitToAll('app:updateChanged', state)
   }
+}
+
+/**
+ * feed 里的下载地址是 `/api/client/updates/<id>/download`,electron-updater 会按 URL 末段把安装包
+ * 存成无扩展名的 `download`,Windows 直接启动它只会弹出「选择应用以打开」。补回 .exe 并改写
+ * installerPath(实例属性遮蔽原型 getter),让 quitAndInstall 拿到可执行的路径。
+ */
+async function ensureInstallerExtension(downloadedFile: string): Promise<void> {
+  if (process.platform !== 'win32') return
+  if (downloadedFile.length === 0 || extname(downloadedFile).toLowerCase() === '.exe') return
+  const target = `${downloadedFile}.exe`
+  await rename(downloadedFile, target)
+  Object.defineProperty(autoUpdater, 'installerPath', { value: target, configurable: true, writable: true })
 }
 
 function compareVersions(left: string, right: string): number {

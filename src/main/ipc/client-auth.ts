@@ -6,6 +6,8 @@ import { getHost } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
+import { modelBindingResolver } from '../../shared/domain/model-binding'
+import { IMPORTED_ALIAS_DEFAULTS } from '../../shared/domain/provider'
 import { startConfigSync, stopConfigSync } from './config-sync'
 
 const API_ROOT = 'https://nextco.work'
@@ -127,9 +129,30 @@ function ensureClientProvider(): void {
 }
 
 /**
+ * 已经有别名的老库,只做一次「把 `catalogOverrides` 从 undefined 补成实值」的定型。
+ *
+ * ★★ 早期的模型同步是裸 `putAlias`,写下来的别名没有 `catalogOverrides`。这类别名
+ * 每次被读到都会走 `model-binding.ts` 的历史推断,而当年那份 `/v1/models` 响应里
+ * 缺失的能力位是 false —— 推断会把它们当成「用户特意关掉的」。定型一次,让内置目录
+ * 重新对这些别名生效(症状:登录拿到的模型在「编辑模型」里显示不支持工具调用)。
+ *
+ * 只碰内置供应商自己那批别名,且只在 `catalogOverrides` 尚未存在时动手,
+ * 所以用户后来在设置页改过的任何一条都不受影响 —— 那些记录早就带上了实值。
+ */
+function repairLegacyClientAliases(): void {
+  const legacy = store.listAliases().filter(
+    (a) => a.providerId === CLIENT_PROVIDER_ID && a.catalogOverrides === undefined
+  )
+  if (legacy.length === 0) return
+  const resolver = modelBindingResolver(store.listUserModelCatalog())
+  for (const alias of legacy) store.putAlias(resolver.resolve({ ...alias, catalogOverrides: [] }))
+  windows.emitToAll('provider:changed', { providers: store.listProviders(), models: store.listAliases() })
+}
+
+/**
  * 首次登录时把平台的模型列表灌进去。
  *
- * ★★ **已经有别名就一步都不做** —— 这张表在设置页是可编辑的(增删、改名、排序),
+ * ★★ **已经有别名就不再灌** —— 这张表在设置页是可编辑的(增删、改名、排序),
  * 而这个函数每次读登录态都会跑。不早退的话它就是一次**整表覆盖**:用户删掉的模型
  * 下次启动自己回来,改过的顺序被重排。自动同步因此只服务冷启动,之后靠设置页
  * 那颗「从服务商拉取模型列表」按钮刷新(它走 `provider:fetchModels` + `provider:setAliases`,
@@ -139,20 +162,46 @@ function ensureClientProvider(): void {
  * 的必然对价 —— 两者不可能同时成立,而后者是用户明确要的。
  */
 async function syncClientModels(access: string): Promise<void> {
-  if (store.listAliases().some((a) => a.providerId === CLIENT_PROVIDER_ID)) return
+  if (store.listAliases().some((a) => a.providerId === CLIENT_PROVIDER_ID)) {
+    repairLegacyClientAliases()
+    return
+  }
   try {
     const response = await getHost().fetch(`${API_ROOT}/v1/models`, { headers: { Authorization: `Bearer ${access}` } })
     if (!response.ok) return
     if (meta()?.mode !== 'authenticated') return
     const body = await response.json() as { data?: Array<{ id: string; display_name?: string; displayName?: string; context_window?: number; max_output_tokens?: number; capabilities?: string[] }> }
     const remote = body.data ?? []
+    const resolver = modelBindingResolver(store.listUserModelCatalog())
     remote.forEach((m, index) => {
       const caps = new Set((m.capabilities ?? []).map((x) => x.toLowerCase()))
-      store.putAlias({ alias: m.id, providerId: CLIENT_PROVIDER_ID, upstreamModel: m.id, priority: index * 10,
+      /*
+        ★ 走 `resolver.resolve` + 空的 `catalogOverrides`,和「从服务商拉取模型列表」
+        (`provider.setAliases`)完全同一条路径。
+
+        以前这里是**裸 `putAlias`**,于是 `/v1/models` 那份贫瘠的响应就成了终值:
+        平台不返回 `capabilities` 时四个能力位一律写成 false,而编辑弹窗读的正是别名上
+        这份 `capabilities` —— 症状是内置供应商登录后拿到的模型在「编辑模型」里
+        显示不支持工具调用,同一个模型在「模型管理」里(读的是内置目录)却写着支持。
+
+        更糟的是 `catalogOverrides` 当时是 undefined,别名一被读到就触发历史推断,
+        那些 false 会被认成「用户特意关掉的」并永久落进 overrides,此后内置目录再也压不过它。
+
+        平台给的值现在只当**目录查不到该模型时**的兜底:目录命中就以目录为准。
+      */
+      const platformCapabilities = m.capabilities === undefined
+        ? IMPORTED_ALIAS_DEFAULTS.capabilities
+        : { ...IMPORTED_ALIAS_DEFAULTS.capabilities,
+            tools: caps.has('tools'), vision: caps.has('vision') || caps.has('imageinput'),
+            thinking: caps.has('thinking'), caching: caps.has('caching') }
+      store.putAlias(resolver.resolve({
+        alias: m.id, providerId: CLIENT_PROVIDER_ID, upstreamModel: m.id, priority: index * 10,
         displayName: m.display_name ?? m.displayName,
-        capabilities: { tools: caps.has('tools'), vision: caps.has('vision') || caps.has('imageinput'), thinking: caps.has('thinking'), caching: caps.has('caching') },
-        contextWindow: Number.isFinite(m.context_window) && (m.context_window ?? 0) > 0 ? m.context_window! : 128_000,
-        maxOutputTokens: Number.isFinite(m.max_output_tokens) && (m.max_output_tokens ?? 0) > 0 ? m.max_output_tokens! : 16_000, enabled: true })
+        capabilities: { ...platformCapabilities },
+        contextWindow: Number.isFinite(m.context_window) && (m.context_window ?? 0) > 0 ? m.context_window! : IMPORTED_ALIAS_DEFAULTS.contextWindow,
+        maxOutputTokens: Number.isFinite(m.max_output_tokens) && (m.max_output_tokens ?? 0) > 0 ? m.max_output_tokens! : IMPORTED_ALIAS_DEFAULTS.maxOutputTokens,
+        catalogOverrides: [], enabled: true
+      }))
     })
     windows.emitToAll('provider:changed', { providers: store.listProviders(), models: store.listAliases() })
   } catch { /* model sync is best effort; user can retry from the model page */ }
