@@ -50,6 +50,7 @@ import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type { SyncConflict, SyncPreview, SyncStatus } from '../domain/config-sync'
+import type { PlanDocument, PlanOperation, PlanUpdateResult } from '../domain/plan'
 import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
@@ -347,6 +348,10 @@ export interface IpcInvokeMap {
   'agent:respondInteraction': { req: InteractionResponse; res: void }
   'agent:listInteractions': { req: { runId?: string }; res: PendingInteraction[] }
   'agent:listTools': { req: { workspaceId: string }; res: ToolInfo[] }
+  'plans:list': { req: { sessionId: string }; res: PlanDocument[] }
+  'plans:get': { req: { planId: string }; res: PlanDocument | null }
+  'plans:update': { req: { planId?: string; sessionId: string; baseVersion?: number; operations: PlanOperation[] }; res: PlanUpdateResult }
+  'plans:submit': { req: { planId: string; version: number }; res: PlanDocument }
 
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
@@ -805,6 +810,10 @@ export const INVOKE_CHANNELS = {
   'storage:clearLocalData': 1
   , 'context:list': 1
   , 'context:updateCheckpoint': 1
+  , 'plans:list': 1
+  , 'plans:get': 1
+  , 'plans:update': 1
+  , 'plans:submit': 1
 } as const satisfies Record<keyof IpcInvokeMap, 1>
 
 export const SEND_CHANNELS = {

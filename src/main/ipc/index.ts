@@ -39,6 +39,7 @@ import {
   uploadAttachment
 } from './attachment'
 import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
+import * as plans from './plans'
 import { getTools, installChildRunLauncher, setCredentialChangeListener, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
@@ -307,6 +308,10 @@ const handlers: HandlerMap = {
     if (store.getWorkspace(workspaceId) === undefined) throw new Error('Workspace does not exist')
     return getTools().info()
   },
+  'plans:list': plans.list,
+  'plans:get': plans.get,
+  'plans:update': plans.update,
+  'plans:submit': plans.submit,
 
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),

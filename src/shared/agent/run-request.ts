@@ -134,6 +134,9 @@ export interface RunRequest {
    * 而一个正在跑的子 run 仍然要能说出「我是谁」。名字是稳定的,对象不是。
    */
   agentType?: string
+  /** Approved durable plan snapshot this execution run is bound to. */
+  planId?: string
+  planVersion?: number
 }
 
 /**

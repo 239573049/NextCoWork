@@ -16,8 +16,8 @@ import type { ResolvedModelThinking } from '../../../shared/domain/model-runtime
 import { resolveModelThinking } from '../../../shared/domain/model-runtime'
 import { modelBindingsFor } from '../../../shared/domain/model-selection'
 import { REQUEST_PATH } from '../../../shared/domain/baseurl'
-import type { ModelAlias, ProviderHealth, ThinkingConfig, UpstreamProvider } from '../../../shared/domain/provider'
-import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
+import type { ModelAlias, ProviderHealth, ThinkingConfig, UpstreamProvider, UpstreamProtocol } from '../../../shared/domain/provider'
+import { anthropicCacheTtlOf, effectiveModelProtocol } from '../../../shared/domain/provider'
 import { applyRequestPatches, RequestPatchError } from '../../../shared/domain/request-patch'
 import {
   applyThinkingAdapter,
@@ -84,13 +84,13 @@ interface Candidate {
   alias: ModelAlias
 }
 
-function thinkingConfigFor(req: CanonicalRequest, c: Candidate): ThinkingConfig | undefined {
+function thinkingConfigFor(req: CanonicalRequest, c: Candidate, protocol: UpstreamProtocol): ThinkingConfig | undefined {
   if (c.alias.thinkingConfig !== undefined) return c.alias.thinkingConfig
   if (req.thinkingBudget !== undefined) return { mode: 'budget', defaultEnabled: true }
   if (req.reasoning?.explicit !== true || req.reasoning.enabled) return undefined
   // Old model imports defaulted capabilities.thinking to false and had no
   // ThinkingConfig. Known toggle protocols still support an explicit Off.
-  if (c.provider.protocol === 'anthropic'
+  if (protocol === 'anthropic'
     || /(?:^|\/)(?:deepseek|deep-seek|glm|chatglm|hy3|hy4)[/:._-]/iu.test(c.alias.upstreamModel)
     || c.alias.capabilities.thinking) return { mode: 'toggle', defaultEnabled: false }
   return undefined
@@ -374,8 +374,9 @@ export class UpstreamRouter {
     attemptNumber: number
   ): AsyncGenerator<ProviderStreamEvent, Outcome> {
     let sawContent = false
+    const protocol = effectiveModelProtocol(c.provider, c.alias)
     const startedAt = this.host.clock.now()
-    const endpoint = joinUpstreamUrl(c.provider.baseUrl, REQUEST_PATH[c.provider.protocol])
+    const endpoint = joinUpstreamUrl(c.provider.baseUrl, REQUEST_PATH[protocol])
     let httpStatus: number | null = null
     let responseModel: string | null = null
     let stopReason: StopReason | null = null
@@ -414,7 +415,7 @@ export class UpstreamRouter {
           attempt: attemptNumber,
           providerId: c.provider.id,
           providerName: c.provider.name,
-          protocol: c.provider.protocol,
+          protocol,
           endpoint,
           alias: req.model,
           upstreamModel: c.alias.upstreamModel,
@@ -461,16 +462,19 @@ export class UpstreamRouter {
       const apiKey = bearerOf(cred)
       const cacheTtl = anthropicCacheTtlOf(c.provider)
       const prepared = await prepareRequestImages(req, this.host, context, signal)
-      const enc = encodeUpstream(c.provider.protocol, prepared, c.alias.upstreamModel, apiKey, {
+      const enc = encodeUpstream(protocol, prepared, c.alias.upstreamModel, apiKey, {
         userId: context.workspaceId,
         cacheTtl
       })
       const thinkingInput: ThinkingAdapterInput = {
-        protocol: c.provider.protocol,
+        protocol,
         upstreamModel: c.alias.upstreamModel,
-        config: thinkingConfigFor(req, c),
+        config: thinkingConfigFor(req, c, protocol),
         reasoning: reasoningFor(req, c.alias),
         maxOutputTokens: req.maxOutputTokens,
+        // Legacy bindings without a request adapter must retain automatic
+        // model-specific thinking detection. Explicit adapters still win;
+        // protocol remains the wire/protocol default for patch validation.
         preset: c.alias.requestAdapter?.preset ?? 'auto',
         ...(c.alias.reasoningEfforts !== undefined
           ? { reasoningEfforts: c.alias.reasoningEfforts }
@@ -480,7 +484,7 @@ export class UpstreamRouter {
       const patchedBody = applyRequestPatches(
         adaptedBody,
         c.alias.requestAdapter?.patches,
-        c.alias.requestAdapter?.preset ?? c.provider.protocol
+        c.alias.requestAdapter?.preset ?? protocol
       )
       const guardedBody = enforceThinkingPreference(patchedBody, thinkingInput)
       // Model-level patches are allowed to customise ordinary parameters, but
@@ -488,7 +492,7 @@ export class UpstreamRouter {
       // final wire boundary. This keeps metadata.user_id mandatory and makes a
       // Provider's off/5m/1h choice authoritative even for legacy aliases with
       // broad custom patches.
-      const anthropicBody = c.provider.protocol === 'anthropic' ? applyAnthropicRequestOptions(guardedBody, {
+      const anthropicBody = protocol === 'anthropic' ? applyAnthropicRequestOptions(guardedBody, {
         userId: context.workspaceId,
         cacheTtl
       }) : guardedBody
@@ -497,7 +501,7 @@ export class UpstreamRouter {
         和上面那段英文注释是**同一条规矩的第二个实例**:供应商自己的硬约束
         压过模型级自定义。API Key 凭证走的是恒等变换,老供应商逐字节不变。
       */
-      const transport = upstreamTransport(c.provider, cred, { ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }) })
+      const transport = upstreamTransport({ ...c.provider, protocol }, cred, { ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }) })
       const body = transport.body(anthropicBody)
       const url = joinUpstreamUrl(c.provider.baseUrl, enc.path)
       const payload = JSON.stringify(body)
@@ -535,7 +539,7 @@ export class UpstreamRouter {
         // 必须读完,否则这条连接不会被释放
         await res.text().catch(() => '')
         const fresh = await this.credentials.refreshNow(c.provider.credentialRef, signal)
-        res = await send(authHeader(c.provider.protocol, fresh.accessToken))
+        res = await send(authHeader(protocol, fresh.accessToken))
       }
       httpStatus = res.status
 
@@ -563,7 +567,7 @@ export class UpstreamRouter {
         } catch {
           /* 非 JSON 的错误体(网关的 HTML 页)—— 原样交给分类器 */
         }
-        const error = c.provider.protocol === 'anthropic' ? anthropicErrorToAgentError(res.status, parsed, {
+        const error = protocol === 'anthropic' ? anthropicErrorToAgentError(res.status, parsed, {
           cacheTtl,
           providerName: c.provider.name
         }) : openAIErrorToAgentError(res.status, parsed)
@@ -572,7 +576,7 @@ export class UpstreamRouter {
         return finish({ kind: 'failed', sawContent, error })
       }
 
-      for await (const ev of decodeUpstream(c.provider.protocol, res, signal)) {
+      for await (const ev of decodeUpstream(protocol, res, signal)) {
         if (ev.type === 'error') {
           /*
             ★ 流内错误在这里留一条痕迹。界面上只看得到翻译过的那一句,而
@@ -599,6 +603,19 @@ export class UpstreamRouter {
           timeToFirstTokenMs = Math.max(0, this.host.clock.now() - startedAt)
         }
         if (isContent(ev)) sawContent = true
+        /*
+          message_end 同理补上「这一次请求花了多久」。渲染层用它累出一轮的
+          Σ 上游耗时,再除出平均 TPS —— 它必须在这里量,因为只有这一层知道
+          请求是什么时候发出去的。
+
+          ★ 和 `finish()` 里写进 usage_records 的 `latencyMs` 差几毫秒(那个量
+          到流真正收完为止,这个量到本条消息收完为止)。刻意不为了对齐而把
+          message_end 押后到循环结束再发 —— 那会让整条流多等一趟。
+        */
+        if (ev.type === 'message_end') {
+          yield { ...ev, latencyMs: Math.max(0, this.host.clock.now() - startedAt) }
+          continue
+        }
         /*
           ★ 给 message_start 补上「这一段是谁给的」。这里是唯一的 choke point:
           三条解码路径(anthropic / openai-chat / openai-responses)都从这过,

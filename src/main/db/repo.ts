@@ -14,7 +14,7 @@
  * (`ipc/workspace.ts` 的 `updateWorkspace` / `listDir`)都是展开取值,不改返回对象。
  */
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
-import type { TokenUsage } from '../../shared/agent/stream'
+import type { RunUsage } from '../../shared/agent/transcript'
 import type { ContextCheckpoint, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
@@ -47,6 +47,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { SyncConfigKind, SyncConflict, SyncMutation } from '../../shared/domain/config-sync'
+import type { PlanDocument, PlanOperation, PlanRevision, PlanUpdateResult } from '../../shared/domain/plan'
 
 const SYNC_ACCOUNT_KEY = 'config-sync.account'
 const SYNC_DEVICE_KEY = 'config-sync.device'
@@ -56,6 +57,110 @@ export { tx } from './index'
 
 /** 列里存的是 JSON 文本;`String()` 是给 `SQLOutputValue` 那个联合类型收窄用的。 */
 const parse = <T>(json: unknown): T => JSON.parse(String(json)) as T
+
+function applyPlanOperations(plan: PlanDocument, operations: readonly PlanOperation[], now: number): PlanDocument {
+  const next: PlanDocument = structuredClone(plan)
+  for (const op of operations) {
+    switch (op.op) {
+      case 'set_title': next.title = op.value.trim(); break
+      case 'set_summary': next.summary = op.value; break
+      case 'set_risks': next.risks = [...op.values]; break
+      case 'set_validation': next.validation = [...op.values]; break
+      case 'insert_step': {
+        const step = { ...op.step, id: op.step.id ?? ulid(), status: op.step.status ?? 'pending' }
+        const at = op.afterId === undefined ? next.steps.length : next.steps.findIndex((s) => s.id === op.afterId) + 1
+        next.steps.splice(Math.max(0, at), 0, step as PlanDocument['steps'][number])
+        break
+      }
+      case 'update_step': {
+        const step = next.steps.find((s) => s.id === op.stepId)
+        if (step !== undefined) Object.assign(step, op.patch)
+        break
+      }
+      case 'delete_step': next.steps = next.steps.filter((s) => s.id !== op.stepId); break
+      case 'move_step': {
+        const index = next.steps.findIndex((s) => s.id === op.stepId)
+        if (index < 0) break
+        const [step] = next.steps.splice(index, 1)
+        const at = op.afterId === undefined ? 0 : next.steps.findIndex((s) => s.id === op.afterId) + 1
+        if (step !== undefined) next.steps.splice(Math.max(0, at), 0, step)
+        break
+      }
+      case 'attach_media': {
+        const media = { id: op.media.id ?? ulid(), ...op.media }
+        next.media = [...next.media.filter((m) => m.id !== media.id), media]
+        if (op.stepId !== undefined) next.steps.find((s) => s.id === op.stepId)?.mediaIds.push(media.id)
+        break
+      }
+      case 'remove_media':
+        next.media = next.media.filter((m) => m.id !== op.mediaId)
+        next.steps.forEach((s) => { s.mediaIds = s.mediaIds.filter((id) => id !== op.mediaId) })
+        break
+    }
+  }
+  next.version += 1
+  next.updatedAt = now
+  return next
+}
+
+export function getPlan(id: string): PlanDocument | undefined {
+  const row = stmt('SELECT json FROM plans WHERE id = ?').get(id)
+  return row === undefined ? undefined : parse<PlanDocument>(row['json'])
+}
+
+export function listPlans(sessionId: string): PlanDocument[] {
+  return stmt('SELECT json FROM plans WHERE session_id = ? ORDER BY updated_at DESC').all(sessionId)
+    .map((row) => parse<PlanDocument>(row['json']))
+}
+
+export function updatePlan(input: {
+  plan?: PlanDocument
+  planId?: string
+  sessionId: string
+  sourceRunId: string
+  baseVersion?: number
+  operations: PlanOperation[]
+  author?: 'agent' | 'user'
+}): PlanUpdateResult {
+  const current = input.plan ?? (input.planId === undefined ? undefined : getPlan(input.planId))
+  const now = Date.now()
+  if (current !== undefined && input.baseVersion !== undefined && current.version !== input.baseVersion) {
+    return { ok: false, conflict: { currentVersion: current.version, planId: current.id }, message: 'Plan version conflict; reload the latest plan before updating.' }
+  }
+  const base: PlanDocument = current ?? {
+    id: input.planId ?? ulid(), sessionId: input.sessionId, version: 0, status: 'draft', title: 'Plan', summary: '',
+    steps: [], risks: [], validation: [], media: [], sourceRunId: input.sourceRunId, updatedAt: now
+  }
+  const next = applyPlanOperations(base, input.operations, now)
+  next.status = 'draft'
+  tx(() => {
+    stmt(`INSERT INTO plans (id, session_id, version, status, json, source_run_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET version=excluded.version, status=excluded.status, json=excluded.json, source_run_id=excluded.source_run_id, updated_at=excluded.updated_at`)
+      .run(next.id, next.sessionId, next.version, next.status, JSON.stringify(next), next.sourceRunId, next.updatedAt)
+    const revision: PlanRevision = { planId: next.id, version: next.version, author: input.author ?? 'agent', sourceRunId: input.sourceRunId, patch: input.operations, createdAt: now }
+    stmt('INSERT INTO plan_revisions (plan_id, version, author, source_run_id, patch, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(next.id, next.version, revision.author, revision.sourceRunId ?? null, JSON.stringify(revision.patch), now)
+  })
+  return { ok: true, plan: next, message: `Plan updated to version ${String(next.version)}.` }
+}
+
+export function submitPlan(id: string, version: number): PlanDocument {
+  const plan = getPlan(id)
+  if (plan === undefined) throw new Error(`Plan does not exist: ${id}`)
+  if (plan.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(plan.version)}`)
+  const next = { ...plan, status: 'review' as const, updatedAt: Date.now() }
+  stmt('UPDATE plans SET status = ?, json = ?, updated_at = ? WHERE id = ?').run(next.status, JSON.stringify(next), next.updatedAt, id)
+  return next
+}
+
+export function approvePlan(id: string, version: number): PlanDocument {
+  const plan = getPlan(id)
+  if (plan === undefined) throw new Error(`Plan does not exist: ${id}`)
+  if (plan.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(plan.version)}`)
+  const next = { ...plan, status: 'approved' as const, updatedAt: Date.now() }
+  stmt('UPDATE plans SET status = ?, json = ?, updated_at = ? WHERE id = ?').run(next.status, JSON.stringify(next), next.updatedAt, id)
+  return next
+}
 
 /** ── 基础配置同步 outbox ─────────────────────────────────────────────── */
 function syncAccount(): { accountId: string; deviceId: string } | undefined {
@@ -496,9 +601,16 @@ export function messageRunsOf(sessionId: string): Record<string, string> {
  * ★ 思考 Token 用 `COALESCE(...,0)` 求和是安全的:它是 `outputTokens` 的子集,
  * 只用于展示,不参与任何合计。拿不到独立计数的供应商聚出来就是 0,
  * 而 0 在这里的含义正是「没有单独报」—— 展示层照样不显示它。
+ *
+ * ★★ **只有耗时那一列把失败尝试排除在外**,和上面的 token 口径**故意不一致**。
+ * 理由是这两个数回答的不是同一个问题:token 回答「这一轮花了多少钱」,失败的
+ * 尝试照样花了;而 `upstream_ms` 回答「模型输出有多快」,它是平均 TPS 的分母。
+ * 一次 30s 超时打回、没产出一个 token 的尝试算进分母,界面上就会把「重试过一次」
+ * 显示成「这家模型慢得像卡住了」。渲染层实时那份也只在 `message_end` 上累加 ——
+ * 失败的尝试根本发不出 message_end,两条路径这样才是同一个口径。
  */
-export function runUsageOf(sessionId: string): Record<string, TokenUsage> {
-  const usage: Record<string, TokenUsage> = {}
+export function runUsageOf(sessionId: string): Record<string, RunUsage> {
+  const usage: Record<string, RunUsage> = {}
   const rows = stmt(
     `SELECT run_id,
             SUM(input_tokens)          AS input_tokens,
@@ -506,7 +618,8 @@ export function runUsageOf(sessionId: string): Record<string, TokenUsage> {
             SUM(cache_read_tokens)     AS cache_read_tokens,
             SUM(cache_write_tokens)    AS cache_write_tokens,
             SUM(cache_write_1h_tokens) AS cache_write_1h_tokens,
-            SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens
+            SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens,
+            SUM(CASE WHEN ok = 1 THEN latency_ms ELSE 0 END) AS upstream_ms
        FROM usage_records
       WHERE session_id = ?
       GROUP BY run_id`
@@ -514,13 +627,17 @@ export function runUsageOf(sessionId: string): Record<string, TokenUsage> {
   for (const row of rows) {
     const r = row as Record<string, unknown>
     const reasoning = Number(r['thinking_tokens'] ?? 0)
+    const upstreamMs = Number(r['upstream_ms'] ?? 0)
     usage[String(r['run_id'])] = {
       inputTokens: Number(r['input_tokens'] ?? 0),
       outputTokens: Number(r['output_tokens'] ?? 0),
       cacheReadInputTokens: Number(r['cache_read_tokens'] ?? 0),
       cacheCreationInputTokens: Number(r['cache_write_tokens'] ?? 0),
       cacheCreation1hInputTokens: Number(r['cache_write_1h_tokens'] ?? 0),
-      ...(reasoning > 0 ? { reasoningTokens: reasoning } : {})
+      ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
+      // 0 = 这一轮没有一次成功的请求。留 undefined 让展示层直接不画 TPS,
+      // 而不是让它去除以零。
+      ...(upstreamMs > 0 ? { upstreamMs } : {})
     }
   }
   return usage

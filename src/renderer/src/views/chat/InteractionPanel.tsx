@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type {
   AskUserQuestion,
   InteractionResponse,
@@ -8,14 +8,15 @@ import { useI18n, type Translate } from '../../i18n'
 import { AgentMarkdown } from '../../components/markdown'
 import { CheckboxCards, RadioCards } from '../../components/ui/ChoiceCards'
 import { Segmented } from '../../components/ui/Segmented'
-import { listInteractions, onAgentEvent, respondInteraction } from '../../services/agent'
+import { listInteractions, onAgentEvent, respondInteraction, getPlan, updatePlan } from '../../services/agent'
+import type { PlanDocument, PlanOperation } from '../../../../shared/domain/plan'
 import {
   choiceOptions, deriveAnswers, initialDraft, isComplete, nextUnanswered, shouldAdvance, showsInput,
   toggle, type AskUserDraft
 } from './ask-user'
 
 /** Includes descendant runs: a child waiting for approval must not leave its parent stuck. */
-export function InteractionPanel({ runId }: { runId: string }): ReactNode {
+export function InteractionPanel({ runId, sessionId, onExecute }: { runId: string; sessionId?: string; onExecute?: (plan: string, newSession: boolean, planId?: string, planVersion?: number) => void }): ReactNode {
   const { t } = useI18n()
   const [pending, setPending] = useState<PendingInteraction[]>([])
   const [failed, setFailed] = useState(false)
@@ -47,14 +48,14 @@ export function InteractionPanel({ runId }: { runId: string }): ReactNode {
       {failed && <button type="button" onClick={() => setReload((v) => v + 1)} className="text-[12px] text-danger">
         {t('agent.interaction.loadFailed')}
       </button>}
-      {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction}
+      {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction} sessionId={sessionId} onExecute={onExecute}
         onAnswered={() => setPending((items) => items.filter((item) => item.id !== interaction.id))} />)}
     </div>
   )
 }
 
 /** 提交这件事三类交互是同一份:一次只允许一发,失败留在原地让用户重试。 */
-function useRespond(onAnswered: () => void): {
+function useRespond(onAnswered: () => void, onResolved?: () => void): {
   busy: boolean
   errorKey: string | null
   setErrorKey: (key: string | null) => void
@@ -70,7 +71,7 @@ function useRespond(onAnswered: () => void): {
       if (busy) return
       setBusy(true)
       setErrorKey(null)
-      void respondInteraction(response).then(onAnswered).catch(() => {
+      void respondInteraction(response).then(() => { onResolved?.(); onAnswered() }).catch(() => {
         setErrorKey('agent.interaction.failed')
         setBusy(false)
       })
@@ -121,10 +122,10 @@ function CardShell({
   )
 }
 
-function InteractionCard({ interaction, onAnswered }: { interaction: PendingInteraction; onAnswered: () => void }): ReactNode {
+function InteractionCard({ interaction, sessionId, onExecute, onAnswered }: { interaction: PendingInteraction; sessionId?: string; onExecute?: (plan: string, newSession: boolean, planId?: string, planVersion?: number) => void; onAnswered: () => void }): ReactNode {
   return interaction.kind === 'ask_user'
     ? <AskUserCard interaction={interaction} onAnswered={onAnswered} />
-    : <ApprovalCard interaction={interaction} onAnswered={onAnswered} />
+    : <ApprovalCard interaction={interaction} sessionId={sessionId} onExecute={onExecute} onAnswered={onAnswered} />
 }
 
 function AskUserCard({ interaction, onAnswered }: {
@@ -251,12 +252,20 @@ function QuestionBlock({ question, index, busy, picked, typed, onPicked, onTyped
 }
 
 /** 工具授权与方案审批 —— 这两类都是「一个是非题 + 一段可选的补充」。 */
-function ApprovalCard({ interaction, onAnswered }: {
+function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
   interaction: Extract<PendingInteraction, { kind: 'tool_permission' | 'plan_approval' }>
+  sessionId?: string
+  onExecute?: (plan: string, newSession: boolean, planId?: string, planVersion?: number) => void
   onAnswered: () => void
 }): ReactNode {
   const { t } = useI18n()
-  const { busy, errorKey, setErrorKey, respond } = useRespond(onAnswered)
+  const execution = useRef<boolean | null>(null)
+  const { busy, errorKey, setErrorKey, respond } = useRespond(onAnswered, () => {
+    if (interaction.kind === 'plan_approval' && onExecute !== undefined && execution.current !== null) {
+      onExecute(interaction.plan, execution.current, interaction.planId, interaction.planVersion)
+      execution.current = null
+    }
+  })
   const [feedback, setFeedback] = useState('')
   const [editing, setEditing] = useState(false)
   const [input, setInput] = useState(interaction.kind === 'tool_permission' ? JSON.stringify(interaction.input, null, 2) : '')
@@ -304,11 +313,64 @@ function ApprovalCard({ interaction, onAnswered }: {
           {t(editing ? 'agent.interaction.keepOriginal' : 'agent.interaction.editArguments')}
         </button>
       </> : <>
-        <AgentMarkdown className="mb-2" content={interaction.plan} />
+        <PlanReview interaction={interaction} sessionId={sessionId} />
         <textarea aria-label={t('agent.interaction.feedback')} placeholder={t('agent.interaction.feedback')}
           value={feedback} onChange={(e) => setFeedback(e.target.value)} rows={2} maxLength={32768} disabled={busy}
           className="mt-1 w-full rounded-lg border border-border bg-app p-2 text-[13px]" />
+        {onExecute !== undefined && <div className="mt-2 flex flex-wrap gap-2">
+          <button type="button" disabled={busy} className={`${BUTTON} bg-accent text-accent-fg`} onClick={() => { execution.current = false; respond({ id: interaction.id, kind: 'plan_approval', approved: true, feedback }) }}>
+            {t('agent.interaction.executeCurrent')}
+          </button>
+          <button type="button" disabled={busy} className={BUTTON} onClick={() => { execution.current = true; respond({ id: interaction.id, kind: 'plan_approval', approved: true, feedback }) }}>
+            {t('agent.interaction.executeNewSession')}
+          </button>
+        </div>}
       </>}
     </CardShell>
   )
+}
+
+function PlanReview({ interaction, sessionId }: {
+  interaction: Extract<PendingInteraction, { kind: 'plan_approval' }>
+  sessionId?: string
+}): ReactNode {
+  const { t } = useI18n()
+  const [plan, setPlan] = useState<PlanDocument | null>(null)
+  const [summary, setSummary] = useState('')
+  const [dirty, setDirty] = useState(false)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => {
+    if (interaction.planId === undefined) return
+    void getPlan(interaction.planId).then((value) => {
+      if (value !== null) { setPlan(value); setSummary(value.summary) }
+    }).catch(() => undefined)
+  }, [interaction.planId])
+  if (plan === null) return <AgentMarkdown className="mb-2" content={interaction.plan} />
+  const save = async (): Promise<void> => {
+    if (!dirty || sessionId === undefined) return
+    const operations: PlanOperation[] = [{ op: 'set_summary', value: summary }]
+    const result = await updatePlan({ planId: plan.id, sessionId, baseVersion: plan.version, operations })
+    if (result.ok && result.plan !== undefined) { setPlan(result.plan); setDirty(false); setSaved(true) }
+  }
+  return <div className="mb-2 space-y-2">
+    <div className="flex items-center justify-between text-[11px] text-fg-faint"><span>{plan.title}</span><span>{t('agent.interaction.planVersion', { version: String(plan.version) })}</span></div>
+    <AgentMarkdown content={interaction.plan} />
+    {plan.steps.length > 0 && <ol className="ml-5 list-decimal space-y-1 text-[12px] text-fg-muted">
+      {plan.steps.map((step) => <li key={step.id}><span className="text-fg">{step.title}</span>{step.description !== '' && <span> — {step.description}</span>}
+        {step.acceptanceCriteria.length > 0 && <ul className="ml-4 list-disc text-[11px] text-fg-faint">{step.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}
+      </li>)}
+    </ol>}
+    {plan.media.length > 0 && <div className="flex flex-wrap gap-2">
+      {plan.media.map((media) => media.kind === 'external' && media.url !== undefined
+        ? <AgentMarkdown key={media.id} content={`![${media.alt}](${media.url})`} variant="compact" />
+        : media.kind === 'mermaid' && media.source !== undefined
+          ? <AgentMarkdown key={media.id} content={`\`\`\`mermaid\n${media.source}\n\`\`\``} variant="compact" />
+          : <span key={media.id} className="rounded-lg border border-border px-2 py-1 text-[11px] text-fg-faint">{media.alt}</span>)}
+    </div>}
+    <label className="block text-[12px] text-fg-muted">{t('agent.interaction.planSummary')}
+      <textarea value={summary} onChange={(event) => { setSummary(event.target.value); setDirty(true) }} rows={2} className="mt-1 w-full rounded-lg border border-border bg-app p-2 text-[13px]" />
+    </label>
+    {dirty && <button type="button" className="text-[12px] text-accent" onClick={() => { void save() }}>{t('agent.interaction.savePlan')}</button>}
+    {saved && <span role="status" className="text-[11px] text-fg-faint">{t('agent.interaction.planSaved')}</span>}
+  </div>
 }

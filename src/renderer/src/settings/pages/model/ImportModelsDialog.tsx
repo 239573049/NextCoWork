@@ -18,6 +18,8 @@ import {
   submitOrder,
   toggleAll,
   toggleRow,
+  filterFetchedModels,
+  type ImportModality,
   type ImportRow,
 } from "./import-models";
 
@@ -44,6 +46,8 @@ export function ImportModelsDialog({
   providerId,
   providerName,
   aliases,
+  modality = "text",
+  preserveAliases = [],
   onClose,
   onDone,
 }: {
@@ -52,6 +56,10 @@ export function ImportModelsDialog({
   providerName: string;
   /** 这家现有的别名 —— 决定哪些默认勾上,以及哪些是「本地独有」 */
   aliases: readonly ModelAlias[];
+  /** 图片页只允许导入图片模型；文本页保留原有完整列表。 */
+  modality?: ImportModality;
+  /** 同一供应商下其他模态的绑定，在替换图片模型时继续保留。 */
+  preserveAliases?: readonly ModelAlias[];
   onClose: () => void;
   onDone?: () => void;
 }): ReactNode {
@@ -75,7 +83,7 @@ export function ImportModelsDialog({
     void fetchProviderModels(providerId)
       .then((fetched) => {
         if (!alive) return;
-        const next = importRows(fetched, aliases);
+        const next = importRows(filterFetchedModels(fetched, modality), aliases);
         setRows(next);
         setSelected(initialSelection(next, Number.POSITIVE_INFINITY));
       })
@@ -94,7 +102,7 @@ export function ImportModelsDialog({
     // ★ `aliases` 刻意不进依赖:store 每广播一次都是个新数组,进去就会无限重拉。
     // 它只在**打开的那一刻**被读一次,用来决定哪些默认勾上 —— 这正是想要的语义
     // (弹窗开着的时候别名被别处改了,不该把用户正在勾的东西重置掉)。
-  }, [open, providerId, attempt]);
+  }, [open, providerId, attempt, modality]);
 
   const visible = useMemo(() => filterRows(rows ?? [], query), [rows, query]);
   const allVisibleChecked =
@@ -118,7 +126,9 @@ export function ImportModelsDialog({
     if (rows === null) return;
     setSaving(true);
     setError(null);
-    void setProviderAliases(providerId, submitOrder(rows, selected))
+    const selectedModels = submitOrder(rows, selected);
+    const preservedModels = preserveAliases.map((alias) => alias.upstreamModel);
+    void setProviderAliases(providerId, [...preservedModels, ...selectedModels])
       .then(() => {
         onDone?.();
         onClose();

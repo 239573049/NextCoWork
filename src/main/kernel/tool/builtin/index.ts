@@ -24,6 +24,7 @@ import { webFetchTool } from './web'
 import { webSearchTool } from './web-search'
 import { browserTools } from './browser'
 import { askUserTool, planApprovalTool } from './interaction'
+import { enterPlanModeTool, exitPlanModeTool, planUpdateTool } from './plan'
 
 export function builtinTools(): ToolRegistration[] {
   return [
@@ -42,6 +43,9 @@ export function builtinTools(): ToolRegistration[] {
     webSearchTool,
     askUserTool,
     planApprovalTool,
+    enterPlanModeTool,
+    planUpdateTool,
+    exitPlanModeTool,
     ...browserTools,
     /*
       ★ `Task` 是唯一一个**每次现造**的内置工具:它的 description 里逐字带着

@@ -1,10 +1,4 @@
-import {
-  Cloud,
-  GripVertical,
-  Image as ImageIcon,
-  Plus,
-  Workflow,
-} from "lucide-react";
+import { GripVertical, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import { PROVIDER_PRESETS } from "../../../../../shared/domain/presets";
 import { cn } from "../../../lib/cn";
@@ -128,59 +122,6 @@ export function EnabledModelList({
           {footer}
         </>
       )}
-
-      <div className="my-2 border-t border-hairline" />
-
-      {/*
-        ★ 这两个是**参考实现有、我们没有**的角色,不是「还没写完的我们的功能」。
-        标 `步骤 4` 会撒谎(步骤 4 是供应商写入面,做完了也不会长出这两个角色),
-        所以标的是「未建模」—— 和上面那两个真能用的角色隔着一条线,读者一眼能分开。
-      */}
-      <ExtraRow
-        icon={<ImageIcon size={14} />}
-        label={t("models.imageFallback")}
-        tag={t("models.notModeled")}
-        title={t("models.imageFallbackHint")}
-      />
-      <ExtraRow
-        icon={<Workflow size={14} />}
-        label={t("models.planExecution")}
-        tag={t("models.notModeled")}
-        title={t("models.planExecutionHint")}
-      />
-      {/* ★ 方案 §10 明确砍掉云同步。这里直说「不做」,不做成「即将推出」 */}
-      <ExtraRow
-        icon={<Cloud size={14} />}
-        label={t("models.cloudSync")}
-        tag={t("models.notPlanned")}
-        title={t("models.cloudSyncHint")}
-      />
-    </div>
-  );
-}
-
-/** 左列底下那三行。都还没有落点,所以一律不可点,右边直说缺的是什么 */
-function ExtraRow({
-  icon,
-  label,
-  tag,
-  title,
-}: {
-  icon: ReactNode;
-  label: string;
-  tag: string;
-  title?: string;
-}): ReactNode {
-  return (
-    <div
-      title={title}
-      className="flex items-center gap-2 rounded-[9px] px-1.5 py-1.5 text-fg-faint"
-    >
-      <span className="shrink-0 text-icon opacity-60" aria-hidden>
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-[12.5px]">{label}</span>
-      <span className="shrink-0 text-[11px]">{tag}</span>
     </div>
   );
 }

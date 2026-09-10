@@ -109,8 +109,6 @@ export interface ProviderPreset {
    */
   oauthIssuer?: OAuthIssuerId
   suggestedModels: readonly string[]
-  /** 订阅制额度(Coding Plan 之类)—— 这类不计入总费用,见方案 §5.3 */
-  subscription?: boolean
   /** 该预设特有的坑,直接显示在表单下方 */
   notes?: string
   /**
@@ -199,7 +197,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     credentialKind: 'oauth',
     oauthIssuer: 'chatgpt',
     suggestedModels: ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.5','gpt-6-astra'],
-    subscription: true,
     notes:
       '用 ChatGPT 账号登录，走订阅额度，不计入 API 账单。' +
       '★ 需要付费 ChatGPT 计划：免费账号能登录成功，但第一次对话会返回 403。' +
@@ -328,7 +325,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     name: 'Kimi·Coding Plan(订阅制)',
     category: 'domestic',
     recommended: true,
-    subscription: true,
     /*
       ★ 同一个服务两个协议,前缀差一段 `/v1` —— OpenAI 族的版本段在 base 里,
       Anthropic 族的不在。实测存在的是 `/coding/v1/messages` 与 `/coding/v1/chat/completions`。
@@ -379,7 +375,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     name: '智谱·GLM Coding Plan(订阅制)',
     category: 'domestic',
     recommended: true,
-    subscription: true,
     /*
       ★★ **Coding 端点排第一,Anthropic 端点排第二 —— 顺序是结论,不是随手写的。**
       `endpoints[0]` 是 `providerFromPreset` 取的那条主推形态(见 `provider-edit.ts`),
@@ -450,7 +445,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     id: 'zai-coding',
     name: 'Z.AI Coding Plan(订阅制)',
     category: 'domestic',
-    subscription: true,
     /* ★ 顺序与理由同 `zhipu-coding` —— 海外站只是把域名换成 api.z.ai,路径规则一样 */
     endpoints: [
       oa('https://api.z.ai/api/coding/paas/v4', false),
@@ -544,14 +538,44 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     verification: 'probed'
   },
   {
+    /*
+      2026-09 改版:老的 `api.hunyuan.cloud.tencent.com` 换成了大模型服务平台
+      **TokenHub**(文档产品号从 1729 挪到 1823)。这不只是换个域名 ——
+      平台从「只有混元」变成了聚合腾讯混元 / DeepSeek / 智谱 GLM / Kimi /
+      MiniMax / Qwen / MiMo,三种协议(chat completions、responses、messages)
+      共用同一组 base URL,只换路径。
+
+      ★ 老域名今天还活着(带假 key 打 `/v1/models` 仍是 401,报错里指的是
+      `console.cloud.tencent.com/hunyuan/start` 这个旧控制台),但它是上一代
+      平台的入口,模型和价格都对不上 1823 那套。不留双端点:同一 protocol
+      写两条,后一条在界面上永远不可达(见上面「同一 protocol 不重复」)。
+
+      探针(2026-09-10,真路径 401 / 假路径 404 明面对照,这家没有 catch-all):
+        /v1/models 401 · /api/v1/models 404
+        /v1/chat/completions 401 · /v1/chat/completionsx 404
+        /v1/responses 401 · /v1/responsesx 404
+        /v1/messages **401 且是 Anthropic 原生错误形状**
+          (`{"error":{"type":"authentication_error"},"type":"error"}`,
+           跟其余路径的 `gateway_error` 信封不是一套) · /v1/messagesx 404
+      —— 最后一条推翻了上一版那句「实测不提供 Anthropic 兼容端点」。
+    */
     id: 'hunyuan',
     name: '腾讯混元',
     category: 'domestic',
-    endpoints: [oa('https://api.hunyuan.cloud.tencent.com/v1', true)],
-    docsUrl: 'https://cloud.tencent.com/document/product/1729',
-    apiKeyUrl: 'https://console.cloud.tencent.com/hunyuan/api-key',
-    suggestedModels: [],
-    notes: '实测**不提供** Anthropic 兼容端点。',
+    endpoints: [
+      oa('https://tokenhub.tencentmaas.com/v1', true),
+      resp('https://tokenhub.tencentmaas.com/v1', true),
+      anth('https://tokenhub.tencentmaas.com', true)
+    ],
+    docsUrl: 'https://cloud.tencent.com/document/product/1823/130078',
+    apiKeyUrl: 'https://console.cloud.tencent.com/tokenhub/apikey',
+    suggestedModels: ['hy4-preview', 'hy3', 'hy-mt2-pro', 'hunyuan-role-latest'],
+    notes:
+      '★ 地址**分地域,不能跨地域调用**:广州(中国大陆)是 tokenhub.tencentmaas.com,' +
+      '新加坡(全球)要改成 tokenhub-intl.tencentmaas.com;两个域名各有一个 .cn 结尾的备用地址。' +
+      '★ 模型要先在控制台开通,没开通的调用返回 **402**,跟协议支不支持无关。' +
+      '★ Responses 协议只覆盖一部分模型(Hy-MT2 系列、GLM-5 系列、Kimi Code 系列都没有),' +
+      '配不通时先退回 OpenAI Chat Completions。',
     verification: 'probed'
   },
   {
@@ -645,7 +669,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     name: 'RoutinAI(订阅)',
     category: 'aggregator',
     recommended: true,
-    subscription: true,
     /*
       探针(2026-09-07,真路径 + 同前缀假路径对照,**GET 与 POST 各打一遍**):
         POST /plan/v1/responses        → 401 {"error":{"type":"unauthorized",…}}         ← OpenAI 信封
@@ -810,7 +833,6 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     id: 'opencode-go',
     name: 'OpenCode Go(订阅制)',
     category: 'aggregator',
-    subscription: true,
     /*
       ★ 三个协议**同一个 base**,这是全表唯一一处 Anthropic base 带 `/v1` 的例外 ——
       这里的 `/v1` 是路由前缀,不是 Anthropic 的版本段。`joinUpstreamUrl` 的去重分支

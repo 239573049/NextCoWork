@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { modelBindingResolver } from '../model-binding'
 import { findCatalogModel, type ModelCatalogDefinition } from '../model-catalog'
 import { findBuiltinModel } from '../model-catalog-inventory'
-import { IMPORTED_ALIAS_DEFAULTS, type ModelAlias } from '../provider'
+import { effectiveModelProtocol, IMPORTED_ALIAS_DEFAULTS, type ModelAlias } from '../provider'
 
 const imported = (overrides: Partial<ModelAlias> = {}): ModelAlias => ({
   ...structuredClone(IMPORTED_ALIAS_DEFAULTS), providerId: 'relay', alias: 'glm',
@@ -11,6 +11,26 @@ const imported = (overrides: Partial<ModelAlias> = {}): ModelAlias => ({
 const glm = findBuiltinModel('glm-5.3-flash')!
 
 describe('catalogue-backed provider metadata', () => {
+  it('resolves a binding protocol override while keeping missing values inherited', () => {
+    expect(effectiveModelProtocol({ protocol: 'openai-responses' }, imported())).toBe('openai-responses')
+    expect(effectiveModelProtocol({ protocol: 'openai-responses' }, imported({ protocolOverride: 'anthropic' }))).toBe('anthropic')
+    expect(effectiveModelProtocol({ protocol: 'openai-chat' }, imported({ protocolOverride: undefined }))).toBe('openai-chat')
+  })
+
+  it('clearing protocolOverride removes the persisted override during update', () => {
+    const resolver = modelBindingResolver()
+    const current = resolver.resolve(imported({ protocolOverride: 'anthropic' }))
+    const cleared = resolver.update(current, { ...current, protocolOverride: undefined })
+    expect(cleared.protocolOverride).toBeUndefined()
+  })
+
+  it('keeps the current override when an older metadata editor omits the field', () => {
+    const resolver = modelBindingResolver()
+    const current = resolver.resolve(imported({ protocolOverride: 'anthropic' }))
+    const input = { ...current }
+    delete (input as Partial<ModelAlias>).protocolOverride
+    expect(resolver.update(current, input).protocolOverride).toBe('anthropic')
+  })
   it('enriches old generic imports, matching casing and gateway prefixes without changing binding identity', () => {
     const raw = imported({ priority: 7, enabled: false })
     const model = modelBindingResolver().resolve(raw)

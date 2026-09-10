@@ -59,6 +59,7 @@ export function modelBindingResolver(custom: readonly ModelCatalogDefinition[] =
       if (overrides.has('thinkingConfig')) overrides.add('reasoningEfforts')
     }
     const result = structuredClone(raw)
+    if (result.protocolOverride === undefined) delete result.protocolOverride
     result.catalogOverrides = [...overrides]
     if (definition !== undefined) {
       for (const field of MODEL_METADATA_FIELDS) {
@@ -106,6 +107,12 @@ export function modelBindingResolver(custom: readonly ModelCatalogDefinition[] =
       alias: raw.alias, providerId: raw.providerId, upstreamModel: raw.upstreamModel,
       capabilities: { ...current.capabilities, ...input.capabilities },
       catalogOverrides: [...overrides]
+    }
+    // Older renderers omit this field entirely; preserve their current value.
+    // The protocol editor sends an own property with `undefined` to explicitly
+    // clear the persisted override.
+    if (Object.hasOwn(input, 'protocolOverride') && input.protocolOverride === undefined) {
+      delete next.protocolOverride
     }
     // Editing the legacy Think capability also changes the detailed declaration.
     if (input.capabilities.thinking !== current.capabilities.thinking && same(input.thinkingConfig, current.thinkingConfig)) {

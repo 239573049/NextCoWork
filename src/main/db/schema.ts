@@ -580,6 +580,30 @@ CREATE TABLE sync_revisions (
 );
 `
 
+/** 第 14 条：版本化计划文档与修订记录。计划内容不写入稳定提示词前缀。 */
+const V14_PLANS = `
+CREATE TABLE plans (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  json TEXT NOT NULL,
+  source_run_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(session_id, id)
+);
+CREATE INDEX plans_by_session ON plans(session_id, updated_at DESC);
+CREATE TABLE plan_revisions (
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  source_run_id TEXT,
+  patch TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(plan_id, version)
+);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -593,5 +617,6 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 10, name: 'subagent-sessions', sql: V10_SUBAGENT_SESSIONS },
   { version: 11, name: 'context-experimental-off', sql: V11_CONTEXT_EXPERIMENTAL_OFF },
   { version: 12, name: 'message-run', sql: V12_MESSAGE_RUN }
-  ,{ version: 13, name: 'config-sync', sql: V13_CONFIG_SYNC }
+  ,{ version: 13, name: 'config-sync', sql: V13_CONFIG_SYNC },
+  { version: 14, name: 'plans', sql: V14_PLANS }
 ]

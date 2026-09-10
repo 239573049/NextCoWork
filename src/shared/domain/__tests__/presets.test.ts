@@ -289,10 +289,6 @@ describe('预设表 × joinUpstreamUrl:拼出来的 URL 没有畸形', () => {
     // 两家的 baseUrl 没有任何重叠 —— 订阅 key 打按量地址(或反过来)只会 401
     const payBases = new Set(pay.endpoints.map((e) => e.baseUrl))
     for (const e of plan.endpoints) expect(payBases.has(e.baseUrl), e.baseUrl).toBe(false)
-
-    // 只有订阅那条是订阅制,按量那条不是 —— 它还关系到费用统计(方案 §5.3)
-    expect(plan.subscription).toBe(true)
-    expect(pay.subscription).toBeUndefined()
   })
 
   /**
@@ -412,15 +408,19 @@ describe('预设表 · 核实等级与 notes', () => {
   })
 
   /**
-   * ★ 方案 §8:「所以 `notes` 是必需字段,不是装饰」—— 说的就是订阅制这几条。
-   * 「配了半天 401」的头号原因是订阅 key 与按量 key 不通用,而这件事
-   * 只有 notes 能说。
+   * ★ 方案 §8:「所以 `notes` 是必需字段,不是装饰」—— 说的就是这几家按月/按积分
+   * 计费的 Coding Plan。「配了半天 401」的头号原因是它们的 key 与按量 key 不通用,
+   * 而这件事只有 notes 能说。
+   *
+   * ★ 名单写死,不是从某个字段筛出来的:这条约束的对象是**具体这几家**,
+   * 筛选条件一旦被改窄,测试会静默地什么都不测。
    */
-  it('订阅制预设必须有 notes', () => {
-    const subs = PROVIDER_PRESETS.filter((p) => p.subscription === true)
-    expect(subs.length).toBeGreaterThan(0)
-    for (const p of subs) expect((p.notes ?? '').length, p.id).toBeGreaterThan(0)
-  })
+  it.each(['codex', 'kimi-coding', 'zhipu-coding', 'zai-coding', 'routin-plan', 'opencode-go'])(
+    '%s 必须有 notes',
+    (id) => {
+      expect((findPreset(id)?.notes ?? '').length, id).toBeGreaterThan(0)
+    }
+  )
 
   it('supportsModelList 为 false 的不会被推荐去点那个按钮', () => {
     // 纯一致性:没有任何预设声称能拉列表却一条 endpoint 都不支持

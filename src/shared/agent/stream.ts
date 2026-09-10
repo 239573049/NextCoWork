@@ -66,7 +66,15 @@ export type ProviderStreamEvent =
    */
   | { type: 'provider_retry'; attempt: number; delayMs: number; reason: string }
   | { type: 'provider_switch'; from: string; to: string; reason: string }
-  | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage }
+  /**
+   * ★ `latencyMs` 是**这一次上游请求**从发出到本条消息收完的耗时,由
+   * `upstream/router.ts` 在转发时补上 —— 和 `message_start.providerId` 同一个
+   * 约定:decoder 不知道自己等了多久,也不该知道。
+   *
+   * 它是「平均 TPS」的分母:工具执行、等待授权都不在里面,所以一轮里
+   * 把每次请求的它累加起来,除出来的才是模型本身的输出速度。
+   */
+  | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage; latencyMs?: number }
   | { type: 'error'; error: AgentError }
 
 /**

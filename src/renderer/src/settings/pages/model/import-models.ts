@@ -11,6 +11,33 @@ import {
   type UpstreamProtocol
 } from '../../../../../shared/domain/provider'
 import { endpointFor, findPreset } from '../../../../../shared/domain/presets'
+import { BUILTIN_MODEL_CATALOG } from '../../../../../shared/domain/model-catalog-inventory'
+
+export type ImportModality = 'text' | 'image'
+
+/**
+ * Provider model-list endpoints do not expose a modality field. For image
+ * imports we therefore use the bundled catalogue first, then a conservative
+ * ID heuristic for preview/private image models that are not catalogued yet.
+ */
+export function isImageModelId(modelId: string): boolean {
+  const wanted = modelId.trim().toLowerCase()
+  const known = BUILTIN_MODEL_CATALOG.find((model) =>
+    [model.id, ...(model.aliases ?? [])].some((id) => {
+      const value = id.toLowerCase()
+      return wanted === value || wanted.endsWith(`/${value}`)
+    }),
+  )
+  if (known !== undefined) return known.modality === 'image'
+  return /(?:^|[/_:-])(image|imagen|dall[-_]?e|dalle|flux|seedream|seedance|z[-_]?image|imagegen|imagine|wanx|kolors|sdxl|stable[-_]?diffusion|ideogram|midjourney|recraft|qwen[-_]?image|pixart|playground)(?:$|[/:.-])/i.test(wanted)
+}
+
+export function filterFetchedModels(
+  fetched: readonly FetchedModel[],
+  modality: ImportModality,
+): FetchedModel[] {
+  return modality === 'image' ? fetched.filter((model) => isImageModelId(model.id)) : [...fetched]
+}
 
 /** 弹窗里的一行 */
 export interface ImportRow {

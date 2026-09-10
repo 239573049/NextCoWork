@@ -10,6 +10,7 @@ import type { InteractionResponse, PendingInteraction } from '../../../shared/ag
 import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import type { Unsubscribe } from '../../../shared/ipc/contract'
+import type { PlanDocument, PlanOperation, PlanUpdateResult } from '../../../shared/domain/plan'
 import { invoke, on } from './ipc'
 
 /**
@@ -54,3 +55,8 @@ export function listInteractions(runId: string): Promise<PendingInteraction[]> {
 export function respondInteraction(response: InteractionResponse): Promise<void> {
   return invoke('agent:respondInteraction', response)
 }
+
+export function listPlans(sessionId: string): Promise<PlanDocument[]> { return invoke('plans:list', { sessionId }) }
+export function getPlan(planId: string): Promise<PlanDocument | null> { return invoke('plans:get', { planId }) }
+export function updatePlan(req: { planId?: string; sessionId: string; baseVersion?: number; operations: PlanOperation[] }): Promise<PlanUpdateResult> { return invoke('plans:update', req) }
+export function submitPlan(planId: string, version: number): Promise<PlanDocument> { return invoke('plans:submit', { planId, version }) }

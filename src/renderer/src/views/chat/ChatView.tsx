@@ -27,6 +27,7 @@ import { Thread } from './Thread'
 import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { WorkspaceMarkdownProvider } from '../../components/markdown'
+import { createSession } from '../../services/sessions'
 
 export function ChatView({
   sessionId,
@@ -96,6 +97,31 @@ export function ChatView({
   const { t } = useI18n()
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
+
+  const executePlan = useCallback((plan: string, newSession: boolean, planId?: string, planVersion?: number): void => {
+    const options = {
+      workspaceId: workspace.id,
+      depth: 0 as const,
+      mode: 'normal' as const,
+      thinking: workspace.settings.defaultThinking,
+      webSearch: workspace.settings.webSearch,
+      permissionMode: workspace.settings.permissionMode,
+      model: workspace.settings.defaultModel !== '' ? workspace.settings.defaultModel : fallbackModel.model,
+      modelProviderId: workspace.settings.defaultModelProviderId ?? fallbackModel.modelProviderId,
+      skillIds: workspace.settings.activeSkillIds,
+      skillSelectionMode: workspace.settings.skillSelectionMode
+      ,planId
+      ,planVersion
+    }
+    const start = (targetSessionId: string): void => {
+      void sessionStore(targetSessionId).getState().send(`Execute the approved plan:\n\n${plan}`, options)
+    }
+    if (!newSession) { start(ensureSessionId()); return }
+    void createSession(workspace.id, t('composer.planExecutionTitle')).then((session) => {
+      useTabsStore.getState().openSession(workspace.id, session.id, session.title)
+      start(session.id)
+    }).catch(() => undefined)
+  }, [ensureSessionId, fallbackModel.model, fallbackModel.modelProviderId, t, workspace])
 
   useEffect(() => {
     void useModelsStore.getState().load()
@@ -381,6 +407,7 @@ export function ChatView({
     <div className="flex min-h-0 flex-1 flex-col">
       <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
         <Thread
+          sessionId={sessionId ?? undefined}
           transcript={transcript}
           runId={activeRunId}
           providerName={provider?.name}
@@ -404,6 +431,7 @@ export function ChatView({
             ,skillSelectionMode: workspace.settings.skillSelectionMode
           })}
           onDeleteTurn={deleteTurn}
+          onExecutePlan={executePlan}
         />
       </WorkspaceMarkdownProvider>
 

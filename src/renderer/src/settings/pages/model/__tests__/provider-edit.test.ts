@@ -151,20 +151,6 @@ describe('providerFromPreset', () => {
   it('每一条预设都建得出来(endpoints 非空是预设表的结构约束)', () => {
     for (const p of PROVIDER_PRESETS) expect(providerFromPreset(p)).not.toBeNull()
   })
-
-  /**
-   * ★ 订阅制**落进记录**,而不是每次计价时回头查预设:记录自解释,用户改过名、
-   * 换过地址都不影响;`runtime.ts` 也不必反过来 import 渲染层的预设表。
-   */
-  it('预设的订阅制标记落进建出来的记录；非订阅制的不落这个键', () => {
-    expect(providerFromPreset(preset('zhipu-coding'))?.subscription).toBe(true)
-    expect(Object.hasOwn(providerFromPreset(preset('zhipu'))!, 'subscription')).toBe(false)
-
-    for (const p of PROVIDER_PRESETS) {
-      const built = providerFromPreset(p)!
-      expect(built.subscription === true, p.id).toBe(p.subscription === true)
-    }
-  })
 })
 
 describe('isPresetAdded', () => {

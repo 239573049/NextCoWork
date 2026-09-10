@@ -14,6 +14,7 @@ import {
 import { endpointFor, findPreset } from '../../../../../../shared/domain/presets'
 import {
   addedModels,
+  filterFetchedModels,
   filterRows,
   importRows,
   initialSelection,
@@ -124,6 +125,21 @@ describe('filterRows', () => {
 
   it('两边都不沾就不出现', () => {
     expect(filterRows(rows, 'llama')).toEqual([])
+  })
+})
+
+describe('filterFetchedModels', () => {
+  it('图片导入只保留图片模型，过滤文本和 embedding', () => {
+    const rows = filterFetchedModels(
+      fetched('text-embedding-3-small', 'gpt-5', 'gpt-image-2', 'imagen-4-generate'),
+      'image',
+    )
+    expect(rows.map((row) => row.id)).toEqual(['gpt-image-2', 'imagen-4-generate'])
+  })
+
+  it('文本导入保持服务商返回的完整列表', () => {
+    const rows = filterFetchedModels(fetched('text-embedding-3-small', 'gpt-5'), 'text')
+    expect(rows.map((row) => row.id)).toEqual(['text-embedding-3-small', 'gpt-5'])
   })
 })
 

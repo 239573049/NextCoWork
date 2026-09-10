@@ -192,7 +192,7 @@ const SOURCES = {
   mistral: source('https://docs.mistral.ai/getting-started/models/'),
   cohere: source('https://docs.cohere.com/docs/models'),
   minimax: source('https://platform.minimax.io/docs/guides/models'),
-  hunyuan: source('https://cloud.tencent.com/document/product/1729'),
+  hunyuan: source('https://cloud.tencent.com/document/product/1823/130051'),
   xiaomi: source('https://platform.xiaomimimo.com/'),
   doubao: source('https://docs.volcengine.com/docs/82379/1330310'),
   baidu: source('https://cloud.baidu.com/doc/qianfan/s/rmh4stp0j'),

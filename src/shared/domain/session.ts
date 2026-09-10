@@ -4,7 +4,7 @@
 import type { AgentMessage } from '../agent/message'
 import type { SessionMode, ThinkingLevel } from '../agent/run-request'
 import type { ContextCheckpoint } from '../agent/context-management'
-import type { TokenUsage } from '../agent/stream'
+import type { RunUsage } from '../agent/transcript'
 
 export interface Session {
   id: string
@@ -78,10 +78,11 @@ export interface SessionDetail {
    * run → 该 run 的累计用量,从 `usage_records` 聚合而来。
    *
    * ★ 这是**重启之后**唯一能拿到逐轮用量的地方:流式过程中累加出来的那份
-   * 只活在渲染进程内存里,进程一没就没了。两者形状相同,展示层因此不必分辨
-   * 手上这份是实时的还是回填的。
+   * 只活在渲染进程内存里,进程一没就没了。两者形状相同(都是 `RunUsage`,
+   * 连算 TPS 的 `upstreamMs` 也在内),展示层因此不必分辨手上这份是实时的
+   * 还是回填的。
    */
-  runUsage?: Record<string, TokenUsage>
+  runUsage?: Record<string, RunUsage>
 }
 
 /** conversations:searchAll 的命中项。FTS5 给出的 snippet 带高亮标记。 */

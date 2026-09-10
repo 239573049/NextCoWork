@@ -99,7 +99,7 @@ export interface TranscriptState {
    */
   providerId?: string
   /** API-reported usage accumulated across completed requests in the current run. */
-  usage?: TokenUsage
+  usage?: RunUsage
   /**
    * 历史轮次的用量,从 SQLite 回填(`SessionDetail.runUsage` / `messageRuns`)。
    *
@@ -113,7 +113,7 @@ export interface TranscriptState {
    * 它们和 `messages` / `tools` 一样必须从上一份状态里带过来,
    * 不能被 `emptyTranscript()` 清掉。
    */
-  runUsage?: Record<string, TokenUsage>
+  runUsage?: Record<string, RunUsage>
   /** 消息 → 产出它的 run。老对话(第 12 条迁移之前)为空。 */
   messageRuns?: Record<string, string>
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
@@ -143,10 +143,28 @@ export function emptyTranscript(): TranscriptState {
   return { messages: [], live: [], tools: {}, subagents: {}, contextCheckpoints: [], status: 'running' }
 }
 
+/**
+ * 一个 run 的用量账:token 数,外加算平均 TPS 用的分母。
+ *
+ * ★ `upstreamMs` **不是 token,绝不参与计价**。`priceOf` 只读它认识的那几个
+ * 字段,所以多这一项是安全的;但反过来往 `TokenUsage` 里塞它就不安全了 ——
+ * 那个类型是计价与落盘的口径,一个毫秒数混进去迟早被当成某种 token 加起来。
+ */
+export interface RunUsage extends TokenUsage {
+  /**
+   * Σ 这一轮里每次上游请求的耗时。工具执行、等待授权、思考之间的空档都不在内 ——
+   * 拿它当分母算出来的才是模型的输出速度,而不是「这一轮总共等了多久」。
+   *
+   * 拿不到就是 undefined(老对话、以及还没收到过 message_end 的 run),
+   * 展示层据此不显示 TPS,而不是显示一个 0。
+   */
+  upstreamMs?: number
+}
+
 /** Add one provider response's usage to a child-agent total. */
-function addUsage(previous: TokenUsage | undefined, delta: TokenUsage): TokenUsage {
-  const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, ...previous }
-  for (const key of Object.keys(delta) as Array<keyof TokenUsage>) {
+function addUsage(previous: RunUsage | undefined, delta: RunUsage): RunUsage {
+  const usage: RunUsage = { inputTokens: 0, outputTokens: 0, ...previous }
+  for (const key of Object.keys(delta) as Array<keyof RunUsage>) {
     const value = delta[key]
     if (value !== undefined) usage[key] = (usage[key] ?? 0) + value
   }
@@ -369,7 +387,12 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
           return s
 
         case 'message_end': {
-          return { ...s, usage: addUsage(s.usage, d.usage) }
+          // latencyMs 走 upstreamMs 这个名字进状态:事件说的是「这一次请求」,
+          // 状态记的是「这一轮的累计」,同一个数在两处的含义不同,名字也不该同。
+          const delta: RunUsage = d.latencyMs === undefined
+            ? d.usage
+            : { ...d.usage, upstreamMs: d.latencyMs }
+          return { ...s, usage: addUsage(s.usage, delta) }
         }
 
         case 'provider_retry':

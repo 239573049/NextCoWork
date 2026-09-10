@@ -99,18 +99,7 @@ export function providerFromPreset(preset: ProviderPreset): UpstreamProvider | n
     baseUrl: first.baseUrl,
     credentialRef: `provider:${preset.id}`,
     priority: PRESET_PRIORITY,
-    enabled: true,
-    /*
-      ★ 把预设的订阅制标记**落进记录**,而不是每次用的时候回头查预设。
-      记录自解释:用户改过名、换过地址、甚至把预设删了重建,计价那边照样认得出
-      这是订阅额度。查预设的话,`runtime.ts` 得反过来 import 渲染层的预设表。
-
-      ★ 老库里已经添加过的订阅预设**不会**被回填(`seedBuiltinUpstream` 是
-      「Never overwrite an existing provider」)。那不是回归:它们继续走
-      「查不到定价 → null」的老路径,和今天一模一样。用户重新添加或在面板上
-      手动打开开关即可。为这个补一条迁移不值当。
-    */
-    ...(preset.subscription === true ? { subscription: true } : {})
+    enabled: true
   }
 }
 

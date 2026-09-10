@@ -4,7 +4,9 @@ import {
   elapsedOf,
   formatCallDuration,
   formatDuration,
+  formatTokensPerSecond,
   runDurationOf,
+  tokensPerSecond,
   totalDuration
 } from '../agent/duration'
 import type { AgentEvent } from '../agent/event'
@@ -126,6 +128,34 @@ describe('runDurationOf', () => {
 
   it('returns undefined when an old run has no usable timing data', () => {
     expect(runDurationOf({}, [{ startedAt: 2_000 }])).toBeUndefined()
+  })
+})
+
+describe('tokensPerSecond', () => {
+  it('总输出除以 Σ 上游耗时 —— 按 token 加权,不是把每次请求的 TPS 再平均', () => {
+    // 两次请求:800 token / 4s 与 5 token / 1s。逐次平均是 (200+5)/2 = 102.5,
+    // 那个数被那句「好的」整个带偏了;真实速度是 805/5s = 161。
+    expect(tokensPerSecond(805, 5_000)).toBeCloseTo(161, 5)
+  })
+
+  it('分母只含等模型的时间,所以跑了半分钟工具的一轮不会显示成模型变慢了', () => {
+    // 同样是 701 token:整轮墙钟 8.1s 会算出 86.5,而模型实际只说了 5.46s 的话
+    expect(tokensPerSecond(701, 5_460)).toBeCloseTo(128.4, 1)
+  })
+
+  it('缺耗时、耗时为 0、没产出 token 都算不出速度,一律 undefined', () => {
+    expect(tokensPerSecond(100, undefined)).toBeUndefined()
+    expect(tokensPerSecond(100, 0)).toBeUndefined()
+    expect(tokensPerSecond(0, 5_000)).toBeUndefined()
+    expect(tokensPerSecond(100, Number.NaN)).toBeUndefined()
+  })
+})
+
+describe('formatTokensPerSecond', () => {
+  it('三位数取整,两位数以下留一位小数', () => {
+    expect(formatTokensPerSecond(128.44)).toBe('128')
+    expect(formatTokensPerSecond(99.94)).toBe('99.9')
+    expect(formatTokensPerSecond(3.25)).toBe('3.3')
   })
 })
 

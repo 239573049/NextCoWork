@@ -498,7 +498,6 @@ function PresetCard({
       <div className="flex items-center gap-1.5">
         <ProviderAvatar name={p.name} id={p.id} size="sm" />
         <span className="min-w-0 flex-1 truncate text-[12px] text-fg">{p.name}</span>
-        {p.subscription === true && <Tag>{t("models.subscription")}</Tag>}
         {/* ★ **只有「未核实」还留在卡面上。** 「探针实测」「文档提取」那两个角标
             每张卡都有,等于没有信息;而未核实的那几家必须当场看得见 ——
             配失败时用户要知道该去查文档,而不是怀疑自己填错了。

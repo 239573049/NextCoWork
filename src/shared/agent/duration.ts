@@ -131,6 +131,40 @@ export function runDurationOf(
   return clampDuration(Math.max(...ends) - Math.min(...starts))
 }
 
+/**
+ * 平均输出速度(token/s)。
+ *
+ * ★ **分母是 Σ 上游请求耗时,不是这一轮的墙钟时长。** 一轮里模型可能只说了
+ * 5 秒话,剩下 25 秒在跑工具、在等用户点「允许」—— 用墙钟当分母,同一个模型
+ * 在「问一句」和「改十个文件」两轮里会显示成两个速度,而它并没有变慢。
+ * 这个口径下的数才是可比的:换一家供应商,这个数变了就是真的变了。
+ *
+ * ★ 「平均」是**按 token 加权**的,不是把每次请求的 TPS 再平均一遍:
+ * 总量除总时间,一次 800 token 的长回复自然比一次 5 token 的
+ * 「好的」更有分量。后者会被极短请求的抖动整个带偏。
+ *
+ * 任一头缺失或为 0 都返回 `undefined` —— 和 `durationOf` 同一个理由:
+ * 「算不出来」和「速度是 0」在界面上是两件事,前者不该显示。
+ */
+export function tokensPerSecond(
+  outputTokens: number,
+  upstreamMs: number | undefined
+): number | undefined {
+  if (upstreamMs === undefined || !Number.isFinite(upstreamMs) || upstreamMs <= 0) return undefined
+  if (!Number.isFinite(outputTokens) || outputTokens <= 0) return undefined
+  return (outputTokens * 1000) / upstreamMs
+}
+
+/**
+ * TPS → 人类可读。
+ *
+ * 分档同 `formatDuration` 的理由:三位数以上的小数位不提供任何决策价值
+ * (187 和 187.4 tok/s 是同一件事),而个位数那一档 3.2 和 3.9 的差别看得见。
+ */
+export function formatTokensPerSecond(tps: number): string {
+  return tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1)
+}
+
 export interface TranscriptRunTiming {
   runStartedAt?: number
   runEndedAt?: number

@@ -154,27 +154,6 @@ describe('upsertProvider', () => {
     })
   })
 
-  /**
-   * ★★ 订阅制标记走的是 `upsertProvider` 里那张**显式白名单**,不是 spread。
-   * 漏一行的表现不是报错,而是:用户打开开关 → 界面跳回去;更糟的是他先打开、
-   * 之后随便改个名字,`ProviderPanel.save()` 发的是全量 `{...p, ...patch}`,
-   * 而主进程那边一声不吭地把标记丢了 —— 账单里于是凭空多出一笔本不该计价的开销。
-   */
-  it('订阅制标记能存进去，改名不抹掉它，显式 false 能关掉', () => {
-    expect(upsertProvider(draft()).subscription).toBeUndefined()
-
-    expect(upsertProvider(draft({ subscription: true })).subscription).toBe(true)
-
-    // ★ 「省略 = 保留库里那条」:旧版导出的 JSON 里根本没有这个键,
-    //   取「省略 = false」的话导入一次就静默抹掉
-    const renamed = upsertProvider(draft({ name: 'Acme 新名字' }))
-    expect(renamed.subscription).toBe(true)
-    expect(store.listProviders().find((p) => p.id === 'acme')?.subscription).toBe(true)
-
-    // ★ `false ?? x` 求值为 false —— 显式关闭必须真的关掉,不能被回落吃掉
-    expect(upsertProvider(draft({ subscription: false })).subscription).toBe(false)
-  })
-
   it('空的嵌套更新保留已有档位；显式 undefined/null 不能清空或绕过校验', () => {
     upsertProvider(draft({ protocolOptions: { anthropic: { cacheTtl: '1h' } } }))
 

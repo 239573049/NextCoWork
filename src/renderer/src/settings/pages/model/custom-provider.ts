@@ -102,7 +102,7 @@ export function validateCustomProvider(input: {
  * 这个值,它自己派生 `provider:<id>`(同 `providerFromPreset`)。
  */
 export function customProviderDraft(
-  input: { name: string; baseUrl: string; protocol: UpstreamProtocol; subscription?: boolean },
+  input: { name: string; baseUrl: string; protocol: UpstreamProtocol },
   existingIds: readonly string[]
 ): UpstreamProvider {
   const name = input.name.trim()
@@ -114,8 +114,6 @@ export function customProviderDraft(
     baseUrl: normalizeBaseUrl(input.baseUrl),
     credentialRef: `provider:${id}`,
     priority: PRESET_PRIORITY,
-    enabled: true,
-    // ★ 和 `providerFromPreset` 同一条规矩:false 不落键,库里干净些
-    ...(input.subscription === true ? { subscription: true } : {})
+    enabled: true
   }
 }

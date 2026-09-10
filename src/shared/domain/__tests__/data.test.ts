@@ -76,6 +76,18 @@ describe('cutoffForAge', () => {
 })
 
 describe('isDataExport', () => {
+  it('accepts valid model protocol overrides and rejects unknown values', () => {
+    const valid = minimalExport()
+    valid.aliases = [{
+      alias: 'm', providerId: 'p', upstreamModel: 'm', protocolOverride: 'anthropic',
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+      contextWindow: 1000, maxOutputTokens: 100
+    }]
+    expect(isDataExport(valid)).toBe(true)
+    const invalid = structuredClone(valid)
+    ;((invalid.aliases as unknown[])[0] as Record<string, unknown>).protocolOverride = 'unknown'
+    expect(isDataExport(invalid)).toBe(false)
+  })
   it('接受当前格式和缺少 data 设置块的旧格式', () => {
     const current = minimalExport()
     expect(isDataExport(current)).toBe(true)

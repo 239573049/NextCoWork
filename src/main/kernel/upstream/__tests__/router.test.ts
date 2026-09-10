@@ -326,6 +326,31 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(usageRecords[0]?.timeToFirstTokenMs).toBe(40)
   })
 
+  /**
+   * 界面上的「平均 TPS」要的是**每次请求各自的耗时**,而不是整轮墙钟 ——
+   * 中间跑工具、等用户点「允许」的时间不能算进分母。只有路由器知道请求是
+   * 什么时候发出去的,所以由它在转发 message_end 时补上这个数。
+   */
+  it('message_end 带上这一次请求的耗时,供渲染层累出平均 TPS', async () => {
+    const { router, now } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))]
+    })
+
+    const out: ProviderStreamEvent[] = []
+    for await (const event of router.stream(REQ, new AbortController().signal, { workspaceId: 'w' })) {
+      out.push(event)
+      if (event.type === 'message_start') now.t += 40
+      if (event.type === 'text_delta') now.t += 60
+    }
+
+    // message_start 不带 —— 那时还没等过任何时间,也没有可报的速度
+    expect(out[0]).toMatchObject({ type: 'message_start' })
+    expect(out[0]).not.toHaveProperty('latencyMs')
+    expect(out.at(-1)).toMatchObject({ type: 'message_end', latencyMs: 100 })
+  })
+
   it('可见思考只记为明确标注的估算值，且不会超过总输出 Token', async () => {
     const { router, usageRecords } = rig({
       providers: [provider('p1')],
@@ -512,6 +537,20 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(headers[0]?.authorization).toBeUndefined()
     // 自报家门(kernel/user-agent.ts)——漏了不会报错,只是请求匿名发出去
     expect(headers[0]?.['user-agent']).toMatch(/^NextCoWork\//)
+  })
+
+  it('模型协议覆盖会让 Responses 供应商按 Anthropic endpoint、请求体和认证头调用', async () => {
+    const { router, calls, headers, bodies, usageRecords } = rig({
+      providers: [provider('responses', { protocol: 'openai-responses' })],
+      aliases: [{ ...alias('m', 'responses'), protocolOverride: 'anthropic' }],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    expect(calls).toEqual(['https://responses.example.com/v1/messages'])
+    expect(bodies[0]).toMatchObject({ model: 'm-upstream', messages: [{ role: 'user' }] })
+    expect(headers[0]).toMatchObject({ 'x-api-key': 'sk-test', 'anthropic-version': '2023-06-01' })
+    expect(headers[0]?.authorization).toBeUndefined()
+    expect(usageRecords[0]?.protocol).toBe('anthropic')
   })
 
   it('成功后健康度上升、连败清零', async () => {

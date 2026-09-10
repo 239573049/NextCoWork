@@ -568,6 +568,15 @@ describe('运行时自播种', () => {
     expect(pro?.displayName).toBe('DeepSeek V4 Pro')
   })
 
+  it('内置 Claude 绑定默认固定使用 Anthropic 协议', async () => {
+    getRouter()
+    const { store } = await import('../../state/store')
+    const claude = store
+      .listAliases()
+      .find((a) => a.alias === 'claude-fable-5-1' && a.providerId === BUILTIN_PROVIDER_ID)
+    expect(claude?.protocolOverride).toBe('anthropic')
+  })
+
   it('★ 演示上游**不再**被种进供应商表 —— 它是测试夹具,不是用户该看见的一条配置', async () => {
     const { store } = await import('../../state/store')
     store.removeProvider(DEMO_PROVIDER.id) // 撤掉 beforeEach 自己种的那条

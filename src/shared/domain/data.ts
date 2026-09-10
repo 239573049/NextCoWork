@@ -552,6 +552,7 @@ function isModelAlias(value: unknown): value is ModelAlias {
   ) return false
   if (has(value, 'modality') && !enumValue(value.modality, ['text', 'image', 'video', 'speech', 'transcription'])) return false
   if (has(value, 'enabled') && !isBoolean(value.enabled)) return false
+  if (has(value, 'protocolOverride') && !enumValue(value.protocolOverride, ['anthropic', 'openai-chat', 'openai-responses'])) return false
   if (has(value, 'thinkingConfig') && !isThinkingConfig(value.thinkingConfig)) return false
   if (has(value, 'reasoningEfforts') && (!Array.isArray(value.reasoningEfforts) || !value.reasoningEfforts.every((effort) => ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(effort))))) return false
   if (has(value, 'catalogOverrides') && (!Array.isArray(value.catalogOverrides) || !value.catalogOverrides.every(isModelCatalogOverride))) return false

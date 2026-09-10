@@ -62,7 +62,6 @@ import { listResolvedModels } from './state/model-bindings'
 import { PRICING_SEED } from '../shared/domain/pricing-seed'
 import { findPricing, priceOf } from '../shared/domain/pricing'
 import type { ModelPricing } from '../shared/domain/pricing'
-import type { UpstreamProvider } from '../shared/domain/provider'
 import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
@@ -253,6 +252,7 @@ function builtinAlias(providerId: string, model: string, index: number): ModelAl
     alias: model,
     providerId,
     upstreamModel: model,
+    ...(known?.manufacturerId === 'anthropic' ? { protocolOverride: 'anthropic' as const } : {}),
     // 表内顺序即优先级 —— 预设里 deepseek 排在前面是因为设置项要指它们
     priority: index * 10,
     capabilities: known?.capabilities ?? {
@@ -312,7 +312,15 @@ function seedBuiltinUpstream(): void {
     */
     const seeded = new Set(store.listAliases().map((a) => `${a.providerId}\u0000${a.alias}`))
     preset.suggestedModels.forEach((model, i) => {
-      if (seeded.has(`${preset.id}\u0000${model}`)) return
+      if (seeded.has(`${preset.id}\u0000${model}`)) {
+        // Migrate the built-in Claude seed introduced before per-model
+        // protocols existed. Preserve any explicit user override.
+        const existingAlias = store.listAliases().find((a) => a.providerId === preset.id && a.alias === model)
+        if (existingAlias !== undefined && existingAlias.protocolOverride === undefined && findBuiltinModel(model)?.manufacturerId === 'anthropic') {
+          store.putAlias({ ...existingAlias, protocolOverride: 'anthropic' })
+        }
+        return
+      }
       store.putAlias(builtinAlias(preset.id, model, i))
     })
   }
@@ -416,42 +424,26 @@ export function resolveUsagePricingModelId(upstreamModel: string): string {
 }
 
 /**
- * 这条用量该按哪张价目行计价 —— 或者**根本不该计价**。
+ * 这条用量该按哪张价目行计价 —— 查不到就是 null。
  *
- * ★★ **订阅制供应商在查表之前就短路,而不是指望「查不到」。**
- * 在这之前,「订阅额度不计入总费用」靠的是 `PRICING_SEED` 里恰好没收录那几家
- * (`pricing-seed.ts` 的 EXCLUDED 清单)。那个巧合对**用户自建**的供应商不成立:
- * `findPricing` 查不到 `(providerId, modelId)` 会退回 `(null, modelId)` 那条通用价,
- * 于是一个自建的订阅制中转,只要模型名叫 `claude-sonnet-4` 这类通用名,
- * 就会被按 token 算出一笔真金白银的假账单 —— 而用户早就付过月费了。
- *
- * ★ 返回 null 让调用方记 `costMicros: null`,和「查不到定价」走同一个出口。
- * 语义上这两件事不一样(「不该计价」vs「我们不知道」),`schema.ts` 也要求
- * NULL 与 0 分得开。**当下可以接受**:那张「用过但查不到定价」的待补表还没实现;
- * 将来实现它的时候,`usage_records` 有 `provider_id` 列,加一条排除订阅制供应商的
- * WHERE 就化解了。在那之前不提前加真列、不提前写迁移。
+ * ★ 返回 null 让调用方记 `costMicros: null`,而不是一个看着挺像样的 0 ——
+ * `schema.ts` 要求 NULL 与 0 分得开。那张「用过但查不到定价」的待补表还没实现;
+ * 将来实现它的时候,`usage_records` 有 `provider_id` 列,够用。
  *
  * ★ 和 `resolveUsagePricingModelId` 同一个理由抽成导出的纯函数:判断本身要可测,
  * 而 `persistUsageAttempt` 挂在内核回调上,测不到。
  */
 export function resolveUsagePricing(
-  provider: Pick<UpstreamProvider, 'subscription'> | undefined,
   providerId: string,
   pricingModelId: string,
   at: number
 ): ModelPricing | null {
-  if (provider?.subscription === true) return null
   return findPricing(PRICING_SEED, providerId, pricingModelId, at)
 }
 
 function persistUsageAttempt(record: UnpricedUsageAttempt): void {
   const pricingModelId = resolveUsagePricingModelId(record.upstreamModel)
-  const pricing = resolveUsagePricing(
-    store.listProviders().find((p) => p.id === record.providerId),
-    record.providerId,
-    pricingModelId,
-    record.at
-  )
+  const pricing = resolveUsagePricing(record.providerId, pricingModelId, record.at)
   const priced =
     pricing === null
       ? null

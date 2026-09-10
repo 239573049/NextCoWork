@@ -13,7 +13,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Pencil } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
-import { runDurationOf } from '../../../../shared/agent/duration'
+import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
 import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { AgentMarkdown } from '../../components/markdown'
@@ -34,14 +34,17 @@ import { TurnActions, type TurnPrompt } from './TurnActions'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
 
 export function Thread({
+  sessionId,
   transcript,
   runId,
   providerName,
   lastSeq,
   queued,
   onEditMessage,
-  onDeleteTurn
+  onDeleteTurn,
+  onExecutePlan
 }: {
+  sessionId?: string
   transcript: TranscriptState
   runId: string | null
   lastSeq: number
@@ -49,6 +52,7 @@ export function Thread({
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
   onDeleteTurn?: (userMessageId: string) => Promise<void>
+  onExecutePlan?: (plan: string, newSession: boolean, planId?: string, planVersion?: number) => void
   /** 助手消息上方那行 `供应商 / 模型`(截图:`RoutinAI / claude-fable-5-1`) */
   providerName: string | undefined
 }): ReactNode {
@@ -101,7 +105,7 @@ export function Thread({
           {error.code}: {agentErrorText(error, t)}
         </p>
       )}
-      {runId !== null && <InteractionPanel key={runId} runId={runId} />}
+      {runId !== null && <InteractionPanel key={runId} runId={runId} sessionId={sessionId ?? undefined} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
         lastSeq={lastSeq} queued={queued} />
     </div>
@@ -232,6 +236,15 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
   const cacheCreate = usage.cacheCreationInputTokens ?? 0
   const inputTotal = usage.inputTokens + cacheRead + cacheCreate
   const cacheRate = inputTotal > 0 ? cacheRead / inputTotal : 0
+  /*
+    ★ **不用旁边那个「用时」当分母。** 那是整轮墙钟,里面含工具执行和等授权的
+    时间;`upstreamMs` 只累加真正在等模型的那几段,算出来的才是模型的输出速度
+    (口径见 `tokensPerSecond`)。
+
+    算不出来就整行不画:老对话没有这个数,一次 token 都没产出的轮次也没有。
+    显示「平均 TPS 0.0」会被读成「慢得没边」,而事实是「无从谈起」。
+  */
+  const tps = tokensPerSecond(usage.outputTokens, usage.upstreamMs)
   return (
     <div className="group relative w-fit" data-testid="task-usage">
       <div className="cursor-help text-[11px] text-fg-faint">
@@ -244,6 +257,7 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
         {cacheRead > 0 && <div>{t('chat.taskUsageCacheRead', { count: cacheRead })}</div>}
         {cacheCreate > 0 && <div>{t('chat.taskUsageCacheCreate', { count: cacheCreate })}</div>}
         <div>{t('chat.taskUsageCacheRate', { rate: `${(cacheRate * 100).toFixed(1)}%` })}</div>
+        {tps !== undefined && <div>{t('chat.taskUsageTps', { tps: formatTokensPerSecond(tps) })}</div>}
       </div>
     </div>
   )

@@ -79,6 +79,8 @@ export const DIRECT_BYPASS: readonly string[] = [
   '*.bce.baidu.com',
   '*.tencent.com',
   '*.tencentcloudapi.com',
+  // 腾讯 TokenHub 的接入域名,不在 *.tencent.com 底下(.cn 那两个备用地址由 *.cn 兜住)
+  '*.tencentmaas.com',
   '*.myqcloud.com',
   '*.huaweicloud.com',
   '*.metaso.cn',

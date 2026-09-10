@@ -71,6 +71,8 @@ import {
 import { formatRate, selectCatalogPricing } from "./pricing-table";
 import { parseModelTab } from "./tabs";
 import { useI18n, type TranslationKey } from "../../../i18n";
+import { ModelProtocolEditor, modelProtocolSummary } from "./ModelProtocol";
+import { ImageModelPage } from "./ImageModelPage";
 
 export function ModelPage({
   settings,
@@ -80,6 +82,7 @@ export function ModelPage({
   const tab = parseModelTab(sub);
   if (tab === "usage") return <UsageTab />;
   if (tab === "management") return <ModelConsole />;
+  if (tab === "image") return <ImageModelPage />;
   if (tab !== "text") return <StubModalityPage modality={tab} />;
   return <LegacyTextTab settings={settings} patch={patch} />;
 }
@@ -613,7 +616,7 @@ function ModelConsole(): ReactNode {
             </button>
           </div>
           <div className="scroll-thin max-h-[502px] overflow-auto rounded-[10px] border border-border">
-            <table className="w-full min-w-[820px] border-collapse text-[11.5px]">
+            <table className="w-full min-w-[1000px] border-collapse text-[11.5px]">
               <thead className="sticky top-0 z-10 bg-surface">
                 <tr className="border-b border-hairline text-fg-faint">
                   <th className="w-7 py-2"></th>
@@ -622,6 +625,9 @@ function ModelConsole(): ReactNode {
                   </th>
                   <th className="py-2 text-left font-normal">
                     {t("models.columns.type")}
+                  </th>
+                  <th className="py-2 text-left font-normal">
+                    {t("models.protocol")}
                   </th>
                   <th className="py-2 text-left font-normal">
                     {t("models.columns.capabilities")}
@@ -648,6 +654,7 @@ function ModelConsole(): ReactNode {
                   <ModelRow
                     key={m.id}
                     model={m}
+                    providers={providers}
                     selected={selectedKey === m.id}
                     onSelect={() => setSelectedKey(m.id)}
                     onEdit={() => setEditingModel({ model: m, isNew: false })}
@@ -700,6 +707,7 @@ function ModelConsole(): ReactNode {
               model.id,
               ...(model.aliases ?? []),
             ])}
+            bindings={editingModel.isNew ? [] : catalog.find((model) => model.id === editingModel.model.id)?.bindings ?? []}
             onSaved={persistCustom}
             onRemoved={removeCustom}
           />
@@ -711,11 +719,13 @@ function ModelConsole(): ReactNode {
 
 function ModelRow({
   model: m,
+  providers,
   selected,
   onSelect,
   onEdit,
 }: {
   model: CatalogModel;
+  providers: readonly UpstreamProvider[];
   selected: boolean;
   onSelect: () => void;
   onEdit: () => void;
@@ -776,6 +786,17 @@ function ModelRow({
         </span>
       </td>
       <td className="py-2 text-fg-muted">{modalityLabel}</td>
+      <td className="max-w-[200px] py-2 pr-3 text-[10px] text-fg-muted">
+        {m.bindings.length === 0 ? t("models.protocolNoBindingShort") : m.bindings.map((binding) => (
+          <div key={`${binding.providerId}:${binding.alias}`} className="py-0.5">
+            <span className="text-fg-faint">
+              {providers.find((provider) => provider.id === binding.providerId)?.name ?? binding.providerId}
+              {m.bindings.length > 1 ? ` · ${binding.alias}` : ""}
+            </span>
+            <div>{modelProtocolSummary(binding, providers, t)}</div>
+          </div>
+        ))}
+      </td>
       <td className="py-2">
         <div className="flex max-w-[135px] flex-wrap gap-1">
           {caps.slice(0, 4).map((c) => (
@@ -925,6 +946,7 @@ function CatalogModelEditor({
   providers,
   initialProviderId,
   existingIds,
+  bindings,
   onSaved,
   onRemoved,
 }: {
@@ -932,9 +954,10 @@ function CatalogModelEditor({
   isNew: boolean;
   builtin: boolean;
   overridden: boolean;
-  providers: readonly { id: string; name: string }[];
+  providers: readonly UpstreamProvider[];
   initialProviderId: string | undefined;
   existingIds: readonly string[];
+  bindings: readonly ModelAlias[];
   onSaved: (model: ModelCatalogDefinition) => void;
   onRemoved: (id: string) => void;
 }): ReactNode {
@@ -1712,6 +1735,12 @@ function CatalogModelEditor({
           </EditorField>
         </div>
       </InspectorSection>
+
+      {providers.length > 0 && (
+        <InspectorSection title={t("models.protocolSettings")}>
+          <ModelProtocolEditor bindings={bindings} providers={providers} />
+        </InspectorSection>
+      )}
 
       {providers.length > 0 && (
         <InspectorSection title={t("models.saveToConnection")}>

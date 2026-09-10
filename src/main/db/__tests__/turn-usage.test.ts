@@ -101,7 +101,8 @@ describe('逐轮用量', () => {
       cacheReadInputTokens: 300,
       cacheCreationInputTokens: 50,
       cacheCreation1hInputTokens: 10,
-      reasoningTokens: 5
+      reasoningTokens: 5,
+      upstreamMs: 1_200
     })
     expect(detail?.runUsage?.['run-2']).toMatchObject({ inputTokens: 7, outputTokens: 3 })
   })
@@ -123,6 +124,36 @@ describe('逐轮用量', () => {
       outputTokens: 20,
       cacheReadInputTokens: 300
     })
+  })
+
+  it('算 TPS 的耗时只收成功的那次,失败尝试的等待不当作「模型很慢」', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '超时一次之后才答上来的一轮'), 'run-1')
+    // 30s 才被打回,一个 token 都没产出。它的 Token 照样计费(上一个用例),
+    // 但把这 30s 算进 TPS 的分母,读数会从 16.7 掉到 0.6 —— 那是在报告一件没发生的事。
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', {
+      ok: false, httpStatus: 504, outputTokens: 0, latencyMs: 30_000, timeToFirstTokenMs: null
+    }))
+    repo.recordUsageAttempt(attempt('u-2', 'run-1', { attempt: 2, latencyMs: 1_200 }))
+
+    restart()
+
+    expect(repo.getSessionDetail('session-1')?.runUsage?.['run-1']).toMatchObject({
+      outputTokens: 20,
+      upstreamMs: 1_200
+    })
+  })
+
+  it('一轮里一次成功请求都没有时不给 upstreamMs,省得展示层去除以零', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '全军覆没的一轮'), 'run-1')
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', {
+      ok: false, httpStatus: 503, outputTokens: 0, latencyMs: 8_000, timeToFirstTokenMs: null
+    }))
+
+    restart()
+
+    expect(repo.getSessionDetail('session-1')?.runUsage?.['run-1']).not.toHaveProperty('upstreamMs')
   })
 
   it('编辑消息重写整段历史,不会把已有轮次的 run 归属抹掉', () => {

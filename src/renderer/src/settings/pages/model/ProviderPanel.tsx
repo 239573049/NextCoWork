@@ -24,6 +24,7 @@ import type {
   AnthropicCacheTtl,
   CredentialInfo,
   ModelAlias,
+  ModelModality,
   ReasoningEffort,
   ThinkingConfig,
   ThinkingMode,
@@ -120,7 +121,15 @@ const REASONING_EFFORTS: readonly ReasoningEffort[] = [
  * 为一句「确定吗」搭一层模态,代价比它挡住的误触还大;而两步按钮同样需要
  * 第二次有意的点击。删除连密钥一起删(`provider:remove` 那边),所以这一步不能省。
  */
-export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
+export function ProviderPanel({
+  entry,
+  modality = "text",
+  preserveAliases = [],
+}: {
+  entry: ProviderEntry;
+  modality?: ModelModality;
+  preserveAliases?: readonly ModelAlias[];
+}): ReactNode {
   const { t } = useI18n();
   const { provider: p, aliases } = entry;
   const managed = p.id === "nextcowork";
@@ -514,7 +523,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
 
   return (
     <>
-      <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[12px] border border-border bg-canvas">
         <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
           <ProviderAvatar name={p.name} id={p.id} />
           <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
@@ -540,7 +549,7 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
           按字段回落的,不是整条拒绝);协议格式和模型列表归用户。整块 `disabled`
           会把那两样一起焊死,而它们正是用户要改的。
         */}
-        <fieldset className="space-y-4 px-4 py-4">
+        <fieldset className="scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
           {managed && <p className="rounded-[8px] bg-accent/10 px-3 py-2 text-[11.5px] leading-[1.6] text-accent">{t("provider.builtinHint")}</p>}
           <Field label={t("provider.name")}>
             <TextInput
@@ -660,29 +669,6 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
               />
             </Field>
           )}
-
-          {/*
-            ★ 放在协议之外 —— 计费方式和用哪个协议没关系,两族协议下都要能改。
-            ★ **不本地 set 状态**,写完靠 `provider:changed` 广播把 `p` 换掉:
-              主进程那边一旦漏了这个字段(它是显式白名单,不是 spread),
-              开关会自己跳回去 —— 这正是我们要看见的,而不是被本地状态盖住。
-          */}
-          <div className="flex items-start gap-4">
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] text-fg">{t("provider.subscription")}</p>
-              <p className="mt-1 text-[11.5px] leading-[1.6] text-fg-muted">
-                {t("provider.subscriptionHint")}
-              </p>
-            </div>
-            <div className="shrink-0 pt-0.5">
-              <Toggle
-                checked={p.subscription === true}
-                disabled={busy}
-                onChange={(on) => save({ subscription: on })}
-                label={t("provider.subscription")}
-              />
-            </div>
-          </div>
 
           <Field
             label={
@@ -1059,6 +1045,8 @@ export function ProviderPanel({ entry }: { entry: ProviderEntry }): ReactNode {
         providerId={p.id}
         providerName={p.name}
         aliases={aliases}
+        modality={modality === "image" ? "image" : "text"}
+        preserveAliases={preserveAliases}
         onClose={() => setImportOpen(false)}
       />
       {thinkingModel !== null && (

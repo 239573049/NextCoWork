@@ -70,6 +70,8 @@ export type PendingInteraction =
       id: string
       runId: string
       plan: string
+      planId?: string
+      planVersion?: number
       createdAt: number
     }
 

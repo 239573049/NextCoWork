@@ -209,6 +209,29 @@ describe('applyEvent · 终局与元信息', () => {
     expect(applyEvent(emptyTranscript(), first).usage?.outputTokens).toBe(144)
   })
 
+  /**
+   * 平均 TPS 的分母。一轮里有几次上游请求就累几段,**工具执行的那段不在内** ——
+   * 这正是不拿旁边那个「用时」当分母的原因。
+   */
+  it('把每次 message_end 报的请求耗时累成这一轮的 upstreamMs', () => {
+    const s = applyEvents(emptyTranscript(), [
+      { type: 'stream', delta: { type: 'message_end', stopReason: 'tool_use',
+        usage: { inputTokens: 100, outputTokens: 40 }, latencyMs: 2_000 } },
+      // 中间跑了 30 秒工具,一个字节都不该进 upstreamMs
+      { type: 'tool_start', callId: 'c1', toolName: 'Bash', input: {}, at: 1_000 },
+      { type: 'tool_end', callId: 'c1', output: { content: 'ok' }, isError: false, at: 31_000 },
+      { type: 'stream', delta: { type: 'message_end', stopReason: 'end_turn',
+        usage: { inputTokens: 200, outputTokens: 60 }, latencyMs: 3_000 } }
+    ])
+    expect(s.usage).toEqual({ inputTokens: 300, outputTokens: 100, upstreamMs: 5_000 })
+  })
+
+  it('上游没报耗时时不留 upstreamMs —— 展示层据此不画 TPS,而不是画个 0', () => {
+    const s = applyEvent(emptyTranscript(), { type: 'stream', delta: {
+      type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 2 } } })
+    expect(s.usage).not.toHaveProperty('upstreamMs')
+  })
+
   it('未知/未接管的事件原样返回,不炸也不吞状态', () => {
     const before = applyEvents(emptyTranscript(), [t(0, 'x')])
     const after = applyEvent(before, {

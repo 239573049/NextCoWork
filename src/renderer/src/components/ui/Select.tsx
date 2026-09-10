@@ -20,12 +20,14 @@ export function Select({
   onValueChange,
   ariaLabel,
   className,
+  disabled = false,
 }: {
   value: string;
   options: readonly SelectOption[];
   onValueChange: (value: string) => void;
   ariaLabel: string;
   className?: string;
+  disabled?: boolean;
 }): ReactNode {
   // Radix 把空串保留给“尚未选择”的内部状态；设置里的“跟随对话”恰好以空串持久化。
   // 为这个选项映射一个仅在组件内部使用、且不会和调用方值冲突的值。
@@ -44,6 +46,7 @@ export function Select({
     >
       <SelectPrimitive.Trigger
         aria-label={ariaLabel}
+        disabled={disabled}
         className={cn(
           "app-no-drag group flex h-7 w-full items-center gap-1.5 rounded-[7px] border border-border",
           "bg-surface-field px-2 text-left text-[11.5px] text-fg outline-none",

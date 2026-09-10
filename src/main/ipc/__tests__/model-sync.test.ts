@@ -65,6 +65,14 @@ describe('model metadata synchronization through IPC and runtime', () => {
     expect(rows[0]?.thinkingConfig).toBeUndefined()
   })
 
+  it('preserves a model protocol override across provider model-list synchronization', () => {
+    const [model] = setAliases('relay', [glm.id])
+    updateModel({ ...model!, protocolOverride: 'anthropic' })
+    const rows = setAliases('relay', ['new-model', glm.id])
+    expect(rows.find((row) => row.upstreamModel === glm.id)?.protocolOverride).toBe('anthropic')
+    expect(rows.find((row) => row.upstreamModel === 'new-model')?.protocolOverride).toBeUndefined()
+  })
+
   it('keeps effort parameter paths on save and rejects inconsistent supported/default efforts', () => {
     const [model] = setAliases('relay', [glm.id])
     expect(updateModel({ ...model!, thinkingConfig: { ...model!.thinkingConfig!, defaultBudgetTokens: undefined } })

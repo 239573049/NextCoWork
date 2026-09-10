@@ -26,6 +26,7 @@ import type {
 } from '../../shared/domain/provider'
 import {
   IMPORTED_ALIAS_DEFAULTS,
+  isUpstreamProtocol,
   normalizeAnthropicCacheTtl,
   providerCredentialRef,
   PROTOCOL_LABEL
@@ -66,6 +67,9 @@ export function listModels(providerId?: string): ModelAlias[] {
 /** Update one configured model while preserving provider/alias identity. */
 export function updateModel(input: ModelAlias): ModelAlias {
   ensureSeeded()
+  if (input.protocolOverride !== undefined && !isUpstreamProtocol(input.protocolOverride)) {
+    throw new Error('模型协议无效。')
+  }
   const existing = store.listAliases().find(
     (m) => m.providerId === input.providerId && m.alias === input.alias
   )
@@ -264,7 +268,7 @@ function mergeProtocolOptions(
  *
  * ★★ **NextCoWork 那条走「字段级托管」,不是整条拒绝。**
  * 它的 `name` / `baseUrl` / `credentialRef` 归登录流程(`client-auth.ts`),
- * 而 `protocol` / `protocolOptions` / `priority` / `enabled` / `subscription` 归用户 ——
+ * 而 `protocol` / `protocolOptions` / `priority` / `enabled` 归用户 ——
  * 用户要能翻「API 格式」那个开关。地址锁死不是保守:`credentialRef` 里存的是
  * **平台发的 access token**,放开地址等于允许把它发到任意主机去。
  *
@@ -304,17 +308,6 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
   const baseUrl = platform?.baseUrl ?? normalizeBaseUrl(input.baseUrl)
 
   const protocolOptions = mergeProtocolOptions(existing?.protocolOptions, input.protocolOptions)
-  /*
-    ★★ **省略 = 保留库里那条,不是关掉。**
-    这个函数是全量 PUT(`ProviderPanel.save()` 发的是 `{...p, ...patch}`),而
-    「省略」有两个来源:一个是 UI 正常提交(它总带着这个字段,两种语义等价),
-    另一个是**导入旧版本导出的 JSON** —— 那份文件里根本没有这个键。
-    取「省略 = false」的话,导入一次就把用户标好的订阅制静默抹掉,
-    表现是账单里凭空多出一笔本该不计价的开销,而没有任何一处报错。
-
-    ★ `false ?? x` 求值为 `false`,所以显式关闭照常生效 —— 只有 `undefined` 才回落。
-  */
-  const subscription = input.subscription ?? existing?.subscription
   const saved = store.putProvider({
     id,
     name,
@@ -323,8 +316,6 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
     credentialRef: existing?.credentialRef ?? providerCredentialRef(id),
     priority: Number.isFinite(input.priority) ? input.priority : 50,
     enabled: input.enabled,
-    // ★ 和 protocolOptions 一样,undefined 时不写这个键 —— 别在库里留一地 `"subscription": null`
-    ...(subscription === undefined ? {} : { subscription }),
     ...(protocolOptions === undefined ? {} : { protocolOptions })
   })
   broadcast()

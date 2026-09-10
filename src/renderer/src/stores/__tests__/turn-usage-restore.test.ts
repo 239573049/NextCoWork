@@ -25,7 +25,8 @@ import { releaseSession, sessionStore } from '../session'
 const SESSION = 'usage-session'
 const user = userMessage('u1', [{ type: 'text', text: 'Question' }], 0)
 const answer = assistantMessage('a1', [{ type: 'text', text: 'Answer' }], 1)
-const usage = { inputTokens: 120, outputTokens: 40, cacheReadInputTokens: 900 }
+// upstreamMs 是平均 TPS 的分母,和 token 一样得挺过重启 —— 少了它,老对话的速度读数会集体消失
+const usage = { inputTokens: 120, outputTokens: 40, cacheReadInputTokens: 900, upstreamMs: 2_500 }
 const OPTS: SendOptions = {
   workspaceId: 'workspace', depth: 0, mode: 'normal', thinking: 'auto',
   webSearch: false, permissionMode: 'ask', model: 'deepseek-test', skillIds: []
