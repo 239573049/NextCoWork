@@ -283,6 +283,11 @@ function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
       respond({ id: interaction.id, kind: interaction.kind,
         decision: editing ? { kind: 'allow_edited', input: value } : { kind: 'allow_once' } })
     } else {
+      // ★ 批准就得真的往前走一步 —— 只把 approved 写回去、不触发执行的话,
+      // 原来那个只读计划模式的 run 会继续跑,模型自己也创建不了文件,
+      // 用户看到的就是「点了批准,啥也没变」。默认当前会话执行,
+      // 「新会话执行」作为额外选项挪去了页脚(见 extraActions)。
+      if (onExecute !== undefined) execution.current = false
       respond({ id: interaction.id, kind: interaction.kind, approved: true, feedback })
     }
   }
@@ -301,13 +306,20 @@ function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
       busy={busy}
       canSubmit
       dismissLabel={t('agent.interaction.deny')}
-      submitLabel={t(interaction.kind === 'tool_permission' ? 'agent.interaction.allowOnce' : 'agent.interaction.approvePlan')}
-      extraActions={alwaysRule === undefined ? undefined : (
+      submitLabel={t(interaction.kind === 'tool_permission'
+        ? 'agent.interaction.allowOnce'
+        : onExecute !== undefined ? 'agent.interaction.executeCurrent' : 'agent.interaction.approvePlan')}
+      extraActions={alwaysRule !== undefined ? (
         <button type="button" disabled={busy} className={BUTTON} title={t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
           onClick={() => respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })}>
           {t('agent.interaction.allowAlways')}
         </button>
-      )}
+      ) : interaction.kind === 'plan_approval' && onExecute !== undefined ? (
+        <button type="button" disabled={busy} className={BUTTON}
+          onClick={() => { execution.current = true; respond({ id: interaction.id, kind: 'plan_approval', approved: true, feedback }) }}>
+          {t('agent.interaction.executeNewSession')}
+        </button>
+      ) : undefined}
       onDismiss={() => {
         if (interaction.kind === 'tool_permission') respond({ id: interaction.id, kind: interaction.kind, decision: { kind: 'deny' } })
         else respond({ id: interaction.id, kind: interaction.kind, approved: false, feedback })
@@ -333,14 +345,6 @@ function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
         <textarea aria-label={t('agent.interaction.feedback')} placeholder={t('agent.interaction.feedback')}
           value={feedback} onChange={(e) => setFeedback(e.target.value)} rows={2} maxLength={32768} disabled={busy}
           className="mt-1 w-full rounded-lg border border-border bg-app p-2 text-[13px]" />
-        {onExecute !== undefined && <div className="mt-2 flex flex-wrap gap-2">
-          <button type="button" disabled={busy} className={`${BUTTON} bg-accent text-accent-fg`} onClick={() => { execution.current = false; respond({ id: interaction.id, kind: 'plan_approval', approved: true, feedback }) }}>
-            {t('agent.interaction.executeCurrent')}
-          </button>
-          <button type="button" disabled={busy} className={BUTTON} onClick={() => { execution.current = true; respond({ id: interaction.id, kind: 'plan_approval', approved: true, feedback }) }}>
-            {t('agent.interaction.executeNewSession')}
-          </button>
-        </div>}
       </>}
     </CardShell>
   )

@@ -210,9 +210,16 @@ const MODE_APPENDIX: Record<SessionMode, string> = {
 You have read-only tools only. This is not advice — the tool list has already been filtered,
 so a write or a command will not fail politely, it simply is not there.
 
-Investigate first, then write the plan: which files change, what changes in each one, what could
-break, and what you could not verify. Then STOP. Do not promise to "start now" — the user reads the
-plan and takes you out of this mode when they want it executed.`,
+Investigate first. Then build the plan with PlanUpdate, one insert_step call per step — not a single
+call at the end that just restates the goal. A step is not done until it names the exact files,
+functions, or symbols touched and the before/after behavior; "update the code" or "fix the bug" is
+not a step, it is the thing you still have to figure out. Every step needs acceptanceCriteria that
+are checkable from the outside — a test that passes, a command that exits 0, a screen that renders
+X — not "works correctly". Before calling ExitPlanMode, also call set_risks with what could actually
+break (not generic caveats like "might have bugs") and set_validation with the exact commands or
+checks to run once it is executed. A plan with one step and no acceptance criteria will be rejected —
+break the work down for real. Then STOP. Do not promise to "start now" — the user reads the plan and
+takes you out of this mode when they want it executed.`,
   goal: `# Goal mode
 
 Keep going until the goal is actually met. Do NOT stop after each step to ask "should I continue?" —

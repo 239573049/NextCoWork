@@ -14,7 +14,7 @@ import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { AgentEvent } from '../../../shared/agent/event'
 import { isToolResultOnly, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
-import type { SendOptions } from '../../../shared/agent/run-request'
+import type { SendOptions, SessionMode } from '../../../shared/agent/run-request'
 import {
   applyEvents,
   applyChildEvent,
@@ -105,6 +105,14 @@ export interface SessionState {
    * 排着的每一条追问打断,那份意图理应立刻覆盖到整条队列,而不是只对新排的消息生效。
    */
   retagQueuedPermission: (mode: PermissionMode) => void
+  /**
+   * 方案批准执行时调用:还没被消费的排队消息**改回普通模式**,而不是继续
+   * 背着「排队那一刻计划模式还没结束」时冻结的 `mode: 'plan'` ——
+   * 否则这条消息出队续跑时会把用户刚退出的计划模式重新打开一轮只读审批,
+   * 看起来就像点了「执行计划」根本没生效。和 `retagQueuedPermission` 一样,
+   * 是「逐条冻结」原则下专门开的例外。
+   */
+  retagQueuedMode: (mode: SessionMode) => void
   /**
    * 编辑一条用户消息。`continueRun` = 从这条起重跑(界面上的「重新生成」)。
    *
@@ -320,6 +328,17 @@ function createSessionStore(sessionId: string): SessionStore {
       set({
         queuedInputs: s.queuedInputs.map((q) =>
           q.options.permissionMode === mode ? q : { ...q, options: { ...q.options, permissionMode: mode } }
+        )
+      })
+      persistInput(sessionId, true)
+    },
+
+    retagQueuedMode(mode) {
+      const s = get()
+      if (s.queuedInputs.length === 0) return
+      set({
+        queuedInputs: s.queuedInputs.map((q) =>
+          q.options.mode === mode ? q : { ...q, options: { ...q.options, mode } }
         )
       })
       persistInput(sessionId, true)

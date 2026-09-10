@@ -131,4 +131,21 @@ describe('侧边栏「新建对话」', () => {
     expect(activeId()).toBe(first.id)
     expect(first.ref.sessionId).toBe('session-history')
   })
+
+  /**
+   * ★ 回归:store 是懒创建的,重启后除了当前那一个,其余 chat Tab 的 store 都不在
+   * 注册表里 —— `isSessionUntouched` 的「查不到就是没碰过」于是把跑过一整段对话的
+   * 会话也当成白纸,点「新建对话」跳进旧会话。绑过 sessionId 就不是白纸。
+   */
+  it('引用着历史会话、store 还没建起来的 Tab 不算白纸', () => {
+    const tabs = useTabsStore.getState()
+    tabs.openSession(WS, 'session-history', '一条历史会话')
+    const history = chats()[0]!
+
+    useTabsStore.getState().newChat(WS)
+
+    expect(chats()).toHaveLength(2)
+    expect(activeId()).not.toBe(history.id)
+    expect(chats()[1]!.ref.sessionId).toBeNull()
+  })
 })

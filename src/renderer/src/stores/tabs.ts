@@ -644,15 +644,25 @@ export const useTabsStore = create<TabsState>((set, get) => {
         (t): t is Extract<InnerTab, { kind: 'chat' }> => t.kind === 'chat'
       )
       /*
+        ★ **只有还没绑定会话的草稿 Tab 才可能是白纸。**
+        `isSessionUntouched` 查的是渲染层的 store 注册表,而那些 store 是懒创建的
+        —— 重启后布局从盘里读回来,除了当前那一个,其余 chat Tab 都还没挂载过,
+        注册表里查不到,于是「查不到就是没碰过」把**跑过一整段对话的会话**也算成了
+        白纸。症状就是点「新建对话」跳进一个早就执行过的会话。
+        绑过 sessionId 就说明它至少发过一条消息或贴过一个附件(见 `bindChatSession`),
+        无论 store 在不在,它都不是白纸。
+
         先看当前这一个 —— 已经站在一张白纸前时,这一下应该什么也不发生,
         而不是切到另一张同样空白的纸上(那看着像点错了)。
         否则取**最靠后**的那一个:`open` 是往后追加的,所以上一次「新建对话」
         给出来的就是最后那一个。
       */
       const active = activeIn(cur, 'main')
+      const blank = (t: Extract<InnerTab, { kind: 'chat' }>): boolean =>
+        t.ref.sessionId === null && isSessionUntouched(chatKey(t))
       const reusable =
-        chats.find((t) => t.id === active && isSessionUntouched(chatKey(t))) ??
-        [...chats].reverse().find((t) => isSessionUntouched(chatKey(t)))
+        chats.find((t) => t.id === active && blank(t)) ??
+        [...chats].reverse().find(blank)
 
       if (reusable === undefined) {
         get().open(workspaceId, 'chat')

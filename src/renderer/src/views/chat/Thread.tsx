@@ -37,6 +37,7 @@ export function Thread({
   sessionId,
   transcript,
   runId,
+  model,
   providerName,
   lastSeq,
   queued,
@@ -55,9 +56,15 @@ export function Thread({
   onExecutePlan?: (plan: string, newSession: boolean, planId?: string, planVersion?: number) => void
   /** 助手消息上方那行 `供应商 / 模型`(截图:`RoutinAI / claude-fable-5-1`) */
   providerName: string | undefined
+  /**
+   * 抬头显示的模型名 —— **用户选的那个别名**,由 `ChatView` 从 `transcript.model`
+   * (上游回包里的真实模型名)反查得到。不在这里直接读 transcript 就是为了不让
+   * 真实模型名漏到界面上:用户认得的是自己在设置里起的名字。
+   */
+  model: string | undefined
 }): ReactNode {
   const { t } = useI18n()
-  const { messages, live, tools, subagents, model, error, usage } = transcript
+  const { messages, live, tools, subagents, error, usage } = transcript
   const running = runId !== null
   const visible = messages.filter((m) => !isToolResultOnly(m))
   const viewport = useRef<HTMLDivElement>(null)

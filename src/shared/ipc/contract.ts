@@ -46,6 +46,7 @@ import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
 import type { ImageTheme, ThemeProfile } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
+import type { CommandDefinition } from '../domain/command'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
@@ -438,6 +439,15 @@ export interface IpcInvokeMap {
     res: void
   }
 
+  // ── 斜杠命令(`/命令`)──
+  /*
+    ★ **正文一起下发**,不另开一条「取正文」的频道。展开发生在发送前的渲染层
+    (见 `shared/domain/command.ts` 文件头),要正文才能展开;而命令总共就那么
+    几条、每条几 KB,渐进披露在这里只会换来一次多余的往返和一个新的失败态。
+  */
+  'commands:list': { req: { workspaceId?: string }; res: CommandDefinition[] }
+  'commands:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
+
   // ── 供应商 / 模型别名 ──
   'provider:list': { req: void; res: UpstreamProvider[] }
   'provider:upsert': { req: UpstreamProvider; res: UpstreamProvider }
@@ -777,6 +787,8 @@ export const INVOKE_CHANNELS = {
   'skills:diagnostics': 1,
   'skills:setGlobalEnabled': 1,
   'skills:setWorkspaceActive': 1,
+  'commands:list': 1,
+  'commands:diagnostics': 1,
   'provider:list': 1,
   'provider:upsert': 1,
   'provider:remove': 1,

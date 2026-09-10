@@ -77,13 +77,25 @@ import { MentionInput, type MentionInputHandle } from "./MentionInput";
 import { MentionPopup } from "./MentionPopup";
 import type { MentionQuery } from "../../../../shared/domain/file-mention";
 import { insertMention, mentionQueryAt } from "../../../../shared/domain/file-mention";
-import { insertSkill, skillQueryAt, type SkillQuery } from "../../../../shared/domain/file-mention";
+import { insertCommand, insertSkill, skillQueryAt, type SkillQuery } from "../../../../shared/domain/file-mention";
 import type { FileSuggestion } from "../../../../shared/domain/file-tree";
 import { searchWorkspaceFiles } from "../../services/app";
 import { listSkills, onSkillsChanged } from "../../services/skills";
+import { listCommands } from "../../services/commands";
 import type { SkillListItem } from "../../../../shared/domain/skill";
-import { SkillPopup } from './SkillPopup';
+import type { CommandDefinition } from "../../../../shared/domain/command";
+import { applyCommand } from "../../../../shared/domain/command";
+import { SkillPopup, type SlashItem } from './SkillPopup';
+import type { TranslationKey } from "../../i18n";
 import type { DraftSelection } from './rich-draft';
+
+/**
+ * 内置命令的副标题。★ 磁盘上的命令取 frontmatter 里的 `description`(那是用户
+ * 自己写的内容,不翻译);内置那几条是应用自己的 UI 文案,必须走 i18n。
+ */
+const BUILTIN_COMMAND_DESCRIPTIONS: Record<string, TranslationKey> = {
+  init: "commands.builtin.init",
+};
 
 /**
  * 可编辑区和它的占位符**共用**的度量类:内边距、字号、行高。
@@ -190,6 +202,7 @@ export function Composer({
   const input = useRef<MentionInputHandle | null>(null);
   const lastCaret = useRef<number | null>(null);
   const [skills, setSkills] = useState<SkillListItem[]>([]);
+  const [commands, setCommands] = useState<CommandDefinition[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(true);
   const [skillsError, setSkillsError] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);

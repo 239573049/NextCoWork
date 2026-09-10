@@ -92,6 +92,7 @@ import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
 import { updateService } from '../update/update-service'
 import { installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
+import { commandDiagnostics, listCommands } from './commands'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
@@ -353,6 +354,10 @@ const handlers: HandlerMap = {
   'skills:diagnostics': (req) => skillDiagnostics(req),
   'skills:setGlobalEnabled': (req) => setSkillGlobalEnabled(req),
   'skills:setWorkspaceActive': (req) => setSkillWorkspaceActive(req),
+
+  // ── 斜杠命令(`.next-cowork/commands/*.md` + 内置 `/init`)──
+  'commands:list': (req) => listCommands(req),
+  'commands:diagnostics': (req) => commandDiagnostics(req),
 
   // ── 步骤 4 / 13:上游与网关 ──
   'provider:list': () => listProviders(),

@@ -126,6 +126,20 @@ export function insertSkill(text: string, range: { start: number; end: number },
   return { text: `${text.slice(0, range.start)}${raw}${pad}${after}`, caret: range.start + raw.length + pad.length }
 }
 
+/**
+ * 把 `/查询` 换成 `/命令名 `。
+ *
+ * ★ 落进草稿的是**命令名**而不是它的正文 —— 展开留到发送那一刻
+ * (`applyCommand`)。把几千字的模板当场塞进输入框的话,用户既没法再补参数,
+ * 也看不清自己到底要发什么。
+ */
+export function insertCommand(text: string, range: { start: number; end: number }, name: string): SkillInsertion {
+  const raw = `/${name}`
+  const after = text.slice(range.end)
+  const pad = after.startsWith(' ') || after.startsWith('\n') ? '' : ' '
+  return { text: `${text.slice(0, range.start)}${raw}${pad}${after}`, caret: range.start + raw.length + pad.length }
+}
+
 // ─────────────────────────────────────────────────────────────
 // 触发与替换
 // ─────────────────────────────────────────────────────────────

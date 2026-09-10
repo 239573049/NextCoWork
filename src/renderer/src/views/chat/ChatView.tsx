@@ -63,10 +63,13 @@ export function ChatView({
     dropInput,
     moveInputToDraft,
     retagQueuedPermission,
+    retagQueuedMode,
     compactContext,
     compacting
   } = useSession()
   const providerById = useModelsStore((s) => s.providerById)
+  // 订阅数组本身而不只是取函数:别名表加载完 / 设置页改完之后抬头要跟着变。
+  const models = useModelsStore((s) => s.models)
   const openMarkdownFile = useCallback((path: string) => {
     useTabsStore.getState().openPath(workspace.id, 'doc', path, path.split('/').pop() ?? path)
   }, [workspace.id])
@@ -92,6 +95,18 @@ export function ChatView({
     故障切换真换了家时它跟着变。
   */
   const provider = transcript.providerId === undefined ? undefined : providerById(transcript.providerId)
+  /*
+    ★ 抬头显示**用户选的那个别名**,不是 `transcript.model`。后者是上游回包里的
+    真实模型名(`deepseek-flash`),而用户在药丸上选的、在设置里配的是别名
+    (`deepseek-v4.1-flash-exp`)—— 两个名字对不上时,他会以为自己选的模型没生效。
+    按 `(providerId, upstreamModel)` 反查这条绑定;查不到(改过配置、或者故障切换
+    到一个没配过的模型)才退回真实模型名,那时它是唯一说得清的信息。
+  */
+  const modelName = transcript.model === undefined
+    ? undefined
+    : models.find((m) => m.upstreamModel === transcript.model
+        && (transcript.providerId === undefined || m.providerId === transcript.providerId))?.alias
+      ?? transcript.model
   /** 编辑消息续跑时用的模型。和 `Composer` 的兜底链同源:工作区选过的 → 应用默认。 */
   const editModel: FallbackModel = workspace.settings.defaultModel !== ''
     ? { model: workspace.settings.defaultModel,
@@ -124,6 +139,7 @@ export function ChatView({
       void sessionStore(targetSessionId).getState().send(`Execute the approved plan:\n\n${plan}`, options)
     }
     setPlanExitSignal((v) => v + 1)
+    retagQueuedMode('normal')
     if (workspace.settings.defaultMode === 'plan') {
       void updateWorkspace({ id: workspace.id, settings: { defaultMode: 'normal' } }).catch(() => undefined)
     }
@@ -132,7 +148,7 @@ export function ChatView({
       useTabsStore.getState().openSession(workspace.id, session.id, session.title)
       start(session.id)
     }).catch(() => undefined)
-  }, [ensureSessionId, fallbackModel.model, fallbackModel.modelProviderId, t, workspace])
+  }, [ensureSessionId, fallbackModel.model, fallbackModel.modelProviderId, retagQueuedMode, t, workspace])
 
   useEffect(() => {
     void useModelsStore.getState().load()
@@ -426,6 +442,7 @@ export function ChatView({
           sessionId={sessionId ?? undefined}
           transcript={transcript}
           runId={activeRunId}
+          model={modelName}
           providerName={provider?.name}
           lastSeq={lastSeq}
           queued={queuedInputs.length}
