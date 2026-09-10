@@ -189,6 +189,8 @@ interface TabsState {
       profileId?: string
     }>
   ) => void
+  /** 把已经存在的 Tab 顶到它所在 Dock 组的最前面(不改 activeGroupId) */
+  revealTab: (workspaceId: string, tabId: string) => void
   /** 工作区关闭时销毁:Tab 表和它那些会话的转录一起放掉(正在跑的除外) */
   forget: (workspaceId: string) => void
 }
@@ -859,7 +861,30 @@ export const useTabsStore = create<TabsState>((set, get) => {
           bottomActiveTabId: nextBottom,
           rightActiveTabId: activatedAgentTabId ?? nextRight
         })
+        if (activatedAgentTabId !== null) get().revealTab(workspaceId, activatedAgentTabId)
       }
+    },
+
+    /*
+      `write` 只会把新 Tab 挂进 Dock 组,不会抢走那一组已经激活的 Tab
+      (右侧那组默认停在「工作区文件」上)。Agent 打开的浏览器必须自己浮到
+      前面来,否则它只是多了一个看不见的标签。这里**不动 activeGroupId** ——
+      后台开一个页面不该把用户正在打字的那一格的焦点抢过去。
+    */
+    revealTab(workspaceId, tabId) {
+      const cur = get().stateOf(workspaceId)
+      const tab = cur.tabs.find((item) => item.id === tabId)
+      if (tab === undefined) return
+      const dock = get().dockOf(workspaceId)
+      const groupId = groupContainingTab(dock, tabId)
+      if (groupId === null) return
+      const group = findGroup(dock.root, groupId)
+      if (group === null || group.activeTabId === tabId) return
+      const update = (node: DockNode): DockNode =>
+        node.type === 'group'
+          ? (node.id === groupId ? { ...node, activeTabId: tabId, hidden: false } : node)
+          : { ...node, first: update(node.first), second: update(node.second) }
+      write(workspaceId, withActive({ ...cur, dock: { ...dock, root: update(dock.root) } }, paneOf(tab), tabId))
     },
 
     applyFileMutation(req) {

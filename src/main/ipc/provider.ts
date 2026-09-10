@@ -42,6 +42,7 @@ import {
   modelListRequest,
   parseModelList
 } from '../kernel/upstream/model-list'
+import { platformLoginAuth } from '../kernel/upstream/transport'
 import { userAgent } from '../kernel/user-agent'
 import { ensureSeeded, getHost } from '../runtime'
 import { store } from '../state/store'
@@ -460,7 +461,18 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
     这里会安静地发出一个畸形请求,而症状是一个看不懂的 401。
   */
   const cred = parseCredential(await getHost().secrets.get(p.credentialRef))
-  const { url, headers } = modelListRequest(p.protocol, p.baseUrl, cred === null ? null : bearerOf(cred))
+  const key = cred === null ? null : bearerOf(cred)
+  const { url, headers } = modelListRequest(p.protocol, p.baseUrl, key)
+  /*
+    ★ 平台那条上游的凭证是登录 JWT,只有 `Authorization: Bearer` 认它 —— 和发对话
+    请求走的是同一条规矩(`kernel/upstream/transport.ts`),漏在这里的表现是
+    「API 格式」选 Anthropic 时那颗「从服务商拉取模型列表」按钮永远 401。
+  */
+  const platform = key === null ? null : platformLoginAuth(p.id, key)
+  if (platform !== null) {
+    for (const name of platform.dropHeaders) delete headers[name]
+    Object.assign(headers, platform.headers)
+  }
 
   let res: Response
   try {

@@ -21,6 +21,7 @@ export function Select({
   ariaLabel,
   className,
   disabled = false,
+  inModal = false,
 }: {
   value: string;
   options: readonly SelectOption[];
@@ -28,6 +29,15 @@ export function Select({
   ariaLabel: string;
   className?: string;
   disabled?: boolean;
+  /**
+   * 放在 `Dialog` 里时必须打开。
+   *
+   * ★★ theme.css 那条「模态自己建层叠上下文,内部的 z-50 天然在遮罩之上」
+   * 对这个组件**不成立** —— Radix 把浮层 portal 到 `document.body`,于是它和
+   * `Dialog`(同样 portal 到 body、z-100)成了同级兄弟,z-60 直接被压在弹窗背后。
+   * 症状不是「样式错位」而是「点了没反应」:菜单开了,只是看不见。
+   */
+  inModal?: boolean;
 }): ReactNode {
   // Radix 把空串保留给“尚未选择”的内部状态；设置里的“跟随对话”恰好以空串持久化。
   // 为这个选项映射一个仅在组件内部使用、且不会和调用方值冲突的值。
@@ -76,7 +86,8 @@ export function Select({
           position="popper"
           sideOffset={4}
           className={cn(
-            "app-no-drag z-[60] max-h-[min(240px,var(--radix-select-content-available-height))]",
+            "app-no-drag max-h-[min(240px,var(--radix-select-content-available-height))]",
+            inModal ? "z-[150]" : "z-[60]",
             "w-[var(--radix-select-trigger-width)] overflow-hidden rounded-card border border-border",
             "bg-surface-raised p-1 shadow-2xl shadow-black/40 outline-none",
           )}

@@ -35,7 +35,14 @@ export const PERMISSION_MODE_HINT: Record<PermissionMode, string> = {
  */
 export type PermissionDecision =
   | { kind: 'allow_once' }
-  /** v1 只定义,不实现 */
+  /**
+   * 「以后都允许」。`workspace` 落成 `.next-cowork/settings.local.json` 里的一条
+   * `permissions.allow` 规则(规则语法见 `permission-rule.ts`);
+   * `session` 还没有存放处,`interaction-gate.ts` 目前不收它。
+   *
+   * ★ 这里**不带规则文本**:规则由主进程按被调工具和入参算出来,
+   * 渲染层只负责把它显示给用户看。否则这条决策就是一个「往权限文件里写任意一行」的接口。
+   */
   | { kind: 'allow_always'; scope: 'session' | 'workspace' }
   | { kind: 'deny'; reason?: string }
   /** v1 只定义,不实现 */

@@ -17,6 +17,7 @@
  */
 import { createHash } from 'node:crypto'
 import type { ProviderCredential } from '../../../shared/domain/credential'
+import { CLIENT_PROVIDER_ID } from '../../../shared/domain/presets'
 import type { UpstreamProvider, UpstreamProtocol } from '../../../shared/domain/provider'
 import { oauthSpecOf } from '../oauth/registry'
 
@@ -29,6 +30,11 @@ export interface UpstreamTransport {
   /** 与 `enc.headers` 合并,同名覆盖 */
   headers: Record<string, string>
   /**
+   * ★ **覆盖不够,必须能删。** 上游按「某个头在不在」分流时,一个值被换掉的头
+   * 和一个不存在的头是两件事(见 `platformLoginAuth`)。
+   */
+  dropHeaders?: readonly string[]
+  /**
    * ★ 在**全部** patch(thinking adapter / requestAdapter / thinking preference)
    * 之后跑,用来把供应商自己的硬约束按回去。
    */
@@ -39,15 +45,44 @@ export interface UpstreamTransport {
 const IDENTITY: UpstreamTransport = { headers: {}, body: (b) => b }
 
 /**
- * ★ `provider` 现在没被读,但留在签名里:将来「同一种凭证、不同 baseUrl 要不同头」
- * (自建反代要转发一个额外头之类)时有地方接,而那时不用改所有调用点。
+ * NextCoWork 平台那条上游的鉴权形状。**不是平台的供应商返回 `null`,请求逐字节不变。**
+ *
+ * ★★ 平台那条的凭证是**登录 access token(JWT)**,不是平台 API Key —— 它由
+ * `ipc/client-auth.ts` 在登录时写进 `nextcowork:client-access-token`,用户从来没有
+ * 填过任何 key。而平台网关**按头分流**:`x-api-key` 去查 API Key 表,
+ * `Authorization: Bearer` 才验登录态。Anthropic 协议的 encode 写出来的正是
+ * `x-api-key`(那是 Anthropic 官方的形状),于是用户在设置页把「API 格式」翻成
+ * Anthropic 之后,每一次对话都是
+ * `401 {"code":"invalid_api_key","message":"API Key 无效或已停用"}` ——
+ * 一句指向「密钥」的错误,而密钥这个东西在这条上游上根本不存在,
+ * 用户唯一能做的事(重新登录)对它一点用都没有。
+ *
+ * ★ `x-api-key` 必须**删掉**而不是置空或让 Bearer 覆盖它:实测平台只要这个头
+ * 非空就走 API Key 分支,同时带着一把合法的 Bearer 也照样 401。
+ *
+ * OpenAI 两族的 encode 本来写的就是 `Authorization: Bearer <同一个串>`,
+ * 所以这一层对它们是恒等的 —— 不按协议分叉,少一处要跟着协议表一起改的地方。
+ */
+export function platformLoginAuth(
+  providerId: string,
+  token: string
+): { headers: Record<string, string>; dropHeaders: readonly string[] } | null {
+  if (providerId !== CLIENT_PROVIDER_ID) return null
+  return { headers: { authorization: `Bearer ${token}` }, dropHeaders: ['x-api-key'] }
+}
+
+/**
+ * ★ `provider` 只被读 `id`(平台那条的登录态鉴权),别的字段留在签名里:将来
+ * 「同一种凭证、不同 baseUrl 要不同头」(自建反代要转发一个额外头之类)时有地方接。
  */
 export function upstreamTransport(
-  _provider: UpstreamProvider,
+  provider: UpstreamProvider,
   cred: ProviderCredential,
   ctx: TransportContext
 ): UpstreamTransport {
-  return cred.kind === 'api-key' ? IDENTITY : oauthSpecOf(cred.issuer).transport(cred, ctx)
+  if (cred.kind === 'oauth') return oauthSpecOf(cred.issuer).transport(cred, ctx)
+  const platform = platformLoginAuth(provider.id, cred.apiKey)
+  return platform === null ? IDENTITY : { ...platform, body: (b) => b }
 }
 
 /**

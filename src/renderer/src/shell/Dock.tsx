@@ -111,8 +111,15 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
       }
     } catch { /* ignore malformed drag payloads */ }
   }
+  /*
+    ★ 这一格**不能**挂 `app-no-drag`。`-webkit-app-region` 是**继承**属性:挂上以后
+    聊天列表里每个元素都带上 no-drag,而 Chromium 收集拖动区用的是元素的绝对包围盒
+    ——**滚上去的长内容包围盒是负 y、高好几千**,横跨顶部那条 34px 的 Tab 条,
+    在 Electron 那边把它的 drag 区整块减掉,表现是「顶栏空白处拖不动窗口」。
+    这一格本来就不在拖动区里,默认的 `none` 才是对的。
+  */
   return (
-    <section data-dock-group-id={node.id} className={cn('app-no-drag relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-hairline', node.id === dock.activeGroupId && 'outline outline-1 outline-accent/30')} onMouseDown={() => useTabsStore.getState().activateDockGroup(workspace.id, node.id)} onDragOver={(event) => { if (!event.dataTransfer.types.includes(DOCK_TAB_MIME)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDragZone(zoneAt(event)) }} onDragLeave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragZone(null) }} onDrop={onDrop}>
+    <section data-dock-group-id={node.id} className={cn('relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-hairline', node.id === dock.activeGroupId && 'outline outline-1 outline-accent/30')} onMouseDown={() => useTabsStore.getState().activateDockGroup(workspace.id, node.id)} onDragOver={(event) => { if (!event.dataTransfer.types.includes(DOCK_TAB_MIME)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDragZone(zoneAt(event)) }} onDragLeave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragZone(null) }} onDrop={onDrop}>
       <InnerTabBar
         // ★ 实色,不能让图片主题的底图透上来 —— 这条 Tab 条和内容区是两层
         //   (参考实现里图是从这条下面那道 hairline 开始铺的)。写在这里而不是

@@ -55,6 +55,13 @@ export type PendingInteraction =
       input: unknown
       readOnly: boolean
       destructive: boolean
+      /**
+       * 用户点「以后都允许」会被写进 `.next-cowork/settings.local.json` 的那条规则。
+       *
+       * ★ 由主进程算好带下来,渲染层**只负责显示**、不负责回送 —— 回送什么就写什么的话,
+       * 这颗按钮等于开放了一个「往权限文件里写任意一行」的接口。
+       */
+      suggestedRule?: string
       createdAt: number
     }
   | {

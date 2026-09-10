@@ -6,9 +6,9 @@ import { cn } from "../../../lib/cn";
 import { useI18n } from "../../../i18n";
 import { listModels, updateModel } from "../../../services/provider";
 
-const PROTOCOLS: readonly UpstreamProtocol[] = ["anthropic", "openai-chat", "openai-responses"];
+export const PROTOCOLS: readonly UpstreamProtocol[] = ["anthropic", "openai-chat", "openai-responses"];
 
-function protocolLabel(protocol: UpstreamProtocol, t: ReturnType<typeof useI18n>["t"]): string {
+export function protocolLabel(protocol: UpstreamProtocol, t: ReturnType<typeof useI18n>["t"]): string {
   if (protocol === "anthropic") return t("models.protocolAnthropic");
   if (protocol === "openai-chat") return t("models.protocolOpenAIChat");
   return t("models.protocolOpenAIResponses");

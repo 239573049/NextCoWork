@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderStreamEvent } from '../../../../shared/agent/stream'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
+import { CLIENT_PROVIDER_ID } from '../../../../shared/domain/presets'
 import type { UnpricedUsageAttempt } from '../../../../shared/domain/usage'
 import { nodeHost, type KernelHost } from '../../host'
 import type { CanonicalRequest } from '../canonical'
@@ -537,6 +538,22 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(headers[0]?.authorization).toBeUndefined()
     // 自报家门(kernel/user-agent.ts)——漏了不会报错,只是请求匿名发出去
     expect(headers[0]?.['user-agent']).toMatch(/^NextCoWork\//)
+  })
+
+  /**
+   * ★ 平台那条上游存的是登录 JWT,而平台网关按头分流:`x-api-key` 非空就去查
+   * API Key 表,JWT 在那儿必然「API Key 无效或已停用」。所以那个头要删掉,
+   * 不是覆盖成空。
+   */
+  it('NextCoWork 平台上游即使走 Anthropic 协议也用 Bearer,且不带 x-api-key', async () => {
+    const { router, headers } = rig({
+      providers: [provider(CLIENT_PROVIDER_ID)],
+      aliases: [alias('m', CLIENT_PROVIDER_ID)],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drain(router)
+    expect(headers[0]).toMatchObject({ authorization: 'Bearer sk-test', 'anthropic-version': '2023-06-01' })
+    expect(headers[0]).not.toHaveProperty('x-api-key')
   })
 
   it('模型协议覆盖会让 Responses 供应商按 Anthropic endpoint、请求体和认证头调用', async () => {

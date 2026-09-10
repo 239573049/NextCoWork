@@ -1,4 +1,4 @@
-import type { InnerTab, InnerTabState } from './tab'
+import type { InnerTab, InnerTabState, TabPane } from './tab'
 import { paneOf } from './tab'
 import { ulid } from '../util/id'
 
@@ -229,9 +229,39 @@ export function normalizeDockState(raw: WorkspaceDockState, tabs: readonly Inner
   const root = normalizeNode(raw.root) ?? { type: 'group', id: raw.root.type === 'group' ? raw.root.id : ulid(), tabIds: [], activeTabId: null }
   const orphaned = uniqueTabs.filter((tab) => !used.has(tab.id))
   const first = findFirstGroup(root)
-  let finalRoot = orphaned.length === 0 || first === null
-    ? root
-    : mapNode(root, first.id, (node) => node.type === 'group' ? { ...node, tabIds: [...node.tabIds, ...orphaned.map((tab) => tab.id)], activeTabId: node.activeTabId ?? orphaned[0]?.id ?? null } : node)
+  /*
+    ★ 孤儿要按**它自己声明的那一格**归位,不能一律塞进第一个组。
+    Agent 打开的浏览器就是这么进来的(先写进 `tabs`,Dock 树后一步才知道它):
+    落回第一个组的话它会开在主区的对话旁边,而不是右侧工作台。
+  */
+  let finalRoot = root
+  if (orphaned.length > 0 && first !== null) {
+    const paneGroups: Array<{ id: string; pane: TabPane | null }> = []
+    const collect = (node: DockNode): void => {
+      if (node.type === 'group') {
+        const members = uniqueTabs.filter((tab) => node.tabIds.includes(tab.id))
+        const head = members[0]
+        paneGroups.push({
+          id: node.id,
+          pane: node.pinned === 'right'
+            ? 'right'
+            : head !== undefined && members.every((tab) => paneOf(tab) === paneOf(head)) ? paneOf(head) : null
+        })
+        return
+      }
+      collect(node.first)
+      collect(node.second)
+    }
+    collect(root)
+    for (const tab of orphaned) {
+      const target = paneGroups.find((entry) => entry.pane === paneOf(tab))?.id ?? first.id
+      finalRoot = mapNode(finalRoot, target, (node) =>
+        node.type === 'group'
+          ? { ...node, tabIds: [...node.tabIds, tab.id], activeTabId: node.activeTabId ?? tab.id }
+          : node
+      )
+    }
+  }
   const filesTab = uniqueTabs.find((tab) => tab.kind === 'files')
   if (filesTab !== undefined) {
     // `filesTab.id` is a tab id, while `findGroup` expects a group id. Find

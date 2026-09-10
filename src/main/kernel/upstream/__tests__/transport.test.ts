@@ -7,8 +7,9 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { OAuthCredential } from '../../../../shared/domain/credential'
+import { CLIENT_PROVIDER_ID } from '../../../../shared/domain/presets'
 import type { UpstreamProvider } from '../../../../shared/domain/provider'
-import { sessionUuid, upstreamTransport } from '../transport'
+import { platformLoginAuth, sessionUuid, upstreamTransport } from '../transport'
 
 const provider: UpstreamProvider = {
   id: 'p',
@@ -39,6 +40,29 @@ describe('upstreamTransport · API Key 零回归', () => {
     const t = upstreamTransport(provider, { kind: 'api-key', apiKey: 'sk-1' }, {})
     const body = { model: 'm', stream: true }
     expect(t.body(body)).toBe(body)
+  })
+})
+
+/**
+ * 平台那条上游存的是登录 JWT,而平台网关按头分流:`x-api-key` 查 API Key 表、
+ * `Authorization: Bearer` 才验登录态。翻成 Anthropic 格式之后每次对话都是
+ * 「API Key 无效或已停用」,而用户从没填过 key。
+ */
+describe('upstreamTransport · NextCoWork 平台登录态', () => {
+  const platform: UpstreamProvider = { ...provider, id: CLIENT_PROVIDER_ID, protocol: 'anthropic' }
+
+  it('登录 token 走 Authorization: Bearer', () => {
+    const t = upstreamTransport(platform, { kind: 'api-key', apiKey: 'jwt-1' }, {})
+    expect(t.headers.authorization).toBe('Bearer jwt-1')
+  })
+
+  it('★ x-api-key 是删掉而不是置空 —— 非空就会被判进 API Key 分支', () => {
+    const t = upstreamTransport(platform, { kind: 'api-key', apiKey: 'jwt-1' }, {})
+    expect(t.dropHeaders).toContain('x-api-key')
+  })
+
+  it('别的供应商不受影响', () => {
+    expect(platformLoginAuth('p', 'sk-1')).toBeNull()
   })
 })
 

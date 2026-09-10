@@ -27,6 +27,8 @@ import { AgentSession } from './kernel/agent-session'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
 import { TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
+import { addLocalPermissionRule, readLocalSettings } from './kernel/local-settings'
+import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/permission-rule'
 import { interactions } from './kernel/interaction-gate'
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
@@ -1076,6 +1078,11 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
  * 加上 `TOOLS_NEEDING_NETWORK` 这张下限表。表里的名字无论字段怎么填都算联网,
  * 所以一个字段被写错(或将来某个注册路径忘了填)也放不宽这道闸。
  * 为什么不只留表、也不只留字段,`TOOLS_NEEDING_NETWORK` 的注释写全了。
+ *
+ * ★ 判定顺序在 `approveWith` 里,**顺序即语义**:
+ * 联网开关 → 本地 `deny` → 本地 `ask`(压过下面两步)→ 档位 → 本地 `allow` → AI 审核 → 问人。
+ * 联网必须排第一 —— 一条写进 `.next-cowork/settings.local.json` 的 allow 规则,
+ * 不该能把用户亲手关掉的开关重新打开。
  */
 type ReviewResult = 'allow' | 'deny' | 'unknown'
 
@@ -1173,18 +1180,44 @@ function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
       needsNetwork: tool.needsNetwork || TOOLS_NEEDING_NETWORK.has(tool.internalId),
       webSearch: req.webSearch
     })
-    if (outcome.kind === 'allow') return { kind: 'allow_once' }
+    // ★ 联网开关排在本地规则之前:一条 `allow` 规则也不该能把用户关掉的开关重新打开。
     if (outcome.kind === 'deny') return { kind: 'deny', reason: outcome.reason }
-    if (req.permissionMode === 'auto' && tool.destructive) {
+
+    const host = getHost()
+    const root = workspaceRootFor(req.workspaceId)
+    // 规则用 internalId 匹配 —— externalName 会被注册表截断去重,跨会话不稳定。
+    const local = await readLocalSettings(host.fs, root, host.logger)
+    const denied = matchPermissionRules(local.permissions.deny, tool.internalId, input)
+    if (denied !== null) {
+      return { kind: 'deny', reason: `This call matches the deny rule \`${denied}\` in the workspace's `
+        + `.next-cowork/settings.local.json. Do not try to reach the same result through another tool.` }
+    }
+    // `ask` 桶的用处正是把某个本来会静默放行的操作重新捞回人眼前,所以它压过 allow 与档位。
+    const forcedAsk = matchPermissionRules(local.permissions.ask, tool.internalId, input) !== null
+    if (!forcedAsk) {
+      if (outcome.kind === 'allow') return { kind: 'allow_once' }
+      if (matchPermissionRules(local.permissions.allow, tool.internalId, input) !== null) return { kind: 'allow_once' }
+    }
+
+    if (req.permissionMode === 'auto' && tool.destructive && !forcedAsk) {
       const review = await reviewSensitiveOperation(req, reviewerModel, reviewerModelProviderId, tool.externalName, input, handle.signal)
       if (review === 'allow') return { kind: 'allow_once' }
       if (review === 'deny') return { kind: 'deny', reason: 'The configured AI reviewer denied this potentially unsafe operation.' }
     }
+
+    const suggestedRule = suggestPermissionRule(tool.internalId, input)
     const response = await interactions.request(handle, {
       kind: 'tool_permission', callId, toolName: tool.externalName,
-      input, readOnly: tool.readOnly, destructive: tool.destructive
+      input, readOnly: tool.readOnly, destructive: tool.destructive,
+      ...(root === '' ? {} : { suggestedRule })
     }, getHost().clock.now())
-    return response.kind === 'tool_permission' ? response.decision : { kind: 'deny' }
+    if (response.kind !== 'tool_permission') return { kind: 'deny' }
+    const decision = response.decision
+    if (decision.kind !== 'allow_always') return decision
+    // 落盘失败不该把用户刚点下的「允许」变成「拒绝」—— 这一次照常放行,只是没记住。
+    const saved = await addLocalPermissionRule(host.fs, root, 'allow', suggestedRule, host.logger)
+    if (!saved.ok) host.logger.warn(`[permission] 未能记住规则 ${suggestedRule}: ${saved.reason}`)
+    return { kind: 'allow_once' }
   }
 }
 

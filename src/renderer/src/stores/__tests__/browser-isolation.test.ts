@@ -75,6 +75,9 @@ describe('browser workspace isolation', () => {
       activeTabId: b.id,
       rightActiveTabId: files.id
     })
+    // 落一份 Dock 快照 —— 有快照以后 legacy 的 rightActiveTabId 就不再是权威，
+    // 这正是真实运行时的状态，也是这条用例要守住的分支。
+    useTabsStore.getState().activate('workspace-b', b.id)
 
     useTabsStore.getState().syncBrowserTabs('workspace-b', [{
       id: 'remote-agent-tab',
@@ -92,6 +95,11 @@ describe('browser workspace isolation', () => {
       ref: { browserId: 'remote-agent-tab' }
     })
     expect(target.rightActiveTabId).toBe(browser?.id)
+    // 右侧那一组默认停在「工作区文件」上；Agent 打开的页面必须顶到前面，
+    // 否则右侧面板掀开后看到的还是文件树。
+    const dock = useTabsStore.getState().dockOf('workspace-b')
+    const group = dock.root.type === 'split' ? dock.root.second : dock.root
+    expect(group.type === 'group' && group.activeTabId).toBe(browser?.id)
   })
 })
 

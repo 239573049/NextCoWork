@@ -505,20 +505,22 @@ export class UpstreamRouter {
       const body = transport.body(anthropicBody)
       const url = joinUpstreamUrl(c.provider.baseUrl, enc.path)
       const payload = JSON.stringify(body)
-      const send = (extraHeaders: Record<string, string>): Promise<Response> =>
-        this.host.fetch(url, {
+      const send = (extraHeaders: Record<string, string>): Promise<Response> => {
+        const headers: Record<string, string> = {
+          // 自报家门排在最前面:任何一个 encode / transport 想自己写 UA 都压得过它
+          'user-agent': userAgent(),
+          ...enc.headers,
+          ...transport.headers
+        }
+        // ★ 删在合并 extraHeaders 之前:那一个是 401 之后重发的鉴权头,不该被这里带走
+        for (const name of transport.dropHeaders ?? []) delete headers[name]
+        return this.host.fetch(url, {
           method: 'POST',
-          headers: {
-            // 自报家门排在最前面:任何一个 encode / transport 想自己写 UA 都压得过它
-            'user-agent': userAgent(),
-            ...enc.headers,
-            ...transport.headers,
-            ...extraHeaders,
-            accept: 'text/event-stream'
-          },
+          headers: { ...headers, ...extraHeaders, accept: 'text/event-stream' },
           body: payload,
           signal
         })
+      }
 
       let res = await send({})
       /*

@@ -22,7 +22,10 @@ function validResponse(pending: PendingInteraction, response: InteractionRespons
       return decision.kind === 'allow_once'
         || (decision.kind === 'allow_edited' && Object.hasOwn(decision, 'input'))
         || (decision.kind === 'deny' && (decision.reason === undefined || typeof decision.reason === 'string'))
-      // Persistent permission grants are deliberately not accepted without a rule store.
+        // ★ 只收 workspace:它落在 `.next-cowork/settings.local.json` 里,有真实的规则库兜着。
+        // `session` 作用域还没有对应的存放处,收下它等于收下一个不会生效的承诺。
+        // 规则文本不从这里进 —— 主进程用待决项里那条 `suggestedRule` 自己算。
+        || (decision.kind === 'allow_always' && decision.scope === 'workspace')
     }
     case 'ask_user': {
       if (pending.kind !== 'ask_user') return false

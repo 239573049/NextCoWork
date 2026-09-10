@@ -28,10 +28,12 @@ import type {
   ReasoningEffort,
   ThinkingConfig,
   ThinkingMode,
+  UpstreamProtocol,
   UpstreamProvider,
 } from "../../../../../shared/domain/provider";
 import {
   anthropicCacheTtlOf,
+  effectiveModelProtocol,
   joinProtocol,
   MAX_ALIASES_PER_PROVIDER,
   splitProtocol,
@@ -39,6 +41,7 @@ import {
 import { Button } from "../../../components/ui/Button";
 import { Dialog } from "../../../components/ui/Dialog";
 import { Segmented } from "../../../components/ui/Segmented";
+import { Select } from "../../../components/ui/Select";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
@@ -62,6 +65,7 @@ import { type ProviderEntry } from "./enabled-models";
 import { ImportModelsDialog } from "./ImportModelsDialog";
 import { modelListAvailability } from "./import-models";
 import { ProviderAvatar } from "./ProviderAvatar";
+import { PROTOCOLS, protocolLabel } from "./ModelProtocol";
 import { baseUrlForProtocol } from "./provider-edit";
 import {
   credentialInUse,
@@ -434,7 +438,7 @@ export function ProviderPanel({
     draft: Pick<
       ModelAlias,
       "alias" | "displayName" | "contextWindow" | "maxOutputTokens" | "capabilities"
-    >,
+    > & { protocolOverride: UpstreamProtocol | undefined },
   ): void => {
     setBusy(true);
     setError(null);
@@ -449,6 +453,8 @@ export function ProviderPanel({
         contextWindow: draft.contextWindow,
         maxOutputTokens: draft.maxOutputTokens,
         capabilities: { ...target.capabilities, ...draft.capabilities },
+        // 显式写成自有属性(哪怕是 undefined),后端据此区分「清除覆盖」和「旧版渲染层没发这个字段」
+        protocolOverride: draft.protocolOverride,
       });
       setEditingModel(null);
     })()
@@ -1064,6 +1070,7 @@ export function ProviderPanel({
         <ModelEditDialog
           key={editingModel.alias}
           model={editingModel}
+          provider={p}
           busy={busy}
           onClose={() => setEditingModel(null)}
           onSave={(draft) => saveModel(editingModel, draft)}
@@ -1321,18 +1328,20 @@ const modelDialogInputClass =
 
 function ModelEditDialog({
   model,
+  provider,
   busy,
   onClose,
   onSave,
 }: {
   model: ModelAlias;
+  provider: UpstreamProvider;
   busy: boolean;
   onClose: () => void;
   onSave: (
     draft: Pick<
       ModelAlias,
       "alias" | "displayName" | "contextWindow" | "maxOutputTokens" | "capabilities"
-    >,
+    > & { protocolOverride: UpstreamProtocol | undefined },
   ) => void;
 }): ReactNode {
   const { t } = useI18n();
@@ -1342,12 +1351,19 @@ function ModelEditDialog({
   const [maxOutputTokens, setMaxOutputTokens] = useState(
     String(model.maxOutputTokens),
   );
+  const [protocol, setProtocol] = useState<UpstreamProtocol | "">(
+    model.protocolOverride ?? "",
+  );
   const [capabilities, setCapabilities] = useState({
     tools: model.capabilities.tools,
     vision: model.capabilities.vision,
     caching: model.capabilities.caching,
   });
   const [invalid, setInvalid] = useState(false);
+
+  const effectiveProtocol = effectiveModelProtocol(provider, {
+    protocolOverride: protocol === "" ? undefined : protocol,
+  });
 
   const save = (): void => {
     const nextContextWindow = Number(contextWindow);
@@ -1369,6 +1385,7 @@ function ModelEditDialog({
       contextWindow: nextContextWindow,
       maxOutputTokens: nextMaxOutputTokens,
       capabilities: { ...model.capabilities, ...capabilities },
+      protocolOverride: protocol === "" ? undefined : protocol,
     });
   };
 
@@ -1430,6 +1447,27 @@ function ModelEditDialog({
             />
           </DialogField>
         </div>
+        <DialogField label={t("models.protocol")}>
+          <Select
+            ariaLabel={t("models.protocol")}
+            inModal
+            value={protocol}
+            onValueChange={(next) => setProtocol(next as UpstreamProtocol | "")}
+            options={[
+              { value: "", label: t("models.protocolFollowProvider") },
+              ...PROTOCOLS.map((item) => ({
+                value: item,
+                label: protocolLabel(item, t),
+              })),
+            ]}
+          />
+          <p className="mt-1 text-[10.5px] text-fg-faint">
+            {t("models.protocolEffective", {
+              protocol: protocolLabel(effectiveProtocol, t),
+              provider: provider.name,
+            })}
+          </p>
+        </DialogField>
         <div className="rounded-[8px] border border-border px-3 py-2.5">
           <p className="text-[11.5px] text-fg-muted">
             {t("models.capabilities")}

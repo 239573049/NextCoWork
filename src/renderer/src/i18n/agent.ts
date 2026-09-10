@@ -67,6 +67,8 @@ export const agentZh = {
   'agent.interaction.dismiss': '暂不回答',
   'agent.interaction.deny': '拒绝',
   'agent.interaction.allowOnce': '允许这一次',
+  'agent.interaction.allowAlways': '以后都允许',
+  'agent.interaction.allowAlwaysHint': '选「以后都允许」会把规则 {rule} 写入 .next-cowork/settings.local.json（仅本机生效）。',
   'agent.interaction.submit': '提交回答',
   // 多道题时按钮上带进度:两道题只答了一道时,按钮是灰的,不写清楚缺哪一道
   // 用户只会反复点它
@@ -167,6 +169,8 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'agent.interaction.dismiss': 'Dismiss',
   'agent.interaction.deny': 'Deny',
   'agent.interaction.allowOnce': 'Allow once',
+  'agent.interaction.allowAlways': 'Always allow',
+  'agent.interaction.allowAlwaysHint': 'Always allow writes the rule {rule} to .next-cowork/settings.local.json (this machine only).',
   'agent.interaction.submit': 'Submit answer',
   'agent.interaction.submitProgress': 'Submit answers ({done}/{total})',
   'agent.interaction.other': 'Something else (type it)',

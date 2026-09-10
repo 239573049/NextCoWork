@@ -84,7 +84,7 @@ const BUTTON = 'rounded-lg border border-border px-3 py-1.5 text-[12px] transiti
 /** 三类交互共用的外壳:标题、可滚动的主体、错误行、右下角两颗按钮。 */
 function CardShell({
   kind, title, header, children, errorKey, busy, dismissLabel, submitLabel, canSubmit, onDismiss,
-  onSubmit, onPrimary, bodyClassName
+  onSubmit, onPrimary, bodyClassName, extraActions
 }: {
   kind: PendingInteraction['kind']
   title: string
@@ -101,6 +101,8 @@ function CardShell({
   /** 给了它,右下角那颗就不是提交键,而是一颗普通按钮(多题时的「下一题」) */
   onPrimary?: () => void
   bodyClassName?: string
+  /** 排在两颗主按钮左边的补充选项(如「以后都允许」) */
+  extraActions?: ReactNode
 }): ReactNode {
   const { t } = useI18n()
   return (
@@ -110,7 +112,8 @@ function CardShell({
       {header}
       <div className={`scroll-thin overflow-auto ${bodyClassName ?? 'max-h-[30vh]'}`}>{children}</div>
       {errorKey !== null && <p role="alert" className="mt-2 text-[12px] text-danger">{t(errorKey)}</p>}
-      <div className="mt-3 flex justify-end gap-2">
+      <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+        {extraActions}
         <button type="button" disabled={busy} className={BUTTON} onClick={onDismiss}>{dismissLabel}</button>
         <button type={onPrimary === undefined ? 'submit' : 'button'} onClick={onPrimary}
           disabled={busy || (onPrimary === undefined && !canSubmit)}
@@ -284,6 +287,10 @@ function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
     }
   }
 
+  // 「以后都允许」只在参数没被改过时给 —— 改过的参数是一次性的,
+  // 而规则记的是「这类调用」,两者写到一起会记下一条用户从没批准过的调用形状。
+  const alwaysRule = interaction.kind === 'tool_permission' && !editing ? interaction.suggestedRule : undefined
+
   return (
     <CardShell
       kind={interaction.kind}
@@ -295,6 +302,12 @@ function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
       canSubmit
       dismissLabel={t('agent.interaction.deny')}
       submitLabel={t(interaction.kind === 'tool_permission' ? 'agent.interaction.allowOnce' : 'agent.interaction.approvePlan')}
+      extraActions={alwaysRule === undefined ? undefined : (
+        <button type="button" disabled={busy} className={BUTTON} title={t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
+          onClick={() => respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })}>
+          {t('agent.interaction.allowAlways')}
+        </button>
+      )}
       onDismiss={() => {
         if (interaction.kind === 'tool_permission') respond({ id: interaction.id, kind: interaction.kind, decision: { kind: 'deny' } })
         else respond({ id: interaction.id, kind: interaction.kind, approved: false, feedback })
@@ -306,6 +319,9 @@ function ApprovalCard({ interaction, sessionId, onExecute, onAnswered }: {
         {editing ? <textarea aria-label={t('agent.interaction.arguments')} value={input} onChange={(e) => setInput(e.target.value)}
           disabled={busy} rows={5} className="w-full rounded-lg border border-border bg-app p-2 font-mono text-[12px]" />
           : <pre className="selectable whitespace-pre-wrap break-all text-[12px]">{input}</pre>}
+        {alwaysRule !== undefined && <p className="mt-2 text-[11px] leading-[1.6] text-fg-faint">
+          {t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
+        </p>}
         <button type="button" disabled={busy} className="mt-2 text-[12px] text-fg-muted" onClick={() => {
           if (editing) setInput(JSON.stringify(interaction.input, null, 2))
           setEditing((v) => !v)

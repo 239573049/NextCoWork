@@ -40,9 +40,10 @@ describe('InteractionGate', () => {
     expect(await result).toMatchObject({ answers: [['B']] })
     const approval = gate.request(handle, { kind: 'tool_permission', callId: 'c', toolName: 'Write', input: {}, readOnly: false, destructive: true }, 101)
     const permissionId = gate.list()[0]!.id
-    expect(() => gate.respond({ id: permissionId, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })).toThrow('Invalid')
-    gate.respond({ id: permissionId, kind: 'tool_permission', decision: { kind: 'deny' } })
-    expect(await approval).toMatchObject({ decision: { kind: 'deny' } })
+    // workspace 作用域有 `.next-cowork/settings.local.json` 兜着;session 还没有存放处。
+    expect(() => gate.respond({ id: permissionId, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'session' } })).toThrow('Invalid')
+    gate.respond({ id: permissionId, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })
+    expect(await approval).toMatchObject({ decision: { kind: 'allow_always', scope: 'workspace' } })
   })
 
   /**
