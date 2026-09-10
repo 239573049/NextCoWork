@@ -1,5 +1,11 @@
 ﻿# 更新日志
 
+## v0.1.10
+
+### 修复
+
+- 修复 macOS 应用在 Apple Silicon 上启动立即闪退的问题(崩溃提示 Code Signature Invalid):打包时 Electron fuse 写入会发生在签名之后并令签名失效,现在会在写入后重新签名
+
 ## v0.1.9
 
 ### 修复

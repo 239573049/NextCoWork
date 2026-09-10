@@ -5,13 +5,17 @@ import path from 'node:path'
  * electron-builder afterPack hook.
  *
  * CI builds macOS artifacts without a Developer ID certificate
- * (`CSC_IDENTITY_AUTO_DISCOVERY=false`), so the packaged `.app` has no code
- * signature at all. On Apple Silicon, macOS requires every executable to
- * carry at least an ad-hoc signature; a fully unsigned arm64 app downloaded
- * from a browser (and therefore quarantined) fails Gatekeeper's integrity
- * check with "App is damaged and can't be opened" instead of the milder
- * "unidentified developer" prompt. Ad-hoc signing here keeps that milder,
- * dismissible prompt without requiring a paid Apple Developer certificate.
+ * (`CSC_IDENTITY_AUTO_DISCOVERY=false`), so the packaged `.app` would otherwise
+ * have no code signature at all. On Apple Silicon a fully unsigned app that a
+ * browser has quarantined fails Gatekeeper outright with "App is damaged"
+ * instead of the milder, dismissible "unidentified developer" prompt.
+ *
+ * This hook only establishes the signature and entitlements. electron-builder
+ * flips the Electron fuses *after* this runs, which rewrites bytes inside the
+ * framework and invalidates whatever was signed here, so the final signature
+ * comes from `electronFuses.resetAdHocDarwinSignature` in electron-builder.yml.
+ * Both pieces are required: without this hook there are no entitlements for the
+ * fuse step to preserve, and without that flag the app is killed at launch.
  */
 export default async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return
