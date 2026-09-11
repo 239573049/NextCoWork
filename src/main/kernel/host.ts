@@ -16,6 +16,7 @@ import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { nodeFs } from './node-fs'
 import { agentShell, nodeSpawn } from './node-spawn'
+import type { EnvironmentFacts } from '../../shared/domain/environment'
 
 export interface Logger {
   debug(msg: string, ...args: unknown[]): void
@@ -85,6 +86,31 @@ export interface PlatformInfo {
   osVersion: string
   /** ★ 必须和 `node-spawn.ts` 真拿去跑命令的那个 shell 是同一个,见 `agentShell()` */
   shell: string
+}
+
+export interface WorkspacePaths {
+  style: 'posix' | 'win32'
+  join(...paths: string[]): string
+  dirname(path: string): string
+  basename(path: string): string
+  extname(path: string): string
+  isAbsolute(path: string): boolean
+  relative(root: string, path: string): string
+  resolve(root: string, path: string): Promise<{ abs: string; outside: boolean }>
+  resolveWithin(root: string, path: string): Promise<string>
+  display(root: string, absolutePath: string): string
+}
+
+export interface WorkspaceHost {
+  key: string
+  rootPath: string
+  fs: KernelFs
+  spawn: SpawnFn
+  platform: PlatformInfo
+  path: WorkspacePaths
+  remote: boolean
+  description: string
+  facts?: EnvironmentFacts
 }
 
 export interface KernelHost {

@@ -67,6 +67,16 @@ describe('readLocalSettings', () => {
     expect((await readLocalSettings(fs, ROOT)).permissions.allow).toEqual(['Read'])
     expect(fs.reads).toBe(2)
   })
+  it('fails closed on unreadable or malformed remote permission rules', async () => {
+    const fs = memoryFs()
+    const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    const remote = { ...fs, stat: async () => { throw denied } }
+    await expect(readLocalSettings(remote, ROOT, undefined, { namespace: 'server:1' })).rejects.toBe(denied)
+    await fs.writeFile(PATH, '{ broken')
+    await expect(readLocalSettings(fs, ROOT, undefined, { namespace: 'server:1' })).rejects.toBeInstanceOf(SyntaxError)
+    const missing = { ...fs, stat: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } }
+    expect((await readLocalSettings(missing, ROOT, undefined, { namespace: 'server:1' })).permissions.deny).toEqual([])
+  })
 })
 
 describe('addLocalPermissionRule', () => {

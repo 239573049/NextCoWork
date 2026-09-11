@@ -1,6 +1,13 @@
 import type { BrowserChange, BrowserProfile, BrowserTab } from '../../shared/domain/browser'
+import { EnvironmentError, isLocalEnvironment } from '../../shared/domain/environment'
 import { ulid } from '../../shared/util/id'
 import { store } from '../state/store'
+
+export function assertLocalBrowserWorkspace(workspaceId: string): void {
+  const workspace = store.getWorkspace(workspaceId)
+  if (!workspace) throw new EnvironmentError('unbound')
+  if (!isLocalEnvironment(workspace.environment)) throw new EnvironmentError('unsupported')
+}
 
 const PROFILES_KEY = 'browser.profiles'
 const DEFAULT_PROFILE_ID = 'default'
@@ -54,6 +61,8 @@ export class BrowserManager {
   private readonly tabs = new Map<string, BrowserTab>()
   private profiles: BrowserProfile[] | null = null
   private listener: BrowserManagerListener | null = null
+
+  constructor(private readonly assertWorkspace: (workspaceId: string) => void = () => {}) {}
 
   setListener(listener: BrowserManagerListener | null): void {
     this.listener = listener
@@ -120,6 +129,7 @@ export class BrowserManager {
   }
 
   open(input: BrowserOpenInput): BrowserTab {
+    this.assertWorkspace(input.workspaceId)
     if (input.profileId !== undefined && !this.listProfiles().some((profile) => profile.id === input.profileId)) {
       throw new Error('指定的浏览器 Profile 不存在')
     }
@@ -161,6 +171,7 @@ export class BrowserManager {
 
   navigate(id: string, url: string, actor?: BrowserActor): BrowserTab {
     const tab = this.requireOwned(id, actor)
+    this.assertWorkspace(tab.workspaceId)
     const next: BrowserTab = {
       ...tab,
       url: normalizeUrl(url),
@@ -174,6 +185,7 @@ export class BrowserManager {
 
   update(id: string, patch: { url?: string; title?: string; status?: BrowserTab['status'] }, actor?: BrowserActor): BrowserTab {
     const tab = this.requireOwned(id, actor)
+    this.assertWorkspace(tab.workspaceId)
     const next: BrowserTab = {
       ...tab,
       ...(patch.url === undefined ? {} : { url: normalizeUrl(patch.url) }),
@@ -258,7 +270,7 @@ export class BrowserManager {
   }
 }
 
-export const browserManager = new BrowserManager()
+export const browserManager = new BrowserManager(assertLocalBrowserWorkspace)
 
 export function setBrowserChangeListener(listener: BrowserManagerListener | null): void {
   browserManager.setListener(listener)

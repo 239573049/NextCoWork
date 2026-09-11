@@ -12,6 +12,7 @@
  */
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { PermissionMode } from '../../../shared/agent/permission'
+import type { SessionChange } from '../../../shared/domain/session'
 import type { AgentEvent } from '../../../shared/agent/event'
 import { isToolResultOnly, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions, SessionMode } from '../../../shared/agent/run-request'
@@ -672,6 +673,13 @@ function persistInput(sessionId: string, immediate: boolean): void {
 
 /** 已发起过 hydrate 的会话。重复调用是无害的,但白费一次 IPC */
 const hydrated = new Set<string>()
+const deletedHistory = new Set<string>()
+const historyLoads = new Map<string, {
+  store: SessionStore
+  authoritative: boolean
+  dirty: boolean
+  promise: Promise<void>
+}>()
 
 /**
  * 回填草稿与队列。
@@ -685,12 +693,11 @@ const hydrated = new Set<string>()
  * 与 aborted 同等对待,由界面上的「继续执行」交还给用户。
  */
 async function hydrateInput(sessionId: string): Promise<void> {
+  const store = stores.get(sessionId)
+  if (!store || deletedHistory.has(sessionId)) return
   try {
     const saved = await getSessionInput(sessionId)
-    if (saved === null) return
-
-    const store = stores.get(sessionId)
-    if (!store) return
+    if (saved === null || stores.get(sessionId) !== store || deletedHistory.has(sessionId)) return
     const s = store.getState()
     if (s.draft !== '' || s.queuedInputs.length > 0 || s.activeRunId !== null) return
 
@@ -720,15 +727,40 @@ function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage
 }
 
 /** 重启后从 SQLite 回填已提交消息；流式 run 期间只合并缺少的 id。 */
-async function hydrateHistory(sessionId: string, authoritative = false): Promise<void> {
+function hydrateHistory(sessionId: string, authoritative = false): Promise<void> {
+  const store = stores.get(sessionId)
+  if (!store || deletedHistory.has(sessionId)) return Promise.resolve()
+  const pending = historyLoads.get(sessionId)
+  if (pending?.store === store) {
+    pending.authoritative ||= authoritative
+    pending.dirty ||= authoritative
+    return pending.promise
+  }
+  const request = { store, authoritative, dirty: false, promise: Promise.resolve() }
+  historyLoads.set(sessionId, request)
+  request.promise = (async () => {
+    do {
+      request.dirty = false
+      await loadHistory(sessionId, request)
+    } while (request.dirty && historyLoads.get(sessionId) === request && !deletedHistory.has(sessionId))
+  })().finally(() => {
+    if (historyLoads.get(sessionId) === request) historyLoads.delete(sessionId)
+  })
+  return request.promise
+}
+
+async function loadHistory(sessionId: string, request: NonNullable<ReturnType<typeof historyLoads.get>>): Promise<void> {
+  const store = request.store
+  const before = store.getState().transcript
+  const current = (): boolean => historyLoads.get(sessionId) === request
+    && stores.get(sessionId) === store && !deletedHistory.has(sessionId) && !request.dirty
   try {
     const detail = await getSession(sessionId)
-    const store = stores.get(sessionId)
-    if (!store) return
+    if (!current()) return
     store.setState((s) => {
       // IPC 往返期间可能刚好启动了新的 run；不要用旧数据库快照覆盖
       // 正在流式显示的内容。
-      if (s.activeRunId !== null
+      if (s.transcript !== before || s.activeRunId !== null
         || [...runIndex.values()].some((r) => r.sessionId === sessionId)
         || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return s
 
@@ -736,7 +768,7 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
       // 正常情况下当前 renderer 消息都已经先于事件写入数据库；这里只
       // 追加极短竞态窗口里尚未返回的本地消息，并且始终把数据库的
       // `ordinal` 顺序放在前面，绝不按 createdAt 重新排序。
-      const localOnly = authoritative
+      const localOnly = request.authoritative
         ? []
         : s.transcript.messages.filter((m) => !databaseIds.has(m.id))
       const messages = [...detail.messages, ...localOnly]
@@ -760,11 +792,11 @@ async function hydrateHistory(sessionId: string, authoritative = false): Promise
       }
     })
   } catch (err) {
+    if (!current()) return
     // 新 Tab 可能还没有主进程会话记录；真正发送时 runtime 会补齐。
     if (err instanceof Error && /会话不存在|不存在该会话|session.*not found/i.test(err.message)) {
-      const store = stores.get(sessionId)
-      store?.setState((s) => {
-        if (s.activeRunId !== null
+      store.setState((s) => {
+        if (s.transcript !== before || s.activeRunId !== null
           || [...runIndex.values()].some((r) => r.sessionId === sessionId)
           || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return s
         return {
@@ -809,8 +841,10 @@ export function sessionStore(sessionId: string): SessionStore {
   }
   if (!hydrated.has(sessionId)) {
     hydrated.add(sessionId)
-    void hydrateInput(sessionId)
-    void hydrateHistory(sessionId)
+    if (!deletedHistory.has(sessionId)) {
+      void hydrateInput(sessionId)
+      void hydrateHistory(sessionId)
+    }
   }
   return s
 }
@@ -833,7 +867,10 @@ export function releaseSession(sessionId: string): boolean {
   for (const r of runIndex.values()) if (r.sessionId === sessionId) return false
   for (const r of childRunIndex.values()) if (r.sessionId === sessionId) return false
   const deleted = stores.delete(sessionId)
-  if (deleted) hydrated.delete(sessionId)
+  if (deleted) {
+    hydrated.delete(sessionId)
+    historyLoads.delete(sessionId)
+  }
   return deleted
 }
 
@@ -865,10 +902,28 @@ export function adoptDraftSession(draftKey: string, sessionId: string): void {
  * 侧边栏列表会重新加载，但已经打开的 Tab 也必须同步数据库，否则
  * 删除历史后仍会继续显示旧 transcript。
  */
-export async function refreshHydratedSessions(): Promise<void> {
-  const ids = [...stores.keys()]
+export async function refreshHydratedSessions(change?: SessionChange): Promise<void> {
+  if (change?.kind === 'metadata' || change?.renamed !== undefined) return
+  if (change?.kind === 'deleted') {
+    for (const sessionId of change.sessionIds) {
+      const store = stores.get(sessionId)
+      if (store?.getState().activeRunId != null
+        || [...runIndex.values()].some((run) => run.sessionId === sessionId)
+        || [...childRunIndex.values()].some((run) => run.sessionId === sessionId)) continue
+      deletedHistory.add(sessionId)
+      historyLoads.delete(sessionId)
+      store?.setState({ draft: '', queuedInputs: [], transcript: { ...emptyTranscript(), status: 'done' } })
+    }
+    return
+  }
+  if (change?.kind === undefined || change.kind === 'reset') deletedHistory.clear()
+  const ids = change?.kind === 'history' || change?.kind === 'messages'
+    ? [...new Set(change.sessionIds)].filter((id) => stores.has(id))
+    : [...stores.keys()]
   await Promise.all(ids.map(async (sessionId) => {
-    if ([...runIndex.values()].some((r) => r.sessionId === sessionId)) return
+    if (stores.get(sessionId)?.getState().activeRunId != null
+      || [...runIndex.values()].some((r) => r.sessionId === sessionId)
+      || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return
     await hydrateHistory(sessionId, true)
   }))
 }

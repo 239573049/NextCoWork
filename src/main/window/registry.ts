@@ -24,6 +24,7 @@ export type TargetedEventChannel =
   | 'terminal:data'
   | 'terminal:exit'
   | 'window:maximized'
+  | 'connection:auth'
 /** 真·全局状态变更,所有窗口都该知道 */
 export type GlobalEventChannel = Exclude<EventChannel, TargetedEventChannel>
 

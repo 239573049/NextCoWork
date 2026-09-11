@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, ExternalLink, Globe, LoaderCircle, RotateCw, Shi
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
+import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import { browserPartition } from '../../../../shared/domain/browser'
 import { closeBrowserTab, listBrowserTabs, navigateBrowserTab, openBrowserTab } from '../../services/browser'
 import { useI18n } from '../../i18n'
@@ -24,6 +25,12 @@ interface BrowserElement extends HTMLElement {
  * webview 加载 http(s) 地址，不能导航到应用的 ncw://、file:// 或脚本协议。
  */
 export function BrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: 'browser' }>; workspace: Workspace }): ReactNode {
+  const { t } = useI18n()
+  if (!isLocalEnvironment(workspace.environment)) return <div role="status" className="flex min-h-0 flex-1 items-center justify-center p-6 text-[13px] text-fg-muted">{t('ssh.browserUnavailable')}</div>
+  return <LocalBrowserView tab={tab} workspace={workspace} />
+}
+
+function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: 'browser' }>; workspace: Workspace }): ReactNode {
   const { t } = useI18n()
   const setBrowser = useTabsStore((state) => state.setBrowser)
   const [url, setUrl] = useState(tab.ref.url)

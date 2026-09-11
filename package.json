@@ -27,7 +27,7 @@
     "dist": "npm run build && electron-builder",
     "dist:ci": "npm run build && electron-builder --publish never",
     "dist:dir": "npm run build && electron-builder --dir",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "patch-package --error-on-fail && electron-builder install-app-deps"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
@@ -35,6 +35,8 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "electron-updater": "^6.8.9",
     "node-pty": "^1.1.0",
+    "ssh2-streams": "npm:ssh2-streams-classic@0.4.14",
+    "undici": "7.29.1",
     "unzipper": "^0.12.5",
     "zod": "^4.5.4"
   },
@@ -48,6 +50,7 @@
     "@types/node": "^24.9.0",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.7",
+    "@types/ssh2-streams": "^0.1.13",
     "@types/unzipper": "^0.10.11",
     "@uiw/react-codemirror": "^4.25.11",
     "@vitejs/plugin-react": "^5.2.0",
@@ -62,6 +65,7 @@
     "jsdom": "^30.0.1",
     "lucide-react": "^1.40.0",
     "mermaid": "^11.17.2",
+    "patch-package": "8.0.1",
     "radix-ui": "^1.6.7",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

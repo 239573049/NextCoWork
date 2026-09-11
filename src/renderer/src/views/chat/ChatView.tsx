@@ -7,18 +7,23 @@
  * `startAgentEventPump()` **不在这里** —— 它在 App 根部起一次。
  * 放这儿的话五个 chat Tab 就是五个泵,同一批事件被 apply 五次。
  */
-import { Check, ChevronDown, LoaderCircle } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Check, ChevronDown, LoaderCircle, Upload } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { greetingOf } from '../../../../shared/domain/greeting'
 import { hasRun } from '../../../../shared/agent/transcript'
 import { latestTodosFrom, type TodoItem } from '../../../../main/kernel/tool/builtin/todo'
 import { useI18n } from '../../i18n'
 import type { ContentPart } from '../../../../shared/agent/message'
-import type { Attachment } from '../../../../shared/domain/attachment'
+import type { Attachment, WorkspaceAttachmentIntent } from '../../../../shared/domain/attachment'
+import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import { isImageMime, mimeOfExt } from '../../../../shared/domain/attachment'
 import type { Workspace } from '../../../../shared/domain/workspace'
 import { ulid } from '../../../../shared/util/id'
-import { listSessionAttachments, pickAttachments, removeAttachment, uploadFile } from '../../services/attachment'
+import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadFile } from '../../services/attachment'
+import { connectionErrorKey } from '../../services/connections'
+import { Dialog } from '../../components/ui/Dialog'
+import { Button } from '../../components/ui/Button'
 import { updateWorkspace } from '../../services/app'
 import { sessionStore, resumeQueue } from '../../stores/session'
 import { Composer, type FallbackModel } from './Composer'
@@ -47,15 +52,17 @@ export function ChatView({
     这个键**只在渲染层有效**,绝不能往 IPC 上送(理由见 `chatKey` 的注释)。
   */
   const storeKey = sessionId ?? tabId
+  const remote = !isLocalEnvironment(workspace.environment)
   const useSession = sessionStore(storeKey)
+  const { activeRunId, lastSeq, transcript, queuedInputs, compacting } = useSession(useShallow((state) => ({
+    activeRunId: state.activeRunId,
+    lastSeq: state.lastSeq,
+    transcript: state.transcript,
+    queuedInputs: state.queuedInputs,
+    compacting: state.compacting
+  })))
   const {
-    activeRunId,
-    lastSeq,
-    transcript,
-    queuedInputs,
-    draft,
     stop,
-    setDraft,
     promoteInput,
     editInput,
     editMessage,
@@ -64,9 +71,8 @@ export function ChatView({
     moveInputToDraft,
     retagQueuedPermission,
     retagQueuedMode,
-    compactContext,
-    compacting
-  } = useSession()
+    compactContext
+  } = useSession.getState()
   const providerById = useModelsStore((s) => s.providerById)
   // 订阅数组本身而不只是取函数:别名表加载完 / 设置页改完之后抬头要跟着变。
   const models = useModelsStore((s) => s.models)
@@ -112,6 +118,18 @@ export function ChatView({
     ? { model: workspace.settings.defaultModel,
         modelProviderId: workspace.settings.defaultModelProviderId }
     : fallbackModel
+  const onEditMessage = useCallback((id: string, text: string, continueRun: boolean) => editMessage(id, text, continueRun, {
+    workspaceId: workspace.id,
+    depth: 0,
+    mode: workspace.settings.defaultMode,
+    thinking: workspace.settings.defaultThinking,
+    webSearch: workspace.settings.webSearch,
+    permissionMode: workspace.settings.permissionMode,
+    model: editModel.model,
+    modelProviderId: editModel.modelProviderId,
+    skillIds: workspace.settings.activeSkillIds,
+    skillSelectionMode: workspace.settings.skillSelectionMode
+  }), [editMessage, editModel.model, editModel.modelProviderId, workspace])
   const started = hasRun(transcript, running)
   const { t } = useI18n()
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
@@ -163,6 +181,15 @@ export function ChatView({
     界面会空着直到第一个传完。
   */
   const [tray, setTray] = useState<TrayItem[]>([])
+  const [uploadIntent, setUploadIntent] = useState<{ key: string; intent: WorkspaceAttachmentIntent } | null>(null)
+  const [transferring, setTransferring] = useState(false)
+  const uploadTicket = useRef<string | null>(null)
+  const uploadVersion = useRef(0)
+  useEffect(() => () => {
+    uploadVersion.current++
+    if (uploadTicket.current) void cancelWorkspaceUpload(uploadTicket.current).catch(() => {})
+    uploadTicket.current = null
+  }, [workspace.id, storeKey])
   // 重试要用原 File,而 TrayItem 是可序列化的展示态,不放 File
   const pendingFiles = useRef(new Map<string, File>())
 
@@ -200,7 +227,7 @@ export function ChatView({
             : list.map((a) => ({
                 key: a.id,
                 name: a.displayName,
-                status: 'done' as const,
+                status: remote && !isImageMime(a.mime) ? 'awaiting-upload' as const : 'done' as const,
                 attachment: a
               }))
         )
@@ -212,7 +239,7 @@ export function ChatView({
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [sessionId, remote])
 
   const startUpload = useCallback(
     (key: string, file: File) => {
@@ -221,18 +248,18 @@ export function ChatView({
       )
       void uploadFile(file, 'session', ensureSessionId())
         .then((a) => {
-          setTray((t) => t.map((x) => (x.key === key ? { ...x, status: 'done', attachment: a } : x)))
+          setTray((t) => t.map((x) => (x.key === key ? { ...x, status: remote && !isImageMime(a.mime) ? 'awaiting-upload' : 'done', attachment: a } : x)))
           pendingFiles.current.delete(key)
         })
-        .catch((err: unknown) => {
+        .catch(() => {
           // ★ 失败的 chip **保留**并可重试。静默移除的话,用户拖了 5 个
           //   只成功 4 个,他只会以为自己少拖了一个。
-          setTray((t) =>
-            t.map((x) => (x.key === key ? { ...x, status: 'error', error: String(err) } : x))
+          setTray((current) =>
+            current.map((x) => (x.key === key ? { ...x, status: 'error', error: t('ssh.attachmentFailed') } : x))
           )
         })
     },
-    [ensureSessionId]
+    [ensureSessionId, remote, t]
   )
 
   /*
@@ -251,18 +278,18 @@ export function ChatView({
       setTray((t) => [
         ...t,
         ...items.map(({ key, name, isImage, file }) =>
-          isImage
+          isImage || remote
             ? { key, name, status: 'uploading' as const }
             : pathTrayItem(key, name, file)
         )
       ])
       for (const { key, file, isImage } of items) {
-        if (!isImage) continue
+        if (!isImage && !remote) continue
         pendingFiles.current.set(key, file)
         startUpload(key, file)
       }
     },
-    [startUpload]
+    [startUpload, remote]
   )
 
   /**
@@ -274,7 +301,7 @@ export function ChatView({
     const path = window.nextcowork.getPathForFile(file)
     return path === ''
       ? { key, name, status: 'error', error: t('chat.pathUnavailable') }
-      : { key, name, status: 'done', path }
+      : { key, name, status: 'done', path, source: { kind: 'local' } }
   }
 
   /**
@@ -284,23 +311,23 @@ export function ChatView({
    */
   const pickAttachment = useCallback(() => {
     // 走主进程 dialog —— 渲染层不指定路径,路径是用户在系统对话框里选定的
-    void pickAttachments('session', ensureSessionId()).then((list) => {
-      setTray((t) => [
-        ...t,
+    void pickAttachments('session', ensureSessionId(), remote).then((list) => {
+      setTray((current) => [
+        ...current,
         ...list.map((p) =>
           p.kind === 'path'
             ? // key 只是 chip 的本地身份,路径型的没有附件 id 可用
-              { key: ulid(), name: p.name, status: 'done' as const, path: p.path }
+              (remote ? { key: ulid(), name: p.name, status: 'error' as const, error: t('ssh.attachmentFailed') } : { key: ulid(), name: p.name, status: 'done' as const, path: p.path, source: { kind: 'local' as const } })
             : {
                 key: p.attachment.id,
                 name: p.attachment.displayName,
-                status: 'done' as const,
+                status: remote && !isImageMime(p.attachment.mime) ? 'awaiting-upload' as const : 'done' as const,
                 attachment: p.attachment
               }
         )
       ])
     })
-  }, [ensureSessionId])
+  }, [ensureSessionId, remote, t])
 
   const removeFromTray = useCallback((key: string) => {
     setTray((t) => {
@@ -312,13 +339,61 @@ export function ChatView({
     pendingFiles.current.delete(key)
   }, [])
 
-  const retryUpload = useCallback(
-    (key: string) => {
-      const file = pendingFiles.current.get(key)
-      if (file !== undefined) startUpload(key, file)
-    },
-    [startUpload]
-  )
+  const cancelTransfer = (): void => {
+    uploadVersion.current++
+    if (uploadTicket.current) void cancelWorkspaceUpload(uploadTicket.current).catch(() => {})
+    uploadTicket.current = null
+    if (uploadIntent) setTray((items) => items.map((item) => item.key === uploadIntent.key ? { ...item, status: 'awaiting-upload' } : item))
+    setUploadIntent(null)
+    setTransferring(false)
+  }
+
+  const retryUpload = (key: string): void => {
+    const item = tray.find((entry) => entry.key === key)
+    if (remote && item?.attachment && !isImageMime(item.attachment.mime)) {
+      if (transferring) return
+      const version = ++uploadVersion.current
+      if (uploadTicket.current) void cancelWorkspaceUpload(uploadTicket.current).catch(() => {})
+      setTransferring(true)
+      void prepareWorkspaceUpload(item.attachment.id, ensureSessionId(), workspace.id).then((intent) => {
+        if (version !== uploadVersion.current) { void cancelWorkspaceUpload(intent.ticket).catch(() => {}); return }
+        uploadTicket.current = intent.ticket
+        setUploadIntent({ key, intent })
+      }).catch((error: unknown) => {
+        if (version === uploadVersion.current) setTray((items) => items.map((entry) => entry.key === key ? { ...entry, status: 'error', error: t(connectionErrorKey(error)) } : entry))
+      }).finally(() => { if (version === uploadVersion.current) setTransferring(false) })
+      return
+    }
+    const file = pendingFiles.current.get(key)
+    if (file !== undefined) startUpload(key, file)
+  }
+
+  const confirmTransfer = (): void => {
+    if (!uploadIntent || transferring) return
+    const { key, intent } = uploadIntent
+    const version = uploadVersion.current
+    setTransferring(true)
+    setTray((items) => items.map((item) => item.key === key ? { ...item, status: 'uploading' } : item))
+    void completeWorkspaceUpload(intent.ticket).then((reference) => {
+      if (version !== uploadVersion.current) return
+      setTray((items) => items.map((item) => item.key === key ? { ...item, ...reference, status: 'done', attachment: undefined } : item))
+      void removeAttachment(intent.attachmentId).catch(() => {})
+    }).catch((error: unknown) => {
+      if (version === uploadVersion.current) setTray((items) => items.map((item) => item.key === key ? { ...item, status: 'error', error: t(connectionErrorKey(error)) } : item))
+    }).finally(() => {
+      if (version === uploadVersion.current) { uploadTicket.current = null; setUploadIntent(null); setTransferring(false) }
+    })
+  }
+
+  const transferDialog = <Dialog open={uploadIntent !== null} title={t('ssh.uploadToServer')} onClose={() => { if (!transferring) cancelTransfer() }} footer={<>
+    <Button variant="ghost" disabled={transferring} onClick={cancelTransfer}>{t('common.cancel')}</Button>
+    <Button disabled={transferring} onClick={confirmTransfer}><Upload size={14} />{t(transferring ? 'chat.uploading' : 'ssh.uploadToServer')}</Button>
+  </>}>
+    {uploadIntent && <dl className="space-y-3 break-words text-[13px]">
+      <div><dt className="text-fg-muted">{t('ssh.uploadSource')}</dt><dd>{uploadIntent.intent.name}</dd></div>
+      <div><dt className="text-fg-muted">{t('ssh.uploadDestination')}</dt><dd>{uploadIntent.intent.connectionName}</dd><dd className="font-mono text-[12px]">{uploadIntent.intent.directory}</dd></div>
+    </dl>}
+  </Dialog>
 
   /** 托盘 → ContentPart[]。只取已完成的,上传中/失败的不进 parts */
   function partsOf(text: string): ContentPart[] | undefined {
@@ -328,7 +403,8 @@ export function ChatView({
     if (text !== '') parts.push({ type: 'text', text })
     for (const x of ready) {
       if (x.path !== undefined) {
-        parts.push({ type: 'file_ref', path: x.path, name: x.name })
+        if (remote && (x.source?.kind !== 'workspace' || x.source.workspaceId !== workspace.id)) continue
+        parts.push({ type: 'file_ref', path: x.path, name: x.name, source: x.source })
         continue
       }
       const a = x.attachment as Attachment
@@ -342,11 +418,10 @@ export function ChatView({
   // 从空态切到有内容时 React 会重新挂载它。这没问题:草稿在 session store 里,
   // 而发出去的那一刻草稿已经清空了。
   const composer = (
-    <Composer
+    <SessionComposer
+      storeKey={storeKey}
       workspace={workspace}
       fallbackModel={fallbackModel}
-      draft={draft}
-      onDraft={setDraft}
       onPermissionModeChange={retagQueuedPermission}
       running={running}
       planExitSignal={planExitSignal}
@@ -369,7 +444,7 @@ export function ChatView({
           - `send` 不能 await —— await 之后的代码属于一棵已经不存在的树。
           重挂出来的那一个从新键的 store 里读,而乐观插入的用户消息已经在里面了。
         */
-        setTray([])
+        setTray((items) => items.filter((item) => item.status !== 'done'))
         pendingFiles.current.clear()
         void sessionStore(ensureSessionId()).getState().send(
           text,
@@ -430,6 +505,7 @@ export function ChatView({
           {queue}
           {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
           {composer}
+          {transferDialog}
         </div>
       </div>
     )
@@ -446,23 +522,7 @@ export function ChatView({
           providerName={provider?.name}
           lastSeq={lastSeq}
           queued={queuedInputs.length}
-          onEditMessage={(id, text, continueRun) => editMessage(id, text, continueRun, {
-            workspaceId: workspace.id,
-            depth: 0,
-            mode: workspace.settings.defaultMode,
-            thinking: workspace.settings.defaultThinking,
-            webSearch: workspace.settings.webSearch,
-            permissionMode: workspace.settings.permissionMode,
-            /*
-              ★ 用工作区当前的选择,**不能用 `transcript.model`** —— 那是上游回包里的
-              真实模型名,不是别名。拿它去查别名表,在改过别名的库里直接查不到,
-              然后报一条「没有配置模型别名 xxx」,而 xxx 是个用户从没见过的字符串。
-            */
-            model: editModel.model,
-            modelProviderId: editModel.modelProviderId,
-            skillIds: workspace.settings.activeSkillIds
-            ,skillSelectionMode: workspace.settings.skillSelectionMode
-          })}
+          onEditMessage={onEditMessage}
           onDeleteTurn={deleteTurn}
           onExecutePlan={executePlan}
         />
@@ -471,8 +531,16 @@ export function ChatView({
       {queue}
       {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
       {composer}
+      {transferDialog}
     </div>
   )
+}
+
+function SessionComposer({ storeKey, ...props }: { storeKey: string } & Omit<ComponentProps<typeof Composer>, 'draft' | 'onDraft'>): ReactNode {
+  const useSession = sessionStore(storeKey)
+  const draft = useSession((state) => state.draft)
+  const setDraft = useSession((state) => state.setDraft)
+  return <Composer {...props} draft={draft} onDraft={setDraft} />
 }
 
 /**

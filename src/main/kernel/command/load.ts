@@ -21,7 +21,8 @@ import {
   COMMAND_PROMPT_MAX
 } from '../../../shared/domain/command'
 import { fmString, parseFrontmatter } from '../frontmatter'
-import type { KernelFs } from '../host'
+import type { KernelFs, WorkspacePaths } from '../host'
+import { EnvironmentError } from '../../../shared/domain/environment'
 import { clampWithEllipsis, stripControlChars } from '../text'
 import { PathEscapeError, resolveInWorkspace } from '../tool/path-guard'
 import { BUILTIN_COMMANDS } from './builtin'
@@ -45,6 +46,8 @@ export interface CommandScanResult {
 
 export interface CommandScanInput {
   fs: KernelFs
+  projectFs?: KernelFs
+  projectPath?: WorkspacePaths
   /** `<appData>/commands`。空串 = 跳过全局这一层。 */
   globalRoot: string
   /** `<workspaceRoot>/.next-cowork/commands`。空串 = 没有工作区。 */
@@ -67,7 +70,8 @@ export async function scanCommands(input: CommandScanInput): Promise<CommandScan
   for (const scope of ['global', 'project'] as const) {
     const root = scope === 'global' ? input.globalRoot : input.projectRoot
     if (root === '') continue
-    await scanOneRoot(input.fs, root, scope, byName, diagnostics)
+    await scanOneRoot(scope === 'project' ? input.projectFs ?? input.fs : input.fs, root, scope, byName, diagnostics,
+      scope === 'project' ? input.projectPath : undefined)
   }
 
   return { commands: [...byName.values()], diagnostics }
@@ -78,13 +82,15 @@ async function scanOneRoot(
   root: string,
   scope: Exclude<CommandScope, 'builtin'>,
   out: Map<string, CommandDefinition>,
-  diagnostics: CommandDiagnostic[]
+  diagnostics: CommandDiagnostic[],
+  path?: WorkspacePaths
 ): Promise<void> {
   let entries: Array<{ name: string; isDir: boolean }>
   try {
     if (!(await fs.exists(root))) return // 没有 commands 目录是常态,不是错误
     entries = await fs.readDir(root)
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err
     diagnostics.push({ path: root, message: `读不了这个目录:${msg(err)}` })
     return
   }
@@ -111,8 +117,9 @@ async function scanOneRoot(
     try {
       // 挡软链逃逸:`commands/evil.md -> /etc/passwd` 之后,选一次命令
       // 就等于把任意文件的内容塞进输入框发给模型。
-      file = resolveInWorkspace(root, e.name)
+      file = path ? await path.resolveWithin(root, e.name) : resolveInWorkspace(root, e.name)
     } catch (err) {
+      if (err instanceof EnvironmentError) throw err
       if (err instanceof PathEscapeError) {
         diagnostics.push({
           path: `${root}/${e.name}`,
@@ -141,6 +148,7 @@ async function loadOne(
     const bytes = await fs.readFileBytes(file, COMMAND_FILE_MAX_BYTES)
     raw = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err
     diagnostics.push({ path: file, message: `读不了这个文件:${msg(err)}` })
     return null
   }

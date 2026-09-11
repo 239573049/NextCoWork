@@ -29,6 +29,7 @@ import { useI18n } from "../../../i18n";
 import { cn } from "../../../lib/cn";
 import { getMcpSecretsInfo, setMcpSecrets } from "../../../services/mcp";
 import { useMcpStore } from "../../../stores/mcp";
+import { useWindowStore } from '../../../stores/window';
 import {
   draftOf,
   emptyDraft,
@@ -57,7 +58,7 @@ export function McpServerDialog({
 }): ReactNode {
   const { t } = useI18n();
   const transports: ReadonlyArray<{ value: McpTransport; label: string }> = [
-    { value: "stdio", label: t("connection.mcp.dialog.localProcess") },
+    { value: "stdio", label: t('ssh.mcp.process') },
     { value: "streamable-http", label: "HTTP" },
     { value: "sse", label: "SSE" },
   ];
@@ -66,6 +67,8 @@ export function McpServerDialog({
   const [errors, setErrors] = useState<McpFormErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const workspaces = useWindowStore((state) => state.workspaceTargets);
+  const [workspaceId, setWorkspaceId] = useState('');
   /** 用户手动改过 id 之后就别再从名字推了 —— 推回去等于把他改的覆盖掉 */
   const [idTouched, setIdTouched] = useState(false);
   const [stored, setStored] = useState<{
@@ -80,6 +83,7 @@ export function McpServerDialog({
   useEffect(() => {
     if (!open) return;
     setDraft(editing === null ? emptyDraft() : draftOf(editing.config));
+    setWorkspaceId(editing?.config.workspaceId ?? '');
     setErrors({});
     setFailure(null);
     setIdTouched(editing !== null);
@@ -126,6 +130,7 @@ export function McpServerDialog({
       draft,
       editing?.config.enabled ?? true,
     );
+    config.workspaceId = workspaceId || undefined;
 
     // 顺序有意义:先写配置(它声明了键名,主进程按那份声明过滤密钥),
     // 再写密钥(那一步会带着新值重连)。反过来的话密钥会被当成未声明而丢掉。
@@ -171,10 +176,17 @@ export function McpServerDialog({
       }
     >
       <div className="flex flex-col gap-3.5">
+        <Field label={t('ssh.mcp.target')}>
+          <select value={workspaceId} aria-label={t('ssh.mcp.target')} onChange={(event) => setWorkspaceId(event.target.value)} className="h-8 w-full min-w-0 rounded-[6px] border border-border bg-canvas px-2 text-[12px] text-fg">
+            <option value="">{t('ssh.mcp.local')}</option>
+            {workspaceId && !workspaces[workspaceId] && <option value={workspaceId}>{workspaceId}</option>}
+            {Object.values(workspaces).map((workspace) => <option key={workspace.id} value={workspace.id}>{t('ssh.mcp.scope', { name: workspace.name })}</option>)}
+          </select>
+        </Field>
         <Field
           label={t("connection.mcp.dialog.transport")}
           hint={
-            stdio
+            workspaceId ? t('ssh.mcp.scope', { name: workspaces[workspaceId]?.name ?? workspaceId }) : stdio
               ? t("connection.mcp.dialog.localHint")
               : t("connection.mcp.dialog.remoteHint")
           }

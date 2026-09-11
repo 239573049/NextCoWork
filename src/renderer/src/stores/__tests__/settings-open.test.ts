@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Bootstrap } from '../../../../shared/domain/bootstrap'
 import { DEFAULT_SETTINGS } from '../../../../shared/domain/settings'
 import type { OuterTab } from '../../../../shared/domain/tab'
+import { DEFAULT_WORKSPACE_SETTINGS } from '../../../../shared/domain/workspace'
 
 vi.mock('../../services/app', () => ({
   getInnerTabs: vi.fn(),
@@ -98,6 +99,7 @@ describe('设置浮层的开关状态', () => {
   })
 
   it('关掉工作区 Tab 不影响设置浮层', () => {
+    useWindowStore.getState().updateWorkspaces([{ id: 'ws-1', name: 'local', rootPath: '/tmp/ws-1', settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 }])
     useWindowStore.getState().openWorkspace('ws-1')
     useWindowStore.getState().openSettings('data')
     const id = useWindowStore.getState().outer[0]!.id

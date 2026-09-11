@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SseParser, sseFromResponse, type SseEvent } from '../sse'
 
 /**
@@ -144,6 +144,37 @@ function bodyOf(bytes: Uint8Array[]): Response {
 }
 
 describe('sseFromResponse', () => {
+  it.each(['return', 'abort'] as const)('does not block %s on upstream cancellation cleanup', async (exit) => {
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const cancel = vi.fn(() => cleanup)
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: partial\n\n')) },
+      cancel
+    })
+    const controller = new AbortController()
+    const events = sseFromResponse(new Response(body), controller.signal)
+    expect((await events.next()).value).toEqual({ event: 'message', data: 'partial' })
+    const finishing = exit === 'abort' ? events.next() : events.return(undefined)
+    let settled = false
+    const outcome = finishing.then(
+      (value) => { settled = true; return { value } },
+      (error: unknown) => { settled = true; return { error } }
+    )
+    if (exit === 'abort') controller.abort()
+    try {
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 200, interval: 1 })
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(body.locked).toBe(false)
+      expect(await outcome).toMatchObject(exit === 'abort'
+        ? { error: { name: 'AbortError' } }
+        : { value: { done: true } })
+    } finally {
+      releaseCleanup()
+      await outcome
+    }
+  })
+
   it('从 Response 读出事件', async () => {
     const res = bodyOf([new TextEncoder().encode('event: a\ndata: 1\n\n')])
     const out: SseEvent[] = []

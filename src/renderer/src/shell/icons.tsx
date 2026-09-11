@@ -6,6 +6,7 @@
  * 两个位置。图标各写各的话,总有一天会漂移成两个不同的图标。
  */
 import {
+  Blocks,
   ChartNoAxesCombined,
   ClockFading,
   Earth,
@@ -13,7 +14,6 @@ import {
   Image as ImageIcon,
   MessageSquare,
   PenTool,
-  ScrollText,
   Settings,
   SquareTerminal,
   FileText,
@@ -25,7 +25,9 @@ import type { FeatureKind, InnerTabKind } from '../../../shared/domain/tab'
  * ★ 这四个字形是**对着截图放大 6~16 倍、再比对 lucide 的真实 path 数据挑的**,
  * 不是按名字猜的:
  * 「定时任务」表盘上有缺口(`ClockFading`),不是完整一圈的 `Clock`;
- * 「Skill 管理」是**带横线的**卷轴(`ScrollText` 的 `M15 12h-5` / `M15 8h-5`),不是空白 `Scroll`;
+ * 「扩展」的 `Blocks` 是**新挑的,没有参考图可比** —— 这一格原本是「Skill 管理」,
+ *   用的是带横线的卷轴(`ScrollText`);现在它扩成了技能 / 命令 / 子代理 / 钩子
+ *   四类资源的统一入口,而卷轴只说得了 Skill 一件事。有了设计稿该回来重挑。
  * 「浏览器」是带大陆块的地球(`Earth`)不是经纬线球(`Globe`)——
  *   参考图那个是地球+光标,lucide 全套(earth / globe / globe-2 / …)都没有,`Earth` 是最近的;
  * 「每日回顾」是柱子加一条趋势线(`ChartNoAxesCombined`)不是打勾的日历。
@@ -33,7 +35,7 @@ import type { FeatureKind, InnerTabKind } from '../../../shared/domain/tab'
  */
 export const FEATURE_ICON: Record<FeatureKind, LucideIcon> = {
   scheduled: ClockFading,
-  skills: ScrollText,
+  extensions: Blocks,
   browser: Earth,
   review: ChartNoAxesCombined,
   settings: Settings

@@ -12,7 +12,7 @@
  */
 import type { AgentError } from './error'
 import type { AgentEvent, RunNotice, RunStatus, SubagentPhase } from './event'
-import { visibleText, type AgentMessage, type SubagentResult, type ToolOutput } from './message'
+import { visibleText, type AgentMessage, type ContentPart, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
 import type { ContextCheckpoint, ContextStatus } from './context-management'
 
@@ -199,32 +199,33 @@ function applySubagentMessage(
   for (const part of message.parts) {
     if (part.type !== 'tool_result' || part.subagent === undefined) continue
     if (next === subagents) next = { ...subagents }
-    const previous = next[part.callId]
-    const metadata: SubagentResult = part.subagent
-    const metadataStatus = metadata.status ?? (part.isError ? 'error' : 'done')
-    // A child can finish before its parent commits the background tool result;
-    // never let that late durable "running" marker downgrade a terminal state.
-    const status = metadataStatus === 'error'
-      ? 'error'
-      : previous !== undefined && previous.status !== 'running'
-        ? previous.status
-        : metadataStatus
-    next[part.callId] = {
-      ...(previous ?? {
-        callId: part.callId,
-        childRunId: metadata.childRunId,
-        toolCalls: 0,
-        toolErrors: 0
-      }),
-      childRunId: metadata.childRunId,
-      status,
-      ...(metadata.background === undefined ? {} : { background: metadata.background }),
-      phase: status === 'running' ? (metadata.background === true ? 'background' : 'starting') : 'finishing',
-      ...(metadata.summary === undefined ? {} : { summary: metadata.summary }),
-      ...(metadata.error === undefined ? {} : { error: metadata.error })
-    }
+    writeSubagentResult(next, part, part.subagent)
   }
   return next
+}
+
+function writeSubagentResult(subagents: TranscriptState['subagents'], part: Extract<ContentPart, { type: 'tool_result' }>, metadata: SubagentResult): void {
+  const previous = subagents[part.callId]
+  const metadataStatus = metadata.status ?? (part.isError ? 'error' : 'done')
+  const status = metadataStatus === 'error'
+    ? 'error'
+    : previous !== undefined && previous.status !== 'running'
+      ? previous.status
+      : metadataStatus
+  subagents[part.callId] = {
+    ...(previous ?? {
+      callId: part.callId,
+      childRunId: metadata.childRunId,
+      toolCalls: 0,
+      toolErrors: 0
+    }),
+    childRunId: metadata.childRunId,
+    status,
+    ...(metadata.background === undefined ? {} : { background: metadata.background }),
+    phase: status === 'running' ? (metadata.background === true ? 'background' : 'starting') : 'finishing',
+    ...(metadata.summary === undefined ? {} : { summary: metadata.summary }),
+    ...(metadata.error === undefined ? {} : { error: metadata.error })
+  }
 }
 
 /** Rebuild durable child-agent cards from session history, retaining live telemetry. */
@@ -232,10 +233,11 @@ export function subagentsFromMessages(
   messages: readonly AgentMessage[],
   live: Readonly<TranscriptState['subagents']> = {}
 ): TranscriptState['subagents'] {
-  let subagents: TranscriptState['subagents'] = {}
+  const subagents: TranscriptState['subagents'] = {}
   const taskCalls = new Map<string, { description?: string; subagentType?: string }>()
   for (const message of messages) {
     for (const part of message.parts) {
+      if (part.type === 'tool_result' && part.subagent !== undefined) writeSubagentResult(subagents, part, part.subagent)
       if (part.type !== 'tool_call' || part.name.toLowerCase() !== 'task') continue
       const input = part.input
       const record = typeof input === 'object' && input !== null ? input as Record<string, unknown> : undefined
@@ -244,7 +246,6 @@ export function subagentsFromMessages(
         ...(typeof record?.subagent_type === 'string' ? { subagentType: record.subagent_type } : {})
       })
     }
-    subagents = applySubagentMessage(subagents, message)
   }
   for (const [callId, info] of taskCalls) {
     const current = subagents[callId]
@@ -273,18 +274,22 @@ function applyToolMessage(tools: TranscriptState['tools'], message: AgentMessage
   for (const part of message.parts) {
     if (part.type !== 'tool_call' && part.type !== 'tool_result') continue
     if (next === tools) next = { ...tools }
-    const previous = next[part.callId]
-    if (part.type === 'tool_call') {
-      next[part.callId] = {
+    writeToolPart(next, part)
+  }
+  return next
+}
+
+function writeToolPart(tools: TranscriptState['tools'], part: Extract<ContentPart, { type: 'tool_call' | 'tool_result' }>): void {
+  const previous = tools[part.callId]
+  tools[part.callId] = part.type === 'tool_call'
+    ? {
         ...previous,
         callId: part.callId,
         name: part.name,
-        // Live tool_start can carry arguments edited during approval.
         input: previous?.input ?? part.input,
         status: previous?.status ?? 'pending'
       }
-    } else {
-      next[part.callId] = {
+    : {
         ...previous,
         callId: part.callId,
         name: previous?.name ?? '(unknown)',
@@ -293,9 +298,6 @@ function applyToolMessage(tools: TranscriptState['tools'], message: AgentMessage
         output: part.output,
         progress: undefined
       }
-    }
-  }
-  return next
 }
 
 /** Rebuild from saved messages, retaining available live details for matching calls only. */
@@ -303,8 +305,12 @@ export function toolsFromMessages(
   messages: readonly AgentMessage[],
   live: Readonly<TranscriptState['tools']> = {}
 ): TranscriptState['tools'] {
-  let tools: TranscriptState['tools'] = {}
-  for (const message of messages) tools = applyToolMessage(tools, message)
+  const tools: TranscriptState['tools'] = {}
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type === 'tool_call' || part.type === 'tool_result') writeToolPart(tools, part)
+    }
+  }
   for (const [callId, saved] of Object.entries(tools)) {
     const current = live[callId]
     if (current === undefined) continue

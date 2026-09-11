@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentMessage } from '../../../shared/agent/message'
 import type { McpServerConfig } from '../../../shared/domain/mcp'
 import { mcpSecretRef } from '../../../shared/domain/mcp'
@@ -23,9 +23,10 @@ import { MIGRATIONS } from '../schema'
 import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import type { Workspace } from '../../../shared/domain/workspace'
+import type { SshConnectionProfile } from '../../../shared/domain/environment'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import { store } from '../../state/store'
-import { DATABASE_DIRNAME, DB_FILENAME, closeDatabase, defaultDatabaseDirectory, openDatabase } from '../index'
+import { DATABASE_DIRNAME, DB_FILENAME, closeDatabase, db, defaultDatabaseDirectory, openDatabase, stmt } from '../index'
 import * as repo from '../repo'
 
 let dir = ''
@@ -77,6 +78,98 @@ const workspace = (id: string): Workspace => ({
 })
 
 describe('★ 关库重开之后,配置一样都不少', () => {
+  it('keeps workspace-scoped MCP configurations device-local', () => {
+    repo.configureSyncAccount('test-account')
+    const server: McpServerConfig = { id: 'remote-mcp', name: 'Remote process', enabled: true, workspaceId: 'remote', transport: 'stdio', command: 'remote-command', args: [], envNames: [] }
+    repo.putMcpServer(server)
+    expect(stmt("SELECT payload FROM sync_outbox WHERE kind = 'mcpServer'").all()).toEqual([])
+    repo.enqueueInitialSyncSnapshot('test-account')
+    expect(stmt("SELECT payload FROM sync_outbox WHERE kind = 'mcpServer'").all()).toEqual([])
+    restart()
+    expect(repo.getMcpServer(server.id)).toEqual(server)
+  })
+  it('persists device-only SSH profiles and never syncs workspace bindings', () => {
+    const connection: SshConnectionProfile = { id: 'ssh-one', name: 'Private server', kind: 'ssh', enabled: true,
+      platform: 'auto', revision: 1, createdAt: 1, updatedAt: 1, target: { kind: 'manual', host: 'private.internal',
+        username: 'user', port: 22, identityFile: '/private/key' } }
+    repo.configureSyncAccount('test-account')
+    store.putConnectionProfile(connection)
+    store.putWorkspace({ ...workspace('remote'), environment: { kind: 'connection', connectionId: connection.id } })
+    const payloads = stmt('SELECT kind, payload FROM sync_outbox').all()
+    expect(payloads).toHaveLength(1)
+    expect(JSON.parse(String(payloads[0]?.['payload']))).toEqual({ id: 'remote', name: '工作区 remote', settings: workspace('remote').settings, createdAt: workspace('remote').createdAt })
+    stmt('DELETE FROM sync_outbox').run()
+    repo.enqueueInitialSyncSnapshot('test-account')
+    const snapshot = String(stmt("SELECT payload FROM sync_outbox WHERE kind = 'workspacePreferences'").get()?.['payload'])
+    expect(snapshot).not.toContain('environment')
+    expect(snapshot).not.toContain('rootPath')
+    expect(snapshot).not.toContain('private.internal')
+    restart()
+    expect(store.getConnectionProfile(connection.id)).toEqual(connection)
+    expect(() => store.removeConnectionProfile(connection.id)).toThrow('connection-in-use')
+    store.removeWorkspace('remote')
+    store.removeConnectionProfile(connection.id)
+    expect(store.getConnectionProfile(connection.id)).toBeUndefined()
+  })
+
+  it('does no writes for identical history and leaves unchanged search rows intact during edits', () => {
+    const session = repo.ensureSession({ id: 'delta-history', workspaceId: 'workspace', title: 'History' })
+    const messages: AgentMessage[] = Array.from({ length: 6 }, (_, index) => ({
+      id: `delta-${index}`, role: 'assistant', parts: [{ type: 'text', text: `needle${index}` }], createdAt: index + 1, schemaVersion: 1
+    }))
+    for (const message of messages) repo.commitMessage(session.id, message, 'owner-run')
+    const changes = (): unknown => stmt('SELECT total_changes() AS count').get()?.['count']
+    const before = changes()
+    repo.replaceHistory(session.id, structuredClone(messages))
+    expect(changes()).toBe(before)
+    db().exec('CREATE TEMP TABLE body_updates (id TEXT); CREATE TEMP TRIGGER track_body_updates AFTER UPDATE OF parts ON messages BEGIN INSERT INTO body_updates VALUES (new.id); END')
+    const indexRows = (): Map<string, number> => new Map(stmt('SELECT rowid, message_id FROM messages_fts WHERE session_id = ?').all(session.id).map((row) => [String(row['message_id']), Number(row['rowid'])]))
+    const indexedBefore = indexRows()
+    const edited = { ...messages[3]!, parts: [{ type: 'text' as const, text: 'replacementneedle' }] }
+    repo.replaceHistory(session.id, [messages[5]!, messages[0]!, edited, messages[2]!])
+    expect(stmt('SELECT id FROM body_updates').all()).toEqual([{ id: edited.id }])
+    expect(repo.getHistory(session.id).map((message) => message.id)).toEqual(['delta-5', 'delta-0', 'delta-3', 'delta-2'])
+    for (const id of ['delta-5', 'delta-0', 'delta-2']) expect(indexRows().get(id)).toBe(indexedBefore.get(id))
+    expect(repo.searchAll('needle1')).toEqual([])
+    expect(repo.searchAll('replacementneedle')[0]?.messageId).toBe(edited.id)
+    expect(repo.getSessionDetail(session.id)?.messageRuns).toEqual({ 'delta-5': 'owner-run', 'delta-0': 'owner-run', 'delta-3': 'owner-run', 'delta-2': 'owner-run' })
+    restart()
+    expect(repo.getHistory(session.id).map((message) => message.id)).toEqual(['delta-5', 'delta-0', 'delta-3', 'delta-2'])
+  })
+
+  it('rejects duplicate and foreign message ids before changing authoritative history', () => {
+    repo.ensureSession({ id: 'history-owner', workspaceId: 'workspace' })
+    repo.ensureSession({ id: 'foreign-owner', workspaceId: 'workspace' })
+    const message: AgentMessage = { id: 'owned', role: 'user', parts: [{ type: 'text', text: 'original' }], createdAt: 1, schemaVersion: 1 }
+    repo.commitMessage('history-owner', message)
+    repo.commitMessage('foreign-owner', { ...message, id: 'foreign' })
+    expect(() => repo.replaceHistory('history-owner', [message, message])).toThrow()
+    expect(() => repo.replaceHistory('history-owner', [{ ...message, id: 'foreign' }])).toThrow()
+    expect(repo.getHistory('history-owner')).toEqual([message])
+    repo.replaceHistory('history-owner', [])
+    expect(repo.getHistory('history-owner')).toEqual([])
+    expect(repo.searchAll('original').map((hit) => hit.sessionId)).toEqual(['foreign-owner'])
+  })
+
+  it('updates every search title only when the normalized session title changes', () => {
+    const session = repo.ensureSession({ id: 'title-cost', workspaceId: 'workspace', title: 'OriginalTitle' })
+    const updates = vi.spyOn(stmt('UPDATE messages_fts SET title = ? WHERE session_id = ?'), 'run')
+    const messages: AgentMessage[] = Array.from({ length: 20 }, (_, index) => ({
+      id: `title-cost-${index}`, role: 'assistant', parts: [{ type: 'text', text: 'searchable content' }], createdAt: index + 1, schemaVersion: 1
+    }))
+    for (const message of messages) repo.commitMessage(session.id, message)
+    repo.putSession({ ...repo.getSession(session.id)!, title: '  OriginalTitle  ' })
+    repo.replaceHistory(session.id, messages)
+    expect(updates).not.toHaveBeenCalled()
+    repo.renameSession(session.id, 'RenamedTitle')
+    expect(updates).toHaveBeenCalledTimes(1)
+    expect(repo.searchAll('OriginalTitle')).toEqual([])
+    expect(repo.searchAll('RenamedTitle')).toHaveLength(20)
+    updates.mockRestore()
+    restart()
+    expect(repo.searchAll('RenamedTitle')).toHaveLength(20)
+  })
+
   it('供应商 / 别名 / 工作区 / 设置 / kv 全部读得回来', () => {
     store.putProvider(provider('主', 0))
     store.putProvider(provider('备', 1))

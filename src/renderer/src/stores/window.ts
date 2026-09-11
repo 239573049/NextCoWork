@@ -15,12 +15,22 @@ import type { Bootstrap } from '../../../shared/domain/bootstrap'
 import type { FeatureKind, OuterTab, WindowKind } from '../../../shared/domain/tab'
 import { reorder } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
+import { isLocalEnvironment } from '../../../shared/domain/environment'
 import { ulid } from '../../../shared/util/id'
 import { DEFAULT_SETTINGS_PAGE, type SettingsPageId } from '../settings/nav'
 import { persistOuterTabs } from '../services/app'
 import { useTabsStore } from './tabs'
+import { cancelConnectionRequest, commitWorkspaceActivation, connectionErrorKey, prepareWorkspace, releaseWorkspaceActivation } from '../services/connections'
 
 interface WindowState {
+  workspaceTargets: Record<string, Workspace>
+  pendingActivation: { workspaceId: string; requestId: string } | null
+  activationApproval: boolean
+  activationError: string | null
+  updateWorkspaces: (workspaces: Workspace[]) => void
+  confirmActivation: (allowed: boolean) => void
+  cancelActivation: () => void
+  clearActivationError: () => void
   windowKind: WindowKind
   outer: OuterTab[]
   activeOuterId: string | null
@@ -32,7 +42,7 @@ interface WindowState {
    * 浏览器管理页不是一个可持久化的外层 Tab：打开它不能改变当前工作区，
    * 后台 Agent 也不能借此改动用户正在看的窗口布局。退出后继续显示原工作区。
    */
-  activeStandaloneFeature: 'browser' | 'skills' | null
+  activeStandaloneFeature: 'browser' | 'extensions' | null
   sidebarCollapsed: boolean
   /**
    * 外层 Tab 条右端的右侧工作台开关。当前值是 active workspace 的投影；
@@ -84,11 +94,11 @@ interface WindowState {
   maximized: boolean
 
   hydrate: (b: Bootstrap) => void
-  activate: (outerId: string) => void
-  openWorkspace: (workspaceId: string) => void
+  activate: (outerId: string) => Promise<boolean>
+  openWorkspace: (workspaceId: string) => Promise<boolean>
   openFeature: (feature: FeatureKind) => void
   closeStandaloneFeature: () => void
-  close: (outerId: string) => void
+  close: (outerId: string) => Promise<void>
   move: (from: number, to: number) => void
   toggleSidebar: () => void
   toggleRightPanel: () => void
@@ -145,6 +155,57 @@ const BOTTOM_PANEL = { def: 220, min: 140, max: 640 } as const
 const clamp = (px: number, r: { min: number; max: number }): number => Math.round(Math.min(r.max, Math.max(r.min, px)))
 
 export const useWindowStore = create<WindowState>((set, get) => {
+  let approval: ((allowed: boolean) => void) | undefined
+  let activeTicket: string | undefined
+  const releaseActive = (): void => {
+    if (activeTicket) void releaseWorkspaceActivation(activeTicket).catch(() => {})
+    activeTicket = undefined
+  }
+  const cancelPending = (): void => {
+    const pending = get().pendingActivation
+    approval?.(false)
+    approval = undefined
+    if (pending) void cancelConnectionRequest(pending.requestId).catch(() => {})
+    set({ pendingActivation: null, activationApproval: false })
+  }
+  const needsPrepare = (workspaceId: string): boolean => {
+    const workspace = get().workspaceTargets[workspaceId]
+    return workspace === undefined || !isLocalEnvironment(workspace.environment)
+  }
+  const verify = async (workspaceId: string, commit: () => boolean): Promise<boolean> => {
+    cancelPending()
+    const requestId = ulid()
+    set({ pendingActivation: { workspaceId, requestId }, activationError: null })
+    try {
+      let ready
+      try { ready = await prepareWorkspace({ workspaceId, requestId }) } catch (error) {
+        if (get().pendingActivation?.requestId !== requestId) return false
+        if (connectionErrorKey(error) !== 'environment.error.approval-required') throw error
+        set({ activationApproval: true })
+        const allowed = await new Promise<boolean>((resolve) => { approval = resolve })
+        if (!allowed || get().pendingActivation?.requestId !== requestId) return false
+        set({ activationApproval: false })
+        ready = await prepareWorkspace({ workspaceId, requestId, allowLocalCommands: true })
+      }
+      if (get().pendingActivation?.requestId !== requestId) return false
+      await commitWorkspaceActivation(ready.ticket, requestId)
+      if (get().pendingActivation?.requestId !== requestId || !commit()) {
+        void releaseWorkspaceActivation(ready.ticket).catch(() => {})
+        return false
+      }
+      releaseActive()
+      activeTicket = ready.ticket
+      return true
+    } catch (error) {
+      if (get().pendingActivation?.requestId === requestId) set({ activationError: connectionErrorKey(error) })
+      return false
+    } finally {
+      if (get().pendingActivation?.requestId === requestId) {
+        set({ pendingActivation: null, activationApproval: false })
+        approval = undefined
+      }
+    }
+  }
   /** 每次结构性变更都落盘。主进程侧防抖 500ms,这里不用自己攒。 */
   const persist = (outer: OuterTab[], activeOuterId: string | null): void => {
     const { windowKind, rightPanelWidth, bottomPanelHeight } = get()
@@ -157,6 +218,14 @@ export const useWindowStore = create<WindowState>((set, get) => {
   }
 
   return {
+    workspaceTargets: {},
+    pendingActivation: null,
+    activationApproval: false,
+    activationError: null,
+    updateWorkspaces: (workspaces) => set({ workspaceTargets: Object.fromEntries(workspaces.map((workspace) => [workspace.id, workspace])) }),
+    confirmActivation: (allowed) => { if (allowed) approval?.(true); else cancelPending() },
+    cancelActivation: cancelPending,
+    clearActivationError: () => set({ activationError: null }),
     windowKind: 'main',
     outer: [],
     activeOuterId: null,
@@ -173,24 +242,39 @@ export const useWindowStore = create<WindowState>((set, get) => {
     maximized: false,
 
     hydrate(b) {
+      cancelPending()
+      releaseActive()
+      get().updateWorkspaces(b.workspaces)
       /*
-        ★ 过滤不再属于外层 Tab 的功能。设置是模态浮层；浏览器是左侧入口切换出的
+        ★ 过滤不再属于外层 Tab 的功能。设置是模态浮层；浏览器和扩展是左侧入口切换出的
         主内容模式。旧版本可能已经把它们写进 kv，升级后必须在恢复边界清掉，
         否则用户仍会看见一个无法由当前交互创建、却会一直恢复出来的幽灵 Tab。
+
+        ★ `'skills'` 是 `'extensions'` 的**旧名**（扩展面板把 Skill 管理并了进去）。
+        它必须继续留在这张表里：老库里那条记录写的还是 `skills`，而这个值已经不在
+        `FeatureKind` 里了 —— 不过滤的话它既取不到图标也匹配不到视图，正好变成上面
+        说的那种幽灵 Tab。表的类型故意写 `string[]` 而不是 `FeatureKind[]`，
+        好让这个已经退役的值还能写在这儿。
       */
+      const NON_TAB_FEATURES: readonly string[] = ['settings', 'browser', 'extensions', 'skills']
       const persisted = b.tabState.outer.filter(
-        (t) => !(t.kind === 'feature' && (t.ref.feature === 'settings' || t.ref.feature === 'browser' || t.ref.feature === 'skills'))
+        (t) => !(t.kind === 'feature' && NON_TAB_FEATURES.includes(t.ref.feature))
       )
       const outer = persisted.length > 0 ? persisted : initialTabs(b.workspaces)
       const requestedActiveId = b.tabState.activeOuterId
-      const activeOuterId = outer.some((tab) => tab.id === requestedActiveId)
+      const desiredActiveId = outer.some((tab) => tab.id === requestedActiveId)
         ? requestedActiveId
         : (outer[0]?.id ?? null)
+      const desiredTab = outer.find((tab) => tab.id === desiredActiveId)
+      const waitForRemote = desiredTab?.kind === 'workspace' && needsPrepare(desiredTab.ref.workspaceId)
+      const activeOuterId = waitForRemote
+        ? outer.find((tab) => tab.kind === 'workspace' && !needsPrepare(tab.ref.workspaceId))?.id ?? null : desiredActiveId
+      const workspaceId = firstWorkspaceId(outer, activeOuterId)
       set({
         windowKind: b.windowKind,
         outer,
         activeOuterId,
-        activeWorkspaceId: firstWorkspaceId(outer, activeOuterId),
+        activeWorkspaceId: workspaceId && !needsPrepare(workspaceId) ? workspaceId : null,
         activeStandaloneFeature: null,
         rightPanelWidth: clamp(b.tabState.rightPanelWidth ?? RIGHT_PANEL.def, RIGHT_PANEL),
         bottomPanelHeight: clamp(b.tabState.bottomPanelHeight ?? BOTTOM_PANEL.def, BOTTOM_PANEL),
@@ -199,13 +283,16 @@ export const useWindowStore = create<WindowState>((set, get) => {
       })
       // 自动开出来的这一个也要落盘,否则它每次启动都换一个新 id。
       // 迁移掉旧功能 Tab 时也立即回写，避免每次启动都重复修复同一份旧布局。
-      if ((persisted.length === 0 && outer.length > 0) || persisted.length !== b.tabState.outer.length)
+      if (!waitForRemote && ((persisted.length === 0 && outer.length > 0) || persisted.length !== b.tabState.outer.length))
         persist(outer, activeOuterId)
+      if (waitForRemote && desiredActiveId) void get().activate(desiredActiveId)
     },
 
-    activate(outerId) {
+    async activate(outerId) {
       const tab = get().outer.find((t) => t.id === outerId)
-      if (tab === undefined) return
+      if (tab === undefined) return false
+      const commit = (): boolean => {
+      if (!get().outer.some((current) => current.id === outerId)) return false
       set({
         activeOuterId: outerId,
         activeStandaloneFeature: null,
@@ -219,14 +306,20 @@ export const useWindowStore = create<WindowState>((set, get) => {
           : {})
       })
       persist(get().outer, outerId)
+      return true
+      }
+      if (tab.kind === 'workspace' && needsPrepare(tab.ref.workspaceId)) return verify(tab.ref.workspaceId, commit)
+      cancelPending()
+      if (tab.kind === 'workspace') releaseActive()
+      return commit()
     },
 
-    openWorkspace(workspaceId) {
+    async openWorkspace(workspaceId) {
       const existing = get().outer.find((t) => t.kind === 'workspace' && t.ref.workspaceId === workspaceId)
       if (existing !== undefined) {
-        get().activate(existing.id)
-        return
+        return get().activate(existing.id)
       }
+      const commit = (): boolean => {
       const tab: OuterTab = {
         id: ulid(),
         kind: 'workspace',
@@ -242,17 +335,24 @@ export const useWindowStore = create<WindowState>((set, get) => {
         bottomPanelOpen: get().bottomPanelOpenByWorkspace[workspaceId] ?? false
       })
       persist(outer, tab.id)
+      return true
+      }
+      if (needsPrepare(workspaceId)) return verify(workspaceId, commit)
+      cancelPending()
+      releaseActive()
+      return commit()
     },
 
     openFeature(feature) {
+      cancelPending()
       // 设置是模态浮层,不是 Tab —— 改道,不建 Tab、不落盘(见 hydrate 里的过滤)
       if (feature === 'settings') {
         get().openSettings()
         return
       }
-      // 浏览器入口切换整块主内容区。它不是文档式工作内容，因此既不创建外层 Tab，
+      // 浏览器和扩展入口切换整块主内容区。它们不是文档式工作内容，因此既不创建外层 Tab，
       // 也不改变/持久化用户原本所在的工作区；关闭后自然回到原处。
-      if (feature === 'browser' || feature === 'skills') {
+      if (feature === 'browser' || feature === 'extensions') {
         set({ activeStandaloneFeature: feature })
         return
       }
@@ -271,7 +371,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
       set({ activeStandaloneFeature: null })
     },
 
-    close(outerId) {
+    async close(outerId) {
       const { outer, activeOuterId } = get()
       const idx = outer.findIndex((t) => t.id === outerId)
       if (idx < 0) return
@@ -280,6 +380,8 @@ export const useWindowStore = create<WindowState>((set, get) => {
       // 关掉的是当前 Tab 时,焦点给右邻;没有右邻给左邻 —— 浏览器的习惯
       const nextActive = activeOuterId === outerId ? (next[idx]?.id ?? next[idx - 1]?.id ?? null) : activeOuterId
       const nextWorkspaceId = firstWorkspaceId(next, nextActive)
+      const commit = (): boolean => {
+      if (get().outer !== outer || get().activeOuterId !== activeOuterId) return false
       set({
         outer: next,
         activeOuterId: nextActive,
@@ -300,9 +402,19 @@ export const useWindowStore = create<WindowState>((set, get) => {
         `releaseSession` 会拒绝放掉那些会话。
       */
       if (closed?.kind === 'workspace') useTabsStore.getState().forget(closed.ref.workspaceId)
+      return true
+      }
+      if (nextWorkspaceId && needsPrepare(nextWorkspaceId) && (activeOuterId === outerId || nextWorkspaceId !== get().activeWorkspaceId)) {
+        await verify(nextWorkspaceId, commit)
+      } else {
+        cancelPending()
+        if (!nextWorkspaceId || !needsPrepare(nextWorkspaceId)) releaseActive()
+        commit()
+      }
     },
 
     move(from, to) {
+      cancelPending()
       const outer = reorder(get().outer, from, to)
       set({ outer })
       persist(outer, get().activeOuterId)

@@ -253,6 +253,29 @@ export function normalizeDockState(raw: WorkspaceDockState, tabs: readonly Inner
       collect(node.second)
     }
     collect(root)
+    /*
+      A right/bottom orphan arriving before any group exists for that pane
+      (e.g. the very first Agent browser tab in a fresh workspace) must get a
+      real split, not just fall back to the main group below. Otherwise the
+      tab renders inside the main pane while still claiming `pane: 'right'`,
+      and `toggleDockEdge` (AppShell) sees that claim and assumes the right
+      panel already has content, so its open/close toggle silently no-ops
+      until the tab is closed.
+    */
+    for (const pane of ['right', 'bottom'] as const) {
+      if (paneGroups.some((entry) => entry.pane === pane)) continue
+      if (!orphaned.some((tab) => paneOf(tab) === pane)) continue
+      const edgeGroup: DockNode = { type: 'group', id: ulid(), tabIds: [], activeTabId: null }
+      finalRoot = {
+        type: 'split',
+        id: ulid(),
+        direction: pane === 'right' ? 'horizontal' : 'vertical',
+        ratio: 0.72,
+        first: finalRoot,
+        second: edgeGroup
+      }
+      paneGroups.push({ id: edgeGroup.id, pane })
+    }
     for (const tab of orphaned) {
       const target = paneGroups.find((entry) => entry.pane === paneOf(tab))?.id ?? first.id
       finalRoot = mapNode(finalRoot, target, (node) =>

@@ -11,7 +11,13 @@ import {
   emptyLocalSettings, normalizeLocalSettings,
   type LocalSettings, type PermissionRuleBucket
 } from '../../shared/domain/local-settings'
-import type { KernelFs, Logger } from './host'
+import type { KernelFs, Logger, WorkspacePaths } from './host'
+import { EnvironmentError } from '../../shared/domain/environment'
+
+interface SettingsScope { path?: WorkspacePaths; namespace?: string }
+async function scopedPath(root: string, scope: SettingsScope): Promise<string> {
+  return scope.path ? scope.path.resolveWithin(root, `${LOCAL_SETTINGS_DIRNAME}/${LOCAL_SETTINGS_FILENAME}`) : localSettingsPath(root)
+}
 
 export function localSettingsPath(workspaceRoot: string): string {
   return join(workspaceRoot, LOCAL_SETTINGS_DIRNAME, LOCAL_SETTINGS_FILENAME)
@@ -40,34 +46,38 @@ export function clearLocalSettingsCache(workspaceRoot?: string): void {
   else cache.delete(localSettingsPath(workspaceRoot))
 }
 
-async function fileKey(fs: KernelFs, path: string): Promise<string> {
+async function fileKey(fs: KernelFs, path: string, strict = false): Promise<string> {
   try {
     const stat = await fs.stat(path)
     return `${String(stat.mtimeMs)}:${String(stat.size)}`
-  } catch {
+  } catch (error) {
+    if (error instanceof EnvironmentError) throw error
+    if (strict && !['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException)?.code))) throw error
     // 文件不存在 = 这个工作区没有任何本地规则,是正常状态,不是错误。
     return MISSING
   }
 }
 
-export async function readLocalSettings(fs: KernelFs, workspaceRoot: string, logger?: Logger): Promise<LocalSettings> {
+export async function readLocalSettings(fs: KernelFs, workspaceRoot: string, logger?: Logger, scope: SettingsScope = {}): Promise<LocalSettings> {
   if (workspaceRoot === '') return emptyLocalSettings()
-  const path = localSettingsPath(workspaceRoot)
-  const key = await fileKey(fs, path)
-  const hit = cache.get(path)
+  const path = await scopedPath(workspaceRoot, scope)
+  const cacheKey = scope.namespace ? JSON.stringify([scope.namespace, path]) : path
+  const key = await fileKey(fs, path, scope.namespace !== undefined)
+  const hit = scope.namespace ? undefined : cache.get(cacheKey)
   if (hit !== undefined && hit.key === key) return hit.settings
 
   let settings = emptyLocalSettings()
   if (key !== MISSING) {
     try {
       settings = normalizeLocalSettings(JSON.parse(await fs.readFile(path)) as unknown)
-    } catch {
+    } catch (error) {
+      if (error instanceof EnvironmentError || scope.namespace !== undefined) throw error
       // 手改坏了的文件按「没有规则」处理:这条路径上唯一比「少一条授权」更糟的结局,
       // 就是让一个 JSON 语法错误拦下用户的整轮运行。
       logger?.warn(`[local-settings] ${path} 不是有效的 JSON,本次按「没有本地权限规则」处理`)
     }
   }
-  cache.set(path, { key, settings })
+  cache.set(cacheKey, { key, settings })
   return settings
 }
 
@@ -123,12 +133,13 @@ async function writeRule(
   return { ok: true, rule, path, added: true }
 }
 
-export function addLocalPermissionRule(
-  fs: KernelFs, workspaceRoot: string, bucket: PermissionRuleBucket, rule: string, logger?: Logger
+export async function addLocalPermissionRule(
+  fs: KernelFs, workspaceRoot: string, bucket: PermissionRuleBucket, rule: string, logger?: Logger, scope: SettingsScope = {}
 ): Promise<AddRuleResult> {
   if (workspaceRoot === '') return Promise.resolve({ ok: false, reason: 'no-workspace' })
-  const path = localSettingsPath(workspaceRoot)
-  const queued = (writes.get(path) ?? Promise.resolve()).then(() => writeRule(fs, path, bucket, rule, logger))
-  writes.set(path, queued.catch(() => undefined))
+  const path = await scopedPath(workspaceRoot, scope)
+  const key = scope.namespace ? JSON.stringify([scope.namespace, path]) : path
+  const queued = (writes.get(key) ?? Promise.resolve()).then(() => writeRule(fs, path, bucket, rule, logger))
+  writes.set(key, queued.catch(() => undefined))
   return queued
 }

@@ -5,7 +5,7 @@
 import { dirname, join } from 'node:path'
 import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { app, shell, BrowserWindow, nativeImage } from 'electron'
+import { app, shell, BrowserWindow, nativeImage, powerMonitor } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
 import { closeDatabase, defaultDatabaseDirectory, DB_FILENAME, openDatabase } from './db'
@@ -14,7 +14,7 @@ import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } from './ipc'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
-import { initRuntime, shutdownMcp, shutdownSessionTitles } from './runtime'
+import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
 import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
 import { SKILLS_DIR } from './kernel/skill/load'
@@ -44,6 +44,7 @@ installUserAgent(app.getVersion())
 // 才放行真正的销毁;不然每个窗口都会在 `before-quit` 之后各自 preventDefault
 // 一次,进程永远退不掉。
 let isQuitting = false
+let shutdownComplete = false
 
 /**
  * 数据根 —— userData、SQLite 主库、附件、skills/agents 文件树全部从这里派生。
@@ -355,6 +356,7 @@ void app.whenReady().then(() => {
     child.once('ready-to-show', () => child.focus())
   })
   registerIpc()
+  powerMonitor.on('suspend', () => { void shutdownEnvironments() })
 
   updateService.configure()
   if (app.isPackaged) {
@@ -396,20 +398,23 @@ app.on('window-all-closed', () => {
 // Tab 布局是防抖 500ms 落盘的(方案 §9)。退出前不 flush,
 // 用户最后一次拖出来的顺序就丢了 —— 而那正是他最可能记得的一次操作。
 // 顺带停掉所有在跑的 run:它们的定时器/上游流会拖住退出。
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (shutdownComplete) return
+  event.preventDefault()
+  if (isQuitting) return
   isQuitting = true
   destroyTray()
   flushPendingPersists()
   shutdownRuns()
   shutdownSessionTitles()
   shutdownTerminals()
-  /*
-    MCP 的 stdio 传输背后是**真的子进程**。不关的话它们会活过主进程 ——
-    表现是退出应用之后活动监视器里还挂着几个 node,而下次启动又会各起一份。
-    不 await:`before-quit` 是同步的,而 `shutdown()` 里每一步都自带兜底。
-  */
-  void shutdownMcp()
-  // 顺序要紧:上面那次 flush 是**经 store 写库的**,先关库就等于把它丢了。
-  // 关库会顺手做一次 WAL checkpoint,把 -wal 并回主文件。
-  closeDatabase()
+  const finish = (): void => {
+    if (shutdownComplete) return
+    shutdownComplete = true
+    clearTimeout(timer)
+    closeDatabase({ final: true })
+    app.quit()
+  }
+  const timer = setTimeout(finish, 6000)
+  void Promise.allSettled([shutdownMcp(), shutdownEnvironments()]).then(finish)
 })

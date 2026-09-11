@@ -59,13 +59,15 @@ export default function App(): React.JSX.Element {
       useThemeProfiles.setState({ profiles })
       useImageThemes.setState({ uploaded: images })
     })
-    const offWorkspaces = on('workspace:changed', ({ workspaces: ws }) => setWorkspaces(ws))
-    const offSessions = on('sessions:changed', ({ workspaceId, renamed }) => {
+    const offWorkspaces = on('workspace:changed', ({ workspaces: ws }) => { setWorkspaces(ws); useWindowStore.getState().updateWorkspaces(ws) })
+    const offSessions = on('sessions:changed', (change) => {
+      const { workspaceId, renamed } = change
       if (workspaceId !== undefined && renamed !== undefined) {
         syncSessionTitle(workspaceId, renamed.sessionId, renamed.title)
         return
       }
-      void refreshHydratedSessions()
+      if (change.kind === 'deleted') useTabsStore.getState().removeSessions(change)
+      void refreshHydratedSessions(change)
     })
     const offBrowser = on('browser:changed', (change) => {
       syncBrowserTabs(change.workspaceId, change.tabs)
@@ -104,9 +106,8 @@ export default function App(): React.JSX.Element {
         const raw = window.location.hash.match(/^#\/([^/]+)(?:\/([^/]+))?$/)
         if (raw !== null) {
           const workspaceId = decodeURIComponent(raw[1]!)
-          openWorkspace(workspaceId)
           const sessionId = raw[2] === undefined ? null : decodeURIComponent(raw[2])
-          if (sessionId !== null) openSession(workspaceId, sessionId)
+          void openWorkspace(workspaceId).then((opened) => { if (opened && sessionId !== null) openSession(workspaceId, sessionId) })
         }
       })
       .catch((e: unknown) => setFatal(e instanceof Error ? e.message : String(e)))

@@ -12,11 +12,14 @@ import type { DirListing, FileEntry } from '../../shared/domain/file-tree'
 import { DIR_LISTING_LIMIT, sortEntries } from '../../shared/domain/file-tree'
 import type { Workspace, WorkspaceSettings } from '../../shared/domain/workspace'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../shared/domain/workspace'
+import { isLocalEnvironment } from '../../shared/domain/environment'
 import { prefixedId } from '../../shared/util/id'
 import { resolveAnywhere } from '../kernel/tool/path-guard'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { IpcError } from './errors'
+import { getWorkspaceEnvironment } from '../runtime'
+import { EnvironmentError, missingPath } from '../environment/errors'
 
 function announce(): void {
   windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
@@ -38,7 +41,7 @@ export async function pickWorkspace(): Promise<Workspace | null> {
   //   路径围栏后面就要面对两个都"正确"的根(方案 §9)
   const rootPath = realpathSync.native(picked)
 
-  const existing = store.listWorkspaces().find((w) => w.rootPath === rootPath)
+  const existing = store.listWorkspaces().find((w) => isLocalEnvironment(w.environment) && w.rootPath === rootPath)
   if (existing) {
     const touched = store.putWorkspace({ ...existing, lastOpenedAt: Date.now(), unavailable: false })
     announce()
@@ -100,6 +103,7 @@ export function closeWorkspace(id: string): void {
 export function listDir(req: { workspaceId: string; path: string }): DirListing {
   const ws = store.getWorkspace(req.workspaceId)
   if (!ws) throw new IpcError('unknown', `工作区不存在: ${req.workspaceId}`)
+  if (!isLocalEnvironment(ws.environment)) throw new EnvironmentError('disconnected')
 
   const dir = resolveAnywhere(ws.rootPath, req.path).abs
 
@@ -131,4 +135,22 @@ export function listDir(req: { workspaceId: string; path: string }): DirListing 
   }
 
   return { path: req.path, entries: sortEntries(entries), truncated }
+}
+
+export async function listWorkspaceDir(req: { workspaceId: string; path: string }): Promise<DirListing> {
+  const workspace = store.getWorkspace(req.workspaceId)
+  if (!workspace || isLocalEnvironment(workspace.environment)) return listDir(req)
+  const environment = getWorkspaceEnvironment(req.workspaceId)
+  const target = (await environment.path.resolve(environment.rootPath, req.path)).abs
+  const raw = await environment.fs.readDir(target)
+  const entries: FileEntry[] = []
+  for (const entry of raw.slice(0, DIR_LISTING_LIMIT)) {
+    let stat: { size: number; mtimeMs: number } | undefined
+    try { stat = await environment.fs.stat(environment.path.join(target, entry.name)) } catch (error) {
+      if (!missingPath(error) && (error as { code?: string })?.code !== 'EACCES') throw error
+    }
+    entries.push({ name: entry.name, path: req.path ? `${req.path.replaceAll('\\', '/').replace(/\/$/, '')}/${entry.name}` : entry.name,
+      kind: entry.isDir ? 'dir' : 'file', hidden: entry.name.startsWith('.'), ...(stat ? { size: stat.size, mtime: stat.mtimeMs } : {}) })
+  }
+  return { path: req.path, entries: sortEntries(entries), truncated: raw.length > DIR_LISTING_LIMIT }
 }

@@ -5,9 +5,11 @@ import { sessionStore } from "../../stores/session";
 import { useTabsStore } from "../../stores/tabs";
 import { useWindowStore } from "../../stores/window";
 
-/** Persist the draft before revealing the chat, which is unmounted in Skills mode. */
-export function useSkillInWorkspace(workspaceId: string, name: string): void {
-  if (!SKILL_NAME_RE.test(name)) return;
+export async function useSkillInWorkspace(workspaceId: string, name: string): Promise<boolean> {
+  if (!SKILL_NAME_RE.test(name)) return false;
+  if (!(await useWindowStore.getState().openWorkspace(workspaceId))) return false;
+  const window = useWindowStore.getState();
+  if (window.activeWorkspaceId !== workspaceId || window.pendingActivation !== null || window.activeStandaloneFeature !== null) return false;
   const tabs = useTabsStore.getState();
   let state = tabs.stateOf(workspaceId);
   let active = state.tabs.find((tab) => tab.id === state.activeTabId);
@@ -16,7 +18,7 @@ export function useSkillInWorkspace(workspaceId: string, name: string): void {
     state = tabs.stateOf(workspaceId);
     active = state.tabs.find((tab) => tab.id === state.activeTabId);
   }
-  if (active?.kind !== "chat") return;
+  if (active?.kind !== "chat") return false;
   const session = sessionStore(chatKey(active)).getState();
   const draft =
     session.draft === "" || /\s$/.test(session.draft)
@@ -25,5 +27,5 @@ export function useSkillInWorkspace(workspaceId: string, name: string): void {
   session.setDraft(
     insertSkill(draft, { start: draft.length, end: draft.length }, name).text,
   );
-  useWindowStore.getState().openWorkspace(workspaceId);
+  return true;
 }

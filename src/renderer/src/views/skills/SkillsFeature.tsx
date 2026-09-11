@@ -44,8 +44,14 @@ type StatusFilter = "all" | "active" | "enabled" | "inactive" | "untriggered";
 
 export function SkillsFeature({
   onClose,
+  chromeless = false,
 }: {
   onClose?: () => void;
+  /**
+   * 嵌在扩展面板里时为 true —— 去掉自己的返回按钮和标题，只留右侧那三颗
+   * Skill 专属的操作按钮。外层已经画了同样一条 header，不去掉就是两条。
+   */
+  chromeless?: boolean;
 }): ReactNode {
   const { t } = useI18n();
   const skillError = (error: unknown): string => {
@@ -257,16 +263,20 @@ export function SkillsFeature({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-canvas">
       <header className="app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4">
-        <IconButton
-          label={t("skills.back")}
-          size={28}
-          width={40}
-          onClick={onClose}
-          className="rounded-pill bg-tint"
-        >
-          <ArrowLeft size={15} />
-        </IconButton>
-        <h1 className="text-[14px] font-medium text-fg">{t("skills.title")}</h1>
+        {!chromeless && (
+          <>
+            <IconButton
+              label={t("skills.back")}
+              size={28}
+              width={40}
+              onClick={onClose}
+              className="rounded-pill bg-tint"
+            >
+              <ArrowLeft size={15} />
+            </IconButton>
+            <h1 className="text-[14px] font-medium text-fg">{t("skills.title")}</h1>
+          </>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <Button
             size="sm"
@@ -511,9 +521,11 @@ export function SkillsFeature({
                     <Button
                       variant="accent"
                       onClick={() => {
-                        useSkillInWorkspace(workspaceId, selected.name);
-                        setSelected(null);
-                        onClose?.();
+                        void useSkillInWorkspace(workspaceId, selected.name).then((opened) => {
+                          if (!opened) return;
+                          setSelected(null);
+                          onClose?.();
+                        });
                       }}
                     >
                       {t("skills.use")}
@@ -589,10 +601,10 @@ export function SkillsFeature({
                 </div>
               )}
             </div>
-            <div className="flex items-center gap-2 text-success">
+            {selected.unavailableReason ? <p role="status" className="text-danger">{t('ssh.skillClientAssets')}</p> : <div className="flex items-center gap-2 text-success">
               <ShieldCheck size={14} />
               {t("skills.healthOk")}
-            </div>
+            </div>}
             {selected.diagnostics && selected.diagnostics.length > 0 && (
               <div className="rounded-[8px] border border-danger/30 bg-danger/5 p-2 text-danger">
                 {selected.diagnostics.join(" · ")}
@@ -736,7 +748,7 @@ function MineDashboard({
               <p className="mt-1 truncate text-[11px] text-fg-muted">{item.description}</p>
             </button>
             <span className="inline-flex w-fit items-center gap-1 rounded-[6px] bg-tint px-2 py-1 text-[11px] text-fg-muted"><Folder size={11} />{item.scope === "project" ? t("skills.project") : t("skills.global")}</span>
-            <div className="flex items-center gap-2"><Toggle checked={item.activeInWorkspace} onChange={() => onWorkspace(item)} disabled={busy !== null} label={t("skills.workspaceToggle")} /><span className="text-[11px] text-fg-muted">{item.activeInWorkspace ? t("skills.active") : t("skills.inactive")}</span></div>
+            <div className="flex items-center gap-2"><Toggle checked={item.activeInWorkspace} onChange={() => onWorkspace(item)} disabled={busy !== null || !!item.unavailableReason} label={t("skills.workspaceToggle")} /><span className="text-[11px] text-fg-muted">{item.unavailableReason ? t('ssh.skillUnavailable') : item.activeInWorkspace ? t("skills.active") : t("skills.inactive")}</span></div>
             <span className="text-[13px] font-medium tabular-nums text-fg">{item.usageCount ?? 0}</span>
             <span className="text-[11px] text-fg-faint">{item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleDateString() : t("skills.neverUsed")}</span>
             <div className="flex items-center justify-end gap-1"><IconButton label={t("skills.openDetails")} size={26} onClick={() => onDetails(item)}><Pencil size={12} /></IconButton><Toggle checked={item.globalEnabled} onChange={() => onGlobal(item)} disabled={busy !== null} label={t("skills.globalToggle")} /></div>

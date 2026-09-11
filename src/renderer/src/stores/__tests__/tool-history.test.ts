@@ -11,6 +11,7 @@ vi.mock('../../services/app', () => ({ getSessionInput: vi.fn(async () => null),
 vi.mock('../../services/sessions', () => ({ getSession: vi.fn() }))
 
 import { attachRun } from '../../services/agent'
+import { getSessionInput } from '../../services/app'
 import { getSession } from '../../services/sessions'
 import { adoptActiveRuns, refreshHydratedSessions, releaseSession, sessionStore } from '../session'
 
@@ -73,6 +74,137 @@ describe('tool results after history refresh', () => {
     vi.mocked(getSession).mockResolvedValue(detail([]))
     await refreshHydratedSessions()
     expect(sessionStore(reference.sessionId).getState().transcript.tools).toEqual({})
+  })
+
+  it('does not reload unrelated histories for metadata or deletion events', async () => {
+    const store = sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    const before = store.getState().transcript
+    vi.mocked(getSession).mockClear()
+    await refreshHydratedSessions({ kind: 'metadata', sessionIds: [reference.sessionId] })
+    await refreshHydratedSessions({ kind: 'deleted', sessionIds: ['another-workspace-session'] })
+    expect(getSession).not.toHaveBeenCalled()
+    expect(store.getState().transcript).toBe(before)
+  })
+
+  it('reloads only affected cached sessions and ignores unopened histories', async () => {
+    sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    vi.mocked(getSession).mockClear()
+    await refreshHydratedSessions({ kind: 'history', sessionIds: ['unopened', reference.sessionId, reference.sessionId] })
+    expect(getSession).toHaveBeenCalledTimes(1)
+    expect(getSession).toHaveBeenCalledWith(reference.sessionId)
+  })
+
+  it('keeps another workspace snapshot unchanged for message events but refreshes both on reset', async () => {
+    const otherDetail = detail()
+    otherDetail.session = { ...otherDetail.session, id: 'other-workspace-history', workspaceId: 'other-workspace' }
+    vi.mocked(getSession).mockImplementation(async (sessionId) => sessionId === otherDetail.session.id ? otherDetail : detail())
+    sessionStore(reference.sessionId)
+    const other = sessionStore(otherDetail.session.id)
+    try {
+      await vi.waitFor(checkResults)
+      await vi.waitFor(() => expect(other.getState().transcript.messages).toEqual(history))
+      const snapshot = other.getState().transcript
+      vi.mocked(getSession).mockClear()
+      await refreshHydratedSessions({ kind: 'messages', workspaceId: reference.workspaceId, sessionIds: [reference.sessionId] })
+      expect(getSession).toHaveBeenCalledTimes(1)
+      expect(getSession).toHaveBeenCalledWith(reference.sessionId)
+      expect(other.getState().transcript).toBe(snapshot)
+      vi.mocked(getSession).mockClear()
+      await refreshHydratedSessions({ kind: 'reset' })
+      expect(getSession).toHaveBeenCalledTimes(2)
+      expect(getSession).toHaveBeenCalledWith(otherDetail.session.id)
+    } finally {
+      releaseSession(otherDetail.session.id)
+    }
+  })
+
+  it('does not invalidate a locally active run even if a stale deletion arrives', async () => {
+    const store = sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    store.setState({ activeRunId: reference.runId })
+    const snapshot = store.getState().transcript
+    vi.mocked(getSession).mockClear()
+    try {
+      await refreshHydratedSessions({ kind: 'messages', sessionIds: [reference.sessionId] })
+      await refreshHydratedSessions({ kind: 'history', sessionIds: [reference.sessionId] })
+      await refreshHydratedSessions({ kind: 'deleted', sessionIds: [reference.sessionId] })
+      await refreshHydratedSessions({ kind: 'reset' })
+      expect(getSession).not.toHaveBeenCalled()
+      expect(store.getState().transcript).toBe(snapshot)
+      expect(store.getState().activeRunId).toBe(reference.runId)
+    } finally {
+      store.setState({ activeRunId: null })
+    }
+  })
+
+  it('discards a late history response after deletion without rehydrating the deleted id', async () => {
+    const store = sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    let resolve!: (value: SessionDetail) => void
+    vi.mocked(getSession).mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    const pending = refreshHydratedSessions({ kind: 'history', sessionIds: [reference.sessionId] })
+    await refreshHydratedSessions({ kind: 'deleted', sessionIds: [reference.sessionId] })
+    resolve(detail())
+    await pending
+    expect(store.getState().transcript.messages).toEqual([])
+    const calls = vi.mocked(getSession).mock.calls.length
+    releaseSession(reference.sessionId)
+    sessionStore(reference.sessionId)
+    expect(getSession).toHaveBeenCalledTimes(calls)
+    await refreshHydratedSessions({ kind: 'reset' })
+    checkResults()
+  })
+
+  it('coalesces invalidations during a read and applies only the trailing snapshot', async () => {
+    const store = sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    const before = store.getState().transcript
+    let resolve!: (value: SessionDetail) => void
+    vi.mocked(getSession).mockClear()
+    vi.mocked(getSession).mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    vi.mocked(getSession).mockResolvedValueOnce(detail([]))
+    const first = refreshHydratedSessions({ kind: 'history', sessionIds: [reference.sessionId] })
+    const second = refreshHydratedSessions({ kind: 'history', sessionIds: [reference.sessionId] })
+    const third = refreshHydratedSessions({ kind: 'history', sessionIds: [reference.sessionId] })
+    expect(getSession).toHaveBeenCalledTimes(1)
+    expect(store.getState().transcript).toBe(before)
+    resolve(detail())
+    await Promise.all([first, second, third])
+    expect(getSession).toHaveBeenCalledTimes(2)
+    expect(store.getState().transcript.messages).toEqual([])
+  })
+
+  it('does not restore a deleted draft into a newly created cache with the same id', async () => {
+    let resolve!: (value: Awaited<ReturnType<typeof getSessionInput>>) => void
+    const pending = new Promise<Awaited<ReturnType<typeof getSessionInput>>>((done) => { resolve = done })
+    vi.mocked(getSessionInput).mockReturnValueOnce(pending)
+    const previous = sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    previous.setState({ draft: 'Local draft' })
+    await refreshHydratedSessions({ kind: 'deleted', sessionIds: [reference.sessionId] })
+    expect(previous.getState().draft).toBe('')
+    releaseSession(reference.sessionId)
+    const replacement = sessionStore(reference.sessionId)
+    resolve({ v: 1, draft: 'Deleted draft', queued: [], savedAt: 1 })
+    await pending
+    expect(replacement.getState().draft).toBe('')
+    await refreshHydratedSessions({ kind: 'reset' })
+  })
+
+  it('does not deliver a released store snapshot into a new store with the same id', async () => {
+    sessionStore(reference.sessionId)
+    await vi.waitFor(checkResults)
+    let resolve!: (value: SessionDetail) => void
+    vi.mocked(getSession).mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    const pending = refreshHydratedSessions()
+    releaseSession(reference.sessionId)
+    vi.mocked(getSession).mockResolvedValue(detail([]))
+    const replacement = sessionStore(reference.sessionId)
+    resolve(detail())
+    await pending
+    expect(replacement.getState().transcript.messages).toEqual([])
   })
 
   it('a refresh response cannot overwrite a newer active run', async () => {

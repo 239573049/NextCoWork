@@ -981,7 +981,7 @@ export async function importApply(req: { password?: string }, ownerId = 0): Prom
     pendingImports.delete(ownerId)
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
-    windows.emitToAll('sessions:changed', {})
+    windows.emitToAll('sessions:changed', { kind: 'reset' })
     return result
   } catch (err) {
     await restoreCredentialRollback(credentialRollback)
@@ -1284,7 +1284,7 @@ export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Pr
     pendingRestores.delete(ownerId)
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
-    windows.emitToAll('sessions:changed', {})
+    windows.emitToAll('sessions:changed', { kind: 'reset' })
     return { restored: true, backupStatus: toBackupStatus() }
   } catch (err) {
     try {
@@ -1787,7 +1787,7 @@ export function cleanupByAge(req: { age: CleanupAge }): CleanupResult {
   const physical = removeUnreferencedManagedFiles(paths)
   result.bytes = preview.bytes
   result.undeletable = physical.undeletable
-  if (result.sessionCount > 0) windows.emitToAll('sessions:changed', {})
+  if (result.sessionCount > 0) windows.emitToAll('sessions:changed', { kind: 'reset' })
   return result
 }
 
@@ -1800,7 +1800,7 @@ export function clearHistory(): CleanupResult {
   const physical = removeUnreferencedManagedFiles(paths)
   result.bytes = preview.bytes
   result.undeletable = physical.undeletable
-  windows.emitToAll('sessions:changed', {})
+  windows.emitToAll('sessions:changed', { kind: 'reset' })
   return result
 }
 

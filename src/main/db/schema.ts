@@ -618,5 +618,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 11, name: 'context-experimental-off', sql: V11_CONTEXT_EXPERIMENTAL_OFF },
   { version: 12, name: 'message-run', sql: V12_MESSAGE_RUN }
   ,{ version: 13, name: 'config-sync', sql: V13_CONFIG_SYNC },
-  { version: 14, name: 'plans', sql: V14_PLANS }
+  { version: 14, name: 'plans', sql: V14_PLANS },
+  { version: 15, name: 'workspace-connections', sql: `
+    CREATE TABLE connection_profiles (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+  ` }
 ]

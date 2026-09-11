@@ -47,6 +47,8 @@ import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents';
 import { DocumentDialogs } from '../views/files/DocumentDialogs';
 import { DockRoot } from './Dock';
 import type { DockNode } from '../../../shared/domain/dock';
+import { ConnectionDialogs } from './ConnectionDialogs';
+import { CreateSshWorkspaceDialog } from './CreateSshWorkspaceDialog';
 
 /**
  * 三格面板开合的时长。**三处必须同一个数** —— 侧边栏收起的同时,主面板的左边界
@@ -116,6 +118,7 @@ export function AppShell({
     tabs.splitAndOpenDock(activeWorkspaceId, base, edge === 'bottom' ? 'down' : 'right', edge === 'bottom' ? 'terminal' : 'files', edge);
   };
   const [sessionItems, setSessionItems] = useState<SessionListItem[]>([]);
+  const [createSshOpen, setCreateSshOpen] = useState(false);
 
   useEffect(() => {
     if (activeWorkspaceId === null) {
@@ -216,10 +219,22 @@ export function AppShell({
    * 停在「定时任务」Tab 上时照样不动。`openWorkspace` 会激活这个工作区的外层 Tab
    * (已存在就复用),两层一起归位。
    */
-  const revealWorkspace = (): void => {
-    if (activeWorkspaceId === null) return;
-    if (activeStandaloneFeature === null && activeOuter?.kind === "workspace") return;
-    win.openWorkspace(activeWorkspaceId);
+  const revealWorkspace = async (): Promise<string | null> => {
+    if (activeWorkspaceId === null) return null;
+    if (activeStandaloneFeature !== null || activeOuter?.kind !== "workspace") {
+      if (!(await win.openWorkspace(activeWorkspaceId))) return null;
+    }
+    const current = useWindowStore.getState();
+    return current.activeWorkspaceId === activeWorkspaceId && current.pendingActivation === null
+      && current.activeStandaloneFeature === null ? activeWorkspaceId : null;
+  };
+
+  const pickLocalWorkspace = async (): Promise<void> => {
+    const selected = await pickWorkspace();
+    if (!selected) return;
+    const state = useWindowStore.getState();
+    state.updateWorkspaces([...Object.values(state.workspaceTargets).filter((item) => item.id !== selected.id), selected]);
+    await state.openWorkspace(selected.id);
   };
 
   /**
@@ -235,9 +250,9 @@ export function AppShell({
     const target = useWindowStore.getState().outer.find((tab) => tab.id === id);
     if (target?.kind === 'workspace') {
       if (!(await confirmDocumentChanges(target.ref.workspaceId))) return;
-      useDocumentsStore.getState().release(target.ref.workspaceId);
     }
-    win.close(id);
+    await win.close(id);
+    if (target?.kind === 'workspace' && !useWindowStore.getState().outer.some((tab) => tab.id === id)) useDocumentsStore.getState().release(target.ref.workspaceId);
   };
 
 
@@ -277,63 +292,29 @@ export function AppShell({
             // ★ `newChat` 不是 `open`:已经有一个没用过的对话就切过去,不再攒一排
             // 一模一样的「新对话」。Tab 条上那颗 `+` 仍走 `open`,它问的是
             // 「再给我一个」—— 见 stores/tabs.ts 的 newChat
-            onNewChat={() => {
-              if (activeWorkspaceId === null) return;
-              revealWorkspace();
-              tabs.newChat(activeWorkspaceId);
+            onNewChat={async () => {
+              const target = await revealWorkspace();
+              if (target !== null) useTabsStore.getState().newChat(target);
             }}
             onSearch={() => {
               /* 步骤 14:cmdk 命令面板 */
             }}
             onOpenFeature={win.openFeature}
             onOpenSettings={() => win.openSettings()}
-            onSelectSession={(sessionId) => {
-              if (activeWorkspaceId === null || inner === null) return;
-              // 先归位主区,再切内层 Tab —— 见 revealWorkspace
-              revealWorkspace();
-              const t = inner.tabs.find(
+            onSelectSession={async (sessionId) => {
+              const target = await revealWorkspace();
+              if (target === null) return;
+              const currentTabs = useTabsStore.getState();
+              const t = currentTabs.stateOf(target).tabs.find(
                 (x) => x.kind === "chat" && x.ref.sessionId === sessionId,
               );
-              if (t !== undefined) tabs.activate(activeWorkspaceId, t.id);
+              if (t !== undefined) currentTabs.activate(target, t.id);
               else {
                 const item = sessionItems.find((x) => x.id === sessionId);
-                tabs.openSession(activeWorkspaceId, sessionId, item?.title);
+                currentTabs.openSession(target, sessionId, item?.title);
               }
             }}
-            onDeleteSession={async (sessionId) => {
-              if (activeWorkspaceId === null) return;
-
-              const before = tabs.stateOf(activeWorkspaceId);
-              const activeTab = before.tabs.find((tab) => tab.id === before.activeTabId);
-              const deletingActive =
-                activeTab?.kind === "chat" && activeTab.ref.sessionId === sessionId;
-
-              // listSessions 已按 updatedAt 倒序。删除当前项时优先取它下面一项，
-              // 没有则取上面一项；这样侧边栏焦点移动和列表视觉顺序一致。
-              const deletedIndex = sessionItems.findIndex((item) => item.id === sessionId);
-
-              await deleteSession(sessionId);
-
-              // 删除后重新读一次，而不是只信当前 render 的 sessionItems：创建/复制
-              // 会话的 sessions:changed 可能还在 IPC 往返中，旧闭包可能少一条。
-              const remaining = await listSessions(activeWorkspaceId);
-              const replacement =
-                remaining[Math.min(Math.max(deletedIndex, 0), remaining.length - 1)] ?? null;
-
-              // 先打开/激活替代会话，再关掉旧 Tab。这样 close() 永远能看到一个
-              // 可接棒的主区 Tab，不会触发“最后一个 Tab 自动补新对话”。
-              if (deletingActive && replacement !== null) {
-                tabs.openSession(activeWorkspaceId, replacement.id, replacement.title);
-              }
-
-              const staleTabIds = tabs
-                .stateOf(activeWorkspaceId)
-                .tabs.filter(
-                  (tab) => tab.kind === "chat" && tab.ref.sessionId === sessionId,
-                )
-                .map((tab) => tab.id);
-              for (const tabId of staleTabIds) tabs.close(activeWorkspaceId, tabId);
-            }}
+            onDeleteSession={deleteSession}
             onCollapse={win.toggleSidebar}
           />
         </div>
@@ -342,8 +323,8 @@ export function AppShell({
       <main data-theme-region="canvas" className="app-canvas flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
         {activeStandaloneFeature === "browser" ? (
           <BrowserFeature onClose={win.closeStandaloneFeature} />
-        ) : activeStandaloneFeature === "skills" ? (
-          <FeatureView feature="skills" onClose={win.closeStandaloneFeature} />
+        ) : activeStandaloneFeature === "extensions" ? (
+          <FeatureView feature="extensions" onClose={win.closeStandaloneFeature} />
         ) : (
           <>
             {/*
@@ -417,18 +398,9 @@ export function AppShell({
                 onClose={(id) => { void closeOuterTab(id); }}
                 onMove={win.move}
                 onOpenWorkspace={win.openWorkspace}
-                onPickWorkspace={() => {
-                  void pickWorkspace().then((w) => {
-                    if (w !== null) win.openWorkspace(w.id);
-                  });
-                }}
-                onCreateWorkspace={() => {
-                  // 「新建」和「打开」目前是同一个动作:工作区就是一个目录,
-                  // 而目录选择必须走主进程 dialog(渲染层永不指定任意路径,方案 §9)
-                  void pickWorkspace().then((w) => {
-                    if (w !== null) win.openWorkspace(w.id);
-                  });
-                }}
+                onPickWorkspace={() => { void pickLocalWorkspace(); }}
+                onCreateWorkspace={() => { void pickLocalWorkspace(); }}
+                onCreateSshWorkspace={() => setCreateSshOpen(true)}
                 rightPanelOpen={rightPanelOpen}
                 bottomPanelOpen={bottomPanelOpen}
                 onToggleRightPanel={() => toggleDockEdge('right')}
@@ -453,7 +425,13 @@ export function AppShell({
             </div>
           </>
         )}
+        <ConnectionDialogs workspace={workspace} />
       </main>
+      {createSshOpen && <CreateSshWorkspaceDialog hidden={settingsPage !== null} onClose={() => setCreateSshOpen(false)} onCreated={async (created) => {
+        const state = useWindowStore.getState();
+        state.updateWorkspaces([...Object.values(state.workspaceTargets).filter((item) => item.id !== created.id), created]);
+        return state.openWorkspace(created.id);
+      }} />}
       <DocumentDialogs />
 
       {/*

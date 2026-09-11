@@ -40,14 +40,15 @@ import type {
   UpstreamProvider
 } from '../domain/provider'
 import type { ModelCatalogDefinition } from '../domain/model-catalog'
-import type { SearchHit, Session, SessionDetail, SessionListItem } from '../domain/session'
+import type { SearchHit, Session, SessionChange, SessionDetail, SessionListItem } from '../domain/session'
 import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
 import type { ImageTheme, ThemeProfile } from '../domain/theme'
-import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../domain/terminal'
+import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo, TerminalPreparation } from '../domain/terminal'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { CommandDefinition } from '../domain/command'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
+import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, PreparedWorkspace, RemoteDirectory, SshAuthRequest, SshAuthResponse } from '../domain/environment'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type { SyncConflict, SyncPreview, SyncStatus } from '../domain/config-sync'
@@ -56,6 +57,7 @@ import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
   WorkspaceFileMutationResult,
+  WorkspaceRecoveryListing,
   WorkspaceFileRequest,
   WorkspaceFileWriteRequest,
   WorkspaceTextFile
@@ -226,6 +228,20 @@ export interface IpcInvokeMap {
 
   // ── 工作区 ──
   'workspace:list': { req: void; res: Workspace[] }
+  'workspace:prepare': { req: { workspaceId: string; requestId: string; allowLocalCommands?: boolean }; res: PreparedWorkspace }
+  'workspace:commitActivation': { req: { ticket: string; requestId: string }; res: void }
+  'workspace:releaseActivation': { req: { ticket: string }; res: void }
+  'workspace:createSsh': { req: { browseId: string; path: string; requestId: string }; res: Workspace }
+  'connection:list': { req: void; res: Array<{ profile: ConnectionProfile; status: ConnectionStatus }> }
+  'connection:upsert': { req: ConnectionProfileInput; res: ConnectionProfile }
+  'connection:remove': { req: { id: string }; res: void }
+  'connection:connect': { req: { id: string; requestId: string; allowLocalCommands: boolean }; res: RemoteDirectory }
+  'connection:disconnect': { req: { id: string }; res: void }
+  'connection:cancel': { req: { requestId: string }; res: void }
+  'connection:browse': { req: { browseId: string; path: string; requestId: string }; res: RemoteDirectory }
+  'connection:closeBrowse': { req: { browseId: string }; res: void }
+  'connection:respond': { req: SshAuthResponse; res: void }
+  'connection:pickFile': { req: void; res: string | null }
   /** ★ 走主进程 dialog.showOpenDialog —— 渲染层永不指定任意路径(方案 §9) */
   'workspace:pick': { req: void; res: Workspace | null }
   'workspace:update': {
@@ -260,7 +276,8 @@ export interface IpcInvokeMap {
   'workspace:readFile': { req: WorkspaceFileRequest; res: WorkspaceFile }
   'workspace:writeFile': { req: WorkspaceFileWriteRequest; res: WorkspaceTextFile }
   'workspace:mutateFile': { req: WorkspaceFileMutationRequest; res: WorkspaceFileMutationResult }
-  'workspace:revealFile': { req: WorkspaceFileRequest; res: void }
+  'workspace:revealFile': { req: WorkspaceFileRequest; res: void | { remote: true; path: string; parent: string; name: string } }
+  'workspace:listRecovery': { req: { workspaceId: string }; res: WorkspaceRecoveryListing }
 
   // ── 浏览器工作台 ──
   'browser:list': { req: { workspaceId: string }; res: BrowserTab[] }
@@ -301,10 +318,16 @@ export interface IpcInvokeMap {
    * 系统对话框里定的既成事实,渲染层仍然没有「指定」任何路径的能力。
    */
   'attachment:pick': {
-    req: { scope: AttachmentScope; ownerId?: string }
+    req: { scope: AttachmentScope; ownerId?: string; stageFiles?: boolean }
     res: PickedAttachment[]
   }
   'attachment:remove': { req: { id: string }; res: void }
+  'attachment:prepareWorkspaceUpload': {
+    req: { id: string; sessionId: string; workspaceId: string }
+    res: import('../domain/attachment').WorkspaceAttachmentIntent
+  }
+  'attachment:completeWorkspaceUpload': { req: { ticket: string }; res: import('../domain/attachment').WorkspaceAttachmentReference }
+  'attachment:cancelWorkspaceUpload': { req: { ticket: string }; res: void }
   /** 已上传但还没发出去的 —— 重启后恢复草稿附件区 */
   'attachment:listBySession': { req: { sessionId: string }; res: Attachment[] }
 
@@ -366,6 +389,8 @@ export interface IpcInvokeMap {
 
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
+  'terminal:prepare': { req: TerminalCreateRequest; res: TerminalPreparation }
+  'terminal:approve': { req: { id: string; approved: boolean }; res: string | null }
   'terminal:kill': { req: { id: string }; res: void }
   'terminal:list': { req: { workspaceId: string }; res: TerminalInfo[] }
   'terminal:getBuffer': { req: { id: string }; res: TerminalBuffer }
@@ -600,6 +625,9 @@ export interface IpcSendMap {
  * 每次 send 前判 webContents.isDestroyed()。
  */
 export interface IpcEventMap {
+  'connection:status': ConnectionStatus
+  'connection:changed': void
+  'connection:auth': SshAuthRequest
   'agent:event': AgentEventEnvelope
   'terminal:data': { id: string; seq: number; chunk: string }
   'terminal:exit': { id: string; code: number }
@@ -618,7 +646,7 @@ export interface IpcEventMap {
   'skills:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
-  'sessions:changed': { workspaceId?: string; renamed?: { sessionId: string; title: string } }
+  'sessions:changed': SessionChange
   'browser:changed': BrowserChange
   'browser:profilesChanged': BrowserProfile[]
   /** The persisted user catalogue changed. Built-in rows are bundled code. */
@@ -715,6 +743,20 @@ export const INVOKE_CHANNELS = {
   'theme:deleteProfile': 1,
   'theme:renameProfile': 1,
   'workspace:list': 1,
+  'workspace:prepare': 1,
+  'workspace:commitActivation': 1,
+  'workspace:releaseActivation': 1,
+  'workspace:createSsh': 1,
+  'connection:list': 1,
+  'connection:upsert': 1,
+  'connection:remove': 1,
+  'connection:connect': 1,
+  'connection:disconnect': 1,
+  'connection:cancel': 1,
+  'connection:browse': 1,
+  'connection:closeBrowse': 1,
+  'connection:respond': 1,
+  'connection:pickFile': 1,
   'workspace:pick': 1,
   'workspace:update': 1,
   'workspace:close': 1,
@@ -724,6 +766,7 @@ export const INVOKE_CHANNELS = {
   'workspace:writeFile': 1,
   'workspace:mutateFile': 1,
   'workspace:revealFile': 1,
+  'workspace:listRecovery': 1,
   'browser:list': 1,
   'browser:open': 1,
   'browser:navigate': 1,
@@ -739,6 +782,9 @@ export const INVOKE_CHANNELS = {
   'attachment:upload': 1,
   'attachment:pick': 1,
   'attachment:remove': 1,
+  'attachment:prepareWorkspaceUpload': 1,
+  'attachment:completeWorkspaceUpload': 1,
+  'attachment:cancelWorkspaceUpload': 1,
   'attachment:listBySession': 1,
   'sessions:list': 1,
   'sessions:get': 1,
@@ -758,6 +804,8 @@ export const INVOKE_CHANNELS = {
   'agent:listInteractions': 1,
   'agent:listTools': 1,
   'terminal:create': 1,
+  'terminal:prepare': 1,
+  'terminal:approve': 1,
   'terminal:kill': 1,
   'terminal:list': 1,
   'terminal:getBuffer': 1,
@@ -850,6 +898,9 @@ export const SEND_CHANNELS = {
 } as const satisfies Record<keyof IpcSendMap, 1>
 
 export const EVENT_CHANNELS = {
+  'connection:status': 1,
+  'connection:changed': 1,
+  'connection:auth': 1,
   'agent:event': 1,
   'terminal:data': 1,
   'terminal:exit': 1,

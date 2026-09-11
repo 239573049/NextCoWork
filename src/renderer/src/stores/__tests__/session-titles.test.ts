@@ -44,4 +44,28 @@ describe('session title synchronization', () => {
     useTabsStore.getState().syncSessionTitle('closed-workspace', 'session', 'Title')
     expect(useTabsStore.getState().byWorkspace).toEqual({})
   })
+
+  it('replaces a deleted active conversation once and removes duplicate tabs', () => {
+    const tabs = useTabsStore.getState()
+    tabs.hydrate('workspace', { ...state, activeTabId: 'chat-a' })
+    tabs.hydrate('another', { ...state, tabs: [{ id: 'other', kind: 'chat', title: 'Other', ref: { sessionId: 'other' } }], activeTabId: 'other' })
+    const unchanged = tabs.stateOf('another')
+    const change = { kind: 'deleted' as const, sessionIds: ['session'], replacement: { workspaceId: 'workspace', id: 'next', title: 'Next' } }
+    tabs.removeSessions(change)
+    tabs.removeSessions(change)
+    const current = tabs.stateOf('workspace')
+    expect(current.tabs.filter((tab) => tab.kind === 'chat')).toEqual([
+      expect.objectContaining({ ref: { sessionId: 'next' } })
+    ])
+    expect(current.tabs.find((tab) => tab.id === current.activeTabId)?.title).toBe('Next')
+    expect(tabs.stateOf('another')).toBe(unchanged)
+  })
+
+  it('creates only one draft when deleting the last conversation', () => {
+    const tabs = useTabsStore.getState()
+    tabs.hydrate('workspace', { ...state, tabs: [state.tabs[0]!], activeTabId: 'chat-a' })
+    tabs.removeSessions({ kind: 'deleted', sessionIds: ['session'] })
+    expect(tabs.stateOf('workspace').tabs).toHaveLength(1)
+    expect(tabs.stateOf('workspace').tabs[0]?.ref).toEqual({ sessionId: null })
+  })
 })

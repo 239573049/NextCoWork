@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 /**
  * Skill 扫描 —— 照搬 Claude Code 的目录约定。
  *
@@ -21,7 +22,8 @@
 import type { Skill, SkillScope } from "../../../shared/domain/skill";
 import { SKILL_BODY_MAX, SKILL_NAME_RE } from "../../../shared/domain/skill";
 import { fmList, fmString, parseFrontmatter } from "../frontmatter";
-import type { KernelFs } from "../host";
+import type { KernelFs, WorkspacePaths } from "../host";
+import { EnvironmentError } from "../../../shared/domain/environment";
 import { PathEscapeError, resolveInWorkspace } from "../tool/path-guard";
 import { clampWithEllipsis, stripControlChars } from "../text";
 
@@ -56,6 +58,8 @@ export interface SkillScanResult {
 
 export interface SkillScanInput {
   fs: KernelFs;
+  projectFs?: KernelFs;
+  projectPath?: WorkspacePaths;
   /** `<appData>/skills`。空串 = 跳过全局这一层。 */
   globalRoot: string;
   /** `<workspaceRoot>/.nextcowork/skills`。空串 = 没有工作区。 */
@@ -80,9 +84,17 @@ export async function scanSkills(
   for (const scope of ["global", "project"] as const) {
     const root = scope === "global" ? input.globalRoot : input.projectRoot;
     if (root === "") continue;
-    await scanOneRoot(input.fs, root, scope, byName, diagnostics);
+    await scanOneRoot(scope === "project" ? input.projectFs ?? input.fs : input.fs, root, scope, byName, diagnostics,
+      scope === "project" ? input.projectPath : undefined);
   }
 
+  if (input.projectFs) for (const skill of byName.values()) {
+    if (skill.scope !== "global") continue;
+    try {
+      const contents = await input.fs.readDir(dirname(skill.source.path));
+      if (contents.some((entry) => entry.name !== "SKILL.md" && entry.name !== ".nextcowork-package.json")) skill.unavailableReason = "client-assets";
+    } catch { skill.unavailableReason = "client-assets"; }
+  }
   return { skills: [...byName.values()], diagnostics };
 }
 
@@ -92,12 +104,14 @@ async function scanOneRoot(
   scope: SkillScope,
   out: Map<string, Skill>,
   diagnostics: SkillDiagnostic[],
+  path?: WorkspacePaths,
 ): Promise<void> {
   let entries: Array<{ name: string; isDir: boolean }>;
   try {
     if (!(await fs.exists(root))) return; // 没有 skills 目录是常态,不是错误
     entries = await fs.readDir(root);
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err;
     diagnostics.push({ path: root, message: `读不了这个目录:${msg(err)}` });
     return;
   }
@@ -131,8 +145,9 @@ async function scanOneRoot(
         「扫描 skills 目录」就变成了「扫描整个磁盘」。`resolveInWorkspace`
         会 realpath 之后做包含判断,所以逃出去的目录在这里就死了。
       */
-      dir = resolveInWorkspace(root, e.name);
+      dir = path ? await path.resolveWithin(root, e.name) : resolveInWorkspace(root, e.name);
     } catch (err) {
+      if (err instanceof EnvironmentError) throw err;
       if (err instanceof PathEscapeError) {
         diagnostics.push({
           path: `${root}/${e.name}`,
@@ -144,9 +159,14 @@ async function scanOneRoot(
       continue;
     }
 
-    const file = `${dir}/SKILL.md`;
-    const loaded = await loadOne(fs, file, e.name, scope, diagnostics);
-    if (loaded !== null) out.set(loaded.name, loaded);
+    try {
+      const file = path ? await path.resolveWithin(dir, "SKILL.md") : resolveInWorkspace(dir, "SKILL.md");
+      const loaded = await loadOne(fs, file, e.name, scope, diagnostics, path, dir);
+      if (loaded !== null) out.set(loaded.name, loaded);
+    } catch (err) {
+      if (err instanceof EnvironmentError) throw err;
+      diagnostics.push({ path: `${dir}/SKILL.md`, message: msg(err) });
+    }
   }
 }
 
@@ -156,6 +176,8 @@ async function loadOne(
   dirName: string,
   scope: SkillScope,
   diagnostics: SkillDiagnostic[],
+  path?: WorkspacePaths,
+  directory?: string,
 ): Promise<Skill | null> {
   let raw: string;
   try {
@@ -169,6 +191,7 @@ async function loadOne(
     const bytes = await fs.readFileBytes(file, SKILL_FILE_MAX_BYTES);
     raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err;
     diagnostics.push({ path: file, message: `读不了这个文件:${msg(err)}` });
     return null;
   }
@@ -226,14 +249,16 @@ async function loadOne(
     sha256?: string;
   } = {};
   try {
-    const metaPath = `${dirName === "" ? file : file.slice(0, Math.max(0, file.length - "SKILL.md".length))}.nextcowork-package.json`;
+    const metaPath = path && directory ? await path.resolveWithin(directory, ".nextcowork-package.json")
+      : `${dirName === "" ? file : file.slice(0, Math.max(0, file.length - "SKILL.md".length))}.nextcowork-package.json`;
     const rawMeta = new TextDecoder().decode(
       await fs.readFileBytes(metaPath, 4096),
     );
     const parsed = JSON.parse(rawMeta) as typeof packageMeta;
     if (parsed.sourceKind === "zip" && typeof parsed.sha256 === "string")
       packageMeta = parsed;
-  } catch {
+  } catch (error) {
+    if (error instanceof EnvironmentError) throw error;
     /* folder installs and older packages have no metadata sidecar */
   }
 

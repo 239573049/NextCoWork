@@ -25,10 +25,15 @@ export function uploadAttachment(req: AttachmentUploadRequest): Promise<Attachme
  */
 export function pickAttachments(
   scope: AttachmentScope,
-  ownerId?: string
+  ownerId?: string,
+  stageFiles = false
 ): Promise<PickedAttachment[]> {
-  return invoke('attachment:pick', { scope, ownerId })
+  return invoke('attachment:pick', { scope, ownerId, stageFiles })
 }
+
+export const prepareWorkspaceUpload = (id: string, sessionId: string, workspaceId: string) => invoke('attachment:prepareWorkspaceUpload', { id, sessionId, workspaceId })
+export const completeWorkspaceUpload = (ticket: string) => invoke('attachment:completeWorkspaceUpload', { ticket })
+export const cancelWorkspaceUpload = (ticket: string) => invoke('attachment:cancelWorkspaceUpload', { ticket })
 
 export function removeAttachment(id: string): Promise<void> {
   return invoke('attachment:remove', { id })

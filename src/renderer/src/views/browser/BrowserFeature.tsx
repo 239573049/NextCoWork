@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { BrowserProfile } from '../../../../shared/domain/browser'
+import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import { Button } from '../../components/ui/Button'
 import { Dialog } from '../../components/ui/Dialog'
 import { IconButton } from '../../components/ui/IconButton'
@@ -34,6 +35,17 @@ import { cn } from '../../lib/cn'
 import { IS_MAC } from '../../lib/platform'
 
 export function BrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
+  const { t } = useI18n()
+  const workspaceId = useWindowStore((state) => state.activeWorkspaceId)
+  const workspace = useWindowStore((state) => state.activeWorkspaceId ? state.workspaceTargets[state.activeWorkspaceId] : undefined)
+  if (workspaceId !== null && (!workspace || !isLocalEnvironment(workspace.environment))) return <div className="flex min-h-0 flex-1 flex-col bg-canvas">
+    <div className="flex h-12 shrink-0 items-center border-b border-border px-3"><IconButton label={t('common.close')} onClick={onClose}><ArrowLeft size={16} /></IconButton></div>
+    <p role="status" className="m-auto p-6 text-[13px] text-fg-muted">{t('ssh.browserUnavailable')}</p>
+  </div>
+  return <LocalBrowserFeature onClose={onClose} />
+}
+
+function LocalBrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
   const { t } = useI18n()
   const [profiles, setProfiles] = useState<BrowserProfile[]>([])
   const [selectedId, setSelectedId] = useState<string>('default')

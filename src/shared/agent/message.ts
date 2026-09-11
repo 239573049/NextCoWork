@@ -5,6 +5,7 @@
  * (要动持久化格式)。这里从第一天就是块。
  */
 import type { AgentError } from './error'
+import type { FileReferenceSource } from '../domain/attachment'
 
 export interface AgentMessage {
   id: string
@@ -38,7 +39,7 @@ export type ContentPart =
    * 渲染层把它当成一张只读 chip 显示,**不**当文本塞进气泡里
    * (那会把一整条长路径糊进 `<p>`,撑出横向滚动条)。
    */
-  | { type: 'file_ref'; path: string; name: string }
+  | { type: 'file_ref'; path: string; name: string; source?: FileReferenceSource }
   | { type: 'error'; error: AgentError }
 
 /**

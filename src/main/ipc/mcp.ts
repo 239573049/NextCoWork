@@ -19,13 +19,13 @@ import {
   mcpSecretNames,
   mcpSecretRef
 } from '../../shared/domain/mcp'
-import { getHost, getMcp, setMcpChangeListener } from '../runtime'
+import { connectConfiguredMcp, disconnectConfiguredMcp, getHost, listMcpStatuses, setMcpChangeListener } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 
 /** 配置 + 运行时状态,合成一份下发 —— 理由在 `McpServerStatus` 的注释 */
 function snapshot(): McpServerStatus[] {
-  return getMcp().list(store.listMcpServers())
+  return listMcpStatuses()
 }
 
 function broadcast(): void {
@@ -39,6 +39,7 @@ function broadcast(): void {
  * 摊薄到两个文件里;而摊薄的防线最后总有一半没人维护。
  */
 function assertValid(cfg: McpServerConfig): void {
+  if (cfg.workspaceId !== undefined && (typeof cfg.workspaceId !== 'string' || !store.getWorkspace(cfg.workspaceId))) throw new Error('environment:unbound')
   if (!MCP_SERVER_ID_RE.test(cfg.id)) {
     throw new Error(
       `服务器 ID "${cfg.id}" 不合法。只能用字母、数字、下划线和连字符,最多 32 个字符 —— ` +
@@ -78,8 +79,8 @@ export async function upsertMcpServer(cfg: McpServerConfig): Promise<McpServerSt
   assertValid(cfg)
   const saved = store.putMcpServer(cfg)
 
-  await getMcp().disconnect(saved.id)
-  const status = saved.enabled ? await getMcp().connect(saved) : getMcp().statusOf(saved)
+  await disconnectConfiguredMcp(saved.id)
+  const status: McpServerStatus = saved.enabled ? await connectConfiguredMcp(saved) : { config: saved, state: 'disconnected', tools: [], toolCount: 0 }
 
   broadcast()
   return status
@@ -87,7 +88,7 @@ export async function upsertMcpServer(cfg: McpServerConfig): Promise<McpServerSt
 
 /** 删服务器:先断开(工具要从注册表里下掉),再删配置与密钥(一个事务) */
 export async function removeMcpServer(id: string): Promise<void> {
-  await getMcp().disconnect(id)
+  await disconnectConfiguredMcp(id)
   store.removeMcpServer(id)
   broadcast()
 }
@@ -100,7 +101,7 @@ export async function removeMcpServer(id: string): Promise<void> {
 export async function testMcpConnection(id: string): Promise<McpServerStatus> {
   const cfg = store.getMcpServer(id)
   if (cfg === undefined) throw new Error(`没有 ID 为 "${id}" 的 MCP 服务器。`)
-  const status = await getMcp().connect(cfg)
+  const status = await connectConfiguredMcp(cfg)
   broadcast()
   return status
 }
@@ -153,8 +154,8 @@ export async function setMcpSecrets(
   await getHost().secrets.set(mcpSecretRef(cfg.id, mcpSecretKind(cfg)), JSON.stringify(kept))
 
   if (cfg.enabled) {
-    await getMcp().disconnect(cfg.id)
-    await getMcp().connect(cfg)
+    await disconnectConfiguredMcp(cfg.id)
+    await connectConfiguredMcp(cfg)
   }
   broadcast()
   return getMcpSecretsInfo(id)

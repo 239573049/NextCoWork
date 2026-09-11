@@ -45,10 +45,10 @@ export type Resolved =
  *
  * ★ 失败信息里**只出现模型自己传进来的那个路径**,不出现目标文件的任何内容。
  */
-export function resolvePath(ctx: ToolContext, p: string): Resolved {
-  if (ctx.workspaceRoot === '' && !isAbsolute(p)) return { ok: false, result: toolFail(NO_WORKSPACE_RELATIVE) }
+export async function resolvePath(ctx: ToolContext, p: string): Promise<Resolved> {
+  if (ctx.workspaceRoot === '' && !(ctx.host.path?.isAbsolute(p) ?? isAbsolute(p))) return { ok: false, result: toolFail(NO_WORKSPACE_RELATIVE) }
   try {
-    const r = resolveAnywhere(ctx.workspaceRoot, p)
+    const r = ctx.host.path ? await ctx.host.path.resolve(ctx.workspaceRoot, p) : resolveAnywhere(ctx.workspaceRoot, p)
     return { ok: true, abs: r.abs, outside: r.outside }
   } catch (err) {
     // 根本身不存在(工作区被删了/改名了)。这是环境问题,不是模型的错。
@@ -68,6 +68,7 @@ export function resolvePath(ctx: ToolContext, p: string): Resolved {
  * 会被它直接带偏。
  */
 export function relOf(ctx: ToolContext, abs: string): string {
+  if (ctx.host.path) return ctx.host.path.display(ctx.workspaceRoot, abs)
   return displayPath(ctx.workspaceRoot, abs)
 }
 
@@ -94,7 +95,7 @@ export function walkBaseOf(ctx: ToolContext, target: { abs: string; outside: boo
       root: target.abs,
       start: '',
       label: target.abs,
-      display: (rel) => (rel === '' ? target.abs : join(target.abs, rel))
+      display: (rel) => (rel === '' ? target.abs : (ctx.host.path?.join ?? join)(target.abs, rel))
     }
   }
   const rel = relOf(ctx, target.abs)

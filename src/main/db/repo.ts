@@ -32,6 +32,9 @@ import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../s
 import { isDefaultSessionTitle } from '../../shared/domain/session'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import type { Workspace } from '../../shared/domain/workspace'
+import type { ConnectionProfile, EnvironmentRef } from '../../shared/domain/environment'
+import { normalizeEnvironmentRef } from '../../shared/domain/environment'
+import { EnvironmentError } from '../environment/errors'
 import type {
   UsageAttemptRecord,
   UsageCostTotal,
@@ -206,15 +209,14 @@ export function enqueueInitialSyncSnapshot(accountId: string): void {
     enqueueSyncMutation('provider', provider.id, payload)
   }
   for (const alias of listAliases()) if (alias.providerId !== 'nextcowork') enqueueSyncMutation('modelAlias', `${alias.providerId}/${alias.alias}`, alias)
-  for (const server of listMcpServers()) enqueueSyncMutation('mcpServer', server.id, server)
+  for (const server of listMcpServers()) if (server.workspaceId === undefined) enqueueSyncMutation('mcpServer', server.id, server)
   for (const search of listStoredSearchProviders()) enqueueSyncMutation('searchProvider', search.id, search)
   const settings = getSettings()
   const { personalization: _personalization, ...preferences } = settings
   enqueueSyncMutation('appPreferences', 'global', { ...preferences, data: { ...settings.data, backupDirectory: null } })
   enqueueSyncMutation('appPersonalization', 'global', settings.personalization)
   for (const workspace of listWorkspaces()) {
-    const { rootPath: _rootPath, unavailable: _unavailable, lastOpenedAt: _lastOpenedAt, ...payload } = workspace
-    enqueueSyncMutation('workspacePreferences', workspace.id, payload)
+    enqueueSyncMutation('workspacePreferences', workspace.id, workspacePreferences(workspace))
   }
 }
 
@@ -348,6 +350,37 @@ export function updateSettings(patch: AppSettingsPatch): AppSettings {
 
 // ── workspaces ──────────────────────────────────────────────────────────────
 
+function workspacePreferences(workspace: Workspace): Pick<Workspace, 'id' | 'name' | 'settings' | 'createdAt'> {
+  return { id: workspace.id, name: workspace.name, settings: workspace.settings, createdAt: workspace.createdAt }
+}
+
+export function listConnectionProfiles(): ConnectionProfile[] {
+  return stmt('SELECT json FROM connection_profiles ORDER BY id').all().map((row) => parse<ConnectionProfile>(row['json']))
+}
+
+export function getConnectionProfile(id: string): ConnectionProfile | undefined {
+  const row = stmt('SELECT json FROM connection_profiles WHERE id = ?').get(id)
+  return row === undefined ? undefined : parse<ConnectionProfile>(row['json'])
+}
+
+export function putConnectionProfile(profile: ConnectionProfile): ConnectionProfile {
+  stmt('INSERT INTO connection_profiles (id, json) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json')
+    .run(profile.id, JSON.stringify(profile))
+  return profile
+}
+
+export function removeConnectionProfile(id: string): void {
+  tx(() => {
+    if (listWorkspaces().some((workspace) => {
+      const ref = normalizeEnvironmentRef(workspace.environment)
+      return ref.kind === 'connection' && ref.connectionId === id
+    })) throw new EnvironmentError('connection-in-use')
+    stmt('DELETE FROM connection_profiles WHERE id = ?').run(id)
+    const prefix = `connection:${id}:`
+    stmt('DELETE FROM credentials WHERE substr(ref, 1, length(?)) = ?').run(prefix, prefix)
+  })
+}
+
 export function listWorkspaces(): Workspace[] {
   return stmt('SELECT json FROM workspaces ORDER BY last_opened_at DESC')
     .all()
@@ -364,8 +397,7 @@ export function putWorkspace(w: Workspace): Workspace {
     `INSERT INTO workspaces (id, last_opened_at, json) VALUES (?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET last_opened_at = excluded.last_opened_at, json = excluded.json`
   ).run(w.id, w.lastOpenedAt, JSON.stringify(w))
-    const { rootPath: _rootPath, unavailable: _unavailable, lastOpenedAt: _lastOpenedAt, ...payload } = w
-    enqueueSyncMutation('workspacePreferences', w.id, payload)
+    enqueueSyncMutation('workspacePreferences', w.id, workspacePreferences(w))
   })
   return w
 }
@@ -487,6 +519,7 @@ export function getSession(id: string): Session | undefined {
 }
 
 export function putSession(session: Session): Session {
+  const previous = stmt('SELECT title FROM sessions WHERE id = ?').get(session.id)
   const normalized: Session = {
     ...session,
     /*
@@ -536,7 +569,9 @@ export function putSession(session: Session): Session {
   // title column in sync when a session is renamed (or imported) so searches
   // by conversation title do not continue returning the old title until the
   // next message is committed.
-  stmt('UPDATE messages_fts SET title = ? WHERE session_id = ?').run(normalized.title, normalized.id)
+  if (previous !== undefined && previous['title'] !== normalized.title) {
+    stmt('UPDATE messages_fts SET title = ? WHERE session_id = ?').run(normalized.title, normalized.id)
+  }
   return normalized
 }
 
@@ -1026,7 +1061,6 @@ function writeMessage(session: Session, message: AgentMessage, ordinal: number, 
   )
   upsertFts(session, message)
   recordMessageAttachments(session, message)
-  putSession({ ...session, updatedAt: Math.max(session.updatedAt, message.createdAt) })
 }
 
 export function commitMessage(sessionId: string, message: AgentMessage, runId?: string): void {
@@ -1041,6 +1075,7 @@ export function commitMessage(sessionId: string, message: AgentMessage, runId?: 
       ? Number((stmt('SELECT COALESCE(MAX(ordinal), -1) AS n FROM messages WHERE session_id = ?').get(sessionId) as Record<string, unknown>)['n'] ?? -1) + 1
       : Number(existing['ordinal'])
     writeMessage(session, message, ordinal, runId)
+    putSession({ ...session, updatedAt: Math.max(session.updatedAt, message.createdAt) })
   })
 }
 
@@ -1060,48 +1095,52 @@ export function getHistory(sessionId: string): readonly AgentMessage[] {
   })
 }
 
-/** 测试/导入用的整段替换；每条消息仍按原顺序和完整 parts 保存。 */
+/** 权威历史对账；未变化的消息保留正文、索引、附件和 run 归属。 */
 export function replaceHistory(sessionId: string, messages: readonly AgentMessage[]): void {
   tx(() => {
     const session = getSession(sessionId)
     if (session === undefined) throw new Error(`会话不存在: ${sessionId}`)
 
-    // `replaceHistory` is also used after a run to reconcile the renderer's
-    // transcript with SQLite.  Deleting all messages first looks simple, but
-    // it cascades their managed attachment rows.  The following commit would
-    // then only UPDATE a missing row, turning every `ncw://` image into an
-    // unreferenced file.  Re-number existing rows into a temporary negative
-    // range, upsert the incoming messages in their authoritative order, and
-    // remove only messages that disappeared.  Their attachment rows are then
-    // safely cascaded by SQLite.
+    const existing = new Map(
+      stmt('SELECT id, ordinal, role, parts, schema_version, created_at FROM messages WHERE session_id = ?').all(sessionId)
+        .map((row) => [String(row['id']), row] as const)
+    )
     const ids = new Set<string>()
-    for (const message of messages) {
+    let renumber = false
+    const entries = messages.map((message, ordinal) => {
       if (ids.has(message.id)) throw new Error(`消息 ${message.id} 在转录中重复`)
       ids.add(message.id)
-      const owner = stmt('SELECT session_id FROM messages WHERE id = ?').get(message.id) as Record<string, unknown> | undefined
-      if (owner !== undefined && String(owner['session_id']) !== sessionId) {
-        throw new Error(`消息 ${message.id} 已属于另一个会话`)
+      const previous = existing.get(message.id)
+      if (previous === undefined) {
+        const owner = stmt('SELECT session_id FROM messages WHERE id = ?').get(message.id)
+        if (owner !== undefined && String(owner['session_id']) !== sessionId) {
+          throw new Error(`消息 ${message.id} 已属于另一个会话`)
+        }
       }
+      if (previous !== undefined && Number(previous['ordinal']) !== ordinal) renumber = true
+      const changed = previous === undefined || previous['role'] !== message.role
+        || previous['parts'] !== JSON.stringify(message.parts)
+        || Number(previous['schema_version']) !== message.schemaVersion
+        || Number(previous['created_at']) !== message.createdAt
+      return { message, ordinal, changed }
+    })
+    const removed = [...existing.keys()].filter((id) => !ids.has(id))
+    const updatedAt = messages.reduce((latest, message) => Math.max(latest, message.createdAt), session.updatedAt)
+    if (!renumber && removed.length === 0 && entries.every((entry) => !entry.changed)) {
+      if (updatedAt !== session.updatedAt) putSession({ ...session, updatedAt })
+      return
     }
 
-    stmt('DELETE FROM messages_fts WHERE session_id = ?').run(sessionId)
-    stmt('UPDATE messages SET ordinal = -ordinal - 1 WHERE session_id = ?').run(sessionId)
-    for (const [ordinal, message] of messages.entries()) writeMessage(session, message, ordinal)
-
-    const existing = stmt('SELECT id FROM messages WHERE session_id = ?').all(sessionId)
-    for (const row of existing) {
-      const id = String((row as Record<string, unknown>)['id'])
-      if (ids.has(id)) continue
-      stmt('DELETE FROM messages WHERE id = ?').run(id)
+    if (renumber) stmt('UPDATE messages SET ordinal = -ordinal - 1 WHERE session_id = ?').run(sessionId)
+    for (const id of removed) stmt('DELETE FROM messages WHERE id = ?').run(id)
+    if (removed.length > 0) {
+      stmt('DELETE FROM messages_fts WHERE session_id = ? AND message_id NOT IN (SELECT id FROM messages WHERE session_id = ?)').run(sessionId, sessionId)
     }
-
-    const current = getSession(sessionId)
-    if (current !== undefined) {
-      putSession({
-        ...current,
-        updatedAt: Math.max(current.updatedAt, messages.at(-1)?.createdAt ?? current.updatedAt)
-      })
+    for (const { message, ordinal, changed } of entries) {
+      if (changed) writeMessage(session, message, ordinal)
+      else if (renumber) stmt('UPDATE messages SET ordinal = ? WHERE id = ?').run(ordinal, message.id)
     }
+    putSession({ ...session, updatedAt })
   })
 }
 
@@ -1189,7 +1228,7 @@ export function exportDataSnapshot(): Omit<DataExport, 'encryptedCredentials'> {
     sessions: listExportableSessionDetails(),
     providers: listProviders().filter((p) => p.id !== 'nextcowork'),
     aliases: listAliases().filter((a) => a.providerId !== 'nextcowork'),
-    mcpServers: listMcpServers(),
+    mcpServers: listMcpServers().filter((server) => server.workspaceId === undefined),
     // 导出的是实际配置行，不把目录里的默认项伪造成用户配置。
     searchProviders: listStoredSearchProviders(),
     disabledSkillIds: (() => {
@@ -1225,7 +1264,11 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
       const local = getWorkspace(w.id)
       const decision = dataMergeDecision(local, w)
       if (decision !== 'skip') {
-        putWorkspace({ ...w, unavailable: !existsSync(w.rootPath) })
+        const incoming = normalizeEnvironmentRef(w.environment)
+        const environment: EnvironmentRef = local ? normalizeEnvironmentRef(local.environment)
+          : incoming.kind === 'local' ? incoming : { kind: 'unbound' }
+        const rootPath = local?.rootPath ?? w.rootPath
+        putWorkspace({ ...w, rootPath, environment, unavailable: environment.kind !== 'local' || !existsSync(rootPath) })
         imported++
         workspacesImported++
         if (decision === 'overwrite') overwritten++
@@ -1255,6 +1298,7 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
     }
     for (const c of data.mcpServers) {
       const local = getMcpServer(c.id)
+      if (c.workspaceId !== undefined || local?.workspaceId !== undefined) { skipped++; continue }
       const decision = dataMergeDecision(local, c)
       if (decision !== 'skip') { putMcpServer(c); imported++; if (decision === 'overwrite') overwritten++ } else skipped++
     }
@@ -2349,10 +2393,15 @@ export function getMcpServer(id: string): McpServerConfig | undefined {
 }
 
 export function putMcpServer(c: McpServerConfig): McpServerConfig {
-  tx(() => { stmt(
+  tx(() => {
+    const previous = getMcpServer(c.id)
+    stmt(
     `INSERT INTO mcp_servers (id, json) VALUES (?, ?)
      ON CONFLICT (id) DO UPDATE SET json = excluded.json`
-  ).run(c.id, JSON.stringify(c)); enqueueSyncMutation('mcpServer', c.id, c) })
+  ).run(c.id, JSON.stringify(c))
+    if (c.workspaceId === undefined) enqueueSyncMutation('mcpServer', c.id, c)
+    else if (previous && previous.workspaceId === undefined) enqueueSyncMutation('mcpServer', c.id, { id: c.id }, 'delete')
+  })
   return c
 }
 
@@ -2369,10 +2418,11 @@ export function putMcpServer(c: McpServerConfig): McpServerConfig {
  */
 export function removeMcpServer(id: string): void {
   tx(() => {
+    const previous = getMcpServer(id)
     stmt('DELETE FROM mcp_servers WHERE id = ?').run(id)
     stmt('DELETE FROM credentials WHERE ref = ?').run(mcpSecretRef(id, 'env'))
     stmt('DELETE FROM credentials WHERE ref = ?').run(mcpSecretRef(id, 'headers'))
-    enqueueSyncMutation('mcpServer', id, { id }, 'delete')
+    if (previous?.workspaceId === undefined) enqueueSyncMutation('mcpServer', id, { id }, 'delete')
   })
 }
 

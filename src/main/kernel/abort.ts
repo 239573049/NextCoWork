@@ -28,6 +28,51 @@ export function abortError(message = 'aborted'): DOMException {
   return new DOMException(message, 'AbortError')
 }
 
+export function abortable<T>(operation: () => PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(abortError())
+    const fail = (error: unknown): void => {
+      signal.removeEventListener('abort', onAbort)
+      reject(error)
+    }
+    const onAbort = (): void => { queueMicrotask(() => fail(abortError())) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      Promise.resolve(operation()).then((value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      }, fail)
+    } catch (error) {
+      fail(error)
+    }
+  })
+}
+
+export async function* abortableStream<T>(
+  source: AsyncIterable<T>, signal: AbortSignal
+): AsyncIterable<T> {
+  signal.throwIfAborted()
+  const iterator = source[Symbol.asyncIterator]()
+  let completed = false
+  try {
+    for (;;) {
+      const next = await abortable(() => iterator.next(), signal)
+      signal.throwIfAborted()
+      if (next.done) {
+        completed = true
+        return
+      }
+      yield next.value
+    }
+  } finally {
+    const close = iterator.return
+    if (!completed && close !== undefined) {
+      if (signal.aborted) void Promise.resolve().then(() => close.call(iterator)).catch(() => {})
+      else await abortable(() => close.call(iterator), signal)
+    }
+  }
+}
+
 /** 可中断的 sleep。上游的重试退避与演示上游的分片节奏共用同一份。 */
 export function abortableSleep(ms: number, signal?: AbortSignal | null): Promise<void> {
   return new Promise((resolve, reject) => {

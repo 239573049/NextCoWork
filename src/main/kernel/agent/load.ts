@@ -24,7 +24,8 @@ import {
 import type { PermissionMode } from '../../../shared/agent/permission'
 import { PERMISSION_MODES } from '../../../shared/agent/permission'
 import { fmList, fmString, parseFrontmatter } from '../frontmatter'
-import type { KernelFs } from '../host'
+import type { KernelFs, WorkspacePaths } from '../host'
+import { EnvironmentError } from '../../../shared/domain/environment'
 import { clampWithEllipsis, stripControlChars } from '../text'
 import { PathEscapeError, resolveInWorkspace } from '../tool/path-guard'
 import { BUILTIN_AGENTS } from './builtin'
@@ -52,6 +53,8 @@ export interface AgentScanResult {
 
 export interface AgentScanInput {
   fs: KernelFs
+  projectFs?: KernelFs
+  projectPath?: WorkspacePaths
   /** `<appData>/agents`。空串 = 跳过全局这一层。 */
   globalRoot: string
   /** `<workspaceRoot>/.nextcowork/agents`。空串 = 没有工作区。 */
@@ -76,7 +79,8 @@ export async function scanAgents(input: AgentScanInput): Promise<AgentScanResult
   for (const scope of ['global', 'project'] as const) {
     const root = scope === 'global' ? input.globalRoot : input.projectRoot
     if (root === '') continue
-    await scanOneRoot(input.fs, root, scope, byName, diagnostics)
+    await scanOneRoot(scope === 'project' ? input.projectFs ?? input.fs : input.fs, root, scope, byName, diagnostics,
+      scope === 'project' ? input.projectPath : undefined)
   }
 
   return { agents: [...byName.values()], diagnostics }
@@ -87,13 +91,15 @@ async function scanOneRoot(
   root: string,
   scope: 'global' | 'project',
   out: Map<string, AgentDefinition>,
-  diagnostics: AgentDiagnostic[]
+  diagnostics: AgentDiagnostic[],
+  path?: WorkspacePaths
 ): Promise<void> {
   let entries: Array<{ name: string; isDir: boolean }>
   try {
     if (!(await fs.exists(root))) return // 没有 agents 目录是常态,不是错误
     entries = await fs.readDir(root)
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err
     diagnostics.push({ path: root, message: `读不了这个目录:${msg(err)}` })
     return
   }
@@ -127,8 +133,9 @@ async function scanOneRoot(
         ★ 挡软链逃逸:`~/.nextcowork/agents/evil.md -> /etc/passwd` 之后,
         「加载子代理」就变成了「把任意文件的内容拼进系统提示词」。
       */
-      file = resolveInWorkspace(root, e.name)
+      file = path ? await path.resolveWithin(root, e.name) : resolveInWorkspace(root, e.name)
     } catch (err) {
+      if (err instanceof EnvironmentError) throw err
       if (err instanceof PathEscapeError) {
         diagnostics.push({
           path: `${root}/${e.name}`,
@@ -157,6 +164,7 @@ async function loadOne(
     const bytes = await fs.readFileBytes(file, AGENT_FILE_MAX_BYTES)
     raw = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err
     diagnostics.push({ path: file, message: `读不了这个文件:${msg(err)}` })
     return null
   }

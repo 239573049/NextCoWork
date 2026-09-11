@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import { JSDOM } from 'jsdom'
+import { describe, expect, it, vi } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage } from '../../../../../shared/agent/message'
+import { emptyTranscript, toolsFromMessages, type TranscriptState } from '../../../../../shared/agent/transcript'
+import { I18nProvider } from '../../../i18n'
+import { Thread } from '../Thread'
 import { assistantSegments, assistantText, isAssistantTextBlock, threadRows } from '../thread-content'
 
 describe('thread content grouping', () => {
@@ -156,5 +162,75 @@ describe('assistant turn plain text', () => {
     expect(row?.kind).toBe('assistant')
     if (row?.kind !== 'assistant') return
     expect(assistantText(row.blocks)).toBe('')
+  })
+})
+
+describe('completed turn rendering', () => {
+  it('retains the process subtree and user expansion when another turn starts or is removed', async () => {
+    const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
+    Object.assign(dom.window, { nextcowork: { on: () => () => {} } })
+    vi.stubGlobal('window', dom.window)
+    vi.stubGlobal('document', dom.window.document)
+    vi.stubGlobal('HTMLElement', dom.window.HTMLElement)
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    vi.stubGlobal('requestAnimationFrame', () => 1)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} })
+    const container = document.getElementById('root')!
+    const root = createRoot(container)
+    const messages = [
+      userMessage('first-user', [{ type: 'text', text: 'Inspect' }], 1),
+      ...Array.from({ length: 250 }, (_, index) => [
+        assistantMessage(`step-${index}`, [
+          { type: 'text', text: `Intermediate ${index}` },
+          { type: 'tool_call', callId: `call-${index}`, name: 'Read', input: {} }
+        ], index * 2 + 2),
+        toolResultMessage(`result-${index}`, [{ type: 'tool_result', callId: `call-${index}`, output: { content: 'ok' }, isError: false }], index * 2 + 3)
+      ]).flat(),
+      assistantMessage('answer', [{ type: 'text', text: 'Final answer' }], 1000)
+    ]
+    const transcript = { ...emptyTranscript(), messages, tools: toolsFromMessages(messages), status: 'done' as const }
+    const render = async (current: TranscriptState, runId: string | null = null): Promise<void> => {
+      await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
+        createElement(Thread, { transcript: current, runId, lastSeq: 0, queued: 0, model: undefined, providerName: undefined }) })))
+    }
+    try {
+      await render(transcript)
+      const process = container.querySelector('[data-testid="run-process-block"]')!
+      const answer = [...container.querySelectorAll('p')].find((element) => element.textContent === 'Final answer')
+      expect(process.getAttribute('data-open')).toBe('false')
+      expect(container.textContent).not.toContain('Intermediate')
+      const next = { ...transcript, messages: [...messages, userMessage('next-user', [{ type: 'text', text: 'Continue' }], 1001)], status: 'running' as const }
+      await render(next, 'next-run')
+      expect(container.querySelector('[data-testid="run-process-block"]')).toBe(process)
+      expect(container.textContent).not.toContain('Intermediate')
+      expect([...container.querySelectorAll('p')].find((element) => element.textContent === 'Final answer')).toBe(answer)
+      await act(async () => (process.querySelector('button') as HTMLButtonElement).click())
+      const intermediate = [...container.querySelectorAll('p')].find((element) => element.textContent === 'Intermediate 0')
+      expect(intermediate).toBeDefined()
+      await render({ ...next, status: 'error' })
+      await render(transcript)
+      expect(container.querySelector('[data-testid="run-process-block"]')).toBe(process)
+      expect(process.getAttribute('data-open')).toBe('true')
+      expect([...container.querySelectorAll('p')].find((element) => element.textContent === 'Intermediate 0')).toBe(intermediate)
+      for (const status of ['error', 'aborted'] as const) {
+        const failedMessages = [
+          userMessage(`${status}-user`, [{ type: 'text', text: 'Inspect' }], 1),
+          ...messages.slice(1, 3),
+          messages.at(-1)!
+        ]
+        await render({ ...transcript, messages: failedMessages, status })
+        expect(container.querySelector('[data-testid="run-process-block"]')).toBeNull()
+        await render({ ...transcript, messages: [
+          ...failedMessages, userMessage(`${status}-retry`, [{ type: 'text', text: 'Retry' }], 1001)
+        ], status: 'running' }, `${status}-retry-run`)
+        expect(container.querySelector('[data-testid="run-process-block"]')).toBeNull()
+        expect(container.textContent).toContain('Intermediate 0')
+      }
+    } finally {
+      await act(async () => root.unmount())
+      dom.window.close()
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -38,6 +38,19 @@ export function databaseDirectory(): string {
 
 let handle: DatabaseSync | null = null
 let handlePath: string | null = null
+/**
+ * 应用退出时封库。区别于 `closeDatabase()` 的**重置**语义(测试在 beforeEach 里关掉、
+ * 下一次 `db()` 自动开内存库继续跑) —— 封库之后任何写入都必须失败,而不是悄悄换一个库。
+ */
+let sealed = false
+
+/** 封库之后仍有人尝试读写。带上调用点比静默丢数据有用得多。 */
+export class DatabaseClosedError extends Error {
+  constructor() {
+    super('数据库已在应用退出时关闭,这次写入没有落盘')
+    this.name = 'DatabaseClosedError'
+  }
+}
 
 /**
  * 预备语句缓存。`prepare()` 每次都要过一遍解析器,而 `listProviders()` 是
@@ -159,6 +172,7 @@ export function openDatabase(dir: string): void {
   mkdirSync(dir, { recursive: true })
   handlePath = join(dir, DB_FILENAME)
   handle = openAt(handlePath)
+  sealed = false
 }
 
 /**
@@ -171,6 +185,14 @@ export function openDatabase(dir: string): void {
  * @internal 只给 `src/main/db/` 内部用。外面拿到句柄就等于外面开始写 SQL 了。
  */
 export function db(): DatabaseSync {
+  if (sealed) {
+    /**
+     * ★ 封库之后**不能**再走下面那条内存兜底 —— 那会凭空开一个跑完整套迁移的新库,
+     * 把退出瞬间还在跑的 run 的转录和 run 记录静默写进去,然后连库带数据一起丢掉。
+     * 一条日志都不会留。宁可在这里抛,让调用方显式处理。
+     */
+    throw new DatabaseClosedError()
+  }
   if (handle === null) {
     handlePath = MEMORY
     handle = openAt(MEMORY)
@@ -236,11 +258,12 @@ export async function txAsync<T>(fn: () => T | Promise<T>): Promise<T> {
 }
 
 /** 关库。退出前调,或测试里重置。 */
-export function closeDatabase(): void {
+export function closeDatabase(options: { final?: boolean } = {}): void {
   prepared.clear()
   handle?.close()
   handle = null
   handlePath = null
+  sealed = options.final === true
 }
 
 /**

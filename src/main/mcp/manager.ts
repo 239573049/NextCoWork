@@ -32,6 +32,7 @@ import type { KernelHost } from '../kernel/host'
 import type { ToolRegistry } from '../kernel/tool/registry'
 import type { McpToolDescriptor } from './bridge'
 import { isRejected, toRegistration } from './bridge'
+import { EnvironmentError } from '../../shared/domain/environment'
 
 /** 连接 + 初始化握手的墙钟预算。卡住的服务器不该让设置页一直转圈。 */
 const CONNECT_TIMEOUT_MS = 30_000
@@ -43,6 +44,7 @@ export interface McpManagerDeps {
   /** 只要 `secrets` 与 `logger` 两项 —— 这个类不需要也不该拿到整个 host */
   secrets: KernelHost['secrets']
   logger: KernelHost['logger']
+  assertReady?: () => void
   /** 状态一变就叫一次。广播由调用方做(这个文件不认识 BrowserWindow) */
   onChange?: (id: string) => void
   /**
@@ -54,7 +56,7 @@ export interface McpManagerDeps {
    * 这件事,除了真跑一遍以外没有别的验证方式,而 stdio 需要一个子进程、
    * http 需要一个监听端口,两者都会把单测变成集成测试。
    */
-  transportFactory?: (cfg: McpServerConfig) => Promise<Transport>
+  transportFactory?: (cfg: McpServerConfig, values: Record<string, string>) => Promise<Transport>
 }
 
 interface Entry {
@@ -71,16 +73,18 @@ interface Entry {
 const CLIENT_INFO = { name: 'NextCoWork', version: '0.1.0' } as const
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
   return Promise.race([
     p,
     new Promise<never>((_, reject) => {
       const t = setTimeout(() => {
         reject(new Error(`${what}超时(超过 ${String(ms / 1000)} 秒)`))
       }, ms)
+      timer = t
       // 正常路径下别让这个定时器把进程按住不退
       if (typeof t.unref === 'function') t.unref()
     })
-  ])
+  ]).finally(() => { if (timer) clearTimeout(timer) })
 }
 
 function describeError(err: unknown): string {
@@ -130,8 +134,8 @@ export class McpManager {
   }
 
   private async makeTransport(cfg: McpServerConfig): Promise<Transport> {
-    if (this.deps.transportFactory !== undefined) return this.deps.transportFactory(cfg)
     const values = await this.secretValues(cfg)
+    if (this.deps.transportFactory !== undefined) return this.deps.transportFactory(cfg, values)
     if (cfg.transport === 'stdio') {
       return new StdioClientTransport({
         command: cfg.command,
@@ -180,16 +184,30 @@ export class McpManager {
     // 重连:先把上一条彻底收干净。不收的话工具会重复注册在两个 client 上
     await this.disconnect(cfg.id)
 
-    this.entries.set(cfg.id, { state: 'connecting', tools: [] })
+    const entry: Entry = { state: 'connecting', tools: [] }
+    this.entries.set(cfg.id, entry)
     this.deps.onChange?.(cfg.id)
 
     let client: Client
     let transport: Transport
     try {
+      this.deps.assertReady?.()
       transport = await this.makeTransport(cfg)
+      if (this.entries.get(cfg.id) !== entry) { await transport.close(); return this.statusOf(cfg) }
       client = new Client(CLIENT_INFO)
+      entry.client = client
+      entry.transport = transport
+      client.onclose = () => {
+        if (this.entries.get(cfg.id) !== entry) return
+        this.deps.tools.unregisterBySource({ kind: 'mcp', serverId: cfg.id })
+        entry.state = 'disconnected'
+        entry.tools = []
+        this.deps.onChange?.(cfg.id)
+      }
       await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, '连接')
     } catch (err) {
+      await entry.transport?.close().catch(() => {})
+      if (this.entries.get(cfg.id) !== entry) return this.statusOf(cfg)
       return this.fail(cfg, describeError(err))
     }
 
@@ -197,9 +215,12 @@ export class McpManager {
     try {
       const res = await withTimeout(client.listTools(), LIST_TOOLS_TIMEOUT_MS, '获取工具列表')
       descriptors = res.tools
+      this.deps.assertReady?.()
+      if (this.entries.get(cfg.id) !== entry || entry.state !== 'connecting') { await client.close(); return this.statusOf(cfg) }
     } catch (err) {
       // 握手过了但列不出工具 —— 连接留不得,不然它会一直挂着占着子进程
       await client.close().catch(() => {})
+      if (this.entries.get(cfg.id) !== entry) return this.statusOf(cfg)
       return this.fail(cfg, describeError(err))
     }
 
@@ -211,13 +232,18 @@ export class McpManager {
         rejected.push(`${reg.name}(${reg.reason})`)
         continue
       }
-      registered.push(this.deps.tools.register(reg).externalName)
+      registered.push(this.deps.tools.register({ ...reg, execute: async (input, context) => {
+        this.deps.assertReady?.()
+        if (this.entries.get(cfg.id) !== entry || entry.state !== 'connected'
+          || (cfg.workspaceId !== undefined && context.workspaceId !== cfg.workspaceId)) throw new EnvironmentError('disconnected')
+        return reg.execute(input, context)
+      } }).externalName)
     }
     if (rejected.length > 0) {
       this.deps.logger.warn(`[mcp] ${cfg.id} 有 ${String(rejected.length)} 个工具被拒绝:${rejected.join('、')}`)
     }
 
-    this.entries.set(cfg.id, {
+    Object.assign(entry, {
       client,
       transport,
       state: 'connected',
@@ -232,7 +258,7 @@ export class McpManager {
           ? undefined
           : `有 ${String(rejected.length)} 个工具没有接入:${rejected.join('、')}`,
       connectedAt: Date.now()
-    })
+    } satisfies Entry)
     this.deps.onChange?.(cfg.id)
     return this.statusOf(cfg)
   }
@@ -259,7 +285,7 @@ export class McpManager {
       await entry.client.close().catch((err: unknown) => {
         this.deps.logger.warn(`[mcp] ${id} 关闭时出错(工具已下线,忽略):${String(err)}`)
       })
-    }
+    } else await entry?.transport?.close().catch(() => {})
     this.deps.onChange?.(id)
   }
 
@@ -289,7 +315,7 @@ export class McpManager {
    */
   connectEnabledInBackground(configs: readonly McpServerConfig[]): void {
     for (const cfg of configs) {
-      if (!cfg.enabled) continue
+      if (!cfg.enabled || cfg.workspaceId !== undefined) continue
       void this.connect(cfg)
     }
   }

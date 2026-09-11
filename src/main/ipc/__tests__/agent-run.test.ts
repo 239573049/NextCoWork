@@ -161,6 +161,7 @@ const seedDemoProvider = (): void => {
 
 beforeEach(() => {
   resetRuntimeForTest()
+  store.putWorkspace({ id: 'w1', name: 'Local test workspace', rootPath: '', environment: { kind: 'local' }, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })
   // 分片不等待:这份测试量的是接线对不对,不是分片节奏 ——
   // 后者是 demo.test.ts 的事。仍然经 `withDemo`,即生产路径同一个挂载点。
   installHost(withDemo(nodeHost(), { chunkDelayMs: 0 }))

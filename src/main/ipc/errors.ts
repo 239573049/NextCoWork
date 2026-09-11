@@ -7,6 +7,7 @@
  */
 import { agentError, type AgentError, type AgentErrorCode } from '../../shared/agent/error'
 import { isAbortError } from '../kernel/abort'
+import { EnvironmentError } from '../environment/errors'
 
 /** 带分类的内部错误。handler 里主动拒绝时抛它,而不是裸 Error。 */
 export class IpcError extends Error {
@@ -33,6 +34,9 @@ export class NotImplementedError extends IpcError {
 }
 
 export function toAgentError(err: unknown): AgentError {
+  if (err instanceof EnvironmentError) return agentError('unknown', err.message, {
+    retryable: false, environmentCode: err.code, environmentDetail: err.detail, messageKey: `environment.error.${err.code}`
+  })
   if (err instanceof IpcError) {
     return agentError(err.code, err.message, { status: err.status })
   }

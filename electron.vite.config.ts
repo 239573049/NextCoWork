@@ -70,7 +70,8 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve('src/main/index.ts') }
+        input: { index: resolve('src/main/entry.ts') },
+        output: { chunkFileNames: '[name]-[hash].js' }
       }
     }
   },

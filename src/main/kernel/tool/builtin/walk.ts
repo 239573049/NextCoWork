@@ -23,7 +23,7 @@
  */
 import { join } from 'node:path'
 import { abortError } from '../../abort'
-import type { KernelFs } from '../../host'
+import type { KernelFs, WorkspacePaths } from '../../host'
 import { PathEscapeError, resolveInWorkspace } from '../path-guard'
 
 export interface WalkEntry {
@@ -35,6 +35,7 @@ export interface WalkEntry {
 
 export interface WalkOptions {
   fs: Pick<KernelFs, 'readDir'>
+  path?: WorkspacePaths
   /** 这一趟的基点(工作区根,或模型指定的那个工作区外的目录)。必须是已经 realpath 过的。 */
   root: string
   /** 从基点下的哪个子目录开始。`''` = 基点本身。 */
@@ -96,7 +97,8 @@ export async function walk(opts: WalkOptions): Promise<WalkResult> {
   const visited = new Set<string>()
   let frontier: Array<{ rel: string; abs: string; depth: number }> = []
 
-  const startAbs = start === '' ? root : join(root, start)
+  const joinPath = opts.path?.join ?? join
+  const startAbs = start === '' ? root : joinPath(root, start)
   frontier.push({ rel: start, abs: startAbs, depth: 0 })
   visited.add(startAbs)
 
@@ -105,11 +107,13 @@ export async function walk(opts: WalkOptions): Promise<WalkResult> {
 
     for (const dir of frontier) {
       if (signal.aborted) throw abortError()
+      if (now() > deadline) return { entries, truncated, timedOut: true }
 
       let listing: Array<{ name: string; isDir: boolean }>
       try {
         listing = await fs.readDir(dir.abs)
-      } catch {
+      } catch (error) {
+        if (opts.path && !['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(String((error as { code?: unknown })?.code))) throw error
         // 没权限 / 刚被删掉 / 是个断链。跳过这一个目录,不让整次遍历失败。
         continue
       }
@@ -126,7 +130,7 @@ export async function walk(opts: WalkOptions): Promise<WalkResult> {
         if (skip?.(item.name, item.isDir) === true) continue
 
         const rel = dir.rel === '' ? item.name : `${dir.rel}/${item.name}`
-        const abs = join(dir.abs, item.name)
+        const abs = joinPath(dir.abs, item.name)
 
         if (entries.length >= maxEntries) {
           truncated = true
@@ -146,11 +150,12 @@ export async function walk(opts: WalkOptions): Promise<WalkResult> {
         */
         let real: string
         try {
-          real = resolveInWorkspace(root, rel)
+          real = opts.path ? await opts.path.resolveWithin(root, rel) : resolveInWorkspace(root, rel)
         } catch (err) {
           // 软链指到工作区外面。跳过它,但**不中止遍历** —— 一个越界的软链
           // 不该让「搜一下这个仓库」整体失败。
           if (err instanceof PathEscapeError) continue
+          if (opts.path && !['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(String((err as { code?: unknown })?.code))) throw err
           continue
         }
         if (visited.has(real)) continue

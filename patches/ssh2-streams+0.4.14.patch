@@ -1,0 +1,12 @@
+diff --git a/node_modules/ssh2-streams/lib/sftp.js b/node_modules/ssh2-streams/lib/sftp.js
+--- a/node_modules/ssh2-streams/lib/sftp.js
++++ b/node_modules/ssh2-streams/lib/sftp.js
+@@ -2197,7 +2197,7 @@ SFTPStream.prototype.ext_openssh_fsync = function(handle, cb) {
+   buf.write('fsync@openssh.com', p += 4, 17, 'ascii');
+ 
+   writeUInt32BE(buf, handlelen, p += 17);
+-  buf.write(handle, p += 4, handlelen, 'utf8');
++  handle.copy(buf, p += 4);
+ 
+   state.requests[reqid] = { cb: cb };
+ 

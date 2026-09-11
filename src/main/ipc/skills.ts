@@ -22,7 +22,10 @@ import { join } from 'node:path'
 import { dirname } from 'node:path'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../../shared/domain/skill'
 import { refreshSkills } from '../runtime'
-import { getHost } from '../runtime'
+import { getEnvironments, getHost, getWorkspaceEnvironment } from '../runtime'
+import { EnvironmentError } from '../environment/errors'
+import { EnvironmentFiles } from '../environment/files'
+import { publishLocalDirectory } from '../environment/artifacts'
 import { installSkillZip } from '../kernel/skill/install'
 import { scanSkills } from '../kernel/skill/load'
 import { store } from '../state/store'
@@ -45,6 +48,7 @@ function broadcast(): void {
  */
 export async function listSkills(req: { workspaceId?: string }): Promise<SkillListItem[]> {
   const scanned = await refreshSkills(req.workspaceId ?? '')
+  const environment = req.workspaceId ? getWorkspaceEnvironment(req.workspaceId) : undefined
 
   const disabled = new Set(store.getDisabledSkillIds())
   const active = activeIdsOf(req.workspaceId)
@@ -59,9 +63,10 @@ export async function listSkills(req: { workspaceId?: string }): Promise<SkillLi
       sourceKind: s.source.kind,
       ...(s.scope !== undefined ? { scope: s.scope } : {}),
       globalEnabled: !disabled.has(s.id),
+      ...(s.unavailableReason ? { unavailableReason: s.unavailableReason } : {}),
       // 空清单 = 全都要,所以此时每一条显示的都是「已启用」
-      activeInWorkspace: active === null || (wsSelectionMode(req.workspaceId) !== 'explicit' && active.length === 0) || active.includes(s.id),
-      sourcePath: dirname(s.source.path),
+      activeInWorkspace: !s.unavailableReason && (active === null || (wsSelectionMode(req.workspaceId) !== 'explicit' && active.length === 0) || active.includes(s.id)),
+      sourcePath: s.scope === 'project' && environment ? environment.path.dirname(s.source.path) : dirname(s.source.path),
       ...(s.source.version ? { version: s.source.version } : {}),
       ...(s.source.sha256 ? { sha256: s.source.sha256 } : {}),
       usageCount: stats[s.id]?.count ?? 0,
@@ -71,22 +76,37 @@ export async function listSkills(req: { workspaceId?: string }): Promise<SkillLi
 
 export async function skillDiagnostics(req: { workspaceId?: string }): Promise<Array<{ path: string; message: string }>> {
   const host = getHost()
-  const workspaceRoot = req.workspaceId ? store.getWorkspace(req.workspaceId)?.rootPath : undefined
+  const environment = req.workspaceId ? getWorkspaceEnvironment(req.workspaceId) : undefined
   const result = await scanSkills({
     fs: host.fs,
+    ...(environment?.remote ? { projectFs: environment.fs, projectPath: environment.path } : {}),
     globalRoot: join(host.paths.userData(), 'skills'),
-    projectRoot: workspaceRoot ? join(workspaceRoot, '.next-cowork', 'skills') : ''
+    projectRoot: environment?.rootPath ? await environment.path.resolveWithin(environment.rootPath, '.next-cowork/skills') : ''
   })
   return result.diagnostics.map((item) => ({ path: item.path, message: item.message }))
 }
 
-function installRoot(scope: SkillInstallScope, workspaceId?: string): string {
+async function installRoot(scope: SkillInstallScope, workspaceId?: string): Promise<string> {
   if (scope === 'project') {
-    const root = workspaceId ? store.getWorkspace(workspaceId)?.rootPath : undefined
-    if (!root) throw new Error('请先打开工作区')
-    return join(root, '.next-cowork', 'skills')
+    if (!workspaceId) throw new EnvironmentError('unbound')
+    const environment = getWorkspaceEnvironment(workspaceId)
+    return environment.path.resolveWithin(environment.rootPath, '.next-cowork/skills')
   }
   return join(getHost().paths.userData(), 'skills')
+}
+
+async function installPackage(path: string, scope: SkillInstallScope, workspaceId?: string, checksum?: string): Promise<Awaited<ReturnType<typeof installSkillZip>>> {
+  const lease = scope === 'project' && workspaceId ? getEnvironments().acquire(workspaceId) : undefined
+  try {
+    const root = await installRoot(scope, workspaceId)
+    if (!lease?.environment.remote) return await installSkillZip(path, root, scope, checksum)
+    const temporary = await fs.mkdtemp(join(getHost().paths.temp(), 'ncw-skill-upload-'))
+    try {
+      const installed = await installSkillZip(path, temporary, scope, checksum)
+      const target = await publishLocalDirectory(lease.environment, installed.target, lease.environment.path.join(root, installed.name))
+      return { ...installed, target }
+    } finally { await fs.rm(temporary, { recursive: true, force: true }) }
+  } finally { lease?.release() }
 }
 
 export async function pickSkillZip(): Promise<{ path: string; name: string } | null> {
@@ -98,7 +118,7 @@ export async function pickSkillZip(): Promise<{ path: string; name: string } | n
 
 export async function installZip(req: { path: string; workspaceId?: string; scope?: SkillInstallScope }): Promise<SkillListItem> {
   const scope = req.scope ?? 'global'
-  const installed = await installSkillZip(req.path, installRoot(scope, req.workspaceId), scope)
+  const installed = await installPackage(req.path, scope, req.workspaceId)
   const items = await listSkills(req.workspaceId === undefined ? {} : { workspaceId: req.workspaceId })
   const found = items.find((item) => item.name === installed.name)
   if (!found) throw new Error('Skill 安装后未能加载')
@@ -172,7 +192,7 @@ export async function installMarketSkill(req: { slug: string; version?: string; 
   const temp = join(tempDir, `skill-v${version.replace(/[^0-9A-Za-z.+-]/g, '')}.zip`)
   try {
     await fs.writeFile(temp, bytes)
-    const installed = await installSkillZip(temp, installRoot(req.scope ?? 'global', req.workspaceId), req.scope ?? 'global', expectedSha256)
+    const installed = await installPackage(temp, req.scope ?? 'global', req.workspaceId, expectedSha256)
     const items = await listSkills(req.workspaceId === undefined ? {} : { workspaceId: req.workspaceId })
     const found = items.find((item) => item.name === installed.name)
     if (!found) throw new Error('Skill 安装后未能加载')
@@ -204,7 +224,20 @@ export async function uninstallSkill(req: { skillId: string; workspaceId?: strin
   const items = await listSkills(req.workspaceId === undefined ? {} : { workspaceId: req.workspaceId })
   const target = items.find((item) => item.id === req.skillId)
   if (!target?.sourcePath) throw new Error('找不到 Skill 安装位置')
-  const expectedRoot = installRoot(req.scope ?? (target.scope === 'project' ? 'project' : 'global'), req.workspaceId)
+  const scope = req.scope ?? (target.scope === 'project' ? 'project' : 'global')
+  const expectedRoot = await installRoot(scope, req.workspaceId)
+  if (scope === 'project' && req.workspaceId) {
+    const lease = getEnvironments().acquire(req.workspaceId)
+    try {
+      if (lease.environment.remote) {
+        const resolved = await lease.environment.path.resolveWithin(expectedRoot, target.sourcePath)
+        if (resolved === expectedRoot) throw new EnvironmentError('invalid-path')
+        await new EnvironmentFiles(lease.environment).mutate({ workspaceId: req.workspaceId, path: resolved, operation: 'delete' })
+        broadcast()
+        return
+      }
+    } finally { lease.release() }
+  }
   const resolved = await fs.realpath(target.sourcePath).catch(() => target.sourcePath as string)
   const root = await fs.realpath(expectedRoot).catch(() => expectedRoot)
   if (!(resolved === root || resolved.startsWith(root + '/'))) throw new Error('Skill 安装位置无效')

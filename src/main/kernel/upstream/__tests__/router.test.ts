@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ProviderStreamEvent } from '../../../../shared/agent/stream'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
 import { CLIENT_PROVIDER_ID } from '../../../../shared/domain/presets'
@@ -193,7 +193,8 @@ function rig(opts: {
   failover?: boolean
   keys?: Record<string, string | null>
   rateLimitFloorMs?: number
-  responses: Array<Response | (() => Response) | Error>
+  idleTimeoutMs?: number
+  responses: Array<Response | (() => Response | Promise<Response>) | Error>
 }): Rig {
   const calls: string[] = []
   const secretReads: string[] = []
@@ -234,6 +235,7 @@ function rig(opts: {
   return {
     router: new UpstreamRouter(host, config, {
       baseDelayMs: 0,
+      ...(opts.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: opts.idleTimeoutMs }),
       // 限流退避的默认基数是秒级(生产上必须如此),测试里压成 0 —— 否则每个
       // 429 用例都要真的睡上几秒。要断言退避本身的用例自己传一个小的非零值。
       rateLimitFloorMs: opts.rateLimitFloorMs ?? 0,
@@ -276,6 +278,109 @@ async function drainWithContext(
 }
 
 // ─── 用例 ────────────────────────────────────────────────────────────
+
+describe('UpstreamRouter stalled responses', () => {
+  it.each(['headers', 'body', 'error body'] as const)('times out stalled %s after 120 seconds without silently retrying', async (stage) => {
+    vi.useFakeTimers()
+    try {
+      const response = stage === 'headers'
+        ? () => new Promise<Response>(() => {})
+        : new Response(new ReadableStream<Uint8Array>(), {
+          status: stage === 'error body' ? 503 : 200,
+          headers: { 'content-type': 'text/event-stream' }
+        })
+      const { router, host, calls, usageRecords } = rig({
+        providers: [provider('p1')], aliases: [alias('m', 'p1')], responses: [response]
+      })
+      const fetchSpy = vi.spyOn(host, 'fetch')
+      let settled = false
+      const running = drain(router).then((events) => { settled = true; return events })
+      await vi.advanceTimersByTimeAsync(119_999)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect((await running).at(-1)).toMatchObject({
+        type: 'error', error: {
+          code: 'network', retryable: false, messageKey: 'agent.error.upstreamTimeout',
+          messageParams: { provider: 'p1', seconds: 120 }
+        }
+      })
+      expect(calls).toHaveLength(1)
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+      expect(usageRecords).toHaveLength(1)
+      expect(usageRecords[0]).toMatchObject({ ok: false, errorKind: 'network' })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resets the idle deadline on progress without imposing a total run limit', async () => {
+    vi.useFakeTimers()
+    try {
+      let source!: ReadableStreamDefaultController<Uint8Array>
+      const encoder = new TextEncoder()
+      const response = new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller
+          controller.enqueue(encoder.encode(truncatedBody('first')))
+        }
+      }), { headers: { 'content-type': 'text/event-stream' } })
+      const { router, calls } = rig({
+        providers: [provider('p1')], aliases: [alias('m', 'p1')],
+        responses: [response], idleTimeoutMs: 100
+      })
+      let settled = false
+      const running = drain(router).then((events) => { settled = true; return events })
+      for (let index = 0; index < 3; index++) {
+        await vi.advanceTimersByTimeAsync(80)
+        expect(settled).toBe(false)
+        source.enqueue(encoder.encode(`data: ${JSON.stringify({
+          type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'more' }
+        })}\n\n`))
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      await vi.advanceTimersByTimeAsync(100)
+      const events = await running
+      expect(events.filter((event) => event.type === 'text_delta')).toHaveLength(4)
+      expect(events.at(-1)).toMatchObject({ type: 'error', error: { messageKey: 'agent.error.upstreamTimeout' } })
+      expect(calls).toHaveLength(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['anthropic', 'openai-chat', 'openai-responses'] as const)('finishes %s without waiting for connection close or cancellation cleanup', async (protocol) => {
+    const source = protocol === 'anthropic' ? ok(sseBody({ text: 'done' }))
+      : protocol === 'openai-responses' ? sse(responseDone([messageItem]))
+        : ok(`data: ${JSON.stringify({ model: 'm-up', choices: [
+          { index: 0, delta: { content: 'done' }, finish_reason: 'stop' }
+        ] })}\n\ndata: [DONE]\n\n`)
+    const bytes = new TextEncoder().encode(await source.text())
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const cancel = vi.fn(() => cleanup)
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(bytes) }, cancel
+    })
+    const { router, calls } = rig({
+      providers: [provider('p1', { protocol })], aliases: [alias('m', 'p1')],
+      responses: [new Response(body, { headers: { 'content-type': 'text/event-stream' } })]
+    })
+    let settled = false
+    const running = drain(router).then((events) => { settled = true; return events })
+    try {
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 200, interval: 1 })
+      expect((await running).at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+      expect(calls).toHaveLength(1)
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(body.locked).toBe(false)
+    } finally {
+      releaseCleanup()
+      await running
+    }
+  })
+})
 
 describe('UpstreamRouter · 正常路径', () => {
   it('单 provider 流式贯通', async () => {

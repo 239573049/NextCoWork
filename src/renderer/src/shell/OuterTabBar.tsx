@@ -11,7 +11,8 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { Folder, LoaderCircle, PanelBottom, PanelRight, Plus, X } from "lucide-react";
+import { Folder, LoaderCircle, PanelBottom, PanelRight, Plus, Server, X } from "lucide-react";
+import { isLocalEnvironment } from '../../../shared/domain/environment';
 import type { ReactNode } from "react";
 import { FEATURE_LABEL, type OuterTab } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
@@ -33,6 +34,7 @@ export function OuterTabBar({
   onOpenWorkspace,
   onPickWorkspace,
   onCreateWorkspace,
+  onCreateSshWorkspace,
   rightPanelOpen,
   bottomPanelOpen,
   onToggleRightPanel,
@@ -49,6 +51,7 @@ export function OuterTabBar({
   onOpenWorkspace: (workspaceId: string) => void;
   onPickWorkspace: () => void;
   onCreateWorkspace: () => void;
+  onCreateSshWorkspace: () => void;
   rightPanelOpen: boolean;
   bottomPanelOpen: boolean;
   onToggleRightPanel: () => void;
@@ -84,7 +87,7 @@ export function OuterTabBar({
             ? (ws?.name ?? t("nav.unknownWorkspace"))
             : FEATURE_LABEL[tab.ref.feature];
         const Icon =
-          tab.kind === "workspace" ? Folder : FEATURE_ICON[tab.ref.feature];
+          tab.kind === "workspace" ? (isLocalEnvironment(ws?.environment) ? Folder : Server) : FEATURE_ICON[tab.ref.feature];
 
         return (
           <div
@@ -150,7 +153,7 @@ export function OuterTabBar({
             {workspaces.map((w) => (
               <MenuItem
                 key={w.id}
-                icon={<Folder size={14} />}
+                icon={isLocalEnvironment(w.environment) ? <Folder size={14} /> : <Server size={14} />}
                 description={w.rootPath}
                 checked={tabs.some(
                   (t) => t.kind === "workspace" && t.ref.workspaceId === w.id,
@@ -182,6 +185,7 @@ export function OuterTabBar({
             >
               {t("nav.createWorkspace")}
             </MenuItem>
+            <MenuItem icon={<Server size={14} />} onSelect={() => { onCreateSshWorkspace(); close(); }}>{t('nav.createSshWorkspace')}</MenuItem>
           </>
         )}
       </Menu>

@@ -30,6 +30,7 @@
  */
 import { z } from 'zod'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
+import { EnvironmentError, missingPath } from '../../../environment/errors'
 import { defineTool } from '../define'
 import type { ToolContext, ToolRegistration } from '../registry'
 import { compileGlob, normalizeGlobPath } from './glob-match'
@@ -56,6 +57,10 @@ const MAX_GREP_FILE_BYTES = 5 * 1024 * 1024
 const SNIFF_BYTES = 4096
 /** 每这么多个文件查一次中断 */
 const SIGNAL_EVERY = 32
+
+function rethrowRemoteFailure(error: unknown, ctx: ToolContext): void {
+  if (error instanceof EnvironmentError || (ctx.host.remote && !missingPath(error))) throw error
+}
 
 /** 忽略表在两个工具的描述里都要提一句 —— 模型据此判断「没搜到」是不是可信 */
 const IGNORE_NOTE =
@@ -128,7 +133,7 @@ export const globTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: false,
   async run(input, ctx) {
-    const r = resolvePath(ctx, input.path ?? '')
+    const r = await resolvePath(ctx, input.path ?? '')
     if (!r.ok) return r.result
     const walkBase = walkBaseOf(ctx, r)
     const base = walkBase.label
@@ -136,6 +141,7 @@ export const globTool: ToolRegistration = defineTool({
     const re = compileGlob(input.pattern)
     const res = await walk({
       fs: ctx.host.fs,
+      path: ctx.host.path,
       root: walkBase.root,
       start: walkBase.start,
       signal: ctx.signal,
@@ -159,7 +165,8 @@ export const globTool: ToolRegistration = defineTool({
         const rel = walkBase.display(e.rel)
         try {
           return { rel, mtime: (await ctx.host.fs.stat(e.abs)).mtimeMs }
-        } catch {
+        } catch (error) {
+          rethrowRemoteFailure(error, ctx)
           return { rel, mtime: 0 }
         }
       })
@@ -270,7 +277,8 @@ async function grepFile(
   let size: number
   try {
     size = (await fs.stat(abs)).size
-  } catch {
+  } catch (error) {
+    rethrowRemoteFailure(error, ctx)
     return null
   }
   if (size === 0 || size > MAX_GREP_FILE_BYTES) return null
@@ -278,14 +286,16 @@ async function grepFile(
   // ★ 先嗅探再解码:大多数二进制文件在这里就被挡掉了,全量读只发生在文本文件上
   try {
     if (looksBinary(await fs.readFileBytes(abs, SNIFF_BYTES))) return null
-  } catch {
+  } catch (error) {
+    rethrowRemoteFailure(error, ctx)
     return null
   }
 
   let raw: string
   try {
     raw = await fs.readFile(abs)
-  } catch {
+  } catch (error) {
+    rethrowRemoteFailure(error, ctx)
     return null
   }
 
@@ -376,7 +386,7 @@ export const grepTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: false,
   async run(input, ctx) {
-    const r = resolvePath(ctx, input.path ?? '')
+    const r = await resolvePath(ctx, input.path ?? '')
     if (!r.ok) return r.result
 
     const multiline = input.multiline === true
@@ -411,7 +421,7 @@ export const grepTool: ToolRegistration = defineTool({
       )
     }
 
-    const st = await ctx.host.fs.stat(r.abs).catch(() => null)
+    const st = await ctx.host.fs.stat(r.abs).catch((error: unknown) => { rethrowRemoteFailure(error, ctx); return null })
     if (st === null) return toolFail(`Path does not exist: ${relOf(ctx, r.abs)}`)
     const walkBase = walkBaseOf(ctx, r)
     const base = walkBase.label
@@ -429,6 +439,7 @@ export const grepTool: ToolRegistration = defineTool({
     } else {
       const res = await walk({
         fs: ctx.host.fs,
+        path: ctx.host.path,
         root: walkBase.root,
         start: walkBase.start,
         signal: ctx.signal,

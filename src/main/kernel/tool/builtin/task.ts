@@ -109,8 +109,7 @@ function buildDescription(agents: readonly AgentDefinition[]): string {
  * ★ 每次调用现拼,不缓存:缓存就意味着「用户新加的 agent 文件要重启才生效」,
  * 而这件事没有任何地方会提示他。拼一份字符串的代价可以忽略。
  */
-export function taskTool(): ToolRegistration {
-  const agents = agentRegistry().list()
+export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().list()): ToolRegistration {
 
   return defineTool({
     internalId: 'Task',

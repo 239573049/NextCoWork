@@ -49,8 +49,59 @@ async function setup(titleFailure = false) {
   const session = store.createSession({ id: 'session', workspaceId: 'workspace', title: '新对话' })
   const changed = vi.fn()
   setSessionChangeListener(changed)
-  return { release, requests, session, changed }
+  return { host, release, requests, session, changed }
 }
+
+describe('run startup cancellation', () => {
+  it('rejects an unknown workspace before local file access, execution, or model requests', async () => {
+    const { host, release, requests } = await setup()
+    const reads = vi.spyOn(host.fs, 'readDir')
+    const commands = vi.spyOn(host, 'spawn')
+    const req = request({ workspaceId: 'missing' })
+    try { await expect(runAgent(new RunHandle(req), req)).rejects.toThrow('unbound') } finally { release() }
+    expect(reads).not.toHaveBeenCalled()
+    expect(commands).not.toHaveBeenCalled()
+    expect(requests).toEqual([])
+  })
+
+  it.each(['scan', 'git'] as const)('stops during a stalled %s and never starts a late model request', async (stage) => {
+    const { host, release, requests } = await setup()
+    let releaseOperation!: () => void
+    let waiting = false
+    const blocked = new Promise<void>((resolve) => { releaseOperation = resolve })
+    if (stage === 'scan') {
+      vi.spyOn(host.fs, 'exists').mockImplementation(async () => {
+        waiting = true
+        await blocked
+        return false
+      })
+    } else {
+      vi.spyOn(host, 'spawn').mockImplementation(async () => {
+        waiting = true
+        await blocked
+        return { code: 1, stdout: '', stderr: '' }
+      })
+    }
+    const req = request()
+    const handle = new RunHandle(req)
+    const running = runAgent(handle, req)
+    try {
+      await vi.waitFor(() => expect(waiting).toBe(true), { timeout: 200, interval: 1 })
+      handle.abort({ by: 'user' })
+      await vi.waitFor(() => expect(handle.status).toBe('aborted'), { timeout: 200, interval: 1 })
+      await running
+      expect(handle.endedAt).toBeDefined()
+    } finally {
+      releaseOperation()
+      release()
+      await running
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(requests).toEqual([])
+    expect(store.getHistory(req.sessionId)).toEqual([])
+    expect(handle.since(0).filter((event) => event.type === 'run_end')).toHaveLength(1)
+  })
+})
 
 describe('first message title wiring', () => {
   it('starts and completes the Agent while the title is unresolved, then broadcasts the generated title', async () => {
@@ -66,7 +117,7 @@ describe('first message title wiring', () => {
     ])
     release()
     await vi.waitFor(() => expect(store.getSession(req.sessionId)?.title).toBe('异步会话标题'))
-    expect(changed).toHaveBeenCalledWith('workspace', { sessionId: 'session', title: '异步会话标题' })
+    expect(changed).toHaveBeenCalledWith({ kind: 'metadata', sessionIds: ['session'], workspaceId: 'workspace', renamed: { sessionId: 'session', title: '异步会话标题' } })
 
     const followup = request({ runId: 'followup', input: [{ type: 'text', text: '第二条消息。' }] })
     await runAgent(new RunHandle(followup), followup)

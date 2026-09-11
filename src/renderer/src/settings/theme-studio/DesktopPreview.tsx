@@ -54,7 +54,7 @@ export function DesktopPreview({ profile, images }: { profile: ThemeProfile; ima
           <main className="app-canvas flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
             <header data-theme-region="chrome" className="flex h-[34px] shrink-0 items-end bg-chrome px-2">
               <OuterTabBar tabs={[{ id: 'preview-workspace', kind: 'workspace', ref: { workspaceId: workspace.id } }]} activeId="preview-workspace" workspaces={[workspace]} runningWorkspaceIds={running}
-                onActivate={noop} onClose={noop} onMove={noop} onOpenWorkspace={noop} onPickWorkspace={noop} onCreateWorkspace={noop}
+                onActivate={noop} onClose={noop} onMove={noop} onOpenWorkspace={noop} onPickWorkspace={noop} onCreateWorkspace={noop} onCreateSshWorkspace={noop}
                 rightPanelOpen={right} bottomPanelOpen={bottom} onToggleRightPanel={() => setRight(!right)} onToggleBottomPanel={() => setBottom(!bottom)} />
             </header>
             <div className="flex min-h-0 flex-1">

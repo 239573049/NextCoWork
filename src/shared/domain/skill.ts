@@ -26,6 +26,7 @@ export interface Skill {
   scope?: SkillScope
   /** 全局开关;还要在工作区里单独启用才生效(界面「Skill 工作区选装模式」) */
   globalEnabled: boolean
+  unavailableReason?: 'client-assets'
   frontmatter: SkillFrontmatter
   /**
    * 注入系统提示词的正文。
@@ -56,6 +57,7 @@ export interface SkillListItem {
   globalEnabled: boolean
   /** 在**当前**工作区是否激活 */
   activeInWorkspace: boolean
+  unavailableReason?: 'client-assets'
   /** Local package metadata, when available. */
   version?: string
   sha256?: string

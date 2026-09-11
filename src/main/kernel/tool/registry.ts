@@ -10,7 +10,7 @@ import type { PermissionMode } from '../../../shared/agent/permission'
 import type { Skill } from '../../../shared/domain/skill'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
-import type { KernelHost } from '../host'
+import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
 import type { InteractFn } from '../interaction-gate'
 import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
 
@@ -21,7 +21,11 @@ import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
  *   把 `secrets.get()` 递过去,等于 `host.ts` 里「明文 key 永不进内核」那条作废。
  * - `paths`:`userData` 在工作区外面。工具要么走路径围栏,要么根本不该碰路径。
  */
-export type ToolHost = Pick<KernelHost, 'fs' | 'spawn' | 'fetch' | 'browserFetch' | 'clock' | 'logger'>
+export type ToolHost = Pick<KernelHost, 'fs' | 'spawn' | 'fetch' | 'browserFetch' | 'clock' | 'logger'> & {
+  path?: WorkspacePaths
+  platform?: PlatformInfo
+  remote?: boolean
+}
 
 /**
  * 派一个子代理出去 —— `Task` 工具与外面那台机器之间**唯一**的接触面。

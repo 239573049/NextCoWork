@@ -17,10 +17,13 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 let userDataDir = ''
+const { acquireEnvironment } = vi.hoisted(() => ({ acquireEnvironment: vi.fn() }))
+vi.mock('../../runtime', () => ({ getEnvironments: () => ({ acquire: acquireEnvironment }) }))
 
 vi.mock('electron', () => ({
   app: { getPath: (): string => userDataDir },
@@ -32,7 +35,11 @@ import { MAX_ATTACHMENT_BYTES } from '../../../shared/domain/attachment'
 import { closeDatabase, openDatabase } from '../../db'
 import * as repo from '../../db/repo'
 import { attachmentRoot } from '../../net/attachment-protocol'
-import { listSessionAttachments, pickAttachments, removeAttachment, uploadAttachment } from '../attachment'
+import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadAttachment } from '../attachment'
+import { localEnvironment } from '../../environment/local'
+import { nodeHost } from '../../kernel/host'
+import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
+import type { WindowContext } from '../../window/registry'
 
 const bytesOf = (s: string): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Buffer.from(s, 'utf8')) as Uint8Array<ArrayBuffer>
@@ -49,6 +56,42 @@ afterEach(() => {
 })
 
 describe('uploadAttachment', () => {
+  it('requires a single-use window-bound upload approval and preserves source identity', async () => {
+    const remote = mkdtempSync(join(tmpdir(), 'ncw-remote-attachment-'))
+    const lease = { environment: { ...localEnvironment(nodeHost(), remote), remote: true, description: 'server' }, release: vi.fn() }
+    acquireEnvironment.mockReturnValue(lease)
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }) as unknown as WindowContext['sender']
+    const ctx: WindowContext = { id: 42, kind: 'main', sender }
+    repo.putWorkspace({ id: 'W1', name: 'remote', rootPath: remote, environment: { kind: 'connection', connectionId: 'server' }, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })
+    repo.putConnectionProfile({ id: 'server', name: 'server', kind: 'ssh', target: { kind: 'config', host: 'server' }, platform: 'auto', enabled: true, revision: 1, createdAt: 1, updatedAt: 1 })
+    const attachment = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'report.pdf', mime: 'application/pdf', bytes: bytesOf('report') })
+    try {
+      const cancelled = await prepareWorkspaceUpload({ id: attachment.id, sessionId: 'S1', workspaceId: 'W1' }, ctx)
+      expect(readdirSync(remote)).toEqual([])
+      cancelWorkspaceUpload(cancelled.ticket, ctx)
+      await expect(completeWorkspaceUpload(cancelled.ticket, ctx)).rejects.toThrow('approval-expired')
+      const intent = await prepareWorkspaceUpload({ id: attachment.id, sessionId: 'S1', workspaceId: 'W1' }, ctx)
+      await expect(completeWorkspaceUpload(intent.ticket, { ...ctx, id: 43 })).rejects.toThrow('approval-expired')
+      const reference = await completeWorkspaceUpload(intent.ticket, ctx)
+      expect(reference.source).toMatchObject({ kind: 'workspace', workspaceId: 'W1', connectionRevision: 1, environment: { kind: 'connection', connectionId: 'server' } })
+      expect(readFileSync(reference.path, 'utf8')).toBe('report')
+      expect(readFileSync(repo.getAttachmentRow(attachment.id)!.path, 'utf8')).toBe('report')
+      await expect(completeWorkspaceUpload(intent.ticket, ctx)).rejects.toThrow('approval-expired')
+      expect(lease.release).toHaveBeenCalledTimes(2)
+    } finally { sender.emit('destroyed'); rmSync(remote, { recursive: true, force: true }) }
+  })
+
+  it('stages a selected client document without exposing a local file reference for remote upload', async () => {
+    const source = join(userDataDir, 'report.pdf')
+    writeFileSync(source, 'REPORT')
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [source] })
+    const picked = await pickAttachments({ scope: 'session', ownerId: 'S1', stageFiles: true })
+    expect(picked).toHaveLength(1)
+    expect(picked[0]).toMatchObject({ kind: 'attachment', attachment: { displayName: 'report.pdf', size: 6 } })
+    expect(JSON.stringify(picked)).not.toContain(source)
+    expect(readFileSync(source, 'utf8')).toBe('REPORT')
+  })
+
   it('落盘到 sessions/<id>/ 并返回 ncw:// URL,不泄漏绝对路径', () => {
     const a = uploadAttachment({
       scope: 'session',

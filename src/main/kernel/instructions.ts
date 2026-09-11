@@ -28,7 +28,8 @@
  * 标签(`kernel/untrusted.ts`)、限长。而真正的防线在权限层:AGENTS.md 里
  * 写什么都不能让一次工具调用跳过 `approve`。
  */
-import type { KernelFs } from './host'
+import type { KernelFs, WorkspacePaths } from './host'
+import { EnvironmentError } from '../../shared/domain/environment'
 import { clampWithEllipsis, stripControlChars } from './text'
 import { PathEscapeError, resolveInWorkspace } from './tool/path-guard'
 import { neutralizeReminderTags } from './untrusted'
@@ -58,6 +59,8 @@ export interface InstructionsDiagnostic {
 
 export interface InstructionsScanInput {
   fs: KernelFs
+  projectFs?: KernelFs
+  projectPath?: WorkspacePaths
   /** `<appData>`。空串 = 跳过全局这一层。 */
   globalRoot: string
   /** `<workspaceRoot>`。空串 = 没有工作区。 */
@@ -86,9 +89,12 @@ export async function scanInstructions(
   const diagnostics: InstructionsDiagnostic[] = []
   const chunks: string[] = []
 
-  for (const root of [input.globalRoot, input.projectRoot]) {
+  for (const { root, fs, path } of [
+    { root: input.globalRoot, fs: input.fs, path: undefined },
+    { root: input.projectRoot, fs: input.projectFs ?? input.fs, path: input.projectPath }
+  ]) {
     if (root === '') continue
-    const text = await readOne(input.fs, root, diagnostics)
+    const text = await readOne(fs, root, diagnostics, path)
     if (text !== '') chunks.push(text)
   }
 
@@ -98,7 +104,8 @@ export async function scanInstructions(
 async function readOne(
   fs: KernelFs,
   root: string,
-  diagnostics: InstructionsDiagnostic[]
+  diagnostics: InstructionsDiagnostic[],
+  path?: WorkspacePaths
 ): Promise<string> {
   let file: string
   try {
@@ -107,8 +114,9 @@ async function readOne(
       的软链,配上「每一轮都把这份正文发给上游」,就是一次静默的密钥外泄。
       全局那层同样要过 —— userData 也可能被人放了软链进去。
     */
-    file = resolveInWorkspace(root, INSTRUCTIONS_FILE)
+    file = path ? await path.resolveWithin(root, INSTRUCTIONS_FILE) : resolveInWorkspace(root, INSTRUCTIONS_FILE)
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err
     if (err instanceof PathEscapeError) {
       // ★ 只说模型/用户自己给的那个名字,不回显目标路径 —— 那是逃逸想探的东西
       diagnostics.push({ path: `${root}/${INSTRUCTIONS_FILE}`, message: '它指向了目录之外,已跳过' })
@@ -124,6 +132,7 @@ async function readOne(
     const bytes = await fs.readFileBytes(file, INSTRUCTIONS_FILE_MAX_BYTES)
     raw = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err
     diagnostics.push({ path: file, message: `读不了这个文件:${msg(err)}` })
     return ''
   }

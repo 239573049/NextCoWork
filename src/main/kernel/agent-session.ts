@@ -31,8 +31,10 @@ import {
   validateModelRuntime
 } from '../../shared/domain/model-runtime'
 import type { Skill } from '../../shared/domain/skill'
+import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
+import { EnvironmentError } from '../../shared/domain/environment'
 import { ulid } from '../../shared/util/id'
-import { isAbortError } from './abort'
+import { abortable, abortableStream, isAbortError } from './abort'
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
 import { compactMessages, withSummary } from './context-assembler'
@@ -88,6 +90,8 @@ export type ApproveFn = (req: {
 
 export interface SessionDeps {
   host: KernelHost
+  workspace?: import('./host').WorkspaceHost
+  fileReferenceSource?: FileReferenceSource
   upstream: SessionUpstream
   tools: ToolRegistry
   workspaceRoot: string
@@ -147,6 +151,10 @@ const INTERRUPTED = '[interrupted: the user stopped the run before this tool cal
 const RECOVERED_INTERRUPTED =
   '[not executed: the previous run ended before this tool call produced a result]'
 
+/** 历史里对不上当前运行环境的文件引用 → 发给模型的替代文本(与上一条同样是模型侧英文)。 */
+const foreignReference = (name: string): string =>
+  `[attachment "${name}" omitted: it belongs to a different workspace environment and has no usable path here]`
+
 /** 工具执行期间的异常收敛(中断除外)。`defineTool` 已经做过一遍,但 MCP 工具是直接注册的。 */
 function toolThrewError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err)
@@ -175,7 +183,18 @@ export class AgentSession {
     private readonly req: RunRequest
   ) {
     this.messages = [...(deps.history ?? [])]
-    this.contextMessages = [...this.messages]
+    /**
+     * ★ 历史一律走 `isolateHistoryPaths`(不抛),**两个分支都要走**。
+     *
+     * 远端分支原先走 `normalizePaths`,那是会抛的:历史里只要有一条对不上的引用
+     * (工作区改指过另一台服务器、或原本是本地工作区),构造函数就在 run 开始之前抛,
+     * 此后每一次 run 都在同一处抛,除了手改历史没有任何修复入口。
+     *
+     * 本地分支原先直接 `[...this.messages]`,一个字都不校验 —— 更糟:历史引用早已被
+     * 归一成相对写法,于是 server-a 的 `src/a.ts` 进本地 run 后指向**本机同名文件**,
+     * 模型读到一个无关文件而全程无一处报错。
+     */
+    this.contextMessages = this.messages.map((message) => ({ ...message, parts: this.isolateHistoryPaths(message.parts) }))
     const latestCheckpoint = [...(deps.contextCheckpoints ?? [])].sort((a, b) => b.windowIndex - a.windowIndex)[0]
     this.contextNote = latestCheckpoint?.note
     this.contextWindowIndex = latestCheckpoint?.windowIndex ?? 0
@@ -342,7 +361,8 @@ export class AgentSession {
       ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
       workspaceRoot: this.deps.workspaceRoot,
       now: this.deps.host.clock.now(),
-      platform: this.deps.host.platform,
+      platform: this.deps.workspace?.platform ?? this.deps.host.platform,
+      environment: this.deps.workspace,
       permissionMode: this.req.permissionMode,
       webSearch: this.req.webSearch,
       reminder: {
@@ -424,11 +444,11 @@ export class AgentSession {
     let streamError: AgentError | undefined
     let ended = false
 
-    for await (const ev of this.deps.upstream.stream(request, this.handle.signal, {
+    for await (const ev of abortableStream(this.deps.upstream.stream(request, this.handle.signal, {
       workspaceId: this.req.workspaceId,
       runId: this.req.runId,
       sessionId: this.req.sessionId
-    })) {
+    }), this.handle.signal)) {
       this.handle.signal.throwIfAborted()
       this.handle.emit({ type: 'stream', delta: ev })
       acc.apply(ev)
@@ -509,13 +529,14 @@ export class AgentSession {
     }
     let note = ''
     try {
-      for await (const ev of this.deps.upstream.stream(request, this.handle.signal, {
+      for await (const ev of abortableStream(this.deps.upstream.stream(request, this.handle.signal, {
         workspaceId: this.req.workspaceId, runId: `${this.req.runId}:context`, sessionId: this.req.sessionId
-      })) {
+      }), this.handle.signal)) {
         if (ev.type === 'text_delta') note += ev.text
         if (ev.type === 'error') return undefined
       }
-    } catch {
+    } catch (error) {
+      if (isAbortError(error) || this.handle.signal.aborted) throw error
       return undefined
     }
     // eslint-disable-next-line no-control-regex -- intentionally strip control characters from model output
@@ -629,7 +650,8 @@ export class AgentSession {
     // 用户才能把审批弹窗、工具卡片和转录对上号。
     this.handle.emit({ type: 'tool_start', callId, toolName: tool.externalName, input: call.input })
 
-    const decision = await this.approve(callId, tool, call.input)
+    const decision = await abortable(() => this.approve(callId, tool, call.input), this.handle.signal)
+    this.handle.signal.throwIfAborted()
     if (decision.kind === 'deny') {
       // 拒绝要让模型**看见**:系统提示词里写了「被拒绝时不要试图绕开」,
       // 而那句话的前提是它知道自己被拒了。
@@ -641,14 +663,14 @@ export class AgentSession {
 
     let result: ToolResult
     try {
-      result = await tool.execute(input, this.toolContext(callId))
+      result = await abortable(() => tool.execute(input, this.toolContext(callId)), this.handle.signal)
     } catch (err) {
       /**
        * ★ 中断**原样抛出**,不伪装成工具失败(`define.test.ts` 钉住的契约)。
        * 伪装成失败的话,模型会看到「工具失败了」然后继续往下跑 ——
        * 用户点了停止,对话却还在动。
        */
-      if (isAbortError(err)) throw err
+      if (isAbortError(err) || this.handle.signal.aborted) throw err
       // 其余异常收敛成工具错误:`tool_failed` 进转录并继续循环(方案 §4.11)
       return this.toolFailure(callId, `Tool execution failed: ${toolThrewError(err)}`)
     }
@@ -687,7 +709,11 @@ export class AgentSession {
       skills: this.deps.skills,
       // ★ 递的是 deps.host 本身(结构上满足 ToolHost),不是拷贝出来的五个字段 ——
       //   拷贝会在换宿主后留下一份旧引用,正是 ctx 传递想避免的那件事
-      host: this.deps.host,
+      host: this.deps.workspace ? {
+        fs: this.deps.workspace.fs, spawn: this.deps.workspace.spawn, path: this.deps.workspace.path,
+        remote: this.deps.workspace.remote, platform: this.deps.workspace.platform,
+        fetch: this.deps.host.fetch, clock: this.deps.host.clock, logger: this.deps.host.logger
+      } : this.deps.host,
       // 进度是易失的:单独的事件类型,永不写入转录
       emit: (progress) => this.handle.emit({ type: 'tool_progress', callId, progress }),
       /*
@@ -797,9 +823,40 @@ export class AgentSession {
    * 两边不一致时,模型会把同一个文件当成两个。
    */
   private normalizePaths(parts: readonly ContentPart[]): ContentPart[] {
-    return parts.map((p) =>
-      p.type === 'file_ref' ? { ...p, path: displayPath(this.deps.workspaceRoot, p.path) } : p
-    )
+    return parts.map((part) => {
+      if (part.type !== 'file_ref') return part
+      const expected = this.deps.fileReferenceSource ?? { kind: 'local' }
+      if ((this.deps.workspace?.remote && expected.kind !== 'workspace') || !fileReferenceMatches(part.source, expected)) throw new EnvironmentError('conflict')
+      const path = this.deps.workspace?.remote
+        ? this.deps.workspace.path.display(this.deps.workspaceRoot, part.path)
+        : displayPath(this.deps.workspaceRoot, part.path)
+      return { ...part, path }
+    })
+  }
+
+  /**
+   * 历史里的文件引用:同样的匹配规则,但**不抛异常**。
+   *
+   * 抛和放行都是错的。抛会让整条会话永久卡死(见构造函数);放行则把一条在**别的**
+   * 环境里算出来的路径喂给模型 —— 两台服务器上存在同一个相对路径时,它会读到一个
+   * 完全无关的同名文件,而且没有任何一处会报错。所以换成一句纯文本:模型知道这里
+   * 曾经有过一个附件,但拿不到一条能用的路径。
+   *
+   * 只作用于 `contextMessages`(发给模型的那份)。`this.messages` 是转录,原样保留,
+   * 渲染层那张 chip 不受影响。
+   */
+  private isolateHistoryPaths(parts: readonly ContentPart[]): ContentPart[] {
+    const expected = this.deps.fileReferenceSource ?? { kind: 'local' }
+    return parts.map((part) => {
+      if (part.type !== 'file_ref') return part
+      if ((this.deps.workspace?.remote && expected.kind !== 'workspace') || !fileReferenceMatches(part.source, expected)) {
+        return { type: 'text', text: foreignReference(part.name) }
+      }
+      const path = this.deps.workspace?.remote
+        ? this.deps.workspace.path.display(this.deps.workspaceRoot, part.path)
+        : displayPath(this.deps.workspaceRoot, part.path)
+      return { ...part, path }
+    })
   }
 
   private injectInterjections(): void {

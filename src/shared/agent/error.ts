@@ -6,6 +6,8 @@
  * 而不是在 30 个调用点上被不一致地决定。
  */
 
+import type { EnvironmentErrorCode } from '../domain/environment'
+
 export type AgentErrorCode =
   /** 凭证无效/缺失 → UI 跳设置页 */
   | 'auth'
@@ -39,6 +41,8 @@ export interface AgentError {
   /** Locally generated errors are translated in the renderer; upstream text stays verbatim. */
   messageKey?: string
   messageParams?: Record<string, string | number>
+  environmentCode?: EnvironmentErrorCode
+  environmentDetail?: string
 }
 
 /** 只有这两类会终止整个 run;其余的要么进转录、要么只是提示。 */

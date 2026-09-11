@@ -19,10 +19,10 @@
  * 和 `defaultSkip` 那张忽略表。自己写一遍 readdir 递归就等于把
  * 「`node_modules` 会不会把主进程卡住」这个问题重新犯一次。
  */
-import { realpathSync } from 'node:fs'
 import type { FileSuggestion } from '../../shared/domain/file-tree'
 import { rankPaths } from '../../shared/domain/fuzzy-path'
-import { nodeFs } from '../kernel/node-fs'
+import { getWorkspaceEnvironment } from '../runtime'
+import type { WorkspaceEnvironment } from '../environment/contract'
 import { defaultSkip } from '../kernel/tool/builtin/ignore'
 import { walk } from '../kernel/tool/builtin/walk'
 import { store } from '../state/store'
@@ -50,11 +50,12 @@ interface Index {
 const cache = new Map<string, Index>()
 const building = new Map<string, Promise<Index>>()
 
-async function buildIndex(workspaceId: string, root: string): Promise<Index> {
+async function buildIndex(environment: WorkspaceEnvironment): Promise<Index> {
   const r = await walk({
-    fs: nodeFs(),
+    fs: environment.fs,
+    path: environment.path,
     // ★ `walk` 要求基点已经 realpath 过 —— 它内部拿这个根做越界判定
-    root: realpathSync.native(root),
+    root: await environment.fs.realpath(environment.rootPath),
     signal: new AbortController().signal,
     now: () => Date.now(),
     maxEntries: MAX_INDEX_ENTRIES,
@@ -67,20 +68,22 @@ async function buildIndex(workspaceId: string, root: string): Promise<Index> {
     if (e.isDir) continue
     files.push({ path: e.rel, name: e.rel.slice(e.rel.lastIndexOf('/') + 1) })
   }
-  const index: Index = { files, builtAt: Date.now() }
-  cache.set(workspaceId, index)
-  return index
+  environment.assertReady()
+  return { files, builtAt: Date.now() }
 }
 
-function indexOf(workspaceId: string, root: string): Promise<Index> {
+function indexOf(workspaceId: string, environment: WorkspaceEnvironment): Promise<Index> {
   const hit = cache.get(workspaceId)
   if (hit !== undefined && Date.now() - hit.builtAt < INDEX_TTL_MS) return Promise.resolve(hit)
 
   const inflight = building.get(workspaceId)
   if (inflight !== undefined) return inflight
 
-  const p = buildIndex(workspaceId, root).finally(() => {
-    building.delete(workspaceId)
+  const p = buildIndex(environment).then((index) => {
+    if (building.get(workspaceId) === p) cache.set(workspaceId, index)
+    return index
+  }).finally(() => {
+    if (building.get(workspaceId) === p) building.delete(workspaceId)
   })
   building.set(workspaceId, p)
   return p
@@ -98,22 +101,25 @@ export async function searchWorkspaceFiles(req: {
 }): Promise<FileSuggestion[]> {
   const ws = store.getWorkspace(req.workspaceId)
   if (!ws) throw new IpcError('unknown', `工作区不存在: ${req.workspaceId}`)
+  const environment = getWorkspaceEnvironment(req.workspaceId)
 
   let index: Index
   try {
-    index = await indexOf(req.workspaceId, ws.rootPath)
-  } catch {
+    index = await indexOf(`${req.workspaceId}:${environment.key}`, environment)
+  } catch (error) {
+    if (environment.remote) throw error
     // 根被删/改名/没权限。★ 返回空列表而不是抛:`@` 只是个便利入口,
     //   它失败不该在输入框上弹一个错误,用户照样可以把路径打出来。
     return []
   }
 
   const limit = Math.min(Math.max(req.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT)
+  environment.assertReady()
   return rankPaths(index.files, req.query, limit)
 }
 
 /** 工作区关闭/换根时丢掉它的索引。留着只是白占内存。 */
 export function forgetFileIndex(workspaceId: string): void {
-  cache.delete(workspaceId)
-  building.delete(workspaceId)
+  for (const key of cache.keys()) if (key.startsWith(`${workspaceId}:`)) cache.delete(key)
+  for (const key of building.keys()) if (key.startsWith(`${workspaceId}:`)) building.delete(key)
 }

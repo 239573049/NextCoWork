@@ -22,7 +22,22 @@ export interface TerminalCreateRequest {
   cwd?: string
   cols: number
   rows: number
+  approval?: string
 }
+
+export interface TerminalIntent {
+  id: string
+  terminalId: string
+  workspaceId: string
+  connection: string
+  cwd: string
+  shell: string
+  expiresAt: number
+}
+
+export type TerminalPreparation =
+  | { kind: 'ready'; terminal: TerminalInfo }
+  | { kind: 'approval'; intent: TerminalIntent }
 
 /**
  * ★ 主进程保留环形缓冲(每终端 ~256KB)供 terminal:getBuffer,

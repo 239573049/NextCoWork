@@ -68,6 +68,7 @@ async function push(): Promise<void> {
 
 function applyEvent(event: { kind: string; entityId: string; operation: string; payload: unknown; revision?: number }): void {
   const payload = event.payload as Record<string, unknown>
+  if (event.kind === 'mcpServer' && (payload.workspaceId !== undefined || repo.getMcpServer(event.entityId)?.workspaceId !== undefined)) return
   repo.withSyncApply(() => {
     if (event.operation === 'delete' || payload.deleted === true) {
       if (event.kind === 'provider') repo.removeProvider(event.entityId)

@@ -251,6 +251,9 @@ skillMarket:install-progress   (on)     ← { taskId, phase, percent }
 | `storage:extractDocumentText` | I | 文档抽取纯文本 |
 | `storage:undoTurnChanges` / `redoTurnChanges` / `classifyTurnChanges` | I | 变更回滚 / 重做 |
 | `storage:inspectGitWorkspace` | I | Git 工作区状态 |
+| `workspace:readFile` / `writeFile` / `mutateFile` | I | 文件工作台读写与增删改（本机走磁盘围栏，远端走 SFTP） |
+| `workspace:revealFile` | I | 在文件树中定位。远端返回工作区相对的扎根位置；越界不返回扎根指令，且绝不调用本机文件管理器 |
+| `workspace:listRecovery` | I | 列出远端工作区可恢复的删除项（从服务器索引派生，顺带回收孤儿条目）。本机工作区返回空 |
 | `sqlite:*` | I | 本地数据库读写 |
 | `export:*` | I | 数据导出 |
 

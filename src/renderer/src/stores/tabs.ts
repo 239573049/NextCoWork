@@ -21,6 +21,7 @@ import type { WorkspaceFileMutationRequest } from '../../../shared/domain/worksp
 import { isWithinPath } from './documents'
 import { findGroup, migrateLegacyInnerTabs, normalizeDockState, splitGroup, moveTab as moveDockTab, reorderTab as reorderDockTab, resizeSplit, closeTab as closeDockTab, closeGroup as closeDockGroupState, addTabToGroup, type DockDirection, type DockNode } from '../../../shared/domain/dock'
 import { useWindowStore } from './window'
+import type { SessionChange } from '../../../shared/domain/session'
 
 const EMPTY: InnerTabState = {
   tabs: [],
@@ -47,6 +48,7 @@ interface BrowserTabSyncItem {
  */
 export interface TabInit {
   title?: string
+  selectedPath?: string
   /** 给 doc / draw / preview / files 用;其余 kind 忽略 */
   path?: string
   /** 给 browser 用 */
@@ -96,7 +98,7 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
     case 'preview':
       return { id, kind, pane, title: init.title ?? '文件预览', ref: { path } }
     case 'files':
-      return { id, kind, pane, title: init.title ?? '工作区文件', ref: { path } }
+      return { id, kind, pane, title: init.title ?? '工作区文件', ref: { path, ...(init.selectedPath === undefined ? {} : { selectedPath: init.selectedPath }) } }
   }
 }
 
@@ -128,6 +130,7 @@ interface TabsState {
   open: (workspaceId: string, kind: InnerTabKind, pane?: TabPane, init?: TabInit) => void
   /** 在已有会话上打开一个新 Tab（侧边栏历史会话使用）。 */
   openSession: (workspaceId: string, sessionId: string, title?: string) => void
+  removeSessions: (change: Extract<SessionChange, { kind: 'deleted' }>) => void
   /**
    * 在文件树或 Markdown 链接里点一个文件时走这条,**不是 `open`**:文件会进入
    * 当前工作区的右侧工作台；同一个文件已经开着就切过去,不再开第二个。
@@ -584,6 +587,20 @@ export const useTabsStore = create<TabsState>((set, get) => {
       if (groupId === null) return
       const nextDock = addTabToGroup(dock, groupId, chat)
       write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'main', chat.id))
+    },
+
+    removeSessions(change) {
+      const deleted = new Set(change.sessionIds)
+      for (const [workspaceId, state] of Object.entries(get().byWorkspace)) {
+        const affected = state.tabs.filter((tab) => tab.kind === 'chat' && tab.ref.sessionId !== null && deleted.has(tab.ref.sessionId))
+        if (affected.length === 0) continue
+        const replacement = change.replacement
+        if (affected.some((tab) => tab.id === state.activeTabId)
+          && replacement?.workspaceId === workspaceId && !deleted.has(replacement.id)) {
+          get().openSession(workspaceId, replacement.id, replacement.title)
+        }
+        for (const tab of affected) get().close(workspaceId, tab.id)
+      }
     },
 
     openPath(workspaceId, kind, path, title) {

@@ -14,9 +14,9 @@
  * 用户拖了 5 个文件进来,其中一个太大被拒,如果它悄悄不见了,
  * 用户只会以为自己少拖了一个。
  */
-import { AlertCircle, FileText, RotateCw, X } from "lucide-react";
+import { AlertCircle, FileText, RotateCw, Upload, X } from "lucide-react";
 import type { ReactNode } from "react";
-import type { Attachment } from "../../../../shared/domain/attachment";
+import type { Attachment, FileReferenceSource } from "../../../../shared/domain/attachment";
 import { isImageMime } from "../../../../shared/domain/attachment";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
@@ -28,10 +28,11 @@ import { cn } from "../../lib/cn";
 export interface TrayItem {
   key: string;
   name: string;
-  status: "uploading" | "done" | "error";
+  status: "uploading" | "awaiting-upload" | "done" | "error";
   attachment?: Attachment;
   /** 非图片文件的真实磁盘路径——不经过上传，与 attachment 二选一 */
   path?: string;
+  source?: FileReferenceSource;
   error?: string;
 }
 
@@ -65,6 +66,7 @@ export function AttachmentTray({
           }}
           labels={{
             uploading: t("chat.uploading"),
+            upload: t("ssh.uploadToServer"),
             retry: t("accessibility.retry"),
             remove: t("accessibility.remove"),
           }}
@@ -83,7 +85,7 @@ function AttachmentChip({
   item: TrayItem;
   onRemove: () => void;
   onRetry: () => void;
-  labels: { uploading: string; retry: string; remove: string };
+  labels: { uploading: string; upload: string; retry: string; remove: string };
 }): ReactNode {
   const a = item.attachment;
   const isImage = a !== undefined && isImageMime(a.mime);
@@ -122,6 +124,8 @@ function AttachmentChip({
       {item.status === "uploading" && (
         <span className="shrink-0 text-fg-faint">{labels.uploading}</span>
       )}
+
+      {item.status === "awaiting-upload" && <button type="button" onClick={onRetry} title={labels.upload} aria-label={labels.upload} className="shrink-0 rounded-[5px] p-1 text-accent hover:bg-tint-hover"><Upload size={13} /></button>}
 
       {item.status === "error" && (
         <button

@@ -25,7 +25,7 @@ import {
   ThinkingAdapterError,
   type ThinkingAdapterInput
 } from '../../../shared/domain/thinking-adapter'
-import { abortableSleep, isAbortError } from '../abort'
+import { abortable, abortableSleep, abortableStream, isAbortError } from '../abort'
 import { estimateTokens } from '../context-assembler'
 import { userAgent } from '../user-agent'
 import type { KernelHost } from '../host'
@@ -54,6 +54,7 @@ const MAX_ATTEMPTS = 3
  */
 const MAX_NETWORK_ATTEMPTS = 6
 const DEFAULT_BASE_DELAY_MS = 500
+const DEFAULT_IDLE_TIMEOUT_MS = 120_000
 /**
  * 限流(429)专用的退避基数,和上面那个**刻意不是一个数**。
  *
@@ -164,6 +165,7 @@ type Outcome =
 
 export interface UpstreamRouterOptions {
   baseDelayMs?: number
+  idleTimeoutMs?: number
   /** 限流退避的基数。见 `DEFAULT_RATE_LIMIT_FLOOR_MS`;测试压成 0 就不会真的睡。 */
   rateLimitFloorMs?: number
   /** Synchronous sink; failures are isolated so telemetry can never fail a request. */
@@ -194,6 +196,7 @@ export class UpstreamRouter {
    */
   private readonly rateLimitGate = new Map<string, { until: number; reason: string }>()
   private readonly baseDelayMs: number
+  private readonly idleTimeoutMs: number
   private readonly rateLimitFloorMs: number
   private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
   /**
@@ -208,6 +211,7 @@ export class UpstreamRouter {
     opts: UpstreamRouterOptions = {}
   ) {
     this.baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
+    this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
     this.rateLimitFloorMs = opts.rateLimitFloorMs ?? DEFAULT_RATE_LIMIT_FLOOR_MS
     this.onUsageAttempt = opts.onUsageAttempt
     this.credentials = new CredentialResolver(host, opts.onCredentialChanged)
@@ -377,7 +381,7 @@ export class UpstreamRouter {
   private async *attempt(
     c: Candidate,
     req: CanonicalRequest,
-    signal: AbortSignal,
+    parentSignal: AbortSignal,
     context: UpstreamRequestContext,
     attemptNumber: number
   ): AsyncGenerator<ProviderStreamEvent, Outcome> {
@@ -393,6 +397,21 @@ export class UpstreamRouter {
     let toolCalls = 0
     let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
     let recorded = false
+    const controller = new AbortController()
+    const signal = AbortSignal.any([parentSignal, controller.signal])
+    let timedOut = false
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const resetIdleTimeout = (): void => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, this.idleTimeoutMs)
+    }
+    const waitFor = <T>(operation: () => PromiseLike<T>): Promise<T> => {
+      resetIdleTimeout()
+      return abortable(operation, signal)
+    }
 
     const finish = (outcome: Outcome): Outcome => {
       if (recorded) return outcome
@@ -453,7 +472,7 @@ export class UpstreamRouter {
 
     try {
       signal.throwIfAborted()
-      const cred = await this.credentials.resolve(c.provider.credentialRef, signal)
+      const cred = await waitFor(() => this.credentials.resolve(c.provider.credentialRef, signal))
       if (cred === null) {
         return finish({
           kind: 'failed',
@@ -469,7 +488,7 @@ export class UpstreamRouter {
       */
       const apiKey = bearerOf(cred)
       const cacheTtl = anthropicCacheTtlOf(c.provider)
-      const prepared = await prepareRequestImages(req, this.host, context, signal)
+      const prepared = await waitFor(() => prepareRequestImages(req, this.host, context, signal))
       const enc = encodeUpstream(protocol, prepared, c.alias.upstreamModel, apiKey, {
         userId: context.workspaceId,
         cacheTtl
@@ -530,7 +549,7 @@ export class UpstreamRouter {
         })
       }
 
-      let res = await send({})
+      let res = await waitFor(() => send({}))
       /*
         ★★ **401 之后强制刷新一次,就一次。**
 
@@ -547,15 +566,15 @@ export class UpstreamRouter {
       */
       if (res.status === 401 && cred.kind === 'oauth') {
         // 必须读完,否则这条连接不会被释放
-        await res.text().catch(() => '')
-        const fresh = await this.credentials.refreshNow(c.provider.credentialRef, signal)
-        res = await send(authHeader(protocol, fresh.accessToken))
+        await waitFor(() => res.text().catch(() => ''))
+        const fresh = await waitFor(() => this.credentials.refreshNow(c.provider.credentialRef, signal))
+        res = await waitFor(() => send(authHeader(protocol, fresh.accessToken)))
       }
       httpStatus = res.status
 
       if (!res.ok) {
         // 必须把 body 读完(或 cancel),否则连接不会被释放
-        const text = await res.text().catch(() => '')
+        const text = await waitFor(() => res.text().catch(() => ''))
         /*
           ★ 原始 body 只在这一刻存在过。分类器认不出形状时给出的是一句
           「Upstream request failed (HTTP 400)」—— 上游到底抱怨什么一个字都不说。
@@ -586,7 +605,9 @@ export class UpstreamRouter {
         return finish({ kind: 'failed', sawContent, error })
       }
 
-      for await (const ev of decodeUpstream(protocol, res, signal)) {
+      resetIdleTimeout()
+      for await (const ev of abortableStream(decodeUpstream(protocol, res, signal), signal)) {
+        if (isContent(ev) || ev.type === 'message_start') resetIdleTimeout()
         if (ev.type === 'error') {
           /*
             ★ 流内错误在这里留一条痕迹。界面上只看得到翻译过的那一句,而
@@ -624,7 +645,7 @@ export class UpstreamRouter {
         */
         if (ev.type === 'message_end') {
           yield { ...ev, latencyMs: Math.max(0, this.host.clock.now() - startedAt) }
-          continue
+          break
         }
         /*
           ★ 给 message_start 补上「这一段是谁给的」。这里是唯一的 choke point:
@@ -642,13 +663,24 @@ export class UpstreamRouter {
       this.recordSuccess(c.provider.id, this.host.clock.now() - startedAt)
       return finish({ kind: 'ok' })
     } catch (err) {
-      if (isAbortError(err)) {
+      if (parentSignal.aborted || (isAbortError(err) && !timedOut)) {
         finish({
           kind: 'failed',
           sawContent,
           error: agentError('aborted', '已中断', { retryable: false })
         })
         throw err
+      }
+      if (timedOut) {
+        const seconds = Math.ceil(this.idleTimeoutMs / 1000)
+        return finish({
+          kind: 'failed', sawContent,
+          error: agentError('network', `No response progress from ${c.provider.name} for ${seconds} seconds.`, {
+            retryable: false,
+            messageKey: 'agent.error.upstreamTimeout',
+            messageParams: { provider: c.provider.name, seconds }
+          })
+        })
       }
       if (err instanceof RequestPatchError || err instanceof ThinkingAdapterError) {
         return finish({
@@ -673,6 +705,9 @@ export class UpstreamRouter {
         sawContent,
         error: agentError('network', `连接「${c.provider.name}」失败:${(err as Error).message}`)
       })
+    } finally {
+      if (idleTimer !== undefined) clearTimeout(idleTimer)
+      controller.abort()
     }
   }
 

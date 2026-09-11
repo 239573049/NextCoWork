@@ -367,6 +367,7 @@ export interface SystemPromptInput {
    * 提示词里的事实要么是真的、要么根本不该在,没有「有时候有」这一档。
    */
   platform: PlatformInfo
+  environment?: Pick<import('./host').WorkspaceHost, 'remote' | 'description' | 'facts'>
   /**
    * 这两项和 `platform` 同档:**必填的事实**,不是可选的装饰。
    *
@@ -416,6 +417,9 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
     `# Environment\n\nWorkspace root: ${input.workspaceRoot}\n` +
       `Platform: ${input.platform.os} (${input.platform.osVersion})\n` +
       `Shell: ${input.platform.shell}\n` +
+      (input.environment ? `Execution location: ${input.environment.remote ? 'SSH server' : 'local machine'} ${JSON.stringify(input.environment.description)}\n`
+        + (input.environment.facts ? `Host: ${JSON.stringify(input.environment.facts.hostname)}; user: ${JSON.stringify(input.environment.facts.username)}; home: ${JSON.stringify(input.environment.facts.home)}\n` : '')
+        + (input.environment.remote ? 'Workspace files, commands and terminals execute on this server. The client filesystem and client browser are not available to workspace tools.\n' : '') : '') +
       `Today's date: ${date} (UTC)\n` +
       permissionFacts(input.permissionMode, input.webSearch),
     /*

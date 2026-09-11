@@ -39,7 +39,7 @@ import { Button } from '../components/ui/Button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
 import { copyText, openSessionWindow } from '../services/app'
 
-const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'skills', 'review']
+const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'extensions', 'review']
 
 export function Sidebar({
   workspace,

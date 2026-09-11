@@ -25,10 +25,16 @@ vi.mock('../../services/app', () => ({
   persistInnerTabs: vi.fn(),
   persistOuterTabs: vi.fn()
 }))
+vi.mock('../../services/connections', () => ({
+  prepareWorkspace: vi.fn(), commitWorkspaceActivation: vi.fn(), cancelConnectionRequest: vi.fn(async () => {}),
+  releaseWorkspaceActivation: vi.fn(async () => {}),
+  connectionErrorKey: () => 'environment.error.connection-failed'
+}))
 
 import { getInnerTabs, persistInnerTabs, persistOuterTabs } from '../../services/app'
 import { useTabsStore } from '../tabs'
 import { useWindowStore } from '../window'
+import { prepareWorkspace, commitWorkspaceActivation, releaseWorkspaceActivation } from '../../services/connections'
 
 const mockGetInnerTabs = vi.mocked(getInnerTabs)
 const mockPersistInner = vi.mocked(persistInnerTabs)
@@ -79,6 +85,54 @@ const chatTab = (id: string): InnerTab => ({
   kind: 'chat',
   title: '上次那个对话',
   ref: { sessionId: `s-${id}` }
+})
+
+describe('remote workspace activation', () => {
+  const remote = ws({ id: 'remote', environment: { kind: 'connection', connectionId: 'server' } })
+  it('keeps active ids, tabs and persisted layout unchanged on connection failure', async () => {
+    useWindowStore.getState().hydrate(boot({ workspaces: [ws(), remote], tabState: { outer: [wsTab('local', 'ws-default'), wsTab('remote', 'remote')], activeOuterId: 'local' } }))
+    vi.mocked(prepareWorkspace).mockRejectedValueOnce(new Error('offline'))
+    expect(await useWindowStore.getState().activate('remote')).toBe(false)
+    expect(useWindowStore.getState().activeOuterId).toBe('local')
+    expect(useWindowStore.getState().activeWorkspaceId).toBe('ws-default')
+    expect(mockPersistOuter).not.toHaveBeenCalled()
+  })
+  it('does not activate a late response after another tab was selected', async () => {
+    useWindowStore.getState().hydrate(boot({ workspaces: [ws(), remote], tabState: { outer: [wsTab('local', 'ws-default'), wsTab('remote', 'remote')], activeOuterId: 'local' } }))
+    let finish!: (value: Awaited<ReturnType<typeof prepareWorkspace>>) => void
+    vi.mocked(prepareWorkspace).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const opening = useWindowStore.getState().activate('remote')
+    await useWindowStore.getState().activate('local')
+    finish({ ticket: 'ticket', workspaceId: 'remote', rootPath: '/remote', environmentKey: 'server', generation: 1 })
+    expect(await opening).toBe(false)
+    expect(useWindowStore.getState().activeOuterId).toBe('local')
+    expect(commitWorkspaceActivation).not.toHaveBeenCalled()
+  })
+  it('does not mount a restored SSH workspace before validation succeeds', async () => {
+    vi.mocked(prepareWorkspace).mockRejectedValueOnce(new Error('offline'))
+    useWindowStore.getState().hydrate(boot({ workspaces: [remote], tabState: { outer: [wsTab('remote', 'remote')], activeOuterId: 'remote' } }))
+    expect(useWindowStore.getState().activeWorkspaceId).toBeNull()
+    await settle()
+    expect(useWindowStore.getState().activeWorkspaceId).toBeNull()
+  })
+  it('releases a late committed ticket without changing the newly selected local view', async () => {
+    useWindowStore.getState().hydrate(boot({ workspaces: [ws(), remote], tabState: { outer: [wsTab('local', 'ws-default'), wsTab('remote', 'remote')], activeOuterId: 'local' } }))
+    vi.mocked(prepareWorkspace).mockResolvedValueOnce({ ticket: 'late-ticket', workspaceId: 'remote', rootPath: '/remote', environmentKey: 'server', generation: 1 })
+    const pending = Promise.withResolvers<void>()
+    vi.mocked(commitWorkspaceActivation).mockReturnValueOnce(pending.promise)
+    const opening = useWindowStore.getState().activate('remote')
+    await settle()
+    await useWindowStore.getState().activate('local')
+    pending.resolve()
+    expect(await opening).toBe(false)
+    expect(useWindowStore.getState().activeOuterId).toBe('local')
+    expect(releaseWorkspaceActivation).toHaveBeenCalledWith('late-ticket')
+  })
+  it('does not treat an unknown workspace as local', async () => {
+    vi.mocked(prepareWorkspace).mockRejectedValueOnce(new Error('unbound'))
+    expect(await useWindowStore.getState().openWorkspace('missing')).toBe(false)
+    expect(useWindowStore.getState().activeWorkspaceId).toBeNull()
+  })
 })
 
 describe('useWindowStore.hydrate · 外层 Tab 的冷启动', () => {
@@ -310,6 +364,7 @@ describe('useTabsStore.ensure · 内层 Tab 的冷启动', () => {
  * 而是**关 Tab 这条路径上到底有没有人去调它**。
  */
 describe('useWindowStore.close · 工作区退场时的释放', () => {
+  beforeEach(() => useWindowStore.getState().updateWorkspaces([ws({ id: 'w1' }), ws({ id: 'w2' })]))
   it('★ 关掉工作区 Tab,它的内层 Tab 表跟着放掉', () => {
     useTabsStore.getState().hydrate('w1', { tabs: [chatTab('a')], activeTabId: 'a' })
     useWindowStore.getState().openWorkspace('w1')

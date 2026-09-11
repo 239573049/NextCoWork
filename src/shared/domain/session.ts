@@ -6,6 +6,15 @@ import type { SessionMode, ThinkingLevel } from '../agent/run-request'
 import type { ContextCheckpoint } from '../agent/context-management'
 import type { RunUsage } from '../agent/transcript'
 
+export type SessionChange = {
+  workspaceId?: string
+  renamed?: { sessionId: string; title: string }
+} & (
+  | { kind: 'metadata' | 'messages' | 'history'; sessionIds: string[] }
+  | { kind: 'deleted'; sessionIds: string[]; replacement?: { workspaceId: string; id: string; title: string } }
+  | { kind?: 'reset' }
+)
+
 export interface Session {
   id: string
   workspaceId: string

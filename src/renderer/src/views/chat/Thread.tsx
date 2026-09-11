@@ -9,7 +9,7 @@
  * 之后都会多出一个空白的用户气泡 —— 而它长得完全像一个 bug,查起来却要
  * 一路翻到消息模型才明白。
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Pencil } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
@@ -33,7 +33,7 @@ import { assistantSegments, assistantText, isAssistantTextBlock, threadRows, typ
 import { TurnActions, type TurnPrompt } from './TurnActions'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
 
-export function Thread({
+export const Thread = memo(function Thread({
   sessionId,
   transcript,
   runId,
@@ -166,7 +166,7 @@ export function Thread({
               subagents={subagents}
               model={model}
               providerName={providerName}
-              runStatus={transcript.status}
+              runStatus={isLast ? transcript.status : undefined}
               /*
                 ★ **run 级的起止只属于最后一轮。** `transcript.runStartedAt` 说的是
                 「当前(或刚结束的)那一次 run」,历史回合与它无关。以前无条件优先于
@@ -176,7 +176,6 @@ export function Thread({
               */
               runStartedAt={isLast ? transcript.runStartedAt ?? row.startedAt : row.startedAt}
               runEndedAt={isLast ? transcript.runEndedAt ?? row.endedAt : row.endedAt}
-              collapseEnabled={isLast}
               feedback={isLast ? feedback : undefined}
               // 助手回合永远紧跟在引出它的提问之后 —— threadRows 会把连续的模型
               // 回复并成一行,所以前一行要么是那条提问,要么(开局补的空回合)什么都没有。
@@ -205,7 +204,7 @@ export function Thread({
       </div>
     </div>
   )
-}
+})
 
 /**
  * 这一轮该显示哪份用量。
@@ -427,7 +426,6 @@ function AssistantTurn({
   runStatus,
   runStartedAt,
   runEndedAt,
-  collapseEnabled,
   feedback,
   prompt,
   isLast,
@@ -441,10 +439,9 @@ function AssistantTurn({
   subagents: TranscriptState['subagents']
   model: string | undefined
   providerName: string | undefined
-  runStatus: TranscriptState['status']
+  runStatus: TranscriptState['status'] | undefined
   runStartedAt?: number
   runEndedAt?: number
-  collapseEnabled: boolean
   feedback?: ReactNode
   prompt?: TurnPrompt
   isLast: boolean
@@ -454,6 +451,8 @@ function AssistantTurn({
   onDeleteTurn?: (userMessageId: string) => Promise<void>
 }): ReactNode {
   const { t } = useI18n()
+  const [lastKnownStatus, setLastKnownStatus] = useState(runStatus ?? 'done')
+  if (runStatus !== undefined && runStatus !== lastKnownStatus) setLastKnownStatus(runStatus)
   const segments = assistantSegments(blocks, t('chat.tool.name'), subagents)
   const lastProcessIndex = segments.reduce((last, segment, index) => segment.kind === 'process' ? index : last, -1)
   const processSegments = lastProcessIndex < 0 ? [] : segments.slice(0, lastProcessIndex + 1)
@@ -462,8 +461,8 @@ function AssistantTurn({
   const errorCount = processItems.filter((item) => statusOfItem(item, tools) === 'error').length
   const hasRunningSubagent = processItems.some((item) => item.kind === 'subagent' && item.state?.status === 'running')
   const hasTrailingText = trailingSegments.some((segment) => segment.kind === 'block' && isAssistantTextBlock(segment.block))
-  const outcome = runStatus === 'done' ? 'ok' : runStatus
-  const decision = collapseEnabled && !hasRunningSubagent
+  const outcome = lastKnownStatus === 'done' ? 'ok' : lastKnownStatus
+  const decision = !hasRunningSubagent
     ? decideWorkspace({
         outcome,
         itemCount: processItems.length,

@@ -8,7 +8,19 @@ import { windows } from '../window/registry'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { IMPORTED_ALIAS_DEFAULTS } from '../../shared/domain/provider'
+import { findBuiltinModel } from '../../shared/domain/model-catalog-inventory'
 import { startConfigSync, stopConfigSync } from './config-sync'
+
+/**
+ * DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen 的模型在 NextCoWork 内置渠道下固定走
+ * anthropic 协议,而不是继承该供应商的出厂协议(Responses)—— 按需求配置,只钉这四家。
+ */
+function anthropicOverrideFor(modelId: string): 'anthropic' | undefined {
+  const manufacturerId = findBuiltinModel(modelId)?.manufacturerId
+  return manufacturerId === 'deepseek' || manufacturerId === 'zhipu' ||
+    manufacturerId === 'xiaomi' || manufacturerId === 'qwen'
+    ? 'anthropic' : undefined
+}
 
 const API_ROOT = 'https://nextco.work'
 const CLIENT_ID = 'nextcowork-desktop'
@@ -100,12 +112,25 @@ async function refreshAccessToken(): Promise<void> {
 }
 
 /**
+ * 平台那条上游的出厂协议。平台网关主推 Responses(它才带 `reasoning` 的完整往返
+ * 与 `previous_response_id`),chat/completions 只是兼容层。
+ */
+const DEFAULT_CLIENT_PROTOCOL = 'openai-responses' as const
+
+/** 把老库里那条出厂就是 `openai-chat` 的记录抬到 Responses,只做一次。 */
+const RESPONSES_DEFAULT_KEY = 'client-auth.responses-default'
+
+/**
  * 保证这条供应商记录在，且**身份字段**是平台那份。
  *
  * ★★ **只钉身份,不钉配置。** 名称 / 地址 / 凭证引用归登录流程(access token 是发往
  * 平台域名的凭证,地址一旦被改走就等于把它送到别处去);而 `protocol` /
  * `protocolOptions` / `priority` / `enabled` 是**用户在设置页改的**,这里必须原样留着 ——
  * 以前整条重写,表现是用户翻完「API 格式」开关,下一次读登录态就被静默改回 openai-chat。
+ *
+ * ★ 出厂默认改成 Responses 之后,已经登录过的库里那条还停在 `openai-chat`。
+ * `RESPONSES_DEFAULT_KEY` 那段是**一次性**抬升:只认 `openai-chat`(旧出厂值),
+ * 且标记落库后永不重跑 —— 用户之后再翻回 chat 不会被第二次改掉。
  */
 function ensureClientProvider(): void {
   const identity = {
@@ -116,15 +141,22 @@ function ensureClientProvider(): void {
   } as const
   const current = store.listProviders().find((p) => p.id === CLIENT_PROVIDER_ID)
   if (current === undefined) {
-    store.putProvider({ ...identity, protocol: 'openai-chat', priority: 1, enabled: true })
+    store.setKv(RESPONSES_DEFAULT_KEY, true)
+    store.putProvider({ ...identity, protocol: DEFAULT_CLIENT_PROTOCOL, priority: 1, enabled: true })
     return
   }
+  const migrated = store.getKv<boolean>(RESPONSES_DEFAULT_KEY, false)
+  const protocol = !migrated && current.protocol === 'openai-chat'
+    ? DEFAULT_CLIENT_PROTOCOL
+    : current.protocol
+  if (!migrated) store.setKv(RESPONSES_DEFAULT_KEY, true)
   if (
+    protocol !== current.protocol ||
     current.name !== identity.name ||
     current.baseUrl !== identity.baseUrl ||
     current.credentialRef !== identity.credentialRef
   ) {
-    store.putProvider({ ...current, ...identity })
+    store.putProvider({ ...current, ...identity, protocol })
   }
 }
 
@@ -149,6 +181,26 @@ function repairLegacyClientAliases(): void {
   windows.emitToAll('provider:changed', { providers: store.listProviders(), models: store.listAliases() })
 }
 
+/** 一次性 KV 标记,避免下面的补种在每次读登录态时都重跑一遍。加入 Qwen 后需要重跑,所以带 v3。 */
+const ANTHROPIC_OVERRIDE_MIGRATION_KEY = 'client-auth.deepseek-zhipu-xiaomi-qwen-anthropic-override-v3'
+
+/**
+ * 老库里已经同步过的 DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen 别名早于
+ * `anthropicOverrideFor` 这条规则存在,补种一次。只补没有显式协议覆盖的 ——
+ * 用户自己在「协议」下拉里选过的不碰,且标记落库后永不重跑,翻回别的协议不会被这里悄悄改回去。
+ */
+function backfillAnthropicOverride(): void {
+  if (store.getKv<boolean>(ANTHROPIC_OVERRIDE_MIGRATION_KEY, false)) return
+  store.setKv(ANTHROPIC_OVERRIDE_MIGRATION_KEY, true)
+  const targets = store.listAliases().filter(
+    (a) => a.providerId === CLIENT_PROVIDER_ID && a.protocolOverride === undefined &&
+      anthropicOverrideFor(a.upstreamModel) !== undefined
+  )
+  if (targets.length === 0) return
+  for (const alias of targets) store.putAlias({ ...alias, protocolOverride: 'anthropic' })
+  windows.emitToAll('provider:changed', { providers: store.listProviders(), models: store.listAliases() })
+}
+
 /**
  * 首次登录时把平台的模型列表灌进去。
  *
@@ -164,6 +216,7 @@ function repairLegacyClientAliases(): void {
 async function syncClientModels(access: string): Promise<void> {
   if (store.listAliases().some((a) => a.providerId === CLIENT_PROVIDER_ID)) {
     repairLegacyClientAliases()
+    backfillAnthropicOverride()
     return
   }
   try {
@@ -196,6 +249,7 @@ async function syncClientModels(access: string): Promise<void> {
             thinking: caps.has('thinking'), caching: caps.has('caching') }
       store.putAlias(resolver.resolve({
         alias: m.id, providerId: CLIENT_PROVIDER_ID, upstreamModel: m.id, priority: index * 10,
+        ...(anthropicOverrideFor(m.id) === undefined ? {} : { protocolOverride: anthropicOverrideFor(m.id) }),
         displayName: m.display_name ?? m.displayName,
         capabilities: { ...platformCapabilities },
         contextWindow: Number.isFinite(m.context_window) && (m.context_window ?? 0) > 0 ? m.context_window! : IMPORTED_ALIAS_DEFAULTS.contextWindow,

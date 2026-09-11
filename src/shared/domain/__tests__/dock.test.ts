@@ -125,4 +125,18 @@ describe('Dock layout', () => {
     expect(target.type === 'group' && target.pinned).toBe('right')
     expect(target.type === 'group' && target.tabIds).toContain(preview.id)
   })
+
+  it('gives a right-pane orphan its own split instead of the main group', () => {
+    // Mirrors an Agent browser_open tab landing in `tabs` before the Dock
+    // tree knows about it, in a fresh workspace that never opened the right
+    // panel before (so no group with pane 'right' exists yet).
+    const chatTab = chat('chat')
+    const state = createInitialDock([chatTab])
+    const browserTab: InnerTab = { id: 'browser', kind: 'browser', pane: 'right', title: 'example.com', ref: { url: 'https://example.com' } }
+    const repaired = normalizeDockState(state, [chatTab, browserTab])
+    expect(repaired.root.type).toBe('split')
+    if (repaired.root.type !== 'split') return
+    expect(repaired.root.first.type === 'group' && repaired.root.first.tabIds).toEqual(['chat'])
+    expect(repaired.root.second.type === 'group' && repaired.root.second.tabIds).toEqual(['browser'])
+  })
 })

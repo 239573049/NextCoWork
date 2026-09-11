@@ -94,6 +94,7 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
      * 不编占位数据 —— 同 `StubPage.tsx` 的规矩。
      */
     subs: [
+      { id: 'ssh', label: 'SSH' },
       { id: 'connector', label: '连接器' },
       { id: 'mcp', label: 'MCP' },
       { id: 'plugin', label: '插件' },
@@ -132,6 +133,7 @@ export interface SettingsRow {
  * 而这种漂移没有任何机制会报警。
  */
 export const SETTINGS_INDEX: readonly SettingsRow[] = [
+  { page: 'connection', sub: 'ssh', title: 'SSH', keywords: ['ssh', 'remote', 'server', '服务器', '远程'] },
   // ── 通用 ──
   { page: 'general', sub: 'app', title: '界面语言', keywords: ['language', 'locale', '语言'] },
   {

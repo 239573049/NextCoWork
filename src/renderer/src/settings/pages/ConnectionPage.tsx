@@ -18,9 +18,12 @@ import { McpPane } from './connection/McpPane'
 import { NetworkPane } from './connection/NetworkPane'
 import { NotPlannedPane } from './connection/NotPlannedPane'
 import { SearchPane } from './connection/SearchPane'
+import { RemoteConnectionsPane } from './connection/RemoteConnectionsPane'
 
 export function ConnectionPage(props: SettingsPageProps): ReactNode {
   switch (props.sub) {
+    case 'ssh':
+      return <RemoteConnectionsPane />
     case 'mcp':
       return <McpPane />
     case 'search':

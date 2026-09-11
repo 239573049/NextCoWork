@@ -27,7 +27,7 @@ import { BrowserView } from "./browser/BrowserView";
 import { useI18n } from "../i18n";
 import { BrowserFeature } from "./browser/BrowserFeature";
 import { DocumentView } from './files/DocumentView';
-import { SkillsFeature } from './skills/SkillsFeature';
+import { ExtensionsFeature } from './extensions/ExtensionsFeature';
 
 export interface InnerViewProps {
   tab: InnerTab;
@@ -83,14 +83,14 @@ export function InnerView({
 export function FeatureView({ feature, onClose }: { feature: FeatureKind; onClose?: () => void }): ReactNode {
   const { t } = useI18n();
   if (feature === "browser") return <BrowserFeature />;
-  if (feature === "skills") return <SkillsFeature onClose={onClose} />;
+  if (feature === "extensions") return <ExtensionsFeature onClose={onClose} />;
   const Icon = FEATURE_ICON[feature];
-  const key = feature as "scheduled" | "skills" | "review" | "settings";
+  const key = feature as "scheduled" | "review" | "settings";
   return (
     <Placeholder
       icon={Icon}
-      title={t(`view.feature.${key}` as "view.feature.scheduled" | "view.feature.skills" | "view.feature.review" | "view.feature.settings")}
-      step={t(`view.feature.${key}Hint` as "view.feature.scheduledHint" | "view.feature.skillsHint" | "view.feature.reviewHint" | "view.feature.settingsHint")}
+      title={t(`view.feature.${key}` as "view.feature.scheduled" | "view.feature.review" | "view.feature.settings")}
+      step={t(`view.feature.${key}Hint` as "view.feature.scheduledHint" | "view.feature.reviewHint" | "view.feature.settingsHint")}
     />
   );
 }

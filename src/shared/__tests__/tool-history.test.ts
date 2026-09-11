@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { assistantMessage, toolResultMessage } from '../agent/message'
-import { applyEvent, applyEvents, emptyTranscript, toolsFromMessages } from '../agent/transcript'
+import { applyEvent, applyEvents, emptyTranscript, subagentsFromMessages, toolsFromMessages } from '../agent/transcript'
 
 const calls = assistantMessage('calls', [
   { type: 'tool_call', callId: 'list', name: 'LS', input: { path: '/workspace' } },
@@ -70,5 +70,50 @@ describe('tool state from durable history', () => {
   it('preserves a result with empty content and pairs a result seen before its call metadata', () => {
     const output = toolResultMessage('empty', [{ type: 'tool_result', callId: 'list', output: { content: '' }, isError: false }], 200)
     expect(toolsFromMessages([output, calls])['list']).toMatchObject({ name: 'LS', input: { path: '/workspace' }, status: 'ok', output: { content: '' } })
+  })
+
+  it('keeps event snapshots and live inputs immutable while matching the event reducer', () => {
+    const previous = applyEvent(emptyTranscript(), { type: 'message_commit', message: calls })
+    Object.freeze(previous.tools)
+    for (const tool of Object.values(previous.tools)) Object.freeze(tool)
+    const snapshot = structuredClone(previous.tools)
+    const next = applyEvent(previous, { type: 'message_commit', message: results })
+    expect(next.tools).toEqual(toolsFromMessages([calls, results]))
+    expect(next.tools).not.toBe(previous.tools)
+    expect(previous.tools).toEqual(snapshot)
+    expect(toolsFromMessages([calls, results], previous.tools)).toEqual(next.tools)
+    expect(previous.tools).toEqual(snapshot)
+  })
+
+  it('rebuilds a large interleaved history without losing any calls or results', () => {
+    const messages = Array.from({ length: 5000 }, (_, index) => {
+      const callId = `call-${index}`
+      return [
+        assistantMessage(`request-${index}`, [{ type: 'tool_call', callId, name: 'Read', input: { index } }], index * 2),
+        toolResultMessage(`result-${index}`, [{ type: 'tool_result', callId, output: { content: `result ${index}` }, isError: index % 2 === 0 }], index * 2 + 1)
+      ]
+    }).flat()
+    const tools = toolsFromMessages(messages)
+    expect(Object.keys(tools)).toHaveLength(5000)
+    expect(tools['call-0']).toMatchObject({ status: 'error', output: { content: 'result 0' } })
+    expect(tools['call-4999']).toMatchObject({ status: 'ok', input: { index: 4999 }, output: { content: 'result 4999' } })
+  })
+
+  it('rebuilds child cards without downgrading terminal results or mutating event snapshots', () => {
+    const finished = toolResultMessage('finished', [{ type: 'tool_result', callId: 'task', output: { content: 'done' }, isError: false,
+      subagent: { childRunId: 'child', status: 'done', summary: 'Finished' } }], 1)
+    const background = toolResultMessage('background', [{ type: 'tool_result', callId: 'task', output: { content: 'started' }, isError: false,
+      subagent: { childRunId: 'child', status: 'running', background: true } }], 2)
+    const before = applyEvent(emptyTranscript(), { type: 'message_commit', message: finished })
+    Object.freeze(before.subagents)
+    Object.freeze(before.subagents['task'])
+    const snapshot = structuredClone(before.subagents)
+    const next = applyEvent(before, { type: 'message_commit', message: background })
+    const rebuilt = subagentsFromMessages([finished, background])
+    expect(rebuilt).toEqual(next.subagents)
+    expect(rebuilt['task']).toMatchObject({ status: 'done', summary: 'Finished', background: true })
+    expect(before.subagents).toEqual(snapshot)
+    const live = { ...snapshot, detached: { ...snapshot['task']!, callId: 'detached', childRunId: 'detached-run', status: 'running' as const } }
+    expect(subagentsFromMessages([finished], live)['detached']).toBe(live.detached)
   })
 })

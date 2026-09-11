@@ -88,6 +88,10 @@ export const skillTool: ToolRegistration = defineTool({
       )
     }
 
+    if (hit.unavailableReason) return toolFail('This client Skill requires local package assets. Install it as a project Skill on the SSH server before using it. Do not run its scripts on the client.')
+    const source = ctx.host.remote ? hit.scope === 'project'
+      ? `\n\nServer package directory: ${ctx.host.path?.dirname(hit.source.path) ?? hit.source.path}`
+      : '\n\nSource: client instruction snapshot. Client files and absolute client paths are not available on the server.' : ''
     // 正文在加载时已经消毒过一次;这里再来一次是因为「谁消的毒」不该由调用方记着
     const body = clampWithEllipsis(stripControlChars(hit.body), SKILL_BODY_MAX)
     try { store.recordSkillTrigger(hit.id, ctx.workspaceId) } catch { /* telemetry must never break Skill */ }
@@ -102,6 +106,6 @@ export const skillTool: ToolRegistration = defineTool({
         ? `\n\n(Tools this Skill suggests using: ${tools.join(', ')})`
         : ''
 
-    return toolOk(`# Skill: ${hit.name}\n\n${body}${hint}${BOUNDARY}`)
+    return toolOk(`# Skill: ${hit.name}${source}\n\n${body}${hint}${BOUNDARY}`)
   }
 })

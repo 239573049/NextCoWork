@@ -93,6 +93,7 @@ export const agentZh = {
   // {detail} 是解码器给出的具体原因(十几种),不带上的话这些原因在界面上无从区分
   'agent.error.invalidResponse': '上游返回的响应格式不完整或不符合协议，本轮已停止。（{detail}）',
   'agent.error.incompleteResponse': '上游连接在回复完成前断开，请重试。',
+  'agent.error.upstreamTimeout': '供应商「{provider}」连续 {seconds} 秒未返回有效响应，请求已超时。已保留收到的内容，请重试或更换模型。',
   'agent.error.outputLimit': '回复达到模型的输出上限，已保留收到的内容。可以继续对话或提高输出上限。',
   'agent.error.imageInput': '无法读取本轮图片附件，请重新添加图片后重试。',
   // 三条都点明「不会自动切到其它供应商」：用户的既有心智是「配了多家就会兜底」，
@@ -191,6 +192,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'agent.interaction.planVersion': 'Version {version}',
   'agent.error.invalidResponse': 'The upstream response was incomplete or did not match the protocol. This run has stopped. ({detail})',
   'agent.error.incompleteResponse': 'The upstream connection closed before the reply finished. Please retry.',
+  'agent.error.upstreamTimeout': 'Provider "{provider}" made no response progress for {seconds} seconds. The request timed out and received content has been saved. Retry or choose another model.',
   'agent.error.outputLimit': 'The reply reached the model output limit. Received content has been saved. Continue the conversation or increase the output limit.',
   'agent.error.imageInput': 'Unable to read an image attachment for this request. Attach the image again and retry.',
   'agent.error.pinnedProviderMissing':

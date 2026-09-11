@@ -178,7 +178,7 @@ export async function* sseFromResponse(
     signal.removeEventListener('abort', onAbort)
     // ★ 不 cancel 的话底层 socket 会一直挂着 —— 中断一个长回复后
     // 上游仍在给我们发 token,只是没人读了(方案 §4.7 末尾那条注释的同一个坑)
-    await reader.cancel().catch(() => {})
+    void reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { nodeHost } from '../../../host'
+import { EnvironmentError } from '../../../../environment/errors'
 import type { ToolContext } from '../../registry'
 import { redosRisk } from '../redos'
 import { globTool, grepTool } from '../search'
@@ -58,6 +59,18 @@ afterEach(() => {
 // ────────────────────────────── Glob ──────────────────────────────
 
 describe('Glob', () => {
+  it('reports a dropped connection instead of a successful empty search', async () => {
+    put('file.ts', 'content')
+    const host = nodeHost()
+    const remoteHost = { ...host, remote: true, fs: { ...host.fs, stat: async () => { throw new EnvironmentError('disconnected') } } }
+    const glob = await globTool.execute({ pattern: '**/*.ts' }, ctx({ host: remoteHost }))
+    expect(glob.isError).toBe(true)
+    expect(glob.output.content).toContain('disconnected')
+    const grep = await grepTool.execute({ pattern: 'content' }, ctx({ host: remoteHost }))
+    expect(grep.isError).toBe(true)
+    expect(grep.output.content).toContain('disconnected')
+  })
+
   it('跨目录匹配,且根目录下的文件也算', async () => {
     put('a.ts', '')
     put('src/b.ts', '')

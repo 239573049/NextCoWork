@@ -13,6 +13,8 @@ import { editorZh, editorEn } from './editor';
 import { agentZh, agentEn } from './agent';
 import { markdownZh, markdownEn } from './markdown';
 import { themesZh, themesEn } from './themes';
+import { sshZh, sshEn } from './ssh';
+import { extensionsZh, extensionsEn } from './extensions';
 
 export const SUPPORTED_LOCALES = ["zh-CN", "en-US"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
@@ -28,6 +30,8 @@ type Messages = Record<string, MessageValue>;
  * translated here.
  */
 const ZH: Messages = {
+  ...sshZh,
+  ...extensionsZh,
   ...themesZh,
   ...agentZh,
   ...documentsZh,
@@ -94,7 +98,7 @@ const ZH: Messages = {
   "window.restore": "向下还原",
   "feature.scheduled": "定时任务",
   "feature.browser": "浏览器",
-  "feature.skills": "Skills",
+  "feature.extensions": "扩展",
   "skills.title": "Skill 管理",
   "skills.back": "返回",
   "skills.market": "Skill 市场",
@@ -1479,11 +1483,9 @@ const ZH: Messages = {
   "view.shellOnly": "本版只出空壳",
   "view.previewStep": "步骤 9（真实 fs 工具）",
   "view.feature.scheduled": "定时任务",
-  "view.feature.skills": "Skills",
   "view.feature.review": "每日回顾",
   "view.feature.settings": "设置",
   "view.feature.scheduledHint": "调度器本版不做，只留入口",
-  "view.feature.skillsHint": "步骤 12（SkillRegistry）",
   "view.feature.reviewHint": "本版不做",
   "view.feature.settingsHint": "设置是模态浮层，不应走到这里。",
   "connection.search.connected": "已连通",
@@ -1522,6 +1524,8 @@ const ZH: Messages = {
 };
 
 const EN: Messages = {
+  ...sshEn,
+  ...extensionsEn,
   ...themesEn,
   ...agentEn,
   ...documentsEn,
@@ -1586,7 +1590,7 @@ const EN: Messages = {
   "window.restore": "Restore",
   "feature.scheduled": "Scheduled tasks",
   "feature.browser": "Browser",
-  "feature.skills": "Skills",
+  "feature.extensions": "Extensions",
   "skills.title": "Skill management",
   "skills.back": "Back",
   "skills.market": "Skill marketplace",
@@ -3009,12 +3013,10 @@ const EN: Messages = {
   "view.shellOnly": "Shell only in this version",
   "view.previewStep": "Step 9 (real fs tools)",
   "view.feature.scheduled": "Scheduled tasks",
-  "view.feature.skills": "Skills",
   "view.feature.review": "Daily review",
   "view.feature.settings": "Settings",
   "view.feature.scheduledHint":
     "The scheduler is not included in this release; only the entry point remains.",
-  "view.feature.skillsHint": "Step 12 (SkillRegistry)",
   "view.feature.reviewHint": "Not included in this release",
   "view.feature.settingsHint":
     "Settings is a modal overlay and should not appear here.",

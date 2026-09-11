@@ -1,5 +1,5 @@
 import { shell } from 'electron'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import {
   closeSync,
   constants,
@@ -20,7 +20,6 @@ import {
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   WORKSPACE_FILE_ERROR_PREFIX,
-  WORKSPACE_IMAGE_LIMIT,
   WORKSPACE_TEXT_LIMIT,
   type WorkspaceFile,
   type WorkspaceFileErrorCode,
@@ -28,31 +27,18 @@ import {
   type WorkspaceFileMutationResult,
   type WorkspaceFileRequest,
   type WorkspaceFileWriteRequest,
+  type WorkspaceRecoveryListing,
   type WorkspaceTextFile
 } from '../../shared/domain/workspace-file'
 import { PathEscapeError, resolveAnywhere } from '../kernel/tool/path-guard'
 import { store } from '../state/store'
 import { IpcError } from './errors'
+import { isLocalEnvironment } from '../../shared/domain/environment'
+import { getWorkspaceEnvironment } from '../runtime'
+import { EnvironmentError } from '../environment/errors'
+import { EnvironmentFileError, EnvironmentFiles, remoteFileFailure } from '../environment/files'
+import { classifyWorkspaceFile, contentRevision as revision, decodeWorkspaceText as decodeText, isBinaryText as binaryText, workspaceReadLimit } from '../kernel/workspace-file-content'
 
-const IMAGE_MIME: Readonly<Record<string, string>> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.avif': 'image/avif',
-  '.bmp': 'image/bmp',
-  '.ico': 'image/x-icon',
-  '.svg': 'image/svg+xml'
-}
-const BINARY_EXTENSIONS = new Set([
-  '.pdf', '.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.tar',
-  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods',
-  '.exe', '.dll', '.so', '.dylib', '.bin', '.wasm', '.class', '.pyc',
-  '.sqlite', '.sqlite3', '.db', '.mp3', '.wav', '.ogg', '.flac',
-  '.mp4', '.mov', '.webm', '.avi', '.woff', '.woff2', '.ttf', '.otf',
-  '.heic', '.tif', '.tiff', '.psd', '.dmg', '.iso'
-])
 const MAX_COPY_ENTRIES = 10_000
 const MAX_COPY_BYTES = 256 * 1024 * 1024
 
@@ -61,6 +47,8 @@ function fail(code: WorkspaceFileErrorCode): never {
 }
 
 function translateError(error: unknown): never {
+  if (error instanceof EnvironmentError) throw error
+  if (error instanceof EnvironmentFileError) fail(error.fileCode)
   if (error instanceof IpcError) throw error
   if (error instanceof PathEscapeError) fail('invalid-path')
   const code = (error as NodeJS.ErrnoException | undefined)?.code
@@ -76,6 +64,7 @@ function workspaceRoot(workspaceId: string): string {
   if (typeof workspaceId !== 'string') fail('workspace-unavailable')
   const workspace = store.getWorkspace(workspaceId)
   if (!workspace) fail('workspace-unavailable')
+  if (!isLocalEnvironment(workspace.environment)) throw new EnvironmentError('disconnected')
   try {
     const root = realpathSync.native(workspace.rootPath)
     if (!lstatSync(root).isDirectory()) fail('workspace-unavailable')
@@ -134,10 +123,6 @@ function checkedPath(root: string, path: string, allowRoot = false): string {
   return target
 }
 
-function revision(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex')
-}
-
 /** O_NOFOLLOW 配合有上限的 read，拒绝设备/FIFO，也不会因读取中增长而无限分配。 */
 function readBounded(path: string, limit: number): { bytes?: Buffer; stat: Stats } {
   const before = lstatSync(path)
@@ -164,42 +149,73 @@ function readBounded(path: string, limit: number): { bytes?: Buffer; stat: Stats
   }
 }
 
-function decodeText(bytes: Buffer): string | undefined {
-  try {
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
-  } catch {
-    return undefined
-  }
-}
-
-function binaryText(content: string): boolean {
-  for (let index = 0; index < content.length; index++) {
-    const code = content.charCodeAt(index)
-    if (code <= 8 || code === 11 || (code >= 14 && code <= 31) || code === 127) return true
-  }
-  return false
-}
-
 function readFileAt(root: string, path: string): WorkspaceFile {
   const target = checkedPath(root, path)
   const extension = extname(path).toLowerCase()
-  const mime = IMAGE_MIME[extension]
-  const { bytes, stat } = readBounded(target, mime ? WORKSPACE_IMAGE_LIMIT : WORKSPACE_TEXT_LIMIT)
-  const base = {
-    path,
-    size: stat.size,
-    revision: bytes ? revision(bytes) : `large:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+  const { bytes, stat } = readBounded(target, workspaceReadLimit(extension))
+  return classifyWorkspaceFile(path, extension, bytes, stat)
+}
+
+function remoteEditor(workspaceId: string): EnvironmentFiles | undefined {
+  const workspace = store.getWorkspace(workspaceId)
+  if (!workspace || isLocalEnvironment(workspace.environment)) return undefined
+  return new EnvironmentFiles(getWorkspaceEnvironment(workspaceId))
+}
+
+export async function readWorkspaceDocument(req: WorkspaceFileRequest): Promise<WorkspaceFile> {
+  try { return await (remoteEditor(req.workspaceId)?.read(req.path) ?? readWorkspaceFile(req)) } catch (error) {
+    try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
   }
-  if (!bytes) return { ...base, kind: 'binary', reason: 'too-large' }
-  if (mime) return { ...base, kind: 'image', mime, dataUrl: `data:${mime};base64,${bytes.toString('base64')}` }
-  if (BINARY_EXTENSIONS.has(extension)) return { ...base, kind: 'binary', reason: 'unsupported' }
-  const content = decodeText(bytes)
-  if (content === undefined || bytes.subarray(0, 2).equals(Buffer.from([0xff, 0xfe])) ||
-    bytes.subarray(0, 2).equals(Buffer.from([0xfe, 0xff]))) {
-    return { ...base, kind: 'binary', reason: 'encoding' }
+}
+export async function writeWorkspaceDocument(req: WorkspaceFileWriteRequest): Promise<WorkspaceTextFile> {
+  try { return await (remoteEditor(req.workspaceId)?.write(req) ?? writeWorkspaceFile(req)) } catch (error) {
+    try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
   }
-  if (binaryText(content)) return { ...base, kind: 'binary', reason: 'unsupported' }
-  return { ...base, kind: 'text', content }
+}
+export async function mutateWorkspaceDocument(req: WorkspaceFileMutationRequest): Promise<WorkspaceFileMutationResult> {
+  try { return await (remoteEditor(req.workspaceId)?.mutate(req) ?? mutateWorkspaceFile(req)) } catch (error) {
+    try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
+  }
+}
+export async function listWorkspaceRecovery(req: { workspaceId: string }): Promise<WorkspaceRecoveryListing> {
+  const editor = remoteEditor(req.workspaceId)
+  // 本机工作区走系统回收站,没有我们自己的索引可列
+  if (!editor) return { entries: [], environmentKey: '' }
+  try { return await editor.listRecovery() } catch (error) {
+    try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
+  }
+}
+
+export async function revealWorkspaceDocument(req: WorkspaceFileRequest): Promise<void | { remote: true; path: string; parent: string; name: string }> {
+  const editor = remoteEditor(req.workspaceId)
+  if (editor) {
+    const environment = getWorkspaceEnvironment(req.workspaceId)
+    const path = await editor.checkedPath(req.path, true)
+    const stat = await environment.fs.stat(path)
+    environment.assertReady()
+    const directory = stat.isDir ? path : environment.path.dirname(path)
+    /**
+     * ★ 用 realpath 后的根来比:`checkedPath` 返回的是 realpath 过的路径,而
+     * `environment.rootPath` 是配置里的原样写法。根自身是软链时(BSD 的 /home →
+     * /usr/home、macOS 的 /var → /private/var),拿两者直接比会把工作区内的文件
+     * 判成越界。
+     */
+    const root = await environment.fs.realpath(environment.rootPath)
+    /**
+     * ★ `parent` 是渲染层用来**扎文件树根**的,必须走 `display()` 而不是 `relative()`。
+     *
+     * `relative()` 没有 `inside()` 判断:对工作区外的目标它产出 `../../etc` 这种字符串,
+     * 渲染层原样当成 rootPath 开一个 files tab,而 `listWorkspaceDir` 只 resolve、不查
+     * `outside`,于是工作区外的目录被整棵列出来。这里越界就不返回扎根指令 —— 文件树
+     * 本来也表达不了工作区外的位置。注意围栏只针对 reveal 这个 UI 入口,Agent 通过
+     * 工具显式访问绝对路径是被允许的行为,不在这里拦。
+     */
+    const parent = environment.path.display(root, directory)
+    if (environment.path.isAbsolute(parent)) return
+    return { remote: true, path: environment.path.display(root, path),
+      parent, name: environment.path.basename(path) }
+  }
+  revealWorkspaceFile(req)
 }
 
 export function readWorkspaceFile(req: WorkspaceFileRequest): WorkspaceFile {

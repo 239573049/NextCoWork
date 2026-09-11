@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { WebContents } from 'electron'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
+import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { runs } from '../../kernel/run-registry'
 import {
@@ -197,6 +198,8 @@ const allEvents = (wc: FakeWebContents): AgentEvent[] => wc.envelopes().flatMap(
 beforeEach(() => {
   subagentType = 'general-purpose'
   resetRuntimeForTest()
+  store.putWorkspace({ id: 'w1', name: 'Local test workspace', rootPath: '', environment: { kind: 'local' }, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })
+  store.ensureSession({ id: PARENT_SESSION, workspaceId: 'w1', rootPathAtCreation: '' })
   store.setHistory(PARENT_SESSION, [])
   installHost(demoHost({ fetch: fakeUpstream() }, { chunkDelayMs: 0 }))
   // ★ `seed()` 不再种演示上游(理由见 runtime.ts 的 seed 文件头),而这份测试

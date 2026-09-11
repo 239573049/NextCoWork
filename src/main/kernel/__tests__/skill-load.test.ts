@@ -56,6 +56,19 @@ const said = (r: SkillScanResult, needle: string): boolean =>
   r.diagnostics.some((d) => d.message.includes(needle))
 
 describe('基本形状', () => {
+  it('marks client asset packages unavailable while retaining text snapshots and project overrides', async () => {
+    put(globalRoot, 'text-only', md('Text snapshot'))
+    put(globalRoot, 'client-package', md('Client assets'))
+    mkdirSync(join(globalRoot, 'client-package', 'scripts'))
+    put(globalRoot, 'overridden', md('Client assets'))
+    mkdirSync(join(globalRoot, 'overridden', 'scripts'))
+    put(projectRoot, 'overridden', md('Server version'))
+    const result = await scanSkills({ fs, globalRoot, projectRoot, projectFs: fs })
+    expect(result.skills.find((skill) => skill.name === 'text-only')?.unavailableReason).toBeUndefined()
+    expect(result.skills.find((skill) => skill.name === 'client-package')?.unavailableReason).toBe('client-assets')
+    expect(result.skills.find((skill) => skill.name === 'overridden')).toMatchObject({ scope: 'project' })
+    expect(result.skills.find((skill) => skill.name === 'overridden')?.unavailableReason).toBeUndefined()
+  })
   it('读出名字、描述、正文,并标上 scope', async () => {
     put(globalRoot, 'commit', '---\ndescription: 写提交信息\n---\n按 Conventional Commits 写。\n')
 

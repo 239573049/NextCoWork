@@ -19,6 +19,7 @@ import {
   type SessionUpstream
 } from '../agent-session'
 import { nodeHost } from '../host'
+import { localEnvironment } from '../../environment/local'
 import { collect, RunHandle } from '../run-registry'
 import { ToolRegistry, type ToolContext } from '../tool/registry'
 import type { CanonicalRequest, UpstreamRequestContext } from '../upstream/canonical'
@@ -217,6 +218,91 @@ function expectNoOrphans(history: readonly AgentMessage[]): void {
 }
 
 // ─────────────────────────── 最简一轮 ───────────────────────────
+
+describe('stalled operation cancellation', () => {
+  it('stops a stalled upstream without waiting for another stream event', async () => {
+    let releaseStream!: () => void
+    let waiting = false
+    const blocked = new Promise<void>((resolve) => { releaseStream = resolve })
+    const upstream = fakeUpstream([])
+    upstream.stream = async function* () {
+      yield { type: 'message_start', model: ALIAS.alias }
+      yield { type: 'text_delta', index: 0, text: 'partial response' }
+      waiting = true
+      await blocked
+      yield { type: 'text_delta', index: 0, text: 'late response' }
+      yield END()
+    }
+    const request = req()
+    const handle = new RunHandle(request)
+    const session = new AgentSession({
+      host: quietHost(), upstream, tools: registry(), workspaceRoot: '/ws'
+    }, handle, request)
+    const running = session.run()
+
+    try {
+      await vi.waitFor(() => expect(waiting).toBe(true), { timeout: 200, interval: 1 })
+      handle.abort({ by: 'user' })
+      await vi.waitFor(() => expect(handle.status).toBe('aborted'), { timeout: 200, interval: 1 })
+      await running
+      expect(partsOf(session.history)).toContainEqual({ type: 'text', text: 'partial response' })
+      expect(handle.since(0).filter((event) => event.type === 'run_end')).toHaveLength(1)
+    } finally {
+      releaseStream()
+      await running
+    }
+    expect(partsOf(session.history)).not.toContainEqual({ type: 'text', text: 'late response' })
+  })
+
+  it.each(['approval', 'tool'] as const)('stops a stalled %s and ignores its late result', async (stage) => {
+    let releaseOperation!: () => void
+    let waiting = false
+    const blocked = new Promise<void>((resolve) => { releaseOperation = resolve })
+    const execute = vi.fn(async () => {
+      if (stage === 'tool') {
+        waiting = true
+        await blocked
+      }
+      return toolOk('late result')
+    })
+    const approve: ApproveFn = async () => {
+      if (stage === 'approval') {
+        waiting = true
+        await blocked
+      }
+      return { kind: 'allow_once' }
+    }
+    const upstream = fakeUpstream([callsTool('blocked-call', 'Blocked')])
+    const request = req()
+    const handle = new RunHandle(request)
+    const session = new AgentSession({
+      host: quietHost(), upstream, tools: registry({ internalId: 'Blocked', execute }),
+      workspaceRoot: '/ws', approve
+    }, handle, request)
+    const running = session.run()
+
+    try {
+      await vi.waitFor(() => expect(waiting).toBe(true), { timeout: 200, interval: 1 })
+      handle.abort({ by: 'user' })
+      await vi.waitFor(() => expect(handle.status).toBe('aborted'), { timeout: 200, interval: 1 })
+      await running
+      expectNoOrphans(session.history)
+      expect(partsOf(session.history)).toContainEqual(expect.objectContaining({
+        type: 'tool_result', callId: 'blocked-call', isError: true,
+        output: { content: expect.stringContaining('interrupted') }
+      }))
+    } finally {
+      releaseOperation()
+      await running
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(execute).toHaveBeenCalledTimes(stage === 'tool' ? 1 : 0)
+    expect(handle.since(0).filter((event) => event.type === 'run_end')).toHaveLength(1)
+    expect(partsOf(session.history)).not.toContainEqual(expect.objectContaining({
+      type: 'tool_result', output: { content: 'late result' }
+    }))
+  })
+})
 
 describe('单轮对话', () => {
   it('说一句话就正常收尾', async () => {
@@ -1502,6 +1588,54 @@ describe('插话', () => {
  * 假根一律判成「工作区外」,那样这组测试会全绿地什么都没测到。
  */
 describe('file_ref 路径归一化', () => {
+  it('does not treat a client or foreign server reference as a remote workspace file', () => {
+    const request = req({ input: [{ type: 'file_ref', path: '/project/file.txt', name: 'file.txt', source: { kind: 'local' } }] })
+    const source = { kind: 'workspace' as const, workspaceId: request.workspaceId, environment: { kind: 'connection' as const, connectionId: 'server-a' }, rootPath: '/project', connectionRevision: 1 }
+    const deps: SessionDeps = { host: quietHost(), upstream: fakeUpstream([says('ok')]), tools: registry(), workspaceRoot: '/project', fileReferenceSource: source }
+    expect(() => new AgentSession(deps, new RunHandle(request), request)).toThrow('conflict')
+    const foreign = { ...request, input: [{ type: 'file_ref' as const, path: '/project/file.txt', name: 'file.txt', source: { ...source, environment: { kind: 'connection' as const, connectionId: 'server-b' } } }] }
+    expect(() => new AgentSession(deps, new RunHandle(foreign), foreign)).toThrow('conflict')
+    const matching = { ...request, input: [{ type: 'file_ref' as const, path: '/project/file.txt', name: 'file.txt', source }] }
+    expect(() => new AgentSession(deps, new RunHandle(matching), matching)).not.toThrow()
+  })
+
+  /**
+   * ★ 历史与新鲜输入的分界:新鲜输入对不上 → 抛(上面那条);历史对不上 → 隔离,不抛。
+   *
+   * 历史是已经发生的事实,会话可能在两台服务器之间改过绑定。在构造函数里抛的后果是
+   * 整条会话永久卡死 —— 每一次 run 都在同一处抛,除了手改历史没有修复入口。
+   */
+  it('★ 历史里对不上的引用不会让整条会话永久卡死', () => {
+    const request = req({ input: [{ type: 'text', text: '继续' }] })
+    const source = { kind: 'workspace' as const, workspaceId: request.workspaceId, environment: { kind: 'connection' as const, connectionId: 'server-a' }, rootPath: '/srv/app', connectionRevision: 1 }
+    const stale = { ...source, environment: { kind: 'connection' as const, connectionId: 'server-b' } }
+    const history = [userMessage('h1', [{ type: 'file_ref', path: 'src/a.ts', name: 'a.ts', source: stale }], 0)]
+    const workspace = { ...localEnvironment(nodeHost(), '/srv/app'), remote: true }
+    const deps: SessionDeps = { host: quietHost(), upstream: fakeUpstream([says('ok')]), tools: registry(),
+      workspaceRoot: '/srv/app', fileReferenceSource: source, workspace, history }
+    expect(() => new AgentSession(deps, new RunHandle(request), request)).not.toThrow()
+  })
+
+  /**
+   * ★ 这条盯的是**静默**的那一侧:本地 run 原先完全不校验历史引用。
+   *
+   * 历史引用早已被归一成工作区相对写法,所以 server-a 的 `src/a.ts` 进本地 run 后
+   * 指向本机同名文件。同一套部署目录在两边都存在时,模型读到一个无关文件,且没有
+   * 任何一处报错 —— 正是「两台服务器上存在相同路径」那个场景。
+   */
+  it('★ 历史里来自远端的引用,不会以本机同名文件的身份进入模型上下文', async () => {
+    const request = req({ input: [{ type: 'text', text: '继续' }] })
+    const handle = new RunHandle(request)
+    const upstream = fakeUpstream([says('好')])
+    const remote = { kind: 'workspace' as const, workspaceId: request.workspaceId, environment: { kind: 'connection' as const, connectionId: 'server-a' }, rootPath: '/srv/app', connectionRevision: 1 }
+    const history = [userMessage('h1', [{ type: 'file_ref', path: 'src/a.ts', name: 'a.ts', source: remote }], 0)]
+    const session = new AgentSession({ host: quietHost(), upstream, tools: registry(), workspaceRoot: root, history }, handle, request)
+    await session.run()
+    const parts = (upstream.requests[0]?.messages ?? []).flatMap((message) => message.parts)
+    expect(parts.some((part) => part.type === 'file_ref'), '远端引用不得带着可用路径进入上下文').toBe(false)
+    expect(parts.some((part) => part.type === 'text' && part.text.includes('a.ts') && part.text.includes('different workspace environment'))).toBe(true)
+  })
+
   let base = ''
   let root = ''
   let outside = ''

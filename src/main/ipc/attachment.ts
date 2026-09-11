@@ -14,7 +14,8 @@
  * 要正确处理得上引用计数 —— 而省下的那点磁盘不值得引入一套引用计数的
  * 正确性负担(理由同 `repo.findAttachmentByChecksum`)。
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { constants, promises as fs } from 'node:fs'
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { dialog } from 'electron'
@@ -22,7 +23,9 @@ import type {
   Attachment,
   AttachmentScope,
   AttachmentUploadRequest,
-  PickedAttachment
+  PickedAttachment,
+  WorkspaceAttachmentIntent,
+  WorkspaceAttachmentReference
 } from '../../shared/domain/attachment'
 import {
   MAX_ATTACHMENT_BYTES,
@@ -36,6 +39,104 @@ import { ulid } from '../../shared/util/id'
 import * as repo from '../db/repo'
 import { attachmentRoot } from '../net/attachment-protocol'
 import { IpcError } from './errors'
+import { EnvironmentError, normalizeEnvironmentRef } from '../../shared/domain/environment'
+import type { EnvironmentLease } from '../environment/contract'
+import { uploadWorkspaceAttachment } from '../environment/artifacts'
+import type { WindowContext } from '../window/registry'
+
+type UploadGrant = {
+  owner: number
+  sessionId: string
+  lease: EnvironmentLease
+  intent: WorkspaceAttachmentIntent
+  source: WorkspaceAttachmentReference['source']
+  timer: NodeJS.Timeout
+  uploading: boolean
+  cancelled: boolean
+}
+const uploadGrants = new Map<string, UploadGrant>()
+const uploadWindows = new WeakSet<WindowContext['sender']>()
+
+export function cancelWorkspaceUpload(ticket: string, ctx: WindowContext): void {
+  const grant = uploadGrants.get(ticket)
+  if (!grant || grant.owner !== ctx.id) return
+  grant.cancelled = true
+  clearTimeout(grant.timer)
+  if (!grant.uploading) { uploadGrants.delete(ticket); grant.lease.release() }
+}
+
+export async function prepareWorkspaceUpload(req: { id: string; sessionId: string; workspaceId: string }, ctx: WindowContext): Promise<WorkspaceAttachmentIntent> {
+  const row = repo.getAttachmentRow(req.id)
+  const workspace = repo.getWorkspace(req.workspaceId)
+  const ref = normalizeEnvironmentRef(workspace?.environment)
+  const session = repo.getSession(req.sessionId)
+  if (!workspace || ref.kind !== 'connection' || !row || row.scope !== 'session' || row.ownerId !== req.sessionId
+    || row.status !== 'draft' || (session && session.workspaceId !== req.workspaceId)) throw new EnvironmentError('unbound')
+  if (row.size > MAX_ATTACHMENT_BYTES || uploadGrants.size >= 64) throw new EnvironmentError('unsupported')
+  const profile = repo.getConnectionProfile(ref.connectionId)
+  if (!profile?.enabled) throw new EnvironmentError('disabled')
+  const { getEnvironments } = await import('../runtime')
+  if (ctx.sender.isDestroyed()) throw new EnvironmentError('cancelled')
+  const lease = getEnvironments().acquire(req.workspaceId)
+  if (!lease.environment.remote) { lease.release(); throw new EnvironmentError('unbound') }
+  const ticket = randomUUID()
+  const intent: WorkspaceAttachmentIntent = { ticket, attachmentId: req.id, workspaceId: workspace.id,
+    connectionName: lease.environment.description, directory: lease.environment.path.join(lease.environment.rootPath, '.next-cowork', 'attachments'),
+    name: row.displayName ?? basename(row.path), size: row.size }
+  const timer = setTimeout(() => cancelWorkspaceUpload(ticket, ctx), 60_000)
+  timer.unref?.()
+  uploadGrants.set(ticket, { owner: ctx.id, sessionId: req.sessionId, lease, intent, timer, uploading: false, cancelled: false,
+    source: { kind: 'workspace', workspaceId: workspace.id, environment: ref, rootPath: lease.environment.rootPath, connectionRevision: profile.revision } })
+  if (!uploadWindows.has(ctx.sender)) {
+    uploadWindows.add(ctx.sender)
+    const cancel = (): void => { for (const [id, grant] of uploadGrants) if (grant.owner === ctx.id) cancelWorkspaceUpload(id, ctx) }
+    ctx.sender.once('destroyed', cancel)
+    ctx.sender.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => { if (mainFrame) cancel() })
+  }
+  return intent
+}
+
+export async function completeWorkspaceUpload(ticket: string, ctx: WindowContext): Promise<WorkspaceAttachmentReference> {
+  const grant = uploadGrants.get(ticket)
+  if (!grant || grant.owner !== ctx.id || grant.uploading || grant.cancelled) throw new EnvironmentError('approval-expired')
+  grant.uploading = true
+  clearTimeout(grant.timer)
+  const assertCurrent = (): void => {
+    if (grant.cancelled || ctx.sender.isDestroyed()) throw new EnvironmentError('cancelled')
+    grant.lease.environment.assertReady()
+    const source = grant.source
+    const workspace = repo.getWorkspace(grant.intent.workspaceId)
+    if (source.kind !== 'workspace' || source.environment.kind !== 'connection'
+      || JSON.stringify(normalizeEnvironmentRef(workspace?.environment)) !== JSON.stringify(source.environment)
+      || workspace?.rootPath !== source.rootPath
+      || repo.getConnectionProfile(source.environment.connectionId)?.revision !== source.connectionRevision) throw new EnvironmentError('conflict')
+  }
+  try {
+    assertCurrent()
+    const row = repo.getAttachmentRow(grant.intent.attachmentId)
+    if (!row || row.status !== 'draft' || row.ownerId !== grant.sessionId || row.scope !== 'session') throw new EnvironmentError('conflict')
+    const root = await fs.realpath(join(attachmentRoot(), 'sessions', grant.sessionId))
+    const path = await fs.realpath(row.path)
+    const rel = relative(root, path)
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new EnvironmentError('invalid-path')
+    const handle = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    let bytes: Buffer
+    try {
+      const stat = await handle.stat()
+      if (!stat.isFile() || stat.size !== row.size || stat.size > MAX_ATTACHMENT_BYTES) throw new EnvironmentError('conflict')
+      bytes = Buffer.alloc(stat.size)
+      let offset = 0
+      while (offset < bytes.length) {
+        const result = await handle.read(bytes, offset, bytes.length - offset, offset)
+        if (!result.bytesRead) throw new EnvironmentError('conflict')
+        offset += result.bytesRead
+      }
+      if ((await handle.stat()).size !== row.size || sha256(bytes) !== row.checksum) throw new EnvironmentError('conflict')
+    } finally { await handle.close() }
+    const pathOnServer = await uploadWorkspaceAttachment(grant.lease.environment, bytes, grant.intent.name, assertCurrent)
+    return { path: pathOnServer, name: grant.intent.name, source: grant.source }
+  } finally { uploadGrants.delete(ticket); grant.lease.release() }
+}
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -154,6 +255,7 @@ export function uploadAttachment(req: AttachmentUploadRequest): Attachment {
 export async function pickAttachments(req: {
   scope: AttachmentScope
   ownerId?: string
+  stageFiles?: boolean
 }): Promise<PickedAttachment[]> {
   const r = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
@@ -170,7 +272,7 @@ export async function pickAttachments(req: {
       // ★ 非图片这一支**不读字节**,所以也不受上传上限约束 —— 上限存在的理由是
       //   结构化克隆的卡顿(见 MAX_ATTACHMENT_BYTES),而这里一个字节都不过 IPC。
       //   拖一个 200MB 的日志进来是可以的,从菜单选同一个文件没有理由被静默丢掉。
-      if (!isImageMime(mime)) {
+      if (!isImageMime(mime) && !req.stageFiles) {
         out.push({ kind: 'path', path, name: basename(path) })
         continue
       }

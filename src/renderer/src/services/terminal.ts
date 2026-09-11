@@ -1,15 +1,12 @@
-import type { TerminalBuffer, TerminalInfo } from '../../../shared/domain/terminal'
+import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo } from '../../../shared/domain/terminal'
 import { invoke, on, send } from './ipc'
 
-export function createTerminal(req: {
-  workspaceId: string
-  id?: string
-  cwd?: string
-  cols: number
-  rows: number
-}): Promise<TerminalInfo> {
+export function createTerminal(req: TerminalCreateRequest): Promise<TerminalInfo> {
   return invoke('terminal:create', req)
 }
+
+export const prepareTerminal = (request: TerminalCreateRequest) => invoke('terminal:prepare', request)
+export const approveTerminal = (id: string, approved: boolean) => invoke('terminal:approve', { id, approved })
 
 export function getTerminalBuffer(id: string): Promise<TerminalBuffer> {
   return invoke('terminal:getBuffer', { id })

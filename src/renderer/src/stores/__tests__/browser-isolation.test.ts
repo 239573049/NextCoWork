@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InnerTab, OuterTab } from '../../../../shared/domain/tab'
+import { DEFAULT_WORKSPACE_SETTINGS } from '../../../../shared/domain/workspace'
 
 vi.mock('../../services/app', () => ({
   getInnerTabs: vi.fn(),
@@ -20,6 +21,7 @@ const tabsInitial = useTabsStore.getState()
 beforeEach(() => {
   vi.clearAllMocks()
   useWindowStore.setState(windowInitial, true)
+  useWindowStore.getState().updateWorkspaces(['workspace-a', 'workspace-b'].map((id) => ({ id, name: id, rootPath: `/tmp/${id}`, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })))
   useTabsStore.setState(tabsInitial, true)
 })
 

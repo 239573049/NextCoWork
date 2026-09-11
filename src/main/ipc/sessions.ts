@@ -1,7 +1,7 @@
 /** 会话实体 IPC：所有读写都经过 state/store，避免 handler 直接写 SQL。 */
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
-import type { Session } from '../../shared/domain/session'
+import type { Session, SessionChange } from '../../shared/domain/session'
 import type { AgentMessage } from '../../shared/agent/message'
 import { mimeOfExt, parseNcwUrl } from '../../shared/domain/attachment'
 import { ulid } from '../../shared/util/id'
@@ -11,8 +11,8 @@ import { store } from '../state/store'
 import { removeSessionAttachmentFiles } from './storage'
 import { uploadAttachment } from './attachment'
 
-function changed(workspaceId?: string): void {
-  windows.emitToAll('sessions:changed', workspaceId === undefined ? {} : { workspaceId })
+function changed(event: SessionChange): void {
+  windows.emitToAll('sessions:changed', event)
 }
 
 export function listSessions(req: { workspaceId: string; archived?: boolean }) {
@@ -38,7 +38,7 @@ export function replaceHistory(req: { sessionId: string; messages: AgentMessage[
   }
   store.replaceHistory(req.sessionId, req.messages)
   const session = store.getSession(req.sessionId)
-  changed(session?.workspaceId)
+  changed({ kind: 'history', sessionIds: [req.sessionId], workspaceId: session?.workspaceId })
 }
 
 export function createSession(req: { workspaceId: string; title?: string; sessionId?: string }): Session {
@@ -49,7 +49,7 @@ export function createSession(req: { workspaceId: string; title?: string; sessio
     title: req.title,
     rootPathAtCreation: ws?.rootPath ?? ''
   })
-  changed(req.workspaceId)
+  changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: req.workspaceId })
   return session
 }
 
@@ -96,7 +96,7 @@ export function duplicateSession(req: { sessionId: string; title: string }): Ses
     removeSessionAttachmentFiles(paths)
     throw error
   }
-  changed(sourceSession.workspaceId)
+  changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: sourceSession.workspaceId })
   return session
 }
 
@@ -104,18 +104,19 @@ export function renameSession(req: { sessionId: string; title: string }): void {
   store.renameSession(req.sessionId, req.title)
   const session = store.getSession(req.sessionId)!
   windows.emitToAll('sessions:changed', {
+    kind: 'metadata', sessionIds: [session.id],
     workspaceId: session.workspaceId, renamed: { sessionId: session.id, title: session.title }
   })
 }
 
 export function setArchived(req: { sessionId: string; archived: boolean }): void {
   store.setSessionArchived(req.sessionId, req.archived)
-  changed()
+  changed({ kind: 'metadata', sessionIds: [req.sessionId], workspaceId: store.getSession(req.sessionId)?.workspaceId })
 }
 
 export function setFavorited(req: { sessionId: string; favorited: boolean }): void {
   store.setSessionFavorited(req.sessionId, req.favorited)
-  changed()
+  changed({ kind: 'metadata', sessionIds: [req.sessionId], workspaceId: store.getSession(req.sessionId)?.workspaceId })
 }
 
 export function deleteSession(req: { sessionId: string }): void {
@@ -130,12 +131,21 @@ export function deleteSession(req: { sessionId: string }): void {
   // storage helper re-checks remaining references after deletion, so a file
   // shared by an older/migrated record is never removed prematurely.
   const attachmentPaths = requireSessionAttachmentPaths(req.sessionId)
-  store.deleteSession(req.sessionId)
+  const session = store.getSession(req.sessionId)
+  const previous = session === undefined ? [] : store.listSessions(session.workspaceId)
+  const deletedIndex = previous.findIndex((item) => item.id === req.sessionId)
+  const sessionIds = store.deleteSession(req.sessionId)
+  const deleted = new Set(sessionIds)
+  const remaining = previous.filter((item) => !deleted.has(item.id))
+  const replacement = remaining[Math.min(Math.max(deletedIndex, 0), remaining.length - 1)]
   const physical = removeSessionAttachmentFiles(attachmentPaths)
   if (physical.undeletable.length > 0) {
     console.warn('[sessions] 会话附件未能全部删除:', physical.undeletable)
   }
-  changed()
+  changed({ kind: 'deleted', sessionIds, workspaceId: session?.workspaceId,
+    ...(replacement === undefined || session === undefined ? {} : {
+      replacement: { workspaceId: session.workspaceId, id: replacement.id, title: replacement.title }
+    }) })
 }
 
 function requireSessionAttachmentPaths(sessionId: string): string[] {

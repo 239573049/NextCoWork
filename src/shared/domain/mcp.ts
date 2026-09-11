@@ -20,6 +20,7 @@ interface McpServerBase {
   /** 参考图那栏「描述(可选)」。也会拼进工具描述前缀,给模型一点上下文 */
   description?: string
   enabled: boolean
+  workspaceId?: string
 }
 
 export type McpServerConfig =

@@ -4,16 +4,31 @@ const persisted = vi.hoisted(() => new Map<string, unknown>())
 
 vi.mock('../../state/store', () => ({
   store: {
+    getWorkspace: vi.fn(),
     getKv: vi.fn((key: string, fallback: unknown) => persisted.get(key) ?? fallback),
     setKv: vi.fn((key: string, value: unknown) => persisted.set(key, value))
   }
 }))
 
-import { BrowserManager } from '../manager'
+import { assertLocalBrowserWorkspace, BrowserManager } from '../manager'
+import { store } from '../../state/store'
+import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 
 beforeEach(() => persisted.clear())
 
 describe('BrowserManager · workspace and run isolation', () => {
+  it('rejects remote and unknown workspace browser requests before opening local resources', () => {
+    vi.mocked(store.getWorkspace).mockReturnValue(undefined)
+    expect(() => assertLocalBrowserWorkspace('missing')).toThrow('unbound')
+    const workspace = { id: 'workspace', name: 'workspace', rootPath: '/project', settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 }
+    vi.mocked(store.getWorkspace).mockReturnValue({ ...workspace, environment: { kind: 'connection', connectionId: 'server' } })
+    expect(() => assertLocalBrowserWorkspace('workspace')).toThrow('unsupported')
+    const manager = new BrowserManager(assertLocalBrowserWorkspace)
+    expect(() => manager.open({ workspaceId: 'workspace', url: 'https://example.com', source: 'user' })).toThrow('unsupported')
+    expect(manager.list('workspace')).toEqual([])
+    vi.mocked(store.getWorkspace).mockReturnValue(workspace)
+    expect(() => assertLocalBrowserWorkspace('workspace')).not.toThrow()
+  })
   it('标签只出现在所属工作区的目录里', () => {
     const manager = new BrowserManager()
     const a = manager.open({ workspaceId: 'workspace-a', source: 'user', url: 'https://a.example.com' })

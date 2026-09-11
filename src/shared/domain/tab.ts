@@ -12,11 +12,11 @@ export type OuterTab =
   | { id: string; kind: 'workspace'; ref: { workspaceId: string } }
   | { id: string; kind: 'feature'; ref: { feature: FeatureKind } }
 
-export type FeatureKind = 'scheduled' | 'skills' | 'browser' | 'review' | 'settings'
+export type FeatureKind = 'scheduled' | 'extensions' | 'browser' | 'review' | 'settings'
 
 export const FEATURE_LABEL: Record<FeatureKind, string> = {
   scheduled: '定时任务',
-  skills: 'Skill 管理',
+  extensions: '扩展',
   browser: '浏览器',
   review: '每日回顾',
   settings: '设置'
@@ -72,7 +72,7 @@ export type InnerTab =
    * 留着这个字段是因为参考实现的行动菜单里有「以此为根」类的操作,
    * 而且它让「同时挂两棵不同子树」不需要改类型。
    */
-  | (InnerTabBase & { kind: 'files'; ref: { path: string } })
+  | (InnerTabBase & { kind: 'files'; ref: { path: string; selectedPath?: string } })
 
 export type InnerTabKind = InnerTab['kind']
 

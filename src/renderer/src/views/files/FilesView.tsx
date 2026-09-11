@@ -32,13 +32,14 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Undo2,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { DirListing, FileEntry, SortBy } from '../../../../shared/domain/file-tree'
 import { paneOf, type InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
-import type { WorkspaceFileMutationRequest } from '../../../../shared/domain/workspace-file'
+import type { WorkspaceFileMutationRequest, WorkspaceRecoveryEntry } from '../../../../shared/domain/workspace-file'
 import type { DockNode } from '../../../../shared/domain/dock'
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
@@ -47,7 +48,7 @@ import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
 import { listDir } from '../../services/app'
-import { mutateWorkspaceFile, revealWorkspaceFile, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
+import { listWorkspaceRecovery, mutateWorkspaceFile, revealWorkspaceFile, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
 import { confirmDocumentChanges } from '../../stores/documents'
 import { useTabsStore } from '../../stores/tabs'
 import { flatten } from './flatten'
@@ -105,6 +106,15 @@ function WorkspaceFilesView({
   const [confirmingChanges, setConfirmingChanges] = useState(false)
   const [operationError, setOperationError] = useState<TranslationKey | null>(null)
   const [notice, setNotice] = useState<{ key: TranslationKey; path?: string; error?: boolean } | null>(null)
+  /**
+   * ★ 可恢复项从**服务器索引**派生,不再是组件 state。
+   *
+   * 原先是单槽 `useState`:删第二个就把第一个覆盖掉(而它在服务器回收站里还在,UI 再也
+   * 找不到);组件 key 是 `${workspace.id}:${rootPath}`,切子树根就重挂载、恢复项蒸发;
+   * 刷新、重连、重启更不用说。现在列表来自 `listRecovery()`,上述四种情况天然都还在。
+   */
+  const [recoveryEntries, setRecoveryEntries] = useState<WorkspaceRecoveryEntry[]>([])
+  const [recoveryKey, setRecoveryKey] = useState('')
   const generation = useRef(0)
   const requests = useRef(new Map<string, number>())
   const sequence = useRef(0)
@@ -113,6 +123,20 @@ function WorkspaceFilesView({
 
   const toolbar = useRef<HTMLDivElement>(null)
   const compact = useToolbarCompact(toolbar)
+
+  const refreshRecovery = useCallback(async (): Promise<void> => {
+    try {
+      const listing = await listWorkspaceRecovery(workspace.id)
+      if (!alive.current) return
+      setRecoveryEntries(listing.entries)
+      setRecoveryKey(listing.environmentKey)
+    } catch {
+      // 列不出来不该打断文件操作本身,静默退成空列表
+      if (alive.current) setRecoveryEntries([])
+    }
+  }, [workspace.id])
+
+  useEffect(() => { void refreshRecovery() }, [refreshRecovery])
 
   const load = useCallback(
     (path: string): void => {
@@ -244,6 +268,7 @@ function WorkspaceFilesView({
         delete: 'files.manage.deleted',
       }
       setNotice({ key: noticeKeys[request.operation], path: result.destination ?? result.path })
+      if (result.recoveryPath) void refreshRecovery()
       setOperation(null)
       setScope('all')
       if (request.operation === 'create-file') {
@@ -269,6 +294,20 @@ function WorkspaceFilesView({
       await revealWorkspaceFile(workspace.id, path)
     } catch (error) {
       if (alive.current) setNotice({ key: workspaceFileErrorKey(error), error: true })
+    }
+  }
+
+  const restoreDeleted = async (entry: WorkspaceRecoveryEntry): Promise<void> => {
+    if (operationRunning.current) return
+    operationRunning.current = true; setBusy(true)
+    try {
+      // ★ 带上列举时的 environmentKey:重连换了环境后这条记录属于上一个连接,主进程会拒绝
+      await mutateWorkspaceFile({ workspaceId: workspace.id, operation: 'move', path: entry.recoveryPath, destination: entry.originalPath, environmentKey: recoveryKey })
+      if (alive.current) setNotice({ key: 'ssh.fileRestored', path: entry.originalPath })
+    } catch (error) { if (alive.current) setNotice({ key: workspaceFileErrorKey(error), error: true }) }
+    finally {
+      operationRunning.current = false
+      if (alive.current) { setBusy(false); void refreshRecovery() }
     }
   }
 
@@ -447,6 +486,24 @@ function WorkspaceFilesView({
         </div>
       </div>
 
+      {recoveryEntries.length > 0 && (
+        <div role="status" className="flex shrink-0 flex-col gap-1 border-y border-border px-3 py-2 text-[12px] text-fg-muted">
+          <span className="shrink-0">{t('ssh.recoveryTitle', { count: String(recoveryEntries.length) })}</span>
+          {/* 只列最近若干条,其余用一行计数带过 —— 窄面板下每条都要能换行,所以 break-all */}
+          {recoveryEntries.slice(0, 5).map((entry) => (
+            <div key={entry.token} className="flex items-start gap-2">
+              <span className="min-w-0 flex-1 break-all">
+                {t('ssh.fileRecovery', { path: entry.originalPath })}
+                {entry.occupied && <span className="ml-1 text-fg-subtle">({t('ssh.recoveryOccupied')})</span>}
+              </span>
+              <IconButton disabled={busy || entry.occupied} label={t('ssh.restoreFile')} onClick={() => { void restoreDeleted(entry) }}>
+                <Undo2 size={14} />
+              </IconButton>
+            </div>
+          ))}
+          {recoveryEntries.length > 5 && <span className="shrink-0">{t('ssh.recoveryMore', { count: String(recoveryEntries.length - 5) })}</span>}
+        </div>
+      )}
       {notice !== null && (
         <div role={notice.error ? 'alert' : 'status'} className={cn(
           'mx-2 mb-1.5 flex items-start gap-1 rounded-[7px] bg-tint px-2 py-1.5 text-[12px]',
@@ -716,7 +773,7 @@ export function FilesTab({ tab, workspace }: { tab: InnerTab; workspace: Workspa
     <FilesView
       workspace={workspace}
       rootPath={tab.kind === 'files' ? tab.ref.path : ''}
-      selectedPath={selectedPath}
+      selectedPath={tab.kind === 'files' ? tab.ref.selectedPath ?? selectedPath : selectedPath}
       onOpenFile={(path, name) => openPath(workspace.id, 'doc', path, name)}
     />
   )

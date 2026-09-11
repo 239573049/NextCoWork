@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_WORKSPACE_SETTINGS } from '../../../../../shared/domain/workspace'
+import { store } from '../../../../state/store'
 import { browserPartition } from '../../../../../shared/domain/browser'
 import { browserManager } from '../../../../browser/manager'
 import { nodeHost } from '../../../host'
@@ -14,10 +16,15 @@ vi.mock('node:dns', () => ({
 
 const opened: string[] = []
 
+beforeEach(() => {
+  vi.spyOn(store, 'getWorkspace').mockReturnValue({ id: 'workspace-a', name: 'local', rootPath: '/tmp/workspace-a', environment: { kind: 'local' }, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })
+})
+
 afterEach(() => {
   for (const id of opened.splice(0)) {
     if (browserManager.get(id) !== undefined) browserManager.close(id)
   }
+  vi.restoreAllMocks()
 })
 
 function openAgentTab(url = 'https://example.com/') {

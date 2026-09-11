@@ -24,6 +24,7 @@ import { minPermission } from '../shared/agent/permission'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../shared/domain/workspace'
 import type { ApproveFn } from './kernel/agent-session'
 import { AgentSession } from './kernel/agent-session'
+import { abortable } from './kernel/abort'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
 import { TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
@@ -45,6 +46,8 @@ import { taskTool } from './kernel/tool/builtin/task'
 import type { SpawnSubagentFn } from './kernel/tool/registry'
 import { ToolRegistry } from './kernel/tool/registry'
 import { McpManager } from './mcp/manager'
+import { environmentTransport } from './mcp/environment-transport'
+import type { McpServerConfig, McpServerStatus } from '../shared/domain/mcp'
 import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
 import type { ProviderConfigSource } from './kernel/upstream/router'
@@ -67,8 +70,17 @@ import type { ModelPricing } from '../shared/domain/pricing'
 import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
+import type { SessionChange } from '../shared/domain/session'
 import type { CanonicalRequest } from './kernel/upstream/canonical'
 import { ulid } from '../shared/util/id'
+import type { ConnectionStatus, SshConnectionProfile } from '../shared/domain/environment'
+import { EnvironmentManager } from './environment/manager'
+import { localEnvironment } from './environment/local'
+import { connectSshEnvironment } from './environment/ssh/provider'
+import { EnvironmentError } from './environment/errors'
+import { normalizeEnvironmentRef } from '../shared/domain/environment'
+import type { FileReferenceSource } from '../shared/domain/attachment'
+import type { WorkspaceEnvironment } from './environment/contract'
 
 let host: KernelHost | null = null
 let router: UpstreamRouter | null = null
@@ -76,6 +88,30 @@ let tools: ToolRegistry | null = null
 let mcp: McpManager | null = null
 let seeded = false
 let sessionTitles: SessionTitleGenerator | null = null
+let environments: EnvironmentManager | null = null
+let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
+let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void> }>) | undefined
+
+export function installEnvironmentInteraction(authentication: NonNullable<typeof environmentAuthentication>, status: NonNullable<typeof environmentStatusSink>): void {
+  environmentAuthentication = authentication
+  environmentStatusSink = status
+}
+
+export function getEnvironments(): EnvironmentManager {
+  environments ??= new EnvironmentManager({
+    workspace: (id) => store.getWorkspace(id), profile: (id) => store.getConnectionProfile(id),
+    local: (root) => localEnvironment(getHost(), root),
+    connect: async (profile, context) => {
+      if (!environmentAuthentication) throw new EnvironmentError('authentication')
+      return connectSshEnvironment(profile, context, await environmentAuthentication(profile, context.senderId))
+    },
+    onStatus: (status) => environmentStatusSink?.(status)
+  })
+  return environments
+}
+
+export function getWorkspaceEnvironment(workspaceId: string): WorkspaceEnvironment { return getEnvironments().get(workspaceId) }
+export async function shutdownEnvironments(): Promise<void> { await environments?.shutdown() }
 
 /**
  * 谁来广播 MCP 的状态变化。
@@ -95,7 +131,7 @@ let mcpOnChange: ((id: string) => void) | null = null
  * 会话持久化发生在 runtime，但广播属于 Electron IPC 层。和 MCP 状态
  * 广播一样用一个零 Electron 的注入回调，避免 runtime 反向依赖窗口模块。
  */
-let sessionOnChange: ((workspaceId: string, renamed?: { sessionId: string; title: string }) => void) | null = null
+let sessionOnChange: ((change: SessionChange) => void) | null = null
 
 /**
  * 某条凭证被刷新、或者被标成需要重新登录了。
@@ -112,6 +148,8 @@ let credentialOnChange: ((credentialRef: string) => void) | null = null
  */
 export function installHost(h: KernelHost): void {
   shutdownSessionTitles()
+  void environments?.shutdown()
+  environments = null
   host = h
   /*
     ★ 搜索服务的 Key 访问器。装在这里(而不是 `initRuntime`)是因为
@@ -403,7 +441,7 @@ function getSessionTitles(): SessionTitleGenerator {
     }),
     getSession: store.getSession,
     putSession: store.putSession,
-    onChange: (session) => sessionOnChange?.(session.workspaceId, { sessionId: session.id, title: session.title }),
+    onChange: (session) => sessionOnChange?.({ kind: 'metadata', sessionIds: [session.id], workspaceId: session.workspaceId, renamed: { sessionId: session.id, title: session.title } }),
     logger: getHost().logger
   })
   sessionTitles = generator
@@ -503,6 +541,63 @@ export function getMcp(): McpManager {
   return mcp
 }
 
+const workspaceMcps = new Map<string, { key: string; manager: McpManager; tools: ToolRegistry; started: Set<string>; release(): void }>()
+
+function workspaceMcp(workspaceId: string, environment = getWorkspaceEnvironment(workspaceId)) {
+  environment.assertReady()
+  const existing = workspaceMcps.get(workspaceId)
+  if (existing?.key === environment.key) return existing
+  if (existing) { void existing.manager.shutdown(); existing.release() }
+  const lease = getEnvironments().acquire(workspaceId)
+  const scopedTools = new ToolRegistry()
+  const app = getHost()
+  const manager = new McpManager({ tools: scopedTools, secrets: app.secrets, logger: app.logger,
+    assertReady: environment.assertReady,
+    transportFactory: (config, values) => environmentTransport(environment, config, values),
+    onChange: (id) => mcpOnChange?.(id) })
+  const scope = { key: environment.key, manager, tools: scopedTools, started: new Set<string>(), release: lease.release }
+  workspaceMcps.set(workspaceId, scope)
+  return scope
+}
+
+export function listMcpStatuses(): McpServerStatus[] {
+  return store.listMcpServers().map((config) => {
+    if (config.workspaceId === undefined) return getMcp().statusOf(config)
+    const scope = workspaceMcps.get(config.workspaceId)
+    try {
+      if (scope?.key === getWorkspaceEnvironment(config.workspaceId).key) return scope.manager.statusOf(config)
+    } catch { /* Disconnected workspaces have no usable MCP tools. */ }
+    return { config, state: 'disconnected', tools: [], toolCount: 0 }
+  })
+}
+
+export async function connectConfiguredMcp(config: McpServerConfig): Promise<McpServerStatus> {
+  if (config.workspaceId === undefined) return getMcp().connect(config)
+  try {
+    const scope = workspaceMcp(config.workspaceId)
+    scope.started.add(config.id)
+    return await scope.manager.connect(config)
+  } catch (error) {
+    return { config, state: 'error', tools: [], toolCount: 0, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export async function disconnectConfiguredMcp(id: string): Promise<void> {
+  await Promise.all([getMcp().disconnect(id), ...[...workspaceMcps.values()].map((scope) => scope.manager.disconnect(id))])
+}
+
+async function prepareWorkspaceMcp(workspaceId: string, environment: WorkspaceEnvironment): Promise<ToolRegistry | undefined> {
+  const configs = store.listMcpServers().filter((config) => config.workspaceId === workspaceId && config.enabled)
+  if (configs.length === 0) return undefined
+  const scope = workspaceMcp(workspaceId, environment)
+  await Promise.all(configs.filter((config) => !scope.started.has(config.id)).map((config) => {
+    scope.started.add(config.id)
+    return scope.manager.connect(config)
+  }))
+  environment.assertReady()
+  return scope.tools
+}
+
 /** 由 `ipc/mcp.ts` 在 `registerIpc()` 里装上 —— 理由见 `mcpOnChange` 的注释 */
 export function setMcpChangeListener(fn: (id: string) => void): void {
   mcpOnChange = fn
@@ -524,6 +619,8 @@ export function setCredentialChangeListener(fn: NonNullable<typeof credentialOnC
  */
 export async function shutdownMcp(): Promise<void> {
   await mcp?.shutdown()
+  await Promise.all([...workspaceMcps.values()].map(async (scope) => { await scope.manager.shutdown(); scope.release() }))
+  workspaceMcps.clear()
 }
 
 /** app ready 时调一次。seed 提前跑,好让首屏的 bootstrap 已经带上默认模型。 */
@@ -567,13 +664,16 @@ function workspaceRootFor(workspaceId: string): string {
  * ★ 这个函数住在 runtime 而不是 `ipc/skills.ts`:它只需要 `getHost().paths`
  * 和 `store`,两样这里都有,而反过来会让内核的装配依赖 IPC 层。
  */
-export async function refreshSkills(workspaceId: string): Promise<readonly Skill[]> {
+export async function refreshSkills(workspaceId: string, environment?: WorkspaceEnvironment): Promise<readonly Skill[]> {
   const h = getHost()
   const root = workspaceRootFor(workspaceId)
+  environment ??= store.getWorkspace(workspaceId) ? getWorkspaceEnvironment(workspaceId) : undefined
+  const remote = environment?.remote ? environment : undefined
   const result = await scanSkills({
     fs: h.fs,
+    projectFs: remote?.fs, projectPath: remote?.path,
     globalRoot: join(h.paths.userData(), SKILLS_DIR),
-    projectRoot: root === '' ? '' : join(root, PROJECT_SKILLS_PREFIX, SKILLS_DIR)
+    projectRoot: root === '' ? '' : remote ? await remote.path.resolveWithin(remote.rootPath, `${PROJECT_SKILLS_PREFIX}/${SKILLS_DIR}`) : join(root, PROJECT_SKILLS_PREFIX, SKILLS_DIR)
   })
   // 诊断只记日志,不阻断:一条坏掉的 SKILL.md 不该让别的都用不了
   for (const d of result.diagnostics) h.logger.warn(`[skill] ${d.path}: ${d.message}`)
@@ -588,11 +688,13 @@ export async function refreshSkills(workspaceId: string): Promise<readonly Skill
  * 没有任何工具会在运行期查它,它只在组装时用一次。一个返回字符串的函数就够,
  * 而且顺带躲掉了 `skillRegistry()` 那个没有 test reset 钩子的问题。
  */
-export async function loadInstructions(workspaceId: string): Promise<string> {
+export async function loadInstructions(workspaceId: string, environment?: WorkspaceEnvironment): Promise<string> {
   const h = getHost()
   const root = workspaceRootFor(workspaceId)
+  environment ??= store.getWorkspace(workspaceId) ? getWorkspaceEnvironment(workspaceId) : undefined
   const result = await scanInstructions({
     fs: h.fs,
+    ...(environment?.remote ? { projectFs: environment.fs, projectPath: environment.path } : {}),
     globalRoot: h.paths.userData(),
     projectRoot: root
   })
@@ -612,7 +714,7 @@ function activeSkills(req: RunRequest, snapshot?: readonly Skill[]): readonly Sk
   const disabled = new Set(store.getDisabledSkillIds())
   const source = snapshot ?? skillRegistry().list()
   return (snapshot === undefined ? skillRegistry().resolve(req.skillIds, req.skillSelectionMode ?? 'all') : resolveSkillsSnapshot(source, req))
-    .filter((s) => !disabled.has(s.id))
+    .filter((s) => !disabled.has(s.id) && !s.unavailableReason)
 }
 
 function resolveSkillsSnapshot(skills: readonly Skill[], req: RunRequest): readonly Skill[] {
@@ -632,17 +734,45 @@ function resolveSkillsSnapshot(skills: readonly Skill[], req: RunRequest): reado
  * `register()` 按 internalId 幂等替换且保住 externalName,所以重注册不会让
  * 历史转录里的 `Task` 引用失配(见 `ToolRegistry.register` 的注释)。
  */
-export async function refreshAgents(workspaceId: string): Promise<void> {
+export async function refreshAgents(workspaceId: string, environment?: WorkspaceEnvironment): Promise<readonly AgentDefinition[]> {
   const h = getHost()
   const root = workspaceRootFor(workspaceId)
+  environment ??= store.getWorkspace(workspaceId) ? getWorkspaceEnvironment(workspaceId) : undefined
+  const remote = environment?.remote ? environment : undefined
   const result = await scanAgents({
     fs: h.fs,
+    projectFs: remote?.fs, projectPath: remote?.path,
     globalRoot: join(h.paths.userData(), AGENTS_DIR),
-    projectRoot: root === '' ? '' : join(root, PROJECT_AGENTS_PREFIX, AGENTS_DIR)
+    projectRoot: root === '' ? '' : remote ? await remote.path.resolveWithin(remote.rootPath, `${PROJECT_AGENTS_PREFIX}/${AGENTS_DIR}`) : join(root, PROJECT_AGENTS_PREFIX, AGENTS_DIR)
   })
   for (const d of result.diagnostics) h.logger.warn(`[agent] ${d.path}: ${d.message}`)
   agentRegistry().replaceAll(result)
   getTools().register(taskTool())
+  return result.agents
+}
+
+interface RunResources {
+  fileReferenceSource: FileReferenceSource
+  environment: WorkspaceEnvironment
+  agents: readonly AgentDefinition[]
+  tools: ToolRegistry
+}
+
+function snapshotRunTools(environment: WorkspaceEnvironment, agents: readonly AgentDefinition[], scoped?: ToolRegistry): ToolRegistry {
+  const registry = new ToolRegistry()
+  for (const tool of getTools().snapshot()) {
+    if (environment.remote && (tool.source.kind === 'mcp' || tool.internalId.startsWith('browser_'))) continue
+    registry.register(tool.internalId === 'Bash' && environment.remote ? {
+      ...tool,
+      description: `Runs a non-interactive command on the SSH server in the workspace directory using ${environment.platform.shell}. `
+        + 'Each call starts a fresh shell, stdin is closed, and output and execution time are bounded. '
+        + (environment.platform.os === 'win32' ? 'Use PowerShell syntax and Windows paths, not Bash or cmd.exe syntax. ' : 'Use the remote shell syntax and paths. ')
+        + 'Commands do not run on the client. A lost connection may leave the outcome unknown; do not automatically repeat a mutation.'
+    } : tool)
+  }
+  registry.register(taskTool(agents))
+  for (const tool of scoped?.snapshot() ?? []) registry.register(tool)
+  return registry
 }
 
 // ─────────────────────────── 子代理 ───────────────────────────
@@ -952,7 +1082,7 @@ function availableSubagentModel(configured: { model: string; modelProviderId?: s
  * (要在它身上发 `subagent_start/end`)和 store(要取子代理的产出)。
  * `ctx.emit` 只会发 `tool_progress`,发不了子代理事件。
  */
-function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills?: readonly Skill[]): SpawnSubagentFn {
+function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills: readonly Skill[] | undefined, resources: RunResources): SpawnSubagentFn {
   return async (sub) => {
     /*
       ★ 深度在这里**再断言一次**,尽管 `Task.run` 第一行已经判过。
@@ -968,7 +1098,8 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
       }
     }
 
-    const def = agentRegistry().get(sub.subagentType)
+    resources.environment.assertReady()
+    const def = resources.agents.find((definition) => definition.name === sub.subagentType)
     if (def === undefined) {
       /*
         ★ **绝不静默回落到 general-purpose。**名字敲错的用户会拿到一份
@@ -978,7 +1109,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
       return {
         kind: 'refused',
         reason:
-          `There is no subagent named "${sub.subagentType}". Available: ${agentRegistry().names().join(', ')}. ` +
+          `There is no subagent named "${sub.subagentType}". Available: ${resources.agents.map((definition) => definition.name).join(', ')}. ` +
           `Pick one from that list, or skip the subagent and do this step yourself.`
       }
     }
@@ -1048,7 +1179,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
     */
     let finished: Promise<void> | undefined
     const child = launch(parent, childReq, (h, r) => {
-      finished = runAgent(h, r, def, parentSkills)
+      finished = runAgent(h, r, def, parentSkills, resources)
       return finished
     })
     const result = monitorChildRun(parent, child, childReq, sub.callId, sub.background === true, finished)
@@ -1165,7 +1296,7 @@ async function reviewSensitiveOperation(
   return 'unknown'
 }
 
-function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
+function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceEnvironment): ApproveFn {
   // 与 permissionMode 一样按 run 冻结，避免用户改设置后同一轮请求前后使用不同审核器。
   // ★ 别名和供应商必须在**同一刻**冻结:一个冻结一个现取的话,用户中途换了供应商
   //   就会拼出「旧别名 + 新供应商」,而这一轮的审核器是谁将无从解释。
@@ -1184,9 +1315,12 @@ function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
     if (outcome.kind === 'deny') return { kind: 'deny', reason: outcome.reason }
 
     const host = getHost()
-    const root = workspaceRootFor(req.workspaceId)
+    environment.assertReady()
+    const root = environment.rootPath
+    const filesystem = environment.remote ? environment.fs : host.fs
+    const scope = environment.remote ? { path: environment.path, namespace: environment.key } : undefined
     // 规则用 internalId 匹配 —— externalName 会被注册表截断去重,跨会话不稳定。
-    const local = await readLocalSettings(host.fs, root, host.logger)
+    const local = await readLocalSettings(filesystem, root, host.logger, scope)
     const denied = matchPermissionRules(local.permissions.deny, tool.internalId, input)
     if (denied !== null) {
       return { kind: 'deny', reason: `This call matches the deny rule \`${denied}\` in the workspace's `
@@ -1215,7 +1349,7 @@ function approveWith(req: RunRequest, handle: RunHandle): ApproveFn {
     const decision = response.decision
     if (decision.kind !== 'allow_always') return decision
     // 落盘失败不该把用户刚点下的「允许」变成「拒绝」—— 这一次照常放行,只是没记住。
-    const saved = await addLocalPermissionRule(host.fs, root, 'allow', suggestedRule, host.logger)
+    const saved = await addLocalPermissionRule(filesystem, root, 'allow', suggestedRule, host.logger, scope)
     if (!saved.ok) host.logger.warn(`[permission] 未能记住规则 ${suggestedRule}: ${saved.reason}`)
     return { kind: 'allow_once' }
   }
@@ -1237,9 +1371,12 @@ export async function runAgent(
    * 另一份定义了 —— 而模型看到的工具清单还是派出去那一刻的。
    */
   agent?: AgentDefinition,
-  inheritedSkills?: readonly Skill[]
+  inheritedSkills?: readonly Skill[],
+  inheritedResources?: RunResources
 ): Promise<void> {
   const existing = store.getSession(req.sessionId)
+  const workspace = store.getWorkspace(req.workspaceId)
+  if (!workspace || (existing && existing.workspaceId !== req.workspaceId)) throw new EnvironmentError('unbound')
   const session = store.ensureSession({
     id: req.sessionId,
     workspaceId: req.workspaceId,
@@ -1273,7 +1410,7 @@ export async function runAgent(
 
     子代理的转录不算:`parentSessionId` 非空的那些从来不进面向用户的枚举。
   */
-  if (existing === undefined && req.parentSessionId === undefined) sessionOnChange?.(req.workspaceId)
+  if (existing === undefined && req.parentSessionId === undefined) sessionOnChange?.({ kind: 'metadata', sessionIds: [req.sessionId], workspaceId: req.workspaceId })
   const startedAt = getHost().clock.now()
   store.setRunRecord(req.runId, req.sessionId, 'running', startedAt)
   /*
@@ -1285,38 +1422,74 @@ export async function runAgent(
     而重扫会在父代理正跑着的时候把 `Task` 的 description 换掉。
   */
   let runSkills: readonly Skill[] | undefined = inheritedSkills
-  if (agent === undefined) {
-    runSkills = await refreshSkills(req.workspaceId)
-    await refreshAgents(req.workspaceId)
+  let environment: WorkspaceEnvironment
+  let scopedMcpTools: ToolRegistry | undefined
+  let runAgents = inheritedResources?.agents ?? agentRegistry().list()
+  let release = (): void => {}
+  let projectInstructions: string
+  let git: GitContext | undefined
+  try {
+    if (inheritedResources) {
+      const lease = getEnvironments().retain(inheritedResources.environment)
+      environment = lease.environment
+      release = lease.release
+    }
+    else {
+      const lease = getEnvironments().acquire(req.workspaceId)
+      environment = lease.environment
+      release = lease.release
+    }
+    environment.assertReady()
+    if (agent === undefined) {
+      runSkills = await abortable(() => refreshSkills(req.workspaceId, environment), handle.signal)
+      runAgents = await abortable(() => refreshAgents(req.workspaceId, environment), handle.signal)
+      scopedMcpTools = await abortable(() => prepareWorkspaceMcp(req.workspaceId, environment), handle.signal)
+    }
+
+    /*
+      ★ 这两件事在那个 `if` **外面** —— 先弄清那个 `if` 到底在防什么:
+      它防的**不是**「数据太旧」,而是 `refreshSkills` / `refreshAgents` 会
+      `replaceAll()` 一个**进程内单例**(父 run 跑到一半时子 run 去重扫,
+      父代理下一轮的 Skill 目录就被换掉了)。
+
+      读一个文件、shell 一次 git,**什么单例都不动**,所以不属于那道闸门。
+      而子代理在**同一个工作区**里改同一份代码:不给它项目规矩,它会写出一份
+      不合仓库约定的代码交回来 —— 父代理拿到的只有结论,看不出错在哪一步。
+
+      ★ 唯一不给子代理的是 todo 快照,而它**不需要特判**:快照是从 `messages`
+      反推的,子 run 的 `messages` 是空的,推出来自然就是没有。这条自解。
+    */
+    projectInstructions = await abortable(() => loadInstructions(req.workspaceId, environment), handle.signal)
+    git = await abortable(() => readGitContext(
+      environment.spawn,
+      environment.rootPath,
+      handle.signal
+    ), handle.signal)
+    environment.assertReady()
+    handle.signal.throwIfAborted()
+  } catch (error) {
+    release()
+    if (!handle.signal.aborted) throw error
+    handle.finish('aborted')
+    store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
+    return
   }
 
-  /*
-    ★ 这两件事在那个 `if` **外面** —— 先弄清那个 `if` 到底在防什么:
-    它防的**不是**「数据太旧」,而是 `refreshSkills` / `refreshAgents` 会
-    `replaceAll()` 一个**进程内单例**(父 run 跑到一半时子 run 去重扫,
-    父代理下一轮的 Skill 目录就被换掉了)。
-
-    读一个文件、shell 一次 git,**什么单例都不动**,所以不属于那道闸门。
-    而子代理在**同一个工作区**里改同一份代码:不给它项目规矩,它会写出一份
-    不合仓库约定的代码交回来 —— 父代理拿到的只有结论,看不出错在哪一步。
-
-    ★ 唯一不给子代理的是 todo 快照,而它**不需要特判**:快照是从 `messages`
-    反推的,子 run 的 `messages` 是空的,推出来自然就是没有。这条自解。
-  */
-  const projectInstructions = await loadInstructions(req.workspaceId)
-  const git: GitContext | undefined = await readGitContext(
-    getHost().spawn,
-    workspaceRootFor(req.workspaceId),
-    handle.signal
-  )
-
   const history = store.getHistory(req.sessionId)
-  const agentSession = new AgentSession(
+  const ref = normalizeEnvironmentRef(workspace.environment)
+  const fileReferenceSource: FileReferenceSource = ref.kind === 'connection'
+    ? { kind: 'workspace', workspaceId: workspace.id, environment: ref, rootPath: environment.rootPath, connectionRevision: store.getConnectionProfile(ref.connectionId)?.revision ?? -1 }
+    : { kind: 'local' }
+  const resources: RunResources = inheritedResources ?? { environment, fileReferenceSource, agents: runAgents, tools: snapshotRunTools(environment, runAgents, scopedMcpTools) }
+  let agentSession: AgentSession
+  try { agentSession = new AgentSession(
     {
       host: getHost(),
+      fileReferenceSource: resources.fileReferenceSource,
+      ...(environment.remote ? { workspace: environment } : {}),
       upstream: getRouter(),
-      tools: getTools(),
-      workspaceRoot: workspaceRootFor(req.workspaceId),
+      tools: resources.tools,
+      workspaceRoot: environment.rootPath,
       /**
        * ★ 多轮的全部实现。缺省(空转录)意味着模型每轮都从零开始 ——
        * 界面上明明有三轮问答,它却只看得见最后一句。
@@ -1348,12 +1521,12 @@ export async function runAgent(
           判据用 `parentSessionId` 而不是 `depth === 0`:让「这条会话是隐藏的」
           和「不发侧边栏事件」共用同一个条件,将来多一种隐藏会话也自动跟上。
         */
-        if (req.parentSessionId === undefined) sessionOnChange?.(req.workspaceId)
+        if (req.parentSessionId === undefined) sessionOnChange?.({ kind: 'messages', sessionIds: [req.sessionId], workspaceId: req.workspaceId })
       },
       onToolUsage: ({ runId, toolCalls, toolErrors }) => {
         store.updateUsageToolsForRun(runId, toolCalls, toolErrors)
       },
-      approve: approveWith(req, handle),
+      approve: approveWith(req, handle, environment),
       interact: (draft) => interactions.request(handle, draft, getHost().clock.now()),
       /*
         ★ 这里给的是**目录**,不是正文。`context-assembler.ts` 只读
@@ -1369,7 +1542,7 @@ export async function runAgent(
       */
       ...(agent !== undefined ? { agentPrompt: agent.prompt } : {}),
       ...(agent?.tools !== undefined ? { allowedTools: agent.tools } : {}),
-      spawnSubagent: spawnSubagentFor(handle, req, runSkills),
+      spawnSubagent: spawnSubagentFor(handle, req, runSkills, resources),
       /*
         ★ 这两项注入的是**发出去的那份消息流**,转录一个字都不动
         (`context-assembler.ts` 的 `decorate`)。commit 进转录的话,用户会在
@@ -1389,7 +1562,7 @@ export async function runAgent(
     },
     handle,
     req
-  )
+  ) } catch (error) { release(); throw error }
   /**
    * `finally` 而不是 `then`:中断路径上 `finalizeAbort` 已经把半截回复和
    * 补上的 tool_result 都写进了 `history`。不在中断时落盘,下一轮就会带着
@@ -1409,19 +1582,34 @@ export async function runAgent(
     }
   }
   return running.finally(() => {
+    release()
     // message_commit 已逐条落盘；replaceHistory 是兼容旧调用/修复异常的最终校验。
     // A detached child may have completed between the last commit and this
     // final write. Preserve its newest durable metadata when replacing the
     // parent's in-memory snapshot.
-    const latest = store.getHistory(req.sessionId)
-    store.setHistory(req.sessionId, mergeLatestSubagentReceipts(agentSession.history, latest))
-    store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
+    /**
+     * ★ 这是一个**异步续延**:`abortAll()` 早已返回,库可能已经在退出流程里封掉了
+     * (`shutdownRuns()` 同步返回,6 秒兜底的 `finish()` 不等环境/MCP 关完就 closeDatabase)。
+     * 封库后写入会抛 —— 抛在 finally 里会变成无人接管的 rejection,所以在这里收住,
+     * 并留一条日志:这一条转录确实没落盘,不能假装它落了。
+     */
+    try {
+      const latest = store.getHistory(req.sessionId)
+      store.setHistory(req.sessionId, mergeLatestSubagentReceipts(agentSession.history, latest))
+      store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
+    } catch (error) {
+      getHost().logger.warn(`[runtime] run ${req.runId} 的收尾写入没有落盘:${error instanceof Error ? error.message : String(error)}`)
+    }
   })
 }
 
 /** 测试专用:把单例清干净,让每个用例从同一个起点开始。 */
 export function resetRuntimeForTest(): void {
   shutdownSessionTitles()
+  void environments?.shutdown()
+  environments = null
+  for (const scope of workspaceMcps.values()) { void scope.manager.shutdown(); scope.release() }
+  workspaceMcps.clear()
   interactions.clear()
   host = null
   router = null

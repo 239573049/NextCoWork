@@ -6,10 +6,12 @@
  */
 import type { PermissionMode } from '../agent/permission'
 import type { SessionMode, ThinkingLevel } from '../agent/run-request'
+import type { EnvironmentRef } from './environment'
 
 export interface Workspace {
   id: string
   name: string
+  environment?: EnvironmentRef
   /** ★ 按 { id, rootPath } 存;根目录会在运行期被删除或改名(方案 §9) */
   rootPath: string
   /** 根路径失效时标记它,而不是崩溃 */

@@ -22,6 +22,7 @@ import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
 import type { Workspace } from '../../shared/domain/workspace'
+import type { ConnectionProfile } from '../../shared/domain/environment'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
 import type {
   UsageAttemptRecord,
@@ -37,7 +38,29 @@ import * as repo from '../db/repo'
 /** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
 const DISABLED_SKILLS_KEY = 'skills.disabled'
 const SKILL_STATS_KEY = 'skills.stats'
+/**
+ * 命令 / 子代理的开关。同样存**被关掉**的那些名字，理由同 `getDisabledSkillIds`。
+ *
+ * ★ 存 kv 而不是写进 `.md` 的 frontmatter：「这台机器上我不想用这条」是一个
+ * 每机器偏好，写进文件会在共享仓库里产生一个 git diff，替队友做了决定 ——
+ * 这和 `settings.local.json` 文件头反对的是同一件事。
+ */
+const DISABLED_COMMANDS_KEY = 'commands.disabled'
+const DISABLED_AGENTS_KEY = 'agents.disabled'
 export interface SkillUsageStat { count: number; lastTriggeredAt: number; workspaces: Record<string, number>; lastTriggeredAtByWorkspace?: Record<string, number> }
+
+/** kv 里那张名字表读回来。★ 宽容读：kv 是用户能手改的，一个坏值不该让开关整个失灵。 */
+function readNameList(key: string): string[] {
+  const raw = repo.getKv<unknown>(key, [])
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+}
+
+function toggleName(current: readonly string[], name: string, enabled: boolean): string[] {
+  const now = new Set(current)
+  if (enabled) now.delete(name)
+  else now.add(name)
+  return [...now]
+}
 
 export const store = {
   // ── settings ──
@@ -51,6 +74,10 @@ export const store = {
   },
 
   // ── workspaces ──
+  listConnectionProfiles(): ConnectionProfile[] { return repo.listConnectionProfiles() },
+  getConnectionProfile(id: string): ConnectionProfile | undefined { return repo.getConnectionProfile(id) },
+  putConnectionProfile(profile: ConnectionProfile): ConnectionProfile { return repo.putConnectionProfile(profile) },
+  removeConnectionProfile(id: string): void { repo.removeConnectionProfile(id) },
   listWorkspaces(): Workspace[] {
     return repo.listWorkspaces()
   },
@@ -201,6 +228,20 @@ export const store = {
     else now.add(skillId)
     repo.setKv(DISABLED_SKILLS_KEY, [...now])
   },
+
+  // ── 命令 / 子代理的开关（同样存「被关掉的那些」，见 DISABLED_COMMANDS_KEY） ──
+  getDisabledCommandNames(): string[] {
+    return readNameList(DISABLED_COMMANDS_KEY)
+  },
+  setCommandEnabled(name: string, enabled: boolean): void {
+    repo.setKv(DISABLED_COMMANDS_KEY, toggleName(store.getDisabledCommandNames(), name, enabled))
+  },
+  getDisabledAgentNames(): string[] {
+    return readNameList(DISABLED_AGENTS_KEY)
+  },
+  setAgentEnabled(name: string, enabled: boolean): void {
+    repo.setKv(DISABLED_AGENTS_KEY, toggleName(store.getDisabledAgentNames(), name, enabled))
+  },
   recordSkillTrigger(skillId: string, workspaceId?: string): void {
     const raw = repo.getKv<Record<string, SkillUsageStat>>(SKILL_STATS_KEY, {})
     const current = raw && typeof raw === 'object' ? raw : {}
@@ -281,10 +322,10 @@ export const store = {
   setSessionFavorited(sessionId: string, favorited: boolean): void {
     repo.setSessionFavorited(sessionId, favorited)
   },
-  deleteSession(sessionId: string): void {
+  deleteSession(sessionId: string): string[] {
     // 未发出的输入、以及派生出来的子代理转录,都由 `repo.deleteSession` 一起收 ——
     // 它是整棵子树遍历的那一层,级联必须和遍历在同一处(见那边的注释)。
-    repo.deleteSession(sessionId)
+    return repo.deleteSession(sessionId)
   },
   searchSessions(q: string, workspaceId?: string, limit = 50): SearchHit[] {
     return repo.searchAll(q, workspaceId, limit)

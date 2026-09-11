@@ -33,13 +33,19 @@ import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
 import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
 import {
+  cancelWorkspaceUpload,
+  completeWorkspaceUpload,
   listSessionAttachments,
   pickAttachments,
+  prepareWorkspaceUpload,
   removeAttachment,
   uploadAttachment
 } from './attachment'
 import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
 import * as plans from './plans'
+import * as connections from './connections'
+import { assertLocalBrowserWorkspace } from '../browser/manager'
+import { getEnvironments } from '../runtime'
 import { getTools, installChildRunLauncher, setCredentialChangeListener, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
@@ -96,12 +102,12 @@ import { commandDiagnostics, listCommands } from './commands'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
-  listDir,
+  listWorkspaceDir as listDir,
   listWorkspaces,
   pickWorkspace,
   updateWorkspace
 } from './workspace'
-import { mutateWorkspaceFile, readWorkspaceFile, revealWorkspaceFile, writeWorkspaceFile } from './workspace-files'
+import { listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
 import { compactContext, listContextCheckpoints, updateContextCheckpoint } from './context'
 import {
@@ -201,6 +207,20 @@ const handlers: HandlerMap = {
   'theme:deleteProfile': (req) => deleteProfile(req.id),
   'theme:renameProfile': (req) => renameProfile(req),
   'workspace:list': () => listWorkspaces(),
+  'workspace:prepare': (req, ctx) => connections.prepareWorkspace(req, ctx),
+  'workspace:commitActivation': (req, ctx) => connections.commitWorkspaceActivation(req, ctx),
+  'workspace:releaseActivation': ({ ticket }, ctx) => connections.releaseWorkspaceActivation(ticket, ctx),
+  'workspace:createSsh': (req, ctx) => connections.createSshWorkspace(req, ctx),
+  'connection:list': () => connections.listConnections(),
+  'connection:upsert': (req) => connections.upsertConnection(req),
+  'connection:remove': ({ id }) => connections.removeConnection(id),
+  'connection:connect': (req, ctx) => connections.connectForBrowse(req, ctx),
+  'connection:disconnect': ({ id }) => getEnvironments().disconnect(id),
+  'connection:cancel': ({ requestId }, ctx) => connections.cancelConnectionRequest(requestId, ctx),
+  'connection:browse': (req, ctx) => connections.browseConnection(req, ctx),
+  'connection:closeBrowse': ({ browseId }, ctx) => connections.closeBrowse(browseId, ctx),
+  'connection:respond': (req, ctx) => connections.respondSshAuthentication(req, ctx),
+  'connection:pickFile': () => connections.pickSshFile(),
   'workspace:pick': () => pickWorkspace(),
   'workspace:update': (req) => updateWorkspace(req),
   'workspace:close': ({ id }) => {
@@ -214,10 +234,14 @@ const handlers: HandlerMap = {
   'workspace:writeFile': (req) => writeWorkspaceFile(req),
   'workspace:mutateFile': (req) => mutateWorkspaceFile(req),
   'workspace:revealFile': (req) => revealWorkspaceFile(req),
+  'workspace:listRecovery': (req) => listWorkspaceRecovery(req),
   'browser:list': ({ workspaceId }) => browserManager.list(workspaceId),
-  'browser:open': ({ workspaceId, url, title, profileId, clientTabId }) =>
-    browserManager.open({ workspaceId, url, title, profileId, clientTabId, source: 'user' }),
+  'browser:open': ({ workspaceId, url, title, profileId, clientTabId }) => {
+    assertLocalBrowserWorkspace(workspaceId)
+    return browserManager.open({ workspaceId, url, title, profileId, clientTabId, source: 'user' })
+  },
   'browser:navigate': ({ workspaceId, tabId, url }) => {
+    assertLocalBrowserWorkspace(workspaceId)
     const tab = browserManager.get(tabId)
     if (tab?.workspaceId !== workspaceId) throw new Error('浏览器标签不属于当前工作区')
     return browserManager.navigate(tabId, url)
@@ -242,15 +266,18 @@ const handlers: HandlerMap = {
     windows.emitToAll('browser:profilesChanged', browserManager.listProfiles())
   },
   'browser:exportCookies': ({ workspaceId, profileId }, ctx) => {
+    assertLocalBrowserWorkspace(workspaceId)
     const profile = browserManager.listProfiles().find((item) => item.id === profileId)
     if (profile === undefined) throw new Error('Profile 不存在')
     return exportBrowserCookies(ctx.sender, workspaceId, profile)
   },
   'browser:importCookies': ({ workspaceId, profileId }, ctx) => {
+    assertLocalBrowserWorkspace(workspaceId)
     if (!browserManager.listProfiles().some((item) => item.id === profileId)) throw new Error('Profile 不存在')
     return importBrowserCookies(ctx.sender, workspaceId, profileId)
   },
   'browser:clearProfileState': ({ workspaceId, profileId }) => {
+    assertLocalBrowserWorkspace(workspaceId)
     const profile = browserManager.listProfiles().find((item) => item.id === profileId)
     if (profile === undefined) throw new Error('Profile 不存在')
     if (profile.isDefault) throw new Error('默认浏览器不能清除登录态')
@@ -266,6 +293,9 @@ const handlers: HandlerMap = {
   // ── 附件(读取走 ncw:// 协议,不占 IPC) ──
   'attachment:upload': (req) => uploadAttachment(req),
   'attachment:pick': (req) => pickAttachments(req),
+  'attachment:prepareWorkspaceUpload': (req, ctx) => prepareWorkspaceUpload(req, ctx),
+  'attachment:completeWorkspaceUpload': ({ ticket }, ctx) => completeWorkspaceUpload(ticket, ctx),
+  'attachment:cancelWorkspaceUpload': ({ ticket }, ctx) => cancelWorkspaceUpload(ticket, ctx),
   'attachment:remove': (req) => removeAttachment(req),
   'attachment:listBySession': (req) => listSessionAttachments(req),
 
@@ -317,8 +347,10 @@ const handlers: HandlerMap = {
 
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
-  'terminal:kill': ({ id }) => terminalHost.kill(id),
-  'terminal:list': ({ workspaceId }) => terminalHost.list(workspaceId),
+  'terminal:prepare': (req, ctx) => terminalHost.prepare(req, ctx.sender),
+  'terminal:approve': ({ id, approved }, ctx) => terminalHost.approve(id, approved, ctx.sender),
+  'terminal:kill': ({ id }, ctx) => terminalHost.kill(id, ctx.sender),
+  'terminal:list': ({ workspaceId }, ctx) => terminalHost.list(workspaceId, ctx.sender),
   'terminal:getBuffer': ({ id }, ctx) => terminalHost.attach(id, ctx.sender),
 
   // ── 步骤 10:MCP ──
@@ -471,8 +503,8 @@ const sendHandlers: SendHandlerMap = {
   'session:persistInput': ({ sessionId, state, immediate }) =>
     persistDebounced(sessionInputKey(sessionId), state, immediate),
 
-  'terminal:write': ({ id, data }) => terminalHost.write(id, data),
-  'terminal:resize': ({ id, cols, rows }) => terminalHost.resize(id, cols, rows)
+  'terminal:write': ({ id, data }, ctx) => terminalHost.write(id, data, ctx.sender),
+  'terminal:resize': ({ id, cols, rows }, ctx) => terminalHost.resize(id, cols, rows, ctx.sender)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -526,6 +558,7 @@ export function registerIpc(): void {
 
   registerThemeBridge()
   registerMcpBridge()
+  connections.registerConnectionBridge()
   setBrowserChangeListener((change) => windows.emitToAll('browser:changed', change))
   /*
     ★ 子 run 的启动器。方向是 **ipc 依赖 runtime,runtime 永不依赖 ipc** ——
@@ -534,8 +567,8 @@ export function registerIpc(): void {
     里那次 `setMcpChangeListener` 是同一种接线。
   */
   installChildRunLauncher(startChildRun)
-  setSessionChangeListener((workspaceId, renamed) => {
-    windows.emitToAll('sessions:changed', { workspaceId, ...(renamed === undefined ? {} : { renamed }) })
+  setSessionChangeListener((change) => {
+    windows.emitToAll('sessions:changed', change)
   })
   // 刷新 token 之后（含刷失败标记 needsReauth）把新的登录态推给设置页
   setCredentialChangeListener(announceCredentialRef)

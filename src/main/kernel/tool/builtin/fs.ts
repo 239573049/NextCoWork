@@ -103,7 +103,7 @@ export const readTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: false,
   async run(input, ctx) {
-    const r = resolvePath(ctx, input.file_path)
+    const r = await resolvePath(ctx, input.file_path)
     if (!r.ok) return r.result
     const { fs } = ctx.host
     const rel = relOf(ctx, r.abs)
@@ -183,7 +183,7 @@ export const writeTool: ToolRegistration = defineTool({
   destructive: true,
   needsNetwork: false,
   async run(input, ctx) {
-    const r = resolvePath(ctx, input.file_path)
+    const r = await resolvePath(ctx, input.file_path)
     if (!r.ok) return r.result
     const { fs } = ctx.host
     const rel = relOf(ctx, r.abs)
@@ -247,7 +247,7 @@ export const editTool: ToolRegistration = defineTool({
       return toolFail('old_string and new_string are identical, so this edit would change nothing.')
     }
 
-    const r = resolvePath(ctx, input.file_path)
+    const r = await resolvePath(ctx, input.file_path)
     if (!r.ok) return r.result
     const { fs } = ctx.host
     const rel = relOf(ctx, r.abs)
@@ -317,7 +317,7 @@ export const lsTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: false,
   async run(input, ctx) {
-    const r = resolvePath(ctx, input.path)
+    const r = await resolvePath(ctx, input.path)
     if (!r.ok) return r.result
     const { fs } = ctx.host
     const rel = relOf(ctx, r.abs)

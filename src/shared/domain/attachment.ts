@@ -28,7 +28,36 @@
  * 于是不会被 `attachments` 表的 `ON DELETE CASCADE` 带走。这一条直接决定了
  * 清理规则必须按子树分治,否则它们会被当成孤儿删掉(设计 §6)。
  */
+import type { EnvironmentRef } from './environment'
+import { environmentKey } from './environment'
+
 export type AttachmentScope = 'session' | 'theme' | 'export'
+
+export type FileReferenceSource =
+  | { kind: 'local' }
+  | { kind: 'workspace'; workspaceId: string; environment: EnvironmentRef; rootPath: string; connectionRevision: number }
+
+export interface WorkspaceAttachmentIntent {
+  ticket: string
+  attachmentId: string
+  workspaceId: string
+  connectionName: string
+  directory: string
+  name: string
+  size: number
+}
+
+export interface WorkspaceAttachmentReference {
+  path: string
+  name: string
+  source: FileReferenceSource
+}
+
+export function fileReferenceMatches(source: FileReferenceSource | undefined, expected: FileReferenceSource): boolean {
+  if (expected.kind === 'local') return source === undefined || source?.kind === 'local'
+  return source?.kind === 'workspace' && source.workspaceId === expected.workspaceId && source.rootPath === expected.rootPath
+    && source.connectionRevision === expected.connectionRevision && environmentKey(source.environment) === environmentKey(expected.environment)
+}
 
 /** scope → 目录名。复数形式,与既有的 `themes/` 保持一致 */
 const SCOPE_DIR: Record<AttachmentScope, string> = {
