@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FM_LIMITS, fmBool, fmList, fmString, parseFrontmatter } from '../frontmatter'
+import { FM_LIMITS, fmBool, fmList, fmString, parseFrontmatter, serializeFrontmatter } from '../frontmatter'
 
 /**
  * 前置块解析器的测试。
@@ -397,5 +397,120 @@ describe('fmBool', () => {
 
   it('解析时 true 仍然是字符串 —— coerce 只在 fmBool 里发生', () => {
     expect(parseFrontmatter('---\na: true\n---\n').data.a).toBe('true')
+  })
+})
+
+/**
+ * 序列化 —— 它存在的全部意义是「写回去还能原样读出来」，所以这一节几乎每条
+ * 都是往返断言，而不是在比对生成的文本长什么样。
+ *
+ * ★ 断言生成文本的写法（`expect(out).toBe('---\\nname: x\\n---\\n')`）是脆的：
+ *   它把缩进、引号策略、键序这些实现细节全锁死了，改一次策略就要重写一片测试，
+ *   而真正要保的东西——**值不丢、不变形**——反而没被直接断言。
+ */
+describe('serializeFrontmatter · 往返', () => {
+  /** 往返一次，回到 data。 */
+  const round = (data: Record<string, string | string[]>, body = 'body'): Record<string, string | string[]> =>
+    parseFrontmatter(serializeFrontmatter(data, body)).data as Record<string, string | string[]>
+
+  it('普通标量和列表原样回来', () => {
+    const data = { name: 'commit', description: '写提交信息', tools: ['Read', 'Grep'] }
+    expect(round(data)).toEqual(data)
+  })
+
+  it('★ 含字面反斜杠的值能往返', () => {
+    // 这条是 `unquote` 那个链式 replace 顺序 bug 的回归保护：曾经 `a\nb`
+    // （反斜杠 + 字母 n）写出去再读回来会变成 `a` + 反斜杠 + 真换行。
+    const data = { re: 'a\\nb', win: 'C:\\Users\\me', tail: '结尾一个反斜杠\\' }
+    expect(round(data)).toEqual(data)
+  })
+
+  it('换行、tab、引号都能往返', () => {
+    const data = { multi: '第一行\n第二行', tabbed: 'a\tb', quoted: '他说"好"', both: 'x\n"y"\\z' }
+    expect(round(data)).toEqual(data)
+  })
+
+  it('会被解析器当成别的东西的裸值，都能往返', () => {
+    const data = {
+      empty: '',
+      spaced: '  前后有空格  ',
+      looksList: '[a, b]',
+      anchor: '&ref',
+      alias: '*ref',
+      block: '|',
+      block2: '>-2',
+      dash: '- 看着像列表项',
+      hash: '#不是注释',
+      colon: 'foo: bar',
+      truthy: 'true',
+      numeric: '123'
+    }
+    expect(round(data)).toEqual(data)
+  })
+
+  it('★ 列表项含逗号时退回块式 —— 流式是按逗号切的', () => {
+    const data = { tools: ['a, b', 'c'] }
+    expect(round(data)).toEqual(data)
+    expect(serializeFrontmatter(data, '')).toContain('  - ')
+  })
+
+  it('列表项含方括号或首尾空白也退块式', () => {
+    expect(round({ k: ['[x]', 'y'] })).toEqual({ k: ['[x]', 'y'] })
+    expect(round({ k: [' 前后空格 ', 'y'] })).toEqual({ k: [' 前后空格 ', 'y'] })
+  })
+
+  it('空列表往返成空列表', () => {
+    expect(round({ k: [] })).toEqual({ k: [] })
+  })
+
+  it('★ 正文不累积空行 —— 反复往返 body 必须收敛', () => {
+    // 序列化时若在 `---` 后补一个空行，而 body 又来自上一次 parse，
+    // 每存一次就会多一个前导换行，一直涨。
+    const data = { a: 'x' }
+    let body = '\n正文\n'
+    for (let i = 0; i < 5; i++) body = parseFrontmatter(serializeFrontmatter(data, body)).body
+    expect(body).toBe('\n正文\n')
+  })
+
+  it('CRLF 的正文归一成 LF', () => {
+    expect(parseFrontmatter(serializeFrontmatter({ a: 'x' }, '一\r\n二')).body).toBe('一\n二')
+  })
+
+  it('未被识别的键原样带回来 —— 表单只覆盖它认识的那几个', () => {
+    // 从 Claude Code 粘过来的 agent 文件里常有 `color: blue` 这类本应用不认识的键。
+    const data = { description: '必填', color: 'blue', 'argument-hint': '<path>' }
+    expect(round(data)).toEqual(data)
+  })
+
+  it('order 决定键序，其余按字母序 —— 每存一次换一次顺序会把 diff 变成噪音', () => {
+    const out = serializeFrontmatter(
+      { zeta: '1', description: '2', alpha: '3', name: '4' },
+      '',
+      { order: ['name', 'description'] }
+    )
+    const keys = out.split('\n').filter((l) => /^[a-z]/.test(l)).map((l) => l.slice(0, l.indexOf(':')))
+    expect(keys).toEqual(['name', 'description', 'alpha', 'zeta'])
+  })
+
+  it('__proto__ 一类的键不写出去', () => {
+    const out = serializeFrontmatter({ __proto__: 'polluted', ok: 'x' } as Record<string, string>, '')
+    expect(out).not.toContain('polluted')
+    expect(out).toContain('ok: x')
+  })
+
+  it('undefined 的键跳过，不写成空值', () => {
+    const out = serializeFrontmatter({ a: 'x', b: undefined }, '')
+    expect(out).toContain('a: x')
+    expect(out).not.toContain('b:')
+  })
+
+  it('一个键都没有时不写前置块 —— 命令文件允许没有 frontmatter', () => {
+    expect(serializeFrontmatter({}, '只有正文')).toBe('只有正文')
+  })
+
+  it('键名不合法的直接跳过', () => {
+    const out = serializeFrontmatter({ 'bad key': 'x', good: 'y' } as Record<string, string>, '')
+    expect(out).not.toContain('bad key')
+    expect(out).toContain('good: y')
   })
 })

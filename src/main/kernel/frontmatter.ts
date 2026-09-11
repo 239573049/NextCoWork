@@ -81,12 +81,32 @@ function unquote(raw: string): string {
     return raw.slice(1, -1).replace(/''/g, "'")
   }
   if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
-    return raw
-      .slice(1, -1)
-      .replace(/\\"/g, '"')
-      .replace(/\\n/g, '\n')
-      .replace(/\\t/g, '\t')
-      .replace(/\\\\/g, '\\')
+    /*
+      ★ **单次扫描,不能用链式 `replace`**。曾经这里是
+      `.replace(/\\"/g,'"').replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\\\/g,'\\')`,
+      而那是错的:一个字面反斜杠按规矩要写成 `\\`,于是 `a\\nb`(想表达 `a` + 反斜杠 + `n`)
+      里的第二个反斜杠会先被 `/\\n/` 抓去当成换行转义,读出来变成 `a` + 反斜杠 + 换行。
+
+      只读的时候这只是个冷门的边缘情况;有了 `serializeFrontmatter` 之后它变成
+      **写进去再读出来就损坏** —— 往返契约要求这里必须真的可逆。
+    */
+    const inner = raw.slice(1, -1)
+    let out = ''
+    for (let i = 0; i < inner.length; i++) {
+      if (inner[i] !== '\\') {
+        out += inner[i]
+        continue
+      }
+      const next = inner[++i]
+      // 末尾的孤立反斜杠:原样留着,不吞
+      if (next === undefined) return `${out}\\`
+      if (next === 'n') out += '\n'
+      else if (next === 't') out += '\t'
+      else if (next === '"' || next === '\\') out += next
+      // 认不出的转义序列原样保留 —— 猜错比留着更难查
+      else out += `\\${next}`
+    }
+    return out
   }
   return raw
 }
@@ -304,3 +324,117 @@ export const FM_LIMITS = {
   FM_VALUE_MAX,
   FM_LIST_MAX
 } as const
+
+// ─────────────────────────────────────────────────────────────
+// 序列化 —— `parseFrontmatter` 的逆函数
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 需要加引号才能原样读回来的裸标量。★ 每一条都对应 `parseFrontmatter` 里一段
+ * 真实的分支,不是照着 YAML 规范抄的:
+ *
+ * - `''`          → 空值那条分支会把它变成「块式序列的头」(`pendingListKey`)
+ * - 首尾有空白    → 解析时 `t.slice(colon + 1).trim()` 会削掉
+ * - `[` … `]`     → 被当成流式序列
+ * - `&` / `*` 开头 → 被当成锚点 / 别名并跳过
+ * - `|` / `>` 形状 → 被当成块标量并跳过,还会吞掉后面的缩进行
+ * - `- ` 开头      → 在块式列表的上下文里会被读成列表项
+ * - 含换行或 tab   → 一行放不下,只能靠双引号里的 `\n` / `\t`
+ * - `#` 开头       → 整行会被当成注释
+ *
+ * ★ 值里含 `: ` **不需要**加引号:解析取的是第一个冒号,`k: foo: bar` 读回来
+ *   就是 `foo: bar`。这一条是实测出来的,别凭 YAML 直觉再加回去。
+ * ★ `true` / `123` 这类**也不需要**:这个解析器只产出字符串,coerce 全在
+ *   `fmBool` 里,不存在「读回来变成布尔」的可能。
+ */
+function needsQuote(v: string): boolean {
+  if (v === '') return true
+  if (v !== v.trim()) return true
+  if (/[\n\t]/.test(v)) return true
+  if (v.startsWith('[') && v.endsWith(']')) return true
+  if (v.startsWith('&') || v.startsWith('*') || v.startsWith('#')) return true
+  if (v === '|' || v === '>' || /^[|>][-+]?\d*$/.test(v)) return true
+  if (v.startsWith('- ') || v === '-') return true
+  return false
+}
+
+/** 双引号里那一层转义 —— 和 `unquote` 的双引号分支严格互为逆运算。 */
+function quote(v: string): string {
+  const escaped = v
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t')
+  return `"${escaped}"`
+}
+
+function scalar(v: string): string {
+  return needsQuote(v) ? quote(v) : v
+}
+
+export interface SerializeOptions {
+  /** 优先输出的键序;其余键按字母序跟在后面。 */
+  order?: readonly string[]
+}
+
+/**
+ * 把一张扁平 map 写回 YAML 前置块 —— `parseFrontmatter` 的**逆函数**。
+ *
+ * ★ 契约:`parseFrontmatter(serializeFrontmatter(data, body)).data` 与 `data` 逐键相等。
+ *   表单保存一次就丢一个字段,是那种当场看不出、三天后才发现的损坏。
+ *
+ * ★ **只输出这个解析器读得回来的子集**,照着它的限制写,而不是照着 YAML 规范写:
+ *   不产出块标量、不产出嵌套、含逗号的列表退回块式(`parseFlowSeq` 是 `.split(',')`)。
+ *
+ * ★ **正文紧贴着结束标记写,不额外空一行**。解析时 body 取的是结束标记的下一行起
+ *   到结尾,所以 `---\n\nbody` 读回来的 body 自带一个前导换行 —— 如果这里再补一个
+ *   空行,而 body 又是上一次 parse 的产物,那么每存一次就多一个空行,会一直累积。
+ *
+ * 键序稳定是刻意的:每存一次就换一次顺序,git diff 会变成一片噪音。
+ */
+export function serializeFrontmatter(
+  data: Readonly<Record<string, string | string[] | undefined>>,
+  body: string,
+  options?: SerializeOptions
+): string {
+  const order = options?.order ?? []
+  const keys = Object.keys(data)
+    .filter((k) => KEY_RE.test(k) && !FORBIDDEN_KEYS.has(k) && data[k] !== undefined)
+    .sort((a, b) => {
+      const ia = order.indexOf(a)
+      const ib = order.indexOf(b)
+      if (ia !== -1 && ib !== -1) return ia - ib
+      if (ia !== -1) return -1
+      if (ib !== -1) return 1
+      return a.localeCompare(b)
+    })
+
+  const lines: string[] = []
+  for (const key of keys.slice(0, FM_KEYS_MAX)) {
+    const value = data[key]
+    if (typeof value === 'string') {
+      lines.push(`${key}: ${scalar(value)}`)
+      continue
+    }
+    if (!Array.isArray(value)) continue
+    const items = value.slice(0, FM_LIST_MAX)
+    if (items.length === 0) {
+      // `[]` 能原样读回一个空数组（`parseFlowSeq` 把空串过滤掉了）。
+      lines.push(`${key}: []`)
+      continue
+    }
+    // 流式序列按逗号切,所以只要有一项含逗号（或方括号、或首尾空白），整列退块式。
+    const flowSafe = items.every((s) => !/[,[\]]/.test(s) && s === s.trim() && s !== '' && !/[\n\t]/.test(s))
+    if (flowSafe) {
+      lines.push(`${key}: [${items.join(', ')}]`)
+      continue
+    }
+    lines.push(`${key}:`)
+    for (const item of items) lines.push(`  - ${scalar(item)}`)
+  }
+
+  const normalizedBody = body.replace(/\r\n?/g, '\n')
+  // 没有任何键时不写前置块 —— 命令文件本来就允许没有 frontmatter。
+  if (lines.length === 0) return normalizedBody
+  return `---\n${lines.join('\n')}\n---\n${normalizedBody}`
+}
