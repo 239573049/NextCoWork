@@ -215,15 +215,24 @@ export function Composer({
   }, [load]);
   useEffect(() => {
     let cancelled = false;
-    const refreshSkills = (): void => {
+    // 命令和 Skill 同进同出 —— 它们共用一个 `/` 弹层,各记一个 loading 会让弹层
+    // 出现「一半已经列出来、另一半还在转」的中间态,而方向键正要在两者之间连续地走。
+    const refreshSlash = (): void => {
       setSkillsLoading(true);
       setSkillsError(false);
-      void listSkills(workspace.id).then((items) => { if (!cancelled) setSkills(items.filter((s) => s.globalEnabled && s.activeInWorkspace)); }).catch(() => {
-        if (!cancelled) { setSkills([]); setSkillsError(true); }
+      void Promise.all([
+        listSkills(workspace.id).then((items) => items.filter((s) => s.globalEnabled && s.activeInWorkspace)),
+        listCommands(workspace.id)
+      ]).then(([skillItems, commandItems]) => {
+        if (cancelled) return;
+        setSkills(skillItems);
+        setCommands(commandItems);
+      }).catch(() => {
+        if (!cancelled) { setSkills([]); setCommands([]); setSkillsError(true); }
       }).finally(() => { if (!cancelled) setSkillsLoading(false); });
     };
-    refreshSkills();
-    const unsubscribe = onSkillsChanged(refreshSkills);
+    refreshSlash();
+    const unsubscribe = onSkillsChanged(refreshSlash);
     return () => { cancelled = true; unsubscribe() };
   }, [workspace.id]);
 
@@ -353,17 +362,51 @@ export function Composer({
   }
 
   const skillNeedle = skillPickerOpen ? skillPickerQuery : skillQuery?.query ?? '';
-  const filteredSkills = skills.filter((s) =>
-    `${s.name} ${s.description} ${s.category}`.toLocaleLowerCase().includes(skillNeedle.toLocaleLowerCase())
-  );
 
-  function pickSkill(skill: SkillListItem): void {
+  /**
+   * 命令在前、Skill 在后,合成**一个**数组 —— 分组标题由 `SkillPopup` 按相邻两项的
+   * `kind` 是否变化自己画,所以这里的排列顺序就是弹层里的分组顺序。
+   *
+   * ★ 内置命令的副标题走 i18n(那是应用自己的 UI 文案),磁盘上的命令取 frontmatter
+   *   里的 `description`(那是用户自己写的内容,不该翻译)。
+   */
+  const slashNeedle = skillNeedle.toLocaleLowerCase();
+  const slashItems: SlashItem[] = [
+    ...commands
+      .filter((c) => `${c.name} ${c.description}`.toLocaleLowerCase().includes(slashNeedle))
+      .map((command) => {
+        const builtin = BUILTIN_COMMAND_DESCRIPTIONS[command.name];
+        return {
+          kind: 'command' as const,
+          key: `command:${command.scope}:${command.name}`,
+          command,
+          description: command.scope === 'builtin' && builtin !== undefined ? t(builtin) : command.description
+        };
+      }),
+    ...skills
+      .filter((s) => `${s.name} ${s.description} ${s.category}`.toLocaleLowerCase().includes(slashNeedle))
+      .map((skill) => ({ kind: 'skill' as const, key: `skill:${skill.id}`, skill }))
+  ];
+
+  /**
+   * 弹层里选中一行。
+   *
+   * ★ 命令落进草稿的只是**命令名**,正文的展开留到 `submit` 那一刻(`applyCommand`)
+   *   —— 当场把几千字的模板塞进输入框,用户既没法再补参数,也看不清自己要发什么。
+   */
+  function pickSlash(item: SlashItem): void {
     const range = skillQuery ?? skillInsertRange.current ?? input.current?.selection() ?? { start: lastCaret.current ?? draft.length, end: lastCaret.current ?? draft.length };
-    const r = insertSkill(draft, range, skill.name);
+    const r = item.kind === 'command'
+      ? insertCommand(draft, range, item.command.name)
+      : insertSkill(draft, range, item.skill.name);
     dismissedSkillAt.current = null;
     setSkillQuery(null);
     setSkillPickerOpen(false);
     input.current?.replace(r.text, r.caret);
+  }
+
+  function pickSkill(skill: SkillListItem): void {
+    pickSlash({ kind: 'skill', key: `skill:${skill.id}`, skill });
   }
 
   useEffect(() => {
@@ -413,12 +456,12 @@ export function Composer({
 
   function handleSkillKey(e: React.KeyboardEvent<HTMLElement>): boolean {
     if ((skillQuery === null && !skillPickerOpen) || e.nativeEvent.isComposing) return false;
-    const n = filteredSkills.length;
+    const n = slashItems.length;
     if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n > 0) {
       e.preventDefault(); setActiveSkill((i) => e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n); return true;
     }
     if (e.key === 'Escape') { e.preventDefault(); dismissedSkillAt.current = skillQuery?.start ?? null; setSkillQuery(null); setSkillPickerOpen(false); input.current?.focus(); return true; }
-    if ((e.key === 'Enter' || e.key === 'Tab') && n > 0) { e.preventDefault(); pickSkill(filteredSkills[activeSkill] ?? filteredSkills[0]!); return true; }
+    if ((e.key === 'Enter' || e.key === 'Tab') && n > 0) { e.preventDefault(); pickSlash(slashItems[activeSkill] ?? slashItems[0]!); return true; }
     return false;
   }
 
@@ -463,13 +506,16 @@ export function Composer({
     model !== "" ? model : loaded ? t("chat.noModel") : t("common.loading");
 
   function submit(): void {
-    const text = draft.trim();
+    const raw = draft.trim();
     // ★ 只有附件、没有文字也该能发 —— 拖一张图进来直接问「这是什么」是常见用法。
     //   但上传还没完成时不发:那样 parts 里会缺一张图,而用户以为发出去了。
     const hasReady = attachments.some((a) => a.status === "done");
     const pending = attachments.some((a) => a.status === "uploading");
     if (pending) return;
-    if ((text === "" && !hasReady) || model === "") return;
+    if ((raw === "" && !hasReady) || model === "") return;
+    // ★ 命令在**发送这一刻**才展开:草稿里一直留着 `/name args`(用户看得懂、也还能
+    //   回去改),进 RunRequest 的才是展开后的完整提示词。不是命令调用就原样返回。
+    const text = applyCommand(raw, commands);
     // 发送时打快照:药丸此刻的值进 RunRequest,run 跑起来后再改药丸不影响它
     // ★ `modelProviderId` 必须和 `model` 一起覆盖:两者都可能来自兜底而不在 `value` 里,
     //   只覆盖一半就会把「兜底的别名」配上「value 里那个陈旧的供应商」。
@@ -537,10 +583,10 @@ export function Composer({
           />
         )}
         {(skillQuery !== null || skillPickerOpen) && (
-          <SkillPopup id={skillListId} items={filteredSkills} active={activeSkill} loading={skillsLoading} error={skillsError}
+          <SkillPopup id={skillListId} items={slashItems} active={activeSkill} loading={skillsLoading} error={skillsError}
             search={skillPickerOpen ? skillPickerQuery : undefined}
-            onSearch={(query) => { setSkillPickerQuery(query); setActiveSkill(0); }} onPick={pickSkill} onHover={setActiveSkill}
-            labels={{ search: t('skills.searchPlaceholder'), loading: t('common.loading'), error: t('skills.loadFailed'), empty: t('skills.empty') }}
+            onSearch={(query) => { setSkillPickerQuery(query); setActiveSkill(0); }} onPick={pickSlash} onHover={setActiveSkill}
+            labels={{ search: t('skills.searchPlaceholder'), loading: t('common.loading'), error: t('skills.loadFailed'), empty: t('skills.empty'), commands: t('commands.groupLabel'), skills: t('commands.skillsGroupLabel') }}
             onKeyDown={handleSkillKey} />
         )}
 
@@ -561,7 +607,7 @@ export function Composer({
           aria-activedescendant={
             mention !== null && suggestions.length > 0
               ? `${mentionListId}-${String(activeSuggestion)}`
-              : skillQuery !== null && filteredSkills.length > 0 ? `${skillListId}-${activeSkill}` : undefined
+              : skillQuery !== null && slashItems.length > 0 ? `${skillListId}-${activeSkill}` : undefined
           }
           onChange={(text, caret) => {
             onDraft(text);
