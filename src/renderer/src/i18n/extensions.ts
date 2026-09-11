@@ -6,6 +6,14 @@
  * ★ `skills.*` 那一整套**不在这里**，它们还在 `index.tsx` 里原样留着：扩展面板只是
  * 把 Skill 管理收进了一个 Tab，那些文案本身一个字没变，搬过来只会制造一次无谓的大 diff。
  */
+
+/**
+ * 带参数的文案那一个入参类型。★ 必须显式标出来：这个文件没有 `Messages` 的
+ * 上下文（它在 `index.tsx` 里），不标的话参数会被推断成 implicit any，
+ * spread 进 `ZH` 时整张表都不再匹配 `Messages`。
+ */
+type Params = Record<string, string | number>
+
 export const extensionsZh = {
   'ext.title': '扩展',
   'ext.back': '返回',
@@ -28,7 +36,7 @@ export const extensionsZh = {
   'ext.scope.global': '全局',
   'ext.scope.project': '本工作区',
   'ext.scope.builtin': '内置',
-  'ext.toggleLabel': ({ name }) => `启用 ${String(name)}`,
+  'ext.toggleLabel': ({ name }: Params) => `启用 ${String(name)}`,
   'ext.new': '新建',
   'ext.newTitle': '新建',
   'ext.create': '创建',
@@ -37,7 +45,7 @@ export const extensionsZh = {
   // ── 编辑器 ──
   'ext.save': '保存',
   'ext.delete': '删除',
-  'ext.deleteTitle': ({ name }) => `删除 ${String(name)}？`,
+  'ext.deleteTitle': ({ name }: Params) => `删除 ${String(name)}？`,
   'ext.deleteHint': '文件会从磁盘上删掉，这一步撤不回来。',
   'ext.field.description': '描述',
   'ext.field.descriptionHint': '弹层里那一行副标题；不写就取正文第一行',
@@ -54,9 +62,9 @@ export const extensionsZh = {
   'ext.error.loadFailed': '读不到列表',
   'ext.error.emptyBody': '正文不能为空 —— 正文就是它的全部内容',
   'ext.error.agentNeedsDescription': '子代理必须填描述，否则加载时整条会被作废',
-  'ext.lossyWarning': ({ count }) =>
+  'ext.lossyWarning': ({ count }: Params) =>
     `这个文件里有 ${String(count)} 处本应用读不懂的语法（嵌套、块标量等），保存会丢掉它们`,
-  'ext.confirmLossy': ({ list }) => `保存会丢掉这些读不懂的内容：\n\n${String(list)}\n\n继续？`
+  'ext.confirmLossy': ({ list }: Params) => `保存会丢掉这些读不懂的内容：\n\n${String(list)}\n\n继续？`
 }
 
 export const extensionsEn = {
@@ -80,7 +88,7 @@ export const extensionsEn = {
   'ext.scope.global': 'Global',
   'ext.scope.project': 'This workspace',
   'ext.scope.builtin': 'Built-in',
-  'ext.toggleLabel': ({ name }) => `Enable ${String(name)}`,
+  'ext.toggleLabel': ({ name }: Params) => `Enable ${String(name)}`,
   'ext.new': 'New',
   'ext.newTitle': 'New',
   'ext.create': 'Create',
@@ -88,7 +96,7 @@ export const extensionsEn = {
 
   'ext.save': 'Save',
   'ext.delete': 'Delete',
-  'ext.deleteTitle': ({ name }) => `Delete ${String(name)}?`,
+  'ext.deleteTitle': ({ name }: Params) => `Delete ${String(name)}?`,
   'ext.deleteHint': 'The file is removed from disk. This cannot be undone.',
   'ext.field.description': 'Description',
   'ext.field.descriptionHint': 'Subtitle in the picker; falls back to the first line of the body',
@@ -104,7 +112,7 @@ export const extensionsEn = {
   'ext.error.loadFailed': 'Could not load the list',
   'ext.error.emptyBody': 'The body cannot be empty — it is the whole content',
   'ext.error.agentNeedsDescription': 'A subagent needs a description, otherwise it is discarded on load',
-  'ext.lossyWarning': ({ count }) =>
+  'ext.lossyWarning': ({ count }: Params) =>
     `This file has ${String(count)} construct(s) this app cannot parse (nesting, block scalars); saving drops them`,
-  'ext.confirmLossy': ({ list }) => `Saving will drop these unparsable parts:\n\n${String(list)}\n\nContinue?`
+  'ext.confirmLossy': ({ list }: Params) => `Saving will drop these unparsable parts:\n\n${String(list)}\n\nContinue?`
 }

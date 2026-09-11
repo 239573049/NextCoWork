@@ -1,6 +1,6 @@
 import { Bot } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { PERMISSION_MODES, type PermissionMode } from '../../../../../shared/domain/permission'
+import { PERMISSION_MODES, type PermissionMode } from '../../../../../shared/agent/permission'
 import { Segmented } from '../../../components/ui/Segmented'
 import { TextInput } from '../../../components/ui/TextInput'
 import { useI18n } from '../../../i18n'
