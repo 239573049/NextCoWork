@@ -154,7 +154,6 @@ export function ResourcePanel({
         file={editing}
         frontmatter={draftFm}
         body={draftBody}
-        onFrontmatter={setDraftFm}
         onBody={setDraftBody}
         onSave={save}
         onDelete={remove}

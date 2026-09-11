@@ -22,7 +22,6 @@ export function MarkdownResourceEditor({
   file,
   frontmatter,
   body,
-  onFrontmatter,
   onBody,
   onSave,
   onDelete,
@@ -35,14 +34,13 @@ export function MarkdownResourceEditor({
   file: MarkdownResourceFile
   frontmatter: Frontmatter
   body: string
-  onFrontmatter: (fm: Frontmatter) => void
   onBody: (body: string) => void
   onSave: () => void
   onDelete: () => void
   onClose: () => void
   saving: boolean
   error: string | null
-  /** 各 kind 自己的 frontmatter 表单。 */
+  /** 各 kind 自己的 frontmatter 表单。改 frontmatter 的回调包在里面，这里不用再拿一份。 */
   fields: ReactNode
 }): ReactNode {
   const { t } = useI18n()
