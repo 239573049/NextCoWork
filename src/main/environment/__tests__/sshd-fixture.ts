@@ -49,7 +49,9 @@ export async function isolatedSshd(): Promise<Sshd> {
   await writeFile(daemonConfig, `Port ${port}\nListenAddress 127.0.0.1\nHostKey ${hostKey}\nPidFile ${join(directory, 'pid')}\n`
     + `AuthorizedKeysFile ${join(directory, 'authorized_keys')}\nStrictModes yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n`
     + `UsePAM no\nPermitRootLogin no\nAllowUsers ${username}\nSubsystem sftp ${sftpServer}\nLogLevel VERBOSE\n`, { mode: 0o600 })
-  const daemon = spawn('/usr/sbin/sshd', ['-D', '-e', '-f', daemonConfig], { stdio: ['ignore', 'ignore', 'pipe'] })
+  // ★ detached:true 让 sshd 自成进程组。sshd 为每条连接 fork 一个子进程,只 kill 监听进程
+  //   **不会**断开已建立的连接 —— 想制造真实断线就必须杀整个组。
+  const daemon = spawn('/usr/sbin/sshd', ['-D', '-e', '-f', daemonConfig], { stdio: ['ignore', 'ignore', 'pipe'], detached: true })
   let diagnostic = ''
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`sshd startup timed out: ${diagnostic}`)), 5000)
@@ -70,7 +72,8 @@ export async function isolatedSshd(): Promise<Sshd> {
       return path
     },
     async close() {
-      daemon.kill()
+      // 杀进程组而不是单个 pid，连带那些为已建立连接 fork 出来的 sshd 子进程
+      try { process.kill(-daemon.pid!, 'SIGKILL') } catch { daemon.kill('SIGKILL') }
       await rm(directory, { recursive: true, force: true })
     }
   }

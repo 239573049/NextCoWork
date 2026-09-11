@@ -33,6 +33,8 @@ NCW_SSH_INTEGRATION=1 npx vitest run src/main/environment
 | 终端 Ctrl+C（SIGINT 信号语义） | 真实环境已验证 | 远端前台进程被杀，shell 拿回控制权 |
 | 终端逐页授权（批准前不 spawn） | 真实环境已验证 | `TerminalHost` 接真实环境，断言的是**进程表**而不是 spy |
 | 活页切回免授权 / 关闭重开需重新授权 | 真实环境已验证 | 同上，真实 PTY 会话上走完整状态机 |
+| 休眠：拆掉活会话后保留输出、不自动重连、重建需重新授权 | 真实环境已验证 | 复刻 `shutdownEnvironments()` 对终端 driver 的那一下 kill |
+| 网络分区（真正丢包/对端消失）下的断线检测 | 未验证 | 见下"为什么本机造不出网络分区" |
 | 关闭本机后回收远端进程（终端 `-tt`） | 真实环境已验证 | 远端有 pty，sshd 发 SIGHUP，进程随之退出 |
 | 关闭本机后回收远端进程（MCP stdio `-T`） | **已知缺陷** | 见下"非 PTY 路径会留下孤儿" |
 | 打包形态 askpass 入口 | 真实环境已验证 | 真跑 Electron 入口，且不创建应用数据目录 |
@@ -57,6 +59,20 @@ NCW_SSH_INTEGRATION=1 npx vitest run src/main/environment
 | 命名管道 endpoint 的 ACL | askpass 桥在 win32 用 `\\.\pipe\...`，未验证访问控制 |
 | `powershellCommand` 的 `-EncodedCommand` 链路 | 远端命令组装仅有单元测试 |
 | 路径围栏：ADS 与尾部点/空格 | `notes.txt:stream`、`foo.` / `foo ` 会被 Win32 归一，`requireAbsent` 查的是未归一的词法路径，存在静默覆盖同名文件的可能 |
+
+## 为什么本机造不出网络分区
+
+想验证"对端突然消失时客户端多久察觉"，直觉做法是把 sshd 杀掉。**这条路走不通**：sshd 为每条连接 fork 一个子进程，该子进程会改写自己的进程标题（`sshd: user@…`）并脱离进程组，所以
+
+- 只 `kill` 监听进程，已建立的连接毫发无伤；
+- 连进程组一起 `kill`，也碰不到那个已经 `setsid()` 出去的子进程；
+- 而按 `/usr/sbin/sshd` 去数进程会**看不见**它（标题已被改写），于是计数器显示"sshd 已归零"，制造出一种连接已断的假象。
+
+实测：杀掉监听进程组之后，客户端 `ssh -tt` 50 秒仍无任何察觉，pty 不退出。这**不能**当作断线检测的缺陷证据——因为连接压根没断。
+
+要如实验证网络分区，需要能丢包的网络夹具（把转发端口挂到一个可切断的中间层上，或用 `pfctl`/netem 规则），属于尚未覆盖项。当前已覆盖的是**主动拆除**语义：`shutdownEnvironments()` 杀掉终端 driver 之后，输出保留、不自动重连、重建需重新授权。
+
+`baseArgs()` 里的 `ServerAliveInterval=15` + `ServerAliveCountMax=2` 决定了理论检测上限约 30 秒，但这个数字目前是**读配置得来的，不是测出来的**。
 
 ## 已知缺陷：非 PTY 路径会留下孤儿
 

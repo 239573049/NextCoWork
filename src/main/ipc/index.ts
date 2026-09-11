@@ -98,7 +98,9 @@ import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
 import { updateService } from '../update/update-service'
 import { installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
-import { commandDiagnostics, listCommands } from './commands'
+import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } from './commands'
+import { agentDiagnostics, listAgents, setAgentEnabled } from './agents'
+import { deleteResource, getResource, saveResource } from './markdown-resource'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
@@ -390,6 +392,16 @@ const handlers: HandlerMap = {
   // ── 斜杠命令(`.next-cowork/commands/*.md` + 内置 `/init`)──
   'commands:list': (req) => listCommands(req),
   'commands:diagnostics': (req) => commandDiagnostics(req),
+
+  // ── 扩展面板:命令 / 子代理的管理与编辑 ──
+  'commands:listAll': (req) => listAllCommands(req),
+  'commands:setEnabled': (req) => setCommandEnabled(req),
+  'agents:list': (req) => listAgents(req),
+  'agents:diagnostics': (req) => agentDiagnostics(req),
+  'agents:setEnabled': (req) => setAgentEnabled(req),
+  'resource:get': (req) => getResource(req),
+  'resource:save': (req) => saveResource(req),
+  'resource:delete': (req) => deleteResource(req),
 
   // ── 步骤 4 / 13:上游与网关 ──
   'provider:list': () => listProviders(),

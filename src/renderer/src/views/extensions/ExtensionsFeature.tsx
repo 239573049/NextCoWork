@@ -19,6 +19,8 @@ import { Segmented } from '../../components/ui/Segmented'
 import { useI18n } from '../../i18n'
 import { FEATURE_ICON } from '../../shell/icons'
 import { SkillsFeature } from '../skills/SkillsFeature'
+import { AgentsPanel } from './agents/AgentsPanel'
+import { CommandsPanel } from './commands/CommandsPanel'
 
 type ExtensionTab = 'skills' | 'commands' | 'agents' | 'hooks'
 
@@ -56,13 +58,13 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
       */}
       {tab === 'skills' ? (
         <SkillsFeature chromeless />
+      ) : tab === 'commands' ? (
+        <CommandsPanel />
+      ) : tab === 'agents' ? (
+        <AgentsPanel />
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center">
-          <EmptyState
-            icon={<Icon size={26} />}
-            title={t(`ext.${tab}.empty` as 'ext.commands.empty' | 'ext.agents.empty' | 'ext.hooks.empty')}
-            hint={t(`ext.${tab}.emptyHint` as 'ext.commands.emptyHint' | 'ext.agents.emptyHint' | 'ext.hooks.emptyHint')}
-          />
+          <EmptyState icon={<Icon size={26} />} title={t('ext.hooks.empty')} hint={t('ext.hooks.emptyHint')} />
         </div>
       )}
     </div>

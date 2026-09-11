@@ -32,7 +32,7 @@ const owner = (id: number): WebContents =>
   Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents
 
 /** 与 provider.ts:73-85 同一条装配路径,只是不经过整个连接上下文。 */
-function remoteEnvironment(transport: OpenSshTransport, root: string, opened?: { count: number }): WorkspaceEnvironment {
+function remoteEnvironment(transport: OpenSshTransport, root: string, opened?: { count: number }, drivers?: TerminalDriver[]): WorkspaceEnvironment {
   const base = localEnvironment(nodeHost(), root)
   return {
     ...base,
@@ -43,8 +43,11 @@ function remoteEnvironment(transport: OpenSshTransport, root: string, opened?: {
       if (opened) opened.count++
       const invocation = transport.terminalArgs(remoteTerminalCommand('linux', base.platform.shell, request.cwd))
       const pty = await import('node-pty')
-      return pty.spawn(invocation.executable, invocation.args, { name: 'xterm-256color',
+      const terminal = pty.spawn(invocation.executable, invocation.args, { name: 'xterm-256color',
         cols: request.cols, rows: request.rows, env: { ...invocation.env, TERM: 'xterm-256color' } as Record<string, string> })
+      // provider.ts 用同一个集合记住开出去的终端，环境 close 时逐个 kill
+      drivers?.push(terminal)
+      return terminal
     }
   } as WorkspaceEnvironment
 }
@@ -100,5 +103,62 @@ it.skipIf(!integration || process.platform === 'win32')('gates a real remote she
     host?.kill('tab-1')
     await transport.close()
     await sshd.close()
+  }
+}, 150_000)
+
+/**
+ * ★ 休眠:会话**活着的时候**被环境连带拆掉。
+ *
+ * 既有单测覆盖的是"断线之后再 create"(拿不到授权),没有覆盖"活着的会话被拆掉之后会怎样"。
+ * 而那正是休眠的形状 —— `powerMonitor.on('suspend')` 走 `shutdownEnvironments()`,环境 close
+ * 时把自己记着的终端 driver 逐个 kill 掉(provider.ts 的 `terminals` 集合)。交接单对这一步的
+ * 要求很硬:**保留界面和终端输出，不自动重连、不重跑、不重写**;重建要重新授权。
+ *
+ * 这里复刻的就是那一下 driver.kill()，而**不是**网络分区 —— 后者在本机很难如实制造:
+ * sshd 的每连接子进程会改写进程标题并脱离进程组，杀掉监听进程根本断不了已建立的连接
+ * (实测杀掉监听组之后，客户端 `ssh -tt` 50 秒仍无察觉)。真正的网络分区语义需要能丢包的
+ * 网络夹具，属于尚未覆盖项，见 docs/ssh-support-matrix.md。
+ */
+it.skipIf(!integration || process.platform === 'win32')('keeps the transcript and demands fresh approval after the environment tears a live session down', async () => {
+  const sshd = await isolatedSshd()
+  const clientConfig = await readyConfig(sshd)
+  const transport = new OpenSshTransport({ ...profile, target: { kind: 'config', host: 'native-test', configFile: clientConfig } })
+  const marker = 'NCW-BEFORE-SUSPEND'
+  const opened = { count: 0 }
+  const drivers: TerminalDriver[] = []
+  let host: InstanceType<typeof TerminalHost> | undefined
+  try {
+    await transport.connect(AbortSignal.timeout(20_000))
+    const environment = remoteEnvironment(transport, sshd.directory, opened, drivers)
+    host = new TerminalHost(() => ({ environment, release: () => {} }))
+    const sender = owner(1)
+    const request = { id: 'tab-suspend', workspaceId: 'workspace', cols: 80, rows: 24 }
+
+    const prepared = await host.prepare(request, sender)
+    if (prepared.kind !== 'approval') throw new Error('Expected approval')
+    const grant = host.approve(prepared.intent.id, true, sender)!
+    const terminal = await host.create({ ...request, approval: grant }, sender)
+    host.write(terminal.id, `echo ${marker}\n`, sender)
+    await until(() => host!.attach(terminal.id, sender).data.includes(marker), 20_000, '休眠前的输出')
+    expect(opened.count).toBe(1)
+
+    // 休眠：环境 close 把它记着的终端 driver 逐个杀掉
+    expect(drivers, '环境必须记住它开出去的 driver，否则休眠时拆不干净').toHaveLength(1)
+    drivers[0]!.kill()
+    await until(() => !host!.list(request.workspaceId, sender).some((session) => session.id === terminal.id && session.alive),
+      30_000, '会话被标记为已结束')
+
+    // 1. 输出必须保留 —— 用户读到过的字不能因为休眠就消失
+    expect(host.attach(terminal.id, sender).data, '休眠后终端输出必须保留').toContain(marker)
+    // 2. 不得自动重连、重跑
+    expect(opened.count, '休眠不得触发自动重连').toBe(1)
+    // 3. 重建必须重新授权
+    const reopened = await host.prepare(request, sender)
+    expect(reopened.kind, '休眠后重建必须重新授权').toBe('approval')
+    expect(opened.count, 'prepare 只是要授权，不该已经把终端起起来').toBe(1)
+  } finally {
+    host?.kill('tab-suspend')
+    await transport.close()
+    await sshd.close().catch(() => undefined)
   }
 }, 150_000)

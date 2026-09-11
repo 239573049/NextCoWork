@@ -19,7 +19,44 @@ export const extensionsZh = {
   'ext.agents.emptyHint': '子代理是 .md 文件，放在 <appData>/agents/ 或工作区的 .next-cowork/agents/ 下；模型通过 Task 工具派遣它们',
   'ext.hooks.empty': '还没有钩子',
   'ext.hooks.emptyHint': '钩子会在运行的固定时机执行一条本机命令，比如工具调用前后',
-  'ext.comingSoon': '尚未接入'
+  'ext.comingSoon': '尚未接入',
+
+  // ── 列表与工具条 ──
+  'ext.searchPlaceholder': '搜索名字或描述',
+  'ext.scopeFilter': '作用域',
+  'ext.scope.all': '全部',
+  'ext.scope.global': '全局',
+  'ext.scope.project': '本工作区',
+  'ext.scope.builtin': '内置',
+  'ext.toggleLabel': ({ name }) => `启用 ${String(name)}`,
+  'ext.new': '新建',
+  'ext.newTitle': '新建',
+  'ext.create': '创建',
+  'ext.namePlaceholder': '名字（字母、数字、连字符）',
+
+  // ── 编辑器 ──
+  'ext.save': '保存',
+  'ext.delete': '删除',
+  'ext.deleteTitle': ({ name }) => `删除 ${String(name)}？`,
+  'ext.deleteHint': '文件会从磁盘上删掉，这一步撤不回来。',
+  'ext.field.description': '描述',
+  'ext.field.descriptionHint': '弹层里那一行副标题；不写就取正文第一行',
+  'ext.field.argumentHint': '参数提示',
+  'ext.field.agentDescriptionHint': '模型靠它决定派不派活给这个子代理',
+  'ext.field.tools': '工具',
+  'ext.field.toolsHint': '留空 = 继承全部，例如 Read, Grep',
+  'ext.field.model': '模型',
+  'ext.field.modelHint': '留空 = 用默认子代理模型',
+  'ext.field.permissionMode': '权限档位',
+  'ext.field.inherit': '继承',
+
+  // ── 错误与提示 ──
+  'ext.error.loadFailed': '读不到列表',
+  'ext.error.emptyBody': '正文不能为空 —— 正文就是它的全部内容',
+  'ext.error.agentNeedsDescription': '子代理必须填描述，否则加载时整条会被作废',
+  'ext.lossyWarning': ({ count }) =>
+    `这个文件里有 ${String(count)} 处本应用读不懂的语法（嵌套、块标量等），保存会丢掉它们`,
+  'ext.confirmLossy': ({ list }) => `保存会丢掉这些读不懂的内容：\n\n${String(list)}\n\n继续？`
 }
 
 export const extensionsEn = {
@@ -35,5 +72,39 @@ export const extensionsEn = {
   'ext.agents.emptyHint': 'Subagents are .md files under <appData>/agents/ or the workspace .next-cowork/agents/; the model dispatches them via the Task tool',
   'ext.hooks.empty': 'No hooks yet',
   'ext.hooks.emptyHint': 'Hooks run a local command at fixed points of a run, such as before and after a tool call',
-  'ext.comingSoon': 'Not wired up yet'
+  'ext.comingSoon': 'Not wired up yet',
+
+  'ext.searchPlaceholder': 'Search name or description',
+  'ext.scopeFilter': 'Scope',
+  'ext.scope.all': 'All',
+  'ext.scope.global': 'Global',
+  'ext.scope.project': 'This workspace',
+  'ext.scope.builtin': 'Built-in',
+  'ext.toggleLabel': ({ name }) => `Enable ${String(name)}`,
+  'ext.new': 'New',
+  'ext.newTitle': 'New',
+  'ext.create': 'Create',
+  'ext.namePlaceholder': 'Name (letters, digits, hyphens)',
+
+  'ext.save': 'Save',
+  'ext.delete': 'Delete',
+  'ext.deleteTitle': ({ name }) => `Delete ${String(name)}?`,
+  'ext.deleteHint': 'The file is removed from disk. This cannot be undone.',
+  'ext.field.description': 'Description',
+  'ext.field.descriptionHint': 'Subtitle in the picker; falls back to the first line of the body',
+  'ext.field.argumentHint': 'Argument hint',
+  'ext.field.agentDescriptionHint': 'The model uses this to decide whether to dispatch this subagent',
+  'ext.field.tools': 'Tools',
+  'ext.field.toolsHint': 'Empty = inherit all, e.g. Read, Grep',
+  'ext.field.model': 'Model',
+  'ext.field.modelHint': 'Empty = use the default subagent model',
+  'ext.field.permissionMode': 'Permission mode',
+  'ext.field.inherit': 'Inherit',
+
+  'ext.error.loadFailed': 'Could not load the list',
+  'ext.error.emptyBody': 'The body cannot be empty — it is the whole content',
+  'ext.error.agentNeedsDescription': 'A subagent needs a description, otherwise it is discarded on load',
+  'ext.lossyWarning': ({ count }) =>
+    `This file has ${String(count)} construct(s) this app cannot parse (nesting, block scalars); saving drops them`,
+  'ext.confirmLossy': ({ list }) => `Saving will drop these unparsable parts:\n\n${String(list)}\n\nContinue?`
 }

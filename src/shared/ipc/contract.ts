@@ -47,6 +47,14 @@ import type { ImageTheme, ThemeProfile } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo, TerminalPreparation } from '../domain/terminal'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { CommandDefinition } from '../domain/command'
+import type {
+  AgentListItem,
+  CommandListItem,
+  MarkdownResourceFile,
+  MarkdownResourceKind,
+  MarkdownResourceSave,
+  MarkdownResourceScope
+} from '../domain/markdown-resource'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, PreparedWorkspace, RemoteDirectory, SshAuthRequest, SshAuthResponse } from '../domain/environment'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
@@ -473,6 +481,31 @@ export interface IpcInvokeMap {
   'commands:list': { req: { workspaceId?: string }; res: CommandDefinition[] }
   'commands:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
 
+  /*
+    扩展面板里的命令 / 子代理管理。
+
+    ★ `commands:list` 和 `commands:listAll` 是**两个**频道，不是一个带参数的：
+    前者给运行期用（输入框的 `/` 弹层），已经滤掉关掉的那些；后者给管理界面用，
+    关掉的也要列出来，否则用户没法再把它打开。合成一个 `includeDisabled` 参数的话，
+    调用点漏传一次就会把禁用的命令重新喂给模型 —— 那种 bug 不会报错，只会「失效了」。
+  */
+  'commands:listAll': { req: { workspaceId?: string }; res: CommandListItem[] }
+  'commands:setEnabled': { req: { name: string; enabled: boolean }; res: void }
+  'agents:list': { req: { workspaceId?: string }; res: AgentListItem[] }
+  'agents:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
+  'agents:setEnabled': { req: { name: string; enabled: boolean }; res: void }
+
+  /* 命令和子代理共用这三个 —— 磁盘上它们是同构的，见 shared/domain/markdown-resource.ts。 */
+  'resource:get': {
+    req: { kind: MarkdownResourceKind; scope: MarkdownResourceScope; name: string; workspaceId?: string }
+    res: MarkdownResourceFile
+  }
+  'resource:save': { req: MarkdownResourceSave; res: MarkdownResourceFile }
+  'resource:delete': {
+    req: { kind: MarkdownResourceKind; scope: MarkdownResourceScope; name: string; workspaceId?: string }
+    res: void
+  }
+
   // ── 供应商 / 模型别名 ──
   'provider:list': { req: void; res: UpstreamProvider[] }
   'provider:upsert': { req: UpstreamProvider; res: UpstreamProvider }
@@ -644,6 +677,8 @@ export interface IpcEventMap {
   'theme:libraryChanged': { profiles: ThemeProfile[]; images: ImageTheme[] }
   'workspace:changed': { workspaces: Workspace[] }
   'skills:changed': void
+  'commands:changed': void
+  'agents:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
   'sessions:changed': SessionChange
@@ -837,6 +872,14 @@ export const INVOKE_CHANNELS = {
   'skills:setWorkspaceActive': 1,
   'commands:list': 1,
   'commands:diagnostics': 1,
+  'commands:listAll': 1,
+  'commands:setEnabled': 1,
+  'agents:list': 1,
+  'agents:diagnostics': 1,
+  'agents:setEnabled': 1,
+  'resource:get': 1,
+  'resource:save': 1,
+  'resource:delete': 1,
   'provider:list': 1,
   'provider:upsert': 1,
   'provider:remove': 1,
@@ -912,6 +955,8 @@ export const EVENT_CHANNELS = {
   'theme:libraryChanged': 1,
   'workspace:changed': 1,
   'skills:changed': 1,
+  'commands:changed': 1,
+  'agents:changed': 1,
   'mcp:changed': 1,
   'provider:changed': 1,
   'provider:authProgress': 1,
