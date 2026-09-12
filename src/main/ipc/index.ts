@@ -101,6 +101,7 @@ import { installMarketSkill, installZip, listMarketCategories, listMarketSkills,
 import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } from './commands'
 import { agentDiagnostics, listAgents, setAgentEnabled } from './agents'
 import { deleteResource, getResource, saveResource } from './markdown-resource'
+import { deleteHook, hookDiagnostics, listHooks, saveHook, setHookEnabledIpc, testHookIpc } from './hooks'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
@@ -402,6 +403,14 @@ const handlers: HandlerMap = {
   'resource:get': (req) => getResource(req),
   'resource:save': (req) => saveResource(req),
   'resource:delete': (req) => deleteResource(req),
+
+  // ── 钩子（本阶段只管存，事件触发点还没接） ──
+  'hooks:list': (req) => listHooks(req),
+  'hooks:diagnostics': (req) => hookDiagnostics(req),
+  'hooks:save': (req) => saveHook(req),
+  'hooks:delete': (req) => deleteHook(req),
+  'hooks:setEnabled': (req) => setHookEnabledIpc(req),
+  'hooks:test': (req) => testHookIpc(req),
 
   // ── 步骤 4 / 13:上游与网关 ──
   'provider:list': () => listProviders(),

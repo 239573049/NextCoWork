@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import type { McpServerConfig } from '../../../../shared/domain/mcp'
 import {
+  authorizationWarning,
   draftOf,
   emptyDraft,
   hasErrors,
@@ -140,6 +141,29 @@ describe('secretValues', () => {
 
   it('一条都没填时是空对象,不是 undefined', () => {
     expect(secretValues(parseSecretLines('A=\nB='))).toEqual({})
+  })
+})
+
+describe('authorizationWarning', () => {
+  /** ★ 这条测试对应的真实症状:填了裸 token,服务端报一个不相关的认证错误 */
+  it('裸 token(不含空格)要警告', () => {
+    expect(authorizationWarning(parseSecretLines('Authorization=abc123'))).toContain('Bearer abc123')
+  })
+
+  it('带方案前缀(含空格)不警告', () => {
+    expect(authorizationWarning(parseSecretLines('Authorization=Bearer abc123'))).toBeNull()
+  })
+
+  it('键名大小写不敏感', () => {
+    expect(authorizationWarning(parseSecretLines('authorization=abc123'))).not.toBeNull()
+  })
+
+  it('值为空(编辑已有服务器的常态)不警告', () => {
+    expect(authorizationWarning(parseSecretLines('Authorization='))).toBeNull()
+  })
+
+  it('没有 Authorization 这一行不警告', () => {
+    expect(authorizationWarning(parseSecretLines('X-API-Key=abc123'))).toBeNull()
   })
 })
 

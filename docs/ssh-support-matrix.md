@@ -40,7 +40,9 @@ NCW_SSH_INTEGRATION=1 npx vitest run src/main/environment
 | 打包形态 askpass 入口 | 真实环境已验证 | 真跑 Electron 入口，且不创建应用数据目录 |
 | 远端 MCP over TLS 的身份校验 | 真实环境已验证 | 真实握手，校验名取转发目标而非本机跳板 |
 | 远端 MCP over 真实 `ssh -W` 转发 | 真实环境已验证 | 隔离 sshd 转发一次 HTTP，Host 头不被改写 |
-| 断线后不重放 | 真实环境已验证 | 断线后请求立即失败，且不为重试新起转发 |
+| 远端 MCP 协议全链路（握手/列工具/调用） | 真实环境已验证 | MCP 客户端经 `environmentTransport` + 真实转发跑完一轮；`streamable-http` 与 `sse` 两条分支都覆盖 |
+| SSE 常驻流被打断后不重连 | 真实环境已验证（但见下注） | 打断 GET 流后服务器侧请求计数不涨 |
+| 断线后不重放 | 真实环境已验证 | 断线后请求立即失败；服务器侧请求计数一个都不涨 |
 | 关闭后回收转发进程（含迟到 socket） | 真实环境已验证 | 数的是转发到本次端口的 `ssh -W` 进程，close 后归零 |
 | ProxyCommand | 未验证 | 依赖的环境变量无法穷举，见下"已知取舍" |
 | 密码认证 | 阻塞 | sshd 口令认证走 PAM/真实账户口令，本机无法在测试里提供 |
@@ -59,6 +61,12 @@ NCW_SSH_INTEGRATION=1 npx vitest run src/main/environment
 | 命名管道 endpoint 的 ACL | askpass 桥在 win32 用 `\\.\pipe\...`，未验证访问控制 |
 | `powershellCommand` 的 `-EncodedCommand` 链路 | 远端命令组装仅有单元测试 |
 | 路径围栏：ADS 与尾部点/空格 | `notes.txt:stream`、`foo.` / `foo ` 会被 Win32 归一，`requireAbsent` 查的是未归一的词法路径，存在静默覆盖同名文件的可能 |
+
+## 关于「SSE 不重连」这条结论的边界
+
+做过对照实验：把 `assertReady()` 栅栏摘掉之后，打断 SSE 常驻流，服务器侧的请求计数**照样不涨**。也就是说这个版本的 `SSEClientTransport` 在流断掉后压根不会自动重连 —— 「断线不重连」成立，但**不是我们的栅栏挡住的**。
+
+所以那条用例守的是「SDK 或我们的 transport 哪天开始重连了要能发现」，不能拿它当「栅栏有效」的证据。栅栏对**主动发起的请求**确实有效（同一条用例里 `callTool` 会立刻失败），那一半是真的。
 
 ## 为什么本机造不出网络分区
 

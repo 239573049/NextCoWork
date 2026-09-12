@@ -223,9 +223,11 @@ export class EnvironmentFiles {
       for (const entry of entries) {
         const output = entry.relative ? path.join(temporary, entry.relative) : temporary
         if ((await fs.lstat(entry.source)).isSymbolicLink) fail('symlink')
+        // ★ 先登记再写：copyFile 写到一半断线时，目标文件可能已存在却不在清理名单里，
+        //   finally 对暂存根目录的 rmdir 会因「目录非空」失败并被吞掉，.ncw-copy-*.tmp 永久残留
+        created.push({ path: output, isDir: entry.stat.isDir })
         if (entry.stat.isDir) await fs.mkdir(output)
         else transferred += await fs.copyFile(entry.source, output, 256 * 1024 * 1024 - transferred, entry.stat.mode & 0o777)
-        created.push({ path: output, isDir: entry.stat.isDir })
       }
       await this.requireAbsent(destination)
       await fs.rename(temporary, destination)

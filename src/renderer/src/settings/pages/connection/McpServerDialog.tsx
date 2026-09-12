@@ -31,6 +31,7 @@ import { getMcpSecretsInfo, setMcpSecrets } from "../../../services/mcp";
 import { useMcpStore } from "../../../stores/mcp";
 import { useWindowStore } from '../../../stores/window';
 import {
+  authorizationWarning,
   draftOf,
   emptyDraft,
   hasErrors,
@@ -113,11 +114,13 @@ export function McpServerDialog({
     editing === null
       ? existingIds
       : existingIds.filter((i) => i !== editing.config.id);
-  const typed = secretValues(parseSecretLines(draft.secretsText));
+  const secretLines = parseSecretLines(draft.secretsText);
+  const typed = secretValues(secretLines);
   const typedKeys = Object.keys(typed);
   // ★ 这次没填、但库里存着的键 —— 保存后会被这次的整体写覆盖掉
   const willClear =
     typedKeys.length === 0 ? [] : stored.names.filter((n) => !(n in typed));
+  const authWarning = authorizationWarning(secretLines);
 
   const save = (): void => {
     const e = validateDraft(draft, others);
@@ -350,6 +353,7 @@ export function McpServerDialog({
               })}
             </Notice>
           )}
+          {authWarning !== null && <Notice>{authWarning}</Notice>}
         </Field>
 
         {failure !== null && (

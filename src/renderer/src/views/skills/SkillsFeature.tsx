@@ -58,6 +58,7 @@ export function SkillsFeature({
     const key = error instanceof Error ? error.message : "";
     const known = [
       "skills.authRequired",
+      "skills.clientAssetsUnavailable",
       "skills.scopeRequired",
       "skills.versionUnavailable",
       "skills.networkFailed",
@@ -520,6 +521,7 @@ export function SkillsFeature({
                   {workspaceId !== null && (
                     <Button
                       variant="accent"
+                      disabled={!!selected.unavailableReason}
                       onClick={() => {
                         void useSkillInWorkspace(workspaceId, selected.name).then((opened) => {
                           if (!opened) return;
@@ -852,7 +854,7 @@ function SkillCard({
               <Toggle
                 checked={item.activeInWorkspace}
                 onChange={onWorkspace}
-                disabled={busy !== null}
+                disabled={busy !== null || !!item.unavailableReason}
                 label={t("skills.workspaceToggle")}
               />
               <Settings2 size={14} className="text-fg-faint" />

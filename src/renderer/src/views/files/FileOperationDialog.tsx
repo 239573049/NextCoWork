@@ -1,10 +1,12 @@
 import { AlertTriangle, Loader2 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import type { WorkspaceFileMutationRequest } from '../../../../shared/domain/workspace-file'
 import { Button } from '../../components/ui/Button'
 import { Dialog } from '../../components/ui/Dialog'
 import { TextInput } from '../../components/ui/TextInput'
 import { useI18n, type TranslationKey } from '../../i18n'
+import { useWindowStore } from '../../stores/window'
 import { operationRequest, type FileOperationTarget } from './file-operations'
 
 export function FileOperationDialog({
@@ -25,6 +27,11 @@ export function FileOperationDialog({
   onClose: () => void
 }): ReactNode {
   const { t } = useI18n()
+  // 远端工作区没有系统回收站 —— 那边是工作区内的 .next-cowork-trash，文案必须分开
+  const remote = useWindowStore((state) => {
+    const workspace = state.workspaceTargets[workspaceId]
+    return workspace !== undefined && !isLocalEnvironment(workspace.environment)
+  })
   const [value, setValue] = useState(
     target.operation === 'rename'
       ? target.name
@@ -107,7 +114,7 @@ export function FileOperationDialog({
         {isDelete ? (
           <p className="flex items-start gap-2 text-[13px] text-fg">
             <AlertTriangle size={16} className="mt-0.5 shrink-0 text-danger" />
-            <span className="break-words">{t('files.manage.deleteHint', { name: target.name })}</span>
+            <span className="break-words">{t(remote ? 'files.manage.deleteHintRemote' : 'files.manage.deleteHint', { name: target.name })}</span>
           </p>
         ) : (
           <>

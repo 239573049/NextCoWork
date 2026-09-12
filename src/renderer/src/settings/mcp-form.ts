@@ -158,6 +158,18 @@ export function secretValues(lines: readonly SecretLine[]): Record<string, strin
 }
 
 /**
+ * `Authorization` 的值几乎总是带一个方案前缀(`Bearer x`、`Basic x`),
+ * 用户却常常只粘了裸 token —— 服务端多半不会说「少了 Bearer」,只会报
+ * 一个不相关的认证错误,排查起来要绕一圈。裸 token 本身不含空格,
+ * 而 `Scheme x` 一定有,拿这个当启发式够用,不需要认全部方案名。
+ */
+export function authorizationWarning(lines: readonly SecretLine[]): string | null {
+  const line = lines.find((l) => l.name.toLowerCase() === 'authorization' && l.value !== '')
+  if (line === undefined || line.value.includes(' ')) return null
+  return `Authorization 的值通常要带方案前缀,比如 Bearer ${line.value}`
+}
+
+/**
  * 从名字猜一个 id。参考图那个弹窗里 id 是自动填的,用户很少去改它。
  *
  * 猜不出来(比如名字是纯中文)时返回空串,让用户自己填 —— 编一个

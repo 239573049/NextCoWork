@@ -746,9 +746,19 @@ export async function refreshAgents(workspaceId: string, environment?: Workspace
     projectRoot: root === '' ? '' : remote ? await remote.path.resolveWithin(remote.rootPath, `${PROJECT_AGENTS_PREFIX}/${AGENTS_DIR}`) : join(root, PROJECT_AGENTS_PREFIX, AGENTS_DIR)
   })
   for (const d of result.diagnostics) h.logger.warn(`[agent] ${d.path}: ${d.message}`)
-  agentRegistry().replaceAll(result)
+  /*
+    ★ 用户在扩展面板里关掉的那些，在这里滤掉 —— 不滤的话「禁用」只改了界面上
+    一个开关的样子，模型照样能通过 `Task` 派遣它。
+
+    过滤放在这一层而不是 `scanAgents` 里：内核不认识 kv，而「磁盘上有这个子代理吗」
+    和「我想不想用它」是两个问题，扫描器只回答前一个（`ipc/agents.ts` 要列出被
+    关掉的那些，靠的就是扫描器不过滤）。
+  */
+  const disabled = new Set(store.getDisabledAgentNames())
+  const enabled = { ...result, agents: result.agents.filter((a) => !disabled.has(a.name)) }
+  agentRegistry().replaceAll(enabled)
   getTools().register(taskTool())
-  return result.agents
+  return enabled.agents
 }
 
 interface RunResources {

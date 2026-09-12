@@ -47,6 +47,7 @@ import type { ImageTheme, ThemeProfile } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo, TerminalPreparation } from '../domain/terminal'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { CommandDefinition } from '../domain/command'
+import type { HookDefinition, HookEvent, HookListItem, HookRunReport, HookScope } from '../domain/hook'
 import type {
   AgentListItem,
   CommandListItem,
@@ -506,6 +507,22 @@ export interface IpcInvokeMap {
     res: void
   }
 
+  // ── 钩子（`settings.local.json` / `<appData>/settings.json` 的 hooks 段）──
+  'hooks:list': { req: { workspaceId?: string }; res: HookListItem[] }
+  'hooks:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
+  /** 按 id upsert。id 省略 = 新建，主进程铸 ULID 并回传。 */
+  'hooks:save': {
+    req: { scope: HookScope; workspaceId?: string; hook: Omit<HookDefinition, 'id'> & { id?: string } }
+    res: HookListItem
+  }
+  'hooks:delete': { req: { scope: HookScope; workspaceId?: string; id: string }; res: void }
+  'hooks:setEnabled': { req: { scope: HookScope; workspaceId?: string; id: string; enabled: boolean }; res: void }
+  /** 试运行。★ 跑的是弹层里此刻的草稿，不读磁盘上那一条。 */
+  'hooks:test': {
+    req: { workspaceId?: string; scope: HookScope; event: HookEvent; command: string; timeoutMs: number }
+    res: HookRunReport
+  }
+
   // ── 供应商 / 模型别名 ──
   'provider:list': { req: void; res: UpstreamProvider[] }
   'provider:upsert': { req: UpstreamProvider; res: UpstreamProvider }
@@ -679,6 +696,7 @@ export interface IpcEventMap {
   'skills:changed': void
   'commands:changed': void
   'agents:changed': void
+  'hooks:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
   'sessions:changed': SessionChange
@@ -880,6 +898,12 @@ export const INVOKE_CHANNELS = {
   'resource:get': 1,
   'resource:save': 1,
   'resource:delete': 1,
+  'hooks:list': 1,
+  'hooks:diagnostics': 1,
+  'hooks:save': 1,
+  'hooks:delete': 1,
+  'hooks:setEnabled': 1,
+  'hooks:test': 1,
   'provider:list': 1,
   'provider:upsert': 1,
   'provider:remove': 1,
@@ -957,6 +981,7 @@ export const EVENT_CHANNELS = {
   'skills:changed': 1,
   'commands:changed': 1,
   'agents:changed': 1,
+  'hooks:changed': 1,
   'mcp:changed': 1,
   'provider:changed': 1,
   'provider:authProgress': 1,

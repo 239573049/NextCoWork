@@ -1,6 +1,6 @@
 {
   "name": "nextcowork",
-  "version": "0.1.12",
+  "version": "0.1.14",
   "description": "NextCoWork — 编码型 Agent 桌面端",
   "main": "./out/main/index.js",
   "author": "NextCoWork",
@@ -21,6 +21,7 @@
     "release:upload": "node scripts/upload-client-release.mjs",
     "e2e": "npm run build && node scripts/e2e-probe.mjs",
     "e2e:theme": "npm run build && node scripts/theme-probe.mjs",
+    "e2e:import": "npm run build && node scripts/import-probe.mjs",
     "shot": "npm run build && node scripts/screenshot.mjs",
     "review": "node scripts/inline-shots.mjs docs/design-review.standalone.html",
     "test:watch": "vitest",
@@ -35,6 +36,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "electron-updater": "^6.8.9",
     "node-pty": "^1.1.0",
+    "smol-toml": "^1.8.0",
     "ssh2-streams": "npm:ssh2-streams-classic@0.4.14",
     "undici": "7.29.1",
     "unzipper": "^0.12.5",

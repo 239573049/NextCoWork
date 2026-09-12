@@ -1,5 +1,44 @@
 ﻿# 更新日志
 
+## v0.1.14
+
+### 新增
+
+- 扩展页面拆分为 Agents / Commands / Markdown 三个子面板，共享统一的资源列表与 frontmatter 编辑表单
+- frontmatter 解析模块新增序列化能力(`serializeFrontmatter`)，供应用内编辑命令/子代理时把表单写回 `.md` 文件
+- 补充 SSH 集成测试与相关文档
+
+### 修复
+
+- 修复 Composer 中斜杠命令选择与展开逻辑
+- 修复 frontmatter `unquote` 因链式 replace 导致的转义顺序 bug
+- 修复 extensions 相关 i18n 函数缺少显式参数类型的问题
+
+### 改动
+
+- 优化聊天响应性相关逻辑，新增配套 QA 脚本用于回归验证
+- 清理 MarkdownResourceEditor 冗余的 onFrontmatter prop
+
+## v0.1.13
+
+### 新增
+
+- 新增斜杠命令系统:支持从磁盘加载自定义命令,在 Composer 中输入 `/` 即可与 Skill 混合检索、方向键连续切换;内置命令副标题走 i18n,磁盘命令取 frontmatter 的 description,命令正文在提交时才展开
+- 新增远程环境(SSH)支持:可创建与管理 SSH 连接及远程工作区,涵盖 SFTP 文件读写、askpass 交互式认证、原生终端接入,MCP 服务调用也随环境一并转发到远程
+- 扩展页面拆分为 Agents / Commands / Markdown 三个子面板,共享统一的资源列表(ResourcePanel/ResourceTable)与 frontmatter 编辑表单
+- frontmatter 解析模块新增序列化能力(`serializeFrontmatter`),供应用内编辑命令/子代理时把表单写回 `.md` 文件
+
+### 修复
+
+- 修复 Composer 未接通斜杠命令选择与展开逻辑的问题:此前敲 `/` 只能触发 Skill,命令一条都进不去
+- 修复 frontmatter `unquote` 因链式 replace 导致的转义顺序 bug:值中的反斜杠会被后续的换行转义规则误吞,写入再读出后发生损坏
+- 修复 extensions 相关 i18n 函数缺少显式参数类型的问题
+
+### 改动
+
+- 优化聊天响应性相关逻辑,新增配套 QA 脚本用于回归验证
+- 清理 MarkdownResourceEditor 冗余的 onFrontmatter prop
+
 ## v0.1.12
 
 ### 新增

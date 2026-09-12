@@ -271,6 +271,21 @@ export async function setSkillWorkspaceActive(req: {
   const ws = store.getWorkspace(req.workspaceId)
   if (ws === undefined) throw new Error(`没有 id 为 "${req.workspaceId}" 的工作区。`)
 
+  /**
+   * ★ 权威闸门在这里，不在渲染层。
+   *
+   * 依赖本机资源的技能在 SSH 工作区里跑不了:`runtime.ts` 的 `activeSkills()` 会按
+   * `unavailableReason` 把它过滤掉,`tool/builtin/skill.ts` 也会拒绝执行。但在此之前
+   * **没有任何一处拦住"打开这个开关"** —— 于是 `activeSkillIds` 里留下一条永远不会
+   * 生效的 id,界面显示「已启用」,模型那边却被静默排除。界面在撒谎比功能缺失更糟。
+   *
+   * 渲染层有三个入口(列表行 Toggle、卡片网格 Toggle、详情弹窗「使用」),历史上只有
+   * 第一个做了判断。把闸门放在主进程,三个入口就不可能各自漏掉。
+   */
+  if (req.active && scanned.find((skill) => skill.id === req.skillId)?.unavailableReason) {
+    throw new Error('skills.clientAssetsUnavailable')
+  }
+
   const current = ws.settings.activeSkillIds
   const all = scanned.map((s) => s.id)
   // 隐式的「全都要」在这里物化,否则关掉一条会是个空操作

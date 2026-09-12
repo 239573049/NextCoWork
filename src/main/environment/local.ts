@@ -3,6 +3,7 @@ import { constants, promises as fs, type Stats } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { createConnection } from 'node:net'
 import type { KernelHost } from '../kernel/host'
+import { killTree } from '../kernel/node-spawn'
 import type { EnvironmentFs, EnvironmentStat, WorkspaceEnvironment } from './contract'
 import { EnvironmentError, missingPath } from './errors'
 import { createWorkspacePaths } from './paths'
@@ -57,13 +58,23 @@ export function localEnvironment(host: KernelHost, rootPath: string): WorkspaceE
       const env = { ...process.env, ...options.env }
       delete env.ELECTRON_RUN_AS_NODE
       delete env.NODE_OPTIONS
-      const child = spawn(command, [...args], { cwd: options.cwd, env, stdio: 'pipe', windowsHide: true, shell: false })
+      const detached = options.detached === true
+      const child = spawn(command, [...args], { cwd: options.cwd, env, stdio: 'pipe', windowsHide: true, shell: false, detached })
       child.stdin.on('error', () => {})
       return { stdin: child.stdin, stdout: child.stdout, stderr: child.stderr,
         exited: new Promise((resolve) => {
           child.once('close', (code, signal) => resolve({ code, signal }))
           child.once('error', () => resolve({ code: null }))
-        }), kill: () => { child.kill() } }
+        }),
+        /*
+          ★ `detached` 时杀整棵树。`sh -c "npm run x"` 只杀 sh 的话，node 会活下来
+          继续占着端口 —— 而调用方看到的是「已经 kill 过了」。理由与实现同
+          `kernel/node-spawn.ts` 的 `killTree`，那里是同一个问题的另一条路径。
+        */
+        kill: () => {
+          if (detached && child.pid !== undefined) killTree(child.pid, 'SIGTERM')
+          else child.kill()
+        } }
     },
     openTerminal: async (options) => {
       const pty = await import('node-pty')

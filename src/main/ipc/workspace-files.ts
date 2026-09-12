@@ -304,12 +304,18 @@ function copyTree(root: string, source: string, destination: string, onCreated?:
   const destinationPath = checkedPath(root, destination)
   requireAbsent(destinationPath)
   const stat = lstatSync(sourcePath)
+  /**
+   * ★ 先登记再写。原先 `onCreated` 排在写之后:顶层是文件且 `copyFileSync` 写到一半失败时,
+   * 调用方的 `created` 仍是 false,那句 `rmSync(temporary)` 根本不执行 —— 半个
+   * `.ncw-copy-*.tmp` 就永久留在用户工作区里。登记一个还没建成的路径是无害的,
+   * 清理侧本来就是 `force: true`。
+   */
   if (stat.isFile()) {
+    onCreated?.()
     copyFileSync(sourcePath, destinationPath, constants.COPYFILE_EXCL)
-    onCreated?.()
   } else if (stat.isDirectory()) {
-    mkdirSync(destinationPath, { mode: stat.mode & 0o777 })
     onCreated?.()
+    mkdirSync(destinationPath, { mode: stat.mode & 0o777 })
     for (const name of readdirSync(sourcePath)) copyTree(root, `${source}/${name}`, `${destination}/${name}`)
   } else {
     fail('unsupported')

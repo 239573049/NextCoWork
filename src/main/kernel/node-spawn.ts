@@ -45,7 +45,14 @@ function childEnv(): NodeJS.ProcessEnv {
  * Windows 没有进程组的等价物,只能靠 `taskkill /T`。⚠️ v1 的已知缺口:
  * 这条分支没有自动化测试覆盖。
  */
-function killTree(pid: number, signal: NodeJS.Signals): void {
+/**
+ * 杀掉整棵进程树。
+ *
+ * ★ 导出是给 `environment/local.ts` 的 `openProcess` 用的（钩子会跑
+ *   `npm run xxx` 这类会派生子进程的命令）。**一份实现** —— 平台差异
+ *   （POSIX 进程组 vs Windows `taskkill /T`）只该有一个答案。
+ */
+export function killTree(pid: number, signal: NodeJS.Signals): void {
   try {
     if (isWindows) {
       spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' })

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { addLocalPermissionRule, clearLocalSettingsCache, localSettingsPath, readLocalSettings } from '../local-settings'
+import { addLocalPermissionRule, clearLocalSettingsCache, globalSettingsPath, localSettingsPath, readGlobalSettings, readLocalSettings, writeHooks } from '../local-settings'
 import type { KernelFs } from '../host'
 
 function memoryFs(): KernelFs & { files: Map<string, string>; reads: number } {
@@ -131,5 +131,81 @@ describe('addLocalPermissionRule', () => {
     const written = JSON.parse(fs.files.get(PATH) as string)
     expect(written.permissions.allow).toEqual(['Bash(a:*)', 'Bash(b:*)'])
     expect(written.permissions.deny).toEqual(['Bash(c:*)'])
+  })
+})
+
+/**
+ * 两段配置共用一份文件。
+ *
+ * ★ 这一节是整个模块**唯一会静默毁数据**的地方：改一段把另一段抹掉，不报错、
+ *   不崩、下一次读才发现少了东西，而那时候已经找不到是谁干的了。
+ */
+describe('permissions 与 hooks 共存', () => {
+  const hooksOf = (fs: ReturnType<typeof memoryFs>, path = PATH): Record<string, unknown> =>
+    (JSON.parse(fs.files.get(path) as string) as { hooks: Record<string, unknown> }).hooks
+
+  it('★ 写 hooks 不动 permissions', async () => {
+    const fs = memoryFs()
+    await addLocalPermissionRule(fs, ROOT, 'allow', 'Bash(git status:*)')
+    await writeHooks(fs, PATH, () => ({ PreToolUse: [{ id: 'a', command: 'guard.sh', timeout: 10 }] }))
+    const written = JSON.parse(fs.files.get(PATH) as string)
+    expect(written.permissions.allow).toEqual(['Bash(git status:*)'])
+    expect(written.hooks.PreToolUse).toHaveLength(1)
+  })
+
+  it('★ 写 permissions 不动 hooks', async () => {
+    const fs = memoryFs()
+    await writeHooks(fs, PATH, () => ({ Stop: [{ id: 'a', command: 'notify.sh', timeout: 60 }] }))
+    await addLocalPermissionRule(fs, ROOT, 'deny', 'Bash(rm:*)')
+    const written = JSON.parse(fs.files.get(PATH) as string)
+    expect(written.hooks.Stop).toHaveLength(1)
+    expect(written.permissions.deny).toEqual(['Bash(rm:*)'])
+  })
+
+  it('未知的顶层键在两种写入下都留着', async () => {
+    const fs = memoryFs()
+    fs.files.set(PATH, JSON.stringify({ version: 1, futureSection: { keep: true } }))
+    await addLocalPermissionRule(fs, ROOT, 'allow', 'Bash')
+    await writeHooks(fs, PATH, () => ({ Stop: [{ id: 'a', command: 'x', timeout: 60 }] }))
+    expect(JSON.parse(fs.files.get(PATH) as string).futureSection).toEqual({ keep: true })
+  })
+
+  it('读不懂的文件拒绝写 hooks —— 和权限那条是同一个取向', async () => {
+    const fs = memoryFs()
+    fs.files.set(PATH, '{ not json')
+    expect(await writeHooks(fs, PATH, () => ({}))).toEqual({ ok: false, reason: 'unreadable' })
+    expect(fs.files.get(PATH)).toBe('{ not json')
+  })
+
+  it('hooks 的并行写入也串起来', async () => {
+    const fs = memoryFs()
+    await Promise.all([
+      writeHooks(fs, PATH, (h) => ({ ...h, PreToolUse: [...(h.PreToolUse ?? []), { id: 'a', command: 'a', timeout: 10 }] })),
+      writeHooks(fs, PATH, (h) => ({ ...h, PreToolUse: [...(h.PreToolUse ?? []), { id: 'b', command: 'b', timeout: 10 }] }))
+    ])
+    expect((hooksOf(fs).PreToolUse as unknown[])).toHaveLength(2)
+  })
+
+  it('缓存按 mtime+size 失效，写完立刻读得到新的 hooks', async () => {
+    const fs = memoryFs()
+    expect((await readLocalSettings(fs, ROOT)).hooks).toEqual({})
+    await writeHooks(fs, PATH, () => ({ Stop: [{ id: 'a', command: 'x', timeout: 60 }] }))
+    expect((await readLocalSettings(fs, ROOT)).hooks.Stop).toHaveLength(1)
+  })
+})
+
+describe('全局那一份', () => {
+  const USER_DATA = '/appdata'
+
+  it('文件不存在 = 没有钩子，不是错误', async () => {
+    expect((await readGlobalSettings(memoryFs(), USER_DATA)).hooks).toEqual({})
+  })
+
+  it('★ 全局和项目各自缓存、互不串', async () => {
+    const fs = memoryFs()
+    await writeHooks(fs, globalSettingsPath(USER_DATA), () => ({ Stop: [{ id: 'g', command: 'global', timeout: 60 }] }))
+    await writeHooks(fs, PATH, () => ({ Stop: [{ id: 'p', command: 'project', timeout: 60 }] }))
+    expect((await readGlobalSettings(fs, USER_DATA)).hooks.Stop?.[0]?.command).toBe('global')
+    expect((await readLocalSettings(fs, ROOT)).hooks.Stop?.[0]?.command).toBe('project')
   })
 })

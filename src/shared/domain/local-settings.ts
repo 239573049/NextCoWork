@@ -7,7 +7,7 @@
  *
  * ★ 这个文件**会继续长**。所以三条约定从第一天就立住:
  *
- * 1. **分段命名**。每一类设置占一个顶层键(现在只有 `permissions`),
+ * 1. **分段命名**。每一类设置占一个顶层键(`permissions`、`hooks`),
  *    新增能力就是新增一个键,不往已有的段里塞不相干的字段。
  * 2. **读的时候宽容**。认不出来的段、认不出来的规则一律忽略,绝不因为文件里有
  *    一行看不懂的东西就拒绝整个文件 —— 那会让一个旧版本的应用把用户的工作区锁死。
@@ -15,6 +15,17 @@
  *    新版本写进去的段,旧版本改一次规则不能把它抹掉。
  */
 import { isValidPermissionRule } from '../agent/permission-rule'
+import {
+  HOOK_COMMAND_MAX,
+  HOOK_MAX_TIMEOUT_MS,
+  MAX_HOOKS_PER_EVENT,
+  defaultTimeoutMs,
+  isHookEvent,
+  isValidHookMatcher,
+  type HookEvent,
+  type HookFileEntry,
+  type HookSettings
+} from './hook'
 
 export const LOCAL_SETTINGS_DIRNAME = '.next-cowork'
 export const LOCAL_SETTINGS_FILENAME = 'settings.local.json'
@@ -41,10 +52,12 @@ export interface LocalPermissionSettings {
 export interface LocalSettings {
   version: number
   permissions: LocalPermissionSettings
+  /** 见 `domain/hook.ts`。空对象 = 这一层没有钩子。 */
+  hooks: HookSettings
 }
 
 export function emptyLocalSettings(): LocalSettings {
-  return { version: LOCAL_SETTINGS_VERSION, permissions: { allow: [], ask: [], deny: [] } }
+  return { version: LOCAL_SETTINGS_VERSION, permissions: { allow: [], ask: [], deny: [] }, hooks: {} }
 }
 
 function normalizeBucket(raw: unknown): string[] {
@@ -61,6 +74,75 @@ function normalizeBucket(raw: unknown): string[] {
   return out
 }
 
+/**
+ * 归一化 hooks 段。
+ *
+ * ★ **兼容读 Claude Code 的嵌套写法**：`{ matcher, hooks: [{ type, command }] }`
+ *   读得懂就拍平。让「从 `.claude/settings.json` 里整段粘过来」这件事直接可用，
+ *   而不需要用户手工翻译一遍。写出去一律是扁平形状。
+ *
+ * ★ 一条读不懂的 hook 丢掉，**不是**让整个文件作废 —— 这条和 `normalizeBucket`
+ *   对坏规则的处理是同一个取向，也是这个文件头第 2 条约定。
+ */
+function normalizeHooks(raw: unknown): HookSettings {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: HookSettings = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isHookEvent(key) || !Array.isArray(value)) continue
+    const entries: HookFileEntry[] = []
+    for (const item of value) {
+      for (const flat of flattenHookEntry(item)) {
+        const entry = normalizeHookEntry(flat, key)
+        if (entry !== null) entries.push(entry)
+        if (entries.length >= MAX_HOOKS_PER_EVENT) break
+      }
+      if (entries.length >= MAX_HOOKS_PER_EVENT) break
+    }
+    if (entries.length > 0) out[key] = entries
+  }
+  return out
+}
+
+/** CC 的 `{ matcher, hooks: [...] }` 拍平成若干条；本项目自己的形状原样放行。 */
+function flattenHookEntry(item: unknown): unknown[] {
+  if (item === null || typeof item !== 'object') return []
+  const record = item as Record<string, unknown>
+  if (!Array.isArray(record.hooks)) return [item]
+  return record.hooks.map((inner) =>
+    inner !== null && typeof inner === 'object'
+      ? { ...(inner as Record<string, unknown>), matcher: record.matcher }
+      : inner
+  )
+}
+
+function normalizeHookEntry(raw: unknown, event: HookEvent): HookFileEntry | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const record = raw as Record<string, unknown>
+  const command = typeof record.command === 'string' ? record.command.trim() : ''
+  if (command === '' || command.length > HOOK_COMMAND_MAX) return null
+
+  const matcher = typeof record.matcher === 'string' ? record.matcher.trim() : ''
+  // 读不懂的 matcher 直接丢掉这一条：留着它只会在某天以「我明明写了」的形式
+  // 变成一次没拦住，而那正是安全类 hook 最不该有的失败方式。
+  if (matcher !== '' && !isValidHookMatcher(matcher)) return null
+
+  const seconds = typeof record.timeout === 'number' && Number.isFinite(record.timeout) && record.timeout > 0
+    ? record.timeout
+    : defaultTimeoutMs(event) / 1000
+  const timeout = Math.min(seconds, HOOK_MAX_TIMEOUT_MS / 1000)
+
+  return {
+    id: typeof record.id === 'string' && record.id !== '' ? record.id : '',
+    ...(matcher === '' ? {} : { matcher }),
+    command,
+    ...(record.enabled === false ? { enabled: false } : {}),
+    timeout,
+    ...(typeof record.description === 'string' && record.description.trim() !== ''
+      ? { description: record.description.trim() }
+      : {})
+  }
+}
+
 /** 任何输入都能得到一份可用的设置 —— 这个函数不抛异常。 */
 export function normalizeLocalSettings(raw: unknown): LocalSettings {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return emptyLocalSettings()
@@ -75,6 +157,7 @@ export function normalizeLocalSettings(raw: unknown): LocalSettings {
       allow: normalizeBucket(permissions.allow),
       ask: normalizeBucket(permissions.ask),
       deny: normalizeBucket(permissions.deny)
-    }
+    },
+    hooks: normalizeHooks(record.hooks)
   }
 }
