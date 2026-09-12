@@ -7,10 +7,22 @@ export interface ClientAuthUser {
   wallet?: { currency: string; availableBalance: number; cashBalance: number; giftBalance: number; totalConsumed: number } | null
 }
 
+export interface ClientTeamOption {
+  id: string
+  name: string
+  type: string
+  role: string
+  memberCount: number
+  isSelected: boolean
+}
+
 export interface ClientAuthState {
   mode: 'undecided' | 'offline' | 'authenticated'
   user: ClientAuthUser | null
   expiresAt: number | null
+  teams?: ClientTeamOption[]
+  selectedTeamId?: string | null
+  contextRequired?: boolean
 }
 
 export interface ClientUsageEntry {

@@ -4,6 +4,7 @@ import type { ClientAuthState, ClientUsageEntry } from '../../../../shared/domai
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { getClientAuthState, getClientUsage, getClientUser, signOutClient, startClientLogin } from '../../services/client-auth'
+import { ClientTeamSelectionView } from '../../views/ClientTeamSelectionView'
 import { useI18n } from '../../i18n'
 import type { SettingsPageProps } from '../props'
 
@@ -13,9 +14,20 @@ export function AccountPage({ walletOnly = false }: SettingsPageProps & { wallet
   const [usage, setUsage] = useState<ClientUsageEntry[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(false)
-  const load = async (): Promise<void> => { const next = await getClientAuthState(); setAuth(next); if (next.mode === 'authenticated') { const user = await getClientUser(); setAuth({ ...next, user: user ?? next.user }); setUsage(await getClientUsage()) } }
+  const load = async (): Promise<void> => {
+    const next = await getClientAuthState()
+    setAuth(next)
+    if (next.mode === 'authenticated') {
+      const user = await getClientUser()
+      const latest = await getClientAuthState()
+      const resolved = { ...latest, user: user ?? latest.user }
+      setAuth(resolved)
+      if (resolved.contextRequired !== true) setUsage(await getClientUsage())
+    }
+  }
   useEffect(() => { void load() }, [])
   if (auth === null) return <div className="p-8 text-sm text-fg-muted">{t('common.loading')}</div>
+  if (auth.mode === 'authenticated' && auth.contextRequired === true) return <ClientTeamSelectionView auth={auth} onComplete={setAuth} />
   if (auth.mode !== 'authenticated' || !auth.user) return <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4"><EmptyState icon={<UserCircle size={28} />} title={t('auth.notSignedIn')} hint={t('auth.signInFromWelcome')} /><Button variant="accent" disabled={busy} onClick={() => { setBusy(true); setError(false); void startClientLogin().then(setAuth).catch(() => setError(true)).finally(() => setBusy(false)) }}>{busy ? t('auth.openingBrowser') : t('auth.login')}</Button>{error && <p className="text-xs text-danger">{t('auth.loginFailed')}</p>}</div>
   return <div className="space-y-5">
     {error && <p className="text-xs text-danger">{t('auth.actionFailed')}</p>}

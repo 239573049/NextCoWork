@@ -206,6 +206,7 @@ export interface IpcInvokeMap {
   // ── NextCoWork 账户 ──
   'clientAuth:getState': { req: void; res: ClientAuthState }
   'clientAuth:startLogin': { req: void; res: ClientAuthState }
+  'clientAuth:selectTeam': { req: { teamId: string }; res: ClientAuthState }
   'clientAuth:useOffline': { req: void; res: ClientAuthState }
   'clientAuth:signOut': { req: void; res: ClientAuthState }
   'clientAuth:getUser': { req: void; res: ClientAuthUser | null }
@@ -861,6 +862,7 @@ export const INVOKE_CHANNELS = {
   'app:openSessionWindow': 1,
   'clientAuth:getState': 1,
   'clientAuth:startLogin': 1,
+  'clientAuth:selectTeam': 1,
   'clientAuth:useOffline': 1,
   'clientAuth:signOut': 1,
   'clientAuth:getUser': 1,

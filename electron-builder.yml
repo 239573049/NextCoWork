@@ -35,10 +35,10 @@ electronFuses:
   # Flipping fuses rewrites bytes inside the Electron Framework, which happens
   # after `afterPack` and therefore invalidates the signature made there. Without
   # this, arm64 builds are killed at launch with "Code Signature Invalid".
-  resetAdHocDarwinSignature: true
+  resetAdHocDarwinSignature: false
 # Establishes the ad-hoc signature and entitlements that the fuse step above
 # preserves when it re-signs. See the hook file for details.
-afterPack: scripts/mac-adhoc-sign.mjs
+# afterPack: scripts/mac-adhoc-sign.mjs
 publish:
   provider: generic
   url: https://nextco.work/api/client/updates/feed/stable/

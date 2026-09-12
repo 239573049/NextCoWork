@@ -3,6 +3,7 @@ import { invoke } from './ipc'
 
 export const getClientAuthState = (): Promise<ClientAuthState> => invoke('clientAuth:getState', undefined)
 export const startClientLogin = (): Promise<ClientAuthState> => invoke('clientAuth:startLogin', undefined)
+export const selectClientTeam = (teamId: string): Promise<ClientAuthState> => invoke('clientAuth:selectTeam', { teamId })
 export const useOffline = (): Promise<ClientAuthState> => invoke('clientAuth:useOffline', undefined)
 export const signOutClient = (): Promise<ClientAuthState> => invoke('clientAuth:signOut', undefined)
 export const getClientUser = (): Promise<ClientAuthUser | null> => invoke('clientAuth:getUser', undefined)

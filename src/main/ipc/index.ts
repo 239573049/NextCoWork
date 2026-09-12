@@ -109,7 +109,7 @@ import {
   updateImportSyncSettings
 } from './import'
 import { initImports, setImportChangeListener, setImportSessionNotifier, setImportWorkspaceNotifier } from '../imports/service'
-import { getClientAuthState, startClientLogin, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
+import { getClientAuthState, startClientLogin, selectClientTeam, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
 import { confirmInitialConfigSync, getConfigSyncPreview, getConfigSyncStatus, getConfigSyncConflicts, resolveConfigSyncConflict } from './config-sync'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
@@ -206,6 +206,7 @@ const handlers: HandlerMap = {
   'app:openSessionWindow': (req) => openSessionWindow(req),
   'clientAuth:getState': () => getClientAuthState(),
   'clientAuth:startLogin': () => startClientLogin(),
+  'clientAuth:selectTeam': (req) => selectClientTeam(req.teamId),
   'clientAuth:useOffline': () => useOffline(),
   'clientAuth:signOut': () => signOutClient(),
   'clientAuth:getUser': () => getClientUser(),

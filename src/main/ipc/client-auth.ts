@@ -1,7 +1,7 @@
 import { shell } from 'electron'
 import { createServer, type Server } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
-import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../../shared/domain/client-auth'
+import type { ClientAuthState, ClientAuthUser, ClientTeamOption, ClientUsageEntry } from '../../shared/domain/client-auth'
 import { getHost } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
@@ -27,7 +27,14 @@ const CLIENT_ID = 'nextcowork-desktop'
 const ACCESS_REF = 'nextcowork:client-access-token'
 const REFRESH_REF = 'nextcowork:client-refresh-token'
 const META_KEY = 'client-auth.meta'
-type Meta = { mode: 'offline' | 'authenticated'; user: ClientAuthUser | null; expiresAt: number | null }
+type Meta = {
+  mode: 'offline' | 'authenticated'
+  user: ClientAuthUser | null
+  expiresAt: number | null
+  teams?: ClientTeamOption[]
+  selectedTeamId?: string | null
+  contextRequired?: boolean
+}
 let callbackServer: Server | null = null
 let refreshTimer: NodeJS.Timeout | null = null
 let refreshInFlight: Promise<void> | null = null
@@ -77,7 +84,13 @@ function meta(): Meta | null {
 
 function state(): ClientAuthState {
   const m = meta()
-  return m === null ? { mode: 'undecided', user: null, expiresAt: null } : m
+  if (m === null) return { mode: 'undecided', user: null, expiresAt: null }
+  return {
+    ...m,
+    teams: m.teams ?? [],
+    selectedTeamId: m.selectedTeamId ?? null,
+    contextRequired: m.contextRequired === true
+  }
 }
 
 async function saveTokens(access: string, refresh: string, m: Meta): Promise<void> {
@@ -263,12 +276,67 @@ async function syncClientModels(access: string): Promise<void> {
 
 async function fetchMe(access: string): Promise<ClientAuthUser> {
   const response = await getHost().fetch(`${API_ROOT}/api/client/account`, { headers: { Authorization: `Bearer ${access}` } })
-  if (!response.ok) throw new Error(`account request failed: ${response.status}`)
+  if (!response.ok) throw new ClientAuthHttpError(response.status, `account request failed: ${response.status}`)
   const body = await response.json() as { data?: { user?: ClientAuthUser; wallet?: ClientAuthUser['wallet'] }; user?: ClientAuthUser; wallet?: ClientAuthUser['wallet'] }
   const payload = body.data ?? body
   const user = payload.user
   if (!user) throw new Error('account response invalid')
   return { ...user, wallet: payload.wallet ?? user.wallet }
+}
+
+class ClientAuthHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message)
+    this.name = 'ClientAuthHttpError'
+  }
+}
+
+type ClientContextResponse = {
+  items: ClientTeamOption[]
+  selectedTeamId: string | null
+}
+
+async function fetchClientContext(access: string): Promise<ClientContextResponse> {
+  const response = await getHost().fetch(`${API_ROOT}/api/client/context/options`, {
+    headers: { Authorization: `Bearer ${access}` }
+  })
+  if (!response.ok) throw new ClientAuthHttpError(response.status, `Team context request failed: ${response.status}`)
+  const body = await response.json() as {
+    data?: { items?: ClientTeamOption[]; selectedTeamId?: string | null }
+    items?: ClientTeamOption[]
+    selectedTeamId?: string | null
+  }
+  const payload = body.data ?? body
+  return {
+    items: Array.isArray(payload.items) ? payload.items : [],
+    selectedTeamId: payload.selectedTeamId ?? null
+  }
+}
+
+async function selectRemoteTeam(access: string, teamId: string): Promise<void> {
+  const response = await getHost().fetch(`${API_ROOT}/api/client/context/select`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${access}` },
+    body: JSON.stringify({ team: teamId })
+  })
+  if (!response.ok) throw new ClientAuthHttpError(response.status, `Team selection failed: ${response.status}`)
+}
+
+async function completeTeamContext(access: string, refresh: string, expiresAt: number, context: ClientContextResponse, teamId: string): Promise<ClientAuthState> {
+  const selected = context.items.find((team) => team.id === teamId)
+  if (selected === undefined) throw new Error('请选择一个可用 Team 后继续')
+  await selectRemoteTeam(access, teamId)
+  const user = await fetchMe(access)
+  const next: Meta = {
+    mode: 'authenticated',
+    user,
+    expiresAt,
+    teams: context.items.map((team) => ({ ...team, isSelected: team.id === teamId })),
+    selectedTeamId: teamId,
+    contextRequired: false
+  }
+  await saveTokens(access, refresh, next)
+  return state()
 }
 
 export function getClientAuthState(): ClientAuthState {
@@ -362,17 +430,68 @@ export async function startClientLogin(): Promise<ClientAuthState> {
   })
   if (!response.ok) throw new Error(`登录失败：${response.status}`)
   const tokens = await response.json() as { access_token: string; refresh_token: string; expires_in: number; user?: ClientAuthUser }
-  const user = tokens.user ?? await fetchMe(tokens.access_token)
-  const next: Meta = { mode: 'authenticated', user, expiresAt: Date.now() + tokens.expires_in * 1000 }
-  await saveTokens(tokens.access_token, tokens.refresh_token, next)
-  return announce(next)
+  const expiresAt = Date.now() + tokens.expires_in * 1000
+  const context = await fetchClientContext(tokens.access_token)
+  if (context.items.length === 0) {
+    const remove = getHost().secrets.remove
+    if (remove) {
+      await remove(ACCESS_REF).catch(() => undefined)
+      await remove(REFRESH_REF).catch(() => undefined)
+    }
+    throw new Error('账户没有可用 Team')
+  }
+
+  // A single Team is unambiguous and can be bound immediately. Multiple Teams
+  // must be chosen by the user before /account, usage, or gateway calls run.
+  const selectedTeamId = context.selectedTeamId ?? (context.items.length === 1 ? context.items[0]!.id : null)
+  if (selectedTeamId === null) {
+    const pending: Meta = {
+      mode: 'authenticated', user: tokens.user ?? null, expiresAt,
+      teams: context.items, selectedTeamId: null, contextRequired: true
+    }
+    await saveTokens(tokens.access_token, tokens.refresh_token, pending)
+    return state()
+  }
+  return completeTeamContext(tokens.access_token, tokens.refresh_token, expiresAt, context, selectedTeamId)
+}
+
+export async function selectClientTeam(teamId: string): Promise<ClientAuthState> {
+  if (teamId.trim().length === 0) throw new Error('Team 无效')
+  await refreshAccessToken()
+  const access = await getHost().secrets.get(ACCESS_REF)
+  const refresh = await getHost().secrets.get(REFRESH_REF)
+  const current = meta()
+  if (!access || !refresh || !current || current.mode !== 'authenticated') {
+    throw new Error('登录状态已失效，请重新登录')
+  }
+  const context = await fetchClientContext(access)
+  const expiresAt = current.expiresAt ?? Date.now() + 5 * 60_000
+  return completeTeamContext(access, refresh, expiresAt, context, teamId)
 }
 
 export async function getClientUser(): Promise<ClientAuthUser | null> {
   await refreshAccessToken()
   const access = await getHost().secrets.get(ACCESS_REF)
   if (!access) return null
-  try { const user = await fetchMe(access); const m = meta(); if (m) store.setKv(META_KEY, { ...m, user }); return user } catch { return meta()?.user ?? null }
+  try {
+    const user = await fetchMe(access)
+    const m = meta()
+    if (m) store.setKv(META_KEY, { ...m, user, contextRequired: false })
+    return user
+  } catch (error) {
+    if (error instanceof ClientAuthHttpError && error.status === 409) {
+      try {
+        const context = await fetchClientContext(access)
+        const m = meta()
+        if (m) {
+          store.setKv(META_KEY, { ...m, teams: context.items, selectedTeamId: context.selectedTeamId, contextRequired: true })
+          announce(state())
+        }
+      } catch { /* keep the cached account state for transient network failures */ }
+      return null
+    }
+    return meta()?.user ?? null
+  }
 }
 
 export async function getClientUsage(req: { from?: string; to?: string }): Promise<ClientUsageEntry[]> {

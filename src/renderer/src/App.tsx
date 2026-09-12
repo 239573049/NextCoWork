@@ -25,8 +25,9 @@ import { useTabsStore } from './stores/tabs'
 import { applyTheme } from './theme/apply'
 import { useI18n } from './i18n'
 import type { ClientAuthState } from '../../shared/domain/client-auth'
-import { getClientAuthState } from './services/client-auth'
+import { getClientAuthState, getClientUser } from './services/client-auth'
 import { WelcomeView } from './views/WelcomeView'
+import { ClientTeamSelectionView } from './views/ClientTeamSelectionView'
 import { UpdateBanner } from './components/UpdateBanner'
 import { useThemeProfiles } from './stores/themeProfiles'
 
@@ -88,7 +89,20 @@ export default function App(): React.JSX.Element {
         setSettings(b.settings)
         setWorkspaces(b.workspaces)
         setAppearance(b.resolvedTheme)
-        void getClientAuthState().then(setAuth).catch((error: unknown) => setFatal(error instanceof Error ? error.message : String(error)))
+        void getClientAuthState()
+          .then(async (next) => {
+            if (next.mode !== 'authenticated' || next.contextRequired === true) {
+              setAuth(next)
+              return
+            }
+            // Validate the Team context of sessions created by older clients.
+            // The API intentionally returns 409 until the desktop session has
+            // selected a Team; getClientUser turns that into a selection state.
+            const user = await getClientUser()
+            const latest = await getClientAuthState()
+            setAuth({ ...latest, user: user ?? latest.user })
+          })
+          .catch((error: unknown) => setFatal(error instanceof Error ? error.message : String(error)))
         hydrate(b)
         // ⌘R 重载后主进程里还活着的 run —— 角标要立刻正确,不能等下一个事件
         adoptActiveRuns(b.activeRuns)
@@ -194,6 +208,9 @@ export default function App(): React.JSX.Element {
   }
   if (auth.mode === 'undecided') {
     return <><WindowControls /><WelcomeView onComplete={() => { void getClientAuthState().then(setAuth) }} /></>
+  }
+  if (auth.mode === 'authenticated' && auth.contextRequired === true) {
+    return <><WindowControls /><ClientTeamSelectionView auth={auth} onComplete={setAuth} /></>
   }
 
   return (
