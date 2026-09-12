@@ -14,6 +14,10 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierrc,.prettierignore}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
+  # electron-builder 只会自动排除 directories.output 指向的那个目录。发版时需要把输出改到
+  # iCloud 同步范围之外(见下方 afterPack 的说明),此时 dist 不再是输出目录,必须在这里显式
+  # 排除,否则历史安装包会被一并打进 app,体积从 134M 涨到 800M。
+  - '!dist'
 extraResources:
   - from: resources/skills
     to: skills
@@ -35,8 +39,12 @@ electronFuses:
   # 必须保持 false。开启后 fuse 步骤会自己去 codesign，而那次调用不在我们控制内，
   # 碰上 iCloud 补盖的 com.apple.FinderInfo 就会以 "detritus not allowed" 整个构建失败。
   resetAdHocDarwinSignature: false
-# macOS 的 fuse 翻转与 ad-hoc 签名都在这个钩子里按正确顺序完成（先翻 fuse 再签名），
-# 否则 fuse 写入会让签名作废，应用启动即被内核杀掉。详见钩子文件里的说明。
+# macOS 的 fuse 翻转与 ad-hoc 签名都在这个钩子里按正确顺序完成(先翻 fuse 再签名),
+# 否则 fuse 写入会让签名作废,应用启动即被内核杀掉。详见钩子文件里的说明。
+# 另:若仓库位于 iCloud 同步范围内(如 ~/Desktop),文件提供者会不断往 .app/.framework 目录上
+# 补盖 com.apple.FinderInfo,这个属性会被打进 dmg/zip,使产物无法通过 codesign --verify。
+# 发版请把输出改到同步范围之外:
+#   npm run dist:ci -- -c.directories.output=/tmp/ncw-release
 afterPack: scripts/mac-adhoc-sign.mjs
 publish:
   provider: generic
