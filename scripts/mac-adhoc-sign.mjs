@@ -24,9 +24,10 @@ export default async function afterPack(context) {
   // The Electron.app framework tree ships nested items (PkgInfo files,
   // "Versions/Current" symlinks) carrying a `com.apple.FinderInfo` xattr.
   // codesign refuses to sign anything under a path with that xattr present,
-  // and `xattr -cr` alone does not reliably strip it from every nested entry,
-  // so clear each path individually first.
-  execFileSync(`find "${appPath}" -print0 | xargs -0 xattr -c`, { shell: true, stdio: 'inherit' })
+  // so we must remove all xattrs recursively before signing.
+  execFileSync(`find "${appPath}" -print0 | xargs -0 xattr -d com.apple.FinderInfo 2>/dev/null || true`, { shell: true, stdio: 'inherit' })
+  execFileSync(`find "${appPath}" -print0 | xargs -0 xattr -d com.apple.ResourceFork 2>/dev/null || true`, { shell: true, stdio: 'inherit' })
+  execFileSync(`find "${appPath}" -print0 | xargs -0 xattr -c 2>/dev/null || true`, { shell: true, stdio: 'inherit' })
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', '--entitlements', entitlements, appPath], {
     stdio: 'inherit',
   })
