@@ -1,5 +1,15 @@
 ﻿# 更新日志
 
+## v0.1.15
+
+### 新增
+
+- 客户端登录支持多 Team 账户:登录后按需拉取可选 Team 列表,新增 `ClientTeamSelectionView` 供用户选择 Team,选定前暂缓 `/account`、用量等接口调用
+
+### 修复
+
+- 修复 macOS 签名时 xattr 属性的清理逻辑
+
 ## v0.1.14
 
 ### 新增
