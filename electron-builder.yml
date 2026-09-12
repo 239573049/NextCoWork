@@ -32,13 +32,12 @@ electronFuses:
   onlyLoadAppFromAsar: false
   loadBrowserProcessSpecificV8Snapshot: false
   grantFileProtocolExtraPrivileges: true
-  # Flipping fuses rewrites bytes inside the Electron Framework, which happens
-  # after `afterPack` and therefore invalidates the signature made there. Without
-  # this, arm64 builds are killed at launch with "Code Signature Invalid".
+  # 必须保持 false。开启后 fuse 步骤会自己去 codesign，而那次调用不在我们控制内，
+  # 碰上 iCloud 补盖的 com.apple.FinderInfo 就会以 "detritus not allowed" 整个构建失败。
   resetAdHocDarwinSignature: false
-# Establishes the ad-hoc signature and entitlements that the fuse step above
-# preserves when it re-signs. See the hook file for details.
-# afterPack: scripts/mac-adhoc-sign.mjs
+# macOS 的 fuse 翻转与 ad-hoc 签名都在这个钩子里按正确顺序完成（先翻 fuse 再签名），
+# 否则 fuse 写入会让签名作废，应用启动即被内核杀掉。详见钩子文件里的说明。
+afterPack: scripts/mac-adhoc-sign.mjs
 publish:
   provider: generic
   url: https://nextco.work/api/client/updates/feed/stable/
