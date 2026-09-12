@@ -120,7 +120,7 @@ function hostnameOf(raw: string): string | null {
  *   只按 id 匹配会**整个漏掉他** —— 而他遇到的报错和预设用户一模一样,
  *   却怎么也对不上「我们已经修好了」这句话。
  */
-export function isOpencodeGo(provider: UpstreamProvider): boolean {
+export function isOpencodeGo(provider: Pick<UpstreamProvider, 'id' | 'baseUrl'>): boolean {
   if (provider.id === OPENCODE_GO_PROVIDER_ID) return true
   const host = hostnameOf(provider.baseUrl)
   return host !== null && (host === OPENCODE_HOST || host.endsWith(`.${OPENCODE_HOST}`))

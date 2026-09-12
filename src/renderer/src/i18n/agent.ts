@@ -1,6 +1,54 @@
 import type { AgentError } from '../../../shared/agent/error'
 import type { Translate } from './index'
 
+/**
+ * 等回复的这几十秒是整个界面**最没东西可看**的时刻:一句「正在等待回复…」
+ * 从第一秒到第四十秒一个像素都不变,读起来像卡住了,而不像在干活。
+ * 轮换一组词不提供任何新信息,但它证明这一帧是刚画出来的。
+ *
+ * ★ 只当**纯装饰**用:真正的状态在 `data-status` 属性上,读屏念的是那句固定的
+ * `chat.status.waitingResponse`(见 StatusLine 里的 sr-only)。所以这里既不进
+ * Messages 表、也不参与 ZH/EN 键一致性校验 —— 它不是一句要翻译的文案,
+ * 是一串可以随便增删的料。两边不必一一对应。
+ */
+export const whimsyZh = [
+  '琢磨中…',
+  '盘算中…',
+  '酝酿中…',
+  '推敲中…',
+  '捣鼓中…',
+  '掐指一算…',
+  '打草稿…',
+  '理思路…',
+  '搭架子…',
+  '翻资料…',
+  '找灵感…',
+  '转脑筋…',
+  '熬汤中…',
+  '咕嘟咕嘟…',
+  '憋大招…',
+  '挠头中…'
+] as const
+
+export const whimsyEn = [
+  'Pondering…',
+  'Percolating…',
+  'Noodling…',
+  'Ruminating…',
+  'Musing…',
+  'Brewing…',
+  'Simmering…',
+  'Cogitating…',
+  'Puzzling…',
+  'Mulling…',
+  'Marinating…',
+  'Tinkering…',
+  'Conjuring…',
+  'Untangling…',
+  'Scheming…',
+  'Whirring…'
+] as const
+
 export const agentZh = {
   'chat.status.running': '运行中',
   'chat.status.waitingResponse': '正在等待回复…',

@@ -9,12 +9,20 @@
  * 三样数据都是已有事件的直接投影(方案 §8):`message_start.model`、
  * `TokenUsage`、`context_usage`。不新增任何数据。
  */
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import { hasRun } from '../../../../shared/agent/transcript'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
+import { whimsyEn, whimsyZh } from '../../i18n/agent'
+import type { Locale } from '../../i18n'
+
+/**
+ * 4 秒:比读完一个词慢得多,又比「一直不动」快得多。
+ * 再快就成了跑马灯,眼睛会一直被它拽过去 —— 而这里全部的信息量就是「还活着」。
+ */
+const WHIMSY_ROTATE_MS = 4000
 
 /**
  * 压力条**平时根本不画**,过半才出现,逼近上限才变色。
@@ -40,8 +48,10 @@ export function StatusLine({
   lastSeq: number
   queued: number
 }): ReactNode {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   const { status, model, usage, contextUsage, notice } = transcript
+  // ★ 在 early return 之前调用 —— hooks 不能出现在条件分支后面。
+  const whimsy = useWhimsy(waitingForResponse, locale)
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
   if (!hasRun(transcript, running)) return null
@@ -78,7 +88,17 @@ export function StatusLine({
       <span role="status" className={cn('inline-flex items-center gap-1.5',
         noticeText !== undefined ? 'text-danger' : running && 'text-accent')}>
         {running && <LoaderCircle size={12} aria-hidden className="animate-spin motion-reduce:animate-none" />}
-        {noticeText ?? t(waitingForResponse ? 'chat.status.waitingResponse' : `chat.status.${status}`)}
+        {noticeText ?? (waitingForResponse ? (
+          /*
+            ★ 读屏拿到的是那句**不动**的「正在等待回复…」,轮换的词 aria-hidden。
+            `role="status"` 自带 aria-live=polite:每 4 秒换一个词就是每 4 秒打断一次朗读,
+            对看不见这行字的人来说,趣味词全是噪音,而它连一个字节的状态都没多说。
+          */
+          <>
+            <span className="sr-only">{t('chat.status.waitingResponse')}</span>
+            <span aria-hidden>{whimsy}</span>
+          </>
+        ) : t(`chat.status.${status}`))}
       </span>
 
       {running && usage !== undefined && (
@@ -122,6 +142,26 @@ export function StatusLine({
       )}
     </div>
   )
+}
+
+/**
+ * 等待期间轮换一个词。`active` 为假时**不起定时器**,也不推进下标 ——
+ * 下一轮等待会从上一轮停住的地方接着走,而不是每次都从同一个词开始。
+ */
+function useWhimsy(active: boolean, locale: Locale): string {
+  const words = locale === 'en-US' ? whimsyEn : whimsyZh
+  // 初值随机:否则每个会话的第一句永远是同一个词,轮换就只剩下后面几秒有意思。
+  const [index, setIndex] = useState(() => Math.floor(Math.random() * words.length))
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => {
+      // +1 起跳保证**一定**换一个词 —— 纯随机会挑中自己,看上去就是定时器停了。
+      setIndex((prev) => (prev + 1 + Math.floor(Math.random() * (words.length - 1))) % words.length)
+    }, WHIMSY_ROTATE_MS)
+    return () => clearInterval(timer)
+  }, [active, words.length])
+  // `?? words[0]` 只是为了闭合 noUncheckedIndexedAccess:取模之后下标不可能越界。
+  return words[index % words.length] ?? words[0]
 }
 
 function Dot(): ReactNode {

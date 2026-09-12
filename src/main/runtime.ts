@@ -54,6 +54,7 @@ import { environmentTransport } from './mcp/environment-transport'
 import type { McpServerConfig, McpServerStatus } from '../shared/domain/mcp'
 import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
+import { opencodeGoProtocolFor } from './kernel/upstream/opencode-protocol'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
 import {
@@ -215,6 +216,7 @@ function seed(): void {
   if (seeded) return
   seeded = true
   seedBuiltinUpstream()
+  backfillOpencodeGoProtocol()
 
   /**
    * 没配过 = 全新安装,指向内置上游的别名。**两个设置项指两个不同的模型:**
@@ -369,6 +371,41 @@ function seedBuiltinUpstream(): void {
       }
       store.putAlias(builtinAlias(preset.id, model, i))
     })
+  }
+}
+
+/** 一次性标记,避免这段回填在每次进程启动时都把整张别名表扫一遍。 */
+const OPENCODE_GO_PROTOCOL_MIGRATION_KEY = 'provider.opencode-go-model-protocol-v1'
+
+/**
+ * 老库里 OpenCode Go 的别名早于「协议按模型钉」这条规则存在,补种一次。
+ *
+ * ★★ **光改 `ipc/provider.ts` 的 `setAliases` 救不了已经配好的人。** 那条只在
+ * 用户下次拉模型列表时才跑,而他此刻的症状是**发一句就 500**
+ * (`muse-spark-1.3-contributor` 被发去 `/chat/completions`)——
+ * 一句读不出「和协议有关」的报错。指望他自己想到去重拉一次列表是不现实的。
+ *
+ * ★ 只补 `protocolOverride` 为空的。用户在「协议」下拉里显式选过的一律不碰,
+ * 且标记落库后永不重跑 —— 他之后把某个模型翻回别的协议,不会被下次启动悄悄改回去。
+ * (同样的取舍见 `ipc/client-auth.ts` 的 `backfillAnthropicOverride`。)
+ *
+ * ★ 这里**不广播** `provider:changed`:本文件零 electron import(见文件头),
+ * 而 `window/registry` 是 electron 的。不需要广播 —— `ipc/provider.ts` 的
+ * `listProviders` / `listModels` 都以 `ensureSeeded()` 开头,渲染层读到的
+ * 必然已经是补完之后的值。
+ */
+function backfillOpencodeGoProtocol(): void {
+  if (store.getKv<boolean>(OPENCODE_GO_PROTOCOL_MIGRATION_KEY, false)) return
+  store.setKv(OPENCODE_GO_PROTOCOL_MIGRATION_KEY, true)
+
+  const providers = new Map(store.listProviders().map((p) => [p.id, p]))
+  for (const alias of store.listAliases()) {
+    if (alias.protocolOverride !== undefined) continue
+    const provider = providers.get(alias.providerId)
+    if (provider === undefined) continue
+    const protocol = opencodeGoProtocolFor(provider, alias.upstreamModel)
+    if (protocol === undefined) continue
+    store.putAlias({ ...alias, protocolOverride: protocol })
   }
 }
 

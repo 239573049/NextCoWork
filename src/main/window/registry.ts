@@ -21,11 +21,7 @@ import type { WindowKind } from '../../shared/domain/tab'
  * ⌥Space 快捷窗的还原按钮不该跟着换字形)。
  */
 export type TargetedEventChannel =
-  | 'agent:event'
-  | 'terminal:data'
-  | 'terminal:exit'
-  | 'window:maximized'
-  | 'connection:auth'
+  'agent:event' | 'terminal:data' | 'terminal:exit' | 'window:maximized' | 'connection:auth'
 /** 真·全局状态变更,所有窗口都该知道 */
 export type GlobalEventChannel = Exclude<EventChannel, TargetedEventChannel>
 
@@ -158,6 +154,13 @@ class WindowRegistry {
   /**
    * ★ 每次 send 前判 isDestroyed()(方案 §3 规则 4)。
    * 窗口刚关掉、事件泵还有一批在路上 —— 不判就是一个 "Object has been destroyed"。
+   *
+   * isDestroyed() 判的是 webContents,不是它当前的渲染帧:重载/关闭过程中
+   * 帧可能已经先一步销毁,而 webContents 本身要等 'destroyed' 事件才翻转。
+   * 这个窗口期里 `.send()` 会抛 "Render frame was disposed"——不 catch 住的话,
+   * 同一个死掉的订阅者会在它没被 forget 之前的每一次 emit 上重复抛给
+   * Electron 吞掉再打印,直到 'destroyed' 真正触发。抓到就当它已经死了,
+   * 立刻 forget,别等下一个事件循环再来试一次。
    */
   private send(id: number, channel: string, payload: unknown): void {
     const ctx = this.windows.get(id)
@@ -166,7 +169,11 @@ class WindowRegistry {
       this.forget(id)
       return
     }
-    ctx.sender.send(channel, payload)
+    try {
+      ctx.sender.send(channel, payload)
+    } catch {
+      this.forget(id)
+    }
   }
 
   list(): WindowContext[] {

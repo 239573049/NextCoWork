@@ -100,7 +100,18 @@ export default defineConfig({
       alias: {
         '@shared': resolve('src/shared'),
         '@renderer': resolve('src/renderer/src')
-      }
+      },
+      /*
+       * ★ @lobehub/streamdown 声明 katex ^0.18,仓库其余部分(rehype-katex /
+       * remark-math / mermaid)统一在 0.16,npm 因此在 streamdown 下嵌套了第二份。
+       * 两份 katex 各 ~590K 源码,不去重就都进 renderer bundle。
+       *
+       * streamdown 只用 katex 的 `renderToString` 做「尾部公式能不能渲染」的
+       * 布尔探测(latex.ts `isLastFormulaRenderable`),渲染结果直接丢弃 ——
+       * 不产出任何进入 DOM 的 markup,所以降到 0.16 不存在 markup 与
+       * katex.min.css 版本错配的风险,这正是能安全 dedupe 的前提。
+       */
+      dedupe: ['katex']
     },
     build: {
       rollupOptions: {

@@ -42,6 +42,7 @@ import {
   modelListRequest,
   parseModelList
 } from '../kernel/upstream/model-list'
+import { opencodeGoProtocolFor } from '../kernel/upstream/opencode-protocol'
 import { platformLoginAuth } from '../kernel/upstream/transport'
 import { userAgent } from '../kernel/user-agent'
 import { ensureSeeded, getHost } from '../runtime'
@@ -551,11 +552,30 @@ export function setAliases(providerId: string, models: readonly string[]): Model
   }
   for (const [priority, m] of wanted.entries()) {
     const existing = keep.get(m)
+    /*
+      ★ OpenCode Go 的协议**按模型钉**(见 `kernel/upstream/opencode-protocol.ts`)。
+      那家三个端点共用一个 base,出厂协议只能选一个,而它对表里三分之二的模型是错的 ——
+      不钉的话,用户拉完列表得到的一批模型里有一批是坏的,且报错是一句
+      「Internal server error」,读不出和协议有任何关系。
+
+      ★★ 只钉**新建**的那支。已存在的别名一个字不改 —— 用户可能在「协议」下拉里
+      自己选过,而重拉一次列表把他的选择顶掉,和这个函数「命中就保留供应商覆盖值」
+      的既有语义直接冲突。老库里那些协议为空的,由 `runtime.ts` 的一次性回填管。
+    */
+    const pinned = existing === undefined ? opencodeGoProtocolFor(p, m) : undefined
     // ★ 别名默认等于上游模型名(和 seed 那条一致)。这里不加任何前缀/后缀 ——
     // 别名是用户在药丸和 `defaultModel` 里看见的字符串,加工过就对不上他在上游文档里读到的名字
     store.putAlias(resolver.resolve(
       existing === undefined
-        ? { ...IMPORTED_ALIAS_DEFAULTS, alias: m, providerId, upstreamModel: m, priority, catalogOverrides: [] }
+        ? {
+            ...IMPORTED_ALIAS_DEFAULTS,
+            alias: m,
+            providerId,
+            upstreamModel: m,
+            priority,
+            ...(pinned === undefined ? {} : { protocolOverride: pinned }),
+            catalogOverrides: []
+          }
         : { ...existing, priority }
     ))
   }

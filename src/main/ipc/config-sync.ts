@@ -148,7 +148,7 @@ export function startConfigSync(nextAccountId: string): void {
   accountId = nextAccountId
   repo.configureSyncAccount(nextAccountId, true)
   running = true
-  timer = setInterval(() => { void tick() }, 5000)
+  timer = setInterval(() => { void tick().catch(() => undefined) }, 5000)
   timer.unref?.()
   void initializeInitialSync(nextAccountId)
   void tick()
@@ -173,6 +173,16 @@ export function stopConfigSync(): void {
   running = false
   accountId = null
   windows.emitToAll('configSync:changed', status())
+}
+
+/**
+ * 退出专用。区别于 `stopConfigSync()`:那个要读库算出 `status()` 再推给窗口,
+ * 而退出时库马上就要封、窗口也正在销毁 —— 这里只把表停掉,一步都不碰它们。
+ */
+export function shutdownConfigSync(): void {
+  if (timer !== null) clearInterval(timer)
+  timer = null
+  running = false
 }
 
 export function getConfigSyncStatus(): SyncStatus { return status() }

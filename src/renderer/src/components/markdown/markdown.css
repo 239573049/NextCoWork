@@ -22,8 +22,16 @@
 
 .agent-markdown[data-variant='compact'] { color: var(--color-fg-muted); font-size: 12.5px; }
 .agent-markdown[data-variant='document'] { font-size: 14px; }
-.agent-markdown > :first-child { margin-top: 0; }
-.agent-markdown > :last-child { margin-bottom: 0; }
+/*
+ * 内容外面套了 .agent-markdown-body(流式下再套一层 Streamdown 的 .streamdown-animated),
+ * 所以外边距清零不能再用 `.agent-markdown > :first-child` —— 那只会命中包装层。
+ * 两层都设 display: contents,布局与外边距合并跟没有包装层时完全一致。
+ */
+.agent-markdown-body, .agent-markdown .streamdown-animated { display: contents; }
+.agent-markdown-body > :first-child,
+.agent-markdown-body > .streamdown-animated > :first-child { margin-top: 0; }
+.agent-markdown-body > :last-child,
+.agent-markdown-body > .streamdown-animated > :last-child { margin-bottom: 0; }
 .agent-markdown p { margin: 0.75em 0; white-space: pre-wrap; }
 .agent-markdown h1, .agent-markdown h2, .agent-markdown h3,
 .agent-markdown h4, .agent-markdown h5, .agent-markdown h6 {
@@ -103,10 +111,6 @@
 .agent-markdown .footnotes { margin-top: 1.8em; padding-top: 0.6em; border-top: 1px solid var(--color-border); color: var(--color-fg-muted); font-size: 0.9em; }
 .agent-markdown .footnotes h2 { font-size: 1em; }
 .agent-markdown .footnotes :target { scroll-margin-top: 24px; }
-.markdown-stream-cursor { display: inline-block; width: 5px; height: 13px; margin-left: 3px; background: var(--color-accent); vertical-align: -2px; animation: markdown-pulse 1.1s ease-in-out infinite; }
-.agent-markdown[data-streaming] > :nth-last-child(2):is(p, h1, h2, h3, h4, h5, h6) { display: inline; }
-@keyframes markdown-pulse { 50% { opacity: 0.25; } }
-@media (prefers-reduced-motion: reduce) { .markdown-stream-cursor { animation: none; } }
 @media (max-width: 600px) {
   .markdown-code-toolbar { gap: 6px; padding-left: 10px; }
   .agent-markdown .markdown-code-source { padding: 12px; }

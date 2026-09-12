@@ -9,7 +9,7 @@ import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { IMPORTED_ALIAS_DEFAULTS } from '../../shared/domain/provider'
 import { findBuiltinModel } from '../../shared/domain/model-catalog-inventory'
-import { startConfigSync, stopConfigSync } from './config-sync'
+import { shutdownConfigSync, startConfigSync, stopConfigSync } from './config-sync'
 
 /**
  * DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen 的模型在 NextCoWork 内置渠道下固定走
@@ -71,8 +71,21 @@ function announce(next: ClientAuthState): ClientAuthState {
 
 function ensureRefreshTimer(): void {
   if (refreshTimer !== null) return
-  refreshTimer = setInterval(() => { void refreshAccessToken() }, 5 * 60_000)
+  refreshTimer = setInterval(() => { void refreshAccessToken().catch(() => undefined) }, 5 * 60_000)
   refreshTimer.unref()
+}
+
+/**
+ * 退出时停掉这两条后台轮询。`before-quit` 末尾的 `closeDatabase({ final: true })` 会
+ * **封库**,而 `unref()` 过的 interval 在进程真正退出前照样照常触发 —— 5 秒一轮的配置
+ * 同步几乎必中一次,拿到的是 `DatabaseClosedError`,并且没有任何人接。
+ *
+ * ★ 症状只是退出时控制台冒出一条 UnhandledPromiseRejection,数据一个字节都没坏,
+ *   所以极容易被当成噪音放过去 —— 但它同时说明**关灯之后还有人在写库**。
+ */
+export function shutdownClientAuth(): void {
+  if (refreshTimer !== null) { clearInterval(refreshTimer); refreshTimer = null }
+  shutdownConfigSync()
 }
 
 function meta(): Meta | null {

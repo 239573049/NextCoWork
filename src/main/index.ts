@@ -11,7 +11,7 @@ import appIconPath from '../../resources/icon.png?asset'
 import { closeDatabase, defaultDatabaseDirectory, DB_FILENAME, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
-import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } from './ipc'
+import { flushPendingPersists, registerIpc, shutdownClientAuth, shutdownRuns, shutdownTerminals } from './ipc'
 import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
@@ -422,6 +422,9 @@ app.on('before-quit', (event) => {
   //   而那张表正要被清空,此时起一轮新扫描等于在关灯的房间里搬东西。
   stopImportSync()
   stopScheduler()
+  // 同理:登录态刷新(5 分钟)与配置同步(5 秒)都是 unref 过的 interval,
+  // 停不掉就会在下面 closeDatabase 封库之后继续摸库。
+  shutdownClientAuth()
   shutdownImports()
   shutdownRuns()
   shutdownSessionTitles()

@@ -703,4 +703,5 @@ export function registerIpc(): void {
 
 export { EMPTY_OUTER }
 export { shutdownRuns } from './agent'
+export { shutdownClientAuth } from './client-auth'
 export { shutdownTerminals }

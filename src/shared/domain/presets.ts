@@ -861,8 +861,11 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     docsUrl: 'https://opencode.ai/docs/go/',
     suggestedModels: ['minimax-m3', 'kimi-k3', 'glm-5.3', 'deepseek-v4-pro', 'grok-4.6'],
     notes:
-      '★ **协议是跟着模型走的,不是你选的**:GLM/Kimi/DeepSeek 走 chat/completions,' +
-      'MiniMax/Qwen 走 messages,Grok/GPT 走 responses —— 选错会 400。' +
+      '★ **协议是跟着模型走的,不是你选的**:GLM / Kimi / DeepSeek / LongCat / MiMo / 混元 ' +
+      '走 chat/completions,MiniMax / Qwen 走 messages,Grok / GPT / Muse Spark 走 responses。' +
+      '选错的表现是一句 `500 Internal server error` —— 从那句话里看不出和协议有任何关系。' +
+      '应用会按官方端点表自动给每个模型钉好协议(见 kernel/upstream/opencode-protocol.ts),' +
+      '这里写出来只为让你能核对;要改的话在「编辑模型」的协议下拉里改。' +
       '额度按美元计($10/月),不按 token。模型列表免鉴权就能拉。',
     verification: 'probed'
   },

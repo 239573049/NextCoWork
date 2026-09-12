@@ -17,8 +17,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { UpstreamProvider } from '../../../shared/domain/provider'
-import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
+import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
+import { anthropicCacheTtlOf, IMPORTED_ALIAS_DEFAULTS } from '../../../shared/domain/provider'
 import { closeDatabase, openDatabase } from '../../db/index'
 import { resetRuntimeForTest } from '../../runtime'
 import { store } from '../../state/store'
@@ -519,5 +519,114 @@ describe('内置 NextCoWork 供应商:哪些能改,哪些不能', () => {
 
     expect(() => removeProvider(CLIENT_PROVIDER_ID)).toThrow(/不能删除/u)
     expect(client()).toBeDefined()
+  })
+})
+
+/**
+ * OpenCode Go 的协议按模型钉 —— 见 `kernel/upstream/opencode-protocol.ts`。
+ *
+ * ★ 这里守的是两条**用户看不见的路**:拉模型列表时钉上去(`setAliases`),
+ * 以及老库里那些早于这条规则的别名被补一次(`runtime.ts` 的 seed)。
+ * 两条都断了的话,症状是发一句得到 `500 Internal server error` ——
+ * 那句话里没有任何字指向「协议」。
+ */
+describe('OpenCode Go · 协议按模型钉', () => {
+  const GO = 'opencode-go'
+  const goProvider = (protocol: UpstreamProvider['protocol'] = 'openai-chat'): UpstreamProvider => ({
+    ...draft(),
+    id: GO,
+    name: 'OpenCode Go(订阅制)',
+    protocol,
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    credentialRef: `provider:${GO}`
+  })
+
+  const protocolsOf = (providerId: string): Record<string, string | undefined> =>
+    Object.fromEntries(listModels(providerId).map((m) => [m.upstreamModel, m.protocolOverride]))
+
+  const muse = (over: Partial<ModelAlias> = {}): ModelAlias => ({
+    alias: 'muse-spark-1.3-contributor',
+    providerId: GO,
+    upstreamModel: 'muse-spark-1.3-contributor',
+    priority: 0,
+    capabilities: { ...IMPORTED_ALIAS_DEFAULTS.capabilities },
+    contextWindow: IMPORTED_ALIAS_DEFAULTS.contextWindow,
+    maxOutputTokens: IMPORTED_ALIAS_DEFAULTS.maxOutputTokens,
+    catalogOverrides: [],
+    ...over
+  })
+
+  it('★ 拉进来的模型各走各的协议,不再一律继承出厂那一个', () => {
+    upsertProvider(goProvider())
+
+    setAliases(GO, ['muse-spark-1.3-contributor', 'glm-5.3', 'minimax-m3', 'omen-alpha'])
+
+    expect(protocolsOf(GO)).toEqual({
+      // ★★ 本次线上 500 的那个:走 responses,不是 chat/completions
+      'muse-spark-1.3-contributor': 'openai-responses',
+      'glm-5.3': 'openai-chat',
+      'minimax-m3': 'anthropic',
+      // 表里认不出的不猜,继承出厂协议
+      'omen-alpha': undefined
+    })
+  })
+
+  it('出厂选了 anthropic 的用户,GLM 同样被钉回 chat/completions', () => {
+    upsertProvider(goProvider('anthropic'))
+
+    setAliases(GO, ['glm-5.3'])
+
+    expect(protocolsOf(GO)).toEqual({ 'glm-5.3': 'openai-chat' })
+  })
+
+  it('★ 重拉一次列表不顶掉用户自己在协议下拉里选过的值', () => {
+    upsertProvider(goProvider())
+    store.putAlias(muse({ protocolOverride: 'anthropic' }))
+
+    setAliases(GO, ['muse-spark-1.3-contributor'])
+
+    expect(protocolsOf(GO)).toEqual({ 'muse-spark-1.3-contributor': 'anthropic' })
+  })
+
+  it('别家供应商一个 override 都不会多出来', () => {
+    upsertProvider(draft())
+
+    setAliases('acme', ['muse-spark-1.3-contributor', 'glm-5.3'])
+
+    expect(protocolsOf('acme')).toEqual({
+      'muse-spark-1.3-contributor': undefined,
+      'glm-5.3': undefined
+    })
+  })
+
+  it('★★ 老库里协议为空的别名,启动时补一次 —— 否则现有用户一发就 500', () => {
+    store.putProvider(goProvider())
+    store.putAlias(muse())
+
+    // seed 的触发点之一。`listModels` 以 `ensureSeeded()` 开头,所以读到的
+    // 必然已经是补完之后的值 —— 回填因此不需要广播
+    expect(protocolsOf(GO)).toEqual({ 'muse-spark-1.3-contributor': 'openai-responses' })
+  })
+
+  it('★ 回填不碰用户显式设过的,也不碰别家', () => {
+    store.putProvider(goProvider())
+    store.putAlias(muse({ protocolOverride: 'openai-chat' }))
+    store.putProvider(draft())
+    store.putAlias(muse({ providerId: 'acme' }))
+
+    expect(protocolsOf(GO)).toEqual({ 'muse-spark-1.3-contributor': 'openai-chat' })
+    expect(protocolsOf('acme')).toEqual({ 'muse-spark-1.3-contributor': undefined })
+  })
+
+  it('★ 标记落库后不再重跑 —— 用户之后翻回去的协议不会被下次启动改掉', () => {
+    store.putProvider(goProvider())
+    store.putAlias(muse())
+    expect(protocolsOf(GO)).toEqual({ 'muse-spark-1.3-contributor': 'openai-responses' })
+
+    // 用户把它翻回 chat/completions,然后重启
+    store.putAlias(muse({ protocolOverride: undefined }))
+    resetRuntimeForTest()
+
+    expect(protocolsOf(GO)).toEqual({ 'muse-spark-1.3-contributor': undefined })
   })
 })

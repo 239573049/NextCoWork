@@ -6,6 +6,7 @@ import { AgentMarkdown, type AgentMarkdownProps } from '../AgentMarkdown'
 import { MarkdownProvider, type MarkdownEnvironment } from '../MarkdownProvider'
 import { resolveMarkdownTarget } from '../links'
 import { highlightCode } from '../highlight'
+import { reusableSpans } from '../CodeSource'
 import { canRenderMermaid } from '../mermaid-policy'
 
 function render(content: string, props: Partial<AgentMarkdownProps> = {}, environment: MarkdownEnvironment = {}, locale: Locale = 'en-US'): string {
@@ -49,6 +50,18 @@ describe('Agent Markdown', () => {
     expect(render('```ts\nconst answer = 42', { streaming: true })).toContain('data-language="ts" data-streaming="true"')
     expect(render('```ts\nconst answer = 42\n```', { streaming: true })).not.toContain('data-language="ts" data-streaming="true"')
     expect(render('```\nconst answer = 42', { streaming: false })).toContain('<code>const answer = 42</code>')
+  })
+
+  it('renders streaming through Streamdown and committed content through react-markdown', () => {
+    // 双引擎是刻意的:Streamdown 逐块独立解析,跨块引用(脚注、[text][ref])解析不出来,
+    // 所以只在流式时用它。接错引擎不会报错,只会悄悄退化,这里把归属钉死。
+    expect(render('# Live', { streaming: true })).toContain('streamdown-animated')
+    expect(render('# Live')).not.toContain('streamdown-animated')
+    // remend 会把打到一半的链接改写成 `streamdown:incomplete-link`,
+    // 那是自愈占位符而不是被拦截的链接,不能显示成「此链接无法打开」。
+    const partial = render('See [docs](https://exa', { streaming: true })
+    expect(partial).not.toContain('markdown-blocked-link')
+    expect(partial).not.toContain('streamdown:incomplete-link')
   })
 
   it('waits for closed diagram fences, including nested and longer fences', () => {
@@ -125,6 +138,20 @@ describe('Agent Markdown', () => {
     expect(spans.some((span) => span.className.includes('tok-keyword') && code.slice(span.from, span.to) === 'const')).toBe(true)
     expect(await highlightCode(code, 'not-a-language')).toEqual([])
     expect(await highlightCode('x'.repeat(100_001), 'ts')).toEqual([])
+  })
+
+  it('keeps highlight colors across the stable prefix while code streams in', () => {
+    // 用户报的「代码块一闪一闪」就出在这里:高亮是异步的,以前用全等做缓存键,
+    // 流式下每个 token 都命中不了,整块回退成无色纯文本并被绘制一帧。
+    const cached = { code: 'const a\nconst b', language: 'ts', spans: [
+      { from: 0, to: 5, className: 'tok-keyword' }, { from: 8, to: 13, className: 'tok-keyword' }] }
+    expect(reusableSpans(cached, cached.code, 'ts')).toHaveLength(2)
+    // 又追进来一个 token:仍是前缀,首行的颜色必须留住,不能整块回退。
+    // 但最后一行还没打完,收尾越过末尾换行符的 span 一律不采信,免得染错色。
+    expect(reusableSpans(cached, 'const a\nconst bb', 'ts')).toEqual([cached.spans[0]])
+    expect(reusableSpans(cached, 'const a\nconst b', 'js')).toEqual([])
+    expect(reusableSpans(cached, 'const c', 'ts')).toEqual([])
+    expect(reusableSpans(null, 'const a', 'ts')).toEqual([])
   })
 
   it('keeps Mermaid resource nodes and configuration from bypassing image consent', () => {
