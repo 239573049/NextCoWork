@@ -1,5 +1,11 @@
 ﻿# 更新日志
 
+## v0.1.16
+
+### 修复
+
+- 修复 macOS 应用启动即闪退的问题:打包时 Electron fuse 的写入会重写 Framework 内部字节、让此前打的 ad-hoc 签名作废,应用启动读取 fuse 时被内核以 Code Signature Invalid 杀掉;现改为在打包钩子里先翻转 fuse 再签名,并对 codesign 因扩展属性失败的情况重试
+
 ## v0.1.15
 
 ### 新增
