@@ -16,6 +16,17 @@ const MAX_EXPANDED = 50 * 1024 * 1024;
 const MAX_ENTRIES = 1000;
 const MAX_DEPTH = 12;
 
+/**
+ * ★ 导出给「从其他 AI 应用导入技能包」复用 —— 那条路径不经过 zip,但**必须**
+ * 受同一组上限管着。抄一份数值出去的代价很具体:两处一旦分叉,预览会说
+ * 「能装」而安装当场拒绝,而用户看不出哪一边说了实话。
+ */
+export const PACKAGE_LIMITS = {
+  MAX_EXPANDED,
+  MAX_ENTRIES,
+  MAX_DEPTH,
+} as const;
+
 export interface InstalledPackage {
   name: string;
   version?: string;

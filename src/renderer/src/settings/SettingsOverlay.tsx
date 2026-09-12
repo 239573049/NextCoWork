@@ -42,6 +42,7 @@ import {
 import { AboutPage } from './pages/AboutPage'
 import { ConnectionPage } from './pages/ConnectionPage'
 import { DataPage } from './pages/DataPage'
+import { ImportPage } from './pages/import/ImportPage'
 import { GeneralPage } from './pages/GeneralPage'
 import { ModelPage } from './pages/model/ModelPage'
 import { PreferencePage } from './pages/PreferencePage'
@@ -260,6 +261,15 @@ function PageBody({
   switch (page) {
     case 'general':
       return <GeneralPage {...props} />
+    case 'import':
+      /*
+        ★ 不吃 `SettingsPageProps` —— 这一页一个 `AppSettings` 字段都不读。
+        来源授权、同步范围、已导入的映射全都是**设备本地状态**,存在
+        `import_sources` 表里,不进会跟着账户云同步漂到另一台机器的设置
+        (那台机器上 `/Users/a/.claude` 根本不存在)。硬塞 props 会让下一个人
+        以为这里有设置可读。
+      */
+      return <ImportPage />
     case 'preference':
       return <PreferencePage {...props} />
     case 'model':

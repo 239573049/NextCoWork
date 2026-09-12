@@ -258,6 +258,8 @@ describe('workspace file management and path boundaries', () => {
     symlinkSync(outside, join(mocks.root, 'folder/external'))
     await expect(mutateWorkspaceFile({ ...request('folder'), operation: 'copy', destination: 'copy' })).rejects.toThrow()
     expect(existsSync(join(mocks.root, 'copy'))).toBe(false)
+    // 失败的 copy 不得把暂存目录留在用户工作区里
+    expect(readdirSync(mocks.root).filter((name) => name.startsWith('.ncw-copy-'))).toEqual([])
   })
 
   it('returns stable localized error identifiers and reveals only a checked path', () => {

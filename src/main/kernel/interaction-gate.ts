@@ -43,7 +43,16 @@ function validResponse(pending: PendingInteraction, response: InteractionRespons
       })
     }
     case 'plan_approval':
-      return typeof response.approved === 'boolean' && (response.feedback === undefined || typeof response.feedback === 'string')
+      if ('approved' in response) return pending.kind === 'plan_approval' && pending.planId === undefined && typeof response.approved === 'boolean' && (response.feedback === undefined || typeof response.feedback === 'string')
+      if (pending.kind !== 'plan_approval') return false
+      return typeof response.action === 'string'
+        && ['approve_current', 'approve_new_session', 'request_revision', 'reject'].includes(response.action)
+        && typeof response.planId === 'string'
+        && typeof response.version === 'number'
+        && pending.planId === response.planId
+        && pending.planVersion === response.version
+        && (response.feedback === undefined || typeof response.feedback === 'string')
+        && (response.action !== 'request_revision' || (response.feedback !== undefined && response.feedback.trim() !== ''))
   }
 }
 

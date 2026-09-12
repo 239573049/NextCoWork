@@ -27,4 +27,6 @@ export interface InterjectItem {
   /** ★ 渲染层排队条目的 id;注入后**直接用作**那条用户消息的 id(见上) */
   id: string
   parts: ContentPart[]
+  /** Coordination messages are sent to the model but hidden from the chat UI. */
+  internal?: boolean
 }

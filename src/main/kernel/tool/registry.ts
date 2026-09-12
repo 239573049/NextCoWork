@@ -9,6 +9,8 @@ import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../sh
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { Skill } from '../../../shared/domain/skill'
 import type { RunStatus } from '../../../shared/agent/event'
+import type { SessionMode } from '../../../shared/agent/run-request'
+import type { PlanDocumentV2 } from '../../../shared/domain/plan'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
 import type { InteractFn } from '../interaction-gate'
@@ -115,6 +117,9 @@ export interface ToolContext {
   host: ToolHost
   /** 进度是**易失的**:单独的事件类型,永不写入转录 */
   emit(progress: ToolProgress): void
+  /** Structured plan progress is a UI event, never transcript content. */
+  emitPlanProgress?(plan: PlanDocumentV2): void
+  emitPlanEvent?(type: 'plan_created' | 'plan_updated' | 'plan_review_requested' | 'plan_approval_resolved', plan: PlanDocumentV2): void
   /**
    * 派子代理。只有 `Task` 用得到,所以是可选的 —— 让每个工具的
    * ctx 都必须带上一个它永远不会碰的函数,是没有道理的。
@@ -142,6 +147,7 @@ export interface ToolRegistration extends Omit<ToolInfo, 'externalName'> {
 }
 
 export interface SnapshotFilter {
+  mode?: SessionMode
   /** plan 模式:过滤掉所有写工具(方案 §4.8) */
   readOnlyOnly?: boolean
   /**
@@ -233,6 +239,8 @@ export class ToolRegistry {
     const allow = filter.allowList === undefined ? undefined : new Set(filter.allowList)
     const out: Tool[] = []
     for (const t of this.tools.values()) {
+      if ((filter.mode === 'plan' || filter.readOnlyOnly === true) && t.internalId === 'update_plan') continue
+      if (filter.mode !== undefined && filter.mode !== 'plan' && t.internalId === 'submit_plan') continue
       if (filter.readOnlyOnly === true && !t.readOnly) continue
       if (filter.network === false && t.needsNetwork) continue
       if (allow !== undefined && !allow.has(t.internalId) && !allow.has(t.externalName)) continue

@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import type { RunRequest } from '../shared/agent/run-request'
 import { MAX_DEPTH } from '../shared/agent/run-request'
 import type { AgentEvent, RunStatus } from '../shared/agent/event'
-import type { AgentError } from '../shared/agent/error'
+import { agentError, type AgentError } from '../shared/agent/error'
 import { userMessage, visibleText, type AgentMessage, type SubagentResult } from '../shared/agent/message'
 import type { AgentDefinition } from '../shared/domain/agent-def'
 import { minPermission } from '../shared/agent/permission'
@@ -28,6 +28,7 @@ import { abortable } from './kernel/abort'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
 import { TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
+import { decideAfterHooks, decideBeforeHooks } from './kernel/permission-decision'
 import { addLocalPermissionRule, readLocalSettings } from './kernel/local-settings'
 import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/permission-rule'
 import { interactions } from './kernel/interaction-gate'
@@ -36,7 +37,10 @@ import { runs } from './kernel/run-registry'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
 import type { GitContext } from './kernel/git-context'
 import { readGitContext } from './kernel/git-context'
-import { scanInstructions } from './kernel/instructions'
+import { INSTRUCTIONS_MAX, sanitizeInstructions, scanInstructions } from './kernel/instructions'
+import { clampWithEllipsis } from './kernel/text'
+import { readTextBounded } from './imports/assets'
+import { managedInstructionsPath } from './imports/service'
 import { agentRegistry } from './kernel/agent/registry'
 import type { Skill } from '../shared/domain/skill'
 import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, scanSkills } from './kernel/skill/load'
@@ -73,6 +77,8 @@ import { SessionTitleGenerator } from './session-title'
 import type { SessionChange } from '../shared/domain/session'
 import type { CanonicalRequest } from './kernel/upstream/canonical'
 import { ulid } from '../shared/util/id'
+import { runHookEvent } from './hooks'
+import { getExecutionPlanV2, getPlanV2, transitionPlanV2 } from './db/repo'
 import type { ConnectionStatus, SshConnectionProfile } from '../shared/domain/environment'
 import { EnvironmentManager } from './environment/manager'
 import { localEnvironment } from './environment/local'
@@ -90,7 +96,7 @@ let seeded = false
 let sessionTitles: SessionTitleGenerator | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
-let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void> }>) | undefined
+let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void }>) | undefined
 
 export function installEnvironmentInteraction(authentication: NonNullable<typeof environmentAuthentication>, status: NonNullable<typeof environmentStatusSink>): void {
   environmentAuthentication = authentication
@@ -700,7 +706,53 @@ export async function loadInstructions(workspaceId: string, environment?: Worksp
   })
   // 诊断只记日志,不阻断 —— 一份读不了的 AGENTS.md 不该让这次提问跑不起来
   for (const d of result.diagnostics) h.logger.warn(`[instructions] ${d.path}: ${d.message}`)
-  return result.text
+
+  /*
+    ★★ 导入来的说明拼在**最后**,而且读的是受管副本,不是任何原生文件。
+
+    三条边界一条都不能少:
+    - **不覆盖原生 `AGENTS.md`** —— 那是用户自己写的,导入不该动它;
+    - **不修改源 `CLAUDE.md`** —— 只读承诺,受管副本是导入时另存的第三份;
+    - **原生内容优先占用总长度预算** —— 拼在后面意味着超出 `INSTRUCTIONS_MAX`
+      时先被 `clampWithEllipsis` 从尾部截掉的是导入的那部分。
+  */
+  const managed = await loadManagedInstructions(workspaceId)
+  if (managed === '') return result.text
+  return clampWithEllipsis(
+    result.text === '' ? managed : `${result.text}${MANAGED_SEPARATOR}${managed}`,
+    INSTRUCTIONS_MAX
+  )
+}
+
+const MANAGED_SEPARATOR = '\n\n--- (imported instructions — the native rules above win) ---\n\n'
+
+/**
+ * 读全局与本工作区的受管说明副本。
+ *
+ * ★ 每一份都过 `sanitizeInstructions` —— 它来自另一个工具的目录,和 clone 来的
+ * 仓库一样是**不可信输入**(见 `kernel/instructions.ts` 文件头)。「已经导入过
+ * 一次」并不让它变可信:那份源文件在导入之后还会被改。
+ */
+async function loadManagedInstructions(workspaceId: string): Promise<string> {
+  const chunks: string[] = []
+  for (const source of store.listImportSources()) {
+    for (const scopeKey of ['', workspaceId]) {
+      if (scopeKey === '' && workspaceId === '') continue
+      const mapping = store.getImportMapping(
+        source.sourceId,
+        scopeKey,
+        'instructions',
+        scopeKey === '' ? 'global' : scopeKey
+      )
+      // suppressed = 用户删过这一项,不要在下一轮把它拼回上下文里。
+      if (mapping === undefined || mapping.syncState === 'suppressed') continue
+      const text = await readTextBounded(managedInstructionsPath(source.sourceId, scopeKey), 64 * 1024)
+      if (text === null) continue
+      const clean = sanitizeInstructions(text)
+      if (clean !== '') chunks.push(clean)
+    }
+  }
+  return chunks.join('\n\n')
 }
 
 /**
@@ -865,13 +917,13 @@ function monitorChildRun(
       toolCalls++
       if (parent.status === 'running') parent.emit({
         type: 'subagent_update', callId, childRunId: child.runId,
-        phase: 'tool', currentTool: event.toolName, toolCalls, toolErrors, childSeq, at: event.at
+        phase: 'tool', currentTool: event.toolName, currentTarget: toolTarget(event.input), toolCalls, toolErrors, childSeq, at: event.at
       })
     } else if (event.type === 'tool_end') {
       if (event.isError) toolErrors++
       if (parent.status === 'running') parent.emit({
         type: 'subagent_update', callId, childRunId: child.runId,
-        phase: 'thinking', currentTool: undefined, toolCalls, toolErrors, childSeq, at: event.at
+        phase: 'thinking', currentTool: undefined, currentTarget: undefined, toolCalls, toolErrors, childSeq, at: event.at
       })
     } else if (event.type === 'context_usage' && parent.status === 'running') {
       parent.emit({
@@ -898,7 +950,23 @@ function monitorChildRun(
     const last = [...history].reverse().find((m) => m.role === 'assistant')
     const text = last === undefined ? '' : visibleText(last)
     const endedAt = child.endedAt
-    persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text, error)
+    persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text, error, background)
+    /*
+      SubagentStop 钩子。★ fire-and-forget，理由同 Stop。
+      环境从 `childReq.workspaceId` 现取而不是闭包捕获：子 run 可能跑在
+      和父不同的租约上，拿错的话钩子会在另一个工作区的根目录下执行。
+    */
+    try {
+      void runHookEvent({
+        event: 'SubagentStop',
+        environment: getWorkspaceEnvironment(childReq.workspaceId),
+        sessionId: childReq.sessionId,
+        runId: child.runId,
+        extra: { status }
+      }).catch(() => undefined)
+    } catch {
+      // 环境已经释放（父 run 早就结束了）—— 子代理收尾的钩子不值得为此报错。
+    }
     if (parent.status === 'running') {
       parent.emit({
         type: 'subagent_end', callId, childRunId: child.runId, status,
@@ -916,6 +984,17 @@ function monitorChildRun(
   })()
 }
 
+function toolTarget(input: unknown): string | undefined {
+  if (typeof input === 'string') return input.slice(0, 160)
+  if (input === null || typeof input !== 'object') return undefined
+  const record = input as Record<string, unknown>
+  for (const key of ['path', 'filePath', 'query', 'pattern', 'command', 'url']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim() !== '') return value.slice(0, 160)
+  }
+  return undefined
+}
+
 /** Update the durable Task receipt when a detached/background child finishes. */
 function persistSubagentCompletion(
   sessionId: string,
@@ -923,7 +1002,8 @@ function persistSubagentCompletion(
   childRunId: string,
   status: RunStatus,
   text: string,
-  error?: AgentError
+  error?: AgentError,
+  background = false
 ): void {
   const history = store.getHistory(sessionId)
   let changed = false
@@ -939,6 +1019,7 @@ function persistSubagentCompletion(
         subagent: {
           ...part.subagent,
           status,
+          ...(background ? { reportStatus: 'pending' as const } : {}),
           ...(summary === undefined ? {} : { summary }),
           ...(error === undefined ? {} : { error })
         }
@@ -992,6 +1073,9 @@ function mergeLatestSubagentReceipts(
         ...(current.error === undefined
           ? {}
           : { error: current.error }),
+        ...(current.reportStatus === undefined
+          ? {}
+          : { reportStatus: current.reportStatus }),
         ...(status === undefined ? {} : { status })
       }
       messageChanged = true
@@ -1321,9 +1405,6 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
       needsNetwork: tool.needsNetwork || TOOLS_NEEDING_NETWORK.has(tool.internalId),
       webSearch: req.webSearch
     })
-    // ★ 联网开关排在本地规则之前:一条 `allow` 规则也不该能把用户关掉的开关重新打开。
-    if (outcome.kind === 'deny') return { kind: 'deny', reason: outcome.reason }
-
     const host = getHost()
     environment.assertReady()
     const root = environment.rootPath
@@ -1331,25 +1412,72 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
     const scope = environment.remote ? { path: environment.path, namespace: environment.key } : undefined
     // 规则用 internalId 匹配 —— externalName 会被注册表截断去重,跨会话不稳定。
     const local = await readLocalSettings(filesystem, root, host.logger, scope)
-    const denied = matchPermissionRules(local.permissions.deny, tool.internalId, input)
-    if (denied !== null) {
-      return { kind: 'deny', reason: `This call matches the deny rule \`${denied}\` in the workspace's `
-        + `.next-cowork/settings.local.json. Do not try to reach the same result through another tool.` }
-    }
-    // `ask` 桶的用处正是把某个本来会静默放行的操作重新捞回人眼前,所以它压过 allow 与档位。
-    const forcedAsk = matchPermissionRules(local.permissions.ask, tool.internalId, input) !== null
-    if (!forcedAsk) {
-      if (outcome.kind === 'allow') return { kind: 'allow_once' }
-      if (matchPermissionRules(local.permissions.allow, tool.internalId, input) !== null) return { kind: 'allow_once' }
-    }
 
-    if (req.permissionMode === 'auto' && tool.destructive && !forcedAsk) {
+    /*
+      ★ 判定顺序在 `kernel/permission-decision.ts`，那里一条一条写明了为什么是这个次序。
+      拆成「钩子之前 / 钩子之后」两段，是因为跑钩子会 fork 进程：拿到 early deny 就
+      直接 return，物理上到不了跑钩子那一步。
+    */
+    const early = decideBeforeHooks(outcome, matchPermissionRules(local.permissions.deny, tool.internalId, input))
+    if (early.kind === 'deny') return { kind: 'deny', reason: early.reason }
+    /*
+      PreToolUse 钩子。★ **顺序即语义**，这个位置是设计的一部分：
+
+      - 排在 `deny` 桶**之后** —— `deny` 是「连档位都放宽不了」的那一层
+        （见 `shared/domain/local-settings.ts` 文件头），一条钩子不该能把它打开。
+      - 排在 `ask` / `allow` 桶**之前** —— 钩子的 deny 必须压得过一条 allow 规则，
+        否则用户点过一次「以后都允许」，就等于永久绕开了所有安全钩子。
+
+      钩子失败（超时 / 起不来 / 非 0 非 2 退出）**不阻断**，理由见 `hook/run.ts`
+      文件头那段 fail-open。
+    */
+    const hookReports = await runHookEvent({
+      event: 'PreToolUse',
+      environment,
+      sessionId: req.sessionId,
+      runId: req.runId,
+      tool: { internalId: tool.internalId, externalName: tool.externalName, input },
+      signal: handle.signal
+    })
+    const blockedBy = hookReports.find((r) => r.outcome === 'blocked' || r.decision === 'deny')
+    const verdict = decideAfterHooks({
+      gate: outcome,
+      hook: {
+        ...(blockedBy === undefined
+          ? {}
+          : { deny: blockedBy.reason ?? 'A PreToolUse hook blocked this call.' }),
+        allow: hookReports.some((r) => r.decision === 'allow'),
+        ask: hookReports.some((r) => r.decision === 'ask')
+      },
+      askRule: matchPermissionRules(local.permissions.ask, tool.internalId, input),
+      allowRule: matchPermissionRules(local.permissions.allow, tool.internalId, input),
+      autoReview: req.permissionMode === 'auto' && tool.destructive
+    })
+    if (verdict.kind === 'deny') return { kind: 'deny', reason: verdict.reason }
+    if (verdict.kind === 'allow') return { kind: 'allow_once' }
+    if (verdict.kind === 'review') {
       const review = await reviewSensitiveOperation(req, reviewerModel, reviewerModelProviderId, tool.externalName, input, handle.signal)
       if (review === 'allow') return { kind: 'allow_once' }
       if (review === 'deny') return { kind: 'deny', reason: 'The configured AI reviewer denied this potentially unsafe operation.' }
     }
 
     const suggestedRule = suggestPermissionRule(tool.internalId, input)
+    /*
+      Notification 钩子 —— 「有个弹窗在等你」的那一刻。典型用法是
+      `osascript -e 'display notification …'`。
+      ★ fire-and-forget：不 await、不看结果。审批弹窗已经在等人了，
+      再为一条通知脚本多等几秒只会让用户更晚看到它。
+    */
+    void runHookEvent({
+      event: 'Notification',
+      environment,
+      sessionId: req.sessionId,
+      runId: req.runId,
+      tool: { internalId: tool.internalId, externalName: tool.externalName, input },
+      extra: { notification: { kind: 'tool_permission', toolName: tool.externalName } },
+      signal: handle.signal
+    }).catch(() => undefined)
+
     const response = await interactions.request(handle, {
       kind: 'tool_permission', callId, toolName: tool.externalName,
       input, readOnly: tool.readOnly, destructive: tool.destructive,
@@ -1384,6 +1512,29 @@ export async function runAgent(
   inheritedSkills?: readonly Skill[],
   inheritedResources?: RunResources
 ): Promise<void> {
+  let approvedPlanContext: import('../shared/domain/plan').PlanDocumentV2 | undefined
+  handle.beforeFinish((status) => {
+    try {
+      const current = getExecutionPlanV2(req.runId)
+      if (current !== undefined && current.lifecycle === 'executing') {
+        const lifecycle = status === 'done' ? 'completed' : 'failed'
+        const next = transitionPlanV2(current.id, current.version, lifecycle)
+        if (lifecycle === 'completed') handle.emit({ type: 'plan_execution_completed', planId: next.id, sessionId: next.sessionId, runId: req.runId, version: next.version, lifecycle: 'completed' })
+        else handle.emit({ type: 'plan_execution_failed', planId: next.id, sessionId: next.sessionId, runId: req.runId, version: next.version, lifecycle: 'failed' })
+      }
+    } catch (error) {
+      getHost().logger.warn(`[plan] failed to finalize execution: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+  if (req.approvedPlan !== undefined) {
+    const plan = getPlanV2(req.approvedPlan.planId)
+    if (plan === undefined || plan.version !== req.approvedPlan.version || (plan.lifecycle !== 'approved' && plan.lifecycle !== 'failed')) {
+      throw new Error('Approved plan is missing, stale, or no longer approved.')
+    }
+    transitionPlanV2(plan.id, plan.version, 'executing', req.runId)
+    approvedPlanContext = { ...plan, lifecycle: 'executing', executionRunId: req.runId }
+    handle.emit({ type: 'plan_execution_started', planId: plan.id, sessionId: plan.sessionId, runId: req.runId, version: plan.version, lifecycle: 'executing' })
+  }
   const existing = store.getSession(req.sessionId)
   const workspace = store.getWorkspace(req.workspaceId)
   if (!workspace || (existing && existing.workspaceId !== req.workspaceId)) throw new EnvironmentError('unbound')
@@ -1486,6 +1637,43 @@ export async function runAgent(
   }
 
   const history = store.getHistory(req.sessionId)
+
+  /*
+    UserPromptSubmit 钩子。★ 位置是**拿到环境之后、`new AgentSession` 之前** ——
+    用户消息是在 AgentSession 的构造函数里 commit 的，晚一步就拦不住了。
+    （`ipc/agent.ts` 的 `startRun` 是同步函数，在那儿 await 不了，所以只能落这里。）
+
+    守卫 `agent === undefined`：子 run 不跑这个事件，它没有「用户提交了提示词」这回事。
+  */
+  if (agent === undefined && req.input.length > 0) {
+    const reports = await runHookEvent({
+      event: 'UserPromptSubmit',
+      environment,
+      sessionId: req.sessionId,
+      runId: req.runId,
+      // `req.input` 是 ContentPart[]（可能带附件）；钩子只关心文字那部分。
+      extra: { prompt: req.input.filter((p) => p.type === 'text').map((p) => p.text).join('\n') },
+      signal: handle.signal
+    })
+    const blocked = reports.find((r) => r.outcome === 'blocked' || r.decision === 'deny')
+    if (blocked !== undefined) {
+      release()
+      handle.finish('error', agentError('unknown', blocked.reason ?? '被钩子拦下'))
+      store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
+      return
+    }
+    /*
+      注入走 `projectInstructions` 而不是新开一个字段：它经 `context-assembler.ts`
+      的 `decorate` 只进**发出去的那份消息流**，转录一个字不动 —— 这正是钩子注入
+      上下文该有的语义（不该出现在用户的聊天气泡里，也不该被重放到旧会话）。
+    */
+    const injected = reports.map((r) => r.additionalContext ?? '').filter((s) => s !== '').join('\n')
+    if (injected !== '') {
+      projectInstructions = projectInstructions === ''
+        ? `<hook-context>\n${injected}\n</hook-context>`
+        : `${projectInstructions}\n\n<hook-context>\n${injected}\n</hook-context>`
+    }
+  }
   const ref = normalizeEnvironmentRef(workspace.environment)
   const fileReferenceSource: FileReferenceSource = ref.kind === 'connection'
     ? { kind: 'workspace', workspaceId: workspace.id, environment: ref, rootPath: environment.rootPath, connectionRevision: store.getConnectionProfile(ref.connectionId)?.revision ?? -1 }
@@ -1536,6 +1724,30 @@ export async function runAgent(
       onToolUsage: ({ runId, toolCalls, toolErrors }) => {
         store.updateUsageToolsForRun(runId, toolCalls, toolErrors)
       },
+      /*
+        PostToolUse 钩子。★ 只能追加反馈，不能改 output（见 `SessionDeps` 上那段）。
+
+        `exit 2` 时把 `isError` 翻成 true —— 「你的改动被 lint 钩子拒绝了」是模型
+        能据此行动的信息，而一段夹在正常输出里的抱怨它多半会忽略。
+      */
+      onToolExecuted: async ({ tool, input, output, isError }) => {
+        const reports = await runHookEvent({
+          event: 'PostToolUse',
+          environment,
+          sessionId: req.sessionId,
+          runId: req.runId,
+          tool: { internalId: tool.internalId, externalName: tool.externalName, input },
+          extra: { toolOutput: output.content, toolIsError: isError },
+          signal: handle.signal
+        })
+        if (reports.length === 0) return undefined
+        const context = reports.map((r) => r.additionalContext ?? r.reason ?? '').filter((s) => s !== '').join('\n')
+        const blocked = reports.some((r) => r.outcome === 'blocked')
+        return {
+          ...(context === '' ? {} : { additionalContext: context }),
+          ...(blocked ? { isError: true } : {})
+        }
+      },
       approve: approveWith(req, handle, environment),
       interact: (draft) => interactions.request(handle, draft, getHost().clock.now()),
       /*
@@ -1569,6 +1781,7 @@ export async function runAgent(
         「什么都没填」这件事只该有一个地方知道,多一处判断就多一处会漂移的判断。
       */
       personalization: store.getSettings().personalization
+      ,...(approvedPlanContext === undefined ? {} : { approvedPlan: approvedPlanContext })
     },
     handle,
     req
@@ -1593,6 +1806,22 @@ export async function runAgent(
   }
   return running.finally(() => {
     release()
+    /*
+      Stop 钩子 —— 一轮运行收尾。★ fire-and-forget 且**不 await**：这里是
+      `finally` 里的异步续延，落盘才是正事；让一条通知脚本拖慢转录落盘，
+      换来的是「应用退出时这一轮没存上」。
+      守卫 `depth === 0 && parentSessionId === undefined`：子 run 收尾走
+      SubagentStop，不重复触发。
+    */
+    if (req.depth === 0 && req.parentSessionId === undefined) {
+      void runHookEvent({
+        event: 'Stop',
+        environment,
+        sessionId: req.sessionId,
+        runId: req.runId,
+        extra: { status: handle.status }
+      }).catch(() => undefined)
+    }
     // message_commit 已逐条落盘；replaceHistory 是兼容旧调用/修复异常的最终校验。
     // A detached child may have completed between the last commit and this
     // final write. Preserve its newest durable metadata when replacing the

@@ -63,6 +63,7 @@ const run = (
     query?: string | null
     root?: string
     listings?: Readonly<Record<string, DirListing>>
+    selectedPath?: string | null
   } = {}
 ): string[] =>
   shape(
@@ -72,7 +73,8 @@ const run = (
       o.root ?? '',
       o.sortBy ?? 'name',
       o.showHidden ?? false,
-      o.query ?? null
+      o.query ?? null,
+      o.selectedPath ?? null
     )
   )
 
@@ -134,6 +136,28 @@ describe('flatten · 展开与层级', () => {
 describe('flatten · 隐藏文件', () => {
   it('默认不显示隐藏项', () => {
     expect(run({ expanded: ALL_OPEN })).not.toContain('.env')
+  })
+
+  /**
+   * ★ 「在文件管理器中显示」一个 `.env` 之后,树开出来了却一行都没有 —— 用户看到的是
+   * 「点了没反应」,而且没有任何线索告诉他要去开隐藏项开关。被点名选中的那一项
+   * 不受隐藏过滤约束,其余隐藏项照旧不出。
+   */
+  it('被 reveal 选中的隐藏项照常出现,其余隐藏项不受影响', () => {
+    const rows = run({ selectedPath: '.env' })
+    expect(rows).toContain('.env')
+    expect(rows, '只放行被选中的那一项').not.toContain('.git')
+  })
+
+  /**
+   * 选中的隐藏目录如果正好是展开的,它的普通子项要跟着出来 —— 一个展开着却空无一物的
+   * 目录壳比不显示更让人困惑。放行仅限被选中的那一项本身,`.env` 仍然不出。
+   */
+  it('选中的隐藏目录展开时,它的普通子项跟着出来', () => {
+    const rows = run({ expanded: ALL_OPEN, selectedPath: '.git' })
+    expect(rows).toContain('.git')
+    expect(rows).toContain('  config')
+    expect(rows, '没被选中的隐藏项照旧不出').not.toContain('.env')
   })
 
   /**

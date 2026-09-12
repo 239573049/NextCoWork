@@ -10,7 +10,7 @@ import type { InteractionResponse, PendingInteraction } from '../../../shared/ag
 import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import type { Unsubscribe } from '../../../shared/ipc/contract'
-import type { PlanDocument, PlanOperation, PlanUpdateResult } from '../../../shared/domain/plan'
+import type { PlanDocument, PlanOperation, PlanUpdateResult, PlanDocumentV2, PlanV2Input, PlanLifecycle, PlanStepV2Status } from '../../../shared/domain/plan'
 import { invoke, on } from './ipc'
 
 /**
@@ -60,3 +60,8 @@ export function listPlans(sessionId: string): Promise<PlanDocument[]> { return i
 export function getPlan(planId: string): Promise<PlanDocument | null> { return invoke('plans:get', { planId }) }
 export function updatePlan(req: { planId?: string; sessionId: string; baseVersion?: number; operations: PlanOperation[] }): Promise<PlanUpdateResult> { return invoke('plans:update', req) }
 export function submitPlan(planId: string, version: number): Promise<PlanDocument> { return invoke('plans:submit', { planId, version }) }
+export function listPlansV2(sessionId: string): Promise<PlanDocumentV2[]> { return invoke('plans:v2:list', { sessionId }) }
+export function getPlanV2(planId: string): Promise<PlanDocumentV2 | null> { return invoke('plans:v2:get', { planId }) }
+export function putPlanV2(req: PlanV2Input): Promise<{ ok: boolean; plan?: PlanDocumentV2; conflict?: { planId: string; currentVersion: number }; message?: string }> { return invoke('plans:v2:put', req) }
+export function transitionPlanV2(req: { planId: string; version: number; lifecycle: PlanLifecycle; executionRunId?: string }): Promise<PlanDocumentV2> { return invoke('plans:v2:transition', req) }
+export function updatePlanProgressV2(req: { planId: string; version: number; explanation?: string | null; plan: Array<{ id?: string; step: string; status: PlanStepV2Status }> }): Promise<PlanDocumentV2> { return invoke('plans:v2:progress', req) }

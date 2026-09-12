@@ -36,7 +36,19 @@ export function replaceHistory(req: { sessionId: string; messages: AgentMessage[
   if (runs.activeRunIds().some((id) => runs.get(id)?.sessionId === req.sessionId)) {
     throw new Error('有运行中的 Agent，请先停止任务后再编辑消息')
   }
-  store.replaceHistory(req.sessionId, req.messages)
+  /*
+    ★★ 手动编辑转录 = 永久脱离导入来源,且必须和替换**在同一个事务里**。
+
+    分成两步的话,中间那一瞬同步器可以插进来:它看到的还是「未修改」,
+    于是用源侧转录覆盖掉用户刚编辑的结果。放进同一个事务,两者不可能交错。
+
+    ★ 只有**内容**修改算脱离。归档/收藏/改标题不是转录编辑 ——
+    因为那些而丢掉正常同步,用户会觉得收藏一下就"坏了"。
+  */
+  store.tx(() => {
+    store.replaceHistory(req.sessionId, req.messages)
+    store.detachImportedSession(req.sessionId)
+  })
   const session = store.getSession(req.sessionId)
   changed({ kind: 'history', sessionIds: [req.sessionId], workspaceId: session?.workspaceId })
 }
@@ -101,7 +113,21 @@ export function duplicateSession(req: { sessionId: string; title: string }): Ses
 }
 
 export function renameSession(req: { sessionId: string; title: string }): void {
-  store.renameSession(req.sessionId, req.title)
+  store.tx(() => {
+    store.renameSession(req.sessionId, req.title)
+    /*
+      ★ 用户改过的标题归用户,但这**不是**脱离同步 —— 改个名字不等于编辑转录,
+      源侧后续的消息照样该同步进来。所以这里只打一个覆盖标记,让下一轮
+      不要用源侧标题把它盖回去。
+    */
+    for (const mapping of store.findImportMappingsByTarget(req.sessionId, 'session')) {
+      store.putImportMapping({
+        ...mapping,
+        meta: { ...mapping.meta, titleOverridden: true },
+        updatedAt: Date.now()
+      })
+    }
+  })
   const session = store.getSession(req.sessionId)!
   windows.emitToAll('sessions:changed', {
     kind: 'metadata', sessionIds: [session.id],

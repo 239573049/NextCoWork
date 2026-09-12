@@ -45,6 +45,7 @@ export function threadRows(
   }
 
   for (const message of messages) {
+    if (message.internal === true) continue
     if (isToolResultOnly(message)) continue
     if (message.role === 'user') {
       rows.push({ kind: 'user', key: message.id, message })

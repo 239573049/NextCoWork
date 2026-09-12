@@ -1,4 +1,4 @@
-import type { SshConnectionProfile } from '../../../shared/domain/environment'
+import { SSH_AUTH_METHODS, type SshConnectionProfile } from '../../../shared/domain/environment'
 import { EnvironmentError } from '../errors'
 
 export function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'` }
@@ -6,19 +6,23 @@ export function powershellQuote(value: string): string { return `'${value.replac
 
 export function sshTargetArgs(profile: SshConnectionProfile): string[] {
   const target = profile.target
+  if (profile.authMethod !== undefined && !SSH_AUTH_METHODS.includes(profile.authMethod)) throw new EnvironmentError('invalid-profile')
+  const preferred = profile.authMethod === 'password' || profile.authMethod === 'ask' ? 'password,keyboard-interactive'
+    : profile.authMethod === 'key' ? 'publickey' : profile.authMethod === 'interactive' ? 'keyboard-interactive' : undefined
+  const authArgs = preferred ? ['-o', `PreferredAuthentications=${preferred}`] : []
   if (typeof target?.host !== 'string' || target.host.startsWith('-') || !target.host || /[\s\0\r\n]/.test(target.host)) {
     throw new EnvironmentError('invalid-profile')
   }
   if (target.kind === 'config') {
-    if (target.configFile?.includes('\0')) throw new EnvironmentError('invalid-profile')
-    return [...(target.configFile ? ['-F', target.configFile] : []), target.host]
+    if (target.configFile?.includes('\0') || /[\0\r\n]/.test(target.identityFile ?? '')) throw new EnvironmentError('invalid-profile')
+    return [...authArgs, ...(target.configFile ? ['-F', target.configFile] : []), ...(target.identityFile ? ['-i', target.identityFile] : []), target.host]
   }
   if (target.kind !== 'manual' || !Number.isInteger(target.port) || target.port < 1 || target.port > 65535
     || !target.username || /[\0\r\n]/.test(target.username)) throw new EnvironmentError('invalid-profile')
   for (const value of [target.identityFile, target.proxyJump]) {
     if (value?.includes('\0') || value?.includes('\n')) throw new EnvironmentError('invalid-profile')
   }
-  return ['-p', String(target.port), '-l', target.username,
+  return [...authArgs, '-p', String(target.port), '-l', target.username,
     ...(target.identityFile ? ['-i', target.identityFile] : []), ...(target.proxyJump ? ['-J', target.proxyJump] : []), target.host]
 }
 

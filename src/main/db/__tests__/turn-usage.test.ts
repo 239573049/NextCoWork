@@ -197,6 +197,45 @@ describe('逐轮用量', () => {
     expect(Object.keys(repo.getSessionDetail('session-2')?.runUsage ?? {})).toEqual(['run-2'])
   })
 
+  it('重启后按 run 回填每一轮发送时选中的模型别名,不同轮次各自独立', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '第一轮用 deepseek'), 'run-1')
+    repo.commitMessage('session-1', say('m-2', '第二轮换成 claude', 2), 'run-2')
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', { alias: 'deepseek-v4.1-flash-expires-on-0910', upstreamModel: 'deepseek-v4-flash-202605', responseModel: 'deepseek-v4-flash-202605' }))
+    repo.recordUsageAttempt(attempt('u-2', 'run-2', { alias: 'claude-fable-5' }))
+
+    restart()
+
+    const detail = repo.getSessionDetail('session-1')
+    // ★ 显示的是发送时选的别名,不是回包里那个和目录对不上的真实模型名。
+    expect(detail?.runModel?.['run-1']).toBe('deepseek-v4.1-flash-expires-on-0910')
+    expect(detail?.runModel?.['run-2']).toBe('claude-fable-5')
+  })
+
+  it('同一轮里的重试共享同一个别名,不会因为故障切换换掉展示值', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '重试后换了家的一轮'), 'run-1')
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', {
+      alias: 'deepseek-v4.1-flash-expires-on-0910', providerId: 'provider-a', ok: false, httpStatus: 503
+    }))
+    repo.recordUsageAttempt(attempt('u-2', 'run-1', {
+      alias: 'deepseek-v4.1-flash-expires-on-0910', providerId: 'provider-b', attempt: 2
+    }))
+
+    restart()
+
+    expect(repo.getSessionDetail('session-1')?.runModel?.['run-1']).toBe('deepseek-v4.1-flash-expires-on-0910')
+  })
+
+  it('没有任何用量记录的 run 不出现在 runModel 里', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-old', '老对话'))
+
+    restart()
+
+    expect(repo.getSessionDetail('session-1')?.runModel).toEqual({})
+  })
+
   /**
    * 升级路径和新建库是两条不同的代码路径:上面每个用例都是在**全新**库上跑完
    * 全部迁移,而真实用户是带着一个停在第 11 版、已经装着对话的库进来的。

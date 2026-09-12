@@ -109,17 +109,13 @@ describe('browser management navigation', () => {
     expect(state.rightPanelOpen).toBe(true)
   })
 
-  it('其他功能仍按原行为创建外层标签', () => {
+  it('定时任务也只切换独立主内容模式，不创建外层标签', () => {
     useWindowStore.getState().openFeature('scheduled')
 
     const state = useWindowStore.getState()
-    expect(state.activeStandaloneFeature).toBeNull()
-    expect(state.outer).toHaveLength(1)
-    expect(state.outer[0]).toMatchObject({
-      kind: 'feature',
-      ref: { feature: 'scheduled' }
-    })
-    expect(mockPersistOuter).toHaveBeenCalledTimes(1)
+    expect(state.activeStandaloneFeature).toBe('scheduled')
+    expect(state.outer).toHaveLength(0)
+    expect(mockPersistOuter).not.toHaveBeenCalled()
   })
 
   it('扩展面板和浏览器共用独立模式，退出后保留工作区及面板', () => {

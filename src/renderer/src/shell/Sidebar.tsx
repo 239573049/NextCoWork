@@ -46,6 +46,7 @@ export function Sidebar({
   chatTabs,
   sessions,
   activeFeature,
+  scheduledUnread = false,
   activeSessionId,
   runningSessionIds,
   onNewChat,
@@ -64,6 +65,7 @@ export function Sidebar({
   /** 数据库中的全部会话；未打开的历史会话也应出现在侧边栏。 */
   sessions: readonly SessionListItem[]
   activeFeature: FeatureKind | null
+  scheduledUnread?: boolean
   activeSessionId: string | null
   runningSessionIds: ReadonlySet<string>
   onNewChat: () => void
@@ -134,6 +136,7 @@ export function Sidebar({
               onClick={() => onOpenFeature(f)}
             >
               {t(`feature.${f}` as Parameters<typeof t>[0])}
+              {f === 'scheduled' && scheduledUnread && <span className="ml-auto size-1.5 rounded-full bg-accent" aria-label={t('scheduled.unread')} />}
             </NavItem>
           )
         })}

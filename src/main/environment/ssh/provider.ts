@@ -10,11 +10,13 @@ import { SftpFileSystem } from './sftp'
 
 export async function connectSshEnvironment(profile: SshConnectionProfile,
   context: ConnectionContext & { generation: number; assertCurrent(): void; onDisconnect(): void },
-  authentication: { env: NodeJS.ProcessEnv; close(): Promise<void> }, options: Pick<OpenSshOptions, 'executable'> = {}): Promise<EnvironmentConnection> {
+  authentication: { env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void },
+  options: Pick<OpenSshOptions, 'executable'> = {}): Promise<EnvironmentConnection> {
   let closed = false
   let filesystem: SftpFileSystem | undefined
   const terminals = new Set<TerminalDriver>()
   const transport = new OpenSshTransport(profile, { ...options, env: authentication.env,
+    ...(authentication.resolve ? { onResolved: authentication.resolve } : {}),
     onDisconnect: () => { closed = true; context.onDisconnect() } })
   const assertReady = (): void => {
     context.assertCurrent()

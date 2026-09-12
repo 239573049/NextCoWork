@@ -27,8 +27,15 @@ export interface Sshd {
   close(): Promise<void>
 }
 
-/** 起一个隔离的 sshd:随机 loopback 端口、临时 host key 与 client key、不碰任何系统配置。 */
-export async function isolatedSshd(): Promise<Sshd> {
+/**
+ * 起一个隔离的 sshd:随机 loopback 端口、临时 host key 与 client key、不碰任何系统配置。
+ *
+ * `passwordAuth` 让它把 **password** 列为可用认证方法,于是真实 ssh 会发出真实的密码提示。
+ * ★ 注意它**验不了密码**:`UsePAM no` 下 sshd 没有校验通道,认证最终一定失败。这个开关是
+ * 为了拿到真实提示去验**分类与自动作答**,不是为了验"输对密码能登上去"—— 后者要可控的
+ * PAM 栈和 root,本机做不到(见 docs/ssh-support-matrix.md)。
+ */
+export async function isolatedSshd(options: { passwordAuth?: boolean } = {}): Promise<Sshd> {
   const directory = await mkdtemp(join(tmpdir(), 'ncw-sshd-'))
   await chmod(directory, 0o700)
   const hostKey = join(directory, 'host-key')
@@ -47,7 +54,8 @@ export async function isolatedSshd(): Promise<Sshd> {
   const username = userInfo().username
   const daemonConfig = join(directory, 'sshd_config')
   await writeFile(daemonConfig, `Port ${port}\nListenAddress 127.0.0.1\nHostKey ${hostKey}\nPidFile ${join(directory, 'pid')}\n`
-    + `AuthorizedKeysFile ${join(directory, 'authorized_keys')}\nStrictModes yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n`
+    + `AuthorizedKeysFile ${join(directory, 'authorized_keys')}\nStrictModes yes\n`
+    + `PasswordAuthentication ${options.passwordAuth ? 'yes' : 'no'}\nKbdInteractiveAuthentication no\n`
     + `UsePAM no\nPermitRootLogin no\nAllowUsers ${username}\nSubsystem sftp ${sftpServer}\nLogLevel VERBOSE\n`, { mode: 0o600 })
   // ★ detached:true 让 sshd 自成进程组。sshd 为每条连接 fork 一个子进程,只 kill 监听进程
   //   **不会**断开已建立的连接 —— 想制造真实断线就必须杀整个组。

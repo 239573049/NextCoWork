@@ -461,7 +461,8 @@ function isAgentMessage(value: unknown): value is AgentMessage {
     Array.isArray(value.parts) &&
     value.parts.every(isContentPart) &&
     isIntegerAtLeast(value.createdAt, 0) &&
-    value.schemaVersion === 1
+    value.schemaVersion === 1 &&
+    optionalBoolean(value, 'internal')
   )
 }
 
@@ -475,6 +476,7 @@ function isContentPart(value: unknown): boolean {
       return isNonEmptyString(value.callId) && isNonEmptyString(value.name) && isJsonValue(value.input)
     case 'tool_result':
       return isNonEmptyString(value.callId) && isToolOutput(value.output) && isBoolean(value.isError)
+        && (!has(value, 'subagent') || isSubagentResult(value.subagent))
     case 'subagent':
       return isNonEmptyString(value.callId) && isNonEmptyString(value.childRunId) && optionalString(value, 'summary')
     case 'image':
@@ -484,6 +486,15 @@ function isContentPart(value: unknown): boolean {
     default:
       return false
   }
+}
+
+function isSubagentResult(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return isNonEmptyString(value.childRunId)
+    && optionalString(value, 'summary')
+    && optionalBoolean(value, 'background')
+    && (!has(value, 'status') || enumValue(value.status, ['running', 'done', 'error', 'aborted']))
+    && (!has(value, 'reportStatus') || enumValue(value.reportStatus, ['none', 'pending', 'injecting', 'reported', 'blocked']))
 }
 
 function isToolOutput(value: unknown): boolean {

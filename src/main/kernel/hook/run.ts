@@ -94,11 +94,19 @@ function parseDecision(stdout: string): Pick<HookRunReport, 'decision' | 'reason
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>
     const decision = parsed.decision
-    return {
+    const out: Pick<HookRunReport, 'decision' | 'reason' | 'additionalContext'> = {
       ...(decision === 'allow' || decision === 'deny' || decision === 'ask' ? { decision } : {}),
       ...(typeof parsed.reason === 'string' ? { reason: parsed.reason } : {}),
       ...(typeof parsed.additionalContext === 'string' ? { additionalContext: parsed.additionalContext } : {})
     }
+    /*
+      ★ 合法 JSON、但一个认得的字段都没有 —— 当普通文本用。
+
+      不这么做的话，一条 `echo '{"foo":"bar"}'` 的钩子，它的输出会被**静默丢掉**：
+      脚本作者看到自己 echo 了东西，模型那边却什么也没收到，而中间没有任何报错。
+      「看着像 JSON 但不是」那条 catch 分支早就是这个取向，这里只是把它补齐。
+    */
+    return Object.keys(out).length === 0 ? { additionalContext: text } : out
   } catch {
     // 看着像 JSON 但不是 —— 当普通文本用，别把用户的输出丢掉
     return { additionalContext: text }

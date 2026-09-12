@@ -23,6 +23,8 @@ import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
 import type { Workspace } from '../../shared/domain/workspace'
 import type { ConnectionProfile } from '../../shared/domain/environment'
+import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../../shared/domain/scheduled'
+import { normalizeScheduledTaskInput, nextScheduledOccurrence } from '../../shared/domain/scheduled'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
 import type {
   UsageAttemptRecord,
@@ -34,6 +36,7 @@ import type {
 } from '../../shared/domain/usage'
 import type { SessionCreateInput } from '../db/repo'
 import * as repo from '../db/repo'
+import { ulid } from '../../shared/util/id'
 
 /** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
 const DISABLED_SKILLS_KEY = 'skills.disabled'
@@ -47,6 +50,9 @@ const SKILL_STATS_KEY = 'skills.stats'
  */
 const DISABLED_COMMANDS_KEY = 'commands.disabled'
 const DISABLED_AGENTS_KEY = 'agents.disabled'
+const SCHEDULED_TASKS_KEY = 'scheduled.tasks'
+const SCHEDULED_RUNS_KEY = 'scheduled.runs'
+let scheduledLegacyMigrated = false
 export interface SkillUsageStat { count: number; lastTriggeredAt: number; workspaces: Record<string, number>; lastTriggeredAtByWorkspace?: Record<string, number> }
 
 /** kv 里那张名字表读回来。★ 宽容读：kv 是用户能手改的，一个坏值不该让开关整个失灵。 */
@@ -62,6 +68,28 @@ function toggleName(current: readonly string[], name: string, enabled: boolean):
   return [...now]
 }
 
+/** One-time bridge for builds that stored scheduled data in kv before migration 18. */
+function migrateLegacyScheduledData(): void {
+  if (scheduledLegacyMigrated) return
+  scheduledLegacyMigrated = true
+  const legacyTasks = repo.getKv<unknown>(SCHEDULED_TASKS_KEY, [])
+  if (Array.isArray(legacyTasks) && repo.listScheduledTasks().length === 0) {
+    for (const item of legacyTasks) {
+      if (item !== null && typeof item === 'object' && typeof (item as ScheduledTask).id === 'string') repo.putScheduledTask(item as ScheduledTask)
+    }
+  }
+  const legacyRuns = repo.getKv<unknown>(SCHEDULED_RUNS_KEY, [])
+  if (Array.isArray(legacyRuns) && repo.listScheduledRuns(undefined, 1).length === 0) {
+    for (const item of legacyRuns) {
+      if (item !== null && typeof item === 'object' && typeof (item as ScheduledRun).id === 'string') repo.putScheduledRun(item as ScheduledRun)
+    }
+  }
+  if (Array.isArray(legacyTasks) || Array.isArray(legacyRuns)) {
+    repo.removeKv(SCHEDULED_TASKS_KEY)
+    repo.removeKv(SCHEDULED_RUNS_KEY)
+  }
+}
+
 export const store = {
   // ── settings ──
   getSettings(): AppSettings {
@@ -71,6 +99,59 @@ export const store = {
     // 合并规则在 shared/domain/settings.ts 的 mergeSettings —— 纯函数,有测试。
     // 曾经是浅合并,于是连点同一块里的两个开关,第二次写会把第一次的覆盖回去。
     return repo.updateSettings(patch)
+  },
+
+  // ── 定时任务 ──
+  listScheduledTasks(workspaceId?: string): ScheduledTask[] {
+    migrateLegacyScheduledData()
+    return repo.listScheduledTasks(workspaceId)
+  },
+  getScheduledTask(id: string): ScheduledTask | undefined {
+    migrateLegacyScheduledData()
+    return repo.getScheduledTask(id)
+  },
+  putScheduledTask(task: ScheduledTask): ScheduledTask {
+    return repo.putScheduledTask(task)
+  },
+  createScheduledTask(input: ScheduledTaskInput): ScheduledTask {
+    const now = Date.now()
+    const task: ScheduledTask = { id: ulid(now), ...normalizeScheduledTaskInput(input, now) }
+    return store.putScheduledTask(task)
+  },
+  updateScheduledTask(id: string, patch: Partial<ScheduledTaskInput>): ScheduledTask {
+    const current = store.getScheduledTask(id)
+    if (current === undefined) throw new Error('定时任务不存在')
+    const merged: ScheduledTaskInput = {
+      name: patch.name ?? current.name,
+      prompt: patch.prompt ?? current.prompt,
+      workspaceId: patch.workspaceId ?? current.workspaceId,
+      model: patch.model ?? current.model,
+      modelProviderId: patch.modelProviderId ?? current.modelProviderId,
+      schedule: patch.schedule ?? current.schedule,
+      timezone: patch.timezone ?? current.timezone,
+      repeatWindow: patch.repeatWindow ?? current.repeatWindow,
+      enabled: patch.enabled ?? current.enabled
+    }
+    const next = normalizeScheduledTaskInput(merged, Date.now())
+    return store.putScheduledTask({ ...current, ...next, id, createdAt: current.createdAt })
+  },
+  deleteScheduledTask(id: string): void {
+    repo.deleteScheduledTask(id)
+  },
+  setScheduledTaskEnabled(id: string, enabled: boolean): ScheduledTask {
+    const task = store.getScheduledTask(id)
+    if (task === undefined) throw new Error('定时任务不存在')
+    const now = Date.now()
+    return store.putScheduledTask({ ...task, enabled, nextRunAt: enabled ? nextScheduledOccurrence(task.schedule, task.timezone, task.repeatWindow, now) : null, updatedAt: now })
+  },
+  listScheduledRuns(taskId?: string, limit = 100): ScheduledRun[] {
+    migrateLegacyScheduledData()
+    return repo.listScheduledRuns(taskId, limit)
+  },
+  getScheduledRun(id: string): ScheduledRun | undefined { migrateLegacyScheduledData(); return repo.getScheduledRun(id) },
+  deleteScheduledRun(id: string): void { repo.deleteScheduledRun(id) },
+  putScheduledRun(run: ScheduledRun): ScheduledRun {
+    return repo.putScheduledRun(run)
   },
 
   // ── workspaces ──
@@ -350,6 +431,78 @@ export const store = {
   },
   setRunRecord(id: string, sessionId: string, status: string, startedAt: number, endedAt?: number): void {
     repo.setRunRecord(id, sessionId, status, startedAt, endedAt)
+  },
+
+  // ── 外部来源导入(schema 第 16 条) ──
+  /**
+   * ★ 这一整组是**纯转发**,和上面所有访问器同一个理由:全应用没有第二个地方
+   * 摸持久化。导入服务、同步器、IPC 三处都只认这一层 —— 其中同步器会在
+   * 后台线程式的定时器里跑,让它直接 import `db/repo` 就等于给「把 Db 挪进
+   * utilityProcess」那天多留一个必须一起改的调用点。
+   */
+  listImportSources(): repo.ImportSourceRow[] {
+    return repo.listImportSources()
+  },
+  getImportSource(sourceId: string): repo.ImportSourceRow | undefined {
+    return repo.getImportSource(sourceId)
+  },
+  putImportSource(source: repo.ImportSourceRow): repo.ImportSourceRow {
+    return repo.putImportSource(source)
+  },
+  getImportMapping(
+    sourceId: string,
+    scopeKey: string,
+    entityKind: repo.ImportEntityKind,
+    sourceItemId: string
+  ): repo.ImportMappingRow | undefined {
+    return repo.getImportMapping(sourceId, scopeKey, entityKind, sourceItemId)
+  },
+  listImportMappings(sourceId: string, entityKind?: repo.ImportEntityKind): repo.ImportMappingRow[] {
+    return repo.listImportMappings(sourceId, entityKind)
+  },
+  findImportMappingsByTarget(targetId: string, entityKind: repo.ImportEntityKind): repo.ImportMappingRow[] {
+    return repo.findImportMappingsByTarget(targetId, entityKind)
+  },
+  putImportMapping(mapping: repo.ImportMappingRow): void {
+    repo.putImportMapping(mapping)
+  },
+  /**
+   * 「这条会话从此不再跟随源」。返回被改动的行数 —— 调用点据此决定要不要
+   * 发一次 `imports:changed`(0 行时发等于每一轮 run 都刷一次设置页)。
+   */
+  detachImportedSession(sessionId: string, now = Date.now()): number {
+    return repo.markImportMappingsByTarget(sessionId, 'session', 'detached', now)
+  },
+  suppressImportedTarget(targetId: string, entityKind: repo.ImportEntityKind, now = Date.now()): void {
+    repo.suppressImportMappingsByTarget(targetId, entityKind, now)
+  },
+  deleteImportMessageMappings(sessionIds: readonly string[]): void {
+    repo.deleteImportMessageMappings(sessionIds)
+  },
+  createImportBatch(batch: repo.ImportBatchRow): void {
+    repo.createImportBatch(batch)
+  },
+  updateImportBatch(id: string, phase: string, counts: Record<string, number>, endedAt?: number): void {
+    repo.updateImportBatch(id, phase, counts, endedAt)
+  },
+  markInterruptedImportBatches(): number {
+    return repo.markInterruptedImportBatches()
+  },
+  appendImportBatchItem(item: repo.ImportBatchItemRow): void {
+    repo.appendImportBatchItem(item)
+  },
+  listImportBatches(offset: number, limit: number): { rows: repo.ImportBatchRow[]; total: number } {
+    return repo.listImportBatches(offset, limit)
+  },
+  listImportBatchItems(batchId: string, offset: number, limit: number): { rows: repo.ImportBatchItemRow[]; total: number } {
+    return repo.listImportBatchItems(batchId, offset, limit)
+  },
+  sessionExists(id: string): boolean {
+    return repo.sessionExists(id)
+  },
+  /** 导入服务要把「写映射」和「写目标实体」放进同一个事务。 */
+  tx<T>(fn: () => T): T {
+    return repo.tx(fn)
   },
 
   /**

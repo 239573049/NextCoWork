@@ -4,8 +4,9 @@ import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/pro
 import { CLIENT_PROVIDER_ID } from '../../../../shared/domain/presets'
 import type { UnpricedUsageAttempt } from '../../../../shared/domain/usage'
 import { nodeHost, type KernelHost } from '../../host'
-import type { CanonicalRequest } from '../canonical'
+import type { CanonicalRequest, UpstreamRequestContext } from '../canonical'
 import { parseRetryAfter, UpstreamRouter, type ProviderConfigSource } from '../router'
+import { sessionUuid } from '../transport'
 import { chunk, sse, responseDone, messageItem } from './openai-fixtures'
 
 describe('OpenAI protocol routing and recovery', () => {
@@ -269,7 +270,7 @@ async function drainRequest(
 
 async function drainWithContext(
   r: UpstreamRouter,
-  context: { workspaceId: string },
+  context: UpstreamRequestContext,
   signal = new AbortController().signal
 ): Promise<ProviderStreamEvent[]> {
   const out: ProviderStreamEvent[] = []
@@ -647,6 +648,43 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(headers[0]?.authorization).toBeUndefined()
     // 自报家门(kernel/user-agent.ts)——漏了不会报错,只是请求匿名发出去
     expect(headers[0]?.['user-agent']).toMatch(/^NextCoWork\//)
+    // ★ 别家供应商不该多出 OpenCode 那个会话头
+    expect(headers[0]?.['x-opencode-session']).toBeUndefined()
+  })
+
+  /**
+   * OpenCode Go 按 `x-opencode-session` 做会话路由,缺了每一次对话都是
+   * 「Request is missing x-opencode-session and cannot be routed efficiently」。
+   * `transport.test.ts` 测的是值算得对不对,这一条测的是**它真的上了 wire**。
+   */
+  it('OpenCode Go 供应商的请求带上 x-opencode-session', async () => {
+    const { router, headers } = rig({
+      providers: [provider('opencode-go', { baseUrl: 'https://opencode.ai/zen/go/v1' })],
+      aliases: [alias('m', 'opencode-go')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drainWithContext(router, { workspaceId: 'ws-test', sessionId: '01JSESSION' })
+    expect(headers[0]?.['x-opencode-session']).toBe(sessionUuid('01JSESSION'))
+    // 自定义 UA 是同一份文档里的第二条准入要求,和这个头一起构成准入条件
+    expect(headers[0]?.['user-agent']).toMatch(/^NextCoWork\//)
+  })
+
+  /**
+   * ★ 手动新建、自己填 opencode.ai 地址的那条 —— id 带 `custom-` 前缀,
+   * 只按 id 匹配会整个漏掉他,而他撞的是同一个错。
+   *
+   * 顺带钉住 `joinUpstreamUrl` 的 `/v1` 去重分支(那条预设注释点名的场景):
+   * `…/zen/go/v1` + `/v1/messages` 要拼成实测存在的 `…/zen/go/v1/messages`。
+   */
+  it('自定义供应商填了 opencode.ai 地址也带这个头', async () => {
+    const { router, calls, headers } = rig({
+      providers: [provider('custom-og', { baseUrl: 'https://opencode.ai/zen/go/v1' })],
+      aliases: [alias('m', 'custom-og')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drainWithContext(router, { workspaceId: 'ws-test', sessionId: '01JSESSION' })
+    expect(calls).toEqual(['https://opencode.ai/zen/go/v1/messages'])
+    expect(headers[0]?.['x-opencode-session']).toBe(sessionUuid('01JSESSION'))
   })
 
   /**

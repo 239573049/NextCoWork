@@ -16,8 +16,10 @@ import { interactions } from '../kernel/interaction-gate'
 import { IpcError, toAgentError } from './errors'
 import { RunHandle, runs } from '../kernel/run-registry'
 import { runAgent } from '../runtime'
+import { store } from '../state/store'
 import { runTopic, windows, type WindowContext } from '../window/registry'
 import { updateService } from '../update/update-service'
+import { getPlanV2, transitionPlanV2 } from '../db/repo'
 
 /**
  * 16ms ≈ 一帧。方案 §8 给的是 16–33ms:再快没意义(渲染层反正等 rAF),
@@ -126,8 +128,36 @@ export type RunDriver = (handle: RunHandle, req: RunRequest) => void | Promise<v
 export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver = runAgent): void {
   updateService.configure()
   if (!updateService.canStartNewRuns()) throw new IpcError('unknown', '必须安装客户端更新后才能开始新的任务')
+  detachImportedSession(req)
   windows.subscribe(runTopic(req.runId), ctx.sender)
   launch(req, driver)
+}
+
+/**
+ * ★★ 一经续聊,这条会话**永久脱离**导入来源的同步。
+ *
+ * 位置很关键:在 `launch` 之前、在任何 await 之前,而且只对**顶层** run 生效
+ * (子代理 run 有自己的 sessionId,它不是用户在续聊)。
+ *
+ * 为什么必须这么早:同步器可能正好扫完、正要提交。晚一步标记,那次提交就会
+ * 用源侧的旧转录 `replaceHistory` 掉用户刚发出去的话 —— 而用户看到的是
+ * 自己的消息凭空消失。放在这里,`startRun` 的校验一旦通过(不会再 throw),
+ * 脱离标记就已经落库了。
+ *
+ * ★ 校验失败时**不**脱离:上面那两行 throw 出去的 run 从来没有开始过,
+ * 把它算成一次续聊会让一条还没被碰过的会话失去同步。
+ */
+function detachImportedSession(req: RunRequest): void {
+  if (req.parentSessionId !== undefined) return // 子代理不是用户续聊
+  if (req.sessionId === '') return
+  try {
+    if (store.detachImportedSession(req.sessionId) > 0) {
+      windows.emitToAll('imports:changed', { sourceId: '', seq: Date.now() })
+    }
+  } catch {
+    // 脱离标记失败不该阻止用户发消息。最坏的结果是下一轮同步报一次冲突,
+    // 而冲突的处置是「保留本地」—— 方向仍然是安全的。
+  }
 }
 
 /**
@@ -213,6 +243,15 @@ export function respondInteraction(response: InteractionResponse, ctx: WindowCon
   const pending = interactions.get(response?.id)
   if (pending === undefined || !windows.isSubscribed(runTopic(pending.runId), ctx.sender)) {
     throw new IpcError('unknown', 'Interaction is no longer pending in this window')
+  }
+  if (pending.kind === 'plan_approval' && 'action' in response) {
+    const current = pending.planId === undefined ? undefined : getPlanV2(pending.planId)
+    if (current === undefined || current.id !== response.planId || current.version !== response.version || current.lifecycle !== 'review') {
+      throw new IpcError('conflict', 'The plan changed before it was approved. Refresh the latest plan.')
+    }
+    if (!['approve_current', 'approve_new_session', 'request_revision', 'reject'].includes(response.action)
+      || (response.action === 'request_revision' && !response.feedback?.trim())) throw new IpcError('unknown', 'Invalid plan approval response')
+    transitionPlanV2(current.id, current.version, response.action === 'request_revision' ? 'draft' : response.action === 'reject' ? 'superseded' : 'approved')
   }
   interactions.respond(response)
 }

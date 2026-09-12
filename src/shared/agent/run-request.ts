@@ -7,6 +7,8 @@
  */
 import type { ContentPart } from './message'
 import type { PermissionMode } from './permission'
+import type { ApprovedPlanExecution } from '../domain/plan'
+export type { PlanRef, ApprovedPlanExecution } from '../domain/plan'
 
 /**
  * 界面 `/` 菜单:/plan 规划模式「先出方案,你确认后再执行」、
@@ -137,6 +139,8 @@ export interface RunRequest {
   /** Approved durable plan snapshot this execution run is bound to. */
   planId?: string
   planVersion?: number
+  /** Structured approved plan reference for execution runs. */
+  approvedPlan?: ApprovedPlanExecution
 }
 
 /**

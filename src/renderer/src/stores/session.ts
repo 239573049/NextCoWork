@@ -14,6 +14,7 @@ import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { SessionChange } from '../../../shared/domain/session'
 import type { AgentEvent } from '../../../shared/agent/event'
+import type { PlanDocumentV2 } from '../../../shared/domain/plan'
 import { isToolResultOnly, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions, SessionMode } from '../../../shared/agent/run-request'
 import {
@@ -54,6 +55,10 @@ export type { SendOptions }
 
 export interface SessionState {
   sessionId: string
+  currentPlan: PlanDocumentV2 | null
+  planExpanded: boolean
+  setCurrentPlan: (plan: PlanDocumentV2 | null) => void
+  setPlanExpanded: (expanded: boolean) => void
   /** ★ 一个会话同一时刻只有一个 run(方案 §8)。null = 空闲 */
   activeRunId: string | null
   /** 已应用的最后一个 seq。防漂移就靠它 */
@@ -83,7 +88,7 @@ export interface SessionState {
   /** 上一次手动压缩的失败原因,成功或再次发起时清掉。 */
   compactError: string | null
 
-  send: (text: string, opts: SendOptions, parts?: ContentPart[]) => Promise<void>
+  send: (text: string, opts: SendOptions, parts?: ContentPart[], internal?: boolean) => Promise<void>
   stop: () => Promise<void>
   /**
    * 手动压缩上下文(输入框那个圆环双击)。
@@ -130,6 +135,8 @@ export interface SessionState {
   applyEvents: (events: AgentEvent[]) => void
   /** Apply a child run's telemetry to its parent Task card. */
   applyChildEvents: (childRunId: string, events: AgentEvent[], firstSeq?: number) => void
+  /** Mark a detached child's result as being handed back to the main agent. */
+  setSubagentReportStatus: (callId: string, status: NonNullable<TranscriptState['subagents'][string]['reportStatus']>) => void
 }
 
 type SessionStore = UseBoundStore<StoreApi<SessionState>>
@@ -137,6 +144,10 @@ type SessionStore = UseBoundStore<StoreApi<SessionState>>
 function createSessionStore(sessionId: string): SessionStore {
   return create<SessionState>((set, get) => ({
     sessionId,
+    currentPlan: null,
+    planExpanded: false,
+    setCurrentPlan: (plan) => set((state) => ({ currentPlan: plan !== null && state.currentPlan?.id === plan.id && (state.currentPlan.version > plan.version || (state.currentPlan.version === plan.version && state.currentPlan.updatedAt > plan.updatedAt)) ? state.currentPlan : plan })),
+    setPlanExpanded: (planExpanded) => set({ planExpanded }),
     activeRunId: null,
     lastSeq: 0,
     transcript: emptyTranscript(),
@@ -146,11 +157,16 @@ function createSessionStore(sessionId: string): SessionStore {
     compacting: false,
     compactError: null,
 
-    async send(text, opts, parts) {
+    async send(text, opts, parts, internal = false) {
       const s = get()
       // ★ 不变式:一个会话同一时刻只有一个 run。用户连按两次回车就能并发起两个 run,
       // 共享同一份转录 → 消息交错。这几行就是那条不变式的全部实现。
       if (s.activeRunId !== null) {
+        if (internal) {
+          const reportParts = parts ?? [{ type: 'text' as const, text }]
+          await interjectRun(s.activeRunId, [{ id: ulid(), parts: reportParts, internal: true }])
+          return
+        }
         // ★ 软上限:超过就不是队列了,是便签本。**拒绝入队并保留草稿** ——
         // 静默丢弃会让用户以为消息进了队列。
         if (s.queuedInputs.length >= QUEUE_MAX_ITEMS) return
@@ -183,7 +199,7 @@ function createSessionStore(sessionId: string): SessionStore {
       const input = parts ?? [{ type: 'text' as const, text }]
       const inputMessageId = ulid()
       const now = Date.now()
-      const inputMessage = userMessage(inputMessageId, [...input], now)
+      const inputMessage = { ...userMessage(inputMessageId, [...input], now), ...(internal ? { internal: true } : {}) }
       registerRun(runId, sessionId, opts.workspaceId)
       set({
         activeRunId: runId,
@@ -464,6 +480,7 @@ function createSessionStore(sessionId: string): SessionStore {
       // ★ 先收队列再续跑。反过来的话,`drainQueue` 会看见一条刚刚已经被注入、
       //   只是还没从队列里摘掉的条目,把同一句话再发一遍。
       reapInjected(sessionId, env.events)
+      reportCompletedBackgroundFromState(sessionId, env.events)
       if (endedCleanly(env.events)) drainQueue(sessionId)
     },
 
@@ -473,12 +490,13 @@ function createSessionStore(sessionId: string): SessionStore {
         ...settleRun(get().activeRunId, events)
       })
       reapInjected(sessionId, events)
+      reportCompletedBackgroundFromState(sessionId, events)
       if (endedCleanly(events)) drainQueue(sessionId)
     },
 
     applyChildEvents(childRunId, events, firstSeq) {
-      set((state) => ({
-        transcript: events.reduce(
+      set((state) => {
+        const transcript = events.reduce(
           (current, event, index) => applyChildEvent(
             current,
             childRunId,
@@ -487,9 +505,72 @@ function createSessionStore(sessionId: string): SessionStore {
           ),
           state.transcript
         )
-      }))
+        return { transcript }
+      })
+      reportCompletedBackgroundFromState(sessionId, events, childRunId)
+    },
+
+    setSubagentReportStatus(callId, status) {
+      set((state) => {
+        const current = state.transcript.subagents[callId]
+        if (current === undefined || current.reportStatus === status) return state
+        const messages = state.transcript.messages.map((message) => ({
+          ...message,
+          parts: message.parts.map((part) => part.type === 'tool_result' && part.callId === callId && part.subagent !== undefined
+            ? { ...part, subagent: { ...part.subagent, reportStatus: status } }
+            : part)
+        }))
+        void replaceHistory(sessionId, messages).catch(() => undefined)
+        return { transcript: { ...state.transcript, messages, subagents: { ...state.transcript.subagents, [callId]: { ...current, reportStatus: status } } } }
+      })
     }
   }))
+}
+
+const backgroundReports = new Set<string>()
+
+function reportCompletedBackgroundFromState(sessionId: string, events: readonly AgentEvent[], childRunId?: string): void {
+  const store = stores.get(sessionId)
+  if (!store) return
+  const childIds = new Set<string>()
+  for (const event of events) {
+    if (event.type === 'subagent_end') childIds.add(event.callId)
+    if (event.type === 'run_end' && childRunId !== undefined) childIds.add(childRunId)
+  }
+  for (const [callId, state] of Object.entries(store.getState().transcript.subagents)) {
+    if (state.background === true && state.reportStatus === 'pending' && (childIds.has(callId) || childIds.has(state.childRunId))) {
+      void reportBackgroundChild(sessionId, callId)
+    }
+  }
+}
+
+/** Deliver a detached child result to the main agent exactly once. */
+export async function reportBackgroundChild(sessionId: string, callId: string): Promise<void> {
+  const key = `${sessionId}:${callId}`
+  if (backgroundReports.has(key)) return
+  const store = stores.get(sessionId)
+  if (!store) return
+  const before = store.getState()
+  const child = before.transcript.subagents[callId]
+  if (!child || child.background !== true || child.reportStatus !== 'pending') return
+  if (!before.lastOptions) return
+  backgroundReports.add(key)
+  store.getState().setSubagentReportStatus(callId, 'injecting')
+  const summary = child.summary ?? 'The background subagent finished without a summary.'
+  const report = `Background subagent result (${child.subagentType ?? 'subagent'}, ${child.childRunId}):\n\n${summary}\n\nReview this result and continue the conversation if action is needed.`
+  try {
+    const parts: ContentPart[] = [{ type: 'text', text: report }]
+    if (before.activeRunId !== null) {
+      await interjectRun(before.activeRunId, [{ id: ulid(), parts, internal: true }])
+    } else {
+      await before.send(report, before.lastOptions, parts, true)
+    }
+    store.getState().setSubagentReportStatus(callId, 'reported')
+  } catch (error) {
+    backgroundReports.delete(key)
+    store.getState().setSubagentReportStatus(callId, 'pending')
+    console.error('[agent] background subagent report failed:', error)
+  }
 }
 
 /**
@@ -716,9 +797,10 @@ async function hydrateInput(sessionId: string): Promise<void> {
  * 之后,上面所有历史轮次的用量读数**一起消失**,而当前这一轮是好的。
  * 抽成函数就是不想在三个地方各记一次。
  */
-function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage' | 'messageRuns' | 'lastInputTokens'> {
+function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage' | 'runModel' | 'messageRuns' | 'lastInputTokens'> {
   return {
     ...(t.runUsage === undefined ? {} : { runUsage: t.runUsage }),
+    ...(t.runModel === undefined ? {} : { runModel: t.runModel }),
     ...(t.messageRuns === undefined ? {} : { messageRuns: t.messageRuns }),
     // 上下文占用是**整段对话**的属性:新一轮还没发出请求之前,
     // 圆环该继续显示上一轮结束时的读数,而不是空着。
@@ -784,6 +866,7 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
           // 重启之后逐轮用量的唯一来源。内存里那份 `usage` 只说得清当前 run,
           // 这两张表说的是整段对话的账,来自 SQLite。
           runUsage: detail.runUsage ?? s.transcript.runUsage,
+          runModel: detail.runModel ?? s.transcript.runModel,
           messageRuns: detail.messageRuns ?? s.transcript.messageRuns,
           status: 'done',
           runStartedAt: undefined,

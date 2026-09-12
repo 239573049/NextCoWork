@@ -10,7 +10,7 @@
  * 这个文件只负责把 presenter 的输出摆进版式里。新增一个工具的展示规则
  * 不需要动这里一行。
  */
-import { Bot, Brain, ChevronRight, CornerDownRight, Square } from "lucide-react";
+import { Bot, Brain, CheckCircle2, ChevronRight, CircleAlert, Clock3, CornerDownRight, ListChecks, Square } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
@@ -219,7 +219,7 @@ function StatusSlot({
   );
 }
 
-/** 子代理：展示子 run 的状态、耗时、模型、工具统计和上下文压力。 */
+/** 子代理：首屏展示任务正在做什么，详情区再放运行统计。 */
 export function SubagentNode({
   summary,
   state,
@@ -265,6 +265,17 @@ export function SubagentNode({
     ? undefined
     : formatDuration(elapsedOf({ startedAt: state.startedAt, endedAt: state.endedAt }, now) ?? 0)
   const title = state?.description ?? summary ?? t("chat.subagent.default");
+  const reportStatus = state?.reportStatus ?? (state?.background === true && status === 'done' ? 'pending' : status === 'running' ? 'none' : 'reported');
+  const reportLabel = reportStatus === 'pending'
+    ? t('chat.subagent.report.pending')
+    : reportStatus === 'injecting'
+      ? t('chat.subagent.report.injecting')
+      : reportStatus === 'reported'
+        ? t('chat.subagent.report.reported')
+        : reportStatus === 'blocked'
+          ? t('chat.subagent.report.blocked')
+        : undefined;
+  const activity = state?.activity ?? [];
   const phaseKey = state?.phase === undefined ? undefined : `chat.subagent.phase.${state.phase}` as
     | 'chat.subagent.phase.starting'
     | 'chat.subagent.phase.thinking'
@@ -279,6 +290,7 @@ export function SubagentNode({
     <div
       className="overflow-hidden rounded-card border border-border bg-surface-raised/40 text-[12.5px] text-fg-muted"
       data-testid="subagent-node"
+      data-subagent-call-id={state?.callId}
       data-subagent-status={status}
       data-subagent-background={state?.background === true ? 'true' : 'false'}
     >
@@ -290,7 +302,7 @@ export function SubagentNode({
       >
         <ChevronRight size={13} className={cn("shrink-0 text-fg-faint transition-transform", open && "rotate-90")} />
         <CornerDownRight size={13} className="shrink-0 text-accent-soft" />
-        <Bot size={14} className={cn("shrink-0", running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")} />
+        {status === 'error' ? <CircleAlert size={14} className="shrink-0 text-danger" /> : status === 'done' ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" /> : <Bot size={14} className="shrink-0 text-accent" />}
         <span className="min-w-0 flex-1 truncate text-fg">{title}</span>
         {state?.subagentType !== undefined && <span className="max-w-[24%] truncate text-[11px] text-fg-faint">{state.subagentType}</span>}
         {state?.background === true && <span className="shrink-0 text-[11px] text-accent-soft">{t('chat.subagent.mode.background')}</span>}
@@ -300,8 +312,32 @@ export function SubagentNode({
         </span>
         {duration !== undefined && <span className="shrink-0 font-mono text-[11px] text-fg-faint">{duration}</span>}
       </button>
+      {running && (
+        <div className="flex items-center gap-2 border-t border-hairline px-3 py-2 text-[11.5px] text-fg-muted">
+          <Clock3 size={12} className="shrink-0 animate-pulse text-accent" />
+          <span className="min-w-0 truncate">{state?.currentTool ?? (phaseKey === undefined ? t('chat.subagent.phase.thinking') : t(phaseKey))}{state?.currentTarget !== undefined && <span className="text-fg-faint"> · {state.currentTarget}</span>}</span>
+          <span className="ml-auto shrink-0 font-mono text-fg-faint">{t('chat.subagent.activityCount', { count: state?.toolCalls ?? 0 })}</span>
+        </div>
+      )}
+      {!running && reportLabel !== undefined && (
+        <div className={cn("flex items-center gap-2 border-t border-hairline px-3 py-2 text-[11.5px]", reportStatus === 'pending' ? "text-accent" : "text-fg-muted")}>
+          <ListChecks size={12} className="shrink-0" />
+          <span>{reportLabel}</span>
+        </div>
+      )}
       {open && (
         <div className="border-t border-hairline px-3 py-2.5">
+          {activity.length > 0 && (
+            <div className="mb-3 border-b border-hairline pb-2.5">
+              <div className="mb-1.5 text-[11px] font-medium text-fg-muted">{t('chat.subagent.detail.recentActivity')}</div>
+              <div className="flex flex-col gap-1">
+                {activity.map((item, index) => <div key={`${item.toolName}-${item.at ?? index}`} className="flex min-w-0 items-center gap-2 text-[11px] text-fg-faint">
+                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", index === 0 && running ? "bg-accent" : "bg-fg-faint/50")} />
+                  <span className="min-w-0 truncate text-fg">{item.toolName}{item.target !== undefined && <span className="text-fg-faint"> · {item.target}</span>}</span>
+                </div>)}
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-fg-faint">
             <span>{t('chat.subagent.detail.model')}</span><span className="truncate text-right text-fg">{state?.model ?? t('common.default')}</span>
             <span>{t('chat.subagent.detail.mode')}</span><span className="text-right text-fg">{state?.background === true ? t('chat.subagent.mode.background') : state?.background === false ? t('chat.subagent.mode.foreground') : t('chat.subagent.unavailable')}</span>

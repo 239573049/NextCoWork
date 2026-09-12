@@ -29,6 +29,7 @@ import {
   store
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
+import { refreshScheduler, runScheduledTaskNow } from '../scheduled/scheduler'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
 import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
@@ -92,6 +93,22 @@ import {
   testSearchProvider
 } from './websearch'
 import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
+import {
+  applyImports,
+  cancelImport,
+  chooseImportSource,
+  detectImports,
+  getImportState,
+  importJobStatus,
+  listImportHistory,
+  listImportHistoryItems,
+  listPreviewItems,
+  previewImports,
+  resolveImportConflict,
+  syncImportsNow,
+  updateImportSyncSettings
+} from './import'
+import { initImports, setImportChangeListener, setImportSessionNotifier, setImportWorkspaceNotifier } from '../imports/service'
 import { getClientAuthState, startClientLogin, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
 import { confirmInitialConfigSync, getConfigSyncPreview, getConfigSyncStatus, getConfigSyncConflicts, resolveConfigSyncConflict } from './config-sync'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
@@ -286,6 +303,42 @@ const handlers: HandlerMap = {
     if (profile.isDefault) throw new Error('默认浏览器不能清除登录态')
     return clearBrowserProfileState(workspaceId, profileId)
   },
+  'scheduled:listTasks': ({ workspaceId }) => store.listScheduledTasks(workspaceId),
+  'scheduled:getTask': ({ id }) => store.getScheduledTask(id) ?? null,
+  'scheduled:create': (input) => {
+    if (store.getWorkspace(input.workspaceId) === undefined) throw new Error('工作区不存在')
+    const task = store.createScheduledTask(input)
+    refreshScheduler()
+    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: task.id })
+    return task
+  },
+  'scheduled:update': ({ id, patch }) => {
+    if (patch.workspaceId !== undefined && store.getWorkspace(patch.workspaceId) === undefined) throw new Error('工作区不存在')
+    const task = store.updateScheduledTask(id, patch)
+    refreshScheduler()
+    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: task.id })
+    return task
+  },
+  'scheduled:delete': ({ id }) => {
+    store.deleteScheduledTask(id)
+    refreshScheduler()
+    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: id })
+  },
+  'scheduled:setEnabled': ({ id, enabled }) => {
+    const task = store.setScheduledTaskEnabled(id, enabled)
+    refreshScheduler()
+    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: id })
+    return task
+  },
+  'scheduled:runNow': ({ id }) => {
+    return runScheduledTaskNow(id)
+  },
+  'scheduled:listRuns': ({ taskId, limit }) => store.listScheduledRuns(taskId, limit),
+  'scheduled:getRun': ({ id }) => store.getScheduledRun(id) ?? null,
+  'scheduled:deleteRun': ({ id }) => {
+    store.deleteScheduledRun(id)
+    windows.emitToAll('scheduled:changed', { kind: 'run', runId: id })
+  },
   'tabs:getInner': ({ workspaceId }) => {
     const key = innerTabKey(workspaceId)
     flushPendingPersists(key)
@@ -332,6 +385,21 @@ const handlers: HandlerMap = {
   'storage:clearHistory': () => clearHistory(),
   'storage:clearLocalData': (req) => clearLocalData(req),
 
+  // ── 从其他 AI 应用导入(设置 › 导入) ──
+  'imports:detect': (req) => detectImports(req),
+  'imports:chooseSource': (req) => chooseImportSource(req),
+  'imports:getState': (req) => getImportState(req),
+  'imports:preview': (req) => previewImports(req),
+  'imports:previewItems': (req) => listPreviewItems(req),
+  'imports:apply': (req) => applyImports(req),
+  'imports:status': (req) => importJobStatus(req),
+  'imports:cancel': (req) => cancelImport(req),
+  'imports:history': (req) => listImportHistory(req),
+  'imports:historyItems': (req) => listImportHistoryItems(req),
+  'imports:updateSync': (req) => updateImportSyncSettings(req),
+  'imports:syncNow': (req) => syncImportsNow(req),
+  'imports:resolveConflict': (req) => resolveImportConflict(req),
+
   // ── 步骤 3–5:RunRegistry / AgentSession / 交互 ──
   'agent:run': (req, ctx) => startRun(req, ctx),
   'agent:attach': (req, ctx) => attachRun(req, ctx),
@@ -347,6 +415,12 @@ const handlers: HandlerMap = {
   'plans:get': plans.get,
   'plans:update': plans.update,
   'plans:submit': plans.submit,
+  'plans:v2:list': plans.listV2,
+  'plans:v2:get': plans.getV2,
+  'plans:v2:put': plans.putV2,
+  'plans:v2:submit': plans.submitV2,
+  'plans:v2:transition': plans.transitionV2,
+  'plans:v2:progress': plans.progressV2,
 
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
@@ -593,6 +667,26 @@ export function registerIpc(): void {
   })
   // 刷新 token 之后（含刷失败标记 needsReauth）把新的登录态推给设置页
   setCredentialChangeListener(announceCredentialRef)
+
+  /*
+    导入服务的接线,和上面 `setMcpChangeListener` 是同一种:
+    `imports/*` 不 import `window/registry`,方向保持「ipc 依赖服务,服务不依赖 ipc」。
+  */
+  setImportChangeListener((payload) => windows.emitToAll('imports:changed', payload))
+  setImportSessionNotifier((workspaceId, sessionIds) => {
+    // ★ 按工作区合并一条,不逐会话广播 —— 一次导入一百个会话就是一百次全量刷新。
+    windows.emitToAll('sessions:changed', { kind: 'metadata', workspaceId, sessionIds })
+  })
+  /*
+    ★ 导入建了工作区要广播,否则左上角那个切换器里看不到新项目 ——
+    渲染层那份列表只靠这个事件更新(`ipc/workspace.ts` 的 `announce` 是同一句)。
+    整个 job 结束后只发一次,它带的是全量列表。
+  */
+  setImportWorkspaceNotifier(() => {
+    windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
+  })
+  // 上次没跑完的批次标成 interrupted,而不是留一个永远转圈的进度条。
+  initImports()
 
   // 自动备份只在启动时按到期判断一次，不依赖渲染层计时器。
   scheduleAutomaticBackup()

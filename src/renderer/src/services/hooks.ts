@@ -1,5 +1,16 @@
-import type { HookDefinition, HookListItem, HookScope } from '../../../shared/domain/hook'
+import type { HookDefinition, HookEvent, HookListItem, HookRunReport, HookScope } from '../../../shared/domain/hook'
 import { invoke, on } from './ipc'
+
+/** 试运行。★ 跑的是弹层里此刻的草稿，不读磁盘上那一条。 */
+export function testHook(
+  scope: HookScope,
+  event: HookEvent,
+  command: string,
+  timeoutMs: number,
+  workspaceId?: string
+): Promise<HookRunReport> {
+  return invoke('hooks:test', { scope, event, command, timeoutMs, ...(workspaceId === undefined ? {} : { workspaceId }) })
+}
 
 export function listHooks(workspaceId?: string): Promise<HookListItem[]> {
   return invoke('hooks:list', workspaceId === undefined ? {} : { workspaceId })

@@ -51,6 +51,6 @@ export const planApprovalTool = defineTool({
     if (ctx.interact === undefined) return toolFail('User interaction is unavailable in this environment.')
     const response = await ctx.interact({ kind: 'plan_approval', plan: input.plan })
     if (response.kind !== 'plan_approval') return toolFail('Unexpected interaction response.')
-    return toolOk(JSON.stringify({ approved: response.approved, feedback: response.feedback ?? '' }))
+    return toolOk(JSON.stringify({ approved: 'approved' in response ? response.approved : response.action === 'approve_current' || response.action === 'approve_new_session', action: 'action' in response ? response.action : undefined, feedback: response.feedback ?? '' }))
   }
 })

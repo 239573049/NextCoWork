@@ -93,7 +93,8 @@ function aliasWith(requestAdapter?: typeof storePatch): ModelAlias {
 function rig(
   seed: string,
   responses: (n: number, url: string) => Response,
-  modelAlias: ModelAlias = alias
+  modelAlias: ModelAlias = alias,
+  providerOver: Partial<UpstreamProvider> = {}
 ) {
   const calls: Call[] = []
   const mem = new Map<string, string>([[REF, seed]])
@@ -118,7 +119,11 @@ function rig(
   })
   const router = new UpstreamRouter(
     host,
-    { providers: () => [provider], aliases: () => [modelAlias], failoverEnabled: () => false },
+    {
+      providers: () => [{ ...provider, ...providerOver }],
+      aliases: () => [modelAlias],
+      failoverEnabled: () => false
+    },
     { baseDelayMs: 0 }
   )
   return { router, host, calls, mem }
@@ -204,6 +209,35 @@ describe('router · OAuth 凭证', () => {
     const tokenCalls = r.calls.filter((c) => c.url.includes('/oauth/token'))
     expect(tokenCalls).toHaveLength(1)
   })
+
+  /**
+   * ★ 401 重发走的是同一个 `send()` 闭包 —— 它每次都从 `transport.headers` 重新
+   * 合并,`extraHeaders` 只带一个鉴权头。所以**供应商装饰的头在重发里还在**。
+   *
+   * 这条路今天跑不到(OpenCode 走 api-key,而 401 刷新只属于 OAuth),钉它是因为
+   * **结构上该成立的事,别等到成立那天才发现不成立**。
+   */
+  it('★ 401 重发不丢 x-opencode-session', async () => {
+    const r = rig(
+      serializeCredential(oauth),
+      (n, url) => {
+        if (url.includes('/oauth/token')) return tokenResponse()
+        return n === 1
+          ? new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })
+          : sse(responseDone([messageItem]))
+      },
+      alias,
+      { baseUrl: 'https://opencode.ai/zen/go/v1' }
+    )
+    await drain(r.router, r.host)
+
+    const first = r.calls[0]?.headers['x-opencode-session']
+    expect(first).toMatch(/^[0-9a-f]{8}-/u)
+    expect(r.calls[2]?.headers['authorization']).toBe('Bearer at-new')
+    expect(r.calls[2]?.headers['x-opencode-session']).toBe(first)
+    // OAuth 自己那几个头也没被装饰挤掉
+    expect(r.calls[2]?.headers['chatgpt-account-id']).toBe('acct-42')
+  })
 })
 
 describe('router · API Key 凭证零回归', () => {
@@ -217,6 +251,8 @@ describe('router · API Key 凭证零回归', () => {
     expect(h['openai-beta']).toBeUndefined()
     expect(h['originator']).toBeUndefined()
     expect(h['session_id']).toBeUndefined()
+    // 供应商装饰那一维也不该凭空出现 —— 这条 baseUrl 是 chatgpt.com,不是 OpenCode
+    expect(h['x-opencode-session']).toBeUndefined()
   })
 
   it('★ body 不被 transport 改写 —— 用户的 patch 在 API Key 供应商上照常生效', async () => {

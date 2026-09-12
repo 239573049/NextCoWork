@@ -8,6 +8,7 @@
 import {
   Cpu,
   Database,
+  DownloadCloud,
   Info,
   Plug,
   SlidersHorizontal,
@@ -23,6 +24,9 @@ export const SETTINGS_ICON: Record<SettingsPageId, LucideIcon> = {
   account: User,
   wallet: Wallet,
   general: SlidersHorizontal,
+  // ★ 不用 `Upload`:这一页的方向是「把外面的东西搬进来」,箭头必须朝下。
+  //   `Database` 已经被「数据」页占了,而那两页最不该被认混。
+  import: DownloadCloud,
   preference: Sparkles,
   model: Cpu,
   review: FEATURE_ICON.review,

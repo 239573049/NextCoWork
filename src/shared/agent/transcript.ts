@@ -57,6 +57,7 @@ export interface SubagentState {
   background?: boolean
   phase?: SubagentPhase
   currentTool?: string
+  currentTarget?: string
   toolCalls: number
   toolErrors: number
   startedAt?: number
@@ -75,6 +76,10 @@ export interface SubagentState {
   notice?: RunNotice
   /** Last child-run event sequence already reflected in this state. */
   childSeq?: number
+  /** Recent high-signal actions, newest first. Kept small so the chat stays readable. */
+  activity?: Array<{ toolName: string; target?: string; at?: number }>
+  /** Background result handoff state. */
+  reportStatus?: 'none' | 'pending' | 'injecting' | 'reported' | 'blocked'
 }
 
 export interface TranscriptState {
@@ -114,6 +119,16 @@ export interface TranscriptState {
    * 不能被 `emptyTranscript()` 清掉。
    */
   runUsage?: Record<string, RunUsage>
+  /**
+   * run → 发送那条消息时用户选中的模型别名,从 SQLite 回填(`SessionDetail.runModel`)。
+   *
+   * ★ 和 `runUsage` 同理,两份不同来源的同一种数:当前这一轮走 `SendOptions.model`
+   * (进程内存,`send()` 打的快照),历史轮次查这张表(落盘账,重启后照样在)。
+   * 别拿上面的 `model`(回包真实模型名)去顶替它 —— 那个会被服务端悄悄换名字
+   * (过期的预览别名、故障切换)而用户毫无察觉,抬头应该说的是「你选了什么」,
+   * 不是「服务端这次到底吐出了什么名字」。
+   */
+  runModel?: Record<string, string>
   /** 消息 → 产出它的 run。老对话(第 12 条迁移之前)为空。 */
   messageRuns?: Record<string, string>
   contextUsage?: { used: number; window: number; shouldCompact: boolean }
@@ -224,7 +239,10 @@ function writeSubagentResult(subagents: TranscriptState['subagents'], part: Extr
     ...(metadata.background === undefined ? {} : { background: metadata.background }),
     phase: status === 'running' ? (metadata.background === true ? 'background' : 'starting') : 'finishing',
     ...(metadata.summary === undefined ? {} : { summary: metadata.summary }),
-    ...(metadata.error === undefined ? {} : { error: metadata.error })
+    ...(metadata.error === undefined ? {} : { error: metadata.error }),
+    ...(metadata.reportStatus === undefined
+      ? (metadata.background === true && status === 'done' ? { reportStatus: 'pending' as const } : {})
+      : { reportStatus: metadata.reportStatus })
   }
 }
 
@@ -548,6 +566,10 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             // clear sent by `tool_end`, while an omitted field means "keep the
             // last tool" for telemetry updates that do not change it.
             ...('currentTool' in e ? { currentTool: e.currentTool } : {}),
+            ...('currentTarget' in e ? { currentTarget: e.currentTarget } : {}),
+            ...('currentTool' in e && typeof e.currentTool === 'string' ? {
+              activity: [{ toolName: e.currentTool, target: e.currentTarget, at: e.at }, ...(previous.activity ?? [])].slice(0, 3)
+            } : {}),
             ...(e.toolCalls === undefined ? {} : { toolCalls: e.toolCalls }),
             ...(e.toolErrors === undefined ? {} : { toolErrors: e.toolErrors }),
             ...(e.usage === undefined ? {} : { usage: addUsage(previous.usage, e.usage) }),
@@ -574,13 +596,15 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             status: e.status,
             phase: 'finishing',
             currentTool: undefined,
+            currentTarget: undefined,
             // 终态下错误框会把话说全,顶上再挂一句过期的「正在重试」只会误导
             // —— 和 `applyEvent` 里 `error` 分支清 `notice` 是同一条理由
             notice: undefined,
             ...(e.summary === undefined ? {} : { summary: e.summary }),
             ...(e.error === undefined ? {} : { error: e.error }),
             ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq }),
-            ...(e.at === undefined ? {} : { endedAt: e.at })
+            ...(e.at === undefined ? {} : { endedAt: e.at }),
+            ...(previous.background === true ? { reportStatus: 'pending' as const } : {})
           }
         }
       }
@@ -671,10 +695,10 @@ export function applyChildEvent(
       return s
     case 'tool_start':
       return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
-        phase: 'tool', currentTool: e.toolName, toolCalls: entry.toolCalls + 1 })
+        phase: 'tool', currentTool: e.toolName, currentTarget: toolTargetOf(e.input), toolCalls: entry.toolCalls + 1 })
     case 'tool_end':
       return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
-        phase: 'thinking', currentTool: undefined, toolErrors: entry.toolErrors + (e.isError ? 1 : 0) })
+        phase: 'thinking', currentTool: undefined, currentTarget: undefined, toolErrors: entry.toolErrors + (e.isError ? 1 : 0) })
     case 'context_usage':
       return childUpdate({ type: 'subagent_update', callId: entry.callId, childRunId,
         contextUsage: { used: e.used, window: e.window, shouldCompact: e.shouldCompact } })
@@ -684,6 +708,17 @@ export function applyChildEvent(
     default:
       return s
   }
+}
+
+function toolTargetOf(input: unknown): string | undefined {
+  if (typeof input === 'string') return input.slice(0, 160)
+  if (input === null || typeof input !== 'object') return undefined
+  const record = input as Record<string, unknown>
+  for (const key of ['path', 'filePath', 'query', 'pattern', 'command', 'url']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim() !== '') return value.slice(0, 160)
+  }
+  return undefined
 }
 
 /** 活跃块里的纯文本 —— 「正在打字」的那一段。 */

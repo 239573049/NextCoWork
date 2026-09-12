@@ -7,16 +7,31 @@ import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import type { SshConnectionProfile } from '../../../shared/domain/environment'
+import { connectionSecretRef } from '../../../shared/domain/environment'
 import { nodeHost } from '../../kernel/host'
 import { SshAuthBroker } from '../ssh/askpass'
 import { POSIX_PROBE, remoteTerminalCommand } from '../ssh/command'
 import { OpenSshTransport } from '../ssh/transport'
 import { SftpFileSystem } from '../ssh/sftp'
-import { execute, integration, isolatedSshd, readyConfig, remoteProcessAlive, until } from './sshd-fixture'
+import { execute, integration, isolatedSshd, readyConfig, remoteProcessAlive, until, type Sshd } from './sshd-fixture'
 
 const profile: SshConnectionProfile = { id: 'native-test', name: 'native-test', kind: 'ssh', enabled: true,
   platform: 'auto', revision: 1, createdAt: 0, updatedAt: 0, target: { kind: 'config', host: 'native-test' } }
 const electronBinary = createRequire(import.meta.url)('electron') as string
+
+/**
+ * 一份**逼 ssh 走密码认证**的客户端 config。
+ *
+ * `PubkeyAuthentication no` 是关键:夹具里那把 client key 是能用的,不关掉的话 ssh 走公钥
+ * 直接连上,一句密码都不会问 —— 用例会以"没收到提示"的形式静默通过。
+ */
+async function passwordConfig(sshd: Sshd): Promise<string> {
+  const knownHosts = join(sshd.directory, 'known_hosts_password')
+  await writeFile(knownHosts, `[127.0.0.1]:${sshd.port} ${sshd.hostKeyPublic}\n`, { mode: 0o600 })
+  return sshd.config(`Host native-test\n HostName 127.0.0.1\n Port ${sshd.port}\n User ${sshd.username}\n`
+    + ` PubkeyAuthentication no\n PreferredAuthentications password\n NumberOfPasswordPrompts 1\n`
+    + ` IdentityAgent none\n UserKnownHostsFile ${knownHosts}\n StrictHostKeyChecking yes\n`)
+}
 
 it.skipIf(!integration)('runs the built Electron askpass entry without opening application data', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ncw-helper-test-'))
@@ -130,8 +145,71 @@ it.skipIf(!integration || process.platform === 'win32')('classifies a real host 
   } finally { await transport.close(); await auth.close(); await sshd.close() }
 }, 60_000)
 
-/** host key 变更必须被拒绝,且**不能**退化成一次可点"是"的确认。 */
-it.skipIf(!integration || process.platform === 'win32')('refuses to connect when the recorded host key no longer matches', async () => {
+/**
+ * ★ 真实 ssh 的**密码**提示长什么样,在此之前没有任何用例走过。
+ *
+ * 既有的集成夹具一律 `PasswordAuthentication no` —— 也就是说真实 ssh 走过的认证提示只有
+ * `passphrase` 和 `host-key` 两种,`password` 的真实覆盖是零。而 `host-key` 的分类曾经就是
+ * 错的(OpenSSH 10.3 做 host key 确认时并不设 `SSH_ASKPASS_PROMPT`),那个 bug 是开了真实
+ * 开关之后第一次运行抓到的,mock 原理上抓不到。这里给 `password` 补同一根哨兵。
+ *
+ * 分类错的后果很具体:掉进 `challenge` 分支之后标签显示成"认证响应"、`canRemember` 关闭,
+ * 于是**存下的密码永远不会被用上**,自动作答整条路径静默失效。
+ */
+it.skipIf(!integration || process.platform === 'win32')('classifies a real password prompt as password', async () => {
+  const sshd = await isolatedSshd({ passwordAuth: true })
+  const clientConfig = await passwordConfig(sshd)
+  const kinds: string[] = []
+  const prompts: string[] = []
+  const broker = new SshAuthBroker(nodeHost().secrets, (sender, request) => {
+    kinds.push(request.kind)
+    prompts.push(request.prompt)
+    void broker.respond(sender, { id: request.id, value: 'wrong-on-purpose' })
+  })
+  const auth = await broker.open(profile, 1, { executable: electronBinary, appPath: process.cwd() })
+  const transport = new OpenSshTransport({ ...profile, target: { kind: 'config', host: 'native-test', configFile: clientConfig } },
+    { env: auth.env, onResolved: auth.resolve })
+  try {
+    const outcome = await transport.connect(AbortSignal.timeout(20_000)).then(() => 'connected', (error: Error) => error.message)
+    expect(kinds, `真实 ssh 的密码提示必须判成 password。连接结果:${outcome};收到的提示:${JSON.stringify(prompts)}`).toEqual(['password'])
+    // `UsePAM no` 下 sshd 校验不了密码 —— 认证注定失败,这里断言的是**分类**,不是登录成功
+    expect(outcome).not.toBe('connected')
+  } finally { await transport.close(); await auth.close(); await sshd.close() }
+}, 60_000)
+
+/**
+ * ★ 存下的密码被**真实 ssh 的真实提示**触发、自动作答,界面上不弹窗。
+ *
+ * "自动作答了"这件事必须有正面证据:只断言"没弹窗"是空的 —— askpass 压根没被调用时
+ * 也没弹窗。所以同时断言 broker 确实去取过那把密码。
+ */
+it.skipIf(!integration || process.platform === 'win32')('answers a real password prompt from storage without prompting the window', async () => {
+  const sshd = await isolatedSshd({ passwordAuth: true })
+  const clientConfig = await passwordConfig(sshd)
+  const ref = connectionSecretRef(profile.id, 'password')
+  const reads: string[] = []
+  const secrets = {
+    get: (key: string) => { reads.push(key); return Promise.resolve(key === ref ? 'stored-but-wrong' : null) },
+    set: () => Promise.resolve(), remove: () => Promise.resolve(), available: () => true
+  }
+  const notified: string[] = []
+  const broker = new SshAuthBroker(secrets, (sender, request) => {
+    notified.push(request.kind)
+    void broker.respond(sender, { id: request.id, cancelled: true })
+  })
+  const auth = await broker.open(profile, 1, { executable: electronBinary, appPath: process.cwd() })
+  const transport = new OpenSshTransport({ ...profile, target: { kind: 'config', host: 'native-test', configFile: clientConfig } },
+    { env: auth.env, onResolved: auth.resolve })
+  try {
+    const outcome = await transport.connect(AbortSignal.timeout(20_000)).then(() => 'connected', (error: Error) => error.message)
+    expect(reads, `broker 必须去取存下的密码。连接结果:${outcome}`).toContain(ref)
+    expect(notified, '存了密码就不该弹窗').toEqual([])
+    // 同上:密码是错的,而且 sshd 也校验不了 —— 认证失败是预期结果
+    expect(outcome).not.toBe('connected')
+  } finally { await transport.close(); await auth.close(); await sshd.close() }
+}, 60_000)
+
+/** host key 变更必须被拒绝,且**不能**退化成一次可点"是"的确认。 */it.skipIf(!integration || process.platform === 'win32')('refuses to connect when the recorded host key no longer matches', async () => {
   const sshd = await isolatedSshd()
   const decoy = join(sshd.directory, 'decoy-key')
   await execute('/usr/bin/ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', decoy])

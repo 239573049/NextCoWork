@@ -56,6 +56,7 @@ export class RunHandle {
 
   private readonly log: LogEntry[] = []
   private readonly listeners = new Set<RunListener>()
+  private readonly beforeFinishListeners = new Set<(status: RunStatus, error?: AgentError) => void>()
   private readonly controller = new AbortController()
   /**
    * 插话信箱 —— 渲染层放进来,`AgentSession` 在轮次边界取走(见 `takeInterject`)。
@@ -155,6 +156,11 @@ export class RunHandle {
     }
   }
 
+  beforeFinish(listener: (status: RunStatus, error?: AgentError) => void): Unsubscribe {
+    this.beforeFinishListeners.add(listener)
+    return () => this.beforeFinishListeners.delete(listener)
+  }
+
   get listenerCount(): number {
     return this.listeners.size
   }
@@ -196,7 +202,7 @@ export class RunHandle {
    * 取消/编辑/删除全都退化成「重发一次当前全集」,乱序到达也收敛。
    */
   setInterject(items: readonly InterjectItem[]): void {
-    this.interject = items.map((item) => ({ id: item.id, parts: [...item.parts] }))
+    this.interject = items.map((item) => ({ id: item.id, parts: [...item.parts], ...(item.internal ? { internal: true } : {}) }))
   }
 
   /**
@@ -226,6 +232,8 @@ export class RunHandle {
   finish(status: RunStatus, error?: AgentError): void {
     if (this.status !== 'running') return
     this.endedAt = Date.now()
+    for (const listener of this.beforeFinishListeners) listener(status, error)
+    this.beforeFinishListeners.clear()
     this.emit(error
       ? { type: 'run_end', status, error, at: this.endedAt }
       : { type: 'run_end', status, at: this.endedAt })

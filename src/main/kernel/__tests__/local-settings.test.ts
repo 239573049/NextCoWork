@@ -77,6 +77,45 @@ describe('readLocalSettings', () => {
     const missing = { ...fs, stat: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } }
     expect((await readLocalSettings(missing, ROOT, undefined, { namespace: 'server:1' })).permissions.deny).toEqual([])
   })
+
+  /**
+   * ★ 远端**每一次都重读**,不吃缓存。
+   *
+   * 这是权限判定的 fail-closed 取向在缓存上的那一半:一条缓存的规则说不清它属于哪一次
+   * 连接。重连之后拿旧连接的答案当结论,方向是「放行」——用户在服务器上删掉的 deny
+   * 规则还在生效,或者刚点的「以后都允许」不认账。判新鲜本来就要一次 stat,
+   * 那已经是一趟网络往返,省下的那次 readFile 不值得用这个换。
+   */
+  it('远端每一次读都重新落盘,不吃缓存', async () => {
+    const fs = memoryFs()
+    await fs.writeFile(PATH, JSON.stringify({ permissions: { allow: ['Bash'] } }))
+    const scope = { namespace: 'server:1' }
+    await readLocalSettings(fs, ROOT, undefined, scope)
+    await readLocalSettings(fs, ROOT, undefined, scope)
+    await readLocalSettings(fs, ROOT, undefined, scope)
+    expect(fs.reads, '远端三次读就是三次落盘').toBe(3)
+  })
+
+  /**
+   * ★ 远端和本机不能共用一把缓存键。
+   *
+   * 同一条路径在客户端和服务器上都存在是很平常的事(`/home/user/project` 两边都有),
+   * 共用一把键就意味着一边的答案会被当成另一边的。这里从本机那一侧观测:
+   * 夹在中间的那次远端读**不能**动本机那条缓存。
+   *
+   * 注:这条和上一条都只拦得住「往后有人把远端缓存打开」。历史上那次
+   * 「铸了键、写进去、又永远读不到」的写入是观测不到的 —— 它的代价只有内存,
+   * 没有任何行为差异,所以没有能变红的测试,只能靠代码审查。
+   */
+  it('远端读不污染本机缓存', async () => {
+    const fs = memoryFs()
+    await fs.writeFile(PATH, JSON.stringify({ permissions: { allow: ['Bash'] } }))
+    expect((await readLocalSettings(fs, ROOT)).permissions.allow).toEqual(['Bash'])
+    const after = fs.reads
+    await readLocalSettings(fs, ROOT, undefined, { namespace: 'server:1' })
+    await readLocalSettings(fs, ROOT)
+    expect(fs.reads, '本机那次仍然命中缓存,远端读没动它').toBe(after + 1)
+  })
 })
 
 describe('addLocalPermissionRule', () => {

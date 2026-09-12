@@ -834,6 +834,20 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     name: 'OpenCode Go(订阅制)',
     category: 'aggregator',
     /*
+      ★★ **这家上游对客户端有准入要求**,不满足就一条对话都发不出去。
+      文档(https://opencode.ai/docs/go.md 的 "Where can I use it?")列了三条:
+      发典型 coding agent 流量、**用自己的 User-Agent 而不是通用 SDK 名**
+      (`kernel/user-agent.ts` 那一行对这家不是可有可无的自报家门)、以及
+      **每个对话带一个稳定的 `x-opencode-session`**。
+
+      少了第三条,每一次对话都是
+      `Request is missing x-opencode-session and cannot be routed efficiently` ——
+      一句**措辞像性能建议、实则是硬拒绝**的错误,用户从里面读不出任何可做的事。
+      那个头在 `kernel/upstream/transport.ts` 的 `opencodeSession` 里装,按
+      **id 或主机名**认这家:用户手填 opencode.ai 地址建的自定义供应商 id 带
+      `custom-` 前缀,只按 id 认会把他整个漏掉,而他撞的是同一个错。
+    */
+    /*
       ★ 三个协议**同一个 base**,这是全表唯一一处 Anthropic base 带 `/v1` 的例外 ——
       这里的 `/v1` 是路由前缀,不是 Anthropic 的版本段。`joinUpstreamUrl` 的去重分支
       正好把它拼成实测存在的那个 `POST /zen/go/v1/messages`,不会变成 `/v1/v1/`。
@@ -977,6 +991,16 @@ export const BUILTIN_PROVIDER_ID = 'routin'
 export const BUILTIN_PLAN_PROVIDER_ID = 'routin-plan'
 /** Platform hosted provider, unlocked after desktop account sign-in. */
 export const CLIENT_PROVIDER_ID = 'nextcowork'
+
+/**
+ * OpenCode Go 那条预设。
+ *
+ * ★ 和上面几个同一个理由:`kernel/upstream/transport.ts` 拿它判「这次请求该不该
+ * 发 `x-opencode-session`」—— 不是只有本表在用。在那边另写一个 `'opencode-go'`
+ * 字面量的话,改预设 id 时只会有一边跟着改,而另一边**不报错,只是判断从此恒为
+ * false**:表现是 OpenCode 又开始拒每一次对话,且没有任何一处线索指向那次重命名。
+ */
+export const OPENCODE_GO_PROVIDER_ID = 'opencode-go'
 
 /**
  * 全新安装会被种进供应商表的那些(`main/runtime.ts` 的 `seedBuiltinUpstream`)。

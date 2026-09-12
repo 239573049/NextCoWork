@@ -7,6 +7,7 @@ import {
   PROVIDER_PRESETS,
   presetsByCategory,
   recommendedPresets,
+  OPENCODE_GO_PROVIDER_ID,
   type ProviderPreset
 } from '../presets'
 
@@ -321,6 +322,15 @@ describe('预设表 × joinUpstreamUrl:拼出来的 URL 没有畸形', () => {
     expect(joinUpstreamUrl('https://opencode.ai/zen/go/v1', '/v1/messages')).toBe(
       'https://opencode.ai/zen/go/v1/messages'
     )
+  })
+
+  /**
+   * ★ `kernel/upstream/transport.ts` 按这个常量判「该不该发 `x-opencode-session`」。
+   * 表里那条改了 id 而常量没跟着改的话,**不报错,只是判断从此恒为 false** ——
+   * 表现是 OpenCode 又开始拒每一次对话,且没有任何线索指向那次重命名。
+   */
+  it('★ OPENCODE_GO_PROVIDER_ID 确实指向表里那条', () => {
+    expect(findPreset(OPENCODE_GO_PROVIDER_ID)).not.toBeNull()
   })
 })
 

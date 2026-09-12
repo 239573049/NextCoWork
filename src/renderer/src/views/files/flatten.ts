@@ -31,7 +31,8 @@ export function flatten(
   root: string,
   sortBy: SortBy,
   showHidden: boolean,
-  query: string | null
+  query: string | null,
+  selectedPath: string | null = null
 ): Row[] {
   const needle = query === null ? '' : query.trim().toLowerCase()
   const out: Row[] = []
@@ -42,7 +43,9 @@ export function flatten(
 
     let any = false
     for (const entry of sortEntries(listing.entries, sortBy)) {
-      if (entry.hidden && !showHidden) continue
+      // ★ 被点名选中的那一项不受「不显示隐藏项」约束 —— reveal 一个 .env 的结果
+      //   不能是「树开出来了,却一行都没有」。用户没有别的入口能知道要去开隐藏项开关。
+      if (entry.hidden && !showHidden && entry.path !== selectedPath) continue
 
       if (entry.kind === 'dir') {
         const at = out.length

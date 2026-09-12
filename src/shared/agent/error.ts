@@ -27,6 +27,7 @@ export type AgentErrorCode =
   | 'cache_unsupported'
   /** 别名下所有 provider 都不健康(§5.3) */
   | 'no_healthy_provider'
+  | 'conflict'
   | 'unknown'
 
 export interface AgentError {

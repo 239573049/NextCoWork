@@ -28,6 +28,7 @@ import { useI18n } from "../i18n";
 import { BrowserFeature } from "./browser/BrowserFeature";
 import { DocumentView } from './files/DocumentView';
 import { ExtensionsFeature } from './extensions/ExtensionsFeature';
+import { ScheduledFeature } from './scheduled/ScheduledFeature';
 
 export interface InnerViewProps {
   tab: InnerTab;
@@ -84,6 +85,7 @@ export function FeatureView({ feature, onClose }: { feature: FeatureKind; onClos
   const { t } = useI18n();
   if (feature === "browser") return <BrowserFeature />;
   if (feature === "extensions") return <ExtensionsFeature onClose={onClose} />;
+  if (feature === "scheduled") return <ScheduledFeature onClose={onClose} />;
   const Icon = FEATURE_ICON[feature];
   const key = feature as "scheduled" | "review" | "settings";
   return (

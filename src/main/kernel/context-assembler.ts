@@ -27,6 +27,7 @@ import type { PlatformInfo } from './host'
 import { permissionFacts } from './permission-gate'
 import { clampWithEllipsis, stripControlChars } from './text'
 import type { TodoItem } from './tool/builtin/todo'
+import type { PlanDocumentV2 } from '../../shared/domain/plan'
 import { MARK, latestTodosFrom } from './tool/builtin/todo'
 import { neutralizeReminderTags, untrustedBoundary } from './untrusted'
 import type { CanonicalRequest } from './upstream/canonical'
@@ -187,7 +188,7 @@ Do what the user asked, completely — and stop there.
 
 # Doing the work
 - Prefer editing an existing file over creating a new one.
-- Use TodoWrite once a task takes three or more steps, and keep it current — it is how the user sees where you are.
+- Keep users informed when a multi-step task changes state.
 - Batch independent tool calls into a single reply. Several searches at once beats one per turn.
 - Verify when verifying is cheap: run the test, run the typechecker, re-read the line you edited. NEVER report that something passes when you did not run it.
 - Finish the whole task. If one part is genuinely blocked, do everything else and say plainly what you left out and why.
@@ -204,22 +205,16 @@ that does the same thing, and do not use Bash to do what the denied tool would h
 Stop and tell the user which permission you need.`
 
 const MODE_APPENDIX: Record<SessionMode, string> = {
-  normal: '',
+  normal: `# Default mode progress
+
+For complex execution tasks, use update_plan with the complete checklist. Keep it concise and update it only when a step changes. Finish the current step before starting the next one. Do not repeat the whole checklist in chat after calling the tool. If scope changes, submit a complete replacement checklist. Before finishing, run the relevant verification command and report the result.`,
   plan: `# Plan mode
 
-You have read-only tools only. This is not advice — the tool list has already been filtered,
-so a write or a command will not fail politely, it simply is not there.
-
-Investigate first. Then build the plan with PlanUpdate, one insert_step call per step — not a single
-call at the end that just restates the goal. A step is not done until it names the exact files,
-functions, or symbols touched and the before/after behavior; "update the code" or "fix the bug" is
-not a step, it is the thing you still have to figure out. Every step needs acceptanceCriteria that
-are checkable from the outside — a test that passes, a command that exits 0, a screen that renders
-X — not "works correctly". Before calling ExitPlanMode, also call set_risks with what could actually
-break (not generic caveats like "might have bugs") and set_validation with the exact commands or
-checks to run once it is executed. A plan with one step and no acceptance criteria will be rejected —
-break the work down for real. Then STOP. Do not promise to "start now" — the user reads the plan and
-takes you out of this mode when they want it executed.`,
+You have read-only tools only. Investigate the environment and repository first. Build a concise,
+verifiable checklist with submit_plan using only explanation and plan[]. Do not call update_plan,
+modify files, execute commands that change state, or promise that execution has started. The plan
+must contain at least one concrete step and should not add redundant ceremony for a simple task.
+After submit_plan succeeds, stop this planning run and wait for the user's decision.`,
   goal: `# Goal mode
 
 Keep going until the goal is actually met. Do NOT stop after each step to ask "should I continue?" —
@@ -520,6 +515,7 @@ const REMINDER_CLOSE = '</system-reminder>'
 const TODO_TEXT_MAX = 200
 
 export interface ReminderContext {
+  approvedPlan?: PlanDocumentV2
   /** AGENTS.md,已拼接已消毒(`instructions.ts`)。空串 / 缺省 = 没有。 */
   projectInstructions?: string
   /** run 开始时的 git 快照(`git-context.ts`)。缺省 = 不是仓库 / 读不到。 */
@@ -574,6 +570,7 @@ function todoSection(todos: readonly TodoItem[]): string {
 
 function stateBlock(ctx: ReminderContext, messages: readonly AgentMessage[]): string | undefined {
   const sections: string[] = []
+  if (ctx.approvedPlan !== undefined) sections.push(`Approved plan (${ctx.approvedPlan.id} v${String(ctx.approvedPlan.version)}):\n${ctx.approvedPlan.plan.map((step) => `- [${step.status}] ${step.step}`).join('\n')}`)
   if (ctx.git !== undefined) sections.push(gitSection(ctx.git))
 
   /*
@@ -632,7 +629,7 @@ export function decorate(
 ): readonly AgentMessage[] {
   const instructions = ctx.projectInstructions?.trim() ?? ''
   const head = instructions === '' ? undefined : reminderPart(instructionsBlock(instructions))
-  if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined) return messages
+  if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined && ctx.approvedPlan === undefined) return messages
 
   /*
     ★ 两处定位都不能写成 `messages[0]` / `messages.at(-1)`。

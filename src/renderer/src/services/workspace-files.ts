@@ -60,3 +60,19 @@ export function workspaceFileErrorKey(error: unknown): TranslationKey {
   const known = ['not-found', 'exists', 'invalid-path', 'symlink', 'permission', 'conflict', 'too-large', 'not-file', 'invalid-encoding', 'unsupported', 'workspace-unavailable']
   return `document.error.${known.includes(code) ? code : 'io'}`
 }
+
+/**
+ * 「结果未知」——连接在**请求已经发出之后**断的,操作可能已经在服务器上完成了。
+ *
+ * ★ 它和其它失败在界面上的后果完全不同。别的错(`exists`、`invalid-path`、`conflict`)
+ * 都意味着服务器上什么都没变,面板照原样显示就是对的;而 `result-unknown` 之后,
+ * 面板上那份列表已经**可能**是假的 —— rename 也许成功了,文件树里却还挂着旧名字。
+ * 提示语写的是「请先检查服务器状态」,而用户唯一用来检查的就是这个面板。
+ *
+ * 所以调用方必须重新去读一次服务器,不能拿本地状态当结论。注意重读**不是重试** ——
+ * 它不重放那个可能已经生效的写操作,只是把「我不知道」如实画出来(断着的时候
+ * 重读会失败,那一行就显示读取失败 + 可重试,而已经画出来的内容原样留着)。
+ */
+export function isResultUnknown(error: unknown): boolean {
+  return error instanceof AgentErrorException && error.error.environmentCode === 'result-unknown'
+}

@@ -14,6 +14,8 @@ export interface AgentMessage {
   createdAt: number
   /** 每条记录带版本号 —— 最便宜的保险(方案 §9) */
   schemaVersion: 1
+  /** Internal coordination messages are sent to the model but omitted from the chat transcript UI. */
+  internal?: boolean
 }
 
 /** Durable metadata attached to a Task tool result for UI reconstruction. */
@@ -24,6 +26,7 @@ export interface SubagentResult {
   /** Terminal error, including localization metadata, retained for UI diagnostics. */
   error?: AgentError
   background?: boolean
+  reportStatus?: 'none' | 'pending' | 'injecting' | 'reported' | 'blocked'
 }
 
 export type ContentPart =

@@ -7,6 +7,7 @@ import {
   isValidHookMatcher,
   type HookEvent
 } from '../../../../../shared/domain/hook'
+import type { HookTemplate } from '../../../../../shared/domain/hook-templates'
 
 export interface HookDraft {
   event: HookEvent
@@ -15,6 +16,26 @@ export interface HookDraft {
   timeoutSeconds: number
   description: string
   enabled: boolean
+}
+
+/**
+ * 模板 → 表单草稿。
+ *
+ * ★ 抽成纯函数而不是写在 `onValueChange` 里：`vitest.config.ts` 的 include 是
+ *   `src/**\/*.test.ts`，不含 `.tsx` —— 留在组件里的话，「选了模板但 matcher 没填上」
+ *   这种错一行测试也覆盖不到。
+ *
+ * `description` 由调用方传（它要走 i18n，而这一层不认识 `t`）。
+ */
+export function templateToDraft(template: HookTemplate, description: string): HookDraft {
+  return {
+    event: template.event,
+    matcher: template.matcher ?? '',
+    command: template.command,
+    timeoutSeconds: template.timeoutSeconds,
+    description,
+    enabled: true
+  }
 }
 
 /** 阻断错误：不修好就不能保存。 */

@@ -79,6 +79,66 @@ export interface PlanUpdateResult {
   message: string
 }
 
+/** Codex-shaped plan protocol. The rich PlanDocument above is legacy read-only data. */
+export const PlanStepV2Status = z.enum(['pending', 'in_progress', 'completed'])
+export type PlanStepV2Status = z.infer<typeof PlanStepV2Status>
+export const PlanLifecycle = z.enum(['draft', 'review', 'approved', 'executing', 'completed', 'failed', 'superseded'])
+export type PlanLifecycle = z.infer<typeof PlanLifecycle>
+
+export interface PlanStepV2 {
+  id: string
+  step: string
+  status: PlanStepV2Status
+}
+
+export interface PlanDocumentV2 {
+  id: string
+  sessionId: string
+  version: number
+  lifecycle: PlanLifecycle
+  explanation: string | null
+  plan: PlanStepV2[]
+  sourceRunId: string
+  executionRunId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type PlanRef = { planId: string; version: number }
+export type ApprovedPlanExecution = PlanRef & { source: 'current_session' | 'new_session' }
+
+export type PlanApprovalResponse =
+  | { kind: 'approve_current'; planId: string; version: number; feedback?: string }
+  | { kind: 'approve_new_session'; planId: string; version: number; feedback?: string }
+  | { kind: 'request_revision'; planId: string; version: number; feedback: string }
+  | { kind: 'reject'; planId: string; version: number; feedback?: string }
+
+export interface PlanV2Input {
+  planId?: string
+  sessionId: string
+  sourceRunId: string
+  explanation?: string | null
+  plan: Array<{ id?: string; step: string; status?: PlanStepV2Status }>
+}
+
+export function validatePlanV2Input(input: { explanation?: string | null; plan: Array<{ step: string; status: string }> }): string | null {
+  if (!Array.isArray(input.plan) || input.plan.length === 0) return 'A plan must contain at least one step.'
+  if (input.plan.length > 100) return 'A plan cannot contain more than 100 steps.'
+  if (input.explanation !== undefined && input.explanation !== null && input.explanation.length > 4000) return 'Explanation is too long (maximum 4000 characters).'
+  const seen = new Set<string>()
+  let active = 0
+  for (const step of input.plan) {
+    if (typeof step.step !== 'string' || step.step.trim() === '') return 'Every plan step must contain text.'
+    if (!PlanStepV2Status.safeParse(step.status).success) return `Unknown plan step status: ${step.status}`
+    const key = step.step.trim().toLocaleLowerCase()
+    if (seen.has(key)) return 'Plan steps must be unique.'
+    seen.add(key)
+    if (step.status === 'in_progress') active++
+  }
+  if (active > 1) return 'A plan can have at most one in-progress step.'
+  return null
+}
+
 export function isPlanOperation(value: unknown): value is PlanOperation {
   if (typeof value !== 'object' || value === null || !('op' in value)) return false
   const op = (value as { op?: unknown }).op

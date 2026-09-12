@@ -524,9 +524,10 @@ export class UpstreamRouter {
         cacheTtl
       }) : guardedBody
       /*
-        ★ 凭证决定的那部分请求形状(额外的头、被钉死的 body 字段)在这里合并 ——
-        和上面那段英文注释是**同一条规矩的第二个实例**:供应商自己的硬约束
-        压过模型级自定义。API Key 凭证走的是恒等变换,老供应商逐字节不变。
+        ★ **凭证与供应商**决定的那部分请求形状(额外的头、被钉死的 body 字段)在这里
+        合并 —— 和上面那段英文注释是**同一条规矩的第二个实例**:供应商自己的硬约束
+        压过模型级自定义。API Key 凭证 + 非 OpenCode 供应商走的是恒等变换,
+        老供应商逐字节不变。
       */
       const transport = upstreamTransport({ ...c.provider, protocol }, cred, { ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }) })
       const body = transport.body(anthropicBody)

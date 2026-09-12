@@ -9,6 +9,12 @@
  * 模型列表(`upstream/model-list.ts`)、搜索服务(`main/search/service.ts`)。
  * 这三条的对面都是 API,认的是 Key,不看 UA。
  *
+ * ★★ **有一个例外,而且是反方向的:** OpenCode Go 把「用自己的 User-Agent,
+ * 不是通用 SDK 或 HTTP 库名」列为**准入条件**之一(三条要求见
+ * `shared/domain/presets.ts` 那条预设旁边的注释)。所以对那家而言,这一行不是
+ * 可有可无的自报家门 —— 退回 Electron 的默认 UA 会让它开始拒,
+ * 而报错里不会提到 UA 一个字。
+ *
  * ★★ **另外三条路径刻意不动,每一条都有具体的失败模式:**
  *
  * | 不动的地方 | 改了会怎样 |

@@ -12,6 +12,8 @@ import { closeDatabase, defaultDatabaseDirectory, DB_FILENAME, openDatabase } fr
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownRuns, shutdownTerminals } from './ipc'
+import { shutdownImports } from './imports/service'
+import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
@@ -24,6 +26,7 @@ import { windows } from './window/registry'
 import { titleBarOptions, watchMaximized } from './window/title-bar'
 import { setSessionWindowOpener } from './ipc/app'
 import { updateService } from './update/update-service'
+import { reconcileScheduler, startScheduler, stopScheduler } from './scheduled/scheduler'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 单实例锁 —— 必须在 whenReady 之前。方案 §9:两个实例开同一个 SQLite 文件,
@@ -336,6 +339,7 @@ void app.whenReady().then(() => {
     host.logger.warn(`[skill:bundled] ${diagnostic.path}: ${diagnostic.message}`)
   }
   initRuntime(host)
+  startScheduler()
 
   /*
     ★ 代理必须在**任何一次出站请求之前**装好。`initRuntime` 已经把 host 装上了,
@@ -357,6 +361,15 @@ void app.whenReady().then(() => {
   })
   registerIpc()
   powerMonitor.on('suspend', () => { void shutdownEnvironments() })
+  /*
+    ★ 唤醒补扫。休眠两小时回来,30 秒定时器只会补触发一次,而这两小时里
+    源侧可能积了几十个会话 —— 少这一行的表现是「合盖前导过的那些还在,
+    合盖期间新增的要等很久才出现」,而用户会以为同步坏了。
+  */
+  powerMonitor.on('resume', () => { resumeImportSync(); reconcileScheduler() })
+
+  // 外部来源自动同步。**非阻塞**,不占启动路径;只在用户开过开关的来源上跑。
+  startImportSync()
 
   updateService.configure()
   if (app.isPackaged) {
@@ -405,6 +418,11 @@ app.on('before-quit', (event) => {
   isQuitting = true
   destroyTray()
   flushPendingPersists()
+  // ★ 停调度**在** shutdownRuns 之前:自动同步会去问「哪些 run 在跑」,
+  //   而那张表正要被清空,此时起一轮新扫描等于在关灯的房间里搬东西。
+  stopImportSync()
+  stopScheduler()
+  shutdownImports()
   shutdownRuns()
   shutdownSessionTitles()
   shutdownTerminals()

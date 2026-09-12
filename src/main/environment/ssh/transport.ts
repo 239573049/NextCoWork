@@ -13,6 +13,11 @@ export interface OpenSshOptions {
   env?: NodeJS.ProcessEnv
   executable?: string
   onDisconnect?: () => void
+  /**
+   * `ssh -G` 解析出的最终配置。认证 broker 用它判断某条密码提示来自链路上的哪一跳
+   * (见 `askpass.ts` 的 `shouldAutoAnswer`)。在任何会认证的 ssh 启动**之前**调用。
+   */
+  onResolved?: (values: Map<string, string>) => void
 }
 
 /**
@@ -118,6 +123,8 @@ export class OpenSshTransport {
     const config = await this.capture(['-G', ...sshTargetArgs(this.profile)], signal, 15_000)
     if (config.code !== 0) throw new EnvironmentError('unsupported-config', config.stderr.slice(-2000))
     const values = new Map(config.stdout.split('\n').map((line) => { const split = line.indexOf(' '); return [line.slice(0, split), line.slice(split + 1)] }))
+    // 交给认证 broker —— 必须在下面那个会认证的 ssh 之前,否则密码提示来时它还不知道要连哪儿
+    this.options.onResolved?.(values)
     if (values.get('remotecommand') && values.get('remotecommand') !== 'none') {
       throw new EnvironmentError('unsupported-config', 'RemoteCommand conflicts with workspace command and SFTP sessions. Use a dedicated Host alias.')
     }

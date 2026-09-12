@@ -604,6 +604,179 @@ CREATE TABLE plan_revisions (
 );
 `
 
+/**
+ * 第 16 条：从其他 AI 应用导入(首版:本机 Claude Code)。
+ *
+ * ## 为什么这四张表不进 `AppSettings`
+ *
+ * 来源绑定是**设备本地状态**:授权的目录、已确认的项目范围、同步开关,
+ * 说的全都是「这台机器上的那份 Claude Code 数据」。而 `AppSettings` 会被
+ * `config-sync.ts` 推上云再拉到另一台机器 —— 那台机器上 `/Users/a/.claude`
+ * 根本不存在,同步器却会照着它去扫,最好的情况是报错,最坏的情况是扫到
+ * 另一个人的目录。所以它必须留在只属于本机的表里。
+ *
+ * ## `import_mappings` 是整个功能的支点
+ *
+ * 「导入两次仍一份」不是靠 `replaceHistory` 的增量对账实现的 —— 那个函数按
+ * **本地消息 id** 对账,而同一份源转录第二次扫描会 mint 一批全新的 ULID,
+ * 于是对账的结果是「全都是新消息」。唯一能挡住的是一张
+ * 源 UUID → 本地 id 的持久映射,也就是这张表。
+ *
+ * 唯一键是 `(source_id, scope_key, entity_kind, source_item_id)` 四元组:
+ * - `scope_key`:`''` = 全局,否则是工作区 id。同一个源技能可以按全局装一份、
+ *   按项目再装一份,两者是不同的目标,不能互相覆盖。
+ * - `entity_kind`:workspace / session / message / skill / agent / command /
+ *   instructions / mcp。消息也在里面 —— 重试不重复全靠它。
+ *
+ * ## 两份指纹各挡一件事
+ *
+ * - `source_fingerprint`:上次成功导入时**源**长什么样。源没变就不用重做。
+ * - `target_fingerprint`:上次写完时**目标**长什么样。目标和它不一样 =
+ *   用户改过,于是源更新只能记 conflict,不能覆盖。
+ *
+ * 少任何一份都会退化成「按时间戳猜」,而那正是会把用户工作覆盖掉的做法。
+ *
+ * ★ 没有指向 `sessions` / `workspaces` 的外键。目标被用户删掉之后这一行要
+ * **留下来**当 tombstone(`sync_state = 'suppressed'`),否则下一轮自动同步
+ * 会把它原地复活 —— 那是用户明确删过的东西。
+ */
+const V16_IMPORTS = `
+CREATE TABLE import_sources (
+  source_id      TEXT PRIMARY KEY,
+  kind           TEXT NOT NULL,
+  -- 已授权的配置目录绝对路径。空串 = 曾经登记过但现在找不到了。
+  config_dir     TEXT NOT NULL DEFAULT '',
+  origin         TEXT NOT NULL DEFAULT 'auto',
+  sync_enabled   INTEGER NOT NULL DEFAULT 0,
+  -- 已授权类别与项目。JSON 数组:整读整写,从不按元素查询(见文件头的判据)。
+  categories     TEXT NOT NULL DEFAULT '[]',
+  project_keys   TEXT NOT NULL DEFAULT '[]',
+  last_check_at  INTEGER,
+  last_sync_at   INTEGER,
+  status         TEXT NOT NULL DEFAULT 'off',
+  diagnostics    TEXT NOT NULL DEFAULT '[]',
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+
+CREATE TABLE import_mappings (
+  source_id          TEXT NOT NULL,
+  -- '' = 全局作用域;否则是 workspace id。见文件头。
+  scope_key          TEXT NOT NULL DEFAULT '',
+  entity_kind        TEXT NOT NULL,
+  source_item_id     TEXT NOT NULL,
+  target_id          TEXT NOT NULL DEFAULT '',
+  target_path        TEXT NOT NULL DEFAULT '',
+  target_workspace_id TEXT NOT NULL DEFAULT '',
+  source_fingerprint TEXT NOT NULL DEFAULT '',
+  target_fingerprint TEXT NOT NULL DEFAULT '',
+  -- 转换器版本。解析规则改了之后,旧映射要能被认出来重做。
+  transformer_version INTEGER NOT NULL DEFAULT 1,
+  -- linked | detached | conflict | source-missing | suppressed
+  sync_state         TEXT NOT NULL DEFAULT 'linked',
+  -- 来源模型名/时间/标题这类只用于显示的元数据。不按字段查,留 JSON。
+  meta               TEXT NOT NULL DEFAULT '{}',
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  PRIMARY KEY (source_id, scope_key, entity_kind, source_item_id)
+);
+-- 反查:本地实体被删/被改时要找到它对应的那条映射
+CREATE INDEX import_mappings_by_target ON import_mappings (target_id, entity_kind);
+-- 同步一轮要按 (source, kind, state) 收窄
+CREATE INDEX import_mappings_by_state ON import_mappings (source_id, entity_kind, sync_state);
+
+CREATE TABLE import_batches (
+  id         TEXT PRIMARY KEY,
+  source_id  TEXT NOT NULL,
+  source_kind TEXT NOT NULL,
+  trigger    TEXT NOT NULL,
+  phase      TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at   INTEGER,
+  -- ImportCounts 六个数。整读整写。
+  counts     TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX import_batches_by_started ON import_batches (started_at DESC, id DESC);
+
+-- ★ 明细只记「哪一项、去了哪、结果如何」,**不复制转录正文或原始配置**。
+--   复制正文等于在审计表里留第二份用户数据,而它既不参与任何查询,
+--   又要跟着「清空对话历史」一起被想起来清掉。
+CREATE TABLE import_batch_items (
+  batch_id            TEXT NOT NULL REFERENCES import_batches (id) ON DELETE CASCADE,
+  seq                 INTEGER NOT NULL,
+  category            TEXT NOT NULL,
+  title               TEXT NOT NULL DEFAULT '',
+  source_path         TEXT NOT NULL DEFAULT '',
+  result              TEXT NOT NULL,
+  target_kind         TEXT,
+  target_id           TEXT,
+  target_workspace_id TEXT,
+  diagnostics         TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (batch_id, seq)
+);
+`
+
+/** 第 17 条：标记发给模型的内部协调消息，渲染层可将其从用户气泡中隐藏。 */
+const V17_INTERNAL_MESSAGES = `
+ALTER TABLE messages ADD COLUMN internal INTEGER NOT NULL DEFAULT 0;
+`
+
+/** 第 18 条：定时任务计划与执行记录。计划的查询/排序字段提列，领域配置保留 JSON。 */
+const V18_SCHEDULED_TASKS = `
+CREATE TABLE scheduled_tasks (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  next_run_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  json TEXT NOT NULL
+);
+CREATE INDEX scheduled_tasks_by_next_run ON scheduled_tasks (enabled, next_run_at);
+CREATE INDEX scheduled_tasks_by_workspace ON scheduled_tasks (workspace_id, updated_at DESC);
+
+CREATE TABLE scheduled_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '',
+  trigger TEXT NOT NULL,
+  status TEXT NOT NULL,
+  scheduled_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  summary TEXT,
+  error TEXT
+);
+CREATE INDEX scheduled_runs_by_task ON scheduled_runs (task_id, scheduled_at DESC, id DESC);
+CREATE INDEX scheduled_runs_by_scheduled_at ON scheduled_runs (scheduled_at DESC, id DESC);
+`
+
+/** 第 19 条：Codex-shaped v2 plans. Legacy plans remain readable through the old table. */
+const V19_PLANS_V2 = `
+CREATE TABLE plans_v2 (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  lifecycle TEXT NOT NULL,
+  json TEXT NOT NULL,
+  source_run_id TEXT NOT NULL,
+  execution_run_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX plans_v2_by_session ON plans_v2(session_id, updated_at DESC);
+CREATE TABLE plan_revisions_v2 (
+  plan_id TEXT NOT NULL REFERENCES plans_v2(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  author TEXT NOT NULL CHECK(author IN ('agent', 'user', 'system')),
+  source_run_id TEXT,
+  patch TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(plan_id, version)
+);
+CREATE UNIQUE INDEX plans_v2_one_execution ON plans_v2(id, execution_run_id) WHERE execution_run_id IS NOT NULL;
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -621,5 +794,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 14, name: 'plans', sql: V14_PLANS },
   { version: 15, name: 'workspace-connections', sql: `
     CREATE TABLE connection_profiles (id TEXT PRIMARY KEY, json TEXT NOT NULL);
-  ` }
+  ` },
+  { version: 16, name: 'imports', sql: V16_IMPORTS },
+  { version: 17, name: 'internal-messages', sql: V17_INTERNAL_MESSAGES },
+  { version: 18, name: 'scheduled-tasks', sql: V18_SCHEDULED_TASKS }
+  ,{ version: 19, name: 'plans-v2', sql: V19_PLANS_V2 }
 ]

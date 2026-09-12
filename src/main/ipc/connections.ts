@@ -1,7 +1,7 @@
 import { app, dialog } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { ConnectionProfile, ConnectionProfileInput, PreparedWorkspace, RemoteDirectory, SshAuthResponse } from '../../shared/domain/environment'
-import { normalizeEnvironmentRef } from '../../shared/domain/environment'
+import { connectionSecretRef, normalizeEnvironmentRef, SSH_AUTH_METHODS } from '../../shared/domain/environment'
 import type { Workspace } from '../../shared/domain/workspace'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../shared/domain/workspace'
 import { DIR_LISTING_LIMIT } from '../../shared/domain/file-tree'
@@ -120,21 +120,42 @@ export function registerConnectionBridge(): void {
   (status) => windows.emitToAll('connection:status', status))
 }
 
-export function listConnections(): Array<{ profile: ConnectionProfile; status: ReturnType<ReturnType<typeof getEnvironments>['status']> }> {
-  return store.listConnectionProfiles().map((profile) => ({ profile, status: getEnvironments().status(profile.id) }))
+/** ★ 只回 `hasPassword` 布尔 —— 存下的密码永不离开主进程。 */
+export async function listConnections(): Promise<Array<{ profile: ConnectionProfile; status: ReturnType<ReturnType<typeof getEnvironments>['status']>; hasPassword: boolean }>> {
+  const secrets = getHost().secrets
+  return Promise.all(store.listConnectionProfiles().map(async (profile) => ({
+    profile, status: getEnvironments().status(profile.id),
+    hasPassword: secrets.available() && (await secrets.get(connectionSecretRef(profile.id, 'password'))) !== null
+  })))
 }
 
 export async function upsertConnection(input: ConnectionProfileInput): Promise<ConnectionProfile> {
   if (!input || input.kind !== 'ssh' || typeof input.name !== 'string' || !input.name.trim() || input.name.length > 120
     || !['auto', 'linux', 'darwin', 'win32'].includes(input.platform) || typeof input.enabled !== 'boolean'
+    || (input.authMethod !== undefined && !SSH_AUTH_METHODS.includes(input.authMethod))
     || (input.id !== undefined && (typeof input.id !== 'string' || input.id.length > 128))) throw new EnvironmentError('invalid-profile')
+  const password = input.password
+  if (password !== undefined && password !== null && (typeof password !== 'string' || password.length > 8192 || password.includes('\0'))) {
+    throw new EnvironmentError('invalid-profile')
+  }
+  const secrets = getHost().secrets
+  /**
+   * ★ 存不了就**什么都不写**,而不是"连接存下了、密码悄悄丢了"。
+   *
+   * Linux 上没有 keyring 时 safeStorage 不可用,而明文落盘不是可接受的降级。部分成功
+   * 比整体失败更糟:用户以为密码存好了,下次连接却又被问,还找不到原因。校验排在
+   * `putConnectionProfile` 之前,失败时连 profile 都没动。
+   */
+  if (typeof password === 'string' && password !== '' && !secrets.available()) throw new EnvironmentError('invalid-profile')
   const previous = input.id ? store.getConnectionProfile(input.id) : undefined
   if (previous && previous.revision !== input.revision) throw new EnvironmentError('conflict')
   const now = Date.now()
   const target = input.target
+  // ★ profile 逐字段构造(不是展开 input)—— password 天然进不了 connection_profiles 行
   const profile: ConnectionProfile = { id: previous?.id ?? randomUUID(), name: input.name.trim(), kind: 'ssh', enabled: input.enabled,
+    ...(input.authMethod !== undefined ? { authMethod: input.authMethod } : {}),
     platform: input.platform, revision: (previous?.revision ?? 0) + 1, createdAt: previous?.createdAt ?? now, updatedAt: now,
-    target: target?.kind === 'config' ? { kind: 'config', host: target.host, configFile: target.configFile }
+    target: target?.kind === 'config' ? { kind: 'config', host: target.host, configFile: target.configFile, identityFile: target.identityFile }
       : { kind: 'manual', host: target?.host, port: target?.port, username: target?.username, identityFile: target?.identityFile, proxyJump: target?.proxyJump } }
   sshTargetArgs(profile)
   const identityChanged = previous && (JSON.stringify(previous.target) !== JSON.stringify(profile.target) || previous.platform !== profile.platform)
@@ -144,6 +165,12 @@ export async function upsertConnection(input: ConnectionProfileInput): Promise<C
   })) throw new EnvironmentError('approval-required')
   if (previous) await getEnvironments().disconnect(previous.id)
   store.putConnectionProfile(profile)
+  // undefined = 不动已存的;'' / null = 清除;非空 = 写入
+  if (password !== undefined) {
+    const ref = connectionSecretRef(profile.id, 'password')
+    if (password === null || password === '') await secrets.remove?.(ref)
+    else await secrets.set(ref, password)
+  }
   windows.emitToAll('connection:changed', undefined)
   return profile
 }

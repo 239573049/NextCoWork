@@ -1,35 +1,51 @@
 /**
  * 扩展面板探针 —— 验证「扩展」入口和它那四个 Tab。
  *
- * ⚠️ **这个脚本还没有端到端跑通过一次**。写完当场就被单实例锁挡住了(见下),
- * 所以里面的选择器和断言都只是照着源码写的,没有被真实页面证伪过。
- * 第一次跑很可能要调选择器 —— 别把它的失败直接当成被测代码的问题。
- *
- * ⚠️ **跑之前必须关掉 `/Applications/NextCoWork.app`**。`src/main/index.ts` 里
- * `app.requestSingleInstanceLock()`(第 32 行)排在 `app.setPath('userData', …)`
- * (第 69 行)**前面**,锁按 userData 路径算,于是未打包的开发实例和安装版共用
- * 同一把锁。拿不到锁的表现极具迷惑性:Electron 照常打印 `DevTools listening`,
- * 但 CDP 的 `/json` 永远是空的(窗口压根没建),进程静默退出且 exit code 是 0。
- *
  * CDP 驱动那套是从 `screenshot.mjs` 抄下来的(同一个理由:Electron 没实现 CDP 的
  * Browser 域,真窗口尺寸改不了,只能覆盖视口再靠 `captureBeyondViewport` 重绘)。
  *
- * ★ 跑在 `mkdtemp` 出来的**临时工作目录**里:主进程那句 setPath 会把命令行上的
- * `--user-data-dir` 整个忽略掉 —— 所以隔离靠的是 `cwd`,不是那个参数。
- * 不这么做会直接写进开发者自己的库。
+ * ★ **两个隔离参数缺一不可,而且它们管的是两件事**:
+ *
+ *   - `--user-data-dir` 管的是**单实例锁**。`src/main/index.ts` 里
+ *     `app.requestSingleInstanceLock()`(第 32 行)排在
+ *     `app.setPath('userData', …)`(第 69 行)**前面**,所以取锁那一刻用的还是
+ *     命令行给的这个值。不传它的话,开发实例会和已安装的 NextCoWork.app 抢
+ *     同一把锁 —— 表现极具迷惑性:Electron 照常打印 `DevTools listening`,
+ *     但 CDP 的 `/json` 永远是空的(窗口压根没建),进程静默退出且 exit code 是 0。
+ *
+ *   - `cwd`(mkdtemp 出来的临时目录)管的是**数据落在哪**。setPath 之后
+ *     userData 变成 `cwd/.next-cowork`,命令行那个参数对落盘位置不再起作用。
+ *     不这么做会直接写进开发者自己的库。
  *
  * 跑法:`npm run build && node scripts/extensions-probe.mjs`
  */
 import { spawn } from 'node:child_process'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import electron from 'electron'
 
-const PORT = 9336
 const OUT = '/tmp/nextcowork-extensions'
 const VIEWPORT = { width: 1264, height: 900 }
+
+/**
+ * 找一个没人用的调试端口。
+ *
+ * ★ 写死一个端口的代价是**上一次跑剩下的进程会把这一次挡在门外**，而症状和
+ *   「单实例锁没绕开」一模一样（CDP 连不上），排查时极容易走错方向。
+ */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.on('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(() => resolve(port))
+    })
+  })
+}
 
 class Cdp {
   #ws
@@ -111,10 +127,18 @@ try {
   const projectRoot = process.cwd()
   testProject = await mkdtemp(join(tmpdir(), 'nextcowork-ext-'))
 
-  child = spawn(electron, [projectRoot, `--remote-debugging-port=${PORT}`], {
+  const port = await freePort()
+  /*
+    ★ `detached: true` 是为了收尾能杀掉**整棵**进程树。Electron 会派生一堆
+    helper 进程，只 `child.kill()` 的话主进程走了、helper 还占着调试端口 ——
+    下一次跑就会卡在「CDP 连不上」，而那个症状和单实例锁没绕开长得一模一样。
+    （和 `environment/local.ts` 给钩子加 detached 是同一个问题。）
+  */
+  child = spawn(electron, [projectRoot, `--remote-debugging-port=${port}`, `--user-data-dir=${join(testProject, '.ud')}`], {
     cwd: testProject,
     env,
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true
   })
   child.stderr.on('data', (b) => {
     const s = String(b)
@@ -123,7 +147,7 @@ try {
 
   const target = await until('渲染进程 CDP target', async () => {
     try {
-      const list = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json()
+      const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json()
       return list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl) ?? null
     } catch {
       return null
@@ -164,9 +188,17 @@ try {
   )
   check('四个 Tab 都在', tabs.every((x) => labels.includes(x)), `实际:${JSON.stringify(labels)}`)
 
-  // header 只能有一条 —— chromeless 没生效的话 Skills 会再画一条。
+  /*
+    Skills Tab 应当有**两条** header:外层那条(返回 + 标题 + 四个 Tab)，
+    加上 SkillsFeature 自己那条只剩右侧按钮的工具条(`chromeless` 去掉的是
+    返回键和标题，不是整个 header)。三条就说明 chromeless 没生效。
+  */
   const headerCount = await cdp.eval(`document.querySelectorAll('header').length`)
-  check('Skills Tab 只有一条 header', headerCount === 1, `实际 ${headerCount} 条`)
+  check('Skills Tab 的 header 没有重复', headerCount === 2, `实际 ${headerCount} 条`)
+  const backButtons = await cdp.eval(
+    `[...document.querySelectorAll('header button')].filter((b) => b.getAttribute('aria-label') === '返回').length`
+  )
+  check('只有一个返回按钮', backButtons === 1, `实际 ${backButtons} 个`)
   await cdp.shoot('01-skills')
 
   for (const [i, name] of tabs.entries()) {
@@ -182,6 +214,23 @@ try {
     check(`切到「${name}」有内容`, body.includes(name), '')
     await cdp.shoot(`0${String(i + 1)}-${['skills', 'commands', 'agents', 'hooks'][i]}`)
   }
+
+  // 钩子的新建弹层：模板下拉必须在（模板是这一屏最先要看到的东西）。
+  await cdp.eval(clickButton('新建'))
+  await sleep(600)
+  const dialogOpen = await cdp.eval(`document.querySelector('[role="dialog"]') !== null`)
+  check('钩子新建弹层能打开', dialogOpen === true)
+  const hasTemplatePicker = await cdp.eval(
+    `[...document.querySelectorAll('[role="dialog"] *')].some((e) => e.textContent?.trim() === '从模板开始')`
+  )
+  check('弹层里有「从模板开始」', hasTemplatePicker === true)
+  const hasTestButton = await cdp.eval(
+    `[...document.querySelectorAll('[role="dialog"] button')].some((b) => b.textContent?.trim() === '试运行')`
+  )
+  check('弹层里有「试运行」', hasTestButton === true)
+  await cdp.shoot('05-hook-dialog')
+  await cdp.eval(clickButton('取消'))
+  await sleep(300)
 
   // 回到技能 Tab，确认 Skills 的操作按钮还在（chromeless 只该去掉返回键和标题）。
   await cdp.eval(`(() => {
@@ -199,7 +248,9 @@ try {
   failed = true
   console.error(`探针挂了:${error.message}`)
 } finally {
-  child?.kill()
+  if (child?.pid !== undefined) {
+    try { process.kill(-child.pid, 'SIGTERM') } catch { child.kill() }
+  }
   if (testProject) await rm(testProject, { recursive: true, force: true })
   process.exit(failed ? 1 : 0)
 }

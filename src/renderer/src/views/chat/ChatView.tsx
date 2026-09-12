@@ -39,13 +39,16 @@ export function ChatView({
   sessionId,
   tabId,
   workspace,
-  fallbackModel
+  fallbackModel,
+  runningOverride
 }: {
   /** null = 还没有会话的草稿 Tab,见 `shared/domain/tab.ts` 的 `chatKey` */
   sessionId: string | null
   tabId: string
   workspace: Workspace
   fallbackModel: FallbackModel
+  /** Background scheduled runs do not subscribe to the normal renderer run pump. */
+  runningOverride?: boolean
 }): ReactNode {
   /*
     ★ 草稿期用 tabId 作键 —— 转录 store 与未发出输入的存档都按它索引。
@@ -54,12 +57,13 @@ export function ChatView({
   const storeKey = sessionId ?? tabId
   const remote = !isLocalEnvironment(workspace.environment)
   const useSession = sessionStore(storeKey)
-  const { activeRunId, lastSeq, transcript, queuedInputs, compacting } = useSession(useShallow((state) => ({
+  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, lastOptions } = useSession(useShallow((state) => ({
     activeRunId: state.activeRunId,
     lastSeq: state.lastSeq,
     transcript: state.transcript,
     queuedInputs: state.queuedInputs,
-    compacting: state.compacting
+    compacting: state.compacting,
+    lastOptions: state.lastOptions
   })))
   const {
     stop,
@@ -74,8 +78,6 @@ export function ChatView({
     compactContext
   } = useSession.getState()
   const providerById = useModelsStore((s) => s.providerById)
-  // 订阅数组本身而不只是取函数:别名表加载完 / 设置页改完之后抬头要跟着变。
-  const models = useModelsStore((s) => s.models)
   const openMarkdownFile = useCallback((path: string) => {
     useTabsStore.getState().openPath(workspace.id, 'doc', path, path.split('/').pop() ?? path)
   }, [workspace.id])
@@ -92,7 +94,7 @@ export function ChatView({
     [workspace.id, tabId, storeKey]
   )
 
-  const running = activeRunId !== null
+  const running = runningOverride ?? activeRunId !== null
   /*
     ★ 直接按回包带回来的 providerId 查,**不再经过别名表**。
     以前是 `providerOf(transcript.model)`,而 `transcript.model` 是上游回包里的
@@ -102,17 +104,14 @@ export function ChatView({
   */
   const provider = transcript.providerId === undefined ? undefined : providerById(transcript.providerId)
   /*
-    ★ 抬头显示**用户选的那个别名**,不是 `transcript.model`。后者是上游回包里的
-    真实模型名(`deepseek-flash`),而用户在药丸上选的、在设置里配的是别名
-    (`deepseek-v4.1-flash-exp`)—— 两个名字对不上时,他会以为自己选的模型没生效。
-    按 `(providerId, upstreamModel)` 反查这条绑定;查不到(改过配置、或者故障切换
-    到一个没配过的模型)才退回真实模型名,那时它是唯一说得清的信息。
+    ★ 抬头显示**发送这条消息时用户选中的那个别名**(`lastOptions.model`),
+    不是 `transcript.model`。后者是上游回包里的真实模型名 —— 服务端随时可能
+    悄悄换个名字(过期的预览别名、故障切换),用户选的和回包报的对不上时,
+    他会以为自己选的模型没生效。这里不做任何反查,拿到什么就是什么:
+    发送那一刻药丸上是什么,抬头就说什么。历史轮次的值见 `Thread` 里的
+    `turnModel`,按各自的 `runId` 查 `transcript.runModel`。
   */
-  const modelName = transcript.model === undefined
-    ? undefined
-    : models.find((m) => m.upstreamModel === transcript.model
-        && (transcript.providerId === undefined || m.providerId === transcript.providerId))?.alias
-      ?? transcript.model
+  const modelName = lastOptions?.model
   /** 编辑消息续跑时用的模型。和 `Composer` 的兜底链同源:工作区选过的 → 应用默认。 */
   const editModel: FallbackModel = workspace.settings.defaultModel !== ''
     ? { model: workspace.settings.defaultModel,
@@ -138,7 +137,7 @@ export function ChatView({
   /** 批准执行后计划模式已经完成使命 —— 药丸和工作区默认值都要跟着退回普通模式,否则下一句话还得再走一遍只读审批。 */
   const [planExitSignal, setPlanExitSignal] = useState(0)
 
-  const executePlan = useCallback((plan: string, newSession: boolean, planId?: string, planVersion?: number): void => {
+  const executePlan = useCallback((ref: { planId: string; version: number }, source: 'current_session' | 'new_session'): void => {
     const options = {
       workspaceId: workspace.id,
       depth: 0 as const,
@@ -149,19 +148,18 @@ export function ChatView({
       model: workspace.settings.defaultModel !== '' ? workspace.settings.defaultModel : fallbackModel.model,
       modelProviderId: workspace.settings.defaultModelProviderId ?? fallbackModel.modelProviderId,
       skillIds: workspace.settings.activeSkillIds,
-      skillSelectionMode: workspace.settings.skillSelectionMode
-      ,planId
-      ,planVersion
+      skillSelectionMode: workspace.settings.skillSelectionMode,
+      approvedPlan: { ...ref, source }
     }
     const start = (targetSessionId: string): void => {
-      void sessionStore(targetSessionId).getState().send(`Execute the approved plan:\n\n${plan}`, options)
+      void sessionStore(targetSessionId).getState().send(t('agent.plan.executePrompt'), options)
     }
     setPlanExitSignal((v) => v + 1)
     retagQueuedMode('normal')
     if (workspace.settings.defaultMode === 'plan') {
       void updateWorkspace({ id: workspace.id, settings: { defaultMode: 'normal' } }).catch(() => undefined)
     }
-    if (!newSession) { start(ensureSessionId()); return }
+    if (source === 'current_session') { start(ensureSessionId()); return }
     void createSession(workspace.id, t('composer.planExecutionTitle')).then((session) => {
       useTabsStore.getState().openSession(workspace.id, session.id, session.title)
       start(session.id)
@@ -544,11 +542,11 @@ function SessionComposer({ storeKey, ...props }: { storeKey: string } & Omit<Com
 }
 
 /**
- * 输入框上方的任务清单。默认折叠 —— 展开态会顶掉输入框上方的空间,而清单标题行
- * 里已经带了「已完成 x/y」、当前进行项和进度条,不展开也够看。想看全部再点开。
+ * 输入框上方的任务清单。默认展开，让当前任务直接显示在输入框上方；标题行
+ * 仍然带有完成进度和当前进行项，用户也可以手动收起。
  */
 function TaskChecklist({ todos, t }: { todos: readonly TodoItem[]; t: ReturnType<typeof useI18n>['t'] }): ReactNode {
-  const [collapsed, setCollapsed] = useState(true)
+  const [collapsed, setCollapsed] = useState(false)
   const done = todos.filter((item) => item.status === 'completed').length
   const active = todos.find((item) => item.status === 'in_progress')
   const progress = todos.length === 0 ? 0 : done / todos.length

@@ -10,6 +10,7 @@
  * 现在合并成一个 union 是十几行。
  */
 import type { PermissionDecision } from './permission'
+import type { PlanDocumentV2 } from '../domain/plan'
 
 /** 一道题里的一个候选项。`description` 是选项下面那行小字,模型可以不给。 */
 export interface AskUserOption {
@@ -79,6 +80,7 @@ export type PendingInteraction =
       plan: string
       planId?: string
       planVersion?: number
+      planDocument?: PlanDocumentV2
       createdAt: number
     }
 
@@ -90,6 +92,8 @@ export type InteractionResponse =
    * 而不是裸字符串 —— 两种形状会让下游每处都得先判类型。
    */
   | { id: string; kind: 'ask_user'; answers: string[][] | null }
+  | { id: string; kind: 'plan_approval'; action: 'approve_current' | 'approve_new_session' | 'request_revision' | 'reject'; planId: string; version: number; feedback?: string }
+  /** Legacy renderer compatibility; v2 plan tools never emit this shape. */
   | { id: string; kind: 'plan_approval'; approved: boolean; feedback?: string }
 
 /** 待决项的最终去向。`aborted` 是中断路径写进去的(方案 §4.8 第 2 步)。 */

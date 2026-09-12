@@ -272,6 +272,53 @@ describe('恢复保留本机专属备份状态', () => {
   })
 })
 
+describe('备份带上全局 settings.json', () => {
+  const globalPath = (): string => join(root, 'settings.json')
+  const hooks = (command: string): string =>
+    JSON.stringify({ version: 1, hooks: { Stop: [{ id: 'h1', command, timeout: 60 }] } })
+
+  it('★ 钩子进包，并且能还原回来 —— 只还原一半的话，用户拿回了会话却丢了钩子', async () => {
+    const directory = join(outside, 'hook-backups')
+    mkdirSync(directory)
+    writeFileSync(globalPath(), hooks('notify.sh'))
+    const archive = await makeBackup(directory)
+
+    // 备份之后被改掉，恢复应该把它盖回去
+    writeFileSync(globalPath(), hooks('别的东西.sh'))
+    select(archive)
+    await restoreBackup({ confirm: false }, 41)
+    await restoreBackup({ confirm: true }, 41)
+
+    expect(JSON.parse(readFileSync(globalPath(), 'utf8')).hooks.Stop[0].command).toBe('notify.sh')
+  })
+
+  it('★ 包里没有这个条目时不动磁盘上现有的那份 —— 备份里没有不等于用户想删掉它', async () => {
+    const directory = join(outside, 'no-hook-backups')
+    mkdirSync(directory)
+    // 备份的时候没有全局设置
+    const archive = await makeBackup(directory)
+    // 之后才配了钩子
+    writeFileSync(globalPath(), hooks('后来配的.sh'))
+
+    select(archive)
+    await restoreBackup({ confirm: false }, 42)
+    await restoreBackup({ confirm: true }, 42)
+
+    expect(existsSync(globalPath())).toBe(true)
+    expect(JSON.parse(readFileSync(globalPath(), 'utf8')).hooks.Stop[0].command).toBe('后来配的.sh')
+  })
+
+  it('没有全局设置时备份照常能做、能恢复', async () => {
+    const directory = join(outside, 'plain-backups')
+    mkdirSync(directory)
+    repo.ensureSession({ id: 's1', workspaceId: 'w', title: '只有会话' })
+    const archive = await makeBackup(directory)
+    select(archive)
+    await restoreBackup({ confirm: false }, 43)
+    await expect(restoreBackup({ confirm: true }, 43)).resolves.toMatchObject({ restored: true })
+  })
+})
+
 describe('加密凭证导入跟随冲突合并结果', () => {
   it('新供应商的归档 ref 会映射为本机派生 ref', async () => {
     store.putProvider({

@@ -65,6 +65,27 @@ import { windows } from '../window/registry'
 import { PROXY_PASSWORD_REF } from '../net/proxy'
 import { IpcError } from './errors'
 import { runs } from '../kernel/run-registry'
+import { jobStatusFor } from '../imports/service'
+import { store as stateStore } from '../state/store'
+import { GLOBAL_SETTINGS_FILENAME, clearGlobalSettingsCache } from '../kernel/local-settings'
+
+/**
+ * 破坏性操作与导入作业**互斥**。
+ *
+ * ★ 和上面那道「有运行中的 Agent」是同一类守卫,但挡的是另一种事故:
+ * 导入作业正在逐项写会话和文件,此时恢复整库或清空数据库,会让一半的
+ * `import_mappings` 指向已经不存在的行 —— 而下一轮自动同步读到那些行,
+ * 会认为「导过了」,于是那部分内容再也不会被重新导入。
+ */
+function assertNoImportJob(action: string): void {
+  for (const source of stateStore.listImportSources()) {
+    const job = jobStatusFor(source.sourceId)
+    if (job === null) continue
+    if (job.phase === 'scanning' || job.phase === 'importing' || job.phase === 'ready') {
+      throw new IpcError('unknown', `有正在进行的导入任务，请先等待或取消后再${action}`)
+    }
+  }
+}
 
 const BACKUP_STATUS_KEY = 'data.backup.status'
 const ATTACHMENTS_DIR = 'attachments'
@@ -1082,10 +1103,23 @@ export async function createBackup(req: { manual?: boolean } = { manual: true })
       encryptedCredentials: repo.listCredentials().length > 0
     }
     const settings = jsonBytes(store.getSettings())
+    /*
+      全局 `settings.json`（目前只有 hooks）。
+
+      ★ zip 里的条目名是 `global-settings.json` 而不是磁盘上那个 `settings.json`：
+      这个包里**已经**有一个叫 `settings.json` 的条目，装的是 AppSettings 的 dump
+      （恢复时还要和 database.sqlite 对账）。两者同名会让读包的人分不清，
+      而改已有那个条目名就得动 `BACKUP_FORMAT_VERSION`。
+
+      ★ 文件不存在是常态（用户一条钩子都没配过）—— 那就不放进包里，
+      恢复端也按「没有钩子」处理。
+    */
+    const globalSettings = readGlobalSettingsBytes()
     const archive = makeZip([
       { name: 'manifest.json', data: jsonBytes(manifest) },
       { name: 'database.sqlite', data: database },
-      { name: 'settings.json', data: settings }
+      { name: 'settings.json', data: settings },
+      ...(globalSettings === null ? [] : [{ name: 'global-settings.json', data: globalSettings }])
     ])
     const baseName = req.manual === true ? `nextcowork-${new Date().toISOString().replaceAll(':', '-')}` : 'nextcowork-auto'
     let name = `${baseName}${BACKUP_EXT}`
@@ -1129,7 +1163,42 @@ function normalizedSettings(value: unknown): unknown {
   return mergeSettings(DEFAULT_SETTINGS, value as Parameters<typeof mergeSettings>[1])
 }
 
-function parseBackup(path: string): { manifest: BackupManifest; database: Buffer; settings: unknown } {
+/**
+ * 全局 `<appData>/settings.json`（目前只有 hooks）的备份 / 恢复。
+ *
+ * ★ 它和数据库是两份独立的存储，但对用户来说恢复是**一件事**：只还原一半的话，
+ *   会话回来了而钩子没了，界面上还没有任何地方会提这件事。
+ */
+function globalSettingsFilePath(): string {
+  return join(dataDirectory(), GLOBAL_SETTINGS_FILENAME)
+}
+
+/** 不存在返回 null —— 用户一条钩子都没配过是常态，不是错误。 */
+function readGlobalSettingsBytes(): Buffer | null {
+  const path = globalSettingsFilePath()
+  try {
+    return existsSync(path) ? readFileSync(path) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * ★ 包里没有这个条目时**不动**磁盘上现有的那份：备份里没有（旧版本的包、
+ *   或者当时确实没配过）不等于用户想删掉它。
+ */
+function restoreGlobalSettings(data: Buffer | null): void {
+  if (data === null) return
+  try {
+    atomicWrite(globalSettingsFilePath(), data)
+    clearGlobalSettingsCache(dataDirectory())
+  } catch (err) {
+    // 钩子没还原成功不该让整次恢复回滚 —— 数据库才是主体。
+    getHost().logger.warn(`[backup] 全局设置恢复失败：${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+function parseBackup(path: string): { manifest: BackupManifest; database: Buffer; settings: unknown; globalSettings: Buffer | null } {
   if (!isAbsolute(path) || !existsSync(path)) throw new IpcError('unknown', '备份文件不存在')
   try {
     if (statSync(path).size > MAX_BACKUP_BYTES) throw new IpcError('unknown', '备份文件过大')
@@ -1188,7 +1257,8 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
     throw new IpcError('unknown', '备份设置结构无效')
   }
   validateBackupDatabase(dbRaw, m, settings)
-  return { manifest: m as BackupManifest, database: dbRaw, settings }
+  // 旧版本的备份里没有这个条目 —— 缺席按「没有钩子」处理，不是错误。
+  return { manifest: m as BackupManifest, database: dbRaw, settings, globalSettings: entries.get('global-settings.json') ?? null }
 }
 
 /**
@@ -1262,6 +1332,7 @@ export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Pr
     return { restored: false, preview }
   }
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再恢复')
+  assertNoImportJob('恢复')
   const target = pendingRestores.get(ownerId)
   if (target === undefined) throw new IpcError('unknown', '没有待确认的恢复预览')
   const parsed = parseBackup(target.path)
@@ -1281,6 +1352,15 @@ export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Pr
     // current device's backup directory and sanitize its status immediately
     // after reopening the replacement database.
     restoreLocalBackupState(localBackupState)
+    /*
+      全局 `settings.json`（钩子）。★ 放在数据库换完之后、广播之前：它和数据库
+      是两份独立的存储，但恢复必须是一件事 —— 只还原一半的话，用户拿回了会话
+      却丢了钩子，而界面上没有任何地方会提。
+
+      ★ 包里没有这个条目是**正常**的（旧版本的备份、或者用户一条钩子都没配过），
+      这时**不动**磁盘上现有的那份：备份里没有不等于用户想删掉它。
+    */
+    restoreGlobalSettings(parsed.globalSettings)
     pendingRestores.delete(ownerId)
     windows.emitToAll('settings:changed', store.getSettings())
     windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
@@ -1738,6 +1818,7 @@ export function cleanupPreview(req: { kind: 'attachments' | 'age' | 'history' | 
 
 export function cleanupAttachments(): CleanupResult {
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再清理')
+  assertNoImportJob('清理')
 
   // ★ 预览与执行走同一次扫描，不是两次 —— 两次之间文件可能变化，
   //   而用户看到的数字必须就是实际发生的事。
@@ -1778,6 +1859,7 @@ export function cleanupAttachments(): CleanupResult {
 
 export function cleanupByAge(req: { age: CleanupAge }): CleanupResult {
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再清理')
+  assertNoImportJob('清理')
   const cutoff = cutoffForAge(Date.now(), req.age)
   const ids = repo.sessionIdsBefore(cutoff)
   const rows = repo.attachmentRowsForSessions(ids)
@@ -1793,6 +1875,7 @@ export function cleanupByAge(req: { age: CleanupAge }): CleanupResult {
 
 export function clearHistory(): CleanupResult {
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再清理')
+  assertNoImportJob('清理')
   const rows = repo.allSessionAttachmentRows()
   const preview = withActualAttachmentBytes(repo.cleanupPreview('history'), rows)
   const paths = rows.map((row) => row.path)
@@ -1808,6 +1891,7 @@ export function clearHistory(): CleanupResult {
 export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } {
   if (!req.confirm) throw new IpcError('unknown', '必须明确确认删除本机数据')
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再删除')
+  assertNoImportJob('删除')
   const root = dataDirectory()
   const configuredBackup = store.getSettings().data.backupDirectory
   // A malformed legacy setting must not accidentally protect a path relative

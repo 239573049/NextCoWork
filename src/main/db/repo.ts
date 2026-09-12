@@ -32,6 +32,7 @@ import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../s
 import { isDefaultSessionTitle } from '../../shared/domain/session'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import type { Workspace } from '../../shared/domain/workspace'
+import type { ScheduledRun, ScheduledTask } from '../../shared/domain/scheduled'
 import type { ConnectionProfile, EnvironmentRef } from '../../shared/domain/environment'
 import { normalizeEnvironmentRef } from '../../shared/domain/environment'
 import { EnvironmentError } from '../environment/errors'
@@ -50,7 +51,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { SyncConfigKind, SyncConflict, SyncMutation } from '../../shared/domain/config-sync'
-import type { PlanDocument, PlanOperation, PlanRevision, PlanUpdateResult } from '../../shared/domain/plan'
+import type { PlanDocument, PlanOperation, PlanRevision, PlanUpdateResult, PlanDocumentV2, PlanV2Input, PlanLifecycle, PlanStepV2Status } from '../../shared/domain/plan'
+import { validatePlanV2Input } from '../../shared/domain/plan'
 
 const SYNC_ACCOUNT_KEY = 'config-sync.account'
 const SYNC_DEVICE_KEY = 'config-sync.device'
@@ -163,6 +165,111 @@ export function approvePlan(id: string, version: number): PlanDocument {
   const next = { ...plan, status: 'approved' as const, updatedAt: Date.now() }
   stmt('UPDATE plans SET status = ?, json = ?, updated_at = ? WHERE id = ?').run(next.status, JSON.stringify(next), next.updatedAt, id)
   return next
+}
+
+// ── Codex-shaped plans v2 ───────────────────────────────────────────────────
+
+function parsePlanV2(row: Record<string, unknown>): PlanDocumentV2 {
+  return parse<PlanDocumentV2>(row['json'])
+}
+
+export function getPlanV2(id: string): PlanDocumentV2 | undefined {
+  const row = stmt('SELECT json FROM plans_v2 WHERE id = ?').get(id)
+  return row === undefined ? undefined : parsePlanV2(row as Record<string, unknown>)
+}
+
+export function listPlansV2(sessionId: string): PlanDocumentV2[] {
+  return stmt('SELECT json FROM plans_v2 WHERE session_id = ? ORDER BY updated_at DESC').all(sessionId)
+    .map((row) => parsePlanV2(row as Record<string, unknown>))
+}
+
+export function getExecutionPlanV2(runId: string): PlanDocumentV2 | undefined {
+  const row = stmt('SELECT json FROM plans_v2 WHERE execution_run_id = ? ORDER BY updated_at DESC LIMIT 1').get(runId)
+  return row === undefined ? undefined : parsePlanV2(row as Record<string, unknown>)
+}
+
+/** A normal-mode checklist has no approval interaction; it starts as execution progress. */
+export function createProgressPlanV2(input: PlanV2Input): PlanDocumentV2 {
+  const saved = putPlanV2(input)
+  if (!saved.ok) throw new Error(saved.message)
+  const next: PlanDocumentV2 = { ...saved.plan, lifecycle: 'executing', executionRunId: input.sourceRunId }
+  stmt('UPDATE plans_v2 SET lifecycle = ?, execution_run_id = ?, json = ? WHERE id = ?')
+    .run(next.lifecycle, next.executionRunId ?? input.sourceRunId, JSON.stringify(next), next.id)
+  return next
+}
+
+export function putPlanV2(input: PlanV2Input, author: 'agent' | 'user' | 'system' = 'agent'): { ok: true; plan: PlanDocumentV2 } | { ok: false; conflict?: { planId: string; currentVersion: number }; message: string } {
+  const error = validatePlanV2Input({ explanation: input.explanation, plan: input.plan.map((step) => ({ step: step.step, status: step.status ?? 'pending' })) })
+  if (error !== null) return { ok: false, message: error }
+  const now = Date.now()
+  const current = input.planId === undefined ? undefined : getPlanV2(input.planId)
+  if (current !== undefined && current.lifecycle !== 'draft') return { ok: false, message: 'Only draft plans can be updated; create a new revision after review.' }
+  const next: PlanDocumentV2 = {
+    id: current?.id ?? input.planId ?? ulid(),
+    sessionId: input.sessionId,
+    version: (current?.version ?? 0) + 1,
+    lifecycle: 'draft',
+    explanation: input.explanation?.trim() || null,
+    plan: input.plan.map((step) => ({ id: step.id ?? ulid(), step: step.step.trim(), status: step.status ?? 'pending' })),
+    sourceRunId: input.sourceRunId,
+    ...(current?.executionRunId === undefined ? {} : { executionRunId: current.executionRunId }),
+    createdAt: current?.createdAt ?? now,
+    updatedAt: now
+  }
+  tx(() => {
+    stmt(`INSERT INTO plans_v2 (id, session_id, version, lifecycle, json, source_run_id, execution_run_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET version=excluded.version, lifecycle=excluded.lifecycle, json=excluded.json,
+        source_run_id=excluded.source_run_id, execution_run_id=excluded.execution_run_id, updated_at=excluded.updated_at`)
+      .run(next.id, next.sessionId, next.version, next.lifecycle, JSON.stringify(next), next.sourceRunId, next.executionRunId ?? null, next.createdAt, next.updatedAt)
+    stmt('INSERT INTO plan_revisions_v2 (plan_id, version, author, source_run_id, patch, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(next.id, next.version, author, input.sourceRunId, JSON.stringify({ explanation: next.explanation, plan: next.plan }), now)
+  })
+  return { ok: true, plan: next }
+}
+
+const PLAN_TRANSITIONS: Record<PlanLifecycle, readonly PlanLifecycle[]> = {
+  draft: ['review', 'superseded'], review: ['draft', 'approved', 'superseded'], approved: ['executing', 'superseded'],
+  executing: ['completed', 'failed'], completed: [], failed: ['executing', 'superseded'], superseded: []
+}
+
+export function transitionPlanV2(id: string, version: number, lifecycle: PlanLifecycle, executionRunId?: string): PlanDocumentV2 {
+  const current = getPlanV2(id)
+  if (current === undefined) throw new Error(`Plan does not exist: ${id}`)
+  if (current.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(current.version)}`)
+  if (current.lifecycle === lifecycle) return current
+  if (!PLAN_TRANSITIONS[current.lifecycle].includes(lifecycle)) throw new Error(`Invalid plan lifecycle transition: ${current.lifecycle} -> ${lifecycle}`)
+  if (lifecycle === 'executing' && current.lifecycle === 'executing' && current.executionRunId !== undefined && current.executionRunId !== executionRunId) throw new Error('This plan already has an execution run.')
+  const next: PlanDocumentV2 = { ...current, lifecycle, updatedAt: Date.now(), ...(executionRunId === undefined ? {} : { executionRunId }) }
+  stmt('UPDATE plans_v2 SET lifecycle = ?, json = ?, execution_run_id = ?, updated_at = ? WHERE id = ? AND version = ?')
+    .run(next.lifecycle, JSON.stringify(next), next.executionRunId ?? null, next.updatedAt, id, version)
+  return next
+}
+
+export function submitPlanV2(id: string, version: number): PlanDocumentV2 {
+  return transitionPlanV2(id, version, 'review')
+}
+
+export function updatePlanProgressV2(id: string, version: number, plan: Array<{ id?: string; step: string; status: PlanStepV2Status }>, explanation?: string | null): PlanDocumentV2 {
+  const current = getPlanV2(id)
+  if (current === undefined) throw new Error(`Plan does not exist: ${id}`)
+  if (current.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(current.version)}`)
+  if (current.lifecycle !== 'executing') throw new Error('Plan progress can only be updated while executing.')
+  const error = validatePlanV2Input({ explanation, plan })
+  if (error !== null) throw new Error(error)
+  const next: PlanDocumentV2 = { ...current, version: current.version + 1, explanation: explanation === undefined ? current.explanation : explanation, plan: plan.map((step) => ({ id: step.id ?? ulid(), step: step.step.trim(), status: step.status })), updatedAt: Date.now() }
+  tx(() => {
+    stmt('UPDATE plans_v2 SET version = ?, json = ?, updated_at = ? WHERE id = ? AND version = ?').run(next.version, JSON.stringify(next), next.updatedAt, id, version)
+    stmt('INSERT INTO plan_revisions_v2 (plan_id, version, author, source_run_id, patch, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, next.version, 'agent', current.executionRunId ?? null, JSON.stringify({ explanation: next.explanation, plan: next.plan }), next.updatedAt)
+  })
+  return next
+}
+
+export function legacyPlanAsV2(plan: PlanDocument): PlanDocumentV2 {
+  return {
+    id: plan.id, sessionId: plan.sessionId, version: plan.version, lifecycle: plan.status === 'approved' ? 'approved' : plan.status === 'executing' ? 'executing' : plan.status === 'completed' ? 'completed' : plan.status === 'superseded' ? 'superseded' : plan.status === 'review' ? 'review' : 'draft',
+    explanation: plan.summary || null, plan: plan.steps.map((step) => ({ id: step.id, step: `${step.title}${step.description ? ` — ${step.description}` : ''}`, status: step.status === 'in_progress' ? 'in_progress' : step.status === 'completed' ? 'completed' : 'pending' })), sourceRunId: plan.sourceRunId, createdAt: plan.updatedAt, updatedAt: plan.updatedAt
+  }
 }
 
 /** ── 基础配置同步 outbox ─────────────────────────────────────────────── */
@@ -416,6 +523,7 @@ export interface SessionCreateInput {
   workspaceId: string
   /** 非空 = 这是一次子代理 run 的转录,不进任何面向用户的枚举。见 `Session.parentSessionId`。 */
   parentSessionId?: string
+  origin?: 'chat' | 'scheduled'
   title?: string
   model?: string
   modelProviderId?: string
@@ -442,6 +550,7 @@ function sessionFromRow(row: Record<string, unknown>): Session {
     */
     ...(row['parent_session_id'] === null || row['parent_session_id'] === undefined
       ? {} : { parentSessionId: String(row['parent_session_id']) }),
+    ...(parsed.origin === 'scheduled' ? { origin: 'scheduled' as const } : { origin: 'chat' as const }),
     title: String(row['title'] ?? parsed.title ?? '新对话'),
     ...(parsed.titleSource === 'default' || parsed.titleSource === 'generated' || parsed.titleSource === 'manual'
       ? { titleSource: parsed.titleSource } : {}),
@@ -477,6 +586,7 @@ export function createSession(input: SessionCreateInput): Session {
     id: input.id ?? ulid(now),
     workspaceId: input.workspaceId,
     ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
+    origin: input.origin ?? 'chat',
     title: input.title?.trim() || '新对话',
     titleSource: isDefaultSessionTitle(input.title ?? '') ? 'default' : 'manual',
     model: input.model ?? '',
@@ -597,7 +707,7 @@ export function listSessions(workspaceId: string, archived?: boolean): SessionLi
       favorited: Boolean(Number((getSession(id) as Session | undefined)?.favorited ?? 0)),
       running: false
     }
-  })
+  }).filter((item) => getSession(item.id)?.origin !== 'scheduled')
 }
 
 export function getSessionDetail(id: string): SessionDetail | undefined {
@@ -608,7 +718,8 @@ export function getSessionDetail(id: string): SessionDetail | undefined {
     messages: getHistory(id) as AgentMessage[],
     contextCheckpoints: listContextCheckpoints(id),
     messageRuns: messageRunsOf(id),
-    runUsage: runUsageOf(id)
+    runUsage: runUsageOf(id),
+    runModel: runModelOf(id)
   }
 }
 
@@ -676,6 +787,29 @@ export function runUsageOf(sessionId: string): Record<string, RunUsage> {
     }
   }
   return usage
+}
+
+/**
+ * 一条会话里每个 run 发送时选中的模型别名,从 `usage_records.alias` 回填。
+ *
+ * ★ 同一个 run 的多次尝试(重试/故障切换)共享同一个 `req.model`(`router.ts`
+ * 里 `alias: req.model`),所以这一列在同一 `run_id` 分组内恒定 —— `MIN()`
+ * 只是凑 SQL 聚合语法,取哪一行结果都一样。这是**发送时选的别名**,不是
+ * 回包里的真实上游模型名(那个是 `upstream_model` 列,定价用它查)。
+ */
+export function runModelOf(sessionId: string): Record<string, string> {
+  const model: Record<string, string> = {}
+  const rows = stmt(
+    `SELECT run_id, MIN(alias) AS alias
+       FROM usage_records
+      WHERE session_id = ?
+      GROUP BY run_id`
+  ).all(sessionId)
+  for (const row of rows) {
+    const r = row as Record<string, unknown>
+    model[String(r['run_id'])] = String(r['alias'])
+  }
+  return model
 }
 
 /**
@@ -1044,11 +1178,11 @@ function writeMessage(session: Session, message: AgentMessage, ordinal: number, 
     throw new Error(`消息 ${message.id} 已属于另一个会话`)
   }
   stmt(
-    `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at, run_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at, run_id, internal)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET ordinal = excluded.ordinal, parts = excluded.parts, role = excluded.role,
        schema_version = excluded.schema_version, created_at = excluded.created_at,
-       run_id = COALESCE(excluded.run_id, messages.run_id)`
+       run_id = COALESCE(excluded.run_id, messages.run_id), internal = excluded.internal`
   ).run(
     message.id,
     session.id,
@@ -1057,7 +1191,8 @@ function writeMessage(session: Session, message: AgentMessage, ordinal: number, 
     JSON.stringify(message.parts),
     message.schemaVersion,
     message.createdAt,
-    runId ?? null
+    runId ?? null,
+    message.internal === true ? 1 : 0
   )
   upsertFts(session, message)
   recordMessageAttachments(session, message)
@@ -1080,7 +1215,7 @@ export function commitMessage(sessionId: string, message: AgentMessage, runId?: 
 }
 
 export function getHistory(sessionId: string): readonly AgentMessage[] {
-  return stmt('SELECT id, role, parts, schema_version, created_at FROM messages WHERE session_id = ? ORDER BY ordinal, id').all(sessionId).map((row) => {
+  return stmt('SELECT id, role, parts, schema_version, created_at, internal FROM messages WHERE session_id = ? ORDER BY ordinal, id').all(sessionId).map((row) => {
     const r = row as Record<string, unknown>
     const parts: ContentPart[] = (() => {
       try { return parse<ContentPart[]>(r['parts']) } catch { return [] }
@@ -1090,7 +1225,8 @@ export function getHistory(sessionId: string): readonly AgentMessage[] {
       role: String(r['role']) as AgentMessage['role'],
       parts,
       createdAt: Number(r['created_at']),
-      schemaVersion: Number(r['schema_version'] ?? 1) as 1
+      schemaVersion: Number(r['schema_version'] ?? 1) as 1,
+      ...(Number(r['internal'] ?? 0) !== 0 ? { internal: true } : {})
     }
   })
 }
@@ -1102,7 +1238,7 @@ export function replaceHistory(sessionId: string, messages: readonly AgentMessag
     if (session === undefined) throw new Error(`会话不存在: ${sessionId}`)
 
     const existing = new Map(
-      stmt('SELECT id, ordinal, role, parts, schema_version, created_at FROM messages WHERE session_id = ?').all(sessionId)
+      stmt('SELECT id, ordinal, role, parts, schema_version, created_at, internal FROM messages WHERE session_id = ?').all(sessionId)
         .map((row) => [String(row['id']), row] as const)
     )
     const ids = new Set<string>()
@@ -1122,6 +1258,7 @@ export function replaceHistory(sessionId: string, messages: readonly AgentMessag
         || previous['parts'] !== JSON.stringify(message.parts)
         || Number(previous['schema_version']) !== message.schemaVersion
         || Number(previous['created_at']) !== message.createdAt
+        || Number(previous['internal'] ?? 0) !== (message.internal === true ? 1 : 0)
       return { message, ordinal, changed }
     })
     const removed = [...existing.keys()].filter((id) => !ids.has(id))
@@ -1193,6 +1330,15 @@ export function deleteSession(id: string): string[] {
       // 因此不能只依赖 CASCADE；owner_id 是它们的会话归属。
       stmt("DELETE FROM attachments WHERE scope = 'session' AND owner_id = ?").run(sid)
       removeKv(`session.input.${sid}`)
+      /*
+        ★★ 导入来的会话留 tombstone,**不删映射行**。
+
+        删掉的话,下一轮自动同步看不到任何记录,于是把这条会话原地复活 ——
+        而它是用户明确删掉的。墓碑放在这里(而不是 `ipc/sessions.ts`)是因为
+        这个函数是**唯一**的会话删除出口:单条删除、按时长清理、子树级联
+        全都经过它。拦在 UI 那一层的话,按时长清理会绕过去。
+      */
+      suppressImportMappingsByTarget(sid, 'session', Date.now())
     }
     return ids
   })
@@ -1817,6 +1963,16 @@ export function deleteAllHistory(): CleanupResult {
     // unreachable rows as well; deleting only the relational tables leaves
     // stale text that can reappear when an id is reused.
     stmt("DELETE FROM kv WHERE key LIKE 'session.input.%'").run()
+    /*
+      ★ 「清空对话历史」同样要留墓碑,而且必须整表一次改完 —— 这条路径**不**
+      走 `deleteSession`(它是一次性 DELETE,没有逐条循环),所以上面那处墓碑
+      在这里帮不上忙。漏掉的表现:用户清空历史,三十秒后自动同步把几百条
+      对话原样搬回来。
+    */
+    stmt(
+      `UPDATE import_mappings SET sync_state = 'suppressed', target_id = '', updated_at = ?
+        WHERE entity_kind = 'session'`
+    ).run(Date.now())
     return { ...p, deleted: p.sessionCount + p.messageCount + p.attachmentCount }
   })
 }
@@ -1968,6 +2124,66 @@ export function putAlias(a: ModelAlias): ModelAlias {
 
 export function removeAlias(providerId: string, alias: string): void {
   tx(() => { stmt('DELETE FROM model_aliases WHERE provider_id = ? AND alias = ?').run(providerId, alias); if (providerId !== 'nextcowork') enqueueSyncMutation('modelAlias', `${providerId}/${alias}`, { providerId, alias }, 'delete') })
+}
+
+// ── scheduled tasks / runs ───────────────────────────────────────────────────
+
+export function listScheduledTasks(workspaceId?: string): ScheduledTask[] {
+  const rows = workspaceId === undefined
+    ? stmt('SELECT json FROM scheduled_tasks ORDER BY enabled DESC, next_run_at IS NULL, next_run_at ASC, json').all()
+    : stmt('SELECT json FROM scheduled_tasks WHERE workspace_id = ? ORDER BY enabled DESC, next_run_at IS NULL, next_run_at ASC, json').all(workspaceId)
+  return rows.map((row) => parse<ScheduledTask>(row['json']))
+}
+
+export function getScheduledTask(id: string): ScheduledTask | undefined {
+  const row = stmt('SELECT json FROM scheduled_tasks WHERE id = ?').get(id)
+  return row === undefined ? undefined : parse<ScheduledTask>(row['json'])
+}
+
+export function putScheduledTask(task: ScheduledTask): ScheduledTask {
+  stmt(`INSERT INTO scheduled_tasks (id, workspace_id, enabled, next_run_at, created_at, updated_at, json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, enabled=excluded.enabled,
+      next_run_at=excluded.next_run_at, updated_at=excluded.updated_at, json=excluded.json`)
+    .run(task.id, task.workspaceId, task.enabled ? 1 : 0, task.nextRunAt, task.createdAt, task.updatedAt, JSON.stringify(task))
+  return task
+}
+
+export function deleteScheduledTask(id: string): void {
+  stmt('DELETE FROM scheduled_tasks WHERE id = ?').run(id)
+}
+
+export function listScheduledRuns(taskId?: string, limit = 100): ScheduledRun[] {
+  const rows = taskId === undefined
+    ? stmt('SELECT * FROM scheduled_runs ORDER BY scheduled_at DESC, id DESC LIMIT ?').all(Math.max(1, limit))
+    : stmt('SELECT * FROM scheduled_runs WHERE task_id = ? ORDER BY scheduled_at DESC, id DESC LIMIT ?').all(taskId, Math.max(1, limit))
+  return rows.map((row) => ({
+    id: String(row['id']), taskId: String(row['task_id']), sessionId: String(row['session_id'] ?? ''),
+    trigger: String(row['trigger']) as ScheduledRun['trigger'], status: String(row['status']) as ScheduledRun['status'],
+    scheduledAt: Number(row['scheduled_at']),
+    ...(row['started_at'] == null ? {} : { startedAt: Number(row['started_at']) }),
+    ...(row['ended_at'] == null ? {} : { endedAt: Number(row['ended_at']) }),
+    ...(row['summary'] == null ? {} : { summary: String(row['summary']) }),
+    ...(row['error'] == null ? {} : { error: String(row['error']) })
+  }))
+}
+
+export function getScheduledRun(id: string): ScheduledRun | undefined {
+  return listScheduledRuns(undefined, 10_000).find((run) => run.id === id)
+}
+
+export function deleteScheduledRun(id: string): void {
+  stmt('DELETE FROM scheduled_runs WHERE id = ?').run(id)
+}
+
+export function putScheduledRun(run: ScheduledRun): ScheduledRun {
+  stmt(`INSERT INTO scheduled_runs (id, task_id, session_id, trigger, status, scheduled_at, started_at, ended_at, summary, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET task_id=excluded.task_id, session_id=excluded.session_id, trigger=excluded.trigger,
+      status=excluded.status, scheduled_at=excluded.scheduled_at, started_at=excluded.started_at,
+      ended_at=excluded.ended_at, summary=excluded.summary, error=excluded.error`)
+    .run(run.id, run.taskId, run.sessionId, run.trigger, run.status, run.scheduledAt, run.startedAt ?? null, run.endedAt ?? null, run.summary ?? null, run.error ?? null)
+  return run
 }
 
 // ── kv ──────────────────────────────────────────────────────────────────────
@@ -2517,4 +2733,445 @@ export function putCredential(ref: string, blob: Uint8Array): void {
 
 export function removeCredential(ref: string): void {
   stmt('DELETE FROM credentials WHERE ref = ?').run(ref)
+}
+
+// ── 导入映射与批次(schema.ts 第 16 条) ──────────────────────────────────────
+
+/**
+ * 这一节是「导入两次仍一份」的全部实现。
+ *
+ * ★ 刻意**不**复用 `mergeDataExport`:那个函数为 NextCoWork 自己的整库备份而写,
+ * 会合并全套设置并按时间戳覆盖。外部来源要的是逐项、可重试、可脱离的语义,
+ * 两者只是名字里都有「导入」。
+ */
+
+export type ImportEntityKind =
+  | 'workspace'
+  | 'session'
+  | 'message'
+  | 'skill'
+  | 'agent'
+  | 'command'
+  | 'instructions'
+  | 'mcp'
+  | 'provider'
+  | 'alias'
+  | 'hook'
+
+/** linked = 跟随源;detached = 用户续聊/编辑过,永久不再跟随;suppressed = 本地删过的 tombstone。 */
+export type ImportSyncStateValue = 'linked' | 'detached' | 'conflict' | 'source-missing' | 'suppressed'
+
+export interface ImportSourceRow {
+  sourceId: string
+  kind: string
+  configDir: string
+  origin: string
+  syncEnabled: boolean
+  categories: string[]
+  projectKeys: string[]
+  lastCheckAt?: number
+  lastSyncAt?: number
+  status: string
+  diagnostics: unknown[]
+  createdAt: number
+  updatedAt: number
+}
+
+function importSourceFromRow(row: Record<string, unknown>): ImportSourceRow {
+  const list = (raw: unknown): string[] => {
+    try {
+      const value = parse<unknown>(raw)
+      return Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  }
+  return {
+    sourceId: String(row['source_id']),
+    kind: String(row['kind']),
+    configDir: String(row['config_dir'] ?? ''),
+    origin: String(row['origin'] ?? 'auto'),
+    syncEnabled: Number(row['sync_enabled'] ?? 0) !== 0,
+    categories: list(row['categories']),
+    projectKeys: list(row['project_keys']),
+    ...(row['last_check_at'] === null || row['last_check_at'] === undefined
+      ? {} : { lastCheckAt: Number(row['last_check_at']) }),
+    ...(row['last_sync_at'] === null || row['last_sync_at'] === undefined
+      ? {} : { lastSyncAt: Number(row['last_sync_at']) }),
+    status: String(row['status'] ?? 'off'),
+    diagnostics: (() => {
+      try {
+        const value = parse<unknown>(row['diagnostics'])
+        return Array.isArray(value) ? value : []
+      } catch {
+        return []
+      }
+    })(),
+    createdAt: Number(row['created_at'] ?? 0),
+    updatedAt: Number(row['updated_at'] ?? 0)
+  }
+}
+
+export function listImportSources(): ImportSourceRow[] {
+  return stmt('SELECT * FROM import_sources ORDER BY created_at')
+    .all()
+    .map((row) => importSourceFromRow(row as Record<string, unknown>))
+}
+
+export function getImportSource(sourceId: string): ImportSourceRow | undefined {
+  const row = stmt('SELECT * FROM import_sources WHERE source_id = ?').get(sourceId)
+  return row === undefined ? undefined : importSourceFromRow(row as Record<string, unknown>)
+}
+
+export function putImportSource(source: ImportSourceRow): ImportSourceRow {
+  stmt(
+    `INSERT INTO import_sources (
+       source_id, kind, config_dir, origin, sync_enabled, categories, project_keys,
+       last_check_at, last_sync_at, status, diagnostics, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (source_id) DO UPDATE SET
+       kind = excluded.kind,
+       config_dir = excluded.config_dir,
+       origin = excluded.origin,
+       sync_enabled = excluded.sync_enabled,
+       categories = excluded.categories,
+       project_keys = excluded.project_keys,
+       last_check_at = excluded.last_check_at,
+       last_sync_at = excluded.last_sync_at,
+       status = excluded.status,
+       diagnostics = excluded.diagnostics,
+       updated_at = excluded.updated_at`
+  ).run(
+    source.sourceId,
+    source.kind,
+    source.configDir,
+    source.origin,
+    source.syncEnabled ? 1 : 0,
+    JSON.stringify(source.categories),
+    JSON.stringify(source.projectKeys),
+    source.lastCheckAt ?? null,
+    source.lastSyncAt ?? null,
+    source.status,
+    JSON.stringify(source.diagnostics),
+    source.createdAt,
+    source.updatedAt
+  )
+  return getImportSource(source.sourceId) ?? source
+}
+
+export interface ImportMappingRow {
+  sourceId: string
+  /** '' = 全局作用域,否则是 workspace id。 */
+  scopeKey: string
+  entityKind: ImportEntityKind
+  sourceItemId: string
+  targetId: string
+  targetPath: string
+  targetWorkspaceId: string
+  sourceFingerprint: string
+  targetFingerprint: string
+  transformerVersion: number
+  syncState: ImportSyncStateValue
+  meta: Record<string, unknown>
+  createdAt: number
+  updatedAt: number
+}
+
+function importMappingFromRow(row: Record<string, unknown>): ImportMappingRow {
+  return {
+    sourceId: String(row['source_id']),
+    scopeKey: String(row['scope_key'] ?? ''),
+    entityKind: String(row['entity_kind']) as ImportEntityKind,
+    sourceItemId: String(row['source_item_id']),
+    targetId: String(row['target_id'] ?? ''),
+    targetPath: String(row['target_path'] ?? ''),
+    targetWorkspaceId: String(row['target_workspace_id'] ?? ''),
+    sourceFingerprint: String(row['source_fingerprint'] ?? ''),
+    targetFingerprint: String(row['target_fingerprint'] ?? ''),
+    transformerVersion: Number(row['transformer_version'] ?? 1),
+    syncState: String(row['sync_state'] ?? 'linked') as ImportSyncStateValue,
+    meta: (() => {
+      try {
+        const value = parse<unknown>(row['meta'])
+        return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+      } catch {
+        return {}
+      }
+    })(),
+    createdAt: Number(row['created_at'] ?? 0),
+    updatedAt: Number(row['updated_at'] ?? 0)
+  }
+}
+
+export function getImportMapping(
+  sourceId: string,
+  scopeKey: string,
+  entityKind: ImportEntityKind,
+  sourceItemId: string
+): ImportMappingRow | undefined {
+  const row = stmt(
+    `SELECT * FROM import_mappings
+      WHERE source_id = ? AND scope_key = ? AND entity_kind = ? AND source_item_id = ?`
+  ).get(sourceId, scopeKey, entityKind, sourceItemId)
+  return row === undefined ? undefined : importMappingFromRow(row as Record<string, unknown>)
+}
+
+export function listImportMappings(
+  sourceId: string,
+  entityKind?: ImportEntityKind
+): ImportMappingRow[] {
+  const rows = entityKind === undefined
+    ? stmt('SELECT * FROM import_mappings WHERE source_id = ?').all(sourceId)
+    : stmt('SELECT * FROM import_mappings WHERE source_id = ? AND entity_kind = ?').all(sourceId, entityKind)
+  return rows.map((row) => importMappingFromRow(row as Record<string, unknown>))
+}
+
+/** 本地实体反查它是不是导入来的 —— 续聊/编辑要在这一跳上标 detached。 */
+export function findImportMappingsByTarget(targetId: string, entityKind: ImportEntityKind): ImportMappingRow[] {
+  return stmt('SELECT * FROM import_mappings WHERE target_id = ? AND entity_kind = ?')
+    .all(targetId, entityKind)
+    .map((row) => importMappingFromRow(row as Record<string, unknown>))
+}
+
+export function putImportMapping(mapping: ImportMappingRow): void {
+  stmt(
+    `INSERT INTO import_mappings (
+       source_id, scope_key, entity_kind, source_item_id, target_id, target_path,
+       target_workspace_id, source_fingerprint, target_fingerprint, transformer_version,
+       sync_state, meta, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (source_id, scope_key, entity_kind, source_item_id) DO UPDATE SET
+       target_id = excluded.target_id,
+       target_path = excluded.target_path,
+       target_workspace_id = excluded.target_workspace_id,
+       source_fingerprint = excluded.source_fingerprint,
+       target_fingerprint = excluded.target_fingerprint,
+       transformer_version = excluded.transformer_version,
+       sync_state = excluded.sync_state,
+       meta = excluded.meta,
+       updated_at = excluded.updated_at`
+  ).run(
+    mapping.sourceId,
+    mapping.scopeKey,
+    mapping.entityKind,
+    mapping.sourceItemId,
+    mapping.targetId,
+    mapping.targetPath,
+    mapping.targetWorkspaceId,
+    mapping.sourceFingerprint,
+    mapping.targetFingerprint,
+    mapping.transformerVersion,
+    mapping.syncState,
+    JSON.stringify(mapping.meta),
+    mapping.createdAt,
+    mapping.updatedAt
+  )
+}
+
+/**
+ * 把某个本地目标对应的全部映射切到新状态。
+ *
+ * ★ **无条件更新,不读后写** —— 「接受一次本地 run」和「同步器正要提交」
+ * 可能落在同一毫秒,读后写会让其中一方的判断基于已经过期的快照。
+ * 这条 UPDATE 在单条 SQL 里完成,调用方把它放进自己那个事务即可。
+ */
+export function markImportMappingsByTarget(
+  targetId: string,
+  entityKind: ImportEntityKind,
+  syncState: ImportSyncStateValue,
+  now: number
+): number {
+  const result = stmt(
+    `UPDATE import_mappings SET sync_state = ?, updated_at = ?
+      WHERE target_id = ? AND entity_kind = ? AND sync_state <> ?`
+  ).run(syncState, now, targetId, entityKind, syncState)
+  return Number(result.changes ?? 0)
+}
+
+/**
+ * 本地删除 → tombstone。★ 目标 id 一并清空:那条记录指向的行已经不存在了,
+ * 留着它会让「打开聊天」在历史里显示成可点击。
+ */
+export function suppressImportMappingsByTarget(
+  targetId: string,
+  entityKind: ImportEntityKind,
+  now: number
+): void {
+  stmt(
+    `UPDATE import_mappings SET sync_state = 'suppressed', target_id = '', updated_at = ?
+      WHERE target_id = ? AND entity_kind = ?`
+  ).run(now, targetId, entityKind)
+}
+
+/** 消息级映射跟着会话走 —— 会话没了,它们的 target 也没了。 */
+export function deleteImportMessageMappings(sessionTargetIds: readonly string[]): void {
+  for (const id of sessionTargetIds) {
+    stmt(
+      `DELETE FROM import_mappings
+        WHERE entity_kind = 'message' AND json_extract(meta, '$.sessionId') = ?`
+    ).run(id)
+  }
+}
+
+export interface ImportBatchRow {
+  id: string
+  sourceId: string
+  sourceKind: string
+  trigger: string
+  phase: string
+  startedAt: number
+  endedAt?: number
+  counts: Record<string, number>
+}
+
+function importBatchFromRow(row: Record<string, unknown>): ImportBatchRow {
+  return {
+    id: String(row['id']),
+    sourceId: String(row['source_id']),
+    sourceKind: String(row['source_kind']),
+    trigger: String(row['trigger']),
+    phase: String(row['phase']),
+    startedAt: Number(row['started_at'] ?? 0),
+    ...(row['ended_at'] === null || row['ended_at'] === undefined
+      ? {} : { endedAt: Number(row['ended_at']) }),
+    counts: (() => {
+      try {
+        const value = parse<unknown>(row['counts'])
+        return value !== null && typeof value === 'object' ? (value as Record<string, number>) : {}
+      } catch {
+        return {}
+      }
+    })()
+  }
+}
+
+export function createImportBatch(batch: ImportBatchRow): void {
+  stmt(
+    `INSERT INTO import_batches (id, source_id, source_kind, trigger, phase, started_at, ended_at, counts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    batch.id,
+    batch.sourceId,
+    batch.sourceKind,
+    batch.trigger,
+    batch.phase,
+    batch.startedAt,
+    batch.endedAt ?? null,
+    JSON.stringify(batch.counts)
+  )
+}
+
+export function updateImportBatch(
+  id: string,
+  phase: string,
+  counts: Record<string, number>,
+  endedAt?: number
+): void {
+  stmt('UPDATE import_batches SET phase = ?, counts = ?, ended_at = ? WHERE id = ?').run(
+    phase,
+    JSON.stringify(counts),
+    endedAt ?? null,
+    id
+  )
+}
+
+/**
+ * 上次进程没跑完就退出了。★ 标成 interrupted 而不是 failed ——
+ * 已提交的那部分是**真的成功了**,按映射重扫就能接着走;
+ * 报成 failed 会让用户以为要从头再来一遍。
+ */
+export function markInterruptedImportBatches(): number {
+  const result = stmt(
+    `UPDATE import_batches SET phase = 'interrupted'
+      WHERE phase IN ('scanning', 'ready', 'importing')`
+  ).run()
+  return Number(result.changes ?? 0)
+}
+
+export interface ImportBatchItemRow {
+  batchId: string
+  seq: number
+  category: string
+  title: string
+  sourcePath: string
+  result: string
+  targetKind?: string
+  targetId?: string
+  targetWorkspaceId?: string
+  diagnostics: unknown[]
+}
+
+export function appendImportBatchItem(item: ImportBatchItemRow): void {
+  stmt(
+    `INSERT INTO import_batch_items (
+       batch_id, seq, category, title, source_path, result,
+       target_kind, target_id, target_workspace_id, diagnostics
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (batch_id, seq) DO UPDATE SET
+       result = excluded.result, diagnostics = excluded.diagnostics`
+  ).run(
+    item.batchId,
+    item.seq,
+    item.category,
+    item.title,
+    item.sourcePath,
+    item.result,
+    item.targetKind ?? null,
+    item.targetId ?? null,
+    item.targetWorkspaceId ?? null,
+    JSON.stringify(item.diagnostics)
+  )
+}
+
+export function listImportBatches(offset: number, limit: number): { rows: ImportBatchRow[]; total: number } {
+  const total = Number(
+    (stmt('SELECT COUNT(*) AS n FROM import_batches').get() as Record<string, unknown>)['n'] ?? 0
+  )
+  const rows = stmt('SELECT * FROM import_batches ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?')
+    .all(limit, offset)
+    .map((row) => importBatchFromRow(row as Record<string, unknown>))
+  return { rows, total }
+}
+
+export function listImportBatchItems(
+  batchId: string,
+  offset: number,
+  limit: number
+): { rows: ImportBatchItemRow[]; total: number } {
+  const total = Number(
+    (stmt('SELECT COUNT(*) AS n FROM import_batch_items WHERE batch_id = ?').get(batchId) as Record<string, unknown>)['n'] ?? 0
+  )
+  const rows = stmt('SELECT * FROM import_batch_items WHERE batch_id = ? ORDER BY seq LIMIT ? OFFSET ?')
+    .all(batchId, limit, offset)
+    .map((row) => {
+      const r = row as Record<string, unknown>
+      return {
+        batchId: String(r['batch_id']),
+        seq: Number(r['seq']),
+        category: String(r['category']),
+        title: String(r['title'] ?? ''),
+        sourcePath: String(r['source_path'] ?? ''),
+        result: String(r['result']),
+        ...(r['target_kind'] === null || r['target_kind'] === undefined
+          ? {} : { targetKind: String(r['target_kind']) }),
+        ...(r['target_id'] === null || r['target_id'] === undefined
+          ? {} : { targetId: String(r['target_id']) }),
+        ...(r['target_workspace_id'] === null || r['target_workspace_id'] === undefined
+          ? {} : { targetWorkspaceId: String(r['target_workspace_id']) }),
+        diagnostics: (() => {
+          try {
+            const value = parse<unknown>(r['diagnostics'])
+            return Array.isArray(value) ? value : []
+          } catch {
+            return []
+          }
+        })()
+      }
+    })
+  return { rows, total }
+}
+
+/** 目标会话是否还在 —— 历史里那颗「打开」按钮据此决定可不可点。 */
+export function sessionExists(id: string): boolean {
+  return stmt('SELECT 1 FROM sessions WHERE id = ?').get(id) !== undefined
 }

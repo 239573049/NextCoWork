@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 import type { OAuthCredential } from '../../../../shared/domain/credential'
 import { CLIENT_PROVIDER_ID } from '../../../../shared/domain/presets'
 import type { UpstreamProvider } from '../../../../shared/domain/provider'
-import { platformLoginAuth, sessionUuid, upstreamTransport } from '../transport'
+import { isOpencodeGo, platformLoginAuth, sessionUuid, upstreamTransport } from '../transport'
 
 const provider: UpstreamProvider = {
   id: 'p',
@@ -104,6 +104,139 @@ describe('upstreamTransport · ChatGPT 订阅通道', () => {
       model: 'm',
       input: [{ role: 'user' }]
     })
+  })
+})
+
+/**
+ * OpenCode Go 要求每个对话带一个稳定的 `x-opencode-session`,缺了是一句
+ * 「Request is missing x-opencode-session and cannot be routed efficiently」——
+ * 措辞像性能建议,实则是硬拒绝。
+ *
+ * ★ 这一组里最重要的不是「命中」那几条,是**「不命中」那几条**:判宽了等于
+ * 我们主动把会话标识发给一台不是 OpenCode 的机器。
+ */
+describe('upstreamTransport · OpenCode Go 会话头', () => {
+  const key = { kind: 'api-key' as const, apiKey: 'sk-1' }
+  const og = (over: Partial<UpstreamProvider> = {}): UpstreamProvider => ({
+    ...provider,
+    id: 'opencode-go',
+    protocol: 'openai-chat',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    ...over
+  })
+
+  it('预设 id 命中,值是 sessionId 折出来的那个 UUID', () => {
+    expect(upstreamTransport(og(), key, { sessionId: 's-1' }).headers['x-opencode-session']).toBe(
+      sessionUuid('s-1')
+    )
+  })
+
+  it('★ 自己填 opencode.ai 地址的自定义供应商也命中 —— 只按 id 匹配会整个漏掉他', () => {
+    const t = upstreamTransport(og({ id: 'custom-my-opencode' }), key, { sessionId: 's-1' })
+    expect(t.headers['x-opencode-session']).toBe(sessionUuid('s-1'))
+  })
+
+  it('子域命中', () => {
+    const p = og({ id: 'custom-x', baseUrl: 'https://gateway.opencode.ai/v1' })
+    expect(upstreamTransport(p, key, { sessionId: 's-1' }).headers['x-opencode-session']).toBe(
+      sessionUuid('s-1')
+    )
+  })
+
+  /**
+   * ★★ 这一条是整组的理由所在。`baseUrl.includes('opencode.ai')` 会让它通过,
+   * 而通过的代价是把会话标识发给一台第三方主机 —— 且用户看不到任何异常,
+   * 因为那台机器完全可以反代真上游、把回复原样送回来。
+   */
+  it.each([
+    'https://opencode.ai.attacker.com/v1',
+    'https://notopencode.ai/v1',
+    'https://evil.example.com/?upstream=opencode.ai'
+  ])('★★ 不命中 %s —— 子串匹配会把会话 id 发给第三方', (baseUrl) => {
+    expect(upstreamTransport(og({ id: 'custom-x', baseUrl }), key, { sessionId: 's-1' }).headers)
+      .toEqual({})
+  })
+
+  it('别家供应商一个头都不多', () => {
+    expect(upstreamTransport(provider, key, { sessionId: 's-1' }).headers).toEqual({})
+  })
+
+  /**
+   * ★ `new URL()` 对这些会抛。抛出去的话整条对话会崩在一个和网络、和凭证
+   * 都无关的地方,而报错里一个字都不会提到「地址」。
+   */
+  it.each(['', '   ', 'not a url', '//opencode.ai/v1', 'opencode.ai/zen/go/v1', 'https://'])(
+    '★ 畸形 baseUrl(%j)不抛异常,只是不命中',
+    (baseUrl) => {
+      const p = og({ id: 'custom-x', baseUrl })
+      expect(() => upstreamTransport(p, key, { sessionId: 's-1' })).not.toThrow()
+      expect(upstreamTransport(p, key, { sessionId: 's-1' }).headers).toEqual({})
+    }
+  )
+
+  it('sessionId 缺失时仍然发头 —— 省略它等于退回那个 missing header 报错', () => {
+    expect(upstreamTransport(og(), key, {}).headers['x-opencode-session']).toBe(
+      sessionUuid(undefined)
+    )
+    expect(
+      upstreamTransport(og(), key, { sessionId: '' }).headers['x-opencode-session']
+    ).toBe(sessionUuid(undefined))
+  })
+
+  /**
+   * ★★ 装饰是**叠加**不是替换。今天 OpenCode 只用 api-key,这两条钉的是
+   * 「那家哪天上了 OAuth / 走到平台那条」时结构仍然对 —— 写成互斥分支不会报错,
+   * 只会在那一天静默地把其中一件事改没。
+   */
+  it('★★ 与 OAuth 分支共存 —— 四个 OAuth 头和 body 改写都还在', () => {
+    const p = og({ id: 'custom-x', protocol: 'openai-responses' })
+    const t = upstreamTransport(p, oauth, { sessionId: 's-1' })
+    expect(t.headers['chatgpt-account-id']).toBe('acct-789')
+    expect(t.headers['openai-beta']).toBe('responses=experimental')
+    expect(t.headers['originator']).toBe('codex_cli_rs')
+    expect(t.headers['session_id']).toBe(sessionUuid('s-1'))
+    expect(t.headers['x-opencode-session']).toBe(sessionUuid('s-1'))
+    expect(t.body({ model: 'm', store: true, stream: false })).toEqual({
+      model: 'm',
+      store: false,
+      stream: true
+    })
+  })
+
+  it('★★ 与平台登录态分支共存 —— dropHeaders 不被装饰弄丢', () => {
+    const p = og({ id: CLIENT_PROVIDER_ID, protocol: 'anthropic' })
+    const t = upstreamTransport(p, { kind: 'api-key', apiKey: 'jwt-1' }, { sessionId: 's-1' })
+    expect(t.headers.authorization).toBe('Bearer jwt-1')
+    expect(t.headers['x-opencode-session']).toBe(sessionUuid('s-1'))
+    expect(t.dropHeaders).toContain('x-api-key')
+  })
+
+  /**
+   * ★★ `IDENTITY` 是模块级共享常量。往它身上就地写一个头,会让这个进程里
+   * **此后每一个供应商**的每一个请求都带上它 —— 连同那个会话 id,发给别家上游。
+   * 而零回归那两条断言会从此恒假,却没有任何一条用例会先跑到 OpenCode 那条路上去。
+   */
+  it('★★ 装饰不污染 IDENTITY —— 装过一次之后普通供应商的头仍是空对象', () => {
+    upstreamTransport(og(), key, { sessionId: 's-1' })
+    expect(upstreamTransport(provider, key, { sessionId: 's-1' }).headers).toEqual({})
+    const body = { model: 'm', stream: true }
+    expect(upstreamTransport(provider, key, {}).body(body)).toBe(body)
+  })
+})
+
+describe('isOpencodeGo', () => {
+  it('id 与主机名是「或」,任一命中即可', () => {
+    const base = { ...provider, baseUrl: 'https://my-proxy.internal/v1' }
+    expect(isOpencodeGo({ ...base, id: 'opencode-go' })).toBe(true)
+    expect(isOpencodeGo({ ...base, id: 'custom-x' })).toBe(false)
+    expect(
+      isOpencodeGo({ ...base, id: 'custom-x', baseUrl: 'https://opencode.ai/zen/go/v1' })
+    ).toBe(true)
+  })
+
+  it('主机名大小写不敏感', () => {
+    const p = { ...provider, id: 'custom-x', baseUrl: 'https://OpenCode.AI/zen/go/v1' }
+    expect(isOpencodeGo(p)).toBe(true)
   })
 })
 

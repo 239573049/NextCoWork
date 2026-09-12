@@ -12,6 +12,7 @@ import type { TokenUsage } from './stream'
 import type { ToolOutput } from './message'
 import type { ToolProgress } from './tool'
 import type { ContextCheckpoint, ContextStatus } from './context-management'
+import type { PlanDocumentV2 } from '../domain/plan'
 
 export type RunStatus = 'running' | 'done' | 'error' | 'aborted'
 
@@ -42,6 +43,11 @@ export type AgentEvent =
   | { type: 'tool_start'; callId: string; toolName: string; input: unknown; at?: number }
   /** 易失,永不进转录 */
   | { type: 'tool_progress'; callId: string; progress: ToolProgress }
+  | { type: 'plan_progress_updated'; planId: string; sessionId: string; runId: string; version: number; lifecycle: PlanDocumentV2['lifecycle']; plan: PlanDocumentV2 }
+  | { type: 'plan_created' | 'plan_updated' | 'plan_review_requested' | 'plan_approval_resolved'; planId: string; sessionId: string; runId: string; version: number; lifecycle: PlanDocumentV2['lifecycle']; plan: PlanDocumentV2 }
+  | { type: 'plan_execution_started'; planId: string; sessionId: string; runId: string; version: number; lifecycle: 'executing' }
+  | { type: 'plan_execution_completed'; planId: string; sessionId: string; runId: string; version: number; lifecycle: 'completed' }
+  | { type: 'plan_execution_failed'; planId: string; sessionId: string; runId: string; version: number; lifecycle: 'failed' }
   | { type: 'tool_end'; callId: string; output: ToolOutput; isError: boolean; at?: number }
   | { type: 'interaction_request'; interaction: PendingInteraction }
   | { type: 'interaction_resolved'; id: string; outcome: InteractionOutcome }
@@ -61,6 +67,7 @@ export type AgentEvent =
       childRunId: string
       phase?: SubagentPhase
       currentTool?: string
+      currentTarget?: string
       toolCalls?: number
       toolErrors?: number
       usage?: TokenUsage

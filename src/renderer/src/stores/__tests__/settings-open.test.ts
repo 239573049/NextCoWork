@@ -80,9 +80,10 @@ describe('设置浮层的开关状态', () => {
     expect(mockPersistOuter).not.toHaveBeenCalled()
   })
 
-  it('别的功能 Tab 照常建', () => {
+  it('定时任务使用独立主内容模式', () => {
     useWindowStore.getState().openFeature('scheduled')
-    expect(useWindowStore.getState().outer).toHaveLength(1)
+    expect(useWindowStore.getState().activeStandaloneFeature).toBe('scheduled')
+    expect(useWindowStore.getState().outer).toHaveLength(0)
     expect(useWindowStore.getState().settingsPage).toBeNull()
   })
 
@@ -94,7 +95,7 @@ describe('设置浮层的开关状态', () => {
       ])
     )
     const outer = useWindowStore.getState().outer
-    expect(outer.map((t) => t.id)).toEqual(['t2'])
+    expect(outer).toEqual([])
     expect(useWindowStore.getState().settingsPage).toBeNull()
   })
 

@@ -29,6 +29,8 @@ export interface Session {
    * 从里面反推父亲一定会切错(理由写在 `db/schema.ts` 第 10 条迁移上)。
    */
   parentSessionId?: string
+  /** Session created by the scheduler; it is opened from the task history instead of chat navigation. */
+  origin?: 'chat' | 'scheduled'
   title: string
   /** Stored in session JSON; absent on older exports. Manual names are never auto-replaced. */
   titleSource?: 'default' | 'generated' | 'manual'
@@ -92,6 +94,13 @@ export interface SessionDetail {
    * 还是回填的。
    */
   runUsage?: Record<string, RunUsage>
+  /**
+   * run → 发送那条消息时用户选中的模型别名,从 `usage_records.alias` 回填。
+   *
+   * ★ 和 `runUsage` 同源同理:流式过程中这份信息只活在渲染进程内存里
+   * (`SendOptions.model`),进程一没就没了,重启后只能靠这张表找回来。
+   */
+  runModel?: Record<string, string>
 }
 
 /** conversations:searchAll 的命中项。FTS5 给出的 snippet 带高亮标记。 */

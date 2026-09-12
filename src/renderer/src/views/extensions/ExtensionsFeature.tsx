@@ -16,6 +16,8 @@ import { useState, type ReactNode } from 'react'
 import { IconButton } from '../../components/ui/IconButton'
 import { Segmented } from '../../components/ui/Segmented'
 import { useI18n } from '../../i18n'
+import { cn } from '../../lib/cn'
+import { IS_MAC } from '../../lib/platform'
 import { SkillsFeature } from '../skills/SkillsFeature'
 import { AgentsPanel } from './agents/AgentsPanel'
 import { CommandsPanel } from './commands/CommandsPanel'
@@ -29,8 +31,19 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-canvas">
-      <header className="app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4">
-        <IconButton label={t('ext.back')} size={28} width={40} onClick={onClose} className="rounded-pill bg-tint">
+      <header
+        className={cn(
+          'app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4',
+          !IS_MAC && 'pr-window-controls'
+        )}
+      >
+        <IconButton
+          label={t('ext.back')}
+          size={28}
+          width={40}
+          onClick={onClose}
+          className="rounded-pill bg-tint"
+        >
           <ArrowLeft size={15} />
         </IconButton>
         <h1 className="text-[14px] font-medium text-fg">{t('ext.title')}</h1>
@@ -54,15 +67,24 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
         嵌进来会变成两条。右侧那三颗按钮(刷新 / 作用域 / 安装)是 Skill 专属的,
         留在它自己那条工具条里。
       */}
-      {tab === 'skills' ? (
+      <div
+        className={cn('min-h-0 flex-1', tab !== 'skills' && 'hidden')}
+        aria-hidden={tab !== 'skills'}
+      >
+        {/*
+          保持技能面板挂载，切换到其它扩展类型时只隐藏它。技能市场来自远端，
+          卸载再挂载会丢掉本地筛选状态，并重复请求市场列表和分类。
+        */}
         <SkillsFeature chromeless />
-      ) : tab === 'commands' ? (
+      </div>
+
+      {tab === 'commands' ? (
         <CommandsPanel />
       ) : tab === 'agents' ? (
         <AgentsPanel />
-      ) : (
+      ) : tab === 'hooks' ? (
         <HooksPanel />
-      )}
+      ) : null}
     </div>
   )
 }

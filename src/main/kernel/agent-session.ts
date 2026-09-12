@@ -31,6 +31,7 @@ import {
   validateModelRuntime
 } from '../../shared/domain/model-runtime'
 import type { Skill } from '../../shared/domain/skill'
+import type { PlanDocumentV2 } from '../../shared/domain/plan'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
 import { ulid } from '../../shared/util/id'
@@ -104,6 +105,20 @@ export interface SessionDeps {
   onMessageCommit?: (message: AgentMessage) => void
   /** 上游响应结束后执行工具；把真实执行结果回填到产生这些调用的用量记录。 */
   onToolUsage?: (summary: { runId: string; toolCalls: number; toolErrors: number }) => void
+  /**
+   * 工具跑完之后的钩子（PostToolUse）。
+   *
+   * ★ 只能**追加反馈**，不能改 `output` —— 改的话转录里那段文本和模型收到的那段
+   *   就不是同一份了，而事后没有任何办法分辨用户看到的是哪一份。
+   * ★ 调用点在 `tool_end` emit **之前**，这样 UI 卡片上显示的就是模型看到的那份。
+   */
+  onToolExecuted?: (info: {
+    tool: Tool
+    input: unknown
+    output: ToolOutput
+    isError: boolean
+    callId: string
+  }) => Promise<{ additionalContext?: string; isError?: boolean } | undefined>
   skills?: readonly Skill[]
   approve?: ApproveFn
   interact?: InteractFn
@@ -138,6 +153,7 @@ export interface SessionDeps {
    * 重破一次 prompt cache(理由同 `SystemPromptInput` 里 `permissionMode` 那段)。
    */
   personalization?: PersonalizationSettings
+  approvedPlan?: PlanDocumentV2
   contextManagement?: ContextManagementSettings
   contextCheckpoints?: readonly ContextCheckpoint[]
   saveContextCheckpoint?: (checkpoint: ContextCheckpoint) => void
@@ -176,6 +192,7 @@ export class AgentSession {
   private pending: BlockAccumulator | null = null
   private contextNote: string | undefined
   private contextWindowIndex = 0
+  private stopAfterPlanApproval = false
 
   constructor(
     private readonly deps: SessionDeps,
@@ -272,6 +289,10 @@ export class AgentSession {
       const outcome = await this.turn()
       if (outcome === null) return // 这一轮已经把 run 收尾了
       await this.executeAll(outcome.calls, outcome.tools)
+      if (this.stopAfterPlanApproval) {
+        this.handle.finish('done')
+        return
+      }
       /**
        * ★ 插话的注入点 —— **在工具结果落进转录之后、下一次请求组装之前**。
        *
@@ -322,6 +343,7 @@ export class AgentSession {
      * 「下发的列表里有,执行时却找不到」的错位。
      */
     const available = this.deps.tools.snapshot({
+      mode: this.req.mode,
       // ★ plan 模式的**真正实现**:过滤掉写工具,而不是在提示词里祈祷(§4.8)
       readOnlyOnly: this.req.mode === 'plan',
       /*
@@ -366,6 +388,7 @@ export class AgentSession {
       permissionMode: this.req.permissionMode,
       webSearch: this.req.webSearch,
       reminder: {
+        ...(this.deps.approvedPlan !== undefined ? { approvedPlan: this.deps.approvedPlan } : {}),
         ...(this.deps.projectInstructions !== undefined
           ? { projectInstructions: this.deps.projectInstructions }
           : {}),
@@ -685,12 +708,34 @@ export class AgentSession {
         ? truncateToolOutput(result.output.content)
         : result.output
 
-    this.handle.emit({ type: 'tool_end', callId, output, isError: result.isError })
+    /*
+      PostToolUse 钩子。★ 在 `tool_end` **之前**调用，并且它只能往后**追加**：
+      UI 卡片、转录、模型收到的那份必须是同一段文本 —— 允许改写 output 的话，
+      事后没有任何办法分辨用户看到的是哪一份。
+      钩子里的异常不该拖垮工具循环，所以整个吞掉（失败已经记进诊断了）。
+    */
+    let finalOutput = output
+    let finalIsError = result.isError
+    if (this.deps.onToolExecuted !== undefined) {
+      const feedback = await this.deps
+        .onToolExecuted({ tool, input: call.input, output, isError: result.isError, callId })
+        .catch(() => undefined)
+      if (feedback?.additionalContext !== undefined && feedback.additionalContext.trim() !== '') {
+        finalOutput = {
+          ...output,
+          content: `${output.content}\n\n<hook-feedback>\n${feedback.additionalContext.trim()}\n</hook-feedback>`
+        }
+      }
+      if (feedback?.isError === true) finalIsError = true
+    }
+
+    this.handle.emit({ type: 'tool_end', callId, output: finalOutput, isError: finalIsError })
+    if (result.stopRun === true && !finalIsError) this.stopAfterPlanApproval = true
     return {
       type: 'tool_result',
       callId,
-      output,
-      isError: result.isError,
+      output: finalOutput,
+      isError: finalIsError,
       ...(result.subagent === undefined ? {} : { subagent: result.subagent })
     }
   }
@@ -716,6 +761,8 @@ export class AgentSession {
       } : this.deps.host,
       // 进度是易失的:单独的事件类型,永不写入转录
       emit: (progress) => this.handle.emit({ type: 'tool_progress', callId, progress }),
+      emitPlanProgress: (plan) => this.handle.emit({ type: 'plan_progress_updated', planId: plan.id, sessionId: plan.sessionId, runId: this.req.runId, version: plan.version, lifecycle: plan.lifecycle, plan }),
+      emitPlanEvent: (type, plan) => this.handle.emit({ type, planId: plan.id, sessionId: plan.sessionId, runId: this.req.runId, version: plan.version, lifecycle: plan.lifecycle, plan }),
       /*
         ★ 没装启动器时**不放这个字段进去**,而不是放一个抛错的函数:
         `Task` 判的是 `ctx.spawnSubagent === undefined`,据此给出一句
@@ -865,7 +912,7 @@ export class AgentSession {
     for (const item of items) {
       if (item.parts.length === 0) continue
       const now = this.deps.host.clock.now()
-      this.commit(userMessage(item.id, this.normalizePaths(item.parts), now))
+      this.commit({ ...userMessage(item.id, this.normalizePaths(item.parts), now), ...(item.internal ? { internal: true } : {}) })
     }
   }
 

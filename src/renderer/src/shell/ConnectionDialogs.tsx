@@ -76,6 +76,7 @@ function AuthenticationDialog({ request, onDone }: { request: SshAuthRequest; on
     {request.hasSaved && <Button size="sm" disabled={busy} onClick={() => { void answer({ useSaved: true }) }}>{t('ssh.auth.useSaved')}</Button>}
     <Button size="sm" variant="accent" disabled={busy || (request.kind !== 'host-key' && value === '')} onClick={submit}>{t(request.kind === 'host-key' ? 'ssh.auth.trust' : 'ssh.auth.confirm')}</Button>
   </>}>
+    {request.savedRejected && <p role="alert" className="mb-3 text-[12px] text-danger">{t('ssh.auth.savedRejected')}</p>}
     <pre className="selectable mb-4 max-h-48 overflow-auto whitespace-pre-wrap break-all text-[12px] text-fg-muted">{request.prompt}</pre>
     {request.kind !== 'host-key' && <label className="flex flex-col gap-2 text-[12px] text-fg">
       {t(`ssh.auth.${request.kind}`)}

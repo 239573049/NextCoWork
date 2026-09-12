@@ -215,7 +215,7 @@ describe('useWindowStore.hydrate · 外层 Tab 的冷启动', () => {
     expect(mockPersistOuter).not.toHaveBeenCalled()
   })
 
-  it('★ 上次停在功能 Tab 上:侧边栏仍要落到一个工作区,不能空着', () => {
+  it('★ 旧版定时任务功能 Tab 会被迁移掉，并恢复到原工作区上下文', () => {
     /**
      * 「定时任务」这类功能 Tab 不属于任何工作区。它激活时侧边栏下半的会话区
      * 仍然显示原来那个工作区的列表(§8,截图 4aa68110)—— 派生式写法
@@ -232,8 +232,9 @@ describe('useWindowStore.hydrate · 外层 Tab 的冷启动', () => {
     )
 
     const s = useWindowStore.getState()
-    expect(s.activeOuterId).toBe('t2')
+    expect(s.activeOuterId).toBe('t1')
     expect(s.activeWorkspaceId).toBe('a')
+    expect(s.outer.map((tab) => tab.id)).toEqual(['t1'])
   })
 })
 
@@ -375,13 +376,11 @@ describe('useWindowStore.close · 工作区退场时的释放', () => {
     expect(useTabsStore.getState().byWorkspace['w1']).toBeUndefined()
   })
 
-  it('关掉功能 Tab 不碰任何工作区 —— 「定时任务」和工作区没有从属关系', () => {
+  it('关闭定时任务独立模式不碰任何工作区', () => {
     useTabsStore.getState().hydrate('w1', { tabs: [chatTab('a')], activeTabId: 'a' })
     useWindowStore.getState().openWorkspace('w1')
     useWindowStore.getState().openFeature('scheduled')
-    const featureId = useWindowStore.getState().activeOuterId ?? ''
-
-    useWindowStore.getState().close(featureId)
+    useWindowStore.getState().closeStandaloneFeature()
 
     expect(useTabsStore.getState().stateOf('w1').tabs).toHaveLength(1)
   })

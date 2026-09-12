@@ -188,12 +188,22 @@ export async function listWorkspaceRecovery(req: { workspaceId: string }): Promi
 
 export async function revealWorkspaceDocument(req: WorkspaceFileRequest): Promise<void | { remote: true; path: string; parent: string; name: string }> {
   const editor = remoteEditor(req.workspaceId)
-  if (editor) {
+  if (!editor) { revealWorkspaceFile(req); return }
+  try {
     const environment = getWorkspaceEnvironment(req.workspaceId)
+    const key = environment.key
     const path = await editor.checkedPath(req.path, true)
-    const stat = await environment.fs.stat(path)
+    await environment.fs.stat(path)
     environment.assertReady()
-    const directory = stat.isDir ? path : environment.path.dirname(path)
+    /**
+     * ★ 迟到的返回不开 tab。`environment.key` 里带着 generation,重连就换一把。
+     *
+     * 中间这几次 await 期间工作区可能已经重连(甚至换了连接):那时算出来的
+     * `parent` 属于**上一个**环境的根,渲染层照开不误,用户会得到一棵扎在陈旧路径上、
+     * 每一项都列不出来的树。`assertReady()` 只保证手里这个环境对象自己还活着,
+     * 不保证它还是这个工作区**当前**的环境 —— 所以要按 runtime 里 MCP 那套显式比 key。
+     */
+    if (getWorkspaceEnvironment(req.workspaceId).key !== key) throw new EnvironmentError('conflict')
     /**
      * ★ 用 realpath 后的根来比:`checkedPath` 返回的是 realpath 过的路径,而
      * `environment.rootPath` 是配置里的原样写法。根自身是软链时(BSD 的 /home →
@@ -202,20 +212,44 @@ export async function revealWorkspaceDocument(req: WorkspaceFileRequest): Promis
      */
     const root = await environment.fs.realpath(environment.rootPath)
     /**
-     * ★ `parent` 是渲染层用来**扎文件树根**的,必须走 `display()` 而不是 `relative()`。
+     * ★ 工作区相对写法里,根是**空串**不是 `'.'`。
      *
-     * `relative()` 没有 `inside()` 判断:对工作区外的目标它产出 `../../etc` 这种字符串,
-     * 渲染层原样当成 rootPath 开一个 files tab,而 `listWorkspaceDir` 只 resolve、不查
-     * `outside`,于是工作区外的目录被整棵列出来。这里越界就不返回扎根指令 —— 文件树
-     * 本来也表达不了工作区外的位置。注意围栏只针对 reveal 这个 UI 入口,Agent 通过
-     * 工具显式访问绝对路径是被允许的行为,不在这里拦。
+     * `display()` 对根返回 `'.'`(它是给人看的写法),而这条返回值是给机器用的:
+     * 渲染层拿 `parent` 当 files tab 的 rootPath,`listWorkspaceDir` 再拿它拼每一项的
+     * path。`'.'` 是真串,拼出来就是 `./a.txt` —— 而 `checkedPath` 明令拒绝 `.` 段,
+     * 于是那棵树里的文件一个也打不开。根**下的每一个文件**都会走到这条路径上。
      */
-    const parent = environment.path.display(root, directory)
-    if (environment.path.isAbsolute(parent)) return
-    return { remote: true, path: environment.path.display(root, path),
-      parent, name: environment.path.basename(path) }
+    const relative = (absolute: string): string | undefined => {
+      /**
+       * ★ 必须走 `display()` 而不是 `relative()`。
+       *
+       * `relative()` 没有 `inside()` 判断:对工作区外的目标它产出 `../../etc` 这种字符串,
+       * 渲染层原样当成 rootPath 开一个 files tab,而 `listWorkspaceDir` 只 resolve、不查
+       * `outside`,于是工作区外的目录被整棵列出来。越界就不返回扎根指令 —— 文件树本来
+       * 也表达不了工作区外的位置。注意围栏只针对 reveal 这个 UI 入口,Agent 通过工具
+       * 显式访问绝对路径是被允许的行为,不在这里拦。
+       */
+      const shown = environment.path.display(root, absolute)
+      if (environment.path.isAbsolute(shown)) return undefined
+      return shown === '.' ? '' : shown
+    }
+    const name = environment.path.basename(path)
+    // 根自己没有「在树里选中」这一说 —— 它就是树根。扎在根上,不选中任何一行。
+    if (path === root) return { remote: true, path: '', parent: '', name }
+    /**
+     * ★ 目录也扎在**父目录**上并选中它自己,和本机 `showItemInFolder` 一致。
+     *
+     * 原先目录是扎在自己身上的,于是 `selectedPath` 恰好等于树根 —— 而树根永远不是
+     * 树里的一行,「在文件管理器中显示」对任何目录都没有任何可见效果。
+     */
+    const parent = relative(environment.path.dirname(path))
+    const selected = relative(path)
+    if (parent === undefined || selected === undefined) return
+    return { remote: true, path: selected, parent, name }
+  } catch (error) {
+    // 远端 stat 抛的是裸 ENOENT,不归一化就会在界面上显示成「读写失败」
+    try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
   }
-  revealWorkspaceFile(req)
 }
 
 export function readWorkspaceFile(req: WorkspaceFileRequest): WorkspaceFile {

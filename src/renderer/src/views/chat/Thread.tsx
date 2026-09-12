@@ -10,7 +10,7 @@
  * 一路翻到消息模型才明白。
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Pencil } from 'lucide-react'
+import { CheckCircle2, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
@@ -27,6 +27,7 @@ import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
 import { InteractionPanel } from './InteractionPanel'
 import { StatusLine } from './StatusLine'
 import { ToolTimeline } from './ToolTimeline'
+import { reportBackgroundChild } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { ContextCheckpointPanel } from './ContextCheckpointPanel'
 import { assistantSegments, assistantText, isAssistantTextBlock, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
@@ -53,20 +54,21 @@ export const Thread = memo(function Thread({
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
   onDeleteTurn?: (userMessageId: string) => Promise<void>
-  onExecutePlan?: (plan: string, newSession: boolean, planId?: string, planVersion?: number) => void
+  onExecutePlan?: (ref: { planId: string; version: number }, source: 'current_session' | 'new_session') => void
   /** 助手消息上方那行 `供应商 / 模型`(截图:`RoutinAI / claude-fable-5-1`) */
   providerName: string | undefined
   /**
-   * 抬头显示的模型名 —— **用户选的那个别名**,由 `ChatView` 从 `transcript.model`
-   * (上游回包里的真实模型名)反查得到。不在这里直接读 transcript 就是为了不让
-   * 真实模型名漏到界面上:用户认得的是自己在设置里起的名字。
+   * 最新一轮抬头显示的模型名 —— **发送那条消息时用户选中的别名**,由
+   * `ChatView` 从 `lastOptions.model` 直接读出,不经过任何反查。只对
+   * 最后一行成立;更早的历史轮次从 `transcript.runModel` 按各自的
+   * `row.runId` 查(见下面的 `turnModel`)。
    */
   model: string | undefined
 }): ReactNode {
   const { t } = useI18n()
-  const { messages, live, tools, subagents, error, usage } = transcript
+  const { messages, live, tools, subagents, error, usage, runModel } = transcript
   const running = runId !== null
-  const visible = messages.filter((m) => !isToolResultOnly(m))
+  const visible = messages.filter((m) => !m.internal && !isToolResultOnly(m))
   const viewport = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const followBottom = useRef(true)
@@ -112,14 +114,15 @@ export const Thread = memo(function Thread({
           {error.code}: {agentErrorText(error, t)}
         </p>
       )}
-      {runId !== null && <InteractionPanel key={runId} runId={runId} sessionId={sessionId ?? undefined} onExecute={onExecutePlan} />}
+      {runId !== null && <InteractionPanel key={runId} runId={runId} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
         lastSeq={lastSeq} queued={queued} />
     </div>
   )
 
   return (
-    <div ref={viewport} className="scroll-thin fade-top min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]" data-testid="thread"
+    <div className="relative min-h-0 flex-1">
+    <div ref={viewport} className="scroll-thin fade-top h-full min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]" data-testid="thread"
       onScroll={() => {
         const el = viewport.current
         if (el === null) return
@@ -164,7 +167,13 @@ export const Thread = memo(function Thread({
               blocks={row.blocks}
               tools={tools}
               subagents={subagents}
-              model={model}
+              /*
+                ★ **按行各取各的,别名版。** 只有最后一行才对得上 `ChatView` 传下来的
+                `model`(那是最新一次发送时的选择,存在渲染进程内存里,没跑完也知道 ——
+                不必等回包);更早的历史轮次必须查 `transcript.runModel`,否则会像
+                修复前那样,所有历史行一起显示"最新一轮"选的模型。
+              */
+              model={turnModel(row, isLast ? model : undefined, runModel)}
               providerName={providerName}
               runStatus={isLast ? transcript.status : undefined}
               /*
@@ -203,8 +212,48 @@ export const Thread = memo(function Thread({
         })}
       </div>
     </div>
+    <SubagentTaskCenter sessionId={sessionId} subagents={subagents} />
+    </div>
   )
 })
+
+function SubagentTaskCenter({ sessionId, subagents }: { sessionId?: string; subagents: Readonly<Record<string, import('../../../../shared/agent/transcript').SubagentState>> }): ReactNode {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  const entries = Object.values(subagents).filter((item) => item.background === true)
+  if (entries.length === 0) return null
+  const running = entries.filter((item) => item.status === 'running').length
+  const pending = entries.filter((item) => item.reportStatus === 'pending').length
+  const jump = (callId: string): void => {
+    document.querySelector(`[data-subagent-call-id="${CSS.escape(callId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+  return (
+    <div className="pointer-events-none absolute right-4 top-4 z-20 flex flex-col items-end gap-2">
+      <button type="button" aria-expanded={open} aria-label={t('chat.subagent.center.open')} onClick={() => setOpen((value) => !value)} className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-raised/95 px-3 py-1.5 text-[11.5px] text-fg-muted shadow-lg backdrop-blur transition hover:text-fg">
+        <PanelRight size={13} />
+        <span>{t('chat.subagent.center.title')}</span>
+        {running > 0 && <span className="font-mono text-accent">{running}</span>}
+        {pending > 0 && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
+      </button>
+      {open && <div className="pointer-events-auto w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-card border border-border bg-surface-raised/98 shadow-xl backdrop-blur">
+        <div className="flex items-center justify-between border-b border-hairline px-3 py-2.5">
+          <div><div className="text-[12px] font-medium text-fg">{t('chat.subagent.center.title')}</div><div className="mt-0.5 text-[10.5px] text-fg-faint">{t('chat.subagent.center.count', { count: entries.length })}</div></div>
+          <button type="button" aria-label={t('common.close')} onClick={() => setOpen(false)} className="rounded p-1 text-fg-faint hover:bg-tint-hover hover:text-fg"><X size={13} /></button>
+        </div>
+        <div className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
+          {entries.map((item) => {
+            const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : item.reportStatus === 'pending' ? 'pending' : 'done'
+            return <div key={item.callId} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
+              {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
+              <button type="button" onClick={() => jump(item.callId)} className="min-w-0 flex-1 text-left"><span className="block truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span><span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span></button>
+              {state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
+            </div>
+          })}
+        </div>
+      </div>}
+    </div>
+  )
+}
 
 /**
  * 这一轮该显示哪份用量。
@@ -220,6 +269,21 @@ function turnUsage(
 ): ReactNode {
   const usage = live ?? (row.runId === undefined ? undefined : persisted?.[row.runId])
   return usage === undefined ? undefined : <TaskUsage usage={usage} />
+}
+
+/**
+ * 这一轮抬头该显示哪个模型别名。
+ *
+ * 和 `turnUsage` 的口径不同:用量要等 `message_end` 累计,只有 run 彻底
+ * 跑完才可信;而"发送时选的模型"在按下发送那一刻就已确定,不必等 run 结束 ——
+ * 所以调用方对 `live` 只用 `isLast` 判断,没有 `runId === null` 那道门槛。
+ */
+function turnModel(
+  row: Extract<ThreadRow, { kind: 'assistant' }>,
+  live: string | undefined,
+  persisted: TranscriptState['runModel']
+): string | undefined {
+  return live ?? (row.runId === undefined ? undefined : persisted?.[row.runId])
 }
 
 /**

@@ -10,6 +10,7 @@
  * - `emitToAll`   只接受 GlobalEventChannel(设置、主题、工作区列表这类真·全局变更)
  * 想拿 emitToAll 推 agent:event,编译期就过不去。
  */
+import { BrowserWindow } from 'electron'
 import type { WebContents } from 'electron'
 import type { EventChannel, IpcEventMap } from '../../shared/ipc/contract'
 import type { WindowKind } from '../../shared/domain/tab'
@@ -123,6 +124,15 @@ class WindowRegistry {
 
   isSubscribed(topic: string, sender: WebContents): boolean {
     return this.topics.get(topic)?.has(sender.id) === true
+  }
+
+  /** Bring the existing main window back when a background notification is clicked. */
+  showMainWindow(): void {
+    const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed())
+    if (win === undefined) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
   }
 
   // ─── 推送 ───

@@ -61,7 +61,7 @@ import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, Prepa
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type { SyncConflict, SyncPreview, SyncStatus } from '../domain/config-sync'
-import type { PlanDocument, PlanOperation, PlanUpdateResult } from '../domain/plan'
+import type { PlanDocument, PlanOperation, PlanUpdateResult, PlanDocumentV2, PlanV2Input, PlanLifecycle, PlanStepV2Status } from '../domain/plan'
 import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
@@ -72,6 +72,7 @@ import type {
   WorkspaceTextFile
 } from '../domain/workspace-file'
 import type { BrowserChange, BrowserProfile, BrowserTab } from '../domain/browser'
+import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../domain/scheduled'
 import type {
   BackupStatus,
   CleanupAge,
@@ -81,6 +82,18 @@ import type {
   ImportPreview,
   RestoreResult
 } from '../domain/data'
+import type {
+  ImportApplyRequest,
+  ImportBatchItemsPage,
+  ImportConflictResolution,
+  ImportHistoryPage,
+  ImportJobStatus,
+  ImportPreview as SourceImportPreview,
+  ImportPreviewPage,
+  ImportPreviewQuery,
+  ImportSourceState,
+  ImportSyncPatch
+} from '../domain/import'
 import type {
   UsageDimensionStat,
   UsageRequestLogsPage,
@@ -241,7 +254,8 @@ export interface IpcInvokeMap {
   'workspace:commitActivation': { req: { ticket: string; requestId: string }; res: void }
   'workspace:releaseActivation': { req: { ticket: string }; res: void }
   'workspace:createSsh': { req: { browseId: string; path: string; requestId: string }; res: Workspace }
-  'connection:list': { req: void; res: Array<{ profile: ConnectionProfile; status: ConnectionStatus }> }
+  /** ★ `hasPassword` 是**布尔**:存下的密码永不回渲染层,界面只需要知道"有没有" */
+  'connection:list': { req: void; res: Array<{ profile: ConnectionProfile; status: ConnectionStatus; hasPassword: boolean }> }
   'connection:upsert': { req: ConnectionProfileInput; res: ConnectionProfile }
   'connection:remove': { req: { id: string }; res: void }
   'connection:connect': { req: { id: string; requestId: string; allowLocalCommands: boolean }; res: RemoteDirectory }
@@ -302,6 +316,18 @@ export interface IpcInvokeMap {
   'browser:exportCookies': { req: { workspaceId: string; profileId: string }; res: boolean }
   'browser:importCookies': { req: { workspaceId: string; profileId: string }; res: number | null }
   'browser:clearProfileState': { req: { workspaceId: string; profileId: string }; res: void }
+
+  // ── 定时任务 ──
+  'scheduled:listTasks': { req: { workspaceId?: string }; res: ScheduledTask[] }
+  'scheduled:getTask': { req: { id: string }; res: ScheduledTask | null }
+  'scheduled:create': { req: ScheduledTaskInput; res: ScheduledTask }
+  'scheduled:update': { req: { id: string; patch: Partial<ScheduledTaskInput> }; res: ScheduledTask }
+  'scheduled:delete': { req: { id: string }; res: void }
+  'scheduled:setEnabled': { req: { id: string; enabled: boolean }; res: ScheduledTask }
+  'scheduled:runNow': { req: { id: string }; res: ScheduledRun }
+  'scheduled:listRuns': { req: { taskId?: string; limit?: number }; res: ScheduledRun[] }
+  'scheduled:getRun': { req: { id: string }; res: ScheduledRun | null }
+  'scheduled:deleteRun': { req: { id: string }; res: void }
 
   // ── Tab 状态(读;写走 send,见 IpcSendMap) ──
   'tabs:getInner': { req: { workspaceId: string }; res: InnerTabState }
@@ -395,6 +421,12 @@ export interface IpcInvokeMap {
   'plans:get': { req: { planId: string }; res: PlanDocument | null }
   'plans:update': { req: { planId?: string; sessionId: string; baseVersion?: number; operations: PlanOperation[] }; res: PlanUpdateResult }
   'plans:submit': { req: { planId: string; version: number }; res: PlanDocument }
+  'plans:v2:list': { req: { sessionId: string }; res: PlanDocumentV2[] }
+  'plans:v2:get': { req: { planId: string }; res: PlanDocumentV2 | null }
+  'plans:v2:put': { req: PlanV2Input; res: { ok: boolean; plan?: PlanDocumentV2; conflict?: { planId: string; currentVersion: number }; message?: string } }
+  'plans:v2:submit': { req: { planId: string; version: number }; res: PlanDocumentV2 }
+  'plans:v2:transition': { req: { planId: string; version: number; lifecycle: PlanLifecycle; executionRunId?: string }; res: PlanDocumentV2 }
+  'plans:v2:progress': { req: { planId: string; version: number; explanation?: string | null; plan: Array<{ id?: string; step: string; status: PlanStepV2Status }> }; res: PlanDocumentV2 }
 
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
@@ -611,6 +643,46 @@ export interface IpcInvokeMap {
   'storage:cleanupByAge': { req: { age: CleanupAge }; res: CleanupResult }
   'storage:clearHistory': { req: void; res: CleanupResult }
   'storage:clearLocalData': { req: { confirm: boolean }; res: { deleted: boolean } }
+
+  // ── 从其他 AI 应用导入(设置 › 导入) ──
+  /*
+    ★ 频道名是 `imports:*`(复数),而上面「数据」页那三条是 `storage:import*` ——
+    两者是**两个功能**:那边导入的是 NextCoWork 自己的整库备份,这边是外部来源。
+    共用前缀的话,下一个人接手时得先读实现才知道哪个是哪个,而 `storage:importApply`
+    会合并全套设置、按时间戳覆盖,误用一次的代价是用户配置被一份外部数据盖掉。
+
+    ★ 读与写分得很开:detect/getState/preview/previewItems/history/historyItems
+    都是纯读,只有 chooseSource(要弹系统对话框)、apply、cancel、updateSync、
+    syncNow、resolveConflict 会改状态。
+  */
+  /** 探测本机来源。不弹对话框,找不到就如实回 not-found。 */
+  'imports:detect': { req: { sourceKind: 'claude-code' | 'codex' }; res: ImportSourceState }
+  /**
+   * 让用户自己指定配置目录。★ 走主进程 dialog.showOpenDialog ——
+   * 渲染层永不指定任意路径(方案 §9)。取消返回当前状态,不报错。
+   *
+   * 这条入口不能省:Finder 启动的 Electron 没有 shell 环境变量,
+   * `CLAUDE_CONFIG_DIR` 在那种启动方式下读不到。
+   */
+  'imports:chooseSource': { req: { sourceKind: 'claude-code' | 'codex' }; res: ImportSourceState }
+  'imports:getState': { req: { sourceId: string }; res: ImportSourceState }
+  /**
+   * 扫描并产出不可变快照。★ 返回的是**句柄 + 计数**,不是全部条目 ——
+   * 条目走 `imports:previewItems` 分页取(见 `ImportPreview` 的注释)。
+   */
+  'imports:preview': { req: { sourceId: string; requestId: string }; res: SourceImportPreview }
+  'imports:previewItems': { req: ImportPreviewQuery; res: ImportPreviewPage }
+  /** 提交。只接受快照内的 item id(见 `ImportApplyRequest`)。 */
+  'imports:apply': { req: ImportApplyRequest; res: ImportJobStatus }
+  'imports:status': { req: { sourceId: string }; res: ImportJobStatus | null }
+  /** 在单项原子提交边界生效:保留已成功项,记 cancelled。 */
+  'imports:cancel': { req: { jobId: string }; res: void }
+  'imports:history': { req: { offset: number; limit: number }; res: ImportHistoryPage }
+  'imports:historyItems': { req: { batchId: string; offset: number; limit: number }; res: ImportBatchItemsPage }
+  /** 同步开关与已授权范围。★ 只影响后续扫描,不删已导入数据。 */
+  'imports:updateSync': { req: { sourceId: string; patch: ImportSyncPatch }; res: ImportSourceState }
+  'imports:syncNow': { req: { sourceId: string }; res: ImportJobStatus }
+  'imports:resolveConflict': { req: ImportConflictResolution; res: void }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -702,6 +774,8 @@ export interface IpcEventMap {
   'sessions:changed': SessionChange
   'browser:changed': BrowserChange
   'browser:profilesChanged': BrowserProfile[]
+  'scheduled:changed': { kind: 'task' | 'run'; taskId?: string; runId?: string; status?: ScheduledRun['status'] }
+  'scheduled:focusRun': { runId: string }
   /** The persisted user catalogue changed. Built-in rows are bundled code. */
   'modelCatalog:changed': { custom: ModelCatalogDefinition[] }
   /**
@@ -744,6 +818,18 @@ export interface IpcEventMap {
   'clientAuth:changed': ClientAuthState
   'configSync:changed': SyncStatus
   'app:updateChanged': UpdateState
+  /**
+   * 导入状态变了 —— 作业进度、同步状态、新批次。
+   *
+   * ★ 带 `seq` 且**限频**:一次 100 会话的导入会产生上百次状态变化,
+   * 每次都推一遍等于让设置页在导入期间每秒重渲染几十次。主进程侧按
+   * 大约 200ms 合并,渲染层用 seq 判断自己手里那份是不是已经过期。
+   *
+   * ★ 不带快照正文:渲染层收到这条之后自己去 `imports:getState` 拉 ——
+   * 把 `ImportJobStatus` 塞进来的话,一个没开设置页的窗口也要为每一次
+   * 进度变化付一次结构化克隆。
+   */
+  'imports:changed': { sourceId: string; jobId?: string; seq: number }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -945,6 +1031,19 @@ export const INVOKE_CHANNELS = {
   'storage:cleanupByAge': 1,
   'storage:clearHistory': 1,
   'storage:clearLocalData': 1
+  , 'imports:detect': 1
+  , 'imports:chooseSource': 1
+  , 'imports:getState': 1
+  , 'imports:preview': 1
+  , 'imports:previewItems': 1
+  , 'imports:apply': 1
+  , 'imports:status': 1
+  , 'imports:cancel': 1
+  , 'imports:history': 1
+  , 'imports:historyItems': 1
+  , 'imports:updateSync': 1
+  , 'imports:syncNow': 1
+  , 'imports:resolveConflict': 1
   , 'context:list': 1
   , 'context:updateCheckpoint': 1
   , 'context:compact': 1
@@ -952,6 +1051,22 @@ export const INVOKE_CHANNELS = {
   , 'plans:get': 1
   , 'plans:update': 1
   , 'plans:submit': 1
+  , 'plans:v2:list': 1
+  , 'plans:v2:get': 1
+  , 'plans:v2:put': 1
+  , 'plans:v2:submit': 1
+  , 'plans:v2:transition': 1
+  , 'plans:v2:progress': 1
+  , 'scheduled:listTasks': 1
+  , 'scheduled:getTask': 1
+  , 'scheduled:create': 1
+  , 'scheduled:update': 1
+  , 'scheduled:delete': 1
+  , 'scheduled:setEnabled': 1
+  , 'scheduled:runNow': 1
+  , 'scheduled:listRuns': 1
+  , 'scheduled:getRun': 1
+  , 'scheduled:deleteRun': 1
 } as const satisfies Record<keyof IpcInvokeMap, 1>
 
 export const SEND_CHANNELS = {
@@ -994,6 +1109,9 @@ export const EVENT_CHANNELS = {
   'clientAuth:changed': 1
   ,'configSync:changed': 1
   ,'app:updateChanged': 1
+  ,'imports:changed': 1
+  ,'scheduled:changed': 1
+  ,'scheduled:focusRun': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

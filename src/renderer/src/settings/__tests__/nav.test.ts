@@ -12,8 +12,27 @@ import {
 const PAGE_IDS = new Set<SettingsPageId>(SETTINGS_PAGES.map((p) => p.id))
 
 describe('导航表与行目录的自洽', () => {
-  it('十项,照参考图', () => {
-    expect(SETTINGS_PAGES).toHaveLength(10)
+  /**
+   * 参考图那十项 + 「导入」。
+   *
+   * ★ 断言的是**逐个 id**,不只是长度。原来那条只数个数,而它想守的其实是
+   * 「没人悄悄加一页、也没人悄悄删一页」—— 只数个数的话,把「钱包」换成
+   * 「导入」照样是绿的,而那正是这条测试该拦下的那种改动。
+   */
+  it('十项照参考图,外加「导入」', () => {
+    expect(SETTINGS_PAGES.map((p) => p.id)).toEqual([
+      'account',
+      'wallet',
+      'general',
+      'import',
+      'preference',
+      'model',
+      'review',
+      'connection',
+      'computer',
+      'data',
+      'about'
+    ])
   })
 
   it('行目录里的 page 全都存在', () => {

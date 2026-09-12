@@ -48,7 +48,7 @@ import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
 import { listDir } from '../../services/app'
-import { listWorkspaceRecovery, mutateWorkspaceFile, revealWorkspaceFile, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
+import { listWorkspaceRecovery, mutateWorkspaceFile, isResultUnknown, revealWorkspaceFile, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
 import { confirmDocumentChanges } from '../../stores/documents'
 import { useTabsStore } from '../../stores/tabs'
 import { flatten } from './flatten'
@@ -279,6 +279,8 @@ function WorkspaceFilesView({
         const errorKey = workspaceFileErrorKey(error)
         setOperationError(errorKey)
         if (request.operation === 'delete') setNotice({ key: errorKey, error: true })
+        // 「结果未知」之后面板上这份列表可能已经是假的 —— 重新去读服务器,别拿本地状态当结论
+        if (isResultUnknown(error)) { refresh(); void refreshRecovery() }
       }
     } finally {
       operationRunning.current = false
@@ -304,7 +306,13 @@ function WorkspaceFilesView({
       // ★ 带上列举时的 environmentKey:重连换了环境后这条记录属于上一个连接,主进程会拒绝
       await mutateWorkspaceFile({ workspaceId: workspace.id, operation: 'move', path: entry.recoveryPath, destination: entry.originalPath, environmentKey: recoveryKey })
       if (alive.current) setNotice({ key: 'ssh.fileRestored', path: entry.originalPath })
-    } catch (error) { if (alive.current) setNotice({ key: workspaceFileErrorKey(error), error: true }) }
+    } catch (error) {
+      if (alive.current) {
+        setNotice({ key: workspaceFileErrorKey(error), error: true })
+        // 恢复也可能是「发出去了但不知道成没成」—— 树里那一行到底回来没有,只能问服务器
+        if (isResultUnknown(error)) refresh()
+      }
+    }
     finally {
       operationRunning.current = false
       if (alive.current) { setBusy(false); void refreshRecovery() }
@@ -312,8 +320,8 @@ function WorkspaceFilesView({
   }
 
   const rows = useMemo(
-    () => flatten(listings, expanded, rootPath, sortBy, showHidden, query),
-    [listings, expanded, rootPath, sortBy, showHidden, query]
+    () => flatten(listings, expanded, rootPath, sortBy, showHidden, query, selectedPath),
+    [listings, expanded, rootPath, sortBy, showHidden, query, selectedPath]
   )
 
   const root = listings[rootPath]

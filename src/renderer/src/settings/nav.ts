@@ -15,6 +15,7 @@ export type SettingsPageId =
   | 'account'
   | 'wallet'
   | 'general'
+  | 'import'
   | 'preference'
   | 'model'
   | 'review'
@@ -47,6 +48,18 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
       { id: 'task', label: '任务' }
     ]
   },
+  /**
+   * ★ 第十一页,**不是**照参考图铺的 —— 参考图里没有它。
+   *
+   * 它和「数据」页那个「导入数据」是**两回事**:那边读的是 NextCoWork 自己
+   * 导出的整库备份,这边读的是别的 AI 应用留在本机的目录。合进「数据」页的话,
+   * 页面上会同时出现两颗都叫「导入」的按钮,而误点的代价是一份外部数据
+   * 覆盖掉整套设置。分成两页是让这两件事在界面上**永远不挨着**。
+   *
+   * 没有子 Tab:首版只有一个来源(Claude Code),铺一个只有一项的切换器
+   * 是在假装还有别的。
+   */
+  { id: 'import', label: '导入' },
   {
     id: 'preference',
     label: '偏好',
@@ -173,6 +186,30 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
     sub: 'task',
     title: '子代理并发上限',
     keywords: ['subagent', '子代理', '并发']
+  },
+
+  // ── 导入 ──
+  // ★ 每一行都必须真的在那一页上(见 SETTINGS_INDEX 顶上那条约定)。
+  //   「自动同步」「同步内容」「选择导入」「导入历史」是导入页上真实存在的四块。
+  {
+    page: 'import',
+    title: '自动同步',
+    keywords: ['sync', 'auto', 'claude', '同步', '自动']
+  },
+  {
+    page: 'import',
+    title: '同步内容',
+    keywords: ['sync', 'category', 'claude', '同步', '内容', '类别']
+  },
+  {
+    page: 'import',
+    title: '从其他 AI 应用导入',
+    keywords: ['import', 'claude', 'claude code', 'migrate', '导入', '迁移', '其他']
+  },
+  {
+    page: 'import',
+    title: '导入历史',
+    keywords: ['import', 'history', 'batch', '导入', '历史', '批次']
   },
 
   // ── 偏好 ──

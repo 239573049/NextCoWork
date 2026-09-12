@@ -36,6 +36,7 @@ import { usePresence } from "../lib/usePresence";
 import { pickWorkspace } from "../services/app";
 import { deleteSession, listSessions } from "../services/sessions";
 import { on } from "../services/ipc";
+import { onScheduledChanged } from "../services/scheduled";
 import { SettingsOverlay } from "../settings/SettingsOverlay";
 import { useTabsStore } from "../stores/tabs";
 import { useWindowStore } from "../stores/window";
@@ -89,8 +90,12 @@ export function AppShell({
     rightPanelOpen,
     bottomPanelOpen,
     settingsPage,
+    scheduledUnread,
   } = useWindowStore();
   const win = useWindowStore();
+  useEffect(() => onScheduledChanged((event) => {
+    if (event.kind === 'run' && (event.status === 'success' || event.status === 'error' || event.status === 'skipped') && useWindowStore.getState().activeStandaloneFeature !== 'scheduled') useWindowStore.setState({ scheduledUnread: true })
+  }), []);
   const tabs = useTabsStore();
   const ensureTabs = useTabsStore((s) => s.ensure);
 
@@ -287,6 +292,7 @@ export function AppShell({
               activeStandaloneFeature ??
               (activeOuter?.kind === "feature" ? activeOuter.ref.feature : null)
             }
+            scheduledUnread={scheduledUnread}
             activeSessionId={routeSessionId}
             runningSessionIds={runningSessionIds}
             // ★ `newChat` 不是 `open`:已经有一个没用过的对话就切过去,不再攒一排
@@ -321,7 +327,9 @@ export function AppShell({
       )}
 
       <main data-theme-region="canvas" className="app-canvas flex min-w-0 flex-1 flex-col overflow-hidden rounded-panel bg-canvas">
-        {activeStandaloneFeature === "browser" ? (
+        {activeStandaloneFeature === "scheduled" ? (
+          <FeatureView feature="scheduled" onClose={win.closeStandaloneFeature} />
+        ) : activeStandaloneFeature === "browser" ? (
           <BrowserFeature onClose={win.closeStandaloneFeature} />
         ) : activeStandaloneFeature === "extensions" ? (
           <FeatureView feature="extensions" onClose={win.closeStandaloneFeature} />

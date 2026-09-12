@@ -81,6 +81,8 @@ export interface ToolResult {
   isError: boolean
   /** Optional UI-only metadata; encoders ignore it when sending tool results upstream. */
   subagent?: SubagentResult
+  /** Host-owned control signal; the result is committed before ending the run. */
+  stopRun?: boolean
 }
 
 export function toolOk(content: string, extra?: Omit<ToolOutput, 'content'>): ToolResult {

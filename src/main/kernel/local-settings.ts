@@ -83,10 +83,10 @@ async function fileKey(fs: KernelFs, path: string, strict = false): Promise<stri
 
 /** 两份文件共用的读 —— 缓存、容错、远程 fail-closed 都在这儿，调用方只给路径。 */
 async function readSettingsAt(
-  fs: KernelFs, path: string, cacheKey: string, strict: boolean, logger?: Logger
+  fs: KernelFs, path: string, cacheKey: string | undefined, strict: boolean, logger?: Logger
 ): Promise<LocalSettings> {
   const key = await fileKey(fs, path, strict)
-  const hit = strict ? undefined : cache.get(cacheKey)
+  const hit = cacheKey === undefined ? undefined : cache.get(cacheKey)
   if (hit !== undefined && hit.key === key) return hit.settings
 
   let settings = emptyLocalSettings()
@@ -100,15 +100,30 @@ async function readSettingsAt(
       logger?.warn(`[settings] ${path} 不是有效的 JSON,本次按「没有配置」处理`)
     }
   }
-  cache.set(cacheKey, { key, settings })
+  if (cacheKey !== undefined) cache.set(cacheKey, { key, settings })
   return settings
 }
 
 export async function readLocalSettings(fs: KernelFs, workspaceRoot: string, logger?: Logger, scope: SettingsScope = {}): Promise<LocalSettings> {
   if (workspaceRoot === '') return emptyLocalSettings()
   const path = await scopedPath(workspaceRoot, scope)
-  const cacheKey = scope.namespace ? JSON.stringify([scope.namespace, path]) : path
-  return readSettingsAt(fs, path, cacheKey, scope.namespace !== undefined, logger)
+  /**
+   * ★ 远端**一条都不进缓存**,连键都不铸。
+   *
+   * 原先这里按 `[namespace, path]` 铸了个键写进去,而命中判断又对远端一律跳过 ——
+   * 那些条目从写进去的第一刻起就没有任何代码读得到,`namespace` 里带着 generation,
+   * 每重连一次再攒一份。
+   *
+   * 光是删掉那次写还不够,得让「远端不缓存」在调用点上看得见:失效的两个入口
+   * (`clearLocalSettingsCache` 和 `updateSettingsFile` 写完那次 `cache.delete`)
+   * 用的都是**不带 namespace 的裸路径**。哪天有人觉得「远端也缓存一下更快」而打开
+   * 命中判断,这两处就都清不到那些条目 —— 症状是用户在远端点了「以后都允许」却不生效,
+   * 或者更糟:删掉的 deny 规则还在拦人。缓存键干脆不存在,这条路就走不通。
+   *
+   * 远端每次重读并不亏:判新鲜本来就要一次 stat,那已经是一趟网络往返了。
+   */
+  const remote = scope.namespace !== undefined
+  return readSettingsAt(fs, path, remote ? undefined : path, remote, logger)
 }
 
 /**

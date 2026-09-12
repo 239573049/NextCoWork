@@ -23,7 +23,7 @@ import { todoWriteTool } from './todo'
 import { webFetchTool } from './web'
 import { webSearchTool } from './web-search'
 import { browserTools } from './browser'
-import { askUserTool, planApprovalTool } from './interaction'
+import { askUserTool } from './interaction'
 import { enterPlanModeTool, exitPlanModeTool, planUpdateTool } from './plan'
 
 export function builtinTools(): ToolRegistration[] {
@@ -42,7 +42,6 @@ export function builtinTools(): ToolRegistration[] {
     skillTool,
     webSearchTool,
     askUserTool,
-    planApprovalTool,
     enterPlanModeTool,
     planUpdateTool,
     exitPlanModeTool,

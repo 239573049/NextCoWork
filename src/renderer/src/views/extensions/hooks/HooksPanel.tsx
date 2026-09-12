@@ -2,15 +2,17 @@
  * 钩子面板。和命令 / 子代理不同，钩子不是「一个文件一条」，而是两份 JSON 文件里
  * 的两段数组 —— 所以它不复用 `ResourcePanel`，列表按事件分组，编辑走 Dialog。
  */
-import { AlertTriangle, Plus, Webhook } from 'lucide-react'
+import { AlertTriangle, Play, Plus, Webhook } from 'lucide-react'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
   HOOK_EVENTS,
   defaultTimeoutMs,
   type HookEvent,
   type HookListItem,
+  type HookRunReport,
   type HookScope
 } from '../../../../../shared/domain/hook'
+import { HOOK_TEMPLATES, findHookTemplate } from '../../../../../shared/domain/hook-templates'
 import { Button } from '../../../components/ui/Button'
 import { Dialog } from '../../../components/ui/Dialog'
 import { EmptyState } from '../../../components/ui/EmptyState'
@@ -27,10 +29,11 @@ import {
   listHooks,
   onHooksChanged,
   saveHook,
-  setHookEnabled
+  setHookEnabled,
+  testHook
 } from '../../../services/hooks'
 import { useWindowStore } from '../../../stores/window'
-import { validateHook, warnHook, type HookDraft } from './hook-form'
+import { templateToDraft, validateHook, warnHook, type HookDraft } from './hook-form'
 
 const EMPTY_DRAFT = (event: HookEvent): HookDraft => ({
   event,
@@ -49,6 +52,24 @@ export function HooksPanel(): ReactNode {
   const [error, setError] = useState<string | null>(null)
 
   const [editing, setEditing] = useState<{ draft: HookDraft; id?: string; scope: HookScope } | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<HookRunReport | null>(null)
+
+  const test = (): void => {
+    if (editing === null || validateHook(editing.draft) !== null) return
+    setTesting(true)
+    setTestResult(null)
+    void testHook(
+      editing.scope,
+      editing.draft.event,
+      editing.draft.command.trim(),
+      Math.round(editing.draft.timeoutSeconds * 1000),
+      workspaceId ?? undefined
+    )
+      .then(setTestResult)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setTesting(false))
+  }
 
   const refresh = useCallback(() => {
     void listHooks(workspaceId ?? undefined).then(setRows).catch(() => setError(t('ext.error.loadFailed')))
@@ -94,7 +115,7 @@ export function HooksPanel(): ReactNode {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 px-4 py-2">
-        <span className="text-[12px] text-fg-faint">{t('hooks.notWired')}</span>
+        <span className="text-[12px] text-fg-faint">{t('hooks.runNote')}</span>
         <Button
           size="sm"
           variant="accent"
@@ -185,6 +206,37 @@ export function HooksPanel(): ReactNode {
       >
         {editing !== null && (
           <div className="flex flex-col gap-3">
+            {/*
+              模板只**填充表单**，不直接保存 —— 钩子执行本机命令，哪怕内容无害，
+              「装了应用就开始跑」这件事也该由用户点头。选完还能改、还能试运行。
+            */}
+            <label className="flex flex-col gap-1">
+              <span className="text-[12px] text-fg-muted">{t('hooks.field.template')}</span>
+              <Select
+                inModal
+                value=""
+                ariaLabel={t('hooks.field.template')}
+                options={[
+                  { value: '', label: t('hooks.template.pick') },
+                  ...HOOK_TEMPLATES.map((tpl) => ({
+                    value: tpl.id,
+                    label:
+                      t(`hooks.template.${tpl.id}` as 'hooks.template.danger-guard') +
+                      (tpl.platform === 'darwin' ? ' (macOS)' : '')
+                  }))
+                ]}
+                onValueChange={(id) => {
+                  const tpl = findHookTemplate(id)
+                  if (tpl === undefined) return
+                  setTestResult(null)
+                  setEditing({
+                    ...editing,
+                    draft: templateToDraft(tpl, t(`hooks.template.${tpl.id}` as 'hooks.template.danger-guard'))
+                  })
+                }}
+              />
+            </label>
+
             <label className="flex flex-col gap-1">
               <span className="text-[12px] text-fg-muted">{t('hooks.field.event')}</span>
               <Select
@@ -250,6 +302,29 @@ export function HooksPanel(): ReactNode {
               <p className="text-[11px] text-danger" role="alert">{t(invalid as 'hooks.error.emptyCommand')}</p>
             )}
             <p className="text-[11px] text-fg-faint">{t('hooks.dangerNote')}</p>
+
+            {/*
+              ★ 试运行是这一屏性价比最高的控件：钩子的失败模式（脚本路径不对、
+              shell 语法、超时）全都只有真跑一次才暴露，而配好之后要等到某次
+              工具调用才会触发，那时候错误早就淹没在别的事情里了。
+            */}
+            <div className="flex items-center gap-2 border-t border-hairline pt-3">
+              <Button size="sm" icon={<Play size={13} />} onClick={test} disabled={invalid !== null || testing}>
+                {testing ? t('hooks.testing') : t('hooks.test')}
+              </Button>
+              {workspaceId === null && <span className="text-[11px] text-fg-faint">{t('hooks.testNeedsWorkspace')}</span>}
+            </div>
+            {testResult !== null && (
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-input p-2 font-mono text-[11px] text-fg-muted">
+                {t('hooks.testResult', {
+                  outcome: testResult.outcome,
+                  code: testResult.exitCode === null ? '-' : String(testResult.exitCode),
+                  ms: String(testResult.durationMs)
+                })}
+                {testResult.stdout === '' ? '' : `\n\nstdout:\n${testResult.stdout}`}
+                {testResult.stderr === '' ? '' : `\n\nstderr:\n${testResult.stderr}`}
+              </pre>
+            )}
           </div>
         )}
       </Dialog>
