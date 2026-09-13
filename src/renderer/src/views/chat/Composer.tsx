@@ -17,19 +17,19 @@ import {
   BrainCircuit,
   Check,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   Globe,
   Lightbulb,
+  Maximize2,
   Paperclip,
   Plus,
+  RefreshCw,
   Settings2,
   ShieldCheck,
   ShieldQuestion,
   Square,
   Target,
   Unlock,
-  Wrench,
   Sparkles,
 } from "lucide-react";
 import {
@@ -50,8 +50,15 @@ import type {
   ThinkingLevel,
 } from "../../../../shared/agent/run-request";
 import {
-} from "../../../../shared/agent/run-request";
-import { DEFAULT_CONTEXT_WINDOW } from "../../../../shared/agent/context-management";
+  effectiveContextWindow,
+  formatContextWindow,
+  longContextTickRatio,
+  LONG_CONTEXT_THRESHOLD,
+  supportsMaxContext,
+} from "../../../../shared/agent/context-management";
+import { longContextSurcharge, findPricing } from "../../../../shared/domain/pricing";
+import { PRICING_SEED } from "../../../../shared/domain/pricing-seed";
+import { findBuiltinModel } from "../../../../shared/domain/model-catalog-inventory";
 import { modelThinkingLevels, normalizeModelThinkingLevel } from "../../../../shared/domain/model-runtime";
 import type {
   Workspace,
@@ -68,6 +75,7 @@ import {
   MenuLabel,
   MenuSeparator,
 } from "../../components/ui/Menu";
+import { Slider } from "../../components/ui/Slider";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
@@ -84,7 +92,7 @@ import { listSkills, onSkillsChanged } from "../../services/skills";
 import { listCommands } from "../../services/commands";
 import type { SkillListItem } from "../../../../shared/domain/skill";
 import type { CommandDefinition } from "../../../../shared/domain/command";
-import { applyCommand } from "../../../../shared/domain/command";
+import { applyCommand, parseCommandInvocation } from "../../../../shared/domain/command";
 import { SkillPopup, type SlashItem } from './SkillPopup';
 import type { TranslationKey } from "../../i18n";
 import type { DraftSelection } from './rich-draft';
@@ -116,6 +124,14 @@ export interface ComposerValue {
   mode: SessionMode;
   thinking: ThinkingLevel;
   webSearch: boolean;
+  /**
+   * 「最大上下文」:关(默认)时有效窗口夹在 272K 以内。见
+   * `shared/agent/context-management.ts` 文件头的三层窗口。
+   *
+   * ★ 药丸这一侧是**必填**,虽然 `WorkspaceSettings` 那一侧是可选的 ——
+   * `fromSettings` 负责把缺席铺成 false,之后本地就没有「不知道」这个状态了。
+   */
+  maxContext: boolean;
 }
 
 /** 应用级默认模型(设置页那个)。别名和供应商必须一起传,拆成两个 prop 必漏 */
@@ -371,7 +387,27 @@ export function Composer({
    *   里的 `description`(那是用户自己写的内容,不该翻译)。
    */
   const slashNeedle = skillNeedle.toLocaleLowerCase();
+  /*
+    ★ **本地动作 —— `command.ts` 那条约定的唯一例外。**
+
+    那份头注把斜杠命令定义为「一段存在磁盘上的提示词模板,不是一个能执行的动作」,
+    正因为如此这个功能只需要一个 IPC 频道。`/compact` 破例,是因为它要压缩的对象
+    **就是即将发出的这个请求本身** —— 没有任何一段提示词能表达这件事,
+    展开成文本发给模型只会让模型多读一句「请压缩上下文」然后照常回答。
+
+    所以它只在这里拼进弹层(可见、可搜),并在 `submit()` 里于 `applyCommand`
+    **之前**被拦下:主进程永远收不到 `/compact` 这三个字。
+    `prompt` 留空串正是这个意思 —— 它没有可展开的正文。
+  */
+  const localActions: { command: CommandDefinition; run: () => void }[] =
+    onCompactContext === undefined ? [] : [{
+      command: { name: 'compact', description: t('composer.command.compact'), prompt: '', scope: 'builtin', source: '' },
+      run: onCompactContext
+    }];
   const slashItems: SlashItem[] = [
+    ...localActions
+      .filter((a) => `${a.command.name} ${a.command.description}`.toLocaleLowerCase().includes(slashNeedle))
+      .map((a) => ({ kind: 'command' as const, key: `local:${a.command.name}`, command: a.command, description: a.command.description })),
     ...commands
       .filter((c) => `${c.name} ${c.description}`.toLocaleLowerCase().includes(slashNeedle))
       .map((command) => {
@@ -513,6 +549,21 @@ export function Composer({
     const pending = attachments.some((a) => a.status === "uploading");
     if (pending) return;
     if ((raw === "" && !hasReady) || model === "") return;
+    /*
+      ★ 本地动作必须拦在 `applyCommand` **之前**:它不是模板,展开不出任何东西,
+      放过去就会被当成普通文本原样发给模型。拦下之后只清草稿,不走 `onSend`。
+    */
+    const call = parseCommandInvocation(raw);
+    const action = call === null
+      ? undefined
+      : localActions.find((a) => a.command.name === call.name.toLowerCase());
+    if (action !== undefined) {
+      action.run();
+      onDraft("");
+      dismissedAt.current = null;
+      setMention(null);
+      return;
+    }
     // ★ 命令在**发送这一刻**才展开:草稿里一直留着 `/name args`(用户看得懂、也还能
     //   回去改),进 RunRequest 的才是展开后的完整提示词。不是命令调用就原样返回。
     const text = applyCommand(raw, commands);
@@ -750,24 +801,32 @@ export function Composer({
             )}
           </Menu>
 
-          {thinking !== "auto" && (
-            <Pill readonly>
-              <Wrench size={12} />
-              <span>{t(selectedModel?.thinkingConfig?.mode === 'toggle' && thinking === 'medium'
-                ? 'chat.thinkingOn' : `chat.thinkingLevel.${thinking}`)}</span>
-            </Pill>
-          )}
-
           <div className="flex-1" />
 
           {/*
+            ── 右半边:「怎么想 / 装得下多少 / 发给谁」 ──
+            左半边(权限档位 / `+`)说的是「允许它做什么」。这三颗加发送是另一件事。
+
+            ★ 思考强度从模型菜单的二级页搬到这里。原来它的**显示**在工具栏(一个
+            点不动的只读徽标)、**操作**在模型药丸 → 滚到底 → 模型配置 → 第二页,
+            改一个每轮都要动的旋钮要走四步。显示和操作分居两地正是「不方便」的根因。
+          */}
+          <ThinkingPill
+            model={selectedModel}
+            thinking={thinking}
+            onThinking={(next) => patch({ thinking: next })}
+          />
+
+          {/*
             ── 上下文余量:紧挨模型选择器的左边 ──
-            它说的是「发给谁」之前的那个前提 —— 这一次还装得下多少。
-            双击 = 手动压缩,只在停止状态可用。
+            它说的是「发给谁」之前的那个前提 —— 这一次还装得下多少,以及愿不愿意
+            为超出 272K 的部分付双倍。双击仍是手动压缩(老肌肉记忆),但现在有菜单了。
           */}
           <ContextRing
             used={contextTokens}
-            window={selectedModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW}
+            model={selectedModel}
+            maxContext={value.maxContext}
+            onMaxContext={(next) => patch({ maxContext: next })}
             running={running}
             compacting={contextCompacting}
             onCompact={onCompactContext}
@@ -788,16 +847,21 @@ export function Composer({
             providers={providers}
             models={models}
             loaded={loaded}
-            thinking={thinking}
             onModel={(nextModel, nextProviderId) => patch({
               model: nextModel,
               // 用户从菜单里点选是**唯一**会把供应商写进工作区的时机(兜底不写回)。
               modelProviderId: nextProviderId,
+              /*
+                ★ thinking 必须 normalize,而 maxContext **故意不 normalize**。
+                不对称的理由:下发一个新模型不认的 reasoning effort 会被上游拒;
+                而 maxContext 多留一个 true 没有任何下游后果 —— `effectiveContextWindow`
+                的 `min()` 已经兜住了窗口不够大的模型。抹掉它反而会让
+                「sol → claude → sol」这条常见路径静默丢掉用户的选择。
+              */
               thinking: normalizeModelThinkingLevel(thinking, models.find(
                 (m) => m.alias === nextModel && m.providerId === nextProviderId
               ))
             })}
-            onThinking={(thinking) => patch({ thinking })}
           />
 
           <button
@@ -926,111 +990,434 @@ function Pill({
 const CONTEXT_WARN = 0.75;
 
 /**
- * 上下文余量圆环。
+ * 思考强度药丸。
+ *
+ * ★ 它取代的是「工具栏上一个点不动的只读徽标 + 模型菜单第四层的二级页」这个组合。
+ * 原来**显示**和**操作**分居两地,改一个每轮都要动的旋钮要走四步,这正是「不方便」的根因。
+ *
+ * 三处刻意的选择:
+ * - `thinking === 'auto'` 时**照样显示**(旧徽标偏偏在 auto 时整个消失)——
+ *   auto 恰恰是最需要能一键调走的那个值。
+ * - 触发器用 `active` 而不是 `accent`:整个浅色界面只有两处用色,见 `Pill` 的注释。
+ * - 面板里是**滑杆**不是七行单选:强度本来就是个有序量,列表把它画成了七个互不相干的
+ *   选项,还要占掉 300px 的高度。滑杆顺带白拿了左右方向键(原生 `range` 的语义),
+ *   而这正是这颗药丸要解决的「切一档要走四步」。
+ *   代价是滑杆没有逐档的文字,所以标题行必须**拖动中实时跟着变**(`onPreview`)。
+ */
+function ThinkingPill({
+  model,
+  thinking,
+  onThinking,
+}: {
+  model?: ModelAlias;
+  thinking: ThinkingLevel;
+  onThinking: (level: ThinkingLevel) => void;
+}): ReactNode {
+  const { t } = useI18n();
+  const levels = modelThinkingLevels(model);
+  const config = model?.thinkingConfig;
+  const label = (level: ThinkingLevel): string =>
+    t(
+      config?.mode === "toggle" && level === "medium"
+        ? "chat.thinkingOn"
+        : `chat.thinkingLevel.${level}`,
+    );
+  const defaultLevel: ThinkingLevel =
+    config?.defaultEnabled !== true || config.defaultEffort === "none"
+      ? "off"
+      : config.defaultEffort === "xhigh"
+        ? "higher"
+        : config.defaultEffort ?? "medium";
+  const description = config?.mode === "unsupported" ? t("chat.thinkingUnsupported")
+    : config?.mode === "always" ? t("chat.thinkingAlways")
+    : thinking === "auto" && config !== undefined
+      ? t("chat.thinkingAutomatic", { level: label(defaultLevel) })
+      : t("chat.thinkingLevelDescription", { level: label(thinking) });
+  /*
+    ★ 滑杆的轨道上**只放有序的强度**,`auto` 不在轴上。
+
+    「自动」的意思是"不指定,由模型和协议自己决定",把它塞进轨道的任何一个位置
+    都是在声明一个它并不具有的序关系 —— 所以它单独占一行。而 `off` 在
+    `THINKING_LEVELS` 里排在**末尾**(那是给菜单列表用的排法),上了轴必须挪到最左:
+    强度为 0 就该在最左边,否则拖到头反而是关掉。
+  */
+  const track: ThinkingLevel[] = [
+    ...(levels.includes("off") ? (["off"] as ThinkingLevel[]) : []),
+    ...levels.filter((level) => level !== "auto" && level !== "off"),
+  ];
+  /*
+    `auto` 档下滑杆停在**这个模型自动会落到的那一档**上并调暗 ——
+    比停在 0 诚实:auto 不等于不思考。查不到就落 0(只发生在
+    `defaultEffort` 指向一个该模型不提供的档位时,而那时滑杆本来就是暗的)。
+  */
+  const shown = thinking === "auto" ? defaultLevel : thinking;
+  const index = Math.max(0, track.indexOf(shown));
+  // 拖动中的实时读数,只用来更新标题那行;写回走 onCommit。null = 没在拖。
+  const [preview, setPreview] = useState<number | null>(null);
+  const headline = preview === null ? thinking : (track[preview] ?? thinking);
+
+  /*
+    药丸**聚焦时**的 ↑/↓ —— 面板根本不用打开。
+
+    这颗药丸存在的全部理由是把「改一个每轮都要动的旋钮」从四步压到一步,
+    而「Tab 过去 → Enter 开面板 → 拖滑杆 → Esc」仍然是四步。
+    左右也收,因为面板里那根滑杆就是横的,两套方向在同一颗控件上指的是同一件事。
+
+    ★ 从 `auto` 出发时按一下就**移动一格**,而不是原地落到 `defaultLevel`。
+      滑杆本来就停在 defaultLevel 上(只是暗的),原地点亮不动看起来像没反应。
+  */
+  const shift = (delta: number): void => {
+    if (track.length < 2) return;
+    const from = track.indexOf(shown);
+    const next = track[Math.min(track.length - 1, Math.max(0, (from < 0 ? 0 : from) + delta))];
+    // 已经在两端时不写回 —— 顶着边连按不该每次都走一遍工作区落盘。
+    if (next !== undefined && next !== thinking) onThinking(next);
+  };
+
+  /*
+    只有一档可选 = 没什么可切的(unsupported / always / 模型还没加载完)。
+    整颗不渲染,而不是置灰 —— 一颗永远点不动的药丸只是在工具栏上占位置。
+  */
+  if (levels.length < 2) return null;
+  return (
+    <Menu
+      label={t("composer.thinking")}
+      width={232}
+      align="end"
+      onOpenChange={(open) => {
+        if (!open) setPreview(null);
+      }}
+      onTriggerKeyDown={(e) => {
+        // ★ 不碰 Enter / Space —— 那是 button 打开菜单的原生路径。
+        const delta =
+          e.key === "ArrowUp" || e.key === "ArrowRight"
+            ? 1
+            : e.key === "ArrowDown" || e.key === "ArrowLeft"
+              ? -1
+              : 0;
+        if (delta === 0) return;
+        e.preventDefault(); // 否则上下键会把整个转录滚走
+        shift(delta);
+      }}
+      trigger={
+        <Pill active={thinking !== "auto"}>
+          <BrainCircuit size={12} />
+          <span>{label(thinking)}</span>
+          <ChevronDown size={12} className="text-fg-faint" />
+        </Pill>
+      }
+    >
+      {(close) => (
+        <>
+          <MenuLabel>
+            <span className="flex items-center gap-1.5 text-fg">
+              <BrainCircuit size={12} className="text-fg-faint" />
+              {t("composer.thinkingHeadline", { level: label(headline) })}
+            </span>
+          </MenuLabel>
+          {/*
+            ★ 轨道不足两档时退回列表(`['auto','off']` 这种模型:轴上只剩一个点,
+            画出来是一根拖不动的杠)。两档的 toggle 型模型还是走滑杆 ——
+            那就是「关闭 ↔ 开启」,滑杆表达得了。
+          */}
+          {track.length >= 2 ? (
+            <div className="px-2.5 pt-1 pb-0.5">
+              <Slider
+                value={index}
+                min={0}
+                max={track.length - 1}
+                ariaLabel={t("composer.thinking")}
+                /*
+                  拖动本身就是一次表态 —— 所以 `preview` 一出现就立刻**点亮**,
+                  而不是等松手写回 `thinking` 之后才亮。暗着拖是最别扭的那种手感:
+                  你已经在操作它了,它还显示着"这一档不是你选的"。
+                */
+                className={cn(thinking === "auto" && preview === null && "opacity-45")}
+                onPreview={setPreview}
+                onCommit={(v) => {
+                  setPreview(null);
+                  const level = track[v];
+                  // 拖动即是一次明确表态,于是自动脱离 `auto`。
+                  if (level !== undefined) onThinking(level);
+                }}
+              />
+              {/* 只标两端 —— 中间每一档都标的话,232px 里七个标签会糊在一起,
+                  而"现在是哪一档"由上面那行标题实时回答,不靠猜滑块落点。 */}
+              <div className="mt-1 flex justify-between text-[10.5px] text-fg-faint">
+                <span>{label(track[0] ?? "off")}</span>
+                <span>{label(track[track.length - 1] ?? "max")}</span>
+              </div>
+            </div>
+          ) : (
+            track.map((level) => (
+              <MenuItem
+                key={level}
+                checked={level === thinking}
+                onSelect={() => {
+                  onThinking(level);
+                  close();
+                }}
+              >
+                {label(level)}
+              </MenuItem>
+            ))
+          )}
+          <MenuSeparator />
+          <MenuItem
+            checked={thinking === "auto"}
+            onSelect={() => {
+              onThinking("auto");
+              close();
+            }}
+          >
+            {label("auto")}
+          </MenuItem>
+          <MenuLabel>{description}</MenuLabel>
+        </>
+      )}
+    </Menu>
+  );
+}
+
+/**
+ * 上下文余量圆环 —— 同时是「最大上下文」开关和手动压缩的入口。
  *
  * ★ 分子是**最近一次请求**报回来的输入 token,不是整轮累加 ——
  * 上下文占用是个瞬时量,累加出来的那个数几轮之内必然冲破 100%。
- * 分母优先用当前模型别名的窗口,查不到才退到默认的 272K。
+ *
+ * ★ 分母是**有效窗口**,不是模型的协议窗口:默认夹在 272K(计费分界)以内,
+ * 打开「最大上下文」才放开。所以这里收的是**协议窗口原值** ——
+ * 组件要同时知道两个数(协议值用于置灰判断和「1.05M」文案,有效值当分母),
+ * 传一个算好的进来就只能在这里反向再实现一遍 `effectiveContextWindow`。
+ *
+ * ★ 中途切开关时圆环**立刻**变,而状态行那根压力条要等下一次发送 ——
+ * 这是对的,不该「修好」:药丸是本地权威(它说的是下一轮会怎样),
+ * 转录是既成事实(它说的是上一轮实际怎样)。和切模型后抬头仍显示旧模型同理。
  */
 function ContextRing({
   used,
-  window: total,
+  model,
+  maxContext,
+  onMaxContext,
   running,
   compacting,
   onCompact,
 }: {
   used?: number;
-  window: number;
+  /** 整个别名而不是单个窗口数:计费文案还要 `upstreamModel` / `providerId` */
+  model?: ModelAlias;
+  maxContext: boolean;
+  onMaxContext: (next: boolean) => void;
   running: boolean;
   compacting: boolean;
   onCompact?: () => void;
 }): ReactNode {
   const { t } = useI18n();
-  // 还没发生过一次真实请求时不画:一个恒为 0 的圆环只是个渲染残留。
-  if (used === undefined || total <= 0) return null;
-  const ratio = Math.min(1, Math.max(0, used / total));
-  const percent = Math.round(ratio * 100);
+  const protocolWindow = model?.contextWindow;
+  const total = effectiveContextWindow(protocolWindow, maxContext);
+  const tickRatio = longContextTickRatio(protocolWindow, maxContext);
+  const canMax = supportsMaxContext(protocolWindow);
+  /*
+    ★ `used === undefined`(还没发生过一次真实请求)时**不能整个不渲染**。
+    那样会把「最大上下文」开关一起藏掉,而新会话恰恰是最该在发第一条之前
+    决定花不花这笔钱的时刻。所以照常渲染,只是中心显示 `–` 而不是 `0` ——
+    `0%` 是个断言,`–` 是「还不知道」。
+  */
+  const ratio = used === undefined ? 0 : Math.min(1, Math.max(0, used / total));
+  const percent = used === undefined ? undefined : Math.round(ratio * 100);
+  // 越界:`ratio` 被 min(1) 夹住了,看不出来,得单独算一个标志。
+  const over = used !== undefined && used > total;
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
   const blocked = running || compacting || onCompact === undefined;
   const color = ratio >= CONTEXT_WARN ? "var(--color-danger)" : "var(--color-accent)";
+
+  // 计费文案按真实定价出,不写死「×2」—— 只有 OpenAI 现代四款是双档,
+  // 而且倍率不对称(输入 ×2、输出 ×1.5)。查不到就降级成中性说法,不编一个数。
+  const pricingModelId =
+    model === undefined ? undefined : findBuiltinModel(model.upstreamModel)?.pricingModelId;
+  const pricing =
+    pricingModelId === undefined
+      ? null
+      : findPricing(PRICING_SEED, model?.providerId ?? null, pricingModelId, Date.now());
+  const surcharge =
+    pricingModelId === undefined
+      ? undefined
+      : longContextSurcharge(PRICING_SEED, model?.providerId ?? null, pricingModelId, Date.now());
+  const protocolLabel = formatContextWindow(effectiveContextWindow(protocolWindow, true));
+  const maxContextHint = !canMax
+    ? t("composer.maxContextUnavailable", { window: protocolLabel })
+    : surcharge !== undefined
+      ? t("composer.maxContextHint", {
+          window: protocolLabel,
+          threshold: formatContextWindow(surcharge.threshold),
+          multiplier: Number(surcharge.inputMultiplier.toFixed(2)),
+        })
+      : pricing !== null
+        ? // 查到了定价而且只有一档 —— 这个模型放开窗口是不涨价的,说清楚。
+          t("composer.maxContextHintFlat", { window: protocolLabel })
+        : t("composer.maxContextHintUnknown", {
+            window: protocolLabel,
+            threshold: formatContextWindow(LONG_CONTEXT_THRESHOLD),
+          });
+
   return (
-    // `group` 挂在这一层:圆环按钮和悬浮说明是兄弟节点,说明的显隐靠
-    // `group-hover` 而不是按钮自己的 hover —— 按钮上还叠着圆环与百分比两层东西。
-    <div className="group relative">
-      <button
-        type="button"
-        data-testid="composer-context-ring"
-        data-context-percent={percent}
-        aria-label={t("composer.contextUsage", { percent })}
-        // 单击什么都不做:压缩会真的发一次请求,不该被一次误触点掉。
-        onDoubleClick={() => {
-          if (!blocked) onCompact?.();
-        }}
-        className={cn(
-          "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors",
-          blocked ? "cursor-default" : "hover:bg-tint-hover",
-        )}
-      >
-        <svg
-          viewBox="0 0 16 16"
-          aria-hidden="true"
+    <Menu
+      label={compacting
+        ? `${t("composer.contextUsage", { percent: percent ?? 0 })} · ${t("composer.contextCompacting")}`
+        : t("composer.contextMenu")}
+      width={260}
+      align="end"
+      /*
+        双击 = 立刻压缩,保住改造之前就有的肌肉记忆。为什么不能直接包
+        `onDoubleClick`、为什么用 `e.detail` 而不是延时消歧,见 `Menu.tsx` 里
+        这个 prop 的注释。
+      */
+      onTriggerDoubleClick={() => {
+        if (!blocked) onCompact?.();
+      }}
+      trigger={
+        <span
+          /* 挂在这个 `<span>` 上而不是触发按钮上:`Menu` 自己渲染按钮,不透传任意 DOM 属性。
+             当前没有消费者,是留给将来 e2e 的锚点,不要顺手删。 */
+          data-testid="composer-context-ring"
+          data-context-percent={percent}
           className={cn(
-            "h-4 w-4 -rotate-90",
-            compacting && "animate-spin motion-reduce:animate-none",
+            "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors",
+            "hover:bg-tint-hover",
           )}
         >
-          <circle cx="8" cy="8" r={radius} fill="none" strokeWidth="2.5" stroke="var(--color-tint-strong)" />
-          <circle
-            cx="8"
-            cy="8"
-            r={radius}
-            fill="none"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            stroke={color}
-            strokeDasharray={circumference}
-            strokeDashoffset={circumference * (1 - ratio)}
-          />
-        </svg>
-        {/* 默认就显示的百分比,不是只在悬浮时才有 —— 圆环本身太小,弧长读不出精确数字。 */}
-        {!compacting && (
-          <span
+          <svg
+            viewBox="0 0 16 16"
             aria-hidden="true"
-            style={{ color }}
-            className="pointer-events-none absolute inset-0 flex items-center justify-center text-[8px] font-semibold tabular-nums"
+            className={cn(
+              "h-4 w-4 -rotate-90",
+              compacting && "animate-spin motion-reduce:animate-none",
+            )}
           >
-            {percent}
-          </span>
-        )}
-      </button>
-      <div
-        role="tooltip"
-        className="pointer-events-none invisible absolute bottom-full right-0 z-20 mb-2 w-max max-w-[240px] rounded-card border border-border bg-surface-raised px-3 py-2 text-[11px] text-fg opacity-0 shadow-lg transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100"
-      >
-        <div className="mb-1 font-medium">{t("composer.contextUsage", { percent })}</div>
-        <div className="text-fg-muted">
-          {t("composer.contextUsageDetail", { used, window: total, remaining: 100 - percent })}
-        </div>
-        <div className="mt-1 text-fg-faint">
-          {t(
-            compacting
-              ? "composer.contextCompacting"
-              : running
-                ? "composer.contextCompactBusy"
-                : "composer.contextCompactHint",
+            <circle cx="8" cy="8" r={radius} fill="none" strokeWidth="2.5" stroke="var(--color-tint-strong)" />
+            <circle
+              cx="8"
+              cy="8"
+              r={radius}
+              fill="none"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              stroke={color}
+              strokeDasharray={circumference}
+              strokeDashoffset={circumference * (1 - ratio)}
+            />
+            {/*
+              272K 刻度 —— 打开「最大上下文」之后分母变了,这道线告诉你计费分界在哪儿。
+              ★ 画在 +x 轴上再 `rotate`,**不手算 cos/sin**:`<circle>` 的描边正是从
+              `(cx+r, cy)` 起笔顺时针走的,`strokeDashoffset` 也按这个方向算,
+              于是刻度和进度弧共用同一个起点和方向,永远对得上。
+              外层那个 `-rotate-90` 把整组转到 12 点起笔,不影响相对关系。
+              几何:描边占据半径 4.75→7.25,刻度取 4.3→7.7,两头各探出 0.45。
+              颜色只用 `--color-fg-faint` —— 一道刻度线不值得成为界面里的第三处用色。
+            */}
+            {tickRatio !== undefined && (
+              <line
+                x1={12.3}
+                y1={8}
+                x2={15.7}
+                y2={8}
+                transform={`rotate(${(tickRatio * 360).toFixed(2)} 8 8)`}
+                stroke="var(--color-fg-faint)"
+                strokeWidth="1"
+                strokeLinecap="butt"
+              />
+            )}
+          </svg>
+          {/* 默认就显示的百分比,不是只在悬浮时才有 —— 圆环本身太小,弧长读不出精确数字。 */}
+          {!compacting && (
+            <span
+              aria-hidden="true"
+              style={{ color }}
+              className="pointer-events-none absolute inset-0 flex items-center justify-center text-[8px] font-semibold tabular-nums"
+            >
+              {percent ?? "–"}
+            </span>
           )}
-        </div>
-      </div>
-    </div>
+        </span>
+      }
+    >
+      {(close) => (
+        <>
+          <MenuLabel>
+            {t("composer.contextHeadline", {
+              used: used === undefined ? "—" : formatContextWindow(used),
+              window: formatContextWindow(total),
+            })}
+          </MenuLabel>
+          <div className="px-2 pb-2 pt-0.5">
+            <div className="h-1 w-full overflow-hidden rounded-full bg-tint-strong">
+              <div
+                className="h-full rounded-full"
+                style={{ width: `${Math.round(ratio * 100)}%`, background: color }}
+              />
+            </div>
+          </div>
+          {/*
+            越界:请求照常发(协议窗口放得下),但要说出来,否则用户是在无提示的情况下
+            被按长上下文计费。不塞进消息流 —— 这是个每轮都可能重复的瞬时状态。
+          */}
+          {over && (
+            <MenuLabel>
+              <span className="text-danger">
+                {t("composer.contextOverLimit", { threshold: formatContextWindow(total) })}
+              </span>
+            </MenuLabel>
+          )}
+          <MenuSeparator />
+          <ComposerMenuItem
+            icon={<Maximize2 size={16} />}
+            checked={maxContext}
+            disabled={!canMax}
+            description={maxContextHint}
+            // 不 close:开关要能连续调,和 `+` 菜单里 webSearch 的既有约定一致。
+            onSelect={() => {
+              onMaxContext(!maxContext);
+            }}
+          >
+            {t("composer.maxContext")}
+          </ComposerMenuItem>
+          <MenuSeparator />
+          <ComposerMenuItem
+            icon={<RefreshCw size={16} />}
+            disabled={blocked}
+            description={t(
+              compacting
+                ? "composer.contextCompacting"
+                : running
+                  ? "composer.contextCompactBusy"
+                  : "composer.compactNowHint",
+            )}
+            /*
+              ★ 这条是本次补上的**键盘入口**。改造之前手动压缩只有双击一条路,
+              而 `<button>` 的 Enter/Space 走的是 click 不是 dblclick ——
+              键盘用户在这里曾经没有任何入口。
+            */
+            onSelect={() => {
+              close();
+              onCompact?.();
+            }}
+          >
+            {t("composer.compactNow")}
+          </ComposerMenuItem>
+        </>
+      )}
+    </Menu>
   );
 }
 
 
 /**
  * 模型选择采用两级结构：第一次打开先选供应商，进入供应商后再选模型。
- * 这样模型别名很多时不会把所有供应商混在一个长菜单里；底部固定保留本轮模型
- * 配置（当前是思考强度），切换模型时不需要再去“更多”菜单里找。
+ * 这样模型别名很多时不会把所有供应商混在一个长菜单里。
+ *
+ * ★ 这里曾经还挂着一个「模型配置 ›」二级页(只有思考强度一项)。它被拆成了
+ * 工具栏上的 `ThinkingPill` —— 一个每轮都要调的旋钮不该埋在第四层。
  */
 function ModelPicker({
   model,
@@ -1040,9 +1427,7 @@ function ModelPicker({
   providers,
   models,
   loaded,
-  thinking,
   onModel,
-  onThinking,
 }: {
   model: string;
   modelProviderId?: string;
@@ -1051,26 +1436,10 @@ function ModelPicker({
   providers: UpstreamProvider[];
   models: ModelAlias[];
   loaded: boolean;
-  thinking: ThinkingLevel;
   onModel: (model: string, modelProviderId: string) => void;
-  onThinking: (thinking: ThinkingLevel) => void;
 }): ReactNode {
   const { t } = useI18n();
   const [providerId, setProviderId] = useState<string | null>(null);
-  const selectedModel = models.find((m) => m.alias === model && m.providerId === provider?.id);
-  const thinkingLevels = modelThinkingLevels(selectedModel);
-  const thinkingConfig = selectedModel?.thinkingConfig;
-  const thinkingLabel = (level: ThinkingLevel): string => t(
-    thinkingConfig?.mode === 'toggle' && level === 'medium' ? 'chat.thinkingOn' : `chat.thinkingLevel.${level}`
-  );
-  const defaultLevel: ThinkingLevel = thinkingConfig?.defaultEnabled !== true || thinkingConfig.defaultEffort === 'none'
-    ? 'off' : thinkingConfig.defaultEffort === 'xhigh' ? 'higher' : thinkingConfig.defaultEffort ?? 'medium';
-  const thinkingDescription = thinkingConfig?.mode === 'unsupported' ? t('chat.thinkingUnsupported')
-    : thinkingConfig?.mode === 'always' ? t('chat.thinkingAlways')
-    : thinking === 'auto' && thinkingConfig !== undefined
-      ? t('chat.thinkingAutomatic', { level: thinkingLabel(defaultLevel) })
-      : t('chat.thinkingLevelDescription', { level: thinkingLabel(thinking) });
-  const [configOpen, setConfigOpen] = useState(false);
   const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(
     null,
   );
@@ -1104,7 +1473,6 @@ function ModelPicker({
         onOpenChange={(open) => {
           if (!open) {
             setProviderId(null);
-            setConfigOpen(false);
             setSubmenuAnchor(null);
           }
         }}
@@ -1114,42 +1482,6 @@ function ModelPicker({
       >
         {(close) => {
           closeMenuRef.current = close;
-          if (configOpen) {
-            return (
-              <>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => setConfigOpen(false)}
-                  className="app-no-drag mb-1 flex w-full items-center gap-1.5 rounded-[7px] px-2.5 py-2 text-left text-[12px] text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg"
-                >
-                  <ChevronLeft size={14} />
-                  <span>{t("chat.backToProviders")}</span>
-                </button>
-                <MenuSeparator />
-                <MenuLabel>
-                  <span className="flex items-center gap-1.5">
-                    <BrainCircuit size={12} />
-                    {t("chat.modelConfigThinking")}
-                  </span>
-                </MenuLabel>
-                <MenuLabel>{thinkingDescription}</MenuLabel>
-                {thinkingLevels.map((level) => (
-                  <MenuItem
-                    key={level}
-                    checked={level === thinking}
-                    onSelect={() => {
-                      onThinking(level);
-                      close();
-                    }}
-                  >
-                    {thinkingLabel(level)}
-                  </MenuItem>
-                ))}
-              </>
-            );
-          }
-
           return (
             <>
               <MenuLabel>
@@ -1188,24 +1520,6 @@ function ModelPicker({
                   );
                 })
               )}
-              <MenuSeparator />
-              <MenuItem
-                icon={<BrainCircuit size={14} />}
-                description={thinkingDescription}
-                disabled={thinkingLevels.length < 2}
-                onSelect={() => {
-                  setConfigOpen(true);
-                  setProviderId(null);
-                  setSubmenuAnchor(null);
-                }}
-              >
-                <span className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate">
-                    {t("chat.modelConfig")}
-                  </span>
-                  <ChevronRight size={13} className="text-fg-faint" />
-                </span>
-              </MenuItem>
             </>
           );
         }}
@@ -1339,6 +1653,8 @@ function fromSettings(s: WorkspaceSettings): ComposerValue {
     mode: s.defaultMode,
     thinking: s.defaultThinking,
     webSearch: s.webSearch,
+    // 缺席的旧工作区在这里铺成 false —— 本地权威不留「不知道」。
+    maxContext: s.maxContext === true,
   };
 }
 
@@ -1352,5 +1668,6 @@ function toSettings(v: ComposerValue): Partial<WorkspaceSettings> {
     defaultMode: v.mode,
     defaultThinking: v.thinking,
     webSearch: v.webSearch,
+    maxContext: v.maxContext,
   };
 }

@@ -109,6 +109,11 @@ export interface RunRequest {
   thinking: ThinkingLevel
   /** 即使 full 档,这个开关关掉时网络类工具一律拒绝(方案 §4.5) */
   webSearch: boolean
+  /**
+   * 「最大上下文」的 run 快照 —— 决定 `shouldCompact` 的分母是 272K 还是模型的协议窗口。
+   * 缺席 = 按 false 走(旧队列条目、旧 run、子代理 frontmatter 里都没有这一项)。
+   */
+  maxContext?: boolean
   /** ★ 快照:run 开始时定死,运行期不变 —— 界面说的「下一次新回复生效」 */
   permissionMode: PermissionMode
   /** ModelAlias.alias,不是上游真实模型名 */

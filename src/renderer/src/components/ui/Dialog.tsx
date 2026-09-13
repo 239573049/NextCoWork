@@ -40,9 +40,12 @@ import { X } from 'lucide-react'
 import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '../../lib/cn'
+import { usePresence } from '../../lib/usePresence'
 import { IconButton } from './IconButton'
 import { useFocusTrap } from './useFocusTrap'
 import { useI18n } from '../../i18n'
+
+const DIALOG_MS = 220
 
 export function Dialog({
   title,
@@ -66,8 +69,12 @@ export function Dialog({
   const { t } = useI18n()
   const panelRef = useRef<HTMLDivElement>(null)
   const firstRef = useRef<HTMLDivElement>(null)
+  const presence = usePresence(open, DIALOG_MS, true)
 
-  useFocusTrap(panelRef, open, firstRef)
+  // Presence mounts the panel before the first frame of an opening transition and
+  // keeps it mounted until the closing transition has finished.  Tie the focus
+  // trap to the mounted state so it also runs when a dialog starts closed.
+  useFocusTrap(panelRef, open && presence.mounted, firstRef)
 
   useEffect(() => {
     if (!open) return
@@ -84,11 +91,17 @@ export function Dialog({
     return () => document.removeEventListener('keydown', onKey, true)
   }, [open, onClose])
 
-  if (!open) return null
+  if (!presence.mounted) return null
+
+  const visible = presence.shown
 
   return createPortal(
     <div
-      className="app-no-drag fixed inset-0 z-100 flex items-center justify-center p-[10px]"
+      className={cn(
+        'app-no-drag fixed inset-0 z-100 flex items-center justify-center p-[10px]',
+        'transition-opacity duration-220 ease-panel motion-reduce:transition-none',
+        visible ? 'opacity-100' : 'pointer-events-none opacity-0'
+      )}
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -101,7 +114,9 @@ export function Dialog({
         style={{ width }}
         className={cn(
           'relative flex max-h-full w-full flex-col overflow-hidden bg-surface',
-          'rounded-panel shadow-2xl shadow-black/40 outline-none'
+          'rounded-panel shadow-2xl shadow-black/40 outline-none',
+          'transition-[opacity,transform,translate,scale] duration-220 ease-panel motion-reduce:transition-none motion-reduce:transform-none motion-reduce:translate-y-0 motion-reduce:scale-100',
+          visible ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-2 scale-[.98] opacity-0'
         )}
       >
         <div ref={firstRef} tabIndex={-1} className="flex shrink-0 items-start gap-2 px-5 pt-4 outline-none">

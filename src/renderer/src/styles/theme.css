@@ -433,6 +433,19 @@ body {
   scrollbar-width: thin;
 }
 
+/* Tab strips still scroll horizontally, but a visible scrollbar is chrome, not
+   content.  More importantly, a classic 8px scrollbar participates in the
+   strip's cross-axis sizing and stretches the 30px/28px tab row. */
+.tab-strip-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.tab-strip-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* xterm deliberately fills its panel instead of introducing a second framed card. */
 .terminal-surface {
   background: var(--color-surface);

@@ -797,14 +797,24 @@ async function hydrateInput(sessionId: string): Promise<void> {
  * 之后,上面所有历史轮次的用量读数**一起消失**,而当前这一轮是好的。
  * 抽成函数就是不想在三个地方各记一次。
  */
-function conversationScoped(t: TranscriptState): Pick<TranscriptState, 'runUsage' | 'runModel' | 'messageRuns' | 'lastInputTokens'> {
+function conversationScoped(
+  t: TranscriptState
+): Pick<TranscriptState, 'runUsage' | 'runModel' | 'messageRuns' | 'lastInputTokens' | 'contextCheckpoints'> {
   return {
     ...(t.runUsage === undefined ? {} : { runUsage: t.runUsage }),
     ...(t.runModel === undefined ? {} : { runModel: t.runModel }),
     ...(t.messageRuns === undefined ? {} : { messageRuns: t.messageRuns }),
     // 上下文占用是**整段对话**的属性:新一轮还没发出请求之前,
     // 圆环该继续显示上一轮结束时的读数,而不是空着。
-    ...(t.lastInputTokens === undefined ? {} : { lastInputTokens: t.lastInputTokens })
+    ...(t.lastInputTokens === undefined ? {} : { lastInputTokens: t.lastInputTokens }),
+    /*
+      ★ 检查点标的是**消息流里的位置**,它比任何一轮都活得久 ——
+      漏带这一处,用户一发下条消息,消息流里所有压缩分隔线就一起消失,
+      要等下一次 authoritative hydrate 才回来。
+      ★ `contextStatus` 是**本轮**的瞬时相位,故意不带:上一轮的「正在压缩…」
+      跟到新一轮就是一句谎话。
+    */
+    contextCheckpoints: t.contextCheckpoints
   }
 }
 

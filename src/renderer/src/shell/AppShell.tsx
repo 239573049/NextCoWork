@@ -38,6 +38,7 @@ import { deleteSession, listSessions } from "../services/sessions";
 import { on } from "../services/ipc";
 import { onScheduledChanged } from "../services/scheduled";
 import { SettingsOverlay } from "../settings/SettingsOverlay";
+import { DEFAULT_SETTINGS_PAGE } from "../settings/nav";
 import { useTabsStore } from "../stores/tabs";
 import { useWindowStore } from "../stores/window";
 import { FeatureView } from "../views/registry";
@@ -404,6 +405,7 @@ export function AppShell({
                 runningWorkspaceIds={runningWorkspaceIds}
                 onActivate={win.activate}
                 onClose={(id) => { void closeOuterTab(id); }}
+                onTogglePin={win.togglePin}
                 onMove={win.move}
                 onOpenWorkspace={win.openWorkspace}
                 onPickWorkspace={() => { void pickLocalWorkspace(); }}
@@ -447,15 +449,14 @@ export function AppShell({
         portal 到 body 下就够不着 `.app-no-drag`,浮层压住标题栏的那一条会被
         OS 吞掉 pointer 事件。
       */}
-      {settingsPage !== null && (
-        <SettingsOverlay
-          page={settingsPage}
-          settings={settings}
-          versions={versions}
-          onNavigate={win.openSettings}
-          onClose={win.closeSettings}
-        />
-      )}
+      <SettingsOverlay
+        open={settingsPage !== null}
+        page={settingsPage ?? DEFAULT_SETTINGS_PAGE}
+        settings={settings}
+        versions={versions}
+        onNavigate={win.openSettings}
+        onClose={win.closeSettings}
+      />
     </div>
   );
 }

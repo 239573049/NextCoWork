@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '../agent/event'
+import type { ContextCheckpoint } from '../agent/context-management'
 import { assistantMessage, toolResultMessage, userMessage } from '../agent/message'
 import { applyChildEvent, applyEvent, applyEvents, emptyTranscript, hasRun, liveText, subagentsFromMessages } from '../agent/transcript'
 
@@ -515,5 +516,71 @@ describe('applyEvent · 重试与切换提示', () => {
     })
     expect(s.notice).toBeUndefined()
     expect(s.error?.message).toBe('boom')
+  })
+})
+
+/**
+ * 压缩相关的两个分支。
+ *
+ * ★ 它们原先**一条覆盖都没有**,而它们恰好是界面上「压缩看不见」的最后一段接线:
+ * 事件到了投影这里若被丢掉、或检查点按顺序追加导致同一条重复两行,
+ * 症状都是消息流里多出/少掉一条分隔线,而不是报错。
+ */
+describe('applyEvent · 上下文压缩', () => {
+  const checkpoint = (over: Partial<ContextCheckpoint> = {}): ContextCheckpoint => ({
+    id: 'sess:context:1',
+    sessionId: 'sess',
+    windowIndex: 1,
+    note: '折叠了 14 条消息',
+    source: 'mechanical',
+    createdAt: 0,
+    updatedAt: 0,
+    revision: 1,
+    ...over
+  })
+
+  it('context_status 原样落到 contextStatus', () => {
+    const s = applyEvent(emptyTranscript(), {
+      type: 'context_status',
+      status: { phase: 'fallback', windowIndex: 3 }
+    })
+    expect(s.contextStatus).toEqual({ phase: 'fallback', windowIndex: 3 })
+  })
+
+  it('后一个相位覆盖前一个 —— 它是瞬时状态,不是流水', () => {
+    let s = applyEvent(emptyTranscript(), { type: 'context_status', status: { phase: 'preparing' } })
+    s = applyEvent(s, { type: 'context_status', status: { phase: 'error' } })
+    expect(s.contextStatus).toEqual({ phase: 'error' })
+  })
+
+  it('context_checkpoint 追加,并把相位推到 ready', () => {
+    const s = applyEvent(emptyTranscript(), { type: 'context_checkpoint', checkpoint: checkpoint() })
+    expect(s.contextCheckpoints).toHaveLength(1)
+    expect(s.contextStatus).toEqual({ phase: 'ready', windowIndex: 1 })
+  })
+
+  /**
+   * ★ 最值钱的一条。机械压缩是**每轮重做的投影**,同一个窗口号会被反复落盘
+   * (边界随对话推进而移动)。按 id 覆盖是「一段压缩期只画一条线」的依据 ——
+   * 改成追加的话,消息流里的分隔线会按轮次线性增生,且不报错。
+   */
+  it('★ 同 id 覆盖而不是追加', () => {
+    let s = applyEvent(emptyTranscript(), { type: 'context_checkpoint', checkpoint: checkpoint() })
+    s = applyEvent(s, {
+      type: 'context_checkpoint',
+      checkpoint: checkpoint({ note: '折叠了 20 条消息', revision: 2 })
+    })
+    expect(s.contextCheckpoints).toHaveLength(1)
+    expect(s.contextCheckpoints[0]?.note).toBe('折叠了 20 条消息')
+  })
+
+  it('不同窗口号各占一条,顺序按到达', () => {
+    let s = applyEvent(emptyTranscript(), { type: 'context_checkpoint', checkpoint: checkpoint() })
+    s = applyEvent(s, {
+      type: 'context_checkpoint',
+      checkpoint: checkpoint({ id: 'sess:context:2', windowIndex: 2, source: 'model' })
+    })
+    expect(s.contextCheckpoints.map((c) => c.windowIndex)).toEqual([1, 2])
+    expect(s.contextStatus).toEqual({ phase: 'ready', windowIndex: 2 })
   })
 })

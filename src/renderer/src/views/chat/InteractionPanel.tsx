@@ -79,7 +79,9 @@ function useRespond(onAnswered: () => void, onResolved?: () => void): {
   }
 }
 
-const BUTTON = 'rounded-lg border border-border px-3 py-1.5 text-[12px] transition-colors hover:bg-tint disabled:opacity-50'
+const BUTTON = 'rounded-lg border border-border px-3 py-1.5 text-[12px] transition-colors disabled:opacity-50'
+const GHOST_BUTTON = `${BUTTON} hover:bg-tint`
+const PRIMARY_BUTTON = `${BUTTON} bg-accent text-accent-fg hover:opacity-90`
 
 /** 三类交互共用的外壳:标题、可滚动的主体、错误行、右下角两颗按钮。 */
 function CardShell({
@@ -114,10 +116,10 @@ function CardShell({
       {errorKey !== null && <p role="alert" className="mt-2 text-[12px] text-danger">{t(errorKey)}</p>}
       <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
         {extraActions}
-        <button type="button" disabled={busy} className={BUTTON} onClick={onDismiss}>{dismissLabel}</button>
+        <button type="button" disabled={busy} className={GHOST_BUTTON} onClick={onDismiss}>{dismissLabel}</button>
         <button type={onPrimary === undefined ? 'submit' : 'button'} onClick={onPrimary}
           disabled={busy || (onPrimary === undefined && !canSubmit)}
-          className={`${BUTTON} bg-accent text-accent-fg`}>
+          className={PRIMARY_BUTTON}>
           {busy ? t('agent.interaction.sending') : submitLabel}
         </button>
       </div>
@@ -311,12 +313,12 @@ function ApprovalCard({ interaction, onExecute, onAnswered }: {
         ? 'agent.interaction.allowOnce'
         : onExecute !== undefined ? 'agent.interaction.executeCurrent' : 'agent.interaction.approvePlan')}
       extraActions={alwaysRule !== undefined ? (
-        <button type="button" disabled={busy} className={BUTTON} title={t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
+        <button type="button" disabled={busy} className={GHOST_BUTTON} title={t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
           onClick={() => respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })}>
           {t('agent.interaction.allowAlways')}
         </button>
       ) : interaction.kind === 'plan_approval' && onExecute !== undefined ? (
-        <button type="button" disabled={busy} className={BUTTON}
+        <button type="button" disabled={busy} className={GHOST_BUTTON}
           onClick={() => { execution.current = 'new_session'; respond({ id: interaction.id, kind: 'plan_approval', action: 'approve_new_session', planId: interaction.planId ?? '', version: interaction.planVersion ?? -1, feedback }) }}>
           {t('agent.interaction.executeNewSession')}
         </button>

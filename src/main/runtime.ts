@@ -1166,6 +1166,8 @@ function childRequestFor(
     thinking: parentReq.thinking,
     // 联网是用户的硬开关,子代理放宽不了
     webSearch: parentReq.webSearch,
+    // 同理:子代理不能替用户决定多花一倍的钱,也不该在用户明确开了之后被压回 272K。
+    ...(parentReq.maxContext === undefined ? {} : { maxContext: parentReq.maxContext }),
     /*
       ★ 取 min,不是取子代理声明的那个。否则一个被投毒的 MCP 工具描述
       可以诱导主 agent 派一个子 agent 去做它自己不被允许做的事 ——

@@ -30,6 +30,14 @@ export interface WorkspaceSettings {
   defaultMode: SessionMode
   defaultThinking: ThinkingLevel
   webSearch: boolean
+  /**
+   * 「最大上下文」:关(默认)时有效窗口夹在 `LONG_CONTEXT_THRESHOLD`(272K)以内,
+   * 开则放开到模型的协议窗口。见 `agent/context-management.ts` 文件头的三层窗口。
+   *
+   * ★ **可选而非必填** —— 旧库里的工作区 JSON 没有这一项(`repo.ts` 的 `getWorkspace`
+   * 是裸 `JSON.parse`,不铺默认值),声明成必填会让类型在运行时说谎。读的地方一律 `=== true`。
+   */
+  maxContext?: boolean
   /** 按工作区单独启用的 Skill(界面:「Skill 工作区选装模式」) */
   activeSkillIds: string[]
   /** 空清单的含义；缺省兼容旧数据并表示全部可用。 */
@@ -49,6 +57,13 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
     这不是把权限放宽 —— 用户随时能关,而关掉的效果是硬拒,不是「问一下」。
   */
   webSearch: true,
+  /*
+    ★ 出厂就关,理由和上面那条**恰好相反**。
+    webSearch 默认开,是因为关掉的第一感受是「它说不让上网」而界面没有任何提示;
+    maxContext 默认关,是因为打开的后果是**账单翻倍**(超过 272K 后输入 ×2、输出 ×1.5),
+    而账单也不会在界面上提示。两边都是「哪个方向的静默损失更大」,答案正好反过来。
+  */
+  maxContext: false,
   activeSkillIds: [],
   skillSelectionMode: 'all'
 }

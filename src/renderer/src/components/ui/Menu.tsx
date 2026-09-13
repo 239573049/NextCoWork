@@ -27,10 +27,24 @@
  *
  * 仍然**不 portal** —— 上面那条 `.app-no-drag` 的理由没变,而 `fixed` 已经够用了。
  */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  // ★ 必须起别名:下面 `onKey` 收的是 **DOM** 的 KeyboardEvent(document 上的监听),
+  //   同名导入会把它整个遮住,报错还指在那一行,和这里看不出关系。
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type Ref
+} from 'react'
 import { Check } from 'lucide-react'
 import { cn } from '../../lib/cn'
+import { usePresence } from '../../lib/usePresence'
 import { placeMenu, type Placement } from './menu-position'
+
+const MENU_MS = 180
 
 export function Menu({
   trigger,
@@ -43,6 +57,8 @@ export function Menu({
   panelClassName,
   disabled = false,
   onOpenChange,
+  onTriggerDoubleClick,
+  onTriggerKeyDown,
   containsTarget
 }: {
   /** 触发按钮的**内容**;按钮本身由 Menu 渲染,免得每个调用点重复写 no-drag */
@@ -57,11 +73,34 @@ export function Menu({
   disabled?: boolean
   /** 在菜单打开/关闭时通知调用方，用于重置多级菜单的临时视图状态。 */
   onOpenChange?: (open: boolean) => void
+  /**
+   * 触发器上的双击 —— **只为上下文圆环存在**,不是一项可以随便加在任何菜单上的通用能力。
+   *
+   * 那个圆环在升级成菜单之前,双击就是「立刻压缩」,而这条肌肉记忆不该被拿走。
+   * 但触发按钮每次 click 都 toggle,第二下会把刚开的面板又关上,看起来是闪一下。
+   * 所以这里用 `e.detail >= 2`(浏览器给的点击计数,第二次 click 上它是 2)在
+   * `onClick` 里短路 —— **不做延时消歧**,那要给每一次打开菜单都加 200ms,
+   * 代价落在常用路径上,而受益的只有一个调用点。
+   */
+  onTriggerDoubleClick?: () => void
+  /**
+   * 触发器上的键盘事件 —— 和上面那条一样,是**为某个具体调用点开的口**,不是通用能力。
+   *
+   * 思考强度那颗药丸用它做「聚焦后 ↑/↓ 直接换一档,面板根本不用打开」。
+   * 那颗药丸存在的全部理由就是把「改一个每轮都要动的旋钮」从四步压到一步,
+   * 而「Tab 过去 → Enter 开面板 → 操作 → Esc」仍然是四步。
+   *
+   * ★ Menu **只转发,不解释** —— 它不知道哪些键有意义,也就不该替调用方
+   * `preventDefault`。Enter / Space 是 button 打开菜单的原生路径,
+   * 调用方在这里拦下它们就等于把菜单关死了,这是唯一需要自律的一条。
+   */
+  onTriggerKeyDown?: (e: ReactKeyboardEvent<HTMLButtonElement>) => void
   /** 允许通过 portal 渲染的二级菜单参与“点击外部关闭”判断。 */
   containsTarget?: (target: Node) => boolean
 }): ReactNode {
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState<Placement | null>(null)
+  const presence = usePresence(open, MENU_MS)
   const wrapRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -73,10 +112,9 @@ export function Menu({
     用 useEffect 的话面板会在左上角闪一帧。
   */
   useLayoutEffect(() => {
-    if (!open) {
-      setPos(null)
-      return
-    }
+    // Keep the last placement while the closing transition runs. Clearing it on
+    // close would animate the panel back at (0, 0) instead of at its trigger.
+    if (!open || !presence.mounted) return
     const measure = (): void => {
       const t = triggerRef.current?.getBoundingClientRect()
       const panel = panelRef.current
@@ -121,7 +159,7 @@ export function Menu({
       document.removeEventListener('scroll', measure, true)
       resizeObserver.disconnect()
     }
-  }, [open, width, align])
+  }, [open, presence.mounted, width, align])
 
   useEffect(() => {
     if (!open) return
@@ -159,8 +197,15 @@ export function Menu({
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         disabled={disabled}
-        onClick={() => {
+        onKeyDown={onTriggerKeyDown}
+        onClick={(e) => {
+          // 第二下点击:交给双击处理,面板保持当前状态(第一下已经把它打开了)。
+          if (onTriggerDoubleClick !== undefined && e.detail >= 2) {
+            onTriggerDoubleClick()
+            return
+          }
           const next = !open
+          if (next) setPos(null)
           setOpen(next)
           onOpenChange?.(next)
         }}
@@ -169,7 +214,7 @@ export function Menu({
         {trigger}
       </button>
 
-      {open && (
+      {presence.mounted && (
         <div
           ref={panelRef}
           id={panelId}
@@ -185,6 +230,10 @@ export function Menu({
           className={cn(
             'app-no-drag scroll-thin fixed z-50 overflow-y-auto rounded-card',
             'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40',
+            'transition-[opacity,transform,translate,scale] duration-180 ease-panel motion-reduce:transition-none motion-reduce:transform-none motion-reduce:translate-y-0 motion-reduce:scale-100',
+            presence.shown
+              ? 'translate-y-0 scale-100 opacity-100'
+              : 'pointer-events-none translate-y-1 scale-[.98] opacity-0',
             panelClassName
           )}
         >

@@ -33,7 +33,8 @@ export function Button({
       onClick={onClick}
       className={cn(
         'app-no-drag inline-flex shrink-0 items-center justify-center gap-1.5 rounded-pill',
-        'whitespace-nowrap transition-colors disabled:opacity-40',
+        'whitespace-nowrap transition-[background-color,border-color,color,opacity,transform,scale,translate] duration-150',
+        'active:scale-[.97] motion-reduce:transition-none motion-reduce:active:scale-100 disabled:opacity-40',
         size === 'sm' ? 'h-7 px-3 text-[12px]' : 'h-[34px] px-4 text-[13px]',
         variant === 'accent' && 'bg-accent text-accent-fg hover:opacity-90',
         // ghost 的静息态是「槽」,悬停往暖里偏 —— 和 theme.css 那条规律一致

@@ -840,6 +840,51 @@ export function compactMessages(
 }
 
 /**
+ * 机械压缩这一刀切在哪里 —— `compactMessages` 的**只读伴生函数**。
+ *
+ * ★ 规则只写一遍。上面那个 `map` 的判据是「`i === 0` 或 `i >= cutoff` 保留原文」,
+ * 这里就只是把同一个 `cutoff` 翻译成边界消息的 id;在调用方重算下标,
+ * 等于把同一条规则写第二遍,而两份规则迟早会分叉。
+ *
+ * 返回 undefined = 这一刀什么都没切到(历史还不够长)。
+ */
+export interface CompactionSummary {
+  /** 被折叠区间的第一条(第 0 条永远保留原文,所以最早只能是第 1 条) */
+  fromMessageId?: string
+  /** 被折叠区间的**最后**一条 —— 消息流里那条分隔线就画在它后面 */
+  throughMessageId?: string
+  /** 被削掉内容的消息条数 */
+  foldedMessages: number
+  /** 其中被清空的工具输出处数 —— 体积的大头在这里 */
+  foldedToolOutputs: number
+}
+
+export function compactionBoundary(
+  messages: readonly AgentMessage[],
+  opts: CompactOptions = {}
+): CompactionSummary | undefined {
+  const keepRecent = opts.keepRecent ?? KEEP_RECENT_DEFAULT
+  const cutoff = messages.length - keepRecent
+  // 折叠区间是 [1, cutoff),`cutoff <= 1` 时它是空的
+  if (cutoff <= 1) return undefined
+  const folded = messages.slice(1, cutoff)
+  return {
+    ...(folded[0] === undefined ? {} : { fromMessageId: folded[0].id }),
+    ...(folded.at(-1) === undefined ? {} : { throughMessageId: folded.at(-1)?.id }),
+    foldedMessages: folded.length,
+    foldedToolOutputs: folded.reduce(
+      (count, m) => count + m.parts.filter((p) => p.type === 'tool_result').length,
+      0
+    )
+  }
+}
+
+/** 机械压缩落盘时的 note。它是**算出来的事实**,不是笔记 —— 所以只报数字。 */
+export function compactionNote(summary: CompactionSummary, keepRecent = KEEP_RECENT_DEFAULT): string {
+  return `Mechanically compacted ${String(summary.foldedMessages)} message(s), dropping ${String(summary.foldedToolOutputs)} tool output(s). The first message and the latest ${String(keepRecent)} are kept verbatim.`
+}
+
+/**
  * 压缩后接一条摘要消息的位置 —— 步骤 12 让模型生成摘要时往这里塞。
  * 现在给出签名,是为了让调用方那一行**不必在那时改**。
  */

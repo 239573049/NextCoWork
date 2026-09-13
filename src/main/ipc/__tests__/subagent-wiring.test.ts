@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { WebContents } from 'electron'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
+import { LONG_CONTEXT_THRESHOLD } from '../../../shared/agent/context-management'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { runs } from '../../kernel/run-registry'
@@ -450,5 +451,82 @@ describe('子代理继承模型时的别名/供应商配对', () => {
     await waitForEnd(r.runId)
 
     expect(seen[0]).toMatchObject({ model: DEMO_ALIAS, modelProviderId: DEMO_PROVIDER_ID })
+  })
+})
+
+
+/**
+ * ★ 「最大上下文」开关的**继承**。
+ *
+ * 这个开关的语义是**花钱**,不是解锁容量:开着就意味着这一轮可以越过
+ * `LONG_CONTEXT_THRESHOLD`(272K)那条计费分界,输入按双倍算。于是两个方向
+ * 各挡着一种真实的坏结果 ——
+ *
+ * - **不继承「开」**:用户明确开了,子代理却仍按 272K 压缩,长活儿在子代理里
+ *   被腰斩,而界面上那颗药丸显示的是"开着"。
+ * - **不继承「关」**:子代理替用户决定多花一倍的钱,账单上没有任何一处能追到
+ *   是哪个子代理花的。
+ *
+ * 第二条用例走到 `context_usage` 才停,因为「字段传过去了」和「分母真的变了」
+ * 是两件事 —— 中间还隔着 `effectiveContextWindow` 那一跳。
+ */
+describe('子代理继承「最大上下文」开关', () => {
+  /** 装一个探针启动器:先记下子 RunRequest,再照常交给真启动器 */
+  const captureChildReq = (): RunRequest[] => {
+    const seen: RunRequest[] = []
+    installChildRunLauncher((parent, childReq, driver) => {
+      seen.push(childReq)
+      return startChildRun(parent, childReq, driver)
+    })
+    return seen
+  }
+
+  it('开着 / 关着都原样传下去,父亲没给时不凭空补一个 false', async () => {
+    const seen = captureChildReq()
+
+    const on = req({ maxContext: true })
+    startRun(on, fakeWindow().ctx)
+    await waitForEnd(on.runId)
+    expect(seen[0]?.maxContext).toBe(true)
+
+    const off = req({ maxContext: false })
+    startRun(off, fakeWindow().ctx)
+    await waitForEnd(off.runId)
+    expect(seen[1]?.maxContext).toBe(false)
+
+    /*
+      ★ 旧队列条目 / 旧 run 的 RunRequest 里没有这一项。补成 `false` 看着无害,
+      实际上把"没表过态"和"明确关掉"抹成了同一个值 —— 以后想给这一档换默认值
+      就再也分不出来了。所以这里断言的是**键不存在**,不是值为 false。
+    */
+    const legacy = req()
+    startRun(legacy, fakeWindow().ctx)
+    await waitForEnd(legacy.runId)
+    expect(seen[2]).not.toHaveProperty('maxContext')
+  })
+
+  it('★ 分母真的跟着变 —— 子 run 的 context_usage 按有效窗口发', async () => {
+    // 演示别名本来是 200K(< 272K),那个区间里开关没有可观测的效果
+    store.putAlias({ ...DEMO_ALIASES[0]!, contextWindow: 1_050_000 })
+    installChildRunLauncher(startChildRun)
+
+    const childWindow = async (maxContext: boolean): Promise<number | undefined> => {
+      const { wc, ctx } = fakeWindow()
+      const r = req({ maxContext })
+      startRun(r, ctx)
+      await waitForEnd(r.runId)
+      const started = allEvents(wc).find((e) => e.type === 'subagent_start')
+      const childRunId = started?.type === 'subagent_start' ? started.childRunId : ''
+      expect(childRunId).not.toBe('')
+      const usage = wc
+        .envelopes()
+        .filter((e) => e.runId === childRunId)
+        .flatMap((e) => e.events)
+        .find((e) => e.type === 'context_usage')
+      return usage?.type === 'context_usage' ? usage.window : undefined
+    }
+
+    expect(await childWindow(true)).toBe(1_050_000)
+    expect(await childWindow(false)).toBe(LONG_CONTEXT_THRESHOLD)
   })
 })

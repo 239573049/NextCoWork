@@ -102,6 +102,7 @@ interface WindowState {
   closeStandaloneFeature: () => void
   close: (outerId: string) => Promise<void>
   move: (from: number, to: number) => void
+  togglePin: (outerId: string) => void
   toggleSidebar: () => void
   toggleRightPanel: () => void
   setRightPanelForWorkspace: (workspaceId: string, open: boolean) => void
@@ -155,6 +156,18 @@ const RIGHT_PANEL = { def: 300, min: 240, max: 720 } as const
 const BOTTOM_PANEL = { def: 220, min: 140, max: 640 } as const
 
 const clamp = (px: number, r: { min: number; max: number }): number => Math.round(Math.min(r.max, Math.max(r.min, px)))
+
+/** Keep pinned tabs in a stable block at the beginning of the outer tab strip. */
+const orderOuterTabs = (tabs: readonly OuterTab[]): OuterTab[] => [
+  ...tabs.filter((tab) => tab.pinned === true),
+  ...tabs.filter((tab) => tab.pinned !== true)
+]
+
+const outerTabOrderChanged = (before: readonly OuterTab[], after: readonly OuterTab[]): boolean =>
+  before.length !== after.length || after.some((tab, index) => {
+    const previous = before[index]
+    return previous?.id !== tab.id || previous?.pinned !== tab.pinned
+  })
 
 export const useWindowStore = create<WindowState>((set, get) => {
   let approval: ((allowed: boolean) => void) | undefined
@@ -264,7 +277,8 @@ export const useWindowStore = create<WindowState>((set, get) => {
       const persisted = b.tabState.outer.filter(
         (t) => !(t.kind === 'feature' && NON_TAB_FEATURES.includes(t.ref.feature))
       )
-      const outer = persisted.length > 0 ? persisted : initialTabs(b.workspaces)
+      const orderedPersisted = orderOuterTabs(persisted)
+      const outer = orderedPersisted.length > 0 ? orderedPersisted : initialTabs(b.workspaces)
       const requestedActiveId = b.tabState.activeOuterId
       const desiredActiveId = outer.some((tab) => tab.id === requestedActiveId)
         ? requestedActiveId
@@ -287,7 +301,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
       })
       // 自动开出来的这一个也要落盘,否则它每次启动都换一个新 id。
       // 迁移掉旧功能 Tab 时也立即回写，避免每次启动都重复修复同一份旧布局。
-      if (!waitForRemote && ((persisted.length === 0 && outer.length > 0) || persisted.length !== b.tabState.outer.length))
+      if (!waitForRemote && ((persisted.length === 0 && outer.length > 0) || persisted.length !== b.tabState.outer.length || outerTabOrderChanged(persisted, outer)))
         persist(outer, activeOuterId)
       if (waitForRemote && desiredActiveId) void get().activate(desiredActiveId)
     },
@@ -419,7 +433,16 @@ export const useWindowStore = create<WindowState>((set, get) => {
 
     move(from, to) {
       cancelPending()
-      const outer = reorder(get().outer, from, to)
+      const outer = orderOuterTabs(reorder(get().outer, from, to))
+      set({ outer })
+      persist(outer, get().activeOuterId)
+    },
+
+    togglePin(outerId) {
+      cancelPending()
+      const current = get().outer
+      if (!current.some((tab) => tab.id === outerId)) return
+      const outer = orderOuterTabs(current.map((tab) => tab.id === outerId ? { ...tab, pinned: tab.pinned !== true } : tab))
       set({ outer })
       persist(outer, get().activeOuterId)
     },

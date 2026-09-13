@@ -9,10 +9,10 @@
  * 之后都会多出一个空白的用户气泡 —— 而它长得完全像一个 bug,查起来却要
  * 一路翻到消息模型才明白。
  */
-import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { CheckCircle2, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
-import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
+import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
 import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
@@ -30,7 +30,8 @@ import { ToolTimeline } from './ToolTimeline'
 import { reportBackgroundChild } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { ContextCheckpointPanel } from './ContextCheckpointPanel'
-import { assistantSegments, assistantText, isAssistantTextBlock, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
+import { CompactionDivider } from './CompactionDivider'
+import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, unanchoredCheckpoints, type AssistantBlock, type ThreadRow } from './thread-content'
 import { TurnActions, type TurnPrompt } from './TurnActions'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
 
@@ -42,6 +43,7 @@ export const Thread = memo(function Thread({
   providerName,
   lastSeq,
   queued,
+  compactError,
   onEditMessage,
   onDeleteTurn,
   onExecutePlan
@@ -51,6 +53,8 @@ export const Thread = memo(function Thread({
   runId: string | null
   lastSeq: number
   queued: number
+  /** 手动压缩的失败原因,由状态行显示。它在 store 里而不在 transcript 里。 */
+  compactError?: string | null
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
   onDeleteTurn?: (userMessageId: string) => Promise<void>
@@ -116,8 +120,27 @@ export const Thread = memo(function Thread({
       )}
       {runId !== null && <InteractionPanel key={runId} runId={runId} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
-        lastSeq={lastSeq} queued={queued} />
+        lastSeq={lastSeq} queued={queued} compactError={compactError} />
     </div>
+  )
+
+  const rows = threadRows(messages, live, running, transcript.messageRuns, transcript.contextCheckpoints)
+  /*
+    ★ **不能是「最后一个元素」。** 手动压缩的分隔线就落在整段末尾,那时
+    `rows.at(-1)` 是那条线 —— 按下标比的话没有任何一行算末轮,
+    `feedback` 整块不渲染,而且全程不报错。
+  */
+  const lastTurn = lastTurnIndex(rows)
+  /*
+    ★ 这里**必须 useMemo**:`ContextCheckpointPanel` 内部是
+    `useEffect(() => setItems(checkpoints), [checkpoints])`,依赖是数组引用。
+    每次渲染喂一个新数组 = 每次渲染都 setState = 渲染死循环。
+    (`rows` 反过来**不能**套 useMemo:memo 边界已经挡住了多余渲染,
+     套上只会让 chat-view 那条「改草稿不重算」的 spy 断言变成假绿。)
+  */
+  const orphans = useMemo(
+    () => unanchoredCheckpoints(messages, transcript.contextCheckpoints),
+    [messages, transcript.contextCheckpoints]
   )
 
   return (
@@ -156,12 +179,16 @@ export const Thread = memo(function Thread({
         lastSeen.current = { top, height }
       }}>
       <div ref={content} className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
-        <ContextCheckpointPanel checkpoints={transcript.contextCheckpoints} />
-        {threadRows(messages, live, running, transcript.messageRuns).map((row, index, rows) => {
-          const isLast = index === rows.length - 1
-          return row.kind === 'user' ? (
-            <UserBubble key={row.key} message={row.message} onEdit={onEditMessage} disabled={running} />
-          ) : (
+        <ContextCheckpointPanel checkpoints={orphans} />
+        {rows.map((row, index) => {
+          const isLast = index === lastTurn
+          if (row.kind === 'divider') {
+            return <CompactionDivider key={row.key} checkpoint={row.checkpoint} foldedCount={row.foldedCount} />
+          }
+          if (row.kind === 'user') {
+            return <UserBubble key={row.key} message={row.message} onEdit={onEditMessage} disabled={running} />
+          }
+          return (
             <AssistantTurn
               key={row.key}
               blocks={row.blocks}
@@ -188,7 +215,8 @@ export const Thread = memo(function Thread({
               feedback={isLast ? feedback : undefined}
               // 助手回合永远紧跟在引出它的提问之后 —— threadRows 会把连续的模型
               // 回复并成一行,所以前一行要么是那条提问,要么(开局补的空回合)什么都没有。
-              prompt={promptOf(rows[index - 1])}
+              // 中间可能夹着一条压缩分隔线,`promptOf` 会跳过去。
+              prompt={promptOf(rows, index)}
               isLast={isLast}
               running={running}
               /*
@@ -284,19 +312,6 @@ function turnModel(
   persisted: TranscriptState['runModel']
 ): string | undefined {
   return live ?? (row.runId === undefined ? undefined : persisted?.[row.runId])
-}
-
-/**
- * 引出某个助手回合的提问。
- *
- * 「重新生成」和「删除这一轮」都以它为锚点:前者把历史截断到这条提问之前再发一次,
- * 后者删掉从它开始的整段。所以拿不到提问的回合(会话开头补出来的空回合)
- * 两个操作都不提供 —— 没有可以退回去的地方。
- */
-function promptOf(previous: ThreadRow | undefined): TurnPrompt | undefined {
-  if (previous?.kind !== 'user') return undefined
-  const text = visibleText(previous.message).trim()
-  return { id: previous.message.id, text }
 }
 
 function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {

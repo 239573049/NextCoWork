@@ -19,6 +19,7 @@ import { cn } from '../../lib/cn'
 export function Slider({
   value,
   onCommit,
+  onPreview,
   min,
   max,
   step = 1,
@@ -28,6 +29,14 @@ export function Slider({
 }: {
   value: number
   onCommit: (v: number) => void
+  /**
+   * 拖动过程中每一次取值变化。**只用来更新同屏的读数**(比如标题里那行「· 高」),
+   * 不要在里面写回存储 —— 那正是 `onCommit` 存在的理由,上面那段注释算过这笔账。
+   *
+   * 为什么需要它:滑杆自己没有刻度文字(两头各一个端点标签而已),
+   * 不给实时读数的话,拖动中你看不出停在了哪一档,只能松手试。
+   */
+  onPreview?: (v: number) => void
   min: number
   max: number
   step?: number
@@ -50,13 +59,25 @@ export function Slider({
     if (latest.current !== value) onCommit(latest.current)
   }
 
+  /*
+    ★ 只在**没拖**的时候给过渡。点轨道跳档、方向键换档都该滑过去,
+    而拖动中加过渡 = 滑块永远慢光标半拍,那正是「手感黏」的来源。
+  */
+  const glide = dragging === null ? 'transition-[left,width] duration-150 ease-out' : ''
+
   return (
-    <div className={cn('app-no-drag relative flex h-6 items-center', disabled && 'opacity-40', className)}>
+    <div
+      className={cn(
+        'group app-no-drag relative flex h-6 select-none items-center',
+        disabled && 'opacity-40',
+        className
+      )}
+    >
       {/* 槽 */}
       <div className="absolute inset-x-0 h-1.5 rounded-pill bg-tint" />
       {/* 已填充 */}
       <div
-        className="absolute left-0 h-1.5 rounded-pill bg-accent"
+        className={cn('absolute left-0 h-1.5 rounded-pill bg-accent', glide)}
         style={{ width: `${pct}%` }}
       />
       {showTicks && (
@@ -66,11 +87,30 @@ export function Slider({
           ))}
         </div>
       )}
-      {/* 滑块。白色沿用 Toggle 的旋钮(参考图里这两处看着是同一颗,没有单独量) */}
+      {/*
+        滑块。白色沿用 Toggle 的旋钮(参考图里这两处看着是同一颗,没有单独量)。
+
+        ★ **位置和缩放必须分两层。** 一个元素上只有一条 `transition-property`,
+        后写的那条整个顶掉前一条 —— 位移的 `left` 和反馈的 `scale` 挂在同一个
+        div 上,就会变成「要么跳档不滑、要么按下去不放大」,而且哪个赢取决于
+        Tailwind 把哪条工具类排在后面,改个无关的类就可能翻转。
+        外层只管位移,内层只管反馈,两条过渡各归各的。
+      */}
       <div
-        className="pointer-events-none absolute size-[14px] rounded-pill bg-white shadow-sm shadow-black/30"
+        className={cn('pointer-events-none absolute', glide)}
         style={{ left: `calc(${pct}% - ${(pct / 100) * 14}px)` }}
-      />
+      >
+        <div
+          className={cn(
+            'size-[14px] rounded-pill bg-white shadow-sm shadow-black/30',
+            'transition-transform duration-100 group-hover:scale-110',
+            // 按住时再放大一点 = 「抓住了」的反馈;键盘聚焦时给环,
+            // 否则 Tab 到这根杠上**屏幕上没有任何变化**(原生 input 是全透明的)。
+            'group-has-[:active]:scale-125 group-has-[:focus-visible]:ring-2',
+            'group-has-[:focus-visible]:ring-accent/60 group-has-[:focus-visible]:ring-offset-0'
+          )}
+        />
+      </div>
       <input
         type="range"
         min={min}
@@ -83,11 +123,24 @@ export function Slider({
           const v = Number(e.target.value)
           latest.current = v
           setDragging(v)
+          onPreview?.(v)
         }}
         onPointerUp={commit}
+        // 拖出控件外再松手 / 被系统打断时,pointerup 不一定回到这里
+        onPointerCancel={commit}
         onKeyUp={commit}
         onBlur={() => dragging !== null && commit()}
-        className="absolute inset-x-0 h-6 w-full cursor-pointer opacity-0"
+        /*
+          ★ `appearance-none` + 显式 14px 的 thumb 不是为了长相(它是全透明的),
+          是为了**落点对齐**:浏览器把光标 x 映射成取值时,两端各留出半个 thumb 的
+          余量,而那个 thumb 宽度由 UA 定(Chromium ≈16px)。自绘的是 14px,
+          两个数不一样,于是越靠边光标和白点偏得越明显。统一成 14px 就没有这个缝。
+        */
+        className={cn(
+          'absolute inset-x-0 h-6 w-full cursor-pointer appearance-none bg-transparent opacity-0',
+          '[&::-webkit-slider-thumb]:size-[14px] [&::-webkit-slider-thumb]:appearance-none',
+          'active:cursor-grabbing'
+        )}
       />
     </div>
   )

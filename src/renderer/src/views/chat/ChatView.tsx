@@ -57,12 +57,13 @@ export function ChatView({
   const storeKey = sessionId ?? tabId
   const remote = !isLocalEnvironment(workspace.environment)
   const useSession = sessionStore(storeKey)
-  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, lastOptions } = useSession(useShallow((state) => ({
+  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions } = useSession(useShallow((state) => ({
     activeRunId: state.activeRunId,
     lastSeq: state.lastSeq,
     transcript: state.transcript,
     queuedInputs: state.queuedInputs,
     compacting: state.compacting,
+    compactError: state.compactError,
     lastOptions: state.lastOptions
   })))
   const {
@@ -123,6 +124,8 @@ export function ChatView({
     mode: workspace.settings.defaultMode,
     thinking: workspace.settings.defaultThinking,
     webSearch: workspace.settings.webSearch,
+    // 不经过输入框的路径,档位只能取工作区默认值(和 webSearch 同理)。
+    maxContext: workspace.settings.maxContext === true,
     permissionMode: workspace.settings.permissionMode,
     model: editModel.model,
     modelProviderId: editModel.modelProviderId,
@@ -144,6 +147,7 @@ export function ChatView({
       mode: 'normal' as const,
       thinking: workspace.settings.defaultThinking,
       webSearch: workspace.settings.webSearch,
+      maxContext: workspace.settings.maxContext === true,
       permissionMode: workspace.settings.permissionMode,
       model: workspace.settings.defaultModel !== '' ? workspace.settings.defaultModel : fallbackModel.model,
       modelProviderId: workspace.settings.defaultModelProviderId ?? fallbackModel.modelProviderId,
@@ -452,6 +456,7 @@ export function ChatView({
             mode: v.mode,
             thinking: v.thinking,
             webSearch: v.webSearch,
+            maxContext: v.maxContext,
             permissionMode: v.permissionMode,
             model: v.model,
             modelProviderId: v.modelProviderId,
@@ -520,6 +525,7 @@ export function ChatView({
           providerName={provider?.name}
           lastSeq={lastSeq}
           queued={queuedInputs.length}
+          compactError={compactError}
           onEditMessage={onEditMessage}
           onDeleteTurn={deleteTurn}
           onExecutePlan={executePlan}

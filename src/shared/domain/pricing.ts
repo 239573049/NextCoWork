@@ -325,3 +325,39 @@ export function findPricing(
   }
   return rows.find((p) => p.providerId === null) ?? null
 }
+
+/** 越过长上下文分界之后的涨价倍率 —— 给界面出「超出 272K 后输入 ×2」这句话用。 */
+export interface LongContextSurcharge {
+  /** 分界点,即第一档的上界 */
+  threshold: number
+  /** 第二档 / 第一档的输入单价之比 */
+  inputMultiplier: number
+  outputMultiplier: number
+}
+
+/**
+ * 这个模型有没有长上下文涨价档,涨多少。
+ *
+ * ★ 界面文案必须查这里而不是写死「×2」:只有 OpenAI 现代四款是双档,
+ * 而且倍率不对称(输入 ×2、输出 ×1.5)。查不到 / 单档 → undefined,
+ * 调用方降级成中性说法,**不要编一个 1**(「×1」看着像「不涨价」,而实际是「不知道」)。
+ */
+export function longContextSurcharge(
+  table: readonly ModelPricing[],
+  providerId: string | null,
+  modelId: string,
+  at: number
+): LongContextSurcharge | undefined {
+  const pricing = findPricing(table, providerId, modelId, at)
+  if (pricing === null) return undefined
+  const [base, long] = pricing.tiers
+  if (base === undefined || long === undefined) return undefined
+  const threshold = base.upToInputTokens
+  if (threshold === null || threshold <= 0) return undefined
+  if (base.rate.input <= 0 || base.rate.output <= 0) return undefined
+  return {
+    threshold,
+    inputMultiplier: long.rate.input / base.rate.input,
+    outputMultiplier: long.rate.output / base.rate.output
+  }
+}

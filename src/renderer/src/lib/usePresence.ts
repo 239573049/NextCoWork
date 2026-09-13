@@ -14,7 +14,8 @@
  *                transition 常开的话每拖一帧都排一次 280ms 插值,手感像在拉皮筋。
  *                只在开关引起的那 280ms 里挂 transition,拖动期间它是 false
  *
- * 首帧不算一次变化(`first`):启动时侧边栏本来就开着,不该自己滑进来一次。
+ * 默认首帧不算一次变化(`first`):启动时侧边栏本来就开着,不该自己滑进来一次。
+ * 需要“条件挂载后第一次出现也播放”的组件可传 `animateOnMount=true`。
  */
 import { useEffect, useRef, useState } from 'react'
 
@@ -24,16 +25,33 @@ export interface Presence {
   animating: boolean
 }
 
-export function usePresence(open: boolean, ms: number): Presence {
+/**
+ * @param animateOnMount Play the opening transition when a conditionally
+ * mounted component first appears with `open=true` (shared Dialogs use this;
+ * layout panels intentionally keep the default false).
+ */
+export function usePresence(open: boolean, ms: number, animateOnMount = false): Presence {
   const [mounted, setMounted] = useState(open)
-  const [shown, setShown] = useState(open)
+  const [shown, setShown] = useState(open && !animateOnMount)
   const [animating, setAnimating] = useState(false)
   const first = useRef(true)
 
   useEffect(() => {
     if (first.current) {
       first.current = false
-      return
+      if (!animateOnMount || !open) return
+
+      setAnimating(true)
+      let inner = 0
+      const settle = setTimeout(() => setAnimating(false), ms + 80)
+      const outer = requestAnimationFrame(() => {
+        inner = requestAnimationFrame(() => setShown(true))
+      })
+      return () => {
+        clearTimeout(settle)
+        cancelAnimationFrame(outer)
+        cancelAnimationFrame(inner)
+      }
     }
     setAnimating(true)
     // +80:进场要等两帧才真正开始跑,提前摘掉 transition 会让最后几像素是跳过去的
@@ -58,7 +76,7 @@ export function usePresence(open: boolean, ms: number): Presence {
       clearTimeout(settle)
       clearTimeout(unmount)
     }
-  }, [open, ms])
+  }, [open, ms, animateOnMount])
 
   return { mounted, shown, animating }
 }

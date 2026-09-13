@@ -30,6 +30,7 @@ import { TextInput } from '../components/ui/TextInput'
 import { useFocusTrap } from '../components/ui/useFocusTrap'
 import { prettyAccelerator } from '../lib/accelerator'
 import { cn } from '../lib/cn'
+import { usePresence } from '../lib/usePresence'
 import { updateSettings } from '../services/app'
 import { SETTINGS_ICON } from './icons'
 import {
@@ -54,20 +55,29 @@ import { themeDraftDirty, useThemeProfiles } from '../stores/themeProfiles'
 
 
 export function SettingsOverlay({
+  open,
   page,
   settings,
   versions,
   onNavigate,
   onClose
 }: {
+  open: boolean
   page: SettingsPageId
   settings: AppSettings
   versions: Bootstrap['versions']
   onNavigate: (p: SettingsPageId) => void
   onClose: () => void
 }): ReactNode {
+  const presence = usePresence(open, 280)
   const panelRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const lastOpenPage = useRef<SettingsPageId>(page)
+  if (open) lastOpenPage.current = page
+  // AppShell keeps this component mounted so the close transition can finish.
+  // Keep the last real page visible while the parent store is switching back to
+  // its default value after close, avoiding a one-frame flash of General.
+  const visiblePage = open ? page : lastOpenPage.current
   const [query, setQuery] = useState('')
   const [sub, setSub] = useState<string>('')
   const [seenPage, setSeenPage] = useState(page)
@@ -75,27 +85,28 @@ export function SettingsOverlay({
   const [confirmClose, setConfirmClose] = useState(false)
   const discardThemeDraft = useThemeProfiles((state) => state.discard)
   const requestClose = (): void => {
-    if (page === 'preference' && themeDraftDirty()) setConfirmClose(true)
+    if (visiblePage === 'preference' && themeDraftDirty()) setConfirmClose(true)
     else onClose()
   }
 
-  const def = SETTINGS_PAGES.find((p) => p.id === page)
+  const def = SETTINGS_PAGES.find((p) => p.id === visiblePage)
   const subs = def?.subs
 
   // 换页时把子 Tab 重置到该页的第一个 —— 渲染期改状态,不用 useEffect:
   // 后者会先渲染一帧「连接页 + 上一页残留的子 Tab」再纠正,看得见地闪一下
-  if (page !== seenPage) {
-    setSeenPage(page)
+  if (visiblePage !== seenPage) {
+    setSeenPage(visiblePage)
     setSub(subs?.[0]?.id ?? '')
   }
   const availableSubs = subs === undefined
     ? undefined
-    : [...subs.map((item) => ({ ...item, label: subLabel(t, item.id) })), ...(page === 'model' ? [{ id: 'management', label: t('settings.sub.management') }] : [])]
+    : [...subs.map((item) => ({ ...item, label: subLabel(t, item.id) })), ...(visiblePage === 'model' ? [{ id: 'management', label: t('settings.sub.management') }] : [])]
   const activeSub = availableSubs === undefined ? '' : availableSubs.some((s) => s.id === sub) ? sub : availableSubs[0]!.id
 
-  useFocusTrap(panelRef, true, searchRef)
+  useFocusTrap(panelRef, open && presence.mounted, searchRef)
 
   useEffect(() => {
+    if (!open) return
     const onKey = (e: KeyboardEvent): void => {
       // ★ 先让下层消费者说话:Menu 关自己时会 preventDefault。不查这个的话
       // 「在设置里打开模型选择器再按 Esc」会同时关掉菜单和整个面板。
@@ -105,7 +116,7 @@ export function SettingsOverlay({
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [open, onClose])
 
   const patch = (p: AppSettingsPatch): void => {
     // 失败只记日志:值已经在界面上生效了(main 广播回来才是最终态),
@@ -125,9 +136,15 @@ export function SettingsOverlay({
     setQuery('')
   }
 
+  if (!presence.mounted) return null
+
   return (
     <div
-      className="app-no-drag fixed inset-0 z-100 flex items-center justify-center p-[10px]"
+      className={cn(
+        'app-no-drag fixed inset-0 z-100 flex items-center justify-center p-[10px]',
+        'transition-opacity duration-280 ease-panel motion-reduce:transition-none',
+        presence.shown ? 'opacity-100' : 'pointer-events-none opacity-0'
+      )}
       role="dialog"
       aria-modal="true"
       aria-label={t('common.settings')}
@@ -140,7 +157,11 @@ export function SettingsOverlay({
         tabIndex={-1}
         className={cn(
           'relative flex h-[720px] max-h-full w-full max-w-[1058px] overflow-hidden',
-          'rounded-panel shadow-2xl shadow-black/40 outline-none'
+          'rounded-panel shadow-2xl shadow-black/40 outline-none',
+          // Menu uses viewport coordinates while remaining inside this panel;
+          // keep the ancestor transform-free so its fixed positioning stays exact.
+          'transition-opacity duration-280 ease-panel motion-reduce:transition-none',
+          presence.shown ? 'opacity-100' : 'opacity-0'
         )}
       >
         {/* ── 左:导航 ── */}
@@ -167,7 +188,7 @@ export function SettingsOverlay({
           <ul className="scroll-thin flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-2 pb-2">
             {SETTINGS_PAGES.map((p) => {
               const Icon = SETTINGS_ICON[p.id]
-              const on = p.id === page && !searching
+              const on = p.id === visiblePage && !searching
               return (
                 <li key={p.id}>
                   <button
@@ -200,11 +221,11 @@ export function SettingsOverlay({
         */}
         <div data-menu-bounds className="flex min-w-0 flex-1 flex-col bg-canvas">
           <header className="flex shrink-0 items-center gap-4 px-6 pt-5 pb-3">
-            <h2 className="text-[15px] text-fg">{searching ? t('settings.searchResults') : pageLabel(t, page)}</h2>
+            <h2 className="text-[15px] text-fg">{searching ? t('settings.searchResults') : pageLabel(t, visiblePage)}</h2>
             {!searching && availableSubs !== undefined && (
               <Segmented
                 size="sm"
-                label={`${pageLabel(t, page)}${t('settings.categorySuffix')}`}
+                label={`${pageLabel(t, visiblePage)}${t('settings.categorySuffix')}`}
                 value={activeSub}
                 options={(availableSubs ?? []).map((s) => ({ value: s.id, label: s.label }))}
                 onChange={setSub}
@@ -221,7 +242,7 @@ export function SettingsOverlay({
               <SearchResults rows={rows} pages={pages.map((p) => p.id)} onPick={goto} />
             ) : (
               <PageBody
-                page={page}
+                page={visiblePage}
                 sub={activeSub}
                 settings={settings}
                 versions={versions}

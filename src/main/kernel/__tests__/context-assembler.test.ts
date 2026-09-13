@@ -13,6 +13,8 @@ import {
   assemble,
   buildSystemPrompt,
   compactMessages,
+  compactionBoundary,
+  compactionNote,
   estimateMessages,
   estimateTokens,
   estimateTools,
@@ -681,5 +683,96 @@ describe('compactMessages', () => {
     const snapshot = structuredClone(h)
     compactMessages(h)
     expect(h).toEqual(snapshot)
+  })
+})
+
+/**
+ * `compactionBoundary` 报的是 `compactMessages` **这一刀切在哪**。
+ *
+ * ★ 它和 `compactMessages` 必须共用同一套下标规则,否则消息流里那条分隔线
+ * 会画在一个模型其实还看得见原文的位置上 —— 界面说「这之前折叠了」,
+ * 而实际没有。所以这一组用例全部拿 `compactMessages` 的真实产出来对账,
+ * 不去复述规则。
+ */
+describe('compactionBoundary', () => {
+  /**
+   * ★ 每一条都带着**会被压缩改写的东西**(助手带 thinking、用户带图)。
+   * 若用纯文本,折叠区间里的消息压完与原文逐字节相同,下面那条「对账」用例
+   * 就会拿着一个空的 `changed` 数组绿掉 —— 断言什么都没钉住。
+   */
+  function msgs(n: number): AgentMessage[] {
+    return Array.from({ length: n }, (_, i) =>
+      i % 2 === 0
+        ? userMessage(
+            `m${i}`,
+            [{ type: 'text', text: `第 ${i} 条` }, { type: 'image', mime: 'image/png', dataRef: `r${i}` }],
+            NOW
+          )
+        : assistantMessage(
+            `m${i}`,
+            [{ type: 'thinking', text: '想了想', opaque: { sig: 'x' } }, { type: 'text', text: `第 ${i} 条` }],
+            NOW
+          )
+    )
+  }
+
+  it('空历史没有边界', () => {
+    expect(compactionBoundary([])).toBeUndefined()
+  })
+
+  it('短于 keepRecent 时没有边界 —— 这一轮什么都没折叠,不该落检查点', () => {
+    expect(compactionBoundary(msgs(4), { keepRecent: 6 })).toBeUndefined()
+  })
+
+  /** 折叠区间是 [1, cutoff),`cutoff === 1` 时它是空的:只剩第一条,无处可折 */
+  it('恰好只剩首条可折时仍然没有边界', () => {
+    expect(compactionBoundary(msgs(7), { keepRecent: 6 })).toBeUndefined()
+  })
+
+  it('首条永远在折叠区间之外', () => {
+    const summary = compactionBoundary(msgs(12), { keepRecent: 4 })
+    expect(summary?.fromMessageId).toBe('m1')
+  })
+
+  /** ★ 最值钱的一条:边界正好落在 `length - keepRecent - 1` */
+  it('末条折叠消息就是 compactMessages 改动范围的最后一条', () => {
+    const h = msgs(12)
+    const out = compactMessages(h, { keepRecent: 4 })
+    const changed = h.filter((m, i) => JSON.stringify(out[i]) !== JSON.stringify(m))
+    const summary = compactionBoundary(h, { keepRecent: 4 })
+
+    expect(summary?.throughMessageId).toBe('m7')
+    expect(summary?.foldedMessages).toBe(7)
+    // 对账:改动范围的两端与边界严丝合缝 —— 差一条,线就画在模型其实还看得见的位置上
+    expect(changed.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'])
+    expect(changed.at(-1)?.id).toBe(summary?.throughMessageId)
+    expect(changed[0]?.id).toBe(summary?.fromMessageId)
+  })
+
+  it('数的是工具输出的处数,不是消息条数', () => {
+    const h = [
+      userMessage('first', [{ type: 'text', text: '开始' }], NOW),
+      userMessage(
+        'r1',
+        [
+          { type: 'tool_result', callId: 'c1', output: { content: 'x' }, isError: false },
+          { type: 'tool_result', callId: 'c2', output: { content: 'y' }, isError: false }
+        ],
+        NOW
+      ),
+      ...msgs(4)
+    ]
+    const summary = compactionBoundary(h, { keepRecent: 4 })
+    expect(summary).toMatchObject({ foldedMessages: 1, foldedToolOutputs: 2 })
+  })
+
+  /** note 是列的 NOT NULL 约束的实际填充物 —— 空字符串会被写路径挡回来 */
+  it('note 里带得出条数', () => {
+    const summary = compactionBoundary(msgs(12), { keepRecent: 4 })
+    expect(summary).toBeDefined()
+    if (summary === undefined) return
+    const note = compactionNote(summary, 4)
+    expect(note).toContain('7 message(s)')
+    expect(note.trim()).not.toBe('')
   })
 })

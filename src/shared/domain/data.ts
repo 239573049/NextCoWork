@@ -408,6 +408,9 @@ function isWorkspaceSettings(value: unknown): boolean {
     enumValue(value.defaultMode, SESSION_MODES) &&
     enumValue(value.defaultThinking, THINKING_LEVELS) &&
     isBoolean(value.webSearch) &&
+    // ★ 必须是 optionalBoolean:改动之前导出的备份里没有这一项,用 isBoolean
+    //   会让整份 DataExport 在导入时被拒(isWorkspaceSettings → isWorkspace → 全份失败)。
+    optionalBoolean(value, 'maxContext') &&
     stringArray(value.activeSkillIds) &&
     (value.skillSelectionMode === undefined || enumValue(value.skillSelectionMode, ['all', 'explicit'] as const))
   )

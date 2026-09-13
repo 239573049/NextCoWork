@@ -51,7 +51,8 @@ export function IconButton({
       onClick={onClick}
       style={{ width: width ?? size, height: size }}
       className={cn(
-        'app-no-drag flex shrink-0 items-center justify-center rounded-[8px] transition-colors',
+        'app-no-drag flex shrink-0 items-center justify-center rounded-[8px] transition-[background-color,color,opacity,transform,scale,translate] duration-150',
+        'active:scale-[.94] motion-reduce:transition-none motion-reduce:active:scale-100',
         'text-icon hover:bg-tint-hover hover:text-fg disabled:opacity-30 disabled:hover:bg-transparent',
         active && 'bg-surface-sunken text-accent hover:text-accent',
         className

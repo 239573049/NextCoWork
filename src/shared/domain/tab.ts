@@ -9,8 +9,8 @@
 
 /** ★ 外层 Tab 不只装工作区 —— 「定时任务」是作为独立外层 Tab 打开的 */
 export type OuterTab =
-  | { id: string; kind: 'workspace'; ref: { workspaceId: string } }
-  | { id: string; kind: 'feature'; ref: { feature: FeatureKind } }
+  | { id: string; kind: 'workspace'; ref: { workspaceId: string }; /** Keep this tab at the start of the tab strip. */ pinned?: boolean }
+  | { id: string; kind: 'feature'; ref: { feature: FeatureKind }; /** Keep this tab at the start of the tab strip. */ pinned?: boolean }
 
 export type FeatureKind = 'scheduled' | 'extensions' | 'browser' | 'review' | 'settings'
 

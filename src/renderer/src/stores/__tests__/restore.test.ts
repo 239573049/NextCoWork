@@ -398,3 +398,36 @@ describe('useWindowStore.close · 工作区退场时的释放', () => {
     expect(useTabsStore.getState().stateOf('w2').tabs).toHaveLength(1)
   })
 })
+
+describe('useWindowStore · 外层 Tab 置顶', () => {
+  const reviewTab = (id: string, pinned = false): OuterTab => ({
+    id,
+    kind: 'feature',
+    ref: { feature: 'review' },
+    pinned
+  })
+
+  it('恢复时把置顶 Tab 放到最前，并保留置顶状态', () => {
+    useWindowStore.getState().hydrate(boot({
+      tabState: { outer: [reviewTab('regular'), reviewTab('pinned', true)], activeOuterId: 'regular' }
+    }))
+
+    expect(useWindowStore.getState().outer.map((tab) => tab.id)).toEqual(['pinned', 'regular'])
+    expect(useWindowStore.getState().outer[0]?.pinned).toBe(true)
+    expect(useWindowStore.getState().activeOuterId).toBe('regular')
+  })
+
+  it('右键操作对应的 store action 可置顶、取消置顶并持久化', () => {
+    useWindowStore.getState().hydrate(boot({ tabState: { outer: [reviewTab('a'), reviewTab('b')], activeOuterId: 'a' } }))
+    vi.clearAllMocks()
+
+    useWindowStore.getState().togglePin('b')
+    expect(useWindowStore.getState().outer.map((tab) => tab.id)).toEqual(['b', 'a'])
+    expect(useWindowStore.getState().outer[0]?.pinned).toBe(true)
+    expect(mockPersistOuter).toHaveBeenCalledTimes(1)
+
+    useWindowStore.getState().togglePin('b')
+    expect(useWindowStore.getState().outer.map((tab) => tab.id)).toEqual(['b', 'a'])
+    expect(useWindowStore.getState().outer[0]?.pinned).toBe(false)
+  })
+})

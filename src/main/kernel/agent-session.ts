@@ -38,8 +38,9 @@ import { ulid } from '../../shared/util/id'
 import { abortable, abortableStream, isAbortError } from './abort'
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
-import { compactMessages, withSummary } from './context-assembler'
+import { compactMessages, compactionBoundary, compactionNote, withSummary } from './context-assembler'
 import type { ContextCheckpoint } from '../../shared/agent/context-management'
+import { effectiveContextWindow } from '../../shared/agent/context-management'
 import type {
   ContextManagementSettings,
   PersonalizationSettings
@@ -160,7 +161,6 @@ export interface SessionDeps {
 }
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
-const FALLBACK_CONTEXT_WINDOW = 200_000
 const FALLBACK_MAX_OUTPUT = 8192
 
 const INTERRUPTED = '[interrupted: the user stopped the run before this tool call finished]'
@@ -181,6 +181,16 @@ function toRunError(err: unknown): AgentError {
   return agentError('unknown', err instanceof Error ? err.message : String(err))
 }
 
+/**
+ * 这条检查点是不是机械压缩产生的。
+ *
+ * `'auto'` 是同一件事的旧写法 —— 库里两种都可能存在,判反了就会把一句折叠统计
+ * 当成对话摘要发给模型。
+ */
+function isMechanical(checkpoint: ContextCheckpoint): boolean {
+  return checkpoint.source === 'mechanical' || checkpoint.source === 'auto'
+}
+
 export class AgentSession {
   private readonly messages: AgentMessage[]
   /** 当前上下文窗口使用的投影；完整 messages 仍保留用于持久化和后续摘要。 */
@@ -192,6 +202,15 @@ export class AgentSession {
   private pending: BlockAccumulator | null = null
   private contextNote: string | undefined
   private contextWindowIndex = 0
+  /**
+   * 当前这一段机械压缩期占用的窗口号。
+   *
+   * 机械压缩是**每一轮重做的投影**,边界随对话推进而移动 —— 每轮新开一条的话,
+   * 表和消息流都会按轮次线性膨胀。沿用同一个号(即同一个 id)让 upsert 覆盖它,
+   * 于是一段压缩期只留一条,读数随轮更新。中途做过一次模型摘要就清空,
+   * 后续机械压缩会拿到更大的号、正确地另起一条。
+   */
+  private mechanicalWindowIndex: number | undefined
   private stopAfterPlanApproval = false
 
   constructor(
@@ -212,9 +231,25 @@ export class AgentSession {
      * 模型读到一个无关文件而全程无一处报错。
      */
     this.contextMessages = this.messages.map((message) => ({ ...message, parts: this.isolateHistoryPaths(message.parts) }))
-    const latestCheckpoint = [...(deps.contextCheckpoints ?? [])].sort((a, b) => b.windowIndex - a.windowIndex)[0]
+    /*
+      ★ **两个值取法不同,不能合并。**
+
+      `contextNote` 会被 `withSummary` 当成「到此为止的对话摘要」发给模型,
+      所以它**只能来自模型摘要**。机械压缩那条检查点的 note 是一句
+      「折叠了 14 条消息、丢掉 9 处工具输出」—— 把它当摘要送上去,
+      模型看到的就不是这段对话讲了什么,而是一句关于压缩本身的统计。
+
+      `contextWindowIndex` 反过来必须按**全部**检查点推进:它是下一个窗口号的来源,
+      漏掉机械那条会让号码倒退,再落盘就撞 `UNIQUE (session_id, window_index)`。
+    */
+    const allCheckpoints = [...(deps.contextCheckpoints ?? [])].sort((a, b) => b.windowIndex - a.windowIndex)
+    const latestCheckpoint = allCheckpoints.find((c) => !isMechanical(c))
     this.contextNote = latestCheckpoint?.note
-    this.contextWindowIndex = latestCheckpoint?.windowIndex ?? 0
+    this.contextWindowIndex = allCheckpoints[0]?.windowIndex ?? 0
+    // 最新那条就是机械压缩的话,这一段压缩期还没结束 —— 下次接着覆盖它,而不是新开一条。
+    this.mechanicalWindowIndex = allCheckpoints[0] !== undefined && isMechanical(allCheckpoints[0])
+      ? allCheckpoints[0].windowIndex
+      : undefined
     if (latestCheckpoint !== undefined && this.contextMessages.length > 0) {
       this.contextMessages = withSummary(
         compactMessages(this.contextMessages),
@@ -402,7 +437,13 @@ export class AgentSession {
         */
         ...(todoToolName !== undefined ? { todoToolName } : {})
       },
-      contextWindow: alias?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
+      /*
+        ★ 这里给的是**有效窗口**,不是协议窗口 —— 它决定 `shouldCompact` 的分母和
+        圆环的分母。协议窗口那条线在下面的 `validateModelRuntime` 里读 `alias` 原值,
+        两条线**故意**不一样:默认夹在 272K 是「不越过计费线」,而不是「模型装不下」。
+        见 `shared/agent/context-management.ts` 文件头。
+      */
+      contextWindow: effectiveContextWindow(alias?.contextWindow, this.req.maxContext === true),
       maxOutputTokens: alias?.maxOutputTokens ?? FALLBACK_MAX_OUTPUT,
       supportsThinking: alias?.capabilities.thinking ?? false,
       reasoningEfforts: alias?.reasoningEfforts,
@@ -426,6 +467,8 @@ export class AgentSession {
       if (checkpoint !== undefined) {
         this.contextNote = checkpoint.note
         this.contextWindowIndex = checkpoint.windowIndex
+        // 摘要压缩另起了一个窗口,上一段机械压缩期到此为止。
+        this.mechanicalWindowIndex = undefined
         const compacted = compactMessages(this.messages)
         const projected = withSummary(compacted, checkpoint.note, checkpoint.id, this.deps.host.clock.now())
         this.contextMessages = [...projected]
@@ -435,10 +478,21 @@ export class AgentSession {
         this.handle.emit({ type: 'context_checkpoint', checkpoint: finalized })
         this.handle.emit({ type: 'context_status', status: { phase: 'ready', windowIndex: finalized.windowIndex } })
       } else {
-        this.handle.emit({ type: 'context_status', status: { phase: 'fallback', windowIndex: this.contextWindowIndex } })
+        /*
+          ★ **「摘要失败」和「压根没打算摘要」不是同一件事。**
+          后者是默认配置下每一次自动压缩的正常结果;前者意味着这一轮按原历史发出去,
+          下一步很可能就是 400。以前两者都报 `fallback`,用户分不出来。
+        */
+        const wantsSummary = contextSettings.experimentalMode === true
+        this.handle.emit({
+          type: 'context_status',
+          status: { phase: wantsSummary ? 'error' : 'fallback', windowIndex: this.contextWindowIndex }
+        })
+        const before = usage.used
         const projected = compactMessages(this.messages)
         this.contextMessages = [...projected]
         ;({ request, usage } = assemble({ ...assembleInput, messages: projected }))
+        this.recordMechanicalCompaction(before, usage.used)
       }
     }
 
@@ -528,6 +582,42 @@ export class AgentSession {
     }
 
     return { calls, tools: byName }
+  }
+
+  /**
+   * 把这一次机械压缩记成一条检查点。
+   *
+   * ★ 这是默认路径的压缩位置**重启后还看得见**的唯一途径 —— 渲染层自己算不出来:
+   * 重挂之后 `contextUsage` 是 undefined,它判断不出这一轮压没压、压到了哪。
+   *
+   * 边界从 `compactionBoundary` 拿,不在这里重算下标(规则只写一遍)。
+   */
+  private recordMechanicalCompaction(inputTokensBefore: number, inputTokensAfter: number): void {
+    const save = this.deps.saveContextCheckpoint
+    if (save === undefined) return
+    const summary = compactionBoundary(this.messages)
+    // 历史还不够长,这一刀什么都没切到 —— 没有位置可标,就不要留一条空记录。
+    if (summary === undefined) return
+    const windowIndex = this.mechanicalWindowIndex ?? this.contextWindowIndex + 1
+    const now = this.deps.host.clock.now()
+    const checkpoint: ContextCheckpoint = {
+      id: `${this.req.sessionId}:context:${String(windowIndex)}`,
+      sessionId: this.req.sessionId,
+      windowIndex,
+      note: compactionNote(summary),
+      source: 'mechanical',
+      ...(summary.fromMessageId === undefined ? {} : { coveredFromMessageId: summary.fromMessageId }),
+      ...(summary.throughMessageId === undefined ? {} : { coveredThroughMessageId: summary.throughMessageId }),
+      inputTokensBefore,
+      inputTokensAfter,
+      createdAt: now,
+      updatedAt: now,
+      revision: 1
+    }
+    this.mechanicalWindowIndex = windowIndex
+    this.contextWindowIndex = Math.max(this.contextWindowIndex, windowIndex)
+    save(checkpoint)
+    this.handle.emit({ type: 'context_checkpoint', checkpoint })
   }
 
   private async createContextCheckpoint(input: {

@@ -11,17 +11,22 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { Folder, LoaderCircle, PanelBottom, PanelRight, Plus, Server, X } from "lucide-react";
+import { ChevronDown, Folder, LoaderCircle, PanelBottom, PanelRight, Pin, PinOff, Plus, Server, X } from "lucide-react";
 import { isLocalEnvironment } from '../../../shared/domain/environment';
-import type { ReactNode } from "react";
-import { FEATURE_LABEL, type OuterTab } from "../../../shared/domain/tab";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { FeatureKind, OuterTab } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
+import { ContextMenu, type ContextMenuPosition } from "../components/ui/ContextMenu";
 import { IconButton } from "../components/ui/IconButton";
 import { Menu, MenuItem, MenuSeparator } from "../components/ui/Menu";
 import { cn } from "../lib/cn";
 import { FEATURE_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
-import { useI18n } from "../i18n";
+import { useI18n, type Translate } from "../i18n";
+
+function featureLabel(t: Translate, feature: FeatureKind): string {
+  return t(`view.feature.${feature}` as Parameters<Translate>[0]);
+}
 
 export function OuterTabBar({
   tabs,
@@ -30,6 +35,7 @@ export function OuterTabBar({
   runningWorkspaceIds,
   onActivate,
   onClose,
+  onTogglePin,
   onMove,
   onOpenWorkspace,
   onPickWorkspace,
@@ -47,6 +53,7 @@ export function OuterTabBar({
   runningWorkspaceIds: ReadonlySet<string>;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
+  onTogglePin: (id: string) => void;
   onMove: (from: number, to: number) => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onPickWorkspace: () => void;
@@ -59,6 +66,48 @@ export function OuterTabBar({
 }): ReactNode {
   const { t } = useI18n();
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
+  const [contextMenu, setContextMenu] = useState<{ tabId: string; position: ContextMenuPosition } | null>(null);
+  const [hiddenTabIds, setHiddenTabIds] = useState<readonly string[]>([]);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const contextTab = contextMenu === null ? undefined : tabs.find((tab) => tab.id === contextMenu.tabId);
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (strip === null) return;
+
+    let frame = 0;
+    const measure = (): void => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const bounds = strip.getBoundingClientRect();
+        const left = bounds.left;
+        const right = bounds.left + strip.clientWidth;
+        const hidden = [...strip.querySelectorAll<HTMLElement>('[data-outer-tab-id]')]
+          .filter((tab) => {
+            const box = tab.getBoundingClientRect();
+            return box.left < left - 1 || box.right > right + 1;
+          })
+          .map((tab) => tab.dataset.outerTabId ?? '')
+          .filter((id) => id !== '');
+        setHiddenTabIds((current) => current.length === hidden.length && current.every((id, index) => id === hidden[index]) ? current : hidden);
+      });
+    };
+
+    measure();
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(strip);
+    const mutationObserver = new MutationObserver(measure);
+    mutationObserver.observe(strip, { childList: true, subtree: true, characterData: true });
+    strip.addEventListener('scroll', measure, { passive: true });
+    window.addEventListener('resize', measure);
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      strip.removeEventListener('scroll', measure);
+      window.removeEventListener('resize', measure);
+    };
+  }, [tabs, workspaces]);
 
   return (
     /*
@@ -73,7 +122,14 @@ export function OuterTabBar({
       和以前逐像素相同),只有 `self-center` 的那一组挪回真正的条心。
     */
     <div className="flex min-w-0 flex-1 self-stretch items-end gap-0.5">
-      {tabs.map((tab, i) => {
+      {/*
+        Keep the + trigger outside the scrollable tab list. Previously it shared the
+        same non-wrapping flex row as every tab, so a full strip let the last tab's
+        close button overlap the trigger. The list can now scroll while + always has
+        its own fixed hit target.
+      */}
+      <div ref={stripRef} className="app-no-drag tab-strip-scroll flex w-max min-w-0 max-w-full flex-initial items-end gap-0.5 overflow-x-auto overflow-y-hidden">
+        {tabs.map((tab, i) => {
         const active = tab.id === activeId;
         const running =
           tab.kind === "workspace" &&
@@ -85,16 +141,21 @@ export function OuterTabBar({
         const label =
           tab.kind === "workspace"
             ? (ws?.name ?? t("nav.unknownWorkspace"))
-            : FEATURE_LABEL[tab.ref.feature];
+            : featureLabel(t, tab.ref.feature);
         const Icon =
           tab.kind === "workspace" ? (isLocalEnvironment(ws?.environment) ? Folder : Server) : FEATURE_ICON[tab.ref.feature];
 
-        return (
+          return (
           <div
             key={tab.id}
+            data-outer-tab-id={tab.id}
             style={styleFor(i)}
             onPointerDown={(e) => onPointerDown(e, i)}
             onClick={() => onActivate(tab.id)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setContextMenu({ tabId: tab.id, position: { x: event.clientX, y: event.clientY } });
+            }}
             role="tab"
             aria-selected={active}
             title={ws?.rootPath ?? label}
@@ -117,6 +178,7 @@ export function OuterTabBar({
               size={13}
               className={cn("shrink-0", active ? "text-fg" : "text-icon")}
             />
+            {tab.pinned === true && <Pin size={11} aria-hidden className="shrink-0 text-accent" />}
             <span className="min-w-0 flex-1 truncate">{label}</span>
             {running && (
               <LoaderCircle size={11} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
@@ -138,13 +200,51 @@ export function OuterTabBar({
               <X size={12} />
             </button>
           </div>
-        );
-      })}
+          );
+        })}
+      </div>
+
+      {hiddenTabIds.length > 0 && (
+        <Menu
+          label={t("nav.allTabs")}
+          width={260}
+          className="mb-0.5 shrink-0"
+          trigger={<ChevronDown size={15} />}
+          triggerClassName="flex size-[26px] items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
+        >
+          {(close) => (
+            <>
+              {hiddenTabIds.map((id) => {
+                const tab = tabs.find((candidate) => candidate.id === id);
+                if (tab === undefined) return null;
+                const ws = tab.kind === "workspace" ? workspaces.find((workspace) => workspace.id === tab.ref.workspaceId) : undefined;
+                const label = tab.kind === "workspace" ? (ws?.name ?? t("nav.unknownWorkspace")) : featureLabel(t, tab.ref.feature);
+                const Icon = tab.kind === "workspace"
+                  ? (isLocalEnvironment(ws?.environment) ? Folder : Server)
+                  : FEATURE_ICON[tab.ref.feature];
+                return (
+                  <MenuItem
+                    key={tab.id}
+                    icon={<Icon size={14} />}
+                    checked={tab.id === activeId}
+                    onSelect={() => {
+                      onActivate(tab.id);
+                      close();
+                    }}
+                  >
+                    {label}
+                  </MenuItem>
+                );
+              })}
+            </>
+          )}
+        </Menu>
+      )}
 
       <Menu
         label={t("nav.openWorkspace")}
         width={300}
-        className="mb-0.5 ml-0.5"
+        className="mb-0.5 ml-0.5 shrink-0"
         trigger={<Plus size={15} />}
         triggerClassName="flex size-[26px] items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
       >
@@ -236,6 +336,27 @@ export function OuterTabBar({
           <PanelRight size={16} strokeWidth={1.5} />
         </IconButton>
       </div>
+
+      {contextMenu !== null && contextTab !== undefined && (
+        <ContextMenu
+          position={contextMenu.position}
+          label={t("nav.tabContextMenu")}
+          onClose={() => setContextMenu(null)}
+        >
+          {(close) => (
+            <MenuItem
+              icon={contextTab.pinned === true ? <PinOff size={14} /> : <Pin size={14} />}
+              checked={contextTab.pinned === true}
+              onSelect={() => {
+                onTogglePin(contextTab.id);
+                close();
+              }}
+            >
+              {contextTab.pinned === true ? t("nav.unpinTab") : t("nav.pinTab")}
+            </MenuItem>
+          )}
+        </ContextMenu>
+      )}
     </div>
   );
 }

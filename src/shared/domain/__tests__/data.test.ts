@@ -113,6 +113,34 @@ describe('isDataExport', () => {
     expect(isDataExport(old)).toBe(true)
   })
 
+  /**
+   * `maxContext`(最大上下文开关)是后加的可选项 —— 改动**之前**导出的每一份备份里
+   * 都没有它。校验器那行若写成 `isBoolean` 而不是 `optionalBoolean`,整份 DataExport
+   * 会在导入时被拒(isWorkspaceSettings → isWorkspace → 全份失败),而用户看到的只是
+   * 一句"文件格式不对"。这条用例是 CI 里唯一挡得住那次改写的东西。
+   */
+  it('接受缺少 maxContext 的旧工作区,带了但类型不对仍然拒绝', () => {
+    const legacy = minimalExport()
+    legacy.workspaces = [{
+      id: 'w', name: 'A', rootPath: '/a', settings: {
+        permissionMode: 'auto', defaultModel: 'gpt-5.5', defaultMode: 'normal',
+        defaultThinking: 'auto', webSearch: true, activeSkillIds: []
+      }, createdAt: 1, lastOpenedAt: 1
+    }]
+    expect(isDataExport(legacy)).toBe(true)
+
+    const settingsOf = (e: Record<string, unknown>): Record<string, unknown> =>
+      ((e.workspaces as unknown[])[0] as Record<string, unknown>).settings as Record<string, unknown>
+
+    const enabled = structuredClone(legacy)
+    settingsOf(enabled).maxContext = true
+    expect(isDataExport(enabled)).toBe(true)
+
+    const wrongType = structuredClone(legacy)
+    settingsOf(wrongType).maxContext = 'yes'
+    expect(isDataExport(wrongType)).toBe(false)
+  })
+
   it('带了但类型不对的一律拒掉,而不是存进去等以后炸', () => {
     const bad = minimalExport()
     ;(bad.settings as Record<string, unknown>).defaultModelProviderId = 123

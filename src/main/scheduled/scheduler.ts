@@ -83,6 +83,9 @@ async function execute(task: ScheduledTask, scheduledAt: number, trigger: 'sched
       runId, sessionId, workspaceId: task.workspaceId, depth: 0,
       input: [{ type: 'text', text: task.prompt }], mode: workspace.settings.defaultMode,
       thinking: workspace.settings.defaultThinking, webSearch: workspace.settings.webSearch,
+      // 定时任务没有输入框,唯一档位来源就是工作区默认值 —— 漏了这行,用户开了
+      // 「最大上下文」但半夜的任务仍按 272K 压缩,且无处可查。
+      maxContext: workspace.settings.maxContext === true,
       permissionMode: SCHEDULED_PERMISSION_MODE, model: task.model, modelProviderId: task.modelProviderId,
       skillIds: workspace.settings.activeSkillIds, skillSelectionMode: workspace.settings.skillSelectionMode
     }

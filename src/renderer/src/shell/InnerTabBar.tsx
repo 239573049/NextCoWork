@@ -83,7 +83,7 @@ export function InnerTabBar({
         className,
       )}
     >
-      <div className="scroll-thin flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
+      <div className="tab-strip-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
         {tabs.map((tab, i) => {
           const active = tab.id === activeId;
           const running =

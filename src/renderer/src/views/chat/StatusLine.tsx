@@ -13,6 +13,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import { hasRun } from '../../../../shared/agent/transcript'
+import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { whimsyEn, whimsyZh } from '../../i18n/agent'
@@ -35,23 +36,35 @@ const WHIMSY_ROTATE_MS = 4000
 const PRESSURE_SHOW = 0.5
 const PRESSURE_WARN = 0.75
 
+/**
+ * 「已压缩」显示多久。
+ *
+ * 它说的是**刚刚发生过**的一件事,不是一个持续状态 —— 一直挂着的话,
+ * 十轮之后那句话说的还是第一轮那次压缩,而用户会以为它指的是这一轮。
+ */
+const COMPACTED_SHOW_MS = 8000
+
 export function StatusLine({
   transcript,
   running,
   waitingForResponse,
   lastSeq,
-  queued
+  queued,
+  compactError
 }: {
   transcript: TranscriptState
   running: boolean
   waitingForResponse: boolean
   lastSeq: number
   queued: number
+  /** 手动压缩(`/compact` 或双击圆环)的失败原因。自动压缩走 `contextStatus`。 */
+  compactError?: string | null
 }): ReactNode {
   const { t, locale } = useI18n()
-  const { status, model, usage, contextUsage, notice } = transcript
+  const { status, model, usage, contextUsage, notice, contextStatus } = transcript
   // ★ 在 early return 之前调用 —— hooks 不能出现在条件分支后面。
   const whimsy = useWhimsy(waitingForResponse, locale)
+  const showCompacted = useFading(contextStatus?.phase === 'ready', contextStatus)
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
   if (!hasRun(transcript, running)) return null
@@ -73,6 +86,17 @@ export function StatusLine({
       ? 0
       : Math.min(1, contextUsage.used / contextUsage.window)
 
+  /*
+    ★ **`fallback` 不是故障。** 它是默认配置下每一次自动压缩的正常结果
+    (没开实验摘要 → 走机械折叠)。按 danger 画的话,用户会把产品的正常行为
+    当成一串错误。真正出事的是 `error`:摘要请求挂了,这一轮按原历史发出去,
+    下一步很可能就是 400。两者必须是不同档位。
+  */
+  const compaction = compactionLine({
+    t, phase: contextStatus?.phase, showCompacted, compactError,
+    saved: savedTokens(transcript)
+  })
+
   return (
     <div
       data-testid="chat-status"
@@ -80,6 +104,8 @@ export function StatusLine({
       data-seq={lastSeq}
       data-model={model ?? ''}
       data-queued={queued}
+      // ★ 探针读这一个属性,不去正则那句会随文案改的中文 —— 见本文件抬头。
+      data-context-phase={contextStatus?.phase ?? ''}
       className="flex w-full items-center gap-2 text-[11.5px] text-fg-faint"
     >
       {/* ★ 有提示时用 danger 而不是运行中的绿:绿色说的是「一切正常」,而此刻不是。
@@ -114,6 +140,21 @@ export function StatusLine({
         <>
           <Dot />
           <span>{t('chat.queue', { count: queued })}</span>
+        </>
+      )}
+
+      {compaction !== undefined && (
+        <>
+          <Dot />
+          <span
+            data-testid="context-compaction"
+            title={compaction.detail}
+            className={cn('inline-flex items-center gap-1.5',
+              compaction.tone === 'danger' ? 'text-danger' : compaction.tone === 'accent' && 'text-accent')}
+          >
+            {compaction.spinner && <LoaderCircle size={12} aria-hidden className="animate-spin motion-reduce:animate-none" />}
+            {compaction.text}
+          </span>
         </>
       )}
 
@@ -166,4 +207,74 @@ function useWhimsy(active: boolean, locale: Locale): string {
 
 function Dot(): ReactNode {
   return <span aria-hidden className="text-fg-faint/50">·</span>
+}
+
+/**
+ * 压缩相位 → 状态行上的一句话。纯函数,好单测。
+ *
+ * 手动压缩的失败**压过**自动压缩的相位:用户刚刚亲手点了一下,
+ * 他要看的是那一下的结果,而不是上一轮自动压缩留下的读数。
+ */
+function compactionLine({
+  t, phase, showCompacted, compactError, saved
+}: {
+  t: ReturnType<typeof useI18n>['t']
+  phase: ContextStatusPhase | undefined
+  showCompacted: boolean
+  compactError?: string | null
+  saved?: number
+}): { text: string; tone: 'danger' | 'accent' | 'muted'; spinner: boolean; detail?: string } | undefined {
+  if (compactError !== undefined && compactError !== null && compactError !== '') {
+    // 原始报错进 title:它常常是一整句上游错误,铺在状态行上会把这一行撑爆,
+    // 但排查的时候又只有它有用。
+    return { text: t('chat.contextStatus.error'), tone: 'danger', spinner: false, detail: compactError }
+  }
+  switch (phase) {
+    case 'preparing':
+      return { text: t('chat.contextStatus.preparing'), tone: 'accent', spinner: true }
+    case 'ready':
+      if (!showCompacted) return undefined
+      return {
+        text: saved === undefined
+          ? t('chat.contextStatus.ready')
+          : t('chat.contextStatus.readySaved', { saved }),
+        tone: 'muted', spinner: false
+      }
+    case 'fallback':
+      return { text: t('chat.contextStatus.fallback'), tone: 'muted', spinner: false }
+    case 'error':
+      return { text: t('chat.contextStatus.error'), tone: 'danger', spinner: false }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * 这一次压缩省下了多少 token。
+ *
+ * ★ **两边都有才算。** 检查点刚建出来时只有 `before`,`after` 要等下一次组装回填;
+ * 那时候拿单边的数字去报「省下 N」就是编的。算不出来就退回不带数字那句。
+ */
+function savedTokens(transcript: TranscriptState): number | undefined {
+  const index = transcript.contextStatus?.windowIndex
+  if (index === undefined) return undefined
+  const checkpoint = transcript.contextCheckpoints.find((item) => item.windowIndex === index)
+  const { inputTokensBefore: before, inputTokensAfter: after } = checkpoint ?? {}
+  if (before === undefined || after === undefined || before <= after) return undefined
+  return before - after
+}
+
+/**
+ * `active` 变真之后只亮一段时间。`token` 换一个新对象就重新计时 ——
+ * 靠它区分「同一次压缩」和「又压了一次」,而 phase 字符串本身分不出来。
+ */
+function useFading(active: boolean, token: unknown): boolean {
+  const [shownFor, setShownFor] = useState<unknown>(undefined)
+  useEffect(() => {
+    if (!active) return
+    setShownFor(token)
+    const timer = setTimeout(() => setShownFor(undefined), COMPACTED_SHOW_MS)
+    return () => clearTimeout(timer)
+  }, [active, token])
+  return active && shownFor === token
 }

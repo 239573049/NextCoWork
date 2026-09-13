@@ -11,6 +11,7 @@ import { MAX_TURNS, MAX_TURNS_GOAL } from '../../../shared/agent/run-request'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ToolResult, ToolSource } from '../../../shared/agent/tool'
 import { toolOk } from '../../../shared/agent/tool'
+import type { ContextCheckpoint } from '../../../shared/agent/context-management'
 import type { ModelAlias } from '../../../shared/domain/provider'
 import {
   AgentSession,
@@ -1402,6 +1403,54 @@ describe('模型声明运行时约束', () => {
     expect(upstream.requests).toEqual([])
   })
 
+  /*
+    ── 有效上下文窗口 ──
+    ★ 这一组钉的是「哪个数在管压缩」。协议窗口(会不会被上游 400)和有效窗口
+    (自愿的花钱上限)从这次改动起是两条线,而它们只在这里被同时断言。
+  */
+  it('关着最大上下文时,超大窗口的模型按 272K 计压力', async () => {
+    const model: ModelAlias = { ...ALIAS, contextWindow: 1_050_000 }
+    const upstream = fakeUpstream([says('好')], { models: [model] })
+    const { events } = await runSession({ upstream, request: req({ maxContext: false }) })
+    expect(events.find((e) => e.type === 'context_usage')).toMatchObject({ window: 272_000 })
+  })
+
+  it('开着最大上下文时放开到模型的协议窗口', async () => {
+    const model: ModelAlias = { ...ALIAS, contextWindow: 1_050_000 }
+    const upstream = fakeUpstream([says('好')], { models: [model] })
+    const { events } = await runSession({ upstream, request: req({ maxContext: true }) })
+    expect(events.find((e) => e.type === 'context_usage')).toMatchObject({ window: 1_050_000 })
+  })
+
+  it('请求里没有 maxContext(旧队列条目 / 旧 run)按关着走', async () => {
+    const model: ModelAlias = { ...ALIAS, contextWindow: 1_050_000 }
+    const upstream = fakeUpstream([says('好')], { models: [model] })
+    const { events } = await runSession({ upstream })
+    expect(events.find((e) => e.type === 'context_usage')).toMatchObject({ window: 272_000 })
+  })
+
+  /*
+    ★ 一条用例同时钉住两件事:有效窗口真的在管压缩(shouldCompact 起来了),
+    协议窗口真的没被开关污染(请求照常发出,没有 context_length)。
+    历史约 220K token —— 越过 272K×0.8,但离 1.05M 还远得很。
+  */
+  it('历史越过 272K 的压缩阈值时要压,但不报 context_length', async () => {
+    const model: ModelAlias = { ...ALIAS, contextWindow: 1_050_000 }
+    const upstream = fakeUpstream([says('好')], { models: [model] })
+    const big = 'x'.repeat(900_000)
+    const { events } = await runSession({
+      upstream,
+      request: req({ maxContext: false }),
+      history: [userMessage('old', [{ type: 'text', text: big }], 1)]
+    })
+    expect(events.find((e) => e.type === 'context_usage')).toMatchObject({
+      window: 272_000,
+      shouldCompact: true
+    })
+    expect(runEnd(events).error?.code).not.toBe('context_length')
+    expect(upstream.requests.length).toBeGreaterThan(0)
+  })
+
   it('开启 Web Search 但模型既无内置搜索也无工具能力时明确失败', async () => {
     const model: ModelAlias = {
       ...ALIAS,
@@ -1743,5 +1792,80 @@ describe('file_ref 路径归一化', () => {
 
     const injected = session.history.find((m) => m.id === 'q1')
     expect(injected?.parts).toEqual([{ type: 'file_ref', path: 'src/a.ts', name: 'a.ts' }])
+  })
+})
+
+/**
+ * 恢复检查点时按 `source` 分流。
+ *
+ * ★ 机械压缩也落检查点之后,构造函数那句「取 windowIndex 最大的」会捞到它,
+ * 于是一句「折叠了 N 条消息」被 `withSummary` 当成**对话摘要**送给模型 ——
+ * 模型看到的不再是这段对话讲了什么,而是一句关于压缩本身的统计。
+ * 全程没有任何报错,是这套改动唯一的硬风险,所以单独钉一条。
+ */
+describe('恢复上下文检查点', () => {
+  function checkpoint(over: Partial<ContextCheckpoint> = {}): ContextCheckpoint {
+    return {
+      id: 'sess-1:context:1',
+      sessionId: 'sess-1',
+      windowIndex: 1,
+      note: '摘要正文',
+      source: 'model',
+      createdAt: 0,
+      updatedAt: 0,
+      revision: 1,
+      ...over
+    }
+  }
+
+  const HISTORY: readonly AgentMessage[] = [
+    userMessage('h1', [{ type: 'text', text: '开始' }], 0),
+    assistantMessage('h2', [{ type: 'text', text: '好的' }], 0)
+  ]
+
+  async function assembled(contextCheckpoints: readonly ContextCheckpoint[]): Promise<string> {
+    const request = req()
+    const handle = new RunHandle(request)
+    const upstream = fakeUpstream([says('ok')])
+    const session = new AgentSession(
+      { host: quietHost(), upstream, tools: registry(), workspaceRoot: '/ws', history: HISTORY, contextCheckpoints },
+      handle,
+      request
+    )
+    await session.run()
+    return JSON.stringify(upstream.requests[0]?.messages ?? [])
+  }
+
+  it('模型摘要会作为摘要进入请求', async () => {
+    expect(await assembled([checkpoint({ note: '用户在重构登录模块' })])).toContain('用户在重构登录模块')
+  })
+
+  it('★ 机械压缩那条的 note 绝不进请求', async () => {
+    const sent = await assembled([
+      checkpoint({ id: 'sess-1:context:2', windowIndex: 2, source: 'mechanical', note: '折叠了 14 条消息' })
+    ])
+    expect(sent).not.toContain('折叠了 14 条消息')
+    expect(sent).not.toContain('Summary of the conversation so far')
+  })
+
+  /** `'auto'` 是机械压缩的旧写法,同样不是摘要 */
+  it("★ 旧写法 'auto' 同样被挡住", async () => {
+    const sent = await assembled([
+      checkpoint({ id: 'sess-1:context:2', windowIndex: 2, source: 'auto', note: '自动折叠统计' })
+    ])
+    expect(sent).not.toContain('自动折叠统计')
+  })
+
+  /**
+   * 混着来:机械那条窗口号更大(它是后发生的),但摘要那条才是能当摘要用的。
+   * 若按窗口号一把抓,送上去的就是统计而不是摘要。
+   */
+  it('★ 机械检查点更新时,仍取更早的那条模型摘要', async () => {
+    const sent = await assembled([
+      checkpoint({ windowIndex: 1, source: 'model', note: '用户在重构登录模块' }),
+      checkpoint({ id: 'sess-1:context:2', windowIndex: 2, source: 'mechanical', note: '折叠了 14 条消息' })
+    ])
+    expect(sent).toContain('用户在重构登录模块')
+    expect(sent).not.toContain('折叠了 14 条消息')
   })
 })
