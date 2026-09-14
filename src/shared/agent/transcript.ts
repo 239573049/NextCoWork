@@ -14,6 +14,7 @@ import type { AgentError } from './error'
 import type { AgentEvent, RunNotice, RunStatus, SubagentPhase } from './event'
 import { visibleText, type AgentMessage, type ContentPart, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
+import type { RunCost } from '../domain/pricing'
 import type { ContextCheckpoint, ContextStatus } from './context-management'
 
 /** 尚未提交的内容块。`index` 就是上游给的块序号(方案 §4.2)。 */
@@ -181,6 +182,17 @@ export interface RunUsage extends TokenUsage {
    * 展示层据此不显示 TPS,而不是显示一个 0。
    */
   upstreamMs?: number
+  /**
+   * Σ 这一轮的花费,由 `message_end.cost` 逐次累加(实时那份),或从
+   * `usage_records` 聚合(落盘那份,见 `repo.ts` 的 `runUsageOf`)。
+   *
+   * ★ `null` 和 `undefined` 在这里**不是一回事**:`undefined` = 还没有任何
+   * 计价信息(老对话、没接计价的链路),`null` = **明确算不出**(有请求查不到价,
+   * 或一轮里混了多种币种)。展示层两者都不画,但累加方必须分得开 —— 见 `addCost`。
+   *
+   * ★ 它**不是 token,绝不参与计价**,和上面的 `upstreamMs` 同一条理由。
+   */
+  cost?: RunCost | null
 }
 
 /**
@@ -195,14 +207,48 @@ export function promptTokensOf(usage: TokenUsage): number {
     + (usage.cacheCreationInputTokens ?? 0)
 }
 
-/** Add one provider response's usage to a child-agent total. */
+/**
+ * Add one provider response's usage to a child-agent total.
+ *
+ * ★ `cost` **必须**在下面那个循环之外单独处理。那个循环做的是无差别加法
+ * (`(usage[key] ?? 0) + value`),而 cost 是个对象 —— 让它进循环,币种字段会被
+ * 加成 `"0USD"` 这种东西。所以两头都先把它解构出来。
+ */
 function addUsage(previous: RunUsage | undefined, delta: RunUsage): RunUsage {
-  const usage: RunUsage = { inputTokens: 0, outputTokens: 0, ...previous }
-  for (const key of Object.keys(delta) as Array<keyof RunUsage>) {
-    const value = delta[key]
+  const { cost: previousCost, ...previousTokens } = previous ?? {}
+  const { cost: deltaCost, ...deltaTokens } = delta
+  const usage: RunUsage = { inputTokens: 0, outputTokens: 0, ...previousTokens }
+  for (const key of Object.keys(deltaTokens) as Array<keyof typeof deltaTokens>) {
+    const value = deltaTokens[key]
     if (value !== undefined) usage[key] = (usage[key] ?? 0) + value
   }
-  return usage
+  const cost = addCost(previousCost, deltaCost)
+  return cost === undefined ? usage : { ...usage, cost }
+}
+
+/**
+ * 把一次请求的钱累进这一轮的总额。
+ *
+ * ★★ **`null` 一旦立起来就不再回头。** 「第 1 次请求查不到价、第 2 次查到了」
+ * 若只把第 2 次的钱报上去,会得到一个偏低、却完全合理的总额 —— 没有任何人
+ * 会发现它少了一截。这与 `pricing.ts` 全篇「宁可返回 null 也不返回一个像样的 0」
+ * 是同一条原则。
+ *
+ * ★ 币种不同也锁 null:应用里没有汇率源,把 ¥ 和 $ 加起来同样是个看着合理的错数。
+ * 这在故障切换到另一家(国内↔国外)时是真会发生的。
+ *
+ * ★ `delta === undefined`(事件根本没带这个字段)是**没接计价**,不是「算不出」——
+ * 保持已有累计值不动,老链路的行为于是分毫不变。
+ */
+function addCost(
+  previous: RunCost | null | undefined,
+  delta: RunCost | null | undefined
+): RunCost | null | undefined {
+  if (delta === undefined) return previous
+  if (previous === null || delta === null) return null
+  if (previous === undefined) return delta
+  if (previous.currency !== delta.currency) return null
+  return { micros: previous.micros + delta.micros, currency: delta.currency }
 }
 
 /** Reconstruct durable Task-card metadata from persisted tool result messages. */
@@ -432,9 +478,15 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         case 'message_end': {
           // latencyMs 走 upstreamMs 这个名字进状态:事件说的是「这一次请求」,
           // 状态记的是「这一轮的累计」,同一个数在两处的含义不同,名字也不该同。
-          const delta: RunUsage = d.latencyMs === undefined
-            ? d.usage
-            : { ...d.usage, upstreamMs: d.latencyMs }
+          //
+          // ★ cost 用「字段在不在」传递第三种状态(见 stream.ts 上的表),所以
+          // 这里必须条件展开,不能写 `cost: d.cost` —— 那会把「没接计价」变成
+          // 一个显式的 undefined,和「算不出」在下游就分不开了。
+          const delta: RunUsage = {
+            ...d.usage,
+            ...(d.latencyMs === undefined ? {} : { upstreamMs: d.latencyMs }),
+            ...(d.cost === undefined ? {} : { cost: d.cost })
+          }
           return { ...s, usage: addUsage(s.usage, delta), lastInputTokens: promptTokensOf(d.usage) }
         }
 

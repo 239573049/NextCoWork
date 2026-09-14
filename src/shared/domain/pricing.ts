@@ -13,6 +13,35 @@ import type { TokenUsage } from '../agent/stream'
 
 export type Currency = 'USD' | 'CNY'
 
+export const CURRENCY_SYMBOL: Readonly<Record<Currency, string>> = { USD: '$', CNY: '¥' }
+
+/**
+ * 一笔已经算出来的钱。★ 只在**币种相同**时才谈得上相加 —— 应用里没有汇率源,
+ * 把 ¥ 和 $ 加到一起会得到一个看着完全合理的错数。累加方见
+ * `transcript.ts` 的 `addCost`:币种不同就整轮报「算不出」。
+ */
+export interface RunCost {
+  micros: number
+  currency: Currency
+}
+
+/**
+ * micros → 界面上的金额。
+ *
+ * ★ **小额不能截成两位。** 一轮小请求常落在 $0.0004 这个量级,`$0.00` 会被
+ * 读成「这次免费」。口径照抄设置页用量表的 `costs()`(`UsageTab.tsx`)——
+ * 那是同一类东西(总额,不是费率),两处报同一笔账就该长得一样。
+ *
+ * 和 `formatRate` 的规则**故意不同**:那个格式化的是「每百万 token 多少钱」,
+ * 量级恒定在 $0.075–$15 之间,至少两位最多四位就够;这里的总额跨着
+ * $0.0001 到 $100 六个数量级。
+ */
+export function formatCostMicros(micros: number, currency: Currency): string {
+  const value = micros / 1_000_000
+  const digits = value !== 0 && Math.abs(value) < 0.01 ? 6 : 2
+  return `${CURRENCY_SYMBOL[currency]}${value.toFixed(digits)}`
+}
+
 /**
  * 模态。顶部 Tab 需要它。
  *

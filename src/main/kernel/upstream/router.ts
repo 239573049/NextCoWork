@@ -30,6 +30,7 @@ import { estimateTokens } from '../context-assembler'
 import { userAgent } from '../user-agent'
 import type { KernelHost } from '../host'
 import type { UnpricedUsageAttempt } from '../../../shared/domain/usage'
+import type { RunCost } from '../../../shared/domain/pricing'
 import { ulid } from '../../../shared/util/id'
 import {
   joinUpstreamUrl,
@@ -178,6 +179,22 @@ export interface UpstreamRouterOptions {
    * 才知道自己已经掉线了。
    */
   onCredentialChanged?: (credentialRef: string) => void
+  /**
+   * 这一次请求花了多少钱。★ 又是**注入回调**,和上面两个同一个套路:价目表在
+   * `runtime.ts`(它要查内置模型表才知道该按哪个 modelId 计价),内核不认识它。
+   *
+   * 返回 `null` = 查不到价。它会原样进 `message_end.cost`,渲染层据此把整轮
+   * 报成「算不出」而不是显示一个偏低的数(见 `transcript.ts` 的 `addCost`)。
+   *
+   * 不注入时 `message_end` 里**根本不会有 cost 这个字段** —— 现有测试、
+   * gateway、fake-emitter 于是一行都不用改。
+   */
+  priceAttempt?: (
+    providerId: string,
+    upstreamModel: string,
+    usage: TokenUsage,
+    at: number
+  ) => RunCost | null
 }
 
 export class UpstreamRouter {
@@ -199,6 +216,7 @@ export class UpstreamRouter {
   private readonly idleTimeoutMs: number
   private readonly rateLimitFloorMs: number
   private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
+  private readonly priceAttempt: UpstreamRouterOptions['priceAttempt']
   /**
    * ★ 在构造函数里自己建,**不作为必填参数** —— 于是 gateway 和现有全部测试里那些
    * `new UpstreamRouter(host, config)` 一行都不用改。
@@ -214,7 +232,31 @@ export class UpstreamRouter {
     this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
     this.rateLimitFloorMs = opts.rateLimitFloorMs ?? DEFAULT_RATE_LIMIT_FLOOR_MS
     this.onUsageAttempt = opts.onUsageAttempt
+    this.priceAttempt = opts.priceAttempt
     this.credentials = new CredentialResolver(host, opts.onCredentialChanged)
+  }
+
+  /**
+   * 算这一次请求的钱。★ 抛异常**绝不能**掀掉整条流 —— 和 `onUsageAttempt`
+   * 外面那圈 try/catch 同一个道理,只是这里更要紧:那个是收尾时的遥测,
+   * 这个在流中间,抛出去用户看到的是回复被截断。
+   *
+   * 出错按 `null`(算不出)记,不按 undefined(没接计价):钩子接了却抛了,
+   * 那这一轮的总额确实不可信,该整轮不显示,而不是悄悄少算这一次。
+   */
+  private priceOfAttempt(
+    providerId: string,
+    upstreamModel: string,
+    usage: TokenUsage,
+    at: number
+  ): RunCost | null | undefined {
+    if (this.priceAttempt === undefined) return undefined
+    try {
+      return this.priceAttempt(providerId, upstreamModel, usage, at)
+    } catch (error) {
+      this.host.logger.warn('[usage] 计价失败,本轮不显示金额,请求本身不受影响', error)
+      return null
+    }
   }
 
   listModels(): ModelAlias[] {
@@ -645,7 +687,22 @@ export class UpstreamRouter {
           message_end 押后到循环结束再发 —— 那会让整条流多等一趟。
         */
         if (ev.type === 'message_end') {
-          yield { ...ev, latencyMs: Math.max(0, this.host.clock.now() - startedAt) }
+          /*
+            ★ 计价的时刻传 `startedAt`,**不是** now()。落盘那条走的是
+            `finish()` 里的 `at: startedAt`,两处必须是同一个时刻 ——
+            分时段计价的模型(DeepSeek 有夜间档)在跨过窗口边界的那一刻,
+            两个数会不一样,而且只在凌晨那几分钟不一样,几乎不可能被测出来。
+
+            ★ 传 `c.alias.upstreamModel` 而不是回包里的 `responseModel`,也是
+            为了和落盘那条对齐:服务端会悄悄换名字,两边各查各的就会在同一轮上
+            报出两个不同的金额(聊天页一个、设置页另一个)。
+          */
+          const cost = this.priceOfAttempt(c.provider.id, c.alias.upstreamModel, ev.usage, startedAt)
+          yield {
+            ...ev,
+            latencyMs: Math.max(0, this.host.clock.now() - startedAt),
+            ...(cost === undefined ? {} : { cost })
+          }
           break
         }
         /*

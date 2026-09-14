@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { findPricing } from '../../shared/domain/pricing'
+import { findPricing, priceOf } from '../../shared/domain/pricing'
 import { PRICING_SEED } from '../../shared/domain/pricing-seed'
-import { resolveUsagePricing, resolveUsagePricingModelId } from '../runtime'
+import { priceUsageAttempt, resolveUsagePricing, resolveUsagePricingModelId } from '../runtime'
 
 describe('resolveUsagePricingModelId', () => {
   it('resolves an aggregator-prefixed Kimi alias to its official pricing model id', () => {
@@ -111,5 +111,45 @@ describe('resolveUsagePricing', () => {
   it('查不到价时是 null,而不是一个看着挺像样的 0', () => {
     expect(resolveUsagePricing('custom-my-relay', '不存在的模型', at)).toBeNull()
     expect(findPricing(PRICING_SEED, 'custom-my-relay', '不存在的模型', at)).toBeNull()
+  })
+})
+
+/*
+  ★ 同一次请求有**两条**出口:落盘的 `usage_records.cost_micros`(设置页用量表读它)
+  和随 `message_end` 推给聊天页的实时金额。两处各写一遍计价,迟早会在别名归一化或
+  时段判定上分叉 —— 那时同一轮的钱在两个页面上是两个数,而且都很像样。
+  所以两条出口共用这一个函数,下面钉的就是它的两个关键行为。
+*/
+describe('priceUsageAttempt', () => {
+  const usage = { inputTokens: 1_000_000, outputTokens: 0 }
+
+  it('走的是和落盘同一条别名归一化 → 查表 → 计价链', () => {
+    const at = Date.parse('2026-09-05T00:00:00Z')
+    const priced = priceUsageAttempt('custom-my-relay', 'deepseek-v4-pro', usage, at)
+
+    const pricing = resolveUsagePricing('custom-my-relay', resolveUsagePricingModelId('deepseek-v4-pro'), at)
+    expect(pricing).not.toBeNull()
+    expect(priced).toEqual(priceOf(pricing!, usage, at))
+  })
+
+  /*
+    ★★ `at` 必须一路传到时段判定里。DeepSeek 的高峰档是 ×2,拿错时刻算出来的数
+    完全合理 —— 只是贵一倍或便宜一半,没有任何人会发现。
+  */
+  it('时段价按传进来的时刻算,不是按「现在」', () => {
+    const peak = Date.parse('2026-09-07T02:00:00Z') // 周一 —— 落在高峰窗口内
+    const idle = Date.parse('2026-09-07T00:00:00Z') // 同一天,窗口之前
+
+    const atPeak = priceUsageAttempt('custom-my-relay', 'deepseek-v4-pro', usage, peak)
+    const atIdle = priceUsageAttempt('custom-my-relay', 'deepseek-v4-pro', usage, idle)
+
+    expect(atIdle?.micros).toBeGreaterThan(0)
+    expect(atPeak?.micros).toBe(atIdle!.micros * 2)
+    expect(atPeak?.window).toBeDefined()
+    expect(atIdle?.window).toBeUndefined()
+  })
+
+  it('查不到价时返回 null —— 界面据此整行不画', () => {
+    expect(priceUsageAttempt('custom-my-relay', '不存在的模型', usage, Date.now())).toBeNull()
   })
 })

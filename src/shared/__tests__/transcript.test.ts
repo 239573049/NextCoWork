@@ -233,6 +233,56 @@ describe('applyEvent · 终局与元信息', () => {
     expect(s.usage).not.toHaveProperty('upstreamMs')
   })
 
+  /**
+   * 花费的累加。★ 三种状态(字段不在 / null / 有值)各自的含义见 `stream.ts`
+   * 里 message_end 上那段表 —— 下面四个用例一一对着它。
+   */
+  const end = (usage: { inputTokens: number; outputTokens: number },
+    cost?: { micros: number; currency: 'USD' | 'CNY' } | null): AgentEvent =>
+    ({ type: 'stream', delta: { type: 'message_end', stopReason: 'end_turn', usage,
+      ...(cost === undefined ? {} : { cost }) } })
+
+  it('把每次请求的钱累成这一轮的总额', () => {
+    const s = applyEvents(emptyTranscript(), [
+      end({ inputTokens: 100, outputTokens: 40 }, { micros: 1_200, currency: 'USD' }),
+      end({ inputTokens: 200, outputTokens: 60 }, { micros: 3_400, currency: 'USD' })
+    ])
+    expect(s.usage?.cost).toEqual({ micros: 4_600, currency: 'USD' })
+  })
+
+  /*
+    ★★ 这一条是整个改动里最要紧的断言。第一次查不到价、第二次查到了,如果只把
+    第二次的钱报上去,界面会显示一个偏低、却完全合理的总额 —— 没有人会发现它
+    少了一截。所以 null 必须粘住。
+  */
+  it('有一次算不出价,整轮就锁成算不出,后面再算得出也不回头', () => {
+    const s = applyEvents(emptyTranscript(), [
+      end({ inputTokens: 100, outputTokens: 40 }, null),
+      end({ inputTokens: 200, outputTokens: 60 }, { micros: 3_400, currency: 'USD' })
+    ])
+    expect(s.usage?.cost).toBeNull()
+    // token 照常累加 —— 锁掉的只是钱
+    expect(s.usage?.inputTokens).toBe(300)
+  })
+
+  it('一轮里混了两种币种也锁成算不出 —— 没有汇率源,加起来是个看着合理的错数', () => {
+    const s = applyEvents(emptyTranscript(), [
+      end({ inputTokens: 100, outputTokens: 40 }, { micros: 1_200, currency: 'USD' }),
+      end({ inputTokens: 200, outputTokens: 60 }, { micros: 9_000, currency: 'CNY' })
+    ])
+    expect(s.usage?.cost).toBeNull()
+  })
+
+  it('事件不带 cost 字段 = 没接计价,保持原样,不留一个 null', () => {
+    const s = applyEvents(emptyTranscript(), [
+      end({ inputTokens: 100, outputTokens: 40 }, { micros: 1_200, currency: 'USD' }),
+      end({ inputTokens: 200, outputTokens: 60 })
+    ])
+    expect(s.usage?.cost).toEqual({ micros: 1_200, currency: 'USD' })
+    expect(applyEvent(emptyTranscript(), end({ inputTokens: 1, outputTokens: 2 })).usage)
+      .not.toHaveProperty('cost')
+  })
+
   it('未知/未接管的事件原样返回,不炸也不吞状态', () => {
     const before = applyEvents(emptyTranscript(), [t(0, 'x')])
     const after = applyEvent(before, {

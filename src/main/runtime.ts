@@ -71,7 +71,8 @@ import { store } from './state/store'
 import { listResolvedModels } from './state/model-bindings'
 import { PRICING_SEED } from '../shared/domain/pricing-seed'
 import { findPricing, priceOf } from '../shared/domain/pricing'
-import type { ModelPricing } from '../shared/domain/pricing'
+import type { ModelPricing, PriceResult, RunCost } from '../shared/domain/pricing'
+import type { TokenUsage } from '../shared/agent/stream'
 import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
@@ -467,6 +468,7 @@ export function getRouter(): UpstreamRouter {
   seed()
   router ??= new UpstreamRouter(getHost(), providerConfig, {
     onUsageAttempt: persistUsageAttempt,
+    priceAttempt: priceAttemptForRouter,
     onCredentialChanged: (ref) => credentialOnChange?.(ref)
   })
   return router
@@ -480,7 +482,8 @@ function getSessionTitles(): SessionTitleGenerator {
     upstream: new UpstreamRouter(getHost(), providerConfig, {
       onUsageAttempt: (record) => {
         if (sessionTitles === generator) persistUsageAttempt(record)
-      }
+      },
+      priceAttempt: priceAttemptForRouter
     }),
     getSession: store.getSession,
     putSession: store.putSession,
@@ -524,26 +527,52 @@ export function resolveUsagePricing(
   return findPricing(PRICING_SEED, providerId, pricingModelId, at)
 }
 
+/**
+ * 这一次请求多少钱 —— 查表 + 计价那三步的唯一落点。
+ *
+ * ★★ **落盘的钱和推给界面的钱必须出自这一个函数。** 它有两个调用方:
+ * `persistUsageAttempt`(写 `usage_records`,设置页的用量统计读它)和 router 的
+ * `priceAttempt` 钩子(随 `message_end` 推给聊天页的「任务用量」)。两边各写一遍
+ * 的话,同一轮对话的花费会在应用的两个页面上显示成两个数 —— 而且是那种
+ * 差一点点、谁也说不清哪个对的两个数。
+ */
+export function priceUsageAttempt(
+  providerId: string,
+  upstreamModel: string,
+  usage: TokenUsage,
+  at: number
+): PriceResult | null {
+  const pricing = resolveUsagePricing(providerId, resolveUsagePricingModelId(upstreamModel), at)
+  return pricing === null ? null : priceOf(pricing, usage, at)
+}
+
+/** `priceUsageAttempt` 的 router 钩子形态 —— 只保留界面要的那两个字段。 */
+function priceAttemptForRouter(
+  providerId: string,
+  upstreamModel: string,
+  usage: TokenUsage,
+  at: number
+): RunCost | null {
+  const priced = priceUsageAttempt(providerId, upstreamModel, usage, at)
+  return priced === null ? null : { micros: priced.micros, currency: priced.currency }
+}
+
 function persistUsageAttempt(record: UnpricedUsageAttempt): void {
-  const pricingModelId = resolveUsagePricingModelId(record.upstreamModel)
-  const pricing = resolveUsagePricing(record.providerId, pricingModelId, record.at)
-  const priced =
-    pricing === null
-      ? null
-      : priceOf(
-          pricing,
-          {
-            inputTokens: record.inputTokens,
-            outputTokens: record.outputTokens,
-            cacheReadInputTokens: record.cacheReadTokens,
-            cacheCreationInputTokens: record.cacheWriteTokens,
-            cacheCreation1hInputTokens: record.cacheWrite1hTokens,
-            ...(record.thinkingTokens !== null && !record.thinkingTokensEstimated
-              ? { reasoningTokens: record.thinkingTokens }
-              : {})
-          },
-          record.at
-        )
+  const priced = priceUsageAttempt(
+    record.providerId,
+    record.upstreamModel,
+    {
+      inputTokens: record.inputTokens,
+      outputTokens: record.outputTokens,
+      cacheReadInputTokens: record.cacheReadTokens,
+      cacheCreationInputTokens: record.cacheWriteTokens,
+      cacheCreation1hInputTokens: record.cacheWrite1hTokens,
+      ...(record.thinkingTokens !== null && !record.thinkingTokensEstimated
+        ? { reasoningTokens: record.thinkingTokens }
+        : {})
+    },
+    record.at
+  )
 
   store.recordUsageAttempt({
     ...record,

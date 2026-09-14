@@ -15,6 +15,7 @@
  */
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import type { RunUsage } from '../../shared/agent/transcript'
+import type { RunCost } from '../../shared/domain/pricing'
 import type { ContextCheckpoint, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
@@ -765,7 +766,12 @@ export function runUsageOf(sessionId: string): Record<string, RunUsage> {
             SUM(cache_write_tokens)    AS cache_write_tokens,
             SUM(cache_write_1h_tokens) AS cache_write_1h_tokens,
             SUM(COALESCE(thinking_tokens, 0)) AS thinking_tokens,
-            SUM(CASE WHEN ok = 1 THEN latency_ms ELSE 0 END) AS upstream_ms
+            SUM(CASE WHEN ok = 1 THEN latency_ms ELSE 0 END) AS upstream_ms,
+            SUM(cost_micros)         AS cost_micros,
+            COUNT(cost_micros)       AS priced_count,
+            COUNT(*)                 AS attempt_count,
+            COUNT(DISTINCT currency) AS currency_count,
+            MIN(currency)            AS currency
        FROM usage_records
       WHERE session_id = ?
       GROUP BY run_id`
@@ -783,10 +789,34 @@ export function runUsageOf(sessionId: string): Record<string, RunUsage> {
       ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
       // 0 = 这一轮没有一次成功的请求。留 undefined 让展示层直接不画 TPS,
       // 而不是让它去除以零。
-      ...(upstreamMs > 0 ? { upstreamMs } : {})
+      ...(upstreamMs > 0 ? { upstreamMs } : {}),
+      ...costOf(r)
     }
   }
   return usage
+}
+
+/**
+ * 这一轮的花费 —— **只在算得齐的时候才给**。
+ *
+ * ★★ 有一条尝试 `cost_micros IS NULL`(模型不在价目表),`SUM()` 会安静地把它
+ * 当 0 跳过,给出一个偏低却完全合理的总额。所以这里拿 `COUNT(cost_micros)`
+ * (不计 NULL)和 `COUNT(*)` 对一下:对不上就整个字段不给,界面据此不画那一行。
+ * 这和渲染层 `addCost` 的「一次算不出就整轮算不出」是同一条规矩 —— 实时那份和
+ * 落盘这份必须同口径,否则切走再切回来金额会变。
+ *
+ * ★ 币种多于一种同样不给:没有汇率源,¥ 和 $ 加起来是个看着合理的错数。
+ * 一轮里故障切换到了另一个国别的供应商就会这样。
+ *
+ * ★ 口径跟着上面的 token 走:**失败的尝试也算**。它一样把 prompt 发上去了、
+ * 一样计了费,排除掉界面就会比账单小,而差额没有任何地方交代。
+ */
+function costOf(r: Record<string, unknown>): { cost?: RunCost } {
+  const currency = r['currency']
+  if (Number(r['priced_count'] ?? 0) !== Number(r['attempt_count'] ?? 0)) return {}
+  if (Number(r['currency_count'] ?? 0) !== 1) return {}
+  if (currency !== 'USD' && currency !== 'CNY') return {}
+  return { cost: { micros: Number(r['cost_micros'] ?? 0), currency } }
 }
 
 /**

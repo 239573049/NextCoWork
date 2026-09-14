@@ -3,6 +3,7 @@ import type { ProviderStreamEvent } from '../../../../shared/agent/stream'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
 import { CLIENT_PROVIDER_ID } from '../../../../shared/domain/presets'
 import type { UnpricedUsageAttempt } from '../../../../shared/domain/usage'
+import type { RunCost } from '../../../../shared/domain/pricing'
 import { nodeHost, type KernelHost } from '../../host'
 import type { CanonicalRequest, UpstreamRequestContext } from '../canonical'
 import { parseRetryAfter, UpstreamRouter, type ProviderConfigSource } from '../router'
@@ -195,6 +196,12 @@ function rig(opts: {
   keys?: Record<string, string | null>
   rateLimitFloorMs?: number
   idleTimeoutMs?: number
+  priceAttempt?: (
+    providerId: string,
+    upstreamModel: string,
+    usage: { inputTokens: number; outputTokens: number },
+    at: number
+  ) => RunCost | null
   responses: Array<Response | (() => Response | Promise<Response>) | Error>
 }): Rig {
   const calls: string[] = []
@@ -240,7 +247,8 @@ function rig(opts: {
       // 限流退避的默认基数是秒级(生产上必须如此),测试里压成 0 —— 否则每个
       // 429 用例都要真的睡上几秒。要断言退避本身的用例自己传一个小的非零值。
       rateLimitFloorMs: opts.rateLimitFloorMs ?? 0,
-      onUsageAttempt: (record) => usageRecords.push(record)
+      onUsageAttempt: (record) => usageRecords.push(record),
+      ...(opts.priceAttempt === undefined ? {} : { priceAttempt: opts.priceAttempt })
     }),
     host,
     calls,
@@ -460,6 +468,79 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(out[0]).toMatchObject({ type: 'message_start' })
     expect(out[0]).not.toHaveProperty('latencyMs')
     expect(out.at(-1)).toMatchObject({ type: 'message_end', latencyMs: 100 })
+  })
+
+  /*
+    钱和耗时走同一处补上 —— 但计价**按单次请求**算,不能等一轮结束拿累计值算:
+    档位由该次请求的输入总量定,时段价由该次请求的发起时刻定。
+  */
+  it('message_end 带上这一次请求的钱,拿的是别名的上游模型名和请求发起时刻', async () => {
+    const seen: Array<[string, string, number, number]> = []
+    const { router, now } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))],
+      priceAttempt: (providerId, upstreamModel, usage, at) => {
+        seen.push([providerId, upstreamModel, usage.inputTokens, at])
+        return { micros: 1_234, currency: 'USD' }
+      }
+    })
+    const startedAt = now.t
+
+    const out: ProviderStreamEvent[] = []
+    for await (const event of router.stream(REQ, new AbortController().signal, { workspaceId: 'w' })) {
+      out.push(event)
+      now.t += 50 // 流一边走一边过时间 —— 用来钉住传下去的是发起时刻而不是 now()
+    }
+
+    expect(out.at(-1)).toMatchObject({ type: 'message_end', cost: { micros: 1_234, currency: 'USD' } })
+    // ★ 'm-upstream' 是别名表里的上游模型名;回包里报的是 'm-up'(见 sseBody)。
+    //   查价必须用前者 —— 落盘那条用的就是它,否则聊天页和设置页会显示成两个数。
+    // ★ at 必须是 startedAt:落盘用的 record.at 也是它。分时段计价的模型跨过
+    //   窗口边界那一刻,两条路径会各报各的,而且只在那几分钟里不一样。
+    expect(seen).toEqual([['p1', 'm-upstream', 5, startedAt]])
+  })
+
+  it('查不到价时是 cost: null 而不是缺省 —— 累加方据此把整轮锁成「算不出」', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))],
+      priceAttempt: () => null
+    })
+
+    const end = (await drain(router)).at(-1)
+    expect(end).toMatchObject({ type: 'message_end' })
+    expect(end).toHaveProperty('cost', null)
+  })
+
+  /*
+    ★ 没注入钩子时字段必须**整个不出现**,不能是 null:null 的含义是「接了计价但
+    查不到价」,会让渲染层把一轮明明算得出的钱锁死。老转录和大部分测试走的都是这条路。
+  */
+  it('不注入计价钩子时 message_end 完全不带 cost 字段', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))]
+    })
+
+    expect((await drain(router)).at(-1)).not.toHaveProperty('cost')
+  })
+
+  it('计价函数抛错时只丢金额,响应本身照常流完', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: '你好' }))],
+      priceAttempt: () => {
+        throw new Error('价目表坏了')
+      }
+    })
+
+    const out = await drain(router)
+    expect(out.map((e) => e.type)).toContain('text_delta')
+    expect(out.at(-1)).toHaveProperty('cost', null)
   })
 
   it('可见思考只记为明确标注的估算值，且不会超过总输出 Token', async () => {

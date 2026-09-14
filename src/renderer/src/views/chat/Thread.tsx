@@ -14,6 +14,8 @@ import { CheckCircle2, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } 
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
+import { formatTokenCount } from '../../../../shared/agent/tokens'
+import { formatCostMicros } from '../../../../shared/domain/pricing'
 import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { AgentMarkdown } from '../../components/markdown'
@@ -315,7 +317,7 @@ function turnModel(
 }
 
 function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   if (usage === undefined) return null
   const cacheRead = usage.cacheReadInputTokens ?? 0
   const cacheCreate = usage.cacheCreationInputTokens ?? 0
@@ -330,19 +332,47 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
     显示「平均 TPS 0.0」会被读成「慢得没边」,而事实是「无从谈起」。
   */
   const tps = tokensPerSecond(usage.outputTokens, usage.upstreamMs)
+  /*
+    ★ 和 TPS 同一个口径:算不出就整行不画,**不显示 0**。这里的「算不出」有两种,
+    都由 `addCost` / `runUsageOf` 归成同一个表示:模型不在价目表,或者这一轮里
+    故障切换跨了币种(没有汇率源,加起来是个看着合理的错数)。
+
+    `null` 与 `undefined` 在展示层不必区分 —— 分开是累加那一侧的事,
+    它要靠这个区别判断该不该把整轮锁死。
+  */
+  const cost = usage.cost == null ? undefined : formatCostMicros(usage.cost.micros, usage.cost.currency)
+  // 压缩之后原始数字在界面上就没有别处可看了,挂到 title 上留一手
+  const exact = (n: number): string => n.toLocaleString(locale)
   return (
     <div className="group relative w-fit" data-testid="task-usage">
       <div className="cursor-help text-[11px] text-fg-faint">
-        {t('chat.taskUsageSummary', { input: inputTotal, output: usage.outputTokens })}
+        {t('chat.taskUsageSummary', {
+          input: formatTokenCount(inputTotal),
+          output: formatTokenCount(usage.outputTokens)
+        })}
+        {cost !== undefined && ` · ${cost}`}
       </div>
       <div className="pointer-events-none invisible absolute bottom-full left-0 z-20 mb-2 w-max max-w-[min(360px,calc(100vw-48px))] rounded-card border border-border bg-surface-raised px-3 py-2 text-[11px] text-fg shadow-lg opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100">
         <div className="mb-1 font-medium">{t('chat.taskUsage')}</div>
-        <div>{t('chat.taskUsageInput', { count: inputTotal })}</div>
-        <div>{t('chat.taskUsageOutput', { count: usage.outputTokens })}</div>
-        {cacheRead > 0 && <div>{t('chat.taskUsageCacheRead', { count: cacheRead })}</div>}
-        {cacheCreate > 0 && <div>{t('chat.taskUsageCacheCreate', { count: cacheCreate })}</div>}
+        <div title={exact(inputTotal)}>
+          {t('chat.taskUsageInput', { count: formatTokenCount(inputTotal) })}
+        </div>
+        <div title={exact(usage.outputTokens)}>
+          {t('chat.taskUsageOutput', { count: formatTokenCount(usage.outputTokens) })}
+        </div>
+        {cacheRead > 0 && (
+          <div title={exact(cacheRead)}>
+            {t('chat.taskUsageCacheRead', { count: formatTokenCount(cacheRead) })}
+          </div>
+        )}
+        {cacheCreate > 0 && (
+          <div title={exact(cacheCreate)}>
+            {t('chat.taskUsageCacheCreate', { count: formatTokenCount(cacheCreate) })}
+          </div>
+        )}
         <div>{t('chat.taskUsageCacheRate', { rate: `${(cacheRate * 100).toFixed(1)}%` })}</div>
         {tps !== undefined && <div>{t('chat.taskUsageTps', { tps: formatTokensPerSecond(tps) })}</div>}
+        {cost !== undefined && <div>{t('chat.taskUsageCost', { amount: cost })}</div>}
       </div>
     </div>
   )

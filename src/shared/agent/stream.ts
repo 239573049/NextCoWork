@@ -3,6 +3,7 @@
  * 这是「上游那一层」的事件;往 UI 推的是 AgentEvent(见 event.ts),它是这个的超集。
  */
 import type { AgentError } from './error'
+import type { RunCost } from '../domain/pricing'
 
 export type StopReason =
   | 'end_turn'
@@ -73,8 +74,27 @@ export type ProviderStreamEvent =
    *
    * 它是「平均 TPS」的分母:工具执行、等待授权都不在里面,所以一轮里
    * 把每次请求的它累加起来,除出来的才是模型本身的输出速度。
+   *
+   * ★ `cost` 是**这一次请求**的钱,和 `latencyMs` 同一处补上(`router.ts`)。
+   * 三个状态各有各的含义,**不能合并**:
+   *
+   * - 字段不存在 = 这条链路没接计价(老转录、fake-emitter、大部分测试),
+   *   累加方保持已有的累计值不动;
+   * - `null` = 接了计价但**查不到价**(模型不在 `pricing-seed.ts` 里),
+   *   累加方据此把整轮锁成「算不出」;
+   * - 有值 = 算出来了,累加。
+   *
+   * ★★ 计价**必须按单次请求**做,不能等一轮结束拿累计值算:档位由该次请求的
+   * 输入总量决定(越过阈值是整条请求重算,见 `priceOf` 上面那段),时段价由
+   * 该次请求的发起时刻决定。拿累计值算,这两类模型都会系统性偏低。
    */
-  | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage; latencyMs?: number }
+  | {
+      type: 'message_end'
+      stopReason: StopReason
+      usage: TokenUsage
+      latencyMs?: number
+      cost?: RunCost | null
+    }
   | { type: 'error'; error: AgentError }
 
 /**

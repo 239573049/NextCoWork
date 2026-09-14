@@ -102,7 +102,8 @@ describe('逐轮用量', () => {
       cacheCreationInputTokens: 50,
       cacheCreation1hInputTokens: 10,
       reasoningTokens: 5,
-      upstreamMs: 1_200
+      upstreamMs: 1_200,
+      cost: { micros: 1_000, currency: 'USD' }
     })
     expect(detail?.runUsage?.['run-2']).toMatchObject({ inputTokens: 7, outputTokens: 3 })
   })
@@ -124,6 +125,53 @@ describe('逐轮用量', () => {
       outputTokens: 20,
       cacheReadInputTokens: 300
     })
+  })
+
+  /*
+    花费的口径。★ 和 token 一致:**失败的尝试也算** —— 它一样把 prompt 发上去了、
+    一样计了费。三个用例覆盖「算得齐」和两种「算不齐」。
+  */
+  it('一轮里每次尝试的钱累成总额,失败那次的也算', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '重试过一次的一轮'), 'run-1')
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', { ok: false, httpStatus: 429, costMicros: 400 }))
+    repo.recordUsageAttempt(attempt('u-2', 'run-1', { attempt: 2, costMicros: 1_000 }))
+
+    restart()
+
+    expect(repo.getSessionDetail('session-1')?.runUsage?.['run-1']?.cost)
+      .toEqual({ micros: 1_400, currency: 'USD' })
+  })
+
+  /*
+    ★★ 有一条查不到价时,SUM() 会安静地把它当 0 跳过,给出一个偏低却完全合理的
+    总额。整个字段不给,界面才会不画那一行 —— 而不是显示一个少了一截的数。
+  */
+  it('有一次查不到价,整轮就不报金额 —— 而不是把它当 0 加进去', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '中途切到了没有定价的模型'), 'run-1')
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', { costMicros: 1_000 }))
+    repo.recordUsageAttempt(attempt('u-2', 'run-1', {
+      attempt: 2, costMicros: null, currency: null, pricingTier: null
+    }))
+
+    restart()
+
+    const usage = repo.getSessionDetail('session-1')?.runUsage?.['run-1']
+    expect(usage).not.toHaveProperty('cost')
+    // token 照常 —— 不给的只有钱
+    expect(usage?.inputTokens).toBe(200)
+  })
+
+  it('一轮里混了两种币种也不报金额 —— 没有汇率源', () => {
+    repo.ensureSession({ id: 'session-1', workspaceId: 'workspace-1', title: '会话' })
+    repo.commitMessage('session-1', say('m-1', '故障切换跨了国别'), 'run-1')
+    repo.recordUsageAttempt(attempt('u-1', 'run-1', { costMicros: 1_000, currency: 'USD' }))
+    repo.recordUsageAttempt(attempt('u-2', 'run-1', { attempt: 2, costMicros: 9_000, currency: 'CNY' }))
+
+    restart()
+
+    expect(repo.getSessionDetail('session-1')?.runUsage?.['run-1']).not.toHaveProperty('cost')
   })
 
   it('算 TPS 的耗时只收成功的那次,失败尝试的等待不当作「模型很慢」', () => {

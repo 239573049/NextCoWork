@@ -17,10 +17,8 @@ import type {
   PriceTier,
   PriceWindow
 } from '../../../../../shared/domain/pricing'
-import { findPricing } from '../../../../../shared/domain/pricing'
+import { CURRENCY_SYMBOL, findPricing } from '../../../../../shared/domain/pricing'
 import { findPreset } from '../../../../../shared/domain/presets'
-
-const SYMBOL: Readonly<Record<Currency, string>> = { USD: '$', CNY: '¥' }
 
 export interface CatalogPricingTarget {
   id: string
@@ -74,7 +72,7 @@ export function formatRate(v: number | undefined, currency: Currency): string {
   if (v === undefined || !Number.isFinite(v)) return '—'
   const [int, frac = ''] = v.toFixed(4).split('.')
   const trimmed = frac.replace(/0+$/, '').padEnd(2, '0')
-  return `${SYMBOL[currency]}${int}.${trimmed}`
+  return `${CURRENCY_SYMBOL[currency]}${int}.${trimmed}`
 }
 
 /** 272000 → `272K`。档位边界只有 200K / 272K 两种量级,不做通用单位换算 */
