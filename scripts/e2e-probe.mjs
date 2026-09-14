@@ -115,9 +115,9 @@ try {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_NO_ATTACH_CONSOLE
-  // 数据库固定在 `<cwd>/.next-cowork`，所以真正的隔离边界必须是测试
-  // 工作目录。`--user-data-dir` 仍保留，用来在应用重设 userData 之前隔离
-  // Electron 的单实例锁与早期 profile 状态。
+  // `--user-data-dir` 同时管两件事:数据根(`resolveDataRoot()` 认这个开关,
+  // 不传就落到用户真实的 `~/.next-cowork`)和单实例锁。临时 cwd 仍要给,
+  // 但它现在只决定「工作区在哪」,不再决定数据落在哪。
   const projectRoot = process.cwd()
   testProject = await mkdtemp(join(tmpdir(), 'nextcowork-e2e-project-'))
   const userData = join(testProject, '.electron-user-data')

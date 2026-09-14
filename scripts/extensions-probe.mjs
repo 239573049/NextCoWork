@@ -4,18 +4,18 @@
  * CDP 驱动那套是从 `screenshot.mjs` 抄下来的(同一个理由:Electron 没实现 CDP 的
  * Browser 域,真窗口尺寸改不了,只能覆盖视口再靠 `captureBeyondViewport` 重绘)。
  *
- * ★ **两个隔离参数缺一不可,而且它们管的是两件事**:
+ * ★ **`--user-data-dir` 一个人管着两件事,少传一次两件一起出问题**:
  *
- *   - `--user-data-dir` 管的是**单实例锁**。`src/main/index.ts` 里
- *     `app.requestSingleInstanceLock()`(第 32 行)排在
- *     `app.setPath('userData', …)`(第 69 行)**前面**,所以取锁那一刻用的还是
- *     命令行给的这个值。不传它的话,开发实例会和已安装的 NextCoWork.app 抢
- *     同一把锁 —— 表现极具迷惑性:Electron 照常打印 `DevTools listening`,
- *     但 CDP 的 `/json` 永远是空的(窗口压根没建),进程静默退出且 exit code 是 0。
+ *   - **单实例锁**。`src/main/index.ts` 里 `app.requestSingleInstanceLock()` 排在
+ *     `app.setPath('userData', …)` **前面**,所以取锁那一刻用的就是命令行给的这个值。
+ *     不传它的话,开发实例会和已安装的 NextCoWork.app 抢同一把锁 —— 表现极具
+ *     迷惑性:Electron 照常打印 `DevTools listening`,但 CDP 的 `/json` 永远是空的
+ *     (窗口压根没建),进程静默退出且 exit code 是 0。
  *
- *   - `cwd`(mkdtemp 出来的临时目录)管的是**数据落在哪**。setPath 之后
- *     userData 变成 `cwd/.next-cowork`,命令行那个参数对落盘位置不再起作用。
- *     不这么做会直接写进开发者自己的库。
+ *   - **数据落在哪**。`resolveDataRoot()` 认这个开关:传了就以它为数据根,
+ *     不传就是用户真实的 `~/.next-cowork` —— 那等于直接写进开发者自己的库。
+ *     (历史注记:早先数据根从 cwd 派生,靠 mkdtemp 出来的临时 cwd 隔离;
+ *     现在 cwd 只决定「工作区在哪」。)
  *
  * 跑法:`npm run build && node scripts/extensions-probe.mjs`
  */

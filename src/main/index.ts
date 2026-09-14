@@ -3,12 +3,12 @@
  * 内核代码永远不从这里 import —— 依赖方向是单向的:main → kernel,不反向。
  */
 import { dirname, join } from 'node:path'
-import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { app, shell, BrowserWindow, nativeImage, powerMonitor } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
-import { closeDatabase, defaultDatabaseDirectory, DB_FILENAME, openDatabase } from './db'
+import { closeDatabase, DATABASE_DIRNAME, defaultDatabaseDirectory, DB_FILENAME, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownClientAuth, shutdownRuns, shutdownTerminals } from './ipc'
@@ -18,6 +18,7 @@ import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/ro
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
+import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
 import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
 import { SKILLS_DIR } from './kernel/skill/load'
@@ -258,17 +259,60 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
 }
 
 /**
- * 首次切换到新数据根时保留旧版 Electron userData 数据库。
- * 只在目标库不存在时复制，不覆盖用户已经生成的库。
+ * 旧数据根 —— 数据根搬到 `~/.next-cowork` 之前,用户的库可能在两个地方:
  *
- * 打包后 `resolveDataRoot()` 就是 `legacyUserDataPath` 本身,两条路径相同,
- * 下面的 `existsSync` 判断自然退化成 no-op —— 不需要额外分支。
+ * | 旧根 | 谁在用 |
+ * |---|---|
+ * | `legacyUserDataPath` | 旧版**打包安装**(`~/Library/Application Support/NextCoWork` 等) |
+ * | `<cwd>/.next-cowork` | 旧版**开发运行** |
+ *
+ * 两个都有时按 `nextcowork.db` 的 mtime 选最新的那个 —— 固定顺序会在开发机上
+ * 稳定地搬错一份(「我昨天那些会话呢」),而 mtime 就是「上一次在用的是哪一份」。
+ *
+ * ★ 打包时**不把 cwd 列进候选**。发行版的 cwd 是随机的(从快捷方式启动时是安装
+ * 目录),那里碰巧存在一个 `.next-cowork` 就会把一份毫不相干的数据搬进来。
+ */
+function pickLegacyRoot(targetDir: string): string | null {
+  // 显式传了 --user-data-dir = 调用方要的就是一个干净的隔离根,一个字节都不要搬。
+  if (explicitUserDataDir) return null
+
+  const candidates = [legacyUserDataPath]
+  if (!app.isPackaged) candidates.push(join(process.cwd(), DATABASE_DIRNAME))
+
+  let best: { root: string; mtimeMs: number } | null = null
+  for (const root of candidates) {
+    // 升级路径上两者可能已经重合(比如 cwd 正好是主目录),那就没什么可搬的。
+    if (root === targetDir) continue
+    try {
+      const legacyDb = join(root, DB_FILENAME)
+      if (!existsSync(legacyDb)) continue
+      const { mtimeMs } = statSync(legacyDb)
+      if (best === null || mtimeMs > best.mtimeMs) best = { root, mtimeMs }
+    } catch {
+      // 读不到的候选直接跳过 —— 迁移是尽力而为,不能让它挡住启动。
+    }
+  }
+  return best === null ? null : best.root
+}
+
+/**
+ * 首次切换到新数据根时,把旧根整棵搬过来。
+ * 只在目标库不存在时**复制**(不是移动):旧目录留着当回滚兜底,
+ * 也绝不覆盖用户已经在新根生成的库。
+ *
+ * ★ 搬的不只是库文件。`settings.json`(全局钩子)、`commands/` / `skills/` /
+ * `agents/`(用户自己写的扩展)、`attachments/`、`workspaces/` 漏掉任何一样,
+ * 用户的表现都是「升级之后我的东西没了」,而日志里不会有半个字。
+ *
+ * ★ **不搬 Chromium profile**(Cookies / Local Storage)。代价是浏览器工具的
+ * 登录态重置一次,换来的是不用去拷一棵 Chromium 自己管着的、带锁文件的目录树。
  */
 function prepareProjectDatabaseDirectory(): string {
   const targetDir = resolveDataRoot()
   const targetPath = join(targetDir, DB_FILENAME)
-  const legacyPath = join(legacyUserDataPath, DB_FILENAME)
-  if (!existsSync(targetPath) && existsSync(legacyPath)) {
+  const legacyRoot = pickLegacyRoot(targetDir)
+  if (!existsSync(targetPath) && legacyRoot !== null) {
+    const legacyPath = join(legacyRoot, DB_FILENAME)
     mkdirSync(targetDir, { recursive: true })
     copyFileSync(legacyPath, targetPath)
     for (const suffix of ['-wal', '-shm']) {
@@ -278,20 +322,21 @@ function prepareProjectDatabaseDirectory(): string {
     // Move application-owned file trees alongside the copied database. The
     // attachment rows contain absolute paths, so rewrite those references in
     // the copied database before the normal migration runner opens it.
-    const managedDirs = ['attachments', 'skills', 'agents', 'workspaces']
+    const managedDirs = ['attachments', 'skills', 'agents', 'commands', 'workspaces']
     for (const name of managedDirs) {
-      const source = join(legacyUserDataPath, name)
+      const source = join(legacyRoot, name)
       const target = join(targetDir, name)
       if (existsSync(source) && !existsSync(target)) cpSync(source, target, { recursive: true })
     }
-    const legacyInstructions = join(legacyUserDataPath, 'AGENTS.md')
-    const targetInstructions = join(targetDir, 'AGENTS.md')
-    if (existsSync(legacyInstructions) && !existsSync(targetInstructions)) {
-      copyFileSync(legacyInstructions, targetInstructions)
+    // 全局指令与全局设置(目前只有钩子)是单文件,和上面那些目录同等重要。
+    for (const name of ['AGENTS.md', GLOBAL_SETTINGS_FILENAME]) {
+      const source = join(legacyRoot, name)
+      const target = join(targetDir, name)
+      if (existsSync(source) && !existsSync(target)) copyFileSync(source, target)
     }
     // Legacy themes lived beside the old database; their new canonical home
     // is the shared attachments/themes subtree.
-    const legacyThemes = join(legacyUserDataPath, 'themes')
+    const legacyThemes = join(legacyRoot, 'themes')
     const targetThemes = join(targetDir, 'attachments', 'themes')
     if (existsSync(legacyThemes) && !existsSync(targetThemes)) {
       mkdirSync(dirname(targetThemes), { recursive: true })
@@ -299,22 +344,22 @@ function prepareProjectDatabaseDirectory(): string {
     }
     try {
       const migrated = new DatabaseSync(targetPath)
-      const oldRoot = legacyUserDataPath
       migrated.prepare('UPDATE attachments SET path = REPLACE(path, ?, ?) WHERE path LIKE ?').run(
-        join(oldRoot, 'attachments'),
+        join(legacyRoot, 'attachments'),
         join(targetDir, 'attachments'),
-        `${join(oldRoot, 'attachments')}%`
+        `${join(legacyRoot, 'attachments')}%`
       )
       migrated.prepare('UPDATE sessions SET root_path_at_creation = REPLACE(root_path_at_creation, ?, ?) WHERE root_path_at_creation LIKE ?').run(
-        join(oldRoot, 'workspaces'),
+        join(legacyRoot, 'workspaces'),
         join(targetDir, 'workspaces'),
-        `${join(oldRoot, 'workspaces')}%`
+        `${join(legacyRoot, 'workspaces')}%`
       )
       migrated.close()
     } catch (err) {
       console.warn(`[db] 旧数据库路径迁移未完成，将保留原数据并继续启动: ${String(err)}`)
     }
-    console.log(`[db] 已将旧数据库迁移到 ${targetDir}`)
+    // 搬了哪一份是排查这条路径时第一个要问的问题,所以两个根都打出来。
+    console.log(`[db] 已将旧数据从 ${legacyRoot} 迁移到 ${targetDir}`)
   }
   return targetDir
 }
@@ -351,10 +396,10 @@ void app.whenReady().then(() => {
     根本没做时的原症状,没人会怀疑到调用顺序上来。`openDatabase()` 因此
     在重复调用时直接抛错,把这个顺序钉死。
 
-    数据库目录固定为当前工作目录下的 `.next-cowork/`，与 Electron 的
-    `userData` 路径解耦；`openDatabase` 会在首次启动时自动创建它。
+    数据库目录是 `resolveDataRoot()`(默认 `~/.next-cowork/`,与 Electron 的
+    `userData` 同一个目录);`openDatabase` 会在首次启动时自动创建它。
   */
-  // SQLite 主库及应用管理的文件资源统一使用项目级 .next-cowork 目录。
+  // SQLite 主库及应用管理的文件资源统一使用同一个用户级数据根。
   openDatabase(prepareProjectDatabaseDirectory())
 
   /*

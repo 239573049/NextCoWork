@@ -17,8 +17,21 @@
  * CDP 驱动抄自 screenshot.mjs / segmented-probe.mjs。
  */
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import electron from 'electron'
+
+/**
+ * ★ 这个探针要的是**开发者那份已登录的库**,不是一个干净的新根 —— 它没有
+ * 过登录门的能力,全新 user-data 的第一屏只有「登录 / 免登录使用」,CDP 那端
+ * 看到的会是一个和目标界面毫无关系的页面。
+ *
+ * `main/index.ts` 的 `resolveDataRoot()` 认这个开关:传了就以它为数据根,
+ * 不传才用 `~/.next-cowork` —— 这里显式指回同一个位置,顺便也拿到了
+ * 单实例锁(锁在 setPath 之前取,用的正是命令行这个值)。
+ */
+const DATA_ROOT = join(homedir(), '.next-cowork')
 
 const PORT = 9338
 
@@ -137,7 +150,7 @@ try {
 
   child = spawn(
     electron,
-    ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=/tmp/nextcowork-sb-${Date.now()}`],
+    ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${DATA_ROOT}`],
     { env, stdio: ['ignore', 'pipe', 'pipe'] }
   )
 
