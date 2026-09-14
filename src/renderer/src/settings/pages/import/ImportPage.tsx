@@ -204,9 +204,12 @@ export function ImportPage(): ReactNode {
           <Button variant={sourceKind === 'codex' ? 'accent' : undefined} onClick={() => { setSourceKind('codex') }}>
             {t('import.sourceCodex')}
           </Button>
+          <Button variant={sourceKind === 'opencode' ? 'accent' : undefined} onClick={() => { setSourceKind('opencode') }}>
+            {t('import.sourceOpencode')}
+          </Button>
         </div>
         <Row
-          title={sourceKind === 'codex' ? t('import.sourceCodex') : t('import.sourceName')}
+          title={sourceKind === 'codex' ? t('import.sourceCodex') : sourceKind === 'opencode' ? t('import.sourceOpencode') : t('import.sourceName')}
           description={
             detected ? (
               <>
@@ -222,7 +225,7 @@ export function ImportPage(): ReactNode {
                   {detection?.configDir}
                 </span>
                 <span className="mt-1 block">
-                  {t(sourceKind === 'codex' ? 'import.detectedCodex' : 'import.detected', {
+                  {t(sourceKind === 'codex' ? 'import.detectedCodex' : sourceKind === 'opencode' ? 'import.detectedOpencode' : 'import.detected', {
                     projects: detection?.projectCount ?? 0,
                     sessions: detection?.sessionCount ?? 0
                   })}

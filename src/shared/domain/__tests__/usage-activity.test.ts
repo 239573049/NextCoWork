@@ -4,6 +4,7 @@ import {
   dayFromIndex,
   dayIndex,
   dayRange,
+  localDayOf,
   weekdayOf
 } from '../usage-activity'
 
@@ -58,11 +59,7 @@ describe('weekdayOf', () => {
 
 describe('dayRange', () => {
   it('含两端', () => {
-    expect(dayRange('2026-09-12', '2026-09-14')).toEqual([
-      '2026-09-12',
-      '2026-09-13',
-      '2026-09-14'
-    ])
+    expect(dayRange('2026-09-12', '2026-09-14')).toEqual(['2026-09-12', '2026-09-13', '2026-09-14'])
   })
 
   it('单日返回一个元素', () => {
@@ -97,8 +94,13 @@ describe('computeStreaks', () => {
 
   it('最长取历史最优,不是最近那一段', () => {
     const days = [
-      '2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05',
-      '2026-09-13', '2026-09-14'
+      '2026-08-01',
+      '2026-08-02',
+      '2026-08-03',
+      '2026-08-04',
+      '2026-08-05',
+      '2026-09-13',
+      '2026-09-14'
     ]
     expect(computeStreaks(days, '2026-09-14')).toEqual({ current: 2, longest: 5 })
   })
@@ -120,5 +122,26 @@ describe('computeStreaks', () => {
 
   it('只活跃一天', () => {
     expect(computeStreaks(['2026-09-14'], '2026-09-14')).toEqual({ current: 1, longest: 1 })
+  })
+})
+
+describe('本地日期', () => {
+  it('月和日补足两位', () => {
+    expect(localDayOf(new Date(2026, 0, 5, 12, 0, 0).getTime())).toBe('2026-01-05')
+  })
+
+  it('取的是本地日期而不是 UTC 日期', () => {
+    // 本地当天 23:30 —— 在 UTC+X 的时区上换算成 UTC 就落到了后一天(或前一天)。
+    // 这里断言它跟着本地日历走,和汇总表 `date(...,'localtime')` 的口径一致。
+    const at = new Date(2026, 8, 14, 23, 30, 0)
+    expect(localDayOf(at.getTime())).toBe('2026-09-14')
+  })
+
+  it('产出的字符串能直接进日历算术', () => {
+    const a = localDayOf(new Date(2026, 2, 8, 12).getTime())
+    const b = localDayOf(new Date(2026, 2, 9, 12).getTime())
+    // ★ 3 月 8 日在美区是夏令时切换日(23 小时)。两个时间戳相减除以 86400000
+    // 得到 0.958,而序号差必须是 1 —— 这正是本文件存在的理由。
+    expect(dayIndex(b) - dayIndex(a)).toBe(1)
   })
 })

@@ -62,6 +62,8 @@ import {
   renameModel,
   removeModel
 } from './provider'
+import { exportProviders, importProviders } from './provider-transfer'
+import { collectImportableProviders } from '../imports/provider-import'
 import {
   announceCredentialRef,
   cancelOAuth,
@@ -491,6 +493,7 @@ const handlers: HandlerMap = {
 
   // ── 步骤 4 / 13:上游与网关 ──
   'provider:list': () => listProviders(),
+  'providers:listImportable': ({ sourceKind, pickedDir }) => collectImportableProviders(sourceKind, pickedDir),
   'provider:listModels': ({ providerId }) => listModels(providerId),
   'provider:upsert': (req) => upsertProvider(req),
   'provider:remove': ({ id }) => removeProvider(id),
@@ -498,6 +501,8 @@ const handlers: HandlerMap = {
   'provider:setAliases': ({ providerId, models }) => setAliases(providerId, models),
   'provider:setCredential': ({ providerId, apiKey }) => setCredential(providerId, apiKey),
   'provider:getCredentialInfo': ({ providerId }) => getCredentialInfo(providerId),
+  'provider:export': (req) => exportProviders(req),
+  'provider:import': (req) => importProviders(req),
   'provider:startOAuth': ({ providerId }) => startOAuth(providerId),
   'provider:cancelOAuth': ({ providerId }) => cancelOAuth(providerId),
   'provider:submitOAuthCode': ({ providerId, code }) => submitOAuthCode(providerId, code),

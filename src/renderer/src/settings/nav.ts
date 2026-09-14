@@ -18,6 +18,7 @@ export type SettingsPageId =
   | 'import'
   | 'preference'
   | 'model'
+  | 'usage'
   | 'review'
   | 'connection'
   | 'computer'
@@ -78,23 +79,29 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
     id: 'model',
     label: '模型',
     /**
-     * ★ 六个 Tab **不是六种能力**,是「照参考图铺满 + 诚实标注哪几个是空的」——
-     * 本轮只有 `text` 真能用(范围决策:六个全铺,只有文本真能用)。
+     * ★ 五个 Tab **不是五种能力**,是「照参考图铺满 + 诚实标注哪几个是空的」——
+     * 本轮只有 `text` 真能用(范围决策:全铺,只有文本真能用)。
      *
-     * 前五个 id 和 `shared/domain/pricing.ts` 的 `Modality` **逐字相同**,
-     * 而 `usage` 刻意**不在** `Modality` 里 —— 它是另一种视图,不是一种模态
-     * (那边的注释写了理由:混进去会让「按模态过滤定价表」到处特判它)。
-     * 两处对不上就是静默筛出空表,所以 `pages/model/tabs.ts` 的测试守着这条。
+     * 五个 id 和 `shared/domain/pricing.ts` 的 `Modality` **逐字相同**,
+     * 对不上就是静默筛出空表(定价表按模态过滤会永远空),
+     * 所以 `pages/model/tabs.ts` 的测试守着这条。
      */
     subs: [
       { id: 'text', label: '文本生成' },
       { id: 'image', label: '图像生成' },
       { id: 'video', label: '视频生成' },
       { id: 'speech', label: '语音生成' },
-      { id: 'transcription', label: '语音识别' },
-      { id: 'usage', label: '使用统计' }
+      { id: 'transcription', label: '语音识别' }
     ]
   },
+  /**
+   * ★ 第十二页。它曾经是「模型」底下的第六个子 Tab,现在独立成页 ——
+   * 那五个子 Tab 是**按模态选模型**(选完了要保存到设置里),而这一页
+   * 一个设置都不写,只读历史账。挂在同一排切换器上,「模型」这一页就同时
+   * 是配置面板和报表,而两者的进出方式完全不同:配置是改完就走,
+   * 报表是切范围反复看。
+   */
+  { id: 'usage', label: '使用统计' },
   { id: 'review', label: '每日回顾' },
   {
     id: 'connection',
@@ -146,7 +153,12 @@ export interface SettingsRow {
  * 而这种漂移没有任何机制会报警。
  */
 export const SETTINGS_INDEX: readonly SettingsRow[] = [
-  { page: 'connection', sub: 'ssh', title: 'SSH', keywords: ['ssh', 'remote', 'server', '服务器', '远程'] },
+  {
+    page: 'connection',
+    sub: 'ssh',
+    title: 'SSH',
+    keywords: ['ssh', 'remote', 'server', '服务器', '远程']
+  },
   // ── 通用 ──
   { page: 'general', sub: 'app', title: '界面语言', keywords: ['language', 'locale', '语言'] },
   {
@@ -173,8 +185,18 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
     title: '默认权限档位',
     keywords: ['permission', '审批', '权限']
   },
-  { page: 'general', sub: 'agent', title: '智能上下文管理', keywords: ['context', 'memory', '上下文', '笔记'] },
-  { page: 'general', sub: 'agent', title: '自动上下文压缩', keywords: ['compact', 'compression', '压缩'] },
+  {
+    page: 'general',
+    sub: 'agent',
+    title: '智能上下文管理',
+    keywords: ['context', 'memory', '上下文', '笔记']
+  },
+  {
+    page: 'general',
+    sub: 'agent',
+    title: '自动上下文压缩',
+    keywords: ['compact', 'compression', '压缩']
+  },
   {
     page: 'general',
     sub: 'task',
@@ -288,6 +310,30 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
     title: '模型优先级',
     // 「拉取 / 同步 / fetch」都收进来:用户想找的是那颗按钮,而按钮上写的是「拉取」
     keywords: ['model', 'fetch', 'sync', 'import', '拉取', '同步', '导入', '模型列表']
+  },
+
+  // ── 使用统计 ──
+  // ★ 四行对应页面上真实存在的四块面板(见 SETTINGS_INDEX 顶上那条约定)。
+  //   关键词收 `cost` / `token` / `spend`:想查账的人搜的是这几个词,不是「统计」。
+  {
+    page: 'usage',
+    title: 'Token 活动',
+    keywords: ['usage', 'token', 'activity', 'heatmap', '活跃', '热力图', '统计']
+  },
+  {
+    page: 'usage',
+    title: '每日 Token 趋势',
+    keywords: ['usage', 'token', 'trend', 'chart', '趋势', '图表', '统计']
+  },
+  {
+    page: 'usage',
+    title: '模型费用',
+    keywords: ['cost', 'spend', 'price', 'billing', '费用', '花费', '账单', '价格']
+  },
+  {
+    page: 'usage',
+    title: '请求日志',
+    keywords: ['usage', 'log', 'request', 'latency', '日志', '请求', '延迟']
   },
 
   // ── 连接 ──

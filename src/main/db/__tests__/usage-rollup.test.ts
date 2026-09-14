@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { localDayOf } from '../../../shared/domain/usage-activity'
 import type { UsageAttemptRecord } from '../../../shared/domain/usage'
 import { closeDatabase, openDatabase, stmt } from '../index'
 import { recordUsageAttempt, updateUsageToolsForRun } from '../repo'
@@ -9,7 +10,6 @@ import {
   dayBoundsLocal,
   getUsageActivityStats,
   getUsageDailySeries,
-  localDayOf,
   refreshUsageRollup
 } from '../usage-rollup'
 
@@ -330,8 +330,22 @@ describe('getUsageActivityStats', () => {
   })
 
   it('峰值取单日 token 总量最大的那天', () => {
-    recordUsageAttempt(attempt('a1', noonAgo(2), { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }))
-    recordUsageAttempt(attempt('a2', noonAgo(1), { inputTokens: 500, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 }))
+    recordUsageAttempt(
+      attempt('a1', noonAgo(2), {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0
+      })
+    )
+    recordUsageAttempt(
+      attempt('a2', noonAgo(1), {
+        inputTokens: 500,
+        outputTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0
+      })
+    )
     refreshUsageRollup()
 
     const stats = getUsageActivityStats()

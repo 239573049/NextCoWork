@@ -43,7 +43,7 @@ export class AgentRegistry {
 }
 
 /**
- * 内建的排在最前,其余按名字。
+ * 内建的排在最前(内建之间按 `BUILTIN_AGENTS` 的书写顺序),其余按名字。
  *
  * 排序本身是**必需**的(不是整洁癖):这个顺序会原样变成 `Task` 工具
  * description 里那份清单的顺序,而目录遍历的顺序在不同平台上不一样 ——
@@ -51,12 +51,26 @@ export class AgentRegistry {
  *
  * 内建优先则是给模型看的:`general-purpose` 是它在拿不准时该选的那个,
  * 排在第一行比排在字母序中间更容易被选中。
+ *
+ * ★ 内建之间**不能**按名字排 —— 那正是这一条会悄悄失效的地方:内建里三条是
+ *   `code-*` 开头,字母序会把 `general-purpose` 推到第四行,而「拿不准就选它」
+ *   这条规矩在清单里没有任何别的载体,它靠的就是排在第一行。
+ *
+ * ★ 用户可以用同名文件覆盖一条内建(`load.ts` 里那个 `byName`),覆盖之后
+ *   `source.kind` 就不是 `builtin` 了 —— 于是它按名字排进后半段,这是对的:
+ *   那已经是用户自己的子代理,不该再占着「模型该优先看的那几行」。
  */
+const BUILTIN_ORDER = new Map(BUILTIN_AGENTS.map((a, index) => [a.name, index]))
+
 function sortAgents(list: readonly AgentDefinition[]): readonly AgentDefinition[] {
   return [...list].sort((a, b) => {
     const ab = a.source.kind === 'builtin' ? 0 : 1
     const bb = b.source.kind === 'builtin' ? 0 : 1
-    return ab !== bb ? ab - bb : a.name.localeCompare(b.name)
+    if (ab !== bb) return ab - bb
+    if (ab === 1) return a.name.localeCompare(b.name)
+    // 两条都是内建 —— 认不出的(理论上不存在)排到已知的后面,而不是插进中间。
+    return (BUILTIN_ORDER.get(a.name) ?? Number.MAX_SAFE_INTEGER)
+      - (BUILTIN_ORDER.get(b.name) ?? Number.MAX_SAFE_INTEGER)
   })
 }
 

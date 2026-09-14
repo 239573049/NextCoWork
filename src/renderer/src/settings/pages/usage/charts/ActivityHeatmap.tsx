@@ -75,6 +75,9 @@ export function ActivityHeatmap({ grid }: { grid: HeatmapGrid }): React.ReactNod
                   ) : (
                     <span
                       key={cell.day}
+                      // 颜色是 color-mix 派生的,截图之外没法断言;档位挂在属性上,
+                      // 探针才能验证「真数据确实着了色」而不是画了一片空网格
+                      data-heat-level={cell.level}
                       className="size-[11px] rounded-[2px] transition-transform hover:scale-125"
                       style={{ backgroundColor: heatColor(cell.level) }}
                       onMouseEnter={() => setHover(cell)}

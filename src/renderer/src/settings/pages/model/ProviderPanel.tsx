@@ -3,6 +3,7 @@ import {
   Brain,
   Check,
   CloudDownload,
+  Download,
   Copy,
   ExternalLink,
   GripVertical,
@@ -10,6 +11,7 @@ import {
   Pencil,
   Plus,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -60,6 +62,8 @@ import {
   submitOAuthCode,
   updateModel,
   upsertProvider,
+  exportProviders,
+  importProviders,
 } from "../../../services/provider";
 import { useDragReorder } from "../../../shell/useDragReorder";
 import { type ProviderEntry } from "./enabled-models";
@@ -183,6 +187,10 @@ export function ProviderPanel({
   const addingModelRequest = useRef(false);
 
   const [importOpen, setImportOpen] = useState(false);
+  const [transferOpen, setTransferOpen] = useState<"export" | "import" | null>(null);
+  const [transferCredentials, setTransferCredentials] = useState(false);
+  const [transferPassword, setTransferPassword] = useState("");
+  const [transferBusy, setTransferBusy] = useState(false);
 
   const [cred, setCred] = useState<CredentialInfo | null>(null);
   const [keyDraft, setKeyDraft] = useState("");
@@ -535,6 +543,28 @@ export function ProviderPanel({
       });
   };
 
+  const closeTransfer = (): void => {
+    setTransferOpen(null);
+    setTransferCredentials(false);
+    setTransferPassword("");
+    setTransferBusy(false);
+  };
+
+  const runTransfer = (): void => {
+    if (transferBusy || transferOpen === null) return;
+    setTransferBusy(true);
+    setError(null);
+    const action = transferOpen === "export"
+      ? exportProviders({ includeCredentials: transferCredentials, ...(transferCredentials ? { password: transferPassword } : {}) })
+      : importProviders(transferPassword.trim() === "" ? undefined : transferPassword);
+    void action
+      .then((result) => {
+        if (result !== null) closeTransfer();
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setTransferBusy(false));
+  };
+
   return (
     <>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[12px] border border-border bg-canvas">
@@ -549,6 +579,12 @@ export function ProviderPanel({
               className="shrink-0 animate-spin text-fg-faint"
             />
           )}
+          <Button size="sm" icon={<Download size={12} />} disabled={busy} onClick={() => { setError(null); setTransferOpen("export"); }}>
+            {t("provider.export")}
+          </Button>
+          <Button size="sm" icon={<Upload size={12} />} disabled={busy} onClick={() => { setError(null); setTransferOpen("import"); }}>
+            {t("provider.import")}
+          </Button>
         </div>
 
         {error !== null && (
@@ -1063,6 +1099,36 @@ export function ProviderPanel({
         preserveAliases={preserveAliases}
         onClose={() => setImportOpen(false)}
       />
+      <Dialog
+        open={transferOpen !== null}
+        onClose={closeTransfer}
+        title={transferOpen === "export" ? t("provider.exportTitle") : t("provider.importTitle")}
+        description={t("provider.transferHint")}
+        footer={
+          <>
+            <Button size="sm" disabled={transferBusy} onClick={closeTransfer}>{t("common.cancel")}</Button>
+            <Button size="sm" variant="accent" disabled={transferBusy || (transferOpen === "export" && transferCredentials && transferPassword.length < 8)} onClick={runTransfer}>
+              {transferOpen === "export" ? t("provider.export") : t("provider.import")}
+            </Button>
+          </>
+        }
+      >
+        {error !== null && <p className="mb-3 rounded-[8px] bg-danger/10 px-3 py-2 text-[12px] leading-[1.6] text-danger">{error}</p>}
+        {transferOpen === "export" ? (
+          <div className="space-y-3">
+            <Toggle checked={transferCredentials} onChange={setTransferCredentials} label={t("provider.includeCredentials")} />
+            <p className="text-[11.5px] leading-[1.6] text-fg-faint">{t("provider.credentialsHint")}</p>
+            {transferCredentials && (
+              <TextInput value={transferPassword} onChange={setTransferPassword} ariaLabel={t("provider.exportPassword")} placeholder={t("provider.exportPasswordPlaceholder")} type="password" />
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-[12px] leading-[1.6] text-fg-muted">{t("provider.importHint")}</p>
+            <TextInput value={transferPassword} onChange={setTransferPassword} ariaLabel={t("provider.importPassword")} placeholder={t("provider.importPasswordPlaceholder")} type="password" />
+          </div>
+        )}
+      </Dialog>
       {thinkingModel !== null && (
         <ThinkingDialog
           key={thinkingModel.alias}

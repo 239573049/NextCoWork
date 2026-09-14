@@ -146,6 +146,26 @@ describe('子代理卡片 · 不是抽屉', () => {
     expect(opened).toHaveLength(0)
   })
 
+  /**
+   * ★★ 「汇报」只对后台子代理成立。
+   *
+   * 前台子代理的结果就是它那条 `tool_result`,同步回到主代理 —— 根本没有
+   * 「回传」这一步。以前的兜底是「没写 reportStatus 且不在跑 → reported」,
+   * 而前台在 `runtime.ts` 里恰恰从不写这个字段,于是**每一张跑完的前台卡片**
+   * 都挂着一句「结果已汇报给主代理」,把后台专属的信号摊派给了所有人。
+   */
+  it('★★ 前台子代理跑完,不显示任何「已汇报」横幅', async () => {
+    const { container } = await renderCard(subagent({ status: 'done', endedAt: Date.now() }))
+    expect(container.textContent).not.toContain('汇报')
+    expect(container.textContent).not.toContain('后台')
+  })
+
+  it('后台子代理跑完,「待汇报」和「后台」标记都在', async () => {
+    const { container } = await renderCard(subagent({ status: 'done', endedAt: Date.now(), background: true }))
+    expect(container.textContent).toContain('后台')
+    expect(container.textContent).toContain('结果待汇报给主代理')
+  })
+
   /** 失败原因留一行在卡片上 —— 这一条是详情整体搬走时**唯一**的例外 */
   it('出错时,原因直接写在卡片上,不必开面板', async () => {
     const { container } = await renderCard(subagent({

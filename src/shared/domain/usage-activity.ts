@@ -16,6 +16,21 @@
  * 夏令时,相邻日期的序号必然差 1。这里只把它当整数用,从不当成某个真实时刻。
  */
 
+/**
+ * 毫秒 → **本地**日期 `YYYY-MM-DD`。与 SQLite `date(at/1000,'unixepoch','localtime')`
+ * 同口径,汇总表的 `day` 列就是这么来的。
+ *
+ * ★ 这是本文件里唯一一个碰本地时区的函数,而且只在这一处碰:时间戳一旦变成
+ * 日期字符串,后面全部是纯日历算术(见文件头)。主进程和渲染层都要把「今天」
+ * 算成同一个字符串,所以它必须是共用的 —— 两边各写一遍,热力图最后一格和
+ * 「当前连续天数」就有可能差一天。
+ */
+export function localDayOf(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
 /** `YYYY-MM-DD` → UTC 纪元日序号。非法输入返回 `NaN`。 */
 export function dayIndex(day: string): number {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day)

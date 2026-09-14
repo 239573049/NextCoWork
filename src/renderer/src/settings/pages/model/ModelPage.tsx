@@ -53,12 +53,11 @@ import {
   listUserModelCatalog,
   onUserModelCatalogChanged,
   removeUserModelCatalog,
-  upsertUserModelCatalog,
+  upsertUserModelCatalog
 } from "../../../services/model-catalog";
 import { useModelsStore } from "../../../stores/models";
 import type { SettingsPageProps } from "../../props";
 import { ProviderCatalog } from "./ProviderCatalog";
-import { UsageTab } from "./UsageTab";
 import { StubModalityPage } from "./StubModalityPage";
 import { EnabledModelList } from "./EnabledModelList";
 import { ProviderPanel } from "./ProviderPanel";
@@ -74,13 +73,8 @@ import { useI18n, type TranslationKey } from "../../../i18n";
 import { ModelProtocolEditor, modelProtocolSummary } from "./ModelProtocol";
 import { ImageModelPage } from "./ImageModelPage";
 
-export function ModelPage({
-  settings,
-  sub,
-  patch,
-}: SettingsPageProps): ReactNode {
+export function ModelPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
   const tab = parseModelTab(sub);
-  if (tab === "usage") return <UsageTab />;
   if (tab === "management") return <ModelConsole />;
   if (tab === "image") return <ImageModelPage />;
   if (tab !== "text") return <StubModalityPage modality={tab} />;

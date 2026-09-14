@@ -16,12 +16,15 @@
  */
 import { ArrowLeft, Sparkles, Trash2 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
-import { PERMISSION_MODES, type PermissionMode } from '../../../../../shared/agent/permission'
 import { AGENT_TOOL_CHOICES, AGENT_COLORS } from '../../../../../shared/domain/agent-def'
 import type {
   MarkdownResourceFile,
   MarkdownResourceScope
 } from '../../../../../shared/domain/markdown-resource'
+import {
+  modelSelectionKey,
+  parseModelSelectionKey
+} from '../../../../../shared/domain/model-selection'
 import { Button } from '../../../components/ui/Button'
 import { Dialog } from '../../../components/ui/Dialog'
 import { IconButton } from '../../../components/ui/IconButton'
@@ -86,6 +89,7 @@ export function AgentEditor({
 }): ReactNode {
   const { t } = useI18n()
   const models = useModelsStore((s) => s.models)
+  const providers = useModelsStore((s) => s.providers)
   const isNew = file.revision === ''
 
   const [form, setForm] = useState<AgentForm>(() => formFromFile(file.name, file.frontmatter, file.body))
@@ -170,14 +174,46 @@ export function AgentEditor({
     setAsking(true)
   }
 
-  /** 同一个别名可能挂在好几家上;子代理文件里存的是**裸别名**,所以这里按名字去重。 */
+  /*
+    ★ 一条**绑定**一个选项,不按别名去重 —— 同一个别名可以挂在好几家上,而那几家
+    计费不同(按量 / 订阅)。去重之后用户看到的是一个 `deepseek-v4-flash`,
+    却不知道自己钉的是哪条线;而 `value` 是 `providerId/alias`,天然唯一,
+    两条同名的选项本身不存在。标签**永远**带上供应商,不搞「只有撞名时才加后缀」
+    那一套:这一格存的就是一对,把一半藏起来等于又把「选哪一家」抹掉了。
+  */
+  const currentModelKey = form.model === '' ? '' : modelSelectionKey(
+    form.modelProviderId === '' ? undefined : form.modelProviderId,
+    form.model
+  )
   const modelOptions = [
     { value: '', label: t('ext.field.inheritDefault') },
-    ...[...new Set(models.filter((m) => m.enabled !== false).map((m) => m.alias))].map((alias) => ({
-      value: alias,
-      label: alias
-    }))
+    ...models
+      .filter((m) => m.enabled !== false)
+      .map((m) => ({
+        value: modelSelectionKey(m.providerId, m.alias),
+        label: `${providers.find((p) => p.id === m.providerId)?.name ?? m.providerId} · ${m.alias}`
+      }))
   ]
+  /*
+    ★ 文件里那一对**未必**还在上面这张表里,而两种落空的含义完全不同:
+
+    - 只写了 `model:` 没写 `modelProviderId:`(从 Claude Code 粘过来的文件**总是**
+      这个形状)—— 那是个**合法且有意**的状态:只认别名,由路由器按优先级择优。
+      不给它一个选项的话,下拉框会显示空白,用户以为没设过,随手一选就把
+      「不钉供应商」这件事默默改掉了。
+    - 钉的那家已经删了 / 停用了 —— 这个得**看得出来**,但同样不能自动抹掉:
+      供应商是会被重新启用的,替用户清掉那一行是不可逆的。
+
+    两种都补一个选项在最前面,选中态才对得上,而用户不碰它就原样存回去。
+  */
+  if (currentModelKey !== '' && !modelOptions.some((o) => o.value === currentModelKey)) {
+    modelOptions.splice(1, 0, {
+      value: currentModelKey,
+      label: form.modelProviderId === ''
+        ? t('ext.field.modelAnyProvider', { alias: form.model })
+        : t('ext.field.modelUnavailable', { alias: `${form.modelProviderId} · ${form.model}` })
+    })
+  }
 
   const generateDialog = (
     <Dialog
@@ -333,11 +369,18 @@ export function AgentEditor({
 
           <Row label={t('ext.field.model')}>
             <Select
-              value={form.model}
+              value={currentModelKey}
               options={modelOptions}
-              onValueChange={(v) => setForm({ ...form, model: v })}
+              onValueChange={(v) => {
+                const picked = parseModelSelectionKey(v)
+                setForm({
+                  ...form,
+                  model: v === '' ? '' : picked.alias,
+                  modelProviderId: picked.modelProviderId ?? ''
+                })
+              }}
               ariaLabel={t('ext.field.model')}
-              className="max-w-[280px]"
+              className="max-w-[320px]"
             />
           </Row>
 
@@ -389,20 +432,6 @@ export function AgentEditor({
                 <p className="text-[11px] text-fg-faint">{t('ext.field.toolsUnknown', { list: extraTools.join('、') })}</p>
               )}
             </div>
-          </Row>
-
-          <Row label={t('ext.field.permissionMode')}>
-            <Segmented<string>
-              size="sm"
-              value={form.permissionMode === '' ? 'inherit' : form.permissionMode}
-              onChange={(v) => setForm({ ...form, permissionMode: v === 'inherit' ? '' : v })}
-              label={t('ext.field.permissionMode')}
-              className="self-start"
-              options={[
-                { value: 'inherit', label: t('ext.field.inherit') },
-                ...PERMISSION_MODES.map((m: PermissionMode) => ({ value: m, label: t(`permission.${m}`) }))
-              ]}
-            />
           </Row>
 
           <Row label={t('ext.field.prompt')} required>

@@ -94,7 +94,11 @@ describe('fillDayGaps', () => {
    * 那三天有稳定的中等用量,而实际是零。
    */
   it('缺失的日期补成零值行', () => {
-    const filled = fillDayGaps(toDayTotals([bucket({ day: '2026-09-14' })]), '2026-09-12', '2026-09-14')
+    const filled = fillDayGaps(
+      toDayTotals([bucket({ day: '2026-09-14' })]),
+      '2026-09-12',
+      '2026-09-14'
+    )
     expect(filled.map((t) => t.day)).toEqual(['2026-09-12', '2026-09-13', '2026-09-14'])
     expect(filled[0]?.tokens).toBe(0)
     expect(filled[0]?.requests).toBe(0)
@@ -106,7 +110,11 @@ describe('fillDayGaps', () => {
   })
 
   it('区间外的数据被排除', () => {
-    const filled = fillDayGaps(toDayTotals([bucket({ day: '2026-08-01' })]), '2026-09-12', '2026-09-13')
+    const filled = fillDayGaps(
+      toDayTotals([bucket({ day: '2026-08-01' })]),
+      '2026-09-12',
+      '2026-09-13'
+    )
     expect(filled).toHaveLength(2)
     expect(filled.every((t) => t.tokens === 0)).toBe(true)
   })
@@ -265,10 +273,22 @@ describe('buildHeatmap', () => {
 describe('toModelShares', () => {
   it('按 token 降序,占比加起来是 1', () => {
     const shares = toModelShares([
-      bucket({ upstreamModel: 'small', inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }),
-      bucket({ upstreamModel: 'big', inputTokens: 90, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+      bucket({
+        upstreamModel: 'small',
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0
+      }),
+      bucket({
+        upstreamModel: 'big',
+        inputTokens: 90,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0
+      })
     ])
-    expect(shares.map((s) => s.label)).toEqual(['alias-a', 'alias-a'])
+    expect(shares.map((s) => s.label)).toEqual(['alias-a · big', 'alias-a · small'])
     expect(shares[0]?.tokens).toBe(90)
     expect(shares.reduce((sum, s) => sum + s.share, 0)).toBeCloseTo(1)
   })
@@ -284,7 +304,13 @@ describe('toModelShares', () => {
    */
   it('超出上限的尾部合并成「其他」,占比仍是 1', () => {
     const many = Array.from({ length: 12 }, (_, i) =>
-      bucket({ upstreamModel: `m${i}`, inputTokens: 12 - i, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+      bucket({
+        upstreamModel: `m${i}`,
+        inputTokens: 12 - i,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0
+      })
     )
     const shares = toModelShares(many, 5)
     expect(shares).toHaveLength(6)
@@ -297,9 +323,26 @@ describe('toModelShares', () => {
     expect(toModelShares(many, 5).some((s) => s.key === '__others__')).toBe(false)
   })
 
-  it('同名模型跨供应商不合并', () => {
-    const shares = toModelShares([bucket({ providerId: 'p1' }), bucket({ providerId: 'p2' })])
+  it('同名模型跨供应商不合并,且标签补上供应商区分得开', () => {
+    const shares = toModelShares([
+      bucket({ providerId: 'p1', providerName: '甲' }),
+      bucket({ providerId: 'p2', providerName: '乙' })
+    ])
     expect(shares).toHaveLength(2)
+    expect(shares.map((s) => s.label).sort()).toEqual(['alias-a · 乙', 'alias-a · 甲'])
+  })
+
+  it('没撞名就不补后缀', () => {
+    const shares = toModelShares([bucket(), bucket({ upstreamModel: 'm2', alias: 'alias-b' })])
+    expect(shares.map((s) => s.label).sort()).toEqual(['alias-a', 'alias-b'])
+  })
+
+  it('供应商名为空时退回供应商 id', () => {
+    const shares = toModelShares([
+      bucket({ providerId: 'p1', providerName: '' }),
+      bucket({ providerId: 'p2', providerName: '' })
+    ])
+    expect(shares.map((s) => s.label).sort()).toEqual(['alias-a · p1', 'alias-a · p2'])
   })
 
   it('总量为零时占比是 0 而不是 NaN', () => {
@@ -344,7 +387,9 @@ describe('toCostBreakdown', () => {
   })
 
   it('部分计价时金额只含已计价行,差额进未计价数', () => {
-    const result = toCostBreakdown([bucket({ costMicros: 2_000_000, requestCount: 10, pricedCount: 6 })])
+    const result = toCostBreakdown([
+      bucket({ costMicros: 2_000_000, requestCount: 10, pricedCount: 6 })
+    ])
     expect(result.groups[0]?.totalMicros).toBe(2_000_000)
     expect(result.groups[0]?.rows[0]?.requests).toBe(6)
     expect(result.unpricedRequests).toBe(4)
@@ -356,6 +401,18 @@ describe('toCostBreakdown', () => {
       bucket({ costMicros: 2_500_000, upstreamModel: 'b' })
     ])
     expect(groups[0]?.totalMicros).toBe(4_000_000)
+  })
+
+  /*
+   * ★ 三行同名不同数看起来像同一行被列重了,或者像哪儿算重了 ——
+   * 本机库里 `gpt-6-astra` 就同时来自三个供应商。
+   */
+  it('跨供应商同名的费用行各自补上供应商', () => {
+    const { groups } = toCostBreakdown([
+      bucket({ providerId: 'p1', providerName: '甲', costMicros: 3_000_000 }),
+      bucket({ providerId: 'p2', providerName: '乙', costMicros: 1_000_000 })
+    ])
+    expect(groups[0]?.rows.map((r) => r.label)).toEqual(['alias-a · 甲', 'alias-a · 乙'])
   })
 
   it('空输入返回空分组与零未计价', () => {

@@ -19,7 +19,7 @@ describe('导航表与行目录的自洽', () => {
    * 「没人悄悄加一页、也没人悄悄删一页」—— 只数个数的话,把「钱包」换成
    * 「导入」照样是绿的,而那正是这条测试该拦下的那种改动。
    */
-  it('十项照参考图,外加「导入」', () => {
+  it('十项照参考图,外加「导入」与「使用统计」', () => {
     expect(SETTINGS_PAGES.map((p) => p.id)).toEqual([
       'account',
       'wallet',
@@ -27,6 +27,7 @@ describe('导航表与行目录的自洽', () => {
       'import',
       'preference',
       'model',
+      'usage',
       'review',
       'connection',
       'computer',
@@ -44,7 +45,10 @@ describe('导航表与行目录的自洽', () => {
     for (const r of SETTINGS_INDEX) {
       if (r.sub === undefined) continue
       const page = SETTINGS_PAGES.find((p) => p.id === r.page)
-      expect(page?.subs?.some((s) => s.id === r.sub), `${r.page}/${r.sub}`).toBe(true)
+      expect(
+        page?.subs?.some((s) => s.id === r.sub),
+        `${r.page}/${r.sub}`
+      ).toBe(true)
     }
   })
 

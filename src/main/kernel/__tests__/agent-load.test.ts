@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { nodeHost } from '../host'
-import { GENERAL_PURPOSE } from '../agent/builtin'
+import { BUILTIN_AGENTS, GENERAL_PURPOSE } from '../agent/builtin'
+import { normalizeToolName } from '../agent/tool-alias'
 import type { AgentScanResult } from '../agent/load'
 import { scanAgents } from '../agent/load'
 import { AgentRegistry } from '../agent/registry'
@@ -75,18 +76,17 @@ describe('基本形状', () => {
     expect(a?.permissionMode).toBeUndefined()
   })
 
-  it('★ 一个子代理都没有时,内建的那条仍然在', async () => {
+  it('★ 一个子代理都没有时,内建那几条仍然在', async () => {
     const r = await scan()
 
-    expect(r.agents).toHaveLength(1)
-    expect(r.agents[0]?.name).toBe(GENERAL_PURPOSE.name)
-    expect(r.agents[0]?.source.kind).toBe('builtin')
+    expect(r.agents.map((a) => a.name)).toEqual(BUILTIN_AGENTS.map((a) => a.name))
+    expect(r.agents.every((a) => a.source.kind === 'builtin')).toBe(true)
   })
 
   it('两层目录都不存在也不报错 —— 没有 agents 目录是常态', async () => {
     const r = await scanAgents({ fs, globalRoot: join(root, '不存在'), projectRoot: '' })
 
-    expect(r.agents.map((a) => a.name)).toEqual([GENERAL_PURPOSE.name])
+    expect(r.agents.map((a) => a.name)).toEqual(BUILTIN_AGENTS.map((a) => a.name))
     expect(r.diagnostics).toEqual([])
   })
 
@@ -107,9 +107,11 @@ describe('基本形状', () => {
 
     const r = await scan()
 
-    expect(r.agents).toHaveLength(1)
-    expect(r.agents[0]?.description).toBe('我自己的通用代理')
-    expect(r.agents[0]?.source.kind).toBe('project')
+    // 覆盖的是**那一条**,其余内建照旧 —— 总数不变。
+    expect(r.agents).toHaveLength(BUILTIN_AGENTS.length)
+    const a = r.agents.find((x) => x.name === GENERAL_PURPOSE.name)
+    expect(a?.description).toBe('我自己的通用代理')
+    expect(a?.source.kind).toBe('project')
   })
 
   it('★ 覆盖失败(文件是坏的)时,留下的仍然是内建那条能用的', async () => {
@@ -117,8 +119,8 @@ describe('基本形状', () => {
 
     const r = await scan()
 
-    expect(r.agents).toHaveLength(1)
-    expect(r.agents[0]?.source.kind).toBe('builtin')
+    expect(r.agents).toHaveLength(BUILTIN_AGENTS.length)
+    expect(r.agents.find((x) => x.name === GENERAL_PURPOSE.name)?.source.kind).toBe('builtin')
     expect(said(r, 'description')).toBe(true)
   })
 
@@ -318,7 +320,7 @@ describe('AgentRegistry', () => {
   it('★ 出厂就非空 —— Task 的第一份 description 是在第一次扫描之前拼的', () => {
     const reg = new AgentRegistry()
 
-    expect(reg.names()).toEqual([GENERAL_PURPOSE.name])
+    expect(reg.names()).toEqual(BUILTIN_AGENTS.map((a) => a.name))
   })
 
   it('内建的排最前,其余按名字 —— 顺序稳定,否则工具定义每次都变、缓存全失效', async () => {
@@ -328,7 +330,41 @@ describe('AgentRegistry', () => {
 
     reg.replaceAll(await scan())
 
-    expect(reg.names()).toEqual(['general-purpose', 'alpha', 'zeta'])
+    expect(reg.names()).toEqual([...BUILTIN_AGENTS.map((a) => a.name), 'alpha', 'zeta'])
+  })
+
+  it('★ general-purpose 排在内建的第一行 —— 字母序会把它推到 code-* 后面', async () => {
+    // 「拿不准就选 general-purpose」这条规矩在 `Task` 的清单里没有别的载体,
+    // 它靠的就是排在第一行。内建之间按名字排的话,三条 c 开头的会把它挤到第四。
+    const reg = new AgentRegistry()
+    reg.replaceAll(await scan())
+
+    expect(reg.names()[0]).toBe(GENERAL_PURPOSE.name)
+  })
+
+  it('★ 内建自己写的工具名必须被 normalizeToolName 原样认出', async () => {
+    /*
+      认不出的那一个会被 `resolveTools` 丢掉;全认不出时**整条内建作废** ——
+      而它是写死在代码里的,用户连删都删不掉,界面上也不会有诊断(诊断只对文件)。
+      `AGENT_TOOL_CHOICES` 那条同形的测试守的是表单,这条守的是内建自己。
+    */
+    for (const agent of BUILTIN_AGENTS) {
+      for (const tool of agent.tools ?? []) {
+        expect(normalizeToolName(tool), `${agent.name} 的 ${tool}`).toBe(tool)
+      }
+    }
+  })
+
+  it('内建被同名文件覆盖之后不再占内建那几行', async () => {
+    // 覆盖之后 `source.kind` 是 global —— 那已经是用户自己的子代理了。
+    put(globalRoot, 'code-analyst.md', md('我自己的分析代理'))
+    const reg = new AgentRegistry()
+
+    reg.replaceAll(await scan())
+
+    expect(reg.names()[0]).toBe(GENERAL_PURPOSE.name)
+    expect(reg.names().at(-1)).toBe('code-analyst')
+    expect(reg.get('code-analyst')?.description).toBe('我自己的分析代理')
   })
 
   it('get 认名字,认不出返回 undefined —— 绝不回落到 general-purpose', async () => {

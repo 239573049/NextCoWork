@@ -29,6 +29,25 @@ export type ThreadRow =
    * `foldedCount` 是上一条线到这条线之间的可见消息数 —— 也就是这一刀切掉的范围。
    */
   | { kind: 'divider'; key: string; checkpoint: ContextCheckpoint; foldedCount: number }
+  /**
+   * 一个后台子代理的结果**回到主线的那一刻**。
+   *
+   * ★★ 这条消息是 `internal` 的 —— 它发给模型,但以前在界面上**整条不存在**。
+   * 于是用户看到的是:主代理毫无来由地开口,讲一件几百轮之前派出去的事,
+   * 唯一的线索是滚动区深处那张老卡片上的一行小字。看不见输入的输出,
+   * 比看不见输出更难解释。
+   *
+   * 这一行只占一行的高度(谁、什么时候回来的),全文收在里面,点开才展开 ——
+   * 它终究不是用户说的话,不该长得像一条提问。
+   */
+  | {
+      kind: 'subagent-report'
+      key: string
+      message: AgentMessage
+      callId: string
+      childRunId: string
+      summary?: string
+    }
 
 /** Tool receipts are invisible boundaries; consecutive model replies form one assistant turn. */
 export function threadRows(
@@ -89,6 +108,24 @@ export function threadRows(
       而且不报错:检查点在库里、顶部面板里也有,就是线不出现。
     */
     const shown = message.internal !== true && !isToolResultOnly(message)
+    /*
+      ★ 后台汇报**是**一条消息,不是消息之间的一条线 —— 所以它和可见消息一样
+      推进 `preceding`。不推进的话,它后面那个 assistant 行会和它前面那个
+      共用同一个 `reply:${preceding}` key(`assistant()` 只看 `rows.at(-1)`,
+      隔着一行就不复用了),两行同 key。分隔线没有这个问题,因为
+      「两次新建 assistant 行之间隔着至少一条可见消息」——这一行打破了它。
+    */
+    const report = shown ? undefined : backgroundReportOf(message)
+    if (report !== undefined) {
+      rows.push({
+        kind: 'subagent-report', key: `report:${message.id}`, message,
+        callId: report.callId, childRunId: report.childRunId,
+        ...(report.summary === undefined ? {} : { summary: report.summary })
+      })
+      preceding = message.id
+      precedingAt = message.createdAt
+      visible += 1
+    }
     if (shown) {
       if (message.role === 'user') {
         rows.push({ kind: 'user', key: message.id, message })
@@ -145,6 +182,22 @@ export function threadRows(
     })
   }
   return rows
+}
+
+/**
+ * 认出一条「后台子代理结果回传」。
+ *
+ * 标记就是那个 `subagent` part —— 它是一条**只存在于界面这一轨**的通道
+ * (两个上游编码器都把它丢掉),所以拿它当标记不会多给模型一个字。
+ * 只认 internal 的:助手消息里的 `subagent` part 是卡片,不是汇报。
+ */
+function backgroundReportOf(
+  message: AgentMessage
+): Extract<ContentPart, { type: 'subagent' }> | undefined {
+  if (message.internal !== true) return undefined
+  return message.parts.find(
+    (part): part is Extract<ContentPart, { type: 'subagent' }> => part.type === 'subagent'
+  )
 }
 
 /**

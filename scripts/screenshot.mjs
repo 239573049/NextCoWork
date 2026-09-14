@@ -603,8 +603,8 @@ try {
     deviceScaleFactor: 1,
     mobile: false
   })
-  await clickNav('模型')
-  await clickSub('使用统计')
+  // 「使用统计」是侧栏里的独立一页,不再是「模型」下的子 Tab
+  await clickNav('使用统计')
   await until('使用统计加载', () =>
     cdp.eval(`document.querySelector('[data-testid="usage-page"]')?.textContent.includes('请求日志')`)
   )

@@ -104,6 +104,20 @@ import {
 import { parseCodexTranscript } from './codex-transcript'
 import { aliasSurface, mapCodexProvider, providerSurface } from './codex-provider'
 import { mapCodexHook } from './codex-hooks'
+import {
+  detectOpencodeSource,
+  listOpencodeAssets,
+  listOpencodeMcp,
+  listOpencodePlugins,
+  listOpencodeProviders,
+  listOpencodeSessions,
+  opencodeConfigDir,
+  readOpencodeAuthNames,
+  readOpencodeConfig,
+  readOpencodeSession
+} from './opencode'
+import { parseOpencodeSession } from './opencode-transcript'
+import { mapOpencodeProvider, type OpencodeProviderConfig } from './opencode-provider'
 
 const SOURCE_KIND = 'claude-code' as const
 
@@ -138,6 +152,8 @@ type ItemPayload =
   | { kind: 'hook'; hook: CodexHookEntry }
   | { kind: 'codex-chat'; file: CodexSessionFile; contentHash: string; title?: string; model?: string; modelProvider?: string; archived: boolean }
   | { kind: 'codex-skill'; skill: CodexSkillEntry }
+  | { kind: 'opencode-chat'; sessionId: string; contentHash: string; title?: string; model?: string; modelProvider?: string }
+  | { kind: 'opencode-provider'; provider: OpencodeProviderConfig; alias?: ModelAlias }
 
 interface JobState {
   status: ImportJobStatus
@@ -273,7 +289,7 @@ function unregisteredState(availability: ImportSourceState['detection']['availab
 }
 
 export async function detectImportSource(pickedDir?: string, kind: ImportSourceState['detection']['kind'] = SOURCE_KIND): Promise<ImportSourceState> {
-  const detected = kind === 'codex' ? await detectCodexSource(pickedDir) : await detectSource(pickedDir)
+  const detected = kind === 'codex' ? await detectCodexSource(pickedDir) : kind === 'opencode' ? await detectOpencodeSource(pickedDir) : await detectSource(pickedDir)
   if (detected.availability !== 'detected') {
     return unregisteredState(detected.availability, detected.diagnostics, kind)
   }
@@ -308,6 +324,11 @@ async function countSource(configDir: string, kind: ImportSourceState['detection
     const files = await listCodexSessions(configDir)
     const projects = await listCodexProjectRoots(configDir)
     return { projectCount: projects.length, sessionCount: files.length }
+  }
+  if (kind === 'opencode') {
+    const sessions = await listOpencodeSessions(configDir)
+    const projects = new Set(sessions.map((s) => s.directory).filter((d) => d !== ''))
+    return { projectCount: projects.size, sessionCount: sessions.length }
   }
   const { files } = await listTranscripts(configDir)
   return { projectCount: new Set(files.map((f) => f.encodedDir)).size, sessionCount: files.length }
@@ -439,6 +460,7 @@ interface ScanResult {
  */
 async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
   if (row.kind === 'codex') return scanCodexSource(row)
+  if (row.kind === 'opencode') return scanOpencodeSource(row)
   const items: ImportPreviewItem[] = []
   const payloads = new Map<string, ItemPayload>()
   const diagnostics: ImportDiagnostic[] = []
@@ -719,6 +741,119 @@ async function scanCodexSource(row: ImportSourceRow): Promise<ScanResult> {
   }
   sourceCounts.set(row.sourceId, { projectCount: projects.length, sessionCount: seenSessions.size })
   return { items, payloads, projects, diagnostics }
+}
+
+async function scanOpencodeSource(row: ImportSourceRow): Promise<ScanResult> {
+  const items: ImportPreviewItem[] = []
+  const payloads = new Map<string, ItemPayload>()
+  const diagnostics: ImportDiagnostic[] = []
+  const configDir = opencodeConfigDir()
+
+  // ── provider(opencode.jsonc `provider` + auth.json,只搬键名不搬值) ──
+  const { config, path: configPath } = await readOpencodeConfig(configDir, diagnostics)
+  const authNames = await readOpencodeAuthNames(row.configDir)
+  const providers = listOpencodeProviders(config, authNames, configPath)
+  for (const provider of providers) {
+    const key = 'provider:' + provider.id
+    const id = itemId('provider', key)
+    const itemDiagnostics = [...provider.diagnostics]
+    let mapped: ReturnType<typeof mapOpencodeProvider> | undefined
+    try { mapped = mapOpencodeProvider(row.sourceId, provider) } catch { itemDiagnostics.push({ code: 'provider.needs-manual-setup', detail: 'base_url' }) }
+    const mapping = store.getImportMapping(row.sourceId, '', 'provider', key)
+    const target = mapped ? store.listProviders().find((candidate) => candidate.id === mapped.provider.id) : undefined
+    let status = mapped ? codexStatus(mapping, provider.fingerprint, target ? providerSurface(target) : null, itemDiagnostics) : 'incompatible'
+    if (mapped?.alias && status !== 'conflict' && status !== 'incompatible') {
+      const aliasMapping = store.getImportMapping(row.sourceId, '', 'alias', `${key}:${mapped.alias.alias}`)
+      const aliasTarget = store.listAliases().find((candidate) => candidate.providerId === mapped.provider.id && candidate.alias === mapped.alias?.alias)
+      const aliasStatus = codexStatus(aliasMapping, aliasSurface(mapped.alias), aliasTarget ? aliasSurface(aliasTarget) : null, itemDiagnostics)
+      if (aliasStatus === 'conflict') status = 'conflict'
+      else if (status === 'exists' && (aliasStatus === 'new' || aliasStatus === 'update')) status = 'update'
+    }
+    items.push({ id, category: 'provider', title: provider.name, sourcePath: provider.sourcePath, status, scope: 'global', diagnostics: itemDiagnostics, defaultSelected: status === 'new',
+      provider: { protocol: mapped?.provider.protocol ?? provider.protocol, baseUrl: provider.baseUrl, profile: 'default', model: provider.defaultModel } })
+    if (mapped) payloads.set(id, { kind: 'opencode-provider', provider, ...(mapped.alias ? { alias: mapped.alias } : {}) })
+  }
+
+  // ── mcp ──
+  scanMcp(row, 'global', undefined, listOpencodeMcp(config), items, payloads)
+
+  // ── plugin:本地跑不了 npm 插件,只报告,不建 payload ──
+  for (const plugin of listOpencodePlugins(config)) {
+    const id = itemId('hook', 'plugin:' + plugin)
+    items.push({ id, category: 'hook', title: plugin, sourcePath: configPath, status: 'incompatible', scope: 'global', diagnostics: [{ code: 'hook.plugin-skipped', detail: plugin }], defaultSelected: false })
+  }
+
+  // ── chats + projects(SQLite) ──
+  const sessions = await listOpencodeSessions(row.configDir, diagnostics)
+  const projectStats = new Map<string, { count: number; last: number }>()
+  const seenSessions = new Set<string>()
+  for (const meta of sessions) {
+    const raw = await readOpencodeSession(row.configDir, meta.id)
+    if (!raw) { diagnostics.push({ code: 'source.unreadable', detail: meta.id }); continue }
+    const parsed = parseOpencodeSession(raw, { maxMessages: IMPORT_LIMITS.maxMessagesPerSession })
+    if (seenSessions.has(parsed.sessionId)) continue
+    seenSessions.add(parsed.sessionId)
+    const key = 'session:' + parsed.sessionId
+    const id = itemId('chat', key)
+    const projectKey = parsed.cwd ? await realpath(parsed.cwd).catch(() => resolve(parsed.cwd)) : ''
+    const itemDiagnostics = [...parsed.diagnostics]
+    if (parsed.modelProvider && !providers.some((provider) => provider.id === parsed.modelProvider)) itemDiagnostics.push({ code: 'model-provider-unresolved', detail: parsed.modelProvider })
+    const contentHash = hashTranscript(parsed)
+    const mapping = store.getImportMapping(row.sourceId, '', 'session', key)
+    const workspaceId = resolveWorkspace(row.sourceId, projectKey, new Map())
+    const status = parsed.messages.length === 0 ? 'incompatible' : statusOfChat(mapping, contentHash, workspaceId !== null, itemDiagnostics)
+    if (projectKey) {
+      const stats = projectStats.get(projectKey) ?? { count: 0, last: 0 }
+      projectStats.set(projectKey, { count: stats.count + 1, last: Math.max(stats.last, parsed.updatedAt ?? meta.updatedAt) })
+    }
+    items.push({ id, category: 'chat', title: parsed.title ?? parsed.sessionId, sourcePath: `opencode.db#${parsed.sessionId}`, status, scope: 'project', ...(projectKey ? { projectKey } : {}), ...(workspaceId ? { targetWorkspaceId: workspaceId } : {}), count: parsed.messages.length, sourceUpdatedAt: parsed.updatedAt ?? meta.updatedAt, diagnostics: itemDiagnostics, defaultSelected: status === 'new' || status === 'update' })
+    payloads.set(id, { kind: 'opencode-chat', sessionId: parsed.sessionId, contentHash, ...(parsed.title ? { title: parsed.title } : {}), ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.modelProvider ? { modelProvider: parsed.modelProvider } : {}) })
+  }
+  const projects: ImportProjectCandidate[] = []
+  for (const [path, stats] of projectStats) {
+    const accessible = await isDirectory(path)
+    const workspaceId = resolveWorkspace(row.sourceId, path, new Map())
+    const workspace = workspaceId ? store.getWorkspace(workspaceId) : undefined
+    const projectDiagnostics: ImportDiagnostic[] = accessible ? [] : [{ code: 'project.needs-workspace', detail: path }]
+    projects.push({ key: path, sourcePath: path, accessible, ...(workspace ? { targetWorkspaceId: workspace.id, targetWorkspaceName: workspace.name } : {}), sessionCount: stats.count, lastActivityAt: stats.last, diagnostics: projectDiagnostics })
+    const id = itemId('project', path)
+    items.push({ id, category: 'project', title: basename(path) || path, sourcePath: path, status: workspace ? 'exists' : accessible ? 'new' : 'needs-target', projectKey: path, ...(workspace ? { targetWorkspaceId: workspace.id } : {}), scope: 'project', count: stats.count, diagnostics: projectDiagnostics, defaultSelected: !workspace && accessible })
+    payloads.set(id, { kind: 'project', projectKey: path, sourcePath: path })
+  }
+
+  // ── 资产(agent/command/skill,存在才有;本机为空则降级为 0 项) ──
+  const assets = await listOpencodeAssets(configDir)
+  for (const skill of assets.skills) {
+    const id = itemId('skill', skill.name)
+    const targetPath = join(databaseDirectory(), 'skills', skill.name)
+    const mapping = store.getImportMapping(row.sourceId, '', 'skill', skill.name)
+    const assetDiagnostics = await inspectSkill(skill.dir)
+    const status = assetStatus(mapping, await currentFingerprint(targetPath), skill.name, assetDiagnostics)
+    items.push({ id, category: 'skill', title: skill.name, sourcePath: skill.dir, status, scope: 'global', diagnostics: assetDiagnostics, defaultSelected: status === 'new' })
+    payloads.set(id, { kind: 'skill', name: skill.name, dir: skill.dir })
+  }
+  for (const entry of [{ kind: 'agent' as const, dir: 'agents', list: assets.agents }, { kind: 'command' as const, dir: 'commands', list: assets.commands }]) {
+    for (const asset of entry.list) {
+      const id = itemId(entry.kind, asset.name)
+      const targetPath = join(databaseDirectory(), entry.dir, `${asset.name}.md`)
+      const mapping = store.getImportMapping(row.sourceId, '', entry.kind, asset.name)
+      const inspected = await inspectMarkdownAsset(entry.kind, asset.file)
+      const status = assetStatus(mapping, await currentFingerprint(targetPath), asset.name, inspected.diagnostics)
+      items.push({ id, category: entry.kind, title: asset.name, sourcePath: asset.file, status, scope: 'global', diagnostics: inspected.diagnostics, defaultSelected: status === 'new' })
+      payloads.set(id, { kind: entry.kind, name: asset.name, file: asset.file })
+    }
+  }
+
+  sourceCounts.set(row.sourceId, { projectCount: projects.length, sessionCount: seenSessions.size })
+  return { items, payloads, projects, diagnostics }
+}
+
+/** 资产条目的预览状态。与 `scanAssets` 的判定同源:目标存在但非我们所导 → 默认跳过。 */
+function assetStatus(mapping: ImportMappingRow | undefined, targetFingerprint: string | null, name: string, diagnostics: ImportDiagnostic[]): ImportPreviewItem['status'] {
+  if (targetFingerprint !== null && mapping === undefined) { diagnostics.push({ code: 'target.name-conflict', detail: name }); return 'exists' }
+  if (mapping === undefined) return 'new'
+  if (targetFingerprint !== null && targetFingerprint !== mapping.targetFingerprint) { diagnostics.push({ code: 'target.locally-modified', detail: name }); return 'conflict' }
+  return 'update'
 }
 
 function codexStatus(mapping: ImportMappingRow | undefined, sourceHash: string, targetHash: string | null, diagnostics: ImportDiagnostic[]): ImportPreviewItem['status'] {
@@ -1235,6 +1370,10 @@ async function applyOne(
         return await applyCodexSkill(snapshot.sourceId, payload, item, stagingRoot, targets)
       case 'codex-chat':
         return await applyCodexChat(snapshot.sourceId, payload, targets)
+      case 'opencode-chat':
+        return await applyOpencodeChat(snapshot.sourceId, payload, targets)
+      case 'opencode-provider':
+        return applyOpencodeProvider(snapshot.sourceId, payload, item)
     }
   } catch (err) {
     return {
@@ -1370,6 +1509,77 @@ async function applyCodexChat(sourceId: string, payload: Extract<ItemPayload, { 
     writeMapping(sourceId, '', 'session', sourceItemId, { targetId: targetSessionId, targetPath: payload.file.path, targetWorkspaceId: workspaceId, sourceFingerprint: payload.contentHash, targetFingerprint: payload.contentHash, now, meta: { cwd: parsed.cwd, archived: payload.archived, messages: messages.length } })
   })
   return { result: mapping ? 'updated' : 'imported', diagnostics: [...read.diagnostics, ...parsed.diagnostics, ...providerDiagnostics], target: { kind: 'session', id: targetSessionId, workspaceId } }
+}
+
+async function applyOpencodeChat(sourceId: string, payload: Extract<ItemPayload, { kind: 'opencode-chat' }>, targets: ReadonlyMap<string, string>): Promise<ApplyOutcome> {
+  const source = store.getImportSource(sourceId)
+  const raw = source ? await readOpencodeSession(source.configDir, payload.sessionId) : null
+  if (!raw) return { result: 'failed', diagnostics: [{ code: 'source.unreadable', detail: payload.sessionId }] }
+  const parsed = parseOpencodeSession(raw, { maxMessages: IMPORT_LIMITS.maxMessagesPerSession })
+  const workspaceId = resolveWorkspace(sourceId, parsed.cwd, targets)
+  if (workspaceId === null) return { result: 'skipped', diagnostics: [{ code: 'project.needs-workspace', detail: parsed.cwd }] }
+  const sourceItemId = `session:${payload.sessionId}`
+  const mapping = store.getImportMapping(sourceId, '', 'session', sourceItemId)
+  if (mapping?.syncState === 'detached') return { result: 'skipped', diagnostics: [{ code: 'target.detached' }] }
+  if (mapping?.syncState === 'suppressed') return { result: 'skipped', diagnostics: [{ code: 'target.deleted' }] }
+  if (parsed.messages.length === 0) return { result: 'incompatible', diagnostics: [...parsed.diagnostics, { code: 'transcript.empty' }] }
+  const contentHash = hashTranscript(parsed)
+  const targetSessionId = mapping?.targetId || derivedId('cs', sourceId, payload.sessionId)
+  if (mapping !== undefined && mapping.sourceFingerprint === contentHash && store.sessionExists(targetSessionId)) {
+    return { result: 'skipped', diagnostics: parsed.diagnostics, target: { kind: 'session', id: targetSessionId, workspaceId } }
+  }
+  const messages = await materializeMessages(parsed.messages, sourceId, payload.sessionId, targetSessionId)
+  const now = Date.now()
+  const workspace = store.getWorkspace(workspaceId)
+  const providerId = parsed.modelProvider
+    ? store.listImportMappings(sourceId, 'provider').find((entry) => entry.meta['opencodeProviderId'] === parsed.modelProvider)?.targetId
+      ?? store.listProviders().find((provider) => provider.name === parsed.modelProvider || provider.id === parsed.modelProvider)?.id
+    : undefined
+  const providerDiagnostics = parsed.modelProvider && providerId === undefined
+    ? [{ code: 'model-provider-unresolved' as const, detail: parsed.modelProvider }]
+    : []
+  store.tx(() => {
+    store.ensureSession({ id: targetSessionId, workspaceId, title: parsed.title ?? payload.sessionId, model: parsed.model ?? '', ...(providerId ? { modelProviderId: providerId } : {}), rootPathAtCreation: workspace?.rootPath ?? parsed.cwd, createdAt: parsed.startedAt ?? now })
+    store.replaceHistory(targetSessionId, messages)
+    writeMapping(sourceId, '', 'session', sourceItemId, { targetId: targetSessionId, targetPath: `opencode.db#${payload.sessionId}`, targetWorkspaceId: workspaceId, sourceFingerprint: contentHash, targetFingerprint: contentHash, now, meta: { cwd: parsed.cwd, messages: messages.length } })
+  })
+  return { result: mapping ? 'updated' : 'imported', diagnostics: [...parsed.diagnostics, ...providerDiagnostics], target: { kind: 'session', id: targetSessionId, workspaceId } }
+}
+
+function applyOpencodeProvider(sourceId: string, payload: Extract<ItemPayload, { kind: 'opencode-provider' }>, item: ImportPreviewItem): ApplyOutcome {
+  const mapped = mapOpencodeProvider(sourceId, payload.provider)
+  const sourceItemId = `provider:${payload.provider.id}`
+  const now = Date.now()
+  const existing = store.listProviders().find((candidate) => candidate.id === mapped.provider.id)
+  const mapping = store.getImportMapping(sourceId, '', 'provider', sourceItemId)
+  const diagnostics = [...item.diagnostics]
+  const status = codexStatus(mapping, payload.provider.fingerprint, existing ? providerSurface(existing) : null, diagnostics)
+  if (status === 'conflict') return { result: 'conflict', diagnostics }
+  if (existing && !mapping) return { result: 'skipped', diagnostics }
+  const aliasKey = mapped.alias ? `${sourceItemId}:${mapped.alias.alias}` : undefined
+  const existingAlias = mapped.alias ? store.listAliases().find((candidate) => candidate.providerId === mapped.provider.id && candidate.alias === mapped.alias?.alias) : undefined
+  if (mapped.alias && aliasKey) {
+    const aliasMapping = store.getImportMapping(sourceId, '', 'alias', aliasKey)
+    const aliasStatus = codexStatus(aliasMapping, aliasSurface(mapped.alias), existingAlias ? aliasSurface(existingAlias) : null, diagnostics)
+    if (aliasStatus === 'conflict') return { result: 'conflict', diagnostics }
+    if (existingAlias && !aliasMapping) return { result: 'skipped', diagnostics }
+  }
+  store.tx(() => {
+    const saved = store.putProvider(existing === undefined ? mapped.provider : { ...mapped.provider, credentialRef: existing.credentialRef, enabled: existing.enabled })
+    if (mapped.alias && aliasKey) {
+      const alias = store.putAlias({ ...mapped.alias, enabled: existingAlias?.enabled ?? false })
+      writeMapping(sourceId, '', 'alias', aliasKey, {
+        targetId: `${mapped.provider.id}/${mapped.alias.alias}`, targetPath: '', targetWorkspaceId: '',
+        sourceFingerprint: aliasSurface(mapped.alias), targetFingerprint: aliasSurface(alias), now
+      })
+    }
+    writeMapping(sourceId, '', 'provider', sourceItemId, {
+      targetId: mapped.provider.id, targetPath: payload.provider.sourcePath, targetWorkspaceId: '',
+      sourceFingerprint: payload.provider.fingerprint, targetFingerprint: providerSurface(saved), now,
+      meta: { profile: 'default', opencodeProviderId: payload.provider.id }
+    })
+  })
+  return { result: existing === undefined ? 'imported' : 'updated', diagnostics: item.diagnostics, target: { kind: 'provider', id: mapped.provider.id } }
 }
 
 // ─── 项目 ───

@@ -215,6 +215,14 @@ async function loadOne(
   if (mode === 'invalid') return null
 
   const model = fmString(fm, 'model')
+  /*
+    ★ 只在写了 `model` 时才认 `modelProviderId`:单独一个供应商没有意义
+    (别名都没定,钉住一家也选不出模型),而把它带上会让 `subagentModelSelection`
+    收到一个「没别名却锁着家」的对 —— 那个形状在下游没有定义。
+    这里也**不校验这家是否还在**:加载器够不着路由器,而校验在运行时那一侧
+    (`declaredSubagentModel`),那里查不到就退回只按别名择优。
+  */
+  const modelProviderId = model === undefined ? undefined : fmString(fm, 'modelProviderId')
 
   /*
     ★ 颜色读不懂就当没写,**不作废**。它纯装饰,而上面那两个 `'invalid'` 分支
@@ -230,6 +238,7 @@ async function loadOne(
     prompt,
     ...(tools !== undefined ? { tools } : {}),
     ...(model !== undefined ? { model: stripControlChars(model) } : {}),
+    ...(modelProviderId !== undefined ? { modelProviderId: stripControlChars(modelProviderId) } : {}),
     ...(mode !== undefined ? { permissionMode: mode } : {}),
     ...(color !== undefined ? { color } : {}),
     source: { kind: scope, path: file }

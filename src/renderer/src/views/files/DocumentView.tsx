@@ -6,9 +6,10 @@ import { IconButton } from '../../components/ui/IconButton'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { revealWorkspaceFile, workspaceFileErrorKey } from '../../services/workspace-files'
-import { confirmDocumentChanges, documentKey, isDocumentDirty, useDocumentsStore } from '../../stores/documents'
+import { confirmDocumentChanges, documentKey, isDocumentDirty, previewFormat, useDocumentsStore } from '../../stores/documents'
 import { useTabsStore } from '../../stores/tabs'
 import { CodeEditor } from './CodeEditor'
+import { HtmlPreview } from './HtmlPreview'
 import { MarkdownPreview } from './MarkdownPreview'
 
 export function DocumentView({ workspaceId, path }: { workspaceId: string; path: string }): ReactNode {
@@ -17,7 +18,7 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
   const { load, edit, save, setMode } = useDocumentsStore.getState()
   const [imageFailed, setImageFailed] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const markdown = /\.(?:md|markdown|mdown|mdx)$/i.test(path)
+  const format = previewFormat(path)
 
   useEffect(() => {
     if (path) void load(workspaceId, path)
@@ -50,7 +51,7 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
     }}>
       <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-hairline px-4 py-2">
         <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-muted" title={path}>{path}</div>
-        {file?.kind === 'text' && markdown && (
+        {file?.kind === 'text' && format && (
           <div className="flex items-center gap-1 rounded-pill bg-tint p-0.5">
             {(['preview', 'source'] as const).map((mode) => (
               <button key={mode} type="button" aria-pressed={entry?.mode === mode} onClick={() => setMode(workspaceId, path, mode)} className={cn('rounded-pill px-2.5 py-1 text-[11px] transition-colors', entry?.mode === mode ? 'bg-surface text-fg' : 'text-fg-muted hover:text-fg')}>
@@ -66,8 +67,10 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
 
       {(entry?.error || actionError) && <div role="alert" className="flex shrink-0 items-center gap-3 border-b border-danger/20 bg-danger/5 px-4 py-2 text-[12px] text-danger"><span className="flex-1">{t(entry?.error ?? actionError!)}</span><Button size="sm" onClick={() => { void reload() }}>{t('document.reload')}</Button></div>}
       {!entry || entry.loading ? <div role="status" className="p-6 text-[13px] text-fg-muted">{t('common.loading')}</div> : file?.kind === 'text' ? (
-        markdown && entry.mode === 'preview'
-          ? <MarkdownPreview content={entry.draft} workspaceId={workspaceId} path={path} onOpenFile={(target) => useTabsStore.getState().openPath(workspaceId, 'doc', target, target.split('/').pop() ?? target)} />
+        format && entry.mode === 'preview'
+          ? format === 'html'
+            ? <HtmlPreview content={entry.draft} path={path} />
+            : <MarkdownPreview content={entry.draft} workspaceId={workspaceId} path={path} onOpenFile={(target) => useTabsStore.getState().openPath(workspaceId, 'doc', target, target.split('/').pop() ?? target)} />
           : <CodeEditor path={path} value={entry.draft} onChange={(value) => edit(workspaceId, path, value)} onSave={() => { void save(workspaceId, path) }} />
       ) : file?.kind === 'image' ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6">

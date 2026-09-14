@@ -51,7 +51,12 @@ const TIMEOUT_MS = 60_000
  * 2. **tools 能省则省。** 省略 = 继承全部工具。模型天然爱列一张「看起来很专业」
  *    的工具表,而漏掉一个就是子代理跑到一半发现自己做不了 —— 它不会报错,
  *    它会编一个答案交上来。
- * 3. **需求是素材,不是指令。** 同 `SESSION_TITLE_PROMPT` 最后那句。用户会把
+ * 3. **一律写英文。** `description` 和正文最终是和系统提示词、工具说明拼在一起
+ *    发出去的,那些全是英文;中英混排的那一段会让模型在派活判断上更容易走神,
+ *    而 `description` 恰恰是派活的唯一依据。用户用中文提需求是常态,所以这条
+ *    得写死在提示词里,不能指望模型自己选。需求里的专有名词(路径、命令、
+ *    库名)照抄原样。
+ * 4. **需求是素材,不是指令。** 同 `SESSION_TITLE_PROMPT` 最后那句。用户会把
  *    一整份说明文档粘进来,里面完全可能有「忽略以上所有要求」。
  */
 export const AGENT_DRAFT_PROMPT = [
@@ -61,7 +66,8 @@ export const AGENT_DRAFT_PROMPT = [
   '"name": lowercase letters, digits and hyphens only, starting with a letter or digit, at most 64 characters, e.g. "code-reviewer".',
   '"description": one or two sentences telling a dispatcher model WHEN to hand work to this subagent, phrased as a trigger rather than a self-introduction.',
   'Prefer "Reviews freshly written code for bugs and style problems. Use it proactively right after writing a chunk of code." over "A code review agent." At most 400 characters.',
-  '"prompt": the subagent role prompt — who it is, what it must and must not do, how it works, what it reports back. Write it in the same language as the request, be concrete, and keep it under 3000 characters.',
+  '"prompt": the subagent role prompt — who it is, what it must and must not do, how it works, what it reports back. Be concrete and keep it under 3000 characters.',
+  'Write the name, the description and the prompt in English even when the request is written in another language; keep identifiers quoted from the request (paths, commands, library names) exactly as given.',
   `"tools": OPTIONAL array, chosen only from ${AGENT_TOOL_CHOICES.join(', ')}.`,
   'Omitting it means the subagent inherits every tool, which is the right default: include it only when the request explicitly asks to restrict the subagent.',
   '"color": OPTIONAL, one of yellow, red, orange, green, cyan, blue, purple, pink.',

@@ -17,10 +17,20 @@ import type {
   ModelAlias,
   UpstreamProvider
 } from '../../../shared/domain/provider'
+import type { ImportSourceKind } from '../../../shared/domain/import'
+import type { ImportableProviders } from '../../../shared/domain/provider-import'
 import { invoke } from './ipc'
 
 export function listProviders(): Promise<UpstreamProvider[]> {
   return invoke('provider:list', undefined)
+}
+
+/**
+ * 解析本机 Claude Code / Codex / OpenCode 里配置的提供商供审核。
+ * ★ 只回元数据(名字/协议/base URL/模型名/有无本地凭证),密钥值不带回。
+ */
+export function listImportableProviders(sourceKind: ImportSourceKind, pickedDir?: string): Promise<ImportableProviders> {
+  return invoke('providers:listImportable', pickedDir === undefined ? { sourceKind } : { sourceKind, pickedDir })
 }
 
 /** 省略 providerId = 全部别名。 */
@@ -71,6 +81,14 @@ export function setCredential(providerId: string, apiKey: string): Promise<Crede
 
 export function getCredentialInfo(providerId: string): Promise<CredentialInfo> {
   return invoke('provider:getCredentialInfo', { providerId })
+}
+
+export function exportProviders(options: { includeCredentials?: boolean; password?: string } = {}): Promise<{ path: string; encrypted: boolean; providerCount: number; aliasCount: number } | null> {
+  return invoke('provider:export', options)
+}
+
+export function importProviders(password?: string): Promise<{ path: string; providerCount: number; aliasCount: number; credentialCount: number } | null> {
+  return invoke('provider:import', password === undefined ? {} : { password })
 }
 
 /**

@@ -292,6 +292,67 @@ function labelOf(bucket: UsageDailyBucket): string {
   return bucket.alias !== '' ? bucket.alias : bucket.upstreamModel
 }
 
+/** 撞名时用来补后缀的原始字段。 */
+interface LabelSource {
+  providerId: string
+  providerName: string
+  upstreamModel: string
+}
+
+function labelSourceOf(bucket: UsageDailyBucket): LabelSource {
+  return {
+    providerId: bucket.providerId,
+    providerName: bucket.providerName,
+    upstreamModel: bucket.upstreamModel
+  }
+}
+
+/**
+ * 给撞名的标签补后缀,先补供应商,还撞再补上游模型名。
+ *
+ * ★ 行是按「供应商 × 模型」分的,而标签只取别名 —— 同一个模型从多个供应商
+ * 接入是常态(本机库里 `gpt-6-astra` 就有三个来源),不补后缀,费用表里就是
+ * 三行同名不同数的行,看起来像同一行被列重了、或者像哪儿算重了。
+ *
+ * 只给真撞名的补:没撞名的挂上供应商只会更长,而图例里的长名字是要被截掉的。
+ */
+function disambiguateLabels<T extends { key: string; label: string }>(
+  rows: T[],
+  sources: ReadonlyMap<string, LabelSource>
+): void {
+  const picks = [
+    (s: LabelSource): string => (s.providerName !== '' ? s.providerName : s.providerId),
+    (s: LabelSource): string => s.upstreamModel
+  ]
+  for (const pick of picks) {
+    const groups = new Map<string, T[]>()
+    for (const row of rows) {
+      const list = groups.get(row.label)
+      if (list === undefined) groups.set(row.label, [row])
+      else list.push(row)
+    }
+
+    let clean = true
+    for (const list of groups.values()) {
+      if (list.length < 2) continue
+      clean = false
+      // 「其他」那一项不在 sources 里,而且只会有一项,撞不上
+      const parts = list.map((row) => {
+        const source = sources.get(row.key)
+        return source === undefined ? '' : pick(source)
+      })
+      // 这一档在这组里分不开(比如三行本来就是同一个供应商),
+      // 补上去只是把每一行都变长,留给下一档
+      if (new Set(parts).size < 2) continue
+      list.forEach((row, index) => {
+        const part = parts[index]
+        if (part !== undefined && part !== '') row.label = `${row.label} · ${part}`
+      })
+    }
+    if (clean) break
+  }
+}
+
 /**
  * 按模型合并并算占比,降序。超过 `limit` 的尾部合并成一项 `key: '__others__'`。
  *
@@ -301,6 +362,7 @@ function labelOf(bucket: UsageDailyBucket): string {
 export function toModelShares(buckets: readonly UsageDailyBucket[], limit = 8): ModelShare[] {
   const byModel = new Map<string, ModelShare>()
   const costs = new Map<string, Map<string, number>>()
+  const sources = new Map<string, LabelSource>()
 
   for (const bucket of buckets) {
     const key = `${bucket.providerId}/${bucket.upstreamModel}`
@@ -317,6 +379,7 @@ export function toModelShares(buckets: readonly UsageDailyBucket[], limit = 8): 
       }
       byModel.set(key, share)
       costs.set(key, new Map())
+      sources.set(key, labelSourceOf(bucket))
     }
     share.tokens += bucketTokens(bucket)
     share.requests += bucket.requestCount
@@ -354,6 +417,7 @@ export function toModelShares(buckets: readonly UsageDailyBucket[], limit = 8): 
     head.push(merged)
   }
 
+  disambiguateLabels(head, sources)
   for (const item of head) item.share = total === 0 ? 0 : item.tokens / total
   return head
 }
@@ -389,6 +453,7 @@ export interface CostBreakdown {
  */
 export function toCostBreakdown(buckets: readonly UsageDailyBucket[]): CostBreakdown {
   const byCurrency = new Map<string, Map<string, CostRow>>()
+  const sources = new Map<string, LabelSource>()
   let unpricedRequests = 0
 
   for (const bucket of buckets) {
@@ -410,6 +475,7 @@ export function toCostBreakdown(buckets: readonly UsageDailyBucket[]): CostBreak
         requests: bucket.pricedCount,
         share: 0
       })
+      sources.set(key, labelSourceOf(bucket))
     } else {
       row.micros += bucket.costMicros
       row.requests += bucket.pricedCount
@@ -420,6 +486,8 @@ export function toCostBreakdown(buckets: readonly UsageDailyBucket[]): CostBreak
     const list = [...rows.values()].sort(
       (a, b) => b.micros - a.micros || a.key.localeCompare(b.key)
     )
+    // 每个币种是独立一张表,撞名只在表内算
+    disambiguateLabels(list, sources)
     const totalMicros = list.reduce((sum, r) => sum + r.micros, 0)
     for (const row of list) row.share = totalMicros === 0 ? 0 : row.micros / totalMicros
     return { currency, rows: list, totalMicros }

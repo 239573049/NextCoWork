@@ -25,12 +25,12 @@ import { agentErrorText } from '../../i18n/agent'
 import { MessageImage } from './MessageImage'
 import { MentionText } from './MentionText'
 import { MessageFileRef } from './MessageFileRef'
-import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
+import { SubagentNode, SubagentReportRow, ThinkingBlock, ToolCallCard } from './parts'
 import { useOpenSubagent } from './subagent-open'
 import { InteractionPanel } from './InteractionPanel'
 import { StatusLine } from './StatusLine'
 import { ToolTimeline } from './ToolTimeline'
-import { reportBackgroundChild } from '../../stores/session'
+import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { ContextCheckpointPanel } from './ContextCheckpointPanel'
 import { CompactionDivider } from './CompactionDivider'
@@ -47,6 +47,7 @@ export const Thread = memo(function Thread({
   lastSeq,
   queued,
   compactError,
+  reportOptions,
   onEditMessage,
   onDeleteTurn,
   onExecutePlan,
@@ -67,6 +68,13 @@ export const Thread = memo(function Thread({
   readOnly?: boolean
   /** 手动压缩的失败原因,由状态行显示。它在 store 里而不在 transcript 里。 */
   compactError?: string | null
+  /**
+   * 手动回传后台子代理结果时用的档位。
+   *
+   * ★ 必须由外面传进来:store 里的 `lastOptions` 只在 `send` 里写、不落盘,
+   * 重启之后是 null —— 而跨重启正是「处理」这颗按钮唯一还有用的场景。
+   */
+  reportOptions?: SendOptions
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
   onDeleteTurn?: (userMessageId: string) => Promise<void>
@@ -202,6 +210,14 @@ export const Thread = memo(function Thread({
           if (row.kind === 'user') {
             return <UserBubble key={row.key} message={row.message} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
           }
+          if (row.kind === 'subagent-report') {
+            /*
+              ★ 卡片状态按 `callId` 查 —— 汇报行自己只带摘要,而「是哪个子代理、
+              能不能点开完整记录」都在 `subagents` 里。查不到(老转录)就退化成
+              一行没有子代理名的通用文案,仍然比整条消息不存在强。
+            */
+            return <SubagentReportRow key={row.key} summary={row.summary} state={subagents[row.callId]} />
+          }
           return (
             <AssistantTurn
               key={row.key}
@@ -255,19 +271,20 @@ export const Thread = memo(function Thread({
         })}
       </div>
     </div>
-    <SubagentTaskCenter sessionId={sessionId} subagents={subagents} readOnly={readOnly} />
+    <SubagentTaskCenter sessionId={sessionId} subagents={subagents} readOnly={readOnly} reportOptions={reportOptions} />
     </div>
   )
 })
 
-function SubagentTaskCenter({ sessionId, subagents, readOnly = false }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean }): ReactNode {
+function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOptions }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean; reportOptions?: SendOptions }): ReactNode {
   const { t } = useI18n()
   const openSubagent = useOpenSubagent()
   const [open, setOpen] = useState(false)
   const entries = Object.values(subagents).filter((item) => item.background === true)
   if (entries.length === 0) return null
   const running = entries.filter((item) => item.status === 'running').length
-  const pending = entries.filter((item) => item.reportStatus === 'pending').length
+  /* blocked = 「结果在库里,但当时没有可用的发送档位」。对用户来说它和 pending 是同一件事:等你点一下。 */
+  const pending = entries.filter((item) => item.reportStatus === 'pending' || item.reportStatus === 'blocked').length
   /*
     ★ 以前这里是 `scrollIntoView` 跳到那张卡片上 —— 而后台子代理的卡片可能在
     几百轮之前,跳过去之后用户看到的还是那张什么都不说的摘要,得再点开它。
@@ -296,11 +313,11 @@ function SubagentTaskCenter({ sessionId, subagents, readOnly = false }: { sessio
         </div>
         <div className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
           {entries.map((item) => {
-            const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : item.reportStatus === 'pending' ? 'pending' : 'done'
+            const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : (item.reportStatus === 'pending' || item.reportStatus === 'blocked') ? 'pending' : 'done'
             return <div key={item.callId} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
               {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
               <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left"><span className="block truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span><span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span></button>
-              {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
+              {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId, reportOptions)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
             </div>
           })}
         </div>

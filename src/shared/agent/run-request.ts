@@ -104,6 +104,15 @@ export interface RunRequest {
    * 这样确认事件会替换乐观消息,而不会在转录里产生重复内容。
    */
   inputMessageId?: string
+  /**
+   * 本轮输入是**协调消息**(目前只有后台子代理的结果回传),发给模型但不进对话流。
+   *
+   * ★ 没有它的时候,`send(..., internal)` 只把标记写在渲染层那条乐观消息上,
+   * 而主进程 commit 回来的那条**不带标记** —— `message_commit` 整条替换之后
+   * 标记就没了,于是那段 `Background subagent result (...)` 会作为一条普通用户
+   * 消息裸露在对话里(插话那条路没有这个问题,它的 internal 一直是传过去的)。
+   */
+  inputInternal?: boolean
 
   mode: SessionMode
   thinking: ThinkingLevel
@@ -155,7 +164,7 @@ export interface RunRequest {
  * (`QueuedInput.options`),而 `shared/domain/queued-input.ts` 不能反向依赖渲染层。
  * `session.ts` 仍然 re-export 同名类型,既有引用点不受影响。
  */
-export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'inputMessageId'>
+export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'inputMessageId' | 'inputInternal'>
 
 /**
  * Deprecated compatibility exports. AgentSession no longer uses a fixed turn

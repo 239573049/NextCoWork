@@ -33,6 +33,67 @@ describe('thread content grouping', () => {
     expect(rows[1]?.kind === 'assistant' ? rows[1].blocks.length : 0).toBe(3)
   })
 
+  /**
+   * ★★ 后台子代理的结果回传是一条 `internal` 消息 —— 它以前在界面上**整条不存在**。
+   * 于是主代理毫无来由地开口,讲一件几百轮之前派出去的事,而用户看不到任何输入。
+   *
+   * 认它的标记是那个 `subagent` part:两个上游编码器都把它丢掉,所以拿它当
+   * 界面标记不会多给模型一个字。
+   */
+  it('★★ 后台汇报单独成一行,而不是整条消息消失', () => {
+    const report = {
+      ...userMessage('rep', [
+        { type: 'text' as const, text: 'Background subagent result (code-analyst, run-9):\n\n查完了' },
+        { type: 'subagent' as const, callId: 'task-1', childRunId: 'run-9', summary: '查完了' }
+      ], 3),
+      internal: true
+    }
+    const rows = threadRows([
+      userMessage('u', [{ type: 'text', text: '开始' }], 1),
+      assistantMessage('a1', [{ type: 'text', text: '好' }], 2),
+      report,
+      assistantMessage('a2', [{ type: 'text', text: '收到后台结果' }], 4)
+    ], [], false)
+
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant', 'subagent-report', 'assistant'])
+    const line = rows[2]
+    expect(line?.kind === 'subagent-report' ? line.callId : undefined).toBe('task-1')
+    expect(line?.kind === 'subagent-report' ? line.summary : undefined).toBe('查完了')
+  })
+
+  /**
+   * ★ 汇报行**推进 `preceding`**,和可见消息一样。不推进的话,它前后两个
+   * assistant 行会共用同一个 `reply:${preceding}` key(`assistant()` 只看
+   * `rows.at(-1)`,隔着一行就不复用了)—— 同 key 两行,React 会把两轮的内容搅在一起。
+   */
+  it('★ 汇报行两侧的 assistant 行 key 不相同', () => {
+    const report = {
+      ...userMessage('rep', [
+        { type: 'text' as const, text: 'report' },
+        { type: 'subagent' as const, callId: 'task-1', childRunId: 'run-9' }
+      ], 3),
+      internal: true
+    }
+    const rows = threadRows([
+      userMessage('u', [{ type: 'text', text: '开始' }], 1),
+      assistantMessage('a1', [{ type: 'text', text: '好' }], 2),
+      report,
+      assistantMessage('a2', [{ type: 'text', text: '收到' }], 4)
+    ], [], false)
+    const keys = rows.filter((row) => row.kind === 'assistant').map((row) => row.key)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  /** 没有 `subagent` part 的 internal 消息照旧整条隐藏 —— 那些是纯协调消息 */
+  it('普通 internal 消息仍然不出现在消息流里', () => {
+    const rows = threadRows([
+      userMessage('u', [{ type: 'text', text: '开始' }], 1),
+      { ...userMessage('sys', [{ type: 'text', text: '内部协调' }], 2), internal: true },
+      assistantMessage('a1', [{ type: 'text', text: '好' }], 3)
+    ], [], false)
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant'])
+  })
+
   it('tags a merged assistant turn with the run that produced it', () => {
     const messages = [
       userMessage('u', [{ type: 'text', text: 'Inspect' }], 1),

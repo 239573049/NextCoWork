@@ -15,6 +15,7 @@ import type { ToolOutput } from "../../../../shared/agent/message";
 import type { ToolShape } from "../../../../shared/domain/tool-presenter";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
+import { computeDiff, type DiffRow } from "./diff";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -48,6 +49,72 @@ export function Labeled({
       >
         {children}
       </pre>
+    </div>
+  );
+}
+
+/** 详情区里的一个 diff 行:上下文灰、删除红(danger)、新增绿(accent)。 */
+function DiffLine({ row }: { row: DiffRow }): ReactNode {
+  const mark = row.type === "add" ? "+" : row.type === "del" ? "-" : " ";
+  const rowCls =
+    row.type === "add"
+      ? "bg-accent/10 text-accent"
+      : row.type === "del"
+        ? "bg-danger/5 text-danger"
+        : "text-fg-muted";
+  const hiCls = row.type === "add" ? "bg-accent/25" : "bg-danger/20";
+  return (
+    <div className={cn("flex px-2.5 whitespace-pre", rowCls)}>
+      {/* select-none:复制 diff 时不把 +/- 前缀也带上 */}
+      <span className="mr-2 shrink-0 select-none opacity-60">{mark}</span>
+      <span className="min-w-0">
+        {row.spans.map((s, i) =>
+          s.hi ? (
+            <span key={i} className={cn("rounded-[2px]", hiCls)}>
+              {s.text}
+            </span>
+          ) : (
+            <span key={i}>{s.text}</span>
+          ),
+        )}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Edit 的改动块 —— 把 old_string / new_string 渲染成一份统一 diff,改动的行
+ * 逐词高亮。取代了原先并排的「替换前 / 替换后」两个 <pre>:并排要用户自己
+ * 用眼睛对齐找差异,统一 diff 直接把差异标出来。
+ */
+function DiffBlock({
+  oldStr,
+  newStr,
+  maxRows = 24,
+}: {
+  oldStr: string;
+  newStr: string;
+  maxRows?: number;
+}): ReactNode {
+  const { t } = useI18n();
+  const all = computeDiff(oldStr, newStr);
+  const rows = all.slice(0, maxRows);
+  const omitted = all.length - rows.length;
+  return (
+    <div className="mt-1.5 first:mt-0">
+      <p className="mb-0.5 text-[11px] text-fg-faint">
+        {t("chat.tool.change")}
+      </p>
+      <div className="selectable scroll-thin max-h-72 overflow-auto rounded-[7px] bg-canvas py-1 font-mono text-[11.5px] leading-relaxed">
+        {rows.map((row, i) => (
+          <DiffLine key={i} row={row} />
+        ))}
+        {omitted > 0 && (
+          <div className="px-2.5 pt-0.5 text-fg-faint">
+            {t("chat.tool.linesOmitted", { count: omitted }).trim()}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -170,17 +237,24 @@ function MutateDetail({ input, output, isError }: DetailProps): ReactNode {
   return (
     <>
       {path !== "" && <PathLine path={path} />}
-      {oldStr !== "" && (
-        <Labeled label={t("chat.tool.before")}>
-          {clipLines(oldStr, 12).text}
-          <Truncated omitted={clipLines(oldStr, 12).omitted} />
-        </Labeled>
-      )}
-      {newStr !== "" && (
-        <Labeled label={t("chat.tool.after")}>
-          {clipLines(newStr, 12).text}
-          <Truncated omitted={clipLines(newStr, 12).omitted} />
-        </Labeled>
+      {oldStr !== "" && newStr !== "" ? (
+        // 两侧都在:统一 diff,词级高亮改动
+        <DiffBlock oldStr={oldStr} newStr={newStr} />
+      ) : (
+        <>
+          {oldStr !== "" && (
+            <Labeled label={t("chat.tool.before")}>
+              {clipLines(oldStr, 12).text}
+              <Truncated omitted={clipLines(oldStr, 12).omitted} />
+            </Labeled>
+          )}
+          {newStr !== "" && (
+            <Labeled label={t("chat.tool.after")}>
+              {clipLines(newStr, 12).text}
+              <Truncated omitted={clipLines(newStr, 12).omitted} />
+            </Labeled>
+          )}
+        </>
       )}
       {content !== "" && (
         <Labeled label={t("chat.tool.writeContent")}>

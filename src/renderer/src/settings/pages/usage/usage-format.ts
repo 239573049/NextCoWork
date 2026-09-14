@@ -1,5 +1,5 @@
 /**
- * 使用统计的格式化。从 `UsageTab.tsx` 抽出来 —— 这些函数原先埋在 .tsx 里,
+ * 使用统计的格式化。从 `UsagePage.tsx` 抽出来 —— 这些函数原先埋在 .tsx 里,
  * **一条测试都没有**,而它们决定了页面上每一个数字长什么样。
  *
  * vitest 是 `environment: 'node'` + `include: ['src/**\/*.test.ts']`,`.test.tsx`
@@ -76,7 +76,9 @@ export function formatCosts(
   locale: Locale
 ): string {
   if (values.length === 0) return '—'
-  return values.map(({ currency, micros }) => formatCostMicros(micros, currency, locale)).join(' + ')
+  return values
+    .map(({ currency, micros }) => formatCostMicros(micros, currency, locale))
+    .join(' + ')
 }
 
 export function formatLatency(value: number | null, locale: Locale, t: Translate): string {
@@ -106,8 +108,11 @@ export function formatDuration(ms: number, locale: Locale, t: Translate): string
       minutes: formatNumber(minutes, locale)
     })
   }
-  if (totalMinutes > 0) return t('usage.duration.m', { minutes: formatNumber(totalMinutes, locale) })
-  return t('usage.duration.s', { seconds: formatNumber(Math.max(1, Math.round(ms / 1000)), locale) })
+  if (totalMinutes > 0)
+    return t('usage.duration.m', { minutes: formatNumber(totalMinutes, locale) })
+  return t('usage.duration.s', {
+    seconds: formatNumber(Math.max(1, Math.round(ms / 1000)), locale)
+  })
 }
 
 /**

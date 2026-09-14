@@ -8,7 +8,7 @@
  * 放这儿的话五个 chat Tab 就是五个泵,同一批事件被 apply 五次。
  */
 import { Check, ChevronDown, LoaderCircle, Upload } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { greetingOf } from '../../../../shared/domain/greeting'
 import { cacheHitRateOf, hasRun, type SubagentState } from '../../../../shared/agent/transcript'
@@ -133,20 +133,31 @@ export function ChatView({
     ? { model: workspace.settings.defaultModel,
         modelProviderId: workspace.settings.defaultModelProviderId }
     : fallbackModel
-  const onEditMessage = useCallback((id: string, text: string, continueRun: boolean) => editMessage(id, text, continueRun, {
+  /**
+   * 「不经过输入框」那一类路径共用的档位:编辑后重新生成、以及后台子代理
+   * 结果的手动回传。它们都没有 Composer 的实时选择可用,只能取工作区默认值
+   * (和 `webSearch` 同理)。
+   *
+   * ★ 抽出来是因为第二个用户 —— 后台汇报 —— 在**重启之后**别无选择:
+   * store 里的 `lastOptions` 不落盘,那时是 null。
+   */
+  const offComposerOptions = useMemo(() => ({
     workspaceId: workspace.id,
-    depth: 0,
+    depth: 0 as const,
     mode: workspace.settings.defaultMode,
     thinking: workspace.settings.defaultThinking,
     webSearch: workspace.settings.webSearch,
-    // 不经过输入框的路径,档位只能取工作区默认值(和 webSearch 同理)。
     maxContext: workspace.settings.maxContext === true,
     permissionMode: workspace.settings.permissionMode,
     model: editModel.model,
     modelProviderId: editModel.modelProviderId,
     skillIds: workspace.settings.activeSkillIds,
     skillSelectionMode: workspace.settings.skillSelectionMode
-  }), [editMessage, editModel.model, editModel.modelProviderId, workspace])
+  }), [editModel.model, editModel.modelProviderId, workspace])
+  const onEditMessage = useCallback(
+    (id: string, text: string, continueRun: boolean) => editMessage(id, text, continueRun, offComposerOptions),
+    [editMessage, offComposerOptions]
+  )
   const started = hasRun(transcript, running)
   const { t } = useI18n()
   /**
@@ -593,6 +604,7 @@ export function ChatView({
             model={modelName}
             providerName={provider?.name}
             lastSeq={lastSeq}
+            reportOptions={offComposerOptions}
             queued={queuedInputs.length}
             compactError={compactError}
             onEditMessage={onEditMessage}

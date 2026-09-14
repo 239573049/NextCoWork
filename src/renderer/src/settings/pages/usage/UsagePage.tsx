@@ -5,10 +5,10 @@ import type {
   UsageDimensionStat,
   UsageRequestLogsPage,
   UsageStatusFilter,
-  UsageSummary,
-  UsageWindow
+  UsageSummary
 } from '../../../../../shared/domain/usage'
 import { TextInput } from '../../../components/ui/TextInput'
+import { Segmented } from '../../../components/ui/Segmented'
 import { Toggle } from '../../../components/ui/Toggle'
 import { useI18n, type Locale, type Translate } from '../../../i18n'
 import { cn } from '../../../lib/cn'
@@ -18,26 +18,22 @@ import {
   getUsageRequestLogs,
   getUsageSummary
 } from '../../../services/usage'
+import {
+  formatCompactNumber as compactNumber,
+  formatCosts as costs,
+  formatLatency as latency,
+  formatNumber as number,
+  formatPercent as percent,
+  windowFor,
+  USAGE_RANGES as RANGES,
+  type UsageRange
+} from './usage-format'
+import { UsageOverview } from './charts/UsageOverview'
 
-type UsageRange = '24h' | '7d' | '30d' | 'all'
 type UsageSection = 'requests' | 'providers' | 'models' | 'tools'
 
 const PAGE_SIZE = 50
-const RANGES: readonly UsageRange[] = ['24h', '7d', '30d', 'all']
 const SECTIONS: readonly UsageSection[] = ['requests', 'providers', 'models', 'tools']
-
-function windowFor(range: UsageRange): UsageWindow {
-  const to = Date.now() + 1
-  const duration =
-    range === '24h'
-      ? 24 * 60 * 60 * 1000
-      : range === '7d'
-        ? 7 * 24 * 60 * 60 * 1000
-        : range === '30d'
-          ? 30 * 24 * 60 * 60 * 1000
-          : null
-  return duration === null ? { to } : { from: to - duration, to }
-}
 
 function rangeLabel(t: Translate, range: UsageRange): string {
   return t(`usage.range.${range}` as const)
@@ -47,65 +43,15 @@ function sectionLabel(t: Translate, section: UsageSection): string {
   return t(`usage.section.${section}` as const)
 }
 
-function number(value: number, locale: Locale): string {
-  return new Intl.NumberFormat(locale).format(value)
-}
-
-function compactNumber(value: number, locale: Locale): string {
-  return new Intl.NumberFormat(locale, {
-    notation: 'compact',
-    maximumFractionDigits: value >= 1_000_000 ? 1 : 0
-  }).format(value)
-}
-
-function percent(value: number | null, locale: Locale): string {
-  if (value === null) return '—'
-  return new Intl.NumberFormat(locale, {
-    style: 'percent',
-    maximumFractionDigits: 1
-  }).format(value)
-}
-
-function costs(
-  values: readonly { currency: string; micros: number }[],
-  locale: Locale
-): string {
-  if (values.length === 0) return '—'
-  return values
-    .map(({ currency, micros }) => {
-      const value = micros / 1_000_000
-      return new Intl.NumberFormat(locale, {
-        style: 'currency',
-        currency,
-        minimumFractionDigits: 2,
-        maximumFractionDigits: value !== 0 && Math.abs(value) < 0.01 ? 6 : 2
-      }).format(value)
-    })
-    .join(' + ')
-}
-
-function latency(value: number | null, locale: Locale, t: Translate): string {
-  if (value === null) return '—'
-  if (value >= 1000) {
-    return t('usage.seconds', {
-      value: new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1000)
-    })
-  }
-  return t('usage.milliseconds', { value: number(Math.round(value), locale) })
-}
-
 function requestTokens(record: UsageAttemptRecord): number {
-  return (
-    record.inputTokens +
-    record.outputTokens +
-    record.cacheReadTokens +
-    record.cacheWriteTokens
-  )
+  return record.inputTokens + record.outputTokens + record.cacheReadTokens + record.cacheWriteTokens
 }
 
-export function UsageTab(): ReactNode {
+export function UsagePage(): ReactNode {
   const { t, locale } = useI18n()
-  const [range, setRange] = useState<UsageRange>('24h')
+  // ★ 默认 7 天而不是 24 小时。概览上来就是趋势图和热力图,而 24 小时窗口里
+  // 只有一两个日桶 —— 折线退化成一根斜线,看起来像图表坏了而不是「数据就这么多」。
+  const [range, setRange] = useState<UsageRange>('7d')
   const [section, setSection] = useState<UsageSection>('requests')
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<UsageStatusFilter>('all')
@@ -121,10 +67,7 @@ export function UsageTab(): ReactNode {
   const [logsLoading, setLogsLoading] = useState(true)
   const [loadFailed, setLoadFailed] = useState(false)
 
-  const usageWindow = useMemo(
-    () => windowFor(range),
-    [range, refreshVersion]
-  )
+  const usageWindow = useMemo(() => windowFor(range), [range, refreshVersion])
 
   useEffect(() => {
     let active = true
@@ -203,24 +146,14 @@ export function UsageTab(): ReactNode {
   return (
     <div data-testid="usage-page" className="min-w-0 pb-5 pt-1">
       <div className="mb-4 flex items-center justify-end gap-2">
-        <div className="flex rounded-pill bg-tint p-0.5" aria-label={t('usage.rangeLabel')}>
-          {RANGES.map((item) => (
-            <button
-              key={item}
-              type="button"
-              aria-pressed={range === item}
-              onClick={() => chooseRange(item)}
-              className={cn(
-                'h-7 rounded-pill px-3 text-[11.5px] transition-colors',
-                range === item
-                  ? 'bg-surface-field text-fg shadow-sm'
-                  : 'text-fg-muted hover:text-fg'
-              )}
-            >
-              {rangeLabel(t, item)}
-            </button>
-          ))}
-        </div>
+        <Segmented
+          value={range}
+          options={RANGES.map((item) => ({ value: item, label: rangeLabel(t, item) }))}
+          onChange={chooseRange}
+          size="sm"
+          shape="pill"
+          label={t('usage.rangeLabel')}
+        />
         <button
           type="button"
           aria-label={t('common.refresh')}
@@ -245,25 +178,23 @@ export function UsageTab(): ReactNode {
         </div>
       ) : (
         <>
-          <SummaryCards summary={summary} loading={overviewLoading} locale={locale} t={t} />
+          <UsageOverview usageWindow={usageWindow} />
 
-          <div className="mt-4 flex w-fit max-w-full overflow-x-auto rounded-pill bg-tint p-0.5">
-            {SECTIONS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                aria-pressed={section === item}
-                onClick={() => setSection(item)}
-                className={cn(
-                  'h-7 whitespace-nowrap rounded-pill px-3 text-[11.5px] transition-colors',
-                  section === item
-                    ? 'bg-surface-field text-fg shadow-sm'
-                    : 'text-fg-muted hover:text-fg'
-                )}
-              >
-                {sectionLabel(t, item)}
-              </button>
-            ))}
+          {/* 下面是原有的请求日志表。概览回答「花了多少、哪个模型最贵」,日志表
+              回答「这一条请求到底发生了什么」—— 两者都留着,不互相替代 */}
+          <div className="mt-5">
+            <SummaryCards summary={summary} loading={overviewLoading} locale={locale} t={t} />
+          </div>
+
+          <div className="mt-4 w-fit max-w-full">
+            <Segmented
+              value={section}
+              options={SECTIONS.map((item) => ({ value: item, label: sectionLabel(t, item) }))}
+              onChange={setSection}
+              size="sm"
+              shape="pill"
+              label={t('usage.sectionLabel')}
+            />
           </div>
 
           {section === 'requests' && (
@@ -309,7 +240,13 @@ export function UsageTab(): ReactNode {
             />
           )}
           {section === 'tools' && (
-            <ToolStats rows={modelStats} summary={summary} loading={overviewLoading} locale={locale} t={t} />
+            <ToolStats
+              rows={modelStats}
+              summary={summary}
+              loading={overviewLoading}
+              locale={locale}
+              t={t}
+            />
           )}
         </>
       )}
@@ -522,9 +459,7 @@ function RequestLogs({
         </div>
         {!loading && page?.items.length === 0 && (
           <div className="flex h-[148px] items-center justify-center text-[12px] text-fg-faint">
-            {query.trim() === '' && status === 'all'
-              ? t('usage.empty')
-              : t('usage.noMatch')}
+            {query.trim() === '' && status === 'all' ? t('usage.empty') : t('usage.noMatch')}
           </div>
         )}
         {loading && page === null && (
@@ -609,7 +544,8 @@ function RequestRow({
               record.ok ? 'bg-accent/10 text-accent' : 'bg-danger/10 text-danger'
             )}
           >
-            {record.httpStatus ?? (record.ok ? t('usage.status.success') : t('usage.status.failed'))}
+            {record.httpStatus ??
+              (record.ok ? t('usage.status.success') : t('usage.status.failed'))}
           </span>
         </td>
         <td>
@@ -628,10 +564,22 @@ function RequestRow({
         <tr className="border-b border-hairline bg-tint/25">
           <td colSpan={8} className="px-3 py-3">
             <div className="grid grid-cols-3 gap-x-4 gap-y-2 min-[760px]:grid-cols-6">
-              <DetailMetric label={t('usage.inputTokens')} value={number(record.inputTokens, locale)} />
-              <DetailMetric label={t('usage.cacheReadTokens')} value={number(record.cacheReadTokens, locale)} />
-              <DetailMetric label={t('usage.cacheWriteTokens')} value={number(record.cacheWriteTokens, locale)} />
-              <DetailMetric label={t('usage.outputTokens')} value={number(record.outputTokens, locale)} />
+              <DetailMetric
+                label={t('usage.inputTokens')}
+                value={number(record.inputTokens, locale)}
+              />
+              <DetailMetric
+                label={t('usage.cacheReadTokens')}
+                value={number(record.cacheReadTokens, locale)}
+              />
+              <DetailMetric
+                label={t('usage.cacheWriteTokens')}
+                value={number(record.cacheWriteTokens, locale)}
+              />
+              <DetailMetric
+                label={t('usage.outputTokens')}
+                value={number(record.outputTokens, locale)}
+              />
               <DetailMetric
                 label={t('usage.thinkingTokens')}
                 value={
@@ -647,9 +595,13 @@ function RequestRow({
             </div>
             <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-hairline pt-2 text-[10px] leading-[1.45]">
               <dt className="text-fg-faint">{t('usage.runId')}</dt>
-              <dd className="selectable truncate font-mono text-fg-muted" title={record.runId}>{record.runId}</dd>
+              <dd className="selectable truncate font-mono text-fg-muted" title={record.runId}>
+                {record.runId}
+              </dd>
               <dt className="text-fg-faint">{t('usage.endpoint')}</dt>
-              <dd className="selectable truncate font-mono text-fg-muted" title={record.endpoint}>{record.endpoint || '—'}</dd>
+              <dd className="selectable truncate font-mono text-fg-muted" title={record.endpoint}>
+                {record.endpoint || '—'}
+              </dd>
               <dt className="text-fg-faint">{t('usage.response')}</dt>
               <dd className="truncate text-fg-muted">
                 {[
@@ -657,13 +609,16 @@ function RequestRow({
                   record.responseModel,
                   record.stopReason,
                   t('usage.attemptNumber', { number: record.attempt })
-                ].filter(Boolean).join(' · ')}
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
               </dd>
               {record.errorKind !== null && (
                 <>
                   <dt className="text-fg-faint">{t('usage.error')}</dt>
                   <dd className="selectable text-danger">
-                    {record.errorKind}{record.errorMessage === null ? '' : ` · ${record.errorMessage}`}
+                    {record.errorKind}
+                    {record.errorMessage === null ? '' : ` · ${record.errorMessage}`}
                   </dd>
                 </>
               )}
@@ -726,12 +681,17 @@ function DimensionTable({
           <tbody className={cn('text-[11px]', loading && 'opacity-55')}>
             {rows.map((row) => (
               <tr key={row.id} className="h-11 border-b border-hairline last:border-b-0">
-                <td className="truncate px-3 text-fg" title={row.label}>{row.label}</td>
+                <td className="truncate px-3 text-fg" title={row.label}>
+                  {row.label}
+                </td>
                 <td className="px-2 text-right tabular-nums text-fg-muted">
                   {number(row.requestCount, locale)}
                 </td>
                 <td className="px-2 text-right tabular-nums text-fg-muted">
-                  {percent(row.requestCount === 0 ? null : row.successCount / row.requestCount, locale)}
+                  {percent(
+                    row.requestCount === 0 ? null : row.successCount / row.requestCount,
+                    locale
+                  )}
                 </td>
                 <td className="px-2 text-right text-[10px] tabular-nums text-fg-muted">
                   {t('usage.compactTokenBreakdown', {
@@ -740,9 +700,7 @@ function DimensionTable({
                     output: compactNumber(row.outputTokens, locale)
                   })}
                 </td>
-                <td className="px-2 text-right tabular-nums text-fg">
-                  {costs(row.costs, locale)}
-                </td>
+                <td className="px-2 text-right tabular-nums text-fg">{costs(row.costs, locale)}</td>
                 <td className="px-3 text-right tabular-nums text-fg-muted">
                   {latency(row.averageLatencyMs, locale, t)}
                 </td>
@@ -803,10 +761,18 @@ function ToolStats({
           <tbody className={cn('text-[11px]', loading && 'opacity-55')}>
             {withTools.map((row) => (
               <tr key={row.id} className="h-10 border-b border-hairline last:border-b-0">
-                <td className="truncate px-3 text-fg" title={row.label}>{row.label}</td>
-                <td className="px-3 text-right tabular-nums text-fg-muted">{number(row.toolCalls, locale)}</td>
-                <td className="px-3 text-right tabular-nums text-fg-muted">{number(row.toolErrors, locale)}</td>
-                <td className="px-3 text-right tabular-nums text-fg-muted">{number(row.requestCount, locale)}</td>
+                <td className="truncate px-3 text-fg" title={row.label}>
+                  {row.label}
+                </td>
+                <td className="px-3 text-right tabular-nums text-fg-muted">
+                  {number(row.toolCalls, locale)}
+                </td>
+                <td className="px-3 text-right tabular-nums text-fg-muted">
+                  {number(row.toolErrors, locale)}
+                </td>
+                <td className="px-3 text-right tabular-nums text-fg-muted">
+                  {number(row.requestCount, locale)}
+                </td>
               </tr>
             ))}
           </tbody>

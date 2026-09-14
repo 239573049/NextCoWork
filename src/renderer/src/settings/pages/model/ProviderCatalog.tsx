@@ -3,13 +3,14 @@ import {
   Check,
   ExternalLink,
   Loader2,
+  PackageOpen,
   Plus,
   Search,
   Shuffle,
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   PROVIDER_PRESETS,
   type ProviderPreset,
@@ -17,8 +18,11 @@ import {
 import { baseUrlWarnings, previewUrl } from "../../../../../shared/domain/baseurl";
 import {
   joinProtocol,
+  PROTOCOL_LABEL,
   type ProtocolFamily,
 } from "../../../../../shared/domain/provider";
+import type { ImportSourceKind } from "../../../../../shared/domain/import";
+import type { ImportableProvider } from "../../../../../shared/domain/provider-import";
 import { Button } from "../../../components/ui/Button";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Segmented } from "../../../components/ui/Segmented";
@@ -26,7 +30,7 @@ import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
 import { openExternal } from "../../../services/app";
-import { upsertProvider, setProviderAliases } from "../../../services/provider";
+import { upsertProvider, setProviderAliases, listImportableProviders } from "../../../services/provider";
 import { useModelsStore } from "../../../stores/models";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { isPresetAdded, providerFromPreset, seedModelsForPreset } from "./provider-edit";
@@ -81,6 +85,9 @@ import {
  * ★ 每张卡片显示的是 `previewUrl()` 算出的**最终请求地址**而不是 baseUrl:
  * OpenAI 族的版本段在 base 里、Anthropic 族不带,只看 base 会以为数据录错了。
  */
+/** 右侧那一栏的三个视图:预设目录 / 自定义表单 / 从其他应用导入。 */
+type CatalogView = "catalog" | "custom" | "import";
+
 export function ProviderCatalog({
   onClose,
   onAdded,
@@ -92,8 +99,8 @@ export function ProviderCatalog({
   const { t } = useI18n();
   const [tab, setTab] = useState<CatalogTab>("recommended");
   const [query, setQuery] = useState("");
-  /** 目录 ↔ 自定义表单。同一栏里换视图,不再叠一层浮层 */
-  const [custom, setCustom] = useState(false);
+  /** 目录 ↔ 自定义表单 ↔ 从其他应用导入。同一栏里换视图,不再叠一层浮层 */
+  const [view, setView] = useState<CatalogView>("catalog");
   const providers = useModelsStore((s) => s.providers);
 
   // 搜索时跨全表找 —— 用户打「openrouter」不该还要先猜它在哪个分类
@@ -120,11 +127,11 @@ export function ProviderCatalog({
   return (
     <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas">
       <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
-        {custom && (
+        {view !== "catalog" && (
           <button
             type="button"
             aria-label={t("models.backToPresets")}
-            onClick={() => setCustom(false)}
+            onClick={() => setView("catalog")}
             className={cn(
               "app-no-drag flex size-6 shrink-0 items-center justify-center",
               "rounded-[7px] text-icon transition-colors hover:bg-tint hover:text-fg",
@@ -134,7 +141,11 @@ export function ProviderCatalog({
           </button>
         )}
         <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
-          {custom ? t("models.customProviderTitle") : t("models.addProvider")}
+          {view === "custom"
+            ? t("models.customProviderTitle")
+            : view === "import"
+              ? t("models.importFromApps")
+              : t("models.addProvider")}
         </span>
         <button
           type="button"
@@ -149,8 +160,10 @@ export function ProviderCatalog({
         </button>
       </div>
 
-      {custom ? (
+      {view === "custom" ? (
         <CustomProviderForm onAdded={onAdded} />
+      ) : view === "import" ? (
+        <ImportProvidersForm onAdded={onAdded} />
       ) : (
         <div className="px-4 py-3.5">
           <p className="pb-3 text-[11.5px] leading-[1.6] text-fg-faint">
@@ -198,7 +211,8 @@ export function ProviderCatalog({
             />
           ) : (
             <div className="grid grid-cols-2 gap-2">
-              {showCustom && <CustomProviderCard onOpen={() => setCustom(true)} />}
+              {showCustom && <CustomProviderCard onOpen={() => setView("custom")} />}
+              {showCustom && <ImportFromAppsCard onOpen={() => setView("import")} />}
               {list.map((p) => (
                 <PresetCard
                   key={p.id}
@@ -264,6 +278,246 @@ function CustomProviderCard({ onOpen }: { onOpen: () => void }): ReactNode {
         {t("models.customProviderCardHint")}
       </p>
     </button>
+  );
+}
+
+/**
+ * 「从其他应用导入」那张卡。紧挨着「自定义」卡 —— 两者都是预设表覆盖不到的
+ * 逃生门:一个给手上有地址的人,一个给手上有 Claude Code / Codex / OpenCode
+ * 的人(那些配置里往往已经有一个可用的中转端点,不该让他再手抄一遍)。
+ */
+function ImportFromAppsCard({ onOpen }: { onOpen: () => void }): ReactNode {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={cn(
+        "app-no-drag min-w-0 rounded-[9px] border border-border bg-canvas px-2.5 py-2 text-left",
+        "transition-colors hover:bg-tint/60",
+      )}
+    >
+      <div className="flex items-center gap-1.5">
+        <span
+          className={cn(
+            "flex size-5 shrink-0 items-center justify-center rounded-[6px]",
+            "bg-tint text-icon",
+          )}
+          aria-hidden
+        >
+          <PackageOpen size={12} />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-fg">
+          {t("models.importFromApps")}
+        </span>
+        <Plus size={12} className="shrink-0 text-icon" aria-hidden />
+      </div>
+      <p className="mt-1 truncate text-[10.5px] text-fg-muted">
+        {t("models.importFromAppsHint")}
+      </p>
+      <p className="mt-0.5 truncate text-[10.5px] text-fg-faint">
+        {t("models.importFromAppsCardHint")}
+      </p>
+    </button>
+  );
+}
+
+const IMPORT_SOURCES: ReadonlyArray<{ kind: ImportSourceKind; labelKey: TranslationKey }> = [
+  { kind: "claude-code", labelKey: "import.sourceClaude" },
+  { kind: "codex", labelKey: "import.sourceCodex" },
+  { kind: "opencode", labelKey: "import.sourceOpencode" },
+];
+
+/**
+ * 从 Claude Code / Codex / OpenCode 解析提供商 → 勾选审核 → 生成自定义提供商。
+ *
+ * ★ 解析全在主进程只读完成,这里拿到的**已经没有任何密钥值**(`hasLocalKey`
+ * 只是个布尔提示)。落地走的是和「自定义」表单**同一条路**:`customProviderDraft`
+ * + `upsertProvider` 生成 `custom-` 前缀的提供商,用户随后到右侧填密钥、拉模型。
+ *
+ * ★ **不自动种模型** —— 理由同 `CustomProviderForm`:我们对这个端点一无所知,
+ * 种什么都是猜。源侧的模型名只作展示,导入后一点「从服务商拉取」就有真的那份。
+ *
+ * ★ 缺 base URL 的项**禁选**:生成一个连不上的提供商比不生成更糟。
+ */
+function ImportProvidersForm({
+  onAdded,
+}: {
+  onAdded?: (providerId: string) => void;
+}): ReactNode {
+  const { t } = useI18n();
+  const providers = useModelsStore((s) => s.providers);
+  const [sourceKind, setSourceKind] = useState<ImportSourceKind>("codex");
+  const [items, setItems] = useState<ImportableProvider[] | null>(null);
+  const [available, setAvailable] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setSelected(new Set());
+    void listImportableProviders(sourceKind)
+      .then((res) => {
+        if (cancelled) return;
+        setAvailable(res.available);
+        setItems(res.providers);
+        // 默认勾选所有可导入(有 base URL)的项。
+        setSelected(new Set(res.providers.filter((p) => p.baseUrl !== "").map((p) => p.sourceKey)));
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setItems([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceKind]);
+
+  const toggle = (key: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const chosen = (items ?? []).filter((p) => selected.has(p.sourceKey) && p.baseUrl !== "");
+
+  const runImport = (): void => {
+    if (chosen.length === 0) return;
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      // ★ existingIds 边导边累积:两条同名的源提供商不会撞成同一个 id。
+      const existing = providers.map((p) => p.id);
+      let last = "";
+      for (const p of chosen) {
+        const draft = customProviderDraft(
+          { name: p.name, baseUrl: p.baseUrl, protocol: p.protocol },
+          existing,
+        );
+        await upsertProvider(draft);
+        existing.push(draft.id);
+        last = draft.id;
+      }
+      if (last !== "") onAdded?.(last);
+    })()
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="space-y-3 px-4 py-4">
+      <p className="text-[11.5px] leading-[1.6] text-fg-faint">
+        {t("models.importProvidersHint")}
+      </p>
+
+      <Segmented
+        size="sm"
+        label={t("import.fromOtherApps")}
+        value={sourceKind}
+        onChange={(v) => setSourceKind(v)}
+        options={IMPORT_SOURCES.map((s) => ({ value: s.kind, label: t(s.labelKey) }))}
+      />
+
+      {error !== null && (
+        <p className="rounded-[8px] bg-danger/10 px-3 py-2 text-[12px] leading-[1.6] text-danger">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 text-[12px] text-fg-faint">
+          <Loader2 size={14} className="animate-spin" />
+          {t("common.loading")}
+        </div>
+      ) : !available ? (
+        <EmptyState
+          icon={<PackageOpen size={20} />}
+          title={t("models.importSourceNotFound")}
+          hint={t("models.importSourceNotFoundHint")}
+          className="py-10"
+        />
+      ) : (items ?? []).length === 0 ? (
+        <EmptyState
+          icon={<PackageOpen size={20} />}
+          title={t("models.importNoProviders")}
+          hint={t("models.importNoProvidersHint")}
+          className="py-10"
+        />
+      ) : (
+        <div className="space-y-1.5">
+          {(items ?? []).map((p) => {
+            const selectable = p.baseUrl !== "";
+            const active = selected.has(p.sourceKey);
+            return (
+              <button
+                key={p.sourceKey}
+                type="button"
+                disabled={!selectable}
+                onClick={() => toggle(p.sourceKey)}
+                className={cn(
+                  "app-no-drag flex w-full min-w-0 items-start gap-2.5 rounded-[9px] border px-2.5 py-2 text-left transition-colors",
+                  selectable ? "border-border hover:bg-tint/60" : "border-hairline opacity-60",
+                  active && selectable && "border-accent bg-accent/5",
+                )}
+              >
+                <span
+                  className={cn(
+                    "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[5px] border",
+                    active && selectable ? "border-accent bg-accent text-accent-fg" : "border-border text-transparent",
+                  )}
+                  aria-hidden
+                >
+                  <Check size={11} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5">
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-fg">{p.name}</span>
+                    <span className="shrink-0 rounded-[5px] bg-tint px-1.5 py-0.5 text-[10px] text-fg-muted">
+                      {PROTOCOL_LABEL[p.protocol]}
+                    </span>
+                  </span>
+                  <span className="mt-0.5 block truncate font-mono text-[10.5px] text-fg-faint" title={p.baseUrl}>
+                    {p.baseUrl || t("models.importNoBaseUrl")}
+                  </span>
+                  <span className="mt-0.5 block text-[10.5px] text-fg-muted">
+                    {p.models.length > 0 && t("models.importModelCount", { count: p.models.length })}
+                    {p.hasLocalKey && (
+                      <span className="text-warning">
+                        {p.models.length > 0 ? " · " : ""}
+                        {t("models.importHasKey")}
+                      </span>
+                    )}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="flex items-center justify-end gap-2 border-t border-hairline pt-3">
+        <Button
+          size="sm"
+          variant="accent"
+          disabled={busy || loading || chosen.length === 0}
+          icon={busy ? <Loader2 size={13} className="animate-spin" /> : undefined}
+          onClick={runImport}
+        >
+          {t("models.importSelected", { count: chosen.length })}
+        </Button>
+      </div>
+    </div>
   );
 }
 

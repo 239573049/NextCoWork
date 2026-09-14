@@ -66,8 +66,6 @@ export const extensionsZh = {
   'ext.field.toolsHint': '留空 = 继承全部，例如 Read, Grep',
   'ext.field.model': '模型',
   'ext.field.modelHint': '留空 = 用默认子代理模型',
-  'ext.field.permissionMode': '权限档位',
-  'ext.field.inherit': '继承',
   'ext.field.name': '名称',
   'ext.field.nameHint': '小写字母、数字、连字符；模型按它派活',
   'ext.field.color': '颜色标记',
@@ -78,6 +76,8 @@ export const extensionsZh = {
   'ext.field.toolsCustom': '自定义',
   'ext.field.toolsUnknown': ({ list }: Params) => `另外还留着表里没有的工具，保存时原样写回：${String(list)}`,
   'ext.field.inheritDefault': '继承默认',
+  'ext.field.modelAnyProvider': ({ alias }: Params) => `任意供应商 · ${String(alias)}`,
+  'ext.field.modelUnavailable': ({ alias }: Params) => `${String(alias)}(当前不可用)`,
 
   // ── 错误与提示 ──
   'ext.error.loadFailed': '读不到列表',
@@ -175,8 +175,6 @@ export const extensionsEn = {
   'ext.field.toolsHint': 'Empty = inherit all, e.g. Read, Grep',
   'ext.field.model': 'Model',
   'ext.field.modelHint': 'Empty = use the default subagent model',
-  'ext.field.permissionMode': 'Permission mode',
-  'ext.field.inherit': 'Inherit',
   'ext.field.name': 'Name',
   'ext.field.nameHint': 'Lowercase letters, digits, hyphens; the model dispatches by it',
   'ext.field.color': 'Color',
@@ -187,6 +185,8 @@ export const extensionsEn = {
   'ext.field.toolsCustom': 'Custom',
   'ext.field.toolsUnknown': ({ list }: Params) => `Also keeps tools that are not in this list and writes them back as-is: ${String(list)}`,
   'ext.field.inheritDefault': 'Inherit default',
+  'ext.field.modelAnyProvider': ({ alias }: Params) => `Any provider · ${String(alias)}`,
+  'ext.field.modelUnavailable': ({ alias }: Params) => `${String(alias)} (unavailable)`,
 
   'ext.error.loadFailed': 'Could not load the list',
   'ext.error.emptyBody': 'The body cannot be empty — it is the whole content',

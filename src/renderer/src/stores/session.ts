@@ -226,7 +226,7 @@ function createSessionStore(sessionId: string): SessionStore {
       persistInput(sessionId, true)
 
       try {
-        await startRun({ ...opts, runId, sessionId, input, inputMessageId })
+        await startRun({ ...opts, runId, sessionId, input, inputMessageId, ...(internal ? { inputInternal: true } : {}) })
       } catch (err) {
         unregisterRun(runId)
         set((state) => ({
@@ -570,26 +570,61 @@ function reportCompletedBackgroundFromState(sessionId: string, events: readonly 
   }
 }
 
-/** Deliver a detached child result to the main agent exactly once. */
-export async function reportBackgroundChild(sessionId: string, callId: string): Promise<void> {
+/**
+ * Deliver a detached child result to the main agent exactly once.
+ *
+ * ★★ **`lastOptions` 在重启之后是 null** —— 它只在 `send` 里写,不落盘。
+ * 于是一个跨重启的 pending 汇报走到这里会直接 return:界面上那颗待办圆点、
+ * 那句「结果待汇报给主代理」、后台任务中心里那颗「处理」按钮全都在,
+ * 点下去**什么都不发生,也不报错**。子代理跑完的结果就此烂在库里。
+ *
+ * 所以这里收一份 `fallback` —— 由调用方(React 那一侧,手上有 workspace)
+ * 按「不经过输入框的路径」的老规矩从工作区默认值拼出来,和「编辑某条消息后
+ * 重新生成」用的是同一份档位。自动触发那条路不需要它:那时刚发过消息,
+ * `lastOptions` 必然在。
+ *
+ * ★ 连 fallback 都没有时置 `blocked` 而**不是**静默 return。
+ * 「等待主代理处理」至少说的是实话,而一个什么都不做的按钮不是。
+ */
+export async function reportBackgroundChild(
+  sessionId: string,
+  callId: string,
+  fallback?: SendOptions
+): Promise<void> {
   const key = `${sessionId}:${callId}`
   if (backgroundReports.has(key)) return
   const store = stores.get(sessionId)
   if (!store) return
   const before = store.getState()
   const child = before.transcript.subagents[callId]
-  if (!child || child.background !== true || child.reportStatus !== 'pending') return
-  if (!before.lastOptions) return
+  if (!child || child.background !== true || (child.reportStatus !== 'pending' && child.reportStatus !== 'blocked')) return
+  const options = before.lastOptions ?? fallback
+  if (options === undefined || options === null) {
+    store.getState().setSubagentReportStatus(callId, 'blocked')
+    return
+  }
   backgroundReports.add(key)
   store.getState().setSubagentReportStatus(callId, 'injecting')
   const summary = child.summary ?? 'The background subagent finished without a summary.'
   const report = `Background subagent result (${child.subagentType ?? 'subagent'}, ${child.childRunId}):\n\n${summary}\n\nReview this result and continue the conversation if action is needed.`
   try {
-    const parts: ContentPart[] = [{ type: 'text', text: report }]
+    /*
+      ★ 第二个 part 是**给界面看的**,不给模型 —— `subagent` 在两个编码器里都被丢弃
+      (anthropic 编码器显式 `return null`,openai 那条 if-else 链不认它)。
+      它在这里的唯一职责是让 `threadRows` 认出「这条 internal 消息是某个后台子代理
+      的结果回传」,从而画一行可展开的汇报行,而不是把整条消息藏起来。
+
+      ★ 用现成的 part 类型而不是在 `AgentMessage` 上加字段:这条通道已经打通了
+      持久化校验、IPC、上下文估算三处,加字段要把这三处再走一遍。
+    */
+    const parts: ContentPart[] = [
+      { type: 'text', text: report },
+      { type: 'subagent', callId, childRunId: child.childRunId, summary }
+    ]
     if (before.activeRunId !== null) {
       await interjectRun(before.activeRunId, [{ id: ulid(), parts, internal: true }])
     } else {
-      await before.send(report, before.lastOptions, parts, true)
+      await before.send(report, options, parts, true)
     }
     store.getState().setSubagentReportStatus(callId, 'reported')
   } catch (error) {

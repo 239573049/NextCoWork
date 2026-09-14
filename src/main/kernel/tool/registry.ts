@@ -78,6 +78,14 @@ export type SubagentOutcome =
   | {
       kind: 'background'
       childRunId: string
+      /**
+       * 并发满了,这次派发**还在排队**,run 尚未创建 —— 有空位时会自动开始。
+       *
+       * ★ 仍然走 `background` 而不是新开一支 `queued`:对调用方来说两者是同一件事
+       * (「派出去了,别等它」),而 `childRunId` 此刻已经 mint 好,任务面板照样找得到。
+       * 分成两支只会让 `Task` 里多一条除了措辞之外完全一样的分支。
+       */
+      queued?: boolean
     }
 
 export type SpawnSubagentFn = (req: SubagentRequest) => Promise<SubagentOutcome>

@@ -1,7 +1,7 @@
 /**
  * 概览指标卡 —— 参考图顶部那一排。
  *
- * 复用 `UsageTab` 里 `SummaryCards` 的既有样式(`rounded-[18px] bg-surface` +
+ * 复用 `UsagePage` 里 `SummaryCards` 的既有样式(`rounded-[18px] bg-surface` +
  * `grid-cols-2 min-[760px]:grid-cols-4`),同一页上两排卡不该长得不一样。
  */
 import type { UsageActivityStats } from '../../../../../../shared/domain/usage'
@@ -64,13 +64,19 @@ export function OverviewCards({
     {
       key: 'current',
       title: t('usage.metric.currentStreak'),
-      value: activity === null ? '—' : t('usage.metric.days', { days: formatNumber(activity.currentStreak, locale) }),
+      value:
+        activity === null
+          ? '—'
+          : t('usage.metric.days', { days: formatNumber(activity.currentStreak, locale) }),
       detail: ''
     },
     {
       key: 'longest',
       title: t('usage.metric.longestStreak'),
-      value: activity === null ? '—' : t('usage.metric.days', { days: formatNumber(activity.longestStreak, locale) }),
+      value:
+        activity === null
+          ? '—'
+          : t('usage.metric.days', { days: formatNumber(activity.longestStreak, locale) }),
       detail: ''
     }
   ]
@@ -84,11 +90,21 @@ export function OverviewCards({
           aria-busy={loading}
         >
           <p className="text-[11px] text-fg-faint">{card.title}</p>
-          <p className="mt-1 truncate text-[18px] font-semibold tabular-nums text-fg" title={card.value}>
+          <p
+            className="mt-1 truncate text-[18px] font-semibold tabular-nums text-fg"
+            title={card.value}
+          >
             {card.value}
           </p>
           {card.detail !== '' && (
-            <p className="mt-1 text-[10.5px] leading-[1.35] text-fg-muted">{card.detail}</p>
+            // 六张卡并排,说明长短差很多。不钳住的话最长的那张会把整行撑高一截,
+            // 而卡片高度本来是这排的视觉基线
+            <p
+              className="mt-1 line-clamp-2 text-[10.5px] leading-[1.35] text-fg-muted"
+              title={card.detail}
+            >
+              {card.detail}
+            </p>
           )}
         </section>
       ))}

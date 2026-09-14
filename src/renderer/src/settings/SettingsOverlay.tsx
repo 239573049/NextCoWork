@@ -47,6 +47,7 @@ import { ImportPage } from './pages/import/ImportPage'
 import { GeneralPage } from './pages/GeneralPage'
 import { ModelPage } from './pages/model/ModelPage'
 import { PreferencePage } from './pages/PreferencePage'
+import { UsagePage } from './pages/usage/UsagePage'
 import { StubPage } from './pages/StubPage'
 import { useI18n, type Translate } from '../i18n'
 import { AccountPage } from './pages/AccountPage'
@@ -295,6 +296,12 @@ function PageBody({
       return <PreferencePage {...props} />
     case 'model':
       return <ModelPage {...props} />
+    /*
+      ★ 不吃 `SettingsPageProps` —— 这一页一个 `AppSettings` 字段都不读、
+      也不写。它只按时间窗查历史账,所有状态都是页面本地的。
+    */
+    case 'usage':
+      return <UsagePage />
     case 'connection':
       return <ConnectionPage {...props} />
     case 'data':

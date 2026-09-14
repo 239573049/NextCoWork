@@ -34,6 +34,8 @@ import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/per
 import { interactions, type InteractionDraft } from './kernel/interaction-gate'
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
+import type { Capacity, SlotRefusal } from './kernel/subagent-queue'
+import { QUEUE_MAX_WAIT_MS, SubagentQueue } from './kernel/subagent-queue'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
 import type { GitContext } from './kernel/git-context'
 import { readGitContext } from './kernel/git-context'
@@ -969,6 +971,36 @@ export function installChildRunLauncher(fn: ChildRunLauncher): void {
 /** 配置损坏时的安全回退值。正常值来自 settings.subagent。 */
 const DEFAULT_CONCURRENT_SUBAGENTS = 4
 
+/**
+ * 现读一次并发上限。
+ *
+ * ★ 每次都重读而不是缓存:用户在运行期间调高上限,下一次派发(以及队列的下一个
+ * tick)就该生效。设置文件是用户可编辑输入,所以这里对异常值做防御性归一化 ——
+ * 注意 `globalLimit` 合法下界是 **0**(意为「完全禁用子代理」),不是 1。
+ */
+function subagentCapacity(): Capacity {
+  const configured = store.getSettings().subagent
+  return {
+    perSessionLimit:
+      Number.isInteger(configured.perSessionLimit) && configured.perSessionLimit >= 1
+        ? configured.perSessionLimit
+        : DEFAULT_CONCURRENT_SUBAGENTS,
+    globalLimit:
+      Number.isInteger(configured.globalLimit) && configured.globalLimit >= 0
+        ? configured.globalLimit
+        : DEFAULT_CONCURRENT_SUBAGENTS
+  }
+}
+
+/**
+ * 子代理并发队列 —— 满载时排队,而不是把一次调度问题报成失败。策略全在
+ * `kernel/subagent-queue.ts`,这里只把「上限从哪读」和「谁在占着名额」接上去。
+ */
+const subagentQueue = new SubagentQueue(subagentCapacity, {
+  childRunIds: (parentRunId) => runs.activeChildrenOf(parentRunId).map((h) => h.runId),
+  subagentRunIds: () => runs.activeSubagentRunIds()
+})
+
 /** 子 runId 的序号。进程内单调递增就够 —— 它只需要在本进程里唯一。 */
 let childSeq = 0
 
@@ -1050,6 +1082,13 @@ function monitorChildRun(
     const { status, error } = await waitForEnd(child)
     if (finished !== undefined) await finished.catch(() => {})
     off()
+    /*
+      名额刚刚腾出来了 —— 立刻重扫一遍队列,把排队中的下一个派出去。
+      ★ 这只是**快路径**:队列自己那个 1 秒的兜底重扫才是正确性所在。
+      run 被 abort 但从未 finish、launch 抛了异常、run 被整个遗弃,
+      这些路径压根走不到这一行,靠的就是那次兜底重扫。
+    */
+    subagentQueue.notify()
     const history = store.getHistory(childReq.sessionId)
     const last = [...history].reverse().find((m) => m.role === 'assistant')
     const text = last === undefined ? '' : visibleText(last)
@@ -1243,11 +1282,35 @@ function childRequestFor(
     permissionMode: minPermission(parentReq.permissionMode, def.permissionMode ?? 'full'),
     // ★ 别名和供应商必须成对决定 —— 三档来源的优先级连同理由都在
     //   `subagentModelSelection` 里。`configuredModel` 已经过可用性校验(见调用点)。
-    ...subagentModelSelection(def.model, configuredModel, parentReq),
+    ...subagentModelSelection(declaredSubagentModel(def), configuredModel, parentReq),
     skillIds: parentReq.skillIds,
     skillSelectionMode: parentReq.skillSelectionMode,
     agentType: def.name
   }
+}
+
+/**
+ * 子代理文件里那一对 `(model, modelProviderId)`,把**已经指不到的那个锁摘掉**。
+ *
+ * ★ 摘锁而不是整对作废:别名多半还在(供应商被删、或者那家不再提供这个别名),
+ * 只按别名择优跑得起来,而带着一个查不到的供应商去路由,拿到的是空候选集 ——
+ * 子代理整条失败,父代理只会转述一句「子代理失败了」。用户当初钉那一家是**偏好**,
+ * 而「这个子代理要用这个别名」是他更硬的那半个意思。
+ *
+ * ★ 反过来,别名本身查不到时**不动它**:那是用户写错了模型名,静默换一个模型
+ * 跑完再交回结果,比失败难查得多。
+ */
+function declaredSubagentModel(def: AgentDefinition): { model?: string; modelProviderId?: string } {
+  if (def.model === undefined) return {}
+  const providerId = def.modelProviderId
+  if (providerId === undefined) return { model: def.model }
+  if (getRouter().resolveModel(def.model, providerId) !== undefined) {
+    return { model: def.model, modelProviderId: providerId }
+  }
+  getHost().logger.warn(
+    `[subagent] ${def.name} 钉的供应商 ${providerId} 提供不了 ${def.model},改按别名择优`
+  )
+  return { model: def.model }
 }
 
 /**
@@ -1276,12 +1339,22 @@ function availableSubagentModel(configured: { model: string; modelProviderId?: s
 }
 
 /**
- * `ToolContext.spawnSubagent` 的生产实现 —— 三道闸门 + 建 run + 等结果。
+ * `ToolContext.spawnSubagent` 的生产实现 —— 两道闸门 + 排队要名额 + 建 run + 等结果。
+ *
+ * ★ 并发满了走的是**排队**,不是拒绝(见 `kernel/subagent-queue.ts`)。
+ * 之前那两道「满了就 refused」的闸门把一个纯调度问题伪装成了一次失败:
+ * UI 上是一张红色失败卡,而模型拿到 `toolFail` 之后可能放弃这个子任务、
+ * 可能换个 `subagent_type` 再试(以为是那个代理坏了)—— 这次派发的意图直接丢了。
  *
  * ★ 它住在 runtime 而不是 `task.ts`,因为只有这里同时握着**父 handle**
  * (要在它身上发 `subagent_start/end`)和 store(要取子代理的产出)。
  * `ctx.emit` 只会发 `tool_progress`,发不了子代理事件。
  */
+/** ⚠️ 只给测试:队列里还有几个在等。接线用例靠它证明等待者没有泄漏。 */
+export function queuedSubagentCountForTest(): number {
+  return subagentQueue.size
+}
+
 function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills: readonly Skill[] | undefined, resources: RunResources): SpawnSubagentFn {
   return async (sub) => {
     /*
@@ -1314,90 +1387,181 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
       }
     }
 
-    // 读取最新设置,让用户在运行期间调整并发上限也能影响下一次派发。
-    // 设置文件是用户可编辑输入,因此对异常值做一次防御性归一化。
+    // 读取最新设置,让用户在运行期间调整默认模型与并发上限都能影响下一次派发。
     const configured = store.getSettings().subagent
-    const perSessionLimit = Number.isInteger(configured.perSessionLimit) && configured.perSessionLimit >= 1
-      ? configured.perSessionLimit
-      : DEFAULT_CONCURRENT_SUBAGENTS
-    const globalLimit = Number.isInteger(configured.globalLimit) && configured.globalLimit >= 0
-      ? configured.globalLimit
-      : DEFAULT_CONCURRENT_SUBAGENTS
-
-    if (runs.activeChildCount(parent.runId) >= perSessionLimit) {
-      return {
-        kind: 'refused',
-        reason:
-          `The per-conversation concurrent subagent limit of ${String(perSessionLimit)} has been reached. ` +
-          `Wait for the running ones to finish before launching another, or carry on yourself.`
-      }
-    }
-
-    if (runs.activeSubagentCount() >= globalLimit) {
-      return {
-        kind: 'refused',
-        reason:
-          `The global concurrent subagent limit of ${String(globalLimit)} has been reached. ` +
-          `Wait for the running ones to finish before launching another, or carry on yourself.`
-      }
-    }
+    // 上限单独走 `subagentCapacity()`:队列每个 tick 也要重读同一份归一化逻辑。
+    const { perSessionLimit, globalLimit } = subagentCapacity()
 
     const childRunId = `${parent.runId}:sub:${String(++childSeq)}`
     const childReq = childRequestFor(
       parentReq, parent, def, childRunId, sub.prompt, availableSubagentModel(configured)
     )
 
-    const startedAt = getHost().clock.now()
-    parent.emit({
-      type: 'subagent_start', callId: sub.callId, childRunId,
-      // ★ 派生 id 在这里已经算好了(`childRequestFor`),原样递出去 ——
-      //   渲染层照着模板再拼一遍的话,套两层子代理就会拼错,见 `event.ts` 那段注释
-      childSessionId: childReq.sessionId,
-      description: sub.description,
-      subagentType: def.name,
-      model: childReq.model,
-      background: sub.background === true,
-      at: startedAt
-    })
-
-    const launch =
-      childRunLauncher ??
-      /*
-        没装启动器时的降级路径。run 照跑,只是不推给任何渲染层 ——
-        这恰好是无头测试想要的形状,所以它不是「测试替身」,是一条真实的降级。
-      */
-      ((_p: RunHandle, r: RunRequest, driver: (h: RunHandle, rr: RunRequest) => Promise<void>) => {
-        const h = runs.create(r)
-        void driver(h, r)
-        return h
-      })
-
     /*
-      ★ 除了 handle,还要攥住 driver 那个 promise —— 光等 `run_end` 是**不够**的。
-
-      `runAgent` 的形状是 `session.run().finally(() => store.setHistory(...))`:
-      `run_end` 在 `run()` 里面就发出去了,而写转录发生在它**之后**的那个
-      `finally` 里。只等 handle 的话,这里读到的 history 会是空的 ——
-      于是每一次子代理都被报成「结束时没有产出任何文字」,而它明明说了话。
+      ★ 名额拿到之后要同步做完的那一段。整段交给队列在派发循环里**内联执行** ——
+      理由见 `subagent-queue.ts` 里 `SlotRequest.start` 的注释(不这么做的话,
+      `runs.create` 会落在微任务里,同一个空位会被唤醒的多个等待者同时认领)。
     */
-    let finished: Promise<void> | undefined
-    const child = launch(parent, childReq, (h, r) => {
-      finished = runAgent(h, r, def, parentSkills, resources)
-      return finished
-    })
-    const result = monitorChildRun(parent, child, childReq, sub.callId, sub.background === true, finished)
-    if (sub.background === true) {
-      void result.catch((error: unknown) => {
-        getHost().logger.warn(`[subagent] background child failed: ${childRunId}`, error)
+    const start = (): { result: Promise<ChildRunResult> } => {
+      /*
+        ★ 环境要**再断言一次**。排队可能排了几分钟,而工作区租约在这期间
+        完全可能已经被释放 —— 入队前那一次断言早就过期了。
+      */
+      resources.environment.assertReady()
+
+      const startedAt = getHost().clock.now()
+      parent.emit({
+        type: 'subagent_start', callId: sub.callId, childRunId,
+        // ★ 派生 id 在这里已经算好了(`childRequestFor`),原样递出去 ——
+        //   渲染层照着模板再拼一遍的话,套两层子代理就会拼错,见 `event.ts` 那段注释
+        childSessionId: childReq.sessionId,
+        description: sub.description,
+        subagentType: def.name,
+        model: childReq.model,
+        background: sub.background === true,
+        at: startedAt
       })
-      return { kind: 'background', childRunId }
+
+      const launch =
+        childRunLauncher ??
+        /*
+          没装启动器时的降级路径。run 照跑,只是不推给任何渲染层 ——
+          这恰好是无头测试想要的形状,所以它不是「测试替身」,是一条真实的降级。
+        */
+        ((_p: RunHandle, r: RunRequest, driver: (h: RunHandle, rr: RunRequest) => Promise<void>) => {
+          const h = runs.create(r)
+          /*
+            ★ **必须接住 driver 的 rejection**(`ipc/agent.ts` 的 `launch` 早就这么做了,
+            只有这条降级路径漏了)。`runAgent` 在 `new AgentSession(...)` 那一步是会
+            `release(); throw` 的 —— 抛完没人 `finish()`,这条 run 就永远停在 `running`。
+            以前的症状只是「偶尔少一个并发位」;排队之后,它会永久占着名额,
+            把后面所有派发全卡在队列里。
+          */
+          const failed = (error: unknown): void => {
+            if (h.signal.aborted) h.finish('aborted')
+            else h.finish('error', agentError('unknown', error instanceof Error ? error.message : String(error)))
+          }
+          try { void Promise.resolve(driver(h, r)).catch(failed) }
+          catch (error) { failed(error) }
+          return h
+        })
+
+      /*
+        ★ 除了 handle,还要攥住 driver 那个 promise —— 光等 `run_end` 是**不够**的。
+
+        `runAgent` 的形状是 `session.run().finally(() => store.setHistory(...))`:
+        `run_end` 在 `run()` 里面就发出去了,而写转录发生在它**之后**的那个
+        `finally` 里。只等 handle 的话,这里读到的 history 会是空的 ——
+        于是每一次子代理都被报成「结束时没有产出任何文字」,而它明明说了话。
+      */
+      let finished: Promise<void> | undefined
+      const child = launch(parent, childReq, (h, r) => {
+        finished = runAgent(h, r, def, parentSkills, resources)
+        return finished
+      })
+      return {
+        result: monitorChildRun(parent, child, childReq, sub.callId, sub.background === true, finished)
+      }
     }
 
-    const completed = await result
+    /*
+      ★ 这里依赖 `acquire` 的**同步不变式**:它在第一次 await 之前就决定好了
+      「直接启动」还是「入队」,所以 `acquire(...)` 一返回,`queued` 就已经是准的了。
+      后台派发要立刻回话给模型,靠的就是这条。别在这两行之间插入 await。
+    */
+    let queued = false
+    const slot = subagentQueue.acquire({
+      parent,
+      // 后台派发不阻塞父 run,所以它**不算**死锁判据里的「卡住了」。见 `SlotRequest.blocking`
+      blocking: sub.background !== true,
+      start,
+      onQueued: (ahead) => {
+        queued = true
+        parent.emit({
+          type: 'tool_progress',
+          callId: sub.callId,
+          progress: {
+            callId: sub.callId,
+            message: ahead === 0 ? '排队中，等待空位' : `排队中，前面还有 ${String(ahead)} 个`
+          }
+        })
+      }
+    })
+
+    if (sub.background === true) {
+      void slot.then((acquired) => {
+        if (acquired.ok) {
+          return acquired.value.result.then(() => undefined, (error: unknown) => {
+            getHost().logger.warn(`[subagent] background child failed: ${childRunId}`, error)
+          })
+        }
+        /*
+          排着队但一秒都没跑过。★ 必须把落盘的那张 Task 回执改成 aborted ——
+          否则卡片会永远停在「运行中」,而它其实从来没有启动过。
+        */
+        getHost().logger.info(`[subagent] queued background child never started (${acquired.reason}): ${childRunId}`)
+        persistSubagentCompletion(parent.sessionId, sub.callId, childRunId, 'aborted', '', undefined, true)
+        return undefined
+      }, (error: unknown) => {
+        getHost().logger.warn(`[subagent] background child failed to start: ${childRunId}`, error)
+      })
+      return { kind: 'background', childRunId, ...(queued ? { queued: true } : {}) }
+    }
+
+    const acquired = await slot
+    if (!acquired.ok) {
+      /*
+        ★ 死锁拒绝要留痕:它基本等价于「用户把并发上限配得太小,而代理在套娃」——
+        生产里这是唯一能发现那件事的途径(队列深度今天没有任何地方在记)。
+      */
+      if (acquired.reason === 'deadlock') {
+        getHost().logger.warn(
+          `[subagent] slot deadlock (${String(perSessionLimit)}/${String(globalLimit)}): ${childRunId}`
+        )
+      }
+      return { kind: 'refused', reason: slotRefusalReason(acquired.reason, perSessionLimit, globalLimit) }
+    }
+
+    const completed = await acquired.value.result
     return {
       kind: 'finished', childRunId, status: completed.status, text: completed.text,
       ...(completed.error === undefined ? {} : { error: completed.error })
     }
+  }
+}
+
+/**
+ * 排不进队列时给模型的那句话。
+ *
+ * ★ 每一种都要说清**「不是你错了,是满了」以及「那你现在该做什么」**。
+ * 只说「达到上限」的话,模型会换一个 `subagent_type` 再试一次 —— 它会以为
+ * 是那个子代理的问题(和 `task.ts` 里深度闸门那条注释同一个道理)。
+ */
+function slotRefusalReason(reason: SlotRefusal, perSessionLimit: number, globalLimit: number): string {
+  switch (reason) {
+    case 'disabled':
+      return (
+        'Subagents are disabled: the global concurrent subagent limit is set to 0. ' +
+        'Do this step yourself — launching another subagent will not work.'
+      )
+    case 'deadlock':
+      return (
+        `All ${String(globalLimit)} concurrent subagent slots are held by subagents that are ` +
+        'themselves waiting for a slot, so none will free up. Do this step yourself.'
+      )
+    case 'timeout':
+      return (
+        `No subagent slot became free within ${String(Math.round(QUEUE_MAX_WAIT_MS / 60_000))} minutes ` +
+        `(limits: ${String(perSessionLimit)} per conversation, ${String(globalLimit)} overall). ` +
+        'Do this step yourself, or try again later.'
+      )
+    case 'overflow':
+      return (
+        'Too many subagents are already queued. ' +
+        'Wait for the queued ones to finish before launching another, or carry on yourself.'
+      )
+    case 'cancelled':
+      return 'The conversation stopped before a subagent slot became free.'
   }
 }
 
@@ -2013,6 +2177,14 @@ export function resetRuntimeForTest(): void {
   sessionOnChange = null
   childRunLauncher = null
   childSeq = 0
+  // ★ 必须清:留着的话,等待者和它那个 interval 会跨用例泄漏 ——
+  //   下一个用例会被上一个用例的定时器唤醒,而它的 registry 早就换了一份。
+  subagentQueue.reset()
+  /*
+    ★ 也必须清注册表。`afterEach` 走的是 `runs.abortAll()`,而 `abort()` 不置 status ——
+    残留的「永远 running」的 run 会被队列当成占位者,把下一个用例的派发永久挂起。
+  */
+  runs.clearForTest()
   seeded = false
   store.clearHistoriesForTest()
 }

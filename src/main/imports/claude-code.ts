@@ -408,6 +408,47 @@ export async function listAssetNames(
 
 export { LAYOUT as CLAUDE_LAYOUT }
 
+/**
+ * Claude Code 的「提供商」= 它连的那个 Anthropic 端点。
+ *
+ * ★ Claude Code 没有多 provider 注册表 —— 它只认 Anthropic 一家。但很多人在
+ * `settings.json` 的 `env` 里把 `ANTHROPIC_BASE_URL` 指向了一个兼容网关。
+ * 只有当**存在自定义 base URL** 时才产出一条(否则就是内置 Anthropic 预设,
+ * 用户用现成的即可)。★ token 只判有无,**值一个字节都不读进返回**。
+ */
+export interface ClaudeProviderEnv {
+  baseUrl: string
+  defaultModel?: string
+  models: string[]
+  hasLocalKey: boolean
+}
+
+async function readEnvBlock(root: string, filename: string): Promise<Record<string, unknown>> {
+  const path = await resolveWithinRoot(root, filename)
+  if (path === null) return {}
+  try {
+    const info = await stat(path)
+    if (!info.isFile() || info.size > 2 * 1024 * 1024) return {}
+    const raw = JSON.parse(await readFile(path, 'utf8')) as unknown
+    const env = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>)['env'] : undefined
+    return env && typeof env === 'object' && !Array.isArray(env) ? (env as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+export async function listClaudeProviders(configDir: string): Promise<ClaudeProviderEnv[]> {
+  // settings.local.json 覆盖 settings.json,与 Claude Code 自身的合并次序一致。
+  const env = { ...(await readEnvBlock(configDir, 'settings.json')), ...(await readEnvBlock(configDir, 'settings.local.json')) }
+  const str = (key: string): string | undefined => (typeof env[key] === 'string' ? (env[key] as string).trim() || undefined : undefined)
+  const baseUrl = str('ANTHROPIC_BASE_URL')
+  if (baseUrl === undefined) return []
+  const defaultModel = str('ANTHROPIC_DEFAULT_MODEL') ?? str('ANTHROPIC_MODEL')
+  const models = [...new Set([defaultModel, str('ANTHROPIC_DEFAULT_HAIKU_MODEL'), str('ANTHROPIC_SMALL_FAST_MODEL')].filter((m): m is string => !!m))]
+  const hasLocalKey = str('ANTHROPIC_AUTH_TOKEN') !== undefined || str('ANTHROPIC_API_KEY') !== undefined
+  return [{ baseUrl, ...(defaultModel ? { defaultModel } : {}), models, hasLocalKey }]
+}
+
 // ─── 小工具 ───────────────────────────────────────────────────────────────
 
 async function readJson(

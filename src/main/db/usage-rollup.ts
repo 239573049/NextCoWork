@@ -36,7 +36,7 @@ import { stmt, tx } from './index'
 import { getKv, setKv } from './repo'
 import type { UsageActivityStats, UsageDailyBucket, UsageWindow } from '../../shared/domain/usage'
 import type { Currency } from '../../shared/domain/pricing'
-import { computeStreaks } from '../../shared/domain/usage-activity'
+import { computeStreaks, localDayOf } from '../../shared/domain/usage-activity'
 
 const STATE_KEY = 'usage.rollup.state'
 
@@ -77,13 +77,6 @@ export function dayBoundsLocal(day: string): { from: number; to: number } {
   const from = new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0).getTime()
   const to = new Date(y ?? 1970, (m ?? 1) - 1, (d ?? 1) + 1, 0, 0, 0, 0).getTime()
   return { from, to }
-}
-
-/** 毫秒 → 本地日期 `YYYY-MM-DD`。与 SQLite `date(at/1000,'unixepoch','localtime')` 同口径。 */
-export function localDayOf(ms: number): string {
-  const d = new Date(ms)
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
 const INSERT_DAY = `

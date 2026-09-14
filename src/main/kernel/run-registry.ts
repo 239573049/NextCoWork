@@ -292,11 +292,22 @@ export class RunRegistry {
     return this.activeChildrenOf(runId).length
   }
 
+  /**
+   * 全局仍在运行的子 run id。
+   *
+   * ★ 要 id 而不只是计数,是因为子代理并发队列的**死锁判据**要拿这些 id
+   * 去和「正卡在队列里等名额的 run」求交集:占着名额的那些自己也在等,
+   * 就没有任何人能腾出空位(见 `subagent-queue.ts`)。
+   */
+  activeSubagentRunIds(): string[] {
+    return [...this.runs.values()]
+      .filter((r) => r.parentRunId !== undefined && r.status === 'running')
+      .map((r) => r.runId)
+  }
+
   /** 全局仍在运行的子 run 数,用于应用级子代理并发上限。 */
   activeSubagentCount(): number {
-    return [...this.runs.values()].filter(
-      (r) => r.parentRunId !== undefined && r.status === 'running'
-    ).length
+    return this.activeSubagentRunIds().length
   }
 
   /** 级联中断(方案 §4.8 第 5 件):父 run 停,子 run 一起停 */
@@ -313,6 +324,19 @@ export class RunRegistry {
 
   abortAll(reason: AbortReason = { by: 'shutdown' }): void {
     for (const id of this.activeRunIds()) this.abort(id, false, reason)
+  }
+
+  /**
+   * ⚠️ **只给测试。**清空整张表。
+   *
+   * ★ 为什么 `reap()` 不够:用例的 `afterEach` 走的是 `abortAll()`,而 `abort()`
+   * **不置 status**(见上面那条注释)—— 于是每个用例都往这张进程内单例表里
+   * 留下几条永远 `running` 的 run。以前这无所谓(并发闸门只是多拒一次,
+   * 断言 refused 的用例照样绿);改成排队之后,残留的占位者会把下一个用例的
+   * 派发**永久挂起**,表现为一串莫名其妙的超时。
+   */
+  clearForTest(): void {
+    this.runs.clear()
   }
 
   /** 已结束且没人订阅的 run 可以回收。步骤 6 之后转录在 SQLite 里,内存日志就没用了。 */

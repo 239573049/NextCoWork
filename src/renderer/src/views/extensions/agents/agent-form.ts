@@ -3,6 +3,8 @@
  * (vitest 的 include 只收 `.test.ts`,`.tsx` 里的东西测不到)。
  *
  * ★ 承接那个文件的核心约束:**表单只覆盖它认识的那几个键,其余原样带回去**。
+ *   `permissionMode` 就是靠这条活下来的:界面上没有它的控件(新建时一律写成
+ *   `full`,见 `AgentsPanel`),但文件里已经写着的那个值编辑一次不能被改掉。
  *   所以这里所有的写入都走 `setField`/`setListField`,而不是自己拼一个新对象 ——
  *   从 Claude Code 粘过来的文件里那些本应用不认识的键,编辑一次不能被抹掉。
  */
@@ -25,10 +27,15 @@ export interface AgentForm {
   prompt: string
   /** `''` = 继承默认子代理模型(删掉 `model:` 这一行)。 */
   model: string
+  /**
+   * 钉死给哪一家发。`''` = 不钉,由路由器按优先级择优。
+   *
+   * ★ 只在 `model` 有值时才写得出去 —— 没别名却锁着一家在下游没有定义,
+   *   `fileFromForm` 会顺手把它删掉。
+   */
+  modelProviderId: string
   /** `''` = 不标颜色。 */
   color: string
-  /** `''` = 继承父代理的权限档位。 */
-  permissionMode: string
   toolsMode: 'all' | 'custom'
   /** 只在 `toolsMode === 'custom'` 时有意义;切回 `all` 时**保留**,免得误切一下就全没了。 */
   tools: string[]
@@ -43,9 +50,9 @@ export function formFromFile(name: string, fm: Frontmatter, body: string): Agent
     description: readField(fm, 'description'),
     prompt: body,
     model: readField(fm, 'model'),
+    modelProviderId: readField(fm, 'modelProviderId'),
     // 认不出的颜色当作没标 —— 同 `agent/load.ts`,它纯装饰,不该让表单显示一个空选项。
     color: isAgentColor(color) ? color : '',
-    permissionMode: readField(fm, 'permissionMode'),
     toolsMode: tools.length > 0 ? 'custom' : 'all',
     // 文件里写的名字可能不在白名单里(比如 MCP 工具的全名),那些格子勾不出来,
     // 但也**不能丢** —— 丢了就是用户编辑一次就少了一个工具。留在这里由
@@ -65,8 +72,10 @@ export function fileFromForm(form: AgentForm, base: Frontmatter): { frontmatter:
   let fm = base
   fm = setField(fm, 'name', form.name)
   fm = setField(fm, 'description', form.description.trim())
-  fm = setField(fm, 'model', form.model.trim())
-  fm = setField(fm, 'permissionMode', form.permissionMode.trim())
+  const model = form.model.trim()
+  fm = setField(fm, 'model', model)
+  // 选了「继承默认」就把锁一起删掉,不留一个孤零零的供应商。
+  fm = setField(fm, 'modelProviderId', model === '' ? '' : form.modelProviderId.trim())
   fm = setField(fm, 'color', form.color.trim())
   // ★ `all` 档**删掉** `tools` 键,而不是写一张全表:写全表的话,以后新增一个工具,
   //   这条子代理不会拿到它 —— 而用户当初选的是「默认全部」。
@@ -99,7 +108,7 @@ export function unknownTools(form: AgentForm): string[] {
  *
  * ★ 是**整份覆盖**,不是逐字段填空:用户点「生成」表达的就是「这一份我不要了,
  *   照我说的重来」。留着上一轮的半截描述配这一轮的提示词,得到的是一份两不像的
- *   东西,而它看起来完全正常。作用域和权限档位不在草稿里,那两个不动。
+ *   东西,而它看起来完全正常。作用域不在草稿里,它不动。
  */
 export function applyDraft(form: AgentForm, draft: AgentDraft): AgentForm {
   const color: AgentColor | '' = draft.color ?? ''

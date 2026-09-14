@@ -43,3 +43,11 @@
   overflow: auto;
   padding: 24px clamp(20px, 5%, 64px) 48px;
 }
+
+.html-preview {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}

@@ -67,7 +67,14 @@ export function AgentsPanel(): ReactNode {
       scope: workspaceId === null ? 'global' : 'project',
       name: '',
       path: '',
-      frontmatter: {},
+      /*
+        ★ 新建的默认档位是**完全访问**,而不是「继承」。省掉这个键的含义是
+        「跟父代理同档」,可子代理是被 `Task` 派出去自己跑完一整段活的 —— 父代理
+        在 ask 档时,它每动一次文件都要弹一次框,而弹框问的是用户看不见上下文的
+        那一步,结果就是一路点「允许」。要收紧的人在表单里改一下就是了,
+        但默认值得让它先能干活。
+      */
+      frontmatter: { permissionMode: 'full' },
       body: '',
       skipped: [],
       revision: ''

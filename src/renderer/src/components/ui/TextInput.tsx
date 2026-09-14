@@ -27,6 +27,7 @@ export function TextInput({
   ariaLabel,
   size = 'md',
   inputMode,
+  type = 'text',
   className,
   inputRef
 }: {
@@ -47,6 +48,7 @@ export function TextInput({
   ariaLabel: string
   size?: 'sm' | 'md'
   inputMode?: 'text' | 'numeric' | 'url'
+  type?: 'text' | 'password'
   className?: string
   inputRef?: React.Ref<HTMLInputElement>
 }): React.ReactNode {
@@ -64,7 +66,7 @@ export function TextInput({
       {icon !== undefined && <span className="shrink-0 text-fg-faint">{icon}</span>}
       <input
         ref={inputRef}
-        type="text"
+        type={type}
         value={value}
         disabled={disabled}
         aria-label={ariaLabel}

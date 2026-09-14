@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { heatColor, seriesColor, seriesPalette } from '../usage/colors'
+import { heatColor, seriesColor, seriesPalette } from '../charts/colors'
 
 /*
  * 这些断言看着琐碎,守的是一件具体的事:色值必须留成 `var(--color-*)` 表达式

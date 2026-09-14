@@ -277,7 +277,18 @@ export function SubagentNode({
     ? undefined
     : formatDuration(elapsedOf({ startedAt: state.startedAt, endedAt: state.endedAt }, now) ?? 0)
   const title = state?.description ?? summary ?? t("chat.subagent.default");
-  const reportStatus = state?.reportStatus ?? (state?.background === true && status === 'done' ? 'pending' : status === 'running' ? 'none' : 'reported');
+  /*
+    ★★ 「汇报」这件事**只对后台子代理成立**。前台子代理的结果就是它那条
+    `tool_result`,同步回到主代理,根本不存在「回传」这一步 —— 而这里以前的兜底是
+    「没写 reportStatus 且不在跑 → reported」,前台在 `runtime.ts` 里恰恰从不写
+    这个字段(只有 background 才写 'pending'),于是**每一张跑完的前台卡片**
+    都挂着一句「结果已汇报给主代理」。那句话本该是后台专属的信号,
+    结果人人都有,等于把两者的区别抹平了。
+  */
+  const background = state?.background === true;
+  const reportStatus = !background
+    ? 'none'
+    : state?.reportStatus ?? (status === 'done' ? 'pending' : status === 'running' ? 'none' : 'reported');
   const reportLabel = reportStatus === 'pending'
     ? t('chat.subagent.report.pending')
     : reportStatus === 'injecting'
@@ -305,7 +316,15 @@ export function SubagentNode({
 
   return (
     <div
-      className="overflow-hidden rounded-card border border-border bg-surface-raised/40 text-[12.5px] text-fg-muted"
+      /*
+        ★ 后台卡片走一条 accent 左边框。以前唯一的区分是标题行右边那个 11px 的
+        「后台」标签,挤在子代理名、状态、耗时中间 —— 一屏里叠着四五张卡片时
+        等于没有。左边框在任何密度下都认得出,而且不占标题行的位置。
+      */
+      className={cn(
+        "overflow-hidden rounded-card border border-border bg-surface-raised/40 text-[12.5px] text-fg-muted",
+        background && "border-l-2 border-l-accent/70"
+      )}
       data-testid="subagent-node"
       data-subagent-call-id={state?.callId}
       data-subagent-status={status}
@@ -325,10 +344,23 @@ export function SubagentNode({
           )}
         >
           <CornerDownRight size={13} className="shrink-0 text-accent-soft" />
-          {status === 'error' ? <CircleAlert size={14} className="shrink-0 text-danger" /> : status === 'done' ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" /> : <Bot size={14} className="shrink-0 text-accent" />}
+          {status === 'error'
+            ? <CircleAlert size={14} className="shrink-0 text-danger" />
+            : status === 'done'
+              ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />
+              /* 后台跑的用时钟,前台用机器人 —— 图标这一格本来就在,不必再挤一个标签进标题行 */
+              : background
+                ? <Clock3 size={14} className="shrink-0 text-accent" />
+                : <Bot size={14} className="shrink-0 text-accent" />}
+          {/* ★ 「后台」紧跟图标、在标题**左边** —— 它说的是这张卡片是什么,
+              不是它此刻怎么样;摆到右边那堆状态元数据里会被当成状态读。 */}
+          {background && (
+            <span className="shrink-0 rounded-[4px] bg-accent/12 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+              {t('chat.subagent.mode.background')}
+            </span>
+          )}
           <span className="min-w-0 flex-1 truncate text-fg">{title}</span>
           {state?.subagentType !== undefined && <span className="max-w-[24%] truncate text-[11px] text-fg-faint">{state.subagentType}</span>}
-          {state?.background === true && <span className="shrink-0 text-[11px] text-accent-soft">{t('chat.subagent.mode.background')}</span>}
           <span className={cn("shrink-0 text-[11px]",
             noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}>
             {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
@@ -379,6 +411,82 @@ export function SubagentNode({
           {errorText === undefined || errorText.trim() === ''
             ? t('chat.subagent.detail.errorUnknown')
             : errorText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 后台子代理的结果**回到主线的那一行**。
+ *
+ * ★★ 在此之前这条消息在界面上整条不存在(它是 `internal` 的,被
+ * `threadRows` 的可见性过滤直接跳过)。于是主代理会毫无来由地开口,
+ * 讲一件几百轮之前派出去的事 —— 而**看不见输入的输出,比看不见输出更难解释**。
+ *
+ * ★ 它默认收起,只占一行。这终究不是用户说的话,不该长得像一条提问:
+ * 一屏后台任务全文摊开的话,主线索性读不下去了。
+ */
+export function SubagentReportRow({
+  summary,
+  state,
+}: {
+  summary: string | undefined;
+  state?: SubagentState;
+}): ReactNode {
+  const { t } = useI18n();
+  const openSubagent = useOpenSubagent();
+  const [open, setOpen] = useState(false);
+  const text = summary?.trim() ?? "";
+  const canOpen = openSubagent !== undefined && state?.childSessionId !== undefined;
+
+  return (
+    <div
+      data-testid="subagent-report-row"
+      data-report-call-id={state?.callId}
+      className="overflow-hidden rounded-card border border-dashed border-accent/35 bg-accent/[0.04] text-[12px] text-fg-muted"
+    >
+      <div className="flex w-full min-w-0 items-center">
+        <button
+          type="button"
+          data-testid="subagent-report-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-tint-hover/40"
+        >
+          <ChevronRight size={13} className={cn("shrink-0 text-fg-faint transition-transform", open && "rotate-90")} />
+          <ListChecks size={13} className="shrink-0 text-accent" />
+          <span className="min-w-0 flex-1 truncate">
+            {state?.subagentType === undefined
+              ? t("chat.subagent.report.rowGeneric")
+              : t("chat.subagent.report.row", { agent: state.subagentType })}
+          </span>
+          {state?.description !== undefined && (
+            <span className="max-w-[38%] shrink-0 truncate text-[11px] text-fg-faint">{state.description}</span>
+          )}
+        </button>
+        {canOpen && (
+          <button
+            type="button"
+            data-testid="subagent-report-open"
+            onClick={() => { if (state !== undefined) openSubagent?.(state) }}
+            title={t("chat.subagent.open")}
+            className="mr-1.5 shrink-0 rounded-[5px] px-2 py-1 text-[11px] text-accent transition-colors hover:bg-accent/10"
+          >
+            {t("chat.subagent.report.openRecord")}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="selectable border-t border-hairline px-3 py-2.5">
+          {/*
+            ★ 只渲染子代理**自己那段摘要**,不是注入给模型的那整段英文
+            (它外面还包着一层 "Background subagent result (...) / Review this result..."
+            的指令壳)。那层壳是写给模型的,给人看只会碍事。
+          */}
+          {text === ""
+            ? <p className="text-[11.5px] text-fg-faint">{t("chat.subagent.report.empty")}</p>
+            : <AgentMarkdown content={text} variant="compact" />}
         </div>
       )}
     </div>

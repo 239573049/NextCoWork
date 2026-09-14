@@ -318,7 +318,10 @@ export class AgentSession {
        * 这里 emit 得到的时机是安全的:`startRun` 先建 handle 与泵、再调驱动,
        * 构造函数跑到这一行时事件已经有人接了。
        */
-      this.commit(userMessage(req.inputMessageId ?? ulid(now), this.normalizePaths(req.input), now))
+      this.commit({
+        ...userMessage(req.inputMessageId ?? ulid(now), this.normalizePaths(req.input), now),
+        ...(req.inputInternal === true ? { internal: true } : {})
+      })
     }
   }
 

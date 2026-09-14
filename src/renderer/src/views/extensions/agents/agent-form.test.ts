@@ -6,8 +6,8 @@ const base = {
   description: '审查刚写完的代码',
   prompt: '你是一个代码审查者。',
   model: '',
+  modelProviderId: '',
   color: '',
-  permissionMode: '',
   toolsMode: 'all' as const,
   tools: [] as string[]
 }
@@ -31,10 +31,42 @@ describe('子代理表单映射', () => {
   })
 
   it('空值删键,不写空值', () => {
-    const out = fileFromForm(base, { model: 'gpt-5', color: 'blue', permissionMode: 'readonly' })
+    const out = fileFromForm(base, { model: 'gpt-5', color: 'blue' })
     expect('model' in out.frontmatter).toBe(false)
     expect('color' in out.frontmatter).toBe(false)
-    expect('permissionMode' in out.frontmatter).toBe(false)
+  })
+
+  it('权限档位界面上没有控件,但文件里那个值不能被编辑掉', () => {
+    // ★ 新建时一律写 `full`(在 `AgentsPanel` 里),表单不再管它 —— 于是它走的是
+    //   「未知键」那条路。已经写着 `ask` 的文件编辑一次还得是 `ask`。
+    const fm = { name: 'reviewer', description: '旧描述', permissionMode: 'ask' }
+    const form = formFromFile('reviewer', fm, '正文')
+    const out = fileFromForm(form, fm)
+    expect(out.frontmatter.permissionMode).toBe('ask')
+  })
+
+  it('别名和供应商是一对,一起写回去', () => {
+    const out = fileFromForm({ ...base, model: 'gpt-5.6-sol', modelProviderId: 'codex' }, {})
+    expect(out.frontmatter.model).toBe('gpt-5.6-sol')
+    expect(out.frontmatter.modelProviderId).toBe('codex')
+  })
+
+  it('切回「继承默认」时把供应商一起删掉,不留一个孤零零的锁', () => {
+    // 只删 model 的话,文件里会剩一个 `modelProviderId:` —— 加载器只在有 model 时
+    // 才读它,于是那一行谁也不认,却会在下次编辑时原样显示回来。
+    const out = fileFromForm({ ...base, model: '', modelProviderId: 'codex' },
+      { model: 'gpt-5.6-sol', modelProviderId: 'codex' })
+    expect('model' in out.frontmatter).toBe(false)
+    expect('modelProviderId' in out.frontmatter).toBe(false)
+  })
+
+  it('从 Claude Code 粘来的裸别名不会被补上一个供应商', () => {
+    // 那个形状是**有意**的:只认别名、按优先级择优。编辑一次凭空钉上一家
+    // 就把故障切换那条路堵死了。
+    const fm = { name: 'a', description: 'd', model: 'sonnet' }
+    const form = formFromFile('a', fm, '正文')
+    expect(form.modelProviderId).toBe('')
+    expect(fileFromForm(form, fm).frontmatter).toEqual(fm)
   })
 
   it('name 对齐到文件名,免得加载器报「两个名字不一致」', () => {
@@ -93,6 +125,8 @@ describe('把生成结果并进表单', () => {
     })
     expect(next.toolsMode).toBe('all')
     expect(next.name).toBe('a11y-reviewer')
+    // 勾过的那几个留着 —— 误切一下档位不该把它们清空。
+    expect(next.tools).toEqual(['Read'])
   })
 
   it('草稿给了 tools 就切到自定义', () => {
@@ -106,10 +140,5 @@ describe('把生成结果并进表单', () => {
     expect(next.toolsMode).toBe('custom')
     expect(next.tools).toEqual(['Read', 'Grep'])
     expect(next.color).toBe('cyan')
-  })
-
-  it('作用域之外的东西不动 —— 权限档位是安全决定,不由生成器定', () => {
-    const next = applyDraft({ ...base, permissionMode: 'readonly' }, { name: 'a', description: 'b', prompt: 'c' })
-    expect(next.permissionMode).toBe('readonly')
   })
 })

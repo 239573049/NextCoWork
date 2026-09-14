@@ -83,6 +83,7 @@ import type {
   ImportPreview,
   RestoreResult
 } from '../domain/data'
+import type { ProviderImportResult } from '../domain/provider-export'
 import type {
   ImportApplyRequest,
   ImportBatchItemsPage,
@@ -92,9 +93,11 @@ import type {
   ImportPreview as SourceImportPreview,
   ImportPreviewPage,
   ImportPreviewQuery,
+  ImportSourceKind,
   ImportSourceState,
   ImportSyncPatch
 } from '../domain/import'
+import type { ImportableProviders } from '../domain/provider-import'
 import type {
   UsageActivityStats,
   UsageDailyBucket,
@@ -600,11 +603,15 @@ export interface IpcInvokeMap {
 
   // ── 供应商 / 模型别名 ──
   'provider:list': { req: void; res: UpstreamProvider[] }
+  /** 解析本机 Claude Code / Codex / OpenCode 里配置的提供商供审核。★ 只回元数据,不回密钥值。 */
+  'providers:listImportable': { req: { sourceKind: ImportSourceKind; pickedDir?: string }; res: ImportableProviders }
   'provider:upsert': { req: UpstreamProvider; res: UpstreamProvider }
   'provider:remove': { req: { id: string }; res: void }
   /** ★ 只写不读:返回 { hasKey, last4 },永不回传明文(方案 §9) */
   'provider:setCredential': { req: { providerId: string; apiKey: string }; res: CredentialInfo }
   'provider:getCredentialInfo': { req: { providerId: string }; res: CredentialInfo }
+  'provider:export': { req: { includeCredentials?: boolean; password?: string }; res: { path: string; encrypted: boolean; providerCount: number; aliasCount: number } | null }
+  'provider:import': { req: { password?: string }; res: ({ path: string } & ProviderImportResult) | null }
   /**
    * 走一遍账号登录(OAuth 授权码 + PKCE),成功后凭证落进和 API Key 同一个槽。
    *
@@ -1054,10 +1061,13 @@ export const INVOKE_CHANNELS = {
   'hooks:setEnabled': 1,
   'hooks:test': 1,
   'provider:list': 1,
+  'providers:listImportable': 1,
   'provider:upsert': 1,
   'provider:remove': 1,
   'provider:setCredential': 1,
   'provider:getCredentialInfo': 1,
+  'provider:export': 1,
+  'provider:import': 1,
   'provider:startOAuth': 1,
   'provider:cancelOAuth': 1,
   'provider:submitOAuthCode': 1,

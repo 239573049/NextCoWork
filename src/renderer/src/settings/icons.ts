@@ -6,6 +6,7 @@
  * 的两个位置,图标各写各的迟早会漂成两个。
  */
 import {
+  ChartColumn,
   Cpu,
   Database,
   DownloadCloud,
@@ -29,6 +30,9 @@ export const SETTINGS_ICON: Record<SettingsPageId, LucideIcon> = {
   import: DownloadCloud,
   preference: Sparkles,
   model: Cpu,
+  // ★ 柱状,和「每日回顾」那个折线图标分开 —— 两页都是图表,图标再同源
+  //   侧栏里就只剩文字能区分
+  usage: ChartColumn,
   review: FEATURE_ICON.review,
   connection: Plug,
   computer: FEATURE_ICON.browser,

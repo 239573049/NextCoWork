@@ -167,9 +167,19 @@ export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().li
       if (outcome.kind === 'refused') return toolFail(outcome.reason)
 
       if (outcome.kind === 'background') {
+        /*
+          ★ 「已排队」要说成排队,不能说成「已启动」。
+
+          并发满的时候这次派发是真的还没开始跑。谎报成已启动的话,模型会在
+          几秒后就去等它的产出、或者据此认为这条调查已经在进行中 ——
+          而它可能还要等上几分钟。说清楚它自己会开始,模型就不会去重派一次。
+        */
         return {
           ...toolOk(
-            `The subagent started in the background (run ${outcome.childRunId}). ` +
+            (outcome.queued === true
+              ? `The subagent is queued behind the running ones (run ${outcome.childRunId}); ` +
+                'it starts automatically as soon as a concurrency slot frees up. '
+              : `The subagent started in the background (run ${outcome.childRunId}). `) +
             'Continue with the parent task; its progress and final report remain available in the task panel.'
           ),
           subagent: { childRunId: outcome.childRunId, status: 'running', background: true }

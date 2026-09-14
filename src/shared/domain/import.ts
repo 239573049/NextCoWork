@@ -24,7 +24,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 /** 首版只有一个。留成联合是为了让 `switch` 在加第二个来源时报未覆盖。 */
-export type ImportSourceKind = 'claude-code' | 'codex'
+export type ImportSourceKind = 'claude-code' | 'codex' | 'opencode'
 
 /**
  * 七类支持内容。

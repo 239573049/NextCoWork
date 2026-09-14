@@ -96,7 +96,7 @@ export function parseModelSelectionKey(key: string): {
  *
  * 三档来源,**越具体的越优先**:
  *
- * 1. `declaredAlias` —— 这个子代理自己声明的。它是对某一个代理的明确安排,
+ * 1. `declared` —— 这个子代理自己声明的。它是对某一个代理的明确安排,
  *    盖过任何全局默认。
  * 2. `configured` —— 设置页那个「默认子代理」。★ 它排在父亲**前面**才是这一栏
  *    存在的理由:子代理是拿来跑量的(`perSessionLimit` 默认 4),用户配它就是
@@ -104,19 +104,22 @@ export function parseModelSelectionKey(key: string): {
  *    时才轮得到它 —— 也就是几乎永远不生效。
  * 3. `parent` —— 都没配时沿用父 run,连同它锁的那家。
  *
- * @param declaredAlias `agents/<name>.md` frontmatter 里的模型。那里只写得下一个
- *   **裸别名**、没有供应商的概念 —— 所以子代理一旦自己声明了别名,供应商就是
- *   「没指定」(按优先级择优),而不是沿用父亲锁的那家。
+ * @param declared `agents/<name>.md` frontmatter 里的那一对。`modelProviderId`
+ *   缺席(从 Claude Code 粘过来的文件里**总是**缺席)= 只认别名,按优先级择优,
+ *   而**不是**沿用父亲锁的那家 —— 父亲那家未必提供这个别名,拼出来的就是
+ *   上面说的「A 家的别名 + B 家的锁」。
  * @param configured `settings.subagent`。空别名 = 这一栏是「跟随对话」,当作没配。
  *   ★ 调用方有责任先确认它**当前还指得到一条绑定**(供应商被删/别名被改名的
  *   窗口期里它会悬空),否则子代理会拿着一个查不到的别名去发请求。
  */
 export function subagentModelSelection(
-  declaredAlias: string | undefined,
+  declared: { model?: string; modelProviderId?: string },
   configured: { model: string; modelProviderId?: string },
   parent: { model: string; modelProviderId?: string }
 ): { model: string; modelProviderId: string | undefined } {
-  if (declaredAlias !== undefined) return { model: declaredAlias, modelProviderId: undefined }
+  if (declared.model !== undefined) {
+    return { model: declared.model, modelProviderId: declared.modelProviderId }
+  }
   if (configured.model.trim() !== '') {
     return { model: configured.model, modelProviderId: configured.modelProviderId }
   }

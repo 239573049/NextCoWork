@@ -36,6 +36,9 @@ interface DocumentsState {
 }
 
 export const documentKey = (workspaceId: string, path: string): string => JSON.stringify([workspaceId, path])
+/** 可渲染预览的文本格式；决定预览/源码开关的显示与默认模式。 */
+export const previewFormat = (path: string): 'markdown' | 'html' | null =>
+  /\.(?:md|markdown|mdown|mdx)$/i.test(path) ? 'markdown' : /\.html?$/i.test(path) ? 'html' : null
 export const isDocumentDirty = (entry: DocumentDraft): boolean => entry.draft !== entry.base
 export const isWithinPath = (path: string, parent?: string): boolean => parent === undefined || path === parent || path.startsWith(`${parent}/`)
 
@@ -85,7 +88,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => {
       const previous = get().entries[key]
       if (previous && (!force || previous.loading || previous.saving || isDocumentDirty(previous))) return
       // The object identity is a request token: late reads cannot revive a closed or moved file.
-      const pending: DocumentDraft = { workspaceId, path, draft: '', base: '', bom: '', lineEnding: '\n', lineEndings: [], loading: true, saving: false, mode: previous?.mode ?? (/\.md(?:own|x)?$|\.markdown$/i.test(path) ? 'preview' : 'source') }
+      const pending: DocumentDraft = { workspaceId, path, draft: '', base: '', bom: '', lineEnding: '\n', lineEndings: [], loading: true, saving: false, mode: previous?.mode ?? (previewFormat(path) ? 'preview' : 'source') }
       set({ entries: { ...get().entries, [key]: pending } })
       try {
         const file = await readWorkspaceFile(workspaceId, path)

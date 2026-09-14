@@ -29,16 +29,18 @@ const modelSubs = SETTINGS_PAGES.find((p) => p.id === 'model')?.subs
 
 describe('MODEL_TABS 与两处外部清单对齐', () => {
   it('五个模态一个不多一个不少', () => {
-    expect(MODEL_TABS.filter(isModality).slice().sort()).toEqual(
-      Object.keys(ALL_MODALITIES).sort()
-    )
+    expect(MODEL_TABS.filter(isModality).slice().sort()).toEqual(Object.keys(ALL_MODALITIES).sort())
   })
 
-  it('usage 在表里,但不是模态', () => {
-    expect(MODEL_TABS).toContain('usage')
-    expect(isModality('usage')).toBe(false)
-    // 排末位是有意的:它是另一种视图,不和五个模态并列
-    expect(MODEL_TABS[MODEL_TABS.length - 1]).toBe('usage')
+  /**
+   * ★ 「使用统计」曾经是这里的第六项,现在是设置侧栏的独立一页。
+   * 两边都留着的话,同一个页面有两个入口,而 `parseModelTab('usage')`
+   * 会静默回退到「文本生成」—— Tab 高亮在「使用统计」,内容却是模型配置。
+   */
+  it('表里只有模态 —— 使用统计已独立成页,不再是子 Tab', () => {
+    expect(MODEL_TABS.every(isModality)).toBe(true)
+    expect(modelSubs?.some((s) => s.id === 'usage')).toBe(false)
+    expect(SETTINGS_PAGES.some((p) => p.id === 'usage')).toBe(true)
   })
 
   it('和 nav.ts 的子 Tab 同序同值', () => {
