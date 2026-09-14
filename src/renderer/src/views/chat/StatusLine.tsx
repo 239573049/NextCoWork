@@ -6,14 +6,19 @@
  * 探针去正则一句会随文案改动的话,产品界面就得永远背着一个调试字符串,
  * 而且改文案会莫名其妙挂掉 e2e。
  *
- * 三样数据都是已有事件的直接投影(方案 §8):`message_start.model`、
- * `TokenUsage`、`context_usage`。不新增任何数据。
+ * 两样数据都是已有事件的直接投影(方案 §8):`message_start.model`、`context_usage`。
+ * 不新增任何数据。
+ *
+ * ★ **流式过程中不报 token 读数。** 它只在每次请求结束时跳一下,中间一直定在
+ * 一个旧数上 —— 看着像卡住;而真要看用量,回复下方的「任务用量」给的是整轮的
+ * 完整口径(含缓存与花费),比这里这个半截的累计值准。
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import { hasRun } from '../../../../shared/agent/transcript'
 import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
+import { activityOf, type ActivityPhase } from '../../../../shared/domain/activity'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { whimsyEn, whimsyZh } from '../../i18n/agent'
@@ -61,9 +66,9 @@ export function StatusLine({
   compactError?: string | null
 }): ReactNode {
   const { t, locale } = useI18n()
-  const { status, model, usage, contextUsage, notice, contextStatus } = transcript
+  const { status, model, contextUsage, notice, contextStatus } = transcript
   // ★ 在 early return 之前调用 —— hooks 不能出现在条件分支后面。
-  const whimsy = useWhimsy(waitingForResponse, locale)
+  const whimsy = useWhimsy(running, activityOf(transcript, waitingForResponse), locale)
   const showCompacted = useFading(contextStatus?.phase === 'ready', contextStatus)
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
@@ -114,27 +119,22 @@ export function StatusLine({
       <span role="status" className={cn('inline-flex items-center gap-1.5',
         noticeText !== undefined ? 'text-danger' : running && 'text-accent')}>
         {running && <LoaderCircle size={12} aria-hidden className="animate-spin motion-reduce:animate-none" />}
-        {noticeText ?? (waitingForResponse ? (
+        {noticeText ?? (running && (waitingForResponse || status === 'running') ? (
           /*
-            ★ 读屏拿到的是那句**不动**的「正在等待回复…」,轮换的词 aria-hidden。
+            ★ 读屏拿到的是那句**不动**的「正在等待回复…」/「运行中」,轮换的词 aria-hidden。
             `role="status"` 自带 aria-live=polite:每 4 秒换一个词就是每 4 秒打断一次朗读,
             对看不见这行字的人来说,趣味词全是噪音,而它连一个字节的状态都没多说。
+            ★ `running` 为假时一律走固定文案:run 已经收尾(done/error/aborted),
+            此时还在转词就是在演一个已经不存在的进度。
           */
           <>
-            <span className="sr-only">{t('chat.status.waitingResponse')}</span>
+            <span className="sr-only">
+              {t(waitingForResponse ? 'chat.status.waitingResponse' : 'chat.status.running')}
+            </span>
             <span aria-hidden>{whimsy}</span>
           </>
         ) : t(`chat.status.${status}`))}
       </span>
-
-      {running && usage !== undefined && (
-        <>
-          <Dot />
-          <span title={t('chat.usageTooltip', { input: usage.inputTokens, output: usage.outputTokens })}>
-            ↓{usage.outputTokens}
-          </span>
-        </>
-      )}
 
       {queued > 0 && (
         <>
@@ -186,11 +186,15 @@ export function StatusLine({
 }
 
 /**
- * 等待期间轮换一个词。`active` 为假时**不起定时器**,也不推进下标 ——
- * 下一轮等待会从上一轮停住的地方接着走,而不是每次都从同一个词开始。
+ * 运行期间轮换一个词。`active` 为假时**不起定时器**,也不推进下标 ——
+ * 下一轮运行会从上一轮停住的地方接着走,而不是每次都从同一个词开始。
+ *
+ * ★ **相位切换时不需要重置下标。** 每个相位是各自一组料,换了相位就是换了一个数组,
+ * 同一个下标落在新数组上取到的**本来就是另一个词** —— 工具一开跑,那句话当帧就变,
+ * 不必等下一个 4 秒,也不必为此多起一次 setState。
  */
-function useWhimsy(active: boolean, locale: Locale): string {
-  const words = locale === 'en-US' ? whimsyEn : whimsyZh
+function useWhimsy(active: boolean, phase: ActivityPhase, locale: Locale): string {
+  const words = locale === 'en-US' ? whimsyEn[phase] : whimsyZh[phase]
   // 初值随机:否则每个会话的第一句永远是同一个词,轮换就只剩下后面几秒有意思。
   const [index, setIndex] = useState(() => Math.floor(Math.random() * words.length))
   useEffect(() => {

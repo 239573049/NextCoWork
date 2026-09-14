@@ -21,6 +21,13 @@ export interface ResourceRow {
   enabled: boolean
   /** 名字后面那截灰字，比如命令的 argument-hint。 */
   suffix?: string
+  /**
+   * 名字前面那个小圆点的**颜色值**（子代理的 `color:`）。
+   *
+   * ★ 收的是算好的 CSS 颜色,不是色名:这张表四个 Tab 共用,让它认识
+   *   「子代理的八个色名」等于把一个 kind 专属的概念塞进公共组件。
+   */
+  color?: string
 }
 
 /** 全局 / 本工作区 / 内置 的小徽章。 */
@@ -72,6 +79,13 @@ export function ResourceTable<T extends ResourceRow>({
                 className={cn('min-w-0 flex-1 text-left', readOnly ? 'cursor-default' : 'cursor-pointer')}
               >
                 <span className="flex items-center gap-1.5">
+                  {row.color !== undefined && (
+                    <span
+                      aria-hidden
+                      style={{ backgroundColor: row.color }}
+                      className="size-2 shrink-0 rounded-full"
+                    />
+                  )}
                   <span className={cn('truncate text-[13px]', row.enabled ? 'text-fg' : 'text-fg-faint')}>
                     {row.name}
                   </span>

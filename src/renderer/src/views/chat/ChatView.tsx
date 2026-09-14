@@ -11,7 +11,7 @@ import { Check, ChevronDown, LoaderCircle, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { greetingOf } from '../../../../shared/domain/greeting'
-import { hasRun } from '../../../../shared/agent/transcript'
+import { cacheHitRateOf, hasRun, type SubagentState } from '../../../../shared/agent/transcript'
 import { latestTodosFrom, type TodoItem } from '../../../../main/kernel/tool/builtin/todo'
 import { useI18n } from '../../i18n'
 import type { ContentPart } from '../../../../shared/agent/message'
@@ -30,8 +30,11 @@ import { Composer, type FallbackModel } from './Composer'
 import { type TrayItem } from './AttachmentTray'
 import { PendingQueue } from './PendingQueue'
 import { Thread } from './Thread'
+import { SubagentLiveFeed } from './subagent-live'
+import { SubagentOpenProvider } from './subagent-open'
 import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
+import { useWindowStore } from '../../stores/window'
 import { WorkspaceMarkdownProvider } from '../../components/markdown'
 import { createSession } from '../../services/sessions'
 
@@ -40,7 +43,9 @@ export function ChatView({
   tabId,
   workspace,
   fallbackModel,
-  runningOverride
+  runningOverride,
+  readOnly = false,
+  subagentOf
 }: {
   /** null = 还没有会话的草稿 Tab,见 `shared/domain/tab.ts` 的 `chatKey` */
   sessionId: string | null
@@ -49,6 +54,16 @@ export function ChatView({
   fallbackModel: FallbackModel
   /** Background scheduled runs do not subscribe to the normal renderer run pump. */
   runningOverride?: boolean
+  /**
+   * **别人的会话,只能看。** 目前唯一的来源是子代理卡片点开的右侧面板。
+   *
+   * ★ 参考形态是「标题 + 正文,零操作」:不画输入框、不画队列区、不画任务清单、
+   * 不画审批面板、不画逐轮的重跑/删除。理由不是审美 —— 往一个子代理的会话里
+   * 发消息这条路在主进程侧**根本没有接**,画出来的每一个控件都是一次会失败的承诺。
+   */
+  readOnly?: boolean
+  /** 只读面板靠它接上子 run 的实时流 —— 它不画任何东西,见 `SubagentLiveFeed` */
+  subagentOf?: { sessionId: string; callId: string }
 }): ReactNode {
   /*
     ★ 草稿期用 tabId 作键 —— 转录 store 与未发出输入的存档都按它索引。
@@ -134,6 +149,25 @@ export function ChatView({
   }), [editMessage, editModel.model, editModel.modelProviderId, workspace])
   const started = hasRun(transcript, running)
   const { t } = useI18n()
+  /**
+   * 卡片点一下 → 右侧工作区开一个只读会话。
+   *
+   * ★ 标题用子代理的**任务描述**,而不是「子代理」这种类别名 —— 参考图里那个
+   * Tab 叫「分析调度器架构」。同时派出去三个子代理时,三个都叫「子代理」的话,
+   * Tab 栏上认不出哪个是哪个。
+   *
+   * ★ `subagentOf` 记的是**父会话 + callId**,跟着 Tab 一起落盘:重载之后
+   * 身份栏还能从父转录里把那些格子读回来(渲染层的索引表这时候是空的)。
+   */
+  const openSubagent = useCallback((state: SubagentState) => {
+    if (state.childSessionId === undefined || sessionId === null) return
+    useTabsStore.getState().openSubagentSession(
+      workspace.id,
+      state.childSessionId,
+      state.description ?? state.summary ?? t('chat.subagent.default'),
+      { sessionId, callId: state.callId }
+    )
+  }, [workspace.id, sessionId, t])
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
 
@@ -432,7 +466,11 @@ export function ChatView({
       onPickAttachment={pickAttachment}
       onRemoveAttachment={removeFromTray}
       onRetryAttachment={retryUpload}
+      sessionId={sessionId}
       contextTokens={transcript.lastInputTokens}
+      contextSegments={transcript.contextUsage?.segments}
+      contextCacheHitRate={cacheHitRateOf(transcript.usage)}
+      onManageMcp={() => useWindowStore.getState().openSettings('connection')}
       contextCompacting={compacting}
       onCompactContext={compactContext}
       onSend={(text, v) => {
@@ -498,6 +536,36 @@ export function ChatView({
     没有状态行、输入框也不贴底。贴底的输入框加一张居中插画,看起来像是内容没加载出来。
     第一条消息发出去之后才切成「转录在上、输入框在下」的常驻布局。
   */
+  /*
+    ★★ 只读态是**另一棵树**,不是「把输入框藏起来的那棵」。
+
+    分支写在这里(而不是给每个控件挂 `!readOnly &&`),是因为「零操作」这件事
+    要能一眼验证:下面这棵树里没有 `composer` / `queue` / `todos` / `transferDialog`
+    任何一个标识符,所以以后谁往常驻布局里加一个新按钮,都不会顺手漏进只读面板。
+    空态那一屏同理跳过 —— 它的全部内容就是问候语加一个输入框。
+  */
+  if (readOnly) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col" data-testid="chat-readonly">
+        {subagentOf !== undefined && sessionId !== null && (
+          <SubagentLiveFeed childSessionId={sessionId} parent={subagentOf} />
+        )}
+        <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
+          <Thread
+            sessionId={sessionId ?? undefined}
+            transcript={transcript}
+            runId={activeRunId}
+            model={modelName}
+            providerName={provider?.name}
+            lastSeq={lastSeq}
+            queued={0}
+            readOnly
+          />
+        </WorkspaceMarkdownProvider>
+      </div>
+    )
+  }
+
   if (!started) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 pb-10">
@@ -516,21 +584,23 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
-        <Thread
-          sessionId={sessionId ?? undefined}
-          transcript={transcript}
-          runId={activeRunId}
-          model={modelName}
-          providerName={provider?.name}
-          lastSeq={lastSeq}
-          queued={queuedInputs.length}
-          compactError={compactError}
-          onEditMessage={onEditMessage}
-          onDeleteTurn={deleteTurn}
-          onExecutePlan={executePlan}
-        />
-      </WorkspaceMarkdownProvider>
+      <SubagentOpenProvider open={openSubagent}>
+        <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
+          <Thread
+            sessionId={sessionId ?? undefined}
+            transcript={transcript}
+            runId={activeRunId}
+            model={modelName}
+            providerName={provider?.name}
+            lastSeq={lastSeq}
+            queued={queuedInputs.length}
+            compactError={compactError}
+            onEditMessage={onEditMessage}
+            onDeleteTurn={deleteTurn}
+            onExecutePlan={executePlan}
+          />
+        </WorkspaceMarkdownProvider>
+      </SubagentOpenProvider>
 
       {queue}
       {todos !== undefined && <TaskChecklist todos={todos} t={t} />}

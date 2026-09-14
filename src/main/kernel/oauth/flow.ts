@@ -1,8 +1,13 @@
 /**
- * OAuth 授权码流程的**通用编排** —— 一份代码跑所有 issuer。
+ * OAuth 登录流程的**通用编排** —— 一份代码跑所有 issuer。
  *
  * ★★ 这里没有任何一家的知识:端点、client_id、回调怎么接、怎么提账号身份,
  * 全部从 `OAuthProviderSpec` 里读(见 `registry.ts` 的文件头)。加一家 = 加一行数据。
+ *
+ * ★ 两种授权方式各一段编排,分岔点只有 `runOAuthFlow` 里那一个 switch:
+ * - **授权码**(ChatGPT / ZCode):开授权页 → 从回调或粘贴里取 code → 换 token
+ * - **设备码**(RFC 8628,Kimi):申请配对码 → 用户去浏览器输 → 按 interval 轮询
+ * 拿到 token 之后的一切(第二跳、身份提取、凭证落盘)两条路共用。
  *
  * ★ 零 Electron import。`shell.openExternal` 是**注入**进来的(`openBrowser`),
  * `fetch` 和 `now` 也是 —— 于是整条流程可以在纯 Node 里用假上游跑完。
@@ -10,8 +15,15 @@
 import type { OAuthCredential } from '../../../shared/domain/credential'
 import { OAuthAbandonedError, OAuthFailedError } from './errors'
 import { awaitOAuthCallback, type LoopbackResult } from '../../net/oauth-loopback'
+import { record, str } from './issuers/shared'
 import { createPkce, randomState, stateMatches } from './pkce'
-import { redirectUriOf, type OAuthProviderSpec, type OAuthTokenRequest, type OAuthTokenRequestArgs } from './registry'
+import {
+  redirectUriOf,
+  type OAuthGrant,
+  type OAuthProviderSpec,
+  type OAuthTokenRequest,
+  type OAuthTokenRequestArgs
+} from './registry'
 
 export type OAuthPhase =
   | 'opening'
@@ -25,6 +37,20 @@ export type OAuthPhase =
 // 这里原样 re-export —— 既有的 `from './flow'` 一个都不用改
 export { OAuthAbandonedError, OAuthFailedError }
 
+/**
+ * 设备码流程里**必须显示给用户看**的两样东西。
+ *
+ * ★★ 它跟着 `waiting` 阶段一起推给上层,而不是另开一个事件:配对码是「等待授权」
+ * 这个状态**的内容**,不是一件独立发生的事。分成两个事件的话,上层要自己保证
+ * 两者的先后和配对,而错配的表现是界面上一个空的配对码框 —— 用户无从下手。
+ */
+export interface OAuthDeviceHint {
+  /** 用户要在浏览器里核对/输入的配对码,如 `B7MB-FOW3` */
+  userCode: string
+  /** 输码的页面(不带码的那个)。给「浏览器没自动打开」时手动访问用 */
+  verificationUri: string
+}
+
 export interface OAuthFlowDeps {
   spec: OAuthProviderSpec
   /**
@@ -35,7 +61,11 @@ export interface OAuthFlowDeps {
   fetch: typeof globalThis.fetch
   now: () => number
   openBrowser: (url: string) => Promise<void>
-  onPhase?: (phase: OAuthPhase) => void
+  /**
+   * ★ 第二个参数只在**设备码流程的 `waiting`** 上出现。授权码流程一如既往
+   * 只推一个阶段名 —— 那条路径的调用方一个字都不用改。
+   */
+  onPhase?: (phase: OAuthPhase, device?: OAuthDeviceHint) => void
   signal: AbortSignal
   /** `manual-paste` 形态下,等用户把 code 粘回来 */
   awaitPastedCode?: () => Promise<string>
@@ -43,9 +73,10 @@ export interface OAuthFlowDeps {
 
 function authorizeUrl(
   spec: OAuthProviderSpec,
+  endpoint: string,
   args: { challenge: string; state: string; redirectUri: string }
 ): string {
-  const u = new URL(spec.authorizeUrl)
+  const u = new URL(endpoint)
   const custom = spec.authorizeParams?.({ ...args, clientId: spec.clientId })
   if (custom === undefined) {
     u.searchParams.set('response_type', 'code')
@@ -208,9 +239,10 @@ export function pastedCallbackCode(
 
 async function collectCode(
   deps: OAuthFlowDeps,
+  endpoint: string,
   args: { challenge: string; state: string; redirectUri: string }
 ): Promise<string> {
-  await deps.openBrowser(authorizeUrl(deps.spec, args))
+  await deps.openBrowser(authorizeUrl(deps.spec, endpoint, args))
   deps.onPhase?.('waiting')
   const awaitPastedCode = deps.awaitPastedCode
   if (awaitPastedCode === undefined) {
@@ -232,7 +264,17 @@ function describe(result: LoopbackResult): never {
   throw new OAuthFailedError(result.reason ?? '授权未完成')
 }
 
-export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential> {
+/**
+ * 授权码流程:开浏览器 → 收 code → 换 token。**返回 token 端点原样的 JSON。**
+ *
+ * ★ 整段是从原来的 `runOAuthFlow` 里**原封不动**搬进来的,只多了一个 `grant`
+ * 参数(端点和回调策略从它读,不再从 spec 顶层读)。ChatGPT / Z.AI / 智谱
+ * 那三条路径的行为一个字节都没变。
+ */
+async function runAuthorizationCodeFlow(
+  deps: OAuthFlowDeps,
+  grant: Extract<OAuthGrant, { kind: 'authorization-code' }>
+): Promise<unknown> {
   const { spec, signal } = deps
   const pkce = createPkce()
   const state = randomState()
@@ -243,12 +285,16 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
     比对这两处,不一致就是一个不说明原因的 `invalid_grant`。所以它只算一次,
     算完两处都用这一个变量,而不是各拼一遍。
   */
-  let redirectUri = redirectUriOf(spec)
+  let redirectUri = redirectUriOf(grant.redirect)
 
   deps.onPhase?.('opening')
 
-  if (spec.redirect.kind === 'manual-paste') {
-    code = await collectCode(deps, { challenge: pkce.challenge, state, redirectUri })
+  if (grant.redirect.kind === 'manual-paste') {
+    code = await collectCode(deps, grant.authorizeUrl, {
+      challenge: pkce.challenge,
+      state,
+      redirectUri
+    })
   } else {
     /*
       ★★ **先把服务器起起来,再打开浏览器。** 反过来有一个真实的竞态:
@@ -267,21 +313,22 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
     const forward = (): void => inner.abort()
     signal.addEventListener('abort', forward, { once: true })
 
-    const fixedPort = spec.redirect.kind === 'loopback-fixed' ? spec.redirect.port : 0
+    const redirect = grant.redirect
+    const fixedPort = redirect.kind === 'loopback-fixed' ? redirect.port : 0
 
     let result: LoopbackResult
     try {
       result = await awaitOAuthCallback({
         expectedState: state,
         signal: inner.signal,
-        path: spec.redirect.path,
+        path: redirect.path,
         port: fixedPort,
         // ★ 省略即 `code`,所以 ChatGPT / Z.AI 那两条的行为一个字都没变
         codeParam: spec.callbackCodeParam,
         onListening: (bound) => {
           if (opened) return
           opened = true
-          redirectUri = redirectUriOf(spec, bound)
+          redirectUri = redirectUriOf(redirect, bound)
           /*
             ★ `waiting` 在**发起**打开浏览器时就推,不挂在 `openBrowser().then()` 上。
             挂上去的话,浏览器缓存了授权同意时回调会先回来,于是阶段倒着走 ——
@@ -289,7 +336,13 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
           */
           deps.onPhase?.('waiting')
           void deps
-            .openBrowser(authorizeUrl(spec, { challenge: pkce.challenge, state, redirectUri }))
+            .openBrowser(
+              authorizeUrl(spec, grant.authorizeUrl, {
+                challenge: pkce.challenge,
+                state,
+                redirectUri
+              })
+            )
             .catch((e: unknown) => {
               openError = e
               inner.abort()
@@ -326,6 +379,224 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
   if (!token.ok) {
     throw new OAuthFailedError(`换取凭证失败（HTTP ${token.status}）：${token.body.slice(0, 300)}`)
   }
+  return token.json
+}
+
+/* ======================= 设备码流程(RFC 8628) ======================= */
+
+/**
+ * 上游没给 `expires_in` 时的本地兜底。
+ *
+ * ★ 它不是「规范推荐值」—— RFC 8628 没规定默认时长。取 15 分钟是因为这条流程
+ * 要用户切到浏览器、登录、输一串码,五分钟(粘贴那条的时长)偏紧;而更长的话,
+ * 一个**服务端早就作废了 device_code** 的会话会在界面上一直转。
+ * Kimi 实际会给 1800 秒,所以这个值在它身上根本用不到。
+ */
+const DEVICE_FLOW_TIMEOUT_MS = 15 * 60_000
+
+/**
+ * 收到 `slow_down` 时轮询间隔的**永久**增量。
+ *
+ * ★★ RFC 8628 §3.5 的原话是「每收到一次就把间隔增加 5 秒」,而且**是累加、不回退**。
+ * 写成「这一次多等 5 秒」的表现是:上游一直回 slow_down、我们一直以原速度撞上去,
+ * 最坏情况是被限流到整个登录失败,而错误信息只会说一句 `slow_down`。
+ */
+const SLOW_DOWN_BUMP_MS = 5_000
+
+/** 可被取消打断的 sleep。轮询等待期间用户点「取消」要立刻收敛,不能等满一个间隔 */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new OAuthAbandonedError('cancelled'))
+      return
+    }
+    /* ★ onAbort 只会在 setTimeout 之后被触发,所以闭包里引用 `timer` 不会撞上 TDZ */
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(new OAuthAbandonedError('cancelled'))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/**
+ * 表单 POST,**成功失败都把 JSON 解出来**。
+ *
+ * ★★ 不能复用 `postToken`:那个在非 2xx 时只回一段原文。而设备码轮询的正常状态
+ * (`authorization_pending`)**本身就是一个 400** —— 错误码在 body 的 `error` 字段里。
+ * 拿不到解析后的 body,就分不清「用户还没点同意」和「device_code 已失效」,
+ * 而那两者一个该继续等、一个该当场报错。
+ */
+async function postFormJson(
+  deps: OAuthFlowDeps,
+  url: string,
+  body: Readonly<Record<string, string>>
+): Promise<{ status: number; json: unknown; text: string }> {
+  const res = await deps.fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      accept: 'application/json',
+      ...(deps.spec.oauthHeaders ?? {})
+    },
+    body: new URLSearchParams(body).toString(),
+    signal: deps.signal
+  })
+  const text = await res.text()
+  let json: unknown = undefined
+  try {
+    json = JSON.parse(text)
+  } catch {
+    // 保持 undefined —— 调用方据此判「响应不是 JSON」
+  }
+  return { status: res.status, json, text }
+}
+
+/** RFC 8628 §3.2:申请设备码 */
+async function requestDeviceAuthorization(
+  deps: OAuthFlowDeps,
+  grant: Extract<OAuthGrant, { kind: 'device-code' }>
+): Promise<{
+  deviceCode: string
+  userCode: string
+  verificationUri: string
+  verificationUriComplete: string
+  expiresInMs: number
+  intervalMs: number
+}> {
+  const res = await postFormJson(deps, grant.deviceAuthorizationUrl, {
+    client_id: deps.spec.clientId,
+    /*
+      ★★ RFC 8628 §3.1 里 `scope` 是可选的,但**「可选」不等于「可以不发」** ——
+      它决定的是换回来那把 access_token 带着哪些权限。xAI 那条 2026-09-14 实测:
+      只发 `client_id` 照样 **200**,配对码、verification_uri 一应俱全;但那把令牌
+      不带 `grok-cli:access`,于是表现是**登录一路成功、第一条消息 401**,
+      而错误信息里一个字都不提 scope。(同一端点发一个不存在的 scope 回的是
+      400 `invalid_scope`,说明它是真校验的,不是照单全收。)
+
+      ★ 没声明 scope 的家(Kimi)这里**一个字都不写**,而不是写成空串 ——
+      和 `authorizeUrl` 里那条是同一个理由。它那条路径的请求逐字节不变。
+    */
+    ...(deps.spec.scope === undefined ? {} : { scope: deps.spec.scope })
+  })
+  if (res.status < 200 || res.status >= 300) {
+    throw new OAuthFailedError(`申请设备码失败（HTTP ${res.status}）：${res.text.slice(0, 300)}`)
+  }
+  const body = record(res.json)
+  const deviceCode = str(body?.['device_code'])
+  const userCode = str(body?.['user_code'])
+  const verificationUri = str(body?.['verification_uri'])
+  if (deviceCode === undefined || userCode === undefined || verificationUri === undefined) {
+    throw new OAuthFailedError('申请设备码失败：响应里缺少 device_code / user_code / verification_uri')
+  }
+  const expiresIn = body?.['expires_in']
+  const interval = body?.['interval']
+  return {
+    deviceCode,
+    userCode,
+    verificationUri,
+    // ★ 带码的那个链接可以省(RFC 里是可选的),省了就退回到不带码的页面 ——
+    //   用户得自己抄一遍 user_code,能用,只是麻烦
+    verificationUriComplete: str(body?.['verification_uri_complete']) ?? verificationUri,
+    expiresInMs:
+      typeof expiresIn === 'number' && expiresIn > 0 ? expiresIn * 1000 : DEVICE_FLOW_TIMEOUT_MS,
+    // ★ RFC 8628 §3.2:`interval` 省略时的默认值就是 5 秒,不是 0
+    intervalMs: (typeof interval === 'number' && interval > 0 ? interval : 5) * 1000
+  }
+}
+
+/**
+ * 设备码流程:申请码 → 把码显示给用户 → 按 `interval` 轮询 token 端点。
+ *
+ * ★★ **这里没有 state、没有 PKCE、没有 redirect_uri。** 不是「省略了」,是 RFC 8628
+ * 这条路上根本不存在这些东西 —— 防重放靠的是 device_code 本身只能兑换一次、且有
+ * 服务端过期时间。硬塞一个 state 进去的话,上游会把它当未知参数忽略,而读代码的人
+ * 会以为这里有一层并不存在的防护。
+ */
+async function runDeviceCodeFlow(
+  deps: OAuthFlowDeps,
+  grant: Extract<OAuthGrant, { kind: 'device-code' }>
+): Promise<unknown> {
+  deps.onPhase?.('opening')
+  const device = await requestDeviceAuthorization(deps, grant)
+
+  /*
+    ★★ 配对码要在**开浏览器之前**推给界面。反过来的话,浏览器抢焦点的那一瞬间
+    用户看到的是一个还没有码的空面板;而如果浏览器压根打不开,他连码都看不到。
+  */
+  deps.onPhase?.('waiting', {
+    userCode: device.userCode,
+    verificationUri: device.verificationUri
+  })
+
+  /*
+    ★★ **打不开浏览器在这条路径上不致命** —— 和回环那条正相反(那边打不开就
+    彻底没戏,因为 code 只会回到回调地址)。这里用户手上有配对码和地址,完全可以
+    自己开一个浏览器输进去。所以这里只吞掉错误继续轮询,而不是中止登录。
+  */
+  await deps.openBrowser(device.verificationUriComplete).catch(() => undefined)
+
+  const deadline = deps.now() + Math.min(device.expiresInMs, grant.timeoutMs ?? device.expiresInMs)
+  let intervalMs = device.intervalMs
+
+  for (;;) {
+    await sleep(intervalMs, deps.signal)
+    if (deps.now() >= deadline) throw new OAuthAbandonedError('timeout')
+
+    const res = await postFormJson(deps, deps.spec.tokenUrl, {
+      client_id: deps.spec.clientId,
+      device_code: device.deviceCode,
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+    })
+
+    /*
+      ★ 5xx 当**故障**处理而不是继续轮询:上游挂了的话再轮十五分钟也没用,
+      而用户看着一个转圈的界面完全不知道发生了什么。kimi-code 自己也是这么做的。
+    */
+    if (res.status >= 500) {
+      throw new OAuthFailedError(`等待授权失败（HTTP ${res.status}）：${res.text.slice(0, 300)}`)
+    }
+    if (res.status >= 200 && res.status < 300) {
+      deps.onPhase?.('exchanging')
+      return res.json
+    }
+
+    const error = str(record(res.json)?.['error'])
+    switch (error) {
+      case 'authorization_pending':
+        // 用户还没点同意 —— 这是**正常状态**,不是错误
+        continue
+      case 'slow_down':
+        intervalMs += SLOW_DOWN_BUMP_MS
+        continue
+      case 'expired_token':
+        // 配对码过期 = 用户没在时限内完成,和超时是同一件事(不报红)
+        throw new OAuthAbandonedError('timeout')
+      case 'access_denied':
+        throw new OAuthAbandonedError('cancelled')
+      default: {
+        const detail = error ?? res.text.slice(0, 300)
+        throw new OAuthFailedError(`等待授权失败（HTTP ${res.status}）：${detail}`)
+      }
+    }
+  }
+}
+
+export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential> {
+  const { spec } = deps
+  /*
+    ★★ 两种授权方式在这里分岔,而且**只在这里分岔**:再往下(第二跳、身份提取、
+    凭证落盘)两条路完全一样。switch 挂在一个联合类型上,于是将来加第三种授权方式时
+    编译器会在这里报错,而不是让它在运行期走进 else。
+  */
+  const token =
+    spec.grant.kind === 'device-code'
+      ? await runDeviceCodeFlow(deps, spec.grant)
+      : await runAuthorizationCodeFlow(deps, spec.grant)
 
   /*
     ★ 第二跳(有的家 token 端点给的还不是能发请求的令牌)。缺省是恒等,
@@ -333,10 +604,10 @@ export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential
   */
   const exchanged =
     spec.finishExchange === undefined
-      ? token.json
-      : await spec.finishExchange(token.json, {
+      ? token
+      : await spec.finishExchange(token, {
           fetch: deps.fetch,
-          signal,
+          signal: deps.signal,
           now: deps.now()
         })
 

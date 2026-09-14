@@ -6,6 +6,7 @@ import {
   userMessage
 } from '../../../shared/agent/message'
 import type { ToolInfo } from '../../../shared/agent/tool'
+import type { ContextSegment, ContextSegmentKind } from '../../../shared/agent/context-management'
 import type { Skill } from '../../../shared/domain/skill'
 import type { PersonalizationSettings } from '../../../shared/domain/settings'
 import { PERSONALIZATION_MAX } from '../../../shared/domain/settings'
@@ -525,6 +526,22 @@ describe('assemble', () => {
     expect(big.usage.shouldCompact).toBe(true)
   })
 
+  /**
+   * ★ **这条钉的是一个线上 bug:压力条几乎空着,旁边却写着「接近上限」。**
+   *
+   * `maxOutputTokens` 按模型的**协议**窗口标(1M 窗口配 384K 输出),而传进来的
+   * `contextWindow` 是被 `LONG_CONTEXT_THRESHOLD` 夹过的**有效**窗口(272K)。
+   * 不给预留封顶的话,光预留一项(384K)就超过阈值(272K×0.8=217.6K),
+   * 判据恒为真 —— 自动压缩从第一条消息起每轮触发,而且压完仍为真,永不收敛。
+   */
+  it('★ 预留封顶 —— maxOutputTokens 大于阈值时不会恒判该压缩', () => {
+    const over = input({ contextWindow: 272_000, maxOutputTokens: 384_000 })
+    expect(assemble(over).usage.shouldCompact).toBe(false)
+    // 封顶之后判据重新跟历史长度有关:塞满就该压了
+    const huge = [userMessage('m', [{ type: 'text', text: '中'.repeat(200_000) }], NOW)]
+    expect(assemble({ ...over, messages: huge }).usage.shouldCompact).toBe(true)
+  })
+
   it('工具占用计入 used', () => {
     const many = Array.from({ length: 40 }, (_, i) =>
       tool({ internalId: `t${i}`, externalName: `t${i}`, description: '描述'.repeat(50) })
@@ -532,6 +549,129 @@ describe('assemble', () => {
     expect(assemble(input({ tools: many })).usage.used).toBeGreaterThan(
       assemble(input()).usage.used + 3000
     )
+  })
+})
+
+describe('assemble · 占用归因', () => {
+  /** 六档各取一点,一条用例覆盖所有来源 —— 守恒只在混着的时候才容易破。 */
+  function mixed(): AssembleInput {
+    return input({
+      messages: [
+        userMessage('m1', [{ type: 'text', text: '帮我看看这段代码'.repeat(20) }], NOW),
+        assistantMessage('m2', [{ type: 'text', text: '好的' }], NOW)
+      ],
+      tools: [
+        tool({ internalId: 'read_file', externalName: 'read_file' }),
+        tool({ internalId: 'bash', externalName: 'bash', description: '跑命令'.repeat(30) }),
+        tool({
+          internalId: 'mcp__github__pr',
+          externalName: 'github_pr',
+          description: 'PR'.repeat(200),
+          source: { kind: 'mcp', serverId: 'github' }
+        }),
+        tool({
+          internalId: 'mcp__github__issue',
+          externalName: 'github_issue',
+          source: { kind: 'mcp', serverId: 'github' }
+        }),
+        tool({
+          internalId: 'mcp__linear__task',
+          externalName: 'linear_task',
+          source: { kind: 'mcp', serverId: 'linear' }
+        }),
+        tool({
+          internalId: 'skill__commit',
+          externalName: 'skill_commit',
+          source: { kind: 'skill', skillId: 's1' }
+        })
+      ],
+      skills: [skill(), skill({ id: 's2', name: 'review', description: '审查改动' })],
+      personalization: { name: '张三', background: '前端工程师', instructions: '一律用中文回答' },
+      reminder: { projectInstructions: '这个仓库的提交信息用中文。'.repeat(10) }
+    })
+  }
+
+  function tokensOf(usage: { segments?: ContextSegment[] }, kind: ContextSegmentKind): number {
+    return usage.segments?.find((s) => s.kind === kind)?.tokens ?? 0
+  }
+
+  /*
+    ★★ **这是这一组里唯一不能松的一条。** 破了它的表现极其温和:界面上百分比
+    加起来是 98%,看着像四舍五入 —— 于是没人会去查,而真实原因可能是整个 MCP
+    那一档漏算了一半。`join` 的分隔符和分段各自 ceil 的累积都会打破它。
+  */
+  it('各档之和恒等于 used', () => {
+    const { usage } = assemble(mixed())
+    const sum = (usage.segments ?? []).reduce((n, s) => n + s.tokens, 0)
+    expect(sum).toBe(usage.used)
+  })
+
+  it('空会话同样守恒', () => {
+    const { usage } = assemble(input())
+    expect((usage.segments ?? []).reduce((n, s) => n + s.tokens, 0)).toBe(usage.used)
+    // 还没发过消息:这一档是真的 0,不是「不知道」。
+    expect(tokensOf(usage, 'messages')).toBe(0)
+  })
+
+  it('MCP 分档到 server,按占用降序', () => {
+    const detail = assemble(mixed()).usage.segments?.find((s) => s.kind === 'tools-mcp')?.detail
+    expect(detail?.map((d) => d.id)).toEqual(['github', 'linear'])
+    // 「MCP 占 42%」不可行动,「github 这一个占 28%」可以 —— 见 ContextSegmentKind。
+    expect(detail?.[0]?.tokens).toBeGreaterThan(detail?.[1]?.tokens ?? 0)
+  })
+
+  it('内置工具与 MCP 工具分属不同档', () => {
+    const { usage } = assemble(mixed())
+    expect(tokensOf(usage, 'tools-builtin')).toBeGreaterThan(0)
+    expect(tokensOf(usage, 'tools-mcp')).toBeGreaterThan(0)
+  })
+
+  /** 技能的清单段和它注册的工具在设置里是同一个开关,归因也必须是同一档。 */
+  it('技能工具并入 skills,不单列', () => {
+    const withSkillTool = assemble(mixed()).usage
+    const withoutSkillTool = assemble({
+      ...mixed(),
+      tools: mixed().tools.filter((t) => t.source.kind !== 'skill')
+    }).usage
+    expect(tokensOf(withSkillTool, 'skills')).toBeGreaterThan(tokensOf(withoutSkillTool, 'skills'))
+    expect(withSkillTool.segments?.map((s) => s.kind)).not.toContain('tools-skill')
+  })
+
+  /*
+    ★ AGENTS.md 是**注入进消息流**的,但它不是对话 —— 记到 `messages` 头上的话,
+    用户会看着一个「消息占 30%」的读数去按压缩,而压缩一个字节都减不掉它。
+  */
+  it('注入的项目指令算 instructions,不算 messages', () => {
+    const withReminder = assemble(mixed()).usage
+    const withoutReminder = assemble({ ...mixed(), reminder: undefined }).usage
+    expect(tokensOf(withReminder, 'instructions')).toBeGreaterThan(
+      tokensOf(withoutReminder, 'instructions')
+    )
+    expect(tokensOf(withReminder, 'messages')).toBe(tokensOf(withoutReminder, 'messages'))
+  })
+
+  /** 个性化是用户自己写的,和关不掉的基础提示词不同档。 */
+  it('个性化算 instructions,不算 system', () => {
+    const on = assemble(mixed()).usage
+    const off = assemble({ ...mixed(), personalization: undefined }).usage
+    expect(tokensOf(on, 'instructions')).toBeGreaterThan(tokensOf(off, 'instructions'))
+  })
+
+  it('挂上 MCP 之后 system 那一档不动', () => {
+    const bare = assemble(input()).usage
+    const heavy = assemble(
+      input({
+        tools: Array.from({ length: 30 }, (_, i) =>
+          tool({
+            internalId: `mcp__x__${i}`,
+            externalName: `x_${i}`,
+            description: '描述'.repeat(80),
+            source: { kind: 'mcp', serverId: 'x' }
+          })
+        )
+      })
+    ).usage
+    expect(tokensOf(heavy, 'system')).toBe(tokensOf(bare, 'system'))
   })
 })
 

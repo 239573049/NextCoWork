@@ -139,6 +139,29 @@ interface TabsState {
    */
   openPath: (workspaceId: string, kind: InnerTabKind, path: string, title: string) => void
   /**
+   * 点一张子代理卡片 → 在右侧工作区开一个**只读**会话。
+   *
+   * ★ 为什么不复用 `openPath`:那条路的去重谓词要求 `'path' in t.ref`,而 chat
+   * 的 ref 里没有 path —— 直接拿来用的话每点一次都会再开一个 Tab。右侧面板那套
+   * 机制(无条件展开、没有 right 分栏就现切一个、已开着但在别的 pane 就搬过来)
+   * 是一样的,所以下面是照着它写的,只换了去重的判据和建 Tab 的方式。
+   *
+   * 也不复用 `openSession`:那条路把会话开在**主区**,而且是可写的。
+   */
+  /**
+   * 子代理卡片点一下走这条:在**右侧工作区**开一个只读会话。
+   *
+   * `parent` 是那张卡片在父转录里的坐标(父会话 id + `Task` 那次调用的 callId)。
+   * 它会跟着 Tab 一起落盘 —— 身份栏要显示的格子一个都不在子会话自己的转录里,
+   * 见 `shared/domain/tab.ts` 的 `subagentOf`。
+   */
+  openSubagentSession: (
+    workspaceId: string,
+    sessionId: string,
+    title: string,
+    parent: { sessionId: string; callId: string }
+  ) => void
+  /**
    * 侧边栏那颗「新建对话」走这条,**也不是 `open`**。
    *
    * 区别在于这两颗按钮问的是**不同的问题**:Tab 条上的 `+ 新建对话` 说的是
@@ -653,6 +676,57 @@ export const useTabsStore = create<TabsState>((set, get) => {
       if (groupId === null) return
       const nextDock = addTabToGroup(dock, groupId, tab)
       write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', tab.id))
+    },
+
+    openSubagentSession(workspaceId, sessionId, title, parent) {
+      const cur = get().stateOf(workspaceId)
+      // 和 `openPath` 一样:后台工作区也只展开它自己的面板,不改当前在看的工作区
+      useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
+      let dock = get().dockOf(workspaceId)
+      const existing = cur.tabs.find((t) => t.kind === 'chat' && t.ref.sessionId === sessionId)
+      if (existing !== undefined) {
+        const sourceGroupId = groupContainingTab(dock, existing.id)
+        if (sourceGroupId === null) return
+        if (paneOf(existing) === 'right') {
+          get().activateDockTab(workspaceId, sourceGroupId, existing.id)
+          return
+        }
+        let targetGroupId = groupForPane(dock, 'right')
+        if (targetGroupId === null) {
+          const base = dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+          if (base === null) return
+          dock = splitGroup(dock, base, 'right')
+          targetGroupId = dock.activeGroupId
+        }
+        if (targetGroupId === null) return
+        const movedDock = moveDockTab(dock, existing.id, sourceGroupId, targetGroupId)
+        // 空分组没有 pane 提示可供推断,这里的目的地明确就是右侧工作台
+        const nextDock = {
+          ...movedDock,
+          tabs: movedDock.tabs.map((tab) => tab.id === existing.id ? { ...tab, pane: 'right' as const } : tab)
+        }
+        write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', existing.id))
+        return
+      }
+      // 手搓字面量而不是 `makeTab`:那个函数会多铸一个随即丢掉的 id,
+      // 而且它不认识 `readOnly`。和 `openSession` 同一个理由。
+      const chat: InnerTab = {
+        id: ulid(),
+        kind: 'chat',
+        pane: 'right',
+        title: title.trim(),
+        ref: { sessionId, readOnly: true, subagentOf: parent }
+      }
+      let groupId = groupForPane(dock, 'right')
+      if (groupId === null) {
+        const base = dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+        if (base === null) return
+        dock = splitGroup(dock, base, 'right')
+        groupId = dock.activeGroupId
+      }
+      if (groupId === null) return
+      const nextDock = addTabToGroup(dock, groupId, chat)
+      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', chat.id))
     },
 
     newChat(workspaceId) {

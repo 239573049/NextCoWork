@@ -196,7 +196,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     docsUrl: 'https://developers.openai.com/codex/cli',
     credentialKind: 'oauth',
     oauthIssuer: 'chatgpt',
-    suggestedModels: ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.5','gpt-6-astra'],
+    suggestedModels: ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-6-astra'],
     notes:
       '用 ChatGPT 账号登录，走订阅额度，不计入 API 账单。' +
       '★ 需要付费 ChatGPT 计划：免费账号能登录成功，但第一次对话会返回 403。' +
@@ -244,6 +244,62 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     verification: 'documented'
   },
   {
+    /*
+      ★★ **和上面那条 `xai` 是两家,不是一家的两种付款方式。**
+      `api.x.ai` 吃 API Key、计 API 账单;这条走 `cli-chat-proxy.grok.com`,
+      凭证是 Grok 账号登录换来的 OAuth 令牌,吃的是订阅额度。
+      两条路的**端点、鉴权头、模型名**都不一样,合成一条的表现是用户拿订阅登录
+      成功之后第一条消息 401。
+
+      ★ 没有 `apiKeyUrl`:这条通道不存在「创建 API Key」这回事(要 key 的人应当
+      去上面那条 `xai`)。理由和 `codex` 那条逐字相同。
+
+      ★ 不进「推荐服务」:同 `codex` —— 要走完一次浏览器授权才有用的卡片
+      不该占首屏。
+    */
+    id: 'grok-build',
+    name: 'Grok Build(Grok 订阅)',
+    category: 'overseas',
+    /*
+      ★★ Responses 在前。2026-09-14 用 GET 做的 405/404 判别(仓库判据):
+        GET /v1/responses          → 405(存在,只收 POST)
+        GET /v1/chat/completions   → 405(存在)
+        GET /v1/chat/completionz   → 404(同前缀的假路径,对照组)
+      官方 CLI 的 `auth.json` 里写着 `backend: responses`,两个第三方实现发的也是
+      `/v1/responses` —— 所以默认那条选它,`chat/completions` 留作退路。
+
+      ★ `supportsModelList` 为 true:`GET /v1/models` 无凭证回 **401**、
+      同前缀假路径 `/v1/modelz` 回 **404**(同日实测),说明列表端点是真的、
+      只是要带令牌。**不标 `modelListPublic`** —— 没登录时拉不到。
+    */
+    endpoints: [
+      resp('https://cli-chat-proxy.grok.com/v1', true),
+      oa('https://cli-chat-proxy.grok.com/v1', true)
+    ],
+    docsUrl: 'https://docs.x.ai/docs/grok-cli',
+    credentialKind: 'oauth',
+    /*
+      ★★ 规格表里的第二条 **RFC 8628 设备码**流程。官方 CLI 默认走的是授权码 +
+      PKCE + 临时端口,我们走它的 `--device-auth` 那条 —— 理由是证据强度
+      (`/oauth2/authorize` 隔着 Cloudflare,redirect_uri 的注册形态没法验证),
+      完整推导在 `issuers/grok.ts` 的文件头。
+    */
+    oauthIssuer: 'grok-build',
+    /*
+      ★ `supportsModelList` 是 true,登录之后这张表会被真实列表顶掉;种在这里是为了
+      **没登录时也点得出东西**。名字来自二进制的 `strings`、第三方实现的 fallback
+      目录,以及它们注释里那句「observed via /v1/models」。
+      `grok-build` 放第一个:它是这条通道的同名主力模型(500K 上下文)。
+    */
+    suggestedModels: ['grok-build', 'grok-4.6', 'grok-4.5', 'grok-composer-2.5-fast'],
+    notes:
+      '用 Grok 账号登录，走订阅额度，不计入 API 账单。' +
+      '★ 这条通道和「xAI Grok」那条是两个不同的服务：域名、模型名、鉴权方式都不一样，' +
+      '订阅登录换来的令牌在 api.x.ai 上不认。' +
+      '★ 请求必须带 x-grok-client-version，缺了会返回 426 而不是 401（已由登录通道自动带上）。',
+    verification: 'probed'
+  },
+  {
     id: 'mistral',
     name: 'Mistral AI',
     category: 'overseas',
@@ -285,7 +341,11 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     ],
     docsUrl: 'https://api-docs.deepseek.com/',
     apiKeyUrl: 'https://platform.deepseek.com/api_keys',
-    suggestedModels: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4.1-flash-expires-on-0910'],
+    suggestedModels: [
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+      'deepseek-v4.1-flash-expires-on-0910'
+    ],
     notes:
       '★ 老别名 deepseek-chat / deepseek-reasoner 已于 2026-07-24 下线,填了会直接 400。' +
       '官方注明地址里的 v1 与模型版本无关,带不带都通。',
@@ -334,6 +394,16 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     docsUrl: 'https://www.kimi.com/code/docs/en/',
     apiKeyUrl: 'https://www.kimi.com/code/console',
     credentialKind: 'subscription-key',
+    /*
+      ★★ **两种凭证都能用**(理由同 `zhipu-coding` 那条):订阅 key 照填,也可以直接
+      用 Kimi 账号登录。后者走的是 **RFC 8628 设备码**,规格表里的第一条设备码流程 ——
+      协议来自官方一方源码 `@moonshot-ai/kimi-code`,细节和实测证据在
+      `issuers/kimi.ts` 的文件头。
+
+      ★ 登录成功后端点会被切到 `endpoints[1]`(`/coding/v1`,openai-chat)——
+      那正是 kimi-code 自己用的 base URL。切换逻辑在渲染层的 `SIGN_IN_PROTOCOL`。
+    */
+    oauthIssuer: 'kimi-code',
     /*
       ★★ **这里填的是 Model ID,不是版本名 —— 填错不是「查不到」,是直接调用失败。**
       官方那页把话说死了(2026-09-09 核对):可用的 Model ID 只有下面四个,

@@ -1,4 +1,6 @@
 import type {
+  UsageActivityStats,
+  UsageDailyBucket,
   UsageDimensionStat,
   UsageRequestLogsPage,
   UsageRequestLogsQuery,
@@ -23,4 +25,14 @@ export function getUsageProviderStats(window: UsageWindow): Promise<UsageDimensi
 
 export function getUsageModelStats(window: UsageWindow): Promise<UsageDimensionStat[]> {
   return invoke('usage:getModelStats', window)
+}
+
+/** 概览区的每日汇总。★ 主进程会先刷一次汇总表再查,比上面几条慢,别放进轮询。 */
+export function getUsageDailySeries(window: UsageWindow): Promise<UsageDailyBucket[]> {
+  return invoke('usage:getDailySeries', window)
+}
+
+/** 全历史活跃度。不接受时间窗 —— 连续天数按定义就是问全部历史。 */
+export function getUsageActivityStats(): Promise<UsageActivityStats> {
+  return invoke('usage:getActivityStats', undefined)
 }

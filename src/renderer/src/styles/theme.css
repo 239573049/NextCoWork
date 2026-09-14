@@ -194,6 +194,36 @@
   --color-scrim: #2b2a27; /* 暖近黑 —— 浅色下压暗要压暖,压蓝会发灰(无参考,按规律推) */
 }
 
+/*
+  ── 首屏兜底(只管骨架屏那几百毫秒)────────────────────────────────────────
+
+  `applyTheme` 要等 bootstrap 回来才落行内样式,在那之前 `:root` 上还没有
+  `data-theme`,页面用的是上面 @theme 里的深色默认值。浅色用户于是看到
+  「深色空块 → 界面出来 → 啪一下变浅」。这一段让**第一帧**就是对的。
+
+  能生效是因为主进程建窗前调了 `applyThemePreference`(见 main/index.ts),
+  它把 `nativeTheme.themeSource` 设成用户偏好,渲染层的 `prefers-color-scheme`
+  随之为真 —— 所以这里跟的是用户的选择,不是裸的系统设置。
+
+  ★ **只列骨架屏看得见的那几个,别把上面整套 22 个 token 抄下来。** 这不是第二份
+  浅色主题,只是让首屏不跳色;真正的一套在 `:root[data-theme='light']`,最终值由
+  `applyTheme` 的行内样式盖上来(行内样式不参与选择器优先级,一定赢)。
+
+  `:not([data-theme='dark'])` 那个限定是给「系统浅色 + 用户显式选深色」那一格用的:
+  没有它,深色偏好的用户在浅色系统上会被这段兜底抢先画一帧浅色。
+*/
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --color-app: #f2eee6;
+    --color-canvas: #faf9f5;
+    --color-surface: #f6f4ef;
+    --color-chrome: #e8e4dd;
+    --color-tint: #efefec;
+    --color-border: #e6e6e2;
+    --color-fg: #181c19;
+  }
+}
+
 html,
 body,
 #root {

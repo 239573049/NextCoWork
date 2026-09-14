@@ -30,6 +30,7 @@ import type { McpConnectionState, McpServerConfig, McpServerStatus } from '../..
 import { MCP_SERVER_ID_RE, mcpSecretKind, mcpSecretNames, mcpSecretRef } from '../../shared/domain/mcp'
 import type { KernelHost } from '../kernel/host'
 import type { ToolRegistry } from '../kernel/tool/registry'
+import { withDeadline } from '../kernel/abort'
 import type { McpToolDescriptor } from './bridge'
 import { isRejected, toRegistration } from './bridge'
 import { EnvironmentError } from '../../shared/domain/environment'
@@ -71,21 +72,6 @@ interface Entry {
 
 /** 客户端自报家门。服务器日志里看到的就是这个名字。 */
 const CLIENT_INFO = { name: 'NextCoWork', version: '0.1.0' } as const
-
-function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined
-  return Promise.race([
-    p,
-    new Promise<never>((_, reject) => {
-      const t = setTimeout(() => {
-        reject(new Error(`${what}超时(超过 ${String(ms / 1000)} 秒)`))
-      }, ms)
-      timer = t
-      // 正常路径下别让这个定时器把进程按住不退
-      if (typeof t.unref === 'function') t.unref()
-    })
-  ]).finally(() => { if (timer) clearTimeout(timer) })
-}
 
 function describeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err)
@@ -204,7 +190,7 @@ export class McpManager {
         entry.tools = []
         this.deps.onChange?.(cfg.id)
       }
-      await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, '连接')
+      await withDeadline(() => client.connect(transport), CONNECT_TIMEOUT_MS, '连接')
     } catch (err) {
       await entry.transport?.close().catch(() => {})
       if (this.entries.get(cfg.id) !== entry) return this.statusOf(cfg)
@@ -213,7 +199,7 @@ export class McpManager {
 
     let descriptors: McpToolDescriptor[]
     try {
-      const res = await withTimeout(client.listTools(), LIST_TOOLS_TIMEOUT_MS, '获取工具列表')
+      const res = await withDeadline(() => client.listTools(), LIST_TOOLS_TIMEOUT_MS, '获取工具列表')
       descriptors = res.tools
       this.deps.assertReady?.()
       if (this.entries.get(cfg.id) !== entry || entry.state !== 'connecting') { await client.close(); return this.statusOf(cfg) }

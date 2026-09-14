@@ -124,7 +124,7 @@ async function refreshAccessToken(): Promise<void> {
   const m = meta()
     if (!refresh || !m || m.mode !== 'authenticated') return
     if (m.expiresAt !== null && m.expiresAt - Date.now() > 2 * 60_000) return
-    const response = await getHost().fetch(`${API_ROOT}/api/client/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: refresh }) }).catch(() => null)
+    const response = await getHost().fetch(`${API_ROOT}/api/client/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: refresh }), signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS) }).catch(() => null)
     if (!response?.ok) return
     const tokens = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number }
     if (!tokens.access_token || !tokens.refresh_token || !tokens.expires_in || meta()?.mode !== 'authenticated') return
@@ -287,8 +287,15 @@ async function syncClientModels(access: string): Promise<void> {
   } catch { /* model sync is best effort; user can retry from the model page */ }
 }
 
+/**
+ * 账号相关的请求统一挂 10 秒超时。`getHost().fetch` 是 `net.fetch` 裸透传,
+ * 不带任何 deadline —— 网络挂起(而不是拒绝)时这些 promise 永不 settle,
+ * 设置页的账号信息和钱包余额会无限期转圈。写法照抄 ipc/app.ts 的 checkForUpdates。
+ */
+const ACCOUNT_TIMEOUT_MS = 10_000
+
 async function fetchMe(access: string): Promise<ClientAuthUser> {
-  const response = await getHost().fetch(`${API_ROOT}/api/client/account`, { headers: { Authorization: `Bearer ${access}` } })
+  const response = await getHost().fetch(`${API_ROOT}/api/client/account`, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS) })
   if (!response.ok) throw new ClientAuthHttpError(response.status, `account request failed: ${response.status}`)
   const body = await response.json() as { data?: { user?: ClientAuthUser; wallet?: ClientAuthUser['wallet'] }; user?: ClientAuthUser; wallet?: ClientAuthUser['wallet'] }
   const payload = body.data ?? body
@@ -311,7 +318,8 @@ type ClientContextResponse = {
 
 async function fetchClientContext(access: string): Promise<ClientContextResponse> {
   const response = await getHost().fetch(`${API_ROOT}/api/client/context/options`, {
-    headers: { Authorization: `Bearer ${access}` }
+    headers: { Authorization: `Bearer ${access}` },
+    signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS)
   })
   if (!response.ok) throw new ClientAuthHttpError(response.status, `Team context request failed: ${response.status}`)
   const body = await response.json() as {
@@ -489,7 +497,13 @@ export async function getClientUser(): Promise<ClientAuthUser | null> {
   try {
     const user = await fetchMe(access)
     const m = meta()
-    if (m) store.setKv(META_KEY, { ...m, user, contextRequired: false })
+    if (m) {
+      store.setKv(META_KEY, { ...m, user, contextRequired: false })
+      // ★ 和下面 409 那支对称地推一次。**渲染层不再 await 这个调用**(见 App.tsx
+      // 的握手):首屏只认 getClientAuthState() 的本地快照,这次刷新拿到的新头像、
+      // 新钱包余额全靠这条推送回去。少了它,余额要等下次重启才更新。
+      announce(state())
+    }
     return user
   } catch (error) {
     if (error instanceof ClientAuthHttpError && error.status === 409) {

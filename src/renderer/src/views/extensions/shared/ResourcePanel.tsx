@@ -5,7 +5,6 @@
  *   界面这一层自然也该共用。各自只剩三样东西要给：怎么取列表、frontmatter 表单
  *   长什么样、新建时的默认内容。
  */
-import { Plus, Search } from 'lucide-react'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type {
   MarkdownResourceFile,
@@ -21,8 +20,8 @@ import { deleteResource, getResource, saveResource } from '../../../services/res
 import { useWindowStore } from '../../../stores/window'
 import { MarkdownResourceEditor } from '../markdown/MarkdownResourceEditor'
 import type { Frontmatter } from '../markdown/frontmatter-form'
-import { filterRows, type ScopeFilter } from './filter'
-import { ResourceTable, type ResourceRow } from './ResourceTable'
+import { ResourceListPane } from './ResourceListPane'
+import type { ResourceRow } from './ResourceTable'
 
 export interface PanelRow extends ResourceRow {
   scope: 'builtin' | 'global' | 'project'
@@ -52,8 +51,6 @@ export function ResourcePanel({
   const { t } = useI18n()
   const workspaceId = useWindowStore((s) => s.activeWorkspaceId)
   const [rows, setRows] = useState<PanelRow[]>([])
-  const [query, setQuery] = useState('')
-  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all')
   const [error, setError] = useState<string | null>(null)
 
   // 打开的编辑器。null = 在列表页。
@@ -165,54 +162,18 @@ export function ResourcePanel({
     )
   }
 
-  const visible = filterRows(rows, query, scopeFilter)
-
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-2 px-4 py-2">
-        <TextInput
-          value={query}
-          onChange={setQuery}
-          size="sm"
-          icon={<Search size={13} />}
-          placeholder={t('ext.searchPlaceholder')}
-          ariaLabel={t('ext.searchPlaceholder')}
-          className="max-w-[220px]"
-        />
-        <Segmented<ScopeFilter>
-          size="sm"
-          value={scopeFilter}
-          onChange={setScopeFilter}
-          label={t('ext.scopeFilter')}
-          options={[
-            { value: 'all', label: t('ext.scope.all') },
-            { value: 'global', label: t('ext.scope.global') },
-            { value: 'project', label: t('ext.scope.project') }
-          ]}
-        />
-        <Button
-          size="sm"
-          variant="accent"
-          icon={<Plus size={13} />}
-          className="ml-auto"
-          onClick={() => {
-            setNewScope(workspaceId === null ? 'global' : 'project')
-            setCreating(true)
-          }}
-        >
-          {t('ext.new')}
-        </Button>
-      </div>
-
-      {error !== null && (
-        <p className="shrink-0 px-4 pb-1 text-[11px] text-danger" role="alert">{error}</p>
-      )}
-
-      <ResourceTable
-        rows={visible}
+      <ResourceListPane
+        rows={rows}
+        error={error}
         icon={icon}
         emptyTitle={emptyTitle}
         emptyHint={emptyHint}
+        onNew={() => {
+          setNewScope(workspaceId === null ? 'global' : 'project')
+          setCreating(true)
+        }}
         onOpen={(row) => { if (row.scope !== 'builtin') open(row.scope, row.name) }}
         onToggle={(row, enabled) => { void setEnabled(row.name, enabled).then(refresh) }}
       />

@@ -26,6 +26,7 @@ import {
   toolsFromMessages,
   type TranscriptState
 } from '../../../shared/agent/transcript'
+import { orphanedCheckpoints, type ContextCheckpoint } from '../../../shared/agent/context-management'
 import type { QueuedInput } from '../../../shared/domain/queued-input'
 import {
   QUEUE_MAX_ITEMS,
@@ -384,6 +385,14 @@ function createSessionStore(sessionId: string): SessionStore {
         transcript: {
           ...state.transcript,
           messages: continueRun ? messages : state.transcript.messages.map((message, i) => i === index ? edited : message),
+          // 改写历史同样让窗口占用的读数过期,理由同 `deleteTurn` 里那段注释。
+          // 截断重跑(`continueRun`)会立刻发起新请求把它填回来,不截断的纯文本编辑
+          // 则等到下一次发送 —— 两种情况显示 `–` 都比显示一个对不上的数诚实。
+          lastInputTokens: undefined,
+          contextUsage: undefined,
+          ...(continueRun
+            ? { contextCheckpoints: pruneCheckpoints(messages, state.transcript.contextCheckpoints) }
+            : {}),
           live: continueRun ? [] : state.transcript.live,
           tools: continueRun ? {} : state.transcript.tools,
           subagents: continueRun ? {} : state.transcript.subagents,
@@ -434,6 +443,23 @@ function createSessionStore(sessionId: string): SessionStore {
         transcript: {
           ...state.transcript,
           messages: next,
+          contextCheckpoints: pruneCheckpoints(next, state.transcript.contextCheckpoints),
+          /*
+            ★ 这两个读数量的是「**这段历史**有多大」,不是某一轮的账 —— 删掉任意一轮
+            之后它们描述的那段历史就不存在了,而圆环和压力条会原样继续显示那个旧数
+            (把消息全删光也照样挂着「81K / 272K」)。所以不分末轮与否,一律清掉。
+
+            ★ 和紧挨着的 `usage` 分开处理,不要合并进那个 `trailing` 分支:
+            `usage` 是**最后一轮的账单**,删中间一轮跟它无关(见 turn-delete 用例);
+            而窗口占用被**任何一次**删除改写。两者只是恰好都住在 transcript 上。
+
+            ★ 清成 `undefined` 而不是就地重估。只按剩下的消息估会漏掉系统提示词和
+            工具 schema(见 `estimateTools` 上的注释,挂几个 MCP 就是两三万 token),
+            那是拿一个新的假数换掉旧的假数。`undefined` 让圆环显示 `–` ——
+            「还不知道」,下一次真实请求回包时它自己就回来了。
+          */
+          lastInputTokens: undefined,
+          contextUsage: undefined,
           ...(trailing ? { error: undefined, usage: undefined, runStartedAt: undefined, runEndedAt: undefined } : {})
         }
       }))
@@ -790,6 +816,26 @@ async function hydrateInput(sessionId: string): Promise<void> {
 }
 
 /**
+ * 改写历史之后,本地同步剪掉锚不回去的检查点。
+ *
+ * 库里那几条主进程已经在同一次 `replaceHistory` 的事务里删掉了(判据见
+ * `orphanedCheckpoints`),这里只是让界面**当帧**对上 —— 否则那条孤儿会一直
+ * 挂在顶部的「上下文检查点」面板上,直到下一次全量回填才消失,而删完消息
+ * 恰恰是用户盯着看的那一刻。
+ *
+ * 没有孤儿时原样返回同一个数组:zustand 靠引用比较,换新数组就是白重渲染一遍。
+ */
+function pruneCheckpoints(
+  messages: readonly AgentMessage[],
+  checkpoints: ContextCheckpoint[]
+): ContextCheckpoint[] {
+  const orphans = orphanedCheckpoints(new Set(messages.map((m) => m.id)), checkpoints)
+  if (orphans.length === 0) return checkpoints
+  const ids = new Set(orphans.map((c) => c.id))
+  return checkpoints.filter((c) => !ids.has(c.id))
+}
+
+/**
  * 会话级(而非 run 级)的转录状态。
  *
  * ★ 每一处 `...emptyTranscript()` 都是在「只清本轮」,而这两张表和 `messages`
@@ -940,6 +986,40 @@ export function sessionStore(sessionId: string): SessionStore {
     }
   }
   return s
+}
+
+/**
+ * 子 run id → **它自己那个会话**的 id。右侧只读面板的实时流就挂在这张表上。
+ *
+ * ★ 只有面板挂载时(`openChildSession`)才写进来,**不是每次 `subagent_start` 都写** ——
+ * 一次编排能同时派出十几个后台子代理,而其中绝大多数永远不会被点开。没人打开 =
+ * 这里查不到 = `drain` 少做一次 `applyEnvelope`,也不会凭空多出十几段完整转录。
+ *
+ * 结束时由 `drain` 顺手删掉(和 `childRunIndex` 同一处)。
+ */
+const childSessionOfRun = new Map<string, string>()
+
+/**
+ * 打开一个子代理的只读会话。
+ *
+ * 两条路合流,缺一不可:
+ * - **已提交的那半边**零代码 —— `runtime.ts` 的 `onMessageCommit` 对子 run 也逐条
+ *   写库,所以 `sessionStore()` 的 `hydrateHistory` 在子代理**跑到一半时**就读得到。
+ * - **还在飞的那半边**靠这里:把 `activeRunId` 指过去、登记转发表,再让
+ *   `ensureActiveRunRestored` 走一次 `attachRun` 把「开始到现在」补齐。之后的新块
+ *   由 `drain` 实时喂。
+ *
+ * `childRunId` 不在 `childRunIndex` 里 = 这个子代理早就跑完了,库里那份就是全部,
+ * 不必 attach 一个已经回收的 run。
+ */
+export function openChildSession(childSessionId: string, childRunId?: string): void {
+  const store = sessionStore(childSessionId)
+  if (childRunId === undefined || !childRunIndex.has(childRunId)) return
+  childSessionOfRun.set(childRunId, childSessionId)
+  // ★ 先置 activeRunId 再 attach:`applyEnvelope` 和 `resync` 都拿它当门禁,
+  //   顺序反了的话这段 await 期间到达的信封会被原地丢掉。
+  if (store.getState().activeRunId !== childRunId) store.setState({ activeRunId: childRunId })
+  void ensureActiveRunRestored(childSessionId, childRunId)
 }
 
 /**
@@ -1352,8 +1432,19 @@ function drain(): void {
     const child = childRunIndex.get(env.runId)
     if (child !== undefined) {
       const firstSeq = env.seq - env.events.length + 1
+      // 父会话那张卡片要的是遥测(工具数、阶段、上下文占用),喂的是 applyChildEvents
       stores.get(child.sessionId)?.getState().applyChildEvents(env.runId, env.events, firstSeq)
-      if (env.events.some((event) => event.type === 'run_end')) childRunIndex.delete(env.runId)
+      /*
+        ★ 同一批事件**再喂一份给子会话自己的 store** —— 右侧只读面板逐字流就是这一份,
+        走的是和主智能体一模一样的 `applyEnvelope`(所以渲染也一模一样)。
+        没人打开过面板时 `childSessionOfRun` 查不到,这里什么都不做。
+      */
+      const panel = childSessionOfRun.get(env.runId)
+      if (panel !== undefined) stores.get(panel)?.getState().applyEnvelope(env)
+      if (env.events.some((event) => event.type === 'run_end')) {
+        childRunIndex.delete(env.runId)
+        childSessionOfRun.delete(env.runId)
+      }
       continue
     }
     const sessionId = runIndex.get(env.runId)?.sessionId

@@ -13,6 +13,7 @@
  */
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import { isToolResultOnly, userMessage } from '../../shared/agent/message'
+import type { ContextSegment } from '../../shared/agent/context-management'
 import type { PermissionMode } from '../../shared/agent/permission'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import { THINKING_BUDGET } from '../../shared/agent/run-request'
@@ -118,19 +119,91 @@ export function estimateMessages(messages: readonly AgentMessage[]): number {
 }
 
 /**
+ * 把**装饰后**的消息拆成「真实对话」和「我们注入的那些」两桶,一次遍历。
+ *
+ * ★ 判据是 `reminderPart()` 那对标签,不是「拿原数组再算一遍作差」——
+ * 作差要对整段历史多跑一次 `estimateMessages`,而那是每轮一次的全量扫描,
+ * 为了一行界面把它翻倍不值得。
+ *
+ * ★ 误判的后果**只在这两桶之间**:模型自己吐出一段以 `<system-reminder>` 开头的
+ * 文本会被记到 `injected` 上。两桶之和不变,`used` 不变,压缩判据不变 ——
+ * 归因里少数几个 token 串档,是可以接受的;`used` 本身出偏差不行。
+ * (真正的不可信输入在进来之前已经过了 `neutralizeReminderTags`。)
+ */
+function estimateMessageBuckets(messages: readonly AgentMessage[]): {
+  messages: number
+  injected: number
+} {
+  let own = 0
+  let injected = 0
+  for (const m of messages) {
+    own += MESSAGE_OVERHEAD_TOKENS
+    for (const p of m.parts) {
+      const n = estimatePart(p)
+      if (p.type === 'text' && p.text.startsWith(REMINDER_OPEN)) injected += n
+      else own += n
+    }
+  }
+  return { messages: own, injected }
+}
+
+/**
  * ★ 工具定义**要算进上下文**。一个挂了三个 MCP server 的工作区,工具 schema
  * 能占掉两三万 token —— 漏算它,压力条会在真正爆掉之前一直显示「还很空」。
  */
 export function estimateTools(tools: readonly ToolInfo[]): number {
   let n = 0
-  for (const t of tools) {
-    n +=
-      TOOL_OVERHEAD_TOKENS +
-      estimateTokens(t.externalName) +
-      estimateTokens(t.description) +
-      estimateTokens(safeJson(t.inputSchema))
-  }
+  for (const t of tools) n += estimateTool(t)
   return n
+}
+
+/**
+ * 单条工具的估算。★ 抽出来是为了让下面的分桶和上面的总量**共用同一个算式** ——
+ * 两份各写一遍的结果是归因之和与 `used` 差那么一点,而那个差额看起来
+ * 永远像四舍五入,不像 bug。
+ */
+function estimateTool(t: ToolInfo): number {
+  return (
+    TOOL_OVERHEAD_TOKENS +
+    estimateTokens(t.externalName) +
+    estimateTokens(t.description) +
+    estimateTokens(safeJson(t.inputSchema))
+  )
+}
+
+/**
+ * 工具按来源分桶。MCP 再分档到 server —— 见 `ContextSegmentKind` 上那段:
+ * 分档要分到**用户能关掉的那个东西**。
+ *
+ * ★ 技能注册的工具算进 `skills`,不单列 —— 技能的清单段和它的工具在设置里
+ * 是同一个开关,拆成两处会让人以为关掉只省一半。
+ */
+function estimateToolBuckets(tools: readonly ToolInfo[]): {
+  builtin: number
+  mcp: number
+  skills: number
+  byServer: Map<string, number>
+} {
+  let builtin = 0
+  let mcp = 0
+  let skills = 0
+  const byServer = new Map<string, number>()
+  for (const t of tools) {
+    const n = estimateTool(t)
+    switch (t.source.kind) {
+      case 'builtin':
+        builtin += n
+        break
+      case 'mcp':
+        mcp += n
+        byServer.set(t.source.serverId, (byServer.get(t.source.serverId) ?? 0) + n)
+        break
+      case 'skill':
+        skills += n
+        break
+    }
+  }
+  return { builtin, mcp, skills, byServer }
 }
 
 // ─────────────────────────── 系统提示词 ───────────────────────────
@@ -387,11 +460,27 @@ export interface SystemPromptInput {
 }
 
 export function buildSystemPrompt(input: SystemPromptInput): string {
+  return joinSystemParts(systemPromptParts(input))
+}
+
+/** ★ 拼法只此一处 —— 分段估算要拿它对不变量,两边写法一漂,归因就永远差一点。 */
+function joinSystemParts(parts: readonly SystemPart[]): string {
+  return parts.map((p) => p.text).filter((t) => t !== '').join('\n\n')
+}
+
+/**
+ * 系统提示词的分段,顺序即拼接顺序。
+ *
+ * ★ 拆出来是为了**归因**(`ContextSegmentKind`),不是为了好看:合成一根字符串
+ * 之后就再也分不出「这 5% 是用户自己写的个性化、那 8.8% 是技能清单」了。
+ * `buildSystemPrompt` 的输出一个字节都没变 —— 它现在只是 `join` 这一份。
+ */
+function systemPromptParts(input: SystemPromptInput): SystemPart[] {
   // 模型不知道今天几号,而「最近」「最新版本」这类判断依赖它
   const date = new Date(input.now).toISOString().slice(0, 10)
 
-  const parts = [
-    BASE_PROMPT,
+  return [
+    { bucket: 'system', text: BASE_PROMPT },
     /*
       ★ 角色提示词**追加**在 `BASE_PROMPT` 之后,永远不替换它。
 
@@ -400,23 +489,31 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
       权限设计最不想要的东西。位置也是有意的:紧跟在基础提示词之后、
       在环境和模式之前,所以后面那几段(尤其是 plan 模式那段)压得住它。
     */
-    input.agentPrompt === undefined || input.agentPrompt.trim() === ''
-      ? ''
-      : `# Your role\n\n${input.agentPrompt.trim()}`,
+    {
+      bucket: 'system',
+      text:
+        input.agentPrompt === undefined || input.agentPrompt.trim() === ''
+          ? ''
+          : `# Your role\n\n${input.agentPrompt.trim()}`
+    },
     /*
       ★ 这一段全是**事实**,一条规则都没有 —— 见文件头第 3 关。
       `Platform` 挡掉的是一整类 bash 失败(macOS 的 `sed -i` 要带空串参数、
       没有 `readlink -f`、`date` 的旗标不一样),而它的成本是三个 token。
       `Shell` 来自 `agentShell()`,和 bash 工具真正跑命令的那个是同一个。
     */
-    `# Environment\n\nWorkspace root: ${input.workspaceRoot}\n` +
-      `Platform: ${input.platform.os} (${input.platform.osVersion})\n` +
-      `Shell: ${input.platform.shell}\n` +
-      (input.environment ? `Execution location: ${input.environment.remote ? 'SSH server' : 'local machine'} ${JSON.stringify(input.environment.description)}\n`
-        + (input.environment.facts ? `Host: ${JSON.stringify(input.environment.facts.hostname)}; user: ${JSON.stringify(input.environment.facts.username)}; home: ${JSON.stringify(input.environment.facts.home)}\n` : '')
-        + (input.environment.remote ? 'Workspace files, commands and terminals execute on this server. The client filesystem and client browser are not available to workspace tools.\n' : '') : '') +
-      `Today's date: ${date} (UTC)\n` +
-      permissionFacts(input.permissionMode, input.webSearch),
+    {
+      bucket: 'system',
+      text:
+        `# Environment\n\nWorkspace root: ${input.workspaceRoot}\n` +
+        `Platform: ${input.platform.os} (${input.platform.osVersion})\n` +
+        `Shell: ${input.platform.shell}\n` +
+        (input.environment ? `Execution location: ${input.environment.remote ? 'SSH server' : 'local machine'} ${JSON.stringify(input.environment.description)}\n`
+          + (input.environment.facts ? `Host: ${JSON.stringify(input.environment.facts.hostname)}; user: ${JSON.stringify(input.environment.facts.username)}; home: ${JSON.stringify(input.environment.facts.home)}\n` : '')
+          + (input.environment.remote ? 'Workspace files, commands and terminals execute on this server. The client filesystem and client browser are not available to workspace tools.\n' : '') : '') +
+        `Today's date: ${date} (UTC)\n` +
+        permissionFacts(input.permissionMode, input.webSearch)
+    },
     /*
       ★ 位置是有意的:在**事实**之后、在模式说明之前。
 
@@ -426,12 +523,22 @@ export function buildSystemPrompt(input: SystemPromptInput): string {
 
       在模式说明之前 —— plan 模式那段说的是「你现在只有只读工具」,它必须压得住
       一条写着「别问了直接改」的全局提示词。用户设的是默认口吻,不是权限。
+
+      ★ 归因上它算 `instructions` 而不是 `system`:这一段是**用户自己写进去的**,
+      是他能去改、能去删的那一类,和关不掉的基础提示词不同档。
     */
-    input.personalization === undefined ? '' : buildPersonalizationSection(input.personalization),
-    MODE_APPENDIX[input.mode],
-    buildSkillsSection(input.skills)
+    {
+      bucket: 'instructions',
+      text: input.personalization === undefined ? '' : buildPersonalizationSection(input.personalization)
+    },
+    { bucket: 'system', text: MODE_APPENDIX[input.mode] },
+    { bucket: 'skills', text: buildSkillsSection(input.skills) }
   ]
-  return parts.filter((p) => p !== '').join('\n\n')
+}
+
+interface SystemPart {
+  bucket: 'system' | 'instructions' | 'skills'
+  text: string
 }
 
 // ─────────────────────────── thinking 预算 ───────────────────────────
@@ -667,6 +774,23 @@ export function decorate(
 /** 超过窗口的这个比例就该压缩了 */
 const COMPACT_THRESHOLD = 0.8
 
+/**
+ * 输出预留最多吃掉窗口的这个比例。
+ *
+ * ★ **`maxOutputTokens` 和有效窗口不同源,不封顶就会算出一个恒为真的判据。**
+ * 前者是别名上的原值(按模型的**协议**窗口标的),后者默认被 `LONG_CONTEXT_THRESHOLD`
+ * 夹到 272K。一个 1M 窗口、384K 最大输出的模型,关掉「最大上下文」之后
+ * 预留一项就是 384K —— 已经超过 272K×0.8 的阈值本身,于是 `used` 填 0 都判该压缩:
+ * 自动压缩从会话第一条消息起每轮触发一次,而且压完仍然为真,永远收敛不了。
+ * 症状是压力条几乎空着、旁边却写着「接近上限」。
+ *
+ * 封顶到 1/4 之后,最坏情况下压缩也要等占用过半才触发,判据重新跟历史长度有关。
+ * 这不是在猜模型真实会输出多少 —— 一轮回复本来就不可能写满协议上限,
+ * 而真正兜住「输入塞得下、输出被截断」的是 `validateModelRuntime` 那条硬校验,
+ * 它读协议窗口原值,不受这里影响。
+ */
+const OUTPUT_RESERVE_CAP = 0.25
+
 export interface AssembleInput {
   messages: readonly AgentMessage[]
   tools: readonly ToolInfo[]
@@ -713,6 +837,14 @@ export interface ContextUsage {
   used: number
   window: number
   shouldCompact: boolean
+  /**
+   * 这些 token 是被谁占掉的。★ 各档之和恒等于 `used` —— 见 `contextSegments`。
+   *
+   * 可选是因为它**只由 `assemble` 产出**:转录里恢复出来的老会话没有这一份,
+   * 而界面对「没有」和「全是 0」必须有不同反应(前者是「还不知道」,
+   * 后者是个断言)。
+   */
+  segments?: ContextSegment[]
 }
 
 export interface AssembleOutput {
@@ -721,7 +853,8 @@ export interface AssembleOutput {
 }
 
 export function assemble(input: AssembleInput): AssembleOutput {
-  const system = buildSystemPrompt(input)
+  const systemParts = systemPromptParts(input)
+  const system = joinSystemParts(systemParts)
   const reasoning = input.thinkingConfig === undefined
     // Legacy aliases may have no capability declaration. Preserve an explicit
     // Off so the protocol boundary can disable upstream defaults when supported.
@@ -761,14 +894,64 @@ export function assemble(input: AssembleInput): AssembleOutput {
     usage: {
       used,
       window: input.contextWindow,
+      segments: contextSegments({ system, systemParts, messages, tools: input.tools, used }),
       /**
-       * ★ 把 `maxOutputTokens` 算进来:上下文窗口是**输入加输出**共用的。
+       * ★ 把输出预留算进来:上下文窗口是**输入加输出**共用的。
        * 只比较输入的话,你会在「输入刚好塞得下、回复写到一半被截断」时
        * 才发现该压缩了 —— 而那时这一轮已经浪费了。
+       * 预留取 `maxOutputTokens` 但**必须封顶**,理由见 `OUTPUT_RESERVE_CAP`。
        */
-      shouldCompact: used + input.maxOutputTokens > input.contextWindow * COMPACT_THRESHOLD
+      shouldCompact:
+        used + Math.min(input.maxOutputTokens, input.contextWindow * OUTPUT_RESERVE_CAP) >
+        input.contextWindow * COMPACT_THRESHOLD
     }
   }
+}
+
+/**
+ * 把 `used` 拆成「被谁占掉了」。
+ *
+ * ★★ **各档之和必须恒等于 `used`**,这是这个函数唯一的硬约束
+ * (`__tests__/context-assembler.test.ts` 里有一条用例盯着它)。违反的表现
+ * 极其温和:界面上百分比加起来是 98%,看着像四舍五入,于是没人会去查 ——
+ * 而真实原因可能是整个 MCP 那一档漏了一半。
+ *
+ * ★ 分段之和**不等于**整串的 `estimateTokens`,差额有两个来源:`join` 的那些
+ * `\n\n`,以及每段各自 `Math.ceil` 的累积(分着算总是偏大)。差额一律记到
+ * `system` 头上 —— 它是基数最大、最不随用户配置变的那一档,几十个 token 的
+ * 出入在它身上看不出来;记到 `skills` 上就可能让一个只有两条技能的工作区
+ * 显示出莫名其妙的占比。
+ */
+function contextSegments(input: {
+  system: string
+  systemParts: readonly SystemPart[]
+  messages: readonly AgentMessage[]
+  tools: readonly ToolInfo[]
+  used: number
+}): ContextSegment[] {
+  const bySection = { system: 0, instructions: 0, skills: 0 }
+  for (const part of input.systemParts) {
+    if (part.text !== '') bySection[part.bucket] += estimateTokens(part.text)
+  }
+  // 差额归 system,理由见上。
+  bySection.system +=
+    estimateTokens(input.system) - (bySection.system + bySection.instructions + bySection.skills)
+
+  const msg = estimateMessageBuckets(input.messages)
+  const tools = estimateToolBuckets(input.tools)
+
+  const detail = [...tools.byServer.entries()]
+    .map(([id, tokens]) => ({ id, label: id, tokens }))
+    .sort((a, b) => b.tokens - a.tokens)
+
+  return [
+    { kind: 'system', tokens: bySection.system },
+    { kind: 'skills', tokens: bySection.skills + tools.skills },
+    { kind: 'tools-builtin', tokens: tools.builtin },
+    { kind: 'tools-mcp', tokens: tools.mcp, ...(detail.length > 0 ? { detail } : {}) },
+    { kind: 'instructions', tokens: bySection.instructions + msg.injected },
+    { kind: 'messages', tokens: msg.messages }
+  ]
 }
 
 // ─────────────────────────── 压缩 ───────────────────────────

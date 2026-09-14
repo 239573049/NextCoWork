@@ -138,11 +138,14 @@ function transport(cred: OAuthCredential, ctx: TransportContext): UpstreamTransp
 export const CHATGPT_OAUTH: OAuthProviderSpec = {
   id: 'chatgpt',
   label: 'ChatGPT',
-  authorizeUrl: 'https://auth.openai.com/oauth/authorize',
   tokenUrl: 'https://auth.openai.com/oauth/token',
   clientId: CLIENT_ID,
   scope: 'openid profile email offline_access',
-  redirect: { kind: 'loopback-fixed', port: REDIRECT_PORT, path: REDIRECT_PATH },
+  grant: {
+    kind: 'authorization-code',
+    authorizeUrl: 'https://auth.openai.com/oauth/authorize',
+    redirect: { kind: 'loopback-fixed', port: REDIRECT_PORT, path: REDIRECT_PATH }
+  },
   /*
     ★ `id_token_add_organizations` 让 id_token 带上那个 `…/auth` 命名空间下的
     组织与账号 claim —— 也就是 `accountId` 的唯一来源。不带它,`identity()`

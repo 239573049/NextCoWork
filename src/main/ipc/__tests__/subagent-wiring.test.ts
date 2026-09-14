@@ -54,6 +54,23 @@ const SUB_ALIAS = 'nextcowork-demo-fast'
 /** 假上游要派给谁。用例里改它,就等于改模型填进 `subagent_type` 的那个字符串。 */
 let subagentType = 'general-purpose'
 
+/**
+ * 下发给**子 run** 的那张工具表(外部名)。假上游在子 run 的第一次请求里记下来。
+ *
+ * 这是「子代理不问人」那一半唯一能直接观测到的地方 —— 快照是在
+ * `agent-session.ts` 每轮开头现取的,拿不到对象,只能看它发出去的请求体。
+ */
+let childTools: string[] = []
+
+/** 下发给**父 run** 的那张工具表。和 `childTools` 成对,用来证明收窄的只有 depth > 0。 */
+let parentTools: string[] = []
+
+/**
+ * 让子代理在交报告之前先调一次这个工具(外部名,大小写不敏感);`null` 表示不调。
+ * 用来把子 run 推到权限闸门跟前 —— `Bash` 在 `auto` 档是 destructive,判定为 `ask`。
+ */
+let childCalls: string | null = null
+
 class FakeWebContents {
   readonly sent: Array<{ channel: string; payload: unknown }> = []
   constructor(readonly id: number) {}
@@ -103,8 +120,38 @@ function fakeUpstream(): typeof fetch {
         .filter((b) => b.type === 'text')
         .map((b) => (typeof b.text === 'string' ? b.text : ''))
     )
-    // 子代理那条 run:直接交一份报告,不调任何工具
-    if (texts.some((t) => t.includes(CHILD_MARK))) {
+    const isChild = texts.some((t) => t.includes(CHILD_MARK))
+    // 每次请求都记下这一轮下发的工具表 —— 父子各一张,「子代理不问人」那组要对着看
+    if (isChild) childTools = (body.tools ?? []).map((t) => t.name)
+    else parentTools = (body.tools ?? []).map((t) => t.name)
+
+    // 子代理那条 run
+    if (isChild) {
+      const answered = (messages[messages.length - 1]?.content ?? []).find((b) => b.type === 'tool_result')
+      if (answered !== undefined) {
+        /*
+          ★ 工具回话**原样带进报告**。子 run 的 `tool_end` 事件要经 topic 继承
+          才到得了窗口,而这条路本身就是别的用例在钉的东西;把它抄进文本,
+          断言就只依赖「子代理确实收到了一个结算」,与订阅接线解耦。
+        */
+        const said = typeof answered.content === 'string' ? answered.content : JSON.stringify(answered.content)
+        return Promise.resolve(sse({ blocks: [{ kind: 'text', text: `${CHILD_REPORT}\n工具回话:${said}` }] }, model))
+      }
+      if (childCalls !== null) {
+        const want = childCalls.toLowerCase()
+        const called = (body.tools ?? []).map((t) => t.name).find((n) => n.toLowerCase() === want)
+        if (called === undefined) throw new Error(`子 run 的工具表里没有 ${childCalls}`)
+        return Promise.resolve(
+          sse(
+            {
+              blocks: [{ kind: 'tool_use', id: `child_${String(seq)}`, name: called, input: { command: 'echo hi' } }],
+              stopReason: 'tool_use'
+            },
+            model
+          )
+        )
+      }
+      // 不调任何工具:直接交一份报告
       return Promise.resolve(sse({ blocks: [{ kind: 'text', text: CHILD_REPORT }] }, model))
     }
 
@@ -198,6 +245,9 @@ const allEvents = (wc: FakeWebContents): AgentEvent[] => wc.envelopes().flatMap(
 
 beforeEach(() => {
   subagentType = 'general-purpose'
+  childTools = []
+  parentTools = []
+  childCalls = null
   resetRuntimeForTest()
   store.putWorkspace({ id: 'w1', name: 'Local test workspace', rootPath: '', environment: { kind: 'local' }, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })
   store.ensureSession({ id: PARENT_SESSION, workspaceId: 'w1', rootPathAtCreation: '' })
@@ -528,5 +578,98 @@ describe('子代理继承「最大上下文」开关', () => {
 
     expect(await childWindow(true)).toBe(1_050_000)
     expect(await childWindow(false)).toBe(LONG_CONTEXT_THRESHOLD)
+  })
+})
+
+/**
+ * ★★ 「子代理不问人」—— 两道闸,合起来才堵得住。
+ *
+ * `Task` 的工具描述里写着 *A SUBAGENT CANNOT ASK THE USER ANYTHING*,但机制一直
+ * 没跟上。子代理有两条路能走到 `InteractionGate.request()`,而那个 Promise
+ * **只在 `answer()` 或 abort 时结算**:
+ *
+ * 1. 它自己调 `AskUserQuestion`(快照没收窄,默认子代理拿得到);
+ * 2. 它调一个落在 `ask` 档的工具,`approveWith` 发起 `tool_permission` 审批。
+ *
+ * 两条都通向同一个结果,因为子代理的待决项在界面上**根本走不到用户面前**:
+ * `InteractionPanel` 挂在父 run 的 `activeRunId` 上,父 run 一结束就卸载;
+ * `listInteractions` 在父 handle 回收后返回空数组;`applyChildEvent` 又把
+ * `interaction_request` 当未知事件丢掉。于是那次 await 永远不结算 ——
+ * 用户看到的就是那张跑满一小时、六百多次工具调用、里面什么也没发生的卡片。
+ *
+ * 所以两条用例都不是在测文案,是在测**「会不会结算」**。卡死的回归长这样:
+ * 用例不报错,只是永远不返回,最后死在 vitest 的超时上。
+ */
+describe('子代理不问人', () => {
+  it('★ 子 run 的工具表里没有 AskUserQuestion —— 主动提问那条路在快照层就没了', async () => {
+    installChildRunLauncher(startChildRun)
+    const { ctx } = fakeWindow()
+    const r = req()
+
+    startRun(r, ctx)
+    await waitForEnd(r.runId)
+
+    // 先确认这张表真的抓到了,否则下面那条 not.toContain 对着空数组也会绿
+    expect(childTools.length).toBeGreaterThan(0)
+    expect(childTools.map((n) => n.toLowerCase())).not.toContain('askuserquestion')
+    // 只摘交互工具,别的一个不少 —— 子代理照样是个能干活的代理
+    expect(childTools.map((n) => n.toLowerCase())).toContain('read')
+  })
+
+  /**
+   * ★ 配对的反面用例。少了它,把 `noInteraction` 写成常量 `true`
+   * (主代理也问不了人了)照样全绿 —— 那是一次沉默得多的退化。
+   */
+  it('父 run 的工具表里 AskUserQuestion 照常在 —— 收窄的只有 depth > 0', async () => {
+    installChildRunLauncher(startChildRun)
+    const r = req()
+
+    startRun(r, fakeWindow().ctx)
+    await waitForEnd(r.runId)
+
+    expect(parentTools.map((n) => n.toLowerCase())).toContain('askuserquestion')
+    expect(childTools.map((n) => n.toLowerCase())).not.toContain('askuserquestion')
+  })
+
+  /**
+   * ★★★ 这条是整组里最重要的一条:**`ask` 档的工具当场被拒,而不是挂起**。
+   *
+   * `Bash` 在 `auto` 档是 destructive,`evaluate()` 判 `ask` —— 也就是原来会走到
+   * `interactions.request` 的那条路。父 run 留在 `auto` 是有意的:`Task` 的
+   * destructive 是 false,父自己那次调用照常放行,于是这条用例里唯一撞到闸门的
+   * 就是子代理那一次。
+   *
+   * 断言的是**结算**:run 在 `waitForEnd` 的窗口内跑完了,而且子代理的报告里
+   * 带着那句拒绝的原文。退化回挂起的话,这条会超时而不是断言失败。
+   */
+  it('★ 子代理碰到 ask 档的工具 → 当场拿到一条说得清的拒绝,run 继续跑完', async () => {
+    installChildRunLauncher(startChildRun)
+    childCalls = 'Bash'
+    const { wc, ctx } = fakeWindow()
+    const r = req()
+
+    startRun(r, ctx)
+    await waitForEnd(r.runId)
+
+    expect(runs.get(r.runId)?.status).toBe('done')
+
+    const committed = JSON.stringify(allEvents(wc).filter((e) => e.type === 'message_commit'))
+    expect(committed).toContain('工具回话')
+    // 理由要写成模型能据此行动的一句话 —— 只说「被拒绝」它会原地重试
+    expect(committed).toContain('a subagent cannot ask for it')
+    expect(committed).toContain('parent agent must run it')
+  })
+
+  /** 反面:同一个 `Bash`,父代理自己调的时候这道闸不该动它(它该走审批) */
+  it('这道闸只认 parentRunId —— 父代理的工具表不受影响', async () => {
+    installChildRunLauncher(startChildRun)
+    const { wc, ctx } = fakeWindow()
+    const r = req()
+
+    startRun(r, ctx)
+    await waitForEnd(r.runId)
+
+    // 子代理没调工具时,转录里不该凭空出现那句拒绝
+    expect(JSON.stringify(allEvents(wc))).not.toContain('a subagent cannot ask for it')
   })
 })

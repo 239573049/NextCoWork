@@ -15,7 +15,17 @@ import type { AgentEvent, RunNotice, RunStatus, SubagentPhase } from './event'
 import { visibleText, type AgentMessage, type ContentPart, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
 import type { RunCost } from '../domain/pricing'
-import type { ContextCheckpoint, ContextStatus } from './context-management'
+import type { ContextCheckpoint, ContextSegment, ContextStatus } from './context-management'
+
+/**
+ * 一张子代理卡片留几条「最近做了什么」。
+ *
+ * ★ 这条曾经从 3 提到 8,理由是「右侧只读面板里有地方放」—— 后来那块面板改成了
+ * 纯正文(标题 + 转录,别的什么都没有),于是 `activity` **现在没有任何渲染消费者**,
+ * 多留的 5 条只是白占转录。回到 3:字段本身留着,因为它是转录里唯一一份
+ * 「这个子代理最后几步在干嘛」的结构化记录,排查时读得到。
+ */
+const ACTIVITY_LIMIT = 3
 
 /** 尚未提交的内容块。`index` 就是上游给的块序号(方案 §4.2)。 */
 export interface LiveBlock {
@@ -51,6 +61,8 @@ export interface ToolCallState {
 export interface SubagentState {
   callId: string
   childRunId: string
+  /** 子 run 的会话 id,由 `subagent_start` 带过来。点开卡片时拿它去取转录。 */
+  childSessionId?: string
   status: RunStatus
   description?: string
   subagentType?: string
@@ -63,10 +75,26 @@ export interface SubagentState {
   toolErrors: number
   startedAt?: number
   endedAt?: number
+  /**
+   * 最后一次从这个子代理听到任何动静的墙钟毫秒。
+   *
+   * ★★ 这是区分「卡死」和「在跑一件慢活」的**唯一**可靠信号。`startedAt` 只说
+   * 它跑了多久 —— 而一个健康的长任务和一个一小时前就停住的 run,在耗时那一栏
+   * 上长得一模一样(本仓库真出过:1h5m、794 次工具调用、界面上毫无异常)。
+   * 一个还在动的子代理,这个数总在往前走;停住的那个,它会定在原地。
+   *
+   * 每一条子事件都刷新它 —— 包括心跳式的遥测,所以「没有新事件」就是字面意思。
+   */
+  lastEventAt?: number
   summary?: string
   error?: AgentError
   usage?: TokenUsage
-  contextUsage?: { used: number; window: number; shouldCompact: boolean }
+  contextUsage?: {
+    used: number
+    window: number
+    shouldCompact: boolean
+    segments?: ContextSegment[]
+  }
   /**
    * 和上面 `TranscriptState.notice` 是同一件事,只不过说的是**这个子代理**。
    *
@@ -132,7 +160,12 @@ export interface TranscriptState {
   runModel?: Record<string, string>
   /** 消息 → 产出它的 run。老对话(第 12 条迁移之前)为空。 */
   messageRuns?: Record<string, string>
-  contextUsage?: { used: number; window: number; shouldCompact: boolean }
+  contextUsage?: {
+    used: number
+    window: number
+    shouldCompact: boolean
+    segments?: ContextSegment[]
+  }
   /**
    * 最近一次上游请求**这一次**报回来的输入 token —— 缓存读写也算,它们同样占着窗口。
    *
@@ -205,6 +238,23 @@ export function promptTokensOf(usage: TokenUsage): number {
   return usage.inputTokens
     + (usage.cacheReadInputTokens ?? 0)
     + (usage.cacheCreationInputTokens ?? 0)
+}
+
+/**
+ * 这一轮里有多大比例的提示词是**从缓存读**的。
+ *
+ * ★ 分母用 `promptTokensOf` 而不是 `inputTokens`:后者**不含**缓存那两项,
+ * 拿它当分母的话,一段被完整缓存住的长对话会算出一个远大于 1 的命中率
+ * (极端情况下分母是 0)。
+ *
+ * ★ 一次请求都还没完成时返回 `undefined` 而不是 0 —— `0%` 是「一次都没命中」
+ * 这个断言,而此刻真实情况是「还不知道」。两者在界面上必须长得不一样。
+ */
+export function cacheHitRateOf(usage: TokenUsage | undefined): number | undefined {
+  if (usage === undefined) return undefined
+  const total = promptTokensOf(usage)
+  if (total <= 0) return undefined
+  return (usage.cacheReadInputTokens ?? 0) / total
 }
 
 /**
@@ -431,8 +481,19 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
       const d = e.delta
       switch (d.type) {
         case 'message_start':
-          // ★ 内容开始流了 = 重试成功,提示到此为止。见 TranscriptState.notice
-          return { ...s, model: d.model, providerId: d.providerId, notice: undefined }
+          /*
+            ★ 内容开始流了 = 重试成功,提示到此为止。见 TranscriptState.notice
+
+            ★★ `live: []` 在正常路径上是**无操作** —— `message_commit` 已经清过了
+            (见下面那条「提交即清空活跃块」),所以这里 `live` 必空。它存在只为一件事:
+            **断流续跑**(`agent-session.ts` 的 `RESUME_DELAYS_MS`)。被丢弃的那次尝试
+            没有 commit,只有这一句能把它抹掉;漏掉的话,续跑那次的 `text_delta index:0`
+            会**续写**在上一次半截文字的后面,界面上是一段前后接不上的乱码。
+
+            重载后的重放同理:`run-registry` 只在 `message_commit` 时裁剪 delta,
+            被丢弃那次的 delta 会原样留在日志里重放一遍,也靠这一句清掉。
+          */
+          return { ...s, model: d.model, providerId: d.providerId, notice: undefined, live: [] }
 
         case 'text_delta':
         case 'thinking_delta': {
@@ -568,7 +629,13 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
     case 'context_usage':
       return {
         ...s,
-        contextUsage: { used: e.used, window: e.window, shouldCompact: e.shouldCompact }
+        contextUsage: {
+          used: e.used,
+          window: e.window,
+          shouldCompact: e.shouldCompact,
+          // ★ 缺省时**不要补一个空数组**:界面对「还不知道」和「全是 0」要有不同反应。
+          ...(e.segments === undefined ? {} : { segments: e.segments })
+        }
       }
 
     case 'context_status':
@@ -591,6 +658,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             callId: e.callId,
             childRunId: e.childRunId,
             status: 'running',
+            ...(e.childSessionId === undefined ? {} : { childSessionId: e.childSessionId }),
             ...(e.description === undefined ? {} : { description: e.description }),
             ...(e.subagentType === undefined ? {} : { subagentType: e.subagentType }),
             ...(e.model === undefined ? {} : { model: e.model }),
@@ -598,6 +666,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             phase: e.background === true ? 'background' : 'starting',
             toolCalls: 0,
             toolErrors: 0,
+            lastEventAt: e.at ?? Date.now(),
             ...(e.at === undefined ? {} : { startedAt: e.at })
           }
         }
@@ -613,6 +682,10 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
           ...s.subagents,
           [e.callId]: {
             ...previous,
+            // ★ 无条件刷新:这一格的意义是「最后一次听到动静」,而不是
+            //   「最后一次状态有变化」—— 只在有变化时更新的话,一个反复
+            //   report 同一个 phase 的健康子代理会被显示成停住了。
+            lastEventAt: e.at ?? Date.now(),
             ...(e.phase === undefined ? {} : { phase: e.phase }),
             // Presence matters here: `currentTool: undefined` is an explicit
             // clear sent by `tool_end`, while an omitted field means "keep the
@@ -620,7 +693,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             ...('currentTool' in e ? { currentTool: e.currentTool } : {}),
             ...('currentTarget' in e ? { currentTarget: e.currentTarget } : {}),
             ...('currentTool' in e && typeof e.currentTool === 'string' ? {
-              activity: [{ toolName: e.currentTool, target: e.currentTarget, at: e.at }, ...(previous.activity ?? [])].slice(0, 3)
+              activity: [{ toolName: e.currentTool, target: e.currentTarget, at: e.at }, ...(previous.activity ?? [])].slice(0, ACTIVITY_LIMIT)
             } : {}),
             ...(e.toolCalls === undefined ? {} : { toolCalls: e.toolCalls }),
             ...(e.toolErrors === undefined ? {} : { toolErrors: e.toolErrors }),
@@ -646,7 +719,16 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
           [e.callId]: {
             ...previous,
             status: e.status,
-            phase: 'finishing',
+            /*
+              ★ **不要**在这里把 phase 改写成 `'finishing'`。
+
+              以前这么写,结果是任何终态卡片都显示「收尾中」—— 不管它是正常
+              跑完的、被中断的、还是停在某次工具调用上一小时没动的。排查时
+              最想知道的恰恰是**它停在哪一步**,而这一栏当时等于零信息。
+              留住 `previous.phase`:正常跑完的本来就已经是 `'finishing'`
+              (最后那条 `message_end` 置的),而卡在工具上的会照实说「工具」。
+            */
+            lastEventAt: e.at ?? Date.now(),
             currentTool: undefined,
             currentTarget: undefined,
             // 终态下错误框会把话说全,顶上再挂一句过期的「正在重试」只会误导
@@ -715,6 +797,10 @@ export function applyChildEvent(
           [entry.callId]: {
             ...entry,
             summary: text.slice(0, 240),
+            // 这一支绕开了 `childUpdate`,所以得自己刷一次 —— 漏掉的话,
+            // 一个只提交消息、不报遥测的后台子代理会显示成「很久没动静」。
+            // `message_commit` 不带 `at`(见 `event.ts`),只能用本地时钟。
+            lastEventAt: Date.now(),
             ...(childSeq === undefined ? {} : { childSeq })
           }
         }

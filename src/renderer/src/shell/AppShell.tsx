@@ -100,6 +100,28 @@ export function AppShell({
   const tabs = useTabsStore();
   const ensureTabs = useTabsStore((s) => s.ensure);
 
+  /*
+    ★ **拆包的配套预热。** ChatView 现在是 lazy 的(见 views/registry.tsx 文件头:
+    它替主 bundle 背走了 streamdown + katex),代价是「点开一段会话」多了一次 chunk
+    往返。外壳一挂上首屏就已经画完了,此后到用户真去点之间那段空闲白白浪费 ——
+    在这里把它预取掉,等用户点的时候 lazy 已经能同步解析,Suspense 的占位一帧都不出现。
+
+    只预热 ChatView:它是每次启动几乎必开的那个。终端 / 文档不是,替它们抢带宽
+    反而会拖慢真正要用的那个。
+
+    `requestIdleCallback` 没有就退回一个短 timeout(Chromium 里其实一定有,
+    这行是给 jsdom 下的单测用的)。返回的清理函数取消掉还没跑的那次。
+  */
+  useEffect(() => {
+    const preload = (): void => { void import('../views/chat/ChatView') };
+    if (typeof requestIdleCallback !== 'function') {
+      const timer = setTimeout(preload, 200);
+      return () => clearTimeout(timer);
+    }
+    const handle = requestIdleCallback(preload, { timeout: 2000 });
+    return () => cancelIdleCallback(handle);
+  }, []);
+
   /**
    * 三格面板都是条件挂载的,直接 `{open && <Panel/>}` 收起时节点当场消失,
    * 没有东西可以播退场 —— 所以统一过一遍 usePresence(它的文件头写了为什么)。

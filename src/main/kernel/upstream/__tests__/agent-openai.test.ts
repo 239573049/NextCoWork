@@ -28,7 +28,15 @@ function finalResponse(protocol: UpstreamProtocol): Response {
   return protocol === 'openai-chat' ? sse(chunk({ content: '完成' }, 'stop'), '[DONE]') : sse(responseDone([messageItem]))
 }
 
-function rig(protocol: typeof protocols[number], responses: Response[]) {
+/**
+ * ★ `resumeDelaysMs` 缺省 `[]` = **关掉断流自动续跑**。
+ *
+ * 真实缺省是 `RESUME_DELAYS_MS`(1s/2s/5s/15s/45s),这份文件跑的是真 router + 真
+ * transport,`fetch` 的脚本一用完就抛「Unexpected request」—— 那是个网络错误,
+ * 于是每一条脚本不够长的用例都会凭空多睡 68 秒然后超时。续跑只在明确要测它的
+ * 那两条用例里打开。
+ */
+function rig(protocol: typeof protocols[number], responses: Response[], resumeDelaysMs: readonly number[] = []) {
   const request: RunRequest = { runId: 'r1', sessionId: 's1', workspaceId: 'w1', depth: 0, input: [{ type: 'text', text: '开始' }],
     mode: 'normal', thinking: 'high', webSearch: false, permissionMode: 'ask', model: 'test', skillIds: [] }
   const alias: ModelAlias = { alias: 'test', providerId: 'p', upstreamModel: protocol === 'openai-chat' ? 'deepseek-test' : 'gpt-test',
@@ -56,6 +64,7 @@ function rig(protocol: typeof protocols[number], responses: Response[]) {
   const saved: AgentMessage[] = []
   handle.on((event) => events.push(event))
   const session = new AgentSession({ host, upstream: router, tools, workspaceRoot: '/workspace',
+    resumeDelaysMs,
     onMessageCommit: (message) => saved.push(structuredClone(message)),
     approve: async ({ tool, callId, input }) => {
       if (tool.readOnly) return { kind: 'allow_once' }
@@ -150,16 +159,53 @@ describe.each(protocols)('%s real router → agent → interaction → tool → 
     expect(r.execute).not.toHaveBeenCalled()
   })
 
-  it('never retries or executes partial tool output on a truncated stream', async () => {
-    const response = protocol === 'openai-chat' ? sse(chunk({ reasoning_content: 'partial', tool_calls: [
-      { index: 0, id: 'c', function: { name: 'Echo', arguments: '{"text":' } }
-    ] })) : sse({ type: 'response.output_item.added', output_index: 0, item: functionItem })
-    const r = rig(protocol, [response])
+  /** 流在工具参数说到一半时断掉:`{"text":` 是个不完整的 JSON */
+  const truncated = (): Response => protocol === 'openai-chat' ? sse(chunk({ reasoning_content: 'partial', tool_calls: [
+    { index: 0, id: 'c', function: { name: 'Echo', arguments: '{"text":' } }
+  ] })) : sse({ type: 'response.output_item.added', output_index: 0, item: functionItem })
+
+  it('never executes partial tool output on a truncated stream', async () => {
+    const r = rig(protocol, [truncated()])
     await r.ready
     await r.session.run()
     expect(r.handle.status).toBe('error')
     expect(r.bodies).toHaveLength(1)
+    // ★ 半截的工具调用**一次都不许执行** —— `{"text":` 解析出来的参数是残的,
+    //   而 Echo 是 destructive。这一条和续跑开不开没有关系,下一条用例里同样成立。
     expect(r.execute).not.toHaveBeenCalled()
     expect(orphanedToolCalls([...r.session.history])).toEqual([])
+  })
+
+  /**
+   * ★★ 同一个截断流,打开续跑之后应该自己重来一轮。
+   *
+   * 这是整条链的端到端验收:真 transport 把流读到一半就没了 → `streamOnce` 合成
+   * `incompleteResponse`(code `network`,**router 一个 error 事件都没发过**,因为
+   * 从它的角度看这是一次正常结束的 HTTP 响应)→ session 退避后原样重发。
+   *
+   * 三条断言各钉一件事:重发了(`bodies` 两份且逐字相同)、这一轮**真的救回来了**
+   * (`done` + 「完成」)、被丢弃那次的半截工具调用**没有溜进执行**。
+   * 第三条尤其要紧:续跑丢弃的是整个 accumulator,漏一点都会变成一次带残参数的
+   * destructive 调用。
+   */
+  it('★ resumes a truncated stream and discards the partial tool call', async () => {
+    const r = rig(protocol, [truncated(), finalResponse(protocol)], [0])
+    await r.ready
+    await r.session.run()
+    expect(r.handle.status).toBe('done')
+    expect(r.bodies).toHaveLength(2)
+    expect(JSON.stringify(r.bodies[0])).toBe(JSON.stringify(r.bodies[1]))
+    expect(visibleText(r.saved.at(-1)!)).toBe('完成')
+    expect(r.execute).not.toHaveBeenCalled()
+    expect(orphanedToolCalls([...r.session.history])).toEqual([])
+    // 半截那一份一个字都不留:转录里没有第二个气泡,也没有 partial 的思考块
+    expect(applyEvents(emptyTranscript(), r.events).messages.filter((m) => m.role === 'assistant')).toHaveLength(1)
+    /*
+      ★★ 第二次尝试必须**重新发一个 `message_start`** —— 渲染层清掉上一次半截
+      文字的唯一时机就是它(`transcript.ts` 的 `case 'message_start'` 里那句
+      `live: []`)。协议解析器哪天改成「只在第一条响应上发」,这里就会红,
+      而界面上的症状是两段文字前后接不上的乱码 —— 一个截图都难抓的错乱。
+    */
+    expect(r.events.filter((e) => e.type === 'stream' && e.delta.type === 'message_start')).toHaveLength(2)
   })
 })

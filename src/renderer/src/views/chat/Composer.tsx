@@ -50,11 +50,15 @@ import type {
   ThinkingLevel,
 } from "../../../../shared/agent/run-request";
 import {
+  contextSegmentShare,
   effectiveContextWindow,
   formatContextWindow,
   longContextTickRatio,
   LONG_CONTEXT_THRESHOLD,
   supportsMaxContext,
+  type ContextPreview,
+  type ContextSegment,
+  type ContextSegmentKind,
 } from "../../../../shared/agent/context-management";
 import { longContextSurcharge, findPricing } from "../../../../shared/domain/pricing";
 import { PRICING_SEED } from "../../../../shared/domain/pricing-seed";
@@ -79,6 +83,7 @@ import { Slider } from "../../components/ui/Slider";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
+import { previewContext } from "../../services/context";
 import { useModelsStore } from "../../stores/models";
 import { AttachmentTray, type TrayItem } from "./AttachmentTray";
 import { MentionInput, type MentionInputHandle } from "./MentionInput";
@@ -155,9 +160,13 @@ export function Composer({
   onRemoveAttachment,
   onRetryAttachment,
   planExitSignal,
+  sessionId,
   contextTokens,
+  contextSegments,
+  contextCacheHitRate,
   contextCompacting = false,
   onCompactContext,
+  onManageMcp,
 }: {
   workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
@@ -193,13 +202,23 @@ export function Composer({
    */
   planExitSignal?: number;
   /**
+   * null = 还没落库的草稿 Tab。只给上下文预览用 —— 有会话时它的历史要算进归因,
+   * 没有时预览的就是「一句话都没聊」的那个基线。
+   */
+  sessionId?: string | null;
+  /**
    * 最近一次上游请求实际吃掉的输入 token。★ 是**瞬时量**不是累计量 ——
    * 传 `transcript.usage.inputTokens`(整轮之和)的话,聊到第三轮就会显示 200%。
    */
   contextTokens?: number;
+  /** 最近一轮的占用归因(本地估算)。缺省 = 还没发生过一次请求。 */
+  contextSegments?: ContextSegment[];
+  contextCacheHitRate?: number;
   contextCompacting?: boolean;
   /** 双击圆环触发。生成中不给触发,由这里的按钮自己拦。 */
   onCompactContext?: () => void;
+  /** 归因卡里 MCP 那一行的去处。缺省 = 那一行不可点。 */
+  onManageMcp?: () => void;
 }): ReactNode {
   const { t } = useI18n();
   const { models: configuredModels, providers, loaded, providerOf, load } = useModelsStore();
@@ -215,6 +234,12 @@ export function Composer({
     lastPlanExit.current = planExitSignal;
     setValue((v) => (v.mode === "normal" ? v : { ...v, mode: "normal" }));
   }, [planExitSignal]);
+  /*
+    上下文归因的**预览**:还没发过请求时,`contextSegments` 是空的,而那正是这张卡
+    最该说话的时刻 —— 一个挂满 MCP 的工作区在一句话都没聊的时候就已经少掉半个窗口。
+    ★ 菜单打开时才拉(见 `services/context.ts`),而且**真实归因一到就让位**。
+  */
+  const [preview, setPreview] = useState<ContextPreview | undefined>(undefined);
   const input = useRef<MentionInputHandle | null>(null);
   const lastCaret = useRef<number | null>(null);
   const [skills, setSkills] = useState<SkillListItem[]>([]);
@@ -824,6 +849,31 @@ export function Composer({
           */}
           <ContextRing
             used={contextTokens}
+            segments={contextSegments}
+            preview={preview}
+            onMenuOpen={() => {
+              /* 真实归因已经在了就别再估一遍 —— 估出来的那份从这一刻起
+                 不会被显示,而它每次都要把整份工具清单重新走一遍。 */
+              if (contextSegments !== undefined) return;
+              void previewContext({
+                sessionId: sessionId ?? "",
+                workspaceId: workspace.id,
+                model: value.model,
+                ...(value.modelProviderId === undefined
+                  ? {}
+                  : { modelProviderId: value.modelProviderId }),
+                mode: value.mode,
+                thinking: value.thinking,
+                permissionMode: value.permissionMode,
+                webSearch: value.webSearch,
+                maxContext: value.maxContext,
+              })
+                .then(setPreview)
+                /* 预览失败就当没有 —— 这张卡是诊断,不该把一次 IPC 抖动变成一个报错弹窗。 */
+                .catch(() => setPreview(undefined));
+            }}
+            cacheHitRate={contextCacheHitRate}
+            onManageMcp={onManageMcp}
             model={selectedModel}
             maxContext={value.maxContext}
             onMaxContext={(next) => patch({ maxContext: next })}
@@ -1202,6 +1252,11 @@ function ContextRing({
   running,
   compacting,
   onCompact,
+  segments,
+  preview,
+  onMenuOpen,
+  cacheHitRate,
+  onManageMcp,
 }: {
   used?: number;
   /** 整个别名而不是单个窗口数:计费文案还要 `upstreamModel` / `providerId` */
@@ -1211,6 +1266,29 @@ function ContextRing({
   running: boolean;
   compacting: boolean;
   onCompact?: () => void;
+  /**
+   * 最近一轮的占用归因。
+   *
+   * ★ 它和上面的 `used` **不同源**,这是有意的,不要「修好」:`used` 是上游报回来的
+   * 真实输入 token,`segments` 是发出去之前本地估的(误差英文 ±15%、中文 ±25%,
+   * 见 `context-assembler.ts` 文件头)。所以这张卡**只显示百分比,不显示 token 数** ——
+   * 百分比是相对量,估算误差在分子分母上同向抵消;一列写着 `14.3K` 的绝对值
+   * 是在承诺一个我们给不准的数,而用户迟早会拿它去对账单。
+   */
+  segments?: ContextSegment[];
+  /**
+   * 一句话都没聊时的归因 —— 主进程装配一次但不发出去。
+   *
+   * ★ **只在 `segments` 缺席时顶上**,真实归因一到就让位:预览是纯本地估算,
+   * 而且拿不到 git 上下文、也看不见还没连上的 MCP。它的价值全在时机上 ——
+   * 「发第一条之前就已经占掉多少」只有在发第一条之前看见才是可行动的。
+   */
+  preview?: ContextPreview;
+  /** 菜单打开 —— 预览在这一刻才去拉。 */
+  onMenuOpen?: () => void;
+  /** 本轮缓存命中率。`undefined` = 还没有过一次完成的请求。 */
+  cacheHitRate?: number;
+  onManageMcp?: () => void;
 }): ReactNode {
   const { t } = useI18n();
   const protocolWindow = model?.contextWindow;
@@ -1268,6 +1346,9 @@ function ContextRing({
         : t("composer.contextMenu")}
       width={260}
       align="end"
+      onOpenChange={(open) => {
+        if (open) onMenuOpen?.();
+      }}
       /*
         双击 = 立刻压缩,保住改造之前就有的肌肉记忆。为什么不能直接包
         `onDoubleClick`、为什么用 `e.detail` 而不是延时消歧,见 `Menu.tsx` 里
@@ -1369,6 +1450,25 @@ function ContextRing({
               </span>
             </MenuLabel>
           )}
+          <ContextBreakdown
+            segments={segments ?? preview?.segments}
+            /* 预览才给这个总量:真实归因在场时,圆环上那个数已经是真值了,
+               再写一个估算的总量只会让人怀疑该信哪一个。 */
+            previewShare={
+              segments !== undefined || preview === undefined || preview.window <= 0
+                ? undefined
+                : preview.used / preview.window
+            }
+            cacheHitRate={cacheHitRate}
+            onManageMcp={
+              onManageMcp === undefined
+                ? undefined
+                : () => {
+                    close();
+                    onManageMcp();
+                  }
+            }
+          />
           <MenuSeparator />
           <ComposerMenuItem
             icon={<Maximize2 size={16} />}
@@ -1408,6 +1508,144 @@ function ContextRing({
         </>
       )}
     </Menu>
+  );
+}
+
+/** 归因行的顺序只由占比决定 —— 这张卡回答的就是「谁最大」。 */
+const SEGMENT_LABEL: Record<ContextSegmentKind, string> = {
+  system: "composer.contextSegSystem",
+  skills: "composer.contextSegSkills",
+  "tools-builtin": "composer.contextSegToolsBuiltin",
+  "tools-mcp": "composer.contextSegToolsMcp",
+  instructions: "composer.contextSegInstructions",
+  messages: "composer.contextSegMessages",
+};
+
+/**
+ * 「这些上下文被谁占掉了」。
+ *
+ * ★ **分母是已用量,不是窗口。** 圆环和它上面那根条回答「还剩多少」,这张卡回答
+ * 「已经占掉的那些是什么」—— 两个不同的问题。一个 3% 的读数配上「MCP 占了其中
+ * 42%」才是可行动的:挂满 MCP 的工作区在**一句话都没聊**的时候就已经少掉半个窗口,
+ * 而单看余量只会得出「还早着呢」。
+ *
+ * ★ **不用分类色板。** 每一行都带着自己的文字标签,颜色一个字节的身份信息都不承载,
+ * 纯装饰 —— 而这个界面的既有约定是不为装饰新增用色(见圆环里那道 272K 刻度线的
+ * 注释)。圆点因此只有一个色相,浓淡跟的是**这一档自己的占比**,不是它的排名:
+ * 排序会随对话变,而「同一档换个位置就换个颜色」正是让人读错的那种变化。
+ *
+ * ★ **一个数都不显示 token。** 理由见 `ContextRing` 的 `segments` 那段。
+ */
+function ContextBreakdown({
+  segments,
+  previewShare,
+  cacheHitRate,
+  onManageMcp,
+}: {
+  segments?: ContextSegment[];
+  /** 预览态才有:估算出来的「已占窗口」比例。见调用点。 */
+  previewShare?: number;
+  cacheHitRate?: number;
+  onManageMcp?: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+
+  /*
+    ★ 「还没有」和「全是 0」必须长得不一样。新会话在发出第一条之前一个真实
+    请求都没发生过,此时画一排 0% 是个**断言**(「这些东西都没占地方」),而它是假的 ——
+    工具定义那时候已经占了几万 token,只是我们还没算过。
+  */
+  if (segments === undefined || segments.length === 0) {
+    return (
+      <MenuLabel>
+        <span className="text-fg-faint">{t("composer.contextBreakdownPending")}</span>
+      </MenuLabel>
+    );
+  }
+
+  const used = segments.reduce((n, s) => n + s.tokens, 0);
+  const rows = [...segments].sort((a, b) => b.tokens - a.tokens);
+  const max = rows[0]?.tokens ?? 0;
+
+  return (
+    <>
+      <MenuLabel>{t("composer.contextBreakdown")}</MenuLabel>
+      <div className="px-2.5 pb-1 pt-0.5 text-[11.5px]">
+        {previewShare !== undefined && (
+          /*
+            ★ 这一行才是整张卡的由头:下面六行是「占掉的那些是什么」(分母是已用量),
+            这一行是「还没开口就已经占掉多少窗口」(分母是窗口)。两个分母不一样,
+            所以它在线上面、措辞也不同 —— 混进去会让人把 42% 读成 42% 的窗口。
+          */
+          <div
+            className="mb-1.5 flex items-center gap-2 border-b border-border pb-1.5"
+            title={t("composer.contextPreviewNote")}
+          >
+            <span className="min-w-0 flex-1 truncate text-fg-muted">
+              {t("composer.contextPreviewTotal")}
+            </span>
+            <span className="shrink-0 tabular-nums text-fg">
+              {(Math.min(1, Math.max(0, previewShare)) * 100).toFixed(1)}%
+            </span>
+          </div>
+        )}
+        {rows.map((segment) => {
+          const share = contextSegmentShare(segment.tokens, used);
+          const mcp = segment.kind === "tools-mcp" && onManageMcp !== undefined;
+          const Row = mcp ? "button" : "div";
+          return (
+            <Row
+              key={segment.kind}
+              {...(mcp ? { type: "button" as const, onClick: onManageMcp } : {})}
+              /* MCP 那一行可点 —— 「MCP 占 42%」看完之后总得有个地方能去关掉它,
+                 否则这张卡就只是个漂亮的诊断。 */
+              className={cn(
+                "flex w-full items-center gap-2 rounded-sm py-[3px] text-left",
+                mcp && "-mx-1 px-1 hover:bg-tint-hover",
+              )}
+              /* 悬浮才给按 server 的拆分:六行里塞进 N 个服务器会把这张卡撑成一屏,
+                 而「哪个服务器最贵」是追问出来的,不是第一眼要的。 */
+              title={
+                [
+                  ...(segment.detail ?? []).map(
+                    (d) => `${d.label} ${(contextSegmentShare(d.tokens, used) * 100).toFixed(1)}%`,
+                  ),
+                  ...(mcp ? [t("composer.contextManageMcp")] : []),
+                ].join("\n") || undefined
+              }
+            >
+              <span
+                aria-hidden="true"
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                /* 浓淡编码的是这一档自己的占比。0.25 是下限:再淡就看不见了,
+                   而一个看不见的点和一个被漏掉的行长得一样。 */
+                style={{ opacity: max === 0 ? 0.25 : 0.25 + 0.75 * (segment.tokens / max) }}
+              />
+              <span className="min-w-0 flex-1 truncate text-fg-muted">
+                {t(SEGMENT_LABEL[segment.kind])}
+              </span>
+              {/* 数字穿的是文字色,不穿那个圆点的颜色 —— 身份由标签给,不由颜色给。 */}
+              <span className="shrink-0 tabular-nums text-fg">{(share * 100).toFixed(1)}%</span>
+            </Row>
+          );
+        })}
+        {cacheHitRate !== undefined && (
+          /*
+            ★ 它和上面六行**不是一件事**,所以隔一条线:上面说的是「窗口被谁占了」,
+            这一行说的是「这些 token 里有多少是从缓存读的」(便宜那部分)。
+            并排列进去会让人以为缓存也是六档里的一档。
+          */
+          <div className="mt-1 flex items-center gap-2 border-t border-border pt-1.5">
+            <span className="min-w-0 flex-1 truncate text-fg-muted">
+              {t("composer.contextCacheHit")}
+            </span>
+            <span className="shrink-0 tabular-nums text-fg">
+              {(cacheHitRate * 100).toFixed(1)}%
+            </span>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

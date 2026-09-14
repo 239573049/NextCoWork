@@ -116,7 +116,7 @@ import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } 
 import { updateService } from '../update/update-service'
 import { installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
 import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } from './commands'
-import { agentDiagnostics, listAgents, setAgentEnabled } from './agents'
+import { agentDiagnostics, generateAgent, listAgents, setAgentEnabled } from './agents'
 import { deleteResource, getResource, saveResource } from './markdown-resource'
 import { deleteHook, hookDiagnostics, listHooks, saveHook, setHookEnabledIpc, testHookIpc } from './hooks'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
@@ -129,7 +129,7 @@ import {
 } from './workspace'
 import { listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
-import { compactContext, listContextCheckpoints, updateContextCheckpoint } from './context'
+import { compactContext, listContextCheckpoints, previewContext, updateContextCheckpoint } from './context'
 import {
   createSession,
   duplicateSession,
@@ -370,6 +370,7 @@ const handlers: HandlerMap = {
   'context:list': (req) => listContextCheckpoints(req),
   'context:updateCheckpoint': (req) => updateContextCheckpoint(req),
   'context:compact': (req) => compactContext(req),
+  'context:preview': (req) => previewContext(req),
   'storage:getStats': () => getStats(),
   'storage:vacuum': () => vacuum(),
   'storage:openDataDirectory': () => openDataDirectory(),
@@ -475,6 +476,7 @@ const handlers: HandlerMap = {
   'agents:list': (req) => listAgents(req),
   'agents:diagnostics': (req) => agentDiagnostics(req),
   'agents:setEnabled': (req) => setAgentEnabled(req),
+  'agents:generate': (req) => generateAgent(req),
   'resource:get': (req) => getResource(req),
   'resource:save': (req) => saveResource(req),
   'resource:delete': (req) => deleteResource(req),
@@ -512,6 +514,20 @@ const handlers: HandlerMap = {
   'usage:getRequestLogs': (query) => store.getUsageRequestLogs(query),
   'usage:getProviderStats': (window) => store.getUsageProviderStats(window),
   'usage:getModelStats': (window) => store.getUsageModelStats(window),
+  /*
+   * ★ 概览这两条查询前先刷一次汇总。后台定时器五分钟一轮,少了这一步,
+   * 「刚聊完就打开统计页」会看到一张停在几分钟前的图 —— 而图上没有任何
+   * 迹象说明它是旧的,用户只会觉得刚才那次对话没被记上。
+   * refreshUsageRollup 幂等,与定时器重叠调用只是重复功,不会算错。
+   */
+  'usage:getDailySeries': (window) => {
+    store.refreshUsageRollup()
+    return store.getUsageDailySeries(window)
+  },
+  'usage:getActivityStats': () => {
+    store.refreshUsageRollup()
+    return store.getUsageActivityStats()
+  },
   'gateway:getStatus': todo('gateway:getStatus', '步骤 13'),
   'gateway:setEnabled': todo('gateway:setEnabled', '步骤 13'),
   'gateway:resetHealth': todo('gateway:resetHealth', '步骤 13')

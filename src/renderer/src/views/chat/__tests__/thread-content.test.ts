@@ -14,7 +14,8 @@ import {
   lastTurnIndex,
   promptOf,
   threadRows,
-  unanchoredCheckpoints
+  unanchoredCheckpoints,
+  type ThreadRow
 } from '../thread-content'
 
 describe('thread content grouping', () => {
@@ -285,8 +286,12 @@ describe('compaction dividers', () => {
   /**
    * ★ 锚点常常是一条**界面上不存在**的工具回执。跟着可见性过滤一起跳过去的话,
    * 「工具回合之间压缩」那条线一条都画不出来,而且不报错。
+   *
+   * ★ **线切在锚点上,哪怕这把刀落在一轮内部。** 这里曾经是「一轮绝不切开、
+   * 线推迟到轮末」—— 而工具循环里根本没有轮末:一整个会话可以是 1 条提问 +
+   * 50 条工具回执,线于是一路挂到整段最底部,压在状态行下面不动窝。
    */
-  it('★ 锚在工具回执上时线仍画得出来,而且不把那一轮切成两行', () => {
+  it('★ 锚在工具回执上时线落在回执处,把那一轮切成两行', () => {
     const messages = [
       user,
       assistantMessage('a1', [{ type: 'tool_call', callId: 'r', name: 'Read', input: {} }], 2),
@@ -294,8 +299,47 @@ describe('compaction dividers', () => {
       assistantMessage('a2', [{ type: 'text', text: 'Done' }], 4)
     ]
     const rows = threadRows(messages, [], false, {}, [cp({ coveredThroughMessageId: 'r1' })])
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant', 'divider', 'assistant'])
+    // 线**上方**只留压缩覆盖到的那部分,下方是压缩之后才发生的事
+    expect(rows[1]?.kind === 'assistant' ? rows[1].blocks.length : 0).toBe(1)
+    expect(rows[3]?.kind === 'assistant' ? rows[3].blocks.length : 0).toBe(1)
+    // 切开之后「重新生成 / 删除这一轮」仍要找得回那条提问
+    expect(promptOf(rows, 3)?.id).toBe('u1')
+  })
+
+  /**
+   * ★ **切开不等于重挂 —— 这是选「切开」而不是「推迟」的前提。**
+   *
+   * 行 key 取的是创建那一瞬的 `preceding`,而工具回执不可见、不推进 `preceding`:
+   * 所以线下方那一行从流式创建到提交拿的是同一个值,key 一个字节不变。
+   * 变了就是整棵子树重挂:markdown 重渲、工具组展开状态丢失、滚动跳一下。
+   */
+  it('★ 锚在工具回执上时,线下方那一行的 key 在提交前后不变', () => {
+    const head = [
+      user,
+      assistantMessage('a1', [{ type: 'tool_call', callId: 'r', name: 'Read', input: {} }], 2),
+      toolResultMessage('r1', [{ type: 'tool_result', callId: 'r', output: { content: 'ok' }, isError: false }], 3)
+    ]
+    const anchor = [cp({ coveredThroughMessageId: 'r1' })]
+    const live = threadRows(head, [{ index: 0, kind: 'text', text: 'Done' }], true, {}, anchor)
+    const committed = threadRows(
+      [...head, assistantMessage('a2', [{ type: 'text', text: 'Done' }], 4)], [], false, {}, anchor
+    )
+    expect(live.map((row) => row.kind)).toEqual(['user', 'assistant', 'divider', 'assistant'])
+    expect(live.at(-1)?.key).toBe(committed.at(-1)?.key)
+    // 块 key 也要对得上,否则重挂的是块而不是行 —— 症状一样
+    const blockKeys = (row: ThreadRow | undefined): string[] =>
+      row?.kind === 'assistant' ? row.blocks.map((b) => b.key) : []
+    expect(blockKeys(live.at(-1))).toEqual(blockKeys(committed.at(-1)))
+  })
+
+  /**
+   * ★ 锚在整段最后一条消息上时(手动压缩),线就是数组末尾 ——
+   * 不能在它**下面**再补一个空回合出来。
+   */
+  it('★ 线落在末尾时不补空回合', () => {
+    const rows = threadRows([user, answer], [], false, {}, [cp({ coveredThroughMessageId: 'a1' })])
     expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant', 'divider'])
-    expect(rows[1]?.kind === 'assistant' ? rows[1].blocks.length : 0).toBe(2)
   })
 
   /**

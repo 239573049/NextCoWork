@@ -27,7 +27,9 @@ import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../../shar
 import { normalizeScheduledTaskInput, nextScheduledOccurrence } from '../../shared/domain/scheduled'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
 import type {
+  UsageActivityStats,
   UsageAttemptRecord,
+  UsageDailyBucket,
   UsageDimensionStat,
   UsageRequestLogsPage,
   UsageRequestLogsQuery,
@@ -36,6 +38,7 @@ import type {
 } from '../../shared/domain/usage'
 import type { SessionCreateInput } from '../db/repo'
 import * as repo from '../db/repo'
+import * as usageRollup from '../db/usage-rollup'
 import { ulid } from '../../shared/util/id'
 
 /** Skill 全局开关的 kv 键。值是**被关掉**的那些 id。 */
@@ -228,6 +231,18 @@ export const store = {
   },
   getUsageModelStats(window: UsageWindow): UsageDimensionStat[] {
     return repo.getUsageModelStats(window)
+  },
+  /**
+   * 把新的 usage 行汇总进 `usage_daily`。幂等,由后台定时器和两条概览 IPC 共同调用。
+   */
+  refreshUsageRollup(): { days: number; rows: number } {
+    return usageRollup.refreshUsageRollup()
+  },
+  getUsageDailySeries(window: UsageWindow): UsageDailyBucket[] {
+    return usageRollup.getUsageDailySeries(window)
+  },
+  getUsageActivityStats(): UsageActivityStats {
+    return usageRollup.getUsageActivityStats()
   },
 
   // ── user model catalogue ──

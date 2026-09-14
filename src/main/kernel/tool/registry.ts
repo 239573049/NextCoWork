@@ -169,7 +169,41 @@ export interface SnapshotFilter {
    * 真正承重的那道闸在 `permission-gate.ts`,而它不看这个字段。
    */
   network?: boolean
+  /**
+   * 摘掉「会挂起等人回答」的那几个工具。子代理专用(`depth > 0`)。
+   *
+   * ★ 这不是一条偏好,是在**兑现 `Task` 工具描述里已经写下的承诺**:
+   * 「A SUBAGENT CANNOT ASK THE USER ANYTHING」。以前描述这么写、机制却让它
+   * 问得出来,而 `InteractionGate.request()` 没有任何超时 —— 一个子代理调了
+   * `AskUserQuestion`,就永远停在那儿,卡片上只剩一个不动的「运行中」。
+   * 那是本仓库真实发生过的死锁,不是理论风险。
+   *
+   * 权限审批(`tool_permission`)走的是另一条路,不经过快照,由 `approveWith`
+   * 里那道对称的闸门挡住 —— 两处都要有,缺一处就还是能挂起。
+   */
+  noInteraction?: boolean
 }
+
+/**
+ * 调用后会挂起、直到用户回答才继续的工具 —— 也就是 `run` 里 `await ctx.interact(...)`
+ * 的那几个。全仓只有两个:`AskUserQuestion` 和 `submit_plan`。
+ *
+ * ★ `submit_plan` 必须在列。plan 档**会传染给子代理**(`childRequestFor` 里
+ * `mode: parentReq.mode === 'plan' ? 'plan' : 'normal'`),而下面 `snapshot()`
+ * 恰恰只在 plan 档放行 `submit_plan` —— 于是「规划模式下派出去的子代理」
+ * 是第二条一模一样的死锁路径,和 `AskUserQuestion` 那条并列。漏掉它,
+ * 这道闸就只挡住了一半。
+ *
+ * ★ `RequestPlanApproval`(`builtin/interaction.ts` 的 `planApprovalTool`)
+ * **不在列,因为它根本没注册** —— `builtin/index.ts` 只引了 `askUserTool`,
+ * 那个工具已被带 plan-v2 落库的 `submit_plan` 取代。把一个永远不会出现在
+ * 注册表里的名字写进来,只会让下一个读的人以为它是活的。
+ *
+ * ★ 写在这里而不是 `builtin/interaction.ts`:那个模块 → `../define` → 本模块,
+ * 引过去就是一个循环。而且 `snapshot()` 里本来就直接写 internalId 字面量
+ * (`update_plan` / `submit_plan`),这一条只是跟着同一套写法。
+ */
+const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'submit_plan'])
 
 function sourceKey(s: ToolSource): string {
   switch (s.kind) {
@@ -243,6 +277,7 @@ export class ToolRegistry {
       if (filter.mode !== undefined && filter.mode !== 'plan' && t.internalId === 'submit_plan') continue
       if (filter.readOnlyOnly === true && !t.readOnly) continue
       if (filter.network === false && t.needsNetwork) continue
+      if (filter.noInteraction === true && INTERACTIVE_TOOLS.has(t.internalId)) continue
       if (allow !== undefined && !allow.has(t.internalId) && !allow.has(t.externalName)) continue
       out.push(t)
     }

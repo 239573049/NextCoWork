@@ -16,7 +16,7 @@ import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
 import { formatTokenCount } from '../../../../shared/agent/tokens'
 import { formatCostMicros } from '../../../../shared/domain/pricing'
-import type { LiveBlock, TranscriptState } from '../../../../shared/agent/transcript'
+import type { LiveBlock, SubagentState, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { AgentMarkdown } from '../../components/markdown'
 import { cn } from '../../lib/cn'
@@ -26,6 +26,7 @@ import { MessageImage } from './MessageImage'
 import { MentionText } from './MentionText'
 import { MessageFileRef } from './MessageFileRef'
 import { SubagentNode, ThinkingBlock, ToolCallCard } from './parts'
+import { useOpenSubagent } from './subagent-open'
 import { InteractionPanel } from './InteractionPanel'
 import { StatusLine } from './StatusLine'
 import { ToolTimeline } from './ToolTimeline'
@@ -48,13 +49,22 @@ export const Thread = memo(function Thread({
   compactError,
   onEditMessage,
   onDeleteTurn,
-  onExecutePlan
+  onExecutePlan,
+  readOnly = false
 }: {
   sessionId?: string
   transcript: TranscriptState
   runId: string | null
   lastSeq: number
   queued: number
+  /**
+   * **别人的会话,只能看**(右侧的子代理面板)。关掉一切会写回去的东西:
+   * 逐轮的重跑/删除/编辑、审批面板、后台任务中心里那颗「处理」。
+   *
+   * ★ 状态行**留着** —— 它一个 `<button>` 都没有,而「跑了多久、用了多少 token」
+   * 正是打开这个面板的人要看的。
+   */
+  readOnly?: boolean
   /** 手动压缩的失败原因,由状态行显示。它在 store 里而不在 transcript 里。 */
   compactError?: string | null
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
@@ -120,7 +130,9 @@ export const Thread = memo(function Thread({
           {error.code}: {agentErrorText(error, t)}
         </p>
       )}
-      {runId !== null && <InteractionPanel key={runId} runId={runId} onExecute={onExecutePlan} />}
+      {/* ★ 审批面板在只读态里必须消失:这个 run 的审批归它的**父**对话管,
+          而子代理这条路现在根本不会发起审批(见 `runtime.ts` 的 `approveWith`)。 */}
+      {!readOnly && runId !== null && <InteractionPanel key={runId} runId={runId} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
         lastSeq={lastSeq} queued={queued} compactError={compactError} />
     </div>
@@ -188,7 +200,7 @@ export const Thread = memo(function Thread({
             return <CompactionDivider key={row.key} checkpoint={row.checkpoint} foldedCount={row.foldedCount} />
           }
           if (row.kind === 'user') {
-            return <UserBubble key={row.key} message={row.message} onEdit={onEditMessage} disabled={running} />
+            return <UserBubble key={row.key} message={row.message} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
           }
           return (
             <AssistantTurn
@@ -233,29 +245,41 @@ export const Thread = memo(function Thread({
                 也不按时间窗去猜它属于哪个 run。
               */
               usage={turnUsage(row, isLast && runId === null ? usage : undefined, transcript.runUsage)}
-              onRegenerate={onEditMessage === undefined
+              onRegenerate={readOnly || onEditMessage === undefined
                 ? undefined
                 : (id, text) => onEditMessage(id, text, true)}
-              onDeleteTurn={onDeleteTurn}
+              onDeleteTurn={readOnly ? undefined : onDeleteTurn}
+              readOnly={readOnly}
             />
           )
         })}
       </div>
     </div>
-    <SubagentTaskCenter sessionId={sessionId} subagents={subagents} />
+    <SubagentTaskCenter sessionId={sessionId} subagents={subagents} readOnly={readOnly} />
     </div>
   )
 })
 
-function SubagentTaskCenter({ sessionId, subagents }: { sessionId?: string; subagents: Readonly<Record<string, import('../../../../shared/agent/transcript').SubagentState>> }): ReactNode {
+function SubagentTaskCenter({ sessionId, subagents, readOnly = false }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean }): ReactNode {
   const { t } = useI18n()
+  const openSubagent = useOpenSubagent()
   const [open, setOpen] = useState(false)
   const entries = Object.values(subagents).filter((item) => item.background === true)
   if (entries.length === 0) return null
   const running = entries.filter((item) => item.status === 'running').length
   const pending = entries.filter((item) => item.reportStatus === 'pending').length
-  const jump = (callId: string): void => {
-    document.querySelector(`[data-subagent-call-id="${CSS.escape(callId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  /*
+    ★ 以前这里是 `scrollIntoView` 跳到那张卡片上 —— 而后台子代理的卡片可能在
+    几百轮之前,跳过去之后用户看到的还是那张什么都不说的摘要,得再点开它。
+    现在和卡片走同一个动作:直接在右侧开它的完整记录。
+    跳不动的(旧转录没有 `childSessionId`)就还是滚过去,聊胜于无。
+  */
+  const reveal = (item: SubagentState): void => {
+    if (item.childSessionId !== undefined && openSubagent !== undefined) {
+      openSubagent(item)
+      return
+    }
+    document.querySelector(`[data-subagent-call-id="${CSS.escape(item.callId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
   return (
     <div className="pointer-events-none absolute right-4 top-4 z-20 flex flex-col items-end gap-2">
@@ -275,8 +299,8 @@ function SubagentTaskCenter({ sessionId, subagents }: { sessionId?: string; suba
             const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : item.reportStatus === 'pending' ? 'pending' : 'done'
             return <div key={item.callId} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
               {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
-              <button type="button" onClick={() => jump(item.callId)} className="min-w-0 flex-1 text-left"><span className="block truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span><span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span></button>
-              {state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
+              <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left"><span className="block truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span><span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span></button>
+              {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
             </div>
           })}
         </div>
@@ -541,7 +565,8 @@ function AssistantTurn({
   running,
   usage,
   onRegenerate,
-  onDeleteTurn
+  onDeleteTurn,
+  readOnly
 }: {
   blocks: readonly AssistantBlock[]
   tools: TranscriptState['tools']
@@ -558,6 +583,7 @@ function AssistantTurn({
   usage?: ReactNode
   onRegenerate?: (id: string, text: string) => Promise<void>
   onDeleteTurn?: (userMessageId: string) => Promise<void>
+  readOnly: boolean
 }): ReactNode {
   const { t } = useI18n()
   const [lastKnownStatus, setLastKnownStatus] = useState(runStatus ?? 'done')
@@ -622,7 +648,12 @@ function AssistantTurn({
         操作条要等这一轮跑完再出现。流式过程中「复制」拿到的是半句话,
         「重新生成」更是要先中断当前 run —— 那是另一件事,输入框旁边的停止键管它。
       */}
-      {!(isLast && running) && (
+      {/*
+        ★ 只读态整条操作栏不出现 —— 不是「把重跑和删除禁掉」,是**一个按钮都不留**。
+        复制和导出本身无害,但参考形态是「标题 + 正文」;留两颗按钮在那儿,
+        这个面板就又变回了一个半能用的对话界面。用时与用量在顶上的身份栏里。
+      */}
+      {!readOnly && !(isLast && running) && (
         <TurnActions
           text={assistantText(blocks)}
           prompt={prompt}

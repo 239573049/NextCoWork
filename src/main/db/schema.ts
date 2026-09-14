@@ -777,6 +777,63 @@ CREATE TABLE plan_revisions_v2 (
 CREATE UNIQUE INDEX plans_v2_one_execution ON plans_v2(id, execution_run_id) WHERE execution_run_id IS NOT NULL;
 `
 
+/**
+ * 第 20 条：按天 × 供应商 × 模型 × 币种的用量汇总。
+ *
+ * `usage_records` 只增不删(全仓没有一处 `DELETE FROM usage_records`,`cleanupByAge`
+ * 与 `clearHistory` 都不碰它),所以历史桶不会被回溯削减 —— 这是「汇总一次就算数」
+ * 成立的前提,也是这张表敢做物化的理由。
+ *
+ * ★ **`currency` 用空串表示「未计价」,不是 NULL。** SQLite 主键里的 NULL 不参与
+ *   唯一性判定,同一天同一模型的未计价行会一次次插进来而不是合并成一行 ——
+ *   而它的表现是「费用图里某个模型莫名其妙出现很多次」,没人会去 diff 的静默错。
+ *
+ * ★ **刻意不存 `tool_calls` / `tool_errors`。** 那两列是 run 结束后由
+ *   `updateUsageToolsForRun` **回写历史行**的,任何汇总都会停在回写之前。
+ *   工具口径继续走 `usage_records` 直查(设置页的「工具」分区),不进这张表。
+ *
+ * ★ `cost_micros` 可空,并单独记 `priced_count`。沿用 `usage_records` 的约定:
+ *   NULL = 不知道多少钱,0 = 真的免费。`priced_count < request_count` 就是界面
+ *   该说「这个数字不含未定价的请求」的依据 —— 缺了它,少算的钱看起来和省下的钱一样。
+ *
+ * ★ 平均延迟存的是 **sum + count 而不是 avg**。存 avg 的话跨桶再平均就是「平均的
+ *   平均」,权重全错;而这张表的每一行都还要被按天、按模型二次聚合。
+ */
+const V20_USAGE_DAILY = `
+CREATE TABLE usage_daily (
+  -- 本地日期 YYYY-MM-DD。跟着写库时的时区走,所以刷新器发现时区变了会整表重建
+  day                   TEXT NOT NULL,
+  provider_id           TEXT NOT NULL,
+  provider_name         TEXT NOT NULL DEFAULT '',
+  upstream_model        TEXT NOT NULL,
+  -- 展示用:界面优先显示别名(参考图里的「GLM-5.3」),定价与分组仍按 upstream_model
+  alias                 TEXT NOT NULL DEFAULT '',
+  currency              TEXT NOT NULL DEFAULT '',
+
+  request_count         INTEGER NOT NULL DEFAULT 0,
+  success_count         INTEGER NOT NULL DEFAULT 0,
+
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens    INTEGER NOT NULL DEFAULT 0,
+  cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+  thinking_tokens       INTEGER NOT NULL DEFAULT 0,
+
+  cost_micros           INTEGER,
+  priced_count          INTEGER NOT NULL DEFAULT 0,
+
+  latency_sum           INTEGER NOT NULL DEFAULT 0,
+  ttft_sum              INTEGER NOT NULL DEFAULT 0,
+  ttft_count            INTEGER NOT NULL DEFAULT 0,
+
+  PRIMARY KEY (day, provider_id, upstream_model, currency)
+);
+
+-- 趋势图与热力图都是「给我这段日期的所有行」,按 day 收窄后行数已经很小
+CREATE INDEX usage_daily_by_day ON usage_daily (day);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -799,4 +856,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 17, name: 'internal-messages', sql: V17_INTERNAL_MESSAGES },
   { version: 18, name: 'scheduled-tasks', sql: V18_SCHEDULED_TASKS }
   ,{ version: 19, name: 'plans-v2', sql: V19_PLANS_V2 }
+  ,{ version: 20, name: 'usage-daily', sql: V20_USAGE_DAILY }
 ]

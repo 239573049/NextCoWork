@@ -107,6 +107,38 @@ describe('删除一整轮', () => {
     expect(s.getState().transcript.usage).toEqual({ inputTokens: 10, outputTokens: 20 })
   })
 
+  /*
+    删除之后**上下文圆环上的数**要跟着作废 —— 这里量的是一件用户会直接看见的事:
+    把消息删光,圆环却还挂着「81K / 272K」,因为那个分子是上一次请求报回来的
+    输入 token,而删除不产生请求。它和 usage 的判据不同:usage 是最后一轮的账单
+    (删中间一轮与它无关),窗口占用则被任何一次删除改写。
+  */
+  it('删任意一轮都清掉窗口占用读数 —— 它描述的那段历史已经不存在了', async () => {
+    const s = seeded('d-context-mid', [...turn('1'), ...turn('2')])
+    s.setState((state) => ({
+      transcript: {
+        ...state.transcript,
+        lastInputTokens: 81_000,
+        contextUsage: { used: 81_000, window: 272_000, shouldCompact: false }
+      }
+    }))
+
+    await s.getState().deleteTurn('u1')
+
+    expect(s.getState().transcript.lastInputTokens).toBeUndefined()
+    expect(s.getState().transcript.contextUsage).toBeUndefined()
+  })
+
+  it('删光所有消息后圆环回到「还不知道」,而不是停在删除前的读数', async () => {
+    const s = seeded('d-context-all', [...turn('1')])
+    s.setState((state) => ({ transcript: { ...state.transcript, lastInputTokens: 81_000 } }))
+
+    await s.getState().deleteTurn('u1')
+
+    expect(s.getState().transcript.messages).toHaveLength(0)
+    expect(s.getState().transcript.lastInputTokens).toBeUndefined()
+  })
+
   it('把删除结果落盘 —— 只改内存的话,重开会话删掉的内容会原样回来', async () => {
     const s = seeded('d-persist', [...turn('1'), ...turn('2')])
 

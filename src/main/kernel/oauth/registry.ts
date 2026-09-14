@@ -24,6 +24,8 @@ import type { OAuthCredential, OAuthIssuerId } from '../../../shared/domain/cred
 // 编译后类型被擦掉,不构成运行时循环依赖
 import type { TransportContext, UpstreamTransport } from '../upstream/transport'
 import { CHATGPT_OAUTH } from './issuers/chatgpt'
+import { GROK_BUILD_OAUTH } from './issuers/grok'
+import { KIMI_CODE_OAUTH } from './issuers/kimi'
 import { ZCODE_BIGMODEL_OAUTH } from './issuers/zcode-bigmodel'
 import { ZCODE_ZAI_OAUTH } from './issuers/zcode-zai'
 
@@ -51,6 +53,29 @@ export type OAuthRedirect =
   | { kind: 'loopback-ephemeral'; path: string; host?: LoopbackHost }
   /** 授权页把 code 显示出来,用户粘回应用 */
   | { kind: 'manual-paste'; redirectUri: string }
+
+/**
+ * **授权方式本身** —— 到今天为止真实存在两种,形状**没有交集**。
+ *
+ * ★★ 它是一个联合而不是「`redirect` 可选 + `deviceAuthorizationUrl` 可选」,
+ * 因为后者能表达出「两个都没有」和「两个都有」这两种不存在的东西 ——
+ * 而它们的表现是 `runOAuthFlow` 在运行期走进一条谁也没想过的分支。
+ *
+ * ★ `authorizeUrl` 跟着 `authorization-code` 走,**不在 spec 顶层**:设备码流程
+ * 压根没有「授权 URL」这个东西(用户是在厂商自己的页面上输一个配对码)。留在顶层
+ * 的话,加设备码那家时必须给它编一个,而编出来的那个值会被谁读一次都不知道。
+ */
+export type OAuthGrant =
+  /** 标准授权码 —— 打开授权 URL、从回调里取 code、拿 code 换 token */
+  | { kind: 'authorization-code'; authorizeUrl: string; redirect: OAuthRedirect }
+  /**
+   * RFC 8628 设备授权码(Kimi 走的这条)。**没有 redirect_uri、没有 state、没有 PKCE**
+   * —— 用户在浏览器里输一个配对码,我们这边按 `interval` 轮询 token 端点。
+   *
+   * ★ `timeoutMs` 是**本地**兜底:上游会在响应里给 `expires_in`(Kimi 是 1800 秒),
+   * 给了就用它。省略时用流程里那个默认值。
+   */
+  | { kind: 'device-code'; deviceAuthorizationUrl: string; timeoutMs?: number }
 
 /**
  * `identity()` 从 token 响应里提出来的东西 —— 正好是 `OAuthCredential` 里非派生的那些字段
@@ -114,7 +139,10 @@ export interface OAuthProviderSpec {
   id: OAuthIssuerId
   /** 登录按钮上的名字(「使用 __ 账号登录」)。带进 i18n 参数,加一家不用加新文案键 */
   label: string
-  authorizeUrl: string
+  /**
+   * ★ 授权码流程和设备码流程**共用这一个** token 端点(RFC 8628 换码和刷新打的
+   * 都是它),所以它留在顶层;只属于其中一种的那些字段在 `grant` 里。
+   */
   tokenUrl: string
   clientId: string
   /** ★ 省略 = 授权 URL 里**根本不写** `scope` 这个参数(不是写成空串) */
@@ -125,7 +153,16 @@ export interface OAuthProviderSpec {
    * 不支持 PKCE 的授权服务器收到这两个参数时的反应各不相同,有的直接报错。
    */
   pkce?: boolean
-  redirect: OAuthRedirect
+  grant: OAuthGrant
+  /**
+   * 这家在**每一个 OAuth HTTP 请求**上都要带的私货头(设备码申请 / 换 token / 刷新)。
+   *
+   * ★★ 和 `tokenRequest().headers` 不是一回事:那个只盖住换码那一跳,而刷新走的是
+   * `CredentialResolver.standardRefresh`、设备码轮询走的是 `flow.ts` —— 三条路径
+   * 各自拼一遍头,漏掉哪条都只会在**那一条**上失败(比如「能登录、第二天刷新 403」),
+   * 而错误信息里不会出现任何一个头的名字。
+   */
+  oauthHeaders?: Readonly<Record<string, string>>
   /** 各家在授权 URL 上的私货(`access_type=offline` / `code=true` / …) */
   extraAuthorizeParams?: Readonly<Record<string, string>>
   /**
@@ -186,7 +223,9 @@ export interface OAuthProviderSpec {
 const SPECS = {
   chatgpt: CHATGPT_OAUTH,
   'zcode-zai': ZCODE_ZAI_OAUTH,
-  'zcode-bigmodel': ZCODE_BIGMODEL_OAUTH
+  'zcode-bigmodel': ZCODE_BIGMODEL_OAUTH,
+  'kimi-code': KIMI_CODE_OAUTH,
+  'grok-build': GROK_BUILD_OAUTH
 } as const satisfies Record<OAuthIssuerId, OAuthProviderSpec>
 
 export const OAUTH_SPECS: Readonly<Record<OAuthIssuerId, OAuthProviderSpec>> = SPECS
@@ -202,8 +241,8 @@ export function oauthSpecOf(issuer: OAuthIssuerId): OAuthProviderSpec {
  * OAuth 规范要求服务端比对这两处,不一致就是 `invalid_grant`。两处各拼一遍
  * 迟早会有一处多个斜杠,而那个错误信息不会告诉你差在哪。
  */
-export function redirectUriOf(spec: OAuthProviderSpec, boundPort?: number): string {
-  const r = spec.redirect
+export function redirectUriOf(redirect: OAuthRedirect, boundPort?: number): string {
+  const r = redirect
   switch (r.kind) {
     case 'loopback-fixed':
       return `http://${r.host ?? 'localhost'}:${r.port}${r.path}`

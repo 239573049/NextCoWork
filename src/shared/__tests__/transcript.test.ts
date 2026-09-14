@@ -92,6 +92,42 @@ describe('applyEvent · 提交边界', () => {
 
     expect(s.messages).toEqual([confirmed])
   })
+
+  /**
+   * ★★ `message_start` 也清活跃块 —— 这一句是给**断流续跑**用的。
+   *
+   * 正常路径上它是无操作:上一条消息的 `message_commit` 已经清过了,所以
+   * `message_start` 到达时 `live` 必空(下一条用例钉的就是这件事)。
+   *
+   * 续跑路径上它是全部:session 层断流重来时,失败那一次**没有 commit** ——
+   * 它吐的半截文字只有这一句能抹掉。漏掉的话,第二次的 `text_delta index:0`
+   * 会**续写**在半截文字后面,界面上是一段前后接不上的乱码。
+   *
+   * ⌘R 重载后的重放同理:`run-registry` 的 `trimSupersededDeltas` 只在
+   * `message_commit` 时裁剪 delta,被丢弃那次的 delta 会原样留在日志里重放一遍。
+   */
+  it('★ message_start 清掉没提交过的半截内容 —— 断流续跑不留重影', () => {
+    let s = applyEvents(emptyTranscript(), [t(0, '我先看一眼 con')])
+    s = applyEvent(s, { type: 'stream', delta: { type: 'message_start', model: 'm' } })
+    expect(s.live).toEqual([])
+
+    s = applyEvent(s, t(0, '完整回答'))
+    expect(liveText(s)).toBe('完整回答')
+  })
+
+  /** 正常路径上这一句什么也不做 —— 已提交的消息一条都不能被它动到 */
+  it('提交之后来的 message_start 不改变任何东西', () => {
+    let s = applyEvents(emptyTranscript(), [t(0, '你好')])
+    s = applyEvent(s, {
+      type: 'message_commit',
+      message: assistantMessage('m1', [{ type: 'text', text: '你好' }], 1)
+    })
+    const before = s
+    s = applyEvent(s, { type: 'stream', delta: { type: 'message_start', model: 'm' } })
+
+    expect(s.messages).toEqual(before.messages)
+    expect(s.live).toEqual([])
+  })
 })
 
 describe('applyEvent · 工具状态', () => {
@@ -316,7 +352,9 @@ describe('applyEvent · 终局与元信息', () => {
       phase: 'background',
       toolCalls: 0,
       toolErrors: 0,
-      startedAt: 100
+      startedAt: 100,
+      // 「距上次事件多久」的基准。开始那一刻就是第一次事件
+      lastEventAt: 100
     })
   })
 
@@ -370,9 +408,43 @@ describe('applyEvent · 终局与元信息', () => {
     })
 
     expect(s.subagents.c1).toMatchObject({
-      status: 'done', phase: 'finishing', summary: '配置在 src/config.ts', endedAt: 250
+      status: 'done', summary: '配置在 src/config.ts', endedAt: 250, lastEventAt: 250
     })
     expect(s.subagents.c1?.currentTool).toBeUndefined()
+  })
+
+  /*
+    ★★ 回归护栏。`subagent_end` 曾经硬写 `phase: 'finishing'`,于是**每一张**终态
+    卡片都显示「收尾中」—— 跑完的、失败的、被停掉的、卡死了被人掐掉的,一模一样。
+    那一栏在终态下等于零信息,而它恰恰是排查时唯一想知道的那一格:它停在哪一步。
+  */
+  it('subagent_end 不覆盖 phase —— 终态要留住「停在哪一步」', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2', at: 100
+    })
+    s = applyEvent(s, {
+      type: 'subagent_update', callId: 'c1', childRunId: 'r2', phase: 'tool', currentTool: 'Bash'
+    })
+    s = applyEvent(s, {
+      type: 'subagent_end', callId: 'c1', childRunId: 'r2', status: 'aborted', at: 250
+    })
+
+    expect(s.subagents.c1?.phase).toBe('tool')
+  })
+
+  it('lastEventAt 随每一个子事件推进', () => {
+    let s = applyEvent(emptyTranscript(), {
+      type: 'subagent_start', callId: 'c1', childRunId: 'r2', at: 100
+    })
+    expect(s.subagents.c1?.lastEventAt).toBe(100)
+    s = applyEvent(s, {
+      type: 'subagent_update', callId: 'c1', childRunId: 'r2', phase: 'tool', at: 180
+    })
+    expect(s.subagents.c1?.lastEventAt).toBe(180)
+    s = applyEvent(s, {
+      type: 'subagent_update', callId: 'c1', childRunId: 'r2', toolCalls: 3, at: 240
+    })
+    expect(s.subagents.c1?.lastEventAt).toBe(240)
   })
 
   it('applyChildEvent 把子 run 的工具和 run_end 投影到 Task 卡片', () => {

@@ -35,7 +35,7 @@ import type { PlanDocumentV2 } from '../../shared/domain/plan'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
 import { ulid } from '../../shared/util/id'
-import { abortable, abortableStream, isAbortError } from './abort'
+import { abortable, abortableSleep, abortableStream, isAbortError } from './abort'
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
 import { compactMessages, compactionBoundary, compactionNote, withSummary } from './context-assembler'
@@ -158,10 +158,46 @@ export interface SessionDeps {
   contextManagement?: ContextManagementSettings
   contextCheckpoints?: readonly ContextCheckpoint[]
   saveContextCheckpoint?: (checkpoint: ContextCheckpoint) => void
+  /**
+   * 断流续跑的退避表。缺省 `RESUME_DELAYS_MS`(见那条常量上面的长注释)。
+   *
+   * ★ 存在的理由和 `UpstreamRouter` 的 `baseDelayMs` 一样:测试里传 `[0, 0, 0]`
+   * 就能跑完整条续跑路径,不必上假时钟。传 `[]` 等于关掉续跑。
+   */
+  resumeDelaysMs?: readonly number[]
 }
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
 const FALLBACK_MAX_OUTPUT = 8192
+
+/**
+ * 断流之后自己续跑几次,每次之前等多久。
+ *
+ * ## 为什么 session 层需要这个(而 `router.ts` 的重试不够)
+ *
+ * `UpstreamRouter` 只在**还没吐出第一个内容字节之前**重试或切换供应商 ——
+ * 一旦上游已经吐了 500 个 token 和一个 tool_use 块,重发会产生重复输出和
+ * 错位的工具调用(router.ts §5.3 那五行)。那条边界是对的,不该放宽。
+ *
+ * 于是「流吐到一半被掐断」在 router 眼里是一个**硬错误**,原样交给这里;
+ * 而这里以前对任何 `streamError` 一律 `finish('error')`,整个 run 当场死掉。
+ * 主代理死了还有人能重新提问,**子代理没有人** —— `Task` 直接把失败汇报给父代理,
+ * 那一分多钟的工作全部作废。
+ *
+ * ## 为什么放在这一层是安全的
+ *
+ * `router.ts` 文件头写着「重试绝不放在 session 里 —— 会重放已经执行过的工具调用」。
+ * 那说的是 **run 级**重放(从消息历史重跑整个 run)。而流错误发生的那一刻,
+ * **本轮一个工具都还没执行** —— `executeAll` 在 `loop()` 里、`turn()` 返回之后才跑。
+ * 重发单轮请求重放的工具副作用是**零个**。
+ *
+ * ## 代价
+ *
+ * 断流那一次已经生成的内容**整个丢弃**、重新生成,所以这个数组的长度直接等于
+ * 最坏情况的重复计费倍数。保留半截回答的做法试过是更糟的:历史会以一条 assistant
+ * 消息结尾(Anthropic 的 prefill 语义 + 尾部空白 400),对话里还多出一个割裂的气泡。
+ */
+const RESUME_DELAYS_MS: readonly number[] = [1_000, 2_000, 5_000, 15_000, 45_000]
 
 const INTERRUPTED = '[interrupted: the user stopped the run before this tool call finished]'
 const RECOVERED_INTERRUPTED =
@@ -212,12 +248,15 @@ export class AgentSession {
    */
   private mechanicalWindowIndex: number | undefined
   private stopAfterPlanApproval = false
+  /** 断流续跑的退避表。见 `RESUME_DELAYS_MS` 与 `canResume`。 */
+  private readonly resumeDelays: readonly number[]
 
   constructor(
     private readonly deps: SessionDeps,
     private readonly handle: RunHandle,
     private readonly req: RunRequest
   ) {
+    this.resumeDelays = deps.resumeDelaysMs ?? RESUME_DELAYS_MS
     this.messages = [...(deps.history ?? [])]
     /**
      * ★ 历史一律走 `isolateHistoryPaths`(不抛),**两个分支都要走**。
@@ -392,7 +431,15 @@ export class AgentSession {
         ★ Composer 上那颗「联网搜索」药丸第一次真的控制住东西的地方。
         关掉时联网工具连下发都不下发,模型不会先白跑一轮再被拒。
       */
-      network: this.req.webSearch
+      network: this.req.webSearch,
+      /*
+        ★ 子代理问不到人 —— 这是 `Task` 的工具描述里早就写下的承诺,这一行才是
+        它的实现。以前描述这么写、机制却让它调得出 `AskUserQuestion`,而
+        `InteractionGate.request()` 没有超时:子代理就永远停在那次调用上,
+        界面上只剩一个不动的「运行中」。判据用 `depth`(而不是 `parentRunId`)
+        是因为 tool ctx 递下去的也是 `depth`,两边说的是同一件事。
+      */
+      noInteraction: this.req.depth > 0
     })
     // A model without tool calling must not receive a tool schema merely
     // because the application registry contains tools. Existing tool history
@@ -515,6 +562,82 @@ export class AgentSession {
       }
     }
 
+    /*
+      ★ 断流自动续跑。请求体本身(`assemble` / `context_usage`)留在循环**外面** ——
+      两次尝试之间消息一字没变,重新组装是白做功,还会重复发一条压力条事件。
+    */
+    let attempt = await this.streamOnce(request)
+    for (let resume = 0; ; resume++) {
+      const failure = attempt.streamError
+      if (failure === undefined || !this.canResume(failure, resume)) break
+      const delayMs = this.resumeDelays[resume] ?? 0
+      /*
+        复用 `provider_retry` 而不是新造一个事件:要说的话和 router 退避时一模一样
+        (「在等,因为上游出了问题」),而主状态行(`StatusLine.tsx`)、子代理卡片
+        (`parts.tsx`)、转录 reducer 三处都已经在画它了。新造一个只会多出三处要改的地方,
+        换不来任何新信息。提示在下一个 `message_start` 到达时自动消失。
+      */
+      this.handle.emit({
+        type: 'stream',
+        delta: { type: 'provider_retry', attempt: resume + 1, delayMs, reason: failure.message }
+      })
+      await abortableSleep(delayMs, this.handle.signal)
+      this.handle.signal.throwIfAborted()
+      // 上一次那份 accumulator 到这里整个丢弃 —— 半截回答不进转录、不进历史。
+      attempt = await this.streamOnce(request)
+    }
+    const { acc, stopReason, streamError } = attempt
+
+    const { parts, calls } = acc.finalize()
+    /**
+     * ★ error part 也进转录。它只属于 UI 那一轨 —— encode/anthropic.ts 的
+     * `toBlock` 对它返回 null,所以下一轮上行时会被丢掉,不会让模型
+     * 开始为我们的 bug 道歉。而重载后 `attach` 回来的转录里,
+     * 失败仍然看得见,不是一个消失了的 toast。
+     */
+    if (streamError !== undefined) parts.push({ type: 'error', error: streamError })
+    this.commitAssistant(parts)
+
+    if (streamError !== undefined) {
+      this.closeUnexecutedCalls('[not executed: the upstream response did not complete successfully]')
+      this.handle.finish('error', streamError)
+      return null
+    }
+
+    /**
+     * `tool_use` 却一个可执行的调用都没有:所有 tool_call 块都没闭合
+     * (流被掐断)。继续循环会**原样重发一次同样的请求** —— 大概率再来一次。
+     * 收尾比空转诚实。
+     */
+    if (stopReason !== 'tool_use' || calls.length === 0) {
+      this.closeUnexecutedCalls('[not executed: the model did not request tool execution]')
+      if (stopReason === 'tool_use') {
+        this.deps.host.logger.warn('[session] stopReason=tool_use 但没有已闭合的工具调用')
+      }
+      this.handle.finish('done')
+      return null
+    }
+
+    return { calls, tools: byName }
+  }
+
+  /**
+   * 一次上游请求:建 accumulator、消费整条流、把「流结束了却没有 message_end」
+   * 和「stopReason=max_tokens」两种结局合成 `streamError`。
+   *
+   * ★ 从 `turn()` 里拆出来,是为了让外面能套一层断流续跑(见 `RESUME_DELAYS_MS`)。
+   * 调用之间**不共享任何状态**:accumulator 每次新建,所以失败那一次整个丢弃、
+   * 重来一次是干净的。
+   *
+   * ★ `this.pending = null` 只在**正常完成**那条路上执行,不放进 `finally` ——
+   * 中断发生在流中途时,`run()` 的 catch 要靠 `this.pending` 把那半截回复提交进转录
+   * (见 `finalizeAbort`)。清早了,用户点停止之后看到的是一片空白。
+   */
+  private async streamOnce(request: CanonicalRequest): Promise<{
+    acc: BlockAccumulator
+    stopReason: StopReason
+    streamError: AgentError | undefined
+  }> {
     const acc = new BlockAccumulator()
     this.pending = acc
     let stopReason: StopReason = 'end_turn'
@@ -550,38 +673,30 @@ export class AgentSession {
         messageKey: 'agent.error.outputLimit', retryable: false
       })
     }
+    return { acc, stopReason, streamError }
+  }
 
-    const { parts, calls } = acc.finalize()
-    /**
-     * ★ error part 也进转录。它只属于 UI 那一轨 —— encode/anthropic.ts 的
-     * `toBlock` 对它返回 null,所以下一轮上行时会被丢掉,不会让模型
-     * 开始为我们的 bug 道歉。而重载后 `attach` 回来的转录里,
-     * 失败仍然看得见,不是一个消失了的 toast。
-     */
-    if (streamError !== undefined) parts.push({ type: 'error', error: streamError })
-    this.commitAssistant(parts)
-
-    if (streamError !== undefined) {
-      this.closeUnexecutedCalls('[not executed: the upstream response did not complete successfully]')
-      this.handle.finish('error', streamError)
-      return null
-    }
-
-    /**
-     * `tool_use` 却一个可执行的调用都没有:所有 tool_call 块都没闭合
-     * (流被掐断)。继续循环会**原样重发一次同样的请求** —— 大概率再来一次。
-     * 收尾比空转诚实。
-     */
-    if (stopReason !== 'tool_use' || calls.length === 0) {
-      this.closeUnexecutedCalls('[not executed: the model did not request tool execution]')
-      if (stopReason === 'tool_use') {
-        this.deps.host.logger.warn('[session] stopReason=tool_use 但没有已闭合的工具调用')
-      }
-      this.handle.finish('done')
-      return null
-    }
-
-    return { calls, tools: byName }
+  /**
+   * 这次断流该不该自己续一轮。
+   *
+   * ★★ **只认 `code === 'network'`,刻意不放宽到全部 `retryable`。**
+   *
+   * - `network` 是唯一一类「router 已经无话可说、而 `sawContent` 是恢复没发生的
+   *   全部原因」的错误。router 自己的注释说得很清楚:连接层错误「换下一个 provider
+   *   大概率也是同一个病因,真正管用的是多等一会儿再碰」—— 这个循环做的正是这件事。
+   * - 它也是唯一一类**没有任何服务端信号**的错误(没有 `Retry-After`、没有 5xx body),
+   *   盲退避是仅有的手段。
+   * - `rate_limit`、5xx `provider`、冷却中的 `no_healthy_provider` 走的是 router 那条
+   *   **信息更全**的路(认 `Retry-After`、会切 provider、有健康表)。在它外面再套一个
+   *   盲循环,最坏情况是 5 × 3 次尝试的长时间空转 —— 那是另一个决定,不在这里做。
+   *
+   * 这条判据同时覆盖了 `streamOnce` 自己合成的 `incompleteResponse`:流静默断掉、
+   * router 一个 `error` 事件都没发的那一支。
+   */
+  private canResume(err: AgentError, resume: number): boolean {
+    return err.code === 'network'
+      && resume < this.resumeDelays.length
+      && !this.handle.signal.aborted
   }
 
   /**

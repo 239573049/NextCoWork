@@ -11,7 +11,7 @@ import type { ProviderStreamEvent } from './stream'
 import type { TokenUsage } from './stream'
 import type { ToolOutput } from './message'
 import type { ToolProgress } from './tool'
-import type { ContextCheckpoint, ContextStatus } from './context-management'
+import type { ContextCheckpoint, ContextSegment, ContextStatus } from './context-management'
 import type { PlanDocumentV2 } from '../domain/plan'
 
 export type RunStatus = 'running' | 'done' | 'error' | 'aborted'
@@ -55,6 +55,18 @@ export type AgentEvent =
       type: 'subagent_start'
       callId: string
       childRunId: string
+      /**
+       * 子 run 自己那个会话的 id —— 右侧只读面板就是靠它去 `getSession()` 取转录的。
+       *
+       * ★ **必须由主进程带过来,不能在渲染层拼。** 派生 id 的写法是
+       * `${parent.sessionId}:sub:${childRunId}`(见 `runtime.ts` 的 `childRequestFor`),
+       * 而 childRunId 本身又是 `${parentRunId}:sub:N` —— 套两层子代理之后,
+       * 想从字符串里反推父亲会切出爷爷。权威在库里那一列 `parentSessionId`,
+       * 这个字段只是把当时已经算好的那个值原样递出来。
+       *
+       * 可选,是因为旧转录里没有这一格 —— 那些卡片点开会是空的,仅此而已。
+       */
+      childSessionId?: string
       description?: string
       subagentType?: string
       model?: string
@@ -96,7 +108,14 @@ export type AgentEvent =
       at?: number
     }
   /** ★ 抄自 agent-request-flow.md §4 的 agent:contextUsage —— 见下方注释 */
-  | { type: 'context_usage'; used: number; window: number; shouldCompact: boolean }
+  | {
+      type: 'context_usage'
+      used: number
+      window: number
+      shouldCompact: boolean
+      /** 归因明细。老 run / 纯内核路径可能没有 —— 见 `ContextUsage.segments`。 */
+      segments?: ContextSegment[]
+    }
   | { type: 'context_status'; status: ContextStatus }
   | { type: 'context_checkpoint'; checkpoint: ContextCheckpoint }
   /** `at` is the wall-clock time at which the run reached its terminal state. */

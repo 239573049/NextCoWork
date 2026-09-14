@@ -23,6 +23,7 @@ import { AgentMarkdown } from "../../components/markdown";
 import { ToolDetail } from "./ToolDetail";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 import { abortRun } from "../../services/agent";
+import { useOpenSubagent } from "./subagent-open";
 
 /**
  * 「深度思考 N 秒」—— 截图里是一条可折叠的行,默认收起。
@@ -219,7 +220,20 @@ function StatusSlot({
   );
 }
 
-/** 子代理：首屏展示任务正在做什么，详情区再放运行统计。 */
+/**
+ * 子代理卡片 —— **一张摘要,不是一个抽屉。**
+ *
+ * ★ 它以前是个手风琴:点标题行展开,里面塞着详情网格、活动列表、错误框,
+ * 以及**停止按钮**。那个形态是「跑了一个钟头没人看出它卡死了」的一半原因:
+ *
+ * 1. **停止按钮藏在折叠里。** 想掐掉一个卡住的子代理,得先点开一张
+ *    从外面完全看不出异常的卡片 —— 而会去点的人,首先得怀疑它有异常。
+ * 2. **详情摊在对话流中间。** 一张展开的卡片能把转录顶掉半屏,于是没人愿意展开;
+ *    可那几格(停在哪个阶段、距上次事件多久、工具数/错误数)恰恰是排查时唯一要看的。
+ *
+ * 现在整张卡片点一下,在**右侧工作区**开一个只读会话(复用主智能体那套渲染),
+ * 详情搬进那边的身份栏;停止按钮提到标题行上 —— 不展开就能按。
+ */
 export function SubagentNode({
   summary,
   state,
@@ -228,7 +242,7 @@ export function SubagentNode({
   state?: SubagentState;
 }): ReactNode {
   const { t } = useI18n();
-  const [manual, setManual] = useState<boolean | null>(null);
+  const openSubagent = useOpenSubagent();
   const [now, setNow] = useState(() => Date.now());
   const running = state?.status === 'running';
 
@@ -245,8 +259,8 @@ export function SubagentNode({
     于是限流退避在这张卡片上和「跑得慢」一模一样,几次退避全失败之后直接跳到
     错误框,看起来就像子代理根本没重试(它和主代理走的是同一份 `router.ts`)。
 
-    ★ 卡片默认折叠(只有失败才自动展开),所以标题行那一格必须先说一句短的;
-    带原因的完整句子放在展开后的横幅里,复用状态行那两条文案。
+    ★ 卡片不再折叠,所以完整那句话直接挂在标题行下面,不必再分「短标签 + 展开后的横幅」
+    两份 —— 短标签仍然留在状态那一格,因为标题行本身没有位置写一整句。
   */
   const notice = running ? state?.notice : undefined;
   const noticeLabel = notice === undefined
@@ -259,8 +273,6 @@ export function SubagentNode({
     : notice.kind === 'retry'
       ? t('chat.status.retrying', { attempt: notice.attempt, reason: notice.reason })
       : t('chat.status.providerSwitched', { to: notice.to, reason: notice.reason });
-  // Failed subagents expose their diagnostic automatically; users can still collapse it.
-  const open = manual ?? status === 'error';
   const duration = state?.startedAt === undefined
     ? undefined
     : formatDuration(elapsedOf({ startedAt: state.startedAt, endedAt: state.endedAt }, now) ?? 0)
@@ -275,7 +287,6 @@ export function SubagentNode({
         : reportStatus === 'blocked'
           ? t('chat.subagent.report.blocked')
         : undefined;
-  const activity = state?.activity ?? [];
   const phaseKey = state?.phase === undefined ? undefined : `chat.subagent.phase.${state.phase}` as
     | 'chat.subagent.phase.starting'
     | 'chat.subagent.phase.thinking'
@@ -285,6 +296,12 @@ export function SubagentNode({
   const stop = (): void => {
     if (state?.childRunId !== undefined) void abortRun(state.childRunId, true)
   }
+  /*
+    ★ 没有 `childSessionId` 的是**旧转录**(那个字段是随这次改动才加进
+    `subagent_start` 的)。它们点开会是一个空面板,所以这里索性不让点 ——
+    一张点了没反应的卡片比一张不能点的卡片难解释得多。
+  */
+  const canOpen = openSubagent !== undefined && state !== undefined && state.childSessionId !== undefined;
 
   return (
     <div
@@ -294,29 +311,56 @@ export function SubagentNode({
       data-subagent-status={status}
       data-subagent-background={state?.background === true ? 'true' : 'false'}
     >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setManual(!open)}
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-tint-hover/40"
-      >
-        <ChevronRight size={13} className={cn("shrink-0 text-fg-faint transition-transform", open && "rotate-90")} />
-        <CornerDownRight size={13} className="shrink-0 text-accent-soft" />
-        {status === 'error' ? <CircleAlert size={14} className="shrink-0 text-danger" /> : status === 'done' ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" /> : <Bot size={14} className="shrink-0 text-accent" />}
-        <span className="min-w-0 flex-1 truncate text-fg">{title}</span>
-        {state?.subagentType !== undefined && <span className="max-w-[24%] truncate text-[11px] text-fg-faint">{state.subagentType}</span>}
-        {state?.background === true && <span className="shrink-0 text-[11px] text-accent-soft">{t('chat.subagent.mode.background')}</span>}
-        <span className={cn("shrink-0 text-[11px]",
-          noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}>
-          {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
-        </span>
-        {duration !== undefined && <span className="shrink-0 font-mono text-[11px] text-fg-faint">{duration}</span>}
-      </button>
+      {/* 停止按钮是标题行的**兄弟**,不是它的子节点 —— 按钮不能套按钮 */}
+      <div className="flex w-full min-w-0 items-center">
+        <button
+          type="button"
+          data-testid="subagent-open"
+          disabled={!canOpen}
+          title={canOpen ? t('chat.subagent.open') : undefined}
+          onClick={() => { if (state !== undefined) openSubagent?.(state) }}
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left transition-colors",
+            canOpen && "hover:bg-tint-hover/40"
+          )}
+        >
+          <CornerDownRight size={13} className="shrink-0 text-accent-soft" />
+          {status === 'error' ? <CircleAlert size={14} className="shrink-0 text-danger" /> : status === 'done' ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" /> : <Bot size={14} className="shrink-0 text-accent" />}
+          <span className="min-w-0 flex-1 truncate text-fg">{title}</span>
+          {state?.subagentType !== undefined && <span className="max-w-[24%] truncate text-[11px] text-fg-faint">{state.subagentType}</span>}
+          {state?.background === true && <span className="shrink-0 text-[11px] text-accent-soft">{t('chat.subagent.mode.background')}</span>}
+          <span className={cn("shrink-0 text-[11px]",
+            noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}>
+            {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
+          </span>
+          {duration !== undefined && <span className="shrink-0 font-mono text-[11px] text-fg-faint">{duration}</span>}
+        </button>
+        {running && (
+          <button
+            type="button"
+            data-testid="subagent-stop"
+            onClick={stop}
+            aria-label={t('chat.subagent.stop')}
+            title={t('chat.subagent.stop')}
+            className="mr-1.5 inline-flex shrink-0 items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] text-danger transition-colors hover:bg-danger/10"
+          >
+            <Square size={11} />
+          </button>
+        )}
+      </div>
       {running && (
         <div className="flex items-center gap-2 border-t border-hairline px-3 py-2 text-[11.5px] text-fg-muted">
           <Clock3 size={12} className="shrink-0 animate-pulse text-accent" />
           <span className="min-w-0 truncate">{state?.currentTool ?? (phaseKey === undefined ? t('chat.subagent.phase.thinking') : t(phaseKey))}{state?.currentTarget !== undefined && <span className="text-fg-faint"> · {state.currentTarget}</span>}</span>
           <span className="ml-auto shrink-0 font-mono text-fg-faint">{t('chat.subagent.activityCount', { count: state?.toolCalls ?? 0 })}</span>
+        </div>
+      )}
+      {noticeDetail !== undefined && (
+        <div
+          data-testid="subagent-notice"
+          className="selectable border-t border-hairline bg-danger/10 px-3 py-1.5 text-[11px] leading-relaxed text-danger"
+        >
+          {noticeDetail}
         </div>
       )}
       {!running && reportLabel !== undefined && (
@@ -325,65 +369,16 @@ export function SubagentNode({
           <span>{reportLabel}</span>
         </div>
       )}
-      {open && (
-        <div className="border-t border-hairline px-3 py-2.5">
-          {activity.length > 0 && (
-            <div className="mb-3 border-b border-hairline pb-2.5">
-              <div className="mb-1.5 text-[11px] font-medium text-fg-muted">{t('chat.subagent.detail.recentActivity')}</div>
-              <div className="flex flex-col gap-1">
-                {activity.map((item, index) => <div key={`${item.toolName}-${item.at ?? index}`} className="flex min-w-0 items-center gap-2 text-[11px] text-fg-faint">
-                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", index === 0 && running ? "bg-accent" : "bg-fg-faint/50")} />
-                  <span className="min-w-0 truncate text-fg">{item.toolName}{item.target !== undefined && <span className="text-fg-faint"> · {item.target}</span>}</span>
-                </div>)}
-              </div>
-            </div>
-          )}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-fg-faint">
-            <span>{t('chat.subagent.detail.model')}</span><span className="truncate text-right text-fg">{state?.model ?? t('common.default')}</span>
-            <span>{t('chat.subagent.detail.mode')}</span><span className="text-right text-fg">{state?.background === true ? t('chat.subagent.mode.background') : state?.background === false ? t('chat.subagent.mode.foreground') : t('chat.subagent.unavailable')}</span>
-            <span>{t('chat.subagent.detail.phase')}</span><span className="text-right text-fg">{phaseKey === undefined ? t('chat.subagent.unavailable') : t(phaseKey)}</span>
-            <span>{t('chat.subagent.detail.duration')}</span><span className="text-right font-mono text-fg">{duration ?? t('chat.subagent.unavailable')}</span>
-            <span>{t('chat.subagent.detail.tools')}</span><span className="text-right text-fg">{state?.toolCalls ?? 0}</span>
-            <span>{t('chat.subagent.detail.errors')}</span><span className={cn("text-right", (state?.toolErrors ?? 0) > 0 ? "text-danger" : "text-fg")}>{state?.toolErrors ?? 0}</span>
-            {state?.contextUsage !== undefined && <>
-              <span>{t('chat.subagent.detail.context')}</span>
-              <span className="text-right text-fg">{state.contextUsage.used.toLocaleString()} / {state.contextUsage.window.toLocaleString()}</span>
-            </>}
-            <span>{t('chat.subagent.detail.runId')}</span><code className="truncate text-right text-fg-faint">{state?.childRunId ?? t('chat.subagent.unavailable')}</code>
-          </div>
-          {noticeDetail !== undefined && (
-            <div
-              data-testid="subagent-notice"
-              className="selectable mt-2 whitespace-pre-wrap break-words rounded-[5px] border border-danger/30 bg-danger/10 px-2 py-1 text-[11px] leading-relaxed text-danger"
-            >
-              {noticeDetail}
-            </div>
-          )}
-          {state?.currentTool !== undefined && (
-            <div className="mt-2 truncate rounded-[5px] bg-tint px-2 py-1 text-[11px] text-fg">
-              {t('chat.subagent.detail.currentTool', { tool: state.currentTool })}
-            </div>
-          )}
-          {status === 'error' && (
-            <div className="selectable mt-2 whitespace-pre-wrap break-words rounded-[5px] border border-danger/30 bg-danger/10 px-2 py-1.5 text-[11.5px] leading-relaxed text-danger">
-              {errorText === undefined || errorText.trim() === ''
-                ? t('chat.subagent.detail.errorUnknown')
-                : t('chat.subagent.detail.errorMessage', { error: errorText })}
-            </div>
-          )}
-          {state?.summary !== undefined && state.summary !== summary && (
-            <p className="selectable mt-2 border-t border-hairline pt-2 text-[11.5px] leading-relaxed text-fg">{state.summary}</p>
-          )}
-          {running && (
-            <button
-              type="button"
-              onClick={stop}
-              className="mt-2 inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] text-danger transition-colors hover:bg-danger/10"
-            >
-              <Square size={11} />
-              {t('chat.subagent.stop')}
-            </button>
-          )}
+      {/*
+        ★ 失败原因**留一行在卡片上**,完整的错误框在面板里。
+        详情整体搬走的那一条对错误不成立:一张只写着「错误」的卡片,等于逼着
+        用户为了看一句话去开一个面板 —— 而失败恰恰是最该一眼看见的那件事。
+      */}
+      {status === 'error' && (
+        <div data-testid="subagent-error" className="truncate border-t border-hairline bg-danger/10 px-3 py-1.5 text-[11.5px] text-danger">
+          {errorText === undefined || errorText.trim() === ''
+            ? t('chat.subagent.detail.errorUnknown')
+            : errorText}
         </div>
       )}
     </div>

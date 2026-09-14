@@ -167,7 +167,13 @@ export class CredentialResolver {
             //   直接写 `scope: spec.scope` 的话,URLSearchParams 会把它编成
             //   字面量 `scope=undefined` 发出去,而那个 400 不会提到 scope。
             ...(spec.scope === undefined ? {} : { scope: spec.scope })
-          }
+          },
+          /*
+            ★★ 这家的私货头在**刷新**这一跳上一样要带(见 `registry.ts` 的
+            `oauthHeaders`)。漏掉的表现不是登不上,而是**能登录、第二天刷新 403**
+            —— 一个隔一天才出现、且错误信息里不提任何头名的症状。
+          */
+          ...(spec.oauthHeaders === undefined ? {} : { headers: spec.oauthHeaders })
         },
         AbortSignal.timeout(30_000)
       )

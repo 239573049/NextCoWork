@@ -272,10 +272,13 @@ export function createZcodeSpec(channel: ZcodeChannel): OAuthProviderSpec {
   return {
     id: channel.id,
     label: channel.label,
-    authorizeUrl: channel.authorizeUrl,
     tokenUrl: channel.tokenUrl,
     clientId: channel.clientId,
-    redirect: channel.redirect,
+    grant: {
+      kind: 'authorization-code',
+      authorizeUrl: channel.authorizeUrl,
+      redirect: channel.redirect
+    },
     /*
       ★ 这条链路**不支持 PKCE**,授权 URL 里不能有 code_challenge;也没有 scope。
       两者都是「省略」而不是「置空」——`scope=` 和「没有 scope」在有的服务端上

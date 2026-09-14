@@ -17,6 +17,7 @@ import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import type { RunUsage } from '../../shared/agent/transcript'
 import type { RunCost } from '../../shared/domain/pricing'
 import type { ContextCheckpoint, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
+import { orphanedCheckpoints } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import { mcpSecretRef } from '../../shared/domain/mcp'
@@ -1302,6 +1303,16 @@ export function replaceHistory(sessionId: string, messages: readonly AgentMessag
     for (const id of removed) stmt('DELETE FROM messages WHERE id = ?').run(id)
     if (removed.length > 0) {
       stmt('DELETE FROM messages_fts WHERE session_id = ? AND message_id NOT IN (SELECT id FROM messages WHERE session_id = ?)').run(sessionId, sessionId)
+      /*
+        ★ **改写历史要连着清理检查点,而且必须在同一个事务里。**
+        判据见 `orphanedCheckpoints`。放在这里而不是各个调用点上,是因为
+        这个函数是「用户有意改写转录」的**唯一**入口(删一轮、编辑消息、
+        编辑后重跑都汇到这儿)—— 分散到调用点就总有一条路会忘。
+        没删过消息就不可能产生新孤儿,所以只在 `removed` 非空时走一趟。
+      */
+      for (const orphan of orphanedCheckpoints(ids, listContextCheckpoints(sessionId))) {
+        stmt('DELETE FROM context_checkpoints WHERE id = ?').run(orphan.id)
+      }
     }
     for (const { message, ordinal, changed } of entries) {
       if (changed) writeMessage(session, message, ordinal)

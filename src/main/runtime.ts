@@ -31,7 +31,7 @@ import { TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
 import { decideAfterHooks, decideBeforeHooks } from './kernel/permission-decision'
 import { addLocalPermissionRule, readLocalSettings } from './kernel/local-settings'
 import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/permission-rule'
-import { interactions } from './kernel/interaction-gate'
+import { interactions, type InteractionDraft } from './kernel/interaction-gate'
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
@@ -76,6 +76,7 @@ import type { TokenUsage } from '../shared/agent/stream'
 import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
+import { AgentDraftGenerator } from './agent-draft'
 import type { SessionChange } from '../shared/domain/session'
 import type { CanonicalRequest } from './kernel/upstream/canonical'
 import { ulid } from '../shared/util/id'
@@ -96,6 +97,7 @@ let tools: ToolRegistry | null = null
 let mcp: McpManager | null = null
 let seeded = false
 let sessionTitles: SessionTitleGenerator | null = null
+let agentDrafts: AgentDraftGenerator | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
 let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void }>) | undefined
@@ -174,6 +176,8 @@ export function installHost(h: KernelHost): void {
   // 路由器在构造时就抓住了 host 的引用,换宿主必须让它重建,
   // 否则新装的宿主对已经建好的路由器完全不起作用
   router = null
+  // 辅助请求那个路由器同样抓着旧 host(`shutdownSessionTitles` 已经处理了标题那一个)
+  agentDrafts = null
 }
 
 export function getHost(): KernelHost {
@@ -500,6 +504,29 @@ export function shutdownSessionTitles(): void {
 }
 
 /**
+ * 「AI 生成子代理」用的那一次辅助请求。
+ *
+ * ★ 和 `getSessionTitles` 逐条同形,理由也同一条:**独立的 `UpstreamRouter`**,
+ *   让一次失败的辅助请求不去影响正文的供应商健康度。用量回调里那句
+ *   `agentDrafts === generator` 同理 —— 换过宿主之后,上一个生成器迟到的
+ *   用量不该再记进账。
+ */
+export function getAgentDraftGenerator(): AgentDraftGenerator {
+  if (agentDrafts !== null) return agentDrafts
+  const generator = new AgentDraftGenerator({
+    upstream: new UpstreamRouter(getHost(), providerConfig, {
+      onUsageAttempt: (record) => {
+        if (agentDrafts === generator) persistUsageAttempt(record)
+      },
+      priceAttempt: priceAttemptForRouter
+    }),
+    logger: getHost().logger
+  })
+  agentDrafts = generator
+  return generator
+}
+
+/**
  * Freeze pricing at the attempt boundary. Later seed updates must never change
  * historical spend, and an unavailable rate remains NULL rather than silently
  * turning into a plausible-looking zero.
@@ -668,6 +695,17 @@ async function prepareWorkspaceMcp(workspaceId: string, environment: WorkspaceEn
   }))
   environment.assertReady()
   return scope.tools
+}
+
+/**
+ * 这个工作区**已经连上的**那些 MCP 工具,没连过就是 undefined。
+ *
+ * ★ 和 `prepareWorkspaceMcp` 的区别就是一个字:那个会**去连**,这个只**看**。
+ * 上下文预览(`ipc/context.ts`)要的是后者 —— 用户点开一个菜单不该顺带
+ * 拉起几个子进程,而「还没连上所以这一档是 0」是个诚实的读数。
+ */
+export function connectedWorkspaceMcpTools(workspaceId: string): ToolRegistry | undefined {
+  return workspaceMcps.get(workspaceId)?.tools
 }
 
 /** 由 `ipc/mcp.ts` 在 `registerIpc()` 里装上 —— 理由见 `mcpOnChange` 的注释 */
@@ -1312,6 +1350,9 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
     const startedAt = getHost().clock.now()
     parent.emit({
       type: 'subagent_start', callId: sub.callId, childRunId,
+      // ★ 派生 id 在这里已经算好了(`childRequestFor`),原样递出去 ——
+      //   渲染层照着模板再拼一遍的话,套两层子代理就会拼错,见 `event.ts` 那段注释
+      childSessionId: childReq.sessionId,
       description: sub.description,
       subagentType: def.name,
       model: childReq.model,
@@ -1530,6 +1571,38 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
     }
 
     const suggestedRule = suggestPermissionRule(tool.internalId, input)
+
+    /*
+      ★★ 子代理到此为止 —— **它没有人可问**。
+
+      下面那句 `interactions.request` 没有任何超时(设计如此:审批只该由人或中断
+      来结束)。而一个子代理的待决项在界面上根本走不到用户面前:`InteractionPanel`
+      挂在父 run 的 `activeRunId` 上,父 run 一结束它就卸载;`listInteractions`
+      在父 handle 被回收后返回空数组;`applyChildEvent` 又把 `interaction_request`
+      当未知事件丢掉。三条路全断,于是这次 await 永远不会结算 ——
+      子代理就停在那次工具调用上,卡片上只剩一个不动的「运行中」。
+      这是真实发生过的死锁(跑满一小时、六百多次工具调用之后毫无进展)。
+
+      所以这里**当场拒绝**,而不是挂起。拒绝进转录、模型看得见,它可以换个做法
+      或者把这一步交回给主代理 —— 这正是 `Task` 的工具描述里已经承诺过的语义。
+
+      ★ 位置在钩子与本地规则**之后**:一条 `allow` 规则仍然应该让子代理跑起来,
+      变的只是「没有规则时,从无限等待变成一句说得清的拒绝」。
+      与 `ToolRegistry.snapshot({ noInteraction })` 是对称的两道闸:那道摘掉
+      主动提问的工具,这道挡住权限审批,缺一处就还是能挂起。
+    */
+    if (req.parentRunId !== undefined) {
+      return {
+        kind: 'deny',
+        reason:
+          `This tool needs the user's approval, and a subagent cannot ask for it. ` +
+          `Either do this step without ${tool.externalName}, or report back that the parent agent must run it. ` +
+          (root === ''
+            ? ''
+            : `To allow it unattended in future runs, the user can add "${suggestedRule}" to permissions.allow in .next-cowork/settings.local.json.`)
+      }
+    }
+
     /*
       Notification 钩子 —— 「有个弹窗在等你」的那一刻。典型用法是
       `osascript -e 'display notification …'`。
@@ -1817,7 +1890,18 @@ export async function runAgent(
         }
       },
       approve: approveWith(req, handle, environment),
-      interact: (draft) => interactions.request(handle, draft, getHost().clock.now()),
+      /*
+        ★ 只有主 run 装配 —— 子代理没有人可问,让它连 `interact` 都拿不到。
+
+        这是 `noInteraction` 快照过滤之外的**第二道**:快照是"下发的工具列表里
+        没有它",这里是"就算别的路径调到了,`ctx.interact` 也是 undefined"。
+        `builtin/interaction.ts` 的既有兜底会返回
+        「User interaction is unavailable in this environment.」—— 一次工具失败,
+        模型看得见、能换路,而不是停在一次永不结算的 `interactions.request` 上。
+      */
+      ...(req.parentRunId === undefined
+        ? { interact: (draft: InteractionDraft) => interactions.request(handle, draft, getHost().clock.now()) }
+        : {}),
       /*
         ★ 这里给的是**目录**,不是正文。`context-assembler.ts` 只读
         name / description 两个字段拼成一行一条的清单,正文要模型自己调
@@ -1920,6 +2004,7 @@ export function resetRuntimeForTest(): void {
   interactions.clear()
   host = null
   router = null
+  agentDrafts = null
   tools = null
   // 不 await shutdown:这个函数是同步的(beforeEach 里调),而留着的
   // manager 会攥着上一个用例的 ToolRegistry —— 那正是要断开的引用

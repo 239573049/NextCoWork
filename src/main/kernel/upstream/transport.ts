@@ -231,10 +231,22 @@ export function authHeader(protocol: UpstreamProtocol, bearer: string): Record<s
  */
 export function sessionUuid(sessionId: string | undefined): string {
   const seed = sessionId === undefined || sessionId === '' ? 'nextcowork:no-session' : sessionId
+  return uuidFromSeed(seed)
+}
+
+/**
+ * 任意字符串 → 一个合法的 v4 形状 UUID。**确定性纯函数。**
+ *
+ * ★ 从 `sessionUuid` 里抽出来,是因为出现了第二个调用点:Kimi 那家的
+ * `X-Msh-Device-Id` 要一个**跨重启稳定**的设备 id(见 `issuers/kimi.ts`)。
+ * 两处各写一遍 RFC 4122 那两行位运算的代价不是「重复」,是**其中一处写漏**——
+ * 漏了之后那个值只是「长得像 UUID」,而按规范校验的一方会拒,
+ * 且错误信息不会提到这个字段。
+ */
+export function uuidFromSeed(seed: string): string {
   const h = createHash('sha256').update(seed).digest()
   const b = Buffer.from(h.subarray(0, 16))
-  // RFC 4122:version 置 4、variant 置 10xx。不置的话它只是「长得像 UUID」,
-  // 而按规范校验的一方会拒
+  // RFC 4122:version 置 4、variant 置 10xx
   b[6] = ((b[6] as number) & 0x0f) | 0x40
   b[8] = ((b[8] as number) & 0x3f) | 0x80
   const hex = b.toString('hex')

@@ -6,3 +6,19 @@ out
 .eslintcache
 .vite
 .next-cowork/
+
+# tsc 漏了 --noEmit 那一次的产物。★ 不只是脏,是会**覆盖源码**:
+# Vite 的默认 resolve.extensions 把 .js 排在 .ts 前面,而本仓库没覆盖它 ——
+# 只要 foo.ts 旁边躺着一个旧 foo.js,dev / build / vitest 加载的都是那份旧的,
+# 表现为「源码改了但界面和测试纹丝不动」,且全程不报任何错。
+# 手写的 env.d.ts / preload/index.d.ts 已被跟踪,不受这几条影响。
+src/**/*.js
+src/**/*.d.ts
+electron.vite.config.js
+electron.vite.config.d.ts
+# ★ 这三个是**手写源码**,不是产物。上面那条 src/**/*.d.ts 会打到它们 ——
+# 眼下它们只是因为「已被跟踪」才没被忽略掉,一旦谁 rm 之后重新 add 就会凭空消失。
+!src/main/env.d.ts
+!src/renderer/src/env.d.ts
+!src/preload/index.d.ts
+.tscache

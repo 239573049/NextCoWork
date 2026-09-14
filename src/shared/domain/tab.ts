@@ -61,7 +61,34 @@ export type InnerTab =
    * 见 `stores/tabs.ts` 的 `bindChatSession`;库里那一行更晚,由主进程
    * `runAgent` 的 `ensureSession` 建。
    */
-  | (InnerTabBase & { kind: 'chat'; ref: { sessionId: string | null } })
+  /**
+   * `readOnly` = 这是**别人的**会话,只能看。目前唯一的来源是子代理卡片:
+   * 点一下就在右侧工作区开一个只读会话,复用主智能体那套渲染。
+   *
+   * ★ 放在 `ref` 而不是 `InnerTabBase`,是因为它是「这个 Tab 指着什么」的一部分 ——
+   * 只读的是那个会话,不是这个 Tab 的显示方式。也因此它会跟着布局一起落盘:
+   * 重启之后那个面板仍然是只读的,而不是突然多出一个输入框、让人往子代理的
+   * 会话里发消息(那条路在主进程侧根本没有接)。
+   */
+  /**
+   * `subagentOf` = 这个只读会话是**哪张卡片**点开的:父会话 id + 那次 `Task` 调用的 callId。
+   *
+   * 身份栏要显示的那些格子(子代理类型、模型、执行方式、停在哪个阶段、工具数/错误数、
+   * 距上次事件多久)**一格都不在子会话自己的转录里** —— 它们住在**父**会话的
+   * `transcript.subagents[callId]`。子转录只是一段普通对话,它不知道自己是谁派出来的。
+   *
+   * ★ 跟着 `readOnly` 一起落盘,而不是在渲染层另起一张 `childSessionId → 父坐标` 的索引表:
+   * 那张表在 ⌘R 之后是空的(它只在活的 `subagent_start` 流过时才被写),而 Tab 是从盘里
+   * 读回来的 —— 于是重载后面板还在,身份栏却整条消失。
+   */
+  | (InnerTabBase & {
+      kind: 'chat'
+      ref: {
+        sessionId: string | null
+        readOnly?: true
+        subagentOf?: { sessionId: string; callId: string }
+      }
+    })
   | (InnerTabBase & { kind: 'terminal'; ref: { terminalId: string } })
   | (InnerTabBase & { kind: 'doc'; ref: { path: string } })
   | (InnerTabBase & { kind: 'draw'; ref: { path: string } })

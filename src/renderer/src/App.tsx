@@ -17,6 +17,7 @@ import type { Workspace } from '../../shared/domain/workspace'
 import { announceReady, getBootstrap } from './services/app'
 import { on } from './services/ipc'
 import { AppShell } from './shell/AppShell'
+import { AppSkeleton } from './shell/AppSkeleton'
 import { WindowControls } from './shell/WindowControls'
 import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
@@ -89,18 +90,26 @@ export default function App(): React.JSX.Element {
         setSettings(b.settings)
         setWorkspaces(b.workspaces)
         setAppearance(b.resolvedTheme)
+        /*
+          ★ **首屏不等网络。** `getClientAuthState()` 只读主进程里那行 SQLite 快照
+          (实测 1ms),拿到就渲染;`getClientUser()` 是一次真实 HTTP 往返
+          (实测 2219ms),降级成后台刷新。
+
+          它以前被 `await` 在这条路径上,于是窗口早就 `show()` 出来了、界面却还要
+          再等 2.2 秒才有内容 —— 那正是用户说的「刚打开会白屏一会儿」。
+
+          不 setAuth 结果也不丢:主进程两条支路都会推。成功那支写完 KV 调
+          `announce(state())`(新头像、新钱包余额),需要选 Team 的 409 那支也调,
+          而 `clientAuth:changed` 上面已经订阅了。所以这里只管发起,不管收。
+        */
         void getClientAuthState()
-          .then(async (next) => {
-            if (next.mode !== 'authenticated' || next.contextRequired === true) {
-              setAuth(next)
-              return
+          .then((next) => {
+            setAuth(next)
+            // 校验老客户端建的会话有没有绑 Team —— 服务端答 409 时 getClientUser
+            // 会把界面推成选 Team 态。已经是选 Team 态、或者压根没登录就别问了。
+            if (next.mode === 'authenticated' && next.contextRequired !== true) {
+              void getClientUser().catch((error: unknown) => console.error('[clientAuth] 后台刷新账号失败', error))
             }
-            // Validate the Team context of sessions created by older clients.
-            // The API intentionally returns 409 until the desktop session has
-            // selected a Team; getClientUser turns that into a selection state.
-            const user = await getClientUser()
-            const latest = await getClientAuthState()
-            setAuth({ ...latest, user: user ?? latest.user })
           })
           .catch((error: unknown) => setFatal(error instanceof Error ? error.message : String(error)))
         hydrate(b)
@@ -193,18 +202,21 @@ export default function App(): React.JSX.Element {
     )
   }
 
-  // 首屏之前不渲染外壳 —— 渲染一个空 Tab 条再让它跳成有内容的,比空一瞬间更难看
+  /*
+    首屏之前显示骨架屏 —— 窗口这时已经 show() 出来了,一块纯色看着像程序坏了。
+    轮廓和 AppShell 完全重合,所以真界面接上来是「内容填进来」,不是换一屏。
+  */
   if (boot === null || settings === null) {
     return (
       <>
         <WindowControls />
-        <div className="h-full bg-app" />
+        <AppSkeleton />
       </>
     )
   }
 
   if (auth === null) {
-    return <><WindowControls /><div className="h-full bg-app" /></>
+    return <><WindowControls /><AppSkeleton /></>
   }
   if (auth.mode === 'undecided') {
     return <><WindowControls /><WelcomeView onComplete={() => { void getClientAuthState().then(setAuth) }} /></>

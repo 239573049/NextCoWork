@@ -68,6 +68,8 @@ export interface AgentListItem {
   tools?: string[]
   model?: string
   permissionMode?: string
+  /** 列表行前面那个小圆点。纯装饰,见 `agent-def.ts` 的 `AgentColor`。 */
+  color?: string
   /**
    * ★ 存在 kv 里,**不写进 `.md`**。
    *

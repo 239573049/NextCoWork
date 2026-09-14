@@ -12,10 +12,11 @@
  *   挪进 `utilityProcess` 是唯一的出路,而那一步的前提就是调用点全走访问器。
  *   同样的理由:聚合查询一律带 LIMIT 和时间窗,`VACUUM` 只在空闲时跑。
  * - 迁移**只增不改**(见 `schema.ts`)。
- * - 应用数据库默认落在当前工作目录的 `.next-cowork/` 下,便于项目级携带和
- *   备份；调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
+ * - 应用数据库默认落在**用户主目录**的 `.next-cowork/` 下 —— 与 cwd、与是否打包
+ *   都无关;调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
  */
 import { lstatSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { MIGRATIONS } from './schema'
@@ -26,9 +27,19 @@ export const DATABASE_DIRNAME = '.next-cowork'
 
 const MEMORY = ':memory:'
 
-/** 默认项目级数据目录: `<cwd>/.next-cowork/`。 */
+/**
+ * 默认数据目录: `~/.next-cowork/`。
+ *
+ * ★ **不能用 `process.cwd()` 派生**。打包后的 cwd 没有任何意义:Windows 从快捷方式
+ * 启动时它是安装目录(数据会在卸载/升级时被一起清掉),从别的目录双击 exe 又会
+ * 凭空开出一个空库 —— 用户看到的是「我的会话全没了」,而不是任何一条能指向
+ * 工作目录的线索。主目录对两种运行方式都稳定。
+ *
+ * 要隔离(探针、多实例)走命令行的 `--user-data-dir`,见 `main/index.ts` 的
+ * `resolveDataRoot()`。
+ */
 export function defaultDatabaseDirectory(): string {
-  return join(process.cwd(), DATABASE_DIRNAME)
+  return join(homedir(), DATABASE_DIRNAME)
 }
 
 /** 当前打开的文件库所在目录；测试和恢复流程可通过 openDatabase 指定目录。 */

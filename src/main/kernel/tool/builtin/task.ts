@@ -207,8 +207,21 @@ export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().li
           const error = typeof outcome.error === 'string'
             ? agentError('unknown', outcome.error)
             : outcome.error
+          /*
+            ★ 网络故障要**明说它是瞬时的**。
+
+            子 run 走到这里时,session 层已经按 `RESUME_DELAYS_MS` 自己续跑过 5 次
+            (`agent-session.ts` 的 `canResume`)—— 这里是最后一道防线,而父代理是
+            唯一还能做点什么的人。只甩一句「failed: 连接「X」失败:net::ERR_CONNECTION_CLOSED」
+            的话,模型读不出「这跟我的提示词无关、原样再派一次就可能成」,于是要么
+            放弃这一步、要么换个方向瞎试。措辞形状同上面那条空输出错误:说清原因 + 给一个动作。
+          */
+          const transient = error?.code === 'network'
+            ? ' This was a transient network failure and the subagent already retried on its own; '
+              + 'dispatching the same task again may well succeed.'
+            : ''
           return {
-            ...toolFail(`The subagent ${input.subagent_type} failed: ${error?.message ?? 'unknown error'}`),
+            ...toolFail(`The subagent ${input.subagent_type} failed: ${error?.message ?? 'unknown error'}${transient}`),
             subagent: {
               childRunId: outcome.childRunId,
               status: 'error',

@@ -31,6 +31,15 @@ import { toolFail, toolOk } from '../../shared/agent/tool'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import { mcpInternalId } from '../../shared/domain/mcp'
 import type { ToolContext, ToolRegistration } from '../kernel/tool/registry'
+import { isAbortError, withDeadline } from '../kernel/abort'
+
+/**
+ * 一次 MCP 工具调用的墙钟上限。
+ *
+ * 比 `manager.ts` 的连接超时(30s)宽 —— 工具本身就可能慢(跑一遍测试、建一个 PR),
+ * 拿连接握手的标准去卡执行,会把正常的慢工具误杀成失败。60s 是「慢」与「死」之间那条线。
+ */
+const CALL_TOOL_TIMEOUT_MS = 60_000
 
 /** `client.listTools()` 里一个元素的形状,只取我们真的会读的字段。 */
 export interface McpToolDescriptor {
@@ -166,15 +175,46 @@ export function toRegistration(
         一遍校验,只会在两边理解不一致时产生「模型按 schema 传了参,却被我们拒了」。
         `defineTool` 那层的 zod 校验是给**我们自己写的**工具用的,这里走不到。
       */
-      const res = await client.callTool(
-        { name: tool.name, arguments: (input ?? {}) as Record<string, unknown> },
-        undefined,
+      let res: Awaited<ReturnType<Client['callTool']>>
+      try {
         /*
-          ★ signal 一定要传下去(方案 §4.3)。不传的话用户点了停止,
-          界面停了,而远端那次调用还在跑 —— 一个正在建 PR 的工具会把 PR 建完。
+          ★★ 墙钟上限 —— 一台不回包的服务器,以前能把整个 run **永久**挂住。
+
+          `manager.ts` 给 `connect`(30s)和 `listTools`(15s)都上了闸,唯独真正
+          执行的这一次漏了:握手成功、工具列出来了、然后某次调用一去不回,
+          而这里只有 `ctx.signal`,没有任何超时 —— 除非用户自己按停止,否则
+          这个 await 永远不结算。子代理尤其致命:它的卡片上只剩一个不动的「运行中」。
+
+          比 connect 的 30s 宽,是因为工具本来就可能慢(跑测试、建 PR);
+          但「慢」和「死」必须有一条线,60s 是那条线。
         */
-        { signal: ctx.signal }
-      )
+        res = await withDeadline(
+          /*
+            ★ signal 一定要传下去(方案 §4.3)。不传的话用户点了停止,
+            界面停了,而远端那次调用还在跑 —— 一个正在建 PR 的工具会把 PR 建完。
+            超时同理:`withDeadline` 给的这个 signal 会在到点时 abort,
+            所以远端那次调用也会被真的取消,而不是我们单方面走开。
+          */
+          (signal) =>
+            client.callTool(
+              { name: tool.name, arguments: (input ?? {}) as Record<string, unknown> },
+              undefined,
+              { signal }
+            ),
+          CALL_TOOL_TIMEOUT_MS,
+          `MCP 工具 ${tool.name}`,
+          ctx.signal
+        )
+      } catch (err) {
+        /*
+          ★ 中断照旧往上抛 —— 用户按停止不是一次「工具失败」,
+          `agent-session.ts` 那边要靠它把整个 run 收成 `aborted`。
+          超时(以及服务器自己抛的错)则收成 `toolFail`:进转录、模型看得见、
+          能换条路,run 继续。这正是「统一硬超时 + 报工具失败」那条决定。
+        */
+        if (isAbortError(err)) throw err
+        return toolFail(err instanceof Error ? err.message : String(err))
+      }
 
       const text = flattenContent(res.content)
       /*

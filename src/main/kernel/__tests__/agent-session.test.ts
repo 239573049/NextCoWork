@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { agentError } from '../../../shared/agent/error'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
@@ -168,6 +169,7 @@ async function runSession(o: {
   history?: readonly AgentMessage[]
   approve?: ApproveFn
   onToolUsage?: SessionDeps['onToolUsage']
+  resumeDelaysMs?: readonly number[]
 }): Promise<Ran> {
   const request = o.request ?? req()
   const handle = new RunHandle(request)
@@ -179,7 +181,10 @@ async function runSession(o: {
       workspaceRoot: '/ws',
       ...(o.history !== undefined ? { history: o.history } : {}),
       ...(o.approve !== undefined ? { approve: o.approve } : {}),
-      ...(o.onToolUsage !== undefined ? { onToolUsage: o.onToolUsage } : {})
+      ...(o.onToolUsage !== undefined ? { onToolUsage: o.onToolUsage } : {}),
+      // 缺省关掉断流续跑:它只在明确要测的那几条用例里打开,别的用例不该因为
+      // 上游脚本里出现一个 error 事件就凭空多跑五轮。
+      resumeDelaysMs: o.resumeDelaysMs ?? []
     },
     handle,
     request
@@ -1867,5 +1872,126 @@ describe('恢复上下文检查点', () => {
     ])
     expect(sent).toContain('用户在重构登录模块')
     expect(sent).not.toContain('折叠了 14 条消息')
+  })
+})
+
+/**
+ * 断流自动续跑(`RESUME_DELAYS_MS` / `canResume`)。
+ *
+ * 背景:`UpstreamRouter` 只在**还没吐第一个内容字节之前**重试或切换供应商
+ * (router.ts §5.3 那条 `sawContent` 边界)。一旦流吐到一半被掐断,它把错误原样交上来,
+ * 而 session 以前对任何 `streamError` 一律 `finish('error')` —— 整个 run 当场死掉。
+ * 主代理死了还有人能重新提问,**子代理没有人**:`Task` 直接把失败汇报给父代理。
+ *
+ * 这里钉的是两件事:续跑**真的发生**,以及它**只在该发生的时候**发生。
+ */
+describe('断流自动续跑', () => {
+  /** 吐了一半就断:有 message_start、有正文,没有 message_end */
+  const cutOff = (text: string, error = agentError('network', '连接「X」失败:net::ERR_CONNECTION_CLOSED')):
+    ProviderStreamEvent[] => [
+    { type: 'message_start', model: 'claude-sonnet-4' },
+    { type: 'text_delta', index: 0, text },
+    { type: 'error', error }
+  ]
+
+  const texts = (ms: readonly AgentMessage[]): string[] =>
+    partsOf(ms).flatMap((part) => (part.type === 'text' ? [part.text] : []))
+
+  it('★ 断了一次就自己重来一轮,断掉那半截不进转录', async () => {
+    const upstream = fakeUpstream([cutOff('我先看一眼 con'), says('完整回答')])
+    const ran = await runSession({ upstream, resumeDelaysMs: [0] })
+
+    expect(runEnd(ran.events).status).toBe('done')
+    // ★★ 半截那一份**一个字都不能留**。留着的话历史会以一条 assistant 消息结尾
+    //    (Anthropic prefill 语义 + 尾部空白 400),对话里还多一个割裂的气泡。
+    expect(texts(ran.history)).toEqual(['你好', '完整回答'])
+    expect(upstream.requests).toHaveLength(2)
+    // 两次请求体逐字相同 —— 续跑重发的是**同一个请求**,不是在半截回答上接着写
+    expect(JSON.stringify(upstream.requests[0])).toBe(JSON.stringify(upstream.requests[1]))
+  })
+
+  /**
+   * 续跑期间界面上要有话说。
+   *
+   * ★ 复用 `provider_retry` 而不是新造事件:主状态行、子代理卡片、转录 reducer
+   * 三处都已经在画它。这条用例同时钉住「别改成别的事件类型」——
+   * 改了的话那三处会一起静音,而静音的重试和卡死在界面上长得一模一样。
+   */
+  it('续跑期间发 provider_retry,带着第几次和原因', async () => {
+    const upstream = fakeUpstream([cutOff('半截'), cutOff('又半截'), says('第三次才成')])
+    const ran = await runSession({ upstream, resumeDelaysMs: [0, 0] })
+
+    const notices = ran.events.flatMap((e) =>
+      e.type === 'stream' && e.delta.type === 'provider_retry' ? [e.delta] : [])
+    expect(notices.map((n) => n.attempt)).toEqual([1, 2])
+    expect(notices[0]?.reason).toContain('ERR_CONNECTION_CLOSED')
+    expect(runEnd(ran.events).status).toBe('done')
+  })
+
+  /** 退避表用尽就认输 —— 尝试次数正好是 1 + 退避表长度,不多不少 */
+  it('★ 续跑次数用尽后照常报错,不无限重来', async () => {
+    // fakeUpstream 的脚本用尽会重复最后一段,所以这一段就是每一次的结局
+    const upstream = fakeUpstream([cutOff('每次都断')])
+    const ran = await runSession({ upstream, resumeDelaysMs: [0, 0, 0] })
+
+    expect(runEnd(ran.events).status).toBe('error')
+    expect(runEnd(ran.events).error?.code).toBe('network')
+    expect(upstream.requests).toHaveLength(4)
+    // 失败那一份的半截正文 + error part 仍然要进转录:重载之后失败还看得见,
+    // 不是一个消失了的 toast(见 turn() 里 error part 那段注释)
+    expect(texts(ran.history)).toContain('每次都断')
+    expect(partsOf(ran.history)).toContainEqual(expect.objectContaining({ type: 'error' }))
+  })
+
+  /**
+   * ★★ 边界:**只认 `code === 'network'`**。
+   *
+   * 放宽到全部 `retryable` 的话,`rate_limit` 和 5xx 会在 router 那条**信息更全**的
+   * 重试路(认 `Retry-After`、会切 provider、有健康表)外面再套一个盲循环,
+   * 最坏情况是 5 × 3 次尝试的长时间空转。
+   */
+  it.each([
+    ['auth', agentError('auth', '密钥无效')],
+    ['provider 4xx', agentError('provider', '请求不合法', { status: 400 })],
+    ['rate_limit(router 已经按 Retry-After 退过了)', agentError('rate_limit', '超出速率限制')]
+  ])('%s 一次都不续跑', async (_label, error) => {
+    const upstream = fakeUpstream([cutOff('半截', error), says('不该被请求到')])
+    const ran = await runSession({ upstream, resumeDelaysMs: [0, 0, 0, 0, 0] })
+
+    expect(runEnd(ran.events).status).toBe('error')
+    expect(upstream.requests).toHaveLength(1)
+  })
+
+  /** `resumeDelaysMs: []` = 关掉续跑。这是旧行为,也是本文件其余用例的默认档。 */
+  it('退避表为空时保持原来的行为', async () => {
+    const upstream = fakeUpstream([cutOff('半截'), says('不该被请求到')])
+    const ran = await runSession({ upstream, resumeDelaysMs: [] })
+
+    expect(runEnd(ran.events).status).toBe('error')
+    expect(upstream.requests).toHaveLength(1)
+  })
+
+  /**
+   * ★ 停止按钮要能穿透退避睡眠。
+   *
+   * 没有这条的话,用户在一次 45 秒的退避里按停止会等满 45 秒 ——
+   * 而「按了没反应」正是这整轮改动想根除的那种体感。
+   */
+  it('★ 退避睡眠中被中断:立刻收尾,不再发第二次请求', async () => {
+    const upstream = fakeUpstream([cutOff('半截')])
+    const request = req()
+    const handle = new RunHandle(request)
+    const session = new AgentSession({
+      host: quietHost(), upstream, tools: registry(), workspaceRoot: '/ws',
+      resumeDelaysMs: [10_000]
+    }, handle, request)
+    const running = session.run()
+
+    await vi.waitFor(() => expect(upstream.requests).toHaveLength(1), { timeout: 200, interval: 1 })
+    handle.abort({ by: 'user' })
+    await running
+
+    expect(handle.status).toBe('aborted')
+    expect(upstream.requests).toHaveLength(1)
   })
 })

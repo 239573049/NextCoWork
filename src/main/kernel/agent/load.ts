@@ -19,7 +19,8 @@ import type { AgentDefinition } from '../../../shared/domain/agent-def'
 import {
   AGENT_DESCRIPTION_MAX,
   AGENT_NAME_RE,
-  AGENT_PROMPT_MAX
+  AGENT_PROMPT_MAX,
+  isAgentColor
 } from '../../../shared/domain/agent-def'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import { PERMISSION_MODES } from '../../../shared/agent/permission'
@@ -215,6 +216,14 @@ async function loadOne(
 
   const model = fmString(fm, 'model')
 
+  /*
+    ★ 颜色读不懂就当没写,**不作废**。它纯装饰,而上面那两个 `'invalid'` 分支
+    各自都有非装饰的理由(空工具表会让子代理编答案;读错的权限档位会放宽权限)。
+    为一条坏颜色让用户的子代理消失,代价完全不成比例。
+  */
+  const rawColor = fmString(fm, 'color')?.trim().toLowerCase()
+  const color = rawColor !== undefined && isAgentColor(rawColor) ? rawColor : undefined
+
   return {
     name,
     description: clampWithEllipsis(stripControlChars(description), AGENT_DESCRIPTION_MAX),
@@ -222,6 +231,7 @@ async function loadOne(
     ...(tools !== undefined ? { tools } : {}),
     ...(model !== undefined ? { model: stripControlChars(model) } : {}),
     ...(mode !== undefined ? { permissionMode: mode } : {}),
+    ...(color !== undefined ? { color } : {}),
     source: { kind: scope, path: file }
   }
 }

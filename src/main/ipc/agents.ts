@@ -10,9 +10,10 @@
  *   正在跑的 run 的工具表在中途换掉。
  */
 import { join } from 'node:path'
+import type { AgentDraft } from '../../shared/domain/agent-def'
 import type { AgentListItem } from '../../shared/domain/markdown-resource'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents, type AgentScanInput } from '../kernel/agent/load'
-import { getHost, getWorkspaceEnvironment } from '../runtime'
+import { getAgentDraftGenerator, getHost, getWorkspaceEnvironment } from '../runtime'
 import { store } from '../state/store'
 import { broadcastResourceChanged } from './markdown-resource'
 
@@ -42,6 +43,7 @@ export async function listAgents(req: { workspaceId?: string }): Promise<AgentLi
     ...(a.tools !== undefined ? { tools: [...a.tools] } : {}),
     ...(a.model !== undefined ? { model: a.model } : {}),
     ...(a.permissionMode !== undefined ? { permissionMode: a.permissionMode } : {}),
+    ...(a.color !== undefined ? { color: a.color } : {}),
     enabled: !disabled.has(a.name)
   }))
 }
@@ -56,4 +58,28 @@ export async function agentDiagnostics(
 export function setAgentEnabled(req: { name: string; enabled: boolean }): void {
   store.setAgentEnabled(req.name, req.enabled)
   broadcastResourceChanged('agent')
+}
+
+/**
+ * 「AI 生成」那颗按钮。产出一份**草稿**,由渲染层填进表单等人过目 —— 这里不落盘。
+ *
+ * ★ 模型用设置里的默认模型,弹窗里不给选择器:这是一次辅助请求,再给一个
+ *   模型选择器等于让用户在「我要一个什么样的子代理」之外多做一个无关的决定。
+ *
+ * ★ 失败一律 throw 一句**人话**。和标题生成的「失败就算了」正相反 ——
+ *   用户点了按钮在等,静默失败会变成一个永远转不完的圈。
+ */
+export async function generateAgent(
+  req: { requirement: string; workspaceId?: string }
+): Promise<AgentDraft> {
+  const settings = store.getSettings()
+  if (settings.defaultModel === '') throw new Error('还没配可用模型,先去设置里选一个默认模型')
+  return await getAgentDraftGenerator().generate({
+    requirement: req.requirement,
+    model: settings.defaultModel,
+    ...(settings.defaultModelProviderId === undefined
+      ? {}
+      : { modelProviderId: settings.defaultModelProviderId }),
+    ...(req.workspaceId === undefined ? {} : { workspaceId: req.workspaceId })
+  })
 }

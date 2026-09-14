@@ -42,42 +42,41 @@ export function threadRows(
   let preceding = 'start'
   let precedingAt: number | undefined
   /*
-    ★ **分隔行只落在两行之间,绝不切开一行。**
+    ★ **分隔行就落在锚点上，必要时把一轮切成两行。**
 
-    命中锚点时先压进 `pending`,只在「马上要推一个真正的行」之前、或整段扫完之后
-    才真的入列。这一个约束同时买下三样东西:
+    这里曾经是反过来的 —— 命中锚点先压进一个 `pending`，等到「下一行真正开始」才入列，
+    因此一轮永远不会被切断。那条约束在**一轮里有下一条可见消息**时只是「线晚半轮」，
+    但工具循环里根本没有那个下一条:一整个会话可以是 1 条提问 + 50 条工具回执，
+    它们全部并进同一个 assistant 行，`assistant()` 一直命中复用分支、从不入列，
+    于是线一路挂到末尾那次收尾入列 —— 落在 live 块之后，**钉在整段最底部**，
+    而且要等用户发下一条消息才归位。又因为 `lastTurnIndex` 会跳过分隔行，
+    状态行挂在它前面那个 assistant 行上，观感就是「运行中…」下面压着一条压缩线。
 
-    1. 循环期间 `rows.at(-1)` **永远不可能是分隔行** —— 所以下面 `assistant()` 的
-       合并判断和第「要不要补空回合」那句看到的东西和加这个功能之前一模一样,
-       一轮永远不会被从中间切断。
-    2. 行 key 不受影响:分隔行不动 `preceding`,自己用独立的 `compaction:` 前缀。
-    3. `checkpoints` 为空时 `flush()` 是空操作,产出与改动前**逐字节相同**。
-
-    代价是锚点落在一轮内部时,线会推迟到这一轮结束后才画。这是刻意的:
-    宁可晚半轮,也不接受提交那一瞬行 key 从 `reply:a1` 变回 `reply:u1` —— 那会让
-    整棵子树重新挂载(markdown 重渲、工具组的展开状态丢失、滚动跳一下)。
+    现在命中锚点就直接入列，后续内容另起一个 assistant 行。关键是这**不会**引起
+    当初担心的那种重挂:行 key 取创建那一瞬的 `preceding`，而切开前后两行创建时的
+    `preceding` 必定不同 —— 两次「新建 assistant 行」之间隔着至少一条可见消息，
+    而可见消息一定推进 `preceding`。流式那一行更是从创建到提交都拿同一个
+    `preceding`(工具回执不可见、不推进它)，key 全程不变。有用例钉这一点。
   */
   const anchored = checkpointsByAnchor(checkpoints)
-  const pending: { checkpoint: ContextCheckpoint; foldedCount: number }[] = []
-  const flush = (): void => {
-    for (const item of pending) {
-      rows.push({
-        kind: 'divider', key: `compaction:${item.checkpoint.id}`,
-        checkpoint: item.checkpoint, foldedCount: item.foldedCount
-      })
-    }
-    pending.length = 0
-  }
   const assistant = (): Extract<ThreadRow, { kind: 'assistant' }> => {
     const last = rows.at(-1)
+    // 末尾是分隔行时**必须**新建:复用线之前那一行等于把压缩后的内容塞回线上方。
     if (last?.kind === 'assistant') return last
-    flush()
     const row: Extract<ThreadRow, { kind: 'assistant' }> = {
       kind: 'assistant', key: `reply:${preceding}`, blocks: [],
       ...(precedingAt === undefined ? {} : { startedAt: precedingAt })
     }
     rows.push(row)
     return row
+  }
+  /** 最后一个**回合**行 —— 要不要补空回合看的是它，不是 `rows.at(-1)`。 */
+  const lastTurnRow = (): ThreadRow | undefined => {
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i]
+      if (row !== undefined && row.kind !== 'divider') return row
+    }
+    return undefined
   }
 
   let visible = 0
@@ -92,7 +91,6 @@ export function threadRows(
     const shown = message.internal !== true && !isToolResultOnly(message)
     if (shown) {
       if (message.role === 'user') {
-        flush()
         rows.push({ kind: 'user', key: message.id, message })
       } else {
         const row = assistant()
@@ -117,15 +115,25 @@ export function threadRows(
       visible += 1
     }
 
+    /*
+      ★ 锚点结算要在 `shown` 分支**之后**:锚在一条可见消息上时(手动压缩最常见的
+      形态就是锚在刚发出的那条提问上),线该落在它下面,而不是上面。
+    */
     for (const checkpoint of anchored.get(message.id) ?? []) {
-      // 折叠数在**命中锚点时**结算,而不是 flush 时 —— 否则推迟期间新消费的消息
-      // 会被算进这一刀的范围里。
-      pending.push({ checkpoint, foldedCount: visible - foldedBase })
+      rows.push({
+        kind: 'divider', key: `compaction:${checkpoint.id}`,
+        checkpoint, foldedCount: visible - foldedBase
+      })
       foldedBase = visible
     }
   }
 
-  if (live.length > 0 || rows.at(-1)?.kind !== 'assistant') {
+  /*
+    ★ 判断依据是最后一个**回合**行，不是 `rows.at(-1)`。锚在整段最后一条消息上时
+    (手动压缩)末尾就是分隔行，照旧看 `rows.at(-1)` 会在线**下面**再补一个空回合 ——
+    一条压缩线孤零零地夹在两段之间，下面跟着一个什么都没有的回合。
+  */
+  if (live.length > 0 || lastTurnRow()?.kind !== 'assistant') {
     const row = assistant()
     live.forEach((liveBlock, index) => {
       // The preceding visible message is known before this reply's committed ID.
@@ -136,8 +144,6 @@ export function threadRows(
         cursor: running && index === live.length - 1 && liveBlock.kind === 'text' })
     })
   }
-  // ★ 必须排在 live 块之后:手动压缩锚在最后一条消息上,线该落在整段末尾。
-  flush()
   return rows
 }
 
@@ -187,10 +193,18 @@ export function unanchoredCheckpoints(
  * ★ **要跳过分隔行。** 压缩最常见的锚点就是刚发出的那条提问,线正好落在
  * 提问和回答之间;只看 `rows[index - 1]` 会拿到那条线、返回 undefined,
  * 症状是最新一轮的两个操作**不报错地消失**。
+ *
+ * ★ **还要跳过线上方那个助手行。** 锚点落在一轮内部(工具回执)时,这条线把
+ * 一轮切成了两行,提问在**更上面**。两个助手行之间必定隔着一条线 —— 否则它们
+ * 早就并成一行了 —— 所以「线的上方是助手行」这一个形状足以认出被切开的同一轮,
+ * 不会误跳到上一轮的回答上去。
  */
 export function promptOf(rows: readonly ThreadRow[], index: number): TurnPrompt | undefined {
   let cursor = index - 1
-  while (rows[cursor]?.kind === 'divider') cursor -= 1
+  while (rows[cursor]?.kind === 'divider') {
+    cursor -= 1
+    if (rows[cursor]?.kind === 'assistant') cursor -= 1
+  }
   const previous = rows[cursor]
   if (previous?.kind !== 'user') return undefined
   return { id: previous.message.id, text: visibleText(previous.message).trim() }

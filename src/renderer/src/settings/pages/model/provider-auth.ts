@@ -7,7 +7,11 @@
  */
 import type { OAuthIssuerId } from '../../../../../shared/domain/oauth-issuer'
 import { findPreset } from '../../../../../shared/domain/presets'
-import type { CredentialInfo, UpstreamProtocol, UpstreamProvider } from '../../../../../shared/domain/provider'
+import type {
+  CredentialInfo,
+  UpstreamProtocol,
+  UpstreamProvider
+} from '../../../../../shared/domain/provider'
 import { baseUrlForProtocol } from './provider-edit'
 
 /**
@@ -30,7 +34,17 @@ export type OAuthView =
    * 得用户自己把地址栏里那条粘回来。少了它,粘贴形态的登录在界面上是一个
    * **永远转下去的 spinner**,而用户手里正拿着那条回调地址无处可放。
    */
-  | { state: 'signing-in'; phase: 'opening' | 'waiting' | 'exchanging'; needsPaste: boolean }
+  | {
+      state: 'signing-in'
+      phase: 'opening' | 'waiting' | 'exchanging'
+      needsPaste: boolean
+      /**
+       * ★ 设备码流程(Kimi)的配对码,同样只在 `waiting` 时有值。`null` = 这次登录
+       * 不是设备码那条。没有它,设备码登录在界面上就是一个永远转下去的 spinner ——
+       * 而真正要用户做的事(去浏览器输这一串)只存在于这个字段里。
+       */
+      device: { userCode: string; verificationUri: string } | null
+    }
   | { state: 'signed-in'; email: string | null; plan: string | null }
   | { state: 'expired'; email: string | null; reason: 'expired' | 'revoked' }
 
@@ -67,7 +81,9 @@ export function providerAuthMode(providerId: string): ProviderAuthMode {
 const ISSUER_LABELS: Readonly<Record<OAuthIssuerId, string>> = {
   chatgpt: 'ChatGPT',
   'zcode-zai': 'Z.AI',
-  'zcode-bigmodel': '智谱'
+  'zcode-bigmodel': '智谱',
+  'kimi-code': 'Kimi',
+  'grok-build': 'Grok'
 }
 
 export function oauthIssuerLabel(issuer: OAuthIssuerId): string {
@@ -89,10 +105,30 @@ export function providerOAuthIssuer(providerId: string): OAuthIssuerId | null {
  */
 export function oauthView(
   info: CredentialInfo | null,
-  flow: { phase: OAuthPhase; needsPastedCode?: boolean } | null
+  flow: {
+    phase: OAuthPhase
+    needsPastedCode?: boolean
+    userCode?: string
+    verificationUri?: string
+  } | null
 ): OAuthView {
-  if (flow !== null && (flow.phase === 'opening' || flow.phase === 'waiting' || flow.phase === 'exchanging')) {
-    return { state: 'signing-in', phase: flow.phase, needsPaste: flow.needsPastedCode === true }
+  if (
+    flow !== null &&
+    (flow.phase === 'opening' || flow.phase === 'waiting' || flow.phase === 'exchanging')
+  ) {
+    return {
+      state: 'signing-in',
+      phase: flow.phase,
+      needsPaste: flow.needsPastedCode === true,
+      /*
+        ★ 两个字段是**同进同出**的(主进程那边一起摊平出来),所以这里只要有一个
+        缺就整个判成「不是设备码流程」—— 半个配对码画不出可用的界面。
+      */
+      device:
+        flow.userCode === undefined || flow.verificationUri === undefined
+          ? null
+          : { userCode: flow.userCode, verificationUri: flow.verificationUri }
+    }
   }
 
   const auth = info?.auth
@@ -141,7 +177,22 @@ const SIGN_IN_PROTOCOL: Readonly<Record<OAuthIssuerId, UpstreamProtocol | null>>
   /* ★ 已实测:业务 JWT 走 `api.z.ai/api/anthropic` */
   'zcode-zai': 'anthropic',
   /* ★★ **不挪**。理由见上面那段;换回 anthropic 前先拿到「这个账号加白了」的证据 */
-  'zcode-bigmodel': null
+  'zcode-bigmodel': null,
+  /*
+    ★★ Kimi 切到 openai-chat —— 目标 base 是 `https://api.kimi.com/coding/v1`,
+    **与 kimi-code 自己的 `DEFAULT_KIMI_CODE_BASE_URL` 逐字节相同**。
+    `kimi-coding` 的 `endpoints[0]` 是 anthropic 端点,而设备码换来的令牌只在
+    kimi-code 那条路上被实测过;不挪的表现是登录成功、第一条消息走一条没人验过的路。
+  */
+  'kimi-code': 'openai-chat',
+  /*
+    ★★ **不挪**,理由和 chatgpt 那条一样:`grok-build` 是纯 OAuth 预设,
+    `endpoints[0]` 本来就是已实测的那条(`cli-chat-proxy.grok.com/v1`,
+    openai-responses),这里给 null 与今天等价。
+    ★ 写成 `'openai-responses'` 同样能跑,但那等于多一处将来会和预设分叉的事实;
+    分叉之后的表现是登录成功、第一条消息打到一条没人验过的路上。
+  */
+  'grok-build': null
 }
 
 /**

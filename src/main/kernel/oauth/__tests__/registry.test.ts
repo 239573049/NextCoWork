@@ -7,15 +7,11 @@
  */
 import { describe, expect, it } from 'vitest'
 import { OAUTH_ISSUER_IDS } from '../../../../shared/domain/oauth-issuer'
-import { OAUTH_SPECS, oauthSpecOf, redirectUriOf, type OAuthProviderSpec } from '../registry'
-
-function withRedirect(redirect: OAuthProviderSpec['redirect']): OAuthProviderSpec {
-  return { ...oauthSpecOf('chatgpt'), redirect }
-}
+import { OAUTH_SPECS, oauthSpecOf, redirectUriOf, type OAuthRedirect } from '../registry'
 
 describe('redirectUriOf · host', () => {
   it('不写 host 时是 localhost —— 这是加 host 字段之前的行为，不能变', () => {
-    expect(redirectUriOf(withRedirect({ kind: 'loopback-fixed', port: 1455, path: '/auth/callback' }))).toBe(
+    expect(redirectUriOf({ kind: 'loopback-fixed', port: 1455, path: '/auth/callback' })).toBe(
       'http://localhost:1455/auth/callback'
     )
   })
@@ -27,17 +23,21 @@ describe('redirectUriOf · host', () => {
       拼错的表现是登录走到最后一步失败,且错误信息里不会出现「redirect_uri」。
     */
     expect(
-      redirectUriOf(withRedirect({ kind: 'loopback-fixed', port: 9999, path: '/callback', host: '127.0.0.1' }))
+      redirectUriOf({ kind: 'loopback-fixed', port: 9999, path: '/callback', host: '127.0.0.1' })
     ).toBe('http://127.0.0.1:9999/callback')
   })
 
   it('临时端口用 bind 完的那个，host 一样跟着走', () => {
-    const spec = withRedirect({ kind: 'loopback-ephemeral', path: '/callback', host: '127.0.0.1' })
-    expect(redirectUriOf(spec, 54321)).toBe('http://127.0.0.1:54321/callback')
+    const redirect: OAuthRedirect = {
+      kind: 'loopback-ephemeral',
+      path: '/callback',
+      host: '127.0.0.1'
+    }
+    expect(redirectUriOf(redirect, 54321)).toBe('http://127.0.0.1:54321/callback')
   })
 
   it('手动粘贴那种原样返回（自定义 scheme，拼不出端口）', () => {
-    expect(redirectUriOf(withRedirect({ kind: 'manual-paste', redirectUri: 'zcode://oauth/callback' }))).toBe(
+    expect(redirectUriOf({ kind: 'manual-paste', redirectUri: 'zcode://oauth/callback' })).toBe(
       'zcode://oauth/callback'
     )
   })
@@ -53,9 +53,31 @@ describe('OAUTH_SPECS', () => {
     expect(oauthSpecOf(issuer).id).toBe(issuer)
   })
 
-  it('★ 每家都给得出一个非空的 redirect_uri', () => {
+  it('★ 每家授权码流程都给得出一个非空的 redirect_uri', () => {
     for (const issuer of OAUTH_ISSUER_IDS) {
-      expect(redirectUriOf(OAUTH_SPECS[issuer], 1), issuer).not.toBe('')
+      const grant = OAUTH_SPECS[issuer].grant
+      /*
+        ★ 设备码那条**没有 redirect_uri**,不是「拼不出来」而是这个概念在
+        RFC 8628 里根本不存在(见 `registry.ts` 的 `OAuthGrant`)。跳过它,
+        而不是给它编一个空串去满足断言。
+      */
+      if (grant.kind !== 'authorization-code') continue
+      expect(redirectUriOf(grant.redirect, 1), issuer).not.toBe('')
+    }
+  })
+
+  it('★★ 每家的 grant 都得是流程认识的那两种之一', () => {
+    /*
+      加第三种授权方式时,`flow.ts` 的 switch 会在编译期报错 —— 但那张表里
+      少填一家的 `grant` 是填不出来的(类型必填)。这条断言守的是另一件事:
+      两种 grant 各自的必填端点**不能是空串**,而空串在类型上完全合法。
+    */
+    for (const issuer of OAUTH_ISSUER_IDS) {
+      const grant = OAUTH_SPECS[issuer].grant
+      const endpoint =
+        grant.kind === 'authorization-code' ? grant.authorizeUrl : grant.deviceAuthorizationUrl
+      expect(endpoint, issuer).not.toBe('')
+      expect(() => new URL(endpoint), issuer).not.toThrow()
     }
   })
 })

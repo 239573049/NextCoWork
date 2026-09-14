@@ -14,6 +14,7 @@ import {
   OAuthAbandonedError,
   OAuthFailedError,
   runOAuthFlow,
+  type OAuthDeviceHint,
   type OAuthPhase
 } from '../kernel/oauth/flow'
 import { oauthSpecOf, type OAuthProviderSpec } from '../kernel/oauth/registry'
@@ -59,13 +60,21 @@ function resolveSpec(providerId: string): { spec: OAuthProviderSpec; credentialR
 function emitPhase(
   providerId: string,
   phase: OAuthPhase,
-  extra: { message?: string; needsPastedCode?: boolean } = {}
+  extra: { message?: string; needsPastedCode?: boolean; device?: OAuthDeviceHint } = {}
 ): void {
   windows.emitToAll('provider:authProgress', {
     providerId,
     phase,
     ...(extra.message === undefined ? {} : { message: extra.message }),
-    ...(extra.needsPastedCode === true ? { needsPastedCode: true } : {})
+    ...(extra.needsPastedCode === true ? { needsPastedCode: true } : {}),
+    /*
+      ★ 配对码只在设备码流程的 `waiting` 上有值。摊平成两个可选字段而不是嵌一层
+      对象,是因为 IPC 事件的 schema 是逐字段声明的(见 `shared/ipc/contract.ts`),
+      嵌套对象要多一套校验,而这里只有两个字符串。
+    */
+    ...(extra.device === undefined
+      ? {}
+      : { userCode: extra.device.userCode, verificationUri: extra.device.verificationUri })
   })
 }
 
@@ -90,10 +99,12 @@ function translate(err: unknown): IpcError {
     )
   }
   if (err instanceof OAuthAbandonedError) {
-    return new IpcError(
-      'unknown',
-      err.kind === 'timeout' ? '授权超时（5 分钟），请重试' : '已取消登录'
-    )
+    /*
+      ★ 这句话里**不能写死时长**。粘贴那条是 5 分钟、回环那条也是 5 分钟,而设备码
+      那条的时限由上游给(Kimi 是 30 分钟)—— 写死一个数字的表现是用户等了半小时
+      看到一句「授权超时（5 分钟）」,一句自相矛盾的话。
+    */
+    return new IpcError('unknown', err.kind === 'timeout' ? '授权超时，请重试' : '已取消登录')
   }
   if (err instanceof OAuthFailedError) return new IpcError('auth', err.message)
   return new IpcError('unknown', err instanceof Error ? err.message : String(err))
@@ -121,13 +132,18 @@ export async function startOAuth(providerId: string): Promise<CredentialInfo> {
       */
       openBrowser: (url) => shell.openExternal(url),
       /*
-        ★ 「这次要不要粘」是从 `spec.redirect.kind` 现算的,不是渲染层猜的。
+        ★ 「这次要不要粘」是从 `spec.grant` 现算的,不是渲染层猜的。
         渲染层拿它决定 `waiting` 阶段画输入框还是画 spinner —— 猜错的表现是
         用户对着一个永远转下去的圈,而他手里正拿着那条回调地址无处可放。
+
+        ★ 设备码那条的 `waiting` 带着配对码一起过来(第二个参数),原样转发。
       */
-      onPhase: (phase) =>
+      onPhase: (phase, device) =>
         emitPhase(providerId, phase, {
-          needsPastedCode: spec.redirect.kind === 'manual-paste'
+          needsPastedCode:
+            spec.grant.kind === 'authorization-code' &&
+            spec.grant.redirect.kind === 'manual-paste',
+          ...(device === undefined ? {} : { device })
         }),
       signal: abort.signal,
       awaitPastedCode: () =>

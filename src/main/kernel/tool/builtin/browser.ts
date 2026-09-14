@@ -12,10 +12,23 @@ import { browserManager } from '../../../browser/manager'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
 import { resolvedAddressRisk, ssrfRisk } from './ssrf'
+import { WEB_LIMITS } from './web'
 
 const MAX_SNAPSHOT_CHARS = 80_000
 const MAX_SNAPSHOT_BYTES = 1_000_000
 const MAX_REDIRECTS = 5
+/**
+ * 取页的墙钟上限。
+ *
+ * ★ 直接借 `WebFetch` 的那一个,不另起一个数 —— 两个工具做的是同一件事
+ * (跟着重定向去读一个公网页面),用户没有理由在这里遇到另一套忍耐度;
+ * 更实际的是:同一件事两个常量,调的人只会记得改一个。
+ *
+ * 之前这条链路**一个超时都没有**:`host.fetch` / `host.browserFetch` 和
+ * `readPageText` 的 `reader.read()` 循环都只收了 signal。一个连上了却不发
+ * 响应体的服务器,能把整个 run 永久挂住 —— 而隔壁 `web.ts` 一直是有闸的。
+ */
+const FETCH_TIMEOUT_MS = WEB_LIMITS.FETCH_TIMEOUT_MS
 
 function workspaceIdOf(ctx: { workspaceId?: string; workspaceRoot: string }): string {
   // 生产运行一定带 workspaceId；空值只为无头工具测试提供稳定的拒绝信息。
@@ -200,11 +213,29 @@ const browserSnapshotTool: ToolRegistration = defineTool({
     const url = new URL(tab.url)
     const risk = ssrfRisk(url)
     if (risk !== null) return toolFail(risk)
+
+    /*
+      ★★ 整段取页共用一个闸 —— 抄的是 `web.ts:190-197` 那段,连形状都一样。
+
+      为什么闸要罩住 `readPageText` 而不只是那次 fetch:响应头先回来、响应体
+      再也不来,是卡死最常见的形状。而 `reader.read()` 本身不收 signal ——
+      能打断它的唯一办法,是 abort **那次 fetch 的 signal**(流会随之 error)。
+      所以这里传下去的是 `timer.signal`,不是 `ctx.signal`。
+    */
+    const timer = new AbortController()
+    const onAbort = (): void => {
+      timer.abort()
+    }
+    ctx.signal.addEventListener('abort', onAbort, { once: true })
+    const t = setTimeout(() => {
+      timer.abort()
+    }, FETCH_TIMEOUT_MS)
+
     try {
       const fetched = await fetchPublicPage(
         url,
         browserPartition(tab.workspaceId, tab.profileId),
-        ctx
+        { host: ctx.host, signal: timer.signal }
       )
       const response = fetched.response
       if (!response.ok) return toolFail(`Browser page returned HTTP ${String(response.status)}.`)
@@ -225,7 +256,17 @@ const browserSnapshotTool: ToolRegistration = defineTool({
       } catch {
         // The user may close the tab while a background snapshot is in flight.
       }
+      // ★ 中断原样抛出,由 `defineTool` 收 —— 伪装成工具失败的话模型会接着往下跑
+      if (ctx.signal.aborted) throw err
+      if (timer.signal.aborted) {
+        return toolFail(
+          `Reading ${url.toString()} timed out after ${String(FETCH_TIMEOUT_MS / 1000)} seconds.`
+        )
+      }
       return toolFail(`Unable to read browser page: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      clearTimeout(t)
+      ctx.signal.removeEventListener('abort', onAbort)
     }
   }
 })

@@ -43,6 +43,8 @@ const EXPECTED: Readonly<Record<string, Brand | null>> = {
   // ★ 名字里那个「(OpenAI 兼容)」说的是端点形状,不是这家公司
   'gemini-openai': 'gemini',
   xai: 'xai',
+  // ★ Grok Build 是同一家的订阅通道，图标仍是 xAI 那个（同 codex ↔ openai）
+  'grok-build': 'xai',
   mistral: 'mistral',
   cohere: 'cohere',
 

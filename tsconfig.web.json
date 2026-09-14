@@ -7,6 +7,15 @@
     "src/preload/*.d.ts"
   ],
   "compilerOptions": {
+    /*
+      ★ **产物必须落在源码树外。** 这两个工程都是 composite,不能关 emit;
+      而不设 outDir 时 `tsc -p` 会把 .js/.d.ts 直接写在每个 .ts 旁边 ——
+      Vite 的默认 resolve.extensions 又把 .js 排在 .ts 前面,于是那些产物
+      **反过来盖住源码**:dev / build / vitest 加载的全是上一次 emit 的旧版本,
+      表现为「源码改了但界面和测试纹丝不动」,而且全程零报错。
+      npm script 里那句 `--noEmit` 只护得住走 script 的人,护不住手敲 `tsc -p` 的。
+    */
+    "outDir": ".tscache/web",
     "composite": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,

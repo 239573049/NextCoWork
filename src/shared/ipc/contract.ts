@@ -14,7 +14,7 @@
 import type { AgentError } from '../agent/error'
 import type { AgentEvent, RunSnapshot } from '../agent/event'
 import type { AgentMessage } from '../agent/message'
-import type { ContextCheckpoint } from '../agent/context-management'
+import type { ContextCheckpoint, ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
 import type { RunRequest } from '../agent/run-request'
@@ -47,6 +47,7 @@ import type { ImageTheme, ThemeProfile } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo, TerminalPreparation } from '../domain/terminal'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { CommandDefinition } from '../domain/command'
+import type { AgentDraft } from '../domain/agent-def'
 import type { HookDefinition, HookEvent, HookListItem, HookRunReport, HookScope } from '../domain/hook'
 import type {
   AgentListItem,
@@ -95,6 +96,8 @@ import type {
   ImportSyncPatch
 } from '../domain/import'
 import type {
+  UsageActivityStats,
+  UsageDailyBucket,
   UsageDimensionStat,
   UsageRequestLogsPage,
   UsageRequestLogsQuery,
@@ -185,6 +188,24 @@ export interface ThemeImageMetadata {
 // ═══════════════════════════════════════════════════════════════
 // 二、渲染 → 主,要返回值(invoke)
 // ═══════════════════════════════════════════════════════════════
+
+/**
+ * `context:preview` 的入参。★ 字段一律从 `RunRequest` 上 `Pick` 下来,不重新声明 ——
+ * 预览装配的必须和真正发送时装配的是**同一组输入**,各写一份的话哪天 `RunRequest`
+ * 多一个影响提示词的开关,预览会安静地继续按旧口径算。
+ */
+export type ContextPreviewRequest = Pick<
+  RunRequest,
+  | 'sessionId'
+  | 'workspaceId'
+  | 'model'
+  | 'modelProviderId'
+  | 'mode'
+  | 'thinking'
+  | 'permissionMode'
+  | 'webSearch'
+  | 'maxContext'
+>
 
 export interface IpcInvokeMap {
   // ── 应用 ──
@@ -397,6 +418,21 @@ export interface IpcInvokeMap {
     req: { sessionId: string }
     res: { checkpoint: ContextCheckpoint; inputTokens: number }
   }
+  /**
+   * 还没发过请求时的占用归因 —— 装配一次但**不发出去**。
+   *
+   * ★ **只读进程里已经有的那份**:不重扫技能目录、不去连 MCP、不租工作区环境。
+   * 那三件事各自都会动全局单例或者起子进程,而这条通道会在用户每次点开上下文
+   * 菜单时被调到 —— 一个只为了画几个百分比的副作用是不能接受的。代价是诚实的:
+   * MCP 还没连上时那一档就是 0,连上之后再点开才有数(见 `previewContext`)。
+   *
+   * 会话里已经有历史时 `messages` 那一档是**真的**(从库里读),所以这条通道
+   * 对「重开一个老会话」同样有用,不只是给空会话的。
+   */
+  'context:preview': {
+    req: ContextPreviewRequest
+    res: ContextPreview | undefined
+  }
 
   // ── Agent ──
   /** ★ runId 由调用方传入,不由这里返回(方案 §3 规则 2) */
@@ -528,6 +564,12 @@ export interface IpcInvokeMap {
   'agents:list': { req: { workspaceId?: string }; res: AgentListItem[] }
   'agents:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
   'agents:setEnabled': { req: { name: string; enabled: boolean }; res: void }
+  /*
+    「AI 生成一个子代理」。产出**草稿**,不落盘 —— 生成完先填进表单等人过目,
+    要存还得走 `resource:save`。直接写文件的话,一次误点就在用户的 agents 目录里
+    留下一个他没看过的文件,而这些文件是会进每一轮系统提示词的。
+  */
+  'agents:generate': { req: { requirement: string; workspaceId?: string }; res: AgentDraft }
 
   /* 命令和子代理共用这三个 —— 磁盘上它们是同构的，见 shared/domain/markdown-resource.ts。 */
   'resource:get': {
@@ -622,6 +664,13 @@ export interface IpcInvokeMap {
   'usage:getRequestLogs': { req: UsageRequestLogsQuery; res: UsageRequestLogsPage }
   'usage:getProviderStats': { req: UsageWindow; res: UsageDimensionStat[] }
   'usage:getModelStats': { req: UsageWindow; res: UsageDimensionStat[] }
+  /**
+   * 概览区的两条。★ handler 会先跑一次汇总刷新再查 —— 所以它们比上面四条慢,
+   * 别放进任何每秒轮询的路径。
+   */
+  'usage:getDailySeries': { req: UsageWindow; res: UsageDailyBucket[] }
+  /** 不带时间窗:「最长连续天数」按定义就是问全部历史。 */
+  'usage:getActivityStats': { req: void; res: UsageActivityStats }
 
   // ── 本地网关 ──
   'gateway:getStatus': { req: void; res: GatewayStatus }
@@ -804,6 +853,17 @@ export interface IpcEventMap {
      * 不走 preset。
      */
     needsPastedCode?: boolean
+    /**
+     * 设备码流程(RFC 8628,Kimi 走的这条)的**配对码**,只在 `waiting` 上有值。
+     *
+     * ★★ 没有它,设备码登录在界面上就是一个永远转圈的 spinner:真正要用户做的事
+     * (去浏览器里输这一串)**只存在于这个字段里**,厂商的授权页不会替我们告诉他。
+     *
+     * ★ 和 `needsPastedCode` 一样,它描述的是**这一次流程**,不是供应商的静态属性。
+     */
+    userCode?: string
+    /** 输配对码的页面地址,给「浏览器没自动弹出来」时手动访问用。跟 `userCode` 同进同出 */
+    verificationUri?: string
   }
   /**
    * 某家的登录态变了。
@@ -983,6 +1043,7 @@ export const INVOKE_CHANNELS = {
   'agents:list': 1,
   'agents:diagnostics': 1,
   'agents:setEnabled': 1,
+  'agents:generate': 1,
   'resource:get': 1,
   'resource:save': 1,
   'resource:delete': 1,
@@ -1015,6 +1076,8 @@ export const INVOKE_CHANNELS = {
   'usage:getRequestLogs': 1,
   'usage:getProviderStats': 1,
   'usage:getModelStats': 1,
+  'usage:getDailySeries': 1,
+  'usage:getActivityStats': 1,
   'gateway:getStatus': 1,
   'gateway:setEnabled': 1,
   'gateway:resetHealth': 1,
@@ -1049,6 +1112,7 @@ export const INVOKE_CHANNELS = {
   , 'context:list': 1
   , 'context:updateCheckpoint': 1
   , 'context:compact': 1
+  , 'context:preview': 1
   , 'plans:list': 1
   , 'plans:get': 1
   , 'plans:update': 1

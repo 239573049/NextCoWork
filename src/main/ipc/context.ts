@@ -1,7 +1,14 @@
-import type { ContextCheckpoint } from '../../shared/agent/context-management'
+import type { ContextCheckpoint, ContextPreview } from '../../shared/agent/context-management'
+import { effectiveContextWindow } from '../../shared/agent/context-management'
+import { normalizeEnvironmentRef } from '../../shared/domain/environment'
+import type { ContextPreviewRequest } from '../../shared/ipc/contract'
 import { userMessage } from '../../shared/agent/message'
-import { compactMessages, estimateMessages, withSummary } from '../kernel/context-assembler'
-import { getHost, getRouter } from '../runtime'
+import { agentRegistry } from '../kernel/agent/registry'
+import { skillRegistry } from '../kernel/skill/registry'
+import { taskTool } from '../kernel/tool/builtin/task'
+import { ToolRegistry } from '../kernel/tool/registry'
+import { assemble, compactMessages, estimateMessages, withSummary } from '../kernel/context-assembler'
+import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
 
 export function listContextCheckpoints(req: { sessionId: string }): ContextCheckpoint[] {
@@ -101,4 +108,104 @@ export async function compactContext(req: { sessionId: string }): Promise<{
   }
   store.upsertContextCheckpoint(checkpoint)
   return { checkpoint, inputTokens: checkpoint.inputTokensAfter ?? 0 }
+}
+
+/**
+ * 还没发过请求时的占用归因 —— 把这一轮**会**发出去的东西装配一遍,但不发。
+ *
+ * ★ **一个副作用都不留。** 它读的全是进程里已经有的那份:全局工具注册表、
+ * 技能注册表当前的内容、这个工作区**已经连上**的 MCP。三件真正会动东西的事
+ * 一件都不做 —— 不 `refreshSkills`(那会 `replaceAll` 一个进程内单例,父 run
+ * 跑到一半时把它换掉),不 `prepareWorkspaceMcp`(那会去连服务器),不租环境。
+ * 理由很朴素:这条通道是用户点开一个菜单时被调的,而一个菜单不该拉起子进程。
+ *
+ * ★ 代价说清楚:**MCP 还没连上时那一档就是 0**,等它连上再点开才有数。
+ * 这比「为了画个百分比先把所有服务器拉起来」要诚实,也比「装作没有这一档」要有用。
+ *
+ * ★ `messages` 那一档不是估的空值,是**从库里读的真历史** —— 所以重开一个聊过
+ * 很久的老会话,这张卡当场就是对的,不必再发一条消息去把它唤醒。
+ */
+export async function previewContext(req: ContextPreviewRequest): Promise<ContextPreview | undefined> {
+  const workspace = store.getWorkspace(req.workspaceId)
+  if (workspace === undefined) return undefined
+
+  /*
+    ★ 复刻 `runtime.ts` 的 `snapshotRunTools`,但**不要求一个环境**。
+    远程与否只影响两件事(去掉 MCP/浏览器、换掉 Bash 的描述),而前者从
+    工作区的环境引用就能判断,后者只是几十个 token 的措辞差 —— 为它去租一条
+    SSH 连接是本末倒置。
+  */
+  const remote = normalizeEnvironmentRef(workspace.environment).kind === 'connection'
+  const registry = new ToolRegistry()
+  for (const tool of getTools().snapshot()) {
+    if (remote && (tool.source.kind === 'mcp' || tool.internalId.startsWith('browser_'))) continue
+    registry.register(tool)
+  }
+  registry.register(taskTool(agentRegistry().list()))
+  if (!remote) {
+    for (const tool of connectedWorkspaceMcpTools(req.workspaceId)?.snapshot() ?? []) registry.register(tool)
+  }
+
+  const disabled = new Set(store.getDisabledSkillIds())
+  const skills = skillRegistry().list().filter((s) => !disabled.has(s.id) && !s.unavailableReason)
+
+  /*
+    AGENTS.md 算进去 —— `loadInstructions` 不需要一个已经租好的环境,本地工作区
+    就是两次文件读。★ 读不到不算失败:远程工作区没连上时它会抛,而「少一档
+    说明文字」远远好过「整张卡打不开」。
+  */
+  let projectInstructions = ''
+  try { projectInstructions = await loadInstructions(req.workspaceId) } catch { projectInstructions = '' }
+
+  const alias = getRouter().resolveModel(req.model, req.modelProviderId)
+  const tools = registry.snapshot({
+    mode: req.mode,
+    readOnlyOnly: req.mode === 'plan',
+    network: req.webSearch
+  }).map(({ execute: _execute, ...info }) => info)
+
+  /*
+    ★ 空会话必须塞一条**占位的空用户消息**,否则 AGENTS.md 根本不会被算进去:
+    `decorate()` 把说明块注入的是「数组里第一条 user 消息」,一条都没有时它
+    `return messages` 直接走人(见那个 `i === -1`)。于是一个写了两千字 AGENTS.md
+    的仓库,在预览里那一档是 0 —— 而真发送时它一定在,因为那时至少有用户这一句。
+    预览要回答的是「我下一条发出去会占多少」,所以把那条消息先摆上是**更准**不是更假;
+    它自己只贡献一份消息开销(几个 token),落在 `messages` 档里,也是真花的。
+  */
+  const history = req.sessionId === '' ? [] : store.getHistory(req.sessionId)
+  const messages = history.length > 0
+    ? history
+    : [userMessage('preview', [{ type: 'text', text: '' }], 0)]
+
+  const { usage } = assemble({
+    messages,
+    tools,
+    skills,
+    ...(store.getSettings().personalization !== undefined
+      ? { personalization: store.getSettings().personalization }
+      : {}),
+    mode: req.mode,
+    thinking: req.thinking,
+    model: req.model,
+    ...(req.modelProviderId === undefined ? {} : { modelProviderId: req.modelProviderId }),
+    workspaceRoot: workspace.rootPath,
+    now: getHost().clock.now(),
+    platform: getHost().platform,
+    permissionMode: req.permissionMode,
+    webSearch: req.webSearch,
+    contextWindow: effectiveContextWindow(alias?.contextWindow, req.maxContext === true),
+    maxOutputTokens: alias?.maxOutputTokens ?? 8192,
+    supportsThinking: alias?.capabilities.thinking ?? false,
+    ...(alias?.reasoningEfforts !== undefined ? { reasoningEfforts: alias.reasoningEfforts } : {}),
+    ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {}),
+    /*
+      ★ 不给 git 上下文 —— 它要 `environment.spawn`,而那是这个函数唯一拒绝付的代价。
+      少掉的是 reminder 里几行分支名和状态,落在 `instructions` 那一档里,
+      量级上可以忽略;真发送时它会回来。
+      `todoToolName` 同理不给:空会话里推不出 todo,老会话里它只是个名字。
+    */
+    ...(projectInstructions === '' ? {} : { reminder: { projectInstructions } })
+  })
+
+  return { used: usage.used, window: usage.window, segments: usage.segments ?? [] }
 }

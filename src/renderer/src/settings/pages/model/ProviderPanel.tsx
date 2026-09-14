@@ -3,6 +3,7 @@ import {
   Brain,
   Check,
   CloudDownload,
+  Copy,
   ExternalLink,
   GripVertical,
   Loader2,
@@ -190,6 +191,8 @@ export function ProviderPanel({
   const [authFlow, setAuthFlow] = useState<{
     phase: OAuthPhase;
     needsPastedCode?: boolean;
+    userCode?: string;
+    verificationUri?: string;
   } | null>(null);
   const [cacheTtl, setCacheTtl] = useState<AnthropicCacheTtl>(() =>
     anthropicCacheTtlOf(p),
@@ -260,6 +263,11 @@ export function ProviderPanel({
           ? {
               phase: e.phase,
               ...(e.needsPastedCode === true ? { needsPastedCode: true } : {}),
+              /* ★ 设备码的配对码只在 `waiting` 上有值，原样透传给 `oauthView` */
+              ...(e.userCode === undefined ? {} : { userCode: e.userCode }),
+              ...(e.verificationUri === undefined
+                ? {}
+                : { verificationUri: e.verificationUri }),
             }
           : null,
       );
@@ -1159,6 +1167,52 @@ function ProviderAuthField({
   });
 
   if (view.state === "signing-in") {
+    /*
+      ★★ **设备码流程(Kimi):真正要用户做的事只存在于这个配对码里。**
+      没有这个分支时它在界面上和别的登录一样是个转圈的 spinner —— 而浏览器那边
+      正停在一个「请输入配对码」的页面上,用户手里没有码。
+      配对码摆在最显眼的位置,旁边给一颗复制按钮:那串码是拿来**手输进浏览器**的,
+      而人手抄一串带连字符的字符是这条流程最容易出错的一步。
+    */
+    if (view.phase === "waiting" && view.device !== null) {
+      const device = view.device;
+      return (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border bg-surface-field px-2.5">
+              <Loader2 size={12} className="shrink-0 animate-spin text-fg-muted" />
+              <span className="min-w-0 shrink-0 text-[13px] text-fg-muted">
+                {t("provider.authDeviceCodeLabel")}
+              </span>
+              {/* ★ 等宽 + 加宽字距:这串码是给人照着念、照着敲的 */}
+              <span className="min-w-0 flex-1 truncate font-mono text-[14px] font-semibold tracking-[0.12em] text-fg">
+                {device.userCode}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              icon={<Copy size={12} />}
+              onClick={() => {
+                /*
+                  ★ 复制失败**不报错**:剪贴板权限被拒时码仍然明晃晃地显示在
+                  左边,用户照着敲就行 —— 为此弹一条红色错误只会让他以为登录挂了。
+                */
+                void navigator.clipboard?.writeText(device.userCode).catch(() => undefined);
+              }}
+            >
+              {t("common.copy")}
+            </Button>
+            <Button size="sm" onClick={onCancel}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+          <p className="text-[11.5px] leading-[1.6] text-fg-faint">
+            {t("provider.authDeviceHint", { url: device.verificationUri })}
+          </p>
+        </div>
+      );
+    }
+
     /*
       ★★ **这条流程要用户自己把回调地址粘回来。**
       没有这个分支时,粘贴形态的登录在界面上是一个转到超时为止的 spinner ——

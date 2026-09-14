@@ -38,7 +38,9 @@ describe('ZCODE_ZAI_OAUTH · 授权请求的形状', () => {
   })
 
   it('★★ redirect_uri 是 127.0.0.1 而不是 localhost（注册值逐字节相等）', () => {
-    expect(ZCODE_ZAI_OAUTH.redirect).toEqual({
+    expect(
+      ZCODE_ZAI_OAUTH.grant.kind === 'authorization-code' ? ZCODE_ZAI_OAUTH.grant.redirect : null
+    ).toEqual({
       kind: 'loopback-fixed',
       port: 9999,
       path: '/callback',
@@ -217,7 +219,11 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
       `bigmodel.cn` 对 redirect 只有一条 `/^(javascript|data|vbscript):/i` 黑名单，
       没有白名单，所以回环地址是合法的。推导见 `zcode-bigmodel.ts` 文件头。
     */
-    expect(ZCODE_BIGMODEL_OAUTH.redirect).toEqual({
+    expect(
+      ZCODE_BIGMODEL_OAUTH.grant.kind === 'authorization-code'
+        ? ZCODE_BIGMODEL_OAUTH.grant.redirect
+        : null
+    ).toEqual({
       kind: 'loopback-ephemeral',
       path: '/callback',
       host: '127.0.0.1'

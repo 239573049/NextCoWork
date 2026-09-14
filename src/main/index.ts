@@ -14,6 +14,7 @@ import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownClientAuth, shutdownRuns, shutdownTerminals } from './ipc'
 import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
+import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/rollup-task'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
@@ -24,7 +25,7 @@ import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
 import { titleBarOptions, watchMaximized } from './window/title-bar'
-import { setSessionWindowOpener } from './ipc/app'
+import { applyThemePreference, resolveTheme, setSessionWindowOpener } from './ipc/app'
 import { updateService } from './update/update-service'
 import { reconcileScheduler, startScheduler, stopScheduler } from './scheduled/scheduler'
 
@@ -50,26 +51,51 @@ let isQuitting = false
 let shutdownComplete = false
 
 /**
- * 数据根 —— userData、SQLite 主库、附件、skills/agents 文件树全部从这里派生。
+ * 命令行显式给过 `--user-data-dir` 吗?
  *
- * 开发时是 `<cwd>/.next-cowork`:项目级携带、备份方便,仓库里的探针也都假设在这儿。
+ * ★ 这是**唯一**的数据根逃生口,也是 `scripts/` 下那十来个 Electron 探针赖以
+ * 隔离的机制。以前它们靠 mkdtemp 出来的 cwd 隔离数据(数据根从 cwd 派生),
+ * 数据根改成主目录之后那条路断了 —— 不认这个开关的话,每一次跑探针都会直接
+ * 读写用户真实的 `~/.next-cowork`。
  *
- * ★ 打包后**必须换成系统的 per-user 目录**。发行版的 `process.cwd()` 是没有意义的:
- * Windows 从快捷方式启动时它是**安装目录**,数据会在卸载/升级时被一起清掉;而从
- * 别的目录双击 exe,又会凭空开出一个空库 —— 用户看到的是「我的会话全没了」,
- * 而不是任何一条能指向工作目录的线索。
+ * 读 `process.argv` 而不是 `app.commandLine.hasSwitch`:这段代码在 ready 之前
+ * 就要执行,argv 是此刻唯一保证已就绪的来源。
+ */
+const explicitUserDataDir = process.argv.some(
+  (arg) => arg === '--user-data-dir' || arg.startsWith('--user-data-dir=')
+)
+
+/**
+ * setPath 之前的 Electron 默认 userData(`%APPDATA%\NextCoWork` /
+ * `~/Library/Application Support/NextCoWork`)—— 旧版**打包安装**的数据在这儿,
+ * 迁移要从它搬。★ 必须在下面那次 setPath 之前取,取晚了拿到的是新根。
+ */
+const legacyUserDataPath = app.getPath('userData')
+
+/**
+ * 数据根 —— userData、SQLite 主库、附件、settings.json、skills/agents/commands
+ * 文件树全部从这里派生。
  *
- * 打包分支直接用 Electron 默认的 userData(`%APPDATA%\NextCoWork` /
- * `~/Library/Application Support/NextCoWork`),所以那条路径下面就不再 setPath 了。
+ * `~/.next-cowork`,dev 与打包**同一个**。
+ *
+ * ★ 不能从 `process.cwd()` 派生:发行版的 cwd 是没有意义的 —— Windows 从快捷方式
+ * 启动时它是**安装目录**,数据会在卸载/升级时被一起清掉;从别的目录双击 exe
+ * 又会凭空开出一个空库。用户看到的是「我的会话全没了」,而不是任何一条能指向
+ * 工作目录的线索。
+ *
+ * ★ 数据根必须**等于 Electron 的 userData**,所以下面要 setPath。`ipc/storage.ts`
+ * 的 `MANAGED_LOCAL_PATHS` 把 Chromium profile(Cookies / Network / Crashpad …)
+ * 也算进「本应用拥有的文件」,「删除全部数据并退出」靠那张表清理 —— 两者一分家,
+ * 那个功能就再也清不干净了。
  */
 function resolveDataRoot(): string {
-  return app.isPackaged ? app.getPath('userData') : defaultDatabaseDirectory()
+  return explicitUserDataDir ? legacyUserDataPath : defaultDatabaseDirectory()
 }
 
 // 应用数据、附件和 Electron profile 统一落在数据根下。
 // 必须在 app ready 之前设置才生效。
-const legacyUserDataPath = app.getPath('userData')
-if (!app.isPackaged) app.setPath('userData', defaultDatabaseDirectory())
+// 显式传了 --user-data-dir 时不覆盖 —— 那正是调用方要的隔离。
+if (!explicitUserDataDir) app.setPath('userData', resolveDataRoot())
 
 /*
   ★ **必须在 `app.whenReady()` 之前** —— 与单实例锁、userData 改路径同属
@@ -121,7 +147,13 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: '#1c1b19',
+    /*
+      ★ **跟着用户的主题偏好走,不能写死。** 这个色是窗口在渲染层画出第一帧之前
+      露出来的底色 —— 写死深色的话,浅色用户看到的是「深色空块 → 界面出来 → 啪一下
+      变浅」。两个值取自 theme.css 里的 `--color-app`(深 #2a2d2b / 浅 #f2eee6),
+      改那边记得同步这里。
+    */
+    backgroundColor: resolveTheme(store.getSettings().theme) === 'light' ? '#f2eee6' : '#2a2d2b',
     // Windows/Linux 的任务栏与窗口图标(macOS 忽略,那边走下面的 app.dock.setIcon)
     icon: nativeImage.createFromPath(appIconPath),
     // macOS:红绿灯嵌进侧边栏(方案 §8)。Windows/Linux:只去掉系统标题栏,
@@ -353,6 +385,17 @@ void app.whenReady().then(() => {
   installProxyAuth()
   void applyProxy(store.getSettings().proxy)
 
+  /*
+    ★ **必须在建窗之前。** 它把 `nativeTheme.themeSource` 设成用户在设置里选的那档,
+    于是渲染层从**第一帧**起 `prefers-color-scheme` 就是对的 —— 骨架屏(首屏那几百毫秒)
+    靠它选色,否则浅色用户会先看到一块深色再跳成浅色。
+
+    在此之前 ipc/settings.ts 是 `applyThemePreference` 的唯一调用点,只在用户手动改
+    设置时调。所以这行顺带修了一个既有 bug:启动时原生菜单和系统对话框不跟随用户
+    选的主题,得等他去设置里拨一次才对。
+  */
+  applyThemePreference(store.getSettings().theme)
+
   // 契约里的每个频道在这里一次性注册完(缺一个就编译不过)。
   // 必须在建窗之前:渲染层的第一个 invoke 可能在窗口 show 之前就到。
   setSessionWindowOpener((workspaceId, sessionId) => {
@@ -366,10 +409,13 @@ void app.whenReady().then(() => {
     源侧可能积了几十个会话 —— 少这一行的表现是「合盖前导过的那些还在,
     合盖期间新增的要等很久才出现」,而用户会以为同步坏了。
   */
-  powerMonitor.on('resume', () => { resumeImportSync(); reconcileScheduler() })
+  powerMonitor.on('resume', () => { resumeImportSync(); resumeUsageRollup(); reconcileScheduler() })
 
   // 外部来源自动同步。**非阻塞**,不占启动路径;只在用户开过开关的来源上跑。
   startImportSync()
+
+  // 用量按日汇总。同样非阻塞;统计页查询前还会各自兜一次刷新。
+  startUsageRollup()
 
   updateService.configure()
   if (app.isPackaged) {
@@ -421,6 +467,7 @@ app.on('before-quit', (event) => {
   // ★ 停调度**在** shutdownRuns 之前:自动同步会去问「哪些 run 在跑」,
   //   而那张表正要被清空,此时起一轮新扫描等于在关灯的房间里搬东西。
   stopImportSync()
+  stopUsageRollup()
   stopScheduler()
   // 同理:登录态刷新(5 分钟)与配置同步(5 秒)都是 unref 过的 interval,
   // 停不掉就会在下面 closeDatabase 封库之后继续摸库。

@@ -73,6 +73,7 @@ const ZH: Messages = {
   "common.search": "搜索",
   "common.close": "关闭",
   "common.cancel": "取消",
+  "common.copy": "复制",
   "common.save": "保存",
   "common.confirmDelete": "确认删除",
   "common.done": "完成",
@@ -356,26 +357,14 @@ const ZH: Messages = {
   "chat.subagent.status.done": "已完成",
   "chat.subagent.status.error": "失败",
   "chat.subagent.status.aborted": "已停止",
-  "chat.subagent.detail.model": "模型",
-  "chat.subagent.detail.duration": "运行时长",
-  "chat.subagent.detail.tools": "工具调用",
-  "chat.subagent.detail.errors": "失败调用",
-  "chat.subagent.detail.errorMessage": ({ error }) => `错误：${error}`,
   "chat.subagent.detail.errorUnknown": "未提供错误详情",
   "chat.subagent.error.noOutput": ({ agent }) => `子代理 ${agent} 结束时没有产出任何文字。请使用更具体的任务说明重试，或直接完成此步骤。`,
-  "chat.subagent.detail.context": "上下文",
-  "chat.subagent.detail.runId": "运行 ID",
-  "chat.subagent.detail.mode": "执行方式",
   "chat.subagent.mode.background": "后台",
-  "chat.subagent.mode.foreground": "前台",
-  "chat.subagent.detail.phase": "阶段",
   "chat.subagent.phase.starting": "启动中",
   "chat.subagent.phase.thinking": "思考中",
   "chat.subagent.phase.tool": "调用工具",
   "chat.subagent.phase.finishing": "收尾中",
   "chat.subagent.phase.background": "后台运行",
-  "chat.subagent.detail.currentTool": ({ tool }) => `当前：${tool}`,
-  "chat.subagent.detail.recentActivity": "最近动作",
   "chat.subagent.activityCount": ({ count }) => `${count} 次工具调用`,
   "chat.subagent.report.pending": "结果待汇报给主代理",
   "chat.subagent.report.injecting": "主代理正在处理结果",
@@ -385,11 +374,14 @@ const ZH: Messages = {
   "chat.subagent.center.title": "后台任务",
   "chat.subagent.center.open": "打开后台任务",
   "chat.subagent.center.count": ({ count }) => `${count} 个任务`,
-  // 卡片默认是折叠的,所以标题行那一格必须自己说清楚「不是卡住了,是在等」——
-  // 完整原因留给展开后的那条横幅(它复用状态行那两句)
+  "chat.subagent.open": "在右侧打开完整记录",
+  // ★ 终态下这一格问的不是「它在干嘛」,而是「它停在哪一步」—— `subagent_end` 曾经
+  //   把 phase 硬写成「收尾中」,于是每一张终态卡片都说收尾中,这一栏等于零信息
+  // ★ 区分「卡死」和「在跑一个长任务」的唯一可靠信号。耗时一直涨说明不了任何事
+  // 卡片上那一格只有一个词的位置,「不是卡住了,是在等」得先用它说清楚;
+  // 完整原因(带出错信息)写在下面那条横幅里,它复用状态行那两句
   "chat.subagent.notice.retry": ({ attempt }) => `重试 ${attempt}`,
   "chat.subagent.notice.switch": ({ to }) => `已切到 ${to}`,
-  "chat.subagent.unavailable": "暂无",
   "chat.subagent.stop": "停止子代理",
   "chat.status.generating": "生成中",
   "chat.status.done": "已完成",
@@ -432,6 +424,19 @@ const ZH: Messages = {
   "composer.contextMenu": "上下文",
   "composer.contextHeadline": ({ used, window }) => `上下文 · ${used} / ${window}`,
   "composer.contextOverLimit": ({ threshold }) => `已超出 ${threshold}，本轮按长上下文计费`,
+  // ── 占用归因(圆环菜单里的那张分解卡)──
+  "composer.contextBreakdown": "占用归因",
+  "composer.contextBreakdownPending": "发出第一条消息后才有",
+  "composer.contextPreviewTotal": "预计已占窗口",
+  "composer.contextPreviewNote": "估算值 —— 发出第一条消息后换成上游报回的实际用量",
+  "composer.contextSegSystem": "系统提示词",
+  "composer.contextSegSkills": "技能",
+  "composer.contextSegToolsBuiltin": "系统工具",
+  "composer.contextSegToolsMcp": "MCP 工具",
+  "composer.contextSegInstructions": "项目与个人指令",
+  "composer.contextSegMessages": "消息",
+  "composer.contextCacheHit": "缓存命中率",
+  "composer.contextManageMcp": "管理 MCP 服务器",
   "composer.maxContext": "最大上下文",
   // ★ 倍率查真实定价表得来,不写死「×2」—— 只有 OpenAI 现代四款是双档。
   "composer.maxContextHint": ({ window, threshold, multiplier }) =>
@@ -1008,6 +1013,14 @@ const ZH: Messages = {
   "provider.authPasteHint":
     "授权完成后浏览器会停在一个提示页——把地址栏里那一整条复制过来即可（5 分钟内有效）。",
   "provider.authPasteSubmit": "提交",
+  /*
+    ★ 设备码流程（RFC 8628，今天只有 Kimi 走这条）。文案里**不写具体时限**：
+    时限由上游在响应里给（Kimi 是 30 分钟），写死一个数字迟早和实际对不上，
+    而对不上的表现是用户照着提示放弃了一次其实还没过期的登录。
+  */
+  "provider.authDeviceCodeLabel": "配对码",
+  "provider.authDeviceHint": ({ url }) =>
+    `浏览器已打开授权页，把上面的配对码填进去即可。没有自动打开就手动访问：${url}`,
   "provider.modelPriority": "模型优先级（至少添加一个）",
   "provider.addModel": "添加模型",
   "provider.modelIdLabel": "模型 ID",
@@ -1850,6 +1863,7 @@ const EN: Messages = {
   "common.search": "Search",
   "common.close": "Close",
   "common.cancel": "Cancel",
+  "common.copy": "Copy",
   "common.save": "Save",
   "common.confirmDelete": "Confirm delete",
   "common.done": "Done",
@@ -2133,26 +2147,14 @@ const EN: Messages = {
   "chat.subagent.status.done": "Completed",
   "chat.subagent.status.error": "Failed",
   "chat.subagent.status.aborted": "Stopped",
-  "chat.subagent.detail.model": "Model",
-  "chat.subagent.detail.duration": "Elapsed",
-  "chat.subagent.detail.tools": "Tool calls",
-  "chat.subagent.detail.errors": "Failed calls",
-  "chat.subagent.detail.errorMessage": ({ error }) => `Error: ${error}`,
   "chat.subagent.detail.errorUnknown": "No error details were provided",
   "chat.subagent.error.noOutput": ({ agent }) => `The subagent ${agent} finished without producing any text. Retry with a more specific prompt, or do this step yourself.`,
-  "chat.subagent.detail.context": "Context",
-  "chat.subagent.detail.runId": "Run ID",
-  "chat.subagent.detail.mode": "Execution",
   "chat.subagent.mode.background": "Background",
-  "chat.subagent.mode.foreground": "Foreground",
-  "chat.subagent.detail.phase": "Phase",
   "chat.subagent.phase.starting": "Starting",
   "chat.subagent.phase.thinking": "Thinking",
   "chat.subagent.phase.tool": "Using tool",
   "chat.subagent.phase.finishing": "Finishing",
   "chat.subagent.phase.background": "Running in background",
-  "chat.subagent.detail.currentTool": ({ tool }) => `Current: ${tool}`,
-  "chat.subagent.detail.recentActivity": "Recent activity",
   "chat.subagent.activityCount": ({ count }) => `${count} tool calls`,
   "chat.subagent.report.pending": "Result ready for the main agent",
   "chat.subagent.report.injecting": "Main agent is processing the result",
@@ -2162,9 +2164,9 @@ const EN: Messages = {
   "chat.subagent.center.title": "Background tasks",
   "chat.subagent.center.open": "Open background tasks",
   "chat.subagent.center.count": ({ count }) => `${count} tasks`,
+  "chat.subagent.open": "Open the full record on the right",
   "chat.subagent.notice.retry": ({ attempt }) => `Retry ${attempt}`,
   "chat.subagent.notice.switch": ({ to }) => `Switched to ${to}`,
-  "chat.subagent.unavailable": "Unavailable",
   "chat.subagent.stop": "Stop subagent",
   "chat.status.generating": "Generating",
   "chat.status.done": "Done",
@@ -2213,6 +2215,19 @@ const EN: Messages = {
   "composer.contextHeadline": ({ used, window }) => `Context · ${used} / ${window}`,
   "composer.contextOverLimit": ({ threshold }) =>
     `Over ${threshold} — this turn bills at the long-context rate`,
+  // ── Attribution card inside the context ring menu ──
+  "composer.contextBreakdown": "Where it went",
+  "composer.contextBreakdownPending": "Available after the first message",
+  "composer.contextPreviewTotal": "Estimated window used",
+  "composer.contextPreviewNote": "An estimate — replaced by the real figure once the first message is sent",
+  "composer.contextSegSystem": "System prompt",
+  "composer.contextSegSkills": "Skills",
+  "composer.contextSegToolsBuiltin": "Built-in tools",
+  "composer.contextSegToolsMcp": "MCP tools",
+  "composer.contextSegInstructions": "Project & personal instructions",
+  "composer.contextSegMessages": "Messages",
+  "composer.contextCacheHit": "Cache hit rate",
+  "composer.contextManageMcp": "Manage MCP servers",
   "composer.maxContext": "Max context",
   "composer.maxContextHint": ({ window, threshold, multiplier }) =>
     `${window} · input ×${multiplier} beyond ${threshold}`,
@@ -2796,6 +2811,9 @@ const EN: Messages = {
   "provider.authPasteHint":
     "After authorizing, your browser stops on a notice page — copy that entire address from the address bar here (valid for 5 minutes).",
   "provider.authPasteSubmit": "Submit",
+  "provider.authDeviceCodeLabel": "Pairing code",
+  "provider.authDeviceHint": ({ url }) =>
+    `Your browser is open on the authorization page — enter the pairing code above. If it did not open, visit ${url} manually.`,
   "provider.modelPriority": "Model priority (add at least one)",
   "provider.addModel": "Add model",
   "provider.modelIdLabel": "Model ID",

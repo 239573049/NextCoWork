@@ -20,6 +20,12 @@
  * 读回来 `parseCredential` 判残缺返回 null,而界面和错误信息一个字都不提 issuer。
  * 派生之后这种分叉在语法上就不存在了。
  */
-export const OAUTH_ISSUER_IDS = ['chatgpt', 'zcode-zai', 'zcode-bigmodel'] as const
+export const OAUTH_ISSUER_IDS = [
+  'chatgpt',
+  'zcode-zai',
+  'zcode-bigmodel',
+  'kimi-code',
+  'grok-build'
+] as const
 
 export type OAuthIssuerId = (typeof OAUTH_ISSUER_IDS)[number]

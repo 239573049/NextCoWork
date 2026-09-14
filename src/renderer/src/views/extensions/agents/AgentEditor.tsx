@@ -1,0 +1,480 @@
+/**
+ * 子代理的结构化编辑器 —— 新建和编辑走的是同一个,差别只有「有没有源文件」。
+ *
+ * ★ 为什么不继续用通用的 Markdown 资源编辑器:那一套把 `tools` / `model` 做成
+ *   裸文本输入,而这两个字段写错的后果都不对称地严重 —— `tools` 里一个拼错的
+ *   名字会让 `agent/load.ts` 把**整条子代理作废**(界面上只留一条诊断,用户看到的
+ *   是「我的子代理不见了」),`model` 写错则是静默落回默认模型。能勾的就别让人打。
+ *
+ * ★ 两个默认值必须**摆在控件上**,不能只写在 placeholder 里:可用工具默认
+ *   「全部」、模型默认「继承默认」。这两个正是绝大多数人要的,而「留空 = 继承」
+ *   这种话没人读。
+ *
+ * ★ 「编辑源码」保留,但它是**同一份草稿的另一个视图**:切换时通过
+ *   `fileFromForm` / `formFromFile` 往返一次,而不是各存一套状态。两套状态的话,
+ *   在哪一边改的就只有哪一边算数,而用户完全看不出来。
+ */
+import { ArrowLeft, Sparkles, Trash2 } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { PERMISSION_MODES, type PermissionMode } from '../../../../../shared/agent/permission'
+import { AGENT_TOOL_CHOICES, AGENT_COLORS } from '../../../../../shared/domain/agent-def'
+import type {
+  MarkdownResourceFile,
+  MarkdownResourceScope
+} from '../../../../../shared/domain/markdown-resource'
+import { Button } from '../../../components/ui/Button'
+import { Dialog } from '../../../components/ui/Dialog'
+import { IconButton } from '../../../components/ui/IconButton'
+import { Segmented } from '../../../components/ui/Segmented'
+import { Select } from '../../../components/ui/Select'
+import { TextArea } from '../../../components/ui/TextArea'
+import { TextInput } from '../../../components/ui/TextInput'
+import { useI18n } from '../../../i18n'
+import { cn } from '../../../lib/cn'
+import { generateAgent } from '../../../services/agents'
+import { useModelsStore } from '../../../stores/models'
+import { MarkdownResourceEditor } from '../markdown/MarkdownResourceEditor'
+import { readField, setField, setListField, type Frontmatter } from '../markdown/frontmatter-form'
+import {
+  AGENT_COLOR_HEX,
+  applyDraft,
+  fileFromForm,
+  formFromFile,
+  unknownTools,
+  validateAgentForm,
+  type AgentForm
+} from './agent-form'
+
+export interface AgentSavePayload {
+  scope: MarkdownResourceScope
+  name: string
+  frontmatter: Frontmatter
+  body: string
+}
+
+function Row({ label, children, required = false }: { label: string; children: ReactNode; required?: boolean }): ReactNode {
+  return (
+    <div className="flex items-start gap-3">
+      <span className={cn('mt-1.5 w-[84px] shrink-0 text-[12px]', required ? 'text-danger' : 'text-fg-muted')}>
+        {label}{required && '*'}
+      </span>
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+export function AgentEditor({
+  file,
+  taken,
+  onSave,
+  onDelete,
+  onClose,
+  saving,
+  error,
+  workspaceId
+}: {
+  /** `revision === ''` = 还没落盘的新建。 */
+  file: MarkdownResourceFile
+  /** 已有的 `scope:name`,用来当场查重 —— 见下面 `nameTaken` 的注释。 */
+  taken: ReadonlySet<string>
+  onSave: (payload: AgentSavePayload) => void
+  onDelete: () => void
+  onClose: () => void
+  saving: boolean
+  error: string | null
+  workspaceId: string | null
+}): ReactNode {
+  const { t } = useI18n()
+  const models = useModelsStore((s) => s.models)
+  const isNew = file.revision === ''
+
+  const [form, setForm] = useState<AgentForm>(() => formFromFile(file.name, file.frontmatter, file.body))
+  /** 未知键的载体。★ 表单不认识的键全靠它原样带回文件里。 */
+  const [baseFm, setBaseFm] = useState<Frontmatter>(file.frontmatter)
+  const [scope, setScope] = useState<MarkdownResourceScope>(file.scope)
+  const [sourceMode, setSourceMode] = useState(false)
+  const [source, setSource] = useState<{ fm: Frontmatter; body: string }>({ fm: file.frontmatter, body: file.body })
+
+  const [attempted, setAttempted] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [requirement, setRequirement] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [genError, setGenError] = useState<string | null>(null)
+
+  const invalid = validateAgentForm(form)
+  /*
+    ★ 自己查一遍重名,而不是等后端。后端那条路是 `writeResourceFile` 的
+    `conflict` —— 同一个词既表示「重名」又表示「文件在别处被改过」,冒出来的
+    那句「文件已被改动」在改名这个场景里完全对不上,用户会以为是自己手滑了。
+  */
+  const nameTaken = (isNew || form.name !== file.name || scope !== file.scope)
+    && taken.has(`${scope}:${form.name.trim()}`)
+  const blocked = invalid ?? (nameTaken ? 'ext.error.agentNameTaken' : null)
+  /*
+    ★ 只有「即时更新的控件」造成的问题才配禁用保存。`TextArea` 是**失焦才提交**的:
+    描述或正文还空着就把保存按钮禁掉的话,用户打完最后一个字直接去点保存,点到的是
+    一个禁用按钮 —— 禁用元素连 mousedown 都不发,焦点不动、草稿不提交,那颗按钮
+    于是**永远亮不起来**。名字和工具来自 `TextInput`/复选框,当场就更新,禁用是安全的。
+  */
+  const hardBlocked =
+    blocked !== null && blocked !== 'ext.error.agentNeedsDescription' && blocked !== 'ext.error.emptyBody'
+
+  const extraTools = unknownTools(form)
+  const toDraft = (): AgentSavePayload => ({
+    scope,
+    name: form.name.trim(),
+    ...fileFromForm({ ...form, name: form.name.trim() }, baseFm)
+  })
+
+  const save = (): void => {
+    setAttempted(true)
+    if (blocked !== null || saving) return
+    onSave(toDraft())
+  }
+
+  const toSource = (): void => {
+    const file = fileFromForm({ ...form, name: form.name.trim() }, baseFm)
+    setSource({ fm: file.frontmatter, body: file.body })
+    setSourceMode(true)
+  }
+
+  const toForm = (): void => {
+    setForm(formFromFile(form.name, source.fm, source.body))
+    setBaseFm(source.fm)
+    setSourceMode(false)
+  }
+
+  const generate = (): void => {
+    // ★ 同上:需求框也是失焦才提交的,所以这里拦空值,而不是把按钮禁掉。
+    if (requirement.trim() === '') {
+      setGenError(t('ext.agents.generateEmpty'))
+      return
+    }
+    setGenerating(true)
+    setGenError(null)
+    void generateAgent(requirement, workspaceId ?? undefined)
+      .then((draft) => {
+        setForm((current) => applyDraft(current, draft))
+        setAsking(false)
+        setRequirement('')
+      })
+      // ★ 主进程抛的已经是一句人话(见 `main/agent-draft.ts`),原样显示。
+      .catch((e: unknown) => setGenError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setGenerating(false))
+  }
+
+  const dirty = form.description.trim() !== '' || form.prompt.trim() !== ''
+  const askToGenerate = (): void => {
+    setGenError(null)
+    setAsking(true)
+  }
+
+  /** 同一个别名可能挂在好几家上;子代理文件里存的是**裸别名**,所以这里按名字去重。 */
+  const modelOptions = [
+    { value: '', label: t('ext.field.inheritDefault') },
+    ...[...new Set(models.filter((m) => m.enabled !== false).map((m) => m.alias))].map((alias) => ({
+      value: alias,
+      label: alias
+    }))
+  ]
+
+  const generateDialog = (
+    <Dialog
+      title={t('ext.agents.generateTitle')}
+      description={t('ext.agents.generateHint')}
+      open={asking}
+      onClose={() => setAsking(false)}
+      footer={
+        <>
+          <Button size="sm" onClick={() => setAsking(false)}>{t('common.cancel')}</Button>
+          <Button
+            size="sm"
+            variant="accent"
+            icon={<Sparkles size={13} />}
+            onClick={generate}
+            disabled={generating}
+          >
+            {generating ? t('ext.agents.generating') : t('ext.agents.generateAction')}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-2">
+        <TextArea
+          value={requirement}
+          onCommit={setRequirement}
+          rows={5}
+          disabled={generating}
+          placeholder={t('ext.agents.generatePlaceholder')}
+          ariaLabel={t('ext.agents.generateTitle')}
+        />
+        {dirty && <p className="text-[11px] text-fg-faint">{t('ext.agents.generateOverwrite')}</p>}
+        {genError !== null && <p className="text-[11px] text-danger" role="alert">{genError}</p>}
+      </div>
+    </Dialog>
+  )
+
+  if (sourceMode) {
+    /*
+      ★ 源码视图直接复用通用编辑器:那条「读不懂的语法保存会丢,得当面确认」
+      和 Mod-S 保存都在它里面,重做一遍只会分叉。
+    */
+    return (
+      <>
+        <MarkdownResourceEditor
+          kind="agent"
+          file={{ ...file, name: form.name.trim(), scope }}
+          frontmatter={source.fm}
+          body={source.body}
+          onBody={(body) => setSource((s) => ({ ...s, body }))}
+          onSave={() => onSave({ scope, name: form.name.trim(), frontmatter: source.fm, body: source.body })}
+          onDelete={onDelete}
+          onClose={onClose}
+          saving={saving}
+          error={error}
+          fields={
+            <div className="flex flex-col gap-2">
+              <Button size="sm" onClick={toForm} className="self-start">{t('ext.agents.formMode')}</Button>
+              <SourceFields fm={source.fm} set={(fm) => setSource((s) => ({ ...s, fm }))} />
+            </div>
+          }
+        />
+        {generateDialog}
+      </>
+    )
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-4 py-2">
+        <IconButton label={t('ext.back')} size={26} width={34} onClick={onClose} className="rounded-pill bg-tint">
+          <ArrowLeft size={14} />
+        </IconButton>
+        <span className="truncate text-[13px] text-fg">{isNew ? t('ext.agents.newTitle') : file.name}</span>
+        <span className="truncate text-[11px] text-fg-faint">{file.path}</span>
+        <div className="ml-auto flex items-center gap-2">
+          <Button size="sm" icon={<Sparkles size={13} />} onClick={askToGenerate} disabled={generating}>
+            {generating ? t('ext.agents.generating') : t('ext.agents.generate')}
+          </Button>
+          <Button size="sm" onClick={toSource}>{t('ext.agents.sourceMode')}</Button>
+          {!isNew && (
+            <Button size="sm" variant="danger" icon={<Trash2 size={13} />} onClick={() => setConfirmDelete(true)}>
+              {t('ext.delete')}
+            </Button>
+          )}
+          <Button size="sm" variant="accent" onClick={save} disabled={saving || hardBlocked}>
+            {t('ext.save')}
+          </Button>
+        </div>
+      </div>
+
+      {(error !== null || (attempted && blocked !== null)) && (
+        <p className="shrink-0 border-b border-hairline px-4 py-1.5 text-[11px] text-danger" role="alert">
+          {error ?? t(blocked as 'ext.error.emptyBody')}
+        </p>
+      )}
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className="flex max-w-[760px] flex-col gap-3">
+          <Row label={t('ext.field.name')} required>
+            <div className="flex items-center gap-2">
+              <TextInput
+                value={form.name}
+                onChange={(v) => setForm({ ...form, name: v })}
+                size="sm"
+                invalid={nameTaken || (attempted && blocked === 'ext.error.agentBadName')}
+                placeholder={t('ext.field.nameHint')}
+                ariaLabel={t('ext.field.name')}
+              />
+              <Segmented<MarkdownResourceScope>
+                size="sm"
+                value={scope}
+                onChange={setScope}
+                label={t('ext.scopeFilter')}
+                options={[
+                  { value: 'global', label: t('ext.scope.global') },
+                  ...(workspaceId === null ? [] : [{ value: 'project' as const, label: t('ext.scope.project') }])
+                ]}
+              />
+            </div>
+          </Row>
+
+          <Row label={t('ext.field.color')}>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, color: '' })}
+                aria-label={t('ext.field.colorNone')}
+                aria-pressed={form.color === ''}
+                className={cn(
+                  'h-5 rounded-pill border px-2 text-[11px]',
+                  form.color === '' ? 'border-accent text-fg' : 'border-border text-fg-faint'
+                )}
+              >
+                {t('ext.field.colorNone')}
+              </button>
+              {AGENT_COLORS.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  onClick={() => setForm({ ...form, color })}
+                  aria-label={color}
+                  aria-pressed={form.color === color}
+                  style={{ backgroundColor: AGENT_COLOR_HEX[color] }}
+                  className={cn(
+                    'h-5 w-5 rounded-full border-2 transition-transform',
+                    form.color === color ? 'border-fg scale-110' : 'border-transparent'
+                  )}
+                />
+              ))}
+            </div>
+          </Row>
+
+          <Row label={t('ext.field.model')}>
+            <Select
+              value={form.model}
+              options={modelOptions}
+              onValueChange={(v) => setForm({ ...form, model: v })}
+              ariaLabel={t('ext.field.model')}
+              className="max-w-[280px]"
+            />
+          </Row>
+
+          <Row label={t('ext.field.description')} required>
+            <TextArea
+              value={form.description}
+              onCommit={(v) => setForm({ ...form, description: v })}
+              rows={2}
+              placeholder={t('ext.field.agentDescriptionHint')}
+              ariaLabel={t('ext.field.description')}
+            />
+          </Row>
+
+          <Row label={t('ext.field.tools')}>
+            <div className="flex flex-col gap-2">
+              <Segmented<'all' | 'custom'>
+                size="sm"
+                value={form.toolsMode}
+                onChange={(v) => setForm({ ...form, toolsMode: v })}
+                label={t('ext.field.tools')}
+                className="self-start"
+                options={[
+                  { value: 'all', label: t('ext.field.toolsAll') },
+                  { value: 'custom', label: t('ext.field.toolsCustom') }
+                ]}
+              />
+              {form.toolsMode === 'custom' && (
+                <div className="grid grid-cols-4 gap-x-3 gap-y-1.5">
+                  {AGENT_TOOL_CHOICES.map((tool) => (
+                    <label key={tool} className="flex items-center gap-1.5 text-[12px] text-fg-muted">
+                      <input
+                        type="checkbox"
+                        checked={form.tools.includes(tool)}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            tools: e.target.checked
+                              ? [...form.tools, tool]
+                              : form.tools.filter((item) => item !== tool)
+                          })
+                        }
+                      />
+                      {tool}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {form.toolsMode === 'custom' && extraTools.length > 0 && (
+                <p className="text-[11px] text-fg-faint">{t('ext.field.toolsUnknown', { list: extraTools.join('、') })}</p>
+              )}
+            </div>
+          </Row>
+
+          <Row label={t('ext.field.permissionMode')}>
+            <Segmented<string>
+              size="sm"
+              value={form.permissionMode === '' ? 'inherit' : form.permissionMode}
+              onChange={(v) => setForm({ ...form, permissionMode: v === 'inherit' ? '' : v })}
+              label={t('ext.field.permissionMode')}
+              className="self-start"
+              options={[
+                { value: 'inherit', label: t('ext.field.inherit') },
+                ...PERMISSION_MODES.map((m: PermissionMode) => ({ value: m, label: t(`permission.${m}`) }))
+              ]}
+            />
+          </Row>
+
+          <Row label={t('ext.field.prompt')} required>
+            <TextArea
+              value={form.prompt}
+              onCommit={(v) => setForm({ ...form, prompt: v })}
+              rows={14}
+              placeholder={t('ext.field.promptHint')}
+              ariaLabel={t('ext.field.prompt')}
+            />
+          </Row>
+        </div>
+      </div>
+
+      {generateDialog}
+
+      <Dialog
+        title={t('ext.deleteTitle', { name: file.name })}
+        description={t('ext.deleteHint')}
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        footer={
+          <>
+            <Button size="sm" onClick={() => setConfirmDelete(false)}>{t('common.cancel')}</Button>
+            <Button size="sm" variant="danger" onClick={() => { setConfirmDelete(false); onDelete() }}>
+              {t('ext.delete')}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[12px] text-fg-muted">{file.path}</p>
+      </Dialog>
+    </div>
+  )
+}
+
+/** 源码视图上半那排裸字段。★ 名字和作用域不在里面 —— 它们是文件的身份,由表单管。 */
+function SourceFields({ fm, set }: { fm: Frontmatter; set: (fm: Frontmatter) => void }): ReactNode {
+  const { t } = useI18n()
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="flex items-center gap-2">
+        <span className="w-[92px] shrink-0 text-[12px] text-danger">{t('ext.field.description')}*</span>
+        <TextInput
+          value={readField(fm, 'description')}
+          onChange={(v) => set(setField(fm, 'description', v))}
+          size="sm"
+          invalid={readField(fm, 'description').trim() === ''}
+          placeholder={t('ext.field.agentDescriptionHint')}
+          ariaLabel={t('ext.field.description')}
+        />
+      </label>
+      <label className="flex items-center gap-2">
+        <span className="w-[92px] shrink-0 text-[12px] text-fg-muted">{t('ext.field.tools')}</span>
+        <TextInput
+          value={readField(fm, 'tools')}
+          onChange={(v) => set(setListField(fm, 'tools', v.split(',').map((s) => s.trim()).filter((s) => s !== '')))}
+          size="sm"
+          placeholder={t('ext.field.toolsHint')}
+          ariaLabel={t('ext.field.tools')}
+        />
+      </label>
+      <label className="flex items-center gap-2">
+        <span className="w-[92px] shrink-0 text-[12px] text-fg-muted">{t('ext.field.model')}</span>
+        <TextInput
+          value={readField(fm, 'model')}
+          onChange={(v) => set(setField(fm, 'model', v))}
+          size="sm"
+          placeholder={t('ext.field.modelHint')}
+          ariaLabel={t('ext.field.model')}
+        />
+      </label>
+    </div>
+  )
+}

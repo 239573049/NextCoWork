@@ -1,53 +1,132 @@
 import type { AgentError } from '../../../shared/agent/error'
+import type { ActivityPhase } from '../../../shared/domain/activity'
 import type { Translate } from './index'
 
 /**
- * 等回复的这几十秒是整个界面**最没东西可看**的时刻:一句「正在等待回复…」
+ * 状态行上那句会动的话 —— 按**此刻在干什么**分组的料。
+ *
+ * 起因是一次 run 里最没东西可看的那几十秒:一句「正在等待回复…」或「运行中」
  * 从第一秒到第四十秒一个像素都不变,读起来像卡住了,而不像在干活。
- * 轮换一组词不提供任何新信息,但它证明这一帧是刚画出来的。
+ * 轮换一个词不提供任何新信息,但它证明这一帧是刚画出来的;而**按相位分组**
+ * 之后它还真多说了一件事 —— 眼下是在翻文件、在跑命令,还是在派帮手。
+ *
+ * ★ 分组的粒度跟着 `ActivityPhase` 走,不自己另立一套。相位怎么判的见那边。
  *
  * ★ 只当**纯装饰**用:真正的状态在 `data-status` 属性上,读屏念的是那句固定的
- * `chat.status.waitingResponse`(见 StatusLine 里的 sr-only)。所以这里既不进
- * Messages 表、也不参与 ZH/EN 键一致性校验 —— 它不是一句要翻译的文案,
- * 是一串可以随便增删的料。两边不必一一对应。
+ * `chat.status.waitingResponse` / `chat.status.running`(见 StatusLine 里的 sr-only)。
+ * 所以这里既不进 Messages 表、也不参与 ZH/EN 键一致性校验 —— 它不是要翻译的文案,
+ * 是一串可以随便增删的料。两边不必一一对应,某一相位多几条少几条都行。
+ *
+ * ★ **每条都要短。** 这句话右边紧跟着 `· ↓1234 · 队列 2` 那串读数,
+ * 词一长后面整排就跟着左右抖。中文压在 6 字以内,英文压在 14 字符以内。
  */
-export const whimsyZh = [
-  '琢磨中…',
-  '盘算中…',
-  '酝酿中…',
-  '推敲中…',
-  '捣鼓中…',
-  '掐指一算…',
-  '打草稿…',
-  '理思路…',
-  '搭架子…',
-  '翻资料…',
-  '找灵感…',
-  '转脑筋…',
-  '熬汤中…',
-  '咕嘟咕嘟…',
-  '憋大招…',
-  '挠头中…'
-] as const
+type Whimsy = readonly [string, ...string[]]
 
-export const whimsyEn = [
-  'Pondering…',
-  'Percolating…',
-  'Noodling…',
-  'Ruminating…',
-  'Musing…',
-  'Brewing…',
-  'Simmering…',
-  'Cogitating…',
-  'Puzzling…',
-  'Mulling…',
-  'Marinating…',
-  'Tinkering…',
-  'Conjuring…',
-  'Untangling…',
-  'Scheming…',
-  'Whirring…'
-] as const
+export const whimsyZh: Record<ActivityPhase, Whimsy> = {
+  // 等首字节:纯粹的干等,什么都还没发生
+  waiting: [
+    '琢磨中…', '盘算中…', '酝酿中…', '推敲中…', '捣鼓中…', '掐指一算…',
+    '打草稿…', '打腹稿…', '理思路…', '搭架子…', '翻资料…', '找灵感…',
+    '转脑筋…', '绕圈圈…', '踱步中…', '熬汤中…', '咕嘟咕嘟…', '发酵中…',
+    '磨刀中…', '憋大招…', '挠头中…', '眉头一皱…', '冥思苦想…', '搜肠刮肚…',
+    '脑内开会…', '排列组合…', '掂量掂量…', '让我想想…'
+  ],
+  // 思考块在流:和干等不同,这时候是**看得见在想**,词跟着往「推演」上靠
+  reasoning: [
+    '顺着想…', '反着想…', '再想想…', '想深一层…', '推演中…', '权衡中…',
+    '找漏洞…', '自我辩论…', '反复横跳…', '钻牛角尖…', '理因果…', '解扣中…'
+  ],
+  // 正文在流:已经开始写了
+  writing: [
+    '下笔中…', '码字中…', '打字中…', '组织语言…', '斟酌用词…', '一字一句…',
+    '润色中…', '边写边想…', '落笔了…', '收尾中…'
+  ],
+  read: [
+    '读文件…', '翻页中…', '扫读中…', '逐行看…', '一目十行…', '啃文件…',
+    '目不转睛…', '翻开一看…', '对照着看…', '划重点…'
+  ],
+  search: [
+    '大海捞针…', '顺藤摸瓜…', '按图索骥…', '翻箱倒柜…', '刨根问底…', '满仓库找…',
+    '挨个翻…', '循迹中…', '找找看…', '地毯式搜…'
+  ],
+  mutate: [
+    '动刀中…', '施工中…', '改稿中…', '拧螺丝…', '缝缝补补…', '修修改改…',
+    '大兴土木…', '搬砖中…', '落笔改…', '收拾残局…'
+  ],
+  command: [
+    '敲回车…', '开跑了…', '等回显…', '盯着输出…', '噼里啪啦…', '跑一趟…',
+    '命令下去…', '等它跑完…', '咔咔咔…', '连敲带跑…'
+  ],
+  network: [
+    '上网中…', '拉数据…', '等响应…', '蹲网页…', '翻网页…', '抓取中…',
+    '连出去了…', '等对面…', '排队等网…', '拨号中…'
+  ],
+  orchestration: [
+    '派活中…', '摇人中…', '点将中…', '分头行动…', '叫帮手…', '分工中…',
+    '远程指挥…', '盯梢中…', '排兵布阵…', '等回话…'
+  ],
+  external: [
+    '喊外援…', '对接中…', '借力中…', '走外线…', '联络中…', '接上了…',
+    '跨界调用…', '递话中…', '搭桥中…'
+  ],
+  // 兜底:知道在跑,但说不出在跑什么(参数还在流、工具还没开跑)
+  working: [
+    '忙活中…', '开工中…', '动手中…', '撸起袖子…', '跑腿中…', '连轴转…',
+    '马不停蹄…', '火力全开…', '开足马力…', '手脚并用…', '埋头苦干…', '一顿操作…',
+    '三下五除二…', '哼哧哼哧…', '叮叮当当…', '收拾中…', '折腾中…', '加急处理…'
+  ]
+}
+
+export const whimsyEn: Record<ActivityPhase, Whimsy> = {
+  waiting: [
+    'Pondering…', 'Percolating…', 'Noodling…', 'Ruminating…', 'Musing…', 'Brewing…',
+    'Simmering…', 'Steeping…', 'Incubating…', 'Cogitating…', 'Puzzling…', 'Mulling…',
+    'Marinating…', 'Tinkering…', 'Conjuring…', 'Untangling…', 'Scheming…', 'Plotting…',
+    'Whirring…', 'Daydreaming…', 'Doodling…', 'Sketching…', 'Squinting…', 'Wondering…',
+    'Weighing…', 'Chewing…', 'Pacing…', 'Humming…'
+  ],
+  reasoning: [
+    'Reasoning…', 'Deducing…', 'Inferring…', 'Unpacking…', 'Backtracking…', 'Rechecking…',
+    'Zooming in…', 'Arguing…', 'Doubting…', 'Connecting…'
+  ],
+  writing: [
+    'Writing…', 'Drafting…', 'Typing…', 'Composing…', 'Phrasing…', 'Wording it…',
+    'Penning…', 'Polishing…', 'Wrapping up…'
+  ],
+  read: [
+    'Reading…', 'Skimming…', 'Scanning…', 'Perusing…', 'Leafing…', 'Poring over…',
+    'Eyeballing…', 'Flipping…', 'Absorbing…'
+  ],
+  search: [
+    'Searching…', 'Hunting…', 'Combing…', 'Rummaging…', 'Digging…', 'Sleuthing…',
+    'Sniffing…', 'Trawling…', 'Prowling…'
+  ],
+  mutate: [
+    'Editing…', 'Patching…', 'Rewiring…', 'Stitching…', 'Whittling…', 'Hammering…',
+    'Chiseling…', 'Reshaping…', 'Tidying…', 'Retooling…'
+  ],
+  command: [
+    'Running…', 'Executing…', 'Invoking…', 'Crunching…', 'Chugging…', 'Clacking…',
+    'Piping…', 'Watching…', 'Churning…', 'Firing away…'
+  ],
+  network: [
+    'Fetching…', 'Browsing…', 'Surfing…', 'Pinging…', 'Loading…', 'Downloading…',
+    'Dialing out…', 'Awaiting…', 'Knocking…', 'Reeling…'
+  ],
+  orchestration: [
+    'Delegating…', 'Dispatching…', 'Rallying…', 'Herding…', 'Deputizing…',
+    'Marshalling…', 'Checking in…', 'Handing off…', 'Regrouping…'
+  ],
+  external: [
+    'Calling out…', 'Bridging…', 'Relaying…', 'Plugging in…', 'Negotiating…',
+    'Patching in…', 'Hailing…', 'Linking up…'
+  ],
+  working: [
+    'Working…', 'Wrangling…', 'Hustling…', 'Cranking…', 'Grinding…', 'Wrenching…',
+    'Shuffling…', 'Shoveling…', 'Hauling…', 'Barreling…', 'Bustling…', 'Juggling…',
+    'Sprinting…', 'Clattering…', 'Assembling…', 'Splicing…'
+  ]
+}
 
 export const agentZh = {
   'chat.status.running': '运行中',
@@ -69,7 +148,6 @@ export const agentZh = {
   'chat.thinkingLevel.higher': '超高',
   'chat.thinkingLevel.max': '最高',
   'chat.thinkingLevelDescription': '思考强度 · {level}',
-  'chat.usageTooltip': '本次任务 API 已返回的累计用量：输入（不含缓存）{input} · 输出 {output}；当前请求结束后更新',
   'chat.taskUsage': '任务用量',
   'chat.taskUsageSummary': '输入 {input} · 输出 {output}',
   'chat.taskUsageInput': '输入 {count}',
@@ -188,7 +266,6 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.thinkingLevel.higher': 'Extra high',
   'chat.thinkingLevel.max': 'Maximum',
   'chat.thinkingLevelDescription': 'Thinking level · {level}',
-  'chat.usageTooltip': 'API-reported totals for this run: input (excluding cache) {input} · output {output}; updated after each request completes',
   'chat.taskUsage': 'Task usage',
   'chat.taskUsageSummary': 'Input {input} · Output {output}',
   'chat.taskUsageInput': 'Input {count}',

@@ -95,6 +95,74 @@ export function formatContextWindow(n: number): string {
   return String(n)
 }
 
+// ─────────────────────────── 占用归因 ───────────────────────────
+
+/**
+ * 上下文**被谁占掉了**。
+ *
+ * ★ 这是归因,不是余量 —— 分母是「已用」而不是窗口,所有档相加恒等于 `used`。
+ * 上面那三层窗口回答「还装得下多少」,这一组回答「已经装进去的那些是什么」,
+ * 是两个不同的问题:一个 3.4% 的读数配上「MCP 占了其中 42%」才是可行动的,
+ * 单看余量只能得出「还早着呢」,而挂满 MCP 的工作区在**一句话都没聊**的时候
+ * 就已经少掉半个窗口了。
+ *
+ * ★ 分档就是分档到**用户能关掉的那个东西**。`tools-mcp` 因此带 `detail`
+ * (按 server 拆):「MCP 占 42%」不可行动,「github 这一个占 28%」可以。
+ * 同理没有 `tools-skill` 这一档 —— 技能的清单段和它带的工具对用户是**一件事**
+ * (设置里就是一个开关),拆成两行只会让人以为关掉技能只省下其中一半。
+ */
+export type ContextSegmentKind =
+  /** 基础提示词 + 角色 + 环境事实 + 模式附录。用户关不掉,但它是基线。 */
+  | 'system'
+  /** 技能清单段 + 技能注册的工具。 */
+  | 'skills'
+  | 'tools-builtin'
+  | 'tools-mcp'
+  /** 个性化、AGENTS.md、每轮注入的状态块 —— 用户自己写进去的那些。 */
+  | 'instructions'
+  /** 真实对话(含工具结果)。压缩唯一能减掉的就是这一档。 */
+  | 'messages'
+
+export interface ContextSegmentDetail {
+  id: string
+  label: string
+  tokens: number
+}
+
+export interface ContextSegment {
+  kind: ContextSegmentKind
+  tokens: number
+  /** 目前只有 `tools-mcp` 填,按 token 降序。 */
+  detail?: ContextSegmentDetail[]
+}
+
+/**
+ * 归因用的百分比:分母是**已用量**,不是窗口。
+ *
+ * ★ 空会话(`used` 为 0)返回 0 而不是 NaN —— 界面上 `NaN%` 是个渲染 bug 的样子,
+ * 而这里的 0 是真的:还没发过请求,确实什么都没占。
+ */
+export function contextSegmentShare(tokens: number, used: number): number {
+  if (!Number.isFinite(used) || used <= 0) return 0
+  return Math.max(0, Math.min(1, tokens / used))
+}
+
+/**
+ * **还没发过请求时**的归因 —— 装配一次但不发出去。
+ *
+ * ★ 它存在的理由就是这个功能最值钱的那一半:一个挂满 MCP 的工作区在**一句话
+ * 都没聊**的时候就已经少掉半个窗口,而那个数只有在你还没开始聊的时候看见才有用。
+ * 等第一条消息发出去,窗口已经被占了,再看只是事后报告。
+ *
+ * ★ 它是**估算**,和 `transcript.lastInputTokens`(上游回报的真值)不是一个东西。
+ * 所以界面上只有在真值还不存在时才拿它顶上,一旦有过一轮真实请求就让位。
+ */
+export interface ContextPreview {
+  used: number
+  window: number
+  segments: ContextSegment[]
+}
+
 export type ContextCheckpointSource = 'model' | 'mechanical' | 'manual' | 'auto'
 export type ContextStatusPhase = 'preparing' | 'ready' | 'fallback' | 'error'
 
@@ -119,6 +187,33 @@ export interface ContextCheckpoint {
   createdAt: number
   updatedAt: number
   revision: number
+}
+
+/**
+ * 历史被改写之后**锚不回去**的检查点 —— 它描述的那段消息已经不在了。
+ *
+ * 删一轮 / 编辑后重跑都会截掉一段消息,而检查点表**不跟着动**:留下来的孤儿
+ * 有两重害处。界面上它落进顶部那个「上下文检查点」面板赖着不走(画不出线,
+ * 因为锚点没了);更要命的是 `agent-session` 启动时会把最新那条非机械检查点
+ * 当作 `contextNote` 恢复回来,于是一段**描述已删内容**的摘要被继续塞进每一次
+ * 请求 —— 用户删了消息,模型却还记得,而且全程不报错。
+ *
+ * ★ **判据只看锚点消息在不在,不看覆盖范围。** 删掉一轮早期对话时,后面那条
+ * 检查点的摘要里确实混着被删内容,但它同时概括了大量**还在**的消息;为那几句
+ * 整条丢掉,压缩线和折叠计数会一起凭空消失。锚点还在 = 这条线还有地方可落。
+ *
+ * ★ **没有锚点字段的老数据一律留着。** 分不清它是「历史还在」还是「被删了」,
+ * 而误删不可逆。它们由 `unanchoredCheckpoints` 交给顶部面板兜底。
+ */
+export function orphanedCheckpoints(
+  keptMessageIds: ReadonlySet<string>,
+  checkpoints: readonly ContextCheckpoint[]
+): ContextCheckpoint[] {
+  return checkpoints.filter(
+    (checkpoint) =>
+      checkpoint.coveredThroughMessageId !== undefined &&
+      !keptMessageIds.has(checkpoint.coveredThroughMessageId)
+  )
 }
 
 export interface ContextStatus {

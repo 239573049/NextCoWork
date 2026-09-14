@@ -76,7 +76,12 @@ describe('oauthView', () => {
   it('★★ 正在登录时压过旧凭证 —— 否则会让人以为登录已经完成了', () => {
     const view = oauthView(info({ email: 'old@b.test' }), { phase: 'waiting' })
     // ★ `needsPaste` 缺省为 false —— 回环那条(绝大多数)不需要用户动手
-    expect(view).toEqual({ state: 'signing-in', phase: 'waiting', needsPaste: false })
+    expect(view).toEqual({
+      state: 'signing-in',
+      phase: 'waiting',
+      needsPaste: false,
+      device: null
+    })
   })
 
   it('三个中间阶段都算 signing-in', () => {
@@ -147,7 +152,38 @@ describe('oauthView · 要不要粘', () => {
     expect(oauthView(null, { phase: 'waiting', needsPastedCode: true })).toEqual({
       state: 'signing-in',
       phase: 'waiting',
-      needsPaste: true
+      needsPaste: true,
+      device: null
+    })
+  })
+})
+
+describe('oauthView · 设备码的配对码', () => {
+  it('★ 两个字段都在，才带得出一个 device', () => {
+    expect(
+      oauthView(null, {
+        phase: 'waiting',
+        userCode: 'B7MB-FOW3',
+        verificationUri: 'https://www.kimi.com/code/authorize_device'
+      })
+    ).toEqual({
+      state: 'signing-in',
+      phase: 'waiting',
+      needsPaste: false,
+      device: {
+        userCode: 'B7MB-FOW3',
+        verificationUri: 'https://www.kimi.com/code/authorize_device'
+      }
+    })
+  })
+
+  it('★★ 只来了一半就整个判成「不是设备码」—— 半个配对码画不出可用的界面', () => {
+    const view = oauthView(null, { phase: 'waiting', userCode: 'B7MB-FOW3' })
+    expect(view).toEqual({
+      state: 'signing-in',
+      phase: 'waiting',
+      needsPaste: false,
+      device: null
     })
   })
 })
