@@ -9,7 +9,14 @@ vi.mock('../../services/agent', () => ({
 vi.mock('../../services/app', () => ({
   getSessionInput: vi.fn(async () => null), persistSessionInput: vi.fn()
 }))
-vi.mock('../../services/sessions', () => ({ getSession: vi.fn() }))
+/*
+  ★ `replaceHistory` 也得在:恢复一个「跑完了还没汇报」的后台子代理时,
+  汇报那条路现在会走到底 —— 拿不到发消息的档位就置 `blocked` 并落盘,
+  而以前它在拿不到档位时直接 return,一个 store 写入都没有。
+*/
+vi.mock('../../services/sessions', () => ({
+  getSession: vi.fn(), replaceHistory: vi.fn(async () => {})
+}))
 
 import { attachRun } from '../../services/agent'
 import { getSession } from '../../services/sessions'
