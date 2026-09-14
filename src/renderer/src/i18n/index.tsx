@@ -978,7 +978,7 @@ const ZH: Messages = {
     '选择之前导出的 JSON 文件。同 ID 的供应商及模型列表会被文件内容覆盖；若文件包含加密凭证，请输入导出时设置的密码。',
   'provider.importPassword': '导入密码',
   'provider.importPasswordPlaceholder': '没有加密凭证可留空',
-  "models.catalogHint": ({ count }) =>
+  "models.catalogHint": ({ count }: Record<string, string | number>) =>
     `内置 ${count} 家预设，地址与协议经探针实测。添加后在右侧填密钥即可用`,
   "models.customProvider": "自定义供应商",
   "models.customProviderHint": "配置自定义 API 兼容的供应商",
@@ -992,9 +992,9 @@ const ZH: Messages = {
   "models.importNoProviders": "没有可导入的提供商",
   "models.importNoProvidersHint": "该来源的配置里没有自定义提供商",
   "models.importNoBaseUrl": "缺少 base URL,无法导入",
-  "models.importModelCount": ({ count }: { count: number }) => `${count} 个模型`,
+  "models.importModelCount": ({ count }: Record<string, string | number>) => `${count} 个模型`,
   "models.importHasKey": "源侧已配密钥",
-  "models.importSelected": ({ count }: { count: number }) => `导入所选 (${count})`,
+  "models.importSelected": ({ count }: Record<string, string | number>) => `导入所选 (${count})`,
   "models.customProviderTitle": "添加自定义供应商",
   "models.customProviderKeyHint": "创建后在这一栏填密钥、拉模型列表。",
   "models.customNamePlaceholder": "公司内网中转",
@@ -2724,7 +2724,7 @@ const EN: Messages = {
     'Choose a JSON file exported earlier. Providers and model lists with matching IDs are replaced by the file; if it contains encrypted credentials, enter the export password.',
   'provider.importPassword': 'Import password',
   'provider.importPasswordPlaceholder': 'Leave blank when there are no encrypted credentials',
-  "models.catalogHint": ({ count }) =>
+  "models.catalogHint": ({ count }: Record<string, string | number>) =>
     `${count} presets are included. Endpoints and protocols are probe-tested; add one and enter its key on the right.`,
   "models.customProvider": "Custom provider",
   "models.customProviderHint": "Configure any API-compatible provider",
@@ -2738,9 +2738,9 @@ const EN: Messages = {
   "models.importNoProviders": "No providers to import",
   "models.importNoProvidersHint": "This source has no custom providers configured",
   "models.importNoBaseUrl": "Missing base URL, cannot import",
-  "models.importModelCount": ({ count }: { count: number }) => `${count} models`,
+  "models.importModelCount": ({ count }: Record<string, string | number>) => `${count} models`,
   "models.importHasKey": "key set in source",
-  "models.importSelected": ({ count }: { count: number }) => `Import selected (${count})`,
+  "models.importSelected": ({ count }: Record<string, string | number>) => `Import selected (${count})`,
   "models.customProviderTitle": "Add a custom provider",
   "models.customProviderKeyHint": "Enter its key and fetch models here once created.",
   "models.customNamePlaceholder": "Internal gateway",

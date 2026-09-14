@@ -713,7 +713,7 @@ export interface IpcInvokeMap {
     syncNow、resolveConflict 会改状态。
   */
   /** 探测本机来源。不弹对话框,找不到就如实回 not-found。 */
-  'imports:detect': { req: { sourceKind: 'claude-code' | 'codex' }; res: ImportSourceState }
+  'imports:detect': { req: { sourceKind: ImportSourceKind }; res: ImportSourceState }
   /**
    * 让用户自己指定配置目录。★ 走主进程 dialog.showOpenDialog ——
    * 渲染层永不指定任意路径(方案 §9)。取消返回当前状态,不报错。
@@ -721,7 +721,7 @@ export interface IpcInvokeMap {
    * 这条入口不能省:Finder 启动的 Electron 没有 shell 环境变量,
    * `CLAUDE_CONFIG_DIR` 在那种启动方式下读不到。
    */
-  'imports:chooseSource': { req: { sourceKind: 'claude-code' | 'codex' }; res: ImportSourceState }
+  'imports:chooseSource': { req: { sourceKind: ImportSourceKind }; res: ImportSourceState }
   'imports:getState': { req: { sourceId: string }; res: ImportSourceState }
   /**
    * 扫描并产出不可变快照。★ 返回的是**句柄 + 计数**,不是全部条目 ——
