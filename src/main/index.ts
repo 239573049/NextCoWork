@@ -319,14 +319,20 @@ function prepareProjectDatabaseDirectory(): string {
       const source = `${legacyPath}${suffix}`
       if (existsSync(source)) copyFileSync(source, `${targetPath}${suffix}`)
     }
-    // Move application-owned file trees alongside the copied database. The
-    // attachment rows contain absolute paths, so rewrite those references in
-    // the copied database before the normal migration runner opens it.
+    /*
+      Move application-owned file trees alongside the copied database. The
+      attachment rows contain absolute paths, so rewrite those references in
+      the copied database before the normal migration runner opens it.
+
+      ★ `force: false` = **合并,但一个已有文件都不覆盖**,而不是「目标目录存在就整棵跳过」。
+      新根在真正启动成功之前就可能已经有东西了(比如一次半途而废的运行留下的
+      `skills/`,或者内置技能的安装),那时候整棵跳过就等于把用户自己写的技能
+      静静丢掉 —— 而日志里一个字都不会有。
+    */
     const managedDirs = ['attachments', 'skills', 'agents', 'commands', 'workspaces']
     for (const name of managedDirs) {
       const source = join(legacyRoot, name)
-      const target = join(targetDir, name)
-      if (existsSync(source) && !existsSync(target)) cpSync(source, target, { recursive: true })
+      if (existsSync(source)) cpSync(source, join(targetDir, name), { recursive: true, force: false })
     }
     // 全局指令与全局设置(目前只有钩子)是单文件,和上面那些目录同等重要。
     for (const name of ['AGENTS.md', GLOBAL_SETTINGS_FILENAME]) {
@@ -338,9 +344,9 @@ function prepareProjectDatabaseDirectory(): string {
     // is the shared attachments/themes subtree.
     const legacyThemes = join(legacyRoot, 'themes')
     const targetThemes = join(targetDir, 'attachments', 'themes')
-    if (existsSync(legacyThemes) && !existsSync(targetThemes)) {
+    if (existsSync(legacyThemes)) {
       mkdirSync(dirname(targetThemes), { recursive: true })
-      cpSync(legacyThemes, targetThemes, { recursive: true })
+      cpSync(legacyThemes, targetThemes, { recursive: true, force: false })
     }
     try {
       const migrated = new DatabaseSync(targetPath)

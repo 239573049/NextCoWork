@@ -140,6 +140,9 @@ const MANAGED_LOCAL_PATHS = [
   'themes',
   'skills',
   'agents',
+  // ★ 全局斜杠命令。漏了它的话「删除全部数据并退出」之后,用户自己写的 `/xxx`
+  // 还原封不动地留在盘上 —— 和 skills/agents 同一棵树,没有理由区别对待。
+  'commands',
   'plugins',
   'plugin',
   'logs',
@@ -148,6 +151,8 @@ const MANAGED_LOCAL_PATHS = [
   // Migrated application instructions and Chromium's development/profile
   // marker files also belong to this app-level userData tree.
   'AGENTS.md',
+  // ★ 全局设置(目前只有钩子)。同上:不清的话「全部删除」之后钩子还在跑。
+  GLOBAL_SETTINGS_FILENAME,
   'DevToolsActivePort',
   ...ELECTRON_PROFILE_PATHS
 ] as const

@@ -10,7 +10,7 @@
  * 密钥访问器(加解密属于 `main/host/index.ts`),所以直接对 `repo` 测字节保真。
  */
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -545,8 +545,8 @@ describe('搜索服务', () => {
 })
 
 describe('迁移', () => {
-  it('默认数据库目录是项目下的 .next-cowork', () => {
-    expect(defaultDatabaseDirectory()).toBe(join(process.cwd(), DATABASE_DIRNAME))
+  it('默认数据库目录是主目录下的 .next-cowork,与 cwd 无关', () => {
+    expect(defaultDatabaseDirectory()).toBe(join(homedir(), DATABASE_DIRNAME))
   })
 
   it('重开不会重跑迁移,也不会清空已有的行', () => {

@@ -5,7 +5,7 @@
  *
  * | 端口 | 为什么非 Electron 不可 |
  * |---|---|
- * | `paths`   | 统一的项目级 `.next-cowork` 数据目录与系统临时目录 |
+ * | `paths`   | 统一的用户级 `~/.next-cowork` 数据根与系统临时目录 |
  * | `secrets` | `safeStorage` 用的是系统钥匙串,没有纯 Node 的等价物 |
  * | `fetch`   | `net.fetch` 走 Chromium 网络栈,于是 `net/proxy.ts` 那一次 `setProxy` 对全应用的出站请求一起生效 |
  *
@@ -83,9 +83,9 @@ export function electronHost(): KernelHost {
   return withDemo(
     nodeHost({
       paths: {
-        // ★ 必须是 `databaseDirectory()`(已打开的库所在目录)而不是 cwd 派生的默认值 ——
-        // 打包后数据根是系统 userData,两者会分叉,skills/agents 的文件树就会写到
-        // 一个跟数据库无关的目录里去。这个函数是 lazy 的,调用时库一定已经打开。
+        // ★ 必须是 `databaseDirectory()`(**已打开的库**所在目录)而不是那个默认值 ——
+        // 传了 `--user-data-dir` 或走恢复流程时两者会分叉,skills/agents/commands 的
+        // 文件树就会写到一个跟数据库无关的目录里去。这个函数是 lazy 的,调用时库一定已经打开。
         userData: () => databaseDirectory(),
         temp: () => app.getPath('temp')
       },
