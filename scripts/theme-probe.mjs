@@ -153,12 +153,12 @@ try {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_NO_ATTACH_CONSOLE
-  // ★ `--user-data-dir` 给的是**基准路径**,不是最终路径:`main/index.ts` 在
-  // `is.dev` 下会把它改成 `<路径>-dev`。而这个探针跑的是未打包的 `out/`
-  // (`electron .`),所以走的正是那条分支 —— 预置文件得放进带后缀的那一个,
-  // 否则 `theme:listImages` 只会回一张空表,看起来像索引读坏了
+  // ★ `--user-data-dir` **就是**最终数据根(`main/index.ts` 的 `resolveDataRoot()`
+  // 认这个开关;不传才落到 `~/.next-cowork`)。预置文件必须放进应用真正会读的那个
+  // 目录 —— 主题的正规位置是 `<数据根>/attachments/themes/`,放错地方的表现是
+  // `theme:listImages` 回一张空表,看起来像索引读坏了。
   const userData = `/tmp/nextcowork-theme-${Date.now()}`
-  const themes = join(`${userData}-dev`, 'themes')
+  const themes = join(userData, 'attachments', 'themes')
   mkdirSync(themes, { recursive: true })
   writeFileSync(join(themes, `${SEEDED_ID}.png`), Buffer.from(PNG_1PX, 'base64'))
   writeFileSync(
@@ -207,6 +207,19 @@ try {
     cdp.eval('typeof window.nextcowork').then((t) => t === 'object')
   )
   log(`✓ 窗口起来了 · ${target.title || target.url}`)
+
+  // ★ 全新 user-data 的第一屏只有「登录 / 免登录使用」。不过这道门的话,后面每一步
+  // 都在跟一个根本没有主题界面的页面较劲,而报错只会是一句超时。
+  const needsAuth = await cdp.eval(
+    `[...document.querySelectorAll('button')].some((b) => b.textContent?.includes('免登录使用'))`
+  )
+  if (needsAuth) {
+    await cdp.eval(
+      `[...document.querySelectorAll('button')].find((b) => b.textContent?.includes('免登录使用'))?.click(), true`
+    )
+    await sleep(1500)
+    log('✓ 走「免登录使用」进主界面')
+  }
 
   const setColor = async (colorTheme) => {
     const r = await cdp.invoke('settings:update', { colorTheme })
