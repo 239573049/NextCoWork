@@ -4,10 +4,13 @@
  * ★★ 这里没有任何一家的知识:端点、client_id、回调怎么接、怎么提账号身份,
  * 全部从 `OAuthProviderSpec` 里读(见 `registry.ts` 的文件头)。加一家 = 加一行数据。
  *
- * ★ 两种授权方式各一段编排,分岔点只有 `runOAuthFlow` 里那一个 switch:
- * - **授权码**(ChatGPT / ZCode):开授权页 → 从回调或粘贴里取 code → 换 token
+ * ★ 四种授权方式各一段编排,分岔点只有 `runOAuthFlow` 里那一个三元链:
+ * - **授权码**(ChatGPT):开授权页 → 从回调或粘贴里取 code → 换 token
+ * - **服务端发起 + 双通道**(ZCode):init 拿服务端签发的授权 URL → 回环换码和
+ *   轮询赛跑,先到先得(见 `runCliPollFlow` 的文件内注释)
  * - **设备码**(RFC 8628,Kimi):申请配对码 → 用户去浏览器输 → 按 interval 轮询
- * 拿到 token 之后的一切(第二跳、身份提取、凭证落盘)两条路共用。
+ * - **密钥绑定**(Ollama):开绑定页绑公钥 → 轮询到生效(全程无 token)
+ * 拿到 token 之后的一切(第二跳、身份提取、凭证落盘)四条路共用。
  *
  * ★ 零 Electron import。`shell.openExternal` 是**注入**进来的(`openBrowser`),
  * `fetch` 和 `now` 也是 —— 于是整条流程可以在纯 Node 里用假上游跑完。
@@ -18,6 +21,7 @@ import { awaitOAuthCallback, type LoopbackResult } from '../../net/oauth-loopbac
 import { record, str } from './issuers/shared'
 import { createPkce, randomState, stateMatches } from './pkce'
 import {
+  type OAuthExchangeContext,
   redirectUriOf,
   type OAuthGrant,
   type OAuthProviderSpec,
@@ -382,6 +386,384 @@ async function runAuthorizationCodeFlow(
   return token.json
 }
 
+/* ==================== 服务端发起 + 双通道(ZCode) ==================== */
+
+/**
+ * 本地兜底超时的上限。真实 ZCode.app 同款(它对 pending flow 的本地超时就是
+ * `min(300s, expires_at - now)`):服务端给的窗口再长,一条没人理的授权也不该
+ * 在界面上转超过五分钟 —— 和另外两条路径的兜底时长也是同一个量级。
+ */
+const CLI_FLOW_TIMEOUT_CAP_MS = 300_000
+
+/**
+ * A 通道获胜后,回环服务器再多活这几毫秒给迟到的浏览器请求回一页「已授权」。
+ *
+ * ★ B 通道(轮询)赢的时候,用户的浏览器可能正走在跳转途中 —— 立刻 close 的话
+ * 它会撞上 ECONNREFUSED,看到一个长得像「登录失败」的错误页,而登录其实成功了。
+ */
+const CLI_LANDING_LINGER_MS = 3_000
+
+type CliPollGrant = Extract<OAuthGrant, { kind: 'cli-poll' }>
+
+/** init 响应里我们要的那几样(已经过校验,下游可以放心用) */
+interface CliFlowInit {
+  flowId: string
+  authorizeUrl: URL
+  /** 服务端签发的 state —— 授权 URL 自带、回调原样带回,是 A 通道的比对基准 */
+  state: string
+  expiresAtMs: number
+  pollIntervalMs: number
+}
+
+/**
+ * 申请一条服务端发起的授权 flow。
+ *
+ * ★★ pollToken 是**客户端自己生成**的随机数(真实 ZCode.app 生成 32 字节 hex,
+ * 我们用同一个随机源的 `randomState`):init 时随 Bearer 头交上去、服务端把它和
+ * flow 绑定、之后轮询必须还带它 —— 于是**只有发起这条 flow 的进程能取到结果**,
+ * 这也是这条流程真正的防重放防线(授权 URL 里的 state 只是落地页的比对基准)。
+ */
+async function initCliFlow(
+  deps: OAuthFlowDeps,
+  grant: CliPollGrant,
+  pollToken: string
+): Promise<CliFlowInit> {
+  const res = await deps.fetch(grant.initUrl, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${pollToken}`,
+      'content-type': 'application/json',
+      accept: 'application/json',
+      ...(deps.spec.oauthHeaders ?? {})
+    },
+    body: JSON.stringify({ provider: grant.provider }),
+    signal: deps.signal
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new OAuthFailedError(`初始化授权流程失败（HTTP ${res.status}）：${text.slice(0, 300)}`)
+  }
+  let json: unknown
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new OAuthFailedError('初始化授权流程失败：响应不是 JSON')
+  }
+  const body = record(json)
+  if (typeof body?.['code'] === 'number' && body['code'] !== 0) {
+    const msg = str(body['msg']) ?? str(body['message']) ?? '未说明原因'
+    throw new OAuthFailedError(`初始化授权流程失败（${body['code']}）：${msg}`)
+  }
+  const data = record(body?.['data'])
+  const flowId = str(data?.['flow_id'])
+  const authorizeUrlRaw = str(data?.['authorize_url'])
+  const expiresAt = data?.['expires_at']
+  const pollInterval = data?.['poll_interval_sec']
+  if (
+    flowId === undefined ||
+    authorizeUrlRaw === undefined ||
+    typeof expiresAt !== 'number' ||
+    !Number.isFinite(expiresAt) ||
+    typeof pollInterval !== 'number' ||
+    !Number.isFinite(pollInterval)
+  ) {
+    throw new OAuthFailedError('初始化授权流程失败：响应里缺少 flow_id / authorize_url / 有效时限或轮询间隔')
+  }
+
+  let authorizeUrl: URL
+  try {
+    authorizeUrl = new URL(authorizeUrlRaw)
+  } catch {
+    throw new OAuthFailedError('初始化授权流程失败：authorize_url 不是一个合法地址')
+  }
+  const state = authorizeUrl.searchParams.get('state')?.trim() ?? ''
+  const expiresAtMs = expiresAt * 1000
+  const pollIntervalMs = pollInterval * 1000
+  const windowMs = expiresAtMs - deps.now()
+  /*
+    ★ 这批校验逐条对着真实 ZCode.app 抄(它对不合规 init 响应一律当场报
+    「初始化响应无效」):https 是硬要求 —— http 的话整条授权链路都裸奔;
+    state 缺了 A 通道没有比对基准;间隔必须 ≥1s 且小于窗口,否则要么空转
+    要么永远轮不到 ready。
+  */
+  if (
+    authorizeUrl.protocol !== 'https:' ||
+    state === '' ||
+    pollIntervalMs < 1_000 ||
+    windowMs <= 0 ||
+    pollIntervalMs >= windowMs
+  ) {
+    throw new OAuthFailedError('初始化授权流程失败：响应无效')
+  }
+  return { flowId, authorizeUrl, state, expiresAtMs, pollIntervalMs }
+}
+
+/**
+ * B 通道:轮询直到服务端把 flow 标成 ready。
+ *
+ * ★★ 返回的是 **poll 响应的原样 JSON**(信封不拆)—— 它和换码响应同构
+ * (`{code, data:{token, <provider>:{access_token}, user}}`,2026-09-15 逆向
+ * ZCode.app v3.11.2 确认),于是下游的 `finishExchange`/`identity` 两条通道共用。
+ * 这里也因此**一个字段都不认识**:token 长在哪层、user 里有什么,是 issuer 的知识。
+ */
+async function pollCliFlow(
+  deps: OAuthFlowDeps,
+  init: CliFlowInit,
+  pollUrl: string,
+  pollToken: string,
+  deadline: number,
+  signal: AbortSignal
+): Promise<unknown> {
+  let nextPollAt = deps.now()
+  for (;;) {
+    const waitMs = nextPollAt - deps.now()
+    if (waitMs > 0) await sleep(waitMs, signal)
+    nextPollAt = deps.now() + init.pollIntervalMs
+    if (deps.now() >= deadline) throw new OAuthAbandonedError('timeout')
+
+    let res: Response
+    try {
+      res = await deps.fetch(pollUrl, {
+        headers: {
+          authorization: `Bearer ${pollToken}`,
+          accept: 'application/json',
+          ...(deps.spec.oauthHeaders ?? {})
+        },
+        signal
+      })
+    } catch {
+      /*
+        ★★ 网络层错误**可重试**(真实 ZCode.app 同款):轮询本来就是对着一个
+        还没发生的事件反复问,上游抖一下就放弃的话,一次瞬时断网就废掉一条
+        用户已经在浏览器里点了「同意」的授权。真正的上限是 deadline。
+      */
+      if (signal.aborted) throw new OAuthAbandonedError('cancelled')
+      continue
+    }
+
+    const text = await res.text()
+    /*
+      ★★ 4xx(408/429 除外)是**致命**的:它意味着 flow_id/pollToken 不被认、
+      或 flow 已被服务端作废 —— 这两种情况重试到天荒地老也不会变好。
+      408/429 和 5xx 归为可重试故障,交给下一轮。
+    */
+    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+      throw new OAuthFailedError(`查询授权状态失败（HTTP ${res.status}）：${text.slice(0, 300)}`)
+    }
+    if (!res.ok) continue
+
+    let json: unknown
+    try {
+      json = JSON.parse(text)
+    } catch {
+      continue
+    }
+    const body = record(json)
+    if (typeof body?.['code'] === 'number' && body['code'] !== 0) {
+      const msg = str(body['msg']) ?? str(body['message']) ?? '未说明原因'
+      throw new OAuthFailedError(`查询授权状态失败（${body['code']}）：${msg}`)
+    }
+    const status = str(record(body?.['data'])?.['status'])
+    if (status === undefined) throw new OAuthFailedError('查询授权状态失败：响应里没有 status')
+    if (status === 'pending') continue
+    if (status === 'failed') throw new OAuthFailedError('授权失败（服务端标记该次授权未完成）')
+    if (status !== 'ready') {
+      throw new OAuthFailedError(`查询授权状态失败：未知的 status「${status}」`)
+    }
+    deps.onPhase?.('exchanging')
+    return json
+  }
+}
+
+/**
+ * 服务端发起 + 双通道:init 拿授权 URL → A(回环换码)和 B(轮询)赛跑。
+ *
+ * ★★ **为什么是赛跑而不是二选一**:两条通道各自的失败模式互不重叠 —— A 依赖
+ * 浏览器能把用户送回本地(自定义协议被抢、浏览器策略拦截时它死了),B 依赖
+ * 轮询端点活着(契约变了它死了)。真实 ZCode.app 就是两条同时跑、先到先得,
+ * 迟到的那条被幂等吸收。我们只是把它那条 `zcode://` 深链换成了回环地址
+ * (不注册自定义协议的理由见 `issuers/zcode-bigmodel.ts` 文件头)。
+ */
+async function runCliPollFlow(deps: OAuthFlowDeps, grant: CliPollGrant): Promise<unknown> {
+  const { spec, signal } = deps
+  const pollToken = randomState()
+
+  let init: CliFlowInit
+  try {
+    init = await initCliFlow(deps, grant, pollToken)
+  } catch (err) {
+    /*
+      ★★ init 失败 = 新端点这条路走不通(网络、WAF、契约变了),**整体降级**跑
+      fallback 里那份实测验证过的回环+换码 grant。降级发生在打开浏览器之前,
+      用户不会看到两个授权页。用户主动取消不降级 —— 那不是端点的问题。
+    */
+    if (signal.aborted || grant.fallback === undefined) throw err
+    return await runAuthorizationCodeFlow(deps, grant.fallback)
+  }
+
+  deps.onPhase?.('opening')
+
+  const deadline = deps.now() + Math.min(CLI_FLOW_TIMEOUT_CAP_MS, init.expiresAtMs - deps.now())
+  const inner = new AbortController()
+  const forward = (): void => inner.abort()
+  signal.addEventListener('abort', forward, { once: true })
+
+  let openError: unknown = null
+  let landingUri = ''
+
+  try {
+    /*
+      ★ A 通道。回环的 `expectedState` 用**服务端签发**的那个 —— 授权 URL 带着
+      它出去、回调带着它回来,比对逻辑(含 timingSafeEqual)在 loopback 里,
+      和另外两条路径是同一道防线。
+    */
+    const channelA = (async (): Promise<unknown> => {
+      const result = await awaitOAuthCallback({
+        expectedState: init.state,
+        signal: inner.signal,
+        path: grant.landingPath,
+        port: 0,
+        codeParam: spec.callbackCodeParam,
+        timeoutMs: deadline - deps.now(),
+        lingerMs: CLI_LANDING_LINGER_MS,
+        onListening: (bound) => {
+          landingUri = `http://${grant.host ?? '127.0.0.1'}:${bound}${grant.landingPath}`
+          init.authorizeUrl.searchParams.set(grant.redirectParam, landingUri)
+          deps.onPhase?.('waiting')
+          void deps
+            .openBrowser(init.authorizeUrl.toString())
+            .catch((e: unknown) => {
+              openError = e
+              inner.abort()
+            })
+        }
+      })
+      if (result.status === 'ok' && result.code !== undefined) {
+        deps.onPhase?.('exchanging')
+        const args: OAuthTokenRequestArgs = {
+          code: result.code,
+          redirectUri: landingUri,
+          /*
+            ★ 这条流程的授权 URL 是服务端拼的,从没发过 PKCE challenge,
+            verifier 自然无从谈起 —— ZCode 的 tokenRequest 也不读它。
+          */
+          verifier: '',
+          state: init.state,
+          clientId: spec.clientId
+        }
+        let token: Awaited<ReturnType<typeof postToken>>
+        try {
+          token = await postToken(
+            spec,
+            deps.fetch,
+            spec.tokenRequest?.(args) ?? defaultTokenRequest(args),
+            inner.signal
+          )
+        } catch (err) {
+          if (signal.aborted) throw new OAuthAbandonedError('cancelled')
+          throw err
+        }
+        if (!token.ok) {
+          throw new OAuthFailedError(`换取凭证失败（HTTP ${token.status}）：${token.body.slice(0, 300)}`)
+        }
+        return token.json
+      }
+      if (result.status === 'denied') throw new OAuthFailedError(result.reason ?? '授权未完成')
+      /*
+        ★★ timeout **不失败**:落地页没等到回调,恰恰是这条通道存在的意义 ——
+        挂起自己,让 B 通道决定结局。cancelled 要分两种:外层 signal 也断了
+        (用户取消,上抛)、否则是 B 先完成后的清扫(openError 时是浏览器打不开,
+        没有浏览器用户就不可能授权,当场报错而不是等轮询超时)。
+      */
+      if (signal.aborted) throw new OAuthAbandonedError('cancelled')
+      if (openError !== null) {
+        const detail = openError instanceof Error ? openError.message : String(openError)
+        throw new OAuthFailedError(`打不开浏览器：${detail}`)
+      }
+      return await new Promise<never>(() => undefined)
+    })()
+
+    const pollUrl = new URL(
+      `/api/v1/oauth/cli/poll/${encodeURIComponent(init.flowId)}`,
+      grant.initUrl
+    ).toString()
+    const channelB = pollCliFlow(deps, init, pollUrl, pollToken, deadline, inner.signal)
+
+    /*
+      ★ 两个 Promise 各挂一个吞错的 catch:输家晚到的 rejection 不会再被 race
+      消费,不挂的话它是一次 unhandled rejection。
+    */
+    channelA.catch(() => undefined)
+    channelB.catch(() => undefined)
+    return await Promise.race([channelA, channelB])
+  } finally {
+    signal.removeEventListener('abort', forward)
+    inner.abort()
+  }
+}
+
+/* ==================== 密钥绑定(浏览器绑公钥 + 轮询) ==================== */
+
+type KeypairBindingGrant = Extract<OAuthGrant, { kind: 'keypair-binding' }>
+
+const KEYPAIR_POLL_INTERVAL_MS = 1_000
+const KEYPAIR_FLOW_TIMEOUT_MS = 5 * 60_000
+
+/**
+ * 密钥绑定流程:读/生成本机密钥 → 开绑定页(浏览器里登录并绑公钥)→ 轮询直到
+ * 绑定生效 → 可选的可用性验证。
+ *
+ * ★★ 这里**一个协议字节都不知道**(SSH 怎么解析、URL 怎么拼、绑定怎么查,
+ * 全在 `spec.keypairBinding` 钩子束里)—— 和其他三种 grant 的分工完全一致:
+ * 编排归这里,协议归 issuer。
+ *
+ * ★ 第一轮**先查再睡**:已绑定的机器(比如用户之前跑过官方 `ollama signin`,
+ * 两边共用 `~/.ollama/id_ed25519`)登录是瞬时的,不该白等一个间隔。
+ */
+async function runKeypairBindingFlow(
+  deps: OAuthFlowDeps,
+  grant: KeypairBindingGrant
+): Promise<unknown> {
+  const binding = deps.spec.keypairBinding
+  if (binding === undefined) {
+    throw new OAuthFailedError('这家声明了 keypair-binding,但没有实现 keypairBinding 钩子')
+  }
+
+  const key = await binding.loadOrCreate()
+  deps.onPhase?.('opening')
+  /*
+    ★ 绑定页打不开就当场失败,而不是干等五分钟超时 —— 用户没有别的途径拿到
+    这条 URL(它带着本机公钥,不是一个可以手工拼出来的地址)。
+  */
+  try {
+    await deps.openBrowser(binding.connectUrl(key.publicKeyLine))
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new OAuthFailedError(`打不开浏览器：${detail}`)
+  }
+  deps.onPhase?.('waiting')
+
+  const deadline = deps.now() + (grant.timeoutMs ?? KEYPAIR_FLOW_TIMEOUT_MS)
+  const intervalMs = grant.pollIntervalMs ?? KEYPAIR_POLL_INTERVAL_MS
+  for (;;) {
+    const ctx: OAuthExchangeContext = { fetch: deps.fetch, signal: deps.signal, now: deps.now() }
+    const username = await binding.poll(key, ctx)
+    if (username !== null) {
+      if (binding.verify !== undefined) {
+        deps.onPhase?.('exchanging')
+        await binding.verify(key, ctx)
+      }
+      return {
+        username,
+        privateKeyPem: key.privateKeyPem,
+        publicKeyLine: key.publicKeyLine
+      }
+    }
+    await sleep(intervalMs, deps.signal)
+    if (deps.now() >= deadline) throw new OAuthAbandonedError('timeout')
+  }
+}
+
 /* ======================= 设备码流程(RFC 8628) ======================= */
 
 /**
@@ -589,14 +971,18 @@ async function runDeviceCodeFlow(
 export async function runOAuthFlow(deps: OAuthFlowDeps): Promise<OAuthCredential> {
   const { spec } = deps
   /*
-    ★★ 两种授权方式在这里分岔,而且**只在这里分岔**:再往下(第二跳、身份提取、
-    凭证落盘)两条路完全一样。switch 挂在一个联合类型上,于是将来加第三种授权方式时
-    编译器会在这里报错,而不是让它在运行期走进 else。
+    ★★ 三种授权方式在这里分岔,而且**只在这里分岔**:再往下(第二跳、身份提取、
+    凭证落盘)三条路完全一样。三元链挂在联合类型的判别式上,新加一家时只需要
+    在这里认一个新 kind,而不是让它的知识散进每条分支。
   */
   const token =
     spec.grant.kind === 'device-code'
       ? await runDeviceCodeFlow(deps, spec.grant)
-      : await runAuthorizationCodeFlow(deps, spec.grant)
+      : spec.grant.kind === 'cli-poll'
+        ? await runCliPollFlow(deps, spec.grant)
+        : spec.grant.kind === 'keypair-binding'
+          ? await runKeypairBindingFlow(deps, spec.grant)
+          : await runAuthorizationCodeFlow(deps, spec.grant)
 
   /*
     ★ 第二跳(有的家 token 端点给的还不是能发请求的令牌)。缺省是恒等,

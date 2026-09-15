@@ -1239,3 +1239,57 @@ describe('vendor-first model catalogue', () => {
     expect(row.capabilities.vision).toBe(true)
   })
 })
+
+/* ================================================================
+ * Ollama 家族 —— 条目只带 `:tag` 形态的名字,守的是「Think 开关在这家
+ * 真的生效」:目录按名字匹配,`gpt-oss:120b`(冒号)匹配不上 openai 的
+ * `gpt-oss-120b`(连字符),落空后用户切 Off 也什么都不发。
+ * ================================================================ */
+describe('Ollama 目录条目 · Think 的启用方式', () => {
+  it('★★★ `gpt-oss:120b` 命中 Ollama 条目(effort 档),而不再落空', () => {
+    const row = findBuiltinModel('gpt-oss:120b')
+    expect(row).toBeDefined()
+    expect(row?.manufacturerId).toBe('ollama')
+    expect(row?.thinkingConfig.mode).toBe('effort')
+    expect(row?.thinkingConfig.standardWire).toBe(true)
+    /*
+     * ★ 没有 `none`:官方文档明说 GPT-OSS「布尔被忽略、trace 关不干净」——
+     * 给它一个关不掉的「关」是在骗用户。也没有 `max`(它只认 low/medium/high)。
+     */
+    expect(row?.reasoningEfforts).toEqual(['low', 'medium', 'high'])
+  })
+
+  it('★★ 冒号/连字符两个名字各归各家,互不抢占', () => {
+    // openai 那条(连字符)不能被 ollama 条目顶掉 —— 两边语义确实不同
+    expect(findBuiltinModel('gpt-oss-120b')?.manufacturerId).toBe('openai')
+    expect(findBuiltinModel('gpt-oss:20b')?.manufacturerId).toBe('ollama')
+  })
+
+  it('★★★ 非 gpt-oss 的带 tag 模型给全套档位(官方文档:多数模型接受布尔或档位)', () => {
+    for (const id of ['deepseek-v4-pro:0813', 'qwen3.5:397b']) {
+      const row = findBuiltinModel(id)
+      expect(row?.thinkingConfig.mode, id).toBe('effort')
+      expect(row?.thinkingConfig.standardWire, id).toBe(true)
+      expect(row?.reasoningEfforts, id).toEqual(['none', 'low', 'medium', 'high', 'max'])
+    }
+  })
+
+  it('★ 不带 tag 的名字仍归各自厂商 —— ollama 不重复收录(同 id 双条目会让 exact 匹配静默拿到先注册的那条)', () => {
+    expect(findBuiltinModel('kimi-k3')?.manufacturerId).toBe('moonshot')
+    expect(findBuiltinModel('glm-5.3')?.manufacturerId).toBe('zhipu')
+    // ollama 家族里没有这两个 id
+    const ollamaIds = BUILTIN_MODEL_CATALOG.filter((row) => row.manufacturerId === 'ollama').map((row) => row.id)
+    expect(ollamaIds).not.toContain('kimi-k3')
+    expect(ollamaIds).not.toContain('glm-5.3')
+  })
+
+  it('★ ollama 家族已注册(否则侧边栏不显示,且条目校验会退到 other)', () => {
+    expect(MODEL_MANUFACTURERS.some((m) => m.id === 'ollama')).toBe(true)
+    /*
+     * manufacturerForModelId 是按 id 前缀的启发式,`gpt-oss:120b` 以 `gpt-` 开头
+     * 归 openai —— 这是**对的行为**(gpt-oss 本就是 OpenAI 的开源模型,Ollama 只是
+     * 托管方)。权威的家族归属是目录条目自己的 manufacturerId(上面第一条已断言)。
+     */
+    expect(manufacturerForModelId('gpt-oss:120b').id).toBe('openai')
+  })
+})

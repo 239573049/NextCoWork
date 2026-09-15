@@ -83,7 +83,8 @@ const ISSUER_LABELS: Readonly<Record<OAuthIssuerId, string>> = {
   'zcode-zai': 'Z.AI',
   'zcode-bigmodel': '智谱',
   'kimi-code': 'Kimi',
-  'grok-build': 'Grok'
+  'grok-build': 'Grok',
+  'ollama-cloud': 'Ollama Cloud'
 }
 
 export function oauthIssuerLabel(issuer: OAuthIssuerId): string {
@@ -192,7 +193,13 @@ const SIGN_IN_PROTOCOL: Readonly<Record<OAuthIssuerId, UpstreamProtocol | null>>
     ★ 写成 `'openai-responses'` 同样能跑,但那等于多一处将来会和预设分叉的事实;
     分叉之后的表现是登录成功、第一条消息打到一条没人验过的路上。
   */
-  'grok-build': null
+  'grok-build': null,
+  /*
+    ★★ **不挪**。ollama-cloud 是「双形态」预设(密钥绑定登录 + API Key 并存),
+    用户当前选的协议(openai / anthropic)是用户自己的决定,两种端点都在预设表里
+    且签名鉴权对两者一视同仁 —— 登录不该替用户换端点。
+  */
+  'ollama-cloud': null
 }
 
 /**

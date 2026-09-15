@@ -38,21 +38,37 @@ describe('computeDiff', () => {
     expect(shape(rows)).toEqual(['c:head', 'd:foo', 'a:bar', 'c:tail'])
   })
 
-  it('纯新增行整行高亮,没有对应的删除行', () => {
+  it('落单的新增行只靠行底色表达,不叠词级高亮', () => {
     const rows = computeDiff('a\nc', 'a\nb\nc')
     expect(shape(rows)).toEqual(['c:a', 'a:b', 'c:c'])
-    expect(hi(rows, 'add')).toEqual(['b'])
+    // 整行都是新增时,再把整行标成高亮等于没标 —— 还会糊成一块实心底
+    expect(hi(rows, 'add')).toEqual([])
   })
 
-  it('纯删除行整行高亮', () => {
+  it('落单的删除行同样不叠词级高亮', () => {
     const rows = computeDiff('a\nb\nc', 'a\nc')
     expect(shape(rows)).toEqual(['c:a', 'd:b', 'c:c'])
-    expect(hi(rows, 'del')).toEqual(['b'])
+    expect(hi(rows, 'del')).toEqual([])
   })
 
-  it('多删少增时,配对的做词级 diff,多出的删除行整行标注', () => {
+  it('配对的两行几乎毫不相干时,抹平词级高亮', () => {
+    const rows = computeDiff('<ModelStatusStrip model={model} />', '                <Suspense')
+    // 只是被 LCS 按位置凑成一对,逐词标注会把整行标满 —— 退回行级表达
+    expect(hi(rows, 'add')).toEqual([])
+    expect(hi(rows, 'del')).toEqual([])
+  })
+
+  it('改动占比不高时保留词级高亮', () => {
+    const rows = computeDiff('const a = foo(x)', 'const a = bar(x)')
+    expect(hi(rows, 'add')).toEqual(['bar'])
+    expect(hi(rows, 'del')).toEqual(['foo'])
+  })
+
+  it('增删行数不等时不做词级配对,按先删后增排列', () => {
     const rows = computeDiff('x1\nx2', 'y1')
-    // 第一对 x1/y1 词级配对,x2 落单
-    expect(shape(rows)).toEqual(['d:x1', 'a:y1', 'd:x2'])
+    expect(shape(rows)).toEqual(['d:x1', 'd:x2', 'a:y1'])
+    // 凑不成对,就不标词级高亮
+    expect(hi(rows, 'del')).toEqual([])
+    expect(hi(rows, 'add')).toEqual([])
   })
 })

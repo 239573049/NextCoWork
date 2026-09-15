@@ -37,14 +37,46 @@ describe('ZCODE_ZAI_OAUTH · 授权请求的形状', () => {
     expect(ZCODE_ZAI_OAUTH.scope).toBeUndefined()
   })
 
-  it('★★ redirect_uri 是 127.0.0.1 而不是 localhost（注册值逐字节相等）', () => {
-    expect(
-      ZCODE_ZAI_OAUTH.grant.kind === 'authorization-code' ? ZCODE_ZAI_OAUTH.grant.redirect : null
-    ).toEqual({
-      kind: 'loopback-fixed',
-      port: 9999,
-      path: '/callback',
-      host: '127.0.0.1'
+  it('★★★ 主路径是服务端发起(cli-poll),redirectParam 是 redirect_uri', () => {
+    /*
+      ★★ 2026-09-15 逆向 ZCode.app v3.11.2:官方客户端对 zai 渠道的 authorize_url
+      覆盖的是 `redirect_uri`(bigmodel 那条覆盖 `redirect`,两家不一样)。
+      覆盖错了没有任何早期信号 —— 授权页照开、码照回,但服务端 flow 永远
+      pending,最后一句「授权超时」。
+    */
+    expect(ZCODE_ZAI_OAUTH.grant).toMatchObject({
+      kind: 'cli-poll',
+      initUrl: 'https://zcode.z.ai/api/v1/oauth/cli/init',
+      provider: 'zai',
+      redirectParam: 'redirect_uri'
+    })
+  })
+
+  it('★★★ 落地回环是临时端口 —— 9999 只留给 fallback,平时不再占', () => {
+    /*
+      ★ 用户机器上真在跑的 ZCode CLI 就监听 9999。主路径的服务端发起链路
+      对 redirect 没有注册值约束,没理由和它抢端口;fallback 那份仍然必须
+      逐字节等于注册值 `http://127.0.0.1:9999/callback`(见下一条)。
+    */
+    if (ZCODE_ZAI_OAUTH.grant.kind !== 'cli-poll') throw new Error('grant 不是 cli-poll')
+    expect(ZCODE_ZAI_OAUTH.grant.landingPath).toBe('/callback')
+    expect(ZCODE_ZAI_OAUTH.grant.host).toBe('127.0.0.1')
+  })
+
+  it('★★ fallback 仍是 127.0.0.1:9999 的固定回环（注册值逐字节相等）', () => {
+    const grant = ZCODE_ZAI_OAUTH.grant
+    if (grant.kind !== 'cli-poll' || grant.fallback === undefined) {
+      throw new Error('zai 渠道必须带着 fallback')
+    }
+    expect(grant.fallback).toEqual({
+      kind: 'authorization-code',
+      authorizeUrl: 'https://chat.z.ai/api/oauth/authorize',
+      redirect: {
+        kind: 'loopback-fixed',
+        port: 9999,
+        path: '/callback',
+        host: '127.0.0.1'
+      }
     })
   })
 
@@ -175,6 +207,73 @@ describe('ZCODE_ZAI_OAUTH · finishExchange（第二跳）', () => {
     ) as unknown as typeof globalThis.fetch
     await expect(ZCODE_ZAI_OAUTH.finishExchange!(hop2, ctxWith(fetchImpl))).rejects.toThrow(/403/u)
   })
+
+  it('★★ B 通道的 ready 响应(poll 形状)原样可解析 —— 两条通道共用 finishExchange', async () => {
+    /*
+      ★★ 2026-09-15 逆向 ZCode.app v3.11.2:poll 的 ready 响应和换码响应同构,
+      只是多一个 `status` 字段、user 里的 id 键叫 `user_id`。这条断言守的是
+      「同构」这个前提 —— 它碎了的话 B 通道赢下来的登录会在最后一步报
+      「响应里没有 access_token」,而轮询本身全绿。
+    */
+    const pollReady = {
+      code: 0,
+      data: {
+        status: 'ready',
+        token: 'zcode-jwt',
+        zai: { access_token: 'oauth-at' },
+        user: { user_id: 77, name: 'u', email: 'a@b.test' }
+      }
+    }
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes('/api/auth/z/login')) {
+        return jsonResponse({ code: 0, data: { access_token: BUSINESS_JWT } })
+      }
+      return jsonResponse({ code: 0, data: { email: 'a@b.test' } })
+    }) as unknown as typeof globalThis.fetch
+
+    const merged = await ZCODE_ZAI_OAUTH.finishExchange!(pollReady, ctxWith(fetchImpl))
+    expect(ZCODE_ZAI_OAUTH.identity(merged, 1_000)?.refreshToken).toBe('oauth-at')
+  })
+
+  it('★★ 邮箱优先取自响应的 user.email —— userinfo 端点不再被无谓地打一遍', async () => {
+    /*
+      poll 的 ready 响应自带 user.email(逆向确认),这部分数据已经在手里;
+      userinfo 只是「响应里没有」时的兜底。这条断言里 userinfo 一旦被调用
+      fetch 就抛 —— 抛了测试就红,证明它没被碰。
+    */
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes('/api/auth/z/login')) {
+        return jsonResponse({ code: 0, data: { access_token: BUSINESS_JWT } })
+      }
+      throw new Error('userinfo 不该被调用')
+    }) as unknown as typeof globalThis.fetch
+
+    const merged = await ZCODE_ZAI_OAUTH.finishExchange!(
+      {
+        code: 0,
+        data: { zai: { access_token: 'oauth-at' }, user: { user_id: 77, email: 'a@zai.test' } }
+      },
+      ctxWith(fetchImpl)
+    )
+    expect(ZCODE_ZAI_OAUTH.identity(merged, 1_000)?.email).toBe('a@zai.test')
+  })
+
+  it('★★ user.user_id 也是合法的兜底 id —— poll 响应用这个键名', async () => {
+    /*
+      业务 JWT 解不出 user_id 时走兜底:换码响应给 `user.id`,poll 响应给
+      `user.user_id`,两个都得认 —— 少认一个的表现是「登录成功、凭证不完整」。
+    */
+    const hop2UserId = {
+      code: 0,
+      data: { zai: { access_token: 'oauth-at' }, user: { user_id: 77 } }
+    }
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ code: 0, data: { access_token: 'not-a-jwt' } })
+    ) as unknown as typeof globalThis.fetch
+
+    const merged = await ZCODE_ZAI_OAUTH.finishExchange!(hop2UserId, ctxWith(fetchImpl))
+    expect(ZCODE_ZAI_OAUTH.identity(merged, 1_000)?.accountId).toBe('77')
+  })
 })
 
 describe('ZCODE_ZAI_OAUTH · refresh（重跑第三跳）', () => {
@@ -211,7 +310,20 @@ describe('ZCODE_ZAI_OAUTH · refresh（重跑第三跳）', () => {
 })
 
 describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
-  it('★★★ 走回环，不走 zcode:// 自定义协议', () => {
+  it('★★★ 主路径是服务端发起(cli-poll),redirectParam 是 redirect', () => {
+    /*
+      ★ 逆向 ZCode.app 确认两家覆盖的参数名不同:bigmodel 是 `redirect`
+      (它的授权入口是个登录页,吃 appId/redirect/state),zai 是 `redirect_uri`。
+    */
+    expect(ZCODE_BIGMODEL_OAUTH.grant).toMatchObject({
+      kind: 'cli-poll',
+      initUrl: 'https://zcode.z.ai/api/v1/oauth/cli/init',
+      provider: 'bigmodel',
+      redirectParam: 'redirect'
+    })
+  })
+
+  it('★★★ 落地和 fallback 都走回环，不走 zcode:// 自定义协议', () => {
     /*
       ★ 这条不是「配置偏好」，是这条渠道能不能拿到码的全部关键。
       照抄 ZCode 的 `zcode://oauth/callback` 会被系统直接交给已装的 ZCode，
@@ -219,11 +331,13 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
       `bigmodel.cn` 对 redirect 只有一条 `/^(javascript|data|vbscript):/i` 黑名单，
       没有白名单，所以回环地址是合法的。推导见 `zcode-bigmodel.ts` 文件头。
     */
-    expect(
-      ZCODE_BIGMODEL_OAUTH.grant.kind === 'authorization-code'
-        ? ZCODE_BIGMODEL_OAUTH.grant.redirect
-        : null
-    ).toEqual({
+    const grant = ZCODE_BIGMODEL_OAUTH.grant
+    if (grant.kind !== 'cli-poll' || grant.fallback === undefined) {
+      throw new Error('bigmodel 渠道的 grant 必须是带 fallback 的 cli-poll')
+    }
+    expect(grant.landingPath).toBe('/callback')
+    expect(grant.host).toBe('127.0.0.1')
+    expect(grant.fallback.redirect).toEqual({
       kind: 'loopback-ephemeral',
       path: '/callback',
       host: '127.0.0.1'
@@ -313,56 +427,193 @@ describe('ZCODE_BIGMODEL_OAUTH · 探索性渠道', () => {
     expect((req.body as Record<string, unknown>)['redirect_uri']).toBe('zcode://oauth/callback')
   })
 
-  it('★★★ 第三跳打的是 open.bigmodel.cn/api/auth/z/login，不是 api.z.ai 那条', async () => {
+  it('★★ 没有 z/login 第四跳 —— 2026-09-15 用户实测证伪了它', () => {
     /*
-      ★★ 少了这一跳的表现**不是 401**:登录成功、凭证落库、界面显示已登录,
-      然后每条消息都回 `[1234][网络错误…]`。2026-09-09 实测,三种形状合法的假令牌
-      (`id.secret` / 假 JWT / 无点长串)在同一端点上一律 401 —— 所以 1234 是
-      「过了鉴权、没有推理权限」,而不是令牌不对。推导见 `zcode-bigmodel.ts`。
-
-      ★ 域名钉死:两条渠道的第三跳路径**同名**(`/api/auth/z/login`),
-      发到 api.z.ai 去的话错误信息只会说「用户信息异常」,不指向域名。
+      ★★ 用户真登录一次后,真 token 打 open.bigmodel.cn/api/auth/z/login 得到的
+      是 {"code":500,"msg":"z.ai用户信息异常"} —— 和拿假 token 探到的「token 无效」
+      逐字相同,即该端点不认这条链路的 OAuth token。同期逆向 ZCode.app 打包的 CLI
+      确认:BigModel 渠道从不调 z/login(只有 Z.AI 渠道调 api.z.ai 那条),它走的是
+      下面的 apiKeyProvision。这条断言守着「别把 z/login 加回来」。
     */
-    const fresh = jwt({ user_id: 'u-9' })
-    const seen: string[] = []
-    const fetchImpl = vi.fn(async (url: unknown) => {
-      seen.push(String(url))
-      return jsonResponse({ code: 0, data: { access_token: fresh } })
+    expect(ZCODE_BIGMODEL_OAUTH).not.toMatchObject({ businessLoginUrl: expect.any(String) })
+  })
+
+  /*
+    ★★ 下两条钉的是 2026-09-15 从 ZCode.app 打包 CLI(zcode.cjs 的
+    resolveCodingPlanApiKey)逆向到的三步供应。它是「拿 OAuth token 直接当
+    API key 会 1234」的定案:coding 端点要的是真 API Key(id.secret 形态)。
+  */
+  function bizHarness(
+    routes: { match: (url: string) => boolean; respond: () => Response }[]
+  ): { fetchImpl: typeof globalThis.fetch; calls: { url: string; method: string; auth: string }[] } {
+    const calls: { url: string; method: string; auth: string }[] = []
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push({
+        url,
+        method: init?.method ?? 'GET',
+        auth: String((init?.headers as Record<string, string>)?.['authorization'] ?? '')
+      })
+      const hit = routes.find((r) => r.match(url))
+      if (hit === undefined) return new Response('nope', { status: 404 })
+      return hit.respond()
+    }) as unknown as typeof globalThis.fetch
+    return { fetchImpl, calls }
+  }
+
+  it('★★★ 三步供应:查机构/项目 → 找 zcode-api-key → copy 出 secret 拼成 id.secret', async () => {
+    const { fetchImpl, calls } = bizHarness([
+      {
+        match: (u) => u.endsWith('/api/biz/customer/getCustomerInfo'),
+        respond: () =>
+          jsonResponse({
+            code: 0,
+            data: {
+              organizations: [
+                {
+                  // 名字不含「默认机构」但只有它一个 → 取 [0]
+                  organizationName: '某某科技',
+                  organizationId: 'org-1',
+                  projects: [
+                    { projectName: '实验项目', projectId: 'proj-wrong' },
+                    // 不在首位也按名字命中「默认项目」
+                    { projectName: '默认项目', projectId: 'proj-1' }
+                  ]
+                }
+              ]
+            }
+          })
+      },
+      {
+        match: (u) => u.endsWith('/api_keys') && !u.includes('/copy/'),
+        // code:200 也要算成功 —— CLI 的 isSuccessfulRemoteCode 认 0/200/缺省
+        respond: () =>
+          jsonResponse({
+            code: 200,
+            data: [
+              { name: '手工建的', apiKey: 'other-key' },
+              { name: 'zcode-api-key', apiKey: 'ak-1' }
+            ]
+          })
+      },
+      {
+        match: (u) => u.includes('/api_keys/copy/'),
+        respond: () => jsonResponse({ code: 0, data: { secretKey: 'sk-1' } })
+      }
+    ])
+
+    const merged = await ZCODE_BIGMODEL_OAUTH.finishExchange!(
+      { code: 0, data: { bigmodel: { access_token: 'oauth-at' }, user: { user_id: 9, email: 'u@bm.test' } } },
+      ctxWith(fetchImpl)
+    )
+    // 三步各一次,不多不少(没建 key、没碰任何别的端点)
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://bigmodel.cn/api/biz/customer/getCustomerInfo',
+      'https://bigmodel.cn/api/biz/v1/organization/org-1/projects/proj-1/api_keys',
+      'https://bigmodel.cn/api/biz/v1/organization/org-1/projects/proj-1/api_keys/copy/ak-1'
+    ])
+    // ★ 鉴权头是裸 token,不带 Bearer —— CLI 的 createBizAuthHeaders 原样如此
+    expect(calls.map((c) => c.auth)).toEqual(['oauth-at', 'oauth-at', 'oauth-at'])
+    expect(ZCODE_BIGMODEL_OAUTH.identity(merged, 1_000)).toMatchObject({
+      accessToken: 'ak-1.sk-1',
+      // refreshToken 槽仍是 OAuth token —— 刷新 = 拿它重跑供应
+      refreshToken: 'oauth-at',
+      accountId: '9',
+      // ★ 邮箱来自响应自带的 user.email(bigmodel 没配 userinfo 端点,以前永远拿不到)
+      email: 'u@bm.test'
+    })
+  })
+
+  it('★★★ key 不存在就创建;copy 失败不致命(裸 apiKey 也能用)', async () => {
+    const calls2: { url: string; method: string; body: string }[] = []
+    const fetch2 = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      calls2.push({ url, method, body: String(init?.body ?? '') })
+      if (url.endsWith('/api/biz/customer/getCustomerInfo')) {
+        return jsonResponse({
+          code: 0,
+          data: { organizations: [{ organizationName: '默认机构', organizationId: 'o', projects: [{ projectName: '默认项目', projectId: 'p' }] }] }
+        })
+      }
+      if (url.includes('/api_keys/copy/')) return new Response('boom', { status: 500 })
+      if (method === 'POST') return jsonResponse({ code: 0, data: { name: 'zcode-api-key', apiKey: 'ak-2' } })
+      return jsonResponse({ code: 0, data: [] })
+    }) as unknown as typeof globalThis.fetch
+
+    const merged = await ZCODE_BIGMODEL_OAUTH.finishExchange!(
+      { code: 0, data: { bigmodel: { access_token: 'oauth-at' }, user: { id: 7 } } },
+      ctxWith(fetch2)
+    )
+    // GET 列表(空) → POST 创建(名字对上) → copy(挂了也吞掉)
+    expect(calls2[1]).toMatchObject({ method: 'GET' })
+    expect(calls2[2]).toMatchObject({ method: 'POST', body: JSON.stringify({ name: 'zcode-api-key' }) })
+    expect(calls2[3]?.url).toContain('/api_keys/copy/ak-2')
+    expect(ZCODE_BIGMODEL_OAUTH.identity(merged, 1_000)?.accessToken).toBe('ak-2')
+  })
+
+  it('★ 刷新 = 拿 refreshToken 槽里的 OAuth token 幂等地重跑供应', async () => {
+    const fetch2 = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/biz/customer/getCustomerInfo')) {
+        return jsonResponse({
+          code: 0,
+          data: { organizations: [{ organizationName: '默认机构', organizationId: 'o', projects: [{ projectName: '默认项目', projectId: 'p' }] }] }
+        })
+      }
+      if (url.includes('/api_keys/copy/')) return jsonResponse({ code: 0, data: { secretKey: 'sk-9' } })
+      return jsonResponse({ code: 0, data: [{ name: 'zcode-api-key', apiKey: 'ak-9' }] })
     }) as unknown as typeof globalThis.fetch
 
     const id = await ZCODE_BIGMODEL_OAUTH.refresh!(
       {
         kind: 'oauth',
         issuer: 'zcode-bigmodel',
-        accessToken: '旧 JWT',
+        accessToken: 'ak-1.sk-1',
         refreshToken: 'oauth-at',
         expiresAt: null,
         accountId: 'u-9'
       },
-      ctxWith(fetchImpl)
+      ctxWith(fetch2)
     )
-    expect(seen).toEqual(['https://open.bigmodel.cn/api/auth/z/login'])
-    expect(id?.accessToken).toBe(fresh)
+    expect(id?.accessToken).toBe('ak-9.sk-9')
+    // 「用来再换一次的那个东西」不能被换出来的 key 覆盖,否则只能刷一次
     expect(id?.refreshToken).toBe('oauth-at')
+    expect(id?.accountId).toBe('u-9')
   })
 
-  it('★ 换码之后只打第三跳一个地址 —— 不去碰那条实测 404 的 userinfo', async () => {
+  it('★★ transport:配了第四跳的渠道一个鉴权头都不加(encode 写的已是对的)', () => {
     /*
-      逆向文档记的 `zcode.z.ai/api/oauth/userinfo` 2026-09-09 实测是 404
-      (Z.AI 那条 `chat.z.ai/api/oauth/userinfo` 回 401,是活的),所以这条渠道
-      没有填 `userinfoUrl`。它只用来显示邮箱、失败不致命 —— 钉这一条不是怕它出错,
-      是怕后人照着 Z.AI 那条「补齐」时把一个已知 404 的地址加回来。
+      bigmodel 的 accessToken 现在是一把真 API Key(id.secret),anthropic 协议
+      encode 写的 x-api-key、openai 协议写的 Bearer 都直接认 —— 在 transport
+      里再补 Authorization 只会给「哪个头才是真相」制造第二个答案。
+      Bearer 补头只留给「直接拿 OAuth token 发请求」的渠道(今天没有)。
     */
-    const seen: string[] = []
-    const fetchImpl = vi.fn(async (url: unknown) => {
-      seen.push(String(url))
-      return jsonResponse({ code: 0, data: { access_token: jwt({ user_id: 'u-9' }) } })
-    }) as unknown as typeof globalThis.fetch
+    const bigmodelHeaders = ZCODE_BIGMODEL_OAUTH.transport(
+      {
+        kind: 'oauth',
+        issuer: 'zcode-bigmodel',
+        accessToken: 'ak-1.sk-1',
+        refreshToken: 'oauth-at',
+        expiresAt: null,
+        accountId: 'u-1'
+      },
+      { sessionId: 's' }
+    ).headers
+    expect(bigmodelHeaders['authorization']).toBeUndefined()
+    expect(bigmodelHeaders['user-agent']).toMatch(/^ZCode\//u)
 
-    await ZCODE_BIGMODEL_OAUTH.finishExchange!(
-      { code: 0, data: { bigmodel: { access_token: 'oauth-at' }, user: { id: 9 } } },
-      ctxWith(fetchImpl)
-    )
-    expect(seen).toEqual(['https://open.bigmodel.cn/api/auth/z/login'])
+    const zaiHeaders = ZCODE_ZAI_OAUTH.transport(
+      {
+        kind: 'oauth',
+        issuer: 'zcode-zai',
+        accessToken: 'biz-jwt',
+        refreshToken: 'oauth-at',
+        expiresAt: null,
+        accountId: 'u-1'
+      },
+      { sessionId: 's' }
+    ).headers
+    expect(zaiHeaders['authorization']).toBeUndefined()
   })
 })

@@ -13,6 +13,7 @@ import { AgentSession } from '../../agent-session'
 import { RunHandle } from '../../run-registry'
 import { ToolRegistry } from '../../tool/registry'
 import { UpstreamRouter } from '../router'
+import { generateKeyPair } from '../../oauth/issuers/ollama'
 import { messageItem, responseDone, sse } from './openai-fixtures'
 
 const REF = 'provider:codex'
@@ -136,6 +137,10 @@ async function drain(router: UpstreamRouter, host: ReturnType<typeof nodeHost>):
     handle,
     request
   ).run()
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
 function tokenResponse(): Response {
@@ -266,5 +271,79 @@ describe('router · API Key 凭证零回归', () => {
     const r = rig('sk-plain-key', () => new Response('{}', { status: 401 }))
     await drain(r.router, r.host)
     expect(r.calls.every((c) => !c.url.includes('/oauth/token'))).toBe(true)
+  })
+})
+
+/* ================================================================
+ * 密钥签名凭证(ollama-cloud)—— `signRequest` 逐请求签名在 router 里的行为。
+ * 凭证是真的(issuers/ollama 生成真实密钥),fetch 是假的:这里测的是
+ * 「URL 带 ts、头是签名、401 重发不泄私钥」这三件机械的事。
+ * ================================================================ */
+describe('router · 密钥签名凭证(ollama)', () => {
+  const pair = generateKeyPair()
+  const signedCred: OAuthCredential = {
+    kind: 'oauth',
+    issuer: 'ollama-cloud',
+    accessToken: pair.privateKeyPem,
+    refreshToken: pair.publicKeyLine,
+    expiresAt: null,
+    accountId: 'tester'
+  }
+  const signedProvider: UpstreamProvider = {
+    ...provider,
+    id: 'ollama-cloud',
+    name: 'Ollama Cloud',
+    baseUrl: 'https://ollama.com/v1',
+    credentialRef: REF
+  }
+
+  function isSigned(h: Record<string, string>): boolean {
+    return /^[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]{80,}$/u.test(h['authorization'] ?? '')
+  }
+
+  const signedAlias: ModelAlias = { ...alias, providerId: 'ollama-cloud' }
+
+  it('★★★ URL 带 ts,鉴权头是「公钥:签名」而不是 Bearer,更不是私钥 PEM', async () => {
+    const r = rig(serializeCredential(signedCred), () => sse(responseDone([messageItem])), signedAlias, signedProvider)
+    await drain(r.router, r.host)
+
+    const call = r.calls[0]
+    expect(call).toBeDefined()
+    expect(new URL(call?.url ?? '').searchParams.get('ts')).toMatch(/^\d{10}$/u)
+    expect(isSigned(call?.headers ?? {})).toBe(true)
+    expect(call?.headers['authorization'] ?? '').not.toContain('Bearer')
+    expect(call?.headers['authorization'] ?? '').not.toContain('OPENSSH PRIVATE KEY')
+  })
+
+  it('★★★ 401 → 刷新(whoami 也是签名的)→ 重发拿新签名,私钥全程不上头', async () => {
+    const chatUrls: string[] = []
+    const r = rig(
+      serializeCredential(signedCred),
+      (_n, url) => {
+        if (url.includes('/api/me')) return jsonResponse({ Name: 'tester' })
+        chatUrls.push(url)
+        return chatUrls.length === 1
+          ? new Response(JSON.stringify({ error: { message: 'Unauthorized' } }), { status: 401 })
+          : sse(responseDone([messageItem]))
+      },
+      signedAlias,
+      signedProvider
+    )
+    await drain(r.router, r.host)
+
+    // 一次 401 + 一次重发 + 一次刷新里的 whoami,共 3 个请求
+    expect(chatUrls).toHaveLength(2)
+    expect(r.calls).toHaveLength(3)
+    for (const c of r.calls) {
+      expect(isSigned(c.headers), c.url).toBe(true)
+      expect(c.headers['authorization'] ?? '').not.toContain('OPENSSH PRIVATE KEY')
+    }
+    /*
+     * ★★ 「重发要现签新头」在这里**没法用『两次头不同』断言**:ts 是秒级粒度,
+     * mock 链路里两次 send 落在同一秒,challenge 相同 → 签名逐字节相同是**正确**
+     * 行为。结构性保证由实现给出(signRequest 在 send 里逐次调用),这里钉的是
+     * 重发头仍然是「公钥:签名」形态 —— 泄 PEM / 塞 Bearer 都会被上面的循环抓住。
+     */
+    expect(isSigned(r.calls[2]?.headers ?? {})).toBe(true)
   })
 })

@@ -379,6 +379,10 @@ const ZH: Messages = {
   "chat.subagent.report.rowGeneric": "后台子代理的结果已回到对话",
   "chat.subagent.report.openRecord": "完整记录",
   "chat.subagent.report.empty": "这个子代理结束时没有留下结果。",
+  // 展开时现去子会话取全文 —— 消息里存的那份只有开头 240 字,见 `parts.tsx` 的说明
+  "chat.subagent.report.loading": "正在读取完整结果…",
+  "chat.subagent.report.partialFailed": "完整结果读取失败,以下只是开头的一段。可从「完整记录」查看。",
+  "chat.subagent.report.partialLegacy": "这条记录来自旧版本,只存下了开头的一段。",
   "chat.subagent.center.title": "后台任务",
   "chat.subagent.center.open": "打开后台任务",
   "chat.subagent.center.count": ({ count }) => `${count} 个任务`,
@@ -1068,7 +1072,6 @@ const ZH: Messages = {
   "import.customize": "自定义",
   "import.syncNow": "立即同步",
   "import.fromOtherApps": "从其他 AI 应用导入",
-  "import.sourceName": "Claude Code",
   "import.sourceClaude": "Claude Code",
   "import.sourceCodex": "Codex",
   'import.sourceOpencode': 'OpenCode',
@@ -1078,7 +1081,7 @@ const ZH: Messages = {
   "import.detected": ({ projects, sessions }) => `${projects} 个项目 · ${sessions} 个会话`,
   "import.detectedCodex": ({ projects, sessions }) => `${projects} 个项目 · ${sessions} 个会话`,
   'import.detectedOpencode': ({ projects, sessions }) => `${projects} 个项目 · ${sessions} 个会话`,
-  "import.notFound": "未检测到 Claude Code 数据目录",
+  'import.notFound': ({ source }) => `未检测到 ${source} 数据目录`,
   "import.denied": "没有读取该目录的权限",
   "import.unreadable": "目录无法读取",
   "import.originAuto": "自动检测",
@@ -1137,7 +1140,8 @@ const ZH: Messages = {
   "import.cancel": "取消",
 
   "import.selectDialogTitle": "选择要导入的内容",
-  "import.selectDialogHint": "预览来自本机 Claude Code 目录，导入过程只读取源文件，不会修改它们。",
+  'import.selectDialogHint': ({ source }) =>
+    `预览来自本机 ${source} 目录，导入过程只读取源文件，不会修改它们。`,
   "import.applyButton": "导入到 NextCoWork",
   "import.scanning": "正在扫描…",
   "import.importing": ({ done, total }) => `正在导入 ${done}/${total}`,
@@ -2121,6 +2125,9 @@ const EN: Messages = {
   "chat.subagent.report.rowGeneric": "A background subagent reported back into this conversation",
   "chat.subagent.report.openRecord": "Full record",
   "chat.subagent.report.empty": "This subagent finished without leaving a result.",
+  "chat.subagent.report.loading": "Loading the full result…",
+  "chat.subagent.report.partialFailed": "The full result could not be loaded; this is only the opening. Open the full record to read it.",
+  "chat.subagent.report.partialLegacy": "This record predates full-result storage; only the opening was kept.",
   "chat.subagent.center.title": "Background tasks",
   "chat.subagent.center.open": "Open background tasks",
   "chat.subagent.center.count": ({ count }) => `${count} tasks`,
@@ -2812,7 +2819,6 @@ const EN: Messages = {
   "import.customize": "Customise",
   "import.syncNow": "Sync now",
   "import.fromOtherApps": "Import from other AI apps",
-  "import.sourceName": "Claude Code",
   "import.sourceClaude": "Claude Code",
   "import.sourceCodex": "Codex",
   'import.sourceOpencode': 'OpenCode',
@@ -2823,7 +2829,7 @@ const EN: Messages = {
   "import.detectedCodex": ({ projects, sessions }) => `${projects} projects · ${sessions} sessions`,
   'import.detectedOpencode': ({ projects, sessions }) =>
     `${projects} projects · ${sessions} sessions`,
-  "import.notFound": "No Claude Code data folder found",
+  'import.notFound': ({ source }) => `No ${source} data folder found`,
   "import.denied": "No permission to read that folder",
   "import.unreadable": "Folder cannot be read",
   "import.originAuto": "Auto-detected",
@@ -2882,7 +2888,8 @@ const EN: Messages = {
   "import.cancel": "Cancel",
 
   "import.selectDialogTitle": "Choose what to import",
-  "import.selectDialogHint": "The preview reads your local Claude Code folder. Importing never modifies the source files.",
+  'import.selectDialogHint': ({ source }) =>
+    `The preview reads your local ${source} folder. Importing never modifies the source files.`,
   "import.applyButton": "Import into NextCoWork",
   "import.scanning": "Scanning…",
   "import.importing": ({ done, total }) => `Importing ${done}/${total}`,
@@ -3625,4 +3632,33 @@ export function useI18n(): I18nContextValue {
   if (value === null)
     throw new Error("useI18n must be used inside I18nProvider");
   return value;
+}
+
+/*
+ * ★ 这个模块**不做局部热更,一改就整页重载**。
+ *
+ * `I18nContext` 是模块级 `createContext()` 的产物 —— 模块被重新执行一次,就多出
+ * 一个全新的 Context 对象。而本文件导出的不只是组件(还有 `messagesFor`、
+ * `SUPPORTED_LOCALES` 等),react-refresh 因此不会把它当成刷新边界,热更新会向
+ * 上游 importer 传播,传播路径上谁先接住谁就地重渲 —— 结果是**已挂载的
+ * `I18nProvider` 还提供着旧 Context,而更新之后才第一次加载的 lazy chunk
+ * (views/registry.tsx 里那几个:DocumentView / ChatView / TerminalView …)
+ * import 到的是新 Context**。新 Context 从来没有 Provider,`useContext` 取到
+ * null,于是:
+ *
+ *     Uncaught Error: useI18n must be used inside I18nProvider
+ *         at useI18n (index.tsx)
+ *         at DocumentView (DocumentView.tsx)
+ *
+ * 报错点在 DocumentView,但它一行都没改 —— 改的是这里的文案。只要那个视图在
+ * 你改文案之前恰好还没被打开过,就必然踩中;改完文案再开一个新 Tab 就是最典型
+ * 的复现路径。手动刷新窗口即可恢复,但下一次改文案还会再来一遍。
+ *
+ * 所以这里显式自接管热更并整页重载。代价只是改文案时丢一次组件状态,
+ * 换来「改文案绝不会把运行中的应用打成一个假崩溃」。
+ */
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
 }

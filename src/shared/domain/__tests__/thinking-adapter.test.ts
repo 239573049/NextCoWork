@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { ResolvedModelThinking } from '../model-runtime'
 import { applyThinkingAdapter, removeUnsupportedThinking, ThinkingAdapterError } from '../thinking-adapter'
+import { OLLAMA_STANDARD_THINKING } from '../model-catalog-inventory'
+import { modelBindingResolver } from '../model-binding'
+import { modelThinkingLevels, resolveModelThinking } from '../model-runtime'
+import { IMPORTED_ALIAS_DEFAULTS } from '../provider'
 
 const effort: ResolvedModelThinking = {
   mode: 'effort',
@@ -725,5 +729,234 @@ describe('applyThinkingAdapter', () => {
         },
       ),
     ).toThrow(/开关不能写入 Token budget/u)
+  })
+})
+
+/* ================================================================
+ * Ollama 语义(vendors/ollama.ts 的配置落到线上的形状)—— 2026-09-15
+ * 逆向 ollama v0.34.0 定案:OpenAI 层吃 reasoning_effort('none'=关,
+ * 其余档位一律折成 enable_thinking:true);Anthropic 层只认开/关两态。
+ * ================================================================ */
+describe('applyThinkingAdapter · Ollama', () => {
+  /*
+   * ★★ 用**出货常量**而不是手抄一份配置:覆盖路径(model-binding)与目录条目
+   * 共用 `OLLAMA_STANDARD_THINKING`,测试也读同一个对象,三处不会分叉。
+   * reasoning 的形状对齐 `resolveModelThinking` 在 effort 模式下真实的输出。
+   */
+  const off: ResolvedModelThinking = { mode: 'effort', enabled: false, explicit: true }
+  const on: ResolvedModelThinking = { mode: 'effort', enabled: true, explicit: true, effort: 'high' }
+
+  it('★★★ 显式关 → reasoning_effort:"none"(Ollama 的 think:false),且名字劫持被 standardWire 挡下', () => {
+    const body = applyThinkingAdapter(
+      { model: 'deepseek-v4-pro:0813' },
+      {
+        protocol: 'openai-chat',
+        upstreamModel: 'deepseek-v4-pro:0813',
+        maxOutputTokens: 16_384,
+        config: OLLAMA_STANDARD_THINKING,
+        reasoning: off
+      }
+    ) as Record<string, unknown>
+    expect(body['reasoning_effort']).toBe('none')
+    expect(body['enable_thinking']).toBeUndefined()
+    // deepseek 官方方言的字段一个都不许冒出来(那正是它被静默丢弃的原因)
+    expect(body['thinking']).toBeUndefined()
+  })
+
+  it('★★ 开 + 档位 → reasoning_effort 原样透传', () => {
+    const body = applyThinkingAdapter(
+      { model: 'qwen3.5:397b' },
+      {
+        protocol: 'openai-chat',
+        upstreamModel: 'qwen3.5:397b',
+        maxOutputTokens: 16_384,
+        config: OLLAMA_STANDARD_THINKING,
+        reasoning: on
+      }
+    ) as Record<string, unknown>
+    expect(body['reasoning_effort']).toBe('high')
+    expect(body['enable_thinking']).toBeUndefined()
+  })
+
+  it('★★★ standardWire 逃生口:同名模型声明后走标准分支,不声明时官方方言原样保留', () => {
+    const base = {
+      protocol: 'openai-chat' as const,
+      upstreamModel: 'deepseek-v4-pro',
+      maxOutputTokens: 16_384,
+      reasoning: { mode: 'effort' as const, enabled: false, explicit: true }
+    }
+    // 官方 DeepSeek(不声明):方言分支 —— 关只写 thinking:{type:disabled}
+    const dialect = applyThinkingAdapter(
+      {},
+      {
+        ...base,
+        config: { mode: 'effort', defaultEnabled: true, parameterPath: 'reasoning_effort' }
+      }
+    ) as Record<string, unknown>
+    expect(dialect['thinking']).toEqual({ type: 'disabled' })
+    expect(dialect['reasoning_effort']).toBeUndefined()
+    // Ollama 托管(声明 standardWire):标准分支 —— 关写 reasoning_effort:'none'
+    const standard = applyThinkingAdapter(
+      {},
+      {
+        ...base,
+        config: { mode: 'effort', defaultEnabled: true, parameterPath: 'reasoning_effort', standardWire: true }
+      }
+    ) as Record<string, unknown>
+    expect(standard['reasoning_effort']).toBe('none')
+    expect(standard['thinking']).toBeUndefined()
+  })
+
+  it('★★★ glm 名字同样被逃生口接管(Ollama 上的 glm-5.3 走 reasoning_effort)', () => {
+    const body = applyThinkingAdapter(
+      {},
+      {
+        protocol: 'openai-chat',
+        upstreamModel: 'glm-5.3',
+        maxOutputTokens: 16_384,
+        config: { mode: 'toggle', defaultEnabled: false, parameterPath: 'reasoning_effort', standardWire: true },
+        reasoning: { mode: 'toggle', enabled: false, explicit: true }
+      }
+    ) as Record<string, unknown>
+    expect(body['reasoning_effort']).toBe('none')
+    expect(body['thinking']).toBeUndefined()
+  })
+
+  it('★★★ Anthropic 路径两态:effort 配置也只落 thinking.type(档位/budget 被 Ollama 忽略)', () => {
+    const enabled = applyThinkingAdapter(
+      {},
+      {
+        protocol: 'anthropic',
+        upstreamModel: 'gpt-oss:120b',
+        maxOutputTokens: 32_768,
+        config: { mode: 'effort', defaultEnabled: true, defaultEffort: 'medium', parameterPath: 'reasoning_effort' },
+        reasoning: { mode: 'effort', enabled: true, explicit: true, effort: 'high' }
+      }
+    ) as Record<string, unknown>
+    expect(enabled['thinking']).toEqual({ type: 'enabled', budget_tokens: expect.any(Number) })
+    expect(enabled['reasoning_effort']).toBeUndefined()
+
+    const disabled = applyThinkingAdapter(
+      {},
+      {
+        protocol: 'anthropic',
+        upstreamModel: 'gpt-oss:120b',
+        maxOutputTokens: 32_768,
+        config: { mode: 'effort', defaultEnabled: true, defaultEffort: 'medium', parameterPath: 'reasoning_effort' },
+        reasoning: { mode: 'effort', enabled: false, explicit: true }
+      }
+    ) as Record<string, unknown>
+    expect(disabled['thinking']).toEqual({ type: 'disabled' })
+  })
+})
+
+/* ================================================================
+ * standardWire 的 Anthropic 线形(Ollama /v1/messages)—— 档位走
+ * output_config.effort,且**不能与 thinking.type 同发**:Ollama 源码里
+ * output_config 那一支挂在 `think == nil` 上,同发的表现是档位被静默无视。
+ * ================================================================ */
+describe('applyThinkingAdapter · Ollama Anthropic 线形', () => {
+  const ollamaAnthropic = {
+    protocol: 'anthropic' as const,
+    upstreamModel: 'glm-5.3',
+    maxOutputTokens: 16_384,
+    config: {
+      mode: 'effort' as const,
+      defaultEnabled: true,
+      defaultEffort: 'medium' as const,
+      parameterPath: 'reasoning_effort',
+      standardWire: true
+    }
+  }
+
+  it('★★★ 开 + 档位 → output_config.effort,且**没有** thinking 字段(同发会让档位失效)', () => {
+    const body = applyThinkingAdapter(
+      {},
+      { ...ollamaAnthropic, reasoning: { mode: 'effort', enabled: true, explicit: true, effort: 'high' } }
+    ) as Record<string, unknown>
+    expect(body['output_config']).toEqual({ effort: 'high' })
+    expect(body['thinking']).toBeUndefined()
+  })
+
+  it('★★★ 关 → thinking.type:disabled(output_config 表达不了「关」,只能走这一支)', () => {
+    const body = applyThinkingAdapter(
+      {},
+      { ...ollamaAnthropic, reasoning: { mode: 'effort', enabled: false, explicit: true } }
+    ) as Record<string, unknown>
+    expect(body['thinking']).toEqual({ type: 'disabled' })
+    expect(body['output_config']).toBeUndefined()
+  })
+
+  it('★★ 档位原样透传(max 也是 Ollama 认的档位)', () => {
+    const body = applyThinkingAdapter(
+      {},
+      { ...ollamaAnthropic, reasoning: { mode: 'effort', enabled: true, explicit: true, effort: 'max' } }
+    ) as Record<string, unknown>
+    expect(body['output_config']).toEqual({ effort: 'max' })
+  })
+
+  it('★★ 不声明 standardWire 的 Anthropic 供应商照旧走 budget_tokens(零回归)', () => {
+    const { standardWire: _omitted, ...config } = ollamaAnthropic.config
+    const body = applyThinkingAdapter(
+      {},
+      {
+        ...ollamaAnthropic,
+        config,
+        reasoning: { mode: 'effort', enabled: true, explicit: true, effort: 'high' }
+      }
+    ) as Record<string, unknown>
+    expect(body['thinking']).toEqual({ type: 'enabled', budget_tokens: expect.any(Number) })
+    expect(body['output_config']).toBeUndefined()
+  })
+})
+
+/* ================================================================
+ * 端到端:ollama-cloud 上的 glm-5.3 —— 用户报的「glm 没有思考强度」那条链,
+ * 从目录命中一路走到最终请求体,四层各改一处就断在这条上。
+ * ================================================================ */
+describe('端到端 · ollama-cloud 上的 glm-5.3', () => {
+  const alias = modelBindingResolver().resolve({
+    ...structuredClone(IMPORTED_ALIAS_DEFAULTS),
+    providerId: 'ollama-cloud',
+    alias: 'glm',
+    upstreamModel: 'glm-5.3'
+  })
+
+  it('★★★ 档位选择器拿得到强度(低/中/高/最高 + 关)', () => {
+    expect(modelThinkingLevels(alias)).toEqual(['auto', 'low', 'medium', 'high', 'max', 'off'])
+  })
+
+  it('★★★ 「关」真的落到 reasoning_effort:none —— 而不是被丢弃的智谱方言字段', () => {
+    const reasoning = resolveModelThinking('off', alias.thinkingConfig, alias.maxOutputTokens, alias.reasoningEfforts)
+    expect(reasoning).toMatchObject({ enabled: false, explicit: true })
+    const body = applyThinkingAdapter(
+      { model: 'glm-5.3' },
+      {
+        protocol: 'openai-chat',
+        upstreamModel: alias.upstreamModel,
+        config: alias.thinkingConfig,
+        reasoning,
+        maxOutputTokens: alias.maxOutputTokens,
+        reasoningEfforts: alias.reasoningEfforts
+      }
+    ) as Record<string, unknown>
+    expect(body['reasoning_effort']).toBe('none')
+    expect(body['thinking']).toBeUndefined()
+  })
+
+  it('★★ 选「高」→ reasoning_effort:high', () => {
+    const reasoning = resolveModelThinking('high', alias.thinkingConfig, alias.maxOutputTokens, alias.reasoningEfforts)
+    const body = applyThinkingAdapter(
+      { model: 'glm-5.3' },
+      {
+        protocol: 'openai-chat',
+        upstreamModel: alias.upstreamModel,
+        config: alias.thinkingConfig,
+        reasoning,
+        maxOutputTokens: alias.maxOutputTokens,
+        reasoningEfforts: alias.reasoningEfforts
+      }
+    ) as Record<string, unknown>
+    expect(body['reasoning_effort']).toBe('high')
   })
 })

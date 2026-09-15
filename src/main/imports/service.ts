@@ -45,6 +45,7 @@ import type {
   ImportPreviewQuery,
   ImportProjectCandidate,
   ImportResultCode,
+  ImportSourceKind,
   ImportSourceState,
   ImportSyncPatch,
   ImportTargetKind
@@ -60,6 +61,7 @@ import { prefixedId } from '../../shared/util/id'
 import { databaseDirectory } from '../db'
 import type { ImportEntityKind, ImportMappingRow, ImportSourceRow } from '../db/repo'
 import { store } from '../state/store'
+import type { ImportScanCacheRow } from '../db/repo'
 import { getHost } from '../runtime'
 import { globalSettingsPath, localSettingsPath } from '../kernel/local-settings'
 import { hookListFrom } from '../kernel/hook/load'
@@ -73,6 +75,7 @@ import {
   readGlobalConfig,
   readInstructions,
   readProjectMcp,
+  readTranscriptHead,
   readTranscriptLines,
   resolveWithinRoot,
   type MappedMcpServer,
@@ -403,6 +406,7 @@ export async function buildPreview(sourceId: string, _requestId: string): Promis
   return {
     previewId: preview.previewId,
     sourceId,
+    sourceKind: row.kind as ImportSourceKind,
     createdAt: preview.createdAt,
     expiresAt: preview.expiresAt,
     counts: countPreview(scanned.items),
@@ -458,6 +462,195 @@ interface ScanResult {
  * Claude Code 目录有几百份转录,每次打开预览都全量解析一遍的话,
  * 那颗「扫描」按钮要转好几秒,而其中绝大多数文件根本没动过。
  */
+/**
+ * 一条聊天在**预览阶段**需要的全部元数据。
+ *
+ * ★ `contentHash` 为 `''` 表示这一趟只读了头部,没算过全文哈希。调用方
+ * 必须自己判断要不要紧 —— 判据见 `readChatMeta`。
+ */
+interface ChatMeta {
+  sessionId: string
+  cwd: string
+  title?: string
+  model?: string
+  modelProvider?: string
+  /** partial 为真时是下界,不是精确值。 */
+  messages: number
+  contentHash: string
+  startedAt?: number
+  sourceUpdatedAt: number
+  partial: boolean
+  diagnostics: ImportDiagnostic[]
+}
+
+/** 两个文件型来源的 parser 形状一致,统一成这个签名喂给 `readChatMeta`。 */
+type TranscriptParser = (lines: readonly string[]) => {
+  sessionId: string
+  cwd: string
+  title?: string
+  model?: string
+  modelProvider?: string
+  messages: readonly unknown[]
+  startedAt?: number
+  updatedAt?: number
+  diagnostics: ImportDiagnostic[]
+}
+
+/**
+ * 读一条聊天的元数据,**能不读全文就不读全文**。
+ *
+ * ★★ 这是整个预览的性能命门。三条判据叠在一起:
+ *
+ * 1. **缓存先行。** `change_token`(size:mtime)没变就整行复用,一个字节都不读。
+ *    缓存挂在 `import_scan_cache` 而不是 `import_mappings` 上 —— 后者只有
+ *    导入过的会话才有,实测 1063 个转录里仅 47 条,等于对 96% 的文件不生效。
+ *
+ * 2. **哈希按需算。** `statusOfChat` 里没有映射直接返回 new,`contentHash`
+ *    压根不参与。所以只有**已经导入过**的会话才值得为了哈希读满全文。
+ *
+ * 3. **其余只读头部。** 实测 1063 份真实转录(2.1GB):全读全解析 5.19 秒,
+ *    封顶 1MiB 是 1.51 秒。并发 8 路只降到 3.97 秒 —— 瓶颈是 JSON.parse
+ *    的 CPU 和内存带宽,不是磁盘延迟,所以加并发解决不了这件事。
+ *    「读到 4MiB 但跳过超大行」也试过:1.79 秒**更慢**,且 title 反而掉到
+ *    21/24 —— 被跳掉的大行里就有带标题的那条。
+ *
+ * ★ 头部读**不允许**改变结论,只允许改变代价。所以解析不出消息时会回退到
+ * 全文读(见函数末尾),否则「前 1MiB 是一条巨型工具输出」的文件会被误判成
+ * 空会话而静默消失。
+ *
+ * 缓存未命中又确实需要哈希时会读两趟(头部 + 全文)。那是「没缓存且已导入」
+ * 这个少见组合,实测 1063 份里只有 47 条有映射,不值得为它把代码写复杂。
+ */
+async function readChatMeta(input: {
+  sourceId: string
+  path: string
+  changeToken: string
+  fileUpdatedAt: number
+  cache: ReadonlyMap<string, ImportScanCacheRow>
+  parse: TranscriptParser
+  /** 已知需要精确哈希(调用方已从路径查到映射)时直接置真,省一趟头部读。 */
+  needsHash?: boolean
+  /** 拿到 sessionId 之后才能判断要不要哈希 —— Codex 的会话 id 在文件内容里。 */
+  hashNeededFor?: (sessionId: string) => boolean
+}): Promise<ChatMeta> {
+  const cached = input.cache.get(input.path)
+  const parseAll = async (): Promise<ChatMeta> => {
+    const read = await readTranscriptLines(input.path)
+    const parsed = input.parse(read.lines)
+    return {
+      sessionId: parsed.sessionId,
+      cwd: parsed.cwd,
+      ...(parsed.title === undefined ? {} : { title: parsed.title }),
+      ...(parsed.model === undefined ? {} : { model: parsed.model }),
+      ...(parsed.modelProvider === undefined ? {} : { modelProvider: parsed.modelProvider }),
+      messages: parsed.messages.length,
+      contentHash: hashTranscript(parsed as Parameters<typeof hashTranscript>[0]),
+      ...(parsed.startedAt === undefined ? {} : { startedAt: parsed.startedAt }),
+      sourceUpdatedAt: parsed.updatedAt ?? input.fileUpdatedAt,
+      partial: false,
+      diagnostics: [...read.diagnostics, ...parsed.diagnostics]
+    }
+  }
+
+  if (cached !== undefined && cached.changeToken === input.changeToken) {
+    const stillNeedsHash = input.needsHash === true
+      || (input.hashNeededFor?.(cached.sessionId) ?? false)
+    // 缓存是头部读来的,而这次真要哈希 —— 只有这种情况下才回头读全文。
+    if (!(stillNeedsHash && cached.contentHash === '')) {
+      return {
+        sessionId: cached.sessionId,
+        cwd: cached.cwd,
+        ...(cached.title === '' ? {} : { title: cached.title }),
+        ...(cached.model === '' ? {} : { model: cached.model }),
+        ...(cached.modelProvider === '' ? {} : { modelProvider: cached.modelProvider }),
+        messages: cached.messages,
+        contentHash: cached.contentHash,
+        sourceUpdatedAt: cached.sourceUpdatedAt,
+        partial: cached.partial,
+        diagnostics: []
+      }
+    }
+    return parseAll()
+  }
+
+  if (input.needsHash === true) return parseAll()
+
+  // ── 头部快路径 ──
+  const head = await readTranscriptHead(input.path, IMPORT_LIMITS.scanHeadBytes)
+  const parsed = input.parse(head.lines)
+  // 整个文件都在头部里 = 这趟其实是全读,哈希和条数都是准的。
+  if (head.complete) {
+    return {
+      sessionId: parsed.sessionId,
+      cwd: parsed.cwd,
+      ...(parsed.title === undefined ? {} : { title: parsed.title }),
+      ...(parsed.model === undefined ? {} : { model: parsed.model }),
+      ...(parsed.modelProvider === undefined ? {} : { modelProvider: parsed.modelProvider }),
+      messages: parsed.messages.length,
+      contentHash: hashTranscript(parsed as Parameters<typeof hashTranscript>[0]),
+      ...(parsed.startedAt === undefined ? {} : { startedAt: parsed.startedAt }),
+      sourceUpdatedAt: parsed.updatedAt ?? input.fileUpdatedAt,
+      partial: false,
+      diagnostics: parsed.diagnostics
+    }
+  }
+  if (input.hashNeededFor?.(parsed.sessionId) === true) return parseAll()
+
+  /*
+    ★ 头部里 0 条消息 **不等于** 空会话 —— 也可能是前 1MiB 全被一条巨型
+    工具输出占满(实测语料里真有 115MB 的单文件)。而「空」在两个扫描循环里
+    都是终局判决:Claude 那边 `continue` 直接把会话丢出预览,Codex 那边标成
+    incompatible 且不默认勾选。两者都不报错,用户只会发现会话「少了」。
+
+    所以不确定的时候读全文再下结论。有了这条回退,`scanHeadBytes` 就只是
+    性能旋钮而不是正确性参数 —— 把它调到 1 字节,结果依然对,只是变慢。
+  */
+  if (parsed.messages.length === 0) return parseAll()
+
+  return {
+    sessionId: parsed.sessionId,
+    cwd: parsed.cwd,
+    ...(parsed.title === undefined ? {} : { title: parsed.title }),
+    ...(parsed.model === undefined ? {} : { model: parsed.model }),
+    ...(parsed.modelProvider === undefined ? {} : { modelProvider: parsed.modelProvider }),
+    /*
+      ★ 头部里的条数是**下界**。它只用来回答「这个会话是不是空的」——
+      那个判断只关心 0 与非 0,不关心具体值。界面上的条数同样标成近似。
+    */
+    messages: parsed.messages.length,
+    contentHash: '',
+    ...(parsed.startedAt === undefined ? {} : { startedAt: parsed.startedAt }),
+    sourceUpdatedAt: input.fileUpdatedAt,
+    partial: true,
+    diagnostics: parsed.diagnostics
+  }
+}
+
+/** `ChatMeta` → 待写回的缓存行。 */
+function scanCacheRow(
+  sourceId: string,
+  path: string,
+  changeToken: string,
+  meta: ChatMeta,
+  scannedAt: number
+): ImportScanCacheRow {
+  return {
+    sourceId,
+    sourcePath: path,
+    changeToken,
+    sessionId: meta.sessionId,
+    contentHash: meta.contentHash,
+    cwd: meta.cwd,
+    title: meta.title ?? '',
+    model: meta.model ?? '',
+    modelProvider: meta.modelProvider ?? '',
+    messages: meta.messages,
+    partial: meta.partial,
+    sourceUpdatedAt: meta.sourceUpdatedAt,
+    scannedAt
+  }
+}
+
 async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
   if (row.kind === 'codex') return scanCodexSource(row)
   if (row.kind === 'opencode') return scanOpencodeSource(row)
@@ -482,34 +675,36 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
   const workspaces = store.listWorkspaces().filter((w) => isLocalEnvironment(w.environment))
   const byRoot = new Map(workspaces.map((w) => [w.rootPath, w] as const))
 
+  const scanCache = store.listImportScanCache(row.sourceId)
+  const scannedAt = Date.now()
+  const cacheWrites: ImportScanCacheRow[] = []
+
   for (const file of listed.files) {
     const changeToken = `${String(file.size)}:${String(Math.round(file.mtimeMs))}`
+    // Claude Code 的映射键就是文件名,不必解析文件就知道这条导没导过。
     const mapping = mappings.get(file.sessionId)
-    const cachedToken = typeof mapping?.meta['changeToken'] === 'string' ? mapping.meta['changeToken'] : ''
+    const meta = await readChatMeta({
+      sourceId: row.sourceId,
+      path: file.path,
+      changeToken,
+      fileUpdatedAt: file.mtimeMs,
+      cache: scanCache,
+      parse: (lines) =>
+        parseTranscript(lines, {
+          fallbackSessionId: file.sessionId,
+          maxMessages: IMPORT_LIMITS.maxMessagesPerSession
+        }),
+      needsHash: mapping !== undefined
+    })
+    cacheWrites.push(scanCacheRow(row.sourceId, file.path, changeToken, meta, scannedAt))
 
-    let cwd = typeof mapping?.meta['cwd'] === 'string' ? mapping.meta['cwd'] : ''
-    let title = typeof mapping?.meta['title'] === 'string' ? mapping.meta['title'] : undefined
-    let model = typeof mapping?.meta['model'] === 'string' ? mapping.meta['model'] : undefined
-    let count = typeof mapping?.meta['messages'] === 'number' ? mapping.meta['messages'] : 0
-    let contentHash = mapping?.sourceFingerprint ?? ''
-    let updatedAt = file.mtimeMs
-    const itemDiagnostics: ImportDiagnostic[] = []
-
-    if (cachedToken !== changeToken || contentHash === '') {
-      const read = await readTranscriptLines(file.path)
-      itemDiagnostics.push(...read.diagnostics)
-      const parsed = parseTranscript(read.lines, {
-        fallbackSessionId: file.sessionId,
-        maxMessages: IMPORT_LIMITS.maxMessagesPerSession
-      })
-      itemDiagnostics.push(...parsed.diagnostics)
-      cwd = parsed.cwd
-      title = parsed.title
-      model = parsed.model
-      count = parsed.messages.length
-      contentHash = hashTranscript(parsed)
-      updatedAt = parsed.updatedAt ?? file.mtimeMs
-    }
+    const cwd = meta.cwd
+    const title = meta.title
+    const model = meta.model
+    const count = meta.messages
+    const contentHash = meta.contentHash
+    const updatedAt = meta.sourceUpdatedAt
+    const itemDiagnostics: ImportDiagnostic[] = [...meta.diagnostics]
 
     if (count === 0) continue // 空会话不进列表 —— 导进来是一条永远空白的对话
 
@@ -533,6 +728,7 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
       ...(target === undefined ? {} : { targetWorkspaceId: target.id }),
       scope: 'project',
       count,
+      ...(meta.partial ? { countApproximate: true } : {}),
       bytes: file.size,
       sourceUpdatedAt: updatedAt,
       diagnostics: itemDiagnostics,
@@ -631,7 +827,28 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
     sessionCount: items.filter((item) => item.category === 'chat').length
   })
 
+  commitScanCache(row.sourceId, cacheWrites, scannedAt)
   return { items, payloads, projects, diagnostics }
+}
+
+/**
+ * 写回本轮的扫描缓存,并清掉源侧已经消失的行。
+ *
+ * ★ 一次批量写、一个事务:一轮扫描上千行,逐行提交在 WAL 上就是上千次写放大,
+ * 而那正是这套缓存本来要省掉的开销。
+ * ★ 缓存写失败**不能**让整次预览失败 —— 它是加速手段,不是数据。丢了最多下次慢一点。
+ */
+function commitScanCache(
+  sourceId: string,
+  rows: readonly ImportScanCacheRow[],
+  scannedAt: number
+): void {
+  try {
+    store.putImportScanCache(rows)
+    store.pruneImportScanCache(sourceId, scannedAt)
+  } catch {
+    // 故意吞掉,理由见上。
+  }
 }
 
 async function scanCodexSource(row: ImportSourceRow): Promise<ScanResult> {
@@ -666,33 +883,62 @@ async function scanCodexSource(row: ImportSourceRow): Promise<ScanResult> {
   const projectStats = new Map<string, { count: number; last: number }>()
   for (const path of await listCodexProjectRoots(row.configDir, diagnostics)) projectStats.set(path, { count: 0, last: 0 })
   const seenSessions = new Set<string>()
+  /*
+    ★ 映射一次性拉齐,不在循环里一条一条 `getImportMapping` —— 513 个文件
+    就是 513 次 SQL。它同时是「要不要为哈希读全文」的判据来源。
+  */
+  const sessionMappings = new Map(
+    store.listImportMappings(row.sourceId, 'session').map((m) => [m.sourceItemId, m] as const)
+  )
+  const scanCache = store.listImportScanCache(row.sourceId)
+  const scannedAt = Date.now()
+  const cacheWrites: ImportScanCacheRow[] = []
+
   for (const file of files) {
     try {
-      const read = await readTranscriptLines(file.path)
-      const parsed = parseCodexTranscript(read.lines, { fallbackSessionId: file.sessionId, maxMessages: IMPORT_LIMITS.maxMessagesPerSession })
-      if (seenSessions.has(parsed.sessionId)) continue
-      seenSessions.add(parsed.sessionId)
-      file.sessionId = parsed.sessionId
-      const title = titles.get(parsed.sessionId) ?? parsed.title
-      const key = 'session:' + parsed.sessionId
+      const changeToken = `${String(file.size)}:${String(Math.round(file.mtimeMs))}`
+      /*
+        ★ Codex 的会话 id 在**文件内容**里(文件名是 `rollout-*`),所以
+        「这条导没导过」要等解析出 id 才知道 —— 用回调而不是预先算好的布尔值。
+      */
+      const meta = await readChatMeta({
+        sourceId: row.sourceId,
+        path: file.path,
+        changeToken,
+        fileUpdatedAt: file.mtimeMs,
+        cache: scanCache,
+        parse: (lines) =>
+          parseCodexTranscript(lines, {
+            fallbackSessionId: file.sessionId,
+            maxMessages: IMPORT_LIMITS.maxMessagesPerSession
+          }),
+        hashNeededFor: (sessionId) => sessionMappings.has('session:' + sessionId)
+      })
+      cacheWrites.push(scanCacheRow(row.sourceId, file.path, changeToken, meta, scannedAt))
+
+      if (seenSessions.has(meta.sessionId)) continue
+      seenSessions.add(meta.sessionId)
+      file.sessionId = meta.sessionId
+      const title = titles.get(meta.sessionId) ?? meta.title
+      const key = 'session:' + meta.sessionId
       const id = itemId('chat', key)
-      const projectKey = parsed.cwd ? await realpath(parsed.cwd).catch(() => resolve(parsed.cwd)) : ''
-      const itemDiagnostics = [...read.diagnostics, ...parsed.diagnostics]
-      if (parsed.modelProvider && !providers.some((provider) => provider.id === parsed.modelProvider)) {
-        itemDiagnostics.push({ code: 'model-provider-unresolved', detail: parsed.modelProvider })
+      const projectKey = meta.cwd ? await realpath(meta.cwd).catch(() => resolve(meta.cwd)) : ''
+      const itemDiagnostics = [...meta.diagnostics]
+      if (meta.modelProvider && !providers.some((provider) => provider.id === meta.modelProvider)) {
+        itemDiagnostics.push({ code: 'model-provider-unresolved', detail: meta.modelProvider })
       }
-      const contentHash = hashTranscript(parsed)
-      const mapping = store.getImportMapping(row.sourceId, '', 'session', key)
+      const mapping = sessionMappings.get(key)
       const workspaceId = resolveWorkspace(row.sourceId, projectKey, new Map())
-      const status = parsed.messages.length === 0 ? 'incompatible' : statusOfChat(mapping, contentHash, workspaceId !== null, itemDiagnostics)
+      const status = meta.messages === 0 ? 'incompatible' : statusOfChat(mapping, meta.contentHash, workspaceId !== null, itemDiagnostics)
       if (projectKey) {
         const stats = projectStats.get(projectKey) ?? { count: 0, last: 0 }
-        projectStats.set(projectKey, { count: stats.count + 1, last: Math.max(stats.last, parsed.updatedAt ?? file.mtimeMs) })
+        projectStats.set(projectKey, { count: stats.count + 1, last: Math.max(stats.last, meta.sourceUpdatedAt) })
       }
-      items.push({ id, category: 'chat', title: title ?? parsed.sessionId, sourcePath: file.path, status, scope: 'project', ...(projectKey ? { projectKey } : {}), ...(workspaceId ? { targetWorkspaceId: workspaceId } : {}), count: parsed.messages.length, bytes: file.size, sourceUpdatedAt: parsed.updatedAt ?? file.mtimeMs, diagnostics: itemDiagnostics, defaultSelected: status === 'new' || status === 'update' })
-      payloads.set(id, { kind: 'codex-chat', file, contentHash, ...(title ? { title } : {}), ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.modelProvider ? { modelProvider: parsed.modelProvider } : {}), archived: file.archived })
+      items.push({ id, category: 'chat', title: title ?? meta.sessionId, sourcePath: file.path, status, scope: 'project', ...(projectKey ? { projectKey } : {}), ...(workspaceId ? { targetWorkspaceId: workspaceId } : {}), count: meta.messages, ...(meta.partial ? { countApproximate: true } : {}), bytes: file.size, sourceUpdatedAt: meta.sourceUpdatedAt, diagnostics: itemDiagnostics, defaultSelected: status === 'new' || status === 'update' })
+      payloads.set(id, { kind: 'codex-chat', file, contentHash: meta.contentHash, ...(title ? { title } : {}), ...(meta.model ? { model: meta.model } : {}), ...(meta.modelProvider ? { modelProvider: meta.modelProvider } : {}), archived: file.archived })
     } catch { diagnostics.push({ code: 'source.unreadable', detail: file.path }) }
   }
+  commitScanCache(row.sourceId, cacheWrites, scannedAt)
   const projects: ImportProjectCandidate[] = []
   for (const [path, stats] of projectStats) {
     const accessible = await isDirectory(path)
@@ -1494,6 +1740,13 @@ async function applyCodexChat(sourceId: string, payload: Extract<ItemPayload, { 
   const targetSessionId = mapping?.targetId || derivedId('cs', sourceId, payload.file.sessionId)
   const messages = await materializeMessages(parsed.messages, sourceId, payload.file.sessionId, targetSessionId)
   const now = Date.now()
+  /*
+    ★ 指纹用**这一趟重读**算出来的,不是 `payload.contentHash`(预览时算的)。
+    两个理由:预览可能是五分钟前的,源侧还在写;而预览为了快,对没导过的会话
+    只读头部、根本不算哈希(见 `readChatMeta`),那时 payload 里是空串 ——
+    空指纹存进映射,下次扫描就会把这条会话永远显示成「有更新」。
+  */
+  const contentHash = hashTranscript(parsed)
   const workspace = store.getWorkspace(workspaceId)
   const providerId = parsed.modelProvider
     ? store.listImportMappings(sourceId, 'provider').find((mapping) => mapping.meta['codexProviderId'] === parsed.modelProvider)?.targetId
@@ -1506,7 +1759,7 @@ async function applyCodexChat(sourceId: string, payload: Extract<ItemPayload, { 
     store.ensureSession({ id: targetSessionId, workspaceId, title: parsed.title ?? payload.file.sessionId, model: parsed.model ?? '', ...(providerId ? { modelProviderId: providerId } : {}), rootPathAtCreation: workspace?.rootPath ?? parsed.cwd, createdAt: parsed.startedAt ?? now })
     store.replaceHistory(targetSessionId, messages)
     if (payload.archived) store.setSessionArchived(targetSessionId, true)
-    writeMapping(sourceId, '', 'session', sourceItemId, { targetId: targetSessionId, targetPath: payload.file.path, targetWorkspaceId: workspaceId, sourceFingerprint: payload.contentHash, targetFingerprint: payload.contentHash, now, meta: { cwd: parsed.cwd, archived: payload.archived, messages: messages.length } })
+    writeMapping(sourceId, '', 'session', sourceItemId, { targetId: targetSessionId, targetPath: payload.file.path, targetWorkspaceId: workspaceId, sourceFingerprint: contentHash, targetFingerprint: contentHash, now, meta: { cwd: parsed.cwd, archived: payload.archived, messages: messages.length } })
   })
   return { result: mapping ? 'updated' : 'imported', diagnostics: [...read.diagnostics, ...parsed.diagnostics, ...providerDiagnostics], target: { kind: 'session', id: targetSessionId, workspaceId } }
 }

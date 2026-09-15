@@ -173,3 +173,42 @@ describe('awaitOAuthCallback · 端口被占', () => {
     await holder
   })
 })
+
+describe('awaitOAuthCallback · linger', () => {
+  it('★ linger 期内的迟到请求吃到的仍是校验过的页面', async () => {
+    /*
+      ★ 这是给 cli-poll 双通道用的:B 通道(轮询)先赢时,浏览器可能正走在跳转
+      途中 —— 立刻关服务器它会撞上 ECONNREFUSED,看到一个像「登录失败」的
+      错误页。linger 期内迟到请求要能拿到正常的页面,且不改写已落定的结局。
+    */
+    const ctrl = new AbortController()
+    let port = 0
+    const done = awaitOAuthCallback({
+      expectedState: 's-2',
+      signal: ctrl.signal,
+      path: PATH,
+      port: 0,
+      timeoutMs: 3_000,
+      lingerMs: 600,
+      // ★ 主回调放在 onListening 里发 —— 外面发的话 port 还没被赋值(=0)
+      onListening: async (p) => {
+        port = p
+        await fetch(`http://127.0.0.1:${p}${PATH}?code=c2&state=s-2`)
+      }
+    })
+    // 主回调(state 对)先到,结局落定 —— 而且落定**不等** linger(后台关机)
+    const startedAt = Date.now()
+    expect(await done).toEqual({ status: 'ok', code: 'c2' })
+    expect(Date.now() - startedAt).toBeLessThan(300)
+
+    // 迟到的请求:state 错 → 400 页面(不是连接拒绝);state 对 → 200
+    const stragglerBad = await fetch(`http://127.0.0.1:${port}${PATH}?code=x&state=wrong`)
+    expect(stragglerBad.status).toBe(400)
+    const stragglerOk = await fetch(`http://127.0.0.1:${port}${PATH}?code=y&state=s-2`)
+    expect(stragglerOk.status).toBe(200)
+
+    // linger 到点之后,服务器真的关了
+    await new Promise((r) => setTimeout(r, 700))
+    await expect(fetch(`http://127.0.0.1:${port}${PATH}?code=z&state=s-2`)).rejects.toThrow()
+  })
+})

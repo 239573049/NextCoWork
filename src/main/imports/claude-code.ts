@@ -23,7 +23,7 @@
  * 里那张 projects 表),目录名只当**索引键**用。
  */
 import { createReadStream } from 'node:fs'
-import { readdir, readFile, realpath, stat } from 'node:fs/promises'
+import { open, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -177,6 +177,43 @@ export async function readTranscriptLines(
     diagnostics.push({ code: 'transcript.oversize', detail: `lines:${String(oversizeLines)}` })
   }
   return { lines, diagnostics }
+}
+
+/**
+ * 只读一份转录的**开头**。
+ *
+ * ★ 为什么够用:扫描要的是 `cwd` / `title` / `model` / `sessionId`,它们都在
+ * 转录的头几条记录里;而全文读一遍只多产出两样东西 —— 精确的消息数和
+ * `contentHash`。哈希**只在这个会话已经导入过**时才有人看(`statusOfChat`
+ * 里没有映射直接就是 new),那是少数。实测一台机器上 1063 个转录里
+ * 只有 47 个导入过,为另外 96% 读满 2GB 是白读。
+ *
+ * ★ 末尾那一行**必须丢掉**:按字节截断几乎总会把最后一行切在半中间,
+ * 而半条 JSON 喂给 `JSON.parse` 会变成一条「文件损坏」诊断 —— 答非所问。
+ * 整个文件都读完了(`complete`)时它是完整的,那时才留。
+ */
+export async function readTranscriptHead(
+  path: string,
+  maxBytes: number
+): Promise<{ lines: string[]; complete: boolean }> {
+  const info = await stat(path)
+  const want = Math.min(maxBytes, info.size)
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.alloc(want)
+    let filled = 0
+    while (filled < want) {
+      const { bytesRead } = await handle.read(buffer, filled, want - filled, filled)
+      if (bytesRead === 0) break
+      filled += bytesRead
+    }
+    const complete = filled >= info.size
+    const lines = buffer.subarray(0, filled).toString('utf8').split('\n')
+    if (!complete) lines.pop()
+    return { lines: lines.filter((line) => line !== ''), complete }
+  } finally {
+    await handle.close()
+  }
 }
 
 // ─── 项目与转录枚举 ───────────────────────────────────────────────────────

@@ -26,9 +26,11 @@
  * 流程代码一处分支都没加。换码的响应体仍然没被抓到,但既然凭证落库了,
  * `tokenKey: 'bigmodel'` 那条(或它的平铺回退)至少有一条是对的。
  *
- * 登录之后发 AI 请求一度回 `[1234][网络错误…]`,原因是**少了第三跳**:那时省略了
- * `businessLoginUrl`,等于拿 ② 的 OAuth token 直接当 API key。端点已探到并填上,
- * 证据写在下面 `businessLoginUrl` 那段注释里。
+ * 登录之后发 AI 请求一度回 `[1234][网络错误…]`,当时归因于「少了第三跳」并填上了
+ * `businessLoginUrl` —— **2026-09-15 这个结论被证伪**(真 token 打 z/login 同样被拒,
+ * 详见下面 `apiKeyProvision` 那段的定案记录),已移除。1234 的真实原因同日从 ZCode.app
+ * 打包的 CLI 里逆向定案:**coding 端点要的是真 API Key,OAuth token 要先经三步供应**
+ * (见 `apiKeyProvision` 注释),现在登录链路已逐字对齐。
  *
  * ============================ 排查时少走的两条弯路 ============================
  * ① **1234 不是端点选错。** 先怀疑过是登录后被自动切到了
@@ -83,6 +85,10 @@
  * 端口用临时的而不是 ZCode 那个 9999 —— 既然没有白名单就没必要占固定端口,
  * 还能避开用户机器上真在跑的 ZCode。
  *
+ * ★★ 2026-09-15 起这条结论**同时服务两条路径**:主路径(cli/init 服务端发起)
+ * 拿到的 authorize_url 同样把 `redirect` 覆盖成回环地址 —— 「没有白名单」这个
+ * 前提不变,覆盖对象从本地拼的登录页换成了服务端签发的授权 URL 而已。
+ *
  * ★★ **做不通时的修法是改这个文件里的数据,不是改流程代码。** 流程那边
  * (`zcode.ts` / `flow.ts` / `registry.ts`)已经为这条链路撑开过两次;再为它加分支
  * 只会把已经验证过的 Z.AI 那条也搅浑。拿到实测结果后,把结论连同日期写进这段注释。
@@ -115,14 +121,25 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
     独立佐证:ZCode 中转页里那个 CLI 桥的路径段也是
     `/api/v1/oauth/cli/callback/bigmodel`(zai 那条是 `/zai`)。
     `zcode` 是**桌面端的 appId**,和这个字段不是一回事 —— 逆向文档把两者混了。
+    (2026-09-15 逆向 ZCode.app 再次确认:官方 init body 发的就是 `provider:"bigmodel"`。)
   */
   provider: 'bigmodel',
   /*
     ★ 响应体没被抓到过,这里赌它和 zai 那条同构(`data.bigmodel.access_token`)。
     赌错也不致命:`finishExchange` 会退回到平铺的 `data.access_token`。
+    (B 通道的 poll ready 响应里这一层就叫 `bigmodel`,含 refresh_token —— 逆向确认。)
   */
   tokenKey: 'bigmodel',
   clientId: APP_ID,
+  /*
+    ★★ 主路径的服务端发起流程。`redirect` 这个参数名是 2026-09-15 逆向
+    ZCode.app v3.11.2 确认的:官方客户端对 bigmodel 渠道覆盖的是 `redirect`
+    (zai 那条覆盖的是 `redirect_uri`,两家不一样)。
+  */
+  cli: {
+    initUrl: 'https://zcode.z.ai/api/v1/oauth/cli/init',
+    redirectParam: 'redirect'
+  },
   redirect: { kind: 'loopback-ephemeral', path: CALLBACK_PATH, host: '127.0.0.1' },
   /*
     ★★ **换码那跳发的是 ZCode 注册的那个地址,不是我们真用的回环地址。**
@@ -133,24 +150,34 @@ export const ZCODE_BIGMODEL_OAUTH: OAuthProviderSpec = createZcodeSpec({
   */
   tokenRedirectUri: 'zcode://oauth/callback',
   /*
-    ★★★ **第三跳。2026-09-09 探到,和 Z.AI 那条已验证的端点逐字同构。**
+    ★★★ **第四跳 = 把 OAuth token 供应成一把真 API Key。** 2026-09-15 逆向
+    ZCode.app 打包的 CLI(`Resources/glm/zcode.cjs` 的 `resolveCodingPlanApiKey`)
+    拿到的完整链路,登录最后一步逐字对齐:
 
-    先前省略了它(= 拿 ② 的 OAuth token 直接当 API key),表现是登录成功、
-    发请求回 `[1234][网络错误…]`。三种**形状合法**的假令牌
-    (`id.secret` / 假 JWT / 无点长串)在同一端点上一律 401,所以 1234 不是鉴权失败
-    —— 令牌过了那一层,是后面没有推理权限。缺的正是这一跳。
+      ① GET bigmodel.cn/api/biz/customer/getCustomerInfo  Authorization: <token>(裸值)
+         → 挑「默认机构」/「默认项目」(名字含关键字的第一条,否则 [0])
+      ② GET …/api/biz/v1/organization/{org}/projects/{proj}/api_keys
+         → 找 name='zcode-api-key';没有就 POST 创建一把
+      ③ GET …/api_keys/copy/{apiKey} → secretKey
+      最终 accessToken = `apiKey.secretKey`(bigmodel 的标准 API Key 形态)
 
-    端点是这么找到的:`open.bigmodel.cn` 上 `/api/zzz-not-a-route` 会干净地回
-    `404 NOT_FOUND`,所以在没被网关吃掉的前缀上「存不存在」是可测的。按 Z.AI 那条
-    的对称性一扫就中,契约完全一致:
+    **这就是 1234 的真相**:coding 端点(`/api/coding/paas/v4` 或 `/api/anthropic`)
+    要的是真 API Key,OAuth token 直接当 key 用它不认。CLI 登录完成后把这把 key
+    写进用户配置(`provider.bigmodel.options.apiKey`),之后当普通 key 用。
 
-      POST https://open.bigmodel.cn/api/auth/z/login   {token: <②的 access_token>}
-        不带 token → {"code":1002,"msg":"token is empty"}          ← 与 api.z.ai 逐字相同
-        token 无效 → {"code":500,"msg":"z.ai用户信息异常"}          ← api.z.ai 是同一句的英文
-
-    ★ 路径里那个 `z` 不是笔误,智谱这条的端点名就叫 `z/login`。
+    ⚠️ 前两轮的结论都写在这里防再犯:
+    - z/login 第四跳已被证伪(真 token 也被拒,`z.ai用户信息异常`)—— 别加回来;
+    - 「OAuth token 直接当 key」也已被证伪(1234)—— 必须走这三步供应。
   */
-  businessLoginUrl: 'https://open.bigmodel.cn/api/auth/z/login',
+  apiKeyProvision: {
+    /*
+      ★ CLI 的 `hje()`:生产缺省 `https://bigmodel.cn`(env 可覆盖)。
+      注意 biz API 在 bigmodel.cn 主域上,而 AI 端点在 open.bigmodel.cn —— 两个域名,
+      别合并。
+    */
+    bizHost: 'https://bigmodel.cn',
+    keyName: 'zcode-api-key'
+  },
   /*
     ★ **不填 `userinfoUrl`。** 逆向文档记的 `zcode.z.ai/api/oauth/userinfo`
     2026-09-09 实测是 404(Z.AI 那条 `chat.z.ai/api/oauth/userinfo` 回 401,是活的)。

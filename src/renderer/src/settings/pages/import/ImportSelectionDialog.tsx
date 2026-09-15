@@ -27,6 +27,7 @@ import { TextInput } from '../../../components/ui/TextInput'
 import { cn } from '../../../lib/cn'
 import { useI18n, type TranslationKey } from '../../../i18n'
 import * as importService from '../../../services/import'
+import { sourceNameKey } from './source-name'
 import { Box } from './ImportSyncDialog'
 import {
   IMPORT_GROUPS,
@@ -40,6 +41,13 @@ import {
   toggleItem,
   type ImportGroupId
 } from './selection'
+
+/**
+ * 搜索防抖窗口。★ 每次按键都发一趟 IPC 的话,主进程正忙着扫描时这些请求会排队,
+ * 表现是输入框跟不上手 —— 卡的不是渲染,是回包。200ms 打得完一串连续输入,
+ * 又短到停手之后不会被察觉。
+ */
+const SEARCH_DEBOUNCE_MS = 200
 
 export function ImportSelectionDialog({
   open,
@@ -63,6 +71,8 @@ export function ImportSelectionDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<ImportGroupId>>(new Set(['providers', 'projects', 'skills', 'hooks', 'tools']))
   const [query, setQuery] = useState('')
+  /* 输入框读 `query`(必须跟手),发请求读这个(慢一拍)。 */
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [projectFilter, setProjectFilter] = useState('')
   const [targets, setTargets] = useState<Map<string, string>>(new Map())
 
@@ -73,31 +83,48 @@ export function ImportSelectionDialog({
     不做无限滚动是因为这个弹窗的用法是「看一眼、勾几个、提交」,而不是浏览 ——
     真要找某一条,搜索比滚动快得多。
   */
+  /** 最后一次发出的请求序号。用来把先发后回的旧结果认出来并丢掉。 */
+  const requestSeq = useRef(0)
+
   const load = useCallback(async (): Promise<void> => {
     if (previewId === undefined) return
+    const seq = (requestSeq.current += 1)
     setLoading(true)
     setError(null)
     try {
       const page = await importService.previewItems({
         previewId,
-        ...(query.trim() === '' ? {} : { q: query.trim() }),
+        ...(debouncedQuery.trim() === '' ? {} : { q: debouncedQuery.trim() }),
         ...(projectFilter === '' ? {} : { projectKey: projectFilter }),
         offset: 0,
         limit: IMPORT_LIMITS.pageSize
       })
+      /*
+        ★ 防抖挡不住乱序。两次请求在途时,先发的那次完全可能后回 ——
+        真这样的话列表里显示的是**上一个搜索词**的结果,而且看不出哪里不对。
+        只认最后一次发出去的那趟,其余的结果整个丢掉。
+      */
+      if (seq !== requestSeq.current) return
       setItems(page.items)
       setSelected((prev) => (prev.size === 0 ? initialSelection(page.items, projectsRef.current) : prev))
     } catch (err) {
+      if (seq !== requestSeq.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setLoading(false)
+      // 作废的那趟不许碰 loading —— 否则它一收尾就把仍在飞的新请求标成「已完成」。
+      if (seq === requestSeq.current) setLoading(false)
     }
-  }, [previewId, query, projectFilter])
+  }, [previewId, debouncedQuery, projectFilter])
 
   useEffect(() => {
     if (!open) return
     void load()
   }, [open, load])
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [query])
 
   // 弹窗关掉再打开 = 一次新的选择。不清的话上次的勾会留在下一次的预览上,
   // 而那批 id 属于一个已经过期的快照。
@@ -106,6 +133,7 @@ export function ImportSelectionDialog({
     setSelected(new Set())
     setItems([])
     setQuery('')
+    setDebouncedQuery('')
     setProjectFilter('')
     setTargets(new Map())
   }, [open])
@@ -149,7 +177,15 @@ export function ImportSelectionDialog({
     <Dialog
       open={open}
       title={t('import.selectDialogTitle')}
-      description={t('import.selectDialogHint')}
+      /*
+        ★ 来源名读 `preview.sourceKind`(这份快照实际扫的那家),**不是**页面上
+        来源切换按钮的当前值。扫完之后用户还能接着切按钮,读按钮就会出现
+        「扫的是 Codex、提示说 Claude Code」。preview 为空时弹窗本就是关着的,
+        兜底值只是为了不让类型上出现 undefined。
+      */
+      description={t('import.selectDialogHint', {
+        source: t(sourceNameKey(preview?.sourceKind ?? 'claude-code'))
+      })}
       onClose={onClose}
       width={640}
       footer={

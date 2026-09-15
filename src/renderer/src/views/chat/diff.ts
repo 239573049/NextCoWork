@@ -100,6 +100,22 @@ function pushSpan(spans: DiffSpan[], text: string, hi: boolean): void {
 
 const whole = (text: string): DiffSpan[] => [{ text, hi: false }]
 
+/** 高亮占比超过这个数,就说明「几乎整行都变了」。 */
+const SATURATED = 0.8
+
+/**
+ * 一侧几乎全是高亮时抹平它。
+ *
+ * 配对的两行有时其实毫不相干(LCS 只是按位置把它们凑成了一对),逐词 diff 会
+ * 把整行几乎全标上 —— 那和整行高亮一样没有信息量,还会盖住行底色。
+ */
+function unlitIfSaturated(spans: DiffSpan[]): DiffSpan[] {
+  const total = spans.reduce((n, s) => n + s.text.length, 0)
+  if (total === 0) return spans
+  const lit = spans.reduce((n, s) => (s.hi ? n + s.text.length : n), 0)
+  return lit / total < SATURATED ? spans : whole(spans.map((s) => s.text).join(''))
+}
+
 /**
  * 计算 `oldStr → newStr` 的统一 diff 行序列。
  *
@@ -123,16 +139,21 @@ export function computeDiff(oldStr: string, newStr: string): DiffRow[] {
     while (k < ops.length && ops[k]!.tag === 'del') dels.push(ops[k++]!.a as string)
     while (k < ops.length && ops[k]!.tag === 'add') adds.push(ops[k++]!.b as string)
 
-    const pairs = Math.min(dels.length, adds.length)
-    for (let p = 0; p < pairs; p++) {
-      const { del, add } = wordSpans(dels[p]!, adds[p]!)
-      rows.push({ type: 'del', spans: del })
-      rows.push({ type: 'add', spans: add })
+    // ★ 只有增删行数**相等**时才逐行配对做词级 diff。
+    //
+    // 一删九增这种块(把一行展开成一整段),拿第一条删去和第一条增凑对纯属
+    // 位置巧合,标出来的「差异」没有意义。此时整行就是改动本身,行底色已经
+    // 说清楚了 —— 再叠一层词级高亮只会把整行糊成一块实心底,反而看不出改了哪。
+    if (dels.length === adds.length) {
+      for (let p = 0; p < dels.length; p++) {
+        const { del, add } = wordSpans(dels[p]!, adds[p]!)
+        rows.push({ type: 'del', spans: unlitIfSaturated(del) })
+        rows.push({ type: 'add', spans: unlitIfSaturated(add) })
+      }
+    } else {
+      for (const d of dels) rows.push({ type: 'del', spans: whole(d) })
+      for (const a of adds) rows.push({ type: 'add', spans: whole(a) })
     }
-    for (let p = pairs; p < dels.length; p++)
-      rows.push({ type: 'del', spans: [{ text: dels[p]!, hi: true }] })
-    for (let p = pairs; p < adds.length; p++)
-      rows.push({ type: 'add', spans: [{ text: adds[p]!, hi: true }] })
   }
   return rows
 }

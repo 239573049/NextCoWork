@@ -575,16 +575,32 @@ export class UpstreamRouter {
       const body = transport.body(anthropicBody)
       const url = joinUpstreamUrl(c.provider.baseUrl, enc.path)
       const payload = JSON.stringify(body)
+      /*
+        ★★ 签名式鉴权(Ollama)的头和 `?ts=` query 在**这里**逐次现算 —— `send()`
+        每被调用一次(首发、以及 401 之后那次重发)都重新签:时间戳式签名复用旧值
+        等于没重试。没有 `signRequest` 的供应商这一步是恒等,请求逐字节不变。
+      */
       const send = (extraHeaders: Record<string, string>): Promise<Response> => {
+        const target = new URL(url)
+        /*
+         * ★★ 签名用的 path 是**最终 URL 的 pathname**,不是 `enc.path` ——
+         * OpenAI 族的 baseUrl 自带 `/v1` 段,服务端按它看到的完整路径重建签名串,
+         * 用 `enc.path` 签出来的串对不上,且错误只表现为一个不解释的 401。
+         */
+        const signed = transport.signRequest?.({ method: 'POST', path: target.pathname })
+        if (signed?.query !== undefined) {
+          for (const [k, v] of Object.entries(signed.query)) target.searchParams.set(k, v)
+        }
         const headers: Record<string, string> = {
           // 自报家门排在最前面:任何一个 encode / transport 想自己写 UA 都压得过它
           'user-agent': userAgent(),
           ...enc.headers,
-          ...transport.headers
+          ...transport.headers,
+          ...(signed?.headers ?? {})
         }
         // ★ 删在合并 extraHeaders 之前:那一个是 401 之后重发的鉴权头,不该被这里带走
         for (const name of transport.dropHeaders ?? []) delete headers[name]
-        return this.host.fetch(url, {
+        return this.host.fetch(target.toString(), {
           method: 'POST',
           headers: { ...headers, ...extraHeaders, accept: 'text/event-stream' },
           body: payload,
@@ -611,7 +627,14 @@ export class UpstreamRouter {
         // 必须读完,否则这条连接不会被释放
         await waitFor(() => res.text().catch(() => ''))
         const fresh = await waitFor(() => this.credentials.refreshNow(c.provider.credentialRef, signal))
-        res = await waitFor(() => send(authHeader(protocol, fresh.accessToken)))
+        /*
+         * ★★ 签名式凭证(Ollama)重发**不带 extraHeaders**:`send()` 会现签一把新的
+         * (新 ts),而 `authHeader()` 会把凭证槽里的东西当 Bearer/x-api-key 塞进去 ——
+         * 那个槽里装的是 SSH 私钥 PEM,塞进请求头等于把私钥发出去。
+         */
+        res = await waitFor(() =>
+          transport.signRequest !== undefined ? send({}) : send(authHeader(protocol, fresh.accessToken))
+        )
       }
       httpStatus = res.status
 

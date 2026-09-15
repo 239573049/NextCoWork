@@ -6,12 +6,17 @@
  * 界面上都长得完全正常 —— 只是列表短了一截,或者多出一个永远 404 的别名。
  */
 import { describe, expect, it } from 'vitest'
+import type { UpstreamProvider } from '../../../../shared/domain/provider'
+import type { OAuthCredential } from '../../../../shared/domain/credential'
 import { REQUEST_PATH } from '../../../../shared/domain/baseurl'
+import { generateKeyPair } from '../../oauth/issuers/ollama'
 import {
   MODEL_LIST_PATH,
   modelListErrorMessage,
   modelListRequest,
-  parseModelList
+  modelListRequestFor,
+  parseModelList,
+  redactSecrets
 } from '../model-list'
 
 describe('modelListRequest · 路径', () => {
@@ -224,5 +229,97 @@ describe('modelListErrorMessage', () => {
     expect(modelListErrorMessage(400, '{"message":"model list disabled"}')).toContain(
       'model list disabled'
     )
+  })
+})
+
+/* ================================================================
+ * modelListRequestFor —— 凭证形状说了算的那一层。
+ *
+ * ★★ 这组守的是一次实测事故(2026-09-15):keypair 式凭证(ollama-cloud)的
+ * accessToken 槽里是 SSH 私钥 PEM,拿 `bearerOf` 拼 Bearer 会得到多行头值 ——
+ * `Headers.append` 抛 TypeError,而且把私钥整段打进了界面的错误弹窗。
+ * ================================================================ */
+describe('modelListRequestFor · 凭证形状', () => {
+  const ollamaProvider: UpstreamProvider = {
+    id: 'ollama-cloud',
+    name: 'Ollama Cloud',
+    protocol: 'openai-chat',
+    baseUrl: 'https://ollama.com/v1',
+    credentialRef: 'provider:ollama-cloud',
+    priority: 60,
+    enabled: true
+  }
+
+  // 真实密钥对:签名格式错一位,这里和服务端都会沉默地拒绝
+  const pair = generateKeyPair()
+  const signedCred: OAuthCredential = {
+    kind: 'oauth',
+    issuer: 'ollama-cloud',
+    accessToken: pair.privateKeyPem,
+    refreshToken: pair.publicKeyLine,
+    expiresAt: null,
+    accountId: 'tester'
+  }
+
+  it('★★★ 签名式凭证:头是「公钥:签名」、URL 带 ts,私钥 PEM 一个字都不出现', () => {
+    const { url, headers } = modelListRequestFor(ollamaProvider, signedCred)
+    expect(url.startsWith('https://ollama.com/v1/models?ts=')).toBe(true)
+    expect(headers.authorization).toMatch(/^[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]{60,}$/u)
+    expect(headers.authorization ?? '').not.toContain('Bearer')
+    expect(JSON.stringify(headers)).not.toContain('OPENSSH PRIVATE KEY')
+  })
+
+  it('★★ Anthropic 协议同样签名,且 `?limit=` 分页参数保留(ts 追加在其后)', () => {
+    const { url, headers } = modelListRequestFor(
+      { ...ollamaProvider, protocol: 'anthropic', baseUrl: 'https://ollama.com' },
+      signedCred
+    )
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/v1/models')
+    expect(parsed.searchParams.get('limit')).toBe('1000')
+    expect(parsed.searchParams.get('ts')).toMatch(/^\d{10}$/u)
+    expect(headers['x-api-key']).toBeUndefined()
+    expect(headers.authorization).toMatch(/:/u)
+  })
+
+  it('★★ api-key 凭证零回归:还是 Bearer', () => {
+    const { url, headers } = modelListRequestFor(ollamaProvider, { kind: 'api-key', apiKey: 'sk-1' })
+    expect(url).toBe('https://ollama.com/v1/models')
+    expect(headers.authorization).toBe('Bearer sk-1')
+  })
+
+  it('★★ 无凭证(null)= 不带鉴权头 —— modelListPublic 那几家靠它', () => {
+    const { headers } = modelListRequestFor(ollamaProvider, null)
+    expect(headers.authorization).toBeUndefined()
+    expect(headers['x-api-key']).toBeUndefined()
+  })
+
+  it('★★ 非签名式的 OAuth 凭证(chatgpt 这类)仍然 Bearer 它的 accessToken —— 行为不变', () => {
+    const { headers } = modelListRequestFor(
+      { ...ollamaProvider, id: 'codex', baseUrl: 'https://chatgpt.com/backend-api/codex' },
+      {
+        kind: 'oauth',
+        issuer: 'chatgpt',
+        accessToken: 'at-1',
+        refreshToken: 'rt-1',
+        expiresAt: null,
+        accountId: 'u'
+      }
+    )
+    expect(headers.authorization).toBe('Bearer at-1')
+  })
+})
+
+describe('redactSecrets · 密钥不进界面', () => {
+  it('★★★ 私钥 PEM 整段替换成占位符', () => {
+    const leaked = `Headers.append: "Bearer -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nAAAA\n-----END OPENSSH PRIVATE KEY-----" is an invalid header value.`
+    const safe = redactSecrets(leaked)
+    expect(safe).not.toContain('PRIVATE KEY-----')
+    expect(safe).not.toContain('b3BlbnNzaC1rZXktdjEAAAAA')
+    expect(safe).toContain('[已隐去的密钥]')
+  })
+
+  it('★ 没有密钥的文本原样返回', () => {
+    expect(redactSecrets('ECONNREFUSED 127.0.0.1:11434')).toBe('ECONNREFUSED 127.0.0.1:11434')
   })
 })

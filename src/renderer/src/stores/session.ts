@@ -15,7 +15,7 @@ import type { PermissionMode } from '../../../shared/agent/permission'
 import type { SessionChange } from '../../../shared/domain/session'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { PlanDocumentV2 } from '../../../shared/domain/plan'
-import { isToolResultOnly, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
+import { isToolResultOnly, userMessage, visibleText, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions, SessionMode } from '../../../shared/agent/run-request'
 import {
   applyEvents,
@@ -24,6 +24,7 @@ import {
   hasRun,
   subagentsFromMessages,
   toolsFromMessages,
+  type SubagentState,
   type TranscriptState
 } from '../../../shared/agent/transcript'
 import { orphanedCheckpoints, type ContextCheckpoint } from '../../../shared/agent/context-management'
@@ -571,6 +572,27 @@ function reportCompletedBackgroundFromState(sessionId: string, events: readonly 
 }
 
 /**
+ * 子代理**最后一条助手消息**的正文 —— 也就是它这趟活儿交出来的东西。
+ *
+ * 和主进程 `runtime.ts` 收尾时算 `text` 的口径逐字一致(倒着找第一条
+ * assistant、取 `visibleText`),右侧那个只读面板看到的也是它。
+ * 读不到一律返回 undefined 交给调用方兜底 —— 汇报这件事不该因为
+ * 取不到全文就整个失败。
+ */
+async function childFinalText(child: SubagentState): Promise<string | undefined> {
+  const childSessionId = child.childSessionId
+  if (childSessionId === undefined) return undefined
+  try {
+    const detail = await getSession(childSessionId)
+    const last = [...detail.messages].reverse().find((m) => m.role === 'assistant')
+    const text = last === undefined ? '' : visibleText(last).trim()
+    return text === '' ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Deliver a detached child result to the main agent exactly once.
  *
  * ★★ **`lastOptions` 在重启之后是 null** —— 它只在 `send` 里写,不落盘。
@@ -605,7 +627,23 @@ export async function reportBackgroundChild(
   }
   backgroundReports.add(key)
   store.getState().setSubagentReportStatus(callId, 'injecting')
-  const summary = child.summary ?? 'The background subagent finished without a summary.'
+  /*
+    ★★ **发给主代理的是全文,不是 `child.summary`。**
+
+    那个字段是主进程切出来的前 240 字(`runtime.ts` 两处 `slice(0, 240)`),
+    生来是给卡片当一行预览用的。拿它当汇报正文的话,一份「改了八个文件、
+    逐条说明」的报告到主代理手上只剩开头一句,而且断在半个标识符中间 ——
+    主代理据此接着往下做,却以为自己看到了全部。不报错,只是做错。
+
+    对照前台那条路就知道这是个偏差而不是设计:`task.ts` 返回的是
+    `toolOk(outcome.text)`,**全文**进 tool_result,240 字的摘要只装点卡片。
+    同一个子代理改成后台跑,交给主代理的内容缩到二十分之一。
+
+    取不到全文(旧转录没有 childSessionId、子会话已删、IPC 失败)才退回摘要 ——
+    残缺的汇报也好过没有汇报,那毕竟是这个子代理留下的唯一痕迹。
+  */
+  const full = await childFinalText(child)
+  const summary = full ?? child.summary ?? 'The background subagent finished without a summary.'
   const report = `Background subagent result (${child.subagentType ?? 'subagent'}, ${child.childRunId}):\n\n${summary}\n\nReview this result and continue the conversation if action is needed.`
   try {
     /*
@@ -619,7 +657,13 @@ export async function reportBackgroundChild(
     */
     const parts: ContentPart[] = [
       { type: 'text', text: report },
-      { type: 'subagent', callId, childRunId: child.childRunId, summary }
+      /*
+        ★ 这里挂的是**短摘要**,不是上面那份全文:全文已经在 text part 里落盘了,
+        再存一份就是同一段话在库里出现两次。界面那一行展开时会自己去子会话
+        取全文(见 `parts.tsx` 的 `SubagentReportRow`),这个字段只是它的兜底预览。
+      */
+      { type: 'subagent', callId, childRunId: child.childRunId,
+        ...(child.summary === undefined ? {} : { summary: child.summary }) }
     ]
     if (before.activeRunId !== null) {
       await interjectRun(before.activeRunId, [{ id: ulid(), parts, internal: true }])

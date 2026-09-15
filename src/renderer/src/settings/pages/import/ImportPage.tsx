@@ -28,13 +28,14 @@ import type { Workspace } from '../../../../../shared/domain/workspace'
 import { Button } from '../../../components/ui/Button'
 import { Toggle } from '../../../components/ui/Toggle'
 import { cn } from '../../../lib/cn'
-import { useI18n, type TranslationKey } from '../../../i18n'
+import { useI18n, type Translate, type TranslationKey } from '../../../i18n'
 import * as importService from '../../../services/import'
 import { invoke } from '../../../services/ipc'
 import { useTabsStore } from '../../../stores/tabs'
 import { useWindowStore } from '../../../stores/window'
 import { ImportSelectionDialog } from './ImportSelectionDialog'
 import { ImportSyncDialog } from './ImportSyncDialog'
+import { detectedKey, sourceNameKey } from './source-name'
 
 type Modal = { kind: 'sync' } | { kind: 'select'; preview: ImportPreview } | null
 
@@ -209,7 +210,7 @@ export function ImportPage(): ReactNode {
           </Button>
         </div>
         <Row
-          title={sourceKind === 'codex' ? t('import.sourceCodex') : sourceKind === 'opencode' ? t('import.sourceOpencode') : t('import.sourceName')}
+          title={t(sourceNameKey(sourceKind))}
           description={
             detected ? (
               <>
@@ -225,7 +226,7 @@ export function ImportPage(): ReactNode {
                   {detection?.configDir}
                 </span>
                 <span className="mt-1 block">
-                  {t(sourceKind === 'codex' ? 'import.detectedCodex' : sourceKind === 'opencode' ? 'import.detectedOpencode' : 'import.detected', {
+                  {t(detectedKey(sourceKind), {
                     projects: detection?.projectCount ?? 0,
                     sessions: detection?.sessionCount ?? 0
                   })}
@@ -234,7 +235,7 @@ export function ImportPage(): ReactNode {
                 </span>
               </>
             ) : (
-              availabilityLabel(t, detection?.availability ?? 'not-found')
+              availabilityLabel(t, detection?.availability ?? 'not-found', sourceKind)
             )
           }
           descriptionTone={detected ? undefined : 'danger'}
@@ -426,7 +427,7 @@ function BatchRow({
       >
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] text-fg">
-            {t('import.sourceName')} ·{' '}
+            {t(sourceNameKey(batch.sourceKind))} ·{' '}
             {batch.trigger === 'auto' ? t('import.triggerAuto') : t('import.triggerManual')}
           </p>
           <p className="mt-0.5 text-[11.5px] text-fg-muted">
@@ -538,10 +539,16 @@ function originLabel(t: (key: TranslationKey) => string, origin: string): string
   return t('import.originAuto')
 }
 
-function availabilityLabel(t: (key: TranslationKey) => string, availability: string): string {
+function availabilityLabel(
+  t: Translate,
+  availability: string,
+  kind: ImportSourceKind
+): string {
   if (availability === 'denied') return t('import.denied')
   if (availability === 'unreadable') return t('import.unreadable')
-  return t('import.notFound')
+  // ★ 「没找到」必须说清是**哪家**没找到 —— 三个来源共用这一行,不带名字的话
+  // 用户看不出是自己选错了来源还是目录真的不在。
+  return t('import.notFound', { source: t(sourceNameKey(kind)) })
 }
 
 function formatTime(at: number, locale: string): string {

@@ -203,6 +203,11 @@ export interface ImportPreviewItem {
   scope: 'global' | 'project'
   /** 会话消息数 / 技能文件数之类。界面显示用,不参与判定。 */
   count?: number
+  /**
+   * `count` 只是下界 —— 预览没读完整个文件就得出了它。界面上要标成近似值,
+   * 不能让用户以为那是准数。判据见 `service.ts` 的 `readChatMeta`。
+   */
+  countApproximate?: boolean
   bytes?: number
   /** 源侧时间,给「最近的排前面」用。 */
   sourceUpdatedAt?: number
@@ -247,6 +252,11 @@ export interface ImportPreviewCounts {
 export interface ImportPreview {
   previewId: string
   sourceId: string
+  /**
+   * 这份快照**实际扫的**是哪家。★ 界面的来源名必须读它,不能读页面上那个
+   * 来源切换按钮的状态 —— 扫完之后用户还能接着切按钮,那时两者就对不上了。
+   */
+  sourceKind: ImportSourceKind
   createdAt: number
   /** 绝对时间戳。过期后提交被拒,必须重新扫描 —— 源可能已经变了。 */
   expiresAt: number
@@ -471,6 +481,28 @@ export const IMPORT_LIMITS = {
   transcriptLineMaxBytes: 8 * 1024 * 1024,
   /** 一次扫描最多认多少个会话,防止一个异常目录把主进程拖住。 */
   maxSessionsPerScan: 2000,
+  /**
+   * 预览阶段只读转录的前多少字节。全文读一遍只额外换来精确消息数和
+   * `contentHash`,而后者只有已导入过的会话才有人看。
+   *
+   * ★ **1MiB 是量出来的,不是估出来的。** 在本机 1063 份真实转录
+   * (Codex 1.6GB + Claude 474MB)上逐档实测:
+   *
+   * | 头部 | Codex title 命中 | 用时 |
+   * |------|------------------|------|
+   * | 64KiB  | 4/24  | 0.10s |
+   * | 256KiB | 20/24 | —     |
+   * | 1MiB   | 24/24 | 0.96s |
+   * | 全读   | 基准  | 3.94s |
+   *
+   * 64KiB 看着最快,代价是 Codex 有 83% 的会话连标题都解析不出来 ——
+   * 那几十字节省下的时间买来的是一列空标题。1MiB 只读全量的 24.5%,
+   * 换来 title 全中,这才是这一档的意义。
+   *
+   * 调这个数**不会**影响正确性:头部读不出消息时 `readChatMeta` 会回退到
+   * 全文读,所以它纯粹是性能旋钮。
+   */
+  scanHeadBytes: 1024 * 1024,
   /** 单会话最多多少条消息。 */
   maxMessagesPerSession: 20000,
   /** 预览快照存活时间。过期必须重新扫描 —— 源可能已经变了。 */

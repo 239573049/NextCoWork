@@ -26,6 +26,7 @@ import type { TransportContext, UpstreamTransport } from '../upstream/transport'
 import { CHATGPT_OAUTH } from './issuers/chatgpt'
 import { GROK_BUILD_OAUTH } from './issuers/grok'
 import { KIMI_CODE_OAUTH } from './issuers/kimi'
+import { OLLAMA_CLOUD_OAUTH } from './issuers/ollama'
 import { ZCODE_BIGMODEL_OAUTH } from './issuers/zcode-bigmodel'
 import { ZCODE_ZAI_OAUTH } from './issuers/zcode-zai'
 
@@ -76,6 +77,58 @@ export type OAuthGrant =
    * 给了就用它。省略时用流程里那个默认值。
    */
   | { kind: 'device-code'; deviceAuthorizationUrl: string; timeoutMs?: number }
+  /**
+   * **服务端发起的授权 flow**(ZCode 两条渠道走的这条)—— 授权 URL 不再由本地拼,
+   * 而是先 `POST initUrl` 拿一份服务端签发的 `{authorize_url, flow_id, expires_at,
+   * poll_interval_sec}`,再双通道赛跑去完成(2026-09-15 逆向 ZCode.app v3.11.2 得到的
+   * 契约,见 `issuers/zcode.ts` 文件头的证据记录):
+   *
+   * - **A 通道(回环换码)**: authorize_url 的 `redirectParam` 被覆盖成我们的回环地址,
+   *   浏览器授权完落回本地,拿 code 去 `tokenUrl` 换 token(和 authorization-code 那条
+   *   完全同构,复用 `tokenRequest`);
+   * - **B 通道(轮询)**: `GET {initUrl 同源}/api/v1/oauth/cli/poll/{flow_id}`
+   *   (Bearer init 时那个 pollToken),`status=ready` 的响应**直接带 token 和 user**
+   *   —— 浏览器回调丢失(自定义协议被抢、浏览器拒绝跳转)时登录照样完成。
+   *
+   * 先 settle 的通道赢,输家被 abort。真实 ZCode.app 就是这个双通道结构,只是它用
+   * `zcode://` 深链当 A 通道;我们不注册自定义协议,A 通道换成回环地址。
+   *
+   * ★ `landingPath`/`host` 是 A 通道的回环,**总是临时端口**(不存在注册值约束 ——
+   * 服务端对 redirect 不校验值,只透传);和 `fallback` 里那个可能是固定端口的
+   * `redirect` 不是一回事(zai 的 fallback 仍要 9999,注册值逐字节要求)。
+   *
+   * ★★ `fallback`:init 请求失败(网络、WAF、契约变了)时整体降级跑一份完整的
+   * authorization-code grant —— 现有回环+换码链路是实测验证过的保底。
+   */
+  | {
+      kind: 'cli-poll'
+      initUrl: string
+      /** init body 里那个 `provider` 字段的值(zcode.z.ai 认它来决定授权入口) */
+      provider: string
+      /** authorize_url 上要被回环地址覆盖的那个参数名(bigmodel 是 `redirect`,zai 是 `redirect_uri`) */
+      redirectParam: 'redirect' | 'redirect_uri'
+      /** A 通道回环的路径与主机(端口总是临时的) */
+      landingPath: string
+      host?: LoopbackHost
+      fallback?: Extract<OAuthGrant, { kind: 'authorization-code' }>
+    }
+  /**
+   * **密钥绑定**(Ollama 走的这条)。和前三种都不同:全程**没有 token**——
+   * 浏览器里把本机 ed25519 公钥绑到账号,之后每个请求都用私钥现场签名
+   * (2026-09-15 逆向 ollama CLI v0.34.0 + 直连实测定案,见 `issuers/ollama.ts`)。
+   *
+   * ★★ 这条 grant 的编排是通用的(开绑定页 → 轮询 → 验证),但**协议是 ollama 的**,
+   * 于是密钥怎么读、URL 怎么拼、怎么轮询,全部通过 spec 上的 `keypairBinding`
+   * 钩子束注入 —— `flow.ts` 保持零加密/零文件 I/O,和「编排归 flow、协议归 issuer」
+   * 的既有分工一致。
+   */
+  | {
+      kind: 'keypair-binding'
+      /** 轮询间隔。缺省 1 秒(官方 CLI 同款:200ms 转圈、每 5 跳查一次) */
+      pollIntervalMs?: number
+      /** 本地兜底超时。缺省 5 分钟,和回环/粘贴两条路径对齐 */
+      timeoutMs?: number
+    }
 
 /**
  * `identity()` 从 token 响应里提出来的东西 —— 正好是 `OAuthCredential` 里非派生的那些字段
@@ -216,8 +269,40 @@ export interface OAuthProviderSpec {
    * 否则每刷新一次就把用户踢下线一次。
    */
   refresh?(cred: OAuthCredential, ctx: OAuthExchangeContext): Promise<OAuthIdentity | null>
+  /**
+   * ★★ `keypair-binding` 这条 grant 的**协议钩子束** —— 只在 `grant.kind` 是
+   * `keypair-binding` 时被读。密钥文件怎么放、绑定页 URL 怎么拼、怎么轮询、
+   * 怎么验证,全是 ollama 的知识,留在这里注入而 `flow.ts` 只做通用编排。
+   */
+  keypairBinding?: {
+    /** 读或生成本机密钥对(SSH 格式)。已存在就复用 —— 绑定是跟着公钥走的 */
+    loadOrCreate(): Promise<OAuthKeyPair>
+    /** 浏览器里打开的绑定页 URL */
+    connectUrl(publicKeyLine: string): string
+    /**
+     * 查一次绑定状态。**返回 `null` = 还没绑好,继续轮询**(任何网络错误/非 200
+     * 也归到这里 —— 轮询天生要容忍抖动,真正的上限是超时);返回用户名 = 完成。
+     */
+    poll(key: OAuthKeyPair, ctx: OAuthExchangeContext): Promise<string | null>
+    /**
+     * 绑定成功后的**可用性验证**,失败抛 `OAuthFailedError`。
+     *
+     * ★★ 存在的理由:这条链路「绑定成功」和「我们将来发请求的网关认这种鉴权」
+     * 是两件事(ollama 的 `/api/*` 认签名,`/v1` 兼容网关是否认是独立命题)——
+     * 登录时探一次,把「不认」诚实地说出来,而不是让第一条消息去撞 401。
+     */
+    verify?(key: OAuthKeyPair, ctx: OAuthExchangeContext): Promise<void>
+  }
   /** 拿这家的凭证发请求时,额外要带什么头、body 要强制成什么样 */
   transport(cred: OAuthCredential, ctx: TransportContext): UpstreamTransport
+}
+
+/** 密钥绑定流程里那把钥匙 —— `identity()` 的输入里带着它落进凭证 */
+export interface OAuthKeyPair {
+  /** OpenSSH 格式私钥 PEM(`-----BEGIN OPENSSH PRIVATE KEY-----`) */
+  privateKeyPem: string
+  /** 公钥行(`ssh-ed25519 <base64> [comment]`) */
+  publicKeyLine: string
 }
 
 const SPECS = {
@@ -225,7 +310,8 @@ const SPECS = {
   'zcode-zai': ZCODE_ZAI_OAUTH,
   'zcode-bigmodel': ZCODE_BIGMODEL_OAUTH,
   'kimi-code': KIMI_CODE_OAUTH,
-  'grok-build': GROK_BUILD_OAUTH
+  'grok-build': GROK_BUILD_OAUTH,
+  'ollama-cloud': OLLAMA_CLOUD_OAUTH
 } as const satisfies Record<OAuthIssuerId, OAuthProviderSpec>
 
 export const OAUTH_SPECS: Readonly<Record<OAuthIssuerId, OAuthProviderSpec>> = SPECS

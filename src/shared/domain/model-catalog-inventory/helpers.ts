@@ -12,6 +12,7 @@ export const source = (url: string): { url: string; fetchedAt: string } => ({
 
 const SOURCES = {
   openai: source('https://developers.openai.com/api/docs/models'),
+  ollama: source('https://docs.ollama.com/cloud'),
   anthropic: source('https://www.anthropic.com/pricing'),
   google: source('https://ai.google.dev/gemini-api/docs/models'),
   deepseek: source('https://api-docs.deepseek.com/'),

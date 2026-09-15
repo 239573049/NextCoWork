@@ -324,6 +324,75 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     verification: 'documented'
   },
 
+  {
+    /*
+      Ollama Cloud —— **和本表末尾那条本地 `ollama` 是同一家的两条线,不是一条。**
+      本地那条打 `127.0.0.1:11434`(自己的显卡),这条打 `ollama.com`(官方托管,
+      吃订阅额度)。两条都留着,因为它们解决的是两个问题。
+
+      ★★ **模型名在两条线上不一样,这是这家最会咬人的地方。**
+      云 API 上是 `gpt-oss:120b`,本地 daemon 上同一个模型要写成
+      `gpt-oss:120b-cloud`(后缀是 daemon 用来决定「转发到云端」的开关)。
+      填错的表现是 404,而错误信息里只有那个模型名,不会提两条线的事。
+
+      ★★ 2026-09-15 起支持**官方 CLI 同款的密钥绑定登录**(`oauthIssuer`,
+      逆向 ollama v0.34.0 + 直连实测定案,实现见 `main/kernel/oauth/issuers/ollama.ts`):
+      浏览器把本机 `~/.ollama/id_ed25519` 的公钥绑到账号,之后逐请求签名 ——
+      **没有 token**,和官方 CLI 共用同一个绑定。当初「套不进 OAuth 形状」的根因
+      (签名头随 method+path+ts 变)已由 `UpstreamTransport.signRequest`(逐请求
+      签名钩子)解决。API Key 仍然保留(`credentialKind` 不动 → 双形态并存):
+      登录收尾的可用性探针若发现 `/v1` 网关只认 API Key,会当场提示退回此路。
+    */
+    id: 'ollama-cloud',
+    name: 'Ollama Cloud(订阅)',
+    category: 'overseas',
+    oauthIssuer: 'ollama-cloud',
+    /*
+      ★★ 三个协议全在同一个域名下,2026-09-15 实测(仓库判据:真路径非 404 +
+      同前缀假路径 404):
+        GET /v1/models           → 200(**免鉴权**)   /v1/modelz            → 404
+        GET /v1/chat/completions → 405(存在,只收 POST) /v1/chat/completionz → 404
+        GET /v1/messages         → 405,且错误体是 Anthropic 形状
+                                   (`{"type":"error","request_id":"req_…"}`)
+        POST 上面两条 + 假 Bearer → 401
+      OpenAI 族的版本段在 base 里、Anthropic 族不带 —— 两族约定是反的,
+      所以这两条 baseUrl 差一段 `/v1` 不是笔误(见本文件开头那张表)。
+
+      ★ 两条都标 `supportsModelList`,因为两族的列表 URL 恰好**是同一个**:
+      OpenAI 族拼 `{base}/models`、Anthropic 族拼 `{base}/v1/models`,
+      都落到 `https://ollama.com/v1/models`。
+    */
+    endpoints: [oa('https://ollama.com/v1', true, true), anth('https://ollama.com', true)],
+    docsUrl: 'https://docs.ollama.com/cloud',
+    apiKeyUrl: 'https://ollama.com/settings/keys',
+    /*
+      ★ 冷启动兜底而已 —— 这家的 `/v1/models` 免鉴权,用户**key 还没填就能先拉**
+      真实列表(全表只有 OpenRouter / DeepInfra / OpenCode Go 有同样待遇)。
+      种在这里的是 2026-09-15 实测那 20 条里的代表,`gpt-oss:120b` 放第一
+      (官方文档全篇拿它举例)。
+    */
+    suggestedModels: [
+      'gpt-oss:120b',
+      'kimi-k3',
+      'glm-5.3',
+      'deepseek-v4-pro:0813',
+      'qwen3.5:397b',
+      'minimax-m3'
+    ],
+    notes:
+      '★ 模型名不带 -cloud 后缀(那是本地 Ollama 上的写法),填错直接 404。' +
+      '★ 订阅是额度制而非包月无限:Pro $20/月含 $60 用量额度、Max $100/月含 $300,' +
+      '另有 5 小时与 7 天两个滚动窗口的限额,超了返回 429。' +
+      '★ 已装 Ollama 并跑过 ollama signin 的话,本表末尾那条本地「Ollama」' +
+      '也能跑云模型(daemon 代为签名转发),但那条路上模型名要带 -cloud 后缀。' +
+      '★ Think:OpenAI 格式走 `reasoning_effort`(多数模型接受 low/medium/high/max,' +
+      'gpt-oss 只认 low/medium/high 且 trace 关不掉);Anthropic 格式的档位走' +
+      '`output_config.effort`、开关仍走 `thinking.type`。这两条线形对**绑在本供应商' +
+      '上的所有模型**生效(含 glm-5.3 这类名字属别家目录的),推导与源码证据见' +
+      '`model-catalog-inventory/vendors/ollama.ts` 与官方 think 文档。',
+    verification: 'probed'
+  },
+
   // ────────────────────────── 国内服务 ──────────────────────────
   {
     id: 'deepseek',
@@ -1074,6 +1143,19 @@ export const CLIENT_PROVIDER_ID = 'nextcowork'
  * false**:表现是 OpenCode 又开始拒每一次对话,且没有任何一处线索指向那次重命名。
  */
 export const OPENCODE_GO_PROVIDER_ID = 'opencode-go'
+
+/**
+ * Ollama 的两条线 —— 本地 daemon(`127.0.0.1:11434`)和官方托管(`ollama.com`)。
+ *
+ * ★★ 存在的理由:`model-binding.ts` 拿它判「这个绑定是不是跑在 Ollama 上」,
+ * 是就地重写 thinkingConfig 的唯一依据(Ollama 只读 `reasoning_effort`,而
+ * `glm-5.3` 这类名字命中的是智谱官方条目,方言字段会被它的兼容层静默丢弃
+ * —— 推导和证据见 `model-catalog-inventory/vendors/ollama.ts`)。
+ * 在那边另写两个字面量的话,改预设 id 时只会有一边跟着改,而另一边**不报错,
+ * 只是判断从此恒为 false**:表现是 Ollama 的思考开关又变回无效,且没有任何
+ * 一处线索指向那次重命名。
+ */
+export const OLLAMA_PROVIDER_IDS = ['ollama', 'ollama-cloud'] as const
 
 /**
  * 全新安装会被种进供应商表的那些(`main/runtime.ts` 的 `seedBuiltinUpstream`)。

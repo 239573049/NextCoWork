@@ -781,3 +781,454 @@ describe('runOAuthFlow · 设备码(RFC 8628)', () => {
     expect(h.polls).toHaveLength(0)
   })
 })
+
+/* ================================================================
+ * cli-poll(服务端发起 + 双通道)—— ZCode 两条渠道的主路径。
+ *
+ * ★★ 这一组用**真实定时器**,和上面设备码那组正相反:这里的回环服务器和
+ * fetch 都是真的 socket,假定时器会卡住 undici 的内部定时。轮询间隔由 init
+ * 响应给(1 秒),窗口给两三秒,于是每条用例最多等两秒真实时间。
+ * ================================================================ */
+describe('runOAuthFlow · cli-poll(ZCode 双通道)', () => {
+  const INIT_URL = 'https://example.test/api/v1/oauth/cli/init'
+  const POLL_PREFIX = 'https://example.test/api/v1/oauth/cli/poll/'
+  const TOKEN_URL = 'https://example.test/token'
+  const SERVER_STATE = 'srv-st-1'
+
+  const initBody = (expiresInSec: number): Record<string, unknown> => ({
+    code: 0,
+    data: {
+      flow_id: 'flow-1',
+      authorize_url: `https://auth.example.test/authorize?client_id=cid&redirect_uri=${encodeURIComponent('https://zcode.example.test/app/oauth/login')}&state=${SERVER_STATE}`,
+      expires_at: Math.floor(Date.now() / 1000) + expiresInSec,
+      poll_interval_sec: 1
+    }
+  })
+
+  const PENDING = { status: 200, body: { code: 0, data: { status: 'pending' } } }
+  const READY = {
+    status: 200,
+    body: { code: 0, data: { status: 'ready', token: 'zcode-jwt', zai: { access_token: 'poll-at' } } }
+  }
+  const TOKEN_OK = {
+    status: 200,
+    body: { code: 0, data: { zai: { access_token: 'exchange-at' }, user: { user_id: 42 } } }
+  }
+
+  const cliSpec: OAuthProviderSpec = {
+    id: 'zcode-zai',
+    label: '服务端发起家',
+    tokenUrl: TOKEN_URL,
+    clientId: 'cid',
+    pkce: false,
+    grant: {
+      kind: 'cli-poll',
+      initUrl: INIT_URL,
+      provider: 'zai',
+      redirectParam: 'redirect_uri',
+      landingPath: '/callback',
+      host: '127.0.0.1',
+      fallback: {
+        kind: 'authorization-code',
+        authorizeUrl: 'https://fallback.test/authorize',
+        redirect: { kind: 'loopback-ephemeral', path: '/callback' }
+      }
+    },
+    oauthHeaders: { 'user-agent': 'ZCode/3.11.2' },
+    /*
+      ★ identity 直接读**原样信封** —— 这条断言的隐含契约是:flow 把 poll 响应
+      或换码响应**不拆信封**地交出来(两条通道同构,拆信封是 issuer 的事)。
+    */
+    identity: (json) => {
+      const data = (json as { data?: { zai?: { access_token?: string } } }).data
+      const at = data?.zai?.access_token
+      if (at === undefined) return null
+      return { accessToken: at, refreshToken: 'rt', expiresAt: null, accountId: 'acct' }
+    },
+    tokenRequest: (args) => ({
+      contentType: 'json',
+      body: { provider: 'zai', code: args.code, redirect_uri: args.redirectUri, state: args.state }
+    }),
+    transport: () => ({ headers: {}, body: (b) => b })
+  }
+
+  interface CliHarness {
+    deps: OAuthFlowDeps
+    opened: string[]
+    initRequests: { headers: Record<string, string>; body: Record<string, unknown> }[]
+    pollRequests: { url: string; headers: Record<string, string> }[]
+    tokenRequests: { body: Record<string, unknown> }[]
+    abort: () => void
+  }
+
+  /**
+   * ★ `browser` 决定 A 通道的命运:`'land'` 模拟授权完跳回回环(带 code+state),
+   * `'deny'` 带 error 参数落地,`'lost'` 模拟回调丢失(浏览器停在授权页)。
+   */
+  function cliHarness(
+    options: {
+      init?: { status: number; body: unknown }
+      expiresInSec?: number
+      /** 一次一条按顺序回;'network-error' 表示 fetch 直接抛 */
+      polls?: ({ status: number; body: unknown } | 'network-error')[]
+      token?: { status: number; body: unknown }
+      browser?: 'land' | 'deny' | 'lost'
+      noFallback?: boolean
+    } = {}
+  ): CliHarness {
+    const opened: string[] = []
+    const initRequests: CliHarness['initRequests'] = []
+    const pollRequests: CliHarness['pollRequests'] = []
+    const tokenRequests: CliHarness['tokenRequests'] = []
+    const ctrl = new AbortController()
+    const polls = options.polls ?? [PENDING]
+
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const headers = { ...((init?.headers ?? {}) as Record<string, string>) }
+      if (url === INIT_URL) {
+        initRequests.push({ headers, body: JSON.parse(String(init?.body ?? '{}')) })
+        const r = options.init ?? { status: 200, body: initBody(options.expiresInSec ?? 8) }
+        return new Response(JSON.stringify(r.body), { status: r.status })
+      }
+      if (url.startsWith(POLL_PREFIX)) {
+        pollRequests.push({ url, headers })
+        const r = polls[Math.min(pollRequests.length - 1, polls.length - 1)]
+        if (r === undefined || r === 'network-error') throw new TypeError('fetch failed')
+        return new Response(JSON.stringify(r.body), { status: r.status })
+      }
+      if (url === TOKEN_URL) {
+        tokenRequests.push({ body: JSON.parse(String(init?.body ?? '{}')) })
+        const r = options.token ?? TOKEN_OK
+        return new Response(JSON.stringify(r.body), { status: r.status })
+      }
+      throw new Error(`测试没打算接这个请求:${url}`)
+    }) as typeof globalThis.fetch
+
+    const spec: OAuthProviderSpec =
+      options.noFallback === true
+        ? {
+            ...cliSpec,
+            grant: {
+              ...(cliSpec.grant as Extract<OAuthProviderSpec['grant'], { kind: 'cli-poll' }>),
+              fallback: undefined
+            }
+          }
+        : cliSpec
+
+    const openBrowser = async (raw: string): Promise<void> => {
+      opened.push(raw)
+      const mode = options.browser ?? 'land'
+      if (mode === 'lost') return
+      const url = new URL(raw)
+      const landing = new URL(url.searchParams.get('redirect_uri') ?? url.searchParams.get('redirect') ?? '')
+      const q =
+        mode === 'deny'
+          ? 'error=access_denied&state=' + encodeURIComponent(url.searchParams.get('state') ?? '')
+          : 'code=the-code&state=' + encodeURIComponent(url.searchParams.get('state') ?? '')
+      await fetch(`http://127.0.0.1:${landing.port}${landing.pathname}?${q}`)
+    }
+
+    return {
+      deps: {
+        spec,
+        fetch: fetchImpl,
+        now: () => Date.now(),
+        openBrowser,
+        signal: ctrl.signal
+      },
+      opened,
+      initRequests,
+      pollRequests,
+      tokenRequests,
+      abort: () => ctrl.abort()
+    }
+  }
+
+  it('★ init 的形状:Bearer 头 + JSON body 只有 provider + oauthHeaders 带上', async () => {
+    const h = cliHarness({ polls: [PENDING, READY], browser: 'lost' })
+    await runOAuthFlow(h.deps)
+    expect(h.initRequests).toHaveLength(1)
+    const init = h.initRequests[0]
+    const poll = h.pollRequests[0]
+    expect(init?.body).toEqual({ provider: 'zai' })
+    expect(init?.headers['authorization']).toMatch(/^Bearer /u)
+    expect(init?.headers['user-agent']).toBe('ZCode/3.11.2')
+    // ★ poll 带的是**同一个** pollToken —— 它是这条 flow 的取件凭证
+    expect(poll?.headers['authorization']).toBe(init?.headers['authorization'])
+    expect(poll?.url).toBe(`${POLL_PREFIX}flow-1`)
+  })
+
+  it('★★★ authorize_url 的 redirect_uri 被覆盖成回环，服务端的 state 与其余参数原样保留', async () => {
+    const h = cliHarness({ polls: [PENDING, READY], browser: 'lost' })
+    await runOAuthFlow(h.deps)
+    const url = new URL(h.opened[0] ?? '')
+    const landing = new URL(url.searchParams.get('redirect_uri') ?? '')
+    // 临时端口(>0)—— 主路径不再占 zai 注册的 9999
+    expect(landing.hostname).toBe('127.0.0.1')
+    expect(landing.pathname).toBe('/callback')
+    expect(Number(landing.port)).toBeGreaterThan(0)
+    // 服务端签发的 state 原样带出去 —— 它是 A 通道比对的基准
+    expect(url.searchParams.get('state')).toBe(SERVER_STATE)
+    expect(url.searchParams.get('client_id')).toBe('cid')
+    // 中转页一个字都不出现(理由见 zcode-bigmodel.ts 文件头)
+    expect(url.searchParams.get('redirect_uri')).not.toContain('zcode.example.test')
+  })
+
+  it('★★★ A 通道赢:回环收码 → 换码 body 带 provider/code/回环 redirect_uri/服务端 state', async () => {
+    const h = cliHarness({ polls: [PENDING] })
+    const cred = await runOAuthFlow(h.deps)
+    expect(cred.accessToken).toBe('exchange-at')
+    expect(h.tokenRequests).toHaveLength(1)
+    const landing = new URL(new URL(h.opened[0] ?? '').searchParams.get('redirect_uri') ?? '')
+    expect(h.tokenRequests[0]?.body).toEqual({
+      provider: 'zai',
+      code: 'the-code',
+      redirect_uri: `http://127.0.0.1:${landing.port}/callback`,
+      state: SERVER_STATE
+    })
+    // ★ B 通道同时也在跑(立即首询过一次),只是没它的事了
+    expect(h.pollRequests.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('★★★ B 通道赢:回调丢失也不影响 —— poll ready 直接给凭证,且一次换码都没发', async () => {
+    const h = cliHarness({ polls: [PENDING, READY], browser: 'lost' })
+    const cred = await runOAuthFlow(h.deps)
+    expect(cred.accessToken).toBe('poll-at')
+    expect(h.tokenRequests).toHaveLength(0)
+    expect(h.pollRequests).toHaveLength(2)
+  })
+
+  it('★★ 回环收到 error 参数 → 立刻失败(用户拒绝,不用等轮询慢慢发现)', async () => {
+    const h = cliHarness({ browser: 'deny', polls: [PENDING] })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/access_denied/u)
+  })
+
+  it('★★ poll 4xx(非 408/429)→ 致命:flow_id/pollToken 不被认,重试到天荒地老也没用', async () => {
+    const h = cliHarness({ polls: [{ status: 404, body: {} }], browser: 'lost' })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/HTTP 404/u)
+  })
+
+  it('★★ poll 网络错误 → 重试,下一次 ready 照样成功', async () => {
+    const h = cliHarness({ polls: ['network-error', READY], browser: 'lost' })
+    const cred = await runOAuthFlow(h.deps)
+    expect(cred.accessToken).toBe('poll-at')
+    expect(h.pollRequests).toHaveLength(2)
+  })
+
+  it('★ status=failed → 授权失败(服务端明说这次没成)', async () => {
+    const h = cliHarness({
+      polls: [{ status: 200, body: { code: 0, data: { status: 'failed' } } }],
+      browser: 'lost'
+    })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/授权失败/u)
+  })
+
+  it('★ 信封 code 非 0 → 带上那个 code 报错,和换码那跳同一个翻译习惯', async () => {
+    const h = cliHarness({
+      polls: [{ status: 200, body: { code: 1000, msg: 'nope' } }],
+      browser: 'lost'
+    })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/1000/u)
+  })
+
+  it('★ 未知的 status → 报错而不是当 pending 吞下去', async () => {
+    const h = cliHarness({
+      polls: [{ status: 200, body: { code: 0, data: { status: 'weird' } } }],
+      browser: 'lost'
+    })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/weird/u)
+  })
+
+  it('★★ 窗口耗尽 → 超时(放弃,不报红),不是失败', async () => {
+    const h = cliHarness({ polls: [PENDING], browser: 'lost', expiresInSec: 2 })
+    await expect(runOAuthFlow(h.deps)).rejects.toBeInstanceOf(OAuthAbandonedError)
+  })
+
+  it('★★ 用户取消 → Abandoned(界面不该弹红条)', async () => {
+    const h = cliHarness({ polls: [PENDING], browser: 'lost', expiresInSec: 8 })
+    const run = runOAuthFlow(h.deps)
+    await new Promise((r) => setTimeout(r, 150))
+    h.abort()
+    await expect(run).rejects.toBeInstanceOf(OAuthAbandonedError)
+  })
+
+  it('★★★ init 失败 + 有 fallback → 降级走旧链路:授权页是渠道表里那个,换码照发', async () => {
+    const h = cliHarness({ init: { status: 404, body: {} } })
+    const cred = await runOAuthFlow(h.deps)
+    // fallback 的 authorizeUrl 打开,且是标准授权码那套参数(本地生成的 state)
+    const url = new URL(h.opened[0] ?? '')
+    expect(url.origin).toBe('https://fallback.test')
+    expect(url.searchParams.get('response_type')).toBe('code')
+    expect(url.searchParams.get('state')).not.toBe(SERVER_STATE)
+    expect(url.searchParams.get('redirect_uri')).toMatch(/^http:\/\/localhost:\d+\/callback$/u)
+    // 换码发生了,code 是我们模拟浏览器送回去的那个,state 与授权请求一致
+    expect(h.tokenRequests).toHaveLength(1)
+    expect(h.tokenRequests[0]?.body['code']).toBe('the-code')
+    expect(h.tokenRequests[0]?.body['state']).toBe(url.searchParams.get('state'))
+    expect(cred.accessToken).toBe('exchange-at')
+    // 降级发生在 init 一步,轮询从未开始
+    expect(h.pollRequests).toHaveLength(0)
+  })
+
+  it('★★ init 失败且没有 fallback → 当场报错,不挂一个不存在的通道', async () => {
+    const h = cliHarness({ init: { status: 404, body: {} }, noFallback: true })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/初始化授权流程失败/u)
+    expect(h.opened).toHaveLength(0)
+  })
+
+  it('★★ init 响应缺 state 的 authorize_url → 无效,走 fallback', async () => {
+    const h = cliHarness({
+      init: {
+        status: 200,
+        body: {
+          code: 0,
+          data: { flow_id: 'f', authorize_url: 'https://auth.example.test/authorize', expires_at: 9999999999, poll_interval_sec: 1 }
+        }
+      }
+    })
+    await runOAuthFlow(h.deps)
+    // A 通道没有比对基准,init 判无效 → 降级;浏览器开的是 fallback 的授权页
+    expect(new URL(h.opened[0] ?? '').origin).toBe('https://fallback.test')
+  })
+})
+
+/* ================================================================
+ * keypair-binding(Ollama 密钥绑定)—— 全程假钩子:这里测的是**编排**
+ * (开绑定页 → 轮询 → 验证 → 交出中间形态),协议本身在 issuers 的测试里。
+ * ★ 假定时器可用(无 socket/真 I/O),和设备码那组同一个套路。
+ * ================================================================ */
+describe('runOAuthFlow · keypair-binding(Ollama 密钥绑定)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const KEY = { privateKeyPem: '-----PEM-----', publicKeyLine: 'ssh-ed25519 AAAA' }
+
+  function bindingHarness(options: {
+    polls?: (string | null)[]
+    verify?: () => Promise<void>
+    openBrowserError?: boolean
+  } = {}) {
+    let clock = NOW
+    const polls = options.polls ?? [null, 'alice']
+    const opened: string[] = []
+    const phases: string[] = []
+    let pollCalls = 0
+    const spec: OAuthProviderSpec = {
+      id: 'ollama-cloud',
+      label: '密钥绑定家',
+      tokenUrl: 'https://example.test/token',
+      clientId: 'c',
+      grant: { kind: 'keypair-binding', pollIntervalMs: 1_000, timeoutMs: 60_000 },
+      keypairBinding: {
+        loadOrCreate: async () => KEY,
+        connectUrl: (pub) => `https://example.test/connect?key=${pub.slice(-4)}`,
+        poll: async () => polls[Math.min(pollCalls++, polls.length - 1)] ?? null,
+        ...(options.verify === undefined ? {} : { verify: options.verify })
+      },
+      identity: (json) => {
+        const o = json as { username?: string }
+        return o.username === undefined
+          ? null
+          : {
+              accessToken: (json as { privateKeyPem: string }).privateKeyPem,
+              refreshToken: (json as { publicKeyLine: string }).publicKeyLine,
+              expiresAt: null,
+              accountId: o.username
+            }
+      },
+      transport: () => ({ headers: {}, body: (b) => b })
+    }
+    const deps: OAuthFlowDeps = {
+      spec,
+      fetch: vi.fn() as unknown as typeof globalThis.fetch,
+      now: () => clock,
+      openBrowser: async (url) => {
+        if (options.openBrowserError === true) throw new Error('没有默认浏览器')
+        opened.push(url)
+      },
+      onPhase: (phase) => {
+        phases.push(phase)
+      },
+      signal: new AbortController().signal
+    }
+    return {
+      deps,
+      opened,
+      phases,
+      advance: (ms: number) => {
+        clock += ms
+      }
+    }
+  }
+
+  it('★★★ 走通:开绑定页 → 轮询到用户名 → 凭证两槽装密钥对', async () => {
+    const h = bindingHarness({ polls: [null, null, 'alice'] })
+    const run = runOAuthFlow(h.deps)
+    // 第一轮立即查(已绑定的机器瞬时登录),之后每 1s 一轮
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const cred = await run
+    expect(h.opened).toEqual(['https://example.test/connect?key=AAAA'])
+    expect(cred).toMatchObject({
+      accessToken: '-----PEM-----',
+      refreshToken: 'ssh-ed25519 AAAA',
+      accountId: 'alice'
+    })
+    expect(h.phases).toEqual(['opening', 'waiting', 'done'])
+  })
+
+  it('★★ verify 失败 → 登录失败(把「网关不认签名」说在登录时)', async () => {
+    const h = bindingHarness({
+      polls: ['alice'],
+      verify: async () => {
+        throw new OAuthFailedError('已绑定成功，但网关不接受签名鉴权')
+      }
+    })
+    const run = runOAuthFlow(h.deps)
+    // ★ 断言先挂上再推进定时器 —— 反过来的话 rejection 会在挂上之前飞出去,
+    //   变成一条 unhandled rejection
+    const expectation = expect(run).rejects.toThrow(/不接受签名/u)
+    await vi.advanceTimersByTimeAsync(0)
+    await expectation
+    // ★ flow 自己不发 failed —— 那是 ipc/provider-auth 把异常翻译成阶段的地方
+    expect(h.phases).toEqual(['opening', 'waiting', 'exchanging'])
+  })
+
+  it('★★ 一直未绑定 → 超时归 Abandoned(放弃,不报红)', async () => {
+    const h = bindingHarness({ polls: [null] })
+    const run = runOAuthFlow(h.deps)
+    const expectation = expect(run).rejects.toBeInstanceOf(OAuthAbandonedError)
+    await vi.advanceTimersByTimeAsync(0)
+    // 假定时器管 sleep,注入时钟管期限 —— 两个都要往前推
+    h.advance(60_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expectation
+  })
+
+  it('★ 取消 → Abandoned cancelled', async () => {
+    const ctrl = new AbortController()
+    const h = bindingHarness({ polls: [null] })
+    h.deps.signal = ctrl.signal
+    const run = runOAuthFlow(h.deps)
+    await vi.advanceTimersByTimeAsync(0)
+    ctrl.abort()
+    await expect(run).rejects.toBeInstanceOf(OAuthAbandonedError)
+  })
+
+  it('★★ 绑定页打不开 → 当场失败(用户没有别的途径拿到这条带公钥的 URL)', async () => {
+    const h = bindingHarness({ openBrowserError: true })
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/打不开浏览器/u)
+  })
+
+  it('★ 声明了 grant 却没实现钩子 → 当场报错,而不是走进一条空分支', async () => {
+    const h = bindingHarness()
+    delete (h.deps.spec as { keypairBinding?: unknown }).keypairBinding
+    await expect(runOAuthFlow(h.deps)).rejects.toThrow(/keypairBinding/u)
+  })
+})

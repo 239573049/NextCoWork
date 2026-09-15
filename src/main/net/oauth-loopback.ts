@@ -43,6 +43,16 @@ export interface LoopbackOptions {
    * 页面也显示成功了,然后判 state 不匹配走 denied** —— 错误信息一个字都不提参数名。
    */
   codeParam?: string
+  /**
+   * 结局落定之后,服务器再多活这几毫秒给**迟到的浏览器请求**回一页「已授权」。
+   *
+   * ★★ cli-poll 那条流程的完成通道有两个,轮询先到时用户的浏览器可能正走在
+   * 跳转途中 —— 立刻 close 的话它会撞上 ECONNREFUSED,看到一个长得像「登录失败」
+   * 的错误页,而登录其实成功了。默认 0(= 立刻关,其余路径行为一个字不变)。
+   *
+   * ★ 定时器 `unref`:linger 是纯装饰性的收尾,不该有能力拖住进程退出。
+   */
+  lingerMs?: number
 }
 
 /** 五分钟。用户要开浏览器、可能还要先登一次 ChatGPT、可能还要过一次两步验证 */
@@ -132,8 +142,9 @@ export async function awaitOAuthCallback(opts: LoopbackOptions): Promise<Loopbac
       ★★ **state 不对就当没收到 code。**
       这一步防的是 CSRF:攻击者诱导用户的浏览器带着**攻击者自己的** code 打到
       这个本地端点,我们就会把攻击者的账号绑到用户的应用上。state 是我们发起
-      时生成的随机串,只有真正由我们发起的那一次授权才带得回来。
+      时生成的随机串,只有真正由我们发起的那次授权才带得回来。
       比对用 timingSafeEqual(见 `pkce.ts`)。
+      linger 期间 `finish` 已是 no-op,迟到请求只吃页面、不改写结局。
     */
     const ok = error === null && code !== null && stateMatches(expectedState, state)
 
@@ -165,6 +176,12 @@ export async function awaitOAuthCallback(opts: LoopbackOptions): Promise<Loopbac
   }
   signal.addEventListener('abort', onAbort, { once: true })
 
+  /*
+    ★ 内层 finally 可能只**排程**了 linger 关闭而不是当场关 —— 外层 finally
+    (bind 失败那条路)需要知道这件事,否则会把还在服务迟到请求的服务器立即关掉。
+  */
+  let lingered = false
+
   try {
     /*
       ★★ **只监听回环地址,绝不 0.0.0.0。**
@@ -189,11 +206,30 @@ export async function awaitOAuthCallback(opts: LoopbackOptions): Promise<Loopbac
     try {
       return await done
     } finally {
-      v6?.close()
+      /*
+        ★★ linger 时不**同步等待**关机 —— `done` 一落定调用方就要继续换 token,
+        在这里 sleep 会把 A 通道白白拖慢 linger 那么久。排一个后台定时器到点自关。
+      */
+      const lingerMs = opts.lingerMs ?? 0
+      if (lingerMs > 0) {
+        lingered = true
+        const t = setTimeout(() => {
+          v6?.close()
+          server.close()
+        }, lingerMs)
+        t.unref()
+      } else {
+        v6?.close()
+        server.close()
+      }
     }
   } finally {
     clearTimeout(timer)
     signal.removeEventListener('abort', onAbort)
-    server.close()
+    /*
+      ★ bind 失败(listen 抛出)时内层 finally 还没跑过,这里负责把服务器关掉;
+      正常路径上 linger 已排程时 `lingered` 挡住这次立即关闭。
+    */
+    if (!lingered) server.close()
   }
 }

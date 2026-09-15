@@ -220,6 +220,16 @@ export interface ThinkingConfig {
   disabledValue?: unknown
   /** Optional wire-value mapping when provider labels differ from our levels. */
   effortMap?: Partial<Record<ReasoningEffort, unknown>>
+  /**
+   * ★★ 声明这家读**标准协议线形**,跳过按模型名的厂商方言适配。
+   *
+   * 存在的理由:Ollama 这类托管方也跑 `deepseek-*` / `glm-*` 名字的模型,而
+   * 适配器认到这些名字会套 DeepSeek/智谱**官方 API** 的方言(比如 DeepSeek 要
+   * 额外的 `thinking:{type}`)。Ollama 的 OpenAI 兼容层只读 `reasoning_effort`,
+   * 方言字段被静默丢弃 —— 不声明这个,那些模型的 Think 开关(尤其「关」)失真。
+   * 官方供应商的条目不声明,行为一个字节不变。
+   */
+  standardWire?: boolean
 }
 
 export interface RequestPatchRule {

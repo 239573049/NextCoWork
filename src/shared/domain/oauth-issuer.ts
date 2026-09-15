@@ -25,7 +25,8 @@ export const OAUTH_ISSUER_IDS = [
   'zcode-zai',
   'zcode-bigmodel',
   'kimi-code',
-  'grok-build'
+  'grok-build',
+  'ollama-cloud'
 ] as const
 
 export type OAuthIssuerId = (typeof OAUTH_ISSUER_IDS)[number]

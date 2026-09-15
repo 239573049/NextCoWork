@@ -259,7 +259,9 @@ describe('预设表 × joinUpstreamUrl:拼出来的 URL 没有畸形', () => {
     ['routin-plan', 'openai-responses', 'https://api.routin.ai/plan/v1/responses'],
     ['routin-plan', 'anthropic', 'https://api.routin.ai/plan/v1/messages'],
     ['xai', 'openai-responses', 'https://api.x.ai/v1/responses'],
-    ['ollama', 'anthropic', 'http://127.0.0.1:11434/v1/messages']
+    ['ollama', 'anthropic', 'http://127.0.0.1:11434/v1/messages'],
+    ['ollama-cloud', 'openai-chat', 'https://ollama.com/v1/chat/completions'],
+    ['ollama-cloud', 'anthropic', 'https://ollama.com/v1/messages']
   ] as const)('%s / %s', (id, protocol, expected) => {
     const e = endpointFor(findPreset(id)!, protocol)
     expect(e, `${id} 没有 ${protocol} 端点`).not.toBeNull()
@@ -342,11 +344,13 @@ describe('预设表 · 模型列表', () => {
     })
   })
 
-  it('实测免鉴权的那三家标了 modelListPublic', () => {
+  it('实测免鉴权的那四家标了 modelListPublic', () => {
     const publics = PROVIDER_PRESETS.filter((p) =>
       p.endpoints.some((e) => e.modelListPublic === true)
     ).map((p) => p.id)
-    expect(new Set(publics)).toEqual(new Set(['openrouter', 'deepinfra', 'opencode-go']))
+    expect(new Set(publics)).toEqual(
+      new Set(['openrouter', 'deepinfra', 'opencode-go', 'ollama-cloud'])
+    )
   })
 })
 

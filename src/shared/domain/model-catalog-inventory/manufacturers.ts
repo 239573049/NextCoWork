@@ -6,6 +6,12 @@ import type { ModelManufacturer } from './types'
  */
 export const MODEL_MANUFACTURERS: readonly ModelManufacturer[] = [
   { id: 'openai', label: 'OpenAI', aliases: ['openai', 'gpt', 'chatgpt'] },
+  /*
+   * Ollama 云/本地两线的模型目录家族 —— 条目只带 `:tag` 形态的名字
+   * (见 vendors/ollama.ts 的文件头)。注册成独立家族而不是挂进 openai:
+     `gpt-oss:120b` 和 `gpt-oss-120b` 在这边是两个不同端点上的两套行为。
+  */
+  { id: 'ollama', label: 'Ollama', aliases: ['ollama'] },
   { id: 'anthropic', label: 'Anthropic', aliases: ['anthropic', 'claude'] },
   {
     id: 'google',

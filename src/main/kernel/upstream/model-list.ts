@@ -21,8 +21,10 @@
  * 只给 20 条。漏了它的表现不是报错,是**列表少了一截** —— 用户看见 20 个模型,
  * 以为这家就这些,而他要的那个恰好在第 21 条。
  */
-import type { FetchedModel, UpstreamProtocol } from '../../../shared/domain/provider'
+import type { FetchedModel, UpstreamProtocol, UpstreamProvider } from '../../../shared/domain/provider'
+import { bearerOf, type ProviderCredential } from '../../../shared/domain/credential'
 import { joinUpstreamUrl } from '../../../shared/domain/baseurl'
+import { upstreamTransport } from './transport'
 
 /*
   ★ `FetchedModel` 住在 `shared/domain/provider.ts`,不在这里 ——
@@ -76,6 +78,64 @@ export function modelListRequest(
 
   if (apiKey !== null) headers.authorization = `Bearer ${apiKey}`
   return { url, headers }
+}
+
+/**
+ * 「拉模型列表」的**完整鉴权形状** —— 凭证长什么样,这里说了算。
+ *
+ * ★★ 存在的理由是一次实测事故(2026-09-15):keypair 式凭证(`keypair-binding`,
+ * 今天只有 ollama-cloud)的 `accessToken` 槽里装的是 **SSH 私钥 PEM**,
+ * 而调用点当时走的是 `bearerOf` → `Bearer -----BEGIN OPENSSH PRIVATE KEY-----…`。
+ * 多行值不是合法 HTTP 头,`Headers.append` 直接抛 `TypeError`,**并且把私钥
+ * 整段原样打进了界面的错误弹窗**;就算侥幸发出去,那也是个上游不认的凭证。
+ *
+ * ★★ 所以鉴权形状**和对话请求共用同一套来源**:OAuth 凭证一律先问 issuer 的
+ * `transport`(见 `transport.ts` 的文件头)—— 签名式凭证由 `signRequest`
+ * 现场签名(GET 也要签,签的是最终 URL 的 pathname),其余 OAuth 凭证的
+ * Bearer 行为逐字节不变。这条链路和 `router.ts` 的 `send()` 是同一条规矩:
+ * **凭证的线形只该有一个真相来源**。
+ *
+ * ★ 实测(2026-09-15)ollama.com/v1/models:无鉴权 200、签名 200、签名+额外
+ * query(`?limit=`)也 200 —— 服务端只按 path+ts 校验。选签名而不是「干脆不带
+ * 头」是为了和对话路径同源:哪天这个端点收紧成必须鉴权,这里不用再改一次。
+ */
+export function modelListRequestFor(
+  provider: UpstreamProvider,
+  cred: ProviderCredential | null
+): { url: string; headers: Record<string, string> } {
+  const signRequest =
+    cred !== null && cred.kind === 'oauth'
+      ? upstreamTransport(provider, cred, {}).signRequest
+      : undefined
+  /*
+    ★ 签名式凭证**绝不带 bearer**:上面那段事故里泄露的就是这一步拼出来的串。
+    非签名凭证照旧取 token(api-key → apiKey,其余 oauth → accessToken)。
+  */
+  const key = cred === null || signRequest !== undefined ? null : bearerOf(cred)
+  const request = modelListRequest(provider.protocol, provider.baseUrl, key)
+  if (signRequest === undefined) return request
+
+  const signed = signRequest({ method: 'GET', path: new URL(request.url).pathname })
+  const target = new URL(request.url)
+  for (const [name, value] of Object.entries(signed.query ?? {})) {
+    target.searchParams.set(name, value)
+  }
+  return { url: target.toString(), headers: { ...request.headers, ...signed.headers } }
+}
+
+/**
+ * 把错误文本里的**密钥材料**抹掉。
+ *
+ * ★★ 这不是洁癖:上面那次事故里,一行 `String(e)` 把用户整段 SSH 私钥送进了
+ * 界面弹窗,而那种文本会被用户随手截图求助(截图就在仓库的对话记录里)。
+ * 调用点确保凭证**不再**进头是根治;这一层是兜底 —— 任何一个未来的
+ * 「头里带了什么不该带的东西」都先在这里被拦成一句 `[已隐去的密钥]`。
+ */
+export function redactSecrets(text: string): string {
+  return text.replace(
+    /-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/gu,
+    '[已隐去的密钥]'
+  )
 }
 
 /**

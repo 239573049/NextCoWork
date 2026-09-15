@@ -3010,6 +3010,104 @@ export function putImportMapping(mapping: ImportMappingRow): void {
 }
 
 /**
+ * 扫描缓存的一行。★ 这不是「导入过什么」的记录(那是 `import_mappings`),
+ * 而是「上次扫描时从这个文件里读出了什么」—— 没导入的文件也有。
+ */
+export interface ImportScanCacheRow {
+  sourceId: string
+  sourcePath: string
+  changeToken: string
+  sessionId: string
+  /** '' = 只读了头部,没算过全文哈希。 */
+  contentHash: string
+  cwd: string
+  title: string
+  model: string
+  modelProvider: string
+  /** partial 为真时是下界。 */
+  messages: number
+  partial: boolean
+  sourceUpdatedAt: number
+  scannedAt: number
+}
+
+function importScanCacheFromRow(row: Record<string, unknown>): ImportScanCacheRow {
+  return {
+    sourceId: String(row['source_id'] ?? ''),
+    sourcePath: String(row['source_path'] ?? ''),
+    changeToken: String(row['change_token'] ?? ''),
+    sessionId: String(row['session_id'] ?? ''),
+    contentHash: String(row['content_hash'] ?? ''),
+    cwd: String(row['cwd'] ?? ''),
+    title: String(row['title'] ?? ''),
+    model: String(row['model'] ?? ''),
+    modelProvider: String(row['model_provider'] ?? ''),
+    messages: Number(row['messages'] ?? 0),
+    partial: Number(row['partial'] ?? 0) === 1,
+    sourceUpdatedAt: Number(row['source_updated_at'] ?? 0),
+    scannedAt: Number(row['scanned_at'] ?? 0)
+  }
+}
+
+/** 一个来源的全部缓存行,按 `source_path` 建索引供扫描循环查。 */
+export function listImportScanCache(sourceId: string): Map<string, ImportScanCacheRow> {
+  const rows = stmt('SELECT * FROM import_scan_cache WHERE source_id = ?').all(sourceId)
+  const map = new Map<string, ImportScanCacheRow>()
+  for (const row of rows) {
+    const parsed = importScanCacheFromRow(row as Record<string, unknown>)
+    map.set(parsed.sourcePath, parsed)
+  }
+  return map
+}
+
+/**
+ * 整批写回。★ 一次事务,不是一行一个 —— 一轮扫描上千行,逐行提交在 WAL 上
+ * 是上千次写放大,那正是这套缓存要省掉的开销。
+ */
+export function putImportScanCache(rows: readonly ImportScanCacheRow[]): void {
+  if (rows.length === 0) return
+  tx(() => {
+    const write = stmt(
+      `INSERT INTO import_scan_cache (
+         source_id, source_path, change_token, session_id, content_hash, cwd, title,
+         model, model_provider, messages, partial, source_updated_at, scanned_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (source_id, source_path) DO UPDATE SET
+         change_token = excluded.change_token,
+         session_id = excluded.session_id,
+         content_hash = excluded.content_hash,
+         cwd = excluded.cwd,
+         title = excluded.title,
+         model = excluded.model,
+         model_provider = excluded.model_provider,
+         messages = excluded.messages,
+         partial = excluded.partial,
+         source_updated_at = excluded.source_updated_at,
+         scanned_at = excluded.scanned_at`
+    )
+    for (const row of rows) {
+      write.run(
+        row.sourceId, row.sourcePath, row.changeToken, row.sessionId, row.contentHash,
+        row.cwd, row.title, row.model, row.modelProvider, row.messages,
+        row.partial ? 1 : 0, row.sourceUpdatedAt, row.scannedAt
+      )
+    }
+  })
+}
+
+/**
+ * 清掉本轮没再见到的行 —— 源侧文件删了,缓存不该无限长大。
+ *
+ * ★ 按 `scanned_at` 判定而不是传一份「见过的路径」清单:一轮扫描上千条路径,
+ * 拼进 `NOT IN (...)` 会撞上 SQLite 的变量上限,而时间戳比较没有这个问题。
+ */
+export function pruneImportScanCache(sourceId: string, scannedAt: number): number {
+  const result = stmt('DELETE FROM import_scan_cache WHERE source_id = ? AND scanned_at < ?')
+    .run(sourceId, scannedAt)
+  return Number(result.changes ?? 0)
+}
+
+/**
  * 把某个本地目标对应的全部映射切到新状态。
  *
  * ★ **无条件更新,不读后写** —— 「接受一次本地 run」和「同步器正要提交」

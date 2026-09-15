@@ -26,11 +26,18 @@ vi.mock('../../services/sessions', () => ({
   getSession: vi.fn(), replaceHistory: vi.fn(async () => {})
 }))
 
+import { assistantMessage, userMessage } from '../../../../shared/agent/message'
 import { startRun } from '../../services/agent'
+import { getSession } from '../../services/sessions'
 import { releaseSession, reportBackgroundChild, sessionStore } from '../session'
 
 const CALL_ID = 'task-bg'
 const CHILD_RUN = 'parent-run:sub:1'
+const CHILD_SESSION = `s:sub:${CHILD_RUN}`
+/** 主进程切完剩下的那一截(`runtime.ts` 的 `slice(0, 240)`) */
+const BRIEF = '三处读取,都在 config.ts'
+/** 子代理实际交出来的东西 —— 摘要只是它的开头 */
+const FULL = `${BRIEF},另有两处在 legacy/loader.ts;后者的默认值和前者不一致,建议统一。`
 
 const options = (): SendOptions => ({
   workspaceId: 'workspace', depth: 0, mode: 'normal', thinking: 'auto',
@@ -41,11 +48,22 @@ const options = (): SendOptions => ({
 /** 一个「跑完了、还没汇报」的后台子代理 —— 重启后恢复出来就是这个形状。 */
 const restored: AgentEvent[] = [
   { type: 'subagent_start', callId: CALL_ID, childRunId: CHILD_RUN,
-    childSessionId: `s:sub:${CHILD_RUN}`, description: '查配置读取处',
+    childSessionId: CHILD_SESSION, description: '查配置读取处',
     subagentType: 'general-purpose', background: true },
   { type: 'subagent_end', callId: CALL_ID, childRunId: CHILD_RUN,
-    status: 'done', summary: '三处读取,都在 config.ts' }
+    status: 'done', summary: BRIEF }
 ]
+
+/** 子会话里那份完整转录 —— 汇报正文的真正来源 */
+function childTranscript(): void {
+  vi.mocked(getSession).mockResolvedValue({
+    session: { id: CHILD_SESSION } as never,
+    messages: [
+      userMessage('cu', [{ type: 'text', text: '查一下配置在哪读' }], 0),
+      assistantMessage('ca', [{ type: 'text', text: FULL }], 1)
+    ]
+  })
+}
 
 let sessions: string[] = []
 
@@ -76,6 +94,7 @@ function restart(name: string): string {
 
 describe('后台子代理回传 · 重启之后', () => {
   it('★★ 调用方给了 fallback 档位,汇报照发,并且是 internal', async () => {
+    childTranscript()
     const sessionId = restart('fallback')
     await reportBackgroundChild(sessionId, CALL_ID, options())
 
@@ -95,15 +114,39 @@ describe('后台子代理回传 · 重启之后', () => {
     expect(sessionStore(sessionId).getState().transcript.subagents[CALL_ID]?.reportStatus).toBe('blocked')
   })
 
-  it('汇报正文里带着子代理的结论,界面那一轨的 subagent part 也在', async () => {
-    const sessionId = restart('parts')
+  /**
+   * ★★ 这条是「主代理只拿到 240 字」那个 bug 的回归。
+   *
+   * `child.summary` 是主进程切的前 240 字,给卡片当预览用。拿它当汇报正文的话,
+   * 主代理看到的报告断在开头,却会据此接着往下做 —— 不报错,只是做错。
+   * 前台那条路从来不是这样:`task.ts` 把**全文**放进 tool_result。
+   */
+  it('★★ 汇报正文是子会话里的全文,不是那截摘要', async () => {
+    childTranscript()
+    const sessionId = restart('full')
+    await reportBackgroundChild(sessionId, CALL_ID, options())
+
+    expect(getSession).toHaveBeenCalledWith(CHILD_SESSION)
+    const input = vi.mocked(startRun).mock.calls[0]?.[0]?.input ?? []
+    const text = input.find((p) => p.type === 'text')
+    // 只有全文里才有的后半段
+    expect(text?.type === 'text' && text.text).toContain('legacy/loader.ts')
+
+    // ★ 界面那一轨的 part 仍旧只挂短摘要 —— 全文已经在 text part 里落盘了,
+    //   再存一份就是同一段话在库里出现两次
+    const marker = input.find((p) => p.type === 'subagent')
+    expect(marker?.type === 'subagent' && marker.callId).toBe(CALL_ID)
+    expect(marker?.type === 'subagent' && marker.summary).toBe(BRIEF)
+  })
+
+  it('子会话读不到时退回摘要 —— 残缺的汇报也好过没有汇报', async () => {
+    vi.mocked(getSession).mockRejectedValue(new Error('子会话已删除'))
+    const sessionId = restart('fallback-text')
     await reportBackgroundChild(sessionId, CALL_ID, options())
 
     const input = vi.mocked(startRun).mock.calls[0]?.[0]?.input ?? []
     const text = input.find((p) => p.type === 'text')
-    expect(text?.type === 'text' && text.text).toContain('三处读取,都在 config.ts')
-    // ★ 这个 part 只给界面看(两个编码器都丢弃它),`threadRows` 靠它认出汇报行
-    const marker = input.find((p) => p.type === 'subagent')
-    expect(marker?.type === 'subagent' && marker.callId).toBe(CALL_ID)
+    expect(text?.type === 'text' && text.text).toContain(BRIEF)
+    expect(sessionStore(sessionId).getState().transcript.subagents[CALL_ID]?.reportStatus).toBe('reported')
   })
 })

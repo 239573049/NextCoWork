@@ -834,6 +834,48 @@ CREATE TABLE usage_daily (
 CREATE INDEX usage_daily_by_day ON usage_daily (day);
 `
 
+/**
+ * 扫描缓存 —— 让「扫过但**没导入**」的转录也能跳过重读。
+ *
+ * ★ 存在的理由:changeToken 原先挂在 `import_mappings.meta` 上,而映射只有
+ * 导入过的会话才有。实测一台机器上 1063 个转录只有 47 条映射 —— 96% 的文件
+ * 每次扫描都要完整重读(Codex 那 1.6GB 读一遍约 5 秒,全程堵在主进程里)。
+ * 换句话说那个缓存对绝大多数人是不生效的。
+ *
+ * ★ 主键用**文件路径**不用 sessionId:sessionId 要解析完文件才知道
+ * (Codex 的文件名是 `rollout-*`,与会话 id 无关),而缓存的全部意义
+ * 就是在读文件之前决定「要不要读」。
+ *
+ * ★ `content_hash = ''` 表示这一行是**只读头部**得来的 —— 那种情况下
+ * `messages` 是下界而不是精确值。判据见 `service.ts` 的 `readChatMeta`:
+ * 没有映射的条目状态必然是 new,而 new 不需要哈希,所以那一趟全文读是白读的。
+ */
+const V21_IMPORT_SCAN_CACHE = `
+CREATE TABLE import_scan_cache (
+  source_id      TEXT NOT NULL,
+  -- 绝对路径。OpenCode 这类库内会话用 \`opencode.db#<id>\` 这种合成路径。
+  source_path    TEXT NOT NULL,
+  -- size:mtime。和源文件一比就知道整行能不能复用。
+  change_token   TEXT NOT NULL,
+  -- 解析出来的会话 id(去重与映射键都要用它)。
+  session_id     TEXT NOT NULL DEFAULT '',
+  -- '' = 只读了头部,没算过全文哈希。
+  content_hash   TEXT NOT NULL DEFAULT '',
+  cwd            TEXT NOT NULL DEFAULT '',
+  title          TEXT NOT NULL DEFAULT '',
+  model          TEXT NOT NULL DEFAULT '',
+  model_provider TEXT NOT NULL DEFAULT '',
+  -- partial = 1 时这是下界。
+  messages       INTEGER NOT NULL DEFAULT 0,
+  partial        INTEGER NOT NULL DEFAULT 0,
+  source_updated_at INTEGER NOT NULL DEFAULT 0,
+  scanned_at     INTEGER NOT NULL,
+  PRIMARY KEY (source_id, source_path)
+);
+-- 扫完一轮要按来源清掉本轮没再见到的行(源侧文件已删)
+CREATE INDEX import_scan_cache_by_source ON import_scan_cache (source_id, scanned_at);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -857,4 +899,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 18, name: 'scheduled-tasks', sql: V18_SCHEDULED_TASKS }
   ,{ version: 19, name: 'plans-v2', sql: V19_PLANS_V2 }
   ,{ version: 20, name: 'usage-daily', sql: V20_USAGE_DAILY }
+  ,{ version: 21, name: 'import-scan-cache', sql: V21_IMPORT_SCAN_CACHE }
 ]

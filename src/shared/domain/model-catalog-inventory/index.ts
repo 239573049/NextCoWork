@@ -18,8 +18,16 @@ export type { BuiltinModelRecord, ModelManufacturer, ReasoningEffort } from './t
 export { MODEL_MANUFACTURERS, manufacturerForModelId } from './manufacturers'
 export { MODEL_CATALOG_FETCHED_AT } from './helpers'
 
+/*
+ * ★★ Ollama 的思考线形由 `model-binding.ts` 用在「模型绑到 Ollama 系供应商」
+ * 这条路径上 —— 它不是某一个条目的私有数据,是那家供应商对**所有**模型的线形,
+ * 所以从目录入口导出(见 vendors/ollama.ts 的文件头)。
+ */
+export { OLLAMA_REASONING_EFFORTS, OLLAMA_STANDARD_THINKING } from './vendors/ollama'
+
 import type { BuiltinModelRecord } from './types'
 import { OPENAI, OPENAI_MEDIA } from './vendors/openai'
+import { OLLAMA } from './vendors/ollama'
 import { ANTHROPIC } from './vendors/anthropic'
 import { GOOGLE } from './vendors/google'
 import { DEEPSEEK } from './vendors/deepseek'
@@ -57,6 +65,7 @@ import { INTERNLM } from './vendors/internlm'
  */
 export const BUILTIN_MODEL_CATALOG: readonly BuiltinModelRecord[] = [
   ...OPENAI,
+  ...OLLAMA,
   ...OPENAI_MEDIA,
   ...ANTHROPIC,
   ...GOOGLE,

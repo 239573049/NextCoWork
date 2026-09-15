@@ -53,24 +53,52 @@ export function Labeled({
   );
 }
 
-/** 详情区里的一个 diff 行:上下文灰、删除红(danger)、新增绿(accent)。 */
+/**
+ * 详情区里的一个 diff 行。
+ *
+ * ★ **正文一律用常规前景色,增删只靠底色区分。** 一开始把整行文字也染成
+ * accent/danger,结果绿字压绿底、红字压红底 —— 代码本身反而读不动了。
+ * 颜色的活儿交给行底色和行首的 `+/-`,正文只管好好显示代码。
+ *
+ * 词级高亮只会出现在「同一行里只改了一部分」的行上(见 diff.ts 的饱和护栏),
+ * 所以它一出现就一定是有信息量的。
+ */
 function DiffLine({ row }: { row: DiffRow }): ReactNode {
   const mark = row.type === "add" ? "+" : row.type === "del" ? "-" : " ";
-  const rowCls =
-    row.type === "add"
-      ? "bg-accent/10 text-accent"
-      : row.type === "del"
-        ? "bg-danger/5 text-danger"
-        : "text-fg-muted";
-  const hiCls = row.type === "add" ? "bg-accent/25" : "bg-danger/20";
   return (
-    <div className={cn("flex px-2.5 whitespace-pre", rowCls)}>
+    <div
+      className={cn(
+        "flex px-2.5",
+        row.type === "add" && "bg-accent/10",
+        row.type === "del" && "bg-danger/8",
+      )}
+    >
       {/* select-none:复制 diff 时不把 +/- 前缀也带上 */}
-      <span className="mr-2 shrink-0 select-none opacity-60">{mark}</span>
-      <span className="min-w-0">
+      <span
+        className={cn(
+          "mr-2 shrink-0 select-none",
+          row.type === "add"
+            ? "text-accent"
+            : row.type === "del"
+              ? "text-danger"
+              : "text-fg-faint",
+        )}
+      >
+        {mark}
+      </span>
+      {/* pre-wrap + flex 列:长行折行而不是横向溢出,折下来的部分自然缩进对齐 */}
+      <span className="min-w-0 flex-1 whitespace-pre-wrap text-fg-muted">
         {row.spans.map((s, i) =>
           s.hi ? (
-            <span key={i} className={cn("rounded-[2px]", hiCls)}>
+            <span
+              key={i}
+              className={cn(
+                "rounded-[2px]",
+                row.type === "add"
+                  ? "bg-accent/25 text-accent"
+                  : "bg-danger/20 text-danger",
+              )}
+            >
               {s.text}
             </span>
           ) : (

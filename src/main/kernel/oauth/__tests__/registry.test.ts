@@ -58,26 +58,41 @@ describe('OAUTH_SPECS', () => {
       const grant = OAUTH_SPECS[issuer].grant
       /*
         ★ 设备码那条**没有 redirect_uri**,不是「拼不出来」而是这个概念在
-        RFC 8628 里根本不存在(见 `registry.ts` 的 `OAuthGrant`)。跳过它,
-        而不是给它编一个空串去满足断言。
+        RFC 8628 里根本不存在(见 `registry.ts` 的 `OAuthGrant`)。cli-poll 那条
+        的落地回环端口要 bind 完才知道、且对服务端没有注册值约束,它的
+        redirect_uri 形状由 `zcode.test.ts` 钉。这里都跳过,而不是编一个空串
+        去满足断言。
       */
       if (grant.kind !== 'authorization-code') continue
       expect(redirectUriOf(grant.redirect, 1), issuer).not.toBe('')
     }
   })
 
-  it('★★ 每家的 grant 都得是流程认识的那两种之一', () => {
+  it('★★ 每家的 grant 端点都非空且是合法 URL(三种授权方式各认各的)', () => {
     /*
-      加第三种授权方式时,`flow.ts` 的 switch 会在编译期报错 —— 但那张表里
-      少填一家的 `grant` 是填不出来的(类型必填)。这条断言守的是另一件事:
-      两种 grant 各自的必填端点**不能是空串**,而空串在类型上完全合法。
+      三种 grant 各自的必填端点**不能是空串**,而空串在类型上完全合法。
+      cli-poll 那种还有 fallback 端点(fallback 的授权入口),一并查 ——
+      init 失败降级时它就是唯一的授权入口,空串的表现是打开一个空页。
     */
     for (const issuer of OAUTH_ISSUER_IDS) {
       const grant = OAUTH_SPECS[issuer].grant
       const endpoint =
-        grant.kind === 'authorization-code' ? grant.authorizeUrl : grant.deviceAuthorizationUrl
+        grant.kind === 'authorization-code'
+          ? grant.authorizeUrl
+          : grant.kind === 'cli-poll'
+            ? grant.initUrl
+            : grant.kind === 'keypair-binding'
+              ? OAUTH_SPECS[issuer].tokenUrl
+              : grant.deviceAuthorizationUrl
       expect(endpoint, issuer).not.toBe('')
       expect(() => new URL(endpoint), issuer).not.toThrow()
+
+      if (grant.kind === 'cli-poll') {
+        const fallback = grant.fallback
+        if (fallback !== undefined) {
+          expect(() => new URL(fallback.authorizeUrl), issuer).not.toThrow()
+        }
+      }
     }
   })
 })

@@ -1,7 +1,8 @@
 import type { ModelAlias, ModelCapabilities, ModelCatalogOverride } from './provider'
 import { IMPORTED_ALIAS_DEFAULTS, MODEL_METADATA_FIELDS } from './provider'
 import { findCatalogModel, mergeModelCatalog, type ModelCatalogDefinition } from './model-catalog'
-import { BUILTIN_MODEL_CATALOG } from './model-catalog-inventory'
+import { BUILTIN_MODEL_CATALOG, OLLAMA_REASONING_EFFORTS, OLLAMA_STANDARD_THINKING } from './model-catalog-inventory'
+import { OLLAMA_PROVIDER_IDS } from './presets'
 
 /** JSON metadata equality independent of object property insertion order. */
 function same(a: unknown, b: unknown): boolean {
@@ -78,6 +79,38 @@ export function modelBindingResolver(custom: readonly ModelCatalogDefinition[] =
     if (result.thinkingConfig !== undefined) result.capabilities.thinking = result.thinkingConfig.mode !== 'unsupported'
     if (overrides.has('capabilities.vision') && !overrides.has('capabilities.visionInput')) {
       result.capabilities.visionInput = raw.capabilities.vision
+    }
+    /*
+     * ★★ **Ollama 系供应商上,「别家目录条目」的思考线形就地改写。**
+     *
+     * 起因:`glm-5.3`、`kimi-k3` 这类**不带 tag 的名字**命中的是智谱/Moonshot 的
+     * 目录条目,它们的 thinkingConfig 是那两家**官方 API** 的方言(`thinking.type`、
+     * custom 路径)。绑到 Ollama 上时那些字段会被兼容层静默丢弃(Go json 丢弃未知
+     * 键)—— 用户切「关」也什么都发不出去,thinking 始终跟随模型默认。
+     *
+     * 覆盖成 Ollama 自己的线形(`reasoning_effort` + standardWire,见 vendors/ollama.ts):
+     * 开关真实生效,档位也拿得到(官方文档:多数模型接受 low/medium/high/max)。
+     *
+     * 四条边界,缺一条都会伤到别的渠道:
+     * - **只认 Ollama 系 providerId**(本地 + 订阅两条线,常量在 presets.ts);
+     * - **只碰已确认的思考模型**(`definition.capabilities.thinking`)—— 否则连
+     *   llama3.3 这种非思考模型都会长出思考开关;
+     * - **不碰已是 ollama 厂商的条目**(gpt-oss 的档位表与别家不同,见下);
+     * - **用户显式改过就不覆盖**。例外是「读回来的正是我们自己写的配置」——
+     *   旧记录(升级前落下、`catalogOverrides` 还是 undefined)的检测循环会把它
+     *   误判成用户自定义,不认这条的话第一次 resolve 之后覆盖就永久失效。
+     */
+    if (
+      (OLLAMA_PROVIDER_IDS as readonly string[]).includes(raw.providerId) &&
+      definition !== undefined &&
+      definition.manufacturerId !== 'ollama' &&
+      definition.capabilities.thinking === true &&
+      !overrides.has('capabilities.thinking') &&
+      (!overrides.has('thinkingConfig') || same(result.thinkingConfig, OLLAMA_STANDARD_THINKING))
+    ) {
+      result.thinkingConfig = structuredClone(OLLAMA_STANDARD_THINKING)
+      result.reasoningEfforts = [...OLLAMA_REASONING_EFFORTS]
+      result.capabilities.thinking = true
     }
     for (const field of MODEL_METADATA_FIELDS) if (result[field] === undefined) delete result[field]
     if (result.thinkingConfig !== undefined) {

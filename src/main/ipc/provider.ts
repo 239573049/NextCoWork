@@ -33,14 +33,15 @@ import {
 } from '../../shared/domain/provider'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { removeCredential } from '../db/repo'
-import { bearerOf, parseCredential } from '../../shared/domain/credential'
+import { parseCredential } from '../../shared/domain/credential'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { catalogDefinitionFromAlias, isModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import { listResolvedModels } from '../state/model-bindings'
 import {
   modelListErrorMessage,
-  modelListRequest,
-  parseModelList
+  modelListRequestFor,
+  parseModelList,
+  redactSecrets
 } from '../kernel/upstream/model-list'
 import { opencodeGoProtocolFor } from '../kernel/upstream/opencode-protocol'
 import { platformLoginAuth } from '../kernel/upstream/transport'
@@ -447,7 +448,7 @@ function repointDanglingDefaults(): void {
  *
  * ★ 没有密钥时**不是直接失败**:预设表里 `modelListPublic` 的那几家
  * (OpenRouter / DeepInfra 实测 200)免鉴权就能拉,于是「key 还没填先看看
- * 有哪些模型」这条路是通的。带不带头的判断在 `modelListRequest` 里。
+ * 有哪些模型」这条路是通的。带不带头的判断在 `modelListRequestFor` 里。
  */
 export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
   ensureSeeded()
@@ -462,14 +463,22 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
     这里会安静地发出一个畸形请求,而症状是一个看不懂的 401。
   */
   const cred = parseCredential(await getHost().secrets.get(p.credentialRef))
-  const key = cred === null ? null : bearerOf(cred)
-  const { url, headers } = modelListRequest(p.protocol, p.baseUrl, key)
+  /*
+    ★★ 鉴权形状收口在 `modelListRequestFor` 里,和对话请求共用同一套来源
+    (issuer 的 `transport`)。签名式凭证(keypair-binding,今天 ollama-cloud)
+    的 accessToken 槽是 **SSH 私钥 PEM** —— 拿 `bearerOf` 拼 Bearer 会得到
+    一个非法头值(`Headers.append` 抛 TypeError,私钥整段进错误弹窗,
+    2026-09-15 实测事故),这里由 `signRequest` 现场签名解决。
+  */
+  const { url, headers } = modelListRequestFor(p, cred)
   /*
     ★ 平台那条上游的凭证是登录 JWT,只有 `Authorization: Bearer` 认它 —— 和发对话
     请求走的是同一条规矩(`kernel/upstream/transport.ts`),漏在这里的表现是
     「API 格式」选 Anthropic 时那颗「从服务商拉取模型列表」按钮永远 401。
+    ★ 只有 API Key 凭证走这里:平台那条没有 oauthIssuer,登录态也是以 api-key
+    形态存的(`ipc/client-auth.ts`),`cred.kind !== 'api-key'` 时不可能是它。
   */
-  const platform = key === null ? null : platformLoginAuth(p.id, key)
+  const platform = cred === null || cred.kind !== 'api-key' ? null : platformLoginAuth(p.id, cred.apiKey)
   if (platform !== null) {
     for (const name of platform.dropHeaders) delete headers[name]
     Object.assign(headers, platform.headers)
@@ -488,7 +497,13 @@ export async function fetchModels(providerId: string): Promise<FetchedModel[]> {
       signal: AbortSignal.timeout(20_000)
     })
   } catch (e) {
-    const reason = e instanceof Error && e.name === 'TimeoutError' ? '超时(20 秒)' : String(e)
+    /*
+      ★★ `redactSecrets` 是兜底:上面那次事故里一行 `String(e)` 把整段私钥送进了
+      弹窗。根治是凭证不进头(modelListRequestFor),但任何未来的「头里带了不该
+      带的东西」都先在这里被拦成 `[已隐去的密钥]`。
+    */
+    const reason =
+      e instanceof Error && e.name === 'TimeoutError' ? '超时(20 秒)' : redactSecrets(String(e))
     // cause 留着原始的 fetch 错误:上面那句是给用户看的,而 ECONNREFUSED / 证书失败
     // 这类真正的区别只在原始异常里
     throw new Error(`连不上 ${url} —— ${reason}`, { cause: e })

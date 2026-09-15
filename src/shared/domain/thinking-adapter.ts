@@ -77,6 +77,13 @@ function kindFor(input: ThinkingAdapterInput): AdapterKind {
       break
   }
   if (input.protocol === 'anthropic') return 'anthropic'
+  /*
+   * ★★ standardWire(见 provider.ts 的 ThinkingConfig):条目声明这家读标准线形时,
+   * 不套按模型名的厂商方言 —— Ollama 托管的 deepseek/glm 走这里。注意必须放在
+   * 名字启发式**之前**:官方 DeepSeek 的条目也声明 reasoning_effort 路径,靠的
+   * 就是名字启发式补上它家要的 thinking:{type},顺序反了会改掉官方渠道的行为。
+   */
+  if (input.config?.standardWire === true) return input.protocol
   if (/(?:^|\/)(?:deepseek|deep-seek)[/:._-]/iu.test(input.upstreamModel)) return 'deepseek'
   if (/(?:^|\/)(?:glm|chatglm)[/:._-]/iu.test(input.upstreamModel)) return 'glm'
   if (/(?:^|\/)(?:hy4-preview|hy3(?:-preview)?)(?:$|[/:._-])/iu.test(input.upstreamModel)) {
@@ -226,6 +233,18 @@ export function applyThinkingAdapter(body: unknown, input: ThinkingAdapterInput)
       // Compatible relays may default to thinking even when Anthropic itself
       // does not. Omitting the field does not express the user's Off choice.
       next['thinking'] = { type: 'disabled' }
+      return next
+    }
+    /*
+     * ★★ standardWire 的 Anthropic 线形(Ollama):档位走 `output_config.effort`,
+     * 而且**绝不能同时发 `thinking.type`** —— Ollama 源码里 output_config 那一支
+     * 挂在 `think == nil` 上(它先处理 thinking,只在 think 仍为空时才看 output_config),
+     * 两个一起发的表现是 effort 被静默无视、永远停在默认档。这也解释了关的时候
+     * 为什么仍写 `thinking:{type:'disabled'}`:那条路上 output_config 只能
+     * 「开 + 定档」,表达不了「关」。
+     */
+    if (input.config.standardWire === true && reasoning.effort !== undefined) {
+      next['output_config'] = { effort: reasoning.effort }
       return next
     }
     const budget = reasoning.budgetTokens ?? budgetForEffort(reasoning.effort, input.maxOutputTokens)

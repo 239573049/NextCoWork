@@ -11,7 +11,7 @@
  * 不需要动这里一行。
  */
 import { Bot, Brain, CheckCircle2, ChevronRight, CircleAlert, Clock3, CornerDownRight, ListChecks, Square } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
 import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
@@ -23,6 +23,8 @@ import { AgentMarkdown } from "../../components/markdown";
 import { ToolDetail } from "./ToolDetail";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 import { abortRun } from "../../services/agent";
+import { getSession } from "../../services/sessions";
+import { visibleText } from "../../../../shared/agent/message";
 import { useOpenSubagent } from "./subagent-open";
 
 /**
@@ -437,8 +439,62 @@ export function SubagentReportRow({
   const { t } = useI18n();
   const openSubagent = useOpenSubagent();
   const [open, setOpen] = useState(false);
-  const text = summary?.trim() ?? "";
   const canOpen = openSubagent !== undefined && state?.childSessionId !== undefined;
+
+  /*
+    ★★ **`summary` 只有 240 字,而且是主进程切的。**
+
+    `runtime.ts` 发 `subagent_end` 和落盘时都做了 `text.slice(0, 240)` ——
+    那个字段生来是给卡片当一行预览的。后台这条路把它当成了汇报正文,于是
+    一份「改了八个文件、逐条说明」的报告在这里断在半个标识符上
+    (真实案例:`added \`ModelStatusC`)。前台子代理没有这个问题:它的结果是
+    `toolOk(outcome.text)`,全文直接进 tool_result。
+
+    所以展开时现去子会话取全文 —— 和右侧那个只读面板同一个数据源
+    (`runtime.ts` 取的也正是「最后一条 assistant 消息的 visibleText」)。
+    放在展开时而不是汇报时,是因为**历史消息也能因此补全**:已经写进库里的
+    那些汇报,正文里存的就是那 240 字,汇报时再取已经晚了。
+
+    读取期间先摆着摘要,不摆空白或转圈 —— 用户点开是想看内容,
+    先给他能给的那部分,全文到了再原地换掉。
+  */
+  const [full, setFull] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const requested = useRef<string | undefined>(undefined);
+  const childSessionId = state?.childSessionId;
+
+  useEffect(() => {
+    // 旧转录没有 `childSessionId` —— 取不到子会话,摘要就是全部了
+    if (!open || childSessionId === undefined || requested.current === childSessionId) return;
+    requested.current = childSessionId;
+    let cancelled = false;
+    setLoading(true);
+    void getSession(childSessionId)
+      .then((detail) => {
+        if (cancelled) return;
+        const last = [...detail.messages].reverse().find((m) => m.role === "assistant");
+        const body = last === undefined ? "" : visibleText(last).trim();
+        if (body === "") setFailed(true);
+        else setFull(body);
+      })
+      .catch(() => { if (!cancelled) setFailed(true) })
+      .finally(() => { if (!cancelled) setLoading(false) });
+    return () => { cancelled = true };
+  }, [open, childSessionId]);
+
+  const brief = summary?.trim() ?? "";
+  const text = full ?? brief;
+  /*
+    ★ 取不到全文时要**说出来**。悄悄摆着摘要的话,用户看到的是一段
+    断在半路的报告,而没有任何东西告诉他这不是全部 —— 他会以为子代理
+    本来就只说了这些。
+
+    判据是「试过了没成」或「压根没得试」,不是「此刻还没有全文」——
+    后者在效果跑起来之前那一帧也成立,会闪一下假的提示。
+  */
+  const legacy = childSessionId === undefined;
+  const truncated = full === null && brief !== "" && (failed || legacy);
 
   return (
     <div
@@ -480,13 +536,25 @@ export function SubagentReportRow({
       {open && (
         <div className="selectable border-t border-hairline px-3 py-2.5">
           {/*
-            ★ 只渲染子代理**自己那段摘要**,不是注入给模型的那整段英文
+            ★ 只渲染子代理**自己那段正文**,不是注入给模型的那整段英文
             (它外面还包着一层 "Background subagent result (...) / Review this result..."
             的指令壳)。那层壳是写给模型的,给人看只会碍事。
           */}
           {text === ""
-            ? <p className="text-[11.5px] text-fg-faint">{t("chat.subagent.report.empty")}</p>
+            ? <p className="text-[11.5px] text-fg-faint">
+                {loading ? t("chat.subagent.report.loading") : t("chat.subagent.report.empty")}
+              </p>
             : <AgentMarkdown content={text} variant="compact" />}
+          {loading && text !== "" && (
+            <p data-testid="subagent-report-loading" className="mt-2 text-[11px] text-fg-faint">
+              {t("chat.subagent.report.loading")}
+            </p>
+          )}
+          {truncated && (
+            <p data-testid="subagent-report-truncated" className="mt-2 text-[11px] text-fg-faint">
+              {legacy ? t("chat.subagent.report.partialLegacy") : t("chat.subagent.report.partialFailed")}
+            </p>
+          )}
         </div>
       )}
     </div>

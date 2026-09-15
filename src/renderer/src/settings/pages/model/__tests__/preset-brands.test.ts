@@ -1,9 +1,9 @@
 /**
- * 45 个内置预设各自该显示**谁**的 logo —— 一张钉死的对照表。
+ * 47 个内置预设各自该显示**谁**的 logo —— 一张钉死的对照表。
  *
  * **为什么值得单独一个文件:** `brands.test.ts` 守的是规则表本身自洽
  * (每个牌子有样本、顺序不打架),但它不知道「添加供应商」目录里到底摆着
- * 哪 44 个名字。而两张表是**分开演进**的:presets.ts 加一家、或者给某家改个
+ * 哪 47 个名字。而两张表是**分开演进**的:presets.ts 加一家、或者给某家改个
  * 更好听的名字,`brands.ts` 一个字都不用动就能悄悄错掉一个 logo。
  *
  * ★★ 这不是假想。这张表第一次跑出来时,43 家里 **13 家没有图标、3 家挂着
@@ -47,6 +47,8 @@ const EXPECTED: Readonly<Record<string, Brand | null>> = {
   'grok-build': 'xai',
   mistral: 'mistral',
   cohere: 'cohere',
+  // ★ Ollama Cloud 和本地那条「Ollama」是同一家的两条线，共用同一个字形
+  'ollama-cloud': 'ollama',
 
   // ── 国内 ──
   deepseek: 'deepseek',

@@ -48,6 +48,22 @@ export interface UpstreamTransport {
    * 之后跑,用来把供应商自己的硬约束按回去。
    */
   body: (body: unknown) => unknown
+  /**
+   * ★★ **逐请求签名式鉴权**(Ollama 用的)。签名式凭证没有可以存进 headers 表的
+   * 静态值 —— 头随 method+path+时间戳变,而 `headers` 是构造时算死的;真 token
+   * 又根本不存在。于是每一跳由 router 在发请求前现调这个钩子:
+   *
+   * - `query` 会写进最终 URL(Ollama 的签名要求 `ts` 同时出现在 URL 和被签内容里,
+   *   而 URL 只有这一层碰得到);
+   * - `headers` 在 `headers`/`dropHeaders` 之后、401 重发的 `extraHeaders` 之前合并。
+   *
+   * ★★ **每次 `send()` 都会重新调用**(包括 401 之后的那次重发)—— 时间戳式签名
+   * 重发必须换新值,复用旧签名等于没重试。
+   */
+  signRequest?: (req: { method: string; path: string }) => {
+    query?: Record<string, string>
+    headers: Record<string, string>
+  }
 }
 
 /** API Key 凭证走这条 —— 现有全部供应商的请求逐字节不变 */

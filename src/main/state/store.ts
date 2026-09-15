@@ -464,6 +464,15 @@ export const store = {
   putImportSource(source: repo.ImportSourceRow): repo.ImportSourceRow {
     return repo.putImportSource(source)
   },
+  listImportScanCache(sourceId: string): Map<string, repo.ImportScanCacheRow> {
+    return repo.listImportScanCache(sourceId)
+  },
+  putImportScanCache(rows: readonly repo.ImportScanCacheRow[]): void {
+    repo.putImportScanCache(rows)
+  },
+  pruneImportScanCache(sourceId: string, scannedAt: number): number {
+    return repo.pruneImportScanCache(sourceId, scannedAt)
+  },
   getImportMapping(
     sourceId: string,
     scopeKey: string,

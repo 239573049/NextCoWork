@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { modelBindingResolver } from '../model-binding'
 import { findCatalogModel, type ModelCatalogDefinition } from '../model-catalog'
-import { findBuiltinModel } from '../model-catalog-inventory'
+import { findBuiltinModel, OLLAMA_STANDARD_THINKING } from '../model-catalog-inventory'
 import { effectiveModelProtocol, IMPORTED_ALIAS_DEFAULTS, type ModelAlias } from '../provider'
 
 const imported = (overrides: Partial<ModelAlias> = {}): ModelAlias => ({
@@ -123,5 +123,84 @@ describe('catalogue-backed provider metadata', () => {
     expect(findCatalogModel(definitions, 'vendor/model')?.displayName).toBe('Vendor')
     expect(findCatalogModel(definitions, 'gateway/vendor/model')?.displayName).toBe('Vendor')
     expect(findCatalogModel(definitions.map((d) => ({ ...d, aliases: ['ambiguous'] })), 'ambiguous')).toBeUndefined()
+  })
+})
+
+/* ================================================================
+ * Ollama 系供应商的思考线形覆盖 —— `glm-5.3` 这类名字命中的是智谱官方条目,
+ * 而它的方言字段(`thinking.type`)会被 Ollama 的兼容层静默丢弃,用户的
+ * 「关」发不出去。覆盖成 Ollama 的线形(`reasoning_effort` + standardWire),
+ * 并保证**别的供应商一个字节都不变**。
+ * ================================================================ */
+describe('Ollama 系绑定 · 思考线形的 provider 感知覆盖', () => {
+  const ollamaStandard = OLLAMA_STANDARD_THINKING
+
+  it('★★★ ollama-cloud 上的 glm-5.3 → 智谱方言被改写成 reasoning_effort 线形', () => {
+    const model = modelBindingResolver().resolve(
+      imported({ providerId: 'ollama-cloud', upstreamModel: 'glm-5.3' })
+    )
+    expect(model.thinkingConfig).toEqual(ollamaStandard)
+    expect(model.reasoningEfforts).toEqual(['none', 'low', 'medium', 'high', 'max'])
+    expect(model.capabilities.thinking).toBe(true)
+  })
+
+  it('★★ 本地 ollama 那条线同样覆盖(同一个 daemon 的同一套 API)', () => {
+    const model = modelBindingResolver().resolve(
+      imported({ providerId: 'ollama', upstreamModel: 'glm-5.3' })
+    )
+    expect(model.thinkingConfig).toEqual(ollamaStandard)
+  })
+
+  it('★★★ 智谱自己的供应商上不碰 —— 方言分支正是那边要的', () => {
+    const model = modelBindingResolver().resolve(
+      imported({ providerId: 'zhipu', upstreamModel: 'glm-5.3' })
+    )
+    expect(model.thinkingConfig).toMatchObject({ mode: 'toggle', parameterPath: 'thinking.type' })
+    expect(model.thinkingConfig?.standardWire).toBeUndefined()
+  })
+
+  it('★★ ollama 自己的条目不覆盖 —— gpt-oss 的档位表短一截(无 none/无 max)', () => {
+    const model = modelBindingResolver().resolve(
+      imported({ providerId: 'ollama-cloud', upstreamModel: 'gpt-oss:120b' })
+    )
+    expect(model.thinkingConfig).toEqual(ollamaStandard)
+    expect(model.reasoningEfforts).toEqual(['low', 'medium', 'high'])
+  })
+
+  it('★★★ 非思考模型不长出思考开关(llama-3.3 在 Ollama 上也没有)', () => {
+    const model = modelBindingResolver().resolve(
+      imported({ providerId: 'ollama-cloud', upstreamModel: 'meta-llama/llama-3.3-70b-instruct' })
+    )
+    expect(model.thinkingConfig?.mode).toBe('unsupported')
+    expect(model.capabilities.thinking).toBe(false)
+  })
+
+  it('★★★ 用户显式改过的思考配置不被覆盖', () => {
+    const custom = { mode: 'budget' as const, defaultEnabled: true, defaultBudgetTokens: 4096 }
+    const model = modelBindingResolver().resolve(
+      imported({
+        providerId: 'ollama-cloud',
+        upstreamModel: 'glm-5.3',
+        thinkingConfig: custom,
+        catalogOverrides: ['thinkingConfig', 'reasoningEfforts']
+      })
+    )
+    expect(model.thinkingConfig).toMatchObject({ mode: 'budget', defaultBudgetTokens: 4096 })
+  })
+
+  it('★★★ 往返稳定:把解析结果存回去再解析,覆盖仍在且没被记成用户自定义', () => {
+    /*
+     * 这条守的是「覆盖会不会被自己写的值反噬」:resolve 的输出若被存回
+     * (update 的常见路径),下一次 resolve 必须得到同一个结果,且
+     * catalogOverrides 里不能因此多出 thinkingConfig —— 多出来的话覆盖
+     * 会被当成用户自定义而永久失效。
+     */
+    const resolver = modelBindingResolver()
+    const raw = imported({ providerId: 'ollama-cloud', upstreamModel: 'glm-5.3' })
+    const first = resolver.resolve(raw)
+    const second = resolver.update(first, { ...first })
+    expect(second.thinkingConfig).toEqual(ollamaStandard)
+    expect(second.catalogOverrides).not.toContain('thinkingConfig')
+    expect(second.reasoningEfforts).toEqual(['none', 'low', 'medium', 'high', 'max'])
   })
 })
