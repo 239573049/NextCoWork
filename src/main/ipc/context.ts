@@ -155,7 +155,9 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
     说明文字」远远好过「整张卡打不开」。
   */
   let projectInstructions = ''
-  try { projectInstructions = await loadInstructions(req.workspaceId) } catch { projectInstructions = '' }
+  try { projectInstructions = await loadInstructions(req.workspaceId) } catch {
+    // 远程工作区没连上时保持为空字符串
+  }
 
   const alias = getRouter().resolveModel(req.model, req.modelProviderId)
   const tools = registry.snapshot({

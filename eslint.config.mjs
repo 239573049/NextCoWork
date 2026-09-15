@@ -19,7 +19,7 @@ export default tseslint.config(
      *
      * 不引 `globals` 包:这里要的就这几个,列出来比多一个依赖清楚。
      */
-    files: ['scripts/**/*.mjs'],
+    files: ['scripts/**/*.mjs', '*.config.js', '*.config.mjs'],
     languageOptions: {
       globals: {
         process: 'readonly',
