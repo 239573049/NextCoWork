@@ -114,7 +114,20 @@ export interface WorkspaceHost {
 }
 
 export interface KernelHost {
-  paths: { userData(): string; temp(): string }
+  paths: {
+    /**
+     * 账户配置根:skills / commands / agents / settings.json。
+     * ★ **跟着配置作用域走**,见 `db/config-profile.ts`。
+     */
+    userData(): string
+    /**
+     * 附件根(这台机器上的会话数据)。★ **不跟作用域走** ——
+     * 会话附件由 `ipc/storage.ts` 按它扫描占用与清理孤儿,换根等于让那些文件
+     * 从统计里消失,并且下一次清理会把它们当成孤儿删掉。
+     */
+    attachments(): string
+    temp(): string
+  }
   /** ★ 只存引用,永不在内核里出现明文 key(方案 §9) */
   secrets: {
     get(ref: string): Promise<string | null>
@@ -157,6 +170,7 @@ export function nodeHost(overrides: Partial<KernelHost> = {}): KernelHost {
   return {
     paths: {
       userData: () => join(process.cwd(), '.next-cowork'),
+      attachments: () => join(process.cwd(), '.next-cowork', 'attachments'),
       temp: () => tmpdir()
     },
     secrets: {

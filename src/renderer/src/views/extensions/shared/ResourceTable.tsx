@@ -46,7 +46,9 @@ export function ResourceTable<T extends ResourceRow>({
   onToggle,
   emptyTitle,
   emptyHint,
-  icon
+  icon,
+  openReadOnly = false,
+  hideToggle = false
 }: {
   rows: readonly T[]
   onOpen: (row: T) => void
@@ -54,6 +56,8 @@ export function ResourceTable<T extends ResourceRow>({
   emptyTitle: string
   emptyHint: string
   icon: ReactNode
+  openReadOnly?: boolean
+  hideToggle?: boolean
 }): ReactNode {
   const { t } = useI18n()
 
@@ -74,9 +78,9 @@ export function ResourceTable<T extends ResourceRow>({
             <li key={`${row.scope}:${row.name}`} className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-tint">
               <button
                 type="button"
-                disabled={readOnly}
+                disabled={readOnly && !openReadOnly}
                 onClick={() => onOpen(row)}
-                className={cn('min-w-0 flex-1 text-left', readOnly ? 'cursor-default' : 'cursor-pointer')}
+                className={cn('min-w-0 flex-1 text-left', readOnly && !openReadOnly ? 'cursor-default' : 'cursor-pointer')}
               >
                 <span className="flex items-center gap-1.5">
                   {row.color !== undefined && (
@@ -97,12 +101,12 @@ export function ResourceTable<T extends ResourceRow>({
                 <span className="mt-0.5 block truncate text-[11px] text-fg-faint">{row.description}</span>
               </button>
               <ScopeBadge scope={row.scope} />
-              <Toggle
+              {!hideToggle && <Toggle
                 checked={row.enabled}
                 disabled={readOnly}
                 onChange={(v) => onToggle(row, v)}
                 label={t('ext.toggleLabel', { name: row.name })}
-              />
+              />}
             </li>
           )
         })}

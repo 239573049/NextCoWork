@@ -118,6 +118,23 @@ describe('browser management navigation', () => {
     expect(mockPersistOuter).not.toHaveBeenCalled()
   })
 
+  it('Git 面板同样是独立模式，不占外层标签也不落库', () => {
+    const outer = [workspaceTab()]
+    useWindowStore.setState({ outer, activeOuterId: 'outer-a', activeWorkspaceId: 'workspace-a' })
+    useWindowStore.getState().openFeature('git')
+
+    const state = useWindowStore.getState()
+    expect(state.activeStandaloneFeature).toBe('git')
+    // ★ 断的是「没有新建外层 Tab」：git 一旦漏进 NON_TAB_FEATURES，
+    // 这里会多出一个 Tab，并且 persistOuter 会把它写进库里。
+    expect(state.outer).toBe(outer)
+    expect(mockPersistOuter).not.toHaveBeenCalled()
+
+    useWindowStore.getState().closeStandaloneFeature()
+    expect(useWindowStore.getState().activeStandaloneFeature).toBeNull()
+    expect(useWindowStore.getState().activeWorkspaceId).toBe('workspace-a')
+  })
+
   it('扩展面板和浏览器共用独立模式，退出后保留工作区及面板', () => {
     const outer = [workspaceTab()]
     useWindowStore.setState({ outer, activeOuterId: 'outer-a', activeWorkspaceId: 'workspace-a', rightPanelOpen: true, bottomPanelOpen: true })

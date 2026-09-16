@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage } from '../../../../shared/agent/message'
+import { encodeUpstream } from '../codec'
 import { encodeOpenAIChat } from '../encode/openai-chat'
 import { encodeOpenAIResponses } from '../encode/openai-responses'
 import { REQUEST, reasoningItem } from './openai-fixtures'
@@ -19,6 +20,15 @@ const history = [
 ]
 
 describe('OpenAI request encoders', () => {
+  it.each(['openai-chat', 'openai-responses'] as const)('%s ignores mandatory Anthropic cache options', (protocol) => {
+    for (const cacheTtl of ['5m', '1h'] as const) {
+      const body = encodeUpstream(protocol, REQUEST, 'gpt-test', 'k', { userId: 'ws-test', cacheTtl }).body
+      expect(body).not.toHaveProperty('cache_control')
+      expect(body).not.toHaveProperty('metadata')
+      expect(JSON.stringify(body)).not.toContain('cache_control')
+    }
+  })
+
   it('encodes the complete Chat tool conversation, preserving reasoning across later user turns', () => {
     const before = structuredClone(history)
     const encoded = encodeOpenAIChat({ ...REQUEST, messages: [...history, userMessage('u2', [{ type: 'text', text: '继续' }], 0)] }, 'deepseek-reasoner', 'test-key')

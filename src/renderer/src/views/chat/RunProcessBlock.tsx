@@ -60,7 +60,7 @@ export function RunProcessBlock({
       </button>
 
       {open && (
-        <div className="flex flex-col gap-1.5 pl-3">
+        <div className="scroll-thin flex max-h-[min(60vh,560px)] flex-col gap-1.5 overflow-y-auto pl-3 pr-1">
           {children ?? <ToolTimeline items={items} tools={tools} subagents={subagents} />}
         </div>
       )}

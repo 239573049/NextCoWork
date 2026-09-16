@@ -13,8 +13,11 @@
  * 覆盖它们只会多一份要同步维护的代码。
  */
 import { app, net, safeStorage, session } from 'electron'
+import { join } from 'node:path'
 import { getCredential, putCredential, removeCredential } from '../db/repo'
 import { databaseDirectory } from '../db'
+import { configProfileDirectory } from '../db/config-profile'
+import { ATTACHMENTS_DIR } from '../net/attachment-protocol'
 import type { KernelHost } from '../kernel/host'
 import { nodeHost } from '../kernel/host'
 import { withDemo } from '../kernel/upstream/demo'
@@ -86,7 +89,19 @@ export function electronHost(): KernelHost {
         // ★ 必须是 `databaseDirectory()`(**已打开的库**所在目录)而不是那个默认值 ——
         // 传了 `--user-data-dir` 或走恢复流程时两者会分叉,skills/agents/commands 的
         // 文件树就会写到一个跟数据库无关的目录里去。这个函数是 lazy 的,调用时库一定已经打开。
-        userData: () => databaseDirectory(),
+        //
+        // ★★ 外面再套一层 `configProfileDirectory`:**skills / commands / agents /
+        // settings.json 是账户配置**,一个账户写的 Skill 不该在另一个账户的列表里出现。
+        // `local` 返回这个根本身(老库的文件一个都不动),账户作用域返回
+        // `<root>/config-profiles/<sha256(id)>` —— 于是这一层不需要任何「读的时候再筛一次」,
+        // 上下两路拿到的是两个真正不同的目录。
+        userData: () => configProfileDirectory(databaseDirectory()),
+        /*
+          ★ 附件根**不**跟作用域走,所以这里直接拼,不走 `configProfileDirectory`。
+          它必须和 `net/attachment-protocol.ts` 的 `attachmentRoot()` 是同一个目录,
+          否则「写进去的图读不出来」会在登录之后才第一次出现。
+        */
+        attachments: () => join(databaseDirectory(), ATTACHMENTS_DIR),
         temp: () => app.getPath('temp')
       },
       secrets: electronSecrets(),

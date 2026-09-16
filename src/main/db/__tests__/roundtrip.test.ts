@@ -199,43 +199,82 @@ describe('★ 关库重开之后,配置一样都不少', () => {
   })
 
   it('Provider 的协议专属缓存档位跨重启并经导出导入保留', () => {
+    /*
+      `off` 是旧库 / 旧归档里真实存在的取值(现在提示缓存强制开启),类型里已经没有它,
+      所以用显式转换把它当成「未知的旧 JSON」写进去:读回来的有效值必须是强制的 5m。
+      同理,整个 `protocolOptions` 缺失的旧行也不能读成 undefined。
+    */
     const configured = [
       ['关闭', 'off'],
       ['五分钟', '5m'],
       ['一小时', '1h']
     ] as const
+    const missing = '缺省'
+    const expected = { 关闭: '5m', 五分钟: '5m', 一小时: '1h', 缺省: '5m' }
 
     for (const [id, cacheTtl] of configured) {
       store.putProvider({
         ...provider(id, configured.findIndex(([name]) => name === id)),
-        protocolOptions: { anthropic: { cacheTtl } }
+        protocolOptions: { anthropic: { cacheTtl } } as unknown as UpstreamProvider['protocolOptions']
       })
     }
+    store.putProvider(provider(missing, configured.length))
 
     restart()
 
     const readTtls = Object.fromEntries(
       store.listProviders().map((p) => [p.id, anthropicCacheTtlOf(p)])
     )
-    expect(readTtls).toEqual({ 关闭: 'off', 五分钟: '5m', 一小时: '1h' })
+    expect(readTtls).toEqual(expected)
 
     // Provider JSON is part of the regular data snapshot; no special export
     // channel is needed for protocol-specific options.
     const exported = repo.exportDataSnapshot()
     expect(exported.providers.map((p) => [p.id, anthropicCacheTtlOf(p)])).toEqual([
-      ['关闭', 'off'],
+      ['关闭', '5m'],
       ['五分钟', '5m'],
-      ['一小时', '1h']
+      ['一小时', '1h'],
+      ['缺省', '5m']
     ])
 
-    for (const [id] of configured) store.removeProvider(id)
+    for (const id of [...configured.map(([name]) => name), missing]) store.removeProvider(id)
     expect(store.listProviders()).toEqual([])
     repo.mergeDataExport(exported)
     restart()
 
     expect(
       Object.fromEntries(store.listProviders().map((p) => [p.id, anthropicCacheTtlOf(p)]))
-    ).toEqual({ 关闭: 'off', 五分钟: '5m', 一小时: '1h' })
+    ).toEqual(expected)
+  })
+
+  /**
+   * 旧归档(用户手上真实存在的导出文件)里带着 `off`,导入走的是 `putProvider`,
+   * 所以那条路径也必须把值归一化后**存下来** —— 只靠读的时候兜底的话,
+   * 库里会长期留着一个已经不合法的值,下一次读的人未必走同一个访问器。
+   */
+  it('旧归档里的 off 档位导入时按 5m 落库', () => {
+    const snapshot = repo.exportDataSnapshot()
+    repo.mergeDataExport({
+      ...snapshot,
+      providers: [
+        {
+          ...provider('legacy-cache', 0),
+          protocolOptions: { anthropic: { cacheTtl: 'off' } }
+        } as unknown as UpstreamProvider
+      ]
+    })
+
+    restart()
+
+    const imported = store.listProviders().find((p) => p.id === 'legacy-cache')
+    expect(anthropicCacheTtlOf(imported!)).toBe('5m')
+
+    const raw = new DatabaseSync(join(dir, DB_FILENAME), { readOnly: true })
+    const stored = JSON.parse(
+      String(raw.prepare('SELECT json FROM providers WHERE id = ?').get('legacy-cache')?.['json'])
+    ) as UpstreamProvider
+    raw.close()
+    expect(stored.protocolOptions).toEqual({ anthropic: { cacheTtl: '5m' } })
   })
 
   it('别名带着能力位和数字字段一起回来,不是只剩个名字', () => {

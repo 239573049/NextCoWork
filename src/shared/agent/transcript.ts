@@ -66,6 +66,7 @@ export interface SubagentState {
   status: RunStatus
   description?: string
   subagentType?: string
+  color?: import('../domain/agent-def').AgentColor
   model?: string
   background?: boolean
   phase?: SubagentPhase
@@ -333,6 +334,7 @@ function writeSubagentResult(subagents: TranscriptState['subagents'], part: Extr
     childRunId: metadata.childRunId,
     status,
     ...(metadata.background === undefined ? {} : { background: metadata.background }),
+    ...(metadata.color === undefined ? {} : { color: metadata.color }),
     phase: status === 'running' ? (metadata.background === true ? 'background' : 'starting') : 'finishing',
     ...(metadata.summary === undefined ? {} : { summary: metadata.summary }),
     ...(metadata.error === undefined ? {} : { error: metadata.error }),
@@ -482,7 +484,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
       switch (d.type) {
         case 'message_start':
           /*
-            ★ 内容开始流了 = 重试成功,提示到此为止。见 TranscriptState.notice
+            ★ 内容开始流了 = 重试成功,过期的重试提示和错误到此为止。
 
             ★★ `live: []` 在正常路径上是**无操作** —— `message_commit` 已经清过了
             (见下面那条「提交即清空活跃块」),所以这里 `live` 必空。它存在只为一件事:
@@ -493,7 +495,14 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             重载后的重放同理:`run-registry` 只在 `message_commit` 时裁剪 delta,
             被丢弃那次的 delta 会原样留在日志里重放一遍,也靠这一句清掉。
           */
-          return { ...s, model: d.model, providerId: d.providerId, notice: undefined, live: [] }
+          return {
+            ...s,
+            model: d.model,
+            providerId: d.providerId,
+            notice: undefined,
+            error: undefined,
+            live: []
+          }
 
         case 'text_delta':
         case 'thinking_delta': {
@@ -661,6 +670,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             ...(e.childSessionId === undefined ? {} : { childSessionId: e.childSessionId }),
             ...(e.description === undefined ? {} : { description: e.description }),
             ...(e.subagentType === undefined ? {} : { subagentType: e.subagentType }),
+            ...(e.color === undefined ? {} : { color: e.color }),
             ...(e.model === undefined ? {} : { model: e.model }),
             ...(e.background === undefined ? {} : { background: e.background }),
             phase: e.background === true ? 'background' : 'starting',

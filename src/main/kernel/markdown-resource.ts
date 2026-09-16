@@ -29,7 +29,8 @@ const RESOURCE_FILE_MAX_BYTES = 128 * 1024
  */
 const KEY_ORDER: Record<MarkdownResourceKind, readonly string[]> = {
   command: ['description', 'argument-hint'],
-  agent: ['name', 'description', 'tools', 'model', 'modelProviderId', 'permissionMode', 'color']
+  agent: ['name', 'description', 'tools', 'model', 'modelProviderId', 'permissionMode', 'color'],
+  mode: ['name', 'description', 'tools', 'requiredTools']
 }
 
 export interface ResourceFileContent {

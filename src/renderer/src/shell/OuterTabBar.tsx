@@ -11,7 +11,7 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { ChevronDown, Folder, LoaderCircle, PanelBottom, PanelRight, Pin, PinOff, Plus, Server, X } from "lucide-react";
+import { ChevronDown, Folder, PanelBottom, PanelRight, Pin, PinOff, Plus, Server, X } from "lucide-react";
 import { isLocalEnvironment } from '../../../shared/domain/environment';
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { FeatureKind, OuterTab } from "../../../shared/domain/tab";
@@ -23,6 +23,7 @@ import { cn } from "../lib/cn";
 import { FEATURE_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
 import { useI18n, type Translate } from "../i18n";
+import { Spinner } from '../components/ui/Spinner'
 
 function featureLabel(t: Translate, feature: FeatureKind): string {
   return t(`view.feature.${feature}` as Parameters<Translate>[0]);
@@ -181,7 +182,7 @@ export function OuterTabBar({
             {tab.pinned === true && <Pin size={11} aria-hidden className="shrink-0 text-accent" />}
             <span className="min-w-0 flex-1 truncate">{label}</span>
             {running && (
-              <LoaderCircle size={11} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
+              <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
             )}
             <button
               type="button"

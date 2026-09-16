@@ -4,6 +4,7 @@ import { normalizeEnvironmentRef } from '../../shared/domain/environment'
 import type { ContextPreviewRequest } from '../../shared/ipc/contract'
 import { userMessage } from '../../shared/agent/message'
 import { agentRegistry } from '../kernel/agent/registry'
+import { modePromptFor, modeRegistry } from '../kernel/mode/registry'
 import { skillRegistry } from '../kernel/skill/registry'
 import { taskTool } from '../kernel/tool/builtin/task'
 import { ToolRegistry } from '../kernel/tool/registry'
@@ -160,9 +161,9 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
   }
 
   const alias = getRouter().resolveModel(req.model, req.modelProviderId)
+  const mode = modeRegistry().resolve(req.mode)
   const tools = registry.snapshot({
-    mode: req.mode,
-    readOnlyOnly: req.mode === 'plan',
+    ...(mode.tools === undefined ? {} : { allowList: mode.tools }),
     network: req.webSearch
   }).map(({ execute: _execute, ...info }) => info)
 
@@ -186,7 +187,8 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
     ...(store.getSettings().personalization !== undefined
       ? { personalization: store.getSettings().personalization }
       : {}),
-    mode: req.mode,
+    mode: mode.id,
+    modePrompt: modePromptFor(mode),
     thinking: req.thinking,
     model: req.model,
     ...(req.modelProviderId === undefined ? {} : { modelProviderId: req.modelProviderId }),

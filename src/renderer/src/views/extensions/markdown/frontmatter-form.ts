@@ -12,7 +12,8 @@ export type Frontmatter = Record<string, string | string[]>
 /** 表单直接管的键。不在这张表里的一律原样透传。 */
 export const FORM_KEYS: Record<MarkdownResourceKind, readonly string[]> = {
   command: ['description', 'argument-hint'],
-  agent: ['name', 'description', 'tools', 'model', 'permissionMode']
+  agent: ['name', 'description', 'tools', 'model', 'permissionMode'],
+  mode: ['name', 'description', 'tools', 'requiredTools']
 }
 
 export function readField(fm: Frontmatter, key: string): string {
@@ -56,5 +57,12 @@ export function setListField(fm: Frontmatter, key: string, value: readonly strin
 export function validate(kind: MarkdownResourceKind, fm: Frontmatter, body: string): string | null {
   if (body.trim() === '') return 'ext.error.emptyBody'
   if (kind === 'agent' && readField(fm, 'description').trim() === '') return 'ext.error.agentNeedsDescription'
+  if (kind === 'mode' && readField(fm, 'name').trim() === '') return 'ext.error.modeNeedsName'
+  if (kind === 'mode' && readField(fm, 'description').trim() === '') return 'ext.error.modeNeedsDescription'
+  if (kind === 'mode') {
+    const tools = new Set(readListField(fm, 'tools'))
+    const missing = readListField(fm, 'requiredTools').filter((tool) => !tools.has(tool))
+    if (missing.length > 0) return 'ext.error.modeRequiredTools'
+  }
   return null
 }

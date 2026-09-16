@@ -876,6 +876,37 @@ CREATE TABLE import_scan_cache (
 CREATE INDEX import_scan_cache_by_source ON import_scan_cache (source_id, scanned_at);
 `
 
+/**
+ * 第 22 条:本机账户配置隔离。
+ *
+ * `config_profiles` 存**每个作用域那一份配置的归档**:scope 是 `'local'`
+ * (未登录)或账户的**原始不可变 id**;`json` 是 `config-profile.ts` 定义的
+ * 快照(settings / providers+aliases / mcp / search / connections /
+ * scheduled tasks / kv 白名单)。切账户 = 归档当前、恢复目标,**在同一个事务里**。
+ *
+ * ★ 只有**配置**进这张表。会话、消息、运行记录、附件、用量一律留在原表 ——
+ *   它们是「这台机器上的数据」,不随账户切换搬家,也绝不能因为一次切换被删掉。
+ *   连 `sessions.workspace_id` 上的行都不动:切账户改的是**看得见哪些行**。
+ *
+ * ★ 为什么不复用 `sync_outbox` / kv:这份归档必须**在任何作用域下都能读**,
+ *   而 kv 里那些键本身就会随作用域被换掉 —— 用它存快照等于把梯子架在自己脚下。
+ *
+ * `workspaces.owner` 是第 2 件事:工作区**归属**。默认 `'local'` 同时是
+ * 这一列存在之前**所有已有行**的正确归属(那时的库里只有未登录这一种用法),
+ * 所以这条迁移不需要任何数据回填。列而不是新表,因为判据是「要不要被
+ * WHERE 读到」—— `listWorkspaces` 的每一条查询都要按它收窄。
+ */
+const V22_CONFIG_PROFILES = `
+CREATE TABLE config_profiles (
+  scope TEXT PRIMARY KEY,
+  json  TEXT NOT NULL
+);
+
+ALTER TABLE workspaces ADD COLUMN owner TEXT NOT NULL DEFAULT 'local';
+-- 每个作用域的首屏列表都按 owner + last_opened_at 取,收窄后行数已经很小
+CREATE INDEX workspaces_by_owner ON workspaces (owner, last_opened_at DESC);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -900,4 +931,5 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 19, name: 'plans-v2', sql: V19_PLANS_V2 }
   ,{ version: 20, name: 'usage-daily', sql: V20_USAGE_DAILY }
   ,{ version: 21, name: 'import-scan-cache', sql: V21_IMPORT_SCAN_CACHE }
+  ,{ version: 22, name: 'config-profiles', sql: V22_CONFIG_PROFILES }
 ]

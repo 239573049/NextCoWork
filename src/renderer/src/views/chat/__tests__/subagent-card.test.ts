@@ -35,6 +35,7 @@ function subagent(patch: Partial<SubagentState> = {}): SubagentState {
     status: 'running',
     description: '查配置读取处',
     subagentType: 'general-purpose',
+    color: 'blue',
     toolCalls: 7,
     toolErrors: 0,
     startedAt: Date.now() - 60_000,
@@ -127,6 +128,19 @@ describe('子代理卡片 · 不是抽屉', () => {
     await click(stop)
     // 第二个参数 true = 这是子 run,不要连父 run 一起收
     expect(abortRun).toHaveBeenCalledWith(CHILD_RUN, true)
+  })
+
+  it('运行卡片不再显示阶段和工具调用次数', async () => {
+    const { container } = await renderCard(subagent({ phase: 'starting', toolCalls: 7 }))
+    expect(container.textContent).not.toContain('启动中')
+    expect(container.textContent).not.toContain('7 次工具调用')
+  })
+
+  it('使用子代理配置的颜色标记卡片', async () => {
+    const { container } = await renderCard(subagent({ color: 'blue' }))
+    const card = container.querySelector('[data-testid="subagent-node"]') as HTMLElement | null
+    expect(card?.dataset.subagentColor).toBe('blue')
+    expect(card?.style.borderColor).not.toBe('')
   })
 
   it('跑完了就没有停止按钮 —— 没有可掐的东西', async () => {

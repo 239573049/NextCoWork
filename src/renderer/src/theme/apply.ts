@@ -40,7 +40,7 @@ const IMAGE_VAR = '--theme-image'
 const SOURCE_ATTR = 'imageSource'
 
 /**
- * 返回**这一次写下去的那 22 个值**。不是顺手加的:Windows/Linux 标题栏那三颗
+ * 返回**这一次写下去的那 23 个值**。不是顺手加的:Windows/Linux 标题栏那三颗
  * 系统按钮不是 DOM,颜色只能经 IPC 推给主进程,而调用点要拿到 `chrome` / `icon`
  * 就得再算一次 `tokensOf` —— 同一份输入算两遍,迟早有一遍的参数会漏掉更新
  * (`uploaded` 这一路尤其容易忘)。这里原样交出去,两边永远是同一个结果。
@@ -109,7 +109,7 @@ export function applyLegacyTheme(root: HTMLElement, appearance: ResolvedTheme, s
     if (value && key in tokens) tokens[key as keyof typeof tokens] = value
   }
 
-  // 22 个全写一遍,不做差量:上一次写的值总会被这一次盖掉,
+  // 23 个全写一遍,不做差量:上一次写的值总会被这一次盖掉,
   // 也就不存在「换主题之后还剩一个旧色」这种半截状态。
   for (const k of THEME_TOKENS) root.style.setProperty(`--color-${k}`, tokens[k])
 

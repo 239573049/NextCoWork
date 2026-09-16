@@ -24,7 +24,6 @@ import {
   FolderOpen,
   FolderPlus,
   ListCollapse,
-  Loader2,
   MoreHorizontal,
   MoveRight,
   Pencil,
@@ -55,6 +54,7 @@ import { flatten } from './flatten'
 import { useI18n, type TranslationKey } from '../../i18n'
 import { FileOperationDialog } from './FileOperationDialog'
 import { type FileOperationTarget } from './file-operations'
+import { Spinner } from '../../components/ui/Spinner'
 
 type Scope = 'conversation' | 'all'
 
@@ -487,7 +487,7 @@ function WorkspaceFilesView({
                   <FolderOpen size={14} />
                 </IconButton>
                 <IconButton label={t('common.refresh')} size={24} onClick={() => refresh()} disabled={loading.size > 0}>
-                  <RefreshCw size={14} className={cn(loading.size > 0 && 'animate-spin')} />
+                  <RefreshCw size={14} className={cn(loading.size > 0 && 'animate-spin motion-reduce:animate-none')} />
                 </IconButton>
               </>
             ))}
@@ -525,7 +525,7 @@ function WorkspaceFilesView({
       )}
       {loading.size > 0 && listings[rootPath] !== undefined && (
         <div role="status" className="flex items-center gap-1.5 px-3 py-1 text-[11.5px] text-fg-faint">
-          <Loader2 size={12} className="animate-spin" />
+          <Spinner size="xs" />
           {t('files.manage.refreshing')}
         </div>
       )}
@@ -651,7 +651,7 @@ function TreeRow({
     >
       {/* 占位一律画:没有它,文件名会比同级目录名左移 14px,一列名字就对不齐了 */}
       <span className="flex size-3.5 shrink-0 items-center justify-center text-fg-faint">
-        {loading ? <Loader2 size={12} className="animate-spin" /> : entry.kind === 'dir' && (
+        {loading ? <Spinner size="xs" /> : entry.kind === 'dir' && (
           <ChevronRight size={12} className={cn('transition-transform', expanded && 'rotate-90')} />
         )}
       </span>

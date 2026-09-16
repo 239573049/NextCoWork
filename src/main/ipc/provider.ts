@@ -192,7 +192,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function isAnthropicCacheTtl(value: unknown): value is AnthropicCacheTtl {
+function isAnthropicCacheTtl(value: unknown): value is AnthropicCacheTtl | 'off' {
+  // Accept legacy writes; mergeProtocolOptions normalizes `off` to 5m.
   return value === 'off' || value === '5m' || value === '1h'
 }
 

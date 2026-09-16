@@ -7,33 +7,12 @@
  */
 import type { ContentPart } from './message'
 import type { PermissionMode } from './permission'
-import type { ApprovedPlanExecution } from '../domain/plan'
-export type { PlanRef, ApprovedPlanExecution } from '../domain/plan'
+import type { ModeId } from '../domain/mode'
+import type { PlanExecutionRef } from '../domain/plan-file'
+export type { PlanExecutionRef, PlanFileRef } from '../domain/plan-file'
 
-/**
- * 界面 `/` 菜单:/plan 规划模式「先出方案,你确认后再执行」、
- * /goal 目标模式「持续推进,直到目标完成」。
- *
- * ★ 会话模式必须落在**工具层**,不能只靠提示词祈祷(方案 §4.8):
- * - plan → snapshot({ readOnlyOnly: true }) 过滤掉所有写工具 + 提示词追加 + 产出待确认方案
- * - goal → 提示词禁止「我做完了吗」式提前退出
- */
-export type SessionMode = 'normal' | 'plan' | 'goal'
-
-export const SESSION_MODES: readonly SessionMode[] = ['normal', 'plan', 'goal']
-
-/** 界面 `/` 斜杠菜单里的三项。`normal` 也列出来 —— 用户要有路退回默认。 */
-export const SESSION_MODE_LABEL: Record<SessionMode, string> = {
-  normal: '普通模式',
-  plan: '规划模式',
-  goal: '目标模式'
-}
-
-export const SESSION_MODE_HINT: Record<SessionMode, string> = {
-  normal: '边想边做',
-  plan: '先出方案,你确认后再执行',
-  goal: '持续推进,直到目标完成'
-}
+/** Stable id of a built-in or user-defined conversation mode. */
+export type SessionMode = ModeId
 
 /** 界面:自动/极低/低/中/高/超高/最高/关闭 */
 export type ThinkingLevel =
@@ -150,11 +129,8 @@ export interface RunRequest {
    * 而一个正在跑的子 run 仍然要能说出「我是谁」。名字是稳定的,对象不是。
    */
   agentType?: string
-  /** Approved durable plan snapshot this execution run is bound to. */
-  planId?: string
-  planVersion?: number
-  /** Structured approved plan reference for execution runs. */
-  approvedPlan?: ApprovedPlanExecution
+  /** Approved Markdown plan file injected by the main process for an execution run. */
+  planExecution?: PlanExecutionRef
 }
 
 /**
@@ -172,8 +148,6 @@ export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'in
  */
 /** @deprecated Runs are no longer stopped after a fixed number of turns. */
 export const MAX_TURNS = 25
-/** @deprecated Runs are no longer stopped after a fixed number of turns. */
-export const MAX_TURNS_GOAL = 60
 /** A run has no application-imposed turn limit. */
 export const UNLIMITED_TURNS = Number.POSITIVE_INFINITY
 /** 没有深度上限的子代理会指数级烧钱(方案 §4.9) */

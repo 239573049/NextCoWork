@@ -12,8 +12,8 @@ export function isUpstreamProtocol(value: unknown): value is UpstreamProtocol {
   return value === 'anthropic' || value === 'openai-chat' || value === 'openai-responses'
 }
 
-/** Anthropic prompt-cache lifetime configured per provider. */
-export type AnthropicCacheTtl = 'off' | '5m' | '1h'
+/** Anthropic prompt caching is mandatory; providers only choose its lifetime. */
+export type AnthropicCacheTtl = '5m' | '1h'
 
 /** Protocol-specific options are deliberately nested so future protocols can add their own fields. */
 export interface AnthropicProtocolOptions {
@@ -25,12 +25,11 @@ export interface ProviderProtocolOptions {
 }
 
 /**
- * Runtime boundary for provider JSON. Older exports and hand-edited records may
- * omit this field or contain an unknown value; those records must never
- * accidentally enable caching.
+ * Runtime boundary for provider JSON. Missing, legacy `off`, and unknown values
+ * use the mandatory 5-minute default; an explicit 1-hour lifetime is preserved.
  */
 export function normalizeAnthropicCacheTtl(value: unknown): AnthropicCacheTtl {
-  return value === '5m' || value === '1h' ? value : 'off'
+  return value === '1h' ? '1h' : '5m'
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -44,8 +43,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
  * fields belonging to protocols added in a later version.
  *
  * The IPC write path rejects an explicitly invalid TTL. This helper is for
- * older JSON/imports/direct storage reads, where the safe behavior is to keep
- * the record readable but make an unknown Anthropic value behave as `off`.
+ * older JSON/imports/direct storage reads, which keep the record readable and
+ * normalize legacy or unknown Anthropic values to the mandatory 5m default.
  */
 export function normalizeProviderProtocolOptions(value: unknown): ProviderProtocolOptions | undefined {
   const source = record(value)

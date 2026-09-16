@@ -43,6 +43,9 @@ function sub(o: Record<string, unknown> | undefined, k: string): Record<string, 
 const ERROR_BODY_SUMMARY_LIMIT = 4096
 const CACHE_FIELD_PATTERN =
   /cache[_ -]?control|cache[_ -]?breakpoint|(?:^|[^a-z0-9])(ephemeral|ttl)(?:$|[^a-z0-9])/i
+const REQUEST_ECHO_FIELDS = new Set([
+  'request', 'request_body', 'requestBody', 'input', 'messages', 'system', 'tools', 'body', 'payload'
+])
 
 function errorBodySummary(value: string): string {
   if (value.length <= ERROR_BODY_SUMMARY_LIMIT) return value
@@ -75,7 +78,7 @@ function errorBodySummary(value: string): string {
 function errorDetails(
   body: unknown,
   status: number
-): { message: string; kind: string; mentionsCacheField: boolean; raw: string } {
+): { message: string; kind: string; mentionsCacheField: boolean; raw: string; upstreamMessage: string } {
   const root = rec(body)
   const nested = sub(root, 'error')
   const nestedMessage = str(nested, 'message')
@@ -86,26 +89,26 @@ function errorDetails(
   let serialized = ''
   if (body !== null && typeof body === 'object') {
     try {
-      serialized = JSON.stringify(body)
+      // Relay/validator request echoes are not error evidence. Strip them at
+      // every depth before both classification and user-visible summaries.
+      serialized = JSON.stringify(body, (key: string, value: unknown) =>
+        REQUEST_ECHO_FIELDS.has(key) ? undefined : value
+      )
     } catch {
       // Error bodies normally come from JSON.parse and cannot be cyclic; keep
       // the structured message fallback if a custom relay violates that.
     }
   }
   const raw = errorBodySummary(text !== '' ? text : serialized)
-  const unboundedMessage =
-    nestedMessage ??
-    rootMessage ??
-    (errorText !== ''
-      ? errorText
-      : raw === ''
-        ? `上游返回 ${status}`
-        : `上游返回 ${status}: ${raw}`)
+  const suppliedMessage = nestedMessage ?? rootMessage ?? (errorText !== '' ? errorText : undefined)
+  const unboundedMessage = suppliedMessage ?? (raw === '' ? `上游返回 ${status}` : `上游返回 ${status}: ${raw}`)
   const message = errorBodySummary(unboundedMessage)
   const kind = str(nested, 'type') ?? str(root, 'type') ?? ''
   const mentionsCacheField = [message, kind, text, serialized]
     .some((value) => CACHE_FIELD_PATTERN.test(value))
-  return { message, kind, mentionsCacheField, raw }
+  // Localized cache errors supply their own surrounding copy in the renderer.
+  const upstreamMessage = errorBodySummary(suppliedMessage ?? raw)
+  return { message, kind, mentionsCacheField, raw, upstreamMessage }
 }
 
 /**
@@ -140,37 +143,38 @@ export function anthropicErrorToAgentError(
   body: unknown,
   options: { cacheTtl?: AnthropicCacheTtl; providerName?: string } = {}
 ): AgentError {
-  const { message, kind, mentionsCacheField, raw } = errorDetails(body, status)
+  const { message, kind, mentionsCacheField, raw, upstreamMessage } = errorDetails(body, status)
   const cacheTtl = normalizeAnthropicCacheTtl(options.cacheTtl)
 
-  if (
-    (status === 400 || status === 422) &&
-    cacheTtl !== 'off' &&
-    mentionsCacheField
-  ) {
-    const ttl = cacheTtl === '1h' ? '1 小时' : '5 分钟'
-    const provider = options.providerName === undefined ? '当前供应商' : `供应商「${options.providerName}」`
+  if ((status === 400 || status === 422) && mentionsCacheField) {
     // Some relays provide only an error type (for example
     // `cache_control_not_supported`) and omit `message`. Keep that raw type in
     // the actionable error so the user can identify the upstream limitation.
     const standardError =
-      kind !== '' && !message.toLowerCase().includes(kind.toLowerCase())
-        ? `${kind}: ${message}`
-        : message
+      kind !== '' && !upstreamMessage.toLowerCase().includes(kind.toLowerCase())
+        ? `${kind}: ${upstreamMessage}`
+        : upstreamMessage
     // A relay may put the useful cache rejection only in a non-standard
     // `details` object while returning a generic official-looking message.
-    // The full body participates in classification; include a bounded raw
-    // summary as well so the actionable error does not discard that evidence.
+    // Include a bounded summary with request echoes removed so the actionable
+    // error retains those diagnostics without repeating the user's request.
     const upstreamError =
       raw !== '' &&
       CACHE_FIELD_PATTERN.test(raw) &&
-      !CACHE_FIELD_PATTERN.test(`${message}\n${kind}`)
+      !CACHE_FIELD_PATTERN.test(`${upstreamMessage}\n${kind}`)
         ? `${standardError}; ${raw}`
         : standardError
     return agentError(
       'cache_unsupported',
-      `${provider}拒绝了 Anthropic ${ttl}提示缓存配置：${upstreamError}。请在供应商设置中关闭或调整提示缓存。`,
-      { status, retryable: false }
+      options.providerName === undefined ? upstreamError : `${options.providerName}: ${upstreamError}`,
+      {
+        status,
+        retryable: false,
+        messageKey: options.providerName === undefined
+          ? 'agent.error.cacheUnsupportedUnnamed'
+          : 'agent.error.cacheUnsupported',
+        messageParams: { provider: options.providerName ?? '', ttl: cacheTtl, detail: upstreamError }
+      }
     )
   }
 

@@ -19,7 +19,6 @@ import { runAgent } from '../runtime'
 import { store } from '../state/store'
 import { runTopic, windows, type WindowContext } from '../window/registry'
 import { updateService } from '../update/update-service'
-import { getPlanV2, transitionPlanV2 } from '../db/repo'
 
 /**
  * 16ms ≈ 一帧。方案 §8 给的是 16–33ms:再快没意义(渲染层反正等 rAF),
@@ -243,15 +242,6 @@ export function respondInteraction(response: InteractionResponse, ctx: WindowCon
   const pending = interactions.get(response?.id)
   if (pending === undefined || !windows.isSubscribed(runTopic(pending.runId), ctx.sender)) {
     throw new IpcError('unknown', 'Interaction is no longer pending in this window')
-  }
-  if (pending.kind === 'plan_approval' && 'action' in response) {
-    const current = pending.planId === undefined ? undefined : getPlanV2(pending.planId)
-    if (current === undefined || current.id !== response.planId || current.version !== response.version || current.lifecycle !== 'review') {
-      throw new IpcError('conflict', 'The plan changed before it was approved. Refresh the latest plan.')
-    }
-    if (!['approve_current', 'approve_new_session', 'request_revision', 'reject'].includes(response.action)
-      || (response.action === 'request_revision' && !response.feedback?.trim())) throw new IpcError('unknown', 'Invalid plan approval response')
-    transitionPlanV2(current.id, current.version, response.action === 'request_revision' ? 'draft' : response.action === 'reject' ? 'superseded' : 'approved')
   }
   interactions.respond(response)
 }

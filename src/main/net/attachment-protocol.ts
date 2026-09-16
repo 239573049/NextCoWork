@@ -39,6 +39,7 @@ import {
   mimeOfExt,
   parseNcwUrl
 } from '../../shared/domain/attachment'
+import { configProfileDirectory } from '../db/config-profile'
 
 /** 附件根。★ 必须与 `ipc/storage.ts` 的 `attachmentDirectory()` 是同一个目录 —— 清理扫的就是它 */
 export const ATTACHMENTS_DIR = 'attachments'
@@ -104,7 +105,25 @@ export function registerAttachmentScheme(): void {
 
 /** 在 `app.whenReady()` 之后调用 */
 export function installAttachmentProtocol(): void {
-  protocol.handle(NCW_SCHEME, (request) => handleAttachmentRequest(request, attachmentRoot()))
+  protocol.handle(NCW_SCHEME, (request) => handleAttachmentRequest(request, attachmentRootFor(request.url)))
+}
+
+/**
+ * 这次请求该落在哪个根上。
+ *
+ * ★ **只有主题图跟着配置作用域走。** 主题库是会跨账户泄漏的那一份
+ * (`index.json` 列着上一个账户传过的壁纸),所以账户作用域落
+ * `<attachments>/config-profiles/<hash>/themes`;`local` 落 `<attachments>`,
+ * 于是 `themes/<file>` 还是老位置。
+ *
+ * ★ 会话附件**必须**留在 `attachmentRoot()`:它们由 `ipc/storage.ts` 的
+ * 占用统计与孤儿清理按那个根扫描,换根等于让那些文件从统计里消失,
+ * 并且下一次清理会把它们当孤儿删掉。
+ */
+export function attachmentRootFor(rawUrl: string): string {
+  return parseNcwUrl(rawUrl)?.scope === 'theme'
+    ? configProfileDirectory(attachmentRoot())
+    : attachmentRoot()
 }
 
 export async function handleAttachmentRequest(

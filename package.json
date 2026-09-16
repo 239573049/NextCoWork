@@ -69,6 +69,7 @@
     "katex": "^0.16.47",
     "lucide-react": "^1.40.0",
     "mermaid": "^11.17.2",
+    "motion": "^13.3.0",
     "patch-package": "8.0.1",
     "radix-ui": "^1.6.7",
     "react": "^19.2.8",

@@ -104,6 +104,22 @@ describe('groupConsecutiveTools', () => {
     expect(groupConsecutiveTools(items).map((group) => group.length)).toEqual([1, 1, 1])
   })
 
+  it('starts a new group after a completed group instead of reopening it', () => {
+    reset()
+    const completed = [tool('Read'), tool('Bash')]
+    const running = tool('Grep', 'running')
+    const groups = groupConsecutiveTools([...completed, running], toolTable)
+    expect(groups.map((group) => group.map((item) => item.key))).toEqual([
+      completed.map((item) => item.key),
+      [running.key]
+    ])
+    expect(isCompletedToolGroup(groups[0]!, toolTable)).toBe(true)
+    expect(isCompletedToolGroup(groups[1]!, toolTable)).toBe(false)
+
+    toolTable[running.callId!].status = 'ok'
+    expect(groupConsecutiveTools([...completed, running], toolTable).map((group) => group.length)).toEqual([3])
+  })
+
   it('only collapses a multi-tool group after every call succeeds', () => {
     reset()
     const complete = groupConsecutiveTools([tool('Read'), tool('Bash')])[0]!

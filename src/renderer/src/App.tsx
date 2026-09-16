@@ -30,6 +30,7 @@ import { getClientAuthState, getClientUser } from './services/client-auth'
 import { WelcomeView } from './views/WelcomeView'
 import { ClientTeamSelectionView } from './views/ClientTeamSelectionView'
 import { UpdateBanner } from './components/UpdateBanner'
+import { ToastViewport } from './components/ui/ToastViewport'
 import { useThemeProfiles } from './stores/themeProfiles'
 
 export default function App(): React.JSX.Element {
@@ -237,6 +238,13 @@ export default function App(): React.JSX.Element {
         auth={auth}
       />
       <UpdateBanner />
+      {/*
+        ★ 只挂在这一个分支里,不跟着 `WindowControls` 铺到每个早退分支上。
+        上面那几个分支(握手失败、骨架屏、欢迎页、选 Team)都还没有可供操作的
+        界面 —— 没有操作就没有「操作的结果」要报。窗口按钮不一样,那是任何时候
+        都得能关窗。
+      */}
+      <ToastViewport />
     </>
   )
 }

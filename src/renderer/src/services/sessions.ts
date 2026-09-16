@@ -1,5 +1,6 @@
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../../shared/domain/session'
 import type { AgentMessage } from '../../../shared/agent/message'
+import type { SessionMode } from '../../../shared/agent/run-request'
 import { invoke } from './ipc'
 
 export function listSessions(workspaceId: string, archived?: boolean): Promise<SessionListItem[]> {
@@ -14,8 +15,17 @@ export function replaceHistory(sessionId: string, messages: AgentMessage[]): Pro
   return invoke('sessions:replaceHistory', { sessionId, messages })
 }
 
-export function createSession(workspaceId: string, title?: string, sessionId?: string): Promise<Session> {
-  return invoke('sessions:create', { workspaceId, ...(title === undefined ? {} : { title }), ...(sessionId === undefined ? {} : { sessionId }) })
+export function createSession(workspaceId: string, title?: string, sessionId?: string, mode?: SessionMode): Promise<Session> {
+  return invoke('sessions:create', {
+    workspaceId,
+    ...(title === undefined ? {} : { title }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(mode === undefined ? {} : { mode })
+  })
+}
+
+export function setSessionMode(sessionId: string, mode: SessionMode): Promise<void> {
+  return invoke('sessions:setMode', { sessionId, mode })
 }
 
 export function duplicateSession(sessionId: string, title: string): Promise<Session> {

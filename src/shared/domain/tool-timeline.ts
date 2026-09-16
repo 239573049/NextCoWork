@@ -103,11 +103,18 @@ export function groupItems(
 
 /** Group every adjacent tool call, including different tool shapes. Thinking and
  * prose stay boundaries so a run can be summarized as one compact process row. */
-export function groupConsecutiveTools(items: readonly TimelineItem[]): TimelineItem[][] {
+export function groupConsecutiveTools(
+  items: readonly TimelineItem[],
+  tools: Readonly<Record<string, ToolCallState>> = {}
+): TimelineItem[][] {
   const groups: TimelineItem[][] = []
   for (const item of items) {
     const previous = groups.at(-1)
-    if (item.kind === 'tool' && previous?.[0]?.kind === 'tool') previous.push(item)
+    const startsAfterCompleted = item.kind === 'tool'
+      && statusOfItem(item, tools) !== 'ok'
+      && previous !== undefined
+      && isCompletedToolGroup(previous, tools)
+    if (item.kind === 'tool' && previous?.[0]?.kind === 'tool' && !startsAfterCompleted) previous.push(item)
     else groups.push([item])
   }
   return groups

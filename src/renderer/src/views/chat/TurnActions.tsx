@@ -13,6 +13,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { Check, Copy, Download, RotateCcw, Trash2 } from 'lucide-react'
 import { formatDuration } from '../../../../shared/agent/duration'
 import { copyText, saveTextFile } from '../../services/app'
+import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 
@@ -49,21 +50,12 @@ export function TurnActions({
   onDelete?: (id: string) => Promise<void>
 }): ReactNode {
   const { t } = useI18n()
-  const [copy, setCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
-  const [exported, setExported] = useState<'idle' | 'done' | 'failed'>('idle')
+  const [copy, setCopy] = useTransientStatus()
+  const [exported, setExported] = useTransientStatus()
   const [confirm, setConfirm] = useState<'none' | 'regenerate' | 'delete'>('none')
 
-  useEffect(() => { setCopy('idle') }, [text])
-  useEffect(() => {
-    if (copy === 'idle') return
-    const timer = setTimeout(() => setCopy('idle'), 2200)
-    return () => clearTimeout(timer)
-  }, [copy])
-  useEffect(() => {
-    if (exported === 'idle') return
-    const timer = setTimeout(() => setExported('idle'), 2200)
-    return () => clearTimeout(timer)
-  }, [exported])
+  // 正文变了就撤掉「已复制」—— 那个钩子说的是上一份文本,留着会指错东西。
+  useEffect(() => { setCopy('idle') }, [text, setCopy])
   useEffect(() => {
     if (confirm === 'none') return
     const timer = setTimeout(() => setConfirm('none'), CONFIRM_TIMEOUT_MS)
@@ -87,19 +79,19 @@ export function TurnActions({
       data-testid="turn-actions"
     >
       {hasText && (
-        <ActionButton
-          label={t(copy === 'failed' ? 'chat.turn.copyFailed' : copy === 'copied' ? 'chat.turn.copied' : 'chat.turn.copy')}
+        <ActionIconButton
+          label={t(copy === 'failed' ? 'chat.turn.copyFailed' : copy === 'done' ? 'chat.turn.copied' : 'chat.turn.copy')}
           testId="turn-copy"
           onClick={() => {
-            void copyText(text).then(() => setCopy('copied')).catch(() => setCopy('failed'))
+            void copyText(text).then(() => setCopy('done')).catch(() => setCopy('failed'))
           }}
         >
-          {copy === 'copied' ? <Check size={13} /> : <Copy size={13} />}
-        </ActionButton>
+          {copy === 'done' ? <Check size={13} /> : <Copy size={13} />}
+        </ActionIconButton>
       )}
 
       {canRewrite && (
-        <ActionButton
+        <ActionIconButton
           label={confirm === 'regenerate' ? t('chat.turn.regenerateConfirm') : t('chat.turn.regenerate')}
           testId="turn-regenerate"
           text={confirm === 'regenerate' ? t('chat.turn.regenerateConfirm') : undefined}
@@ -111,11 +103,11 @@ export function TurnActions({
           }}
         >
           <RotateCcw size={13} />
-        </ActionButton>
+        </ActionIconButton>
       )}
 
       {hasText && (
-        <ActionButton
+        <ActionIconButton
           label={t(exported === 'failed' ? 'chat.turn.exportFailed' : exported === 'done' ? 'chat.turn.exported' : 'chat.turn.export')}
           testId="turn-export"
           onClick={() => {
@@ -126,11 +118,11 @@ export function TurnActions({
           }}
         >
           {exported === 'done' ? <Check size={13} /> : <Download size={13} />}
-        </ActionButton>
+        </ActionIconButton>
       )}
 
       {canRewrite && onDelete !== undefined && (
-        <ActionButton
+        <ActionIconButton
           label={confirm === 'delete' ? t('common.confirmDelete') : t('chat.turn.delete')}
           testId="turn-delete"
           text={confirm === 'delete' ? t('common.confirmDelete') : undefined}
@@ -142,7 +134,7 @@ export function TurnActions({
           }}
         >
           <Trash2 size={13} />
-        </ActionButton>
+        </ActionIconButton>
       )}
 
       {durationMs !== undefined && (
@@ -153,41 +145,6 @@ export function TurnActions({
       {usage !== undefined && <span className="ml-1.5 text-fg-faint/60">·</span>}
       {usage}
     </div>
-  )
-}
-
-function ActionButton({
-  children,
-  label,
-  text,
-  tone = 'plain',
-  testId,
-  onClick
-}: {
-  children: ReactNode
-  label: string
-  /** 给出文案就渲染成「图标 + 字」—— 确认态靠它把代价说出来。 */
-  text?: string
-  tone?: 'plain' | 'warn' | 'danger'
-  testId: string
-  onClick: () => void
-}): ReactNode {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      data-testid={testId}
-      onClick={onClick}
-      className={cn(
-        'flex items-center gap-1 rounded-[6px] p-1 transition-colors hover:bg-tint-hover',
-        text !== undefined && 'px-1.5',
-        tone === 'danger' ? 'text-danger' : tone === 'warn' ? 'text-fg' : 'hover:text-fg-muted'
-      )}
-    >
-      {children}
-      {text !== undefined && <span className="text-[11px]">{text}</span>}
-    </button>
   )
 }
 

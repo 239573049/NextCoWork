@@ -33,6 +33,7 @@ import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { cn } from '../../lib/cn'
 import { IS_MAC } from '../../lib/platform'
+import { SidebarReveal } from '../../shell/SidebarReveal'
 
 export function BrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
   const { t } = useI18n()
@@ -200,6 +201,7 @@ function LocalBrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
           !IS_MAC && 'pr-window-controls'
         )}
       >
+        <SidebarReveal />
         <IconButton
           label={t('browser.back')}
           size={28}

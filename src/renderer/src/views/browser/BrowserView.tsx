@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, ExternalLink, Globe, LoaderCircle, RotateCw, ShieldAlert } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ExternalLink, Globe, RotateCw, ShieldAlert } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
@@ -9,6 +9,7 @@ import { useI18n } from '../../i18n'
 import { useTabsStore } from '../../stores/tabs'
 import { IconButton } from '../../components/ui/IconButton'
 import { cn } from '../../lib/cn'
+import { Spinner } from '../../components/ui/Spinner'
 
 interface BrowserElement extends HTMLElement {
   loadURL?: (url: string) => Promise<void>
@@ -143,7 +144,7 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
           <ArrowRight size={14} />
         </IconButton>
         <IconButton label={t('browser.reload')} size={26} onClick={() => viewRef.current?.reload?.()}>
-          <RotateCw size={14} className={cn(loading && 'animate-spin')} />
+          <RotateCw size={14} className={cn(loading && 'animate-spin motion-reduce:animate-none')} />
         </IconButton>
         <form
           className="flex min-w-0 flex-1 items-center rounded-[8px] border border-hairline bg-surface px-2"
@@ -197,7 +198,7 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
         )}
         {loading && (
           <div className="pointer-events-none absolute right-3 top-3 rounded-pill bg-canvas/90 px-2 py-1 text-[11px] text-fg-muted shadow-sm">
-            <LoaderCircle size={12} className="mr-1 inline animate-spin" />
+            <Spinner size="xs" className="mr-1 inline" />
             {t('browser.loading')}
           </div>
         )}

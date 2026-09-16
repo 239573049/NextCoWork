@@ -14,7 +14,6 @@
  * 完整口径(含缓存与花费),比这里这个半截的累计值准。
  */
 import { useEffect, useState, type ReactNode } from 'react'
-import { LoaderCircle } from 'lucide-react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import { hasRun } from '../../../../shared/agent/transcript'
 import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
@@ -23,6 +22,7 @@ import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { whimsyEn, whimsyZh } from '../../i18n/agent'
 import type { Locale } from '../../i18n'
+import { Spinner } from '../../components/ui/Spinner'
 
 /**
  * 4 秒:比读完一个词慢得多,又比「一直不动」快得多。
@@ -118,7 +118,7 @@ export function StatusLine({
           色板里没有 warning 这一档,不为这一处新造一个 token。 */}
       <span role="status" className={cn('inline-flex items-center gap-1.5',
         noticeText !== undefined ? 'text-danger' : running && 'text-accent')}>
-        {running && <LoaderCircle size={12} aria-hidden className="animate-spin motion-reduce:animate-none" />}
+        {running && <Spinner size="xs" />}
         {noticeText ?? (running && (waitingForResponse || status === 'running') ? (
           /*
             ★ 读屏拿到的是那句**不动**的「正在等待回复…」/「运行中」,轮换的词 aria-hidden。
@@ -152,7 +152,7 @@ export function StatusLine({
             className={cn('inline-flex items-center gap-1.5',
               compaction.tone === 'danger' ? 'text-danger' : compaction.tone === 'accent' && 'text-accent')}
           >
-            {compaction.spinner && <LoaderCircle size={12} aria-hidden className="animate-spin motion-reduce:animate-none" />}
+            {compaction.spinner && <Spinner size="xs" />}
             {compaction.text}
           </span>
         </>
@@ -246,6 +246,13 @@ function compactionLine({
       }
     case 'fallback':
       return { text: t('chat.contextStatus.fallback'), tone: 'muted', spinner: false }
+    /*
+      ★ 用 danger 而不是 muted:这一句要求用户做一件事(开摘要压缩 / 换更大的窗口 /
+      另起会话),而机械压缩已经帮不上忙了。灰掉它等于把唯一一条可行动的提示
+      混进「已折叠较早的历史」那类事后播报里。
+    */
+    case 'exhausted':
+      return { text: t('chat.contextStatus.exhausted'), tone: 'danger', spinner: false }
     case 'error':
       return { text: t('chat.contextStatus.error'), tone: 'danger', spinner: false }
     default:

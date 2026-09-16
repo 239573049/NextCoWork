@@ -12,11 +12,9 @@ import {
   Download,
   FolderOpen,
   HardDrive,
-  Loader2,
   RefreshCw,
   Trash2,
-  Upload,
-} from "lucide-react";
+  Upload } from "lucide-react";
 import type {
   BackupFrequency,
   StorageStats,
@@ -40,6 +38,7 @@ import { useRunIndex } from "../../stores/session";
 import type { SettingsPageProps } from "../props";
 import { formatBytes, formatCount } from "../format";
 import { on } from "../../services/ipc";
+import { Spinner } from '../../components/ui/Spinner'
 
 type ModalState =
   | { kind: "export" }
@@ -611,7 +610,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
           className="flex items-center gap-1.5 px-1 pb-2 text-[11.5px] text-fg-muted"
           role="status"
         >
-          <Loader2 size={12} className="animate-spin" />
+          <Spinner size="xs" />
           {t("data.processing")}
         </p>
       )}
@@ -916,7 +915,7 @@ function ExportDialog({
             onClick={onExport}
             icon={
               busy ? (
-                <Loader2 size={13} className="animate-spin" />
+                <Spinner size="sm" />
               ) : (
                 <Download size={13} />
               )
@@ -1010,7 +1009,7 @@ function ImportDialog({
             onClick={onApply}
             icon={
               busy ? (
-                <Loader2 size={13} className="animate-spin" />
+                <Spinner size="sm" />
               ) : (
                 <Upload size={13} />
               )
@@ -1092,7 +1091,7 @@ function RestoreDialog({
             onClick={onApply}
             icon={
               busy ? (
-                <Loader2 size={13} className="animate-spin" />
+                <Spinner size="sm" />
               ) : (
                 <RefreshCw size={13} />
               )
@@ -1164,7 +1163,7 @@ function CleanupDialog({
             onClick={onApply}
             icon={
               busy ? (
-                <Loader2 size={13} className="animate-spin" />
+                <Spinner size="sm" />
               ) : (
                 <Trash2 size={13} />
               )
@@ -1182,7 +1181,7 @@ function CleanupDialog({
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
           {t("data.irreversible")}
           {preview.kind === "local-data"
-            ? t("data.localDataRetention")
+            ? `${t("data.localDataRetention")}${t("data.localDataDeferredHint")}`
             : t("data.historyRetention")}
         </div>
       )}

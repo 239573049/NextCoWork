@@ -1,4 +1,4 @@
-import { AlertTriangle, Loader2 } from 'lucide-react'
+import { AlertTriangle } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import type { WorkspaceFileMutationRequest } from '../../../../shared/domain/workspace-file'
@@ -8,6 +8,7 @@ import { TextInput } from '../../components/ui/TextInput'
 import { useI18n, type TranslationKey } from '../../i18n'
 import { useWindowStore } from '../../stores/window'
 import { operationRequest, type FileOperationTarget } from './file-operations'
+import { Spinner } from '../../components/ui/Spinner'
 
 export function FileOperationDialog({
   workspaceId,
@@ -93,7 +94,7 @@ export function FileOperationDialog({
             variant={isDelete ? 'danger' : 'accent'}
             onClick={submit}
             disabled={busy || (!isDelete && value.trim() === '')}
-            icon={busy ? <Loader2 size={13} className="animate-spin" /> : undefined}
+            icon={busy ? <Spinner size="sm" /> : undefined}
           >
             {t(busy ? 'files.manage.working' : actionKeys[target.operation])}
           </Button>

@@ -12,12 +12,13 @@ export type OuterTab =
   | { id: string; kind: 'workspace'; ref: { workspaceId: string }; /** Keep this tab at the start of the tab strip. */ pinned?: boolean }
   | { id: string; kind: 'feature'; ref: { feature: FeatureKind }; /** Keep this tab at the start of the tab strip. */ pinned?: boolean }
 
-export type FeatureKind = 'scheduled' | 'extensions' | 'browser' | 'review' | 'settings'
+export type FeatureKind = 'scheduled' | 'extensions' | 'browser' | 'git' | 'review' | 'settings'
 
 export const FEATURE_LABEL: Record<FeatureKind, string> = {
   scheduled: '定时任务',
   extensions: '扩展',
   browser: '浏览器',
+  git: 'Git',
   review: '每日回顾',
   settings: '设置'
 }

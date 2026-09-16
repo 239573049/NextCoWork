@@ -43,7 +43,6 @@ import {
   uploadAttachment
 } from './attachment'
 import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
-import * as plans from './plans'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getEnvironments } from '../runtime'
@@ -115,10 +114,25 @@ import { getClientAuthState, startClientLogin, selectClientTeam, useOffline, sig
 import { confirmInitialConfigSync, getConfigSyncPreview, getConfigSyncStatus, getConfigSyncConflicts, resolveConfigSyncConflict } from './config-sync'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
+import {
+  checkoutGitBranch,
+  commitGit,
+  createGitBranch,
+  generateGitCommitMessage,
+  getGitDiff,
+  getGitOverview,
+  listGitBranches,
+  listGitCommits,
+  pullGit,
+  pushGit,
+  stageGitPaths,
+  unstageGitPaths
+} from './git'
 import { updateService } from '../update/update-service'
 import { installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
 import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } from './commands'
 import { agentDiagnostics, generateAgent, listAgents, setAgentEnabled } from './agents'
+import { listModes } from './modes'
 import { deleteResource, getResource, saveResource } from './markdown-resource'
 import { deleteHook, hookDiagnostics, listHooks, saveHook, setHookEnabledIpc, testHookIpc } from './hooks'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
@@ -142,7 +156,8 @@ import {
   replaceHistory,
   searchAll,
   setArchived,
-  setFavorited
+  setFavorited,
+  setMode
 } from './sessions'
 import {
   chooseBackupDirectory,
@@ -306,6 +321,18 @@ const handlers: HandlerMap = {
     if (profile.isDefault) throw new Error('默认浏览器不能清除登录态')
     return clearBrowserProfileState(workspaceId, profileId)
   },
+  'git:getOverview': (req) => getGitOverview(req),
+  'git:listBranches': (req) => listGitBranches(req),
+  'git:listCommits': (req) => listGitCommits(req),
+  'git:getDiff': (req) => getGitDiff(req),
+  'git:stage': (req) => stageGitPaths(req),
+  'git:unstage': (req) => unstageGitPaths(req),
+  'git:commit': (req) => commitGit(req),
+  'git:checkoutBranch': (req) => checkoutGitBranch(req),
+  'git:createBranch': (req) => createGitBranch(req),
+  'git:pull': (req) => pullGit(req),
+  'git:push': (req) => pushGit(req),
+  'git:generateCommitMessage': (req) => generateGitCommitMessage(req),
   'scheduled:listTasks': ({ workspaceId }) => store.listScheduledTasks(workspaceId),
   'scheduled:getTask': ({ id }) => store.getScheduledTask(id) ?? null,
   'scheduled:create': (input) => {
@@ -365,6 +392,7 @@ const handlers: HandlerMap = {
   'sessions:create': (req) => createSession(req),
   'sessions:duplicate': (req) => duplicateSession(req),
   'sessions:rename': (req) => renameSession(req),
+  'sessions:setMode': (req) => setMode(req),
   'sessions:setArchived': (req) => setArchived(req),
   'sessions:setFavorited': (req) => setFavorited(req),
   'sessions:delete': (req) => deleteSession(req),
@@ -415,17 +443,6 @@ const handlers: HandlerMap = {
     if (store.getWorkspace(workspaceId) === undefined) throw new Error('Workspace does not exist')
     return getTools().info()
   },
-  'plans:list': plans.list,
-  'plans:get': plans.get,
-  'plans:update': plans.update,
-  'plans:submit': plans.submit,
-  'plans:v2:list': plans.listV2,
-  'plans:v2:get': plans.getV2,
-  'plans:v2:put': plans.putV2,
-  'plans:v2:submit': plans.submitV2,
-  'plans:v2:transition': plans.transitionV2,
-  'plans:v2:progress': plans.progressV2,
-
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
   'terminal:prepare': (req, ctx) => terminalHost.prepare(req, ctx.sender),
@@ -479,6 +496,7 @@ const handlers: HandlerMap = {
   'agents:diagnostics': (req) => agentDiagnostics(req),
   'agents:setEnabled': (req) => setAgentEnabled(req),
   'agents:generate': (req) => generateAgent(req),
+  'modes:list': (req) => listModes(req),
   'resource:get': (req) => getResource(req),
   'resource:save': (req) => saveResource(req),
   'resource:delete': (req) => deleteResource(req),

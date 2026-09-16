@@ -37,7 +37,7 @@ beforeEach(() => {
   resetRuntimeForTest()
   // 内存 secrets + 一律 404 的 fetch:这几条路径一步都不该出网。
   installHost(nodeHost({
-    paths: { userData: () => join(dir, 'userData'), temp: () => tmpdir() },
+    paths: { userData: () => join(dir, 'userData'), attachments: () => join(dir, 'attachments'), temp: () => tmpdir() },
     fetch: () => Promise.resolve(new Response('{}', { status: 404 }))
   }))
 })

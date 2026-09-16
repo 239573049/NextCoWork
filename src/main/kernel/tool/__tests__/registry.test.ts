@@ -142,11 +142,6 @@ describe('ToolRegistry · snapshot', () => {
     return r
   }
 
-  /** ★ plan 模式的**真正实现**:过滤掉写工具,而不是在提示词里祈祷(方案 §4.8) */
-  it('readOnlyOnly 过滤掉所有写工具', () => {
-    expect(seeded().snapshot({ readOnlyOnly: true }).map((t) => t.internalId)).toEqual(['read'])
-  })
-
   /**
    * Composer 上那颗「联网搜索」药丸的落点。三条用例分别钉三件不同的事:
    *
@@ -186,9 +181,8 @@ describe('ToolRegistry · snapshot', () => {
     ).toContain('WebFetch')
   })
 
-  /** 两个过滤器是**与**的关系:plan 模式下一个只读的联网工具仍然要被联网闸拦住 */
-  it('readOnlyOnly 与 network 同时生效', () => {
-    expect(withNet().snapshot({ readOnlyOnly: true, network: false }).map((t) => t.internalId)).toEqual([
+  it('allowList 与 network 同时生效', () => {
+    expect(withNet().snapshot({ allowList: ['read', 'WebFetch'], network: false }).map((t) => t.internalId)).toEqual([
       'read'
     ])
   })
@@ -212,10 +206,6 @@ describe('ToolRegistry · snapshot', () => {
 
   it('空 allowList 意味着一个都不给', () => {
     expect(seeded().snapshot({ allowList: [] })).toEqual([])
-  })
-
-  it('两个过滤条件是与关系', () => {
-    expect(seeded().snapshot({ readOnlyOnly: true, allowList: ['write'] })).toEqual([])
   })
 
   /**
@@ -262,7 +252,7 @@ describe('ToolRegistry · 解析与 info', () => {
     const r = new ToolRegistry()
     r.register(reg({ internalId: 'read', readOnly: true }))
     r.register(reg({ internalId: 'write', readOnly: false }))
-    expect(r.info({ readOnlyOnly: true }).map((t) => t.internalId)).toEqual(['read'])
+    expect(r.info({ allowList: ['read'] }).map((t) => t.internalId)).toEqual(['read'])
   })
 
   it('execute 拿到的是注册时给的那个函数与 ctx', async () => {

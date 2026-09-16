@@ -57,6 +57,7 @@ const TINT_TOKENS = [
   'tint-strong',
   'surface-field',
   'border',
+  'stroke',
   'fg',
   'fg-muted',
   'fg-faint'
@@ -106,9 +107,9 @@ const isGrey = (hex: string): boolean => {
 // ─────────────────────────────────────────────────────────────
 
 describe('token 名单', () => {
-  it('22 个,四个角色不重不漏', () => {
+  it('23 个,四个角色不重不漏', () => {
     const named = [...NEUTRAL_TOKENS, ...TINT_TOKENS, ...SPEC_TOKENS, 'danger']
-    expect(THEME_TOKENS).toHaveLength(22)
+    expect(THEME_TOKENS).toHaveLength(23)
     expect([...named].sort()).toEqual([...THEME_TOKENS].sort())
   })
 

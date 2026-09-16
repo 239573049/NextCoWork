@@ -45,6 +45,7 @@ import { FeatureView } from "../views/registry";
 import { BrowserFeature } from "../views/browser/BrowserFeature";
 import { OuterTabBar } from "./OuterTabBar";
 import { Sidebar } from "./Sidebar";
+import { SearchPalette } from "./SearchPalette";
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents';
 import { DocumentDialogs } from '../views/files/DocumentDialogs';
 import { DockRoot } from './Dock';
@@ -147,6 +148,7 @@ export function AppShell({
   };
   const [sessionItems, setSessionItems] = useState<SessionListItem[]>([]);
   const [createSshOpen, setCreateSshOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
     if (activeWorkspaceId === null) {
@@ -257,6 +259,24 @@ export function AppShell({
       && current.activeStandaloneFeature === null ? activeWorkspaceId : null;
   };
 
+  /**
+   * 带我去某段会话 —— Sidebar 的会话列表和 SearchPalette 的搜索结果共用这一份逻辑
+   * (原来是内联在 `onSelectSession` 里的,现在两处都要调,拆出来)。
+   */
+  const selectSession = async (sessionId: string): Promise<void> => {
+    const target = await revealWorkspace();
+    if (target === null) return;
+    const currentTabs = useTabsStore.getState();
+    const t = currentTabs.stateOf(target).tabs.find(
+      (x) => x.kind === "chat" && x.ref.sessionId === sessionId,
+    );
+    if (t !== undefined) currentTabs.activate(target, t.id);
+    else {
+      const item = sessionItems.find((x) => x.id === sessionId);
+      currentTabs.openSession(target, sessionId, item?.title);
+    }
+  };
+
   const pickLocalWorkspace = async (): Promise<void> => {
     const selected = await pickWorkspace();
     if (!selected) return;
@@ -326,23 +346,12 @@ export function AppShell({
               if (target !== null) useTabsStore.getState().newChat(target);
             }}
             onSearch={() => {
-              /* 步骤 14:cmdk 命令面板 */
+              if (activeWorkspaceId === null) return;
+              setSearchOpen(true);
             }}
             onOpenFeature={win.openFeature}
             onOpenSettings={() => win.openSettings()}
-            onSelectSession={async (sessionId) => {
-              const target = await revealWorkspace();
-              if (target === null) return;
-              const currentTabs = useTabsStore.getState();
-              const t = currentTabs.stateOf(target).tabs.find(
-                (x) => x.kind === "chat" && x.ref.sessionId === sessionId,
-              );
-              if (t !== undefined) currentTabs.activate(target, t.id);
-              else {
-                const item = sessionItems.find((x) => x.id === sessionId);
-                currentTabs.openSession(target, sessionId, item?.title);
-              }
-            }}
+            onSelectSession={selectSession}
             onDeleteSession={deleteSession}
             onCollapse={win.toggleSidebar}
           />
@@ -356,6 +365,8 @@ export function AppShell({
           <BrowserFeature onClose={win.closeStandaloneFeature} />
         ) : activeStandaloneFeature === "extensions" ? (
           <FeatureView feature="extensions" onClose={win.closeStandaloneFeature} />
+        ) : activeStandaloneFeature === "git" ? (
+          <FeatureView feature="git" onClose={win.closeStandaloneFeature} />
         ) : (
           <>
             {/*
@@ -465,6 +476,13 @@ export function AppShell({
         return state.openWorkspace(created.id);
       }} />}
       <DocumentDialogs />
+
+      <SearchPalette
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        workspaceId={activeWorkspaceId}
+        onSelectSession={(sessionId) => { void selectSession(sessionId); }}
+      />
 
       {/*
         ★ 渲染在根 div **之内**,不 portal —— 见 SettingsOverlay 文件头:

@@ -88,6 +88,22 @@ export function isAgentColor(value: string): value is AgentColor {
   return (AGENT_COLORS as readonly string[]).includes(value)
 }
 
+/** 固定色值同时用于扩展列表和运行中的子代理卡片。 */
+export const AGENT_COLOR_HEX: Record<AgentColor, string> = {
+  yellow: '#e0a300',
+  red: '#e5484d',
+  orange: '#f76b15',
+  green: '#30a46c',
+  cyan: '#00a2c7',
+  blue: '#3e63dd',
+  purple: '#8e4ec6',
+  pink: '#d6409f'
+}
+
+export function agentColorHex(color: string | undefined): string | undefined {
+  return color !== undefined && isAgentColor(color) ? AGENT_COLOR_HEX[color] : undefined
+}
+
 /**
  * 表单里能勾的工具。
  *

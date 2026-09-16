@@ -31,16 +31,17 @@ import {
   validateModelRuntime
 } from '../../shared/domain/model-runtime'
 import type { Skill } from '../../shared/domain/skill'
-import type { PlanDocumentV2 } from '../../shared/domain/plan'
+import type { PlanExecutionContext } from './plan-execution'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
 import { ulid } from '../../shared/util/id'
 import { abortable, abortableSleep, abortableStream, isAbortError } from './abort'
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
-import { compactMessages, compactionBoundary, compactionNote, withSummary } from './context-assembler'
+import { compactMessages, compactionBoundary, compactionNote, tokenCalibration, withSummary } from './context-assembler'
 import type { ContextCheckpoint } from '../../shared/agent/context-management'
 import { effectiveContextWindow } from '../../shared/agent/context-management'
+import { promptTokensOf } from '../../shared/agent/transcript'
 import type {
   ContextManagementSettings,
   PersonalizationSettings
@@ -133,7 +134,11 @@ export interface SessionDeps {
    * `snapshot()` 结构上只过滤、不新增,所以这个清单**永远不可能提权**:
    * 写一个不存在的名字进去,结果是少一个工具,不是多一个。
    */
-  allowedTools?: readonly string[]
+  allowedTools?: readonly string[] | (() => readonly string[] | undefined)
+  /** Dynamic path fence used by file-backed Plan mode. */
+  writeFileRestriction?: () => string | undefined
+  /** Resolved built-in or custom mode instructions. */
+  modePrompt?: string
   /**
    * 子代理的角色提示词。★ **追加**在 `BASE_PROMPT` 之后,不替换它 ——
    * 换掉基础提示词的子代理会丢掉「被拒绝时不要试图绕开」那一类约束,
@@ -154,7 +159,7 @@ export interface SessionDeps {
    * 重破一次 prompt cache(理由同 `SystemPromptInput` 里 `permissionMode` 那段)。
    */
   personalization?: PersonalizationSettings
-  approvedPlan?: PlanDocumentV2
+  planExecution?: PlanExecutionContext
   contextManagement?: ContextManagementSettings
   contextCheckpoints?: readonly ContextCheckpoint[]
   saveContextCheckpoint?: (checkpoint: ContextCheckpoint) => void
@@ -169,6 +174,21 @@ export interface SessionDeps {
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
 const FALLBACK_MAX_OUTPUT = 8192
+
+/**
+ * 一次机械压缩至少要削掉这个比例,才算「压缩生效了」。
+ *
+ * ★ 不用「有没有变化」当判据。`compactMessages` 每一轮都会把新落进折叠区的那一两条
+ * 削掉几十个 token,于是「变化了」恒为真,而占用照样一路涨到窗口之外 ——
+ * 那正是用户看到的症状。5% 是「这一刀还值得再挥一次」的下限:削不到 5%,
+ * 说明大头在保留区(最近 6 条)或纯正文里,再压一百轮也是同一个结果。
+ */
+const MIN_EFFECTIVE_COMPACTION = 0.05
+
+function isEffectiveCompaction(before: number, after: number): boolean {
+  if (before <= 0) return false
+  return (before - after) / before >= MIN_EFFECTIVE_COMPACTION
+}
 
 /**
  * 断流之后自己续跑几次,每次之前等多久。
@@ -247,7 +267,31 @@ export class AgentSession {
    * 后续机械压缩会拿到更大的号、正确地另起一条。
    */
   private mechanicalWindowIndex: number | undefined
-  private stopAfterPlanApproval = false
+  /**
+   * 上一次真的发出去的那份请求,`assemble` 当时估了多少 —— 校准系数的分母。
+   *
+   * ★ 必须在**压缩之后、streamOnce 之前**记下:压缩会把请求整个换掉,
+   * 记压缩前那份的话,分母是一份从没发出去的历史,而分子是压缩后的真值,
+   * 算出来的系数会把判据往「永远不用压」的方向拉。
+   */
+  private lastEstimatedInputTokens: number | undefined
+  /**
+   * 上游最近一次报回来的真实提示词大小(`promptTokensOf`,含缓存读写)——
+   * 校准系数的分子。见 `tokenCalibration`。
+   */
+  private lastReportedInputTokens: number | undefined
+  /**
+   * 机械压缩已经榨不出东西了。
+   *
+   * ★ 它不是「压缩失败」。机械压缩只清空**倒数第 6 条之前**的 `tool_result` /
+   * `thinking` / `image`(见 `compactMessages`),一段以长正文为主、或者早就压过一遍的
+   * 历史,再压一次只会原地打转:每轮重建一次投影、重写一次检查点、重发一次状态,
+   * 而 `used` 一个 token 都不降。置位之后这一轮的自动压缩整个跳过,
+   * 并且**告诉用户**(`ContextStatus.phase === 'exhausted'`)—— 此时唯一有用的动作
+   * 在用户那边(开摘要压缩、换更大的窗口、或者另起一个会话),不在我们这边。
+   */
+  private mechanicalCompactionExhausted = false
+  private stopAfterTool = false
   /** 断流续跑的退避表。见 `RESUME_DELAYS_MS` 与 `canResume`。 */
   private readonly resumeDelays: readonly number[]
 
@@ -366,7 +410,7 @@ export class AgentSession {
       const outcome = await this.turn()
       if (outcome === null) return // 这一轮已经把 run 收尾了
       await this.executeAll(outcome.calls, outcome.tools)
-      if (this.stopAfterPlanApproval) {
+      if (this.stopAfterTool) {
         this.handle.finish('done')
         return
       }
@@ -419,17 +463,11 @@ export class AgentSession {
      * 工具列表,和稍后按名字找回工具 —— 必须是同一份,否则会出现
      * 「下发的列表里有,执行时却找不到」的错位。
      */
+    const allowedTools = typeof this.deps.allowedTools === 'function'
+      ? this.deps.allowedTools()
+      : this.deps.allowedTools
     const available = this.deps.tools.snapshot({
-      mode: this.req.mode,
-      // ★ plan 模式的**真正实现**:过滤掉写工具,而不是在提示词里祈祷(§4.8)
-      readOnlyOnly: this.req.mode === 'plan',
-      /*
-        子代理定义文件里的 `tools:`。★ 和上面那行是**两个不同的问题**,
-        所以是两个字段而不是一个合并后的清单:`readOnlyOnly` 是模式的定义
-        (plan 就是不写盘),`allowList` 是这个子代理被授予了什么。
-        两个都在时取交集 —— 一个 plan 模式下的子代理仍然只能读。
-      */
-      ...(this.deps.allowedTools !== undefined ? { allowList: this.deps.allowedTools } : {}),
+      ...(allowedTools !== undefined ? { allowList: allowedTools } : {}),
       /*
         ★ Composer 上那颗「联网搜索」药丸第一次真的控制住东西的地方。
         关掉时联网工具连下发都不下发,模型不会先白跑一轮再被拒。
@@ -458,6 +496,7 @@ export class AgentSession {
       messages: this.contextMessages,
       tools: infos,
       skills: this.deps.skills ?? [],
+      ...(this.deps.modePrompt !== undefined ? { modePrompt: this.deps.modePrompt } : {}),
       ...(this.deps.agentPrompt !== undefined ? { agentPrompt: this.deps.agentPrompt } : {}),
       ...(this.deps.personalization !== undefined
         ? { personalization: this.deps.personalization }
@@ -473,7 +512,7 @@ export class AgentSession {
       permissionMode: this.req.permissionMode,
       webSearch: this.req.webSearch,
       reminder: {
-        ...(this.deps.approvedPlan !== undefined ? { approvedPlan: this.deps.approvedPlan } : {}),
+        ...(this.deps.planExecution !== undefined ? { planExecution: this.deps.planExecution } : {}),
         ...(this.deps.projectInstructions !== undefined
           ? { projectInstructions: this.deps.projectInstructions }
           : {}),
@@ -497,12 +536,18 @@ export class AgentSession {
       maxOutputTokens: alias?.maxOutputTokens ?? FALLBACK_MAX_OUTPUT,
       supportsThinking: alias?.capabilities.thinking ?? false,
       reasoningEfforts: alias?.reasoningEfforts,
-      ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {})
+      ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {}),
+      /*
+        ★ 上一轮真值 ÷ 上一轮估算。没有真值时它是 1,判据逐字退回纯估算。
+        见 `context-assembler.ts` 的 `tokenCalibration`:圆环读上游真值、
+        判据读本地估算,两个数从不对账,正是「超了 200K 也不压缩」的病因。
+      */
+      tokenCalibration: this.tokenCalibration()
     }
-    let { request, usage } = assemble(assembleInput)
+    let { request, usage, calibratedInputTokens } = assemble(assembleInput)
 
     const contextSettings = this.deps.contextManagement
-    if (usage.shouldCompact && contextSettings?.autoCompact === true) {
+    if (usage.shouldCompact && contextSettings?.autoCompact === true && !this.mechanicalCompactionExhausted) {
       const checkpoint = contextSettings.experimentalMode === true
         ? await (async () => {
           this.handle.emit({ type: 'context_status', status: { phase: 'preparing', windowIndex: this.contextWindowIndex + 1 } })
@@ -519,10 +564,12 @@ export class AgentSession {
         this.contextWindowIndex = checkpoint.windowIndex
         // 摘要压缩另起了一个窗口,上一段机械压缩期到此为止。
         this.mechanicalWindowIndex = undefined
+        // 摘要换掉了整段基线 —— 机械压缩「榨干了」这个判断随之作废。
+        this.mechanicalCompactionExhausted = false
         const compacted = compactMessages(this.messages)
         const projected = withSummary(compacted, checkpoint.note, checkpoint.id, this.deps.host.clock.now())
         this.contextMessages = [...projected]
-        ;({ request, usage } = assemble({ ...assembleInput, messages: projected }))
+        ;({ request, usage, calibratedInputTokens } = assemble({ ...assembleInput, messages: projected }))
         const finalized = { ...checkpoint, inputTokensAfter: usage.used, updatedAt: this.deps.host.clock.now() }
         this.deps.saveContextCheckpoint?.(finalized)
         this.handle.emit({ type: 'context_checkpoint', checkpoint: finalized })
@@ -534,14 +581,28 @@ export class AgentSession {
           下一步很可能就是 400。以前两者都报 `fallback`,用户分不出来。
         */
         const wantsSummary = contextSettings.experimentalMode === true
-        this.handle.emit({
-          type: 'context_status',
-          status: { phase: wantsSummary ? 'error' : 'fallback', windowIndex: this.contextWindowIndex }
-        })
         const before = usage.used
         const projected = compactMessages(this.messages)
         this.contextMessages = [...projected]
-        ;({ request, usage } = assemble({ ...assembleInput, messages: projected }))
+        ;({ request, usage, calibratedInputTokens } = assemble({ ...assembleInput, messages: projected }))
+        /*
+          ★ 状态在**压完之后**才发,因为「压了没用」是第三种结局,压之前判不出来。
+          发早了的话,榨干那一轮用户先看到一句「已折叠较早的历史」,再看着占用
+          一动不动 —— 而他真正需要知道的是「机械压缩到此为止,接下来得你来动手」。
+
+          ★ `wantsSummary` 时**不置位**:那条路上这一轮的失败是摘要请求失败
+          (上游抖一下就会),下一轮完全可能成功。为一次网络错误把整个 run 的
+          自动压缩永久关掉,比不压缩更糟。
+        */
+        const exhausted = !wantsSummary && !isEffectiveCompaction(before, usage.used)
+        this.mechanicalCompactionExhausted = exhausted
+        this.handle.emit({
+          type: 'context_status',
+          status: {
+            phase: wantsSummary ? 'error' : exhausted ? 'exhausted' : 'fallback',
+            windowIndex: this.contextWindowIndex
+          }
+        })
         this.recordMechanicalCompaction(before, usage.used)
       }
     }
@@ -554,7 +615,12 @@ export class AgentSession {
       const contextIssue = validateModelRuntime({
         alias,
         messages: request.messages,
-        estimatedInputTokens: usage.used
+        /*
+          ★ 和 `shouldCompact` 读同一个数(校准后的),不是原始估算。
+          两边口径不同的话会出现「判据说该压了、硬校验却说还早」,
+          而这条硬校验是 400 之前最后一道拦网 —— 它偏低就等于不存在。
+        */
+        estimatedInputTokens: calibratedInputTokens
       }).find((issue) => issue.code === 'context_length')
       if (contextIssue !== undefined) {
         this.handle.finish(
@@ -569,6 +635,8 @@ export class AgentSession {
       ★ 断流自动续跑。请求体本身(`assemble` / `context_usage`)留在循环**外面** ——
       两次尝试之间消息一字没变,重新组装是白做功,还会重复发一条压力条事件。
     */
+    // 校准系数的分母:**这一份**(可能已被压缩替换过的)请求当时估了多少。
+    this.lastEstimatedInputTokens = usage.used
     let attempt = await this.streamOnce(request)
     for (let resume = 0; ; resume++) {
       const failure = attempt.streamError
@@ -658,6 +726,13 @@ export class AgentSession {
       if (ev.type === 'message_end') {
         stopReason = ev.stopReason
         ended = true
+        /*
+          ★ 上游真值在这里、也只在这里进得来 —— 这一跳就是「圆环读真值、判据读估算」
+          那条裂缝的补丁。`promptTokensOf` 而不是 `usage.inputTokens`:缓存读写同样
+          占着窗口,Anthropic 的 `input_tokens` 不含它们(与转录里 `lastInputTokens`
+          同一个理由,也必须是同一个口径 —— 界面上写着 211K 的正是那个数)。
+        */
+        this.lastReportedInputTokens = promptTokensOf(ev.usage)
       }
       // 路由器把总失败表达成一个**终止事件**而不是异常(见 router.stream),
       // 所以这里是正常的循环出口,不是 catch。
@@ -700,6 +775,16 @@ export class AgentSession {
     return err.code === 'network'
       && resume < this.resumeDelays.length
       && !this.handle.signal.aborted
+  }
+
+  /**
+   * 这一轮的校准系数 —— 上一轮上游真值 ÷ 上一轮本地估算,夹在 [1, 3]。
+   *
+   * ★ 一次请求都还没完成时返回 1,判据逐字退回纯估算(即改这版之前的行为)。
+   * 规则本身在 `context-assembler.ts` 的 `tokenCalibration` 里,这里只负责取两个数。
+   */
+  private tokenCalibration(): number {
+    return tokenCalibration(this.lastEstimatedInputTokens ?? 0, this.lastReportedInputTokens ?? 0)
   }
 
   /**
@@ -938,7 +1023,7 @@ export class AgentSession {
     }
 
     this.handle.emit({ type: 'tool_end', callId, output: finalOutput, isError: finalIsError })
-    if (result.stopRun === true && !finalIsError) this.stopAfterPlanApproval = true
+    if (result.stopRun === true && !finalIsError) this.stopAfterTool = true
     return {
       type: 'tool_result',
       callId,
@@ -949,6 +1034,7 @@ export class AgentSession {
   }
 
   private toolContext(callId: string): ToolContext {
+    const writeFileRestriction = this.deps.writeFileRestriction?.()
     return {
       sessionId: this.req.sessionId,
       workspaceId: this.req.workspaceId,
@@ -959,6 +1045,7 @@ export class AgentSession {
       depth: this.req.depth,
       callId,
       runId: this.req.runId,
+      ...(writeFileRestriction === undefined ? {} : { writeFileRestriction }),
       skills: this.deps.skills,
       // ★ 递的是 deps.host 本身(结构上满足 ToolHost),不是拷贝出来的五个字段 ——
       //   拷贝会在换宿主后留下一份旧引用,正是 ctx 传递想避免的那件事
@@ -969,8 +1056,6 @@ export class AgentSession {
       } : this.deps.host,
       // 进度是易失的:单独的事件类型,永不写入转录
       emit: (progress) => this.handle.emit({ type: 'tool_progress', callId, progress }),
-      emitPlanProgress: (plan) => this.handle.emit({ type: 'plan_progress_updated', planId: plan.id, sessionId: plan.sessionId, runId: this.req.runId, version: plan.version, lifecycle: plan.lifecycle, plan }),
-      emitPlanEvent: (type, plan) => this.handle.emit({ type, planId: plan.id, sessionId: plan.sessionId, runId: this.req.runId, version: plan.version, lifecycle: plan.lifecycle, plan }),
       /*
         ★ 没装启动器时**不放这个字段进去**,而不是放一个抛错的函数:
         `Task` 判的是 `ctx.spawnSubagent === undefined`,据此给出一句

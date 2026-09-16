@@ -26,9 +26,7 @@ import {
   Check,
   ExternalLink,
   GripVertical,
-  Loader2,
-  Search,
-} from "lucide-react";
+  Search } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { SearchProviderStatus } from "../../../../../shared/domain/search";
 import { searchMeta } from "../../../../../shared/domain/search";
@@ -42,6 +40,7 @@ import { testSearchProvider } from "../../../services/websearch";
 import { useDragReorder } from "../../../shell/useDragReorder";
 import { useWebSearchStore } from "../../../stores/websearch";
 import { SettingGroup } from "../../Row";
+import { Spinner } from '../../../components/ui/Spinner'
 
 export function SearchPane(): ReactNode {
   const { t } = useI18n();
@@ -89,7 +88,7 @@ export function SearchPane(): ReactNode {
         </div>
       ) : !loaded ? (
         <div className="flex items-center justify-center gap-2 py-8 text-[12.5px] text-fg-faint">
-          <Loader2 size={14} className="animate-spin" />
+          <Spinner size="sm" />
           {t("connection.search.reading")}
         </div>
       ) : (
@@ -269,7 +268,7 @@ function ProviderRow({
                     size="sm"
                     icon={
                       busy ? (
-                        <Loader2 size={12} className="animate-spin" />
+                        <Spinner size="xs" />
                       ) : (
                         <Search size={12} />
                       )

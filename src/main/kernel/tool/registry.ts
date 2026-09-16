@@ -9,8 +9,6 @@ import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../sh
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { Skill } from '../../../shared/domain/skill'
 import type { RunStatus } from '../../../shared/agent/event'
-import type { SessionMode } from '../../../shared/agent/run-request'
-import type { PlanDocumentV2 } from '../../../shared/domain/plan'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
 import type { InteractFn } from '../interaction-gate'
@@ -72,12 +70,14 @@ export type SubagentOutcome =
       status: RunStatus
       /** 子代理最后一条助手消息的可见文字。`status !== 'done'` 时可能是空串 */
       text: string
+      color?: import('../../../shared/domain/agent-def').AgentColor
       /** `status === 'error'` 时的原因 */
       error?: AgentError | string
     }
   | {
       kind: 'background'
       childRunId: string
+      color?: import('../../../shared/domain/agent-def').AgentColor
       /**
        * 并发满了,这次派发**还在排队**,run 尚未创建 —— 有空位时会自动开始。
        *
@@ -111,6 +111,8 @@ export interface ToolContext {
   callId: string
   /** 所属 run。子代理要用它当 parentRunId,日志也靠它把工具调用归到某次运行 */
   runId: string
+  /** When set, Write/Edit must target this exact resolved path. */
+  writeFileRestriction?: string
   /** 本次 run 冻结的 Skill 快照，避免全局注册表重扫后串工作区。 */
   skills?: readonly Skill[]
   /**
@@ -125,9 +127,6 @@ export interface ToolContext {
   host: ToolHost
   /** 进度是**易失的**:单独的事件类型,永不写入转录 */
   emit(progress: ToolProgress): void
-  /** Structured plan progress is a UI event, never transcript content. */
-  emitPlanProgress?(plan: PlanDocumentV2): void
-  emitPlanEvent?(type: 'plan_created' | 'plan_updated' | 'plan_review_requested' | 'plan_approval_resolved', plan: PlanDocumentV2): void
   /**
    * 派子代理。只有 `Task` 用得到,所以是可选的 —— 让每个工具的
    * ctx 都必须带上一个它永远不会碰的函数,是没有道理的。
@@ -155,9 +154,6 @@ export interface ToolRegistration extends Omit<ToolInfo, 'externalName'> {
 }
 
 export interface SnapshotFilter {
-  mode?: SessionMode
-  /** plan 模式:过滤掉所有写工具(方案 §4.8) */
-  readOnlyOnly?: boolean
   /**
    * Skill frontmatter 的 `allowedTools`。作者写的可能是 internalId 也可能是
    * externalName —— 两边都认,因为让用户去猜我们内部用哪个名字是没有道理的。
@@ -194,24 +190,12 @@ export interface SnapshotFilter {
 
 /**
  * 调用后会挂起、直到用户回答才继续的工具 —— 也就是 `run` 里 `await ctx.interact(...)`
- * 的那几个。全仓只有两个:`AskUserQuestion` 和 `submit_plan`。
+ * 的那几个。全仓只有两个:`AskUserQuestion` 和 `ExitPlanMode`。
  *
- * ★ `submit_plan` 必须在列。plan 档**会传染给子代理**(`childRequestFor` 里
- * `mode: parentReq.mode === 'plan' ? 'plan' : 'normal'`),而下面 `snapshot()`
- * 恰恰只在 plan 档放行 `submit_plan` —— 于是「规划模式下派出去的子代理」
- * 是第二条一模一样的死锁路径,和 `AskUserQuestion` 那条并列。漏掉它,
- * 这道闸就只挡住了一半。
- *
- * ★ `RequestPlanApproval`(`builtin/interaction.ts` 的 `planApprovalTool`)
- * **不在列,因为它根本没注册** —— `builtin/index.ts` 只引了 `askUserTool`,
- * 那个工具已被带 plan-v2 落库的 `submit_plan` 取代。把一个永远不会出现在
- * 注册表里的名字写进来,只会让下一个读的人以为它是活的。
- *
- * ★ 写在这里而不是 `builtin/interaction.ts`:那个模块 → `../define` → 本模块,
- * 引过去就是一个循环。而且 `snapshot()` 里本来就直接写 internalId 字面量
- * (`update_plan` / `submit_plan`),这一条只是跟着同一套写法。
+ * Plan 和 ACP 的主代理工具策略都不允许子代理触发这些交互；这里再做一次机制层过滤，
+ * 防止自定义 agent/tool 白名单意外重新开放后造成无人能回答的死锁。
  */
-const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'submit_plan'])
+const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 
 function sourceKey(s: ToolSource): string {
   switch (s.kind) {
@@ -281,9 +265,6 @@ export class ToolRegistry {
     const allow = filter.allowList === undefined ? undefined : new Set(filter.allowList)
     const out: Tool[] = []
     for (const t of this.tools.values()) {
-      if ((filter.mode === 'plan' || filter.readOnlyOnly === true) && t.internalId === 'update_plan') continue
-      if (filter.mode !== undefined && filter.mode !== 'plan' && t.internalId === 'submit_plan') continue
-      if (filter.readOnlyOnly === true && !t.readOnly) continue
       if (filter.network === false && t.needsNetwork) continue
       if (filter.noInteraction === true && INTERACTIVE_TOOLS.has(t.internalId)) continue
       if (allow !== undefined && !allow.has(t.internalId) && !allow.has(t.externalName)) continue

@@ -100,6 +100,25 @@
   --color-tint-strong: #3c423e; /* 菜单行悬停 / 分类 chip(推的:+17) */
 
   --color-border: #2b2e2d; /* 与 tint 同值 —— 沿用 v1.1.15 里两者相等的关系 */
+  /*
+    ★ **`stroke` 和 `border` 值相同,但不是同一个东西 —— 别合并。**
+
+    区别不在颜色上,在**谁会去改它**:`theme-profile.ts` 的可读性护栏对
+    `border` 跑一次 `fitColor(border, [surface-input], 3)`,因为「输入框必须有
+    一圈看得见的轮廓」是 WCAG 的非文本对比度要求。而护栏**不碰 `stroke`**。
+
+    合并的后果实测过一次,就是这次要修的 bug:护栏开着(默认开)的时候,
+    深色下 `border` 被从 #2b2e2d 一路提亮到 **#707875**(对 canvas 3.61:1),
+    浅色下提到 **#969685**。输入框因此有了轮廓 —— 代价是聊天流里每一张工具卡
+    都镶了一圈中灰实线,而那圈线本该是 1.19:1 的发丝线。一个 token 同时背着
+    「功能性轮廓」和「装饰性收边」两个职责,护栏只能按前者算,后者必然被牺牲。
+
+    所以分工是:
+      border  → 输入框 / 下拉 / 菜单 / 对话框,**要被人点的东西的轮廓**,受护栏保护
+      stroke  → 卡片 / 面板 / 区块的收边,**纯装饰**,永远是设计值
+    分隔线仍然走 `hairline`(卡片**内部**的横线),这三个别混。
+  */
+  --color-stroke: #2b2e2d;
   --color-hairline: #252727; /* 内容区里的行分隔线,比 canvas 只高一点点 */
 
   --color-fg: #ececec;
@@ -179,6 +198,7 @@
   --color-tint-strong: #e2ded7;
 
   --color-border: #e6e6e2; /* 输入框描边 */
+  --color-stroke: #e6e6e2; /* 卡片收边 —— 见深色那段:和 border 同值但不受护栏改写 */
   --color-hairline: #efefec; /* 内层 Tab 条下那一道 */
 
   --color-fg: #181c19;
@@ -205,7 +225,7 @@
   它把 `nativeTheme.themeSource` 设成用户偏好,渲染层的 `prefers-color-scheme`
   随之为真 —— 所以这里跟的是用户的选择,不是裸的系统设置。
 
-  ★ **只列骨架屏看得见的那几个,别把上面整套 22 个 token 抄下来。** 这不是第二份
+  ★ **只列骨架屏看得见的那几个,别把上面整套 23 个 token 抄下来。** 这不是第二份
   浅色主题,只是让首屏不跳色;真正的一套在 `:root[data-theme='light']`,最终值由
   `applyTheme` 的行内样式盖上来(行内样式不参与选择器优先级,一定赢)。
 
@@ -220,6 +240,7 @@
     --color-chrome: #e8e4dd;
     --color-tint: #efefec;
     --color-border: #e6e6e2;
+    --color-stroke: #e6e6e2;
     --color-fg: #181c19;
   }
 }
@@ -469,6 +490,21 @@ body {
 .tab-strip-scroll {
   scrollbar-width: none;
   -ms-overflow-style: none;
+  overscroll-behavior-x: contain;
+}
+/* A mask creates a containing block for fixed descendants; keep menus and overlays
+   outside the masked scrolling element. */
+.tab-strip-fade-left {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000);
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000);
+}
+.tab-strip-fade-right {
+  -webkit-mask-image: linear-gradient(to right, #000, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, #000, #000 calc(100% - 18px), transparent);
+}
+.tab-strip-fade-both {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
 }
 .tab-strip-scroll::-webkit-scrollbar {
   display: none;

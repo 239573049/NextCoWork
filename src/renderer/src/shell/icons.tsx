@@ -11,6 +11,7 @@ import {
   ClockFading,
   Earth,
   Files,
+  GitBranch,
   Image as ImageIcon,
   MessageSquare,
   PenTool,
@@ -37,6 +38,7 @@ export const FEATURE_ICON: Record<FeatureKind, LucideIcon> = {
   scheduled: ClockFading,
   extensions: Blocks,
   browser: Earth,
+  git: GitBranch,
   review: ChartNoAxesCombined,
   settings: Settings
 }

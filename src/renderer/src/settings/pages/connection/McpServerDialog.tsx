@@ -14,7 +14,7 @@
  *    于是「只补填其中一个键」会把另外几个已存的值清掉 —— 这件事不能靠用户猜,
  *    所以下面会把**将被清掉的键名逐个列出来**。
  */
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type {
   McpServerConfig,
@@ -30,6 +30,7 @@ import { cn } from "../../../lib/cn";
 import { getMcpSecretsInfo, setMcpSecrets } from "../../../services/mcp";
 import { useMcpStore } from "../../../stores/mcp";
 import { useWindowStore } from '../../../stores/window';
+import { Spinner } from '../../../components/ui/Spinner'
 import {
   authorizationWarning,
   draftOf,
@@ -170,7 +171,7 @@ export function McpServerDialog({
           </Button>
           <Button size="sm" variant="accent" onClick={save} disabled={busy}>
             {busy ? (
-              <Loader2 size={13} className="animate-spin" />
+              <Spinner size="sm" />
             ) : (
               t("connection.mcp.dialog.saveConnect")
             )}

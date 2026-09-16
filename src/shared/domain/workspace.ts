@@ -48,7 +48,7 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   // 新工作区继承“询问批准”，用户可在输入框或设置中主动放宽。
   permissionMode: 'ask',
   defaultModel: '',
-  defaultMode: 'normal',
+  defaultMode: 'code',
   defaultThinking: 'auto',
   /*
     ★ 出厂就开。`WebFetch` 受这个开关管(见 `kernel/permission-gate.ts` 那张表的

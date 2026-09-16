@@ -9,7 +9,7 @@
  *   一个从来没写过 description 的命令，编辑一次就会被塞进一行正文的第一句。
  */
 
-export type MarkdownResourceKind = 'command' | 'agent'
+export type MarkdownResourceKind = 'command' | 'agent' | 'mode'
 /** `builtin` 不在里面:内置的那几条没有源文件,改不了也删不了。 */
 export type MarkdownResourceScope = 'global' | 'project'
 

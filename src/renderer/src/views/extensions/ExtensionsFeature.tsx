@@ -18,16 +18,22 @@ import { Segmented } from '../../components/ui/Segmented'
 import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { IS_MAC } from '../../lib/platform'
+import { SidebarReveal } from '../../shell/SidebarReveal'
 import { SkillsFeature } from '../skills/SkillsFeature'
 import { AgentsPanel } from './agents/AgentsPanel'
 import { CommandsPanel } from './commands/CommandsPanel'
 import { HooksPanel } from './hooks/HooksPanel'
+import { ModesPanel } from './modes/ModesPanel'
 
-type ExtensionTab = 'skills' | 'commands' | 'agents' | 'hooks'
+type ExtensionTab = 'skills' | 'commands' | 'agents' | 'modes' | 'hooks'
 
 export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactNode {
   const { t } = useI18n()
-  const [tab, setTab] = useState<ExtensionTab>('skills')
+  const [tab, setTab] = useState<ExtensionTab>(() => {
+    const requested = sessionStorage.getItem('next-cowork:extensions-tab')
+    sessionStorage.removeItem('next-cowork:extensions-tab')
+    return requested === 'modes' ? 'modes' : 'skills'
+  })
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-canvas">
@@ -37,6 +43,7 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
           !IS_MAC && 'pr-window-controls'
         )}
       >
+        <SidebarReveal />
         <IconButton
           label={t('ext.back')}
           size={28}
@@ -57,6 +64,7 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
             { value: 'skills', label: t('ext.tab.skills') },
             { value: 'commands', label: t('ext.tab.commands') },
             { value: 'agents', label: t('ext.tab.agents') },
+            { value: 'modes', label: t('ext.tab.modes') },
             { value: 'hooks', label: t('ext.tab.hooks') }
           ]}
         />
@@ -68,7 +76,7 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
         留在它自己那条工具条里。
       */}
       <div
-        className={cn('min-h-0 flex-1', tab !== 'skills' && 'hidden')}
+        className={cn('flex min-h-0 flex-1 flex-col', tab !== 'skills' && 'hidden')}
         aria-hidden={tab !== 'skills'}
       >
         {/*
@@ -82,6 +90,8 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
         <CommandsPanel />
       ) : tab === 'agents' ? (
         <AgentsPanel />
+      ) : tab === 'modes' ? (
+        <ModesPanel />
       ) : tab === 'hooks' ? (
         <HooksPanel />
       ) : null}

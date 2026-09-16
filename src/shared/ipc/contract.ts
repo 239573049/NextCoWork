@@ -17,7 +17,7 @@ import type { AgentMessage } from '../agent/message'
 import type { ContextCheckpoint, ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
-import type { RunRequest } from '../agent/run-request'
+import type { RunRequest, SessionMode } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
 import type { DirListing, FileSuggestion } from '../domain/file-tree'
@@ -57,12 +57,12 @@ import type {
   MarkdownResourceSave,
   MarkdownResourceScope
 } from '../domain/markdown-resource'
+import type { ModeDefinition } from '../domain/mode'
 import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, PreparedWorkspace, RemoteDirectory, SshAuthRequest, SshAuthResponse } from '../domain/environment'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type { SyncConflict, SyncPreview, SyncStatus } from '../domain/config-sync'
-import type { PlanDocument, PlanOperation, PlanUpdateResult, PlanDocumentV2, PlanV2Input, PlanLifecycle, PlanStepV2Status } from '../domain/plan'
 import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
@@ -73,6 +73,7 @@ import type {
   WorkspaceTextFile
 } from '../domain/workspace-file'
 import type { BrowserChange, BrowserProfile, BrowserTab } from '../domain/browser'
+import type { GitBranchSummary, GitCommitSummary, GitDiff, GitOverview } from '../domain/git'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../domain/scheduled'
 import type {
   BackupStatus,
@@ -342,6 +343,36 @@ export interface IpcInvokeMap {
   'browser:importCookies': { req: { workspaceId: string; profileId: string }; res: number | null }
   'browser:clearProfileState': { req: { workspaceId: string; profileId: string }; res: void }
 
+  // ── Git(侧边栏入口,管理当前工作区的仓库)──
+  /*
+    ★ 一律按 `workspaceId` 寻址,渲染层**从不递路径**给 git(方案 §9 同一条规矩):
+    主进程自己去 store 查 rootPath。渲染层递进来的 `path` 是仓库相对路径,只被
+    原样拼回给 git 当参数,不参与 fs 拼接 —— 所以这里的校验是「非空、无 NUL」,
+    而不是 workspace-files 那套逐段 lstat 审计。
+  */
+  'git:getOverview': { req: { workspaceId: string }; res: GitOverview }
+  'git:listBranches': { req: { workspaceId: string }; res: GitBranchSummary[] }
+  'git:listCommits': { req: { workspaceId: string; limit?: number }; res: GitCommitSummary[] }
+  /** 单个文件的 diff。`staged` 选择看暂存区还是工作区。 */
+  'git:getDiff': { req: { workspaceId: string; path: string; staged: boolean }; res: GitDiff }
+  'git:stage': { req: { workspaceId: string; paths: string[] }; res: void }
+  'git:unstage': { req: { workspaceId: string; paths: string[] }; res: void }
+  /** 提交暂存区。`message` 空白一律拒 —— 空提交信息没有任何意义。 */
+  'git:commit': { req: { workspaceId: string; message: string }; res: GitCommitSummary }
+  'git:checkoutBranch': { req: { workspaceId: string; branch: string }; res: void }
+  'git:createBranch': { req: { workspaceId: string; name: string; checkout: boolean }; res: GitBranchSummary }
+  'git:pull': { req: { workspaceId: string }; res: void }
+  'git:push': { req: { workspaceId: string }; res: void }
+  /**
+   * 「AI 写一条提交信息」。产出一份**草稿**交给渲染层填进输入框等人过目 ——
+   * 这里不提交,和 `agents:generate` 同一个道理。
+   *
+   * ★ 不收 model 参数:模型取设置里的默认模型,在主进程里定。渲染层要是能指定
+   *   模型,这颗按钮旁边就得多一个模型选择器,而用户此刻要决定的是提交信息
+   *   的措辞,不是用哪家模型。
+   */
+  'git:generateCommitMessage': { req: { workspaceId: string }; res: { message: string } }
+
   // ── 定时任务 ──
   'scheduled:listTasks': { req: { workspaceId?: string }; res: ScheduledTask[] }
   'scheduled:getTask': { req: { id: string }; res: ScheduledTask | null }
@@ -395,9 +426,10 @@ export interface IpcInvokeMap {
   'sessions:list': { req: { workspaceId: string; archived?: boolean }; res: SessionListItem[] }
   'sessions:get': { req: { sessionId: string }; res: SessionDetail }
   'sessions:replaceHistory': { req: { sessionId: string; messages: AgentMessage[] }; res: void }
-  'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string }; res: Session }
+  'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string; mode?: SessionMode }; res: Session }
   'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
+  'sessions:setMode': { req: { sessionId: string; mode: SessionMode }; res: void }
   'sessions:setArchived': { req: { sessionId: string; archived: boolean }; res: void }
   'sessions:setFavorited': { req: { sessionId: string; favorited: boolean }; res: void }
   'sessions:delete': { req: { sessionId: string }; res: void }
@@ -457,16 +489,6 @@ export interface IpcInvokeMap {
   'agent:respondInteraction': { req: InteractionResponse; res: void }
   'agent:listInteractions': { req: { runId?: string }; res: PendingInteraction[] }
   'agent:listTools': { req: { workspaceId: string }; res: ToolInfo[] }
-  'plans:list': { req: { sessionId: string }; res: PlanDocument[] }
-  'plans:get': { req: { planId: string }; res: PlanDocument | null }
-  'plans:update': { req: { planId?: string; sessionId: string; baseVersion?: number; operations: PlanOperation[] }; res: PlanUpdateResult }
-  'plans:submit': { req: { planId: string; version: number }; res: PlanDocument }
-  'plans:v2:list': { req: { sessionId: string }; res: PlanDocumentV2[] }
-  'plans:v2:get': { req: { planId: string }; res: PlanDocumentV2 | null }
-  'plans:v2:put': { req: PlanV2Input; res: { ok: boolean; plan?: PlanDocumentV2; conflict?: { planId: string; currentVersion: number }; message?: string } }
-  'plans:v2:submit': { req: { planId: string; version: number }; res: PlanDocumentV2 }
-  'plans:v2:transition': { req: { planId: string; version: number; lifecycle: PlanLifecycle; executionRunId?: string }; res: PlanDocumentV2 }
-  'plans:v2:progress': { req: { planId: string; version: number; explanation?: string | null; plan: Array<{ id?: string; step: string; status: PlanStepV2Status }> }; res: PlanDocumentV2 }
 
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
@@ -574,7 +596,12 @@ export interface IpcInvokeMap {
   */
   'agents:generate': { req: { requirement: string; workspaceId?: string }; res: AgentDraft }
 
-  /* 命令和子代理共用这三个 —— 磁盘上它们是同构的，见 shared/domain/markdown-resource.ts。 */
+  'modes:list': {
+    req: { workspaceId: string }
+    res: { modes: readonly ModeDefinition[]; diagnostics: ReadonlyArray<{ path: string; message: string }>; tools: readonly string[] }
+  }
+
+  /* 命令、子代理和模式共用这三个 —— 磁盘上它们是同构的，见 shared/domain/markdown-resource.ts。 */
   'resource:get': {
     req: { kind: MarkdownResourceKind; scope: MarkdownResourceScope; name: string; workspaceId?: string }
     res: MarkdownResourceFile
@@ -825,6 +852,7 @@ export interface IpcEventMap {
   'skills:changed': void
   'commands:changed': void
   'agents:changed': void
+  'modes:changed': void
   'hooks:changed': void
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
@@ -985,6 +1013,18 @@ export const INVOKE_CHANNELS = {
   'browser:exportCookies': 1,
   'browser:importCookies': 1,
   'browser:clearProfileState': 1,
+  'git:getOverview': 1,
+  'git:listBranches': 1,
+  'git:listCommits': 1,
+  'git:getDiff': 1,
+  'git:stage': 1,
+  'git:unstage': 1,
+  'git:commit': 1,
+  'git:checkoutBranch': 1,
+  'git:createBranch': 1,
+  'git:pull': 1,
+  'git:push': 1,
+  'git:generateCommitMessage': 1,
   'tabs:getInner': 1,
   'session:getInput': 1,
   'attachment:upload': 1,
@@ -1000,6 +1040,7 @@ export const INVOKE_CHANNELS = {
   'sessions:create': 1,
   'sessions:duplicate': 1,
   'sessions:rename': 1,
+  'sessions:setMode': 1,
   'sessions:setArchived': 1,
   'sessions:setFavorited': 1,
   'sessions:delete': 1,
@@ -1051,6 +1092,7 @@ export const INVOKE_CHANNELS = {
   'agents:diagnostics': 1,
   'agents:setEnabled': 1,
   'agents:generate': 1,
+  'modes:list': 1,
   'resource:get': 1,
   'resource:save': 1,
   'resource:delete': 1,
@@ -1123,16 +1165,6 @@ export const INVOKE_CHANNELS = {
   , 'context:updateCheckpoint': 1
   , 'context:compact': 1
   , 'context:preview': 1
-  , 'plans:list': 1
-  , 'plans:get': 1
-  , 'plans:update': 1
-  , 'plans:submit': 1
-  , 'plans:v2:list': 1
-  , 'plans:v2:get': 1
-  , 'plans:v2:put': 1
-  , 'plans:v2:submit': 1
-  , 'plans:v2:transition': 1
-  , 'plans:v2:progress': 1
   , 'scheduled:listTasks': 1
   , 'scheduled:getTask': 1
   , 'scheduled:create': 1
@@ -1172,6 +1204,7 @@ export const EVENT_CHANNELS = {
   'skills:changed': 1,
   'commands:changed': 1,
   'agents:changed': 1,
+  'modes:changed': 1,
   'hooks:changed': 1,
   'mcp:changed': 1,
   'provider:changed': 1,

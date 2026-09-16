@@ -653,7 +653,7 @@ describe('AGENTS.md 与运行时状态注入', () => {
     installHost(
       withDemo(
         nodeHost({
-          paths: { userData: () => join(tmp, 'userData'), temp: () => tmpdir() },
+          paths: { userData: () => join(tmp, 'userData'), attachments: () => join(tmp, 'attachments'), temp: () => tmpdir() },
           ...over
         }),
         { chunkDelayMs: 0 }

@@ -20,7 +20,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../../runtime', () => ({
-  getHost: () => ({ paths: { userData: (): string => userDataDir } })
+  getHost: () => ({ paths: { userData: (): string => userDataDir, attachments: (): string => join(userDataDir, 'attachments') } })
 }))
 
 vi.mock('../../window/registry', () => ({ windows: { broadcast: vi.fn() } }))

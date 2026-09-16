@@ -67,6 +67,9 @@ linux:
     - AppImage
 nsis:
   oneClick: false
+  # oneClick: false 只是把安装器切成向导模式,默认仍然不带"选择安装目录"页,
+  # 必须显式开启下面这个开关,用户才能在安装时自定义目录。
+  allowToChangeInstallationDirectory: true
   perMachine: false
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

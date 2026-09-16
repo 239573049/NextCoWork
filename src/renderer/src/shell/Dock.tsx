@@ -8,7 +8,7 @@ import type { FallbackModel } from '../views/chat/Composer'
 import { cn } from '../lib/cn'
 import { useI18n } from '../i18n'
 import { InnerView } from '../views/registry'
-import { InnerTabBar } from './InnerTabBar'
+import { AllTabsMenu, InnerTabBar } from './InnerTabBar'
 import { useTabsStore } from '../stores/tabs'
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents'
 import { DOCK_TAB_MIME, dockDropZone, groupPane, groupTabs, visibleDockNode, type DockDropZone } from './dock-layout'
@@ -132,6 +132,13 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
         activeId={node.activeTabId}
         runningSessionIds={runningSessionIds}
         menu={menu}
+        trailing={
+          <AllTabsMenu
+            tabs={tabs}
+            activeId={node.activeTabId}
+            onActivate={(id) => activateTab(workspace.id, node.id, id)}
+          />
+        }
         canDragTab={(tab) => tab.kind !== 'files'}
         onActivate={(id) => activateTab(workspace.id, node.id, id)}
         onClose={(id) => { void onClose(id) }}

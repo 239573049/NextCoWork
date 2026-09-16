@@ -8,7 +8,7 @@ import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
 import { assistantMessage, userMessage } from '../../../shared/agent/message'
 import type { RunRequest } from '../../../shared/agent/run-request'
-import { MAX_TURNS, MAX_TURNS_GOAL } from '../../../shared/agent/run-request'
+import { MAX_TURNS } from '../../../shared/agent/run-request'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ToolResult, ToolSource } from '../../../shared/agent/tool'
 import { toolOk } from '../../../shared/agent/tool'
@@ -169,6 +169,7 @@ async function runSession(o: {
   history?: readonly AgentMessage[]
   approve?: ApproveFn
   onToolUsage?: SessionDeps['onToolUsage']
+  allowedTools?: SessionDeps['allowedTools']
   resumeDelaysMs?: readonly number[]
 }): Promise<Ran> {
   const request = o.request ?? req()
@@ -182,6 +183,7 @@ async function runSession(o: {
       ...(o.history !== undefined ? { history: o.history } : {}),
       ...(o.approve !== undefined ? { approve: o.approve } : {}),
       ...(o.onToolUsage !== undefined ? { onToolUsage: o.onToolUsage } : {}),
+      ...(o.allowedTools !== undefined ? { allowedTools: o.allowedTools } : {}),
       // 缺省关掉断流续跑:它只在明确要测的那几条用例里打开,别的用例不该因为
       // 上游脚本里出现一个 error 事件就凭空多跑五轮。
       resumeDelaysMs: o.resumeDelaysMs ?? []
@@ -801,11 +803,12 @@ describe('审批接缝(方案 §4.5 / §4.6)', () => {
 
 // ─────────────────────────── 会话模式 ───────────────────────────
 
-describe('会话模式落在工具层,不靠提示词祈祷(方案 §4.8)', () => {
-  it('plan 模式下写工具不出现在请求里', async () => {
+describe('运行时工具白名单落在工具层', () => {
+  it('模式白名单外的工具不出现在请求里', async () => {
     const { upstream } = await runSession({
       upstream: fakeUpstream([says('这是我的方案')]),
       request: req({ mode: 'plan' }),
+      allowedTools: ['read_file'],
       tools: registry(
         { internalId: 'read_file', readOnly: true },
         { internalId: 'write_file', readOnly: false }
@@ -814,7 +817,7 @@ describe('会话模式落在工具层,不靠提示词祈祷(方案 §4.8)', () =
     expect(upstream.requests[0]?.tools.map((t) => t.externalName)).toEqual(['read_file'])
   })
 
-  it('normal 模式下写工具在', async () => {
+  it('code 模式没有白名单时保留写工具', async () => {
     const { upstream } = await runSession({
       upstream: fakeUpstream([says('好')]),
       tools: registry(
@@ -828,12 +831,12 @@ describe('会话模式落在工具层,不靠提示词祈祷(方案 §4.8)', () =
     ])
   })
 
-  /** plan 模式下模型硬要调写工具,得到的是工具错误 —— 因为它根本不在本轮快照里 */
-  it('plan 模式下调写工具会被当成未知工具', async () => {
+  it('模型调用白名单外工具时得到未知工具错误', async () => {
     const exec = vi.fn(() => Promise.resolve(toolOk('不该跑')))
     const { history } = await runSession({
       upstream: fakeUpstream([callsTool('c1', 'write_file'), says('好吧')]),
       request: req({ mode: 'plan' }),
+      allowedTools: ['read_file'],
       tools: registry({ internalId: 'write_file', readOnly: false, execute: exec })
     })
     expect(exec).not.toHaveBeenCalled()
@@ -1186,20 +1189,6 @@ describe('错误与边界', () => {
     expect(end.status).toBe('done')
     expect(upstream.requests.length).toBe(MAX_TURNS + 3)
     expect(history.at(-1)?.role).toBe('assistant')
-    expectNoOrphans(history)
-  })
-
-  /** goal mode also has no fixed turn ceiling. */
-  it('goal 模式不会被固定轮次上限截断', async () => {
-    const turns = Array.from({ length: MAX_TURNS_GOAL + 1 }, (_, i) => callsTool(`c${i}`, 'echo'))
-    turns.push(says('完成'))
-    const { events, upstream, history } = await runSession({
-      upstream: fakeUpstream(turns),
-      request: req({ mode: 'goal' }),
-      tools: registry({ internalId: 'echo' })
-    })
-    expect(runEnd(events).status).toBe('done')
-    expect(upstream.requests.length).toBe(MAX_TURNS_GOAL + 2)
     expectNoOrphans(history)
   })
 
@@ -1993,5 +1982,166 @@ describe('断流自动续跑', () => {
 
     expect(handle.status).toBe('aborted')
     expect(upstream.requests).toHaveLength(1)
+  })
+})
+
+/**
+ * 自动压缩的判据用什么数(`tokenCalibration` / `MIN_EFFECTIVE_COMPACTION`)。
+ *
+ * 背景是一个线上故障:圆环上写着「211K / 200K,已超出」,自动压缩却一次都没触发。
+ * 两个数不同源 —— 圆环读上游在 `message_end` 里报回的真值,判据读发出去之前的
+ * chars/4 本地估算。代码 / JSON / 工具输出的真实分词接近 3 chars/token,于是同一份
+ * 请求在判据里只有 ~152K,恰好压在 200K×0.8 之下,而 `validateModelRuntime` 的
+ * context_length 硬校验读的也是这个偏低的数,所以连报错都不会有。
+ *
+ * 这里钉两件事:真值**回流**并纠正了判据,以及纠正之后压缩**能收敛**。
+ */
+describe('压缩判据按上游真值校准', () => {
+  const AUTO_COMPACT = { experimentalMode: false, autoCompact: true }
+  /** 估算约 100K,是 200K×0.8 − 8192 预留(≈151.8K)的三分之二 —— 不校准就不会压。 */
+  const BIG = 'x'.repeat(400_000)
+  const COMPACTED = '[compacted: tool output from this turn was dropped]'
+
+  const ends = (inputTokens: number, stopReason: 'end_turn' | 'tool_use'): ProviderStreamEvent => ({
+    type: 'message_end',
+    stopReason,
+    usage: { inputTokens, outputTokens: 5 }
+  })
+
+  /** 调一次工具(好让循环进入第二轮),并让上游报回指定的真实输入用量。 */
+  const turnReporting = (inputTokens: number, callId: string): ProviderStreamEvent[] => [
+    { type: 'message_start', model: 'claude-sonnet-4' },
+    { type: 'tool_call_start', index: 0, callId, name: 'echo' },
+    { type: 'tool_call_delta', index: 0, callId, argsDelta: '{}' },
+    { type: 'tool_call_end', index: 0, callId },
+    ends(inputTokens, 'tool_use')
+  ]
+
+  /**
+   * 大头是一条**落在折叠区**的工具输出 —— 机械压缩对它有效。
+   * 前后垫够消息,保证 `compactMessages` 的 cutoff(倒数第 6 条)把它切进去。
+   */
+  function historyWithFoldableBlob(): AgentMessage[] {
+    return [
+      userMessage('h0', [{ type: 'text', text: '任务' }], 0),
+      assistantMessage('h1', [{ type: 'tool_call', callId: 'c0', name: 'echo', input: {} }], 0),
+      userMessage('h2', [{ type: 'tool_result', callId: 'c0', output: { content: BIG }, isError: false }], 0),
+      ...Array.from({ length: 6 }, (_, i) =>
+        i % 2 === 0
+          ? assistantMessage(`h${i + 3}`, [{ type: 'text', text: `回应 ${i}` }], 0)
+          : userMessage(`h${i + 3}`, [{ type: 'text', text: `追问 ${i}` }], 0)
+      )
+    ]
+  }
+
+  async function run(o: {
+    upstream: FakeUpstream
+    history: readonly AgentMessage[]
+    saveContextCheckpoint?: SessionDeps['saveContextCheckpoint']
+  }): Promise<Ran> {
+    const request = req()
+    const handle = new RunHandle(request)
+    const session = new AgentSession(
+      {
+        host: quietHost(),
+        upstream: o.upstream,
+        tools: registry({ internalId: 'echo' }),
+        workspaceRoot: '/ws',
+        history: o.history,
+        contextManagement: AUTO_COMPACT,
+        ...(o.saveContextCheckpoint !== undefined
+          ? { saveContextCheckpoint: o.saveContextCheckpoint }
+          : {}),
+        resumeDelaysMs: []
+      },
+      handle,
+      request
+    )
+    const events = collect(handle)
+    await session.run()
+    return { events: await events, history: session.history, handle, upstream: o.upstream }
+  }
+
+  const statuses = (events: AgentEvent[]): string[] =>
+    events.flatMap((e) => (e.type === 'context_status' ? [e.status.phase] : []))
+  const sent = (upstream: FakeUpstream, turn: number): string =>
+    JSON.stringify(upstream.requests[turn]?.messages ?? [])
+
+  /**
+   * ★★ 本组的主用例 —— 就是那个截图里的场景。
+   *
+   * 第一轮:本地估 ~100K,判据说还宽裕,请求照发;上游回报这一份其实是 200K。
+   * 第二轮:同样估 ~100K,但校准系数已经是 ~2,判据这才看见真实的 200K 并触发压缩。
+   */
+  it('★ 上游报回的真值远高于估算时,下一轮必须触发自动压缩', async () => {
+    const upstream = fakeUpstream([turnReporting(200_000, 'c1'), says('好')])
+    const { events } = await run({ upstream, history: historyWithFoldableBlob() })
+
+    // 第一轮没压:大块原样发出去了(这也是「不校准就不压」的反面证据)
+    expect(sent(upstream, 0)).toContain(BIG)
+    // 第二轮压了:大块被折叠成占位符
+    expect(sent(upstream, 1)).not.toContain(BIG)
+    expect(sent(upstream, 1)).toContain(COMPACTED)
+    expect(statuses(events)).toContain('fallback')
+  })
+
+  /**
+   * ★ 反面:上游报回来的数**小于**估算时,系数夹在 1,判据逐字退回纯估算。
+   *
+   * 不少中转按「未命中缓存的那部分」报 `input_tokens` 且不给 `cache_read`。
+   * 让系数跟着掉到 0.0x 的话,自动压缩会被这种上游整个关掉 ——
+   * 正是我们在修的那个故障,从另一头再进来一次。
+   */
+  it('★ 上游报回的真值偏小时不放松判据(系数夹在 1)', async () => {
+    const upstream = fakeUpstream([turnReporting(10, 'c1'), says('好')])
+    const { events } = await run({ upstream, history: historyWithFoldableBlob() })
+
+    expect(sent(upstream, 1)).toContain(BIG)
+    expect(statuses(events)).toEqual([])
+  })
+
+  /** 一次请求都还没完成时没有真值可用 —— 第一轮的判据必须就是旧行为。 */
+  it('第一轮没有真值可用,判据即纯估算', async () => {
+    const upstream = fakeUpstream([says('好')])
+    const { events } = await run({ upstream, history: historyWithFoldableBlob() })
+
+    expect(events.find((e) => e.type === 'context_usage')).toMatchObject({ shouldCompact: false })
+    expect(sent(upstream, 0)).toContain(BIG)
+  })
+
+  /**
+   * ★★ 收敛:压了没用就**停手并说出来**。
+   *
+   * 大头在第 0 条(`compactMessages` 永远保留原文,那是任务的原始表述),
+   * 机械压缩一个 token 都削不掉。以前这会每轮重来一次:重建投影、重写检查点、
+   * 重发一条「已折叠较早的历史」,而占用一动不动 —— 用户看着一句正常播报,
+   * 上下文一路涨过窗口。
+   */
+  it('★ 机械压缩削不动时只报一次 exhausted,之后不再重试', async () => {
+    // 估算约 175K > 151.8K:第一轮不用校准就该压
+    const huge = userMessage('h0', [{ type: 'text', text: 'x'.repeat(700_000) }], 0)
+    const save = vi.fn()
+    const upstream = fakeUpstream([
+      turnReporting(10, 'c1'),
+      turnReporting(10, 'c2'),
+      says('好')
+    ])
+    const { events } = await run({ upstream, history: [huge], saveContextCheckpoint: save })
+
+    expect(upstream.requests.length).toBeGreaterThanOrEqual(3)
+    expect(statuses(events)).toEqual(['exhausted'])
+    // 每轮重写一次检查点也一并停掉
+    expect(save.mock.calls.length).toBeLessThanOrEqual(1)
+  })
+
+  /** `exhausted` 之后判据本身不变 —— 压力条照常报「该压了」,只是我们不再空转。 */
+  it('exhausted 之后 context_usage 仍然如实报 shouldCompact', async () => {
+    const huge = userMessage('h0', [{ type: 'text', text: 'x'.repeat(700_000) }], 0)
+    const upstream = fakeUpstream([turnReporting(10, 'c1'), says('好')])
+    const { events } = await run({ upstream, history: [huge] })
+
+    const usage = events.filter((e) => e.type === 'context_usage')
+    expect(usage.length).toBeGreaterThanOrEqual(2)
+    expect(usage.at(-1)).toMatchObject({ shouldCompact: true })
   })
 })

@@ -1,4 +1,4 @@
-import { ArrowUp, ChevronRight, Folder, LoaderCircle, RefreshCw, Server } from 'lucide-react'
+import { ArrowUp, ChevronRight, Folder, RefreshCw, Server } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { ConnectionProfile, RemoteDirectory } from '../../../shared/domain/environment'
 import type { Workspace } from '../../../shared/domain/workspace'
@@ -9,6 +9,7 @@ import { TextInput } from '../components/ui/TextInput'
 import { useI18n } from '../i18n'
 import { browseConnection, cancelConnectionRequest, closeBrowse, connectForBrowse, connectionErrorKey, createSshWorkspace, listConnections, onConnectionsChanged } from '../services/connections'
 import { useWindowStore } from '../stores/window'
+import { Spinner } from '../components/ui/Spinner'
 
 export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidden: boolean; onClose(): void; onCreated(workspace: Workspace): Promise<boolean> }): ReactNode {
   const { t } = useI18n()
@@ -73,7 +74,7 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
   const entries = directory?.entries.filter((entry) => showHidden || !entry.name.startsWith('.')) ?? []
   return <Dialog open={!hidden} width={600} title={t('ssh.create')} onClose={onClose} footer={<>
     <Button size="sm" onClick={onClose}>{t('common.cancel')}</Button>
-    <Button size="sm" variant="accent" disabled={busy || (directory === null && (!selected || !allowed))} icon={busy ? <LoaderCircle size={13} className="animate-spin" /> : <Server size={13} />}
+    <Button size="sm" variant="accent" disabled={busy || (directory === null && (!selected || !allowed))} icon={busy ? <Spinner size="sm" /> : <Server size={13} />}
       onClick={() => { if (directory) void create(); else void loadDirectory() }}>{t(directory ? 'ssh.useDirectory' : 'ssh.connect')}</Button>
   </>}>
     <div className="flex flex-col gap-3">

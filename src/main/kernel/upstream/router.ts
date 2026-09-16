@@ -558,9 +558,9 @@ export class UpstreamRouter {
       const guardedBody = enforceThinkingPreference(patchedBody, thinkingInput)
       // Model-level patches are allowed to customise ordinary parameters, but
       // Provider-owned Anthropic identity/cache fields are re-applied at the
-      // final wire boundary. This keeps metadata.user_id mandatory and makes a
-      // Provider's off/5m/1h choice authoritative even for legacy aliases with
-      // broad custom patches.
+      // final wire boundary. This keeps metadata.user_id and caching mandatory,
+      // with the Provider's 5m/1h lifetime authoritative even for legacy aliases
+      // with broad custom patches.
       const anthropicBody = protocol === 'anthropic' ? applyAnthropicRequestOptions(guardedBody, {
         userId: context.workspaceId,
         cacheTtl

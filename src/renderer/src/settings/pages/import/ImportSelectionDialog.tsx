@@ -9,7 +9,7 @@
  * 会话,整包过一次结构化克隆就是打开弹窗时肉眼可见的一卡
  * (见 `shared/domain/import.ts` 的 `ImportPreview` 注释)。
  */
-import { AlertTriangle, ChevronDown, Loader2, Search } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Search } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type {
   ImportCategory,
@@ -29,6 +29,7 @@ import { useI18n, type TranslationKey } from '../../../i18n'
 import * as importService from '../../../services/import'
 import { sourceNameKey } from './source-name'
 import { Box } from './ImportSyncDialog'
+import { Spinner } from '../../../components/ui/Spinner'
 import {
   IMPORT_GROUPS,
   groupState,
@@ -196,7 +197,7 @@ export function ImportSelectionDialog({
             disabled={busy || loading || !blockers.ok}
             onClick={() => onApply([...selected], [...targets].map(([projectKey, workspaceId]) => ({ projectKey, workspaceId })))}
           >
-            {busy ? <Loader2 size={13} className="animate-spin" /> : null}
+            {busy ? <Spinner size="sm" /> : null}
             {`${t('import.applyButton')}${counts.total > 0 ? ` (${String(counts.total)})` : ''}`}
           </Button>
         </>
@@ -234,7 +235,7 @@ export function ImportSelectionDialog({
 
       {loading && items.length === 0 && (
         <p role="status" className="flex items-center gap-1.5 py-6 text-[12px] text-fg-muted">
-          <Loader2 size={13} className="animate-spin" />
+          <Spinner size="sm" />
           {t('import.scanning')}
         </p>
       )}

@@ -21,7 +21,7 @@ import { z } from 'zod'
 import { DIR_LISTING_LIMIT, sortEntries, type FileEntry } from '../../../../shared/domain/file-tree'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import { defineTool } from '../define'
-import type { ToolRegistration } from '../registry'
+import type { ToolContext, ToolRegistration } from '../registry'
 import { compileGlob, normalizeGlobPath } from './glob-match'
 import { humanSize, looksBinary, relOf, resolvePath } from './paths'
 import { markRead, wasRead } from './read-tracker'
@@ -40,6 +40,13 @@ function mustReadFirst(rel: string): string {
   return (
     `You have not read ${rel} in this session yet. Read it first, then edit.` +
     `This exists so you cannot overwrite a file from memory and silently wipe out what you never saw.`
+  )
+}
+
+function restrictedWrite(ctx: ToolContext, abs: string, rel: string) {
+  if (ctx.writeFileRestriction === undefined || abs === ctx.writeFileRestriction) return undefined
+  return toolFail(
+    `Plan mode may only modify its active Markdown plan. ${rel} is outside that file; no changes were made.`
   )
 }
 
@@ -187,6 +194,8 @@ export const writeTool: ToolRegistration = defineTool({
     if (!r.ok) return r.result
     const { fs } = ctx.host
     const rel = relOf(ctx, r.abs)
+    const blocked = restrictedWrite(ctx, r.abs, rel)
+    if (blocked !== undefined) return blocked
 
     const existed = await fs.exists(r.abs)
     if (existed) {
@@ -251,6 +260,8 @@ export const editTool: ToolRegistration = defineTool({
     if (!r.ok) return r.result
     const { fs } = ctx.host
     const rel = relOf(ctx, r.abs)
+    const blocked = restrictedWrite(ctx, r.abs, rel)
+    if (blocked !== undefined) return blocked
 
     if (!(await fs.exists(r.abs))) {
       return toolFail(`File does not exist: ${rel}. Use Write to create a new file.`)

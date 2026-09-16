@@ -10,6 +10,7 @@
  */
 import type { AgentColor, AgentDraft } from '../../../../../shared/domain/agent-def'
 import { AGENT_NAME_RE, AGENT_TOOL_CHOICES, isAgentColor } from '../../../../../shared/domain/agent-def'
+export { AGENT_COLOR_HEX, agentColorHex } from '../../../../../shared/domain/agent-def'
 import { readField, readListField, setField, setListField, type Frontmatter } from '../markdown/frontmatter-form'
 
 /**
@@ -121,27 +122,4 @@ export function applyDraft(form: AgentForm, draft: AgentDraft): AgentForm {
     toolsMode: draft.tools === undefined ? 'all' : 'custom',
     tools: draft.tools === undefined ? form.tools : [...draft.tools]
   }
-}
-
-/**
- * 色名 → 实际颜色。
- *
- * ★ 不用 CSS 变量:这八个是**内容里的值**(用户文件里写着 `color: blue`),
- *   不是主题的语义色。跟着主题走的话,换一次主题,两个原本不同的标记可能撞成
- *   同一个颜色 —— 而标记的全部用处就是一眼能分开。
- */
-export const AGENT_COLOR_HEX: Record<AgentColor, string> = {
-  yellow: '#e0a300',
-  red: '#e5484d',
-  orange: '#f76b15',
-  green: '#30a46c',
-  cyan: '#00a2c7',
-  blue: '#3e63dd',
-  purple: '#8e4ec6',
-  pink: '#d6409f'
-}
-
-/** 列表行前面那个小圆点的颜色。没标或者认不出就不画。 */
-export function agentColorHex(color: string | undefined): string | undefined {
-  return color !== undefined && isAgentColor(color) ? AGENT_COLOR_HEX[color] : undefined
 }

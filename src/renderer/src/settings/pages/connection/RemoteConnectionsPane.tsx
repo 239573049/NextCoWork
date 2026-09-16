@@ -1,4 +1,4 @@
-import { Cable, FolderOpen, LoaderCircle, Pencil, Plus, Server, Trash2, Unplug } from 'lucide-react'
+import { Cable, FolderOpen, Pencil, Plus, Server, Trash2, Unplug } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { ConnectionProfile, ConnectionProfileInput, SshAuthMethod } from '../../../../../shared/domain/environment'
 import { Button } from '../../../components/ui/Button'
@@ -8,6 +8,7 @@ import { Segmented } from '../../../components/ui/Segmented'
 import { Select } from '../../../components/ui/Select'
 import { TextInput } from '../../../components/ui/TextInput'
 import { useI18n } from '../../../i18n'
+import { Spinner } from '../../../components/ui/Spinner'
 import { cancelConnectionRequest, closeBrowse, connectForBrowse, connectionErrorKey, disconnectConnection, listConnections,
   onConnectionsChanged, onConnectionStatus, pickSshFile, removeConnection, saveConnection } from '../../../services/connections'
 
@@ -64,7 +65,7 @@ export function RemoteConnectionsPane(): ReactNode {
         </label>
         <IconButton label={t(status.phase === 'ready' ? 'ssh.disconnect' : 'ssh.test')} disabled={busy !== null || !profile.enabled}
           onClick={() => { if (status.phase === 'ready') void run(profile.id, () => disconnectConnection(profile.id)); else setConfirmTest(profile) }}>
-          {busy === profile.id ? <LoaderCircle size={14} className="animate-spin" /> : status.phase === 'ready' ? <Unplug size={14} /> : <Cable size={14} />}
+          {busy === profile.id ? <Spinner size="sm" /> : status.phase === 'ready' ? <Unplug size={14} /> : <Cable size={14} />}
         </IconButton>
         <IconButton label={t('ssh.edit')} disabled={busy !== null} onClick={() => setEditing({ profile, hasPassword })}><Pencil size={14} /></IconButton>
         <IconButton label={t('ssh.remove')} disabled={busy !== null} onClick={() => setDeleting(profile)}><Trash2 size={14} /></IconButton>
@@ -136,7 +137,7 @@ export function ServerEditor({ editing, hasPassword, onClose }: { editing: Conne
   </div>
   return <Dialog open title={t(editing ? 'ssh.edit' : 'ssh.add')} onClose={() => { if (!busy) onClose() }} width={680} footer={<>
     <Button size="sm" onClick={onClose} disabled={busy}>{t('common.cancel')}</Button>
-    <Button size="sm" variant="accent" disabled={busy || !valid || (targetChange && !confirmed)} onClick={() => { void save() }} icon={busy ? <LoaderCircle size={13} className="animate-spin" /> : undefined}>{t('common.save')}</Button>
+    <Button size="sm" variant="accent" disabled={busy || !valid || (targetChange && !confirmed)} onClick={() => { void save() }} icon={busy ? <Spinner size="sm" /> : undefined}>{t('common.save')}</Button>
   </>}>
     <fieldset disabled={busy} className="flex min-w-0 flex-col gap-4" onChangeCapture={() => setConfirmed(false)}>
       <section aria-label={t('ssh.basicInfo')} className="divide-y divide-border overflow-hidden rounded-[10px] border border-border">

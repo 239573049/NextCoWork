@@ -86,7 +86,7 @@ export function MessageImage({
             而 `max-w-full` 只管宽度 —— 竖长图仍会占满整屏往下推。
             两个方向都要限,`object-contain` 保证不变形。
           */
-          className="my-1 max-h-[320px] max-w-full rounded-card border border-border object-contain"
+          className="my-1 max-h-[320px] max-w-full rounded-card border border-stroke object-contain"
         />
       </button>
 
@@ -114,7 +114,7 @@ function ImagePlaceholder({
     <div
       data-testid="message-image-placeholder"
       className={cn(
-        "my-1 inline-flex items-center gap-2 rounded-card border border-border",
+        "my-1 inline-flex items-center gap-2 rounded-card border border-stroke",
         "bg-tint/50 px-2.5 py-2 text-[12px] text-fg-faint",
       )}
     >

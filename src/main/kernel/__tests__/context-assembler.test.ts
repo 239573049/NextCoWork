@@ -20,6 +20,9 @@ import {
   estimateTokens,
   estimateTools,
   resolveThinkingBudget,
+  tokenCalibration,
+  MAX_TOKEN_CALIBRATION,
+  MIN_TOKEN_CALIBRATION,
   type AssembleInput,
   type SystemPromptInput
 } from '../context-assembler'
@@ -179,22 +182,19 @@ describe('buildSystemPrompt', () => {
     expect(s).toContain('Shell: cmd.exe')
   })
 
-  /** plan 的真正实现在工具过滤,但提示词也得说 —— 否则模型会一直问「为什么写不了」 */
-  it('规划模式追加说明', () => {
-    const s = buildSystemPrompt({ ...PROMPT, mode: 'plan' })
-    expect(s).toContain('Plan mode')
-    expect(s).toContain('read-only')
+  it('追加运行时解析出的模式提示词', () => {
+    const s = buildSystemPrompt({ ...PROMPT, mode: 'plan', modePrompt: 'PLAN WORKFLOW SENTINEL' })
+    expect(s).toContain('PLAN WORKFLOW SENTINEL')
   })
 
-  it('目标模式追加说明', () => {
+  it('不再根据旧模式 id 隐式注入提示词', () => {
     const s = buildSystemPrompt({ ...PROMPT, mode: 'goal' })
-    expect(s).toContain('Goal mode')
+    expect(s).not.toContain('Goal mode')
   })
 
-  it('普通模式两段都不出现', () => {
+  it('编程模式没有额外模式提示词', () => {
     const s = buildSystemPrompt({ ...PROMPT })
-    expect(s).not.toContain('Plan mode')
-    expect(s).not.toContain('Goal mode')
+    expect(s).not.toContain('PLAN WORKFLOW SENTINEL')
   })
 
   it('没有 Skill 时不出现 Skill 段', () => {
@@ -378,6 +378,7 @@ describe('buildSystemPrompt · 个性化', () => {
     const s = buildSystemPrompt({
       ...PROMPT,
       mode: 'plan',
+      modePrompt: '# Plan mode\n\nInvestigate and clarify before writing the plan.',
       personalization: P({ instructions: '别问我,直接改' })
     })
     const env = s.indexOf('# Environment')
@@ -540,6 +541,69 @@ describe('assemble', () => {
     // 封顶之后判据重新跟历史长度有关:塞满就该压了
     const huge = [userMessage('m', [{ type: 'text', text: '中'.repeat(200_000) }], NOW)]
     expect(assemble({ ...over, messages: huge }).usage.shouldCompact).toBe(true)
+  })
+
+  /*
+    ── 估算 → 真值的校准 ──
+    ★ 这一组钉的是一个线上 bug:圆环(读上游报回的真值)已经写着「211K / 200K,
+    已超出」,自动压缩却一次都没触发 —— 因为判据读的是本地 chars/4 估算,
+    同一份请求在那里只有 ~152K,恰好压在 200K×0.8 之下。两个数从不对账。
+  */
+  it('★ 校准系数把偏低的估算拉回真值,判据随之为真', () => {
+    // 估算约 100K(400K 拉丁字符 ÷ 4),阈值 200K×0.8 − 预留 8192 ≈ 151.8K
+    const messages = [userMessage('m', [{ type: 'text', text: 'x'.repeat(400_000) }], NOW)]
+    const base = input({ messages, contextWindow: 200_000, maxOutputTokens: 8192 })
+    expect(assemble(base).usage.shouldCompact).toBe(false)
+    // 上游报回来的真值是估算的两倍 —— 这一份请求其实已经 200K 了
+    expect(assemble({ ...base, tokenCalibration: 2 }).usage.shouldCompact).toBe(true)
+  })
+
+  /** `used` 与 `segments` 是「谁占了多少」的同一套读数,校准只走判据。 */
+  it('★ 校准不动 used,也不动归因之和', () => {
+    const messages = [userMessage('m', [{ type: 'text', text: 'x'.repeat(400_000) }], NOW)]
+    const plain = assemble(input({ messages }))
+    const scaled = assemble(input({ messages, tokenCalibration: 2.5 }))
+    expect(scaled.usage.used).toBe(plain.usage.used)
+    expect(scaled.usage.segments?.reduce((n, s) => n + s.tokens, 0)).toBe(scaled.usage.used)
+  })
+
+  /** 没有真值可用时必须逐字退回旧行为,包括那个数本身。 */
+  it('缺省校准系数等于 1,calibratedInputTokens 与 used 逐字相等', () => {
+    const messages = [userMessage('m', [{ type: 'text', text: '中'.repeat(30_000) }], NOW)]
+    const out = assemble(input({ messages }))
+    expect(out.calibratedInputTokens).toBe(out.usage.used)
+    expect(assemble(input({ messages, tokenCalibration: 1 })).usage.shouldCompact).toBe(
+      out.usage.shouldCompact
+    )
+  })
+
+  describe('tokenCalibration', () => {
+    it('真值 ÷ 估算', () => {
+      expect(tokenCalibration(100_000, 200_000)).toBe(2)
+    })
+
+    /*
+      ★ 下界 1 挡的是一类具体的上游:按「未命中缓存的那部分」报 input_tokens、
+      又不给 cache_read 的中转。系数能小于 1 的话,这种上游会把自动压缩整个关掉。
+    */
+    it('★ 真值比估算还小时夹到 1 —— 上游读数不能把判据变宽松', () => {
+      expect(tokenCalibration(100_000, 1_000)).toBe(MIN_TOKEN_CALIBRATION)
+    })
+
+    /** 上界挡的是「把整轮累计当成单次提示词报回来」那种读数。 */
+    it('离谱的真值被夹在上界', () => {
+      expect(tokenCalibration(1_000, 10_000_000)).toBe(MAX_TOKEN_CALIBRATION)
+    })
+
+    /** 两个数任意一个不可用 → 退化成纯估算,而不是 NaN / Infinity。 */
+    it.each([
+      ['还没发过请求', 0, 200_000],
+      ['上游没报 usage', 100_000, 0],
+      ['负数', -1, 200_000],
+      ['非有限值', Number.NaN, 200_000]
+    ])('%s 时退化为 1', (_case, estimated, reported) => {
+      expect(tokenCalibration(estimated, reported)).toBe(1)
+    })
   })
 
   it('工具占用计入 used', () => {

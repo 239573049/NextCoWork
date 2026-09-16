@@ -24,7 +24,7 @@ import { webFetchTool } from './web'
 import { webSearchTool } from './web-search'
 import { browserTools } from './browser'
 import { askUserTool } from './interaction'
-import { enterPlanModeTool, exitPlanModeTool, planUpdateTool } from './plan'
+import { enterPlanModeTool, exitPlanModeTool } from './plan-file'
 
 export function builtinTools(): ToolRegistration[] {
   return [
@@ -43,7 +43,6 @@ export function builtinTools(): ToolRegistration[] {
     webSearchTool,
     askUserTool,
     enterPlanModeTool,
-    planUpdateTool,
     exitPlanModeTool,
     ...browserTools,
     /*

@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock3, LoaderCircle, Play, Plus, Trash2, Pencil, X } from 'lucide-react'
+import { AlertTriangle, Clock3, Play, Plus, Trash2, Pencil, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput, ScheduleRule } from '../../../../shared/domain/scheduled'
 import type { Workspace } from '../../../../shared/domain/workspace'
@@ -30,6 +30,8 @@ import { cn } from '../../lib/cn'
 import { ContextMenu, type ContextMenuPosition } from '../../components/ui/ContextMenu'
 import { ChatView } from '../chat/ChatView'
 import type { FallbackModel } from '../chat/Composer'
+import { Spinner } from '../../components/ui/Spinner'
+import { SidebarReveal } from '../../shell/SidebarReveal'
 
 type PageMode = 'runs' | 'tasks'
 type DialogState = { mode: 'create' | 'edit'; task?: ScheduledTask } | null
@@ -177,7 +179,11 @@ export function ScheduledFeature({ onClose }: { onClose?: () => void } = {}): Re
       <section style={{ width: listWidth }} className="flex shrink-0 flex-col border-r border-hairline">
         <div className="px-4 pb-3 pt-4">
           <div className="flex items-center justify-between gap-2">
-            <div className="text-[14px] font-medium text-fg">{t('scheduled.title')}</div>
+            {/* 收起态下这里既让出红绿灯也把侧边栏叫得回来,见 shell/SidebarReveal */}
+            <div className="flex min-w-0 items-center gap-2">
+              <SidebarReveal />
+              <div className="text-[14px] font-medium text-fg">{t('scheduled.title')}</div>
+            </div>
             {onClose !== undefined && <button type="button" className="rounded-[6px] p-1 text-fg-faint hover:bg-tint-hover hover:text-fg" onClick={onClose} aria-label={t('scheduled.close')}><X size={15} /></button>}
             <Select value={filterWorkspace} options={workspaceOptions} onValueChange={setFilterWorkspace} ariaLabel={t('scheduled.workspaceFilter')} className="w-[138px]" />
           </div>
@@ -251,7 +257,7 @@ export function ScheduledFeature({ onClose }: { onClose?: () => void } = {}): Re
 function RunStatus({ status }: { status: ScheduledRun['status'] }): ReactNode {
   const { t } = useI18n()
   const key = status === 'success' ? 'scheduled.success' : status === 'error' ? 'scheduled.error' : status === 'running' ? 'scheduled.running' : status === 'queued' ? 'scheduled.queued' : status === 'skipped' ? 'scheduled.skipped' : status === 'aborted' ? 'scheduled.aborted' : 'scheduled.status'
-  return <span className={cn('inline-flex shrink-0 items-center gap-1 text-[11px]', status === 'running' || status === 'queued' ? 'text-accent' : status === 'error' ? 'text-danger' : 'text-fg-faint')} aria-live="polite">{(status === 'running' || status === 'queued') && <LoaderCircle size={11} className="animate-spin motion-reduce:animate-none" />}{t(key)}</span>
+  return <span className={cn('inline-flex shrink-0 items-center gap-1 text-[11px]', status === 'running' || status === 'queued' ? 'text-accent' : status === 'error' ? 'text-danger' : 'text-fg-faint')} aria-live="polite">{(status === 'running' || status === 'queued') && <Spinner size="xs" />}{t(key)}</span>
 }
 
 function TaskDetail({ task, runs, workspaceName, onRun, onEdit, onDelete, onToggle }: { task: ScheduledTask | null; runs: ScheduledRun[]; workspaceName: (id: string) => string; onRun: (task: ScheduledTask) => void; onEdit: (task: ScheduledTask) => void; onDelete: (task: ScheduledTask) => void; onToggle: (task: ScheduledTask) => void }): ReactNode {

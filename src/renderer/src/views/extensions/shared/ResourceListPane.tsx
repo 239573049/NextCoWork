@@ -23,7 +23,9 @@ export function ResourceListPane<T extends ResourceRow>({
   onToggle,
   icon,
   emptyTitle,
-  emptyHint
+  emptyHint,
+  openReadOnly = false,
+  hideToggle = false
 }: {
   rows: readonly T[]
   error: string | null
@@ -33,6 +35,8 @@ export function ResourceListPane<T extends ResourceRow>({
   icon: ReactNode
   emptyTitle: string
   emptyHint: string
+  openReadOnly?: boolean
+  hideToggle?: boolean
 }): ReactNode {
   const { t } = useI18n()
   // 搜索词和筛选是**这半边自己的** UI 状态,不值得往上提:提上去之后每个
@@ -80,6 +84,8 @@ export function ResourceListPane<T extends ResourceRow>({
         emptyHint={emptyHint}
         onOpen={onOpen}
         onToggle={onToggle}
+        openReadOnly={openReadOnly}
+        hideToggle={hideToggle}
       />
     </div>
   )

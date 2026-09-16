@@ -299,9 +299,9 @@ export function SkillsFeature({
           </Button>
         </div>
       </header>
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5">
-        <div className="mx-auto w-full max-w-[1080px]">
-          <div className="flex flex-wrap items-center gap-2">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-6 py-5">
+        <div className="mx-auto flex min-h-0 w-full max-w-[1080px] flex-1 flex-col">
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             <Segmented
               value={view}
               onChange={(mode) => {
@@ -336,7 +336,7 @@ export function SkillsFeature({
             />
           </div>
           {view === 'market' && (
-            <div className="mt-4 flex flex-wrap gap-2">
+            <div className="mt-4 flex shrink-0 flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => setCategory('')}
@@ -368,7 +368,7 @@ export function SkillsFeature({
               ))}
             </div>
           )}
-          <div key={view} className="skills-view-enter">
+          <div key={view} className="skills-view-enter mt-4 flex min-h-0 flex-1 flex-col overflow-y-auto">
             {view === 'mine' && (
               <MineDashboard
                 items={mineItems}
@@ -394,12 +394,12 @@ export function SkillsFeature({
               />
             )}
             {error !== null && (
-              <div className="mt-4 rounded-[10px] border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
+              <div className="mt-4 shrink-0 rounded-[10px] border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
                 {error}
               </div>
             )}
             {view === 'market' && marketError && (
-              <div className="mt-4 rounded-[10px] border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
+              <div className="mt-4 shrink-0 rounded-[10px] border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
                 {t('skills.marketLoadFailed')}
                 <Button
                   size="sm"
@@ -420,7 +420,8 @@ export function SkillsFeature({
                   {t('skills.empty')}
                 </div>
               ) : (
-                <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                   {filtered.map((item, index) => (
                     <SkillCard
                       key={item.id}
@@ -454,6 +455,7 @@ export function SkillsFeature({
                       t={t}
                     />
                   ))}
+                  </div>
                 </div>
               ))}
           </div>
@@ -683,8 +685,8 @@ function MineDashboard({
     { value: 'untriggered', label: t('skills.statusUntriggered') }
   ] as const
   return (
-    <section className="space-y-4">
-      <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+    <section className="flex min-h-0 flex-1 flex-col gap-4">
+      <div className="grid shrink-0 grid-cols-2 gap-2 xl:grid-cols-4">
         <MineStat
           value={items.length}
           label={t('skills.totalSkills')}
@@ -707,7 +709,7 @@ function MineDashboard({
           tone={issueCount > 0 ? 'danger' : 'default'}
         />
       </div>
-      <div className="max-w-[330px] rounded-[14px] border border-hairline bg-surface p-3.5">
+      <div className="max-w-[330px] shrink-0 rounded-[14px] border border-hairline bg-surface p-3.5">
         <div className="flex items-center justify-between text-[12px] font-medium text-fg">
           <span>{t('skills.contextUsage')}</span>
           <span>{contextPercent}%</span>
@@ -722,7 +724,7 @@ function MineDashboard({
           {t('skills.contextUsageHint', { active: activeCount, total: items.length })}
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <Segmented
           value={scopeFilter}
           onChange={onScopeChange}
@@ -754,8 +756,8 @@ function MineDashboard({
           </span>
         )}
       </div>
-      <div className="overflow-hidden rounded-[14px] border border-hairline bg-surface">
-        <div className="hidden grid-cols-[minmax(250px,1.8fr)_130px_130px_90px_110px_82px] gap-3 border-b border-hairline px-3 py-2 text-[11px] text-fg-faint xl:grid">
+      <div className="min-h-[160px] flex-1 overflow-y-auto rounded-[14px] border border-hairline bg-surface">
+        <div className="sticky top-0 z-10 hidden grid-cols-[minmax(250px,1.8fr)_130px_130px_90px_110px_82px] gap-3 border-b border-hairline bg-surface px-3 py-2 text-[11px] text-fg-faint xl:grid">
           <span>{t('skills.tableSkill')}</span>
           <span>{t('skills.scopeLabel')}</span>
           <span>{t('skills.workspaceStatus')}</span>

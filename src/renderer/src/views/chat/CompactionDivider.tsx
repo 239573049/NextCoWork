@@ -5,14 +5,15 @@
  * 而不是又一个气泡 —— 气泡会被读成「有人说了句话」,而这里发生的事情是
  * 更早的历史从此不再原样发给模型。
  *
- * ★ 只复用已有的 token 和结构:线是 `h-px bg-border`(和 MenuSeparator 同一句),
- * 药丸是 `rounded-pill bg-tint`,展开区照搬 ContextCheckpointPanel 的卡片体。
- * 不为这一处新起一套设计语言。
+ * ★ 只复用已有的 token 和结构:线是 `h-px bg-stroke`(装饰性收边,不是控件轮廓 ——
+ *   见 `theme.css` 里 `--color-stroke` 那段),药丸是 `rounded-pill bg-tint`,
+ *   展开区走公共的 `Surface`。不为这一处新起一套设计语言。
  */
 import { useState, type ReactNode } from 'react'
 import { ChevronDown, Pencil, Save } from 'lucide-react'
 import type { ContextCheckpoint } from '../../../../shared/agent/context-management'
 import { useI18n } from '../../i18n'
+import { Surface, SurfaceReveal } from '../../components/ui/Surface'
 import { updateContextCheckpoint } from '../../services/context'
 import { cn } from '../../lib/cn'
 
@@ -71,11 +72,11 @@ export function CompactionDivider({
             </>
           )}
         </button>
-        <span aria-hidden className="h-px flex-1 bg-border" />
+        <span aria-hidden className="h-px flex-1 bg-stroke" />
       </div>
 
-      {open && (
-        <div className="rounded-card border border-hairline bg-surface-raised/40 px-3 py-2">
+      <SurfaceReveal open={open} divider={false}>
+        <Surface className="px-3 py-2">
           <TokenDelta before={checkpoint.inputTokensBefore} after={checkpoint.inputTokensAfter} />
           {editing ? (
             <textarea
@@ -85,7 +86,7 @@ export function CompactionDivider({
               aria-label={t('chat.contextNote')}
             />
           ) : (
-            <p className="break-words whitespace-pre-wrap text-[12px] leading-[1.5] text-fg-muted">{checkpoint.note}</p>
+            <p className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto break-words pr-1 whitespace-pre-wrap text-[12px] leading-[1.5] text-fg-muted">{checkpoint.note}</p>
           )}
           <div className="mt-2 flex items-center justify-end gap-1.5">
             {!editable ? (
@@ -100,8 +101,8 @@ export function CompactionDivider({
               </button>
             )}
           </div>
-        </div>
-      )}
+        </Surface>
+      </SurfaceReveal>
     </div>
   )
 }

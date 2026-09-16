@@ -416,6 +416,74 @@ describe('anthropicErrorToAgentError', () => {
     expect(e.code).toBe('context_length')
   })
 
+  it.each(['request', 'request_body', 'requestBody', 'input', 'messages', 'system', 'tools', 'body', 'payload'])(
+    '错误体的 %s 请求回显不应被当成缓存拒绝证据',
+    (key) => {
+      for (const [status, message, code] of [
+        [400, 'prompt is too long: 250000 tokens > 200000 maximum', 'context_length'],
+        [400, 'bad tool schema', 'provider'],
+        [422, 'bad tool schema', 'provider']
+      ] as const) {
+        const e = anthropicErrorToAgentError(status, {
+          error: { type: 'invalid_request_error', message },
+          [key]: {
+            cache_control: { type: 'ephemeral', ttl: '5m' },
+            system: 'private-system-prompt',
+            messages: [{ role: 'user', content: 'private-user-message' }]
+          }
+        })
+        expect(e).toMatchObject({ code, status, retryable: false })
+        expect(JSON.stringify(e)).not.toContain('private-system-prompt')
+        expect(JSON.stringify(e)).not.toContain('private-user-message')
+      }
+    }
+  )
+
+  it('嵌套在 error/details 里的请求回显也不能触发缓存误判', () => {
+    const echoedInput = { cache_control: { type: 'ephemeral' }, prompt: 'private-prompt' }
+    const e = anthropicErrorToAgentError(400, {
+      error: { type: 'invalid_request_error', message: 'bad tool schema', input: echoedInput },
+      details: [{ request_body: echoedInput }]
+    })
+    expect(e.code).toBe('provider')
+    expect(JSON.stringify(e)).not.toContain('private-prompt')
+  })
+
+  it('没有标准错误消息时，请求回显也不参与分类或错误摘要', () => {
+    const e = anthropicErrorToAgentError(400, {
+      request: { cache_control: { type: 'ephemeral' }, prompt: 'private-prompt' }
+    })
+    expect(e.code).toBe('provider')
+    expect(JSON.stringify(e)).not.toContain('private-prompt')
+  })
+
+  it('真正的缓存拒绝仍保留 details，但不把请求回显写入错误文案', () => {
+    const echoedInput = { cache_control: { type: 'ephemeral' }, prompt: 'private-prompt' }
+    const e = anthropicErrorToAgentError(422, {
+      error: { type: 'invalid_request_error', message: 'invalid request' },
+      details: { field: 'cache_control', reason: 'unsupported', input: echoedInput },
+      request: echoedInput
+    })
+    expect(e.code).toBe('cache_unsupported')
+    expect(e.messageParams?.detail).toContain('cache_control')
+    expect(e.messageParams?.detail).toContain('unsupported')
+    expect(JSON.stringify(e)).not.toContain('private-prompt')
+  })
+
+  it.each(['cache_control', 'messages'])('校验器按错误路径 %s 分类，而不是按 input 回显分类', (field) => {
+    const e = anthropicErrorToAgentError(422, {
+      detail: [{
+        loc: ['body', field],
+        msg: 'extra fields not permitted',
+        type: 'value_error.extra',
+        input: { cache_control: { type: 'ephemeral' }, prompt: 'private-prompt' }
+      }]
+    })
+    expect(e.code).toBe(field === 'cache_control' ? 'cache_unsupported' : 'provider')
+    expect(e.message).toContain(field)
+    expect(JSON.stringify(e)).not.toContain('private-prompt')
+  })
+
   it('其余 400 → provider 且不可重试', () => {
     expect(anthropicErrorToAgentError(400, body('invalid_request_error', 'bad tool schema'))).toMatchObject({
       code: 'provider',
@@ -444,9 +512,12 @@ describe('anthropicErrorToAgentError', () => {
       cacheTtl: '5m',
       providerName: '中转站 A'
     })
-    expect(e).toMatchObject({ code: 'cache_unsupported', status: 400, retryable: false })
+    expect(e).toMatchObject({
+      code: 'cache_unsupported', status: 400, retryable: false,
+      messageKey: 'agent.error.cacheUnsupported',
+      messageParams: { provider: '中转站 A', ttl: '5m', detail: 'cache_control is not supported' }
+    })
     expect(e.message).toContain('中转站 A')
-    expect(e.message).toContain('5 分钟')
     expect(e.message).toContain('cache_control is not supported')
   })
 
@@ -524,20 +595,18 @@ describe('anthropicErrorToAgentError', () => {
     expect(e.message.length).toBeLessThan(4_500)
   })
 
-  it('缓存关闭时普通 400 不会被误判为 cache_unsupported', () => {
-    expect(
-      anthropicErrorToAgentError(400, { error: { message: 'cache_control is not supported' } }, { cacheTtl: 'off' })
-    ).toMatchObject({ code: 'provider', retryable: false })
-  })
-
-  it('运行时未知 TTL 按关闭处理，不会误判缓存不兼容', () => {
+  it.each([undefined, 'off', '90d'])('缺省或旧 TTL %s 使用强制 5m 缓存，拒绝标记时明确报错', (cacheTtl) => {
     expect(
       anthropicErrorToAgentError(
         400,
         { error: { message: 'cache_control is not supported' } },
-        { cacheTtl: '90d' as never }
+        { cacheTtl: cacheTtl as never }
       )
-    ).toMatchObject({ code: 'provider', retryable: false })
+    ).toMatchObject({
+      code: 'cache_unsupported', retryable: false,
+      messageKey: 'agent.error.cacheUnsupportedUnnamed',
+      messageParams: { ttl: '5m', detail: 'cache_control is not supported' }
+    })
   })
 
   it('普通错误消息中的相似子串不会被误判为缓存不兼容', () => {

@@ -58,12 +58,14 @@ import { providerCredentialRef } from '../../shared/domain/provider'
 import { DRAFT_ATTACHMENT_TTL_MS } from '../../shared/domain/attachment'
 import { databaseDirectory, databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, openDatabase, txAsync, vacuumDatabase } from '../db'
 import { MIGRATIONS } from '../db/schema'
+import { PROFILE_DIRECTORY_SEGMENT } from '../db/config-profile'
 import * as repo from '../db/repo'
 import { getHost } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { PROXY_PASSWORD_REF } from '../net/proxy'
 import { IpcError } from './errors'
+import { isWithin, recordPendingDelete } from './pending-delete'
 import { runs } from '../kernel/run-registry'
 import { jobStatusFor } from '../imports/service'
 import { store as stateStore } from '../state/store'
@@ -167,6 +169,45 @@ const MANAGED_LOCAL_FILE_PATTERNS = [
   /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u,
   /^nextcowork [1-9]\d*\.db(?:-(?:wal|shm))?$/u
 ] as const
+/**
+ * 「删不掉就推迟到下次启动」只对 Chromium 自己拥有的那些路径成立。
+ *
+ * ★ 主进程活着的时候 Chromium 一直握着 profile 里的文件句柄,而 Windows 不允许
+ *   rename 一棵内部有打开句柄的目录。删除请求恰恰是在应用还活着时发出的,所以
+ *   `GPUCache` 之流在 Windows 上**必然** `EPERM` —— 旧代码让它整体回滚,结果是
+ *   「删除并退出」在 Windows 上一个字节也删不掉。收尾方案见 `./pending-delete.ts`。
+ *
+ * ★ 判据刻意只认 Chromium 的东西。`nextcowork.db*` / `attachments` / `logs` /
+ *   `settings.json` 这些是我们自己的数据,它们搬不动就是真出了问题,必须维持
+ *   「全有或全无」—— 暂存机制存在的全部理由就是不留下删了一半的库。
+ *   `nextcowork 2.db` 这类带碰撞后缀的副本同样归我们,不在此列。
+ */
+const DEFERRABLE_LOCAL_NAMES = new Set<string>([...ELECTRON_PROFILE_PATHS, 'DevToolsActivePort'])
+const DEFERRABLE_LOCAL_PATTERNS = [
+  /^DIPS-(?:wal|shm)(?: [1-9]\d*)?$/u,
+  /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u
+] as const
+
+function isDeferrableLocalPath(path: string): boolean {
+  const name = basename(path)
+  return DEFERRABLE_LOCAL_NAMES.has(name) || DEFERRABLE_LOCAL_PATTERNS.some((p) => p.test(name))
+}
+
+/**
+ * 目标被别的进程占着的那几种 errno。Windows 报 `EPERM`,POSIX 上更常见 `EBUSY`。
+ *
+ * ★ 要穿过 `cause` 看。`stageManagedPath` 把 fs 的错误重包成 `IpcError`,
+ *   只看最外层的话 `code` 永远是 undefined,这个判据会一律返回 false。
+ */
+function isLockedError(err: unknown): boolean {
+  for (let current: unknown = err, depth = 0; current !== undefined && current !== null && depth < 4; depth++) {
+    const code = (current as NodeJS.ErrnoException).code
+    if (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY' || code === 'ENOTEMPTY') return true
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
 // Confirmation state is scoped to the WebContents that opened the preview.
 // Otherwise a confirmation in window B could apply the file selected in A.
 // Direct unit tests use owner 0.
@@ -1388,11 +1429,6 @@ export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Pr
   }
 }
 
-function isWithin(root: string, path: string): boolean {
-  const rel = relative(resolve(root), resolve(path))
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-}
-
 function isManagedSessionAttachment(path: string): boolean {
   const root = resolve(attachmentDirectory())
   const target = resolve(path)
@@ -1400,7 +1436,12 @@ function isManagedSessionAttachment(path: string): boolean {
   // Current non-session scopes have their own owners/cleanup rules. Everything
   // else inside attachments is either the current sessions subtree or a
   // pre-scope legacy session layout and is safe for session-orphan cleanup.
-  for (const scope of ['themes', 'exports']) {
+  /*
+    ★ `config-profiles` 必须在排除名单里。账户作用域的主题库落在
+    `attachments/config-profiles/<hash>/themes/…` —— 它是**用户的主题文件**,
+    不属于会话,按会话孤儿清掉就是「换个账户登录,壁纸全没了」。
+  */
+  for (const scope of ['themes', 'exports', PROFILE_DIRECTORY_SEGMENT]) {
     if (isWithin(join(root, scope), target)) return false
   }
   return true
@@ -1492,7 +1533,9 @@ function stageManagedPath(
     renameSync(path, destination)
     staged.push({ original: path, staged: destination })
   } catch (err) {
-    throw new IpcError('unknown', `暂存 ${path} 失败: ${String(err)}`)
+    // ★ 原始 errno 必须挂在 cause 上传出去 —— `clearLocalData` 靠它区分
+    // 「被 Chromium 占着、可以推迟」和「真的出了问题、必须回滚」。
+    throw Object.assign(new IpcError('unknown', `暂存 ${path} 失败: ${String(err)}`), { cause: err })
   }
 }
 
@@ -1906,12 +1949,40 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   const dbPath = databaseFilePath()
   const stagingRoot = join(root, `.delete-safety-${process.pid}-${Date.now()}`)
   const staged: StagedManagedPath[] = []
+  /**
+   * 被 Chromium 占住、这一轮搬不动的 profile 路径。它们**从未被 rename**,
+   * 所以不进 `staged`,也就不参与回滚 —— 原地没动过的东西没什么可还原的。
+   */
+  const deferred: string[] = []
   let databaseClosed = false
   try {
     // Move ordinary files first, then close and move SQLite as the commit
     // point. Nothing is physically erased until every target is staged.
     for (const path of managedLocalPaths(root)) {
-      stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+      /*
+        ★ 受保护的备份目录若嵌在这棵子树里就不能推迟 —— 补删是在下一次启动、
+        在一个不知道备份设置的早期时机做的 `rmSync`,推迟等于把那份备份也判了死刑。
+        这种(合法遗留的软链在 profile 目录里)情形只会出现在极端配置下,让它照旧
+        抛错回滚即可。
+      */
+      const deferrable =
+        isDeferrableLocalPath(path) && (externalBackup === null || !isWithin(path, externalBackup))
+      if (!deferrable) {
+        stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+        continue
+      }
+      /*
+        Chromium 的 profile 目录在主进程活着时句柄一直开着,Windows 上 rename 必 EPERM。
+        让这一条把整次删除拖垮是不可接受的(那正是这个功能在 Windows 上从来没成功过的
+        原因),改为记账、下次启动补删 —— 见 ./pending-delete.ts。
+        ★ 只吞「被占用」这一类错误;其它错误照旧抛出并整体回滚。
+      */
+      try {
+        stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+      } catch (err) {
+        if (!isLockedError(err)) throw err
+        deferred.push(path)
+      }
     }
     if (dbPath !== null) {
       checkpointDatabase()
@@ -1934,6 +2005,14 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
       }
     }
     throw err
+  }
+  if (deferred.length > 0) {
+    // 记账失败只记日志:删除本身已经提交了,不能因为写不下一张清单就把它报成失败。
+    try {
+      recordPendingDelete(root, deferred)
+    } catch (err) {
+      console.error('[storage] 写入补删清单失败，以下路径将残留:', deferred, err)
+    }
   }
   // 保留 Claude CLI 共享目录和外部备份目录；应用退出后下次启动会重建数据库。
   app.quit()

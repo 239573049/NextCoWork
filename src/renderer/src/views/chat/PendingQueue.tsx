@@ -62,7 +62,7 @@ export function PendingQueue({
       data-count={items.length}
       data-promoted={promotedCount}
     >
-      <div className="overflow-hidden rounded-panel border border-border bg-surface/60">
+      <div className="overflow-hidden rounded-panel border border-stroke bg-surface/60">
         <QueueHeader
           count={items.length}
           promotedCount={promotedCount}
@@ -328,7 +328,7 @@ export function PendingQueueEditor({
   return (
     <div
       data-testid="queue-editor"
-      className="my-1 rounded-card border border-border bg-surface-field p-2"
+      className="my-1 rounded-card border border-stroke bg-surface-field p-2"
     >
       <textarea
         ref={ref}

@@ -164,7 +164,17 @@ export interface ContextPreview {
 }
 
 export type ContextCheckpointSource = 'model' | 'mechanical' | 'manual' | 'auto'
-export type ContextStatusPhase = 'preparing' | 'ready' | 'fallback' | 'error'
+/**
+ * 自动压缩这一轮的结局。
+ *
+ * ★ `fallback` 与 `exhausted` **必须分开**:前者是默认配置下每次自动压缩的正常结果
+ * (折叠了较早的历史,占用真的降下来了),后者是「折叠完还是这么大」——
+ * 机械压缩只动倒数第 6 条之前的工具输出 / 思考 / 图,大头在保留区或纯正文里时
+ * 它一个 token 都削不掉。两者报成同一句话的话,用户会盯着一句「已折叠较早的历史」
+ * 看着占用一路涨过窗口,而**此时唯一有用的动作全在他那边**(开摘要压缩、
+ * 换更大的窗口、另起一个会话)。
+ */
+export type ContextStatusPhase = 'preparing' | 'ready' | 'fallback' | 'exhausted' | 'error'
 
 export interface ContextSearchHit {
   messageId: string

@@ -12,6 +12,7 @@ import { closeDatabase, DATABASE_DIRNAME, defaultDatabaseDirectory, DB_FILENAME,
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
 import { flushPendingPersists, registerIpc, shutdownClientAuth, shutdownRuns, shutdownTerminals } from './ipc'
+import { sweepPendingDelete } from './ipc/pending-delete'
 import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/rollup-task'
@@ -97,6 +98,18 @@ function resolveDataRoot(): string {
 // 必须在 app ready 之前设置才生效。
 // 显式传了 --user-data-dir 时不覆盖 —— 那正是调用方要的隔离。
 if (!explicitUserDataDir) app.setPath('userData', resolveDataRoot())
+
+/*
+  上一次「删除并退出」留下的补删清单。
+
+  ★ **必须在 `app.whenReady()` 之前**,而且要紧跟着 setPath —— 唯一能删掉 Chromium
+  profile 目录的时刻就是现在:app ready 之后 Chromium 立刻把 `GPUCache` / `Cookies` /
+  `Network` 这些打开并一直握着句柄,Windows 上就再也删不动了(那正是这份清单存在的
+  原因,见 `ipc/pending-delete.ts`)。晚一步,清单只会一轮轮攒下去。
+
+  没有清单时这是一次读文件失败,代价可以忽略;它自己吞掉所有异常,不会挡住启动。
+*/
+sweepPendingDelete(resolveDataRoot())
 
 /*
   ★ **必须在 `app.whenReady()` 之前** —— 与单实例锁、userData 改路径同属

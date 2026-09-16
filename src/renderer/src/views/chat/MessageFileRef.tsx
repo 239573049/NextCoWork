@@ -19,7 +19,7 @@ export function MessageFileRef({
     <div
       data-testid="message-file-ref"
       title={path}
-      className="flex h-8 max-w-full items-center gap-1.5 rounded-[7px] border border-border bg-tint px-2 text-[11.5px] text-fg-muted"
+      className="flex h-8 max-w-full items-center gap-1.5 rounded-[7px] border border-stroke bg-tint px-2 text-[11.5px] text-fg-muted"
     >
       <FileText size={13} className="shrink-0 text-fg-faint" />
       <span className="min-w-0 truncate">{name}</span>

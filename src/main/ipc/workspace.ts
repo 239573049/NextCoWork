@@ -16,6 +16,7 @@ import { isLocalEnvironment } from '../../shared/domain/environment'
 import { prefixedId } from '../../shared/util/id'
 import { resolveAnywhere } from '../kernel/tool/path-guard'
 import { store } from '../state/store'
+import { findLocalWorkspaceByRoot } from '../state/workspace-root'
 import { windows } from '../window/registry'
 import { IpcError } from './errors'
 import { getWorkspaceEnvironment } from '../runtime'
@@ -41,7 +42,8 @@ export async function pickWorkspace(): Promise<Workspace | null> {
   //   路径围栏后面就要面对两个都"正确"的根(方案 §9)
   const rootPath = realpathSync.native(picked)
 
-  const existing = store.listWorkspaces().find((w) => isLocalEnvironment(w.environment) && w.rootPath === rootPath)
+  // ★ 匹配走归一化比较:导入建出来的行可能是旧规则写的原样路径,只比字符串会重开一个。
+  const existing = findLocalWorkspaceByRoot(rootPath)
   if (existing) {
     const touched = store.putWorkspace({ ...existing, lastOpenedAt: Date.now(), unavailable: false })
     announce()

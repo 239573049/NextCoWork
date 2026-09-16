@@ -16,8 +16,14 @@
  * 这一条不在 `.app-drag` 区里,所以不需要逐个 `.app-no-drag` ——
  * 但拖动重排用的是同一个 hook,行为和外层一致。
  */
-import { ChevronDown, LoaderCircle, Plus, X } from "lucide-react";
-import { Fragment, type ReactNode } from "react";
+import { ChevronDown, Plus, X } from "lucide-react";
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type {
   InnerTab,
   InnerTabKind,
@@ -37,6 +43,14 @@ import { useDragReorder } from "./useDragReorder";
 import { useI18n } from "../i18n";
 import { documentKey, isDocumentDirty, useDocumentsStore } from '../stores/documents';
 import { DOCK_TAB_MIME } from './dock-layout';
+import { Spinner } from '../components/ui/Spinner'
+
+function revealTab(strip: HTMLDivElement | null, id: string | null): void {
+  if (strip === null || id === null) return;
+  const activeTab = [...strip.querySelectorAll<HTMLElement>("[data-inner-tab-id]")]
+    .find((tab) => tab.dataset.innerTabId === id);
+  activeTab?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+}
 
 export function InnerTabBar({
   tabs,
@@ -74,6 +88,61 @@ export function InnerTabBar({
   const drafts = useDocumentsStore((state) => state.entries);
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
   const mainChatCount = tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main').length;
+  const stripRef = useRef<HTMLDivElement>(null);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const [scrollEdges, setScrollEdges] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (strip === null) return;
+
+    let frame = 0;
+    const measure = (): void => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const maxScrollLeft = Math.max(0, strip.scrollWidth - strip.clientWidth);
+        const next = {
+          left: strip.scrollLeft > 1,
+          right: strip.scrollLeft < maxScrollLeft - 1,
+        };
+        setScrollEdges((current) =>
+          current.left === next.left && current.right === next.right ? current : next,
+        );
+      });
+    };
+    const scrollHorizontally = (event: WheelEvent): void => {
+      if (event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || event.deltaY === 0) return;
+      if (strip.scrollWidth <= strip.clientWidth) return;
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1;
+      const before = strip.scrollLeft;
+      strip.scrollLeft += event.deltaY * scale;
+      if (strip.scrollLeft !== before) event.preventDefault();
+    };
+    const layoutChanged = (): void => {
+      revealTab(strip, activeIdRef.current);
+      measure();
+    };
+
+    layoutChanged();
+    const resizeObserver = new ResizeObserver(layoutChanged);
+    resizeObserver.observe(strip);
+    const mutationObserver = new MutationObserver(layoutChanged);
+    mutationObserver.observe(strip, { childList: true, subtree: true, characterData: true });
+    strip.addEventListener("scroll", measure, { passive: true });
+    strip.addEventListener("wheel", scrollHorizontally, { passive: false });
+    window.addEventListener("resize", layoutChanged);
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      strip.removeEventListener("scroll", measure);
+      strip.removeEventListener("wheel", scrollHorizontally);
+      window.removeEventListener("resize", layoutChanged);
+    };
+  }, []);
+
+  useEffect(() => revealTab(stripRef.current, activeId), [activeId]);
 
   return (
     <div
@@ -83,7 +152,17 @@ export function InnerTabBar({
         className,
       )}
     >
-      <div className="tab-strip-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
+      <div
+        ref={stripRef}
+        className={cn(
+          "tab-strip-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden",
+          scrollEdges.left && scrollEdges.right
+            ? "tab-strip-fade-both"
+            : scrollEdges.left
+              ? "tab-strip-fade-left"
+              : scrollEdges.right && "tab-strip-fade-right",
+        )}
+      >
         {tabs.map((tab, i) => {
           const active = tab.id === activeId;
           const running =
@@ -97,6 +176,7 @@ export function InnerTabBar({
           return (
             <div
               key={tab.id}
+              data-inner-tab-id={tab.id}
               draggable={groupId !== undefined && (canDragTab?.(tab) ?? true)}
               data-dock-tab-id={groupId === undefined ? undefined : tab.id}
               onDragStart={(event) => {
@@ -127,7 +207,7 @@ export function InnerTabBar({
               <span className="min-w-0 flex-1 truncate">{tab.title}</span>
               {dirty && <span title={t('document.unsaved')} aria-label={t('document.unsaved')} className="size-1.5 shrink-0 rounded-full bg-accent" />}
               {running && (
-                <LoaderCircle size={11} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
+                <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
               )}
               <button
                 type="button"
@@ -149,39 +229,40 @@ export function InnerTabBar({
             </div>
           );
         })}
-
-        <Menu
-          label={t("nav.newTab")}
-          width={230}
-          trigger={<Plus size={15} />}
-          triggerClassName="flex size-7 items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
-        >
-          {(close) => (
-            <>
-              {menu.map((item) => (
-                <Fragment key={item.kind}>
-                  {/* 分隔是**数据**(见 INNER_TAB_MENU),不是渲染时的 `i === 3` ——
-                      底部那条菜单多了「文件预览」一项,按下标算分隔就错位了 */}
-                  {item.separatorBefore === true && <MenuSeparator />}
-                  <MenuItem
-                    icon={(() => {
-                      const Icon = INNER_TAB_ICON[item.kind];
-                      return <Icon size={14} />;
-                    })()}
-                    accelerator={prettyAccelerator(item.accelerator)}
-                    onSelect={() => {
-                      onOpen(item.kind);
-                      close();
-                    }}
-                  >
-                    {item.label}
-                  </MenuItem>
-                </Fragment>
-              ))}
-            </>
-          )}
-        </Menu>
       </div>
+
+      <Menu
+        className="shrink-0"
+        label={t("nav.newTab")}
+        width={230}
+        trigger={<Plus size={15} />}
+        triggerClassName="flex size-7 items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
+      >
+        {(close) => (
+          <>
+            {menu.map((item) => (
+              <Fragment key={item.kind}>
+                {/* 分隔是**数据**(见 INNER_TAB_MENU),不是渲染时的 `i === 3` ——
+                    底部那条菜单多了「文件预览」一项,按下标算分隔就错位了 */}
+                {item.separatorBefore === true && <MenuSeparator />}
+                <MenuItem
+                  icon={(() => {
+                    const Icon = INNER_TAB_ICON[item.kind];
+                    return <Icon size={14} />;
+                  })()}
+                  accelerator={prettyAccelerator(item.accelerator)}
+                  onSelect={() => {
+                    onOpen(item.kind);
+                    close();
+                  }}
+                >
+                  {item.label}
+                </MenuItem>
+              </Fragment>
+            ))}
+          </>
+        )}
+      </Menu>
 
       {trailing}
     </div>
@@ -209,6 +290,7 @@ export function AllTabsMenu({
   const { t } = useI18n();
   return (
     <Menu
+      className="shrink-0"
       label={t("nav.allTabs")}
       width={240}
       align="end"

@@ -9,7 +9,7 @@
  * ★ **密码不在 `settings` 里**,单独走 `proxy:*` 三条频道进 safeStorage。
  * 它因此是这一页唯一有本地状态的东西 —— 其余字段一律从 prop 读(见 `props.ts`)。
  */
-import { Check, Eye, Loader2 } from "lucide-react";
+import { Check, Eye } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ProxyScheme } from "../../../../../shared/domain/proxy";
 import {
@@ -30,6 +30,7 @@ import {
 } from "../../../services/proxy";
 import { SettingField, SettingGroup, SettingRow } from "../../Row";
 import type { SettingsPageProps } from "../../props";
+import { Spinner } from '../../../components/ui/Spinner'
 import {
   bypassSummary,
   parsePortInput,
@@ -455,7 +456,7 @@ function ProxyPasswordField({ disabled }: { disabled: boolean }): ReactNode {
         onClick={save}
       >
         {busy ? (
-          <Loader2 size={13} className="animate-spin" />
+          <Spinner size="sm" />
         ) : (
           t("connection.network.save")
         )}

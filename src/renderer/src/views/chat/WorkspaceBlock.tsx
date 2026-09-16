@@ -21,6 +21,7 @@ import {
 } from "../../../../shared/domain/tool-timeline";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
+import { Surface, SurfaceReveal } from "../../components/ui/Surface";
 import { ToolTimeline } from "./ToolTimeline";
 import { ShapeStrip } from "./ToolIcon";
 
@@ -108,14 +109,11 @@ export function WorkspaceBlock({
   const extraShapes = summary.shapes.length - shownShapes.length;
 
   return (
-    <div
+    <Surface
       ref={ref}
       data-testid="workspace-block"
       data-open={open}
-      className={cn(
-        "overflow-hidden rounded-card border bg-surface-raised/40",
-        danger !== undefined ? "border-danger/30" : "border-border",
-      )}
+      tone={danger !== undefined ? "danger" : "default"}
     >
       <button
         type="button"
@@ -147,16 +145,14 @@ export function WorkspaceBlock({
         )}
       </button>
 
-      {open && (
-        <div className="border-t border-hairline px-2.5 py-2">
-          {/*
-            ★ `running={false}` 是关键:工作区只在 run 结束后出现,
-            此时 L2 不该再按「最近 3 项」的窗口规则坍缩 —— 那个规则解决的是
-            运行中的刷屏,而运行已经结束了。这里交给用户自己按组展开。
-          */}
-          <ToolTimeline items={items} tools={tools} />
-        </div>
-      )}
-    </div>
+      <SurfaceReveal open={open} className="px-2.5">
+        {/*
+          ★ `running={false}` 是关键:工作区只在 run 结束后出现,
+          此时 L2 不该再按「最近 3 项」的窗口规则坍缩 —— 那个规则解决的是
+          运行中的刷屏,而运行已经结束了。这里交给用户自己按组展开。
+        */}
+        <ToolTimeline items={items} tools={tools} />
+      </SurfaceReveal>
+    </Surface>
   );
 }

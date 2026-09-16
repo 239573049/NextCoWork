@@ -2,14 +2,12 @@ import {
   ArrowLeft,
   Check,
   ExternalLink,
-  Loader2,
   PackageOpen,
   Plus,
   Search,
   Shuffle,
   SlidersHorizontal,
-  X,
-} from "lucide-react";
+  X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   PROVIDER_PRESETS,
@@ -40,6 +38,7 @@ import {
   type CustomProviderIssue,
 } from "./custom-provider";
 import { useI18n, type TranslationKey } from "../../../i18n";
+import { Spinner } from '../../../components/ui/Spinner'
 import {
   CATALOG_TABS,
   divergentCount,
@@ -437,7 +436,7 @@ function ImportProvidersForm({
 
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-[12px] text-fg-faint">
-          <Loader2 size={14} className="animate-spin" />
+          <Spinner size="sm" />
           {t("common.loading")}
         </div>
       ) : !available ? (
@@ -511,7 +510,7 @@ function ImportProvidersForm({
           size="sm"
           variant="accent"
           disabled={busy || loading || chosen.length === 0}
-          icon={busy ? <Loader2 size={13} className="animate-spin" /> : undefined}
+          icon={busy ? <Spinner size="sm" /> : undefined}
           onClick={runImport}
         >
           {t("models.importSelected", { count: chosen.length })}
@@ -672,7 +671,7 @@ function CustomProviderForm({
           size="sm"
           variant="accent"
           disabled={busy}
-          icon={busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+          icon={busy ? <Spinner size="xs" /> : <Plus size={12} />}
           onClick={submit}
         >
           {t("common.add")}
@@ -788,7 +787,7 @@ function PresetCard({
               "bg-tint text-fg transition-colors hover:bg-tint-strong disabled:opacity-40",
             )}
           >
-            {busy ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+            {busy ? <Spinner size="xs" /> : <Plus size={11} />}
           </button>
         )}
       </div>

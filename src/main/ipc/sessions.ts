@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import type { Session, SessionChange } from '../../shared/domain/session'
 import type { AgentMessage } from '../../shared/agent/message'
+import type { SessionMode } from '../../shared/agent/run-request'
+import { normalizeModeId } from '../../shared/domain/mode'
 import { mimeOfExt, parseNcwUrl } from '../../shared/domain/attachment'
 import { ulid } from '../../shared/util/id'
 import { runs } from '../kernel/run-registry'
@@ -53,16 +55,26 @@ export function replaceHistory(req: { sessionId: string; messages: AgentMessage[
   changed({ kind: 'history', sessionIds: [req.sessionId], workspaceId: session?.workspaceId })
 }
 
-export function createSession(req: { workspaceId: string; title?: string; sessionId?: string }): Session {
+export function createSession(req: { workspaceId: string; title?: string; sessionId?: string; mode?: SessionMode }): Session {
   const ws = store.getWorkspace(req.workspaceId)
   const session = store.ensureSession({
     id: req.sessionId,
     workspaceId: req.workspaceId,
     title: req.title,
+    mode: normalizeModeId(req.mode ?? ws?.settings.defaultMode),
     rootPathAtCreation: ws?.rootPath ?? ''
   })
   changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: req.workspaceId })
   return session
+}
+
+export function setMode(req: { sessionId: string; mode: SessionMode }): void {
+  const session = store.getSession(req.sessionId)
+  if (session === undefined) return
+  const mode = normalizeModeId(req.mode)
+  if (session.mode === mode) return
+  store.putSession({ ...session, mode, updatedAt: Date.now() })
+  changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: session.workspaceId })
 }
 
 /** Clone a transcript into a new session, including managed image attachments. */

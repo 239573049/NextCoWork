@@ -182,7 +182,12 @@ export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().li
               : `The subagent started in the background (run ${outcome.childRunId}). `) +
             'Continue with the parent task; its progress and final report remain available in the task panel.'
           ),
-          subagent: { childRunId: outcome.childRunId, status: 'running', background: true }
+          subagent: {
+            childRunId: outcome.childRunId,
+            status: 'running',
+            background: true,
+            ...(outcome.color === undefined ? {} : { color: outcome.color })
+          }
         }
       }
 
@@ -201,7 +206,12 @@ export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().li
             )
             return {
               ...toolFail(error.message),
-              subagent: { childRunId: outcome.childRunId, status: 'error', error }
+              subagent: {
+                childRunId: outcome.childRunId,
+                status: 'error',
+                error,
+                ...(outcome.color === undefined ? {} : { color: outcome.color })
+              }
             }
           }
           return {
@@ -209,7 +219,8 @@ export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().li
             subagent: {
               childRunId: outcome.childRunId,
               status: outcome.status,
-              summary: outcome.text.slice(0, 240)
+              summary: outcome.text.slice(0, 240),
+              ...(outcome.color === undefined ? {} : { color: outcome.color })
             }
           }
 
@@ -235,6 +246,7 @@ export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().li
             subagent: {
               childRunId: outcome.childRunId,
               status: 'error',
+              ...(outcome.color === undefined ? {} : { color: outcome.color }),
               ...(error === undefined ? {} : { error })
             }
           }

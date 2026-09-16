@@ -74,6 +74,22 @@ function editedLineEndings(entry: DocumentDraft, next: string): string[] {
 
 const saves = new Map<string, Promise<boolean>>()
 
+/**
+ * 通知别处（比如聊天里的计划卡片）重读这个刚保存的文件。
+ *
+ * ★ 必须**在 save 的 try 之外**失败:派发通知失败和写盘失败是两件事。
+ * 放在 try 里的话,`window` 不存在(非 DOM 环境)或监听方抛错,都会被那个
+ * catch 吞掉,于是一次**已经成功写盘**的保存被报成失败 —— 用户会以为改动丢了。
+ */
+function notifyWorkspaceFileChanged(workspaceId: string, path: string): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.dispatchEvent(new CustomEvent('workspace-files-changed', { detail: { workspaceId, path } }))
+  } catch {
+    // 通知只是锦上添花,不参与保存结果的判定
+  }
+}
+
 export const useDocumentsStore = create<DocumentsState>((set, get) => {
   const patch = (key: string, value: Partial<DocumentDraft>): void => {
     const entry = get().entries[key]
@@ -121,6 +137,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => {
           const file = await writeWorkspaceFile({ workspaceId, path, content: serializeDraft(entry), revision })
           // Keep any edits typed while the request was in flight.
           patch(key, { file, base: entry.draft, saving: false })
+          notifyWorkspaceFileChanged(workspaceId, path)
           return true
         } catch (error) {
           patch(key, { saving: false, error: workspaceFileErrorKey(error) })

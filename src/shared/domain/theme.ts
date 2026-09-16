@@ -2,7 +2,7 @@
  * 主题:**一套量出来的基准色板 + 一个纯函数的换色器**。
  *
  * 界面上有三样东西(偏好 → 主题):外观模式(浅/深/跟随系统)、图片主题、颜色主题。
- * 后两者要能把**整套 22 个 token 一起换掉** —— 选「陶土叠影」之后连窗口底、
+ * 后两者要能把**整套 23 个 token 一起换掉** —— 选「陶土叠影」之后连窗口底、
  * 侧边栏、分隔线都跟着变暖,而不是只换一个强调色。
  *
  * ── 为什么不是「每套主题各写一张 22 色的表」 ──
@@ -35,7 +35,7 @@
 // ─────────────────────────── token 名单与角色 ───────────────────────────
 
 /**
- * 22 个 token,名字就是 CSS 变量去掉 `--color-` 前缀 ——
+ * 23 个 token,名字就是 CSS 变量去掉 `--color-` 前缀 ——
  * 于是 `applyTheme` 里是 `--color-${key}`,两边不会漂。
  * 顺序照 `theme.css` 的书写顺序,方便对读。
  */
@@ -52,6 +52,7 @@ export const THEME_TOKENS = [
   'tint-hover',
   'tint-strong',
   'border',
+  'stroke',
   'hairline',
   'fg',
   'fg-muted',
@@ -76,8 +77,8 @@ export type Appearance = 'light' | 'dark'
  *
  * - `neutral` 结构灰:窗口底 / 画布 / 侧边栏 / 发丝线。深色里冷,浅色里暖(奶油色)。
  * - `tint`    交互态 + 文字:悬停 / 选中槽 / 描边 / 三级文字。两个外观里都是暖的。
- *   ★ `border` 和 `surface-field` 归**这一族**不是笔误:深色下
- *     `border === tint`、`surface-field === tint-hover`,`theme.css` 的注释里写着。
+ *   ★ `border` / `stroke` / `surface-field` 归**这一族**不是笔误:深色下
+ *     `border === stroke === tint`、`surface-field === tint-hover`,`theme.css` 的注释里写着。
  * - `spec`    主题自己声明的四个色:图标、强调、强调前景、装饰性弱强调。
  * - `keep`    原样保留。只有 `danger`,理由见文件头第 3 条。
  */
@@ -99,6 +100,7 @@ const ROLE = {
   'tint-strong': 'tint',
   'surface-field': 'tint',
   border: 'tint',
+  stroke: 'tint',
   fg: 'tint',
   'fg-muted': 'tint',
   'fg-faint': 'tint',
@@ -254,6 +256,7 @@ export const BASE: Record<Appearance, Palette> = {
       'tint-hover': '#363b38',
       'tint-strong': '#3c423e',
       border: '#2b2e2d',
+      stroke: '#2b2e2d',
       hairline: '#252727',
       fg: '#ececec',
       'fg-muted': '#959897',
@@ -281,6 +284,7 @@ export const BASE: Record<Appearance, Palette> = {
       'tint-hover': '#edeae6',
       'tint-strong': '#e2ded7',
       border: '#e6e6e2',
+      stroke: '#e6e6e2',
       hairline: '#efefec',
       fg: '#181c19',
       'fg-muted': '#72736f',
@@ -299,7 +303,7 @@ export const BASE: Record<Appearance, Palette> = {
 // ─────────────────────────── 换色器 ───────────────────────────
 
 /**
- * 一套主题在**一个外观**下的声明。只有 7 个数,不是 22 个色值。
+ * 一套主题在**一个外观**下的声明。只有 7 个数,不是 23 个色值。
  */
 export interface ThemeSpec {
   /** 结构灰的目标色相 */
@@ -316,7 +320,7 @@ export interface ThemeSpec {
 }
 
 /**
- * 基准色板 + 声明 → 22 个色值。**纯函数,`base` 不会被改。**
+ * 基准色板 + 声明 → 23 个色值。**纯函数,`base` 不会被改。**
  *
  * 每个 token:L 原样保留,H 按家族**增量**平移,S 乘上 `chroma`。
  * 白(`#ffffff`)和黑(`#000000`)是自保护的 —— S 已经是 0,乘几都还是 0,
@@ -745,7 +749,7 @@ function derivedTheme(id: string, seed: string): ColorTheme {
  * 重掷 = 换一个 `seed` 存进设置,挑色 = 换一个 `custom`,都不是在这里摇骰子。
  *
  * ★ `custom` 先过 `normalizeHex`:它是从磁盘读回来的,也可能是用户还没打完的
- *   半截 hex。不过这一关,`specFromSeed` 会把 `NaN` 一路带进 22 个 token。
+ *   半截 hex。不过这一关,`specFromSeed` 会把 `NaN` 一路带进 23 个 token。
  */
 export function resolveColorTheme(choice: ColorThemeChoiceLike): ColorTheme {
   if (choice.id === RANDOM_COLOR_THEME_ID) {
@@ -1070,7 +1074,7 @@ export function extractPalette(rgba: Uint8ClampedArray, count = 4): string[] {
 // ─────────────────────────── 对外的一个口子 ───────────────────────────
 
 /**
- * 设置里那三样 → 22 个色值。**界面只该调这一个函数。**
+ * 设置里那三样 → 23 个色值。**界面只该调这一个函数。**
  *
  * 图片主题**盖过**颜色主题:界面上选了一张图之后,颜色主题那一栏就不再生效了
  * (取消选图才回到颜色主题)。这条不是随便定的 —— 两者都要改整套 token,

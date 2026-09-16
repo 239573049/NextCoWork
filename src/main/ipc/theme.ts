@@ -23,6 +23,7 @@ import { buildNcwUrl } from '../../shared/domain/attachment'
 import type { ImportedImage, ThemeImageMetadata } from '../../shared/ipc/contract'
 import { prefixedId } from '../../shared/util/id'
 import { attachmentRoot } from '../net/attachment-protocol'
+import { configProfileDirectory } from '../db/config-profile'
 import { getHost } from '../runtime'
 import { IpcError } from './errors'
 
@@ -100,7 +101,18 @@ interface StoredItem {
  * 读的必须是**同一个**目录,两处各拼一次早晚会分岔(dev 下 userData 还带 `-dev` 后缀)。
  */
 function themesDir(): string {
-  const dir = join(attachmentRoot(), 'themes')
+  /*
+    ★ 主题库跟着**配置作用域**走:它由 index.json / profiles.json 描述,
+    而这两份就是用户的配置 —— 不隔离的话,B 账户登录后在主题库里看到的
+    是 A 账户传的壁纸(以及 A 挑中的那一张)。
+
+    `local` 的落点仍然是 `<attachments>/themes`,一个文件都不动;
+    账户作用域落到 `<attachments>/config-profiles/<hash>/themes`。
+
+    ★ 会话附件**不**跟着走(它们由 `attachmentRoot()` 直接给):那是这台机器上的
+    数据,而且清理扫描、占用统计都按那个根走,挪动它们等于一次静默的数据搬家。
+  */
+  const dir = join(configProfileDirectory(attachmentRoot()), 'themes')
   mkdirSync(dir, { recursive: true })
   return dir
 }
@@ -161,6 +173,22 @@ export function profileSettings(id: string | null): { activeThemeProfileId: stri
 }
 function broadcastLibrary(): void {
   windows.emitToAll('theme:libraryChanged', { profiles: readProfiles(), images: listImages() })
+}
+
+/**
+ * 换配置作用域时把主题库重新读一遍并播出去。
+ *
+ * ★ 主题库是**跟着作用域走的文件**(见 `themesDir()`),所以切完之后渲染层
+ * 手里那份清单必然过期 —— 它列着上一个账户传的壁纸,而其中的图片 URL
+ * 在这个作用域下已经指到别的目录去了(或者根本没有文件)。
+ *
+ * ★ 先 `initializeThemeLibrary()`:新作用域的目录第一次被访问,
+ * 不初始化就读的话 `profiles.json` 还不存在,播出去的是一个**空库** ——
+ * 界面会从「有壁纸」闪成「一张都没有」。
+ */
+export function broadcastThemeLibrary(): void {
+  initializeThemeLibrary()
+  broadcastLibrary()
 }
 /** Keep legacy settings callers (including older windows and integrations) reflected in the active profile. */
 export function syncLegacyProfile(settings: ReturnType<typeof store.getSettings>, patch: { colorTheme?: unknown; imageTheme?: unknown }): void {

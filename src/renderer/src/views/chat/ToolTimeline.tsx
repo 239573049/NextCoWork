@@ -6,6 +6,7 @@
  * 这条边界让同一个组件能同时服务于「已提交消息」和「还在流的块」两条路径。
  */
 import { ChevronRight } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, type ReactNode } from "react";
 import { formatDuration } from "../../../../shared/agent/duration";
 import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
@@ -20,6 +21,7 @@ import {
 } from "../../../../shared/domain/tool-timeline";
 import { cn } from "../../lib/cn";
 import { useI18n, type TranslationKey } from "../../i18n";
+import { motionScale, useMotionLevel } from "../../theme/useMotionLevel";
 import { SubagentNode, ThinkingBlock, ToolCallCard } from "./parts";
 import { ShapeStrip } from "./ToolIcon";
 import { useGroupCollapse } from "./useGroupCollapse";
@@ -36,25 +38,49 @@ export function ToolTimeline({
   /** 从文件审查回跳时定位到的那一行;所在组强制展开并滚入视口 */
   focusCallId?: string | undefined;
 }): ReactNode {
+  const scale = motionScale(useMotionLevel());
   if (items.length === 0) return null;
 
-  const groups = groupConsecutiveTools(items);
+  const groups = groupConsecutiveTools(items, tools);
   const autoCollapsed = groups.map((group) => isCompletedToolGroup(group, tools));
 
   return (
     <div className="flex flex-col gap-2" data-testid="tool-timeline">
-      {groups.map((g, i) => (
-        <ToolGroup
-          // ★ key 用**首项**的 key,不用下标。理由见 tool-timeline.ts 的 groupKey:
-          // 下标会让「用户展开过第 2 组」的意图在重新分组后漂到别的组身上。
-          key={groupKey(g)}
-          items={g}
-          tools={tools}
-          subagents={subagents}
-          autoCollapsed={autoCollapsed[i] ?? false}
-          focusCallId={focusCallId}
-        />
-      ))}
+      {/*
+        ★★ **`initial={false}` 是这里唯一重要的那个参数,不是随手加的。**
+
+        入场动画想要的语义是「流式过程中**新冒出来**的那一行往上浮一下」。
+        不写 `initial={false}` 的话,`AnimatePresence` 会把**首次挂载时就已经在
+        列表里的所有组**也当成新增 —— 于是打开一段跑了两百轮的历史会话,
+        满屏几十张卡片一起淡入,像拉开一道帘子。那不是「流畅」,那是开场动画。
+
+        `initial={false}` 精确地表达了这个区别:第一帧就在的,直接到位;
+        第一帧之后才进来的,才播入场。历史转录和流式新增因此不需要两条代码路径,
+        也就不存在「两边长得不一样」的风险(同 parts.tsx 文件头那一条)。
+      */}
+      <AnimatePresence initial={false}>
+        {groups.map((g, i) => (
+          <motion.div
+            // ★ key 用**首项**的 key,不用下标。理由见 tool-timeline.ts 的 groupKey:
+            // 下标会让「用户展开过第 2 组」的意图在重新分组后漂到别的组身上。
+            key={groupKey(g)}
+            layout="position"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, height: 0, y: -4 }}
+            style={{ overflow: "hidden" }}
+            transition={{ duration: 0.18 * scale, ease: [0.32, 0.72, 0, 1] }}
+          >
+            <ToolGroup
+              items={g}
+              tools={tools}
+              subagents={subagents}
+              autoCollapsed={autoCollapsed[i] ?? false}
+              focusCallId={focusCallId}
+            />
+          </motion.div>
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
@@ -72,6 +98,7 @@ function ToolGroup({
   autoCollapsed: boolean;
   focusCallId: string | undefined;
 }): ReactNode {
+  const scale = motionScale(useMotionLevel());
   const hasError = items.some((it) => statusOfItem(it, tools) === "error");
   const hasFocus =
     focusCallId !== undefined &&
@@ -101,43 +128,33 @@ function ToolGroup({
     );
   }
 
-  if (collapsed) {
-    return (
-      <div ref={ref}>
-        <CollapsedGroupBar items={items} tools={tools} onExpand={toggle} />
-      </div>
-    );
-  }
-
   return (
-    <div ref={ref} className="flex flex-col gap-1.5">
+    <motion.div ref={ref} layout className="flex flex-col gap-1.5">
       <GroupHeader
         items={items}
         tools={tools}
-        collapsed={false}
+        collapsed={collapsed}
         onToggle={toggle}
       />
-      <div className="flex flex-col gap-1.5 pl-2">
-        {items.map((it) => (
-          <TimelineRow key={it.key} item={it} tools={tools} subagents={subagents} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** 坍缩态:一行标题,点开即展开。**无动画** —— 理由见设计文档 §2.3。 */
-function CollapsedGroupBar({
-  items,
-  tools,
-  onExpand,
-}: {
-  items: readonly TimelineItem[];
-  tools: Readonly<Record<string, ToolCallState>>;
-  onExpand: () => void;
-}): ReactNode {
-  return (
-    <GroupHeader items={items} tools={tools} collapsed onToggle={onExpand} />
+      <AnimatePresence initial={false}>
+        {!collapsed && (
+          <motion.div
+            key="tool-group-content"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 * scale, ease: [0.32, 0.72, 0, 1] }}
+            style={{ overflow: "hidden" }}
+          >
+            <div className="flex flex-col gap-1.5 pl-2">
+              {items.map((it) => (
+                <TimelineRow key={it.key} item={it} tools={tools} subagents={subagents} />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }
 

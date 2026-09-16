@@ -1,4 +1,4 @@
-import { LoaderCircle, RotateCw, Server, ShieldCheck, X } from 'lucide-react'
+import { RotateCw, Server, ShieldCheck, X } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { ConnectionStatus, SshAuthRequest, SshAuthResponse } from '../../../shared/domain/environment'
 import { normalizeEnvironmentRef } from '../../../shared/domain/environment'
@@ -9,6 +9,7 @@ import { IconButton } from '../components/ui/IconButton'
 import { useI18n } from '../i18n'
 import { connectionErrorKey, listConnections, onConnectionStatus, onSshAuthentication, respondSshAuthentication } from '../services/connections'
 import { useWindowStore } from '../stores/window'
+import { Spinner } from '../components/ui/Spinner'
 
 export function ConnectionDialogs({ workspace }: { workspace?: Workspace }): ReactNode {
   const { t } = useI18n()
@@ -35,7 +36,7 @@ export function ConnectionDialogs({ workspace }: { workspace?: Workspace }): Rea
   return <>
     {(pending || win.activationError || ref.kind === 'connection') && (
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5 text-[12px]" role="status">
-        {pending ? <LoaderCircle size={13} className="shrink-0 animate-spin" /> : <Server size={13} className="shrink-0 text-accent" />}
+        {pending ? <Spinner size="sm" /> : <Server size={13} className="shrink-0 text-accent" />}
         <span className="min-w-0 flex-1 truncate" title={workspace?.rootPath}>
           {pending ? t('ssh.activating', { name: pendingWorkspace?.name ?? pending.workspaceId }) : win.activationError ? t(win.activationError)
             : `${workspace?.name ?? ''} · ${t(status?.phase === 'ready' ? 'ssh.phase.ready' : 'ssh.offline')} · ${workspace?.rootPath ?? ''}`}

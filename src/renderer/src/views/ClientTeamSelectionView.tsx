@@ -1,10 +1,11 @@
-import { ArrowRight, Building2, LoaderCircle, UserRound } from 'lucide-react'
+import { ArrowRight, Building2, UserRound } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import type { ClientAuthState, ClientTeamOption } from '../../../shared/domain/client-auth'
 import { Button } from '../components/ui/Button'
 import { Mark } from '../components/brand/Mark'
 import { useI18n } from '../i18n'
 import { selectClientTeam } from '../services/client-auth'
+import { Spinner } from '../components/ui/Spinner'
 
 export function ClientTeamSelectionView({ auth, onComplete }: { auth: ClientAuthState; onComplete: (next: ClientAuthState) => void }): ReactNode {
   const { t } = useI18n()
@@ -51,7 +52,7 @@ export function ClientTeamSelectionView({ auth, onComplete }: { auth: ClientAuth
                 <span className="block truncate text-[13px] font-medium text-white">{team.name}</span>
                 <span className="mt-1 block text-[11px] text-white/40">{t('auth.selectTeamRole', { role: team.role })} · {t('auth.selectTeamMembers', { count: team.memberCount })}</span>
               </span>
-              {busy === team.id ? <LoaderCircle size={15} className="animate-spin text-white/50" /> : <ArrowRight size={15} className="text-white/25 transition group-hover:translate-x-0.5 group-hover:text-accent" />}
+              {busy === team.id ? <Spinner size="sm" className="text-white/50" /> : <ArrowRight size={15} className="text-white/25 transition group-hover:translate-x-0.5 group-hover:text-accent" />}
             </Button>
           ))}
         </div>

@@ -15,7 +15,9 @@ import { markdownZh, markdownEn } from './markdown';
 import { themesZh, themesEn } from './themes';
 import { sshZh, sshEn } from './ssh';
 import { extensionsZh, extensionsEn } from './extensions';
+import { gitZh, gitEn } from './git';
 import { usageZh, usageEn } from './usage';
+import { searchZh, searchEn } from './search';
 
 export const SUPPORTED_LOCALES = ["zh-CN", "en-US"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
@@ -33,7 +35,9 @@ type Messages = Record<string, MessageValue>;
 const ZH: Messages = {
   ...sshZh,
   ...extensionsZh,
+  ...gitZh,
   ...usageZh,
+  ...searchZh,
   ...themesZh,
   ...agentZh,
   ...documentsZh,
@@ -92,6 +96,7 @@ const ZH: Messages = {
   "common.failed": "失败",
   "common.running": "执行中",
   "common.waiting": "等待",
+  "toast.repeated": "该提示重复出现 {count} 次",
   "nav.newChat": "新建对话",
   "nav.search": "搜索",
   "nav.settings": "打开设置",
@@ -409,14 +414,27 @@ const ZH: Messages = {
   "chat.contextNearLimit": "接近上限，可 /compact",
   "composer.permission": "权限档位",
   "composer.mode": "会话模式",
+  "composer.mode.label": "模式",
+  "composer.mode.builtIn": "内置模式",
+  "composer.mode.custom": "自定义模式",
+  "composer.mode.code": "编程",
+  "composer.mode.codeHint": "直接分析、修改代码并完成验证",
+  "composer.mode.plan": "计划",
+  "composer.mode.planHint": "先调查并深度澄清，再生成一份 Markdown 计划供审核",
+  "composer.mode.acp": "ACP",
+  "composer.mode.acpHint": "主智能体负责架构和调度，实施与验证交给子代理",
+  "composer.mode.setDefault": "设为新会话默认",
+  "composer.mode.setDefaultHint": "新建会话将默认使用当前模式",
+  "composer.mode.manage": "管理模式",
+  "composer.mode.manageHint": "查看内置模式或创建自定义模式",
+  "composer.environment.label": "环境",
+  "composer.environment.local": "本机",
+  "composer.environment.remote": "远程",
+  "composer.environment.unbound": "未绑定",
   "composer.more": "更多",
   "composer.add": "添加",
   "composer.options": "会话选项",
-  "composer.plan": "计划模式",
-  "composer.planHint": "先制定计划，确认后再执行",
   "composer.planExecutionTitle": "执行已批准计划",
-  "composer.goal": "目标模式",
-  "composer.goalHint": "持续推进，直到目标完成",
   "composer.attachmentHint": "也可以直接拖进来或粘贴截图",
   "composer.addAttachment": "添加附件",
   "composer.skills": "Skills",
@@ -536,6 +554,9 @@ const ZH: Messages = {
   "chat.contextStatus.ready": "上下文已压缩",
   "chat.contextStatus.readySaved": ({ saved }) => `上下文已压缩 · 省下 ${saved}`,
   "chat.contextStatus.fallback": "已折叠较早的历史",
+  // ★ 和上一句分开:折叠已经削不动了,占用只会继续涨。这一句要让人**去做一件事**,
+  // 所以写「可以怎么办」而不是「发生了什么」。
+  "chat.contextStatus.exhausted": "已无可折叠的历史，请开启摘要压缩或另起会话",
   "chat.contextStatus.error": "上下文压缩失败，本轮按原历史发送",
   // 消息流里那条线
   "chat.compaction.label": "上下文在此压缩",
@@ -1030,7 +1051,7 @@ const ZH: Messages = {
   "provider.responseApiWarning":
     "我们实测这家没有可用的 Responses 端点，开着大概率 404。",
   "provider.cacheHint":
-    "一般情况下保持关闭。缓存适合长且重复的上下文；1 小时写入通常更贵，且部分 Anthropic 兼容中转站不支持。",
+    "Anthropic 请求始终携带缓存标记，默认 5 分钟。缓存适合长且重复的上下文；1 小时写入通常更贵，且部分 Anthropic 兼容中转站不支持。是否命中取决于上游支持、前缀一致性和最小长度。",
   "provider.keyringWarning":
     "系统密钥环不可用，密钥无法安全存储，保存会被拒绝。",
   "provider.keySavedHint":
@@ -1382,6 +1403,7 @@ const ZH: Messages = {
 "themeStudio.token.tint-hover": "悬停态",
 "themeStudio.token.tint-strong": "选中态",
 "themeStudio.token.border": "控件边框",
+"themeStudio.token.stroke": "卡片描边",
 "themeStudio.token.hairline": "分隔线",
 "themeStudio.token.fg-faint": "弱化文字",
 "themeStudio.token.accent-soft": "弱强调",
@@ -1569,6 +1591,8 @@ const ZH: Messages = {
   "data.confirmCleanup": "确认清理",
   "data.irreversible": "此操作不可撤销。",
   "data.localDataRetention": "Claude CLI 共享目录和外部备份目录会保留。",
+  "data.localDataDeferredHint":
+    "被系统占用而无法立即删除的浏览器缓存，将在下次启动时自动清除。",
   "data.historyRetention": "应用设置、模型和身份信息会保留。",
   "data.reclaimableSpace": "预计释放空间：",
   "data.undeletable": ({ count }) =>
@@ -1781,6 +1805,7 @@ const ZH: Messages = {
 const EN: Messages = {
   ...sshEn,
   ...extensionsEn,
+  ...gitEn,
   ...themesEn,
   ...agentEn,
   ...documentsEn,
@@ -1788,6 +1813,7 @@ const EN: Messages = {
   ...editorEn,
   ...markdownEn,
   ...usageEn,
+  ...searchEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",
@@ -1840,6 +1866,7 @@ const EN: Messages = {
   "common.failed": "Failed",
   "common.running": "Running",
   "common.waiting": "Waiting",
+  "toast.repeated": "This notice repeated {count} times",
   "nav.newChat": "New chat",
   "nav.search": "Search",
   "nav.settings": "Open settings",
@@ -2154,14 +2181,27 @@ const EN: Messages = {
   "chat.contextNearLimit": "Near the limit; try /compact",
   "composer.permission": "Permission level",
   "composer.mode": "Conversation mode",
+  "composer.mode.label": "Mode",
+  "composer.mode.builtIn": "Built-in modes",
+  "composer.mode.custom": "Custom modes",
+  "composer.mode.code": "Code",
+  "composer.mode.codeHint": "Analyze, edit code, and verify the result directly",
+  "composer.mode.plan": "Plan",
+  "composer.mode.planHint": "Investigate and clarify deeply before producing one reviewable Markdown plan",
+  "composer.mode.acp": "ACP",
+  "composer.mode.acpHint": "The lead agent owns architecture and coordination; subagents implement and verify",
+  "composer.mode.setDefault": "Set as new-session default",
+  "composer.mode.setDefaultHint": "New conversations will start in the current mode",
+  "composer.mode.manage": "Manage modes",
+  "composer.mode.manageHint": "Inspect built-ins or create a custom mode",
+  "composer.environment.label": "Environment",
+  "composer.environment.local": "Local",
+  "composer.environment.remote": "Remote",
+  "composer.environment.unbound": "Not bound",
   "composer.more": "More",
   "composer.add": "Add",
   "composer.options": "Conversation options",
-  "composer.plan": "Plan mode",
-  "composer.planHint": "Make a plan for approval before taking action",
   "composer.planExecutionTitle": "Execute approved plan",
-  "composer.goal": "Goal mode",
-  "composer.goalHint": "Keep working until the goal is complete",
   "composer.attachmentHint": "You can also drop files or paste a screenshot",
   "composer.addAttachment": "Add attachment",
   "composer.skills": "Skills",
@@ -2281,6 +2321,7 @@ const EN: Messages = {
   "chat.contextStatus.ready": "Context compacted",
   "chat.contextStatus.readySaved": ({ saved }) => `Context compacted · saved ${saved}`,
   "chat.contextStatus.fallback": "Older history folded",
+  "chat.contextStatus.exhausted": "Nothing left to fold — enable summary compaction or start a new session",
   "chat.contextStatus.error": "Context compaction failed; sending the full history",
   "chat.compaction.label": "Context compacted here",
   "chat.compaction.folded": ({ count }) => `${count} folded`,
@@ -2780,7 +2821,7 @@ const EN: Messages = {
   "provider.responseApiWarning":
     "This provider has no verified Responses endpoint; enabling it will likely return 404.",
   "provider.cacheHint":
-    "Usually keep this off. Caching helps with long, repeated context; one-hour writes usually cost more and some Anthropic-compatible relays do not support it.",
+    "Anthropic requests always include cache markers, with a 5-minute default. Caching helps with long, repeated context; one-hour writes usually cost more and some Anthropic-compatible relays do not support it. Cache hits depend on upstream support, matching prefixes, and minimum length.",
   "provider.keyringWarning":
     "The system keychain is unavailable. The key cannot be stored safely and saving will be rejected.",
   "provider.keySavedHint":
@@ -3138,6 +3179,7 @@ const EN: Messages = {
 "themeStudio.token.tint-hover": "Hover tint",
 "themeStudio.token.tint-strong": "Strong tint",
 "themeStudio.token.border": "Control border",
+"themeStudio.token.stroke": "Card stroke",
 "themeStudio.token.hairline": "Hairline",
 "themeStudio.token.fg-faint": "Faint text",
 "themeStudio.token.accent-soft": "Soft accent",
@@ -3345,6 +3387,8 @@ const EN: Messages = {
   "data.irreversible": "This action cannot be undone.",
   "data.localDataRetention":
     "Shared Claude CLI and external backup directories are kept.",
+  "data.localDataDeferredHint":
+    "Browser caches locked by the system are cleared automatically on next launch.",
   "data.historyRetention":
     "App settings, models, and identity information are kept.",
   "data.reclaimableSpace": "Estimated space to free:",

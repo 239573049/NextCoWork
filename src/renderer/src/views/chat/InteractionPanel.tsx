@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { ArrowUpRight, Check, Copy, Download, FileText, Pencil } from 'lucide-react'
 import type {
   AskUserQuestion,
   InteractionResponse,
@@ -6,17 +7,27 @@ import type {
 } from '../../../../shared/agent/interaction'
 import { useI18n, type Translate } from '../../i18n'
 import { AgentMarkdown } from '../../components/markdown'
-import { CheckboxCards, RadioCards } from '../../components/ui/ChoiceCards'
+import { CheckboxCards, RadioCards, type ChoiceOption } from '../../components/ui/ChoiceCards'
+import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
 import { Segmented } from '../../components/ui/Segmented'
 import { listInteractions, onAgentEvent, respondInteraction } from '../../services/agent'
-import type { PlanRef } from '../../../../shared/domain/plan'
+import { copyText, saveTextFile } from '../../services/app'
+import type { PlanExecutionRef } from '../../../../shared/domain/plan-file'
+import { documentKey, isDocumentDirty, useDocumentsStore } from '../../stores/documents'
+import { ActionRows, type ActionRowSpec } from './ActionRows'
+import { isEditableTarget, isSelfHandlingButton, resolveRowKey } from './interaction-keys'
 import {
-  choiceOptions, deriveAnswers, initialDraft, isComplete, nextUnanswered, shouldAdvance, showsInput,
+  choiceOptions, deriveAnswers, initialDraft, isComplete, nextUnanswered, otherValue, shouldAdvance,
   toggle, type AskUserDraft
 } from './ask-user'
 
 /** Includes descendant runs: a child waiting for approval must not leave its parent stuck. */
-export function InteractionPanel({ runId, onExecute }: { runId: string; onExecute?: (ref: PlanRef, source: 'current_session' | 'new_session') => void }): ReactNode {
+export function InteractionPanel({ runId, workspaceId, onOpenPlan, onExecute }: {
+  runId: string
+  workspaceId?: string
+  onOpenPlan?: (path: string) => void
+  onExecute?: (ref: PlanExecutionRef, source: 'current_session' | 'new_session') => void
+}): ReactNode {
   const { t } = useI18n()
   const [pending, setPending] = useState<PendingInteraction[]>([])
   const [failed, setFailed] = useState(false)
@@ -48,7 +59,8 @@ export function InteractionPanel({ runId, onExecute }: { runId: string; onExecut
       {failed && <button type="button" onClick={() => setReload((v) => v + 1)} className="text-[12px] text-danger">
         {t('agent.interaction.loadFailed')}
       </button>}
-      {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction} onExecute={onExecute}
+      {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction} workspaceId={workspaceId}
+        onOpenPlan={onOpenPlan} onExecute={onExecute}
         onAnswered={() => setPending((items) => items.filter((item) => item.id !== interaction.id))} />)}
     </div>
   )
@@ -82,11 +94,21 @@ function useRespond(onAnswered: () => void, onResolved?: () => void): {
 const BUTTON = 'rounded-lg border border-border px-3 py-1.5 text-[12px] transition-colors disabled:opacity-50'
 const GHOST_BUTTON = `${BUTTON} hover:bg-tint`
 const PRIMARY_BUTTON = `${BUTTON} bg-accent text-accent-fg hover:opacity-90`
+const FIELD = [
+  'w-full resize-none rounded-[8px] border border-border bg-surface-field px-2.5 py-2 text-[13px]',
+  'leading-[1.6] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent',
+  'disabled:opacity-40'
+].join(' ')
 
-/** 三类交互共用的外壳:标题、可滚动的主体、错误行、右下角两颗按钮。 */
+/**
+ * 三类交互共用的外壳:标题、可滚动的主体、错误行、底部一条。
+ *
+ * ★ **底部放什么由卡片自己决定。** 以前这里硬写了「次要 + 主要」两颗按钮,
+ * 于是批准计划这种有四条去向的卡只能把四颗一字排开,谁都看不出默认是哪个。
+ * 现在动作由主体里的行承担,底部只剩「退出」和键盘提示。
+ */
 function CardShell({
-  kind, title, header, children, errorKey, busy, dismissLabel, submitLabel, canSubmit, onDismiss,
-  onSubmit, onPrimary, bodyClassName, extraActions
+  kind, title, header, children, errorKey, busy, onSubmit, onKeyDown, bodyClassName, footer, takeFocus = false
 }: {
   kind: PendingInteraction['kind']
   title: string
@@ -95,42 +117,58 @@ function CardShell({
   children: ReactNode
   errorKey: string | null
   busy: boolean
-  dismissLabel: string
-  submitLabel: string
-  canSubmit: boolean
-  onDismiss: () => void
   onSubmit: (event: FormEvent) => void
-  /** 给了它,右下角那颗就不是提交键,而是一颗普通按钮(多题时的「下一题」) */
-  onPrimary?: () => void
+  onKeyDown?: (event: KeyboardEvent<HTMLFormElement>) => void
   bodyClassName?: string
-  /** 排在两颗主按钮左边的补充选项(如「以后都允许」) */
-  extraActions?: ReactNode
+  /** 底部一条。用 `ml-auto` 自己控制靠哪边。 */
+  footer: ReactNode
+  /**
+   * 挂载时把焦点收进这张卡。带行的卡由 `ActionRows` 自己接管,不用这个;
+   * `ask_user` 的行是 Radix 管的,只能在这一层接 —— 不接的话数字键形同虚设,
+   * 焦点常年在下面的输入区上。
+   *
+   * ★ **只在用户没在打字时接**:写到一半被抢走焦点,比没有快捷键糟得多。
+   */
+  takeFocus?: boolean
 }): ReactNode {
   const { t } = useI18n()
+  const form = useRef<HTMLFormElement>(null)
+  useEffect(() => {
+    if (!takeFocus || isEditableTarget(document.activeElement)) return
+    form.current?.focus({ preventScroll: true })
+  }, [takeFocus])
   return (
-    <form onSubmit={onSubmit} data-testid="agent-interaction" data-interaction-kind={kind}
-      className="mb-2 rounded-card border border-accent-soft/40 bg-surface-raised p-3 text-fg">
+    <form ref={form} tabIndex={takeFocus ? -1 : undefined}
+      onSubmit={onSubmit} onKeyDown={onKeyDown} data-testid="agent-interaction" data-interaction-kind={kind}
+      className="mb-2 rounded-card border border-accent-soft/40 bg-surface-raised p-3 text-fg outline-none">
       <h2 className="mb-2 text-[13px] font-medium">{title}</h2>
       {header}
       <div className={`scroll-thin overflow-auto ${bodyClassName ?? 'max-h-[30vh]'}`}>{children}</div>
       {errorKey !== null && <p role="alert" className="mt-2 text-[12px] text-danger">{t(errorKey)}</p>}
-      <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-        {extraActions}
-        <button type="button" disabled={busy} className={GHOST_BUTTON} onClick={onDismiss}>{dismissLabel}</button>
-        <button type={onPrimary === undefined ? 'submit' : 'button'} onClick={onPrimary}
-          disabled={busy || (onPrimary === undefined && !canSubmit)}
-          className={PRIMARY_BUTTON}>
-          {busy ? t('agent.interaction.sending') : submitLabel}
-        </button>
-      </div>
+      {busy && <p className="mt-2 text-[12px] text-fg-muted">{t('agent.interaction.sending')}</p>}
+      <div className="mt-3 flex flex-wrap items-center gap-2">{footer}</div>
     </form>
   )
 }
 
-function InteractionCard({ interaction, onExecute, onAnswered }: { interaction: PendingInteraction; onExecute?: (ref: PlanRef, source: 'current_session' | 'new_session') => void; onAnswered: () => void }): ReactNode {
-  return interaction.kind === 'ask_user'
-    ? <AskUserCard interaction={interaction} onAnswered={onAnswered} />
-    : <ApprovalCard interaction={interaction} onExecute={onExecute} onAnswered={onAnswered} />
+/** 底部那行键盘提示。没有行可点名时不显示 —— 提示一件做不到的事更糟。 */
+function KeyboardHint({ show }: { show: boolean }): ReactNode {
+  const { t } = useI18n()
+  if (!show) return null
+  return <span className="text-[11px] text-fg-faint">{t('agent.interaction.keyboardHint')}</span>
+}
+
+function InteractionCard({ interaction, workspaceId, onOpenPlan, onExecute, onAnswered }: {
+  interaction: PendingInteraction
+  workspaceId?: string
+  onOpenPlan?: (path: string) => void
+  onExecute?: (ref: PlanExecutionRef, source: 'current_session' | 'new_session') => void
+  onAnswered: () => void
+}): ReactNode {
+  if (interaction.kind === 'ask_user') return <AskUserCard interaction={interaction} onAnswered={onAnswered} />
+  if (interaction.kind === 'plan_approval') return <PlanApprovalCard interaction={interaction} workspaceId={workspaceId}
+    onOpenPlan={onOpenPlan} onExecute={onExecute} onAnswered={onAnswered} />
+  return <ToolApprovalCard interaction={interaction} onAnswered={onAnswered} />
 }
 
 function AskUserCard({ interaction, onAnswered }: {
@@ -152,15 +190,61 @@ function AskUserCard({ interaction, onAnswered }: {
   const complete = isComplete(answers)
   const question = questions[active] ?? questions[0]!
   const multi = questions.length > 1
+  const options = choiceOptions(question, t('agent.interaction.other'))
+  // 纯问答题没有选项可点名,直接给输入框 —— 只为一个「其它」渲染一行是多余的。
+  const plain = question.options.length === 0
+  const picked = draft.picked[active] ?? []
   // 没答完时右下角那颗是「下一题」而不是一颗按不动的灰键 —— 灰键只说明「不行」,
   // 不说明「下一步该干嘛」,而这里恰好有明确的下一步。
   const goNext = complete ? null : nextUnanswered(answers, active)
+
+  function pick(value: string): void {
+    const next = question.multiSelect ? toggle(options, picked, value) : [value]
+    setDraft((d) => ({ ...d, picked: d.picked.map((v, i) => (i === active ? next : v)) }))
+    // 单选题选完就往下走 —— 但要拿「答完这道之后」的答案去找下一道,
+    // 用当前的 `answers` 会把刚答的这道也算成没答,原地打转。
+    if (!shouldAdvance(question, next)) return
+    const after = answers.map((answer, i) => (i === active ? next : answer))
+    const target = nextUnanswered(after, active)
+    if (target !== null) setActive(target)
+  }
+
+  function submit(): void {
+    if (!complete) {
+      if (goNext !== null) setActive(goNext)
+      return
+    }
+    respond({ id: interaction.id, kind: 'ask_user', answers })
+  }
 
   return (
     <CardShell
       kind="ask_user"
       title={t('agent.interaction.question')}
       bodyClassName="max-h-[46vh]"
+      takeFocus
+      onKeyDown={(event) => {
+        // 方向键留给 Radix 的漫游焦点,别和它抢。
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') return
+        const action = resolveRowKey(event, {
+          count: plain ? 0 : options.length,
+          active: 0,
+          inEditable: isEditableTarget(event.target),
+          expanded: false,
+          onOtherButton: isSelfHandlingButton(event.target)
+        })
+        if (action === null || busy) return
+        if (action.kind === 'activate') {
+          const option = options[action.index]
+          if (option === undefined) return
+          event.preventDefault()
+          pick(option.value)
+          return
+        }
+        if (action.kind !== 'run') return
+        event.preventDefault()
+        submit()
+      }}
       header={multi ? (
         // 题头可能长,窄窗口下让它横向滚,而不是把卡片撑破
         <div className="scroll-thin mb-2 overflow-x-auto pb-1">
@@ -180,37 +264,37 @@ function AskUserCard({ interaction, onAnswered }: {
       ) : undefined}
       errorKey={errorKey}
       busy={busy}
-      canSubmit={complete}
-      dismissLabel={t('agent.interaction.dismiss')}
-      submitLabel={goNext !== null
-        ? t('agent.interaction.nextQuestion')
-        : multi
-          ? t('agent.interaction.submitProgress', { done: String(answered), total: String(questions.length) })
-          : t('agent.interaction.submit')}
-      onPrimary={goNext === null ? undefined : () => setActive(goNext)}
-      onDismiss={() => respond({ id: interaction.id, kind: 'ask_user', answers: null })}
-      onSubmit={(event) => {
-        event.preventDefault()
-        if (!complete) return
-        respond({ id: interaction.id, kind: 'ask_user', answers })
-      }}
+      footer={<>
+        <KeyboardHint show={!plain && options.length > 0} />
+        <span className="ml-auto flex flex-wrap items-center gap-2">
+          <button type="button" disabled={busy} className={GHOST_BUTTON}
+            onClick={() => respond({ id: interaction.id, kind: 'ask_user', answers: null })}>
+            {t('agent.interaction.dismiss')}
+          </button>
+          <button type={goNext === null ? 'submit' : 'button'}
+            onClick={goNext === null ? undefined : () => setActive(goNext)}
+            disabled={busy || (goNext === null && !complete)}
+            className={PRIMARY_BUTTON}>
+            {goNext !== null
+              ? t('agent.interaction.nextQuestion')
+              : multi
+                ? t('agent.interaction.submitProgress', { done: String(answered), total: String(questions.length) })
+                : t('agent.interaction.submit')}
+          </button>
+        </span>
+      </>}
+      onSubmit={(event) => { event.preventDefault(); submit() }}
     >
       <QuestionBlock
         key={active}
         question={question}
         index={active}
+        options={options}
+        plain={plain}
         busy={busy}
-        picked={draft.picked[active] ?? []}
+        picked={picked}
         typed={draft.typed[active] ?? ''}
-        onPicked={(next) => {
-          setDraft((d) => ({ ...d, picked: d.picked.map((v, i) => (i === active ? next : v)) }))
-          // 单选题选完就往下走 —— 但要拿「答完这道之后」的答案去找下一道,
-          // 用当前的 `answers` 会把刚答的这道也算成没答,原地打转。
-          if (!shouldAdvance(question, next)) return
-          const after = answers.map((answer, i) => (i === active ? next : answer))
-          const target = nextUnanswered(after, active)
-          if (target !== null) setActive(target)
-        }}
+        onPick={pick}
         onTyped={(next) => setDraft((d) => ({ ...d, typed: d.typed.map((v, i) => (i === active ? next : v)) }))}
         t={t}
       />
@@ -218,18 +302,30 @@ function AskUserCard({ interaction, onAnswered }: {
   )
 }
 
-function QuestionBlock({ question, index, busy, picked, typed, onPicked, onTyped, t }: {
+function QuestionBlock({ question, index, options, plain, busy, picked, typed, onPick, onTyped, t }: {
   question: AskUserQuestion
   index: number
+  options: ChoiceOption[]
+  plain: boolean
   busy: boolean
   picked: string[]
   typed: string
-  onPicked: (next: string[]) => void
+  onPick: (value: string) => void
   onTyped: (next: string) => void
   t: Translate
 }): ReactNode {
-  const options = choiceOptions(question, t('agent.interaction.other'))
-  const showInput = showsInput(question, picked)
+  const other = otherValue(question)
+  const answerField = (
+    <textarea
+      // 选了「其它」之后输入框才出现,焦点得跟过去,否则用户要再点一下才能写
+      autoFocus={!plain}
+      aria-label={t('agent.interaction.answer')}
+      placeholder={t('agent.interaction.answer')}
+      value={typed} onChange={(e) => onTyped(e.target.value)} rows={2} maxLength={32768} disabled={busy}
+      name={`answer-${index}`}
+      className={FIELD}
+    />
+  )
 
   return (
     <section data-testid="agent-question" data-question-index={index}>
@@ -238,129 +334,264 @@ function QuestionBlock({ question, index, busy, picked, typed, onPicked, onTyped
         {question.multiSelect && <span className="text-[11px] text-fg-faint">{t('agent.interaction.multiSelect')}</span>}
       </div>
       <AgentMarkdown className="mb-2" content={question.question} />
-      {options.length > 0 && (question.multiSelect
-        ? <CheckboxCards values={picked} options={options} disabled={busy}
-          ariaLabel={question.header} onToggle={(value) => onPicked(toggle(options, picked, value))} />
-        : <RadioCards value={picked[0] ?? ''} options={options} disabled={busy}
-          ariaLabel={question.header} onValueChange={(value) => onPicked([value])} />)}
-      {showInput && <textarea
-        // 选了「其它」之后输入框才出现,焦点得跟过去,否则用户要再点一下才能写
-        autoFocus={question.options.length > 0}
-        aria-label={t('agent.interaction.answer')}
-        placeholder={t('agent.interaction.answer')}
-        value={typed} onChange={(e) => onTyped(e.target.value)} rows={2} maxLength={32768} disabled={busy}
-        name={`answer-${index}`}
-        className="mt-1.5 w-full resize-none rounded-[8px] border border-border bg-surface-field px-2.5 py-2 text-[13px] leading-[1.6] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent disabled:opacity-40"
-      />}
+      {/* ★ 「其它」的输入框长在**那一行里面**,不在列表下面 —— 挂在下面时,它和
+          上面那些没选中的选项看起来是并列的两个作答入口,用户看不出哪个算数。 */}
+      {plain ? answerField : (question.multiSelect
+        ? <CheckboxCards values={picked} options={options} disabled={busy} ariaLabel={question.header}
+          onToggle={onPick} renderExpanded={(option) => (option.value === other ? answerField : null)} />
+        : <RadioCards value={picked[0] ?? ''} options={options} disabled={busy} ariaLabel={question.header}
+          onValueChange={onPick} renderExpanded={(option) => (option.value === other ? answerField : null)} />)}
     </section>
   )
 }
 
-/** 工具授权与方案审批 —— 这两类都是「一个是非题 + 一段可选的补充」。 */
-function ApprovalCard({ interaction, onExecute, onAnswered }: {
-  interaction: Extract<PendingInteraction, { kind: 'tool_permission' | 'plan_approval' }>
-  onExecute?: (ref: PlanRef, source: 'current_session' | 'new_session') => void
+/** 普通工具授权卡。 */
+function ToolApprovalCard({ interaction, onAnswered }: {
+  interaction: Extract<PendingInteraction, { kind: 'tool_permission' }>
+  onAnswered: () => void
+}): ReactNode {
+  const { t } = useI18n()
+  const { busy, errorKey, setErrorKey, respond } = useRespond(onAnswered)
+  const original = JSON.stringify(interaction.input, null, 2)
+  const [editing, setEditing] = useState(false)
+  const [input, setInput] = useState(original)
+  const rule = interaction.suggestedRule
+
+  const rows: ActionRowSpec[] = [
+    { value: 'allow_once', label: t('agent.interaction.allowOnce') },
+    // ★ 正在改参数时**撤掉**这一行:它写进本机配置的是**原始**那份参数,
+    //   摆在一份改了一半的 JSON 旁边,看起来却像「按现在这样一直允许」。
+    ...(rule === undefined || editing ? [] : [{
+      value: 'allow_always',
+      label: t('agent.interaction.allowAlways'),
+      // 「会往本机配置里写一条规则」是这一项的全部代价,必须跟着它,而不是
+      // 缩在卡片角落的一行小字里。
+      description: t('agent.interaction.allowAlwaysHint', { rule })
+    }]),
+    {
+      value: 'allow_edited',
+      label: t('agent.interaction.editArgumentsRow'),
+      icon: <Pencil aria-hidden size={13} className="text-fg-faint" />,
+      expands: true
+    }
+  ]
+
+  function run(value: string): void {
+    if (value === 'allow_once') {
+      respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_once' } })
+      return
+    }
+    if (value === 'allow_always') {
+      respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })
+      return
+    }
+    let parsed: unknown
+    try { parsed = JSON.parse(input) } catch { setErrorKey('agent.interaction.invalidJson'); return }
+    respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_edited', input: parsed } })
+  }
+
+  return <CardShell
+    kind="tool_permission"
+    title={t('agent.interaction.permission', { tool: interaction.toolName })}
+    errorKey={errorKey}
+    busy={busy}
+    footer={<>
+      <KeyboardHint show={!busy} />
+      <button type="button" disabled={busy} className={`${GHOST_BUTTON} ml-auto`}
+        onClick={() => respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'deny' } })}>
+        {t('agent.interaction.deny')}
+      </button>
+    </>}
+    onSubmit={(event) => { event.preventDefault() }}
+  >
+    {interaction.destructive && <p className="mb-2 text-[12px] text-fg-muted">{t('agent.interaction.changes')}</p>}
+    {/* 展开编辑时收起只读预览 —— 同一份参数同时摆两遍,改的是哪一份说不清。 */}
+    {!editing && <pre className="selectable mb-2 whitespace-pre-wrap break-all text-[12px]">{input}</pre>}
+    <ActionRows
+      rows={rows}
+      disabled={busy}
+      ariaLabel={t('agent.interaction.permission', { tool: interaction.toolName })}
+      onRun={run}
+      onExpandedChange={(value) => {
+        setEditing(value === 'allow_edited')
+        // 收起等于放弃这次修改:下次展开应该从原始参数重新开始,而不是
+        // 接着上一次改了一半的那份。
+        if (value === null) { setInput(original); setErrorKey(null) }
+      }}
+      renderExpanded={(value, collapse) => value !== 'allow_edited' ? null : (
+        <>
+          <textarea autoFocus aria-label={t('agent.interaction.arguments')} value={input}
+            onChange={(event) => setInput(event.target.value)} disabled={busy} rows={6}
+            className={`${FIELD} font-mono text-[12px]`} />
+          <div className="mt-1.5 flex items-center justify-end gap-2">
+            <button type="button" disabled={busy} className={GHOST_BUTTON} onClick={collapse}>
+              {t('agent.interaction.keepOriginal')}
+            </button>
+            <button type="button" disabled={busy} className={PRIMARY_BUTTON} onClick={() => run('allow_edited')}>
+              {t('agent.interaction.allowOnce')}
+            </button>
+          </div>
+        </>
+      )}
+    />
+  </CardShell>
+}
+
+/** 计划文件名。路径分隔符两种都要认 —— Windows 上拿到的是反斜杠。 */
+export function planFileName(path: string): string {
+  const name = path.split(/[\\/]/).pop()?.trim() ?? ''
+  return name === '' ? 'plan.md' : name
+}
+
+/** One Markdown file is the only plan source of truth. */
+function PlanApprovalCard({ interaction, workspaceId, onOpenPlan, onExecute, onAnswered }: {
+  interaction: Extract<PendingInteraction, { kind: 'plan_approval' }>
+  workspaceId?: string
+  onOpenPlan?: (path: string) => void
+  onExecute?: (ref: PlanExecutionRef, source: 'current_session' | 'new_session') => void
   onAnswered: () => void
 }): ReactNode {
   const { t } = useI18n()
   const execution = useRef<'current_session' | 'new_session' | null>(null)
+  const entry = useDocumentsStore((state) => workspaceId === undefined ? undefined : state.entries[documentKey(workspaceId, interaction.path)])
+  const save = useDocumentsStore((state) => state.save)
+  const [feedback, setFeedback] = useState('')
+  const [preparing, setPreparing] = useState(false)
+  const [copied, setCopied] = useTransientStatus()
+  const [exported, setExported] = useTransientStatus()
   const { busy, errorKey, setErrorKey, respond } = useRespond(onAnswered, () => {
-    if (interaction.kind === 'plan_approval' && onExecute !== undefined && execution.current !== null) {
-      if (interaction.planId !== undefined && interaction.planVersion !== undefined) onExecute({ planId: interaction.planId, version: interaction.planVersion }, execution.current)
+    if (execution.current !== null && onExecute !== undefined) {
+      onExecute({ planId: interaction.planId, path: interaction.path }, execution.current)
       execution.current = null
     }
   })
-  const [feedback, setFeedback] = useState('')
-  const [editing, setEditing] = useState(false)
-  const [input, setInput] = useState(interaction.kind === 'tool_permission' ? JSON.stringify(interaction.input, null, 2) : '')
+  const disabled = busy || preparing
+  const plan = entry?.draft ?? interaction.plan
 
-  function submit(event: FormEvent): void {
-    event.preventDefault()
-    if (interaction.kind === 'tool_permission') {
-      let value: unknown = interaction.input
-      if (editing) {
-        try { value = JSON.parse(input ?? '') } catch { setErrorKey('agent.interaction.invalidJson'); return }
-      }
-      respond({ id: interaction.id, kind: interaction.kind,
-        decision: editing ? { kind: 'allow_edited', input: value } : { kind: 'allow_once' } })
-    } else {
-      // ★ 批准就得真的往前走一步 —— 只把 approved 写回去、不触发执行的话,
-      // 原来那个只读计划模式的 run 会继续跑,模型自己也创建不了文件,
-      // 用户看到的就是「点了批准,啥也没变」。默认当前会话执行,
-      // 「新会话执行」作为额外选项挪去了页脚(见 extraActions)。
-      if (interaction.kind === 'plan_approval') {
-        if (onExecute !== undefined) execution.current = 'current_session'
-        respond({ id: interaction.id, kind: interaction.kind, action: 'approve_current', planId: interaction.planId ?? '', version: interaction.planVersion ?? -1, feedback })
-      }
-    }
+  async function saveOpenDraft(): Promise<boolean> {
+    if (workspaceId === undefined || entry === undefined || !isDocumentDirty(entry)) return true
+    setPreparing(true)
+    const saved = await save(workspaceId, interaction.path).catch(() => false)
+    setPreparing(false)
+    if (!saved) setErrorKey('agent.interaction.planSaveFailed')
+    return saved
   }
 
-  // 「以后都允许」只在参数没被改过时给 —— 改过的参数是一次性的,
-  // 而规则记的是「这类调用」,两者写到一起会记下一条用户从没批准过的调用形状。
-  const alwaysRule = interaction.kind === 'tool_permission' && !editing ? interaction.suggestedRule : undefined
+  async function decide(action: 'approve_current' | 'approve_new_session' | 'request_revision' | 'reject'): Promise<void> {
+    if (disabled) return
+    if (action === 'request_revision' && feedback.trim() === '') {
+      setErrorKey('agent.interaction.planFeedbackRequired')
+      return
+    }
+    if (!(await saveOpenDraft())) return
+    if (action === 'approve_current') execution.current = onExecute === undefined ? null : 'current_session'
+    if (action === 'approve_new_session') execution.current = onExecute === undefined ? null : 'new_session'
+    respond({ id: interaction.id, kind: 'plan_approval', action, ...(feedback.trim() === '' ? {} : { feedback: feedback.trim() }) })
+  }
 
-  return (
-    <CardShell
-      kind={interaction.kind}
-      title={interaction.kind === 'tool_permission'
-        ? t('agent.interaction.permission', { tool: interaction.toolName })
-        : t('agent.interaction.plan')}
-      errorKey={errorKey}
-      busy={busy}
-      canSubmit
-      dismissLabel={t('agent.interaction.deny')}
-      submitLabel={t(interaction.kind === 'tool_permission'
-        ? 'agent.interaction.allowOnce'
-        : onExecute !== undefined ? 'agent.interaction.executeCurrent' : 'agent.interaction.approvePlan')}
-      extraActions={alwaysRule !== undefined ? (
-        <button type="button" disabled={busy} className={GHOST_BUTTON} title={t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
-          onClick={() => respond({ id: interaction.id, kind: 'tool_permission', decision: { kind: 'allow_always', scope: 'workspace' } })}>
-          {t('agent.interaction.allowAlways')}
-        </button>
-      ) : interaction.kind === 'plan_approval' && onExecute !== undefined ? (
-        <button type="button" disabled={busy} className={GHOST_BUTTON}
-          onClick={() => { execution.current = 'new_session'; respond({ id: interaction.id, kind: 'plan_approval', action: 'approve_new_session', planId: interaction.planId ?? '', version: interaction.planVersion ?? -1, feedback }) }}>
-          {t('agent.interaction.executeNewSession')}
-        </button>
-      ) : undefined}
-      onDismiss={() => {
-        if (interaction.kind === 'tool_permission') respond({ id: interaction.id, kind: interaction.kind, decision: { kind: 'deny' } })
-        else if (interaction.kind === 'plan_approval') respond({ id: interaction.id, kind: interaction.kind, action: feedback.trim() === '' ? 'reject' : 'request_revision', planId: interaction.planId ?? '', version: interaction.planVersion ?? -1, feedback })
+  const rows: ActionRowSpec[] = [
+    {
+      value: 'approve_current',
+      label: t(onExecute === undefined ? 'agent.interaction.approvePlan' : 'agent.interaction.executeCurrent')
+    },
+    ...(onExecute === undefined ? [] : [{
+      value: 'approve_new_session',
+      label: t('agent.interaction.executeNewSession')
+    }]),
+    {
+      value: 'request_revision',
+      label: t('agent.interaction.requestRevisionRow'),
+      icon: <Pencil aria-hidden size={13} className="text-fg-faint" />,
+      expands: true
+    }
+  ]
+
+  return <CardShell
+    kind="plan_approval"
+    title={t('agent.interaction.plan')}
+    bodyClassName="max-h-none"
+    errorKey={errorKey}
+    busy={disabled}
+    footer={<>
+      <KeyboardHint show={!disabled} />
+      <button type="button" disabled={disabled} className={`${GHOST_BUTTON} ml-auto`}
+        onClick={() => { void decide('reject') }}>
+        {t('agent.interaction.abandonPlan')}
+      </button>
+    </>}
+    onSubmit={(event) => { event.preventDefault() }}
+  >
+    <div className="mb-2 overflow-hidden rounded-lg border border-border bg-app">
+      {/* 动作摆在固定的头部,不压在预览的渐变上 —— 那里的位置随内容长度浮动。 */}
+      <div className="flex items-center gap-1 border-b border-border px-2 py-1">
+        <FileText aria-hidden size={13} className="shrink-0 text-accent-soft" />
+        <span className="mr-auto truncate text-[11px] text-fg-muted">{planFileName(interaction.path)}</span>
+        <ActionIconButton
+          testId="plan-copy"
+          disabled={disabled}
+          label={t(copied === 'failed' ? 'agent.interaction.copyFailed'
+            : copied === 'done' ? 'agent.interaction.planCopied' : 'agent.interaction.copyPlan')}
+          onClick={() => { void copyText(plan).then(() => setCopied('done')).catch(() => setCopied('failed')) }}
+        >
+          {copied === 'done' ? <Check size={13} /> : <Copy size={13} />}
+        </ActionIconButton>
+        <ActionIconButton
+          testId="plan-export"
+          disabled={disabled}
+          label={t(exported === 'failed' ? 'agent.interaction.exportFailed'
+            : exported === 'done' ? 'agent.interaction.planExported' : 'agent.interaction.exportPlan')}
+          onClick={() => {
+            void saveTextFile(planFileName(interaction.path), plan)
+              // null = 用户在系统对话框里取消了。那不是失败,不该给成功反馈。
+              .then((saved) => { if (saved !== null) setExported('done') })
+              .catch(() => setExported('failed'))
+          }}
+        >
+          {exported === 'done' ? <Check size={13} /> : <Download size={13} />}
+        </ActionIconButton>
+        {onOpenPlan !== undefined && <ActionIconButton
+          testId="plan-open"
+          disabled={disabled}
+          label={t('agent.interaction.openFullPlan')}
+          onClick={() => onOpenPlan(interaction.path)}
+        >
+          <ArrowUpRight size={13} />
+        </ActionIconButton>}
+      </div>
+      <button type="button" disabled={disabled} onClick={() => onOpenPlan?.(interaction.path)}
+        aria-label={t('agent.interaction.openPlan')}
+        className="relative block h-[220px] w-full overflow-hidden p-3 text-left">
+        <AgentMarkdown content={plan} />
+        <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-app to-transparent" />
+      </button>
+    </div>
+    <ActionRows
+      rows={rows}
+      disabled={disabled}
+      ariaLabel={t('agent.interaction.plan')}
+      onRun={(value) => {
+        if (value === 'approve_current' || value === 'approve_new_session' || value === 'request_revision') {
+          void decide(value)
+        }
       }}
-      onSubmit={submit}
-    >
-      {interaction.kind === 'tool_permission' ? <>
-        {interaction.destructive && <p className="mb-2 text-[12px] text-fg-muted">{t('agent.interaction.changes')}</p>}
-        {editing ? <textarea aria-label={t('agent.interaction.arguments')} value={input} onChange={(e) => setInput(e.target.value)}
-          disabled={busy} rows={5} className="w-full rounded-lg border border-border bg-app p-2 font-mono text-[12px]" />
-          : <pre className="selectable whitespace-pre-wrap break-all text-[12px]">{input}</pre>}
-        {alwaysRule !== undefined && <p className="mt-2 text-[11px] leading-[1.6] text-fg-faint">
-          {t('agent.interaction.allowAlwaysHint', { rule: alwaysRule })}
-        </p>}
-        <button type="button" disabled={busy} className="mt-2 text-[12px] text-fg-muted" onClick={() => {
-          if (editing) setInput(JSON.stringify(interaction.input, null, 2))
-          setEditing((v) => !v)
-        }}>
-          {t(editing ? 'agent.interaction.keepOriginal' : 'agent.interaction.editArguments')}
-        </button>
-      </> : <>
-        <PlanReview interaction={interaction} />
-        <textarea aria-label={t('agent.interaction.feedback')} placeholder={t('agent.interaction.feedback')}
-          value={feedback} onChange={(e) => setFeedback(e.target.value)} rows={2} maxLength={32768} disabled={busy}
-          className="mt-1 w-full rounded-lg border border-border bg-app p-2 text-[13px]" />
-      </>}
-    </CardShell>
-  )
-}
-
-function PlanReview({ interaction }: {
-  interaction: Extract<PendingInteraction, { kind: 'plan_approval' }>
-}): ReactNode {
-  const { t } = useI18n()
-  const plan = interaction.planDocument
-  if (plan === undefined) return <AgentMarkdown className="mb-2" content={interaction.plan} />
-  return <div className="mb-2 space-y-2">
-    <div className="flex items-center justify-between text-[11px] text-fg-faint"><span>{plan.explanation ?? t('agent.interaction.plan')}</span><span>{t('agent.interaction.planVersion', { version: String(plan.version) })}</span></div>
-    <ol className="ml-5 list-decimal space-y-1 text-[12px] text-fg-muted">{plan.plan.map((step) => <li key={step.id}><span className="text-fg">{step.step}</span><span className="ml-2 text-[11px] text-fg-faint">{t(`agent.plan.step.${step.status}`)}</span></li>)}</ol>
-  </div>
+      renderExpanded={(value, collapse) => value !== 'request_revision' ? null : (
+        <>
+          <textarea autoFocus aria-label={t('agent.interaction.feedback')} placeholder={t('agent.interaction.feedback')}
+            value={feedback} onChange={(event) => setFeedback(event.target.value)} rows={3} maxLength={32768}
+            disabled={disabled} className={FIELD} />
+          <div className="mt-1.5 flex items-center justify-end gap-2">
+            <button type="button" disabled={disabled} className={GHOST_BUTTON} onClick={collapse}>
+              {t('agent.interaction.cancelRevision')}
+            </button>
+            {/* ★ 没写字时**不给**这颗键,而不是给一颗灰的 —— 灰键只说明「不行」,
+                说不出「还差什么」,而这里差的东西就在上面那个空框里。 */}
+            {feedback.trim() !== '' && <button type="button" disabled={disabled} className={PRIMARY_BUTTON}
+              onClick={() => { void decide('request_revision') }}>
+              {t('agent.interaction.sendRevision')}
+            </button>}
+          </div>
+        </>
+      )}
+    />
+  </CardShell>
 }

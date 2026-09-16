@@ -6,7 +6,7 @@ import type { AnthropicCacheTtl } from '../../../../shared/domain/provider'
 import { joinUpstreamUrl, type CanonicalRequest } from '../canonical'
 import { encodeAnthropic, toAnthropicMessages, toAnthropicTools } from '../encode/anthropic'
 
-const ENCODE_OPTIONS = { userId: 'ws-test', cacheTtl: 'off' as const }
+const ENCODE_OPTIONS = { userId: 'ws-test', cacheTtl: '5m' as const }
 
 function u(...parts: ContentPart[]): AgentMessage {
   return userMessage('u', parts, 0)
@@ -36,7 +36,7 @@ const TOOL: ToolInfo = {
 
 type JsonRecord = Record<string, unknown>
 
-function encodedBody(over: Partial<CanonicalRequest> = {}, cacheTtl: AnthropicCacheTtl = 'off'): JsonRecord {
+function encodedBody(over: Partial<CanonicalRequest> = {}, cacheTtl: AnthropicCacheTtl = '5m'): JsonRecord {
   return encodeAnthropic(
     { ...BASE, ...over },
     'claude-x',
@@ -189,15 +189,32 @@ describe('encodeAnthropic', () => {
     )
     expect(enc.path).toBe('/v1/messages')
     expect(enc.headers).toMatchObject({ 'x-api-key': 'sk-1', 'anthropic-version': '2023-06-01' })
-    expect(enc.body).toMatchObject({ model: 'claude-x', max_tokens: 4096, stream: true, system: '你是助手' })
+    expect(enc.body).toMatchObject({
+      model: 'claude-x', max_tokens: 4096, stream: true,
+      cache_control: { type: 'ephemeral' },
+      system: [{ type: 'text', text: '你是助手', cache_control: { type: 'ephemeral' } }]
+    })
     expect(enc.body).toMatchObject({ metadata: { user_id: 'ws-test' } })
   })
 
-  it('metadata.user_id 与缓存开关独立：关闭缓存仍发送工作区标识', () => {
-    const body = encodedBody({ system: '稳定提示' }, 'off')
+  it.each([undefined, null, 'off', '90d'])('缺省或旧 TTL %s 也必须发送缓存标记和工作区标识', (cacheTtl) => {
+    const body = encodeAnthropic(
+      { ...BASE, system: '稳定提示' }, 'claude-x', 'sk-1',
+      { userId: 'ws-opaque', cacheTtl: cacheTtl as never }
+    ).body as JsonRecord
     expect(body.metadata).toEqual({ user_id: 'ws-opaque' })
-    expect(body).not.toHaveProperty('cache_control')
-    expect(body.system).toBe('稳定提示')
+    expect(body.cache_control).toEqual({ type: 'ephemeral' })
+    expect(body.system).toEqual([
+      { type: 'text', text: '稳定提示', cache_control: { type: 'ephemeral' } }
+    ])
+  })
+
+  it('旧三参数调用同样默认启用 5 分钟缓存', () => {
+    const body = encodeAnthropic({ ...BASE, system: '稳定提示' }, 'claude-x', 'sk-1').body as JsonRecord
+    expect(body.cache_control).toEqual({ type: 'ephemeral' })
+    expect(body.system).toEqual([
+      { type: 'text', text: '稳定提示', cache_control: { type: 'ephemeral' } }
+    ])
   })
 
   it('5 分钟缓存使用 Anthropic 默认 TTL，并在 system 上固定稳定前缀断点', () => {

@@ -161,7 +161,7 @@ export function UsagePage(): ReactNode {
           onClick={retry}
           className="flex size-8 items-center justify-center rounded-full bg-tint text-icon transition-colors hover:bg-tint-hover"
         >
-          <RefreshCw size={14} className={overviewLoading || logsLoading ? 'animate-spin' : ''} />
+          <RefreshCw size={14} className={overviewLoading || logsLoading ? 'animate-spin motion-reduce:animate-none' : ''} />
         </button>
       </div>
 

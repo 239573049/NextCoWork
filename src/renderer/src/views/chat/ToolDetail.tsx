@@ -395,7 +395,7 @@ function OrchestrationDetail({
   if (Array.isArray(todos) && todos.length > 0) {
     return (
       <>
-        <ul className="mb-1.5 flex flex-col gap-1">
+        <ul className="scroll-thin mb-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto pr-1">
           {todos.map((t, i) => {
             const item = (
               typeof t === "object" && t !== null ? t : {}

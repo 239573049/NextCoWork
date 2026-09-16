@@ -33,6 +33,7 @@ import { dataMergeDecision, type CleanupPreview, type CleanupResult, type DataEx
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
 import { isDefaultSessionTitle } from '../../shared/domain/session'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
+import { normalizeModeId } from '../../shared/domain/mode'
 import type { Workspace } from '../../shared/domain/workspace'
 import type { ScheduledRun, ScheduledTask } from '../../shared/domain/scheduled'
 import type { ConnectionProfile, EnvironmentRef } from '../../shared/domain/environment'
@@ -48,13 +49,21 @@ import type {
   UsageWindow
 } from '../../shared/domain/usage'
 import { fileStats, stmt, tx } from './index'
+import {
+  ConfigProfileError,
+  credentialScopePrefix,
+  currentConfigScope,
+  logicalCredentialRef,
+  physicalCredentialRef,
+  workspaceScope,
+  workspaceScopeVisible
+} from './config-profile'
+
 import { ulid } from '../../shared/util/id'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { SyncConfigKind, SyncConflict, SyncMutation } from '../../shared/domain/config-sync'
-import type { PlanDocument, PlanOperation, PlanRevision, PlanUpdateResult, PlanDocumentV2, PlanV2Input, PlanLifecycle, PlanStepV2Status } from '../../shared/domain/plan'
-import { validatePlanV2Input } from '../../shared/domain/plan'
 
 const SYNC_ACCOUNT_KEY = 'config-sync.account'
 const SYNC_DEVICE_KEY = 'config-sync.device'
@@ -65,222 +74,13 @@ export { tx } from './index'
 /** 列里存的是 JSON 文本;`String()` 是给 `SQLOutputValue` 那个联合类型收窄用的。 */
 const parse = <T>(json: unknown): T => JSON.parse(String(json)) as T
 
-function applyPlanOperations(plan: PlanDocument, operations: readonly PlanOperation[], now: number): PlanDocument {
-  const next: PlanDocument = structuredClone(plan)
-  for (const op of operations) {
-    switch (op.op) {
-      case 'set_title': next.title = op.value.trim(); break
-      case 'set_summary': next.summary = op.value; break
-      case 'set_risks': next.risks = [...op.values]; break
-      case 'set_validation': next.validation = [...op.values]; break
-      case 'insert_step': {
-        const step = { ...op.step, id: op.step.id ?? ulid(), status: op.step.status ?? 'pending' }
-        const at = op.afterId === undefined ? next.steps.length : next.steps.findIndex((s) => s.id === op.afterId) + 1
-        next.steps.splice(Math.max(0, at), 0, step as PlanDocument['steps'][number])
-        break
-      }
-      case 'update_step': {
-        const step = next.steps.find((s) => s.id === op.stepId)
-        if (step !== undefined) Object.assign(step, op.patch)
-        break
-      }
-      case 'delete_step': next.steps = next.steps.filter((s) => s.id !== op.stepId); break
-      case 'move_step': {
-        const index = next.steps.findIndex((s) => s.id === op.stepId)
-        if (index < 0) break
-        const [step] = next.steps.splice(index, 1)
-        const at = op.afterId === undefined ? 0 : next.steps.findIndex((s) => s.id === op.afterId) + 1
-        if (step !== undefined) next.steps.splice(Math.max(0, at), 0, step)
-        break
-      }
-      case 'attach_media': {
-        const media = { id: op.media.id ?? ulid(), ...op.media }
-        next.media = [...next.media.filter((m) => m.id !== media.id), media]
-        if (op.stepId !== undefined) next.steps.find((s) => s.id === op.stepId)?.mediaIds.push(media.id)
-        break
-      }
-      case 'remove_media':
-        next.media = next.media.filter((m) => m.id !== op.mediaId)
-        next.steps.forEach((s) => { s.mediaIds = s.mediaIds.filter((id) => id !== op.mediaId) })
-        break
-    }
-  }
-  next.version += 1
-  next.updatedAt = now
-  return next
-}
-
-export function getPlan(id: string): PlanDocument | undefined {
-  const row = stmt('SELECT json FROM plans WHERE id = ?').get(id)
-  return row === undefined ? undefined : parse<PlanDocument>(row['json'])
-}
-
-export function listPlans(sessionId: string): PlanDocument[] {
-  return stmt('SELECT json FROM plans WHERE session_id = ? ORDER BY updated_at DESC').all(sessionId)
-    .map((row) => parse<PlanDocument>(row['json']))
-}
-
-export function updatePlan(input: {
-  plan?: PlanDocument
-  planId?: string
-  sessionId: string
-  sourceRunId: string
-  baseVersion?: number
-  operations: PlanOperation[]
-  author?: 'agent' | 'user'
-}): PlanUpdateResult {
-  const current = input.plan ?? (input.planId === undefined ? undefined : getPlan(input.planId))
-  const now = Date.now()
-  if (current !== undefined && input.baseVersion !== undefined && current.version !== input.baseVersion) {
-    return { ok: false, conflict: { currentVersion: current.version, planId: current.id }, message: 'Plan version conflict; reload the latest plan before updating.' }
-  }
-  const base: PlanDocument = current ?? {
-    id: input.planId ?? ulid(), sessionId: input.sessionId, version: 0, status: 'draft', title: 'Plan', summary: '',
-    steps: [], risks: [], validation: [], media: [], sourceRunId: input.sourceRunId, updatedAt: now
-  }
-  const next = applyPlanOperations(base, input.operations, now)
-  next.status = 'draft'
-  tx(() => {
-    stmt(`INSERT INTO plans (id, session_id, version, status, json, source_run_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET version=excluded.version, status=excluded.status, json=excluded.json, source_run_id=excluded.source_run_id, updated_at=excluded.updated_at`)
-      .run(next.id, next.sessionId, next.version, next.status, JSON.stringify(next), next.sourceRunId, next.updatedAt)
-    const revision: PlanRevision = { planId: next.id, version: next.version, author: input.author ?? 'agent', sourceRunId: input.sourceRunId, patch: input.operations, createdAt: now }
-    stmt('INSERT INTO plan_revisions (plan_id, version, author, source_run_id, patch, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(next.id, next.version, revision.author, revision.sourceRunId ?? null, JSON.stringify(revision.patch), now)
-  })
-  return { ok: true, plan: next, message: `Plan updated to version ${String(next.version)}.` }
-}
-
-export function submitPlan(id: string, version: number): PlanDocument {
-  const plan = getPlan(id)
-  if (plan === undefined) throw new Error(`Plan does not exist: ${id}`)
-  if (plan.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(plan.version)}`)
-  const next = { ...plan, status: 'review' as const, updatedAt: Date.now() }
-  stmt('UPDATE plans SET status = ?, json = ?, updated_at = ? WHERE id = ?').run(next.status, JSON.stringify(next), next.updatedAt, id)
-  return next
-}
-
-export function approvePlan(id: string, version: number): PlanDocument {
-  const plan = getPlan(id)
-  if (plan === undefined) throw new Error(`Plan does not exist: ${id}`)
-  if (plan.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(plan.version)}`)
-  const next = { ...plan, status: 'approved' as const, updatedAt: Date.now() }
-  stmt('UPDATE plans SET status = ?, json = ?, updated_at = ? WHERE id = ?').run(next.status, JSON.stringify(next), next.updatedAt, id)
-  return next
-}
-
-// ── Codex-shaped plans v2 ───────────────────────────────────────────────────
-
-function parsePlanV2(row: Record<string, unknown>): PlanDocumentV2 {
-  return parse<PlanDocumentV2>(row['json'])
-}
-
-export function getPlanV2(id: string): PlanDocumentV2 | undefined {
-  const row = stmt('SELECT json FROM plans_v2 WHERE id = ?').get(id)
-  return row === undefined ? undefined : parsePlanV2(row as Record<string, unknown>)
-}
-
-export function listPlansV2(sessionId: string): PlanDocumentV2[] {
-  return stmt('SELECT json FROM plans_v2 WHERE session_id = ? ORDER BY updated_at DESC').all(sessionId)
-    .map((row) => parsePlanV2(row as Record<string, unknown>))
-}
-
-export function getExecutionPlanV2(runId: string): PlanDocumentV2 | undefined {
-  const row = stmt('SELECT json FROM plans_v2 WHERE execution_run_id = ? ORDER BY updated_at DESC LIMIT 1').get(runId)
-  return row === undefined ? undefined : parsePlanV2(row as Record<string, unknown>)
-}
-
-/** A normal-mode checklist has no approval interaction; it starts as execution progress. */
-export function createProgressPlanV2(input: PlanV2Input): PlanDocumentV2 {
-  const saved = putPlanV2(input)
-  if (!saved.ok) throw new Error(saved.message)
-  const next: PlanDocumentV2 = { ...saved.plan, lifecycle: 'executing', executionRunId: input.sourceRunId }
-  stmt('UPDATE plans_v2 SET lifecycle = ?, execution_run_id = ?, json = ? WHERE id = ?')
-    .run(next.lifecycle, next.executionRunId ?? input.sourceRunId, JSON.stringify(next), next.id)
-  return next
-}
-
-export function putPlanV2(input: PlanV2Input, author: 'agent' | 'user' | 'system' = 'agent'): { ok: true; plan: PlanDocumentV2 } | { ok: false; conflict?: { planId: string; currentVersion: number }; message: string } {
-  const error = validatePlanV2Input({ explanation: input.explanation, plan: input.plan.map((step) => ({ step: step.step, status: step.status ?? 'pending' })) })
-  if (error !== null) return { ok: false, message: error }
-  const now = Date.now()
-  const current = input.planId === undefined ? undefined : getPlanV2(input.planId)
-  if (current !== undefined && current.lifecycle !== 'draft') return { ok: false, message: 'Only draft plans can be updated; create a new revision after review.' }
-  const next: PlanDocumentV2 = {
-    id: current?.id ?? input.planId ?? ulid(),
-    sessionId: input.sessionId,
-    version: (current?.version ?? 0) + 1,
-    lifecycle: 'draft',
-    explanation: input.explanation?.trim() || null,
-    plan: input.plan.map((step) => ({ id: step.id ?? ulid(), step: step.step.trim(), status: step.status ?? 'pending' })),
-    sourceRunId: input.sourceRunId,
-    ...(current?.executionRunId === undefined ? {} : { executionRunId: current.executionRunId }),
-    createdAt: current?.createdAt ?? now,
-    updatedAt: now
-  }
-  tx(() => {
-    stmt(`INSERT INTO plans_v2 (id, session_id, version, lifecycle, json, source_run_id, execution_run_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET version=excluded.version, lifecycle=excluded.lifecycle, json=excluded.json,
-        source_run_id=excluded.source_run_id, execution_run_id=excluded.execution_run_id, updated_at=excluded.updated_at`)
-      .run(next.id, next.sessionId, next.version, next.lifecycle, JSON.stringify(next), next.sourceRunId, next.executionRunId ?? null, next.createdAt, next.updatedAt)
-    stmt('INSERT INTO plan_revisions_v2 (plan_id, version, author, source_run_id, patch, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(next.id, next.version, author, input.sourceRunId, JSON.stringify({ explanation: next.explanation, plan: next.plan }), now)
-  })
-  return { ok: true, plan: next }
-}
-
-const PLAN_TRANSITIONS: Record<PlanLifecycle, readonly PlanLifecycle[]> = {
-  draft: ['review', 'superseded'], review: ['draft', 'approved', 'superseded'], approved: ['executing', 'superseded'],
-  executing: ['completed', 'failed'], completed: [], failed: ['executing', 'superseded'], superseded: []
-}
-
-export function transitionPlanV2(id: string, version: number, lifecycle: PlanLifecycle, executionRunId?: string): PlanDocumentV2 {
-  const current = getPlanV2(id)
-  if (current === undefined) throw new Error(`Plan does not exist: ${id}`)
-  if (current.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(current.version)}`)
-  if (current.lifecycle === lifecycle) return current
-  if (!PLAN_TRANSITIONS[current.lifecycle].includes(lifecycle)) throw new Error(`Invalid plan lifecycle transition: ${current.lifecycle} -> ${lifecycle}`)
-  if (lifecycle === 'executing' && current.lifecycle === 'executing' && current.executionRunId !== undefined && current.executionRunId !== executionRunId) throw new Error('This plan already has an execution run.')
-  const next: PlanDocumentV2 = { ...current, lifecycle, updatedAt: Date.now(), ...(executionRunId === undefined ? {} : { executionRunId }) }
-  stmt('UPDATE plans_v2 SET lifecycle = ?, json = ?, execution_run_id = ?, updated_at = ? WHERE id = ? AND version = ?')
-    .run(next.lifecycle, JSON.stringify(next), next.executionRunId ?? null, next.updatedAt, id, version)
-  return next
-}
-
-export function submitPlanV2(id: string, version: number): PlanDocumentV2 {
-  return transitionPlanV2(id, version, 'review')
-}
-
-export function updatePlanProgressV2(id: string, version: number, plan: Array<{ id?: string; step: string; status: PlanStepV2Status }>, explanation?: string | null): PlanDocumentV2 {
-  const current = getPlanV2(id)
-  if (current === undefined) throw new Error(`Plan does not exist: ${id}`)
-  if (current.version !== version) throw new Error(`Plan version conflict: expected ${String(version)}, current ${String(current.version)}`)
-  if (current.lifecycle !== 'executing') throw new Error('Plan progress can only be updated while executing.')
-  const error = validatePlanV2Input({ explanation, plan })
-  if (error !== null) throw new Error(error)
-  const next: PlanDocumentV2 = { ...current, version: current.version + 1, explanation: explanation === undefined ? current.explanation : explanation, plan: plan.map((step) => ({ id: step.id ?? ulid(), step: step.step.trim(), status: step.status })), updatedAt: Date.now() }
-  tx(() => {
-    stmt('UPDATE plans_v2 SET version = ?, json = ?, updated_at = ? WHERE id = ? AND version = ?').run(next.version, JSON.stringify(next), next.updatedAt, id, version)
-    stmt('INSERT INTO plan_revisions_v2 (plan_id, version, author, source_run_id, patch, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, next.version, 'agent', current.executionRunId ?? null, JSON.stringify({ explanation: next.explanation, plan: next.plan }), next.updatedAt)
-  })
-  return next
-}
-
-export function legacyPlanAsV2(plan: PlanDocument): PlanDocumentV2 {
-  return {
-    id: plan.id, sessionId: plan.sessionId, version: plan.version, lifecycle: plan.status === 'approved' ? 'approved' : plan.status === 'executing' ? 'executing' : plan.status === 'completed' ? 'completed' : plan.status === 'superseded' ? 'superseded' : plan.status === 'review' ? 'review' : 'draft',
-    explanation: plan.summary || null, plan: plan.steps.map((step) => ({ id: step.id, step: `${step.title}${step.description ? ` — ${step.description}` : ''}`, status: step.status === 'in_progress' ? 'in_progress' : step.status === 'completed' ? 'completed' : 'pending' })), sourceRunId: plan.sourceRunId, createdAt: plan.updatedAt, updatedAt: plan.updatedAt
-  }
-}
-
 /** ── 基础配置同步 outbox ─────────────────────────────────────────────── */
-function syncAccount(): { accountId: string; deviceId: string } | undefined {
+function syncAccount(): { accountId: string; deviceId: string; enabled: boolean } | undefined {
   const raw = getKv<unknown>(SYNC_ACCOUNT_KEY, null)
   if (typeof raw !== 'object' || raw === null) return undefined
   const value = raw as Record<string, unknown>
   return typeof value.accountId === 'string' && typeof value.deviceId === 'string'
-    ? { accountId: value.accountId, deviceId: value.deviceId } : undefined
+    ? { accountId: value.accountId, deviceId: value.deviceId, enabled: value.enabled === true } : undefined
 }
 
 export function ensureSyncDeviceId(): string {
@@ -291,7 +91,12 @@ export function ensureSyncDeviceId(): string {
   return next
 }
 
-export function configureSyncAccount(accountId: string | null, enabled = true): void {
+/**
+ * ★ `enabled` **默认 false**。v1 那套明文 outbox 已经停用(见 `enqueueSyncMutation`),
+ * 而调用点里只要有一处忘了显式传 true,默认 true 就会让「未启用同步」的账户
+ * 悄悄开始往 sync_account 里写行。显式开启只发生在 `startConfigSync` 那一处。
+ */
+export function configureSyncAccount(accountId: string | null, enabled = false): void {
   tx(() => {
     if (accountId === null) {
       removeKv(SYNC_ACCOUNT_KEY)
@@ -334,17 +139,45 @@ export function setInitialSyncCompleted(accountId: string, completed = true): vo
     .run(completed ? 1 : 0, Date.now(), accountId)
 }
 
-export function enqueueSyncMutation(kind: SyncConfigKind, entityId: string, payload: unknown, operation: SyncMutation['operation'] = 'upsert', workspaceId?: string): void {
+/** v2 脏标记的 kv 键。**带作用域**,所以它自己不会随着切换被搬走。 */
+export function configDirtyKey(scope: string): string {
+  return `config-sync.v2.dirty.${scope}`
+}
+
+/** 标记某个作用域的配置自上次加密快照以来变过。v2 靠它决定下一次要不要重算指纹。 */
+export function setConfigDirty(scope: string = currentConfigScope(), dirty = true): void {
+  setKv(configDirtyKey(scope), dirty)
+}
+
+export function getConfigDirty(scope: string = currentConfigScope()): boolean {
+  return getKv<unknown>(configDirtyKey(scope), false) === true
+}
+
+/**
+ * ★★ **v1 明文 outbox 从这里起不再产生任何一行。**
+ *
+ * 原来这里把整份 payload(`JSON.stringify(payload)`)写进 `sync_outbox` ——
+ * 供应商的 baseUrl、别名、设置、工作区偏好,全是明文落盘。v2 的同步走
+ * `config-sync` 引擎的加密快照,不需要、也不允许再有一份明文副本。
+ *
+ * 现在它只做一件事:打一个**脏标记**。函数名和签名**一个字都没改** ——
+ * 它是全应用十几个写入点(putProvider / putAlias / updateSettings / …)唯一的
+ * 收口,改签名就等于把「哪个写入点忘了告诉同步层」重新变成一件要靠人记的事。
+ *
+ * 三个前提缺一不可,否则连标记都不打:
+ * - 不在同步应用过程中(`withSyncApply`:远端推回来的改动不是本地改动);
+ * - 已配置同步账户(`configureSyncAccount`);
+ * - 且那一份是**启用**状态 —— 退出登录 / 关掉同步之后配置照样能改,
+ *   而那时候打标记等于给一个不存在的同步会话记账。
+ *
+ * ★ 已经在库里的 v1 行**不动**:它们是历史,迁移的输入,只读。
+ * `listPendingSyncMutations` / `ack*` 因此原样留着。
+ */
+export function enqueueSyncMutation(_kind: SyncConfigKind, _entityId: string, _payload: unknown, _operation: SyncMutation['operation'] = 'upsert', _workspaceId?: string): void {
   if (syncApplying) return
   const account = syncAccount()
-  if (account === undefined) return
-  const next = Number((stmt('SELECT COALESCE(MAX(client_seq), 0) AS n FROM sync_outbox WHERE account_id = ?').get(account.accountId) as Record<string, unknown>)['n'] ?? 0) + 1
-  const mutationId = randomUUID()
-  const revision = Number((stmt('SELECT revision FROM sync_revisions WHERE account_id = ? AND kind = ? AND entity_id = ?').get(account.accountId, kind, entityId) as Record<string, unknown> | undefined)?.revision ?? 0)
-  stmt(`INSERT INTO sync_outbox
-    (mutation_id, account_id, device_id, client_seq, kind, entity_id, operation, payload, base_revision, workspace_id, created_at, next_attempt_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(mutationId, account.accountId, account.deviceId, next, kind, entityId, operation, JSON.stringify(payload ?? {}), revision, workspaceId ?? null, Date.now(), Date.now())
+  if (account === undefined || !account.enabled) return
+  setConfigDirty(account.accountId)
 }
 
 export function withSyncApply<T>(fn: () => T): T {
@@ -485,35 +318,66 @@ export function removeConnectionProfile(id: string): void {
       return ref.kind === 'connection' && ref.connectionId === id
     })) throw new EnvironmentError('connection-in-use')
     stmt('DELETE FROM connection_profiles WHERE id = ?').run(id)
-    const prefix = `connection:${id}:`
+    /*
+      ★ 前缀也要带**本作用域**。不带的话这句会按逻辑前缀扫全表,
+      把另一个账户里同名 id 的连接密钥一起删掉 —— 症状是「我在 A 账户删了条 SSH 连接,
+      B 账户的却连不上了」,而两个账户之间根本没有可见的联系。
+    */
+    const prefix = `${credentialScopePrefix()}connection:${id}:`
     stmt('DELETE FROM credentials WHERE substr(ref, 1, length(?)) = ?').run(prefix, prefix)
   })
 }
 
+/**
+ * 当前作用域的工作区列表。
+ *
+ * ★ 收窄在 **SQL 的 WHERE**,不是读回来再 filter —— 后者每一个调用点都要重记一遍
+ * 「这里也要过滤」,而漏掉任何一处的表现都是「另一个账户的工作区出现在列表里」。
+ */
 export function listWorkspaces(): Workspace[] {
-  return stmt('SELECT json FROM workspaces ORDER BY last_opened_at DESC')
-    .all()
-    .map((r) => parse<Workspace>(r['json']))
+  return stmt('SELECT json FROM workspaces WHERE owner = ? ORDER BY last_opened_at DESC')
+    .all(currentConfigScope())
+    .map((r) => normalizeWorkspace(parse<Workspace>(r['json'])))
 }
 
 export function getWorkspace(id: string): Workspace | undefined {
-  const row = stmt('SELECT json FROM workspaces WHERE id = ?').get(id)
-  return row === undefined ? undefined : parse<Workspace>(row['json'])
+  const row = stmt('SELECT owner, json FROM workspaces WHERE id = ?').get(id)
+  if (row === undefined) return undefined
+  // 别的账户的工作区**当作不存在**。返回它再让调用点各自判断归属,是必然会有漏网的一版。
+  return String(row['owner']) === currentConfigScope() ? normalizeWorkspace(parse<Workspace>(row['json'])) : undefined
 }
 
+function normalizeWorkspace(workspace: Workspace): Workspace {
+  const defaultMode = normalizeModeId(workspace.settings.defaultMode)
+  return defaultMode === workspace.settings.defaultMode
+    ? workspace
+    : { ...workspace, settings: { ...workspace.settings, defaultMode } }
+}
+
+/**
+ * 写工作区。
+ *
+ * ★ 撞上**别的账户**已有的 id 时拒绝,而不是顶替。id 是渲染层先生成/导入来的,
+ * 顶替意味着一次「新建工作区」可能悄无声息地把另一个账户的那一份覆盖掉 ——
+ * 而这件事在界面上完全看不出来(两边看起来都只是「我的工作区」)。
+ */
 export function putWorkspace(w: Workspace): Workspace {
+  const normalized = normalizeWorkspace(w)
+  const owner = workspaceScope(normalized.id)
+  if (owner !== null && owner !== currentConfigScope()) throw new ConfigProfileError('workspaceOwned')
   tx(() => { stmt(
-    `INSERT INTO workspaces (id, last_opened_at, json) VALUES (?, ?, ?)
+    `INSERT INTO workspaces (id, last_opened_at, json, owner) VALUES (?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET last_opened_at = excluded.last_opened_at, json = excluded.json`
-  ).run(w.id, w.lastOpenedAt, JSON.stringify(w))
-    enqueueSyncMutation('workspacePreferences', w.id, workspacePreferences(w))
+  ).run(normalized.id, normalized.lastOpenedAt, JSON.stringify(normalized), owner ?? currentConfigScope())
+    enqueueSyncMutation('workspacePreferences', normalized.id, workspacePreferences(normalized))
   })
-  return w
+  return normalized
 }
 
 export function removeWorkspace(id: string): void {
+  if (!workspaceScopeVisible(id)) return
   tx(() => {
-    stmt('DELETE FROM workspaces WHERE id = ?').run(id)
+    stmt('DELETE FROM workspaces WHERE id = ? AND owner = ?').run(id, currentConfigScope())
     enqueueSyncMutation('workspacePreferences', id, { id }, 'delete')
   })
 }
@@ -565,7 +429,7 @@ function sessionFromRow(row: Record<string, unknown>): Session {
       正说明了这种不一致要用硬规则去压。
     */
     ...(typeof parsed.modelProviderId === 'string' ? { modelProviderId: parsed.modelProviderId } : {}),
-    mode: (row['mode'] ?? parsed.mode ?? 'normal') as SessionMode,
+    mode: normalizeModeId(row['mode'] ?? parsed.mode),
     thinking: (row['thinking'] ?? parsed.thinking ?? 'auto') as ThinkingLevel,
     rootPathAtCreation: String(row['root_path_at_creation'] ?? parsed.rootPathAtCreation ?? ''),
     // running 永不从磁盘恢复；启动和读取都视为 idle。
@@ -593,7 +457,7 @@ export function createSession(input: SessionCreateInput): Session {
     titleSource: isDefaultSessionTitle(input.title ?? '') ? 'default' : 'manual',
     model: input.model ?? '',
     ...(input.modelProviderId === undefined ? {} : { modelProviderId: input.modelProviderId }),
-    mode: input.mode ?? 'normal',
+    mode: normalizeModeId(input.mode),
     thinking: input.thinking ?? 'auto',
     rootPathAtCreation: input.rootPathAtCreation ?? '',
     status: 'idle',
@@ -625,9 +489,26 @@ export function ensureSession(input: SessionCreateInput): Session {
   return createSession(input)
 }
 
+/**
+ * 会话 → 当前作用域能不能看见它。
+ *
+ * ★ 归属判据是**它挂的那个工作区**,而不是会话自己的某个字段:
+ * 工作区已经在 `workspaces.owner` 上有了权威归属,给会话再加一份就是
+ * 「同一个事实存两处」,而它们迟早会不一致。
+ *
+ * 返回 `false` 而不是抛错:跨账户访问在界面上就该是「查不到」,不是一条
+ * 说明「它存在但你没权限」的错误 —— 后者本身就是一次信息泄露。
+ */
+export function sessionScopeVisible(id: string): boolean {
+  const row = stmt('SELECT workspace_id FROM sessions WHERE id = ?').get(id)
+  return row !== undefined && workspaceScopeVisible(String(row['workspace_id']))
+}
+
 export function getSession(id: string): Session | undefined {
   const row = stmt('SELECT * FROM sessions WHERE id = ?').get(id)
-  return row === undefined ? undefined : sessionFromRow(row as Record<string, unknown>)
+  if (row === undefined) return undefined
+  const session = sessionFromRow(row as Record<string, unknown>)
+  return workspaceScopeVisible(session.workspaceId) ? session : undefined
 }
 
 export function putSession(session: Session): Session {
@@ -641,7 +522,8 @@ export function putSession(session: Session): Session {
     */
     ...(session.parentSessionId === session.id ? { parentSessionId: undefined } : {}),
     status: 'idle',
-    title: session.title.trim() || '新对话'
+    title: session.title.trim() || '新对话',
+    mode: normalizeModeId(session.mode)
   }
   stmt(
     `INSERT INTO sessions
@@ -695,6 +577,8 @@ export function putSession(session: Session): Session {
  * 侧边栏就多一条永远叫「新对话」的条目(标题生成只对 depth 0 触发)。
  */
 export function listSessions(workspaceId: string, archived?: boolean): SessionListItem[] {
+  // 看不见的工作区就是空列表。侧边栏据此收起,而不是显示另一个账户的对话。
+  if (!workspaceScopeVisible(workspaceId)) return []
   const rows = archived === undefined
     ? stmt('SELECT id, title, updated_at, archived FROM sessions WHERE workspace_id = ? AND parent_session_id IS NULL ORDER BY updated_at DESC, id DESC').all(workspaceId)
     : stmt('SELECT id, title, updated_at, archived FROM sessions WHERE workspace_id = ? AND parent_session_id IS NULL AND archived = ? ORDER BY updated_at DESC, id DESC').all(workspaceId, archived ? 1 : 0)
@@ -802,21 +686,22 @@ export function runUsageOf(sessionId: string): Record<string, RunUsage> {
  *
  * ★★ 有一条尝试 `cost_micros IS NULL`(模型不在价目表),`SUM()` 会安静地把它
  * 当 0 跳过,给出一个偏低却完全合理的总额。所以这里拿 `COUNT(cost_micros)`
- * (不计 NULL)和 `COUNT(*)` 对一下:对不上就整个字段不给,界面据此不画那一行。
+ * (不计 NULL)和 `COUNT(*)` 对一下:对不上就显式返回 `cost: null`,界面据此不画
+ * 那一行，同时会话总额也不会把其余已知金额误报成完整总额。
  * 这和渲染层 `addCost` 的「一次算不出就整轮算不出」是同一条规矩 —— 实时那份和
  * 落盘这份必须同口径,否则切走再切回来金额会变。
  *
- * ★ 币种多于一种同样不给:没有汇率源,¥ 和 $ 加起来是个看着合理的错数。
+ * ★ 币种多于一种同样返回 null:没有汇率源,¥ 和 $ 加起来是个看着合理的错数。
  * 一轮里故障切换到了另一个国别的供应商就会这样。
  *
  * ★ 口径跟着上面的 token 走:**失败的尝试也算**。它一样把 prompt 发上去了、
  * 一样计了费,排除掉界面就会比账单小,而差额没有任何地方交代。
  */
-function costOf(r: Record<string, unknown>): { cost?: RunCost } {
+function costOf(r: Record<string, unknown>): { cost?: RunCost | null } {
   const currency = r['currency']
-  if (Number(r['priced_count'] ?? 0) !== Number(r['attempt_count'] ?? 0)) return {}
-  if (Number(r['currency_count'] ?? 0) !== 1) return {}
-  if (currency !== 'USD' && currency !== 'CNY') return {}
+  if (Number(r['priced_count'] ?? 0) !== Number(r['attempt_count'] ?? 0)) return { cost: null }
+  if (Number(r['currency_count'] ?? 0) !== 1) return { cost: null }
+  if (currency !== 'USD' && currency !== 'CNY') return { cost: null }
   return { cost: { micros: Number(r['cost_micros'] ?? 0), currency } }
 }
 
@@ -1385,12 +1270,32 @@ export function deleteSession(id: string): string[] {
   })
 }
 
+/**
+ * 导出用的清单。
+ *
+ * ★★ **只返回当前作用域的密文,并且把物理键还原成逻辑 ref。**
+ *
+ * 两条都缺一不可:
+ * - 不按作用域收窄 → 导出的备份里会带上**别的账户**的供应商密钥;
+ * - 不还原逻辑名 → 导出的备份里每个 ref 都顶着一段账户 id 前缀,
+ *   再导入到别处时那些前缀会被当成 ref 的一部分,密钥就再也对不上了。
+ *
+ * 平台/全局键(`nextcowork:client-*`、`config-sync:*`)**不进这个列表**:
+ * 它们是设备身份,不是用户配置,备份里带出去等于把登录凭证复制一份。
+ */
 export function listCredentials(): Array<{ ref: string; blob: Uint8Array }> {
-  return stmt('SELECT ref, blob FROM credentials ORDER BY ref').all().flatMap((row) => {
+  const scope = currentConfigScope()
+  const out: Array<{ ref: string; blob: Uint8Array }> = []
+  for (const row of stmt('SELECT ref, blob FROM credentials ORDER BY ref').all()) {
     const r = row as Record<string, unknown>
     const blob = r['blob']
-    return blob instanceof Uint8Array ? [{ ref: String(r['ref']), blob }] : []
-  })
+    if (!(blob instanceof Uint8Array)) continue
+    // `local` 作用域下这一句同时是过滤器:裸 ref 里混着的全局键会被它挡掉。
+    const logical = logicalCredentialRef(String(r['ref']), scope)
+    if (logical === null) continue
+    out.push({ ref: logical, blob })
+  }
+  return out
 }
 
 /** 仅返回数据库中实际存过的搜索配置；不要和目录默认值混用。 */
@@ -1705,9 +1610,24 @@ export function findAttachmentByChecksum(
   return row == null ? undefined : toAttachmentRow(row)
 }
 
+/**
+ * 附件行 → 是否属于当前作用域。
+ *
+ * 判据是**它挂的那个会话**:附件没有自己的归属字段,而 `session_id` 就是它
+ * 实际归属的那个会话。`session_id` 为空的是「上传了但还没发出去、也没绑定会话」
+ * 的裸文件,只在 `local` 可见 —— 与 `workspaceScopeVisible` 对 `''` 的处理同一个道理。
+ */
+function attachmentScopeVisible(row: AttachmentRow): boolean {
+  return row.sessionId === null || row.sessionId === undefined
+    ? workspaceScopeVisible('')
+    : sessionScopeVisible(row.sessionId)
+}
+
 export function getAttachmentRow(id: string): AttachmentRow | undefined {
   const row = stmt('SELECT * FROM attachments WHERE id = ?').get(id)
-  return row == null ? undefined : toAttachmentRow(row)
+  if (row == null) return undefined
+  const attachment = toAttachmentRow(row)
+  return attachmentScopeVisible(attachment) ? attachment : undefined
 }
 
 /**
@@ -1717,6 +1637,8 @@ export function getAttachmentRow(id: string): AttachmentRow | undefined {
  * sessions may legitimately contain files with the same name.
  */
 export function findAttachmentByOwnerAndFileName(ownerId: string, fileName: string): AttachmentRow | undefined {
+  // `ownerId` 就是会话 id(见上面的说明),所以归属判定和会话同一条。
+  if (!sessionScopeVisible(ownerId)) return undefined
   const rows = stmt(
     `SELECT * FROM attachments
        WHERE scope = 'session' AND owner_id = ? AND status IN ('draft', 'committed')
@@ -1729,8 +1651,15 @@ export function findAttachmentByOwnerAndFileName(ownerId: string, fileName: stri
   return undefined
 }
 
-/** 某个会话下所有还没发出去的附件 —— 重启后恢复草稿附件区要用 */
+/**
+ * 某个会话下所有还没发出去的附件 —— 重启后恢复草稿附件区要用。
+ *
+ * ★ 会话不可见时返回空数组。草稿附件是**按会话 id 直接查**的,不经过
+ * `getSession`,所以它是唯一一条绕过归属判定的入口 —— 少了这一句,
+ * 跨账户随便给一个会话 id 就能列出别人的待发附件。
+ */
 export function listDraftAttachments(sessionId: string): AttachmentRow[] {
+  if (!sessionScopeVisible(sessionId)) return []
   return stmt(
     `SELECT * FROM attachments WHERE owner_id = ? AND status = 'draft' ORDER BY created_at`
   )
@@ -1915,6 +1844,8 @@ export function commitAttachmentsByPath(
 export function searchAll(q: string, workspaceId?: string, limit = 50): SearchHit[] {
   const trimmed = q.trim()
   if (trimmed === '') return []
+  // 指定了工作区却看不见它,那就是空结果 —— 和 `listSessions` 同一个判据。
+  if (workspaceId !== undefined && !workspaceScopeVisible(workspaceId)) return []
   const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
   // 以短语查询避免用户输入的 MATCH 运算符破坏 FTS 语法。
   // 四条 SQL 都带 `s.parent_session_id IS NULL`:子代理转录不是用户的对话,
@@ -1932,7 +1863,7 @@ export function searchAll(q: string, workspaceId?: string, limit = 50): SearchHi
     return rows.map((row) => {
       const r = row as Record<string, unknown>
       return { sessionId: String(r['session_id']), workspaceId: String(r['workspace_id']), messageId: String(r['message_id']), title: String(r['title']), snippet: String(r['snippet'] ?? ''), createdAt: Number(r['created_at']) }
-    })
+    }).filter(visibleHit)
   } catch {
     // FTS 对极端 Unicode/旧数据库失败时，退回 LIKE，搜索仍可用。
     const like = `%${trimmed}%`
@@ -1941,14 +1872,27 @@ export function searchAll(q: string, workspaceId?: string, limit = 50): SearchHi
               FROM messages m JOIN sessions s ON s.id = m.session_id WHERE s.parent_session_id IS NULL AND m.parts LIKE ? ORDER BY m.created_at DESC LIMIT ?`).all(like, safeLimit)
       : stmt(`SELECT m.session_id, m.id AS message_id, s.workspace_id, s.title, substr(m.parts, 1, 240) AS snippet, m.created_at
               FROM messages m JOIN sessions s ON s.id = m.session_id WHERE s.workspace_id = ? AND s.parent_session_id IS NULL AND m.parts LIKE ? ORDER BY m.created_at DESC LIMIT ?`).all(workspaceId, like, safeLimit)
-    return rows.map((row) => { const r = row as Record<string, unknown>; return { sessionId: String(r['session_id']), workspaceId: String(r['workspace_id']), messageId: String(r['message_id']), title: String(r['title']), snippet: String(r['snippet'] ?? ''), createdAt: Number(r['created_at']) } })
+    return rows.map((row) => { const r = row as Record<string, unknown>; return { sessionId: String(r['session_id']), workspaceId: String(r['workspace_id']), messageId: String(r['message_id']), title: String(r['title']), snippet: String(r['snippet'] ?? ''), createdAt: Number(r['created_at']) } }).filter(visibleHit)
   }
 }
+
+/**
+ * 全局搜索(没有指定工作区)的那条路径也要按作用域收窄。
+ *
+ * ★ 收在**这里**而不是每个调用点:`searchAll` 的那条 SQL 一条都没有按归属过滤,
+ * 靠调用方自己筛的话,漏掉任何一处就是「在 A 账户里搜到了 B 账户的对话内容」——
+ * 那是这个功能里泄露代价最高的一条。行数本来就被 `LIMIT` 压着,多一次
+ * 主键查(工作区归属)不构成负担。
+ */
+const visibleHit = (hit: SearchHit): boolean => workspaceScopeVisible(hit.workspaceId)
 
 /** 为上下文窗口提供当前会话范围的历史检索，复用 messages_fts，避免跨任务串入。 */
 export function searchSessionHistory(sessionId: string, q: string, limit = 5): ContextSearchHit[] {
   const trimmed = q.trim()
   if (trimmed === '') return []
+  // 非本作用域的会话一律 0 条:上下文检索是给正在跑的 run 喂资料的路径,
+  // 它比界面上的搜索更不该跨账户。
+  if (!sessionScopeVisible(sessionId)) return []
   const safeLimit = Math.max(1, Math.min(10, Math.floor(limit)))
   const phrase = `"${trimmed.replaceAll('"', '""')}"`
   try {
@@ -2677,8 +2621,10 @@ export function removeMcpServer(id: string): void {
   tx(() => {
     const previous = getMcpServer(id)
     stmt('DELETE FROM mcp_servers WHERE id = ?').run(id)
-    stmt('DELETE FROM credentials WHERE ref = ?').run(mcpSecretRef(id, 'env'))
-    stmt('DELETE FROM credentials WHERE ref = ?').run(mcpSecretRef(id, 'headers'))
+    // ★ 走 removeCredential(带作用域),不是裸 DELETE:同 id 的服务器在别的
+    //   账户里可能也有一份,裸 DELETE 会把那一条的密钥一起清掉。
+    removeCredential(mcpSecretRef(id, 'env'))
+    removeCredential(mcpSecretRef(id, 'headers'))
     if (previous?.workspaceId === undefined) enqueueSyncMutation('mcpServer', id, { id }, 'delete')
   })
 }
@@ -2747,7 +2693,7 @@ export function putSearchProviders(list: readonly SearchProviderConfig[]): void 
 
 /** Key 也一起删,理由同 `removeMcpServer` —— 同 id 重配时不该继承上一次的 Key。 */
 export function clearSearchCredential(id: SearchProviderId): void {
-  stmt('DELETE FROM credentials WHERE ref = ?').run(searchSecretRef(id))
+  removeCredential(searchSecretRef(id))
 }
 
 // ── credentials ─────────────────────────────────────────────────────────────
@@ -2758,9 +2704,19 @@ export function clearSearchCredential(id: SearchProviderId): void {
  *
  * 读回来的是 `Uint8Array`,`safeStorage.decryptString` 要 `Buffer`,
  * 转换留给调用方 —— 数据库层不 import electron 的任何东西。
+ *
+ * ★★ **这四个函数是账户隔离的唯一收口。** 逻辑 `ref` 在这里被换成物理键
+ * (`config-profile.physicalCredentialRef`):`local` 沿用裸 ref(兼容这一列
+ * 存在之前的所有行),账户作用域加 `<accountId>\u0000` 前缀,
+ * 而平台账户的显式键(`nextcowork:client-*` / `config-sync:*`)在任何作用域下
+ * 都是同一个物理键。
+ *
+ * 于是「A、B 两个账户给同一个 providerId 配了不同的 Key」在库里天然就是两行,
+ * 任何调用点都不可能读串 —— 而这正是上一版把密钥放在 `providers.credentialRef`
+ * 里指过去时做不到的事(那时的 ref 是**逻辑名**,换账户就指向同一行)。
  */
 export function getCredential(ref: string): Uint8Array | undefined {
-  const row = stmt('SELECT blob FROM credentials WHERE ref = ?').get(ref)
+  const row = stmt('SELECT blob FROM credentials WHERE ref = ?').get(physicalCredentialRef(ref))
   if (row === undefined) return undefined
   const blob = row['blob']
   return blob instanceof Uint8Array ? blob : undefined
@@ -2769,11 +2725,18 @@ export function getCredential(ref: string): Uint8Array | undefined {
 export function putCredential(ref: string, blob: Uint8Array): void {
   stmt(
     'INSERT INTO credentials (ref, blob) VALUES (?, ?) ON CONFLICT (ref) DO UPDATE SET blob = excluded.blob'
-  ).run(ref, blob)
+  ).run(physicalCredentialRef(ref), blob)
 }
 
+/**
+ * 只删**当前作用域**那一行(见 `getCredential` 的说明)。
+ *
+ * ★ 平台显式键(`nextcowork:client-*` / `config-sync:*`)照删不误 ——
+ * 退出登录正是靠这一句清掉 access / refresh token。它们本来就不带前缀,
+ * 所以「只删当前作用域」对它们而言恰好等于「删它们自己」。
+ */
 export function removeCredential(ref: string): void {
-  stmt('DELETE FROM credentials WHERE ref = ?').run(ref)
+  stmt('DELETE FROM credentials WHERE ref = ?').run(physicalCredentialRef(ref))
 }
 
 // ── 导入映射与批次(schema.ts 第 16 条) ──────────────────────────────────────

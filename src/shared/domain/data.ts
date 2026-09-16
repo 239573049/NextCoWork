@@ -15,7 +15,8 @@ import type { Session } from './session'
 import type { Workspace } from './workspace'
 import type { McpServerConfig } from './mcp'
 import { PERMISSION_MODES } from '../agent/permission'
-import { SESSION_MODES, THINKING_LEVELS } from '../agent/run-request'
+import { THINKING_LEVELS } from '../agent/run-request'
+import { MODE_ID_RE } from './mode'
 import { PROXY_SCHEMES } from './proxy'
 
 export const DATA_EXPORT_TYPE = 'nextcowork-data-export' as const
@@ -232,6 +233,10 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
+function isModeId(value: unknown): value is string {
+  return typeof value === 'string' && MODE_ID_RE.test(value.trim().toLowerCase())
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
@@ -405,7 +410,7 @@ function isWorkspaceSettings(value: unknown): boolean {
     enumValue(value.permissionMode, PERMISSION_MODES) &&
     typeof value.defaultModel === 'string' &&
     optionalString(value, 'defaultModelProviderId') &&
-    enumValue(value.defaultMode, SESSION_MODES) &&
+    isModeId(value.defaultMode) &&
     enumValue(value.defaultThinking, THINKING_LEVELS) &&
     isBoolean(value.webSearch) &&
     // ★ 必须是 optionalBoolean:改动之前导出的备份里没有这一项,用 isBoolean
@@ -425,7 +430,7 @@ function isSession(value: unknown): value is Session {
     (value.titleSource === undefined || enumValue(value.titleSource, ['default', 'generated', 'manual'])) &&
     typeof value.model === 'string' &&
     optionalString(value, 'modelProviderId') &&
-    enumValue(value.mode, SESSION_MODES) &&
+    isModeId(value.mode) &&
     enumValue(value.thinking, THINKING_LEVELS) &&
     typeof value.rootPathAtCreation === 'string' &&
     enumValue(value.status, ['idle', 'running']) &&
@@ -544,8 +549,8 @@ function isProvider(value: unknown): value is UpstreamProvider {
   const anthropic = value.protocolOptions.anthropic
   // Provider JSON predates protocol-specific options, and future versions may
   // add new TTL values.  Import/read paths deliberately accept a missing or
-  // unknown cacheTtl and let the persistence normalizer map it to `off` so an
-  // old export remains importable without ever enabling caching accidentally.
+  // unknown cacheTtl and let the persistence normalizer map it (including
+  // legacy `off`) to the mandatory 5m default so old exports remain importable.
   // Keep rejecting a malformed `anthropic` container itself: that is a shape
   // error, not a forward-compatible value.
   return isRecord(anthropic)

@@ -28,7 +28,8 @@ import type { PlatformInfo } from './host'
 import { permissionFacts } from './permission-gate'
 import { clampWithEllipsis, stripControlChars } from './text'
 import type { TodoItem } from './tool/builtin/todo'
-import type { PlanDocumentV2 } from '../../shared/domain/plan'
+import type { PlanExecutionContext } from './plan-execution'
+import { PLAN_FILE_MAX_BYTES } from '../../shared/domain/plan-file'
 import { MARK, latestTodosFrom } from './tool/builtin/todo'
 import { neutralizeReminderTags, untrustedBoundary } from './untrusted'
 import type { CanonicalRequest } from './upstream/canonical'
@@ -277,26 +278,6 @@ If a call is denied, do NOT route around it: do not retry it, do not reach for a
 that does the same thing, and do not use Bash to do what the denied tool would have done.
 Stop and tell the user which permission you need.`
 
-const MODE_APPENDIX: Record<SessionMode, string> = {
-  normal: `# Default mode progress
-
-For complex execution tasks, use update_plan with the complete checklist. Keep it concise and update it only when a step changes. Finish the current step before starting the next one. Do not repeat the whole checklist in chat after calling the tool. If scope changes, submit a complete replacement checklist. Before finishing, run the relevant verification command and report the result.`,
-  plan: `# Plan mode
-
-You have read-only tools only. Investigate the environment and repository first. Build a concise,
-verifiable checklist with submit_plan using only explanation and plan[]. Do not call update_plan,
-modify files, execute commands that change state, or promise that execution has started. The plan
-must contain at least one concrete step and should not add redundant ceremony for a simple task.
-After submit_plan succeeds, stop this planning run and wait for the user's decision.`,
-  goal: `# Goal mode
-
-Keep going until the goal is actually met. Do NOT stop after each step to ask "should I continue?" —
-switching into goal mode is the user saying "keep going" once, for all of it.
-
-Stop for exactly two reasons: the goal is done, or you have hit a fork you genuinely cannot resolve
-without guessing. Say which of the two it is when you stop.`
-}
-
 /**
  * Skill 目录 —— **只有名字和描述,没有正文**。
  *
@@ -446,6 +427,8 @@ export interface SystemPromptInput {
    */
   permissionMode: PermissionMode
   webSearch: boolean
+  /** Resolved built-in or custom mode prompt for this run. */
+  modePrompt?: string
   /**
    * 子代理的角色提示词(`agents/<name>.md` 的正文)。
    *
@@ -531,7 +514,7 @@ function systemPromptParts(input: SystemPromptInput): SystemPart[] {
       bucket: 'instructions',
       text: input.personalization === undefined ? '' : buildPersonalizationSection(input.personalization)
     },
-    { bucket: 'system', text: MODE_APPENDIX[input.mode] },
+    { bucket: 'system', text: input.modePrompt?.trim() ?? '' },
     { bucket: 'skills', text: buildSkillsSection(input.skills) }
   ]
 }
@@ -622,7 +605,7 @@ const REMINDER_CLOSE = '</system-reminder>'
 const TODO_TEXT_MAX = 200
 
 export interface ReminderContext {
-  approvedPlan?: PlanDocumentV2
+  planExecution?: PlanExecutionContext
   /** AGENTS.md,已拼接已消毒(`instructions.ts`)。空串 / 缺省 = 没有。 */
   projectInstructions?: string
   /** run 开始时的 git 快照(`git-context.ts`)。缺省 = 不是仓库 / 读不到。 */
@@ -677,7 +660,7 @@ function todoSection(todos: readonly TodoItem[]): string {
 
 function stateBlock(ctx: ReminderContext, messages: readonly AgentMessage[]): string | undefined {
   const sections: string[] = []
-  if (ctx.approvedPlan !== undefined) sections.push(`Approved plan (${ctx.approvedPlan.id} v${String(ctx.approvedPlan.version)}):\n${ctx.approvedPlan.plan.map((step) => `- [${step.status}] ${step.step}`).join('\n')}`)
+  if (ctx.planExecution !== undefined) sections.push(`Approved plan file: ${clean(ctx.planExecution.path, 256)}\n\n${clean(ctx.planExecution.content, PLAN_FILE_MAX_BYTES)}`)
   if (ctx.git !== undefined) sections.push(gitSection(ctx.git))
 
   /*
@@ -736,7 +719,7 @@ export function decorate(
 ): readonly AgentMessage[] {
   const instructions = ctx.projectInstructions?.trim() ?? ''
   const head = instructions === '' ? undefined : reminderPart(instructionsBlock(instructions))
-  if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined && ctx.approvedPlan === undefined) return messages
+  if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined && ctx.planExecution === undefined) return messages
 
   /*
     ★ 两处定位都不能写成 `messages[0]` / `messages.at(-1)`。
@@ -791,10 +774,62 @@ const COMPACT_THRESHOLD = 0.8
  */
 const OUTPUT_RESERVE_CAP = 0.25
 
+/*
+  ★★ 校准系数 —— `estimateTokens` 的 chars/4 只够画一根条,**不够当判据**。
+
+  文件头已经写明误差是英文 ±15%、中文 ±25%(代码 / JSON / diff 更糟,真实分词
+  接近 3 chars/token)。而 `shouldCompact` 是个**阈值比较**:偏低 28% 就意味着
+  一个真实 211K 的请求在这里只算出 152K,恰好压在 200K×0.8 之下 ——
+  于是自动压缩一次都不触发,圆环(读上游真值 `lastInputTokens`)已经写着
+  「已超出 200K」,判据却还觉得宽裕。两个数从不对账,是这个 bug 的全部。
+
+  真值每一轮都会由上游在 `message_end.usage` 里报回来,所以不必去猜分词器:
+  拿**上一轮的真值 ÷ 上一轮的估算**当系数,乘回这一轮的估算即可。
+  会话内的文本构成是连续的(同一份代码库、同一种语言),系数因此相当稳。
+*/
+
+/**
+ * 下界 **1**:不允许任何上游读数把判据变得比纯估算更宽松。
+ *
+ * ★ 这不是对称的保守取值,而是挡一类具体的上游:不少中转按「未命中缓存的那部分」
+ * 报 `input_tokens` 且不给 `cache_read_input_tokens`,于是 `promptTokensOf` 算出来
+ * 只有真实提示词的零头。系数若能小于 1,这种上游会把自动压缩**整个关掉** ——
+ * 正是我们在修的那个故障,从另一头再进来一次。
+ */
+export const MIN_TOKEN_CALIBRATION = 1
+
+/**
+ * 上界 **3**:估算最坏也就差这个量级(全角 CJK + 密集 JSON)。
+ * 再大只可能是上游读数本身有问题(把整轮累计当成单次提示词报回来之类),
+ * 而那会让压缩在会话第一条消息起就每轮触发一次,永远收敛不了 ——
+ * 与 `OUTPUT_RESERVE_CAP` 封顶挡的是同一种「恒为真的判据」。
+ */
+export const MAX_TOKEN_CALIBRATION = 3
+
+/**
+ * 上一轮的估算与上游真值 → 这一轮的校准系数。
+ *
+ * ★ 两个数任意一个不可用(还没发过请求、上游没报 usage、报了 0)一律回 1,
+ * 即「退化成纯估算」—— 和改这版之前的行为逐字相同。宁可不纠偏,
+ * 也不能拿一个 NaN / Infinity 去乘阈值。
+ */
+export function tokenCalibration(estimated: number, reported: number): number {
+  if (!Number.isFinite(estimated) || estimated <= 0) return MIN_TOKEN_CALIBRATION
+  if (!Number.isFinite(reported) || reported <= 0) return MIN_TOKEN_CALIBRATION
+  return clampCalibration(reported / estimated)
+}
+
+function clampCalibration(ratio: number | undefined): number {
+  if (ratio === undefined || !Number.isFinite(ratio)) return MIN_TOKEN_CALIBRATION
+  return Math.min(MAX_TOKEN_CALIBRATION, Math.max(MIN_TOKEN_CALIBRATION, ratio))
+}
+
 export interface AssembleInput {
   messages: readonly AgentMessage[]
   tools: readonly ToolInfo[]
   skills: readonly Skill[]
+  /** 当前会话模式的追加提示词。 */
+  modePrompt?: string
   /** 子代理的角色提示词,追加在基础提示词之后。主 run 不传。 */
   agentPrompt?: string
   /**
@@ -831,6 +866,14 @@ export interface AssembleInput {
    * 只是少注入一段可有可无的上下文,没有任何东西会变成假的。
    */
   reminder?: ReminderContext
+  /**
+   * 上一轮真值 ÷ 上一轮估算,见 `tokenCalibration`。缺省 = 1(纯估算)。
+   *
+   * ★ 它只走进 `shouldCompact`,**不动 `used` 和 `segments`**:那两样是「谁占了多少」
+   * 的同一套读数,乘一个系数上去,归因之和就不再恒等于 `used`(见 `contextSegments`),
+   * 而圆环旁边那张卡本来就只显示百分比 —— 同向缩放一遍什么也不会变。
+   */
+  tokenCalibration?: number
 }
 
 export interface ContextUsage {
@@ -850,6 +893,15 @@ export interface ContextUsage {
 export interface AssembleOutput {
   request: CanonicalRequest
   usage: ContextUsage
+  /**
+   * `usage.used` 乘上校准系数之后的输入估算 —— `shouldCompact` 就是拿它判的。
+   *
+   * ★ **故意不放进 `usage`。** `usage` 会被 session 原样摊进 `context_usage` 事件,
+   * 多一个字段就等于多一个口径要在渲染层解释;而这个数只有两个消费者,
+   * 都在主进程里(压缩判据、`validateModelRuntime` 的 context_length 硬校验),
+   * 它们必须和 `shouldCompact` 读同一个数,否则会出现「判该压缩了、硬校验却说还早」。
+   */
+  calibratedInputTokens: number
 }
 
 export function assemble(input: AssembleInput): AssembleOutput {
@@ -888,9 +940,16 @@ export function assemble(input: AssembleInput): AssembleOutput {
     表现是「上下文突然就爆了」,不会有任何报错。
   */
   const used = estimateTokens(system) + estimateMessages(messages) + estimateTools(input.tools)
+  /*
+    ★ 判据读校准后的数,`used` / `segments` 保持原始估算 —— 见 `AssembleInput.tokenCalibration`。
+    向上取整:系数为 1 时它必须和 `used` 逐字相等,否则「没有真值可用」这条退化路径
+    会因为一次浮点乘法而和旧行为差一个 token。
+  */
+  const calibratedInputTokens = Math.ceil(used * clampCalibration(input.tokenCalibration))
 
   return {
     request,
+    calibratedInputTokens,
     usage: {
       used,
       window: input.contextWindow,
@@ -902,7 +961,7 @@ export function assemble(input: AssembleInput): AssembleOutput {
        * 预留取 `maxOutputTokens` 但**必须封顶**,理由见 `OUTPUT_RESERVE_CAP`。
        */
       shouldCompact:
-        used + Math.min(input.maxOutputTokens, input.contextWindow * OUTPUT_RESERVE_CAP) >
+        calibratedInputTokens + Math.min(input.maxOutputTokens, input.contextWindow * OUTPUT_RESERVE_CAP) >
         input.contextWindow * COMPACT_THRESHOLD
     }
   }

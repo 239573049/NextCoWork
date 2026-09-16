@@ -7,11 +7,13 @@
  * `startAgentEventPump()` **不在这里** —— 它在 App 根部起一次。
  * 放这儿的话五个 chat Tab 就是五个泵,同一批事件被 apply 五次。
  */
-import { Check, ChevronDown, LoaderCircle, Upload } from 'lucide-react'
+import { Check, ChevronDown, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { greetingOf } from '../../../../shared/domain/greeting'
-import { cacheHitRateOf, hasRun, type SubagentState } from '../../../../shared/agent/transcript'
+import { cacheHitRateOf, hasRun, type RunUsage, type SubagentState } from '../../../../shared/agent/transcript'
+import { tokensPerSecond } from '../../../../shared/agent/duration'
+import type { RunCost } from '../../../../shared/domain/pricing'
 import { latestTodosFrom, type TodoItem } from '../../../../main/kernel/tool/builtin/todo'
 import { useI18n } from '../../i18n'
 import type { ContentPart } from '../../../../shared/agent/message'
@@ -26,7 +28,7 @@ import { Dialog } from '../../components/ui/Dialog'
 import { Button } from '../../components/ui/Button'
 import { updateWorkspace } from '../../services/app'
 import { sessionStore, resumeQueue } from '../../stores/session'
-import { Composer, type FallbackModel } from './Composer'
+import { Composer, type ConversationUsageSummary, type FallbackModel } from './Composer'
 import { type TrayItem } from './AttachmentTray'
 import { PendingQueue } from './PendingQueue'
 import { Thread } from './Thread'
@@ -36,7 +38,9 @@ import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { WorkspaceMarkdownProvider } from '../../components/markdown'
-import { createSession } from '../../services/sessions'
+import { createSession, getSession, setSessionMode } from '../../services/sessions'
+import type { SessionMode } from '../../../../shared/agent/run-request'
+import { Spinner } from '../../components/ui/Spinner'
 
 export function ChatView({
   sessionId,
@@ -111,6 +115,18 @@ export function ChatView({
   )
 
   const running = runningOverride ?? activeRunId !== null
+  const [sessionMode, setCurrentSessionMode] = useState<SessionMode>(workspace.settings.defaultMode)
+  useEffect(() => {
+    if (sessionId === null) {
+      setCurrentSessionMode(workspace.settings.defaultMode)
+      return
+    }
+    let cancelled = false
+    void getSession(sessionId).then((detail) => {
+      if (!cancelled) setCurrentSessionMode(detail.session.mode)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [sessionId, workspace.settings.defaultMode])
   /*
     ★ 直接按回包带回来的 providerId 查,**不再经过别名表**。
     以前是 `providerOf(transcript.model)`,而 `transcript.model` 是上游回包里的
@@ -144,7 +160,7 @@ export function ChatView({
   const offComposerOptions = useMemo(() => ({
     workspaceId: workspace.id,
     depth: 0 as const,
-    mode: workspace.settings.defaultMode,
+    mode: sessionMode,
     thinking: workspace.settings.defaultThinking,
     webSearch: workspace.settings.webSearch,
     maxContext: workspace.settings.maxContext === true,
@@ -153,12 +169,16 @@ export function ChatView({
     modelProviderId: editModel.modelProviderId,
     skillIds: workspace.settings.activeSkillIds,
     skillSelectionMode: workspace.settings.skillSelectionMode
-  }), [editModel.model, editModel.modelProviderId, workspace])
+  }), [editModel.model, editModel.modelProviderId, sessionMode, workspace])
   const onEditMessage = useCallback(
     (id: string, text: string, continueRun: boolean) => editMessage(id, text, continueRun, offComposerOptions),
     [editMessage, offComposerOptions]
   )
   const started = hasRun(transcript, running)
+  const conversationUsage = useMemo(
+    () => summarizeConversationUsage(transcript.runUsage, transcript.usage),
+    [transcript.runUsage, transcript.usage]
+  )
   const { t } = useI18n()
   /**
    * 卡片点一下 → 右侧工作区开一个只读会话。
@@ -182,14 +202,11 @@ export function ChatView({
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
 
-  /** 批准执行后计划模式已经完成使命 —— 药丸和工作区默认值都要跟着退回普通模式,否则下一句话还得再走一遍只读审批。 */
-  const [planExitSignal, setPlanExitSignal] = useState(0)
-
-  const executePlan = useCallback((ref: { planId: string; version: number }, source: 'current_session' | 'new_session'): void => {
+  const executePlan = useCallback((ref: { planId: string; path: string }, source: 'current_session' | 'new_session'): void => {
     const options = {
       workspaceId: workspace.id,
       depth: 0 as const,
-      mode: 'normal' as const,
+      mode: 'code' as const,
       thinking: workspace.settings.defaultThinking,
       webSearch: workspace.settings.webSearch,
       maxContext: workspace.settings.maxContext === true,
@@ -198,18 +215,19 @@ export function ChatView({
       modelProviderId: workspace.settings.defaultModelProviderId ?? fallbackModel.modelProviderId,
       skillIds: workspace.settings.activeSkillIds,
       skillSelectionMode: workspace.settings.skillSelectionMode,
-      approvedPlan: { ...ref, source }
+      planExecution: ref
     }
     const start = (targetSessionId: string): void => {
+      void setSessionMode(targetSessionId, 'code')
       void sessionStore(targetSessionId).getState().send(t('agent.plan.executePrompt'), options)
     }
-    setPlanExitSignal((v) => v + 1)
-    retagQueuedMode('normal')
-    if (workspace.settings.defaultMode === 'plan') {
-      void updateWorkspace({ id: workspace.id, settings: { defaultMode: 'normal' } }).catch(() => undefined)
+    if (source === 'current_session') {
+      retagQueuedMode('code')
+      setCurrentSessionMode('code')
+      start(ensureSessionId())
+      return
     }
-    if (source === 'current_session') { start(ensureSessionId()); return }
-    void createSession(workspace.id, t('composer.planExecutionTitle')).then((session) => {
+    void createSession(workspace.id, t('composer.planExecutionTitle'), undefined, 'code').then((session) => {
       useTabsStore.getState().openSession(workspace.id, session.id, session.title)
       start(session.id)
     }).catch(() => undefined)
@@ -470,8 +488,20 @@ export function ChatView({
       workspace={workspace}
       fallbackModel={fallbackModel}
       onPermissionModeChange={retagQueuedPermission}
+      sessionMode={sessionMode}
+      onSessionModeChange={(mode) => {
+        setCurrentSessionMode(mode)
+        retagQueuedMode(mode)
+        if (sessionId !== null) void setSessionMode(sessionId, mode).catch(() => undefined)
+      }}
+      onSetDefaultMode={(mode) => {
+        void updateWorkspace({ id: workspace.id, settings: { defaultMode: mode } }).catch(() => undefined)
+      }}
+      onManageModes={() => {
+        sessionStorage.setItem('next-cowork:extensions-tab', 'modes')
+        useWindowStore.getState().openFeature('extensions')
+      }}
       running={running}
-      planExitSignal={planExitSignal}
       attachments={tray}
       onAttachFiles={attachFiles}
       onPickAttachment={pickAttachment}
@@ -481,6 +511,7 @@ export function ChatView({
       contextTokens={transcript.lastInputTokens}
       contextSegments={transcript.contextUsage?.segments}
       contextCacheHitRate={cacheHitRateOf(transcript.usage)}
+      conversationUsage={conversationUsage}
       onManageMcp={() => useWindowStore.getState().openSettings('connection')}
       contextCompacting={compacting}
       onCompactContext={compactContext}
@@ -497,7 +528,10 @@ export function ChatView({
         */
         setTray((items) => items.filter((item) => item.status !== 'done'))
         pendingFiles.current.clear()
-        void sessionStore(ensureSessionId()).getState().send(
+        const targetSessionId = ensureSessionId()
+        setCurrentSessionMode(v.mode)
+        void setSessionMode(targetSessionId, v.mode).catch(() => undefined)
+        void sessionStore(targetSessionId).getState().send(
           text,
           {
             workspaceId: workspace.id,
@@ -609,6 +643,8 @@ export function ChatView({
             compactError={compactError}
             onEditMessage={onEditMessage}
             onDeleteTurn={deleteTurn}
+            workspaceId={workspace.id}
+            onOpenPlan={openMarkdownFile}
             onExecutePlan={executePlan}
           />
         </WorkspaceMarkdownProvider>
@@ -620,6 +656,49 @@ export function ChatView({
       {transferDialog}
     </div>
   )
+}
+
+function summarizeConversationUsage(
+  persisted: Readonly<Record<string, RunUsage>> | undefined,
+  live: RunUsage | undefined
+): ConversationUsageSummary | undefined {
+  const historical = Object.entries(persisted ?? {})
+    .sort(([left], [right]) => right.localeCompare(left))
+  const usages = historical.map(([, usage]) => usage)
+  // run_end 会把实时对象原样归档；引用相同说明它已在 historical 中，不能再算一次。
+  if (live !== undefined && !usages.includes(live)) usages.push(live)
+  if (usages.length === 0) return undefined
+
+  let cost: RunCost | null | undefined
+  for (const usage of usages) {
+    if (usage.cost === undefined) continue
+    if (usage.cost === null) {
+      cost = null
+      continue
+    }
+    if (cost === null) continue
+    if (cost === undefined) {
+      cost = { ...usage.cost }
+      continue
+    }
+    cost = cost.currency === usage.cost.currency
+      ? { currency: cost.currency, micros: cost.micros + usage.cost.micros }
+      : null
+  }
+
+  const latestTps = live === undefined
+    ? historical.map(([, usage]) => tokensPerSecond(usage.outputTokens, usage.upstreamMs))
+        .find((value) => value !== undefined)
+    : tokensPerSecond(live.outputTokens, live.upstreamMs)
+
+  return {
+    inputTokens: usages.reduce((total, usage) => total + usage.inputTokens, 0),
+    cacheReadTokens: usages.reduce((total, usage) => total + (usage.cacheReadInputTokens ?? 0), 0),
+    cacheWriteTokens: usages.reduce((total, usage) => total + (usage.cacheCreationInputTokens ?? 0), 0),
+    outputTokens: usages.reduce((total, usage) => total + usage.outputTokens, 0),
+    ...(latestTps === undefined ? {} : { latestTps }),
+    ...(cost === undefined ? {} : { cost })
+  }
 }
 
 function SessionComposer({ storeKey, ...props }: { storeKey: string } & Omit<ComponentProps<typeof Composer>, 'draft' | 'onDraft'>): ReactNode {
@@ -638,5 +717,5 @@ function TaskChecklist({ todos, t }: { todos: readonly TodoItem[]; t: ReturnType
   const done = todos.filter((item) => item.status === 'completed').length
   const active = todos.find((item) => item.status === 'in_progress')
   const progress = todos.length === 0 ? 0 : done / todos.length
-  return <div className="mx-auto w-full max-w-[760px] px-6 pb-2" data-testid="task-checklist"><div className="rounded-panel border border-border bg-surface/60 px-3 py-2"><button type="button" aria-expanded={!collapsed} aria-controls="task-checklist-items" className="flex w-full min-w-0 items-center gap-1.5 text-left text-[12px] font-medium text-fg" onClick={() => setCollapsed((value) => !value)}><ChevronDown size={13} className={`shrink-0 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`} /><span className="shrink-0">{t('chat.taskChecklist', { done, total: todos.length })}</span>{active !== undefined && <span className="ml-1 min-w-0 truncate font-normal text-fg-muted">· {active.activeForm}</span>}{active !== undefined && <LoaderCircle size={12} aria-label={t('chat.taskChecklistRunning')} className="ml-auto shrink-0 animate-spin text-accent motion-reduce:animate-none" />}{collapsed && <span className="ml-auto flex shrink-0 items-center gap-1.5"><span className="h-1.5 w-16 overflow-hidden rounded-pill bg-tint"><span className="block h-full rounded-pill bg-accent transition-[width] duration-500" style={{ width: `${progress * 100}%` }} /></span><span className="text-[10px] text-fg-faint">{Math.round(progress * 100)}%</span></span>}</button><div id="task-checklist-items" className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out ${collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100'}`}><div className="min-h-0 overflow-hidden"><ul className="scroll-thin mt-1.5 max-h-32 overflow-y-auto pl-5">{todos.map((item, i) => <li key={`${i}:${item.content}`} className={`flex gap-1.5 text-[12px] leading-relaxed ${item.status === 'completed' ? 'text-fg-faint line-through' : item.status === 'in_progress' ? 'text-fg' : 'text-fg-muted'}`}><span className="shrink-0 font-mono">{item.status === 'completed' ? <Check size={12} aria-hidden /> : item.status === 'in_progress' ? <LoaderCircle size={12} className="animate-spin text-accent motion-reduce:animate-none" /> : '○'}</span><span>{item.status === 'in_progress' ? item.activeForm : item.content}</span></li>)}</ul></div></div></div></div>
+  return <div className="mx-auto w-full max-w-[760px] px-6 pb-2" data-testid="task-checklist"><div className="rounded-panel border border-stroke bg-surface/60 px-3 py-2"><button type="button" aria-expanded={!collapsed} aria-controls="task-checklist-items" className="flex w-full min-w-0 items-center gap-1.5 text-left text-[12px] font-medium text-fg" onClick={() => setCollapsed((value) => !value)}><ChevronDown size={13} className={`shrink-0 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`} /><span className="shrink-0">{t('chat.taskChecklist', { done, total: todos.length })}</span>{active !== undefined && <span className="ml-1 min-w-0 truncate font-normal text-fg-muted">· {active.activeForm}</span>}{active !== undefined && <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="ml-auto text-accent" />}{collapsed && <span className="ml-auto flex shrink-0 items-center gap-1.5"><span className="h-1.5 w-16 overflow-hidden rounded-pill bg-tint"><span className="block h-full rounded-pill bg-accent transition-[width] duration-500" style={{ width: `${progress * 100}%` }} /></span><span className="text-[10px] text-fg-faint">{Math.round(progress * 100)}%</span></span>}</button><div id="task-checklist-items" className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out ${collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100'}`}><div className="min-h-0 overflow-hidden"><ul className="scroll-thin mt-1.5 max-h-32 overflow-y-auto pl-5">{todos.map((item, i) => <li key={`${i}:${item.content}`} className={`flex gap-1.5 text-[12px] leading-relaxed ${item.status === 'completed' ? 'text-fg-faint line-through' : item.status === 'in_progress' ? 'text-fg' : 'text-fg-muted'}`}><span className="shrink-0 font-mono">{item.status === 'completed' ? <Check size={12} aria-hidden /> : item.status === 'in_progress' ? <Spinner size="xs" className="text-accent" /> : '○'}</span><span>{item.status === 'in_progress' ? item.activeForm : item.content}</span></li>)}</ul></div></div></div></div>
 }

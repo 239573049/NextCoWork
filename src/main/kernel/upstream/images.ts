@@ -52,7 +52,7 @@ export async function prepareRequestImages(
           const rel = attachmentRelPath(locator)
           if (rel === null) throw new ImageInputError('Invalid image attachment location')
           try {
-            const root = await host.fs.realpath(join(host.paths.userData(), 'attachments'))
+            const root = await host.fs.realpath(host.paths.attachments())
             const ownerRoot = await host.fs.realpath(join(root, 'sessions', locator.ownerId))
             const file = await host.fs.realpath(join(root, rel))
             if (ownerRoot !== join(root, 'sessions', locator.ownerId) || !within(root, ownerRoot)

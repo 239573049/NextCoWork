@@ -84,6 +84,89 @@ describe('thread content grouping', () => {
     expect(new Set(keys).size).toBe(keys.length)
   })
 
+  /*
+    计划回执行:一次审批落槌的记录。以前它不是「一行」,而是整段对话之后
+    无条件追加的一张卡 —— 所以永远贴在输入框上面,关不掉。
+  */
+  const planReceipt = (id: string, planId: string, action: string, at: number) =>
+    toolResultMessage(id, [{
+      type: 'tool_result',
+      callId: `plan-${at}`,
+      output: { content: `${JSON.stringify({ type: 'plan_file', planId, path: `.plan/${planId}.md`, action })}\n写好了` },
+      isError: false
+    }], at)
+
+  it('★★ 计划回执停在当初批准的那一轮,而不是整段末尾', () => {
+    const rows = threadRows([
+      userMessage('u1', [{ type: 'text', text: '做个计划' }], 1),
+      assistantMessage('a1', [{ type: 'text', text: '计划如下' }], 2),
+      planReceipt('r1', 'p1', 'approve_current', 3),
+      assistantMessage('a2', [{ type: 'text', text: '开始执行' }], 4),
+      userMessage('u2', [{ type: 'text', text: '继续' }], 5),
+      assistantMessage('a3', [{ type: 'text', text: '好' }], 6)
+    ], [], false)
+
+    expect(rows.map((row) => row.kind))
+      .toEqual(['user', 'assistant', 'plan-receipt', 'assistant', 'user', 'assistant'])
+    const line = rows[2]
+    expect(line?.kind === 'plan-receipt' ? line.receipt.planId : undefined).toBe('p1')
+  })
+
+  /** 同一个计划先「要求修改」后「已批准」,只留最后那条 —— 中间那次已被推翻。 */
+  it('★ 同一个计划只留最后一条回执', () => {
+    const rows = threadRows([
+      userMessage('u1', [{ type: 'text', text: '做个计划' }], 1),
+      assistantMessage('a1', [{ type: 'text', text: 'v1' }], 2),
+      planReceipt('r1', 'p1', 'request_revision', 3),
+      assistantMessage('a2', [{ type: 'text', text: 'v2' }], 4),
+      planReceipt('r2', 'p1', 'approve_current', 5),
+      assistantMessage('a3', [{ type: 'text', text: '开工' }], 6)
+    ], [], false)
+
+    const receipts = rows.filter((row) => row.kind === 'plan-receipt')
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]?.kind === 'plan-receipt' ? receipts[0].receipt.action : undefined).toBe('approve_current')
+    // 留下的是**后面**那条,所以它排在 v2 之后;被丢掉的那条不再切开 v1 / v2,
+    // 两段回复合成一行 —— 正是「中间那次没发生过」该有的样子。
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant', 'plan-receipt', 'assistant'])
+  })
+
+  /** 两个不同的计划各留各的,互不顶替。 */
+  it('不同计划的回执各自成行', () => {
+    const rows = threadRows([
+      userMessage('u1', [{ type: 'text', text: '做计划' }], 1),
+      assistantMessage('a1', [{ type: 'text', text: 'p1' }], 2),
+      planReceipt('r1', 'p1', 'approve_current', 3),
+      assistantMessage('a2', [{ type: 'text', text: 'p2' }], 4),
+      planReceipt('r2', 'p2', 'reject', 5),
+      assistantMessage('a3', [{ type: 'text', text: '好' }], 6)
+    ], [], false)
+    expect(rows.filter((row) => row.kind === 'plan-receipt')).toHaveLength(2)
+  })
+
+  /** 和汇报行同理:不推进 `preceding` 的话,两侧 assistant 行会共用一个 key。 */
+  it('★ 计划回执行两侧的 assistant 行 key 不相同', () => {
+    const rows = threadRows([
+      userMessage('u1', [{ type: 'text', text: '做个计划' }], 1),
+      assistantMessage('a1', [{ type: 'text', text: '计划' }], 2),
+      planReceipt('r1', 'p1', 'approve_current', 3),
+      assistantMessage('a2', [{ type: 'text', text: '执行' }], 4)
+    ], [], false)
+    const keys = rows.filter((row) => row.kind === 'assistant').map((row) => row.key)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  /** 别的工具输出压根不是 JSON,不该被当成回执。 */
+  it('非计划的工具结果不产生回执行', () => {
+    const rows = threadRows([
+      userMessage('u1', [{ type: 'text', text: '看看' }], 1),
+      assistantMessage('a1', [{ type: 'tool_call', callId: 'read', name: 'Read', input: {} }], 2),
+      toolResultMessage('r1', [{ type: 'tool_result', callId: 'read', output: { content: 'plain text' }, isError: false }], 3),
+      assistantMessage('a2', [{ type: 'text', text: '好' }], 4)
+    ], [], false)
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant'])
+  })
+
   /** 没有 `subagent` part 的 internal 消息照旧整条隐藏 —— 那些是纯协调消息 */
   it('普通 internal 消息仍然不出现在消息流里', () => {
     const rows = threadRows([

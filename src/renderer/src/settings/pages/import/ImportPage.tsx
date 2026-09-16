@@ -14,7 +14,7 @@
  * 会过期;靠 `imports:changed` 事件触发重新拉取(事件是限频合并过的,所以
  * 回调里只重新拉,不试图从 payload 拼状态)。
  */
-import { AlertTriangle, ChevronDown, DownloadCloud, FolderOpen, Loader2, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ChevronDown, DownloadCloud, FolderOpen, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type {
   ImportBatchItem,
@@ -36,6 +36,7 @@ import { useWindowStore } from '../../../stores/window'
 import { ImportSelectionDialog } from './ImportSelectionDialog'
 import { ImportSyncDialog } from './ImportSyncDialog'
 import { detectedKey, sourceNameKey } from './source-name'
+import { Spinner } from '../../../components/ui/Spinner'
 
 type Modal = { kind: 'sync' } | { kind: 'select'; preview: ImportPreview } | null
 
@@ -185,7 +186,7 @@ export function ImportPage(): ReactNode {
             </Button>
             <Button
               disabled={!detected || sync?.enabled !== true || running || busy !== null}
-              icon={busy === 'sync-now' ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+              icon={busy === 'sync-now' ? <Spinner size="sm" /> : <RefreshCw size={13} />}
               onClick={() => {
                 void run('sync-now', () => importService.syncNow(sourceId))
               }}
@@ -243,7 +244,7 @@ export function ImportPage(): ReactNode {
         >
           <div className="flex items-center gap-2">
             <Button
-              icon={busy === 'detect' ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+              icon={busy === 'detect' ? <Spinner size="sm" /> : <RefreshCw size={13} />}
               disabled={busy !== null}
               onClick={() => {
                   void run('detect', async () => {
@@ -266,7 +267,7 @@ export function ImportPage(): ReactNode {
             </Button>
             <Button
               variant="accent"
-              icon={busy === 'preview' ? <Loader2 size={13} className="animate-spin" /> : <DownloadCloud size={13} />}
+              icon={busy === 'preview' ? <Spinner size="sm" /> : <DownloadCloud size={13} />}
               disabled={!detected || running || busy !== null}
               onClick={() => {
                 void openSelection()

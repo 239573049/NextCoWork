@@ -3,7 +3,7 @@
  *
  * **上下两半作用域不同,不能混在一个 store 里:**
  *
- *   上半(功能入口)  作用域 = 全局      新建对话 / 搜索 / 定时任务 / 浏览器 / Skill 管理 / 每日回顾
+ *   上半(功能入口)  作用域 = 全局      新建对话 / 搜索 / 定时任务 / 浏览器 / Skill 管理
  *   下半(会话区)    作用域 = 当前工作区  长期计划 / 最近对话 / 归档
  *
  * 这正是你要的那条行为:**切换顶部的工作空间会影响左侧会话列表**。
@@ -19,7 +19,7 @@
  * 也没有分隔条。中途一度以为它在 235~312 之间浮动,那是把设置浮层的左侧导航栏
  * 当成侧边栏量了 —— 浮层盖住了扫描线,量到的是它内部的分栏。
  */
-import { Archive, Check, Copy, ExternalLink, Link, LoaderCircle, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
+import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
@@ -38,8 +38,9 @@ import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
 import { copyText, openSessionWindow } from '../services/app'
+import { Spinner } from '../components/ui/Spinner'
 
-const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'extensions', 'review']
+const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'git', 'extensions']
 
 export function Sidebar({
   workspace,
@@ -118,26 +119,26 @@ export function Sidebar({
         <span className="font-brand text-[15px] font-bold tracking-tight">NextCoWork</span>
       </div>
 
-      {/* ── 上半:全局 ── */}
-      <nav className="flex flex-col gap-0.5 px-2.5">
-        <NavItem icon={<SquarePen size={16} />} onClick={onNewChat}>
-          {t('nav.newChat')}
-        </NavItem>
-        <NavItem icon={<Search size={16} />} onClick={onSearch}>
-          {t('nav.search')}
-        </NavItem>
+      {/* ── 上半:全局 ──
+        五个入口各自占一行、撑满宽度,文字常驻可见,纵向堆叠。 */}
+      <nav className="flex flex-col gap-1.5 px-2.5">
+        <NavItem icon={<SquarePen size={16} />} label={t('nav.newChat')} onClick={onNewChat} />
+        <NavItem icon={<Search size={16} />} label={t('nav.search')} onClick={onSearch} />
         {NAV_FEATURES.map((f) => {
           const Icon = FEATURE_ICON[f]
           return (
             <NavItem
               key={f}
               icon={<Icon size={16} />}
+              label={t(`feature.${f}` as Parameters<typeof t>[0])}
               active={activeFeature === f}
+              badge={
+                f === 'scheduled' && scheduledUnread ? (
+                  <span className="size-1.5 rounded-full bg-accent" aria-label={t('scheduled.unread')} />
+                ) : undefined
+              }
               onClick={() => onOpenFeature(f)}
-            >
-              {t(`feature.${f}` as Parameters<typeof t>[0])}
-              {f === 'scheduled' && scheduledUnread && <span className="ml-auto size-1.5 rounded-full bg-accent" aria-label={t('scheduled.unread')} />}
-            </NavItem>
+            />
           )
         })}
       </nav>
@@ -245,24 +246,33 @@ export function Sidebar({
   )
 }
 
+/**
+ * 上半那排入口,现在每一项各占一行、撑满宽度,图标 + 文字常驻可见。
+ *
+ * ★ **折叠态必须有 `aria-label`**:侧边栏折叠时视觉上只剩图标,可访问名不能跟着一起消失。
+ */
 function NavItem({
-  children,
+  label,
   icon,
   active = false,
+  badge,
   onClick
 }: {
-  children: ReactNode
+  label: string
   icon: ReactNode
   active?: boolean
+  /** 右侧的状态点(今天只有「定时任务」的未读圆点)。 */
+  badge?: ReactNode
   onClick: () => void
 }): ReactNode {
   return (
     <button
       type="button"
       aria-current={active ? 'page' : undefined}
+      aria-label={label}
       onClick={onClick}
       className={cn(
-        'flex items-center gap-2.5 rounded-[8px] px-3 py-[7px] text-left text-[13px] transition-colors',
+        'relative flex h-8 w-full min-w-0 items-center gap-2 overflow-hidden rounded-pill px-2 text-left text-[13px] transition-colors',
         // 激活 = 往暗里挖;悬停 = 往暖里偏。两个维度,不会互相盖掉
         active ? 'bg-canvas text-fg' : 'text-fg hover:bg-tint-hover'
       )}
@@ -270,13 +280,14 @@ function NavItem({
       {/*
         ★ 导航图标**不分激活态**,一律满强度 `icon`。
         原本非激活用 `accent-soft`(#7f5944),放大 6 倍对比参考图才看出来:
-        参考里五个图标是同一个强度,而我这边量出来是 #754e3c —— 整列读起来像是禁用了。
+        参考里五个图标是同一个强度,而我这边量出来是 #754e3c —— 一整排读起来像是禁用了。
         激活态已经由行底色(`bg-canvas`)表达,不需要图标再表达第二遍。
         用 `icon` 不用 `accent`:深色参考里它是橙的,浅色参考里是中性灰,
         两者是同一个语义的两套取值 —— 见 IconButton 的注释。
       */}
       <span className="shrink-0 text-icon">{icon}</span>
-      <span className="min-w-0 flex-1 truncate">{children}</span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {badge !== undefined && <span className="absolute top-0.5 right-0.5">{badge}</span>}
     </button>
   )
 }
@@ -443,7 +454,7 @@ function SessionGroupBlock({
                       </span>}
                       <span className="min-w-0 flex-1 truncate">{openTab?.title ?? session.title}</span>
                   {(runningSessionIds.has(session.id) || session.running) && (
-                    <LoaderCircle size={12} aria-label={t('chat.taskChecklistRunning')} className="shrink-0 animate-spin text-accent motion-reduce:animate-none" />
+                    <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
                   )}
                   {session.favorited && <span className="shrink-0 text-accent">★</span>}
                 </button>

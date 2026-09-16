@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import type { AnthropicCacheTtl, UpstreamProvider } from '../../../../../../shared/domain/provider'
+import { IMPORTED_ALIAS_DEFAULTS, type AnthropicCacheTtl, type ModelAlias, type UpstreamProvider } from '../../../../../../shared/domain/provider'
 import { Segmented } from '../../../../components/ui/Segmented'
 import { I18nProvider, type Locale } from '../../../../i18n'
 import { ProviderPanel } from '../ProviderPanel'
@@ -35,31 +35,51 @@ function renderPanel(
   protocol: UpstreamProvider['protocol'],
   cacheTtl?: AnthropicCacheTtl,
   locale: Locale = 'zh-CN',
-  id = 'relay'
+  id = 'relay',
+  aliases: readonly ModelAlias[] = [],
+  preserveAliases: readonly ModelAlias[] = []
 ): string {
   return renderToStaticMarkup(
     createElement(I18nProvider, {
       initialLocale: locale,
-      children: createElement(ProviderPanel, { entry: entry(protocol, cacheTtl, id) })
+      children: createElement(ProviderPanel, {
+        entry: { ...entry(protocol, cacheTtl, id), aliases },
+        preserveAliases
+      })
     })
   )
 }
 
 describe('ProviderPanel · 协议专属配置', () => {
-  it('Anthropic 显示三档提示缓存，旧 Provider 默认关闭', () => {
+  it('Anthropic 只显示两个缓存时长，旧 Provider 默认 5 分钟且不能关闭', () => {
     const html = renderPanel('anthropic')
     expect(html).toContain('提示缓存')
-    expect(html).toContain('关闭')
+    expect(html).not.toContain('>关闭</span>')
     expect(html).toContain('5 分钟')
     expect(html).toContain('1 小时')
-    expect(html).toMatch(/aria-checked="true"[^>]*>关闭<\/button>/)
+    expect(html).toMatch(/aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>5 分钟<\/span><\/button>/)
+    expect(html).toContain('始终携带缓存标记')
     expect(html).toContain('1 小时写入通常更贵')
     expect(html).toContain('Anthropic 兼容中转站不支持')
   })
 
+  it('旧 off 配置也显示为 5 分钟', () => {
+    const html = renderPanel('anthropic', 'off' as AnthropicCacheTtl)
+    expect(html).toMatch(/aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>5 分钟<\/span><\/button>/)
+    expect(html).not.toContain('>关闭</span>')
+  })
+
   it('已保存的 1 小时档位在重新渲染时恢复', () => {
     const html = renderPanel('anthropic', '1h')
-    expect(html).toMatch(/aria-checked="true"[^>]*>1 小时<\/button>/)
+    expect(html).toMatch(/aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>1 小时<\/span><\/button>/)
+  })
+
+  it('英文缓存设置同样默认启用，并说明命中限制', () => {
+    const html = renderPanel('anthropic', undefined, 'en-US')
+    expect(html).toMatch(/aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>5 minutes<\/span><\/button>/)
+    expect(html).not.toContain('>Off</span>')
+    expect(html).toContain('always include cache markers')
+    expect(html).toContain('Cache hits depend on upstream support')
   })
 
   it('OpenAI 隐藏 Anthropic 配置，也不暗示 prompt_cache_key 已实现', () => {
@@ -68,6 +88,37 @@ describe('ProviderPanel · 协议专属配置', () => {
     expect(html).not.toContain('prompt_cache_key')
     expect(html).not.toContain('命中率')
     expect(html).toContain('/v1/responses')
+  })
+
+  it.each(['openai-chat', 'openai-responses'] as const)('%s 供应商含 Anthropic 覆盖模型时也能设置缓存时长', (protocol) => {
+    const model: ModelAlias = {
+      ...IMPORTED_ALIAS_DEFAULTS,
+      alias: 'mixed-model', providerId: 'relay', upstreamModel: 'mixed-model',
+      protocolOverride: 'anthropic'
+    }
+    for (const cacheTtl of [undefined, '1h'] as const) {
+      const html = renderPanel(protocol, cacheTtl, 'zh-CN', 'relay', [model])
+      expect(html).toContain('提示缓存')
+      expect(html).toContain('始终携带缓存标记')
+      expect(html).not.toContain('>关闭</span>')
+      expect(html).toMatch(cacheTtl === '1h'
+        ? /aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>1 小时<\/span><\/button>/
+        : /aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>5 分钟<\/span><\/button>/)
+    }
+    expect(renderPanel(protocol, undefined, 'zh-CN', 'relay', [
+      { ...model, protocolOverride: 'openai-responses' }
+    ])).not.toContain('提示缓存')
+  })
+
+  it('其他模态保留的 Anthropic 模型也让供应商缓存设置保持可见', () => {
+    const model: ModelAlias = {
+      ...IMPORTED_ALIAS_DEFAULTS,
+      alias: 'text-model', providerId: 'relay', upstreamModel: 'text-model',
+      protocolOverride: 'anthropic', modality: 'text'
+    }
+    const html = renderPanel('openai-chat', '1h', 'en-US', 'relay', [], [model])
+    expect(html).toContain('always include cache markers')
+    expect(html).toMatch(/aria-checked="true"[^>]*>(?:<span[^>]*><\/span>)?<span[^>]*>1 hour<\/span><\/button>/)
   })
 
   it('两种协议页面都不提供 metadata.user_id 编辑框', () => {

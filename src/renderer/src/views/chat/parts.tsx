@@ -10,16 +10,18 @@
  * 这个文件只负责把 presenter 的输出摆进版式里。新增一个工具的展示规则
  * 不需要动这里一行。
  */
-import { Bot, Brain, CheckCircle2, ChevronRight, CircleAlert, Clock3, CornerDownRight, ListChecks, Square } from "lucide-react";
+import { Bot, Brain, CheckCircle2, ChevronRight, CircleAlert, Clock3, ListChecks, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
 import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
 import { presenterOf } from "../../../../shared/domain/tool-presenter";
+import { agentColorHex } from "../../../../shared/domain/agent-def";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
 import { agentErrorText } from "../../i18n/agent";
 import { AgentMarkdown } from "../../components/markdown";
+import { Surface, SurfaceReveal, SurfaceRow } from "../../components/ui/Surface";
 import { ToolDetail } from "./ToolDetail";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 import { abortRun } from "../../services/agent";
@@ -42,15 +44,23 @@ export function ThinkingBlock({
 }): ReactNode {
   const { t } = useI18n();
   const [manual, setManual] = useState<boolean | null>(null);
+  const body = useRef<HTMLDivElement>(null);
+  const followBottom = useRef(true);
   const open = manual ?? streaming;
+
+  useEffect(() => {
+    if (!streaming || !open || !followBottom.current || body.current === null) return;
+    body.current.scrollTop = body.current.scrollHeight;
+  }, [open, streaming, text]);
+
   if (!streaming && text.trim() === '') return null;
   return (
-    <div className="rounded-card bg-surface-raised/60" data-testid="thinking-block">
+    <Surface data-testid="thinking-block">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setManual(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-fg-muted transition-colors hover:text-fg"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover/40 hover:text-fg"
       >
         <ChevronRight
           size={13}
@@ -61,12 +71,19 @@ export function ThinkingBlock({
           {streaming ? t("chat.thinkingNow") : t("chat.thinking")}
         </span>
       </button>
-      {open && (
-        <div className="px-3 pb-2.5 pl-[30px]">
+      <SurfaceReveal open={open} className="pl-[30px]">
+        <div
+          ref={body}
+          className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto pr-1"
+          onScroll={(event) => {
+            const el = event.currentTarget;
+            followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+        >
           <AgentMarkdown content={text} streaming={streaming} variant="compact" />
         </div>
-      )}
-    </div>
+      </SurfaceReveal>
+    </Surface>
   );
 }
 
@@ -113,68 +130,59 @@ export function ToolCallCard({
   const summary = presenter.summary?.(shownInput, call?.output);
 
   return (
-    <div
+    <Surface
       // 状态同时给一个机器可读的属性:e2e 探针读它,而不是去正则「完成/失败」
       // 这几个会改的中文字(同 StatusLine 的理由)
       data-testid="tool-call"
       data-tool-status={status}
       data-tool-shape={presenter.shape}
-      className={cn(
-        "overflow-hidden rounded-card border bg-surface-raised/60",
-        status === "error" ? "border-danger/40" : "border-border",
-      )}
+      // 失败时左侧一道竖条:在一屏十几行工具里,颜色差比文字差更快被扫到
+      tone={status === "error" ? "danger" : "default"}
+      rail={status === "error" ? "danger" : undefined}
     >
-      {/* 失败时左侧一道竖条:在一屏十几行工具里,颜色差比文字差更快被扫到 */}
-      <div className="flex">
-        {status === "error" && (
-          <span aria-hidden className="w-[2px] shrink-0 bg-danger" />
-        )}
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setManual(!open)}
-          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-[12.5px] transition-colors hover:bg-tint-hover/40"
-        >
-          <ChevronRight
-            size={13}
-            className={cn(
-              "shrink-0 text-fg-faint transition-transform",
-              open && "rotate-90",
-            )}
-          />
-          <ToolIcon shape={presenter.shape} status={status} />
-          <span className="min-w-0 flex-1 truncate text-fg">
-            {presenter.title(shownInput)}
-          </span>
-
-          {/* 运行中的一行进度优先于摘要 —— 它是此刻唯一在变的信息 */}
-          {call?.progress !== undefined ? (
-            <span className="max-w-[40%] shrink-0 truncate text-[11px] text-fg-faint">
-              {call.progress}
-            </span>
-          ) : (
-            summary !== undefined && (
-              <span className="max-w-[40%] shrink-0 truncate text-[11px] text-fg-faint">
-                {summary}
-              </span>
-            )
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setManual(!open)}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left text-[12.5px] transition-colors hover:bg-tint-hover/40"
+      >
+        <ChevronRight
+          size={13}
+          className={cn(
+            "shrink-0 text-fg-faint transition-transform",
+            open && "rotate-90",
           )}
+        />
+        <ToolIcon shape={presenter.shape} status={status} />
+        <span className="min-w-0 flex-1 truncate text-fg">
+          {presenter.title(shownInput)}
+        </span>
 
-          <StatusSlot status={status} duration={duration} />
-        </button>
-      </div>
+        {/* 运行中的一行进度优先于摘要 —— 它是此刻唯一在变的信息 */}
+        {call?.progress !== undefined ? (
+          <span className="max-w-[40%] shrink-0 truncate text-[11px] text-fg-faint">
+            {call.progress}
+          </span>
+        ) : (
+          summary !== undefined && (
+            <span className="max-w-[40%] shrink-0 truncate text-[11px] text-fg-faint">
+              {summary}
+            </span>
+          )
+        )}
 
-      {open && (
-        <div className="border-t border-hairline px-3 py-2">
-          <ToolDetail
-            shape={presenter.shape}
-            input={shownInput}
-            output={call?.output}
-            isError={status === "error"}
-          />
-        </div>
-      )}
-    </div>
+        <StatusSlot status={status} duration={duration} />
+      </button>
+
+      <SurfaceReveal open={open}>
+        <ToolDetail
+          shape={presenter.shape}
+          input={shownInput}
+          output={call?.output}
+          isError={status === "error"}
+        />
+      </SurfaceReveal>
+    </Surface>
   );
 }
 
@@ -300,12 +308,7 @@ export function SubagentNode({
         : reportStatus === 'blocked'
           ? t('chat.subagent.report.blocked')
         : undefined;
-  const phaseKey = state?.phase === undefined ? undefined : `chat.subagent.phase.${state.phase}` as
-    | 'chat.subagent.phase.starting'
-    | 'chat.subagent.phase.thinking'
-    | 'chat.subagent.phase.tool'
-    | 'chat.subagent.phase.finishing'
-    | 'chat.subagent.phase.background'
+  const color = status === 'error' ? undefined : agentColorHex(state?.color);
   const stop = (): void => {
     if (state?.childRunId !== undefined) void abortRun(state.childRunId, true)
   }
@@ -317,20 +320,20 @@ export function SubagentNode({
   const canOpen = openSubagent !== undefined && state !== undefined && state.childSessionId !== undefined;
 
   return (
-    <div
-      /*
-        ★ 后台卡片走一条 accent 左边框。以前唯一的区分是标题行右边那个 11px 的
-        「后台」标签,挤在子代理名、状态、耗时中间 —— 一屏里叠着四五张卡片时
-        等于没有。左边框在任何密度下都认得出,而且不占标题行的位置。
-      */
-      className={cn(
-        "overflow-hidden rounded-card border border-border bg-surface-raised/40 text-[12.5px] text-fg-muted",
-        background && "border-l-2 border-l-accent/70"
-      )}
+    <Surface
+      tone={status === 'error' ? 'danger' : 'default'}
+      rail={color === undefined && background ? 'accent' : undefined}
+      style={color === undefined || status === 'error' ? undefined : {
+        borderColor: `${color}66`,
+        background: `color-mix(in srgb, ${color} 5%, var(--color-surface-raised))`,
+        boxShadow: `inset 3px 0 0 ${color}`
+      }}
+      className="text-[12.5px] text-fg-muted"
       data-testid="subagent-node"
       data-subagent-call-id={state?.callId}
       data-subagent-status={status}
       data-subagent-background={state?.background === true ? 'true' : 'false'}
+      data-subagent-color={state?.color}
     >
       {/* 停止按钮是标题行的**兄弟**,不是它的子节点 —— 按钮不能套按钮 */}
       <div className="flex w-full min-w-0 items-center">
@@ -341,33 +344,51 @@ export function SubagentNode({
           title={canOpen ? t('chat.subagent.open') : undefined}
           onClick={() => { if (state !== undefined) openSubagent?.(state) }}
           className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left transition-colors",
+            "flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left transition-colors",
             canOpen && "hover:bg-tint-hover/40"
           )}
         >
-          <CornerDownRight size={13} className="shrink-0 text-accent-soft" />
-          {status === 'error'
-            ? <CircleAlert size={14} className="shrink-0 text-danger" />
-            : status === 'done'
-              ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />
-              /* 后台跑的用时钟,前台用机器人 —— 图标这一格本来就在,不必再挤一个标签进标题行 */
-              : background
-                ? <Clock3 size={14} className="shrink-0 text-accent" />
-                : <Bot size={14} className="shrink-0 text-accent" />}
-          {/* ★ 「后台」紧跟图标、在标题**左边** —— 它说的是这张卡片是什么,
-              不是它此刻怎么样;摆到右边那堆状态元数据里会被当成状态读。 */}
-          {background && (
-            <span className="shrink-0 rounded-[4px] bg-accent/12 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-              {t('chat.subagent.mode.background')}
-            </span>
-          )}
-          <span className="min-w-0 flex-1 truncate text-fg">{title}</span>
-          {state?.subagentType !== undefined && <span className="max-w-[24%] truncate text-[11px] text-fg-faint">{state.subagentType}</span>}
-          <span className={cn("shrink-0 text-[11px]",
-            noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}>
-            {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
+          <span
+            className={cn(
+              "flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px]",
+              color === undefined && (status === 'error' ? "bg-danger/10 text-danger" : "bg-accent/10 text-accent")
+            )}
+            style={color === undefined ? undefined : { color, backgroundColor: `${color}1f` }}
+          >
+            {status === 'error'
+              ? <CircleAlert size={14} />
+              : status === 'done'
+                ? <CheckCircle2 size={14} />
+                : background
+                  ? <Clock3 size={14} />
+                  : <Bot size={14} />}
           </span>
-          {duration !== undefined && <span className="shrink-0 font-mono text-[11px] text-fg-faint">{duration}</span>}
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate font-medium text-fg">{title}</span>
+            <span className="flex min-w-0 items-center gap-1.5 text-[10.5px] text-fg-faint">
+              {state?.subagentType !== undefined && (
+                <span className="truncate" style={color === undefined ? undefined : { color }}>
+                  {state.subagentType}
+                </span>
+              )}
+              {background && (
+                <span
+                  className={cn("shrink-0 rounded-full px-1.5 py-px text-[9.5px] font-medium", color === undefined && "bg-accent/10 text-accent")}
+                  style={color === undefined ? undefined : { color, backgroundColor: `${color}1a` }}
+                >
+                  {t('chat.subagent.mode.background')}
+                </span>
+              )}
+            </span>
+          </span>
+          <span className="flex shrink-0 flex-col items-end gap-0.5">
+            <span className={cn("text-[11px] font-medium",
+              noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}
+              style={color !== undefined && running && noticeLabel === undefined ? { color } : undefined}>
+              {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
+            </span>
+            {duration !== undefined && <span className="font-mono text-[10.5px] text-fg-faint">{duration}</span>}
+          </span>
         </button>
         {running && (
           <button
@@ -376,32 +397,25 @@ export function SubagentNode({
             onClick={stop}
             aria-label={t('chat.subagent.stop')}
             title={t('chat.subagent.stop')}
-            className="mr-1.5 inline-flex shrink-0 items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] text-danger transition-colors hover:bg-danger/10"
+            className="mr-2 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-danger transition-colors hover:bg-danger/10"
           >
             <Square size={11} />
           </button>
         )}
       </div>
-      {running && (
-        <div className="flex items-center gap-2 border-t border-hairline px-3 py-2 text-[11.5px] text-fg-muted">
-          <Clock3 size={12} className="shrink-0 animate-pulse text-accent" />
-          <span className="min-w-0 truncate">{state?.currentTool ?? (phaseKey === undefined ? t('chat.subagent.phase.thinking') : t(phaseKey))}{state?.currentTarget !== undefined && <span className="text-fg-faint"> · {state.currentTarget}</span>}</span>
-          <span className="ml-auto shrink-0 font-mono text-fg-faint">{t('chat.subagent.activityCount', { count: state?.toolCalls ?? 0 })}</span>
-        </div>
-      )}
       {noticeDetail !== undefined && (
-        <div
+        <SurfaceRow
           data-testid="subagent-notice"
-          className="selectable border-t border-hairline bg-danger/10 px-3 py-1.5 text-[11px] leading-relaxed text-danger"
+          className="selectable bg-danger/10 py-1.5 text-[11px] leading-relaxed text-danger"
         >
           {noticeDetail}
-        </div>
+        </SurfaceRow>
       )}
       {!running && reportLabel !== undefined && (
-        <div className={cn("flex items-center gap-2 border-t border-hairline px-3 py-2 text-[11.5px]", reportStatus === 'pending' ? "text-accent" : "text-fg-muted")}>
+        <SurfaceRow className={cn(reportStatus === 'pending' ? "text-accent" : "text-fg-muted")}>
           <ListChecks size={12} className="shrink-0" />
           <span>{reportLabel}</span>
-        </div>
+        </SurfaceRow>
       )}
       {/*
         ★ 失败原因**留一行在卡片上**,完整的错误框在面板里。
@@ -409,13 +423,15 @@ export function SubagentNode({
         用户为了看一句话去开一个面板 —— 而失败恰恰是最该一眼看见的那件事。
       */}
       {status === 'error' && (
-        <div data-testid="subagent-error" className="truncate border-t border-hairline bg-danger/10 px-3 py-1.5 text-[11.5px] text-danger">
-          {errorText === undefined || errorText.trim() === ''
-            ? t('chat.subagent.detail.errorUnknown')
-            : errorText}
-        </div>
+        <SurfaceRow data-testid="subagent-error" className="bg-danger/10 py-1.5 text-danger">
+          <span className="min-w-0 truncate">
+            {errorText === undefined || errorText.trim() === ''
+              ? t('chat.subagent.detail.errorUnknown')
+              : errorText}
+          </span>
+        </SurfaceRow>
       )}
-    </div>
+    </Surface>
   );
 }
 
@@ -497,10 +513,12 @@ export function SubagentReportRow({
   const truncated = full === null && brief !== "" && (failed || legacy);
 
   return (
-    <div
+    <Surface
+      tone="accent"
+      dashed
       data-testid="subagent-report-row"
       data-report-call-id={state?.callId}
-      className="overflow-hidden rounded-card border border-dashed border-accent/35 bg-accent/[0.04] text-[12px] text-fg-muted"
+      className="text-[12px] text-fg-muted"
     >
       <div className="flex w-full min-w-0 items-center">
         <button
@@ -533,8 +551,8 @@ export function SubagentReportRow({
           </button>
         )}
       </div>
-      {open && (
-        <div className="selectable border-t border-hairline px-3 py-2.5">
+      <SurfaceReveal open={open} className="selectable py-2.5">
+        <div className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto pr-1">
           {/*
             ★ 只渲染子代理**自己那段正文**,不是注入给模型的那整段英文
             (它外面还包着一层 "Background subagent result (...) / Review this result..."
@@ -556,7 +574,7 @@ export function SubagentReportRow({
             </p>
           )}
         </div>
-      )}
-    </div>
+      </SurfaceReveal>
+    </Surface>
   );
 }

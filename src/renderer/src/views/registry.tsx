@@ -61,6 +61,9 @@ const ExtensionsFeature = lazy(() => import("./extensions/ExtensionsFeature").th
 // 留成静态的话 ChatView 连同 streamdown + katex 会被它一路拽回主 bundle,
 // 上面给 ChatView 做的 lazy 就白做了。
 const ScheduledFeature = lazy(() => import("./scheduled/ScheduledFeature").then((m) => ({ default: m.ScheduledFeature })));
+// Git 面板只引 services + ui 组件,自身很轻;lazy 是为了让它和它的 diff 渲染
+// 不占首屏 —— 和 ScheduledFeature 一样从 FeatureView 这个唯一边界进。
+const GitFeature = lazy(() => import("./git/GitFeature").then((m) => ({ default: m.GitFeature })));
 
 /**
  * chunk 还在路上时占位。**和面板同色的空块,不要 spinner** ——
@@ -134,6 +137,7 @@ export function FeatureView({ feature, onClose }: { feature: FeatureKind; onClos
   // 唯一一个 lazy 的 feature —— 它下面的 MarkdownResourceEditor 拖着整个 codemirror
   if (feature === "extensions") return <Suspense fallback={VIEW_FALLBACK}><ExtensionsFeature onClose={onClose} /></Suspense>;
   if (feature === "scheduled") return <Suspense fallback={VIEW_FALLBACK}><ScheduledFeature onClose={onClose} /></Suspense>;
+  if (feature === "git") return <Suspense fallback={VIEW_FALLBACK}><GitFeature onClose={onClose} /></Suspense>;
   const Icon = FEATURE_ICON[feature];
   const key = feature as "scheduled" | "review" | "settings";
   return (

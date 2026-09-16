@@ -21,16 +21,18 @@
  *   右键系统菜单**全部保留** —— `titleBarStyle: 'hidden'` 保留原生窗框
  *   (`thickFrame` 默认 true),只是不画标题栏,这一点和用 overlay 时完全一样。
  *
- * ★ **颜色不再有任何 IPC。** 按钮就是普通 DOM,`theme.css` 那 22 个变量直接够到它,
+ * ★ **颜色不再有任何 IPC。** 按钮就是普通 DOM,`theme.css` 那 23 个变量直接够到它,
  *   原先那条 `window:titleBarOverlay`(以及它为图片主题绕的那一大圈)一并删掉了。
  */
 import { BrowserWindow, type BrowserWindowConstructorOptions, type WebContents } from 'electron'
 import type { IpcSendMap } from '../../shared/ipc/contract'
 import { windows } from './registry'
 
-/** 开窗选项。macOS 走 hiddenInset,其余平台只去掉那条系统标题栏。 */
-export function titleBarOptions(): Pick<BrowserWindowConstructorOptions, 'titleBarStyle'> {
-  return { titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden' }
+/** 开窗选项。macOS 走 hiddenInset,并把红绿灯与 34px 顶栏垂直居中；其余平台只去掉标题栏。 */
+export function titleBarOptions(): Pick<BrowserWindowConstructorOptions, 'titleBarStyle' | 'trafficLightPosition'> {
+  return process.platform === 'darwin'
+    ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 18 } }
+    : { titleBarStyle: 'hidden' }
 }
 
 /**

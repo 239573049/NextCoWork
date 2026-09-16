@@ -61,6 +61,7 @@ import { prefixedId } from '../../shared/util/id'
 import { databaseDirectory } from '../db'
 import type { ImportEntityKind, ImportMappingRow, ImportSourceRow } from '../db/repo'
 import { store } from '../state/store'
+import { canonicalRoot, findLocalWorkspaceByRoot } from '../state/workspace-root'
 import type { ImportScanCacheRow } from '../db/repo'
 import { getHost } from '../runtime'
 import { globalSettingsPath, localSettingsPath } from '../kernel/local-settings'
@@ -673,7 +674,6 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
   )
   const projectSessions = new Map<string, { count: number; last: number }>()
   const workspaces = store.listWorkspaces().filter((w) => isLocalEnvironment(w.environment))
-  const byRoot = new Map(workspaces.map((w) => [w.rootPath, w] as const))
 
   const scanCache = store.listImportScanCache(row.sourceId)
   const scannedAt = Date.now()
@@ -708,7 +708,9 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
 
     if (count === 0) continue // 空会话不进列表 —— 导进来是一条永远空白的对话
 
-    const projectKey = cwd === '' ? '' : cwd
+    // ★ 归一化后才当键:转录里的 cwd 是原样的,可能经符号链接 / 大小写不同,
+    //   不归一就会和 Codex / OpenCode 的同一个目录各建一个工作区。
+    const projectKey = canonicalRoot(cwd)
     const bucket = projectSessions.get(projectKey) ?? { count: 0, last: 0 }
     projectSessions.set(projectKey, {
       count: bucket.count + 1,
@@ -716,7 +718,7 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
     })
 
     const id = itemId('chat', file.sessionId)
-    const target = projectKey === '' ? undefined : byRoot.get(projectKey)
+    const target = projectKey === '' ? undefined : findLocalWorkspaceByRoot(projectKey, workspaces)
     const status = statusOfChat(mapping, contentHash, target !== undefined, itemDiagnostics)
     items.push({
       id,
@@ -746,14 +748,14 @@ async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
 
   // ── 项目候选 ──
   const projectPaths = new Set<string>([
-    ...Object.keys(global.config.projects),
+    ...Object.keys(global.config.projects).map(canonicalRoot).filter((path) => path !== ''),
     ...[...projectSessions.keys()].filter((key) => key !== '')
   ])
   const projects: ImportProjectCandidate[] = []
   for (const path of [...projectPaths].sort()) {
     const bucket = projectSessions.get(path) ?? { count: 0, last: 0 }
     const accessible = await isDirectory(path)
-    const target = byRoot.get(path)
+    const target = findLocalWorkspaceByRoot(path, workspaces)
     const candidate: ImportProjectCandidate = {
       key: path,
       sourcePath: path,
@@ -881,7 +883,9 @@ async function scanCodexSource(row: ImportSourceRow): Promise<ScanResult> {
   const titles = await readCodexSessionIndex(row.configDir, diagnostics)
   const files = await listCodexSessions(row.configDir, diagnostics)
   const projectStats = new Map<string, { count: number; last: number }>()
-  for (const path of await listCodexProjectRoots(row.configDir, diagnostics)) projectStats.set(path, { count: 0, last: 0 })
+  // ★ config.toml 里的路径和会话 cwd 走同一套归一化,否则一个来源内部就能
+  //   为同一个目录排出两条项目候选。
+  for (const path of await listCodexProjectRoots(row.configDir, diagnostics)) projectStats.set(canonicalRoot(path), { count: 0, last: 0 })
   const seenSessions = new Set<string>()
   /*
     ★ 映射一次性拉齐,不在循环里一条一条 `getImportMapping` —— 513 个文件
@@ -922,7 +926,7 @@ async function scanCodexSource(row: ImportSourceRow): Promise<ScanResult> {
       const title = titles.get(meta.sessionId) ?? meta.title
       const key = 'session:' + meta.sessionId
       const id = itemId('chat', key)
-      const projectKey = meta.cwd ? await realpath(meta.cwd).catch(() => resolve(meta.cwd)) : ''
+      const projectKey = canonicalRoot(meta.cwd)
       const itemDiagnostics = [...meta.diagnostics]
       if (meta.modelProvider && !providers.some((provider) => provider.id === meta.modelProvider)) {
         itemDiagnostics.push({ code: 'model-provider-unresolved', detail: meta.modelProvider })
@@ -1041,7 +1045,7 @@ async function scanOpencodeSource(row: ImportSourceRow): Promise<ScanResult> {
     seenSessions.add(parsed.sessionId)
     const key = 'session:' + parsed.sessionId
     const id = itemId('chat', key)
-    const projectKey = parsed.cwd ? await realpath(parsed.cwd).catch(() => resolve(parsed.cwd)) : ''
+    const projectKey = canonicalRoot(parsed.cwd)
     const itemDiagnostics = [...parsed.diagnostics]
     if (parsed.modelProvider && !providers.some((provider) => provider.id === parsed.modelProvider)) itemDiagnostics.push({ code: 'model-provider-unresolved', detail: parsed.modelProvider })
     const contentHash = hashTranscript(parsed)
@@ -1846,7 +1850,9 @@ function applyProject(
   payload: Extract<ItemPayload, { kind: 'project' }>,
   targets: ReadonlyMap<string, string>
 ): ApplyOutcome {
-  const explicit = targets.get(payload.projectKey)
+  const projectKey = canonicalRoot(payload.projectKey) || payload.projectKey
+  const rootPath = canonicalRoot(payload.sourcePath) || payload.sourcePath
+  const explicit = targets.get(projectKey) ?? targets.get(payload.projectKey)
   const now = Date.now()
 
   if (explicit !== undefined) {
@@ -1854,7 +1860,7 @@ function applyProject(
     if (workspace === undefined) {
       return { result: 'failed', diagnostics: [{ code: 'project.needs-workspace', detail: payload.projectKey }] }
     }
-    writeMapping(sourceId, '', 'workspace', payload.projectKey, {
+    writeMapping(sourceId, '', 'workspace', projectKey, {
       targetId: workspace.id,
       targetPath: workspace.rootPath,
       targetWorkspaceId: workspace.id,
@@ -1864,12 +1870,14 @@ function applyProject(
     return { result: 'updated', diagnostics: [], target: { kind: 'workspace', id: workspace.id } }
   }
 
-  // 复用按**规范化路径**匹配的工作区,不按显示名 —— 两个不同目录可以同名。
-  const existing = store
-    .listWorkspaces()
-    .find((w) => isLocalEnvironment(w.environment) && w.rootPath === payload.sourcePath)
+  /*
+    复用按**规范化路径**匹配的工作区,不按显示名 —— 两个不同目录可以同名。
+    ★ 匹配时把库里那一行也归一化:存量工作区是按旧规则(原样 cwd / 目录选择器的
+    native realpath)写进去的,只比字符串就会为同一个目录再建一个。
+  */
+  const existing = findLocalWorkspaceByRoot(rootPath)
   if (existing !== undefined) {
-    writeMapping(sourceId, '', 'workspace', payload.projectKey, {
+    writeMapping(sourceId, '', 'workspace', projectKey, {
       targetId: existing.id,
       targetPath: existing.rootPath,
       targetWorkspaceId: existing.id,
@@ -1881,13 +1889,13 @@ function applyProject(
 
   const created = store.putWorkspace({
     id: prefixedId('ws'),
-    name: basename(payload.sourcePath) || payload.sourcePath,
-    rootPath: payload.sourcePath,
+    name: basename(rootPath) || rootPath,
+    rootPath,
     settings: structuredClone(DEFAULT_WORKSPACE_SETTINGS),
     createdAt: now,
     lastOpenedAt: now
   })
-  writeMapping(sourceId, '', 'workspace', payload.projectKey, {
+  writeMapping(sourceId, '', 'workspace', projectKey, {
     targetId: created.id,
     targetPath: created.rootPath,
     targetWorkspaceId: created.id,
@@ -2050,16 +2058,21 @@ function resolveWorkspace(
   targets: ReadonlyMap<string, string>
 ): string | null {
   if (projectKey === '') return null
-  const explicit = targets.get(projectKey)
+  /*
+    ★ 调用方给的可能是原样的 `cwd`(见 applyCodexChat / applyOpencodeChat),
+    而映射与 targets 的键都是扫描时归一化过的 —— 这里不归一化,就会明明有工作区
+    却判成没有,聊天被整批跳过并报 `project.needs-workspace`。
+  */
+  const key = canonicalRoot(projectKey)
+  if (key === '') return null
+  const explicit = targets.get(key) ?? targets.get(projectKey)
   if (explicit !== undefined && store.getWorkspace(explicit) !== undefined) return explicit
-  const mapped = store.getImportMapping(sourceId, '', 'workspace', projectKey)
+  const mapped = store.getImportMapping(sourceId, '', 'workspace', key)
+    ?? store.getImportMapping(sourceId, '', 'workspace', projectKey)
   if (mapped !== undefined && mapped.targetId !== '' && store.getWorkspace(mapped.targetId) !== undefined) {
     return mapped.targetId
   }
-  const existing = store
-    .listWorkspaces()
-    .find((w) => isLocalEnvironment(w.environment) && w.rootPath === projectKey)
-  return existing?.id ?? null
+  return findLocalWorkspaceByRoot(key)?.id ?? null
 }
 
 // ─── 资产 ───

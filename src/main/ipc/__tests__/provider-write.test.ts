@@ -102,12 +102,20 @@ describe('upsertProvider', () => {
     expect(() => upsertProvider(draft({ name: '   ' }))).toThrow(/名称/)
   })
 
-  it('按 Provider 保存 Anthropic 缓存档位，并在旧字段缺失时有效值为 off', () => {
-    expect(anthropicCacheTtlOf(draft())).toBe('off')
+  it('按 Provider 保存 Anthropic 缓存档位，缺失时有效值为强制的 5m', () => {
+    expect(anthropicCacheTtlOf(draft())).toBe('5m')
     const saved = upsertProvider(
       draft({ protocolOptions: { anthropic: { cacheTtl: '5m' } } })
     )
     expect(anthropicCacheTtlOf(saved)).toBe('5m')
+
+    // 旧版下拉里的 'off' 仍会被 IPC 接受(它已经在界面上消失了),但只能落成 5m
+    const legacyOff = upsertProvider(
+      draft({
+        protocolOptions: { anthropic: { cacheTtl: 'off' } } as unknown as UpstreamProvider['protocolOptions']
+      })
+    )
+    expect(anthropicCacheTtlOf(legacyOff)).toBe('5m')
 
     const changedProtocol = upsertProvider(
       draft({ protocol: 'openai-chat', protocolOptions: undefined })
@@ -140,13 +148,13 @@ describe('upsertProvider', () => {
     const changed = upsertProvider(
       draft({
         protocolOptions: {
-          anthropic: { cacheTtl: 'off' },
+          anthropic: { cacheTtl: '5m' },
           futureProtocol: { transport: { timeoutMs: 30_000 } }
         } as UpstreamProvider['protocolOptions']
       })
     )
     expect(changed.protocolOptions).toEqual({
-      anthropic: { cacheTtl: 'off' },
+      anthropic: { cacheTtl: '5m' },
       futureProtocol: {
         enabled: true,
         transport: { region: 'cn-east', timeoutMs: 30_000 }
@@ -182,7 +190,7 @@ describe('upsertProvider', () => {
     expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('1h')
   })
 
-  it('显式非法 TTL 被拒绝且不覆盖原配置；异常旧值按 off 使用', () => {
+  it('显式非法 TTL 被拒绝且不覆盖原配置；异常旧值按 5m 使用', () => {
     upsertProvider(draft({ protocolOptions: { anthropic: { cacheTtl: '1h' } } }))
     expect(() =>
       upsertProvider(
@@ -194,13 +202,13 @@ describe('upsertProvider', () => {
     expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('1h')
 
     // Direct/imported legacy JSON may contain an unknown value; persistence
-    // sanitizes it so a future read can never accidentally enable caching.
+    // normalizes it to the mandatory 5m default.
     store.putProvider(
       draft({
         protocolOptions: { anthropic: { cacheTtl: 'unknown' } }
       } as unknown as UpstreamProvider)
     )
-    expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('off')
+    expect(anthropicCacheTtlOf(listProviders().find((p) => p.id === 'acme')!)).toBe('5m')
   })
 
   it('重播种内置 Provider 时保留已保存的协议配置', () => {

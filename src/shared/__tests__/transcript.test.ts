@@ -336,6 +336,7 @@ describe('applyEvent · 终局与元信息', () => {
       childRunId: 'r2',
       description: '查找配置读取处',
       subagentType: 'researcher',
+      color: 'purple',
       model: 'model-a',
       background: true,
       at: 100
@@ -347,6 +348,7 @@ describe('applyEvent · 终局与元信息', () => {
       status: 'running',
       description: '查找配置读取处',
       subagentType: 'researcher',
+      color: 'purple',
       model: 'model-a',
       background: true,
       phase: 'background',
@@ -618,13 +620,24 @@ describe('applyEvent · 重试与切换提示', () => {
     expect(s.notice).toEqual({ kind: 'switch', to: 'B', reason: '上游不可用' })
   })
 
-  it('★ 内容一开始流就清掉 —— 重试成功后不该继续挂着「正在重试」', () => {
+  it('★ 内容一开始流就清掉 —— 重试成功后不该继续挂着旧提示和错误', () => {
     let s = applyEvent(emptyTranscript(), {
+      type: 'stream',
+      delta: { type: 'message_start', model: 'm' }
+    })
+    s = applyEvent(s, {
+      type: 'stream',
+      delta: { type: 'error', error: { code: 'network', message: 'boom', retryable: true } }
+    })
+    s = applyEvent(s, {
       type: 'stream',
       delta: { type: 'provider_retry', attempt: 1, delayMs: 0, reason: 'boom' }
     })
+    expect(s.error?.message).toBe('boom')
+
     s = applyEvent(s, { type: 'stream', delta: { type: 'message_start', model: 'm' } })
     expect(s.notice).toBeUndefined()
+    expect(s.error).toBeUndefined()
   })
 
   it('★ 出错也清掉 —— 错误框里会写全,状态行不必再挂一句过期的', () => {

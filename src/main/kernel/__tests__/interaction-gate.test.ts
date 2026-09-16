@@ -31,7 +31,7 @@ describe('InteractionGate', () => {
     const result = gate.request(handle, { kind: 'ask_user', questions: [{ header: 'Pick', question: 'Pick one',
       options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowFreeform: false }] }, 100)
     const id = gate.list()[0]!.id
-    expect(() => gate.respond({ id, kind: 'plan_approval', approved: true })).toThrow('Invalid')
+    expect(() => gate.respond({ id, kind: 'plan_approval', action: 'approve_current' })).toThrow('Invalid')
     expect(() => gate.respond({ id, kind: 'ask_user', answers: [['C']] })).toThrow('Invalid')
     expect(() => gate.respond({ id, kind: 'ask_user', answers: [['A', 'B']] })).toThrow('Invalid')
     expect(() => gate.respond({ id, kind: 'ask_user', answers: [] })).toThrow('Invalid')
@@ -81,6 +81,21 @@ describe('InteractionGate', () => {
     expect(() => gate.respond({ id, kind: 'ask_user', answers: [['A', 'B']] })).toThrow('Invalid')
     gate.respond({ id, kind: 'ask_user', answers: null })
     expect(await result).toMatchObject({ answers: null })
+  })
+
+  it('accepts file-backed plan decisions and requires revision feedback', async () => {
+    const gate = new InteractionGate()
+    const handle = new RunHandle(req)
+    const result = gate.request(handle, {
+      kind: 'plan_approval',
+      planId: 'plan-1',
+      path: '.plan/plan-1.md',
+      plan: '# Plan'
+    }, 100)
+    const id = gate.list()[0]!.id
+    expect(() => gate.respond({ id, kind: 'plan_approval', action: 'request_revision' })).toThrow('Invalid')
+    gate.respond({ id, kind: 'plan_approval', action: 'request_revision', feedback: 'Add tests.' })
+    expect(await result).toMatchObject({ action: 'request_revision', feedback: 'Add tests.' })
   })
 
   it.each(['abort', 'finish'] as const)('settles the blocked call on run %s and rejects late approvals', async (action) => {

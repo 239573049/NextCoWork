@@ -18,19 +18,29 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleDollarSign,
+  Code2,
+  Database,
+  DatabaseZap,
+  Gauge,
   Globe,
   Lightbulb,
+  LogIn,
+  LogOut,
   Maximize2,
+  Monitor,
+  Percent,
   Paperclip,
   Plus,
   RefreshCw,
+  Server,
   Settings2,
   ShieldCheck,
   ShieldQuestion,
   Square,
-  Target,
   Unlock,
   Sparkles,
+  Workflow,
 } from "lucide-react";
 import {
   useEffect,
@@ -60,14 +70,17 @@ import {
   type ContextSegment,
   type ContextSegmentKind,
 } from "../../../../shared/agent/context-management";
-import { longContextSurcharge, findPricing } from "../../../../shared/domain/pricing";
+import { formatCostMicros, longContextSurcharge, findPricing, type RunCost } from "../../../../shared/domain/pricing";
 import { PRICING_SEED } from "../../../../shared/domain/pricing-seed";
+import { formatTokensPerSecond } from "../../../../shared/agent/duration";
+import { formatTokenCount } from "../../../../shared/agent/tokens";
 import { findBuiltinModel } from "../../../../shared/domain/model-catalog-inventory";
 import { modelThinkingLevels, normalizeModelThinkingLevel } from "../../../../shared/domain/model-runtime";
 import type {
   Workspace,
   WorkspaceSettings,
 } from "../../../../shared/domain/workspace";
+import { normalizeEnvironmentRef } from "../../../../shared/domain/environment";
 import type {
   ModelAlias,
   UpstreamProvider,
@@ -80,9 +93,11 @@ import {
   MenuSeparator,
 } from "../../components/ui/Menu";
 import { Slider } from "../../components/ui/Slider";
+import { Tooltip } from "../../components/ui/Tooltip";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
+import { listConnections, onConnectionsChanged } from "../../services/connections";
 import { previewContext } from "../../services/context";
 import { useModelsStore } from "../../stores/models";
 import { AttachmentTray, type TrayItem } from "./AttachmentTray";
@@ -98,6 +113,9 @@ import { listCommands } from "../../services/commands";
 import type { SkillListItem } from "../../../../shared/domain/skill";
 import type { CommandDefinition } from "../../../../shared/domain/command";
 import { applyCommand, parseCommandInvocation } from "../../../../shared/domain/command";
+import type { ModeDefinition } from '../../../../shared/domain/mode';
+import { isBuiltinModeId } from '../../../../shared/domain/mode';
+import { listModes, onModesChanged } from '../../services/modes';
 import { SkillPopup, type SlashItem } from './SkillPopup';
 import type { TranslationKey } from "../../i18n";
 import type { DraftSelection } from './rich-draft';
@@ -145,12 +163,25 @@ export interface FallbackModel {
   modelProviderId?: string;
 }
 
+export interface ConversationUsageSummary {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  latestTps?: number;
+  cost?: RunCost | null;
+}
+
 export function Composer({
   workspace,
   fallbackModel,
   draft,
   onDraft,
   onPermissionModeChange,
+  sessionMode,
+  onSessionModeChange,
+  onSetDefaultMode,
+  onManageModes,
   running,
   onSend,
   onStop,
@@ -159,7 +190,6 @@ export function Composer({
   onPickAttachment,
   onRemoveAttachment,
   onRetryAttachment,
-  planExitSignal,
   sessionId,
   contextTokens,
   contextSegments,
@@ -167,6 +197,7 @@ export function Composer({
   contextCompacting = false,
   onCompactContext,
   onManageMcp,
+  conversationUsage,
 }: {
   workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
@@ -178,6 +209,11 @@ export function Composer({
    * 否则切到「完全访问」只对之后新敲的消息生效,已经排在队列里的那些还得继续按旧档位跟审批。
    */
   onPermissionModeChange?: (mode: PermissionMode) => void;
+  /** Mode persisted on the current session; drafts inherit the workspace default. */
+  sessionMode?: SessionMode;
+  onSessionModeChange?: (mode: SessionMode) => void;
+  onSetDefaultMode?: (mode: SessionMode) => void;
+  onManageModes?: () => void;
   running: boolean;
   onSend: (text: string, value: ComposerValue) => void;
   onStop: () => void;
@@ -193,14 +229,6 @@ export function Composer({
   onPickAttachment?: () => void;
   onRemoveAttachment?: (key: string) => void;
   onRetryAttachment?: (key: string) => void;
-  /**
-   * 方案获批并开始执行时,ChatView 把这个计数加一。
-   *
-   * ★ 不能用 `workspace.settings.defaultMode` 直接同步 —— 药丸是本地权威,
-   * 工作区设置改变不应该把用户刚选的值冲掉(见 `fromSettings`/`patch` 那段注释)。
-   * 这个计数是专门为“退出计划模式”这一件事开的侧门,不走那条拦置。
-   */
-  planExitSignal?: number;
   /**
    * null = 还没落库的草稿 Tab。只给上下文预览用 —— 有会话时它的历史要算进归因,
    * 没有时预览的就是「一句话都没聊」的那个基线。
@@ -219,21 +247,21 @@ export function Composer({
   onCompactContext?: () => void;
   /** 归因卡里 MCP 那一行的去处。缺省 = 那一行不可点。 */
   onManageMcp?: () => void;
+  /** 整个会话的累计用量，以及最近一轮可计算的输出速度。 */
+  conversationUsage?: ConversationUsageSummary;
 }): ReactNode {
   const { t } = useI18n();
   const { models: configuredModels, providers, loaded, providerOf, load } = useModelsStore();
   const models = configuredModels.filter((m) => m.enabled !== false &&
     providers.some((p) => p.id === m.providerId && p.enabled));
-  const [value, setValue] = useState<ComposerValue>(() =>
-    fromSettings(workspace.settings),
-  );
-  /** 只在 `planExitSignal` **变化**时把药丸拨回普通模式 —— 挂载那一次不算数。 */
-  const lastPlanExit = useRef(planExitSignal);
+  const [value, setValue] = useState<ComposerValue>(() => ({
+    ...fromSettings(workspace.settings),
+    mode: sessionMode ?? workspace.settings.defaultMode,
+  }));
   useEffect(() => {
-    if (planExitSignal === lastPlanExit.current) return;
-    lastPlanExit.current = planExitSignal;
-    setValue((v) => (v.mode === "normal" ? v : { ...v, mode: "normal" }));
-  }, [planExitSignal]);
+    if (sessionMode === undefined) return;
+    setValue((current) => current.mode === sessionMode ? current : { ...current, mode: sessionMode });
+  }, [sessionMode]);
   /*
     上下文归因的**预览**:还没发过请求时,`contextSegments` 是空的,而那正是这张卡
     最该说话的时刻 —— 一个挂满 MCP 的工作区在一句话都没聊的时候就已经少掉半个窗口。
@@ -244,6 +272,11 @@ export function Composer({
   const lastCaret = useRef<number | null>(null);
   const [skills, setSkills] = useState<SkillListItem[]>([]);
   const [commands, setCommands] = useState<CommandDefinition[]>([]);
+  const [modes, setModes] = useState<readonly ModeDefinition[]>([]);
+  const modeRef = useRef(value.mode);
+  const modeChangeRef = useRef(onSessionModeChange);
+  modeRef.current = value.mode;
+  modeChangeRef.current = onSessionModeChange;
   const [skillsLoading, setSkillsLoading] = useState(true);
   const [skillsError, setSkillsError] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
@@ -254,6 +287,23 @@ export function Composer({
   useEffect(() => {
     void load();
   }, [load]);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = (): void => {
+      void listModes(workspace.id).then((catalog) => {
+        if (cancelled) return;
+        setModes(catalog.modes);
+        if (!catalog.modes.some((mode) => mode.id === modeRef.current)) {
+          modeRef.current = 'code';
+          setValue((current) => ({ ...current, mode: 'code' }));
+          modeChangeRef.current?.('code');
+        }
+      }).catch(() => { if (!cancelled) setModes([]); });
+    };
+    refresh();
+    const off = onModesChanged(refresh);
+    return () => { cancelled = true; off(); };
+  }, [workspace.id]);
   useEffect(() => {
     let cancelled = false;
     // 命令和 Skill 同进同出 —— 它们共用一个 `/` 弹层,各记一个 loading 会让弹层
@@ -526,6 +576,12 @@ export function Composer({
     return false;
   }
 
+  function selectMode(mode: SessionMode): void {
+    modeRef.current = mode;
+    setValue((current) => ({ ...current, mode }));
+    onSessionModeChange?.(mode);
+  }
+
   function patch(p: Partial<ComposerValue>): void {
     const next = { ...value, ...p };
     setValue(next);
@@ -565,6 +621,16 @@ export function Composer({
   }, [loaded, thinking, value.thinking, workspace.id]);
   const modelLabel =
     model !== "" ? model : loaded ? t("chat.noModel") : t("common.loading");
+  const builtInModes = modes.filter((mode) => isBuiltinModeId(mode.id));
+  const customModes = modes.filter((mode) => !isBuiltinModeId(mode.id));
+  const selectedMode = modes.find((mode) => mode.id === value.mode);
+  const modeName = (mode: ModeDefinition): string => isBuiltinModeId(mode.id)
+    ? t(`composer.mode.${mode.id}` as 'composer.mode.code' | 'composer.mode.plan' | 'composer.mode.acp')
+    : mode.name;
+  const modeDescription = (mode: ModeDefinition): string => isBuiltinModeId(mode.id)
+    ? t(`composer.mode.${mode.id}Hint` as 'composer.mode.codeHint' | 'composer.mode.planHint' | 'composer.mode.acpHint')
+    : mode.description;
+  const selectedModeName = selectedMode === undefined ? value.mode : modeName(selectedMode);
 
   function submit(): void {
     const raw = draft.trim();
@@ -755,7 +821,7 @@ export function Composer({
             )}
           </Menu>
 
-          {/* ── `+` 统一收纳附件、会话模式和联网开关 ── */}
+          {/* ── `+` 统一收纳附件、Skills 和联网开关 ── */}
           <Menu
             label={t("composer.more")}
             width={320}
@@ -764,10 +830,10 @@ export function Composer({
             trigger={
               <span className={cn(
                 "relative flex h-7 w-7 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg group-aria-expanded:bg-tint",
-                (value.mode !== "normal" || value.webSearch) && "bg-tint text-fg",
+                value.webSearch && "bg-tint text-fg",
               )}>
                 <Plus size={16} />
-                {(value.mode !== "normal" || value.webSearch) && (
+                {value.webSearch && (
                   <span aria-hidden="true" className="absolute top-1 right-1 h-1 w-1 rounded-full bg-accent" />
                 )}
               </span>
@@ -793,22 +859,6 @@ export function Composer({
                     setSkillQuery(null); setMention(null); setSkillPickerQuery(''); setActiveSkill(0);
                     close(); setSkillPickerOpen(true);
                   }}>{t('composer.skills')}</ComposerMenuItem>
-                <ComposerMenuItem
-                  icon={<Lightbulb size={16} />}
-                  checked={value.mode === "plan"}
-                  description={t("composer.planHint")}
-                  onSelect={() => patch({ mode: value.mode === "plan" ? "normal" : "plan" })}
-                >
-                  {t("composer.plan")}
-                </ComposerMenuItem>
-                <ComposerMenuItem
-                  icon={<Target size={16} />}
-                  checked={value.mode === "goal"}
-                  description={t("composer.goalHint")}
-                  onSelect={() => patch({ mode: value.mode === "goal" ? "normal" : "goal" })}
-                >
-                  {t("composer.goal")}
-                </ComposerMenuItem>
                 <MenuSeparator />
                 <div className="px-2 pt-1 pb-1 text-[11px] text-fg-faint">{t("common.settings")}</div>
                 <ComposerMenuItem
@@ -944,6 +994,250 @@ export function Composer({
           </button>
         </div>
       </div>
+      {/*
+        ── 输入框**外面**的这一行:环境 + 模式 ──
+        两者说的都是「这一轮跑在哪、按哪套规矩跑」,而不是「这条消息怎么发」——
+        后者(权限档位 / `+` / 模型 / 发送)才留在框内那一排。放到框外还有个好处:
+        框内那排在窄窗口下已经两头顶死了,再塞一颗模式药丸就会把模型名挤成省略号。
+      */}
+      <div className="mx-auto mt-1.5 flex w-full max-w-[760px] items-center gap-1">
+        <EnvironmentPill workspace={workspace} />
+
+        <Menu
+          label={t('composer.mode.label')}
+          width={320}
+          panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
+          triggerClassName="rounded-full focus-visible:outline-2 focus-visible:outline-accent"
+          trigger={
+            <Pill accent={value.mode !== 'code'}>
+              {selectedModeName}
+              <ChevronDown size={11} className="text-fg-faint" />
+            </Pill>
+          }
+        >
+          {(close) => (
+            <>
+              <div className="px-2 pt-1.5 pb-1 text-[11px] text-fg-faint">{t('composer.mode.builtIn')}</div>
+              {builtInModes.map((mode) => (
+                <ComposerMenuItem
+                  key={mode.id}
+                  checked={mode.id === value.mode}
+                  selection="radio"
+                  icon={mode.id === 'code' ? <Code2 size={16} /> : mode.id === 'plan' ? <Lightbulb size={16} /> : <Workflow size={16} />}
+                  description={modeDescription(mode)}
+                  onSelect={() => { selectMode(mode.id); close(); }}
+                >
+                  {modeName(mode)}
+                </ComposerMenuItem>
+              ))}
+              {customModes.length > 0 && <>
+                <MenuSeparator />
+                <div className="px-2 pt-1 pb-1 text-[11px] text-fg-faint">{t('composer.mode.custom')}</div>
+                {customModes.map((mode) => (
+                  <ComposerMenuItem
+                    key={mode.id}
+                    checked={mode.id === value.mode}
+                    selection="radio"
+                    icon={<Settings2 size={16} />}
+                    description={mode.description}
+                    onSelect={() => { selectMode(mode.id); close(); }}
+                  >
+                    {mode.name}
+                  </ComposerMenuItem>
+                ))}
+              </>}
+              <MenuSeparator />
+              <ComposerMenuItem
+                icon={<Check size={16} />}
+                description={t('composer.mode.setDefaultHint')}
+                onSelect={() => { onSetDefaultMode?.(value.mode); close(); }}
+              >
+                {t('composer.mode.setDefault')}
+              </ComposerMenuItem>
+              <ComposerMenuItem
+                icon={<Settings2 size={16} />}
+                description={t('composer.mode.manageHint')}
+                onSelect={() => { close(); onManageModes?.(); }}
+              >
+                {t('composer.mode.manage')}
+              </ComposerMenuItem>
+            </>
+          )}
+        </Menu>
+
+        {/* 用量读数和左边那两颗同处一行:它们都在描述「这个会话此刻的状态」,
+            各占一行会在输入框下面堆出两条几乎空着的横带。 */}
+        {conversationUsage !== undefined && (
+          <div className="flex min-w-0 flex-1 justify-end pl-3">
+            <ConversationUsage usage={conversationUsage} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 当前环境:本机 / 某条 SSH 连接。**只读徽标**,不是切换入口 ——
+ * 换环境等于换工作区根(见 `workspace:prepare`),那不是发消息途中该顺手做的事。
+ *
+ * ★ 连接名要单独拉一次 `connection:list`:工作区上存的只有 `connectionId`,
+ * 而用户认得的是自己给那台机器起的名字。拉不到就退回中性的「远程」——
+ * 编一个 id 当名字显示没有任何意义。
+ */
+function EnvironmentPill({ workspace }: { workspace: Workspace }): ReactNode {
+  const { t } = useI18n();
+  const ref = normalizeEnvironmentRef(workspace.environment);
+  const connectionId = ref.kind === "connection" ? ref.connectionId : undefined;
+  const [connectionName, setConnectionName] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (connectionId === undefined) {
+      setConnectionName(undefined);
+      return;
+    }
+    let cancelled = false;
+    const refresh = (): void => {
+      void listConnections()
+        .then((items) => {
+          if (cancelled) return;
+          setConnectionName(items.find((item) => item.profile.id === connectionId)?.profile.name);
+        })
+        // 名字拉不到不该在输入框下面弹错误:徽标退回「远程」照样说清楚了这不是本机。
+        .catch(() => { if (!cancelled) setConnectionName(undefined); });
+    };
+    refresh();
+    const off = onConnectionsChanged(refresh);
+    return () => { cancelled = true; off(); };
+  }, [connectionId]);
+
+  const label = ref.kind === "local"
+    ? t("composer.environment.local")
+    : ref.kind === "unbound"
+      ? t("composer.environment.unbound")
+      // 连接名是用户自己起的名字 —— 域内容,不翻译。
+      : connectionName ?? t("composer.environment.remote");
+  return (
+    <span
+      title={`${t("composer.environment.label")}: ${label} · ${workspace.rootPath}`}
+      aria-label={`${t("composer.environment.label")}: ${label}`}
+      data-testid="composer-environment"
+    >
+      <Pill readonly>
+        {ref.kind === "local"
+          ? <Monitor aria-hidden="true" size={12} />
+          : <Server aria-hidden="true" size={12} />}
+        <span className="max-w-[160px] truncate">{label}</span>
+      </Pill>
+    </span>
+  );
+}
+
+function ConversationUsage({ usage }: { usage: ConversationUsageSummary }): ReactNode {
+  const { t, locale } = useI18n();
+  const exact = (value: number): string => value.toLocaleString(locale);
+  /*
+    ★ 口径与转录区那条「任务用量」保持一致（Thread.tsx 的 cacheRate）：
+    分母是**输入总量**（未命中 + 缓存读 + 缓存写），不是 input 单项。
+    两处若各算各的，同一轮会给出两个不同的命中率。
+
+    输入为 0 时给「—」而不是 0.0%：这里的 0 是「还没有输入可谈」，
+    而 0.0% 会被读成「缓存一次都没命中」——和 TPS、花费算不出时同一处理。
+  */
+  const inputTotal = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  const cacheRate = inputTotal > 0 ? usage.cacheReadTokens / inputTotal : undefined;
+  const metrics = [
+    {
+      key: "input",
+      icon: <LogIn size={12} />,
+      label: t("chat.conversationUsageInput"),
+      value: formatTokenCount(usage.inputTokens),
+      exact: exact(usage.inputTokens),
+    },
+    {
+      key: "cache-read",
+      icon: <Database size={12} />,
+      label: t("chat.conversationUsageCacheRead"),
+      value: formatTokenCount(usage.cacheReadTokens),
+      exact: exact(usage.cacheReadTokens),
+    },
+    {
+      key: "cache-write",
+      icon: <DatabaseZap size={12} />,
+      label: t("chat.conversationUsageCacheWrite"),
+      value: formatTokenCount(usage.cacheWriteTokens),
+      exact: exact(usage.cacheWriteTokens),
+    },
+    {
+      key: "cache-rate",
+      icon: <Percent size={12} />,
+      label: t("chat.conversationUsageCacheRate"),
+      value: cacheRate === undefined ? "—" : `${(cacheRate * 100).toFixed(1)}%`,
+      // 悬停给出算式本身 —— 百分比看不出是拿哪两个数除出来的
+      exact: cacheRate === undefined
+        ? "—"
+        : `${exact(usage.cacheReadTokens)} / ${exact(inputTotal)}`,
+    },
+    {
+      key: "output",
+      icon: <LogOut size={12} />,
+      label: t("chat.conversationUsageOutput"),
+      value: formatTokenCount(usage.outputTokens),
+      exact: exact(usage.outputTokens),
+    },
+    {
+      key: "tps",
+      icon: <Gauge size={12} />,
+      label: t("chat.conversationUsageLatestTps"),
+      value: usage.latestTps === undefined
+        ? "—"
+        : t("chat.conversationUsageTpsValue", { tps: formatTokensPerSecond(usage.latestTps) }),
+      exact: usage.latestTps === undefined
+        ? "—"
+        : t("chat.conversationUsageTpsValue", { tps: formatTokensPerSecond(usage.latestTps) }),
+    },
+    {
+      key: "cost",
+      icon: <CircleDollarSign size={12} />,
+      label: t("chat.conversationUsageCost"),
+      value: usage.cost == null ? "—" : formatCostMicros(usage.cost.micros, usage.cost.currency),
+      exact: usage.cost == null ? "—" : formatCostMicros(usage.cost.micros, usage.cost.currency),
+    },
+  ];
+  return (
+    <div
+      data-testid="conversation-usage"
+      className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-1 text-[10.5px] tabular-nums text-fg-faint"
+    >
+      {metrics.map((metric) => (
+        /*
+          ★ 气泡而不是原生 `title`：原生提示要停顿约一秒才弹、样式不受控，
+          而这一行每个数字都是缩写过的（4.1M / $47.35），不悬停就读不到口径和精确值。
+          `Tooltip` 顺带解决了键盘可达（focus 也触发）和被祖先 overflow 裁切。
+        */
+        <Tooltip
+          key={metric.key}
+          align="center"
+          content={
+            <>
+              <div className="font-medium">{metric.label}</div>
+              {/* 缩写和精确值相同时（TPS、花费）不重复写一遍 */}
+              {metric.exact !== metric.value && (
+                <div className="tabular-nums text-fg-muted">{metric.exact}</div>
+              )}
+            </>
+          }
+        >
+          <span
+            role="group"
+            tabIndex={0}
+            aria-label={`${metric.label}: ${metric.exact}`}
+            className="inline-flex cursor-help items-center gap-1 whitespace-nowrap rounded-[3px] outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+          >
+            <span aria-hidden="true" className="text-fg-muted">{metric.icon}</span>
+            <span>{metric.value}</span>
+          </span>
+        </Tooltip>
+      ))}
     </div>
   );
 }
@@ -1903,7 +2197,6 @@ function toSettings(v: ComposerValue): Partial<WorkspaceSettings> {
     // ★ **无条件**写,不能条件展开:主进程那边是深合并,漏写这一项时旧的供应商
     //   会原样留下,于是得到「新别名 + 旧供应商」—— 正是这次修复要消灭的那个形状。
     defaultModelProviderId: v.modelProviderId,
-    defaultMode: v.mode,
     defaultThinking: v.thinking,
     webSearch: v.webSearch,
     maxContext: v.maxContext,

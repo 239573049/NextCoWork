@@ -14,7 +14,6 @@ import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { SessionChange } from '../../../shared/domain/session'
 import type { AgentEvent } from '../../../shared/agent/event'
-import type { PlanDocumentV2 } from '../../../shared/domain/plan'
 import { isToolResultOnly, userMessage, visibleText, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import type { SendOptions, SessionMode } from '../../../shared/agent/run-request'
 import {
@@ -57,10 +56,6 @@ export type { SendOptions }
 
 export interface SessionState {
   sessionId: string
-  currentPlan: PlanDocumentV2 | null
-  planExpanded: boolean
-  setCurrentPlan: (plan: PlanDocumentV2 | null) => void
-  setPlanExpanded: (expanded: boolean) => void
   /** ★ 一个会话同一时刻只有一个 run(方案 §8)。null = 空闲 */
   activeRunId: string | null
   /** 已应用的最后一个 seq。防漂移就靠它 */
@@ -146,10 +141,6 @@ type SessionStore = UseBoundStore<StoreApi<SessionState>>
 function createSessionStore(sessionId: string): SessionStore {
   return create<SessionState>((set, get) => ({
     sessionId,
-    currentPlan: null,
-    planExpanded: false,
-    setCurrentPlan: (plan) => set((state) => ({ currentPlan: plan !== null && state.currentPlan?.id === plan.id && (state.currentPlan.version > plan.version || (state.currentPlan.version === plan.version && state.currentPlan.updatedAt > plan.updatedAt)) ? state.currentPlan : plan })),
-    setPlanExpanded: (planExpanded) => set({ planExpanded }),
     activeRunId: null,
     lastSeq: 0,
     transcript: emptyTranscript(),
@@ -499,8 +490,9 @@ function createSessionStore(sessionId: string): SessionStore {
         return
       }
 
+      const transcript = archiveRunUsage(applyEvents(s.transcript, env.events), env.runId, env.events)
       set({
-        transcript: applyEvents(s.transcript, env.events),
+        transcript,
         lastSeq: env.seq,
         ...settleRun(env.runId, env.events)
       })
@@ -512,9 +504,11 @@ function createSessionStore(sessionId: string): SessionStore {
     },
 
     applyEvents(events) {
+      const runId = get().activeRunId
+      const transcript = archiveRunUsage(applyEvents(get().transcript, events), runId, events)
       set({
-        transcript: applyEvents(get().transcript, events),
-        ...settleRun(get().activeRunId, events)
+        transcript,
+        ...settleRun(runId, events)
       })
       reapInjected(sessionId, events)
       reportCompletedBackgroundFromState(sessionId, events)
@@ -675,6 +669,24 @@ export async function reportBackgroundChild(
     backgroundReports.delete(key)
     store.getState().setSubagentReportStatus(callId, 'pending')
     console.error('[agent] background subagent report failed:', error)
+  }
+}
+
+/**
+ * run 结束时把实时累计用量并入会话级索引。这样连续发送多轮时，无需等待下一次
+ * SQLite hydrate，输入框下方的会话累计也不会漏掉刚结束的历史轮次。
+ */
+function archiveRunUsage(
+  transcript: TranscriptState,
+  runId: string | null,
+  events: readonly AgentEvent[]
+): TranscriptState {
+  if (runId === null || transcript.usage === undefined || !events.some((event) => event.type === 'run_end')) {
+    return transcript
+  }
+  return {
+    ...transcript,
+    runUsage: { ...transcript.runUsage, [runId]: transcript.usage }
   }
 }
 
@@ -1003,6 +1015,8 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
           runUsage: detail.runUsage ?? s.transcript.runUsage,
           runModel: detail.runModel ?? s.transcript.runModel,
           messageRuns: detail.messageRuns ?? s.transcript.messageRuns,
+          // 权威账已进入 runUsage；清掉同一轮的实时副本，避免会话累计重复计算。
+          usage: undefined,
           status: 'done',
           runStartedAt: undefined,
           runEndedAt: undefined
@@ -1364,7 +1378,7 @@ async function restoreDetachedParent(
         subagents: s.transcript.subagents,
         ...conversationScoped(s.transcript)
       }
-      const transcript = applyEvents(base, snap.events)
+      const transcript = archiveRunUsage(applyEvents(base, snap.events), parentRunId, snap.events)
       const messages = [...new Map([...(detail?.messages ?? []), ...transcript.messages]
         .map((m) => [m.id, m])).values()]
       return {
@@ -1443,7 +1457,11 @@ async function resync(sessionId: string, runId: string, sinceSeq: number, histor
             ...(s.transcript.runStartedAt === undefined ? {} : { runStartedAt: s.transcript.runStartedAt })
           }
         : s.transcript
-      const transcript = s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, snap.events)
+      const transcript = archiveRunUsage(
+        s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, snap.events),
+        runId,
+        snap.events
+      )
       const messages = [...new Map([...(history ?? []), ...transcript.messages].map((m) => [m.id, m])).values()]
       return {
         transcript: {

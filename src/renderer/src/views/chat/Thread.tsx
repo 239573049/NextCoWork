@@ -19,6 +19,7 @@ import { formatCostMicros } from '../../../../shared/domain/pricing'
 import type { LiveBlock, SubagentState, TranscriptState } from '../../../../shared/agent/transcript'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { AgentMarkdown } from '../../components/markdown'
+import { Tooltip } from '../../components/ui/Tooltip'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
@@ -28,6 +29,8 @@ import { MessageFileRef } from './MessageFileRef'
 import { SubagentNode, SubagentReportRow, ThinkingBlock, ToolCallCard } from './parts'
 import { useOpenSubagent } from './subagent-open'
 import { InteractionPanel } from './InteractionPanel'
+import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
+import { readWorkspaceFile } from '../../services/workspace-files'
 import { StatusLine } from './StatusLine'
 import { ToolTimeline } from './ToolTimeline'
 import { reportBackgroundChild, type SendOptions } from '../../stores/session'
@@ -50,6 +53,8 @@ export const Thread = memo(function Thread({
   reportOptions,
   onEditMessage,
   onDeleteTurn,
+  workspaceId,
+  onOpenPlan,
   onExecutePlan,
   readOnly = false
 }: {
@@ -78,7 +83,9 @@ export const Thread = memo(function Thread({
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
   onDeleteTurn?: (userMessageId: string) => Promise<void>
-  onExecutePlan?: (ref: { planId: string; version: number }, source: 'current_session' | 'new_session') => void
+  workspaceId?: string
+  onOpenPlan?: (path: string) => void
+  onExecutePlan?: (ref: { planId: string; path: string }, source: 'current_session' | 'new_session') => void
   /** 助手消息上方那行 `供应商 / 模型`(截图:`RoutinAI / claude-fable-5-1`) */
   providerName: string | undefined
   /**
@@ -140,7 +147,7 @@ export const Thread = memo(function Thread({
       )}
       {/* ★ 审批面板在只读态里必须消失:这个 run 的审批归它的**父**对话管,
           而子代理这条路现在根本不会发起审批(见 `runtime.ts` 的 `approveWith`)。 */}
-      {!readOnly && runId !== null && <InteractionPanel key={runId} runId={runId} onExecute={onExecutePlan} />}
+      {!readOnly && runId !== null && <InteractionPanel key={runId} runId={runId} workspaceId={workspaceId} onOpenPlan={onOpenPlan} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
         lastSeq={lastSeq} queued={queued} compactError={compactError} />
     </div>
@@ -210,6 +217,12 @@ export const Thread = memo(function Thread({
           if (row.kind === 'user') {
             return <UserBubble key={row.key} message={row.message} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
           }
+          if (row.kind === 'plan-receipt') {
+            // 工作区未知就没法把计划正文读出来 —— 无正文的卡片只剩一句状态,
+            // 不如不占这个位置。
+            if (workspaceId === undefined) return null
+            return <ResolvedPlanCard key={row.key} workspaceId={workspaceId} receipt={row.receipt} onOpenPlan={onOpenPlan} />
+          }
           if (row.kind === 'subagent-report') {
             /*
               ★ 卡片状态按 `callId` 查 —— 汇报行自己只带摘要,而「是哪个子代理、
@@ -275,6 +288,53 @@ export const Thread = memo(function Thread({
     </div>
   )
 })
+
+function ResolvedPlanCard({ workspaceId, receipt, onOpenPlan }: {
+  workspaceId: string
+  receipt: PlanToolReceipt
+  onOpenPlan?: (path: string) => void
+}): ReactNode {
+  const { t } = useI18n()
+  const [content, setContent] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    const load = (): void => {
+      void readWorkspaceFile(workspaceId, receipt.path).then((file) => {
+        if (!cancelled && file.kind === 'text') setContent(file.content)
+      }).catch(() => undefined)
+    }
+    load()
+    const changed = (event: Event): void => {
+      const detail = (event as CustomEvent<{ workspaceId?: string; path?: string }>).detail
+      if (detail?.workspaceId === workspaceId && detail.path === receipt.path) load()
+    }
+    window.addEventListener('workspace-files-changed', changed)
+    return () => { cancelled = true; window.removeEventListener('workspace-files-changed', changed) }
+  }, [receipt.path, workspaceId])
+
+  const actionKey = receipt.action === 'approve_current'
+    ? 'agent.interaction.planApprovedCurrent'
+    : receipt.action === 'approve_new_session'
+      ? 'agent.interaction.planApprovedNew'
+      : receipt.action === 'request_revision'
+        ? 'agent.interaction.planRevisionRequested'
+        : 'agent.interaction.planRejected'
+
+  return <section className="rounded-xl border border-border bg-surface p-3" data-testid="plan-file-card">
+    <div className="mb-2 flex items-center justify-between gap-3 text-[12px] text-fg-muted">
+      <span>{t('agent.interaction.plan')}</span>
+      <span>{t(actionKey as 'agent.interaction.planApprovedCurrent')}</span>
+    </div>
+    <button type="button" onClick={() => onOpenPlan?.(receipt.path)} aria-label={t('agent.interaction.openPlan')}
+      className="group relative block h-[220px] w-full overflow-hidden rounded-lg border border-border bg-app p-3 text-left hover:border-accent/50">
+      {content === '' ? <span className="text-[12px] text-fg-faint">{receipt.path}</span> : <AgentMarkdown content={content} />}
+      <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-app to-transparent" />
+      <span className="absolute right-2 bottom-2 rounded-pill bg-surface-raised px-2 py-1 text-[11px] text-fg-muted shadow-sm group-hover:text-fg">
+        {t('agent.interaction.openFullPlan')}
+      </span>
+    </button>
+  </section>
+}
 
 function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOptions }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean; reportOptions?: SendOptions }): ReactNode {
   const { t } = useI18n()
@@ -385,37 +445,47 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
   // 压缩之后原始数字在界面上就没有别处可看了,挂到 title 上留一手
   const exact = (n: number): string => n.toLocaleString(locale)
   return (
-    <div className="group relative w-fit" data-testid="task-usage">
-      <div className="cursor-help text-[11px] text-fg-faint">
+    <Tooltip
+      className="block"
+      content={
+        <>
+          <div className="mb-1 font-medium">{t('chat.taskUsage')}</div>
+          <div title={exact(inputTotal)}>
+            {t('chat.taskUsageInput', { count: formatTokenCount(inputTotal) })}
+          </div>
+          <div title={exact(usage.outputTokens)}>
+            {t('chat.taskUsageOutput', { count: formatTokenCount(usage.outputTokens) })}
+          </div>
+          {cacheRead > 0 && (
+            <div title={exact(cacheRead)}>
+              {t('chat.taskUsageCacheRead', { count: formatTokenCount(cacheRead) })}
+            </div>
+          )}
+          {cacheCreate > 0 && (
+            <div title={exact(cacheCreate)}>
+              {t('chat.taskUsageCacheCreate', { count: formatTokenCount(cacheCreate) })}
+            </div>
+          )}
+          <div>{t('chat.taskUsageCacheRate', { rate: `${(cacheRate * 100).toFixed(1)}%` })}</div>
+          {tps !== undefined && <div>{t('chat.taskUsageTps', { tps: formatTokensPerSecond(tps) })}</div>}
+          {cost !== undefined && <div>{t('chat.taskUsageCost', { amount: cost })}</div>}
+        </>
+      }
+    >
+      {/* ★ `tabIndex={0}` 不是多余的:这一整条只有文字、没有可聚焦元素,
+          不给的话键盘用户走不到它身上,Tooltip 的 focus 触发也就无从发生。 */}
+      <div
+        tabIndex={0}
+        data-testid="task-usage"
+        className="w-fit cursor-help rounded-[4px] text-[11px] text-fg-faint outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+      >
         {t('chat.taskUsageSummary', {
           input: formatTokenCount(inputTotal),
           output: formatTokenCount(usage.outputTokens)
         })}
         {cost !== undefined && ` · ${cost}`}
       </div>
-      <div className="pointer-events-none invisible absolute bottom-full left-0 z-20 mb-2 w-max max-w-[min(360px,calc(100vw-48px))] rounded-card border border-border bg-surface-raised px-3 py-2 text-[11px] text-fg shadow-lg opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100">
-        <div className="mb-1 font-medium">{t('chat.taskUsage')}</div>
-        <div title={exact(inputTotal)}>
-          {t('chat.taskUsageInput', { count: formatTokenCount(inputTotal) })}
-        </div>
-        <div title={exact(usage.outputTokens)}>
-          {t('chat.taskUsageOutput', { count: formatTokenCount(usage.outputTokens) })}
-        </div>
-        {cacheRead > 0 && (
-          <div title={exact(cacheRead)}>
-            {t('chat.taskUsageCacheRead', { count: formatTokenCount(cacheRead) })}
-          </div>
-        )}
-        {cacheCreate > 0 && (
-          <div title={exact(cacheCreate)}>
-            {t('chat.taskUsageCacheCreate', { count: formatTokenCount(cacheCreate) })}
-          </div>
-        )}
-        <div>{t('chat.taskUsageCacheRate', { rate: `${(cacheRate * 100).toFixed(1)}%` })}</div>
-        {tps !== undefined && <div>{t('chat.taskUsageTps', { tps: formatTokensPerSecond(tps) })}</div>}
-        {cost !== undefined && <div>{t('chat.taskUsageCost', { amount: cost })}</div>}
-      </div>
-    </div>
+    </Tooltip>
   )
 }
 

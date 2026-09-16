@@ -42,7 +42,7 @@ interface WindowState {
    * 浏览器管理页不是一个可持久化的外层 Tab：打开它不能改变当前工作区，
    * 后台 Agent 也不能借此改动用户正在看的窗口布局。退出后继续显示原工作区。
    */
-  activeStandaloneFeature: 'browser' | 'extensions' | 'scheduled' | null
+  activeStandaloneFeature: 'browser' | 'extensions' | 'scheduled' | 'git' | null
   scheduledUnread: boolean
   clearScheduledUnread: () => void
   sidebarCollapsed: boolean
@@ -273,7 +273,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
         说的那种幽灵 Tab。表的类型故意写 `string[]` 而不是 `FeatureKind[]`，
         好让这个已经退役的值还能写在这儿。
       */
-      const NON_TAB_FEATURES: readonly string[] = ['settings', 'browser', 'extensions', 'scheduled', 'skills']
+      const NON_TAB_FEATURES: readonly string[] = ['settings', 'browser', 'extensions', 'scheduled', 'git', 'skills']
       const persisted = b.tabState.outer.filter(
         (t) => !(t.kind === 'feature' && NON_TAB_FEATURES.includes(t.ref.feature))
       )
@@ -370,7 +370,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
       }
       // 浏览器和扩展入口切换整块主内容区。它们不是文档式工作内容，因此既不创建外层 Tab，
       // 也不改变/持久化用户原本所在的工作区；关闭后自然回到原处。
-      if (feature === 'browser' || feature === 'extensions' || feature === 'scheduled') {
+      if (feature === 'browser' || feature === 'extensions' || feature === 'scheduled' || feature === 'git') {
         set({ activeStandaloneFeature: feature, ...(feature === 'scheduled' ? { scheduledUnread: false } : {}) })
         return
       }

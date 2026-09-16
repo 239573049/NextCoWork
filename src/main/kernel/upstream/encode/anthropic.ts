@@ -143,8 +143,7 @@ export interface AnthropicEncodeOptions {
 
 type AnthropicCacheControl = { type: 'ephemeral'; ttl?: '1h' }
 
-function cacheControl(ttl: AnthropicCacheTtl): AnthropicCacheControl | undefined {
-  if (ttl === 'off') return undefined
+function cacheControl(ttl: AnthropicCacheTtl): AnthropicCacheControl {
   // Anthropic's default is 5 minutes. Omitting `ttl: "5m"` also keeps older
   // Anthropic-compatible relays working while 1h must be explicit.
   return ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
@@ -176,10 +175,9 @@ function withoutCacheBreakpoints(value: unknown): unknown {
  *
  * This function is intentionally reusable after model-level request patches.
  * Those patches may customise ordinary wire parameters, but they must not be
- * able to replace metadata.user_id, silently enable caching for an `off`
- * Provider, or change a Provider's TTL. Reapplying the policy at the final wire
- * boundary also keeps the explicit breakpoint and top-level automatic cache on
- * exactly the same TTL.
+ * able to replace metadata.user_id, disable mandatory caching, or change a
+ * Provider's TTL. Reapplying the policy at the final wire boundary also keeps
+ * the explicit breakpoint and top-level automatic cache on exactly the same TTL.
  */
 export function applyAnthropicRequestOptions(
   body: unknown,
@@ -198,14 +196,10 @@ export function applyAnthropicRequestOptions(
   // may not replace the workspace id with a name, path, or another tenant.
   next.metadata = { ...(record(next.metadata) ?? {}), user_id: userId }
 
-  // Provider settings are authoritative. Start from a breakpoint-free shape
-  // so `off` really means no cache field and an enabled tier cannot inherit a
-  // model patch's mismatched TTL.
-  delete next.cache_control
+  // Provider settings are authoritative. Clear adapter-supplied breakpoints
+  // before restoring mandatory caching with the same TTL at every boundary.
   if (Object.hasOwn(next, 'system')) next.system = withoutCacheBreakpoints(next.system)
   if (Object.hasOwn(next, 'tools')) next.tools = withoutCacheBreakpoints(next.tools)
-  if (caching === undefined) return next
-
   next.cache_control = { ...caching }
 
   // A non-empty system prefix is the preferred stable breakpoint. The normal
@@ -257,9 +251,8 @@ export function encodeAnthropic(
   options?: AnthropicEncodeOptions
 ): EncodedRequest {
   // Keep the three-argument form source-compatible for older gateway callers.
-  // Production routing always supplies a validated workspace id; an omitted
-  // option is therefore a cache-off request with an empty (non-production)
-  // metadata value rather than a way to silently enable caching.
+  // Production routing always supplies a validated workspace id. Older callers
+  // still get mandatory 5m caching with an empty (non-production) metadata value.
   const userId = typeof options?.userId === 'string' ? options.userId : ''
   const cacheTtl = normalizeAnthropicCacheTtl(options?.cacheTtl)
   const body: Record<string, unknown> = {

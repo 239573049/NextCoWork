@@ -1,6 +1,9 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { messagesFor } from './index'
-import { whimsyEn, whimsyZh } from './agent'
+import type { AgentError } from '../../../shared/agent/error'
+import { I18nProvider, messagesFor, useI18n } from './index'
+import { agentErrorText, whimsyEn, whimsyZh } from './agent'
 
 describe('renderer i18n catalog', () => {
   it('has a complete English catalog for every Chinese key', () => {
@@ -12,6 +15,27 @@ describe('renderer i18n catalog', () => {
   it('keeps locale-independent language names readable', () => {
     expect(messagesFor('en-US')['locale.name.zhCN']).toBe('简体中文')
     expect(messagesFor('en-US')['locale.name.enUS']).toBe('English')
+  })
+
+  it.each(['zh-CN', 'en-US'] as const)('localizes mandatory-cache errors in %s without offering to disable caching', (locale) => {
+    for (const messageKey of ['agent.error.cacheUnsupported', 'agent.error.cacheUnsupportedUnnamed'] as const) {
+      const error: AgentError = {
+        code: 'cache_unsupported', message: 'raw fallback', retryable: false, messageKey,
+        messageParams: { provider: 'Relay A', ttl: '5m', detail: 'cache_control is not supported' }
+      }
+      function ErrorCopy(): string {
+        return agentErrorText(error, useI18n().t)
+      }
+      const html = renderToStaticMarkup(createElement(I18nProvider, {
+        initialLocale: locale, children: createElement(ErrorCopy)
+      }))
+      expect(html).toContain(locale === 'zh-CN' ? '缓存标记为必需' : 'Cache markers are required')
+      expect(html).toContain('5m')
+      expect(html).toContain('cache_control is not supported')
+      if (messageKey === 'agent.error.cacheUnsupported') expect(html).toContain('Relay A')
+      expect(html).not.toContain('raw fallback')
+      expect(html).not.toContain(locale === 'zh-CN' ? '关闭' : 'disable')
+    }
   })
 })
 

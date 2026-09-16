@@ -37,6 +37,7 @@ import { runs } from './kernel/run-registry'
 import type { Capacity, SlotRefusal } from './kernel/subagent-queue'
 import { QUEUE_MAX_WAIT_MS, SubagentQueue } from './kernel/subagent-queue'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
+import { BUILTIN_AGENTS } from './kernel/agent/builtin'
 import type { GitContext } from './kernel/git-context'
 import { readGitContext } from './kernel/git-context'
 import { INSTRUCTIONS_MAX, sanitizeInstructions, scanInstructions } from './kernel/instructions'
@@ -44,6 +45,12 @@ import { clampWithEllipsis } from './kernel/text'
 import { readTextBounded } from './imports/assets'
 import { managedInstructionsPath } from './imports/service'
 import { agentRegistry } from './kernel/agent/registry'
+import { MODES_DIR, PROJECT_MODES_PREFIX, scanModes } from './kernel/mode/load'
+import { modePromptFor, modeRegistry } from './kernel/mode/registry'
+import { activePlanForRun, leavePlanRun, planToolAllowList } from './kernel/plan-run'
+import { loadPlanExecution, type PlanExecutionContext } from './kernel/plan-execution'
+import type { ModeDefinition } from '../shared/domain/mode'
+import { normalizeModeId } from '../shared/domain/mode'
 import type { Skill } from '../shared/domain/skill'
 import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, scanSkills } from './kernel/skill/load'
 import { skillRegistry } from './kernel/skill/registry'
@@ -57,6 +64,7 @@ import type { McpServerConfig, McpServerStatus } from '../shared/domain/mcp'
 import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
 import { opencodeGoProtocolFor } from './kernel/upstream/opencode-protocol'
+import { currentConfigScope, defaultWorkspaceIdForScope } from './db/config-profile'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
 import {
@@ -79,11 +87,11 @@ import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
 import { AgentDraftGenerator } from './agent-draft'
+import { CommitMessageGenerator } from './commit-message'
 import type { SessionChange } from '../shared/domain/session'
 import type { CanonicalRequest } from './kernel/upstream/canonical'
 import { ulid } from '../shared/util/id'
 import { runHookEvent } from './hooks'
-import { getExecutionPlanV2, getPlanV2, transitionPlanV2 } from './db/repo'
 import type { ConnectionStatus, SshConnectionProfile } from '../shared/domain/environment'
 import { EnvironmentManager } from './environment/manager'
 import { localEnvironment } from './environment/local'
@@ -100,6 +108,7 @@ let mcp: McpManager | null = null
 let seeded = false
 let sessionTitles: SessionTitleGenerator | null = null
 let agentDrafts: AgentDraftGenerator | null = null
+let commitMessages: CommitMessageGenerator | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
 let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void }>) | undefined
@@ -178,8 +187,9 @@ export function installHost(h: KernelHost): void {
   // 路由器在构造时就抓住了 host 的引用,换宿主必须让它重建,
   // 否则新装的宿主对已经建好的路由器完全不起作用
   router = null
-  // 辅助请求那个路由器同样抓着旧 host(`shutdownSessionTitles` 已经处理了标题那一个)
+  // 辅助请求那几个路由器同样抓着旧 host(`shutdownSessionTitles` 已经处理了标题那一个)
   agentDrafts = null
+  commitMessages = null
 }
 
 export function getHost(): KernelHost {
@@ -431,10 +441,28 @@ function backfillOpencodeGoProtocol(): void {
  * 存在的理由(方案 §9:「工作区根会在运行期被删除或改名,加载时标记
  * unavailable 而不是崩溃」)。
  */
-const DEFAULT_WORKSPACE_ID = 'ws-default'
+/**
+ * 默认工作区的 id。**按配置作用域派生**,不是常量。
+ *
+ * ★★ 常量在这里是**错的**:`workspaces.id` 是主键,而一个作用域里
+ * 叫 `ws-default` 的行已经归 `local` 了 —— 账户作用域再想建一个同 id 的,
+ * `putWorkspace` 会(正确地)以 `workspaceOwned` 拒绝,于是新登录的账户
+ * 连一个能发消息的工作区都没有,首屏是一片空白。
+ *
+ * ★ 派生值必须**稳定**:每次启动算出来不一样的话,每次启动都会新建一个
+ * 「默认工作区」,而它们都是空的、长得一样。哈希是稳定且不可逆的,
+ * 于是这个 id 里也不带账户原文。
+ *
+ * ★ `local` 保持原样 `'ws-default'` —— 库里已经有这一行(可能还带着会话),
+ * 换 id 等于把它变成孤儿。
+ */
+function defaultWorkspaceId(): string {
+  return defaultWorkspaceIdForScope(currentConfigScope())
+}
 
 function seedDefaultWorkspace(): void {
-  if (store.getWorkspace(DEFAULT_WORKSPACE_ID) !== undefined) return
+  const id = defaultWorkspaceId()
+  if (store.getWorkspace(id) !== undefined) return
   // 用户自己开过工作区就不再塞默认的 —— 否则每次启动都多一个他没要的 Tab
   if (store.listWorkspaces().length > 0) return
 
@@ -449,7 +477,7 @@ function seedDefaultWorkspace(): void {
 
   const now = getHost().clock.now()
   store.putWorkspace({
-    id: DEFAULT_WORKSPACE_ID,
+    id,
     name: '默认工作区',
     rootPath,
     ...(unavailable ? { unavailable: true } : {}),
@@ -525,6 +553,28 @@ export function getAgentDraftGenerator(): AgentDraftGenerator {
     logger: getHost().logger
   })
   agentDrafts = generator
+  return generator
+}
+
+/**
+ * 「AI 写提交信息」用的那一次辅助请求。
+ *
+ * ★ 和上面两个逐条同形。**又一个独立的 `UpstreamRouter`** 不是复制粘贴偷懒:
+ *   Git 面板点一次按钮就发一次请求,失败率天然比正文高(diff 大、模型挑食),
+ *   这些失败不该把某家供应商在正文侧标记成不健康。
+ */
+export function getCommitMessageGenerator(): CommitMessageGenerator {
+  if (commitMessages !== null) return commitMessages
+  const generator = new CommitMessageGenerator({
+    upstream: new UpstreamRouter(getHost(), providerConfig, {
+      onUsageAttempt: (record) => {
+        if (commitMessages === generator) persistUsageAttempt(record)
+      },
+      priceAttempt: priceAttemptForRouter
+    }),
+    logger: getHost().logger
+  })
+  commitMessages = generator
   return generator
 }
 
@@ -749,6 +799,57 @@ export function initRuntime(h: KernelHost): void {
 }
 
 /**
+ * 配置作用域变了:把**进程内**那份配置全部丢掉,再按新的作用域重新种。
+ *
+ * ★★ 为什么不能只靠「下一次读的时候会现算」:`ipc/context.ts` 的上下文预览
+ * 直接读 `skillRegistry().list()` / `agentRegistry().list()`,那是**上一次 run
+ * 开头**扫出来的一份快照。不在这里清掉,切完账户打开上下文预览,列的是
+ * 上一个账户装的那些 Skill —— 而 `refreshSkills` / `refreshAgents` 只在
+ * **下一次 run 开始**时才跑。
+ *
+ * ★ 顺序是先拆后种,不是先种后拆:反过来种下去的东西会被紧跟着的
+ * `shutdown()` 一起收掉(比如 MCP 刚建好的连接)。
+ *
+ * ★ 本函数必须 `await` —— `mcp?.shutdown()` 要等子进程真的退出,
+ *   `environments.shutdown()` 要等远端连接断开。不 await 的版本会在
+ *   它们还在收尾的时候就让调用方去切库,而那些连接里的回调会读到新作用域。
+ */
+export async function refreshRuntimeForConfigScope(): Promise<void> {
+  /*
+    终端与远端连接由 `account-switch.ts` 在调用本函数之前先收掉 ——
+    那两件事要排在「连 MCP 一起关」之前,理由和这里是同一个:
+    它们都守着上一账户的凭据。
+  */
+  for (const scope of workspaceMcps.values()) { void scope.manager.shutdown(); scope.release() }
+  workspaceMcps.clear()
+  const manager = mcp
+  mcp = null
+  await manager?.shutdown()
+  // 会话标题生成器自带一套上游健康状态 —— 那是**上一账户的**(哪家 401 过、
+  // 哪家限流过),留着会让新账户的第一个会话绕开一家其实没问题的供应商。
+  shutdownSessionTitles()
+
+  // 惰性单例:下一次 `getTools()` / `getRouter()` / `getEnvironments()` 会按新作用域重建。
+  tools = null
+  router = null
+  agentDrafts = null
+  commitMessages = null
+
+  /*
+    ★ 两个注册表**主动清空**,不是留着等下一次 run 覆盖:
+    内建子代理要留下(它是代码,不是配置),用户自己的那些必须走 ——
+    它们在另一个作用域的文件根里,留着就是跨账户串。
+  */
+  skillRegistry().replaceAll({ skills: [], diagnostics: [] })
+  agentRegistry().replaceAll({ agents: [...BUILTIN_AGENTS], diagnostics: [] })
+  getTools().register(taskTool())
+
+  // 空账户要有默认供应商与默认工作区,否则首屏是一个空的应用。
+  seeded = false
+  seed()
+}
+
+/**
  * 会话绑定的工作区根。**查不到就给空串,不给回落目录。**
  *
  * 这里以前回落到 `paths.temp()`。★ 那是个会安静地骗人的默认值:模型以为自己
@@ -892,6 +993,30 @@ function resolveSkillsSnapshot(skills: readonly Skill[], req: RunRequest): reado
  * `register()` 按 internalId 幂等替换且保住 externalName,所以重注册不会让
  * 历史转录里的 `Task` 引用失配(见 `ToolRegistry.register` 的注释)。
  */
+export async function refreshModes(workspaceId: string, environment?: WorkspaceEnvironment): Promise<readonly ModeDefinition[]> {
+  const h = getHost()
+  const root = workspaceRootFor(workspaceId)
+  environment ??= store.getWorkspace(workspaceId) ? getWorkspaceEnvironment(workspaceId) : undefined
+  const remote = environment?.remote ? environment : undefined
+  const result = await scanModes({
+    fs: h.fs,
+    projectFs: remote?.fs,
+    projectPath: remote?.path,
+    globalRoot: join(h.paths.userData(), MODES_DIR),
+    projectRoot: root === ''
+      ? ''
+      : remote
+        ? await remote.path.resolveWithin(remote.rootPath, `${PROJECT_MODES_PREFIX}/${MODES_DIR}`)
+        : join(root, PROJECT_MODES_PREFIX, MODES_DIR),
+    availableTools: new Set(getTools().info().map((tool) => tool.internalId))
+  })
+  for (const diagnostic of result.diagnostics) {
+    h.logger.warn(`[mode] ${diagnostic.path}: ${diagnostic.message}`)
+  }
+  modeRegistry().replaceAll(result)
+  return result.modes
+}
+
 export async function refreshAgents(workspaceId: string, environment?: WorkspaceEnvironment): Promise<readonly AgentDefinition[]> {
   const h = getHost()
   const root = workspaceRootFor(workspaceId)
@@ -917,6 +1042,16 @@ export async function refreshAgents(workspaceId: string, environment?: Workspace
   agentRegistry().replaceAll(enabled)
   getTools().register(taskTool())
   return enabled.agents
+}
+
+function intersectToolLists(
+  first: readonly string[] | undefined,
+  second: readonly string[] | undefined
+): readonly string[] | undefined {
+  if (first === undefined) return second
+  if (second === undefined) return first
+  const allowed = new Set(second)
+  return first.filter((tool) => allowed.has(tool))
 }
 
 interface RunResources {
@@ -1263,12 +1398,8 @@ function childRequestFor(
     parentSessionId: parentReq.sessionId,
     depth: parentReq.depth + 1,
     input: [{ type: 'text', text: prompt }],
-    /*
-      ★ plan **必须传染**,normal / goal 一律降成 normal。
-      不传染 plan:规划模式下可以借子代理写盘,那道围栏就白建了。
-      传染 goal:MAX_TURNS_GOAL × N 个子代理,是一颗成本炸弹。
-    */
-    mode: parentReq.mode === 'plan' ? 'plan' : 'normal',
+    // 子代理始终按编程模式运行。Plan 模式没有 Task，ACP 则必须把实施交给子代理。
+    mode: 'code',
     thinking: parentReq.thinking,
     // 联网是用户的硬开关,子代理放宽不了
     webSearch: parentReq.webSearch,
@@ -1417,6 +1548,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
         childSessionId: childReq.sessionId,
         description: sub.description,
         subagentType: def.name,
+        ...(def.color === undefined ? {} : { color: def.color }),
         model: childReq.model,
         background: sub.background === true,
         at: startedAt
@@ -1505,7 +1637,12 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
       }, (error: unknown) => {
         getHost().logger.warn(`[subagent] background child failed to start: ${childRunId}`, error)
       })
-      return { kind: 'background', childRunId, ...(queued ? { queued: true } : {}) }
+      return {
+        kind: 'background',
+        childRunId,
+        ...(def.color === undefined ? {} : { color: def.color }),
+        ...(queued ? { queued: true } : {})
+      }
     }
 
     const acquired = await slot
@@ -1525,6 +1662,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
     const completed = await acquired.value.result
     return {
       kind: 'finished', childRunId, status: completed.status, text: completed.text,
+      ...(def.color === undefined ? {} : { color: def.color }),
       ...(completed.error === undefined ? {} : { error: completed.error })
     }
   }
@@ -1671,9 +1809,14 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
     permissionReviewerModelProviderId: reviewerModelProviderId } = store.getSettings()
   // 契约要求返回 Promise;策略本身是同步的纯函数
   return async ({ tool, callId, input }) => {
+    const mode = modeRegistry().resolve(req.mode)
+    const planWorkflowEnabled = mode.id === 'plan' || mode.tools?.includes('EnterPlanMode') === true
+    const trustedPlanFileTool = planWorkflowEnabled
+      && ['EnterPlanMode', 'Write', 'Edit', 'ExitPlanMode'].includes(tool.internalId)
     const outcome = evaluate({
       mode: req.permissionMode,
-      readOnly: tool.readOnly,
+      // Plan mode fences Write/Edit to one generated .plan file, so its workflow does not prompt twice.
+      readOnly: tool.readOnly || trustedPlanFileTool,
       destructive: tool.destructive,
       needsNetwork: tool.needsNetwork || TOOLS_NEEDING_NETWORK.has(tool.internalId),
       webSearch: req.webSearch
@@ -1817,29 +1960,7 @@ export async function runAgent(
   inheritedSkills?: readonly Skill[],
   inheritedResources?: RunResources
 ): Promise<void> {
-  let approvedPlanContext: import('../shared/domain/plan').PlanDocumentV2 | undefined
-  handle.beforeFinish((status) => {
-    try {
-      const current = getExecutionPlanV2(req.runId)
-      if (current !== undefined && current.lifecycle === 'executing') {
-        const lifecycle = status === 'done' ? 'completed' : 'failed'
-        const next = transitionPlanV2(current.id, current.version, lifecycle)
-        if (lifecycle === 'completed') handle.emit({ type: 'plan_execution_completed', planId: next.id, sessionId: next.sessionId, runId: req.runId, version: next.version, lifecycle: 'completed' })
-        else handle.emit({ type: 'plan_execution_failed', planId: next.id, sessionId: next.sessionId, runId: req.runId, version: next.version, lifecycle: 'failed' })
-      }
-    } catch (error) {
-      getHost().logger.warn(`[plan] failed to finalize execution: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  })
-  if (req.approvedPlan !== undefined) {
-    const plan = getPlanV2(req.approvedPlan.planId)
-    if (plan === undefined || plan.version !== req.approvedPlan.version || (plan.lifecycle !== 'approved' && plan.lifecycle !== 'failed')) {
-      throw new Error('Approved plan is missing, stale, or no longer approved.')
-    }
-    transitionPlanV2(plan.id, plan.version, 'executing', req.runId)
-    approvedPlanContext = { ...plan, lifecycle: 'executing', executionRunId: req.runId }
-    handle.emit({ type: 'plan_execution_started', planId: plan.id, sessionId: plan.sessionId, runId: req.runId, version: plan.version, lifecycle: 'executing' })
-  }
+  req = { ...req, mode: normalizeModeId(req.mode) }
   const existing = store.getSession(req.sessionId)
   const workspace = store.getWorkspace(req.workspaceId)
   if (!workspace || (existing && existing.workspaceId !== req.workspaceId)) throw new EnvironmentError('unbound')
@@ -1891,7 +2012,9 @@ export async function runAgent(
   let environment: WorkspaceEnvironment
   let scopedMcpTools: ToolRegistry | undefined
   let runAgents = inheritedResources?.agents ?? agentRegistry().list()
+  let runMode = modeRegistry().resolve(req.mode)
   let release = (): void => {}
+  let planExecution: PlanExecutionContext | undefined
   let projectInstructions: string
   let git: GitContext | undefined
   try {
@@ -1906,7 +2029,12 @@ export async function runAgent(
       release = lease.release
     }
     environment.assertReady()
+    if (req.planExecution !== undefined) {
+      planExecution = await abortable(() => loadPlanExecution(environment, req.planExecution!), handle.signal)
+    }
     if (agent === undefined) {
+      await abortable(() => refreshModes(req.workspaceId, environment), handle.signal)
+      runMode = modeRegistry().resolve(req.mode)
       runSkills = await abortable(() => refreshSkills(req.workspaceId, environment), handle.signal)
       runAgents = await abortable(() => refreshAgents(req.workspaceId, environment), handle.signal)
       scopedMcpTools = await abortable(() => prepareWorkspaceMcp(req.workspaceId, environment), handle.signal)
@@ -1939,6 +2067,17 @@ export async function runAgent(
     handle.finish('aborted')
     store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
     return
+  }
+
+  if (runMode.id !== req.mode) {
+    req = { ...req, mode: runMode.id }
+    const current = store.getSession(req.sessionId)
+    if (current !== undefined && current.mode !== runMode.id) {
+      store.putSession({ ...current, mode: runMode.id, updatedAt: Date.now() })
+      if (req.parentSessionId === undefined) {
+        sessionOnChange?.({ kind: 'metadata', sessionIds: [req.sessionId], workspaceId: req.workspaceId })
+      }
+    }
   }
 
   const history = store.getHistory(req.sessionId)
@@ -1984,6 +2123,12 @@ export async function runAgent(
     ? { kind: 'workspace', workspaceId: workspace.id, environment: ref, rootPath: environment.rootPath, connectionRevision: store.getConnectionProfile(ref.connectionId)?.revision ?? -1 }
     : { kind: 'local' }
   const resources: RunResources = inheritedResources ?? { environment, fileReferenceSource, agents: runAgents, tools: snapshotRunTools(environment, runAgents, scopedMcpTools) }
+  const baseAllowedTools = intersectToolLists(runMode.tools, agent?.tools)
+  const modeToolPool = baseAllowedTools ?? resources.tools.info().map((tool) => tool.internalId)
+  const planWorkflowEnabled = runMode.id === 'plan' || runMode.tools?.includes('EnterPlanMode') === true
+  const allowedTools = (): readonly string[] => planWorkflowEnabled
+    ? planToolAllowList(req.runId, modeToolPool)
+    : modeToolPool.filter((tool) => tool !== 'EnterPlanMode' && tool !== 'ExitPlanMode')
   let agentSession: AgentSession
   try { agentSession = new AgentSession(
     {
@@ -2078,8 +2223,12 @@ export async function runAgent(
         工具清单是**收窄**的(`snapshot` 只过滤不新增)。两个方向都只能变严,
         所以一个 agent 定义文件永远不可能给子代理拿到父代理没有的东西。
       */
+      modePrompt: modePromptFor(runMode),
       ...(agent !== undefined ? { agentPrompt: agent.prompt } : {}),
-      ...(agent?.tools !== undefined ? { allowedTools: agent.tools } : {}),
+      allowedTools,
+      ...(planWorkflowEnabled
+        ? { writeFileRestriction: () => activePlanForRun(req.runId)?.absolutePath }
+        : {}),
       spawnSubagent: spawnSubagentFor(handle, req, runSkills, resources),
       /*
         ★ 这两项注入的是**发出去的那份消息流**,转录一个字都不动
@@ -2096,8 +2245,8 @@ export async function runAgent(
         对全空的那份返回空串,而空串会被 `buildSystemPrompt` 的 filter 丢掉 ——
         「什么都没填」这件事只该有一个地方知道,多一处判断就多一处会漂移的判断。
       */
-      personalization: store.getSettings().personalization
-      ,...(approvedPlanContext === undefined ? {} : { approvedPlan: approvedPlanContext })
+      personalization: store.getSettings().personalization,
+      ...(planExecution === undefined ? {} : { planExecution })
     },
     handle,
     req
@@ -2122,6 +2271,7 @@ export async function runAgent(
   }
   return running.finally(() => {
     release()
+    leavePlanRun(req.runId)
     /*
       Stop 钩子 —— 一轮运行收尾。★ fire-and-forget 且**不 await**：这里是
       `finally` 里的异步续延，落盘才是正事；让一条通知脚本拖慢转录落盘，
@@ -2169,6 +2319,7 @@ export function resetRuntimeForTest(): void {
   host = null
   router = null
   agentDrafts = null
+  commitMessages = null
   tools = null
   // 不 await shutdown:这个函数是同步的(beforeEach 里调),而留着的
   // manager 会攥着上一个用例的 ToolRegistry —— 那正是要断开的引用

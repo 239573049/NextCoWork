@@ -10,7 +10,7 @@
  * (store 里写了理由)。于是「停用」这个开关按下去到变色之间有一小段延迟,
  * 那段延迟是真的 —— 它正在断开一个子进程。假装立刻断了才是骗人。
  */
-import { Cable, Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Cable, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type {
   McpConnectionState,
@@ -26,6 +26,7 @@ import { testMcpConnection } from "../../../services/mcp";
 import { useMcpStore } from "../../../stores/mcp";
 import { SettingGroup } from "../../Row";
 import { McpServerDialog } from "./McpServerDialog";
+import { Spinner } from '../../../components/ui/Spinner'
 
 const STATE_DOT: Readonly<Record<McpConnectionState, string>> = {
   disconnected: "bg-fg-faint",
@@ -78,7 +79,7 @@ export function McpPane(): ReactNode {
         </div>
       ) : !loaded ? (
         <div className="flex items-center justify-center gap-2 py-8 text-[12.5px] text-fg-faint">
-          <Loader2 size={14} className="animate-spin" />
+          <Spinner size="sm" />
           {t("connection.mcp.reading")}
         </div>
       ) : servers.length === 0 ? (
@@ -229,7 +230,7 @@ function ServerRow({
             disabled={testing}
           >
             {testing ? (
-              <Loader2 size={14} className="animate-spin" />
+              <Spinner size="sm" />
             ) : (
               <RefreshCw size={14} />
             )}

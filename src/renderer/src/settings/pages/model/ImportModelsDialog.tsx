@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Loader2, Search } from "lucide-react";
+import { AlertTriangle, Check, Search } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { type ModelAlias } from "../../../../../shared/domain/provider";
 import { Button } from "../../../components/ui/Button";
@@ -7,6 +7,7 @@ import { EmptyState } from "../../../components/ui/EmptyState";
 import { TextInput } from "../../../components/ui/TextInput";
 import { cn } from "../../../lib/cn";
 import { useI18n } from "../../../i18n";
+import { Spinner } from '../../../components/ui/Spinner'
 import {
   fetchProviderModels,
   setProviderAliases,
@@ -161,7 +162,7 @@ export function ImportModelsDialog({
             disabled={rows === null || saving || selected.size === 0}
             icon={
               saving ? (
-                <Loader2 size={13} className="animate-spin" />
+                <Spinner size="sm" />
               ) : undefined
             }
             onClick={submit}
@@ -191,7 +192,7 @@ export function ImportModelsDialog({
       {rows === null ? (
         error === null && (
           <EmptyState
-            icon={<Loader2 size={20} className="animate-spin" />}
+            icon={<Spinner size="md" />}
             title={t("models.fetchingTitle")}
             hint={t("models.fetchingHint")}
             className="py-12"

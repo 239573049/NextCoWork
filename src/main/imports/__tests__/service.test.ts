@@ -8,7 +8,7 @@
  * 用真库文件不用 `:memory:`,和 `roundtrip.test.ts` 同一个理由:这里要断言的
  * 恰恰是跨越提交边界之后还成立的东西。
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -47,6 +47,8 @@ vi.mock('../../ipc/attachment', () => ({
 let dbDir = ''
 let sourceDir = ''
 let projectDir = ''
+/** 单个用例自己开的临时目录,afterEach 一并清掉。 */
+let extraDirs: string[] = []
 
 /** 最小往返:一轮文本 + 一对工具。第 1 步验收的那条夹具,这里复用形状。 */
 function transcript(sessionId: string, extra: unknown[] = []): string {
@@ -101,7 +103,8 @@ beforeEach(() => {
 
 afterEach(() => {
   closeDatabase()
-  for (const dir of [dbDir, sourceDir, projectDir]) rmSync(dir, { recursive: true, force: true })
+  for (const dir of [dbDir, sourceDir, projectDir, ...extraDirs]) rmSync(dir, { recursive: true, force: true })
+  extraDirs = []
   vi.useRealTimers()
 })
 
@@ -326,5 +329,82 @@ describe('聊天导入闭环', () => {
       })
     ).rejects.toThrow()
     vi.useRealTimers()
+  })
+})
+
+describe('项目目录去重', () => {
+  /*
+    真机上的症状:切换器里并排两个同名项目,一个有会话一个空的。
+
+    成因是同一个目录在三个来源里长得不一样 —— Claude Code 的转录写的是会话启动时
+    的 `cwd`(原样,可能是符号链接),Codex 的 `config.toml` 写的是用户手敲的路径,
+    目录选择器给的是 `realpathSync.native` 之后的路径。只比字符串,就会各建一份。
+  */
+
+  /** 写一条 `cwd` 指定的转录,并登记一个独立的 claude-code 来源。 */
+  function seedSourceWithCwd(sourceId: string, cwd: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ncw-cc-alt-'))
+    extraDirs.push(dir)
+    mkdirSync(join(dir, 'projects', 'encoded-proj'), { recursive: true })
+    const records = [
+      {
+        uuid: 'u1', parentUuid: null, type: 'user', cwd, sessionId: sourceId,
+        timestamp: '2025-01-01T00:00:00.000Z',
+        message: { role: 'user', content: '看一下 README' }
+      },
+      {
+        uuid: 'a1', parentUuid: 'u1', type: 'assistant', timestamp: '2025-01-01T00:00:01.000Z',
+        message: { role: 'assistant', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: '好的。' }] }
+      }
+    ]
+    writeFileSync(
+      join(dir, 'projects', 'encoded-proj', `${sourceId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n'
+    )
+    const now = Date.now()
+    store.putImportSource({
+      sourceId, kind: 'claude-code', configDir: dir, origin: 'user-picked', syncEnabled: false,
+      categories: ['chat', 'project'], projectKeys: [], status: 'off', diagnostics: [],
+      createdAt: now, updatedAt: now
+    })
+    return sourceId
+  }
+
+  /** 指向 `projectDir` 的符号链接 —— 和真实路径是同一个目录。 */
+  function linkToProject(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ncw-link-'))
+    extraDirs.push(dir)
+    const link = join(dir, 'proj')
+    symlinkSync(projectDir, link)
+    return link
+  }
+
+  it('★★ 经符号链接记录的 cwd,复用已有工作区而不是再建一个', async () => {
+    seedWorkspace() // rootPath = 真实路径
+    const sourceId = seedSourceWithCwd('src-link', linkToProject())
+
+    await importAll(sourceId)
+
+    const workspaces = store.listWorkspaces()
+    expect(workspaces).toHaveLength(1)
+    expect(workspaces[0]!.id).toBe('ws-test')
+    // 会话要真的落进那个复用的工作区,而不是被判成「没有目标」整条跳过。
+    expect(store.listSessions('ws-test')).toHaveLength(1)
+  })
+
+  it('★★ 两个来源指向同一个目录,只建一个工作区', async () => {
+    // 谁都没有现成工作区:第一个来源建,第二个来源必须认出来。
+    const first = seedSourceWithCwd('src-real', projectDir)
+    await importAll(first)
+    // 头一趟的预览是在「还没有工作区」时算的,聊天那条是 needs-target;
+    // 工作区已经由项目那条建出来了,再扫一次它才有落脚点。
+    await importAll(first)
+    expect(store.listWorkspaces()).toHaveLength(1)
+
+    await importAll(seedSourceWithCwd('src-alias', linkToProject()))
+
+    const workspaces = store.listWorkspaces()
+    expect(workspaces).toHaveLength(1)
+    expect(store.listSessions(workspaces[0]!.id)).toHaveLength(2)
   })
 })

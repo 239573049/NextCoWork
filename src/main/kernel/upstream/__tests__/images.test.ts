@@ -25,7 +25,7 @@ function request(dataRef = imageUrl, mime = 'image/png'): typeof REQUEST {
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'nextcowork-upstream-images-')))
   await mkdir(join(root, 'attachments', 'sessions', 'session-a'), { recursive: true })
-  host = nodeHost({ paths: { userData: () => root, temp: () => root } })
+  host = nodeHost({ paths: { userData: () => root, attachments: () => join(root, 'attachments'), temp: () => root } })
 })
 
 afterEach(async () => {
@@ -46,7 +46,7 @@ describe('upstream managed images', () => {
     expect(original).toEqual(before)
     expect(read).toHaveBeenCalledTimes(1)
     for (const protocol of ['anthropic', 'openai-chat', 'openai-responses'] as const) {
-      const body = encodeUpstream(protocol, prepared, 'model', 'test-key', { userId: context.workspaceId, cacheTtl: 'off' }).body
+      const body = encodeUpstream(protocol, prepared, 'model', 'test-key', { userId: context.workspaceId, cacheTtl: '5m' }).body
       expect(JSON.stringify(body)).toContain(imageBytes.toString('base64'))
       expect(JSON.stringify(body)).not.toContain('ncw://')
     }

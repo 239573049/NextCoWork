@@ -13,6 +13,7 @@ import { promises as nodeFs } from 'node:fs'
 import { join } from 'node:path'
 import { AGENT_NAME_RE } from '../../shared/domain/agent-def'
 import { COMMAND_NAME_RE } from '../../shared/domain/command'
+import { isBuiltinModeId, MODE_ID_RE } from '../../shared/domain/mode'
 import { EnvironmentError } from '../environment/errors'
 import { EnvironmentFiles } from '../environment/files'
 import type {
@@ -26,19 +27,20 @@ import {
   renderResourceFile,
   writeResourceFile
 } from '../kernel/markdown-resource'
-import { getEnvironments, getHost, getWorkspaceEnvironment } from '../runtime'
+import { getEnvironments, getHost, getTools, getWorkspaceEnvironment } from '../runtime'
 import { windows } from '../window/registry'
 
 interface KindSpec {
   /** `<appData>/<dir>/` 与 `<workspaceRoot>/.next-cowork/<dir>/` */
   dir: string
   nameRe: RegExp
-  changedChannel: 'commands:changed' | 'agents:changed'
+  changedChannel: 'commands:changed' | 'agents:changed' | 'modes:changed'
 }
 
 const SPEC: Record<MarkdownResourceKind, KindSpec> = {
   command: { dir: 'commands', nameRe: COMMAND_NAME_RE, changedChannel: 'commands:changed' },
-  agent: { dir: 'agents', nameRe: AGENT_NAME_RE, changedChannel: 'agents:changed' }
+  agent: { dir: 'agents', nameRe: AGENT_NAME_RE, changedChannel: 'agents:changed' },
+  mode: { dir: 'modes', nameRe: MODE_ID_RE, changedChannel: 'modes:changed' }
 }
 
 export function broadcastResourceChanged(kind: MarkdownResourceKind): void {
@@ -107,7 +109,36 @@ export async function getResource(req: {
   return { kind: req.kind, scope: req.scope, name: req.name, path: file, ...content }
 }
 
+function frontmatterList(value: unknown): string[] | undefined {
+  if (typeof value === 'string') return value.split(',').map((item) => item.trim()).filter(Boolean)
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value.map((item) => item.trim()).filter(Boolean)
+  return undefined
+}
+
+function validateModeSave(req: MarkdownResourceSave): void {
+  if (isBuiltinModeId(req.name)) throw new Error('Built-in modes are read-only.')
+  if (typeof req.frontmatter['name'] !== 'string' || req.frontmatter['name'].trim() === '') throw new Error('Mode name is required.')
+  if (typeof req.frontmatter['description'] !== 'string' || req.frontmatter['description'].trim() === '') throw new Error('Mode description is required.')
+  if (req.body.trim() === '') throw new Error('Mode prompt is required.')
+
+  const tools = frontmatterList(req.frontmatter['tools'])
+  const required = frontmatterList(req.frontmatter['requiredTools'])
+  if (req.frontmatter['tools'] !== undefined && (tools === undefined || tools.length === 0)) throw new Error('Mode tools must be a non-empty list.')
+  if (req.frontmatter['requiredTools'] !== undefined && (required === undefined || required.length === 0)) throw new Error('Mode required tools must be a non-empty list.')
+  if (required !== undefined) {
+    if (tools === undefined) throw new Error('Required tools must also be listed in tools.')
+    const allowed = new Set(tools)
+    const missing = required.filter((tool) => !allowed.has(tool))
+    if (missing.length > 0) throw new Error(`Required tools must also be listed in tools: ${missing.join(', ')}`)
+  }
+
+  const available = new Set(getTools().info().map((tool) => tool.internalId))
+  const unknown = [...(tools ?? []), ...(required ?? [])].filter((tool) => !available.has(tool))
+  if (unknown.length > 0) throw new Error(`Unknown mode tools: ${[...new Set(unknown)].join(', ')}`)
+}
+
 export async function saveResource(req: MarkdownResourceSave): Promise<MarkdownResourceFile> {
+  if (req.kind === 'mode') validateModeSave(req)
   const { file } = await resourcePath(req.kind, req.scope, req.name, req.workspaceId)
   const fs = fsFor(req.scope, req.workspaceId)
   const text = renderResourceFile(req.kind, req.frontmatter, req.body)
@@ -133,6 +164,7 @@ export async function deleteResource(req: {
   name: string
   workspaceId?: string
 }): Promise<void> {
+  if (req.kind === 'mode' && isBuiltinModeId(req.name)) throw new Error('Built-in modes are read-only.')
   const { file, root } = await resourcePath(req.kind, req.scope, req.name, req.workspaceId)
 
   if (req.scope === 'project' && req.workspaceId) {

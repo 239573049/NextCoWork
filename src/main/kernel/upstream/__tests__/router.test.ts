@@ -574,6 +574,22 @@ describe('UpstreamRouter · 正常路径', () => {
     expect(bodies[0]?.stream).toBe(true)
   })
 
+  it.each([undefined, 'off', 'unknown'])('Anthropic 旧缓存档位 %s 在实际发包时强制使用 5m', async (cacheTtl) => {
+    const { router, bodies } = rig({
+      providers: [provider('p1', cacheTtl === undefined ? {} : {
+        protocolOptions: { anthropic: { cacheTtl: cacheTtl as never } }
+      })],
+      aliases: [alias('m', 'p1')],
+      responses: [ok(sseBody({ text: 'x' }))]
+    })
+    await drainRequest(router, { ...REQ, system: 'stable prefix' })
+    expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
+    expect(bodies[0]?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(bodies[0]?.system).toEqual([
+      { type: 'text', text: 'stable prefix', cache_control: { type: 'ephemeral' } }
+    ])
+  })
+
   it('Anthropic 请求始终带 metadata.user_id，缓存档位映射到实际请求体', async () => {
     const { router, bodies } = rig({
       providers: [
@@ -641,17 +657,17 @@ describe('UpstreamRouter · 正常路径', () => {
     ])
   })
 
-  it('缓存关闭时 request-adapter 也不能注入 cache_control 或断点', async () => {
+  it('默认缓存不能被 request-adapter 删除，注入的断点恢复为 5m', async () => {
     const a = alias('m', 'p1')
     a.requestAdapter = {
       preset: 'custom',
       patches: [
         { op: 'replace', path: '/metadata', value: { user_id: 'attacker' } },
-        { op: 'add', path: '/cache_control', value: { type: 'ephemeral', ttl: '1h' } },
+        { op: 'remove', path: '/cache_control' },
         {
           op: 'add',
           path: '/system',
-          value: [{ type: 'text', text: 'should not become a breakpoint', cache_control: { type: 'ephemeral' } }]
+          value: [{ type: 'text', text: 'stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } }]
         }
       ]
     }
@@ -664,8 +680,10 @@ describe('UpstreamRouter · 正常路径', () => {
     await drain(router)
 
     expect(bodies[0]?.metadata).toEqual({ user_id: 'ws-test' })
-    expect(bodies[0]).not.toHaveProperty('cache_control')
-    expect(bodies[0]?.system).toEqual([{ type: 'text', text: 'should not become a breakpoint' }])
+    expect(bodies[0]?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(bodies[0]?.system).toEqual([
+      { type: 'text', text: 'stable prefix', cache_control: { type: 'ephemeral' } }
+    ])
   })
 
   it('目录 ThinkingConfig 在 Anthropic 请求体上真实生效', async () => {
@@ -792,7 +810,9 @@ describe('UpstreamRouter · 正常路径', () => {
     })
     await drain(router)
     expect(calls).toEqual(['https://responses.example.com/v1/messages'])
-    expect(bodies[0]).toMatchObject({ model: 'm-upstream', messages: [{ role: 'user' }] })
+    expect(bodies[0]).toMatchObject({
+      model: 'm-upstream', messages: [{ role: 'user' }], cache_control: { type: 'ephemeral' }
+    })
     expect(headers[0]).toMatchObject({ 'x-api-key': 'sk-test', 'anthropic-version': '2023-06-01' })
     expect(headers[0]?.authorization).toBeUndefined()
     expect(usageRecords[0]?.protocol).toBe('anthropic')
@@ -1030,13 +1050,13 @@ describe('UpstreamRouter · 重试与切换', () => {
 })
 
 describe('UpstreamRouter · Anthropic 缓存兼容性错误', () => {
-  it('明确拒绝 cache_control 时只发一次请求，不重试、不切换且不记健康失败', async () => {
+  it.each([undefined, '5m', '1h'] as const)('档位 %s 拒绝 cache_control 时只发一次请求，不重试、不切换且不记健康失败', async (cacheTtl) => {
     const { router, calls, bodies } = rig({
       providers: [
         provider('p1', {
           name: 'Relay A',
           priority: 0,
-          protocolOptions: { anthropic: { cacheTtl: '5m' } }
+          ...(cacheTtl === undefined ? {} : { protocolOptions: { anthropic: { cacheTtl } } })
         }),
         provider('p2', {
           name: 'Relay B',
@@ -1054,11 +1074,55 @@ describe('UpstreamRouter · Anthropic 缓存兼容性错误', () => {
     expect(out.filter((e) => e.type === 'provider_switch')).toEqual([])
     expect(out.at(-1)).toMatchObject({
       type: 'error',
-      error: { code: 'cache_unsupported', retryable: false, status: 400 }
+      error: {
+        code: 'cache_unsupported', retryable: false, status: 400,
+        messageKey: 'agent.error.cacheUnsupported',
+        messageParams: { provider: 'Relay A', ttl: cacheTtl ?? '5m' }
+      }
     })
+    expect(bodies[0]?.cache_control).toEqual(
+      cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+    )
     expect((out.at(-1) as { error: { message: string } }).error.message).toContain('Relay A')
-    expect((out.at(-1) as { error: { message: string } }).error.message).toContain('5 分钟')
     expect(router.health()).toEqual([])
+  })
+
+  it('普通 400 回显缓存标记时仍正常切换供应商，不把请求回显写入用量错误', async () => {
+    const r = rig({
+      providers: [provider('p1'), provider('p2', { priority: 1 })],
+      aliases: [alias('m', 'p1'), alias('m', 'p2')],
+      responses: [
+        () => Response.json({
+          error: { type: 'invalid_request_error', message: 'bad tool schema' },
+          request: r.bodies[0]
+        }, { status: 400 }),
+        ok(sseBody({ text: 'ok' }))
+      ]
+    })
+    const out = await drainRequest(r.router, { ...REQ, system: 'private-system-prompt' })
+    expect(r.calls).toEqual(['https://p1.example.com/v1/messages', 'https://p2.example.com/v1/messages'])
+    expect(out).toContainEqual(expect.objectContaining({ type: 'provider_switch', from: 'p1', to: 'p2' }))
+    expect(out.at(-1)?.type).toBe('message_end')
+    expect(r.usageRecords[0]).toMatchObject({ ok: false, errorKind: 'provider', errorMessage: 'bad tool schema' })
+    expect(JSON.stringify(r.usageRecords)).not.toContain('private-system-prompt')
+    expect(JSON.stringify(out)).not.toContain('private-system-prompt')
+  })
+
+  it('上下文超长的回显请求不覆盖 context_length 分类', async () => {
+    const r = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      responses: [() => Response.json({
+        error: { type: 'invalid_request_error', message: 'prompt is too long: 250000 tokens > 200000 maximum' },
+        request: r.bodies[0]
+      }, { status: 400 })]
+    })
+    const out = await drainRequest(r.router, { ...REQ, system: 'private-system-prompt' })
+    expect(r.calls).toHaveLength(1)
+    expect(out.at(-1)).toMatchObject({ type: 'error', error: { code: 'context_length' } })
+    expect(r.usageRecords[0]).toMatchObject({ ok: false, errorKind: 'context_length' })
+    expect(JSON.stringify(r.usageRecords)).not.toContain('private-system-prompt')
+    expect(JSON.stringify(out)).not.toContain('private-system-prompt')
   })
 
   it('空或超长 workspaceId 在读取密钥和发出 HTTP 前失败', async () => {

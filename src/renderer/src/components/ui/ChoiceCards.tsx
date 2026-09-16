@@ -11,28 +11,117 @@ export interface ChoiceOption {
 }
 
 /**
- * 「一组可选项」的两种形态:单选(`RadioCards`)与多选(`CheckboxCards`)。
+ * 「一组可选项」的两种形态:单选(`RadioCards`)与多选(`CheckboxCards`),
+ * 以及它们和交互卡里的「动作行」共用的那副行壳子(`OptionRow` / `RowLead`)。
  *
- * ★ **两者共用同一副卡片外壳,只有指示器不同** —— 分成两个文件写的话,某一天
- * 改选中态的配色就会改漏一个,而这两组卡片在同一张问答卡里上下相邻,漏掉的那个
- * 一眼就能看出来。差异被收在 `indicator` 一个参数里,壳子只有一份。
+ * ★ **所有行共用同一副壳子,只有指示器不同** —— 分成几个文件写的话,某一天
+ * 改选中态的配色就会改漏一个,而这些行在同一张卡里上下相邻,漏掉的那个一眼
+ * 就能看出来。差异被收在 `RowLead` 一个组件里,壳子只有一份。
  *
  * 无障碍与键盘导航交给 Radix:单选组的方向键漫游、`aria-checked`、
  * 空格切换都在原语里,自己用 `<div onClick>` 拼是拼不出来的。
  */
-const CARD = [
-  'app-no-drag group flex w-full cursor-pointer items-start gap-2.5 rounded-[8px] border',
-  'px-2.5 py-2 text-left outline-none transition-[background-color,border-color] duration-150',
-  'focus-visible:ring-2 focus-visible:ring-accent/25 disabled:cursor-default disabled:opacity-40'
-].join(' ')
+
+/** 行的外框。**它不是按钮** —— 可点区是里面那层,理由见 `OptionRow`。 */
+const ROW_FRAME = 'app-no-drag rounded-[8px] border transition-[background-color,border-color] duration-150'
 
 /** 选中 = 描边转 accent + 底色进「槽」。和 `Select` 的展开态同一套语言。 */
-const CARD_STATE = 'border-border bg-transparent hover:bg-tint data-[state=checked]:border-accent data-[state=checked]:bg-tint'
+const ROW_ON = 'border-accent bg-tint'
+const ROW_OFF = 'border-border bg-transparent hover:bg-tint'
 
-function OptionBody({ option }: { option: ChoiceOption }): ReactNode {
+/** 可点区的类名。外框不可点,所以这层必须自己撑满、自己接焦点环。 */
+export const ROW_HIT = [
+  'group flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-[8px] px-2.5 py-2',
+  'text-left outline-none focus-visible:ring-2 focus-visible:ring-accent/25 disabled:cursor-default'
+].join(' ')
+
+/**
+ * 一行的壳子:外框 + 可点区(`children`)+ 右侧槽(`trailing`)+ 展开区(`expanded`)。
+ *
+ * ★ **展开区在可点区外面。** 套进 `<button>` 里的 `textarea` 点不动(点击会被
+ * 按钮吃掉),嵌套交互元素本身也是非法结构 —— 所以外框只能是一个 `div`,
+ * 选中态的配色靠算好的 `checked` 传进来,而不是 `data-[state=checked]`。
+ */
+export function OptionRow({
+  checked,
+  disabled = false,
+  trailing,
+  expanded,
+  children
+}: {
+  checked: boolean
+  disabled?: boolean
+  /** 排在行尾的东西(`→`、「跳过」)。 */
+  trailing?: ReactNode
+  /** 选中/展开后就地长出来的东西(输入框)。 */
+  expanded?: ReactNode
+  children: ReactNode
+}): ReactNode {
+  return (
+    <div className={cn(ROW_FRAME, checked ? ROW_ON : ROW_OFF, disabled && 'opacity-40')}>
+      <div className="flex items-stretch">
+        {children}
+        {trailing !== undefined && trailing !== null && (
+          <span className="flex shrink-0 items-center pr-2">{trailing}</span>
+        )}
+      </div>
+      {expanded !== undefined && expanded !== null && <div className="px-2.5 pb-2">{expanded}</div>}
+    </div>
+  )
+}
+
+/**
+ * leading 槽。
+ *
+ * ★ **数字徽章只在没选中时露面** —— 它是快捷键提示,而选中态更需要一眼扫得出
+ * 的指示器;两者抢同一个位置,选中的那个赢。超过 9 的行键盘选不中,给一个没有
+ * 数字的占位,而不是一个按不出来的「10」。
+ */
+export function RowLead({
+  index,
+  checked,
+  kind
+}: {
+  /** 0 基。渲染出来是 1 基 —— 键盘上按的是 1 不是 0。 */
+  index: number
+  checked: boolean
+  /** `plain` 永远显示徽章:动作行没有「选中」这回事,徽章是它唯一的 leading。 */
+  kind: 'radio' | 'check' | 'plain'
+}): ReactNode {
+  const box = 'mt-[2px] flex h-[16px] w-[16px] shrink-0 items-center justify-center text-[10px]'
+  if (kind !== 'plain' && checked) {
+    return kind === 'radio' ? (
+      <span className={cn(box, 'rounded-pill border border-accent')}>
+        <span className="h-[7px] w-[7px] rounded-pill bg-accent" />
+      </span>
+    ) : (
+      <span className={cn(box, 'rounded-[4px] border border-accent bg-accent')}>
+        <Check aria-hidden size={10} strokeWidth={3} className="text-accent-fg" />
+      </span>
+    )
+  }
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        box,
+        'tabular-nums text-fg-faint',
+        kind === 'radio' ? 'rounded-pill border border-fg-faint' : 'rounded-[4px] border border-fg-faint',
+        kind === 'plain' && 'border-none bg-tint'
+      )}
+    >
+      {index < 9 ? index + 1 : ''}
+    </span>
+  )
+}
+
+function OptionBody({ option, icon }: { option: ChoiceOption; icon?: ReactNode }): ReactNode {
   return (
     <span className="min-w-0 flex-1">
-      <span className="block text-[13px] leading-[1.5] text-fg">{option.label}</span>
+      <span className="flex items-center gap-1.5 text-[13px] leading-[1.5] text-fg">
+        {icon}
+        {option.label}
+      </span>
       {option.description !== undefined && option.description !== '' && (
         <span className="mt-0.5 block text-[12px] leading-[1.5] text-fg-muted">{option.description}</span>
       )}
@@ -46,6 +135,7 @@ export function RadioCards({
   onValueChange,
   ariaLabel,
   disabled = false,
+  renderExpanded,
   className
 }: {
   value: string
@@ -53,6 +143,8 @@ export function RadioCards({
   onValueChange: (value: string) => void
   ariaLabel: string
   disabled?: boolean
+  /** 这一项选中后要就地长出来的东西(如「其它」的输入框)。返回 null 就是不长。 */
+  renderExpanded?: (option: ChoiceOption) => ReactNode
   className?: string
 }): ReactNode {
   return (
@@ -63,19 +155,22 @@ export function RadioCards({
       aria-label={ariaLabel}
       className={cn('flex flex-col gap-1.5', className)}
     >
-      {options.map((option) => (
-        <RadioGroupPrimitive.Item key={option.value} value={option.value} className={cn(CARD, CARD_STATE)}>
-          <span
-            className={cn(
-              'mt-[3px] flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-pill border',
-              'border-fg-faint transition-colors group-data-[state=checked]:border-accent'
-            )}
+      {options.map((option, index) => {
+        const checked = value === option.value
+        return (
+          <OptionRow
+            key={option.value}
+            checked={checked}
+            disabled={disabled}
+            expanded={checked ? renderExpanded?.(option) : undefined}
           >
-            <RadioGroupPrimitive.Indicator className="h-[7px] w-[7px] rounded-pill bg-accent" />
-          </span>
-          <OptionBody option={option} />
-        </RadioGroupPrimitive.Item>
-      ))}
+            <RadioGroupPrimitive.Item value={option.value} data-row-value={option.value} className={ROW_HIT}>
+              <RowLead index={index} checked={checked} kind="radio" />
+              <OptionBody option={option} />
+            </RadioGroupPrimitive.Item>
+          </OptionRow>
+        )
+      })}
     </RadioGroupPrimitive.Root>
   )
 }
@@ -86,6 +181,7 @@ export function CheckboxCards({
   onToggle,
   ariaLabel,
   disabled = false,
+  renderExpanded,
   className
 }: {
   values: readonly string[]
@@ -94,35 +190,33 @@ export function CheckboxCards({
   onToggle: (value: string) => void
   ariaLabel: string
   disabled?: boolean
+  renderExpanded?: (option: ChoiceOption) => ReactNode
   className?: string
 }): ReactNode {
   return (
     // Radix 没有 CheckboxGroup —— 分组语义靠这层 role 补,少了它读屏只会念出
     // 一串互不相干的复选框,听不出它们属于同一道题。
     <div role="group" aria-label={ariaLabel} className={cn('flex flex-col gap-1.5', className)}>
-      {options.map((option) => {
+      {options.map((option, index) => {
         const checked = values.includes(option.value)
         return (
-          <CheckboxPrimitive.Root
+          <OptionRow
             key={option.value}
             checked={checked}
             disabled={disabled}
-            onCheckedChange={() => onToggle(option.value)}
-            className={cn(CARD, CARD_STATE)}
+            expanded={checked ? renderExpanded?.(option) : undefined}
           >
-            <span
-              className={cn(
-                'mt-[3px] flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-[4px] border',
-                'border-fg-faint transition-colors',
-                checked && 'border-accent bg-accent'
-              )}
+            <CheckboxPrimitive.Root
+              checked={checked}
+              disabled={disabled}
+              onCheckedChange={() => onToggle(option.value)}
+              data-row-value={option.value}
+              className={ROW_HIT}
             >
-              <CheckboxPrimitive.Indicator>
-                <Check aria-hidden size={10} strokeWidth={3} className="text-accent-fg" />
-              </CheckboxPrimitive.Indicator>
-            </span>
-            <OptionBody option={option} />
-          </CheckboxPrimitive.Root>
+              <RowLead index={index} checked={checked} kind="check" />
+              <OptionBody option={option} />
+            </CheckboxPrimitive.Root>
+          </OptionRow>
         )
       })}
     </div>

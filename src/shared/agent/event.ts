@@ -12,7 +12,6 @@ import type { TokenUsage } from './stream'
 import type { ToolOutput } from './message'
 import type { ToolProgress } from './tool'
 import type { ContextCheckpoint, ContextSegment, ContextStatus } from './context-management'
-import type { PlanDocumentV2 } from '../domain/plan'
 
 export type RunStatus = 'running' | 'done' | 'error' | 'aborted'
 
@@ -43,11 +42,6 @@ export type AgentEvent =
   | { type: 'tool_start'; callId: string; toolName: string; input: unknown; at?: number }
   /** 易失,永不进转录 */
   | { type: 'tool_progress'; callId: string; progress: ToolProgress }
-  | { type: 'plan_progress_updated'; planId: string; sessionId: string; runId: string; version: number; lifecycle: PlanDocumentV2['lifecycle']; plan: PlanDocumentV2 }
-  | { type: 'plan_created' | 'plan_updated' | 'plan_review_requested' | 'plan_approval_resolved'; planId: string; sessionId: string; runId: string; version: number; lifecycle: PlanDocumentV2['lifecycle']; plan: PlanDocumentV2 }
-  | { type: 'plan_execution_started'; planId: string; sessionId: string; runId: string; version: number; lifecycle: 'executing' }
-  | { type: 'plan_execution_completed'; planId: string; sessionId: string; runId: string; version: number; lifecycle: 'completed' }
-  | { type: 'plan_execution_failed'; planId: string; sessionId: string; runId: string; version: number; lifecycle: 'failed' }
   | { type: 'tool_end'; callId: string; output: ToolOutput; isError: boolean; at?: number }
   | { type: 'interaction_request'; interaction: PendingInteraction }
   | { type: 'interaction_resolved'; id: string; outcome: InteractionOutcome }
@@ -69,6 +63,7 @@ export type AgentEvent =
       childSessionId?: string
       description?: string
       subagentType?: string
+      color?: import('../domain/agent-def').AgentColor
       model?: string
       background?: boolean
       at?: number
@@ -110,6 +105,19 @@ export type AgentEvent =
   /** ★ 抄自 agent-request-flow.md §4 的 agent:contextUsage —— 见下方注释 */
   | {
       type: 'context_usage'
+      /**
+       * 发出去之前**本地估的**输入大小(`estimateTokens`,误差英文 ±15% / 中文 ±25%)。
+       *
+       * ★ 它和转录里的 `lastInputTokens`(上游在 `message_end` 里报回的真值)
+       * **不是同一个数,也不该是**:这一条在请求发出前就发,那时真值还不存在 ——
+       * 压力条要在这一轮真的挤爆之前就画出来。所以圆环显示真值、只有真值缺席时
+       * 才退回这里的估算;而 `segments` 各档之和恒等于 `used`,两者同源。
+       *
+       * ★ **`shouldCompact` 不是拿这个 `used` 判的**,它读的是校准后的数
+       * (上一轮真值 ÷ 上一轮估算,见 `context-assembler.ts` 的 `tokenCalibration`)。
+       * 别为了「让两个数看起来一致」把校准也乘到 `used` 上:那会让归因之和不再等于
+       * `used`,而圆环旁边那张卡本来就只显示百分比,同向缩放一遍什么也不会变。
+       */
       used: number
       window: number
       shouldCompact: boolean

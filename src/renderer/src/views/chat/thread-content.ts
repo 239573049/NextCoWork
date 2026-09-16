@@ -2,6 +2,7 @@ import type { AgentMessage, ContentPart } from '../../../../shared/agent/message
 import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
 import type { ContextCheckpoint } from '../../../../shared/agent/context-management'
 import type { LiveBlock, SubagentState } from '../../../../shared/agent/transcript'
+import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import type { TimelineItem } from '../../../../shared/domain/tool-timeline'
 import type { TurnPrompt } from './TurnActions'
 
@@ -40,6 +41,19 @@ export type ThreadRow =
    * 这一行只占一行的高度(谁、什么时候回来的),全文收在里面,点开才展开 ——
    * 它终究不是用户说的话,不该长得像一条提问。
    */
+  /**
+   * 一次计划审批**落槌的那一刻**(批准 / 要求修改 / 放弃)。
+   *
+   * ★★ 这张卡以前不在对话流里,而是渲染在所有回合**之后** —— 于是它永远贴在
+   * 整段最底部,紧挨着输入框。批准发生在几十轮之前也一样,看上去像一张关不掉的
+   * 常驻卡片,而它其实是一条历史记录。现在它回到产生它的那条工具回执的位置上,
+   * 底部随之空出来。
+   *
+   * 承载它的消息是一条工具回执(界面上不可见),所以这一行和后台汇报一样:
+   * 是**一条消息**,不是消息之间的一条线,因此同样要推进 `preceding` ——
+   * 否则它前后两个 assistant 行会共用同一个 key。
+   */
+  | { kind: 'plan-receipt'; key: string; receipt: PlanToolReceipt }
   | {
       kind: 'subagent-report'
       key: string
@@ -78,6 +92,7 @@ export function threadRows(
     `preceding`(工具回执不可见、不推进它)，key 全程不变。有用例钉这一点。
   */
   const anchored = checkpointsByAnchor(checkpoints)
+  const planRows = latestPlanReceipts(messages)
   const assistant = (): Extract<ThreadRow, { kind: 'assistant' }> => {
     const last = rows.at(-1)
     // 末尾是分隔行时**必须**新建:复用线之前那一行等于把压缩后的内容塞回线上方。
@@ -153,6 +168,19 @@ export function threadRows(
     }
 
     /*
+      ★ 计划回执**排在提出它的那条消息之后**:「这是刚才那个计划的下场」,
+      所以得在计划正文下面,不是上面。同一个计划只留最后一条 —— 一个计划从
+      「要求修改」走到「已批准」会留下两条,两张 220px 的卡片摞在一起说的却是
+      同一件事的两个阶段。挑选在 `latestPlanReceipts` 里做完。
+    */
+    for (const receipt of planRows.get(message.id) ?? []) {
+      rows.push({ kind: 'plan-receipt', key: `plan:${receipt.planId}`, receipt })
+      preceding = message.id
+      precedingAt = message.createdAt
+      visible += 1
+    }
+
+    /*
       ★ 锚点结算要在 `shown` 分支**之后**:锚在一条可见消息上时(手动压缩最常见的
       形态就是锚在刚发出的那条提问上),线该落在它下面,而不是上面。
     */
@@ -191,6 +219,56 @@ export function threadRows(
  * (两个上游编码器都把它丢掉),所以拿它当标记不会多给模型一个字。
  * 只认 internal 的:助手消息里的 `subagent` part 是卡片,不是汇报。
  */
+/**
+ * 每个计划最后那条回执落在哪条消息上。返回 `消息 id → 回执`,只含胜出的那些。
+ *
+ * 回执是工具结果正文的**第一行 JSON**([plan-file.ts](../../../main/kernel/tool/builtin/plan-file.ts))。
+ * 别的工具输出压根不是 JSON,`JSON.parse` 抛出来就是「这条不是回执」,不是错误。
+ *
+ * ★★ **锚在提出计划的那条消息上,不是装着回执的那条。**
+ *
+ * 看上去后者更直接,但它会**落到整段最底部**,正是这次要修的毛病:点「在当前
+ * 会话执行」时,渲染进程当场就 `send('实施已批准的计划。')` 开了新一轮,而主
+ * 进程那边计划工具才刚从审批闸门里返回、结果还没写进库。两条消息按落盘先后
+ * 排队,新提问常常赢 —— 回执于是排在新一轮**之后**,卡片又贴回了输入框上面。
+ *
+ * 发起那条消息(带同 `callId` 的 `tool_call`)在用户点批准**之前**就落盘了,
+ * 不参与这场竞争。老转录里找不到它时退回装回执的那条 —— 位置不理想,
+ * 总比整张卡消失强。
+ */
+function latestPlanReceipts(
+  messages: readonly AgentMessage[]
+): Map<string, PlanToolReceipt[]> {
+  const ACTIONS = ['approve_current', 'approve_new_session', 'request_revision', 'reject']
+  const proposedIn = new Map<string, string>()
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type === 'tool_call') proposedIn.set(part.callId, message.id)
+    }
+  }
+  const winner = new Map<string, { messageId: string; receipt: PlanToolReceipt }>()
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== 'tool_result' || part.isError) continue
+      const firstLine = part.output.content.split('\n', 1)[0] ?? ''
+      try {
+        const value = JSON.parse(firstLine) as Partial<PlanToolReceipt>
+        if (value.type !== 'plan_file' || typeof value.planId !== 'string' || typeof value.path !== 'string') continue
+        if (!ACTIONS.includes(value.action ?? '')) continue
+        const messageId = proposedIn.get(part.callId) ?? message.id
+        winner.set(value.planId, { messageId, receipt: value as PlanToolReceipt })
+      } catch {
+        // Other tool outputs are intentionally not JSON.
+      }
+    }
+  }
+  const byMessage = new Map<string, PlanToolReceipt[]>()
+  for (const { messageId, receipt } of winner.values()) {
+    byMessage.set(messageId, [...(byMessage.get(messageId) ?? []), receipt])
+  }
+  return byMessage
+}
+
 function backgroundReportOf(
   message: AgentMessage
 ): Extract<ContentPart, { type: 'subagent' }> | undefined {
@@ -254,7 +332,8 @@ export function unanchoredCheckpoints(
  */
 export function promptOf(rows: readonly ThreadRow[], index: number): TurnPrompt | undefined {
   let cursor = index - 1
-  while (rows[cursor]?.kind === 'divider') {
+  // 计划回执行和压缩线一样会把一轮切成两行,提问在更上面 —— 同一个跳法。
+  while (rows[cursor]?.kind === 'divider' || rows[cursor]?.kind === 'plan-receipt') {
     cursor -= 1
     if (rows[cursor]?.kind === 'assistant') cursor -= 1
   }

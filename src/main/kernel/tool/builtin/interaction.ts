@@ -41,16 +41,3 @@ export const askUserTool = defineTool({
     }))
   }
 })
-
-export const planApprovalTool = defineTool({
-  internalId: 'RequestPlanApproval',
-  description: 'Present a concrete plan for user review and wait for approval or feedback. Approval does not change the permission mode; plan mode still permits read-only tools only.',
-  schema: z.object({ plan: z.string().trim().min(1).max(32000) }),
-  readOnly: true, destructive: false, needsNetwork: false,
-  async run(input, ctx) {
-    if (ctx.interact === undefined) return toolFail('User interaction is unavailable in this environment.')
-    const response = await ctx.interact({ kind: 'plan_approval', plan: input.plan })
-    if (response.kind !== 'plan_approval') return toolFail('Unexpected interaction response.')
-    return toolOk(JSON.stringify({ approved: 'approved' in response ? response.approved : response.action === 'approve_current' || response.action === 'approve_new_session', action: 'action' in response ? response.action : undefined, feedback: response.feedback ?? '' }))
-  }
-})

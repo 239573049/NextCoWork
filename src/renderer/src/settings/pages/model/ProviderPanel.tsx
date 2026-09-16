@@ -7,13 +7,11 @@ import {
   Copy,
   ExternalLink,
   GripVertical,
-  Loader2,
   Pencil,
   Plus,
   Trash2,
   Upload,
-  X,
-} from "lucide-react";
+  X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   baseUrlWarnings,
@@ -83,6 +81,7 @@ import {
   type OAuthView,
 } from "./provider-auth";
 import { useI18n } from "../../../i18n";
+import { Spinner } from '../../../components/ui/Spinner'
 
 const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   "none",
@@ -143,6 +142,8 @@ export function ProviderPanel({
   const { provider: p, aliases } = entry;
   const managed = p.id === "nextcowork";
   const { family, responses } = splitProtocol(p.protocol);
+  const hasAnthropicModels = family === "anthropic" ||
+    [...aliases, ...preserveAliases].some((model) => effectiveModelProtocol(p, model) === "anthropic");
   const preset = findPreset(p.id);
   const apiKeyUrl = preset?.apiKeyUrl;
   const apiKeyActionLabel =
@@ -574,10 +575,7 @@ export function ProviderPanel({
             {p.name}
           </span>
           {busy && (
-            <Loader2
-              size={13}
-              className="shrink-0 animate-spin text-fg-faint"
-            />
+            <Spinner size="sm" className="text-fg-faint" />
           )}
           <Button size="sm" icon={<Download size={12} />} disabled={busy} onClick={() => { setError(null); setTransferOpen("export"); }}>
             {t("provider.export")}
@@ -700,7 +698,7 @@ export function ProviderPanel({
             </>
           )}
 
-          {family === "anthropic" && (
+          {hasAnthropicModels && (
             <Field
               label={t("provider.cache")}
               hint={t("provider.cacheHint")}
@@ -710,7 +708,6 @@ export function ProviderPanel({
                 size="sm"
                 value={cacheTtl}
                 options={[
-                  { value: "off", label: t("provider.off") },
                   { value: "5m", label: t("provider.fiveMinutes") },
                   { value: "1h", label: t("provider.oneHour") },
                 ]}
@@ -1246,7 +1243,7 @@ function ProviderAuthField({
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
             <div className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border bg-surface-field px-2.5">
-              <Loader2 size={12} className="shrink-0 animate-spin text-fg-muted" />
+              <Spinner size="xs" className="text-fg-muted" />
               <span className="min-w-0 shrink-0 text-[13px] text-fg-muted">
                 {t("provider.authDeviceCodeLabel")}
               </span>
@@ -1331,7 +1328,7 @@ function ProviderAuthField({
     return (
       <div className="flex items-center gap-2">
         <div className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border bg-surface-field px-2.5">
-          <Loader2 size={12} className="shrink-0 animate-spin text-fg-muted" />
+          <Spinner size="xs" className="text-fg-muted" />
           <span className="min-w-0 flex-1 truncate text-[13px] text-fg-muted">
             {phaseLabel}
           </span>

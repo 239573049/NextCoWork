@@ -227,6 +227,29 @@ export class BrowserManager {
     return tab
   }
 
+  /**
+   * 配置作用域变了:关掉所有 Tab,并丢掉缓存的那份 Profile 清单。
+   *
+   * ★ Tab 属于上一个账户的工作区,而工作区**已经不在**新作用域里 ——
+   * 留着它们就是「A 的页面还开在 B 的界面上」,而面板给的还是能点的。
+   *
+   * ★ Profile 清单缓存(`this.profiles`)存的是 `browser.profiles` 这个 kv 键,
+   * 而那个键**在白名单里**(它随作用域走)。不清缓存的话,下一次 `listProfiles()`
+   * 直接返回 A 的那份,连读都不读 —— 它的 `ensureProfiles()` 只在 null 时才读。
+   *
+   * ★★ **不碰 cookies。** 每个 Profile 的 partition 是
+   * `persist:ncw-workspace-<workspaceId>-profile-<profileId>`,而工作区 id 是
+   * ULID、跨作用域不会重号 —— 所以 A 的登录态在 B 里本来就取不到。
+   * 反过来「切走时清一遍」是**有破坏性**的:A 的 cookies 会被删掉,
+   * 而用户只是登了个 B 的账户。
+   */
+  resetForConfigScopeChange(): void {
+    const affected = new Set([...this.tabs.values()].map((tab) => tab.workspaceId))
+    this.tabs.clear()
+    this.profiles = null
+    for (const workspaceId of affected) this.emit(workspaceId)
+  }
+
   private emit(workspaceId: string, rightPanelOpen = false): void {
     this.listener?.({ workspaceId, tabs: this.list(workspaceId), ...(rightPanelOpen ? { rightPanelOpen: true } : {}) })
   }
