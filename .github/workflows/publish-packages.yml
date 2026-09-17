@@ -1,0 +1,59 @@
+name: Publish packages
+
+# 发布插件工具链三件套到 npm:
+#   @aidotnet/plugin-api、@aidotnet/plugin-cli、create-nextcowork-plugin
+#
+# ★ 挂在「packages/ 下有变动」而不是 tag 上:这三个包与客户端发版
+#   (release.yml,tag v*.*.* 触发)节奏无关。跟着 tag 走会出现「客户端发一版、
+#   三个 npm 包被各重发一次」,而版本号没变的话 npm 会直接报 EPUBLISHCONFLICT。
+#
+# ★ matrix 三个包并行发布、互不等待:plugin-api 卡住不该挡住
+#   create-nextcowork-plugin —— 三者之间没有运行时依赖(模板里的
+#   devDependencies 是装到用户机器上的,不在发布这一步)。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/**'
+      - '.github/workflows/publish-packages.yml'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.dir }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: plugin-api
+          - dir: plugin-cli
+          - dir: create-nextcowork-plugin
+    defaults:
+      run:
+        working-directory: packages/${{ matrix.dir }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      # 三个包都是零构建(files 直发,无 scripts),不需要 npm ci。
+      # 若哪天加了构建步骤,在这里补 —— 别等 publish 报缺产物。
+
+      # 先 dry-run:版本号忘了改时,npm 在这一步就报 EPUBLISHCONFLICT,
+      # 而不是真正发布时留下不可恢复的 403。
+      - name: Dry run
+        run: npm publish --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
