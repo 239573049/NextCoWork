@@ -10,21 +10,43 @@
  * ★ 没打包时**跳过**而不是失败:ZIP 是构建产物,不进版本库(见 .gitignore),
  * 在干净检出上让它红着会把「CI 该不该跑构建」这件事伪装成一次测试失败。
  */
-import { existsSync, promises as fs } from 'node:fs'
+import { existsSync, promises as fs, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { installPluginZip } from '../installer'
 
-const ZIP = resolve(__dirname, '../../../../examples/acme.excalidraw/acme.excalidraw-0.1.0.zip')
+const EXAMPLE = resolve(__dirname, '../../../../examples/acme.excalidraw')
+
+/**
+ * 示例当前打出来的那个包。
+ *
+ * ★ **不写死版本号**。写死的话,每次给插件升版本,这条测试就从「跑」变成
+ * 「静默跳过」—— 而跳过时它是绿的,没人会注意到示例包已经没人验了。
+ */
+function currentZip(): string | null {
+  if (!existsSync(EXAMPLE)) return null
+  const zip = readdirSync(EXAMPLE)
+    .filter((name) => /^acme\.excalidraw-\d+\.\d+\.\d+\.zip$/.test(name))
+    .sort()
+    .pop()
+  return zip === undefined ? null : join(EXAMPLE, zip)
+}
+
+const ZIP = currentZip()
 
 const roots: string[] = []
 afterEach(async () => {
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true })
 })
 
-describe.skipIf(!existsSync(ZIP))('示例插件 acme.excalidraw', () => {
+describe.skipIf(ZIP === null)('示例插件 acme.excalidraw', () => {
   it('能被真正的安装器装上,而且清单与贡献点都读得出来', async () => {
+    /*
+      `skipIf` 已经在运行期排除掉 null,但类型系统不知道 —— 这一行是给它看的。
+      不写成 `ZIP!` 是因为那会把「这里为什么一定不是 null」变成一句无人可查的断言。
+    */
+    if (ZIP === null) return
     const root = await fs.mkdtemp(join(tmpdir(), 'ncw-excalidraw-'))
     roots.push(root)
 

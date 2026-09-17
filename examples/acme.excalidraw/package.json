@@ -3,7 +3,7 @@
   "publisher": "acme",
   "displayName": "Excalidraw",
   "description": "在标签页里新建并编辑 .excalidraw 手绘白板",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "categories": ["可视化"],
   "keywords": ["diagram", "excalidraw", "drawing", "whiteboard"],
