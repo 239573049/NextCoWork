@@ -107,7 +107,11 @@ if (process.argv.includes('--package')) {
   mkdirSync(join(staging, id), { recursive: true })
 
   // ★ 顶层目录必须是 `<publisher>.<name>` —— 服务端与客户端校验的第一条。
-  for (const entry of ['package.json', 'dist', 'l10n']) {
+  // ★ `assets` 必须在列表里:清单的 `icon` 指向它,而安装器会**核对那个文件
+  //   真的在包里** —— 漏掉的话报的是「icon 指的文件不在包里」,和图标本身无关,
+  //   却要一路翻到打包脚本才看得出来。
+  for (const entry of ['package.json', 'dist', 'l10n', 'assets']) {
+    if (!existsSync(join(here, entry))) continue
     cpSync(join(here, entry), join(staging, id, entry), { recursive: true })
   }
   // 包里那份清单不该带开发依赖与脚本:它们对装的人没有意义,只会让审核多读两屏。

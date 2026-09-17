@@ -76,5 +76,13 @@ describe.skipIf(ZIP === null)('示例插件 acme.excalidraw', () => {
     // 两种语言缺一个就该被拒装 —— 这里反过来确认示例包是齐的
     expect(existsSync(join(installed.target, 'l10n/zh-CN.json'))).toBe(true)
     expect(existsSync(join(installed.target, 'l10n/en-US.json'))).toBe(true)
+
+    /*
+      ★ 图标。安装器**会**核对它(清单的 `icon` 必须在包里),所以真缺了这条
+      测试会因为前面抛错而红 —— 这里显式再断言一次,是为了让「必须带图标」
+      成为一条写下来的约定,而不是某次打包漏拷 assets/ 之后才被发现的事故。
+    */
+    expect(installed.manifest.icon).toBe('assets/icon.png')
+    expect(existsSync(join(installed.target, 'assets/icon.png'))).toBe(true)
   })
 })
