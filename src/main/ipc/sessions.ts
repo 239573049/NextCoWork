@@ -181,12 +181,21 @@ export function setFavorited(req: { sessionId: string; favorited: boolean }): vo
 }
 
 export function deleteSession(req: { sessionId: string }): void {
-  // Deleting one session while another run is still writing can race the
-  // shared database snapshot/attachment cleanup (and makes a later restore or
-  // clear-history operation ambiguous). Treat session deletion as the same
-  // high-risk operation as the bulk data actions: any active Agent blocks it.
-  if (runs.activeRunIds().length > 0) {
-    throw new Error('有运行中的 Agent，请先停止任务后再删除会话')
+  /*
+    ★ 只有「正在运行的这个会话自己」能挡住删除,别的会话在跑不算。
+
+    删除是整棵子树级联(子代理转录跟着走),所以运行中的 run 只要落在这棵子树里
+    就必须拦 —— 否则那个 run 还在往已删除的 sessionId 上写消息。
+    但**别的会话**的 run 和这次删除互不相干:曾经这里是「任何一个 Agent 在跑就全局禁止」,
+    表现为 A 会话在跑,B 会话连删都删不掉,用户只能先停下来再删,再手动重启任务。
+    渲染层会在删除前先用同样的条件弹警告(见 Sidebar),这里只是兜底,错误信息
+    用户最终会在 toast 里看到。
+  */
+  const activeSessionIds = new Set(
+    runs.activeRunIds().map((id) => runs.get(id)?.sessionId).filter((id): id is string => id !== undefined)
+  )
+  if (runsInDeletionSubtree(req.sessionId, activeSessionIds)) {
+    throw new Error('该会话有运行中的 Agent，请先停止任务后再删除')
   }
   // Capture paths before the database cascade removes their rows.  The
   // storage helper re-checks remaining references after deletion, so a file
@@ -217,6 +226,18 @@ function requireSessionAttachmentPaths(sessionId: string): string[] {
   // Keep SQL out of the handler; the store/repository owns the attachment
   // shape and this small accessor is exposed through the storage boundary.
   return store.sessionAttachmentPaths(sessionId)
+}
+
+/**
+ * 待删会话的级联子树里是否有正在运行的 run。子代理 run 的 sessionId 是子会话
+ * 自己的 id,但删除父会话时会连它一起删掉,所以按 `parentSessionId` 追一层。
+ */
+function runsInDeletionSubtree(rootSessionId: string, activeSessionIds: ReadonlySet<string>): boolean {
+  for (const activeId of activeSessionIds) {
+    if (activeId === rootSessionId) return true
+    if (store.getSession(activeId)?.parentSessionId === rootSessionId) return true
+  }
+  return false
 }
 
 export function searchAll(req: { q: string; workspaceId?: string; limit: number }) {

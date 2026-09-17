@@ -86,15 +86,27 @@ describe('session title IPC', () => {
     }
   })
 
-  it('keeps deletion blocked while any agent is running', () => {
+  it('blocks deletion only for a run inside the deleted subtree, not for unrelated runs', () => {
     store.createSession({ id: 'retained', workspaceId: 'workspace' })
-    const active = vi.spyOn(runs, 'activeRunIds').mockReturnValue(['another-workspace-run'])
+    store.createSession({ id: 'busy', workspaceId: 'workspace' })
+    store.createSession({ id: 'busy-child', workspaceId: 'workspace', parentSessionId: 'busy' })
+    const active = vi.spyOn(runs, 'activeRunIds').mockReturnValue(['run-1'])
+    const get = vi.spyOn(runs, 'get').mockReturnValue({ sessionId: 'busy' } as never)
     try {
-      expect(() => deleteSession({ sessionId: 'retained' })).toThrow('Agent')
-      expect(store.getSession('retained')).toBeDefined()
-      expect(windows.emitToAll).not.toHaveBeenCalled()
-      expect(removeSessionAttachmentFiles).not.toHaveBeenCalled()
+      // 无关会话在跑 —— 不再全局禁止删除
+      expect(() => deleteSession({ sessionId: 'retained' })).not.toThrow()
+      expect(store.getSession('retained')).toBeUndefined()
+      // 被删会话自己在跑 —— 拦下
+      expect(() => deleteSession({ sessionId: 'busy' })).toThrow('Agent')
+      expect(store.getSession('busy')).toBeDefined()
+      expect(windows.emitToAll).not.toHaveBeenCalledWith('sessions:changed', expect.objectContaining({ kind: 'deleted', sessionIds: expect.arrayContaining(['busy']) }))
+      expect(removeSessionAttachmentFiles).toHaveBeenCalledTimes(1)
+      get.mockReturnValue({ sessionId: 'busy-child' } as never)
+      // run 落在被删会话的子代理转录上 —— 同样拦下(级联会连它一起删)
+      expect(() => deleteSession({ sessionId: 'busy' })).toThrow('Agent')
+      expect(store.getSession('busy-child')).toBeDefined()
     } finally {
+      get.mockRestore()
       active.mockRestore()
     }
   })

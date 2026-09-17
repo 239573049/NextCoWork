@@ -39,6 +39,7 @@ import { Button } from '../components/ui/Button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
 import { copyText, openSessionWindow } from '../services/app'
 import { Spinner } from '../components/ui/Spinner'
+import { toast } from '../stores/toast'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'git', 'extensions']
 
@@ -195,6 +196,7 @@ export function Sidebar({
                       key={s.id}
                       session={s}
                       workspaceId={workspace.id}
+                      runningSessionIds={runningSessionIds}
                       onSelectSession={onSelectSession}
                       onDeleteSession={onDeleteSession}
                       t={t}
@@ -413,6 +415,13 @@ function SessionGroupBlock({
   const [menu, setMenu] = useState<{ session: SessionListItem; position: ContextMenuPosition } | null>(null)
   const [dialog, setDialog] = useState<{ kind: 'rename'; session: SessionListItem } | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
+  /*
+    ★ 删除被运行中的 Agent 挡下时要弹窗,不能只让菜单悄悄合上。
+
+    曾经这里的兜底是主进程直接抛错,而 `run()` 只 console.error —— 用户点了
+    「确认删除」却什么都没发生,也不知道自己被什么挡住了。
+  */
+  const [runningBlocked, setRunningBlocked] = useState(false)
   const [renameDraft, setRenameDraft] = useState('')
   const run = async (action: () => Promise<void>): Promise<void> => {
     try { await action() } catch (error) { console.error('[sessions] 操作失败', error) }
@@ -499,17 +508,38 @@ function SessionGroupBlock({
                 icon={<Trash2 size={15} />}
                 label={confirmingDeleteId === menu.session.id ? t('common.confirmDelete') : t('session.delete')}
                 onSelect={() => {
-                  if (confirmingDeleteId === menu.session.id) {
-                    void run(() => onDeleteSession(menu.session.id))
-                  } else {
+                  if (confirmingDeleteId !== menu.session.id) {
                     setConfirmingDeleteId(menu.session.id)
+                    return
                   }
+                  if (runningSessionIds.has(menu.session.id) || menu.session.running === true) {
+                    setMenu(null)
+                    setConfirmingDeleteId(null)
+                    setRunningBlocked(true)
+                    return
+                  }
+                  void run(async () => {
+                    try { await onDeleteSession(menu.session.id) } catch (error) {
+                      // 主进程的兜底守卫(会话子树里有运行中的 run)在这里变成用户可见的提示。
+                      toast.error(error instanceof Error ? error.message : String(error), 'session-delete')
+                      throw error
+                    }
+                  })
                 }}
               />
             </>
           )}
         </ContextMenu>
       )}
+      <Dialog
+        open={runningBlocked}
+        onClose={() => setRunningBlocked(false)}
+        title={t('session.deleteRunningTitle')}
+        width={420}
+        footer={<Button size="sm" variant="accent" onClick={() => setRunningBlocked(false)}>{t('common.close')}</Button>}
+      >
+        <p className="text-[12.5px] text-fg-muted">{t('session.deleteRunningMessage')}</p>
+      </Dialog>
       <Dialog
         open={dialog?.kind === 'rename'}
         onClose={() => setDialog(null)}
@@ -545,18 +575,22 @@ function MenuAction({ icon, label, danger = false, onSelect }: { icon: ReactNode
 function ArchivedSessionItem({
   session,
   workspaceId,
+  runningSessionIds,
   onSelectSession,
   onDeleteSession,
   t
 }: {
   session: SessionListItem
   workspaceId: string
+  /** 和 SessionGroupBlock 同一份运行中集合 —— 归档会话也可能挂着正在跑的 run。 */
+  runningSessionIds: ReadonlySet<string>
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>
   t: SidebarI18n
 }): ReactNode {
   const [menu, setMenu] = useState<ContextMenuPosition | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [runningBlocked, setRunningBlocked] = useState(false)
   const run = async (action: () => Promise<void>): Promise<void> => {
     try { await action() } catch (error) { console.error('[sessions] 操作失败', error) }
     setMenu(null)
@@ -594,17 +628,37 @@ function ArchivedSessionItem({
                 icon={<Trash2 size={15} />}
                 label={confirmingDelete ? t('common.confirmDelete') : t('session.delete')}
                 onSelect={() => {
-                  if (confirmingDelete) {
-                    void run(() => onDeleteSession(session.id))
-                  } else {
+                  if (!confirmingDelete) {
                     setConfirmingDelete(true)
+                    return
                   }
+                  if (runningSessionIds.has(session.id) || session.running === true) {
+                    setMenu(null)
+                    setConfirmingDelete(false)
+                    setRunningBlocked(true)
+                    return
+                  }
+                  void run(async () => {
+                    try { await onDeleteSession(session.id) } catch (error) {
+                      toast.error(error instanceof Error ? error.message : String(error), 'session-delete')
+                      throw error
+                    }
+                  })
                 }}
               />
             </>
           )}
         </ContextMenu>
       )}
+      <Dialog
+        open={runningBlocked}
+        onClose={() => setRunningBlocked(false)}
+        title={t('session.deleteRunningTitle')}
+        width={420}
+        footer={<Button size="sm" variant="accent" onClick={() => setRunningBlocked(false)}>{t('common.close')}</Button>}
+      >
+        <p className="text-[12.5px] text-fg-muted">{t('session.deleteRunningMessage')}</p>
+      </Dialog>
     </li>
   )
 }
