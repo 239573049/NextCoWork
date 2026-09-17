@@ -12,31 +12,69 @@ import type {
   HookScope,
   HookSettings
 } from '../../../shared/domain/hook'
-import { HOOK_EVENTS, defaultTimeoutMs } from '../../../shared/domain/hook'
+import { HOOK_EVENTS, defaultTimeoutMs, isHookType } from '../../../shared/domain/hook'
 
-/** 文件里那一条 → 内存里那一条。`timeout` 秒 → `timeoutMs` 毫秒在这里发生。 */
-function toDefinition(entry: HookFileEntry, event: HookEvent): HookDefinition {
-  return {
+/**
+ * 文件里那一条 → 内存里那一条。`timeout` 秒 → `timeoutMs` 毫秒在这里发生。
+ *
+ * ★ 返回 `null` = **这一条读不懂，丢掉**（`command` 型缺 command、`prompt` 型缺
+ *   prompt、`type` 写了个不认识的词）。不要造一个 `command: ''` 的条目出来 ——
+ *   那是一条永远跑不起来、却在列表里占着一行的钩子，用户看不出它坏在哪。
+ *   丢掉的数量会被 `ipc/hooks.ts` 的 `countRawHooks` 差值算出来，进诊断红条。
+ */
+function toDefinition(entry: HookFileEntry, event: HookEvent): HookDefinition | null {
+  const rawType: unknown = entry.type
+  if (rawType !== undefined && !isHookType(rawType)) return null
+  // 缺省 command —— 老文件里一条 `type` 都没有。
+  const type = rawType ?? 'command'
+  const base = {
     id: entry.id,
     event,
     ...(entry.matcher === undefined ? {} : { matcher: entry.matcher }),
-    command: entry.command,
     enabled: entry.enabled !== false,
-    timeoutMs: entry.timeout === undefined ? defaultTimeoutMs(event) : Math.round(entry.timeout * 1000),
+    timeoutMs: entry.timeout === undefined ? defaultTimeoutMs(event, type) : Math.round(entry.timeout * 1000),
     ...(entry.description === undefined ? {} : { description: entry.description })
   }
+  if (type === 'prompt') {
+    if (typeof entry.prompt !== 'string' || entry.prompt === '') return null
+    return {
+      ...base,
+      type: 'prompt',
+      prompt: entry.prompt,
+      ...(entry.model === undefined ? {} : { model: entry.model }),
+      ...(entry.modelProviderId === undefined ? {} : { modelProviderId: entry.modelProviderId })
+    }
+  }
+  if (typeof entry.command !== 'string' || entry.command === '') return null
+  return { ...base, type: 'command', command: entry.command }
 }
 
 /** 内存里那一条 → 文件里那一条。和 `toDefinition` 严格互逆。 */
 export function toFileEntry(hook: HookDefinition): HookFileEntry {
-  return {
+  const base: HookFileEntry = {
     id: hook.id,
     ...(hook.matcher === undefined || hook.matcher === '' ? {} : { matcher: hook.matcher }),
-    command: hook.command,
     ...(hook.enabled ? {} : { enabled: false }),
     timeout: hook.timeoutMs / 1000,
     ...(hook.description === undefined || hook.description === '' ? {} : { description: hook.description })
   }
+  if (hook.type === 'prompt') {
+    return {
+      ...base,
+      type: 'prompt',
+      prompt: hook.prompt,
+      ...(hook.model === undefined || hook.model === '' ? {} : { model: hook.model }),
+      ...(hook.modelProviderId === undefined || hook.modelProviderId === ''
+        ? {}
+        : { modelProviderId: hook.modelProviderId })
+    }
+  }
+  /*
+    ★ command 型**不写 `type`**：老文件里没有这个键，写上去会让一次无关的
+      「改了超时」把整份文件重排成另一种写法（同 `setHookEnabled` 里
+      「开启时把键去掉」那条理由）。缺省值就是 command，互逆成立。
+  */
+  return { ...base, command: hook.command }
 }
 
 export function hookListFrom(hooks: HookSettings, scope: HookScope, sourcePath: string): HookListItem[] {
@@ -45,7 +83,9 @@ export function hookListFrom(hooks: HookSettings, scope: HookScope, sourcePath: 
   // 顺序，会让同样两份配置在界面上排成不同的样子。
   for (const event of HOOK_EVENTS) {
     for (const entry of hooks[event] ?? []) {
-      out.push({ ...toDefinition(entry, event), scope, sourcePath })
+      const definition = toDefinition(entry, event)
+      if (definition === null) continue
+      out.push({ ...definition, scope, sourcePath })
     }
   }
   return out

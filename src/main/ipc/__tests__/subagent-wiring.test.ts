@@ -19,7 +19,11 @@
  * 没法让它去调 `Task`。所以这里自己拼 SSE —— 但用的是 `renderDemoSse`,
  * 即和演示上游**同一个渲染器**:分片、事件序列、解析器全都是生产路径那份。
  */
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { nodeHost } from '../../kernel/host'
 import type { WebContents } from 'electron'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
@@ -276,6 +280,43 @@ afterEach(() => {
 })
 
 describe('父代理派子代理 · 全链路', () => {
+  it.skipIf(process.platform === 'win32' || !existsSync('/bin/bash'))('SubagentStop 钩子沿用子任务的 Shell，不跟随中途改动的全局选择', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ncw-subagent-shell-'))
+    try {
+      mkdirSync(join(root, '.next-cowork'))
+      writeFileSync(join(root, '.next-cowork', 'settings.local.json'), JSON.stringify({
+        version: 1,
+        hooks: { SubagentStop: [{ id: 'shell-probe', command: 'printf "%s" "$0" > hook-shell.txt' }] }
+      }))
+      store.putWorkspace({ ...store.getWorkspace('w1')!, rootPath: root })
+      let selected = '/bin/sh'
+      const upstream = demoHost({ fetch: fakeUpstream() }, { chunkDelayMs: 0 })
+      installHost(nodeHost({
+        paths: { userData: () => join(root, 'userData'), attachments: () => join(root, 'attachments'), temp: () => root },
+        secrets: upstream.secrets,
+        fetch: (input, init) => {
+          if (String(init?.body ?? '').includes(CHILD_MARK)) selected = '/bin/bash'
+          return upstream.fetch(input, init)
+        }
+      }, () => selected))
+      installChildRunLauncher(startChildRun)
+      const r = req()
+      startRun(r, fakeWindow().ctx)
+      await waitForEnd(r.runId)
+      expect(runs.get(r.runId)?.status).toBe('done')
+      expect(selected).toBe('/bin/bash')
+      const marker = join(root, 'hook-shell.txt')
+      const deadline = Date.now() + 3000
+      while ((!existsSync(marker) || readFileSync(marker, 'utf8') === '') && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(readFileSync(marker, 'utf8')).toBe('/bin/sh')
+    } finally {
+      runs.abortAll()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('★ 子 run 的事件落在父窗口上 —— 断言信封的 runId,不是子 run 的 status', async () => {
     installChildRunLauncher(startChildRun)
     const { wc, ctx } = fakeWindow()

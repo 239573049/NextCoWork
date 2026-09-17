@@ -17,6 +17,8 @@ import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/rollup-task'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
+import { installPluginProtocol, registerPluginScheme } from './plugin/protocol'
+import { shutdownPlugins, startPlugins } from './ipc/plugins'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
 import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
@@ -121,6 +123,12 @@ sweepPendingDelete(resolveDataRoot())
   没有一条会指向「注册时机不对」。
 */
 registerAttachmentScheme()
+/*
+  ★ 和上面那行一样,必须排在 `app.whenReady()` **之前**。放到 ready 之后不报错,
+  但 privileges 全部丢失 —— 表现是插件页面的 CSP、fetch、模块加载各自以
+  看起来彼此无关的方式失败。
+*/
+registerPluginScheme()
 
 // 步骤 0 的 sqlite 探针。留着不删:将来升 Electron 大版本时,
 // 它是第一个会告诉你出事的地方(方案 §9)。
@@ -426,6 +434,7 @@ void app.whenReady().then(() => {
     派生，协议读取、上传和 storage 清理必须始终指向同一棵项目级数据树。
   */
   installAttachmentProtocol()
+  installPluginProtocol()
 
   const host = electronHost()
   const bundledSkillsRoot = app.isPackaged
@@ -435,6 +444,12 @@ void app.whenReady().then(() => {
     host.logger.warn(`[skill:bundled] ${diagnostic.path}: ${diagnostic.message}`)
   }
   initRuntime(host)
+  /*
+    ★ 插件系统在 `initRuntime` **之后**起:它要 `getHost()`。
+    不 await —— 扫描插件目录是几次 readdir,但一个坏包不该让首屏等着它。
+    装载结果经 `plugins:changed` 播出去,设置页照实显示。
+  */
+  void startPlugins()
   startScheduler()
 
   /*
@@ -548,5 +563,5 @@ app.on('before-quit', (event) => {
     app.quit()
   }
   const timer = setTimeout(finish, 6000)
-  void Promise.allSettled([shutdownMcp(), shutdownEnvironments()]).then(finish)
+  void Promise.allSettled([shutdownMcp(), shutdownPlugins(), shutdownEnvironments()]).then(finish)
 })

@@ -24,12 +24,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type {
-  InnerTab,
-  InnerTabKind,
-  InnerTabMenuItem,
-} from "../../../shared/domain/tab";
+import type { InnerTab } from "../../../shared/domain/tab";
 import { paneOf } from "../../../shared/domain/tab";
+import {
+  needsSeparator,
+  type MergedMenu,
+  type TabMenuItem,
+} from "../../../shared/plugin/contribution";
 import {
   Menu,
   MenuItem,
@@ -38,9 +39,9 @@ import {
 } from "../components/ui/Menu";
 import { prettyAccelerator } from "../lib/accelerator";
 import { cn } from "../lib/cn";
-import { INNER_TAB_ICON } from "./icons";
+import { INNER_TAB_ICON, MENU_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
-import { useI18n } from "../i18n";
+import { useI18n, type TranslationKey } from "../i18n";
 import { documentKey, isDocumentDirty, useDocumentsStore } from '../stores/documents';
 import { DOCK_TAB_MIME } from './dock-layout';
 import { Spinner } from '../components/ui/Spinner'
@@ -73,8 +74,11 @@ export function InnerTabBar({
   canDragTab?: (tab: InnerTab) => boolean;
   activeId: string | null;
   runningSessionIds: ReadonlySet<string>;
-  /** `+` 菜单的内容。主区与底部各有一份常量,见 shared/domain/tab.ts */
-  menu: readonly InnerTabMenuItem[];
+  /**
+   * `+` 菜单的内容 —— 内置项与插件贡献项**已经合并好**(见 `shell/tab-menu.ts`)。
+   * 三条 Tab 条共用这一个组件,差异全在这个参数里。
+   */
+  menu: MergedMenu;
   /** 条右端那个按钮:主区是「全部标签页」,底部是「关闭面板」 */
   trailing?: ReactNode;
   className?: string;
@@ -82,7 +86,14 @@ export function InnerTabBar({
   onClose: (id: string) => void;
   /** 下标是**本条内**的下标 —— 两条 Tab 条共用一张表,见 reorderInPane */
   onMove: (from: number, to: number) => void;
-  onOpen: (kind: InnerTabKind) => void;
+  /**
+   * ★ 收到的是**整个菜单项**,不是一个 `kind`。
+   *
+   * 原来这里是 `onOpen(kind)`,于是 `kind` 同时是身份、图标键和动作 ——
+   * 插件项没有 `InnerTabKind`,三处全卡死。改成传项之后,调用方按
+   * `item.action` 分发:内置是开一个 Tab,插件是执行它自己的命令。
+   */
+  onOpen: (item: TabMenuItem) => void;
 }): ReactNode {
   const { t } = useI18n();
   const drafts = useDocumentsStore((state) => state.entries);
@@ -240,24 +251,52 @@ export function InnerTabBar({
       >
         {(close) => (
           <>
-            {menu.map((item) => (
-              <Fragment key={item.kind}>
-                {/* 分隔是**数据**(见 INNER_TAB_MENU),不是渲染时的 `i === 3` ——
-                    底部那条菜单多了「文件预览」一项,按下标算分隔就错位了 */}
-                {item.separatorBefore === true && <MenuSeparator />}
+            {menu.items.map((item, index) => (
+              <Fragment key={item.id}>
+                {/*
+                  ★ 分隔线由 **group 边界自动生成**,不是数据里的 `separatorBefore`,
+                  更不是渲染时的 `i === 3`。插件项落在哪个 group 就跟着哪条边界走,
+                  加一项不需要手工挪任何标记。
+                */}
+                {needsSeparator(menu.items[index - 1], item) && <MenuSeparator />}
                 <MenuItem
                   icon={(() => {
-                    const Icon = INNER_TAB_ICON[item.kind];
+                    const Icon = MENU_ICON[item.icon];
                     return <Icon size={14} />;
                   })()}
                   accelerator={prettyAccelerator(item.accelerator)}
                   onSelect={() => {
-                    onOpen(item.kind);
+                    onOpen(item);
                     close();
                   }}
                 >
-                  {item.label}
+                  {t(item.titleKey as TranslationKey)}
                 </MenuItem>
+              </Fragment>
+            ))}
+            {/*
+              单插件超过 3 项时折叠。**不丢弃** —— 丢弃意味着作者写了 5 项、
+              装上只看见 3 项,而没有任何地方告诉他另外两项去哪了。
+            */}
+            {menu.overflow.map((group) => (
+              <Fragment key={group.pluginId}>
+                <MenuSeparator />
+                <MenuLabel>{group.pluginId}</MenuLabel>
+                {group.items.map((item) => (
+                  <MenuItem
+                    key={item.id}
+                    icon={(() => {
+                      const Icon = MENU_ICON[item.icon];
+                      return <Icon size={14} />;
+                    })()}
+                    onSelect={() => {
+                      onOpen(item);
+                      close();
+                    }}
+                  >
+                    {t(item.titleKey as TranslationKey)}
+                  </MenuItem>
+                ))}
               </Fragment>
             ))}
           </>

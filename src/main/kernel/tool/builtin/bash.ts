@@ -74,17 +74,19 @@ export const bashTool: ToolRegistration = defineTool({
     `- command is required. timeout is optional, in milliseconds, up to ${String(MAX_TIMEOUT_MS)} (10 minutes); ` +
     `it defaults to ${String(DEFAULT_TIMEOUT_MS)} (2 minutes)\n` +
     '- Write a 5-10 word description; that is what the user sees in the UI\n' +
+    '- Use the Shell identified in the Environment section. The tool name Bash does not imply Bash or POSIX syntax.\n' +
     `- Output longer than ${String(MAX_OUTPUT_CHARS)} characters is truncated\n` +
     '- IMPORTANT: EVERY CALL GETS A FRESH SHELL AND KEEPS NO STATE. A cd, an export, or a variable you set ' +
     'in one call does not exist in the next. The working directory is always the workspace root, so use ' +
-    'absolute or workspace-relative paths instead of relying on cd. To run somewhere else, write ' +
-    '`cd subdir && command` inside a SINGLE call\n' +
+    'absolute or workspace-relative paths instead of relying on cd. To run somewhere else, change directory ' +
+    'and execute the command inside a SINGLE call using the current shell syntax\n' +
     '- IMPORTANT: STDIN IS CLOSED. Any command that waits for input will hang until it times out: pass -m to ' +
     'git commit, pass --yes / --no-input to package managers, and never run something that needs an interactive login\n' +
     '- VERY IMPORTANT: NEVER use shell `find` or `grep` to search — use Grep and Glob. NEVER use `cat`, `head`, ' +
     '`tail`, or `ls` to read files and list directories — use Read and LS. Those tools apply the ignore list, ' +
     'skip binaries, add line numbers, and enforce a timeout; the shell equivalents do none of that\n' +
-    '- Chain multiple commands on one line with `&&` (stop on first failure) or `;`\n' +
+    '- Chain commands using syntax supported by the current shell. Windows PowerShell 5 does not support `&&`; ' +
+    'use an explicit success check when later commands depend on earlier ones succeeding\n' +
     '- Quote paths that contain spaces: `cd "path with spaces"`\n' +
     '- A non-zero exit code comes back to you as an error, with stdout and stderr included',
   schema: BashInput,

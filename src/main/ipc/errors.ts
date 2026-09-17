@@ -14,7 +14,8 @@ export class IpcError extends Error {
   constructor(
     readonly code: AgentErrorCode,
     message: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly localized?: Pick<AgentError, 'messageKey' | 'messageParams'>
   ) {
     super(message)
     this.name = 'IpcError'
@@ -38,7 +39,7 @@ export function toAgentError(err: unknown): AgentError {
     retryable: false, environmentCode: err.code, environmentDetail: err.detail, messageKey: `environment.error.${err.code}`
   })
   if (err instanceof IpcError) {
-    return agentError(err.code, err.message, { status: err.status })
+    return agentError(err.code, err.message, { status: err.status, ...err.localized })
   }
   /**
    * ★ 中断的判断走 `kernel/abort.ts`,不在这里另写一份。

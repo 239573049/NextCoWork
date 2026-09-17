@@ -199,6 +199,28 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   },
   {
     page: 'general',
+    sub: 'agent',
+    // ★ 标题是**域名词**「Shell」,不翻译(界面那一行也写 Shell);用户打的是
+    //   shell 名或 shell 本身,所以关键词把八个取值全收进来,外加 `sheel` 这个
+    //   常见拼错 —— 搜不到就等于这一项不存在。
+    title: 'Shell',
+    keywords: [
+      'shell',
+      'sheel',
+      'bash',
+      'zsh',
+      'fish',
+      'sh',
+      'powershell',
+      'pwsh',
+      'cmd',
+      'terminal',
+      '终端',
+      '命令'
+    ]
+  },
+  {
+    page: 'general',
     sub: 'task',
     title: '单对话子代理上限',
     keywords: ['subagent', '子代理', '并发']

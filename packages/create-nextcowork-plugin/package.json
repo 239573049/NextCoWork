@@ -1,0 +1,11 @@
+{
+  "name": "create-nextcowork-plugin",
+  "version": "0.1.0",
+  "description": "Scaffold a NextCoWork plugin that is already publishable.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "create-nextcowork-plugin": "./index.mjs" },
+  "files": ["index.mjs", "template", "README.md"],
+  "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public" }
+}

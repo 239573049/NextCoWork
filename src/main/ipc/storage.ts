@@ -51,7 +51,7 @@ import {
   dataMergeDecision,
   isDataExport
 } from '../../shared/domain/data'
-import { DEFAULT_SETTINGS, mergeSettings, type StorageStats } from '../../shared/domain/settings'
+import { DEFAULT_SETTINGS, mergeSettings, type ShellPreference, type StorageStats } from '../../shared/domain/settings'
 import { mcpSecretKind, mcpSecretRef } from '../../shared/domain/mcp'
 import { searchSecretRef } from '../../shared/domain/search'
 import { providerCredentialRef } from '../../shared/domain/provider'
@@ -257,6 +257,7 @@ function writeBackupStatus(status: StoredBackupStatus): void {
 interface LocalBackupState {
   directory: string | null
   status: StoredBackupStatus
+  shell: ShellPreference
 }
 
 /**
@@ -348,7 +349,8 @@ function captureLocalBackupState(): LocalBackupState {
   const settings = store.getSettings()
   return {
     directory: normalizeLocalBackupDirectory(settings.data.backupDirectory),
-    status: readBackupStatus()
+    status: readBackupStatus(),
+    shell: settings.shell
   }
 }
 
@@ -366,10 +368,10 @@ function sanitizeLocalBackupStatus(directory: string | null, status: StoredBacku
   return { ...status, lastBackupPath: resolve(status.lastBackupPath) }
 }
 
-/** Re-apply the local-only backup settings after replacing a database file. */
+/** Re-apply local-only backup settings and the shell after replacing a database file. */
 function restoreLocalBackupState(state: LocalBackupState): void {
   const directory = normalizeLocalBackupDirectory(state.directory)
-  store.updateSettings({ data: { backupDirectory: directory } })
+  store.updateSettings({ data: { backupDirectory: directory }, shell: state.shell })
   writeBackupStatus(sanitizeLocalBackupStatus(directory, state.status))
 }
 

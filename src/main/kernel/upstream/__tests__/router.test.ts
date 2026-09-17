@@ -289,7 +289,7 @@ async function drainWithContext(
 // ─── 用例 ────────────────────────────────────────────────────────────
 
 describe('UpstreamRouter stalled responses', () => {
-  it.each(['headers', 'body', 'error body'] as const)('times out stalled %s after 120 seconds without silently retrying', async (stage) => {
+  it.each(['headers', 'body', 'error body'] as const)('times out stalled %s after 600 seconds without silently retrying', async (stage) => {
     vi.useFakeTimers()
     try {
       const response = stage === 'headers'
@@ -304,13 +304,13 @@ describe('UpstreamRouter stalled responses', () => {
       const fetchSpy = vi.spyOn(host, 'fetch')
       let settled = false
       const running = drain(router).then((events) => { settled = true; return events })
-      await vi.advanceTimersByTimeAsync(119_999)
+      await vi.advanceTimersByTimeAsync(599_999)
       expect(settled).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
       expect((await running).at(-1)).toMatchObject({
         type: 'error', error: {
           code: 'network', retryable: false, messageKey: 'agent.error.upstreamTimeout',
-          messageParams: { provider: 'p1', seconds: 120 }
+          messageParams: { provider: 'p1', seconds: 600 }
         }
       })
       expect(calls).toHaveLength(1)

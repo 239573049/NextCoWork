@@ -2038,6 +2038,7 @@ describe('压缩判据按上游真值校准', () => {
     upstream: FakeUpstream
     history: readonly AgentMessage[]
     saveContextCheckpoint?: SessionDeps['saveContextCheckpoint']
+    contextCheckpoints?: readonly ContextCheckpoint[]
   }): Promise<Ran> {
     const request = req()
     const handle = new RunHandle(request)
@@ -2052,6 +2053,7 @@ describe('压缩判据按上游真值校准', () => {
         ...(o.saveContextCheckpoint !== undefined
           ? { saveContextCheckpoint: o.saveContextCheckpoint }
           : {}),
+        ...(o.contextCheckpoints !== undefined ? { contextCheckpoints: o.contextCheckpoints } : {}),
         resumeDelaysMs: []
       },
       handle,
@@ -2143,5 +2145,55 @@ describe('压缩判据按上游真值校准', () => {
     const usage = events.filter((e) => e.type === 'context_usage')
     expect(usage.length).toBeGreaterThanOrEqual(2)
     expect(usage.at(-1)).toMatchObject({ shouldCompact: true })
+  })
+
+  /**
+   * ★★ 机械压缩**不能把已恢复的模型摘要弄丢**。
+   *
+   * 构造函数在恢复检查点时把历史投影成 `withSummary(compactMessages(...))`,而到阈值走
+   * 机械压缩那一支时,投影曾经被一句 `compactMessages(this.messages)` 整个换掉 ——
+   * `this.messages` 是**转录原文**,里面没有摘要那条消息,于是它当场消失。
+   * 症状是「压缩之后模型突然忘了前半段对话」,而检查点、分隔线、笔记全都好端端地
+   * 在界面上,一处报错都没有。修法是两条分支共用 `projectContext()`。
+   *
+   * (同一行还漏掉了 `isolateHistoryPaths`:从转录直接重建等于把另一台服务器的
+   * 文件引用重新放回上下文。那条路径要一个远端工作区才跑得起来,这里不覆盖。)
+   */
+  it('★ 机械压缩之后,已恢复的模型摘要仍在请求里', async () => {
+    const NOTE = '用户在重构登录模块'
+    /*
+      大块放在**尾部保留区之内**:构造时的 compactMessages 折不到它(6 条正好等于
+      keepRecent),等本轮追加了用户消息与一轮工具往返之后它才落进折叠区 ——
+      于是第二轮的机械压缩是一次**真的有效**的压缩,而不是空转。
+    */
+    const history: AgentMessage[] = [
+      userMessage('h0', [{ type: 'text', text: '任务' }], 0),
+      assistantMessage('h1', [{ type: 'tool_call', callId: 'c0', name: 'echo', input: {} }], 0),
+      userMessage('h2', [{ type: 'tool_result', callId: 'c0', output: { content: BIG }, isError: false }], 0),
+      assistantMessage('h3', [{ type: 'text', text: '回应' }], 0),
+      userMessage('h4', [{ type: 'text', text: '追问' }], 0),
+      assistantMessage('h5', [{ type: 'text', text: '再回应' }], 0)
+    ]
+    const upstream = fakeUpstream([turnReporting(200_000, 'c1'), says('好')])
+    const { events } = await run({
+      upstream,
+      history,
+      contextCheckpoints: [{
+        id: 'sess-1:context:1',
+        sessionId: 'sess-1',
+        windowIndex: 1,
+        note: NOTE,
+        source: 'model',
+        createdAt: 0,
+        updatedAt: 0,
+        revision: 1
+      }]
+    })
+
+    // 压缩确实发生了(大块被折叠),而摘要一起活了下来
+    expect(statuses(events)).toContain('fallback')
+    expect(sent(upstream, 1)).not.toContain(BIG)
+    expect(sent(upstream, 1)).toContain(COMPACTED)
+    expect(sent(upstream, 1)).toContain(NOTE)
   })
 })

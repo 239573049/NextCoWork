@@ -12,7 +12,7 @@
  */
 import type { AgentError } from './error'
 import type { AgentEvent, RunNotice, RunStatus, SubagentPhase } from './event'
-import { visibleText, type AgentMessage, type ContentPart, type SubagentResult, type ToolOutput } from './message'
+import { mergeGoalStatusMessage, visibleText, type AgentMessage, type ContentPart, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
 import type { RunCost } from '../domain/pricing'
 import type { ContextCheckpoint, ContextSegment, ContextStatus } from './context-management'
@@ -189,6 +189,7 @@ export interface TranscriptState {
    * 留在对话流里只会变成噪声。
    */
   notice?: RunNotice
+  warning?: AgentError
   error?: AgentError
 }
 
@@ -581,7 +582,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         const existing = s.messages.findIndex((message) => message.id === e.message.id)
         const messages = existing < 0
           ? [...s.messages, e.message]
-          : s.messages.map((message, index) => (index === existing ? e.message : message))
+          : s.messages.map((message, index) => (index === existing ? mergeGoalStatusMessage(e.message, message) : message))
         return {
           ...s,
           messages,
@@ -634,6 +635,9 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         }
       }
     }
+
+    case 'notification':
+      return { ...s, warning: e.warning }
 
     case 'context_usage':
       return {

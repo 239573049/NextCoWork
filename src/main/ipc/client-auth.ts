@@ -379,21 +379,65 @@ export async function useOffline(): Promise<ClientAuthState> {
   return announce(next)
 }
 
+function describeError(error: unknown): string {
+  return error instanceof Error && error.message.length > 0 ? error.message : String(error)
+}
+
+/**
+ * 退出登录是**本地动作**,必须能在离线、撤销接口不可达、甚至本地密文解不开的
+ * 情况下走完。
+ *
+ * ★★ 以前这里每一步都是裸调用,第一个抛出的异常就把后面全部掐掉 —— 而最容易抛的
+ * 恰恰是第二步的 `secrets.get(REFRESH_REF)`:它走 `safeStorage.decryptString`,
+ * Windows 的 DPAPI 密文一旦换了机器 / 系统账户就直接抛。症状是 token、META、内置
+ * 供应商一个都没清掉,界面还显示着已登录,而用户看到的只有一句「操作失败,请重试」
+ * —— 重试多少次都卡在同一步。
+ *
+ * 现在每一步各自兜住并把原因记下来:
+ * - 读不出 refresh token 就跳过远端撤销(它本来就是尽力而为),照样删本地密文;
+ * - 只有**登录态本身没清掉**(`meta()` 还在)才算真失败,此时带着全部原因抛出去,
+ *   渲染层才有话可说;
+ * - 别名 / 供应商清理失败只降级成一条 warn —— 登录态已经没了,下一次
+ *   `getClientAuthState()` 的 else 分支会把它们补删。
+ */
 export async function signOutClient(): Promise<ClientAuthState> {
-  stopConfigSync()
-  const refresh = await getHost().secrets.get(REFRESH_REF)
-  if (refresh) {
-    await getHost().fetch(`${API_ROOT}/api/client/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: CLIENT_ID, refresh_token: refresh }) }).catch(() => undefined)
+  const failures: string[] = []
+  const step = async (label: string, run: () => void | Promise<void>): Promise<void> => {
+    try { await run() } catch (error) { failures.push(`${label}: ${describeError(error)}`) }
   }
+
+  await step('configSync.stop', () => { stopConfigSync() })
+
+  const refresh = await getHost().secrets.get(REFRESH_REF).catch((error: unknown) => {
+    failures.push(`secrets.readRefreshToken: ${describeError(error)}`)
+    return null
+  })
+  if (refresh) {
+    // 撤销失败不该拦住本地登出,超时同理 —— 裸 `net.fetch` 不带 deadline。
+    await getHost().fetch(`${API_ROOT}/api/client/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: CLIENT_ID, refresh_token: refresh }), signal: AbortSignal.timeout(ACCOUNT_TIMEOUT_MS) }).catch(() => undefined)
+  }
+
   const remove = getHost().secrets.remove
   if (remove) {
-    await remove(ACCESS_REF)
-    await remove(REFRESH_REF)
+    await step('secrets.removeAccessToken', () => remove(ACCESS_REF))
+    await step('secrets.removeRefreshToken', () => remove(REFRESH_REF))
   }
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
-  store.setKv(META_KEY, null)
-  for (const alias of store.listAliases().filter((a) => a.providerId === CLIENT_PROVIDER_ID)) store.removeAlias(CLIENT_PROVIDER_ID, alias.alias)
-  store.removeProvider(CLIENT_PROVIDER_ID)
+
+  await step('store.clearAuthMeta', () => { store.setKv(META_KEY, null) })
+  await step('store.removeClientModels', () => {
+    for (const alias of store.listAliases().filter((a) => a.providerId === CLIENT_PROVIDER_ID)) store.removeAlias(CLIENT_PROVIDER_ID, alias.alias)
+  })
+  await step('store.removeClientProvider', () => {
+    if (store.listProviders().some((p) => p.id === CLIENT_PROVIDER_ID)) store.removeProvider(CLIENT_PROVIDER_ID)
+  })
+
+  if (meta() !== null) {
+    throw new Error(`退出登录失败:${failures.length > 0 ? failures.join('; ') : '登录状态未被清除'}`)
+  }
+  if (failures.length > 0) {
+    console.warn(`[clientAuth] 退出登录已完成,但有清理步骤失败:${failures.join('; ')}`)
+  }
   return announce(state())
 }
 

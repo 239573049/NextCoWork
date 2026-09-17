@@ -1,0 +1,13 @@
+{
+  "name": "@aidotnet/plugin-cli",
+  "version": "0.1.0",
+  "description": "Build, package and publish NextCoWork plugins.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "nextcowork-plugin": "./index.mjs" },
+  "files": ["index.mjs", "README.md"],
+  "engines": { "node": ">=20" },
+  "peerDependencies": { "esbuild": ">=0.21" },
+  "peerDependenciesMeta": { "esbuild": { "optional": false } },
+  "publishConfig": { "access": "public" }
+}

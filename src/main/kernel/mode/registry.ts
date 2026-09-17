@@ -1,4 +1,5 @@
 import type { ModeDefinition } from '../../../shared/domain/mode'
+import { RegistryBuckets } from '../registry-buckets'
 import { BUILTIN_MODES, CODE_MODE } from './builtin'
 import type { ModeDiagnostic, ModeScanResult } from './load'
 
@@ -41,9 +42,25 @@ function sortModes(modes: readonly ModeDefinition[]): readonly ModeDefinition[] 
   })
 }
 
-let singleton: ModeRegistry | undefined
+/**
+ * **每个工作区一份。** 参数没有默认值的理由见 `skill/registry.ts` 的同名函数,
+ * 分桶与淘汰规则见 `kernel/registry-buckets.ts`。
+ *
+ * ★ 新建的桶出厂就带内建那几个模式,`resolve()` 也永远兜底到 `CODE_MODE` ——
+ * 于是「总能解析出一个模式」在第一次扫描发生之前就成立。
+ */
+const buckets = new RegistryBuckets(() => new ModeRegistry())
 
-export function modeRegistry(): ModeRegistry {
-  singleton ??= new ModeRegistry()
-  return singleton
+export function modeRegistry(workspaceId: string): ModeRegistry {
+  return buckets.get(workspaceId)
+}
+
+/** 工作区被移除时调。 */
+export function dropModeRegistry(workspaceId: string): void {
+  buckets.drop(workspaceId)
+}
+
+/** 全部丢掉 —— 换账户时必须调,理由同 `resetSkillRegistries`。 */
+export function resetModeRegistries(): void {
+  buckets.clear()
 }

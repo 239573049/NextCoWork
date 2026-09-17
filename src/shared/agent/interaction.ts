@@ -74,6 +74,14 @@ export type PendingInteraction =
       createdAt: number
     }
   | {
+      kind: 'goal_proposal'
+      id: string
+      runId: string
+      sessionId: string
+      condition: string
+      createdAt: number
+    }
+  | {
       kind: 'plan_approval'
       id: string
       runId: string
@@ -92,6 +100,7 @@ export type InteractionResponse =
    */
   | { id: string; kind: 'ask_user'; answers: string[][] | null }
   | { id: string; kind: 'plan_approval'; action: PlanApprovalAction; feedback?: string }
+  | { id: string; kind: 'goal_proposal'; approved: boolean }
 
 /** 待决项的最终去向。`aborted` 是中断路径写进去的(方案 §4.8 第 2 步)。 */
 export type InteractionOutcome =
@@ -112,7 +121,8 @@ export type InteractionOutcome =
 export const INTERACTION_SOUND: Record<InteractionKind, 'approval' | 'plan' | 'ask'> = {
   tool_permission: 'approval',
   plan_approval: 'plan',
-  ask_user: 'ask'
+  ask_user: 'ask',
+  goal_proposal: 'approval'
 }
 
 export function interactionTitle(i: PendingInteraction): string {
@@ -123,5 +133,7 @@ export function interactionTitle(i: PendingInteraction): string {
       return i.questions[0]?.question ?? '需要你的回答'
     case 'plan_approval':
       return '确认执行方案?'
+    case 'goal_proposal':
+      return i.condition
   }
 }

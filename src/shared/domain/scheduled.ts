@@ -11,6 +11,9 @@ export interface RepeatWindow {
   intervalMinutes?: number
 }
 
+/** 谁建的这条任务。缺省(旧数据、界面手建)一律按 `'user'` 读。 */
+export type ScheduledTaskCreator = 'user' | 'agent'
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -25,6 +28,15 @@ export interface ScheduledTask {
   nextRunAt: number | null
   createdAt: number
   updatedAt: number
+  /** 缺省 = `'user'` —— 字段引入之前的任务全部落在这一档。 */
+  createdBy?: ScheduledTaskCreator
+  /**
+   * 自动排程的层数:用户手建 = 0,定时任务**运行当中**由 Agent 建的 = 父任务 + 1。
+   *
+   * ★ 没有这个数,一个每天跑的任务可以在每次运行时再建一个任务,而新任务又接着建 ——
+   * 指数增长,且在用户打开定时任务面板之前**没有任何症状**。
+   */
+  chainDepth?: number
 }
 
 export type ScheduledRunStatus = 'queued' | 'running' | 'success' | 'error' | 'skipped' | 'aborted'
@@ -52,6 +64,8 @@ export interface ScheduledTaskInput {
   timezone?: string
   repeatWindow?: RepeatWindow
   enabled?: boolean
+  createdBy?: ScheduledTaskCreator
+  chainDepth?: number
 }
 
 export const DEFAULT_REPEAT_WINDOW: RepeatWindow = { enabled: false }
@@ -200,7 +214,9 @@ export function normalizeScheduledTaskInput(input: ScheduledTaskInput, now = Dat
     enabled: input.enabled ?? true,
     nextRunAt: input.enabled === false ? null : nextScheduledOccurrence(input.schedule, timezone, repeatWindow, now),
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }),
+    ...(input.chainDepth === undefined ? {} : { chainDepth: input.chainDepth })
   }
 }
 
@@ -211,3 +227,114 @@ export function advanceScheduledTask(task: ScheduledTask, after: number): Schedu
 
 /** Background runs never wait for an interactive permission prompt. */
 export const SCHEDULED_PERMISSION_MODE: PermissionMode = 'full'
+
+// ─────────────────────── Agent 侧(工具)的领域约定 ───────────────────────
+
+/**
+ * 只对**模型**生效的那几条上限 —— 用户在界面里不受它们约束。
+ *
+ * ★ 分开写而不是收紧领域层的校验:界面上的每一次创建背后都站着一个人,
+ * 而工具那一侧站着的是一个会把「每分钟检查一次」当成合理安排的模型。
+ */
+export const SCHEDULED_AGENT_LIMITS = {
+  /** 每个工作区模型能建到的上限。到顶之后 create 直接拒,并让模型去删旧的。 */
+  maxTasksPerWorkspace: 20,
+  /** 链式排程的最大层数(用户手建 = 0)。见 `ScheduledTask.chainDepth`。 */
+  maxChainDepth: 2,
+  /** 窗口内重复的最小间隔。领域层允许 1 分钟,那是给界面上的人用的。 */
+  minIntervalMinutes: 5,
+  maxNameLength: 60,
+  maxPromptLength: 4000
+} as const
+
+/**
+ * 交给模型看的一条任务。
+ *
+ * ★ 时间一律是**已经格式化好的本地时间字符串**,不是时间戳:模型拿到 epoch
+ * 毫秒只会按 UTC 复述给用户,而任务是按 `timezone` 跑的 —— 那种错说出来
+ * 一字不差地像真的(「已设为明早 9 点」),用户要到第二天才发现不对。
+ */
+export interface ScheduledTaskSummary {
+  id: string
+  name: string
+  prompt: string
+  /** 人话的规则,如 `every day at 09:00 (Asia/Shanghai)` */
+  schedule: string
+  timezone: string
+  enabled: boolean
+  model: string
+  modelProviderId?: string
+  /** 下次触发的本地时间;停用或规则已过期时为 null */
+  nextRunAt: string | null
+  createdBy: ScheduledTaskCreator
+}
+
+export interface SchedulingCreateInput {
+  name: string
+  prompt: string
+  schedule: ScheduleRule
+  timezone?: string
+  repeatWindow?: RepeatWindow
+  model?: string
+  modelProviderId?: string
+  enabled?: boolean
+}
+
+export type SchedulingUpdateInput = Partial<SchedulingCreateInput>
+
+/**
+ * 工具与主进程之间**唯一**的接触面(同 `SpawnSubagentFn` 的道理):
+ * 工具住在内核里,而 store / 调度器 / 窗口广播住在 `main/`。
+ *
+ * ★ 失败一律 **throw 一个模型读得懂的英文 Error**,由工具转成 `toolFail` ——
+ * 返回一个 `{ ok: false }` 型的结果会让每个调用点都要写一遍分支,而漏写的那处
+ * 会把失败当成成功报给模型。
+ */
+export interface SchedulingBridge {
+  list(): Promise<ScheduledTaskSummary[]>
+  create(input: SchedulingCreateInput): Promise<ScheduledTaskSummary>
+  update(id: string, patch: SchedulingUpdateInput): Promise<ScheduledTaskSummary>
+  remove(id: string): Promise<{ id: string; name: string }>
+}
+
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const
+
+/** `1714032000000` → `2024-04-25 09:00`(按给定时区)。时区非法时回退到 ISO。 */
+export function formatInstantInZone(at: number, timezone: string): string {
+  try {
+    const p = partsInZone(at, timezone)
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    return `${String(p.year ?? 0)}-${pad(p.month ?? 1)}-${pad(p.day ?? 1)} ${pad(p.hour ?? 0)}:${pad(p.minute ?? 0)}`
+  } catch {
+    return new Date(at).toISOString()
+  }
+}
+
+/** 一条规则的人话版本 —— 模型复述给用户时逐字用它。 */
+export function describeScheduleRule(rule: ScheduleRule, timezone: string, repeatWindow?: RepeatWindow): string {
+  const base = rule.kind === 'once'
+    ? `once at ${rule.at.replace('T', ' ')}`
+    : rule.kind === 'daily'
+      ? `every day at ${rule.time}`
+      : `every ${rule.weekdays.map((d) => WEEKDAY_NAMES[d] ?? String(d)).join(', ')} at ${rule.time}`
+  const repeat = repeatWindow?.enabled === true && repeatWindow.endTime !== undefined
+    ? `, then every ${String(repeatWindow.intervalMinutes ?? 60)} minutes until ${repeatWindow.endTime}`
+    : ''
+  return `${base}${repeat} (${timezone})`
+}
+
+/** 存储形态 → 模型看的形态。**唯一**的转换处,免得两个工具各转一份。 */
+export function summarizeScheduledTask(task: ScheduledTask): ScheduledTaskSummary {
+  return {
+    id: task.id,
+    name: task.name,
+    prompt: task.prompt,
+    schedule: describeScheduleRule(task.schedule, task.timezone, task.repeatWindow),
+    timezone: task.timezone,
+    enabled: task.enabled,
+    model: task.model,
+    ...(task.modelProviderId === undefined ? {} : { modelProviderId: task.modelProviderId }),
+    nextRunAt: task.nextRunAt === null ? null : formatInstantInZone(task.nextRunAt, task.timezone),
+    createdBy: task.createdBy ?? 'user'
+  }
+}

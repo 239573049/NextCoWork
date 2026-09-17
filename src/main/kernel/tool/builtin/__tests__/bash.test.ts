@@ -217,6 +217,13 @@ describe('Bash · 描述里那三处和 CC 的差异', () => {
     expect(d).toContain('cd')
   })
 
+  it('以环境里的 Shell 为准，不把工具名当成 POSIX 语法保证', () => {
+    expect(d).toContain('Shell identified in the Environment')
+    expect(d).toContain('does not imply Bash or POSIX syntax')
+    expect(d).toContain('Windows PowerShell 5 does not support `&&`')
+    expect(d).not.toContain('`cd subdir && command`')
+  })
+
   it('★ 说清了 stdin 是关的 —— 不说的话 git commit 不带 -m 会挂到超时', () => {
     expect(d).toContain('STDIN IS CLOSED')
     expect(d).toContain('-m')

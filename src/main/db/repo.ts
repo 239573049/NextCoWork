@@ -126,7 +126,7 @@ export function enqueueInitialSyncSnapshot(accountId: string): void {
   for (const server of listMcpServers()) if (server.workspaceId === undefined) enqueueSyncMutation('mcpServer', server.id, server)
   for (const search of listStoredSearchProviders()) enqueueSyncMutation('searchProvider', search.id, search)
   const settings = getSettings()
-  const { personalization: _personalization, ...preferences } = settings
+  const { personalization: _personalization, shell: _shell, ...preferences } = settings
   enqueueSyncMutation('appPreferences', 'global', { ...preferences, data: { ...settings.data, backupDirectory: null } })
   enqueueSyncMutation('appPersonalization', 'global', settings.personalization)
   for (const workspace of listWorkspaces()) {
@@ -283,7 +283,7 @@ export function updateSettings(patch: AppSettingsPatch): AppSettings {
     stmt(
       'INSERT INTO settings (id, json) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json'
     ).run(JSON.stringify(next))
-    const { personalization: _personalization, ...preferences } = next
+    const { personalization: _personalization, shell: _shell, ...preferences } = next
     enqueueSyncMutation('appPreferences', 'global', { ...preferences, data: { ...next.data, backupDirectory: null } })
     enqueueSyncMutation('appPersonalization', 'global', next.personalization)
     return next
@@ -1311,6 +1311,7 @@ export function exportDataSnapshot(): Omit<DataExport, 'encryptedCredentials'> {
   // 备份目录是设备本地路径，不能随普通导出迁移到另一台机器；频率仍是
   // 用户偏好，可以安全导出。导入时也会保留当前设备的目录。
   settings.data = { ...settings.data, backupDirectory: null }
+  settings.shell = 'system'
   return {
     type: 'nextcowork-data-export',
     version: 1,
@@ -1344,6 +1345,7 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
     // 设置没有可靠的 updatedAt，导入文件由用户明确确认，按整块导入。
     updateSettings({
       ...data.settings,
+      shell: localSettings.shell,
       data: {
         ...data.settings.data,
         // 这个路径只属于当前设备，普通导入不能把另一台机器的路径写进来。
@@ -1599,13 +1601,14 @@ export function findAttachmentByChecksum(
   scope: string,
   ownerId?: string
 ): AttachmentRow | undefined {
+  // 优先复用重传后的新副本,否则旧的失效记录会让后续每次上传都再次落盘。
   const row =
     ownerId === undefined
       ? stmt(
-          `SELECT * FROM attachments WHERE checksum = ? AND scope = ? AND owner_id IS NULL LIMIT 1`
+          `SELECT * FROM attachments WHERE checksum = ? AND scope = ? AND owner_id IS NULL ORDER BY rowid DESC LIMIT 1`
         ).get(checksum, scope)
       : stmt(
-          `SELECT * FROM attachments WHERE checksum = ? AND scope = ? AND owner_id = ? LIMIT 1`
+          `SELECT * FROM attachments WHERE checksum = ? AND scope = ? AND owner_id = ? ORDER BY rowid DESC LIMIT 1`
         ).get(checksum, scope, ownerId)
   return row == null ? undefined : toAttachmentRow(row)
 }
@@ -2148,7 +2151,11 @@ export function listScheduledRuns(taskId?: string, limit = 100): ScheduledRun[] 
   const rows = taskId === undefined
     ? stmt('SELECT * FROM scheduled_runs ORDER BY scheduled_at DESC, id DESC LIMIT ?').all(Math.max(1, limit))
     : stmt('SELECT * FROM scheduled_runs WHERE task_id = ? ORDER BY scheduled_at DESC, id DESC LIMIT ?').all(taskId, Math.max(1, limit))
-  return rows.map((row) => ({
+  return rows.map(toScheduledRun)
+}
+
+function toScheduledRun(row: Record<string, unknown>): ScheduledRun {
+  return {
     id: String(row['id']), taskId: String(row['task_id']), sessionId: String(row['session_id'] ?? ''),
     trigger: String(row['trigger']) as ScheduledRun['trigger'], status: String(row['status']) as ScheduledRun['status'],
     scheduledAt: Number(row['scheduled_at']),
@@ -2156,11 +2163,24 @@ export function listScheduledRuns(taskId?: string, limit = 100): ScheduledRun[] 
     ...(row['ended_at'] == null ? {} : { endedAt: Number(row['ended_at']) }),
     ...(row['summary'] == null ? {} : { summary: String(row['summary']) }),
     ...(row['error'] == null ? {} : { error: String(row['error']) })
-  }))
+  }
 }
 
 export function getScheduledRun(id: string): ScheduledRun | undefined {
   return listScheduledRuns(undefined, 10_000).find((run) => run.id === id)
+}
+
+/**
+ * 某个会话属于哪一次定时执行。
+ *
+ * ★ 走 SQL 而不是照抄 `getScheduledRun` 那句全表 10000 行再 find:这条查询在
+ * **每次 Agent 建定时任务时**都要跑一遍(算链深度),而那条路径上多扫一万行
+ * 不会有任何可见症状,只会慢。`session_id` 唯一,取最新一条即可。
+ */
+export function getScheduledRunBySession(sessionId: string): ScheduledRun | undefined {
+  if (sessionId === '') return undefined
+  const row = stmt('SELECT * FROM scheduled_runs WHERE session_id = ? ORDER BY scheduled_at DESC, id DESC LIMIT 1').get(sessionId)
+  return row === undefined ? undefined : toScheduledRun(row)
 }
 
 export function deleteScheduledRun(id: string): void {

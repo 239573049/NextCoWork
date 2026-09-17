@@ -16,7 +16,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, promises as fs } from 'node:fs'
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { dialog } from 'electron'
 import type {
@@ -33,12 +33,14 @@ import {
   buildNcwUrl,
   extOfMime,
   isImageMime,
-  mimeOfExt
+  mimeOfExt,
+  imageMimeOfBytes,
+  normalizeImageMime
 } from '../../shared/domain/attachment'
 import { ulid } from '../../shared/util/id'
 import * as repo from '../db/repo'
 import { attachmentRoot } from '../net/attachment-protocol'
-import { IpcError } from './errors'
+import { IpcError, toAgentError } from './errors'
 import { EnvironmentError, normalizeEnvironmentRef } from '../../shared/domain/environment'
 import type { EnvironmentLease } from '../environment/contract'
 import { uploadWorkspaceAttachment } from '../environment/artifacts'
@@ -157,7 +159,7 @@ function toAttachment(row: repo.AttachmentRow): Attachment {
   })
   if (url === null) {
     // 表里存着一条拼不出 URL 的记录 —— 只可能是数据被外部改过
-    throw new IpcError('unknown', '附件记录已损坏')
+    throw new IpcError('unknown', 'Invalid attachment record', undefined, { messageKey: 'attachment.error.invalidLocation' })
   }
   return {
     id: row.id,
@@ -173,37 +175,61 @@ function toAttachment(row: repo.AttachmentRow): Attachment {
 }
 
 export function uploadAttachment(req: AttachmentUploadRequest): Attachment {
-  if (req.bytes.byteLength === 0) throw new IpcError('unknown', '空文件')
+  if (req.bytes.byteLength === 0) throw new IpcError('unknown', 'Empty attachment', undefined, {
+    messageKey: 'attachment.error.empty', messageParams: { name: req.displayName }
+  })
   if (req.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
-    throw new IpcError('unknown', `文件超过 ${String(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB 上限`)
+    throw new IpcError('unknown', 'Attachment exceeds the upload limit', undefined, {
+      messageKey: 'attachment.error.tooLarge', messageParams: { name: req.displayName, limit: MAX_ATTACHMENT_BYTES / 1024 / 1024 }
+    })
   }
 
+  let mime = req.mime
+  const inferredMime = mimeOfExt(req.displayName)
+  if (req.scope === 'session' && (isImageMime(mime) || isImageMime(inferredMime))) {
+    // 浏览器/扩展名可能把 JPEG 写成 image/jpg,也可能把 PNG 标成 JPEG。
+    // 能识别文件头时以字节为准,否则只接受发送端同一份 MIME 白名单。
+    const declaredMime = mime.trim() === '' || mime === 'application/octet-stream' ? inferredMime : mime
+    const imageMime = imageMimeOfBytes(req.bytes) ?? normalizeImageMime(declaredMime)
+    if (imageMime === null) throw new IpcError('unknown', `Unsupported image media type: ${declaredMime}`, undefined, {
+      messageKey: 'attachment.error.unsupportedImage', messageParams: { mime: declaredMime }
+    })
+    mime = imageMime
+  }
   const checksum = sha256(req.bytes)
 
-  // ★ 去重命中时**不写新文件**,直接复用。同一张截图粘三次只占一份磁盘。
-  //   ★ 但 displayName 仍取本次上传的 —— 去重的是字节,不是用户对它的称呼。
+  // ★ 去重的是字节,但旧记录的类型、落点与大小也必须仍然可用。
   const hit = repo.findAttachmentByChecksum(checksum, req.scope, req.ownerId)
-  if (hit !== undefined && existsSync(hit.path)) {
-    return { ...toAttachment(hit), displayName: req.displayName }
+  if (hit !== undefined && (!isImageMime(mime) || mimeOfExt(hit.path) === mime)) {
+    const hitRel = attachmentRelPath({ scope: req.scope, ownerId: req.ownerId, fileName: basename(hit.path) })
+    if (hitRel !== null && resolve(hit.path) === resolve(attachmentRoot(), hitRel)) {
+      try {
+        const stat = lstatSync(hit.path)
+        if (stat.isFile() && stat.size === req.bytes.byteLength) return { ...toAttachment(hit), displayName: req.displayName }
+      } catch { /* 文件已丢失或不可读时,用本次上传的字节重新落盘。 */ }
+    }
   }
 
   const id = ulid()
-  const fileName = `${id}${extOfMime(req.mime)}`
+  const fileName = `${id}${extOfMime(mime)}`
   const rel = attachmentRelPath({ scope: req.scope, ownerId: req.ownerId, fileName })
-  if (rel === null) throw new IpcError('unknown', '附件位置非法')
+  if (rel === null) throw new IpcError('unknown', 'Invalid attachment location', undefined, { messageKey: 'attachment.error.invalidLocation' })
 
   const target = join(attachmentRoot(), rel)
-  mkdirSync(dirname(target), { recursive: true })
 
   // ★ 临时文件名以 `.` 开头:清理时按前缀就能认出残片,
   //   而它又不会被 `ncw://` 寻址到(fileName 段校验不过)。
   const tmp = join(dirname(target), `.${fileName}.tmp`)
   try {
+    mkdirSync(dirname(target), { recursive: true })
     writeFileSync(tmp, req.bytes)
     renameSync(tmp, target)
   } catch (err) {
-    rmSync(tmp, { force: true })
-    throw new IpcError('unknown', `写入附件失败: ${String(err)}`)
+    try { rmSync(tmp, { force: true }) } catch { /* 保留原始写入错误。 */ }
+    throw new IpcError('unknown', `Unable to save attachment: ${String(err)}`, undefined, {
+      messageKey: 'attachment.error.writeFailed',
+      messageParams: { name: req.displayName, code: (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN' }
+    })
   }
 
   const createdAt = Date.now()
@@ -219,14 +245,14 @@ export function uploadAttachment(req: AttachmentUploadRequest): Attachment {
   })
 
   const url = buildNcwUrl({ scope: req.scope, ownerId: req.ownerId, fileName })
-  if (url === null) throw new IpcError('unknown', '附件位置非法')
+  if (url === null) throw new IpcError('unknown', 'Invalid attachment location', undefined, { messageKey: 'attachment.error.invalidLocation' })
 
   return {
     id,
     scope: req.scope,
     ownerId: req.ownerId,
     displayName: req.displayName,
-    mime: req.mime,
+    mime,
     size: req.bytes.byteLength,
     checksum,
     createdAt,
@@ -276,7 +302,9 @@ export async function pickAttachments(req: {
         out.push({ kind: 'path', path, name: basename(path) })
         continue
       }
-      if (st.size > MAX_ATTACHMENT_BYTES) continue
+      if (st.size > MAX_ATTACHMENT_BYTES) throw new IpcError('unknown', 'Attachment exceeds the upload limit', undefined, {
+        messageKey: 'attachment.error.tooLarge', messageParams: { name: basename(path), limit: MAX_ATTACHMENT_BYTES / 1024 / 1024 }
+      })
       const bytes = new Uint8Array(readFileSync(path))
       out.push({
         kind: 'attachment',
@@ -288,9 +316,13 @@ export async function pickAttachments(req: {
           bytes: bytes as Uint8Array<ArrayBuffer>
         })
       })
-    } catch {
-      // 单个文件失败不该让整批选择失败 —— 用户选了 5 个,不能因为第 3 个
-      // 权限不足就一个都拿不到
+    } catch (err) {
+      // 单个文件失败不拖垮整批,也不能让失败项在托盘里消失。
+      const name = basename(path)
+      const error = err instanceof IpcError ? err : new IpcError('unknown', `Unable to read attachment: ${String(err)}`, undefined, {
+        messageKey: 'attachment.error.readFailed', messageParams: { name, code: (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN' }
+      })
+      out.push({ kind: 'error', name, error: toAgentError(error) })
     }
   }
   return out

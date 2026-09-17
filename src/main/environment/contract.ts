@@ -52,7 +52,7 @@ export interface WorkspaceEnvironment extends WorkspaceHost {
    *   子进程），超时只杀那一个 shell 会留下一地僵尸。其余调用点行为一字不变。
    *   远程实现忽略这个字段：kill 走 SSH channel，没有本地进程组这回事。
    */
-  openProcess(command: string, args: readonly string[], options: { cwd: string; env?: Record<string, string>; detached?: boolean }): Promise<EnvironmentProcess>
+  openProcess(command: string, args: readonly string[], options: { cwd: string; env?: Record<string, string>; detached?: boolean; windowsVerbatimArguments?: boolean }): Promise<EnvironmentProcess>
   openTerminal(options: { cwd: string; cols: number; rows: number }): Promise<TerminalDriver>
   openTcp?(hostname: string, port: number): Promise<Socket>
 }

@@ -69,12 +69,17 @@ export const skillTool: ToolRegistration = defineTool({
   // 契约要求返回 Promise;注册表是进程内的,没有异步的事要做
   async run(input, ctx) {
     const snapshot = ctx.skills
+    /*
+      ★ 没有快照时回落到**这个工作区**那一份注册表(分桶见 `kernel/registry-buckets.ts`)。
+      旧的无头调用没有 `workspaceId`,走 `''` 那一桶 —— 和它当年读那个单例是同一份。
+    */
+    const registry = skillRegistry(ctx.workspaceId ?? '')
     const hit = snapshot === undefined
-      ? skillRegistry().get(input.name)
+      ? registry.get(input.name)
       : snapshot.find((s) => s.name === input.name)
 
     if (hit === undefined) {
-      const all = snapshot === undefined ? skillRegistry().list() : snapshot
+      const all = snapshot === undefined ? registry.list() : snapshot
       /*
         ★ 把可用清单**再列一遍**,而不是只说「没有这个 Skill」。
         只说不行的话,模型会把名字改一改再试一次(`commit` → `git-commit` → `commits`),

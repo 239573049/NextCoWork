@@ -47,8 +47,8 @@ export function onAgentEvent(cb: (env: AgentEventEnvelope) => void): Unsubscribe
   return on('agent:event', cb)
 }
 
-export function listInteractions(runId: string): Promise<PendingInteraction[]> {
-  return invoke('agent:listInteractions', { runId })
+export function listInteractions(runId?: string, sessionId?: string): Promise<PendingInteraction[]> {
+  return invoke('agent:listInteractions', { runId, sessionId })
 }
 
 export function respondInteraction(response: InteractionResponse): Promise<void> {

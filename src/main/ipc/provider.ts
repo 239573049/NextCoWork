@@ -142,6 +142,10 @@ export function renameModel(
     patch.permissionReviewerModel = next
     patch.permissionReviewerModelProviderId = settings.permissionReviewerModelProviderId
   }
+  if (renames(settings.goalEvaluatorModel, settings.goalEvaluatorModelProviderId)) {
+    patch.goalEvaluatorModel = next
+    patch.goalEvaluatorModelProviderId = settings.goalEvaluatorModelProviderId
+  }
   if (Object.keys(patch).length > 0) {
     windows.emitToAll("settings:changed", store.updateSettings(patch))
   }
@@ -430,6 +434,14 @@ function repointDanglingDefaults(): void {
   if (reviewer !== undefined) {
     patch.permissionReviewerModel = reviewer.model
     patch.permissionReviewerModelProviderId = reviewer.modelProviderId
+  }
+  // 判定模型的空串同样是「回落到本次 run 的模型」,悬空时置空即可
+  const goalEvaluator = repairModelSelection(before.goalEvaluatorModel,
+    before.goalEvaluatorModelProviderId, aliveBindings, aliveAliases,
+    { model: '', modelProviderId: undefined })
+  if (goalEvaluator !== undefined) {
+    patch.goalEvaluatorModel = goalEvaluator.model
+    patch.goalEvaluatorModelProviderId = goalEvaluator.modelProviderId
   }
   if (Object.keys(patch).length === 0) return
 

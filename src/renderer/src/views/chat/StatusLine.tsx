@@ -15,6 +15,8 @@
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
+import type { ActiveGoal } from '../../../../shared/domain/goal'
+import { agentErrorText } from '../../i18n/agent'
 import { hasRun } from '../../../../shared/agent/transcript'
 import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
 import { activityOf, type ActivityPhase } from '../../../../shared/domain/activity'
@@ -55,7 +57,8 @@ export function StatusLine({
   waitingForResponse,
   lastSeq,
   queued,
-  compactError
+  compactError,
+  goal
 }: {
   transcript: TranscriptState
   running: boolean
@@ -64,6 +67,7 @@ export function StatusLine({
   queued: number
   /** 手动压缩(`/compact` 或双击圆环)的失败原因。自动压缩走 `contextStatus`。 */
   compactError?: string | null
+  goal?: ActiveGoal
 }): ReactNode {
   const { t, locale } = useI18n()
   const { status, model, contextUsage, notice, contextStatus } = transcript
@@ -72,7 +76,7 @@ export function StatusLine({
   const showCompacted = useFading(contextStatus?.phase === 'ready', contextStatus)
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
-  if (!hasRun(transcript, running)) return null
+  if (!hasRun(transcript, running) && goal === undefined) return null
 
   /*
     ★ 重试 / 切换提示**压过**那句「正在等待回复…」,而不是并排再加一行:
@@ -103,6 +107,18 @@ export function StatusLine({
   })
 
   return (
+    <div className="flex w-full flex-col gap-1 text-[11.5px]">
+      {goal !== undefined && <p role="status" data-testid="goal-status-line"
+        title={t('goal.notice.current', { condition: goal.condition, iterations: goal.iterations, reason: goal.lastReason ?? t('goal.panel.noCheckYet') })}
+        className="inline-flex min-w-0 items-center gap-1.5 text-fg-muted">
+        <span className="shrink-0">{t('goal.pill.label')}</span><Dot />
+        <span className="truncate">{goal.condition}</span>
+        {goal.lastReason && <span className="truncate text-fg-faint">{t('goal.panel.lastCheck')}: {goal.lastReason}</span>}
+        {goal.deferredSince !== undefined && <span className="truncate text-fg-faint">{t('goal.panel.deferred')}</span>}
+      </p>}
+      {transcript.warning !== undefined && <p role="status" className="text-warning" data-testid="goal-warning">
+        {agentErrorText(transcript.warning, t)}
+      </p>}
     <div
       data-testid="chat-status"
       data-status={status}
@@ -181,6 +197,7 @@ export function StatusLine({
           </div>
         </div>
       )}
+    </div>
     </div>
   )
 }

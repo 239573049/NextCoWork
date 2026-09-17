@@ -198,6 +198,35 @@ describe('OpenAI Responses decoding', () => {
     expect((await collect(decodeOpenAIResponses(events()))).at(-1)).toMatchObject({ type: 'error' })
   })
 
+  // 网关把参数 parse 完重新 stringify、或干脆不给终局快照 —— 入参一个字没变,
+  // 为它中止整轮是我们自己的问题
+  it.each(['{ "text": "hello" }', ''])('accepts a re-serialized or absent argument snapshot (%s)', async (snapshot) => {
+    const output = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { ...functionItem, arguments: '' } },
+      { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'fc-1', delta: functionItem.arguments },
+      responseDone([{ ...functionItem, arguments: snapshot }])
+    )))
+    expect(output.some((e) => e.type === 'error')).toBe(false)
+    expect(accumulated(output).calls).toEqual([{ ok: true, callId: 'call-1', name: 'Echo', input: { text: 'hello' } }])
+  })
+
+  // 终局 output 重排顺序并重新生成 item id:按下标并槽会把 B 的参数追到 A 上
+  it('keeps parallel calls apart when the terminal output is reordered with new item ids', async () => {
+    const second = { type: 'function_call', id: 'fc-2', call_id: 'call-2', name: 'Echo', arguments: '{"text":"world"}' }
+    const output = await collect(decodeOpenAIResponses(events(
+      { type: 'response.output_item.added', output_index: 0, item: { ...functionItem, arguments: '' } },
+      { type: 'response.output_item.added', output_index: 1, item: { ...second, arguments: '' } },
+      { type: 'response.function_call_arguments.done', output_index: 0, item_id: 'fc-1', arguments: functionItem.arguments },
+      { type: 'response.function_call_arguments.done', output_index: 1, item_id: 'fc-2', arguments: second.arguments },
+      responseDone([{ ...second, id: 'rewritten-2' }, { ...functionItem, id: 'rewritten-1' }])
+    )))
+    expect(output.some((e) => e.type === 'error')).toBe(false)
+    expect(accumulated(output).calls).toEqual([
+      { ok: true, callId: 'call-1', name: 'Echo', input: { text: 'hello' } },
+      { ok: true, callId: 'call-2', name: 'Echo', input: { text: 'world' } }
+    ])
+  })
+
   // 规范的 incomplete_details.reason 枚举有四个值,以前只放行两个 ——
   // max_messages 和 steered 被当成协议违规中止整轮,而 steered 是正常终止
   it.each([

@@ -758,6 +758,48 @@ describe('AGENTS.md 与运行时状态注入', () => {
     expect(first?.parts).toEqual([{ type: 'text', text: typed }])
   })
 
+  it('Shell 变更只影响后续任务，当前任务的提示词和工具执行保持一致', async () => {
+    workspace('ws-shell', '')
+    let selected = 'shell-before'
+    const observed: Array<{ advertised: string | undefined; executed: string }> = []
+    const bodies: string[] = []
+    const host = withDemo(nodeHost({
+      paths: { userData: () => join(tmp, 'userData'), attachments: () => join(tmp, 'attachments'), temp: () => tmpdir() },
+      spawn: async (_command, options) => ({ code: 0, stdout: options.shell ?? selected, stderr: '' })
+    }, () => selected), { chunkDelayMs: 0 })
+    installHost({ ...host, fetch: (input, init) => {
+      const body = String(init?.body ?? '')
+      if (body.includes('Shell: ')) bodies.push(body)
+      selected = 'shell-after'
+      return host.fetch(input, init)
+    } })
+    getTools().register(defineTool({
+      internalId: 'echo', description: 'Probe the shell snapshot', schema: z.object({ text: z.string() }),
+      readOnly: true, destructive: false, needsNetwork: false,
+      async run(_input, ctx) {
+        const result = await ctx.host.spawn('probe', { cwd: ctx.workspaceRoot, signal: ctx.signal })
+        observed.push({ advertised: ctx.host.platform?.shell, executed: result.stdout })
+        return toolOk(result.stdout)
+      }
+    }))
+    const first = req({ workspaceId: 'ws-shell', sessionId: 'shell-first' })
+    startRun(first, fakeWindow().ctx)
+    await waitForEnd(first.runId)
+    expect(runs.get(first.runId)?.status).toBe('done')
+    expect(observed).toEqual([{ advertised: 'shell-before', executed: 'shell-before' }])
+    expect(bodies.length).toBeGreaterThan(0)
+    expect(bodies.every((body) => body.includes('Shell: shell-before'))).toBe(true)
+
+    bodies.length = 0
+    const second = req({ workspaceId: 'ws-shell', sessionId: 'shell-second' })
+    startRun(second, fakeWindow().ctx)
+    await waitForEnd(second.runId)
+    expect(runs.get(second.runId)?.status).toBe('done')
+    expect(observed.at(-1)).toEqual({ advertised: 'shell-after', executed: 'shell-after' })
+    expect(bodies.length).toBeGreaterThan(0)
+    expect(bodies.every((body) => body.includes('Shell: shell-after'))).toBe(true)
+  })
+
   it('★ git 探测炸了,run 照样跑完 —— 不是无声消失', async () => {
     workspace('ws-nogit', '')
     // 中断走的是 reject 而不是 resolve(`node-spawn.ts`),所以 `readGitContext`

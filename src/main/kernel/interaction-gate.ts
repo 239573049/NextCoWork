@@ -42,6 +42,8 @@ function validResponse(pending: PendingInteraction, response: InteractionRespons
           && (question.allowFreeform || question.options.some((option) => option.label === value)))
       })
     }
+    case 'goal_proposal':
+      return typeof response.approved === 'boolean'
     case 'plan_approval':
       if (pending.kind !== 'plan_approval') return false
       return typeof response.action === 'string'
@@ -55,16 +57,24 @@ function validResponse(pending: PendingInteraction, response: InteractionRespons
 export class InteractionGate {
   private readonly pending = new Map<string, Entry>()
 
-  request(handle: RunHandle, draft: InteractionDraft, now: number): Promise<InteractionResponse> {
+  request(handle: RunHandle, draft: InteractionDraft, now: number, options?: { onChange?: () => void }): Promise<InteractionResponse> {
     handle.signal.throwIfAborted()
     if (handle.status !== 'running') return Promise.reject(new Error('Run is no longer active'))
     const interaction = { ...structuredClone(draft), id: ulid(now), runId: handle.runId, createdAt: now } as PendingInteraction
     return new Promise((resolve, reject) => {
       let off: () => void = () => {}
+      const changed = (): void => {
+        try { options?.onChange?.() } catch { /* UI notification must not change the decision. */ }
+      }
       const clean = (): void => {
         this.pending.delete(interaction.id)
         handle.signal.removeEventListener('abort', abort)
         off()
+        if (handle.status !== 'running') {
+          const index = handle.pendingInteractions.findIndex((pending) => pending.id === interaction.id)
+          if (index >= 0) handle.pendingInteractions.splice(index, 1)
+        }
+        changed()
       }
       const abort = (): void => {
         if (!this.pending.has(interaction.id)) return
@@ -80,13 +90,19 @@ export class InteractionGate {
         interaction, handle, abort,
         answer: (response) => {
           clean()
-          handle.emit({ type: 'interaction_resolved', id: interaction.id, outcome: { status: 'answered', response } })
+          if (handle.status === 'running') handle.emit({ type: 'interaction_resolved', id: interaction.id, outcome: { status: 'answered', response } })
           resolve(response)
         }
       })
       handle.signal.addEventListener('abort', abort, { once: true })
-      off = handle.on((event) => { if (event.type === 'run_end') abort() })
+      off = handle.on((event) => {
+        if (event.type !== 'run_end') return
+        // A proposal does not hold the run open and remains answerable after normal completion.
+        if (interaction.kind === 'goal_proposal' && event.status === 'done') return
+        abort()
+      })
       handle.emit({ type: 'interaction_request', interaction })
+      changed()
     })
   }
 
@@ -101,11 +117,22 @@ export class InteractionGate {
 
   respond(response: InteractionResponse): void {
     const entry = this.pending.get(response?.id)
-    if (entry === undefined || entry.handle.signal.aborted || entry.handle.status !== 'running') {
+    if (entry === undefined || entry.handle.signal.aborted
+      || (entry.handle.status !== 'running' && !(entry.interaction.kind === 'goal_proposal' && entry.handle.status === 'done'))) {
       throw new Error('Interaction is no longer pending')
     }
     if (!validResponse(entry.interaction, response)) throw new Error('Invalid interaction response')
     entry.answer(structuredClone(response))
+  }
+
+  hasGoalProposal(sessionId: string): boolean {
+    return [...this.pending.values()].some(({ interaction }) => interaction.kind === 'goal_proposal' && interaction.sessionId === sessionId)
+  }
+
+  cancelGoalProposals(sessionId: string): void {
+    for (const entry of [...this.pending.values()]) {
+      if (entry.interaction.kind === 'goal_proposal' && entry.interaction.sessionId === sessionId) entry.abort()
+    }
   }
 
   clear(): void {

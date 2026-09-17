@@ -11,9 +11,11 @@ import {
   attachmentRelPath,
   buildNcwUrl,
   extOfMime,
+  imageMimeOfBytes,
   isImageMime,
   isSafeFileName,
   mimeOfExt,
+  normalizeImageMime,
   parseNcwUrl
 } from '../domain/attachment'
 
@@ -168,6 +170,58 @@ describe('mime', () => {
   it('isImageMime', () => {
     expect(isImageMime('image/webp')).toBe(true)
     expect(isImageMime('application/pdf')).toBe(false)
+  })
+
+  /**
+   * 别名归并:预览可见的图片在发送时不能被白名单拒掉。
+   * `image/jpg` / `image/pjpeg` / `image/x-png` 都是真实世界中存在的写法,
+   * 大小写与 `; charset=` 参数也会出现。
+   */
+  it.each([
+    ['image/jpg', 'image/jpeg'],
+    ['image/pjpeg', 'image/jpeg'],
+    [' IMAGE/JPEG ', 'image/jpeg'],
+    ['image/jpeg; charset=binary', 'image/jpeg'],
+    ['image/x-png', 'image/png'],
+    ['IMAGE/PNG', 'image/png'],
+    ['image/gif', 'image/gif'],
+    ['image/webp', 'image/webp']
+  ])('%j 归一到 %s', (mime, expected) => {
+    expect(normalizeImageMime(mime)).toBe(expected)
+  })
+
+  it.each(['image/svg+xml', 'image/bmp', 'image/avif', 'application/pdf', ''])(
+    '%j 不在图片白名单里',
+    (mime) => {
+      expect(normalizeImageMime(mime)).toBeNull()
+    }
+  )
+
+  it('imageMimeOfBytes 认容器签名,不靠 MIME 也不靠扩展名', () => {
+    expect(imageMimeOfBytes(Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]))).toBe('image/png')
+    expect(imageMimeOfBytes(Uint8Array.from([255, 216, 255, 224]))).toBe('image/jpeg')
+    expect(imageMimeOfBytes(Buffer.from('GIF87a'))).toBe('image/gif')
+    expect(imageMimeOfBytes(Buffer.from('GIF89a'))).toBe('image/gif')
+    expect(imageMimeOfBytes(Buffer.from('RIFF\0\0\0\0WEBP'))).toBe('image/webp')
+  })
+
+  it('imageMimeOfBytes 对空字节、截断签名与伪装不猜', () => {
+    expect(imageMimeOfBytes(new Uint8Array())).toBeNull()
+    expect(imageMimeOfBytes(Uint8Array.from([137, 80, 78, 71]))).toBeNull()
+    expect(imageMimeOfBytes(Buffer.from('RIFF\0\0\0\0WAVE'))).toBeNull()
+    expect(imageMimeOfBytes(Buffer.from('<svg/>'))).toBeNull()
+  })
+
+  it('JFIF 与 JPEG 使用同一种图片 MIME', () => {
+    expect(mimeOfExt('photo.JFIF')).toBe('image/jpeg')
+    expect(isImageMime(mimeOfExt('photo.JFIF'))).toBe(true)
+  })
+
+  it.each([
+    ['image/jpg', '.jpg'],
+    ['image/x-png', '.png']
+  ])('extOfMime(%j) 先过归一化 => %s', (mime, expected) => {
+    expect(extOfMime(mime)).toBe(expected)
   })
 })
 

@@ -19,6 +19,7 @@ import {
 import { tmpdir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 let userDataDir = ''
@@ -27,17 +28,22 @@ vi.mock('../../runtime', () => ({ getEnvironments: () => ({ acquire: acquireEnvi
 
 vi.mock('electron', () => ({
   app: { getPath: (): string => userDataDir },
-  dialog: { showOpenDialog: vi.fn() }
+  dialog: { showOpenDialog: vi.fn() },
+  net: { fetch: vi.fn(async (url: string) => new Response(new Uint8Array(readFileSync(fileURLToPath(url))))) }
 }))
 
 import { dialog } from 'electron'
 import { MAX_ATTACHMENT_BYTES } from '../../../shared/domain/attachment'
 import { closeDatabase, openDatabase } from '../../db'
 import * as repo from '../../db/repo'
-import { attachmentRoot } from '../../net/attachment-protocol'
+import { attachmentRoot, handleAttachmentRequest } from '../../net/attachment-protocol'
 import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadAttachment } from '../attachment'
 import { localEnvironment } from '../../environment/local'
 import { nodeHost } from '../../kernel/host'
+import { prepareRequestImages } from '../../kernel/upstream/images'
+import { encodeUpstream } from '../../kernel/upstream/codec'
+import { REQUEST } from '../../kernel/upstream/__tests__/openai-fixtures'
+import { userMessage } from '../../../shared/agent/message'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import type { WindowContext } from '../../window/registry'
 
@@ -112,6 +118,72 @@ describe('uploadAttachment', () => {
     expect(readFileSync(join(dir, files[0] as string), 'utf8')).toBe('PNGDATA')
   })
 
+  it.each(['upload', 'picker'] as const)('keeps preview and all upstream protocols on the same bytes in a new session via %s', async (entry) => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
+    const sessionId = 'brand-new-image-session'
+    expect(repo.getSession(sessionId)).toBeUndefined()
+    if (entry === 'picker') {
+      const source = join(userDataDir, 'photo.JPG')
+      writeFileSync(source, png)
+      vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [source] })
+      const picked = await pickAttachments({ scope: 'session', ownerId: sessionId })
+      expect(picked).toMatchObject([{ kind: 'attachment', attachment: { mime: 'image/png' } }])
+    } else {
+      uploadAttachment({ scope: 'session', ownerId: sessionId, displayName: 'photo.jpg', mime: 'image/jpg', bytes: new Uint8Array(png) })
+    }
+    const [attachment] = listSessionAttachments({ sessionId })
+    expect(attachment?.mime).toBe('image/png')
+    const preview = await handleAttachmentRequest(new Request(attachment!.url), attachmentRoot())
+    expect(preview.status).toBe(200)
+    expect(preview.headers.get('content-type')).toBe('image/png')
+    expect(Buffer.from(await preview.arrayBuffer())).toEqual(png)
+    const host = nodeHost({ paths: {
+      userData: () => join(userDataDir, 'config-profiles', 'account'),
+      attachments: attachmentRoot, temp: () => userDataDir
+    } })
+    const request = { ...REQUEST, messages: [userMessage('u', [{ type: 'image', mime: attachment!.mime, dataRef: attachment!.url }], 0)] }
+    const before = structuredClone(request)
+    const prepared = await prepareRequestImages(request, host, { workspaceId: 'workspace', sessionId }, new AbortController().signal)
+    for (const protocol of ['anthropic', 'openai-chat', 'openai-responses'] as const) {
+      const encoded = encodeUpstream(protocol, prepared, 'vision-model', 'test-key', { userId: 'workspace', cacheTtl: '5m' })
+      expect(JSON.stringify(encoded.body)).toContain(png.toString('base64'))
+      expect(JSON.stringify(encoded.body)).not.toContain('ncw://')
+    }
+    expect(request).toEqual(before)
+  })
+
+  it('uses the image bytes rather than a misleading MIME label for storage and restored metadata', () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0])
+    const uploaded = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'photo.jpg', mime: 'image/jpg', bytes: png })
+    expect(uploaded.mime).toBe('image/png')
+    expect(uploaded.url).toMatch(/\.png$/)
+    expect(listSessionAttachments({ sessionId: 'S1' })[0]?.mime).toBe(uploaded.mime)
+    expect(uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'photo.png', mime: 'image/png', bytes: png }).id).toBe(uploaded.id)
+  })
+
+  it('does not reuse a legacy attachment with an incompatible stored MIME type', () => {
+    const bytes = bytesOf('legacy image')
+    const old = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'old', mime: 'application/x-unknown', bytes })
+    const uploaded = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'photo.jpg', mime: 'image/jpg', bytes })
+    expect(uploaded.id).not.toBe(old.id)
+    expect(uploaded.mime).toBe('image/jpeg')
+    expect(uploaded.url).toMatch(/\.jpg$/)
+    const repeated = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'photo.jpg', mime: 'image/jpeg', bytes })
+    expect(repeated.id).toBe(uploaded.id)
+  })
+
+  it('reuses the repaired copy even when the system clock moves backwards', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(2000)
+    const bytes = bytesOf('clock rollback image')
+    try {
+      uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'old', mime: 'application/x-unknown', bytes })
+      now.mockReturnValue(1000)
+      const repaired = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'photo.jpg', mime: 'image/jpg', bytes })
+      const repeated = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'photo.jpg', mime: 'image/jpeg', bytes })
+      expect(repeated.id).toBe(repaired.id)
+    } finally { now.mockRestore() }
+  })
+
   it('★ 同内容重复上传去重:只占一份磁盘,返回同一个 id', () => {
     const a = uploadAttachment({
       scope: 'session', ownerId: 'S1', displayName: 'a.png', mime: 'image/png', bytes: bytesOf('SAME')
@@ -174,7 +246,7 @@ describe('uploadAttachment', () => {
         scope: 'session', ownerId: 'S1', displayName: 'big', mime: 'application/zip',
         bytes: new Uint8Array(33 * 1024 * 1024) as Uint8Array<ArrayBuffer>
       })
-    ).toThrow(/上限/)
+    ).toThrow(/upload limit/)
   })
 
   it('★ 落盘后不留 .tmp 残片 —— 原子替换的可观测证据', () => {
@@ -345,6 +417,15 @@ describe('pickAttachments —— 与拖拽/粘贴同一套分流', () => {
     expect(repo.listDraftAttachments('S1')).toHaveLength(0)
   })
 
+  it.each(['bmp', 'avif', 'heic', 'heif', 'tif', 'tiff'])('preserves the existing file-reference path for %s selections', async (extension) => {
+    const path = fixture(`source.${extension}`, 'SOURCE')
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path] })
+    expect(await pickAttachments({ scope: 'session', ownerId: 'S1' })).toEqual([
+      { kind: 'path', path, name: `source.${extension}` }
+    ])
+    expect(repo.listDraftAttachments('S1')).toEqual([])
+  })
+
   it('图片仍走落盘 —— 内联展示要有 ncw:// 地址', async () => {
     const path = fixture('截图.png', 'PNGDATA')
     showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path] })
@@ -360,7 +441,17 @@ describe('pickAttachments —— 与拖拽/粘贴同一套分流', () => {
     expect(JSON.stringify(a)).not.toContain(userDataDir)
   })
 
-  it('★ 超限的非图片仍然回传,超限的图片仍然被跳过', async () => {
+  it('reports an unsupported image at selection time without dropping other selections', async () => {
+    const svg = fixture('drawing.svg', '<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+    const document = fixture('report.pdf', 'PDF')
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [svg, document] })
+    expect(await pickAttachments({ scope: 'session', ownerId: 'S1' })).toMatchObject([
+      { kind: 'error', name: 'drawing.svg', error: { messageKey: 'attachment.error.unsupportedImage' } },
+      { kind: 'path', path: document, name: 'report.pdf' }
+    ])
+  })
+
+  it('returns large non-image paths and reports oversized images instead of dropping them', async () => {
     // 稀疏文件:声明 33MB 但不占磁盘,跑得比写 33MB 快得多
     const big = fixture('巨大.log', '')
     truncateSync(big, MAX_ATTACHMENT_BYTES + 1)
@@ -372,7 +463,10 @@ describe('pickAttachments —— 与拖拽/粘贴同一套分流', () => {
 
     // 上限存在的理由是结构化克隆的卡顿,而路径这一支根本不读字节 ——
     // 拖一个 200MB 的日志进来是可以的,菜单选同一个文件没有理由被静默丢掉。
-    expect(out).toEqual([{ kind: 'path', path: big, name: '巨大.log' }])
+    expect(out).toMatchObject([
+      { kind: 'path', path: big, name: '巨大.log' },
+      { kind: 'error', name: '巨图.png', error: { messageKey: 'attachment.error.tooLarge', messageParams: { limit: 32 } } }
+    ])
   })
 
   it('单个文件失败不拖垮整批', async () => {
@@ -383,7 +477,10 @@ describe('pickAttachments —— 与拖拽/粘贴同一套分流', () => {
     })
 
     const out = await pickAttachments({ scope: 'session', ownerId: 'S1' })
-    expect(out).toEqual([{ kind: 'path', path: ok, name: '好.pdf' }])
+    expect(out).toMatchObject([
+      { kind: 'error', name: '不存在.pdf', error: { messageKey: 'attachment.error.readFailed', messageParams: { code: 'ENOENT' } } },
+      { kind: 'path', path: ok, name: '好.pdf' }
+    ])
   })
 
   it('目录被跳过 —— 不递归展开', async () => {

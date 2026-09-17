@@ -12,8 +12,8 @@ export interface ModeCatalog {
 export async function listModes(req: { workspaceId: string }): Promise<ModeCatalog> {
   await refreshModes(req.workspaceId)
   return {
-    modes: modeRegistry().list(),
-    diagnostics: modeRegistry().diagnostics(),
+    modes: modeRegistry(req.workspaceId).list(),
+    diagnostics: modeRegistry(req.workspaceId).diagnostics(),
     tools: getTools().info().map((tool) => tool.internalId).sort()
   }
 }

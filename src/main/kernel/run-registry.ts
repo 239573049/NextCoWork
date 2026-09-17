@@ -43,7 +43,10 @@ export class RunHandle {
   readonly sessionId: string
   readonly workspaceId: string
   readonly parentRunId: string | undefined
+  readonly parentSessionId: string | undefined
   readonly depth: number
+  /** Metadata of a detached Task run, kept with its authoritative run handle. */
+  backgroundTask?: { type: string; description: string }
 
   status: RunStatus = 'running'
   readonly startedAt = Date.now()
@@ -67,12 +70,14 @@ export class RunHandle {
    * 那张表的生命周期与 handle 完全重合 —— 两份状态,同一条命,迟早对不上。
    */
   private interject: InterjectItem[] = []
+  private readonly internalInterject = new Map<string, InterjectItem>()
 
   constructor(req: RunRequest) {
     this.runId = req.runId
     this.sessionId = req.sessionId
     this.workspaceId = req.workspaceId
     this.parentRunId = req.parentRunId
+    this.parentSessionId = req.parentSessionId
     this.depth = req.depth
   }
 
@@ -202,7 +207,18 @@ export class RunHandle {
    * 取消/编辑/删除全都退化成「重发一次当前全集」,乱序到达也收敛。
    */
   setInterject(items: readonly InterjectItem[]): void {
-    this.interject = items.map((item) => ({ id: item.id, parts: [...item.parts], ...(item.internal ? { internal: true } : {}) }))
+    // Renderer queue replacement must not erase a background result or goal kickoff.
+    if (items.length === 0 || items.some((item) => !item.internal)) {
+      this.interject = items.filter((item) => !item.internal).map((item) => ({ id: item.id, parts: [...item.parts] }))
+    }
+    for (const item of items) {
+      if (item.internal) this.enqueueInternal(item)
+    }
+  }
+
+  enqueueInternal(item: InterjectItem): void {
+    if (this.signal.aborted || this.status !== 'running') return
+    this.internalInterject.set(item.id, { ...item, parts: [...item.parts], internal: true })
   }
 
   /**
@@ -211,8 +227,9 @@ export class RunHandle {
    * 用户消息进同一份转录,上游看到的是一个自相矛盾的历史。
    */
   takeInterject(): InterjectItem[] {
-    const taken = this.interject
+    const taken = [...this.interject, ...this.internalInterject.values()]
     this.interject = []
+    this.internalInterject.clear()
     return taken
   }
 
@@ -242,6 +259,17 @@ export class RunHandle {
 
 export class RunRegistry {
   private readonly runs = new Map<string, RunHandle>()
+  private readonly abortAllListeners = new Set<() => void>()
+
+  onAbortAll(listener: () => void): Unsubscribe {
+    this.abortAllListeners.add(listener)
+    return () => this.abortAllListeners.delete(listener)
+  }
+
+  activeBackgroundChildrenOfSession(sessionId: string): RunHandle[] {
+    return [...this.runs.values()].filter((handle) => handle.parentSessionId === sessionId
+      && handle.backgroundTask !== undefined && handle.status === 'running' && !handle.signal.aborted)
+  }
 
   create(req: RunRequest): RunHandle {
     const existing = this.runs.get(req.runId)
@@ -323,6 +351,7 @@ export class RunRegistry {
   }
 
   abortAll(reason: AbortReason = { by: 'shutdown' }): void {
+    for (const listener of this.abortAllListeners) listener()
     for (const id of this.activeRunIds()) this.abort(id, false, reason)
   }
 

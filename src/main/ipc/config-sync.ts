@@ -90,6 +90,8 @@ function applyEvent(event: { kind: string; entityId: string; operation: string; 
     else if (event.kind === 'searchProvider') repo.putSearchProvider(payload as unknown as SearchProviderConfig)
     else if (event.kind === 'appPreferences' || event.kind === 'appPersonalization') {
       const patch = { ...payload }
+      // Shell selection is device-local, even when an older remote payload includes it.
+      delete patch.shell
       if (patch.data && typeof patch.data === 'object') {
         // backupDirectory is explicitly device-local; a cloud null must not erase it.
         const { backupDirectory: _ignored, ...data } = patch.data as Record<string, unknown>

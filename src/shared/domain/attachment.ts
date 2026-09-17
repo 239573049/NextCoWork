@@ -28,6 +28,7 @@
  * 于是不会被 `attachments` 表的 `ON DELETE CASCADE` 带走。这一条直接决定了
  * 清理规则必须按子树分治,否则它们会被当成孤儿删掉(设计 §6)。
  */
+import type { AgentError } from '../agent/error'
 import type { EnvironmentRef } from './environment'
 import { environmentKey } from './environment'
 
@@ -121,6 +122,8 @@ export type PickedAttachment =
   | { kind: 'attachment'; attachment: Attachment }
   /** `path` 是绝对路径。★ 它由用户在系统对话框里选定,与他拖进来的文件同源 */
   | { kind: 'path'; path: string; name: string }
+  /** 单个文件失败也保留结果,不能让它从多选列表里静默消失。 */
+  | { kind: 'error'; name: string; error: AgentError }
 
 export interface AttachmentUploadRequest {
   scope: AttachmentScope
@@ -262,6 +265,7 @@ const MIME_BY_EXT: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
+  jfif: 'image/jpeg',
   gif: 'image/gif',
   webp: 'image/webp',
   svg: 'image/svg+xml',
@@ -272,13 +276,36 @@ const MIME_BY_EXT: Record<string, string> = {
   zip: 'application/zip'
 }
 
+export type SupportedImageMime = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
+
+/** 上传与发送共用白名单;MIME 别名不能让预览可见的图片在发送时被拒。 */
+export function normalizeImageMime(mime: string): SupportedImageMime | null {
+  switch ((mime.split(';', 1)[0] ?? '').trim().toLowerCase()) {
+    case 'image/png': case 'image/x-png': return 'image/png'
+    case 'image/jpeg': case 'image/jpg': case 'image/pjpeg': return 'image/jpeg'
+    case 'image/gif': return 'image/gif'
+    case 'image/webp': return 'image/webp'
+    default: return null
+  }
+}
+
+/** 只识别容器签名,不在共享层解码整张图;字节可纠正不可靠的扩展名与 MIME。 */
+export function imageMimeOfBytes(bytes: Uint8Array): SupportedImageMime | null {
+  if ([137, 80, 78, 71, 13, 10, 26, 10].every((value, i) => bytes[i] === value)) return 'image/png'
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg'
+  const header = String.fromCharCode(...bytes.subarray(0, 12))
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) return 'image/gif'
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') return 'image/webp'
+  return null
+}
+
 /**
  * ★ 未知 mime 落到 `.bin` 而**不是没有扩展名**:无扩展名的文件在
  * `mimeOfExt` 那边推不出类型,协议就只能回 `application/octet-stream`,
  * 浏览器于是把它当下载而不是内联 —— 一个 mime 表的空缺会变成一个显示 bug。
  */
 export function extOfMime(mime: string): string {
-  return EXT_BY_MIME[mime.toLowerCase()] ?? '.bin'
+  return EXT_BY_MIME[normalizeImageMime(mime) ?? mime.toLowerCase()] ?? '.bin'
 }
 
 export function mimeOfExt(pathOrName: string): string {
@@ -288,5 +315,5 @@ export function mimeOfExt(pathOrName: string): string {
 }
 
 export function isImageMime(mime: string): boolean {
-  return mime.toLowerCase().startsWith('image/')
+  return mime.trim().toLowerCase().startsWith('image/')
 }

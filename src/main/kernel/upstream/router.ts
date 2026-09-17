@@ -19,6 +19,7 @@ import { REQUEST_PATH } from '../../../shared/domain/baseurl'
 import type { ModelAlias, ProviderHealth, ThinkingConfig, UpstreamProvider, UpstreamProtocol } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf, effectiveModelProtocol } from '../../../shared/domain/provider'
 import { applyRequestPatches, RequestPatchError } from '../../../shared/domain/request-patch'
+import { DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS } from '../../../shared/domain/settings'
 import {
   applyThinkingAdapter,
   enforceThinkingPreference,
@@ -55,7 +56,11 @@ const MAX_ATTEMPTS = 3
  */
 const MAX_NETWORK_ATTEMPTS = 6
 const DEFAULT_BASE_DELAY_MS = 500
-const DEFAULT_IDLE_TIMEOUT_MS = 120_000
+/**
+ * 默认值取自设置层的 `DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS` —— 那边是
+ * 「设置页那一栏的默认」,这边是「没注入函数时的兜底」,两者必须是同一个数。
+ */
+const DEFAULT_IDLE_TIMEOUT_MS = DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS * 1000
 /**
  * 限流(429)专用的退避基数,和上面那个**刻意不是一个数**。
  *
@@ -166,7 +171,12 @@ type Outcome =
 
 export interface UpstreamRouterOptions {
   baseDelayMs?: number
-  idleTimeoutMs?: number
+  /**
+   * 上游空闲超时。给数字就是定值(测试用);给函数则**每次请求时重新求值** ——
+   * `runtime.ts` 用后者把设置页「连接 › 网络」的那一栏接进来,改完立刻对
+   * 下一条请求生效,不必重建路由器(和 `ProviderConfigSource` 用函数同一个理由)。
+   */
+  idleTimeoutMs?: number | (() => number)
   /** 限流退避的基数。见 `DEFAULT_RATE_LIMIT_FLOOR_MS`;测试压成 0 就不会真的睡。 */
   rateLimitFloorMs?: number
   /** Synchronous sink; failures are isolated so telemetry can never fail a request. */
@@ -213,7 +223,7 @@ export class UpstreamRouter {
    */
   private readonly rateLimitGate = new Map<string, { until: number; reason: string }>()
   private readonly baseDelayMs: number
-  private readonly idleTimeoutMs: number
+  private readonly idleTimeoutMs: () => number
   private readonly rateLimitFloorMs: number
   private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
   private readonly priceAttempt: UpstreamRouterOptions['priceAttempt']
@@ -229,7 +239,10 @@ export class UpstreamRouter {
     opts: UpstreamRouterOptions = {}
   ) {
     this.baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
-    this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+    const idleTimeout = opts.idleTimeoutMs
+    this.idleTimeoutMs = typeof idleTimeout === 'function'
+      ? idleTimeout
+      : () => idleTimeout ?? DEFAULT_IDLE_TIMEOUT_MS
     this.rateLimitFloorMs = opts.rateLimitFloorMs ?? DEFAULT_RATE_LIMIT_FLOOR_MS
     this.onUsageAttempt = opts.onUsageAttempt
     this.priceAttempt = opts.priceAttempt
@@ -448,7 +461,7 @@ export class UpstreamRouter {
       idleTimer = setTimeout(() => {
         timedOut = true
         controller.abort()
-      }, this.idleTimeoutMs)
+      }, this.idleTimeoutMs())
     }
     const waitFor = <T>(operation: () => PromiseLike<T>): Promise<T> => {
       resetIdleTimeout()
@@ -753,7 +766,7 @@ export class UpstreamRouter {
         throw err
       }
       if (timedOut) {
-        const seconds = Math.ceil(this.idleTimeoutMs / 1000)
+        const seconds = Math.ceil(this.idleTimeoutMs() / 1000)
         return finish({
           kind: 'failed', sawContent,
           error: agentError('network', `No response progress from ${c.provider.name} for ${seconds} seconds.`, {

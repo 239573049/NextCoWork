@@ -5,14 +5,23 @@
 import { AlertTriangle, Play, Plus, Webhook } from 'lucide-react'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
+  BLOCKING_HOOK_EVENTS,
   HOOK_EVENTS,
+  HOOK_TYPES,
   defaultTimeoutMs,
   type HookEvent,
+  type HookDiagnostic,
   type HookListItem,
   type HookRunReport,
-  type HookScope
+  type HookScope,
+  type HookType
 } from '../../../../../shared/domain/hook'
 import { HOOK_TEMPLATES, findHookTemplate } from '../../../../../shared/domain/hook-templates'
+import {
+  modelSelectionKey,
+  parseModelSelectionKey
+} from '../../../../../shared/domain/model-selection'
+import type { InvokeReq } from '../../../../../shared/ipc/contract'
 import { Button } from '../../../components/ui/Button'
 import { Dialog } from '../../../components/ui/Dialog'
 import { EmptyState } from '../../../components/ui/EmptyState'
@@ -23,6 +32,7 @@ import { TextArea } from '../../../components/ui/TextArea'
 import { TextInput } from '../../../components/ui/TextInput'
 import { Toggle } from '../../../components/ui/Toggle'
 import { useI18n } from '../../../i18n'
+import { modelOptions } from '../../../settings/pages/model/enabled-models'
 import {
   deleteHook,
   hookDiagnostics,
@@ -32,42 +42,83 @@ import {
   setHookEnabled,
   testHook
 } from '../../../services/hooks'
+import { useModelsStore } from '../../../stores/models'
 import { useWindowStore } from '../../../stores/window'
-import { templateToDraft, validateHook, warnHook, type HookDraft } from './hook-form'
+import {
+  draftToUpsert,
+  emptyHookDraft,
+  templateToDraft,
+  validateHook,
+  warnHook,
+  type HookDraft
+} from './hook-form'
 
-const EMPTY_DRAFT = (event: HookEvent): HookDraft => ({
-  event,
-  matcher: '',
-  command: '',
-  timeoutSeconds: defaultTimeoutMs(event) / 1000,
-  description: '',
-  enabled: true
-})
+/** 列表里那一行的主标题：两支各有一个「正文」字段。 */
+function hookBody(row: HookListItem): string {
+  return row.type === 'prompt' ? row.prompt : row.command
+}
+
+/**
+ * 草稿里那一对 `(别名, 供应商)` 在复合下拉里的键。
+ *
+ * ★ 空别名 = 「回落到本次 run 的模型」,而那时**供应商那一半没有意义**(单独一个
+ *   providerId 配不出任何一条绑定,见 `draftToUpsert`),所以键也必须是空的。
+ */
+function draftModelKey(draft: HookDraft): string {
+  const model = draft.model.trim()
+  if (model === '') return ''
+  const providerId = draft.modelProviderId.trim()
+  return modelSelectionKey(providerId === '' ? undefined : providerId, model)
+}
 
 export function HooksPanel(): ReactNode {
   const { t } = useI18n()
   const workspaceId = useWindowStore((s) => s.activeWorkspaceId)
+  const models = useModelsStore((s) => s.models)
+  const providers = useModelsStore((s) => s.providers)
+  const modelsLoaded = useModelsStore((s) => s.loaded)
+  const loadModels = useModelsStore((s) => s.load)
   const [rows, setRows] = useState<HookListItem[]>([])
-  const [diagnostics, setDiagnostics] = useState<Array<{ path: string; message: string }>>([])
+  const [diagnostics, setDiagnostics] = useState<HookDiagnostic[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const [editing, setEditing] = useState<{ draft: HookDraft; id?: string; scope: HookScope } | null>(null)
   const [testing, setTesting] = useState(false)
+  /**
+   * 试运行的结果。★ **prompt 型也是真发一次请求**(`hooks:test`),不再在本地拼。
+   *
+   * 拼 `$ARGUMENTS` 的那一段示例 payload 只能有一份 —— 判定器真正看到的那段
+   * 展开是主进程做的,渲染层再拼一份「差不多的」,两段就会各自漂移:用户照着
+   * 预览改好了 prompt,真跑起来收到的却是另一个形状,而预览本身没有任何症状。
+   * 那正是「预览」这个词最坏的一种失效方式。
+   */
   const [testResult, setTestResult] = useState<HookRunReport | null>(null)
+
+  useEffect(() => {
+    if (!modelsLoaded) void loadModels()
+  }, [modelsLoaded, loadModels])
 
   const test = (): void => {
     if (editing === null || validateHook(editing.draft) !== null) return
     setTesting(true)
     setTestResult(null)
-    void testHook(
-      editing.scope,
-      editing.draft.event,
-      editing.draft.command.trim(),
-      Math.round(editing.draft.timeoutSeconds * 1000),
-      workspaceId ?? undefined
-    )
+    const base = {
+      scope: editing.scope,
+      event: editing.draft.event,
+      timeoutMs: Math.round(editing.draft.timeoutSeconds * 1000),
+      ...(workspaceId === null ? {} : { workspaceId })
+    }
+    /*
+      ★ 两支共用一个频道(`hooks:test`),靠 `type` 判别 —— 见 `services/hooks.ts`。
+        prompt 型那一支走的是同样的往返:预览由主进程给,这里只负责显示。
+    */
+    const request: InvokeReq<'hooks:test'> = editing.draft.type === 'prompt'
+      ? { ...base, type: 'prompt', prompt: editing.draft.prompt.trim() }
+      : { ...base, type: 'command', command: editing.draft.command.trim() }
+    void testHook(request)
       .then(setTestResult)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      // ★ 失败时只把主进程那句人话显示出来,不新编文案;非 Error 的抛出物落回一条已有提示。
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : t('ext.error.loadFailed')))
       .finally(() => setTesting(false))
   }
 
@@ -86,19 +137,7 @@ export function HooksPanel(): ReactNode {
     const { draft, id, scope } = editing
     if (validateHook(draft) !== null) return
     setError(null)
-    void saveHook(
-      scope,
-      {
-        ...(id === undefined ? {} : { id }),
-        event: draft.event,
-        ...(draft.matcher.trim() === '' ? {} : { matcher: draft.matcher.trim() }),
-        command: draft.command.trim(),
-        enabled: draft.enabled,
-        timeoutMs: Math.round(draft.timeoutSeconds * 1000),
-        ...(draft.description.trim() === '' ? {} : { description: draft.description.trim() })
-      },
-      workspaceId ?? undefined
-    )
+    void saveHook(scope, draftToUpsert(draft, id), workspaceId ?? undefined)
       .then(() => { setEditing(null); refresh() })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
   }
@@ -112,6 +151,52 @@ export function HooksPanel(): ReactNode {
   const invalid = editing === null ? null : validateHook(editing.draft)
   const warning = editing === null ? null : warnHook(editing.draft)
 
+  /**
+   * 试运行那一屏要显示的东西。
+   *
+   * ★ 有 `preview` 就是 prompt 型：主进程已经把 `$ARGUMENTS` 展开好了,原样显示。
+   *   没有则是命令型,按老样子给结果行 + stdout / stderr。
+   */
+  const testOutput = testResult === null
+    ? null
+    : testResult.preview ?? `${t('hooks.testResult', {
+      outcome: testResult.outcome,
+      code: testResult.exitCode === null ? '-' : String(testResult.exitCode),
+      ms: String(testResult.durationMs)
+    })}${testResult.stdout === '' ? '' : `\n\nstdout:\n${testResult.stdout}`}${
+      testResult.stderr === '' ? '' : `\n\nstderr:\n${testResult.stderr}`}`
+
+  /** prompt 型那一格存的是一对 `(别名, 供应商)`,候选也只能是复合键。 */
+  const currentModelKey = editing === null ? '' : draftModelKey(editing.draft)
+  /*
+    ★ 空选项的文案跟设置里那几栏用同一句「跟随对话」:空在这里的含义就是
+      「回落到本次 run 的模型」,和 `settings.subagent.model` 那一栏逐字相同。
+  */
+  const promptModelOptions = [
+    { value: '', label: t('models.followConversation') },
+    ...modelOptions(models.filter((m) => m.enabled !== false), providers)
+  ]
+  /*
+    ★ 文件里那一对**未必**还在这张候选表里(钉的那家被停用 / 被删,或者只写了别名
+      没写供应商)。不补一个选项的话,下拉框会显示成空白 —— 用户以为没配过,随手
+      一选就把「不钉供应商」这件事默默改掉了;而钉着的那家是会被重新启用的,替用户
+      清掉那一行不可逆。补上之后选中态才对得上,用户不碰它就原样存回去。
+  */
+  if (
+    editing !== null &&
+    currentModelKey !== '' &&
+    !promptModelOptions.some((o) => o.value === currentModelKey)
+  ) {
+    const model = editing.draft.model.trim()
+    const providerId = editing.draft.modelProviderId.trim()
+    promptModelOptions.splice(1, 0, {
+      value: currentModelKey,
+      label: providerId === ''
+        ? t('ext.field.modelAnyProvider', { alias: model })
+        : t('ext.field.modelUnavailable', { alias: `${providerId} · ${model}` })
+    })
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 px-4 py-2">
@@ -121,19 +206,20 @@ export function HooksPanel(): ReactNode {
           variant="accent"
           icon={<Plus size={13} />}
           className="ml-auto"
-          onClick={() =>
-            setEditing({ draft: EMPTY_DRAFT('PreToolUse'), scope: workspaceId === null ? 'global' : 'project' })
-          }
+          onClick={() => {
+            setTestResult(null)
+            setEditing({ draft: emptyHookDraft('PreToolUse'), scope: workspaceId === null ? 'global' : 'project' })
+          }}
         >
           {t('ext.new')}
         </Button>
       </div>
 
       {error !== null && <p className="shrink-0 px-4 pb-1 text-[11px] text-danger" role="alert">{error}</p>}
-      {diagnostics.map((d) => (
-        <p key={d.path} className="shrink-0 px-4 pb-1 text-[11px] text-warning" role="status">
+      {diagnostics.map((d, index) => (
+        <p key={`${d.path}:${index}`} className="shrink-0 px-4 pb-1 text-[11px] text-warning" role="status">
           <AlertTriangle size={11} className="mr-1 inline" />
-          {d.message} — {d.path}
+          {d.messageKey === undefined ? d.message : t(d.messageKey, d.messageParams)}{d.path === '' ? '' : ` — ${d.path}`}
         </p>
       ))}
 
@@ -152,23 +238,32 @@ export function HooksPanel(): ReactNode {
                     <button
                       type="button"
                       className="min-w-0 flex-1 text-left"
-                      onClick={() =>
+                      onClick={() => {
+                        // ★ 换一条草稿 = 上一次的试运行结果跟它没有任何关系,清掉。
+                        setTestResult(null)
                         setEditing({
                           id: row.id,
                           scope: row.scope,
                           draft: {
-                            event: row.event,
+                            ...emptyHookDraft(row.event, row.type),
                             matcher: row.matcher ?? '',
-                            command: row.command,
+                            ...(row.type === 'prompt'
+                              ? {
+                                prompt: row.prompt,
+                                model: row.model ?? '',
+                                modelProviderId: row.modelProviderId ?? ''
+                              }
+                              : { command: row.command }),
                             timeoutSeconds: row.timeoutMs / 1000,
                             description: row.description ?? '',
                             enabled: row.enabled
                           }
                         })
-                      }
+                      }}
                     >
-                      <span className="block truncate font-mono text-[12px] text-fg">{row.command}</span>
+                      <span className="block truncate font-mono text-[12px] text-fg">{hookBody(row)}</span>
                       <span className="block truncate text-[11px] text-fg-faint">
+                        {row.type === 'prompt' ? `${t('hooks.type.prompt')} · ` : ''}
                         {row.matcher ?? t('hooks.anyTool')}
                         {row.description === undefined ? '' : ` · ${row.description}`}
                       </span>
@@ -178,7 +273,7 @@ export function HooksPanel(): ReactNode {
                     </span>
                     <Toggle
                       checked={row.enabled}
-                      label={t('ext.toggleLabel', { name: row.command })}
+                      label={t('ext.toggleLabel', { name: hookBody(row) })}
                       onChange={(v) => {
                         void setHookEnabled(row.scope, row.id, v, workspaceId ?? undefined).then(refresh)
                       }}
@@ -237,6 +332,40 @@ export function HooksPanel(): ReactNode {
               />
             </label>
 
+            {/*
+              ★ 类型选在事件**之前**：它决定下面那一屏长什么样（命令还是 prompt、
+              默认超时是 60 秒还是 30 秒）。放在后面的话用户会先填完再发现填错了地方。
+            */}
+            <label className="flex flex-col gap-1">
+              <span className="text-[12px] text-fg-muted">{t('hooks.field.type')}</span>
+              <Segmented<HookType>
+                size="sm"
+                value={editing.draft.type}
+                label={t('hooks.field.type')}
+                onChange={(v) => {
+                  // 换类型 = 上一次那份结果属于另一种钩子,清掉。
+                  setTestResult(null)
+                  /*
+                    ★ 只换 `type` 和默认超时，**两段正文都留着**：用户来回切时
+                      他已经写好的那一段不该被清掉（切回来发现空了是最恼人的表单行为）。
+                      保存时 `draftToUpsert` 只取其中一支。
+                  */
+                  setEditing({
+                    ...editing,
+                    draft: {
+                      ...editing.draft,
+                      type: v,
+                      timeoutSeconds: defaultTimeoutMs(editing.draft.event, v) / 1000
+                    }
+                  })
+                }}
+                options={HOOK_TYPES.map((v) => ({
+                  value: v,
+                  label: t(v === 'prompt' ? 'hooks.type.prompt' : 'hooks.type.command')
+                }))}
+              />
+            </label>
+
             <label className="flex flex-col gap-1">
               <span className="text-[12px] text-fg-muted">{t('hooks.field.event')}</span>
               <Select
@@ -250,6 +379,15 @@ export function HooksPanel(): ReactNode {
               />
             </label>
 
+            {/*
+              ★ `Stop` 的「阻断」和 PreToolUse / UserPromptSubmit **方向相反**：
+              后两个拦的是「别发生」，Stop 拦的是收尾 —— 拦住的结果是这一轮**继续跑**。
+              不说清会让用户照着前两个的直觉配出一个他没想到的死循环。
+            */}
+            {editing.draft.event === 'Stop' && BLOCKING_HOOK_EVENTS.includes('Stop') && (
+              <p className="text-[11px] text-warning" role="status">{t('hooks.blocking.stopNote')}</p>
+            )}
+
             <label className="flex flex-col gap-1">
               <span className="text-[12px] text-fg-muted">{t('hooks.field.matcher')}</span>
               <TextInput
@@ -261,16 +399,54 @@ export function HooksPanel(): ReactNode {
               />
             </label>
 
-            <label className="flex flex-col gap-1">
-              <span className="text-[12px] text-fg-muted">{t('hooks.field.command')}</span>
-              <TextArea
-                value={editing.draft.command}
-                onCommit={(v) => setEditing({ ...editing, draft: { ...editing.draft, command: v } })}
-                placeholder="./scripts/guard.sh"
-                ariaLabel={t('hooks.field.command')}
-                rows={3}
-              />
-            </label>
+            {editing.draft.type === 'prompt' ? (
+              <>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[12px] text-fg-muted">{t('hooks.prompt.label')}</span>
+                  <TextArea
+                    value={editing.draft.prompt}
+                    onCommit={(v) => setEditing({ ...editing, draft: { ...editing.draft, prompt: v } })}
+                    placeholder={t('hooks.prompt.placeholder')}
+                    ariaLabel={t('hooks.prompt.label')}
+                    rows={4}
+                  />
+                </label>
+                {/*
+                  ★ 判定模型是**一对** `(别名, 供应商)`,和设置里那几栏同一种东西 ——
+                    模型名 / 供应商名是**领域值**,不翻译。空着 = 回落到本次 run 的模型。
+                    两个裸输入框拼不出这一对:用户填了别名却不知道那一半落在哪家,
+                    而同一别名挂在不同家上时计费是不同的(`modelSelectionKey`)。
+                */}
+                <label className="flex flex-col gap-1">
+                  <span className="text-[12px] text-fg-muted">{t('hooks.prompt.model')}</span>
+                  <Select
+                    inModal
+                    value={currentModelKey}
+                    options={promptModelOptions}
+                    ariaLabel={t('hooks.prompt.model')}
+                    onValueChange={(key) => {
+                      const { alias, modelProviderId } = parseModelSelectionKey(key)
+                      // 空键 = 两半一起清掉:只留一个 providerId 配不出任何一条绑定。
+                      setEditing({
+                        ...editing,
+                        draft: { ...editing.draft, model: alias, modelProviderId: modelProviderId ?? '' }
+                      })
+                    }}
+                  />
+                </label>
+              </>
+            ) : (
+              <label className="flex flex-col gap-1">
+                <span className="text-[12px] text-fg-muted">{t('hooks.field.command')}</span>
+                <TextArea
+                  value={editing.draft.command}
+                  onCommit={(v) => setEditing({ ...editing, draft: { ...editing.draft, command: v } })}
+                  placeholder="./scripts/guard.sh"
+                  ariaLabel={t('hooks.field.command')}
+                  rows={3}
+                />
+              </label>
+            )}
 
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-2">
@@ -301,28 +477,36 @@ export function HooksPanel(): ReactNode {
             {invalid !== null && (
               <p className="text-[11px] text-danger" role="alert">{t(invalid as 'hooks.error.emptyCommand')}</p>
             )}
-            <p className="text-[11px] text-fg-faint">{t('hooks.dangerNote')}</p>
+            {/* ★ 那是「它会跑本机命令」的提醒 —— 对 prompt 型说这句话是错的。 */}
+            {editing.draft.type === 'command' && (
+              <p className="text-[11px] text-fg-faint">{t('hooks.dangerNote')}</p>
+            )}
 
             {/*
               ★ 试运行是这一屏性价比最高的控件：钩子的失败模式（脚本路径不对、
               shell 语法、超时）全都只有真跑一次才暴露，而配好之后要等到某次
               工具调用才会触发，那时候错误早就淹没在别的事情里了。
+
+              ★ prompt 型也走同一条频道：它只预览 `$ARGUMENTS` 的替换结果，不真调模型。
+              那段展开由主进程给（渲染层不再自己拼一份示例 payload）—— 理由见
+              `testResult` 那段。
             */}
             <div className="flex items-center gap-2 border-t border-hairline pt-3">
               <Button size="sm" icon={<Play size={13} />} onClick={test} disabled={invalid !== null || testing}>
-                {testing ? t('hooks.testing') : t('hooks.test')}
+                {testing
+                  ? t('hooks.testing')
+                  : editing.draft.type === 'prompt' ? t('hooks.prompt.preview') : t('hooks.test')}
               </Button>
-              {workspaceId === null && <span className="text-[11px] text-fg-faint">{t('hooks.testNeedsWorkspace')}</span>}
+              {editing.draft.type === 'command' && workspaceId === null && (
+                <span className="text-[11px] text-fg-faint">{t('hooks.testNeedsWorkspace')}</span>
+              )}
+              {editing.draft.type === 'prompt' && (
+                <span className="text-[11px] text-fg-faint">{t('hooks.prompt.previewNote')}</span>
+              )}
             </div>
-            {testResult !== null && (
+            {testOutput !== null && (
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-input p-2 font-mono text-[11px] text-fg-muted">
-                {t('hooks.testResult', {
-                  outcome: testResult.outcome,
-                  code: testResult.exitCode === null ? '-' : String(testResult.exitCode),
-                  ms: String(testResult.durationMs)
-                })}
-                {testResult.stdout === '' ? '' : `\n\nstdout:\n${testResult.stdout}`}
-                {testResult.stderr === '' ? '' : `\n\nstderr:\n${testResult.stderr}`}
+                {testOutput}
               </pre>
             )}
           </div>

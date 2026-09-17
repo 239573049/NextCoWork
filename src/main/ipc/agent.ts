@@ -15,7 +15,9 @@ import type { InterjectItem } from '../../shared/agent/interject'
 import { interactions } from '../kernel/interaction-gate'
 import { IpcError, toAgentError } from './errors'
 import { RunHandle, runs } from '../kernel/run-registry'
-import { runAgent } from '../runtime'
+import { ensureGoalRuntime, runAgent } from '../runtime'
+import { pauseGoal, restoreGoal } from '../goal/runtime'
+import { getActiveGoal } from '../goal/state'
 import { store } from '../state/store'
 import { runTopic, windows, type WindowContext } from '../window/registry'
 import { updateService } from '../update/update-service'
@@ -127,6 +129,9 @@ export type RunDriver = (handle: RunHandle, req: RunRequest) => void | Promise<v
 export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver = runAgent): void {
   updateService.configure()
   if (!updateService.canStartNewRuns()) throw new IpcError('unknown', '必须安装客户端更新后才能开始新的任务')
+  if (req.inputGoalId !== undefined && getActiveGoal(req.sessionId)?.id !== req.inputGoalId) {
+    throw new IpcError('unknown', 'The goal was cleared or replaced before this input was sent.')
+  }
   detachImportedSession(req)
   windows.subscribe(runTopic(req.runId), ctx.sender)
   launch(req, driver)
@@ -215,6 +220,10 @@ export function attachRun(req: { runId: string; sinceSeq: number }, ctx: WindowC
   // 而不是一个空快照 —— 空快照会被当成「run 存在但没事件」,UI 就永远转圈了。
   if (!handle) throw new IpcError('unknown', `run 不存在: ${req.runId}`)
 
+  if (handle.depth === 0 && handle.parentRunId === undefined) {
+    ensureGoalRuntime()
+    restoreGoal(handle.sessionId)
+  }
   pumps.get(req.runId)?.flush()
   windows.subscribe(runTopic(req.runId), ctx.sender)
   for (const childId of descendantRunIds(handle)) windows.subscribe(runTopic(childId), ctx.sender)
@@ -231,11 +240,21 @@ function descendantRunIds(handle: RunHandle): string[] {
   return result
 }
 
-export function listInteractions(req: { runId?: string }, ctx: WindowContext): PendingInteraction[] {
+export function listInteractions(req: { runId?: string; sessionId?: string }, ctx: WindowContext): PendingInteraction[] {
   const handle = req.runId === undefined ? undefined : runs.get(req.runId)
   const allowed = handle === undefined ? undefined : new Set([handle.runId, ...descendantRunIds(handle)])
-  return interactions.list().filter((i) => windows.isSubscribed(runTopic(i.runId), ctx.sender)
-    && (req.runId === undefined || allowed?.has(i.runId) === true))
+  const session = req.sessionId === undefined ? undefined : store.getSession(req.sessionId)
+  return interactions.list().filter((interaction) => {
+    if (interaction.kind === 'goal_proposal' && session !== undefined
+      && session.parentSessionId === undefined && interaction.sessionId === session.id) {
+      // Session-scoped proposals survive run completion and renderer reload.
+      windows.subscribe(runTopic(interaction.runId), ctx.sender)
+      return true
+    }
+    if (req.sessionId !== undefined && req.runId === undefined) return false
+    return windows.isSubscribed(runTopic(interaction.runId), ctx.sender)
+      && (req.runId === undefined || allowed?.has(interaction.runId) === true)
+  })
 }
 
 export function respondInteraction(response: InteractionResponse, ctx: WindowContext): void {
@@ -247,6 +266,11 @@ export function respondInteraction(response: InteractionResponse, ctx: WindowCon
 }
 
 export function abortRun(req: { runId: string; cascade: boolean }): void {
+  const handle = runs.get(req.runId)
+  if (handle !== undefined && handle.depth === 0) {
+    pauseGoal(handle.sessionId)
+    interactions.cancelGoalProposals(handle.sessionId)
+  }
   runs.abort(req.runId, req.cascade, { by: 'user' })
 }
 

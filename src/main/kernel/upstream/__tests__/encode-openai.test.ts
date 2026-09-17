@@ -84,6 +84,16 @@ describe('OpenAI request encoders', () => {
     expect(JSON.stringify(encoded.body)).not.toContain('reasoning_content')
   })
 
+  it('strips output-only fields from echoed reasoning items', () => {
+    const messages = [assistantMessage('a', [{ type: 'thinking', text: '检查参数。', opaque: {
+      protocol: 'openai-responses',
+      item: { ...reasoningItem, status: 'completed', object: 'reasoning' }
+    } }], 0)]
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'gpt-test', 'k').body as { input: unknown[] }).input
+    expect(input[0]).toEqual(reasoningItem)
+    expect(JSON.stringify(input)).not.toContain('status')
+  })
+
   it('encodes vision blocks and omits tools for tool-free requests', () => {
     const request = { ...REQUEST, tools: [], messages: [userMessage('u', [
       { type: 'text', text: '看图' }, { type: 'image', mime: 'image/png', dataRef: 'data:image/png;base64,aGVsbG8=' }

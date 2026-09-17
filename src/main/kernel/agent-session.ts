@@ -31,6 +31,7 @@ import {
   validateModelRuntime
 } from '../../shared/domain/model-runtime'
 import type { Skill } from '../../shared/domain/skill'
+import type { SchedulingBridge } from '../../shared/domain/scheduled'
 import type { PlanExecutionContext } from './plan-execution'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
@@ -39,6 +40,13 @@ import { abortable, abortableSleep, abortableStream, isAbortError } from './abor
 import { BlockAccumulator, type PendingCall } from './block-accumulator'
 import { assemble } from './context-assembler'
 import { compactMessages, compactionBoundary, compactionNote, tokenCalibration, withSummary } from './context-assembler'
+import {
+  COMPACTION_SYSTEM,
+  buildCompactionPrompt,
+  compactionDigestBudget,
+  sanitizeSummaryNote,
+  summaryOutputTokens
+} from './context-assembler'
 import type { ContextCheckpoint } from '../../shared/agent/context-management'
 import { effectiveContextWindow } from '../../shared/agent/context-management'
 import { promptTokensOf } from '../../shared/agent/transcript'
@@ -103,8 +111,11 @@ export interface SessionDeps {
    * 由调用方决定写不写盘。步骤 6 的 SQLite 就接在这个缝上。
    */
   history?: readonly AgentMessage[]
-  /** 每个完整消息块提交时调用；主进程把它接到 SQLite。 */
+  /** Merge UI-only metadata before the persistence boundary; context keeps the original copy. */
+  prepareMessage?: (message: AgentMessage) => AgentMessage
   onMessageCommit?: (message: AgentMessage) => void
+  /** Reject coordination queued for a goal that was cleared or replaced. */
+  acceptsGoalInput?: (goalId: string) => boolean
   /** 上游响应结束后执行工具；把真实执行结果回填到产生这些调用的用量记录。 */
   onToolUsage?: (summary: { runId: string; toolCalls: number; toolErrors: number }) => void
   /**
@@ -124,6 +135,30 @@ export interface SessionDeps {
   skills?: readonly Skill[]
   approve?: ApproveFn
   interact?: InteractFn
+  canProposeGoal?: () => boolean
+  proposeGoal?: (condition: string, askUser: boolean) => Promise<'set' | 'pending'>
+  /**
+   * 定时任务的读写通道。缺省 = 这个环境里排不了程,四个定时任务工具整体不下发。
+   *
+   * ★ 形状同 `spawnSubagent`:内核只认这个窄接口,「store 在哪、写完要不要重排
+   * 调度器」全部留在 `main/scheduled/bridge.ts`。内核仍然零 electron、可单测。
+   */
+  scheduling?: SchedulingBridge
+  /**
+   * 回合末的一次询问 —— 「这一轮真的可以停了吗」。
+   *
+   * ★★ **只有主 run 装配**（装配点在 `main/runtime.ts`）。子 run 没有「停止」这回事：
+   *   它的结局是把结论交回父代理，没有人在等它满足一个会话级的条件。
+   *   不装配意味着 `depth > 0` 时这个 `await` 是 `undefined?.()` —— 零开销，
+   *   也没有第二条「要不要判定」的判断路径。
+   *
+   * 返回 `continue` 时内核把 `inject` 提交成一条 **internal** 用户消息并继续循环；
+   * 返回 `finish` 或 `undefined` 时按原路径收尾。
+   *
+   * ★ 形状参照 `onToolExecuted`：内核只定义缝，「判定器是谁、钩子从哪来」
+   *   全部留在 `main/`。内核仍然零 electron、可单测。
+   */
+  onTurnEnd?: (input: TurnEndInput) => Promise<TurnEndResult | undefined>
   /**
    * 收窄本轮工具快照的**额外**闸门。
    *
@@ -137,6 +172,14 @@ export interface SessionDeps {
   allowedTools?: readonly string[] | (() => readonly string[] | undefined)
   /** Dynamic path fence used by file-backed Plan mode. */
   writeFileRestriction?: () => string | undefined
+  /**
+   * Plan 模式当前那份计划文件(工作区相对路径),每轮现取。
+   *
+   * ★ 必须是函数:计划可能在**本轮中途**才由 `EnterPlanMode` 产生。
+   * 每轮注入的理由见 `runtime.ts` 里装配它的那段 —— 压缩会清空历史工具输出,
+   * 而路径原本只存在于那条 `tool_result` 里。
+   */
+  planFile?: () => string | undefined
   /** Resolved built-in or custom mode instructions. */
   modePrompt?: string
   /**
@@ -164,6 +207,13 @@ export interface SessionDeps {
   contextCheckpoints?: readonly ContextCheckpoint[]
   saveContextCheckpoint?: (checkpoint: ContextCheckpoint) => void
   /**
+   * 这个会话**当前**最大的窗口号(现查,不是构造时的快照)。缺省 = 只看内存计数。
+   *
+   * ★ 它存在的唯一理由是发号撞车:`contextCheckpoints` 是构造时读一次的快照,
+   * 而 run 跑到一半用户可以点手动压缩,那条路按库里的 max+1 发号。见 `nextWindowIndex`。
+   */
+  latestContextWindowIndex?: () => number
+  /**
    * 断流续跑的退避表。缺省 `RESUME_DELAYS_MS`(见那条常量上面的长注释)。
    *
    * ★ 存在的理由和 `UpstreamRouter` 的 `baseDelayMs` 一样:测试里传 `[0, 0, 0]`
@@ -174,6 +224,65 @@ export interface SessionDeps {
 
 /** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
 const FALLBACK_MAX_OUTPUT = 8192
+
+export interface TurnEndInput {
+  sessionId: string
+  workspaceId: string
+  runId: string
+  /** 到这一刻为止的完整转录 —— 判定器的输入就是它。 */
+  messages: readonly AgentMessage[]
+  isSubagent: boolean
+  /**
+   * 本 run 至今调用过的工具总数。
+   *
+   * ★ 刹车判据的来源。`main/` 那层只知道「这一轮模型有没有要求工具」，
+   *   它连工具执行都看不到 —— 所以这个数必须由内核数。
+   */
+  toolCallsThisRun: number
+  /**
+   * 连续「什么都没做就想停」的轮数。任何一次带工具的回合把它清零。
+   *
+   * ★ 它拦的是「模型什么都不做还想停」，**不是**「长任务跑了很久」：
+   *   一个老实干活的目标可以跑几百轮而从不触发。这正是不加总迭代上限的理由。
+   */
+  stoppedTurnStreak: number
+  /** Has a Stop hook already been evaluated in this run (not reset by tools)? */
+  stopHookActive?: boolean
+  signal: AbortSignal
+}
+
+export interface TurnEndResult {
+  kind: 'continue' | 'finish'
+  /**
+   * 继续时注入的内容。★ 内核会把它提交成 `internal` 用户消息 —— 它是协作消息，
+   * 不是用户说的话，不该出现在聊天气泡里（同 `InterjectItem.internal` 的理由）。
+   */
+  inject?: ContentPart[]
+  /** 一条只进 UI 那一轨的状态标记（达成 / 未达成 / 判为不可能 / 已清除）。 */
+  goalStatus?: Extract<ContentPart, { type: 'goal_status' }>
+  /**
+   * 一条用户可见的警告（连续空转被强停之类）。走和 `goalStatus` 同一条附加路径。
+   *
+   * ★ 用 `AgentError` 而不是裸字符串：`messageKey` 那条既有约定让渲染层按 i18n
+   *   翻译本地产生的文案，而这条警告正是本地产生的。
+   */
+  warning?: AgentError
+  /** A deferred/idle-brake finish must first accept coordination received during evaluation. */
+  acceptPendingInput?: boolean
+  /** 判定的文字结论，给日志与遥测用。 */
+  note?: string
+}
+
+/**
+ * `turn()` 的三种结局。
+ *
+ * ★ 写成判别联合而不是「返回空 calls 数组表示继续」：后者会让 `executeAll([])`
+ *   跑一次空循环，并且往用量账本里写一条 0 工具的记录 —— 一个跑两百轮的目标
+ *   会留下两百条那样的假记录。
+ */
+type TurnOutcome =
+  | { kind: 'tools'; calls: PendingCall[]; tools: Map<string, Tool> }
+  | { kind: 'continue' }
 
 /**
  * 一次机械压缩至少要削掉这个比例,才算「压缩生效了」。
@@ -257,6 +366,14 @@ export class AgentSession {
    */
   private pending: BlockAccumulator | null = null
   private contextNote: string | undefined
+  /**
+   * `contextNote` 那条检查点的 id —— `withSummary` 拿它当摘要消息的消息 id。
+   *
+   * ★ 和 `contextNote` 必须成对存在:重建投影(`projectContext`)时两者缺一,
+   * 摘要就接不回去。原来只有构造函数里用到它的局部变量,于是**后面每一次重建
+   * 都把摘要弄丢了** —— 见 `projectContext`。
+   */
+  private contextNoteId: string | undefined
   private contextWindowIndex = 0
   /**
    * 当前这一段机械压缩期占用的窗口号。
@@ -292,6 +409,23 @@ export class AgentSession {
    */
   private mechanicalCompactionExhausted = false
   private stopAfterTool = false
+  /**
+   * 本 run 至今调用过的工具总数。run 结束即随对象一起消失。
+   *
+   * ★ 它是刹车判据的唯一来源 —— 判定器那层不该自己去看「这轮有没有调工具」。
+   */
+  private toolCallsThisRun = 0
+  /**
+   * 连续「什么都没做就想停」的轮数。
+   *
+   * 拿到 `continue` 时 +1；`executeAll()` 里跑到任何一次工具调用时归零。
+   *
+   * ★ 复位放在**内核**而不是判定器里：判定与续跑是两个层的事。`main/` 那层
+   *   只看得到「这一轮模型有没有要求工具」，连工具执行都看不到。复位放在这里，
+   *   `main/` 那层就只需要读一个数。
+   */
+  private stoppedTurnStreak = 0
+  private stopHookActive = false
   /** 断流续跑的退避表。见 `RESUME_DELAYS_MS` 与 `canResume`。 */
   private readonly resumeDelays: readonly number[]
 
@@ -328,6 +462,7 @@ export class AgentSession {
     const allCheckpoints = [...(deps.contextCheckpoints ?? [])].sort((a, b) => b.windowIndex - a.windowIndex)
     const latestCheckpoint = allCheckpoints.find((c) => !isMechanical(c))
     this.contextNote = latestCheckpoint?.note
+    this.contextNoteId = latestCheckpoint?.id
     this.contextWindowIndex = allCheckpoints[0]?.windowIndex ?? 0
     // 最新那条就是机械压缩的话,这一段压缩期还没结束 —— 下次接着覆盖它,而不是新开一条。
     this.mechanicalWindowIndex = allCheckpoints[0] !== undefined && isMechanical(allCheckpoints[0])
@@ -409,10 +544,12 @@ export class AgentSession {
     for (;;) {
       const outcome = await this.turn()
       if (outcome === null) return // 这一轮已经把 run 收尾了
-      await this.executeAll(outcome.calls, outcome.tools)
-      if (this.stopAfterTool) {
-        this.handle.finish('done')
-        return
+      if (outcome.kind === 'tools') {
+        await this.executeAll(outcome.calls, outcome.tools)
+        if (this.stopAfterTool) {
+          this.handle.finish('done')
+          return
+        }
       }
       /**
        * ★ 插话的注入点 —— **在工具结果落进转录之后、下一次请求组装之前**。
@@ -427,6 +564,9 @@ export class AgentSession {
        * Anthropic 编码器会把相邻的同角色消息并成一轮(`encode/anthropic.ts`),
        * 所以模型看到的是一条 `[tool_result…, 插话文本]` 的用户消息 ——
        * tool_result 仍在最前,形状合法。
+       *
+       * ★ 续跑(`kind === 'continue'`)那条路**也**走这里:用户在目标跑着的时候
+       * 排进来的话,应该在下一次请求里被模型看到,而不是等到目标结束。
        */
       this.injectInterjections()
     }
@@ -435,10 +575,11 @@ export class AgentSession {
   /**
    * 一轮:组装 → 请求 → 拼块 → 提交助手消息。
    *
-   * 返回 null 表示 run 已经结束(正常收尾或出错);否则返回待执行的工具调用
-   * 与**本轮下发给模型的那份工具快照**。
+   * 返回 null 表示 run 已经结束(正常收尾或出错);`'continue'` 表示回合末判定
+   * 要求再跑一轮(已经注入过续跑消息);否则返回待执行的工具调用与**本轮下发给
+   * 模型的那份工具快照**。
    */
-  private async turn(): Promise<{ calls: PendingCall[]; tools: Map<string, Tool> } | null> {
+  private async turn(): Promise<TurnOutcome | null> {
     this.handle.signal.throwIfAborted()
     const alias = this.aliasFor(this.req.model)
     if (alias !== undefined) {
@@ -480,7 +621,8 @@ export class AgentSession {
         界面上只剩一个不动的「运行中」。判据用 `depth`(而不是 `parentRunId`)
         是因为 tool ctx 递下去的也是 `depth`,两边说的是同一件事。
       */
-      noInteraction: this.req.depth > 0
+      noInteraction: this.req.depth > 0,
+      context: this.toolContext('')
     })
     // A model without tool calling must not receive a tool schema merely
     // because the application registry contains tools. Existing tool history
@@ -488,9 +630,11 @@ export class AgentSession {
     const advertised = modelSupportsTools(alias) ? available : []
     const byName = new Map(advertised.map((t) => [t.externalName, t]))
     // `execute` 是闭包,过不了结构化克隆 —— 请求体里不该带着它
-    const infos: ToolInfo[] = advertised.map(({ execute: _execute, ...info }) => info)
+    const infos: ToolInfo[] = advertised.map(({ execute: _execute, isEnabled: _isEnabled, ...info }) => info)
 
     const todoToolName = this.deps.tools.byInternalId('TodoWrite')?.externalName
+    // 每轮现取 —— `EnterPlanMode` 可能就发生在本轮的上一次工具调用里
+    const planFile = this.deps.planFile?.()
 
     const assembleInput = {
       messages: this.contextMessages,
@@ -513,6 +657,7 @@ export class AgentSession {
       webSearch: this.req.webSearch,
       reminder: {
         ...(this.deps.planExecution !== undefined ? { planExecution: this.deps.planExecution } : {}),
+        ...(planFile !== undefined ? { planFile } : {}),
         ...(this.deps.projectInstructions !== undefined
           ? { projectInstructions: this.deps.projectInstructions }
           : {}),
@@ -561,13 +706,13 @@ export class AgentSession {
         : undefined
       if (checkpoint !== undefined) {
         this.contextNote = checkpoint.note
+        this.contextNoteId = checkpoint.id
         this.contextWindowIndex = checkpoint.windowIndex
         // 摘要压缩另起了一个窗口,上一段机械压缩期到此为止。
         this.mechanicalWindowIndex = undefined
         // 摘要换掉了整段基线 —— 机械压缩「榨干了」这个判断随之作废。
         this.mechanicalCompactionExhausted = false
-        const compacted = compactMessages(this.messages)
-        const projected = withSummary(compacted, checkpoint.note, checkpoint.id, this.deps.host.clock.now())
+        const projected = this.projectContext()
         this.contextMessages = [...projected]
         ;({ request, usage, calibratedInputTokens } = assemble({ ...assembleInput, messages: projected }))
         const finalized = { ...checkpoint, inputTokensAfter: usage.used, updatedAt: this.deps.host.clock.now() }
@@ -582,7 +727,7 @@ export class AgentSession {
         */
         const wantsSummary = contextSettings.experimentalMode === true
         const before = usage.used
-        const projected = compactMessages(this.messages)
+        const projected = this.projectContext()
         this.contextMessages = [...projected]
         ;({ request, usage, calibratedInputTokens } = assemble({ ...assembleInput, messages: projected }))
         /*
@@ -685,11 +830,67 @@ export class AgentSession {
       if (stopReason === 'tool_use') {
         this.deps.host.logger.warn('[session] stopReason=tool_use 但没有已闭合的工具调用')
       }
+
+      /*
+        ★★ 回合末的判定点。位置被两头夹死，不是随便选的：
+
+        - 必须在 `closeUnexecutedCalls` **之后** —— 判定器读的转录必须已经配对完整，
+          否则它会看到一串没有 tool_result 的 tool_call，那是我们自己的半成品状态，
+          而它会据此判「工具还没跑完，未达成」。
+        - 必须在 `handle.finish('done')` **之前** —— 一旦收尾，run 就从注册表摘掉了，
+          再想继续就是「同一轮里的第二次 run」，用户看到的是两次回答。
+
+        ★ 判定器抛异常**必须在这里兜住**。结构上它每一轮 end_turn 都会被调用，
+          一次逃出去的异常 = `for(;;)` 无限重试同一个请求。降级成「这一轮不判定」。
+      */
+      // A completed background result or kickoff already queued is work to do, not a stop.
+      if (this.injectInterjections() > 0) return { kind: 'continue' }
+      let turnEnd: TurnEndResult | undefined
+      try {
+        turnEnd = stopReason === 'end_turn' ? await this.deps.onTurnEnd?.({
+          sessionId: this.req.sessionId,
+          workspaceId: this.req.workspaceId,
+          runId: this.req.runId,
+          messages: this.messages,
+          isSubagent: this.req.depth > 0,
+          toolCallsThisRun: this.toolCallsThisRun,
+          stoppedTurnStreak: this.stoppedTurnStreak,
+          stopHookActive: this.stopHookActive,
+          signal: this.handle.signal
+        }) : undefined
+        if (stopReason === 'end_turn' && this.deps.onTurnEnd !== undefined) this.stopHookActive = true
+      } catch (err) {
+        this.deps.host.logger.warn('[session] 回合末判定失败，本轮按正常收尾处理', err)
+      }
+
+      this.handle.signal.throwIfAborted()
+      if (turnEnd !== undefined) {
+        if (turnEnd.goalStatus !== undefined) this.attachUiParts([turnEnd.goalStatus])
+        if (turnEnd.acceptPendingInput === true && this.injectInterjections() > 0) return { kind: 'continue' }
+        if (turnEnd.warning !== undefined) this.handle.emit({ type: 'notification', warning: turnEnd.warning })
+        if (turnEnd.kind === 'continue' && (turnEnd.inject?.length ?? 0) > 0) {
+          this.stoppedTurnStreak += 1
+          const at = this.deps.host.clock.now()
+          /*
+            ★ `internal` 要**展开设置**，不能当构造器的参数传：`userMessage(id, parts, now)`
+              只有三个参数。照 `injectInterjections` 里那条既有写法来。
+          */
+          this.commit({ ...userMessage(ulid(at), turnEnd.inject!, at), internal: true })
+          /*
+            ★ 交回 `loop()` 再跑一轮，**不在这里递归**：一个跑几百轮的目标会把
+              `turn()` 叠成几百层栈帧，而它最后是以一次栈溢出结束的 —— 那种失败
+              既看不出原因，也没有任何转录留下来。
+          */
+          return { kind: 'continue' }
+        }
+      }
+
+      if (turnEnd?.kind !== 'finish' && this.injectInterjections() > 0) return { kind: 'continue' }
       this.handle.finish('done')
       return null
     }
 
-    return { calls, tools: byName }
+    return { kind: 'tools', calls, tools: byName }
   }
 
   /**
@@ -788,6 +989,46 @@ export class AgentSession {
   }
 
   /**
+   * 重建「发给模型的那份历史」—— 机械压缩 + 当前摘要(如果有)。
+   *
+   * ★★ 抽出来是因为原来两条压缩分支各自写了一遍 `compactMessages(this.messages)`,
+   * 而那一行同时漏掉了两样**构造函数里明明做过**的事:
+   *
+   * 1. **摘要没接回去。** 构造函数恢复检查点时把历史投影成 `withSummary(compact(...))`,
+   *    可到了阈值走机械压缩那一支,投影被 `compactMessages(this.messages)` 整个换掉 ——
+   *    那条摘要消息就此消失。症状是「压缩之后模型突然忘了前半段对话」,而检查点、
+   *    分隔线、笔记全都好端端地在界面上,没有任何一处报错。
+   * 2. **路径没隔离。** `this.messages` 是**转录原文**,`isolateHistoryPaths` 只作用在
+   *    `contextMessages` 上(见构造函数里那段)。从转录直接重建,等于把另一台服务器的
+   *    文件引用重新放回上下文。
+   *
+   * 所以这里只做一件事:**一个入口把这两样一起补齐**,谁重建投影都走它。
+   */
+  private projectContext(): AgentMessage[] {
+    const isolated = this.messages.map((message) => ({
+      ...message,
+      parts: this.isolateHistoryPaths(message.parts)
+    }))
+    const compacted = compactMessages(isolated)
+    if (this.contextNote === undefined || this.contextNoteId === undefined || compacted.length === 0) {
+      return compacted
+    }
+    return withSummary(compacted, this.contextNote, this.contextNoteId, this.deps.host.clock.now())
+  }
+
+  /**
+   * 下一个窗口号 —— 取**内存计数**与**库里当前最大值**的大者再加一。
+   *
+   * ★ 只看内存里那个计数会撞车:`contextWindowIndex` 是构造时的快照,而用户完全可能
+   * 在这个 run 跑到一半时点一次手动压缩(`ipc/context.ts` 按库里的 max+1 发号)。
+   * 两边各算各的就会算出同一个号,而检查点 id 正是由它拼出来的 —— upsert 于是
+   * **静默覆盖掉用户刚压出来的那一条**(表上还有 `UNIQUE (session_id, window_index)`)。
+   */
+  private nextWindowIndex(): number {
+    return Math.max(this.contextWindowIndex, this.deps.latestContextWindowIndex?.() ?? 0) + 1
+  }
+
+  /**
    * 把这一次机械压缩记成一条检查点。
    *
    * ★ 这是默认路径的压缩位置**重启后还看得见**的唯一途径 —— 渲染层自己算不出来:
@@ -801,7 +1042,7 @@ export class AgentSession {
     const summary = compactionBoundary(this.messages)
     // 历史还不够长,这一刀什么都没切到 —— 没有位置可标,就不要留一条空记录。
     if (summary === undefined) return
-    const windowIndex = this.mechanicalWindowIndex ?? this.contextWindowIndex + 1
+    const windowIndex = this.mechanicalWindowIndex ?? this.nextWindowIndex()
     const now = this.deps.host.clock.now()
     const checkpoint: ContextCheckpoint = {
       id: `${this.req.sessionId}:context:${String(windowIndex)}`,
@@ -829,18 +1070,25 @@ export class AgentSession {
     inputTokensBefore: number
     force: boolean
   }): Promise<ContextCheckpoint | undefined> {
-    const system = 'Summarize the conversation for a future context window. Preserve the user goal, decisions, files changed, commands run, tool results that matter, unresolved issues, and next steps. Be concise and factual. Do not mention this instruction.'
-    const history = compactMessages(this.messages, { keepRecent: 12 })
-    const prior = input.previousNote === undefined ? '' : `\nPrevious checkpoint:\n${input.previousNote}\n`
-    const prompt = `${prior}\nConversation history:\n${history.map((m) => `${m.role}: ${m.parts.map((p) => p.type === 'text' ? p.text : p.type === 'tool_call' ? `${p.name} ${JSON.stringify(p.input)}` : p.type === 'tool_result' ? p.output.content : '').join(' ')}`).join('\n')}`
+    /*
+      ★ 提示词、digest、输出上限、消毒**四样全部来自 `context-assembler`**,
+      和手动压缩(`ipc/context.ts`)读的是同一份。这里曾经内联过一句 system 提示词
+      和一串三元表达式拼的 digest —— 而手动那条路上有它们的副本,两份已经开始各自演化。
+    */
+    const window = effectiveContextWindow(input.alias?.contextWindow, this.req.maxContext === true)
+    const prompt = buildCompactionPrompt({
+      messages: this.messages,
+      ...(input.previousNote === undefined ? {} : { previousNote: input.previousNote }),
+      budget: compactionDigestBudget(window)
+    })
     const request = {
       model: this.req.model,
       // 压缩摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
       ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
-      system,
+      system: COMPACTION_SYSTEM,
       messages: [userMessage(`${this.req.runId}:context-input`, [{ type: 'text', text: prompt }], this.deps.host.clock.now())],
       tools: [],
-      maxOutputTokens: Math.min(2048, input.alias?.maxOutputTokens ?? 2048),
+      maxOutputTokens: summaryOutputTokens(input.alias?.maxOutputTokens, window),
       thinkingLevel: 'off' as const
     }
     let note = ''
@@ -855,14 +1103,14 @@ export class AgentSession {
       if (isAbortError(error) || this.handle.signal.aborted) throw error
       return undefined
     }
-    // eslint-disable-next-line no-control-regex -- intentionally strip control characters from model output
-    note = note.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32_000)
+    note = sanitizeSummaryNote(note)
     if (note === '') return undefined
     const now = this.deps.host.clock.now()
+    const windowIndex = this.nextWindowIndex()
     const checkpoint: ContextCheckpoint = {
-      id: `${this.req.sessionId}:context:${String(this.contextWindowIndex + 1)}`,
+      id: `${this.req.sessionId}:context:${String(windowIndex)}`,
       sessionId: this.req.sessionId,
-      windowIndex: this.contextWindowIndex + 1,
+      windowIndex,
       note,
       source: input.force ? 'model' : 'manual',
       coveredFromMessageId: this.messages[0]?.id,
@@ -890,8 +1138,17 @@ export class AgentSession {
     const results: Array<ContentPart | undefined> = Array.from({ length: calls.length })
     let failed = false
     let firstError: unknown
+    /*
+      ★ 两个计数在**执行之前**就更新，不等结果：判据是「模型有没有要求干活」，
+        不是「干成了没有」。一个每轮都调工具却每次都失败的 run 仍然在做事
+        （它会读到错误、换个做法），而那不是空转。
+    */
+    if (calls.length > 0) {
+      this.toolCallsThisRun += calls.length
+      this.stoppedTurnStreak = 0
+    }
     try {
-      await Promise.all(calls.map(async (call, index) => {
+      const execute = async (call: PendingCall, index: number): Promise<void> => {
         try {
           results[index] = await this.executeOne(call, tools)
         } catch (error) {
@@ -901,7 +1158,13 @@ export class AgentSession {
             firstError = error
           }
         }
-      }))
+      }
+      if (calls.some((call) => tools.get(call.name)?.concurrencySafe === false)) {
+        for (const [index, call] of calls.entries()) {
+          await execute(call, index)
+          if (failed) break
+        }
+      } else await Promise.all(calls.map(execute))
       if (failed) throw firstError
     } finally {
       /**
@@ -1047,6 +1310,9 @@ export class AgentSession {
       runId: this.req.runId,
       ...(writeFileRestriction === undefined ? {} : { writeFileRestriction }),
       skills: this.deps.skills,
+      // 新建的定时任务默认继承这一次 run 的模型 —— 见 ToolContext.model 上那段
+      model: this.req.model,
+      ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
       // ★ 递的是 deps.host 本身(结构上满足 ToolHost),不是拷贝出来的五个字段 ——
       //   拷贝会在换宿主后留下一份旧引用,正是 ctx 传递想避免的那件事
       host: this.deps.workspace ? {
@@ -1063,7 +1329,10 @@ export class AgentSession {
         就变成一条内部错误信息了。
       */
       ...(this.deps.spawnSubagent !== undefined ? { spawnSubagent: this.deps.spawnSubagent } : {}),
-      ...(this.deps.interact !== undefined ? { interact: this.deps.interact } : {})
+      ...(this.deps.interact !== undefined ? { interact: this.deps.interact } : {}),
+      ...(this.deps.canProposeGoal === undefined ? {} : { canProposeGoal: this.deps.canProposeGoal }),
+      ...(this.deps.proposeGoal === undefined ? {} : { proposeGoal: this.deps.proposeGoal }),
+      ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling })
     }
   }
 
@@ -1187,7 +1456,7 @@ export class AgentSession {
    */
   private isolateHistoryPaths(parts: readonly ContentPart[]): ContentPart[] {
     const expected = this.deps.fileReferenceSource ?? { kind: 'local' }
-    return parts.map((part) => {
+    return parts.filter((part) => part.type !== 'goal_status').map((part) => {
       if (part.type !== 'file_ref') return part
       if ((this.deps.workspace?.remote && expected.kind !== 'workspace') || !fileReferenceMatches(part.source, expected)) {
         return { type: 'text', text: foreignReference(part.name) }
@@ -1199,14 +1468,17 @@ export class AgentSession {
     })
   }
 
-  private injectInterjections(): void {
+  private injectInterjections(): number {
     const items = this.handle.takeInterject()
-    if (items.length === 0) return
+    let injected = 0
     for (const item of items) {
       if (item.parts.length === 0) continue
+      if (item.goalId !== undefined && this.deps.acceptsGoalInput?.(item.goalId) !== true) continue
       const now = this.deps.host.clock.now()
       this.commit({ ...userMessage(item.id, this.normalizePaths(item.parts), now), ...(item.internal ? { internal: true } : {}) })
+      injected++
     }
+    return injected
   }
 
   /**
@@ -1228,12 +1500,42 @@ export class AgentSession {
     this.commit(assistantMessage(ulid(now), parts, now))
   }
 
+  /**
+   * 把只属于 UI 那一轨的标记挂在**最后一条消息**上。
+   *
+   * ★★ 追加而不是新 commit：`goal_status` 编码后是 null，单独成一条就是一条
+   *   零内容块的助手消息 —— 而上游对空 content 是 400（`encode/anthropic.ts`
+   *   文件头第 1 条规则）。`commitAssistant` 里那条 `parts.length === 0` 拦的是
+   *   「数组为空」，拦不住「数组里有元素但都编码成 null」。
+   *   挂在别人身上既保住了转录（重载恢复要反扫它），又不新增任何一条上行消息。
+   *
+   * ★ **只改转录那一份**（`this.messages`），不进 `contextMessages`：
+   *   两个数组是构造函数里 `map` 出来的**两批对象**，靠引用对不上；
+   *   而且 `goal_status` 本来就该只存在于转录里 —— 编码器那条 `return null`
+   *   是为了防「它被别人带进去了」，不是为了让它进去。
+   *
+   * ★ 只挂在**助手**消息上。用户那一轨不能出现「目标状态」，两轨必须分开。
+   *   挂不上时（转录为空、或最后一条是用户消息）就退化成「只发广播、不进转录」——
+   *   那种场景下这一轮本来什么都没发生，重载后恢复不出这个目标是**正确的**。
+   */
+  private attachUiParts(parts: readonly ContentPart[]): void {
+    const index = this.messages.length - 1
+    const last = this.messages[index]
+    if (last === undefined || last.role !== 'assistant') return
+    const next: AgentMessage = { ...last, parts: [...last.parts, ...parts] }
+    const committed = this.deps.prepareMessage?.(next) ?? next
+    this.deps.onMessageCommit?.(committed)
+    this.messages[index] = committed
+    this.handle.emit({ type: 'message_commit', message: committed })
+  }
+
   /** 落盘边界(方案 §4.2):也是 RunRegistry 裁剪冗余 delta 的那个点 */
   private commit(message: AgentMessage): void {
-    this.messages.push(message)
-    this.contextMessages.push(message)
-    // 先落盘再通知渲染层，避免 UI 看见一条重启后不存在的消息。
-    this.deps.onMessageCommit?.(message)
-    this.handle.emit({ type: 'message_commit', message })
+    const committed = this.deps.prepareMessage?.(message) ?? message
+    this.deps.onMessageCommit?.(committed)
+    this.messages.push(committed)
+    // Only transcript markers may be added by persistence; never send them upstream.
+    this.contextMessages.push({ ...message, parts: message.parts.filter((part) => part.type !== 'goal_status') })
+    this.handle.emit({ type: 'message_commit', message: committed })
   }
 }

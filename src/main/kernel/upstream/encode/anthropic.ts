@@ -91,6 +91,11 @@ function toBlock(p: ContentPart): unknown | null {
       // 错误只属于 UI 那一轨。把它回传给模型,模型就会开始为我们的 bug 道歉。
       return null
 
+    case 'goal_status':
+      // 同上:目标的成绩单是我们自己盖的章。回传给模型,它会开始为
+      // 「上一轮没达成」辩解 —— 既没用,又占窗口。
+      return null
+
     default:
       return null
   }

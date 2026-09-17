@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { EXTERNAL_NAME_RE } from '../../../../../shared/agent/tool'
-import { builtinTools } from '../index'
+import { toolOk } from '../../../../../shared/agent/tool'
+import { defineTool } from '../../define'
+import { builtinTools, clearToolProviders, registerToolProvider } from '../index'
 
 /**
  * 内置工具**清单本身**的测试 —— 不测任何一个工具做了什么,只测这张表的形状。
@@ -72,5 +75,79 @@ describe('builtinTools()', () => {
     const a = builtinTools()
     a.pop()
     expect(builtinTools().length).toBeGreaterThan(a.length)
+  })
+})
+
+/**
+ * provider 注册表 —— 「编译期还不存在的贡献方」(插件)靠它进这张表。
+ *
+ * 这一组守的是三条会以「没有症状」的方式出错的性质:排在写死那批之后、
+ * 撞名时丢掉后来者、注销之后真的消失。
+ */
+describe('builtinTools() · provider', () => {
+  const fake = (internalId: string) =>
+    defineTool({
+      internalId,
+      description: '测试用的假工具,描述得够长才过得了那条最短长度校验。',
+      schema: z.object({}),
+      readOnly: true,
+      destructive: false,
+      needsNetwork: false,
+      // 契约要求返回 Promise;这里没有异步的事要做
+      async run() {
+        return toolOk('ok')
+      }
+    })
+
+  afterEach(() => {
+    // 注册表是进程内的 —— 不清的话,下一个文件里的测试会看见这里装的东西
+    clearToolProviders()
+  })
+
+  it('贡献的工具进得来,而且排在写死的那批之后', () => {
+    const core = builtinTools().length
+    registerToolProvider('p', () => [fake('Fake_one'), fake('Fake_two')])
+    const all = builtinTools()
+    expect(all.length).toBe(core + 2)
+    expect(all[0]?.internalId).toBe('echo')
+    expect(all.slice(-2).map((t) => t.internalId)).toEqual(['Fake_one', 'Fake_two'])
+  })
+
+  it('★ 撞名时丢掉后来者 —— 否则一个 provider 能悄悄把真的 Bash 换掉', () => {
+    registerToolProvider('p', () => [fake('Bash')])
+    const bash = builtinTools().filter((t) => t.internalId === 'Bash')
+    expect(bash.length).toBe(1)
+    expect(bash[0]?.destructive, '被顶替的话这里会变成假工具的 false').toBe(true)
+  })
+
+  it('同 id 再注册是替换,不是叠加 —— 插件重载走的就是这条路', () => {
+    const core = builtinTools().length
+    registerToolProvider('p', () => [fake('Fake_one')])
+    registerToolProvider('p', () => [fake('Fake_two')])
+    const ids = builtinTools().map((t) => t.internalId)
+    expect(ids.length).toBe(core + 1)
+    expect(ids).toContain('Fake_two')
+    expect(ids).not.toContain('Fake_one')
+  })
+
+  it('注销之后就不在了,而且只注销自己那一次', () => {
+    const core = builtinTools().length
+    const dispose = registerToolProvider('p', () => [fake('Fake_one')])
+    registerToolProvider('p', () => [fake('Fake_two')])
+    dispose()
+    // 被替换过,所以这次 dispose 不该动到替换者
+    expect(builtinTools().map((t) => t.internalId)).toContain('Fake_two')
+    clearToolProviders()
+    expect(builtinTools().length).toBe(core)
+  })
+
+  it('每次装配现问一遍 provider —— 存的是函数,不是那一刻的结果', () => {
+    let ids = ['Fake_one']
+    registerToolProvider('p', () => ids.map(fake))
+    expect(builtinTools().map((t) => t.internalId)).toContain('Fake_one')
+    ids = ['Fake_two']
+    const now = builtinTools().map((t) => t.internalId)
+    expect(now).toContain('Fake_two')
+    expect(now).not.toContain('Fake_one')
   })
 })

@@ -18,9 +18,11 @@ import { isValidPermissionRule } from '../agent/permission-rule'
 import {
   HOOK_COMMAND_MAX,
   HOOK_MAX_TIMEOUT_MS,
+  HOOK_PROMPT_MAX,
   MAX_HOOKS_PER_EVENT,
   defaultTimeoutMs,
   isHookEvent,
+  isHookType,
   isValidHookMatcher,
   type HookEvent,
   type HookFileEntry,
@@ -118,8 +120,15 @@ function flattenHookEntry(item: unknown): unknown[] {
 function normalizeHookEntry(raw: unknown, event: HookEvent): HookFileEntry | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
   const record = raw as Record<string, unknown>
-  const command = typeof record.command === 'string' ? record.command.trim() : ''
-  if (command === '' || command.length > HOOK_COMMAND_MAX) return null
+  /*
+    ★ `type` 缺省是 `'command'` —— 老文件里一条都没写过它。
+      CC 的嵌套写法内层正好也是 `{ type: 'command', command }`，两边对上了，
+      所以「整段粘过来」仍然可用。写了个不认识的词就丢掉这一条：一个
+      `type: "webhook"` 的条目按 command 读会静默地跑一条空命令。
+  */
+  const rawType: unknown = record.type
+  if (rawType !== undefined && !isHookType(rawType)) return null
+  const type = rawType ?? 'command'
 
   const matcher = typeof record.matcher === 'string' ? record.matcher.trim() : ''
   // 读不懂的 matcher 直接丢掉这一条：留着它只会在某天以「我明明写了」的形式
@@ -128,19 +137,38 @@ function normalizeHookEntry(raw: unknown, event: HookEvent): HookFileEntry | nul
 
   const seconds = typeof record.timeout === 'number' && Number.isFinite(record.timeout) && record.timeout > 0
     ? record.timeout
-    : defaultTimeoutMs(event) / 1000
+    : defaultTimeoutMs(event, type) / 1000
   const timeout = Math.min(seconds, HOOK_MAX_TIMEOUT_MS / 1000)
 
-  return {
+  const base: HookFileEntry = {
     id: typeof record.id === 'string' && record.id !== '' ? record.id : '',
     ...(matcher === '' ? {} : { matcher }),
-    command,
     ...(record.enabled === false ? { enabled: false } : {}),
     timeout,
     ...(typeof record.description === 'string' && record.description.trim() !== ''
       ? { description: record.description.trim() }
       : {})
   }
+
+  if (type === 'prompt') {
+    const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : ''
+    if (prompt === '' || prompt.length > HOOK_PROMPT_MAX) return null
+    const model = typeof record.model === 'string' ? record.model.trim() : ''
+    const modelProviderId = typeof record.modelProviderId === 'string' ? record.modelProviderId.trim() : ''
+    return {
+      ...base,
+      type: 'prompt',
+      prompt,
+      ...(model === '' ? {} : { model }),
+      // ★ 供应商只在有别名时才留：单独一个供应商 id 配不出任何一条绑定。
+      ...(model === '' || modelProviderId === '' ? {} : { modelProviderId })
+    }
+  }
+
+  const command = typeof record.command === 'string' ? record.command.trim() : ''
+  if (command === '' || command.length > HOOK_COMMAND_MAX) return null
+  // command 型不写 `type` —— 缺省值就是它，写上去会让老文件被无谓地重排。
+  return { ...base, command }
 }
 
 /** 任何输入都能得到一份可用的设置 —— 这个函数不抛异常。 */

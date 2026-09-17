@@ -28,6 +28,7 @@ import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import { store } from '../../state/store'
 import { DATABASE_DIRNAME, DB_FILENAME, closeDatabase, db, defaultDatabaseDirectory, openDatabase, stmt } from '../index'
 import * as repo from '../repo'
+import { switchConfigProfile } from '../config-profile'
 
 let dir = ''
 
@@ -75,6 +76,43 @@ const workspace = (id: string): Workspace => ({
   settings: { ...DEFAULT_WORKSPACE_SETTINGS, defaultModel: 'm' },
   createdAt: 1_700_000_000_000,
   lastOpenedAt: 1_700_000_001_000
+})
+
+describe('Shell 机器本地设置', () => {
+  it('默认跟随系统，手动选择在关库重开后仍然保留', () => {
+    expect(store.getSettings().shell).toBe('system')
+    store.updateSettings({ shell: 'bash' })
+    restart()
+    expect(store.getSettings().shell).toBe('bash')
+    store.updateSettings({ theme: 'dark' })
+    expect(store.getSettings().shell).toBe('bash')
+  })
+
+  it('切换账户与恢复旧账户快照都保留当前设备的 Shell', () => {
+    store.updateSettings({ shell: 'bash' })
+    switchConfigProfile('account-a')
+    expect(store.getSettings().shell).toBe('bash')
+    store.updateSettings({ shell: 'pwsh' })
+    switchConfigProfile('account-b')
+    expect(store.getSettings().shell).toBe('pwsh')
+    store.updateSettings({ shell: 'system' })
+    switchConfigProfile('account-a')
+    expect(store.getSettings().shell).toBe('system')
+    switchConfigProfile(null)
+    expect(store.getSettings().shell).toBe('system')
+  })
+
+  it('普通导出不携带手动 Shell，导入保留当前设备的选择', () => {
+    store.updateSettings({ shell: 'zsh' })
+    const exported = repo.exportDataSnapshot()
+    expect(exported.settings.shell).toBe('system')
+    expect(store.getSettings().shell).toBe('zsh')
+    exported.settings.shell = 'powershell'
+    exported.settings.theme = 'dark'
+    repo.mergeDataExport(exported)
+    expect(store.getSettings().shell).toBe('zsh')
+    expect(store.getSettings().theme).toBe('dark')
+  })
 })
 
 describe('★ 关库重开之后,配置一样都不少', () => {

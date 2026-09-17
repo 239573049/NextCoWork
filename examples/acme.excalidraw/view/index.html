@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Excalidraw</title>
+    <!--
+      ★ 这里**不写 <meta> CSP**:真正生效的那份由协议 handler 强制注入
+      (见 main/plugin/protocol.ts)。页面里再写一份只会造成「两份规则
+      哪份生效」的困惑,而 meta 版是页面内容的一部分 —— 插件自己能改。
+    -->
+    <!--
+      ★ esbuild 把 `import '@excalidraw/excalidraw/index.css'` 抽成了同名的
+      `main.css`。忘了引它的话画布能跑,但整套工具栏没有样式 —— 症状是
+      「一排裸按钮堆在左上角」,而控制台一个错都不报。
+    -->
+    <link rel="stylesheet" href="./main.css" />
+    <style>
+      html, body, #root { height: 100%; margin: 0; }
+      /* 画布铺满标签页;底色跟宿主主题走,避免加载瞬间闪一下白 */
+      body { background: var(--ncw-canvas, #ffffff); overflow: hidden; }
+      .ncw-loading { height: 100%; background: var(--ncw-canvas, #ffffff); }
+      .excalidraw { height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

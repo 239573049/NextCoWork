@@ -5,7 +5,8 @@
  * 进程组、抽干管道、env 清洗。其余部分是薄的。
  */
 import { spawn } from 'node:child_process'
-import { constants } from 'node:os'
+import { constants, userInfo } from 'node:os'
+import { shellPreferencesForPlatform, type ShellPreference } from '../../shared/domain/settings'
 import { abortError } from './abort'
 import type { SpawnFn, SpawnResult } from './host'
 
@@ -79,12 +80,78 @@ function signalNumber(sig: NodeJS.Signals): number {
  * zsh 才有的语法,然后在 /bin/sh 里失败。事实型提示词一旦是假的,
  * 比不写更糟:模型不会怀疑它。
  */
-export function agentShell(): string {
-  if (isWindows) return process.env.ComSpec ?? 'cmd.exe'
-  return process.env.SHELL ?? '/bin/sh'
+export function agentShell(
+  preference: ShellPreference = 'system',
+  options: { platform?: string; env?: NodeJS.ProcessEnv; loginShell?: () => string | null } = {}
+): string {
+  const platform = options.platform ?? process.platform
+  const env = options.env ?? process.env
+  // 跨系统导入的选择不能拿到本机直接执行；回到本机的自动选择。
+  const selected = shellPreferencesForPlatform(platform).includes(preference) ? preference : 'system'
+  if (selected !== 'system') {
+    return platform === 'win32' ? `${selected}.exe` : selected
+  }
+  if (platform === 'win32') return env.ComSpec?.trim() || env.COMSPEC?.trim() || 'cmd.exe'
+  if (env.SHELL?.trim()) return env.SHELL.trim()
+  try {
+    // Finder 启动时可能没有 SHELL，仍优先使用账户配置的登录 shell。
+    const login = (options.loginShell ?? (() => userInfo().shell))()?.trim()
+    if (login) return login
+  } catch {
+    // 账户信息不可读时仍须有可用的系统兜底。
+  }
+  return platform === 'darwin' ? '/bin/zsh' : '/bin/sh'
 }
 
-export function nodeSpawn(): SpawnFn {
+export function shellDialect(shell: string): 'cmd' | 'powershell' | 'fish' | 'posix' {
+  const name = shell.split(/[\\/]/).pop()?.toLowerCase().replace(/\.exe$/, '')
+  if (name === 'cmd') return 'cmd'
+  if (name === 'powershell' || name === 'pwsh' || name === 'pwsh-preview') return 'powershell'
+  return name === 'fish' ? 'fish' : 'posix'
+}
+
+/** 插件的 argv 必须按实际 shell 引号化，不能把 PowerShell 参数当 cmd 字符串拼接。 */
+export function quoteShellArg(shell: string, arg: string): string {
+  switch (shellDialect(shell)) {
+    case 'cmd':
+      if (/["^&|<>%!\r\n]/.test(arg)) throw new Error('argument contains characters that cannot be quoted on Windows')
+      // 结束引号前的反斜杠需翻倍，否则原生程序会把结束引号吞进 argv。
+      return arg === '' || /[\s()]/.test(arg) ? `"${arg.replace(/\\+$/, (slashes) => slashes + slashes)}"` : arg
+    case 'powershell':
+      // PowerShell 也把弯单引号识别为引号；必须同样转义，不能让数据结束字面量。
+      return `'${arg.replace(/['\u2018-\u201b]/g, (quote) => quote + quote)}'`
+    case 'fish':
+      return `'${arg.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+    default:
+      return `'${arg.replaceAll("'", String.raw`'\''`)}'`
+  }
+}
+
+/** Agent 命令与本地钩子共用参数规则，不能仅凭操作系统假定 shell 语法。 */
+export function shellCommandArgs(shell: string, command: string): string[] {
+  switch (shellDialect(shell)) {
+    case 'cmd':
+      // 与 Node 的 shell: true 一致：/s /c 去掉最外层引号，内部原样保留。
+      return ['/d', '/s', '/c', `"${command}"`]
+    case 'powershell': {
+      // 编码传入避免 Windows 的二次引号解析；输出按 UTF-8 解码，原生命令退出码保留。
+      const script = '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n'
+        // Windows PowerShell 无控制台时不能设代码页，改为直接配置重定向的文本流。
+        + 'try { [Console]::OutputEncoding = $OutputEncoding } catch { & {\n'
+        + '$writer = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), $OutputEncoding); $writer.AutoFlush = $true; [Console]::SetOut($writer)\n'
+        + '$writer = [System.IO.StreamWriter]::new([Console]::OpenStandardError(), $OutputEncoding); $writer.AutoFlush = $true; [Console]::SetError($writer)\n'
+        + '} }\n'
+        + 'try { [Console]::InputEncoding = $OutputEncoding } catch { [Console]::SetIn([System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding)) }\n'
+        + command + '\nif (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }'
+      return ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text',
+        '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]
+    }
+    default:
+      return ['-c', command]
+  }
+}
+
+export function nodeSpawn(resolveShell: () => string = agentShell): SpawnFn {
   return (cmd, opts) =>
     new Promise<SpawnResult>((resolve, reject) => {
       if (opts.signal.aborted) {
@@ -92,13 +159,12 @@ export function nodeSpawn(): SpawnFn {
         return
       }
 
-      const [file, args] = isWindows
-        ? ['cmd.exe', ['/d', '/s', '/c', cmd]]
-        : [agentShell(), ['-c', cmd]]
-
-      const child = spawn(file, args, {
+      const file = opts.shell ?? resolveShell()
+      const child = spawn(file, shellCommandArgs(file, cmd), {
         cwd: opts.cwd,
         env: childEnv(),
+        windowsHide: true,
+        windowsVerbatimArguments: isWindows && shellDialect(file) === 'cmd',
         // POSIX:自成进程组,让 killTree 能一次带走整棵树
         detached: !isWindows,
         /*

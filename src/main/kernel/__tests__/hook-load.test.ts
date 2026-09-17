@@ -9,16 +9,20 @@ import {
   upsertHook
 } from '../hook/load'
 import { normalizeLocalSettings } from '../../../shared/domain/local-settings'
-import type { HookDefinition, HookSettings } from '../../../shared/domain/hook'
+import type { CommandHook, HookDefinition, HookSettings } from '../../../shared/domain/hook'
 
-const hook = (over: Partial<HookDefinition> = {}): HookDefinition => ({
+const hook = (over: Partial<CommandHook> = {}): HookDefinition => ({
   id: 'h1',
+  type: 'command',
   event: 'PreToolUse',
   command: 'echo hi',
   enabled: true,
   timeoutMs: 10_000,
   ...over
 })
+
+/** 列表里那一条的「正文」—— 两支各有一个，断言时统一取它。 */
+const bodyOf = (h: HookDefinition): string => (h.type === 'prompt' ? h.prompt : h.command)
 
 describe('归一化 · 从文件读进来', () => {
   const norm = (raw: unknown): HookSettings => normalizeLocalSettings({ hooks: raw }).hooks
@@ -54,7 +58,7 @@ describe('归一化 · 从文件读进来', () => {
         { id: 'd', command: 'also-ok' }
       ]
     })
-    expect(hookListFrom(out, 'global', '/p').map((h) => h.command)).toEqual(['ok', 'also-ok'])
+    expect(hookListFrom(out, 'global', '/p').map(bodyOf)).toEqual(['ok', 'also-ok'])
   })
 
   it('认不出的事件名整组丢掉', () => {
@@ -66,7 +70,7 @@ describe('归一化 · 从文件读进来', () => {
       PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'a.sh' }, { type: 'command', command: 'b.sh' }] }]
     })
     const list = hookListFrom(out, 'global', '/p')
-    expect(list.map((h) => h.command)).toEqual(['a.sh', 'b.sh'])
+    expect(list.map(bodyOf)).toEqual(['a.sh', 'b.sh'])
     expect(list.every((h) => h.matcher === 'Bash')).toBe(true)
   })
 
@@ -142,5 +146,63 @@ describe('增删改', () => {
   it('已经有 id 的不重铸', () => {
     const hooks = normalizeLocalSettings({ hooks: { PreToolUse: [{ id: 'keep', command: 'x' }] } }).hooks
     expect(assignIds(hooks, () => 'new').PreToolUse?.[0]?.id).toBe('keep')
+  })
+})
+
+describe('prompt 型钩子', () => {
+  const norm = (raw: unknown): HookSettings => normalizeLocalSettings({ hooks: raw }).hooks
+
+  it('★ 老文件（一条 type 都没有）仍然解析成 command —— 缺省值不能换', () => {
+    const list = hookListFrom(norm({ Stop: [{ id: 'a', command: 'x' }] }), 'global', '/p')
+    expect(list[0]?.type).toBe('command')
+  })
+
+  it('prompt 型读得进来，默认超时是 30 秒（独立于命令钩子那条 60 秒）', () => {
+    const list = hookListFrom(norm({ Stop: [{ id: 'a', type: 'prompt', prompt: '达成了吗' }] }), 'global', '/p')
+    const row = list[0]
+    expect(row?.type).toBe('prompt')
+    expect(row?.timeoutMs).toBe(30_000)
+    expect(row !== undefined && row.type === 'prompt' ? row.prompt : '').toBe('达成了吗')
+  })
+
+  it('★ prompt 型缺 prompt 被丢掉 —— 不造一条永远跑不起来的条目', () => {
+    expect(hookListFrom(norm({ Stop: [{ id: 'a', type: 'prompt' }] }), 'global', '/p')).toEqual([])
+    expect(hookListFrom(norm({ Stop: [{ id: 'a', type: 'prompt', prompt: '   ' }] }), 'global', '/p')).toEqual([])
+  })
+
+  it('command 型缺 command 同样被丢掉', () => {
+    expect(hookListFrom(norm({ Stop: [{ id: 'a', type: 'command' }] }), 'global', '/p')).toEqual([])
+  })
+
+  it('认不出的 type 丢掉这一条，不按 command 读', () => {
+    expect(hookListFrom(norm({ Stop: [{ id: 'a', type: 'webhook', command: 'x' }] }), 'global', '/p')).toEqual([])
+  })
+
+  it('★ 读写互逆：prompt 型写回去再读回来是同一条', () => {
+    const original: HookDefinition = {
+      id: 'g1',
+      type: 'prompt',
+      event: 'Stop',
+      prompt: '只有当 README 的版本号与 package.json 一致时才算达成',
+      model: 'sonnet',
+      modelProviderId: 'p1',
+      enabled: true,
+      timeoutMs: 30_000
+    }
+    const roundTripped = hookListFrom(norm({ Stop: [toFileEntry(original)] }), 'global', '/p')[0]
+    expect(roundTripped).toMatchObject(original)
+  })
+
+  it('command 型写回去**不带 type** —— 缺省即它，写上去会把老文件重排一遍', () => {
+    expect(toFileEntry(hook())).not.toHaveProperty('type')
+  })
+
+  it('★ 只配了供应商没配别名时供应商被丢掉 —— 那配不出任何一条绑定', () => {
+    const list = hookListFrom(
+      norm({ Stop: [{ id: 'a', type: 'prompt', prompt: 'x', modelProviderId: 'p1' }] }),
+      'global',
+      '/p'
+    )
+    expect(list[0]).not.toHaveProperty('modelProviderId')
   })
 })

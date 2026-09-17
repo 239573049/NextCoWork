@@ -52,6 +52,27 @@ describe('upstream managed images', () => {
     }
   })
 
+  it('reads uploaded images from the attachment root, not the active account profile', async () => {
+    await writeFile(join(root, 'attachments', 'sessions', 'session-a', 'image.png'), imageBytes)
+    host.paths.userData = () => join(root, 'config-profiles', 'account-a')
+    const prepared = await prepareRequestImages(request(), host, context, signal)
+    expect(prepared.messages[0]?.parts[1]).toMatchObject({ dataRef: `data:image/png;base64,${imageBytes.toString('base64')}` })
+  })
+
+  it.each(['image/jpg', 'image/pjpeg', 'IMAGE/JPEG'])('normalizes the image MIME alias %s before encoding', async (mime) => {
+    await writeFile(join(root, 'attachments', 'sessions', 'session-a', 'image.png'), imageBytes)
+    const prepared = await prepareRequestImages(request(imageUrl, mime), host, context, signal)
+    expect(prepared.messages[0]?.parts[1]).toMatchObject({ mime: 'image/jpeg', dataRef: `data:image/jpeg;base64,${imageBytes.toString('base64')}` })
+  })
+
+  it('preserves the filesystem error code instead of hiding every read failure', async () => {
+    await writeFile(join(root, 'attachments', 'sessions', 'session-a', 'image.png'), imageBytes)
+    vi.spyOn(host.fs, 'readFileBytes').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }))
+    await expect(prepareRequestImages(request(), host, context, signal)).rejects.toMatchObject({
+      error: { messageKey: 'attachment.error.unreadable', messageParams: { name: 'image.png', code: 'EACCES' } }
+    })
+  })
+
   it('accepts matching inline images without reading the filesystem', async () => {
     const read = vi.spyOn(host.fs, 'realpath')
     const original = request(`data:image/png;base64,${imageBytes.toString('base64')}`)
@@ -73,7 +94,7 @@ describe('upstream managed images', () => {
 
   it('reports missing attachments as a localized non-retryable input error', async () => {
     await expect(prepareRequestImages(request(), host, context, signal)).rejects.toMatchObject({
-      error: { code: 'provider', retryable: false, messageKey: 'agent.error.imageInput' }
+      error: { code: 'provider', retryable: false, messageKey: 'attachment.error.missing', messageParams: { name: 'image.png', code: 'ENOENT' } }
     })
   })
 
@@ -103,6 +124,43 @@ describe('upstream managed images', () => {
   it('rejects unsupported or mismatched media types', async () => {
     await expect(prepareRequestImages(request(imageUrl, 'image/svg+xml'), host, context, signal)).rejects.toThrow('media type')
     await expect(prepareRequestImages(request('data:image/jpeg;base64,aGk='), host, context, signal)).rejects.toThrow('data URL')
+  })
+
+  it('distinguishes unavailable storage from a missing image file', async () => {
+    vi.spyOn(host.fs, 'realpath').mockRejectedValue(Object.assign(new Error('missing storage'), { code: 'ENOENT' }))
+    await expect(prepareRequestImages(request(), host, context, signal)).rejects.toMatchObject({
+      error: { messageKey: 'attachment.error.storageUnavailable', messageParams: { code: 'ENOENT' } }
+    })
+  })
+
+  it('rejects a partial read instead of sending truncated image bytes', async () => {
+    await writeFile(join(root, 'attachments', 'sessions', 'session-a', 'image.png'), imageBytes)
+    const read = vi.spyOn(host.fs, 'readFileBytes').mockResolvedValue(imageBytes.subarray(0, 2))
+    await expect(prepareRequestImages(request(), host, context, signal)).rejects.toMatchObject({
+      error: { messageKey: 'attachment.error.incompleteRead' }
+    })
+    expect(read).toHaveBeenCalledWith(expect.any(String), imageBytes.length + 1)
+  })
+
+  it('corrects a supported but inaccurate MIME label in the outgoing copy only', async () => {
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0])
+    await writeFile(join(root, 'attachments', 'sessions', 'session-a', 'image.png'), png)
+    const original = request(imageUrl, 'image/jpeg')
+    const prepared = await prepareRequestImages(original, host, context, signal)
+    expect(prepared.messages[0]?.parts[1]).toMatchObject({ mime: 'image/png', dataRef: `data:image/png;base64,${png.toString('base64')}` })
+    expect(original.messages[0]?.parts[1]).toMatchObject({ mime: 'image/jpeg', dataRef: imageUrl })
+  })
+
+  it('normalizes matching inline MIME aliases without accessing local files', async () => {
+    const read = vi.spyOn(host.fs, 'realpath')
+    const data = imageBytes.toString('base64')
+    const prepared = await prepareRequestImages(request(`data:image/jpg;base64,${data}`, 'image/pjpeg'), host, context, signal)
+    expect(prepared.messages[0]?.parts[1]).toMatchObject({ mime: 'image/jpeg', dataRef: `data:image/jpeg;base64,${data}` })
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it.each(['', '%invalid%', 'a', 'aGk==='])('rejects malformed inline image payload %s', async (data) => {
+    await expect(prepareRequestImages(request(`data:image/png;base64,${data}`), host, context, signal)).rejects.toBeInstanceOf(ImageInputError)
   })
 
   it('honors cancellation before reading an attachment', async () => {

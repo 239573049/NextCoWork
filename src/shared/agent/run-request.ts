@@ -92,6 +92,8 @@ export interface RunRequest {
    * 消息裸露在对话里(插话那条路没有这个问题,它的 internal 一直是传过去的)。
    */
   inputInternal?: boolean
+  /** Identity of a goal coordination input; stale wake-ups must not start a run. */
+  inputGoalId?: string
 
   mode: SessionMode
   thinking: ThinkingLevel
@@ -140,7 +142,7 @@ export interface RunRequest {
  * (`QueuedInput.options`),而 `shared/domain/queued-input.ts` 不能反向依赖渲染层。
  * `session.ts` 仍然 re-export 同名类型,既有引用点不受影响。
  */
-export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'inputMessageId' | 'inputInternal'>
+export type SendOptions = Omit<RunRequest, 'runId' | 'sessionId' | 'input' | 'inputMessageId' | 'inputInternal' | 'inputGoalId'>
 
 /**
  * Deprecated compatibility exports. AgentSession no longer uses a fixed turn

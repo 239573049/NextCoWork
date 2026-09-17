@@ -7,9 +7,14 @@ import { DEFAULT_PROXY } from '../proxy'
 import { DEFAULT_CUSTOM_SEED } from '../theme'
 import {
   DEFAULT_SETTINGS,
+  MODEL_PROPOSED_GOALS,
   PERSONALIZATION_MAX,
+  SHELL_PREFERENCES,
+  isShellPreference,
   mergeSettings,
-  type AppSettings
+  shellPreferencesForPlatform,
+  type AppSettings,
+  type AppSettingsPatch
 } from '../settings'
 
 const base = (): AppSettings => structuredClone(DEFAULT_SETTINGS)
@@ -253,7 +258,7 @@ describe('mergeSettings · 个性化', () => {
 })
 
 /**
- * ★★ 「模型别名 + 供应商」三个配对必须**成对写**。
+ * ★★ 「模型别名 + 供应商」四个配对必须**成对写**。
  *
  * 这一组是防**同一个 bug 在它自己的修复里复活**:只写别名、让旧 providerId
  * 留下来,得到的就是「新别名 + 旧供应商」—— 和用户报的「选了 Codex 却发给
@@ -265,6 +270,7 @@ describe('mergeSettings 的模型配对', () => {
     ...base(),
     defaultModel: 'shared', defaultModelProviderId: 'codex',
     permissionReviewerModel: 'shared', permissionReviewerModelProviderId: 'codex',
+    goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'codex',
     subagent: { ...base().subagent, model: 'shared', modelProviderId: 'codex' }
   })
 
@@ -288,15 +294,118 @@ describe('mergeSettings 的模型配对', () => {
     expect(next.permissionReviewerModelProviderId).toBeUndefined()
   })
 
+  it('★ 目标判定模型同理 —— 只给别名时旧供应商被清掉', () => {
+    const next = mergeSettings(pinned(), { goalEvaluatorModel: 'other' })
+    expect(next.goalEvaluatorModel).toBe('other')
+    expect(next.goalEvaluatorModelProviderId).toBeUndefined()
+  })
+
   it('成对给出时两个都写进去', () => {
     const next = mergeSettings(pinned(), { defaultModel: 'other', defaultModelProviderId: 'routin' })
     expect(next).toMatchObject({ defaultModel: 'other', defaultModelProviderId: 'routin' })
   })
 
-  it('没提到模型的 patch 不动这三对', () => {
+  it('没提到模型的 patch 不动这四对', () => {
     const next = mergeSettings(pinned(), { theme: 'dark' })
     expect(next.defaultModelProviderId).toBe('codex')
     expect(next.subagent.modelProviderId).toBe('codex')
     expect(next.permissionReviewerModelProviderId).toBe('codex')
+    expect(next.goalEvaluatorModelProviderId).toBe('codex')
+  })
+})
+
+/**
+ * 模型自提目标:`auto` 是默认,`alwaysAsk` / `disabled` 是用户**收紧**同意的
+ * 两档。所以坏值既不许落成 `auto`(那是静默放宽),也不该把他已经收紧的选择抹掉。
+ */
+describe('mergeSettings · 模型自提目标', () => {
+  it('默认是 auto', () => {
+    expect(DEFAULT_SETTINGS.modelProposedGoals).toBe('auto')
+    expect(base().modelProposedGoals).toBe('auto')
+  })
+
+  it('三档都原样往返', () => {
+    for (const mode of MODEL_PROPOSED_GOALS) {
+      expect(mergeSettings(base(), { modelProposedGoals: mode }).modelProposedGoals).toBe(mode)
+    }
+  })
+
+  it.each([
+    ['非字符串', 42],
+    ['未知取值', 'sometimes'],
+    ['空串', '']
+  ])('%s 时保留当前选择', (_label, value) => {
+    const current = mergeSettings(base(), { modelProposedGoals: 'alwaysAsk' })
+    const next = mergeSettings(current, { modelProposedGoals: value } as unknown as AppSettingsPatch)
+    expect(next.modelProposedGoals).toBe('alwaysAsk')
+  })
+
+  it('旧库里缺这一项时落回 auto', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.modelProposedGoals
+    expect(mergeSettings(DEFAULT_SETTINGS, legacy).modelProposedGoals).toBe('auto')
+  })
+})
+
+/** 旧库默认自动选择，坏值保留当前设置；界面与执行器共用平台选项表。 */
+describe('mergeSettings · 执行 Shell', () => {
+  it('旧设置里没有 shell 时落回 system', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.shell
+    expect(DEFAULT_SETTINGS.shell).toBe('system')
+    expect(mergeSettings(DEFAULT_SETTINGS, legacy).shell).toBe('system')
+  })
+
+  it('八个合法取值都原样往返', () => {
+    for (const shell of SHELL_PREFERENCES) {
+      expect(mergeSettings(base(), { shell }).shell).toBe(shell)
+    }
+  })
+
+  it('改 shell 不动别的设置', () => {
+    const next = mergeSettings(base(), { shell: 'zsh' })
+    expect(next.shell).toBe('zsh')
+    expect(next.theme).toBe(DEFAULT_SETTINGS.theme)
+    expect(next.contextManagement).toEqual(DEFAULT_SETTINGS.contextManagement)
+    expect(next.gateway).toEqual(DEFAULT_SETTINGS.gateway)
+  })
+
+  it.each([
+    ['非字符串', 42],
+    ['空串', ''],
+    ['未知取值', 'tcsh']
+  ])('%s 时保留当前选择', (_label, value) => {
+    const current = mergeSettings(base(), { shell: 'fish' })
+    const next = mergeSettings(current, { shell: value } as unknown as AppSettingsPatch)
+    expect(next.shell).toBe('fish')
+  })
+
+  it('isShellPreference 只认枚举本身,不认大小写变体', () => {
+    for (const shell of SHELL_PREFERENCES) expect(isShellPreference(shell)).toBe(true)
+    for (const value of ['', 'ZSH', 'powershell.exe', null, 42, undefined, {}]) {
+      expect(isShellPreference(value)).toBe(false)
+    }
+  })
+
+  it('平台选项集:system 在最前,且不含那个平台装不上的 shell', () => {
+    for (const platform of ['win32', 'darwin', 'linux', 'freebsd']) {
+      const choices = shellPreferencesForPlatform(platform)
+      expect(choices[0], platform).toBe('system')
+      expect(choices.every((choice) => isShellPreference(choice)), platform).toBe(true)
+    }
+
+    expect(shellPreferencesForPlatform('win32')).toEqual(['system', 'cmd', 'powershell', 'pwsh'])
+    expect(shellPreferencesForPlatform('darwin')).toEqual(['system', 'zsh', 'bash', 'fish', 'sh', 'pwsh'])
+    expect(shellPreferencesForPlatform('linux')).toEqual(['system', 'bash', 'zsh', 'fish', 'sh', 'pwsh'])
+    expect(shellPreferencesForPlatform('freebsd')).toEqual(['system', 'sh'])
+
+    // 原生预设不混用 WSL/MSYS 的路径与进程语义。
+    const win = shellPreferencesForPlatform('win32')
+    for (const shell of ['zsh', 'bash', 'fish', 'sh']) expect(win).not.toContain(shell)
+    for (const platform of ['darwin', 'linux']) {
+      const choices = shellPreferencesForPlatform(platform)
+      expect(choices).not.toContain('cmd')
+      expect(choices).not.toContain('powershell')
+    }
   })
 })

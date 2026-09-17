@@ -15,7 +15,7 @@
  */
 import { spawn } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import type { HookDefinition } from '../../../shared/domain/hook'
+import type { CommandHook } from '../../../shared/domain/hook'
 import { runHook, type HookPayload, type HookProcessOpen } from '../hook/run'
 
 const posix = process.platform !== 'win32'
@@ -55,7 +55,7 @@ const payload: HookPayload = {
 }
 
 const run = (command: string, timeoutMs = 5000): ReturnType<typeof runHook> => {
-  const hook: HookDefinition = { id: 'h1', event: 'PreToolUse', command, enabled: true, timeoutMs }
+  const hook: CommandHook = { id: 'h1', type: 'command', event: 'PreToolUse', command, enabled: true, timeoutMs }
   return runHook({ open: realOpen, hook, scope: 'project', payload, cwd: process.cwd(), shell: SHELL })
 }
 

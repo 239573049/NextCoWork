@@ -77,14 +77,47 @@ function incompleteStopReason(reason: string | undefined): StopReason | undefine
   }
 }
 
+/**
+ * 两份工具参数是不是**同一个值**,只是写法不同。
+ *
+ * ★ 用 `JSON.parse` 再 `stringify` 归一:网关重新序列化会改缩进、空格、转义和
+ * 数字写法,这些一个都不影响工具拿到的入参。任一边解析不出来就算不同 ——
+ * 那时我们根本无从判断,只能按"不一样"处理。
+ */
+function sameArguments(a: string, b: string): boolean {
+  try {
+    return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b))
+  } catch {
+    return false
+  }
+}
+
 /** OpenAI Responses output_index, content_index and call_id are three separate namespaces. */
 export async function* decodeOpenAIResponses(events: AsyncIterable<SseEvent>): AsyncGenerator<ProviderStreamEvent> {
   const items = new Map<number, Item>()
   /** item id → 槽位。所有流式事件都带 `item_id`,它比 output_index 可靠,见 itemAt */
   const byId = new Map<string, number>()
+  /** call_id → 槽位。function_call 换了 item id 也还是同一次调用,见 itemAt */
+  const byCall = new Map<string, number>()
   const usage = new OpenAIUsage()
   let started = false
   let refused = false
+
+  /**
+   * 槽里那条和现在这条是不是**两回事**。
+   *
+   * ★★ function_call **不能**走 reasoning 那条「同类就并进去」的宽松规矩。
+   * 并行工具调用时,网关在终局 `output` 里重排顺序、重新生成一遍 item id 都很常见;
+   * 按下标并进去的话,B 的参数会被追加到 A 的槽上 —— 快照对不上前缀,
+   * `argumentsDelta` 直接把整轮打掉(completed arguments do not match streamed
+   * arguments)。各占一个槽最坏只是多出一条,而合并是**必然错的**。
+   */
+  function conflicts(occupant: Item, kind: string, id?: string, callId?: string): boolean {
+    if (occupant.kind !== kind) return true
+    if (kind !== 'function_call') return false
+    return (id !== undefined && occupant.id !== '' && occupant.id !== id)
+      || (callId !== undefined && occupant.callId !== '' && occupant.callId !== callId)
+  }
 
   /**
    * 这条 item 该落进哪个槽。
@@ -98,20 +131,21 @@ export async function* decodeOpenAIResponses(events: AsyncIterable<SseEvent>): A
    * dependent on the model's response",从没保证它和流式阶段对齐。
    *
    * 所以三条路,没有一条是报错:
-   * - id 认得出 → 就是那个槽(最可靠,所有流式事件都带 `item_id`)
-   * - 认不出,下标空着或占着的是同类 → 用下标。**同类但 id 对不上也并进去** ——
-   *   那多半只是网关换了个 id,当成新条目会把同一段思考重复渲染一遍
-   * - 认不出且 kind 都不同 → 开一个没人用过的新槽,那才真是另一条内容
+   * - id 认得出(function_call 还认 `call_id`)→ 就是那个槽,最可靠
+   * - 认不出,下标空着或占着的那条不冲突 → 用下标。reasoning **同类但 id 对不上
+   *   也并进去** —— 那多半只是网关换了个 id,当成新条目会把同一段思考重复渲染一遍
+   * - 冲突 → 开一个没人用过的新槽,那才真是另一条内容(判定见 `conflicts`)
    *
    * 内容一条不丢,好过整轮归零。
    */
-  function itemAt(hint: number, kind: string, id?: string): Item {
+  function itemAt(hint: number, kind: string, id?: string, callId?: string): Item {
     if (hint >= INDEX_STRIDE) throw new InvalidResponse('output_index exceeds supported range')
-    const known = id === undefined ? undefined : byId.get(id)
+    const known = (id === undefined ? undefined : byId.get(id))
+      ?? (callId === undefined ? undefined : byCall.get(callId))
     let index = known ?? hint
     if (known === undefined) {
       const occupant = items.get(hint)
-      if (occupant !== undefined && occupant.kind !== kind) {
+      if (occupant !== undefined && conflicts(occupant, kind, id, callId)) {
         index = hint + 1
         while (items.has(index)) index++
       }
@@ -124,6 +158,10 @@ export async function* decodeOpenAIResponses(events: AsyncIterable<SseEvent>): A
     if (id !== undefined && item.id === '') {
       item.id = id
       byId.set(id, index)
+    }
+    if (callId !== undefined && item.callId === '') {
+      item.callId = callId
+      byCall.set(callId, index)
     }
     return item
   }
@@ -157,11 +195,23 @@ export async function* decodeOpenAIResponses(events: AsyncIterable<SseEvent>): A
       yield { type: 'tool_call_start', index: item.index, callId: item.callId, name: item.name }
     }
     /*
-      ★ 这里**不能**像 `text` 那样降级。工具参数会被原样交给工具去执行 ——
+      ★ 这里**不能**像 `text` 那样无条件降级。工具参数会被原样交给工具去执行 ——
       快照和流式内容不一致意味着我们手上这份入参是错的,而 `tool_call_delta` 是
       只进不退的,没法用快照把它改回来。宁可报错也不能拿一份错的入参去调用工具。
+
+      ★★ 但「不是前缀」不等于「不一样」。放行两种**不改变入参**的情况:
+      - 空快照:网关只是没给终局 `arguments`,不是说参数变了。手上这份完整的
+        流式内容才是唯一的一份,为一个空字段丢掉它没有任何道理。
+      - 只是重新序列化:网关把 JSON parse 完再 stringify 一遍,空格、转义、
+        数字写法都可能变,而 `JSON.parse` 出来是同一个值。工具拿到的东西一字不差,
+        报错的只会是我们自己。语义真的不同时,才是原来那条规则要防的事。
     */
-    if (complete && !value.startsWith(item.args)) throw new InvalidResponse('completed arguments do not match streamed arguments')
+    if (complete && !value.startsWith(item.args)) {
+      if (value !== '' && !sameArguments(value, item.args)) {
+        throw new InvalidResponse('completed arguments do not match streamed arguments')
+      }
+      return
+    }
     const delta = complete ? value.slice(item.args.length) : value
     item.args += delta
     if (delta !== '') yield { type: 'tool_call_delta', index: item.index, callId: item.callId, argsDelta: delta }
@@ -172,7 +222,7 @@ export async function* decodeOpenAIResponses(events: AsyncIterable<SseEvent>): A
     const kind = string(value?.type)
     if (kind === undefined || value === undefined) throw new InvalidResponse('missing output item type')
     if (CLIENT_TOOL_ITEMS.has(kind)) throw new InvalidResponse(`unsupported output item: ${kind}`)
-    const item = itemAt(outputIndex, kind, string(value.id))
+    const item = itemAt(outputIndex, kind, string(value.id), string(value.call_id))
     if (kind === 'function_call') {
       const callId = string(value.call_id) ?? item.callId
       const name = string(value.name) ?? item.name

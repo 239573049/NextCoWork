@@ -31,5 +31,5 @@ export function mapCodexHook(sourceId: string, entry: CodexHookEntry): { hook?: 
   const blocked = diagnostics.some((d) => ['hook.unsupported-event', 'hook.unsupported-handler', 'hook.plugin-skipped', 'hook.matcher-needs-review'].includes(d.code)) || (entry.async && !['Stop', 'SubagentStop'].includes(entry.event))
   if (blocked) return { diagnostics }
   const id = `codex-${createHash('sha256').update(JSON.stringify([sourceId, entry.sourceKey])).digest('hex').slice(0, 24)}`
-  return { hook: { id, event: entry.event as HookEvent, command: entry.command as string, enabled: false, timeoutMs, ...(matcher ? { matcher } : {}), ...(entry.statusMessage ? { description: entry.statusMessage } : {}) }, diagnostics }
+  return { hook: { id, type: 'command', event: entry.event as HookEvent, command: entry.command as string, enabled: false, timeoutMs, ...(matcher ? { matcher } : {}), ...(entry.statusMessage ? { description: entry.statusMessage } : {}) }, diagnostics }
 }

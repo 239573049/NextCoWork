@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { HOOK_TEMPLATES, findHookTemplate, type HookTemplate } from '../../../../../shared/domain/hook-templates'
-import { templateToDraft, validateHook, warnHook, type HookDraft } from './hook-form'
+import { emptyHookDraft, templateToDraft, validateHook, warnHook, type HookDraft } from './hook-form'
 
 /**
  * 钩子模板。
@@ -21,12 +21,10 @@ const draftOf = (id: string): HookDraft => {
   const tpl = findHookTemplate(id)
   if (tpl === undefined) throw new Error(`没有这个模板：${id}`)
   return {
-    event: tpl.event,
+    ...emptyHookDraft(tpl.event),
     matcher: tpl.matcher ?? '',
     command: tpl.command,
-    timeoutSeconds: tpl.timeoutSeconds,
-    description: '',
-    enabled: true
+    timeoutSeconds: tpl.timeoutSeconds
   }
 }
 
@@ -144,16 +142,15 @@ describe.skipIf(!posix)('模板 · 真的跑一遍', () => {
 })
 
 describe('templateToDraft', () => {
-  it('★ 五个字段一个都不能漏 —— 漏掉 matcher 的话，一条本该只管 Bash 的钩子会对每次工具调用都触发', () => {
+  it('★ 模板那几个字段一个都不能漏 —— 漏掉 matcher 的话，一条本该只管 Bash 的钩子会对每次工具调用都触发', () => {
     const tpl = findHookTemplate('danger-guard')
     expect(tpl).toBeDefined()
     expect(templateToDraft(tpl as HookTemplate, '说明')).toEqual({
-      event: 'PreToolUse',
+      ...emptyHookDraft('PreToolUse'),
       matcher: 'Bash',
       command: tpl?.command,
       timeoutSeconds: 5,
-      description: '说明',
-      enabled: true
+      description: '说明'
     })
   })
 

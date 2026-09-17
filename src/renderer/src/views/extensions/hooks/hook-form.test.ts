@@ -1,13 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { validateHook, warnHook, type HookDraft } from './hook-form'
+import { draftToUpsert, emptyHookDraft, validateHook, warnHook, type HookDraft } from './hook-form'
 
 const draft = (over: Partial<HookDraft> = {}): HookDraft => ({
-  event: 'PreToolUse',
-  matcher: '',
+  ...emptyHookDraft('PreToolUse'),
   command: 'echo hi',
   timeoutSeconds: 10,
-  description: '',
-  enabled: true,
   ...over
 })
 
@@ -53,5 +50,39 @@ describe('warnHook', () => {
 
   it('精确 matcher 不警告', () => {
     expect(warnHook(draft({ event: 'PreToolUse', matcher: 'Write(src/a.ts)' }))).toBeNull()
+  })
+})
+
+describe('prompt 型草稿', () => {
+  const promptDraft = (over: Partial<HookDraft> = {}): HookDraft =>
+    draft({ type: 'prompt', prompt: '达成了吗', ...over })
+
+  it('prompt 为空拦下（此时 command 有没有填无关紧要）', () => {
+    expect(validateHook(promptDraft({ prompt: '  ', command: 'echo hi' }))).toBe('hooks.error.emptyPrompt')
+  })
+
+  it('prompt 型不检查 command —— 它根本不跑命令', () => {
+    expect(validateHook(promptDraft({ command: '' }))).toBeNull()
+  })
+
+  it('★ 只取一支：prompt 型不把用户改主意之前那条命令也发上去', () => {
+    const upsert = draftToUpsert(promptDraft({ command: 'echo stale' }))
+    expect(upsert).not.toHaveProperty('command')
+    expect(upsert.type).toBe('prompt')
+  })
+
+  it('★ 没配别名时供应商不带上去 —— 单独一个供应商 id 配不出任何绑定', () => {
+    expect(draftToUpsert(promptDraft({ model: '', modelProviderId: 'p1' }))).not.toHaveProperty('modelProviderId')
+    expect(draftToUpsert(promptDraft({ model: 'sonnet', modelProviderId: 'p1' }))).toHaveProperty('modelProviderId', 'p1')
+  })
+
+  it('command 型草稿不把 prompt 发上去', () => {
+    expect(draftToUpsert(draft({ prompt: '写了一半又切回来了' }))).not.toHaveProperty('prompt')
+  })
+
+  it('prompt 型的默认超时是 30 秒，命令型是事件各自那条', () => {
+    expect(emptyHookDraft('Stop', 'prompt').timeoutSeconds).toBe(30)
+    expect(emptyHookDraft('Stop').timeoutSeconds).toBe(60)
+    expect(emptyHookDraft('PreToolUse').timeoutSeconds).toBe(10)
   })
 })

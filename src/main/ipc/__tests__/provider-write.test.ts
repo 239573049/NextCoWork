@@ -444,6 +444,53 @@ describe('锁定了供应商的设置项在别名表变动后怎么修', () => {
       defaultModel: 'shared', defaultModelProviderId: 'routin'
     })
   })
+
+  it('目标判定模型悬空时置空 + 解锁,而不是随便接一条', () => {
+    bothOffer('shared')
+    upsertProvider(draft({ id: 'solo', name: 'solo', baseUrl: 'https://solo.invalid', priority: 3 }))
+    store.putAlias({
+      alias: 'evaluator', providerId: 'solo', upstreamModel: 'evaluator',
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+      contextWindow: 1000, maxOutputTokens: 100
+    })
+    // 另一对不受影响 —— 两个配对互不牵连
+    store.updateSettings({
+      goalEvaluatorModel: 'evaluator', goalEvaluatorModelProviderId: 'solo',
+      permissionReviewerModel: 'shared', permissionReviewerModelProviderId: 'codex'
+    })
+
+    removeProvider('solo')
+
+    const after = store.getSettings()
+    // 空串 = 回落到本次 run 的模型,所以置空是合法的降级,不是「换一家给你」
+    expect(after.goalEvaluatorModel).toBe('')
+    expect(after.goalEvaluatorModelProviderId).toBeUndefined()
+    expect(after).toMatchObject({
+      permissionReviewerModel: 'shared', permissionReviewerModelProviderId: 'codex'
+    })
+  })
+
+  it('改名:目标判定模型锁定的正是这一家时无条件跟着改', () => {
+    bothOffer('shared')
+    store.updateSettings({ goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'codex' })
+
+    renameModel('codex', 'shared', 'shared-v2')
+
+    expect(store.getSettings()).toMatchObject({
+      goalEvaluatorModel: 'shared-v2', goalEvaluatorModelProviderId: 'codex'
+    })
+  })
+
+  it('改名:目标判定模型锁定的是另一家时不动', () => {
+    bothOffer('shared')
+    store.updateSettings({ goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'routin' })
+
+    renameModel('codex', 'shared', 'shared-v2')
+
+    expect(store.getSettings()).toMatchObject({
+      goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'routin'
+    })
+  })
 })
 
 describe('供应商 id 的字符约束', () => {

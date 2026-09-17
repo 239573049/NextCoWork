@@ -203,7 +203,11 @@ describe('注册表完整性', () => {
     'WebFetch',
     'Skill',
     'web_search',
-    'Task'
+    'Task',
+    'ListScheduledTasks',
+    'CreateScheduledTask',
+    'UpdateScheduledTask',
+    'DeleteScheduledTask'
   ]
 
   it('每个内置工具都在注册表里', () => {

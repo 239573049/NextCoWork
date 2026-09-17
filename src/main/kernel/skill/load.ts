@@ -21,6 +21,7 @@ import { dirname } from "node:path";
  */
 import type { Skill, SkillScope } from "../../../shared/domain/skill";
 import { SKILL_BODY_MAX, SKILL_NAME_RE } from "../../../shared/domain/skill";
+import { LOCAL_SETTINGS_DIRNAME } from "../../../shared/domain/local-settings";
 import { fmList, fmString, parseFrontmatter } from "../frontmatter";
 import type { KernelFs, WorkspacePaths } from "../host";
 import { EnvironmentError } from "../../../shared/domain/environment";
@@ -41,7 +42,16 @@ const MAX_SKILLS = 200;
 
 /** 目录名 —— 和 CC 一致 */
 export const SKILLS_DIR = "skills";
-export const PROJECT_SKILLS_PREFIX = ".next-cowork";
+/**
+ * 项目级资源所在的那层目录。
+ *
+ * ★ **这里不再写字面量。** 同一个 `.next-cowork` 曾经被 skill / command /
+ * agent / mode 四个扫描器各写过一遍,而 `settings.local.json` 那边还有第五份 ——
+ * 改一处漏四处的表现是「换了目录名之后只剩某一类资源还认得出来」,
+ * 而每一类都是独立失效的,没有任何一处会报错。唯一出处在
+ * `shared/domain/local-settings.ts` 的 `LOCAL_SETTINGS_DIRNAME`。
+ */
+export const PROJECT_SKILLS_PREFIX = LOCAL_SETTINGS_DIRNAME;
 
 export type { SkillScope };
 

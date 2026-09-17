@@ -180,13 +180,46 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => {
   }
 })
 
-/** Drafts survive tab/workspace switches. Only destructive navigation asks. */
+/**
+ * Drafts survive tab/workspace switches. Only destructive navigation asks.
+ *
+ * ★ **它问的不再只有 `documents` store。** 插件接管的自定义编辑器把改动放在
+ * 自己那边(宿主连那份文档长什么样都不知道),而它们同样会被「关 Tab」
+ * 这个动作丢掉。所以这里泛化成「问所有脏文档源」:
+ *
+ * 1. 内置草稿 —— 老路,弹挽留对话框让用户选;
+ * 2. 插件编辑器 —— 让插件**自己存**,存不下来才拦住关闭。
+ *
+ * 两者的处理方式不同是有理由的:内置草稿宿主能显示、能让用户选择丢弃,
+ * 插件文档宿主显示不了 —— 给一个「丢弃吗」的对话框而不给预览,
+ * 等于让用户在看不见内容的情况下决定要不要丢掉它。
+ */
 export async function confirmDocumentChanges(workspaceId?: string, path?: string): Promise<boolean> {
   const matches = (entry: DocumentDraft): boolean => (workspaceId === undefined || entry.workspaceId === workspaceId) && isWithinPath(entry.path, path)
   const pending = Object.entries(useDocumentsStore.getState().entries).filter(([, entry]) => matches(entry) && entry.saving)
   await Promise.all(pending.map(([key]) => saves.get(key)))
   const keys = Object.entries(useDocumentsStore.getState().entries).filter(([, entry]) => matches(entry) && isDocumentDirty(entry)).map(([key]) => key)
-  if (keys.length === 0) return true
-  if (useDocumentsStore.getState().confirmation) return false
-  return new Promise((resolve) => useDocumentsStore.setState({ confirmation: { keys, resolve } }))
+  if (keys.length > 0) {
+    if (useDocumentsStore.getState().confirmation) return false
+    const proceed = await new Promise<boolean>((resolve) => useDocumentsStore.setState({ confirmation: { keys, resolve } }))
+    if (!proceed) return false
+  }
+  return confirmPluginDocuments(path)
+}
+
+/**
+ * 插件编辑器那一半。
+ *
+ * ★ 失败一律当成「可以关」:插件系统没起来、IPC 断了、这一版还没接上 ——
+ * 这些都不该让用户关不掉一个 Tab。**能丢数据的那个方向是主进程说了算的**
+ * (它拿得到真实的脏状态),而这里拿不到答案时,拦住用户的代价更高。
+ */
+async function confirmPluginDocuments(path?: string): Promise<boolean> {
+  try {
+    const { invoke } = await import('../services/ipc')
+    const result = await invoke('plugins:confirmClose', path === undefined ? {} : { path })
+    return result.safe
+  } catch {
+    return true
+  }
 }

@@ -1,15 +1,18 @@
 import { isAbsolute, join, relative } from 'node:path'
 import { agentError, type AgentError } from '../../../shared/agent/error'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
-import { attachmentRelPath, MAX_ATTACHMENT_BYTES, parseNcwUrl } from '../../../shared/domain/attachment'
+import { attachmentRelPath, imageMimeOfBytes, MAX_ATTACHMENT_BYTES, normalizeImageMime, parseNcwUrl } from '../../../shared/domain/attachment'
 import type { KernelHost } from '../host'
 import type { CanonicalRequest, UpstreamRequestContext } from './canonical'
 
+type ImageInputFailure = 'unsupportedImage' | 'invalidImageData' | 'foreignSession' | 'invalidLocation'
+  | 'unsafePath' | 'invalidSize' | 'storageUnavailable' | 'missing' | 'unreadable' | 'incompleteRead'
+
 export class ImageInputError extends Error {
   readonly error: AgentError
-  constructor(detail: string) {
+  constructor(detail: string, reason: ImageInputFailure, messageParams?: AgentError['messageParams']) {
     super(detail)
-    this.error = agentError('provider', detail, { retryable: false, messageKey: 'agent.error.imageInput' })
+    this.error = agentError('provider', detail, { retryable: false, messageKey: `attachment.error.${reason}`, messageParams })
   }
 }
 
@@ -26,50 +29,80 @@ export async function prepareRequestImages(
   signal: AbortSignal
 ): Promise<CanonicalRequest> {
   if (!request.messages.some((m) => m.parts.some((p) => p.type === 'image'))) return request
-  const resolved = new Map<string, string>()
+  const resolved = new Map<string, { mime: string; dataRef: string }>()
+  const limit = MAX_ATTACHMENT_BYTES / 1024 / 1024
   const messages: AgentMessage[] = []
   for (const message of request.messages) {
     const parts: ContentPart[] = []
     for (const part of message.parts) {
       signal.throwIfAborted()
       if (part.type !== 'image') { parts.push(part); continue }
-      if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(part.mime)) {
-        throw new ImageInputError(`Unsupported image media type: ${part.mime}`)
+      const mime = normalizeImageMime(part.mime)
+      if (mime === null) {
+        throw new ImageInputError(`Unsupported image media type: ${part.mime}`, 'unsupportedImage', { mime: part.mime })
       }
-      const cacheKey = `${part.mime}:${part.dataRef}`
-      let url = resolved.get(cacheKey)
-      if (url === undefined) {
+      const cacheKey = `${mime}:${part.dataRef}`
+      let image = resolved.get(cacheKey)
+      if (image === undefined) {
         if (part.dataRef.startsWith('data:')) {
-          if (!part.dataRef.startsWith(`data:${part.mime};base64,`) || part.dataRef.length > MAX_ATTACHMENT_BYTES * 1.4) {
-            throw new ImageInputError('Invalid image data URL')
+          if (part.dataRef.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 128) {
+            throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
           }
-          url = part.dataRef
+          const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(part.dataRef)
+          if (match === null || normalizeImageMime(match[1]!) !== mime) {
+            throw new ImageInputError('Invalid image data URL', 'invalidImageData')
+          }
+          const data = match[2]!
+          const bytes = Buffer.from(data, 'base64')
+          const encoded = bytes.toString('base64')
+          if (encoded.replace(/=+$/, '') !== data.replace(/=+$/, '')) {
+            throw new ImageInputError('Invalid image data URL', 'invalidImageData')
+          }
+          if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) {
+            throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
+          }
+          const actualMime = imageMimeOfBytes(bytes) ?? mime
+          image = { mime: actualMime, dataRef: `data:${actualMime};base64,${encoded}` }
         } else {
           const locator = parseNcwUrl(part.dataRef)
-          if (locator?.scope !== 'session' || locator.ownerId === undefined || locator.ownerId !== context.sessionId) {
-            throw new ImageInputError('Image attachment does not belong to this session')
+          if (locator === null) throw new ImageInputError('Invalid image attachment location', 'invalidLocation')
+          if (locator.scope !== 'session' || locator.ownerId === undefined || locator.ownerId !== context.sessionId) {
+            throw new ImageInputError('Image attachment does not belong to this session', 'foreignSession')
           }
           const rel = attachmentRelPath(locator)
-          if (rel === null) throw new ImageInputError('Invalid image attachment location')
+          if (rel === null) throw new ImageInputError('Invalid image attachment location', 'invalidLocation')
+          let stage: 'storage' | 'file' | 'read' = 'storage'
           try {
             const root = await host.fs.realpath(host.paths.attachments())
-            const ownerRoot = await host.fs.realpath(join(root, 'sessions', locator.ownerId))
+            const expectedOwnerRoot = join(root, 'sessions', locator.ownerId)
+            const ownerRoot = await host.fs.realpath(expectedOwnerRoot)
+            stage = 'file'
             const file = await host.fs.realpath(join(root, rel))
-            if (ownerRoot !== join(root, 'sessions', locator.ownerId) || !within(root, ownerRoot)
-              || !within(ownerRoot, file)) throw new ImageInputError('Image attachment escaped its session directory')
+            if (relative(expectedOwnerRoot, ownerRoot) !== '' || !within(root, ownerRoot)
+              || !within(ownerRoot, file)) throw new ImageInputError('Image attachment escaped its session directory', 'unsafePath')
             const stat = await host.fs.stat(file)
-            if (stat.isDir || stat.size === 0 || stat.size > MAX_ATTACHMENT_BYTES) throw new ImageInputError('Invalid image attachment size')
-            const bytes = await host.fs.readFileBytes(file, MAX_ATTACHMENT_BYTES + 1)
-            if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) throw new ImageInputError('Invalid image attachment size')
-            url = `data:${part.mime};base64,${Buffer.from(bytes).toString('base64')}`
+            if (stat.isDir) throw new ImageInputError('Image attachment is a directory', 'invalidLocation')
+            if (stat.size === 0 || stat.size > MAX_ATTACHMENT_BYTES) {
+              throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
+            }
+            stage = 'read'
+            const bytes = await host.fs.readFileBytes(file, stat.size + 1)
+            if (bytes.length !== stat.size) {
+              throw new ImageInputError('Image attachment changed or was not read completely', 'incompleteRead', { name: locator.fileName })
+            }
+            const actualMime = imageMimeOfBytes(bytes) ?? mime
+            image = { mime: actualMime, dataRef: `data:${actualMime};base64,${Buffer.from(bytes).toString('base64')}` }
           } catch (error) {
+            signal.throwIfAborted()
             if (error instanceof ImageInputError) throw error
-            throw new ImageInputError('Image attachment is missing or unreadable')
+            const code = (error as NodeJS.ErrnoException)?.code ?? 'UNKNOWN'
+            const reason = stage === 'storage' ? 'storageUnavailable' : code === 'ENOENT' ? 'missing' : 'unreadable'
+            throw new ImageInputError(`Image attachment is missing or unreadable (${stage}: ${code})`, reason, { name: locator.fileName, code })
           }
         }
-        resolved.set(cacheKey, url)
+        resolved.set(cacheKey, image)
       }
-      parts.push({ ...part, dataRef: url })
+      parts.push({ ...part, ...image })
     }
     messages.push({ ...message, parts })
   }

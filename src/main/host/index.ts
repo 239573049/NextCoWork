@@ -13,13 +13,13 @@
  * 覆盖它们只会多一份要同步维护的代码。
  */
 import { app, net, safeStorage, session } from 'electron'
-import { join } from 'node:path'
-import { getCredential, putCredential, removeCredential } from '../db/repo'
+import { getCredential, getSettings, putCredential, removeCredential } from '../db/repo'
 import { databaseDirectory } from '../db'
 import { configProfileDirectory } from '../db/config-profile'
-import { ATTACHMENTS_DIR } from '../net/attachment-protocol'
+import { attachmentRoot } from '../net/attachment-protocol'
 import type { KernelHost } from '../kernel/host'
 import { nodeHost } from '../kernel/host'
+import { agentShell } from '../kernel/node-spawn'
 import { withDemo } from '../kernel/upstream/demo'
 
 /**
@@ -97,16 +97,16 @@ export function electronHost(): KernelHost {
         // 上下两路拿到的是两个真正不同的目录。
         userData: () => configProfileDirectory(databaseDirectory()),
         /*
-          ★ 附件根**不**跟作用域走,所以这里直接拼,不走 `configProfileDirectory`。
-          它必须和 `net/attachment-protocol.ts` 的 `attachmentRoot()` 是同一个目录,
+          ★ 附件根**不**跟作用域走,直接复用上传/预览的 `attachmentRoot`。
+          不走 `configProfileDirectory`,避免再维护一份目录拼接规则,
           否则「写进去的图读不出来」会在登录之后才第一次出现。
         */
-        attachments: () => join(databaseDirectory(), ATTACHMENTS_DIR),
+        attachments: attachmentRoot,
         temp: () => app.getPath('temp')
       },
       secrets: electronSecrets(),
       fetch: electronFetch,
       browserFetch: electronBrowserFetch
-    })
+    }, () => agentShell(getSettings().shell))
   )
 }

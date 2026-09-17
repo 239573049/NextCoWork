@@ -10,6 +10,22 @@ describe('toAgentError', () => {
     })
   })
 
+  it('IpcError 的本地化 key/params 原样带过去,别在 IPC 边界丢掉', () => {
+    const e = toAgentError(
+      new IpcError('unknown', 'internal error', undefined, {
+        messageKey: 'attachment.error.tooLarge',
+        messageParams: { name: 'photo.png', limit: 32 }
+      })
+    )
+    expect(e).toMatchObject({
+      code: 'unknown',
+      message: 'internal error',
+      messageKey: 'attachment.error.tooLarge',
+      messageParams: { name: 'photo.png', limit: 32 },
+      retryable: false
+    })
+  })
+
   it('NotImplementedError 是 unknown,但消息指向实施顺序', () => {
     const e = toAgentError(new NotImplementedError('mcp:list', '步骤 10'))
     expect(e.code).toBe('unknown')

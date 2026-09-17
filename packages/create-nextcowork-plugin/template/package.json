@@ -1,0 +1,36 @@
+{
+  "name": "__NAME__",
+  "publisher": "__PUBLISHER__",
+  "displayName": "__DISPLAY_NAME__",
+  "description": "__DESCRIPTION__",
+  "version": "0.1.0",
+  "license": "MIT",
+  "categories": ["其他"],
+  "engines": { "nextcowork": "__ENGINES__" },
+  "main": "./dist/extension.js",
+  "source": "src/extension.ts",
+  "l10n": "./l10n",
+  "activationEvents": ["onCommand:__PUBLISHER__.__NAME__.hello"],
+  "permissions": ["storage"],
+  "optionalPermissions": [],
+  "hostPermissions": [],
+  "contributes": {
+    "commands": [
+      { "command": "__PUBLISHER__.__NAME__.hello", "title": "%cmd.hello%", "icon": "sparkles" }
+    ],
+    "menus": {
+      "tabBar/new": [{ "command": "__PUBLISHER__.__NAME__.hello", "group": "create@10" }]
+    }
+  },
+  "devDependencies": {
+    "@aidotnet/plugin-api": "^0.1.0",
+    "@aidotnet/plugin-cli": "^0.1.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  },
+  "scripts": {
+    "build": "nextcowork-plugin build",
+    "package": "nextcowork-plugin package",
+    "dev": "nextcowork-plugin dev"
+  }
+}

@@ -11,7 +11,8 @@ import type {
   PickedAttachment
 } from '../../../shared/domain/attachment'
 import { MAX_ATTACHMENT_BYTES, mimeOfExt } from '../../../shared/domain/attachment'
-import { invoke } from './ipc'
+import { agentError } from '../../../shared/agent/error'
+import { AgentErrorException, invoke } from './ipc'
 
 export function uploadAttachment(req: AttachmentUploadRequest): Promise<Attachment> {
   return invoke('attachment:upload', req)
@@ -55,8 +56,12 @@ export async function uploadFile(
   scope: AttachmentScope,
   ownerId?: string
 ): Promise<Attachment> {
-  if (file.size > MAX_ATTACHMENT_BYTES) {
-    throw new Error(`「${file.name}」超过 ${String(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB 上限`)
+  if (file.size === 0 || file.size > MAX_ATTACHMENT_BYTES) {
+    throw new AgentErrorException(agentError('unknown', 'Attachment size is invalid', {
+      retryable: false,
+      messageKey: file.size === 0 ? 'attachment.error.empty' : 'attachment.error.tooLarge',
+      messageParams: { name: file.name, limit: MAX_ATTACHMENT_BYTES / 1024 / 1024 }
+    }))
   }
   const buf = await file.arrayBuffer()
   return uploadAttachment({

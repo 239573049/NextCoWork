@@ -1,0 +1,5 @@
+{
+  "cmd.hello": "Say hello",
+  "greeted": "Hello! That is greeting number {count}.",
+  "ready": "Plugin ready"
+}

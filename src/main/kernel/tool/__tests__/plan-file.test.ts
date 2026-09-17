@@ -3,22 +3,26 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createWorkspacePaths } from '../../../environment/paths'
-import { activePlanForRun, leavePlanRun, planToolAllowList } from '../../plan-run'
+import { activePlanFor, leavePlan, planToolAllowList } from '../../plan-run'
 import { nodeHost } from '../../host'
 import { editTool, writeTool } from '../builtin/fs'
 import { enterPlanModeTool, exitPlanModeTool } from '../builtin/plan-file'
 import type { ToolContext } from '../registry'
 
+const WORKFLOW_TOOLS = ['EnterPlanMode', 'Write', 'Edit', 'ExitPlanMode', 'Read']
+
 let root = ''
 let runId = ''
+let sessionId = ''
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'nextcowork-plan-'))
   runId = `run-${Date.now()}`
+  sessionId = `session-${Date.now()}`
 })
 
 afterEach(() => {
-  leavePlanRun(runId)
+  leavePlan({ runId, sessionId })
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -31,7 +35,7 @@ function context(overrides: Partial<ToolContext> = {}): ToolContext {
     depth: 0,
     callId: 'call-1',
     runId,
-    sessionId: 'session-1',
+    sessionId,
     workspaceId: 'workspace-1',
     host: { ...base, path: createWorkspacePaths(base.fs, process.platform) },
     emit: () => undefined,
@@ -41,16 +45,16 @@ function context(overrides: Partial<ToolContext> = {}): ToolContext {
 
 describe('file-backed Plan mode', () => {
   it('creates one Markdown file and changes the available workflow tools by phase', async () => {
-    const before = planToolAllowList(runId, ['EnterPlanMode', 'Write', 'Edit', 'ExitPlanMode', 'Read'])
+    const before = planToolAllowList({ runId, sessionId }, WORKFLOW_TOOLS)
     expect(before).toEqual(['EnterPlanMode', 'Read'])
 
     // Local runs provide KernelHost without WorkspaceHost.path; this is the default desktop path.
     const result = await enterPlanModeTool.execute({ reason: 'Requirements are clear.' }, context({ host: nodeHost() }))
     expect(result.isError).toBe(false)
-    const active = activePlanForRun(runId)
+    const active = activePlanFor({ runId, sessionId })
     expect(active?.path).toMatch(/^\.plan\/[0-9A-HJKMNP-TV-Z]{26}\.md$/)
     expect(readFileSync(active!.absolutePath, 'utf8')).toBe('')
-    expect(planToolAllowList(runId, ['EnterPlanMode', 'Write', 'Edit', 'ExitPlanMode', 'Read']))
+    expect(planToolAllowList({ runId, sessionId }, WORKFLOW_TOOLS))
       .toEqual(['Write', 'Edit', 'ExitPlanMode', 'Read'])
 
     const second = await enterPlanModeTool.execute({}, context())
@@ -58,9 +62,25 @@ describe('file-backed Plan mode', () => {
     expect(second.output.content).toContain('already active')
   })
 
+  it('keeps the plan and its write tools available in later runs of the same session', async () => {
+    await enterPlanModeTool.execute({}, context())
+    const active = activePlanFor({ runId, sessionId })!
+
+    // 下一轮用户消息 = 新的 runId,同一条会话
+    const nextRunId = `${runId}-next`
+    expect(activePlanFor({ runId: nextRunId, sessionId })?.planId).toBe(active.planId)
+    expect(planToolAllowList({ runId: nextRunId, sessionId }, WORKFLOW_TOOLS))
+      .toEqual(['Write', 'Edit', 'ExitPlanMode', 'Read'])
+
+    // 另一条会话不受影响 —— 它还没有计划文件
+    expect(activePlanFor({ runId: nextRunId, sessionId: 'other-session' })).toBeUndefined()
+    expect(planToolAllowList({ runId: nextRunId, sessionId: 'other-session' }, WORKFLOW_TOOLS))
+      .toEqual(['EnterPlanMode', 'Read'])
+  })
+
   it('hard-fences Write and Edit to the active plan path', async () => {
     await enterPlanModeTool.execute({}, context())
-    const active = activePlanForRun(runId)!
+    const active = activePlanFor({ runId, sessionId })!
     const fenced = context({ writeFileRestriction: active.absolutePath })
 
     const blocked = await writeTool.execute({ file_path: join(root, 'src.ts'), content: 'no' }, fenced)
@@ -80,7 +100,7 @@ describe('file-backed Plan mode', () => {
 
   it('presents the saved Markdown and stops after approval', async () => {
     await enterPlanModeTool.execute({}, context())
-    const active = activePlanForRun(runId)!
+    const active = activePlanFor({ runId, sessionId })!
     await writeTool.execute({ file_path: active.absolutePath, content: '# Approved plan' }, context({ writeFileRestriction: active.absolutePath }))
 
     let presented: unknown
@@ -103,17 +123,33 @@ describe('file-backed Plan mode', () => {
       path: active.path,
       action: 'approve_current'
     })
+    // 批准即终点:下一条计划要重新 EnterPlanMode
+    expect(activePlanFor({ runId, sessionId })).toBeUndefined()
   })
 
-  it('continues the same run when the user requests a revision', async () => {
+  it('continues the same plan when the user requests a revision', async () => {
     await enterPlanModeTool.execute({}, context())
-    const active = activePlanForRun(runId)!
+    const active = activePlanFor({ runId, sessionId })!
     await writeTool.execute({ file_path: active.absolutePath, content: '# Draft plan' }, context({ writeFileRestriction: active.absolutePath }))
     const result = await exitPlanModeTool.execute({}, context({
       interact: async () => ({ id: 'interaction-1', kind: 'plan_approval', action: 'request_revision', feedback: 'Add tests.' })
     }))
     expect(result.stopRun).toBe(false)
     expect(result.output.content).toContain('Add tests.')
-    expect(activePlanForRun(runId)?.planId).toBe(active.planId)
+    expect(activePlanFor({ runId, sessionId })?.planId).toBe(active.planId)
+  })
+
+  it('releases the plan when its file disappeared, so a new one can be started', async () => {
+    await enterPlanModeTool.execute({}, context())
+    const active = activePlanFor({ runId, sessionId })!
+    rmSync(active.absolutePath, { force: true })
+
+    const result = await exitPlanModeTool.execute({}, context({
+      interact: async () => ({ id: 'interaction-1', kind: 'plan_approval', action: 'approve_current' })
+    }))
+    expect(result.isError).toBe(true)
+    expect(result.output.content).toContain('no longer exists')
+    expect(activePlanFor({ runId, sessionId })).toBeUndefined()
+    expect(planToolAllowList({ runId, sessionId }, WORKFLOW_TOOLS)).toEqual(['EnterPlanMode', 'Read'])
   })
 })

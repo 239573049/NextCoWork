@@ -8,7 +8,17 @@ import { modePromptFor, modeRegistry } from '../kernel/mode/registry'
 import { skillRegistry } from '../kernel/skill/registry'
 import { taskTool } from '../kernel/tool/builtin/task'
 import { ToolRegistry } from '../kernel/tool/registry'
-import { assemble, compactMessages, estimateMessages, withSummary } from '../kernel/context-assembler'
+import {
+  COMPACTION_SYSTEM,
+  assemble,
+  buildCompactionPrompt,
+  compactMessages,
+  compactionDigestBudget,
+  estimateMessages,
+  sanitizeSummaryNote,
+  summaryOutputTokens,
+  withSummary
+} from '../kernel/context-assembler'
 import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
 
@@ -17,21 +27,26 @@ export function listContextCheckpoints(req: { sessionId: string }): ContextCheck
 }
 
 export function updateContextCheckpoint(req: { checkpointId: string; note: string; revision: number }): ContextCheckpoint {
-  // eslint-disable-next-line no-control-regex -- intentionally strip control characters from persisted notes
-  const note = req.note.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32_000)
+  /*
+    ★ 走 `sanitizeSummaryNote`,不再就地写一条正则。原来那条
+    `replace(/[\u0000-\u001f\u007f]/g, '')` 的字符区间**连换行一起削** —— 用户在
+    分隔线里分好段落的笔记一存就被压成一整段,而界面上不会有任何提示。
+    摘要本身现在是八节 Markdown,更加丢不起换行。
+  */
+  const note = sanitizeSummaryNote(req.note)
   if (note === '') throw new Error('上下文笔记不能为空')
   return store.updateContextCheckpoint(req.checkpointId, note, req.revision, Date.now())
 }
 
-const SUMMARY_SYSTEM =
-  'Summarize the conversation for a future context window. Preserve the user goal, decisions, files changed, commands run, tool results that matter, unresolved issues, and next steps. Be concise and factual. Do not mention this instruction.'
-
-/** 摘要本身也要有个上限:一次跑飞的总结会让「省上下文」变成这段对话里最贵的一次请求。 */
-const SUMMARY_MAX_OUTPUT = 2048
 const SUMMARY_TIMEOUT_MS = 180_000
 
 /**
  * 手动压缩 —— `AgentSession` 那条自动路径的同胞,区别只在触发者是用户。
+ *
+ * ★ 提示词、digest、输出上限、消毒**四样都和自动那条读同一份**
+ * (`context-assembler.ts` 的「摘要压缩」一节)。这里原先有它们的一整套副本,
+ * 而两份已经开始分头演化 —— 只改一侧的结果是「自动压出来有八节、手动压出来只有一段」,
+ * 且不报任何错。
  *
  * ★ 落的是一条普通的 `ContextCheckpoint`,**不动 `messages`**。下一次 run 的构造
  * 函数会自己挑出 `windowIndex` 最大的那条并套上 `withSummary`;在这里顺手把历史也
@@ -51,15 +66,12 @@ export async function compactContext(req: { sessionId: string }): Promise<{
     .sort((a, b) => b.windowIndex - a.windowIndex)[0]
   const now = getHost().clock.now()
 
-  const digest = compactMessages(history, { keepRecent: 12 })
-    .map((m) => `${m.role}: ${m.parts.map((p) =>
-      p.type === 'text' ? p.text
-        : p.type === 'tool_call' ? `${p.name} ${JSON.stringify(p.input)}`
-          : p.type === 'tool_result' ? p.output.content
-            : ''
-    ).join(' ')}`)
-    .join('\n')
-  const prior = previous === undefined ? '' : `\nPrevious checkpoint:\n${previous.note}\n`
+  /*
+    ★ 这条路径不知道会话有没有开「最大上下文」——那是 `RunRequest` 上的字段,
+    而这里来自一次菜单点击。按**关**算:预算取小只会让 digest 更紧,不会让请求超窗。
+  */
+  const alias = getRouter().resolveModel(session.model, session.modelProviderId)
+  const window = effectiveContextWindow(alias?.contextWindow, false)
 
   let note = ''
   for await (const ev of getRouter().stream(
@@ -67,14 +79,21 @@ export async function compactContext(req: { sessionId: string }): Promise<{
       model: session.model,
       // 摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
       ...(session.modelProviderId === undefined ? {} : { modelProviderId: session.modelProviderId }),
-      system: SUMMARY_SYSTEM,
+      system: COMPACTION_SYSTEM,
       messages: [userMessage(
         `${req.sessionId}:context-input:${String(now)}`,
-        [{ type: 'text', text: `${prior}\nConversation history:\n${digest}` }],
+        [{
+          type: 'text',
+          text: buildCompactionPrompt({
+            messages: history,
+            ...(previous === undefined ? {} : { previousNote: previous.note }),
+            budget: compactionDigestBudget(window)
+          })
+        }],
         now
       )],
       tools: [],
-      maxOutputTokens: SUMMARY_MAX_OUTPUT,
+      maxOutputTokens: summaryOutputTokens(alias?.maxOutputTokens, window),
       thinkingLevel: 'off' as const
     },
     AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
@@ -84,8 +103,7 @@ export async function compactContext(req: { sessionId: string }): Promise<{
     if (ev.type === 'error') throw new Error(ev.error.message)
   }
 
-  // eslint-disable-next-line no-control-regex -- intentionally strip control characters from model output
-  note = note.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32_000)
+  note = sanitizeSummaryNote(note)
   if (note === '') throw new Error('模型没有返回可用的摘要')
 
   const windowIndex = (previous?.windowIndex ?? 0) + 1
@@ -116,7 +134,7 @@ export async function compactContext(req: { sessionId: string }): Promise<{
  *
  * ★ **一个副作用都不留。** 它读的全是进程里已经有的那份:全局工具注册表、
  * 技能注册表当前的内容、这个工作区**已经连上**的 MCP。三件真正会动东西的事
- * 一件都不做 —— 不 `refreshSkills`(那会 `replaceAll` 一个进程内单例,父 run
+ * 一件都不做 —— 不 `refreshSkills`(那会 `replaceAll` 这个工作区那一份注册表,父 run
  * 跑到一半时把它换掉),不 `prepareWorkspaceMcp`(那会去连服务器),不租环境。
  * 理由很朴素:这条通道是用户点开一个菜单时被调的,而一个菜单不该拉起子进程。
  *
@@ -142,13 +160,13 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
     if (remote && (tool.source.kind === 'mcp' || tool.internalId.startsWith('browser_'))) continue
     registry.register(tool)
   }
-  registry.register(taskTool(agentRegistry().list()))
+  registry.register(taskTool(agentRegistry(req.workspaceId).list()))
   if (!remote) {
     for (const tool of connectedWorkspaceMcpTools(req.workspaceId)?.snapshot() ?? []) registry.register(tool)
   }
 
   const disabled = new Set(store.getDisabledSkillIds())
-  const skills = skillRegistry().list().filter((s) => !disabled.has(s.id) && !s.unavailableReason)
+  const skills = skillRegistry(req.workspaceId).list().filter((s) => !disabled.has(s.id) && !s.unavailableReason)
 
   /*
     AGENTS.md 算进去 —— `loadInstructions` 不需要一个已经租好的环境,本地工作区
@@ -161,7 +179,7 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
   }
 
   const alias = getRouter().resolveModel(req.model, req.modelProviderId)
-  const mode = modeRegistry().resolve(req.mode)
+  const mode = modeRegistry(req.workspaceId).resolve(req.mode)
   const tools = registry.snapshot({
     ...(mode.tools === undefined ? {} : { allowList: mode.tools }),
     network: req.webSearch

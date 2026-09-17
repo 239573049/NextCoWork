@@ -17,6 +17,7 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { InteractionResponse, PendingInteraction } from '../../../../../shared/agent/interaction'
 import { I18nProvider } from '../../../i18n'
+import { listInteractions } from '../../../services/agent'
 import { InteractionPanel } from '../InteractionPanel'
 
 const sent: InteractionResponse[] = []
@@ -51,8 +52,20 @@ afterEach(async () => {
   vi.clearAllMocks()
 })
 
-async function renderPanel(interaction: PendingInteraction, onExecute?: () => void): Promise<HTMLElement> {
-  pending = [interaction]
+async function renderPanel(
+  interaction: PendingInteraction,
+  onExecute?: () => void,
+  sessionId?: string
+): Promise<HTMLElement> {
+  return renderPending([interaction], onExecute, sessionId)
+}
+
+async function renderPending(
+  interactions: PendingInteraction[],
+  onExecute?: () => void,
+  sessionId?: string
+): Promise<HTMLElement> {
+  pending = interactions
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   // Radix 的 RadioGroup 会 unobserve —— 缺一个方法就在卸载时炸,而报错指向 React 内部
   vi.stubGlobal('ResizeObserver', class {
@@ -67,7 +80,7 @@ async function renderPanel(interaction: PendingInteraction, onExecute?: () => vo
   const root = createRoot(container)
   await act(async () => root.render(createElement(I18nProvider, {
     initialLocale: 'zh-CN',
-    children: createElement(InteractionPanel, { runId: 'run-1', onExecute })
+    children: createElement(InteractionPanel, { runId: 'run-1', sessionId, onExecute })
   })))
   teardown = async () => {
     await act(async () => root.unmount())
@@ -272,5 +285,69 @@ describe('问答卡 · 「其它」长在那一行里', () => {
     await press(card, 'Enter', { metaKey: true })
 
     expect(sent).toHaveLength(0)
+  })
+})
+
+describe('目标提议卡 · 模型想设一个完成条件', () => {
+  const PROPOSAL: PendingInteraction = {
+    id: 'i-goal',
+    runId: 'run-1',
+    sessionId: 'session-1',
+    kind: 'goal_proposal',
+    condition: '`bun test` 退出码为 0，且转录里有这次运行的输出',
+    createdAt: 0
+  }
+
+  it('★ 从 listInteractions 的返回里渲染,条件原文照抄', async () => {
+    const container = await renderPanel(PROPOSAL, undefined, 'session-1')
+
+    // 卡片是按这一对 id 去问的;问错了就把别的会话的提议摆到了这一张屏幕上
+    expect(vi.mocked(listInteractions)).toHaveBeenCalledWith('run-1', 'session-1')
+    const card = container.querySelector('[data-testid="agent-interaction"]')
+    expect(card?.getAttribute('data-interaction-kind')).toBe('goal_proposal')
+    expect(container.textContent).toContain('模型想设一个完成条件')
+    expect(container.textContent).toContain(PROPOSAL.condition)
+    expect(rows(container).map((row) => row.dataset.rowValue)).toEqual(['approve', 'decline'])
+  })
+
+  it('★ 同意只发 {id, kind, approved} —— 一个多余字段都不带', async () => {
+    const container = await renderPanel(PROPOSAL, undefined)
+
+    await click(rows(container).find((row) => row.dataset.rowValue === 'approve') ?? null)
+
+    // 用 toEqual 而不是 toMatchObject:回送形状就是主进程的输入契约,
+    // 多带一个字段(比如把 condition 捎回去)等于在这里开了一个口子
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toEqual({ id: 'i-goal', kind: 'goal_proposal', approved: true })
+  })
+
+  it('★ 拒绝发 approved:false,卡片当场撤走', async () => {
+    const container = await renderPanel(PROPOSAL, undefined)
+
+    await click(rows(container).find((row) => row.dataset.rowValue === 'decline') ?? null)
+
+    expect(sent[0]).toEqual({ id: 'i-goal', kind: 'goal_proposal', approved: false })
+    // 答完就消失 —— 留在屏幕上会让人以为还没决定
+    expect(container.querySelector('[data-testid="agent-interaction"]')).toBeNull()
+  })
+
+  it('数字键 2 + Enter 落在拒绝上 —— 和别的卡共用同一套行', async () => {
+    const container = await renderPanel(PROPOSAL, undefined)
+
+    await press(container.querySelector('[data-testid="interaction-rows"]')!, '2')
+    await press(container.querySelector('[data-testid="interaction-rows"]')!, 'Enter')
+
+    expect(sent[0]).toEqual({ id: 'i-goal', kind: 'goal_proposal', approved: false })
+  })
+
+  it('提议与旧卡同时待决时互不干扰 —— 老几条路一条都没变', async () => {
+    const container = await renderPending([PLAN, PROPOSAL], () => {})
+
+    expect(rows(container).map((row) => row.dataset.rowValue)).toEqual([
+      'approve_current', 'approve_new_session', 'request_revision', 'approve', 'decline'
+    ])
+    expect([...container.querySelectorAll('[data-testid="agent-interaction"]')]
+      .map((card) => card.getAttribute('data-interaction-kind')))
+      .toEqual(['plan_approval', 'goal_proposal'])
   })
 })

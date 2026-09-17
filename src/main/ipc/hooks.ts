@@ -8,9 +8,10 @@
  *   一条也不会响。这个隔离是故意的:执行引擎要动 `runtime.ts` 的审批闸和
  *   `agent-session.ts` 的工具循环,风险比存储高一个量级,不该和存储一起上。
  */
-import type { HookDefinition, HookEvent, HookListItem, HookScope } from '../../shared/domain/hook'
+import type { HookDefinition, HookDiagnostic, HookListItem, HookScope, HookUpsert } from '../../shared/domain/hook'
 import type { HookRunReport } from '../kernel/hook/run'
-import { recentHookFailures, testHook } from '../hooks'
+import { previewPromptHook, recentHookFailures, setHookDiagnosticsListener, testHook } from '../hooks'
+import type { InvokeReq } from '../../shared/ipc/contract'
 import { EnvironmentError } from '../environment/errors'
 import {
   assignIds,
@@ -34,6 +35,10 @@ import { windows } from '../window/registry'
 
 function broadcast(): void {
   windows.emitToAll('hooks:changed', undefined)
+}
+
+export function registerHookDiagnosticsBridge(): void {
+  setHookDiagnosticsListener(broadcast)
 }
 
 /** 项目级那份文件的路径。没有工作区时返回空串。 */
@@ -94,12 +99,19 @@ function pathFor(scope: HookScope, workspaceId?: string): string {
 export async function saveHook(req: {
   scope: HookScope
   workspaceId?: string
-  hook: Omit<HookDefinition, 'id'> & { id?: string }
+  hook: HookUpsert
 }): Promise<HookListItem> {
   const host = getHost()
   const path = pathFor(req.scope, req.workspaceId)
   const id = req.hook.id !== undefined && req.hook.id !== '' ? req.hook.id : ulid()
-  const hook: HookDefinition = { ...req.hook, id }
+  /*
+    ★ 展开之后**按判别分支重建**，不能只 `{ ...req.hook, id }`：`HookDefinition`
+      现在是联合，而 `Omit<Union, 'id'>` 展开回来的对象在 TS 眼里两支都不是。
+      重建的同时也就挡住了「prompt 型带着一个 command 字段」那种半成品条目。
+  */
+  const hook: HookDefinition = req.hook.type === 'prompt'
+    ? { ...req.hook, type: 'prompt', id }
+    : { ...req.hook, type: 'command', id }
 
   const out = await writeHooks(host.fs, path, (hooks) => upsertHook(hooks, hook), host.logger)
   if (!out.ok) {
@@ -130,10 +142,10 @@ export async function setHookEnabledIpc(req: {
   broadcast()
 }
 
-export async function hookDiagnostics(req: { workspaceId?: string }): Promise<Array<{ path: string; message: string }>> {  // 归一化会把读不懂的条目**静默丢掉**（那是刻意的，一条坏 hook 不该让整个文件作废），
+export async function hookDiagnostics(req: { workspaceId?: string }): Promise<HookDiagnostic[]> {  // 归一化会把读不懂的条目**静默丢掉**（那是刻意的，一条坏 hook 不该让整个文件作废），
   // 所以「文件里有几条 vs 认出来几条」的差值就是诊断的来源。
   const host = getHost()
-  const out: Array<{ path: string; message: string }> = []
+  const out: HookDiagnostic[] = []
   const layers: Array<[HookScope, string, string]> = [
     ['global', globalSettingsPath(host.paths.userData()), '']
   ]
@@ -150,10 +162,10 @@ export async function hookDiagnostics(req: { workspaceId?: string }): Promise<Ar
       const recognized = hookListFrom(settings.hooks, scope, path).length
       const raw = await countRawHooks(path)
       if (raw > recognized) {
-        out.push({ path, message: `有 ${String(raw - recognized)} 条钩子读不懂，已忽略（检查 command 和 matcher）` })
+        out.push({ path, message: '', messageKey: 'hooks.diagnostic.invalid', messageParams: { count: raw - recognized } })
       }
     } catch {
-      out.push({ path, message: '读不了这个文件' })
+      out.push({ path, message: '', messageKey: 'hooks.diagnostic.unreadable' })
     }
   }
   // 运行期的失败也算诊断 —— 钩子失败不阻断运行，这是用户唯一能发现
@@ -164,13 +176,14 @@ export async function hookDiagnostics(req: { workspaceId?: string }): Promise<Ar
 /**
  * 试运行。跑的是弹层里此刻的草稿，不读磁盘 —— 理由见 `main/hooks.ts` 的 `testHook`。
  */
-export async function testHookIpc(req: {
-  workspaceId?: string
-  scope: HookScope
-  event: HookEvent
-  command: string
-  timeoutMs: number
-}): Promise<HookRunReport> {
+export async function testHookIpc(req: InvokeReq<'hooks:test'>): Promise<HookRunReport> {
+  if (req.type === 'prompt') return {
+    hookId: 'test', scope: req.scope, exitCode: null, stdout: '', stderr: '', durationMs: 0,
+    outcome: 'ok', preview: previewPromptHook({
+      event: req.event, scope: req.scope, prompt: req.prompt,
+      workspaceRoot: req.workspaceId === undefined ? '' : getWorkspaceEnvironment(req.workspaceId).rootPath
+    })
+  }
   if (!req.workspaceId) throw new EnvironmentError('unbound')
   return testHook({
     environment: getWorkspaceEnvironment(req.workspaceId),

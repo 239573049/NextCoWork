@@ -6,6 +6,7 @@
  *
  * 角标的数据源是 **RunRegistry 按 workspaceId 聚合**,不是任何 UI 状态。
  */
+import type { TabMenuItem } from '../plugin/contribution'
 
 /** ★ 外层 Tab 不只装工作区 —— 「定时任务」是作为独立外层 Tab 打开的 */
 export type OuterTab =
@@ -14,13 +15,21 @@ export type OuterTab =
 
 export type FeatureKind = 'scheduled' | 'extensions' | 'browser' | 'git' | 'review' | 'settings'
 
-export const FEATURE_LABEL: Record<FeatureKind, string> = {
-  scheduled: '定时任务',
-  extensions: '扩展',
-  browser: '浏览器',
-  git: 'Git',
-  review: '每日回顾',
-  settings: '设置'
+/**
+ * 功能页的标题 —— **key 不是文案**。
+ *
+ * ★ 这里原本是一张硬编码中文的 `Record<FeatureKind, string>`。它违反项目
+ * AGENTS.md 的第一条,而且是那种切到 `en-US` 之后**还是中文**、却不会有任何
+ * 报错的违规:渲染处直接把值铺出去,根本没有 `t()` 可言。改成 key 之后,
+ * 漏翻的那一条会在界面上显示成 key 本身 —— 看得见,才改得掉。
+ */
+export const FEATURE_LABEL_KEY: Record<FeatureKind, string> = {
+  scheduled: 'feature.scheduled',
+  extensions: 'feature.extensions',
+  browser: 'feature.browser',
+  git: 'feature.git',
+  review: 'feature.review',
+  settings: 'feature.settings'
 }
 
 /**
@@ -101,6 +110,20 @@ export type InnerTab =
    * 而且它让「同时挂两棵不同子树」不需要改类型。
    */
   | (InnerTabBase & { kind: 'files'; ref: { path: string; selectedPath?: string } })
+  /**
+   * 插件接管的自定义编辑器(`contributes.customEditors`)。
+   *
+   * ★ `pluginId` 和 `viewType` **都要落盘**,而且**都要存**:
+   *
+   * - 只存 `viewType` 的话,两个插件声明了同一个 viewType 时,重启之后这个
+   *   Tab 会打开另一个插件 —— 而它读的是同一个文件;
+   * - 只存 `pluginId` 的话,一个插件贡献多个编辑器时认不出该开哪一个。
+   *
+   * ★ 插件不在了(卸载 / 禁用 / 装载失败)时**不能让这个 Tab 消失**,
+   * 也不能让它空着 —— 降级成只读文本预览,见 `views/registry.tsx`。
+   * 让它消失意味着用户重启一次就丢了一屏工作区布局,而没有任何提示。
+   */
+  | (InnerTabBase & { kind: 'custom'; ref: { viewType: string; pluginId: string; path: string } })
 
 export type InnerTabKind = InnerTab['kind']
 
@@ -123,42 +146,48 @@ export function chatKey(tab: Extract<InnerTab, { kind: 'chat' }>): string {
   return tab.ref.sessionId ?? tab.id
 }
 
-export interface InnerTabMenuItem {
-  kind: InnerTabKind
-  label: string
-  accelerator?: string
-  /** 菜单里这一项之前画一道分隔 —— 写成数据而不是渲染时的 `i === 3` */
-  separatorBefore?: boolean
+/**
+ * `+` 菜单的内置项 —— **三格共用一张表**,靠 `panes` 决定哪一格出哪几项。
+ *
+ * ## 这里换掉了什么
+ *
+ * 原本是三张常量(`INNER_TAB_MENU` / `BOTTOM_TAB_MENU` / `RIGHT_TAB_MENU`),
+ * 每一项长这样:`{ kind, label: '新建对话', separatorBefore }`。三处硬伤:
+ *
+ * 1. **`label` 是硬编码中文**,渲染处直接铺出去 —— 切到 `en-US` 菜单还是中文。
+ * 2. **`kind` 同时是身份、图标键、动作**。插件项没有 `InnerTabKind`,三处全卡死:
+ *    `key={item.kind}`、`INNER_TAB_ICON[item.kind]`、`onOpen(item.kind)`。
+ * 3. **分隔线是数据里的 `separatorBefore`**,加一项就得手工挪那个标记。
+ *
+ * 换成 `TabMenuItem` 之后:文案是 key、身份是 `id`、动作是 `action` 判别联合、
+ * 分隔线由 **group 边界自动生成**。截图里那条分隔(新建文档与新建终端之间)
+ * 正好落在 `create|tools` 边界上,**视觉零变化**。
+ *
+ * 插件项经 `mergeMenuItems` 并进来,规则(排在内置之后、单插件最多 3 项)
+ * 在 `shared/plugin/contribution.ts`。
+ */
+export const BUILTIN_TAB_MENU: readonly TabMenuItem[] = [
+  // view —— 「看已有的东西」。主区不出:主区默认就是内容区。
+  { id: 'builtin.files', titleKey: 'tabMenu.files', icon: 'files', group: 'view', order: 10, panes: ['right'], action: { kind: 'openTab', tabKind: 'files' } },
+  { id: 'builtin.preview', titleKey: 'tabMenu.preview', icon: 'image', group: 'view', order: 20, panes: ['bottom', 'right'], action: { kind: 'openTab', tabKind: 'preview' } },
+
+  // create —— 「造一个新的」。三格都出,顺序即截图里的顺序。
+  { id: 'builtin.chat', titleKey: 'tabMenu.chat', icon: 'message-square', accelerator: 'CmdOrCtrl+N', group: 'create', order: 10, action: { kind: 'openTab', tabKind: 'chat' } },
+  { id: 'builtin.draw', titleKey: 'tabMenu.draw', icon: 'pen-tool', group: 'create', order: 20, action: { kind: 'openTab', tabKind: 'draw' } },
+  { id: 'builtin.doc', titleKey: 'tabMenu.doc', icon: 'file-text', accelerator: 'Alt+CmdOrCtrl+N', group: 'create', order: 30, action: { kind: 'openTab', tabKind: 'doc' } },
+
+  // tools —— 「开一个工具」。分隔线落在这条边界上。
+  { id: 'builtin.terminal', titleKey: 'tabMenu.terminal', icon: 'terminal', group: 'tools', order: 10, action: { kind: 'openTab', tabKind: 'terminal' } },
+  { id: 'builtin.browser', titleKey: 'tabMenu.browser', icon: 'globe', accelerator: 'CmdOrCtrl+T', group: 'tools', order: 20, action: { kind: 'openTab', tabKind: 'browser' } }
+]
+
+/** 这一格该出哪几项。省略 `panes` = 三格都出。 */
+export function tabMenuForPane(
+  items: readonly TabMenuItem[],
+  pane: TabPane
+): TabMenuItem[] {
+  return items.filter((item) => item.panes === undefined || item.panes.includes(pane))
 }
-
-/** 主区 `+` 菜单(截图 7674f2f5):五项,终端之前一道分隔 */
-export const INNER_TAB_MENU: readonly InnerTabMenuItem[] = [
-  { kind: 'chat', label: '新建对话', accelerator: 'CmdOrCtrl+N' },
-  { kind: 'draw', label: '新建绘图' },
-  { kind: 'doc', label: '新建文档', accelerator: 'Alt+CmdOrCtrl+N' },
-  { kind: 'terminal', label: '新建终端', separatorBefore: true },
-  { kind: 'browser', label: '网页浏览', accelerator: 'CmdOrCtrl+T' }
-]
-
-/**
- * 底部面板 `+` 菜单。比主区那条**多一项「文件预览」并排在最前**,
- * 其余五项和分隔位置完全一致 —— 这正是「底部是同一套 Tab 系统」的直接证据。
- */
-export const BOTTOM_TAB_MENU: readonly InnerTabMenuItem[] = [
-  { kind: 'preview', label: '文件预览' },
-  ...INNER_TAB_MENU
-]
-
-/**
- * 右侧面板 `+` 菜单。那颗 `+` 的 tooltip 是「**添加右侧工作台标签**」——
- * 「工作台标签」这四个字就是这一层的命名,右边不是一个专用的文件栏,
- * 是一格能放任何东西的工作台。首项自然是它默认那一个:工作区文件。
- */
-export const RIGHT_TAB_MENU: readonly InnerTabMenuItem[] = [
-  { kind: 'files', label: '工作区文件' },
-  { kind: 'preview', label: '文件预览' },
-  ...INNER_TAB_MENU
-]
 
 /** 每个工作区一份内层 Tab 状态,持久化到 kv 表(防抖 500ms) */
 export interface InnerTabState {

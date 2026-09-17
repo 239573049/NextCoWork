@@ -13,6 +13,7 @@
  *    第一份 description 里会写着「当前没有任何可用的子代理」。
  */
 import type { AgentDefinition } from '../../../shared/domain/agent-def'
+import { RegistryBuckets } from '../registry-buckets'
 import { BUILTIN_AGENTS } from './builtin'
 import type { AgentDiagnostic, AgentScanResult } from './load'
 
@@ -74,10 +75,25 @@ function sortAgents(list: readonly AgentDefinition[]): readonly AgentDefinition[
   })
 }
 
-let singleton: AgentRegistry | null = null
+/**
+ * **每个工作区一份。** 参数没有默认值的理由见 `skill/registry.ts` 的同名函数,
+ * 分桶与淘汰规则见 `kernel/registry-buckets.ts`。
+ *
+ * ★ 新建的桶出厂就带内建那条(见类上的第 2 点)—— 于是「至少有一个子代理可派」
+ * 在**每一个**工作区里、在第一次扫描发生之前就成立。
+ */
+const buckets = new RegistryBuckets(() => new AgentRegistry())
 
-/** 进程内单例。和 `skillRegistry()` / `getTools()` 同一个惯例。 */
-export function agentRegistry(): AgentRegistry {
-  singleton ??= new AgentRegistry()
-  return singleton
+export function agentRegistry(workspaceId: string): AgentRegistry {
+  return buckets.get(workspaceId)
+}
+
+/** 工作区被移除时调。 */
+export function dropAgentRegistry(workspaceId: string): void {
+  buckets.drop(workspaceId)
+}
+
+/** 全部丢掉 —— 换账户时必须调,理由同 `resetSkillRegistries`。 */
+export function resetAgentRegistries(): void {
+  buckets.clear()
 }

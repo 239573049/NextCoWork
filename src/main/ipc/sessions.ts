@@ -12,6 +12,9 @@ import { windows } from '../window/registry'
 import { store } from '../state/store'
 import { removeSessionAttachmentFiles } from './storage'
 import { uploadAttachment } from './attachment'
+import { endGoalSession, restoreGoal } from '../goal/runtime'
+import { ensureGoalRuntime } from '../runtime'
+import { interactions } from '../kernel/interaction-gate'
 
 function changed(event: SessionChange): void {
   windows.emitToAll('sessions:changed', event)
@@ -30,6 +33,10 @@ export function listSessions(req: { workspaceId: string; archived?: boolean }) {
 export function getSession(req: { sessionId: string }) {
   const detail = store.getSessionDetail(req.sessionId)
   if (detail === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+  if (detail.session.parentSessionId === undefined) {
+    ensureGoalRuntime()
+    restoreGoal(req.sessionId, detail.messages)
+  }
   return detail
 }
 
@@ -74,6 +81,22 @@ export function setMode(req: { sessionId: string; mode: SessionMode }): void {
   const mode = normalizeModeId(req.mode)
   if (session.mode === mode) return
   store.putSession({ ...session, mode, updatedAt: Date.now() })
+  changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: session.workspaceId })
+}
+
+/**
+ * 记住这条会话选中的模型。
+ *
+ * ★ 不动 `updatedAt`:换个模型不是「这条对话有了新进展」,碰它会让侧边栏的
+ *   最近顺序因为一次纯 UI 操作而跳动。
+ * ★ `modelProviderId` **无条件写**,不能条件展开 —— 别名换了而供应商没跟着换,
+ *   留下的就是「新别名 + 旧供应商」这个谁也没配过的组合(同 runtime.ts 那处)。
+ */
+export function setModel(req: { sessionId: string; model: string; modelProviderId?: string }): void {
+  const session = store.getSession(req.sessionId)
+  if (session === undefined) return
+  if (session.model === req.model && session.modelProviderId === req.modelProviderId) return
+  store.putSession({ ...session, model: req.model, modelProviderId: req.modelProviderId })
   changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: session.workspaceId })
 }
 
@@ -173,6 +196,10 @@ export function deleteSession(req: { sessionId: string }): void {
   const previous = session === undefined ? [] : store.listSessions(session.workspaceId)
   const deletedIndex = previous.findIndex((item) => item.id === req.sessionId)
   const sessionIds = store.deleteSession(req.sessionId)
+  for (const sessionId of sessionIds) {
+    interactions.cancelGoalProposals(sessionId)
+    endGoalSession(sessionId)
+  }
   const deleted = new Set(sessionIds)
   const remaining = previous.filter((item) => !deleted.has(item.id))
   const replacement = remaining[Math.min(Math.max(deletedIndex, 0), remaining.length - 1)]

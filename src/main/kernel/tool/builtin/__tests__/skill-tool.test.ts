@@ -46,9 +46,14 @@ const skill = (over: Partial<Skill> = {}): Skill => ({
   ...over
 })
 
-/** 装一批 Skill 进那个进程内单例。 */
+/**
+ * 装一批 Skill 进注册表。
+ *
+ * ★ 走 `''` 那一桶 —— 上面的 `ctx()` 没有 `workspaceId`(无头调用),
+ * 而 `skillTool` 对这种调用的回落就是这一桶,两边必须对上。
+ */
 function install(...skills: Skill[]): void {
-  skillRegistry().replaceAll({ skills, diagnostics: [] })
+  skillRegistry('').replaceAll({ skills, diagnostics: [] })
 }
 
 beforeEach(() => {
@@ -56,7 +61,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // 单例是跨用例共享的 —— 不清的话,下一个文件里的测试会看见这里装的东西
+  // 注册表是跨用例共享的 —— 不清的话,下一个文件里的测试会看见这里装的东西
   install()
 })
 

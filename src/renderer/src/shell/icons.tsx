@@ -7,19 +7,40 @@
  */
 import {
   Blocks,
+  Bookmark,
+  Bug,
   ChartNoAxesCombined,
   ClockFading,
+  Clock,
+  Download,
   Earth,
+  Eye,
+  File,
   Files,
+  Folder,
   GitBranch,
   Image as ImageIcon,
+  Link,
   MessageSquare,
+  Package,
+  Pencil,
   PenTool,
+  Play,
+  Plus,
+  Puzzle,
+  Search,
   Settings,
+  Shield,
+  Sparkles,
+  Square,
   SquareTerminal,
+  Table,
+  Upload,
+  Wrench,
   FileText,
   type LucideIcon
 } from 'lucide-react'
+import type { MenuIconName } from '../../../shared/plugin/contribution'
 import type { FeatureKind, InnerTabKind } from '../../../shared/domain/tab'
 
 /**
@@ -62,5 +83,53 @@ export const INNER_TAB_ICON: Record<InnerTabKind, LucideIcon> = {
     退一格用叠起来的 `Files`:它同样是"文档"语义,又能和单个文档区分开。
     **这是有意偏离参考的一处**,不是没看图。
   */
-  files: Files
+  files: Files,
+  // 插件接管的自定义编辑器。用拼图块而不是让插件给图标:Tab 条上那个字形是
+  // 用户判断「这个 Tab 是谁提供的」的地方。
+  custom: Puzzle
+}
+
+/**
+ * 菜单图标名 → 组件。**闭集**,和 `shared/plugin/contribution.ts` 的
+ * `MENU_ICON_NAMES` 一一对应(那边有一条测试钉住两张表不脱节)。
+ *
+ * ★ 为什么插件给的是**名字**而不是组件、也不是 SVG:
+ *
+ * - 给组件意味着插件要 import lucide,那它就得把整个图标库打进自己的 bundle;
+ * - 给 SVG 意味着插件能画一个和系统图标一模一样的东西放在菜单里,
+ *   而菜单是用户判断「这个操作是谁提供的」的地方;
+ * - 给名字则让这一层完全在宿主控制之下:认不出的名字回落到拼图块
+ *   (`normalizeMenuIcon`),永远不会渲染出一个宿主没审过的字形。
+ */
+export const MENU_ICON: Record<MenuIconName, LucideIcon> = {
+  file: File,
+  'file-text': FileText,
+  files: Files,
+  folder: Folder,
+  image: ImageIcon,
+  'pen-tool': PenTool,
+  pencil: Pencil,
+  eye: Eye,
+  search: Search,
+  terminal: SquareTerminal,
+  'message-square': MessageSquare,
+  globe: Earth,
+  'git-branch': GitBranch,
+  clock: Clock,
+  settings: Settings,
+  play: Play,
+  square: Square,
+  plus: Plus,
+  download: Download,
+  upload: Upload,
+  package: Package,
+  puzzle: Puzzle,
+  sparkles: Sparkles,
+  wrench: Wrench,
+  bug: Bug,
+  chart: ChartNoAxesCombined,
+  table: Table,
+  link: Link,
+  bookmark: Bookmark,
+  shield: Shield
 }

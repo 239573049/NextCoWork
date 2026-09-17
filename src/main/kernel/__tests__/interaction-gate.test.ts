@@ -98,6 +98,89 @@ describe('InteractionGate', () => {
     expect(await result).toMatchObject({ action: 'request_revision', feedback: 'Add tests.' })
   })
 
+  it('goal_proposal:approved 必须是布尔,不合格的整份退回', async () => {
+    const gate = new InteractionGate()
+    const handle = new RunHandle(req)
+    const result = gate.request(handle, { kind: 'goal_proposal', sessionId: 's', condition: '让 bun test 全绿' }, 100)
+    const id = gate.list()[0]!.id
+    expect(gate.hasGoalProposal('s')).toBe(true)
+    expect(gate.hasGoalProposal('other')).toBe(false)
+
+    expect(() => gate.respond({ id, kind: 'goal_proposal', approved: 'yes' } as unknown as InteractionResponse)).toThrow('Invalid')
+    expect(() => gate.respond({ id, kind: 'goal_proposal' } as unknown as InteractionResponse)).toThrow('Invalid')
+    expect(() => gate.respond({ id, kind: 'ask_user', answers: null })).toThrow('Invalid')
+    expect(gate.list()).toHaveLength(1)
+
+    gate.respond({ id, kind: 'goal_proposal', approved: true })
+    expect(await result).toEqual({ id, kind: 'goal_proposal', approved: true })
+    expect(gate.list()).toEqual([])
+    expect(gate.hasGoalProposal('s')).toBe(false)
+  })
+
+  /**
+   * ★ 目标提案**不占住 run**:批准要问的是一句「这个目标要不要」,而模型
+   *   这时候该继续干活。按其他三种交互那样在 `run_end` 一律 abort 的话,
+   *   一个说得很快的模型会让弹窗在用户看清之前自己关掉。
+   */
+  it('★ goal_proposal 在 run 正常收尾后仍然可以回答', async () => {
+    const gate = new InteractionGate()
+    const handle = new RunHandle(req)
+    const result = gate.request(handle, { kind: 'goal_proposal', sessionId: 's', condition: '让 bun test 全绿' }, 100)
+    const id = gate.list()[0]!.id
+
+    handle.finish('done')
+    expect(handle.status).toBe('done')
+    expect(gate.list()).toHaveLength(1)
+    expect(handle.pendingInteractions).toHaveLength(1)
+
+    gate.respond({ id, kind: 'goal_proposal', approved: false })
+    expect(await result).toEqual({ id, kind: 'goal_proposal', approved: false })
+    expect(gate.list()).toEqual([])
+    expect(handle.pendingInteractions).toEqual([])
+    expect(() => gate.respond({ id, kind: 'goal_proposal', approved: true })).toThrow('no longer pending')
+  })
+
+  it.each(['abort', 'error'] as const)('goal_proposal 在 run %s 时落到 aborted 并结算', async (action) => {
+    const gate = new InteractionGate()
+    const handle = new RunHandle(req)
+    const result = gate.request(handle, { kind: 'goal_proposal', sessionId: 's', condition: '让 bun test 全绿' }, 100)
+    const id = gate.list()[0]!.id
+
+    const rejected = expect(result).rejects.toMatchObject({ name: 'AbortError' })
+    if (action === 'abort') handle.abort({ by: 'user' })
+    else handle.finish('error')
+    await rejected
+    expect(gate.list()).toEqual([])
+    expect(gate.hasGoalProposal('s')).toBe(false)
+    expect(handle.pendingInteractions).toEqual([])
+    expect(() => gate.respond({ id, kind: 'goal_proposal', approved: true })).toThrow()
+  })
+
+  it('cancelGoalProposals 只结算这条会话的目标提案', async () => {
+    const gate = new InteractionGate()
+    const handle = new RunHandle(req)
+    const first = gate.request(handle, { kind: 'goal_proposal', sessionId: 's1', condition: 'a' }, 100)
+    const second = gate.request(handle, { kind: 'goal_proposal', sessionId: 's2', condition: 'b' }, 101)
+    const asked = gate.request(handle, { kind: 'ask_user', questions: [{ header: '继续', question: '继续?',
+      options: [], multiSelect: false, allowFreeform: true }] }, 102)
+
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    gate.cancelGoalProposals('s1')
+    await rejected
+
+    expect(gate.hasGoalProposal('s1')).toBe(false)
+    expect(gate.hasGoalProposal('s2')).toBe(true)
+    expect(gate.list().map((i) => i.kind).sort()).toEqual(['ask_user', 'goal_proposal'])
+    expect(handle.pendingInteractions).toHaveLength(2)
+
+    // 没被取消的那两条照常回答
+    gate.respond({ id: gate.list().find((i) => i.kind === 'goal_proposal')!.id, kind: 'goal_proposal', approved: true })
+    expect(await second).toMatchObject({ kind: 'goal_proposal', approved: true })
+    gate.respond({ id: gate.list()[0]!.id, kind: 'ask_user', answers: [['好']] })
+    expect(await asked).toMatchObject({ answers: [['好']] })
+    expect(gate.list()).toEqual([])
+  })
+
   it.each(['abort', 'finish'] as const)('settles the blocked call on run %s and rejects late approvals', async (action) => {
     const gate = new InteractionGate()
     const handle = new RunHandle(req)

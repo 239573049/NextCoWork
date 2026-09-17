@@ -225,7 +225,37 @@ describe('RunHandle · 待决交互与快照', () => {
   })
 })
 
+describe('RunHandle · goal coordination', () => {
+  it('keeps internal input when the renderer replaces or clears its user queue', () => {
+    const handle = new RunHandle(req())
+    const user = { id: 'user-queued', parts: [{ type: 'text' as const, text: 'user' }] }
+    const internal = { id: 'goal-kickoff', internal: true, goalId: 'goal-1', parts: [{ type: 'text' as const, text: 'kickoff' }] }
+    handle.setInterject([user])
+    handle.setInterject([internal])
+    expect(handle.takeInterject()).toEqual([user, internal])
+    handle.enqueueInternal(internal)
+    handle.setInterject([])
+    expect(handle.takeInterject()).toEqual([internal])
+    expect(handle.takeInterject()).toEqual([])
+  })
+})
+
 describe('RunRegistry · 嵌套与中断', () => {
+  it('finds detached children across parent runs and after the parent is reaped', () => {
+    const registry = new RunRegistry()
+    const parent = registry.create(req({ runId: 'parent', sessionId: 'session' }))
+    const child = registry.create(req({ runId: 'child', sessionId: 'child-session', parentRunId: 'parent', parentSessionId: 'session', depth: 1 }))
+    child.backgroundTask = { type: 'code-analyst', description: 'inspect' }
+    registry.create(req({ runId: 'foreground', sessionId: 'foreground-session', parentRunId: 'parent', parentSessionId: 'session', depth: 1 }))
+    const foreign = registry.create(req({ runId: 'foreign', sessionId: 'foreign-child', parentSessionId: 'other', depth: 1 }))
+    foreign.backgroundTask = { type: 'code-analyst', description: 'elsewhere' }
+    parent.finish('done')
+    registry.reap()
+    registry.create(req({ runId: 'next-parent', sessionId: 'session' }))
+    expect(registry.activeBackgroundChildrenOfSession('session')).toEqual([child])
+    child.abort({ by: 'user' })
+    expect(registry.activeBackgroundChildrenOfSession('session')).toEqual([])
+  })
   it('★ 重复 runId 抛错 —— 静默复用会让两个 run 共享转录', () => {
     const reg = new RunRegistry()
     reg.create(req())

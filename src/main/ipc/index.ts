@@ -19,6 +19,26 @@ import type {
   SendChannel
 } from '../../shared/ipc/contract'
 import { INVOKE_CHANNELS, SEND_CHANNELS } from '../../shared/ipc/contract'
+import {
+  installMarketPlugin,
+  listMarketPluginCategories,
+  listMarketPlugins,
+  marketPluginDetail
+} from './plugin-market'
+import {
+  confirmPluginClose,
+  getPluginConfiguration,
+  grantPluginPermissions,
+  installPlugin,
+  listPlugins,
+  pickPluginPackage,
+  pluginActivity,
+  revokePluginPermissions,
+  runPluginCommand,
+  setPluginConfiguration,
+  setPluginEnabled,
+  uninstallPlugin
+} from './plugins'
 import type { SessionInputState } from '../../shared/domain/queued-input'
 import { isValidSessionInput } from '../../shared/domain/queued-input'
 import {
@@ -29,7 +49,8 @@ import {
   store
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
-import { refreshScheduler, runScheduledTaskNow } from '../scheduled/scheduler'
+import { runScheduledTaskNow } from '../scheduled/scheduler'
+import { scheduledWrites } from '../scheduled/bridge'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
 import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
@@ -134,7 +155,8 @@ import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } 
 import { agentDiagnostics, generateAgent, listAgents, setAgentEnabled } from './agents'
 import { listModes } from './modes'
 import { deleteResource, getResource, saveResource } from './markdown-resource'
-import { deleteHook, hookDiagnostics, listHooks, saveHook, setHookEnabledIpc, testHookIpc } from './hooks'
+import { deleteHook, hookDiagnostics, listHooks, registerHookDiagnosticsBridge, saveHook, setHookEnabledIpc, testHookIpc } from './hooks'
+import { clearGoal, getGoal, registerGoalBridge, setGoal } from './goal'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
@@ -157,7 +179,8 @@ import {
   searchAll,
   setArchived,
   setFavorited,
-  setMode
+  setMode,
+  setModel
 } from './sessions'
 import {
   chooseBackupDirectory,
@@ -335,31 +358,13 @@ const handlers: HandlerMap = {
   'git:generateCommitMessage': (req) => generateGitCommitMessage(req),
   'scheduled:listTasks': ({ workspaceId }) => store.listScheduledTasks(workspaceId),
   'scheduled:getTask': ({ id }) => store.getScheduledTask(id) ?? null,
-  'scheduled:create': (input) => {
-    if (store.getWorkspace(input.workspaceId) === undefined) throw new Error('工作区不存在')
-    const task = store.createScheduledTask(input)
-    refreshScheduler()
-    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: task.id })
-    return task
-  },
-  'scheduled:update': ({ id, patch }) => {
-    if (patch.workspaceId !== undefined && store.getWorkspace(patch.workspaceId) === undefined) throw new Error('工作区不存在')
-    const task = store.updateScheduledTask(id, patch)
-    refreshScheduler()
-    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: task.id })
-    return task
-  },
+  // 写入的三件套(落库 → 重排 → 广播)收口在 `scheduled/bridge.ts`,与 Agent 工具共用同一份
+  'scheduled:create': (input) => scheduledWrites.create(input),
+  'scheduled:update': ({ id, patch }) => scheduledWrites.update(id, patch),
   'scheduled:delete': ({ id }) => {
-    store.deleteScheduledTask(id)
-    refreshScheduler()
-    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: id })
+    scheduledWrites.remove(id)
   },
-  'scheduled:setEnabled': ({ id, enabled }) => {
-    const task = store.setScheduledTaskEnabled(id, enabled)
-    refreshScheduler()
-    windows.emitToAll('scheduled:changed', { kind: 'task', taskId: id })
-    return task
-  },
+  'scheduled:setEnabled': ({ id, enabled }) => scheduledWrites.setEnabled(id, enabled),
   'scheduled:runNow': ({ id }) => {
     return runScheduledTaskNow(id)
   },
@@ -393,6 +398,7 @@ const handlers: HandlerMap = {
   'sessions:duplicate': (req) => duplicateSession(req),
   'sessions:rename': (req) => renameSession(req),
   'sessions:setMode': (req) => setMode(req),
+  'sessions:setModel': (req) => setModel(req),
   'sessions:setArchived': (req) => setArchived(req),
   'sessions:setFavorited': (req) => setFavorited(req),
   'sessions:delete': (req) => deleteSession(req),
@@ -473,6 +479,24 @@ const handlers: HandlerMap = {
   'proxy:getPasswordInfo': () => getProxyPasswordInfo(),
 
   // ── Skill(渐进披露:提示词里只有目录,正文经 `Skill` 工具取)──
+  // ── 插件 ──
+  'plugins:list': () => listPlugins(),
+  'plugins:setEnabled': (req) => setPluginEnabled(req),
+  'plugins:uninstall': (req) => uninstallPlugin(req),
+  'plugins:pickPackage': () => pickPluginPackage(),
+  'plugins:installPackage': (req) => installPlugin(req),
+  'plugins:grantPermissions': (req) => grantPluginPermissions(req),
+  'plugins:revokePermissions': (req) => revokePluginPermissions(req),
+  'plugins:activity': (req) => pluginActivity(req),
+  'plugins:runCommand': (req) => runPluginCommand(req),
+  'plugins:confirmClose': (req) => confirmPluginClose(req),
+  'plugins:marketList': (req) => listMarketPlugins(req),
+  'plugins:marketCategories': () => listMarketPluginCategories(),
+  'plugins:marketDetail': (req) => marketPluginDetail(req),
+  'plugins:installMarket': (req) => installMarketPlugin(req),
+  'plugins:getConfiguration': (req) => getPluginConfiguration(req),
+  'plugins:setConfiguration': (req) => setPluginConfiguration(req),
+
   'skills:list': (req) => listSkills(req),
   'skills:pickZip': () => pickSkillZip(),
   'skills:installZip': (req) => installZip(req),
@@ -508,6 +532,11 @@ const handlers: HandlerMap = {
   'hooks:delete': (req) => deleteHook(req),
   'hooks:setEnabled': (req) => setHookEnabledIpc(req),
   'hooks:test': (req) => testHookIpc(req),
+
+  // ── 会话目标 ──
+  'goal:get': (req, ctx) => getGoal(req, ctx),
+  'goal:set': (req) => setGoal(req),
+  'goal:clear': (req) => { clearGoal(req) },
 
   // ── 步骤 4 / 13:上游与网关 ──
   'provider:list': () => listProviders(),
@@ -693,6 +722,8 @@ export function registerIpc(): void {
 
   registerThemeBridge()
   registerMcpBridge()
+  registerGoalBridge()
+  registerHookDiagnosticsBridge()
   connections.registerConnectionBridge()
   setBrowserChangeListener((change) => windows.emitToAll('browser:changed', change))
   /*

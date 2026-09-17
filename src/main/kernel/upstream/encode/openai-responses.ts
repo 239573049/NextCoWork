@@ -17,6 +17,8 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
     }
     for (const part of message.parts) {
       switch (part.type) {
+        case 'goal_status':
+          break // UI-only: do not flush or create an input item.
         case 'text':
           if (part.text !== '') content.push({ type: message.role === 'user' ? 'input_text' : 'output_text', text: part.text })
           break
@@ -32,7 +34,7 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
           const item = record(opaque?.item)
           if (opaque?.protocol === 'openai-responses' && item?.type === 'reasoning') {
             flush()
-            input.push(structuredClone(item))
+            input.push(reasoningInputItem(item))
           }
           break
         }
@@ -44,6 +46,8 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
           flush()
           input.push({ type: 'function_call_output', call_id: part.callId, output: part.output.content })
           break
+        // ★ `error` / `goal_status` / `subagent` 只属于 UI 那一轨 —— 落到 default,
+        //   一个字节都不上行(理由见 `encode/anthropic.ts` 里对应的那两条 return null)。
         default:
           break
       }
@@ -51,6 +55,28 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
     flush()
   }
   return input
+}
+
+/**
+ * 回传 reasoning item 时,只带**输入侧**认得的那几个字段。
+ *
+ * ★★ `block_opaque` 里存的是上游原样的 **output** item,除了要搬运的密文,
+ * 还带着 `status: 'completed'` 这类只属于输出侧的字段。官方接口对它宽容,
+ * 第三方网关会直接 400(`Unknown parameter: 'input[246].status'`)——
+ * 而且是**整段历史都带着它**,一旦出现,这个会话之后每一轮都发不出去。
+ *
+ * ★ 白名单而不是把 `status` 单独删掉:网关以后再挑剔别的输出字段,
+ * 不会把我们打回同一个坑。反过来,`encrypted_content` 少传一个字节,
+ * 无状态续轮就丢掉整条推理链,所以这四个字段一个都不能漏。
+ */
+const REASONING_INPUT_FIELDS = ['type', 'id', 'summary', 'content', 'encrypted_content'] as const
+
+function reasoningInputItem(item: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const key of REASONING_INPUT_FIELDS) {
+    if (item[key] !== undefined) out[key] = structuredClone(item[key])
+  }
+  return out
 }
 
 function stringText(value: unknown): string {

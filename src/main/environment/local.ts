@@ -12,7 +12,8 @@ const attributes = (stat: Stats): EnvironmentStat => ({ size: stat.size, mtimeMs
   isDir: stat.isDirectory(), isFile: stat.isFile(), isSymbolicLink: stat.isSymbolicLink() })
 
 export function localEnvironment(host: KernelHost, rootPath: string): WorkspaceEnvironment {
-  const terminalShell = host.platform.os === 'win32' ? process.env.ComSpec || 'cmd.exe' : process.env.SHELL || '/bin/sh'
+  const platform = { ...host.platform }
+  const terminalShell = platform.shell
   const filesystem: EnvironmentFs = {
     ...host.fs,
     stat: async (path) => attributes(await fs.stat(path)),
@@ -50,16 +51,18 @@ export function localEnvironment(host: KernelHost, rootPath: string): WorkspaceE
   }
   return {
     key: 'local', rootPath, generation: 0, remote: false, description: 'Local', fs: filesystem, terminalShell,
-    path: createWorkspacePaths(filesystem, host.platform.os), platform: host.platform,
-    facts: { ...host.platform, home: homedir(), hostname: hostname(), username: userInfo().username },
-    assertReady: () => {}, spawn: host.spawn,
+    path: createWorkspacePaths(filesystem, platform.os), platform,
+    facts: { ...platform, home: homedir(), hostname: hostname(), username: userInfo().username },
+    assertReady: () => {},
+    spawn: (command, options) => host.spawn(command, { ...options, shell: platform.shell }),
     openTcp: async (hostname, port) => createConnection({ host: hostname, port }),
     openProcess: async (command, args, options) => {
       const env = { ...process.env, ...options.env }
       delete env.ELECTRON_RUN_AS_NODE
       delete env.NODE_OPTIONS
       const detached = options.detached === true
-      const child = spawn(command, [...args], { cwd: options.cwd, env, stdio: 'pipe', windowsHide: true, shell: false, detached })
+      const child = spawn(command, [...args], { cwd: options.cwd, env, stdio: 'pipe', windowsHide: true,
+        windowsVerbatimArguments: options.windowsVerbatimArguments, shell: false, detached })
       child.stdin.on('error', () => {})
       return { stdin: child.stdin, stdout: child.stdout, stderr: child.stderr,
         exited: new Promise((resolve) => {

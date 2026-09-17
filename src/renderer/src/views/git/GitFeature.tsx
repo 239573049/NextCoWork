@@ -61,7 +61,6 @@ import { Spinner } from '../../components/ui/Spinner'
 import { TextInput } from '../../components/ui/TextInput'
 import { Toggle } from '../../components/ui/Toggle'
 import { useI18n, type Translate } from '../../i18n'
-import { IS_MAC } from '../../lib/platform'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
 import {
@@ -78,7 +77,7 @@ import {
   stageGitPaths,
   unstageGitPaths
 } from '../../services/git'
-import { SidebarReveal } from '../../shell/SidebarReveal'
+import { FeatureFrame } from '../../shell/FeatureFrame'
 import { useWindowStore } from '../../stores/window'
 
 /** 主进程会原样抛回来的 i18n 键。不在表里的一律当作 git 的原话显示。 */
@@ -690,37 +689,32 @@ function Shell({
   children: ReactNode
 }): ReactNode {
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-canvas">
-      {/*
-        ★ `app-drag`:这一条**替换掉了**外层那条 34px Tab 条(见 AppShell 的
-        `activeStandaloneFeature` 分支),窗口顶部唯一能拖的地方就剩它。
-        右端同样要给自绘的三颗窗口按钮让位 —— 它们 fixed 悬浮,在这一页照样
-        浮在右上角。左端的让位和展开按钮由 `SidebarReveal` 负责。
-      */}
-      <div
-        className={cn(
-          'app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4',
-          !IS_MAC && 'pr-window-controls'
-        )}
-      >
-        <SidebarReveal />
-        <span className="text-[14px] font-medium text-fg">{t('git.title')}</span>
-        <span className="truncate text-[12px] text-fg-faint">{t('git.description')}</span>
-        <div className="ml-auto flex items-center gap-1">
-          {onRefresh !== null && (
-            <IconButton label={t('git.refresh')} onClick={onRefresh}>
-              <RefreshCw size={14} />
-            </IconButton>
-          )}
-          {onClose !== undefined && (
-            <IconButton label={t('git.close')} onClick={onClose}>
-              <X size={15} />
-            </IconButton>
-          )}
-        </div>
-      </div>
+    /*
+      52px 标题栏、`app-drag`、右端给自绘窗口按钮让位、左端 `SidebarReveal` ——
+      四条都归 `shell/FeatureFrame` 管,原委见那个文件的头。
+    */
+    <FeatureFrame
+      header={
+        <>
+          <span className="text-[14px] font-medium text-fg">{t('git.title')}</span>
+          <span className="truncate text-[12px] text-fg-faint">{t('git.description')}</span>
+          <div className="ml-auto flex items-center gap-1">
+            {onRefresh !== null && (
+              <IconButton label={t('git.refresh')} onClick={onRefresh}>
+                <RefreshCw size={14} />
+              </IconButton>
+            )}
+            {onClose !== undefined && (
+              <IconButton label={t('git.close')} onClick={onClose}>
+                <X size={15} />
+              </IconButton>
+            )}
+          </div>
+        </>
+      }
+    >
       <div className="flex min-h-0 flex-1">{children}</div>
-    </div>
+    </FeatureFrame>
   )
 }
 

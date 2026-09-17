@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import { PLAN_FILE_MAX_BYTES, type PlanToolReceipt } from '../../../../shared/domain/plan-file'
-import { activePlanForRun, enterPlanRun } from '../../plan-run'
+import { activePlanFor, enterPlanRun, leavePlan } from '../../plan-run'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
 
@@ -9,7 +9,8 @@ export const enterPlanModeTool: ToolRegistration = defineTool({
   internalId: 'EnterPlanMode',
   description:
     'Enter file-backed planning after the user requirements are clear. This creates the only Markdown file ' +
-    'that Write and Edit may change for the rest of this planning run and returns its path. Call it exactly once.',
+    'that Write and Edit may change for the rest of this planning session and returns its path. Call it exactly once; ' +
+    'the file stays active across later turns until the plan is approved or rejected.',
   schema: z.object({
     reason: z.string().max(2000).optional().describe('Why clarification is complete and planning can begin')
   }),
@@ -37,11 +38,17 @@ export const exitPlanModeTool: ToolRegistration = defineTool({
   destructive: false,
   needsNetwork: false,
   async run(_input, ctx) {
-    const active = activePlanForRun(ctx.runId)
+    const active = activePlanFor(ctx)
     if (active === undefined) return toolFail('Plan mode is not active. Call EnterPlanMode first.')
     if (ctx.interact === undefined) return toolFail('Plan review is not available in this environment.')
     if (!(await ctx.host.fs.exists(active.absolutePath))) {
-      return toolFail(`The plan file no longer exists: ${active.path}. Call EnterPlanMode in a new planning run.`)
+      /*
+        ★ 文件没了就把计划一起放掉。计划活着的时候 `planToolAllowList` 不下发
+        EnterPlanMode —— 不清掉的话,模型既写不成这一份(路径已失效),也重开不了
+        新的一份,只能在同一条报错上原地打转。
+      */
+      leavePlan(ctx)
+      return toolFail(`The plan file no longer exists: ${active.path}. Call EnterPlanMode to start a new plan.`)
     }
     const stat = await ctx.host.fs.stat(active.absolutePath)
     if (stat.isDir) return toolFail(`The plan path is a directory, not a Markdown file: ${active.path}`)
@@ -77,6 +84,12 @@ export const exitPlanModeTool: ToolRegistration = defineTool({
       ...(response.feedback === undefined ? {} : { feedback: response.feedback })
     }
     const suffix = response.feedback === undefined ? '' : `\n\nUser feedback:\n${response.feedback}`
+    /*
+      ★ 计划的生命周期到此为止 —— 但**只在批准/拒绝时**。要求修订的那一支必须
+      留着:修订往往发生在下一轮(run 已经结束),计划一旦清掉,下一轮的
+      Write/Edit 又会被摘掉,而模型手里还攥着那个路径。
+    */
+    if (response.action !== 'request_revision') leavePlan(ctx)
     return {
       ...toolOk(`${JSON.stringify(receipt)}${suffix}`),
       stopRun: response.action !== 'request_revision'

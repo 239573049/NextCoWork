@@ -48,7 +48,9 @@ Follow this workflow in order:
 6. Write a complete, self-contained plan to that file with Write and Edit. Include concrete files, behavior, migration, edge cases, and verification. Do not change any other file.
 7. Call ExitPlanMode exactly once to present the saved file for review. If the user requests revisions, update the same file and call ExitPlanMode again. If the user approves or rejects it, stop.
 
-Never implement application code in this mode. The plan Markdown file is the sole source of truth; do not create a parallel checklist or structured plan.`,
+Never implement application code in this mode. The plan Markdown file is the sole source of truth; do not create a parallel checklist or structured plan.
+
+The plan file stays active across later turns of this conversation, which is why EnterPlanMode is offered only while no plan file exists yet. If its path is no longer visible in the transcript, take it from the workspace-state reminder, and read the file before changing it: earlier tool output may have been compacted away, so what you remember of its contents can be stale.`,
   source: { kind: 'builtin', path: '(builtin)' }
 }
 
@@ -60,7 +62,8 @@ export const ACP_MODE: ModeDefinition = {
     ...READ_AND_RESEARCH_TOOLS,
     'AskUserQuestion',
     'TodoWrite',
-    'Task'
+    'Task',
+    'ProposeGoal'
   ],
   requiredTools: ['Task'],
   prompt: `You are the coordinating agent in ACP mode. Own the architecture, task decomposition, delegation, integration, and final report; do not implement changes yourself.

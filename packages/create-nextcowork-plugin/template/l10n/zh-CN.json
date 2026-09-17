@@ -1,0 +1,5 @@
+{
+  "cmd.hello": "打个招呼",
+  "greeted": "你好!这是第 {count} 次。",
+  "ready": "插件已就绪"
+}

@@ -83,6 +83,20 @@ describe('导航表与行目录的自洽', () => {
       }
     }
   })
+
+  /**
+   * ★ 「执行 Shell」那一行是**唯一**这一页上不靠 `settings.*` 取标题的行 ——
+   * 标题是域名词(`Shell`),只有它的描述和「跟随系统」那一项走 i18n。
+   * 漏配一条不报错,只会让描述那一栏写着 `general.shellHint`。
+   */
+  it('「执行 Shell」行的界面文案中英两套都在', () => {
+    const zh = messagesFor('zh-CN')
+    const en = messagesFor('en-US')
+    for (const key of ['general.shell', 'general.shellSystem', 'general.shellHint']) {
+      expect(zh[key], key).toBeDefined()
+      expect(en[key], key).toBeDefined()
+    }
+  })
 })
 
 describe('matchRows', () => {
@@ -115,6 +129,21 @@ describe('matchRows', () => {
 
   it('无命中返回空(驱动空态)', () => {
     expect(matchRows('zzzz没有这一项')).toEqual([])
+  })
+
+  /**
+   * ★ 「执行 Shell」那一行的标题是域名词,而用户打的十有八九是 shell 自己的
+   * 名字或「终端」。搜不到就等于这一项不存在 —— 八个取值一个都不能漏。
+   */
+  it('shell 相关查询都指到通用 › Agent', () => {
+    const queries = ['shell', 'sheel', 'bash', 'zsh', 'fish', 'sh', 'powershell', 'pwsh', 'cmd', 'terminal', '终端', '命令']
+    for (const query of queries) {
+      const rows = matchRows(query)
+      expect(
+        rows.some((r) => r.page === 'general' && r.sub === 'agent' && r.title === 'Shell'),
+        query
+      ).toBe(true)
+    }
   })
 })
 

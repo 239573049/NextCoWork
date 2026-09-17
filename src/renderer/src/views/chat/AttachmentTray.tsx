@@ -10,7 +10,7 @@
  *
  * ## 三种状态都要看得见
  *
- * 上传中、成功、失败。★ **失败的 chip 保留并给重试,不静默消失** ——
+ * 上传中、成功、失败。★ **失败的 chip 保留,有原文件时可重试,不静默消失** ——
  * 用户拖了 5 个文件进来,其中一个太大被拒,如果它悄悄不见了,
  * 用户只会以为自己少拖了一个。
  */
@@ -34,6 +34,8 @@ export interface TrayItem {
   path?: string;
   source?: FileReferenceSource;
   error?: string;
+  /** 没有原 File 的选图失败项只能移除后重新选择。 */
+  canRetry?: boolean;
 }
 
 export function AttachmentTray({
@@ -127,7 +129,7 @@ function AttachmentChip({
 
       {item.status === "awaiting-upload" && <button type="button" onClick={onRetry} title={labels.upload} aria-label={labels.upload} className="shrink-0 rounded-[5px] p-1 text-accent hover:bg-tint-hover"><Upload size={13} /></button>}
 
-      {item.status === "error" && (
+      {item.status === "error" && item.canRetry !== false && (
         <button
           type="button"
           onClick={onRetry}

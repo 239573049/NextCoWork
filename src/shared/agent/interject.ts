@@ -29,4 +29,6 @@ export interface InterjectItem {
   parts: ContentPart[]
   /** Coordination messages are sent to the model but hidden from the chat UI. */
   internal?: boolean
+  /** Drop a queued goal kickoff/check-in if its goal was cleared or replaced. */
+  goalId?: string
 }

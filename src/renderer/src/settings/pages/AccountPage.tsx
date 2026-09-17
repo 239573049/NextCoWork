@@ -13,7 +13,16 @@ export function AccountPage({ walletOnly = false }: SettingsPageProps & { wallet
   const [auth, setAuth] = useState<ClientAuthState | null>(null)
   const [usage, setUsage] = useState<ClientUsageEntry[]>([])
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(false)
+  /**
+   * ★ 存的是**原因**,不是一个 boolean。以前是 `.catch(() => setError(true))`,
+   * 主进程带回来的 `error.message`(比如「退出登录失败:secrets.removeAccessToken: …」)
+   * 在这里被整个丢掉,界面只剩一句「操作失败,请重试」—— 用户和我们都无从判断该重试还是该修。
+   */
+  const [error, setError] = useState<string | null>(null)
+  const fail = (err: unknown): void => {
+    console.error('[account] 账户操作失败:', err)
+    setError(err instanceof Error && err.message !== '' ? err.message : String(err))
+  }
   const load = async (): Promise<void> => {
     const next = await getClientAuthState()
     setAuth(next)
@@ -28,12 +37,12 @@ export function AccountPage({ walletOnly = false }: SettingsPageProps & { wallet
   useEffect(() => { void load() }, [])
   if (auth === null) return <div className="p-8 text-sm text-fg-muted">{t('common.loading')}</div>
   if (auth.mode === 'authenticated' && auth.contextRequired === true) return <ClientTeamSelectionView auth={auth} onComplete={setAuth} />
-  if (auth.mode !== 'authenticated' || !auth.user) return <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4"><EmptyState icon={<UserCircle size={28} />} title={t('auth.notSignedIn')} hint={t('auth.signInFromWelcome')} /><Button variant="accent" disabled={busy} onClick={() => { setBusy(true); setError(false); void startClientLogin().then(setAuth).catch(() => setError(true)).finally(() => setBusy(false)) }}>{busy ? t('auth.openingBrowser') : t('auth.login')}</Button>{error && <p className="text-xs text-danger">{t('auth.loginFailed')}</p>}</div>
+  if (auth.mode !== 'authenticated' || !auth.user) return <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4"><EmptyState icon={<UserCircle size={28} />} title={t('auth.notSignedIn')} hint={t('auth.signInFromWelcome')} /><Button variant="accent" disabled={busy} onClick={() => { setBusy(true); setError(null); void startClientLogin().then(setAuth).catch(fail).finally(() => setBusy(false)) }}>{busy ? t('auth.openingBrowser') : t('auth.login')}</Button>{error !== null && <p className="text-xs text-danger">{t('auth.loginFailedDetail', { message: error })}</p>}</div>
   return <div className="space-y-5">
-    {error && <p className="text-xs text-danger">{t('auth.actionFailed')}</p>}
+    {error !== null && <p className="text-xs text-danger">{t('auth.actionFailedDetail', { message: error })}</p>}
     {!walletOnly && <div className="flex items-center justify-between border-b border-border pb-5">
       <div className="flex items-center gap-3"><div className="flex size-11 items-center justify-center rounded-full bg-tint text-accent">{auth.user.avatarUrl ? <img alt={t('auth.avatarAlt')} src={auth.user.avatarUrl} className="size-11 rounded-full" /> : <UserCircle size={27} />}</div><div><div className="text-[15px] font-medium">{auth.user.displayName || auth.user.username || auth.user.email}</div><div className="mt-0.5 text-xs text-fg-muted">{auth.user.email}</div></div></div>
-      <Button variant="ghost" disabled={busy} onClick={() => { setBusy(true); void signOutClient().then(setAuth).catch(() => setError(true)).finally(() => setBusy(false)) }}><LogOut size={14} />{t('auth.signOut')}</Button>
+      <Button variant="ghost" disabled={busy} onClick={() => { setBusy(true); setError(null); void signOutClient().then(setAuth).catch(fail).finally(() => setBusy(false)) }}><LogOut size={14} />{t('auth.signOut')}</Button>
     </div>}
     {auth.user.wallet && <div className="rounded-[10px] bg-tint px-4 py-3"><div className="text-xs text-fg-muted">{t('auth.walletBalance')}</div><div className="mt-1 text-xl font-medium text-fg">{auth.user.wallet.availableBalance.toFixed(2)} <span className="text-xs text-fg-muted">{auth.user.wallet.currency}</span></div><div className="mt-3 grid grid-cols-3 gap-3 border-t border-border/60 pt-3 text-xs"><div><div className="text-fg-faint">{t('auth.cashBalance')}</div><div className="mt-1 text-fg">{auth.user.wallet.cashBalance.toFixed(2)}</div></div><div><div className="text-fg-faint">{t('auth.giftBalance')}</div><div className="mt-1 text-fg">{auth.user.wallet.giftBalance.toFixed(2)}</div></div><div><div className="text-fg-faint">{t('auth.totalConsumed')}</div><div className="mt-1 text-fg">{auth.user.wallet.totalConsumed.toFixed(2)}</div></div></div></div>}
     <div className="flex items-center justify-between"><div><h3 className="text-[13px] font-medium">{t('auth.usageTitle')}</h3><p className="mt-1 text-xs text-fg-muted">{t('auth.usageHint')}</p></div><Button variant="ghost" onClick={() => void load()}><RefreshCw size={14} />{t('common.refresh')}</Button></div>

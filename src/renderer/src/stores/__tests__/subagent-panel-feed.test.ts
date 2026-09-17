@@ -29,6 +29,7 @@ vi.mock('../../services/app', () => ({
   getSessionInput: vi.fn(async () => null), persistSessionInput: vi.fn()
 }))
 vi.mock('../../services/sessions', () => ({ getSession: vi.fn() }))
+vi.mock('../../services/goal', () => ({ getGoal: vi.fn(async () => undefined), onGoalChanged: vi.fn(() => () => {}) }))
 
 import type { AgentEventEnvelope } from '../../../../shared/ipc/contract'
 import { attachRun, onAgentEvent } from '../../services/agent'

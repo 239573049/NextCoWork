@@ -4,6 +4,7 @@ import { clampWithEllipsis, stripControlChars } from '../text'
 import { PathEscapeError, resolveInWorkspace } from '../tool/path-guard'
 import { normalizeToolName } from '../agent/tool-alias'
 import { EnvironmentError } from '../../../shared/domain/environment'
+import { LOCAL_SETTINGS_DIRNAME } from '../../../shared/domain/local-settings'
 import type { ModeDefinition } from '../../../shared/domain/mode'
 import {
   isBuiltinModeId,
@@ -15,7 +16,8 @@ import {
 import { BUILTIN_MODES } from './builtin'
 
 export const MODES_DIR = 'modes'
-export const PROJECT_MODES_PREFIX = '.next-cowork'
+/** 项目级资源所在的那层目录 —— 唯一出处见 `skill/load.ts` 的同名常量。 */
+export const PROJECT_MODES_PREFIX = LOCAL_SETTINGS_DIRNAME
 const MODE_FILE_MAX_BYTES = 128 * 1024
 const MAX_MODES = 100
 const TOOL_ID_RE = /^[A-Za-z0-9_.:/-]{1,256}$/

@@ -51,6 +51,12 @@ import { FilesTab } from "./files/FilesView";
 import { BrowserView } from "./browser/BrowserView";
 import { useI18n, type Translate } from "../i18n";
 import { BrowserFeature } from "./browser/BrowserFeature";
+/*
+  ★ **静态 import,不 lazy。** 它只引 `PluginViewFrame`(一个 iframe)和
+  插件 store —— 一个重型依赖都没有,lazy 只会给打开插件编辑器多一次往返。
+  往这个表里加视图之前先把传递依赖跟到底,理由见文件头那段。
+*/
+import { CustomEditorView } from "./plugins/CustomEditorView";
 
 // `.then(m => ({ default: ... }))` 是因为这几个都是具名导出,React.lazy 要的是默认导出。
 const ChatView = lazy(() => import("./chat/ChatView").then((m) => ({ default: m.ChatView })));
@@ -80,8 +86,7 @@ export interface InnerViewProps {
 }
 
 export function InnerView(props: InnerViewProps): ReactNode {
-  // Suspense 放在本文件内部,`InnerView` 的两个调用方(shell/Panels、shell/Dock)
-  // 因此什么都不用改。
+  // Suspense 放在本文件内部,`InnerView` 的调用方(shell/Dock)因此什么都不用改。
   // `t` 在这里取、往下传:renderInner 不是组件,在它里面调 Hook 过不了 lint。
   const { t } = useI18n();
   return <Suspense fallback={VIEW_FALLBACK}>{renderInner(props, t)}</Suspense>;
@@ -127,6 +132,19 @@ function renderInner(
     case "files":
       // key 挂子树根:换根等于换一棵树,展开状态和缓存都必须重来
       return <FilesTab key={tab.ref.path} tab={tab} workspace={workspace} />;
+    case "custom":
+      /*
+        插件接管的自定义编辑器。key 挂「插件 + viewType + 文件」三样:
+        换任何一样都是换一个编辑器实例,iframe 必须重建 —— 不重建的话,
+        换文件之后插件仍然画着上一个文件的内容,而它收不到任何通知。
+      */
+      return (
+        <CustomEditorView
+          key={`${tab.ref.pluginId}:${tab.ref.viewType}:${tab.ref.path}`}
+          tab={tab}
+          workspaceId={workspace.id}
+        />
+      );
   }
 }
 
@@ -174,4 +192,5 @@ export const INNER_VIEW_KINDS: Record<InnerTabKind, true> = {
   browser: true,
   preview: true,
   files: true,
+  custom: true,
 };

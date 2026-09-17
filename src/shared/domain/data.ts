@@ -9,7 +9,7 @@ import type { AgentMessage } from '../agent/message'
 import type { ContextCheckpoint } from '../agent/context-management'
 import type { ModelAlias, UpstreamProvider } from './provider'
 import { isModelCatalogOverride } from './provider'
-import type { AppSettings } from './settings'
+import { isShellPreference, isUpstreamIdleTimeoutSeconds, MODEL_PROPOSED_GOALS, type AppSettings } from './settings'
 import type { SearchProviderConfig } from './search'
 import type { Session } from './session'
 import type { Workspace } from './workspace'
@@ -291,6 +291,11 @@ function isAppSettings(value: unknown): boolean {
     !enumValue(v.defaultPermissionMode, PERMISSION_MODES) ||
     (has(v, 'permissionReviewerModel') && typeof v.permissionReviewerModel !== 'string') ||
     !optionalString(v, 'permissionReviewerModelProviderId') ||
+    // ★ 目标判定那一对和 `modelProposedGoals` 都是后加的:缺席 = 旧存档,必须放行,
+    //   否则每一份改动之前的导出都会在导入时被整份拒绝。
+    (has(v, 'goalEvaluatorModel') && typeof v.goalEvaluatorModel !== 'string') ||
+    !optionalString(v, 'goalEvaluatorModelProviderId') ||
+    (has(v, 'modelProposedGoals') && !enumValue(v.modelProposedGoals, MODEL_PROPOSED_GOALS)) ||
     typeof v.defaultModel !== 'string' ||
     !optionalString(v, 'defaultModelProviderId') ||
     (has(v, 'contextManagement') && !isContextManagementSettings(v.contextManagement)) ||
@@ -300,6 +305,15 @@ function isAppSettings(value: unknown): boolean {
     !isProxySettings(v.proxy)
   ) return false
   if (has(v, 'data') && !isDataSettings(v.data)) return false
+  // `shell` is newer than the first settings format, so a missing value must
+  // stay importable — legacy exports are merged with the current defaults.
+  // When it is present it has to be a known shell: an unknown one would only
+  // be discarded by the merger, so silently accepting it hides a bad export.
+  if (has(v, 'shell') && !isShellPreference(v.shell)) return false
+  // 后加的字段:缺席 = 旧存档,放行(和 default defaults 合并);在场就必须在范围内,
+  // 否则会被 merger 丢弃 —— 静默接受一个坏值会掩盖一份损坏的导出。
+  if (has(v, 'upstreamIdleTimeoutSeconds') &&
+      !isUpstreamIdleTimeoutSeconds(v.upstreamIdleTimeoutSeconds)) return false
   if (has(v, 'themeStudio') && !isThemeStudioSettings(v.themeStudio)) return false
   if (has(v, 'activeThemeProfileId') && v.activeThemeProfileId !== null &&
       (typeof v.activeThemeProfileId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(v.activeThemeProfileId))) return false
@@ -491,6 +505,18 @@ function isContentPart(value: unknown): boolean {
       return isNonEmptyString(value.mime) && isNonEmptyString(value.dataRef)
     case 'error':
       return isAgentError(value.error)
+    case 'goal_status':
+      // ★ 只有 `met` 和 `condition` 是必填：一条没有条件的目标标记在恢复时
+      //   会重建出一个空条件的目标，而空条件的判定器稳定地判未达成。
+      return isBoolean(value.met) && typeof value.condition === 'string'
+        && optionalBoolean(value, 'failed') && optionalBoolean(value, 'cleared') && optionalBoolean(value, 'set')
+        && optionalString(value, 'reason')
+        && (!has(value, 'id') || isNonEmptyString(value.id))
+        && (!has(value, 'createdAt') || isIntegerAtLeast(value.createdAt, 0))
+        && (!has(value, 'origin') || enumValue(value.origin, ['user', 'proposal_direct', 'proposal_approved', 'restored']))
+        && (!has(value, 'iterations') || isIntegerAtLeast(value.iterations, 0))
+        && (!has(value, 'durationMs') || isIntegerAtLeast(value.durationMs, 0))
+        && (!has(value, 'tokens') || isIntegerAtLeast(value.tokens, 0))
     default:
       return false
   }

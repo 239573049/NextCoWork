@@ -21,6 +21,15 @@ export type ToolSource =
   | { kind: 'builtin' }
   | { kind: 'mcp'; serverId: string }
   | { kind: 'skill'; skillId: string }
+  /**
+   * 插件贡献的工具。
+   *
+   * ★ 带上 `pluginId` 不是为了显示,是为了**成批下线**:插件崩了、被禁用、
+   * 被卸载时,`unregisterBySource({ kind: 'plugin', pluginId })` 要能一次
+   * 把它的全部工具摘掉。没有这个字段的话,下线只能按工具名逐个来,
+   * 而「这个插件注册过哪些工具」那份清单会和注册表分叉。
+   */
+  | { kind: 'plugin'; pluginId: string }
 
 /**
  * ★ 两个名字是必须的:Anthropic 把工具名限制在 ^[a-zA-Z0-9_-]{1,64}$。
@@ -39,6 +48,8 @@ export interface ToolInfo {
   inputSchema: JsonSchema
   /** 决定 plan 模式可用性 + 将来的并行调度资格 */
   readOnly: boolean
+  /** Explicitly serial tools must not race other calls in a batch. */
+  concurrencySafe?: boolean
   /** 决定权限档位(§4.5 那张 5 行表的入参之一) */
   destructive: boolean
   /**

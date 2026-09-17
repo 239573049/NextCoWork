@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SYNC_SELECTION, SYNC_CATEGORIES, syncDocumentSchema, syncEnvelopeSchema, syncKdfSchema } from '../config-sync'
-import { MODEL_SYNC_FIELDS, PROVIDER_SYNC_FIELDS, portableProvider } from '../config-sync-registry'
+import { MODEL_SYNC_FIELDS, PROVIDER_SYNC_FIELDS, SETTINGS_SYNC_FIELDS, SYNC_REGISTRY, portableProvider } from '../config-sync-registry'
 import { IMPORTED_ALIAS_DEFAULTS, type ModelAlias, type UpstreamProvider } from '../provider'
 
 describe('encrypted configuration contract', () => {
   it('starts with every category explicitly disabled', () => {
     expect(Object.keys(DEFAULT_SYNC_SELECTION)).toEqual([...SYNC_CATEGORIES])
     expect(Object.values(DEFAULT_SYNC_SELECTION).every((value) => value === false)).toBe(true)
+  })
+  it('keeps the command shell device-local rather than syncing it between systems', () => {
+    expect(SETTINGS_SYNC_FIELDS.shell).toBe('device')
+    expect(SYNC_REGISTRY.preferences.deviceFields).toContain('shell')
   })
   it('preserves all provider fields except device-local references', () => {
     const provider: UpstreamProvider = { id: 'custom', name: 'Provider', protocol: 'anthropic', baseUrl: 'https://example.com', credentialRef: 'private-ref', priority: 3, enabled: true, protocolOptions: { anthropic: { cacheTtl: '1h' } } }

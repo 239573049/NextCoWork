@@ -27,6 +27,7 @@ import { PERMISSION_MODES } from '../../../shared/agent/permission'
 import { fmList, fmString, parseFrontmatter } from '../frontmatter'
 import type { KernelFs, WorkspacePaths } from '../host'
 import { EnvironmentError } from '../../../shared/domain/environment'
+import { LOCAL_SETTINGS_DIRNAME } from '../../../shared/domain/local-settings'
 import { clampWithEllipsis, stripControlChars } from '../text'
 import { PathEscapeError, resolveInWorkspace } from '../tool/path-guard'
 import { BUILTIN_AGENTS } from './builtin'
@@ -34,7 +35,8 @@ import { normalizeToolList } from './tool-alias'
 
 /** 目录名 —— 和 CC 一致 */
 export const AGENTS_DIR = 'agents'
-export const PROJECT_AGENTS_PREFIX = '.next-cowork'
+/** 项目级资源所在的那层目录 —— 唯一出处见 `skill/load.ts` 的同名常量。 */
+export const PROJECT_AGENTS_PREFIX = LOCAL_SETTINGS_DIRNAME
 
 /** 单个定义文件读进内存的字节上限。正文还会再被 `AGENT_PROMPT_MAX` 截一次。 */
 const AGENT_FILE_MAX_BYTES = 128 * 1024

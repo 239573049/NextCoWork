@@ -30,7 +30,7 @@ export function DesktopPreview({ profile, images }: { profile: ThemeProfile; ima
   const [scale, setScale] = useState(.45)
   const workspace: Workspace = { id: 'theme-preview', name: t('themeStudio.previewTab'), rootPath: '', settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 0, lastOpenedAt: 0 }
   const tabs: InnerTab[] = [{ id: 'preview-chat', title: t('nav.newChat'), kind: 'chat', ref: { sessionId: null } }, { id: 'preview-doc', title: 'theme.ts', kind: 'doc', ref: { path: 'theme.ts' } }]
-  const barProps = { runningSessionIds: running, menu: [], onActivate: noop, onClose: noop, onMove: noop, onOpen: noop }
+  const barProps = { runningSessionIds: running, menu: { items: [], overflow: [] }, onActivate: noop, onClose: noop, onMove: noop, onOpen: noop }
   useLayoutEffect(() => {
     if (!frame.current) return
     const ro = new ResizeObserver(([e]) => setScale((e?.contentRect.width ?? 500) / 1100))

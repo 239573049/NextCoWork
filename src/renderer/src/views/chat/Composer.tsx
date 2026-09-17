@@ -95,6 +95,8 @@ import {
 import { Slider } from "../../components/ui/Slider";
 import { Tooltip } from "../../components/ui/Tooltip";
 import { cn } from "../../lib/cn";
+import { GoalPanel, GoalPill } from './GoalPanel';
+import { parseGoalCommand, type ActiveGoal } from '../../../../shared/domain/goal';
 import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
 import { listConnections, onConnectionsChanged } from "../../services/connections";
@@ -175,6 +177,8 @@ export interface ConversationUsageSummary {
 export function Composer({
   workspace,
   fallbackModel,
+  sessionModel,
+  onModelChange,
   draft,
   onDraft,
   onPermissionModeChange,
@@ -196,12 +200,27 @@ export function Composer({
   contextCacheHitRate,
   contextCompacting = false,
   onCompactContext,
+  onGoalCommand,
+  goal,
   onManageMcp,
   conversationUsage,
 }: {
   workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
   fallbackModel: FallbackModel;
+  /**
+   * **这条会话自己记住的模型**,优先于工作区默认值。
+   *
+   * ★ 它是异步到的(要读一次会话元数据),所以下面用一个 effect 补写进 `value`,
+   * 而不是只在初始化时读一次 —— 挂载那一刻它还是 `undefined`。
+   * 空别名 = 这条会话从没选过,那就继续走「工作区默认 → 应用默认 → 第一个」。
+   */
+  sessionModel?: FallbackModel;
+  /**
+   * 用户从菜单里点选了模型。★ 落到**会话**上由上层负责 —— 会话 id 归它管
+   * (草稿这一刻可能还没有 id)。工作区默认值仍由这里写回,新会话继承它。
+   */
+  onModelChange?: (model: string, modelProviderId?: string) => void;
   draft: string;
   onDraft: (v: string) => void;
   /**
@@ -245,23 +264,50 @@ export function Composer({
   contextCompacting?: boolean;
   /** 双击圆环触发。生成中不给触发,由这里的按钮自己拦。 */
   onCompactContext?: () => void;
+  /**
+   * `/goal <参数>` 的去处。参数原样递过去（空串 = 用户只打了 `/goal`）。
+   *
+   * ★ 解析在 `shared/domain/goal.ts` 的 `parseGoalCommand`，不在这里：
+   *   同一份规则要服务斜杠命令、`ProposeGoal` 工具、IPC 三个入口，
+   *   各写一份就会各漂各的（「`stop` 算不算清除词」这种事只该有一个答案）。
+   */
+  goal?: ActiveGoal;
+  onGoalCommand?: (args: string, value: ComposerValue) => boolean | void | Promise<boolean | void>;
   /** 归因卡里 MCP 那一行的去处。缺省 = 那一行不可点。 */
   onManageMcp?: () => void;
   /** 整个会话的累计用量，以及最近一轮可计算的输出速度。 */
   conversationUsage?: ConversationUsageSummary;
 }): ReactNode {
   const { t } = useI18n();
+  const [goalPanelOpen, setGoalPanelOpen] = useState(false);
   const { models: configuredModels, providers, loaded, providerOf, load } = useModelsStore();
   const models = configuredModels.filter((m) => m.enabled !== false &&
     providers.some((p) => p.id === m.providerId && p.enabled));
   const [value, setValue] = useState<ComposerValue>(() => ({
     ...fromSettings(workspace.settings),
+    ...(sessionModel === undefined || sessionModel.model === ""
+      ? {}
+      : { model: sessionModel.model, modelProviderId: sessionModel.modelProviderId }),
     mode: sessionMode ?? workspace.settings.defaultMode,
   }));
   useEffect(() => {
     if (sessionMode === undefined) return;
     setValue((current) => current.mode === sessionMode ? current : { ...current, mode: sessionMode });
   }, [sessionMode]);
+  /*
+    会话自己记住的模型 → 药丸。★ 依赖写成**拍平的一对**而不是那个对象:
+    上层每渲染一次都会给一个新对象,按身份比较的话这个 effect 每次都跑。
+    空别名不覆盖 —— 那是「这条会话从没选过」,该由兜底链说了算。
+  */
+  const sessionModelAlias = sessionModel?.model ?? "";
+  const sessionModelProviderId = sessionModel?.modelProviderId;
+  useEffect(() => {
+    if (sessionModelAlias === "") return;
+    setValue((current) =>
+      current.model === sessionModelAlias && current.modelProviderId === sessionModelProviderId
+        ? current
+        : { ...current, model: sessionModelAlias, modelProviderId: sessionModelProviderId });
+  }, [sessionModelAlias, sessionModelProviderId]);
   /*
     上下文归因的**预览**:还没发过请求时,`contextSegments` 是空的,而那正是这张卡
     最该说话的时刻 —— 一个挂满 MCP 的工作区在一句话都没聊的时候就已经少掉半个窗口。
@@ -470,15 +516,29 @@ export function Composer({
     **就是即将发出的这个请求本身** —— 没有任何一段提示词能表达这件事,
     展开成文本发给模型只会让模型多读一句「请压缩上下文」然后照常回答。
 
-    所以它只在这里拼进弹层(可见、可搜),并在 `submit()` 里于 `applyCommand`
+    `/goal` 破例的理由是同一类:它改的是**会话的状态**(挂上一个待满足的条件),
+    而提示词展开不出状态变更 —— 展开成文本只会让模型口头答应一声然后照常停下。
+
+    所以它们只在这里拼进弹层(可见、可搜),并在 `submit()` 里于 `applyCommand`
     **之前**被拦下:主进程永远收不到 `/compact` 这三个字。
     `prompt` 留空串正是这个意思 —— 它没有可展开的正文。
+
+    ★ `run` 收一个 `args`:`/goal <条件>` 的整条参数要原样交给动作。
+      `/compact` 那份忽略它(多一个用不到的参数,不影响)。
   */
-  const localActions: { command: CommandDefinition; run: () => void }[] =
-    onCompactContext === undefined ? [] : [{
-      command: { name: 'compact', description: t('composer.command.compact'), prompt: '', scope: 'builtin', source: '' },
-      run: onCompactContext
-    }];
+  const localActions: { command: CommandDefinition; run: (args: string, value: ComposerValue) => void }[] = [
+    ...(onCompactContext === undefined ? [] : [{
+      command: { name: 'compact', description: t('composer.command.compact'), prompt: '', scope: 'builtin' as const, source: '' },
+      run: (): void => onCompactContext()
+    }]),
+    ...(onGoalCommand === undefined ? [] : [{
+      command: { name: 'goal', description: t('composer.command.goal'), prompt: '', scope: 'builtin' as const, source: '' },
+      run: (args: string, value: ComposerValue): void => {
+        if (args.trim() === '') setGoalPanelOpen(true);
+        else void onGoalCommand(args, value);
+      }
+    }])
+  ];
   const slashItems: SlashItem[] = [
     ...localActions
       .filter((a) => `${a.command.name} ${a.command.description}`.toLocaleLowerCase().includes(slashNeedle))
@@ -638,8 +698,7 @@ export function Composer({
     //   但上传还没完成时不发:那样 parts 里会缺一张图,而用户以为发出去了。
     const hasReady = attachments.some((a) => a.status === "done");
     const pending = attachments.some((a) => a.status === "uploading");
-    if (pending) return;
-    if ((raw === "" && !hasReady) || model === "") return;
+    // Local actions below do not send attachments and remain available without a model.
     /*
       ★ 本地动作必须拦在 `applyCommand` **之前**:它不是模板,展开不出任何东西,
       放过去就会被当成普通文本原样发给模型。拦下之后只清草稿,不走 `onSend`。
@@ -649,12 +708,20 @@ export function Composer({
       ? undefined
       : localActions.find((a) => a.command.name === call.name.toLowerCase());
     if (action !== undefined) {
-      action.run();
-      onDraft("");
+      /*
+        ★ 把**此刻**药丸的值一起递出去：`/goal` 设立成功后要注入一条 kickoff，
+          而那条消息必须跑在用户当前选的模型/档位上（同 `onSend` 那一行的理由）。
+      */
+      const goalIntent = action.command.name === 'goal' ? parseGoalCommand(call?.args ?? '') : undefined;
+      const invalidGoal = goalIntent?.kind === 'invalid' || (goalIntent?.kind === 'set' && model === '');
+      // Keep rejected conditions intact. Clear accepted commands before a draft tab binds to a session.
+      if (!invalidGoal) onDraft("");
       dismissedAt.current = null;
       setMention(null);
+      action.run(call?.args ?? "", { ...value, model, modelProviderId, thinking });
       return;
     }
+    if (pending || (raw === "" && !hasReady) || model === "") return;
     // ★ 命令在**发送这一刻**才展开:草稿里一直留着 `/name args`(用户看得懂、也还能
     //   回去改),进 RunRequest 的才是展开后的完整提示词。不是命令调用就原样返回。
     const text = applyCommand(raw, commands);
@@ -947,21 +1014,28 @@ export function Composer({
             providers={providers}
             models={models}
             loaded={loaded}
-            onModel={(nextModel, nextProviderId) => patch({
-              model: nextModel,
-              // 用户从菜单里点选是**唯一**会把供应商写进工作区的时机(兜底不写回)。
-              modelProviderId: nextProviderId,
+            onModel={(nextModel, nextProviderId) => {
+              patch({
+                model: nextModel,
+                // 用户从菜单里点选是**唯一**会把供应商写进工作区的时机(兜底不写回)。
+                modelProviderId: nextProviderId,
+                /*
+                  ★ thinking 必须 normalize,而 maxContext **故意不 normalize**。
+                  不对称的理由:下发一个新模型不认的 reasoning effort 会被上游拒;
+                  而 maxContext 多留一个 true 没有任何下游后果 —— `effectiveContextWindow`
+                  的 `min()` 已经兜住了窗口不够大的模型。抹掉它反而会让
+                  「sol → claude → sol」这条常见路径静默丢掉用户的选择。
+                */
+                thinking: normalizeModelThinkingLevel(thinking, models.find(
+                  (m) => m.alias === nextModel && m.providerId === nextProviderId
+                ))
+              });
               /*
-                ★ thinking 必须 normalize,而 maxContext **故意不 normalize**。
-                不对称的理由:下发一个新模型不认的 reasoning effort 会被上游拒;
-                而 maxContext 多留一个 true 没有任何下游后果 —— `effectiveContextWindow`
-                的 `min()` 已经兜住了窗口不够大的模型。抹掉它反而会让
-                「sol → claude → sol」这条常见路径静默丢掉用户的选择。
+                ★ 同一次点选还要落到**这条会话**上:工作区默认值是给新会话用的,
+                只写它的话,在另一条会话里换模型就会把这条也换掉 —— 正是这次修的那件事。
               */
-              thinking: normalizeModelThinkingLevel(thinking, models.find(
-                (m) => m.alias === nextModel && m.providerId === nextProviderId
-              ))
-            })}
+              onModelChange?.(nextModel, nextProviderId);
+            }}
           />
 
           <button
@@ -1000,8 +1074,21 @@ export function Composer({
         后者(权限档位 / `+` / 模型 / 发送)才留在框内那一排。放到框外还有个好处:
         框内那排在窄窗口下已经两头顶死了,再塞一颗模式药丸就会把模型名挤成省略号。
       */}
+      {onGoalCommand !== undefined && <GoalPanel
+        open={goalPanelOpen}
+        goal={goal}
+        tokens={goal === undefined ? undefined : Math.max(goal.tokens ?? 0,
+          (conversationUsage === undefined ? goal.tokensAtStart : conversationUsage.inputTokens
+            + conversationUsage.outputTokens + conversationUsage.cacheReadTokens + conversationUsage.cacheWriteTokens) - goal.tokensAtStart)}
+        onClose={() => setGoalPanelOpen(false)}
+        onSet={(condition) => Promise.resolve(onGoalCommand(condition, { ...value, model, modelProviderId, thinking }))}
+        onClear={() => Promise.resolve(onGoalCommand('clear', { ...value, model, modelProviderId, thinking }))}
+      />}
       <div className="mx-auto mt-1.5 flex w-full max-w-[760px] items-center gap-1">
         <EnvironmentPill workspace={workspace} />
+        {onGoalCommand !== undefined && <GoalPill goal={goal} onOpen={() => setGoalPanelOpen(true)}
+          onClear={() => { void onGoalCommand('clear', { ...value, model, modelProviderId, thinking }) }} />}
+
 
         <Menu
           label={t('composer.mode.label')}

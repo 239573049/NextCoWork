@@ -28,6 +28,18 @@ export function setSessionMode(sessionId: string, mode: SessionMode): Promise<vo
   return invoke('sessions:setMode', { sessionId, mode })
 }
 
+/**
+ * 记住这条会话选中的模型。★ 别名和供应商**一起**送 —— 只送一半会在会话元数据上
+ * 留下「新别名 + 旧供应商」。
+ */
+export function setSessionModel(sessionId: string, model: string, modelProviderId?: string): Promise<void> {
+  return invoke('sessions:setModel', {
+    sessionId,
+    model,
+    ...(modelProviderId === undefined ? {} : { modelProviderId })
+  })
+}
+
 export function duplicateSession(sessionId: string, title: string): Promise<Session> {
   return invoke('sessions:duplicate', { sessionId, title })
 }

@@ -13,6 +13,10 @@ import { Check, Eye } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ProxyScheme } from "../../../../../shared/domain/proxy";
 import {
+  DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+  UPSTREAM_IDLE_TIMEOUT_BOUNDS,
+} from "../../../../../shared/domain/settings";
+import {
   DIRECT_BYPASS,
   PROXY_SCHEMES,
 } from "../../../../../shared/domain/proxy";
@@ -170,7 +174,6 @@ export function NetworkPane({ settings, patch }: SettingsPageProps): ReactNode {
             </button>
           </>
         }
-        last
       >
         <BypassInput
           value={p.bypass}
@@ -192,6 +195,16 @@ export function NetworkPane({ settings, patch }: SettingsPageProps): ReactNode {
           </div>
         )}
       </SettingField>
+      <SettingRow
+        title={t("connection.network.upstreamTimeout")}
+        description={t("connection.network.upstreamTimeoutHint")}
+        last
+      >
+        <TimeoutInput
+          value={settings.upstreamIdleTimeoutSeconds}
+          onCommit={(seconds) => patch({ upstreamIdleTimeoutSeconds: seconds })}
+        />
+      </SettingRow>
     </SettingGroup>
   );
 }
@@ -337,6 +350,43 @@ function PortInput({
         return n === 0 ? "" : String(n);
       }}
     />
+  );
+}
+
+/** 上游空闲超时(秒)。范围外的输入不提交,原样还原 —— 主进程那一侧的 merge 也会再拦一次 */
+function TimeoutInput({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (seconds: number) => void;
+}): ReactNode {
+  const { t } = useI18n();
+  return (
+    <div className="w-[160px]">
+      <DraftInput
+        value={String(value)}
+        disabled={false}
+        invalid={false}
+        ariaLabel={t("connection.network.upstreamTimeout")}
+        placeholder={String(DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS)}
+        onCommit={() => {
+          /* 提交在 transform 里做 —— 那边才有解析后的数字 */
+        }}
+        transform={(draft) => {
+          const n = Number(draft.trim());
+          if (
+            !Number.isInteger(n) ||
+            n < UPSTREAM_IDLE_TIMEOUT_BOUNDS.min ||
+            n > UPSTREAM_IDLE_TIMEOUT_BOUNDS.max
+          ) {
+            return null;
+          }
+          if (n !== value) onCommit(n);
+          return String(n);
+        }}
+      />
+    </div>
   );
 }
 

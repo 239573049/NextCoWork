@@ -20,7 +20,7 @@ import { Select } from '../../components/ui/Select'
 import { TextInput } from '../../components/ui/TextInput'
 import { Toggle } from '../../components/ui/Toggle'
 import { cn } from '../../lib/cn'
-import { IS_MAC } from '../../lib/platform'
+import { FeatureFrame } from '../../shell/FeatureFrame'
 import { useI18n, type Translate } from '../../i18n'
 import { useWindowStore } from '../../stores/window'
 import { useSkillsStore } from '../../stores/skills'
@@ -251,13 +251,18 @@ export function SkillsFeature({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-canvas">
-      <header
-        className={cn(
-          'app-drag flex h-[52px] shrink-0 items-center gap-2 border-b border-hairline px-4',
-          !chromeless && !IS_MAC && 'pr-window-controls'
-        )}
-      >
+    /*
+      52px 标题栏那一串类名、拖动区、右端让位统一归 `shell/FeatureFrame`
+      (四个 feature 页原本各写了一份,原委见那个文件的头)。
+
+      ★ `chromeless` = 嵌在扩展页里:那时外层已经有一条标题栏,这里既不该再
+      给窗口按钮让位,也不该再出一颗展开侧边栏的按钮。
+    */
+    <FeatureFrame
+      windowControls={!chromeless}
+      reveal={false}
+      header={
+        <>
         {!chromeless && (
           <>
             <IconButton
@@ -298,7 +303,9 @@ export function SkillsFeature({
             {t('skills.install')}
           </Button>
         </div>
-      </header>
+        </>
+      }
+    >
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-6 py-5">
         <div className="mx-auto flex min-h-0 w-full max-w-[1080px] flex-1 flex-col">
           <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -625,7 +632,7 @@ export function SkillsFeature({
       >
         <p className="text-[12px] text-fg-muted">{t('skills.confirmUninstallHint')}</p>
       </Dialog>
-    </div>
+    </FeatureFrame>
   )
 }
 

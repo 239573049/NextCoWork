@@ -6,6 +6,7 @@ import { agentRegistry } from '../../../agent/registry'
 import { GENERAL_PURPOSE } from '../../../agent/builtin'
 import { nodeHost } from '../../../host'
 import type { SubagentOutcome, SubagentRequest, ToolContext } from '../../registry'
+import type { ToolRegistration } from '../../registry'
 import { taskTool } from '../task'
 
 /**
@@ -66,9 +67,17 @@ const agent = (over: Partial<AgentDefinition> = {}): AgentDefinition => ({
   ...over
 })
 
-/** 装一批子代理进那个进程内单例。 */
+/**
+ * 造一个带**当前注册表内容**的 `Task`。
+ *
+ * ★ 显式把清单传进去,不靠默认参数:注册表按工作区分桶之后,`taskTool()`
+ * 的默认值是内建那几条 —— 它不知道自己是为哪个工作区造的(见 `task.ts` 的说明)。
+ */
+const task = (): ToolRegistration => taskTool(agentRegistry('').list())
+
+/** 装一批子代理进 `''` 那一桶(无头调用没有工作区身份)。 */
 function install(...agents: AgentDefinition[]): void {
-  agentRegistry().replaceAll({ agents: [GENERAL_PURPOSE, ...agents], diagnostics: [] })
+  agentRegistry('').replaceAll({ agents: [GENERAL_PURPOSE, ...agents], diagnostics: [] })
 }
 
 beforeEach(() => {
@@ -76,7 +85,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // 单例跨用例共享 —— 不还原的话,下一个文件里的测试会看见这里装的东西
+  // 注册表跨用例共享 —— 不还原的话,下一个文件里的测试会看见这里装的东西
   install()
 })
 
@@ -89,20 +98,20 @@ describe('Task · 标记与形状', () => {
    * 标成只读是错的,哪怕子代理自己只用了读工具:它跑的是一整条 agent 循环。
    */
   it('★ readOnly: false —— plan 模式靠这个把它摘掉', () => {
-    expect(taskTool().readOnly).toBe(false)
+    expect(task().readOnly).toBe(false)
   })
 
   it('不算破坏性:派出去这个动作本身不改任何东西,子代理里的工具会各自过闸门', () => {
-    expect(taskTool().destructive).toBe(false)
+    expect(task().destructive).toBe(false)
   })
 
   it('不需要联网 —— 联不联网由子代理里那些工具各自声明', () => {
-    expect(taskTool().needsNetwork).toBe(false)
+    expect(task().needsNetwork).toBe(false)
   })
 
   /** ★ 核心参数名逐字照搬 CC,并额外支持后台执行开关 */
   it('★ 参数名逐字照搬 Claude Code,并支持后台执行', () => {
-    const props = taskTool().inputSchema.properties ?? {}
+    const props = task().inputSchema.properties ?? {}
 
     expect(Object.keys(props)).toEqual(['description', 'prompt', 'subagent_type', 'run_in_background'])
   })
@@ -115,21 +124,21 @@ describe('Task · description 就是那份清单', () => {
    * agent 文件「存在、能派、但模型永远看不见它」。
    */
   it('★ 清单跟着注册表走,新装的子代理立刻出现在描述里', () => {
-    expect(taskTool().description).toContain('researcher')
+    expect(task().description).toContain('researcher')
 
     install(agent({ name: 'reviewer', description: '审代码' }))
 
-    const d = taskTool().description
+    const d = task().description
     expect(d).toContain('reviewer')
     expect(d).toContain('审代码')
   })
 
   it('内建的那条永远在清单里', () => {
-    expect(taskTool().description).toContain('general-purpose')
+    expect(task().description).toContain('general-purpose')
   })
 
   it('把每个子代理能用的工具也列出来 —— 省略 tools 的写成 *', () => {
-    const d = taskTool().description
+    const d = task().description
 
     expect(d).toContain('Read, Grep, Glob')
     expect(d).toContain('*')
@@ -140,17 +149,17 @@ describe('Task · description 就是那份清单', () => {
    * 自己的角色提示词。写 prompt 的是父代理,而父代理只读得到这里。
    */
   it('★ 描述里写明子代理看不到当前对话', () => {
-    expect(taskTool().description).toContain('CANNOT SEE THIS CONVERSATION')
+    expect(task().description).toContain('CANNOT SEE THIS CONVERSATION')
   })
 
   it('描述里写明只有最后一条消息会回来 —— 否则父代理会去找中间过程', () => {
-    expect(taskTool().description).toMatch(/ONE MESSAGE|final/)
+    expect(task().description).toMatch(/ONE MESSAGE|final/)
   })
 })
 
 describe('Task · 派不出去的时候', () => {
   it('★ 深度到顶 → 说清为什么、以及该改做什么(否则模型换个名字再试)', async () => {
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx({ depth: MAX_DEPTH, spawnSubagent: fakeSpawn(finished()).fn })
     )
@@ -163,7 +172,7 @@ describe('Task · 派不出去的时候', () => {
   it('深度到顶时压根不调启动器', async () => {
     const spawn = fakeSpawn(finished())
 
-    await taskTool().execute(
+    await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx({ depth: MAX_DEPTH, spawnSubagent: spawn.fn })
     )
@@ -176,7 +185,7 @@ describe('Task · 派不出去的时候', () => {
    * 纯内核测试、以及任何没接启动器的宿主里都会走到这一支。
    */
   it('★ 这个环境派不了子代理 → 一句人话,不是崩溃', async () => {
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx()
     )
@@ -194,7 +203,7 @@ describe('Task · 派不出去的时候', () => {
    */
   it('★ refused 的理由原样转交,不加前缀', async () => {
     const reason = '没有名为 "reviewr" 的子代理。当前可用:general-purpose、researcher。'
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'reviewr' },
       ctx({ spawnSubagent: fakeSpawn({ kind: 'refused', reason }).fn })
     )
@@ -207,7 +216,7 @@ describe('Task · 派不出去的时候', () => {
 
 describe('Task · 三种结局映射成三种不同的东西', () => {
   it('done + 有文字 → 原样交回,不加任何包装', async () => {
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx({ spawnSubagent: fakeSpawn(finished({ text: '结论:在 src/a.ts:3' })).fn })
     )
@@ -222,7 +231,7 @@ describe('Task · 三种结局映射成三种不同的东西', () => {
    * 而真实情况是这次调查根本没发生。
    */
   it('★ done + 空文字 → 报失败,并说清下一步', async () => {
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx({ spawnSubagent: fakeSpawn(finished({ text: '   \n  ' })).fn })
     )
@@ -233,7 +242,7 @@ describe('Task · 三种结局映射成三种不同的东西', () => {
   })
 
   it('error → 带上子代理的名字和原始错误', async () => {
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx({ spawnSubagent: fakeSpawn(finished({ status: 'error', error: '上游 429' })).fn })
     )
@@ -256,7 +265,7 @@ describe('Task · 三种结局映射成三种不同的东西', () => {
    * 同一个 callId 会被写两条结果。
    */
   it('★ aborted → 抛中断,不是返回 toolFail', async () => {
-    const call = taskTool().execute(
+    const call = task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'researcher' },
       ctx({ spawnSubagent: fakeSpawn(finished({ status: 'aborted', text: '' })).fn })
     )
@@ -269,7 +278,7 @@ describe('Task · 传给启动器的东西', () => {
   it('三个入参加上 callId 一起交过去 —— callId 是事件配对用的', async () => {
     const spawn = fakeSpawn(finished())
 
-    await taskTool().execute(
+    await task().execute(
       { description: '查配置', prompt: '找出配置读取处', subagent_type: 'researcher' },
       ctx({ callId: 'call_42', spawnSubagent: spawn.fn })
     )
@@ -287,7 +296,7 @@ describe('Task · 传给启动器的东西', () => {
   it('run_in_background=true 透传后台标记，并把后台结局映射为成功', async () => {
     const spawn = fakeSpawn({ kind: 'background', childRunId: 'run_1:sub:1' })
 
-    const r = await taskTool().execute(
+    const r = await task().execute(
       {
         description: '查配置',
         prompt: '找出配置读取处',
@@ -311,7 +320,7 @@ describe('Task · 传给启动器的东西', () => {
   it('★ 名字不做任何纠正,原样递过去 —— 回落到 general-purpose 是最坏的失败', async () => {
     const spawn = fakeSpawn({ kind: 'refused', reason: '没有名为 "RESEARCHER" 的子代理。' })
 
-    await taskTool().execute(
+    await task().execute(
       { description: 'd', prompt: 'p', subagent_type: 'RESEARCHER' },
       ctx({ spawnSubagent: spawn.fn })
     )
@@ -322,7 +331,7 @@ describe('Task · 传给启动器的东西', () => {
   it('参数不合法时在 schema 那一层就被挡下,不会派出去', async () => {
     const spawn = fakeSpawn(finished())
 
-    const r = await taskTool().execute(
+    const r = await task().execute(
       { description: 'd', prompt: '', subagent_type: 'researcher' },
       ctx({ spawnSubagent: spawn.fn })
     )

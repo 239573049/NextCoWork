@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
 import { findGroup, type DockNode } from '../../../shared/domain/dock'
 import type { InnerTabKind } from '../../../shared/domain/tab'
-import { BOTTOM_TAB_MENU, INNER_TAB_MENU, RIGHT_TAB_MENU } from '../../../shared/domain/tab'
+import type { TabMenuItem } from '../../../shared/plugin/contribution'
 import type { Workspace } from '../../../shared/domain/workspace'
 import { EmptyState } from '../components/ui/EmptyState'
 import type { FallbackModel } from '../views/chat/Composer'
@@ -12,6 +12,8 @@ import { AllTabsMenu, InnerTabBar } from './InnerTabBar'
 import { useTabsStore } from '../stores/tabs'
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents'
 import { DOCK_TAB_MIME, dockDropZone, groupPane, groupTabs, visibleDockNode, type DockDropZone } from './dock-layout'
+import { useTabMenu } from './tab-menu'
+import { usePluginsStore } from '../stores/plugins'
 
 export function DockRoot({ workspace, fallbackModel, runningSessionIds, rightVisible = true, bottomVisible = true }: { workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string>; rightVisible?: boolean; bottomVisible?: boolean }): ReactNode {
   const dock = useTabsStore((state) => state.dockOf(workspace.id))
@@ -63,8 +65,23 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
     }
   }, [dragZone])
   const active = tabs.find((tab) => tab.id === node.activeTabId)
-  const menu = edgePane === 'bottom' ? BOTTOM_TAB_MENU : edgePane === 'right' ? RIGHT_TAB_MENU : INNER_TAB_MENU
-  const open = (kind: InnerTabKind): void => openDock(workspace.id, node.id, kind, undefined, edgePane)
+  /*
+    ★ 三条常量的三元选择换成一个 hook。内置项与插件贡献项在 `useTabMenu` 里
+    合并,插件项被 clamp 到内置项之后(见 `shared/plugin/contribution.ts`)。
+  */
+  const menu = useTabMenu(edgePane)
+  /*
+    ★ 按 `item.action` 分发,不再按 `kind`。内置项开一个 Tab;插件项执行
+    它自己的命令 —— 能力门在命令实现里,所以贡献菜单本身不需要新权限。
+  */
+  const open = (item: TabMenuItem): void => {
+    if (item.action.kind === 'openTab') {
+      openDock(workspace.id, node.id, item.action.tabKind as InnerTabKind, undefined, edgePane)
+      return
+    }
+    if (item.pluginId === undefined) return
+    void usePluginsStore.getState().runCommand(item.pluginId, item.action.commandId)
+  }
   const onClose = async (id: string): Promise<void> => {
     const target = tabs.find((tab) => tab.id === id)
     if (target?.kind === 'doc' || target?.kind === 'preview') {

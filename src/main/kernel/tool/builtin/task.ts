@@ -28,7 +28,7 @@ import { agentError } from '../../../../shared/agent/error'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import type { AgentDefinition } from '../../../../shared/domain/agent-def'
 import { abortError } from '../../abort'
-import { agentRegistry } from '../../agent/registry'
+import { BUILTIN_AGENTS } from '../../agent/builtin'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
 
@@ -104,12 +104,18 @@ function buildDescription(agents: readonly AgentDefinition[]): string {
 }
 
 /**
- * 造一个 `Task` 工具,描述里带着**此刻**注册表里的那份子代理清单。
+ * 造一个 `Task` 工具,描述里带着**传进来**的那份子代理清单。
  *
  * ★ 每次调用现拼,不缓存:缓存就意味着「用户新加的 agent 文件要重启才生效」,
  * 而这件事没有任何地方会提示他。拼一份字符串的代价可以忽略。
+ *
+ * ★ **默认值是内建那几条,不是某个注册表的内容。** 注册表现在按工作区分桶
+ * (见 `kernel/registry-buckets.ts`),而这个函数不知道自己是为哪个工作区造的 ——
+ * 让它去猜一个桶,等于把「A 的子代理出现在 B 的工具描述里」这件事藏进一个默认参数。
+ * 需要某个工作区那份清单的调用方必须显式传:每次 run 的 `snapshotRunTools`
+ * 和上下文预览都是这么做的。
  */
-export function taskTool(agents: readonly AgentDefinition[] = agentRegistry().list()): ToolRegistration {
+export function taskTool(agents: readonly AgentDefinition[] = BUILTIN_AGENTS): ToolRegistration {
 
   return defineTool({
     internalId: 'Task',

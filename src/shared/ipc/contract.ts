@@ -13,7 +13,7 @@
  */
 import type { AgentError } from '../agent/error'
 import type { AgentEvent, RunSnapshot } from '../agent/event'
-import type { AgentMessage } from '../agent/message'
+import type { AgentMessage, ContentPart } from '../agent/message'
 import type { ContextCheckpoint, ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
@@ -23,6 +23,9 @@ import type { Bootstrap } from '../domain/bootstrap'
 import type { DirListing, FileSuggestion } from '../domain/file-tree'
 import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
 import type { ProxyPasswordInfo } from '../domain/proxy'
+import type { PluginPermission } from '../plugin/permission'
+import type { PluginActivity, PluginCatalog } from '../plugin/state'
+import type { PluginMarketItem } from '../plugin/market'
 import type {
   Attachment,
   AttachmentScope,
@@ -48,7 +51,8 @@ import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo, TerminalPrepa
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { CommandDefinition } from '../domain/command'
 import type { AgentDraft } from '../domain/agent-def'
-import type { HookDefinition, HookEvent, HookListItem, HookRunReport, HookScope } from '../domain/hook'
+import type { HookDiagnostic, HookEvent, HookListItem, HookRunReport, HookScope, HookUpsert } from '../domain/hook'
+import type { ActiveGoal, GoalChange } from '../domain/goal'
 import type {
   AgentListItem,
   CommandListItem,
@@ -430,6 +434,11 @@ export interface IpcInvokeMap {
   'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
   'sessions:setMode': { req: { sessionId: string; mode: SessionMode }; res: void }
+  /**
+   * 记住这条会话选中的模型。★ 和 `setMode` 同理:模型是**每条会话自己的**记忆,
+   * 在另一条会话里换模型不该把这条会话也换掉(工作区默认值只影响新会话)。
+   */
+  'sessions:setModel': { req: { sessionId: string; model: string; modelProviderId?: string }; res: void }
   'sessions:setArchived': { req: { sessionId: string; archived: boolean }; res: void }
   'sessions:setFavorited': { req: { sessionId: string; favorited: boolean }; res: void }
   'sessions:delete': { req: { sessionId: string }; res: void }
@@ -487,7 +496,7 @@ export interface IpcInvokeMap {
   'agent:interject': { req: { runId: string; items: InterjectItem[] }; res: void }
   /** ★ 审批 / 反问 / 计划确认三种 kind 共用这一个(方案 §4.6) */
   'agent:respondInteraction': { req: InteractionResponse; res: void }
-  'agent:listInteractions': { req: { runId?: string }; res: PendingInteraction[] }
+  'agent:listInteractions': { req: { runId?: string; sessionId?: string }; res: PendingInteraction[] }
   'agent:listTools': { req: { workspaceId: string }; res: ToolInfo[] }
 
   // ── 终端 ──
@@ -567,6 +576,48 @@ export interface IpcInvokeMap {
     res: void
   }
 
+  // ── 插件 ──
+  /*
+    ★ **一次取回全量 catalog,不做增量。** 插件数量是个位数,而增量协议要多
+      一套「我这份是不是过期了」的判断 —— 那正是 `mcp:changed` 当初踩过的坑
+      (状态变化推了、但推的是一条没有内容的通知,渲染层要自己再拉一次)。
+      这里干脆让每个写操作都返回新的 catalog,渲染层直接换掉手里那份。
+  */
+  'plugins:list': { req: void; res: PluginCatalog }
+  'plugins:setEnabled': { req: { pluginId: string; enabled: boolean }; res: PluginCatalog }
+  'plugins:uninstall': { req: { pluginId: string }; res: PluginCatalog }
+  'plugins:pickPackage': { req: void; res: { path: string; name: string } | null }
+  'plugins:installPackage': { req: { path: string; scope?: 'global' | 'workspace'; workspaceId?: string }; res: PluginCatalog }
+  /** 安装/升级时逐条勾选的结果。**越过清单上界的那些会被丢掉**,见 permission.ts */
+  'plugins:grantPermissions': { req: { pluginId: string; permissions: PluginPermission[] }; res: PluginCatalog }
+  'plugins:revokePermissions': { req: { pluginId: string; permissions: PluginPermission[] }; res: PluginCatalog }
+  /** 活动日志(环形缓冲)。插件详情页的「活动」标签直接展示 */
+  'plugins:activity': { req: { pluginId?: string }; res: PluginActivity[] }
+  /** 执行一条插件命令 —— 菜单项、命令面板、快捷键三处共用 */
+  'plugins:runCommand': { req: { pluginId: string; commandId: string }; res: void }
+  /**
+   * 设置项的读写。**独立 kv,不扩 `AppSettings`** —— 那份 blob 是全应用的,
+   * 每次写都整份重写、整份同步,一个插件的开关不该有那个代价。
+   */
+  /**
+   * 关掉一个文件 / 工作区之前先问一遍插件编辑器。
+   *
+   * ★ 返回 `false` = **别关**。不接这条的话,插件编辑器里没存的改动会在
+   * 关 Tab 的那一刻静默消失 —— 而内置文档的挽留(`confirmDocumentChanges`)
+   * 完全看不见它们。
+   */
+  'plugins:confirmClose': { req: { path?: string }; res: { safe: boolean } }
+  // ── 插件市场 ──
+  'plugins:marketList': { req: { q?: string; category?: string }; res: PluginMarketItem[] }
+  'plugins:marketCategories': { req: void; res: string[] }
+  'plugins:marketDetail': { req: { slug: string }; res: PluginMarketItem & { versions?: { version: string; changelog?: string; permissionEscalated?: boolean }[] } }
+  'plugins:installMarket': { req: { slug: string; version?: string }; res: PluginCatalog }
+  'plugins:getConfiguration': { req: { pluginId: string }; res: Record<string, boolean | string | number> }
+  'plugins:setConfiguration': {
+    req: { pluginId: string; key: string; value: boolean | string | number | null }
+    res: Record<string, boolean | string | number>
+  }
+
   // ── 斜杠命令(`/命令`)──
   /*
     ★ **正文一起下发**,不另开一条「取正文」的频道。展开发生在发送前的渲染层
@@ -614,19 +665,43 @@ export interface IpcInvokeMap {
 
   // ── 钩子（`settings.local.json` / `<appData>/settings.json` 的 hooks 段）──
   'hooks:list': { req: { workspaceId?: string }; res: HookListItem[] }
-  'hooks:diagnostics': { req: { workspaceId?: string }; res: Array<{ path: string; message: string }> }
+  'hooks:diagnostics': { req: { workspaceId?: string }; res: HookDiagnostic[] }
   /** 按 id upsert。id 省略 = 新建，主进程铸 ULID 并回传。 */
   'hooks:save': {
-    req: { scope: HookScope; workspaceId?: string; hook: Omit<HookDefinition, 'id'> & { id?: string } }
+    req: { scope: HookScope; workspaceId?: string; hook: HookUpsert }
     res: HookListItem
   }
   'hooks:delete': { req: { scope: HookScope; workspaceId?: string; id: string }; res: void }
   'hooks:setEnabled': { req: { scope: HookScope; workspaceId?: string; id: string; enabled: boolean }; res: void }
   /** 试运行。★ 跑的是弹层里此刻的草稿，不读磁盘上那一条。 */
   'hooks:test': {
-    req: { workspaceId?: string; scope: HookScope; event: HookEvent; command: string; timeoutMs: number }
+    req: { workspaceId?: string; scope: HookScope; event: HookEvent; timeoutMs: number }
+      & ({ type?: 'command'; command: string } | { type: 'prompt'; prompt: string })
     res: HookRunReport
   }
+
+  // ── 会话目标（goal）──
+  //
+  // ★ **不走 `agent:event`**。那条流是 run 生命周期内的（有 seq、有 attach 补齐语义），
+  //   而目标的寿命比 run 长：设目标时可能根本没有 run 在跑，run 结束后目标还活着。
+  //   塞进 `agent:event` 会让 `agent:attach` 的 seq 补齐多出一种
+  //   「这条事件不属于任何 run」的分支。
+  'goal:get': { req: { sessionId: string }; res: ActiveGoal | undefined }
+  /** 设立 / 覆盖。条件为空或超长时不设立，回一条说得清的理由。 */
+  'goal:set': {
+    req: { sessionId: string; condition: string }
+    /**
+     * `kickoff` 是要注入给主模型的那条 **internal** 消息。
+     *
+     * ★ 由主进程给，不在渲染层拼：它是一段**进模型上下文**的英文 prompt
+     *   （措辞是被调过的，见 `main/goal/prompt.ts` 文件头）。在渲染层拼的话
+     *   它会被当成 UI 文案而走进 i18n，那等于换掉一个判定器的行为。
+     */
+    res:
+      | { ok: true; goal: ActiveGoal; kickoff: ContentPart[] }
+      | { ok: false; reason: 'empty' | 'too_long'; length: number }
+  }
+  'goal:clear': { req: { sessionId: string }; res: void }
 
   // ── 供应商 / 模型别名 ──
   'provider:list': { req: void; res: UpstreamProvider[] }
@@ -850,10 +925,34 @@ export interface IpcEventMap {
   'theme:libraryChanged': { profiles: ThemeProfile[]; images: ImageTheme[] }
   'workspace:changed': { workspaces: Workspace[] }
   'skills:changed': void
+  /** 插件装/卸/启/禁/激活状态变了。渲染层收到后重新 `plugins:list` */
+  'plugins:changed': void
+  /**
+   * 插件要给用户看一条消息。
+   *
+   * ★ 带的是 **key + params**,不是渲染好的句子 —— 渲染层 `t()` 之后才是人话。
+   * 传句子的话,那条通知永远是插件作者写死的那一种语言。
+   */
+  'plugins:message': {
+    pluginId: string
+    kind: 'info' | 'warn' | 'error'
+    messageKey: string
+    params: Record<string, string | number>
+  }
+  /**
+   * 插件请求为某个文件打开它的自定义编辑器 Tab。
+   *
+   * ★ 主进程已经核过 viewType 是这个插件声明过的、path 落在工作区内
+   * (见 `plugin/manager.ts` 的 `tabs.openCustomEditor`)——
+   * 渲染层收到时只决定「放在哪一格」,不再做安全判断。
+   */
+  'plugins:openCustomEditor': { pluginId: string; viewType: string; path: string }
   'commands:changed': void
   'agents:changed': void
   'modes:changed': void
   'hooks:changed': void
+  /** 某条会话的目标变了（设立 / 轮数推进 / 清除）。`goal` 缺席 = 现在没有目标。 */
+  'goal:changed': GoalChange
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
   'sessions:changed': SessionChange
@@ -1041,6 +1140,7 @@ export const INVOKE_CHANNELS = {
   'sessions:duplicate': 1,
   'sessions:rename': 1,
   'sessions:setMode': 1,
+  'sessions:setModel': 1,
   'sessions:setArchived': 1,
   'sessions:setFavorited': 1,
   'sessions:delete': 1,
@@ -1073,6 +1173,22 @@ export const INVOKE_CHANNELS = {
   'proxy:setPassword': 1,
   'proxy:clearPassword': 1,
   'proxy:getPasswordInfo': 1,
+  'plugins:list': 1,
+  'plugins:setEnabled': 1,
+  'plugins:uninstall': 1,
+  'plugins:pickPackage': 1,
+  'plugins:installPackage': 1,
+  'plugins:grantPermissions': 1,
+  'plugins:revokePermissions': 1,
+  'plugins:activity': 1,
+  'plugins:runCommand': 1,
+  'plugins:confirmClose': 1,
+  'plugins:marketList': 1,
+  'plugins:marketCategories': 1,
+  'plugins:marketDetail': 1,
+  'plugins:installMarket': 1,
+  'plugins:getConfiguration': 1,
+  'plugins:setConfiguration': 1,
   'skills:list': 1,
   'skills:pickZip': 1,
   'skills:installZip': 1,
@@ -1102,6 +1218,9 @@ export const INVOKE_CHANNELS = {
   'hooks:delete': 1,
   'hooks:setEnabled': 1,
   'hooks:test': 1,
+  'goal:get': 1,
+  'goal:set': 1,
+  'goal:clear': 1,
   'provider:list': 1,
   'providers:listImportable': 1,
   'provider:upsert': 1,
@@ -1202,10 +1321,14 @@ export const EVENT_CHANNELS = {
   'theme:libraryChanged': 1,
   'workspace:changed': 1,
   'skills:changed': 1,
+  'plugins:changed': 1,
+  'plugins:message': 1,
+  'plugins:openCustomEditor': 1,
   'commands:changed': 1,
   'agents:changed': 1,
   'modes:changed': 1,
   'hooks:changed': 1,
+  'goal:changed': 1,
   'mcp:changed': 1,
   'provider:changed': 1,
   'provider:authProgress': 1,

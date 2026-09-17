@@ -27,7 +27,7 @@
  * 工具都用不了，且没有任何线索指向钩子」。代价用可见性补 —— 失败会进
  * `hooks:diagnostics`，面板顶部挂红条。
  */
-import type { HookDefinition, HookEvent, HookRunReport, HookScope } from '../../../shared/domain/hook'
+import type { CommandHook, HookDefinition, HookEvent, HookRunReport, HookScope } from '../../../shared/domain/hook'
 import { HOOK_STDERR_MAX, HOOK_STDOUT_MAX } from '../../../shared/domain/hook'
 
 export type { HookRunReport }
@@ -65,6 +65,15 @@ export interface HookPayload {
   prompt?: string
   /** Stop / SubagentStop 才有 */
   status?: string
+  /**
+   * 这一轮的 `Stop` 钩子已经被叫过至少一次了。
+   *
+   * ★ 它是**防死循环的唯一线索**：一条阻断了收尾的 Stop 钩子会让这一轮继续跑，
+   *   下一次收尾时它又会被叫一遍。脚本据此可以决定「第二次就放行」。
+   *   没有这一项的话，一条无条件 `exit 2` 的 Stop 钩子就是一个无限循环，
+   *   而脚本作者没有任何办法察觉自己写出了它。
+   */
+  stop_hook_active?: boolean
   /** Notification 才有 */
   notification?: { kind: string; toolName?: string }
 }
@@ -115,7 +124,12 @@ function parseDecision(stdout: string): Pick<HookRunReport, 'decision' | 'reason
 
 export interface RunHookOptions {
   open: HookProcessOpen
-  hook: HookDefinition
+  /**
+   * ★ 只收 `CommandHook`。prompt 型跑的不是进程，它在 `main/hooks.ts` 走另一条路 ——
+   *   判别联合在这里被收窄，所以「给这个函数递一条 prompt 钩子」是编译错误，
+   *   而不是一次 `undefined` 命令行。
+   */
+  hook: CommandHook
   scope: HookScope
   payload: HookPayload
   cwd: string

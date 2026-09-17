@@ -23,13 +23,15 @@ import {
 import { fmString, parseFrontmatter } from '../frontmatter'
 import type { KernelFs, WorkspacePaths } from '../host'
 import { EnvironmentError } from '../../../shared/domain/environment'
+import { LOCAL_SETTINGS_DIRNAME } from '../../../shared/domain/local-settings'
 import { clampWithEllipsis, stripControlChars } from '../text'
 import { PathEscapeError, resolveInWorkspace } from '../tool/path-guard'
 import { BUILTIN_COMMANDS } from './builtin'
 
 /** 目录名 */
 export const COMMANDS_DIR = 'commands'
-export const PROJECT_COMMANDS_PREFIX = '.next-cowork'
+/** 项目级资源所在的那层目录 —— 唯一出处见 `skill/load.ts` 的同名常量。 */
+export const PROJECT_COMMANDS_PREFIX = LOCAL_SETTINGS_DIRNAME
 
 const COMMAND_FILE_MAX_BYTES = 128 * 1024
 const MAX_COMMANDS = 200

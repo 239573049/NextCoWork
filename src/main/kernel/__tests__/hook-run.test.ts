@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { HookDefinition } from '../../../shared/domain/hook'
+import type { CommandHook } from '../../../shared/domain/hook'
 import { runHook, runHookChain, type HookPayload, type HookProcess, type HookProcessOpen } from '../hook/run'
 
-const hook = (over: Partial<HookDefinition> = {}): HookDefinition => ({
+const hook = (over: Partial<CommandHook> = {}): CommandHook => ({
   id: 'h1',
+  type: 'command',
   event: 'PreToolUse',
   command: 'guard.sh',
   enabled: true,

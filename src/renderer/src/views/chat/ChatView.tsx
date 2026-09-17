@@ -16,6 +16,8 @@ import { tokensPerSecond } from '../../../../shared/agent/duration'
 import type { RunCost } from '../../../../shared/domain/pricing'
 import { latestTodosFrom, type TodoItem } from '../../../../main/kernel/tool/builtin/todo'
 import { useI18n } from '../../i18n'
+import { agentErrorText } from '../../i18n/agent'
+import { AgentErrorException } from '../../services/ipc'
 import type { ContentPart } from '../../../../shared/agent/message'
 import type { Attachment, WorkspaceAttachmentIntent } from '../../../../shared/domain/attachment'
 import { isLocalEnvironment } from '../../../../shared/domain/environment'
@@ -28,7 +30,7 @@ import { Dialog } from '../../components/ui/Dialog'
 import { Button } from '../../components/ui/Button'
 import { updateWorkspace } from '../../services/app'
 import { sessionStore, resumeQueue } from '../../stores/session'
-import { Composer, type ConversationUsageSummary, type FallbackModel } from './Composer'
+import { Composer, type ComposerValue, type ConversationUsageSummary, type FallbackModel } from './Composer'
 import { type TrayItem } from './AttachmentTray'
 import { PendingQueue } from './PendingQueue'
 import { Thread } from './Thread'
@@ -38,8 +40,10 @@ import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { WorkspaceMarkdownProvider } from '../../components/markdown'
-import { createSession, getSession, setSessionMode } from '../../services/sessions'
-import type { SessionMode } from '../../../../shared/agent/run-request'
+import { createSession, getSession, setSessionMode, setSessionModel } from '../../services/sessions'
+import { clearGoal, getGoal, setGoal } from '../../services/goal'
+import { parseGoalCommand } from '../../../../shared/domain/goal'
+import type { SendOptions, SessionMode } from '../../../../shared/agent/run-request'
 import { Spinner } from '../../components/ui/Spinner'
 
 export function ChatView({
@@ -115,7 +119,31 @@ export function ChatView({
   )
 
   const running = runningOverride ?? activeRunId !== null
+  const goal = useSession((state) => state.goal)
+  const [goalNotice, setGoalNotice] = useState<string | null>(null)
+  useEffect(() => {
+    if (sessionId === null) return
+    let cancelled = false
+    const version = useSession.getState().goalVersion
+    void getGoal(sessionId).then((current) => {
+      if (!cancelled && useSession.getState().goalVersion === version) useSession.setState({ goal: current })
+    }).catch(() => setGoalNotice(t('goal.error.updateFailed')))
+    return () => { cancelled = true }
+  }, [sessionId, useSession])
   const [sessionMode, setCurrentSessionMode] = useState<SessionMode>(workspace.settings.defaultMode)
+  /**
+   * **这条会话自己记住的模型。** 工作区默认值只负责新会话的起点 ——
+   * 在另一条会话里换模型不该把这条会话也换掉。
+   *
+   * undefined = 还没读到(草稿,或会话元数据还在路上);空别名 = 这条会话
+   * 从来没选过,交回给 `Composer` 的兜底链。
+   */
+  const [sessionModel, setSessionModelState] = useState<FallbackModel | undefined>(undefined)
+  /**
+   * 用户在这个 Tab 里已经点过模型了。★ 用来挡住一次真实的竞态:会话元数据是
+   * 异步读回来的,它晚于一次**刚发生的**点选到达时会把用户的选择盖回去。
+   */
+  const modelPicked = useRef(false)
   useEffect(() => {
     if (sessionId === null) {
       setCurrentSessionMode(workspace.settings.defaultMode)
@@ -123,10 +151,29 @@ export function ChatView({
     }
     let cancelled = false
     void getSession(sessionId).then((detail) => {
-      if (!cancelled) setCurrentSessionMode(detail.session.mode)
+      if (cancelled) return
+      setCurrentSessionMode(detail.session.mode)
+      if (modelPicked.current) return
+      setSessionModelState({
+        model: detail.session.model,
+        ...(detail.session.modelProviderId === undefined
+          ? {}
+          : { modelProviderId: detail.session.modelProviderId })
+      })
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [sessionId, workspace.settings.defaultMode])
+  /**
+   * 药丸上换了模型:先记在本地(输入框重挂时要靠它),再落到会话上。
+   *
+   * ★ 草稿(还没有会话 id)只记本地 —— 它发出去的那一刻,主进程会把这次
+   * 实际用的模型冻进新会话的元数据(见 `runtime.ts`),不必在这里抢着铸 id。
+   */
+  const handleModelChange = useCallback((model: string, modelProviderId?: string): void => {
+    modelPicked.current = true
+    setSessionModelState({ model, ...(modelProviderId === undefined ? {} : { modelProviderId }) })
+    if (sessionId !== null) void setSessionModel(sessionId, model, modelProviderId).catch(() => undefined)
+  }, [sessionId])
   /*
     ★ 直接按回包带回来的 providerId 查,**不再经过别名表**。
     以前是 `providerOf(transcript.model)`,而 `transcript.model` 是上游回包里的
@@ -144,11 +191,19 @@ export function ChatView({
     `turnModel`,按各自的 `runId` 查 `transcript.runModel`。
   */
   const modelName = lastOptions?.model
-  /** 编辑消息续跑时用的模型。和 `Composer` 的兜底链同源:工作区选过的 → 应用默认。 */
-  const editModel: FallbackModel = workspace.settings.defaultModel !== ''
-    ? { model: workspace.settings.defaultModel,
-        modelProviderId: workspace.settings.defaultModelProviderId }
-    : fallbackModel
+  /**
+   * 编辑消息续跑时用的模型。和 `Composer` 的兜底链同源:
+   * 这条会话记住的 → 工作区选过的 → 应用默认。
+   *
+   * ★ 会话记住的那一档排在最前,理由和药丸一样:在这条会话里编辑一条消息重跑,
+   * 用的就该是这条会话的模型,而不是另一条会话刚刚改出来的工作区默认值。
+   */
+  const editModel: FallbackModel = sessionModel !== undefined && sessionModel.model !== ''
+    ? sessionModel
+    : workspace.settings.defaultModel !== ''
+      ? { model: workspace.settings.defaultModel,
+          modelProviderId: workspace.settings.defaultModelProviderId }
+      : fallbackModel
   /**
    * 「不经过输入框」那一类路径共用的档位:编辑后重新生成、以及后台子代理
    * 结果的手动回传。它们都没有 Composer 的实时选择可用,只能取工作区默认值
@@ -316,11 +371,12 @@ export function ChatView({
           setTray((t) => t.map((x) => (x.key === key ? { ...x, status: remote && !isImageMime(a.mime) ? 'awaiting-upload' : 'done', attachment: a } : x)))
           pendingFiles.current.delete(key)
         })
-        .catch(() => {
-          // ★ 失败的 chip **保留**并可重试。静默移除的话,用户拖了 5 个
-          //   只成功 4 个,他只会以为自己少拖了一个。
+        .catch((error: unknown) => {
+          // ★ 失败的 chip **保留**并可重试,并显示上传端给出的具体原因。
+          const message = error instanceof AgentErrorException && error.error.messageKey !== undefined
+            ? agentErrorText(error.error, t) : t('attachment.error.uploadFailed')
           setTray((current) =>
-            current.map((x) => (x.key === key ? { ...x, status: 'error', error: t('ssh.attachmentFailed') } : x))
+            current.map((x) => (x.key === key ? { ...x, status: 'error', error: message } : x))
           )
         })
     },
@@ -338,7 +394,7 @@ export function ChatView({
         key: ulid(),
         name: f.name,
         file: f,
-        isImage: isImageMime(f.type !== '' ? f.type : mimeOfExt(f.name))
+        isImage: isImageMime(f.type) || isImageMime(mimeOfExt(f.name))
       }))
       setTray((t) => [
         ...t,
@@ -365,7 +421,7 @@ export function ChatView({
   function pathTrayItem(key: string, name: string, file: File): TrayItem {
     const path = window.nextcowork.getPathForFile(file)
     return path === ''
-      ? { key, name, status: 'error', error: t('chat.pathUnavailable') }
+      ? { key, name, status: 'error', canRetry: false, error: t('chat.pathUnavailable') }
       : { key, name, status: 'done', path, source: { kind: 'local' } }
   }
 
@@ -379,18 +435,23 @@ export function ChatView({
     void pickAttachments('session', ensureSessionId(), remote).then((list) => {
       setTray((current) => [
         ...current,
-        ...list.map((p) =>
-          p.kind === 'path'
-            ? // key 只是 chip 的本地身份,路径型的没有附件 id 可用
-              (remote ? { key: ulid(), name: p.name, status: 'error' as const, error: t('ssh.attachmentFailed') } : { key: ulid(), name: p.name, status: 'done' as const, path: p.path, source: { kind: 'local' as const } })
-            : {
-                key: p.attachment.id,
-                name: p.attachment.displayName,
-                status: remote && !isImageMime(p.attachment.mime) ? 'awaiting-upload' as const : 'done' as const,
-                attachment: p.attachment
-              }
-        )
+        ...list.map((p): TrayItem => {
+          if (p.kind === 'error') return { key: ulid(), name: p.name, status: 'error', canRetry: false, error: agentErrorText(p.error, t) }
+          if (p.kind === 'path') return remote
+            ? { key: ulid(), name: p.name, status: 'error', canRetry: false, error: t('ssh.attachmentFailed') }
+            : { key: ulid(), name: p.name, status: 'done', path: p.path, source: { kind: 'local' } }
+          return {
+            key: p.attachment.id,
+            name: p.attachment.displayName,
+            status: remote && !isImageMime(p.attachment.mime) ? 'awaiting-upload' : 'done',
+            attachment: p.attachment
+          }
+        })
       ])
+    }).catch((error: unknown) => {
+      const message = error instanceof AgentErrorException && error.error.messageKey !== undefined
+        ? agentErrorText(error.error, t) : t('attachment.error.uploadFailed')
+      setTray((current) => [...current, { key: ulid(), name: t('composer.addAttachment'), status: 'error', canRetry: false, error: message }])
     })
   }, [ensureSessionId, remote, t])
 
@@ -460,6 +521,35 @@ export function ChatView({
     </dl>}
   </Dialog>
 
+  /**
+   * 药丸此刻的值 → 一份 `SendOptions`。
+   *
+   * ★ 抽出来是因为现在有**两个**发送入口（用户按回车、`/goal` 注入 kickoff），
+   *   而它们必须用同一份档位：两处各拼一遍的话，kickoff 会以一个用户没选过的
+   *   模型/权限档位跑起来，而他完全看不出为什么。
+   */
+  function sendOptionsOf(v: ComposerValue): SendOptions {
+    return {
+      workspaceId: workspace.id,
+      depth: 0,
+      mode: v.mode,
+      thinking: v.thinking,
+      webSearch: v.webSearch,
+      maxContext: v.maxContext,
+      permissionMode: v.permissionMode,
+      model: v.model,
+      modelProviderId: v.modelProviderId,
+      /*
+        ★ 这里传空数组曾经让整个 Skill 功能在产品里悄悄失效:单测全绿,
+        而模型永远看不到任何 Skill。现在传的是工作区的选装清单,
+        **空清单在主进程一侧意味着「全都要」**(见 `SkillRegistry.resolve`),
+        所以新建的工作区不需要用户先去哪里勾一遍。
+      */
+      skillIds: workspace.settings.activeSkillIds,
+      skillSelectionMode: workspace.settings.skillSelectionMode
+    }
+  }
+
   /** 托盘 → ContentPart[]。只取已完成的,上传中/失败的不进 parts */
   function partsOf(text: string): ContentPart[] | undefined {
     const ready = tray.filter((x) => x.status === 'done' && (x.attachment !== undefined || x.path !== undefined))
@@ -479,6 +569,54 @@ export function ChatView({
     return parts
   }
 
+  /**
+   * `/goal [参数]`。
+   *
+   * ★ 四条路径的分叉在 `shared/domain/goal.ts` 的 `parseGoalCommand` —— 同一份规则
+   *   要服务斜杠命令、`ProposeGoal` 工具、IPC 三个入口，写在这里就会漂。
+   *
+   * ★ 设立成功后把主进程给的 **kickoff** 原样发出去（`internal: true`）：
+   *   会话正跑着时它走插话通道，闲着时它起一个新 run —— `send` 那一层
+   *   已经把这两种情形收敛成了同一个调用（见 `stores/session.ts`）。
+   *   在渲染层自己拼这段文案是错的：它是进模型上下文的英文 prompt，措辞被调过。
+   */
+  async function handleGoalCommand(args: string, value: ComposerValue): Promise<boolean> {
+    const intent = parseGoalCommand(args)
+    if (intent.kind === 'invalid') {
+      setGoalNotice(intent.reason === 'empty' ? t('goal.error.empty') : t('goal.error.tooLong', { length: intent.length }))
+      return false
+    }
+    if (intent.kind === 'set' && value.model === '') {
+      setGoalNotice(t('composer.noAvailableModel'))
+      return false
+    }
+    const targetSessionId = intent.kind === 'set' ? ensureSessionId() : sessionId
+    if (targetSessionId === null) { setGoalNotice(t('goal.panel.empty')); return true }
+    const target = sessionStore(targetSessionId)
+    try {
+      if (intent.kind === 'show') return true // Composer opens GoalPanel locally.
+      if (intent.kind === 'clear') {
+        const had = await getGoal(targetSessionId)
+        await clearGoal(targetSessionId)
+        target.setState({ goal: undefined })
+        setGoalNotice(had === undefined ? t('goal.panel.empty') : t('goal.notice.cleared'))
+        return true
+      }
+      const result = await setGoal(targetSessionId, intent.condition)
+      if (!result.ok) {
+        setGoalNotice(result.reason === 'too_long' ? t('goal.error.tooLong', { length: result.length }) : t('goal.error.empty'))
+        return false
+      }
+      target.setState({ goal: result.goal })
+      setGoalNotice(null)
+      if (result.kickoff.length > 0) await target.getState().send('', sendOptionsOf(value), result.kickoff, true, result.goal.id)
+      return true
+    } catch {
+      setGoalNotice(t('goal.error.updateFailed'))
+      return false
+    }
+  }
+
   // 两种布局共用同一个输入框实例的**写法**,但注意它们是两棵不同的子树 ——
   // 从空态切到有内容时 React 会重新挂载它。这没问题:草稿在 session store 里,
   // 而发出去的那一刻草稿已经清空了。
@@ -487,6 +625,8 @@ export function ChatView({
       storeKey={storeKey}
       workspace={workspace}
       fallbackModel={fallbackModel}
+      {...(sessionModel === undefined ? {} : { sessionModel })}
+      onModelChange={handleModelChange}
       onPermissionModeChange={retagQueuedPermission}
       sessionMode={sessionMode}
       onSessionModeChange={(mode) => {
@@ -531,40 +671,23 @@ export function ChatView({
         const targetSessionId = ensureSessionId()
         setCurrentSessionMode(v.mode)
         void setSessionMode(targetSessionId, v.mode).catch(() => undefined)
-        void sessionStore(targetSessionId).getState().send(
-          text,
-          {
-            workspaceId: workspace.id,
-            depth: 0,
-            mode: v.mode,
-            thinking: v.thinking,
-            webSearch: v.webSearch,
-            maxContext: v.maxContext,
-            permissionMode: v.permissionMode,
-            model: v.model,
-            modelProviderId: v.modelProviderId,
-            /*
-              ★ 这里传空数组曾经让整个 Skill 功能在产品里悄悄失效:单测全绿,
-              而模型永远看不到任何 Skill。现在传的是工作区的选装清单,
-              **空清单在主进程一侧意味着「全都要」**(见 `SkillRegistry.resolve`),
-              所以新建的工作区不需要用户先去哪里勾一遍。
-            */
-            skillIds: workspace.settings.activeSkillIds
-            ,skillSelectionMode: workspace.settings.skillSelectionMode
-          },
-          parts
-        )
+        void sessionStore(targetSessionId).getState().send(text, sendOptionsOf(v), parts)
       }}
+      goal={goal}
+      onGoalCommand={handleGoalCommand}
       onStop={stop}
     />
+  )
+
+  const goalLine = goalNotice === null ? null : (
+    <p className="px-1 pb-1 whitespace-pre-wrap text-[11.5px] text-fg-faint" role="status">{goalNotice}</p>
   )
 
   /*
     ★ **队列区跟着输入框走,不跟着转录走。** 它属于「还没发出去的东西」那一侧,
     所以空态和常驻态两棵子树都要有它 —— 用户在空会话里连发两条同样会排队。
   */
-  const queue = (
-    <PendingQueue
+  const queue = (    <PendingQueue
       items={queuedInputs}
       running={running}
       onPromote={promoteInput}
@@ -618,6 +741,7 @@ export function ChatView({
           {greetingOf(new Date().getHours())}
         </h1>
         <div className="w-full">
+          {goalLine}
           {queue}
           {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
           {composer}
@@ -639,6 +763,7 @@ export function ChatView({
             providerName={provider?.name}
             lastSeq={lastSeq}
             reportOptions={offComposerOptions}
+            goal={goal}
             queued={queuedInputs.length}
             compactError={compactError}
             onEditMessage={onEditMessage}
@@ -650,6 +775,7 @@ export function ChatView({
         </WorkspaceMarkdownProvider>
       </SubagentOpenProvider>
 
+      {goalLine}
       {queue}
       {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
       {composer}

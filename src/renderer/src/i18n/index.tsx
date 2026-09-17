@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { documentsZh, documentsEn } from './documents';
@@ -18,13 +19,19 @@ import { extensionsZh, extensionsEn } from './extensions';
 import { gitZh, gitEn } from './git';
 import { usageZh, usageEn } from './usage';
 import { searchZh, searchEn } from './search';
+import { goalZh, goalEn } from './goal';
+import {
+  pluginMessages,
+  pluginMessagesVersion,
+  subscribePluginMessages,
+} from './plugin-messages';
 
 export const SUPPORTED_LOCALES = ["zh-CN", "en-US"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 
-type MessageValue =
+export type MessageValue =
   string | ((params: Record<string, string | number>) => string);
-type Messages = Record<string, MessageValue>;
+export type Messages = Record<string, MessageValue>;
 
 /**
  * UI copy lives here instead of in components. Keys are stable product concepts,
@@ -34,6 +41,7 @@ type Messages = Record<string, MessageValue>;
  */
 const ZH: Messages = {
   ...sshZh,
+  ...goalZh,
   ...extensionsZh,
   ...gitZh,
   ...usageZh,
@@ -73,6 +81,8 @@ const ZH: Messages = {
   "auth.giftBalance": "赠送余额",
   "auth.totalConsumed": "累计消费",
   "auth.actionFailed": "操作失败，请重试",
+  "auth.actionFailedDetail": "操作失败：{message}",
+  "auth.loginFailedDetail": "登录失败：{message}",
   "auth.noCost": "—",
   "app.openWorkspace": "打开一个工作区开始",
   "common.settings": "设置",
@@ -388,8 +398,10 @@ const ZH: Messages = {
   "chat.subagent.report.loading": "正在读取完整结果…",
   "chat.subagent.report.partialFailed": "完整结果读取失败,以下只是开头的一段。可从「完整记录」查看。",
   "chat.subagent.report.partialLegacy": "这条记录来自旧版本,只存下了开头的一段。",
-  "chat.subagent.center.title": "后台任务",
-  "chat.subagent.center.open": "打开后台任务",
+  // ★ 这个面板现在同时列前台和后台子代理(角标数的是「此刻有几个在跑」),
+  //   所以标题不能再写「后台任务」—— 那样列表里的前台任务就成了自相矛盾的一行
+  "chat.subagent.center.title": "子代理任务",
+  "chat.subagent.center.open": "打开子代理任务",
   "chat.subagent.center.count": ({ count }) => `${count} 个任务`,
   "chat.subagent.open": "在右侧打开完整记录",
   // ★ 终态下这一格问的不是「它在干嘛」,而是「它停在哪一步」—— `subagent_end` 曾经
@@ -539,6 +551,9 @@ const ZH: Messages = {
   "general.contextManagementHint": "维护任务笔记、检索当前会话历史，并在接近上限时切换上下文窗口。",
   "general.autoCompact": "自动上下文压缩",
   "general.autoCompactHint": "达到上下文阈值时自动整理；关闭后可使用 /compact 手动整理。",
+  "general.shell": "执行 Shell",
+  "general.shellSystem": "跟随系统（自动选择）",
+  "general.shellHint": "默认跟随系统 Shell；手动选项需已安装并可通过 PATH 启动。仅作用于本机后续任务、命令钩子和新建终端，不影响正在执行的任务或 SSH。",
   "chat.contextCheckpoint": ({ window }) => `上下文检查点 · 窗口 ${window}`,
   "chat.contextCheckpointHint": "检查点只影响后续请求，完整对话历史仍会保留。",
   "chat.contextNote": "上下文笔记",
@@ -1719,6 +1734,9 @@ const ZH: Messages = {
   "connection.network.save": "保存",
   "connection.network.keyringUnavailable":
     "系统密钥环不可用，密码无法安全存储。",
+  "connection.network.upstreamTimeout": "上游空闲超时（秒）",
+  "connection.network.upstreamTimeoutHint":
+    "供应商连续这么久没有返回任何有效内容就判定超时。只在没有进展时计时，模型持续输出不受影响。",
   "chat.uploading": "上传中…",
   "chat.pathUnavailable": "无法获取该文件的路径",
   "chat.imageMissing": "图片已不存在",
@@ -1778,6 +1796,76 @@ const ZH: Messages = {
   "dock.activeGroup": "激活工作区分组",
   "nav.allTabs": "全部标签页",
   "nav.noTabs": "没有标签页",
+  // `+` 菜单与功能页标题 —— 原本是 shared/domain/tab.ts 里的硬编码中文,
+  // 渲染处直接铺出去,切到 en-US 还是中文。见那个文件里的说明。
+  "search.group.commands": "命令",
+  "customEditor.unavailable": "这个编辑器暂时打不开",
+  "customEditor.unavailableHint": "提供它的插件 {plugin} 已被禁用、卸载或装载失败。文件本身没有改动。",
+  "customEditor.noView": "这个插件没有提供编辑器界面",
+  "customEditor.noViewHint": "{plugin} 声明了自定义编辑器,但包里没有对应的视图文件。",
+  "tabMenu.files": "工作区文件",
+  "tabMenu.preview": "文件预览",
+  "tabMenu.chat": "新建对话",
+  "tabMenu.draw": "新建绘图",
+  "tabMenu.doc": "新建文档",
+  "tabMenu.terminal": "新建终端",
+  "tabMenu.browser": "网页浏览",
+  "feature.git": "Git",
+  "feature.settings": "设置",
+  "tab.newChat": "新对话",
+  "tab.terminal": "终端",
+  "tab.untitledDoc": "未命名文档",
+  "tab.untitledDraw": "未命名绘图",
+  "tab.newPage": "新标签页",
+  "tab.preview": "文件预览",
+  "tab.files": "工作区文件",
+  "plugins.title": "插件",
+  "plugins.description": "第三方插件通过声明式贡献点扩展这个应用,能力逐条声明、逐条批准。",
+  "plugins.empty": "还没有安装任何插件",
+  "plugins.emptyHint": "从本地目录或 ZIP 包安装,或者到市场里找一个",
+  "plugins.install": "安装插件",
+  "plugins.uninstall": "卸载",
+  "plugins.enable": "启用",
+  "plugins.disable": "禁用",
+  "plugins.status.idle": "已启用",
+  "plugins.status.activating": "正在激活",
+  "plugins.status.active": "运行中",
+  "plugins.status.asleep": "已休眠",
+  "plugins.status.disabled": "已禁用",
+  "plugins.status.pendingApproval": "待批准",
+  "plugins.status.error": "装载失败",
+  "plugins.permissions": "能力",
+  "plugins.permissionsHint": "这个插件声明的能力。必选项不批准就不会激活。",
+  "plugins.grant": "批准",
+  "plugins.revoke": "撤销",
+  "plugins.pendingApprovalHint": "这个版本要求了新的能力,批准之后才会激活。",
+  "plugins.diagnostics": "诊断",
+  "plugins.activity": "活动",
+  "plugins.activityEmpty": "还没有活动记录",
+  "plugins.unsupported": "这一版还不支持的贡献点",
+  "plugins.installFailed": "安装失败:{error}",
+  "plugins.version": "版本 {version}",
+  "plugins.perm.workspace.read": "读取当前工作区里的文件",
+  "plugins.perm.workspace.write": "修改工作区里的文件(每次改动都要你批准)",
+  "plugins.perm.process": "运行命令(仅限它在清单里列出的那几条,每次都要你批准)",
+  "plugins.perm.net": "访问它声明的那几个域名",
+  "plugins.perm.secrets": "在系统钥匙串里存取它自己的密钥",
+  "plugins.perm.storage": "存取它自己的配置与缓存",
+  "plugins.perm.scm.read": "读取 git 状态与改动",
+  "plugins.perm.scm.write": "提交或切换分支(要你批准)",
+  "plugins.perm.agent.intercept": "在 Agent 调用工具前给出意见(只能收紧,不能放宽)",
+  "plugins.perm.agent.context": "往每轮对话里加一小段上下文(有长度上限)",
+  "plugins.perm.clipboard": "读写剪贴板",
+  "plugins.perm.window.notify": "发送系统通知",
+  "plugins.required": "必选",
+  "plugins.tab.installed": "已安装",
+  "plugins.tab.market": "市场",
+  "plugins.installed": "已安装",
+  "plugins.marketSearch": "搜索插件",
+  "plugins.marketEmpty": "市场里还没有适配这个版本的插件",
+  "plugins.marketUnavailable": "连不上插件市场",
+  "plugins.marketUnavailableHint": "检查网络或登录状态后重试。这不代表市场是空的。",
+  "plugins.publisher": "作者 {publisher}",
   "nav.adjustBottomPanel": "调整底部面板高度",
   "nav.adjustRightPanel": "调整右侧面板宽度",
   "nav.closeBottomPanel": "关闭底部面板",
@@ -1804,6 +1892,7 @@ const ZH: Messages = {
 
 const EN: Messages = {
   ...sshEn,
+  ...goalEn,
   ...extensionsEn,
   ...gitEn,
   ...themesEn,
@@ -1843,6 +1932,8 @@ const EN: Messages = {
   "auth.giftBalance": "Gift balance",
   "auth.totalConsumed": "Total spent",
   "auth.actionFailed": "The action failed. Please try again.",
+  "auth.actionFailedDetail": "The action failed: {message}",
+  "auth.loginFailedDetail": "Sign-in failed: {message}",
   "auth.noCost": "—",
   "app.openWorkspace": "Open a workspace to get started",
   "common.settings": "Settings",
@@ -2155,8 +2246,8 @@ const EN: Messages = {
   "chat.subagent.report.loading": "Loading the full result…",
   "chat.subagent.report.partialFailed": "The full result could not be loaded; this is only the opening. Open the full record to read it.",
   "chat.subagent.report.partialLegacy": "This record predates full-result storage; only the opening was kept.",
-  "chat.subagent.center.title": "Background tasks",
-  "chat.subagent.center.open": "Open background tasks",
+  "chat.subagent.center.title": "Subagent tasks",
+  "chat.subagent.center.open": "Open subagent tasks",
   "chat.subagent.center.count": ({ count }) => `${count} tasks`,
   "chat.subagent.open": "Open the full record on the right",
   "chat.subagent.notice.retry": ({ attempt }) => `Retry ${attempt}`,
@@ -2308,6 +2399,9 @@ const EN: Messages = {
   "general.contextManagementHint": "Keeps task notes, searches this conversation, and switches context windows near the limit.",
   "general.autoCompact": "Automatic context compaction",
   "general.autoCompactHint": "Organize context at the threshold automatically; turn this off to use /compact manually.",
+  "general.shell": "Command shell",
+  "general.shellSystem": "Follow system (automatic)",
+  "general.shellHint": "Uses the system shell by default. Manual choices must be installed and available on PATH. Applies only to subsequent local tasks, command hooks, and new terminals; running tasks and SSH are unchanged.",
   "chat.contextCheckpoint": ({ window }) => `Context checkpoint · window ${window}`,
   "chat.contextCheckpointHint": "Checkpoints affect future requests; the full conversation history is preserved.",
   "chat.contextNote": "Context note",
@@ -3525,6 +3619,9 @@ const EN: Messages = {
   "connection.network.save": "Save",
   "connection.network.keyringUnavailable":
     "The system keychain is unavailable; the password cannot be stored safely.",
+  "connection.network.upstreamTimeout": "Upstream idle timeout (seconds)",
+  "connection.network.upstreamTimeoutHint":
+    "A provider is considered timed out after this many seconds without any response progress. Only idle time counts; a model that keeps streaming is never cut off.",
   "chat.uploading": "Uploading…",
   "chat.pathUnavailable": "Couldn't resolve this file's path",
   "chat.imageMissing": "Image no longer exists",
@@ -3588,6 +3685,74 @@ const EN: Messages = {
   "dock.activeGroup": "Activate dock group",
   "nav.allTabs": "All tabs",
   "nav.noTabs": "No tabs",
+  "search.group.commands": "Commands",
+  "customEditor.unavailable": "This editor cannot open right now",
+  "customEditor.unavailableHint": "The plugin that provides it ({plugin}) is disabled, uninstalled, or failed to load. The file itself is untouched.",
+  "customEditor.noView": "This plugin ships no editor UI",
+  "customEditor.noViewHint": "{plugin} declares a custom editor but the package has no matching view file.",
+  "tabMenu.files": "Workspace files",
+  "tabMenu.preview": "File preview",
+  "tabMenu.chat": "New chat",
+  "tabMenu.draw": "New drawing",
+  "tabMenu.doc": "New document",
+  "tabMenu.terminal": "New terminal",
+  "tabMenu.browser": "Web browser",
+  "feature.git": "Git",
+  "feature.settings": "Settings",
+  "tab.newChat": "New chat",
+  "tab.terminal": "Terminal",
+  "tab.untitledDoc": "Untitled document",
+  "tab.untitledDraw": "Untitled drawing",
+  "tab.newPage": "New tab",
+  "tab.preview": "File preview",
+  "tab.files": "Workspace files",
+  "plugins.title": "Plugins",
+  "plugins.description": "Third-party plugins extend this app through declared contribution points. Every capability is declared and granted one by one.",
+  "plugins.empty": "No plugins installed yet",
+  "plugins.emptyHint": "Install from a local directory or a ZIP package, or find one in the marketplace",
+  "plugins.install": "Install plugin",
+  "plugins.uninstall": "Uninstall",
+  "plugins.enable": "Enable",
+  "plugins.disable": "Disable",
+  "plugins.status.idle": "Enabled",
+  "plugins.status.activating": "Activating",
+  "plugins.status.active": "Running",
+  "plugins.status.asleep": "Asleep",
+  "plugins.status.disabled": "Disabled",
+  "plugins.status.pendingApproval": "Awaiting approval",
+  "plugins.status.error": "Failed to load",
+  "plugins.permissions": "Capabilities",
+  "plugins.permissionsHint": "Capabilities this plugin declares. Required ones must be granted before it can activate.",
+  "plugins.grant": "Grant",
+  "plugins.revoke": "Revoke",
+  "plugins.pendingApprovalHint": "This version asks for new capabilities. It stays inactive until you grant them.",
+  "plugins.diagnostics": "Diagnostics",
+  "plugins.activity": "Activity",
+  "plugins.activityEmpty": "No activity recorded yet",
+  "plugins.unsupported": "Contribution points this version does not support",
+  "plugins.installFailed": "Install failed: {error}",
+  "plugins.version": "Version {version}",
+  "plugins.perm.workspace.read": "Read files in the current workspace",
+  "plugins.perm.workspace.write": "Change files in the workspace (every write asks you first)",
+  "plugins.perm.process": "Run commands — only the ones its manifest lists, and every run asks you first",
+  "plugins.perm.net": "Reach the domains it declares",
+  "plugins.perm.secrets": "Store and read its own secrets in the system keychain",
+  "plugins.perm.storage": "Store and read its own settings and cache",
+  "plugins.perm.scm.read": "Read git status and diffs",
+  "plugins.perm.scm.write": "Commit or switch branches (asks you first)",
+  "plugins.perm.agent.intercept": "Weigh in before the Agent runs a tool — it can only tighten, never loosen",
+  "plugins.perm.agent.context": "Add a short note to each turn's context (length-capped)",
+  "plugins.perm.clipboard": "Read and write the clipboard",
+  "plugins.perm.window.notify": "Send system notifications",
+  "plugins.required": "Required",
+  "plugins.tab.installed": "Installed",
+  "plugins.tab.market": "Marketplace",
+  "plugins.installed": "Installed",
+  "plugins.marketSearch": "Search plugins",
+  "plugins.marketEmpty": "No plugin in the marketplace fits this version yet",
+  "plugins.marketUnavailable": "Cannot reach the plugin marketplace",
+  "plugins.marketUnavailableHint": "Check your network or sign-in state and retry. This does not mean the marketplace is empty.",
+  "plugins.publisher": "By {publisher}",
   "nav.adjustBottomPanel": "Adjust bottom panel height",
   "nav.adjustRightPanel": "Adjust right panel width",
   "nav.closeBottomPanel": "Close bottom panel",
@@ -3613,7 +3778,15 @@ const EN: Messages = {
   "locale.name.enUS": "English",
 };
 
-export type TranslationKey = keyof typeof ZH;
+/**
+ * 内置 key 仍然是**编译期封闭联合** —— 拼错一个照样编译期就挂。
+ *
+ * ★ 只开 `plugin.${string}` 这一个口子,给运行期注册进来的插件文案
+ * (见 `plugin-messages.ts`)。它们在编译期不存在,没有第二种办法让插件的
+ * 按钮既有文案又不往 JSX 里塞裸字符串。代价是以 `plugin.` 开头的 key 拼错了
+ * 编译期看不出来 —— 换来的是这个口子之外的三千多个 key 一个都没松。
+ */
+export type TranslationKey = keyof typeof ZH | `plugin.${string}`;
 export type Translate = (
   key: TranslationKey,
   params?: Record<string, string | number>,
@@ -3634,8 +3807,62 @@ function interpolate(
   );
 }
 
+/**
+ * 合并视图的缓存。
+ *
+ * ★ **不能每次 `t()` 都现 spread 一遍。** 这张表有三千多个 key,而 `t()` 在
+ * 渲染热路径上、一次渲染要走几百遍 —— 每次重建一个三千键的对象,等于把一个
+ * O(1) 的查表变成 O(n),而这种回归在功能测试里完全看不出来,只会表现为
+ * 「装了插件之后界面变卡」。
+ *
+ * 按 locale 各留一格:`t()` 的兜底读的是 zh,当前语言是 en 时两格都要用,
+ * 单格缓存会来回颠簸。
+ */
+const mergedCache = new Map<Locale, { version: number; messages: Messages }>();
+
 export function messagesFor(locale: Locale): Messages {
-  return locale === "en-US" ? EN : ZH;
+  const base = locale === "en-US" ? EN : ZH;
+  const version = pluginMessagesVersion();
+  // 一条插件文案都没有 —— 直接还那个模块级常量,和改造之前逐字一样。
+  if (version === 0) return base;
+  const cached = mergedCache.get(locale);
+  if (cached !== undefined && cached.version === version) return cached.messages;
+  // 插件的放后面:它只可能覆盖自己 `plugin.<id>.` 前缀下的 key(注册时强制),
+  // 所以这个顺序不会让插件改写内置文案。
+  const messages: Messages = { ...base, ...pluginMessages(locale) };
+  mergedCache.set(locale, { version, messages });
+  return messages;
+}
+
+/**
+ * 当前语言的**模块级镜像**,以及一个非 Hook 的 `t`。
+ *
+ * ★ 为什么需要它:store 与 service 层也会产出用户可见文案(最典型的是
+ * `makeTab` 里新 Tab 的默认标题「新对话」「未命名文档」)。那些代码不在组件里,
+ * 调不了 `useI18n()` —— 而在它们那儿写裸中文正是项目 AGENTS.md 第一条禁止的事。
+ *
+ * ★ 为什么不把它做成「另一套 i18n」:它读的是**同一张表**、同一个 locale。
+ * `I18nProvider` 在切换语言时同步这个镜像,于是两条路径永远给出同一份文案。
+ *
+ * ★ 只给非组件代码用。组件里一律 `useI18n()` —— 这个函数不订阅任何东西,
+ * 在组件里用它意味着切语言后那一处不会重渲。
+ */
+let activeLocaleValue: Locale = "zh-CN";
+
+export function activeLocale(): Locale {
+  return activeLocaleValue;
+}
+
+export function translate(
+  key: TranslationKey,
+  params: Record<string, string | number> = {},
+): string {
+  return interpolate(
+    messagesFor(activeLocaleValue)[key],
+    messagesFor("zh-CN")[key],
+    params,
+    key,
+  );
 }
 
 export function localeLabel(locale: Locale): string {
@@ -3643,6 +3870,20 @@ export function localeLabel(locale: Locale): string {
     locale === "zh-CN" ? "locale.name.zhCN" : "locale.name.enUS"
   ] as string;
 }
+
+/**
+ * 运行期注册入口 —— 从这里再导一次,让消费者统一从 `../i18n` 进,
+ * 不必记得插件文案住在哪个文件。实现与理由见 `plugin-messages.ts`。
+ */
+export {
+  PluginMessageError,
+  clearPluginMessages,
+  pluginMessages,
+  pluginMessagesVersion,
+  registerPluginMessages,
+  subscribePluginMessages,
+  unregisterPluginMessages,
+} from './plugin-messages';
 
 interface I18nContextValue {
   locale: Locale;
@@ -3659,13 +3900,33 @@ export function I18nProvider({
   initialLocale?: Locale;
 }): ReactNode {
   const [locale, setLocale] = useState<Locale>(initialLocale);
+  /*
+    ★ 镜像在**渲染期**同步,不是在 effect 里。effect 晚一帧,而 `makeTab`
+    可能在同一次事件里就被调用(切完语言立刻新建 Tab)—— 那一个 Tab 会拿到
+    上一种语言的标题,而且它会跟着落盘,以后每次启动都是错的。
+  */
+  activeLocaleValue = locale;
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
+  /*
+    ★ 订阅插件文案注册表。没有这一步,装完插件要重启才看得见它的文案 ——
+    而「重启一下试试」正是插件系统最不该给人的第一印象。
+    版本号进 `t` 的依赖数组,`t` 换了引用,所有消费者才会重渲。
+  */
+  const messagesVersion = useSyncExternalStore(
+    subscribePluginMessages,
+    pluginMessagesVersion,
+    pluginMessagesVersion,
+  );
   const t = useCallback<Translate>(
     (key, params = {}) =>
-      interpolate(messagesFor(locale)[key], ZH[key], params, key),
-    [locale],
+      // 兜底走 zh 的合并视图而不是裸 `ZH`:插件只提供了一种语言时,
+      // 另一种语言下才不会掉回显示 key 本身。
+      interpolate(messagesFor(locale)[key], messagesFor("zh-CN")[key], params, key),
+    // messagesVersion 不在函数体里出现,它在这儿是**缓存失效信号**:
+    // 插件装了新文案 → 版本变 → `t` 换引用 → 消费者重渲。
+    [locale, messagesVersion],
   );
   const value = useMemo(() => ({ locale, setLocale, t }), [locale, t]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

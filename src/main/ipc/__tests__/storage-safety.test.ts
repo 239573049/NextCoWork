@@ -169,6 +169,18 @@ describe('统计与清理不越过符号链接和外部引用', () => {
 })
 
 describe('恢复保留本机专属备份状态', () => {
+  it('恢复另一份数据库后仍保留当前设备的 Shell 选择', async () => {
+    const backupDirectory = join(outside, 'shell-backups')
+    mkdirSync(backupDirectory)
+    store.updateSettings({ shell: 'powershell' })
+    const archive = await makeBackup(backupDirectory)
+    store.updateSettings({ shell: 'zsh' })
+    select(archive)
+    await restoreBackup({ confirm: false }, 41)
+    await expect(restoreBackup({ confirm: true }, 41)).resolves.toMatchObject({ restored: true })
+    expect(store.getSettings().shell).toBe('zsh')
+  })
+
   /**
    * ★ manifest 的 sessionCount 来自 `listAllSessionDetails()`,而校验端拿的是
    * **裸** `SELECT COUNT(*) FROM sessions`。子代理转录在表里有真行,所以

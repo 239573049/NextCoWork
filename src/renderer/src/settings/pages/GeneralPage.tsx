@@ -13,6 +13,13 @@ import {
   modelSelectionKey,
   parseModelSelectionKey
 } from '../../../../shared/domain/model-selection'
+import {
+  MODEL_PROPOSED_GOALS,
+  isModelProposedGoals,
+  isShellPreference,
+  shellPreferencesForPlatform,
+  type ShellPreference
+} from '../../../../shared/domain/settings'
 import { LandsAt, SettingGroup, SettingRow } from '../Row'
 import type { SettingsPageProps } from '../props'
 import { useI18n } from '../../i18n'
@@ -32,6 +39,23 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
       { value: '', label: t('general.permissionReviewerModelEmpty') },
       ...modelOptions(models.filter((m) => m.enabled !== false), providers)
     ]
+    /*
+      ★ 目标判定模型和审核模型存的是**同一种东西**(别名 + 供应商一对),所以候选也
+        同一张表。空的含义在这里是「跟随本轮对话的模型」,不是「未配置」—— 判定器
+        本来就有个天然的落点(这一轮自己那个模型),而审核模型那边没有,空着只能
+        退回人工审批。
+    */
+    const goalEvaluatorOptions = [
+      { value: '', label: t('models.followConversation') },
+      ...modelOptions(models.filter((m) => m.enabled !== false), providers)
+    ]
+    // Shell 名称不翻译；值不在本平台表里时回到自动选择。
+    const shellChoices = shellPreferencesForPlatform(window.nextcowork.platform)
+    const shell: ShellPreference = shellChoices.includes(settings.shell) ? settings.shell : 'system'
+    const shellOptions = shellChoices.map((value) => ({
+      value,
+      label: value === 'system' ? t('general.shellSystem') : SHELL_LABELS[value]
+    }))
       return (
         <SettingGroup>
         <SettingRow
@@ -56,7 +80,6 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           title={t('general.permissionReviewerModel')}
           description={t('general.permissionReviewerModelHint')}
           wide
-          last
         >
           <Select
             value={modelSelectionKey(settings.permissionReviewerModelProviderId, settings.permissionReviewerModel)}
@@ -68,13 +91,65 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             }}
           />
         </SettingRow>
+        <SettingRow
+          title={t('settings.goal.evaluatorModel')}
+          description={t('settings.goal.evaluatorModelHint')}
+          wide
+        >
+          <Select
+            value={modelSelectionKey(settings.goalEvaluatorModelProviderId, settings.goalEvaluatorModel)}
+            options={goalEvaluatorOptions}
+            ariaLabel={t('settings.goal.evaluatorModel')}
+            onValueChange={(key) => {
+              const { alias, modelProviderId } = parseModelSelectionKey(key)
+              patch({ goalEvaluatorModel: alias, goalEvaluatorModelProviderId: modelProviderId })
+            }}
+          />
+        </SettingRow>
+        <SettingRow title={t('settings.goal.modelProposedGoals')} wide>
+          <Select
+            value={settings.modelProposedGoals}
+            options={MODEL_PROPOSED_GOALS.map((value) => ({
+              value,
+              label: t(
+                `settings.goal.modelProposedGoals.${value}` as
+                  | 'settings.goal.modelProposedGoals.auto'
+                  | 'settings.goal.modelProposedGoals.alwaysAsk'
+                  | 'settings.goal.modelProposedGoals.disabled'
+              )
+            }))}
+            ariaLabel={t('settings.goal.modelProposedGoals')}
+            onValueChange={(value) => {
+              // 三档是**枚举**,认不出来的值一个都不许落库 —— 见 `isModelProposedGoals`
+              if (!isModelProposedGoals(value)) return
+              patch({ modelProposedGoals: value })
+            }}
+          />
+        </SettingRow>
         <SettingRow title={t('general.contextManagement')} description={t('general.contextManagementHint')}>
           <Toggle label={t('general.contextManagement')} checked={settings.contextManagement.experimentalMode}
             onChange={(experimentalMode) => patch({ contextManagement: { experimentalMode } })} />
         </SettingRow>
-        <SettingRow title={t('general.autoCompact')} description={t('general.autoCompactHint')} last>
+        <SettingRow title={t('general.autoCompact')} description={t('general.autoCompactHint')}>
           <Toggle label={t('general.autoCompact')} checked={settings.contextManagement.autoCompact}
             onChange={(autoCompact) => patch({ contextManagement: { autoCompact } })} />
+        </SettingRow>
+        <SettingRow
+          title={t('general.shell')}
+          description={t('general.shellHint')}
+          wide
+          last
+        >
+          <Select
+            value={shell}
+            options={shellOptions}
+            inModal
+            ariaLabel={t('general.shell')}
+            onValueChange={(value) => {
+              if (!isShellPreference(value) || !shellChoices.includes(value)) return
+              patch({ shell: value })
+            }}
+          />
         </SettingRow>
       </SettingGroup>
     )
@@ -172,6 +247,17 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
 }
 
 type AppLocale = 'zh-CN' | 'en-US'
+
+/** Shell 名称保持原样；自动选择的文案由 i18n 提供。 */
+const SHELL_LABELS: Record<Exclude<ShellPreference, 'system'>, string> = {
+  cmd: 'CMD',
+  powershell: 'Windows PowerShell',
+  pwsh: 'PowerShell 7 (pwsh)',
+  zsh: 'Zsh',
+  bash: 'Bash',
+  fish: 'Fish',
+  sh: 'sh'
+}
 
 /**
  * 滑杆 + 上方那行「当前 N · 推荐 M」—— 参考图 c44ef6d3 里就是这个形状。

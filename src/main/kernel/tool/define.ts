@@ -24,6 +24,8 @@ export interface ToolSpec<S extends z.ZodType> {
   schema: S
   /** 决定 plan 模式可用性 + 将来的并行调度资格 */
   readOnly: boolean
+  concurrencySafe?: boolean
+  isEnabled?: (ctx: ToolContext) => boolean
   /** 决定权限档位(§4.5 那张 5 行表的入参之一) */
   destructive: boolean
   /**
@@ -59,6 +61,8 @@ export function defineTool<S extends z.ZodType>(spec: ToolSpec<S>): ToolRegistra
     description: spec.description,
     inputSchema: toJsonSchema(spec.schema),
     readOnly: spec.readOnly,
+    ...(spec.concurrencySafe === undefined ? {} : { concurrencySafe: spec.concurrencySafe }),
+    ...(spec.isEnabled === undefined ? {} : { isEnabled: spec.isEnabled }),
     destructive: spec.destructive,
     needsNetwork: spec.needsNetwork,
     source: spec.source ?? { kind: 'builtin' },

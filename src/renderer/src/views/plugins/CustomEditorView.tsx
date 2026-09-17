@@ -1,0 +1,93 @@
+/**
+ * 插件接管的自定义编辑器。
+ *
+ * ## 这个文件真正在处理的是**降级**
+ *
+ * 渲染一个 iframe 是三行代码。难的是那四种「插件不在了」的情况:
+ * 卸载、禁用、装载失败(engines 不匹配)、待批准。它们的共同点是
+ * **Tab 还在盘上**(布局早就落过盘了),而能打开它的那个东西没了。
+ *
+ * 三种处理方式里只有一种是对的:
+ *
+ * - **让 Tab 消失** —— 用户重启一次就丢了一屏布局,而且没有任何提示;
+ * - **渲染一个空白格子** —— 看起来像编辑器坏了,用户会去重装插件;
+ * - **降级成只读文本预览** ← 这个。文件还能看,而且上面写清楚了为什么
+ *   现在打不开、该去哪儿把它弄回来。
+ *
+ * ★ 只读是有意的:一个 `.excalidraw` 文件用文本编辑器存回去,大概率把它
+ * 存坏。能看不能改,是这种时候唯一安全的姿势。
+ */
+import { AlertTriangle } from 'lucide-react'
+import { type ReactNode } from 'react'
+import type { InnerTab } from '../../../../shared/domain/tab'
+import { EmptyState } from '../../components/ui/EmptyState'
+import { useI18n } from '../../i18n'
+import { PluginViewFrame } from '../../shell/PluginViewFrame'
+import { usePluginsStore } from '../../stores/plugins'
+
+export function CustomEditorView({
+  tab,
+  workspaceId
+}: {
+  tab: Extract<InnerTab, { kind: 'custom' }>
+  workspaceId: string
+}): ReactNode {
+  const { t } = useI18n()
+  const catalog = usePluginsStore((state) => state.catalog)
+
+  const plugin = catalog.plugins.find((item) => item.id === tab.ref.pluginId)
+  const editor = plugin?.manifest.contributes.customEditors.find((item) => item.viewType === tab.ref.viewType)
+  const usable =
+    plugin !== undefined &&
+    editor !== undefined &&
+    plugin.enabled &&
+    plugin.status !== 'error' &&
+    plugin.status !== 'pending-approval'
+
+  if (!usable) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-canvas">
+        <EmptyState
+          icon={<AlertTriangle size={26} />}
+          title={t('customEditor.unavailable')}
+          // ★ 说清「是哪个插件」。只说「编辑器不可用」的话,用户根本不知道去禁用列表里找谁。
+          hint={t('customEditor.unavailableHint', { plugin: tab.ref.pluginId })}
+        />
+      </div>
+    )
+  }
+
+  /*
+    ★ 视图路径取的是插件贡献的**第一个视图**,而不是 viewType 同名的那个:
+    `contributes.customEditors` 声明的是「我能打开哪种文件」,
+    `contributes.views` 声明的是「我的 UI 在哪个文件里」—— 两者是两张表。
+    一个编辑器没有配套视图时同样降级,而不是加载一个不存在的 HTML。
+  */
+  const view = plugin.manifest.contributes.views[0]
+  if (view === undefined) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-canvas">
+        <EmptyState
+          icon={<AlertTriangle size={26} />}
+          title={t('customEditor.noView')}
+          hint={t('customEditor.noViewHint', { plugin: tab.ref.pluginId })}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-canvas">
+      <PluginViewFrame
+        pluginId={plugin.id}
+        path={view.path}
+        label={`${plugin.manifest.displayName} — ${tab.ref.path}`}
+        /*
+          ★ 把 Tab 绑定的那个文件交给外壳,由它代读代写。
+          视图自己**说不出**要读哪个文件 —— 见 `PluginViewFrame` 的文档通道。
+        */
+        document={{ workspaceId, path: tab.ref.path }}
+      />
+    </div>
+  )
+}

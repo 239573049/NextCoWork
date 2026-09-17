@@ -15,13 +15,17 @@ export const MODEL_SYNC_FIELDS: Record<keyof ModelAlias, 'copy'> = {
 export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'device' | 'split'> = {
   theme: 'preferences', activeThemeProfileId: 'preferences', locale: 'preferences', colorTheme: 'preferences',
   imageTheme: 'preferences', defaultPermissionMode: 'automation', permissionReviewerModel: 'providers',
-  permissionReviewerModelProviderId: 'providers', defaultModel: 'providers', defaultModelProviderId: 'providers',
+  permissionReviewerModelProviderId: 'providers', goalEvaluatorModel: 'providers',
+  goalEvaluatorModelProviderId: 'providers', modelProposedGoals: 'providers',
+  defaultModel: 'providers', defaultModelProviderId: 'providers',
   contextManagement: 'preferences', subagent: 'split', gateway: 'device', notifications: 'preferences',
-  proxy: 'device', data: 'split', personalization: 'preferences', shortcuts: 'preferences', themeStudio: 'preferences'
+  proxy: 'device', data: 'split', personalization: 'preferences', shortcuts: 'preferences', themeStudio: 'preferences',
+  shell: 'device',
+  upstreamIdleTimeoutSeconds: 'device'
 }
 export const SYNC_REGISTRY: Record<SyncCategory, { order: number; confirmation: boolean; deviceFields: readonly string[] }> = {
   providers: { order: 0, confirmation: false, deviceFields: ['credentialRef', 'oauthTokens', 'platformTokens'] },
-  preferences: { order: 2, confirmation: false, deviceFields: ['backupDirectory', 'gateway', 'proxy'] },
+  preferences: { order: 2, confirmation: false, deviceFields: ['backupDirectory', 'gateway', 'proxy', 'shell'] },
   connections: { order: 3, confirmation: true, deviceFields: ['cwd', 'identityFile', 'knownHostsFile', 'cookies'] },
   extensions: { order: 1, confirmation: true, deviceFields: ['absolutePath', 'executionApproval'] },
   workspaces: { order: 4, confirmation: true, deviceFields: ['rootPath', 'environment', 'lastOpenedAt'] },

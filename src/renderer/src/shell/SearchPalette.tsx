@@ -25,7 +25,10 @@ import { searchAll } from '../services/sessions'
 import { cn } from '../lib/cn'
 import { usePresence } from '../lib/usePresence'
 import { useFocusTrap } from '../components/ui/useFocusTrap'
-import { useI18n } from '../i18n'
+import { useI18n, type TranslationKey } from '../i18n'
+import { prettyAccelerator } from '../lib/accelerator'
+import { MENU_ICON } from './icons'
+import type { Command as AppCommand } from './commands'
 
 const PALETTE_MS = 220
 const DEBOUNCE_MS = 200
@@ -67,12 +70,21 @@ export function SearchPalette({
   open,
   onClose,
   workspaceId,
+  commands = [],
   onSelectSession
 }: {
   open: boolean
   onClose: () => void
   /** 只在当前工作区内搜 —— 和 Sidebar 的 `onSelectSession` 假设的作用域一致 */
   workspaceId: string | null
+  /**
+   * 命令(内置 + 插件),见 `shell/commands.ts`。
+   *
+   * ★ 这一栏在**没有工作区、没有输入**的时候也显示 —— 会话搜索需要一个
+   * 工作区,命令不需要。原来那两个空态分支会把整个面板变成一句「先打开一个
+   * 工作区」,而命令面板在那一刻恰恰是用户最可能想用的东西(比如打开设置)。
+   */
+  commands?: readonly AppCommand[]
   onSelectSession: (sessionId: string) => void
 }): ReactNode {
   const { t } = useI18n()
@@ -141,6 +153,16 @@ export function SearchPalette({
     onClose()
   }
 
+  /*
+    ★ 命令按标题**在这里过滤**,不交给 cmdk:面板整体是 `shouldFilter={false}`
+    (会话那一栏由后端 FTS 排序,不能让前端再筛一遍)。两栏用两套筛选规则
+    是对的 —— 它们的数据来源根本不同。
+  */
+  const needle = query.trim().toLowerCase()
+  const matchedCommands = commands.filter(
+    (command) => needle === '' || t(command.titleKey as TranslationKey).toLowerCase().includes(needle)
+  )
+
   return createPortal(
     <div
       className={cn(
@@ -176,6 +198,35 @@ export function SearchPalette({
             />
           </div>
           <CommandList className="scroll-thin min-h-0 flex-1 overflow-y-auto p-1.5">
+            {matchedCommands.length > 0 && (
+              <CommandGroup
+                heading={t('search.group.commands')}
+                className="[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pt-1.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-faint"
+              >
+                {matchedCommands.map((command) => {
+                  const Icon = MENU_ICON[command.icon]
+                  return (
+                    <CommandItem
+                      key={command.id}
+                      value={command.id}
+                      onSelect={() => {
+                        onClose()
+                        void command.run()
+                      }}
+                      className="flex cursor-pointer items-center gap-2.5 rounded-[9px] px-2.5 py-2 aria-selected:bg-tint-hover"
+                    >
+                      <Icon size={15} className="shrink-0 text-icon" />
+                      <span className="min-w-0 flex-1 truncate text-[13px] text-fg">
+                        {t(command.titleKey as TranslationKey)}
+                      </span>
+                      {command.accelerator !== undefined && (
+                        <span className="shrink-0 text-[11px] text-fg-faint">{prettyAccelerator(command.accelerator)}</span>
+                      )}
+                    </CommandItem>
+                  )
+                })}
+              </CommandGroup>
+            )}
             {workspaceId === null ? (
               <div className="px-3 py-6 text-center text-[12.5px] text-fg-faint">{t('search.noWorkspace')}</div>
             ) : query.trim() === '' ? (

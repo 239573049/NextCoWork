@@ -20,6 +20,43 @@ export type ResolvedTheme = 'light' | 'dark'
 /** 本机数据备份频率。云同步不属于本地数据设置的一部分。 */
 export type BackupFrequency = 'manual' | 'daily' | 'weekly'
 
+/**
+ * 本地命令 / 命令钩子 / 新建终端用哪个 shell。
+ *
+ * ★ `'system'` 是唯一需要运行时解析的取值(由主进程按平台挑),其余七个是
+ * **域名词** —— 它们就是可执行文件的名字,界面上不翻译。
+ */
+export const SHELL_PREFERENCES = [
+  'system',
+  'cmd',
+  'powershell',
+  'pwsh',
+  'zsh',
+  'bash',
+  'fish',
+  'sh'
+] as const
+export type ShellPreference = (typeof SHELL_PREFERENCES)[number]
+
+/** 只认枚举。坏值不许落库,也不许当成 `'system'` 悄悄生效。 */
+export function isShellPreference(value: unknown): value is ShellPreference {
+  return typeof value === 'string' && SHELL_PREFERENCES.includes(value as ShellPreference)
+}
+
+/** 系统原生预设，自动选择排最前。Windows PowerShell 仅限 Windows，pwsh 跨平台。 */
+export function shellPreferencesForPlatform(platform: string): readonly ShellPreference[] {
+  switch (platform) {
+    case 'win32':
+      return ['system', 'cmd', 'powershell', 'pwsh']
+    case 'darwin':
+      return ['system', 'zsh', 'bash', 'fish', 'sh', 'pwsh']
+    case 'linux':
+      return ['system', 'bash', 'zsh', 'fish', 'sh', 'pwsh']
+    default:
+      return ['system', 'sh']
+  }
+}
+
 export interface DataSettings {
   /** 用户选择的本机备份目录；null 表示尚未选择。 */
   backupDirectory: string | null
@@ -124,7 +161,24 @@ export const PERSONALIZATION_MAX = {
   instructions: 8000
 } as const
 
-const BACKUP_FREQUENCIES: readonly BackupFrequency[] = ['manual', 'daily', 'weekly']
+export const BACKUP_FREQUENCIES: readonly BackupFrequency[] = ['manual', 'daily', 'weekly']
+
+/**
+ * 上游空闲超时(秒)的默认值与合法范围。管的是「供应商连续多少秒没吐出任何
+ * 有效内容就判超时」(`UpstreamRouter` 的 idle timeout),不是单次请求总时长。
+ *
+ * ★ 常量放这里而不是 router.ts:渲染层(网络页的输入框提示)和主进程
+ * (路由器)都要读它,放两边会分叉。60s 下限拦的是「误触改成 0 把所有慢模型
+ * 秒杀」;3600s 上限拦的是「挂着一条永远不会到的流占住会话」。
+ */
+export const DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS = 600
+export const UPSTREAM_IDLE_TIMEOUT_BOUNDS = { min: 60, max: 3600 } as const
+
+/** 只认范围内的整数秒;坏值由调用点退回当前值(见 `mergeSettings`)。 */
+export function isUpstreamIdleTimeoutSeconds(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= UPSTREAM_IDLE_TIMEOUT_BOUNDS.min && value <= UPSTREAM_IDLE_TIMEOUT_BOUNDS.max
+}
 
 function isBackupFrequency(value: unknown): value is BackupFrequency {
   return typeof value === 'string' && BACKUP_FREQUENCIES.includes(value as BackupFrequency)
@@ -163,6 +217,20 @@ function mergePersonalization(
     return next.slice(0, PERSONALIZATION_MAX[key])
   }
   return { name: take('name'), background: take('background'), instructions: take('instructions') }
+}
+
+/**
+ * 模型自提目标的三档。★ 它管的是「要不要弹审批」,所以坏值不许落库:
+ * 落到 `'disabled'` 会让用户凭空失去一个功能,落到 `'auto'` 则是**静默放宽同意**。
+ */
+export const MODEL_PROPOSED_GOALS = ['auto', 'alwaysAsk', 'disabled'] as const
+export type ModelProposedGoals = (typeof MODEL_PROPOSED_GOALS)[number]
+
+/** 只认枚举。坏值由调用点退回上一个有效值(见 `mergeSettings`)。
+ *  ★ 与 `defaultPermissionMode` 一样,**只从全局设置读** —— 仓库里的
+ *  project/local settings 说不动它。 */
+export function isModelProposedGoals(value: unknown): value is ModelProposedGoals {
+  return typeof value === 'string' && MODEL_PROPOSED_GOALS.includes(value as ModelProposedGoals)
 }
 
 export interface AppSettings {
@@ -210,6 +278,12 @@ export interface AppSettings {
   permissionReviewerModel: string
   /** 与 `permissionReviewerModel` 成对,见 `defaultModelProviderId` */
   permissionReviewerModelProviderId?: string
+  /** 目标判定模型；空字符串表示未配置，回落到本次 run 的模型。 */
+  goalEvaluatorModel: string
+  /** 与 `goalEvaluatorModel` 成对,见 `defaultModelProviderId` */
+  goalEvaluatorModelProviderId?: string
+  /** 模型自提目标：默认放开，按用户原话直接设立。 */
+  modelProposedGoals: ModelProposedGoals
   defaultModel: string
   /**
    * 与 `defaultModel` 成对:同一个别名可以挂在多家上,光凭别名定不下发给谁。
@@ -222,6 +296,15 @@ export interface AppSettings {
 
   /** 上下文管理：默认只开自动压缩，智能窗口模式要用户自己打开。 */
   contextManagement: ContextManagementSettings
+
+  /**
+   * 执行本地命令 / 命令钩子 / 新建终端用哪个 shell。
+   *
+   * ★ **机器本地**的选择:它描述的是这台机器上装了哪些 shell,所以既不该由
+   * 云同步搬到另一台机器上,也不作用于 SSH —— SSH 那侧跑的是远端自己的 shell。
+   * `'system'` 由主进程按平台解析,这一层只负责存取。
+   */
+  shell: ShellPreference
 
   /** 子代理(方案 §4.9 / 界面「Agent 资源调度」) */
   subagent: {
@@ -249,6 +332,9 @@ export interface AppSettings {
     permissionApproval: boolean
     planApproval: boolean
   }
+
+  /** 设置 › 连接 › 网络:上游空闲超时(秒)。生效点在 `UpstreamRouter`,实时读取,改完即生效。 */
+  upstreamIdleTimeoutSeconds: number
 
   /**
    * 界面「连接 › 网络」那一页。★ 它**真的作用于全应用的出站请求** ——
@@ -284,8 +370,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // 安全默认：任何会改变文件或执行命令的敏感操作都先询问用户。
   defaultPermissionMode: 'ask',
   permissionReviewerModel: '',
+  goalEvaluatorModel: '',
+  modelProposedGoals: 'auto',
   defaultModel: '',
   contextManagement: { experimentalMode: false, autoCompact: true },
+  upstreamIdleTimeoutSeconds: DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+  shell: 'system',
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
@@ -332,15 +422,24 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.defaultPermissionMode !== undefined) {
     next.defaultPermissionMode = patch.defaultPermissionMode
   }
-  // ★★ 三个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
+  // ★★ 四个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
   //    供应商就跟着 patch 走,哪怕 patch 里它是 `undefined`(那是「取消锁定」,
   //    供应商被删时的降级路径就靠这个)。
   //    只写别名、让旧 providerId 留下来的话,就会得到「新别名 + 旧供应商」——
   //    正是 `model-selection.ts` 那一整个模块要消灭的那个 bug,在它自己的
-  //    合并函数里复活一次。这三处一个都不能漏。
+  //    合并函数里复活一次。这四处一个都不能漏。
   if (patch.permissionReviewerModel !== undefined) {
     next.permissionReviewerModel = patch.permissionReviewerModel
     next.permissionReviewerModelProviderId = patch.permissionReviewerModelProviderId
+  }
+  if (patch.goalEvaluatorModel !== undefined) {
+    next.goalEvaluatorModel = patch.goalEvaluatorModel
+    next.goalEvaluatorModelProviderId = patch.goalEvaluatorModelProviderId
+  }
+  // ★ 三档白名单:坏值退回**当前值**(不是硬退回 `'auto'`)—— 这一项管的是
+  //   「要不要弹审批」,静默放宽成 `'auto'` 是这一整类改动里最不该出现的失败形态。
+  if (isModelProposedGoals(patch.modelProposedGoals)) {
+    next.modelProposedGoals = patch.modelProposedGoals
   }
   if (patch.defaultModel !== undefined) {
     next.defaultModel = patch.defaultModel
@@ -349,6 +448,14 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.contextManagement !== undefined) {
     next.contextManagement = { ...next.contextManagement, ...patch.contextManagement }
   }
+  // ★ 范围外的坏值退回当前值而不是默认值 —— 这一项改小了会把慢模型全数
+  //   秒杀,静默放宽/收紧都不是可接受的失败形态(shell 那条同理)。
+  if (isUpstreamIdleTimeoutSeconds(patch.upstreamIdleTimeoutSeconds)) {
+    next.upstreamIdleTimeoutSeconds = patch.upstreamIdleTimeoutSeconds
+  }
+  // ★ 只认枚举:盘上/导入进来的坏值一个都不许落库,也不许被当成 `'system'`
+  //   悄悄生效(`next` 是 current 的克隆,拒绝就是保留用户当前那一个)。
+  if (isShellPreference(patch.shell)) next.shell = patch.shell
 
   // 六个嵌套块:深一层。再深就没有了 —— AppSettings 只有两层,
   // 通用深合并在这里是纯粹的负担(它还得决定数组怎么办)。
@@ -413,9 +520,14 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   defaultPermissionMode: true,
   permissionReviewerModel: true,
   permissionReviewerModelProviderId: true,
+  goalEvaluatorModel: true,
+  goalEvaluatorModelProviderId: true,
+  modelProposedGoals: true,
   defaultModel: true,
   defaultModelProviderId: true,
   contextManagement: true,
+  upstreamIdleTimeoutSeconds: true,
+  shell: true,
   subagent: true,
   gateway: true,
   notifications: true,

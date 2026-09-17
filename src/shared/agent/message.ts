@@ -45,6 +45,59 @@ export type ContentPart =
    */
   | { type: 'file_ref'; path: string; name: string; source?: FileReferenceSource }
   | { type: 'error'; error: AgentError }
+  /**
+   * 会话目标盖的一个章：设立 / 达成 / 判为不可能 / 已清除。
+   *
+   * ★★ **只存在于 UI 那一轨**，和 `{ type: 'error' }` 是同一条已验证的路：
+   *   编码器对它一律 `return null`，`estimatePart` 算 0。回传给模型的话，它会开始
+   *   为自己的历史成绩辩解（「上一轮我没达成，抱歉」），而那既没用又占窗口。
+   *
+   * ★ 它**必须进转录**：重载之后「这条会话还挂着一个目标吗」只能从这里反扫
+   *   （见 `main/goal/restore.ts`）。目标本身是进程内状态，不落盘。
+   *
+   * ★ 它**追加在已有消息上**，不单独成一条：编码后是 null，单独一条就是一条
+   *   零内容块的助手消息，而上游对空 content 是 400。见 `AgentSession.attachGoalStatus`。
+   */
+  | {
+    type: 'goal_status'
+    /** Stable marker identity for merging in-run and out-of-band updates. */
+    id?: string
+    createdAt?: number
+    /** Initial activation, distinct from an unsuccessful evaluation. */
+    set?: boolean
+    origin?: import('../domain/goal').GoalOrigin
+    /** 条件达成。 */
+    met: boolean
+    /** 判定器明确说「永远做不到」。与「这一轮没达成」是两回事。 */
+    failed?: boolean
+    /** 用户/模型写的条件原文。**领域值，不翻译**。 */
+    condition: string
+    /** 判定器给的理由。同样是领域值。 */
+    reason?: string
+    iterations?: number
+    durationMs?: number
+    tokens?: number
+    /** 这一条是「目标已被清除」那种标记。 */
+    cleared?: boolean
+  }
+
+/** Preserve out-of-band goal markers when an older stream commit arrives later. */
+export function mergeGoalStatusMessage(message: AgentMessage, latest?: AgentMessage): AgentMessage {
+  if (message.role !== 'assistant' || latest?.role !== 'assistant') return message
+  const statuses = new Map<string, Extract<ContentPart, { type: 'goal_status' }>>()
+  for (const part of [...latest.parts, ...message.parts]) {
+    if (part.type === 'goal_status') statuses.set(part.id ?? JSON.stringify(part), part)
+  }
+  if (statuses.size === 0) return message
+  return {
+    ...message,
+    parts: [
+      ...message.parts.filter((part) => part.type !== 'goal_status'),
+      ...[...statuses.values()].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)
+        || (a.id ?? '').localeCompare(b.id ?? ''))
+    ]
+  }
+}
 
 /**
  * `file_ref` → 发给模型的那句话。★ 用标准 markdown 链接语法而不是

@@ -11,6 +11,7 @@ import { CheckboxCards, RadioCards, type ChoiceOption } from '../../components/u
 import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
 import { Segmented } from '../../components/ui/Segmented'
 import { listInteractions, onAgentEvent, respondInteraction } from '../../services/agent'
+import { onGoalChanged } from '../../services/goal'
 import { copyText, saveTextFile } from '../../services/app'
 import type { PlanExecutionRef } from '../../../../shared/domain/plan-file'
 import { documentKey, isDocumentDirty, useDocumentsStore } from '../../stores/documents'
@@ -22,8 +23,9 @@ import {
 } from './ask-user'
 
 /** Includes descendant runs: a child waiting for approval must not leave its parent stuck. */
-export function InteractionPanel({ runId, workspaceId, onOpenPlan, onExecute }: {
-  runId: string
+export function InteractionPanel({ runId, sessionId, workspaceId, onOpenPlan, onExecute }: {
+  runId?: string
+  sessionId?: string
   workspaceId?: string
   onOpenPlan?: (path: string) => void
   onExecute?: (ref: PlanExecutionRef, source: 'current_session' | 'new_session') => void
@@ -37,7 +39,7 @@ export function InteractionPanel({ runId, workspaceId, onOpenPlan, onExecute }: 
     let version = 0
     const refresh = (): void => {
       const current = ++version
-      void listInteractions(runId).then((items) => {
+      void listInteractions(runId, sessionId).then((items) => {
         if (disposed || current !== version) return
         setPending(items)
         setFailed(false)
@@ -50,9 +52,10 @@ export function InteractionPanel({ runId, workspaceId, onOpenPlan, onExecute }: 
       if (envelope.events.some((event) => event.type === 'interaction_request' || event.type === 'interaction_resolved'
         || event.type === 'subagent_start' || event.type === 'run_end')) refresh()
     })
+    const offGoal = onGoalChanged((change) => { if (change.sessionId === sessionId) refresh() })
     refresh()
-    return () => { disposed = true; off() }
-  }, [runId, reload])
+    return () => { disposed = true; off(); offGoal() }
+  }, [runId, sessionId, reload])
   if (pending.length === 0 && !failed) return null
   return (
     <div className="w-full" aria-live="polite">
@@ -165,10 +168,29 @@ function InteractionCard({ interaction, workspaceId, onOpenPlan, onExecute, onAn
   onExecute?: (ref: PlanExecutionRef, source: 'current_session' | 'new_session') => void
   onAnswered: () => void
 }): ReactNode {
+  if (interaction.kind === 'goal_proposal') return <GoalProposalCard interaction={interaction} onAnswered={onAnswered} />
   if (interaction.kind === 'ask_user') return <AskUserCard interaction={interaction} onAnswered={onAnswered} />
   if (interaction.kind === 'plan_approval') return <PlanApprovalCard interaction={interaction} workspaceId={workspaceId}
     onOpenPlan={onOpenPlan} onExecute={onExecute} onAnswered={onAnswered} />
   return <ToolApprovalCard interaction={interaction} onAnswered={onAnswered} />
+}
+
+function GoalProposalCard({ interaction, onAnswered }: {
+  interaction: Extract<PendingInteraction, { kind: 'goal_proposal' }>
+  onAnswered: () => void
+}): ReactNode {
+  const { t } = useI18n()
+  const { busy, errorKey, respond } = useRespond(onAnswered)
+  const decide = (approved: boolean): void => respond({ id: interaction.id, kind: 'goal_proposal', approved })
+  return <CardShell kind="goal_proposal" title={t('goal.proposal.title')} errorKey={errorKey} busy={busy}
+    onSubmit={(event) => event.preventDefault()} footer={<KeyboardHint show={!busy} />}>
+    <p className="mb-2 text-[12px] text-fg-muted">{t('goal.proposal.body')}</p>
+    <p className="selectable mb-2 whitespace-pre-wrap break-words text-[13px]">{interaction.condition}</p>
+    <ActionRows disabled={busy} ariaLabel={t('goal.proposal.title')} rows={[
+      { value: 'approve', label: t('goal.proposal.approve') },
+      { value: 'decline', label: t('goal.proposal.decline') }
+    ]} onRun={(value) => decide(value === 'approve')} />
+  </CardShell>
 }
 
 function AskUserCard({ interaction, onAnswered }: {

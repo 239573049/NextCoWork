@@ -8,6 +8,7 @@
 import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../shared/agent/tool'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { Skill } from '../../../shared/domain/skill'
+import type { SchedulingBridge } from '../../../shared/domain/scheduled'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
@@ -116,6 +117,19 @@ export interface ToolContext {
   /** 本次 run 冻结的 Skill 快照，避免全局注册表重扫后串工作区。 */
   skills?: readonly Skill[]
   /**
+   * 这次 run 用的模型别名与(可选的)显式供应商。
+   *
+   * ★ 存在的理由只有一个:`CreateScheduledTask` 要让新任务**默认继承当前模型**。
+   * 不给的话模型只能自己编一个别名,而编错的代价是一条到点才失败的定时任务。
+   */
+  model?: string
+  modelProviderId?: string
+  /**
+   * 定时任务的读写通道。缺省 = 这个环境里排不了程(纯内核测试、没有工作区),
+   * 四个定时任务工具会整体不下发 —— 见 `builtin/scheduled.ts` 的 `isEnabled`。
+   */
+  scheduling?: SchedulingBridge
+  /**
    * ★ 宿主**从 ctx 传进来,不在工具里闭包捕获**。
    *
    * `getTools()` 是进程内单例,而 `installHost()` 只重建 `router`、不动 `tools`
@@ -133,6 +147,8 @@ export interface ToolContext {
    */
   spawnSubagent?: SpawnSubagentFn
   interact?: InteractFn
+  canProposeGoal?: () => boolean
+  proposeGoal?: (condition: string, askUser: boolean) => Promise<'set' | 'pending'>
 }
 
 /**
@@ -145,15 +161,18 @@ export interface ToolContext {
  * 而那时执行器无论如何是闭包(方案 §10)。
  */
 export interface Tool extends ToolInfo {
+  isEnabled?: (ctx: ToolContext) => boolean
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>
 }
 
 /** 注册方提供的东西 —— **没有 externalName**,那是注册表算出来的 */
 export interface ToolRegistration extends Omit<ToolInfo, 'externalName'> {
+  isEnabled?: (ctx: ToolContext) => boolean
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>
 }
 
 export interface SnapshotFilter {
+  context?: ToolContext
   /**
    * Skill frontmatter 的 `allowedTools`。作者写的可能是 internalId 也可能是
    * externalName —— 两边都认,因为让用户去猜我们内部用哪个名字是没有道理的。
@@ -205,6 +224,8 @@ function sourceKey(s: ToolSource): string {
       return `mcp:${s.serverId}`
     case 'skill':
       return `skill:${s.skillId}`
+    case 'plugin':
+      return `plugin:${s.pluginId}`
   }
 }
 
@@ -265,6 +286,7 @@ export class ToolRegistry {
     const allow = filter.allowList === undefined ? undefined : new Set(filter.allowList)
     const out: Tool[] = []
     for (const t of this.tools.values()) {
+      if (filter.context !== undefined && t.isEnabled?.(filter.context) === false) continue
       if (filter.network === false && t.needsNetwork) continue
       if (filter.noInteraction === true && INTERACTIVE_TOOLS.has(t.internalId)) continue
       if (allow !== undefined && !allow.has(t.internalId) && !allow.has(t.externalName)) continue
@@ -290,7 +312,7 @@ export class ToolRegistry {
 
   /** 给 IPC `agent:listTools` 用 —— 去掉 execute 之后才过得了结构化克隆 */
   info(filter: SnapshotFilter = {}): ToolInfo[] {
-    return this.snapshot(filter).map(({ execute: _execute, ...info }) => info)
+    return this.snapshot(filter).map(({ execute: _execute, isEnabled: _isEnabled, ...info }) => info)
   }
 
   get size(): number {

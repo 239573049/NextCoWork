@@ -152,6 +152,11 @@ export const store = {
     return repo.listScheduledRuns(taskId, limit)
   },
   getScheduledRun(id: string): ScheduledRun | undefined { migrateLegacyScheduledData(); return repo.getScheduledRun(id) },
+  /** 「这个会话是不是某条定时任务跑出来的」—— 链式排程算深度用。 */
+  getScheduledRunBySession(sessionId: string): ScheduledRun | undefined {
+    migrateLegacyScheduledData()
+    return repo.getScheduledRunBySession(sessionId)
+  },
   deleteScheduledRun(id: string): void { repo.deleteScheduledRun(id) },
   putScheduledRun(run: ScheduledRun): ScheduledRun {
     return repo.putScheduledRun(run)
@@ -396,6 +401,9 @@ export const store = {
   },
   getSessionDetail(sessionId: string): SessionDetail | undefined {
     return repo.getSessionDetail(sessionId)
+  },
+  getSessionRunUsage(sessionId: string): ReturnType<typeof repo.runUsageOf> {
+    return repo.runUsageOf(sessionId)
   },
   replaceHistory(sessionId: string, messages: readonly AgentMessage[]): void {
     repo.replaceHistory(sessionId, messages)

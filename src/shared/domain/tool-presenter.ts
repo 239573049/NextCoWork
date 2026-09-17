@@ -256,6 +256,43 @@ function firstLineSummary(_i: unknown, o: ToolOutput | undefined): string | unde
   return text === '' ? undefined : text
 }
 
+const WEEKDAY_MARKS = ['日', '一', '二', '三', '四', '五', '六'] as const
+
+/**
+ * 定时任务的规则摘要,从**入参**算。
+ *
+ * ★ 折叠态右侧那一格是用户唯一不展开就能看见「到底定在什么时候」的地方 ——
+ * 而「模型把任务定错了时间」正是这四个工具最需要被一眼看穿的失误。
+ * 规则形状对不上(流式中途的半截 JSON)就返回 undefined,不猜。
+ */
+function scheduleSummary(i: unknown): string | undefined {
+  if (typeof i !== 'object' || i === null) return undefined
+  const raw = (i as Record<string, unknown>)['schedule']
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const rule = raw as Record<string, unknown>
+  const time = typeof rule['time'] === 'string' ? rule['time'] : ''
+  if (rule['kind'] === 'once') {
+    const at = typeof rule['at'] === 'string' ? rule['at'] : ''
+    return at === '' ? undefined : at.replace('T', ' ')
+  }
+  if (rule['kind'] === 'daily') return time === '' ? undefined : `每天 ${time}`
+  if (rule['kind'] === 'weekly') {
+    const days = Array.isArray(rule['weekdays']) ? rule['weekdays'] : []
+    const marks = days.map((d) => (typeof d === 'number' ? WEEKDAY_MARKS[d] : undefined)).filter((m) => m !== undefined)
+    if (marks.length === 0 || time === '') return undefined
+    return `周${marks.join('')} ${time}`
+  }
+  return undefined
+}
+
+/** `ListScheduledTasks` 的输出是一段 JSON,里面的 `count` 就是条数。 */
+function scheduledListSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
+  if (o === undefined) return undefined
+  const m = /"count":\s*(\d+)/.exec(o.content)
+  const n = m?.[1]
+  return n === undefined ? '0 条' : `${n} 条`
+}
+
 // ─────────────────────────── 注册表 ───────────────────────────
 
 /**
@@ -337,6 +374,29 @@ const REGISTRY: Record<string, ToolPresenter> = {
   Skill: {
     shape: 'orchestration',
     title: (i) => withTarget('技能', pick(i, 'name'))
+  },
+  ListScheduledTasks: {
+    shape: 'orchestration',
+    title: () => '查看定时任务',
+    summary: scheduledListSummary
+  },
+  CreateScheduledTask: {
+    shape: 'orchestration',
+    title: (i) => withTarget('新建定时任务', clip(pick(i, 'name'), 24)),
+    summary: (i) => scheduleSummary(i)
+  },
+  UpdateScheduledTask: {
+    shape: 'orchestration',
+    /** 改名时显示新名字,只改时间时退回 id —— 两种都比只显示动词有用 */
+    title: (i) => {
+      const name = pick(i, 'name')
+      return withTarget('修改定时任务', name === '' ? clip(pick(i, 'task_id'), 14) : clip(name, 24))
+    },
+    summary: (i) => scheduleSummary(i)
+  },
+  DeleteScheduledTask: {
+    shape: 'orchestration',
+    title: (i) => withTarget('删除定时任务', clip(pick(i, 'task_id'), 14))
   },
   echo: {
     shape: 'external',

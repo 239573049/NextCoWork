@@ -369,6 +369,7 @@ function machineLevelPatch(settings: AppSettings): AppSettingsPatch {
   return {
     gateway: structuredClone(settings.gateway),
     proxy: structuredClone(settings.proxy),
+    shell: settings.shell,
     data: { backupDirectory: settings.data.backupDirectory }
   }
 }

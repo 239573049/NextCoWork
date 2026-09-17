@@ -1,0 +1,58 @@
+/**
+ * Excalidraw 示例插件的**包级验收**。
+ *
+ * 它回答一个问题:`examples/acme.excalidraw` 打出来的 ZIP,能不能被客户端
+ * 真正的安装器装上去。
+ *
+ * ★ 走的是 `installPluginZip` 本尊,不是一份仿制的校验:这份测试要挡的正是
+ * 「示例包与安装器的约定悄悄分叉」——而分叉的症状是文档里的例子装不上。
+ *
+ * ★ 没打包时**跳过**而不是失败:ZIP 是构建产物,不进版本库(见 .gitignore),
+ * 在干净检出上让它红着会把「CI 该不该跑构建」这件事伪装成一次测试失败。
+ */
+import { existsSync, promises as fs } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { installPluginZip } from '../installer'
+
+const ZIP = resolve(__dirname, '../../../../examples/acme.excalidraw/acme.excalidraw-0.1.0.zip')
+
+const roots: string[] = []
+afterEach(async () => {
+  for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true })
+})
+
+describe.skipIf(!existsSync(ZIP))('示例插件 acme.excalidraw', () => {
+  it('能被真正的安装器装上,而且清单与贡献点都读得出来', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'ncw-excalidraw-'))
+    roots.push(root)
+
+    const installed = await installPluginZip(ZIP, root)
+
+    expect(installed.manifest.id).toBe('acme.excalidraw')
+    expect(installed.manifest.permissions).toEqual(['workspace.read', 'workspace.write'])
+
+    // 自定义编辑器认 .excalidraw —— 这条决定了双击文件能不能落到这个插件身上
+    const editor = installed.manifest.contributes.customEditors[0]
+    expect(editor?.viewType).toBe('excalidraw.editor')
+    expect(editor?.selector[0]?.filenamePattern).toBe('*.excalidraw')
+
+    // 画布视图必须真的在包里:`main` 存在但视图缺席的话,Tab 会降级成只读预览
+    const view = installed.manifest.contributes.views[0]
+    expect(view?.path).toBe('dist/view/index.html')
+    expect(existsSync(join(installed.target, 'dist/view/index.html'))).toBe(true)
+    expect(existsSync(join(installed.target, 'dist/view/main.js'))).toBe(true)
+    /*
+      ★ CSS 与字体一并断言。两者都属于「少了也能装上、但画布是坏的」那一类:
+      没有 CSS 工具栏散架,没有 fonts 手写体退化成系统字体,而安装器
+      对这两样都不会有任何意见。
+    */
+    expect(existsSync(join(installed.target, 'dist/view/main.css'))).toBe(true)
+    expect(existsSync(join(installed.target, 'dist/view/fonts'))).toBe(true)
+
+    // 两种语言缺一个就该被拒装 —— 这里反过来确认示例包是齐的
+    expect(existsSync(join(installed.target, 'l10n/zh-CN.json'))).toBe(true)
+    expect(existsSync(join(installed.target, 'l10n/en-US.json'))).toBe(true)
+  })
+})

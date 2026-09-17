@@ -99,6 +99,29 @@ describe('isDataExport', () => {
   })
 
   /**
+   * `shell` 也是后加的可选项(「执行 Shell」),改动**之前**导出的备份里都没有它。
+   * 校验器把它当必填的话,每一份旧存档都会在导入时被整份拒掉;而它带了却是个
+   * 认不出来的取值,则相反:那条壳名最终会被合并函数丢掉,所以宁可在这里就拒。
+   */
+  it('接受缺少 shell 的旧存档,认不出来的 shell 仍然拒掉', () => {
+    const legacy = minimalExport()
+    delete (legacy.settings as Record<string, unknown>).shell
+    expect(isDataExport(legacy)).toBe(true)
+
+    const known = minimalExport()
+    ;(known.settings as Record<string, unknown>).shell = 'zsh'
+    expect(isDataExport(known)).toBe(true)
+
+    const unknown = minimalExport()
+    ;(unknown.settings as Record<string, unknown>).shell = 'tcsh'
+    expect(isDataExport(unknown)).toBe(false)
+
+    const wrongType = minimalExport()
+    ;(wrongType.settings as Record<string, unknown>).shell = 42
+    expect(isDataExport(wrongType)).toBe(false)
+  })
+
+  /**
    * 存量存档里**一个 `*ProviderId` 都没有** —— 那三对字段是后加的。
    * 校验器把它们当必填的话,每一份旧存档都会在导入时被整份拒绝。
    */
@@ -139,6 +162,33 @@ describe('isDataExport', () => {
     const wrongType = structuredClone(legacy)
     settingsOf(wrongType).maxContext = 'yes'
     expect(isDataExport(wrongType)).toBe(false)
+  })
+
+  /**
+   * 目标判定那一对(`goalEvaluatorModel` / `…ProviderId`)和 `modelProposedGoals`
+   * 都是后加的 —— 改动**之前**导出的每一份备份里都没有它们,校验器把它们当必填的
+   * 话,每一份旧存档都会在导入时被整份拒绝(用户只看到一句「文件格式不对」)。
+   */
+  it('接受缺少目标判定设置的旧存档,带了但类型/取值不对仍然拒绝', () => {
+    const settingsOf = (e: Record<string, unknown>): Record<string, unknown> =>
+      e.settings as Record<string, unknown>
+
+    const legacy = minimalExport()
+    delete settingsOf(legacy).goalEvaluatorModel
+    delete settingsOf(legacy).modelProposedGoals
+    expect(isDataExport(legacy)).toBe(true)
+
+    const badModel = minimalExport()
+    settingsOf(badModel).goalEvaluatorModel = 42
+    expect(isDataExport(badModel)).toBe(false)
+
+    const badProvider = minimalExport()
+    settingsOf(badProvider).goalEvaluatorModelProviderId = 7
+    expect(isDataExport(badProvider)).toBe(false)
+
+    const badMode = minimalExport()
+    settingsOf(badMode).modelProposedGoals = 'sometimes'
+    expect(isDataExport(badMode)).toBe(false)
   })
 
   it('带了但类型不对的一律拒掉,而不是存进去等以后炸', () => {

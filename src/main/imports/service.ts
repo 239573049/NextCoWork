@@ -1125,7 +1125,12 @@ async function targetHook(path: string, id: string, scope: 'global' | 'project')
 }
 
 function hookSurface(hook: HookDefinition): string {
-  return fingerprint(JSON.stringify([hook.id, hook.event, hook.command, hook.matcher ?? '', hook.timeoutMs, hook.description ?? '']))
+  // Preserve the existing command fingerprint so upgrades do not create false import conflicts.
+  if (hook.type === 'command') {
+    return fingerprint(JSON.stringify([hook.id, hook.event, hook.command, hook.matcher ?? '', hook.timeoutMs, hook.description ?? '']))
+  }
+  return fingerprint(JSON.stringify([hook.id, hook.event, hook.type, hook.prompt, hook.model ?? '',
+    hook.modelProviderId ?? '', hook.matcher ?? '', hook.timeoutMs, hook.description ?? '']))
 }
 
 /** 转录的规范化内容指纹。★ 按**已归一化的消息**算,不是按文件字节。 */

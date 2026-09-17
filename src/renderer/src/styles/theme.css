@@ -130,6 +130,22 @@
   --color-accent-fg: #0a2615; /* 压在 accent 上的文字 —— 深绿近黑 */
   --color-accent-soft: #5a8a72; /* 正文里的装饰性小图标(推的:accent 去饱和) */
   --color-danger: #d9614e; /* 未量到,沿用 v1.1.15 */
+  /*
+    ★ **`warning` 之前根本不存在。**
+
+    `text-warning` 已经被 6 处代码用着(GoalPanel 的「检查已暂停」、StatusLine 的
+    目标告警、ProviderCatalog、HooksPanel 的诊断与弱匹配提示、MarkdownResourceEditor),
+    而 Tailwind v4 只为 `@theme` 里出现过的 token 生成工具类 —— 没有这一行,
+    `text-warning` 是个**不存在的类**,那几处提示文字于是和正文一模一样。
+    「警告看起来不像警告」是这种缺失最典型的样子:不报错、不缺内容、只是没人注意到。
+
+    ★ 它**不进 `THEME_TOKENS`**,所以用户主题改不了它。这是有意的:
+      一个能被改成背景色的警告色等于没有警告色。danger 同理已经在表内,
+      属于历史遗留,不在这次一并动。
+
+    色值取 accent 的补色方向(琥珀),在 canvas #1e2020 上对比度 ≈ 8.9:1。
+  */
+  --color-warning: #e0a33a;
 
   /*
     ★ **遮罩是纯黑 + 透明度,不是一个实色。** 反解 v1.1.15 的设置浮层截图:
@@ -210,6 +226,8 @@
   --color-accent-fg: #ffffff;
   --color-accent-soft: #8e8f8d;
   --color-danger: #c4412c;
+  /* 浅色下压暗一档:#e0a33a 在近白底上只有 2.1:1,读不出来 */
+  --color-warning: #9a6b12;
 
   --color-scrim: #2b2a27; /* 暖近黑 —— 浅色下压暗要压暖,压蓝会发灰(无参考,按规律推) */
 }

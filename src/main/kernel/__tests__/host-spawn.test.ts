@@ -1,10 +1,13 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { localEnvironment } from '../../environment/local'
 import { isAbortError } from '../abort'
 import { nodeHost } from '../host'
-import { agentShell } from '../node-spawn'
+import { agentShell, nodeSpawn, quoteShellArg, shellCommandArgs, shellDialect } from '../node-spawn'
+
+vi.mock('node-pty', () => ({ spawn: vi.fn() }))
 
 /**
  * `SpawnFn` 的真进程测试。
@@ -14,7 +17,8 @@ import { agentShell } from '../node-spawn'
  * bash 工具唯一会让用户痛的地方(「我点了停止,但端口还占着」)。
  */
 
-const spawn = nodeHost().spawn
+// 进程生命周期测试固定 sh，不受运行测试的账户默认 shell 影响。
+const spawn = nodeSpawn(() => process.platform === 'win32' ? 'cmd.exe' : '/bin/sh')
 
 let root = ''
 
@@ -61,7 +65,7 @@ async function waitPidFile(path: string, budgetMs = 3000): Promise<number> {
   throw new Error(`子进程没在 ${String(budgetMs)}ms 内写出 pid`)
 }
 
-describe('spawn 基本语义', () => {
+describe.skipIf(process.platform === 'win32')('spawn 基本语义', () => {
   it('拿到 stdout 与退出码 0', async () => {
     const r = await spawn('echo hi', opts())
     expect(r.code).toBe(0)
@@ -93,7 +97,7 @@ describe('spawn 基本语义', () => {
   })
 })
 
-describe('spawn 的 env 清洗', () => {
+describe.skipIf(process.platform === 'win32')('spawn 的 env 清洗', () => {
   it('★ ELECTRON_RUN_AS_NODE 不继承 —— 继承会让子进程里的 node 其实是 Electron', async () => {
     const before = process.env.ELECTRON_RUN_AS_NODE
     process.env.ELECTRON_RUN_AS_NODE = '1'
@@ -131,7 +135,7 @@ describe('spawn 的 env 清洗', () => {
   })
 })
 
-describe('spawn 超时', () => {
+describe.skipIf(process.platform === 'win32')('spawn 超时', () => {
   it('★ 超时回 124(对齐 timeout(1)),并在 stderr 里说人话', async () => {
     const r = await spawn('sleep 30', opts({ timeoutMs: 200 }))
     expect(r.code).toBe(124)
@@ -146,7 +150,7 @@ describe('spawn 超时', () => {
   })
 })
 
-describe('spawn 中断', () => {
+describe.skipIf(process.platform === 'win32')('spawn 中断', () => {
   it('★ 中断**抛出** AbortError,不返回一个普通结果', async () => {
     const ac = new AbortController()
     const p = spawn('sleep 30', opts({ signal: ac.signal }))
@@ -181,7 +185,7 @@ describe('spawn 中断', () => {
   })
 })
 
-describe('spawn 的输出预算', () => {
+describe.skipIf(process.platform === 'win32')('spawn 的输出预算', () => {
   it('★ 输出撑爆预算后仍然抽干管道 —— 不抽干的话子进程会阻塞在 write 上永不退出', async () => {
     /*
       这是**行为测试**:断言的核心是「它返回了」。不继续读管道的实现会在这里挂死,
@@ -209,5 +213,174 @@ describe('agentShell', () => {
 
   it('给得出一个非空的 shell —— 环境没有 SHELL 时也要有兜底', () => {
     expect(agentShell().length).toBeGreaterThan(0)
+  })
+
+  it.each(['darwin', 'linux'])('%s 自动选择优先使用 SHELL，再读账户登录 shell', (platform) => {
+    const loginShell = vi.fn(() => '/usr/local/bin/fish')
+    expect(agentShell('system', { platform, env: { SHELL: '/bin/zsh' }, loginShell })).toBe('/bin/zsh')
+    expect(loginShell).not.toHaveBeenCalled()
+    expect(agentShell('system', { platform, env: { SHELL: ' ' }, loginShell })).toBe('/usr/local/bin/fish')
+    expect(loginShell).toHaveBeenCalledOnce()
+  })
+
+  it.each([['darwin', '/bin/zsh'], ['linux', '/bin/sh']])('%s 账户信息不可用时仍有系统兜底', (platform, fallback) => {
+    expect(agentShell('system', { platform, env: {}, loginShell: () => null })).toBe(fallback)
+    expect(agentShell('system', { platform, env: {}, loginShell: () => { throw new Error('unavailable') } })).toBe(fallback)
+  })
+
+  it('Windows 自动选择尊重 ComSpec，不被 POSIX 的 SHELL 干扰', () => {
+    const env = { ComSpec: String.raw`C:\Windows\System32\cmd.exe`, SHELL: '/bin/bash' }
+    expect(agentShell('system', { platform: 'win32', env })).toBe(env.ComSpec)
+    expect(agentShell('system', { platform: 'win32', env: { COMSPEC: 'custom-cmd.exe' } })).toBe('custom-cmd.exe')
+    expect(agentShell('system', { platform: 'win32', env: { ComSpec: ' ' } })).toBe('cmd.exe')
+  })
+
+  it.each([
+    ['win32', 'cmd', 'cmd.exe'], ['win32', 'powershell', 'powershell.exe'], ['win32', 'pwsh', 'pwsh.exe'],
+    ['darwin', 'zsh', 'zsh'], ['darwin', 'bash', 'bash'], ['linux', 'fish', 'fish'], ['linux', 'sh', 'sh'],
+    ['linux', 'pwsh', 'pwsh']
+  ] as const)('%s 显式选择 %s 不再跟随系统', (platform, preference, executable) => {
+    expect(agentShell(preference, { platform, env: { SHELL: '/bin/other', ComSpec: 'other.exe' } })).toBe(executable)
+  })
+
+  it('别的平台导入的选项回落到当前系统', () => {
+    expect(agentShell('zsh', { platform: 'win32', env: {} })).toBe('cmd.exe')
+    expect(agentShell('powershell', { platform: 'darwin', env: { SHELL: '/bin/zsh' } })).toBe('/bin/zsh')
+    expect(agentShell('cmd', { platform: 'linux', env: { SHELL: '/bin/bash' } })).toBe('/bin/bash')
+  })
+})
+
+describe('shell 参数与引号', () => {
+  it.each([
+    [String.raw`C:\Windows\System32\CMD.EXE`, 'cmd'],
+    [String.raw`C:\Program Files\PowerShell\7\pwsh.exe`, 'powershell'],
+    ['powershell.exe', 'powershell'], ['/opt/powershell/pwsh', 'powershell'],
+    ['/usr/local/bin/fish', 'fish'], ['/bin/zsh', 'posix'], ['/bin/bash', 'posix'], ['/bin/sh', 'posix']
+  ])('按可执行文件 %s 判断语法，不按测试机的系统判断', (shell, dialect) => {
+    expect(shellDialect(shell)).toBe(dialect)
+  })
+
+  it('CMD 使用 /d /s /c，POSIX 与 fish 使用 -c', () => {
+    const command = 'echo "a b"'
+    expect(shellCommandArgs('cmd.exe', command)).toEqual(['/d', '/s', '/c', `"${command}"`])
+    for (const shell of ['/bin/bash', '/bin/zsh', '/bin/sh', '/usr/local/bin/fish']) {
+      expect(shellCommandArgs(shell, command)).toEqual(['-c', command])
+    }
+  })
+
+  it.each(['powershell.exe', 'pwsh.exe', '/usr/local/bin/pwsh'])('%s 使用非交互编码命令并保留退出码', (shell) => {
+    const command = 'Write-Output "中文 `"引号`""\nexit 7'
+    const args = shellCommandArgs(shell, command)
+    expect(args.slice(0, -1)).toEqual(['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand'])
+    const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+    expect(script).toContain(`\n${command}\n`)
+    expect(script).toContain('[System.Text.UTF8Encoding]::new($false)')
+    expect(script).toContain('[Console]::SetOut($writer)')
+    expect(script).toContain('[Console]::SetError($writer)')
+    expect(script).toContain('[Console]::SetIn(')
+    expect(script).toContain('$writer.AutoFlush = $true')
+    expect(script).not.toContain('catch {}')
+    expect(script).toContain('if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }')
+  })
+
+  it('PowerShell 的参数保持字面量，包括单引号、弯引号与命令替换', () => {
+    expect(quoteShellArg('pwsh', "O'Brien")).toBe("'O''Brien'")
+    expect(quoteShellArg('pwsh', 'a\u2019b')).toBe("'a\u2019\u2019b'")
+    const literal = '$env:USER $(Write-Output injected) ` " ;\nnext'
+    expect(quoteShellArg('powershell.exe', literal)).toBe(`'${literal}'`)
+    expect(quoteShellArg('pwsh', '')).toBe("''")
+  })
+
+  it('CMD 包住空格和空参数，拒绝无法安全引号化的字符', () => {
+    expect(quoteShellArg('cmd.exe', 'a b')).toBe('"a b"')
+    expect(quoteShellArg('cmd.exe', '')).toBe('""')
+    expect(quoteShellArg('cmd.exe', 'C:\\Program Files\\')).toBe('"C:\\Program Files\\\\"')
+    expect(quoteShellArg('cmd.exe', 'C:\\work\\')).toBe('C:\\work\\')
+    expect(quoteShellArg('cmd.exe', 'one(two)')).toBe('"one(two)"')
+    for (const arg of ['a&b', '%PATH%', '!value!', '"', 'a\nb', 'a\rb']) {
+      expect(() => quoteShellArg('cmd.exe', arg)).toThrow('cannot be quoted')
+    }
+  })
+
+  it('fish 单引号内的反斜杠与单引号均转义', () => {
+    expect(quoteShellArg('/usr/local/bin/fish', "a\\b'c")).toBe("'a\\\\b\\'c'")
+  })
+})
+
+describe('本地 Shell 配置生效范围', () => {
+  it.skipIf(process.platform === 'win32' || !existsSync('/bin/bash'))('新任务使用新选择，已有环境的提示词与执行器保持同一 shell', async () => {
+    let selected = '/bin/sh'
+    const host = nodeHost({}, () => selected)
+    const before = localEnvironment(host, root)
+    selected = '/bin/bash'
+    const after = localEnvironment(host, root)
+    expect(host.platform.shell).toBe('/bin/bash')
+    expect(before.platform.shell).toBe('/bin/sh')
+    expect(before.facts.shell).toBe('/bin/sh')
+    expect(after.platform.shell).toBe('/bin/bash')
+    expect((await before.spawn('printf "%s" "$0"', opts())).stdout).toBe('/bin/sh')
+    expect((await after.spawn('printf "%s" "$0"', opts())).stdout).toBe('/bin/bash')
+    expect((await host.spawn('printf "%s" "$0"', opts())).stdout).toBe('/bin/bash')
+  })
+
+  it('终端实际启动的 shell 与环境记录一致，已有终端不被设置变更重启', async () => {
+    const { spawn: terminalSpawn } = await import('node-pty')
+    vi.mocked(terminalSpawn).mockClear()
+    let selected = 'sh'
+    const host = nodeHost({}, () => selected)
+    const before = localEnvironment(host, root)
+    await before.openTerminal({ cwd: root, cols: 80, rows: 24 })
+    selected = 'bash'
+    const after = localEnvironment(host, root)
+    expect(terminalSpawn).toHaveBeenCalledTimes(1)
+    await after.openTerminal({ cwd: root, cols: 80, rows: 24 })
+    expect(before.terminalShell).toBe('sh')
+    expect(after.terminalShell).toBe('bash')
+    expect(terminalSpawn).toHaveBeenNthCalledWith(1, 'sh', [], expect.objectContaining({ cwd: root }))
+    expect(terminalSpawn).toHaveBeenNthCalledWith(2, 'bash', [], expect.objectContaining({ cwd: root }))
+    expect(terminalSpawn).toHaveBeenCalledTimes(2)
+  })
+
+  it('手动选择的 shell 不存在时明确失败，不偷偷切到另一种语法', async () => {
+    const run = nodeSpawn(() => join(root, 'missing-shell'))
+    const result = await run('echo hello', opts())
+    expect(result.code).toBe(127)
+    expect(result.stderr).toContain('missing-shell')
+  })
+})
+
+for (const shell of ['/bin/sh', '/bin/bash', '/bin/zsh']) {
+  it.skipIf(process.platform === 'win32' || !existsSync(shell))(`${shell} 实际保留空格、引号、反斜杠与多行参数`, async () => {
+    const literal = "中文 a b'c\\d\n$HOME $(printf injected) `printf injected`"
+    const result = await nodeSpawn(() => shell)(`printf '%s' ${quoteShellArg(shell, literal)}`, opts())
+    expect(result).toEqual({ code: 0, stdout: literal, stderr: '' })
+  })
+}
+
+describe.skipIf(process.platform !== 'win32')('Windows Shell 真进程', () => {
+  it('CMD 能执行命令并返回退出码', async () => {
+    const result = await nodeSpawn(() => 'cmd.exe')('echo hello & exit /b 3', opts())
+    expect(result.code).toBe(3)
+    expect(result.stdout.trim()).toBe('hello')
+  })
+
+  it('CMD 原生参数保留空格路径的末尾反斜杠与相邻参数', async () => {
+    const args = ['C:\\Program Files\\', 'next', '', 'one(two)']
+    const command = [process.execPath, '-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...args]
+      .map((arg) => quoteShellArg('cmd.exe', arg)).join(' ')
+    const result = await nodeSpawn(() => 'cmd.exe')(command, opts())
+    expect(result.code).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual(args)
+  })
+
+  it('Windows PowerShell 返回 UTF-8 文本与显式退出码', async () => {
+    const result = await nodeSpawn(() => 'powershell.exe')('Write-Output "中文"; exit 3', opts())
+    expect(result).toEqual({ code: 3, stdout: '中文\r\n', stderr: '' })
+  })
+
+  it('PowerShell 保留原生命令退出码，也不会把 cmdlet 错误当成功', async () => {
+    const run = nodeSpawn(() => 'powershell.exe')
+    expect((await run('cmd.exe /d /c exit 7', opts())).code).toBe(7)
+    expect((await run('Write-Error "failure"', opts())).code).toBe(1)
   })
 })

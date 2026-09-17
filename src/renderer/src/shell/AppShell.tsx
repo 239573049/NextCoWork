@@ -21,7 +21,7 @@
  * 做成 feature Tab 的话,「关掉设置」和「关掉一个工作区」就成了同一个动作。
  */
 import { PanelLeft } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Bootstrap } from "../../../shared/domain/bootstrap";
 import type { AppSettings } from "../../../shared/domain/settings";
 import type { Workspace } from "../../../shared/domain/workspace";
@@ -30,7 +30,6 @@ import type { ClientAuthState } from "../../../shared/domain/client-auth";
 import { IconButton } from "../components/ui/IconButton";
 import { cn } from "../lib/cn";
 import { IS_MAC } from "../lib/platform";
-import { matchesAccelerator } from "../lib/accelerator";
 import { useI18n } from "../i18n";
 import { usePresence } from "../lib/usePresence";
 import { pickWorkspace } from "../services/app";
@@ -46,6 +45,9 @@ import { BrowserFeature } from "../views/browser/BrowserFeature";
 import { OuterTabBar } from "./OuterTabBar";
 import { Sidebar } from "./Sidebar";
 import { SearchPalette } from "./SearchPalette";
+import { StatusBar } from "./StatusBar";
+import { mergeCommands, usePluginCommands, type Command } from "./commands";
+import { useCommandShortcuts } from "./useCommandShortcuts";
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents';
 import { DocumentDialogs } from '../views/files/DocumentDialogs';
 import { DockRoot } from './Dock';
@@ -100,6 +102,28 @@ export function AppShell({
   }), []);
   const tabs = useTabsStore();
   const ensureTabs = useTabsStore((s) => s.ensure);
+
+  /*
+    插件请求打开它的自定义编辑器。
+
+    ★ 订阅放在 AppShell 而不是插件设置页:发起这件事的是 `+` 菜单里的一项,
+    而那个菜单在任何一屏都点得到。挂在设置页上意味着「没开过设置页就打不开」——
+    那会是一条没有任何错误信息的失败。
+
+    ★ 安全判断已经在主进程做完(viewType 是这个插件声明过的、path 在工作区内),
+    这里只决定放哪一格:跟着当前活动工作区,开在主区。
+  */
+  useEffect(() => on('plugins:openCustomEditor', ({ pluginId, viewType, path }) => {
+    const workspaceId = useWindowStore.getState().activeWorkspaceId;
+    if (workspaceId === null) return;
+    useTabsStore.getState().open(workspaceId, 'custom', 'main', {
+      pluginId,
+      viewType,
+      path,
+      // 标题用文件名 —— 它是用户自己起的名字,不进翻译表(同 `i18n/themes.ts` 的范式)
+      title: path.split('/').pop() ?? path
+    });
+  }), []);
 
   /*
     ★ **拆包的配套预热。** ChatView 现在是 lazy 的(见 views/registry.tsx 文件头:
@@ -198,15 +222,39 @@ export function AppShell({
   */
   const openSettings = useWindowStore((s) => s.openSettings);
   const openSettingsShortcut = settings.shortcuts.openSettings;
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (!matchesAccelerator(openSettingsShortcut, e)) return;
-      e.preventDefault();
-      openSettings();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [openSettings, openSettingsShortcut]);
+
+  /*
+    ★ 命令注册表 —— 内置的那几条在这里现拼(这里才拿得到 store 的 action),
+    插件的经 `usePluginCommands` 并进来。三处消费者共用这一份:
+    命令面板、快捷键分发、将来的 `commandPalette` 菜单贡献点。
+
+    ★ **内置排在前面**,而 `mergeCommands` / `buildKeymap` 都是先到先得 ——
+    于是插件既顶不掉一条同名命令,也抢不走一个已经被内置占着的组合键。
+  */
+  const pluginCommands = usePluginCommands();
+  const commands = useMemo<Command[]>(
+    () =>
+      mergeCommands(
+        [
+          {
+            id: "builtin.openSettings",
+            titleKey: "feature.settings",
+            icon: "settings",
+            accelerator: openSettingsShortcut,
+            run: openSettings
+          },
+          {
+            id: "builtin.search",
+            titleKey: "nav.search",
+            icon: "search",
+            run: () => setSearchOpen(true)
+          }
+        ],
+        pluginCommands
+      ),
+    [openSettings, openSettingsShortcut, pluginCommands]
+  );
+  useCommandShortcuts(commands);
 
   const inner =
     activeWorkspaceId === null ? null : tabs.stateOf(activeWorkspaceId);
@@ -470,6 +518,13 @@ export function AppShell({
         )}
         <ConnectionDialogs workspace={workspace} />
       </main>
+      {/*
+        ★ 状态栏在 `<main>` **之外**、根 div 之内 —— 它是窗口级的一条,
+        不跟着工作区内容区滚动,也不该被 feature 页整条换掉
+        (那几页换掉的是 34px 的 Tab 条,不是窗口底边)。
+        一格都没有时它自己不渲染,见 `shell/StatusBar.tsx`。
+      */}
+      <StatusBar />
       {createSshOpen && <CreateSshWorkspaceDialog hidden={settingsPage !== null} onClose={() => setCreateSshOpen(false)} onCreated={async (created) => {
         const state = useWindowStore.getState();
         state.updateWorkspaces([...Object.values(state.workspaceTargets).filter((item) => item.id !== created.id), created]);
@@ -481,6 +536,7 @@ export function AppShell({
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
         workspaceId={activeWorkspaceId}
+        commands={commands}
         onSelectSession={(sessionId) => { void selectSession(sessionId); }}
       />
 

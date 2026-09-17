@@ -62,7 +62,13 @@ export interface SpawnResult {
  */
 export type SpawnFn = (
   cmd: string,
-  opts: { cwd: string; signal: AbortSignal; timeoutMs?: number }
+  opts: {
+    cwd: string
+    signal: AbortSignal
+    timeoutMs?: number
+    /** 本地调用可冻结本次 run 的 shell，避免设置变更后提示词与执行器分叉。 */
+    shell?: string
+  }
 ) => Promise<SpawnResult>
 
 /**
@@ -165,7 +171,10 @@ const consoleLogger: Logger = {
  * 覆盖掉它。留一个能用的内存实现(而不是抛错)是为了让内核的单测能走完
  * 「取凭证 → 发请求」这条路,而不必每个测试都自己搭一个 host。
  */
-export function nodeHost(overrides: Partial<KernelHost> = {}): KernelHost {
+export function nodeHost(
+  overrides: Partial<KernelHost> = {},
+  resolveShell: () => string = agentShell
+): KernelHost {
   const mem = new Map<string, string>()
   return {
     paths: {
@@ -184,10 +193,10 @@ export function nodeHost(overrides: Partial<KernelHost> = {}): KernelHost {
       available: () => true
     },
     clock: { now: () => Date.now() },
-    platform: { os: process.platform, osVersion: release(), shell: agentShell() },
+    platform: { os: process.platform, osVersion: release(), get shell() { return resolveShell() } },
     logger: consoleLogger,
     fs: nodeFs(),
-    spawn: nodeSpawn(),
+    spawn: nodeSpawn(resolveShell),
     // 绑定到 globalThis:直接传 `fetch` 引用在某些运行时会丢 this
     fetch: (input, init) => globalThis.fetch(input, init),
     ...overrides

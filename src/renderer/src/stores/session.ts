@@ -14,7 +14,9 @@ import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { SessionChange } from '../../../shared/domain/session'
 import type { AgentEvent } from '../../../shared/agent/event'
-import { isToolResultOnly, userMessage, visibleText, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
+import { isToolResultOnly, mergeGoalStatusMessage, userMessage, visibleText, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
+import type { ActiveGoal, GoalChange } from '../../../shared/domain/goal'
+import { getGoal, onGoalChanged } from '../services/goal'
 import type { SendOptions, SessionMode } from '../../../shared/agent/run-request'
 import {
   applyEvents,
@@ -61,6 +63,8 @@ export interface SessionState {
   /** 已应用的最后一个 seq。防漂移就靠它 */
   lastSeq: number
   transcript: TranscriptState
+  goal?: ActiveGoal
+  goalVersion: number
   /**
    * 生成期间用户可以继续输入并入队(截图:「当前回复完成后按队列继续执行」)。
    *
@@ -85,7 +89,7 @@ export interface SessionState {
   /** 上一次手动压缩的失败原因,成功或再次发起时清掉。 */
   compactError: string | null
 
-  send: (text: string, opts: SendOptions, parts?: ContentPart[], internal?: boolean) => Promise<void>
+  send: (text: string, opts: SendOptions, parts?: ContentPart[], internal?: boolean, goalId?: string) => Promise<void>
   stop: () => Promise<void>
   /**
    * 手动压缩上下文(输入框那个圆环双击)。
@@ -144,20 +148,21 @@ function createSessionStore(sessionId: string): SessionStore {
     activeRunId: null,
     lastSeq: 0,
     transcript: emptyTranscript(),
+    goalVersion: 0,
     queuedInputs: [],
     lastOptions: null,
     draft: '',
     compacting: false,
     compactError: null,
 
-    async send(text, opts, parts, internal = false) {
+    async send(text, opts, parts, internal = false, goalId) {
       const s = get()
       // ★ 不变式:一个会话同一时刻只有一个 run。用户连按两次回车就能并发起两个 run,
       // 共享同一份转录 → 消息交错。这几行就是那条不变式的全部实现。
       if (s.activeRunId !== null) {
         if (internal) {
           const reportParts = parts ?? [{ type: 'text' as const, text }]
-          await interjectRun(s.activeRunId, [{ id: ulid(), parts: reportParts, internal: true }])
+          await interjectRun(s.activeRunId, [{ id: ulid(), parts: reportParts, internal: true, ...(goalId === undefined ? {} : { goalId }) }])
           return
         }
         // ★ 软上限:超过就不是队列了,是便签本。**拒绝入队并保留草稿** ——
@@ -213,12 +218,13 @@ function createSessionStore(sessionId: string): SessionStore {
           runStartedAt: now
         },
         lastOptions: opts,
-        draft: ''
+        draft: internal ? s.draft : ''
       })
       persistInput(sessionId, true)
 
       try {
-        await startRun({ ...opts, runId, sessionId, input, inputMessageId, ...(internal ? { inputInternal: true } : {}) })
+        await startRun({ ...opts, runId, sessionId, input, inputMessageId, ...(internal ? { inputInternal: true } : {}),
+          ...(goalId === undefined ? {} : { inputGoalId: goalId }) })
       } catch (err) {
         unregisterRun(runId)
         set((state) => ({
@@ -984,8 +990,13 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
   const current = (): boolean => historyLoads.get(sessionId) === request
     && stores.get(sessionId) === store && !deletedHistory.has(sessionId) && !request.dirty
   try {
+    const version = store.getState().goalVersion
     const detail = await getSession(sessionId)
     if (!current()) return
+    void getGoal(sessionId).then((goal) => {
+      if (stores.get(sessionId) === store && !deletedHistory.has(sessionId)
+        && store.getState().goalVersion === version) store.setState({ goal })
+    }).catch(() => undefined)
     store.setState((s) => {
       // IPC 往返期间可能刚好启动了新的 run；不要用旧数据库快照覆盖
       // 正在流式显示的内容。
@@ -1511,14 +1522,44 @@ export function startAgentEventPump(): () => void {
     if (raf === 0) raf = requestAnimationFrame(drain)
   })
 
+  const offGoal = onGoalChanged(applyGoalChange)
   unsubscribe = () => {
     off()
+    offGoal()
     if (raf !== 0) cancelAnimationFrame(raf)
     raf = 0
     pending = []
     unsubscribe = null
   }
   return unsubscribe
+}
+
+/** State-only updates must not use message_commit: doing so would erase live text. */
+export function applyGoalChange(change: GoalChange): void {
+  if (deletedHistory.has(change.sessionId)) return
+  const target = stores.get(change.sessionId) ?? (change.input === undefined ? undefined : sessionStore(change.sessionId))
+  if (target === undefined) return
+  target.setState((state) => {
+    const message = change.message
+    const messages = message === undefined ? state.transcript.messages
+      : state.transcript.messages.some((item) => item.id === message.id)
+        ? state.transcript.messages.map((item) => item.id === message.id ? mergeGoalStatusMessage(item, message) : item)
+        : [...state.transcript.messages, message]
+    return { goal: change.goal, goalVersion: state.goalVersion + 1, transcript: { ...state.transcript, messages } }
+  })
+  const input = change.input
+  if (input === undefined) return
+  void getGoal(change.sessionId).then(async (current) => {
+    if (current?.id !== input.goalId || deletedHistory.has(change.sessionId)) return
+    // A closed tab may have no store yet. Hydrate it before inserting optimistic run state.
+    await historyLoads.get(change.sessionId)?.promise
+    if (deletedHistory.has(change.sessionId)) return
+    return target.getState().send('', input.options, input.parts, true, input.goalId)
+  }).catch(() => {
+    target.setState((state) => ({ transcript: { ...state.transcript, warning: {
+      code: 'unknown', retryable: false, message: 'Could not deliver the goal check-in.', messageKey: 'goal.error.checkinFailed'
+    } } }))
+  })
 }
 
 function drain(): void {

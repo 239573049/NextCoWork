@@ -203,6 +203,38 @@ describe('★ 压缩与摘要', () => {
   })
 })
 
+describe('★ Plan 模式的计划文件', () => {
+  const PLAN = '.plan/01M2PWN4TPZ1TG0749G8PJKNH4.md'
+
+  /** EnterPlanMode 的那一轮往返 —— 路径只出现在它的 tool_result 里。 */
+  const entered = (): AgentMessage[] => [
+    assistantMessage('a-plan', [{ type: 'tool_call', callId: 'c-plan', name: 'EnterPlanMode', input: {} }], NOW),
+    toolResultMessage(
+      'r-plan',
+      [{ type: 'tool_result', callId: 'c-plan', output: { content: JSON.stringify({ path: PLAN }) }, isError: false }],
+      NOW
+    )
+  ]
+
+  it('★ 压缩把 EnterPlanMode 的输出清空之后,路径仍然到得了模型手里', () => {
+    /*
+      这是「压缩之后写入被围栏拦下」的根因用例:路径原本只存在于那条 tool_result 里,
+      而 `compactMessages` 会把它整条换成占位符。状态块是每轮现算的,压缩动不了它。
+    */
+    const compacted = compactMessages([ask('帮我做个方案'), ...entered(), ask('继续')], { keepRecent: 1 })
+    expect(all(compacted)).not.toContain(PLAN)
+
+    const out = all(decorate(compacted, { planFile: PLAN }))
+
+    expect(out).toContain(PLAN)
+    expect(out).toContain('only file Write and Edit may touch')
+  })
+
+  it('不在计划模式时不出这一段', () => {
+    expect(all(decorate([ask('你好')], { git: GIT }))).not.toContain('Active Plan mode file')
+  })
+})
+
 describe('★ 消毒与容错', () => {
   it('空数组 → 原样返回,绝不合成一条消息', () => {
     const r = assemble(base({ messages: [], reminder: { projectInstructions: AGENTS } }))

@@ -70,6 +70,19 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
+        /*
+          ★ 第二个入口是**插件宿主窗口**的 preload。
+
+          它在 main 这一段构建而不是 preload 那一段:`preload` 段开着
+          `isolatedEntries`(沙箱 preload 必须打成单文件),而那个模式下第二个
+          入口不会产出任何东西。main 段的产物同样是可以直接当 preload 加载的
+          单文件,而这个文件只 import `electron` —— 沙箱 preload 允许的就是它。
+
+          ★ 它必须和主窗口那份 preload **分开**:两者的信任级别不一样
+          (主窗口是我们的代码,插件宿主跑的是第三方代码),共用一份意味着
+          主窗口的每一条频道都顺带对插件开放,而那个口子不会有人注意到。
+          见 `src/preload/plugin-preload.ts`。
+        */
         input: { index: resolve('src/main/entry.ts') },
         output: { chunkFileNames: '[name]-[hash].js' }
       }

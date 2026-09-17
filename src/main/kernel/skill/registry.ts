@@ -7,6 +7,7 @@
  * 让历史转录变得不自洽。所以这里是 `replaceAll`,不是逐条 upsert。
  */
 import type { Skill } from '../../../shared/domain/skill'
+import { RegistryBuckets } from '../registry-buckets'
 import type { SkillDiagnostic, SkillScanResult } from './load'
 
 export class SkillRegistry {
@@ -52,10 +53,31 @@ export class SkillRegistry {
   }
 }
 
-let singleton: SkillRegistry | null = null
+/**
+ * **每个工作区一份。**
+ *
+ * ★ 参数**没有默认值**,是故意的:少传一个参数就是一次静默串味(拿到的是
+ * 另一个工作区扫出来的目录),而那种错误没有任何症状。让编译器来找调用方,
+ * 比让用户在提示词里发现 Skill 不对要早得多。
+ *
+ * 「不属于任何工作区」的场景(没开工作区、无头测试)传 `''`。
+ * 分桶与淘汰规则见 `kernel/registry-buckets.ts`。
+ */
+const buckets = new RegistryBuckets(() => new SkillRegistry())
 
-/** 进程内单例。和 `getTools()` 同一个惯例。 */
-export function skillRegistry(): SkillRegistry {
-  singleton ??= new SkillRegistry()
-  return singleton
+export function skillRegistry(workspaceId: string): SkillRegistry {
+  return buckets.get(workspaceId)
+}
+
+/** 工作区被移除时调。 */
+export function dropSkillRegistry(workspaceId: string): void {
+  buckets.drop(workspaceId)
+}
+
+/**
+ * 全部丢掉 —— 切换配置作用域(换账户)时必须调,否则上一个账户的文件根里
+ * 扫出来的 Skill 会留在某个桶里。测试之间也用它复位。
+ */
+export function resetSkillRegistries(): void {
+  buckets.clear()
 }

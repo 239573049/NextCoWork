@@ -37,6 +37,8 @@ import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { ContextCheckpointPanel } from './ContextCheckpointPanel'
 import { CompactionDivider } from './CompactionDivider'
+import { GoalStatusCard } from './GoalStatusCard'
+import type { ActiveGoal } from '../../../../shared/domain/goal'
 import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, unanchoredCheckpoints, type AssistantBlock, type ThreadRow } from './thread-content'
 import { TurnActions, type TurnPrompt } from './TurnActions'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
@@ -50,6 +52,7 @@ export const Thread = memo(function Thread({
   lastSeq,
   queued,
   compactError,
+  goal,
   reportOptions,
   onEditMessage,
   onDeleteTurn,
@@ -73,6 +76,7 @@ export const Thread = memo(function Thread({
   readOnly?: boolean
   /** 手动压缩的失败原因,由状态行显示。它在 store 里而不在 transcript 里。 */
   compactError?: string | null
+  goal?: ActiveGoal
   /**
    * 手动回传后台子代理结果时用的档位。
    *
@@ -147,9 +151,10 @@ export const Thread = memo(function Thread({
       )}
       {/* ★ 审批面板在只读态里必须消失:这个 run 的审批归它的**父**对话管,
           而子代理这条路现在根本不会发起审批(见 `runtime.ts` 的 `approveWith`)。 */}
-      {!readOnly && runId !== null && <InteractionPanel key={runId} runId={runId} workspaceId={workspaceId} onOpenPlan={onOpenPlan} onExecute={onExecutePlan} />}
+      {!readOnly && (runId !== null || sessionId !== undefined) && <InteractionPanel key={sessionId ?? runId}
+        runId={runId ?? undefined} sessionId={sessionId} workspaceId={workspaceId} onOpenPlan={onOpenPlan} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
-        lastSeq={lastSeq} queued={queued} compactError={compactError} />
+        lastSeq={lastSeq} queued={queued} compactError={compactError} goal={goal} />
     </div>
   )
 
@@ -336,11 +341,34 @@ function ResolvedPlanCard({ workspaceId, receipt, onOpenPlan }: {
   </section>
 }
 
-function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOptions }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean; reportOptions?: SendOptions }): ReactNode {
+/**
+ * 任务面板里一条目的排序档位:**在跑的排最前,其次是等你收结果的**。
+ *
+ * ★ 以前是 `Object.values` 的插入序 —— 于是一个跑了半小时的子代理会被压在
+ * 四五条「已完成」中间,而这个面板存在的唯一理由就是回答「现在还有什么在跑」。
+ */
+function centerRank(item: SubagentState): number {
+  if (item.status === 'running') return 0
+  return item.reportStatus === 'pending' || item.reportStatus === 'blocked' ? 1 : 2
+}
+
+/** 导出只为测试:面板本身仍然只由 `Thread` 挂载 */
+export function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOptions }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean; reportOptions?: SendOptions }): ReactNode {
   const { t } = useI18n()
   const openSubagent = useOpenSubagent()
   const [open, setOpen] = useState(false)
-  const entries = Object.values(subagents).filter((item) => item.background === true)
+  /*
+    ★★ 在跑的**前台**子代理也算一条任务。
+
+    以前这里只收 `background === true`:父代理同步等着的那个子代理,卡片上在转、
+    面板里却一条都没有,于是「两个在跑,角标写 1」—— 点开之后还是找不到另一个,
+    因为它压根不在列表里。角标数的是「此刻有几个子代理在跑」,那它就得把两种
+    派发方式都算上;前台的跑完就从面板里退场(它的结果已经同步回到主对话,
+    没有「等你来收」这一步),所以列表不会被历史前台任务堆满。
+  */
+  const entries = Object.values(subagents)
+    .filter((item) => item.background === true || item.status === 'running')
+    .sort((a, b) => centerRank(a) - centerRank(b))
   if (entries.length === 0) return null
   const running = entries.filter((item) => item.status === 'running').length
   /* blocked = 「结果在库里,但当时没有可用的发送档位」。对用户来说它和 pending 是同一件事:等你点一下。 */
@@ -374,9 +402,16 @@ function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOpti
         <div className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
           {entries.map((item) => {
             const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : (item.reportStatus === 'pending' || item.reportStatus === 'blocked') ? 'pending' : 'done'
-            return <div key={item.callId} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
+            return <div key={item.callId} data-testid="subagent-center-row" data-center-call-id={item.callId} data-center-state={state} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
               {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
-              <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left"><span className="block truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span><span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span></button>
+              <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span>
+                  {/* 前台和后台现在同列一张表,那这一格就得说清它是哪一种 —— 只有后台那种才会有「汇报」这一步 */}
+                  {item.background === true && <span className="shrink-0 rounded-full bg-accent/10 px-1.5 py-px text-[9.5px] font-medium text-accent">{t('chat.subagent.mode.background')}</span>}
+                </span>
+                <span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span>
+              </button>
               {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId, reportOptions)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
             </div>
           })}
@@ -679,6 +714,7 @@ function AssistantTurn({
   const lastProcessIndex = segments.reduce((last, segment, index) => segment.kind === 'process' ? index : last, -1)
   const processSegments = lastProcessIndex < 0 ? [] : segments.slice(0, lastProcessIndex + 1)
   const trailingSegments = lastProcessIndex < 0 ? segments : segments.slice(lastProcessIndex + 1)
+  const goalSegments = processSegments.filter((segment) => segment.kind === 'block' && segment.block.part?.type === 'goal_status')
   const processItems = processSegments.flatMap((segment) => segment.kind === 'process' ? segment.items : [])
   const errorCount = processItems.filter((item) => statusOfItem(item, tools) === 'error').length
   const hasRunningSubagent = processItems.some((item) => item.kind === 'subagent' && item.state?.status === 'running')
@@ -703,6 +739,7 @@ function AssistantTurn({
     <>
       <RunProcessBlock items={processItems} tools={tools} subagents={subagents} durationMs={durationMs} defaultOpen={decision.defaultOpen}>
         {processSegments.map((segment) => {
+          if (segment.kind === 'block' && segment.block.part?.type === 'goal_status') return null
           if (segment.kind === 'block') {
             return <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
               tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor} />
@@ -710,6 +747,9 @@ function AssistantTurn({
           return <ToolTimeline key={segment.key} items={segment.items} tools={tools} subagents={subagents} />
         })}
       </RunProcessBlock>
+      {/* Goal changes, particularly the direct-set disclosure, must not disappear in a collapsed timeline. */}
+      {goalSegments.map((segment) => segment.kind === 'block'
+        ? <PartBlock key={segment.key} part={segment.block.part} tools={tools} /> : null)}
       {trailingSegments.map((segment) => segment.kind === 'block' ? (
         <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
           tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor} />
@@ -808,5 +848,8 @@ function PartBlock({
           {part.error.code}: {agentErrorText(part.error, t)}
         </p>
       )
+    // 和 `error` 并排:两者都是**只存在于 UI 那一轨**的标记(编码器一律 return null)
+    case 'goal_status':
+      return <GoalStatusCard part={part} />
   }
 }

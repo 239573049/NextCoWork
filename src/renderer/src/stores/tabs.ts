@@ -10,6 +10,7 @@
  * 两个 Tab 能看同一个会话。
  */
 import { create } from 'zustand'
+import { translate } from '../i18n'
 import type { InnerTab, InnerTabKind, InnerTabState, TabPane } from '../../../shared/domain/tab'
 import { chatKey, paneOf, reorderInPane, tabsInPane } from '../../../shared/domain/tab'
 import { ulid } from '../../../shared/util/id'
@@ -56,9 +57,18 @@ export interface TabInit {
   /** Agent/browser manager tab identity. */
   browserId?: string
   profileId?: string
+  /** 自定义编辑器的身份 —— 哪个插件的哪一个 viewType */
+  viewType?: string
+  pluginId?: string
 }
 
-/** `+` 菜单里各种 kind 的初始 Tab。ref 的形状由 kind 决定,所以只能在这里分支。 */
+/**
+ * `+` 菜单里各种 kind 的初始 Tab。ref 的形状由 kind 决定,所以只能在这里分支。
+ *
+ * ★ 默认标题走 `translate()` 而不是裸中文。这里不在组件里,调不了 `useI18n()` ——
+ * 原来的写法是七处硬编码中文,切到 en-US 之后新建的 Tab 仍然叫「新对话」,
+ * 而且**它会跟着布局落盘**:以后每次启动都还是那个中文标题。
+ */
 function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTab {
   const id = ulid()
   const path = init.path ?? ''
@@ -76,19 +86,19 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
         (model / mode / thinking / rootPathAtCreation)。这里那次抢跑只是让一条
         空记录提前几分钟出生。id 由 `bindChatSession` 在需要归属时才铸。
       */
-      return { id, kind, pane, title: init.title ?? '新对话', ref: { sessionId: null } }
+      return { id, kind, pane, title: init.title ?? translate('tab.newChat'), ref: { sessionId: null } }
     case 'terminal':
-      return { id, kind, pane, title: init.title ?? '终端', ref: { terminalId: ulid() } }
+      return { id, kind, pane, title: init.title ?? translate('tab.terminal'), ref: { terminalId: ulid() } }
     case 'doc':
-      return { id, kind, pane, title: init.title ?? '未命名文档', ref: { path } }
+      return { id, kind, pane, title: init.title ?? translate('tab.untitledDoc'), ref: { path } }
     case 'draw':
-      return { id, kind, pane, title: init.title ?? '未命名绘图', ref: { path } }
+      return { id, kind, pane, title: init.title ?? translate('tab.untitledDraw'), ref: { path } }
     case 'browser':
       return {
         id,
         kind,
         pane,
-        title: init.title ?? '新标签页',
+        title: init.title ?? translate('tab.newPage'),
         ref: {
           url: init.url ?? '',
           ...(init.browserId === undefined ? {} : { browserId: init.browserId }),
@@ -96,9 +106,23 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
         }
       }
     case 'preview':
-      return { id, kind, pane, title: init.title ?? '文件预览', ref: { path } }
+      return { id, kind, pane, title: init.title ?? translate('tab.preview'), ref: { path } }
     case 'files':
-      return { id, kind, pane, title: init.title ?? '工作区文件', ref: { path, ...(init.selectedPath === undefined ? {} : { selectedPath: init.selectedPath }) } }
+      return { id, kind, pane, title: init.title ?? translate('tab.files'), ref: { path, ...(init.selectedPath === undefined ? {} : { selectedPath: init.selectedPath }) } }
+    case 'custom':
+      /*
+        ★ 自定义编辑器的 Tab **只能由调用方带着身份建**(哪个插件、哪个
+        viewType、哪个文件)。`makeTab('custom')` 拿不到那三样,所以这里
+        给的是一个**明确无效**的占位:`views/registry.tsx` 认出它并降级成
+        只读预览,而不是渲染一个空白格子让人以为编辑器坏了。
+      */
+      return {
+        id,
+        kind,
+        pane,
+        title: init.title ?? translate('tab.preview'),
+        ref: { viewType: init.viewType ?? '', pluginId: init.pluginId ?? '', path }
+      }
   }
 }
 

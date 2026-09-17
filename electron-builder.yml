@@ -23,6 +23,10 @@ extraResources:
     to: skills
     filter:
       - '**/*'
+  # 插件宿主窗口的 preload。手写的 .cjs,原样拷进 resources —— 它是安全边界,
+  # 应该能被逐行读完(理由见那个文件的头)。
+  - from: resources/plugin-preload.cjs
+    to: plugin-preload.cjs
 asarUnpack:
   - '**/node_modules/node-pty/**'
   - 'resources/**'

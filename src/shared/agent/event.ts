@@ -124,6 +124,8 @@ export type AgentEvent =
       /** 归因明细。老 run / 纯内核路径可能没有 —— 见 `ContextUsage.segments`。 */
       segments?: ContextSegment[]
     }
+  /** Localized run warning; not a provider error and never model context. */
+  | { type: 'notification'; warning: AgentError }
   | { type: 'context_status'; status: ContextStatus }
   | { type: 'context_checkpoint'; checkpoint: ContextCheckpoint }
   /** `at` is the wall-clock time at which the run reached its terminal state. */
