@@ -24,6 +24,7 @@ import { on } from '../../../services/ipc'
 import { usePluginsStore } from '../../../stores/plugins'
 import { PluginConfiguration } from './PluginConfiguration'
 import { PluginMarket } from './PluginMarket'
+import { pluginErrorKey } from './plugin-error'
 
 const STATUS_KEY: Record<PluginStatus, TranslationKey> = {
   idle: 'plugins.status.idle',
@@ -105,7 +106,7 @@ export function PluginsPanel(): ReactNode {
             onClick={() => {
               setError(null)
               void install().catch((cause: unknown) => {
-                setError(t('plugins.installFailed', { error: cause instanceof Error ? cause.message : String(cause) }))
+                setError(t('plugins.installFailed', { error: t(pluginErrorKey(cause)) }))
               })
             }}
           >

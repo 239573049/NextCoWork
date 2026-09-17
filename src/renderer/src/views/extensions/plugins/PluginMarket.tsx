@@ -20,6 +20,7 @@ import { EmptyState } from '../../../components/ui/EmptyState'
 import { TextInput } from '../../../components/ui/TextInput'
 import { useI18n } from '../../../i18n'
 import { usePluginsStore } from '../../../stores/plugins'
+import { pluginErrorKey } from './plugin-error'
 
 export function PluginMarket(): ReactNode {
   const { t } = useI18n()
@@ -79,7 +80,9 @@ export function PluginMarket(): ReactNode {
                 setBusy(item.slug)
                 setError(null)
                 void installFromMarket(item.slug)
-                  .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : String(cause)) })
+                  // ★ 主进程抛的是 key,不是句子 —— 经 `pluginErrorKey` 收窄后再 `t()`。
+                  //   直接把 `cause.message` 显示出来的话,界面上是一个 `plugins.xxx`。
+                  .catch((cause: unknown) => { setError(t(pluginErrorKey(cause))) })
                   .finally(() => { setBusy(null) })
               }}
             />

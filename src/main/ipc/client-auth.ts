@@ -485,7 +485,16 @@ export async function startClientLogin(): Promise<ClientAuthState> {
       authorize.searchParams.set('state', stateToken)
       authorize.searchParams.set('code_challenge', challenge)
       authorize.searchParams.set('code_challenge_method', 'S256')
-      authorize.searchParams.set('scope', 'profile:read wallet:read usage:read models:read inference:write config:read config:write config:secret:read config:secret:write skills:read skills:install')
+      /*
+        ★ 这一串必须与后端 `ClientOAuth.Scopes` **逐字对应**:那边是**全等匹配**,
+        不是子集匹配(`ParseScopes`)。少一个,整串就落到 `LegacyScopes` 上,
+        而 `plugins:read` / `plugins:install` 恰好在被切掉的末尾两位 ——
+        症状是「装 Skill 正常、装插件报需要登录」:后端在 token 校验事件里
+        直接判认证失败(401),客户端只能把它显示成「未登录」。
+
+        ★★ 改这一串之后**必须重新登录**,刷新 token 不会补上新 scope。
+      */
+      authorize.searchParams.set('scope', 'profile:read wallet:read usage:read models:read inference:write config:read config:write config:secret:read config:secret:write skills:read skills:install plugins:read plugins:install')
       void shell.openExternal(authorize.toString()).catch(fail)
     })
   })
