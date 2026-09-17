@@ -28,6 +28,18 @@ import '@excalidraw/excalidraw/index.css'
 /** 攒够这么久没有新改动才落盘。 */
 const SAVE_DEBOUNCE_MS = 800
 
+/**
+ * 宿主注入的视图垫片放在这里的当前主题。**插件不用自己接 postMessage** ——
+ * 垫片已经把 24 个颜色 token 写成了 `--ncw-*` CSS 变量、在 `<html>` 上同步了
+ * `data-theme`,并在变化时派发 `ncw:theme` 事件。
+ */
+declare global {
+  var __ncwTheme: { appearance: 'light' | 'dark'; motion: string; tokens: Record<string, string> } | undefined
+  interface WindowEventMap {
+    'ncw:theme': CustomEvent<{ appearance: 'light' | 'dark'; motion: string; tokens: Record<string, string> }>
+  }
+}
+
 interface Scene {
   elements: readonly unknown[]
   appState: Record<string, unknown>
@@ -60,8 +72,34 @@ function stripRuntimeOnly(appState: unknown): Record<string, unknown> {
   return rest
 }
 
+/**
+ * 跟随宿主的深浅色。
+ *
+ * ★ **不自己监听 postMessage,也不读 prefers-color-scheme。** 宿主往视图
+ * 注入了一段垫片,它已经把主题写进 `globalThis.__ncwTheme`,并在变化时
+ * 派发 `ncw:theme` 事件。读系统偏好是错的:用户可以在设置里把应用单独
+ * 锁成浅色,那时系统是深色而应用不是。
+ *
+ * ★ 初值同步取,不是先给个默认值再等事件 —— 否则深色下会先画一帧白底。
+ */
+function useHostTheme(): 'light' | 'dark' {
+  const [theme, setTheme] = useState<'light' | 'dark'>(
+    () => globalThis.__ncwTheme?.appearance ?? 'light'
+  )
+  useEffect(() => {
+    const onTheme = (event: Event): void => {
+      const detail = (event as CustomEvent<{ appearance?: string }>).detail
+      setTheme(detail?.appearance === 'dark' ? 'dark' : 'light')
+    }
+    window.addEventListener('ncw:theme', onTheme)
+    return () => { window.removeEventListener('ncw:theme', onTheme) }
+  }, [])
+  return theme
+}
+
 function App(): React.ReactElement {
   const [scene, setScene] = useState<Scene | null>(null)
+  const theme = useHostTheme()
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null)
   const timerRef = useRef<number | null>(null)
   /** 上一次存下去的内容。用来判断「真的变了吗」—— 见 save()。 */
@@ -134,6 +172,7 @@ function App(): React.ReactElement {
       excalidrawAPI={(api) => { apiRef.current = api }}
       initialData={{ elements: scene.elements as never, appState: scene.appState as never, files: scene.files as never, scrollToContent: true }}
       onChange={onChange}
+      theme={theme}
       // 宿主已经有自己的标题栏与菜单,这里关掉 Excalidraw 自带的那一套多余入口
       UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, export: false, saveAsImage: true } }}
       langCode={document.documentElement.lang === 'en' ? 'en' : 'zh-CN'}
