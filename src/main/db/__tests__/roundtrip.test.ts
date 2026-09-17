@@ -126,22 +126,38 @@ describe('★ 关库重开之后,配置一样都不少', () => {
     restart()
     expect(repo.getMcpServer(server.id)).toEqual(server)
   })
+  /*
+    ★ 这条用例在 v2 之后换了断言对象,**意图一个字没变**:SSH 连接是设备本地的,
+    工作区到它的绑定一个字节都不该离开这台机器。
+
+    v1 的做法是「照样入 outbox,但投影掉 environment / rootPath」,所以当年断言的是
+    「那一行在,且里面没有敏感字段」。v2 把明文 outbox **整个停写**了(见 `repo.ts`
+    的 `enqueueSyncMutation`:配置写入只打一个脏标记,真正上传走加密快照),
+    于是现在能断言的是更强的一条 —— **一行明文都不产生**。
+
+    ⚠️ v2 的上传器还没接上(`encryptSyncDocument` 目前只有测试在调用),所以
+    「快照里到底装了什么」暂时无处可断言。等上传链路落地必须把它加回来:
+    `workspacePreferences()` 那层投影现在没有任何测试守着。
+  */
   it('persists device-only SSH profiles and never syncs workspace bindings', () => {
     const connection: SshConnectionProfile = { id: 'ssh-one', name: 'Private server', kind: 'ssh', enabled: true,
       platform: 'auto', revision: 1, createdAt: 1, updatedAt: 1, target: { kind: 'manual', host: 'private.internal',
         username: 'user', port: 22, identityFile: '/private/key' } }
-    repo.configureSyncAccount('test-account')
+    // ★ enabled 必须显式给 true:`configureSyncAccount` 的第二个参数默认 false,
+    //   不给的话 `enqueueSyncMutation` 一进门就 return,这条用例会变成一句废话。
+    repo.configureSyncAccount('test-account', true)
     store.putConnectionProfile(connection)
     store.putWorkspace({ ...workspace('remote'), environment: { kind: 'connection', connectionId: connection.id } })
-    const payloads = stmt('SELECT kind, payload FROM sync_outbox').all()
-    expect(payloads).toHaveLength(1)
-    expect(JSON.parse(String(payloads[0]?.['payload']))).toEqual({ id: 'remote', name: '工作区 remote', settings: workspace('remote').settings, createdAt: workspace('remote').createdAt })
-    stmt('DELETE FROM sync_outbox').run()
+
+    // 一行明文都不该有 —— 连接目标、私钥路径、工作区绑定都在这两次写入里
+    expect(stmt('SELECT kind, payload FROM sync_outbox').all()).toEqual([])
+    // 但同步层必须知道「这个作用域变脏了」,否则下一次快照不会重算
+    expect(repo.getConfigDirty('test-account')).toBe(true)
+
+    // 首次快照同样不再落明文
     repo.enqueueInitialSyncSnapshot('test-account')
-    const snapshot = String(stmt("SELECT payload FROM sync_outbox WHERE kind = 'workspacePreferences'").get()?.['payload'])
-    expect(snapshot).not.toContain('environment')
-    expect(snapshot).not.toContain('rootPath')
-    expect(snapshot).not.toContain('private.internal')
+    expect(stmt('SELECT payload FROM sync_outbox').all()).toEqual([])
+
     restart()
     expect(store.getConnectionProfile(connection.id)).toEqual(connection)
     expect(() => store.removeConnectionProfile(connection.id)).toThrow('connection-in-use')
@@ -356,22 +372,37 @@ describe('★ 关库重开之后,配置一样都不少', () => {
 })
 
 describe('基础配置同步边界', () => {
-  it('配置写入与 outbox 同事务提交，且不携带本机凭证引用', () => {
-    repo.configureSyncAccount('account-a')
+  /*
+    ★ v2 之后,「配置写入 → 明文 outbox」这条路没有了。一次配置写入现在产出的是
+    一个**脏标记**(`enqueueSyncMutation` 只调 `setConfigDirty`),真正上传走加密快照。
+
+    所以这条用例断言的是新契约的两半:
+    - 写配置**不产生任何明文行** —— 供应商的 baseUrl 之类不再落盘;
+    - 但同步层知道该作用域变脏了,否则下一次快照不会重算(这是 v1 那个
+      「同事务入队」保证过的东西,v2 换成了同事务打标记)。
+
+    ⚠️ 「同步出去的 payload 不含 credentialRef」这一条暂时无处可断言:剥离它的
+    代码(`repo.ts` 的 `enqueueInitialSyncSnapshot`)还在,但它的产物现在被丢弃。
+    v2 上传器落地后必须把那条断言加回来 —— 凭证引用是设备本地的,绝不该上云。
+  */
+  it('配置写入只打脏标记，不再产生任何明文 outbox 行', () => {
+    // ★ enabled 显式给 true —— 默认是 false,不给这条用例测不到任何东西
+    repo.configureSyncAccount('account-a', true)
     repo.putProvider(provider('cloud-provider', 0))
 
-    const pending = repo.listPendingSyncMutations('account-a')
-    expect(pending).toHaveLength(1)
-    expect(pending[0]?.kind).toBe('provider')
-    expect(pending[0]?.accountId).toBe('account-a')
-    expect(pending[0]?.payload).not.toHaveProperty('credentialRef')
-    expect(pending[0]?.mutationId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(repo.listPendingSyncMutations('account-a')).toHaveLength(0)
+    expect(repo.getConfigDirty('account-a')).toBe(true)
+    // 凭证引用留在本机那一份里 —— 它是设备本地的,不随配置走
+    expect(repo.listProviders().find((p) => p.id === 'cloud-provider')).toHaveProperty('credentialRef')
   })
 
   it('远端应用不会再次写入 outbox，会话数据也不进入同步表', () => {
-    repo.configureSyncAccount('account-a')
+    repo.configureSyncAccount('account-a', true)
     repo.withSyncApply(() => repo.putProvider(provider('remote-provider', 0)))
     expect(repo.listPendingSyncMutations('account-a')).toHaveLength(0)
+    // ★ 远端推回来的改动**不算本地改动**,连脏标记都不该打 —— 否则每次拉取
+    //   都会把自己标脏,下一轮再上传一次,两台设备互相触发个没完。
+    expect(repo.getConfigDirty('account-a')).toBe(false)
 
     store.createSession({ workspaceId: 'local', title: 'local session' })
     expect(repo.listPendingSyncMutations('account-a')).toHaveLength(0)
