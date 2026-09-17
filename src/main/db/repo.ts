@@ -1654,12 +1654,18 @@ export function findAttachmentByOwnerAndFileName(ownerId: string, fileName: stri
 /**
  * 某个会话下所有还没发出去的附件 —— 重启后恢复草稿附件区要用。
  *
- * ★ 会话不可见时返回空数组。草稿附件是**按会话 id 直接查**的,不经过
- * `getSession`,所以它是唯一一条绕过归属判定的入口 —— 少了这一句,
+ * ★ 会话**存在但不在本作用域**时返回空数组。草稿附件是**按会话 id 直接查**的,
+ * 不经过 `getSession`,所以它是唯一一条绕过归属判定的入口 —— 少了这一句,
  * 跨账户随便给一个会话 id 就能列出别人的待发附件。
+ *
+ * ★ 但「会话行还不存在」不算不可见:草稿附件恰恰是在会话行落库**之前**上传的
+ * (渲染层先动手生成会话 id,会话行要等首条消息提交才建),这一步判成不可见,
+ * 重启后的草稿恢复就永远拿到空列表。没有会话行的草稿也不构成跨账户泄露 ——
+ * 它还没挂到任何工作区,自然不属于任何账户。
  */
 export function listDraftAttachments(sessionId: string): AttachmentRow[] {
-  if (!sessionScopeVisible(sessionId)) return []
+  const row = stmt('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId)
+  if (row !== undefined && !workspaceScopeVisible(String(row['workspace_id']))) return []
   return stmt(
     `SELECT * FROM attachments WHERE owner_id = ? AND status = 'draft' ORDER BY created_at`
   )
