@@ -22,6 +22,7 @@
  * 变成主进程可校验、可审计、可关闭的一条通道(`ncw.net.fetch`)。
  */
 import { net, protocol } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { lstat, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -45,18 +46,35 @@ export function registerPluginScheme(): void {
   ])
 }
 
-const CSP = [
-  "default-src 'none'",
-  "script-src 'self' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
-  "font-src 'self' data:",
-  "img-src 'self' data: blob:",
-  'media-src blob:',
-  'worker-src blob:',
-  // ★ 仍然禁外网:所有网络请求必须走 ncw.net.fetch,由主进程逐 URL 校验
-  "connect-src 'self' data: blob:",
-  'frame-ancestors ncw://main'
-].join('; ')
+/**
+ * CSP。
+ *
+ * ★ **`nonce` 是必需的,不是可选加固。** 宿主页面(`/__host.html`)靠两段
+ * **内联**脚本启动:importmap 把裸模块名 `nextcowork` 映射到 `/__runtime.js`,
+ * 紧随其后的 module 脚本调 `__bootstrap`。而 `script-src 'self'` 只放行
+ * **外部**脚本 —— 内联的一律拦掉(importmap 同样受 `script-src` 管)。
+ *
+ * 症状极难定位:控制台只有一句「Refused to execute inline script」,而主进程
+ * 那边表现为「插件点了没反应 / 启用后不自启动」—— `__bootstrap` 从不执行,
+ * `bridge.ready()` 从不调用,`spawn()` 里的 `await ready` 就永远不 resolve。
+ *
+ * 所以给内联脚本发 nonce。**每个响应新生成**,不用固定值:固定值等于换个写法
+ * 的 `'unsafe-inline'`,任何能往页面里写内容的人都带得上它。
+ */
+function csp(nonce: string): string {
+  return [
+    "default-src 'none'",
+    `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'`,
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    'media-src blob:',
+    'worker-src blob:',
+    // ★ 仍然禁外网:所有网络请求必须走 ncw.net.fetch,由主进程逐 URL 校验
+    "connect-src 'self' data: blob:",
+    'frame-ancestors ncw://main'
+  ].join('; ')
+}
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -80,14 +98,24 @@ function mimeOf(path: string): string {
   return (dot === -1 ? undefined : MIME[path.slice(dot).toLowerCase()]) ?? 'application/octet-stream'
 }
 
-function headers(contentType: string): Headers {
+function headers(contentType: string, nonce?: string): Headers {
   const out = new Headers()
   out.set('Content-Type', contentType)
-  out.set('Content-Security-Policy', CSP)
+  out.set('Content-Security-Policy', csp(nonce ?? randomNonce()))
   // 插件包里的东西不该被别的 origin 嵌进去,也不该被当成下载执行
   out.set('X-Content-Type-Options', 'nosniff')
   out.set('Cache-Control', 'no-store')
   return out
+}
+
+/**
+ * 一次响应用一次的 nonce。
+ *
+ * ★ 用 `crypto.randomUUID()` 而不是 Math.random:后者对「猜出下一个值」
+ * 不设防,而 nonce 的全部意义就是让**别人写的内容**带不上它。
+ */
+function randomNonce(): string {
+  return randomUUID()
 }
 
 /**
@@ -96,16 +124,20 @@ function headers(contentType: string): Headers {
  * 它只做两件事:把 `nextcowork` 这个裸模块名映射到生成的垫片(import map),
  * 然后动态 import 插件的入口。插件代码里的 `import * as ncw from 'nextcowork'`
  * 因此能解析 —— 和 VS Code 里 `vscode` 被标成 external 是同一套做法。
+ *
+ * ★ **两段脚本都带 nonce**,而 `nonce` 必须和响应头里那个是**同一个值** ——
+ * 分两次生成的话 CSP 依然拦得住它们。见上面 `csp()` 的说明。
  */
-function hostHtml(pluginId: string, main: string): string {
+function hostHtml(pluginId: string, main: string, nonce: string): string {
   const entry = JSON.stringify(`./${main.replace(/^\.\//, '')}`)
+  const attr = `nonce="${nonce}"`
   return `<!doctype html>
 <html><head><meta charset="utf-8">
-<script type="importmap">
+<script ${attr} type="importmap">
 {"imports":{"nextcowork":"/__runtime.js"}}
 </script>
 </head><body>
-<script type="module">
+<script ${attr} type="module">
 import { __bootstrap } from '/__runtime.js'
 __bootstrap(${entry}, ${JSON.stringify(pluginId)})
 </script>
@@ -286,7 +318,15 @@ export async function handlePluginRequest(
 
   const path = decodeURIComponent(url.pathname)
   if (path === '/__host.html' || path === '/') {
-    return new Response(hostHtml(pluginId, entry.main), { status: 200, headers: headers(MIME['.html'] as string) })
+    /*
+      ★ nonce **在这里生成一次**,同时给响应头和页面里的两段内联脚本 ——
+      各生成各的等于没加:页面里那个值和 CSP 里那个对不上,CSP 照样拦。
+    */
+    const nonce = randomNonce()
+    return new Response(hostHtml(pluginId, entry.main, nonce), {
+      status: 200,
+      headers: headers(MIME['.html'] as string, nonce)
+    })
   }
   if (path === '/__runtime.js') {
     return new Response(runtimeJs(pluginId), { status: 200, headers: headers(MIME['.js'] as string) })

@@ -556,7 +556,16 @@ export class PluginManager {
     }
     // ★ 命令本身就是激活事件 —— 点菜单是插件第一次被叫醒的最常见方式。
     if (!(await this.activateFor(`onCommand:${commandId}`, pluginId))) {
-      throw new Error(`plugin ${pluginId} could not be activated`)
+      /*
+        ★ 把**最近一条诊断**带上。`wake` 失败时已经把真正的原因(activate()
+        抛了什么、宿主页面为什么没握手)写进了 `record.diagnostics`,
+        只抛一句笼统的「could not be activated」等于把那条信息锁在插件详情页里,
+        而用户在控制台看到的是一句指向不了任何东西的话。
+      */
+      const why = record.diagnostics.at(-1)?.message
+      throw new Error(
+        `plugin ${pluginId} could not be activated${why === undefined ? '' : `: ${why}`}`
+      )
     }
     await this.deps.runtime.invoke(
       pluginId,

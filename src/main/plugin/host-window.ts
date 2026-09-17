@@ -38,6 +38,15 @@ const CHANNEL_INVOKE = 'plugin:invoke'
 const CHANNEL_INVOKE_RESULT = 'plugin:invokeResult'
 const CHANNEL_READY = 'plugin:ready'
 
+/**
+ * 等宿主页面握手的最长时间。
+ *
+ * 宿主页面只是一个空壳(importmap + 一行 bootstrap),10 秒还没 `plugin:ready`
+ * 就说明它起不来了 —— 而这个状态**必须**有个尽头:见 `spawn` 里那段说明,
+ * 没有尽头的等待会让插件永久卡在 `activating`。
+ */
+const READY_TIMEOUT_MS = 10_000
+
 interface HostEntry {
   window: BrowserWindow
   ready: Promise<void>
@@ -105,6 +114,18 @@ export class ElectronPluginRuntime implements PluginRuntime {
       resolveReady = resolvePromise
       rejectReady = rejectPromise
     })
+    /*
+      ★ 挂一个空的 catch,把这个 promise 标成「已处理」。
+
+      没有它的时候:spawn 在 `await ready` **之前**就抛了(最常见是 `loadURL`
+      失败 —— 宿主页面被 CSP 拦掉、协议没装、路径不对),而这个 promise 从此
+      没人等。之后 `wake` 的 catch 里 `dispose` → `fail` → `rejectReady` 会把它
+      reject 掉,Node 直接抛 UnhandledPromiseRejectionWarning —— 那条警告里只有
+      「plugin host disposed」,**真正的失败原因一个字都没有**,于是排查方向全错。
+
+      标成已处理不影响正常路径:`await ready` 该抛还是抛。
+    */
+    void ready.catch(() => undefined)
 
     const window = new BrowserWindow({
       show: false,
@@ -138,7 +159,24 @@ export class ElectronPluginRuntime implements PluginRuntime {
     window.webContents.on('will-navigate', (event) => { event.preventDefault() })
 
     await window.loadURL(`${'ncw-plugin'}://${plugin.id}/__host.html`)
-    await ready
+    /*
+      ★ **必须带超时。** 原来这里是裸的 `await ready`:宿主页面只要没能把
+      `plugin:ready` 发出来(脚本被 CSP 拦掉、模块解析失败、页面根本没执行),
+      这个 await 就永远不 resolve —— 调用方那一侧表现为「点了没反应」,
+      而且 `wake` 卡在 `status = 'activating'`,**之后每一次点击都会被
+      「已经在激活」直接放行**,连超时都不会再触发。
+
+      超时值对齐 `PLUGIN_TIMEOUT.ACTIVATE_MS` 的量级:宿主页面只是一个空壳,
+      给它 10 秒还没握手就说明它起不来了。
+    */
+    await Promise.race([
+      ready,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('plugin host did not report ready; its page could not start'))
+        }, READY_TIMEOUT_MS).unref?.()
+      })
+    ])
   }
 
   async invoke(pluginId: string, invocation: PluginInvocation, timeoutMs: number): Promise<unknown> {
