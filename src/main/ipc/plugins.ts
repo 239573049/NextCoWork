@@ -57,12 +57,26 @@ export async function startPlugins(): Promise<void> {
     setKv: (key, value) => { store.setKv(key, value) },
     currentWorkspace: () => {
       /*
-        ★ 「当前工作区」取的是**最近激活的那一个**。插件的路径类能力全部以它
-        为根 —— 没有工作区时是空串,而 `narrowWorkspacePath` 对空根一律拒绝。
-        这比回落到临时目录诚实:插件宁可一步都走不动,也不要往一个谁也不会看的
-        目录里写东西然后报告「已完成」(同 `runtime.ts` 的 `workspaceRootFor`)。
+        ★ 「当前工作区」取的是**最近激活的那一个**(`listWorkspaces` 按
+        last_opened_at 倒序)。插件的路径类能力全部以它为根 —— 没有工作区时
+        是空串,而 `narrowWorkspacePath` 对空根一律拒绝。这比回落到临时目录
+        诚实:插件宁可一步都走不动,也不要往一个谁也不会看的目录里写东西
+        然后报告「已完成」(同 `runtime.ts` 的 `workspaceRootFor`)。
+
+        ★★ **远程工作区(environment.kind === 'connection')在这里就排除**,
+        空根交给 narrow 去拒。插件宿主的 fs 是**本地** node fs,远程工作区的
+        rootPath(比如 SSH 机器上的 /root)在本机不存在 —— 不排除的话,
+        写入会在「往上找存在祖先」时一路爬到文件系统根,报一句指向不了
+        任何东西的 `path cannot be resolved`。而更糟的另一条路 —— 静默把文件
+        写进**另一个**本地工作区 —— 绝对不能发生:用户看着 A 工作区点的新建,
+        文件却出现在 B 里。
+
+        远程工作区里插件暂时一步都走不动,这是**当前能力边界**,不是 bug;
+        等插件 fs 支持远程连接时,把这段判断去掉即可。
       */
-      const workspace = store.listWorkspaces()[0]
+      const workspace = store
+        .listWorkspaces()
+        .find((w) => (w.environment?.kind ?? 'local') !== 'connection')
       return { id: workspace?.id ?? '', rootPath: workspace?.rootPath ?? '' }
     },
     approve: async (pluginId, summary) => {
