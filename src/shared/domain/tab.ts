@@ -173,7 +173,15 @@ export const BUILTIN_TAB_MENU: readonly TabMenuItem[] = [
 
   // create —— 「造一个新的」。三格都出,顺序即截图里的顺序。
   { id: 'builtin.chat', titleKey: 'tabMenu.chat', icon: 'message-square', accelerator: 'CmdOrCtrl+N', group: 'create', order: 10, action: { kind: 'openTab', tabKind: 'chat' } },
-  { id: 'builtin.draw', titleKey: 'tabMenu.draw', icon: 'pen-tool', group: 'create', order: 20, action: { kind: 'openTab', tabKind: 'draw' } },
+  /*
+    ★ 这里原来有一项 `builtin.draw`(「新建绘图」)。它开出来的 `draw` Tab
+    本版只有一个占位空壳(`views/registry.tsx` 的 "draw" 分支渲染 Placeholder),
+    而真正的绘图现在由插件贡献(`contributes.menus` → `excalidraw.new`)——
+    留着它等于给用户两个「新建绘图」,其中一个点了什么都没有。
+
+    `draw` 这个 Tab kind 本身**保留**:落盘的旧布局里可能还有它,
+    从联合类型里删掉会让那些 Tab 直接消失(而用户没做错任何事)。
+  */
   { id: 'builtin.doc', titleKey: 'tabMenu.doc', icon: 'file-text', accelerator: 'Alt+CmdOrCtrl+N', group: 'create', order: 30, action: { kind: 'openTab', tabKind: 'doc' } },
 
   // tools —— 「开一个工具」。分隔线落在这条边界上。

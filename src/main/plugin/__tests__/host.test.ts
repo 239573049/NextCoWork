@@ -6,6 +6,8 @@
  * 两者分在两个文件里,正是 `manager.ts` 把 runtime 抽成接口的理由。
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
+import { promises as fs } from 'node:fs'
+import { join } from 'node:path'
 import { nodeHost } from '../../kernel/host'
 import {
   matchesPathScope,
@@ -689,5 +691,52 @@ describe('PluginManager · tabs.openCustomEditor', () => {
     manager.revoke('acme.demo', ['workspace.read'])
     const response = await open(manager, 'demo.editor', 'drawings/a.demo')
     expect((response as { ok: boolean }).ok).toBe(false)
+  })
+})
+
+/**
+ * `workspace.writeFile` 的路径归一。
+ *
+ * 这条钉的是一个真实故障:插件写 `drawings/x.excalidraw` 时 `drawings/` 还不存在,
+ * 而 `resolveInside` 只归一父目录、对不存在的路径 realpath 会抛 —— 于是整次写入
+ * 被判 `invalid_argument`,而同一个函数紧接着就调 `mkdirp`,两边自相矛盾。
+ *
+ * 症状是「点菜单没反应」:调用方那一侧是即发即忘的,rejection 直接消失。
+ */
+describe('PluginManager · workspace.writeFile 的父目录', () => {
+  const writeManifest = {
+    ...MANIFEST,
+    permissions: ['workspace.read', 'workspace.write']
+  }
+
+  it('★ 父目录还不存在时照样能写 —— 第一次新建 drawings/x 就走这条路', async () => {
+    const { manager, root } = await makeManager(writeManifest)
+    manager.grant('acme.demo', ['workspace.read', 'workspace.write'])
+    await manager.setEnabled('acme.demo', true)
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'workspace.writeFile',
+      params: { path: 'drawings/first.excalidraw', data: '{"type":"excalidraw"}' }
+    })
+
+    expect(response.ok).toBe(true)
+    // 文件真的落盘了,而且中间那层目录是它自己建的
+    const written = await fs.readFile(join(root, 'drawings', 'first.excalidraw'), 'utf8')
+    expect(written).toBe('{"type":"excalidraw"}')
+  })
+
+  it('路径跑到工作区外仍然拒 —— 往上找祖先不能把边界一起放宽', async () => {
+    const { manager } = await makeManager(writeManifest)
+    manager.grant('acme.demo', ['workspace.read', 'workspace.write'])
+    await manager.setEnabled('acme.demo', true)
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'workspace.writeFile',
+      params: { path: '../outside/nope.txt', data: 'x' }
+    })
+
+    expect(response.ok).toBe(false)
   })
 })

@@ -84,8 +84,15 @@ export async function startPlugins(): Promise<void> {
     },
     emitChanged: () => { windows.emitToAll('plugins:changed', undefined) },
     publishMessages: (pluginId, locale, dict) => {
+      /*
+        ★ 同一个「插件 + 语言」**替换**而不是追加。插件每次重新装载都会再报一遍
+        自己的 bundle(启用 / 禁用 / 重装 / 升级各一次),追加的话这个数组会一直
+        长,而 `listPlugins` 每次都要遍历它。
+      */
+      const existing = pendingMessages.findIndex((item) => item.pluginId === pluginId && item.locale === locale)
+      if (existing === -1) pendingMessages.push({ pluginId, locale, dict })
+      else pendingMessages[existing] = { pluginId, locale, dict }
       windows.emitToAll('plugins:changed', undefined)
-      pendingMessages.push({ pluginId, locale, dict })
     },
     requestPermissions: async (pluginId, permissions, reasonKey) => {
       /*
@@ -146,12 +153,13 @@ export async function startPlugins(): Promise<void> {
  * ★ 为什么不直接推给渲染层:`plugins:list` 的响应里已经带着每个插件的清单,
  * 而文案要跟着 catalog 一起到达 —— 分两条路送的话,菜单会先以 key 的样子
  * 出现一帧,再变成文字。所以这里攒着,由 `listPlugins` 一次带出去。
+ *
+ * ★★ 这段曾经是**死代码**:数组只进不出(`drainPluginMessages` 全仓无人调用),
+ * 于是包里的 l10n 永远到不了渲染层,菜单一直显示 `excalidraw.new` 这种
+ * 命令 id。修的时候注意:**读的时候不能清空** —— `plugins:list` 会被反复调用
+ * (每次 catalog 变动渲染层都重取一次),清掉之后第二次就只剩 key 了。
  */
 const pendingMessages: { pluginId: string; locale: string; dict: Record<string, string> }[] = []
-
-export function drainPluginMessages(): { pluginId: string; locale: string; dict: Record<string, string> }[] {
-  return [...pendingMessages]
-}
 
 export async function shutdownPlugins(): Promise<void> {
   /*
@@ -164,8 +172,35 @@ export async function shutdownPlugins(): Promise<void> {
   manager = null
 }
 
+/**
+ * 全部已装插件 + 它们各自的文案。
+ *
+ * ★ 文案**挂进 catalog**,不另开一条 IPC:菜单项在插件被激活之前就要画出来,
+ * 而菜单本身就是激活事件的来源。分两条路送的话,菜单会先以 key 的样子出现
+ * 一帧再变成文字。
+ *
+ * ★ 这里**不清空** `pendingMessages`:这个函数每次 catalog 变动都会被调一次
+ * (渲染层收到 `plugins:changed` 就重取),清掉的话第二次返回的就没有文案了,
+ * 菜单又变回一排 key。
+ */
 export function listPlugins(): PluginCatalog {
-  return manager?.catalog() ?? emptyCatalog()
+  const catalog = manager?.catalog() ?? emptyCatalog()
+  if (pendingMessages.length === 0) return catalog
+
+  const byPlugin = new Map<string, Record<string, Record<string, string>>>()
+  for (const { pluginId, locale, dict } of pendingMessages) {
+    const locales = byPlugin.get(pluginId) ?? {}
+    locales[locale] = dict
+    byPlugin.set(pluginId, locales)
+  }
+
+  return {
+    ...catalog,
+    plugins: catalog.plugins.map((plugin) => {
+      const messages = byPlugin.get(plugin.id)
+      return messages === undefined ? plugin : { ...plugin, messages }
+    })
+  }
 }
 
 export async function setPluginEnabled(req: { pluginId: string; enabled: boolean }): Promise<PluginCatalog> {

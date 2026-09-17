@@ -81,7 +81,13 @@ describe('+ 菜单 · 分格', () => {
   it('★ 三格的创建类项目完全一致,顺序也一致', () => {
     const creates = (pane: 'main' | 'bottom' | 'right'): string[] =>
       tabMenuForPane(BUILTIN_TAB_MENU, pane).filter((item) => item.group === 'create').map((item) => item.id)
-    expect(creates('main')).toEqual(['builtin.chat', 'builtin.draw', 'builtin.doc'])
+    /*
+      ★ 这里原来还有 `builtin.draw`。它被删掉了 —— 那个 Tab 本版只是占位空壳,
+      而真正的绘图由插件贡献(见 `shared/domain/tab.ts` 里的说明)。
+      「内置项只剩两项」本身值得钉住:再多出一项,用户就会看到两个「新建绘图」,
+      其中一个点了什么都没有。
+    */
+    expect(creates('main')).toEqual(['builtin.chat', 'builtin.doc'])
     expect(creates('bottom')).toEqual(creates('main'))
     expect(creates('right')).toEqual(creates('main'))
   })

@@ -19,8 +19,9 @@ import {
   type TabMenuItem,
   type WhenContext
 } from '../../../shared/plugin/contribution'
-import { registerPluginMessages, unregisterPluginMessages } from '../i18n'
+import { registerPluginMessages, translate, unregisterPluginMessages } from '../i18n'
 import { invoke } from '../services/ipc'
+import { toast } from './toast'
 
 interface PluginsState {
   catalog: PluginCatalog
@@ -104,7 +105,28 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
   },
 
   async runCommand(pluginId, commandId) {
-    await invoke('plugins:runCommand', { pluginId, commandId })
+    /*
+      ★ **失败必须说出来。**
+
+      调用点(`shell/Dock.tsx`、`shell/commands.ts`)都是 `void runCommand(...)` ——
+      即发即忘。以前这里直接把 rejection 抛出去,于是一次失败的点击表现为
+      「点了没反应」:没有提示、没有日志、控制台干净。而插件命令会失败的
+      地方很多(没激活、能力没批、路径被拒、插件自己的代码抛了),
+      用户唯一能做的就是反复点。
+
+      收口在这一层而不是每个调用点:漏一个调用点就漏一种静默失败。
+    */
+    try {
+      await invoke('plugins:runCommand', { pluginId, commandId })
+    } catch (error) {
+      /*
+        面向用户的是一句人话;原始错误进 console 供排查 —— 主进程那边抛出来的
+        是英文诊断句(比如 `plugin acme.excalidraw could not be activated`),
+        它不该出现在界面上,但排查时又不能没有。`[plugins]` 前缀同 App.tsx。
+      */
+      console.error(`[plugins] ${pluginId} 的命令 ${commandId} 执行失败`, error)
+      toast.error(translate('plugins.commandFailed', { plugin: pluginId }), `plugin-command-${commandId}`)
+    }
   },
 
   async loadMarket(query = {}) {
@@ -162,10 +184,18 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
  */
 function applyCatalog(catalog: PluginCatalog): void {
   for (const plugin of catalog.plugins) {
-    const bundles = pluginMessageBundles(plugin)
-    for (const [locale, dict] of Object.entries(bundles)) {
+    /*
+      ★ **包内的 l10n 优先,清单兜底。** 顺序反过来的话,包里明明写了
+      「新建绘图」,菜单上却一直是 `excalidraw.new` —— 而兜底那一份
+      看起来「有值」,所以不会有任何地方报错。
+    */
+    const bundled = plugin.messages ?? {}
+    const fallback = pluginMessageFallback(plugin)
+    for (const locale of ['zh-CN', 'en-US'] as const) {
+      const dict = { ...fallback[locale], ...bundled[locale] }
+      if (Object.keys(dict).length === 0) continue
       try {
-        registerPluginMessages(plugin.id, locale as 'zh-CN' | 'en-US', dict)
+        registerPluginMessages(plugin.id, locale, dict)
       } catch {
         // 注册被拒(前缀不对/超配额)只影响这一个插件的文案,不该打断别的。
       }
@@ -174,15 +204,17 @@ function applyCatalog(catalog: PluginCatalog): void {
 }
 
 /**
- * 从清单里**兜底**生成一份文案表。
+ * 包没带 l10n 时的**兜底**文案。
  *
- * 真正的文案来自包内的 l10n bundle(主进程读、经 catalog 带过来)——
- * 这里只是在包没带 l10n 时,让菜单至少显示 `displayName` 而不是一排 key。
+ * ★ 兜底值是 `displayName`,不是 `command.command` —— 后者是**协议标识符**
+ * (`excalidraw.new`),把它显示在菜单上等于把内部标识漏给用户,而且看起来
+ * 像一条没翻译的 key,没人分得清它是「缺翻译」还是「本来就长这样」。
+ * 显示名至少是作者自己起的、给人看的字。
  */
-function pluginMessageBundles(plugin: InstalledPlugin): Record<string, Record<string, string>> {
-  const fallback: Record<string, string> = {}
+function pluginMessageFallback(plugin: InstalledPlugin): Record<'zh-CN' | 'en-US', Record<string, string>> {
+  const dict: Record<string, string> = {}
   for (const command of plugin.manifest.contributes.commands) {
-    fallback[`plugin.${plugin.id}.${command.title.slice(1, -1)}`] = command.command
+    dict[`plugin.${plugin.id}.${command.title.slice(1, -1)}`] = plugin.manifest.displayName
   }
-  return { 'zh-CN': fallback, 'en-US': fallback }
+  return { 'zh-CN': dict, 'en-US': dict }
 }

@@ -80,6 +80,17 @@ export interface InstalledPlugin {
   pendingPermissions?: PluginPermission[]
   /** 这一刻它挂在状态栏上的那几格。禁用时必须清空 */
   statusBar: PluginStatusBarItem[]
+  /**
+   * 包内 `l10n/` 的词条,按语言分。
+   *
+   * ★ **必须跟着 catalog 一起下来**,不能另走一条消息:菜单项在插件被激活
+   * 之前就要画出来,而菜单本身就是激活事件的来源。分两条路送的话,
+   * 菜单会先以 key 的样子出现一帧(甚至一直保持那样,如果第二条消息先到),
+   * 再变成文字 —— 见 `renderer/stores/plugins.ts` 的注册处。
+   *
+   * 值是 `plugin.<pluginId>.<key>` → 文案。
+   */
+  messages?: Record<string, Record<string, string>>
 }
 
 /** 插件系统整体状态,一次 IPC 全量取回。 */

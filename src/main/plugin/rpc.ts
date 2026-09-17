@@ -244,10 +244,24 @@ async function resolveInside(ctx: CapabilityContext, path: string): Promise<stri
   if (!narrowed.ok) invalid(narrowed.reason)
   const target = narrowed.value
   /*
-    ★ 文件还不存在是正常的(第一次写)—— 那就归一它的**父目录**。
-    对不存在的路径 realpath 会抛,而「写一个新文件」不该因此被拒。
+    ★ 一路往上找到**最近的存在祖先**,而不是只看父目录。
+
+    文件不存在是常态(第一次写);但它的**父目录也可能不存在** ——
+    `drawings/x.excalidraw` 的第一次写入就是这样。只归一父目录的话,
+    realpath 对 `<ws>/drawings` 抛 ENOENT,整次写入被判 `invalid_argument`,
+    而 `workspace.writeFile` 自己明明紧接着就调 `mkdirp` —— 两边自相矛盾,
+    症状是「插件点了没反应」,因为调用方那一侧把 rejection 丢了。
+
+    词法收窄(`narrowWorkspacePath`)已经保证 `target` 在根内,所以这个循环
+    最差也会停在根上,不会一路跑到文件系统顶层。
   */
-  const probe = (await ctx.host.fs.exists(target)) ? target : dirnameOf(target)
+  let probe = target
+  for (;;) {
+    if (await ctx.host.fs.exists(probe)) break
+    const parent = dirnameOf(probe)
+    if (parent === probe) invalid(`path cannot be resolved: ${path}`)
+    probe = parent
+  }
   const real = await ctx.host.fs.realpath(probe).catch(() => null)
   const realRoot = await ctx.host.fs.realpath(ctx.workspaceRoot).catch(() => ctx.workspaceRoot)
   if (real === null) invalid(`path cannot be resolved: ${path}`)
