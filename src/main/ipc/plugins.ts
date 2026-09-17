@@ -139,6 +139,22 @@ export async function startPlugins(): Promise<void> {
   await manager.start()
 
   /*
+    声明了 `onStartup` 的已启用插件,此刻唤醒。
+
+    ★ **只唤醒声明了的**,不是全部:`activationEvents` 是插件自己说「我什么时候
+      需要活」。全量唤醒等于把这套机制整个作废,每个装了的插件开机就各起一个
+      隐藏窗口 —— 用户只是装了它,没让它常驻。
+
+    ★ **即发即忘**:启动不该被任何一个插件卡住。失败的 wake 已经把原因写进
+      了 `record.diagnostics`,插件详情页能看到;这里不再打扰启动流程。
+  */
+  for (const plugin of manager.catalog().plugins) {
+    if (!plugin.enabled) continue
+    if (!plugin.manifest.activationEvents.includes('onStartup')) continue
+    void manager.wake(plugin.id).catch(() => undefined)
+  }
+
+  /*
     ★ 两条接线都**在 start 之后**:装载期可能已经发现了坏包,而那些插件
       不该出现在工具表里。provider 每次装配现问一遍,所以这里只接一次。
   */

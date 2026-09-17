@@ -21,13 +21,19 @@
  * `connect-src` 不给外网是**关键设计,不是疏漏**:它让「插件能访问哪些域名」
  * 变成主进程可校验、可审计、可关闭的一条通道(`ncw.net.fetch`)。
  */
-import { net, protocol } from 'electron'
+import { net, protocol, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { lstat, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export const PLUGIN_SCHEME = 'ncw-plugin'
+
+/**
+ * 插件宿主窗口的 session 分区。放这里(而不是 `host-window.ts`)是因为
+ * `installPluginProtocol` 也要用 —— 常量住在最低层,谁引谁都不会成环。
+ */
+export const PLUGIN_HOST_PARTITION = 'persist:plugin-host'
 
 /** 在 `app.whenReady()` **之前**调用 —— 之后调不报错,但 privileges 全丢。 */
 export function registerPluginScheme(): void {
@@ -302,7 +308,21 @@ export function setPluginRootResolver(resolver: PluginRootResolver): void {
 
 /** 在 `app.whenReady()` 之后调用。 */
 export function installPluginProtocol(): void {
-  protocol.handle(PLUGIN_SCHEME, (request) => handlePluginRequest(request, resolveRoot))
+  /*
+    ★ **两个 session 都要注册,缺一个是装不出来的。**
+
+    顶层的 `protocol.handle` 只挂在**默认 session**上;而插件宿主窗口跑在
+    `persist:plugin-host` 分区里(ElectronPluginRuntime 给它单独的 partition,
+    隔离插件的网络与存储)。分区 session 里没有这个处理器的话,
+    `loadURL('ncw-plugin://…')` 直接 `ERR_FAILED(-2)` —— 没有更多解释,
+    页面一个字节都到不了,而这个错误和「协议根本没注册」在表现上完全一样。
+
+    `session.fromPartition` 在窗口创建之前就可以调,session 对象会复用。
+    `registerSchemesAsPrivileged` 是全局的,不受影响。
+  */
+  const handler = (request: Request): Promise<Response> => handlePluginRequest(request, resolveRoot)
+  protocol.handle(PLUGIN_SCHEME, handler)
+  session.fromPartition(PLUGIN_HOST_PARTITION).protocol.handle(PLUGIN_SCHEME, handler)
 }
 
 export async function handlePluginRequest(

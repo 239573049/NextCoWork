@@ -13,6 +13,7 @@
   "source": "src/extension.ts",
   "l10n": "./l10n",
   "activationEvents": [
+    "onStartup",
     "onCommand:excalidraw.new",
     "onCustomEditor:excalidraw.editor"
   ],

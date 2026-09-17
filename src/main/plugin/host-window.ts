@@ -27,10 +27,10 @@ import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { join } from 'node:path'
 import type { PluginInvocation, PluginRequest, PluginResponse } from '../../shared/plugin/protocol'
 import type { PluginRuntime } from './manager'
-import { setPluginRootResolver } from './protocol'
+import { setPluginRootResolver, PLUGIN_HOST_PARTITION } from './protocol'
 
-/** 插件窗口用的独立分区 —— 与主窗口的存储完全隔离。 */
-const PARTITION = 'persist:plugin-host'
+/** 插件窗口用的独立分区 —— 与主窗口的存储完全隔离。值住在 `protocol.ts`。 */
+const PARTITION = PLUGIN_HOST_PARTITION
 
 /** preload 只暴露三件事:发请求、收反向调用、报告就绪。 */
 const CHANNEL_REQUEST = 'plugin:rpc'
