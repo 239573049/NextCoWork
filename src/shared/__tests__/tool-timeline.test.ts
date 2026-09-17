@@ -22,7 +22,10 @@ import {
  */
 
 let seq = 0
-function tool(name: string, status?: ToolCallState['status']): TimelineItem {
+function tool(
+  name: string,
+  status?: ToolCallState['status']
+): Extract<TimelineItem, { kind: 'tool' }> & { callId: string } {
   seq += 1
   const callId = `c${String(seq)}`
   toolTable[callId] = {
@@ -116,7 +119,7 @@ describe('groupConsecutiveTools', () => {
     expect(isCompletedToolGroup(groups[0]!, toolTable)).toBe(true)
     expect(isCompletedToolGroup(groups[1]!, toolTable)).toBe(false)
 
-    toolTable[running.callId!].status = 'ok'
+    toolTable[running.callId]!.status = 'ok'
     expect(groupConsecutiveTools([...completed, running], toolTable).map((group) => group.length)).toEqual([3])
   })
 
