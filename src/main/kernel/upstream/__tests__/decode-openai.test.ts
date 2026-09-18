@@ -124,6 +124,14 @@ describe('OpenAI Chat Completions decoding', () => {
     expect(output.at(-1)).toMatchObject({ stopReason: 'refusal' })
   })
 
+  it('drops stray content chunks sent after finish_reason instead of erroring', async () => {
+    const output = await collect(decodeOpenAIChat(events(
+      chunk({ content: '你好' }), chunk({}, 'stop'), chunk({ content: '多余的' }), '[DONE]'
+    )))
+    expect(accumulated(output).parts).toEqual([{ type: 'text', text: '你好' }])
+    expect(output.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+  })
+
   it('classifies in-stream provider errors', async () => {
     const output = await collect(decodeOpenAIChat(events({ error: { code: 'rate_limit_exceeded', message: 'slow down' } })))
     expect(output).toEqual([{ type: 'error', error: { code: 'rate_limit', message: 'slow down', retryable: true } }])

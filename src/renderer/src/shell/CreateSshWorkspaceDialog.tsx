@@ -7,7 +7,7 @@ import { Dialog } from '../components/ui/Dialog'
 import { IconButton } from '../components/ui/IconButton'
 import { TextInput } from '../components/ui/TextInput'
 import { useI18n } from '../i18n'
-import { browseConnection, cancelConnectionRequest, closeBrowse, connectForBrowse, connectionErrorKey, createSshWorkspace, listConnections, onConnectionsChanged } from '../services/connections'
+import { browseConnection, cancelConnectionRequest, closeBrowse, connectForBrowse, connectionErrorDetail, connectionErrorKey, createSshWorkspace, listConnections, onConnectionsChanged } from '../services/connections'
 import { useWindowStore } from '../stores/window'
 import { Spinner } from '../components/ui/Spinner'
 
@@ -21,15 +21,17 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
   const [allowed, setAllowed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  const [failureDetail, setFailureDetail] = useState<string | undefined>(undefined)
   const request = useRef<string | null>(null)
   const browseId = useRef<string | null>(null)
   const alive = useRef(true)
   const selectedRevision = profiles.find((profile) => profile.id === selected)?.revision
+  const reportFailure = (error: unknown): void => { setFailure(connectionErrorKey(error)); setFailureDetail(connectionErrorDetail(error)) }
   useEffect(() => {
     if (request.current) void cancelConnectionRequest(request.current).catch(() => {})
     if (browseId.current) void closeBrowse(browseId.current).catch(() => {})
     request.current = null; browseId.current = null
-    setDirectory(null); setPath(''); setAllowed(false); setBusy(false); setFailure(null)
+    setDirectory(null); setPath(''); setAllowed(false); setBusy(false); setFailure(null); setFailureDetail(undefined)
   }, [selected, selectedRevision])
   useEffect(() => {
     alive.current = true
@@ -38,7 +40,7 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
       const available = items.map((item) => item.profile).filter((profile) => profile.enabled)
       setProfiles(available)
       setSelected((current) => available.some((profile) => profile.id === current) ? current : available[0]?.id ?? '')
-    }).catch((error: unknown) => { if (alive.current) setFailure(connectionErrorKey(error)) }) }
+    }).catch((error: unknown) => { if (alive.current) reportFailure(error) }) }
     load()
     const off = onConnectionsChanged(load)
     return () => {
@@ -51,24 +53,24 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
     if (request.current) void cancelConnectionRequest(request.current).catch(() => {})
     const requestId = crypto.randomUUID()
     request.current = requestId
-    setBusy(true); setFailure(null)
+    setBusy(true); setFailure(null); setFailureDetail(undefined)
     try {
       const next = directory && destination !== undefined ? await browseConnection(directory.browseId, destination, requestId) : await connectForBrowse(selected, requestId, allowed)
       if (!alive.current || request.current !== requestId) { if (!directory) void closeBrowse(next.browseId).catch(() => {}); return }
       browseId.current = next.browseId
       setDirectory(next); setPath(next.path)
-    } catch (error) { if (alive.current && request.current === requestId) setFailure(connectionErrorKey(error)) }
+    } catch (error) { if (alive.current && request.current === requestId) reportFailure(error) }
     finally { if (request.current === requestId) { request.current = null; if (alive.current) setBusy(false) } }
   }
   const create = async (): Promise<void> => {
     if (!directory || busy) return
     const requestId = crypto.randomUUID()
     request.current = requestId
-    setBusy(true); setFailure(null)
+    setBusy(true); setFailure(null); setFailureDetail(undefined)
     try {
       const workspace = await createSshWorkspace(directory.browseId, directory.path, requestId)
       if (alive.current && request.current === requestId && await onCreated(workspace)) onClose()
-    } catch (error) { if (alive.current) setFailure(connectionErrorKey(error)) }
+    } catch (error) { if (alive.current) reportFailure(error) }
     finally { if (request.current === requestId) { request.current = null; if (alive.current) setBusy(false) } }
   }
   const entries = directory?.entries.filter((entry) => showHidden || !entry.name.startsWith('.')) ?? []
@@ -110,6 +112,7 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
         {directory.truncated && <p className="text-[12px] text-fg-muted">{t('ssh.truncated')}</p>}
       </>}
       {failure && <p role="alert" className="text-[12px] text-danger">{t(failure)}</p>}
+      {failureDetail && <p className="break-all font-mono text-[11px] text-fg-faint">{failureDetail}</p>}
     </div>
   </Dialog>
 }

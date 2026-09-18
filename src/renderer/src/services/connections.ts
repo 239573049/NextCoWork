@@ -23,3 +23,7 @@ export function connectionErrorKey(error: unknown): string {
   return error instanceof AgentErrorException && error.error.environmentCode
     ? `environment.error.${error.error.environmentCode}` : 'environment.error.connection-failed'
 }
+/** 底层 ssh 的原始诊断文本(stderr 尾部)。分类可能不准,留一条能看到真实原因的退路。 */
+export function connectionErrorDetail(error: unknown): string | undefined {
+  return error instanceof AgentErrorException ? error.error.environmentDetail : undefined
+}

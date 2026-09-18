@@ -51,10 +51,9 @@ export async function* decodeOpenAIChat(events: AsyncIterable<SseEvent>): AsyncG
       yield { type: 'message_start', model: string(data.model) ?? '<unknown>' }
     }
     const delta = record(choice.delta) ?? record(choice.message)
-    if (finish !== undefined && delta !== undefined && Object.keys(delta).length > 0) {
-      yield { type: 'error', error: malformedResponse('content after finish_reason') }
-      return
-    }
+    // Some relays keep streaming stray content after the finish_reason chunk (buffering races
+    // in their multiplexer); drop it rather than aborting an otherwise-complete response.
+    if (finish !== undefined && delta !== undefined && Object.keys(delta).length > 0) continue
     if (delta !== undefined) {
       const thinking = string(delta.reasoning_content)
       if (thinking !== undefined) {

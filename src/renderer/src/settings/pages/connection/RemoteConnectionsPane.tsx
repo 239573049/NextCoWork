@@ -9,7 +9,7 @@ import { Select } from '../../../components/ui/Select'
 import { TextInput } from '../../../components/ui/TextInput'
 import { useI18n } from '../../../i18n'
 import { Spinner } from '../../../components/ui/Spinner'
-import { cancelConnectionRequest, closeBrowse, connectForBrowse, connectionErrorKey, disconnectConnection, listConnections,
+import { cancelConnectionRequest, closeBrowse, connectForBrowse, connectionErrorDetail, connectionErrorKey, disconnectConnection, listConnections,
   onConnectionsChanged, onConnectionStatus, pickSshFile, removeConnection, saveConnection } from '../../../services/connections'
 
 export function RemoteConnectionsPane(): ReactNode {
@@ -20,18 +20,19 @@ export function RemoteConnectionsPane(): ReactNode {
   const [deleting, setDeleting] = useState<ConnectionProfile | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
+  const [failureDetail, setFailureDetail] = useState<string | undefined>(undefined)
   const requestRef = useRef<string | null>(null)
   useEffect(() => {
     let alive = true
-    const load = (): void => { void listConnections().then((next) => { if (alive) setItems(next) }).catch((error: unknown) => { if (alive) setFailure(connectionErrorKey(error)) }) }
+    const load = (): void => { void listConnections().then((next) => { if (alive) setItems(next) }).catch((error: unknown) => { if (alive) { setFailure(connectionErrorKey(error)); setFailureDetail(connectionErrorDetail(error)) } }) }
     load()
     const off = onConnectionsChanged(load)
     const offStatus = onConnectionStatus((status) => setItems((current) => current.map((item) => item.profile.id === status.connectionId ? { ...item, status } : item)))
     return () => { alive = false; off(); offStatus(); if (requestRef.current) void cancelConnectionRequest(requestRef.current).catch(() => {}) }
   }, [])
   const run = async (id: string, action: () => Promise<unknown>): Promise<void> => {
-    setBusy(id); setFailure(null)
-    try { await action() } catch (error) { setFailure(connectionErrorKey(error)) } finally { setBusy(null) }
+    setBusy(id); setFailure(null); setFailureDetail(undefined)
+    try { await action() } catch (error) { setFailure(connectionErrorKey(error)); setFailureDetail(connectionErrorDetail(error)) } finally { setBusy(null) }
   }
   const test = (): void => {
     if (!confirmTest) return
@@ -51,6 +52,7 @@ export function RemoteConnectionsPane(): ReactNode {
       <Button size="sm" icon={<Plus size={13} />} onClick={() => setEditing({ profile: null, hasPassword: false })}>{t('ssh.add')}</Button>
     </header>
     {failure && <p role="alert" className="text-[12px] text-danger">{t(failure)}</p>}
+    {failureDetail && <p className="break-all font-mono text-[11px] text-fg-faint">{failureDetail}</p>}
     <div className="divide-y divide-border">
       {items.length === 0 && <p className="py-8 text-center text-[13px] text-fg-faint">{t('ssh.empty')}</p>}
       {items.map(({ profile, status, hasPassword }) => <div key={profile.id} className="flex items-center gap-3 py-3">

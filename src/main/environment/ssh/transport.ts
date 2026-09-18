@@ -84,6 +84,18 @@ export function sshProcessEnvironment(overrides: NodeJS.ProcessEnv = {}, inherit
   return env
 }
 
+/**
+ * ssh 连接失败时,`result.code !== 0` 本身分不出「主机密钥被拒」「认证失败」「网络/超时」——
+ * 这三种原因过去全部落进同一个 `connection-failed`,UI 只能显示一句「无法连接服务器」,
+ * 真正的原因(ssh 自己的 stderr)从未展示给用户。OpenSSH 不本地化这些字符串,匹配英文原文是安全的。
+ */
+function classifyConnectFailure(stderr: string): 'host-key' | 'authentication' | 'connection-failed' {
+  if (/host key verification failed/i.test(stderr) || /REMOTE HOST IDENTIFICATION HAS CHANGED/.test(stderr)
+    || /no matching host key type found/i.test(stderr)) return 'host-key'
+  if (/permission denied/i.test(stderr)) return 'authentication'
+  return 'connection-failed'
+}
+
 export function sshExecutable(): string {
   const candidates = process.platform === 'win32'
     ? [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe'), join(process.env.ProgramFiles ?? 'C:\\Program Files', 'OpenSSH', 'ssh.exe')]
@@ -137,7 +149,7 @@ export class OpenSshTransport {
       ...this.baseArgs(), 'echo NextCoWork-SSH-Ready'], signal, 5 * 60_000)
     if (result.code !== 0 || !result.stdout.includes('NextCoWork-SSH-Ready')) {
       await this.close()
-      throw new EnvironmentError('connection-failed', result.stderr.slice(-2000))
+      throw new EnvironmentError(classifyConnectFailure(result.stderr), result.stderr.slice(-2000))
     }
   }
 
