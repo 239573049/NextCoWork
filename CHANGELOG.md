@@ -1,6 +1,18 @@
 ﻿# 更新日志
 
 
+## v2.0.1
+
+### 改动
+
+- **数据目录再收拢**：Chromium 的会话集（`Cache`/`Cookies`/`Local Storage`/`Network`/`Partitions` 等三十来个条目）从 profile 根层再收进一层 `chromium/` 子目录，根层只留 `Preferences`/`Local State`/`Crashpad` 这几样 Chromium 认路径认得死的东西（尤其 `Local State` 存着 cookie 加密密钥，跟着搬会连累 `Cookies` 解不了密）；首次启动做一次性迁移，「删除全部数据」同步更新事实源，失败会整体回滚而不留半搬状态
+
+### 修复
+
+- **插件宿主窗口销毁竞态**：dispose 时如果窗口已经 destroyed，此前会尝试再读一次 `webContents.id` 而失败；现在建窗那一刻就记下来
+- 插件休眠状态写入补上未捕获的 Promise rejection 兜底
+
+
 ## v2.0.0
 
 首个正式版本。此前 0.1.x 系列共 25 个迭代版本都是通向这里的过程，这一条汇总 NextCoWork 作为「编码型 Agent 桌面端」目前具备的完整能力面，并收录 v0.1.25 之后两块尚未发布过的新能力（浏览器自动化、改动审查）。
