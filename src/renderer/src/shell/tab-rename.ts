@@ -43,6 +43,9 @@ export function tabRenameTarget(tab: InnerTab): TabRenameTarget | null {
     case 'browser':
     case 'files':
       return { kind: 'local' }
+    case 'changes':
+      // 审查 tab 的标题是派生的(哪一轮),不给改名入口。
+      return null
   }
 }
 

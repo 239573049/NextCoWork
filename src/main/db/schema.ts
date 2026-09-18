@@ -907,6 +907,72 @@ ALTER TABLE workspaces ADD COLUMN owner TEXT NOT NULL DEFAULT 'local';
 CREATE INDEX workspaces_by_owner ON workspaces (owner, last_opened_at DESC);
 `
 
+/**
+ * 第 23 条:Agent 每一轮改动的文件快照 —— 支撑回复底部的「改动审查」卡、
+ * 右侧 diff 预览、以及**跨重启**的撤销/恢复。
+ *
+ * 两张表,一个是「轮」一个是「文件」:
+ *
+ * - `file_change_sets`:一轮(顶层 run)一行。`state` 是**整轮原子**的撤销态
+ *   (applied / reverted)—— 模型里不存在「三个文件撤了两个」的中间态,把它放
+ *   set 级一行,卡片的撤销/恢复按钮读它写它都在一处,杜绝 per-file 列漂移。
+ *   `run_id` 存的是**顶层** runId:子代理在自己的 child run 下改的文件也 roll-up
+ *   到发起它的父 run,好让 renderer 用 `messageRuns[messageId]` 一次查全。
+ *
+ * - `file_snapshots`:一轮里每个被改文件一行,主键 `(run_id, file_path)` ——
+ *   同一轮多次改同一文件时**首个 before 与最后一个 after** 合并成一行(采集器
+ *   保证,见 `change-recorder.ts`)。`source_run_id` 留真正写它的 run(可能是子 run)。
+ *   `abs_path` 给内核 `host.fs` 用,`file_path`(工作区相对)给撤销回写的
+ *   `workspace:*` IPC 用 —— 两条路径在采集时一次算好,撤销时不重算。
+ *   `before_hash`/`after_hash` 让「撤销前比对磁盘现状」不必先把全文读回内存。
+ *   `oversize=1`(单文件 > 1 MiB)时内容存 NULL、只留 hash+行计数,禁 diff/undo;
+ *   `in_workspace=0`(改到工作区外的文件)同样禁 undo —— IPC 的 checkedPath 会拒。
+ *
+ * 级联:`file_change_sets.session_id` → sessions ON DELETE CASCADE,
+ * `file_snapshots.run_id` → file_change_sets ON DELETE CASCADE。删会话 / 清历史
+ * 时两张表随之清空(FK 前提是 `PRAGMA foreign_keys=ON`,见本文件头与 index.ts)。
+ */
+const V23_FILE_CHANGES = `
+CREATE TABLE file_change_sets (
+  run_id       TEXT PRIMARY KEY,
+  session_id   TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL,
+  -- 'applied' | 'reverted' —— 整轮原子撤销态
+  state        TEXT NOT NULL DEFAULT 'applied',
+  file_count   INTEGER NOT NULL DEFAULT 0,
+  additions    INTEGER NOT NULL DEFAULT 0,
+  deletions    INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+-- 会话侧「这条会话有哪些轮改过文件」的列表查询
+CREATE INDEX file_change_sets_by_session ON file_change_sets (session_id);
+
+CREATE TABLE file_snapshots (
+  run_id         TEXT NOT NULL REFERENCES file_change_sets (run_id) ON DELETE CASCADE,
+  file_path      TEXT NOT NULL,
+  -- 真正写它的 run(可能是子代理的 child run);run_id 存的是顶层 root
+  source_run_id  TEXT NOT NULL,
+  -- 解析后的绝对路径,内核 host.fs 读写用
+  abs_path       TEXT NOT NULL,
+  -- 'created' | 'modified' | (预留 'deleted')
+  change_kind    TEXT NOT NULL,
+  -- created 或 oversize 时为 NULL
+  before_content TEXT,
+  after_content  TEXT,
+  before_hash    TEXT,
+  after_hash     TEXT NOT NULL,
+  additions      INTEGER NOT NULL DEFAULT 0,
+  deletions      INTEGER NOT NULL DEFAULT 0,
+  -- 1 = 单文件超 1 MiB,内容存 NULL,禁 diff/undo
+  oversize       INTEGER NOT NULL DEFAULT 0,
+  -- 0 = 改到了工作区外的文件,禁 undo
+  in_workspace   INTEGER NOT NULL DEFAULT 1,
+  created_at     INTEGER NOT NULL,
+  PRIMARY KEY (run_id, file_path)
+);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -932,4 +998,5 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 20, name: 'usage-daily', sql: V20_USAGE_DAILY }
   ,{ version: 21, name: 'import-scan-cache', sql: V21_IMPORT_SCAN_CACHE }
   ,{ version: 22, name: 'config-profiles', sql: V22_CONFIG_PROFILES }
+  ,{ version: 23, name: 'file-changes', sql: V23_FILE_CHANGES }
 ]

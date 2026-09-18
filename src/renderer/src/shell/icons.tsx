@@ -17,6 +17,7 @@ import {
   Eye,
   File,
   Files,
+  FileDiff,
   Folder,
   GitBranch,
   Image as ImageIcon,
@@ -84,6 +85,8 @@ export const INNER_TAB_ICON: Record<InnerTabKind, LucideIcon> = {
     **这是有意偏离参考的一处**,不是没看图。
   */
   files: Files,
+  // 改动审查:带 +/− 的文档字形,正好是「这个 Tab 是一轮改动的 diff」。
+  changes: FileDiff,
   // 插件接管的自定义编辑器。用拼图块而不是让插件给图标:Tab 条上那个字形是
   // 用户判断「这个 Tab 是谁提供的」的地方。
   custom: Puzzle

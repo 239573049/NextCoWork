@@ -965,3 +965,47 @@ describe('PluginManager · allowedCommands 接进参数门', () => {
     expect(approve).not.toHaveBeenCalled()
   })
 })
+
+describe('PluginManager · 宿主崩溃后自愈', () => {
+  it('★ 插件宿主崩过之后再点命令会重新 spawn,不再永远报 host is not running', async () => {
+    const spawned: string[] = []
+    let alive = false
+    const runtime = {
+      spawn: async (p: { id: string }) => { spawned.push(p.id); alive = true },
+      invoke: async () => ({}),
+      dispose: () => { alive = false },
+      disposeAll: () => {},
+      // 宿主是否还活着由这个开关模拟;崩溃 = 置 false 但 manager 状态仍停在 active
+      isRunning: () => alive
+    }
+    const { manager } = await makeManager({ permissions: [] }, { runtime })
+    await manager.setEnabled('acme.demo', true)
+
+    await manager.runCommand('acme.demo', 'demo.hello') // 首次:spawn 一次
+    expect(spawned).toEqual(['acme.demo'])
+    expect(manager.catalog().plugins[0]?.status).toBe('active')
+
+    // 模拟渲染进程崩溃:窗口没了,但 render-process-gone 不改 manager 状态
+    alive = false
+
+    // 再点命令:wake 发现 isRunning() 为 false,应重新 spawn,而不是拿死窗口去 invoke
+    await manager.runCommand('acme.demo', 'demo.hello')
+    expect(spawned).toEqual(['acme.demo', 'acme.demo'])
+  })
+
+  it('宿主还活着时不重复 spawn', async () => {
+    const spawned: string[] = []
+    const runtime = {
+      spawn: async (p: { id: string }) => { spawned.push(p.id) },
+      invoke: async () => ({}),
+      dispose: () => {},
+      disposeAll: () => {},
+      isRunning: () => true
+    }
+    const { manager } = await makeManager({ permissions: [] }, { runtime })
+    await manager.setEnabled('acme.demo', true)
+    await manager.runCommand('acme.demo', 'demo.hello')
+    await manager.runCommand('acme.demo', 'demo.hello')
+    expect(spawned).toEqual(['acme.demo']) // 活着 → 只 spawn 一次
+  })
+})

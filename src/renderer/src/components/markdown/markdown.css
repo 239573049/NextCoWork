@@ -65,7 +65,7 @@
 .agent-markdown hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--color-border); }
 .agent-markdown a { color: var(--color-accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .agent-markdown :is(a, button, [tabindex]):focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; border-radius: 3px; }
-.agent-markdown :not(pre) > code { padding: 0.12em 0.35em; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-tint); font: 0.9em/1.6 var(--font-mono); white-space: break-spaces; }
+.agent-markdown :not(pre) > code { padding: 0.12em 0.35em; border-radius: 4px; background: var(--color-tint); font: 0.9em/1.6 var(--font-mono); white-space: break-spaces; }
 .markdown-blocked-link { color: var(--color-fg-muted); text-decoration: underline dotted; text-underline-offset: 3px; }
 .markdown-link-error { margin-left: 0.5em; color: var(--color-danger); font-size: 12px; }
 

@@ -26,6 +26,7 @@ import type { ConnectionProfile } from '../../shared/domain/environment'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../../shared/domain/scheduled'
 import { normalizeScheduledTaskInput, nextScheduledOccurrence } from '../../shared/domain/scheduled'
 import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
+import type { ChangeSetState, ReviewChangeSet, ReviewFileDiff } from '../../shared/domain/review'
 import type {
   UsageActivityStats,
   UsageAttemptRecord,
@@ -454,6 +455,33 @@ export const store = {
   },
   setRunRecord(id: string, sessionId: string, status: string, startedAt: number, endedAt?: number): void {
     repo.setRunRecord(id, sessionId, status, startedAt, endedAt)
+  },
+
+  // ── 改动快照(审查卡 / 撤销·恢复,schema 第 23 条) ──
+  saveFileChangeSet(input: {
+    rootRunId: string
+    sourceRunId: string
+    sessionId: string
+    workspaceId: string
+    changes: readonly repo.FileChangeInput[]
+    at: number
+  }): void {
+    repo.saveFileChangeSet(input)
+  },
+  getFileChangeSet(runId: string): ReviewChangeSet | undefined {
+    return repo.getFileChangeSet(runId)
+  },
+  getFileSnapshotDiff(runId: string, path: string): ReviewFileDiff | undefined {
+    return repo.getFileSnapshotDiff(runId, path)
+  },
+  listFileSnapshots(runId: string): repo.FileSnapshotRecord[] {
+    return repo.listFileSnapshots(runId)
+  },
+  getFileChangeSetState(runId: string): ChangeSetState | undefined {
+    return repo.getFileChangeSetState(runId)
+  },
+  setChangeSetState(runId: string, state: ChangeSetState, at: number): void {
+    repo.setChangeSetState(runId, state, at)
   },
 
   // ── 外部来源导入(schema 第 16 条) ──

@@ -62,6 +62,9 @@ export interface TabInit {
   /** 自定义编辑器的身份 —— 哪个插件的哪一个 viewType */
   viewType?: string
   pluginId?: string
+  /** 给 changes(改动审查)用:定位到哪一轮 run 的改动集 */
+  runId?: string
+  sessionId?: string
 }
 
 /**
@@ -124,6 +127,14 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
         pane,
         title: init.title ?? translate('tab.preview'),
         ref: { viewType: init.viewType ?? '', pluginId: init.pluginId ?? '', path }
+      }
+    case 'changes':
+      return {
+        id,
+        kind,
+        pane,
+        title: init.title ?? translate('tab.changes'),
+        ref: { runId: init.runId ?? '', sessionId: init.sessionId ?? '' }
       }
   }
 }

@@ -71,7 +71,7 @@ import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
 import { getEnvironments } from '../runtime'
-import { getTools, installChildRunLauncher, setCredentialChangeListener, setSessionChangeListener } from '../runtime'
+import { getTools, installChildRunLauncher, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
@@ -170,6 +170,7 @@ import {
   updateWorkspace
 } from './workspace'
 import { listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
+import { getReviewChangeSet, getReviewFileDiff, precheckReviewUndo, redoReviewChangeSet, undoReviewChangeSet } from './review'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
 import { compactContext, listContextCheckpoints, previewContext, updateContextCheckpoint } from './context'
 import {
@@ -307,6 +308,11 @@ const handlers: HandlerMap = {
   'workspace:mutateFile': (req) => mutateWorkspaceFile(req),
   'workspace:revealFile': (req) => revealWorkspaceFile(req),
   'workspace:listRecovery': (req) => listWorkspaceRecovery(req),
+  'review:getChangeSet': (req) => getReviewChangeSet(req),
+  'review:getFileDiff': (req) => getReviewFileDiff(req),
+  'review:precheckUndo': (req) => precheckReviewUndo(req),
+  'review:undo': (req) => undoReviewChangeSet(req),
+  'review:redo': (req) => redoReviewChangeSet(req),
   'browser:list': ({ workspaceId }) => browserManager.list(workspaceId),
   'browser:open': ({ workspaceId, url, title, profileId, clientTabId }) => {
     assertLocalBrowserWorkspace(workspaceId)
@@ -765,6 +771,9 @@ export function registerIpc(): void {
   installChildRunLauncher(startChildRun)
   setSessionChangeListener((change) => {
     windows.emitToAll('sessions:changed', change)
+  })
+  setReviewChangeListener((change) => {
+    windows.emitToAll('review:changed', change)
   })
   // 刷新 token 之后（含刷失败标记 needsReauth）把新的登录态推给设置页
   setCredentialChangeListener(announceCredentialRef)

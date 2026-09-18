@@ -25,6 +25,7 @@ import type { ToolContext, ToolRegistration } from '../registry'
 import { compileGlob, normalizeGlobPath } from './glob-match'
 import { humanSize, looksBinary, relOf, resolvePath } from './paths'
 import { markRead, wasRead } from './read-tracker'
+import { recordChange } from './change-recorder'
 
 /** 单次读取的上限。超过就让模型改用 `Grep`,或 `Bash` 里的 `sed -n`。 */
 const MAX_READ_BYTES = 8 * 1024 * 1024
@@ -205,10 +206,21 @@ export const writeTool: ToolRegistration = defineTool({
       if (!wasRead(ctx.runId, r.abs)) return toolFail(mustReadFirst(rel))
     }
 
+    // ★ 覆盖前补读旧内容 —— 采集撤销所需的 before。新建文件 before = null。
+    //   (Edit 天然读了 before,Write 原本不读,这里为审查/撤销补上。)
+    const before = existed ? await fs.readFile(r.abs) : null
+
     await fs.mkdirp(r.abs)
     await fs.writeFile(r.abs, input.content)
     // 写完就等于知道当下内容,后续的 Edit 不该再被拦
     markRead(ctx.runId, r.abs)
+    recordChange(ctx.runId, {
+      abs: r.abs,
+      relPath: rel,
+      before,
+      after: input.content,
+      inWorkspace: !r.outside
+    })
 
     const lines = input.content === '' ? 0 : input.content.split('\n').length
     return toolOk(
@@ -298,6 +310,7 @@ export const editTool: ToolRegistration = defineTool({
         : before.replace(input.old_string, input.new_string)
 
     await fs.writeFile(r.abs, after)
+    recordChange(ctx.runId, { abs: r.abs, relPath: rel, before, after, inWorkspace: !r.outside })
     return toolOk(`Edited ${rel}: replaced ${String(input.replace_all === true ? count : 1)} occurrence(s).`)
   }
 })

@@ -5,7 +5,11 @@
  * 为什么自己写而不引库:仓库没有 diff 依赖(见 package.json),而 Edit 的两段
  * 文本都是**一次替换的片段**,通常几行到几十行,O(n·m) 的 LCS 完全够用,
  * 不值得为它拉一个 diff-match-patch 进来。纯函数,便于单测。
+ *
+ * LCS 本体抽到了 `shared/domain/line-diff.ts`,主进程封包改动集算 `+X −Y` 时复用同一份。
  */
+
+import { lcsOps } from '../../../../shared/domain/line-diff'
 
 export type DiffRowType = 'context' | 'del' | 'add'
 
@@ -18,45 +22,6 @@ export interface DiffSpan {
 export interface DiffRow {
   type: DiffRowType
   spans: DiffSpan[]
-}
-
-/** 通用 LCS 回溯:返回对齐后的操作序列。 */
-type Op<T> = { tag: 'eq' | 'del' | 'add'; a?: T; b?: T }
-
-function lcsOps<T>(a: T[], b: T[], eq: (x: T, y: T) => boolean): Op<T>[] {
-  const n = a.length
-  const m = b.length
-  // dp[i][j] = a[i..] 与 b[j..] 的最长公共子序列长度
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
-  for (let i = n - 1; i >= 0; i--) {
-    const di = dp[i]!
-    const di1 = dp[i + 1]!
-    const ai = a[i]!
-    for (let j = m - 1; j >= 0; j--) {
-      di[j] = eq(ai, b[j]!) ? di1[j + 1]! + 1 : Math.max(di1[j]!, di[j + 1]!)
-    }
-  }
-  const ops: Op<T>[] = []
-  let i = 0
-  let j = 0
-  while (i < n && j < m) {
-    const ai = a[i]!
-    const bj = b[j]!
-    if (eq(ai, bj)) {
-      ops.push({ tag: 'eq', a: ai, b: bj })
-      i++
-      j++
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      ops.push({ tag: 'del', a: ai })
-      i++
-    } else {
-      ops.push({ tag: 'add', b: bj })
-      j++
-    }
-  }
-  while (i < n) ops.push({ tag: 'del', a: a[i++]! })
-  while (j < m) ops.push({ tag: 'add', b: b[j++]! })
-  return ops
 }
 
 /**

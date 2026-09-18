@@ -38,6 +38,7 @@ import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/per
 import { interactions, type InteractionDraft } from './kernel/interaction-gate'
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
+import { takeChanges } from './kernel/tool/builtin/change-recorder'
 import type { Capacity, SlotRefusal } from './kernel/subagent-queue'
 import { QUEUE_MAX_WAIT_MS, SubagentQueue } from './kernel/subagent-queue'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
@@ -180,6 +181,9 @@ let mcpOnChange: ((id: string) => void) | null = null
  * 广播一样用一个零 Electron 的注入回调，避免 runtime 反向依赖窗口模块。
  */
 let sessionOnChange: ((change: SessionChange) => void) | null = null
+
+/** 一轮改动集封包完成后的广播口（由 ipc 注入，纯 Node 测试中 no-op）。 */
+let reviewOnChange: ((change: { runId: string; sessionId: string; workspaceId: string }) => void) | null = null
 
 /**
  * 某条凭证被刷新、或者被标成需要重新登录了。
@@ -869,6 +873,11 @@ export function setMcpChangeListener(fn: (id: string) => void): void {
 /** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。 */
 export function setSessionChangeListener(fn: NonNullable<typeof sessionOnChange>): void {
   sessionOnChange = fn
+}
+
+/** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。 */
+export function setReviewChangeListener(fn: NonNullable<typeof reviewOnChange>): void {
+  reviewOnChange = fn
 }
 
 /** 同上。刷新 token 改写凭证后，把新的登录态推给可能正开着设置页的窗口。 */
@@ -2573,6 +2582,46 @@ export async function runAgent(
       const latest = store.getHistory(req.sessionId)
       store.setHistory(req.sessionId, mergeGoalStatusHistory(mergeLatestSubagentReceipts(agentSession.history, latest), latest))
       store.setRunRecord(req.runId, req.sessionId, handle.status, startedAt, getHost().clock.now())
+
+      /*
+        ★ 封包本轮的文件改动 —— 采集器读即清。**不看 handle.status**:中断/出错时
+        磁盘上已发生的写入就是既成事实,照样封,好让审查卡也能撤销「跑到一半」的改动。
+        子代理(child run)的改动 roll-up 到顶层 root run:阻塞型子代理先于父收尾,
+        此时父 handle 仍在注册表里,climb 得到父的 runId 与**父的会话**,卡片据此
+        用 `messageRuns[messageId]` 一次查全(见 `db/schema.ts` 第 23 条)。
+      */
+      const changes = takeChanges(req.runId)
+      if (changes.length > 0) {
+        let rootRunId = req.runId
+        let rootSessionId = req.sessionId
+        let cursor = req.parentRunId
+        const seen = new Set<string>([req.runId])
+        while (cursor !== undefined && !seen.has(cursor)) {
+          const parent = runs.get(cursor)
+          if (parent === undefined) break
+          seen.add(cursor)
+          rootRunId = parent.runId
+          rootSessionId = parent.sessionId
+          cursor = parent.parentRunId
+        }
+        store.saveFileChangeSet({
+          rootRunId,
+          sourceRunId: req.runId,
+          sessionId: rootSessionId,
+          workspaceId: req.workspaceId,
+          changes: changes.map((c) => ({
+            relPath: c.relPath,
+            absPath: c.abs,
+            before: c.before,
+            after: c.after,
+            changeKind: c.changeKind,
+            inWorkspace: c.inWorkspace
+          })),
+          at: getHost().clock.now()
+        })
+        // 落盘之后再广播,渲染层的审查卡/tab 收到才能拉到已存在的改动集(避开竞态)。
+        reviewOnChange?.({ runId: rootRunId, sessionId: rootSessionId, workspaceId: req.workspaceId })
+      }
     } catch (error) {
       getHost().logger.warn(`[runtime] run ${req.runId} 的收尾写入没有落盘:${error instanceof Error ? error.message : String(error)}`)
     }
@@ -2597,6 +2646,7 @@ export function resetRuntimeForTest(): void {
   mcp = null
   mcpOnChange = null
   sessionOnChange = null
+  reviewOnChange = null
   childRunLauncher = null
   childSeq = 0
   // ★ 必须清:留着的话,等待者和它那个 interval 会跨用例泄漏 ——

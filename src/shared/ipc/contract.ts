@@ -21,6 +21,7 @@ import type { RunRequest, SessionMode } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
 import type { DirListing, FileSuggestion } from '../domain/file-tree'
+import type { ReviewChangeSet, ReviewFileDiff, ReviewMutationResult } from '../domain/review'
 import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
 import type { ProxyPasswordInfo } from '../domain/proxy'
 import type { PluginPermission } from '../plugin/permission'
@@ -347,6 +348,13 @@ export interface IpcInvokeMap {
   'workspace:mutateFile': { req: WorkspaceFileMutationRequest; res: WorkspaceFileMutationResult }
   'workspace:revealFile': { req: WorkspaceFileRequest; res: void | { remote: true; path: string; parent: string; name: string } }
   'workspace:listRecovery': { req: { workspaceId: string }; res: WorkspaceRecoveryListing }
+
+  // ── 改动审查(回复底部审查卡 / 右侧 changes tab / 撤销·恢复,schema 第 23 条)──
+  'review:getChangeSet': { req: { runId: string }; res: ReviewChangeSet | null }
+  'review:getFileDiff': { req: { runId: string; path: string }; res: ReviewFileDiff | null }
+  'review:precheckUndo': { req: { runId: string }; res: { conflicts: string[] } }
+  'review:undo': { req: { runId: string; force?: boolean }; res: ReviewMutationResult }
+  'review:redo': { req: { runId: string }; res: ReviewMutationResult }
 
   // ── 浏览器工作台 ──
   'browser:list': { req: { workspaceId: string }; res: BrowserTab[] }
@@ -1023,6 +1031,8 @@ export interface IpcEventMap {
   'mcp:changed': { servers: McpServerStatus[] }
   'websearch:changed': { providers: SearchProviderStatus[] }
   'sessions:changed': SessionChange
+  /** 一轮的文件改动集封包落盘完成(或被撤销/恢复)—— 卡片与审查 tab 据此重拉。 */
+  'review:changed': { runId: string; sessionId: string; workspaceId: string }
   'browser:changed': BrowserChange
   'browser:cua': BrowserCuaEvent
   'browser:profilesChanged': BrowserProfile[]
@@ -1171,6 +1181,11 @@ export const INVOKE_CHANNELS = {
   'workspace:mutateFile': 1,
   'workspace:revealFile': 1,
   'workspace:listRecovery': 1,
+  'review:getChangeSet': 1,
+  'review:getFileDiff': 1,
+  'review:precheckUndo': 1,
+  'review:undo': 1,
+  'review:redo': 1,
   'browser:list': 1,
   'browser:open': 1,
   'browser:navigate': 1,
@@ -1409,6 +1424,7 @@ export const EVENT_CHANNELS = {
   'provider:authChanged': 1,
   'websearch:changed': 1,
   'sessions:changed': 1,
+  'review:changed': 1,
   'browser:changed': 1,
   'browser:cua': 1,
   'browser:profilesChanged': 1,

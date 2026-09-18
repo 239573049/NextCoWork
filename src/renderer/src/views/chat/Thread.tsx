@@ -41,6 +41,7 @@ import { GoalStatusCard } from './GoalStatusCard'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
 import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, unanchoredCheckpoints, type AssistantBlock, type ThreadRow } from './thread-content'
 import { TurnActions, type TurnPrompt } from './TurnActions'
+import { TurnChangeReview } from './TurnChangeReview'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
 
 export const Thread = memo(function Thread({
@@ -284,6 +285,9 @@ export const Thread = memo(function Thread({
                 : (id, text) => onEditMessage(id, text, true)}
               onDeleteTurn={readOnly ? undefined : onDeleteTurn}
               readOnly={readOnly}
+              runId={row.runId}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
             />
           )
         })}
@@ -688,7 +692,10 @@ function AssistantTurn({
   usage,
   onRegenerate,
   onDeleteTurn,
-  readOnly
+  readOnly,
+  runId,
+  workspaceId,
+  sessionId
 }: {
   blocks: readonly AssistantBlock[]
   tools: TranscriptState['tools']
@@ -706,6 +713,10 @@ function AssistantTurn({
   onRegenerate?: (id: string, text: string) => Promise<void>
   onDeleteTurn?: (userMessageId: string) => Promise<void>
   readOnly: boolean
+  /** 这一轮的顶层 runId,用来拉「本轮改动集」；老转录(v12 前)为 undefined。 */
+  runId?: string
+  workspaceId?: string
+  sessionId?: string
 }): ReactNode {
   const { t } = useI18n()
   const [lastKnownStatus, setLastKnownStatus] = useState(runStatus ?? 'done')
@@ -771,6 +782,8 @@ function AssistantTurn({
     <div className="group/turn flex flex-col gap-2.5" data-testid="assistant-turn">
       <TurnHeader model={model} providerName={providerName} />
       {body}
+      {/* 本轮改动审查卡 —— 改过文件才渲染,见 TurnChangeReview 内部。 */}
+      <TurnChangeReview runId={runId} workspaceId={workspaceId} sessionId={sessionId} readOnly={readOnly} active={isLast && running} />
       {/*
         操作条要等这一轮跑完再出现。流式过程中「复制」拿到的是半句话,
         「重新生成」更是要先中断当前 run —— 那是另一件事,输入框旁边的停止键管它。

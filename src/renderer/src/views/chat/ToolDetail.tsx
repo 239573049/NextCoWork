@@ -15,7 +15,7 @@ import type { ToolOutput } from "../../../../shared/agent/message";
 import type { ToolShape } from "../../../../shared/domain/tool-presenter";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
-import { computeDiff, type DiffRow } from "./diff";
+import { DiffBlock } from "./DiffView";
 import { CardRenderer } from "./CardRenderer";
 
 // ─────────────────────────── 原语 ───────────────────────────
@@ -54,100 +54,7 @@ export function Labeled({
   );
 }
 
-/**
- * 详情区里的一个 diff 行。
- *
- * ★ **正文一律用常规前景色,增删只靠底色区分。** 一开始把整行文字也染成
- * accent/danger,结果绿字压绿底、红字压红底 —— 代码本身反而读不动了。
- * 颜色的活儿交给行底色和行首的 `+/-`,正文只管好好显示代码。
- *
- * 词级高亮只会出现在「同一行里只改了一部分」的行上(见 diff.ts 的饱和护栏),
- * 所以它一出现就一定是有信息量的。
- */
-function DiffLine({ row }: { row: DiffRow }): ReactNode {
-  const mark = row.type === "add" ? "+" : row.type === "del" ? "-" : " ";
-  return (
-    <div
-      className={cn(
-        "flex px-2.5",
-        row.type === "add" && "bg-accent/10",
-        row.type === "del" && "bg-danger/8",
-      )}
-    >
-      {/* select-none:复制 diff 时不把 +/- 前缀也带上 */}
-      <span
-        className={cn(
-          "mr-2 shrink-0 select-none",
-          row.type === "add"
-            ? "text-accent"
-            : row.type === "del"
-              ? "text-danger"
-              : "text-fg-faint",
-        )}
-      >
-        {mark}
-      </span>
-      {/* pre-wrap + flex 列:长行折行而不是横向溢出,折下来的部分自然缩进对齐 */}
-      <span className="min-w-0 flex-1 whitespace-pre-wrap text-fg-muted">
-        {row.spans.map((s, i) =>
-          s.hi ? (
-            <span
-              key={i}
-              className={cn(
-                "rounded-[2px]",
-                row.type === "add"
-                  ? "bg-accent/25 text-accent"
-                  : "bg-danger/20 text-danger",
-              )}
-            >
-              {s.text}
-            </span>
-          ) : (
-            <span key={i}>{s.text}</span>
-          ),
-        )}
-      </span>
-    </div>
-  );
-}
-
-/**
- * Edit 的改动块 —— 把 old_string / new_string 渲染成一份统一 diff,改动的行
- * 逐词高亮。取代了原先并排的「替换前 / 替换后」两个 <pre>:并排要用户自己
- * 用眼睛对齐找差异,统一 diff 直接把差异标出来。
- */
-function DiffBlock({
-  oldStr,
-  newStr,
-  maxRows = 24,
-}: {
-  oldStr: string;
-  newStr: string;
-  maxRows?: number;
-}): ReactNode {
-  const { t } = useI18n();
-  const all = computeDiff(oldStr, newStr);
-  const rows = all.slice(0, maxRows);
-  const omitted = all.length - rows.length;
-  return (
-    <div className="mt-1.5 first:mt-0">
-      <p className="mb-0.5 text-[11px] text-fg-faint">
-        {t("chat.tool.change")}
-      </p>
-      <div className="selectable scroll-thin max-h-72 overflow-auto rounded-[7px] bg-canvas py-1 font-mono text-[11.5px] leading-relaxed">
-        {rows.map((row, i) => (
-          <DiffLine key={i} row={row} />
-        ))}
-        {omitted > 0 && (
-          <div className="px-2.5 pt-0.5 text-fg-faint">
-            {t("chat.tool.linesOmitted", { count: omitted }).trim()}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
+/** 未知形状的入参/结果:退回通用 JSON 呈现(对任何 MCP 工具都永远正确)。 */
 export function stringify(v: unknown): string {
   if (typeof v === "string") return v;
   try {
@@ -276,7 +183,7 @@ function MutateDetail({ input, output, isError }: DetailProps): ReactNode {
       {path !== "" && <PathLine path={path} />}
       {oldStr !== "" && newStr !== "" ? (
         // 两侧都在:统一 diff,词级高亮改动
-        <DiffBlock oldStr={oldStr} newStr={newStr} />
+        <DiffBlock oldStr={oldStr} newStr={newStr} label={t("chat.tool.change")} />
       ) : (
         <>
           {oldStr !== "" && (

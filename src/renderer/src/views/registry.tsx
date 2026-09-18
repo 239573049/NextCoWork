@@ -70,6 +70,9 @@ const ScheduledFeature = lazy(() => import("./scheduled/ScheduledFeature").then(
 // Git 面板只引 services + ui 组件,自身很轻;lazy 是为了让它和它的 diff 渲染
 // 不占首屏 —— 和 ScheduledFeature 一样从 FeatureView 这个唯一边界进。
 const GitFeature = lazy(() => import("./git/GitFeature").then((m) => ({ default: m.GitFeature })));
+// 「改动审查」tab —— 只引 DiffView(轻) + review service,lazy 是为了跟着聊天链一起懒加载,
+// 不占首屏。
+const ChangeReviewTab = lazy(() => import("./chat/ChangeReviewTab").then((m) => ({ default: m.ChangeReviewTab })));
 
 /**
  * chunk 还在路上时占位。**和面板同色的空块,不要 spinner** ——
@@ -132,6 +135,9 @@ function renderInner(
     case "files":
       // key 挂子树根:换根等于换一棵树,展开状态和缓存都必须重来
       return <FilesTab key={tab.ref.path} tab={tab} workspace={workspace} />;
+    case "changes":
+      // key 挂 runId:同一个 tab 换轮次时重建,重新拉那一轮的改动集
+      return <ChangeReviewTab key={tab.ref.runId} tab={tab} workspace={workspace} />;
     case "custom":
       /*
         插件接管的自定义编辑器。key 挂「插件 + viewType + 文件」三样:
@@ -192,5 +198,6 @@ export const INNER_VIEW_KINDS: Record<InnerTabKind, true> = {
   browser: true,
   preview: true,
   files: true,
+  changes: true,
   custom: true,
 };

@@ -16,7 +16,16 @@
  * 这一条不在 `.app-drag` 区里,所以不需要逐个 `.app-no-drag` ——
  * 但拖动重排用的是同一个 hook,行为和外层一致。
  */
-import { ChevronDown, Pencil, Plus, X } from "lucide-react";
+import {
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  ChevronDown,
+  ListX,
+  Pencil,
+  Plus,
+  SquareX,
+  X,
+} from "lucide-react";
 import {
   Fragment,
   useEffect,
@@ -123,6 +132,14 @@ export function InnerTabBar({
   const [contextMenu, setContextMenu] = useState<{ tabId: string; position: ContextMenuPosition } | null>(null);
   const contextTab = tabs.find((tab) => tab.id === contextMenu?.tabId);
   const canRename = (tab: InnerTab): boolean => onRename !== undefined && tabRenameTarget(tab) !== null;
+  /*
+    ★ 批量关闭复用**同一个** `onClose` 逐个关 —— 它已经带着 doc/preview 的保存确认、
+    Dock 清理,以及「主区最后一个对话不可关」那道护栏(见 stores/tabs.ts 的 closeDockTab)。
+    自己在这里另写一套关闭,那三样迟早会漏。
+  */
+  const closeMany = (targets: readonly InnerTab[]): void => {
+    for (const target of targets) onClose(target.id);
+  };
 
   useEffect(() => {
     const strip = stripRef.current;
@@ -234,7 +251,6 @@ export function InnerTabBar({
                 if (e.detail >= 2 && canRename(tab)) setEditingId(tab.id);
               }}
               onContextMenu={(event) => {
-                if (!canRename(tab)) return;
                 event.preventDefault();
                 setContextMenu({ tabId: tab.id, position: { x: event.clientX, y: event.clientY } });
               }}
@@ -358,25 +374,94 @@ export function InnerTabBar({
         ★ 每一条双击路径都配一个**键盘可达**的入口。双击是鼠标独有的动作,
         只给双击等于这个功能对键盘和辅助技术用户不存在。
       */}
-      {contextMenu !== null && contextTab !== undefined && (
-        <ContextMenu
-          position={contextMenu.position}
-          label={t("nav.tabContextMenu")}
-          onClose={() => setContextMenu(null)}
-        >
-          {(close) => (
-            <MenuItem
-              icon={<Pencil size={14} />}
-              onSelect={() => {
-                setEditingId(contextTab.id);
-                close();
-              }}
-            >
-              {t("nav.renameTab")}
-            </MenuItem>
-          )}
-        </ContextMenu>
-      )}
+      {contextMenu !== null && contextTab !== undefined && (() => {
+        // 这几条「关闭右侧 / 左侧」按**本条 Tab 的显示顺序**算,所以要拿到右键那颗
+        // 在条里的下标;条 = 一个 Dock 组,tabs 已经是这一组的顺序视图。
+        const idx = tabs.findIndex((tab) => tab.id === contextTab.id);
+        // 和右上角那颗 `×` 同一条判据:主区剩最后一个对话时不给关。
+        const closeSelfDisabled =
+          contextTab.kind === "chat" && paneOf(contextTab) === "main" && mainChatCount <= 1;
+        const others = tabs.filter((tab) => tab.id !== contextTab.id);
+        const toRight = idx < 0 ? [] : tabs.slice(idx + 1);
+        const toLeft = idx <= 0 ? [] : tabs.slice(0, idx);
+        return (
+          <ContextMenu
+            position={contextMenu.position}
+            label={t("nav.tabContextMenu")}
+            onClose={() => setContextMenu(null)}
+          >
+            {(close) => (
+              <>
+                {canRename(contextTab) && (
+                  <>
+                    <MenuItem
+                      icon={<Pencil size={14} />}
+                      onSelect={() => {
+                        setEditingId(contextTab.id);
+                        close();
+                      }}
+                    >
+                      {t("nav.renameTab")}
+                    </MenuItem>
+                    <MenuSeparator />
+                  </>
+                )}
+                <MenuItem
+                  icon={<X size={14} />}
+                  disabled={closeSelfDisabled}
+                  onSelect={() => {
+                    onClose(contextTab.id);
+                    close();
+                  }}
+                >
+                  {t("nav.closeThisTab")}
+                </MenuItem>
+                <MenuItem
+                  icon={<SquareX size={14} />}
+                  disabled={others.length === 0}
+                  onSelect={() => {
+                    closeMany(others);
+                    close();
+                  }}
+                >
+                  {t("nav.closeOtherTabs")}
+                </MenuItem>
+                <MenuItem
+                  icon={<ArrowRightToLine size={14} />}
+                  disabled={toRight.length === 0}
+                  onSelect={() => {
+                    closeMany(toRight);
+                    close();
+                  }}
+                >
+                  {t("nav.closeTabsToRight")}
+                </MenuItem>
+                <MenuItem
+                  icon={<ArrowLeftToLine size={14} />}
+                  disabled={toLeft.length === 0}
+                  onSelect={() => {
+                    closeMany(toLeft);
+                    close();
+                  }}
+                >
+                  {t("nav.closeTabsToLeft")}
+                </MenuItem>
+                <MenuSeparator />
+                <MenuItem
+                  icon={<ListX size={14} />}
+                  disabled={tabs.length === 0}
+                  onSelect={() => {
+                    closeMany(tabs);
+                    close();
+                  }}
+                >
+                  {t("nav.closeAllTabs")}
+                </MenuItem>
+              </>
+            )}
+          </ContextMenu>
+        );
+      })()}
     </div>
   );
 }

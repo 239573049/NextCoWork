@@ -35,6 +35,8 @@ import { isDefaultSessionTitle } from '../../shared/domain/session'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import { normalizeModeId } from '../../shared/domain/mode'
 import type { Workspace } from '../../shared/domain/workspace'
+import type { ChangeKind, ChangeSetState, ReviewChangeSet, ReviewFileDiff, ReviewFileEntry } from '../../shared/domain/review'
+import { countLineDiff } from '../../shared/domain/line-diff'
 import type { ScheduledRun, ScheduledTask } from '../../shared/domain/scheduled'
 import type { ConnectionProfile, EnvironmentRef } from '../../shared/domain/environment'
 import { normalizeEnvironmentRef } from '../../shared/domain/environment'
@@ -1215,6 +1217,215 @@ export function setRunRecord(id: string, sessionId: string, status: string, star
   ).run(id, sessionId, status, startedAt, endedAt ?? null)
 }
 
+/* ───────────────────────── 改动快照(审查卡 / 撤销·恢复) ───────────────────────── */
+
+/** 单文件超过这个字节数就不入库内容(禁 diff/undo),防一份大文件把两份全文塞进 SQLite。 */
+const SNAPSHOT_MAX_BYTES = 1024 * 1024
+
+const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex')
+
+/** 一个文件在采集侧的原始改动(runtime 从 change-recorder 的 PendingChange 映射而来)。 */
+export interface FileChangeInput {
+  relPath: string
+  absPath: string
+  before: string | null
+  after: string
+  changeKind: 'created' | 'modified'
+  inWorkspace: boolean
+}
+
+/** 撤销/恢复要用的完整快照行(含全文)。 */
+export interface FileSnapshotRecord {
+  path: string
+  absPath: string
+  changeKind: ChangeKind
+  before: string | null
+  after: string | null
+  beforeHash: string | null
+  afterHash: string
+  oversize: boolean
+  inWorkspace: boolean
+}
+
+/**
+ * 落盘一轮的文件改动集。**可叠加**:子代理的 child run 先收尾、把它的改动落到
+ * 顶层 rootRunId 下;父 run 后收尾时再叠加自己的 —— 同一文件在两个 run 都被改过时,
+ * **保留最早的 before、推进到最新的 after**(与 change-recorder 的轮内合并同义,
+ * 只是这里跨父子)。`created` 一旦置位不被后续 modify 翻转。
+ */
+export function saveFileChangeSet(input: {
+  rootRunId: string
+  sourceRunId: string
+  sessionId: string
+  workspaceId: string
+  changes: readonly FileChangeInput[]
+  at: number
+}): void {
+  if (input.changes.length === 0) return
+  tx(() => {
+    stmt(
+      `INSERT INTO file_change_sets (run_id, session_id, workspace_id, state, created_at, updated_at)
+       VALUES (?, ?, ?, 'applied', ?, ?)
+       ON CONFLICT (run_id) DO NOTHING`
+    ).run(input.rootRunId, input.sessionId, input.workspaceId, input.at, input.at)
+
+    for (const change of input.changes) {
+      const existing = stmt(
+        `SELECT before_content, before_hash, change_kind, oversize FROM file_snapshots WHERE run_id = ? AND file_path = ?`
+      ).get(input.rootRunId, change.relPath) as Record<string, unknown> | undefined
+
+      // 已有行:沿用它记的 before / change_kind(最早那次);新行:用本次采集的。
+      const before = existing !== undefined ? (existing['before_content'] as string | null) : change.before
+      const beforeHash =
+        existing !== undefined
+          ? (existing['before_hash'] as string | null)
+          : change.before === null
+            ? null
+            : sha256(change.before)
+      const changeKind = existing !== undefined ? String(existing['change_kind']) : change.changeKind
+      const priorOversize = existing !== undefined && Number(existing['oversize']) === 1
+
+      const after = change.after
+      const afterHash = sha256(after)
+      const oversize =
+        priorOversize ||
+        (before !== null && Buffer.byteLength(before, 'utf8') > SNAPSHOT_MAX_BYTES) ||
+        Buffer.byteLength(after, 'utf8') > SNAPSHOT_MAX_BYTES
+      // 超限的文件不做 O(n·m) 的行 diff(可能是几 MB),计数留 0。
+      const { additions, deletions } = oversize ? { additions: 0, deletions: 0 } : countLineDiff(before, after)
+
+      stmt(
+        `INSERT INTO file_snapshots
+           (run_id, file_path, source_run_id, abs_path, change_kind,
+            before_content, after_content, before_hash, after_hash,
+            additions, deletions, oversize, in_workspace, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (run_id, file_path) DO UPDATE SET
+           source_run_id  = excluded.source_run_id,
+           after_content  = excluded.after_content,
+           after_hash     = excluded.after_hash,
+           additions      = excluded.additions,
+           deletions      = excluded.deletions,
+           oversize       = excluded.oversize`
+      ).run(
+        input.rootRunId,
+        change.relPath,
+        input.sourceRunId,
+        change.absPath,
+        changeKind,
+        oversize ? null : before,
+        oversize ? null : after,
+        beforeHash,
+        afterHash,
+        additions,
+        deletions,
+        oversize ? 1 : 0,
+        change.inWorkspace ? 1 : 0,
+        input.at
+      )
+    }
+
+    // 集合级 +X −Y 与文件数从当前全部快照行重算(叠加后也对)。
+    const agg = stmt(
+      `SELECT COUNT(*) AS fc, COALESCE(SUM(additions), 0) AS a, COALESCE(SUM(deletions), 0) AS d
+       FROM file_snapshots WHERE run_id = ?`
+    ).get(input.rootRunId) as Record<string, unknown>
+    stmt(`UPDATE file_change_sets SET file_count = ?, additions = ?, deletions = ?, updated_at = ? WHERE run_id = ?`).run(
+      Number(agg['fc'] ?? 0),
+      Number(agg['a'] ?? 0),
+      Number(agg['d'] ?? 0),
+      input.at,
+      input.rootRunId
+    )
+  })
+}
+
+/** 一轮的改动集摘要(不含全文)—— 审查卡与右侧 tab 列表用。空集返回 undefined。 */
+export function getFileChangeSet(runId: string): ReviewChangeSet | undefined {
+  const set = stmt(
+    `SELECT run_id, session_id, workspace_id, state, file_count, additions, deletions
+     FROM file_change_sets WHERE run_id = ?`
+  ).get(runId) as Record<string, unknown> | undefined
+  if (set === undefined) return undefined
+  const files = stmt(
+    `SELECT file_path, change_kind, additions, deletions, oversize, in_workspace
+     FROM file_snapshots WHERE run_id = ? ORDER BY file_path`
+  )
+    .all(runId)
+    .map((row): ReviewFileEntry => {
+      const r = row as Record<string, unknown>
+      return {
+        path: String(r['file_path']),
+        changeKind: String(r['change_kind']) as ChangeKind,
+        additions: Number(r['additions'] ?? 0),
+        deletions: Number(r['deletions'] ?? 0),
+        oversize: Number(r['oversize']) === 1,
+        inWorkspace: Number(r['in_workspace']) === 1
+      }
+    })
+  return {
+    runId: String(set['run_id']),
+    sessionId: String(set['session_id']),
+    workspaceId: String(set['workspace_id']),
+    state: String(set['state']) as ChangeSetState,
+    fileCount: Number(set['file_count'] ?? 0),
+    additions: Number(set['additions'] ?? 0),
+    deletions: Number(set['deletions'] ?? 0),
+    files
+  }
+}
+
+/** 单文件的 before/after 全文,diff 预览用。 */
+export function getFileSnapshotDiff(runId: string, path: string): ReviewFileDiff | undefined {
+  const row = stmt(
+    `SELECT file_path, change_kind, before_content, after_content, oversize
+     FROM file_snapshots WHERE run_id = ? AND file_path = ?`
+  ).get(runId, path) as Record<string, unknown> | undefined
+  if (row === undefined) return undefined
+  return {
+    path: String(row['file_path']),
+    changeKind: String(row['change_kind']) as ChangeKind,
+    before: (row['before_content'] as string | null) ?? '',
+    after: (row['after_content'] as string | null) ?? '',
+    oversize: Number(row['oversize']) === 1
+  }
+}
+
+/** 撤销/恢复要用的完整快照行(含 before/after 全文与 hash)。 */
+export function listFileSnapshots(runId: string): FileSnapshotRecord[] {
+  return stmt(
+    `SELECT file_path, abs_path, change_kind, before_content, after_content,
+            before_hash, after_hash, oversize, in_workspace
+     FROM file_snapshots WHERE run_id = ? ORDER BY file_path`
+  )
+    .all(runId)
+    .map((row): FileSnapshotRecord => {
+      const r = row as Record<string, unknown>
+      return {
+        path: String(r['file_path']),
+        absPath: String(r['abs_path']),
+        changeKind: String(r['change_kind']) as ChangeKind,
+        before: (r['before_content'] as string | null) ?? null,
+        after: (r['after_content'] as string | null) ?? null,
+        beforeHash: (r['before_hash'] as string | null) ?? null,
+        afterHash: String(r['after_hash']),
+        oversize: Number(r['oversize']) === 1,
+        inWorkspace: Number(r['in_workspace']) === 1
+      }
+    })
+}
+
+/** 改动集是否存在(handler 校验用)。 */
+export function getFileChangeSetState(runId: string): ChangeSetState | undefined {
+  const row = stmt(`SELECT state FROM file_change_sets WHERE run_id = ?`).get(runId) as Record<string, unknown> | undefined
+  return row === undefined ? undefined : (String(row['state']) as ChangeSetState)
+}
+
+/** 翻转整轮的撤销态(applied ⇄ reverted)。 */
+export function setChangeSetState(runId: string, state: ChangeSetState, at: number): void {
+  stmt(`UPDATE file_change_sets SET state = ?, updated_at = ? WHERE run_id = ?`).run(state, at, runId)
+}
+
 /**
  * 一条会话 + 它派生出来的全部子代理转录(任意深度),root 在前。
  *
@@ -1952,6 +2163,10 @@ export function deleteAllHistory(): CleanupResult {
     // 显式删除。主题/导出附件不属于对话历史，必须保留。
     stmt("DELETE FROM attachments WHERE scope = 'session'").run()
     stmt('DELETE FROM runs').run()
+    // 改动快照随 sessions 级联,但沿本函数「关系表逐张显式清」的纪律一并删,
+    // 顺序按 FK 依赖:先叶(file_snapshots)后根(file_change_sets)。
+    stmt('DELETE FROM file_snapshots').run()
+    stmt('DELETE FROM file_change_sets').run()
     // Drafts and queued inputs are stored in kv because they can exist before
     // a session row is created. Clearing history must remove those otherwise
     // unreachable rows as well; deleting only the relational tables leaves
@@ -1976,6 +2191,8 @@ export function clearSessionDataForTest(): void {
   tx(() => {
     stmt('DELETE FROM messages_fts').run()
     stmt('DELETE FROM runs').run()
+    stmt('DELETE FROM file_snapshots').run()
+    stmt('DELETE FROM file_change_sets').run()
     stmt('DELETE FROM attachments').run()
     stmt('DELETE FROM messages').run()
     stmt('DELETE FROM sessions').run()

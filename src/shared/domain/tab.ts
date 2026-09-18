@@ -111,6 +111,13 @@ export type InnerTab =
    */
   | (InnerTabBase & { kind: 'files'; ref: { path: string; selectedPath?: string } })
   /**
+   * 「改动审查」—— 某一轮(顶层 run)改了哪些文件 + 每个文件的 diff。
+   *
+   * ★ 按 `runId` 定位(不是 sessionId):一个会话有多个任务块,每块一个可独立
+   *   打开的审查 tab。`sessionId` 一并存下,便于关会话时清理与去重。
+   */
+  | (InnerTabBase & { kind: 'changes'; ref: { runId: string; sessionId: string } })
+  /**
    * 插件接管的自定义编辑器(`contributes.customEditors`)。
    *
    * ★ `pluginId` 和 `viewType` **都要落盘**,而且**都要存**:
