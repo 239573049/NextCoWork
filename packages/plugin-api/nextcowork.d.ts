@@ -245,9 +245,66 @@ declare module 'nextcowork' {
 
   // ────────────────────────── tools ──────────────────────────
 
+  /** 卡片里状态/键值的语义色调 —— 宿主映射到主题色,插件不能直接给颜色值。 */
+  export type CardTone = 'neutral' | 'info' | 'ok' | 'warn' | 'danger'
+
+  /**
+   * 声明式卡片的原语块。由宿主的可信渲染器解释,**插件代码不进渲染路径**。
+   * 未知块 / 越界字段会被宿主丢弃或钳制(不是报错)。
+   */
+  export type CardBlock =
+    | { type: 'keyValue'; rows: Array<{ label: string; value: string; tone?: CardTone }> }
+    | { type: 'table'; columns: string[]; rows: string[][] }
+    | { type: 'status'; label: string; tone?: CardTone }
+    | { type: 'text'; value: string }
+    | { type: 'code'; value: string; language?: string }
+    /** dataRef 只接受 `ncw://`(受管附件)或 `data:`(内联)。 */
+    | { type: 'image'; dataRef: string; alt?: string }
+    | { type: 'progress'; fraction: number; label?: string }
+    /** href 只接受 https;宿主经系统默认程序打开,不在应用内导航。 */
+    | { type: 'link'; href: string; label?: string }
+    /**
+     * 交互按钮:点了走反向通道回到**仍在运行**的工具(见 `Tool.invoke` 的 `onAction`)。
+     * 只在实时卡片(经 `progress`)上有意义;工具已返回后点它无效果。
+     */
+    | { type: 'button'; actionId: string; label: string; tone?: CardTone }
+
+  /**
+   * 工具结果的自定义卡片 —— **只影响 UI,不下发给模型**。
+   *
+   * - `declarative`:一组白名单原语,安全轻量,覆盖多数场景。
+   * - `frame`:用你自己的 `contributes.cardViews` 页面渲染任意 UI;`viewType`
+   *   必须在清单里声明过,`data` 会被单向推入卡片 iframe(只读)。
+   */
+  export type ToolCard =
+    | { kind: 'declarative'; blocks: CardBlock[] }
+    | { kind: 'frame'; viewType: string; data: unknown }
+
   export interface ToolResult {
     content: { text: string }[]
     isError?: boolean
+    /**
+     * 可选的自定义结果卡片。宿主会校验(白名单原语、尺寸上限、scheme、frame viewType
+     * 必须已声明);不合法则**静默丢弃卡片、只保留文本**。
+     */
+    card?: ToolCard
+  }
+
+  /** 运行中推进度 / 一张实时卡片。message / card 都是易失的(不进转录)。 */
+  export interface ToolProgressUpdate {
+    /** 一行进度文字,显示在折叠态工具行右侧 */
+    message?: string
+    /**
+     * 实时卡片(第 2 层)。工具还没返回就先给一张可交互的卡;宿主会像结果卡片一样
+     * 校验它(白名单原语、frame viewType 必须已声明)。反复调用 = 覆盖上一张。
+     */
+    card?: ToolCard
+  }
+
+  /** 用户在实时卡片的某个 `button` 上的动作。 */
+  export interface CardAction {
+    actionId: string
+    value?: unknown
   }
 
   export interface Tool<T = Record<string, unknown>> {
@@ -257,7 +314,23 @@ declare module 'nextcowork' {
     readOnly?: boolean
     destructive?: boolean
     needsNetwork?: boolean
-    invoke(options: { input: T; callId: string }): Thenable<ToolResult | string>
+    /**
+     * 声明这是一个**交互式**工具:它会推一张带按钮的实时卡片并挂起等用户点。
+     * 宿主据此放宽这次调用的超时到交互硬上限(否则会撞上常规 60s 超时);
+     * 用户随时可取消(= abort)。
+     */
+    interactive?: boolean
+    invoke(options: {
+      input: T
+      callId: string
+      /** 运行中推进度 / 实时卡片 —— 工具还在跑时调用,见 `ToolProgressUpdate`。 */
+      progress: (update: ToolProgressUpdate) => void
+      /**
+       * 注册用户在实时卡片按钮上的动作回调。典型用法:推一张带按钮的卡,
+       * 然后 `await new Promise((r) => onAction((a) => r(a)))` 挂起等点击,再据此返回结果。
+       */
+      onAction: (handler: (action: CardAction) => void) => void
+    }): Thenable<ToolResult | string>
   }
 
   export namespace tools {
@@ -271,10 +344,60 @@ declare module 'nextcowork' {
     export function registerTool<T>(name: string, tool: Tool<T>): Disposable
   }
 
+  // ─────────────────────── plugins(插件间通信) ───────────────────────
+
+  export namespace plugins {
+    /**
+     * 对外导出一组可被别的插件调用的方法。**无需权限** —— 提供不是消费。
+     * 方法名的集合就是你的 API 表面;调用方经 `connect(你的 id)` 拿到代理来调。
+     */
+    export function exposeApi(methods: Record<string, (...args: any[]) => unknown>): Disposable
+
+    /**
+     * 连接另一个插件导出的 API,拿到一个调用代理:`connect(id).foo(1, 2)` 会跨插件
+     * 调到对方 `exposeApi` 里的 `foo`,返回值经 Promise 带回。
+     *
+     * ★ 需要 `plugins` 能力,且 `pluginId` 必须在你的清单 `dependencies` 里声明过 ——
+     * 两道门都过不了则调用返回 `null`。目标在睡会被自动唤醒。
+     */
+    export function connect<T = Record<string, (...args: any[]) => Promise<any>>>(pluginId: string): T
+
+    /** 松耦合事件总线。需要 `plugins` 能力。topic 建议加命名空间前缀避免撞车。 */
+    export namespace events {
+      /** 往一个 topic 广播。宿主扇出给订阅者(不含自己),只投给正在运行的。 */
+      export function emit(topic: string, payload?: unknown): Thenable<void>
+      /** 订阅一个 topic。`from` 是发出者的 pluginId。返回的 Disposable 用于退订。 */
+      export function on(topic: string, handler: (payload: unknown, from?: string) => void): Disposable
+    }
+  }
+
   // ─────────────────────── diagnostics ───────────────────────
 
   export namespace diagnostics {
     /** 写一条进插件详情页的「活动」标签。排查用,不是给用户看的。 */
     export function log(level: 'info' | 'warn' | 'error', message: string): Thenable<void>
+  }
+
+  // ─────────────────────── appearance ───────────────────────
+
+  /**
+   * 宿主的深浅色。**不需要任何权限** —— 同 `env.appInfo`。
+   *
+   * ★ 这套 API 是给**插件逻辑**(extension.ts)用的。插件的**视图** iframe
+   * 里另有一套、且不用调任何 API:宿主会把 24 个颜色 token 写成 `--ncw-<token>`
+   * CSS 变量,并在 `<html>` 上同步 `data-theme`。视图侧要在 JS 里跟随的话,
+   * 读 `globalThis.__ncwTheme` 或监听 window 上的 `ncw:theme` 事件。
+   */
+  export namespace appearance {
+    export function get(): Thenable<'light' | 'dark'>
+
+    /**
+     * 主题变化时回调。返回的 `Disposable` 用来取消。
+     *
+     * ★ 插件**休眠期间不会收到**回调(空闲五分钟后宿主页面会被销毁)。
+     * 这是有意的:没人在用的插件不值得为一次颜色变化叫醒。下次被唤醒时
+     * `get()` 拿到的就是最新值,所以别把「收到过几次回调」当状态用。
+     */
+    export function onDidChange(handler: (appearance: 'light' | 'dark') => unknown): Disposable
   }
 }

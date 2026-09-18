@@ -533,7 +533,15 @@ function isSubagentResult(value: unknown): boolean {
 
 function isToolOutput(value: unknown): boolean {
   if (!isRecord(value)) return false
-  return typeof value.content === 'string' && optionalBoolean(value, 'truncated') && (!has(value, 'originalBytes') || isIntegerAtLeast(value.originalBytes, 0))
+  const imagesValid = !has(value, 'images') || (
+    Array.isArray(value.images) && value.images.every((image) =>
+      isRecord(image) &&
+      enumValue(image.mime, ['image/png', 'image/jpeg', 'image/webp', 'image/gif']) &&
+      isNonEmptyString(image.dataRef) &&
+      image.dataRef.startsWith(`data:${image.mime};base64,`)
+    )
+  )
+  return typeof value.content === 'string' && imagesValid && optionalBoolean(value, 'truncated') && (!has(value, 'originalBytes') || isIntegerAtLeast(value.originalBytes, 0))
 }
 
 function isAgentError(value: unknown): boolean {

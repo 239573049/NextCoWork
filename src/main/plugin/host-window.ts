@@ -197,6 +197,12 @@ export class ElectronPluginRuntime implements PluginRuntime {
     })
   }
 
+  /** 宿主窗口此刻是否真的活着 —— 崩溃后 entry 会残留但窗口已 destroyed。见 manager.wake。 */
+  isRunning(pluginId: string): boolean {
+    const entry = this.hosts.get(pluginId)
+    return entry !== undefined && !entry.window.isDestroyed()
+  }
+
   dispose(pluginId: string): void {
     const entry = this.hosts.get(pluginId)
     if (entry === undefined) return

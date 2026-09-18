@@ -16,7 +16,7 @@
  * 这一条不在 `.app-drag` 区里,所以不需要逐个 `.app-no-drag` ——
  * 但拖动重排用的是同一个 hook,行为和外层一致。
  */
-import { ChevronDown, Plus, X } from "lucide-react";
+import { ChevronDown, Pencil, Plus, X } from "lucide-react";
 import {
   Fragment,
   useEffect,
@@ -41,6 +41,9 @@ import { prettyAccelerator } from "../lib/accelerator";
 import { cn } from "../lib/cn";
 import { INNER_TAB_ICON, MENU_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
+import { ContextMenu, type ContextMenuPosition } from "../components/ui/ContextMenu";
+import { TabRenameInput } from "./TabRenameInput";
+import { tabRenameTarget } from "./tab-rename";
 import { useI18n, type TranslationKey } from "../i18n";
 import { documentKey, isDocumentDirty, useDocumentsStore } from '../stores/documents';
 import { DOCK_TAB_MIME } from './dock-layout';
@@ -67,6 +70,7 @@ export function InnerTabBar({
   onClose,
   onMove,
   onOpen,
+  onRename,
 }: {
   tabs: readonly InnerTab[];
   groupId?: string;
@@ -94,6 +98,13 @@ export function InnerTabBar({
    * `item.action` 分发:内置是开一个 Tab,插件是执行它自己的命令。
    */
   onOpen: (item: TabMenuItem) => void;
+  /**
+   * 双击 / 右键「重命名」的提交口。
+   *
+   * ★ **可选**:这个组件被三条 Tab 条共用,而 `shell/__tests__` 里的几处
+   * 快照式渲染并不关心改名。不给就没有改名入口,双击退化成两次单击。
+   */
+  onRename?: (tab: InnerTab, value: string) => void;
 }): ReactNode {
   const { t } = useI18n();
   const drafts = useDocumentsStore((state) => state.entries);
@@ -103,6 +114,15 @@ export function InnerTabBar({
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const [scrollEdges, setScrollEdges] = useState({ left: false, right: false });
+  /*
+    ★ 编辑态提升到**条**这一层,不是每个 Tab 各存一个:同一时刻只能有一个
+    标签在改名,分散存的话点第二个标签时第一个的输入框还留在那里,两个都
+    focus 不到,看起来像卡住了。
+  */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ tabId: string; position: ContextMenuPosition } | null>(null);
+  const contextTab = tabs.find((tab) => tab.id === contextMenu?.tabId);
+  const canRename = (tab: InnerTab): boolean => onRename !== undefined && tabRenameTarget(tab) !== null;
 
   useEffect(() => {
     const strip = stripRef.current;
@@ -184,11 +204,14 @@ export function InnerTabBar({
           const draft = workspaceId && (tab.kind === 'doc' || tab.kind === 'preview') ? drafts[documentKey(workspaceId, tab.ref.path)] : undefined;
           const dirty = draft !== undefined && isDocumentDirty(draft);
           const closeDisabled = tab.kind === 'chat' && paneOf(tab) === 'main' && mainChatCount <= 1;
+          const editing = tab.id === editingId;
+          // 文件类标签改的是盘上的文件名 —— 默认选区要跳过扩展名
+          const selectStem = tabRenameTarget(tab)?.kind === 'file';
           return (
             <div
               key={tab.id}
               data-inner-tab-id={tab.id}
-              draggable={groupId !== undefined && (canDragTab?.(tab) ?? true)}
+              draggable={editing !== true && groupId !== undefined && (canDragTab?.(tab) ?? true)}
               data-dock-tab-id={groupId === undefined ? undefined : tab.id}
               onDragStart={(event) => {
                 if (groupId === undefined || (canDragTab !== undefined && !canDragTab(tab))) return;
@@ -199,9 +222,22 @@ export function InnerTabBar({
               // Dock 分组使用原生拖放来同时支持同组排序、跨组移动和边缘拆分。
               // 外层 Tab 仍使用 pointer reorder，因为它位于 Electron 自绘标题栏中。
               onPointerDown={(e) => {
+                if (editing) return;
                 if (groupId === undefined) onPointerDown(e, i);
               }}
-              onClick={() => onActivate(tab.id)}
+              onClick={(e) => {
+                if (editing) return;
+                onActivate(tab.id);
+                // ★ `e.detail >= 2` 判双击,**不用 200~300ms 计时器消歧** ——
+                // 计时器会给每一次单击都压上一段延迟,而本仓库明确拒绝过那个做法
+                // (同 `components/ui/Menu.tsx`)。第一击照常激活,第二击再进编辑态。
+                if (e.detail >= 2 && canRename(tab)) setEditingId(tab.id);
+              }}
+              onContextMenu={(event) => {
+                if (!canRename(tab)) return;
+                event.preventDefault();
+                setContextMenu({ tabId: tab.id, position: { x: event.clientX, y: event.clientY } });
+              }}
               role="tab"
               aria-selected={active}
               title={tab.title}
@@ -215,7 +251,20 @@ export function InnerTabBar({
               )}
             >
               <Icon size={13} className="shrink-0 text-fg-faint" />
-              <span className="min-w-0 flex-1 truncate">{tab.title}</span>
+              {editing ? (
+                <TabRenameInput
+                  initial={tab.title}
+                  ariaLabel={t("nav.renameTab")}
+                  selectStem={selectStem}
+                  onSubmit={(value) => {
+                    setEditingId(null);
+                    onRename?.(tab, value);
+                  }}
+                  onCancel={() => setEditingId(null)}
+                />
+              ) : (
+                <span className="min-w-0 flex-1 truncate">{tab.title}</span>
+              )}
               {dirty && <span title={t('document.unsaved')} aria-label={t('document.unsaved')} className="size-1.5 shrink-0 rounded-full bg-accent" />}
               {running && (
                 <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
@@ -304,6 +353,30 @@ export function InnerTabBar({
       </Menu>
 
       {trailing}
+
+      {/*
+        ★ 每一条双击路径都配一个**键盘可达**的入口。双击是鼠标独有的动作,
+        只给双击等于这个功能对键盘和辅助技术用户不存在。
+      */}
+      {contextMenu !== null && contextTab !== undefined && (
+        <ContextMenu
+          position={contextMenu.position}
+          label={t("nav.tabContextMenu")}
+          onClose={() => setContextMenu(null)}
+        >
+          {(close) => (
+            <MenuItem
+              icon={<Pencil size={14} />}
+              onSelect={() => {
+                setEditingId(contextTab.id);
+                close();
+              }}
+            >
+              {t("nav.renameTab")}
+            </MenuItem>
+          )}
+        </ContextMenu>
+      )}
     </div>
   );
 }

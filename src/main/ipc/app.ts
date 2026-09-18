@@ -14,6 +14,7 @@ import type { ResolvedTheme, ThemePreference } from '../../shared/domain/setting
 import type { WindowKind } from '../../shared/domain/tab'
 import { EMPTY_OUTER, outerTabKey, store } from '../state/store'
 import { windows } from '../window/registry'
+import { notifyPluginsThemeChanged } from './plugins'
 import { IpcError } from './errors'
 import type { ClientUpdateInfo, UpdateCheckResult } from '../../shared/domain/update'
 
@@ -159,12 +160,12 @@ export function openSessionWindow(req: { workspaceId: string; sessionId: string 
   sessionWindowOpener(req.workspaceId, req.sessionId)
 }
 
-/** 跟随系统时,系统切换深浅色要能推到所有窗口 */
+/** 跟随系统时,系统切换深浅色要能推到所有窗口 —— 以及订阅了主题的插件 */
 export function registerThemeBridge(): void {
   nativeTheme.on('updated', () => {
     if (store.getSettings().theme !== 'system') return
-    windows.emitToAll('theme:changed', {
-      resolved: nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
-    })
+    const resolved = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+    windows.emitToAll('theme:changed', { resolved })
+    notifyPluginsThemeChanged(resolved)
   })
 }

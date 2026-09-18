@@ -103,7 +103,8 @@ export function ChatView({
   } = useSession.getState()
   const providerById = useModelsStore((s) => s.providerById)
   const openMarkdownFile = useCallback((path: string) => {
-    useTabsStore.getState().openPath(workspace.id, 'doc', path, path.split('/').pop() ?? path)
+    // 由已装插件决定用谁打开 —— 对话里引用一个 `.excalidraw` 也该落进画布
+    useTabsStore.getState().openFile(workspace.id, path)
   }, [workspace.id])
 
   /**

@@ -1261,7 +1261,7 @@ export class AgentSession {
      */
     const output =
       result.output.content.length > MAX_TOOL_OUTPUT_CHARS
-        ? truncateToolOutput(result.output.content)
+        ? { ...result.output, ...truncateToolOutput(result.output.content) }
         : result.output
 
     /*

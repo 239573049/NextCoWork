@@ -12,7 +12,7 @@
  *   挪进 `utilityProcess` 是唯一的出路,而那一步的前提就是调用点全走访问器。
  *   同样的理由:聚合查询一律带 LIMIT 和时间窗,`VACUUM` 只在空闲时跑。
  * - 迁移**只增不改**(见 `schema.ts`)。
- * - 应用数据库默认落在**用户主目录**的 `.next-cowork/` 下 —— 与 cwd、与是否打包
+ * - 应用数据库默认落在**用户主目录**的 `.next-cowork/data/` 下 —— 与 cwd、与是否打包
  *   都无关;调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
  */
 import { lstatSync, mkdirSync } from 'node:fs'
@@ -24,11 +24,20 @@ import { MIGRATIONS } from './schema'
 /** 库文件名。`-wal` / `-shm` 是 SQLite 自己在同目录建的兄弟文件。 */
 export const DB_FILENAME = 'nextcowork.db'
 export const DATABASE_DIRNAME = '.next-cowork'
+/**
+ * 应用数据在 profile 根下的子目录名。
+ *
+ * ★ 它存在的理由是**布局**,不是功能:`~/.next-cowork` 同时是 Electron 的 userData,
+ * Chromium 把三十来个 profile 条目(`Cache` / `Cookies` / `Preferences` …)扁平铺在
+ * 它的根层。应用自己的库和文件树再挤进同一层,两套命名风格交错,谁也认不出哪些是
+ * 用户的数据、哪些是随手能删的缓存。分一层出来:根层归 Chromium,这里归我们。
+ */
+export const DATA_SUBDIRNAME = 'data'
 
 const MEMORY = ':memory:'
 
 /**
- * 默认数据目录: `~/.next-cowork/`。
+ * Electron profile 根: `~/.next-cowork/`。Chromium 的 userData 指的就是这里。
  *
  * ★ **不能用 `process.cwd()` 派生**。打包后的 cwd 没有任何意义:Windows 从快捷方式
  * 启动时它是安装目录(数据会在卸载/升级时被一起清掉),从别的目录双击 exe 又会
@@ -36,10 +45,21 @@ const MEMORY = ':memory:'
  * 工作目录的线索。主目录对两种运行方式都稳定。
  *
  * 要隔离(探针、多实例)走命令行的 `--user-data-dir`,见 `main/index.ts` 的
- * `resolveDataRoot()`。
+ * `resolveProfileRoot()`。
+ */
+export function defaultProfileRoot(): string {
+  return join(homedir(), DATABASE_DIRNAME)
+}
+
+/**
+ * 默认数据目录: `~/.next-cowork/data/`。库、附件、skills / agents / commands 全在这儿。
+ *
+ * ★ 与 `defaultProfileRoot()` 刻意差一层 `data/` —— 理由见 `DATA_SUBDIRNAME`。
+ * 「删除全部数据并退出」仍能一次清掉两边,靠的正是 `data/` 是 profile 根的**子目录**
+ * 这一点(`ipc/storage.ts` 的 `clearLocalData` 把删除边界定在 profile 根上)。
  */
 export function defaultDatabaseDirectory(): string {
-  return join(homedir(), DATABASE_DIRNAME)
+  return join(defaultProfileRoot(), DATA_SUBDIRNAME)
 }
 
 /** 当前打开的文件库所在目录；测试和恢复流程可通过 openDatabase 指定目录。 */

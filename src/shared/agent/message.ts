@@ -6,6 +6,7 @@
  */
 import type { AgentError } from './error'
 import type { FileReferenceSource } from '../domain/attachment'
+import type { ToolCard } from './tool-card'
 
 export interface AgentMessage {
   id: string
@@ -112,12 +113,25 @@ export function fileRefMarkdown(p: { name: string; path: string }): string {
  * 工具输出在**工具边界**截断并留明确标记 —— 不要让一个返回 40MB 文件的工具
  * 冲垮 IPC 队列(方案 §4.3)。截断发生在产出侧,不在渲染侧。
  */
+export interface ToolOutputImage {
+  mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  /** Tool screenshots are already resolved data URLs, not attachment protocol references. */
+  dataRef: string
+}
+
 export interface ToolOutput {
   content: string
+  /** Visual evidence returned by tools such as browser_screenshot. */
+  images?: ToolOutputImage[]
   /** 被截断时为 true,UI 据此显示「输出已截断」 */
   truncated?: boolean
   /** 截断前的原始字节数,给 UI 显示「共 N MB」 */
   originalBytes?: number
+  /**
+   * 只走 UI 轨的自定义卡片 —— **编码器一律不下发给模型**；编码器只读取
+   * `output.content` 与显式的 `output.images`。跟着 `output` 一起落盘/恢复。
+   */
+  card?: ToolCard
 }
 
 /**

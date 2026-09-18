@@ -4,24 +4,26 @@
  */
 import { dirname, join } from 'node:path'
 import { copyFileSync, cpSync, existsSync, mkdirSync, statSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
 import { app, shell, BrowserWindow, nativeImage, powerMonitor } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
-import { closeDatabase, DATABASE_DIRNAME, defaultDatabaseDirectory, DB_FILENAME, openDatabase } from './db'
+import { closeDatabase, DATABASE_DIRNAME, DATA_SUBDIRNAME, defaultProfileRoot, DB_FILENAME, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost } from './host'
+import { installProductionBrowserBindings, type BrowserBindings } from './browser/bindings'
 import { flushPendingPersists, registerIpc, shutdownClientAuth, shutdownRuns, shutdownTerminals } from './ipc'
 import { sweepPendingDelete } from './ipc/pending-delete'
 import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/rollup-task'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
-import { installPluginProtocol, registerPluginScheme } from './plugin/protocol'
+import { installPluginProtocol, registerPluginScheme, setPluginAppearanceResolver } from './plugin/protocol'
 import { shutdownPlugins, startPlugins } from './ipc/plugins'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
 import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
+import { PROFILE_DIRECTORY_SEGMENT } from './db/config-profile'
+import { migrateFlatLayout, rewriteMigratedPaths } from './db/flat-layout'
 import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
 import { SKILLS_DIR } from './kernel/skill/load'
@@ -53,6 +55,7 @@ installUserAgent(app.getVersion())
 // 一次,进程永远退不掉。
 let isQuitting = false
 let shutdownComplete = false
+let browserBindings: BrowserBindings | null = null
 
 /**
  * 命令行显式给过 `--user-data-dir` 吗?
@@ -77,8 +80,8 @@ const explicitUserDataDir = process.argv.some(
 const legacyUserDataPath = app.getPath('userData')
 
 /**
- * 数据根 —— userData、SQLite 主库、附件、settings.json、skills/agents/commands
- * 文件树全部从这里派生。
+ * Electron profile 根 —— Chromium 的 userData 指这里,`Cache` / `Cookies` /
+ * `Preferences` / `Partitions` 那三十来个条目扁平铺在它的根层。
  *
  * `~/.next-cowork`,dev 与打包**同一个**。
  *
@@ -86,20 +89,29 @@ const legacyUserDataPath = app.getPath('userData')
  * 启动时它是**安装目录**,数据会在卸载/升级时被一起清掉;从别的目录双击 exe
  * 又会凭空开出一个空库。用户看到的是「我的会话全没了」,而不是任何一条能指向
  * 工作目录的线索。
- *
- * ★ 数据根必须**等于 Electron 的 userData**,所以下面要 setPath。`ipc/storage.ts`
- * 的 `MANAGED_LOCAL_PATHS` 把 Chromium profile(Cookies / Network / Crashpad …)
- * 也算进「本应用拥有的文件」,「删除全部数据并退出」靠那张表清理 —— 两者一分家,
- * 那个功能就再也清不干净了。
  */
-function resolveDataRoot(): string {
-  return explicitUserDataDir ? legacyUserDataPath : defaultDatabaseDirectory()
+function resolveProfileRoot(): string {
+  return explicitUserDataDir ? legacyUserDataPath : defaultProfileRoot()
 }
 
-// 应用数据、附件和 Electron profile 统一落在数据根下。
+/**
+ * 数据根 —— SQLite 主库、附件、settings.json、skills / agents / commands 文件树
+ * 全部从这里派生。profile 根下的 `data/` 子目录。
+ *
+ * ★ 它必须是 profile 根的**子目录**,不能挪到别处去。`ipc/storage.ts` 的
+ * `clearLocalData` 要在一次可回滚的 rename 里同时搬走两边的东西,而
+ * `stageManagedPath` 的边界断言只认一个根 —— 父子关系让 Chromium 条目和应用
+ * 条目同时落在界内。搬成兄弟目录,「删除全部数据并退出」会直接抛错整体回滚,
+ * 而不是少删一点。
+ */
+function resolveDataRoot(): string {
+  return join(resolveProfileRoot(), DATA_SUBDIRNAME)
+}
+
+// Electron profile 落在 profile 根;应用数据在它下面的 data/。
 // 必须在 app ready 之前设置才生效。
 // 显式传了 --user-data-dir 时不覆盖 —— 那正是调用方要的隔离。
-if (!explicitUserDataDir) app.setPath('userData', resolveDataRoot())
+if (!explicitUserDataDir) app.setPath('userData', resolveProfileRoot())
 
 /*
   上一次「删除并退出」留下的补删清单。
@@ -111,7 +123,7 @@ if (!explicitUserDataDir) app.setPath('userData', resolveDataRoot())
 
   没有清单时这是一次读文件失败,代价可以忽略;它自己吞掉所有异常,不会挡住启动。
 */
-sweepPendingDelete(resolveDataRoot())
+sweepPendingDelete(resolveProfileRoot())
 
 /*
   ★ **必须在 `app.whenReady()` 之前** —— 与单实例锁、userData 改路径同属
@@ -331,8 +343,24 @@ function pickLegacyRoot(targetDir: string): string | null {
 function prepareProjectDatabaseDirectory(): string {
   const targetDir = resolveDataRoot()
   const targetPath = join(targetDir, DB_FILENAME)
+  if (existsSync(targetPath)) return targetDir
+
+  /*
+    先看扁平布局 —— 同一个 profile 根下直接躺着一个库,那是上一个版本留下的。
+    它优先于下面那两个旧根:那两个是**别的目录**里的老数据,而这个就是用户
+    此刻正在用的这一份,只是层级不对。
+    ★ 探针模式(--user-data-dir)也走这条:它不引入任何外部数据,只是把同一个
+      根里的布局升上来。scripts/segmented-probe.mjs 直接把真实数据根传进来。
+  */
+  const profileRoot = resolveProfileRoot()
+  if (migrateFlatLayout(profileRoot, targetDir)) {
+    rewriteMigratedPaths(targetPath, profileRoot, targetDir)
+    console.log(`[db] 已把扁平布局的数据从 ${profileRoot} 收进 ${targetDir}`)
+    return targetDir
+  }
+
   const legacyRoot = pickLegacyRoot(targetDir)
-  if (!existsSync(targetPath) && legacyRoot !== null) {
+  if (legacyRoot !== null) {
     const legacyPath = join(legacyRoot, DB_FILENAME)
     mkdirSync(targetDir, { recursive: true })
     copyFileSync(legacyPath, targetPath)
@@ -350,7 +378,16 @@ function prepareProjectDatabaseDirectory(): string {
       `skills/`,或者内置技能的安装),那时候整棵跳过就等于把用户自己写的技能
       静静丢掉 —— 而日志里一个字都不会有。
     */
-    const managedDirs = ['attachments', 'skills', 'agents', 'commands', 'workspaces']
+    const managedDirs = [
+      'attachments',
+      'skills',
+      'agents',
+      'commands',
+      'modes',
+      'workspaces',
+      'plugins',
+      PROFILE_DIRECTORY_SEGMENT
+    ]
     for (const name of managedDirs) {
       const source = join(legacyRoot, name)
       if (existsSync(source)) cpSync(source, join(targetDir, name), { recursive: true, force: false })
@@ -369,22 +406,7 @@ function prepareProjectDatabaseDirectory(): string {
       mkdirSync(dirname(targetThemes), { recursive: true })
       cpSync(legacyThemes, targetThemes, { recursive: true, force: false })
     }
-    try {
-      const migrated = new DatabaseSync(targetPath)
-      migrated.prepare('UPDATE attachments SET path = REPLACE(path, ?, ?) WHERE path LIKE ?').run(
-        join(legacyRoot, 'attachments'),
-        join(targetDir, 'attachments'),
-        `${join(legacyRoot, 'attachments')}%`
-      )
-      migrated.prepare('UPDATE sessions SET root_path_at_creation = REPLACE(root_path_at_creation, ?, ?) WHERE root_path_at_creation LIKE ?').run(
-        join(legacyRoot, 'workspaces'),
-        join(targetDir, 'workspaces'),
-        `${join(legacyRoot, 'workspaces')}%`
-      )
-      migrated.close()
-    } catch (err) {
-      console.warn(`[db] 旧数据库路径迁移未完成，将保留原数据并继续启动: ${String(err)}`)
-    }
+    rewriteMigratedPaths(targetPath, legacyRoot, targetDir)
     // 搬了哪一份是排查这条路径时第一个要问的问题,所以两个根都打出来。
     console.log(`[db] 已将旧数据从 ${legacyRoot} 迁移到 ${targetDir}`)
   }
@@ -435,6 +457,12 @@ void app.whenReady().then(() => {
   */
   installAttachmentProtocol()
   installPluginProtocol()
+  /*
+    ★ 协议层自己不认识 store,深浅色由这里喂进去 —— 它是插件视图垫片的初值,
+    决定插件视图的**第一帧**是深是浅。排在 `openDatabase` 之后:`getSettings()`
+    要读库。
+  */
+  setPluginAppearanceResolver(() => resolveTheme(store.getSettings().theme))
 
   const host = electronHost()
   const bundledSkillsRoot = app.isPackaged
@@ -444,6 +472,8 @@ void app.whenReady().then(() => {
     host.logger.warn(`[skill:bundled] ${diagnostic.path}: ${diagnostic.message}`)
   }
   initRuntime(host)
+  // Browser IPC handlers are registered below, so their Electron/Playwright bridge must already exist.
+  browserBindings = installProductionBrowserBindings(host.logger)
   /*
     ★ 插件系统在 `initRuntime` **之后**起:它要 `getHost()`。
     不 await —— 扫描插件目录是几次 readdir,但一个坏包不该让首屏等着它。
@@ -514,6 +544,22 @@ void app.whenReady().then(() => {
 
 /** 从托盘/dock/第二实例唤起:已有窗口就还原、显示并聚焦,一个都没有就新建一个。 */
 function showMainWindow(): void {
+  /*
+    ★ **退出中一律不唤起。** `before-quit` 先 preventDefault,再异步收 MCP/插件/环境
+    (最长 6 秒),这段时间进程还活着、还占着单实例锁、还在收 `activate` 和
+    `second-instance` —— 而窗口这时已经销毁完了,于是下面走的是 `createMainWindow()`,
+    它第一件事就是读设置拿主题底色,库却可能已经在 `finish()` 里封掉:
+
+        DatabaseClosedError: 数据库已在应用退出时关闭,这次写入没有落盘
+          at getSettings → createMainWindow → showMainWindow
+
+    `electron-vite dev --watch` 每次改 `src/main/**` 都会撞上:它 `ps.kill()` 完**不等
+    旧进程退出**就拉起新的,新进程抢不到锁,那次失败的抢锁就是发给旧进程的
+    `second-instance`。用户看到的是一个跟热更新毫无关系的崩溃框。
+    退出中被唤起本来就不该有任何效果——新界面归新进程管。
+  */
+  if (isQuitting || shutdownComplete) return
+
   const [win] = BrowserWindow.getAllWindows()
   if (win) {
     if (win.isMinimized()) win.restore()
@@ -563,5 +609,10 @@ app.on('before-quit', (event) => {
     app.quit()
   }
   const timer = setTimeout(finish, 6000)
-  void Promise.allSettled([shutdownMcp(), shutdownPlugins(), shutdownEnvironments()]).then(finish)
+  void Promise.allSettled([
+    shutdownMcp(),
+    shutdownPlugins(),
+    shutdownEnvironments(),
+    browserBindings?.shutdown() ?? Promise.resolve()
+  ]).then(finish)
 })

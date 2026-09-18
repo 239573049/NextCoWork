@@ -5,6 +5,7 @@ import { useI18n } from '../../i18n'
 import { Button } from '../../components/ui/Button'
 import { updateCheck, updateDownload, updateGetState, updateInstall } from '../../services/app'
 import type { UpdateState } from '../../../../shared/domain/update'
+import { updateErrorKey } from '../../lib/update-error'
 import { on } from '../../services/ipc'
 
 /**
@@ -50,7 +51,7 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
         {result?.state === 'installing' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.installing')}</div>}
         {result?.state === 'disabled' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.devDisabled')}</div>}
         {result?.state === 'idle' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.ready')}</div>}
-        {result?.state === 'error' && <div className="mt-1 text-[12px] text-danger">{t(`about.updates.error.${result.code}` as 'about.updates.error.network')}</div>}
+        {result?.state === 'error' && <div className="mt-1 text-[12px] text-danger">{t(updateErrorKey(result.code))}</div>}
         {result?.state === 'available' && result.update.releaseNotes && <div className="mt-2 whitespace-pre-wrap text-[12px] text-fg-muted">{result.update.releaseNotes}</div>}
       </SettingRow>
       {rows.map(([k, v], i) => (

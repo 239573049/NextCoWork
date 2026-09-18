@@ -38,8 +38,24 @@ export type WorkspaceFileOperation =
 export interface WorkspaceFileMutationRequest extends WorkspaceFileRequest {
   operation: WorkspaceFileOperation
   environmentKey?: string
-  /** rename/move/copy 的完整工作区相对目标路径；始终拒绝覆盖。 */
+  /** rename/move/copy 的完整工作区相对目标路径；默认拒绝覆盖，见 `overwrite`。 */
   destination?: string
+  /**
+   * 目标已存在时覆盖它。**只对 `rename` 生效**，move/copy 一律仍然拒绝。
+   *
+   * ★ 只放开 rename 这一条，是因为它是用户**盯着一个具体文件、亲手把名字改成
+   * 另一个名字**的动作 —— 撞名是当面发生的，确认框问的也就是眼前这一件事。
+   * move/copy 可以一次涉及整棵子树，"是否覆盖"在那里不是一个问题而是 N 个，
+   * 一个布尔答不了。
+   *
+   * ★★ 覆盖的实现是**先把目标丢进系统废纸篓再改名**，不是直接盖掉。
+   * 这一条同 delete 分支的立场：`trashItem` 失败就整体失败，
+   * 绝不降级成 `unlinkSync`（见 `main/ipc/workspace-files.ts`）。
+   *
+   * 渲染层永远是**两次**调用：第一次不带它，拿到 `exists` 之后问用户，
+   * 确认了才带 `overwrite: true` 重发。不存在"顺手带上"的用法。
+   */
+  overwrite?: true
 }
 
 export interface WorkspaceFileMutationResult {

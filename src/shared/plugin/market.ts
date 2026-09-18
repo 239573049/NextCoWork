@@ -29,3 +29,47 @@ export interface PluginMarketItem {
   permissions: string[]
   author: string
 }
+
+/**
+ * 「这个已装的插件有新版」—— 主进程算完之后推给渲染层的一条。
+ *
+ * ★ 整个判定在主进程完成,渲染层不做版本比较、也不碰 slug。理由是
+ * `escalatedPermissions` 那一条必须拿 `approvedRequired` 算,而它**不在**
+ * `InstalledPlugin` 的投影里(见下面的字段注释)。判定一半在这边一半在那边,
+ * 就会出现「横幅说要重新授权、装完其实不用」这种对不上的情况。
+ */
+export interface PluginUpdate {
+  /** `publisher.name`,和 `InstalledPlugin.id` 同一个值 */
+  pluginId: string
+  slug: string
+  displayName: string
+  currentVersion: string
+  latestVersion: string
+  /**
+   * 新版本要、而用户没批准过的**必选**能力。
+   *
+   * ★ **数组不是布尔**:界面上要逐条列出来。「权限有变化」这句话回答不了
+   * 用户唯一想知道的事 —— 变成了什么。
+   *
+   * ★ 拿 `approvedRequired` 算,不是 `granted`。后者是超集(可选能力批过的
+   * 也在里面),用它算会漏掉一种真实情况:某能力这一版是可选、用户批过,
+   * 下一版变必选 —— 算出来「没扩权」,而主进程装完会置成 `pending-approval`,
+   * 插件停了,界面却提前说过不会停。
+   */
+  escalatedPermissions: string[]
+  /**
+   * 是从市场装的吗。本地 ZIP / 目录装的为 `false`。
+   *
+   * ★ `false` 的那些**不计入「N 个插件可更新」也不进「全部更新」**,但照常
+   * 打徽标、详情页照常能点更新(点它 = 用户明确表态)。用户手上那份可能是
+   * 他自己改过的构建,一次批量更新把它换成市场版,他从没说过要跟市场走。
+   */
+  fromMarket: boolean
+}
+
+/** 「全部更新」跑完之后的汇总。失败不中断,所以两边都有值是正常的 */
+export interface PluginUpdateResult {
+  updated: string[]
+  /** `messageKey` 是 key 不是句子 —— 渲染层 `t()` 之后才是人话 */
+  failed: { pluginId: string; messageKey: string }[]
+}

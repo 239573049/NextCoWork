@@ -135,10 +135,48 @@ describe('toAnthropicMessages · 工具', () => {
     ])
   })
 
+  it('browser_screenshot 的图片随 tool_result 上行且只发送裸 base64', () => {
+    const out = toAnthropicMessages([
+      u({
+        type: 'tool_result',
+        callId: 'shot-1',
+        output: {
+          content: '截图',
+          images: [{ mime: 'image/png', dataRef: 'data:image/png;base64,AQID' }]
+        },
+        isError: false
+      })
+    ])
+
+    expect(out[0]?.content[0]).toMatchObject({
+      type: 'tool_result',
+      content: [
+        { type: 'text', text: '截图' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AQID' } }
+      ]
+    })
+  })
+
   /** 无参工具的 input 可能是 undefined —— 下发 undefined 会被 JSON.stringify 掉,变成缺字段 */
   it('input 缺失时补成空对象', () => {
     const out = toAnthropicMessages([a({ type: 'tool_call', callId: 'c', name: 'now', input: undefined })])
     expect(out[0]?.content[0]).toMatchObject({ input: {} })
+  })
+
+  /** ★ output.card 是 UI 轨专属:编码给上游的 tool_result 里绝不能出现它 */
+  it('tool_result 的 card 被 strip,只发 content', () => {
+    const out = toAnthropicMessages([
+      u({
+        type: 'tool_result',
+        callId: 'c1',
+        output: { content: '文本', card: { kind: 'declarative', blocks: [{ type: 'text', value: '卡片' }] } },
+        isError: false
+      })
+    ])
+    const block = out[0]?.content[0]
+    expect(block).toEqual({ type: 'tool_result', tool_use_id: 'c1', content: '文本', is_error: false })
+    expect(JSON.stringify(out)).not.toContain('card')
+    expect(JSON.stringify(out)).not.toContain('卡片')
   })
 
   it('isError 透传给 is_error', () => {

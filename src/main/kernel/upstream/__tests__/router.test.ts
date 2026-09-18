@@ -195,6 +195,7 @@ function rig(opts: {
   failover?: boolean
   keys?: Record<string, string | null>
   rateLimitFloorMs?: number
+  providerErrorFloorMs?: number
   idleTimeoutMs?: number
   priceAttempt?: (
     providerId: string,
@@ -247,6 +248,8 @@ function rig(opts: {
       // 限流退避的默认基数是秒级(生产上必须如此),测试里压成 0 —— 否则每个
       // 429 用例都要真的睡上几秒。要断言退避本身的用例自己传一个小的非零值。
       rateLimitFloorMs: opts.rateLimitFloorMs ?? 0,
+      // 可重试的 provider 5xx 同理(见 `DEFAULT_PROVIDER_ERROR_FLOOR_MS`)。
+      providerErrorFloorMs: opts.providerErrorFloorMs ?? 0,
       onUsageAttempt: (record) => usageRecords.push(record),
       ...(opts.priceAttempt === undefined ? {} : { priceAttempt: opts.priceAttempt })
     }),
@@ -989,6 +992,19 @@ describe('UpstreamRouter · 重试与切换', () => {
     const out = await drain(router)
     // rig 的 baseDelayMs 是 0,所以这个 40 只可能来自限流专用的那条计算
     expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 40, reason: 'quota' })
+    expect(out.at(-1)?.type).toBe('message_end')
+  })
+
+  it('网关 5xx 没给 Retry-After 时,退避走秒级的那条路,不是 500ms 那张表', async () => {
+    const { router } = rig({
+      providers: [provider('p1')],
+      aliases: [alias('m', 'p1')],
+      providerErrorFloorMs: 40,
+      responses: [fail(503, 'server_error', '网关转发请求失败'), ok(sseBody({ text: 'x' }))]
+    })
+    const out = await drain(router)
+    // rig 的 baseDelayMs 是 0,所以这个 40 只可能来自可重试 provider 错误专用的那条计算
+    expect(out).toContainEqual({ type: 'provider_retry', attempt: 1, delayMs: 40, reason: '网关转发请求失败' })
     expect(out.at(-1)?.type).toBe('message_end')
   })
 

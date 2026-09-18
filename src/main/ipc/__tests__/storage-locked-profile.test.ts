@@ -64,15 +64,20 @@ vi.mock('node:fs', async (importActual) => {
   }
 })
 
-import { DB_FILENAME, closeDatabase, openDatabase } from '../../db'
+import { DATA_SUBDIRNAME, DB_FILENAME, closeDatabase, openDatabase } from '../../db'
 import { PENDING_DELETE_FILENAME } from '../pending-delete'
 import { clearLocalData } from '../storage'
 
+/**
+ * Electron profile 根。Chromium 的东西铺在这一层,补删清单也落在这里。
+ */
 let root = ''
+/** 数据根 —— profile 根下的 `data/`。我们自己的库和文件树在这一层。 */
+let dataRoot = ''
 
-/** 建一棵最小的数据树：我们自己的数据 + 一个 Chromium profile 目录。 */
+/** 建一棵最小的数据树：`data/` 下是我们的数据，根层是 Chromium 的 profile。 */
 function seedDataRoot(): { attachment: string; profile: string } {
-  const attachment = join(root, 'attachments', 'sessions', 's1')
+  const attachment = join(dataRoot, 'attachments', 'sessions', 's1')
   mkdirSync(attachment, { recursive: true })
   writeFileSync(join(attachment, 'note.txt'), 'managed')
   const profile = join(root, 'GPUCache')
@@ -90,7 +95,8 @@ function pendingPaths(): string[] {
 beforeEach(() => {
   closeDatabase()
   root = mkdtempSync(join(tmpdir(), 'nextcowork-locked-root-'))
-  openDatabase(root)
+  dataRoot = join(root, DATA_SUBDIRNAME)
+  openDatabase(dataRoot)
   locked.paths.clear()
   electron.quit.mockReset()
   runState.ids = []
@@ -112,7 +118,7 @@ describe('被占用的 Chromium profile 目录', () => {
 
     // 自己的数据真的删掉了 —— 这正是旧代码做不到的那一半。
     expect(existsSync(attachment)).toBe(false)
-    expect(existsSync(join(root, DB_FILENAME))).toBe(false)
+    expect(existsSync(join(dataRoot, DB_FILENAME))).toBe(false)
     // 占用中的目录原封不动留着，等下次启动补删。
     expect(readFileSync(join(profile, 'shader.bin'), 'utf8')).toBe('cached')
     expect(pendingPaths()).toEqual([profile])
@@ -142,7 +148,7 @@ describe('被占用的 Chromium profile 目录', () => {
 
   it('带碰撞后缀的 nextcowork N.db 归我们,搬不动就回滚', () => {
     const { attachment } = seedDataRoot()
-    const collision = join(root, 'nextcowork 2.db')
+    const collision = join(dataRoot, 'nextcowork 2.db')
     writeFileSync(collision, 'our data')
     locked.paths.add(collision)
 
@@ -154,7 +160,7 @@ describe('被占用的 Chromium profile 目录', () => {
 
   it('自己的数据搬不动时仍然整体回滚 —— 可降级的只有 Chromium 那张表', () => {
     const { attachment, profile } = seedDataRoot()
-    locked.paths.add(join(root, 'attachments'))
+    locked.paths.add(join(dataRoot, 'attachments'))
 
     expect(() => clearLocalData({ confirm: true })).toThrow(/暂存/)
 

@@ -4,7 +4,7 @@
  * **上下两半作用域不同,不能混在一个 store 里:**
  *
  *   上半(功能入口)  作用域 = 全局      新建对话 / 搜索 / 定时任务 / 浏览器 / Skill 管理
- *   下半(会话区)    作用域 = 当前工作区  长期计划 / 最近对话 / 归档
+ *   下半(会话区)    作用域 = 当前工作区  最近对话 / 归档
  *
  * 这正是你要的那条行为:**切换顶部的工作空间会影响左侧会话列表**。
  * 下半的数据全部由 `activeWorkspaceId` 派生,所以「切了顶部 Tab 但左边没跟着变」
@@ -154,10 +154,6 @@ export function Sidebar({
           />
         ) : (
           <>
-            <Section title={t('workspace.plan')} defaultOpen={false}>
-              <EmptyState title={t('workspace.noPlan')} className="py-6" />
-            </Section>
-
             <Section
               title={t('workspace.recentChats')}
               defaultOpen

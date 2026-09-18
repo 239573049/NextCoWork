@@ -26,6 +26,7 @@ export { MODEL_CATALOG_FETCHED_AT } from './helpers'
 export { OLLAMA_REASONING_EFFORTS, OLLAMA_STANDARD_THINKING } from './vendors/ollama'
 
 import type { BuiltinModelRecord } from './types'
+import type { UpstreamProtocol } from '../provider'
 import { OPENAI, OPENAI_MEDIA } from './vendors/openai'
 import { OLLAMA } from './vendors/ollama'
 import { ANTHROPIC } from './vendors/anthropic'
@@ -109,4 +110,34 @@ export function findBuiltinModel(modelId: string): BuiltinModelRecord | undefine
       return wanted === candidate || wanted.endsWith(`/${candidate}`)
     })
   })
+}
+
+/**
+ * ★★ 厂商默认线形协议 —— 必须是**数据表**,不能散成各处的 `if (id.startsWith('claude'))`。
+ * 「claude 系模型默认走 anthropic 线形」这条规则有三个消费方:内置种子
+ * (`runtime.ts` 的 `builtinAlias`)、拉取模型列表(`ipc/provider.ts` 的 `setAliases`)
+ * 和老库回填(`runtime.ts` 那段一次性迁移)。各写一遍分支,漏掉一处的表现是
+ * 同一个模型在不同入口拿到不同协议,而且不报错。
+ *
+ * 只登记「线形错了有实质损失」的厂商。目前只有 anthropic:Claude 的思考、
+ * prompt 缓存、工具语义只在 anthropic 线形上是完整的,聚合站的 OpenAI 兼容层
+ * 常常把 `thinking` / `cache_control` 直接丢掉。别家(gpt、glm…)两种线形差异
+ * 小得多,统一钉死反而剥夺了「跟随供应商」这个合理默认。
+ */
+const MANUFACTURER_DEFAULT_PROTOCOL: Readonly<Record<string, UpstreamProtocol>> = {
+  anthropic: 'anthropic'
+}
+
+/**
+ * 该模型按厂商归属应默认使用的线形协议;目录查不到或厂商未登记时返回 undefined ——
+ * 含义是「跟随供应商协议」,不是「没有协议」。
+ *
+ * 聚合站的 `vendor/` 前缀 ID 与裸名等价(走 `findBuiltinModel` 的同一条匹配,
+ * `anthropic/claude-fable-5.1` 命中 `claude-fable-5-1` 那条)。
+ */
+export function defaultProtocolForModel(modelId: string): UpstreamProtocol | undefined {
+  const known = findBuiltinModel(modelId)
+  const result = known === undefined ? undefined : MANUFACTURER_DEFAULT_PROTOCOL[known.manufacturerId]
+  console.log('[debug-helper]', JSON.stringify(modelId), 'known=', known?.id, known?.manufacturerId, 'result=', result)
+  return result
 }

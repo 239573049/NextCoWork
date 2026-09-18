@@ -64,6 +64,55 @@ describe('BrowserManager · workspace and run isolation', () => {
     expect(manager.list('workspace-a')).toEqual([])
   })
 
+  it('允许一个 run 认领用户标签且拒绝另一个 run 抢占', () => {
+    const manager = new BrowserManager()
+    const tab = manager.open({ workspaceId: 'workspace-a', source: 'user', url: 'https://example.com' })
+
+    expect(manager.claim(tab.id, { workspaceId: 'workspace-a', runId: 'run-a' }).ownerRunId).toBe('run-a')
+    expect(manager.claim(tab.id, { workspaceId: 'workspace-a', runId: 'run-a' }).ownerRunId).toBe('run-a')
+    expect(() => manager.claim(tab.id, { workspaceId: 'workspace-a', runId: 'run-b' })).toThrow('另一个 Agent 会话')
+    expect(manager.navigate(tab.id, 'https://example.org', {
+      workspaceId: 'workspace-a',
+      runId: 'run-a'
+    }).url).toBe('https://example.org/')
+  })
+
+  it('同一会话的新 run 可以继续操作先前打开的标签', () => {
+    const manager = new BrowserManager()
+    const tab = manager.open({
+      workspaceId: 'workspace-a',
+      source: 'agent',
+      ownerRunId: 'run-a',
+      ownerSessionId: 'session-a',
+      url: 'https://example.com'
+    })
+
+    expect(manager.navigate(tab.id, 'https://example.org', {
+      workspaceId: 'workspace-a',
+      runId: 'run-b',
+      sessionId: 'session-a'
+    }).url).toBe('https://example.org/')
+    expect(() => manager.navigate(tab.id, 'https://example.net', {
+      workspaceId: 'workspace-a',
+      runId: 'run-c',
+      sessionId: 'session-b'
+    })).toThrow('只能操作')
+  })
+
+  it('拒绝认领 Agent 创建的无头标签', () => {
+    const manager = new BrowserManager()
+    const tab = manager.open({
+      workspaceId: 'workspace-a',
+      source: 'agent',
+      ownerRunId: 'run-a',
+      backend: 'headless',
+      url: 'https://example.com'
+    })
+
+    expect(tab.backend).toBe('headless')
+    expect(() => manager.claim(tab.id, { workspaceId: 'workspace-a', runId: 'run-a' })).toThrow('只能认领用户')
+  })
+
   it('用户标签用 clientTabId 幂等注册，避免事件与 invoke 竞态产生副本', () => {
     const manager = new BrowserManager()
     const first = manager.open({

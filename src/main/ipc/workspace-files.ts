@@ -382,6 +382,21 @@ export async function mutateWorkspaceFile(req: WorkspaceFileMutationRequest): Pr
         const stat = lstatSync(target)
         if (!stat.isFile() && !stat.isDirectory()) fail('unsupported')
         if (stat.isDirectory() && inside(target, destination)) fail('invalid-path')
+        /*
+          ★ `overwrite` **只对 rename 生效**,而且覆盖的实现是先把目标丢进系统
+          废纸篓再改名 —— 同这个文件 delete 分支的立场:失败不降级为永久删除。
+          直接 `renameSync` 盖上去的话,被盖掉的那份连废纸篓里都找不到。
+
+          ★★ 目标是**目录**时一律拒绝。确认框上写的是「覆盖这个文件」,
+          而把一整棵子树丢进废纸篓是另一回事,不能用同一句话换到同意。
+        */
+        if (req.overwrite === true && req.operation === 'rename') {
+          const existing = statIfPresent(destination)
+          if (existing) {
+            if (!existing.isFile()) fail('exists')
+            await shell.trashItem(destination)
+          }
+        }
         requireAbsent(destination)
         requireParent(destination)
         if (req.operation === 'copy') {

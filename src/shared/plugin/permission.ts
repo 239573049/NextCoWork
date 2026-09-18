@@ -48,7 +48,15 @@ export const PLUGIN_PERMISSIONS = [
   /** 剪贴板读写。读需要一次性确认。 */
   'clipboard',
   /** 系统通知。有频率限流。 */
-  'window.notify'
+  'window.notify',
+  /**
+   * 与其它插件通信(第 5 层):`connect(dep)` 调它们导出的 API、以及事件总线。
+   *
+   * ★ 能连谁**另有一道门**:目标必须在本插件清单 `dependencies` 里声明过。
+   * 这条能力是给用户看的「这个插件会和别的插件打交道」,`exposeApi`(自己对外
+   * 提供 API)不需要它 —— 提供不是消费。
+   */
+  'plugins'
 ] as const
 
 export type PluginPermission = (typeof PLUGIN_PERMISSIONS)[number]

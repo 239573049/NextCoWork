@@ -2,10 +2,19 @@ import type { BuiltinModelRecord } from '../types'
 import { model, textCapabilities, visionCapabilities, toggleThinking, effortThinking, budgetThinking, efforts, source } from '../helpers'
 
 export const ZHIPU: readonly BuiltinModelRecord[] = [
+  /*
+   * ★ 2026-09-18 修正:上下文 1M,思考从 toggle 改成 effort 档位(low/high/max,
+   * 对齐 flash 那行 official-api 核实的档位表)。之前吃 200_000 兜底 + toggle 线形,
+   * 表现有二:窗口被压成 200K;zcode 订阅里选 5.3 只有「开/关」没有强度滑杆
+   * (`modelThinkingLevels` 对 toggle 只给 auto/开/关三档)。线上形态由 thinking-adapter
+   * 的智谱方言负责:开时 `thinking:{type:'enabled'}` + `reasoning_effort`,按量端点
+   * 与 coding 订阅端点同吃这一份目录条目。
+   */
   model('zhipu', 'glm-5.3', 'GLM-5.3', {
     capabilities: visionCapabilities({ thinking: true }),
-    thinkingConfig: toggleThinking('thinking.type'),
-    reasoningEfforts: efforts,
+    contextWindow: 1_000_000,
+    thinkingConfig: effortThinking('reasoning_effort', 'max'),
+    reasoningEfforts: ['low', 'high', 'max'],
   }),
   model('zhipu', 'glm-5.3-flash', 'GLM-5.3-Flash', {
     capabilities: visionCapabilities({

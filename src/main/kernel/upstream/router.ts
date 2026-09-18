@@ -57,6 +57,17 @@ const MAX_ATTEMPTS = 3
 const MAX_NETWORK_ATTEMPTS = 6
 const DEFAULT_BASE_DELAY_MS = 500
 /**
+ * 可重试的 provider 错误(5xx / overloaded / 网关转发失败)专用的退避基数,
+ * 和上面那个**刻意不是一个数**。
+ *
+ * ★★ 500ms 起步的指数退避只对**网络层**抖动是对的 —— TCP 重传、DNS 换源,那类
+ * 故障毫秒级自愈。网关回 5xx 不是抖动:是它后面那家挂了或者过载,恢复窗口至少
+ * 是秒级。亚秒级退回去只是再吃一次同样的错,三次机会两秒内用光,用户看到的
+ * 是「报错一条接一条地刷」而不是「在慢慢重试」。上游给了 `Retry-After` 依旧
+ * 一切以它为准(见 `retryDelayFor`)。
+ */
+const DEFAULT_PROVIDER_ERROR_FLOOR_MS = 4_000
+/**
  * 默认值取自设置层的 `DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS` —— 那边是
  * 「设置页那一栏的默认」,这边是「没注入函数时的兜底」,两者必须是同一个数。
  */
@@ -64,9 +75,10 @@ const DEFAULT_IDLE_TIMEOUT_MS = DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS * 1000
 /**
  * 限流(429)专用的退避基数,和上面那个**刻意不是一个数**。
  *
- * ★★ 500ms 起步的指数退避对 5xx / 网络抖动是对的 —— 那类故障是瞬时的,退得越快
+ * ★★ 500ms 起步的指数退避对**网络抖动**是对的 —— 那类故障是瞬时的,退得越快
  * 恢复越快。**限流不是**:配额窗口是分钟级的,0.5s、1s 退回去只是再撞两次墙,
  * 三次机会两秒内用光,然后报一条「超出速率限制」——用户看到的是「重试根本没发生」。
+ * (可重试的 provider 5xx 是第三张表 `DEFAULT_PROVIDER_ERROR_FLOOR_MS`,理由见那行。)
  * 上游给了 `Retry-After` 就一切以它为准(见 `retryDelayFor`),这个数只在**没给**
  * 的时候兜底,而 Azure / 各家网关经常不给。
  */
@@ -179,6 +191,11 @@ export interface UpstreamRouterOptions {
   idleTimeoutMs?: number | (() => number)
   /** 限流退避的基数。见 `DEFAULT_RATE_LIMIT_FLOOR_MS`;测试压成 0 就不会真的睡。 */
   rateLimitFloorMs?: number
+  /**
+   * 可重试 provider 错误(5xx)退避的基数。见 `DEFAULT_PROVIDER_ERROR_FLOOR_MS`;
+   * 测试压成 0 就不会真的睡 —— 否则每个 500 用例都要等上几秒。
+   */
+  providerErrorFloorMs?: number
   /** Synchronous sink; failures are isolated so telemetry can never fail a request. */
   onUsageAttempt?: (record: UnpricedUsageAttempt) => void
   /**
@@ -225,6 +242,7 @@ export class UpstreamRouter {
   private readonly baseDelayMs: number
   private readonly idleTimeoutMs: () => number
   private readonly rateLimitFloorMs: number
+  private readonly providerErrorFloorMs: number
   private readonly onUsageAttempt: ((record: UnpricedUsageAttempt) => void) | undefined
   private readonly priceAttempt: UpstreamRouterOptions['priceAttempt']
   /**
@@ -244,6 +262,7 @@ export class UpstreamRouter {
       ? idleTimeout
       : () => idleTimeout ?? DEFAULT_IDLE_TIMEOUT_MS
     this.rateLimitFloorMs = opts.rateLimitFloorMs ?? DEFAULT_RATE_LIMIT_FLOOR_MS
+    this.providerErrorFloorMs = opts.providerErrorFloorMs ?? DEFAULT_PROVIDER_ERROR_FLOOR_MS
     this.onUsageAttempt = opts.onUsageAttempt
     this.priceAttempt = opts.priceAttempt
     this.credentials = new CredentialResolver(host, opts.onCredentialChanged)
@@ -392,14 +411,16 @@ export class UpstreamRouter {
   }
 
   /**
-   * 这次失败该退避多久。
+   * 这次失败该退避多久。三张表:限流、可重试的 provider 5xx、其余(网络抖动)。
    *
    * ★ 上游给了 `Retry-After` 就**只听它的**,不套下面那个下限:它知道配额窗口
    * 什么时候重置,我们不知道。(`retry-after: 0` 是合法的「立刻再来」,别抬成 4 秒。)
    */
   private retryDelayFor(err: AgentError, attempt: number): number {
     if (err.retryAfterMs !== undefined) return Math.min(err.retryAfterMs, MAX_RETRY_DELAY_MS)
-    const base = err.code === 'rate_limit' ? this.rateLimitFloorMs : this.baseDelayMs
+    const base = err.code === 'rate_limit' ? this.rateLimitFloorMs
+      : err.code === 'provider' && err.retryable === true ? this.providerErrorFloorMs
+      : this.baseDelayMs
     return Math.min(base * 2 ** attempt, MAX_RETRY_DELAY_MS)
   }
 

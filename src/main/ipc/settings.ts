@@ -10,6 +10,7 @@ import { applyProxy } from '../net/proxy'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { applyThemePreference } from './app'
+import { notifyPluginsThemeChanged } from './plugins'
 import { profileSettings, syncLegacyProfile } from './theme'
 
 export function getSettings(): AppSettings {
@@ -29,6 +30,8 @@ export function updateSettings(patch: AppSettingsPatch): AppSettings {
   if (patch.theme !== undefined && patch.theme !== before.theme) {
     const resolved = applyThemePreference(next.theme)
     windows.emitToAll('theme:changed', { resolved })
+    // 插件那一路是独立通道 —— 渲染层的 emitToAll 到不了插件宿主窗口。
+    notifyPluginsThemeChanged(resolved)
   }
 
   /*

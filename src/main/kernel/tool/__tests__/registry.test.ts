@@ -71,6 +71,20 @@ describe('ToolRegistry · 注册与命名', () => {
     expect(second.externalName).toBe(first.externalName)
     expect(r.resolveByExternalName(first.externalName)?.description).toBe('新')
   })
+
+  /**
+   * reserveName 只预留名字、不注册工具 —— 插件 catalog 在激活前就要 externalName。
+   * 关键:预留的名字与将来真正 register 分配的**同一个**,否则历史转录/presenter 失配。
+   */
+  it('reserveName 预留的名字与随后 register 的一致(幂等)', () => {
+    const r = new ToolRegistry()
+    const reserved = r.reserveName('plugin__acme_demo__create_task')
+    expect(r.size).toBe(0)
+    expect(r.reserveName('plugin__acme_demo__create_task')).toBe(reserved)
+    const registered = r.register(reg({ internalId: 'plugin__acme_demo__create_task' }))
+    expect(registered.externalName).toBe(reserved)
+    expect(r.resolveByExternalName(reserved)?.internalId).toBe('plugin__acme_demo__create_task')
+  })
 })
 
 describe('ToolRegistry · 下线', () => {

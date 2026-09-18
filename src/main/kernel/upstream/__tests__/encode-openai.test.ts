@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage } from '../../../../shared/agent/message'
 import { encodeUpstream } from '../codec'
-import { encodeOpenAIChat } from '../encode/openai-chat'
+import { encodeOpenAIChat, toOpenAIChatMessages } from '../encode/openai-chat'
 import { encodeOpenAIResponses } from '../encode/openai-responses'
 import { REQUEST, reasoningItem } from './openai-fixtures'
 
@@ -47,6 +47,36 @@ describe('OpenAI request encoders', () => {
       ]
     })
     expect(history).toEqual(before)
+  })
+
+  it('encodes browser screenshots as model-visible image inputs after tool receipts', () => {
+    const messages = [
+      assistantMessage('shot-a', [{ type: 'tool_call', callId: 'shot-1', name: 'browser_screenshot', input: {} }], 0),
+      toolResultMessage('shot-r', [{
+        type: 'tool_result',
+        callId: 'shot-1',
+        isError: false,
+        output: {
+          content: '截图',
+          images: [{ mime: 'image/png', dataRef: 'data:image/png;base64,AQID' }]
+        }
+      }], 0)
+    ]
+
+    expect(toOpenAIChatMessages(messages)).toMatchObject([
+      { role: 'assistant' },
+      { role: 'tool', tool_call_id: 'shot-1', content: '截图' },
+      { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } }] }
+    ])
+    const responses = encodeOpenAIResponses({ ...REQUEST, messages }, 'gpt-test', 'k').body as { input: unknown[] }
+    expect(responses.input).toContainEqual({
+      type: 'function_call_output',
+      call_id: 'shot-1',
+      output: [
+        { type: 'input_text', text: '截图' },
+        { type: 'input_image', image_url: 'data:image/png;base64,AQID', detail: 'auto' }
+      ]
+    })
   })
 
   it.each(['gpt-5', 'gpt-5.4', 'openai/gpt-5', 'o3', 'o4-mini'])('uses max_completion_tokens for %s', (model) => {

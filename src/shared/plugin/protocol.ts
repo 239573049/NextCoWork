@@ -39,6 +39,18 @@ export interface PluginMethodMap {
   'env.clipboardRead': { params: Record<string, never>; result: { text: string } }
   'env.clipboardWrite': { params: { text: string }; result: Record<string, never> }
 
+  /*
+    appearance —— 宿主当前的深浅色。
+    **不挂权限**(同 `env.appInfo`):它不含用户数据,也不扩展任何访问面,
+    而一个连主题都要申请才能读的插件系统,结果是所有插件都申请,权限表失去意义。
+
+    `subscribe` 之后主题变化经 `kind: 'event'` 反向推送(见 `PluginInvocation`)。
+    没有 unsubscribe:插件停用时整个宿主页面就销毁了,订阅跟着一起没,
+    多一条只能被漏调的 API。
+  */
+  'appearance.get': { params: Record<string, never>; result: { appearance: 'light' | 'dark' } }
+  'appearance.subscribe': { params: Record<string, never>; result: Record<string, never> }
+
   // l10n / 权限 —— 插件自查,不碰别人
   'permissions.contains': { params: { permissions: PluginPermission[] }; result: { granted: boolean } }
   'permissions.request': { params: { permissions: PluginPermission[]; reasonKey: string }; result: { granted: boolean } }
@@ -79,7 +91,7 @@ export interface PluginMethodMap {
   'commands.register': { params: { commandId: string }; result: Record<string, never> }
   'commands.unregister': { params: { commandId: string }; result: Record<string, never> }
   'commands.execute': { params: { commandId: string; args?: unknown }; result: { value: unknown } }
-  'tools.register': { params: { name: string; description: string; inputSchema: unknown; readOnly: boolean; destructive: boolean; needsNetwork: boolean }; result: Record<string, never> }
+  'tools.register': { params: { name: string; description: string; inputSchema: unknown; readOnly: boolean; destructive: boolean; needsNetwork: boolean; interactive?: boolean }; result: Record<string, never> }
   'tools.unregister': { params: { name: string }; result: Record<string, never> }
 
   // agent —— 拦截器与上下文提供者的注册(裁决本身走 invocation 反向通道)
@@ -120,6 +132,30 @@ export interface PluginMethodMap {
 
   // 诊断 —— 插件自己往活动日志里写一条,便于作者排查
   'diagnostics.log': { params: { level: 'info' | 'warn' | 'error'; message: string }; result: Record<string, never> }
+
+  /**
+   * 运行中的工具推一条进度 / 一张实时卡片(第 2 层交互式)。
+   *
+   * ★ **无权限**:它只作用于**这个工具自己这次调用**(按 callId 定位),推不到别处。
+   * message / card 都是**易失的**(不进转录),card 经 `sanitizeToolCard` 消毒后
+   * 由宿主经 `tool_progress` 事件转发给渲染层。工具已结束或 callId 对不上时静默丢弃。
+   */
+  'tool.progress': { params: { callId: string; message?: string; card?: unknown }; result: Record<string, never> }
+
+  // ───────── 第 5 层:插件间通信 ─────────
+
+  /** 声明本插件对外导出的 API 方法名(无权限 —— 提供不是消费)。用于 UI/诊断与路由校验。 */
+  'plugins.expose': { params: { methods: string[] }; result: Record<string, never> }
+  /**
+   * 调用另一个插件导出的 API。权限 `plugins` + 目标必须在本清单 `dependencies` 里。
+   * 宿主做 broker:唤醒目标 → 转发到它的 `api.call` → 把返回值带回来。
+   */
+  'plugins.invoke': { params: { target: string; method: string; args: unknown[] }; result: { value: unknown } }
+  /** 往一个 topic 广播事件。权限 `plugins`。宿主扇出给该 topic 的订阅者(不含自己)。 */
+  'plugins.emitEvent': { params: { topic: string; payload: unknown }; result: Record<string, never> }
+  /** 订阅 / 退订一个 topic。权限 `plugins`。 */
+  'plugins.subscribeEvent': { params: { topic: string }; result: Record<string, never> }
+  'plugins.unsubscribeEvent': { params: { topic: string }; result: Record<string, never> }
 }
 
 export type PluginMethod = keyof PluginMethodMap
@@ -141,6 +177,9 @@ export const PLUGIN_METHOD_PERMISSION = {
   'env.openExternal': null,
   'env.clipboardRead': 'clipboard',
   'env.clipboardWrite': 'clipboard',
+
+  'appearance.get': null,
+  'appearance.subscribe': null,
 
   'permissions.contains': null,
   'permissions.request': null,
@@ -190,7 +229,15 @@ export const PLUGIN_METHOD_PERMISSION = {
 
   'configuration.get': null,
 
-  'diagnostics.log': null
+  'diagnostics.log': null,
+
+  'tool.progress': null,
+
+  'plugins.expose': null,
+  'plugins.invoke': 'plugins',
+  'plugins.emitEvent': 'plugins',
+  'plugins.subscribeEvent': 'plugins',
+  'plugins.unsubscribeEvent': 'plugins'
 } satisfies Record<PluginMethod, PluginPermission | null>
 
 export function isPluginMethod(value: unknown): value is PluginMethod {
@@ -235,6 +282,8 @@ export interface PluginInvocation {
     | 'deactivate'
     | 'tool.execute'
     | 'tool.abort'
+    /** 用户点了实时卡片上的按钮 —— 送给仍在运行的那次工具调用(第 2 层) */
+    | 'tool.action'
     | 'command.run'
     | 'event'
     | 'interceptor.willInvoke'
@@ -242,6 +291,10 @@ export interface PluginInvocation {
     | 'context.provide'
     | 'customEditor.load'
     | 'customEditor.save'
+    /** 宿主 → 目标插件:调用它导出的 API 方法(第 5 层) */
+    | 'api.call'
+    /** 宿主 → 订阅者:投递一条插件事件(第 5 层) */
+    | 'plugins.event'
   payload: unknown
 }
 
@@ -270,6 +323,13 @@ export type PluginMessage =
 export const PLUGIN_TIMEOUT = {
   ACTIVATE_MS: 10_000,
   TOOL_MS: 60_000,
+  /**
+   * 交互式工具的硬上限(第 2 层)——工具挂起等用户点按钮,60s 太短。
+   *
+   * ★ 这是**宿主的最后一道闸**(fork B):不信插件会自律地超时,取消随时可用
+   * (= abort),但一个声明了 interactive 却永不返回的工具最多把这一轮钉 5 分钟。
+   */
+  INTERACTIVE_TOOL_MS: 5 * 60_000,
   INTERCEPTOR_MS: 3_000,
   CONTEXT_MS: 3_000,
   COMMAND_MS: 30_000,

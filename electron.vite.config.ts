@@ -43,6 +43,13 @@ function cspDevPlugin(): Plugin {
     "media-src 'self' ncw:",
     "font-src 'self' data:",
     "connect-src 'self' ncw: ws://localhost:* http://localhost:* ws://127.0.0.1:* http://127.0.0.1:*",
+    /*
+      ★ 插件视图的 iframe。**不能省**:没有 frame-src 时回退到
+      `default-src 'self'`,`ncw-plugin://` 直接被拦 —— 自定义编辑器的
+      标签页开得出来却一片空白(同 src/renderer/index.html 里那段说明)。
+      自定义 scheme 同样要点名,`*` 覆盖不到。
+    */
+    'frame-src ncw-plugin:',
     "object-src 'none'",
     "base-uri 'none'"
   ].join('; ')

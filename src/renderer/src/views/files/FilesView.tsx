@@ -757,7 +757,7 @@ function useToolbarCompact(ref: React.RefObject<HTMLElement | null>): boolean {
  * 「根在哪 / 选中哪个 / 打开时叫谁」,这样它在测试里是纯的。
  */
 export function FilesTab({ tab, workspace }: { tab: InnerTab; workspace: Workspace }): ReactNode {
-  const openPath = useTabsStore((s) => s.openPath)
+  const openFile = useTabsStore((s) => s.openFile)
 
   /*
     选中行 = **右侧工作台**正在看的那个文件。选择器只回一个字符串,
@@ -782,7 +782,7 @@ export function FilesTab({ tab, workspace }: { tab: InnerTab; workspace: Workspa
       workspace={workspace}
       rootPath={tab.kind === 'files' ? tab.ref.path : ''}
       selectedPath={tab.kind === 'files' ? tab.ref.selectedPath ?? selectedPath : selectedPath}
-      onOpenFile={(path, name) => openPath(workspace.id, 'doc', path, name)}
+      onOpenFile={(path, name) => openFile(workspace.id, path, name)}
     />
   )
 }

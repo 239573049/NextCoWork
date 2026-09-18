@@ -11,11 +11,15 @@
  * 不需要动这里一行。
  */
 import { Bot, Brain, CheckCircle2, ChevronRight, CircleAlert, Clock3, ListChecks, Square } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
 import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
-import { presenterOf } from "../../../../shared/domain/tool-presenter";
+import {
+  presenterOf,
+  pluginPresentersSnapshot,
+  subscribePluginPresenters,
+} from "../../../../shared/domain/tool-presenter";
 import { agentColorHex } from "../../../../shared/domain/agent-def";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
@@ -23,6 +27,7 @@ import { agentErrorText } from "../../i18n/agent";
 import { AgentMarkdown } from "../../components/markdown";
 import { Surface, SurfaceReveal, SurfaceRow } from "../../components/ui/Surface";
 import { ToolDetail } from "./ToolDetail";
+import { MAX_PARTIAL_JSON_CHARS, parsePartialJson } from "./partial-json";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 import { abortRun } from "../../services/agent";
 import { getSession } from "../../services/sessions";
@@ -117,14 +122,37 @@ export function ToolCallCard({
    */
   const [manual, setManual] = useState<boolean | null>(null);
 
+  // 订阅插件 presenter 注入版本:catalog 若在这张卡片**提交之后**才加载,
+  // presenterOf 是命令式查表、不会自动重渲,已提交的插件工具卡片会永久停在
+  // 兜底标题。订阅 version 让注入到达时重渲一次。见 tool-presenter 注入层注释。
+  useSyncExternalStore(subscribePluginPresenters, pluginPresentersSnapshot);
+
   const status: ToolViewStatus = call === undefined ? "pending" : call.status;
-  const shownInput = call?.input ?? input;
+  // 卡片只需要一个有界预览。否则 Write 的大段 content 每来一帧就从头重扫一次，
+  // 参数生成过程会退化成二次方工作量；超过上限后前缀不变，useMemo 也不再重算。
+  const pendingSource = typeof input === "string"
+    ? input.slice(0, MAX_PARTIAL_JSON_CHARS)
+    : input;
+  const pendingInput = useMemo(() => {
+    if (typeof pendingSource !== "string") return pendingSource;
+    const parsed = parsePartialJson(pendingSource);
+    return parsed === undefined ? pendingSource : parsed;
+  }, [pendingSource]);
+  // ★ 上游参数还没闭合时 `input` 是原始 JSON 前缀。只把解析出的快照交给展示层；
+  // tool_start 到达后立刻切回内核严格解析的 `call.input`，绝不拿容错结果执行工具。
+  const shownInput = call?.input ?? pendingInput;
   const toolName = call?.name ?? name;
   const presenter = presenterOf(toolName);
 
+  // 结果快照卡片(output.card,静态)或运行中的实时卡片(call.card,第 2 层交互)。
+  // 实时卡片优先:工具还在跑、这张才是此刻在变的。
+  const liveCard = call?.card;
+  const card = liveCard ?? call?.output?.card;
+
   // 失败默认展开:`toolFail` 的文案是设计过的可执行提示(见 fs.ts 里 Edit 失败
   // 那段三段式说明),把它藏在折叠里等于白写。
-  const open = manual ?? status === "error";
+  // 运行中的实时卡片也默认展开:它可能要用户点(审批/表单),藏起来就没人应答。
+  const open = manual ?? (status === "error" || liveCard !== undefined);
 
   const duration = call === undefined ? undefined : formatCallDuration(call);
   const summary = presenter.summary?.(shownInput, call?.output);
@@ -180,6 +208,9 @@ export function ToolCallCard({
           input={shownInput}
           output={call?.output}
           isError={status === "error"}
+          toolName={toolName}
+          callId={call?.callId}
+          card={card}
         />
       </SurfaceReveal>
     </Surface>

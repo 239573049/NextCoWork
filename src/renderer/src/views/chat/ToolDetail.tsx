@@ -16,6 +16,7 @@ import type { ToolShape } from "../../../../shared/domain/tool-presenter";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import { computeDiff, type DiffRow } from "./diff";
+import { CardRenderer } from "./CardRenderer";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -222,6 +223,14 @@ function OutputBlock({
           {t("chat.tool.truncated", { bytes: output.originalBytes ?? "?" })}
         </span>
       )}
+      {(output.images ?? []).map((image, index) => (
+        <img
+          key={`${image.dataRef.slice(0, 48)}:${index}`}
+          src={image.dataRef}
+          alt={t("chat.tool.result")}
+          className="mt-2 max-h-96 max-w-full rounded-lg border border-hairline object-contain"
+        />
+      ))}
     </Labeled>
   );
 }
@@ -512,9 +521,24 @@ export function ToolDetail({
   input,
   output,
   isError,
+  toolName,
+  callId,
+  card,
 }: {
   shape: ToolShape;
+  /** 工具的 externalName —— 仅 frame 卡片反查 pluginId 时用 */
+  toolName?: string;
+  callId?: string;
+  /**
+   * 要渲染的卡片。调用方决定优先级:结果快照(`output.card`)或运行中的实时卡片
+   * (`ToolCallState.card`,第 2 层)。给了它就渲染卡片,**与 shape 正交**。
+   */
+  card?: import("../../../../shared/agent/tool-card").ToolCard;
 } & DetailProps): ReactNode {
+  // ★ card 是 UI 轨专属,编码器早已 strip,模型看不到它。
+  if (card !== undefined) {
+    return <CardRenderer card={card} toolName={toolName} callId={callId} />;
+  }
   const Renderer = DETAIL_RENDERERS[shape];
   return <Renderer input={input} output={output} isError={isError} />;
 }

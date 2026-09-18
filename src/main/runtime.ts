@@ -87,7 +87,7 @@ import { PRICING_SEED } from '../shared/domain/pricing-seed'
 import { findPricing, priceOf } from '../shared/domain/pricing'
 import type { ModelPricing, PriceResult, RunCost } from '../shared/domain/pricing'
 import type { TokenUsage } from '../shared/agent/stream'
-import { findBuiltinModel } from '../shared/domain/model-catalog-inventory'
+import { defaultProtocolForModel, findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
 import { AgentDraftGenerator } from './agent-draft'
@@ -353,11 +353,14 @@ const BUILTIN_UPSTREAMS: readonly {
  */
 function builtinAlias(providerId: string, model: string, index: number): ModelAlias {
   const known = findBuiltinModel(model)
+  // ★ 厂商默认协议(claude 系 → anthropic 线形),表在 model-catalog-inventory ——
+  // 拉取列表(setAliases)和老库回填用的是同一张表,别在这里写第二份判断
+  const wireProtocol = defaultProtocolForModel(model)
   return {
     alias: model,
     providerId,
     upstreamModel: model,
-    ...(known?.manufacturerId === 'anthropic' ? { protocolOverride: 'anthropic' as const } : {}),
+    ...(wireProtocol === undefined ? {} : { protocolOverride: wireProtocol }),
     // 表内顺序即优先级 —— 预设里 deepseek 排在前面是因为设置项要指它们
     priority: index * 10,
     capabilities: known?.capabilities ?? {
@@ -421,8 +424,9 @@ function seedBuiltinUpstream(): void {
         // Migrate the built-in Claude seed introduced before per-model
         // protocols existed. Preserve any explicit user override.
         const existingAlias = store.listAliases().find((a) => a.providerId === preset.id && a.alias === model)
-        if (existingAlias !== undefined && existingAlias.protocolOverride === undefined && findBuiltinModel(model)?.manufacturerId === 'anthropic') {
-          store.putAlias({ ...existingAlias, protocolOverride: 'anthropic' })
+        const wireProtocol = defaultProtocolForModel(model)
+        if (existingAlias !== undefined && existingAlias.protocolOverride === undefined && wireProtocol !== undefined) {
+          store.putAlias({ ...existingAlias, protocolOverride: wireProtocol })
         }
         return
       }

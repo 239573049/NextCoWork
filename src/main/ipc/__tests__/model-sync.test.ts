@@ -73,6 +73,19 @@ describe('model metadata synchronization through IPC and runtime', () => {
     expect(rows.find((row) => row.upstreamModel === 'new-model')?.protocolOverride).toBeUndefined()
   })
 
+  it('pins anthropic-family models to the anthropic protocol on openai-family providers', () => {
+    const rows = setAliases('relay', ['anthropic/claude-opus-5', 'z-ai/GLM-5.3-Flash'])
+    expect(rows.find((row) => row.upstreamModel === 'anthropic/claude-opus-5')?.protocolOverride).toBe('anthropic')
+    expect(rows.find((row) => row.upstreamModel === 'z-ai/GLM-5.3-Flash')?.protocolOverride).toBeUndefined()
+  })
+
+  it('lets anthropic-family models inherit when the provider already speaks anthropic', () => {
+    upsertProvider({ id: 'anthropic-relay', name: 'Anthropic Relay', protocol: 'anthropic',
+      baseUrl: 'https://relay.invalid', credentialRef: '', priority: 0, enabled: true })
+    const [row] = setAliases('anthropic-relay', ['claude-fable-5.1'])
+    expect(row?.protocolOverride).toBeUndefined()
+  })
+
   it('keeps effort parameter paths on save and rejects inconsistent supported/default efforts', () => {
     const [model] = setAliases('relay', [glm.id])
     expect(updateModel({ ...model!, thinkingConfig: { ...model!.thinkingConfig!, defaultBudgetTokens: undefined } })

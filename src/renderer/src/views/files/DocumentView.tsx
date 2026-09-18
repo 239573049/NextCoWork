@@ -70,7 +70,7 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
         format && entry.mode === 'preview'
           ? format === 'html'
             ? <HtmlPreview content={entry.draft} path={path} />
-            : <MarkdownPreview content={entry.draft} workspaceId={workspaceId} path={path} onOpenFile={(target) => useTabsStore.getState().openPath(workspaceId, 'doc', target, target.split('/').pop() ?? target)} />
+            : <MarkdownPreview content={entry.draft} workspaceId={workspaceId} path={path} onOpenFile={(target) => useTabsStore.getState().openFile(workspaceId, target)} />
           : <CodeEditor path={path} value={entry.draft} onChange={(value) => edit(workspaceId, path, value)} onSave={() => { void save(workspaceId, path) }} />
       ) : file?.kind === 'image' ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6">

@@ -11,10 +11,16 @@
       ★ `ncw:` 是附件协议(src/main/net/attachment-protocol.ts)。**两处 CSP 都要有它** ——
       这里是生产版,dev 版在 electron.vite.config.ts 的 DEV_CSP 里。只改一处的话
       开发时正常、打包后图片全不显示,而且不报错,只留一行 CSP 警告。
+
+      ★ `frame-src ncw-plugin:` 同理,而且它**不能靠 default-src 兜底**:没写
+      frame-src 时回退到 `default-src 'self'`,插件视图的 iframe 直接被拦
+      ——「Framing 'ncw-plugin://…' violates … default-src 'self'」。表现是
+      自定义编辑器标签页开出来却一片空白,随后 postMessage 还会报
+      「recipient window's origin ('null')」,因为那个 frame 根本没加载成。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ncw: https: http:; media-src 'self' ncw:; font-src 'self' data:; connect-src 'self' ncw:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ncw: https: http:; media-src 'self' ncw:; font-src 'self' data:; connect-src 'self' ncw:; frame-src ncw-plugin:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     />
     <title>NextCoWork</title>
   </head>

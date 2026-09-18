@@ -167,6 +167,19 @@ describe('applyEvent · 工具状态', () => {
     expect(s.tools['c1']?.status).toBe('error')
   })
 
+  it('★ tool_progress 携带的实时卡片进入 ToolCallState.card,tool_end 时清掉', () => {
+    let s = applyEvent(emptyTranscript(), start)
+    s = applyEvent(s, {
+      type: 'tool_progress',
+      callId: 'c1',
+      progress: { callId: 'c1', message: '等待确认', card: { kind: 'declarative', blocks: [{ type: 'status', label: '待批' }] } }
+    })
+    expect(s.tools['c1']?.card).toEqual({ kind: 'declarative', blocks: [{ type: 'status', label: '待批' }] })
+    // 结束后实时卡片必须清掉,让展示切到 output.card(结果快照)
+    s = applyEvent(s, { type: 'tool_end', callId: 'c1', output: { content: 'ok' }, isError: false })
+    expect(s.tools['c1']?.card).toBeUndefined()
+  })
+
   it('★ 没见过 start 的 tool_end 不能丢 —— 重放裁剪后可能真的只剩 end', () => {
     const s = applyEvent(emptyTranscript(), {
       type: 'tool_end',

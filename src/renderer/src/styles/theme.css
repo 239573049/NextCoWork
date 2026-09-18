@@ -619,6 +619,36 @@ body {
 }
 
 /*
+  进度条在「不知道还要多久」时的斜纹。装插件的授权、解压两段没有百分比可报,
+  而一条一动不动的空槽和一条卡死的进度条在界面上是一模一样的。
+
+  ★ 22.63 = 16 × √2 —— 45° 斜纹的周期沿 x 轴的投影。写 16 的话每播完一圈
+  回到起点时纹路会跳一下,而那个跳动比不动更像出了问题。
+
+  ★★ 这条纹在「减弱 / 关闭」动效档下是**静止**的(上面那段把
+  animation-duration 全局掐成 0)。这是可以接受的,因为**承载信息的是阶段
+  文案和百分比,条纹只是装饰** —— 不要照 Spinner.tsx 的先例去接
+  useMotionLevel() 加 Motion 兜底,那里需要兜底是因为它除了转圈没有别的
+  信息可给,这里不是。
+*/
+@keyframes progress-stripes {
+  from {
+    background-position-x: 0;
+  }
+  to {
+    background-position-x: 22.63px;
+  }
+}
+.progress-stripes {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 8px,
+    color-mix(in srgb, var(--color-fg) 7%, transparent) 8px 16px
+  );
+  animation: progress-stripes 900ms linear infinite;
+}
+
+/*
   系统里勾了「减弱动态效果」就别播 —— 前庭功能敏感的人看这类大块位移会晕。
   不写 0 而写 0.01ms:`transitionend` / `animationend` 照常触发,靠事件收尾的
   逻辑不会因为「动画从来没开始过」而卡住。usePresence 用的是定时器,不受影响。

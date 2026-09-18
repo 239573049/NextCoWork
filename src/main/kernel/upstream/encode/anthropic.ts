@@ -63,13 +63,26 @@ function toBlock(p: ContentPart): unknown | null {
     case 'tool_call':
       return { type: 'tool_use', id: p.callId, name: p.name, input: p.input ?? {} }
 
-    case 'tool_result':
+    case 'tool_result': {
+      // ★ `output.card` remains UI-only. `images` is the one explicit binary path because
+      // browser_screenshot must be visible to the model rather than rendered as base64 text.
+      const images = (p.output.images ?? []).map((image) => ({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: image.mime,
+          data: image.dataRef.slice(`data:${image.mime};base64,`.length)
+        }
+      }))
       return {
         type: 'tool_result',
         tool_use_id: p.callId,
-        content: p.output.content,
+        content: images.length === 0
+          ? p.output.content
+          : [{ type: 'text', text: p.output.content }, ...images],
         is_error: p.isError
       }
+    }
 
     case 'subagent':
       // 步骤 11:子代理的摘要作为 ToolResult 返回,所以到这里时它已经是

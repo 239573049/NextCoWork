@@ -11,7 +11,7 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { ChevronDown, Folder, PanelBottom, PanelRight, Pin, PinOff, Plus, Server, X } from "lucide-react";
+import { ChevronDown, Folder, PanelBottom, PanelRight, Pencil, Pin, PinOff, Plus, Server, X } from "lucide-react";
 import { isLocalEnvironment } from '../../../shared/domain/environment';
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { FeatureKind, OuterTab } from "../../../shared/domain/tab";
@@ -22,6 +22,7 @@ import { Menu, MenuItem, MenuSeparator } from "../components/ui/Menu";
 import { cn } from "../lib/cn";
 import { FEATURE_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
+import { TabRenameInput } from "./TabRenameInput";
 import { useI18n, type Translate } from "../i18n";
 import { Spinner } from '../components/ui/Spinner'
 
@@ -38,6 +39,7 @@ export function OuterTabBar({
   onClose,
   onTogglePin,
   onMove,
+  onRenameWorkspace,
   onOpenWorkspace,
   onPickWorkspace,
   onCreateWorkspace,
@@ -46,6 +48,7 @@ export function OuterTabBar({
   bottomPanelOpen,
   onToggleRightPanel,
   onToggleBottomPanel,
+  updateIndicator,
 }: {
   tabs: readonly OuterTab[];
   activeId: string | null;
@@ -56,6 +59,16 @@ export function OuterTabBar({
   onClose: (id: string) => void;
   onTogglePin: (id: string) => void;
   onMove: (from: number, to: number) => void;
+  /**
+   * 双击 / 右键「重命名工作区」的提交口。
+   *
+   * ★ **可选**:`settings/theme-studio/DesktopPreview.tsx` 也渲染这个组件当静态
+   * 示意图,那里一个真工作区都没有。不给就没有改名入口。
+   *
+   * ★★ 只对 `kind === 'workspace'` 的 Tab 开放 —— 功能 Tab(设置/扩展…)的标题
+   * 来自翻译 key,改了在另一种语言下就对不上,永远不可改名。
+   */
+  onRenameWorkspace?: (workspaceId: string, name: string) => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onPickWorkspace: () => void;
   onCreateWorkspace: () => void;
@@ -64,6 +77,15 @@ export function OuterTabBar({
   bottomPanelOpen: boolean;
   onToggleRightPanel: () => void;
   onToggleBottomPanel: () => void;
+  /**
+   * 插在右端那组开关左边的东西 —— 目前只有更新指示器。
+   *
+   * 走 slot 而不是让这里自己 `<UpdateIndicator />`,是因为主题工作室的
+   * `DesktopPreview` 也渲染这条 Tab 条:它是一张**静态示意图**,不该因为恰好
+   * 有个新版本就在预览里多冒出一颗图标。这条 Tab 条其余部分全是 props 驱动的,
+   * 让它自己去订阅 IPC 会是这里唯一一处有外部状态的地方。
+   */
+  updateIndicator?: ReactNode;
 }): ReactNode {
   const { t } = useI18n();
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
@@ -110,6 +132,10 @@ export function OuterTabBar({
     };
   }, [tabs, workspaces]);
 
+  /* 编辑态提升到条这一层:同一时刻只有一个 Tab 在改名(同 InnerTabBar) */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const canRename = (tab: OuterTab): boolean => onRenameWorkspace !== undefined && tab.kind === "workspace";
+
   return (
     /*
       ★ `self-stretch` 是**几何要件**,不是随手加的。没有它,这个根 div 的交叉轴尺寸
@@ -151,8 +177,17 @@ export function OuterTabBar({
             key={tab.id}
             data-outer-tab-id={tab.id}
             style={styleFor(i)}
-            onPointerDown={(e) => onPointerDown(e, i)}
-            onClick={() => onActivate(tab.id)}
+            onPointerDown={(e) => {
+              // 编辑中不接拖排序 —— 否则在输入框里拖选文字会把整张 Tab 拖走
+              if (tab.id === editingId) return;
+              onPointerDown(e, i);
+            }}
+            onClick={(e) => {
+              if (tab.id === editingId) return;
+              onActivate(tab.id);
+              // `e.detail >= 2` 判双击,理由同 InnerTabBar(不用计时器消歧)
+              if (e.detail >= 2 && canRename(tab)) setEditingId(tab.id);
+            }}
             onContextMenu={(event) => {
               event.preventDefault();
               setContextMenu({ tabId: tab.id, position: { x: event.clientX, y: event.clientY } });
@@ -180,7 +215,19 @@ export function OuterTabBar({
               className={cn("shrink-0", active ? "text-fg" : "text-icon")}
             />
             {tab.pinned === true && <Pin size={11} aria-hidden className="shrink-0 text-accent" />}
-            <span className="min-w-0 flex-1 truncate">{label}</span>
+            {tab.id === editingId ? (
+              <TabRenameInput
+                initial={label}
+                ariaLabel={t("nav.renameWorkspace")}
+                onSubmit={(value) => {
+                  setEditingId(null);
+                  if (tab.kind === "workspace") onRenameWorkspace?.(tab.ref.workspaceId, value);
+                }}
+                onCancel={() => setEditingId(null)}
+              />
+            ) : (
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+            )}
             {running && (
               <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
             )}
@@ -316,6 +363,7 @@ export function OuterTabBar({
         它们**是窗口级的**(见 stores/window.ts 的注释),所以不接受 Tab 参数。
       */}
       <div className="flex shrink-0 items-center gap-1 self-center">
+        {updateIndicator}
         <IconButton
           label={t("nav.bottomPanel")}
           size={28}
@@ -345,6 +393,18 @@ export function OuterTabBar({
           onClose={() => setContextMenu(null)}
         >
           {(close) => (
+            <>
+            {canRename(contextTab) && (
+              <MenuItem
+                icon={<Pencil size={14} />}
+                onSelect={() => {
+                  setEditingId(contextTab.id);
+                  close();
+                }}
+              >
+                {t("nav.renameWorkspace")}
+              </MenuItem>
+            )}
             <MenuItem
               icon={contextTab.pinned === true ? <PinOff size={14} /> : <Pin size={14} />}
               checked={contextTab.pinned === true}
@@ -355,6 +415,7 @@ export function OuterTabBar({
             >
               {contextTab.pinned === true ? t("nav.unpinTab") : t("nav.pinTab")}
             </MenuItem>
+            </>
           )}
         </ContextMenu>
       )}

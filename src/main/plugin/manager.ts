@@ -55,7 +55,9 @@ import { explainUnsupported } from './unsupported'
 import { recordActivity, clearActivity } from './diagnostics'
 import { CapabilityError, invokeCapability, type CapabilityContext } from './rpc'
 import { narrowWorkspacePath, wrapPluginContext } from './capabilities'
-import { isValidPluginToolName, toolRegistrationFor, type PluginToolDeclaration } from './tools'
+import { isValidPluginToolName, pluginToolId, toolRegistrationFor, type PluginToolDeclaration } from './tools'
+import { sanitizeToolCard } from '../../shared/agent/tool-card'
+import type { ToolProgress } from '../../shared/agent/tool'
 import type { ToolRegistration } from '../kernel/tool/registry'
 import { SUPPORTED_LOCALE_FILES, localeOfFile } from './locale-files'
 
@@ -73,6 +75,17 @@ interface PersistedPlugin {
   approvedRequired: PluginPermission[]
   installedAt: number
   updatedAt: number
+  /**
+   * 这个插件是从市场哪一条装来的。**只有市场安装才有值。**
+   *
+   * ★ 它回答的不是「叫什么」,而是「这个插件跟不跟市场走」。本地 ZIP /
+   * 目录装进来的那份没有 slug —— 用户手上可能是他自己改过的构建,
+   * 一次「全部更新」把它换成市场版,而他从没说过这个插件要跟市场走。
+   *
+   * ★ 不存进 `InstalledPlugin`:渲染层不需要知道 slug,更新检测整个在
+   * 主进程里完成,推给渲染层的是算好的 `PluginUpdate`。
+   */
+  slug?: string
 }
 
 type PersistedState = Record<string, PersistedPlugin>
@@ -88,6 +101,15 @@ export interface PluginRuntime {
   /** 销毁这个插件的隔离上下文。幂等。 */
   dispose(pluginId: string): void
   disposeAll(): void
+  /**
+   * 这个插件的宿主窗口此刻**真的还活着**吗(存在且没被销毁)。
+   *
+   * ★ 崩溃(`render-process-gone`)不会回头改 manager 的 `record.status` —— 于是
+   * status 可能停在 `active`,而窗口早没了。`wake` 用它在早返回前核实一次:不在了
+   * 就往下走重新 spawn(spawn 会先 dispose 掉死窗口)。可选:测试的假 runtime 不实现
+   * 时按「还活着」处理,保持旧行为。
+   */
+  isRunning?(pluginId: string): boolean
 }
 
 export interface PluginManagerDeps {
@@ -100,8 +122,15 @@ export interface PluginManagerDeps {
   setKv: (key: string, value: unknown) => void
   /** 当前工作区。路径类能力全部以它为根 */
   currentWorkspace: () => { id: string; rootPath: string }
-  /** 走既有八层权限链 */
-  approve: (pluginId: string, summary: { kind: 'write' | 'exec'; detail: string }) => Promise<boolean>
+  /** 宿主当前的深浅色。插件只读,不挂权限(见 `PLUGIN_METHOD_PERMISSION`) */
+  currentAppearance: () => 'light' | 'dark'
+  /**
+   * 跑命令前问用户。**只剩 `exec`** —— 写/删已经由能力门独自把关,
+   * 见 `rpc.ts` 里 `CapabilityContext.approve` 的注释。
+   */
+  approve: (pluginId: string, summary: { kind: 'exec'; detail: string }) => Promise<boolean>
+  /** 把文件挪进系统废纸篓(`shell.trashItem`)。插件删文件唯一的落点。 */
+  trash: (absolutePath: string) => Promise<void>
   /** catalog 变了,推 `plugins:changed` */
   emitChanged: () => void
   /** 插件的 l10n bundle 注册到渲染层 */
@@ -114,6 +143,15 @@ export interface PluginManagerDeps {
   requestPermissions: (pluginId: string, permissions: readonly PluginPermission[], reasonKey: string) => Promise<boolean>
   /** 贡献的工具变了 —— 下一次装配要重新问一遍 provider */
   onToolsChanged: () => void
+  /**
+   * 预留一个插件工具的 externalName —— **不注册**,只查权威名字。委托给
+   * `ToolRegistry.reserveName`(记忆化 namer),catalog 投影用。
+   *
+   * ★ 插件工具只有被激活后跑 `tools.register` 才真正 register,而工具卡片
+   * 贡献要在激活**之前**就画出来,渲染层此刻已需要 externalName 去 join。
+   * 因 namer 记忆化,此处预留的名字与将来 register 分配的**同一个**,不失配。
+   */
+  reserveName: (internalId: string) => string
   /**
    * 插件要给用户看一条消息。
    *
@@ -147,6 +185,8 @@ interface PluginRecord {
   diagnostics: PluginDiagnostic[]
   installedAt: number
   updatedAt: number
+  /** 从市场哪一条装来的,本地包装的没有。见 `PersistedPlugin.slug` */
+  slug?: string
   /** 最后一次被用到的时刻 —— 休眠判定用它 */
   touchedAt: number
   /** 这个插件注册过的命令 / 工具,禁用时要级联清掉 */
@@ -155,17 +195,41 @@ interface PluginRecord {
   /** 注册过拦截器 / 上下文提供者吗 */
   interceptor: boolean
   contextProvider: boolean
+  /** 订阅了主题变化吗 —— 只给订阅了的推,没订阅的不必为此醒着 */
+  appearanceSubscriber: boolean
   /** 状态栏那几格。禁用时清空 —— 插件没了,它的读数不该还挂在那儿 */
   statusBar: Map<string, PluginStatusBarItem>
   /** 有未保存改动的自定义编辑器文档:`documentId → 文件路径` */
   dirtyDocuments: Map<string, string>
+  /** 本插件对外导出的 API 方法名(`ncw.plugins.exposeApi`)。禁用时清空。 */
+  exposedApi: Set<string>
+  /** 本插件订阅了的事件 topic —— 禁用时要从全局订阅表里摘掉。 */
+  subscribedTopics: Set<string>
 }
 
 export class PluginManager {
   private readonly records = new Map<string, PluginRecord>()
   private sleepTimer: NodeJS.Timeout | undefined
+  /** 覆盖安装期间压住 `plugins:changed` —— 见 `install()` 里的说明 */
+  private suppressChanged = false
+  /**
+   * 正在执行的插件工具的 `ctx.emit`,按 callId 索引。工具运行期间存在,结束即删。
+   *
+   * ★ 带 `pluginId`:`tool.progress` RPC 要核对调用方就是这次工具调用的主人,
+   * 否则一个插件能拿别人工具的 callId 往它的卡片上推东西(callId 虽不易猜,但
+   * 「不易猜」不是授权)。
+   */
+  private readonly liveToolEmits = new Map<string, { pluginId: string; emit: (progress: ToolProgress) => void }>()
+  /** 事件总线的订阅表:topic → 订阅它的 pluginId 集合(第 5 层)。 */
+  private readonly eventSubscribers = new Map<string, Set<string>>()
 
   constructor(private readonly deps: PluginManagerDeps) {}
+
+  /** 只有**中间态**走这条(目前是 `disable()`);终态一律直接 `deps.emitChanged()` */
+  private notifyChanged(): void {
+    if (this.suppressChanged) return
+    this.deps.emitChanged()
+  }
 
   /**
    * 扫描插件目录,读清单,恢复用户的决定。**不激活任何东西。**
@@ -216,6 +280,15 @@ export class PluginManager {
       granted: record.granted
     }
     const pending = record.manifest.permissions.filter((p) => !record.approvedRequired.includes(p))
+    /*
+      ★ 工具的 externalName 投影从**清单**(contributes.tools)算,不从运行期
+      `record.tools` —— 后者只有激活后才有,而卡片贡献要在激活前就画出来。
+      `reserveName` 记忆化,与将来真正 register 时分配的名字一致(见 deps 注释)。
+    */
+    const tools = record.manifest.contributes.tools.map((t) => ({
+      name: t.name,
+      externalName: this.deps.reserveName(pluginToolId(id, t.name))
+    }))
     return {
       id,
       manifest: record.manifest,
@@ -229,6 +302,7 @@ export class PluginManager {
       installedAt: record.installedAt,
       updatedAt: record.updatedAt,
       statusBar: [...record.statusBar.values()],
+      ...(tools.length > 0 ? { tools } : {}),
       ...(pending.length > 0 ? { pendingPermissions: pending } : {})
     }
   }
@@ -300,13 +374,17 @@ export class PluginManager {
       diagnostics,
       installedAt: persisted?.installedAt ?? now,
       updatedAt: now,
+      ...(persisted?.slug === undefined ? {} : { slug: persisted.slug }),
       touchedAt: 0,
       commands: new Set(),
       tools: new Map(),
       interceptor: false,
       contextProvider: false,
+      appearanceSubscriber: false,
       statusBar: new Map(),
-      dirtyDocuments: new Map()
+      dirtyDocuments: new Map(),
+      exposedApi: new Set(),
+      subscribedTopics: new Set()
     })
 
     await this.publishLocaleBundles(manifest, root, diagnostics)
@@ -353,18 +431,70 @@ export class PluginManager {
    * @param expectedSha256
    * 市场给的**权威摘要**。目录安装没有这个东西(本地开发),ZIP 安装必须有 ——
    * 没有它的话,「摘要对得上」只证明了下载到的文件和它自己一致。
+   *
+   * @param slug
+   * 市场那一条的 slug,只有市场安装传。见 `PersistedPlugin.slug`。
    */
-  async install(path: string, expectedSha256?: string): Promise<void> {
+  async install(path: string, expectedSha256?: string, slug?: string): Promise<void> {
     const stat = await fs.stat(path)
     const installed = stat.isDirectory()
       ? await installPluginDirectory(path, this.deps.pluginRoot)
       : await installPluginZip(path, this.deps.pluginRoot, expectedSha256)
-    const previous = this.records.get(installed.manifest.id)
-    if (previous !== undefined) await this.disable(installed.manifest.id)
-    const persisted = this.deps.getKv<PersistedState>(KV_KEY, {})
-    await this.load(installed.target, 'global', persisted[installed.manifest.id])
+    /*
+      ★★ **旧配置必须在 `disable()` 之前读出来。**
+
+      `disable()` 结尾会 `persist()` 一次,把 `enabled: false` 写回 KV。
+      在它之后再 `getKv`,读到的「旧配置」里开关已经是关的了,于是
+      `load()`(见 289 行 `persisted?.enabled ?? false`)把插件定成 `disabled` ——
+      更新完版本号对了,插件被静默关掉,用户还得自己再去开一次。
+
+      今天碰不到,是因为市场卡片在已安装时是 disabled 的、只有本地 picker
+      能覆盖安装,没人试过。**更新功能一上线,这就是每次更新的必经之路。**
+    */
+    const persisted = this.deps.getKv<PersistedState>(KV_KEY, {})[installed.manifest.id]
+    /*
+      ★ 安装期间不播 `plugins:changed`。
+
+      `disable()` 自己会播一条 —— 而这一刻插件确实是禁用的,只不过再过
+      几十毫秒它就被新版本重新装载了。播出去的结果是列表闪一帧「已禁用」,
+      而那一帧会被当成「更新把我的插件关掉了」报回来(讽刺的是上面那个
+      bug 的表现和它一模一样,修好之后更没人分得清哪个是真的)。
+    */
+    this.suppressChanged = true
+    try {
+      if (this.records.has(installed.manifest.id)) await this.disable(installed.manifest.id)
+      await this.load(installed.target, 'global', persisted)
+    } finally {
+      this.suppressChanged = false
+    }
+    /*
+      ★ slug 在 `load()` **之后**写,不混进 `persisted` 参数里。
+
+      那个参数「有没有值」本身是有含义的 —— `load()` 的扩权闸门(279 行)
+      以 `persisted !== undefined` 为前提。为了捎带一个 slug 就把 undefined
+      伪造成 `{ slug: … }`,会让**首次**安装一个带必选能力的插件直接落进
+      `pending-approval`,而它本该走正常的首次安装。
+
+      ★ 本地覆盖安装时**清掉**旧 slug:用户手上这一份已经不是市场那一份了
+      (多半是他自己改过的构建),不该再被「全部更新」悄悄换回去。
+    */
+    const record = this.records.get(installed.manifest.id)
+    if (record !== undefined) {
+      if (slug === undefined) delete record.slug
+      else record.slug = slug
+    }
     this.persist()
     this.deps.emitChanged()
+  }
+
+  /** 这个插件上一次批准时的必选能力。判断「更新会不会扩权」要的是它,不是 `granted` */
+  approvedRequiredOf(pluginId: string): PluginPermission[] {
+    return [...(this.records.get(pluginId)?.approvedRequired ?? [])]
+  }
+
+  /** 这个插件是从市场哪一条装来的。本地包装的返回 `undefined` */
+  slugOf(pluginId: string): string | undefined {
+    return this.records.get(pluginId)?.slug
   }
 
   async uninstall(pluginId: string): Promise<void> {
@@ -428,10 +558,17 @@ export class PluginManager {
     record.dirtyDocuments.clear()
     record.interceptor = false
     record.contextProvider = false
+    record.appearanceSubscriber = false
+    // 第 5 层:清导出的 API + 从全局事件订阅表里摘掉自己(不然会往一个已销毁的
+    // 上下文投事件,每次 emit 都白发一次 invoke)。
+    record.exposedApi.clear()
+    for (const topic of record.subscribedTopics) this.eventSubscribers.get(topic)?.delete(pluginId)
+    record.subscribedTopics.clear()
     this.deps.onToolsChanged()
     this.deps.runtime.dispose(pluginId)
     this.persist()
-    this.deps.emitChanged()
+    // ★ 覆盖安装途中这一条要压住 —— 那一刻的「已禁用」只存在几十毫秒
+    this.notifyChanged()
   }
 
   grant(pluginId: string, permissions: readonly PluginPermission[]): void {
@@ -491,13 +628,28 @@ export class PluginManager {
     return woke
   }
 
-  async wake(pluginId: string): Promise<boolean> {
+  async wake(pluginId: string, chain: ReadonlySet<string> = new Set()): Promise<boolean> {
     const record = this.records.get(pluginId)
     if (record === undefined || !record.enabled) return false
     if (record.status === 'error' || record.status === 'pending-approval' || record.status === 'disabled') return false
     record.touchedAt = Date.now()
-    if (record.status === 'active') return true
+    // status 说 active,但宿主窗口可能已崩(`render-process-gone` 不会回头改 manager 的
+    // 状态)。真的还活着才早返回;不在了就往下走重新 spawn —— spawn 会先 dispose 掉
+    // 那个死窗口。这修的是「插件崩过一次之后,点它的命令永远报 plugin host is not running」。
+    if (record.status === 'active' && this.deps.runtime.isRunning?.(pluginId) !== false) return true
     if (record.status === 'activating') return true
+
+    /*
+      ★ 依赖先醒(第 5 层):`ncw.plugins.connect(dep)` 要能立刻拿到一个已在跑的 dep。
+      环用 `chain` 挡:A→B→A 时,回到 A 那一步 chain 已含 A,跳过、不再递归。
+      best-effort —— 依赖醒不了(没装/被禁/自己也炸)不阻断本插件激活,由 connect
+      在调用时返回失败,而不是让整条激活挂掉。
+    */
+    const nextChain = new Set(chain).add(pluginId)
+    for (const depId of Object.keys(record.manifest.dependencies)) {
+      if (nextChain.has(depId)) continue
+      await this.wake(depId, nextChain).catch(() => undefined)
+    }
 
     record.status = 'activating'
     this.deps.emitChanged()
@@ -529,6 +681,12 @@ export class PluginManager {
       // deactivate 失败不阻断销毁 —— 一个卡住的插件不该让禁用按钮失灵。
     }
     record.status = record.enabled ? 'idle' : 'disabled'
+    /*
+      ★ 订阅跟着宿主页面一起没 —— `dispose()` 之后那个 webContents 就不在了。
+      不清的话,休眠过的插件会被当成「还订阅着」,每次主题变化都触发一次
+      唤醒;而用户并没有在用它。
+    */
+    record.appearanceSubscriber = false
     this.deps.runtime.dispose(pluginId)
   }
 
@@ -572,6 +730,25 @@ export class PluginManager {
       { id: 0, kind: 'command.run', payload: { commandId } },
       PLUGIN_TIMEOUT.COMMAND_MS
     )
+  }
+
+  /**
+   * 主题变了 —— 通知订阅过的插件。
+   *
+   * ★ **只推给活着且订阅过的**。休眠的插件不唤醒:用户没在用它,为了一次
+   * 颜色变化把它叫醒(再起一个隐藏窗口)不值当;它下次醒来自己
+   * `appearance.get()` 拿到的就是新值。
+   *
+   * ★ **即发即忘,且不 await**。主题切换是一次界面动作,不该被任何一个
+   * 插件的处理函数拖住 —— 同 `ipc/plugins.ts` 里 onStartup 唤醒那段的理由。
+   */
+  notifyAppearanceChanged(appearance: 'light' | 'dark'): void {
+    for (const [pluginId, record] of this.records) {
+      if (record.status !== 'active' || !record.appearanceSubscriber) continue
+      void this.deps.runtime
+        .invoke(pluginId, { id: 0, kind: 'event', payload: { event: 'appearance.changed', appearance } }, PLUGIN_TIMEOUT.COMMAND_MS)
+        .catch(() => undefined)
+    }
   }
 
   private async activateFor(event: string, pluginId: string): Promise<boolean> {
@@ -668,8 +845,16 @@ export class PluginManager {
       host: this.deps.host,
       workspaceRoot: workspace.rootPath,
       workspaceId: workspace.id,
-      allowedCommands: [],
+      /*
+        ★ 这里原本写死成 `[]`,而 `narrowCommand` 见到空白名单一律拒 ——
+        于是**任何**插件的 `process.exec` 都在参数门被静默拒死,永远走不到
+        审批那一步。不是接线漏了:`allowedCommands` 这个清单字段当时压根
+        没有实现,`rpc.ts` 那句「清单里可选的命令白名单」指的是一个不存在
+        的东西。字段补上之后这里才有得可传。
+      */
+      allowedCommands: record.manifest.allowedCommands,
       approve: (summary) => this.deps.approve(pluginId, summary),
+      trash: (absolutePath) => this.deps.trash(absolutePath),
       kv: this.kvFor(pluginId)
     }
 
@@ -745,6 +930,13 @@ export class PluginManager {
         this.revoke(pluginId, p.permissions)
         return { data: {}, summary: `remove ${p.permissions.join(',')}` }
       }
+
+      case 'appearance.get':
+        return { data: { appearance: this.deps.currentAppearance() }, summary: 'appearance' }
+
+      case 'appearance.subscribe':
+        record.appearanceSubscriber = true
+        return { data: {}, summary: 'subscribe appearance' }
 
       case 'commands.register': {
         const p = rawParams as { commandId: string }
@@ -903,6 +1095,78 @@ export class PluginManager {
         return { data: { value }, summary: `execute ${p.commandId}` }
       }
 
+      case 'tool.progress': {
+        const p = rawParams as { callId: string; message?: string; card?: unknown }
+        const live = this.liveToolEmits.get(p.callId)
+        // callId 不在跑 / 不是这个插件的 → 静默丢弃(工具可能刚结束,竞态正常)。
+        if (live === undefined || live.pluginId !== pluginId) {
+          return { data: {}, summary: `tool.progress ignored (stale callId)` }
+        }
+        const cardViewTypes = new Set(record.manifest.contributes.cardViews.map((v) => v.viewType))
+        const card = sanitizeToolCard(p.card, cardViewTypes)
+        live.emit({ callId: p.callId, message: p.message ?? '', ...(card === undefined ? {} : { card }) })
+        return { data: {}, summary: `tool.progress${card === undefined ? '' : ' +card'}` }
+      }
+
+      case 'plugins.expose': {
+        const p = rawParams as { methods: string[] }
+        record.exposedApi = new Set((Array.isArray(p.methods) ? p.methods : []).filter((m) => typeof m === 'string'))
+        return { data: {}, summary: `expose ${record.exposedApi.size} api(s)` }
+      }
+
+      case 'plugins.invoke': {
+        const p = rawParams as { target: string; method: string; args: unknown[] }
+        // ★ 准入门:目标必须在**本插件清单**的 dependencies 里声明过。permission `plugins`
+        //   已在 handleRequest 那层查过 —— 这里查的是「能连谁」的那道独立门。
+        if (!Object.hasOwn(record.manifest.dependencies, p.target)) {
+          return { data: { value: null }, summary: `refused: ${p.target} not a declared dependency` }
+        }
+        const target = this.records.get(p.target)
+        if (target === undefined || !target.enabled || target.status === 'error' || target.status === 'pending-approval') {
+          return { data: { value: null }, summary: `target ${p.target} unavailable` }
+        }
+        await this.wake(p.target) // 依赖此刻可能在睡 —— 叫醒它
+        if (target.status !== 'active') return { data: { value: null }, summary: `target ${p.target} not running` }
+        const result = await this.deps.runtime.invoke(
+          p.target,
+          { id: 0, kind: 'api.call', payload: { method: p.method, args: Array.isArray(p.args) ? p.args : [], from: pluginId } },
+          PLUGIN_TIMEOUT.COMMAND_MS
+        )
+        return { data: { value: (result as { value?: unknown } | undefined)?.value ?? null }, summary: `invoke ${p.target}.${p.method}` }
+      }
+
+      case 'plugins.emitEvent': {
+        const p = rawParams as { topic: string; payload: unknown }
+        const subs = this.eventSubscribers.get(p.topic)
+        if (subs !== undefined) {
+          for (const subId of subs) {
+            if (subId === pluginId) continue // 不回给自己
+            const sub = this.records.get(subId)
+            if (sub === undefined || sub.status !== 'active') continue // 只投给在跑的订阅者
+            void this.deps.runtime
+              .invoke(subId, { id: 0, kind: 'plugins.event', payload: { topic: p.topic, payload: p.payload, from: pluginId } }, PLUGIN_TIMEOUT.COMMAND_MS)
+              .catch(() => undefined)
+          }
+        }
+        return { data: {}, summary: `emit ${p.topic}` }
+      }
+
+      case 'plugins.subscribeEvent': {
+        const p = rawParams as { topic: string }
+        let subs = this.eventSubscribers.get(p.topic)
+        if (subs === undefined) { subs = new Set(); this.eventSubscribers.set(p.topic, subs) }
+        subs.add(pluginId)
+        record.subscribedTopics.add(p.topic)
+        return { data: {}, summary: `subscribe ${p.topic}` }
+      }
+
+      case 'plugins.unsubscribeEvent': {
+        const p = rawParams as { topic: string }
+        this.eventSubscribers.get(p.topic)?.delete(pluginId)
+        record.subscribedTopics.delete(p.topic)
+        return { data: {}, summary: `unsubscribe ${p.topic}` }
+      }
+
       default:
         return undefined
     }
@@ -918,15 +1182,21 @@ export class PluginManager {
     const out: ToolRegistration[] = []
     for (const [pluginId, record] of this.records) {
       if (!record.enabled || record.status === 'error' || record.status === 'pending-approval') continue
+      // frame 卡片只能指向该插件自己声明的 cardViews —— 每个插件算一次。
+      const cardViewTypes = new Set(record.manifest.contributes.cardViews.map((v) => v.viewType))
       for (const declaration of record.tools.values()) {
         out.push(
-          toolRegistrationFor(pluginId, declaration, async (name, input, callId, signal) => {
+          toolRegistrationFor(pluginId, declaration, async (name, input, callId, signal, emit) => {
             // 工具调用本身也是一次「碰一下」,免得跑着跑着被休眠扫走。
             record.touchedAt = Date.now()
+            // 登记这次调用的 emit,让 `tool.progress` RPC 找得到它;结束即撤。
+            this.liveToolEmits.set(callId, { pluginId, emit })
+            // 交互式工具会挂起等用户点按钮,60s 太短 —— 放宽到宿主硬上限(fork B)。
+            const timeoutMs = declaration.interactive === true ? PLUGIN_TIMEOUT.INTERACTIVE_TOOL_MS : PLUGIN_TIMEOUT.TOOL_MS
             const invocation = this.deps.runtime.invoke(
               pluginId,
               { id: 0, kind: 'tool.execute', payload: { name, input, callId } },
-              PLUGIN_TIMEOUT.TOOL_MS
+              timeoutMs
             )
             /*
               ★ 用户点停止 → 给插件发一条 `tool.abort`,然后**只等 2 秒宽限**。
@@ -945,12 +1215,31 @@ export class PluginManager {
               return await invocation
             } finally {
               signal.removeEventListener('abort', onAbort)
+              this.liveToolEmits.delete(callId)
             }
-          })
+          }, cardViewTypes)
         )
       }
     }
     return out
+  }
+
+  /**
+   * 用户点了实时卡片上的按钮 —— 把动作送给**仍在运行**的那次工具调用(第 2 层)。
+   *
+   * ★ 按 `liveToolEmits` 核对:callId 必须正在跑、且属于这个插件,否则静默丢弃。
+   * 这挡住两件事:给已结束的工具发动作(竞态),以及借别人的 callId 往别的插件
+   * 塞输入(和 `tool.progress` 同一道 pluginId 门)。
+   *
+   * 即发即忘:一次 `tool.action` 反向调用把动作交给插件垫片,由它路由到工具注册的
+   * `onAction`。失败不回传 —— 挂起的工具要么收到别的动作、要么被 abort、要么超时。
+   */
+  async deliverCardAction(pluginId: string, callId: string, actionId: string, value?: unknown): Promise<void> {
+    const live = this.liveToolEmits.get(callId)
+    if (live === undefined || live.pluginId !== pluginId) return
+    await this.deps.runtime
+      .invoke(pluginId, { id: 0, kind: 'tool.action', payload: { callId, actionId, value } }, PLUGIN_TIMEOUT.ABORT_GRACE_MS)
+      .catch(() => undefined)
   }
 
   /**
@@ -1137,7 +1426,8 @@ export class PluginManager {
         granted: record.granted,
         approvedRequired: record.approvedRequired,
         installedAt: record.installedAt,
-        updatedAt: record.updatedAt
+        updatedAt: record.updatedAt,
+        ...(record.slug === undefined ? {} : { slug: record.slug })
       }
     }
     this.deps.setKv(KV_KEY, state)

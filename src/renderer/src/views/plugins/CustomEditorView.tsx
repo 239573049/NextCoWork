@@ -20,6 +20,7 @@
 import { AlertTriangle } from 'lucide-react'
 import { type ReactNode } from 'react'
 import type { InnerTab } from '../../../../shared/domain/tab'
+import { isRunnable } from '../../../../shared/plugin/state'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { useI18n } from '../../i18n'
 import { PluginViewFrame } from '../../shell/PluginViewFrame'
@@ -37,12 +38,9 @@ export function CustomEditorView({
 
   const plugin = catalog.plugins.find((item) => item.id === tab.ref.pluginId)
   const editor = plugin?.manifest.contributes.customEditors.find((item) => item.viewType === tab.ref.viewType)
-  const usable =
-    plugin !== undefined &&
-    editor !== undefined &&
-    plugin.enabled &&
-    plugin.status !== 'error' &&
-    plugin.status !== 'pending-approval'
+  // 「能不能跑」的判定只有一份(`shared/plugin/state.ts`)—— 这里、菜单项过滤、
+  // 以及「谁来打开这个文件」的挑选,三处必须同时改变,抄成三份迟早会分叉。
+  const usable = plugin !== undefined && editor !== undefined && isRunnable(plugin)
 
   if (!usable) {
     return (

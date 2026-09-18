@@ -1,5 +1,5 @@
-import type { BrowserProfile, BrowserTab } from '../../../shared/domain/browser'
-import { invoke } from './ipc'
+import type { BrowserChange, BrowserCuaEvent, BrowserProfile, BrowserTab } from '../../../shared/domain/browser'
+import { invoke, on } from './ipc'
 
 export function listBrowserTabs(workspaceId: string): Promise<BrowserTab[]> {
   return invoke('browser:list', { workspaceId })
@@ -27,6 +27,18 @@ export function navigateBrowserTab(workspaceId: string, tabId: string, url: stri
 
 export function closeBrowserTab(workspaceId: string, tabId: string): Promise<void> {
   return invoke('browser:close', { workspaceId, tabId })
+}
+
+export function bindBrowserView(workspaceId: string, tabId: string, webContentsId: number): Promise<void> {
+  return invoke('browser:bind', { workspaceId, tabId, webContentsId })
+}
+
+export function onBrowserCua(listener: (event: BrowserCuaEvent) => void): () => void {
+  return on('browser:cua', listener)
+}
+
+export function onBrowserChanged(listener: (change: BrowserChange) => void): () => void {
+  return on('browser:changed', listener)
 }
 
 export function listBrowserProfiles(): Promise<BrowserProfile[]> {

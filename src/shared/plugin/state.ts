@@ -61,6 +61,22 @@ export interface PluginStatusBarItem {
   command?: string
 }
 
+/**
+ * 插件贡献的一个工具在**界面上**的身份投影 —— 渲染层拿它把聊天里的
+ * `tool_call.name`(经 ToolNamer 消毒/哈希后的 externalName)映回是哪个插件的哪个工具。
+ *
+ * ★ 为什么 catalog 里非它不可:模型回传的、转录里存的都是 externalName,
+ * 而它是 `plugin__<pub>_<name>__<tool>` 经截断 + 去重哈希算出来的,渲染层**算不出来**。
+ * 主进程用 `ToolRegistry.reserveName`(与将来真正注册时同一个记忆化 namer)预留权威值,
+ * 随 catalog 一起下来;这样即便插件还没被激活,它的工具卡片也能画出自定义标题。
+ */
+export interface PluginToolProjection {
+  /** 插件清单里声明的工具名(`contributes.tools[].name`) */
+  name: string
+  /** ToolNamer 分配的稳定 externalName —— 模型与转录里出现的就是它 */
+  externalName: string
+}
+
 export interface InstalledPlugin {
   id: string
   manifest: PluginManifest
@@ -80,6 +96,14 @@ export interface InstalledPlugin {
   pendingPermissions?: PluginPermission[]
   /** 这一刻它挂在状态栏上的那几格。禁用时必须清空 */
   statusBar: PluginStatusBarItem[]
+  /**
+   * 这个插件贡献的工具的 externalName 投影,按清单顺序。
+   *
+   * ★ 渲染层用它把 `tool_call.name` 映回 `(pluginId, toolName)`,再 join
+   * `manifest.contributes.tools` 拿到 shape / card 模板去画卡片。见 `PluginToolProjection`。
+   * 没有贡献工具时省略。
+   */
+  tools?: PluginToolProjection[]
   /**
    * 包内 `l10n/` 的词条,按语言分。
    *

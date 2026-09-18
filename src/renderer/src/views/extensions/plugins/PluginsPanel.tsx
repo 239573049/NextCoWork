@@ -10,9 +10,10 @@
  * (名字、作者、版本、能力、贡献点)和宿主自己的记录(诊断、活动)——
  * 插件的 UI 只出现在受控 webview 里,那是另一期的事。
  */
-import { AlertTriangle, Package, Puzzle, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowUpCircle, Package, Puzzle, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { InstalledPlugin, PluginStatus } from '../../../../../shared/plugin/state'
+import type { PluginUpdate } from '../../../../../shared/plugin/market'
 import type { PluginPermission } from '../../../../../shared/plugin/permission'
 import { Button } from '../../../components/ui/Button'
 import { EmptyState } from '../../../components/ui/EmptyState'
@@ -20,7 +21,6 @@ import { Segmented } from '../../../components/ui/Segmented'
 import { Toggle } from '../../../components/ui/Toggle'
 import { useI18n, type TranslationKey } from '../../../i18n'
 import { cn } from '../../../lib/cn'
-import { on } from '../../../services/ipc'
 import { usePluginsStore } from '../../../stores/plugins'
 import { PluginConfiguration } from './PluginConfiguration'
 import { PluginMarket } from './PluginMarket'
@@ -59,12 +59,22 @@ const STATUS_TONE: Record<PluginStatus, string> = {
 export function PluginsPanel(): ReactNode {
   const { t } = useI18n()
   const catalog = usePluginsStore((state) => state.catalog)
-  const load = usePluginsStore((state) => state.load)
   const install = usePluginsStore((state) => state.installFromPicker)
   const loadMarket = usePluginsStore((state) => state.loadMarket)
+  const updates = usePluginsStore((state) => state.updates)
+  const checkUpdates = usePluginsStore((state) => state.checkUpdates)
+  const checkingUpdates = usePluginsStore((state) => state.checkingUpdates)
+  const updatingAll = usePluginsStore((state) => state.updatingAll)
+  const updateAll = usePluginsStore((state) => state.updateAll)
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [view, setView] = useState<'installed' | 'market'>('installed')
+  /*
+    ★ 默认落在**市场**。进这一页的动机绝大多数是「去找一个装上」,而不是
+    「看看我装了什么」—— 后者是已经知道自己要找谁才走的路。默认停在已安装
+    那一栏,等于让最常走的那条路每次都多点一下;而首次使用的人打开看到的
+    还是一句「还没有安装任何插件」,这是这一页能给出的最没用的一屏。
+  */
+  const [view, setView] = useState<'installed' | 'market'>('market')
 
   useEffect(() => {
     // 市场列表**按需拉**:没打开那一栏的用户不该为它付一次网络往返。
@@ -72,13 +82,28 @@ export function PluginsPanel(): ReactNode {
   }, [view, loadMarket])
 
   useEffect(() => {
-    void load()
-    // 主进程装/卸/激活之后推 `plugins:changed`,收到就整份重取。
-    // ★ 退订必须发生 —— 不退订的话 HMR 会叠加监听器(方案 §3 规则 4)。
-    return on('plugins:changed', () => { void load() })
-  }, [load])
+    /*
+      ★ 进这一页顺手查一次更新。**不是每次都打网络** —— 主进程那边压着
+      10 分钟的列表缓存,反复进出只有第一次真的联网。
+
+      ★ 不放到 `App.tsx` 开机查:更新这件事只在用户看得见它的时候才有意义,
+      而开机时多打一次市场请求的收益是零。
+    */
+    void checkUpdates()
+  }, [checkUpdates])
+
+  /*
+    ★ 这里**不再**拉 catalog、也不再订阅 `plugins:changed` —— 两者都搬去了
+    `App.tsx`。搬家的原因见那边的注释(菜单和自定义编辑器不能等到这一页
+    被打开才有数据);留一份在这里的后果是每条 `plugins:changed` 触发两次
+    重取,而这一页恰恰是装/卸插件的地方,事件最密。
+  */
 
   const selected = catalog.plugins.find((plugin) => plugin.id === selectedId) ?? catalog.plugins[0]
+  const updateById = new Map(updates.map((update) => [update.pluginId, update]))
+  // ★ 只数市场来源的:本地包装的那些照常能单独更新,但不该被一颗「全部更新」
+  //   悄悄换成市场版(见 `PluginUpdate.fromMarket`)。
+  const batchable = updates.filter((update) => update.fromMarket)
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-6 py-5">
@@ -94,13 +119,23 @@ export function PluginsPanel(): ReactNode {
             value={view}
             onChange={setView}
             label={t('plugins.title')}
+            /* 顺序跟着默认值走 —— 让「第一个」和「进来看到的」是同一个 */
             options={[
-              { value: 'installed', label: t('plugins.tab.installed') },
-              { value: 'market', label: t('plugins.tab.market') }
+              { value: 'market', label: t('plugins.tab.market') },
+              { value: 'installed', label: t('plugins.tab.installed') }
             ]}
           />
           <Button
             className="ml-auto"
+            size="sm"
+            variant="ghost"
+            disabled={checkingUpdates}
+            icon={<RefreshCw size={13} />}
+            onClick={() => { void checkUpdates(true) }}
+          >
+            {t('plugins.checkUpdates')}
+          </Button>
+          <Button
             size="sm"
             icon={<Package size={13} />}
             onClick={() => {
@@ -117,6 +152,24 @@ export function PluginsPanel(): ReactNode {
         {error !== null && (
           <div className="mt-4 shrink-0 rounded-[10px] border border-danger/30 bg-danger/5 px-3 py-2 text-[12px] text-danger">
             {error}
+          </div>
+        )}
+
+        {/*
+          可更新横幅。形状同详情页那块 `pending-approval` 提示,只换配色 ——
+          「有新版可以装」是一件好事,用 accent;琥珀留给「等着你处理」。
+
+          ★ **两栏都挂**,不再只挂在「已安装」那一栏。默认落地页改成市场之后,
+            只挂一栏的后果是这条横幅默认永远不出现 —— 用户得先主动切到已安装
+            才知道自己有东西要更新,而他本来就不知道才需要被告知。
+        */}
+        {batchable.length > 0 && (
+          <div className="mt-4 flex shrink-0 items-center gap-3 rounded-[10px] border border-accent/40 bg-accent/5 px-3 py-2 text-[12px] text-fg">
+            <ArrowUpCircle size={14} className="shrink-0 text-accent" aria-hidden />
+            <span className="min-w-0 flex-1">{t('plugins.updatesAvailable', { count: batchable.length })}</span>
+            <Button size="sm" variant="accent" disabled={updatingAll} onClick={() => { void updateAll() }}>
+              {updatingAll ? t('plugins.updating') : t('plugins.updateAll')}
+            </Button>
           </div>
         )}
 
@@ -147,12 +200,22 @@ export function PluginsPanel(): ReactNode {
                     <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', STATUS_TONE[plugin.status])} />
                     <span className="min-w-0 truncate">{plugin.manifest.displayName}</span>
                     {plugin.status === 'error' && <AlertTriangle size={12} className="shrink-0 text-danger" />}
+                    {/*
+                      ★ 徽标打在**所有**有新版的插件上,本地装的那些也打 ——
+                      「有新版」是事实,和「要不要一键帮你换掉」是两件事。
+                      后者才看 `fromMarket`。
+                    */}
+                    {updateById.has(plugin.id) && (
+                      <span className="ml-auto shrink-0 rounded-[4px] bg-accent/15 px-1 text-[10px] text-accent">
+                        ↑ {updateById.get(plugin.id)?.latestVersion}
+                      </span>
+                    )}
                   </span>
                   <span className="pl-3 text-[11px] text-fg-faint">{t(STATUS_KEY[plugin.status])}</span>
                 </button>
               ))}
             </div>
-            {selected !== undefined && <PluginDetail plugin={selected} />}
+            {selected !== undefined && <PluginDetail plugin={selected} update={updateById.get(selected.id)} />}
           </div>
         )}
       </div>
@@ -160,7 +223,7 @@ export function PluginsPanel(): ReactNode {
   )
 }
 
-function PluginDetail({ plugin }: { plugin: InstalledPlugin }): ReactNode {
+function PluginDetail({ plugin, update }: { plugin: InstalledPlugin; update: PluginUpdate | undefined }): ReactNode {
   const { t } = useI18n()
   const setEnabled = usePluginsStore((state) => state.setEnabled)
   const uninstall = usePluginsStore((state) => state.uninstall)
@@ -168,6 +231,8 @@ function PluginDetail({ plugin }: { plugin: InstalledPlugin }): ReactNode {
   const revoke = usePluginsStore((state) => state.revoke)
   const activity = usePluginsStore((state) => state.activity)
   const loadActivity = usePluginsStore((state) => state.loadActivity)
+  const installFromMarket = usePluginsStore((state) => state.installFromMarket)
+  const installProgress = usePluginsStore((state) => state.installProgress)
   const [tab, setTab] = useState<'overview' | 'activity'>('overview')
 
   useEffect(() => {
@@ -176,6 +241,7 @@ function PluginDetail({ plugin }: { plugin: InstalledPlugin }): ReactNode {
 
   const declared = [...plugin.permissions.required, ...plugin.permissions.optional]
   const granted = new Set(plugin.permissions.granted)
+  const updating = update !== undefined && installProgress[`market:${update.slug}`] !== undefined
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto rounded-[12px] border border-hairline p-4">
@@ -199,6 +265,41 @@ function PluginDetail({ plugin }: { plugin: InstalledPlugin }): ReactNode {
           label={plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
         />
       </div>
+
+      {update !== undefined && (
+        <div className="mt-3 rounded-[10px] border border-accent/40 bg-accent/5 px-3 py-2">
+          <div className="flex items-center gap-2.5">
+            <ArrowUpCircle size={14} className="shrink-0 text-accent" aria-hidden />
+            {/* 版本号是领域值,不翻译 */}
+            <span className="min-w-0 flex-1 text-[12px] text-fg">
+              {t('plugins.updateTo', { version: update.latestVersion })}
+            </span>
+            <Button
+              size="sm"
+              variant="accent"
+              disabled={updating}
+              onClick={() => { void installFromMarket(update.slug, update.latestVersion).catch(() => undefined) }}
+            >
+              {updating ? t('plugins.updating') : t('plugins.update')}
+            </Button>
+          </div>
+          {/*
+            ★★ **扩权要在点下去之前说,而且要逐条说。**
+
+            新版本多要的必选能力会让插件装完停在「待批准」—— 那一刻用户看到
+            的是一个自己刚更新完、却不转了的插件。事后再解释,他已经在怀疑
+            这次更新是不是把东西弄坏了。「权限有变化」这种话也不够:他要
+            知道的是变成了什么。
+          */}
+          {update.escalatedPermissions.length > 0 && (
+            <p className="mt-1.5 pl-[24px] text-[11.5px] leading-relaxed text-warning">
+              {t('plugins.updateEscalatesPermissions', {
+                permissions: update.escalatedPermissions.join('、')
+              })}
+            </p>
+          )}
+        </div>
+      )}
 
       {plugin.status === 'pending-approval' && (
         <div className="mt-3 rounded-[10px] border border-warning/40 bg-warning/5 px-3 py-2 text-[12px] text-warning">

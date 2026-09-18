@@ -20,10 +20,12 @@ import type {
 } from '../../shared/ipc/contract'
 import { INVOKE_CHANNELS, SEND_CHANNELS } from '../../shared/ipc/contract'
 import {
+  checkPluginUpdates,
   installMarketPlugin,
   listMarketPluginCategories,
   listMarketPlugins,
-  marketPluginDetail
+  marketPluginDetail,
+  updateAllPlugins
 } from './plugin-market'
 import {
   confirmPluginClose,
@@ -35,6 +37,7 @@ import {
   pluginActivity,
   revokePluginPermissions,
   runPluginCommand,
+  deliverPluginCardAction,
   setPluginConfiguration,
   setPluginEnabled,
   uninstallPlugin
@@ -66,6 +69,7 @@ import {
 import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
+import { getBrowserAutomationBridge } from '../browser/runtime'
 import { getEnvironments } from '../runtime'
 import { getTools, installChildRunLauncher, setCredentialChangeListener, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
@@ -289,6 +293,13 @@ const handlers: HandlerMap = {
     forgetFileIndex(id)
     return closeWorkspace(id)
   },
+  /*
+    ★ 只记在内存里的窗口级状态,没有任何副作用 —— 不落库、不广播。
+    读它的是插件的路径类能力(`ipc/plugins.ts` 的 `currentWorkspace`)。
+  */
+  'workspace:setActive': ({ workspaceId }, ctx) => {
+    windows.setActiveWorkspace(ctx.id, workspaceId)
+  },
   'workspace:listDir': (req) => listDir(req),
   'workspace:searchFiles': (req) => searchWorkspaceFiles(req),
   'workspace:readFile': (req) => readWorkspaceFile(req),
@@ -312,6 +323,11 @@ const handlers: HandlerMap = {
     if (tab?.workspaceId !== workspaceId) throw new Error('浏览器标签不属于当前工作区')
     return browserManager.close(tabId)
   },
+  'browser:bind': async ({ workspaceId, tabId, webContentsId }) => {
+    assertLocalBrowserWorkspace(workspaceId)
+    if (!Number.isInteger(webContentsId) || webContentsId <= 0) throw new Error('浏览器 webContentsId 无效')
+    await getBrowserAutomationBridge().bindIab({ workspaceId, tabId, webContentsId })
+  },
   'browser:profiles': () => browserManager.listProfiles(),
   'browser:createProfile': ({ name, domains, startUrl }) => {
     const profile = browserManager.createProfile(name, domains, startUrl)
@@ -322,7 +338,10 @@ const handlers: HandlerMap = {
     const profile = browserManager.listProfiles().find((item) => item.id === id)
     if (profile === undefined) throw new Error('Profile 不存在')
     if (profile.isDefault) return browserManager.deleteProfile(id)
-    await Promise.all(store.listWorkspaces().map((workspace) => clearBrowserProfileState(workspace.id, id)))
+    await Promise.all([
+      ...store.listWorkspaces().map((workspace) => clearBrowserProfileState(workspace.id, id)),
+      getBrowserAutomationBridge().clearProfile(id)
+    ])
     browserManager.deleteProfile(id)
     windows.emitToAll('browser:profilesChanged', browserManager.listProfiles())
   },
@@ -337,12 +356,15 @@ const handlers: HandlerMap = {
     if (!browserManager.listProfiles().some((item) => item.id === profileId)) throw new Error('Profile 不存在')
     return importBrowserCookies(ctx.sender, workspaceId, profileId)
   },
-  'browser:clearProfileState': ({ workspaceId, profileId }) => {
+  'browser:clearProfileState': async ({ workspaceId, profileId }) => {
     assertLocalBrowserWorkspace(workspaceId)
     const profile = browserManager.listProfiles().find((item) => item.id === profileId)
     if (profile === undefined) throw new Error('Profile 不存在')
     if (profile.isDefault) throw new Error('默认浏览器不能清除登录态')
-    return clearBrowserProfileState(workspaceId, profileId)
+    await Promise.all([
+      clearBrowserProfileState(workspaceId, profileId),
+      getBrowserAutomationBridge().clearProfile(profileId, workspaceId)
+    ])
   },
   'git:getOverview': (req) => getGitOverview(req),
   'git:listBranches': (req) => listGitBranches(req),
@@ -489,11 +511,14 @@ const handlers: HandlerMap = {
   'plugins:revokePermissions': (req) => revokePluginPermissions(req),
   'plugins:activity': (req) => pluginActivity(req),
   'plugins:runCommand': (req) => runPluginCommand(req),
+  'plugins:cardAction': (req) => deliverPluginCardAction(req),
   'plugins:confirmClose': (req) => confirmPluginClose(req),
   'plugins:marketList': (req) => listMarketPlugins(req),
   'plugins:marketCategories': () => listMarketPluginCategories(),
   'plugins:marketDetail': (req) => marketPluginDetail(req),
   'plugins:installMarket': (req) => installMarketPlugin(req),
+  'plugins:checkUpdates': (req) => checkPluginUpdates(req),
+  'plugins:updateAll': () => updateAllPlugins(),
   'plugins:getConfiguration': (req) => getPluginConfiguration(req),
   'plugins:setConfiguration': (req) => setPluginConfiguration(req),
 
@@ -725,7 +750,12 @@ export function registerIpc(): void {
   registerGoalBridge()
   registerHookDiagnosticsBridge()
   connections.registerConnectionBridge()
-  setBrowserChangeListener((change) => windows.emitToAll('browser:changed', change))
+  const browserAutomation = getBrowserAutomationBridge()
+  setBrowserChangeListener((change) => {
+    browserAutomation.reconcile(change.workspaceId, change.tabs)
+    windows.emitToAll('browser:changed', change)
+  })
+  browserAutomation.setCuaListener((event) => windows.emitToAll('browser:cua', event))
   /*
     ★ 子 run 的启动器。方向是 **ipc 依赖 runtime,runtime 永不依赖 ipc** ——
     反过来写会把 electron 拖进 runtime 的 import 图,`agent-run.test.ts`

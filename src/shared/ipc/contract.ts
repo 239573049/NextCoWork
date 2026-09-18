@@ -25,7 +25,7 @@ import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain
 import type { ProxyPasswordInfo } from '../domain/proxy'
 import type { PluginPermission } from '../plugin/permission'
 import type { PluginActivity, PluginCatalog } from '../plugin/state'
-import type { PluginMarketItem } from '../plugin/market'
+import type { PluginMarketItem, PluginUpdate, PluginUpdateResult } from '../plugin/market'
 import type {
   Attachment,
   AttachmentScope,
@@ -76,7 +76,7 @@ import type {
   WorkspaceFileWriteRequest,
   WorkspaceTextFile
 } from '../domain/workspace-file'
-import type { BrowserChange, BrowserProfile, BrowserTab } from '../domain/browser'
+import type { BrowserChange, BrowserCuaEvent, BrowserProfile, BrowserTab } from '../domain/browser'
 import type { GitBranchSummary, GitCommitSummary, GitDiff, GitOverview } from '../domain/git'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../domain/scheduled'
 import type {
@@ -304,6 +304,22 @@ export interface IpcInvokeMap {
   /** 关闭 = 从列表移除这条记录,与「关闭外层 Tab」是两回事(方案 §8) */
   'workspace:close': { req: { id: string }; res: void }
   /**
+   * 渲染层上报**这个窗口当前停在哪个工作区**。
+   *
+   * ★ 主进程原本没有这个状态,需要它的地方(目前是插件的路径类能力)只能拿
+   * `listWorkspaces()[0]` —— 按 `last_opened_at` 倒序的第一条。那是个**近似值**:
+   * 它记的是「何时最后一次打开」而不是「现在停在哪」,用户在已开的几个工作区
+   * 之间切 Tab 根本不动这个时间戳。于是插件新建的文件会落进上一次打开的
+   * 那个工作区 —— 用户看着 B 点的新建,文件出现在 A 里。
+   *
+   * ★ **按窗口记**,不是全局单值:`activeWorkspaceId` 在渲染层就是每窗口一份
+   * (`stores/window.ts`),两个窗口停在不同工作区是正常状态,合成一个全局值
+   * 等于让后切的那个窗口覆盖掉前一个。
+   *
+   * `null` = 这个窗口没有停在任何工作区(全部关掉了)。
+   */
+  'workspace:setActive': { req: { workspaceId: string | null }; res: void }
+  /**
    * 右侧文件树列一层。**懒加载**:展开一个目录才拉它,不递归 ——
    * 一次把 `node_modules` 整棵树拉回来,IPC 那一下就够卡半秒。
    *
@@ -340,6 +356,7 @@ export interface IpcInvokeMap {
   }
   'browser:navigate': { req: { workspaceId: string; tabId: string; url: string }; res: BrowserTab }
   'browser:close': { req: { workspaceId: string; tabId: string }; res: void }
+  'browser:bind': { req: { workspaceId: string; tabId: string; webContentsId: number }; res: void }
   'browser:profiles': { req: void; res: BrowserProfile[] }
   'browser:createProfile': { req: { name: string; domains?: string[]; startUrl?: string }; res: BrowserProfile }
   'browser:deleteProfile': { req: { id: string }; res: void }
@@ -596,6 +613,11 @@ export interface IpcInvokeMap {
   /** 执行一条插件命令 —— 菜单项、命令面板、快捷键三处共用 */
   'plugins:runCommand': { req: { pluginId: string; commandId: string }; res: void }
   /**
+   * 用户点了实时工具卡片上的按钮 —— 送给仍在运行的那次工具调用(第 2 层交互)。
+   * 即发即忘:动作到不了(工具已结束 / callId 不属于该插件)时静默丢弃。
+   */
+  'plugins:cardAction': { req: { pluginId: string; callId: string; actionId: string; value?: unknown }; res: void }
+  /**
    * 设置项的读写。**独立 kv,不扩 `AppSettings`** —— 那份 blob 是全应用的,
    * 每次写都整份重写、整份同步,一个插件的开关不该有那个代价。
    */
@@ -612,6 +634,22 @@ export interface IpcInvokeMap {
   'plugins:marketCategories': { req: void; res: string[] }
   'plugins:marketDetail': { req: { slug: string }; res: PluginMarketItem & { versions?: { version: string; changelog?: string; permissionEscalated?: boolean }[] } }
   'plugins:installMarket': { req: { slug: string; version?: string }; res: PluginCatalog }
+  /**
+   * 已装的插件里有哪些能更新。
+   *
+   * ★ 判定整个在主进程完成(见 `PluginUpdate` 的注释)。`force` 绕过市场
+   * 列表的 TTL 缓存 —— 缓存的是**网络结果**,不是算好的这张表,所以更新完
+   * 一个插件之后重算,计数立刻就减下去了,不必等 TTL 过期。
+   */
+  'plugins:checkUpdates': { req: { force?: boolean }; res: PluginUpdate[] }
+  /**
+   * 把所有**市场来源**的可更新插件挨个更新掉。**串行**,失败不中断。
+   *
+   * ★ 串行不是保守:`PluginManager.records` 和 KV 的 read-modify-write 之间
+   * 没有锁,两次 `install()` 交叠会互相踩。顺带也避免了 N 个 20MB 的包
+   * 同时躺在主进程内存里。
+   */
+  'plugins:updateAll': { req: void; res: PluginUpdateResult }
   'plugins:getConfiguration': { req: { pluginId: string }; res: Record<string, boolean | string | number> }
   'plugins:setConfiguration': {
     req: { pluginId: string; key: string; value: boolean | string | number | null }
@@ -928,6 +966,35 @@ export interface IpcEventMap {
   /** 插件装/卸/启/禁/激活状态变了。渲染层收到后重新 `plugins:list` */
   'plugins:changed': void
   /**
+   * 装一个插件走到哪一步了。**只在一次安装期间推**,终态由
+   * `plugins:installMarket` / `plugins:installPackage` 的返回值给。
+   *
+   * ★ 走全局广播而不是定向推:装插件是全局副作用,B 窗口的市场页也该看到
+   * 那颗按钮在跑。代价是渲染层所有基于 `key` 的渲染都必须是**纯查表** ——
+   * 「进度存在」不等于「是我这个窗口发起的」。
+   */
+  'plugins:installProgress': {
+    /**
+     * `market:<slug>` 或 `local:<路径>`。
+     *
+     * ★ 本地安装用固定值(比如 `'local'`)是不行的:多窗口、或者连着装两个
+     * 本地包时,两条进度会挤在同一个 key 上互相覆盖。
+     */
+    key: string
+    phase: 'preparing' | 'downloading' | 'installing' | 'done' | 'failed'
+    /** `downloading` 阶段的已收字节 */
+    received?: number
+    /** content-length;拿不到就没有这个字段 → 渲染层走 indeterminate */
+    total?: number
+    /**
+     * 只在 `failed` 上有值,而且是 **key 不是句子**(同 `plugins:message` 的规矩)。
+     *
+     * ★ 必须有:`emitToAll` 把事件推给所有窗口,但只有发起那个窗口能 catch 到
+     * invoke 的 rejection。没有它,其他窗口看到的是进度条凭空消失。
+     */
+    messageKey?: string
+  }
+  /**
    * 插件要给用户看一条消息。
    *
    * ★ 带的是 **key + params**,不是渲染好的句子 —— 渲染层 `t()` 之后才是人话。
@@ -957,6 +1024,7 @@ export interface IpcEventMap {
   'websearch:changed': { providers: SearchProviderStatus[] }
   'sessions:changed': SessionChange
   'browser:changed': BrowserChange
+  'browser:cua': BrowserCuaEvent
   'browser:profilesChanged': BrowserProfile[]
   'scheduled:changed': { kind: 'task' | 'run'; taskId?: string; runId?: string; status?: ScheduledRun['status'] }
   'scheduled:focusRun': { runId: string }
@@ -1095,6 +1163,7 @@ export const INVOKE_CHANNELS = {
   'workspace:pick': 1,
   'workspace:update': 1,
   'workspace:close': 1,
+  'workspace:setActive': 1,
   'workspace:listDir': 1,
   'workspace:searchFiles': 1,
   'workspace:readFile': 1,
@@ -1106,6 +1175,7 @@ export const INVOKE_CHANNELS = {
   'browser:open': 1,
   'browser:navigate': 1,
   'browser:close': 1,
+  'browser:bind': 1,
   'browser:profiles': 1,
   'browser:createProfile': 1,
   'browser:deleteProfile': 1,
@@ -1182,11 +1252,14 @@ export const INVOKE_CHANNELS = {
   'plugins:revokePermissions': 1,
   'plugins:activity': 1,
   'plugins:runCommand': 1,
+  'plugins:cardAction': 1,
   'plugins:confirmClose': 1,
   'plugins:marketList': 1,
   'plugins:marketCategories': 1,
   'plugins:marketDetail': 1,
   'plugins:installMarket': 1,
+  'plugins:checkUpdates': 1,
+  'plugins:updateAll': 1,
   'plugins:getConfiguration': 1,
   'plugins:setConfiguration': 1,
   'skills:list': 1,
@@ -1322,6 +1395,7 @@ export const EVENT_CHANNELS = {
   'workspace:changed': 1,
   'skills:changed': 1,
   'plugins:changed': 1,
+  'plugins:installProgress': 1,
   'plugins:message': 1,
   'plugins:openCustomEditor': 1,
   'commands:changed': 1,
@@ -1336,6 +1410,7 @@ export const EVENT_CHANNELS = {
   'websearch:changed': 1,
   'sessions:changed': 1,
   'browser:changed': 1,
+  'browser:cua': 1,
   'browser:profilesChanged': 1,
   'modelCatalog:changed': 1,
   'clientAuth:changed': 1

@@ -3,7 +3,8 @@
  *
  * ## 为什么需要它
  *
- * `storage.ts` 的 `clearLocalData` 把数据根下的受管路径先 `rename` 进一棵
+ * `storage.ts` 的 `clearLocalData` 把 profile 根下的受管路径(含 `data/` 里我们自己的
+ * 数据)先 `rename` 进一棵
  * `.delete-safety-*` 暂存树，全部搬完才真删 —— 这样任何一步失败都能整体回滚，
  * 不会留下「删了一半」的库。
  *
@@ -24,7 +25,7 @@
 import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
-/** 补删清单的文件名。它就落在数据根下,和被推迟的那些目录做邻居。 */
+/** 补删清单的文件名。它就落在 profile 根下,和被推迟的那些 Chromium 目录做邻居。 */
 export const PENDING_DELETE_FILENAME = '.pending-local-data-delete.json'
 
 interface PendingDeleteRecord {
@@ -92,15 +93,15 @@ export interface PendingDeleteResult {
  *   Windows 上又变成删不掉,这个清单会一轮一轮地攒下去。
  *
  * ★ 清单是**磁盘上的可写文件**,不能无条件当成删除指令执行。每一条都重新校验
- *   「落在数据根里」且「不是数据根本身」—— 否则一个被改过的 JSON 就能让启动路径
- *   去删任意目录。
+ *   「落在 profile 根里」且「不是 profile 根本身」—— 否则一个被改过的 JSON 就能让
+ *   启动路径去删任意目录。
  *
  * 任何失败都只 warn 不抛:补删是尽力而为的收尾,绝不能挡住应用启动。
  */
 export function sweepPendingDelete(root: string): PendingDeleteResult {
   const record = readRecord(root)
   if (record === null) {
-    // 没有清单,或清单已损坏。文件若还在就顺手清掉,别让它永远留在数据根下。
+    // 没有清单,或清单已损坏。文件若还在就顺手清掉,别让它永远留在 profile 根下。
     try {
       if (existsSync(recordPath(root))) unlinkSync(recordPath(root))
     } catch {

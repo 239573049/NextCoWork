@@ -11,7 +11,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+/** Electron profile 根 —— 旧版的 `themes/` 躺在这一层。 */
 let userDataDir = ''
+/** 数据根 —— profile 根下的 `data/`,附件树在这一层。 */
+let dataDir = ''
 
 vi.mock('electron', () => ({
   app: { getPath: (): string => userDataDir },
@@ -20,13 +23,13 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../../runtime', () => ({
-  getHost: () => ({ paths: { userData: (): string => userDataDir, attachments: (): string => join(userDataDir, 'attachments') } })
+  getHost: () => ({ paths: { userData: (): string => dataDir, attachments: (): string => join(dataDir, 'attachments') } })
 }))
 
 vi.mock('../../window/registry', () => ({ windows: { broadcast: vi.fn() } }))
 vi.mock('../../kernel/run-registry', () => ({ runs: { activeRunIds: (): string[] => [] } }))
 
-import { closeDatabase, openDatabase } from '../../db'
+import { DATA_SUBDIRNAME, closeDatabase, openDatabase } from '../../db'
 import { attachmentRoot } from '../../net/attachment-protocol'
 import { cleanupAttachments } from '../storage'
 import { migrateLegacyThemesDir } from '../theme'
@@ -37,7 +40,10 @@ const newDir = (): string => join(attachmentRoot(), 'themes')
 beforeEach(() => {
   closeDatabase()
   userDataDir = mkdtempSync(join(tmpdir(), 'nextcowork-theme-'))
-  openDatabase(userDataDir)
+  // ★ 两层不能合成一个目录。旧的 `themes/` 在 profile 根,新位置在 `data/attachments/`
+  //   下 —— 合成一层的话「搬过去」和「原地没动」长得一模一样,这个文件就白写了。
+  dataDir = join(userDataDir, DATA_SUBDIRNAME)
+  openDatabase(dataDir)
 })
 
 afterEach(() => {

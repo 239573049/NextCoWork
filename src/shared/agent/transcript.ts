@@ -44,6 +44,11 @@ export interface ToolCallState {
   status: 'pending' | 'running' | 'ok' | 'error'
   /** 易失,不进转录(方案 §4.3) */
   progress?: string
+  /**
+   * 运行中推出的实时交互卡片(第 2 层)。**易失,不进转录** —— 落盘的是 `output.card`。
+   * 有它时渲染层自动展开工具卡并交给 `CardRenderer`。
+   */
+  card?: import('./tool-card').ToolCard
   output?: ToolOutput
   /**
    * `tool_start` 到达时的墙钟毫秒。
@@ -610,7 +615,18 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
     case 'tool_progress': {
       const prev = s.tools[e.callId]
       if (!prev) return s
-      return { ...s, tools: { ...s.tools, [e.callId]: { ...prev, progress: e.progress.message } } }
+      return {
+        ...s,
+        tools: {
+          ...s.tools,
+          [e.callId]: {
+            ...prev,
+            progress: e.progress.message,
+            // 实时卡片易失,但一旦推出就覆盖上一张;不推(card 缺省)则保留上一张。
+            ...(e.progress.card === undefined ? {} : { card: e.progress.card })
+          }
+        }
+      }
     }
 
     case 'tool_end': {
@@ -630,6 +646,9 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             status: e.isError ? 'error' : 'ok',
             output: e.output,
             progress: undefined,
+            // 实时卡片也随结束清掉 —— 让展示切到最终 output.card(结果快照);
+            // 否则那张过程态的卡会一直盖在结果上。
+            card: undefined,
             endedAt: e.at ?? Date.now()
           }
         }

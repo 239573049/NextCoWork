@@ -22,6 +22,8 @@ import type { WorkspaceFileMutationRequest } from '../../../shared/domain/worksp
 import { isWithinPath } from './documents'
 import { findGroup, migrateLegacyInnerTabs, normalizeDockState, splitGroup, moveTab as moveDockTab, reorderTab as reorderDockTab, resizeSplit, closeTab as closeDockTab, closeGroup as closeDockGroupState, addTabToGroup, type DockDirection, type DockNode } from '../../../shared/domain/dock'
 import { useWindowStore } from './window'
+import { usePluginsStore } from './plugins'
+import { pickCustomEditor } from '../../../shared/plugin/custom-editor'
 import type { SessionChange } from '../../../shared/domain/session'
 
 const EMPTY: InnerTabState = {
@@ -161,7 +163,20 @@ interface TabsState {
    * `open` 反过来必须每次都新建(连点两次 `+ 新建对话`要得到两个对话),
    * 所以去重不能塞进它里面。
    */
-  openPath: (workspaceId: string, kind: InnerTabKind, path: string, title: string) => void
+  openPath: (workspaceId: string, kind: InnerTabKind, path: string, title: string, init?: TabInit) => void
+  /**
+   * 按路径打开一个文件,**由已装插件决定用谁来打开**。
+   *
+   * ★ 这是「查插件目录 → 决定 kind」唯一的入口。文件树、Markdown 预览里的
+   * 链接、对话里的文件引用,三处以前各自硬编码 `'doc'` —— 于是插件清单里的
+   * `contributes.customEditors[].selector[].filenamePattern` 全仓**没有任何一处
+   * 读过**,双击 `.excalidraw` 打开的是一屏原始 JSON。分派逻辑只放这一份,
+   * 是为了不让三处再分叉。
+   *
+   * 没有插件认领就退回内置 `doc`;插件被禁用或卸载之后同理 —— `pickCustomEditor`
+   * 只看 `isRunnable` 的插件,所以禁用后重开同一个文件会自动退回文本。
+   */
+  openFile: (workspaceId: string, path: string, title?: string) => void
   /**
    * 点一张子代理卡片 → 在右侧工作区开一个**只读**会话。
    *
@@ -650,14 +665,22 @@ export const useTabsStore = create<TabsState>((set, get) => {
       }
     },
 
-    openPath(workspaceId, kind, path, title) {
+    openPath(workspaceId, kind, path, title, init) {
       const cur = get().stateOf(workspaceId)
       // 文件打开属于当前工作区的右侧工作台。后台工作区也只展开自己的面板，
       // 不会改变窗口当前正在看的工作区。
       useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
       let dock = get().dockOf(workspaceId)
+      /*
+        ★ **只按 path 去重,不比 kind。** 同一个文件可能被不同的 kind 打开
+        (插件的 `custom` 画布 / 内置的 `doc` 文本),比上 kind 的话,禁用插件之后
+        重开同一个文件会在旁边再开一个标签,两个标签指着同一个文件各editing各的。
+
+        `files` 是唯一的例外:它的 `ref.path` 是**目录根**,不是被打开的文件,
+        撞上同名会把文件树标签认成那个文件。
+      */
       const existing = cur.tabs.find(
-        (t) => t.kind === kind && 'path' in t.ref && t.ref.path === path
+        (t) => t.kind !== 'files' && 'path' in t.ref && t.ref.path === path
       )
       if (existing !== undefined) {
         const sourceGroupId = groupContainingTab(dock, existing.id)
@@ -687,7 +710,7 @@ export const useTabsStore = create<TabsState>((set, get) => {
         write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', existing.id))
         return
       }
-      const tab = makeTab(kind, 'right', { path, title })
+      const tab = makeTab(kind, 'right', { ...init, path, title })
       let groupId = groupForPane(dock, 'right')
       // If the right side has never been created, split it now so a file link
       // opened from a chat is immediately visible in the right workbench.
@@ -700,6 +723,24 @@ export const useTabsStore = create<TabsState>((set, get) => {
       if (groupId === null) return
       const nextDock = addTabToGroup(dock, groupId, tab)
       write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', tab.id))
+    },
+
+    openFile(workspaceId, path, title) {
+      const label = title ?? path.split('/').pop() ?? path
+      /*
+        ★ 目录现取现用,不缓存:插件可以在任意时刻被启用 / 禁用 / 卸载,
+        而这三件事都只换掉 store 里的整份 catalog(见 `stores/plugins.ts`)。
+        缓存一份的话,刚装好的插件要等到下一次刷新才接管得了文件。
+      */
+      const editor = pickCustomEditor(usePluginsStore.getState().catalog.plugins, path)
+      if (editor === null) {
+        get().openPath(workspaceId, 'doc', path, label)
+        return
+      }
+      get().openPath(workspaceId, 'custom', path, label, {
+        pluginId: editor.pluginId,
+        viewType: editor.viewType
+      })
     },
 
     openSubagentSession(workspaceId, sessionId, title, parent) {
@@ -1044,7 +1085,20 @@ export const useTabsStore = create<TabsState>((set, get) => {
       const tabs = cur.tabs.map((tab): InnerTab => {
         if (!('path' in tab.ref) || !isWithinPath(tab.ref.path, req.path)) return tab
         const path = destination + tab.ref.path.slice(req.path.length)
-        return { ...tab, ref: { path }, title: path.split('/').pop() ?? path } as InnerTab
+        /*
+          ★ **`ref` 必须展开,不能整个换成 `{ path }`。** 带 `path` 的 ref 里有两种
+          还挂着别的字段:`custom` 的 `{ viewType, pluginId }`、`files` 的
+          `selectedPath`。整个替换掉的表现是**改一次名,插件编辑器就变成
+          「提供它的插件已被禁用、卸载或装载失败」** —— `pluginId` 没了,
+          `CustomEditorView` 拿 `undefined` 去 catalog 里找,当然找不到。
+          (那句提示里的 `{plugin}` 原样显示没被替换,就是这个 bug 的现场证据。)
+
+          ★★ 末尾那个 `as InnerTab` 是这一行当初能编译过去的**唯一**原因:
+          它把「`custom` 的 ref 缺了两个必填字段」这个类型错误直接压掉了。
+          断言留着是因为 TS 不会对映射里的联合成员做分配式收窄,
+          但现在它压住的只剩这一条,不再掩盖字段丢失。
+        */
+        return { ...tab, ref: { ...tab.ref, path }, title: path.split('/').pop() ?? path } as InnerTab
       })
       if (tabs.some((tab, i) => tab !== cur.tabs[i])) write(req.workspaceId, { ...cur, tabs })
     },

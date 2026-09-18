@@ -12,9 +12,9 @@
  * 这是它们能被单测穷尽的前提,也是它们能同时服务于「已提交的 parts」和
  * 「还在流的 live 块」两条路径的前提。
  *
- * ★ **`input` 是 `unknown`,而且经常不是对象。** 流式中途 `tool_call_delta` 攒出来的
- * 是一段**未闭合的 JSON 片段字符串**(见 `Thread.tsx` 里 `input={b.text}` 那处注释),
- * 此时所有 `pick` 都取不到值 —— 标题必须退化成一个可读的短语,而不是崩溃或显示 "undefined"。
+ * ★ **`input` 是 `unknown`,而且经常不是完整对象。** 流式中的 `tool_call_delta`
+ * 会先被工具卡片投影成「目前可读出的部分对象」；畸形前缀仍会退回原始字符串。
+ * 所有 `pick` 因此都必须安全收窄 —— 字段没到时标题要退化成可读短语,不能崩溃或显示 "undefined"。
  *
  * ★ **查表的键是 `externalName`**(转录里存的那个),不是 `internalId`。
  * 内置工具两者一致,MCP 超长名的差异由 `parseMcpId` 吸收 —— 详见那里的说明。
@@ -412,10 +412,51 @@ const FALLBACK: ToolPresenter = {
   summary: firstLineSummary
 }
 
+// ─────────────────────────── 插件贡献的 presenter(注入层) ───────────────────────────
+//
+// ★ REGISTRY 之上唯一的可变层。插件的 presenter **算不出来**(依赖清单里的 shape/card
+// 模板 + i18n),所以由渲染层在 catalog 加载时**构建好闭包再注入**——把 t()/locale 留在
+// 渲染层,这个 shared 模块仍然不碰 store。注入是**全量替换**(与 plugins store 的替换式
+// 一致):每次拿整份 catalog 重建,避免残留已卸载插件的条目。
+//
+// ★ 带 version + 订阅:`presenterOf` 是命令式查表,注入这张 Map 不会触发 React 重渲;
+// 已提交(静态)的工具卡片若 presenter 迟到,不订阅就会永久停在兜底标题。消费方
+// (parts.tsx)用 `useSyncExternalStore` 订阅 `subscribePluginPresenters` 拿到重渲。
+const pluginPresenters = new Map<string, ToolPresenter>()
+let pluginPresentersVersion = 0
+const pluginPresenterListeners = new Set<() => void>()
+
+/** 全量替换插件 presenter 表。键是 externalName(转录里存的那个)。 */
+export function registerPluginPresenters(entries: ReadonlyArray<readonly [string, ToolPresenter]>): void {
+  pluginPresenters.clear()
+  for (const [externalName, presenter] of entries) pluginPresenters.set(externalName, presenter)
+  pluginPresentersVersion += 1
+  for (const listener of pluginPresenterListeners) listener()
+}
+
+/** 主要给测试用:清空注入层,`beforeEach` 复位,避免用例间串状态。 */
+export function clearPluginPresenters(): void {
+  if (pluginPresenters.size === 0) return
+  pluginPresenters.clear()
+  pluginPresentersVersion += 1
+  for (const listener of pluginPresenterListeners) listener()
+}
+
+/** `useSyncExternalStore` 的快照。 */
+export function pluginPresentersSnapshot(): number {
+  return pluginPresentersVersion
+}
+
+/** 订阅注入层变更 —— 见上方注释里「静态卡片 presenter 迟到」那段。 */
+export function subscribePluginPresenters(listener: () => void): () => void {
+  pluginPresenterListeners.add(listener)
+  return () => pluginPresenterListeners.delete(listener)
+}
+
 /**
- * 三级查找:内置注册表 → MCP 拆名 → 兜底。
+ * 四级查找:内置注册表 → MCP 拆名 → 插件注入 → 可读名兜底。
  *
- * 三级都会返回一个可用的 presenter,**永远不返回 undefined** ——
+ * 每一级都会返回一个可用的 presenter,**永远不返回 undefined** ——
  * 调用方不需要写空判断,这是让 `parts.tsx` 里那段渲染保持平铺直叙的前提。
  */
 export function presenterOf(name: string): ToolPresenter {
@@ -430,6 +471,12 @@ export function presenterOf(name: string): ToolPresenter {
       summary: firstLineSummary
     }
   }
+
+  // 插件贡献的 presenter。放在 MCP 之后、humanize 兜底之前:插件工具的
+  // externalName 不匹配 `mcp__` 拆名规则,会一路落到这里;注入了就用注入的,
+  // 没注入(catalog 还没加载 / 这个工具没声明卡片)则继续走可读名兜底。
+  const injected = pluginPresenters.get(name)
+  if (injected !== undefined) return injected
 
   // 认不出来但名字本身可读时,显示名字比显示「工具调用」有用得多。
   // Skill 提供的工具、以及将来任何新来源都会落在这里。

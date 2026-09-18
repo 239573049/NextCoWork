@@ -821,6 +821,61 @@ describe('vendor-first model catalogue', () => {
     })
   })
 
+  /*
+   * 2026-09-18 修正的三件事钉在这里:GLM-5.3 的 1M 窗口、与 flash 同表的
+   * effort 档位(以前是 toggle,订阅端点选 5.3 没有强度滑杆),以及全部
+   * Claude 行的 1M 窗口(以前 16 行全吃 200_000 兜底)。
+   */
+  it('exposes GLM-5.3 with a 1M window and the same effort ladder as Flash', () => {
+    expect(findBuiltinModel('glm-5.3')).toMatchObject({
+      manufacturerId: 'zhipu',
+      contextWindow: 1_000_000,
+      thinkingConfig: {
+        mode: 'effort',
+        defaultEffort: 'max',
+        parameterPath: 'reasoning_effort',
+      },
+      reasoningEfforts: ['low', 'high', 'max'],
+    })
+  })
+
+  it('gives every bundled Claude row an explicit 1M context window', () => {
+    const claudeRows = BUILTIN_MODEL_CATALOG.filter((row) => row.manufacturerId === 'anthropic')
+    expect(claudeRows.length).toBeGreaterThan(10)
+    expect(claudeRows.filter((row) => row.contextWindow !== 1_000_000).map((row) => row.id)).toEqual([])
+  })
+
+  /*
+   * Kimi Coding Plan(2026-09-18 修正):订阅端点的四个 Model ID 必须命中目录行 ——
+   * 命不中就落 IMPORTED_ALIAS_DEFAULTS,表现是 200K 窗口 + 思考只剩「自动/关」;
+   * 而那张端点表 supportsModelList 拉不到别名元数据,用户没有任何自救路径。
+   */
+  it('binds every Kimi Coding Plan model id to a catalogue row with a real window', () => {
+    const expectWindow = (id: string, contextWindow: number): void => {
+      const row = findBuiltinModel(id)
+      expect(row, id).toBeDefined()
+      expect(row?.contextWindow, id).toBe(contextWindow)
+    }
+    expectWindow('k3', 1_000_000)
+    expectWindow('k3-256k', 256_000)
+    expectWindow('kimi-for-coding', 1_000_000)
+    expectWindow('kimi-for-coding-highspeed', 1_000_000)
+  })
+
+  it('exposes Kimi K3 with an effort ladder while the K2.7 Code rows stay toggles', () => {
+    expect(findBuiltinModel('kimi-k3')).toMatchObject({
+      contextWindow: 1_000_000,
+      thinkingConfig: { mode: 'effort', defaultEffort: 'max', parameterPath: 'reasoning_effort' },
+      reasoningEfforts: ['low', 'high', 'max'],
+    })
+    for (const id of ['kimi-k2.7-code', 'kimi-k2.7-code-highspeed']) {
+      expect(findBuiltinModel(id), id).toMatchObject({
+        contextWindow: 1_000_000,
+        thinkingConfig: { mode: 'toggle' },
+      })
+    }
+  })
+
   it('uses the current DeepSeek V4 API ids, limits, capabilities and Think controls', () => {
     const pro = findBuiltinModel('deepseek-v4-pro')
     const flash = findBuiltinModel('deepseek-v4-flash')

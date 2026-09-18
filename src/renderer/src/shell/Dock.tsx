@@ -13,6 +13,7 @@ import { useTabsStore } from '../stores/tabs'
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents'
 import { DOCK_TAB_MIME, dockDropZone, groupPane, groupTabs, visibleDockNode, type DockDropZone } from './dock-layout'
 import { useTabMenu } from './tab-menu'
+import { submitTabRename } from './tab-rename-actions'
 import { usePluginsStore } from '../stores/plugins'
 
 export function DockRoot({ workspace, fallbackModel, runningSessionIds, rightVisible = true, bottomVisible = true }: { workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string>; rightVisible?: boolean; bottomVisible?: boolean }): ReactNode {
@@ -161,10 +162,47 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
         onClose={(id) => { void onClose(id) }}
         onMove={(from, to) => useTabsStore.getState().reorderDockTab(workspace.id, node.id, from, to)}
         onOpen={open}
+        onRename={(tab, value) => { void submitTabRename(workspace.id, tab, value) }}
       />
       {dragZone !== null && <DropOverlay zone={dragZone} />}
-      {active === undefined ? <EmptyState title={t('common.empty')} className="py-6" /> : <InnerView key={active.id} tab={active} workspace={workspace} fallbackModel={fallbackModel} />}
+      <DockContent tabs={tabs} active={active} workspace={workspace} fallbackModel={fallbackModel} emptyTitle={t('common.empty')} />
     </section>
+  )
+}
+
+function DockContent({ tabs, active, workspace, fallbackModel, emptyTitle }: {
+  tabs: ReturnType<typeof groupTabs>
+  active: ReturnType<typeof groupTabs>[number] | undefined
+  workspace: Workspace
+  fallbackModel: FallbackModel
+  emptyTitle: string
+}): ReactNode {
+  const browsers = tabs.filter((tab) => tab.kind === 'browser')
+  if (active === undefined) return <EmptyState title={emptyTitle} className="py-6" />
+  return (
+    <div className="relative flex min-h-0 min-w-0 flex-1">
+      {active.kind !== 'browser' && <InnerView key={active.id} tab={active} workspace={workspace} fallbackModel={fallbackModel} />}
+      {browsers.map((tab) => {
+        const visible = tab.id === active.id
+        return (
+          <div
+            key={tab.id}
+            aria-hidden={visible ? undefined : true}
+            className={cn(
+              'absolute inset-0 flex min-h-0 min-w-0',
+              visible ? 'z-10 opacity-100' : 'pointer-events-none z-0 opacity-0'
+            )}
+          >
+            {/*
+              ★ Browser webviews stay mounted while their tab is inactive. Destroying the guest
+              here detaches its CDP target, so an Agent switching between two browser tabs would
+              make the first tab impossible to inspect or click until the user selected it again.
+            */}
+            <InnerView tab={tab} workspace={workspace} fallbackModel={fallbackModel} />
+          </div>
+        )
+      })}
+    </div>
   )
 }
 

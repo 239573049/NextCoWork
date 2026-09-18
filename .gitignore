@@ -22,3 +22,6 @@ electron.vite.config.d.ts
 !src/renderer/src/env.d.ts
 !src/preload/index.d.ts
 .tscache
+# composite 工程的增量构建缓存,每次 `tsc -p` 都会在 tsconfig 旁边重新生成。
+# 曾经被误提交过(2026-09 清理),纯产物,不入库。
+*.tsbuildinfo

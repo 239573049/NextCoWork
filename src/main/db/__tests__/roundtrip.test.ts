@@ -26,7 +26,7 @@ import type { Workspace } from '../../../shared/domain/workspace'
 import type { SshConnectionProfile } from '../../../shared/domain/environment'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import { store } from '../../state/store'
-import { DATABASE_DIRNAME, DB_FILENAME, closeDatabase, db, defaultDatabaseDirectory, openDatabase, stmt } from '../index'
+import { DATABASE_DIRNAME, DATA_SUBDIRNAME, DB_FILENAME, closeDatabase, db, defaultDatabaseDirectory, openDatabase, stmt } from '../index'
 import * as repo from '../repo'
 import { switchConfigProfile } from '../config-profile'
 
@@ -654,7 +654,7 @@ describe('搜索服务', () => {
 
 describe('迁移', () => {
   it('默认数据库目录是主目录下的 .next-cowork,与 cwd 无关', () => {
-    expect(defaultDatabaseDirectory()).toBe(join(homedir(), DATABASE_DIRNAME))
+    expect(defaultDatabaseDirectory()).toBe(join(homedir(), DATABASE_DIRNAME, DATA_SUBDIRNAME))
   })
 
   it('重开不会重跑迁移,也不会清空已有的行', () => {

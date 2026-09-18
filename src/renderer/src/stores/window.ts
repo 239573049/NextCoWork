@@ -19,6 +19,7 @@ import { isLocalEnvironment } from '../../../shared/domain/environment'
 import { ulid } from '../../../shared/util/id'
 import { DEFAULT_SETTINGS_PAGE, type SettingsPageId } from '../settings/nav'
 import { persistOuterTabs } from '../services/app'
+import { invoke } from '../services/ipc'
 import { useTabsStore } from './tabs'
 import { cancelConnectionRequest, commitWorkspaceActivation, connectionErrorKey, prepareWorkspace, releaseWorkspaceActivation } from '../services/connections'
 
@@ -535,3 +536,29 @@ export const useWindowStore = create<WindowState>((set, get) => {
     }
   }
 })
+
+/**
+ * 把 `activeWorkspaceId` 上报给主进程。
+ *
+ * ★ **用 subscribe 而不是在每个赋值点插一行 `invoke`。** 这个字段现在有五处
+ * 写入(hydrate / activate / openWorkspace / close / 关掉最后一个工作区),
+ * 而且它是显式状态 —— 以后还会有新的写入点。逐点插调用的话,漏掉一处的表现是
+ * 「大部分时候对,偶尔插件把文件写进上一个工作区」,一种没人能稳定复现的故障。
+ * 订阅式写法让「谁改的」这件事不再重要。
+ *
+ * ★ 首次也发:启动时 `hydrate()` 恢复出来的那个值,主进程同样需要 —— 否则
+ * 用户没切过 Tab 的整个会话里,主进程一无所知。
+ *
+ * 由 `App.tsx` 调用一次;返回退订函数(HMR 下不退订会叠加订阅)。
+ */
+export function startActiveWorkspaceReporting(): () => void {
+  let last: string | null | undefined
+  const report = (id: string | null): void => {
+    if (id === last) return
+    last = id
+    // 即发即忘:主进程那边只是往一个 Map 里写一笔,失败了也没有值得打断用户的事。
+    void invoke('workspace:setActive', { workspaceId: id }).catch(() => undefined)
+  }
+  report(useWindowStore.getState().activeWorkspaceId)
+  return useWindowStore.subscribe((state) => { report(state.activeWorkspaceId) })
+}

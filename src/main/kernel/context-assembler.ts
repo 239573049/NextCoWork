@@ -97,7 +97,7 @@ function estimatePart(p: ContentPart): number {
       case 'tool_call':
         return estimateTokens(p.name) + estimateTokens(safeJson(p.input))
       case 'tool_result':
-        return estimateTokens(p.output.content)
+        return estimateTokens(p.output.content) + (p.output.images?.length ?? 0) * IMAGE_TOKENS
       case 'subagent':
         return estimateTokens(p.summary ?? '')
       case 'image':

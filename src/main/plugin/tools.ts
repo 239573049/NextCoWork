@@ -17,6 +17,7 @@
  */
 import { toolFail, toolOk } from '../../shared/agent/tool'
 import type { JsonSchema } from '../../shared/agent/tool'
+import { sanitizeToolCard } from '../../shared/agent/tool-card'
 import type { ToolRegistration } from '../kernel/tool/registry'
 
 /** 插件在 `tools.register` 里报上来的那一份声明。 */
@@ -27,6 +28,8 @@ export interface PluginToolDeclaration {
   readOnly: boolean
   destructive: boolean
   needsNetwork: boolean
+  /** 交互式工具:会推带按钮的实时卡片并挂起等用户点 —— 宿主放宽超时,见 PLUGIN_TIMEOUT */
+  interactive?: boolean
 }
 
 /** 工具名的形状 —— 和 `EXTERNAL_NAME_RE` 兼容,注册表还会再截断去重一次。 */
@@ -62,7 +65,16 @@ export function pluginToolId(pluginId: string, name: string): string {
 export function toolRegistrationFor(
   pluginId: string,
   declaration: PluginToolDeclaration,
-  invoke: (name: string, input: unknown, callId: string, signal: AbortSignal) => Promise<unknown>
+  invoke: (
+    name: string,
+    input: unknown,
+    callId: string,
+    signal: AbortSignal,
+    /** 运行中推进度/实时卡片的回调 —— 转发到内核 `ctx.emit`,见 manager 的 liveToolEmits */
+    emit: (progress: { callId: string; message: string; fraction?: number }) => void
+  ) => Promise<unknown>,
+  /** 该插件 `contributes.cardViews` 声明的 viewType —— frame 卡片只能指向其中之一。 */
+  cardViewTypes: ReadonlySet<string> = new Set()
 ): ToolRegistration {
   return {
     internalId: pluginToolId(pluginId, declaration.name),
@@ -74,8 +86,8 @@ export function toolRegistrationFor(
     source: { kind: 'plugin', pluginId },
     async execute(input, ctx) {
       try {
-        const result = await invoke(declaration.name, input, ctx.callId, ctx.signal)
-        return normalizeToolResult(result)
+        const result = await invoke(declaration.name, input, ctx.callId, ctx.signal, ctx.emit)
+        return normalizeToolResult(result, cardViewTypes)
       } catch (error) {
         /*
           ★ 中断要**原样抛**,不能伪装成工具失败(`kernel/tool/define.ts:74`
@@ -101,17 +113,27 @@ function normalizeSchema(raw: unknown): JsonSchema {
  *
  * 认不出的形状退化成「把它当文本」,而不是报错:一个返回了奇怪东西的插件
  * 工具,对模型来说应该是「这次调用没给出有用的信息」,而不是一次系统故障。
+ *
+ * ★ 可选的 `card` 是**只走 UI 轨**的:`sanitizeToolCard` 是不可信输入的收口
+ * (白名单原语、独立字节预算、image/link scheme、frame viewType 必须已声明)。
+ * 非法 card 直接丢弃,只保留文本 —— 卡片是锦上添花,不该拖垮工具结果本身。
  */
-function normalizeToolResult(raw: unknown): ReturnType<typeof toolOk> {
+function normalizeToolResult(raw: unknown, cardViewTypes: ReadonlySet<string>): ReturnType<typeof toolOk> {
   if (typeof raw === 'string') return toolOk(raw)
   if (raw === null || raw === undefined) return toolOk('')
-  const record = raw as { content?: unknown; isError?: unknown }
+  const record = raw as { content?: unknown; isError?: unknown; card?: unknown }
+  const card = sanitizeToolCard(record.card, cardViewTypes)
+  const withCard = (result: ReturnType<typeof toolOk>): ReturnType<typeof toolOk> =>
+    card === undefined ? result : { ...result, output: { ...result.output, card } }
   if (Array.isArray(record.content)) {
     const text = record.content
       .map((part) => (typeof part === 'string' ? part : typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : ''))
       .filter((part) => part !== '')
       .join('\n')
-    return record.isError === true ? toolFail(text) : toolOk(text)
+    return withCard(record.isError === true ? toolFail(text) : toolOk(text))
   }
+  // 有 card 但 content 不是数组时,别把整个对象 JSON.stringify 塞进文本(那会把
+  // card 也塞进模型可见的 content)。有 card → 文本留空,让卡片说话;没有 → 老行为。
+  if (card !== undefined) return withCard(toolOk(''))
   return toolOk(JSON.stringify(raw))
 }

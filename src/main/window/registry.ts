@@ -65,10 +65,52 @@ class WindowRegistry {
 
   forget(id: number): void {
     this.windows.delete(id)
+    this.activeWorkspace.delete(id)
     for (const [topic, ids] of this.topics) {
       ids.delete(id)
       if (ids.size === 0) this.topics.delete(topic)
     }
+  }
+
+  // ─── 当前工作区 ───
+
+  /**
+   * 每个窗口**此刻停在**哪个工作区。由渲染层经 `workspace:setActive` 上报。
+   *
+   * ★ 和 `last_opened_at` 不是一回事:后者记的是「何时最后一次打开」,在已开的
+   * 几个工作区之间切 Tab 不动它。需要「现在在哪」的地方(插件的路径类能力)
+   * 用那个时间戳会把文件写进上一次打开的工作区。
+   *
+   * ★ 只在内存里,不落库:它描述的是这次运行中某个窗口的即时状态,重启之后
+   * 由渲染层重新上报。落库反而要处理「上次关机时那条还在,但窗口还没起来」。
+   */
+  private readonly activeWorkspace = new Map<number, string>()
+
+  setActiveWorkspace(windowId: number, workspaceId: string | null): void {
+    if (workspaceId === null) this.activeWorkspace.delete(windowId)
+    else this.activeWorkspace.set(windowId, workspaceId)
+  }
+
+  activeWorkspaceOf(windowId: number): string | undefined {
+    return this.activeWorkspace.get(windowId)
+  }
+
+  /**
+   * 焦点窗口报的那一条;没有焦点窗口(应用在后台)时退到**任意一个**有上报的
+   * 主窗。返回 `undefined` = 没有任何窗口报过,调用方自己决定怎么兜底。
+   */
+  activeWorkspaceOfFocused(): string | undefined {
+    const focused = BrowserWindow.getFocusedWindow()
+    if (focused !== null) {
+      const reported = this.activeWorkspace.get(focused.webContents.id)
+      if (reported !== undefined) return reported
+    }
+    for (const [id, ctx] of this.windows) {
+      if (ctx.kind !== 'main') continue
+      const reported = this.activeWorkspace.get(id)
+      if (reported !== undefined) return reported
+    }
+    return undefined
   }
 
   // ─── 订阅 ───

@@ -15,13 +15,15 @@ import type { Bootstrap } from '../../shared/domain/bootstrap'
 import type { AppSettings, ResolvedTheme } from '../../shared/domain/settings'
 import type { Workspace } from '../../shared/domain/workspace'
 import { announceReady, getBootstrap } from './services/app'
+import { onBrowserChanged } from './services/browser'
 import { on } from './services/ipc'
 import { AppShell } from './shell/AppShell'
 import { AppSkeleton } from './shell/AppSkeleton'
 import { WindowControls } from './shell/WindowControls'
 import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { useImageThemes } from './stores/imageTheme'
-import { useWindowStore } from './stores/window'
+import { usePluginsStore } from './stores/plugins'
+import { useWindowStore, startActiveWorkspaceReporting } from './stores/window'
 import { useTabsStore } from './stores/tabs'
 import { applyTheme } from './theme/apply'
 import { useI18n } from './i18n'
@@ -29,7 +31,6 @@ import type { ClientAuthState } from '../../shared/domain/client-auth'
 import { getClientAuthState, getClientUser } from './services/client-auth'
 import { WelcomeView } from './views/WelcomeView'
 import { ClientTeamSelectionView } from './views/ClientTeamSelectionView'
-import { UpdateBanner } from './components/UpdateBanner'
 import { ToastViewport } from './components/ui/ToastViewport'
 import { useThemeProfiles } from './stores/themeProfiles'
 
@@ -55,6 +56,12 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => startAgentEventPump(), [])
 
+  /*
+    ★ 上报当前工作区。**放在事件泵旁边而不是握手那个 effect 里**:它不依赖
+    bootstrap 到没到 —— 订阅先挂上,`hydrate()` 之后那次赋值自然会被捎出去。
+  */
+  useEffect(() => startActiveWorkspaceReporting(), [])
+
   useEffect(() => {
     const offSettings = on('settings:changed', setSettings)
     const offTheme = on('theme:changed', ({ resolved }) => setAppearance(resolved))
@@ -72,8 +79,9 @@ export default function App(): React.JSX.Element {
       if (change.kind === 'deleted') useTabsStore.getState().removeSessions(change)
       void refreshHydratedSessions(change)
     })
-    const offBrowser = on('browser:changed', (change) => {
-      syncBrowserTabs(change.workspaceId, change.tabs)
+    const offBrowser = onBrowserChanged((change) => {
+      // Headless pages intentionally have no workspace tab; their lifecycle is Agent-only.
+      syncBrowserTabs(change.workspaceId, change.tabs.filter((tab) => tab.backend === 'iab'))
       if (change.rightPanelOpen === true) setRightPanelForWorkspace(change.workspaceId, true)
     })
     /*
@@ -83,6 +91,18 @@ export default function App(): React.JSX.Element {
     */
     const offMaximized = on('window:maximized', ({ maximized }) => setMaximized(maximized))
     const offClientAuth = on('clientAuth:changed', setAuth)
+    /*
+      ★ **插件目录的订阅在 App 层,不在插件设置页里。**
+
+      这一条以前只登记在 `views/extensions/plugins/PluginsPanel.tsx` 的 effect 里,
+      于是没打开过那一页的会话中,渲染层的 catalog 一直是空的 —— 而
+      `stores/plugins.ts` 的 `menuItems()` 是遍历 catalog 出菜单的。表现是:
+      「+」菜单里没有插件贡献的入口、`.excalidraw` 双击开出来是空白,
+      直到用户点进插件页才「忽然好了」。看上去像插件到那时才启动,
+      其实主进程开机就已经唤醒了它(`main/ipc/plugins.ts` 的 onStartup 那段),
+      只是没人在听它播出来的 catalog。
+    */
+    const offPlugins = on('plugins:changed', () => { void usePluginsStore.getState().load() })
 
     announceReady('main')
     void getBootstrap()
@@ -146,6 +166,7 @@ export default function App(): React.JSX.Element {
       offBrowser()
       offMaximized()
       offClientAuth()
+      offPlugins()
     }
   }, [hydrate, openSession, openWorkspace, setMaximized, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
 
@@ -174,6 +195,13 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     void useImageThemes.getState().load()
     void useThemeProfiles.getState().load().catch(console.error)
+    /*
+      ★ 插件目录**开机就拉一次**。`load()` 里的 `applyCatalog()` 顺手把每个插件的
+      l10n 注册进 i18n —— 菜单标题(`%cmd.new%`)靠它才显示成人话,而菜单本身
+      就是激活事件的来源。等用户点开插件页才拉的话,在那之前插件对界面
+      等于不存在。失败不拦首屏:`load()` 自己吞了异常并复位 loading。
+    */
+    void usePluginsStore.getState().load()
   }, [])
 
   useEffect(() => {
@@ -237,7 +265,6 @@ export default function App(): React.JSX.Element {
         runningWorkspaceIds={runningWorkspaceIds}
         auth={auth}
       />
-      <UpdateBanner />
       {/*
         ★ 只挂在这一个分支里,不跟着 `WindowControls` 铺到每个早退分支上。
         上面那几个分支(握手失败、骨架屏、欢迎页、选 Team)都还没有可供操作的

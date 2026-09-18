@@ -179,6 +179,7 @@ async function makeManager(
   runtime: ReturnType<typeof fakeRuntime>
   root: string
   approve: ReturnType<typeof vi.fn>
+  trash: ReturnType<typeof vi.fn>
 }> {
   const { promises: fs } = await import('node:fs')
   const { join } = await import('node:path')
@@ -192,6 +193,7 @@ async function makeManager(
   const kv = new Map<string, unknown>()
   const runtime = fakeRuntime()
   const approve = vi.fn(async () => true)
+  const trash = vi.fn(async () => {})
   const manager = new PluginManager({
     host: nodeHost(),
     runtime,
@@ -200,18 +202,21 @@ async function makeManager(
     getKv: (key, fallback) => (kv.has(key) ? (kv.get(key) as typeof fallback) : fallback),
     setKv: (key, value) => { kv.set(key, value) },
     currentWorkspace: () => ({ id: 'ws', rootPath: root }),
+    currentAppearance: () => 'dark' as const,
     approve,
+    trash,
     emitChanged: () => {},
     publishMessages: () => {},
     unpublishMessages: () => {},
     requestPermissions: async () => true,
     onToolsChanged: () => {},
+    reserveName: (id) => id,
     showMessage: () => {},
     openCustomEditor: () => {},
     ...depOverrides
   })
   await manager.start()
-  return { manager, runtime, root, approve }
+  return { manager, runtime, root, approve, trash }
 }
 
 beforeEach(() => { clearAllActivity() })
@@ -237,6 +242,94 @@ describe('PluginManager · 装载', () => {
     const plugin = manager.catalog().plugins[0]
     expect(plugin?.unsupported).toContain('chatRenderers')
     expect(plugin?.diagnostics.some((d) => d.path === 'contributes.chatRenderers')).toBe(true)
+  })
+
+  /**
+   * 工具贡献的 externalName 投影 —— 渲染层靠它把 tool_call.name 映回插件。
+   * 关键:投影从**清单**算(激活前就在),且与真正 register 时的名字一致。
+   */
+  it('★ catalog 带上工具的 externalName 投影,且与 registry 一致', async () => {
+    const { ToolRegistry } = await import('../../kernel/tool/registry')
+    const { pluginToolId } = await import('../tools')
+    const registry = new ToolRegistry()
+    const { manager } = await makeManager(
+      {
+        activationEvents: ['onTool:make_thing'],
+        contributes: {
+          tools: [{ name: 'make_thing', title: '%tool.makeThing%' }]
+        }
+      },
+      { reserveName: (id: string) => registry.reserveName(id) }
+    )
+    const plugin = manager.catalog().plugins[0]
+    const expected = registry.reserveName(pluginToolId('acme.demo', 'make_thing'))
+    expect(plugin?.tools).toEqual([{ name: 'make_thing', externalName: expected }])
+  })
+})
+
+/**
+ * 覆盖安装 = 更新走的那条路。
+ *
+ * ★ 这一组以前**一条都没有**,于是下面第一条钉住的那个 bug 活了很久:
+ * `disable()` 结尾会 `persist()` 写进 `enabled:false`,而 `install()` 在它
+ * 之后才读 KV 当「旧配置」—— 读到的开关已经是关的了。表现是更新完版本
+ * 对了、插件被静默关掉。市场卡片装过就 disabled、只有本地 picker 能覆盖
+ * 安装,所以在更新功能之前没人走到过这条路。
+ */
+describe('PluginManager · 覆盖安装(更新)', () => {
+  /** 另起一个源目录 —— 不能拿 pluginRoot 里那一份当源,`materialize` 会把目标挪走 */
+  async function packageDir(overrides: Record<string, unknown> = {}): Promise<string> {
+    const { tmpdir } = await import('node:os')
+    const dir = join(await fs.mkdtemp(join(tmpdir(), 'ncw-src-')), 'acme.demo')
+    await fs.mkdir(join(dir, 'dist'), { recursive: true })
+    await fs.writeFile(join(dir, 'package.json'), JSON.stringify({ ...MANIFEST, version: '1.1.0', ...overrides }))
+    await fs.writeFile(join(dir, 'dist', 'extension.js'), 'export function activate(){}')
+    return dir
+  }
+
+  it('★★ 更新之后插件还是开着的 —— enabled 与已批的能力都留着', async () => {
+    const { manager } = await makeManager()
+    manager.grant('acme.demo', ['storage'])
+    await manager.setEnabled('acme.demo', true)
+    expect(manager.catalog().plugins[0]?.enabled).toBe(true)
+
+    await manager.install(await packageDir())
+
+    const plugin = manager.catalog().plugins[0]
+    expect(plugin?.manifest.version).toBe('1.1.0')
+    expect(plugin?.enabled, '更新把插件关掉了').toBe(true)
+    expect(plugin?.status).not.toBe('disabled')
+    expect(plugin?.permissions.granted).toContain('storage')
+  })
+
+  it('★ 新版本要了没批过的必选能力 → pending-approval,不激活', async () => {
+    const { manager } = await makeManager()
+    manager.grant('acme.demo', ['storage'])
+    await manager.setEnabled('acme.demo', true)
+
+    await manager.install(await packageDir({ permissions: ['storage', 'clipboard'] }))
+
+    expect(manager.catalog().plugins[0]?.status).toBe('pending-approval')
+  })
+
+  it('★ 首次安装仍然默认不启用 —— 别因为要捎带 slug 就把它变成 pending-approval', async () => {
+    const { manager } = await makeManager()
+    await manager.uninstall('acme.demo')
+    await manager.install(await packageDir(), undefined, 'demo-slug')
+
+    const plugin = manager.catalog().plugins[0]
+    expect(plugin?.enabled).toBe(false)
+    expect(plugin?.status).toBe('disabled')
+  })
+
+  it('★ 市场装的记下 slug;本地覆盖装上来把它清掉', async () => {
+    const { manager } = await makeManager()
+    await manager.install(await packageDir(), undefined, 'demo-slug')
+    expect(manager.slugOf('acme.demo')).toBe('demo-slug')
+
+    // 本地包覆盖 —— 用户手上这一份已经不是市场那一份了
+    await manager.install(await packageDir())
+    expect(manager.slugOf('acme.demo')).toBeUndefined()
   })
 })
 
@@ -738,5 +831,137 @@ describe('PluginManager · workspace.writeFile 的父目录', () => {
     })
 
     expect(response.ok).toBe(false)
+  })
+})
+
+/**
+ * 插件删文件 —— 撤掉逐次确认框之后,这里是仅剩的一层可恢复性。
+ *
+ * ★ 原本是 `fsp.rm(target, { force: true })`,永久删除。那时候每次删还会弹一个
+ * 系统确认框,用户至少有机会说不;确认框撤掉之后再保留永久删除,等于插件
+ * 可以静默抹掉用户的文件。所以这两件事必须一起改,不能只改一半。
+ */
+describe('PluginManager · workspace.deleteFile 走废纸篓', () => {
+  const writeManifest = { ...MANIFEST, permissions: ['workspace.read', 'workspace.write'] }
+
+  async function ready(): Promise<Awaited<ReturnType<typeof makeManager>>> {
+    const made = await makeManager(writeManifest)
+    made.manager.grant('acme.demo', ['workspace.read', 'workspace.write'])
+    await made.manager.setEnabled('acme.demo', true)
+    return made
+  }
+
+  it('★ 删除落到 shell.trashItem,拿到的是解析后的绝对路径', async () => {
+    const { manager, root, trash } = await ready()
+    await fs.writeFile(join(root, 'doomed.txt'), 'bye')
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'workspace.deleteFile',
+      params: { path: 'doomed.txt' }
+    })
+
+    expect(response.ok).toBe(true)
+    expect(trash).toHaveBeenCalledTimes(1)
+    expect(trash.mock.calls[0]?.[0]).toBe(join(root, 'doomed.txt'))
+  })
+
+  it('★ 废纸篓失败时整次调用失败,**不**降级成永久删除', async () => {
+    const { manager, root, trash } = await ready()
+    await fs.writeFile(join(root, 'doomed.txt'), 'bye')
+    trash.mockRejectedValueOnce(new Error('trash is full'))
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'workspace.deleteFile',
+      params: { path: 'doomed.txt' }
+    })
+
+    expect(response.ok).toBe(false)
+    // 文件还在 —— 这正是「不降级」的含义
+    expect(await fs.readFile(join(root, 'doomed.txt'), 'utf8')).toBe('bye')
+  })
+
+  it('工作区外的路径在参数门就被拒,压根到不了废纸篓', async () => {
+    const { manager, trash } = await ready()
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'workspace.deleteFile',
+      params: { path: '../outside/victim.txt' }
+    })
+
+    expect(response.ok).toBe(false)
+    expect(trash).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * `process.exec` 的命令白名单接线。
+ *
+ * ★ 这条以前是**死路**:`manager.ts` 把 `allowedCommands` 写死成 `[]`,而
+ * `narrowCommand` 见到空白名单一律拒 —— 于是任何插件的 exec 都在参数门被
+ * 静默拒死,永远走不到审批那一步。不是接线漏了:`allowedCommands` 这个
+ * 清单字段当时压根没有实现,`rpc.ts` 的注释指向的是一个不存在的东西。
+ *
+ * 下面两条用例分别钉住「白名单生效」和「白名单仍然是门」。
+ */
+describe('PluginManager · allowedCommands 接进参数门', () => {
+  const execManifest = {
+    ...MANIFEST,
+    permissions: ['process'],
+    allowedCommands: ['git']
+  }
+
+  async function ready(manifest: Record<string, unknown>): Promise<Awaited<ReturnType<typeof makeManager>>> {
+    const made = await makeManager(manifest)
+    made.manager.grant('acme.demo', ['process'])
+    await made.manager.setEnabled('acme.demo', true)
+    return made
+  }
+
+  it('★ 清单里列了的命令能走到审批框 —— 用拒绝作为「到达」的证据', async () => {
+    const { manager, approve } = await ready(execManifest)
+    // 审批框返回 false,于是调用停在 approve 之后、spawn 之前 —— 测试不会真去跑 git
+    approve.mockResolvedValueOnce(false)
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'process.exec',
+      params: { command: 'git', args: ['status'] }
+    })
+
+    expect(approve).toHaveBeenCalledTimes(1)
+    // deps 层的 approve 签名是 (pluginId, summary) —— 插件 id 由 manager 补在前面
+    expect(approve.mock.calls[0]?.[0]).toBe('acme.demo')
+    // detail 是**引号转义过**的那一行 —— 弹窗上写的必须和真跑的字面一致
+    expect(approve.mock.calls[0]?.[1]).toMatchObject({ kind: 'exec', detail: "git 'status'" })
+    expect(response.ok).toBe(false)
+  })
+
+  it('★ 没列的命令仍然在参数门被拒,连审批框都不弹', async () => {
+    const { manager, approve } = await ready(execManifest)
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'process.exec',
+      params: { command: 'rm', args: ['-rf', '/'] }
+    })
+
+    expect(response.ok).toBe(false)
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it('★ 没声明 allowedCommands 的插件一条命令都跑不了(退回空白名单)', async () => {
+    const { manager, approve } = await ready({ ...MANIFEST, permissions: ['process'] })
+
+    const response = await manager.handleRequest('acme.demo', {
+      id: 1,
+      method: 'process.exec',
+      params: { command: 'git', args: ['status'] }
+    })
+
+    expect(response.ok).toBe(false)
+    expect(approve).not.toHaveBeenCalled()
   })
 })

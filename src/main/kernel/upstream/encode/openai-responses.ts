@@ -42,10 +42,21 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
           flush()
           input.push({ type: 'function_call', call_id: part.callId, name: part.name, arguments: JSON.stringify(part.input ?? {}) })
           break
-        case 'tool_result':
+        case 'tool_result': {
           flush()
-          input.push({ type: 'function_call_output', call_id: part.callId, output: part.output.content })
+          const images = part.output.images ?? []
+          input.push({
+            type: 'function_call_output',
+            call_id: part.callId,
+            output: images.length === 0
+              ? part.output.content
+              : [
+                  { type: 'input_text', text: part.output.content },
+                  ...images.map((image) => ({ type: 'input_image', image_url: image.dataRef, detail: 'auto' }))
+                ]
+          })
           break
+        }
         // ★ `error` / `goal_status` / `subagent` 只属于 UI 那一轨 —— 落到 default,
         //   一个字节都不上行(理由见 `encode/anthropic.ts` 里对应的那两条 return null)。
         default:

@@ -57,7 +57,13 @@ vi.mock('../../runtime', () => ({
   })
 }))
 
-import { DB_FILENAME, closeDatabase, databaseFilePath, openDatabase } from '../../db'
+import {
+  DATA_SUBDIRNAME,
+  DB_FILENAME,
+  closeDatabase,
+  databaseFilePath,
+  openDatabase
+} from '../../db'
 import * as repo from '../../db/repo'
 import { store } from '../../state/store'
 import {
@@ -73,14 +79,18 @@ import {
   restoreBackup
 } from '../storage'
 
+/** Electron profile 根 —— Chromium 的条目铺在这一层。 */
 let root = ''
+/** 数据根 —— profile 根下的 `data/`,我们自己的库和文件树在这一层。 */
+let dataRoot = ''
 let outside = ''
 
 beforeEach(() => {
   closeDatabase()
   root = mkdtempSync(join(tmpdir(), 'nextcowork-storage-root-'))
+  dataRoot = join(root, DATA_SUBDIRNAME)
   outside = mkdtempSync(join(tmpdir(), 'nextcowork-storage-outside-'))
-  openDatabase(root)
+  openDatabase(dataRoot)
   electron.openDialog.mockReset()
   electron.saveDialog.mockReset()
   electron.openPath.mockReset()
@@ -113,7 +123,7 @@ describe('备份目录路径边界', () => {
     ['附件子目录', (dataRoot: string) => join(dataRoot, 'attachments', 'sessions')],
     ['数据库文件', (dataRoot: string) => join(dataRoot, DB_FILENAME)]
   ])('拒绝%s', async (_label, target) => {
-    const path = target(root)
+    const path = target(dataRoot)
     select(path)
     await expect(chooseBackupDirectory()).rejects.toThrow(/备份目录|数据目录/)
   })
@@ -138,7 +148,7 @@ describe('备份目录路径边界', () => {
 
 describe('统计与清理不越过符号链接和外部引用', () => {
   it('附件统计只读取链接本身，不读取外部目标文件大小', () => {
-    const sessions = join(root, 'attachments', 'sessions')
+    const sessions = join(dataRoot, 'attachments', 'sessions')
     mkdirSync(sessions, { recursive: true })
     const target = join(outside, 'large.bin')
     writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, 7))
@@ -285,7 +295,7 @@ describe('恢复保留本机专属备份状态', () => {
 })
 
 describe('备份带上全局 settings.json', () => {
-  const globalPath = (): string => join(root, 'settings.json')
+  const globalPath = (): string => join(dataRoot, 'settings.json')
   const hooks = (command: string): string =>
     JSON.stringify({ version: 1, hooks: { Stop: [{ id: 'h1', command, timeout: 60 }] } })
 
@@ -492,7 +502,7 @@ describe('原生对话框与文件格式失败路径', () => {
 
 describe('删除并退出的文件系统边界', () => {
   it('删除受管数据和链接本身，但保留外部目标、外部备份与 Claude 目录', () => {
-    const managed = join(root, 'attachments', 'sessions', 's')
+    const managed = join(dataRoot, 'attachments', 'sessions', 's')
     mkdirSync(managed, { recursive: true })
     writeFileSync(join(managed, 'managed.txt'), 'managed')
 
@@ -509,12 +519,20 @@ describe('删除并退出的文件系统边界', () => {
     const claude = join(root, '.claude')
     mkdirSync(claude)
     writeFileSync(join(claude, 'shared.json'), 'keep claude')
-    const collisionWal = join(root, 'nextcowork 3.db-wal')
-    const collisionShm = join(root, 'nextcowork 3.db-shm')
+    /*
+      ★ 插件宿主和浏览器工作区的 `persist:` 分区落在 `Partitions/` 里。它一直不在
+      受管清单上,「删除全部数据」从来没清掉过那两处的登录态 —— 这条用例就是钉死
+      它现在会被清掉。
+    */
+    const partition = join(root, 'Partitions', 'plugin-host', 'Local Storage')
+    mkdirSync(partition, { recursive: true })
+    writeFileSync(join(partition, 'leveldb.log'), 'plugin host session')
+    const collisionWal = join(dataRoot, 'nextcowork 3.db-wal')
+    const collisionShm = join(dataRoot, 'nextcowork 3.db-shm')
     const chromiumDb = join(root, 'declarative_performance_observer.db-journal')
     const dipsCollision = join(root, 'DIPS-wal 4')
     const devToolsMarker = join(root, 'DevToolsActivePort')
-    const migratedInstructions = join(root, 'AGENTS.md')
+    const migratedInstructions = join(dataRoot, 'AGENTS.md')
     for (const path of [
       collisionWal,
       collisionShm,
@@ -534,6 +552,7 @@ describe('删除并退出的文件系统边界', () => {
     expect(readFileSync(externalTarget, 'utf8')).toBe('keep target')
     expect(readFileSync(join(backupDirectory, 'keep.ncwbackup'), 'utf8')).toBe('keep backup')
     expect(readFileSync(join(claude, 'shared.json'), 'utf8')).toBe('keep claude')
+    expect(existsSync(join(root, 'Partitions'))).toBe(false)
     for (const path of [
       collisionWal,
       collisionShm,
@@ -543,7 +562,7 @@ describe('删除并退出的文件系统边界', () => {
       migratedInstructions
     ]) expect(existsSync(path)).toBe(false)
     expect(readFileSync(unrelated, 'utf8')).toBe('keep unrelated file')
-    expect(existsSync(join(root, DB_FILENAME))).toBe(false)
+    expect(existsSync(join(dataRoot, DB_FILENAME))).toBe(false)
     expect(electron.quit).toHaveBeenCalledOnce()
   })
 

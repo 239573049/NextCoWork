@@ -151,12 +151,13 @@ describe('Ollama 系绑定 · 思考线形的 provider 感知覆盖', () => {
     expect(model.thinkingConfig).toEqual(ollamaStandard)
   })
 
-  it('★★★ 智谱自己的供应商上不碰 —— 方言分支正是那边要的', () => {
+  it('★★★ 智谱自己的供应商上不碰 —— 目录的 effort 档位线形原样保留(改写只属于 Ollama)', () => {
     const model = modelBindingResolver().resolve(
       imported({ providerId: 'zhipu', upstreamModel: 'glm-5.3' })
     )
-    expect(model.thinkingConfig).toMatchObject({ mode: 'toggle', parameterPath: 'thinking.type' })
+    expect(model.thinkingConfig).toMatchObject({ mode: 'effort', parameterPath: 'reasoning_effort' })
     expect(model.thinkingConfig?.standardWire).toBeUndefined()
+    expect(model.reasoningEfforts).toEqual(['low', 'high', 'max'])
   })
 
   it('★★ ollama 自己的条目不覆盖 —— gpt-oss 的档位表短一截(无 none/无 max)', () => {

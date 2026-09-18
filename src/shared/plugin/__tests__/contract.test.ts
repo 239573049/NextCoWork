@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  hasNewerVersion,
   matchesHostPermission,
   parsePluginManifest,
   parseRange,
@@ -108,11 +109,89 @@ describe('清单校验', () => {
     expect(result.warnings.some((w) => w.field === 'hostPermissions')).toBe(true)
   })
 
+  /*
+    `allowedCommands` —— `process.exec` 的命令白名单。
+
+    ★ 这个字段是**后补的**:`rpc.ts` 的注释一直说「清单里可选的命令白名单」,
+    但清单里从来没有这个字段,`manager.ts` 那一侧写死成 `[]`,于是任何插件的
+    exec 都在参数门被静默拒死。补上之后,校验必须和 `capabilities.ts` 的归一
+    规则**对齐**:那边比的是去掉目录与 `.exe/.cmd/.bat/.ps1` 之后的 stem,
+    所以作者写 `/usr/bin/git` 永远匹配不上 —— 与其让它静默失效,不如在装载时
+    就报错。
+  */
+  it('裸可执行名通过', () => {
+    const result = parse({ permissions: ['process'], allowedCommands: ['git', 'cargo', 'node'] })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.manifest.allowedCommands).toEqual(['git', 'cargo', 'node'])
+  })
+
+  it('★ 带路径或带 .exe 的条目让整份清单作废 —— 不默默剥掉,也不默默丢掉', () => {
+    // 这里是**错误**而不是警告(对比上面的 hostPermissions):默默丢掉的话,
+    // 作者只会在运行时看到一句「命令不在白名单里」,而清单上明明写着。
+    for (const command of ['/usr/bin/git', 'bin\\git', 'git.exe', 'git.cmd']) {
+      const result = parse({ permissions: ['process'], allowedCommands: [command] })
+      expect(result.ok, command).toBe(false)
+      if (result.ok) continue
+      expect(result.errors.some((e) => e.field === 'allowedCommands'), command).toBe(true)
+    }
+  })
+
+  it('★ 声明了 allowedCommands 却没声明 process 能力 —— 警告,不作废整份', () => {
+    const result = parse({ allowedCommands: ['git'] })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.warnings.some((w) => w.field === 'allowedCommands')).toBe(true)
+  })
+
+  it('没写 allowedCommands 时是空数组,不是 undefined —— 空数组 = 一条都不许跑', () => {
+    const result = parse()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.manifest.allowedCommands).toEqual([])
+  })
+
   it('认得字段名但没实现的贡献点进 unsupported,不报错', () => {
     const result = parse({ contributes: { chatRenderers: [{ id: 'x' }] } })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.manifest.contributes.unsupported).toContain('chatRenderers')
+  })
+
+  it('工具贡献解析 shape 与 card 模板', () => {
+    const result = parse({
+      contributes: {
+        tools: [{ name: 'make_thing', title: '%tool.make%', shape: 'mutate', card: { title: '%tool.make.card%', summary: '%tool.make.sum%' } }]
+      }
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const tool = result.manifest.contributes.tools[0]
+    expect(tool?.shape).toBe('mutate')
+    expect(tool?.card).toEqual({ title: '%tool.make.card%', summary: '%tool.make.sum%' })
+  })
+
+  it('★ 未知 shape 与裸文案 card 模板被拒', () => {
+    expect(parse({ contributes: { tools: [{ name: 't', title: '%t%', shape: 'weird' }] } }).ok).toBe(false)
+    expect(parse({ contributes: { tools: [{ name: 't', title: '%t%', card: { title: '造东西' } }] } }).ok).toBe(false)
+  })
+
+  it('cardViews 解析 viewType + 包内相对路径,越界路径被拒', () => {
+    const ok = parse({ contributes: { cardViews: [{ viewType: 'task.card', path: './dist/card.html' }] } })
+    expect(ok.ok).toBe(true)
+    if (!ok.ok) return
+    expect(ok.manifest.contributes.cardViews[0]).toEqual({ viewType: 'task.card', path: './dist/card.html' })
+    expect(parse({ contributes: { cardViews: [{ viewType: 'x', path: '../evil.html' }] } }).ok).toBe(false)
+  })
+
+  it('dependencies 解析 pluginId→range;自依赖 / 坏 id / 坏 range 被拒', () => {
+    const ok = parse({ dependencies: { 'acme.other': '^1.0.0' } })
+    expect(ok.ok).toBe(true)
+    if (!ok.ok) return
+    expect(ok.manifest.dependencies).toEqual({ 'acme.other': '^1.0.0' })
+    expect(parse({ dependencies: { 'acme.excalidraw': '^1.0.0' } }).ok).toBe(false) // 自依赖(VALID 的 id)
+    expect(parse({ dependencies: { 'Bad Id': '^1.0.0' } }).ok).toBe(false)
+    expect(parse({ dependencies: { 'acme.other': 'not-a-range' } }).ok).toBe(false)
   })
 
   it('不是对象的输入不会把解析器打崩', () => {
@@ -142,6 +221,30 @@ describe('engines range', () => {
   it('★ 读不懂的 range 返回 false,不是放行', () => {
     expect(parseRange('latest')).toBeNull()
     expect(satisfiesEngine('latest', '1.0.0')).toBe(false)
+  })
+})
+
+describe('有没有新版本', () => {
+  it('高的才算新,相等和降级都不算', () => {
+    expect(hasNewerVersion('0.1.2', '0.1.3')).toBe(true)
+    expect(hasNewerVersion('0.1.3', '0.2.0')).toBe(true)
+    expect(hasNewerVersion('0.1.3', '0.1.3')).toBe(false)
+    expect(hasNewerVersion('0.1.4', '0.1.3')).toBe(false)
+  })
+
+  it('★ 手上拿着预发布版 → 正式版算更新', () => {
+    // parseSemVer 丢掉 `-beta`,所以这两个在 compare 眼里是相等的 ——
+    // 而这恰恰是最该提示更新的一种情况。
+    expect(hasNewerVersion('1.0.0-beta.1', '1.0.0')).toBe(true)
+    // 反过来不算:正式版的用户不该被劝退回预发布
+    expect(hasNewerVersion('1.0.0', '1.0.0-beta.1')).toBe(false)
+  })
+
+  it('★ 读不懂 / 没有版本号一律 false —— 宁可不提示,也不提示一次必然失败的更新', () => {
+    expect(hasNewerVersion('0.1.2', 'latest')).toBe(false)
+    expect(hasNewerVersion('nightly', '0.1.3')).toBe(false)
+    expect(hasNewerVersion('0.1.2', null)).toBe(false)
+    expect(hasNewerVersion('0.1.2', undefined)).toBe(false)
   })
 })
 

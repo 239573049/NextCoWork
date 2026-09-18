@@ -2,8 +2,11 @@
  * 补删清单：上一次「删除并退出」搬不动的路径，靠它在下次启动时收尾。
  *
  * 这份清单是磁盘上的普通 JSON，谁都能改。所以这里的重点不在「能不能删掉」，
- * 而在**删之前那道边界校验**：一个被改过的清单绝不能让启动路径去删数据根之外
- * 的东西，也不能把数据根自己整棵端掉。
+ * 而在**删之前那道边界校验**：一个被改过的清单绝不能让启动路径去删 profile 根之外
+ * 的东西，也不能把 profile 根自己整棵端掉。
+ *
+ * ★ 这里的 `root` 是 **profile 根**(`~/.next-cowork`),不是 `data/`。清单上记的是
+ *   搬不动的 Chromium 目录,它们就铺在那一层。
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

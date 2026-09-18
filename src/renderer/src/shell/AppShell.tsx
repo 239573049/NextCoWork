@@ -43,6 +43,7 @@ import { useWindowStore } from "../stores/window";
 import { FeatureView } from "../views/registry";
 import { BrowserFeature } from "../views/browser/BrowserFeature";
 import { OuterTabBar } from "./OuterTabBar";
+import { UpdateIndicator } from "./UpdateIndicator";
 import { Sidebar } from "./Sidebar";
 import { SearchPalette } from "./SearchPalette";
 import { StatusBar } from "./StatusBar";
@@ -50,6 +51,8 @@ import { mergeCommands, usePluginCommands, type Command } from "./commands";
 import { useCommandShortcuts } from "./useCommandShortcuts";
 import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents';
 import { DocumentDialogs } from '../views/files/DocumentDialogs';
+import { OverwriteConfirmDialog } from './OverwriteConfirmDialog';
+import { submitWorkspaceRename } from './tab-rename-actions';
 import { DockRoot } from './Dock';
 import type { DockNode } from '../../../shared/domain/dock';
 import { ConnectionDialogs } from './ConnectionDialogs';
@@ -488,6 +491,7 @@ export function AppShell({
                 onClose={(id) => { void closeOuterTab(id); }}
                 onTogglePin={win.togglePin}
                 onMove={win.move}
+                onRenameWorkspace={(workspaceId, name) => { void submitWorkspaceRename(workspaceId, name); }}
                 onOpenWorkspace={win.openWorkspace}
                 onPickWorkspace={() => { void pickLocalWorkspace(); }}
                 onCreateWorkspace={() => { void pickLocalWorkspace(); }}
@@ -496,6 +500,7 @@ export function AppShell({
                 bottomPanelOpen={bottomPanelOpen}
                 onToggleRightPanel={() => toggleDockEdge('right')}
                 onToggleBottomPanel={() => toggleDockEdge('bottom')}
+                updateIndicator={<UpdateIndicator />}
               />
             </div>
 
@@ -531,6 +536,7 @@ export function AppShell({
         return state.openWorkspace(created.id);
       }} />}
       <DocumentDialogs />
+      <OverwriteConfirmDialog />
 
       <SearchPalette
         open={searchOpen}

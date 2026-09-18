@@ -67,7 +67,12 @@ export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set([
   'web_search',
   'browser_open',
   'browser_navigate',
-  'browser_snapshot'
+  'browser_click',
+  'browser_type',
+  'browser_press',
+  'browser_select',
+  'browser_cua_click',
+  'browser_cua_drag'
 ])
 
 /** 给测试和诊断用:把一次判定压成一行人话。 */

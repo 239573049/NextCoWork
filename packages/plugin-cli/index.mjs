@@ -139,9 +139,7 @@ async function publish() {
   if (!validate.ok) fail(`校验未通过:${validate.message}`)
   console.log(`✓ 校验通过 ${validate.data.pluginId}@${validate.data.version}`)
 
-  const listing = await json(`/api/plugins/mine`, token)
-  const mine = (listing.items ?? []).find((item) => item.pluginId === `${pkg.publisher}.${pkg.name}`)
-  const id = mine?.id ?? (await postJson('/api/plugins', { publisher: pkg.publisher, name: pkg.name, displayName: pkg.displayName, description: pkg.description, category: pkg.categories?.[0] }, token)).id
+  const id = await ensurePlugin(token, pkg)
   const version = await post(`/api/plugins/${id}/versions`, bytes, zipName, token)
   if (!version.ok) fail(`上传失败:${version.message}`)
   if (version.data.permissionEscalated) {
@@ -150,6 +148,50 @@ async function publish() {
   }
   await postJson(`/api/plugins/${id}/submit`, {}, token)
   console.log(`✓ 已提交审核 ${zipName}`)
+}
+
+/**
+ * 插件在库里的**自增数字 id** —— 上传版本、提交审核的路径参数要的是它。
+ *
+ * ★★ 不是 `/api/plugins/mine` 里那个 UUID。列表每一项长这样:
+ *
+ * ```
+ * { internalId: 2, plugin: { id: '<uuid>', pluginId: 'acme.excalidraw', … } }
+ * ```
+ *
+ * 数字 id 挂在**外层**,`plugin` 那一层里只有 UUID —— 而路径上的 UUID
+ * 换来的是 `404 接口不存在`,作者看不出这和「插件不存在」有什么区别:
+ * 插件明明就在自己的列表里列着,`GET /api/plugins/mine` 也是 200。
+ *
+ * ★ 顺带一提 `pluginId` 也在里层,所以判「是我的插件吗」要读
+ * `plugin.pluginId`,不是外层的 `pluginId`(那一读永远 undefined,
+ * 于是每次 publish 都去新建一个已存在的插件)。
+ *
+ * 查不到返回 `null`:这个动作在「已经建过」和「刚建完」两条路上都要做。
+ */
+async function findInternalId(token, pluginId) {
+  const listing = await json('/api/plugins/mine', token)
+  const item = (listing.items ?? []).find((entry) => entry?.plugin?.pluginId === pluginId)
+  return typeof item?.internalId === 'number' ? item.internalId : null
+}
+
+/**
+ * 插件不在自己名下就先建,然后**回头再查一次列表**拿数字 id。
+ *
+ * ★ 不吃 `POST /api/plugins` 的返回值:那份 DTO 里带不带 `internalId`
+ * 没有任何依据(见 `findInternalId` 记的那两层形状),而列表接口的
+ * 形状是确定的 —— 与拿一个「大概有」的字段去拼路径相比,多一个往返
+ * 换的是「路径必对」。
+ */
+async function ensurePlugin(token, pkg) {
+  const pluginId = `${pkg.publisher}.${pkg.name}`
+  const existing = await findInternalId(token, pluginId)
+  if (existing !== null) return existing
+
+  await postJson('/api/plugins', { publisher: pkg.publisher, name: pkg.name, displayName: pkg.displayName, description: pkg.description, category: pkg.categories?.[0] }, token)
+  const created = await findInternalId(token, pluginId)
+  if (created === null) fail(`插件已创建但列表里查不到 ${pluginId},请到市场网页确认它的归属`)
+  return created
 }
 
 async function dev() {
@@ -165,10 +207,29 @@ function run(cmd, args) {
   })
 }
 
+/**
+ * ★ **写请求必须带 `Origin`。** 市场的网关对 POST 做同源校验:不带就一律
+ * `403 请求来源无效` —— 这条错误既不说来源哪里不对、也不说该补哪个头,
+ * 作者只会怀疑自己的 token 过期了,于是重新登录一遍,而 token 一直是对的。
+ *
+ * 值就用 `--api` 指向的那个 origin:指向本地市场时发的是本地 origin,
+ * 与浏览器发的同源请求是同一个值。`Origin` 不带末尾斜杠。
+ *
+ * 读请求不校验(带上也无害),所以这里只留一份 header 构造 ——
+ * 不给「哪几个调用要记得加」留出错的机会。
+ */
+function headers(token, jsonBody = false) {
+  return {
+    Authorization: `Bearer ${token}`,
+    Origin: new URL(apiOrigin).origin,
+    ...(jsonBody ? { 'content-type': 'application/json' } : {})
+  }
+}
+
 async function post(path, bytes, fileName, token) {
   const form = new FormData()
   form.append('file', new Blob([bytes], { type: 'application/zip' }), fileName)
-  const response = await fetch(new URL(path, apiOrigin), { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form })
+  const response = await fetch(new URL(path, apiOrigin), { method: 'POST', headers: headers(token), body: form })
   const body = await response.json().catch(() => ({}))
   return { ok: response.ok, data: body.data ?? body, message: body.message ?? `HTTP ${response.status}` }
 }
@@ -176,7 +237,7 @@ async function post(path, bytes, fileName, token) {
 async function postJson(path, payload, token) {
   const response = await fetch(new URL(path, apiOrigin), {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: headers(token, true),
     body: JSON.stringify(payload)
   })
   const body = await response.json().catch(() => ({}))
@@ -185,7 +246,7 @@ async function postJson(path, payload, token) {
 }
 
 async function json(path, token) {
-  const response = await fetch(new URL(path, apiOrigin), { headers: { Authorization: `Bearer ${token}` } })
+  const response = await fetch(new URL(path, apiOrigin), { headers: headers(token) })
   const body = await response.json().catch(() => ({}))
   return body.data ?? body
 }

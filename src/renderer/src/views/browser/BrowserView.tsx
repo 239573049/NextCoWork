@@ -1,10 +1,17 @@
-import { ArrowLeft, ArrowRight, ExternalLink, Globe, RotateCw, ShieldAlert } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ExternalLink, Globe, Keyboard, MousePointer2, RotateCw, ShieldAlert } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
 import { isLocalEnvironment } from '../../../../shared/domain/environment'
-import { browserPartition } from '../../../../shared/domain/browser'
-import { closeBrowserTab, listBrowserTabs, navigateBrowserTab, openBrowserTab } from '../../services/browser'
+import { browserPartition, type BrowserCuaEvent } from '../../../../shared/domain/browser'
+import {
+  bindBrowserView,
+  closeBrowserTab,
+  listBrowserTabs,
+  navigateBrowserTab,
+  onBrowserCua,
+  openBrowserTab
+} from '../../services/browser'
 import { useI18n } from '../../i18n'
 import { useTabsStore } from '../../stores/tabs'
 import { IconButton } from '../../components/ui/IconButton'
@@ -17,6 +24,11 @@ interface BrowserElement extends HTMLElement {
   goForward?: () => void
   reload?: () => void
   openDevTools?: () => void
+  getWebContentsId?: () => number
+}
+
+interface CuaIndicator extends BrowserCuaEvent {
+  visible: boolean
 }
 
 /**
@@ -38,6 +50,7 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
   const [draft, setDraft] = useState(tab.ref.url)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [cuaIndicator, setCuaIndicator] = useState<CuaIndicator | null>(null)
   const viewRef = useRef<BrowserElement | null>(null)
 
   useEffect(() => {
@@ -67,7 +80,22 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
   useEffect(() => {
     const view = viewRef.current
     if (view === null) return
+    let alive = true
 
+    const onAttach = (): void => {
+      const browserId = tab.ref.browserId
+      let webContentsId: number | undefined
+      try {
+        webContentsId = view.getWebContentsId?.()
+      } catch {
+        // Before did-attach Electron throws instead of returning an absent id.
+        return
+      }
+      if (browserId === undefined || typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) return
+      void bindBrowserView(workspace.id, browserId, webContentsId).catch(() => {
+        if (alive) setError(t('browser.operationFailed'))
+      })
+    }
     const onNavigate = (event: Event): void => {
       const next = (event as Event & { url?: string }).url
       if (typeof next !== 'string' || !/^https?:\/\//i.test(next)) return
@@ -90,12 +118,16 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
       setError(t('browser.loadFailed'))
     }
 
+    view.addEventListener('did-attach', onAttach)
     view.addEventListener('did-navigate', onNavigate)
     view.addEventListener('did-navigate-in-page', onNavigate)
     view.addEventListener('did-start-loading', onStart)
     view.addEventListener('did-stop-loading', onStop)
     view.addEventListener('did-fail-load', onFail)
+    onAttach()
     return () => {
+      alive = false
+      view.removeEventListener('did-attach', onAttach)
       view.removeEventListener('did-navigate', onNavigate)
       view.removeEventListener('did-navigate-in-page', onNavigate)
       view.removeEventListener('did-start-loading', onStart)
@@ -103,6 +135,26 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
       view.removeEventListener('did-fail-load', onFail)
     }
   }, [setBrowser, tab.id, tab.ref.browserId, workspace.id, t])
+
+  useEffect(() => {
+    let hideTimer: ReturnType<typeof setTimeout> | null = null
+    let removeTimer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = onBrowserCua((event) => {
+      if (event.workspaceId !== workspace.id || event.tabId !== tab.ref.browserId) return
+      if (hideTimer !== null) clearTimeout(hideTimer)
+      if (removeTimer !== null) clearTimeout(removeTimer)
+      setCuaIndicator({ ...event, visible: true })
+      hideTimer = setTimeout(() => {
+        setCuaIndicator((current) => current === null ? null : { ...current, visible: false })
+      }, 200)
+      removeTimer = setTimeout(() => setCuaIndicator(null), 400)
+    })
+    return () => {
+      unsubscribe()
+      if (hideTimer !== null) clearTimeout(hideTimer)
+      if (removeTimer !== null) clearTimeout(removeTimer)
+    }
+  }, [tab.ref.browserId, workspace.id])
 
   const navigate = async (): Promise<void> => {
     const raw = draft.trim()
@@ -195,6 +247,26 @@ function LocalBrowserView({ tab, workspace }: { tab: Extract<InnerTab, { kind: '
             webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
             className="h-full w-full border-0"
           />
+        )}
+        {cuaIndicator !== null && (
+          <div
+            aria-hidden="true"
+            className={cn(
+              'pointer-events-none absolute z-20 text-accent transition-opacity duration-200 motion-reduce:transition-none',
+              cuaIndicator.visible ? 'opacity-100' : 'opacity-0'
+            )}
+            style={{ left: cuaIndicator.x, top: cuaIndicator.y }}
+          >
+            <MousePointer2 size={22} className="-translate-x-[2px] -translate-y-[2px] fill-canvas drop-shadow-sm" />
+            {cuaIndicator.kind === 'click' && (
+              <span className="absolute left-0 top-0 h-5 w-5 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full border border-accent motion-reduce:animate-none" />
+            )}
+            {cuaIndicator.kind === 'type' && (
+              <span className="absolute left-4 top-4 rounded border border-accent/40 bg-canvas/90 p-1 shadow-sm">
+                <Keyboard size={12} />
+              </span>
+            )}
+          </div>
         )}
         {loading && (
           <div className="pointer-events-none absolute right-3 top-3 rounded-pill bg-canvas/90 px-2 py-1 text-[11px] text-fg-muted shadow-sm">

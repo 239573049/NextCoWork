@@ -153,12 +153,13 @@ try {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.ELECTRON_NO_ATTACH_CONSOLE
-  // ★ `--user-data-dir` **就是**最终数据根(`main/index.ts` 的 `resolveDataRoot()`
-  // 认这个开关;不传才落到 `~/.next-cowork`)。预置文件必须放进应用真正会读的那个
-  // 目录 —— 主题的正规位置是 `<数据根>/attachments/themes/`,放错地方的表现是
-  // `theme:listImages` 回一张空表,看起来像索引读坏了。
+  // ★ `--user-data-dir` 是 **profile 根**,数据根是它下面的 `data/`
+  // (`main/index.ts` 的 `resolveProfileRoot()` / `resolveDataRoot()`;不传才落到
+  // `~/.next-cowork`)。预置文件必须放进应用真正会读的那个目录 —— 主题的正规位置是
+  // `<profile 根>/data/attachments/themes/`,放错地方的表现是 `theme:listImages`
+  // 回一张空表,看起来像索引读坏了。
   const userData = `/tmp/nextcowork-theme-${Date.now()}`
-  const themes = join(userData, 'attachments', 'themes')
+  const themes = join(userData, 'data', 'attachments', 'themes')
   mkdirSync(themes, { recursive: true })
   writeFileSync(join(themes, `${SEEDED_ID}.png`), Buffer.from(PNG_1PX, 'base64'))
   writeFileSync(

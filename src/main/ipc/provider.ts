@@ -36,6 +36,7 @@ import { removeCredential } from '../db/repo'
 import { parseCredential } from '../../shared/domain/credential'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { catalogDefinitionFromAlias, isModelCatalogDefinition } from '../../shared/domain/model-catalog'
+import { defaultProtocolForModel } from '../../shared/domain/model-catalog-inventory'
 import { listResolvedModels } from '../state/model-bindings'
 import {
   modelListErrorMessage,
@@ -586,11 +587,21 @@ export function setAliases(providerId: string, models: readonly string[]): Model
       不钉的话,用户拉完列表得到的一批模型里有一批是坏的,且报错是一句
       「Internal server error」,读不出和协议有任何关系。
 
+      ★ 厂商默认协议(claude 系 → anthropic 线形,表在 `model-catalog-inventory`)
+      是同一个问题的通用版:聚合站常用一个 openai-chat 端点同时卖 claude 和 gpt,
+      不钉的话 claude 那几条继承供应商协议,Claude 的思考/缓存语义在兼容层里
+      说没就没。**只在默认值与供应商协议不同**时钉 —— 供应商本来就是 anthropic
+      的话,钉一个相同的值只会在「协议」下拉里制造一个看不出差别的显式覆盖。
+
       ★★ 只钉**新建**的那支。已存在的别名一个字不改 —— 用户可能在「协议」下拉里
       自己选过,而重拉一次列表把他的选择顶掉,和这个函数「命中就保留供应商覆盖值」
       的既有语义直接冲突。老库里那些协议为空的,由 `runtime.ts` 的一次性回填管。
     */
-    const pinned = existing === undefined ? opencodeGoProtocolFor(p, m) : undefined
+    const manufacturerDefault = defaultProtocolForModel(m)
+    const pinned = existing === undefined
+      ? opencodeGoProtocolFor(p, m) ??
+        (manufacturerDefault !== undefined && manufacturerDefault !== p.protocol ? manufacturerDefault : undefined)
+      : undefined
     // ★ 别名默认等于上游模型名(和 seed 那条一致)。这里不加任何前缀/后缀 ——
     // 别名是用户在药丸和 `defaultModel` 里看见的字符串,加工过就对不上他在上游文档里读到的名字
     store.putAlias(resolver.resolve(

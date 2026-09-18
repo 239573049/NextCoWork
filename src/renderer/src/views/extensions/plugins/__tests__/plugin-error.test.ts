@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { pluginErrorKey } from '../plugin-error'
+import { PLUGIN_METHOD_PERMISSION } from '../../../../../../shared/plugin/protocol'
 
 const MAIN = join(__dirname, '../../../../../../main')
 
@@ -22,7 +23,10 @@ function keysThrownByMain(): Set<string> {
     const source = readFileSync(join(MAIN, file), 'utf8')
     for (const match of source.matchAll(/['"](plugins\.[a-zA-Z.]+)['"]/g)) {
       const key = match[1]
-      if (key !== undefined) found.add(key)
+      // ★ `plugins.*` 也是协议标识符的命名空间(第 5 层):`plugins.invoke` 等是 **RPC 方法名**,
+      // `plugins.event` 是**反向调用 kind**。它们都不是抛给用户的错误 key —— 按方法表 +
+      // 这一个 kind 排除,别当错误 key 比对。
+      if (key !== undefined && key !== 'plugins.event' && !Object.hasOwn(PLUGIN_METHOD_PERMISSION, key)) found.add(key)
     }
   }
   return found

@@ -17,15 +17,17 @@ export type BrowserOpenInput = {
   url: string
   title?: string
   profileId?: string
+  backend?: BrowserTab['backend']
   openRightPanel?: boolean
 } & (
-  | { source: 'user'; ownerRunId?: never; clientTabId?: string }
-  | { source: 'agent'; ownerRunId: string; clientTabId?: never }
+  | { source: 'user'; ownerRunId?: never; ownerSessionId?: never; clientTabId?: string }
+  | { source: 'agent'; ownerRunId: string; ownerSessionId?: string; clientTabId?: never }
 )
 
 export interface BrowserActor {
   workspaceId: string
   runId: string
+  sessionId?: string
 }
 
 export interface BrowserManagerListener {
@@ -50,7 +52,10 @@ function normalizeUrl(raw: string): string {
 }
 
 function copyTab(tab: BrowserTab): BrowserTab {
-  return { ...tab }
+  return {
+    ...tab,
+    ...(tab.viewport === undefined ? {} : { viewport: { ...tab.viewport } })
+  }
 }
 
 /**
@@ -156,8 +161,10 @@ export class BrowserManager {
       workspaceId: input.workspaceId,
       ...(input.clientTabId === undefined ? {} : { clientTabId: input.clientTabId }),
       ...(input.ownerRunId === undefined ? {} : { ownerRunId: input.ownerRunId }),
+      ...(input.ownerSessionId === undefined ? {} : { ownerSessionId: input.ownerSessionId }),
       ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
       source: input.source,
+      backend: input.backend ?? 'iab',
       url,
       title: input.title?.trim() || new URL(url).hostname,
       status: 'loading',
@@ -183,7 +190,11 @@ export class BrowserManager {
     return copyTab(next)
   }
 
-  update(id: string, patch: { url?: string; title?: string; status?: BrowserTab['status'] }, actor?: BrowserActor): BrowserTab {
+  update(
+    id: string,
+    patch: { url?: string; title?: string; status?: BrowserTab['status']; viewport?: BrowserTab['viewport'] },
+    actor?: BrowserActor
+  ): BrowserTab {
     const tab = this.requireOwned(id, actor)
     this.assertWorkspace(tab.workspaceId)
     const next: BrowserTab = {
@@ -191,6 +202,28 @@ export class BrowserManager {
       ...(patch.url === undefined ? {} : { url: normalizeUrl(patch.url) }),
       ...(patch.title === undefined ? {} : { title: patch.title.trim() || tab.title }),
       ...(patch.status === undefined ? {} : { status: patch.status }),
+      ...(patch.viewport === undefined ? {} : { viewport: { ...patch.viewport } }),
+      updatedAt: Date.now()
+    }
+    this.tabs.set(id, next)
+    this.emit(next.workspaceId)
+    return copyTab(next)
+  }
+
+  claim(id: string, actor: BrowserActor): BrowserTab {
+    const tab = this.tabs.get(id)
+    if (tab === undefined) throw new Error(`浏览器标签不存在: ${id}`)
+    if (tab.workspaceId !== actor.workspaceId) throw new Error('浏览器标签不属于当前工作区')
+    const sameSession = actor.sessionId !== undefined && tab.ownerSessionId === actor.sessionId
+    if (tab.ownerRunId !== undefined && tab.ownerRunId !== actor.runId && !sameSession) {
+      throw new Error('浏览器标签已被另一个 Agent 会话认领')
+    }
+    if (tab.source !== 'user') throw new Error('只能认领用户打开的浏览器标签')
+    if (tab.ownerRunId === actor.runId) return copyTab(tab)
+    const next: BrowserTab = {
+      ...tab,
+      ownerRunId: actor.runId,
+      ...(actor.sessionId === undefined ? {} : { ownerSessionId: actor.sessionId }),
       updatedAt: Date.now()
     }
     this.tabs.set(id, next)
@@ -220,9 +253,12 @@ export class BrowserManager {
     if (tab === undefined) throw new Error(`浏览器标签不存在: ${id}`)
     if (
       actor !== undefined &&
-      (tab.workspaceId !== actor.workspaceId || tab.source !== 'agent' || tab.ownerRunId !== actor.runId)
+      (
+        tab.workspaceId !== actor.workspaceId ||
+        (tab.ownerRunId !== actor.runId && (actor.sessionId === undefined || tab.ownerSessionId !== actor.sessionId))
+      )
     ) {
-      throw new Error('只能操作当前 Agent 打开的浏览器标签')
+      throw new Error('只能操作当前 Agent 打开或认领的浏览器标签')
     }
     return tab
   }

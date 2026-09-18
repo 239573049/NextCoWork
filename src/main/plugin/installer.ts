@@ -271,6 +271,9 @@ function assertPackageFiles(
   for (const view of manifest.contributes.views) {
     if (!hasFile(view.path)) throw new PluginInstallError(`view "${view.id}" points at a missing file: ${view.path}`)
   }
+  for (const card of manifest.contributes.cardViews) {
+    if (!hasFile(card.path)) throw new PluginInstallError(`cardView "${card.viewType}" points at a missing file: ${card.path}`)
+  }
   for (const theme of manifest.contributes.themes) {
     if (!hasFile(theme.path)) throw new PluginInstallError(`theme file is missing: ${theme.path}`)
   }

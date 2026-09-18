@@ -135,39 +135,67 @@ const ELECTRON_PROFILE_PATHS = [
   'QuotaManager-journal',
   'History',
   'History-journal',
-  'Crashpad'
+  'Crashpad',
+  /*
+    ★ 插件宿主(`persist:plugin-host`)和浏览器工作区的 `persist:` 分区都落在这里,
+    装着它们的 cookie / localStorage。Electron 自己决定这个落点,不经过我们任何
+    代码 —— 所以它一直不在这张表里,「删除全部数据」从来就没清掉过插件和浏览器
+    的登录态。
+  */
+  'Partitions'
 ] as const
-const MANAGED_LOCAL_PATHS = [
+/**
+ * 应用自己的数据 —— 全部挂在**数据根**(`<profile 根>/data`)下。
+ *
+ * 清单保持显式:用户在排查问题时可能往目录里放无关文件,一刀递归清扫会很意外。
+ */
+const MANAGED_DATA_PATHS = [
   ATTACHMENTS_DIR,
-  'themes',
   'skills',
   'agents',
   // ★ 全局斜杠命令。漏了它的话「删除全部数据并退出」之后,用户自己写的 `/xxx`
   // 还原封不动地留在盘上 —— 和 skills/agents 同一棵树,没有理由区别对待。
   'commands',
+  'modes',
   'plugins',
+  'workspaces',
+  // 账户作用域的 skills / agents / settings.json 各占一棵 `<hash>` 子树。
+  PROFILE_DIRECTORY_SEGMENT,
+  // Migrated application instructions also belong to this app-level tree.
+  'AGENTS.md',
+  // ★ 全局设置(目前只有钩子)。同上:不清的话「全部删除」之后钩子还在跑。
+  GLOBAL_SETTINGS_FILENAME
+] as const
+/**
+ * 挂在 **profile 根**上的条目:Chromium 自己的 profile,加上几样同层的历史遗留。
+ *
+ * `themes` 是数据根搬家之前的旧主题目录(`ipc/theme.ts` 的 `legacyThemesDir()`
+ * 仍按 `app.getPath('userData')` 去找它);`plugin`(单数) / `logs` / `cache`
+ * 已经没有任何生产代码往里写,但老版本留下的目录还在用户盘上,继续清掉。
+ */
+const MANAGED_PROFILE_PATHS = [
+  'themes',
   'plugin',
   'logs',
   'cache',
-  'workspaces',
-  // Migrated application instructions and Chromium's development/profile
-  // marker files also belong to this app-level userData tree.
-  'AGENTS.md',
-  // ★ 全局设置(目前只有钩子)。同上:不清的话「全部删除」之后钩子还在跑。
-  GLOBAL_SETTINGS_FILENAME,
+  'headless-browsers',
+  'headless-profiles',
   'DevToolsActivePort',
   ...ELECTRON_PROFILE_PATHS
 ] as const
 /**
  * Chromium and SQLite may append a numeric collision suffix to a top-level
- * profile file (for example `DIPS-wal 3` or `nextcowork 2.db-shm`).  Keep the
- * match deliberately narrow: delete-and-quit must remove every file the app
- * owns without turning the data root into an arbitrary recursive delete.
+ * file (for example `DIPS-wal 3` or `nextcowork 2.db-shm`).  Keep the match
+ * deliberately narrow: delete-and-quit must remove every file the app owns
+ * without turning either root into an arbitrary recursive delete.
+ *
+ * ★ 两组分别扫各自的根 —— `nextcowork 2.db-shm` 只会出现在数据根,
+ * `DIPS-wal 3` 只会出现在 profile 根。拿一组去扫两边等于放宽了删除边界。
  */
-const MANAGED_LOCAL_FILE_PATTERNS = [
+const MANAGED_DATA_FILE_PATTERNS = [/^nextcowork [1-9]\d*\.db(?:-(?:wal|shm))?$/u] as const
+const MANAGED_PROFILE_FILE_PATTERNS = [
   /^DIPS-(?:wal|shm)(?: [1-9]\d*)?$/u,
-  /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u,
-  /^nextcowork [1-9]\d*\.db(?:-(?:wal|shm))?$/u
+  /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u
 ] as const
 /**
  * 「删不掉就推迟到下次启动」只对 Chromium 自己拥有的那些路径成立。
@@ -182,7 +210,12 @@ const MANAGED_LOCAL_FILE_PATTERNS = [
  *   「全有或全无」—— 暂存机制存在的全部理由就是不留下删了一半的库。
  *   `nextcowork 2.db` 这类带碰撞后缀的副本同样归我们,不在此列。
  */
-const DEFERRABLE_LOCAL_NAMES = new Set<string>([...ELECTRON_PROFILE_PATHS, 'DevToolsActivePort'])
+const DEFERRABLE_LOCAL_NAMES = new Set<string>([
+  ...ELECTRON_PROFILE_PATHS,
+  'headless-browsers',
+  'headless-profiles',
+  'DevToolsActivePort'
+])
 const DEFERRABLE_LOCAL_PATTERNS = [
   /^DIPS-(?:wal|shm)(?: [1-9]\d*)?$/u,
   /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u
@@ -225,14 +258,42 @@ function dataDirectory(): string {
   return databaseDirectory()
 }
 
-function managedLocalPaths(root: string): string[] {
-  const names = new Set<string>(MANAGED_LOCAL_PATHS)
+/**
+ * Electron profile 根 —— 数据根的父目录。
+ *
+ * ★ 契约:数据根**必须**是 profile 根下的 `data/`(见 `db/index.ts` 的
+ * `DATA_SUBDIRNAME`)。`clearLocalData` 把删除边界定在 profile 根上,靠的正是
+ * 这层父子关系 —— 两边的路径才能同时落在 `stageManagedPath` 的界内。
+ */
+function profileRootDirectory(): string {
+  return dirname(dataDirectory())
+}
+
+function collectManagedPaths(
+  root: string,
+  names: readonly string[],
+  patterns: readonly RegExp[]
+): string[] {
+  const set = new Set<string>(names)
   try {
     for (const name of readdirSync(root)) {
-      if (MANAGED_LOCAL_FILE_PATTERNS.some((pattern) => pattern.test(name))) names.add(name)
+      if (patterns.some((pattern) => pattern.test(name))) set.add(name)
     }
   } catch { /* a missing/unreadable root is handled by each target operation */ }
-  return [...names].map((name) => join(root, name))
+  return [...set].map((name) => join(root, name))
+}
+
+/**
+ * 「删除全部数据并退出」要搬走的全部路径。
+ *
+ * ★ 数据根的条目排在前面。profile 那一侧可能被 Chromium 占着而推迟到下次启动,
+ * 让我们自己的数据先落袋更符合「全有或全无」的语义。
+ */
+function managedLocalPaths(profileRoot: string, dataRoot: string): string[] {
+  return [
+    ...collectManagedPaths(dataRoot, MANAGED_DATA_PATHS, MANAGED_DATA_FILE_PATTERNS),
+    ...collectManagedPaths(profileRoot, MANAGED_PROFILE_PATHS, MANAGED_PROFILE_FILE_PATTERNS)
+  ]
 }
 
 function attachmentDirectory(): string {
@@ -1828,9 +1889,8 @@ function removableManagedEntries(path: string, protectedPath: string | null): st
 
 function localDataPreview(): CleanupPreview {
   const base = repo.cleanupPreview('local-data')
-  const root = dataDirectory()
   const protectedPath = externalBackupPath(store.getSettings().data.backupDirectory)
-  const targets = managedLocalPaths(root).flatMap((path) =>
+  const targets = managedLocalPaths(profileRootDirectory(), dataDirectory()).flatMap((path) =>
     removableManagedEntries(path, protectedPath)
   )
   const dbPath = databaseFilePath()
@@ -1942,14 +2002,21 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   if (!req.confirm) throw new IpcError('unknown', '必须明确确认删除本机数据')
   if (runs.activeRunIds().length > 0) throw new IpcError('unknown', '有运行中的 Agent，请先停止任务后再删除')
   assertNoImportJob('删除')
-  const root = dataDirectory()
+  const dataRoot = dataDirectory()
+  /*
+    ★ 删除边界是 **profile 根**,不是数据根。清单横跨两层(`data/` 下是我们的库和
+    文件树,根层是 Chromium 的 profile),而 `stageManagedPath` 的边界断言只认一个
+    根 —— 取父目录,两边才同时在界内。定在数据根上的话,第一条 Chromium 路径就会
+    让整次删除抛错回滚,而不是少删一点。
+  */
+  const profileRoot = profileRootDirectory()
   const configuredBackup = store.getSettings().data.backupDirectory
   // A malformed legacy setting must not accidentally protect a path relative
   // to the process working directory.  Only a user-selected absolute path is
   // an external backup location worth preserving.
   const externalBackup = externalBackupPath(configuredBackup)
   const dbPath = databaseFilePath()
-  const stagingRoot = join(root, `.delete-safety-${process.pid}-${Date.now()}`)
+  const stagingRoot = join(profileRoot, `.delete-safety-${process.pid}-${Date.now()}`)
   const staged: StagedManagedPath[] = []
   /**
    * 被 Chromium 占住、这一轮搬不动的 profile 路径。它们**从未被 rename**,
@@ -1960,7 +2027,7 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   try {
     // Move ordinary files first, then close and move SQLite as the commit
     // point. Nothing is physically erased until every target is staged.
-    for (const path of managedLocalPaths(root)) {
+    for (const path of managedLocalPaths(profileRoot, dataRoot)) {
       /*
         ★ 受保护的备份目录若嵌在这棵子树里就不能推迟 —— 补删是在下一次启动、
         在一个不知道备份设置的早期时机做的 `rmSync`,推迟等于把那份备份也判了死刑。
@@ -1970,7 +2037,7 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
       const deferrable =
         isDeferrableLocalPath(path) && (externalBackup === null || !isWithin(path, externalBackup))
       if (!deferrable) {
-        stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+        stageManagedPath(path, profileRoot, stagingRoot, externalBackup, staged)
         continue
       }
       /*
@@ -1980,7 +2047,7 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
         ★ 只吞「被占用」这一类错误;其它错误照旧抛出并整体回滚。
       */
       try {
-        stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+        stageManagedPath(path, profileRoot, stagingRoot, externalBackup, staged)
       } catch (err) {
         if (!isLockedError(err)) throw err
         deferred.push(path)
@@ -1991,7 +2058,7 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
       closeDatabase()
       databaseClosed = true
       for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-        stageManagedPath(path, root, stagingRoot, externalBackup, staged)
+        stageManagedPath(path, profileRoot, stagingRoot, externalBackup, staged)
       }
     }
     // The safety tree exists only long enough to make staging reversible.
@@ -2011,7 +2078,7 @@ export function clearLocalData(req: { confirm: boolean }): { deleted: boolean } 
   if (deferred.length > 0) {
     // 记账失败只记日志:删除本身已经提交了,不能因为写不下一张清单就把它报成失败。
     try {
-      recordPendingDelete(root, deferred)
+      recordPendingDelete(profileRoot, deferred)
     } catch (err) {
       console.error('[storage] 写入补删清单失败，以下路径将残留:', deferred, err)
     }

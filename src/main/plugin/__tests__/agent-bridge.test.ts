@@ -134,12 +134,15 @@ async function makeActiveManager(invoke: PluginRuntime['invoke']): Promise<Plugi
     getKv: (key, fallback) => (kv.has(key) ? (kv.get(key) as typeof fallback) : fallback),
     setKv: (key, value) => { kv.set(key, value) },
     currentWorkspace: () => ({ id: 'ws', rootPath: root }),
+    currentAppearance: () => 'dark' as const,
     approve: async () => true,
+    trash: async () => {},
     emitChanged: () => {},
     publishMessages: () => {},
     unpublishMessages: () => {},
     requestPermissions: async () => true,
     onToolsChanged: () => {},
+    reserveName: (id) => id,
     showMessage: () => {},
     openCustomEditor: () => {}
   })

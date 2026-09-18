@@ -17,7 +17,7 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { installPluginZip } from '../installer'
+import { installPluginDirectory, installPluginZip } from '../installer'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -96,5 +96,33 @@ describe('installPluginZip 的路径大小写', () => {
     expect(spawnSync('zip', ['-q', zipPath, 'acme.demo/dist/extension.js'], { cwd: work }).status).toBe(0)
 
     await expect(installPluginZip(zipPath, await scratch())).rejects.toThrow(/duplicate/i)
+  })
+})
+
+describe('installPluginDirectory · 贡献点文件存在性', () => {
+  it('★ cardViews 指向不存在的文件 → 拒装(和 views 同级的守卫)', async () => {
+    const src = await fs.mkdtemp(join(tmpdir(), 'ncw-cardview-'))
+    dirs.push(src)
+    await fs.mkdir(join(src, 'dist'), { recursive: true })
+    await fs.writeFile(join(src, 'dist/extension.js'), 'export function activate() {}')
+    await fs.writeFile(
+      join(src, 'package.json'),
+      JSON.stringify({
+        name: 'demo',
+        publisher: 'acme',
+        displayName: 'Demo',
+        description: 'cardView fixture',
+        version: '1.0.0',
+        engines: { nextcowork: '^0.1.0' },
+        main: './dist/extension.js',
+        activationEvents: ['onTool:make_thing'],
+        permissions: [],
+        contributes: {
+          tools: [{ name: 'make_thing', title: '%t%' }],
+          cardViews: [{ viewType: 'task.card', path: './dist/card.html' }] // 文件不存在
+        }
+      })
+    )
+    await expect(installPluginDirectory(src, await scratch())).rejects.toThrow(/cardView.*missing/i)
   })
 })

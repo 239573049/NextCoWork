@@ -22,7 +22,7 @@ import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
  *   把 `secrets.get()` 递过去,等于 `host.ts` 里「明文 key 永不进内核」那条作废。
  * - `paths`:`userData` 在工作区外面。工具要么走路径围栏,要么根本不该碰路径。
  */
-export type ToolHost = Pick<KernelHost, 'fs' | 'spawn' | 'fetch' | 'browserFetch' | 'clock' | 'logger'> & {
+export type ToolHost = Pick<KernelHost, 'fs' | 'spawn' | 'fetch' | 'clock' | 'logger'> & {
   path?: WorkspacePaths
   platform?: PlatformInfo
   remote?: boolean
@@ -308,6 +308,19 @@ export class ToolRegistry {
 
   byInternalId(internalId: string): Tool | undefined {
     return this.tools.get(internalId)
+  }
+
+  /**
+   * 预留一个 internalId 的 externalName,**不注册工具**。
+   *
+   * ★ 给插件 catalog 用:插件工具只有被激活事件叫醒、跑完 `tools.register` RPC
+   * 之后才会真的 `register()`,而菜单/卡片贡献要在激活**之前**就画出来,
+   * 那时渲染层已经需要 externalName 去 join。直接委托 `namer.nameFor`
+   * (幂等 + 记忆化):此刻预留的名字,与将来真正 `register()` 时分配的**同一个**,
+   * 于是历史转录与 presenter 都不会失配。
+   */
+  reserveName(internalId: string): string {
+    return this.namer.nameFor(internalId)
   }
 
   /** 给 IPC `agent:listTools` 用 —— 去掉 execute 之后才过得了结构化克隆 */

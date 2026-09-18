@@ -38,8 +38,28 @@ export interface CapabilityContext {
   workspaceId: string
   /** 清单里可选的命令白名单 —— 没有就等于一条都不许跑 */
   allowedCommands: readonly string[]
-  /** 走既有八层权限链。`false` = 用户拒了 */
-  approve: (summary: { kind: 'write' | 'exec'; detail: string }) => Promise<boolean>
+  /**
+   * 跑命令前问用户。`false` = 用户拒了。
+   *
+   * ★ **只剩 `exec` 一种。** 这里原本还有 `kind: 'write'` —— 写文件和删文件
+   * 各自在动手前再弹一次系统确认框。那一问是**冗余**的:调用走到这个 handler
+   * 之前,`manager.ts` 的能力门已经查过 `workspace.write` 在不在该插件的
+   * `granted` 集合里(见 `PLUGIN_METHOD_PERMISSION` 映射),而那个集合是用户
+   * 在插件详情页显式批过、并且落盘在 kv `plugins.state` 里的。再弹一次,
+   * 问的是同一个已经回答过的问题 —— 表现就是「每新建一张白板都要批一次」。
+   *
+   * 留着 `'write'` 这个取值会让下一个人以为写操作还有第二条门。收窄成
+   * `'exec'` 之后,类型本身就说明了「只有跑命令还需要逐次问」。
+   */
+  approve: (summary: { kind: 'exec'; detail: string }) => Promise<boolean>
+  /**
+   * 把文件挪进系统废纸篓。
+   *
+   * ★ 由调用方注入而不是在这里 `import { shell } from 'electron'`:这一层现在
+   * 只依赖 `KernelHost`,不认识 Electron —— 真去 import 的话,所有能直接构造
+   * 一个 ctx 来测的 handler 都会连带需要一份 electron mock。
+   */
+  trash: (absolutePath: string) => Promise<void>
   kv: {
     get(key: string): string | null
     set(key: string, value: string | null): void
@@ -129,7 +149,8 @@ export async function invokeCapability<M extends PluginMethod>(
           rejected('the file changed on disk since it was read')
         }
       }
-      if (!(await ctx.approve({ kind: 'write', detail: p.path }))) rejected('the write was not approved')
+      // ★ 不再在这里弹确认框:`workspace.write` 是否被授予,能力门已经在
+      // `manager.ts` 里查过了(答案落在 kv `plugins.state` 的 `granted` 里)。
       await ctx.host.fs.mkdirp(target)
       await ctx.host.fs.writeFile(target, bytes.toString('utf8'))
       const after = await ctx.host.fs.stat(target).catch(() => null)
@@ -139,9 +160,16 @@ export async function invokeCapability<M extends PluginMethod>(
     case 'workspace.deleteFile': {
       const p = params as PluginParams<'workspace.deleteFile'>
       const target = await resolveInside(ctx, p.path)
-      if (!(await ctx.approve({ kind: 'write', detail: `delete ${p.path}` }))) rejected('the delete was not approved')
-      const { promises: fsp } = await import('node:fs')
-      await fsp.rm(target, { force: true })
+      /*
+        ★ **走系统废纸篓,失败时不降级为永久删除。** 这条和
+        `ipc/workspace-files.ts` 的删除分支是同一个立场。
+
+        它在这里尤其要紧:上面那次逐次确认框已经撤掉了,插件删文件不再有
+        「你确定吗」这一问。可恢复性从此**只剩废纸篓这一层** —— 掉回
+        `fs.rm` 就等于插件可以静默地永久抹掉用户的文件。所以 `trash` 抛错
+        就让整条调用失败,让插件收到一个明确的拒绝。
+      */
+      await ctx.trash(target).catch(() => rejected('the file could not be moved to the trash'))
       return { data: {}, summary: `delete ${p.path}` }
     }
 

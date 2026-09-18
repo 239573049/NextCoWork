@@ -1,45 +1,89 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../../../shared/domain/workspace'
-import { store } from '../../../../state/store'
-import { browserPartition } from '../../../../../shared/domain/browser'
 import { browserManager } from '../../../../browser/manager'
+import {
+  installBrowserAutomationBridge,
+  type BrowserAutomationBridge,
+  type BrowserPageSnapshot
+} from '../../../../browser/runtime'
+import { store } from '../../../../state/store'
 import { nodeHost } from '../../../host'
 import type { ToolContext } from '../../registry'
-import { browserSnapshotTool } from '../browser'
-
-vi.mock('node:dns', () => ({
-  promises: {
-    lookup: (): Promise<Array<{ address: string }>> =>
-      Promise.resolve([{ address: '93.184.216.34' }])
-  }
-}))
+import { browserClickTool, browserScreenshotTool, browserSnapshotTool } from '../browser'
 
 const opened: string[] = []
+let snapshot: BrowserPageSnapshot
+let bridge: BrowserAutomationBridge
 
 beforeEach(() => {
-  vi.spyOn(store, 'getWorkspace').mockReturnValue({ id: 'workspace-a', name: 'local', rootPath: '/tmp/workspace-a', environment: { kind: 'local' }, settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1 })
+  vi.spyOn(store, 'getWorkspace').mockReturnValue({
+    id: 'workspace-a',
+    name: 'local',
+    rootPath: '/tmp/workspace-a',
+    environment: { kind: 'local' },
+    settings: DEFAULT_WORKSPACE_SETTINGS,
+    createdAt: 1,
+    lastOpenedAt: 1
+  })
+  snapshot = {
+    tree: '- heading "Example" [ref=e1]\n- button "Continue" [ref=e2]',
+    title: 'Example',
+    url: 'https://example.com/',
+    snapshotId: 'snapshot-1',
+    viewport: { width: 1280, height: 720 },
+    truncated: false
+  }
+  bridge = {
+    bindIab: vi.fn(async () => ({ width: 1280, height: 720 })),
+    openHeadless: vi.fn(async () => ({ width: 1280, height: 720 })),
+    waitFor: vi.fn(async () => undefined),
+    info: vi.fn(() => ({ bound: true, backend: 'iab' as const, viewport: { width: 1280, height: 720 } })),
+    navigate: vi.fn(async () => undefined),
+    snapshot: vi.fn(async () => snapshot),
+    click: vi.fn(async () => undefined),
+    type: vi.fn(async () => undefined),
+    press: vi.fn(async () => undefined),
+    select: vi.fn(async () => undefined),
+    scroll: vi.fn(async () => undefined),
+    cuaClick: vi.fn(async () => undefined),
+    cuaDrag: vi.fn(async () => undefined),
+    screenshot: vi.fn(async () => ({
+      data: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png' as const,
+      width: 1280,
+      height: 720,
+      viewport: { width: 1280, height: 720 }
+    })),
+    release: vi.fn(async () => undefined),
+    clearProfile: vi.fn(async () => undefined),
+    reconcile: vi.fn(),
+    setCuaListener: vi.fn(),
+    shutdown: vi.fn(async () => undefined)
+  }
+  installBrowserAutomationBridge(bridge)
 })
 
 afterEach(() => {
+  installBrowserAutomationBridge(null)
   for (const id of opened.splice(0)) {
     if (browserManager.get(id) !== undefined) browserManager.close(id)
   }
   vi.restoreAllMocks()
 })
 
-function openAgentTab(url = 'https://example.com/') {
+function openAgentTab(runId = 'run-a') {
   const tab = browserManager.open({
     workspaceId: 'workspace-a',
     source: 'agent',
-    ownerRunId: 'run-a',
+    ownerRunId: runId,
     profileId: 'default',
-    url
+    url: 'https://example.com/'
   })
   opened.push(tab.id)
   return tab
 }
 
-function ctx(browserFetch: NonNullable<ToolContext['host']['browserFetch']>): ToolContext {
+function ctx(runId = 'run-a'): ToolContext {
   return {
     workspaceId: 'workspace-a',
     workspaceRoot: '/tmp/workspace-a',
@@ -47,59 +91,45 @@ function ctx(browserFetch: NonNullable<ToolContext['host']['browserFetch']>): To
     permissionMode: 'full',
     depth: 0,
     callId: 'call-1',
-    runId: 'run-a',
-    host: nodeHost({
-      fetch: vi.fn(() => Promise.reject(new Error('default fetch must not be used'))),
-      browserFetch
-    }),
+    runId,
+    host: nodeHost(),
     emit: () => undefined
   }
 }
 
-describe('browser_snapshot', () => {
-  it('通过工作区/Profile 对应的隔离会话读取页面', async () => {
+describe('live browser tools', () => {
+  it('从已绑定页面返回带 ref 的真实快照', async () => {
     const tab = openAgentTab()
-    const browserFetch = vi.fn(async () => new Response('<title>Example</title><p>Hello</p>', {
-      headers: { 'content-type': 'text/html' }
-    }))
 
-    const result = await browserSnapshotTool.execute({ tabId: tab.id }, ctx(browserFetch))
+    const result = await browserSnapshotTool.execute({ tabId: tab.id }, ctx())
 
     expect(result.isError).toBe(false)
-    expect(result.output.content).toContain('Hello')
-    expect(browserFetch).toHaveBeenCalledWith(
-      browserPartition('workspace-a', 'default'),
-      'https://example.com/',
-      expect.objectContaining({ redirect: 'manual', credentials: 'include' })
-    )
+    expect(result.output.content).toContain('Page: Example')
+    expect(result.output.content).toContain('[ref=e2]')
+    expect(bridge.snapshot).toHaveBeenCalledWith(tab.id)
   })
 
-  it('每一跳重定向都重新经过 SSRF 筛查', async () => {
+  it('把 ref 点击委托给同一页面并拒绝另一个 run', async () => {
     const tab = openAgentTab()
-    const browserFetch = vi.fn(async () => new Response('', {
-      status: 302,
-      headers: { location: 'http://127.0.0.1/private', 'content-type': 'text/html' }
-    }))
 
-    const result = await browserSnapshotTool.execute({ tabId: tab.id }, ctx(browserFetch))
+    const accepted = await browserClickTool.execute({ tabId: tab.id, ref: 'e2' }, ctx())
+    const rejected = await browserClickTool.execute({ tabId: tab.id, ref: 'e2' }, ctx('run-b'))
 
-    expect(result.isError).toBe(true)
-    expect(result.output.content).toContain('private-network')
-    expect(browserFetch).toHaveBeenCalledTimes(1)
+    expect(accepted.isError).toBe(false)
+    expect(bridge.click).toHaveBeenCalledWith(tab.id, 'e2', {})
+    expect(rejected.isError).toBe(true)
+    expect(rejected.output.content).toContain('opened or claimed')
   })
 
-  it('在下载正文前拒绝声明过大的页面', async () => {
+  it('把截图作为模型可见的图片结果返回', async () => {
     const tab = openAgentTab()
-    const browserFetch = vi.fn(async () => new Response('ignored', {
-      headers: {
-        'content-type': 'text/plain',
-        'content-length': '1000001'
-      }
-    }))
 
-    const result = await browserSnapshotTool.execute({ tabId: tab.id }, ctx(browserFetch))
+    const result = await browserScreenshotTool.execute({ tabId: tab.id }, ctx())
 
-    expect(result.isError).toBe(true)
-    expect(result.output.content).toContain('larger than 1000000 bytes')
+    expect(result.isError).toBe(false)
+    expect(result.output.images).toEqual([{
+      mime: 'image/png',
+      dataRef: 'data:image/png;base64,AQID'
+    }])
   })
 })

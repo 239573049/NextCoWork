@@ -5,6 +5,7 @@
  * 设置页要列 MCP 工具)。**运行时的 Tool 对象只有主进程有**,因为 execute 是闭包。
  */
 import type { SubagentResult, ToolOutput } from './message'
+import type { ToolCard } from './tool-card'
 
 /**
  * 最小可用的 JSON Schema 形状。刻意不引 `@types/json-schema` ——
@@ -85,6 +86,12 @@ export interface ToolProgress {
   message: string
   /** 0–1,不确定时省略 */
   fraction?: number
+  /**
+   * 运行中推出的**实时卡片**(第 2 层交互式)——工具还没返回,先给一张可交互的卡。
+   * 同 `progress` 一样**易失、不进转录**:落盘的是最终 `output.card`(结果快照),
+   * 这张是过程态。用户在它上面点动作 → 反向通道回到挂起的工具。
+   */
+  card?: ToolCard
 }
 
 export interface ToolResult {

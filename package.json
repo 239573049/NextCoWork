@@ -1,6 +1,6 @@
 {
   "name": "nextcowork",
-  "version": "0.1.24",
+  "version": "0.1.25",
   "description": "NextCoWork — 编码型 Agent 桌面端",
   "main": "./out/main/index.js",
   "author": "NextCoWork",
@@ -36,6 +36,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "electron-updater": "^6.8.9",
     "node-pty": "^1.1.0",
+    "playwright-core": "^1.59.1",
     "smol-toml": "^1.8.0",
     "ssh2-streams": "npm:ssh2-streams-classic@0.4.14",
     "undici": "7.29.1",

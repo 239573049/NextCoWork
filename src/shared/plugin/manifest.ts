@@ -79,10 +79,59 @@ export interface PluginViewContribution {
   path: string
 }
 
+/**
+ * 工具卡片的形态 —— 决定折叠态图标与展开渲染器。
+ *
+ * ★ 字符串**内联**在这里,不 import `domain/tool-presenter` 的 `ToolShape`:
+ * manifest 是纯清单解析,不该为一个枚举把渲染域拖进 import 图。两处取值必须一致
+ * (渲染层拿这个字符串去 `SHAPE_ICON` / `DETAIL_RENDERERS` 查表)。
+ */
+export type PluginToolShape =
+  | 'reasoning'
+  | 'read'
+  | 'mutate'
+  | 'search'
+  | 'command'
+  | 'network'
+  | 'orchestration'
+  | 'external'
+
+const TOOL_SHAPES: readonly PluginToolShape[] = [
+  'reasoning',
+  'read',
+  'mutate',
+  'search',
+  'command',
+  'network',
+  'orchestration',
+  'external'
+]
+
 export interface PluginToolContribution {
   name: string
   title: string
   icon?: string
+  /** 折叠态卡片形态。缺省按 `external` 走。见 `PluginToolShape`。 */
+  shape?: PluginToolShape
+  /**
+   * 折叠态标题 / 摘要模板。值是 `%l10nKey%`,渲染层 `t()` 之后再做 `{param}` 插值。
+   *
+   * ★ 只影响**展示**,不改工具行为。缺参时渲染层回退到静态标题,不漏花括号
+   * (流式态入参可能是半截 JSON)。
+   */
+  card?: { title?: string; summary?: string }
+}
+
+/**
+ * 工具返回 `frame` 卡片时,渲染层据 `viewType` 找到这张卡的 HTML。
+ *
+ * ★ 与 `views`(侧栏常驻视图)**分开声明**:卡片是内联、随聊天流滚动、
+ * 只读数据单向推入、可回收的,生命周期与常驻视图不同,不复用同一贡献点。
+ */
+export interface PluginCardViewContribution {
+  viewType: string
+  /** 卡片 HTML 在包内的相对路径 */
+  path: string
 }
 
 export interface PluginKeybindingContribution {
@@ -110,6 +159,8 @@ export interface PluginContributes {
   customEditors: PluginCustomEditorContribution[]
   views: PluginViewContribution[]
   tools: PluginToolContribution[]
+  /** 工具返回 `frame` 卡片时的 HTML 落点,按 viewType 索引 */
+  cardViews: PluginCardViewContribution[]
   keybindings: PluginKeybindingContribution[]
   skills: { path: string }[]
   themes: { path: string }[]
@@ -146,6 +197,18 @@ export interface PluginManifest {
   permissions: PluginPermission[]
   optionalPermissions: PluginPermission[]
   hostPermissions: string[]
+  /**
+   * `process.exec` 的命令白名单 —— 裸可执行名,不带路径也不带 `.exe` 之类的后缀。
+   * 空数组 = 一条命令都不许跑(即便 `permissions` 里有 `process`)。
+   */
+  allowedCommands: string[]
+  /**
+   * 依赖的其它插件:`pluginId` → 版本 range(与 `engines` 同一套 range 语法)。
+   *
+   * ★ 声明依赖是**跨插件通信的准入门**:`ncw.plugins.connect(pluginId)` 只能连
+   * 这里声明过的插件(外加 `plugins` 能力)。同时决定激活顺序 —— 依赖先醒。
+   */
+  dependencies: Record<string, string>
   contributes: PluginContributes
 }
 
@@ -225,7 +288,50 @@ export function parsePluginManifest(raw: unknown): ManifestParseResult {
     warnings.push({ field: 'hostPermissions', message: 'has no effect without the "net" permission' })
   }
 
+  /*
+    ★ 和 `hostPermissions` 对称:那个回答「能连哪些域名」,这个回答
+    「能跑哪些可执行文件」。`process` 能力本身只表示「可以跑命令」,
+    具体跑什么必须由清单逐条列出 —— 没有这张表就一条都不许跑
+    (`capabilities.ts` 的 `narrowCommand`)。
+
+    ★ 存的是**去掉目录和 Windows 可执行后缀之后的 stem**,因为参数门就是
+    按 stem 比对的。作者写 `/usr/bin/git` 或 `git.exe` 的话,归一之后
+    比对得上、但清单上写着的和实际生效的不是一个东西 —— 与其默默替他改,
+    不如在这里就报错,否则他只会看到「命令不在白名单里」而对不上原因。
+  */
+  const allowedCommands = strList(r.allowedCommands).filter((command) => {
+    if (isCommandStem(command)) return true
+    errors.push({ field: 'allowedCommands', message: `must be a bare executable name without a path: ${command}` })
+    return false
+  }).slice(0, MAX_CONTRIBUTIONS_PER_KIND)
+  // 同 hostPermissions:声明了却没有对应能力是**警告**,不是整份清单作废。
+  if (allowedCommands.length > 0 && !permissions.includes('process') && !optionalPermissions.includes('process')) {
+    warnings.push({ field: 'allowedCommands', message: 'has no effect without the "process" permission' })
+  }
+
   const contributes = parseContributes(r.contributes, errors)
+
+  // 依赖:pluginId → 版本 range(同 engines 的 range 语法)。自依赖是错误。
+  const dependencies: Record<string, string> = {}
+  const depsRaw = r.dependencies
+  if (depsRaw !== null && typeof depsRaw === 'object' && !Array.isArray(depsRaw)) {
+    for (const [depId, range] of Object.entries(depsRaw as Record<string, unknown>)) {
+      const depRange = str(range)
+      if (!PLUGIN_ID_RE.test(depId)) {
+        errors.push({ field: `dependencies.${depId}`, message: 'not a valid plugin id (publisher.name)' })
+        continue
+      }
+      if (depId === `${publisher}.${name}`) {
+        errors.push({ field: `dependencies.${depId}`, message: 'a plugin cannot depend on itself' })
+        continue
+      }
+      if (parseRange(depRange) === null) {
+        errors.push({ field: `dependencies.${depId}`, message: `unsupported range: ${depRange}` })
+        continue
+      }
+      dependencies[depId] = depRange
+    }
+  }
 
   if (errors.length > 0) return { ok: false, errors }
   return {
@@ -249,6 +355,8 @@ export function parsePluginManifest(raw: unknown): ManifestParseResult {
       permissions,
       optionalPermissions,
       hostPermissions,
+      allowedCommands,
+      dependencies,
       contributes
     }
   }
@@ -263,11 +371,39 @@ export const SUPPORTED_CONTRIBUTION_KEYS = [
   'customEditors',
   'views',
   'tools',
+  'cardViews',
   'keybindings',
   'skills',
   'themes',
   'configuration'
 ] as const
+
+/**
+ * 工具卡片模板 `{ title?, summary? }` 的解析。
+ *
+ * 返回 `'error'` 表示已推诊断、调用方应跳过这条工具;`undefined` 表示没声明卡片模板。
+ * title/summary 若存在必须是 `%l10nKey%`(与工具 title 同规则)。
+ */
+function parseToolCard(
+  raw: unknown,
+  toolName: string,
+  errors: ManifestError[]
+): { title?: string; summary?: string } | undefined | 'error' {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const c = raw as Record<string, unknown>
+  const title = str(c.title)
+  const summary = str(c.summary)
+  if (title !== '' && !L10N_REF_RE.test(title)) {
+    errors.push({ field: `contributes.tools.${toolName}.card.title`, message: 'must be a %l10nKey% reference' })
+    return 'error'
+  }
+  if (summary !== '' && !L10N_REF_RE.test(summary)) {
+    errors.push({ field: `contributes.tools.${toolName}.card.summary`, message: 'must be a %l10nKey% reference' })
+    return 'error'
+  }
+  if (title === '' && summary === '') return undefined
+  return { ...(title === '' ? {} : { title }), ...(summary === '' ? {} : { summary }) }
+}
 
 function parseContributes(raw: unknown, errors: ManifestError[]): PluginContributes {
   const out: PluginContributes = {
@@ -276,6 +412,7 @@ function parseContributes(raw: unknown, errors: ManifestError[]): PluginContribu
     customEditors: [],
     views: [],
     tools: [],
+    cardViews: [],
     keybindings: [],
     skills: [],
     themes: [],
@@ -347,7 +484,27 @@ function parseContributes(raw: unknown, errors: ManifestError[]): PluginContribu
     const title = str(item.title)
     if (name === '') { errors.push({ field: 'contributes.tools', message: 'tool name is required' }); continue }
     if (!L10N_REF_RE.test(title)) { errors.push({ field: `contributes.tools.${name}.title`, message: 'must be a %l10nKey% reference' }); continue }
-    out.tools.push({ name, title, ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }) })
+    const shape = str(item.shape)
+    if (shape !== '' && !(TOOL_SHAPES as readonly string[]).includes(shape)) {
+      errors.push({ field: `contributes.tools.${name}.shape`, message: `unknown shape: ${shape}` }); continue
+    }
+    const card = parseToolCard(item.card, name, errors)
+    if (card === 'error') continue
+    out.tools.push({
+      name,
+      title,
+      ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }),
+      ...(shape === '' ? {} : { shape: shape as PluginToolShape }),
+      ...(card === undefined ? {} : { card })
+    })
+  }
+
+  for (const item of objList(r.cardViews)) {
+    const viewType = str(item.viewType)
+    const path = str(item.path)
+    if (viewType === '') { errors.push({ field: 'contributes.cardViews', message: 'viewType is required' }); continue }
+    if (!isSafeRelativePath(path)) { errors.push({ field: `contributes.cardViews.${viewType}.path`, message: 'must be a relative path inside the package' }); continue }
+    out.cardViews.push({ viewType, path })
   }
 
   for (const item of objList(r.keybindings)) {
@@ -458,6 +615,31 @@ export function satisfiesEngine(range: string, hostVersion: string): boolean {
   return host.major === version.major && host.minor === version.minor
 }
 
+/**
+ * 市场那一版比本机这一版新吗 —— 「要不要提示更新」的唯一判据。
+ *
+ * ★ 导出的是**谓词**而不是 `compare`:调用点关心的是「有没有更新」,不是
+ * 「差几个数」。让它们自己去拼 `parseSemVer` + 比较,等于把下面这条
+ * 预发布规则复制 N 份,而它一定会被漏掉其中一份。
+ *
+ * ★★ **`parseSemVer` 是丢预发布标签的**(它只取 x.y.z),而 `PLUGIN_VERSION_RE`
+ * 接受 `-beta.1`。于是本机 `1.0.0-beta` 和市场 `1.0.0` 比出来相等 —— 而那
+ * 恰恰是最该提示更新的一种情况:用户手上拿的是个预览版。核心版本相等时
+ * 单独补一条:本机带预发布、市场不带 = 有更新。
+ *
+ * ★ 读不懂的版本号返回 `false`(不是 true),同 `satisfiesEngine` 的规矩 ——
+ * 宁可不提示,也不要提示一次点下去必然失败的更新。
+ */
+export function hasNewerVersion(current: string, latest: string | null | undefined): boolean {
+  if (typeof latest !== 'string') return false
+  const mine = parseSemVer(current)
+  const theirs = parseSemVer(latest)
+  if (mine === null || theirs === null) return false
+  const diff = compare(theirs, mine)
+  if (diff !== 0) return diff > 0
+  return current.includes('-') && !latest.includes('-')
+}
+
 // ─────────────────────────── 小工具 ───────────────────────────
 
 export function isActivationEvent(event: string): boolean {
@@ -488,6 +670,20 @@ export function isHostPattern(value: string): boolean {
   const host = rest.split('/')[0] ?? ''
   if (host === '' || host === '*' || host.includes('*')) return false
   return /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host)
+}
+
+/**
+ * `allowedCommands` 的一条合法取值 —— **裸可执行名**。
+ *
+ * ★ 拒绝路径分隔符和 `.exe`/`.cmd`/`.bat`/`.ps1` 后缀,而不是把它们剥掉:
+ * 参数门(`capabilities.ts` 的 `narrowCommand`)比对的是归一之后的 stem,
+ * 默默替作者剥掉的话,清单上写着的和实际生效的就成了两个东西。
+ */
+export function isCommandStem(value: string): boolean {
+  if (value === '' || value.length > 64) return false
+  if (/[/\\]/.test(value)) return false
+  if (/\.(exe|cmd|bat|ps1)$/i.test(value)) return false
+  return /^[a-z0-9._+-]+$/i.test(value)
 }
 
 /** 一个具体 URL 命中 `hostPermissions` 里的某一条吗。 */

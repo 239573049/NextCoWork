@@ -30,6 +30,11 @@ export function toOpenAIChatMessages(messages: readonly AgentMessage[]): ChatMes
       if (part.type === 'goal_status') continue // UI-only: no content or message on the wire.
       if (part.type === 'tool_result') {
         out.push({ role: 'tool', tool_call_id: part.callId, content: part.output.content })
+        // Chat Completions tool messages cannot carry image parts. Keep every receipt first,
+        // then append screenshots in the user message emitted below so tool-call adjacency holds.
+        for (const image of part.output.images ?? []) {
+          content.push({ type: 'image_url', image_url: { url: image.dataRef } })
+        }
       } else if (part.type === 'text' && part.text !== '') {
         content.push({ type: 'text', text: part.text })
       } else if (part.type === 'image') {

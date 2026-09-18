@@ -62,6 +62,45 @@ describe('installBundledSkills', () => {
     expect(readFileSync(join(target, 'example', 'SKILL.md'), 'utf8')).toBe('user version')
   })
 
+  it('★ marks installed bundled packages with the sentinel so they are recognised next startup', () => {
+    const { source, target } = fixture()
+    mkdirSync(join(source, 'example'), { recursive: true })
+    writeFileSync(join(source, 'example', 'SKILL.md'), 'v1')
+
+    expect(installBundledSkills(source, target)).toEqual([])
+    expect(existsSync(join(target, 'example', '.nextcowork-bundled'))).toBe(true)
+  })
+
+  it('★ overwrites a previously-bundled package on the next startup (refreshes built-in content)', () => {
+    const { source, target } = fixture()
+    mkdirSync(join(source, 'example'), { recursive: true })
+    writeFileSync(join(source, 'example', 'SKILL.md'), 'v1')
+
+    // 首次安装 → 打哨兵
+    expect(installBundledSkills(source, target)).toEqual([])
+    expect(readFileSync(join(target, 'example', 'SKILL.md'), 'utf8')).toBe('v1')
+
+    // 改了 resources 里的内置内容 → 下次启动应覆盖刷新
+    writeFileSync(join(source, 'example', 'SKILL.md'), 'v2')
+    expect(installBundledSkills(source, target)).toEqual([])
+    expect(readFileSync(join(target, 'example', 'SKILL.md'), 'utf8')).toBe('v2')
+    expect(existsSync(join(target, 'example', '.nextcowork-bundled'))).toBe(true)
+    expect(readdirSync(target)).toEqual(['example']) // 覆盖后没有残留 staging / backup
+  })
+
+  it('★ 用户装的同名 skill(无哨兵)绝不被内置覆盖', () => {
+    const { source, target } = fixture()
+    mkdirSync(join(source, 'example'), { recursive: true })
+    mkdirSync(join(target, 'example'), { recursive: true })
+    writeFileSync(join(source, 'example', 'SKILL.md'), 'builtin v2')
+    writeFileSync(join(target, 'example', 'SKILL.md'), 'user version')
+    // 目标存在但没有哨兵 → 视为用户装的,跳过
+
+    expect(installBundledSkills(source, target)).toEqual([])
+    expect(readFileSync(join(target, 'example', 'SKILL.md'), 'utf8')).toBe('user version')
+    expect(existsSync(join(target, 'example', '.nextcowork-bundled'))).toBe(false)
+  })
+
   it('reports an incomplete bundled package without creating it', () => {
     const { source, target } = fixture()
     mkdirSync(join(source, 'broken'), { recursive: true })

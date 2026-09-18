@@ -10,7 +10,9 @@ const READ_AND_RESEARCH_TOOLS = [
   'browser_open',
   'browser_navigate',
   'browser_snapshot',
+  'browser_screenshot',
   'browser_tabs',
+  'browser_user_tabs',
   'browser_profiles',
   'browser_close',
   'Skill'

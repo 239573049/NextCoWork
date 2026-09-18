@@ -1,14 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import type { ToolOutput } from '../agent/message'
 import {
   base,
+  clearPluginPresenters,
   clip,
   humanize,
   isRegisteredTool,
   parseMcpId,
   pick,
+  pluginPresentersSnapshot,
   presenterOf,
-  registeredToolIds
+  registeredToolIds,
+  registerPluginPresenters
 } from '../domain/tool-presenter'
 
 /**
@@ -226,5 +229,53 @@ describe('注册表完整性', () => {
       expect(title, `${id} 的标题为空`).not.toBe('')
       expect(title).not.toContain('undefined')
     }
+  })
+})
+
+describe('presenterOf · 插件注入层', () => {
+  beforeEach(() => { clearPluginPresenters() })
+
+  it('注入后按 externalName 命中,并排在 humanize 兜底之前', () => {
+    // 未注入时:插件工具的 externalName 落到 humanize 可读名兜底
+    expect(presenterOf('plugin__acme_demo__make_thing').shape).toBe('external')
+    registerPluginPresenters([
+      ['plugin__acme_demo__make_thing', { shape: 'mutate', title: () => '造个东西' }]
+    ])
+    const p = presenterOf('plugin__acme_demo__make_thing')
+    expect(p.shape).toBe('mutate')
+    expect(p.title({})).toBe('造个东西')
+  })
+
+  it('★ 注入的 title 闭包对半截 JSON 也必须给出可读、无花括号的标题', () => {
+    // 这里模拟渲染层构建的闭包:参数没齐就回退静态标题(见 stores/plugins.ts)
+    registerPluginPresenters([
+      [
+        'plugin__acme_demo__make_thing',
+        {
+          shape: 'external',
+          title: (input) => {
+            const name = pick(input, 'name')
+            return name === '' ? '造个东西' : `造:${name}`
+          }
+        }
+      ]
+    ])
+    const p = presenterOf('plugin__acme_demo__make_thing')
+    expect(p.title('{"na')).toBe('造个东西') // 半截 JSON → 静态标题
+    expect(p.title('{"na')).not.toContain('{')
+    expect(p.title({ name: '锤子' })).toBe('造:锤子')
+  })
+
+  it('clearPluginPresenters 复位,version 递增', () => {
+    const v0 = pluginPresentersSnapshot()
+    registerPluginPresenters([['plugin__acme_demo__x', { shape: 'external', title: () => 'X' }]])
+    expect(pluginPresentersSnapshot()).toBeGreaterThan(v0)
+    expect(presenterOf('plugin__acme_demo__x').title({})).toBe('X')
+    const v1 = pluginPresentersSnapshot()
+    clearPluginPresenters()
+    expect(pluginPresentersSnapshot()).toBeGreaterThan(v1)
+    // 复位后回到 humanize 兜底
+    expect(presenterOf('plugin__acme_demo__x').shape).toBe('external')
+    expect(presenterOf('plugin__acme_demo__x').title({})).not.toBe('X')
   })
 })

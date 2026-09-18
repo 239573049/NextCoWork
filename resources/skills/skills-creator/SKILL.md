@@ -20,7 +20,7 @@ Create Skills as small, portable workflow packages that extend the NextCoWork ag
 
 Use the application's global Skill root, `<appData>/skills`, resolved from `getHost().paths.userData()`. In development this is `<app working directory>/.next-cowork/skills`; packaged builds use the application's per-user data directory. Do not assume that app data lives in the user's home directory. Treat `<workspace>/.next-cowork/skills` as the workspace-local root when a workflow must be isolated to one project. Keep global Skills available across workspaces; keep workspace-local Skills available only to the owning workspace.
 
-Bundled Skills live in the NextCoWork repository at `resources/skills/<skill-name>/SKILL.md`. On application startup, each missing bundled Skill directory is copied into the global Skill root with its supporting resources. Existing installations are preserved.
+Bundled Skills live in the NextCoWork repository at `resources/skills/<skill-name>/SKILL.md`. On application startup, each bundled Skill is installed into the global Skill root and **refreshed on every launch** — the previously bundled copy is overwritten so edits to `resources/skills` take effect next start. Refresh is scoped by a `.nextcowork-bundled` sentinel written into each installed bundled package; a Skill you installed yourself (no sentinel) is never touched, even if it shares a name.
 
 Inspect the existing implementation before changing behavior:
 

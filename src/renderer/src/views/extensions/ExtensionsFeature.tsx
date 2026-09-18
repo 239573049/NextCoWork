@@ -26,14 +26,17 @@ import { HooksPanel } from './hooks/HooksPanel'
 import { PluginsPanel } from './plugins/PluginsPanel'
 import { ModesPanel } from './modes/ModesPanel'
 
-type ExtensionTab = 'skills' | 'commands' | 'agents' | 'modes' | 'hooks' | 'plugins'
+type ExtensionTab = 'plugins' | 'skills' | 'commands' | 'agents' | 'modes' | 'hooks'
 
 export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactNode {
   const { t } = useI18n()
   const [tab, setTab] = useState<ExtensionTab>(() => {
     const requested = sessionStorage.getItem('next-cowork:extensions-tab')
     sessionStorage.removeItem('next-cowork:extensions-tab')
-    return requested === 'modes' ? 'modes' : 'skills'
+    // ★ 默认落在**第一个** Tab 上。这条规律原来就在(那时第一个是技能),
+    //   插件挪到首位之后跟着走 —— 让「第一个」和「进来看到的」保持是同一个,
+    //   否则 Tab 栏的顺序就变成了一条没有含义的排列。
+    return requested === 'modes' ? 'modes' : 'plugins'
   })
 
   return (
@@ -57,12 +60,18 @@ export function ExtensionsFeature({ onClose }: { onClose?: () => void }): ReactN
             onChange={setTab}
             label={t('ext.title')}
             options={[
+              /*
+                ★ 插件排第一。它是这一页里**唯一带代码**的一类扩展,也是用户
+                最常回来看的那一类(装 / 更新 / 授权都在这儿,而技能、命令那几类
+                装完基本不再动)。放末位等于让最常走的那条路每次都多扫一遍整条
+                Tab 栏。
+              */
+              { value: 'plugins', label: t('plugins.title') },
               { value: 'skills', label: t('ext.tab.skills') },
               { value: 'commands', label: t('ext.tab.commands') },
               { value: 'agents', label: t('ext.tab.agents') },
               { value: 'modes', label: t('ext.tab.modes') },
-              { value: 'hooks', label: t('ext.tab.hooks') },
-              { value: 'plugins', label: t('plugins.title') }
+              { value: 'hooks', label: t('ext.tab.hooks') }
             ]}
           />
         </>
