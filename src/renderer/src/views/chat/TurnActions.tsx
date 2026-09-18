@@ -10,7 +10,7 @@
  * 的状态上 —— 那时他早忘了自己点过什么。
  */
 import { useEffect, useState, type ReactNode } from 'react'
-import { Check, Copy, Download, RotateCcw, Trash2 } from 'lucide-react'
+import { Check, Copy, Download, GitBranch, RotateCcw, Trash2 } from 'lucide-react'
 import { formatDuration } from '../../../../shared/agent/duration'
 import { copyText, saveTextFile } from '../../services/app'
 import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
@@ -33,11 +33,12 @@ export function TurnActions({
   durationMs,
   usage,
   onRegenerate,
-  onDelete
+  onDelete,
+  onBranch
 }: {
   /** 这一轮的散文正文。为空(纯工具轮)时复制与导出没有意义。 */
   text: string
-  /** 引出这一轮的用户提问。缺失时不能重新生成,也不能删除。 */
+  /** 引出这一轮的用户提问。缺失时不能重新生成,也不能删除,也不能分支。 */
   prompt?: TurnPrompt
   /** 最后一轮常驻显示;更早的回合悬停才浮现,避免整屏都是按钮。 */
   alwaysVisible: boolean
@@ -48,10 +49,13 @@ export function TurnActions({
   usage?: ReactNode
   onRegenerate?: (id: string, text: string) => Promise<void>
   onDelete?: (id: string) => Promise<void>
+  /** 从这一轮分支出一条新会话,只带上到这一轮为止的转录。 */
+  onBranch?: (id: string) => Promise<void>
 }): ReactNode {
   const { t } = useI18n()
   const [copy, setCopy] = useTransientStatus()
   const [exported, setExported] = useTransientStatus()
+  const [branched, setBranched] = useTransientStatus()
   const [confirm, setConfirm] = useState<'none' | 'regenerate' | 'delete'>('none')
 
   // 正文变了就撤掉「已复制」—— 那个钩子说的是上一份文本,留着会指错东西。
@@ -87,6 +91,18 @@ export function TurnActions({
           }}
         >
           {copy === 'done' ? <Check size={13} /> : <Copy size={13} />}
+        </ActionIconButton>
+      )}
+
+      {canRewrite && onBranch !== undefined && (
+        <ActionIconButton
+          label={t(branched === 'failed' ? 'chat.turn.branchFailed' : branched === 'done' ? 'chat.turn.branched' : 'chat.turn.branch')}
+          testId="turn-branch"
+          onClick={() => {
+            void onBranch(prompt.id).then(() => setBranched('done')).catch(() => setBranched('failed'))
+          }}
+        >
+          {branched === 'done' ? <Check size={13} /> : <GitBranch size={13} />}
         </ActionIconButton>
       )}
 

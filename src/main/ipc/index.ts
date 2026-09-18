@@ -182,6 +182,7 @@ import { getReviewChangeSet, getReviewFileDiff, precheckReviewUndo, redoReviewCh
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
 import { compactContext, listContextCheckpoints, previewContext, updateContextCheckpoint } from './context'
 import {
+  branchSession,
   createSession,
   duplicateSession,
   deleteSession,
@@ -433,6 +434,7 @@ const handlers: HandlerMap = {
   'sessions:replaceHistory': (req) => replaceHistory(req),
   'sessions:create': (req) => createSession(req),
   'sessions:duplicate': (req) => duplicateSession(req),
+  'sessions:branch': (req) => branchSession(req),
   'sessions:rename': (req) => renameSession(req),
   'sessions:setMode': (req) => setMode(req),
   'sessions:setModel': (req) => setModel(req),

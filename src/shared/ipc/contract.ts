@@ -460,6 +460,8 @@ export interface IpcInvokeMap {
   'sessions:replaceHistory': { req: { sessionId: string; messages: AgentMessage[] }; res: void }
   'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string; mode?: SessionMode }; res: Session }
   'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
+  /** 从某一轮「分支」：只克隆到这一轮为止的转录，之后的内容不带过去。 */
+  'sessions:branch': { req: { sessionId: string; uptoMessageId: string; title: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
   'sessions:setMode': { req: { sessionId: string; mode: SessionMode }; res: void }
   /**
@@ -1232,6 +1234,7 @@ export const INVOKE_CHANNELS = {
   'sessions:replaceHistory': 1,
   'sessions:create': 1,
   'sessions:duplicate': 1,
+  'sessions:branch': 1,
   'sessions:rename': 1,
   'sessions:setMode': 1,
   'sessions:setModel': 1,

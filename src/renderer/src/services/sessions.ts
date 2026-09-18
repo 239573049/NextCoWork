@@ -44,6 +44,10 @@ export function duplicateSession(sessionId: string, title: string): Promise<Sess
   return invoke('sessions:duplicate', { sessionId, title })
 }
 
+export function branchSession(sessionId: string, uptoMessageId: string, title: string): Promise<Session> {
+  return invoke('sessions:branch', { sessionId, uptoMessageId, title })
+}
+
 export function renameSession(sessionId: string, title: string): Promise<void> {
   return invoke('sessions:rename', { sessionId, title })
 }

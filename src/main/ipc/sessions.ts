@@ -1,8 +1,9 @@
 /** 会话实体 IPC：所有读写都经过 state/store，避免 handler 直接写 SQL。 */
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
-import type { Session, SessionChange } from '../../shared/domain/session'
+import type { Session, SessionChange, SessionDetail } from '../../shared/domain/session'
 import type { AgentMessage } from '../../shared/agent/message'
+import { isToolResultOnly } from '../../shared/agent/message'
 import type { SessionMode } from '../../shared/agent/run-request'
 import { normalizeModeId } from '../../shared/domain/mode'
 import { mimeOfExt, parseNcwUrl } from '../../shared/domain/attachment'
@@ -100,30 +101,32 @@ export function setModel(req: { sessionId: string; model: string; modelProviderI
   changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: session.workspaceId })
 }
 
-/** Clone a transcript into a new session, including managed image attachments. */
-export function duplicateSession(req: { sessionId: string; title: string }): Session {
-  const source = store.getSessionDetail(req.sessionId)
-  if (source === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+/**
+ * 建一条新会话,把 `messages` 整段搬进去(含图片附件重新落盘)。
+ * `duplicateSession`(整段克隆)和 `branchSession`(只克隆到某一轮为止)共用这一步 ——
+ * 两者唯一的差别就是喂给它的 `messages` 切没切。
+ */
+function cloneIntoNewSession(source: SessionDetail, sourceSessionId: string, title: string, messages: AgentMessage[]): Session {
   const sourceSession = source.session
   const sessionId = ulid()
   const session = store.createSession({
     id: sessionId,
     workspaceId: sourceSession.workspaceId,
-    title: req.title,
+    title,
     model: sourceSession.model,
     mode: sourceSession.mode,
     thinking: sourceSession.thinking,
     rootPathAtCreation: sourceSession.rootPathAtCreation
   })
   try {
-    const messages = source.messages.map((message) => ({
+    const cloned = messages.map((message) => ({
       ...message,
       id: ulid(message.createdAt),
       parts: message.parts.map((part) => {
         if (part.type !== 'image') return part
         const locator = parseNcwUrl(part.dataRef)
-        if (locator?.scope !== 'session' || locator.ownerId !== req.sessionId) return part
-        const row = store.getAttachmentRowByOwnerAndFileName(req.sessionId, locator.fileName)
+        if (locator?.scope !== 'session' || locator.ownerId !== sourceSessionId) return part
+        const row = store.getAttachmentRowByOwnerAndFileName(sourceSessionId, locator.fileName)
         if (row === undefined) return part
         const bytes = new Uint8Array(readFileSync(row.path))
         const copied = uploadAttachment({
@@ -136,7 +139,7 @@ export function duplicateSession(req: { sessionId: string; title: string }): Ses
         return { ...part, dataRef: copied.url }
       })
     }))
-    store.replaceHistory(sessionId, messages)
+    store.replaceHistory(sessionId, cloned)
   } catch (error) {
     const paths = store.sessionAttachmentPaths(sessionId)
     store.deleteSession(sessionId)
@@ -145,6 +148,35 @@ export function duplicateSession(req: { sessionId: string; title: string }): Ses
   }
   changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: sourceSession.workspaceId })
   return session
+}
+
+/** Clone a transcript into a new session, including managed image attachments. */
+export function duplicateSession(req: { sessionId: string; title: string }): Session {
+  const source = store.getSessionDetail(req.sessionId)
+  if (source === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+  return cloneIntoNewSession(source, req.sessionId, req.title, source.messages)
+}
+
+/**
+ * 从某一轮「分支」出一条新会话:只带上到这一轮为止的转录,之后的内容不带过去。
+ *
+ * `uptoMessageId` 是引出这一轮的**用户提问**消息 id(与 `deleteTurn` 定位同一轮
+ * 的方式一致)——一路带到下一条「非纯工具结果」的用户消息之前为止,好让紧跟着
+ * 这轮提问之后的工具结果消息也一并带过去。
+ */
+export function branchSession(req: { sessionId: string; uptoMessageId: string; title: string }): Session {
+  const source = store.getSessionDetail(req.sessionId)
+  if (source === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+  const messages = source.messages
+  const start = messages.findIndex((m) => m.id === req.uptoMessageId && m.role === 'user')
+  if (start < 0) throw new Error(`消息不存在: ${req.uptoMessageId}`)
+  let end = start + 1
+  while (end < messages.length) {
+    const m = messages[end]
+    if (m !== undefined && m.role === 'user' && !isToolResultOnly(m)) break
+    end += 1
+  }
+  return cloneIntoNewSession(source, req.sessionId, req.title, messages.slice(0, end))
 }
 
 export function renameSession(req: { sessionId: string; title: string }): void {

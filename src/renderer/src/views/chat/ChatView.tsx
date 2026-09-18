@@ -40,7 +40,7 @@ import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { WorkspaceMarkdownProvider } from '../../components/markdown'
-import { createSession, getSession, setSessionMode, setSessionModel } from '../../services/sessions'
+import { branchSession, createSession, getSession, setSessionMode, setSessionModel } from '../../services/sessions'
 import { clearGoal, getGoal, setGoal } from '../../services/goal'
 import { parseGoalCommand } from '../../../../shared/domain/goal'
 import type { SendOptions, SessionMode } from '../../../../shared/agent/run-request'
@@ -236,6 +236,17 @@ export function ChatView({
     [transcript.runUsage, transcript.usage]
   )
   const { t } = useI18n()
+  /**
+   * 复制按钮旁边的「分支」—— 只把这一轮为止的转录带进一条新会话,再切过去继续聊。
+   * 标题沿用当前会话的标题(而不是转录里的用户提问),这样在侧边栏里还能认出
+   * 它是从哪条对话分出来的。
+   */
+  const onBranchTurn = useCallback(async (userMessageId: string) => {
+    if (sessionId === null) return
+    const detail = await getSession(sessionId)
+    const branched = await branchSession(sessionId, userMessageId, t('session.branchTitle', { title: detail.session.title }))
+    useTabsStore.getState().openSession(workspace.id, branched.id, branched.title)
+  }, [sessionId, workspace.id, t])
   /**
    * 卡片点一下 → 右侧工作区开一个只读会话。
    *
@@ -769,6 +780,7 @@ export function ChatView({
             compactError={compactError}
             onEditMessage={onEditMessage}
             onDeleteTurn={deleteTurn}
+            onBranchTurn={onBranchTurn}
             workspaceId={workspace.id}
             onOpenPlan={openMarkdownFile}
             onExecutePlan={executePlan}

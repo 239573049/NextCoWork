@@ -40,6 +40,8 @@ import { CompactionDivider } from './CompactionDivider'
 import { GoalStatusCard } from './GoalStatusCard'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
 import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, unanchoredCheckpoints, type AssistantBlock, type ThreadRow } from './thread-content'
+import { threadTurnGroups, turnNavigationItems } from './turn-navigation'
+import { TurnNavigationRail } from './TurnNavigationRail'
 import { TurnActions, type TurnPrompt } from './TurnActions'
 import { TurnChangeReview } from './TurnChangeReview'
 import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
@@ -57,6 +59,7 @@ export const Thread = memo(function Thread({
   reportOptions,
   onEditMessage,
   onDeleteTurn,
+  onBranchTurn,
   workspaceId,
   onOpenPlan,
   onExecutePlan,
@@ -88,6 +91,8 @@ export const Thread = memo(function Thread({
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
   onDeleteTurn?: (userMessageId: string) => Promise<void>
+  /** 从这一轮分支出一条新会话。传入的同样是引出该轮的 user 消息 id。 */
+  onBranchTurn?: (userMessageId: string) => Promise<void>
   workspaceId?: string
   onOpenPlan?: (path: string) => void
   onExecutePlan?: (ref: { planId: string; path: string }, source: 'current_session' | 'new_session') => void
@@ -160,6 +165,8 @@ export const Thread = memo(function Thread({
   )
 
   const rows = threadRows(messages, live, running, transcript.messageRuns, transcript.contextCheckpoints)
+  const turns = threadTurnGroups(rows)
+  const navigationItems = turnNavigationItems(turns, t('chat.navigation.untitled'))
   /*
     ★ **不能是「最后一个元素」。** 手动压缩的分隔线就落在整段末尾,那时
     `rows.at(-1)` 是那条线 —— 按下标比的话没有任何一行算末轮,
@@ -213,9 +220,15 @@ export const Thread = memo(function Thread({
         }
         lastSeen.current = { top, height }
       }}>
-      <div ref={content} className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
+      <div ref={content} className={cn('mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6', navigationItems.length > 1 && 'pl-10')}>
         <ContextCheckpointPanel checkpoints={orphans} />
-        {rows.map((row, index) => {
+        {turns.map((turn) => (
+          <section
+            key={turn.key}
+            data-turn-navigation-id={turn.navigationId}
+            className="flex flex-col gap-5"
+          >
+          {turn.rows.map(({ row, index }) => {
           const isLast = index === lastTurn
           if (row.kind === 'divider') {
             return <CompactionDivider key={row.key} checkpoint={row.checkpoint} foldedCount={row.foldedCount} />
@@ -284,15 +297,19 @@ export const Thread = memo(function Thread({
                 ? undefined
                 : (id, text) => onEditMessage(id, text, true)}
               onDeleteTurn={readOnly ? undefined : onDeleteTurn}
+              onBranchTurn={readOnly ? undefined : onBranchTurn}
               readOnly={readOnly}
               runId={row.runId}
               workspaceId={workspaceId}
               sessionId={sessionId}
             />
           )
-        })}
+          })}
+          </section>
+        ))}
       </div>
     </div>
+    <TurnNavigationRail items={navigationItems} viewportRef={viewport} contentRef={content} />
     <SubagentTaskCenter sessionId={sessionId} subagents={subagents} readOnly={readOnly} reportOptions={reportOptions} />
     </div>
   )
@@ -692,6 +709,7 @@ function AssistantTurn({
   usage,
   onRegenerate,
   onDeleteTurn,
+  onBranchTurn,
   readOnly,
   runId,
   workspaceId,
@@ -712,6 +730,7 @@ function AssistantTurn({
   usage?: ReactNode
   onRegenerate?: (id: string, text: string) => Promise<void>
   onDeleteTurn?: (userMessageId: string) => Promise<void>
+  onBranchTurn?: (userMessageId: string) => Promise<void>
   readOnly: boolean
   /** 这一轮的顶层 runId,用来拉「本轮改动集」；老转录(v12 前)为 undefined。 */
   runId?: string
@@ -803,6 +822,7 @@ function AssistantTurn({
           usage={usage}
           onRegenerate={onRegenerate}
           onDelete={onDeleteTurn}
+          onBranch={onBranchTurn}
         />
       )}
       {feedback}

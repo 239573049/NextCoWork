@@ -20,6 +20,7 @@ import { gitZh, gitEn } from './git';
 import { usageZh, usageEn } from './usage';
 import { searchZh, searchEn } from './search';
 import { goalZh, goalEn } from './goal';
+import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
 import {
   pluginMessages,
   pluginMessagesVersion,
@@ -46,6 +47,7 @@ const ZH: Messages = {
   ...gitZh,
   ...usageZh,
   ...searchZh,
+  ...chatNavigationZh,
   ...themesZh,
   ...agentZh,
   ...documentsZh,
@@ -364,6 +366,7 @@ const ZH: Messages = {
   "session.copySuccess": "对话已复制",
   "session.openWindowUnavailable": "暂时无法打开新窗口",
   "session.copyTitle": ({ title }) => `${title} · 副本`,
+  "session.branchTitle": ({ title }) => `${title} · 分支`,
   "session.confirmDeleteMessage": ({ title }) => `确认删除「${title}」？`,
   "session.deleteRunningTitle": "无法删除运行中的会话",
   "session.deleteRunningMessage": "该会话的 Agent 正在运行，请先停止任务后再删除。",
@@ -1997,6 +2000,7 @@ const EN: Messages = {
   ...markdownEn,
   ...usageEn,
   ...searchEn,
+  ...chatNavigationEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",
@@ -2312,6 +2316,7 @@ const EN: Messages = {
   "session.copySuccess": "Chat duplicated",
   "session.openWindowUnavailable": "Unable to open a new window right now",
   "session.copyTitle": ({ title }) => `${title} · copy`,
+  "session.branchTitle": ({ title }) => `${title} · branch`,
   "session.confirmDeleteMessage": ({ title }) => `Delete “${title}”?`,
   "session.deleteRunningTitle": "Can't delete a running chat",
   "session.deleteRunningMessage": "An agent is still running in this chat. Stop it before deleting.",
