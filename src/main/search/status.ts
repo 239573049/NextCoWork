@@ -24,8 +24,8 @@ export function last4Of(key: string): string | undefined {
 }
 
 /**
- * 逐家读一次密钥环。八次 `safeStorage.decryptString` 在一次列表刷新里是
- * 可以接受的(本地、微秒级),而缓存「谁有 Key」的代价是:用户在另一个窗口
+ * 逐家读一次程序密文。八次本地 AES-GCM 解密在一次列表刷新里是
+ * 可以接受的,而缓存「谁有 Key」的代价是:用户在另一个窗口
  * 清了 Key,这个窗口还显示着「已配置」—— 一个会骗人的缓存。
  */
 export async function searchStatuses(

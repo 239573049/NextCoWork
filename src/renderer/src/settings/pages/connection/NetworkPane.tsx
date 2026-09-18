@@ -6,7 +6,7 @@
  * 于是模型请求、MCP 的 http/sse、六个搜索适配器一起改道(它们都过
  * `KernelHost.fetch`,而那是 Chromium 的 `net.fetch`)。
  *
- * ★ **密码不在 `settings` 里**,单独走 `proxy:*` 三条频道进 safeStorage。
+ * ★ **密码不在 `settings` 里**,单独走 `proxy:*` 三条频道进加密凭证存储。
  * 它因此是这一页唯一有本地状态的东西 —— 其余字段一律从 prop 读(见 `props.ts`)。
  */
 import { Check, Eye } from "lucide-react";

@@ -6,7 +6,7 @@
  * 1. **baseUrl 的协议白名单**。`file:` 的 baseUrl 会被 `joinUpstreamUrl` 拼进
  *    `net.fetch`,等于把任意文件读取权交给渲染层。它不会抛在这里,会抛在很远的地方。
  * 2. **`credentialRef` 不采信渲染层**。采信了就意味着「供应商 A 可以指向供应商 B 的
- *    密钥」,而密钥只写不读,谁也不会发现指错了。
+ *    密钥」,存储引用由界面决定会破坏账户隔离。
  * 3. ★★ **删完之后 `defaultModel` 不许悬空**。这条最隐蔽:用户删了一个不用的供应商,
  *    症状是**下一次发送找不到候选**,而那两件事之间在界面上没有任何联系。
  *
@@ -19,16 +19,20 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf, IMPORTED_ALIAS_DEFAULTS } from '../../../shared/domain/provider'
+import { serializeCredential } from '../../../shared/domain/credential'
 import { closeDatabase, openDatabase } from '../../db/index'
-import { resetRuntimeForTest } from '../../runtime'
+import { nodeHost } from '../../kernel/host'
+import { getHost, installHost, resetRuntimeForTest } from '../../runtime'
 import { store } from '../../state/store'
 import {
   listModels,
   listProviders,
   removeModel,
   removeProvider,
+  revealCredential,
   renameModel,
   setAliases,
+  setCredential,
   upsertProvider
 } from '../provider'
 import { BUILTIN_PROVIDER_ID, CLIENT_PROVIDER_ID } from '../../../shared/domain/presets'
@@ -40,6 +44,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'nextcowork-provider-'))
   openDatabase(dir)
   resetRuntimeForTest()
+  installHost(nodeHost())
 })
 
 afterEach(() => {
@@ -228,6 +233,39 @@ describe('upsertProvider', () => {
       protocol: 'openai-chat',
       protocolOptions: { anthropic: { cacheTtl: '1h' } }
     })
+  })
+})
+
+describe('revealCredential', () => {
+  it('only returns plaintext after the explicit reveal call for API keys and OAuth tokens', async () => {
+    upsertProvider(draft())
+    await setCredential('acme', 'sk-visible-on-demand')
+    await expect(revealCredential('acme')).resolves.toEqual({
+      kind: 'api-key',
+      apiKey: 'sk-visible-on-demand'
+    })
+
+    await getHost().secrets.set(
+      'provider:acme',
+      serializeCredential({
+        kind: 'oauth',
+        issuer: 'chatgpt',
+        accessToken: 'oauth-access',
+        refreshToken: 'oauth-refresh',
+        expiresAt: null,
+        accountId: 'account'
+      })
+    )
+    await expect(revealCredential('acme')).resolves.toEqual({
+      kind: 'oauth',
+      accessToken: 'oauth-access',
+      refreshToken: 'oauth-refresh'
+    })
+  })
+
+  it('fails explicitly when the provider has no credential', async () => {
+    upsertProvider(draft())
+    await expect(revealCredential('acme')).rejects.toThrow('还没有配置密钥')
   })
 })
 

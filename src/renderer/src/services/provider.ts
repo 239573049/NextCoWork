@@ -15,6 +15,7 @@ import type {
   CredentialInfo,
   FetchedModel,
   ModelAlias,
+  RevealedCredential,
   UpstreamProvider
 } from '../../../shared/domain/provider'
 import type { ImportSourceKind } from '../../../shared/domain/import'
@@ -74,13 +75,18 @@ export function removeProvider(id: string): Promise<void> {
   return invoke('provider:remove', { id })
 }
 
-/** 存一把密钥。回来的只有 `last4` —— 明文进去就再也出不来(方案 §9)。 */
+/** 存一把密钥。普通刷新只拿 `CredentialInfo`,不会顺带把明文带回。 */
 export function setCredential(providerId: string, apiKey: string): Promise<CredentialInfo> {
   return invoke('provider:setCredential', { providerId, apiKey })
 }
 
 export function getCredentialInfo(providerId: string): Promise<CredentialInfo> {
   return invoke('provider:getCredentialInfo', { providerId })
+}
+
+/** 只在用户显式点击「查看」时调用;调用方不应缓存到全局 store。 */
+export function revealCredential(providerId: string): Promise<RevealedCredential> {
+  return invoke('provider:revealCredential', { providerId })
 }
 
 export function exportProviders(options: { includeCredentials?: boolean; password?: string } = {}): Promise<{ path: string; encrypted: boolean; providerCount: number; aliasCount: number } | null> {

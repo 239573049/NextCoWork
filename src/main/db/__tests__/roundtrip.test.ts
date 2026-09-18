@@ -28,7 +28,11 @@ import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import { store } from '../../state/store'
 import { DATABASE_DIRNAME, DATA_SUBDIRNAME, DB_FILENAME, closeDatabase, db, defaultDatabaseDirectory, openDatabase, stmt } from '../index'
 import * as repo from '../repo'
-import { switchConfigProfile } from '../config-profile'
+import {
+  migrateLegacyLocalProvidersToCurrentAccount,
+  physicalCredentialRef,
+  switchConfigProfile
+} from '../config-profile'
 
 let dir = ''
 
@@ -76,6 +80,31 @@ const workspace = (id: string): Workspace => ({
   settings: { ...DEFAULT_WORKSPACE_SETTINGS, defaultModel: 'm' },
   createdAt: 1_700_000_000_000,
   lastOpenedAt: 1_700_000_001_000
+})
+
+describe('账户上线前的供应商密钥迁移', () => {
+  it('首次登录只复制 local provider/model/key，原件保留且第二次不重复', () => {
+    const p = provider('legacy-provider', 1)
+    store.putProvider(p)
+    store.putAlias(alias(p.id, 'legacy-model'))
+    repo.putCredential(p.credentialRef, new Uint8Array([9, 8, 7]))
+
+    switchConfigProfile('account-a')
+    migrateLegacyLocalProvidersToCurrentAccount()
+    expect(store.listProviders().map((item) => item.id)).toContain(p.id)
+    expect(store.listAliases().map((item) => item.alias)).toContain('legacy-model')
+    expect(repo.getCredential(p.credentialRef)).toEqual(new Uint8Array([9, 8, 7]))
+    const physical = physicalCredentialRef(p.credentialRef, 'account-a')
+    expect(stmt('SELECT blob FROM credentials WHERE ref = ?').get(physical)?.['blob']).toEqual(
+      new Uint8Array([9, 8, 7])
+    )
+
+    migrateLegacyLocalProvidersToCurrentAccount()
+    expect(store.listProviders().filter((item) => item.id === p.id)).toHaveLength(1)
+    switchConfigProfile(null)
+    expect(store.listProviders().map((item) => item.id)).toContain(p.id)
+    expect(repo.getCredential(p.credentialRef)).toEqual(new Uint8Array([9, 8, 7]))
+  })
 })
 
 describe('Shell 机器本地设置', () => {
@@ -394,6 +423,16 @@ describe('基础配置同步边界', () => {
     expect(repo.getConfigDirty('account-a')).toBe(true)
     // 凭证引用留在本机那一份里 —— 它是设备本地的,不随配置走
     expect(repo.listProviders().find((p) => p.id === 'cloud-provider')).toHaveProperty('credentialRef')
+  })
+
+  it('单独修改供应商凭证也会把 providers 密文快照标脏', () => {
+    repo.configureSyncAccount('account-a', true)
+    repo.putCredential('provider:cloud-provider', new Uint8Array([1, 2, 3]))
+    expect(repo.getConfigCategoryDirty('providers', 'account-a')).toBe(true)
+
+    repo.setConfigCategoryDirty('providers', 'account-a', false)
+    repo.removeCredential('provider:cloud-provider')
+    expect(repo.getConfigCategoryDirty('providers', 'account-a')).toBe(true)
   })
 
   it('远端应用不会再次写入 outbox，会话数据也不进入同步表', () => {

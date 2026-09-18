@@ -9,9 +9,16 @@ import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
 import { closeDatabase, DATABASE_DIRNAME, DATA_SUBDIRNAME, defaultProfileRoot, DB_FILENAME, openDatabase } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
-import { electronHost } from './host'
+import { electronHost, migrateLegacyCredentials } from './host'
 import { installProductionBrowserBindings, type BrowserBindings } from './browser/bindings'
-import { flushPendingPersists, registerIpc, shutdownClientAuth, shutdownRuns, shutdownTerminals } from './ipc'
+import {
+  flushPendingPersists,
+  prepareStoredAccountScope,
+  registerIpc,
+  shutdownClientAuth,
+  shutdownRuns,
+  shutdownTerminals
+} from './ipc'
 import { sweepPendingDelete } from './ipc/pending-delete'
 import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
@@ -465,6 +472,12 @@ void app.whenReady().then(() => {
   */
   // SQLite 主库及应用管理的文件资源统一使用同一个用户级数据根。
   openDatabase(prepareProjectDatabaseDirectory())
+  /*
+    ★ 账户作用域必须在 seed / bootstrap / 建窗之前恢复。旧版升级后的库仍标着 local,
+    而已保存登录态属于账户;拖到渲染层来问 clientAuth:getState 才切,首屏就会先读到
+    local 的 provider/key,随后整页跳成账户配置。这里同步切一次,后面同账户调用恒等。
+  */
+  prepareStoredAccountScope()
 
   /*
     ★ 第二段。必须排在 `openDatabase` 之后 —— 附件根目录由当前数据库目录
@@ -480,6 +493,12 @@ void app.whenReady().then(() => {
   setPluginAppearanceResolver(() => resolveTheme(store.getSettings().theme))
 
   const host = electronHost()
+  const credentialMigration = migrateLegacyCredentials()
+  if (credentialMigration.migrated > 0 || credentialMigration.failed > 0) {
+    host.logger.info(
+      `[credentials] 旧密文迁移完成:成功 ${credentialMigration.migrated},保留 ${credentialMigration.failed}`
+    )
+  }
   const bundledSkillsRoot = app.isPackaged
     ? join(process.resourcesPath, SKILLS_DIR)
     : join(app.getAppPath(), 'resources', SKILLS_DIR)

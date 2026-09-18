@@ -61,7 +61,7 @@ export interface PluginMethodMap {
   'storage.set': { params: { scope: 'global' | 'workspace'; key: string; value: string | null }; result: Record<string, never> }
   'storage.keys': { params: { scope: 'global' | 'workspace' }; result: { keys: string[] } }
 
-  // secrets —— safeStorage 加密,key 强制前缀
+  // secrets —— 程序主密钥加密,key 强制前缀
   'secrets.get': { params: { key: string }; result: { value: string | null } }
   'secrets.set': { params: { key: string; value: string | null }; result: Record<string, never> }
 

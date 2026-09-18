@@ -4,12 +4,18 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { ClientAuthState, ClientAuthUser, ClientTeamOption, ClientUsageEntry } from '../../shared/domain/client-auth'
 import { getHost } from '../runtime'
 import { store } from '../state/store'
+import * as repo from '../db/repo'
 import { windows } from '../window/registry'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { IMPORTED_ALIAS_DEFAULTS } from '../../shared/domain/provider'
 import { findBuiltinModel } from '../../shared/domain/model-catalog-inventory'
-import { shutdownConfigSync, startConfigSync, stopConfigSync } from './config-sync'
+import { shutdownConfigSync, stopConfigSync } from './config-sync'
+import { prepareAccountSwitch, startSyncForAccount } from '../account-switch'
+import {
+  migrateLegacyLocalProvidersToCurrentAccount,
+  switchConfigProfile
+} from '../db/config-profile'
 
 /**
  * DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen 的模型在 NextCoWork 内置渠道下固定走
@@ -95,6 +101,26 @@ function meta(): Meta | null {
   } catch { return null }
 }
 
+export function prepareStoredAccountScope(): void {
+  const saved = meta()
+  const accountId = saved?.mode === 'authenticated' ? saved.user?.id : undefined
+  if (accountId === undefined) return
+  switchConfigProfile(accountId)
+  if (migrateLegacyLocalProvidersToCurrentAccount()) {
+    repo.setConfigCategoryDirty('providers', accountId, true)
+  }
+}
+
+/** 数据库恢复后重建账户作用域、内置 provider 与同步会话。调用时 runtime 已初始化。 */
+export function resumeStoredAccountAfterDatabaseReplacement(): void {
+  prepareStoredAccountScope()
+  const saved = meta()
+  const accountId = saved?.mode === 'authenticated' ? saved.user?.id : undefined
+  if (accountId === undefined) return
+  ensureClientProvider()
+  startSyncForAccount(accountId)
+}
+
 function state(): ClientAuthState {
   const m = meta()
   if (m === null) return { mode: 'undecided', user: null, expiresAt: null }
@@ -109,10 +135,12 @@ function state(): ClientAuthState {
 async function saveTokens(access: string, refresh: string, m: Meta): Promise<void> {
   await getHost().secrets.set(ACCESS_REF, access)
   await getHost().secrets.set(REFRESH_REF, refresh)
+  const accountId = m.user?.id
+  if (accountId !== undefined) await prepareAccountSwitch(accountId)
   store.setKv(META_KEY, m)
   ensureClientProvider()
   void syncClientModels(access)
-  if (m.user?.id) startConfigSync(m.user.id)
+  startSyncForAccount(accountId ?? null)
   ensureRefreshTimer()
   announce(m)
 }
@@ -363,8 +391,21 @@ async function completeTeamContext(access: string, refresh: string, expiresAt: n
 export function getClientAuthState(): ClientAuthState {
   const current = state()
   if (current.mode === 'authenticated') {
-    ensureClientProvider(); ensureRefreshTimer()
-    void getHost().secrets.get(ACCESS_REF).then((access) => { if (access && meta()?.mode === 'authenticated') void syncClientModels(access) }).catch(() => undefined)
+    ensureRefreshTimer()
+    const accountId = current.user?.id
+    if (accountId !== undefined) {
+      void prepareAccountSwitch(accountId)
+        .then(async () => {
+          if (meta()?.user?.id !== accountId) return
+          ensureClientProvider()
+          startSyncForAccount(accountId)
+          const access = await getHost().secrets.get(ACCESS_REF)
+          if (access !== null && meta()?.user?.id === accountId) void syncClientModels(access)
+        })
+        .catch((error: unknown) => {
+          console.warn(`[clientAuth] 恢复账户配置作用域失败:${describeError(error)}`)
+        })
+    }
   }
   else {
     for (const alias of store.listAliases().filter((a) => a.providerId === CLIENT_PROVIDER_ID)) store.removeAlias(CLIENT_PROVIDER_ID, alias.alias)
@@ -374,6 +415,8 @@ export function getClientAuthState(): ClientAuthState {
 }
 
 export async function useOffline(): Promise<ClientAuthState> {
+  stopConfigSync()
+  await prepareAccountSwitch(null)
   const next: Meta = { mode: 'offline', user: null, expiresAt: null }
   store.setKv(META_KEY, next)
   return announce(next)
@@ -431,6 +474,7 @@ export async function signOutClient(): Promise<ClientAuthState> {
   await step('store.removeClientProvider', () => {
     if (store.listProviders().some((p) => p.id === CLIENT_PROVIDER_ID)) store.removeProvider(CLIENT_PROVIDER_ID)
   })
+  await step('configProfile.local', () => prepareAccountSwitch(null))
 
   if (meta() !== null) {
     throw new Error(`退出登录失败:${failures.length > 0 ? failures.join('; ') : '登录状态未被清除'}`)

@@ -24,6 +24,7 @@ import {
   writeFileSync,
   openSync,
   closeSync,
+  chmodSync,
   fsyncSync,
   lstatSync,
   realpathSync
@@ -66,6 +67,9 @@ import {
 } from '../db/chromium-layout'
 import * as repo from '../db/repo'
 import { getHost } from '../runtime'
+import { migrateLegacyCredentials } from '../host'
+import { pauseConfigSyncForDatabaseReplacement } from './config-sync'
+import { resumeStoredAccountAfterDatabaseReplacement } from './client-auth'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { PROXY_PASSWORD_REF } from '../net/proxy'
@@ -75,6 +79,7 @@ import { runs } from '../kernel/run-registry'
 import { jobStatusFor } from '../imports/service'
 import { store as stateStore } from '../state/store'
 import { GLOBAL_SETTINGS_FILENAME, clearGlobalSettingsCache } from '../kernel/local-settings'
+import { CREDENTIAL_KEY_FILENAME, isProgramEncrypted } from '../secrets/credential-crypto'
 
 /**
  * 破坏性操作与导入作业**互斥**。
@@ -129,6 +134,8 @@ const MANAGED_DATA_PATHS = [
   'modes',
   'plugins',
   'workspaces',
+  // credentials 表的 NCK1 密文离了这 32 字节就永远解不开。
+  CREDENTIAL_KEY_FILENAME,
   // 账户作用域的 skills / agents / settings.json 各占一棵 `<hash>` 子树。
   PROFILE_DIRECTORY_SEGMENT,
   // Migrated application instructions also belong to this app-level tree.
@@ -839,7 +846,7 @@ async function createExport(includeEncryptedKeys: boolean, password?: string): P
   const data: DataExport = { ...base }
   if (includeEncryptedKeys) {
     if (password === undefined || password.length < 8) throw new IpcError('auth', '加密导出密码至少需要 8 个字符')
-    if (!getHost().secrets.available()) throw new IpcError('auth', '系统密钥环不可用，无法导出加密密钥')
+    if (!getHost().secrets.available()) throw new IpcError('auth', '凭证加密存储不可用，无法导出加密密钥')
     const values: Record<string, string> = {}
     for (const ref of credentialRefs()) {
       const value = await getHost().secrets.get(ref)
@@ -920,9 +927,8 @@ interface CredentialRollbackState {
 
 /**
  * Capture the credentials an import is allowed to touch before opening the
- * SQLite transaction. `safeStorage.set()` is deliberately not part of the
- * SQLite transaction in every host implementation (and test hosts often use
- * an in-memory map), so a database rollback alone is insufficient.
+ * SQLite transaction. Some injected/test hosts keep secrets in an in-memory map
+ * rather than the credentials table, so a database rollback alone is insufficient.
  */
 async function snapshotCredentialRollback(refs: readonly string[]): Promise<Map<string, CredentialRollbackState>> {
   const secrets = getHost().secrets
@@ -933,7 +939,7 @@ async function snapshotCredentialRollback(refs: readonly string[]): Promise<Map<
     try {
       plaintext = await secrets.get(ref)
     } catch {
-      // A corrupt/foreign safeStorage blob can be restored byte-for-byte even
+      // A corrupt/foreign credential blob can be restored byte-for-byte even
       // when it cannot be decrypted. Keep that fact so rollback does not
       // accidentally delete a credential we could not inspect.
       plaintextReadable = false
@@ -969,8 +975,8 @@ async function restoreCredentialRollback(snapshot: Map<string, CredentialRollbac
       } else if (state.blob === undefined) {
         // If the snapshot had no encrypted blob, any credential written by the
         // failed import must be removed. This remains true even when reading
-        // the pre-import value failed (for example, a corrupt safeStorage
-        // value): there was no database credential to preserve.
+        // the pre-import value failed (for example, a corrupt NCK1 or legacy
+        // safeStorage value): there was no database credential to preserve.
         // The optional hook is implemented by Electron and nodeHost. Older
         // injected hosts can still rely on the database restoration above.
         await secrets.remove?.(ref)
@@ -1055,8 +1061,8 @@ export async function importApply(req: { password?: string }, ownerId = 0): Prom
     ...Object.keys(credentialValues),
     ...credentialPlan.removals
   ])
-  // 凭证写入使用 safeStorage，和数据库事务不是同一个同步 API。先保存数据库
-  // 快照，任何一步失败都恢复整库，保证「导入失败 = 现有数据完全不变」。
+  // 自定义/测试 host 的凭证可能不在数据库里。先保存数据库快照,任何一步失败
+  // 都恢复整库与 host 状态,保证「导入失败 = 现有数据完全不变」。
   const dbPath = databaseFilePath()
   let safety: string | null = null
   if (dbPath !== null && existsSync(dbPath)) {
@@ -1065,8 +1071,8 @@ export async function importApply(req: { password?: string }, ownerId = 0): Prom
     copyFileSync(dbPath, safety)
   }
   try {
-    // 保持 SQLite 事务一直到 safeStorage 写入完成。electronSecrets.set
-    // 最终写回 credentials 表；如果任一 Promise 失败，数据库和凭证行一起回滚。
+    // 生产 Electron host 最终写回 credentials 表；如果任一步失败，数据库和
+    // 凭证行一起回滚。异步 test host 仍由外层 rollback snapshot 兜底。
     const result = await txAsync(async () => {
       const merged = repo.mergeDataExport(data)
       const secrets = getHost().secrets
@@ -1167,6 +1173,24 @@ export async function createBackup(req: { manual?: boolean } = { manual: true })
     const dir = ensureBackupDirectory()
     const database = dbSnapshot()
     const details = repo.listAllSessionDetails()
+    const keyPath = join(dataDirectory(), CREDENTIAL_KEY_FILENAME)
+    let credentialKey: Buffer | null = null
+    if (existsSync(keyPath)) {
+      const keyStat = lstatSync(keyPath)
+      if (!keyStat.isFile() || keyStat.isSymbolicLink()) {
+        throw new IpcError('unknown', '凭证主密钥路径不是普通文件，无法创建可恢复的备份')
+      }
+      chmodSync(keyPath, 0o600)
+      credentialKey = readFileSync(keyPath)
+    }
+    if (credentialKey !== null && credentialKey.length !== 32) {
+      throw new IpcError('unknown', '凭证主密钥文件损坏，无法创建可恢复的备份')
+    }
+    const credentialRows = repo.listAllCredentialBlobs()
+    const hasProgramCredentials = credentialRows.some((row) => isProgramEncrypted(row.blob))
+    if (hasProgramCredentials && credentialKey === null) {
+      throw new IpcError('unknown', '凭证主密钥文件缺失，无法创建可恢复的备份')
+    }
     const manifest: BackupManifest = {
       format: 'nextcowork-backup',
       formatVersion: BACKUP_FORMAT_VERSION,
@@ -1176,11 +1200,9 @@ export async function createBackup(req: { manual?: boolean } = { manual: true })
       databaseSha256: sha256(database),
       sessionCount: details.length,
       messageCount: details.reduce((n, x) => n + x.messages.length, 0),
-      // Backups contain a byte-for-byte database snapshot.  If the snapshot
-      // has credential blobs, it does contain the encrypted credential area;
-      // reporting false here would make the manifest lie about what is in the
-      // archive (the blobs remain safeStorage-encrypted, but are still present).
-      encryptedCredentials: repo.listCredentials().length > 0
+      // 数据库快照含**全部账户作用域**的密文,这里也必须按整表计数。
+      encryptedCredentials: credentialRows.length > 0,
+      ...(credentialKey === null ? {} : { credentialKeySha256: sha256(credentialKey) })
     }
     const settings = jsonBytes(store.getSettings())
     /*
@@ -1199,6 +1221,7 @@ export async function createBackup(req: { manual?: boolean } = { manual: true })
       { name: 'manifest.json', data: jsonBytes(manifest) },
       { name: 'database.sqlite', data: database },
       { name: 'settings.json', data: settings },
+      ...(credentialKey === null ? [] : [{ name: CREDENTIAL_KEY_FILENAME, data: credentialKey }]),
       ...(globalSettings === null ? [] : [{ name: 'global-settings.json', data: globalSettings }])
     ])
     const baseName = req.manual === true ? `nextcowork-${new Date().toISOString().replaceAll(':', '-')}` : 'nextcowork-auto'
@@ -1278,7 +1301,13 @@ function restoreGlobalSettings(data: Buffer | null): void {
   }
 }
 
-function parseBackup(path: string): { manifest: BackupManifest; database: Buffer; settings: unknown; globalSettings: Buffer | null } {
+function parseBackup(path: string): {
+  manifest: BackupManifest
+  database: Buffer
+  settings: unknown
+  globalSettings: Buffer | null
+  credentialKey: Buffer | null
+} {
   if (!isAbsolute(path) || !existsSync(path)) throw new IpcError('unknown', '备份文件不存在')
   try {
     if (statSync(path).size > MAX_BACKUP_BYTES) throw new IpcError('unknown', '备份文件过大')
@@ -1298,7 +1327,7 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
   const latestSchema = MIGRATIONS.reduce((max, migration) => Math.max(max, migration.version), 0)
   if (
     m.format !== 'nextcowork-backup' ||
-    m.formatVersion !== BACKUP_FORMAT_VERSION ||
+    (m.formatVersion !== 1 && m.formatVersion !== BACKUP_FORMAT_VERSION) ||
     typeof m.appVersion !== 'string' ||
     m.appVersion.length === 0 ||
     m.appVersion.length > 256 ||
@@ -1317,7 +1346,9 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
     typeof m.messageCount !== 'number' ||
     !Number.isInteger(m.messageCount) ||
     m.messageCount < 0 ||
-    typeof m.encryptedCredentials !== 'boolean'
+    typeof m.encryptedCredentials !== 'boolean' ||
+    (m.credentialKeySha256 !== undefined &&
+      (typeof m.credentialKeySha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.credentialKeySha256)))
   ) throw new IpcError('unknown', '备份格式或数据库版本不受支持')
   if (sha256(dbRaw) !== m.databaseSha256) throw new IpcError('unknown', '备份数据库校验和不匹配')
   // SQLite header stores user_version as a big-endian uint32 at bytes 60..63.
@@ -1336,9 +1367,36 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
   } catch {
     throw new IpcError('unknown', '备份设置结构无效')
   }
-  validateBackupDatabase(dbRaw, m, settings)
-  // 旧版本的备份里没有这个条目 —— 缺席按「没有钩子」处理，不是错误。
-  return { manifest: m as BackupManifest, database: dbRaw, settings, globalSettings: entries.get('global-settings.json') ?? null }
+  const validation = validateBackupDatabase(dbRaw, m, settings)
+  const credentialKey = entries.get(CREDENTIAL_KEY_FILENAME) ?? null
+  if (m.formatVersion === BACKUP_FORMAT_VERSION) {
+    if (credentialKey !== null && credentialKey.length !== 32) {
+      throw new IpcError('unknown', '备份凭证主密钥长度无效')
+    }
+    if (validation.hasProgramCredentials && credentialKey === null) {
+      throw new IpcError('unknown', '备份包含程序加密凭证但缺少主密钥')
+    }
+    if (validation.hasProgramCredentials && m.credentialKeySha256 === undefined) {
+      throw new IpcError('unknown', '备份包含程序加密凭证但缺少主密钥校验值')
+    }
+    if (
+      m.credentialKeySha256 !== undefined &&
+      (credentialKey === null || sha256(credentialKey) !== m.credentialKeySha256)
+    ) {
+      throw new IpcError('unknown', '备份凭证主密钥校验失败')
+    }
+  } else if (validation.hasProgramCredentials) {
+    // v1 备份从未携带主密钥,因此其中不可能合法出现 NCK1 密文。
+    throw new IpcError('unknown', '旧版备份缺少程序加密凭证所需的主密钥')
+  }
+  // 旧版本的备份里没有这些条目 —— 缺席按「没有对应文件」处理,不是格式损坏。
+  return {
+    manifest: m as BackupManifest,
+    database: dbRaw,
+    settings,
+    globalSettings: entries.get('global-settings.json') ?? null,
+    credentialKey
+  }
 }
 
 /**
@@ -1348,7 +1406,11 @@ function parseBackup(path: string): { manifest: BackupManifest; database: Buffer
  * Deserialize into an isolated in-memory handle so no application state is
  * touched while previewing an untrusted archive.
  */
-function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>, expectedSettings: unknown): void {
+function validateBackupDatabase(
+  raw: Buffer,
+  manifest: Partial<BackupManifest>,
+  expectedSettings: unknown
+): { hasProgramCredentials: boolean } {
   let temp: DatabaseSync | null = null
   let validationDir: string | null = null
   try {
@@ -1363,11 +1425,19 @@ function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>, 
     temp = new DatabaseSync(validationPath, { enableForeignKeyConstraints: true })
     const sessions = Number((temp.prepare('SELECT COUNT(*) AS n FROM sessions').get() as Record<string, unknown>)['n'] ?? -1)
     const messages = Number((temp.prepare('SELECT COUNT(*) AS n FROM messages').get() as Record<string, unknown>)['n'] ?? -1)
-    const credentials = Number((temp.prepare('SELECT COUNT(*) AS n FROM credentials').get() as Record<string, unknown>)['n'] ?? -1)
+    const credentialRows = temp.prepare('SELECT blob FROM credentials').all() as Array<Record<string, unknown>>
+    const credentials = credentialRows.length
+    const hasProgramCredentials = credentialRows.some((row) => {
+      const blob = row['blob']
+      return blob instanceof Uint8Array && isProgramEncrypted(blob)
+    })
     if (sessions !== manifest.sessionCount || messages !== manifest.messageCount) {
       throw new Error('manifest count mismatch')
     }
-    if ((credentials > 0) !== manifest.encryptedCredentials) {
+    if (
+      (manifest.formatVersion === BACKUP_FORMAT_VERSION && (credentials > 0) !== manifest.encryptedCredentials) ||
+      (manifest.formatVersion === 1 && manifest.encryptedCredentials === true && credentials === 0)
+    ) {
       throw new Error('manifest credential flag mismatch')
     }
     const settingsRow = temp.prepare('SELECT json FROM settings WHERE id = 1').get() as Record<string, unknown> | undefined
@@ -1382,6 +1452,7 @@ function validateBackupDatabase(raw: Buffer, manifest: Partial<BackupManifest>, 
     if (stableJson(normalizedSettings(databaseSettings)) !== stableJson(normalizedSettings(expectedSettings))) {
       throw new Error('settings.json 与 database.sqlite 不一致')
     }
+    return { hasProgramCredentials }
   } catch (err) {
     if (err instanceof IpcError) throw err
     throw new IpcError('unknown', `备份数据库内容校验失败: ${err instanceof Error ? err.message : String(err)}`)
@@ -1419,15 +1490,27 @@ export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Pr
   const dbPath = databaseFilePath()
   if (dbPath === null) throw new IpcError('unknown', '当前数据库不是文件库')
   const safety = `${dbPath}.restore-safety-${Date.now()}`
+  const keyPath = join(dirname(dbPath), CREDENTIAL_KEY_FILENAME)
+  const previousCredentialKey = existsSync(keyPath) ? readFileSync(keyPath) : null
   const localBackupState = captureLocalBackupState()
+  // 先停并等同步退出。否则它可能在关库后触发,或把恢复前账户的响应写进恢复后的库。
+  await pauseConfigSyncForDatabaseReplacement()
   checkpointDatabase()
   copyFileSync(dbPath, safety)
   try {
     closeDatabase()
     atomicWrite(dbPath, parsed.database)
+    if (parsed.credentialKey !== null) {
+      atomicWrite(keyPath, parsed.credentialKey)
+      chmodSync(keyPath, 0o600)
+    }
     // 清掉旧 WAL/SHM，防止旧日志覆盖恢复后的文件。
     for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* 不存在 */ } }
     openDatabase(dirname(dbPath))
+    // v1 包里没有 credential.key,里面若有旧 safeStorage 行就趁当前系统仍能解时升级。
+    migrateLegacyCredentials()
+    // 先恢复归档所属账户作用域,再把本机路径偏好写到正确那份设置里。
+    resumeStoredAccountAfterDatabaseReplacement()
     // The archive may have been produced on another device. Restore the
     // current device's backup directory and sanitize its status immediately
     // after reopening the replacement database.
@@ -1451,8 +1534,15 @@ export async function restoreBackup(req: { confirm?: boolean }, ownerId = 0): Pr
       closeDatabase()
       for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* 不存在 */ } }
       atomicWrite(dbPath, readFileSync(safety))
+      if (previousCredentialKey === null) {
+        try { unlinkSync(keyPath) } catch { /* 原来就不存在 */ }
+      } else {
+        atomicWrite(keyPath, previousCredentialKey)
+        chmodSync(keyPath, 0o600)
+      }
       for (const suffix of ['-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* 不存在 */ } }
       openDatabase(dirname(dbPath))
+      resumeStoredAccountAfterDatabaseReplacement()
       restoreLocalBackupState(localBackupState)
     } catch (rollbackError) {
       console.error('[storage] 恢复回滚失败', rollbackError)

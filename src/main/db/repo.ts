@@ -65,7 +65,7 @@ import { ulid } from '../../shared/util/id'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import type { SyncConfigKind, SyncConflict, SyncMutation } from '../../shared/domain/config-sync'
+import type { SyncCategory, SyncConfigKind, SyncConflict, SyncMutation } from '../../shared/domain/config-sync'
 
 const SYNC_ACCOUNT_KEY = 'config-sync.account'
 const SYNC_DEVICE_KEY = 'config-sync.device'
@@ -155,6 +155,33 @@ export function getConfigDirty(scope: string = currentConfigScope()): boolean {
   return getKv<unknown>(configDirtyKey(scope), false) === true
 }
 
+function categoryForSyncKind(kind: SyncConfigKind): SyncCategory {
+  if (kind === 'provider' || kind === 'modelAlias') return 'providers'
+  if (kind === 'mcpServer' || kind === 'searchProvider') return 'connections'
+  if (kind === 'workspacePreferences') return 'workspaces'
+  return kind === 'appPersonalization' ? 'preferences' : 'preferences'
+}
+
+function configCategoryDirtyKey(scope: string, category: SyncCategory): string {
+  return `config-sync.v2.dirty.${scope}.${category}`
+}
+
+export function setConfigCategoryDirty(
+  category: SyncCategory,
+  scope: string = currentConfigScope(),
+  dirty = true
+): void {
+  setKv(configCategoryDirtyKey(scope, category), dirty)
+  if (dirty) setConfigDirty(scope, true)
+}
+
+export function getConfigCategoryDirty(
+  category: SyncCategory,
+  scope: string = currentConfigScope()
+): boolean {
+  return getKv<unknown>(configCategoryDirtyKey(scope, category), false) === true
+}
+
 /**
  * ★★ **v1 明文 outbox 从这里起不再产生任何一行。**
  *
@@ -179,13 +206,23 @@ export function enqueueSyncMutation(_kind: SyncConfigKind, _entityId: string, _p
   if (syncApplying) return
   const account = syncAccount()
   if (account === undefined || !account.enabled) return
-  setConfigDirty(account.accountId)
+  setConfigCategoryDirty(categoryForSyncKind(_kind), account.accountId)
 }
 
 export function withSyncApply<T>(fn: () => T): T {
   const previous = syncApplying
   syncApplying = true
   try { return fn() } finally { syncApplying = previous }
+}
+
+/**
+ * 远端快照应用会跨 `secrets.set()` 的 Promise 边界。用同步版包它会在第一个 await
+ * 立刻撤掉围栏,后半段写入被当成本地改动再次上传,两台设备从此互相回声。
+ */
+export async function withSyncApplyAsync<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = syncApplying
+  syncApplying = true
+  try { return await fn() } finally { syncApplying = previous }
 }
 
 export function saveSyncConflict(conflict: Omit<SyncConflict, 'status'>): void {
@@ -1479,6 +1516,23 @@ export function deleteSession(id: string): string[] {
     }
     return ids
   })
+}
+
+/**
+ * 启动期凭证格式迁移专用:**列出全部物理行**,包括当前没激活的账户作用域
+ * 和平台全局 token。业务代码不该用它 —— 绕过 `physicalCredentialRef` 就可能
+ * 把 A 账户的密钥写给 B 账户。
+ */
+export function listAllCredentialBlobs(): Array<{ ref: string; blob: Uint8Array }> {
+  return stmt('SELECT ref, blob FROM credentials ORDER BY ref').all().flatMap((row) => {
+    const blob = row['blob']
+    return blob instanceof Uint8Array ? [{ ref: String(row['ref']), blob }] : []
+  })
+}
+
+/** 启动期迁移专用:按物理 ref 原位替换密文,不做账户作用域转换。 */
+export function putCredentialBlobAtPhysicalRef(ref: string, blob: Uint8Array): void {
+  stmt('UPDATE credentials SET blob = ? WHERE ref = ?').run(blob, ref)
 }
 
 /**
@@ -2945,8 +2999,8 @@ export function clearSearchCredential(id: SearchProviderId): void {
  * ★ 存取的是**密文字节**,这里不认识明文也不该认识 ——
  * 加解密只在 `main/host/index.ts` 那两个函数之间发生(方案 §9)。
  *
- * 读回来的是 `Uint8Array`,`safeStorage.decryptString` 要 `Buffer`,
- * 转换留给调用方 —— 数据库层不 import electron 的任何东西。
+ * 读回来的是 `Uint8Array`;NCK1 解密与旧 safeStorage 兼容都留给 host ——
+ * 数据库层不 import electron 或 crypto。
  *
  * ★★ **这四个函数是账户隔离的唯一收口。** 逻辑 `ref` 在这里被换成物理键
  * (`config-profile.physicalCredentialRef`):`local` 沿用裸 ref(兼容这一列
@@ -2966,9 +3020,14 @@ export function getCredential(ref: string): Uint8Array | undefined {
 }
 
 export function putCredential(ref: string, blob: Uint8Array): void {
-  stmt(
-    'INSERT INTO credentials (ref, blob) VALUES (?, ?) ON CONFLICT (ref) DO UPDATE SET blob = excluded.blob'
-  ).run(physicalCredentialRef(ref), blob)
+  tx(() => {
+    stmt(
+      'INSERT INTO credentials (ref, blob) VALUES (?, ?) ON CONFLICT (ref) DO UPDATE SET blob = excluded.blob'
+    ).run(physicalCredentialRef(ref), blob)
+    // Provider credentials are part of the encrypted `providers` cloud snapshot.
+    // Global platform/sync tokens use other prefixes and therefore never dirty it.
+    if (ref.startsWith('provider:')) enqueueSyncMutation('provider', ref.slice('provider:'.length), {})
+  })
 }
 
 /**
@@ -2979,7 +3038,10 @@ export function putCredential(ref: string, blob: Uint8Array): void {
  * 所以「只删当前作用域」对它们而言恰好等于「删它们自己」。
  */
 export function removeCredential(ref: string): void {
-  stmt('DELETE FROM credentials WHERE ref = ?').run(physicalCredentialRef(ref))
+  tx(() => {
+    stmt('DELETE FROM credentials WHERE ref = ?').run(physicalCredentialRef(ref))
+    if (ref.startsWith('provider:')) enqueueSyncMutation('provider', ref.slice('provider:'.length), {}, 'delete')
+  })
 }
 
 // ── 导入映射与批次(schema.ts 第 16 条) ──────────────────────────────────────

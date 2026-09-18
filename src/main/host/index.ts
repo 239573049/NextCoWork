@@ -6,15 +6,31 @@
  * | 端口 | 为什么非 Electron 不可 |
  * |---|---|
  * | `paths`   | 统一的用户级 `~/.next-cowork` 数据根与系统临时目录 |
- * | `secrets` | `safeStorage` 用的是系统钥匙串,没有纯 Node 的等价物 |
+ * | `secrets` | 程序主密钥加密后存 SQLite;旧 safeStorage 密文仍需 Electron 解密迁移 |
  * | `fetch`   | `net.fetch` 走 Chromium 网络栈,于是 `net/proxy.ts` 那一次 `setProxy` 对全应用的出站请求一起生效 |
  *
  * 其余端口(clock / logger / fs / spawn)在 Electron 里和在 Node 里是同一件事,
  * 覆盖它们只会多一份要同步维护的代码。
  */
 import { app, net, safeStorage } from 'electron'
-import { getCredential, getSettings, putCredential, removeCredential } from '../db/repo'
+import {
+  getCredential,
+  getSettings,
+  listAllCredentialBlobs,
+  putCredential,
+  putCredentialBlobAtPhysicalRef,
+  removeCredential
+} from '../db/repo'
 import { databaseDirectory } from '../db'
+import {
+  decryptCredentialValue,
+  encryptCredentialValue,
+  isProgramEncrypted,
+  loadMasterKey,
+  loadOrCreateMasterKey,
+  migrateCredentialRows,
+  type CredentialMigrationResult
+} from '../secrets/credential-crypto'
 import { configProfileDirectory } from '../db/config-profile'
 import { attachmentRoot } from '../net/attachment-protocol'
 import type { KernelHost } from '../kernel/host'
@@ -23,40 +39,94 @@ import { agentShell } from '../kernel/node-spawn'
 import { withDemo } from '../kernel/upstream/demo'
 
 /**
- * safeStorage 版的凭证存取。
+ * 程序自管 AES-GCM 版的凭证存取。
  *
- * 密文落在 `credentials` 表里(`db/schema.ts`)。**换掉的只是那个 Map,
- * 加解密逻辑一行没动**:进出数据库的从头到尾都是 `encryptString` 的产物,
- * 明文一次都没离开过这两个函数 —— 方案 §9 的「只写不读」就是这个意思。
+ * 密文落在 `credentials` 表里(`db/schema.ts`),主密钥在同目录的
+ * `credential.key`。`masterKey()` **每次现读**而不永久缓存:恢复流程会关库、
+ * 在同一路径替换数据库和 key;按目录缓存识别不出这次替换,会拿旧 key 解
+ * 新库,让整张凭证表看起来都损坏。32 字节本地读取远小于一次上游请求的开销。
+ *
+ * ★ 无 NCK1 magic 的行仍走 safeStorage。这不是迁移结束就能删的临时代码:
+ * 用户随时可能从旧版本导入数据,双格式读是那条回退路径的最后一道保险。
  */
+function withMasterKey<T>(create: boolean, use: (key: Buffer) => T): T {
+  const key = create
+    ? loadOrCreateMasterKey(databaseDirectory())
+    : loadMasterKey(databaseDirectory())
+  try { return use(key) } finally { key.fill(0) }
+}
+
+function decryptBlob(blob: Uint8Array): string {
+  return isProgramEncrypted(blob)
+    ? withMasterKey(false, (key) => decryptCredentialValue(key, blob))
+    : safeStorage.decryptString(Buffer.from(blob))
+}
+
 function electronSecrets(): KernelHost['secrets'] {
+  const setSync = (ref: string, value: string): void => {
+      // 库里已有 NCK1 说明它们和某一把 key 绑定。key 文件丢了或不匹配
+      // 就必须抛错;生成新 key 会让同一张表出现两套不可兼容密文。
+      const programRow = listAllCredentialBlobs().find((row) => isProgramEncrypted(row.blob))
+      const create = programRow === undefined
+      putCredential(ref, withMasterKey(create, (key) => {
+        if (programRow !== undefined) decryptCredentialValue(key, programRow.blob)
+        return encryptCredentialValue(key, value)
+      }))
+  }
+  const removeSync = (ref: string): void => removeCredential(ref)
   return {
     get: async (ref) => {
       const blob = getCredential(ref)
-      // 表里存的是 Uint8Array,decryptString 要 Buffer —— 这一层转换刻意留在
-      // 这里而不是 repo 里:数据库层不 import electron 的任何东西
-      return blob === undefined ? null : safeStorage.decryptString(Buffer.from(blob))
+      return blob === undefined ? null : decryptBlob(blob)
     },
-    set: async (ref, value) => {
-      /**
-       * ★ Linux 无 keyring 时 `isEncryptionAvailable()` 返回 false(方案 §9)。
-       * 这里**明确拒绝存储并说明原因**,而不是:
-       * - 明文存下来 —— 用户以为密钥被系统保护着,其实没有;
-       * - 或者静默丢弃 —— 设置页显示「已保存」,下次启动却是空的。
-       *
-       * 调用方(设置页)据此显示横幅。一个未处理的 false 会变成上面两种之一。
-       */
-      if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error('系统密钥环不可用,拒绝存储密钥(明文落盘不是可接受的降级)')
-      }
-      putCredential(ref, safeStorage.encryptString(value))
-    },
-    remove: async (ref) => {
-      // safeStorage has no delete primitive of its own; deleting the encrypted
-      // blob from our credentials table is the authoritative removal.
-      removeCredential(ref)
-    },
-    available: () => safeStorage.isEncryptionAvailable()
+    set: async (ref, value) => setSync(ref, value),
+    setSync,
+    remove: async (ref) => removeSync(ref),
+    removeSync,
+    // 可用性的判据从「系统 keyring」变成「数据目录可读写」。真正的权限错误
+    // 会在第一次 get/set 时抛出,而不是把密钥静默降级成明文。
+    available: () => true
+  }
+}
+
+/**
+ * 启动期把所有作用域的 safeStorage 行迁到 NCK1。单行解不开只计 failed 并原样保留,
+ * 不能因一个损坏/异机密文让应用整体起不来。
+ */
+export function migrateLegacyCredentials(): CredentialMigrationResult {
+  const rows = listAllCredentialBlobs()
+  if (rows.length === 0) return { migrated: 0, skipped: 0, failed: 0 }
+  const hasProgramRows = rows.some((row) => isProgramEncrypted(row.blob))
+  let key: Buffer
+  try {
+    key = hasProgramRows
+      ? loadMasterKey(databaseDirectory())
+      : loadOrCreateMasterKey(databaseDirectory())
+  } catch {
+    // 旧行原样保留。若已有 NCK1 却丢了 key,生成一把新 key 只会制造同表两套
+    // 不兼容密文;这里宁可让迁移全部显式失败。
+    return {
+      migrated: 0,
+      skipped: rows.filter((row) => isProgramEncrypted(row.blob)).length,
+      failed: rows.filter((row) => !isProgramEncrypted(row.blob)).length
+    }
+  }
+  try {
+    return migrateCredentialRows({
+      list: () => rows,
+      put: putCredentialBlobAtPhysicalRef,
+      decryptLegacy: (blob) => {
+        if (!safeStorage.isEncryptionAvailable()) return null
+        try {
+          return safeStorage.decryptString(Buffer.from(blob))
+        } catch {
+          return null
+        }
+      },
+      encrypt: (plain) => encryptCredentialValue(key, plain)
+    })
+  } finally {
+    key.fill(0)
   }
 }
 

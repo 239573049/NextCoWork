@@ -28,7 +28,7 @@ import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provid
 export const DEMO_PROVIDER_ID = 'demo'
 export const DEMO_MODEL = 'demo-model'
 export const DEMO_ALIAS = 'nextcowork-demo'
-/** 走的是 safeStorage 的同一条取值路径,只是值是个常量 —— 不是明文 key 的特例 */
+/** 走的是 secrets 同一条取值路径,只是值是个常量 —— 不是明文 key 的特例 */
 export const DEMO_CREDENTIAL_REF = 'demo:api-key'
 export const DEMO_API_KEY = 'sk-demo-not-a-real-key'
 

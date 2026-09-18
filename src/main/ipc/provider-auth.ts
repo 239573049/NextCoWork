@@ -157,7 +157,7 @@ export async function startOAuth(providerId: string): Promise<CredentialInfo> {
       ★ 落库在广播之前。反过来的话,渲染层收到 authChanged 去查 getCredentialInfo,
       读到的还是上一次的状态 —— 一次「登录成功但界面显示未登录」的假故障。
 
-      ★ 没有系统密钥环时 `secrets.set` 会抛(不做明文降级),异常照常上抛翻译成人话。
+      ★ 主密钥文件不可写时 `secrets.set` 会抛(不做明文降级),异常照常上抛翻译成人话。
     */
     await getHost().secrets.set(credentialRef, serializeCredential(cred))
     return await announce(providerId)
@@ -190,9 +190,8 @@ export function submitOAuthCode(providerId: string, code: string): Promise<Crede
  * 退出登录。
  *
  * ★★ 走 `db/repo` 的 `removeCredential`,**不是** `secrets.set(ref, '')` ——
- * 后者会先过 `isEncryptionAvailable()`,在没有系统密钥环的机器上直接抛错,
- * 于是「退出登录」这件本该**总能成功**的事会在那类机器上失败。删密文不需要加密能力。
- * (和 `removeProvider` 里那条注释是同一个理由。)
+ * 后者需要读取主密钥并做一次无意义的加密,主密钥文件损坏时会让退出失败;
+ * 删除现有密文不需要加密能力。(和 `removeProvider` 里那条注释是同一个理由。)
  */
 export async function signOut(providerId: string): Promise<CredentialInfo> {
   const { credentialRef } = resolveSpec(providerId)

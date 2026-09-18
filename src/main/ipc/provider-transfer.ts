@@ -20,7 +20,7 @@ export async function exportProviders(req: { includeCredentials?: boolean; passw
   const data: ProviderExport = { type: PROVIDER_EXPORT_TYPE, version: PROVIDER_EXPORT_VERSION, exportedAt: new Date().toISOString(), providers, aliases }
   if (req.includeCredentials === true) {
     if (req.password === undefined || req.password.length < 8) throw new Error('加密导出密码至少需要 8 个字符')
-    if (!getHost().secrets.available()) throw new Error('系统密钥环不可用，无法导出凭证')
+    if (!getHost().secrets.available()) throw new Error('凭证加密存储不可用，无法导出凭证')
     const values: Record<string, string> = {}
     for (const provider of providers) {
       const value = await getHost().secrets.get(provider.credentialRef)
@@ -54,7 +54,7 @@ export async function importProviders(req: { password?: string }): Promise<{ pat
   if (value.encryptedCredentials !== undefined) {
     if (req.password === undefined) throw new Error('该文件包含加密凭证，需要输入密码')
     credentials = decryptCredentialMap(value.encryptedCredentials, req.password)
-    if (Object.keys(credentials).length > 0 && !getHost().secrets.available()) throw new Error('系统密钥环不可用，无法导入凭证')
+    if (Object.keys(credentials).length > 0 && !getHost().secrets.available()) throw new Error('凭证加密存储不可用，无法导入凭证')
   }
   const sourceRefs = new Set(value.providers.map((provider) => provider.credentialRef))
   for (const source of Object.keys(credentials)) if (!sourceRefs.has(source)) throw new Error('导入文件包含未知凭证引用')

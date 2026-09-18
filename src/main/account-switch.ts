@@ -26,6 +26,7 @@
  * 6. **广播**:不然窗口里残留的还是 A 的界面。
  */
 import { ConfigSyncError } from '../shared/domain/config-sync'
+import { setConfigCategoryDirty } from './db/repo'
 import { runs } from './kernel/run-registry'
 import { browserManager } from './browser/manager'
 import { terminalHost } from './terminal-host'
@@ -35,9 +36,15 @@ import {
   configScopeForAccount,
   currentConfigScope,
   importLocalConfigProfile,
+  migrateLegacyLocalProvidersToCurrentAccount,
   switchConfigProfile
 } from './db/config-profile'
-import { getConfigSyncStatus, startConfigSync, stopConfigSync } from './ipc/config-sync'
+import {
+  getConfigSyncStatus,
+  startConfigSync,
+  stopConfigSync,
+  stopConfigSyncAndWait
+} from './ipc/config-sync'
 import { listMcpStatuses, refreshRuntimeForConfigScope, shutdownEnvironments } from './runtime'
 import { broadcastThemeLibrary } from './ipc/theme'
 import { listSearchProviders } from './ipc/websearch'
@@ -74,6 +81,10 @@ export async function prepareAccountSwitch(accountId: string | null): Promise<vo
     */
     if (runs.activeRunIds().length > 0) throw new ConfigSyncError('busy')
 
+    // 旧账户的同步可能正等网络响应。先中断并等它退出,否则响应回来时当前
+    // `physicalCredentialRef` 已经指向新账户,会把 A 的 key 写进 B。
+    await stopConfigSyncAndWait()
+
     // ── 拆掉进程内那堆 ────────────────────────────────────────────────
     // 终端是连到远端机器的 shell;远端连接握着上一账户的凭据引用。
     terminalHost.shutdown()
@@ -83,8 +94,13 @@ export async function prepareAccountSwitch(accountId: string | null): Promise<vo
 
     // ── 切库(配置表整表归档 + 恢复,一个事务) ────────────────────────
     switchConfigProfile(accountId)
+    // 账户隔离上线前的 provider/model/key 都在 local。只归属给首个登录账户一次,
+    // 不自动搬工作区或个性化设置;local 原件保留,后续账户不再重复复制。
+    if (accountId !== null && migrateLegacyLocalProvidersToCurrentAccount()) {
+      setConfigCategoryDirty('providers', accountId, true)
+    }
     // 新作用域的默认供应商 / 默认工作区 —— 空账户的第一个画面不该是空的。
-    refreshRuntimeForConfigScope()
+    await refreshRuntimeForConfigScope()
 
     // ── 进程外那两处 ─────────────────────────────────────────────────
     browserManager.resetForConfigScopeChange()

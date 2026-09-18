@@ -9,7 +9,7 @@
  *
  * ★ 本文件同时提供 `nodeHost()` —— 一个纯 Node 实现。它不是「测试替身」,
  * 而是**真实默认值**:Electron 侧只覆盖 `secrets` 与 `paths` 两项
- * (safeStorage 和 app.getPath 是仅有的两个真正需要 Electron 的能力)。
+ * (旧 safeStorage 密文迁移和 app.getPath 是仅有的两个真正需要 Electron 的能力)。
  * 这样「内核能不能脱离 Electron 跑」这个问题不靠自律维持,靠默认路径维持。
  */
 import { release, tmpdir } from 'node:os'
@@ -134,13 +134,16 @@ export interface KernelHost {
     attachments(): string
     temp(): string
   }
-  /** ★ 只存引用,永不在内核里出现明文 key(方案 §9) */
+  /** ★ 只存引用；明文只在显式取值的主进程调用栈内短暂存在。 */
   secrets: {
     get(ref: string): Promise<string | null>
     set(ref: string, value: string): Promise<void>
+    /** 主进程整批配置事务专用；普通内核代码继续只用异步端口。 */
+    setSync?(ref: string, value: string): void
     /** Remove a stored credential when an operation that wrote it rolls back. */
     remove?(ref: string): Promise<void>
-    /** Linux 无 keyring 时为 false —— 调用方必须有明确的降级路径,不是一个未处理的 false */
+    removeSync?(ref: string): void
+    /** 程序主密钥可用时为 true；写入权限等故障仍由 set/get 明确抛出。 */
     available(): boolean
   }
   clock: { now(): number }
@@ -161,8 +164,8 @@ const consoleLogger: Logger = {
 /**
  * 纯 Node 的默认 host。
  *
- * `secrets` 在这里是**进程内内存**,不是持久化 —— Electron 侧会用 safeStorage
- * 覆盖掉它。留一个能用的内存实现(而不是抛错)是为了让内核的单测能走完
+ * `secrets` 在这里是**进程内内存**,不是持久化 —— Electron 侧会用程序主密钥
+ * + SQLite 覆盖它。留一个能用的内存实现(而不是抛错)是为了让内核的单测能走完
  * 「取凭证 → 发请求」这条路,而不必每个测试都自己搭一个 host。
  */
 export function nodeHost(
@@ -181,7 +184,13 @@ export function nodeHost(
       set: async (ref, v) => {
         mem.set(ref, v)
       },
+      setSync: (ref, v) => {
+        mem.set(ref, v)
+      },
       remove: async (ref) => {
+        mem.delete(ref)
+      },
+      removeSync: (ref) => {
         mem.delete(ref)
       },
       available: () => true

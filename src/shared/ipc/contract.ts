@@ -37,6 +37,7 @@ import type { SessionInputState } from '../domain/queued-input'
 import type { SearchProviderId, SearchProviderStatus } from '../domain/search'
 import type {
   CredentialInfo,
+  RevealedCredential,
   FailoverEvent,
   FetchedModel,
   GatewayStatus,
@@ -67,7 +68,7 @@ import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, PreparedWorkspace, RemoteDirectory, SshAuthRequest, SshAuthResponse } from '../domain/environment'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
-import type { SyncConflict, SyncPreview, SyncStatus } from '../domain/config-sync'
+import type { SyncConflict, SyncPreview, SyncSetupRequest, SyncStatus } from '../domain/config-sync'
 import type {
   WorkspaceFile,
   WorkspaceFileMutationRequest,
@@ -242,6 +243,8 @@ export interface IpcInvokeMap {
   'clientAuth:getUser': { req: void; res: ClientAuthUser | null }
   'clientAuth:getUsage': { req: { from?: string; to?: string }; res: ClientUsageEntry[] }
   'configSync:getStatus': { req: void; res: SyncStatus }
+  /** 密码只用于本次创建/解锁 vault，不进入设置或事件广播。 */
+  'configSync:setup': { req: SyncSetupRequest; res: SyncStatus }
   'configSync:getConflicts': { req: void; res: SyncConflict[] }
   'configSync:getPreview': { req: void; res: SyncPreview }
   'configSync:confirmInitial': { req: void; res: void }
@@ -755,9 +758,14 @@ export interface IpcInvokeMap {
   'providers:listImportable': { req: { sourceKind: ImportSourceKind; pickedDir?: string }; res: ImportableProviders }
   'provider:upsert': { req: UpstreamProvider; res: UpstreamProvider }
   'provider:remove': { req: { id: string }; res: void }
-  /** ★ 只写不读:返回 { hasKey, last4 },永不回传明文(方案 §9) */
+  /** ★ 常规状态只回 { hasKey, last4 };明文仅经 revealCredential 显式返回 */
   'provider:setCredential': { req: { providerId: string; apiKey: string }; res: CredentialInfo }
   'provider:getCredentialInfo': { req: { providerId: string }; res: CredentialInfo }
+  /**
+   * ★ 这是唯一允许把凭证明文送到渲染层的通道,只供用户显式点击「查看」调用。
+   * 禁止列表、初始化、轮询或广播复用它 —— 否则密钥会常驻每个窗口的状态树。
+   */
+  'provider:revealCredential': { req: { providerId: string }; res: RevealedCredential }
   'provider:export': { req: { includeCredentials?: boolean; password?: string }; res: { path: string; encrypted: boolean; providerCount: number; aliasCount: number } | null }
   'provider:import': { req: { password?: string }; res: ({ path: string } & ProviderImportResult) | null }
   /**
@@ -768,7 +776,7 @@ export interface IpcInvokeMap {
    * 才能退出 loading —— 而 `IpcResult` 信封顺带把失败原因免费带回来了。
    * 中间进度靠 `provider:authProgress` 补,终态靠这条的返回值。
    *
-   * ★ **不复用 `provider:setCredential`。** 那条频道的契约就是「只写不读一把 key」,
+   * ★ **不复用 `provider:setCredential`。** 那条频道的契约是「写入一把 key、回状态摘要」,
    * 让它同时表示「打开浏览器走一遍 OAuth」,等于让一条安全敏感频道做两件不相干的事,
    * 而它的校验只按其中一件写过。
    */
@@ -779,7 +787,7 @@ export interface IpcInvokeMap {
     req: { providerId: string; code: string }
     res: CredentialInfo
   }
-  /** 退出登录。★ 一定成功 —— 删密文不需要系统密钥环,见 `signOut` 的注释 */
+  /** 退出登录。★ 一定成功 —— 删除现有密文不需要主密钥,见 `signOut` 的注释 */
   'provider:signOut': { req: { providerId: string }; res: CredentialInfo }
   'provider:listModels': { req: { providerId?: string }; res: ModelAlias[] }
   /**
@@ -1140,6 +1148,7 @@ export const INVOKE_CHANNELS = {
   'clientAuth:getUser': 1,
   'clientAuth:getUsage': 1,
   'configSync:getStatus': 1,
+  'configSync:setup': 1,
   'configSync:getConflicts': 1,
   'configSync:getPreview': 1,
   'configSync:confirmInitial': 1,
@@ -1315,6 +1324,7 @@ export const INVOKE_CHANNELS = {
   'provider:remove': 1,
   'provider:setCredential': 1,
   'provider:getCredentialInfo': 1,
+  'provider:revealCredential': 1,
   'provider:export': 1,
   'provider:import': 1,
   'provider:startOAuth': 1,

@@ -124,7 +124,7 @@ export async function runSearch(
     const key = await source.apiKey(id)
     if (key === null || key === '') {
       // hasKey 说有、现取却没有 —— 库和密钥环不一致,如实记一笔再往下走
-      failures.push({ id, message: `${label(id)} 的 API Key 读不出来,可能是系统密钥环变了。` })
+      failures.push({ id, message: `${label(id)} 的 API Key 读不出来,可能是本机加密数据已损坏。` })
       continue
     }
 

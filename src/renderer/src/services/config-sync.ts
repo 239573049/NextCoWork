@@ -5,6 +5,10 @@ export function getStatus(): Promise<SyncStatus> {
   return invoke('configSync:getStatus', undefined)
 }
 
+export function setup(password: string, remember: boolean): Promise<SyncStatus> {
+  return invoke('configSync:setup', { password, remember })
+}
+
 export function getConflicts(): Promise<SyncConflict[]> {
   return invoke('configSync:getConflicts', undefined)
 }

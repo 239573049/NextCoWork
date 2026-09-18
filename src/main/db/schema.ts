@@ -82,9 +82,9 @@ CREATE TABLE model_aliases (
   PRIMARY KEY (provider_id, alias)
 );
 
--- 上游密钥。**存的是 safeStorage.encryptString 的产物,不是明文**(方案 §9)——
--- 加解密逻辑全在 main/host/index.ts 那两个函数里,这张表只认字节。
--- 系统密钥环不可用时那边直接抛错拒绝存储,不会有明文走到这里来。
+-- 上游密钥。**存的是程序 AES-256-GCM 密文,不是明文** —— NCK1 格式与
+-- 加解密逻辑都在 main/secrets/credential-crypto.ts,主密钥是同目录 0600 文件。
+-- 升级期间还可能有旧 safeStorage 行;host 按 magic 双格式读并在启动时迁移。
 CREATE TABLE credentials (
   ref  TEXT PRIMARY KEY,
   blob BLOB NOT NULL
@@ -106,7 +106,7 @@ CREATE TABLE credentials (
  *
  * ★ **两张表里都没有一个明文密钥。** MCP 的 env / headers 值、搜索服务的 API Key
  * 全部在 `credentials` 表里(ref 分别是 `mcpSecretRef()` 和 `searchSecretRef()`),
- * 经 safeStorage 加密。这也意味着删一行配置要顺手删对应的 credentials 行 ——
+ * 经程序主密钥加密。这也意味着删一行配置要顺手删对应的 credentials 行 ——
  * 那件事在 `repo.ts` 的 `removeMcpServer` 里做,不在这里,因为这张表不认识 ref 的构造规则。
  */
 const V2_CONNECTIONS = `

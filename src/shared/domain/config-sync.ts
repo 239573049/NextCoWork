@@ -69,6 +69,34 @@ export const syncResourceFileSchema = z.object({
   chunks: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(64)
 }).strict()
 export type SyncResourceFile = z.infer<typeof syncResourceFileSchema>
+/**
+ * `/legacy` 的分页导出。documents/conflicts 每页都是完整快照,events 按 cursor 翻页;
+ * counts 是提交迁移时要原样回传的冻结水位。payload 一律 unknown —— 迁移只按 kind
+ * 挑出仍被本客户端认识的记录,其余原样归档,绝不解释。
+ */
+export const syncLegacyExportSchema = z.object({
+  cursor: counter,
+  hasMore: z.boolean(),
+  documents: z.array(z.object({
+    workspaceId: counter, kind: z.string().max(64), entityId: z.string().max(512),
+    payload: z.unknown(), revision: counter, updatedAt: z.string().max(64), updatedByDeviceId: z.string().max(128)
+  }).strict()).max(100_000),
+  events: z.array(z.object({
+    cursor: counter, workspaceId: counter, kind: z.string().max(64), entityId: z.string().max(512),
+    operation: z.string().max(16), payload: z.unknown(), revision: counter,
+    createdAt: z.string().max(64), deviceId: z.string().max(128), mutationId: z.uuid()
+  }).strict()).max(100),
+  conflicts: z.array(z.object({
+    workspaceId: counter, kind: z.string().max(64), entityId: z.string().max(512), mutationId: z.uuid(),
+    localRevision: counter, remoteRevision: counter, localPayload: z.unknown(), remotePayload: z.unknown(),
+    status: z.string().max(16), createdAt: z.string().max(64)
+  }).strict()).max(100_000),
+  counts: z.object({
+    documents: counter, events: counter, conflicts: counter, secrets: counter,
+    maxEventId: counter, maxRevision: counter
+  }).strict()
+}).strict()
+export type SyncLegacyExport = z.infer<typeof syncLegacyExportSchema>
 export interface SyncSetupRequest { password: string; remember: boolean }
 export interface SyncConfigureRequest { selection: SyncSelection; importLocal: boolean; prefer: 'local' | 'remote' }
 export interface SyncPasswordChange { password: string; revokeOtherDevices: boolean }

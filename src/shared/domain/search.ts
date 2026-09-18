@@ -138,7 +138,7 @@ export interface SearchProviderConfig {
   priority: number
 }
 
-/** 列表行要的一切。`hasKey` / `last4` 由主进程从 safeStorage 算出来,明文永不过 IPC */
+/** 列表行要的一切。`hasKey` / `last4` 由主进程从程序密文算出来,明文永不过 IPC */
 export interface SearchProviderStatus {
   config: SearchProviderConfig
   hasKey: boolean

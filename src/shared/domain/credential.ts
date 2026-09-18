@@ -10,7 +10,7 @@
  * 一个槽一个 ref,那五处一行不用改。
  *
  * ★ `secrets` 的接口(`kernel/host.ts`)仍然是**字符串**契约,这里只是约定了
- * 那个字符串的两种形状。safeStorage 加密的是什么它并不关心。
+ * 那个字符串的两种形状。底层用 NCK1 还是兼容旧 safeStorage 与它无关。
  */
 import type { OAuthIssuerId } from './oauth-issuer'
 import { OAUTH_ISSUER_IDS } from './oauth-issuer'

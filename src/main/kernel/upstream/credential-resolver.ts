@@ -246,7 +246,7 @@ export class CredentialResolver {
       .set(ref, serializeCredential({ ...cred, needsReauth: true }))
       .then(() => this.onChanged?.(ref))
       .catch(() => {
-        /* 没有系统密钥环时写不进去 —— 那也不该盖掉下面这个更要紧的错误 */
+        /* 主密钥文件不可写时记不进去 —— 那也不该盖掉下面这个更要紧的错误 */
       })
     return new CredentialAuthError(agentError('auth', message, { retryable: false }))
   }

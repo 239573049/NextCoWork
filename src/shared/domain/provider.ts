@@ -119,7 +119,7 @@ export interface UpstreamProvider {
   name: string
   protocol: UpstreamProtocol
   baseUrl: string
-  /** ★ safeStorage 引用,**永不是明文 key**(方案 §9) */
+  /** ★ credentials 表的逻辑引用,**永不是明文 key** */
   credentialRef: string
   /** 故障切换顺序,小的优先 */
   priority: number
@@ -141,10 +141,10 @@ export function providerCredentialRef(id: string): string {
 }
 
 /**
- * OAuth 登录态里**可以给渲染层看**的那部分。
+ * OAuth 登录态在列表/广播里**可以给渲染层看**的那部分。
  *
- * ★ 这里一个 token 字符都没有,是刻意的:`accessToken` 每小时都换,回传它
- * 既没有识别价值又把「只写不读」那条线弄出一个缺口。用户认自己的账号靠 `email`。
+ * ★ 这里一个 token 字符都没有:常规刷新只需要账号信息。完整 token 只在用户
+ * 显式点击「查看」时通过 `provider:revealCredential` 单次返回。
  */
 export interface CredentialAuthInfo {
   issuer: OAuthIssuerId
@@ -167,11 +167,11 @@ export interface CredentialAuthInfo {
   needsReauth: boolean
 }
 
-/** 设置页对密钥**只写不读**:返回这个,永不回传明文。 */
+/** 设置页列表/初始化路径只返回摘要信息,永不顺带回传明文。 */
 export interface CredentialInfo {
   hasKey: boolean
   last4: string | null
-  /** Linux 无 keyring 时 safeStorage.isEncryptionAvailable() 为 false —— 必须有明确降级路径 */
+  /** 历史兼容字段。程序主密钥可用时恒为 true;旧渲染层据它隐藏不可用提示。 */
   encryptionAvailable: boolean
   /**
    * ★ **缺失 ≠ 未登录**,而是「这条凭证不是 OAuth」(绝大多数供应商)。
@@ -180,6 +180,14 @@ export interface CredentialInfo {
    */
   auth?: CredentialAuthInfo
 }
+
+/**
+ * 只有用户显式点击「查看」才经专用 IPC 返回。列表、广播和初始化路径都不得携带它。
+ * OAuth 的两个 token 都允许查看(产品决策);`accountId` 等非秘密元数据继续走 CredentialInfo。
+ */
+export type RevealedCredential =
+  | { kind: 'api-key'; apiKey: string }
+  | { kind: 'oauth'; accessToken: string; refreshToken: string }
 
 export interface ModelCapabilities {
   tools: boolean

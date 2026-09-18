@@ -21,7 +21,7 @@ import { PROXY_SCHEMES } from './proxy'
 
 export const DATA_EXPORT_TYPE = 'nextcowork-data-export' as const
 export const DATA_EXPORT_VERSION = 1
-export const BACKUP_FORMAT_VERSION = 1
+export const BACKUP_FORMAT_VERSION = 2
 
 export interface ExportSession {
   session: Session
@@ -72,6 +72,8 @@ export interface BackupManifest {
   sessionCount: number
   messageCount: number
   encryptedCredentials: boolean
+  /** v2:存在 NCK1 密文时必须有,用于把数据库与它唯一对应的主密钥绑定成一个恢复单元。 */
+  credentialKeySha256?: string
 }
 
 export interface BackupStatus {
@@ -565,7 +567,7 @@ function isJsonValue(value: unknown): boolean {
   return Object.values(value).every(isJsonValue)
 }
 
-function isProvider(value: unknown): value is UpstreamProvider {
+export function isProvider(value: unknown): value is UpstreamProvider {
   if (!isRecord(value)) return false
   if (
     !isNonEmptyString(value.id) ||
@@ -590,7 +592,7 @@ function isProvider(value: unknown): value is UpstreamProvider {
   return isRecord(anthropic)
 }
 
-function isModelAlias(value: unknown): value is ModelAlias {
+export function isModelAlias(value: unknown): value is ModelAlias {
   if (!isRecord(value)) return false
   if (
     !isNonEmptyString(value.alias) ||

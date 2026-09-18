@@ -1,8 +1,8 @@
 /**
  * 搜索服务的 handler —— 「设置 › 连接 › 搜索服务」那一页背后的六条频道。
  *
- * ★ **明文 Key 只有一个方向:进。**
- * `setCredential` 写进 safeStorage 之后,回程只带 `{hasKey, last4, encryptionAvailable}`;
+ * ★ **搜索服务的明文 Key 只有一个方向:进。**
+ * `setCredential` 写进程序密文之后,回程只带 `{hasKey, last4, encryptionAvailable}`;
  * 没有任何一条频道能把它读出来(方案 §9)。`service.ts` 那个装配槽是明文的
  * **唯一**消费者,而它在主进程里,不过 IPC。
  *

@@ -76,6 +76,7 @@ import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
   getCredentialInfo,
+  revealCredential,
   listModels,
   listProviders,
   removeProvider,
@@ -136,7 +137,14 @@ import {
 } from './import'
 import { initImports, setImportChangeListener, setImportSessionNotifier, setImportWorkspaceNotifier } from '../imports/service'
 import { getClientAuthState, startClientLogin, selectClientTeam, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
-import { confirmInitialConfigSync, getConfigSyncPreview, getConfigSyncStatus, getConfigSyncConflicts, resolveConfigSyncConflict } from './config-sync'
+import {
+  confirmInitialConfigSync,
+  getConfigSyncPreview,
+  getConfigSyncStatus,
+  getConfigSyncConflicts,
+  resolveConfigSyncConflict,
+  setupConfigSync
+} from './config-sync'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
 import { clearBrowserProfileState, exportBrowserCookies, importBrowserCookies } from '../browser/session'
 import {
@@ -257,6 +265,7 @@ const handlers: HandlerMap = {
   'clientAuth:getUser': () => getClientUser(),
   'clientAuth:getUsage': (req) => getClientUsage(req),
   'configSync:getStatus': () => getConfigSyncStatus(),
+  'configSync:setup': (req) => setupConfigSync(req),
   'configSync:getConflicts': () => getConfigSyncConflicts(),
   'configSync:getPreview': () => getConfigSyncPreview(),
   'configSync:confirmInitial': () => confirmInitialConfigSync(),
@@ -579,6 +588,7 @@ const handlers: HandlerMap = {
   'provider:setAliases': ({ providerId, models }) => setAliases(providerId, models),
   'provider:setCredential': ({ providerId, apiKey }) => setCredential(providerId, apiKey),
   'provider:getCredentialInfo': ({ providerId }) => getCredentialInfo(providerId),
+  'provider:revealCredential': ({ providerId }) => revealCredential(providerId),
   'provider:export': (req) => exportProviders(req),
   'provider:import': (req) => importProviders(req),
   'provider:startOAuth': ({ providerId }) => startOAuth(providerId),
@@ -812,5 +822,5 @@ export function registerIpc(): void {
 
 export { EMPTY_OUTER }
 export { shutdownRuns } from './agent'
-export { shutdownClientAuth } from './client-auth'
+export { prepareStoredAccountScope, shutdownClientAuth } from './client-auth'
 export { shutdownTerminals }

@@ -92,7 +92,7 @@ export type ConnectionProfileInput = Omit<SshConnectionProfile, 'id' | 'revision
   /**
    * 表单里填的账户密码。**传输期字段 —— 绝不写进 `connection_profiles` 行。**
    *
-   * 主进程把它剥下来存进 `credentials`(safeStorage 加密),profile 本身逐字段构造,
+   * 主进程把它剥下来存进 `credentials`(程序主密钥加密),profile 本身逐字段构造,
    * 天然带不上它。三种取值:`undefined` 不动已存的、`''`/`null` 清除、非空写入。
    *
    * ★ 它不会被"发给 ssh"—— OpenSSH 不接受任何非交互方式传入的密码。它只是被存下来,

@@ -5,11 +5,11 @@
  * ★ **配置里没有一个明文密钥。** stdio 的环境变量、HTTP/SSE 的请求头,
  * 十有八九装的是 token(`Authorization: Bearer …` 是 MCP 远程服务器的标准做法)。
  * 所以这里只存**键名数组**,值整张表加密后落在 `credentials` 表的
- * `mcpSecretRef(id, …)` 下 —— 和上游供应商的 apiKey 走同一套 safeStorage,
+ * `mcpSecretRef(id, …)` 下 —— 和上游供应商的 apiKey 走同一套程序加密,
  * 理由也同一条:`db/schema.ts` 那张表只认字节。
  *
  * 这带来一个必须知道的后果:**配置能导出,密钥不能**。换机器要重填,
- * 这是 safeStorage 绑定当前用户密钥环的直接结果,不是遗漏。
+ * 这是 credentials 密文绑定本机主密钥的直接结果,不是遗漏。
  */
 
 export type McpTransport = 'stdio' | 'sse' | 'streamable-http'
@@ -28,7 +28,7 @@ export type McpServerConfig =
       transport: 'stdio'
       command: string
       args: string[]
-      /** ★ 只有键名。值在 safeStorage 里,见文件头 */
+      /** ★ 只有键名。值加密存在 credentials 表,见文件头 */
       envNames: string[]
       /** 留空 = 用工作区根目录 */
       cwd?: string
@@ -36,7 +36,7 @@ export type McpServerConfig =
   | (McpServerBase & {
       transport: 'sse' | 'streamable-http'
       url: string
-      /** ★ 只有键名。值在 safeStorage 里,见文件头 */
+      /** ★ 只有键名。值加密存在 credentials 表,见文件头 */
       headerNames: string[]
     })
 
@@ -76,7 +76,7 @@ export function mcpSecretRef(serverId: string, kind: 'env' | 'headers'): string 
   return `mcp:${serverId}:${kind}`
 }
 
-/** 配置里声明的密钥键名 —— 删服务器时要按这个清理 safeStorage */
+/** 配置里声明的密钥键名 —— 删服务器时要按这个清理 credentials 密文 */
 export function mcpSecretKind(cfg: McpServerConfig): 'env' | 'headers' {
   return cfg.transport === 'stdio' ? 'env' : 'headers'
 }

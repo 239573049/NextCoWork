@@ -22,6 +22,7 @@ import type {
   FetchedModel,
   ModelAlias,
   ProviderProtocolOptions,
+  RevealedCredential,
   UpstreamProvider
 } from '../../shared/domain/provider'
 import {
@@ -268,8 +269,8 @@ function mergeProtocolOptions(
  *
  * ★★ **`credentialRef` 一律不采信渲染层传来的值。**
  * 它是入参 `UpstreamProvider` 的一个字段,所以渲染层**能**填 —— 但填了就意味着
- * 「供应商 A 可以指向供应商 B 的密钥」,而密钥是只写不读的(方案 §9),
- * 渲染层本来就不该知道也不该决定这件事。所以:
+ * 「供应商 A 可以指向供应商 B 的密钥」。渲染层可以在显式动作下查看值,
+ * 但本来就不该知道或决定存储引用。所以:
  * - 已存在的:**保留库里那条的 ref**(改名换地址不该弄丢已经存好的 key);
  * - 新建的:主进程自己派生 `provider:<id>`。
  *
@@ -348,9 +349,8 @@ export function removeProvider(id: string): void {
   store.removeProvider(id)
   /**
    * ★ 走 `db/repo` 的 removeCredential,**不是** `secrets.set(ref, '')`。
-   * 后者会先过 `isEncryptionAvailable()`,在没有系统密钥环的机器上直接抛错 ——
-   * 于是「删掉一个供应商」这件本该总能成功的事,会在那类机器上失败。
-   * 删密文不需要加密能力。
+   * 后者需要读取主密钥并做一次无意义的加密,主密钥损坏时会让删除失败;
+   * 删现有密文不需要加密能力。
    */
   removeCredential(target.credentialRef)
   repointDanglingDefaults()
@@ -628,8 +628,8 @@ export function setAliases(providerId: string, models: readonly string[]): Model
  * 把库里那个字符串翻译成设置页能看的东西。
  *
  * ★ OAuth 凭证的 `last4` 是 **null**。access token 的后四位每小时都变,
- * 对用户零识别价值,而「只写不读」这条线的边界值得守死:能不回传的字符
- * 一个都不回传。那种凭证靠 `auth.email` 认。
+ * 对常规状态展示零识别价值。完整 token 只由显式 `revealCredential` 返回,
+ * 这里仍一个字符都不带,避免列表刷新把明文常驻窗口状态。
  */
 function infoFor(plaintext: string | null): CredentialInfo {
   const available = getHost().secrets.available()
@@ -638,7 +638,7 @@ function infoFor(plaintext: string | null): CredentialInfo {
     return { hasKey: false, last4: null, encryptionAvailable: available }
   }
   if (cred.kind === 'api-key') {
-    // ★ 只回后四位。整串明文到这里就止步了 —— 「只写不读」就是这一行
+    // 常规状态只回后四位;完整明文只走显式 revealCredential
     return { hasKey: true, last4: cred.apiKey.slice(-4), encryptionAvailable: available }
   }
   return {
@@ -676,4 +676,26 @@ export async function getCredentialInfo(providerId: string): Promise<CredentialI
   const p = store.listProviders().find((x) => x.id === providerId)
   if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
   return infoFor(await getHost().secrets.get(p.credentialRef))
+}
+
+/**
+ * 显式查看凭证。和 `getCredentialInfo` 分开是安全边界:列表刷新永远只拿摘要,
+ * 明文只在用户点了查看按钮的那一次请求中跨过 IPC。
+ *
+ * OAuth 的 access / refresh token 和内置供应商的登录 token 也允许查看 ——
+ * 这是产品选择,所以这里不按 providerId 或 credential kind 做额外隐藏。
+ */
+export async function revealCredential(providerId: string): Promise<RevealedCredential> {
+  ensureSeeded()
+  const p = store.listProviders().find((x) => x.id === providerId)
+  if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
+  const credential = parseCredential(await getHost().secrets.get(p.credentialRef))
+  if (credential === null) throw new Error('还没有配置密钥')
+  return credential.kind === 'api-key'
+    ? { kind: 'api-key', apiKey: credential.apiKey }
+    : {
+        kind: 'oauth',
+        accessToken: credential.accessToken,
+        refreshToken: credential.refreshToken
+      }
 }

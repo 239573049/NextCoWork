@@ -50,6 +50,8 @@ export const LOCAL_CONFIG_SCOPE = 'local'
 
 /** 当前作用域落在 kv 的哪一行。**不在白名单里**,所以它自己不会被切掉。 */
 const SCOPE_KEY = 'config-profile.scope'
+/** 账户隔离上线前的 provider/key 只允许自动归属给一个账户。 */
+const LEGACY_PROVIDER_MIGRATION_OWNER_KEY = 'config-profile.legacy-provider-migration-owner'
 
 /** 账户专属的文件根在数据根下的位置。 */
 const PROFILES_DIRNAME = 'config-profiles'
@@ -273,6 +275,8 @@ interface ProfileSnapshot {
  */
 interface ProfileRecord extends Partial<ProfileSnapshot> {
   importedLocal?: boolean
+  /** 首次账户登录时只复制过旧 provider/model/credential 资产。 */
+  migratedLegacyProviders?: boolean
   workspaceMap?: Record<string, string>
 }
 
@@ -497,6 +501,81 @@ function preparedRowCount(table: string): number {
  * 不静默覆盖:同 id 的两条配置谁赢没有任何正确答案,而「悄悄用 local 那份盖掉
  * 账户里已有的」正是最坏的那种猜法。
  */
+export function migrateLegacyLocalProvidersToCurrentAccount(): boolean {
+  const target = currentConfigScope()
+  if (target === LOCAL_CONFIG_SCOPE) return false
+  const existing = readProfileRecord(target) ?? {}
+  if (existing.migratedLegacyProviders === true || existing.importedLocal === true) return false
+  const ownerRow = stmt('SELECT json FROM kv WHERE key = ?').get(LEGACY_PROVIDER_MIGRATION_OWNER_KEY)
+  let owner: string | null = null
+  if (ownerRow !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(String(ownerRow['json']))
+      owner = typeof parsed === 'string' && parsed !== '' ? parsed : null
+    } catch { /* 损坏标记按未迁移处理,真正的数据冲突仍由下面逐项守卫 */ }
+  }
+  if (owner !== null && owner !== target) {
+    writeProfileRecord(target, { ...existing, migratedLegacyProviders: true })
+    return false
+  }
+  const source = readProfileRecord(LOCAL_CONFIG_SCOPE)
+  if (source === null) {
+    writeProfileRecord(target, { ...existing, migratedLegacyProviders: true })
+    return false
+  }
+
+  const providers = (source.tables?.['providers'] ?? [])
+    .filter((row) => String(row['id'] ?? '') !== 'nextcowork')
+  const providerRefs = new Map<string, string>()
+  for (const row of providers) {
+    const id = String(row['id'] ?? '')
+    const ref = parseObject(row['json'])['credentialRef']
+    if (id !== '' && typeof ref === 'string' && ref !== '' && !isGlobalCredentialRef(ref)) {
+      providerRefs.set(id, ref)
+    }
+  }
+  const providerIds = new Set(providerRefs.keys())
+  const aliases = (source.tables?.['model_aliases'] ?? [])
+    .filter((row) => providerIds.has(String(row['provider_id'] ?? '')))
+
+  return tx(() => {
+    const insertedProviders = new Set<string>()
+    for (const row of providers) {
+      const id = String(row['id'] ?? '')
+      if (id === '' || providerExists(id)) continue
+      restoreTable('providers', [row])
+      insertedProviders.add(id)
+    }
+    for (const row of aliases) {
+      const providerId = String(row['provider_id'] ?? '')
+      const alias = String(row['alias'] ?? '')
+      if (!insertedProviders.has(providerId) || alias === '') continue
+      const exists = stmt('SELECT 1 FROM model_aliases WHERE provider_id = ? AND alias = ?').get(providerId, alias)
+      if (exists === undefined) restoreTable('model_aliases', [row])
+    }
+    for (const [providerId, logical] of providerRefs) {
+      if (!insertedProviders.has(providerId)) continue
+      const targetProvider = stmt('SELECT json FROM providers WHERE id = ?').get(providerId)
+      const targetRef = parseObject(targetProvider?.['json'])['credentialRef']
+      // 目标已有同 id 但引用不同 = 它是目标账户自己的配置,不把 local key 塞进去。
+      if (targetRef !== logical) continue
+      const next = physicalCredentialRef(logical, target)
+      if (credentialsHas(next)) continue
+      const row = stmt('SELECT blob FROM credentials WHERE ref = ?').get(logical)
+      const blob = row?.['blob']
+      if (blob instanceof Uint8Array) stmt('INSERT INTO credentials (ref, blob) VALUES (?, ?)').run(next, blob)
+    }
+    writeProfileRecord(target, { ...existing, migratedLegacyProviders: true })
+    stmt('INSERT INTO kv (key, json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json')
+      .run(LEGACY_PROVIDER_MIGRATION_OWNER_KEY, JSON.stringify(target))
+    return insertedProviders.size > 0
+  })
+}
+
+function providerExists(id: string): boolean {
+  return stmt('SELECT id FROM providers WHERE id = ?').get(id) !== undefined
+}
+
 export function importLocalConfigProfile(): void {
   const target = currentConfigScope()
   if (target === LOCAL_CONFIG_SCOPE) throw new ConfigProfileError('importNotAllowed')
@@ -676,8 +755,8 @@ function localCredentialRefs(): Array<{ physical: string; logical: string }> {
 /**
  * 把 `local` 的密文**按字节**复制到目标作用域的物理键上。
  *
- * ★ 复制的是 `safeStorage.encryptString` 的产物,不是明文 —— 明文一次都没有
- * 在配置层出现过(它只在 `main/host/index.ts` 那两个函数之间)。
+ * ★ 复制的是 NCK1 AES-GCM 密文,不是明文 —— 同机所有作用域共用数据库目录下
+ * 那一把主密钥,所以换物理 ref 不需要解密重加密。
  * 这也意味着导入**只有在同一台机器上**才有意义,而它的语义正是「同一台机器上
  * 把未登录时的配置归到这个账户」,与跨机迁移无关。
  *

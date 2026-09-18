@@ -8,6 +8,7 @@ import {
   symlinkSync,
   writeFileSync
 } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -66,6 +67,11 @@ import {
 } from '../../db'
 import * as repo from '../../db/repo'
 import { store } from '../../state/store'
+import {
+  CREDENTIAL_KEY_FILENAME,
+  decryptCredentialValue,
+  encryptCredentialValue
+} from '../../secrets/credential-crypto'
 import {
   chooseBackupDirectory,
   cleanupPreview,
@@ -179,6 +185,30 @@ describe('统计与清理不越过符号链接和外部引用', () => {
 })
 
 describe('恢复保留本机专属备份状态', () => {
+  it('把程序密文与它对应的主密钥作为同一个恢复单元', async () => {
+    const backupDirectory = join(outside, 'credential-backups')
+    mkdirSync(backupDirectory)
+    const keyPath = join(dataRoot, CREDENTIAL_KEY_FILENAME)
+    const backupKey = randomBytes(32)
+    writeFileSync(keyPath, backupKey, { mode: 0o600 })
+    repo.putCredential('provider:backup', encryptCredentialValue(backupKey, 'sk-from-backup'))
+    const archive = await makeBackup(backupDirectory)
+
+    const laterKey = randomBytes(32)
+    writeFileSync(keyPath, laterKey)
+    repo.putCredential('provider:later', encryptCredentialValue(laterKey, 'sk-later'))
+    select(archive)
+    await restoreBackup({ confirm: false }, 51)
+    await expect(restoreBackup({ confirm: true }, 51)).resolves.toMatchObject({ restored: true })
+
+    const restoredKey = readFileSync(keyPath)
+    expect(restoredKey).toEqual(backupKey)
+    const restored = repo.getCredential('provider:backup')
+    expect(restored).toBeDefined()
+    expect(decryptCredentialValue(restoredKey, restored!)).toBe('sk-from-backup')
+    expect(repo.getCredential('provider:later')).toBeUndefined()
+  })
+
   it('恢复另一份数据库后仍保留当前设备的 Shell 选择', async () => {
     const backupDirectory = join(outside, 'shell-backups')
     mkdirSync(backupDirectory)

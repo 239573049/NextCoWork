@@ -33,7 +33,7 @@ import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import * as dataService from "../../services/data";
 import * as configSyncService from "../../services/config-sync";
-import type { SyncPreview, SyncStatus } from "../../../../shared/domain/config-sync";
+import { SYNC_PASSWORD_MIN_LENGTH, type SyncPreview, type SyncStatus } from "../../../../shared/domain/config-sync";
 import { useRunIndex } from "../../stores/session";
 import type { SettingsPageProps } from "../props";
 import { formatBytes, formatCount } from "../format";
@@ -45,6 +45,7 @@ type ModalState =
   | { kind: "import"; preview: ImportPreview }
   | { kind: "restore"; preview: RestorePreview }
   | { kind: "cleanup"; preview: CleanupPreview; age?: CleanupAge }
+  | { kind: "syncSetup" }
   | { kind: "syncPreview"; preview: SyncPreview };
 
 /** 设置 › 数据：所有结果都来自主进程数据服务，不在页面里模拟成功状态。 */
@@ -64,6 +65,9 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
   const [exportPassword, setExportPassword] = useState("");
   const [exportPasswordAgain, setExportPasswordAgain] = useState("");
   const [importPassword, setImportPassword] = useState("");
+  const [syncPassword, setSyncPassword] = useState("");
+  const [syncPasswordAgain, setSyncPasswordAgain] = useState("");
+  const [rememberSyncKey, setRememberSyncKey] = useState(true);
   const running = useRunIndex().length > 0;
 
   const refresh = useCallback(
@@ -101,6 +105,8 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
     setExportPassword("");
     setExportPasswordAgain("");
     setImportPassword("");
+    setSyncPassword("");
+    setSyncPasswordAgain("");
   }, []);
 
   const run = useCallback(
@@ -120,13 +126,13 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         if (refreshAfter) await refresh();
         return value;
       } catch (err) {
-        setError(errorMessage(err));
+        setError(syncErrorMessage(err, t));
         return null;
       } finally {
         setBusy(null);
       }
     },
-    [refresh],
+    [refresh, t],
   );
 
   const chooseDirectory = async (): Promise<void> => {
@@ -168,6 +174,30 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         preview,
         ...(selectedAge === undefined ? {} : { age: selectedAge }),
       });
+  };
+
+  const setupSync = async (): Promise<void> => {
+    if (syncPassword.length < SYNC_PASSWORD_MIN_LENGTH) {
+      setError(t("data.cloudSyncPasswordMin", { count: SYNC_PASSWORD_MIN_LENGTH }));
+      return;
+    }
+    if (syncStatus?.control?.vaultConfigured !== true && syncPassword !== syncPasswordAgain) {
+      setError(t("data.passwordMismatch"));
+      return;
+    }
+    const result = await run(
+      "sync-setup",
+      () => configSyncService.setup(syncPassword, rememberSyncKey),
+      undefined,
+      false,
+    );
+    if (result !== null) {
+      setSyncStatus(result);
+      setSyncPassword("");
+      setSyncPasswordAgain("");
+      closeModal();
+      await refresh();
+    }
   };
 
   const openSyncPreview = async (): Promise<void> => {
@@ -311,17 +341,42 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
       <DataSection title={t("data.cloudSync")} className="pt-2">
         <DataRow
           title={t("data.configureCloudSync")}
-          description={syncStatus?.lastError ?? (syncStatus?.enabled ? t("data.cloudSyncEnabled") : t("data.cloudSyncHint"))}
+          description={
+            syncStatus?.lastError === null || syncStatus?.lastError === undefined
+              ? syncStatus?.enabled
+                ? t("data.cloudSyncEnabled")
+                : t("data.cloudSyncHint")
+              : syncErrorMessage(new Error(syncStatus.lastError), t)
+          }
           density="compact"
           last
         >
-          <span className="text-[12px] text-muted-fg">
-            {syncStatus?.accountId === null || syncStatus === null
-              ? t("data.cloudSyncSignedOut")
-              : syncStatus.enabled
-                ? t("data.cloudSyncEnabled")
-                : t("data.cloudSyncHint")}
-          </span>
+          {syncStatus?.accountId === null || syncStatus === null ? (
+            <span className="text-[12px] text-muted-fg">{t("data.cloudSyncSignedOut")}</span>
+          ) : syncStatus.control?.phase === "off" ||
+            syncStatus.control?.phase === "passwordRequired" ||
+            (syncStatus.control?.phase === "error" &&
+              syncStatus.control?.errorCode === "migrationRequired") ? (
+            <Button
+              size="sm"
+              disabled={busyNow}
+              onClick={() => setModal({ kind: "syncSetup" })}
+            >
+              {syncStatus.control.phase === "off"
+                ? t("data.cloudSyncSetPassword")
+                : t("data.cloudSyncUnlock")}
+            </Button>
+          ) : syncStatus.control?.phase === "unsupported" ? (
+            <span className="text-[12px] text-fg-faint">{t("data.cloudSyncUnsupported")}</span>
+          ) : (
+            <span className="text-[12px] text-muted-fg">
+              {syncStatus.control?.phase === "syncing"
+                ? t("data.cloudSyncSyncing")
+                : syncStatus.enabled
+                  ? t("data.cloudSyncEnabled")
+                  : t("data.cloudSyncHint")}
+            </span>
+          )}
         </DataRow>
         {syncConflicts.length > 0 && (
           <DataRow
@@ -685,6 +740,19 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
           void executeCleanup();
         }}
       />
+      <SyncSetupDialog
+        open={modal?.kind === "syncSetup"}
+        existing={syncStatus?.control?.vaultConfigured === true}
+        password={syncPassword}
+        passwordAgain={syncPasswordAgain}
+        remember={rememberSyncKey}
+        busy={busyNow}
+        onPassword={setSyncPassword}
+        onPasswordAgain={setSyncPasswordAgain}
+        onRemember={setRememberSyncKey}
+        onClose={closeModal}
+        onSubmit={() => { void setupSync(); }}
+      />
       <SyncPreviewDialog
         open={modal?.kind === "syncPreview"}
         preview={modal?.kind === "syncPreview" ? modal.preview : null}
@@ -702,6 +770,23 @@ function errorMessage(error: unknown): string {
     : String(error);
 }
 
+function syncErrorMessage(
+  error: unknown,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const message = errorMessage(error);
+  const code = message.startsWith("configSync.") ? message.slice("configSync.".length) : null;
+  if (code === "password") return t("data.cloudSyncErrorPassword");
+  if (code === "migrationRequired") return t("data.cloudSyncErrorMigration");
+  if (code === "deviceRevoked") return t("data.cloudSyncErrorDevice");
+  if (code === "network") return t("data.cloudSyncErrorNetwork");
+  if (code === "unsupported") return t("data.cloudSyncUnsupported");
+  if (code === "conflict") return t("data.cloudSyncErrorConflict");
+  if (code === "storage") return t("data.cloudSyncErrorStorage");
+  if (code === "locked") return t("data.cloudSyncErrorLocked");
+  return message;
+}
+
 function formatDate(
   value: number | null | undefined,
   locale: string,
@@ -713,6 +798,84 @@ function formatDate(
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+function SyncSetupDialog({
+  open,
+  existing,
+  password,
+  passwordAgain,
+  remember,
+  busy,
+  onPassword,
+  onPasswordAgain,
+  onRemember,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  existing: boolean;
+  password: string;
+  passwordAgain: string;
+  remember: boolean;
+  busy: boolean;
+  onPassword: (value: string) => void;
+  onPasswordAgain: (value: string) => void;
+  onRemember: (value: boolean) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={existing ? t("data.cloudSyncUnlockTitle") : t("data.cloudSyncSetupTitle")}
+      description={existing ? t("data.cloudSyncUnlockHint") : t("data.cloudSyncSetupHint")}
+      width={440}
+      footer={(
+        <div className="flex justify-end gap-2">
+          <Button size="sm" className="border border-border bg-transparent" onClick={onClose} disabled={busy}>
+            {t("common.cancel")}
+          </Button>
+          <Button size="sm" onClick={onSubmit} disabled={busy || password.length < SYNC_PASSWORD_MIN_LENGTH}>
+            {existing ? t("data.cloudSyncUnlock") : t("data.cloudSyncCreate")}
+          </Button>
+        </div>
+      )}
+    >
+      <div className="space-y-3">
+        <input
+          type="password"
+          value={password}
+          onChange={(event) => onPassword(event.target.value)}
+          placeholder={t("data.cloudSyncPassword")}
+          aria-label={t("data.cloudSyncPassword")}
+          autoComplete="new-password"
+          className="selectable h-8 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent"
+        />
+        {!existing && (
+          <input
+            type="password"
+            value={passwordAgain}
+            onChange={(event) => onPasswordAgain(event.target.value)}
+            placeholder={t("data.cloudSyncPasswordAgain")}
+            aria-label={t("data.cloudSyncPasswordAgain")}
+            autoComplete="new-password"
+            className="selectable h-8 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent"
+          />
+        )}
+        <div className="flex items-center justify-between gap-3 rounded-[8px] border border-border px-2.5 py-2">
+          <div>
+            <p className="text-[12px] text-fg">{t("data.cloudSyncRemember")}</p>
+            <p className="mt-0.5 text-[11px] text-fg-faint">{t("data.cloudSyncRememberHint")}</p>
+          </div>
+          <Toggle checked={remember} onChange={onRemember} label={t("data.cloudSyncRemember")} />
+        </div>
+        <p className="text-[11px] leading-[1.6] text-fg-faint">{t("data.cloudSyncEncryptionHint")}</p>
+      </div>
+    </Dialog>
+  );
 }
 
 function SyncPreviewDialog({

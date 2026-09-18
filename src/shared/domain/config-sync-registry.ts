@@ -24,7 +24,9 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   upstreamIdleTimeoutSeconds: 'device'
 }
 export const SYNC_REGISTRY: Record<SyncCategory, { order: number; confirmation: boolean; deviceFields: readonly string[] }> = {
-  providers: { order: 0, confirmation: false, deviceFields: ['credentialRef', 'oauthTokens', 'platformTokens'] },
+  // 普通 provider 的 API Key/OAuth token 在 providers 密文文档中同步；只有引用名和
+  // NextCoWork 自身登录 token 留在设备上。
+  providers: { order: 0, confirmation: false, deviceFields: ['credentialRef', 'platformTokens'] },
   preferences: { order: 2, confirmation: false, deviceFields: ['backupDirectory', 'gateway', 'proxy', 'shell'] },
   connections: { order: 3, confirmation: true, deviceFields: ['cwd', 'identityFile', 'knownHostsFile', 'cookies'] },
   extensions: { order: 1, confirmation: true, deviceFields: ['absolutePath', 'executionApproval'] },

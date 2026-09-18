@@ -5,6 +5,8 @@ import {
   CloudDownload,
   Download,
   Copy,
+  Eye,
+  EyeOff,
   ExternalLink,
   GripVertical,
   Pencil,
@@ -24,6 +26,7 @@ import {
 import type {
   AnthropicCacheTtl,
   CredentialInfo,
+  RevealedCredential,
   ModelAlias,
   ModelModality,
   ReasoningEffort,
@@ -50,6 +53,7 @@ import { openExternal } from "../../../services/app";
 import {
   cancelOAuth,
   getCredentialInfo,
+  revealCredential,
   removeModel,
   removeProvider,
   renameModel,
@@ -116,7 +120,7 @@ const REASONING_EFFORTS: readonly ReasoningEffort[] = [
  * |---|---|---|
  * | 名称 / API 地址 | **失焦或回车** | 逐键写入 = 每敲一个字符一次 IPC + 一次全窗口广播,而且中间态(只打了 `http://`)会被存进去 |
  * | API 格式 / Responses | **立即** | 它们是离散选择,没有中间态;而且翻开关会连带换地址,拖到失焦才生效会让人以为没生效 |
- * | API 密钥 | 显式点「保存」 | 只写不读,存错了没法回看核对 —— 不该被一次失焦顺手提交 |
+ * | API 密钥 | 显式点「保存」 | 密钥写入/查看都是有意动作,不该被一次失焦顺手提交 |
  *
  * ★ 地址在提交前跑一遍 `normalizeBaseUrl`(参考图那句「离开输入框后会自动识别并整理」),
  * 并把整理后的值**写回输入框**。不写回的话用户看到的还是自己粘的那条完整请求地址,
@@ -196,6 +200,10 @@ export function ProviderPanel({
   const [cred, setCred] = useState<CredentialInfo | null>(null);
   const [keyDraft, setKeyDraft] = useState("");
   const [editingKey, setEditingKey] = useState(false);
+  // 明文只活在当前面板实例；切供应商、保存或退出登录都会立即清掉。
+  const [revealedCredential, setRevealedCredential] = useState<RevealedCredential | null>(null);
+  const [revealingCredential, setRevealingCredential] = useState(false);
+  const revealRequest = useRef(0);
   /** 登录流程的阶段。`null` = 现在没有登录在跑 */
   const [authFlow, setAuthFlow] = useState<{
     phase: OAuthPhase;
@@ -222,6 +230,9 @@ export function ProviderPanel({
     setSwapped(null);
     setKeyDraft("");
     setEditingKey(false);
+    revealRequest.current += 1;
+    setRevealedCredential(null);
+    setRevealingCredential(false);
     setCred(null);
     setAuthFlow(null);
     setConfirmDelete(false);
@@ -262,7 +273,11 @@ export function ProviderPanel({
   */
   useEffect(() => {
     const offChanged = window.nextcowork.on("provider:authChanged", (e) => {
-      if (e.providerId === p.id) setCred(e.info);
+      if (e.providerId !== p.id) return;
+      revealRequest.current += 1;
+      setRevealingCredential(false);
+      setRevealedCredential(null);
+      setCred(e.info);
     });
     const offProgress = window.nextcowork.on("provider:authProgress", (e) => {
       if (e.providerId !== p.id) return;
@@ -330,6 +345,9 @@ export function ProviderPanel({
   const doSignOut = (): void => {
     setBusy(true);
     setError(null);
+    revealRequest.current += 1;
+    setRevealingCredential(false);
+    setRevealedCredential(null);
     void signOut(p.id)
       .then(setCred)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
@@ -384,6 +402,29 @@ export function ProviderPanel({
     });
   };
 
+  const toggleCredentialReveal = (): void => {
+    const request = revealRequest.current + 1;
+    revealRequest.current = request;
+    if (revealedCredential !== null) {
+      setRevealedCredential(null);
+      return;
+    }
+    setRevealingCredential(true);
+    setError(null);
+    void revealCredential(p.id)
+      .then((value) => {
+        if (revealRequest.current === request) setRevealedCredential(value);
+      })
+      .catch((e: unknown) => {
+        if (revealRequest.current === request) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (revealRequest.current === request) setRevealingCredential(false);
+      });
+  };
+
   const saveKey = (): void => {
     const v = keyDraft.trim();
     if (v === "") return;
@@ -393,6 +434,9 @@ export function ProviderPanel({
       .then((info) => {
         setCred(info);
         setKeyDraft(""); // ★ 存完就从 React 状态里抹掉,别留在内存里
+        revealRequest.current += 1;
+        setRevealingCredential(false);
+        setRevealedCredential(null);
         setEditingKey(false);
       })
       .catch((e: unknown) =>
@@ -755,30 +799,27 @@ export function ProviderPanel({
                   onSignOut={doSignOut}
                   onSubmitCode={doSubmitCode}
                   clearsSlot={authMode === "both"}
+                  revealed={revealedCredential?.kind === "oauth" ? revealedCredential : null}
+                  revealing={revealingCredential}
+                  onToggleReveal={toggleCredentialReveal}
                 />
               </div>
             )}
             {authMode === "oauth" ? null : managed ? (
               /*
-                ★ 托管那条的「密钥」是登录发的 access token,`setCredential` 对它是
-                拒绝的 —— 所以这里**没有「更换」按钮**,不是漏了。给一颗点下去必然
-                报错的按钮,比不给更糟。
+                托管那条的「密钥」是登录发的 access token,不能手工更换,但产品要求
+                允许显式查看。它仍只在点击眼睛后经专用 IPC 进入当前组件内存。
               */
-              <div
-                className={cn(
-                  "flex h-8 min-w-0 items-center gap-2 rounded-[8px] border border-border",
-                  "bg-surface-field px-2.5",
-                )}
-              >
-                <span className="min-w-0 flex-1 truncate text-[13px] tracking-[0.18em] text-fg-muted">
-                  {"••••••••••••"}
-                  {cred?.last4 ?? ""}
-                </span>
-                <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
-                  <Check size={11} />
-                  {t("provider.configured")}
-                </span>
-              </div>
+              <SecretValueRow
+                value={
+                  revealedCredential?.kind === "api-key"
+                    ? revealedCredential.apiKey
+                    : null
+                }
+                masked={`••••••••••••${cred?.last4 ?? ""}`}
+                revealing={revealingCredential}
+                onToggle={toggleCredentialReveal}
+              />
             ) : editingKey || !hasKey ? (
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
@@ -803,7 +844,10 @@ export function ProviderPanel({
                   <Button
                     size="sm"
                     disabled={busy}
-                    onClick={() => setEditingKey(false)}
+                    onClick={() => {
+                      setKeyDraft("");
+                      setEditingKey(false);
+                    }}
                   >
                     {t("common.cancel")}
                   </Button>
@@ -811,30 +855,26 @@ export function ProviderPanel({
               </div>
             ) : (
               <div className="flex items-center gap-2">
-                {/*
-                ★ 这里**不是**一个填了值的输入框 —— 渲染层对密钥只写不读(方案 §9),
-                明文永远不回传。掩码是定长的,它表示「有一把 key」,
-                **不表示 key 有多长**;后面那四位是主进程回的 `last4`。
-              */}
-                <div
-                  className={cn(
-                    "flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border",
-                    "bg-surface-field px-2.5",
-                  )}
-                >
-                  <span className="min-w-0 flex-1 truncate text-[13px] tracking-[0.18em] text-fg-muted">
-                    {"••••••••••••"}
-                    {cred?.last4 ?? ""}
-                  </span>
-                  <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
-                    <Check size={11} />
-                  {t("provider.configured")}
-                  </span>
-                </div>
+                {/* 掩码定长,不泄露 key 的真实长度；点击查看后才显示完整明文。 */}
+                <SecretValueRow
+                  value={
+                    revealedCredential?.kind === "api-key"
+                      ? revealedCredential.apiKey
+                      : null
+                  }
+                  masked={`••••••••••••${cred?.last4 ?? ""}`}
+                  revealing={revealingCredential}
+                  onToggle={toggleCredentialReveal}
+                />
                 <Button
                   size="sm"
                   disabled={busy}
-                  onClick={() => setEditingKey(true)}
+                  onClick={() => {
+                    revealRequest.current += 1;
+                    setRevealingCredential(false);
+                    setRevealedCredential(null);
+                    setEditingKey(true);
+                  }}
                 >
                   {t("provider.replace")}
                 </Button>
@@ -867,15 +907,6 @@ export function ProviderPanel({
                     ? t("provider.managedKeyHint")
                     : t("provider.keySavedHint")}
             </p>
-            {cred !== null && !cred.encryptionAvailable && (
-              /* ★ 不做明文降级,所以这里会真的存不进去 —— 提前说,别等他填完才报错 */
-              <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-[1.6] text-danger">
-                <AlertTriangle size={12} className="mt-[2px] shrink-0" />
-                <span className="min-w-0">
-                  {t("provider.keyringWarning")}
-                </span>
-              </p>
-            )}
           </Field>
 
           <Field
@@ -1204,6 +1235,9 @@ function ProviderAuthField({
   onSignOut,
   onSubmitCode,
   clearsSlot,
+  revealed,
+  revealing,
+  onToggleReveal,
 }: {
   providerId: string;
   view: OAuthView;
@@ -1214,6 +1248,10 @@ function ProviderAuthField({
   onSubmitCode: (pasted: string) => void;
   /** 这一栏还兼着密钥 —— 退出登录会把密钥一起删掉，确认文案得说清楚 */
   clearsSlot: boolean;
+  /** 用户显式展开后才有;不随 CredentialInfo 或广播下发。 */
+  revealed: Extract<RevealedCredential, { kind: "oauth" }> | null;
+  revealing: boolean;
+  onToggleReveal: () => void;
 }): ReactNode {
   const { t } = useI18n();
   const [confirmOut, setConfirmOut] = useState(false);
@@ -1384,6 +1422,14 @@ function ProviderAuthField({
         )}
         <Button
           size="sm"
+          disabled={busy || revealing}
+          icon={revealed === null ? <Eye size={12} /> : <EyeOff size={12} />}
+          onClick={onToggleReveal}
+        >
+          {revealed === null ? t("provider.viewToken") : t("provider.hideToken")}
+        </Button>
+        <Button
+          size="sm"
           disabled={busy}
           onClick={() => {
             if (confirmOut) onSignOut();
@@ -1393,6 +1439,12 @@ function ProviderAuthField({
           {confirmOut ? t("provider.confirmSignOut") : t("provider.signOut")}
         </Button>
       </div>
+      {revealed !== null && (
+        <div className="mt-2 space-y-1.5">
+          <SecretTokenRow label={t("provider.accessTokenLabel")} value={revealed.accessToken} />
+          <SecretTokenRow label={t("provider.refreshTokenLabel")} value={revealed.refreshToken} />
+        </div>
+      )}
       {/*
         ★★ 一个凭证槽装两种凭证,所以「退出登录」在这些家会把**密钥一起删掉**
         (走的是 `removeCredential`,整条 ref 删干净)。等他点完确认才发现
@@ -1405,6 +1457,78 @@ function ProviderAuthField({
         </p>
       )}
     </>
+  );
+}
+
+function SecretValueRow({
+  value,
+  masked,
+  revealing,
+  onToggle,
+}: {
+  value: string | null;
+  masked: string;
+  revealing: boolean;
+  onToggle: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+  return (
+    <div
+      className={cn(
+        "flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-[8px] border border-border",
+        "bg-surface-field px-2.5 py-1",
+      )}
+    >
+      <span
+        className={cn(
+          "selectable min-w-0 flex-1 break-all text-[13px] text-fg",
+          value === null && "truncate tracking-[0.18em] text-fg-muted",
+        )}
+      >
+        {value ?? masked}
+      </span>
+      {value === null && (
+        <span className="flex shrink-0 items-center gap-1 text-[11px] text-accent">
+          <Check size={11} />
+          {t("provider.configured")}
+        </span>
+      )}
+      {value !== null && (
+        <RowAction
+          label={t("provider.copyKey")}
+          disabled={false}
+          onClick={() => void navigator.clipboard?.writeText(value).catch(() => undefined)}
+        >
+          <Copy size={12} />
+        </RowAction>
+      )}
+      <RowAction
+        label={value === null ? t("provider.viewKey") : t("provider.hideKey")}
+        disabled={revealing}
+        onClick={onToggle}
+      >
+        {revealing ? <Spinner size="xs" /> : value === null ? <Eye size={12} /> : <EyeOff size={12} />}
+      </RowAction>
+    </div>
+  );
+}
+
+function SecretTokenRow({ label, value }: { label: string; value: string }): ReactNode {
+  const { t } = useI18n();
+  return (
+    <div className="flex min-w-0 items-start gap-2 rounded-[8px] border border-border bg-surface-field px-2.5 py-1.5">
+      <span className="shrink-0 text-[11px] text-fg-faint">{label}</span>
+      <span className="selectable min-w-0 flex-1 break-all font-mono text-[11px] leading-[1.5] text-fg">
+        {value}
+      </span>
+      <RowAction
+        label={t("common.copy")}
+        disabled={false}
+        onClick={() => void navigator.clipboard?.writeText(value).catch(() => undefined)}
+      >
+        <Copy size={12} />
+      </RowAction>
+    </div>
   );
 }
 

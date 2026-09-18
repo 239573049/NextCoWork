@@ -142,7 +142,7 @@ export async function upsertConnection(input: ConnectionProfileInput): Promise<C
   /**
    * ★ 存不了就**什么都不写**,而不是"连接存下了、密码悄悄丢了"。
    *
-   * Linux 上没有 keyring 时 safeStorage 不可用,而明文落盘不是可接受的降级。部分成功
+   * 主密钥文件不可读写时程序密文不可用,而明文落盘不是可接受的降级。部分成功
    * 比整体失败更糟:用户以为密码存好了,下次连接却又被问,还找不到原因。校验排在
    * `putConnectionProfile` 之前,失败时连 profile 都没动。
    */

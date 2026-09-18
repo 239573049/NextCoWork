@@ -44,7 +44,7 @@ export function emptyDraft(): McpDraft {
  *
  * ★ **密钥的值不在这里**,只有键名 —— 编辑一台已有服务器时,那个多行框里
  * 显示的是 `GITHUB_TOKEN=`(等号后面空着),而不是原来的值。取不回来是
- * 「凭证只写不读」的直接结果(方案 §9),不是遗漏;界面上要说清楚,
+ * 「凭证只写不读」的直接结果,不是遗漏;界面上要说清楚,
  * 不然用户会以为是被清空了。
  */
 export function draftOf(cfg: McpServerConfig): McpDraft {
@@ -148,7 +148,7 @@ export function parseSecretLines(text: string): SecretLine[] {
   return out
 }
 
-/** 只有真填了值的那几条要写进 safeStorage —— 空值意味着「别动已经存着的那个」 */
+/** 只有真填了值的那几条要写进加密存储 —— 空值意味着「别动已经存着的那个」 */
 export function secretValues(lines: readonly SecretLine[]): Record<string, string> {
   const out: Record<string, string> = {}
   for (const l of lines) {

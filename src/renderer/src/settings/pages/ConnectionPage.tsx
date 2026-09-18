@@ -7,7 +7,7 @@
  * 共用的说明页,它自己按 sub 查文案。
  *
  * 三块**真接上运行时**的:MCP(连真服务器、工具进 ToolRegistry)、
- * 搜索服务(八家、Key 进 safeStorage、`web_search` 按优先级切换)、
+ * 搜索服务(八家、Key 进程序加密存储、`web_search` 按优先级切换)、
  * 网络(真的作用于 `session.defaultSession.setProxy`)。开放网关的三个开关
  * 也是真落库的,只是 HTTP 壳本身还没监听 —— 那一页照实标着步骤 13。
  */
