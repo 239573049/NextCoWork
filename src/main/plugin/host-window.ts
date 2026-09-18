@@ -49,6 +49,8 @@ const READY_TIMEOUT_MS = 10_000
 
 interface HostEntry {
   window: BrowserWindow
+  /** 建窗那一刻的 `webContents.id` —— dispose 时窗口可能已经 destroyed,不能再读一遍。 */
+  webContentsId: number
   ready: Promise<void>
   resolveReady: () => void
   rejectReady: (error: Error) => void
@@ -143,9 +145,18 @@ export class ElectronPluginRuntime implements PluginRuntime {
       }
     })
 
-    const entry: HostEntry = { window, ready, resolveReady, rejectReady, pending: new Map(), nextInvocationId: 1 }
+    const webContentsId = window.webContents.id
+    const entry: HostEntry = {
+      window,
+      webContentsId,
+      ready,
+      resolveReady,
+      rejectReady,
+      pending: new Map(),
+      nextInvocationId: 1
+    }
     this.hosts.set(plugin.id, entry)
-    this.byWebContents.set(window.webContents.id, plugin.id)
+    this.byWebContents.set(webContentsId, plugin.id)
 
     /*
       ★ 进程没了 = 所有在途调用**立刻 reject**,不是等它们各自超时。
@@ -207,7 +218,7 @@ export class ElectronPluginRuntime implements PluginRuntime {
     const entry = this.hosts.get(pluginId)
     if (entry === undefined) return
     this.fail(pluginId, new Error('plugin host disposed'))
-    this.byWebContents.delete(entry.window.webContents.id)
+    this.byWebContents.delete(entry.webContentsId)
     this.hosts.delete(pluginId)
     this.roots.delete(pluginId)
     if (!entry.window.isDestroyed()) entry.window.destroy()

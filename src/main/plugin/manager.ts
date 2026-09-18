@@ -700,7 +700,7 @@ export class PluginManager {
         const current = this.records.get(id)
         if (current !== undefined && current.status === 'idle') current.status = 'asleep'
         this.deps.emitChanged()
-      })
+      }).catch(() => undefined)
     }
   }
 

@@ -24,6 +24,7 @@ import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments }
 import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
 import { PROFILE_DIRECTORY_SEGMENT } from './db/config-profile'
 import { migrateFlatLayout, rewriteMigratedPaths } from './db/flat-layout'
+import { CHROMIUM_SUBDIRNAME, migrateChromiumIntoSubdir } from './db/chromium-layout'
 import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
 import { SKILLS_DIR } from './kernel/skill/load'
@@ -80,8 +81,10 @@ const explicitUserDataDir = process.argv.some(
 const legacyUserDataPath = app.getPath('userData')
 
 /**
- * Electron profile 根 —— Chromium 的 userData 指这里,`Cache` / `Cookies` /
- * `Preferences` / `Partitions` 那三十来个条目扁平铺在它的根层。
+ * Electron profile 根 —— Chromium 的 userData 指这里。会话集(`Cache` / `Cookies` /
+ * `Local Storage` / `Network` / `Partitions` …)由下面那次 `setPath('sessionData')`
+ * 收进根下的 `chromium/` 子目录;`Preferences` / `Local State` / `Crashpad` 这几样
+ * **不是**会话数据,仍扁平躺在根层(见 `db/chromium-layout.ts`)。
  *
  * `~/.next-cowork`,dev 与打包**同一个**。
  *
@@ -111,7 +114,19 @@ function resolveDataRoot(): string {
 // Electron profile 落在 profile 根;应用数据在它下面的 data/。
 // 必须在 app ready 之前设置才生效。
 // 显式传了 --user-data-dir 时不覆盖 —— 那正是调用方要的隔离。
-if (!explicitUserDataDir) app.setPath('userData', resolveProfileRoot())
+if (!explicitUserDataDir) {
+  const profileRoot = resolveProfileRoot()
+  app.setPath('userData', profileRoot)
+  /*
+    把根层的会话集收进 `chromium/`,再让 Chromium 从那里读写。两步都**必须在
+    app ready 之前**:那之后 Chromium 立刻握住 Cookies / Cache 的句柄,Windows 上
+    就再也 rename 不动了(与紧随其后的 sweepPendingDelete 同一个时间窗)。迁移只在
+    首次(`chromium/` 尚不存在且根层还留着会话条目)真正搬东西,之后零成本掠过。
+    探针路径(--user-data-dir)刻意不走这套,保持旧扁平布局,免得无意改动真实库。
+  */
+  migrateChromiumIntoSubdir(profileRoot)
+  app.setPath('sessionData', join(profileRoot, CHROMIUM_SUBDIRNAME))
+}
 
 /*
   上一次「删除并退出」留下的补删清单。

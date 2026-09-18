@@ -59,6 +59,11 @@ import { DRAFT_ATTACHMENT_TTL_MS } from '../../shared/domain/attachment'
 import { databaseDirectory, databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, openDatabase, txAsync, vacuumDatabase } from '../db'
 import { MIGRATIONS } from '../db/schema'
 import { PROFILE_DIRECTORY_SEGMENT } from '../db/config-profile'
+import {
+  CHROMIUM_PROFILE_ENTRIES,
+  CHROMIUM_PROFILE_FILE_PATTERNS,
+  CHROMIUM_SUBDIRNAME
+} from '../db/chromium-layout'
 import * as repo from '../db/repo'
 import { getHost } from '../runtime'
 import { store } from '../state/store'
@@ -102,48 +107,13 @@ const MIN_BACKUP_SCHEMA_VERSION = 4
 /**
  * Electron keeps its profile caches beside our database because the app uses
  * the same project-level userData directory.  They are application-owned
- * local data too, and must be removed by "delete and quit".  Keep this list
- * explicit: a user may place unrelated files in the directory while
- * inspecting/debugging it, and a broad recursive sweep would be surprising.
+ * local data too, and must be removed by "delete and quit".
+ *
+ * ★ 迁移后会话集整体落在 `<profile 根>/chromium`(见 `db/chromium-layout.ts`);
+ *   这份扁平名单是「删除全部数据」认领 Chromium 资产的单一事实源,同时兜底那几样
+ *   仍留在根层的条目(`Preferences` / `Local State` / `Crashpad`)。
  */
-const ELECTRON_PROFILE_PATHS = [
-  'Cache',
-  'Code Cache',
-  'GPUCache',
-  'DawnGraphiteCache',
-  'DawnWebGPUCache',
-  'Session Storage',
-  'Local Storage',
-  'blob_storage',
-  'Shared Dictionary',
-  'Network Persistent State',
-  'Cookies',
-  'Cookies-journal',
-  'Trust Tokens',
-  'Trust Tokens-journal',
-  'DIPS',
-  'DIPS-wal',
-  'DIPS-wal 2',
-  'Local State',
-  'Preferences',
-  'Service Worker',
-  'IndexedDB',
-  'WebStorage',
-  'Network',
-  'TransportSecurity',
-  'QuotaManager',
-  'QuotaManager-journal',
-  'History',
-  'History-journal',
-  'Crashpad',
-  /*
-    ★ 插件宿主(`persist:plugin-host`)和浏览器工作区的 `persist:` 分区都落在这里,
-    装着它们的 cookie / localStorage。Electron 自己决定这个落点,不经过我们任何
-    代码 —— 所以它一直不在这张表里,「删除全部数据」从来就没清掉过插件和浏览器
-    的登录态。
-  */
-  'Partitions'
-] as const
+const ELECTRON_PROFILE_PATHS = CHROMIUM_PROFILE_ENTRIES
 /**
  * 应用自己的数据 —— 全部挂在**数据根**(`<profile 根>/data`)下。
  *
@@ -172,6 +142,10 @@ const MANAGED_DATA_PATHS = [
  * `themes` 是数据根搬家之前的旧主题目录(`ipc/theme.ts` 的 `legacyThemesDir()`
  * 仍按 `app.getPath('userData')` 去找它);`plugin`(单数) / `logs` / `cache`
  * 已经没有任何生产代码往里写,但老版本留下的目录还在用户盘上,继续清掉。
+ *
+ * ★ `chromium` 是迁移后会话集所在的子目录 —— 删它一条就带走整套 cookie / 缓存 /
+ *   分区(`db/chromium-layout.ts`)。扁平的 `...ELECTRON_PROFILE_PATHS` 保留:兜底
+ *   未迁移(或留在根层)的 `Preferences` / `Local State` / `Crashpad`。
  */
 const MANAGED_PROFILE_PATHS = [
   'themes',
@@ -181,6 +155,7 @@ const MANAGED_PROFILE_PATHS = [
   'headless-browsers',
   'headless-profiles',
   'DevToolsActivePort',
+  CHROMIUM_SUBDIRNAME,
   ...ELECTRON_PROFILE_PATHS
 ] as const
 /**
@@ -193,10 +168,7 @@ const MANAGED_PROFILE_PATHS = [
  * `DIPS-wal 3` 只会出现在 profile 根。拿一组去扫两边等于放宽了删除边界。
  */
 const MANAGED_DATA_FILE_PATTERNS = [/^nextcowork [1-9]\d*\.db(?:-(?:wal|shm))?$/u] as const
-const MANAGED_PROFILE_FILE_PATTERNS = [
-  /^DIPS-(?:wal|shm)(?: [1-9]\d*)?$/u,
-  /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u
-] as const
+const MANAGED_PROFILE_FILE_PATTERNS = CHROMIUM_PROFILE_FILE_PATTERNS
 /**
  * 「删不掉就推迟到下次启动」只对 Chromium 自己拥有的那些路径成立。
  *
@@ -212,14 +184,13 @@ const MANAGED_PROFILE_FILE_PATTERNS = [
  */
 const DEFERRABLE_LOCAL_NAMES = new Set<string>([
   ...ELECTRON_PROFILE_PATHS,
+  // 迁移后 Chromium 一直握着 `chromium/` 整棵目录的句柄,Windows 上 rename 它必 EPERM。
+  CHROMIUM_SUBDIRNAME,
   'headless-browsers',
   'headless-profiles',
   'DevToolsActivePort'
 ])
-const DEFERRABLE_LOCAL_PATTERNS = [
-  /^DIPS-(?:wal|shm)(?: [1-9]\d*)?$/u,
-  /^declarative_performance_observer\.db(?:-(?:journal|wal|shm))?$/u
-] as const
+const DEFERRABLE_LOCAL_PATTERNS = CHROMIUM_PROFILE_FILE_PATTERNS
 
 function isDeferrableLocalPath(path: string): boolean {
   const name = basename(path)

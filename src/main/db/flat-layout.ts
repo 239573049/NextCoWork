@@ -8,7 +8,8 @@
  * (Chromium 用 `Title Case` 带空格,我们用小写),Finder 一按字母排序就彻底
  * 交错 —— 用户分不出哪些是自己的数据、哪些是能随手删掉的缓存。
  *
- * 收拢之后 `data/` 归我们,根层归 Chromium。
+ * 收拢之后 `data/` 归我们。Chromium 的会话集另由 `chromium-layout.ts` 收进根下的
+ * `chromium/` 子目录,根层只剩 `Preferences` / `Local State` / `Crashpad` 等少数几样。
  *
  * ## 为什么单独一个文件
  *
