@@ -122,6 +122,19 @@ import {
 } from './opencode'
 import { parseOpencodeSession } from './opencode-transcript'
 import { mapOpencodeProvider, type OpencodeProviderConfig } from './opencode-provider'
+import {
+  detectOpencoworkSource,
+  listOpencoworkAssets,
+  listOpencoworkHooks,
+  listOpencoworkMcp,
+  listOpencoworkProviders,
+  listOpencoworkSessions,
+  listOpencoworkSkills,
+  readOpencoworkSession
+} from './opencowork'
+import { parseOpencoworkSession } from './opencowork-transcript'
+import { mapOpencoworkProvider, type OpencoworkProviderConfig } from './opencowork-provider'
+import { mapOpencoworkHook, type OpencoworkHookEntry } from './opencowork-hooks'
 
 const SOURCE_KIND = 'claude-code' as const
 
@@ -158,6 +171,9 @@ type ItemPayload =
   | { kind: 'codex-skill'; skill: CodexSkillEntry }
   | { kind: 'opencode-chat'; sessionId: string; contentHash: string; title?: string; model?: string; modelProvider?: string }
   | { kind: 'opencode-provider'; provider: OpencodeProviderConfig; alias?: ModelAlias }
+  | { kind: 'opencowork-chat'; sessionId: string; contentHash: string; title?: string; model?: string; modelProvider?: string }
+  | { kind: 'opencowork-provider'; provider: OpencoworkProviderConfig; alias?: ModelAlias }
+  | { kind: 'opencowork-hook'; hook: OpencoworkHookEntry }
 
 interface JobState {
   status: ImportJobStatus
@@ -293,7 +309,7 @@ function unregisteredState(availability: ImportSourceState['detection']['availab
 }
 
 export async function detectImportSource(pickedDir?: string, kind: ImportSourceState['detection']['kind'] = SOURCE_KIND): Promise<ImportSourceState> {
-  const detected = kind === 'codex' ? await detectCodexSource(pickedDir) : kind === 'opencode' ? await detectOpencodeSource(pickedDir) : await detectSource(pickedDir)
+  const detected = kind === 'codex' ? await detectCodexSource(pickedDir) : kind === 'opencode' ? await detectOpencodeSource(pickedDir) : kind === 'opencowork' ? await detectOpencoworkSource(pickedDir) : await detectSource(pickedDir)
   if (detected.availability !== 'detected') {
     return unregisteredState(detected.availability, detected.diagnostics, kind)
   }
@@ -655,6 +671,7 @@ function scanCacheRow(
 async function scanSource(row: ImportSourceRow): Promise<ScanResult> {
   if (row.kind === 'codex') return scanCodexSource(row)
   if (row.kind === 'opencode') return scanOpencodeSource(row)
+  if (row.kind === 'opencowork') return scanOpencoworkSource(row)
   const items: ImportPreviewItem[] = []
   const payloads = new Map<string, ItemPayload>()
   const diagnostics: ImportDiagnostic[] = []
@@ -1092,6 +1109,118 @@ async function scanOpencodeSource(row: ImportSourceRow): Promise<ScanResult> {
       items.push({ id, category: entry.kind, title: asset.name, sourcePath: asset.file, status, scope: 'global', diagnostics: inspected.diagnostics, defaultSelected: status === 'new' })
       payloads.set(id, { kind: entry.kind, name: asset.name, file: asset.file })
     }
+  }
+
+  sourceCounts.set(row.sourceId, { projectCount: projects.length, sessionCount: seenSessions.size })
+  return { items, payloads, projects, diagnostics }
+}
+
+async function scanOpencoworkSource(row: ImportSourceRow): Promise<ScanResult> {
+  const items: ImportPreviewItem[] = []
+  const payloads = new Map<string, ItemPayload>()
+  const diagnostics: ImportDiagnostic[] = []
+
+  // ── provider(ai-provider/*.json,只搬结构不搬 apiKey) ──
+  const providers = await listOpencoworkProviders(row.configDir)
+  for (const provider of providers) {
+    const key = 'provider:' + provider.id
+    const id = itemId('provider', key)
+    const itemDiagnostics = [...provider.diagnostics]
+    let mapped: ReturnType<typeof mapOpencoworkProvider> | undefined
+    try { mapped = mapOpencoworkProvider(row.sourceId, provider) } catch { itemDiagnostics.push({ code: 'provider.needs-manual-setup', detail: 'base_url' }) }
+    const mapping = store.getImportMapping(row.sourceId, '', 'provider', key)
+    const target = mapped ? store.listProviders().find((candidate) => candidate.id === mapped.provider.id) : undefined
+    let status = mapped ? codexStatus(mapping, provider.fingerprint, target ? providerSurface(target) : null, itemDiagnostics) : 'incompatible'
+    if (mapped?.alias && status !== 'conflict' && status !== 'incompatible') {
+      const aliasMapping = store.getImportMapping(row.sourceId, '', 'alias', `${key}:${mapped.alias.alias}`)
+      const aliasTarget = store.listAliases().find((candidate) => candidate.providerId === mapped.provider.id && candidate.alias === mapped.alias?.alias)
+      const aliasStatus = codexStatus(aliasMapping, aliasSurface(mapped.alias), aliasTarget ? aliasSurface(aliasTarget) : null, itemDiagnostics)
+      if (aliasStatus === 'conflict') status = 'conflict'
+      else if (status === 'exists' && (aliasStatus === 'new' || aliasStatus === 'update')) status = 'update'
+    }
+    items.push({ id, category: 'provider', title: provider.name, sourcePath: provider.sourcePath, status, scope: 'global', diagnostics: itemDiagnostics, defaultSelected: status === 'new',
+      provider: { protocol: mapped?.provider.protocol ?? provider.protocol, baseUrl: provider.baseUrl, profile: 'default', model: provider.defaultModel } })
+    if (mapped) payloads.set(id, { kind: 'opencowork-provider', provider, ...(mapped.alias ? { alias: mapped.alias } : {}) })
+  }
+
+  // ── mcp ──
+  scanMcp(row, 'global', undefined, await listOpencoworkMcp(row.configDir), items, payloads)
+
+  // ── chats + projects(SQLite) ──
+  const sessions = await listOpencoworkSessions(row.configDir, diagnostics)
+  const projectStats = new Map<string, { count: number; last: number }>()
+  const seenSessions = new Set<string>()
+  for (const meta of sessions) {
+    const raw = await readOpencoworkSession(row.configDir, meta.id)
+    if (!raw) { diagnostics.push({ code: 'source.unreadable', detail: meta.id }); continue }
+    const parsed = parseOpencoworkSession(raw, { maxMessages: IMPORT_LIMITS.maxMessagesPerSession })
+    if (seenSessions.has(parsed.sessionId)) continue
+    seenSessions.add(parsed.sessionId)
+    const key = 'session:' + parsed.sessionId
+    const id = itemId('chat', key)
+    const projectKey = canonicalRoot(parsed.cwd)
+    const itemDiagnostics = [...parsed.diagnostics]
+    if (parsed.modelProvider && !providers.some((provider) => provider.id === parsed.modelProvider)) itemDiagnostics.push({ code: 'model-provider-unresolved', detail: parsed.modelProvider })
+    const contentHash = hashTranscript(parsed)
+    const mapping = store.getImportMapping(row.sourceId, '', 'session', key)
+    const workspaceId = resolveWorkspace(row.sourceId, projectKey, new Map())
+    const status = parsed.messages.length === 0 ? 'incompatible' : statusOfChat(mapping, contentHash, workspaceId !== null, itemDiagnostics)
+    if (projectKey) {
+      const stats = projectStats.get(projectKey) ?? { count: 0, last: 0 }
+      projectStats.set(projectKey, { count: stats.count + 1, last: Math.max(stats.last, parsed.updatedAt ?? meta.updatedAt) })
+    }
+    items.push({ id, category: 'chat', title: parsed.title ?? parsed.sessionId, sourcePath: `data.db#${parsed.sessionId}`, status, scope: 'project', ...(projectKey ? { projectKey } : {}), ...(workspaceId ? { targetWorkspaceId: workspaceId } : {}), count: parsed.messages.length, sourceUpdatedAt: parsed.updatedAt ?? meta.updatedAt, diagnostics: itemDiagnostics, defaultSelected: status === 'new' || status === 'update' })
+    payloads.set(id, { kind: 'opencowork-chat', sessionId: parsed.sessionId, contentHash, ...(parsed.title ? { title: parsed.title } : {}), ...(parsed.model ? { model: parsed.model } : {}), ...(parsed.modelProvider ? { modelProvider: parsed.modelProvider } : {}) })
+  }
+  const projects: ImportProjectCandidate[] = []
+  for (const [path, stats] of projectStats) {
+    const accessible = await isDirectory(path)
+    const workspaceId = resolveWorkspace(row.sourceId, path, new Map())
+    const workspace = workspaceId ? store.getWorkspace(workspaceId) : undefined
+    const projectDiagnostics: ImportDiagnostic[] = accessible ? [] : [{ code: 'project.needs-workspace', detail: path }]
+    projects.push({ key: path, sourcePath: path, accessible, ...(workspace ? { targetWorkspaceId: workspace.id, targetWorkspaceName: workspace.name } : {}), sessionCount: stats.count, lastActivityAt: stats.last, diagnostics: projectDiagnostics })
+    const id = itemId('project', path)
+    items.push({ id, category: 'project', title: basename(path) || path, sourcePath: path, status: workspace ? 'exists' : accessible ? 'new' : 'needs-target', projectKey: path, ...(workspace ? { targetWorkspaceId: workspace.id } : {}), scope: 'project', count: stats.count, diagnostics: projectDiagnostics, defaultSelected: !workspace && accessible })
+    payloads.set(id, { kind: 'project', projectKey: path, sourcePath: path })
+  }
+
+  // ── 资产(agent/command,存在才有;skill 复用 ~/.agents/skills 全局目录) ──
+  const skills = await listOpencoworkSkills()
+  for (const skill of skills) {
+    const id = itemId('skill', skill.name)
+    const targetPath = join(databaseDirectory(), 'skills', skill.name)
+    const mapping = store.getImportMapping(row.sourceId, '', 'skill', skill.name)
+    const assetDiagnostics = await inspectSkill(skill.dir)
+    const status = assetStatus(mapping, await currentFingerprint(targetPath), skill.name, assetDiagnostics)
+    items.push({ id, category: 'skill', title: skill.name, sourcePath: skill.dir, status, scope: 'global', diagnostics: assetDiagnostics, defaultSelected: status === 'new' })
+    payloads.set(id, { kind: 'skill', name: skill.name, dir: skill.dir })
+  }
+  const assets = await listOpencoworkAssets(row.configDir)
+  for (const entry of [{ kind: 'agent' as const, dir: 'agents', list: assets.agents }, { kind: 'command' as const, dir: 'commands', list: assets.commands }]) {
+    for (const asset of entry.list) {
+      const id = itemId(entry.kind, asset.name)
+      const targetPath = join(databaseDirectory(), entry.dir, `${asset.name}.md`)
+      const mapping = store.getImportMapping(row.sourceId, '', entry.kind, asset.name)
+      const inspected = await inspectMarkdownAsset(entry.kind, asset.file)
+      const status = assetStatus(mapping, await currentFingerprint(targetPath), asset.name, inspected.diagnostics)
+      items.push({ id, category: entry.kind, title: asset.name, sourcePath: asset.file, status, scope: 'global', diagnostics: inspected.diagnostics, defaultSelected: status === 'new' })
+      payloads.set(id, { kind: entry.kind, name: asset.name, file: asset.file })
+    }
+  }
+
+  // ── hook(hooks.json,全局,事件名与本项目直接同名交集) ──
+  for (const hook of await listOpencoworkHooks(row.configDir, diagnostics)) {
+    const id = itemId('hook', hook.sourceKey)
+    const mapped = mapOpencoworkHook(row.sourceId, hook)
+    const path = globalSettingsPath(getHost().paths.userData())
+    const target = mapped.hook ? await targetHook(path, mapped.hook.id, 'global') : undefined
+    const mapping = store.getImportMapping(row.sourceId, '', 'hook', hook.sourceKey)
+    const itemDiagnostics = [...mapped.diagnostics]
+    let status = mapped.hook ? codexStatus(mapping, fingerprint(JSON.stringify(hook)), target ? hookSurface(target) : null, itemDiagnostics) : 'incompatible' as const
+    if (status === 'update' && target?.enabled) { itemDiagnostics.push({ code: 'target.locally-modified' }); status = 'conflict' }
+    items.push({ id, category: 'hook', title: hook.event, sourcePath: hook.sourcePath, status, scope: 'global', diagnostics: itemDiagnostics, defaultSelected: status === 'new',
+      hook: { event: hook.event, matcher: hook.matcher, command: hook.command, timeoutMs: mapped.hook?.timeoutMs } })
+    payloads.set(id, { kind: 'opencowork-hook', hook })
   }
 
   sourceCounts.set(row.sourceId, { projectCount: projects.length, sessionCount: seenSessions.size })
@@ -1629,6 +1758,12 @@ async function applyOne(
         return await applyOpencodeChat(snapshot.sourceId, payload, targets)
       case 'opencode-provider':
         return applyOpencodeProvider(snapshot.sourceId, payload, item)
+      case 'opencowork-chat':
+        return await applyOpencoworkChat(snapshot.sourceId, payload, targets)
+      case 'opencowork-provider':
+        return applyOpencoworkProvider(snapshot.sourceId, payload, item)
+      case 'opencowork-hook':
+        return await applyOpencoworkHook(snapshot.sourceId, payload, item)
     }
   } catch (err) {
     return {
@@ -1842,6 +1977,101 @@ function applyOpencodeProvider(sourceId: string, payload: Extract<ItemPayload, {
     })
   })
   return { result: existing === undefined ? 'imported' : 'updated', diagnostics: item.diagnostics, target: { kind: 'provider', id: mapped.provider.id } }
+}
+
+async function applyOpencoworkChat(sourceId: string, payload: Extract<ItemPayload, { kind: 'opencowork-chat' }>, targets: ReadonlyMap<string, string>): Promise<ApplyOutcome> {
+  const source = store.getImportSource(sourceId)
+  const raw = source ? await readOpencoworkSession(source.configDir, payload.sessionId) : null
+  if (!raw) return { result: 'failed', diagnostics: [{ code: 'source.unreadable', detail: payload.sessionId }] }
+  const parsed = parseOpencoworkSession(raw, { maxMessages: IMPORT_LIMITS.maxMessagesPerSession })
+  const workspaceId = resolveWorkspace(sourceId, parsed.cwd, targets)
+  if (workspaceId === null) return { result: 'skipped', diagnostics: [{ code: 'project.needs-workspace', detail: parsed.cwd }] }
+  const sourceItemId = `session:${payload.sessionId}`
+  const mapping = store.getImportMapping(sourceId, '', 'session', sourceItemId)
+  if (mapping?.syncState === 'detached') return { result: 'skipped', diagnostics: [{ code: 'target.detached' }] }
+  if (mapping?.syncState === 'suppressed') return { result: 'skipped', diagnostics: [{ code: 'target.deleted' }] }
+  if (parsed.messages.length === 0) return { result: 'incompatible', diagnostics: [...parsed.diagnostics, { code: 'transcript.empty' }] }
+  const contentHash = hashTranscript(parsed)
+  const targetSessionId = mapping?.targetId || derivedId('cs', sourceId, payload.sessionId)
+  if (mapping !== undefined && mapping.sourceFingerprint === contentHash && store.sessionExists(targetSessionId)) {
+    return { result: 'skipped', diagnostics: parsed.diagnostics, target: { kind: 'session', id: targetSessionId, workspaceId } }
+  }
+  const messages = await materializeMessages(parsed.messages, sourceId, payload.sessionId, targetSessionId)
+  const now = Date.now()
+  const workspace = store.getWorkspace(workspaceId)
+  const providerId = parsed.modelProvider
+    ? store.listImportMappings(sourceId, 'provider').find((entry) => entry.meta['opencoworkProviderId'] === parsed.modelProvider)?.targetId
+      ?? store.listProviders().find((provider) => provider.name === parsed.modelProvider || provider.id === parsed.modelProvider)?.id
+    : undefined
+  const providerDiagnostics = parsed.modelProvider && providerId === undefined
+    ? [{ code: 'model-provider-unresolved' as const, detail: parsed.modelProvider }]
+    : []
+  store.tx(() => {
+    store.ensureSession({ id: targetSessionId, workspaceId, title: parsed.title ?? payload.sessionId, model: parsed.model ?? '', ...(providerId ? { modelProviderId: providerId } : {}), rootPathAtCreation: workspace?.rootPath ?? parsed.cwd, createdAt: parsed.startedAt ?? now })
+    store.replaceHistory(targetSessionId, messages)
+    writeMapping(sourceId, '', 'session', sourceItemId, { targetId: targetSessionId, targetPath: `data.db#${payload.sessionId}`, targetWorkspaceId: workspaceId, sourceFingerprint: contentHash, targetFingerprint: contentHash, now, meta: { cwd: parsed.cwd, messages: messages.length } })
+  })
+  return { result: mapping ? 'updated' : 'imported', diagnostics: [...parsed.diagnostics, ...providerDiagnostics], target: { kind: 'session', id: targetSessionId, workspaceId } }
+}
+
+function applyOpencoworkProvider(sourceId: string, payload: Extract<ItemPayload, { kind: 'opencowork-provider' }>, item: ImportPreviewItem): ApplyOutcome {
+  const mapped = mapOpencoworkProvider(sourceId, payload.provider)
+  const sourceItemId = `provider:${payload.provider.id}`
+  const now = Date.now()
+  const existing = store.listProviders().find((candidate) => candidate.id === mapped.provider.id)
+  const mapping = store.getImportMapping(sourceId, '', 'provider', sourceItemId)
+  const diagnostics = [...item.diagnostics]
+  const status = codexStatus(mapping, payload.provider.fingerprint, existing ? providerSurface(existing) : null, diagnostics)
+  if (status === 'conflict') return { result: 'conflict', diagnostics }
+  if (existing && !mapping) return { result: 'skipped', diagnostics }
+  const aliasKey = mapped.alias ? `${sourceItemId}:${mapped.alias.alias}` : undefined
+  const existingAlias = mapped.alias ? store.listAliases().find((candidate) => candidate.providerId === mapped.provider.id && candidate.alias === mapped.alias?.alias) : undefined
+  if (mapped.alias && aliasKey) {
+    const aliasMapping = store.getImportMapping(sourceId, '', 'alias', aliasKey)
+    const aliasStatus = codexStatus(aliasMapping, aliasSurface(mapped.alias), existingAlias ? aliasSurface(existingAlias) : null, diagnostics)
+    if (aliasStatus === 'conflict') return { result: 'conflict', diagnostics }
+    if (existingAlias && !aliasMapping) return { result: 'skipped', diagnostics }
+  }
+  store.tx(() => {
+    const saved = store.putProvider(existing === undefined ? mapped.provider : { ...mapped.provider, credentialRef: existing.credentialRef, enabled: existing.enabled })
+    if (mapped.alias && aliasKey) {
+      const alias = store.putAlias({ ...mapped.alias, enabled: existingAlias?.enabled ?? false })
+      writeMapping(sourceId, '', 'alias', aliasKey, {
+        targetId: `${mapped.provider.id}/${mapped.alias.alias}`, targetPath: '', targetWorkspaceId: '',
+        sourceFingerprint: aliasSurface(mapped.alias), targetFingerprint: aliasSurface(alias), now
+      })
+    }
+    writeMapping(sourceId, '', 'provider', sourceItemId, {
+      targetId: mapped.provider.id, targetPath: payload.provider.sourcePath, targetWorkspaceId: '',
+      sourceFingerprint: payload.provider.fingerprint, targetFingerprint: providerSurface(saved), now,
+      meta: { profile: 'default', opencoworkProviderId: payload.provider.id }
+    })
+  })
+  return { result: existing === undefined ? 'imported' : 'updated', diagnostics: item.diagnostics, target: { kind: 'provider', id: mapped.provider.id } }
+}
+
+/** OpenCoWork 的 hook 全局唯一(没有项目级 hooks.json),所以比 `applyCodexHook` 少一层 workspace 判定。 */
+async function applyOpencoworkHook(sourceId: string, payload: Extract<ItemPayload, { kind: 'opencowork-hook' }>, item: ImportPreviewItem): Promise<ApplyOutcome> {
+  const mapped = mapOpencoworkHook(sourceId, payload.hook)
+  if (!mapped.hook) return { result: 'incompatible', diagnostics: mapped.diagnostics }
+  const path = globalSettingsPath(getHost().paths.userData())
+  const sourceItemId = payload.hook.sourceKey
+  const mapping = store.getImportMapping(sourceId, '', 'hook', sourceItemId)
+  const existing = await targetHook(path, mapping?.targetId ?? mapped.hook.id, 'global')
+  const surface = fingerprint(JSON.stringify(payload.hook))
+  const diagnostics = [...mapped.diagnostics]
+  const status = codexStatus(mapping, surface, existing ? hookSurface(existing) : null, diagnostics)
+  if (status === 'conflict') return { result: 'conflict', diagnostics }
+  if (existing && !mapping) return { result: 'skipped', diagnostics }
+  if (existing && mapping && existing.enabled && mapping.sourceFingerprint !== surface) {
+    return { result: 'conflict', diagnostics: [...mapped.diagnostics, { code: 'target.locally-modified' }] }
+  }
+  const { saveHook } = await import('../ipc/hooks')
+  const saved = await saveHook({ scope: 'global', hook: { ...mapped.hook, enabled: existing?.enabled ?? false } })
+  const now = Date.now()
+  const targetSurface = hookSurface(saved)
+  writeMapping(sourceId, '', 'hook', sourceItemId, { targetId: saved.id, targetPath: saved.sourcePath, targetWorkspaceId: '', sourceFingerprint: surface, targetFingerprint: targetSurface, now })
+  return { result: existing ? 'updated' : 'imported', diagnostics: item.diagnostics, target: { kind: 'hook', id: saved.id } }
 }
 
 // ─── 项目 ───

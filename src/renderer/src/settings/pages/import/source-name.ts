@@ -19,6 +19,8 @@ export function sourceNameKey(kind: ImportSourceKind): TranslationKey {
       return 'import.sourceCodex'
     case 'opencode':
       return 'import.sourceOpencode'
+    case 'opencowork':
+      return 'import.sourceOpencowork'
     case 'claude-code':
       return 'import.sourceClaude'
   }
@@ -31,6 +33,8 @@ export function detectedKey(kind: ImportSourceKind): TranslationKey {
       return 'import.detectedCodex'
     case 'opencode':
       return 'import.detectedOpencode'
+    case 'opencowork':
+      return 'import.detectedOpencowork'
     case 'claude-code':
       return 'import.detected'
   }

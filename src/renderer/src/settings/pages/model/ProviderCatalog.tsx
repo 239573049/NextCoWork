@@ -325,6 +325,7 @@ const IMPORT_SOURCES: ReadonlyArray<{ kind: ImportSourceKind; labelKey: Translat
   { kind: "claude-code", labelKey: "import.sourceClaude" },
   { kind: "codex", labelKey: "import.sourceCodex" },
   { kind: "opencode", labelKey: "import.sourceOpencode" },
+  { kind: "opencowork", labelKey: "import.sourceOpencowork" },
 ];
 
 /**

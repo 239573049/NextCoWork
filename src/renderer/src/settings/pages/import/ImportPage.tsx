@@ -209,6 +209,9 @@ export function ImportPage(): ReactNode {
           <Button variant={sourceKind === 'opencode' ? 'accent' : undefined} onClick={() => { setSourceKind('opencode') }}>
             {t('import.sourceOpencode')}
           </Button>
+          <Button variant={sourceKind === 'opencowork' ? 'accent' : undefined} onClick={() => { setSourceKind('opencowork') }}>
+            {t('import.sourceOpencowork')}
+          </Button>
         </div>
         <Row
           title={t(sourceNameKey(sourceKind))}

@@ -12,7 +12,7 @@ import type { ImportSourceKind } from '../../../../../../shared/domain/import'
 import { messagesFor, type Locale, type TranslationKey } from '../../../../i18n'
 import { detectedKey, sourceNameKey } from '../source-name'
 
-const KINDS: readonly ImportSourceKind[] = ['claude-code', 'codex', 'opencode']
+const KINDS: readonly ImportSourceKind[] = ['claude-code', 'codex', 'opencode', 'opencowork']
 const LOCALES: readonly Locale[] = ['zh-CN', 'en-US']
 
 /** 取一条真实词条并渲染,和运行时 `t()` 同一条路径。 */

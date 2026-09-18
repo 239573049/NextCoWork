@@ -17,10 +17,12 @@ import {
   readOpencodeAuthNames,
   readOpencodeConfig
 } from './opencode'
+import { detectOpencoworkSource, listOpencoworkProviders } from './opencowork'
 
 export async function collectImportableProviders(kind: ImportSourceKind, pickedDir?: string): Promise<ImportableProviders> {
   if (kind === 'codex') return fromCodex(pickedDir)
   if (kind === 'opencode') return fromOpencode(pickedDir)
+  if (kind === 'opencowork') return fromOpencowork(pickedDir)
   return fromClaude(pickedDir)
 }
 
@@ -56,6 +58,22 @@ async function fromOpencode(pickedDir?: string): Promise<ImportableProviders> {
     diagnostics: c.diagnostics
   }))
   return { kind: 'opencode', available: true, configDir: src.configDir, providers }
+}
+
+async function fromOpencowork(pickedDir?: string): Promise<ImportableProviders> {
+  const src = await detectOpencoworkSource(pickedDir)
+  if (src.availability !== 'detected') return { kind: 'opencowork', available: false, configDir: '', providers: [] }
+  const providers: ImportableProvider[] = (await listOpencoworkProviders(src.configDir)).map((c) => ({
+    sourceKey: c.id,
+    name: c.name,
+    protocol: c.protocol,
+    baseUrl: c.baseUrl,
+    models: c.models,
+    ...(c.defaultModel ? { defaultModel: c.defaultModel } : {}),
+    hasLocalKey: c.hasLocalKey,
+    diagnostics: c.diagnostics
+  }))
+  return { kind: 'opencowork', available: true, configDir: src.configDir, providers }
 }
 
 async function fromClaude(pickedDir?: string): Promise<ImportableProviders> {
