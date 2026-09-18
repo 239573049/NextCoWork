@@ -34,9 +34,9 @@ export interface InstalledPackage {
   target: string;
 }
 
-function safeEntry(name: string): boolean {
-  return (
-    name !== "" &&
+function safeEntryPath(path: string): string | null {
+  const name = path.replace(/\/$/, "").replace(/^\.\//, "");
+  return name !== "" &&
     !name.includes("\\") &&
     !name.startsWith("/") &&
     !/^[A-Za-z]:/.test(name) &&
@@ -44,7 +44,8 @@ function safeEntry(name: string): boolean {
       .split("/")
       .every((part) => part !== "" && part !== "." && part !== "..") &&
     name.split("/").length <= MAX_DEPTH
-  );
+    ? name
+    : null;
 }
 
 async function readEntry(entry: unzipper.File, limit: number): Promise<Buffer> {
@@ -89,15 +90,12 @@ export async function installSkillZip(
   if (directory.files.length === 0 || directory.files.length > MAX_ENTRIES)
     throw new Error("ZIP 文件数量无效");
   let expanded = 0;
-  let top: string | null = null;
-  let skillEntry: unzipper.File | null = null;
+  const entryPaths = new Map<unzipper.File, string>();
   const seen = new Set<string>();
   for (const entry of directory.files) {
-    const name = entry.path.replace(/\/$/, "");
-    if (!safeEntry(name)) throw new Error("ZIP 包含非法路径");
-    const parts = name.split("/");
-    if (top === null) top = parts[0] ?? "";
-    if (parts[0] !== top) throw new Error("ZIP 必须只有一个顶层目录");
+    const name = safeEntryPath(entry.path);
+    if (name === null) throw new Error("ZIP 包含非法路径");
+    entryPaths.set(entry, name);
     const normalized = name.toLocaleLowerCase();
     if (seen.has(normalized)) throw new Error("ZIP 包含重复路径");
     seen.add(normalized);
@@ -110,15 +108,32 @@ export async function installSkillZip(
       throw new Error("ZIP 不允许包含符号链接");
     expanded += entry.uncompressedSize;
     if (expanded > MAX_EXPANDED) throw new Error("ZIP 解压后体积过大");
-    if (name === `${top}/SKILL.md`) {
-      if (skillEntry !== null) throw new Error("ZIP 必须包含唯一的 SKILL.md");
-      skillEntry = entry;
-    }
-    if (name === `${top}/.nextcowork-package.json`)
-      throw new Error("ZIP 使用了保留的元数据文件名");
   }
-  if (!top || !SKILL_NAME_RE.test(top) || skillEntry === null)
-    throw new Error("ZIP 顶层目录或 SKILL.md 无效");
+  const paths = [...entryPaths.values()];
+  // ★ null means a flat archive with SKILL.md at its root. Its install directory
+  // comes from validated frontmatter, never from a download filename users can rename.
+  let packageRoot: string | null = null;
+  if (!paths.includes("SKILL.md")) {
+    const topLevels = new Set(
+      paths.map((name) => name.split("/")[0] ?? ""),
+    );
+    if (topLevels.size !== 1)
+      throw new Error("ZIP 必须只有一个顶层目录");
+    packageRoot = topLevels.values().next().value ?? null;
+    if (packageRoot === null || !SKILL_NAME_RE.test(packageRoot))
+      throw new Error("ZIP 顶层目录或 SKILL.md 无效");
+  }
+  const skillPath =
+    packageRoot === null ? "SKILL.md" : `${packageRoot}/SKILL.md`;
+  const skillEntry =
+    directory.files.find((entry) => entryPaths.get(entry) === skillPath) ?? null;
+  if (skillEntry === null) throw new Error("ZIP 顶层目录或 SKILL.md 无效");
+  const metadataPath =
+    packageRoot === null
+      ? ".nextcowork-package.json"
+      : `${packageRoot}/.nextcowork-package.json`;
+  if (paths.includes(metadataPath))
+    throw new Error("ZIP 使用了保留的元数据文件名");
   const raw = (await readEntry(skillEntry, 256 * 1024)).toString("utf8");
   if (Buffer.byteLength(raw) > 256 * 1024) throw new Error("SKILL.md 文件过大");
   const fm = parseFrontmatter(raw);
@@ -127,7 +142,7 @@ export async function installSkillZip(
   const description = fmString(fm, "description");
   if (
     !name ||
-    name !== top ||
+    (packageRoot !== null && name !== packageRoot) ||
     !SKILL_NAME_RE.test(name) ||
     !description ||
     description.length > SKILL_DESCRIPTION_MAX ||
@@ -135,7 +150,7 @@ export async function installSkillZip(
     fm.body.length > SKILL_BODY_MAX
   )
     throw new Error("SKILL.md 元数据无效");
-  const target = resolve(root, top);
+  const target = resolve(root, name);
   const version =
     fmString(fm, "version") ??
     basename(zipPath).match(/v?(\d+\.\d+\.\d+)/)?.[1];
@@ -149,8 +164,12 @@ export async function installSkillZip(
   try {
     let actualExpanded = 0;
     for (const entry of directory.files) {
-      const parts = entry.path.replace(/\/$/, "").split("/");
-      const child = parts.slice(1).join("/");
+      const entryPath = entryPaths.get(entry);
+      if (entryPath === undefined) throw new Error("ZIP 包含非法路径");
+      const child =
+        packageRoot === null
+          ? entryPath
+          : entryPath.split("/").slice(1).join("/");
       if (child === "") continue;
       const destination = join(staging, child);
       if (entry.path.endsWith("/")) {

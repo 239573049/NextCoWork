@@ -34,6 +34,42 @@ function archive(
   return { root, zip };
 }
 
+function dotPrefixedArchive(): { root: string; zip: string } {
+  const root = mkdtempSync(join(tmpdir(), "nextcowork-dot-install-"));
+  roots.push(root);
+  mkdirSync(join(root, "x", "a"), { recursive: true });
+  writeFileSync(
+    join(root, "x", "a", "SKILL.md"),
+    "---\nname: a\ndescription: dot prefix\n---\ndot-prefixed body\n",
+  );
+  const zip = join(root, "skill.zip");
+  execFileSync("zip", ["-q", zip, "x/a/SKILL.md"], { cwd: root });
+  const bytes = readFileSync(zip).toString("latin1");
+  const prefixed = bytes.replaceAll("x/a/SKILL.md", "./a/SKILL.md");
+  if (prefixed === bytes) throw new Error("ZIP fixture path was not found");
+  writeFileSync(zip, Buffer.from(prefixed, "latin1"));
+  return { root, zip };
+}
+
+function flatArchive(): { root: string; zip: string } {
+  const root = mkdtempSync(join(tmpdir(), "nextcowork-flat-install-"));
+  roots.push(root);
+  mkdirSync(join(root, "knowledge"), { recursive: true });
+  writeFileSync(
+    join(root, "SKILL.md"),
+    "---\nname: flat-demo\ndescription: flat package\n---\nflat body\n",
+  );
+  writeFileSync(join(root, "knowledge", "guide.md"), "guide");
+  writeFileSync(join(root, "RELEASE.md"), "release");
+  const zip = join(root, "renamed-download.zip");
+  execFileSync(
+    "zip",
+    ["-qr", zip, "SKILL.md", "knowledge", "RELEASE.md"],
+    { cwd: root },
+  );
+  return { root, zip };
+}
+
 describe("installSkillZip", () => {
   it("strips the archive top-level directory and atomically replaces an install", async () => {
     const first = archive("---\nname: demo\ndescription: old\n---\nold body\n");
@@ -53,6 +89,64 @@ describe("installSkillZip", () => {
     });
     expect(scanned.skills[0]?.source.kind).toBe("zip");
     expect(scanned.skills[0]?.source.sha256).toBe(result.sha256);
+  });
+
+  it("installs archives whose entries start with ./", async () => {
+    const { root, zip } = dotPrefixedArchive();
+    const installRoot = join(root, "installed");
+
+    const result = await installSkillZip(zip, installRoot, "global");
+
+    expect(result.name).toBe("a");
+    expect(readFileSync(join(installRoot, "a", "SKILL.md"), "utf8")).toContain(
+      "dot-prefixed body",
+    );
+  });
+
+  it("uses frontmatter name when SKILL.md is at the archive root", async () => {
+    const { root, zip } = flatArchive();
+    const installRoot = join(root, "installed");
+
+    const result = await installSkillZip(zip, installRoot, "global");
+
+    expect(result.name).toBe("flat-demo");
+    expect(
+      readFileSync(join(installRoot, "flat-demo", "SKILL.md"), "utf8"),
+    ).toContain("flat body");
+    expect(
+      readFileSync(
+        join(installRoot, "flat-demo", "knowledge", "guide.md"),
+        "utf8",
+      ),
+    ).toBe("guide");
+    expect(
+      readFileSync(join(installRoot, "flat-demo", "RELEASE.md"), "utf8"),
+    ).toBe("release");
+    const scanned = await scanSkills({
+      fs: nodeHost().fs,
+      globalRoot: installRoot,
+      projectRoot: "",
+    });
+    expect(scanned.skills[0]?.name).toBe("flat-demo");
+    expect(scanned.skills[0]?.source.kind).toBe("zip");
+  });
+
+  it("still rejects wrapped archives with multiple top-level directories", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nextcowork-multi-install-"));
+    roots.push(root);
+    mkdirSync(join(root, "demo"), { recursive: true });
+    mkdirSync(join(root, "extra"), { recursive: true });
+    writeFileSync(
+      join(root, "demo", "SKILL.md"),
+      "---\nname: demo\ndescription: d\n---\nbody\n",
+    );
+    writeFileSync(join(root, "extra", "file.md"), "extra");
+    const zip = join(root, "skill.zip");
+    execFileSync("zip", ["-qr", zip, "demo", "extra"], { cwd: root });
+
+    await expect(
+      installSkillZip(zip, join(root, "installed"), "global"),
+    ).rejects.toThrow(/顶层目录/);
   });
 
   it("rejects symbolic links in archives", async () => {
