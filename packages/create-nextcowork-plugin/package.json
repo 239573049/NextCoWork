@@ -1,6 +1,6 @@
 {
   "name": "create-nextcowork-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Scaffold a NextCoWork plugin that is already publishable.",
   "license": "MIT",
   "type": "module",

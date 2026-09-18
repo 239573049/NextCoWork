@@ -1,6 +1,6 @@
 {
   "name": "@aidotnet/plugin-api",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Type definitions for NextCoWork plugins. Zero runtime code.",
   "license": "MIT",
   "types": "./nextcowork.d.ts",
