@@ -1,6 +1,90 @@
 ﻿# 更新日志
 
 
+## v2.2.3
+
+### 新增
+
+**插件可以只包一个网站,一行代码都不用写**
+
+- 清单新增 `kind: "webapp"`:不写 `main`,只声明 `contributes.webApps`(标题、图标、https 地址、开在内层 Tab 还是右侧面板、是否进侧边栏)。写了 `main` 是**错误并整份拒绝**,不是忽略——忽略会让作者以为自己的代码在跑;声明 `commands`/`tools`/`customEditors` 这类需要代码的贡献点同样整份拒绝
+- 装上即生效:侧边栏多一个入口(排在内置功能项之后),点开在当前工作区的浏览器分区里加载,与你自己的浏览器 Tab 共享登录状态——站点已登录就直接可用。插件零权限、不跑任何代码、不占常驻内存
+- 站外链接不劫持:只有命中清单里 `hostPermissions` 的地址在应用内导航,其余交给系统浏览器,并在视图顶部留一条「已用系统浏览器打开」的提示——它不会变成一个不受限的浏览器
+- 随包示例 `examples/ncw.bilibili`(整个包就是一份清单加两份文案)。声明成外层功能 Tab 的 `open: "feature"` 这一档还没做:降级成内层 Tab 并明确告诉你降级了,不静默
+
+**engines 改按插件 API 版本判定 —— 此前用官方脚手架生成的插件装上就是「装载失败」**
+
+- 脚手架默认写 `engines.nextcowork: "^0.2.0"`,而宿主拿**应用版本**去判(2.2.2);`^0.2.0` 要求宿主大版本为 0,于是按官方文档写出来的插件装上直接是 error,诊断说「requires ^0.2.0, this host is 2.2.2」。现在判定改用插件 API 版本(这一版 0.3.1)
+- 已经装了的那批不需要做任何事:判为「弃用」,**照常装载运行**,只在详情页推一条 warn,提示把 engines 改成 `^0.3.1`。这条兼容表带着拆除条件(市场上声明 0.2 的包降到 0 时清掉)
+- 脚手架默认值同步改 `^0.3.0`;读不懂的 version range 仍然判不兼容——宁可装不上,也不要装上一个会静默出错的插件
+
+**一批「d.ts 里写了、真调必失败」的 API 接通了**
+
+- `env.openExternal`(只放行 https)、剪贴板读写、`window.showQuickPick`、`scm.status`、`configuration.get`、`customEditors.setDirty`、`agent.registerToolInterceptor` / `registerContextProvider`:此前要么落到 `internal_error: method ... has no handler`,要么插件侧看到的是 `undefined`(垫片根本没导出这个命名空间,`customEditors.setDirty` 就是这样——脏标记永远为空,关 Tab 不拦)
+- 垫片里 `interceptor.willInvoke` / `didInvoke` / `context.provide` 三条 invocation 此前会抛 `unsupported invocation`(主进程早就在发);现在没注册拦截器的插件返回空裁决——fail-open,一个没实现拦截器的插件不该把所有工具调用堵死
+
+**Git 能力全套**
+
+- `scm.status` / `diff` / `log` / `branches` 与 `stage` / `commit` / `createBranch` / `checkout`,复用应用自己的 git 实现;写操作走既有审批链
+- 不开 push / pull:它们会把本机凭据用到远端,而冲突、鉴权、hook 这些失败形态不是一条 RPC 能如实回答的
+- 不在 git 仓库里、没装 git、远程工作区一律给明确诊断,而不是回一个空状态(空状态会被当成「没有改动」)
+
+**工作区变更订阅(是事件,不是 watcher)**
+
+- `workspace.onDidChangeFiles(handler, globs?)` 只覆盖**经应用发生的写入**:Agent 工具写盘、插件自己写盘。外部编辑器、`git checkout`、终端里的 `mv` 都不会触发,这条边界同时写进 d.ts 与插件文档,免得被当 watcher 用
+- 插件休眠时不叫醒它,也不逐条问权限;按前缀匹配过滤,单插件最多 32 条订阅
+
+**插件能问用户了**
+
+- `window.showInputBox` / `showConfirm` / `withProgress`,以及一起接通的 `showQuickPick`:主进程只发请求并等回执,**界面用应用自己的对话框画**,插件决定不了它长什么样。用户关掉、或 5 分钟没理会 → 返回空值(`null` / `false`)而不是报错——没理会一个弹窗不该让插件收到异常
+- 单插件同时在屏上只有一个输入框、一个确认框与最多 3 条进度;插件被禁用、应用退出时挂起的请求一律按取消收口,不留悬空 Promise
+- 进度这一档只做了一半:配额、插件被禁用时自动收尾、请求超时都由主进程管住了,但**界面上还没有地方画进度条**——插件调 `withProgress` 会成功,用户暂时看不到进度
+
+**流式命令执行**
+
+- `process.execStream` 边跑边推输出(50ms 合批),`execAbort` 立刻中断;审批**只在开始时问一次**,不逐块问
+- 单插件最多 8 条并发;输出上限 512KB,超了仍然继续收但只推一条 `truncated` 标记(停止收会让子进程卡在 write);中断与超时统一 `code = 124`
+
+**结果卡多了四种原语,危险按钮先确认**
+
+- 新增 `markdown`(走应用自己的受信渲染器,链接交给系统浏览器,不执行裸 HTML)、`list`、`metric`、`divider`;`button` 新增 `confirm`,插件声明的危险动作点下去先弹应用自己的确认框,主按钮是危险样式
+- 预算不变(16KB / 32 块):这些原语是为了**少一点 JSON 转储**,不是为了塞更多数据;认不出的块类型仍然只丢那一块
+
+**插件视图可以直接用宿主的 React 与控件**
+
+- `react` / `react-dom` / `nextcowork/ui` / `nextcowork/view` 由宿主通过 import map 注入插件视图:插件不再自带 React(两份实例的症状是 `Invalid hook call`),视图体积从几百 KB 降到几 KB
+- `nextcowork/ui` 就是应用自己的 Button / Dialog / Input 等控件,跟随主题、外观与动效档位;样式表与主题变量由宿主注入,插件 HTML 不需要自己写 CSP 或引样式
+- 打包必须带上这份运行时,漏了的话插件视图一律 `Failed to resolve module specifier "react"`——开发时正常,只有装完才暴露
+
+**自定义编辑器的三个静默失败点**
+
+- `onCustomEditor:` 激活事件此前**没有任何派发点**,编辑器类插件的 iframe 第一次请求必 403;现在挂 iframe 之前先唤醒插件
+- `ncw:doc:dirty` 此前被静默丢弃,表现为关 Tab 从不拦未保存内容;现在关 Tab 前先让插件存一次,**存不下才拦**,并说明是哪一条失败(不是每次都弹「要保存吗」)
+- 图片文档:打开时给 `dataUrl` 与 mime(此前收到空串,编辑器一片空白),保存支持 base64 回写
+
+**插件的 Skill 真正可用**
+
+- 包内 `skills/<name>` 进技能目录:装载期校验路径形状与 `SKILL.md` 是否存在(装得上却扫不出来,才是要挡的那种失败);优先级低于项目与全局,两个插件撞名先来的赢且双方都有诊断
+- 插件被禁用/卸载 → 贡献的 Skill 立刻消失(每次扫描现问,不缓存);技能面板标注「来自插件」且**不画卸载按钮**(那个按钮会去删一个不存在的路径),Skill 工具会把包目录的绝对路径告诉模型
+
+### 改动
+
+- **内置工具卡片的标题与摘要迁进 i18n**:这些句子此前硬编码在 shared 里,表现为英文界面上工具卡片全是中文;顺带补上参数兜底——半截 JSON 时退化成「读取…」,不再把 `{param}` 字样漏到界面上
+- **空会话首屏的问候语同样按语言出**(此前四种问候语写死中文,英文界面也是中文)
+- **输出额度改由唯一的全局设置项决定**(新增 `maxOutputTokens`,1024–200000):模型目录声明的输出上限不再压住你的设置值,只被上下文窗口收窄
+- `workspace:writeFile` 支持 base64 图片字节写回(严格 base64、只覆写已分类为图片的文件,乐观锁与临时文件原子替换不变)
+- 插件脚手架新增 `--view` 模板,生成的视图不自己引样式、不自己写 CSP,三样都由宿主注入
+- `plugin-builder` Skill 从一份长文档拆成索引页加 6 份 references(清单与权限、权限映射、自定义编辑器、agent 工具、runtime API、打包)
+
+### 修复
+
+- **Linux 托盘点了没反应**:多数 Linux 桌面环境的托盘不派发 `click` / `right-click`,只认 `setContextMenu`;不设的后果是整颗图标点了没有任何反应,连菜单里的「退出」也点不到,而这个坏掉的状态在 macOS / Windows 上完全复现不出来。现在 Linux 走 `setContextMenu`,macOS 保持左键唤起窗口
+
+### 测试
+
+- 新增:插件 API 版本判定(老 range 判弃用、读不懂判不兼容、`>=0.2.0` 不享受特殊待遇)、webapp 清单规则(写了 main 整份拒、要代码的贡献点整份拒、URL 只放行 https)、**webapp 插件装载后宿主窗口一次都没被 spawn**、`env.openExternal` 真的落到宿主而不是 `internal_error`、scm 写类没批准被拒、`tabs.openBrowser` 必须命中 `hostPermissions`、插件 Skill 的加载与禁用撤下(含软链出包读不到)、视图运行时的服务与「包内同名文件盖不住宿主运行时」、图片字节写回(解码后相同则整跳写入)、三个示例插件的端到端安装;完整套件 5592 项全部通过
+
+
 ## v2.2.2
 
 ### 新增
