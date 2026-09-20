@@ -100,6 +100,9 @@ export const gitZh = {
   'git.selectFile': '选一个文件查看改动',
   'git.diffBinary': '二进制文件,没有可显示的文本改动',
   'git.diffTruncated': '改动过大,以下内容已被截断',
+  // 统计条上那两个数字只是 `+12` / `−3`,tooltip 负责把它们说成人话
+  'git.diffAdded': ({ count }: Params) => `新增 ${String(count)} 行`,
+  'git.diffRemoved': ({ count }: Params) => `删除 ${String(count)} 行`,
   'git.diffLinesTruncated': ({ shown, total }: Params) =>
     `只显示了前 ${String(shown)} 行,共 ${String(total)} 行`,
   'git.diffEmpty': '这个文件没有文本改动',
@@ -189,6 +192,8 @@ export const gitEn = {
   'git.selectFile': 'Select a file to see its changes',
   'git.diffBinary': 'Binary file — no text changes to show',
   'git.diffTruncated': 'The change is large; the content below is truncated',
+  'git.diffAdded': ({ count }: Params) => `${String(count)} lines added`,
+  'git.diffRemoved': ({ count }: Params) => `${String(count)} lines removed`,
   'git.diffLinesTruncated': ({ shown, total }: Params) =>
     `Showing the first ${String(shown)} of ${String(total)} lines`,
   'git.diffEmpty': 'This file has no text changes',

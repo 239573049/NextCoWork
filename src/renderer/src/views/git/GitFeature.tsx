@@ -31,6 +31,10 @@
  * ★ **AI 写提交信息不传模型。** 主进程读设置里的默认模型(同「AI 生成子代理」)。
  *   渲染层这一侧根本拿不到设置:它们是 `App.tsx` 的 state,而 Git 面板走
  *   `FeatureView`,不在那条 props 链上。
+ *
+ * ★ **diff 的文本解析不在这里,在同目录的 `diff-model.ts`。** 行号推算和「哪一行
+ *   算正文」是这个面板里唯一算得上算法的一段,留在组件里就只能靠肉眼验收 ——
+ *   而它错了不会报错,只会让行号整体串位。抽出去之后有 `__tests__/diff-model.test.ts`。
  */
 import {
   ArrowDown,
@@ -79,6 +83,7 @@ import {
 } from '../../services/git'
 import { FeatureFrame } from '../../shell/FeatureFrame'
 import { useWindowStore } from '../../stores/window'
+import { parseUnifiedDiff, type DiffRowKind } from './diff-model'
 
 /** 主进程会原样抛回来的 i18n 键。不在表里的一律当作 git 的原话显示。 */
 const KNOWN_ERROR_KEYS = [
@@ -126,15 +131,6 @@ function errorText(error: unknown, t: Translate): string {
   const message = error instanceof Error ? error.message : String(error)
   const known = (KNOWN_ERROR_KEYS as readonly string[]).includes(message)
   return known ? t(message as KnownErrorKey) : message
-}
-
-/** diff 的着色。accent 是主题里的亮绿,danger 是红 —— 和 theme.css 同一套。 */
-function diffLineClass(line: string): string {
-  if (line.startsWith('+++') || line.startsWith('---')) return 'text-fg-faint'
-  if (line.startsWith('@@')) return 'text-accent-soft'
-  if (line.startsWith('+')) return 'text-accent'
-  if (line.startsWith('-')) return 'text-danger'
-  return 'text-fg-muted'
 }
 
 /** 列表里那一格状态字母。未跟踪的 worktree 是 `?`,直接拿来用。 */
@@ -822,34 +818,84 @@ function FileGroup({
   )
 }
 
+/** 一行 diff 的外观。行号栏在两种主题下都只能是最淡的那档,否则它比正文还显眼。 */
+const ROW_STYLE: Record<DiffRowKind, { row: string; text: string; sign: string }> = {
+  hunk: { row: 'bg-tint', text: 'text-accent-soft', sign: '' },
+  meta: { row: '', text: 'text-fg-faint', sign: '' },
+  add: { row: 'bg-accent/10', text: 'text-fg', sign: '+' },
+  del: { row: 'bg-danger/10', text: 'text-fg', sign: '-' },
+  context: { row: '', text: 'text-fg-muted', sign: '' }
+}
+
 /**
  * diff 正文。
  *
  * ★ **封顶在 `DIFF_LINE_LIMIT` 行**,见那个常量上的注释。超出的部分给一句说明
  *   而不是一个「展开全部」—— 展开之后卡的还是同一下,只是换成用户自己按的。
  *
- * ★ 切分放在 `useMemo` 里:面板每次 setState(轮询、忙碌态、输入框敲字)都会
+ * ★ 解析放在 `useMemo` 里:面板每次 setState(轮询、忙碌态、输入框敲字)都会
  *   重渲染这棵树,而 diff 本身几乎不变。
+ *
+ * ★ **正文换行而不是横向滚动**(`whitespace-pre-wrap`)。横向滚动会把左边的行号栏
+ *   一起推走 —— 而行号恰恰是滚到一半时最需要的那个东西;这一栏还可能被左侧 340px
+ *   挤得很窄,长行在这里是常态而非例外。
  */
 function DiffView({ t, diff }: { t: Translate; diff: GitDiff }): ReactNode {
-  const lines = useMemo(() => diff.text.split('\n'), [diff.text])
-  const shown = lines.length > DIFF_LINE_LIMIT ? lines.slice(0, DIFF_LINE_LIMIT) : lines
+  const parsed = useMemo(() => parseUnifiedDiff(diff.text, DIFF_LINE_LIMIT), [diff.text])
   return (
-    <div className="px-4 py-3">
-      {diff.truncated && <p className="pb-2 text-[11px] text-fg-faint">{t('git.diffTruncated')}</p>}
-      <pre className="selectable overflow-x-auto font-mono text-[12px] leading-[1.55]">
-        {shown.map((line, i) => (
-          <div key={i} className={diffLineClass(line)}>
-            {line === '' ? ' ' : line}
-          </div>
-        ))}
-      </pre>
-      {shown.length < lines.length && (
-        <p className="pt-2 text-[11px] text-fg-faint">
-          {t('git.diffLinesTruncated', { shown: shown.length, total: lines.length })}
+    <div className="pb-4">
+      {/* 统计条:进来第一眼要的是「动了多大」,不是第一行改了什么 */}
+      <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-hairline bg-canvas px-4 py-2 text-[11px]">
+        <span className="font-mono text-accent" title={t('git.diffAdded', { count: parsed.added })}>
+          +{parsed.added}
+        </span>
+        <span
+          className="font-mono text-danger"
+          title={t('git.diffRemoved', { count: parsed.removed })}
+        >
+          −{parsed.removed}
+        </span>
+        {diff.truncated && <span className="text-fg-faint">{t('git.diffTruncated')}</span>}
+      </div>
+      <div className="selectable font-mono text-[12px] leading-[1.6]">
+        {parsed.rows.map((row, i) => {
+          const style = ROW_STYLE[row.kind]
+          return (
+            <div key={i} className={cn('flex items-start', style.row)}>
+              <LineNumber value={row.oldLine} />
+              <LineNumber value={row.newLine} />
+              {/* ★ 符号列不能 aria-hidden:+/− 是「这一行是增是删」唯一的非颜色线索,
+                  屏幕阅读器和色觉障碍用户都只有它 */}
+              <span className={cn('w-3 shrink-0 select-none text-center', style.text)}>
+                {style.sign}
+              </span>
+              <span className={cn('min-w-0 flex-1 whitespace-pre-wrap break-all pr-4', style.text)}>
+                {row.text === '' ? ' ' : row.text}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      {parsed.rows.length < parsed.total && (
+        <p className="px-4 pt-2 text-[11px] text-fg-faint">
+          {t('git.diffLinesTruncated', { shown: parsed.rows.length, total: parsed.total })}
         </p>
       )}
     </div>
+  )
+}
+
+/**
+ * 行号栏的一格。
+ *
+ * ★ `select-none`:行号**不能**进选区,否则用户复制一段 diff 粘到别处时,每一行
+ *   前面都挂着两个数字,粘出来的代码不能直接用。`tabular-nums` 让等宽数字不抖。
+ */
+function LineNumber({ value }: { value: number | null }): ReactNode {
+  return (
+    <span className="w-11 shrink-0 select-none pr-2 text-right tabular-nums text-fg-faint/70">
+      {value === null ? '' : value}
+    </span>
   )
 }
 

@@ -25,11 +25,11 @@ import type {
   GitBranchSummary,
   GitCommitSummary,
   GitDiff,
-  GitFileChange,
   GitOverview,
   GitUnavailableReason
 } from '../../shared/domain/git'
 import { isLocalEnvironment } from '../../shared/domain/environment'
+import { MAX_FILES, parseStatus } from './git-status'
 import { COMMIT_MESSAGE_DIFF_LIMIT } from '../commit-message'
 import { getCommitMessageGenerator } from '../runtime'
 import { store } from '../state/store'
@@ -42,8 +42,6 @@ const WRITE_TIMEOUT_MS = 30_000
 /** 走网络的命令(pull / push)。慢是常态,不是卡死。 */
 const NETWORK_TIMEOUT_MS = 120_000
 
-/** 改动文件列表的上限。一个 .gitignore 写漏的仓库能有几十万条。 */
-const MAX_FILES = 2000
 /** 单个 diff 的字符上限。超出截断并置 `truncated`。 */
 const MAX_DIFF_CHARS = 200 * 1024
 /** 子进程输出缓冲。status 撑满 MAX_FILES 时也够。 */
@@ -133,9 +131,19 @@ function workspaceDir(workspaceId: string): { dir: string } | { reason: GitUnava
 }
 
 interface Repo {
-  /** 工作区目录 —— 所有 git 命令的 cwd */
+  /**
+   * 工作区目录 —— 不带路径参数的命令(status / log / branch / pull…)的 cwd。
+   */
   dir: string
-  /** 仓库根(可能在工作区根的上层:在子目录里打开项目是常态) */
+  /**
+   * 仓库根(可能在工作区根的上层:在子目录里打开项目是常态)。
+   *
+   * ★ **带路径参数的命令必须用它当 cwd**(add / reset / diff -- <path>)。
+   *   porcelain 给的路径是**仓库根相对**的,而 git 的 pathspec 是 **cwd 相对**的 ——
+   *   两者在「工作区就是仓库根」时恰好一样,所以这个错能一路活到有人在子目录里
+   *   打开项目为止。那时的表现是:列表显示正常,点暂存/取消暂存全部报
+   *   `fatal: pathspec '…' did not match any files`,点文件看 diff 一片空白。
+   */
   root: string
 }
 
@@ -207,140 +215,6 @@ function safeRef(name: unknown): string {
     throw new IpcError('tool_failed', 'git.invalidBranch')
   }
   return trimmed
-}
-
-// ═══════════════════════════════════════════════════════════════
-// status —— porcelain v2
-// ═══════════════════════════════════════════════════════════════
-
-interface StatusSnapshot {
-  branch: string
-  detached: boolean
-  unborn: boolean
-  upstream: string
-  ahead: number
-  behind: number
-  files: GitFileChange[]
-  filesTruncated: boolean
-}
-
-/**
- * ★ 用 `--porcelain=v2 --branch -z` 而不是 v1。
- *
- * 一次调用同时拿到:分支名、上游、ahead/behind、以及文件列表。v1 要另外发三条
- * (`branch --show-current` / `rev-parse @{u}` / `rev-list --count`),而 `@{u}`
- * 在没设上游时退出码非零,又得分辨「没上游」和「命令坏了」。
- *
- * ★ `-z` 是为了中文和带空格的文件名:非 -z 的输出会把这类路径加引号并转义,
- * 解析端必须自己反转义 —— 解析错的表现是文件点不开,而且**只在中文路径上**出现。
- */
-function parseStatus(stdout: string): StatusSnapshot {
-  // -z:每条记录以 NUL 结尾(不是分隔),末尾会留一个空串
-  const records = stdout.split('\0')
-  let branch = ''
-  let detached = false
-  let unborn = false
-  let upstream = ''
-  let ahead = 0
-  let behind = 0
-  const files: GitFileChange[] = []
-  let filesTruncated = false
-
-  for (let i = 0; i < records.length; i++) {
-    const record = records[i]
-    if (record === undefined || record === '') continue
-
-    if (record.startsWith('# ')) {
-      const [key, ...rest] = record.slice(2).split(' ')
-      const value = rest.join(' ')
-      // `(initial)` = 还没有第一个提交
-      if (key === 'branch.oid') unborn = value === '(initial)'
-      else if (key === 'branch.head') {
-        // `(detached)` 是 git 的字面输出,不是一个真的分支名
-        if (value === '(detached)') detached = true
-        else branch = value
-      } else if (key === 'branch.upstream') upstream = value
-      else if (key === 'branch.ab') {
-        // 形如 `+1 -2`
-        const [a, b] = value.split(' ')
-        ahead = Number.parseInt((a ?? '').replace('+', ''), 10) || 0
-        behind = Math.abs(Number.parseInt(b ?? '', 10) || 0)
-      }
-      continue
-    }
-
-    if (files.length >= MAX_FILES) {
-      filesTruncated = true
-      // 仍然继续扫,只是不再收 —— rename 记录要吃掉它后面那条来源路径
-      if (record.startsWith('2 ')) i++
-      continue
-    }
-
-    const kind = record[0]
-    if (kind === '1' || kind === '2') {
-      /*
-        1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
-        2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>
-        —— 固定字段都不含空格,路径可能含,所以按 slice(n).join(' ') 收尾。
-        ★ -z 模式下 rename 的**来源路径是下一条记录**,不是同一条里的 tab 分隔。
-          少读这一条,后面每一条记录的类型判断都会错位一格。
-      */
-      const parts = record.split(' ')
-      const xy = parts[1] ?? '  '
-      const fixed = kind === '1' ? 8 : 9
-      const path = parts.slice(fixed).join(' ')
-      let renamedFrom: string | undefined
-      if (kind === '2') {
-        i++
-        const from = records[i]
-        if (from !== undefined && from !== '') renamedFrom = from
-      }
-      if (path === '') continue
-      files.push(change(path, xy[0] ?? ' ', xy[1] ?? ' ', false, renamedFrom))
-    } else if (kind === 'u') {
-      // u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
-      const parts = record.split(' ')
-      const xy = parts[1] ?? '  '
-      const path = parts.slice(10).join(' ')
-      if (path === '') continue
-      files.push(change(path, xy[0] ?? ' ', xy[1] ?? ' ', false))
-    } else if (kind === '?') {
-      const path = record.slice(2)
-      if (path === '') continue
-      files.push(change(path, '?', '?', true))
-    }
-    // `!`(ignored)不会出现 —— 我们没传 --ignored
-  }
-
-  return { branch, detached, unborn, upstream, ahead, behind, files, filesTruncated }
-}
-
-function change(
-  path: string,
-  index: string,
-  worktree: string,
-  untracked: boolean,
-  renamedFrom?: string
-): GitFileChange {
-  /*
-    ★ 冲突的判据是 `U`,外加 `AA`(双方都新增)和 `DD`(双方都删除)——
-    后两种 XY 里一个 U 都没有,只看 U 会把它们当成普通改动给出暂存按钮。
-  */
-  const conflicted =
-    index === 'U' ||
-    worktree === 'U' ||
-    (index === 'A' && worktree === 'A') ||
-    (index === 'D' && worktree === 'D')
-  return {
-    path,
-    renamedFrom,
-    index,
-    worktree,
-    staged: !untracked && !conflicted && index !== ' ' && index !== '?',
-    unstaged: !untracked && !conflicted && worktree !== ' ' && worktree !== '?',
-    untracked,
-    conflicted
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -513,14 +387,15 @@ export async function getGitDiff(req: {
       (它不在 index 里,没有可比的一侧)—— 直接跑的话用户点开一个新文件
       只会看到一片空白,而那看起来完全像是加载失败。
     */
-    const tracked = await run(repo.dir, ['ls-files', '--error-unmatch', '--', path])
+    const tracked = await run(repo.root, ['ls-files', '--error-unmatch', '--', path])
     if (tracked.code !== 0) return readUntracked(repo, path)
   }
 
   const args = ['diff', '--no-color']
   if (staged) args.push('--cached')
   args.push('--', path)
-  const result = await run(repo.dir, args)
+  // cwd 用仓库根:path 是仓库根相对的,见 `Repo.root` 的 ★
+  const result = await run(repo.root, args)
   if (result.code !== 0) fail(result, 'git diff 失败')
   return clampDiff(path, staged, result.stdout)
 }
@@ -529,7 +404,8 @@ export async function stageGitPaths(req: { workspaceId: string; paths: string[] 
   const repo = await requireRepo(req.workspaceId)
   const paths = safePaths(req.paths)
   // ★ `-A` 让删除也能被暂存 —— 只写 `git add <path>` 的话,删掉的文件暂存不了
-  const result = await run(repo.dir, ['add', '-A', '--', ...paths], WRITE_TIMEOUT_MS)
+  // cwd 用仓库根:paths 是仓库根相对的,见 `Repo.root` 的 ★
+  const result = await run(repo.root, ['add', '-A', '--', ...paths], WRITE_TIMEOUT_MS)
   if (result.code !== 0) fail(result, 'git add 失败')
 }
 
@@ -546,7 +422,8 @@ export async function unstageGitPaths(req: { workspaceId: string; paths: string[
     head.code === 0
       ? ['reset', '-q', 'HEAD', '--', ...paths]
       : ['rm', '-q', '--cached', '-r', '--', ...paths]
-  const result = await run(repo.dir, args, WRITE_TIMEOUT_MS)
+  // cwd 用仓库根:paths 是仓库根相对的,见 `Repo.root` 的 ★
+  const result = await run(repo.root, args, WRITE_TIMEOUT_MS)
   if (result.code !== 0) fail(result, 'git reset 失败')
 }
 
