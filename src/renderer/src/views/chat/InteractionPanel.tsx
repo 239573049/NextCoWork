@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { motion } from 'motion/react'
 import { ArrowUpRight, Check, Copy, Download, FileText, Pencil } from 'lucide-react'
 import type {
   AskUserQuestion,
@@ -15,6 +16,7 @@ import { onGoalChanged } from '../../services/goal'
 import { copyText, saveTextFile } from '../../services/app'
 import type { PlanExecutionRef } from '../../../../shared/domain/plan-file'
 import { documentKey, isDocumentDirty, useDocumentsStore } from '../../stores/documents'
+import { motionScale, useMotionLevel } from '../../theme/useMotionLevel'
 import { ActionRows, type ActionRowSpec } from './ActionRows'
 import { isEditableTarget, isSelfHandlingButton, resolveRowKey } from './interaction-keys'
 import {
@@ -143,13 +145,17 @@ function CardShell({
   return (
     <form ref={form} tabIndex={takeFocus ? -1 : undefined}
       onSubmit={onSubmit} onKeyDown={onKeyDown} data-testid="agent-interaction" data-interaction-kind={kind}
-      className="mb-2 rounded-card border border-accent-soft/40 bg-surface-raised p-3 text-fg outline-none">
-      <h2 className="mb-2 text-[13px] font-medium">{title}</h2>
-      {header}
-      <div className={`scroll-thin overflow-auto ${bodyClassName ?? 'max-h-[30vh]'}`}>{children}</div>
-      {errorKey !== null && <p role="alert" className="mt-2 text-[12px] text-danger">{t(errorKey)}</p>}
-      {busy && <p className="mt-2 text-[12px] text-fg-muted">{t('agent.interaction.sending')}</p>}
-      <div className="mt-3 flex flex-wrap items-center gap-2">{footer}</div>
+      className="mb-2 overflow-hidden rounded-card border border-stroke bg-surface-raised/80 text-fg outline-none">
+      {/* 需求：审批卡用一块中性表面承载内容，把强调色留给选择与主动作；
+          标题和多题导航固定在上方，切题或展开输入区时不能一起滚走。 */}
+      <div className="border-b border-hairline px-3 py-2.5">
+        <h2 className="text-[13px] font-medium">{title}</h2>
+        {header !== undefined && <div className="mt-2">{header}</div>}
+      </div>
+      <div className={`scroll-thin overflow-auto px-3 pt-3 pb-0.5 ${bodyClassName ?? 'max-h-[30vh]'}`}>{children}</div>
+      {errorKey !== null && <p role="alert" className="px-3 pt-2 text-[12px] text-danger">{t(errorKey)}</p>}
+      {busy && <p className="px-3 pt-2 text-[12px] text-fg-muted">{t('agent.interaction.sending')}</p>}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-hairline bg-surface/35 px-3 py-2.5">{footer}</div>
     </form>
   )
 }
@@ -269,7 +275,7 @@ function AskUserCard({ interaction, onAnswered }: {
       }}
       header={multi ? (
         // 题头可能长,窄窗口下让它横向滚,而不是把卡片撑破
-        <div className="scroll-thin mb-2 overflow-x-auto pb-1">
+        <div className="scroll-thin overflow-x-auto pb-0.5">
           <Segmented
             size="sm"
             disabled={busy}
@@ -336,6 +342,7 @@ function QuestionBlock({ question, index, options, plain, busy, picked, typed, o
   onTyped: (next: string) => void
   t: Translate
 }): ReactNode {
+  const scale = motionScale(useMotionLevel())
   const other = otherValue(question)
   const answerField = (
     <textarea
@@ -350,9 +357,16 @@ function QuestionBlock({ question, index, options, plain, busy, picked, typed, o
   )
 
   return (
-    <section data-testid="agent-question" data-question-index={index}>
+    <motion.section
+      data-testid="agent-question"
+      data-question-index={index}
+      // 需求：多题切换要像同一张审批卡内的内容推进，不能硬切得像整张卡重新挂载。
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18 * scale, ease: [0.23, 1, 0.32, 1] }}
+    >
       <div className="mb-1.5 flex items-center gap-2">
-        <span className="rounded-pill bg-tint px-2 py-0.5 text-[11px] leading-[1.6] text-fg-muted">{question.header}</span>
+        <span className="rounded-pill border border-hairline bg-surface-input/55 px-2 py-0.5 text-[11px] leading-[1.6] text-fg-muted">{question.header}</span>
         {question.multiSelect && <span className="text-[11px] text-fg-faint">{t('agent.interaction.multiSelect')}</span>}
       </div>
       <AgentMarkdown className="mb-2" content={question.question} />
@@ -363,7 +377,7 @@ function QuestionBlock({ question, index, options, plain, busy, picked, typed, o
           onToggle={onPick} renderExpanded={(option) => (option.value === other ? answerField : null)} />
         : <RadioCards value={picked[0] ?? ''} options={options} disabled={busy} ariaLabel={question.header}
           onValueChange={onPick} renderExpanded={(option) => (option.value === other ? answerField : null)} />)}
-    </section>
+    </motion.section>
   )
 }
 

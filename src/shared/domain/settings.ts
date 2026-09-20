@@ -345,6 +345,25 @@ export interface AppSettings {
    */
   proxy: ProxySettings
 
+  /**
+   * 设置 › 连接 › 搜索 底部那一小节:免 Key 的内置搜索兜底。
+   *
+   * 需求:一个搜索服务都没配(或配了但全挂)时,`web_search` 仍然应该真的搜一次,
+   * 而不是直接回一句「去配 Key」。内置链路自己带公共 SearxNG 实例,
+   * 这里存的是**用户自建的那一个实例地址**,填了就优先用它。
+   *
+   * ★ 空串 = 没填,不是 `null` —— 与 `defaultModel` / `permissionReviewerModel`
+   *   这一类「空串表示未配置」的既有写法一致,免得 patch 里多一种 `null` 语义。
+   *
+   * ★ 这是一个**机器本地**的选择(自建实例通常是 `localhost:8080`),
+   *   语义上和 `shell` 同类。目前 `shared/domain/config-sync.ts` 不搬运 `AppSettings`,
+   *   所以不需要额外标记;哪天配置同步开始覆盖设置,这一项必须留在本机。
+   */
+  builtinSearch: {
+    /** 自建 SearxNG 实例地址,空串 = 未填。校验与放宽规则见 `main/search/builtin/instances.ts` */
+    searxngUrl: string
+  }
+
   /** 设置 › 数据：只保存本机备份偏好，不包含任何云端开关。 */
   data: DataSettings
 
@@ -380,6 +399,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
   proxy: structuredClone(DEFAULT_PROXY),
+  builtinSearch: { searxngUrl: '' },
   data: { backupDirectory: null, backupFrequency: 'manual' },
   personalization: { name: '', background: '', instructions: '' },
   shortcuts: { openSettings: 'CmdOrCtrl+,' },
@@ -487,6 +507,12 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     next.proxy = { ...next.proxy, ...migrateLegacyProxy(patch.proxy) }
   }
   if (patch.data !== undefined) next.data = mergeDataSettings(next.data, patch.data)
+  // ★ 只认字符串:坏值(数字、对象)原样落库的话,内置搜索会拿着它去 `new URL()`,
+  //   表现为搜索每次都在同一处抛,而设置页看上去一切正常。trim 在这里做掉,
+  //   免得末尾一个空格让 `=== ''` 这条「没填」的判断失效。
+  if (patch.builtinSearch !== undefined && typeof patch.builtinSearch.searxngUrl === 'string') {
+    next.builtinSearch = { searxngUrl: patch.builtinSearch.searxngUrl.trim() }
+  }
   if (patch.personalization !== undefined) {
     next.personalization = mergePersonalization(next.personalization, patch.personalization)
   }
@@ -532,6 +558,7 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   gateway: true,
   notifications: true,
   proxy: true,
+  builtinSearch: true,
   data: true,
   personalization: true,
   shortcuts: true,

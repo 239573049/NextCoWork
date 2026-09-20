@@ -9,8 +9,8 @@
  * 之后都会多出一个空白的用户气泡 —— 而它长得完全像一个 bug,查起来却要
  * 一路翻到消息模型才明白。
  */
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { CheckCircle2, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
+import { memo, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
+import { CheckCircle2, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
@@ -32,6 +32,7 @@ import { InteractionPanel } from './InteractionPanel'
 import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import { readWorkspaceFile } from '../../services/workspace-files'
 import { StatusLine } from './StatusLine'
+import type { CurrentContextLimits } from './context-pressure'
 import { ToolTimeline } from './ToolTimeline'
 import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
@@ -56,6 +57,7 @@ export const Thread = memo(function Thread({
   queued,
   compactError,
   goal,
+  contextLimits,
   reportOptions,
   onEditMessage,
   onDeleteTurn,
@@ -81,6 +83,8 @@ export const Thread = memo(function Thread({
   /** 手动压缩的失败原因,由状态行显示。它在 store 里而不在 transcript 里。 */
   compactError?: string | null
   goal?: ActiveGoal
+  /** 透给状态行:此刻药丸说了算的有效窗口与最大输出。语义见 `StatusLine` 的同名 prop。 */
+  contextLimits?: CurrentContextLimits
   /**
    * 手动回传后台子代理结果时用的档位。
    *
@@ -160,7 +164,8 @@ export const Thread = memo(function Thread({
       {!readOnly && (runId !== null || sessionId !== undefined) && <InteractionPanel key={sessionId ?? runId}
         runId={runId ?? undefined} sessionId={sessionId} workspaceId={workspaceId} onOpenPlan={onOpenPlan} onExecute={onExecutePlan} />}
       <StatusLine transcript={transcript} running={running} waitingForResponse={running && needsReply}
-        lastSeq={lastSeq} queued={queued} compactError={compactError} goal={goal} />
+        lastSeq={lastSeq} queued={queued} compactError={compactError} goal={goal}
+        {...(contextLimits === undefined ? {} : { contextLimits })} />
     </div>
   )
 
@@ -373,11 +378,25 @@ function centerRank(item: SubagentState): number {
   return item.reportStatus === 'pending' || item.reportStatus === 'blocked' ? 1 : 2
 }
 
+/**
+ * 只有「成功结束且结果已经回到主代理」才算可收起的历史项。
+ *
+ * 需求：待处理、正在回传、失败和停止的任务仍要直接露出，否则默认收起会把用户
+ * 还需要关注的状态一起藏掉，表现为任务消失但主对话没有拿到结果。
+ */
+function isCompletedBackground(item: SubagentState): boolean {
+  return item.background === true && item.status === 'done' && item.reportStatus === 'reported'
+}
+
 /** 导出只为测试:面板本身仍然只由 `Thread` 挂载 */
 export function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOptions }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean; reportOptions?: SendOptions }): ReactNode {
   const { t } = useI18n()
   const openSubagent = useOpenSubagent()
   const [open, setOpen] = useState(false)
+  // 需求：折叠按钮必须关联它控制的历史任务区域，屏幕阅读器才能识别展开目标。
+  const completedItemsId = useId()
+  // 需求：任务面板首次挂载时把已归档的后台任务收起；用户手动展开后不因面板开关而丢失选择。
+  const [completedOpen, setCompletedOpen] = useState(false)
   /*
     ★★ 在跑的**前台**子代理也算一条任务。
 
@@ -391,6 +410,8 @@ export function SubagentTaskCenter({ sessionId, subagents, readOnly = false, rep
     .filter((item) => item.background === true || item.status === 'running')
     .sort((a, b) => centerRank(a) - centerRank(b))
   if (entries.length === 0) return null
+  const currentEntries = entries.filter((item) => !isCompletedBackground(item))
+  const completedEntries = entries.filter(isCompletedBackground)
   const running = entries.filter((item) => item.status === 'running').length
   /* blocked = 「结果在库里,但当时没有可用的发送档位」。对用户来说它和 pending 是同一件事:等你点一下。 */
   const pending = entries.filter((item) => item.reportStatus === 'pending' || item.reportStatus === 'blocked').length
@@ -407,6 +428,22 @@ export function SubagentTaskCenter({ sessionId, subagents, readOnly = false, rep
     }
     document.querySelector(`[data-subagent-call-id="${CSS.escape(item.callId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
+  // 需求：展开归档区后复用同一条目行为，避免历史任务和活跃任务的打开、回传动作漂移。
+  const renderEntry = (item: SubagentState): ReactNode => {
+    const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : (item.reportStatus === 'pending' || item.reportStatus === 'blocked') ? 'pending' : 'done'
+    return <div key={item.callId} data-testid="subagent-center-row" data-center-call-id={item.callId} data-center-state={state} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
+      {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
+      <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span>
+          {/* 前台和后台现在同列一张表,那这一格就得说清它是哪一种 —— 只有后台那种才会有「汇报」这一步 */}
+          {item.background === true && <span className="shrink-0 rounded-full bg-accent/10 px-1.5 py-px text-[9.5px] font-medium text-accent">{t('chat.subagent.mode.background')}</span>}
+        </span>
+        <span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span>
+      </button>
+      {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId, reportOptions)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
+    </div>
+  }
   return (
     <div className="pointer-events-none absolute right-4 top-4 z-20 flex flex-col items-end gap-2">
       <button type="button" aria-expanded={open} aria-label={t('chat.subagent.center.open')} onClick={() => setOpen((value) => !value)} className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-raised/95 px-3 py-1.5 text-[11.5px] text-fg-muted shadow-lg backdrop-blur transition hover:text-fg">
@@ -421,21 +458,15 @@ export function SubagentTaskCenter({ sessionId, subagents, readOnly = false, rep
           <button type="button" aria-label={t('common.close')} onClick={() => setOpen(false)} className="rounded p-1 text-fg-faint hover:bg-tint-hover hover:text-fg"><X size={13} /></button>
         </div>
         <div className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
-          {entries.map((item) => {
-            const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : (item.reportStatus === 'pending' || item.reportStatus === 'blocked') ? 'pending' : 'done'
-            return <div key={item.callId} data-testid="subagent-center-row" data-center-call-id={item.callId} data-center-state={state} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
-              {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
-              <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span>
-                  {/* 前台和后台现在同列一张表,那这一格就得说清它是哪一种 —— 只有后台那种才会有「汇报」这一步 */}
-                  {item.background === true && <span className="shrink-0 rounded-full bg-accent/10 px-1.5 py-px text-[9.5px] font-medium text-accent">{t('chat.subagent.mode.background')}</span>}
-                </span>
-                <span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span>
-              </button>
-              {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId, reportOptions)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
-            </div>
-          })}
+          {currentEntries.map(renderEntry)}
+          {completedEntries.length > 0 && <div className={cn(currentEntries.length > 0 && 'mt-1 border-t border-hairline pt-1')}>
+            <button type="button" data-testid="subagent-center-completed-toggle" aria-expanded={completedOpen} aria-controls={completedItemsId} onClick={() => setCompletedOpen((value) => !value)} className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-1.5 text-[10.5px] text-fg-faint hover:bg-tint-hover/60 hover:text-fg-muted">
+              <ChevronRight size={12} aria-hidden className={cn('shrink-0 transition-transform duration-200 motion-reduce:transition-none', completedOpen && 'rotate-90')} />
+              <span>{t('chat.subagent.status.done')}</span>
+              <span className="font-mono">{completedEntries.length}</span>
+            </button>
+            <div id={completedItemsId}>{completedOpen && completedEntries.map(renderEntry)}</div>
+          </div>}
         </div>
       </div>}
     </div>

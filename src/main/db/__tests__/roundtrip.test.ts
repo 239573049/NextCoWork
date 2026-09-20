@@ -20,6 +20,7 @@ import { mcpSecretRef } from '../../../shared/domain/mcp'
 import { SEARCH_PROVIDER_IDS, searchSecretRef } from '../../../shared/domain/search'
 import { DEFAULT_SETTINGS } from '../../../shared/domain/settings'
 import { MIGRATIONS } from '../schema'
+import { MIGRATION_CLAIM_KEY, MIGRATION_UNDO_KEY } from '../legacy-merge'
 import type { ModelAlias, UpstreamProvider } from '../../../shared/domain/provider'
 import { anthropicCacheTtlOf } from '../../../shared/domain/provider'
 import type { Workspace } from '../../../shared/domain/workspace'
@@ -29,6 +30,7 @@ import { store } from '../../state/store'
 import { DATABASE_DIRNAME, DATA_SUBDIRNAME, DB_FILENAME, closeDatabase, db, defaultDatabaseDirectory, openDatabase, stmt } from '../index'
 import * as repo from '../repo'
 import {
+  claimMigratedLocalWorkspaces,
   migrateLegacyLocalProvidersToCurrentAccount,
   physicalCredentialRef,
   switchConfigProfile
@@ -104,6 +106,194 @@ describe('账户上线前的供应商密钥迁移', () => {
     switchConfigProfile(null)
     expect(store.listProviders().map((item) => item.id)).toContain(p.id)
     expect(repo.getCredential(p.credentialRef)).toEqual(new Uint8Array([9, 8, 7]))
+  })
+})
+
+describe('启动数据迁移的工作区归属', () => {
+  it('复制 local 默认工作区并重连迁入会话，登录账户可见且 local 原件保留', () => {
+    const migratedWorkspace = workspace('ws-default')
+    const localWorkspace = workspace('unrelated-local-workspace')
+    store.putWorkspace(migratedWorkspace)
+    store.putWorkspace(localWorkspace)
+    const migratedSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '迁入的会话' })
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 1,
+      source: '/legacy',
+      sessions: [migratedSession.id],
+      workspaces: [],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    expect(store.listWorkspaces()).toEqual([])
+    expect(repo.getSession(migratedSession.id)).toBeUndefined()
+
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    const [accountWorkspace] = store.listWorkspaces()
+    expect(accountWorkspace?.id).not.toBe(migratedWorkspace.id)
+    expect(repo.getSession(migratedSession.id)?.workspaceId).toBe(accountWorkspace?.id)
+    expect(claimMigratedLocalWorkspaces('account-a')).toBe(0)
+
+    switchConfigProfile('account-b')
+    expect(claimMigratedLocalWorkspaces('account-b')).toBe(0)
+    expect(store.listWorkspaces()).toEqual([])
+
+    switchConfigProfile(null)
+    expect(store.listWorkspaces().map((item) => item.id)).toEqual(
+      expect.arrayContaining([migratedWorkspace.id, localWorkspace.id])
+    )
+  })
+
+  it('已有归属清单时仍会认领后来写进旧撤销清单的会话', () => {
+    const migratedWorkspace = workspace('legacy-workspace')
+    store.putWorkspace(migratedWorkspace)
+    const firstSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '先迁入的会话' })
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 1,
+      source: '/legacy',
+      sessions: [firstSession.id],
+      workspaces: [migratedWorkspace.id],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    const copiedWorkspaceId = repo.getSession(firstSession.id)?.workspaceId
+    if (copiedWorkspaceId === undefined) throw new Error('先迁入会话没有工作区副本')
+
+    switchConfigProfile(null)
+    const laterSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '降级期间迁入的会话' })
+    // 模拟旧版本覆盖其唯一的撤销清单；已有归属清单不能因此遮住这条会话。
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 2,
+      source: '/downgraded',
+      sessions: [laterSession.id],
+      workspaces: [],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    expect(repo.getSession(laterSession.id)?.workspaceId).toBe(copiedWorkspaceId)
+  })
+
+  it('用户删除迁入工作区后不在下次认领时复活空副本', () => {
+    const migratedWorkspace = workspace('legacy-workspace')
+    store.putWorkspace(migratedWorkspace)
+    const migratedSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '迁入的会话' })
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 1,
+      source: '/legacy',
+      sessions: [migratedSession.id],
+      workspaces: [],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    const copiedWorkspaceId = repo.getSession(migratedSession.id)?.workspaceId
+    if (copiedWorkspaceId === undefined) throw new Error('迁入会话没有工作区副本')
+    store.removeWorkspace(copiedWorkspaceId)
+    // 模拟旧根补回同一条会话：映射指向已删副本时不能把它再写去一个不存在的 id。
+    stmt('UPDATE sessions SET workspace_id = ? WHERE id = ?').run(migratedWorkspace.id, migratedSession.id)
+
+    expect(claimMigratedLocalWorkspaces('account-a')).toBe(0)
+    expect(repo.getSession(migratedSession.id)).toBeUndefined()
+    expect(store.listWorkspaces()).toEqual([])
+
+    switchConfigProfile(null)
+    expect(repo.getSession(migratedSession.id)?.workspaceId).toBe(migratedWorkspace.id)
+  })
+
+  it('删除旧副本后，新的待认领会话会获得新的账户工作区', () => {
+    const migratedWorkspace = workspace('legacy-workspace')
+    store.putWorkspace(migratedWorkspace)
+    const firstSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '先迁入的会话' })
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 1,
+      source: '/legacy',
+      sessions: [firstSession.id],
+      workspaces: [migratedWorkspace.id],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    const deletedWorkspaceId = repo.getSession(firstSession.id)?.workspaceId
+    if (deletedWorkspaceId === undefined) throw new Error('先迁入会话没有工作区副本')
+    store.removeWorkspace(deletedWorkspaceId)
+
+    switchConfigProfile(null)
+    const laterSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '重试迁入的会话' })
+    const claim = store.getKv<{
+      sessions: string[]
+      workspaces: string[]
+      claimedBy?: string
+      workspaceMap?: Record<string, string>
+      pending?: boolean
+    }>(MIGRATION_CLAIM_KEY, { sessions: [], workspaces: [] })
+    store.setKv(MIGRATION_CLAIM_KEY, {
+      ...claim,
+      sessions: [...claim.sessions, laterSession.id],
+      pending: true
+    })
+
+    switchConfigProfile('account-a')
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    const newWorkspaceId = repo.getSession(laterSession.id)?.workspaceId
+    expect(newWorkspaceId).not.toBe(deletedWorkspaceId)
+    expect(store.getWorkspace(newWorkspaceId ?? '')).toBeDefined()
+  })
+
+  it('远端来源降级为 unbound，且不重连到同路径的远端工作区', () => {
+    const migratedWorkspace = {
+      ...workspace('legacy-workspace'),
+      environment: { kind: 'connection' as const, connectionId: 'legacy-ssh' }
+    }
+    store.putWorkspace(migratedWorkspace)
+    const migratedSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '迁入的会话' })
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 1,
+      source: '/legacy',
+      sessions: [migratedSession.id],
+      workspaces: [migratedWorkspace.id],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    const remoteWorkspace = {
+      ...workspace('remote-workspace'),
+      rootPath: migratedWorkspace.rootPath,
+      environment: { kind: 'connection' as const, connectionId: 'ssh-workspace' }
+    }
+    store.putWorkspace(remoteWorkspace)
+
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    const copiedWorkspaceId = repo.getSession(migratedSession.id)?.workspaceId
+    expect(copiedWorkspaceId).not.toBe(remoteWorkspace.id)
+    expect(store.getWorkspace(copiedWorkspaceId ?? '')?.environment).toEqual({ kind: 'unbound' })
+    expect(store.listWorkspaces()).toHaveLength(2)
+  })
+
+  it('复用同根目录的账户工作区，不创建重复工作区', () => {
+    const migratedWorkspace = workspace('legacy-workspace')
+    store.putWorkspace(migratedWorkspace)
+    const migratedSession = store.createSession({ workspaceId: migratedWorkspace.id, title: '迁入的会话' })
+    store.setKv(MIGRATION_UNDO_KEY, {
+      at: 1,
+      source: '/legacy',
+      sessions: [migratedSession.id],
+      workspaces: [migratedWorkspace.id],
+      files: []
+    })
+
+    switchConfigProfile('account-a')
+    const accountWorkspace = { ...workspace('account-workspace'), rootPath: `${migratedWorkspace.rootPath}/` }
+    store.putWorkspace(accountWorkspace)
+
+    expect(claimMigratedLocalWorkspaces('account-a')).toBeGreaterThan(0)
+    expect(store.listWorkspaces().map((item) => item.id)).toEqual([accountWorkspace.id])
+    expect(repo.getSession(migratedSession.id)?.workspaceId).toBe(accountWorkspace.id)
   })
 })
 

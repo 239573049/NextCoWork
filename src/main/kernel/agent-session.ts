@@ -22,7 +22,7 @@ import {
   userMessage
 } from '../../shared/agent/message'
 import type { PermissionDecision } from '../../shared/agent/permission'
-import type { RunRequest } from '../../shared/agent/run-request'
+import { resolveMaxOutputTokens, type RunRequest } from '../../shared/agent/run-request'
 import type { ProviderStreamEvent, StopReason } from '../../shared/agent/stream'
 import type { ToolInfo, ToolResult } from '../../shared/agent/tool'
 import type { ModelAlias } from '../../shared/domain/provider'
@@ -32,6 +32,7 @@ import {
 } from '../../shared/domain/model-runtime'
 import type { Skill } from '../../shared/domain/skill'
 import type { SchedulingBridge } from '../../shared/domain/scheduled'
+import type { ShellBridge } from '../../shared/domain/shell'
 import type { PlanExecutionContext } from './plan-execution'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
@@ -146,6 +147,14 @@ export interface SessionDeps {
    */
   scheduling?: SchedulingBridge
   /**
+   * Agent 的 shell 注册表(前台停止句柄 + 后台进程)。缺省 = 这个环境里没有它,
+   * `BashOutput` / `KillShell` 不下发,`Bash` 的后台开关当场说明原因。
+   *
+   * ★ 形状同 `scheduling`:内核只认这个窄接口,「进程怎么起、SSH 租约谁拿着」
+   * 全部留在 `main/agent-shells.ts`。内核仍然零 electron、可单测。
+   */
+  shells?: ShellBridge
+  /**
    * 回合末的一次询问 —— 「这一轮真的可以停了吗」。
    *
    * ★★ **只有主 run 装配**（装配点在 `main/runtime.ts`）。子 run 没有「停止」这回事：
@@ -222,9 +231,6 @@ export interface SessionDeps {
    */
   resumeDelaysMs?: readonly number[]
 }
-
-/** 别名表里查不到模型时的兜底。理由见 `aliasFor`。 */
-const FALLBACK_MAX_OUTPUT = 8192
 
 export interface TurnEndInput {
   sessionId: string
@@ -722,10 +728,12 @@ export class AgentSession {
         ★ 这里给的是**有效窗口**,不是协议窗口 —— 它决定 `shouldCompact` 的分母和
         圆环的分母。协议窗口那条线在下面的 `validateModelRuntime` 里读 `alias` 原值,
         两条线**故意**不一样:默认夹在 272K 是「不越过计费线」,而不是「模型装不下」。
-        见 `shared/agent/context-management.ts` 文件头。
+        输出额度也不再直接取模型目录声明的协议上限:正文请求默认封顶 32K,避免大输出
+        模型从空会话起就挤高压力读数;低于 32K 的协议上限仍负责安全收窄。
+        见 `shared/agent/run-request.ts` 的默认值说明。
       */
       contextWindow: effectiveContextWindow(alias?.contextWindow, this.req.maxContext === true),
-      maxOutputTokens: alias?.maxOutputTokens ?? FALLBACK_MAX_OUTPUT,
+      maxOutputTokens: resolveMaxOutputTokens(alias?.maxOutputTokens),
       supportsThinking: alias?.capabilities.thinking ?? false,
       reasoningEfforts: alias?.reasoningEfforts,
       ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {}),
@@ -838,7 +846,9 @@ export class AgentSession {
           两边口径不同的话会出现「判据说该压了、硬校验却说还早」,
           而这条硬校验是 400 之前最后一道拦网 —— 它偏低就等于不存在。
         */
-        estimatedInputTokens: calibratedInputTokens
+        estimatedInputTokens: calibratedInputTokens,
+        // 需求：硬校验必须预留这次真正发送的默认额度，而不是模型目录里的较大协议上限。
+        maxOutputTokens: request.maxOutputTokens
       }).find((issue) => issue.code === 'context_length')
       if (contextIssue !== undefined) {
         this.handle.finish(
@@ -1413,7 +1423,8 @@ export class AgentSession {
       ...(this.deps.interact !== undefined ? { interact: this.deps.interact } : {}),
       ...(this.deps.canProposeGoal === undefined ? {} : { canProposeGoal: this.deps.canProposeGoal }),
       ...(this.deps.proposeGoal === undefined ? {} : { proposeGoal: this.deps.proposeGoal }),
-      ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling })
+      ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling }),
+      ...(this.deps.shells === undefined ? {} : { shells: this.deps.shells })
     }
   }
 

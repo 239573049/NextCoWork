@@ -1,9 +1,9 @@
 /**
  * `Bash` —— 在工作区里跑一条 shell 命令。
  *
- * 名字、参数(`command` / `timeout` / `description`)和描述结构都对齐 Claude Code。
- * 但有**三处必须照实说**的差异,写进描述里,一个都不能省 —— 每一处说错了,
- * 模型都会按 CC 的假设行事,然后拿到一个它无法归因的结果:
+ * 名字、参数(`command` / `timeout` / `description` / `run_in_background`)和描述结构
+ * 都对齐 Claude Code。但有**两处必须照实说**的差异,写进描述里,一个都不能省 ——
+ * 每一处说错了,模型都会按 CC 的假设行事,然后拿到一个它无法归因的结果:
  *
  * 1. ★ **不是持久会话。** CC 的原话是 "a persistent shell session";我们脚下是
  *    `SpawnFn`,每次调用现开一个 shell(见 `host.ts` 里为什么不复用交互式 PTY)。
@@ -12,9 +12,14 @@
  * 2. ★ **stdin 是关着的。** `node-spawn.ts` 用 `stdio: ['ignore', ...]`。
  *    任何等输入的命令(`git commit` 不带 `-m`、`npm login`)会挂到超时。
  *    描述里直接要求一律用非交互式参数。
- * 3. ★ **没有 `run_in_background`。** CC 有,配套还有 `BashOutput` / `KillShell`。
- *    我们没有那套后台 shell 注册表,所以**不声明这个参数** —— 声明一个不生效的
- *    开关,比缺一个功能坏得多:模型会以为自己起了个后台服务然后继续往下做。
+ *
+ * ★ **`run_in_background` 原先是刻意不声明的**,理由是「声明一个不生效的开关,
+ * 比缺一个功能坏得多:模型会以为自己起了个后台服务然后继续往下做」。那条理由
+ * 到今天仍然成立 —— 变的是它背后真的有东西了:后台 shell 注册表
+ * (`main/agent-shells.ts`)+ `BashOutput` / `KillShell` 两个配套工具。
+ * 原来的约束因此换了个落点,而不是被删掉:**没有 `ctx.shells` 的环境里
+ * (纯内核测试、无头调用),这个开关会当场返回一句说清楚的失败**,而不是
+ * 静默降级成前台执行 —— 降级同样会让模型以为自己起了后台服务。
  *
  * 另外**刻意没有**照抄 CC 描述里那一大段 git commit / PR 工作流。那是 CC 的产品行为,
  * 不是这个工具的用法;搬过来会让描述长一倍,而其中每一句都在教模型做我们没验证过的事。
@@ -22,13 +27,14 @@
 import { z } from 'zod'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import { clampWithEllipsis } from '../../text'
+import { isAbortError } from '../../abort'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
 import { NO_WORKSPACE } from './paths'
 
 /** 和 CC 一致:默认 2 分钟。 */
 const DEFAULT_TIMEOUT_MS = 120_000
-/** 和 CC 一致:最长 10 分钟。再长的活应该拆开,或者做成后台任务(还没有)。 */
+/** 和 CC 一致:最长 10 分钟。再长的活应该拆开,或者用 `run_in_background`。 */
 const MAX_TIMEOUT_MS = 600_000
 /**
  * 和 CC 一致:输出超过这个长度就截断。
@@ -52,7 +58,14 @@ const BashInput = z.object({
     .string()
     .max(200)
     .optional()
-    .describe('Clear, concise description of what this command does in 5-10 words. The user sees it in the UI')
+    .describe('Clear, concise description of what this command does in 5-10 words. The user sees it in the UI'),
+  run_in_background: z
+    .boolean()
+    .optional()
+    .describe(
+      'Set to true to start the command and return immediately. Use BashOutput to read its output later, '
+      + 'and KillShell to stop it. timeout does not apply to a background command'
+    )
 })
 
 /** 一段输出的呈现:空的时候要说「空」,不能给一段静默的空白让模型以为没读到。 */
@@ -60,6 +73,17 @@ function section(title: string, body: string): string {
   const t = body.trim()
   return t === '' ? '' : `<${title}>\n${clampWithEllipsis(t, MAX_OUTPUT_CHARS)}\n</${title}>`
 }
+
+/**
+ * 用户点了这张卡片上的停止按钮之后,给模型的那句话。
+ *
+ * ★ 措辞要同时说清三件事:是**用户**停的、**不是**命令坏了、**不要**自动重试。
+ * 只说「命令被终止」的话,模型的默认反应是换个写法再跑一遍 —— 而用户刚刚
+ * 亲手掐掉的就是这条命令,它会以为自己在帮忙。
+ */
+const STOPPED_BY_USER =
+  'The user stopped this command from the UI. It did not fail — do not run it again or work around it. '
+  + 'Ask what to do next, or continue with something else.'
 
 export const bashTool: ToolRegistration = defineTool({
   internalId: 'Bash',
@@ -82,13 +106,19 @@ export const bashTool: ToolRegistration = defineTool({
     'and execute the command inside a SINGLE call using the current shell syntax\n' +
     '- IMPORTANT: STDIN IS CLOSED. Any command that waits for input will hang until it times out: pass -m to ' +
     'git commit, pass --yes / --no-input to package managers, and never run something that needs an interactive login\n' +
+    '- Set run_in_background for a command that does not finish on its own — a dev server, a watcher, a long ' +
+    'build you want to keep working alongside. It returns a shell id immediately; read its output with ' +
+    'BashOutput and stop it with KillShell. NEVER background a command you need the result of right now, ' +
+    'and NEVER append & to fake it: a backgrounded shell is the only one whose output can still be read\n' +
     '- VERY IMPORTANT: NEVER use shell `find` or `grep` to search — use Grep and Glob. NEVER use `cat`, `head`, ' +
     '`tail`, or `ls` to read files and list directories — use Read and LS. Those tools apply the ignore list, ' +
     'skip binaries, add line numbers, and enforce a timeout; the shell equivalents do none of that\n' +
     '- Chain commands using syntax supported by the current shell. Windows PowerShell 5 does not support `&&`; ' +
     'use an explicit success check when later commands depend on earlier ones succeeding\n' +
     '- Quote paths that contain spaces: `cd "path with spaces"`\n' +
-    '- A non-zero exit code comes back to you as an error, with stdout and stderr included',
+    '- A non-zero exit code comes back to you as an error, with stdout and stderr included\n' +
+    '- The user can stop a single running command from the UI. That comes back as a tool error saying so; ' +
+    'it is not a failure of the command and must not be retried',
   schema: BashInput,
   readOnly: false,
   // ★ 破坏性:一条 shell 命令能做的事没有上界。`auto` 档下会走到「需要询问」。
@@ -97,37 +127,101 @@ export const bashTool: ToolRegistration = defineTool({
   async run(input, ctx) {
     if (ctx.workspaceRoot === '') return toolFail(NO_WORKSPACE)
 
-    const timeoutMs = input.timeout ?? DEFAULT_TIMEOUT_MS
     ctx.emit({
       callId: ctx.callId,
       message: input.description ?? clampWithEllipsis(input.command, 80)
     })
 
-    /*
-      ★ 这里**不 try/catch**。`SpawnFn` 在被中断时抛的是 abortError,而
-      `defineTool` 的契约要求中断原样往上抛(见 define.ts 文件头)。
-      在这里包一层 catch 转成 toolFail,会让「用户点了停止」表现成
-      「命令失败了」,于是模型换个写法再试一次 —— 停止按钮就失效了。
-    */
-    const r = await ctx.host.spawn(input.command, {
-      cwd: ctx.workspaceRoot,
-      signal: ctx.signal,
-      timeoutMs
-    })
-
-    const parts = [section('stdout', r.stdout), section('stderr', r.stderr)].filter((s) => s !== '')
-
-    if (r.code === 0) {
-      return toolOk(parts.length === 0 ? '(command succeeded with no output)' : parts.join('\n'))
+    if (input.run_in_background === true) {
+      /*
+        ★ 没有注册表时**明说**,不降级成前台跑。降级的话模型会拿不到 shell id
+        却以为服务已经起在后台,接着去调 `BashOutput` —— 而那时它面对的是
+        两条互相矛盾的信息,没有任何办法归因。
+      */
+      if (ctx.shells === undefined) {
+        return toolFail(
+          'Background commands are unavailable in this environment. Run the command in the foreground instead, '
+          + 'with a timeout that fits it.'
+        )
+      }
+      try {
+        const shell = await ctx.shells.start({
+          command: input.command,
+          cwd: ctx.workspaceRoot,
+          ...(input.description === undefined ? {} : { description: input.description }),
+          runId: ctx.runId,
+          callId: ctx.callId
+        })
+        return toolOk(
+          `Started in the background as shell id ${shell.id}.\n`
+          + `Read its new output with BashOutput({ bash_id: "${shell.id}" }) — each read returns only what `
+          + 'arrived since the previous one. Stop it with KillShell when you are done; it keeps running '
+          + 'across turns until then.'
+        )
+      } catch (error) {
+        return toolFail(error instanceof Error ? error.message : String(error))
+      }
     }
 
-    const head =
-      r.code === 124
-        ? `Command timed out after ${String(timeoutMs)}ms; the whole process group was killed.`
-        : `Command exited with code ${String(r.code)}.`
-    return toolFail(
-      parts.length === 0 ? `${head} (no output)` : `${head}\n${parts.join('\n')}`
+    const timeoutMs = input.timeout ?? DEFAULT_TIMEOUT_MS
+
+    /*
+      ★ 「停这一条」与「停整轮」是**两个 signal**,不能合成一个。
+
+      `ctx.signal` 是整个 run 的:它一响,`defineTool` 的契约要求把中断原样抛上去。
+      而卡片上那颗停止按钮只想掐掉这一条命令,run 要继续 —— 所以它走
+      `stopper`,并在下面被翻译成一次**工具失败**。共用一个 signal 的话,
+      用户点一条命令的停止,整段回复会跟着停在半截。
+    */
+    const stopper = new AbortController()
+    const onRunAbort = (): void => {
+      stopper.abort(ctx.signal.reason)
+    }
+    // 已经中断的 signal 不会再发事件 —— 这一行不是多余的空判,少了它
+    // 「run 已中断」这件事传不到 spawn,于是它会先把命令跑起来再被杀。
+    if (ctx.signal.aborted) onRunAbort()
+    else ctx.signal.addEventListener('abort', onRunAbort, { once: true })
+    const release = ctx.shells?.hold(
+      { runId: ctx.runId, callId: ctx.callId, command: input.command },
+      () => stopper.abort()
     )
+
+    try {
+      /*
+        ★ 这里的 catch **只认「用户停了这一条」那一种**,其余原样往上抛。
+        `SpawnFn` 在被中断时抛的是 abortError,而 `defineTool` 的契约要求中断
+        原样往上抛(见 define.ts 文件头)。把所有 abortError 都转成 toolFail 的话,
+        「用户点了整轮停止」会表现成「命令失败了」,于是模型换个写法再试一次 ——
+        停止按钮就失效了。
+      */
+      const r = await ctx.host.spawn(input.command, {
+        cwd: ctx.workspaceRoot,
+        signal: stopper.signal,
+        timeoutMs
+      })
+
+      const parts = [section('stdout', r.stdout), section('stderr', r.stderr)].filter((s) => s !== '')
+
+      if (r.code === 0) {
+        return toolOk(parts.length === 0 ? '(command succeeded with no output)' : parts.join('\n'))
+      }
+
+      const head =
+        r.code === 124
+          ? `Command timed out after ${String(timeoutMs)}ms; the whole process group was killed.`
+          : `Command exited with code ${String(r.code)}.`
+      return toolFail(
+        parts.length === 0 ? `${head} (no output)` : `${head}\n${parts.join('\n')}`
+      )
+    } catch (error) {
+      if (isAbortError(error) && !ctx.signal.aborted) return toolFail(STOPPED_BY_USER)
+      throw error
+    } finally {
+      // ★ 两个都必须还:留着的注销函数会让注册表攥住一个早就跑完的 callId,
+      //   而监听器会跟着 run 的 signal 活到 run 结束(一轮几十条命令就是几十个)。
+      release?.()
+      ctx.signal.removeEventListener('abort', onRunAbort)
+    }
   }
 })
 

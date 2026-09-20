@@ -349,6 +349,7 @@ describe('assistant turn plain text', () => {
 })
 
 describe('completed turn rendering', () => {
+  // 需求：250 回合的 DOM 压力样本不能因全套测试的 worker 争用误报超时；样本规模保持不变。
   it('retains the process subtree and user expansion when another turn starts or is removed', async () => {
     const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
     Object.assign(dom.window, { nextcowork: { on: () => () => {} } })
@@ -415,7 +416,7 @@ describe('completed turn rendering', () => {
       dom.window.close()
       vi.unstubAllGlobals()
     }
-  })
+  }, 15_000)
 })
 
 /**

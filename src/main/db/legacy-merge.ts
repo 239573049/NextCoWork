@@ -62,6 +62,8 @@ import type { MigrationErrorCode } from '../../shared/domain/data-migration'
  * 文件,下一个人清理数据时既不敢删也不知道它是干什么的。
  */
 export const MIGRATION_UNDO_KEY = 'data-migration.undo'
+/** 迁入行的账户归属交接清单。和撤销清单分开，重试 / 多来源不会改变撤销边界。 */
+export const MIGRATION_CLAIM_KEY = 'data-migration.workspace-claims'
 
 /** 附加库在 ATTACH 时用的别名。★ 固定值,所有 SQL 都按它限定源表。 */
 const SOURCE_SCHEMA = 'legacy_source'
@@ -302,13 +304,13 @@ function emptyResult(): MergeResult {
   }
 }
 
-/** 缺了哪些 id。按主键判,顺序稳定(源库的插入顺序)。 */
+/** 缺了哪些 id。按主键判，按 id 升序保证重试时进度与失败点可复现。 */
 function missingIds(d: DatabaseSync, table: string): string[] {
   if (!tableExists(d, table) || !tableExists(d, table, SOURCE_SCHEMA)) return []
   return d
     .prepare(
       `SELECT s.id AS id FROM ${SOURCE_SCHEMA}."${table}" s ` +
-        `WHERE NOT EXISTS (SELECT 1 FROM "${table}" t WHERE t.id = s.id)`
+        `WHERE NOT EXISTS (SELECT 1 FROM "${table}" t WHERE t.id = s.id) ORDER BY s.id`
     )
     .all()
     .map((r) => String(r['id']))
@@ -340,6 +342,7 @@ export function mergeLegacyRows(options: MergeOptions): MergeResult {
       target.exec('BEGIN')
       try {
         insertByIds(target, 'workspaces', columns, workspaceIds)
+        writeMigrationClaimToDatabase(target, { sessions: [], workspaces: workspaceIds })
         target.exec('COMMIT')
       } catch (err) {
         target.exec('ROLLBACK')
@@ -354,6 +357,7 @@ export function mergeLegacyRows(options: MergeOptions): MergeResult {
       target.exec('BEGIN')
       try {
         const counts = insertSession(target, sessionId)
+        writeMigrationClaimToDatabase(target, { sessions: [sessionId], workspaces: [] })
         target.exec('COMMIT')
         result.sessions += 1
         result.messages += counts.messages
@@ -608,6 +612,21 @@ export interface UndoManifest {
   files: string[]
 }
 
+/**
+ * 迁入数据的账户归属交接状态。
+ *
+ * 这份状态故意不复用 `UndoManifest`：撤销只针对最近一次合并，而多次重试 / 多个旧根
+ * 必须累积所有待重连会话；把两种边界混在一起会让「撤销本次」误删前一次迁入的数据。
+ */
+export interface MigrationClaim {
+  sessions: string[]
+  workspaces: string[]
+  claimedBy?: string
+  workspaceMap?: Record<string, string>
+  /** 有新行写进清单后设 true；账户重连完成才设 false，避免每次登录态读取全量扫描。 */
+  pending?: boolean
+}
+
 export function writeUndoManifest(targetPath: string, manifest: UndoManifest): void {
   const target = new DatabaseSync(targetPath)
   try {
@@ -642,6 +661,10 @@ export function undoMerge(targetPath: string, manifest: UndoManifest): void {
       }
       remove('sessions', manifest.sessions)
       remove('workspaces', manifest.workspaces)
+      /*
+        账户归属时创建的工作区副本故意不在这里删：合并之后用户可能已在里面新建会话、
+        修改设置或重新指向同一目录。撤销旧行不能连带删掉这些后续工作，最多留下空副本。
+      */
       target.prepare('DELETE FROM kv WHERE key = ?').run(MIGRATION_UNDO_KEY)
       target.exec('COMMIT')
     } catch (err) {
@@ -653,6 +676,152 @@ export function undoMerge(targetPath: string, manifest: UndoManifest): void {
   }
 }
 
+function manifestIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const ids = new Set<string>()
+  for (const id of value) {
+    if (typeof id === 'string' && id !== '') ids.add(id)
+  }
+  return [...ids]
+}
+
+/** 账户归属映射只接受完整的 string → string 条目，坏项绝不参与跨作用域重连。 */
+function claimWorkspaceMap(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const map: Record<string, string> = {}
+  for (const [source, target] of Object.entries(value)) {
+    if (source !== '' && typeof target === 'string' && target !== '') map[source] = target
+  }
+  return map
+}
+
+/** 读回撤销清单。没有(或存坏了)时返回 null。 */
+export function parseUndoManifest(value: unknown): UndoManifest | null {
+  if (typeof value !== 'string') return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    return {
+      at: Number(record['at'] ?? 0),
+      source: String(record['source'] ?? ''),
+      sessions: manifestIds(record['sessions']),
+      workspaces: manifestIds(record['workspaces']),
+      files: manifestIds(record['files'])
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 解析账户归属清单。它和撤销清单分开，因此不要求 source / files 字段。 */
+export function parseMigrationClaim(value: unknown): MigrationClaim | null {
+  if (typeof value !== 'string') return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    const claimedBy = typeof record['claimedBy'] === 'string' && record['claimedBy'] !== ''
+      ? record['claimedBy']
+      : undefined
+    const workspaceMap = claimWorkspaceMap(record['workspaceMap'])
+    const pending = record['pending'] === true ? true : record['pending'] === false ? false : undefined
+    return {
+      sessions: manifestIds(record['sessions']),
+      workspaces: manifestIds(record['workspaces']),
+      ...(claimedBy === undefined ? {} : { claimedBy }),
+      ...(Object.keys(workspaceMap).length === 0 ? {} : { workspaceMap }),
+      ...(pending === undefined ? {} : { pending })
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 已发布的旧版本只有撤销清单；升级后首次认领把它当成一份初始账户归属清单。 */
+export function migrationClaimFromUndo(value: unknown): MigrationClaim | null {
+  const undo = parseUndoManifest(value)
+  return undo === null ? null : { sessions: undo.sessions, workspaces: undo.workspaces }
+}
+
+/**
+ * 合并两份归属清单，并在真的发现新 id 时重新标记 pending。
+ *
+ * 需求：写入路径和读取路径都要用同一套并集规则。只在写入时合并旧撤销清单会让
+ * 「先升级、再降级迁入、又升级」那批数据被已有 claim 遮住，账户永远看不见它们。
+ */
+export function mergeMigrationClaims(
+  existing: MigrationClaim | null,
+  incoming: MigrationClaim,
+  forcePending = false
+): MigrationClaim {
+  const existingSessions = existing?.sessions ?? []
+  const existingWorkspaces = existing?.workspaces ?? []
+  const sessions = manifestIds([...existingSessions, ...incoming.sessions])
+  const workspaces = manifestIds([...existingWorkspaces, ...incoming.workspaces])
+  const added = sessions.length > existingSessions.length || workspaces.length > existingWorkspaces.length
+  const workspaceMap = { ...(incoming.workspaceMap ?? {}), ...(existing?.workspaceMap ?? {}) }
+  const claimedBy = existing?.claimedBy ?? incoming.claimedBy
+  return {
+    sessions,
+    workspaces,
+    ...(claimedBy === undefined ? {} : { claimedBy }),
+    ...(Object.keys(workspaceMap).length === 0 ? {} : { workspaceMap }),
+    pending: forcePending || existing?.pending === true || added
+  }
+}
+
+/**
+ * 累积所有待账户重连的行，独立于「只撤销最近一次」的撤销边界。
+ *
+ * 需求：行级合并按会话提交，失败后重试只会返回剩余 id。丢掉已提交那段的 id 会使它们
+ * 永远留在 local 工作区，表现为账户里只缺一部分历史会话且重试后也不会恢复。
+ */
+export function writeMigrationClaim(targetPath: string, claim: MigrationClaim): void {
+  const target = new DatabaseSync(targetPath)
+  try {
+    writeMigrationClaimToDatabase(target, claim)
+  } finally {
+    closeQuietly(target)
+  }
+}
+
+/** 读回累计归属清单；附件重试靠它找回前一次已提交、但还没搬文件的会话。 */
+export function readMigrationClaim(targetPath: string): MigrationClaim | null {
+  if (!existsSync(targetPath)) return null
+  let target: DatabaseSync | null = null
+  try {
+    target = new DatabaseSync(targetPath, { readOnly: true })
+    const row = target.prepare('SELECT json FROM kv WHERE key = ?').get(MIGRATION_CLAIM_KEY)
+    return parseMigrationClaim(row?.['json'])
+  } catch {
+    return null
+  } finally {
+    closeQuietly(target)
+  }
+}
+
+/**
+ * 把归属清单和刚提交的行放进**同一 SQLite 事务**。
+ *
+ * 需求：磁盘满等错误可能在一条会话提交后立刻让第二个连接写 kv 失败。若清单不是
+ * 同事务写入，已提交的会话没有任何可追溯 id，后续重试只会看见剩余行并把前半批
+ * 永久留在 local。
+ */
+function writeMigrationClaimToDatabase(target: DatabaseSync, claim: MigrationClaim): void {
+  const existing = parseMigrationClaim(target.prepare('SELECT json FROM kv WHERE key = ?').get(MIGRATION_CLAIM_KEY)?.['json'])
+  // 需求：旧版本随时可能把最后一批迁入行写回撤销清单。每次都把它并进归属清单，
+  // 否则已有归属清单会遮住降级期间迁入的数据，账户会永久少一部分历史。
+  const legacy = migrationClaimFromUndo(
+    target.prepare('SELECT json FROM kv WHERE key = ?').get(MIGRATION_UNDO_KEY)?.['json']
+  )
+  const base = legacy === null ? existing : mergeMigrationClaims(existing, legacy)
+  const merged = mergeMigrationClaims(base, claim, true)
+  target
+    .prepare('INSERT OR REPLACE INTO kv (key, json) VALUES (?, ?)')
+    .run(MIGRATION_CLAIM_KEY, JSON.stringify(merged))
+}
+
 /** 读回撤销清单。没有(或存坏了)时返回 null。 */
 export function readUndoManifest(targetPath: string): UndoManifest | null {
   if (!existsSync(targetPath)) return null
@@ -660,16 +829,7 @@ export function readUndoManifest(targetPath: string): UndoManifest | null {
   try {
     target = new DatabaseSync(targetPath, { readOnly: true })
     const row = target.prepare('SELECT json FROM kv WHERE key = ?').get(MIGRATION_UNDO_KEY)
-    const json = row?.['json']
-    if (typeof json !== 'string') return null
-    const parsed = JSON.parse(json) as Partial<UndoManifest>
-    return {
-      at: Number(parsed.at ?? 0),
-      source: String(parsed.source ?? ''),
-      sessions: Array.isArray(parsed.sessions) ? parsed.sessions.map(String) : [],
-      workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces.map(String) : [],
-      files: Array.isArray(parsed.files) ? parsed.files.map(String) : []
-    }
+    return parseUndoManifest(row?.['json'])
   } catch {
     // 清单坏了就当没有撤销能力 —— 但**不能**因此阻止启动。
     return null

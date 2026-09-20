@@ -641,10 +641,28 @@ const museGo = maker('opencode-go', 'USD', 'https://opencode.ai/docs/go/')
 
 const MUSE: readonly ModelPricing[] = [muse('muse-spark-1.3', 'Muse Spark 1.3', one({ input: 1.25, output: 4.25, cacheRead: 0.15 })), muse('muse-spark-1.2', 'Muse Spark 1.2', one({ input: 1.25, output: 4.25, cacheRead: 0.15 }), { source: 'https://ai.developer.meta.com/docs/models/muse-spark-1.2' }), museGo('muse-spark-1.3-contributor', 'Muse Spark 1.3 Contributor', one({ input: 0.1, output: 0.2, cacheRead: 0.002 })), museGo('muse-spark-1.2-contributor', 'Muse Spark 1.2 Contributor', one({ input: 0.1, output: 0.2, cacheRead: 0.002 }))]
 
+/* ══════════════════════════ Microsoft ══════════════════════════ */
+
+/*
+ * 需求:2026-09-20 用户点名收录 MAI-Code 1.1 Flash,并明示「定价与 GPT-5.6
+ * Luna 完全一致」(用户口径,当时无官方定价页可核)。这违反文件头第 2 条的
+ * 双源纪律,是本表唯一一次破例 —— 数字照 OPENAI 那边 `gpt-5.6-luna` 一行
+ * 逐值抄,含 272K 长上下文双档与缓存读写价。
+ * 用户随后要求**独立成行、不依赖 Luna**:这里存绝对价,目录行的
+ * pricingModelId 也是自身 id。此后两条价目各自演进 —— Luna 调价不会自动
+ * 带到这条,反过来也一样;要改这条必须带着微软官方价来。
+ * fetchedAt 沿用全表快照日(结构测试钉死全表一致),真实录入日以本注释为准。
+ */
+const microsoft = maker(null, 'USD', 'https://learn.microsoft.com/azure/ai-foundry/')
+
+const MICROSOFT: readonly ModelPricing[] = [
+  microsoft('mai-code-1.1-flash', 'MAI-Code 1.1 Flash', two(272_000, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }, { input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 })),
+]
+
 /**
  * 种子表全量。**顺序 = 界面默认顺序**(国际在前、国内在后,各自按厂商聚簇)。
  */
-export const PRICING_SEED: readonly ModelPricing[] = [...ANTHROPIC, ...OPENAI, ...GEMINI, ...XAI, ...ZHIPU, ...DEEPSEEK, ...MOONSHOT, ...QWEN, ...MINIMAX, ...MIMO, ...DOUBAO, ...BAIDU, ...HUNYUAN, ...STEPFUN, ...BAICHUAN, ...SENSENOVA, ...SPARK, ...PANGU, ...LONGCAT, ...MUSE]
+export const PRICING_SEED: readonly ModelPricing[] = [...ANTHROPIC, ...OPENAI, ...GEMINI, ...XAI, ...ZHIPU, ...DEEPSEEK, ...MOONSHOT, ...QWEN, ...MINIMAX, ...MIMO, ...DOUBAO, ...BAIDU, ...HUNYUAN, ...STEPFUN, ...BAICHUAN, ...SENSENOVA, ...SPARK, ...PANGU, ...LONGCAT, ...MUSE, ...MICROSOFT]
 
 /**
  * ★★ **故意没收进来的东西,以及为什么。**

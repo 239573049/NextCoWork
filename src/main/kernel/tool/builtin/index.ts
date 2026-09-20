@@ -19,6 +19,7 @@
  */
 import type { ToolRegistration } from '../registry'
 import { bashTool } from './bash'
+import { backgroundShellTools } from './bash-background'
 import { echoTool } from './echo'
 import { editTool, lsTool, readTool, writeTool } from './fs'
 import { globTool, grepTool } from './search'
@@ -48,6 +49,8 @@ function coreTools(): ToolRegistration[] {
     globTool,
     grepTool,
     bashTool,
+    // `Bash({ run_in_background })` 的另外两半 —— 三个一起才构成「后台命令」这件事
+    ...backgroundShellTools,
     todoWriteTool,
     webFetchTool,
     skillTool,
@@ -120,6 +123,7 @@ export function builtinTools(): ToolRegistration[] {
 }
 
 export { bashTool } from './bash'
+export { backgroundShellTools, bashOutputTool, killShellTool } from './bash-background'
 export { echoTool } from './echo'
 export { editTool, lsTool, readTool, writeTool } from './fs'
 export { globTool, grepTool } from './search'

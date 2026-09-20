@@ -66,7 +66,7 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun } from './agent'
+import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun, stopToolCall } from './agent'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
@@ -117,6 +117,7 @@ import {
   reorderSearchProviders,
   setSearchCredential,
   setSearchEnabled,
+  testBuiltinSearch,
   testSearchProvider
 } from './websearch'
 import { clearProxyPassword, getProxyPasswordInfo, setProxyPassword } from '../net/proxy'
@@ -509,6 +510,8 @@ const handlers: HandlerMap = {
     if (store.getWorkspace(workspaceId) === undefined) throw new Error('Workspace does not exist')
     return getTools().info()
   },
+  // ── Agent 的 shell:只停这一条命令,run 继续 ──
+  'shell:stopToolCall': (req, ctx) => stopToolCall(req, ctx),
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
   'terminal:prepare': (req, ctx) => terminalHost.prepare(req, ctx.sender),
@@ -532,6 +535,7 @@ const handlers: HandlerMap = {
   'websearch:setCredential': ({ id, apiKey }) => setSearchCredential(id, apiKey),
   'websearch:clearCredential': ({ id }) => clearSearchCredential(id),
   'websearch:test': ({ id }) => testSearchProvider(id),
+  'websearch:testBuiltin': () => testBuiltinSearch(),
 
   // ── 网络代理 ──
   'proxy:setPassword': ({ password }) => setProxyPassword(password),
@@ -897,5 +901,9 @@ export function registerIpc(): void {
 
 export { EMPTY_OUTER }
 export { shutdownRuns } from './agent'
-export { prepareStoredAccountScope, shutdownClientAuth } from './client-auth'
+export {
+  prepareStoredAccountScope,
+  reconcileMigratedWorkspacesForStoredAccount,
+  shutdownClientAuth
+} from './client-auth'
 export { shutdownTerminals }

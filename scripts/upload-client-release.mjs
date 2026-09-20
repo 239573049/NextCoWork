@@ -9,7 +9,7 @@
  */
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import { basename, join, resolve } from 'node:path'
@@ -36,7 +36,8 @@ Options:
   --version <version>     Version, with or without a leading v (default: package.json)
   --base-url <url>        API origin (default: https://nextco.work)
   --channel <channel>     Release channel (default: stable, beta for prereleases)
-  --notes <text>          Release notes sent to the API
+  --notes <text>          Release notes sent to the API (single-line ASCII only)
+  --notes-file <file>     Read release notes from a UTF-8 file (overrides --notes)
   --prerelease             Mark the release as a prerelease
   --mandatory              Mark the release as a mandatory update
   --minimum-supported-version <version>
@@ -48,7 +49,7 @@ Options:
 }
 
 export function parseArgs(argv) {
-  const options = { dir: 'dist', version: packageJson.version, baseUrl: DEFAULT_BASE_URL, channel: 'stable', notes: '', prerelease: false, mandatory: false, minimumSupportedVersion: '', graceUntil: '', requireAll: false, ignoreDuplicates: false, dryRun: false }
+  const options = { dir: 'dist', version: packageJson.version, baseUrl: DEFAULT_BASE_URL, channel: 'stable', notes: '', notesFile: '', prerelease: false, mandatory: false, minimumSupportedVersion: '', graceUntil: '', requireAll: false, ignoreDuplicates: false, dryRun: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { help: true, options }
@@ -57,7 +58,7 @@ export function parseArgs(argv) {
     if (arg === '--ignore-duplicates') { options.ignoreDuplicates = true; continue }
     if (arg === '--prerelease') { options.prerelease = true; continue }
     if (arg === '--mandatory') { options.mandatory = true; continue }
-    const key = { '--dir': 'dir', '--version': 'version', '--base-url': 'baseUrl', '--channel': 'channel', '--notes': 'notes', '--minimum-supported-version': 'minimumSupportedVersion', '--grace-until': 'graceUntil' }[arg]
+    const key = { '--dir': 'dir', '--version': 'version', '--base-url': 'baseUrl', '--channel': 'channel', '--notes': 'notes', '--notes-file': 'notesFile', '--minimum-supported-version': 'minimumSupportedVersion', '--grace-until': 'graceUntil' }[arg]
     if (!key || i + 1 >= argv.length) throw new Error(`Unknown or incomplete option: ${arg}`)
     options[key] = argv[++i]
   }
@@ -126,6 +127,12 @@ export async function uploadArtifacts(options, token) {
   if (!token && !options.dryRun) throw new Error('CLIENT_UPLOAD_TOKEN is required (the token is never printed)')
   // 空 channel 会一路带到请求头，被 Node 以 "Invalid value" 拒掉，报错完全看不出是这里漏了默认值。
   if (!options.channel) throw new Error('A release channel is required (e.g. --channel stable)')
+  // 需求:更新日志是多行中文,HTTP header 装不下换行和非 ASCII 字节 —— 正文 base64 后走
+  // X-Client-Release-Notes-B64;旧 X-Client-Release-Notes 只保留纯 ASCII 单行文本(兼容旧后端)。
+  // 不满足的症状:发布成功但客户端更新卡片永远显示「暂无更新说明」。
+  const notes = options.notesFile ? (await readFile(options.notesFile, 'utf8')).trim() : options.notes
+  const notesB64 = notes === '' ? '' : Buffer.from(notes, 'utf8').toString('base64')
+  const plainNotes = /^[\x20-\x7e]*$/.test(notes) ? notes : ''
   const { found, missing } = await collectArtifacts(options.dir, options.requireAll, options.version)
   if (!found.length) throw new Error(`No release artifacts found in ${resolve(options.dir)}`)
   const endpoint = new URL('/api/client/updates/upload', options.baseUrl).toString()
@@ -140,7 +147,8 @@ export async function uploadArtifacts(options, token) {
       'X-Client-Channel': options.channel,
       'X-Client-File-Name': basename(artifact.fileName),
       'X-Client-Sha256': hash,
-      'X-Client-Release-Notes': options.notes,
+      'X-Client-Release-Notes': plainNotes,
+      'X-Client-Release-Notes-B64': notesB64,
       'X-Client-Prerelease': String(options.prerelease),
       'X-Client-Artifact-Type': artifact.artifactType ?? 'installer',
       'X-Client-Mandatory': String(options.mandatory),

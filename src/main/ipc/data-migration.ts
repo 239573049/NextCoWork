@@ -25,9 +25,20 @@ import type { MigrationGate } from '../db/startup-migration'
 import { windows } from '../window/registry'
 
 let gate: MigrationGate | null = null
+let dataChangedListener: (() => void) | null = null
 
 export function installMigrationGate(instance: MigrationGate): void {
   gate = instance
+}
+
+/**
+ * 数据库打开后接上迁移完成回调。
+ *
+ * 需求：这组 IPC 在开库前就会登记，不能自己 import 会读库的模块；但运行期重试 / 撤销
+ * 又必须让账户归属和渲染缓存同步。回调由启动序列在开库后安装，开库前保持 null。
+ */
+export function setMigrationDataChangedListener(listener: (() => void) | null): void {
+  dataChangedListener = listener
 }
 
 /**
@@ -75,7 +86,11 @@ export function getMigrationState(): MigrationState {
 export async function retryMigration(): Promise<MigrationState> {
   const instance = requireGate()
   if (instance === null) return NO_GATE
-  return instance.run()
+  const state = await instance.run()
+  // 需求：失败的重试也可能按会话提交了一部分行；归属清单与每条会话同事务落盘，
+  // 必须立刻重连并刷新侧边栏，否则用户看到「重试失败」之外仍是一片空白。
+  if (state.merged !== null || state.phase === 'failed') dataChangedListener?.()
+  return state
 }
 
 export function skipMigration(): MigrationState {
@@ -89,6 +104,7 @@ export function undoMigration(): MigrationState {
   const instance = requireGate()
   if (instance === null) return NO_GATE
   instance.undo()
+  dataChangedListener?.()
   return instance.state()
 }
 

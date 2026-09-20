@@ -7,14 +7,16 @@
  * `startAgentEventPump()` **不在这里** —— 它在 App 根部起一次。
  * 放这儿的话五个 chat Tab 就是五个泵,同一批事件被 apply 五次。
  */
-import { Check, ChevronDown, Upload } from 'lucide-react'
+import { Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { greetingOf } from '../../../../shared/domain/greeting'
+import { selectModelBinding } from '../../../../shared/domain/model-selection'
 import { cacheHitRateOf, hasRun, type RunUsage, type SubagentState } from '../../../../shared/agent/transcript'
 import { tokensPerSecond } from '../../../../shared/agent/duration'
+import { effectiveContextWindow } from '../../../../shared/agent/context-management'
 import type { RunCost } from '../../../../shared/domain/pricing'
-import { latestTodosFrom, type TodoItem } from '../../../../main/kernel/tool/builtin/todo'
+import { latestTodosFrom } from '../../../../main/kernel/tool/builtin/todo'
 import { useI18n } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
 import { AgentErrorException } from '../../services/ipc'
@@ -34,9 +36,12 @@ import { Composer, type ComposerValue, type ConversationUsageSummary, type Fallb
 import { type TrayItem } from './AttachmentTray'
 import { deferAttachIntent, takeAttachIntents } from './draft-handoff'
 import { PendingQueue } from './PendingQueue'
+import { TaskChecklist } from './TaskChecklist'
 import { Thread } from './Thread'
 import { SubagentLiveFeed } from './subagent-live'
 import { SubagentOpenProvider } from './subagent-open'
+import { ToolStopProvider } from './tool-stop'
+import { stopToolCall } from '../../services/shell'
 import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
@@ -44,8 +49,7 @@ import { WorkspaceMarkdownProvider } from '../../components/markdown'
 import { branchSession, createSession, getSession, setSessionMode, setSessionModel } from '../../services/sessions'
 import { clearGoal, getGoal, setGoal } from '../../services/goal'
 import { parseGoalCommand } from '../../../../shared/domain/goal'
-import type { SendOptions, SessionMode } from '../../../../shared/agent/run-request'
-import { Spinner } from '../../components/ui/Spinner'
+import { resolveMaxOutputTokens, type SendOptions, type SessionMode } from '../../../../shared/agent/run-request'
 
 export function ChatView({
   sessionId,
@@ -235,6 +239,34 @@ export function ChatView({
     (id: string, text: string, continueRun: boolean) => editMessage(id, text, continueRun, offComposerOptions),
     [editMessage, offComposerOptions]
   )
+  /**
+   * 状态行的分母 —— **和上下文圆环同一个数**,不是上一轮请求报回来的那个。
+   *
+   * 需求:圆环的分母是本地实时算的(开「最大上下文」当帧从 272K 变 1M),而状态行
+   * 读的是 `transcript.contextUsage.window`,要到下一次发送才跟上。两者在同一屏里
+   * 打架:圆环 21%,旁边却写着「接近上限,可 /compact」和「已无可折叠的历史,
+   * 请开启摘要压缩或另起会话」—— 后者要求用户做的事,他刚在圆环里做完了。
+   *
+   * ★ 别名走 `editModel` 这条兜底链:它和药丸**同源**(会话记住的 → 工作区选过的 →
+   * 应用默认),另起一条查询的话,两个分母又会在某些路径上对不上。绑定必须再走
+   * `selectModelBinding`:裸 `models.find` 会在同名别名跨供应商时拿到与路由器不同的一家。
+   * 输出预留和正文请求一样默认封顶 32K,模型目录里更大的协议上限不再抬高它;
+   * 较小的协议上限仍安全收窄。否则压力条会比真实请求更早告警。查不到别名就不传 ——
+   * 那时没有任何本地权威可言,退回主进程的结论。
+   */
+  const contextAlias = useModelsStore((s) => selectModelBinding(
+    s.models,
+    s.providers,
+    editModel.model,
+    editModel.modelProviderId
+  ))
+  const contextLimits = useMemo(
+    () => contextAlias === undefined ? undefined : {
+      window: effectiveContextWindow(contextAlias.contextWindow, workspace.settings.maxContext === true),
+      maxOutputTokens: resolveMaxOutputTokens(contextAlias.maxOutputTokens)
+    },
+    [contextAlias, workspace.settings.maxContext]
+  )
   const started = hasRun(transcript, running)
   const conversationUsage = useMemo(
     () => summarizeConversationUsage(transcript.runUsage, transcript.usage),
@@ -271,6 +303,19 @@ export function ChatView({
       { sessionId, callId: state.callId }
     )
   }, [workspace.id, sessionId, t])
+  /*
+    需求:掐掉正在跑的**那一条**命令(见 `shell:stopToolCall` 的契约),而不是
+    停掉整轮 —— 后者是 Composer 上那颗停止按钮的职责。
+    ★ 没有 run 在跑时给 `undefined`,卡片据此根本不画按钮(见 `tool-stop.tsx`)。
+    ★ 失败静默:唯一的失败是「这条命令刚好在点击的同一刻结束」,而那时用户
+      想要的结果已经达成,弹一条错误只会让人以为出了别的事。
+  */
+  const stopRunningToolCall = useMemo(
+    () => activeRunId === null
+      ? undefined
+      : (callId: string): void => { void stopToolCall(activeRunId, callId).catch(() => {}) },
+    [activeRunId]
+  )
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
 
@@ -809,7 +854,7 @@ export function ChatView({
         <div className="w-full">
           {goalLine}
           {queue}
-          {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
+          {todos !== undefined && <TaskChecklist todos={todos} />}
           {composer}
           {transferDialog}
         </div>
@@ -828,31 +873,34 @@ export function ChatView({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <SubagentOpenProvider open={openSubagent}>
-        <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
-          <Thread
-            sessionId={sessionId ?? undefined}
-            transcript={transcript}
-            runId={activeRunId}
-            model={modelName}
-            providerName={provider?.name}
-            lastSeq={lastSeq}
-            reportOptions={offComposerOptions}
-            goal={goal}
-            queued={queuedInputs.length}
-            compactError={compactError}
-            onEditMessage={onEditMessage}
-            onDeleteTurn={deleteTurn}
-            onBranchTurn={onBranchTurn}
-            workspaceId={workspace.id}
-            onOpenPlan={openMarkdownFile}
-            onExecutePlan={executePlan}
-          />
-        </WorkspaceMarkdownProvider>
+        <ToolStopProvider stop={stopRunningToolCall}>
+          <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
+            <Thread
+              sessionId={sessionId ?? undefined}
+              transcript={transcript}
+              runId={activeRunId}
+              model={modelName}
+              providerName={provider?.name}
+              lastSeq={lastSeq}
+              reportOptions={offComposerOptions}
+              goal={goal}
+              queued={queuedInputs.length}
+              compactError={compactError}
+              {...(contextLimits === undefined ? {} : { contextLimits })}
+              onEditMessage={onEditMessage}
+              onDeleteTurn={deleteTurn}
+              onBranchTurn={onBranchTurn}
+              workspaceId={workspace.id}
+              onOpenPlan={openMarkdownFile}
+              onExecutePlan={executePlan}
+            />
+          </WorkspaceMarkdownProvider>
+        </ToolStopProvider>
       </SubagentOpenProvider>
 
       {goalLine}
       {queue}
-      {todos !== undefined && <TaskChecklist todos={todos} t={t} />}
+      {todos !== undefined && <TaskChecklist todos={todos} />}
       {composer}
       {transferDialog}
     </div>
@@ -907,16 +955,4 @@ function SessionComposer({ storeKey, ...props }: { storeKey: string } & Omit<Com
   const draft = useSession((state) => state.draft)
   const setDraft = useSession((state) => state.setDraft)
   return <Composer {...props} draft={draft} onDraft={setDraft} />
-}
-
-/**
- * 输入框上方的任务清单。默认展开，让当前任务直接显示在输入框上方；标题行
- * 仍然带有完成进度和当前进行项，用户也可以手动收起。
- */
-function TaskChecklist({ todos, t }: { todos: readonly TodoItem[]; t: ReturnType<typeof useI18n>['t'] }): ReactNode {
-  const [collapsed, setCollapsed] = useState(false)
-  const done = todos.filter((item) => item.status === 'completed').length
-  const active = todos.find((item) => item.status === 'in_progress')
-  const progress = todos.length === 0 ? 0 : done / todos.length
-  return <div className="mx-auto w-full max-w-[760px] px-6 pb-2" data-testid="task-checklist"><div className="rounded-panel border border-stroke bg-surface/60 px-3 py-2"><button type="button" aria-expanded={!collapsed} aria-controls="task-checklist-items" className="flex w-full min-w-0 items-center gap-1.5 text-left text-[12px] font-medium text-fg" onClick={() => setCollapsed((value) => !value)}><ChevronDown size={13} className={`shrink-0 transition-transform duration-200 ${collapsed ? '-rotate-90' : ''}`} /><span className="shrink-0">{t('chat.taskChecklist', { done, total: todos.length })}</span>{active !== undefined && <span className="ml-1 min-w-0 truncate font-normal text-fg-muted">· {active.activeForm}</span>}{active !== undefined && <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="ml-auto text-accent" />}{collapsed && <span className="ml-auto flex shrink-0 items-center gap-1.5"><span className="h-1.5 w-16 overflow-hidden rounded-pill bg-tint"><span className="block h-full rounded-pill bg-accent transition-[width] duration-500" style={{ width: `${progress * 100}%` }} /></span><span className="text-[10px] text-fg-faint">{Math.round(progress * 100)}%</span></span>}</button><div id="task-checklist-items" className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out ${collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100'}`}><div className="min-h-0 overflow-hidden"><ul className="scroll-thin mt-1.5 max-h-32 overflow-y-auto pl-5">{todos.map((item, i) => <li key={`${i}:${item.content}`} className={`flex gap-1.5 text-[12px] leading-relaxed ${item.status === 'completed' ? 'text-fg-faint line-through' : item.status === 'in_progress' ? 'text-fg' : 'text-fg-muted'}`}><span className="shrink-0 font-mono">{item.status === 'completed' ? <Check size={12} aria-hidden /> : item.status === 'in_progress' ? <Spinner size="xs" className="text-accent" /> : '○'}</span><span>{item.status === 'in_progress' ? item.activeForm : item.content}</span></li>)}</ul></div></div></div></div>
 }

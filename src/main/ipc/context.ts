@@ -2,6 +2,7 @@ import type { ContextCheckpoint, ContextPreview } from '../../shared/agent/conte
 import { effectiveContextWindow } from '../../shared/agent/context-management'
 import { normalizeEnvironmentRef } from '../../shared/domain/environment'
 import type { ContextPreviewRequest } from '../../shared/ipc/contract'
+import { resolveMaxOutputTokens } from '../../shared/agent/run-request'
 import { userMessage } from '../../shared/agent/message'
 import { agentRegistry } from '../kernel/agent/registry'
 import { modePromptFor, modeRegistry } from '../kernel/mode/registry'
@@ -226,7 +227,8 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
     permissionMode: req.permissionMode,
     webSearch: req.webSearch,
     contextWindow: effectiveContextWindow(alias?.contextWindow, req.maxContext === true),
-    maxOutputTokens: alias?.maxOutputTokens ?? 8192,
+    // 需求：预览装配与正文共用 32K 默认上限；当前返回值不暴露 shouldCompact，但不能让两条装配口径分叉。
+    maxOutputTokens: resolveMaxOutputTokens(alias?.maxOutputTokens),
     supportsThinking: alias?.capabilities.thinking ?? false,
     ...(alias?.reasoningEfforts !== undefined ? { reasoningEfforts: alias.reasoningEfforts } : {}),
     ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {}),

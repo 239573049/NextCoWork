@@ -19,6 +19,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  MIGRATION_CLAIM_KEY,
   MIGRATION_UNDO_KEY,
   classifyMigrationError,
   collectAttachmentFiles,
@@ -30,6 +31,7 @@ import {
   readUndoManifest,
   rewriteMergedAttachmentPaths,
   undoMerge,
+  writeMigrationClaim,
   writeUndoManifest
 } from '../legacy-merge'
 
@@ -281,6 +283,37 @@ describe('mergeLegacyRows', () => {
       's-new',
       's-old'
     ])
+  })
+
+  it('每条已提交会话与归属清单同事务落盘，后续失败不会丢掉前半批 id', () => {
+    const source = new DatabaseSync(sourcePath)
+    source.prepare('INSERT INTO workspaces VALUES (?, ?, ?)').run('z-conflict', 6000, '{"name":"冲突工作区"}')
+    source.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)').run(
+      'z-conflict',
+      'z-conflict',
+      '后面的冲突会话',
+      6000,
+      6000,
+      sourceDir
+    )
+    // `m-old` 已在目标库里，第二条会话写消息时必然回滚；`s-new` 应已完整提交。
+    source.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?)').run(
+      'm-old',
+      'z-conflict',
+      'user',
+      '"冲突消息"',
+      6000
+    )
+    source.close()
+
+    expect(() => merge()).toThrow()
+
+    const claim = rows(targetPath, `SELECT json FROM kv WHERE key = '${MIGRATION_CLAIM_KEY}'`)[0]
+    const parsed = JSON.parse(String(claim?.['json'])) as Record<string, unknown>
+    expect(parsed['sessions']).toEqual(['s-new'])
+    expect(parsed['workspaces']).toEqual(expect.arrayContaining(['w-new', 'z-conflict']))
+    expect(rows(targetPath, "SELECT id FROM sessions WHERE id = 's-new'")).toHaveLength(1)
+    expect(rows(targetPath, "SELECT id FROM sessions WHERE id = 'z-conflict'")).toEqual([])
   })
 
   it('★ 不动目标库里已有的行,哪怕源库那份更新', () => {
@@ -585,6 +618,44 @@ describe('undo', () => {
 
   it('目标库不存在时读回 null', () => {
     expect(readUndoManifest(join(root, 'nope.db'))).toBeNull()
+  })
+})
+
+describe('migration claim manifest', () => {
+  it('累积旧撤销清单、重试和多来源的会话 id，同时保留首个账户与工作区映射', () => {
+    writeUndoManifest(targetPath, {
+      at: 1,
+      source: '/pre-fix',
+      sessions: ['s-old'],
+      workspaces: ['w-shared'],
+      files: []
+    })
+    writeMigrationClaim(targetPath, {
+      sessions: ['s-new'],
+      workspaces: ['w-new'],
+      claimedBy: 'account-a',
+      workspaceMap: { 'w-shared': 'account-workspace' }
+    })
+    // 模拟用户临时降级后，旧版本覆盖最新撤销清单再迁入一批。
+    writeUndoManifest(targetPath, {
+      at: 2,
+      source: '/downgraded',
+      sessions: ['s-downgraded'],
+      workspaces: ['w-downgraded'],
+      files: []
+    })
+    writeMigrationClaim(targetPath, {
+      sessions: ['s-later'],
+      workspaces: ['w-later']
+    })
+
+    const claim = rows(targetPath, `SELECT json FROM kv WHERE key = '${MIGRATION_CLAIM_KEY}'`)[0]
+    const parsed = JSON.parse(String(claim?.['json'])) as Record<string, unknown>
+    expect(parsed['sessions']).toEqual(['s-old', 's-new', 's-downgraded', 's-later'])
+    expect(parsed['workspaces']).toEqual(['w-shared', 'w-new', 'w-downgraded', 'w-later'])
+    expect(parsed['claimedBy']).toBe('account-a')
+    expect(parsed['workspaceMap']).toEqual({ 'w-shared': 'account-workspace' })
+    expect(parsed['pending']).toBe(true)
   })
 })
 

@@ -649,6 +649,48 @@ body {
 }
 
 /*
+  Agent 活动反馈。需求：思考块和状态行要共享同一套“仍在工作”的信号，
+  但不能靠组件内定时器伪造进度；像素波和文字微光都只表达活跃，不表达百分比。
+*/
+@keyframes agent-activity-cell {
+  0%,
+  100% {
+    opacity: 0.18;
+  }
+  22%,
+  48% {
+    opacity: 1;
+  }
+}
+
+@keyframes agent-shimmer-text {
+  from {
+    background-position: 150% center;
+  }
+  to {
+    background-position: -50% center;
+  }
+}
+
+.agent-activity-cell {
+  opacity: 0.18;
+  animation: agent-activity-cell 720ms ease-in-out infinite;
+}
+
+.agent-shimmer-text {
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--color-fg-faint) 30%,
+    var(--color-fg) 50%,
+    var(--color-fg-faint) 70%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  animation: agent-shimmer-text 1.5s linear infinite;
+}
+
+/*
   系统里勾了「减弱动态效果」就别播 —— 前庭功能敏感的人看这类大块位移会晕。
   不写 0 而写 0.01ms:`transitionend` / `animationend` 照常触发,靠事件收尾的
   逻辑不会因为「动画从来没开始过」而卡住。usePresence 用的是定时器,不受影响。

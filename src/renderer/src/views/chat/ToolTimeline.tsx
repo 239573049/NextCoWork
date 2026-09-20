@@ -24,6 +24,7 @@ import { useI18n, type TranslationKey } from "../../i18n";
 import { motionScale, useMotionLevel } from "../../theme/useMotionLevel";
 import { SubagentNode, ThinkingBlock, ToolCallCard } from "./parts";
 import { ShapeStrip } from "./ToolIcon";
+import { AgentActivityGrid } from "./AgentActivity";
 import { useGroupCollapse } from "./useGroupCollapse";
 
 export function ToolTimeline({
@@ -191,28 +192,36 @@ function GroupHeader({
       onClick={onToggle}
       data-testid="tool-group"
       data-collapsed={collapsed}
-      className="flex w-full items-center gap-2 rounded-[7px] px-3 py-1.5 text-left text-[11.5px] text-fg-faint transition-colors hover:bg-tint-hover/40"
+      className={cn(
+        "flex min-h-8 w-full items-center gap-2 rounded-[7px] border px-2.5 py-1.5 text-left text-[11.5px] transition-colors",
+        collapsed
+          ? "border-stroke bg-surface-raised/55 text-fg-muted hover:bg-tint-hover/45"
+          : "border-transparent text-fg-faint hover:border-hairline hover:bg-tint-hover/35",
+      )}
     >
       <ChevronRight
         size={12}
         className={cn(
-          "shrink-0 transition-transform",
+          "shrink-0 transition-transform motion-reduce:transition-none",
           !collapsed && "rotate-90",
         )}
       />
       <ShapeStrip shapes={shapes} />
-      <span className="min-w-0 truncate">{title}</span>
+      <span className="min-w-0 flex-1 truncate">{title}</span>
       {runningCount > 0 && (
-        <span className="shrink-0 text-accent">
+        <span className="inline-flex shrink-0 items-center gap-1.5 text-accent">
+          <AgentActivityGrid />
           {t("chat.tool.runningStatus")}
         </span>
       )}
       {ms > 0 && (
-        <span className="shrink-0 font-mono">{formatDuration(ms)}</span>
+        <span className="shrink-0 rounded-[6px] border border-hairline bg-surface-input/55 px-1.5 py-0.5 font-mono text-[10.5px]">
+          {formatDuration(ms)}
+        </span>
       )}
       {/* 失败标记即使在收起态也必须可见 —— 「这里有个失败被我收起来了」 */}
       {errorCount > 0 && (
-        <span className="shrink-0 text-danger">
+        <span className="shrink-0 rounded-[6px] bg-danger/10 px-1.5 py-0.5 text-danger">
           {t("chat.failedCount", { count: errorCount })}
         </span>
       )}

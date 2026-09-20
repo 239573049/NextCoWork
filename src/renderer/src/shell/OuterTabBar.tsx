@@ -11,7 +11,7 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { ChevronDown, Folder, PanelBottom, PanelRight, Pencil, Pin, PinOff, Plus, Server, X } from "lucide-react";
+import { Check, ChevronDown, Folder, PanelBottom, PanelRight, Pencil, Pin, PinOff, Plus, Server, X } from "lucide-react";
 import { isLocalEnvironment } from '../../../shared/domain/environment';
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { FeatureKind, OuterTab } from "../../../shared/domain/tab";
@@ -41,6 +41,7 @@ export function OuterTabBar({
   onMove,
   onRenameWorkspace,
   onOpenWorkspace,
+  onEditWorkspace,
   onPickWorkspace,
   onCreateWorkspace,
   onCreateSshWorkspace,
@@ -70,6 +71,8 @@ export function OuterTabBar({
    */
   onRenameWorkspace?: (workspaceId: string, name: string) => void;
   onOpenWorkspace: (workspaceId: string) => void;
+  /** 「+」菜单里每个工作区行悬停出现的铅笔 —— 打开 `EditWorkspaceDialog`（名称/默认模型/删除）。 */
+  onEditWorkspace: (workspaceId: string) => void;
   onPickWorkspace: () => void;
   onCreateWorkspace: () => void;
   onCreateSshWorkspace: () => void;
@@ -298,22 +301,55 @@ export function OuterTabBar({
       >
         {(close) => (
           <>
-            {workspaces.map((w) => (
-              <MenuItem
-                key={w.id}
-                icon={isLocalEnvironment(w.environment) ? <Folder size={14} /> : <Server size={14} />}
-                description={w.rootPath}
-                checked={tabs.some(
-                  (t) => t.kind === "workspace" && t.ref.workspaceId === w.id,
-                )}
-                onSelect={() => {
-                  onOpenWorkspace(w.id);
-                  close();
-                }}
-              >
-                {w.name}
-              </MenuItem>
-            ))}
+            {workspaces.map((w) => {
+              const opened = tabs.some((t) => t.kind === "workspace" && t.ref.workspaceId === w.id);
+              return (
+                /*
+                  需求：每一行要同时容纳「点了就打开」和「悬停出现的编辑按钮」两个
+                  独立的可点区域 —— MenuItem 本身整行就是一个 <button>，装不下第二个
+                  嵌套按钮（无效 HTML，且两个 onClick 会互相抢事件）。所以这里改用
+                  普通 <div> 当布局容器，两个动作各自是 role="menuitem" 的 <button>，
+                  和 OuterTabBar 自己的外层 Tab 行（激活区 + 独立关闭键）同一个模式。
+                */
+                <div
+                  key={w.id}
+                  className="group/wsrow flex items-center gap-1 rounded-[7px] transition-colors hover:bg-tint-strong"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      onOpenWorkspace(w.id);
+                      close();
+                    }}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[13px] text-fg"
+                  >
+                    <span className="shrink-0 text-accent-soft">
+                      {isLocalEnvironment(w.environment) ? <Folder size={14} /> : <Server size={14} />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">{w.name}</span>
+                      <span className="mt-0.5 block truncate text-[11px] text-fg-faint">{w.rootPath}</span>
+                    </span>
+                    <Check size={14} className={cn("shrink-0 text-accent", !opened && "invisible")} />
+                  </button>
+                  <IconButton
+                    label={t("workspace.edit")}
+                    size={26}
+                    className={cn(
+                      "mr-1 shrink-0 opacity-0 transition-opacity",
+                      "group-hover/wsrow:opacity-100 focus-visible:opacity-100",
+                    )}
+                    onClick={() => {
+                      onEditWorkspace(w.id);
+                      close();
+                    }}
+                  >
+                    <Pencil size={13} />
+                  </IconButton>
+                </div>
+              );
+            })}
             <MenuSeparator />
             <MenuItem
               icon={<Folder size={14} />}

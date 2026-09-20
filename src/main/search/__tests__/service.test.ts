@@ -54,7 +54,10 @@ function routedFetch(
 function install(statuses: SearchProviderStatus[], keys: Partial<Record<string, string>> = {}): void {
   installSearchConfig({
     statuses: () => Promise.resolve(statuses),
-    apiKey: (id) => Promise.resolve(keys[id] ?? 'k-test-key-1234')
+    apiKey: (id) => Promise.resolve(keys[id] ?? 'k-test-key-1234'),
+    // 免 Key 兜底的自建实例:这些用例一律不填,于是它只会去试内置的公共实例,
+    // 而 routedFetch 没给那些域名准备响应 —— 正好是「兜底也失败」的那条路径
+    selfHostedSearxng: () => ''
   })
 }
 
@@ -97,6 +100,36 @@ describe('runSearch · 故障切换', () => {
   })
 
   /**
+   * ★ 付费链全挂之后还有一层免 Key 的内置兜底(`search/builtin/**`)。
+   * 这条用例钉的是**接线**:内置源真的被调用了,而且付费源的失败原话
+   * 一条不少地跟着结果回来 —— 丢了它,用户那个 401 的 Key 会永远错下去,
+   * 表面上「搜索还能用」。
+   */
+  it('付费链全挂时退到内置免 Key 源,并保留付费源的失败', async () => {
+    install([status('tavily')])
+    const { fn, calls } = routedFetch({
+      'api.tavily.com': () => jsonResponse({ detail: 'invalid api key' }, { status: 401 }),
+      // 第一个公共 SearxNG 实例就给出结果,于是不会再去直抓引擎
+      searx: () =>
+        jsonResponse({
+          results: [{ title: '内置结果', url: 'https://example.com/free', content: '摘要' }]
+        }),
+      // 补正文那一步:返回不可解码的类型 → 静默跳过,保留 SERP 摘要
+      'example.com/free': () => new Response('binary', { headers: { 'content-type': 'image/png' } })
+    })
+
+    const out = await runSearch('q', 5, { fetch: fn, signal: signal() })
+
+    expect(out.provider).toBe('builtin')
+    expect(out.sourceLabel).toBe('searx.be')
+    expect(out.results[0]?.url).toBe('https://example.com/free')
+    expect(out.results[0]?.snippet).toBe('摘要')
+    expect(out.failures[0]?.id).toBe('tavily')
+    expect(out.failures[0]?.message).toContain('401')
+    expect(calls.some((c) => c.includes('format=json'))).toBe(true)
+  })
+
+  /**
    * ★ 成功了也要把中途的失败带出来 —— 用户那个 401 的 Key
    * 只有在这里才有机会被看见。吞掉的话它会一直错下去。
    */
@@ -127,7 +160,16 @@ describe('runSearch · 故障切换', () => {
     const out = await runSearch('q', 5, { fetch: fn, signal: signal() })
     expect(out.results).toEqual([])
     expect(out.provider).toBeUndefined()
-    expect(out.failures.map((f) => f.id)).toEqual(['tavily', 'brave'])
+    /*
+      ★ 只看付费源那几条。付费链全挂之后还会走一遍免 Key 的内置兜底
+      (这些用例里它同样搜不到,因为假 fetch 没给那些域名准备响应),
+      它的失败标的是 `builtin`,不该把这条断言写成「一共两条」——
+      写死条数的话,以后内置链路多试一个候选,这个用例就会无故变红。
+    */
+    expect(out.failures.filter((f) => f.id !== 'builtin').map((f) => f.id)).toEqual([
+      'tavily',
+      'brave'
+    ])
     expect(out.failures[1]?.message).toContain('ECONNREFUSED')
   })
 
@@ -176,15 +218,22 @@ describe('runSearch · 根本不该进链的', () => {
     expect(calls).toHaveLength(1)
   })
 
-  it('一家都没配时返回空,且 failures 也是空', async () => {
+  /**
+   * 一家都没配**不再等于「搜不了」** —— 会直接去走免 Key 的内置兜底。
+   * 这些用例里内置源也拿不到东西(假 fetch 没给那些域名准备响应),
+   * 于是 failures 全部来自 `builtin`,而 `web_search` 正是靠
+   * 「没有一条 failure 来自付费源」判断出「用户还没配搜索服务」。
+   */
+  it('一家都没配时去走内置兜底,失败全部标成 builtin', async () => {
     install([])
     const { fn, calls } = routedFetch({})
 
     const out = await runSearch('q', 5, { fetch: fn, signal: signal() })
-    // ★ 这两个空的组合,就是 web_search 用来说「你还没配搜索服务」的依据
     expect(out.results).toEqual([])
-    expect(out.failures).toEqual([])
-    expect(calls).toEqual([])
+    expect(out.failures.length).toBeGreaterThan(0)
+    expect(out.failures.every((f) => f.id === 'builtin')).toBe(true)
+    // 真的发出去过请求:公共 SearxNG 实例 + 三家结果页
+    expect(calls.length).toBeGreaterThan(0)
   })
 
   it('没装配过就调用是接线错误,直接抛', async () => {

@@ -18,9 +18,17 @@
  *
  * 和 `WebFetch` 一样的立场,理由也一样:我们没有一个替模型读完再总结的小模型,
  * 假装有会让模型把片段当成结论去引用。描述里第一段就说清楚。
+ *
+ * ## 一家都没配时会退到免 Key 的内置源
+ *
+ * `search/service.ts` 在付费链空或全挂时会去走 `search/builtin/**`(公共 SearxNG →
+ * 直抓 SERP)。这个文件负责的是**把这件事说给模型听**:结果头部标出处、
+ * 末尾补一句可信度提示。不说的话,模型会把免费源的片段当成用户精心配置的
+ * 专业搜索结果来引用,而这两者的时效和准确度不是一个量级。
  */
 import { z } from 'zod'
 import type { SearchResult } from '../../../../shared/domain/search'
+import { BUILTIN_SOURCE_ID } from '../../../../shared/domain/search'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import { runSearch } from '../../../search/service'
 import { defineTool } from '../define'
@@ -70,7 +78,9 @@ export const webSearchTool: ToolRegistration = defineTool({
     '- Snippets may be truncated. When a snippet is not enough to answer the question, open the page with ' +
     'WebFetch instead of guessing\n' +
     '- The user can configure several search providers in priority order. A failing provider falls through to ' +
-    'the next automatically, so you do not need to retry',
+    'the next automatically, so you do not need to retry\n' +
+    '- It also works with nothing configured: a built-in key-free source takes over, and the result says so. ' +
+    'Those results are lower quality and less fresh — open the important ones with WebFetch before relying on them',
   schema: WebSearchInput,
   /*
     ★ readOnly: true —— 它确实什么也不改。联网这件事不靠 readOnly 管,
@@ -90,23 +100,49 @@ export const webSearchTool: ToolRegistration = defineTool({
 
     if (outcome.results.length === 0) {
       /*
-        分两种情况说,因为模型该做的事完全不同:
-        一个都没试过 = 用户没配服务,重试一百次也一样,该停下来告诉用户;
-        试过但全败 = 把每家的原话给模型,它可以换个搜索词再来一次。
+        分三种情况说,因为模型接下来该做的事完全不同:
+        1. 有源应答了、但确实没结果 → **换查询词是有意义的**,别让模型以为搜索坏了;
+        2. 一家都没配、内置免 Key 源也没成 → 重试一百次也一样,该停下来告诉用户去配置;
+        3. 配了但全挂、内置源也没成 → 把每家的原话给模型(Key 过期、额度用完都在里面)。
+        把这三种压成一句「搜索失败」,就会看到模型把同一个查询原样重试三遍。
       */
-      if (outcome.failures.length === 0) {
+      const notes = outcome.failures.map((f) => `- ${f.message}`).join('\n')
+
+      if (outcome.reachedEmpty === true) {
         return toolFail(
-          'No search provider is configured. Ask the user to open Settings > Connections > Search, enable one, ' +
-            'and enter its API key. Until then this tool cannot work — changing the query will not help.'
+          `The search itself worked, but no source had results for "${input.query}". ` +
+            'Rephrasing the query or using different keywords is worth a try.' +
+            (notes === '' ? '' : `\n\nDetails:\n${notes}`)
+        )
+      }
+
+      // 付费源一个都没进过链 = 用户什么都没配(内置源的失败标的是 'builtin')
+      const configured = outcome.failures.some((f) => f.id !== BUILTIN_SOURCE_ID)
+      if (!configured) {
+        return toolFail(
+          'No search provider is configured, and the built-in key-free source could not be reached either:\n' +
+            `${notes}\n\n` +
+            'Ask the user to open Settings > Connections > Search and either enable a provider with its API key, ' +
+            'or fill in their own SearxNG instance in the section at the bottom of that page. ' +
+            'Changing the query will not help.'
         )
       }
       return toolFail(
-        'Every configured search provider failed to return results:\n' +
-          outcome.failures.map((f) => `- ${f.message}`).join('\n')
+        'Every configured search provider failed, and so did the built-in key-free fallback:\n' + notes
       )
     }
 
-    const from = outcome.provider === undefined ? '' : ` (via ${outcome.provider})`
+    /*
+      ★ 内置源的出处要落到**实例/引擎的名字**上,不是「builtin」四个字母。
+      「searx.be」告诉模型和用户这条结果来自哪儿,「builtin」什么也没说。
+    */
+    const from =
+      outcome.provider === undefined
+        ? ''
+        : outcome.provider === BUILTIN_SOURCE_ID
+          ? ` (via built-in free source${outcome.sourceLabel === undefined ? '' : `: ${outcome.sourceLabel}`})`
+          : ` (via ${outcome.provider})`
+
     /*
       ★ 成功时也把中途的失败附上。用户那个填错了的 Key 只有在这里才有机会
       被看见 —— 悄悄退到下一家的话,它会一直错下去,而每次搜索都白花一次往返。
@@ -116,8 +152,19 @@ export const webSearchTool: ToolRegistration = defineTool({
         ? ''
         : `\n\n(These providers could not be used this time: ${outcome.failures.map((f) => f.message).join('; ')})`
 
+    /*
+      需求:免费源的结果必须带着「它是免费源」这句话交给模型 —— 这同时也是给用户的告知
+      (这条链路刻意不弹窗)。不带的话,模型会用引用专业搜索结果的口气引用它。
+    */
+    const caveat =
+      outcome.provider === BUILTIN_SOURCE_ID
+        ? '\n\nNOTE: these came from the built-in key-free source, which is less accurate and less fresh than a ' +
+          'configured search provider. Open anything important with WebFetch before relying on it, and tell the ' +
+          'user they can configure a provider in Settings > Connections > Search for better results.'
+        : ''
+
     return toolOk(
-      `Search results for "${input.query}"${from}:\n\n${render(outcome.results)}${notes}`
+      `Search results for "${input.query}"${from}:\n\n${render(outcome.results)}${caveat}${notes}`
     )
   }
 })

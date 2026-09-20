@@ -22,7 +22,7 @@ import {
   type HookProcessOpen,
   type HookRunReport
 } from './kernel/hook/run'
-import { shellCommandArgs, shellDialect } from './kernel/node-spawn'
+import { shellFor, shellVerbatimArguments } from './environment/shell'
 import { globalSettingsPath, localSettingsPath, readGlobalSettings, readLocalSettings } from './kernel/local-settings'
 import { getHost, getRouter } from './runtime'
 import { store } from './state/store'
@@ -70,19 +70,6 @@ function recordFailure(hook: HookDefinition, report: HookRunReport, sourcePath: 
 /** 测试专用：诊断缓冲跨用例泄漏会让下一个用例看到上一个用例的红条。 */
 export function clearHookFailuresForTest(): void {
   recentFailures.length = 0
-}
-
-/** 平台对应的 shell 调用方式。远端看 `facts.os`，本地看自己。 */
-function shellFor(environment: WorkspaceEnvironment): { command: string; args: (c: string) => string[] } {
-  if (!environment.remote) {
-    const command = environment.platform.shell
-    return { command, args: (c) => shellCommandArgs(command, c) }
-  }
-  if (environment.facts.os === 'win32') {
-    return { command: 'cmd.exe', args: (c) => ['/d', '/s', '/c', c] }
-  }
-  const command = environment.facts.shell || '/bin/sh'
-  return { command, args: (c) => ['-c', c] }
 }
 
 /**
@@ -182,7 +169,7 @@ export async function runHookEvent(context: HookEventContext): Promise<HookRunRe
       //   shell 会留下一地僵尸（见 `environment/contract.ts` 上那段）。
       environment.openProcess(command, args, {
         cwd: options.cwd, detached: true,
-        windowsVerbatimArguments: !environment.remote && environment.platform.os === 'win32' && shellDialect(command) === 'cmd'
+        windowsVerbatimArguments: shellVerbatimArguments(environment, command)
       }))
 
   const reports = await runHookChain(
@@ -355,7 +342,7 @@ export async function testHook(input: {
     open: (command, args, options) =>
       input.environment.openProcess(command, args, {
         cwd: options.cwd, detached: true,
-        windowsVerbatimArguments: !input.environment.remote && input.environment.platform.os === 'win32' && shellDialect(command) === 'cmd'
+        windowsVerbatimArguments: shellVerbatimArguments(input.environment, command)
       }),
     hook,
     scope: input.scope,

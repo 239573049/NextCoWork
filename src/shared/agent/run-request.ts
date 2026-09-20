@@ -50,6 +50,8 @@ export const THINKING_LEVEL_LABEL: Record<ThinkingLevel, string> = {
 /**
  * ThinkingLevel 映射成上游的 thinking 预算;界面原文
  * 「不支持该参数的模型将自动忽略此设置」→ 由 ModelAlias.capabilities.thinking 决定是否下发。
+ * ★ 实际预算还必须低于下面解析出的输出上限;32K 封顶后,「超高/最高」可能收敛到同一安全值,
+ * 否则 Anthropic 的 `budget_tokens >= max_tokens` 会让整次请求直接 400。
  */
 export const THINKING_BUDGET: Record<Exclude<ThinkingLevel, 'auto' | 'off'>, number> = {
   minimal: 1024,
@@ -58,6 +60,22 @@ export const THINKING_BUDGET: Record<Exclude<ThinkingLevel, 'auto' | 'off'>, num
   high: 21_333,
   higher: 32_000,
   max: 64_000
+}
+
+/**
+ * 正文请求默认最多输出 32K,模型目录里更大的协议上限不再扩张每轮预算。
+ * 不满足会怎样:大输出模型会从空会话起就挤占上下文压力读数,并让压缩过早触发。
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32_000
+
+/**
+ * 需求:32K 是正文请求的默认上限,但模型更小的协议输出上限仍是硬边界。
+ * 不满足会怎样:32K 上下文或旧模型会收到超过自身能力的额度,每次请求都直接 400。
+ */
+export function resolveMaxOutputTokens(protocolLimit: number | undefined): number {
+  return typeof protocolLimit === 'number' && Number.isFinite(protocolLimit) && protocolLimit >= 1
+    ? Math.min(DEFAULT_MAX_OUTPUT_TOKENS, Math.floor(protocolLimit))
+    : DEFAULT_MAX_OUTPUT_TOKENS
 }
 
 export interface RunRequest {

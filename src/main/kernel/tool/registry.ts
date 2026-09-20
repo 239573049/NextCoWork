@@ -9,6 +9,7 @@ import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../sh
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { Skill } from '../../../shared/domain/skill'
 import type { SchedulingBridge } from '../../../shared/domain/scheduled'
+import type { ShellBridge } from '../../../shared/domain/shell'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
@@ -129,6 +130,12 @@ export interface ToolContext {
    * 四个定时任务工具会整体不下发 —— 见 `builtin/scheduled.ts` 的 `isEnabled`。
    */
   scheduling?: SchedulingBridge
+  /**
+   * Agent 手上那些 shell(前台停止句柄 + 后台进程)。缺省 = 这个环境里
+   * 既停不了单条命令、也起不了后台命令(纯内核测试),`BashOutput` / `KillShell`
+   * 整体不下发,`Bash` 的 `run_in_background` 会当场说清楚而不是假装起了。
+   */
+  shells?: ShellBridge
   /**
    * ★ 宿主**从 ctx 传进来,不在工具里闭包捕获**。
    *

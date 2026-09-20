@@ -22,6 +22,7 @@ import { installProductionBrowserBindings, type BrowserBindings } from './browse
 import {
   flushPendingPersists,
   prepareStoredAccountScope,
+  reconcileMigratedWorkspacesForStoredAccount,
   registerIpc,
   registerMigrationIpc,
   shutdownClientAuth,
@@ -41,7 +42,11 @@ import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
 import { PROFILE_DIRECTORY_SEGMENT } from './db/config-profile'
 import { migrateFlatLayout, rewriteMigratedPaths } from './db/flat-layout'
 import { createMigrationGate, type MigrationGate } from './db/startup-migration'
-import { installMigrationGate, announceMigrationState } from './ipc/data-migration'
+import {
+  announceMigrationState,
+  installMigrationGate,
+  setMigrationDataChangedListener
+} from './ipc/data-migration'
 import { CHROMIUM_SUBDIRNAME, migrateChromiumIntoSubdir } from './db/chromium-layout'
 import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
@@ -601,6 +606,16 @@ void app
     local 的 provider/key,随后整页跳成账户配置。这里同步切一次,后面同账户调用恒等。
   */
   prepareStoredAccountScope()
+  /*
+    需求：失败后的迁移重试发生在应用已经启动之后，不能再依赖上面的启动期恢复。
+    迁移 IPC 本身不能 import 会读库的模块，所以只在这里(开库之后)接回调；每次
+    重试 / 撤销后刷新工作区与会话缓存，否则数据已变而侧边栏仍显示旧列表。
+  */
+  setMigrationDataChangedListener(() => {
+    reconcileMigratedWorkspacesForStoredAccount()
+    windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
+    windows.emitToAll('sessions:changed', { kind: 'reset' })
+  })
 
   /*
     ★ 第二段。必须排在 `openDatabase` 之后 —— 附件根目录由当前数据库目录

@@ -33,6 +33,8 @@ import { abortRun } from "../../services/agent";
 import { getSession } from "../../services/sessions";
 import { visibleText } from "../../../../shared/agent/message";
 import { useOpenSubagent } from "./subagent-open";
+import { useStopToolCall } from "./tool-stop";
+import { AgentActivityGrid, AgentShimmerText } from "./AgentActivity";
 
 /**
  * 「深度思考 N 秒」—— 截图里是一条可折叠的行,默认收起。
@@ -69,17 +71,21 @@ export function ThinkingBlock({
       >
         <ChevronRight
           size={13}
-          className={cn("shrink-0 transition-transform", open && "rotate-90")}
+          className={cn("shrink-0 transition-transform motion-reduce:transition-none", open && "rotate-90")}
         />
-        <Brain size={13} className="shrink-0 text-accent-soft" />
+        {streaming
+          ? <AgentActivityGrid className="text-accent" />
+          : <Brain size={13} className="shrink-0 text-fg-faint" />}
         <span className="min-w-0 flex-1 truncate">
-          {streaming ? t("chat.thinkingNow") : t("chat.thinking")}
+          {streaming
+            ? <AgentShimmerText>{t("chat.thinkingNow")}</AgentShimmerText>
+            : t("chat.thinking")}
         </span>
       </button>
       <SurfaceReveal open={open} className="pl-[30px]">
         <div
           ref={body}
-          className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto pr-1"
+          className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto border-l border-hairline pl-3 pr-1"
           onScroll={(event) => {
             const el = event.currentTarget;
             followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
@@ -114,6 +120,7 @@ export function ToolCallCard({
   name: string;
   input: unknown;
 }): ReactNode {
+  const { t } = useI18n();
   /**
    * `null` = 用户还没表态,按默认规则走;一旦点过就永久接管。
    *
@@ -156,6 +163,24 @@ export function ToolCallCard({
 
   const duration = call === undefined ? undefined : formatCallDuration(call);
   const summary = presenter.summary?.(shownInput, call?.output);
+  // 需求：工具的目标/进度收进紧凑 chip；底层 presenter 仍是唯一文案来源，
+  // 否则视觉替换会把插件工具和流式中的参数重新降级成通用名称。
+  const progress = call?.progress?.trim();
+  const detail = progress !== undefined && progress !== "" ? progress : summary;
+  const detailMono = presenter.shape === "read" || presenter.shape === "mutate" || presenter.shape === "command";
+  /*
+    需求：一条跑飞的命令（`npm test` 挂住、构建停不下来）要能被单独掐掉，
+    而不是只能停掉整轮回复。主进程只为 `Bash` 寄存了停止句柄，所以这里的判据是
+    presenter 里那条**能力声明**，不是「反正画上总没坏处」——
+    画一颗按下去没反应的按钮，比没有按钮难解释得多（§5 不做防御式 UI）。
+  */
+  const stopToolCall = useStopToolCall();
+  const stoppableCallId = presenter.stoppable === true && status === "running" && call !== undefined
+    ? call.callId
+    : undefined;
+  const stop = stopToolCall === undefined || stoppableCallId === undefined
+    ? undefined
+    : (): void => { stopToolCall(stoppableCallId) };
 
   return (
     <Surface
@@ -168,39 +193,50 @@ export function ToolCallCard({
       tone={status === "error" ? "danger" : "default"}
       rail={status === "error" ? "danger" : undefined}
     >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setManual(!open)}
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left text-[12.5px] transition-colors hover:bg-tint-hover/40"
-      >
-        <ChevronRight
-          size={13}
-          className={cn(
-            "shrink-0 text-fg-faint transition-transform",
-            open && "rotate-90",
-          )}
-        />
-        <ToolIcon shape={presenter.shape} status={status} />
-        <span className="min-w-0 flex-1 truncate text-fg">
-          {presenter.title(shownInput)}
-        </span>
-
-        {/* 运行中的一行进度优先于摘要 —— 它是此刻唯一在变的信息 */}
-        {call?.progress !== undefined ? (
-          <span className="max-w-[40%] shrink-0 truncate text-[11px] text-fg-faint">
-            {call.progress}
+      {/* 停止按钮是标题行的**兄弟**,不是它的子节点 —— 按钮不能套按钮(同 SubagentNode) */}
+      <div className="flex w-full min-w-0 items-center">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setManual(!open)}
+          className="flex min-h-8 min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left text-[12.5px] transition-colors hover:bg-tint-hover/40"
+        >
+          <ChevronRight
+            size={13}
+            className={cn(
+              "shrink-0 text-fg-faint transition-transform motion-reduce:transition-none",
+              open && "rotate-90",
+            )}
+          />
+          <ToolIcon shape={presenter.shape} status={status} />
+          <span className="min-w-0 flex-1 truncate font-medium text-fg">
+            {presenter.title(shownInput)}
           </span>
-        ) : (
-          summary !== undefined && (
-            <span className="max-w-[40%] shrink-0 truncate text-[11px] text-fg-faint">
-              {summary}
-            </span>
-          )
-        )}
 
-        <StatusSlot status={status} duration={duration} />
-      </button>
+          {detail !== undefined && (
+            <span className={cn(
+              "inline-flex h-5 max-w-[42%] min-w-0 shrink-0 items-center rounded-[6px] border border-hairline bg-surface-input/55 px-1.5 text-[10.5px] text-fg-muted",
+              detailMono && "font-mono",
+            )}>
+              <span className="min-w-0 truncate">{detail}</span>
+            </span>
+          )}
+
+          <StatusSlot status={status} duration={duration} />
+        </button>
+        {stop !== undefined && (
+          <button
+            type="button"
+            data-testid="tool-stop"
+            onClick={stop}
+            aria-label={t("chat.tool.stop")}
+            title={t("chat.tool.stop")}
+            className="mr-1.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-danger transition-colors hover:bg-danger/10 motion-reduce:transition-none"
+          >
+            <Square size={10} />
+          </button>
+        )}
+      </div>
 
       <SurfaceReveal open={open}>
         <ToolDetail
@@ -241,7 +277,8 @@ function StatusSlot({
   }
   if (status === "running") {
     return (
-      <span className="shrink-0 text-[11px] text-accent">
+      <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-accent">
+        <AgentActivityGrid />
         {t("chat.tool.runningStatus")}
       </span>
     );

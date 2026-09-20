@@ -18,11 +18,14 @@
 import type {
   SearchProviderId,
   SearchProviderStatus,
-  SearchResult
+  SearchResult,
+  SearchSourceId
 } from '../../shared/domain/search'
-import { searchChain, searchMeta } from '../../shared/domain/search'
+import { BUILTIN_SOURCE_ID, searchChain, searchMeta } from '../../shared/domain/search'
 import { ADAPTERS } from './adapters'
 import { withUserAgent } from './adapters/http'
+import { runBuiltinSearch } from './builtin'
+import { withTimeout } from './timeout'
 import type { AdapterDeps } from './types'
 
 /** 一家最多等多久。全败的上限是这个数乘以链长,所以不能松。 */
@@ -33,6 +36,13 @@ export interface SearchConfigSource {
   statuses(): Promise<SearchProviderStatus[]>
   /** 明文 Key。**只有这个模块调它**,工具那一侧永远拿不到 */
   apiKey(id: SearchProviderId): Promise<string | null>
+  /**
+   * 用户手填的自建 SearxNG 地址(`settings.builtinSearch.searxngUrl`),没填就是空串。
+   *
+   * 需求:免 Key 兜底要优先用用户自己那台实例。**每次调用现读** ——
+   * 和上面两个同一条理由:用户刚在设置页改完,下一次搜索就该按新值来。
+   */
+  selfHostedSearxng(): string
 }
 
 let source: SearchConfigSource | null = null
@@ -49,14 +59,24 @@ export function resetSearchConfigForTest(): void {
 
 export interface SearchOutcome {
   results: SearchResult[]
-  /** 最终是哪家给出的结果。没有结果时是 undefined */
-  provider?: SearchProviderId
+  /** 最终是哪家给出的结果。没有结果时是 undefined;免 Key 兜底给出的是 `'builtin'` */
+  provider?: SearchSourceId
+  /**
+   * 内置兜底用的那个源(实例域名或引擎名)。只有 `provider === 'builtin'` 时才有 ——
+   * 「免费源」这三个字对用户没有信息量,「searx.be」才有。
+   */
+  sourceLabel?: string
+  /**
+   * 内置兜底里「有源正常应答、但它说没有结果」。见 `builtin/index.ts` 同名字段。
+   * 付费链那边不设这个标记:那条链上零结果按「这家可能改字段名了」处理,理由见下面 runSearch 的注释。
+   */
+  reachedEmpty?: boolean
   /**
    * 一路上失败的家和原因,顺序即尝试顺序。
    * **即使最后成功了也带着** —— 「Tavily 401、退到了 Brave」这件事,
    * 用户只有在这里才看得到;成功就把它吞掉的话,那个坏掉的 Key 会一直坏下去。
    */
-  failures: Array<{ id: SearchProviderId; message: string }>
+  failures: Array<{ id: SearchSourceId; message: string }>
 }
 
 function label(id: SearchProviderId): string {
@@ -67,32 +87,11 @@ function label(id: SearchProviderId): string {
  * 给一家套上超时。
  *
  * ★ 超时**只中断这一家**,不动 `deps.signal` —— 那是整个 run 的中断信号,
- * abort 它等于把用户的整轮对话掐了。所以这里另起一个 controller,
- * 并把外面那个 signal 转发进来。
+ * abort 它等于把用户的整轮对话掐了。
+ *
+ * 实现现在住在 `./timeout.ts`:免 Key 兜底那条链路要用同一份,
+ * 两份实现里迟早有一份会退化成直接 abort 外层 signal。
  */
-async function withTimeout<T>(
-  outer: AbortSignal,
-  ms: number,
-  fn: (signal: AbortSignal) => Promise<T>
-): Promise<T> {
-  const ctl = new AbortController()
-  const onOuter = (): void => {
-    ctl.abort(outer.reason)
-  }
-  if (outer.aborted) onOuter()
-  outer.addEventListener('abort', onOuter, { once: true })
-  const timer = setTimeout(() => {
-    ctl.abort(new Error('超时'))
-  }, ms)
-  // 定时器不该拖住进程退出
-  timer.unref?.()
-  try {
-    return await fn(ctl.signal)
-  } finally {
-    clearTimeout(timer)
-    outer.removeEventListener('abort', onOuter)
-  }
-}
 
 /**
  * 搜一次。
@@ -104,6 +103,15 @@ async function withTimeout<T>(
  *    (见 `harvest.ts` 文件头)。切一下的代价是一次多余的请求,
  *    不切的代价是「搜索坏了但看起来像没搜到」—— 后者要难查得多。
  * 3. 没配 Key / 这家标了 unavailable / 没有适配器 → 根本不进链(`searchChain` 已滤)
+ *
+ * ## 付费链没出结果时会退到免 Key 的内置源
+ *
+ * 需求:一个服务都没配的用户(以及 Key 过期、额度用完的用户)也该能搜到东西,
+ * 而不是收到一句「去配 Key」就没了下文。内置源在 `builtin/` 下,不需要任何 Key。
+ *
+ * ★ 退到内置源时,付费链的 `failures` **一并带回去**。丢掉它的话,
+ * 用户那个填错的 Key 会永远错下去,而表面上「搜索还能用」—— 这和上面
+ * `failures` 注释记的是同一条理由。
  */
 export async function runSearch(
   query: string,
@@ -147,7 +155,41 @@ export async function runSearch(
     }
   }
 
-  return { results: [], failures }
+  return runFallback(query, count, failures, deps)
+}
+
+/**
+ * 付费链没给出结果时走这里。
+ *
+ * ★ 它**不抛**(除了用户中断):内置源全挂也只是多几条 failures。
+ * 抛的话,`web_search` 那三种分得很细的失败文案就全变成一句异常,
+ * 而那三种情况里模型该做的事完全不同(换查询词 / 去配 Key / 告诉用户网络不通)。
+ */
+async function runFallback(
+  query: string,
+  count: number,
+  failures: SearchOutcome['failures'],
+  deps: Pick<AdapterDeps, 'fetch'> & { signal: AbortSignal }
+): Promise<SearchOutcome> {
+  const selfHosted = source === null ? '' : source.selfHostedSearxng()
+  const builtin = await runBuiltinSearch(query, count, {
+    fetch: deps.fetch,
+    signal: deps.signal,
+    selfHostedSearxng: selfHosted
+  })
+  const all = [
+    ...failures,
+    ...builtin.failures.map((message) => ({ id: BUILTIN_SOURCE_ID, message }))
+  ]
+  if (builtin.results.length === 0) {
+    return { results: [], reachedEmpty: builtin.reachedEmpty, failures: all }
+  }
+  return {
+    results: builtin.results,
+    provider: BUILTIN_SOURCE_ID,
+    ...(builtin.sourceLabel === undefined ? {} : { sourceLabel: builtin.sourceLabel }),
+    failures: all
+  }
 }
 
 /**
@@ -185,6 +227,42 @@ export async function testProvider(
           // 通了但没结果:Key 是好的,值得说清楚,免得用户以为测试失败了
           message: '连接正常,但这次查询没有返回结果。'
         }
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * 设置页底部「内置搜索」那一小节的测试按钮。
+ *
+ * 和 `testProvider` 同一条立场:**只回通不通和用了哪个源,不回结果** ——
+ * 回结果的话这条频道就成了一个绕过工具链、绕过联网开关的搜索入口。
+ *
+ * ★ 不补正文(`enrich: false`)。用户按这个按钮是想知道「这条链路通不通」,
+ * 补正文只会让它多转最多 6 秒。
+ */
+export async function testBuiltin(
+  deps: Pick<AdapterDeps, 'fetch'> & { signal: AbortSignal },
+  now: () => number
+): Promise<{ ok: boolean; latencyMs?: number; source?: string; message?: string }> {
+  const started = now()
+  try {
+    const outcome = await runBuiltinSearch('hello', 1, {
+      fetch: deps.fetch,
+      signal: deps.signal,
+      selfHostedSearxng: source === null ? '' : source.selfHostedSearxng(),
+      enrich: false
+    })
+    const latencyMs = now() - started
+    if (outcome.results.length === 0) {
+      // 全挂时把每一层的原话给出去 —— 「不可用」三个字不能告诉用户该改什么
+      return { ok: false, latencyMs, message: outcome.failures.join(' / ') }
+    }
+    return {
+      ok: true,
+      latencyMs,
+      ...(outcome.sourceLabel === undefined ? {} : { source: outcome.sourceLabel })
+    }
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : String(err) }
   }

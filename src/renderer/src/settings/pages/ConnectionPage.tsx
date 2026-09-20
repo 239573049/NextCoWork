@@ -27,7 +27,7 @@ export function ConnectionPage(props: SettingsPageProps): ReactNode {
     case 'mcp':
       return <McpPane />
     case 'search':
-      return <SearchPane />
+      return <SearchPane {...props} />
     case 'gateway':
       return <GatewayPane {...props} />
     case 'network':

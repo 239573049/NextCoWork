@@ -40,10 +40,20 @@ import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SQLOutputValue } from 'node:sqlite'
+import type { EnvironmentRef } from '../../shared/domain/environment'
+import { normalizeEnvironmentRef } from '../../shared/domain/environment'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import { DEFAULT_SETTINGS, mergeSettings } from '../../shared/domain/settings'
 import { ulid } from '../../shared/util/id'
+import { sameRoot } from '../state/workspace-root-path'
 import { stmt, tx } from './index'
+import {
+  MIGRATION_CLAIM_KEY,
+  MIGRATION_UNDO_KEY,
+  mergeMigrationClaims,
+  migrationClaimFromUndo,
+  parseMigrationClaim
+} from './legacy-merge'
 
 /** 未登录作用域。也是 `workspaces.owner` 的默认值。 */
 export const LOCAL_CONFIG_SCOPE = 'local'
@@ -251,6 +261,201 @@ export function workspaceScopeVisible(workspaceId: string): boolean {
   const owner = workspaceScope(workspaceId)
   if (owner === null) return currentConfigScope() === LOCAL_CONFIG_SCOPE
   return owner === currentConfigScope()
+}
+
+/**
+ * 给启动数据整理迁入的会话建立当前账户专属的工作区副本。
+ *
+ * 需求：行级合并在 `openDatabase()` 之前跑，不能读取当前账户作用域，新插入行只能
+ * 先使用 `workspaces.owner` 的默认值 `local`。登录账户不重连这些会话时，迁移明明
+ * 显示成功，账户侧边栏却没有一条会话可显示。
+ *
+ * ★ 不能直接改原工作区的 owner：`ws-default` 仍是 local 的保留 id，挪走后 local
+ * 下次启动无法重新种默认工作区。这里仅复制归属清单引用的 local 工作区，并重连
+ * 清单里的会话；真正的未登录数据和其他账户的数据都留在原作用域。
+ */
+export function claimMigratedLocalWorkspaces(accountId: string): number {
+  const target = configScopeForAccount(accountId)
+  if (target === LOCAL_CONFIG_SCOPE) return 0
+  return tx(() => {
+    const row = stmt('SELECT json FROM kv WHERE key = ?').get(MIGRATION_CLAIM_KEY)
+    const storedClaim = row === undefined ? null : parseMigrationClaim(row['json'])
+    const legacyClaim = migrationClaimFromUndo(
+      stmt('SELECT json FROM kv WHERE key = ?').get(MIGRATION_UNDO_KEY)?.['json']
+    )
+    const claim = legacyClaim === null
+      ? storedClaim
+      : mergeMigrationClaims(storedClaim, legacyClaim)
+    if (claim === null) return 0
+
+    const claimedBy = claim.claimedBy ?? null
+    // 需求：一份迁入数据只属于第一个认领它的账户；不满足会怎样：切换账户后，
+    // 第二个账户会看到本不属于它的历史会话，而且没有任何跨账户访问报错。
+    if (claimedBy !== null && claimedBy !== target) return 0
+    if (claimedBy === target && claim.pending === false) return 0
+
+    const workspaceMap = { ...(claim.workspaceMap ?? {}) }
+    const sessions = migrationSessions(claim.sessions)
+    const workspaceIds = new Set<string>(claim.workspaces)
+    for (const session of sessions) {
+      workspaceIds.add(sourceWorkspaceIdFor(session.workspaceId, workspaceMap))
+    }
+
+    let changed = 0
+    let manifestChanged = false
+    const unavailableMappings = new Set<string>()
+    for (const workspaceId of workspaceIds) {
+      const mapped = workspaceMap[workspaceId]
+      if (mapped !== undefined) {
+        const targetWorkspace = stmt('SELECT owner FROM workspaces WHERE id = ?').get(mapped)
+        if (targetWorkspace !== undefined && String(targetWorkspace['owner']) === target) continue
+        // 需求：用户删掉账户里的迁入工作区后，普通登录不能复活一个空副本；但一次
+        // 新迁移会重新设 pending，必须让新增会话有可见归宿。旧会话仍保持删除态。
+        if (claim.pending === true) {
+          delete workspaceMap[workspaceId]
+          manifestChanged = true
+        } else {
+          unavailableMappings.add(workspaceId)
+          continue
+        }
+      }
+
+      const source = stmt('SELECT last_opened_at, json, owner FROM workspaces WHERE id = ?').get(workspaceId)
+      if (source === undefined) continue
+      const owner = String(source['owner'])
+      if (owner === target) {
+        workspaceMap[workspaceId] = workspaceId
+        manifestChanged = true
+        continue
+      }
+      if (owner !== LOCAL_CONFIG_SCOPE) continue
+
+      const sourceWorkspace = workspaceRecord(source['json'])
+      if (sourceWorkspace === null) {
+        console.warn(`[config-profile] 启动迁移工作区记录损坏，未认领:${workspaceId}`)
+        continue
+      }
+      const sourceEnvironment = normalizeEnvironmentRef(sourceWorkspace['environment'])
+      const rootPath = typeof sourceWorkspace['rootPath'] === 'string' ? sourceWorkspace['rootPath'] : ''
+      if (sourceEnvironment.kind === 'local' && rootPath !== '') {
+        const existing = workspaceIdForRoot(target, rootPath)
+        if (existing !== null) {
+          workspaceMap[workspaceId] = existing
+          manifestChanged = true
+          continue
+        }
+      }
+
+      // 需求：连接配置不随行级数据迁入账户作用域。远端会话仍需可见，但不能因为
+      // 复用同名本机路径而改在本机执行，所以副本明确降级成 unbound。
+      const copiedEnvironment: EnvironmentRef | undefined = sourceEnvironment.kind === 'local'
+        ? undefined
+        : { kind: 'unbound' }
+      const copiedId = ulid()
+      const json = workspaceJsonWithId(sourceWorkspace, copiedId, copiedEnvironment)
+      stmt('INSERT INTO workspaces (id, last_opened_at, json, owner) VALUES (?, ?, ?, ?)')
+        .run(copiedId, Number(source['last_opened_at'] ?? Date.now()), json, target)
+      workspaceMap[workspaceId] = copiedId
+      manifestChanged = true
+      changed += 1
+    }
+
+    for (const session of sessions) {
+      const sourceWorkspaceId = sourceWorkspaceIdFor(session.workspaceId, workspaceMap)
+      if (unavailableMappings.has(sourceWorkspaceId)) continue
+      const targetWorkspaceId = workspaceMap[sourceWorkspaceId]
+      if (targetWorkspaceId === undefined || targetWorkspaceId === session.workspaceId) continue
+      const json = sessionJsonWithWorkspaceId(session.json, targetWorkspaceId)
+      const updated = json === null
+        ? stmt('UPDATE sessions SET workspace_id = ? WHERE id = ? AND workspace_id = ?')
+          .run(targetWorkspaceId, session.id, session.workspaceId)
+        : stmt('UPDATE sessions SET workspace_id = ?, json = ? WHERE id = ? AND workspace_id = ?')
+          .run(targetWorkspaceId, json, session.id, session.workspaceId)
+      if (Number(updated.changes ?? 0) === 0) continue
+      changed += 1
+      stmt('UPDATE usage_records SET workspace_id = ? WHERE session_id = ? AND workspace_id = ?')
+        .run(targetWorkspaceId, session.id, session.workspaceId)
+      stmt('UPDATE file_change_sets SET workspace_id = ? WHERE session_id = ? AND workspace_id = ?')
+        .run(targetWorkspaceId, session.id, session.workspaceId)
+    }
+
+    if (Object.keys(workspaceMap).length > 0 &&
+      (claimedBy !== target || manifestChanged || claim.pending !== false)) {
+      stmt('INSERT INTO kv (key, json) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET json = excluded.json')
+        .run(MIGRATION_CLAIM_KEY, JSON.stringify({ ...claim, claimedBy: target, workspaceMap, pending: false }))
+    }
+    return changed
+  })
+}
+
+interface MigrationSession {
+  id: string
+  workspaceId: string
+  json: unknown
+}
+
+function migrationSessions(ids: readonly string[]): MigrationSession[] {
+  const sessions: MigrationSession[] = []
+  for (const id of ids) {
+    const row = stmt('SELECT id, workspace_id, json FROM sessions WHERE id = ?').get(id)
+    if (row === undefined) continue
+    const workspaceId = String(row['workspace_id'] ?? '')
+    if (workspaceId === '') continue
+    sessions.push({ id: String(row['id']), workspaceId, json: row['json'] })
+  }
+  return sessions
+}
+
+/** 已重连过的会话存的是副本 id，重跑时反查回 source id 才不会再复制一份。 */
+function sourceWorkspaceIdFor(workspaceId: string, map: Record<string, string>): string {
+  for (const [source, target] of Object.entries(map)) {
+    if (target === workspaceId) return source
+  }
+  return workspaceId
+}
+
+function workspaceIdForRoot(owner: string, rootPath: string): string | null {
+  for (const row of stmt('SELECT id, json FROM workspaces WHERE owner = ?').all(owner)) {
+    const workspace = workspaceRecord(row['json'])
+    // 需求：本机迁入会话只能复用本机工作区；同名远端路径不能把工具执行位置悄悄切到 SSH。
+    if (workspace === null || normalizeEnvironmentRef(workspace['environment']).kind !== 'local') continue
+    const candidate = typeof workspace['rootPath'] === 'string' ? workspace['rootPath'] : null
+    if (candidate !== null && sameRoot(candidate, rootPath)) return String(row['id'])
+  }
+  return null
+}
+
+function workspaceRecord(json: unknown): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(String(json))
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+function workspaceJsonWithId(
+  workspace: Record<string, unknown>,
+  id: string,
+  environment: EnvironmentRef | undefined
+): string {
+  return JSON.stringify({
+    ...workspace,
+    id,
+    ...(environment === undefined ? {} : { environment })
+  })
+}
+
+function sessionJsonWithWorkspaceId(json: unknown, workspaceId: string): string | null {
+  try {
+    const value: unknown = JSON.parse(String(json))
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+    return JSON.stringify({ ...value, workspaceId })
+  } catch {
+    return null
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

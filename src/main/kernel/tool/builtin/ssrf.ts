@@ -26,9 +26,17 @@
  * ## 这道闸拦不住什么(照实记下来)
  *
  * **DNS 重绑定**:`evil.com` 第一次解析成公网 IP、第二次解析成 `127.0.0.1`。
- * 字面量筛查看不见它。`web.ts` 里另有一层「解析出来的地址也过一遍
- * `isPrivateAddress`」的尽力而为的检查,但那一层和真正发请求之间仍然有时间窗。
+ * 字面量筛查看不见它,要靠调用方自己在拿到解析结果后再过一遍 `isPrivateAddress`
+ * (`resolvedAddressRisk` 就是干这个的),而那一层和真正发请求之间仍然有时间窗。
  * 彻底解决要把连接固定到已校验的 IP 上(自定义 agent + `lookup`),不在这一批。
+ *
+ * ## 主机名判断可以被调用方关掉
+ *
+ * `ssrfRisk` 第二个参数 `{ allowPrivateAddresses: true }` 会跳过环回/私网/本地
+ * 域名后缀那一段判断,只留协议白名单和凭证拦截。`browser.ts`、`web.ts`(即
+ * `WebFetch`、浏览器工具那一族)按工作区所有者的要求传了这个选项,因此不再
+ * 拦截本机和内网地址——具体动机和风险写在 `SsrfRiskOptions` 上。`search/builtin/*`
+ * 没有传,继续拦截。
  */
 
 import { promises as dns } from 'node:dns'
@@ -134,8 +142,28 @@ function isPrivateV4(v: number): boolean {
  */
 const LOCAL_SUFFIXES = ['.localhost', '.local', '.internal', '.intranet', '.home.arpa', '.lan']
 
+export interface SsrfRiskOptions {
+  /**
+   * 需求：工作区所有者在 2026-09-20 明确要求 `WebFetch` / 浏览器工具能够触达
+   * 用户自己机器上的本地服务（localhost、内网设备），并在确认过下面这条风险后
+   * 仍要求继续——传 `true` 时跳过本函数里「主机是不是环回/私网地址」这一段判断。
+   *
+   * ★ 风险如实记下：这个 URL 不一定是用户自己敲的，也可能来自一段被投毒的网页
+   * 正文、一条 Skill 正文、一个 MCP 工具的返回值。放开之后，被投毒的内容可以
+   * 诱导模型去请求本机没鉴权的调试端口、内网设备，或云厂商的实例元数据端点
+   * （`169.254.169.254`）—— 且不会再被这里拦下并报错。
+   *
+   * 协议白名单（只认 http/https）和 URL 内嵌凭证（`user:pass@`）的拦截和「是不是
+   * 内网」无关，不受这个开关影响，任何调用方都躲不过去。
+   *
+   * 内置搜索（`search/builtin/*`）抓的是任意搜索结果域名，暴露面比用户主动指挥的
+   * 浏览器工具/WebFetch 大得多，所以它没有传这个选项，继续拦截私网地址。
+   */
+  allowPrivateAddresses?: boolean
+}
+
 /** 有风险就返回给模型看的说明,没有就返回 `null`。 */
-export function ssrfRisk(url: URL): string | null {
+export function ssrfRisk(url: URL, options: SsrfRiskOptions = {}): string | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return (
       `Only http and https are supported, not "${url.protocol}". ` +
@@ -151,6 +179,8 @@ export function ssrfRisk(url: URL): string | null {
     return 'The URL must not carry a username or password. Remove the "user:pass@" part and try again.'
   }
 
+  if (options.allowPrivateAddresses === true) return null
+
   const host = url.hostname.toLowerCase()
 
   if (host === 'localhost' || isPrivateAddress(host)) return refuseLocal(host)
@@ -161,11 +191,13 @@ export function ssrfRisk(url: URL): string | null {
 }
 
 /**
- * 对域名做一次尽力而为的 DNS 层筛查。
+ * 对域名做一次尽力而为的 DNS 层筛查:域名解析出来的地址也得是公网的。
  *
- * `ssrfRisk` 负责 URL 字面量，不能发现 `public.example` 解析到
- * `127.0.0.1` 的情况。浏览器工具会在每一跳请求前调用这里；DNS 不可用时
- * 保持和 WebFetch 一致的可用性策略，交给底层请求自行失败。
+ * `ssrfRisk` 负责 URL 字面量，不能发现 `public.example` 解析到 `127.0.0.1`
+ * 的情况。`browser.ts`/`web.ts` 目前都传了 `allowPrivateAddresses: true`（见
+ * `SsrfRiskOptions`），私网地址本身已经放行，所以它们不再调用这个函数 ——
+ * 但函数本体保留、测试保留：一旦某个调用方需要「域名允许，但解析到内网就该拦」
+ * 这种更细的策略，可以直接复用，不必重写。
  */
 export async function resolvedAddressRisk(
   hostname: string,

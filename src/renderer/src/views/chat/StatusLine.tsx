@@ -7,7 +7,9 @@
  * 而且改文案会莫名其妙挂掉 e2e。
  *
  * 两样数据都是已有事件的直接投影(方案 §8):`message_start.model`、`context_usage`。
- * 不新增任何数据。
+ * 不新增任何数据。**例外是压力条的分母**:它跟圆环一样走本地权威(`contextLimits`),
+ * 否则用户开「最大上下文」之后,这一行会在下一次发送之前一直按旧窗口催他压缩。
+ * 分子仍然只来自事件 —— 见 `context-pressure.ts`。
  *
  * ★ **流式过程中不报 token 读数。** 它只在每次请求结束时跳一下,中间一直定在
  * 一个旧数上 —— 看着像卡住;而真要看用量,回复下方的「任务用量」给的是整轮的
@@ -20,11 +22,13 @@ import { agentErrorText } from '../../i18n/agent'
 import { hasRun } from '../../../../shared/agent/transcript'
 import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
 import { activitySnapshotOf, whimsyBucketOf, type ActivitySnapshot } from '../../../../shared/domain/activity'
+import { contextPressure, type CurrentContextLimits } from './context-pressure'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { whimsyEn, whimsyZh } from '../../i18n/whimsy'
 import type { Locale } from '../../i18n'
 import { Spinner } from '../../components/ui/Spinner'
+import { AgentActivityGrid, AgentShimmerText } from './AgentActivity'
 
 /**
  * 4 秒:比读完一个词慢得多,又比「一直不动」快得多。
@@ -58,7 +62,8 @@ export function StatusLine({
   lastSeq,
   queued,
   compactError,
-  goal
+  goal,
+  contextLimits
 }: {
   transcript: TranscriptState
   running: boolean
@@ -68,6 +73,15 @@ export function StatusLine({
   /** 手动压缩(`/compact` 或双击圆环)的失败原因。自动压缩走 `contextStatus`。 */
   compactError?: string | null
   goal?: ActiveGoal
+  /**
+   * **此刻**药丸说了算的有效窗口与最大输出 —— 和上下文圆环同源。
+   *
+   * 需求:用户中途打开「最大上下文」之后,这一行的分母和那句「接近上限」要当帧
+   * 跟着变,而不是等到下一次发送。为什么这里不能只靠 `transcript.contextUsage`、
+   * 以及本地重判为什么不会比主进程宽松,见 `context-pressure.ts` 的文件头。
+   * 只读面板(子代理)查不到药丸,不传 —— 那时退回主进程给的结论。
+   */
+  contextLimits?: CurrentContextLimits
 }): ReactNode {
   const { t, locale } = useI18n()
   const { status, model, contextUsage, notice, contextStatus } = transcript
@@ -90,10 +104,8 @@ export function StatusLine({
       ? t('chat.status.retrying', { attempt: notice.attempt, reason: notice.reason })
       : t('chat.status.providerSwitched', { to: notice.to, reason: notice.reason })
 
-  const ratio =
-    contextUsage === undefined || contextUsage.window === 0
-      ? 0
-      : Math.min(1, contextUsage.used / contextUsage.window)
+  const pressure = contextPressure(contextUsage, contextLimits)
+  const ratio = pressure?.ratio ?? 0
 
   /*
     ★ **`fallback` 不是故障。** 它是默认配置下每一次自动压缩的正常结果
@@ -103,7 +115,16 @@ export function StatusLine({
   */
   const compaction = compactionLine({
     t, phase: contextStatus?.phase, showCompacted, compactError,
-    saved: savedTokens(transcript)
+    saved: savedTokens(transcript),
+    /*
+      需求:`exhausted` 那句(「已无可折叠的历史,请开启摘要压缩或另起会话」)
+      要求用户去做一件事,而**把窗口放开正是那件事之一**。用户在圆环里打开
+      「最大上下文」之后,这句话依据的那次判断已经不成立了,它却要挂到下一次
+      发送才回落 —— 表现为界面在催用户做一件他刚做完的事。所以窗口被改过、
+      且按新窗口重判已经不再接近上限时,不再说它。`fallback` / `error` 不受影响:
+      那两句是事后播报,说的是上一轮真的发生过什么。
+    */
+    windowResolved: pressure?.rescaled === true && !pressure.nearLimit
   })
 
   return (
@@ -134,7 +155,7 @@ export function StatusLine({
           色板里没有 warning 这一档,不为这一处新造一个 token。 */}
       <span role="status" className={cn('inline-flex items-center gap-1.5',
         noticeText !== undefined ? 'text-danger' : running && 'text-accent')}>
-        {running && <Spinner size="xs" />}
+        {running && <AgentActivityGrid />}
         {noticeText ?? (running && (waitingForResponse || status === 'running') ? (
           /*
             ★ 读屏拿到的是那句**不动**的「正在等待回复…」/「运行中」,轮换的词 aria-hidden。
@@ -147,7 +168,7 @@ export function StatusLine({
             <span className="sr-only">
               {t(waitingForResponse ? 'chat.status.waitingResponse' : 'chat.status.running')}
             </span>
-            <span aria-hidden>{whimsy}</span>
+            <span aria-hidden><AgentShimmerText>{whimsy}</AgentShimmerText></span>
           </>
         ) : t(`chat.status.${status}`))}
       </span>
@@ -176,12 +197,14 @@ export function StatusLine({
 
       <div className="flex-1" />
 
-      {contextUsage !== undefined && (ratio >= PRESSURE_SHOW || contextUsage.shouldCompact) && (
+      {pressure !== undefined && (ratio >= PRESSURE_SHOW || pressure.nearLimit) && (
         <div
           className="flex items-center gap-1.5"
-          title={t('chat.contextTooltip', { used: contextUsage.used, window: contextUsage.window })}
+          /* 提示里写的是**此刻**的分母(可能刚被药丸改过),不是 `contextUsage.window` ——
+             两个数不一致时,用户照着圆环去对的是前者。 */
+          title={t('chat.contextTooltip', { used: contextUsage?.used ?? 0, window: contextLimits?.window ?? contextUsage?.window ?? 0 })}
         >
-          {contextUsage.shouldCompact && (
+          {pressure.nearLimit && (
             // 上下文用尽是这类应用最高频的失败(方案 §4.2)。逼近上限时
             // 明说该怎么办,而不是等它 400 之后再报一个 context_length。
             <span className="text-accent">{t('chat.contextNearLimit')}</span>
@@ -259,13 +282,15 @@ function Dot(): ReactNode {
  * 他要看的是那一下的结果,而不是上一轮自动压缩留下的读数。
  */
 function compactionLine({
-  t, phase, showCompacted, compactError, saved
+  t, phase, showCompacted, compactError, saved, windowResolved = false
 }: {
   t: ReturnType<typeof useI18n>['t']
   phase: ContextStatusPhase | undefined
   showCompacted: boolean
   compactError?: string | null
   saved?: number
+  /** 窗口刚被放开,`exhausted` 那句要求的动作已经做过了 —— 见调用点。 */
+  windowResolved?: boolean
 }): { text: string; tone: 'danger' | 'accent' | 'muted'; spinner: boolean; detail?: string } | undefined {
   if (compactError !== undefined && compactError !== null && compactError !== '') {
     // 原始报错进 title:它常常是一整句上游错误,铺在状态行上会把这一行撑爆,
@@ -291,6 +316,7 @@ function compactionLine({
       混进「已折叠较早的历史」那类事后播报里。
     */
     case 'exhausted':
+      if (windowResolved) return undefined
       return { text: t('chat.contextStatus.exhausted'), tone: 'danger', spinner: false }
     case 'error':
       return { text: t('chat.contextStatus.error'), tone: 'danger', spinner: false }

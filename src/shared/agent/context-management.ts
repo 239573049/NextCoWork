@@ -9,8 +9,10 @@ import type { AgentMessage } from './message'
      模型明明吃得下,我们自己先报错是纯粹的自伤。
   2. **有效窗口** = `effectiveContextWindow()`。回答「我自愿用到多少」。
      它是 `shouldCompact` 的分母,也是圆环的分母。默认被 `LONG_CONTEXT_THRESHOLD` 夹住。
-  3. **压缩阈值** = 有效窗口 × `COMPACT_THRESHOLD`(0.8,在 kernel/context-assembler.ts)。
-     回答「什么时候开始压」。本文件不管这一层。
+  3. **压缩阈值** = 有效窗口 × `COMPACT_THRESHOLD`(0.8)+ 输出预留,见 `shouldCompactAt()`。
+     回答「什么时候开始压」。原先只长在 kernel/context-assembler.ts 里(所以这里写着
+     「本文件不管这一层」),现在渲染层的状态行也要按当前窗口重判同一条不等式,
+     故下沉到本文件,装配器改为调用它 —— 判据仍然只有一份。
 */
 
 /**
@@ -48,6 +50,54 @@ export function effectiveContextWindow(
       ? protocolWindow
       : FALLBACK_CONTEXT_WINDOW
   return maxContext ? protocol : Math.min(protocol, LONG_CONTEXT_THRESHOLD)
+}
+
+/** 超过窗口的这个比例就该压缩了 */
+export const COMPACT_THRESHOLD = 0.8
+
+/**
+ * 输出预留最多吃掉窗口的这个比例。
+ *
+ * ★ **`maxOutputTokens` 和有效窗口不同源,不封顶就会算出一个恒为真的判据。**
+ * 前者是别名上的原值(按模型的**协议**窗口标的),后者默认被 `LONG_CONTEXT_THRESHOLD`
+ * 夹到 272K。一个 1M 窗口、384K 最大输出的模型,关掉「最大上下文」之后
+ * 预留一项就是 384K —— 已经超过 272K×0.8 的阈值本身,于是 `used` 填 0 都判该压缩:
+ * 自动压缩从会话第一条消息起每轮触发一次,而且压完仍然为真,永远收敛不了。
+ * 症状是压力条几乎空着、旁边却写着「接近上限」。
+ *
+ * 封顶到 1/4 之后,最坏情况下压缩也要等占用过半才触发,判据重新跟历史长度有关。
+ * 这不是在猜模型真实会输出多少 —— 一轮回复本来就不可能写满协议上限,
+ * 而真正兜住「输入塞得下、输出被截断」的是 `validateModelRuntime` 那条硬校验,
+ * 它读协议窗口原值,不受这里影响。
+ */
+export const OUTPUT_RESERVE_CAP = 0.25
+
+/**
+ * 「这一轮该压缩了吗」。
+ *
+ * ★ 把输出预留算进来:上下文窗口是**输入加输出**共用的。只比较输入的话,
+ * 你会在「输入刚好塞得下、回复写到一半被截断」时才发现该压缩了 —— 而那时
+ * 这一轮已经浪费了。预留取 `maxOutputTokens` 但**必须封顶**,见 `OUTPUT_RESERVE_CAP`。
+ *
+ * 需求:这三样原先长在 `kernel/context-assembler.ts` 里(主进程装配时判一次,
+ * 结果随 `context_usage` 发到渲染层)。下沉到这里是因为状态行那句「接近上限,可 /compact」
+ * 现在要按**当前**有效窗口重判一次 —— 用户中途打开「最大上下文」之后,
+ * 上一轮在 272K 下判出来的那条建议已经不成立了,而它要到下一次发送才会自己回落。
+ * 两边必须读同一个公式:各写一份的话,状态行会和真正触发自动压缩的那条判据悄悄分叉。
+ *
+ * ★ 渲染层传进来的 `inputTokens` 是上一轮装配的**未校准估算**(`contextUsage.used`),
+ * 主进程传的是**校准后的估算**(见 assembler 的 `tokenCalibration`)。校准系数下界为 1,
+ * 所以渲染层重判不会比主进程更严格;这个函数只负责两边共用的那条不等式。
+ */
+export function shouldCompactAt(input: {
+  inputTokens: number
+  contextWindow: number
+  maxOutputTokens: number
+}): boolean {
+  return (
+    input.inputTokens + Math.min(input.maxOutputTokens, input.contextWindow * OUTPUT_RESERVE_CAP) >
+    input.contextWindow * COMPACT_THRESHOLD
+  )
 }
 
 /**

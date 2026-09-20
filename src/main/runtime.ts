@@ -83,6 +83,7 @@ import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
 import { schedulingBridgeFor } from './scheduled/bridge'
+import { shellBridgeFor } from './agent-shells'
 import { listResolvedModels } from './state/model-bindings'
 import { PRICING_SEED } from '../shared/domain/pricing-seed'
 import { findPricing, priceOf } from '../shared/domain/pricing'
@@ -231,7 +232,10 @@ export function installHost(h: KernelHost): void {
   */
   installSearchConfig({
     statuses: () => searchStatuses(h.secrets),
-    apiKey: (id) => h.secrets.get(searchSecretRef(id))
+    apiKey: (id) => h.secrets.get(searchSecretRef(id)),
+    // 免 Key 兜底用的自建 SearxNG 地址。★ 现读而不是在这里取一次快照:
+    // 用户在设置页改完地址后,下一次搜索就该按新值走,不必重启也不必换宿主。
+    selfHostedSearxng: () => store.getSettings().builtinSearch.searxngUrl
   })
   // 路由器在构造时就抓住了 host 的引用,换宿主必须让它重建,
   // 否则新装的宿主对已经建好的路由器完全不起作用
@@ -2402,6 +2406,20 @@ export async function runAgent(
         model: req.model,
         ...(req.modelProviderId === undefined ? {} : { modelProviderId: req.modelProviderId }),
         resolveModel: (model, modelProviderId) => getRouter().resolveModel(model, modelProviderId) !== undefined
+      }),
+      /*
+        Agent 的 shell 注册表。★ **每个 run 都装**,子代理也不例外:工具卡片上的
+        停止按钮要能停到子代理正在跑的那条命令,而「起一个后台服务」这件事
+        也没有理由只许主代理做。
+        ★ 租约现取现还(见 `shellBridgeFor` 的注释)—— 后台进程握着的那把
+        必须比这次 run 活得久,否则 run 一结束,SSH 连接就进了 60 秒空闲回收,
+        而 `BashOutput` 只会说「读不到」。
+      */
+      shells: shellBridgeFor({
+        workspaceId: req.workspaceId,
+        environment,
+        retain: () => getEnvironments().retain(environment),
+        now: () => getHost().clock.now()
       }),
       acceptsGoalInput: (goalId) => primary && getActiveGoal(req.sessionId)?.id === goalId,
       prepareMessage: (message) => primary ? prepareGoalMessage(req.sessionId, message) : message,

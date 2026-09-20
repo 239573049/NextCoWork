@@ -1,15 +1,34 @@
-import { SSH_AUTH_METHODS, type SshConnectionProfile } from '../../../shared/domain/environment'
+import { SSH_AUTH_METHODS, type SshAuthMethod, type SshConnectionProfile } from '../../../shared/domain/environment'
 import { EnvironmentError } from '../errors'
 
 export function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'` }
 export function powershellQuote(value: string): string { return `'${value.replaceAll("'", "''")}'` }
 
+/**
+ * 用户明确选了认证方式时交给 ssh 的那几个 `-o`。**排个顺序还不够,必须把那个方法的开关也打开。**
+ *
+ * 需求:本机 ssh_config 里一条 `Host *` 下的 `PasswordAuthentication no`(有些客户端工具会自己写进去,
+ * 公司策略也常这么下发)会让 ssh 连试都不试密码 —— 服务器在 `Authentications that can continue` 里
+ * 明明给了 password,客户端下一行就是 `No more authentication methods to try` 然后 Permission denied。
+ * 不满足会怎样:表现为「同样的用户名密码,Xshell 连得上、这里连不上」,而我们这侧只剩一句「认证失败」,
+ * 用户会去反复核对密码 —— 真正的原因在一个谁也没想起来的本机配置文件里(Xshell 自带协议栈,不读它)。
+ * 命令行 `-o` 盖得过所有配置文件(ssh 取第一次获得的值,而命令行最先解析),所以补在这里有效。
+ *
+ * ★ 只在用户**明确选了**方式时补。`auto`(以及老档案里缺省的 undefined)的含义就是「按系统配置来」,
+ * 那时配置里的 `no` 是用户自己的选择,替他打开等于悄悄改掉他的安全策略。
+ */
+const AUTH_OPTIONS: Record<Exclude<SshAuthMethod, 'auto'>, readonly string[]> = {
+  password: ['PreferredAuthentications=password,keyboard-interactive', 'PasswordAuthentication=yes', 'KbdInteractiveAuthentication=yes'],
+  ask: ['PreferredAuthentications=password,keyboard-interactive', 'PasswordAuthentication=yes', 'KbdInteractiveAuthentication=yes'],
+  key: ['PreferredAuthentications=publickey', 'PubkeyAuthentication=yes'],
+  interactive: ['PreferredAuthentications=keyboard-interactive', 'KbdInteractiveAuthentication=yes']
+}
+
 export function sshTargetArgs(profile: SshConnectionProfile): string[] {
   const target = profile.target
-  if (profile.authMethod !== undefined && !SSH_AUTH_METHODS.includes(profile.authMethod)) throw new EnvironmentError('invalid-profile')
-  const preferred = profile.authMethod === 'password' || profile.authMethod === 'ask' ? 'password,keyboard-interactive'
-    : profile.authMethod === 'key' ? 'publickey' : profile.authMethod === 'interactive' ? 'keyboard-interactive' : undefined
-  const authArgs = preferred ? ['-o', `PreferredAuthentications=${preferred}`] : []
+  const method = profile.authMethod
+  if (method !== undefined && !SSH_AUTH_METHODS.includes(method)) throw new EnvironmentError('invalid-profile')
+  const authArgs = method === undefined || method === 'auto' ? [] : AUTH_OPTIONS[method].flatMap((option) => ['-o', option])
   if (typeof target?.host !== 'string' || target.host.startsWith('-') || !target.host || /[\s\0\r\n]/.test(target.host)) {
     throw new EnvironmentError('invalid-profile')
   }

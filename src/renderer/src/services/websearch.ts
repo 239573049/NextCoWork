@@ -42,3 +42,11 @@ export function testSearchProvider(
 ): ReturnType<typeof tryInvoke<'websearch:test'>> {
   return tryInvoke('websearch:test', { id })
 }
+
+/**
+ * 「内置搜索」那一小节的测试按钮。同样用 `tryInvoke`:公共实例被限流、
+ * 自建地址填错,都是这个按钮要**显示**的结果,不是要吞掉的异常。
+ */
+export function testBuiltinSearch(): ReturnType<typeof tryInvoke<'websearch:testBuiltin'>> {
+  return tryInvoke('websearch:testBuiltin', undefined)
+}

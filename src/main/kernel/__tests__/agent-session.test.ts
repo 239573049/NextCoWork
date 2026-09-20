@@ -9,7 +9,7 @@ import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
 import { assistantMessage, orphanedToolCalls, userMessage } from '../../../shared/agent/message'
 import { applyEvents, emptyTranscript } from '../../../shared/agent/transcript'
 import type { RunRequest } from '../../../shared/agent/run-request'
-import { MAX_TURNS } from '../../../shared/agent/run-request'
+import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_TURNS } from '../../../shared/agent/run-request'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ToolResult, ToolSource } from '../../../shared/agent/tool'
 import { toolOk } from '../../../shared/agent/tool'
@@ -1194,6 +1194,22 @@ describe('错误与边界', () => {
     expectNoOrphans(history)
   })
 
+  it('正文请求默认封顶 32000,不跟随模型更大的协议上限', async () => {
+    const model = { ...ALIAS, maxOutputTokens: 64_000 }
+    const { upstream } = await runSession({
+      upstream: fakeUpstream([says('好')], { models: [model] })
+    })
+    expect(upstream.requests[0]?.maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
+  })
+
+  it('模型协议上限低于 32000 时仍安全收窄', async () => {
+    const model = { ...ALIAS, maxOutputTokens: 4096 }
+    const { upstream } = await runSession({
+      upstream: fakeUpstream([says('好')], { models: [model] })
+    })
+    expect(upstream.requests[0]?.maxOutputTokens).toBe(4096)
+  })
+
   /**
    * ★ 查不到别名时**不在这里报错**:让路由器的 noCandidateError 成为唯一的权威错误。
    * 两处都报的话,用户会随机收到信息量少的那一条。
@@ -1205,7 +1221,7 @@ describe('错误与边界', () => {
     })
     expect(runEnd(events).status).toBe('done')
     expect(upstream.requests[0]?.model).toBe('不存在的别名')
-    expect(upstream.requests[0]?.maxOutputTokens).toBeGreaterThan(0)
+    expect(upstream.requests[0]?.maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
   })
 
   /**

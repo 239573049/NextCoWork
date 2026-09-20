@@ -33,6 +33,7 @@ import { terminalHost } from './terminal-host'
 import { store } from './state/store'
 import { windows } from './window/registry'
 import {
+  claimMigratedLocalWorkspaces,
   configScopeForAccount,
   currentConfigScope,
   importLocalConfigProfile,
@@ -59,15 +60,25 @@ export function isAccountSwitchInFlight(): boolean {
 /**
  * 就地把当前作用域让给 `accountId`(`null` = 未登录那一份)。
  *
- * ★ 同账户调用是**恒等操作**:刷新 token、换 Team、重读登录态都会走到这里,
- * 而那些都不该触发一次整表归档。
+ * ★ 同账户的**配置切换**是恒等操作:刷新 token、换 Team、重读登录态都会走到这里,
+ * 而那些都不该触发一次整表归档。唯一例外是启动迁移留下的待认领清单——它只会
+ * 在首次命中时建立工作区副本，随后标记为完成，不能因此重新打开整表归档。
  *
  * ★ 抛的都是 `ConfigSyncError`,渲染层按 `code` 查 i18n ——
  * 这里不拼任何一句给用户看的中文。
  */
 export async function prepareAccountSwitch(accountId: string | null): Promise<void> {
   const target = configScopeForAccount(accountId)
-  if (target === currentConfigScope()) return
+  if (target === currentConfigScope()) {
+    // 需求：同账户启动恢复也必须完成迁移工作区重连；否则不会进下面的切库分支，
+    // 表现为迁移完成后账户仍看不见会话。
+    const relinked = accountId === null ? 0 : claimMigratedLocalWorkspaces(accountId)
+    if (accountId !== null && relinked > 0) {
+      setConfigCategoryDirty('workspaces', accountId, true)
+      broadcastScopeChanged()
+    }
+    return
+  }
   if (switchInFlight) throw new ConfigSyncError('busy')
 
   switchInFlight = true
@@ -94,6 +105,10 @@ export async function prepareAccountSwitch(accountId: string | null): Promise<vo
 
     // ── 切库(配置表整表归档 + 恢复,一个事务) ────────────────────────
     switchConfigProfile(accountId)
+    // 需求：启动数据整理先于开库，迁入会话会暂时挂在 local 工作区。此处只按撤销
+    // 清单复制并重连本次迁入的行；不这样做，登录后的会话列表会空白且没有任何报错。
+    const relinked = accountId === null ? 0 : claimMigratedLocalWorkspaces(accountId)
+    if (accountId !== null && relinked > 0) setConfigCategoryDirty('workspaces', accountId, true)
     // 账户隔离上线前的 provider/model/key 都在 local。只归属给首个登录账户一次,
     // 不自动搬工作区或个性化设置;local 原件保留,后续账户不再重复复制。
     if (accountId !== null && migrateLegacyLocalProvidersToCurrentAccount()) {

@@ -258,6 +258,22 @@ describe('vendor-first model catalogue', () => {
     expect(manufacturerForModelId('muse-spark-1.3').id).toBe('meta')
   })
 
+  /*
+   * 需求:2026-09-20 用户点名收录的微软 MAI-Code 1.1 Flash。钉住三点:
+   * 目录行存在且未宣称已核实;`mai-` 前缀经启发式归入 microsoft 家族
+   * (否则侧边栏落到「其他厂商」,表现是模型管理页分组错家,且零报错);
+   * 定价走自身 id 的独立价目行(用户要求不依赖 gpt-5.6-luna,见 pricing-seed)。
+   */
+  it('ships the user-requested Microsoft MAI-Code 1.1 Flash as an unverified row', () => {
+    expect(findBuiltinModel('mai-code-1.1-flash')).toMatchObject({
+      manufacturerId: 'microsoft',
+      displayName: 'MAI-Code 1.1 Flash',
+      verificationStatus: 'unverified',
+      pricingModelId: 'mai-code-1.1-flash',
+    })
+    expect(manufacturerForModelId('mai-code-1.1-flash').id).toBe('microsoft')
+  })
+
   it('keeps the requested vendor Think adapters and evidence explicit', () => {
     const byId = new Map(BUILTIN_MODEL_CATALOG.map((row) => [row.id, row]))
 

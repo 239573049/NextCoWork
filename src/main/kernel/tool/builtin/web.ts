@@ -13,21 +13,32 @@
  * 上下文之后,模型很容易忘了自己本来要找什么;把问题重新摆在正文前面,
  * 比删掉这个参数有用得多。
  *
- * ## 三道防线,分别防三件不同的事
+ * ## 地址筛查按工作区所有者的要求关闭了
  *
- * 1. `ssrf.ts` 的**地址筛查** —— 防「拿模型当跳板去打本机和内网」。
- * 2. **每一跳重定向都重新筛查一次** —— 防「公网域名 302 到 169.254.169.254」。
- *    这是最容易漏的一处:只查第一个 URL 的实现,在重定向面前等于没查。
- * 3. **content-type 白名单 + 字节上限** —— 防「把一个 500MB 的 zip 解码成
- *    一堆替换字符再塞进上下文」。
+ * 原先这里还有两道专防「拿模型当跳板去打本机和内网」的防线:`ssrf.ts` 的字面量
+ * 地址筛查,以及「每一跳重定向都重新筛查一次」。工作区所有者在 2026-09-20 明确
+ * 要求让这个工具能够触达本机和内网服务,并在确认过风险后仍要求继续——于是这里
+ * 现在传 `ssrfRisk(url, { allowPrivateAddresses: true })`,风险和动机记在
+ * `ssrf.ts` 的 `SsrfRiskOptions` 上,这里不重复。协议白名单(只认 http/https)
+ * 和 URL 内嵌凭证的拦截**没有**被关掉,继续走同一个 `ssrfRisk`。
+ *
+ * 仍然保留的一道防线:**content-type 白名单 + 字节上限** —— 防「把一个 500MB
+ * 的 zip 解码成一堆替换字符再塞进上下文」。
+ *
+ * ## `isTextual` / `htmlToText` 搬家了
+ *
+ * 这两个函数原先就写在本文件里。免 Key 的内置搜索(`main/search/builtin/enrich.ts`)
+ * 要给结果补正文,做的是同一件事,于是实现**原样**搬到了 `shared/text/html-text.ts`,
+ * 当初那两段解释取舍的注释一并跟了过去。这里改成引用,行为与之前一致 ——
+ * 留两份的话迟早分叉,其中一份会拿到另一份没有的修复。
  */
-import { promises as dns } from 'node:dns'
 import { z } from 'zod'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
+import { htmlToText, isTextual } from '../../../../shared/text/html-text'
 import { clampWithEllipsis, stripControlChars } from '../../text'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
-import { isPrivateAddress, ssrfRisk } from './ssrf'
+import { ssrfRisk } from './ssrf'
 
 /** 单次请求的墙钟预算 */
 const FETCH_TIMEOUT_MS = 30_000
@@ -37,94 +48,6 @@ const MAX_REDIRECTS = 5
 const MAX_BYTES = 4 * 1024 * 1024
 /** 交给模型的正文字符上限 */
 const MAX_TEXT_CHARS = 100_000
-/** DNS 反查的等待上限。查不出来就跳过这一层,不因为 DNS 慢而卡住整个工具。 */
-const DNS_TIMEOUT_MS = 800
-
-/**
- * 允许解码成文本的 content-type。
- *
- * ★ 白名单而不是黑名单。黑名单漏一个类型的后果是把二进制倒进上下文;
- * 白名单漏一个类型的后果是模型收到一条说得清楚的拒绝。
- */
-function isTextual(contentType: string): boolean {
-  const t = contentType.split(';')[0]?.trim().toLowerCase() ?? ''
-  if (t.startsWith('text/')) return true
-  if (t.endsWith('+json') || t.endsWith('+xml')) return true
-  return [
-    'application/json',
-    'application/xml',
-    'application/javascript',
-    'application/x-javascript',
-    'application/ld+json',
-    'application/rss+xml',
-    'application/atom+xml',
-    'application/x-yaml',
-    'application/yaml'
-  ].includes(t)
-}
-
-const ENTITIES: Record<string, string> = {
-  '&amp;': '&',
-  '&lt;': '<',
-  '&gt;': '>',
-  '&quot;': '"',
-  '&#39;': "'",
-  '&apos;': "'",
-  '&nbsp;': ' '
-}
-
-/**
- * HTML → 纯文本。
- *
- * ★ 刻意**不**引 turndown / cheerio,也不假装自己产出 markdown。需要的只是
- * 「把标签去掉、把块级元素之间的换行留住」,而一个完整的 HTML 解析器是这一批
- * 里最大的一笔新依赖,且它的解析结果对模型的帮助远没有想象中大。
- * 代价:表格和嵌套列表的结构会丢。描述里会说清楚返回的是正文文本。
- */
-function htmlToText(html: string): string {
-  return html
-    // script / style / noscript / svg 的内容对阅读毫无价值,而且能占掉整页的体积
-    .replace(/<(script|style|noscript|svg|template)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|section|article|li|tr|h[1-6]|blockquote|pre)>/gi, '\n')
-    .replace(/<li\b[^>]*>/gi, '\n- ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
-    .replace(/&[a-z]+;|&#39;/gi, (m) => ENTITIES[m.toLowerCase()] ?? m)
-    // 行内空白压成一个空格,但**保留换行** —— 换行是这里仅剩的结构
-    .replace(/[^\S\n]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .split('\n')
-    .map((l) => l.trim())
-    .join('\n')
-    .trim()
-}
-
-/**
- * 尽力而为的 DNS 层筛查:域名解析出来的地址也得是公网的。
- *
- * ★ 查不出来时**放行**,不是拒绝。DNS 不可用(离线、被墙、解析器抽风)时
- * 把所有联网请求都拒掉,是拿一个可用性问题去换一点点安全边际 ——
- * 而字面量那道筛查才是真正承重的那一道。
- */
-async function resolvedAddressRisk(hostname: string): Promise<string | null> {
-  let addrs: Array<{ address: string }>
-  try {
-    addrs = await Promise.race([
-      dns.lookup(hostname, { all: true }),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('dns timeout')), DNS_TIMEOUT_MS))
-    ])
-  } catch {
-    return null
-  }
-  const bad = addrs.find((a) => isPrivateAddress(a.address))
-  if (bad === undefined) return null
-  return (
-    `Refusing to reach "${hostname}": it resolves to a loopback or private-network address (${bad.address}). ` +
-    `A public hostname pointing inward is usually a deliberate attempt to get around this check.`
-  )
-}
 
 const WebFetchInput = z.object({
   url: z.string().url().describe('The URL to fetch. Must be a complete http/https address'),
@@ -149,8 +72,7 @@ export const webFetchTool: ToolRegistration = defineTool({
     '- Only textual content is accepted (HTML, plain text, JSON, XML, …). PDFs, images, and archives are refused\n' +
     `- Text longer than ${String(MAX_TEXT_CHARS / 1000)}k characters is truncated\n` +
     '- HTML is stripped to readable text; table and nested-list structure may be lost\n' +
-    '- Loopback and private-network addresses are BLOCKED (localhost, 127.0.0.1, 192.168.x.x, cloud metadata ' +
-    'endpoints, …), as are user:pass@ credentials in the URL\n' +
+    '- user:pass@ credentials in the URL are refused\n' +
     '- Pages behind a login cannot be fetched. If you get a login page, do NOT retry — tell the user\n' +
     '- A redirect to a different host is refused and the new address is handed back to you; call again with ' +
     'that address if you want it',
@@ -180,10 +102,8 @@ export const webFetchTool: ToolRegistration = defineTool({
     // 和 CC 一致:http 升级成 https。降级传输里的内容会被中间人改写。
     if (url.protocol === 'http:') url.protocol = 'https:'
 
-    const firstRisk = ssrfRisk(url)
+    const firstRisk = ssrfRisk(url, { allowPrivateAddresses: true })
     if (firstRisk !== null) return toolFail(firstRisk)
-    const dnsRisk = await resolvedAddressRisk(url.hostname)
-    if (dnsRisk !== null) return toolFail(dnsRisk)
 
     ctx.emit({ callId: ctx.callId, message: `正在抓取 ${url.hostname}` })
 
@@ -204,7 +124,8 @@ export const webFetchTool: ToolRegistration = defineTool({
         /*
           ★ `redirect: 'manual'` 是这一段的全部意义。用默认的 'follow' 的话,
           浏览器/undici 会替我们跟过去,而**跟过去的那个地址没有经过任何筛查** ——
-          一个公网域名 302 到 169.254.169.254 就直通了。
+          协议/凭证这两条(见 `ssrf.ts`)就会在重定向面前形同虚设。地址本身现在
+          允许指向内网,但协议白名单和凭证拦截仍然要对每一跳都成立。
         */
         res = await ctx.host.fetch(current, {
           redirect: 'manual',
@@ -224,11 +145,9 @@ export const webFetchTool: ToolRegistration = defineTool({
           return toolFail(`The server returned a redirect address that could not be parsed: "${loc}".`)
         }
 
-        // 每一跳都重新过一遍闸,和第一次一模一样的标准
-        const risk = ssrfRisk(next)
+        // 每一跳都重新过一遍闸,和第一次一模一样的标准(协议白名单 + 凭证拦截)
+        const risk = ssrfRisk(next, { allowPrivateAddresses: true })
         if (risk !== null) return toolFail(`The redirect target is not allowed. ${risk}`)
-        const nextDns = await resolvedAddressRisk(next.hostname)
-        if (nextDns !== null) return toolFail(`The redirect target is not allowed. ${nextDns}`)
 
         /*
           ★ 跨主机重定向**停下来问模型**,而不是默默跟过去。CC 也是这个行为。

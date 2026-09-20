@@ -350,6 +350,23 @@ describe('抄写校验 · 长上下文档', () => {
     for (const p of gem) asymmetric(p, 200_000)
   })
 
+  /*
+   * 需求:2026-09-20 用户要求 MAI-Code 1.1 Flash「定价与 GPT-5.6 Luna 一致」,
+   * 但**独立成行、不依赖 Luna**。这里钉**绝对数**而不是「与 Luna 相等」:
+   * 日后 Luna 调价不应连带这条(联动恰恰是被要求去掉的),谁要改这条
+   * 必须带着微软官方价来,而不是顺手抄 Luna 的新价。
+   */
+  it('MAI-Code 1.1 Flash:独立价目行,数值钉死(录入口径=与 Luna 同价,不联动)', () => {
+    expect(byId('mai-code-1.1-flash')).toMatchObject({
+      providerId: null,
+      currency: 'USD',
+      tiers: [
+        { upToInputTokens: 272_000, rate: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 } },
+        { upToInputTokens: null, rate: { input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 } },
+      ],
+    })
+  })
+
   /** xAI 是唯一一家各计费项倍率统一的 —— 所以它**不**走上面那个不对称断言 */
   it('xAI:阈值 200K,所有计费项一律 ×2', () => {
     const grok = rows.filter((p) => p.modelId.startsWith('grok-'))
@@ -391,6 +408,7 @@ describe('抄写校验 · 长上下文档', () => {
       'grok-4.3',
       'grok-4.5',
       'grok-4.6',
+      'mai-code-1.1-flash',
       'qwen3-coder-30b-a3b-instruct',
       'qwen3-coder-flash',
       'qwen3-coder-next',

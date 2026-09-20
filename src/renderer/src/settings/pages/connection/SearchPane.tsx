@@ -21,6 +21,12 @@
  * 不引 DnD 库,也不再写一份 —— 两份近乎一样的实现迟早分叉,其中一份会拿到
  * 另一份没有的 bug 修复。那个 hook 这次为此加了 axis 参数,默认 'x' 保持
  * 外层 Tab 条原样。
+ *
+ * ## 列表下面还有一小节
+ *
+ * `BuiltinSearchSection` 是免 Key 的内置兜底(一家都没配或全挂时自动接手)。
+ * 它**不是列表里的一行**,理由写在那个文件的文件头 —— 简单说:它没有 Key、
+ * 没有开关、也不参与这里的优先级排序。
  */
 import {
   Check,
@@ -40,9 +46,11 @@ import { testSearchProvider } from "../../../services/websearch";
 import { useDragReorder } from "../../../shell/useDragReorder";
 import { useWebSearchStore } from "../../../stores/websearch";
 import { SettingGroup } from "../../Row";
+import type { SettingsPageProps } from "../../props";
+import { BuiltinSearchSection } from "./BuiltinSearchSection";
 import { Spinner } from '../../../components/ui/Spinner'
 
-export function SearchPane(): ReactNode {
+export function SearchPane({ settings, patch }: SettingsPageProps): ReactNode {
   const { t } = useI18n();
   const {
     providers,
@@ -72,42 +80,45 @@ export function SearchPane(): ReactNode {
   }, "y");
 
   return (
-    <SettingGroup>
-      <div className="px-4 py-3">
-        <p className="text-[13px] text-fg">{t("connection.search.title")}</p>
-        <p className="mt-0.5 text-[12px] text-fg-faint">
-          {t("connection.search.hint")}
-        </p>
-      </div>
-
-      {error !== null ? (
-        <div className="px-4 pb-4">
-          <p className="rounded-[8px] bg-danger/10 px-2.5 py-2 text-[12px] text-danger">
-            {t("connection.search.loadFailed", { error })}
+    <>
+      <SettingGroup>
+        <div className="px-4 py-3">
+          <p className="text-[13px] text-fg">{t("connection.search.title")}</p>
+          <p className="mt-0.5 text-[12px] text-fg-faint">
+            {t("connection.search.hint")}
           </p>
         </div>
-      ) : !loaded ? (
-        <div className="flex items-center justify-center gap-2 py-8 text-[12.5px] text-fg-faint">
-          <Spinner size="sm" />
-          {t("connection.search.reading")}
-        </div>
-      ) : (
-        <ul className="relative border-t border-hairline">
-          {ordered.map((p, i) => (
-            <ProviderRow
-              key={p.config.id}
-              status={p}
-              rank={i + 1}
-              style={drag.styleFor(i)}
-              onGrab={(e) => drag.onPointerDown(e, i)}
-              onToggle={(on) => void setEnabled(p.config.id, on)}
-              onSaveKey={(k) => setCredential(p.config.id, k)}
-              onClearKey={() => void clearCredential(p.config.id)}
-            />
-          ))}
-        </ul>
-      )}
-    </SettingGroup>
+
+        {error !== null ? (
+          <div className="px-4 pb-4">
+            <p className="rounded-[8px] bg-danger/10 px-2.5 py-2 text-[12px] text-danger">
+              {t("connection.search.loadFailed", { error })}
+            </p>
+          </div>
+        ) : !loaded ? (
+          <div className="flex items-center justify-center gap-2 py-8 text-[12.5px] text-fg-faint">
+            <Spinner size="sm" />
+            {t("connection.search.reading")}
+          </div>
+        ) : (
+          <ul className="relative border-t border-hairline">
+            {ordered.map((p, i) => (
+              <ProviderRow
+                key={p.config.id}
+                status={p}
+                rank={i + 1}
+                style={drag.styleFor(i)}
+                onGrab={(e) => drag.onPointerDown(e, i)}
+                onToggle={(on) => void setEnabled(p.config.id, on)}
+                onSaveKey={(k) => setCredential(p.config.id, k)}
+                onClearKey={() => void clearCredential(p.config.id)}
+              />
+            ))}
+          </ul>
+        )}
+      </SettingGroup>
+      <BuiltinSearchSection settings={settings} patch={patch} />
+    </>
   );
 }
 

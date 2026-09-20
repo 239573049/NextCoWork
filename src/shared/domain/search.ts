@@ -31,6 +31,24 @@ export type SearchProviderId =
   | 'doubao'
   | 'bing'
 
+/**
+ * 一条结果(或一次失败)是谁给的。
+ *
+ * 需求:用户一家都没配、或者配了但全挂时,`web_search` 会退到免 Key 的内置源
+ * (`main/search/builtin/**`),而那条链路给出的结果也必须标明出处 ——
+ * 模型据此判断可信度,用户据此知道自己看到的是免费源的东西。
+ *
+ * ★ `'builtin'` **故意不进 `SearchProviderId`**,于是也不在 `SEARCH_CATALOG` 里。
+ * 混进目录的话它会长出一行设置界面、一个 priority、一个它根本不需要的 Key 输入框,
+ * 还会被 `defaultProviderConfigs` 写进 `search_providers` 表 —— 而它既不需要配置
+ * 也不参与排序。不满足会怎样:设置页凭空多一行点了没反应的服务,
+ * 库里多一条永远 `hasKey=false` 的记录,`searchChain` 每次还要把它滤一遍。
+ */
+export type SearchSourceId = SearchProviderId | 'builtin'
+
+/** 内置免 Key 源的出处标识。见 `SearchSourceId`。 */
+export const BUILTIN_SOURCE_ID = 'builtin' as const
+
 export interface SearchProviderMeta {
   id: SearchProviderId
   name: string
@@ -150,8 +168,11 @@ export interface SearchResult {
   url: string
   /** 摘要片段。各家字段名不一样(content / description / snippet / text),适配器统一到这里 */
   snippet: string
-  /** 哪家给的 —— 结果里要标出来,不然模型无从判断可信度 */
-  provider: SearchProviderId
+  /**
+   * 哪家给的 —— 结果里要标出来,不然模型无从判断可信度。
+   * 内置免 Key 源给出的结果标 `'builtin'`,见 `SearchSourceId`。
+   */
+  provider: SearchSourceId
   /** ISO 8601,拿不到就没有 */
   publishedAt?: string
 }

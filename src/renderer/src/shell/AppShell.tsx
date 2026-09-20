@@ -32,7 +32,7 @@ import { cn } from "../lib/cn";
 import { IS_MAC } from "../lib/platform";
 import { useI18n } from "../i18n";
 import { usePresence } from "../lib/usePresence";
-import { pickWorkspace } from "../services/app";
+import { closeWorkspace, pickWorkspace } from "../services/app";
 import { deleteSession, listSessions } from "../services/sessions";
 import { on } from "../services/ipc";
 import { onScheduledChanged } from "../services/scheduled";
@@ -57,6 +57,7 @@ import { DockRoot } from './Dock';
 import type { DockNode } from '../../../shared/domain/dock';
 import { ConnectionDialogs } from './ConnectionDialogs';
 import { CreateSshWorkspaceDialog } from './CreateSshWorkspaceDialog';
+import { EditWorkspaceDialog } from './EditWorkspaceDialog';
 
 /**
  * 三格面板开合的时长。**三处必须同一个数** —— 侧边栏收起的同时,主面板的左边界
@@ -175,6 +176,7 @@ export function AppShell({
   };
   const [sessionItems, setSessionItems] = useState<SessionListItem[]>([]);
   const [createSshOpen, setCreateSshOpen] = useState(false);
+  const [editWorkspaceId, setEditWorkspaceId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
@@ -354,6 +356,31 @@ export function AppShell({
     if (target?.kind === 'workspace' && !useWindowStore.getState().outer.some((tab) => tab.id === id)) useDocumentsStore.getState().release(target.ref.workspaceId);
   };
 
+  /**
+   * 「编辑工作区」弹窗里的删除 —— 从**记录**里移除，和「关掉外层 Tab」是两回事
+   * (`ipc/workspace.ts` 文件头那条区分)。这里要把两件事按顺序接起来：
+   *
+   * 1. 这个工作区如果开着外层 Tab（`openWorkspace` 保证最多一张），先走
+   *    `closeOuterTab` 收掉它 —— 未保存的文档改动会在这一步弹出确认，
+   *    用户选了「取消」的话 Tab 还在，工作区记录也不能删。
+   * 2. 记录本身的删除交给 `workspace:close`（`services/app.ts` 的 `closeWorkspace`，
+   *    命名撞车是主进程那边历史遗留的，语义见 `ipc/workspace.ts:82` 的注释）。
+   *
+   * 返回 `false` 时弹窗留在原地并显示错误，而不是假装删除成功。
+   */
+  const deleteWorkspace = async (id: string): Promise<boolean> => {
+    const outerTab = useWindowStore.getState().outer.find((tab) => tab.kind === 'workspace' && tab.ref.workspaceId === id);
+    if (outerTab !== undefined) {
+      await closeOuterTab(outerTab.id);
+      if (useWindowStore.getState().outer.some((tab) => tab.id === outerTab.id)) return false;
+    }
+    try {
+      await closeWorkspace(id);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   return (
     <div className="app-ground flex h-full bg-app p-2">
@@ -493,6 +520,7 @@ export function AppShell({
                 onMove={win.move}
                 onRenameWorkspace={(workspaceId, name) => { void submitWorkspaceRename(workspaceId, name); }}
                 onOpenWorkspace={win.openWorkspace}
+                onEditWorkspace={setEditWorkspaceId}
                 onPickWorkspace={() => { void pickLocalWorkspace(); }}
                 onCreateWorkspace={() => { void pickLocalWorkspace(); }}
                 onCreateSshWorkspace={() => setCreateSshOpen(true)}
@@ -537,6 +565,11 @@ export function AppShell({
       }} />}
       <DocumentDialogs />
       <OverwriteConfirmDialog />
+      <EditWorkspaceDialog
+        workspace={workspaces.find((w) => w.id === editWorkspaceId) ?? null}
+        onClose={() => setEditWorkspaceId(null)}
+        onDelete={deleteWorkspace}
+      />
 
       <SearchPalette
         open={searchOpen}

@@ -69,8 +69,9 @@ MUTANTS = [
     ('M23', '请求体里带上 execute 闭包', [
         ('const infos: ToolInfo[] = advertised.map(({ execute: _execute, ...info }) => info)',
          'const infos: ToolInfo[] = advertised as unknown as ToolInfo[]')]),
-    ('M24', '别名查不到时兜底 maxOutputTokens 为 0', [
-        ('const FALLBACK_MAX_OUTPUT = 8192', 'const FALLBACK_MAX_OUTPUT = 0')]),
+    ('M24', '正文请求的 maxOutputTokens 变成 0', [
+        ('      maxOutputTokens: resolveMaxOutputTokens(alias?.maxOutputTokens),',
+         '      maxOutputTokens: 0,')]),
     ('M25', 'pending 从不设置(中断时救不回半截回复)', [
         ('    this.pending = acc\n', '    void acc\n')]),
     ('M26', '一轮结束后不清空 pending(中断时重复提交)', [

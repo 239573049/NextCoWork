@@ -17,7 +17,7 @@ import { browserManager } from '../../../browser/manager'
 import { getBrowserAutomationBridge, type BrowserMouseButton } from '../../../browser/runtime'
 import { defineTool } from '../define'
 import type { ToolContext, ToolRegistration } from '../registry'
-import { resolvedAddressRisk, ssrfRisk } from './ssrf'
+import { ssrfRisk } from './ssrf'
 
 const OBSERVE_THEN_ACT =
   'Use a ref only from the latest browser_snapshot. Perform one state-changing action, then snapshot again. ' +
@@ -59,12 +59,16 @@ function ownedTab(tabId: string, ctx: ToolContext): BrowserTab {
   return tab
 }
 
+/*
+  需求：工作区所有者要求浏览器工具能够打开本机/内网页面（2026-09-20，已确认过
+  `ssrf.ts` 里 `SsrfRiskOptions` 记的那条风险后仍要求继续）。所以这里传
+  `allowPrivateAddresses: true`,只保留协议白名单(只认 http/https)和
+  `user:pass@` 凭证拦截 —— 这两条和「是不是内网」无关,不受这个开关影响。
+*/
 async function publicUrl(raw: string): Promise<URL> {
   const url = new URL(raw)
-  const risk = ssrfRisk(url)
+  const risk = ssrfRisk(url, { allowPrivateAddresses: true })
   if (risk !== null) throw new Error(risk)
-  const dnsRisk = await resolvedAddressRisk(url.hostname)
-  if (dnsRisk !== null) throw new Error(dnsRisk)
   return url
 }
 
@@ -93,7 +97,7 @@ function screenshotResult(tabId: string, screenshot: {
 }
 
 const BrowserOpenInput = z.object({
-  url: z.string().url().describe('A complete public http or https URL'),
+  url: z.string().url().describe('A complete http or https URL'),
   title: z.string().max(160).optional().describe('Optional label for the browser tab'),
   profileId: z.string().optional().describe('Optional browser Profile id; defaults to the built-in browser'),
   backend: z.enum(['iab', 'headless']).optional().describe('iab opens a visible workspace tab; headless runs managed Chromium without a visible tab')
@@ -145,7 +149,7 @@ const browserOpenTool: ToolRegistration = defineTool({
 
 const BrowserNavigateInput = z.object({
   tabId: BrowserTabId,
-  url: z.string().url().describe('A complete public http or https URL')
+  url: z.string().url().describe('A complete http or https URL')
 })
 
 const browserNavigateTool: ToolRegistration = defineTool({

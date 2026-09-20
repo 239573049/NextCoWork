@@ -1,109 +1,94 @@
 /**
  * 「改动审查」tab —— 某一轮(顶层 run)改了哪些文件 + 每个文件的 diff。
  *
- * 左列文件清单(路径 + `+X −Y`),点一个在右侧看统一 diff。数据全部来自
- * `review:*` IPC(见 `services/review.ts`);diff 渲染复用 `DiffView` 的 `DiffBlock`。
+ * 文件选择收进顶部工具栏，正文独占整列宽度；大文件默认只画改动 hunk 和邻近
+ * 上下文，切文件后回到首个 hunk。数据全部来自 `review:*` IPC，完整文件由编辑器打开。
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { ChevronLeft, ChevronRight, ExternalLink, FileDiff } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { InnerTab } from "../../../../shared/domain/tab";
 import type { Workspace } from "../../../../shared/domain/workspace";
 import type { ReviewChangeSet, ReviewFileDiff, ReviewFileEntry } from "../../../../shared/domain/review";
+import { IconButton } from "../../components/ui/IconButton";
+import { Select } from "../../components/ui/Select";
+import { Spinner } from "../../components/ui/Spinner";
+import { useI18n, type Translate } from "../../i18n";
 import { getReviewChangeSet, getReviewFileDiff } from "../../services/review";
 import { useTabsStore } from "../../stores/tabs";
-import { useI18n, type Translate } from "../../i18n";
-import { cn } from "../../lib/cn";
-import { DiffBlock } from "./DiffView";
+import { ReviewDiffBlock } from "./DiffView";
 
 type ChangesTab = Extract<InnerTab, { kind: "changes" }>;
 
-/** 拆出目录与文件名,好把文件名加粗、目录压灰(和截图一致)。 */
-function splitPath(path: string): { dir: string; name: string } {
-  const i = path.lastIndexOf("/");
-  return i < 0 ? { dir: "", name: path } : { dir: path.slice(0, i + 1), name: path.slice(i + 1) };
+/** 新建/删除是文件级状态，修改文件不额外占标签空间。 */
+function fileTag(file: ReviewFileEntry, t: Translate): string | null {
+  if (file.changeKind === "created") return t("chat.review.created");
+  if (file.changeKind === "deleted") return t("chat.review.deleted");
+  return null;
 }
 
-function FileRow({
-  file,
-  active,
-  onOpen,
-  onSelect,
-  t,
-}: {
-  file: ReviewFileEntry;
-  active: boolean;
-  onOpen: () => void;
-  onSelect: () => void;
-  t: Translate;
-}): ReactNode {
-  const { dir, name } = splitPath(file.path);
-  const tag =
-    file.changeKind === "created"
-      ? t("chat.review.created")
-      : file.changeKind === "deleted"
-        ? t("chat.review.deleted")
-        : null;
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      onDoubleClick={onOpen}
-      className={cn(
-        "flex w-full items-baseline gap-1.5 px-2.5 py-1.5 text-left text-[12px]",
-        active ? "bg-accent/10" : "hover:bg-canvas",
-      )}
-    >
-      <span className="min-w-0 flex-1 truncate">
-        <span className="text-fg">{name}</span>
-        {dir !== "" && <span className="ml-1 text-fg-faint">{dir}</span>}
-        {tag !== null && <span className="ml-1 text-fg-faint">· {tag}</span>}
-      </span>
-      {file.oversize ? (
-        <span className="shrink-0 text-fg-faint">{t("chat.review.oversize")}</span>
-      ) : (
-        <span className="shrink-0 font-mono text-[11px]">
-          {file.additions > 0 && <span className="text-accent">+{file.additions}</span>}
-          {file.deletions > 0 && <span className="ml-1 text-danger">-{file.deletions}</span>}
-        </span>
-      )}
-    </button>
-  );
+/** 下拉项用一段紧凑文本保留原文件列表的增删摘要。 */
+function fileDelta(file: ReviewFileEntry, t: Translate): string | undefined {
+  if (file.oversize === true) return t("chat.review.oversize");
+  const parts = [
+    file.additions > 0 ? `+${file.additions}` : null,
+    file.deletions > 0 ? `-${file.deletions}` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? undefined : parts.join(" ");
+}
+
+/** 下拉项用完整路径避免同名文件混淆，并把状态与增删数留在同一行。 */
+function fileLabel(file: ReviewFileEntry, t: Translate): string {
+  const details = [fileTag(file, t), fileDelta(file, t)].filter((part): part is string => part !== null && part !== undefined);
+  return details.length === 0 ? file.path : `${file.path} · ${details.join(" · ")}`;
 }
 
 export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace: Workspace }): ReactNode {
   const { t } = useI18n();
-  const runId = tab.ref.runId;
-  // 从回合卡里点某一行过来时带着它 —— 只作用于「首次定位」,之后选中态归左列自己管。
-  const wanted = tab.ref.selectedPath;
+  const targetRef = tab.ref;
+  const runId = targetRef.runId;
   // undefined = 加载中;null = 无改动/加载失败
   const [set, setSet] = useState<ReviewChangeSet | null | undefined>(undefined);
   const [selected, setSelected] = useState<string | null>(null);
-  const [diff, setDiff] = useState<ReviewFileDiff | null>(null);
+  const [diff, setDiff] = useState<ReviewFileDiff | null | undefined>(undefined);
+  const selectedRef = useRef<string | null>(null);
+  const diffScrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let alive = true;
     getReviewChangeSet(runId)
-      .then((s) => {
+      .then((nextSet) => {
         if (!alive) return;
-        setSet(s);
-        if (s === null || s.files.length === 0) return;
-        // 点的那个文件可能已经不在改动集里(撤销后重开),这时退回第一个而不是空着。
-        const hit = wanted === undefined ? undefined : s.files.find((f) => f.path === wanted);
-        setSelected(hit?.path ?? s.files[0]!.path);
+        setSet(nextSet);
+        setDiff(undefined);
+        if (nextSet === null || nextSet.files.length === 0) {
+          selectedRef.current = null;
+          setSelected(null);
+          return;
+        }
+        // 点的文件可能是同一轮刚新增的，也可能撤销后已消失；必须用这次的新快照定位。
+        const wanted = targetRef.selectedPath;
+        const hit = wanted === undefined ? undefined : nextSet.files.find((file) => file.path === wanted);
+        const next = hit?.path ?? nextSet.files[0]!.path;
+        selectedRef.current = next;
+        setSelected(next);
       })
       .catch(() => {
-        if (alive) setSet(null);
+        if (!alive) return;
+        setSet(null);
+        setDiff(null);
       });
     return () => {
       alive = false;
     };
-  }, [runId, wanted]);
+  }, [runId, targetRef]);
 
   useEffect(() => {
-    if (selected === null) {
+    if (selected === null || set === undefined || set === null) {
       setDiff(null);
       return;
     }
     let alive = true;
+    setDiff(undefined);
     getReviewFileDiff(runId, selected)
       .then((d) => {
         if (alive) setDiff(d);
@@ -114,7 +99,15 @@ export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace
     return () => {
       alive = false;
     };
-  }, [runId, selected]);
+  }, [runId, selected, set]);
+
+  useLayoutEffect(() => {
+    const scroller = diffScrollerRef.current;
+    if (scroller === null) return;
+    // 需求：切文件或从回合卡重新定位时必须回到首个 hunk；沿用旧滚动位置会直接越过改动。
+    scroller.scrollTop = 0;
+    scroller.scrollLeft = 0;
+  }, [selected, set]);
 
   if (set === undefined) return <div className="flex min-h-0 flex-1 bg-canvas" />;
   if (set === null || set.files.length === 0) {
@@ -125,29 +118,85 @@ export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace
     );
   }
 
-  const openFile = (path: string): void => useTabsStore.getState().openFile(workspace.id, path);
+  const selectedIndex = selected === null ? -1 : set.files.findIndex((file) => file.path === selected);
+  const selectedFile = selectedIndex < 0 ? undefined : set.files[selectedIndex];
+  const fileOptions = set.files.map((file) => ({ value: file.path, label: fileLabel(file, t) }));
+
+  const selectFile = (path: string): void => {
+    if (path === selectedRef.current) return;
+    // 需求：文件标题一切换就收起旧 diff，不能让旧内容顶着新文件名闪一帧。
+    selectedRef.current = path;
+    setDiff(undefined);
+    setSelected(path);
+  };
+  const selectAt = (index: number): void => {
+    const file = set.files[index];
+    if (file !== undefined) selectFile(file.path);
+  };
+  const openFile = (): void => {
+    // 需求：已删除的路径没有可成功打开的编辑器入口，因此不承诺这个操作。
+    if (selectedFile === undefined || selectedFile.changeKind === "deleted") return;
+    useTabsStore.getState().openFile(workspace.id, selectedFile.path);
+  };
 
   return (
-    <div className="flex min-h-0 flex-1 bg-canvas">
-      <div className="scroll-thin w-64 shrink-0 overflow-auto border-r border-border py-1">
-        {set.files.map((f) => (
-          <FileRow
-            key={f.path}
-            file={f}
-            active={f.path === selected}
-            onSelect={() => setSelected(f.path)}
-            onOpen={() => openFile(f.path)}
-            t={t}
-          />
-        ))}
+    <div className="flex min-h-0 flex-1 flex-col bg-canvas">
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-border bg-surface/40 px-2.5 py-2">
+        <FileDiff aria-hidden size={14} className="shrink-0 text-accent-soft" />
+        <Select
+          value={selected ?? ""}
+          options={fileOptions}
+          onValueChange={selectFile}
+          ariaLabel={t("chat.review.chooseFile")}
+          disabled={selectedFile === undefined}
+          className="min-w-0 flex-1"
+        />
+        <span className="shrink-0 px-1 font-mono text-[11px] tabular-nums text-fg-faint">
+          {selectedIndex + 1} / {set.files.length}
+        </span>
+        <IconButton
+          label={t("chat.review.previousFile")}
+          size={28}
+          disabled={selectedIndex <= 0}
+          onClick={() => selectAt(selectedIndex - 1)}
+        >
+          <ChevronLeft aria-hidden size={14} />
+        </IconButton>
+        <IconButton
+          label={t("chat.review.nextFile")}
+          size={28}
+          disabled={selectedIndex < 0 || selectedIndex >= set.files.length - 1}
+          onClick={() => selectAt(selectedIndex + 1)}
+        >
+          <ChevronRight aria-hidden size={14} />
+        </IconButton>
+        {selectedFile !== undefined && selectedFile.changeKind !== "deleted" && (
+          <IconButton label={t("chat.review.openFile")} size={28} onClick={openFile}>
+            <ExternalLink aria-hidden size={13} />
+          </IconButton>
+        )}
       </div>
-      <div className="scroll-thin min-w-0 flex-1 overflow-auto p-3">
-        {diff === null ? (
-          <div className="text-[12px] text-fg-faint">{t("chat.review.selectFile")}</div>
-        ) : diff.oversize ? (
-          <div className="text-[12px] text-fg-faint">{t("chat.review.oversize")}</div>
+
+      <div ref={diffScrollerRef} className="scroll-thin min-h-0 min-w-0 flex-1 overflow-auto">
+        {selectedFile === undefined ? (
+          <div className="flex min-h-full items-center justify-center p-6 text-[12px] text-fg-faint">
+            {t("chat.review.selectFile")}
+          </div>
+        ) : diff === undefined ? (
+          <div role="status" className="flex min-h-full items-center justify-center gap-2 p-6 text-[12px] text-fg-faint">
+            <Spinner size="sm" />
+            {t("chat.review.loading")}
+          </div>
+        ) : diff === null ? (
+          <div className="flex min-h-full items-center justify-center p-6 text-[12px] text-fg-faint">
+            {t("chat.review.loadFailed")}
+          </div>
+        ) : diff.oversize === true ? (
+          <div className="flex min-h-full items-center justify-center p-6 text-[12px] text-fg-faint">
+            {t("chat.review.oversize")}
+          </div>
         ) : (
-          <DiffBlock oldStr={diff.before} newStr={diff.after} maxRows={100_000} />
+          <ReviewDiffBlock oldStr={diff.before} newStr={diff.after} />
         )}
       </div>
     </div>

@@ -42,6 +42,7 @@ describe('Agent Markdown', () => {
     expect(html).not.toContain('<script>')
   })
 
+  // 需求：逐字符穷举不能因全套测试的 worker 争用误报超时；扩大预算但不减少覆盖的前缀。
   it('renders every incremental prefix, including unclosed fences and Markdown delimiters', () => {
     const source = '## Live\n\n**bold** and [link](https://example.com)\n\n```ts\nconst answer = 42\n```\n\n| A | B |\n| - | - |\n| 1 | 2 |'
     for (let length = 1; length <= source.length; length++) {
@@ -50,7 +51,7 @@ describe('Agent Markdown', () => {
     expect(render('```ts\nconst answer = 42', { streaming: true })).toContain('data-language="ts" data-streaming="true"')
     expect(render('```ts\nconst answer = 42\n```', { streaming: true })).not.toContain('data-language="ts" data-streaming="true"')
     expect(render('```\nconst answer = 42', { streaming: false })).toContain('<code>const answer = 42</code>')
-  })
+  }, 15_000)
 
   it('renders streaming through Streamdown and committed content through react-markdown', () => {
     // 双引擎是刻意的:Streamdown 逐块独立解析,跨块引用(脚注、[text][ref])解析不出来,

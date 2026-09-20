@@ -1,4 +1,4 @@
-import { Check, Copy, WrapText } from 'lucide-react'
+import { Check, Code2, Copy, WrapText } from 'lucide-react'
 import { memo, useEffect, useState, type ReactNode } from 'react'
 import { useI18n } from '../../i18n'
 import { useMarkdownEnvironment, type MarkdownCodeProps } from './MarkdownProvider'
@@ -25,6 +25,8 @@ export const CodeBlock = memo(function CodeBlock(props: MarkdownCodeProps): Reac
   return (
     <div className="markdown-code-block" data-language={language || undefined} data-streaming={streaming || undefined}>
       <div className="markdown-code-toolbar">
+        {/* 需求：代码块标题要先被识别成文件/代码产物，再呈现语言和操作。 */}
+        <Code2 size={14} aria-hidden="true" className="shrink-0 text-fg-faint" />
         <span className="markdown-code-language">{language || t('markdown.code')}</span>
         {Renderer && <div className="markdown-code-views">
           <button type="button" aria-pressed={!showSource} disabled={streaming} onClick={() => setSource(false)}>{t(language === 'mermaid' ? 'markdown.diagram' : 'markdown.preview')}</button>

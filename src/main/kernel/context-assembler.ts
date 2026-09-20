@@ -14,7 +14,7 @@
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import { isToolResultOnly, userMessage } from '../../shared/agent/message'
 import type { ContextSegment } from '../../shared/agent/context-management'
-import { FALLBACK_CONTEXT_WINDOW } from '../../shared/agent/context-management'
+import { FALLBACK_CONTEXT_WINDOW, shouldCompactAt } from '../../shared/agent/context-management'
 import type { PermissionMode } from '../../shared/agent/permission'
 import type { SessionMode, ThinkingLevel } from '../../shared/agent/run-request'
 import { THINKING_BUDGET } from '../../shared/agent/run-request'
@@ -817,25 +817,12 @@ export function decorate(
 
 // ─────────────────────────── 组装 ───────────────────────────
 
-/** 超过窗口的这个比例就该压缩了 */
-const COMPACT_THRESHOLD = 0.8
-
-/**
- * 输出预留最多吃掉窗口的这个比例。
- *
- * ★ **`maxOutputTokens` 和有效窗口不同源,不封顶就会算出一个恒为真的判据。**
- * 前者是别名上的原值(按模型的**协议**窗口标的),后者默认被 `LONG_CONTEXT_THRESHOLD`
- * 夹到 272K。一个 1M 窗口、384K 最大输出的模型,关掉「最大上下文」之后
- * 预留一项就是 384K —— 已经超过 272K×0.8 的阈值本身,于是 `used` 填 0 都判该压缩:
- * 自动压缩从会话第一条消息起每轮触发一次,而且压完仍然为真,永远收敛不了。
- * 症状是压力条几乎空着、旁边却写着「接近上限」。
- *
- * 封顶到 1/4 之后,最坏情况下压缩也要等占用过半才触发,判据重新跟历史长度有关。
- * 这不是在猜模型真实会输出多少 —— 一轮回复本来就不可能写满协议上限,
- * 而真正兜住「输入塞得下、输出被截断」的是 `validateModelRuntime` 那条硬校验,
- * 它读协议窗口原值,不受这里影响。
- */
-const OUTPUT_RESERVE_CAP = 0.25
+/*
+  压缩阈值(0.8)和输出预留封顶(0.25)连同那条不等式,已下沉到
+  `shared/agent/context-management.ts` 的 `shouldCompactAt()` —— 原因写在那边:
+  渲染层的状态行要按**当前**有效窗口重判同一条判据(用户中途开「最大上下文」),
+  两处各写一份就会悄悄分叉。这里的行为一个字节都没变。
+*/
 
 /*
   ★★ 校准系数 —— `estimateTokens` 的 chars/4 只够画一根条,**不够当判据**。
@@ -914,7 +901,7 @@ export interface AssembleInput {
   /** 以下两项直接来自 `RunRequest`,进系统提示词的 `# Environment`(见 `SystemPromptInput`) */
   permissionMode: PermissionMode
   webSearch: boolean
-  /** 以下三项来自 ModelAlias */
+  /** 以下三项由 ModelAlias 派生;maxOutputTokens 还会按正文请求的 32K 默认上限收窄 */
   contextWindow: number
   maxOutputTokens: number
   supportsThinking: boolean
@@ -1021,11 +1008,14 @@ export function assemble(input: AssembleInput): AssembleOutput {
        * ★ 把输出预留算进来:上下文窗口是**输入加输出**共用的。
        * 只比较输入的话,你会在「输入刚好塞得下、回复写到一半被截断」时
        * 才发现该压缩了 —— 而那时这一轮已经浪费了。
-       * 预留取 `maxOutputTokens` 但**必须封顶**,理由见 `OUTPUT_RESERVE_CAP`。
+       * 不等式本身在 `shared/agent/context-management.ts` 的 `shouldCompactAt()`,
+       * 预留封顶的理由(`OUTPUT_RESERVE_CAP`)也一并在那边。
        */
-      shouldCompact:
-        calibratedInputTokens + Math.min(input.maxOutputTokens, input.contextWindow * OUTPUT_RESERVE_CAP) >
-        input.contextWindow * COMPACT_THRESHOLD
+      shouldCompact: shouldCompactAt({
+        inputTokens: calibratedInputTokens,
+        contextWindow: input.contextWindow,
+        maxOutputTokens: input.maxOutputTokens
+      })
     }
   }
 }

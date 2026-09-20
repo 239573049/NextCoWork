@@ -10,7 +10,7 @@
  * 它因此是这一页唯一有本地状态的东西 —— 其余字段一律从 prop 读(见 `props.ts`)。
  */
 import { Check, Eye } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { ProxyScheme } from "../../../../../shared/domain/proxy";
 import {
   DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
@@ -33,6 +33,7 @@ import {
   setProxyPassword,
 } from "../../../services/proxy";
 import { SettingField, SettingGroup, SettingRow } from "../../Row";
+import { DraftInput } from "../../DraftInput";
 import type { SettingsPageProps } from "../../props";
 import { Spinner } from '../../../components/ui/Spinner'
 import {
@@ -210,69 +211,10 @@ export function NetworkPane({ settings, patch }: SettingsPageProps): ReactNode {
 }
 
 /**
- * 草稿态输入框的共用壳 —— 逐键写入等于每个字符一次 IPC + 一次全窗口广播,
- * 而且中间态(打到一半的地址)不该被存进设置。
- *
- * 回灌用**渲染期比对**,不用 `useEffect([value])` —— 后者正是 `Composer.tsx`
- * 注释点名的那个 bug(广播回来时把用户正在打的字冲掉)。有焦点时不回灌:
- * 别的窗口在你打字期间改了同一字段也冲不掉你,你失焦提交时最后写,你赢。
+ * 草稿态输入框的共用壳,实现搬到了 `settings/DraftInput.tsx` ——
+ * 内置搜索那一小节要用同一份,而「渲染期比对而不是 useEffect 回灌」这条规矩
+ * 留两份实现迟早会有一份退化。原来的整段理由跟着实现一起过去了。
  */
-function DraftInput({
-  value,
-  disabled,
-  invalid = false,
-  ariaLabel,
-  placeholder,
-  onCommit,
-  transform,
-}: {
-  value: string;
-  disabled: boolean;
-  invalid?: boolean;
-  ariaLabel: string;
-  placeholder?: string;
-  onCommit: (v: string) => void;
-  /** 提交前的最后一次加工。返回 `null` = 别提交,还原成 `value` */
-  transform?: (draft: string) => string | null;
-}): ReactNode {
-  const [draft, setDraft] = useState(value);
-  const [seen, setSeen] = useState(value);
-  const focused = useRef(false);
-
-  if (value !== seen && !focused.current) {
-    setSeen(value);
-    setDraft(value);
-  }
-
-  const commit = (): void => {
-    focused.current = false;
-    const next = transform === undefined ? draft.trim() : transform(draft);
-    if (next === null) {
-      setDraft(value);
-      return;
-    }
-    setDraft(next);
-    if (next !== value) onCommit(next);
-  };
-
-  return (
-    <div onFocusCapture={() => (focused.current = true)}>
-      <TextInput
-        value={draft}
-        onChange={setDraft}
-        onCommit={commit}
-        onRevert={() => {
-          focused.current = false;
-          setDraft(value);
-        }}
-        invalid={invalid}
-        disabled={disabled}
-        ariaLabel={ariaLabel}
-        placeholder={placeholder}
-      />
-    </div>
-  );
-}
 
 /**
  * 地址栏。★ 粘一整条 `socks5://host:port` 进来时把它拆到三栏 ——

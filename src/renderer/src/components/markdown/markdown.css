@@ -69,16 +69,17 @@
 .markdown-blocked-link { color: var(--color-fg-muted); text-decoration: underline dotted; text-underline-offset: 3px; }
 .markdown-link-error { margin-left: 0.5em; color: var(--color-danger); font-size: 12px; }
 
-.markdown-code-block { min-width: 0; margin: 1em 0; border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; background: var(--color-canvas); }
-.markdown-code-toolbar { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 5px 10px 5px 14px; background: var(--color-surface); border-bottom: 1px solid var(--color-border); font: 11px/1.5 var(--font-sans); color: var(--color-fg-muted); user-select: none; }
-.markdown-code-language { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
-.markdown-code-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
-.markdown-code-toolbar button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 25px; padding: 3px 5px; border-radius: 4px; cursor: pointer; }
+/* Beautiful UI 的产物卡层级，但继续使用本项目的 token、高亮器和流式渲染。 */
+.markdown-code-block { min-width: 0; margin: 1em 0; border: 1px solid var(--color-stroke); border-radius: 10px; overflow: hidden; background: var(--color-canvas); }
+.markdown-code-toolbar { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 10px 6px 12px; background: color-mix(in srgb, var(--color-surface-raised) 82%, transparent); border-bottom: 1px solid var(--color-hairline); font: 11px/1.5 var(--font-sans); color: var(--color-fg-muted); user-select: none; }
+.markdown-code-language { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--color-fg); }
+.markdown-code-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.markdown-code-toolbar button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 25px; padding: 3px 7px; border-radius: 6px; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 .markdown-code-toolbar button:hover { background: var(--color-tint-hover); color: var(--color-fg); }
 .markdown-code-toolbar button:disabled { cursor: default; opacity: 0.5; }
 .markdown-code-toolbar button[aria-pressed='true'] { color: var(--color-fg); background: var(--color-tint); }
-.markdown-code-views { display: flex; gap: 3px; flex-shrink: 0; }
-.agent-markdown .markdown-code-source { margin: 0; padding: 14px 16px; overflow: auto; max-height: 480px; font: 12px/1.75 var(--font-mono); color: var(--color-fg); tab-size: 2; white-space: pre; overflow-wrap: normal; }
+.markdown-code-views { display: flex; gap: 2px; flex-shrink: 0; padding: 2px; border: 1px solid var(--color-hairline); border-radius: 7px; background: color-mix(in srgb, var(--color-surface-input) 55%, transparent); }
+.agent-markdown .markdown-code-source { margin: 0; padding: 13px 15px; overflow: auto; max-height: 480px; font: 12px/1.75 var(--font-mono); color: var(--color-fg); tab-size: 2; white-space: pre; overflow-wrap: normal; }
 .agent-markdown .markdown-code-source code { padding: 0; border: 0; background: none; font: inherit; color: inherit; }
 .agent-markdown .markdown-code-source[data-wrap] { white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-markdown .tok-keyword, .agent-markdown .tok-operator { color: var(--md-keyword); }

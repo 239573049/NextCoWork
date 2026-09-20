@@ -6,6 +6,9 @@
  * 点开之后也找不到另一个。外加一条:在跑的那条要排在已完成的前面,
  * 否则面板存在的唯一理由(「现在还有什么在跑」)要靠用户自己翻。
  *
+ * 已汇报成功的后台任务默认归进折叠区；回传中、失败、停止或还待处理的任务
+ * 不能一起藏掉，否则用户会看到任务消失，但主对话还没有拿到结果。
+ *
  * 样板抄 `subagent-card.test.ts`(JSDOM 手搓,没有全局 jsdom 环境)。
  */
 import { act, createElement } from 'react'
@@ -107,14 +110,36 @@ describe('子代理任务面板', () => {
     expect(opened.map((item) => item.callId)).toEqual(['fg'])
   })
 
-  it('★ 在跑的排在最前,其次是等着收结果的', async () => {
+  it('★ 在跑和待处理的排在前面,已完成后台任务默认收起且可手动展开', async () => {
     const { container } = await renderCenter({
       done: subagent('done', { background: true, status: 'done', reportStatus: 'reported' }),
       pending: subagent('pending', { background: true, status: 'done', reportStatus: 'pending' }),
       running: subagent('running', { background: true })
     })
     await click(container.querySelector('[aria-expanded]'))
+    expect(rows(container).map((row) => row.dataset.centerCallId)).toEqual(['running', 'pending'])
+
+    const completedToggle = container.querySelector('[data-testid="subagent-center-completed-toggle"]')
+    expect(completedToggle?.getAttribute('aria-expanded')).toBe('false')
+    expect(completedToggle?.textContent).toBe('已完成1')
+    const completedItemsId = completedToggle?.getAttribute('aria-controls')
+    expect(completedItemsId).not.toBeNull()
+    expect(container.ownerDocument.getElementById(completedItemsId ?? '')).not.toBeNull()
+
+    await click(completedToggle)
     expect(rows(container).map((row) => row.dataset.centerCallId)).toEqual(['running', 'pending', 'done'])
+  })
+
+  it('回传中、失败和停止的后台任务不进入已完成折叠区', async () => {
+    const { container } = await renderCenter({
+      done: subagent('done', { background: true, status: 'done', reportStatus: 'reported' }),
+      injecting: subagent('injecting', { background: true, status: 'done', reportStatus: 'injecting' }),
+      error: subagent('error', { background: true, status: 'error', reportStatus: 'reported' }),
+      aborted: subagent('aborted', { background: true, status: 'aborted', reportStatus: 'reported' })
+    })
+    await click(container.querySelector('[aria-expanded]'))
+    expect(rows(container).map((row) => row.dataset.centerCallId)).toEqual(['injecting', 'error', 'aborted'])
+    expect(container.querySelector('[data-testid="subagent-center-completed-toggle"]')?.textContent).toBe('已完成1')
   })
 
   /** 前台子代理跑完就退场:它的结果已经同步回到主对话,没有「等你来收」这一步 */
@@ -124,6 +149,7 @@ describe('子代理任务面板', () => {
       fg: subagent('fg', { status: 'done' })
     })
     await click(container.querySelector('[aria-expanded]'))
+    await click(container.querySelector('[data-testid="subagent-center-completed-toggle"]'))
     expect(rows(container).map((row) => row.dataset.centerCallId)).toEqual(['bg'])
   })
 

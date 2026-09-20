@@ -1,26 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { nodeHost } from '../../../host'
 import type { ToolContext } from '../../registry'
 import { WEB_LIMITS, webFetchTool } from '../web'
 
 /**
- * `WebFetch` 的测试。**一个真请求都不发**:fetch 从 `nodeHost({ fetch })` 注进去,
- * DNS 用 `vi.mock` 顶掉。
+ * `WebFetch` 的测试。**一个真请求都不发**:fetch 从 `nodeHost({ fetch })` 注进去。
  *
- * ★ 顶掉 DNS 不是为了跑得快,是为了让「公网域名解析到内网地址」这一条**能测**。
- * 用真 DNS 的话那条只能靠一个真实存在、且真的解析到 127.0.0.1 的域名 ——
- * 而那种域名什么时候失效我们控制不了。顺带也让整个文件在离线机器上照跑。
+ * 这里原先还顶掉了 `node:dns`,专门测「公网域名解析到内网地址」被拒的那条
+ * DNS 层筛查。那条筛查随 `ssrf.ts` 的 `allowPrivateAddresses` 选项一起被
+ * 工作区所有者要求关闭了(2026-09-20,见 `web.ts` 文件头注释),`web.ts` 也
+ * 不再 import `node:dns`,所以这里把 DNS mock 一并去掉 —— 留着一个没有任何
+ * 生产代码路径会触发的 mock,只会让后来者误以为这里还在测 DNS 行为。
  */
-
-/** 域名 → 解析结果。没登记的域名一律解析成一个公网地址。 */
-const dnsTable = vi.hoisted(() => new Map<string, string[]>())
-
-vi.mock('node:dns', () => ({
-  promises: {
-    lookup: (host: string): Promise<Array<{ address: string }>> =>
-      Promise.resolve((dnsTable.get(host) ?? ['93.184.216.34']).map((address) => ({ address })))
-  }
-}))
 
 /** fetch 的假实现:按 URL 字符串查一张表 */
 let routes = new Map<string, Response>()
@@ -72,7 +63,6 @@ const P = { prompt: '这一页在讲什么' }
 beforeEach(() => {
   routes = new Map()
   seen = []
-  dnsTable.clear()
 })
 
 describe('WebFetch · 标记', () => {
@@ -93,20 +83,29 @@ describe('WebFetch · 地址闸门', () => {
     expect(seen).toEqual([])
   })
 
-  it('★ 本机地址被拒,而且一个请求都没发出去', async () => {
-    const r = await webFetchTool.execute({ url: 'http://127.0.0.1:3000/', ...P }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('private-network')
-    expect(seen).toEqual([])
+  /*
+    需求：工作区所有者要求 WebFetch 能触达本机/内网服务(2026-09-20,已确认过
+    `ssrf.ts` 里 `SsrfRiskOptions` 记的风险后仍要求继续)。下面两条原先是
+    「本机地址被拒」「云元数据端点被拒」——现在改成断言它们**放行**,
+    不要把这两条改回“拒绝”断言,那会让这个开关看起来像一次回归。
+  */
+  it('本机地址被放行 —— 地址筛查已按工作区所有者的要求关闭', async () => {
+    route('https://127.0.0.1:3000/', res('本地服务的响应', { type: 'text/plain' }))
+    const r = await webFetchTool.execute({ url: 'https://127.0.0.1:3000/', ...P }, ctx())
+    expect(r.isError).toBeFalsy()
+    expect(r.output.content).toContain('本地服务的响应')
   })
 
-  it('★ 云元数据端点被拒', async () => {
+  it('云元数据端点也被放行 —— 同上,不是遗漏', async () => {
+    route(
+      'https://169.254.169.254/latest/meta-data/',
+      res('meta', { type: 'text/plain' })
+    )
     const r = await webFetchTool.execute(
-      { url: 'http://169.254.169.254/latest/meta-data/', ...P },
+      { url: 'https://169.254.169.254/latest/meta-data/', ...P },
       ctx()
     )
-    expect(r.isError).toBe(true)
-    expect(seen).toEqual([])
+    expect(r.isError).toBeFalsy()
   })
 
   it('file:// 被拒,并指路到 Read', async () => {
@@ -115,27 +114,21 @@ describe('WebFetch · 地址闸门', () => {
     expect(r.output.content).toContain('Read')
   })
 
+  it('★ URL 里带 user:pass@ 时被拒 —— 这条不受地址筛查关闭的影响', async () => {
+    const r = await webFetchTool.execute(
+      { url: 'https://user:pass@example.com/', ...P },
+      ctx()
+    )
+    expect(r.isError).toBe(true)
+    expect(r.output.content).toContain('user:pass@')
+    expect(seen).toEqual([])
+  })
+
   it('★ http 自动升级成 https —— 发出去的是 https', async () => {
     route('https://example.com/a', res('hello', { type: 'text/plain' }))
     const r = await webFetchTool.execute({ url: 'http://example.com/a', ...P }, ctx())
     expect(r.isError).toBeFalsy()
     expect(seen).toEqual(['https://example.com/a'])
-  })
-
-  it('★ 公网域名解析到内网地址时被拒 —— DNS 那一层', async () => {
-    dnsTable.set('evil.example.com', ['127.0.0.1'])
-    route('https://evil.example.com/', res('x', { type: 'text/plain' }))
-    const r = await webFetchTool.execute({ url: 'https://evil.example.com/', ...P }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('127.0.0.1')
-    expect(seen).toEqual([])
-  })
-
-  it('多条 A 记录里只要有一条是内网就拒', async () => {
-    dnsTable.set('mixed.example.com', ['93.184.216.34', '10.0.0.5'])
-    route('https://mixed.example.com/', res('x', { type: 'text/plain' }))
-    const r = await webFetchTool.execute({ url: 'https://mixed.example.com/', ...P }, ctx())
-    expect(r.isError).toBe(true)
   })
 })
 
@@ -149,28 +142,19 @@ describe('WebFetch · 重定向', () => {
     expect(seen).toEqual(['https://example.com/a', 'https://example.com/b'])
   })
 
-  it('★ 重定向到内网地址被拒 —— 只查第一个 URL 的实现在这里会放行', async () => {
+  it('重定向到内网地址也放行 —— 和第一跳的标准一致(地址筛查已关闭)', async () => {
     route('https://example.com/a', redirect('http://169.254.169.254/latest/meta-data/'))
+    route('http://169.254.169.254/latest/meta-data/', res('meta', { type: 'text/plain' }))
+    const r = await webFetchTool.execute({ url: 'https://example.com/a', ...P }, ctx())
+    expect(r.isError).toBeFalsy()
+  })
+
+  it('★ 重定向目标带 user:pass@ 时仍然被拒 —— 凭证拦截没有被这次改动关闭', async () => {
+    route('https://example.com/a', redirect('https://user:pass@example.com/b'))
     const r = await webFetchTool.execute({ url: 'https://example.com/a', ...P }, ctx())
     expect(r.isError).toBe(true)
     expect(r.output.content).toContain('redirect')
-    // 第二跳**没有**被请求
     expect(seen).toEqual(['https://example.com/a'])
-  })
-
-  it('★ 重定向目标的 DNS 也要查 —— 每一跳的标准和第一跳完全一样', async () => {
-    // 先证明同主机重定向本身是通的(否则下面那条红了也说明不了问题)
-    route('https://ok.example.com/a', redirect('https://ok.example.com/b'))
-    route('https://ok.example.com/b', res('x', { type: 'text/plain' }))
-    const good = await webFetchTool.execute({ url: 'https://ok.example.com/a', ...P }, ctx())
-    expect(good.isError).toBeFalsy()
-
-    // 同样的形状,只是这个域名解析到内网 —— 第二跳必须被拦
-    dnsTable.set('sneaky.example.com', ['192.168.1.1'])
-    route('https://sneaky.example.com/a', redirect('https://sneaky.example.com/b'))
-    const r = await webFetchTool.execute({ url: 'https://sneaky.example.com/a', ...P }, ctx())
-    expect(r.isError).toBe(true)
-    expect(r.output.content).toContain('192.168.1.1')
   })
 
   it('★ 跨主机重定向停下来问模型,不默默跟过去', async () => {

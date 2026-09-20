@@ -13,6 +13,7 @@ import { defaultProtocolForModel, findBuiltinModel } from '../../shared/domain/m
 import { shutdownConfigSync, stopConfigSync } from './config-sync'
 import { prepareAccountSwitch, startSyncForAccount } from '../account-switch'
 import {
+  claimMigratedLocalWorkspaces,
   migrateLegacyLocalProvidersToCurrentAccount,
   switchConfigProfile
 } from '../db/config-profile'
@@ -119,9 +120,25 @@ export function prepareStoredAccountScope(): void {
   const accountId = saved?.mode === 'authenticated' ? saved.user?.id : undefined
   if (accountId === undefined) return
   switchConfigProfile(accountId)
+  reconcileMigratedWorkspacesForStoredAccount()
   if (migrateLegacyLocalProvidersToCurrentAccount()) {
     repo.setConfigCategoryDirty('providers', accountId, true)
   }
+}
+
+/**
+ * 为已登录账户完成刚结束的数据迁移工作区重连。
+ *
+ * 需求：迁移失败后可以在已启动的应用里重试；那时不会再经过启动期的
+ * `prepareStoredAccountScope`。没有这个入口，重试虽然写入数据，侧边栏仍会停在空态。
+ */
+export function reconcileMigratedWorkspacesForStoredAccount(): number {
+  const saved = meta()
+  const accountId = saved?.mode === 'authenticated' ? saved.user?.id : undefined
+  if (accountId === undefined) return 0
+  const relinked = claimMigratedLocalWorkspaces(accountId)
+  if (relinked > 0) repo.setConfigCategoryDirty('workspaces', accountId, true)
+  return relinked
 }
 
 /** 数据库恢复后重建账户作用域、内置 provider 与同步会话。调用时 runtime 已初始化。 */

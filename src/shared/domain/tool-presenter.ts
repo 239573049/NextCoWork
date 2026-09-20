@@ -47,6 +47,15 @@ export interface ToolPresenter {
   title: (input: unknown) => string
   /** 折叠态右侧摘要。信息不足时返回 `undefined`,调用方据此不渲染那一格。 */
   summary?: (input: unknown, output: ToolOutput | undefined) => string | undefined
+  /**
+   * 运行中能不能被用户**单独**停掉(`shell:stopToolCall`)。
+   *
+   * ★ 这是一条**能力声明,不是偏好**:主进程只为 `Bash` 寄存停止句柄
+   * (见 `main/agent-shells.ts`),别的工具画了按钮也停不掉。写成注册表里的一行、
+   * 而不是卡片里的 `toolName === 'Bash'`,是为了让「哪些工具可停」和
+   * 「哪些工具长什么样」住在同一张表里 —— 下一个可停的工具只要在这儿加一个字段。
+   */
+  stoppable?: boolean
 }
 
 // ─────────────────────────── 取值原语(全部对 unknown 安全) ───────────────────────────
@@ -248,6 +257,22 @@ function bashSummary(_i: unknown, o: ToolOutput | undefined): string | undefined
   return n === undefined ? undefined : `${String(n)} 行输出`
 }
 
+/**
+ * `BashOutput`:折叠态右侧显示那条后台 shell 的**状态**,不是行数。
+ *
+ * 一次回读最值得一眼看见的是「它还活着吗 / 退出码是几」—— 行数会随轮询忽多忽少,
+ * 而状态正好是模型下一步要据以决定的那件事。输出首行形如
+ * `Shell bash_1 (npm run dev) is still running.`
+ */
+function bashOutputSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
+  if (o === undefined) return undefined
+  if (/is still running/.test(o.content)) return '运行中'
+  if (/was killed/.test(o.content)) return '已停止'
+  const m = /exited with code (\d+)/i.exec(o.content)
+  const code = m?.[1]
+  return code === undefined ? undefined : `退出码 ${code}`
+}
+
 /** MCP / 未知工具:拿输出首行当摘要 —— 这是唯一通用且几乎总有意义的东西 */
 function firstLineSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   if (o === undefined) return undefined
@@ -342,7 +367,17 @@ const REGISTRY: Record<string, ToolPresenter> = {
       if (desc !== '') return clip(desc, 40)
       return withTarget('执行', clip(pick(i, 'command'), 40))
     },
-    summary: bashSummary
+    summary: bashSummary,
+    stoppable: true
+  },
+  BashOutput: {
+    shape: 'command',
+    title: (i) => withTarget('读后台输出', pick(i, 'bash_id')),
+    summary: bashOutputSummary
+  },
+  KillShell: {
+    shape: 'command',
+    title: (i) => withTarget('停止后台命令', pick(i, 'shell_id'))
   },
   WebFetch: {
     shape: 'network',

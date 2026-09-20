@@ -60,6 +60,28 @@ describe('native SSH command construction', () => {
     expect(sshTargetArgs({ ...profile, target: { kind: 'config', host: 'alias', configFile: '/path with spaces/config' } }))
       .toEqual(['-F', '/path with spaces/config', 'alias'])
   })
+  /**
+   * ★ 选了方式就要连**开关**一起给。只发 PreferredAuthentications 的话,本机 ssh_config 里一条
+   * `PasswordAuthentication no` 就能让 ssh 一次密码都不试:日志上是
+   * "No more authentication methods to try",界面上是一句无从下手的「认证失败」。
+   */
+  it('turns on the authentication method the user picked, not just its order', () => {
+    expect(sshTargetArgs({ ...profile, authMethod: 'password' })).toEqual([
+      '-o', 'PreferredAuthentications=password,keyboard-interactive',
+      '-o', 'PasswordAuthentication=yes', '-o', 'KbdInteractiveAuthentication=yes', 'my-alias'])
+    expect(sshTargetArgs({ ...profile, authMethod: 'ask' })).toEqual(sshTargetArgs({ ...profile, authMethod: 'password' }))
+    expect(sshTargetArgs({ ...profile, authMethod: 'interactive' })).toEqual([
+      '-o', 'PreferredAuthentications=keyboard-interactive', '-o', 'KbdInteractiveAuthentication=yes', 'my-alias'])
+    expect(sshTargetArgs({ ...profile, authMethod: 'key' })).toEqual([
+      '-o', 'PreferredAuthentications=publickey', '-o', 'PubkeyAuthentication=yes', 'my-alias'])
+  })
+
+  /** `auto` 与老档案缺省的 undefined 都是「按系统配置来」—— 那时配置里的 no 是用户自己的选择。 */
+  it('leaves the system authentication configuration untouched when no method was picked', () => {
+    expect(sshTargetArgs({ ...profile, authMethod: 'auto' })).toEqual(['my-alias'])
+    expect(sshTargetArgs(profile)).toEqual(['my-alias'])
+  })
+
   it('rejects option injection in destinations', () => {
     expect(() => sshTargetArgs({ ...profile, target: { kind: 'config', host: '-oProxyCommand=bad' } })).toThrow('invalid-profile')
   })

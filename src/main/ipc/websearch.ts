@@ -16,7 +16,7 @@ import type {
 import { SEARCH_PROVIDER_IDS, isUsableProvider, searchSecretRef } from '../../shared/domain/search'
 import type { CredentialInfo } from '../../shared/domain/provider'
 import { getHost } from '../runtime'
-import { testProvider } from '../search/service'
+import { testBuiltin, testProvider } from '../search/service'
 import { last4Of, searchStatuses } from '../search/status'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
@@ -125,6 +125,32 @@ export async function testSearchProvider(
   timer.unref?.()
   try {
     return await testProvider(id, { fetch: host.fetch, signal: ctl.signal }, () => host.clock.now())
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 设置页底部「内置搜索」那一小节的测试按钮。
+ *
+ * 和上面那个同一条立场:只回通不通 + 是哪个源给的,**不回结果**。
+ * 同样的 30 秒硬上限 —— 内置链路最坏情况是三个实例 + 三家引擎依次超时,
+ * 没有这一层,那颗转圈图标能转将近半分钟。
+ */
+export async function testBuiltinSearch(): Promise<{
+  ok: boolean
+  latencyMs?: number
+  source?: string
+  message?: string
+}> {
+  const host = getHost()
+  const ctl = new AbortController()
+  const timer = setTimeout(() => {
+    ctl.abort(new Error('测试超时'))
+  }, TEST_TIMEOUT_MS)
+  timer.unref?.()
+  try {
+    return await testBuiltin({ fetch: host.fetch, signal: ctl.signal }, () => host.clock.now())
   } finally {
     clearTimeout(timer)
   }

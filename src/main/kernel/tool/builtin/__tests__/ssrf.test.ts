@@ -238,3 +238,36 @@ describe('resolvedAddressRisk · DNS 解析结果', () => {
     await expect(resolvedAddressRisk('example.com', 100, lookup)).resolves.toBeNull()
   })
 })
+
+/**
+ * `allowPrivateAddresses` 是给 `browser.ts` / `web.ts` 用的开关(工作区所有者
+ * 2026-09-20 明确要求关掉这两个工具的私网地址拦截)。这里要验证的不是「它能
+ * 放行内网」——那是需求本身——而是「它只放行内网这一件事,协议白名单和凭证
+ * 拦截不受影响」。少了这组测试,以后有人往 `allowPrivateAddresses` 分支里
+ * 塞进别的豁免,不会有任何测试变红。
+ */
+describe('ssrfRisk · allowPrivateAddresses 选项', () => {
+  it('放行本机和内网地址', () => {
+    expect(risk('http://127.0.0.1:3000/')).not.toBeNull() // 默认仍然拦
+    expect(ssrfRisk(new URL('http://127.0.0.1:3000/'), { allowPrivateAddresses: true })).toBeNull()
+    expect(ssrfRisk(new URL('http://192.168.1.1/'), { allowPrivateAddresses: true })).toBeNull()
+    expect(ssrfRisk(new URL('http://169.254.169.254/latest/meta-data/'), { allowPrivateAddresses: true })).toBeNull()
+    expect(ssrfRisk(new URL('http://localhost/'), { allowPrivateAddresses: true })).toBeNull()
+  })
+
+  it('★ 协议白名单不受这个选项影响 —— file:// 仍然被拒', () => {
+    const r = ssrfRisk(new URL('file:///etc/passwd'), { allowPrivateAddresses: true })
+    expect(r).not.toBeNull()
+    expect(r).toContain('Read')
+  })
+
+  it('★ URL 里的凭证不受这个选项影响 —— user:pass@ 仍然被拒', () => {
+    const r = ssrfRisk(new URL('https://user:pass@127.0.0.1/'), { allowPrivateAddresses: true })
+    expect(r).not.toBeNull()
+    expect(r).toContain('user:pass@')
+  })
+
+  it('不传选项时行为和之前完全一样', () => {
+    expect(ssrfRisk(new URL('http://127.0.0.1/'))).not.toBeNull()
+  })
+})

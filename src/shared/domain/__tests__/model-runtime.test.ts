@@ -145,4 +145,13 @@ describe('validateModelRuntime', () => {
       estimatedInputTokens: 8_001
     }).map((issue) => issue.code)).toContain('context_length')
   })
+
+  it('uses the request output budget instead of the model protocol limit when provided', () => {
+    expect(validateModelRuntime({
+      alias: alias({ contextWindow: 10_000, maxOutputTokens: 9_000 }),
+      messages: [message(['text'])],
+      estimatedInputTokens: 7_000,
+      maxOutputTokens: 2_000
+    }).map((issue) => issue.code)).not.toContain('context_length')
+  })
 })

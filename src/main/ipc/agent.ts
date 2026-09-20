@@ -13,6 +13,7 @@ import type { RunRequest } from '../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../shared/agent/interaction'
 import type { InterjectItem } from '../../shared/agent/interject'
 import { interactions } from '../kernel/interaction-gate'
+import { agentShells } from '../agent-shells'
 import { IpcError, toAgentError } from './errors'
 import { RunHandle, runs } from '../kernel/run-registry'
 import { ensureGoalRuntime, runAgent } from '../runtime'
@@ -297,9 +298,33 @@ export function interjectRun(
   handle.setInterject(req.items)
 }
 
+/**
+ * 停掉**一次工具调用**里那条正在跑的命令 —— 工具卡片上那颗停止按钮。
+ *
+ * ★ 和 `abortRun` 是两件事:这条不碰 run,只让 `Bash` 那次调用提前收场并返回
+ * 一条「用户停了这条命令」的工具失败。模型据此换路,回复继续写。
+ *
+ * ★ 订阅校验与 `interjectRun` 同源:runId 是渲染层 mint 的,光有 id 不构成授权,
+ * 否则任何一个窗口都能掐掉别的窗口正在跑的命令。
+ *
+ * 返回 `false`(命令已经不在跑了)**不是错误**,见频道契约。
+ */
+export function stopToolCall(req: { runId: string; callId: string }, ctx: WindowContext): boolean {
+  if (!windows.isSubscribed(runTopic(req.runId), ctx.sender)) {
+    throw new IpcError('unknown', '当前窗口没有订阅这个运行')
+  }
+  return agentShells.stopCall(req.runId, req.callId)
+}
+
 /** app 退出前:停掉所有 run,冲掉所有泵。留着的 setTimeout 会拖住退出。 */
 export function shutdownRuns(): void {
   runs.abortAll({ by: 'shutdown' })
+  /*
+    ★ 后台 shell 跟着一起收。它们**不属于任何一个 run**(这正是后台的意义),
+    所以 `abortAll` 一个也带不走 —— 而 `detached` 的进程组不随主进程消失:
+    不杀的话,用户重启应用后端口还占着,界面上再也找不到是谁占的。
+  */
+  agentShells.shutdown()
   for (const pump of pumps.values()) pump.flush()
   pumps.clear()
 }

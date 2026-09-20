@@ -152,6 +152,8 @@ export interface ModelRuntimeValidationInput {
   webSearchRequested?: boolean
   /** Estimated prompt tokens after system/reminder decoration. */
   estimatedInputTokens?: number
+  /** 本次请求实际预留的输出额度;缺省时保留旧调用方按模型协议上限校验的语义。 */
+  maxOutputTokens?: number
 }
 
 function supports(capabilities: ModelCapabilities, key: keyof ModelCapabilities): boolean {
@@ -233,16 +235,17 @@ export function validateModelRuntime(input: ModelRuntimeValidationInput): ModelR
     })
   }
 
+  const maxOutputTokens = input.maxOutputTokens ?? alias.maxOutputTokens
   if (
     typeof input.estimatedInputTokens === 'number' &&
     Number.isFinite(input.estimatedInputTokens) &&
-    input.estimatedInputTokens + alias.maxOutputTokens > alias.contextWindow
+    input.estimatedInputTokens + maxOutputTokens > alias.contextWindow
   ) {
     issues.push({
       code: 'context_length',
       message:
         `模型「${alias.alias}」的请求预计需要 ${String(Math.ceil(input.estimatedInputTokens))} 个输入 Token` +
-        `，再加 ${String(alias.maxOutputTokens)} 个最大输出 Token，超过 ${String(alias.contextWindow)} 的上下文窗口。`
+        `，再加 ${String(maxOutputTokens)} 个最大输出 Token，超过 ${String(alias.contextWindow)} 的上下文窗口。`
     })
   }
 

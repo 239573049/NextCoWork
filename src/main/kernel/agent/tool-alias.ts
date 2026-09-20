@@ -43,6 +43,10 @@ const CC_ALIAS: Readonly<Record<string, string>> = {
   multiedit: 'Edit',
   notebookedit: 'Edit',
   bash: 'Bash',
+  // ★ 和 CC 同名。子代理只写 `Bash` 时拿不到这两个 —— 而一个能起后台命令、
+  //   却读不到它输出、也停不掉它的子代理,比根本不让它起更糟。
+  bashoutput: 'BashOutput',
+  killshell: 'KillShell',
   glob: 'Glob',
   grep: 'Grep',
   ls: 'LS',

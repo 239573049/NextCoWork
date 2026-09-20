@@ -86,7 +86,9 @@ export const MODEL_MANUFACTURERS: readonly ModelManufacturer[] = [
   },
   { id: 'yi', label: '零一万物 Yi', aliases: ['yi-', '01.ai', '零一万物'] },
   { id: 'meta', label: 'Meta', aliases: ['meta', 'llama', 'muse'] },
-  { id: 'microsoft', label: 'Microsoft Phi', aliases: ['microsoft', 'phi'] },
+  // label 原为 'Microsoft Phi';该家族收录 MAI-Code 后 Phi 不再是全量,改成厂商名。
+  // 'mai' 别名让 manufacturerForModelId 把 `mai-` 前缀的 id 归进本家而不是 'other'。
+  { id: 'microsoft', label: 'Microsoft', aliases: ['microsoft', 'phi', 'mai'] },
   {
     id: 'amazon',
     label: 'Amazon Nova',

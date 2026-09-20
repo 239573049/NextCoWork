@@ -185,16 +185,19 @@ describe('Bash · 输出预算', () => {
 
 describe('Bash · 中断', () => {
   /**
-   * ★ 这一条钉的是「停止按钮不能失效」。
-   *
-   * `SpawnFn` 被中断时抛的是 abortError,而 `defineTool` 的契约是**原样往上抛**。
-   * 在工具里包一层 catch 转成 `toolFail` 的话,「用户点了停止」会表现成
-   * 「命令失败了」—— 模型于是换个写法再试一次,停止按钮就形同虚设。
+   * ★ 原先所有中断都沿 `ctx.signal` 原样抛出；现在单条命令有独立停止按钮，
+   * 只有**整轮中断**仍必须原样往上抛。把它误转成 `toolFail` 的话，模型会继续
+   * 回合并换个写法重试，表现为用户明明停了整轮，命令却再次启动。
    */
-  it('★ 中断原样抛出,不会变成一个普通的 toolFail', async () => {
+  it('★ 整轮中断原样抛出,不会变成一个普通的 toolFail', async () => {
+    const ac = new AbortController()
+    ac.abort()
     const p = bashTool.execute(
       { command: 'sleep 30' },
-      ctx(withSpawn(() => Promise.reject(abortError())))
+      ctx({
+        signal: ac.signal,
+        ...withSpawn(() => Promise.reject(abortError()))
+      })
     )
     await expect(p).rejects.toThrow()
   })
@@ -209,7 +212,7 @@ describe('Bash · 中断', () => {
   }, 10_000)
 })
 
-describe('Bash · 描述里那三处和 CC 的差异', () => {
+describe('Bash · 描述里的运行约束', () => {
   const d = bashTool.description
 
   it('★ 说清了每次调用都是新 shell —— 不说的话模型会先 cd 再在下一次调用里写相对路径', () => {
@@ -229,13 +232,16 @@ describe('Bash · 描述里那三处和 CC 的差异', () => {
     expect(d).toContain('-m')
   })
 
-  it('★ 没有声明 run_in_background —— 声明一个不生效的开关比缺功能坏得多', () => {
-    expect(JSON.stringify(bashTool.inputSchema)).not.toContain('run_in_background')
+  it('★ 只有配套工具真实存在后才声明 run_in_background', () => {
+    expect(JSON.stringify(bashTool.inputSchema)).toContain('run_in_background')
     expect(Object.keys((bashTool.inputSchema as { properties: object }).properties).sort()).toEqual([
       'command',
       'description',
+      'run_in_background',
       'timeout'
     ])
+    expect(d).toContain('BashOutput')
+    expect(d).toContain('KillShell')
   })
 
   it('把搜索和读文件引导回专门的工具', () => {

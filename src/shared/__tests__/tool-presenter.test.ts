@@ -202,6 +202,8 @@ describe('注册表完整性', () => {
     'Glob',
     'Grep',
     'Bash',
+    'BashOutput',
+    'KillShell',
     'TodoWrite',
     'WebFetch',
     'Skill',

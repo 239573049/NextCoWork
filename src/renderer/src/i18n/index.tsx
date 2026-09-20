@@ -15,10 +15,12 @@ import { agentZh, agentEn } from './agent';
 import { markdownZh, markdownEn } from './markdown';
 import { themesZh, themesEn } from './themes';
 import { sshZh, sshEn } from './ssh';
+import { workspaceZh, workspaceEn } from './workspace';
 import { extensionsZh, extensionsEn } from './extensions';
 import { gitZh, gitEn } from './git';
 import { usageZh, usageEn } from './usage';
 import { searchZh, searchEn } from './search';
+import { builtinSearchZh, builtinSearchEn } from './builtin-search';
 import { goalZh, goalEn } from './goal';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
 import { migrationZh, migrationEn } from './migration';
@@ -43,11 +45,13 @@ export type Messages = Record<string, MessageValue>;
  */
 const ZH: Messages = {
   ...sshZh,
+  ...workspaceZh,
   ...goalZh,
   ...extensionsZh,
   ...gitZh,
   ...usageZh,
   ...searchZh,
+  ...builtinSearchZh,
   ...chatNavigationZh,
   ...migrationZh,
   ...themesZh,
@@ -1891,12 +1895,19 @@ const ZH: Messages = {
   "chat.review.reverted": "已撤销",
   "chat.review.review": "审查",
   "chat.review.open": "打开",
+  "chat.review.chooseFile": "选择改动文件",
+  "chat.review.previousFile": "上一个改动文件",
+  "chat.review.nextFile": "下一个改动文件",
+  "chat.review.openFile": "打开文件",
+  "chat.review.loading": "正在加载改动…",
+  "chat.review.diffTooLarge": "改动范围过大，无法安全生成预览",
+  "chat.review.noTextChanges": "没有可显示的文本改动",
   "chat.review.undoConflictConfirm": "有文件在这之后又被改过,撤销会覆盖这些改动,仍要继续吗?",
   "chat.review.oversize": "文件过大,无法预览或撤销",
   "chat.review.outside": "工作区外的文件,不可撤销",
   "chat.review.created": "新建",
   "chat.review.deleted": "删除",
-  "chat.review.selectFile": "选择左侧文件查看改动",
+  "chat.review.selectFile": "选择文件查看改动",
   "chat.review.empty": "这一轮没有文件改动",
   "chat.review.loadFailed": "改动加载失败",
   "plugins.title": "插件",
@@ -1977,6 +1988,9 @@ const ZH: Messages = {
   "chat.tool.failedStatus": "失败",
   "chat.tool.runningStatus": "执行中",
   "chat.tool.waitingStatus": "等待",
+  // 只停这一条命令，不是停整轮（见 `shell:stopToolCall`）。措辞必须和 Composer 上
+  // 那颗「停止」区分得开，否则用户会以为它把整段回复也停掉了。
+  "chat.tool.stop": "停止这条命令",
   "chat.tool.running": "执行中",
   "chat.tool.failed": "失败",
   "chat.tool.waiting": "等待",
@@ -1992,6 +2006,7 @@ const ZH: Messages = {
 
 const EN: Messages = {
   ...sshEn,
+  ...workspaceEn,
   ...goalEn,
   ...extensionsEn,
   ...gitEn,
@@ -2003,6 +2018,7 @@ const EN: Messages = {
   ...markdownEn,
   ...usageEn,
   ...searchEn,
+  ...builtinSearchEn,
   ...chatNavigationEn,
   ...migrationEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
@@ -3878,12 +3894,19 @@ const EN: Messages = {
   "chat.review.reverted": "Reverted",
   "chat.review.review": "Review",
   "chat.review.open": "Open",
+  "chat.review.chooseFile": "Choose a changed file",
+  "chat.review.previousFile": "Previous changed file",
+  "chat.review.nextFile": "Next changed file",
+  "chat.review.openFile": "Open file",
+  "chat.review.loading": "Loading changes…",
+  "chat.review.diffTooLarge": "The change is too large to preview safely",
+  "chat.review.noTextChanges": "No text changes to show",
   "chat.review.undoConflictConfirm": "Some files were changed after this turn. Undoing will overwrite those changes. Continue?",
   "chat.review.oversize": "File too large to preview or undo",
   "chat.review.outside": "Outside the workspace; cannot undo",
   "chat.review.created": "new",
   "chat.review.deleted": "deleted",
-  "chat.review.selectFile": "Select a file on the left to view its changes",
+  "chat.review.selectFile": "Select a file to view its changes",
   "chat.review.empty": "No file changes in this turn",
   "chat.review.loadFailed": "Failed to load changes",
   "plugins.title": "Plugins",
@@ -3964,6 +3987,7 @@ const EN: Messages = {
   "chat.tool.failedStatus": "Failed",
   "chat.tool.runningStatus": "Running",
   "chat.tool.waitingStatus": "Waiting",
+  "chat.tool.stop": "Stop this command",
   "chat.tool.running": "Running",
   "chat.tool.failed": "Failed",
   "chat.tool.waiting": "Waiting",

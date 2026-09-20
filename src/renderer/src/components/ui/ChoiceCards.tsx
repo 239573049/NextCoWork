@@ -23,15 +23,18 @@ export interface ChoiceOption {
  */
 
 /** 行的外框。**它不是按钮** —— 可点区是里面那层,理由见 `OptionRow`。 */
-const ROW_FRAME = 'app-no-drag rounded-[8px] border transition-[background-color,border-color] duration-150'
+const ROW_FRAME = 'app-no-drag rounded-[8px] border transition-[background-color,border-color] duration-150 motion-reduce:transition-none'
 
-/** 选中 = 描边转 accent + 底色进「槽」。和 `Select` 的展开态同一套语言。 */
+/**
+ * 需求：审批选项要像一列紧凑的 agent 决策项，而不是一摞彼此争抢注意力的表单卡。
+ * 选中态仍保留整行槽色，确保键盘高亮与真实选择都能一眼看见。
+ */
 const ROW_ON = 'border-accent bg-tint'
-const ROW_OFF = 'border-border bg-transparent hover:bg-tint'
+const ROW_OFF = 'border-transparent bg-transparent hover:border-hairline hover:bg-tint-hover/55'
 
 /** 可点区的类名。外框不可点,所以这层必须自己撑满、自己接焦点环。 */
 export const ROW_HIT = [
-  'group flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-[8px] px-2.5 py-2',
+  'group flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 rounded-[8px] px-2.5 py-1.5',
   'text-left outline-none focus-visible:ring-2 focus-visible:ring-accent/25 disabled:cursor-default'
 ].join(' ')
 
@@ -91,12 +94,12 @@ export function RowLead({
   const box = 'mt-[2px] flex h-[16px] w-[16px] shrink-0 items-center justify-center text-[10px]'
   if (kind !== 'plain' && checked) {
     return kind === 'radio' ? (
-      <span className={cn(box, 'rounded-pill border border-accent')}>
-        <span className="h-[7px] w-[7px] rounded-pill bg-accent" />
+      <span className={cn(box, 'rounded-pill bg-fg')}>
+        <span className="h-[6px] w-[6px] rounded-pill bg-canvas" />
       </span>
     ) : (
-      <span className={cn(box, 'rounded-[4px] border border-accent bg-accent')}>
-        <Check aria-hidden size={10} strokeWidth={3} className="text-accent-fg" />
+      <span className={cn(box, 'rounded-[4px] bg-fg')}>
+        <Check aria-hidden size={10} strokeWidth={3} className="text-canvas" />
       </span>
     )
   }
@@ -106,7 +109,7 @@ export function RowLead({
       className={cn(
         box,
         'tabular-nums text-fg-faint',
-        kind === 'radio' ? 'rounded-pill border border-fg-faint' : 'rounded-[4px] border border-fg-faint',
+        kind === 'radio' ? 'rounded-pill border border-border' : 'rounded-[4px] border border-border',
         kind === 'plain' && 'border-none bg-tint'
       )}
     >

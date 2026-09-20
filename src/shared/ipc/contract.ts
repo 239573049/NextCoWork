@@ -530,6 +530,20 @@ export interface IpcInvokeMap {
   'agent:listInteractions': { req: { runId?: string; sessionId?: string }; res: PendingInteraction[] }
   'agent:listTools': { req: { workspaceId: string }; res: ToolInfo[] }
 
+  // ── Agent 的 shell ──
+  /**
+   * 只停**这一条**正在跑的命令 —— 工具卡片上那颗停止按钮。
+   *
+   * ★ 和 `agent:abort` 是两件事,不能合并:`agent:abort` 停的是整轮对话
+   * (模型写到一半的回复一起没了);这条只掐掉那个跑飞的 `npm test`,run 继续,
+   * 模型收到一条「用户停止了这条命令」的**工具失败**并据此换路。
+   * 合并的代价用户当场就能看到:想掐一条命令,结果整段回复停在半截。
+   *
+   * 返回 `false` = 那条命令已经不在跑了(点击与收尾撞在同一刻)。这不是错误,
+   * 调用方不必提示 —— 用户要的结果已经达成。
+   */
+  'shell:stopToolCall': { req: { runId: string; callId: string }; res: boolean }
+
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
   'terminal:prepare': { req: TerminalCreateRequest; res: TerminalPreparation }
@@ -574,6 +588,16 @@ export interface IpcInvokeMap {
   'websearch:test': {
     req: { id: SearchProviderId }
     res: { ok: boolean; latencyMs?: number; message?: string }
+  }
+  /**
+   * 测一次免 Key 的内置兜底(公共/自建 SearxNG → 直抓结果页)。
+   *
+   * 和上面那条同样**不返回搜索结果**,只回通不通 + 是哪个源给的
+   * (`source` 是实例域名或引擎名 —— 「可用」两个字帮不了正在排查的用户)。
+   */
+  'websearch:testBuiltin': {
+    req: void
+    res: { ok: boolean; latencyMs?: number; source?: string; message?: string }
   }
 
   // ── 网络代理(设置 › 连接 › 网络)──
@@ -1307,6 +1331,7 @@ export const INVOKE_CHANNELS = {
   'agent:respondInteraction': 1,
   'agent:listInteractions': 1,
   'agent:listTools': 1,
+  'shell:stopToolCall': 1,
   'terminal:create': 1,
   'terminal:prepare': 1,
   'terminal:approve': 1,
@@ -1325,6 +1350,7 @@ export const INVOKE_CHANNELS = {
   'websearch:setCredential': 1,
   'websearch:clearCredential': 1,
   'websearch:test': 1,
+  'websearch:testBuiltin': 1,
   'proxy:setPassword': 1,
   'proxy:clearPassword': 1,
   'proxy:getPasswordInfo': 1,

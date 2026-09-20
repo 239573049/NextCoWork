@@ -40,6 +40,7 @@ import {
   hasAnythingToMerge,
   mergeLegacyRows,
   probeLegacyDelta,
+  readMigrationClaim,
   readUndoManifest,
   rewriteMergedAttachmentPaths,
   undoMerge,
@@ -261,11 +262,9 @@ export function createMigrationGate(input: MigrationInput): MigrationGate {
       })
     } catch (err) {
       /*
-        ★ 失败时**不把已经写进去的行数报出去**:`mergeLegacyRows` 抛错时没有返回值,
-        而它按会话提交,所以此刻确实可能已经进去了一部分。但那是它内部的状态,
-        这里编不出来 —— 所以错误页只说「失败」,不说「已合并 N 条」。
-        想看到底进去了多少,`dataMigration:undoMerge` 的清单里是最准的(写清单
-        在合并之后,所以那条路也拿不到);最终的判断依据是会话列表本身。
+        ★ 失败时错误页仍然不报「已合并 N 条」:那会让用户把半批数据误当成完整结果。
+        每条会话及其归属清单已经在同一事务里提交，不能在这里另开连接补写；补写失败
+        会让已提交的前半批永远无法被账户重连，正是这次迁移要避免的无声缺失。
       */
       fail(classifyMigrationError(err), describe(err), 'merge-legacy-rows')
       return state
@@ -276,6 +275,9 @@ export function createMigrationGate(input: MigrationInput): MigrationGate {
       attachments: wrote.attachments
     }
     completed.push('merge-legacy-rows')
+    // 需求：重试时这次的 `createdSessions` 不含上次已提交的行。归属清单累计它们，
+    // 附件补搬 / 路径改写必须按这份全集走，否则旧会话正文回来但图片永久碎掉。
+    const attachmentSessionIds = readMigrationClaim(input.databasePath)?.sessions ?? wrote.createdSessions
 
     // ── 4. 附件文件 ─────────────────────────────────────────────────
     /*
@@ -291,7 +293,7 @@ export function createMigrationGate(input: MigrationInput): MigrationGate {
       pending.source.databasePath,
       pending.source.root,
       input.dataRoot,
-      wrote.createdSessions
+      attachmentSessionIds
     )
     publish({
       ...state,
@@ -326,7 +328,7 @@ export function createMigrationGate(input: MigrationInput): MigrationGate {
       input.databasePath,
       pending.source.root,
       input.dataRoot,
-      wrote.createdSessions
+      attachmentSessionIds
     )
     if (rewritten > 0) console.log(`[migration] 改写 ${rewritten} 条附件行的路径到新数据根`)
     completed.push('copy-attachment-files')
@@ -347,7 +349,6 @@ export function createMigrationGate(input: MigrationInput): MigrationGate {
     } catch (err) {
       console.warn('[migration] 撤销清单写入失败,本次合并将无法撤销:', err)
     }
-
     publish({
       ...state,
       phase: 'idle',

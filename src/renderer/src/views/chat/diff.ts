@@ -1,15 +1,15 @@
 /**
- * Edit 工具的行内 diff —— 把 `old_string` / `new_string` 算成一份统一 diff,
- * 顺带在**改动的那一对行**里做词级高亮,好让用户一眼看清究竟动了哪几个字。
+ * 对话工具卡与改动审查共用的文本 diff —— 把 before / after 算成统一 diff，
+ * 顺带在**改动的那一对行**里做词级高亮，并为整文件审查切出带行号的 hunk。
  *
- * 为什么自己写而不引库:仓库没有 diff 依赖(见 package.json),而 Edit 的两段
- * 文本都是**一次替换的片段**,通常几行到几十行,O(n·m) 的 LCS 完全够用,
- * 不值得为它拉一个 diff-match-patch 进来。纯函数,便于单测。
+ * 为什么自己写而不引库:仓库没有 diff 依赖(见 package.json)；Edit 片段通常只有
+ * 几十行，整文件审查则先裁相同头尾并限制 LCS 预算，不值得为此新增依赖。
+ * 计算保持为纯函数，便于覆盖行号、hunk 与超限分支。
  *
  * LCS 本体抽到了 `shared/domain/line-diff.ts`,主进程封包改动集算 `+X −Y` 时复用同一份。
  */
 
-import { lcsOps } from '../../../../shared/domain/line-diff'
+import { lcsOps, type LcsOp } from '../../../../shared/domain/line-diff'
 
 export type DiffRowType = 'context' | 'del' | 'add'
 
@@ -22,6 +22,21 @@ export interface DiffSpan {
 export interface DiffRow {
   type: DiffRowType
   spans: DiffSpan[]
+}
+
+/** 审查视图里的 diff 行；null 表示这一行在该侧不存在。 */
+export interface NumberedDiffRow extends DiffRow {
+  oldLine: number | null
+  newLine: number | null
+}
+
+/** 一段连续改动及其上下文；行号范围直接用于统一 diff 的 hunk 标题。 */
+export interface DiffHunk {
+  oldStart: number
+  oldCount: number
+  newStart: number
+  newCount: number
+  rows: NumberedDiffRow[]
 }
 
 /**
@@ -81,14 +96,104 @@ function unlitIfSaturated(spans: DiffSpan[]): DiffSpan[] {
   return lit / total < SATURATED ? spans : whole(spans.map((s) => s.text).join(''))
 }
 
+/** 空文件是 0 行；末尾换行也不应凭空制造一个可见 diff 行。 */
+function textLines(text: string): string[] {
+  if (text === '') return []
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+/** 找一条两侧都只出现一次、且尽量靠近中部的公共行，作为大区段的可靠切点。 */
+function uniqueLineAnchor(oldLines: string[], newLines: string[]): { oldIndex: number; newIndex: number } | null {
+  const positions = (lines: string[]): Map<string, number | null> => {
+    const result = new Map<string, number | null>()
+    lines.forEach((line, index) => result.set(line, result.has(line) ? null : index))
+    return result
+  }
+  const oldPositions = positions(oldLines)
+  const newPositions = positions(newLines)
+  const oldMiddle = (oldLines.length - 1) / 2
+  const newMiddle = (newLines.length - 1) / 2
+  let best: { oldIndex: number; newIndex: number; distance: number } | null = null
+  for (const [line, oldIndex] of oldPositions) {
+    const newIndex = newPositions.get(line)
+    if (oldIndex === null || newIndex === undefined || newIndex === null) continue
+    const distance = Math.abs(oldIndex - oldMiddle) + Math.abs(newIndex - newMiddle)
+    if (best === null || distance < best.distance) best = { oldIndex, newIndex, distance }
+  }
+  return best === null ? null : { oldIndex: best.oldIndex, newIndex: best.newIndex }
+}
+
 /**
- * 计算 `oldStr → newStr` 的统一 diff 行序列。
+ * 先裁掉完全相同的头尾，再对真正可能变化的中段做 O(n·m) LCS。
+ * 超预算时用唯一公共行继续分段；没有可靠锚点才返回 null。
  *
- * 连续的「删除段 + 新增段」若一一对应(同样多行,或对应位置),会两两做词级
- * 高亮;数量不等时,能配上的配对,配不上的整行标为改动。
+ * 需求：几千行文件只有少量分散改动时不能为整份文件分配平方级矩阵，也不能
+ * 因首尾恰好都改过就误判为无法预览。
  */
-export function computeDiff(oldStr: string, newStr: string): DiffRow[] {
-  const ops = lcsOps(oldStr.split('\n'), newStr.split('\n'), (x, y) => x === y)
+function boundedLineOps(
+  oldLines: string[],
+  newLines: string[],
+  budget: { remainingCells: number } | undefined,
+  depth = 0
+): LcsOp<string>[] | null {
+  let prefix = 0
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++
+
+  let suffix = 0
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) suffix++
+
+  const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix)
+  const newMiddle = newLines.slice(prefix, newLines.length - suffix)
+  const prefixOps: LcsOp<string>[] = oldLines.slice(0, prefix).map((line) => ({ tag: 'eq', a: line, b: line }))
+  const suffixOps: LcsOp<string>[] = oldLines
+    .slice(oldLines.length - suffix)
+    .map((line) => ({ tag: 'eq', a: line, b: line }))
+
+  let middleOps: LcsOp<string>[]
+  const cells = oldMiddle.length * newMiddle.length
+  if (budget === undefined || cells <= budget.remainingCells) {
+    if (budget !== undefined) budget.remainingCells -= cells
+    middleOps = lcsOps(oldMiddle, newMiddle, (x, y) => x === y)
+  } else {
+    // 需求：递归深度也必须有硬上限；恶意重排不能靠连续单点锚定拖垮调用栈。
+    if (depth >= 32) return null
+    const anchor = uniqueLineAnchor(oldMiddle, newMiddle)
+    if (anchor === null) return null
+    const left = boundedLineOps(
+      oldMiddle.slice(0, anchor.oldIndex),
+      newMiddle.slice(0, anchor.newIndex),
+      budget,
+      depth + 1
+    )
+    if (left === null) return null
+    const right = boundedLineOps(
+      oldMiddle.slice(anchor.oldIndex + 1),
+      newMiddle.slice(anchor.newIndex + 1),
+      budget,
+      depth + 1
+    )
+    if (right === null) return null
+    const line = oldMiddle[anchor.oldIndex]!
+    middleOps = [...left, { tag: 'eq', a: line, b: line }, ...right]
+  }
+  return [...prefixOps, ...middleOps, ...suffixOps]
+}
+
+function lineOps(oldStr: string, newStr: string): LcsOp<string>[]
+function lineOps(oldStr: string, newStr: string, maxCells: number): LcsOp<string>[] | null
+function lineOps(oldStr: string, newStr: string, maxCells?: number): LcsOp<string>[] | null {
+  const budget = maxCells === undefined ? undefined : { remainingCells: maxCells }
+  return boundedLineOps(textLines(oldStr), textLines(newStr), budget)
+}
+
+/** 把已对齐的行操作转成 UI 行；工具片段与整文件 hunk 共用同一套词级高亮规则。 */
+function rowsFromOps(ops: LcsOp<string>[]): DiffRow[] {
   const rows: DiffRow[] = []
   let k = 0
   while (k < ops.length) {
@@ -121,4 +226,86 @@ export function computeDiff(oldStr: string, newStr: string): DiffRow[] {
     }
   }
   return rows
+}
+
+/**
+ * 计算 `oldStr → newStr` 的统一 diff 行序列。
+ *
+ * 连续的「删除段 + 新增段」若一一对应(同样多行,或对应位置),会两两做词级
+ * 高亮;数量不等时,能配上的配对,配不上的整行标为改动。
+ */
+export function computeDiff(oldStr: string, newStr: string): DiffRow[] {
+  return rowsFromOps(lineOps(oldStr, newStr))
+}
+
+/** 给统一 diff 行补齐旧、新文件行号，供审查视图画固定宽度的双行号栏。 */
+function numberDiffRows(rows: DiffRow[]): NumberedDiffRow[] {
+  let oldLine = 1
+  let newLine = 1
+  return rows.map((row) => {
+    if (row.type === 'context') {
+      return { ...row, oldLine: oldLine++, newLine: newLine++ }
+    }
+    if (row.type === 'del') {
+      return { ...row, oldLine: oldLine++, newLine: null }
+    }
+    return { ...row, oldLine: null, newLine: newLine++ }
+  })
+}
+
+// 预算封顶在约 200 万个矩阵单元；再大就继续分段或停止预览，不能拿渲染器响应性冒险。
+const REVIEW_DIFF_MAX_LCS_CELLS = 2_000_000
+// 一个 hunk 行会展开成多个 DOM 节点；可见行数也要独立封顶。
+const REVIEW_DIFF_MAX_ROWS = 10_000
+
+/**
+ * 把整文件 diff 收成标准的改动块，每块只保留附近几行上下文。
+ *
+ * 需求：打开几千行文件时首屏就必须落在实际改动上，而不是让用户从文件第 1 行
+ * 往下找；相距较远的改动保持为独立 hunk，也避免无关正文占满审查空间。
+ * 返回 null 表示计算量或可见行数超过安全预算，调用方应停止生成预览。
+ */
+export function computeDiffHunks(oldStr: string, newStr: string, contextLines = 3): DiffHunk[] | null {
+  const ops = lineOps(oldStr, newStr, REVIEW_DIFF_MAX_LCS_CELLS)
+  if (ops === null) return null
+  const rows = numberDiffRows(rowsFromOps(ops))
+  const changed = rows.flatMap((row, index) => (row.type === 'context' ? [] : [index]))
+  if (changed.length === 0) return []
+
+  const context = Math.max(0, Math.floor(contextLines))
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const index of changed) {
+    const start = Math.max(0, index - context)
+    const end = Math.min(rows.length, index + context + 1)
+    const previous = ranges[ranges.length - 1]
+    if (previous !== undefined && start <= previous.end) {
+      previous.end = Math.max(previous.end, end)
+    } else {
+      ranges.push({ start, end })
+    }
+  }
+  // 需求：计算能完成不代表浏览器能承受对应 DOM；整文件新增也必须在渲染前止损。
+  if (ranges.reduce((total, range) => total + range.end - range.start, 0) > REVIEW_DIFF_MAX_ROWS) return null
+
+  const oldLinesBefore = [0]
+  const newLinesBefore = [0]
+  for (const row of rows) {
+    oldLinesBefore.push(oldLinesBefore[oldLinesBefore.length - 1]! + (row.type === 'add' ? 0 : 1))
+    newLinesBefore.push(newLinesBefore[newLinesBefore.length - 1]! + (row.type === 'del' ? 0 : 1))
+  }
+
+  return ranges.map(({ start, end }) => {
+    const hunkRows = rows.slice(start, end)
+    const oldBefore = oldLinesBefore[start]!
+    const newBefore = newLinesBefore[start]!
+    const oldCount = oldLinesBefore[end]! - oldBefore
+    const newCount = newLinesBefore[end]! - newBefore
+    return {
+      oldStart: oldCount === 0 ? oldBefore : oldBefore + 1,
+      oldCount,
+      newStart: newCount === 0 ? newBefore : newBefore + 1,
+      newCount,
+      rows: hunkRows
+    }
+  })
 }
