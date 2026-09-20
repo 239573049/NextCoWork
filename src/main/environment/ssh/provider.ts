@@ -11,7 +11,7 @@ import { SftpFileSystem } from './sftp'
 export async function connectSshEnvironment(profile: SshConnectionProfile,
   context: ConnectionContext & { generation: number; assertCurrent(): void; onDisconnect(): void },
   authentication: { env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void },
-  options: Pick<OpenSshOptions, 'executable'> = {}): Promise<EnvironmentConnection> {
+  options: Pick<OpenSshOptions, 'executable' | 'openProxyTunnel'> = {}): Promise<EnvironmentConnection> {
   let closed = false
   let filesystem: SftpFileSystem | undefined
   const terminals = new Set<TerminalDriver>()

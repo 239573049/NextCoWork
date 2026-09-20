@@ -638,6 +638,19 @@ export interface ReminderContext {
    * 也不能从本轮的 `advertised` 快照里取 —— 详见 `latestTodosFrom` 的文档。
    */
   todoToolName?: string
+  /**
+   * 推导 todo 用的那份消息流。缺省 = 就用被装饰的那一份(纯内核测试、子 run)。
+   *
+   * ★★ 它存在的唯一理由是**摘要压缩会真的把切点之前的历史移出上下文**
+   * (见 `projectContextWindow`)。todo 的唯一真相源是转录里那条 `TodoWrite`
+   * 调用 —— 只看投影的话,模型会在压缩之后**静默丢掉自己的进度表**:
+   * 界面上的 todo 面板还在(它读的是转录),模型却从这一轮起当无事发生。
+   * 收一份**完整转录**,压缩因此动不了尾块里的 todo 段。
+   *
+   * ★ 取数仍然截到「本 run 那条用户输入」为止(理由见 `stateBlock`),
+   * 靠锚点消息的 id 在这份数组里重新定位 —— 投影里的下标在这里没有意义。
+   */
+  todoHistory?: readonly AgentMessage[]
 }
 
 function reminderPart(body: string): ContentPart {
@@ -686,6 +699,25 @@ function planFileSection(path: string): string {
     'plan is approved or rejected. Read it before changing it: earlier tool output in this conversation may ' +
     'have been compacted away, so anything you remember about its contents can be stale.'
   )
+}
+
+/**
+ * 推导 todo 的那一段 —— 有 `todoHistory` 就用它(完整转录),按锚点 id 截同一刀。
+ *
+ * ★ 对不上锚点就退回投影本身。`todoHistory` 是补充口径,不是新的必需品:
+ * 少一段 todo,好过拿一段**范围不对**的历史推出一张进度表。
+ */
+function todoScope(
+  ctx: ReminderContext,
+  messages: readonly AgentMessage[],
+  anchor: number
+): readonly AgentMessage[] {
+  const fallback = messages.slice(0, anchor + 1)
+  const source = ctx.todoHistory
+  const anchorId = messages[anchor]?.id
+  if (source === undefined || anchorId === undefined) return fallback
+  const k = source.findIndex((m) => m.id === anchorId)
+  return k === -1 ? fallback : source.slice(0, k + 1)
 }
 
 function stateBlock(ctx: ReminderContext, messages: readonly AgentMessage[]): string | undefined {
@@ -769,7 +801,7 @@ export function decorate(
     }
   }
 
-  const tailBody = j === -1 ? undefined : stateBlock(ctx, messages.slice(0, j + 1))
+  const tailBody = j === -1 ? undefined : stateBlock(ctx, todoScope(ctx, messages, j))
   const tail = tailBody === undefined ? undefined : reminderPart(tailBody)
   if (head === undefined && tail === undefined) return messages
 
@@ -1170,6 +1202,91 @@ export function withSummary(
   return [userMessage(id, [{ type: 'text', text: `Summary of the conversation so far:\n\n${summary}` }], now), ...messages]
 }
 
+// ─────────────────────── 窗口投影(摘要 + 机械压缩) ───────────────────────
+
+/**
+ * 摘要覆盖的那段历史,从第几条起**不再发给模型**。返回 0 = 一条都不裁。
+ *
+ * ★★ 切点只能落在**一轮的起点**上:`role === 'user'` 且不是纯工具结果的那一条。
+ * 随手切会把 `tool_use` 和它的 `tool_result` 分到边界两侧,留下的孤儿下一轮
+ * 直接 400 —— 和 `compactPart` 守的是同一条不变式,只是这边删得更狠,
+ * 所以边界必须自己挑。挑不到(整段历史是一轮)就返回 0,退化成只做机械压缩。
+ *
+ * ★★ `coverage` 是**摘要覆盖到的最后一条**的下标,切点绝不许越过它。
+ * 摘要是在那一刻生成的,它之后的消息没有任何东西概括过 —— 裁掉就是凭空丢失。
+ * 恢复一条几十轮之前的检查点时,这个上界就是「模型突然忘了最近半小时」和
+ * 「正常接着干」的全部差别。`coverage < 0`(老数据没有锚点)一律按「什么都没
+ * 覆盖」处理:分不清就不裁,同 `orphanedCheckpoints` 对老数据的那条立场。
+ */
+export function summaryCutIndex(
+  messages: readonly AgentMessage[],
+  coverage: number,
+  keepRecent = KEEP_RECENT_DEFAULT
+): number {
+  const limit = Math.min(coverage + 1, messages.length - keepRecent)
+  for (let i = limit; i > 0; i--) {
+    const m = messages[i]
+    if (m !== undefined && m.role === 'user' && !isToolResultOnly(m)) return i
+  }
+  return 0
+}
+
+/** 投影时用得上的那几个检查点字段。 */
+export interface ContextSummaryRef {
+  note: string
+  /** 摘要消息的 id = 检查点 id(`withSummary` 拿它当消息 id)。 */
+  id: string
+  /** 检查点的 `coveredThroughMessageId`。缺席 = 老数据,按「什么都没覆盖」处理。 */
+  coveredThroughMessageId?: string
+}
+
+export interface ContextProjection {
+  messages: AgentMessage[]
+  /** 这一次投影把历史裁到了哪一条之后。没裁掉任何东西时缺席。 */
+  droppedThroughMessageId?: string
+}
+
+/**
+ * 转录 → **这一轮真正发给模型的那份历史**。压缩的两半在这里合流,
+ * 而且**只在这里**:构造函数恢复检查点、run 中途到阈值、手动压缩算「省了多少」,
+ * 三处调用点读的是同一份规则。
+ *
+ * ★★ 有摘要时**真的把切点之前的消息拿掉**,不只是清空它们的工具输出。
+ * 原来这里是 `withSummary(compactMessages(全量))` —— 摘要是**附加**上去的,
+ * 历史一条不少。后果有三重,每一重单独都足以否掉那个做法:
+ * 1. `COMPACTION_SYSTEM` 逐字写着「转录已经不在了」,而它其实原样跟在后面 ——
+ *    模型按一个不成立的前提写交接。
+ * 2. 那一轮的占用不降反升(多出整整一份摘要),压缩越压越大。
+ * 3. 于是 `shouldCompact` 一直为真,每一轮都再摘要一次:一轮一次额外的模型请求、
+ *    一条新检查点、一条新分隔线,永远收敛不了。
+ *
+ * ★ 没有摘要时**一条都不裁**。那种情况下被裁掉的内容没有任何继承者,
+ * 而机械压缩至少还留着「调用过什么工具」的骨架。
+ */
+export function projectContextWindow(input: {
+  messages: readonly AgentMessage[]
+  summary?: ContextSummaryRef
+  now: number
+  keepRecent?: number
+}): ContextProjection {
+  const summary = input.summary
+  if (summary === undefined) return { messages: compactMessages(input.messages) }
+
+  const coverage =
+    summary.coveredThroughMessageId === undefined
+      ? -1
+      : input.messages.findIndex((m) => m.id === summary.coveredThroughMessageId)
+  const cut = summaryCutIndex(input.messages, coverage, input.keepRecent)
+  const kept = compactMessages(input.messages.slice(cut))
+  // 空历史照旧不合成摘要消息:一条只有摘要的请求既没有任务,也解释不清它从哪来。
+  if (kept.length === 0) return { messages: kept }
+  const droppedThrough = cut === 0 ? undefined : input.messages[cut - 1]?.id
+  return {
+    messages: withSummary(kept, summary.note, summary.id, input.now),
+    ...(droppedThrough === undefined ? {} : { droppedThroughMessageId: droppedThrough })
+  }
+}
+
 // ─────────────────────── 摘要压缩(旁路模型调用) ───────────────────────
 
 /*
@@ -1364,8 +1481,15 @@ export interface CompactionDigestOptions {
  * 换成按预算的头尾截断之后,早期工具输出仍然在场,只是每条瘦到几百字符。
  *
  * ★ 预算不够时**从中段最早的一侧整条丢**,并留下明确的一行标记:第 0 条
- * (任务的原始表述)和尾部若干条永远在。静默丢弃是更糟的 —— 摘要读起来完整,
+ * (任务的原始表述)和最后一条永远在。静默丢弃是更糟的 —— 摘要读起来完整,
  * 只是从某一段开始全是编的。
+ *
+ * ★★ **必留段也要进预算。** 原来 pinned(第 0 条 + 最近 12 条)只计进 `spent`
+ * 却从不丢弃,于是预算根本不是上限:`RECENT_LIMITS` 是**按块**给的(正文 8000 字符、
+ * 每条工具结果 1800),一条带二十个并行 tool_result 的消息就三万多字符。
+ * 小窗口模型上(预算 = 窗口的一半)这条摘要请求自己先 400 —— 而它偏偏发生在
+ * 最需要压缩的那一刻,并且外面没有任何拦网(这条请求不过 `validateModelRuntime`)。
+ * 现在超预算时按「降级中段 → 丢最早 → 首尾也降级」三级让步,见下面那段注释。
  */
 export function buildCompactionDigest(
   messages: readonly AgentMessage[],
@@ -1376,7 +1500,12 @@ export function buildCompactionDigest(
   const rendered = messages
     .map((m, i) => {
       const pinned = i === 0 || i >= recentFrom
-      return { index: i, pinned, text: digestMessage(m, pinned ? RECENT_LIMITS : EARLIER_LIMITS) }
+      return {
+        index: i,
+        pinned,
+        message: m,
+        text: digestMessage(m, pinned ? RECENT_LIMITS : EARLIER_LIMITS)
+      }
     })
     .filter((r) => r.text !== '')
 
@@ -1385,34 +1514,72 @@ export function buildCompactionDigest(
     return rendered.map((r) => r.text).join('\n')
   }
 
-  // 必留的先占预算;中段再从**最新**的一侧往回填,填不下的整条丢。
-  let spent = rendered.reduce((n, r) => (r.pinned ? n + estimateTokens(r.text) : n), 0)
-  const kept = new Set(rendered.filter((r) => r.pinned).map((r) => r.index))
+  const cost = (text: string): number => estimateTokens(text)
+  const pinnedEntries = rendered.filter((r) => r.pinned)
+  const kept = new Set(pinnedEntries.map((r) => r.index))
+  const spentOf = (): number =>
+    rendered.reduce((n, r) => (kept.has(r.index) ? n + cost(r.text) : n), 0)
+  const degrade = (entry: { message: AgentMessage; text: string }): void => {
+    entry.text = digestMessage(entry.message, EARLIER_LIMITS)
+  }
+
+  /*
+    必留段超预算时逐级让步,每一级都比上一级更疼 —— 所以只在上一级不够时才走:
+    1. 中间那批降到中段限额(首尾不动:第 0 条是任务的原始表述,最后一条是
+       「工作停在哪」,它们的细节最值钱);
+    2. 还超就从**最早**的一侧整条丢 —— 摘要的下游要接着干活,「刚才做到哪」
+       比「二十轮之前读过什么」重要;
+    3. 仍然超,首尾两条也降级。这一步很不情愿,但**请求超窗是彻底失败**:
+       那条摘要请求不过 `validateModelRuntime`,400 回来就是这一轮白压。
+  */
+  if (spentOf() > budget) {
+    for (const entry of pinnedEntries.slice(1, -1)) degrade(entry)
+  }
+  for (const entry of pinnedEntries.slice(1, -1)) {
+    if (spentOf() <= budget) break
+    kept.delete(entry.index)
+  }
+  if (spentOf() > budget) {
+    const first = pinnedEntries[0]
+    const last = pinnedEntries.at(-1)
+    if (first !== undefined) degrade(first)
+    if (last !== undefined && last !== first) degrade(last)
+  }
+
+  // 中段再从**最新**的一侧往回填,填不下的整条丢。
+  let spent = spentOf()
   const middle = rendered.filter((r) => !r.pinned)
   for (let i = middle.length - 1; i >= 0; i--) {
     const entry = middle[i]
     if (entry === undefined) continue
-    const cost = estimateTokens(entry.text)
-    if (spent + cost > budget) break
-    spent += cost
+    if (spent + cost(entry.text) > budget) break
+    spent += cost(entry.text)
     kept.add(entry.index)
   }
 
-  const dropped = rendered.filter((r) => !kept.has(r.index)).length
+  /*
+    ★ 每一段空缺各报各的条数,不是全文只报一次。丢弃现在可能发生在两处
+    (中段 + 被降级掉的必留段),一个笼统的计数会把「这里少了三条」说成
+    「前面少了三十条」—— 而摘要模型拿这个数判断自己能不能下结论。
+  */
   const out: string[] = []
-  let noticed = false
+  let gap = 0
+  const flush = (): void => {
+    if (gap === 0) return
+    out.push(
+      `[… ${String(gap)} earlier message(s) omitted from this digest — they are not recoverable, do not guess their contents …]`
+    )
+    gap = 0
+  }
   for (const r of rendered) {
-    if (kept.has(r.index)) {
-      out.push(r.text)
+    if (!kept.has(r.index)) {
+      gap++
       continue
     }
-    if (!noticed) {
-      out.push(
-        `[… ${String(dropped)} earlier message(s) omitted from this digest — they are not recoverable, do not guess their contents …]`
-      )
-      noticed = true
-    }
+    flush()
+    out.push(r.text)
   }
+  flush()
   return out.join('\n')
 }
 

@@ -10,7 +10,8 @@ import {
   registerPluginMessages,
   unregisterPluginMessages
 } from './plugin-messages'
-import { agentErrorText, whimsyEn, whimsyZh } from './agent'
+import { agentErrorText } from './agent'
+import { whimsyEn, whimsyZh } from './whimsy'
 
 describe('renderer i18n catalog', () => {
   it('has a complete English catalog for every Chinese key', () => {
@@ -69,7 +70,7 @@ describe('renderer i18n catalog', () => {
 
 /**
  * 轮换词**不进** Messages 表,也就绕开了上面那条键一致性校验 —— 它们是一串
- * 可以随便增删的料。这一组守的是那份自由的边界:每个相位都得有料(少一个相位
+ * 可以随便增删的料。这一组守的是那份自由的边界:每个分组都得有料(少一个分组
  * 就是那一档永远显示 undefined),而且每条都得短 —— 这句话右边紧跟着用量读数,
  * 词一长后面整排就跟着左右抖,而这种抖动在截图里根本看不出是文案造成的。
  */
@@ -77,7 +78,7 @@ describe('whimsy 轮换词', () => {
   const ZH_MAX = 6
   const EN_MAX = 14
 
-  it('每个相位两种语言都有料', () => {
+  it('每个分组两种语言都有料', () => {
     for (const phase of Object.keys(whimsyZh) as Array<keyof typeof whimsyZh>) {
       expect(whimsyZh[phase].length, phase).toBeGreaterThan(0)
       expect(whimsyEn[phase].length, phase).toBeGreaterThan(0)
@@ -93,7 +94,7 @@ describe('whimsy 轮换词', () => {
     }
   })
 
-  it('同一相位内不重复 —— 重复项会让轮换看起来像卡住了', () => {
+  it('同一分组内不重复 —— 重复项会让轮换看起来像卡住了', () => {
     for (const [phase, words] of [...Object.entries(whimsyZh), ...Object.entries(whimsyEn)]) {
       expect(new Set(words).size, phase).toBe(words.length)
     }

@@ -9,7 +9,7 @@ import { windows } from '../window/registry'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { IMPORTED_ALIAS_DEFAULTS } from '../../shared/domain/provider'
-import { findBuiltinModel } from '../../shared/domain/model-catalog-inventory'
+import { defaultProtocolForModel, findBuiltinModel } from '../../shared/domain/model-catalog-inventory'
 import { shutdownConfigSync, stopConfigSync } from './config-sync'
 import { prepareAccountSwitch, startSyncForAccount } from '../account-switch'
 import {
@@ -18,10 +18,23 @@ import {
 } from '../db/config-profile'
 
 /**
- * DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen 的模型在 NextCoWork 内置渠道下固定走
- * anthropic 协议,而不是继承该供应商的出厂协议(Responses)—— 按需求配置,只钉这四家。
+ * 哪些模型在 NextCoWork 内置渠道下固定走 anthropic 协议,而不是继承该供应商的
+ * 出厂协议(Responses)。
+ *
+ * ★★ **anthropic 系(claude)这一支不在这里判,走共享的厂商默认协议表**
+ * (`model-catalog-inventory` 的 `defaultProtocolForModel`)。那张表存在的理由正是
+ * 「这条规则有三个消费方,各写一遍分支的话同一个模型在不同入口会拿到不同协议,
+ * 而且不报错」—— 登录同步就是漏掉的第四个消费方:这里原来自己判一遍厂商,而那份
+ * 判断里没有 anthropic,于是同步下来的 claude 别名不带 `protocolOverride`,在路由器
+ * 里继承供应商的 Responses(`effectiveModelProtocol`)。表现是编辑弹窗写着
+ * 「跟随供应商 / 当前生效:OpenAI Responses」,而 Claude 的思考档位(目录声明的是
+ * `thinking.budget_tokens`)与 prompt 缓存语义在兼容层里被丢掉 —— 登录这一路零报错。
+ *
+ * 下面这四家是**平台侧的要求**,不是目录知识(共享表刻意不登记它们:别家两种线形
+ * 差异小得多,统一钉死会剥夺「跟随供应商」这个合理默认),所以留在这里。
  */
 function anthropicOverrideFor(modelId: string): 'anthropic' | undefined {
+  if (defaultProtocolForModel(modelId) === 'anthropic') return 'anthropic'
   const manufacturerId = findBuiltinModel(modelId)?.manufacturerId
   return manufacturerId === 'deepseek' || manufacturerId === 'zhipu' ||
     manufacturerId === 'xiaomi' || manufacturerId === 'qwen'
@@ -235,13 +248,23 @@ function repairLegacyClientAliases(): void {
   windows.emitToAll('provider:changed', { providers: store.listProviders(), models: store.listAliases() })
 }
 
-/** 一次性 KV 标记,避免下面的补种在每次读登录态时都重跑一遍。加入 Qwen 后需要重跑,所以带 v3。 */
-const ANTHROPIC_OVERRIDE_MIGRATION_KEY = 'client-auth.deepseek-zhipu-xiaomi-qwen-anthropic-override-v3'
+/**
+ * 一次性 KV 标记,避免下面的补种在每次读登录态时都重跑一遍。**规则每扩一次厂商
+ * 就要升一版**(v3 是加入 Qwen,v4 是加入 anthropic 系),否则老库永远补不上 —— 理由见下面那段。
+ */
+const ANTHROPIC_OVERRIDE_MIGRATION_KEY = 'client-auth.deepseek-zhipu-xiaomi-qwen-anthropic-override-v4'
 
 /**
- * 老库里已经同步过的 DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen 别名早于
+ * 老库里已经同步过的别名(DeepSeek / 智谱 GLM / 小米 MiMo / 阿里云 Qwen,以及
+ * anthropic 系 —— 后者是规则扩到 claude 之后才补上的,见下面那段)早于
  * `anthropicOverrideFor` 这条规则存在,补种一次。只补没有显式协议覆盖的 ——
  * 用户自己在「协议」下拉里选过的不碰,且标记落库后永不重跑,翻回别的协议不会被这里悄悄改回去。
+ *
+ * ★★ **必须升到 v4 才救得了 claude。** 规则本身改了(anthropic 系改走共享的厂商
+ * 默认协议表)不够:老库里那批 claude 别名是**已经同步完**的,`syncClientModels`
+ * 见到「这家已经有别名」就早退,永远走不到写 `protocolOverride` 那一行。而 v3 标记
+ * 早就落库了,不改版本号这里一次都不会重跑 —— 症状是改了规则、重启、界面纹丝不动。
+ * (同样的取舍见 `runtime.ts` 的 `OPENCODE_GO_PROTOCOL_MIGRATION_KEY`。)
  */
 function backfillAnthropicOverride(): void {
   if (store.getKv<boolean>(ANTHROPIC_OVERRIDE_MIGRATION_KEY, false)) return

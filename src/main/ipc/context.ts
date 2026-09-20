@@ -12,12 +12,11 @@ import {
   COMPACTION_SYSTEM,
   assemble,
   buildCompactionPrompt,
-  compactMessages,
   compactionDigestBudget,
   estimateMessages,
+  projectContextWindow,
   sanitizeSummaryNote,
-  summaryOutputTokens,
-  withSummary
+  summaryOutputTokens
 } from '../kernel/context-assembler'
 import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
@@ -108,9 +107,20 @@ export async function compactContext(req: { sessionId: string }): Promise<{
 
   const windowIndex = (previous?.windowIndex ?? 0) + 1
   const id = `${req.sessionId}:context:${String(windowIndex)}`
-  const projected = withSummary(compactMessages(history), note, id, now)
   const first = history[0]
   const last = history.at(-1)
+  /*
+    ★ 「省了多少」必须按**下一次 run 真的会发出去的那一份**算,所以这里走
+    `projectContextWindow` —— 和 `AgentSession` 恢复检查点时是同一个函数、同一套
+    切点规则。自己再拼一遍 `withSummary(compactMessages(...))` 的话,这个数会
+    偏大一整段被裁掉的历史,而用户看到的「省下 N」是纯编的。
+    覆盖锚点给最后一条:摘要读的就是到此为止的全部转录。
+  */
+  const projected = projectContextWindow({
+    messages: history,
+    summary: { note, id, ...(last === undefined ? {} : { coveredThroughMessageId: last.id }) },
+    now
+  }).messages
   const checkpoint: ContextCheckpoint = {
     id,
     sessionId: req.sessionId,

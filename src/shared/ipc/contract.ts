@@ -68,6 +68,7 @@ import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, PreparedWorkspace, RemoteDirectory, SshAuthRequest, SshAuthResponse } from '../domain/environment'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
+import type { MigrationState } from '../domain/data-migration'
 import type { SyncConflict, SyncPreview, SyncSetupRequest, SyncStatus } from '../domain/config-sync'
 import type {
   WorkspaceFile,
@@ -859,6 +860,39 @@ export interface IpcInvokeMap {
   'storage:clearHistory': { req: void; res: CleanupResult }
   'storage:clearLocalData': { req: { confirm: boolean }; res: { deleted: boolean } }
 
+  // ── 启动迁移闸门(见 shared/domain/data-migration.ts) ──
+  /*
+    ★ 这四条是**全应用唯一能在数据库打开之前调用的 IPC**。
+
+    它们必须能通,因为闸门存在的那段时间里数据库还没打开 —— 渲染层这时候只有
+    一个窗口、一屏进度,别的什么都调不了(这也是「阻止用户使用」的实现方式:
+    不是禁用控件,而是后端根本没起来)。
+
+    ★ 所以这四条的实现里**一个字节的库读写都不能有**。谁哪天顺手往
+    `dataMigration:getState` 里加一句 `store.getSettings()`,表现就是迁移期间
+    主进程先开了一个内存兜底库,随后 `openDatabase()` 直接抛错、启动失败。
+  */
+  'dataMigration:getState': { req: void; res: MigrationState }
+  /** 从失败的那一步继续。已完成的步骤不重跑(每一步自己判前置条件,天然幂等)。 */
+  'dataMigration:retry': { req: void; res: MigrationState }
+  /**
+   * 放弃迁移并继续启动。★ 库此时是**完整**的(合并按会话提交,只 INSERT),
+   * 所以这条路不会开出一个坏库,只是少了一部分旧数据。
+   */
+  'dataMigration:skip': { req: void; res: MigrationState }
+  /**
+   * 撤销本次启动合并进去的行。只删本次记在清单里的 id —— 不是「恢复到某个快照」,
+   * 所以合并之后新产生的会话不受影响。
+   */
+  'dataMigration:undoMerge': { req: void; res: MigrationState }
+  /**
+   * 打开数据目录。★ 走主进程,渲染层拿不到也传不了路径。
+   *
+   * 为什么闸门要自己有一条而不是复用 `storage:openDataDirectory`:那条是
+   * **数据库 handler**,而闸门存在的意义正是「数据库还没打开」。
+   */
+  'dataMigration:openDataDirectory': { req: void; res: void }
+
   // ── 从其他 AI 应用导入(设置 › 导入) ──
   /*
     ★ 频道名是 `imports:*`(复数),而上面「数据」页那三条是 `storage:import*` ——
@@ -927,6 +961,20 @@ export interface IpcSendMap {
    * macOS 不发这条(那边是 hiddenInset 红绿灯)。
    */
   'window:control': { action: 'minimize' | 'toggleMaximize' | 'close' }
+
+  /**
+   * 「这次退出我确认了,别让未保存的文件再挡一次」—— 渲染层在用户于
+   * `DocumentDialogs` 里选完「保存 / 丢弃」之后发。
+   *
+   * ★ **没有它,Cmd+Q 会退不掉。** 退出流程先关窗,关窗会走渲染层的
+   * `beforeunload`;那个处理器看到有未保存的改动就顶住 unload,整次退出因此
+   * 作废(理由见 `main/quit-flow.ts` 文件头)。用户随后在应用自己的对话框里选
+   * 「丢弃」—— 那正是「退出」这个意图的延续,所以渲染层重发一次这条消息,
+   * 这一轮里它的 `allowUnload` 已经是 true,不会再被顶。
+   *
+   * 用 send 不用 invoke:没有返回值,调用方也不该等它。
+   */
+  'app:quitConfirmed': Record<string, never>
 
   /**
    * Tab 布局持久化。★ 用 send 不用 invoke:拖动排序时每帧都在变,
@@ -1113,6 +1161,16 @@ export interface IpcEventMap {
    * 进度变化付一次结构化克隆。
    */
   'imports:changed': { sourceId: string; jobId?: string; seq: number }
+
+  /**
+   * 启动迁移的进度。★ 全量推 `MigrationState`,不是增量 delta。
+   *
+   * 理由和 `imports:changed` 刻意不同:那边一次导入上百次变化、必须限频省克隆,
+   * 这里一次启动最多几十条,而**状态机本身很小**(几个枚举 + 两个数字),
+   * 让渲染层自己做合并就是给一个「两份状态对不上」的 bug 留门 ——
+   * 而它出现在启动路径上,坏了就是白屏。
+   */
+  'dataMigration:progress': MigrationState
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1381,6 +1439,11 @@ export const INVOKE_CHANNELS = {
   , 'imports:updateSync': 1
   , 'imports:syncNow': 1
   , 'imports:resolveConflict': 1
+  , 'dataMigration:getState': 1
+  , 'dataMigration:retry': 1
+  , 'dataMigration:skip': 1
+  , 'dataMigration:undoMerge': 1
+  , 'dataMigration:openDataDirectory': 1
   , 'context:list': 1
   , 'context:updateCheckpoint': 1
   , 'context:compact': 1
@@ -1402,6 +1465,7 @@ export const SEND_CHANNELS = {
   'terminal:resize': 1,
   'window:ready': 1,
   'window:control': 1,
+  'app:quitConfirmed': 1,
   'tabs:persistOuter': 1,
   'tabs:persistInner': 1,
   'session:persistInput': 1
@@ -1448,6 +1512,7 @@ export const EVENT_CHANNELS = {
   ,'imports:changed': 1
   ,'scheduled:changed': 1
   ,'scheduled:focusRun': 1
+  ,'dataMigration:progress': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

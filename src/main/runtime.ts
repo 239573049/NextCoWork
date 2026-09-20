@@ -108,6 +108,7 @@ import type { ConnectionStatus, SshConnectionProfile } from '../shared/domain/en
 import { EnvironmentManager } from './environment/manager'
 import { localEnvironment } from './environment/local'
 import { connectSshEnvironment } from './environment/ssh/provider'
+import { openSshProxyTunnel } from './environment/ssh/proxy'
 import { EnvironmentError } from './environment/errors'
 import { normalizeEnvironmentRef } from '../shared/domain/environment'
 import type { FileReferenceSource } from '../shared/domain/attachment'
@@ -136,7 +137,24 @@ export function getEnvironments(): EnvironmentManager {
     local: (root) => localEnvironment(getHost(), root),
     connect: async (profile, context) => {
       if (!environmentAuthentication) throw new EnvironmentError('authentication')
-      return connectSshEnvironment(profile, context, await environmentAuthentication(profile, context.senderId))
+      return connectSshEnvironment(profile, context, await environmentAuthentication(profile, context.senderId), {
+        /*
+          需求:SSH 连接默认跟随应用/系统代理。ssh 是子进程,`session.setProxy` 管不到它,
+          所以在这里替它问一次「连这台主机该走哪个代理」,再把它接到一条本地隧道上
+          (`environment/ssh/proxy.ts`)。判定与凭据全部来自 `net/proxy.ts`,和模型请求同一份。
+
+          ★ 动态 import:`net/proxy.ts` 自己要 `getHost()`,静态引就成了 runtime ⇄ net/proxy
+          的循环依赖 —— 这个文件被几乎所有主进程模块引用,循环一旦成立,踩到的人不是这里。
+        */
+        openProxyTunnel: async (hostname, port) => {
+          const { resolveProxyForHost } = await import('./net/proxy')
+          const target = await resolveProxyForHost(hostname, port)
+          if (target === null) return null
+          getHost().logger.info(`[proxy] ssh ${hostname}:${String(port)} → ${target.scheme}://${target.host}:${String(target.port)}`)
+          return openSshProxyTunnel(target, hostname, port,
+            (error) => getHost().logger.warn(`[proxy] ssh 隧道握手失败: ${error.message}`))
+        }
+      })
     },
     onStatus: (status) => environmentStatusSink?.(status)
   })

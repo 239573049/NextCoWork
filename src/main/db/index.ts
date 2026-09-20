@@ -345,3 +345,51 @@ export function vacuumDatabase(): void {
   d.exec('PRAGMA wal_checkpoint(TRUNCATE)')
   d.exec('VACUUM')
 }
+
+/**
+ * 在 `openDatabase()` **之前**偷看一眼用户选的主题。读不出来时返回 `'system'`。
+ *
+ * ## 为什么需要它
+ *
+ * 窗口的 `backgroundColor` 要在**建窗那一刻**定下来,而建窗排在启动迁移闸门
+ * 之前 —— 迁移期间用户必须能看见那一屏。而 `store.getSettings()` 是要读库的,
+ * 在 `openDatabase()` 之前读库会先把库以**内存兜底**方式打开,随后真正的
+ * `openDatabase()` 直接抛错:表现是「迁移跑完了,但应用起不来」。
+ *
+ * ★ 所以这里**自己开一个只读连接**,不碰本文件的 `db()`。这是本模块唯一的例外,
+ *   而它是被位置逼出来的:调用方在建窗路径上,那里没有第二个地方能读到设置。
+ *
+ * ## 为什么值得为它单开一次连接
+ *
+ * 拿不到这个值时窗口底色只能写死,浅色用户会看到「深色空块 → 界面出来 →
+ * 啪一下变浅」。一次只读连接加一条单行查询,换掉这个闪烁。
+ *
+ * ★ 读的是**文件里的**设置,不是内存里的 —— 所以它反映不了本次启动期间还没落盘的
+ *   修改。建窗路径上不存在这种修改,所以没关系。
+ */
+export function peekThemePreference(databasePath: string): 'light' | 'dark' | 'system' {
+  let probe: DatabaseSync | null = null
+  try {
+    probe = new DatabaseSync(databasePath, { readOnly: true })
+    const row = probe.prepare('SELECT json FROM settings WHERE id = 1').get() as
+      | { json?: unknown }
+      | undefined
+    const parsed: unknown = JSON.parse(String(row?.json ?? '{}'))
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return 'system'
+    const theme = (parsed as { theme?: unknown }).theme
+    return theme === 'light' || theme === 'dark' ? theme : 'system'
+  } catch {
+    /*
+      ★ 任何失败都回退到 `'system'`,**不抛**。这条路在建窗之前跑,而那里没有
+      任何能显示错误的地方 —— 抛出去就是「窗口都建不出来」。库不存在(全新安装)、
+      损坏、被占用,全都不该阻止建窗:底色猜错只是闪一下,建不出窗是启动失败。
+    */
+    return 'system'
+  } finally {
+    try {
+      probe?.close()
+    } catch {
+      /* 关不掉也无所谓,进程退出会收 */
+    }
+  }
+}

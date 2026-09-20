@@ -32,10 +32,17 @@
  *
  * **例外:MCP 的 stdio 传输不受此约束。** 那是子进程,它自己怎么联网由它自己
  * (和它继承到的环境变量)决定,Chromium 的代理设置管不到。这不是疏漏,是边界。
+ *
+ * ## 子进程要用这份配置时:问 `resolveProxyForHost`
+ *
+ * 需求:SSH 也要默认跟随系统代理。上一段那条边界仍然成立(ssh 是子进程,
+ * `setProxy` 管不到它),所以换的是另一条路 —— 让子进程侧**来问**「连这台主机
+ * 该走哪个代理」,答案仍由同一个 `defaultSession` 给出。这样手动代理、系统代理、
+ * PAC 脚本、直连白名单四件事只有一份实现,不会出现「设置页改了,ssh 那边还是老的」。
  */
 import { app, session } from 'electron'
-import type { ProxyPasswordInfo, ProxySettings } from '../../shared/domain/proxy'
-import { composeProxyUrl, proxyConfigFor } from '../../shared/domain/proxy'
+import type { ProxyDialTarget, ProxyPasswordInfo, ProxySettings } from '../../shared/domain/proxy'
+import { composeProxyUrl, isLocalNetworkHost, parseResolvedProxy, proxyConfigFor } from '../../shared/domain/proxy'
 import { removeCredential } from '../db/repo'
 import { getHost } from '../runtime'
 
@@ -87,6 +94,34 @@ export async function applyProxy(p: ProxySettings): Promise<void> {
         : (cfg.proxyRules ?? '(地址没填完,按直连处理)')
     }`
   )
+}
+
+/**
+ * 「连 host:port 该走哪个代理」。`null` = 直连。
+ *
+ * 需求:ssh 子进程也要跟随同一份代理设置(见文件头最后一段),而它没法被
+ * `setProxy` 管到,只能反过来问。
+ *
+ * ★ 问的是 `defaultSession` 而不是自己读 `current`:手动代理的规则串、内置直连
+ * 白名单、系统设置里的 PAC 脚本全在它那边,在这里再判一遍必然和设置页分叉 ——
+ * 表现为「设置页说走代理,ssh 却直连」,两边看起来都没错。
+ * 代价是得编一个 URL(Chromium 那个接口按 URL 解析,而 ssh 不是 http):
+ * 用 `https://` 是因为 PAC 脚本按协议分支时,CONNECT 隧道归在 https 这一支。
+ *
+ * ★ 凭据**只在解析结果正是用户手填的那台代理时**才带上。系统代理或 PAC 指到的
+ * 是另一台机器,把用户填给自己代理的账号密码送过去就是凭据外泄。
+ */
+export async function resolveProxyForHost(hostname: string, port: number): Promise<ProxyDialTarget | null> {
+  // 局域网/回环一律直连 —— 理由与「判不出来就交回给代理规则」都写在 isLocalNetworkHost 上
+  if (isLocalNetworkHost(hostname)) return null
+  const authority = hostname.includes(':') ? `[${hostname}]` : hostname
+  const endpoint = parseResolvedProxy(await session.defaultSession.resolveProxy(`https://${authority}:${String(port)}`))
+  if (endpoint === null) return null
+  const p = current
+  if (p === null || !p.enabled || p.mode !== 'manual' || !p.authEnabled || p.authUser === '') return endpoint
+  if (p.host !== endpoint.host || (p.port !== 0 && p.port !== endpoint.port)) return endpoint
+  const password = await getHost().secrets.get(PROXY_PASSWORD_REF).catch(() => null)
+  return { ...endpoint, username: p.authUser, password: password ?? '' }
 }
 
 /**

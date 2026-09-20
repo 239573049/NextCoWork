@@ -496,7 +496,11 @@ function createSessionStore(sessionId: string): SessionStore {
         return
       }
 
-      const transcript = archiveRunUsage(applyEvents(s.transcript, env.events), env.runId, env.events)
+      const transcript = recordMessageRuns(
+        archiveRunUsage(applyEvents(s.transcript, env.events), env.runId, env.events),
+        env.runId,
+        env.events
+      )
       set({
         transcript,
         lastSeq: env.seq,
@@ -511,7 +515,11 @@ function createSessionStore(sessionId: string): SessionStore {
 
     applyEvents(events) {
       const runId = get().activeRunId
-      const transcript = archiveRunUsage(applyEvents(get().transcript, events), runId, events)
+      const transcript = recordMessageRuns(
+        archiveRunUsage(applyEvents(get().transcript, events), runId, events),
+        runId,
+        events
+      )
       set({
         transcript,
         ...settleRun(runId, events)
@@ -694,6 +702,37 @@ function archiveRunUsage(
     ...transcript,
     runUsage: { ...transcript.runUsage, [runId]: transcript.usage }
   }
+}
+
+/**
+ * 把「这条消息是哪个 run 产出的」当场记进转录。
+ *
+ * ★ **这是流式路径上唯一的写入点**,漏掉它的症状很隐蔽:`messageRuns` 以前只在
+ * `hydrateHistory` 里从 SQLite 回填,于是刚跑完的那一轮 `row.runId` 始终是
+ * undefined —— `TurnChangeReview` 据此整卡 `return null`,表现为「这一轮明明改了
+ * 11 个文件,底部的改动审查卡不出现,重开应用(触发一次 hydrate)才看见」,
+ * 而且全程零报错。逐轮用量、逐轮模型名走的也是这条查表路径,同病同治。
+ *
+ * 口径跟库里那张表一致(`main/db/repo.ts` 的 `messageRunsOf`):一个 run 期间提交的
+ * 消息全部归它,不分角色 —— 这样这份内存映射和下一次 hydrate 回来的那份不会打架。
+ * `runId === null` 时**什么都不记**:宁可不显示,也不给一个猜出来的归属
+ * (「不知道属于哪个 run」和「属于某个 run」在界面上是两件事)。
+ */
+function recordMessageRuns(
+  transcript: TranscriptState,
+  runId: string | null,
+  events: readonly AgentEvent[]
+): TranscriptState {
+  if (runId === null) return transcript
+  const messageRuns = { ...transcript.messageRuns }
+  let added = false
+  for (const event of events) {
+    if (event.type !== 'message_commit') continue
+    if (messageRuns[event.message.id] === runId) continue
+    messageRuns[event.message.id] = runId
+    added = true
+  }
+  return added ? { ...transcript, messageRuns } : transcript
 }
 
 /**
@@ -1389,7 +1428,11 @@ async function restoreDetachedParent(
         subagents: s.transcript.subagents,
         ...conversationScoped(s.transcript)
       }
-      const transcript = archiveRunUsage(applyEvents(base, snap.events), parentRunId, snap.events)
+      const transcript = recordMessageRuns(
+        archiveRunUsage(applyEvents(base, snap.events), parentRunId, snap.events),
+        parentRunId,
+        snap.events
+      )
       const messages = [...new Map([...(detail?.messages ?? []), ...transcript.messages]
         .map((m) => [m.id, m])).values()]
       return {
@@ -1468,8 +1511,12 @@ async function resync(sessionId: string, runId: string, sinceSeq: number, histor
             ...(s.transcript.runStartedAt === undefined ? {} : { runStartedAt: s.transcript.runStartedAt })
           }
         : s.transcript
-      const transcript = archiveRunUsage(
-        s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, snap.events),
+      const transcript = recordMessageRuns(
+        archiveRunUsage(
+          s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, snap.events),
+          runId,
+          snap.events
+        ),
         runId,
         snap.events
       )

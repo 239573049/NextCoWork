@@ -1,12 +1,14 @@
 /**
  * 助手回合底部的「改动审查」卡 —— 本轮改了哪些文件、+X −Y、撤销/恢复,
- * 展开后每个文件一行「审查 / 打开」。
+ * 展开后每个文件一行:点文件名 = 在审查 tab 里定位到这个文件的 diff,
+ * 行尾另有「审查 / 打开」两颗按钮。
  *
  * 数据按**顶层 runId** 拉(`review:getChangeSet`):一轮没改过文件就整卡不渲染。
  * 撤销前先 `review:precheckUndo` 比对磁盘现状,有冲突则二次点击确认(和 TurnActions
  * 的两段式确认同一套心智)。回写后广播 `workspace-files-changed`,让打开着的编辑器刷新。
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import { ChevronRight, Undo2, Redo2 } from 'lucide-react'
 import type { ReviewChangeSet, ReviewFileEntry, ReviewMutationResult } from '../../../../shared/domain/review'
 import {
@@ -17,8 +19,8 @@ import {
 } from '../../services/review'
 import { on } from '../../services/ipc'
 import { useTabsStore } from '../../stores/tabs'
-import { useWindowStore } from '../../stores/window'
 import { useI18n } from '../../i18n'
+import { motionScale, useMotionLevel } from '../../theme/useMotionLevel'
 import { cn } from '../../lib/cn'
 
 /** 撤销确认态自动复位 —— 和 TurnActions 的 CONFIRM_TIMEOUT_MS 同量级。 */
@@ -50,6 +52,7 @@ export function TurnChangeReview({
   active?: boolean
 }): ReactNode {
   const { t } = useI18n()
+  const scale = motionScale(useMotionLevel())
   const [set, setSet] = useState<ReviewChangeSet | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -155,14 +158,15 @@ export function TurnChangeReview({
       .finally(() => setBusy(false))
   }
 
-  const openReviewTab = (): void => {
-    useTabsStore.getState().open(workspaceId, 'changes', 'right', {
-      runId,
-      sessionId,
-      title: t('tab.changes')
-    })
-    useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
-  }
+  /**
+   * 审查 tab 一律开在**右侧工作区**。
+   *
+   * ★ 走 `openChangeReview` 而不是 `open(ws, 'changes', 'right')`:后者在右侧
+   *   工作台还没被切出来时会退回当前分组,把审查 tab 开进**主区**、盖住对话。
+   *   面板展开也由它负责,所以这里不用再自己 `setRightPanelForWorkspace`。
+   */
+  const openReviewTab = (selectedPath?: string): void =>
+    useTabsStore.getState().openChangeReview(workspaceId, runId, sessionId, selectedPath)
 
   const openFile = (path: string): void => useTabsStore.getState().openFile(workspaceId, path)
 
@@ -211,13 +215,37 @@ export function TurnChangeReview({
         )}
       </div>
 
-      {expanded && (
-        <div>
-          {set.files.map((file) => (
-            <FileRow key={file.path} file={file} onReview={openReviewTab} onOpen={() => openFile(file.path)} t={t} />
-          ))}
-        </div>
-      )}
+      {/*
+        展开/收起是**高度过渡**,不是直接挂载 —— 文件多的时候一下子砸出来,
+        下面整条转录会跟着跳一下。`initial={false}` 让首次就已展开的路径不重播
+        动画,理由同 ToolTimeline 那段长注释。
+        ★ 时长必须乘 `scale`:勾了「减弱动态效果」的用户那里,Motion 走 WAAPI,
+        theme.css 那段 CSS 管不到,漏乘就变成「设置关掉了动画但这里还在动」。
+      */}
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            key="turn-review-files"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 * scale, ease: [0.32, 0.72, 0, 1] }}
+            style={{ overflow: 'hidden' }}
+          >
+            <div>
+              {set.files.map((file) => (
+                <FileRow
+                  key={file.path}
+                  file={file}
+                  onReview={() => openReviewTab(file.path)}
+                  onOpen={() => openFile(file.path)}
+                  t={t}
+                />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }
@@ -235,8 +263,18 @@ function FileRow({
 }): ReactNode {
   const { dir, name } = splitPath(file.path)
   return (
-    <div className="flex items-center gap-2 px-2.5 py-1.5">
-      <span className="min-w-0 flex-1 truncate">
+    <div className="flex items-center gap-2 rounded-[6px] px-2.5 py-1.5 hover:bg-tint-hover">
+      {/*
+        文件名本身就是「审查这个文件」—— 右边那颗「审查」按钮留着,是因为
+        一行文字能不能点从外观上看不出来。整行不做成 <button>:里面还有两颗
+        按钮,嵌套 button 在 HTML 里非法,键盘序也会塌成一个焦点。
+      */}
+      <button
+        type="button"
+        onClick={onReview}
+        title={file.path}
+        className="min-w-0 flex-1 cursor-pointer truncate text-left"
+      >
         <span className="text-fg">{name}</span>
         {dir !== '' && <span className="ml-1 text-fg-faint">{dir}</span>}
         {!file.oversize && (
@@ -246,7 +284,7 @@ function FileRow({
           </span>
         )}
         {file.oversize && <span className="ml-1.5 text-fg-faint">{t('chat.review.oversize')}</span>}
-      </span>
+      </button>
       <button
         type="button"
         onClick={onReview}

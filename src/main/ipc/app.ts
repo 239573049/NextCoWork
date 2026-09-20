@@ -131,6 +131,26 @@ export function setSessionWindowOpener(opener: (workspaceId: string, sessionId: 
   sessionWindowOpener = opener
 }
 
+/**
+ * 渲染层确认过的「重新退出」入口。装配点也在 `main/index.ts`,和上面那个
+ * opener 同一个理由:ipc 层不认识 app 的生命周期。
+ *
+ * ★ 用**可空**的闭包而不是让 ipc 层直接 import `QuitFlow`:注册 handler 与
+ * 装配退出流程都在 `whenReady()` 里,顺序由 index.ts 保证;真到了没装配就收到
+ * 这条消息的情况(理论上只有启动期极短的窗口),这里什么也不做 —— 那说明这一轮
+ * 退出本来就不在跑,不需要它。
+ */
+let quitRequester: (() => void) | null = null
+
+export function setQuitRequester(request: () => void): void {
+  quitRequester = request
+}
+
+/** 用户已经在应用自己的对话框里选完了,别让 `beforeunload` 再挡一次退出。 */
+export function requestQuit(): void {
+  quitRequester?.()
+}
+
 export function copyText(text: string): void {
   clipboard.writeText(text)
 }

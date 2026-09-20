@@ -22,8 +22,10 @@ import {
   estimateMessages,
   estimateTokens,
   estimateTools,
+  projectContextWindow,
   resolveThinkingBudget,
   sanitizeSummaryNote,
+  summaryCutIndex,
   summaryOutputTokens,
   tokenCalibration,
   COMPACTION_SYSTEM,
@@ -991,6 +993,131 @@ describe('compactionBoundary', () => {
 })
 
 /**
+ * 窗口投影 —— 「摘要压缩到底压掉了什么」。
+ *
+ * ★ 这一组盯的是一个**看不见的**故障:摘要原来是**附加**在全量历史后面的,
+ * 于是压完占用不降反升,判据下一轮照样为真,每一轮再摘要一次。界面上一切正常
+ * (检查点有、分隔线有、笔记有),只有账单在涨。所以用例全部拿 `estimateMessages`
+ * 对账「真的变小了」,而不是只看结构。
+ */
+describe('projectContextWindow', () => {
+  /** 一轮 = 用户提问 + 助手调工具 + 工具回执。切点只能落在提问那一条上。 */
+  function turn(i: number, output = 'x'.repeat(4000)): AgentMessage[] {
+    return [
+      userMessage(`u${i}`, [{ type: 'text', text: `第 ${i} 个问题` }], NOW),
+      assistantMessage(`a${i}`, [{ type: 'tool_call', callId: `c${i}`, name: 'bash', input: {} }], NOW),
+      userMessage(`r${i}`, [{ type: 'tool_result', callId: `c${i}`, output: { content: output }, isError: false }], NOW)
+    ]
+  }
+  const history = (n: number): AgentMessage[] => Array.from({ length: n }, (_, i) => turn(i)).flat()
+  const ref = (over: Partial<{ coveredThroughMessageId: string }> = {}): {
+    note: string
+    id: string
+    coveredThroughMessageId?: string
+  } => ({ note: '八节摘要', id: 'sess:context:1', ...over })
+
+  it('没有摘要时一条都不裁 —— 被裁掉的内容那时没有任何继承者', () => {
+    const h = history(6)
+    const out = projectContextWindow({ messages: h, now: NOW })
+    expect(out.messages.map((m) => m.id)).toEqual(h.map((m) => m.id))
+    expect(out.droppedThroughMessageId).toBeUndefined()
+  })
+
+  /** ★ 这一条就是整次改动的理由:压完必须**更小**。 */
+  it('★ 有摘要时把切点之前的历史真的移出上下文,占用随之下降', () => {
+    const h = history(6)
+    const before = estimateMessages(h)
+    const out = projectContextWindow({ messages: h, summary: ref({ coveredThroughMessageId: 'r5' }), now: NOW })
+
+    expect(estimateMessages(out.messages)).toBeLessThan(before / 2)
+    expect(out.messages[0]?.id).toBe('sess:context:1')
+    expect(JSON.stringify(out.messages)).toContain('八节摘要')
+    // 早期那几轮整条不见了,不是被折叠成占位符
+    expect(out.messages.some((m) => m.id === 'u0')).toBe(false)
+  })
+
+  /**
+   * ★★ 切点只能落在一轮的起点上。切错地方的症状是**下一轮 400**:
+   * `tool_use` 留在被裁掉的那侧,它的 `tool_result` 留在这侧(或者反过来)。
+   */
+  it('★ 任何切点都不产生孤儿 tool_call', () => {
+    for (let n = 1; n <= 10; n++) {
+      const h = history(n)
+      const out = projectContextWindow({
+        messages: h,
+        summary: ref({ coveredThroughMessageId: h.at(-1)?.id ?? '' }),
+        now: NOW
+      })
+      expect(orphanedToolCalls(out.messages), `${n} 轮`).toEqual([])
+      // 裁完第一条一定是 user —— Anthropic 的硬要求,也是 withSummary 的前提
+      expect(out.messages[0]?.role, `${n} 轮`).toBe('user')
+    }
+  })
+
+  /**
+   * ★★ 覆盖锚点是上界。越过它就是在裁**摘要没读过**的消息 ——
+   * 恢复一条几十轮之前的检查点时,那等于「模型突然忘了最近半小时」。
+   */
+  it('★ 切点绝不越过摘要的覆盖锚点', () => {
+    const h = history(8)
+    const out = projectContextWindow({
+      messages: h,
+      // 摘要只读到第 2 轮为止(`r2`),后面五轮它一个字都没看过
+      summary: ref({ coveredThroughMessageId: 'r2' }),
+      now: NOW
+    })
+    expect(out.droppedThroughMessageId).toBe('r2')
+    expect(out.messages.some((m) => m.id === 'u3')).toBe(true)
+    expect(out.messages.some((m) => m.id === 'u2')).toBe(false)
+  })
+
+  it('没有锚点的老检查点一条都不裁,只接上摘要', () => {
+    const h = history(8)
+    const out = projectContextWindow({ messages: h, summary: ref(), now: NOW })
+    expect(out.droppedThroughMessageId).toBeUndefined()
+    expect(out.messages.some((m) => m.id === 'u0')).toBe(true)
+  })
+
+  it('历史还不够长时裁不动,退化成只接摘要', () => {
+    const h = history(1)
+    const out = projectContextWindow({ messages: h, summary: ref({ coveredThroughMessageId: 'r0' }), now: NOW })
+    expect(out.droppedThroughMessageId).toBeUndefined()
+    expect(out.messages.map((m) => m.id)).toEqual(['sess:context:1', 'u0', 'a0', 'r0'])
+  })
+
+  it('空历史不合成一条只有摘要的请求', () => {
+    expect(projectContextWindow({ messages: [], summary: ref(), now: NOW }).messages).toEqual([])
+  })
+
+  /** `droppedThroughMessageId` 是分隔线的锚点:它必须是**最后一条被裁掉**的。 */
+  it('报出来的边界与真实裁掉的那一段对得上', () => {
+    const h = history(6)
+    const out = projectContextWindow({ messages: h, summary: ref({ coveredThroughMessageId: 'r5' }), now: NOW })
+    const kept = new Set(out.messages.map((m) => m.id))
+    const dropped = h.filter((m) => !kept.has(m.id))
+
+    expect(out.droppedThroughMessageId).toBe(dropped.at(-1)?.id)
+    expect(dropped[0]?.id).toBe('u0')
+  })
+
+  describe('summaryCutIndex', () => {
+    it('切点落在一轮的起点上,并尽量多裁', () => {
+      const h = history(6)
+      expect(summaryCutIndex(h, h.length - 1)).toBe(12)
+      expect(h[12]?.id).toBe('u4')
+    })
+
+    it('整段历史只有一轮时无处可切', () => {
+      expect(summaryCutIndex(history(1), 2)).toBe(0)
+    })
+
+    it('锚点缺席(-1)一律不裁', () => {
+      expect(summaryCutIndex(history(6), -1)).toBe(0)
+    })
+  })
+})
+
+/**
  * 摘要压缩的输入侧 —— 「摘要太短、丢核心内容」这个故障的三个成因,
  * 这一组用例各盯一个:提示词有没有结构、digest 有没有把料丢掉、输出上限够不够。
  */
@@ -1114,6 +1241,46 @@ describe('摘要压缩', () => {
       // 尾部必留
       expect(digest).toContain('第 39 轮')
       expect(digest).toContain('earlier message(s) omitted')
+    })
+
+    /**
+     * ★★ **必留段也在预算之内。** 原来 pinned(第 0 条 + 最近 12 条)只计进
+     * 已用量、从不丢弃,于是「预算」根本不是上限:限额是**按块**给的,
+     * 一条带二十个并行工具结果的消息就三万多字符。小窗口模型上,这条摘要请求
+     * 自己先 400 —— 而它发生在最需要压缩的那一刻,外面还没有任何拦网。
+     */
+    it('★★ 必留段自己就超预算时照样压得住,首尾两条仍在', () => {
+      const fat = (id: string, label: string): AgentMessage =>
+        userMessage(
+          id,
+          Array.from({ length: 20 }, (_, k) => ({
+            type: 'tool_result' as const,
+            callId: `${id}-${String(k)}`,
+            output: { content: `${label} ${'y'.repeat(4000)}` },
+            isError: false
+          })),
+          NOW
+        )
+      // 全部 13 条都是必留段(第 0 条 + 最近 12 条),每条都撑得很大
+      const h = [
+        userMessage('first', [{ type: 'text', text: '原始任务:重构登录模块' }], NOW),
+        ...Array.from({ length: 12 }, (_, i) => fat(`m${i}`, `第 ${i} 块`))
+      ]
+
+      const digest = buildCompactionDigest(h, { budget: 4000 })
+
+      expect(estimateTokens(digest)).toBeLessThanOrEqual(4000)
+      expect(digest).toContain('原始任务:重构登录模块')
+      expect(digest).toContain('第 11 块')
+      expect(digest).toContain('earlier message(s) omitted')
+    })
+
+    it('预算宽裕时必留段一条都不降级、不丢弃', () => {
+      const h = [
+        userMessage('first', [{ type: 'text', text: '原始任务' }], NOW),
+        ...Array.from({ length: 6 }, (_, i) => toolTurn(i, `输出 ${i}`)).flat()
+      ]
+      expect(buildCompactionDigest(h, { budget: 1_000_000 })).toBe(buildCompactionDigest(h))
     })
 
     /** ★ 静默丢弃是更糟的:摘要读起来完整,只是从某一段开始全是编的。 */

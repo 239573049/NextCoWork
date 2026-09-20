@@ -42,7 +42,6 @@ import type {
   InnerTab,
   InnerTabKind,
 } from "../../../shared/domain/tab";
-import { chatKey } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FEATURE_ICON } from "../shell/icons";
@@ -103,11 +102,27 @@ function renderInner(
     case "chat":
       return (
         <ChatView
-          // ★ key 挂 chatKey 而不是 tab.id:同一个 Tab 换会话时必须重建
-          // per-session store 的订阅,否则新会话会继续画上一个会话的转录。
-          // 草稿期 chatKey 是 tabId,绑定 sessionId 的那一刻它变一次 —— 那次
-          // 重挂是**故意**的,同一个理由:store 换了,订阅必须跟着换。
-          key={chatKey(tab)}
+          /*
+            ★ key 挂 **tab.id**,不是 `chatKey(tab)`。
+
+            以前挂 chatKey,于是草稿铸出 sessionId 的那一刻(用户贴第一张图 /
+            发第一条消息)整棵子树被卸载重挂。那次重挂**看得见**:托盘里的
+            附件 chip、正在飞的上传、输入框的焦点和光标全部随旧的那棵树消失 ——
+            症状是「新对话里第一次粘贴图片没反应,第二次才行」。
+
+            重挂当初的理由是「store 换了,订阅必须跟着换」,但那个理由不成立:
+            ChatView 的 per-session 订阅走的是 `sessionStore(storeKey)` +
+            `useSyncExternalStore`,storeKey 一变 React 自己会重新订阅,不需要
+            换一棵树。而**草稿铸 id 根本不是换会话**,是同一段对话拿到了自己的
+            身份(草稿文本由 `adoptDraftSession` 搬过去)。
+
+            ★ 真正「同一个 Tab 换另一条会话」的路径今天不存在
+            (`bindChatSession` 是 `ref.sessionId` 唯一的写入者,只写 null→id;
+            开历史会话走 `openSession`,那是**另一个 Tab**)。以后真要加,
+            必须在 ChatView 里把 per-会话的本地状态(托盘、sessionMode、
+            sessionModel)一并重置,而不是把 key 改回去。
+          */
+          key={tab.id}
           sessionId={tab.ref.sessionId}
           tabId={tab.id}
           workspace={workspace}

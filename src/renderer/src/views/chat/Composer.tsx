@@ -315,6 +315,21 @@ export function Composer({
   */
   const [preview, setPreview] = useState<ContextPreview | undefined>(undefined);
   const input = useRef<MentionInputHandle | null>(null);
+  /*
+    ★ **挂载即取焦点** —— 这是「新对话里第一次 Ctrl+V 一定没反应」的修法。
+    在此之前首屏的 `document.activeElement` 是 `<body>`(CDP 探针实测):输入框
+    看上去随时能打字,但键盘事件(粘贴在内)根本不会送到它这里,必须先用鼠标
+    点一下 —— 于是「第一次失败、点一下之后第二次就好」成了稳定复现的现象。
+
+    另一个受益的场合是草稿铸出会话 id 的那次重挂(见 `draft-handoff.ts`):
+    新画出来的 contentEditable 是另一个 DOM 节点,焦点不会自己跟过去。
+
+    ★ 只在**挂载**时跑。非激活的 Tab 在 `shell/Dock.tsx` 里压根没有挂载,
+    所以「挂载」就等于「这个对话刚成为可见的那一个」—— 不会去抢别人的焦点。
+  */
+  useEffect(() => {
+    input.current?.focus();
+  }, []);
   const lastCaret = useRef<number | null>(null);
   const [skills, setSkills] = useState<SkillListItem[]>([]);
   const [commands, setCommands] = useState<CommandDefinition[]>([]);
@@ -760,6 +775,14 @@ export function Composer({
     onAttachFiles(files);
   }
 
+  /*
+    输入框外那排(环境 / 目标 / 模式 + 用量读数)量到的宽度。
+    ★ 量的是**这一行自己**,不是窗口:同一个窗口里可以并排开两三个对话,
+    窗口一动不动而这一列被拖窄才是常态。
+  */
+  const metaRow = useRef<HTMLDivElement | null>(null);
+  const usageFits = useUsageFits(metaRow);
+
   return (
     <div className="shrink-0 px-6 pb-5">
       {/*
@@ -848,7 +871,13 @@ export function Composer({
           }}
         />
 
-        <div className="flex items-center gap-1 px-2.5 pt-1 pb-2.5">
+        {/*
+          ★ `flex-wrap`:这一排的宽度是**面板宽度**,不是窗口宽度 —— 三四个工作区
+          并排铺开时一列只有三百多像素,而这排控件的最小宽度比它大。不让它换行的话
+          整排会溢出到输入框边框外面去(模型名压在边框上)。换行后 `justify-end`
+          让溢出的那半排(模型 + 发送)仍然贴右,保持「左=怎么跑 / 右=发给谁」。
+        */}
+        <div className="flex flex-wrap items-center justify-end gap-1 px-2.5 pt-1 pb-2.5">
           {/* ── 权限档位:界面上就在这个位置 ── */}
           <Menu
             label={t("composer.permission")}
@@ -1084,7 +1113,8 @@ export function Composer({
         onSet={(condition) => Promise.resolve(onGoalCommand(condition, { ...value, model, modelProviderId, thinking }))}
         onClear={() => Promise.resolve(onGoalCommand('clear', { ...value, model, modelProviderId, thinking }))}
       />}
-      <div className="mx-auto mt-1.5 flex w-full max-w-[760px] items-center gap-1">
+      {/* 同框内那排一样要能换行 —— 自定义模式名可以很长,而列宽是面板给的 */}
+      <div ref={metaRow} className="mx-auto mt-1.5 flex w-full max-w-[760px] flex-wrap items-center gap-1">
         <EnvironmentPill workspace={workspace} />
         {onGoalCommand !== undefined && <GoalPill goal={goal} onOpen={() => setGoalPanelOpen(true)}
           onClear={() => { void onGoalCommand('clear', { ...value, model, modelProviderId, thinking }) }} />}
@@ -1153,8 +1183,13 @@ export function Composer({
         </Menu>
 
         {/* 用量读数和左边那两颗同处一行:它们都在描述「这个会话此刻的状态」,
-            各占一行会在输入框下面堆出两条几乎空着的横带。 */}
-        {conversationUsage !== undefined && (
+            各占一行会在输入框下面堆出两条几乎空着的横带。
+
+            ★ 放不下就**整块不画**,既不换行也不截断(`usageFits`)。这七个读数是
+            一组互相参照的数(输入/缓存/输出/命中率/花费),留一半在行上只会让人
+            按错的口径去读;而换到第二行就等于在窄面板里把输入框往上顶一整行。
+            藏掉也不丢信息:每一轮的完整用量在转录里那张「任务用量」上。 */}
+        {conversationUsage !== undefined && usageFits && (
           <div className="flex min-w-0 flex-1 justify-end pl-3">
             <ConversationUsage usage={conversationUsage} />
           </div>
@@ -1217,6 +1252,41 @@ function EnvironmentPill({ workspace }: { workspace: Workspace }): ReactNode {
       </Pill>
     </span>
   );
+}
+
+/**
+ * 这排读数需要的最小行宽(px)。
+ *
+ * 来历:量过一次实际布局 —— 左边三颗药丸(环境 / 目标 / 模式)约 170,
+ * 七个读数连着 `gap-x-4` 约 410,中间留一段呼吸位,合起来 600 出头。
+ * 数值偏保守是有意的:读数的宽度随语言和位数变(`18.4M` / `1,234,567`),
+ * 卡着极限画,换成英文或跑久了位数变多就又贴到药丸上去了。
+ * 重新量过就改这个数,不要在渲染处另加一个特判。
+ */
+const USAGE_MIN_ROW_WIDTH = 620;
+
+/**
+ * 输入框下面那排装不装得下用量读数。
+ *
+ * ★ 用 `ResizeObserver` 而不是窗口宽度 / CSS 断点:窄的是**这一列**(dock 可以
+ * 左右分栏、右侧面板可以拖宽),窗口自始至终没变过 —— 按窗口断点判会在
+ * 「窗口很宽、这一列很窄」时原样把读数画出去,正是要修的那个样子。
+ *
+ * 初值取 true:首帧还没量到宽度,此时先画、由观察者在同一帧回调里纠正,
+ * 比先藏再冒出来晃一下安分。
+ */
+function useUsageFits(ref: React.RefObject<HTMLElement | null>): boolean {
+  const [fits, setFits] = useState(true);
+  useEffect(() => {
+    const element = ref.current;
+    if (element === null) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry !== undefined) setFits(entry.contentRect.width >= USAGE_MIN_ROW_WIDTH);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
+  return fits;
 }
 
 function ConversationUsage({ usage }: { usage: ConversationUsageSummary }): ReactNode {
@@ -1383,6 +1453,7 @@ function Pill({
   active = false,
   readonly = false,
   accent = false,
+  className,
 }: {
   children: ReactNode;
   active?: boolean;
@@ -1399,17 +1470,22 @@ function Pill({
    *   于是换颜色主题时药丸底自己跟着 accent 走,不用另外声明。
    */
   accent?: boolean;
+  /** 只给需要**退让**的药丸用(模型名):默认 `shrink-0`,窄面板里靠它改成可压缩 */
+  className?: string;
 }): ReactNode {
   return (
     <span
       className={cn(
-        "flex h-7 shrink-0 items-center gap-1.5 rounded-pill px-2.5 text-[12.5px]",
+        // ★ `whitespace-nowrap`:药丸是**一行一个词**的东西。少了它,面板窄到放不下
+        //   这一排时「完全访问」会一个字一行竖着排下来(不是溢出,是换行)。
+        "flex h-7 shrink-0 items-center gap-1.5 rounded-pill px-2.5 text-[12.5px] whitespace-nowrap",
         readonly
           ? "bg-tint/60 text-fg-muted"
           : accent
             ? "bg-accent/10 text-accent transition-colors"
             : "transition-colors hover:bg-tint-hover " +
               (active ? "bg-tint text-fg" : "text-fg-muted hover:text-fg"),
+        className,
       )}
     >
       {children}
@@ -2079,14 +2155,17 @@ function ModelPicker({
         label={t("chat.modelPicker")}
         width={300}
         align="end"
+        // 这一排里**只有模型名可以退让** —— 其余药丸都是短词,压缩它们只会换行。
+        className="min-w-0"
+        triggerClassName="min-w-0"
         trigger={
-          <Pill>
+          <Pill className="min-w-0 shrink">
             <ProviderIcon
               name={[model, provider?.name, provider?.id]}
               size={13}
             />
-            <span className="max-w-[150px] truncate">{modelLabel}</span>
-            <ChevronRight size={12} className="ml-0.5 text-fg-faint" />
+            <span className="min-w-0 max-w-[150px] truncate">{modelLabel}</span>
+            <ChevronRight size={12} className="ml-0.5 shrink-0 text-fg-faint" />
           </Pill>
         }
         onOpenChange={(open) => {

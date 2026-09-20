@@ -78,6 +78,14 @@ export function TextInput({
         onBlur={onCommit}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
+            /*
+              ★ 组词期间的回车是「确认候选词」,不是提交 —— 更不能 `blur()`。
+              少这一句的症状不是「提交早了」那么轻:回车一到就 `preventDefault`
+              再抽走焦点,输入法那次上屏当场被打断,而它自己的组词串还在,
+              于是同一段中文被写进框里**两遍**(中文用户打一个词看到「测试测试」)。
+              判据与 `shell/TabRenameInput.tsx:86` 一字不差,别在这里改写法。
+            */
+            if (e.nativeEvent.isComposing) return
             e.preventDefault()
             onCommit?.()
             e.currentTarget.blur()

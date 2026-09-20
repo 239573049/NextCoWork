@@ -26,6 +26,44 @@ export function sshTargetArgs(profile: SshConnectionProfile): string[] {
     ...(target.identityFile ? ['-i', target.identityFile] : []), ...(target.proxyJump ? ['-J', target.proxyJump] : []), target.host]
 }
 
+/**
+ * known_hosts 里那条记录的名字。**必须和 OpenSSH 自己拼出来的一模一样**:
+ * 默认端口用裸主机名,非默认端口用 `[host]:port`。
+ */
+export function knownHostsName(host: string, port: number): string {
+  return port === 22 ? host : `[${host}]:${String(port)}`
+}
+
+/**
+ * 把 ssh 改道到本地代理隧道上的那几个 `-o`。
+ *
+ * 需求:SSH 默认跟随系统代理(隧道本身见 `ssh/proxy.ts`)。ssh 连的是
+ * `127.0.0.1:隧道端口`,但**主机密钥必须仍按原来的名字校验** —— 不设
+ * `HostKeyAlias` 的话,ssh 会去 known_hosts 里找 `[127.0.0.1]:54321` 这种
+ * 每次都不一样的名字,表现为每连一次就问一遍「确定要继续连接吗」,
+ * 而且 `~/.ssh/known_hosts` 会被一堆随机端口的条目撑爆。
+ * 顺带:`HostKeyAlias` 一设,ssh 也不再做 CheckHostIP —— 否则那个 IP 是 127.0.0.1。
+ *
+ * ★ 别名里用的是 **`ssh -G` 解析出的 HostName**,不是命令行上那个位置参数。
+ * OpenSSH 的 known_hosts 是按 HostName 记的:配置型连接 `Host native-test /
+ * HostName 10.0.0.2` 存下来的条目是 `10.0.0.2`。按位置参数拼会得到
+ * `[native-test]:22`,在 `StrictHostKeyChecking yes` 下直接被判成陌生主机
+ * (真实 sshd 用例抓到过:"No ED25519 host key is known for [native-test]:60003")。
+ *
+ * ★ 返回的参数要排在 `sshTargetArgs` **前面**。命令行上 `-o Port=` 和 `-p` 谁先谁赢
+ * (实测 OpenSSH 10.3:`-p 2222 -o Port=3333` 得到 2222,反过来得到 3333),
+ * 排在后面的话手动型连接配置的 `-p` 会把隧道端口顶掉,ssh 直接连去真实端口 ——
+ * 表现为「代理设了但没生效」,且只在手动型连接上出现。
+ *
+ * @param resolvedHost `ssh -G` 给出的 hostname —— known_hosts 就是按它记录的
+ * @param resolvedPort `ssh -G` 给出的真实端口,用来还原 known_hosts 里的端口修饰
+ * @param aliasAlreadySet 用户自己配了 HostKeyAlias:那就是他的选择,不要覆盖
+ */
+export function proxyTunnelArgs(resolvedHost: string, resolvedPort: number, tunnelPort: number, aliasAlreadySet: boolean): string[] {
+  return ['-o', 'HostName=127.0.0.1', '-o', `Port=${String(tunnelPort)}`,
+    ...(aliasAlreadySet ? [] : ['-o', `HostKeyAlias=${knownHostsName(resolvedHost, resolvedPort)}`])]
+}
+
 export function powershellCommand(script: string): string {
   return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
 }

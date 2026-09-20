@@ -221,6 +221,25 @@ class WindowRegistry {
   list(): WindowContext[] {
     return [...this.windows.values()]
   }
+
+  /**
+   * 注册表里的窗口,取回 `BrowserWindow` —— 退出流程要关它们(`main/quit-flow.ts`)。
+   *
+   * ★ **插件宿主窗不在这里**,它们住在 `plugin/host-window.ts` 自己的表里,这是
+   * 有意的:退出时不去关第三方代码的窗口,那等于让它的 `beforeunload` 有机会
+   * 拖住退出,而它连我们自己的「有未保存的改动」对话框都调不出来。
+   *
+   * `fromWebContents` 可能返回 null(窗口刚销毁、上下文还留着),所以逐个判,
+   * 不假设一定拿得到。
+   */
+  listWindows(): BrowserWindow[] {
+    const found: BrowserWindow[] = []
+    for (const ctx of this.windows.values()) {
+      const win = BrowserWindow.fromWebContents(ctx.sender)
+      if (win !== null && !win.isDestroyed()) found.push(win)
+    }
+    return found
+  }
 }
 
 export const windows = new WindowRegistry()

@@ -115,8 +115,11 @@ export type InnerTab =
    *
    * ★ 按 `runId` 定位(不是 sessionId):一个会话有多个任务块,每块一个可独立
    *   打开的审查 tab。`sessionId` 一并存下,便于关会话时清理与去重。
+   *
+   * `selectedPath` 是**打开时先看哪个文件的 diff**(缺省是清单里的第一个),
+   * 从回合底部那张卡点某一行过来时带上 —— 可选,老布局读回来时没有它。
    */
-  | (InnerTabBase & { kind: 'changes'; ref: { runId: string; sessionId: string } })
+  | (InnerTabBase & { kind: 'changes'; ref: { runId: string; sessionId: string; selectedPath?: string } })
   /**
    * 插件接管的自定义编辑器(`contributes.customEditors`)。
    *

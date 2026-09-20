@@ -21,6 +21,7 @@ import { usageZh, usageEn } from './usage';
 import { searchZh, searchEn } from './search';
 import { goalZh, goalEn } from './goal';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
+import { migrationZh, migrationEn } from './migration';
 import {
   pluginMessages,
   pluginMessagesVersion,
@@ -48,6 +49,7 @@ const ZH: Messages = {
   ...usageZh,
   ...searchZh,
   ...chatNavigationZh,
+  ...migrationZh,
   ...themesZh,
   ...agentZh,
   ...documentsZh,
@@ -2001,6 +2003,7 @@ const EN: Messages = {
   ...usageEn,
   ...searchEn,
   ...chatNavigationEn,
+  ...migrationEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",

@@ -14,8 +14,10 @@ import {
   DEFAULT_PROXY,
   DIRECT_BYPASS,
   composeProxyUrl,
+  isLocalNetworkHost,
   normalizeBypassList,
   parseProxyEndpoint,
+  parseResolvedProxy,
   proxyBypassRules,
   proxyConfigFor
 } from '../proxy'
@@ -236,6 +238,60 @@ describe('parseProxyEndpoint', () => {
   it('解析再拼回去是同一个地址', () => {
     for (const raw of ['socks5://127.0.0.1:1080', 'http://proxy.corp:3128', 'https://a.b.c:443']) {
       expect(composeProxyUrl(parseProxyEndpoint(raw)!)).toBe(raw)
+    }
+  })
+})
+
+/**
+ * Chromium `resolveProxy()` 的回程解析。
+ *
+ * 需求:ssh 子进程也要跟随同一份代理设置,而它只能靠这个回程知道该连哪儿
+ * (`main/net/proxy.ts` 的 `resolveProxyForHost`)。这里的失败模式是**判成直连**:
+ * 设置页一切正常,ssh 却绕过代理 —— 和文件头说的那个老 bug 是同一副面孔。
+ */
+describe('parseResolvedProxy', () => {
+  it('DIRECT 就是直连', () => {
+    expect(parseResolvedProxy('DIRECT')).toBeNull()
+    expect(parseResolvedProxy('')).toBeNull()
+  })
+
+  /** PAC 的历史命名:`PROXY` 是 HTTP 代理,`SOCKS` 不带数字是 SOCKS4 */
+  it('按 PAC 的命名认协议', () => {
+    expect(parseResolvedProxy('PROXY 127.0.0.1:7890')).toEqual({ scheme: 'http', host: '127.0.0.1', port: 7890 })
+    expect(parseResolvedProxy('HTTPS proxy.corp:443')).toEqual({ scheme: 'https', host: 'proxy.corp', port: 443 })
+    expect(parseResolvedProxy('SOCKS5 127.0.0.1:1080')?.scheme).toBe('socks5')
+    expect(parseResolvedProxy('SOCKS 127.0.0.1:1080')?.scheme).toBe('socks4')
+  })
+
+  /** 备选链只取第一个能用的:隧道一旦交给 ssh 就没有「换一个再来」的时机 */
+  it('备选链取第一条,认不出的跳过', () => {
+    expect(parseResolvedProxy('PROXY a.corp:3128;PROXY b.corp:3128;DIRECT')?.host).toBe('a.corp')
+    expect(parseResolvedProxy('QUIC a.corp:443; PROXY b.corp:3128')?.host).toBe('b.corp')
+  })
+
+  /** PAC 脚本可以不写端口,而拨号必须有一个实数端口 */
+  it('没写端口时按协议补默认端口', () => {
+    expect(parseResolvedProxy('PROXY proxy.corp')?.port).toBe(80)
+    expect(parseResolvedProxy('HTTPS proxy.corp')?.port).toBe(443)
+    expect(parseResolvedProxy('SOCKS5 proxy.corp')?.port).toBe(1080)
+  })
+})
+
+/**
+ * 需求:ssh 跟随系统代理之后,局域网里的机器必须仍然直连 —— 系统代理的排除列表
+ * 默认不含私有网段,而代理软件对它们的 CONNECT 多半是拒绝的。
+ */
+describe('isLocalNetworkHost', () => {
+  it('回环、私有网段、链路本地和 .local 都算本地', () => {
+    for (const host of ['localhost', 'nas.local', '127.0.0.1', '10.1.2.3', '172.16.0.9', '172.31.255.1',
+      '192.168.1.5', '169.254.1.1', '::1', '[fe80::1]', 'fd00::1']) {
+      expect(isLocalNetworkHost(host), host).toBe(true)
+    }
+  })
+
+  it('公网地址和普通域名不算', () => {
+    for (const host of ['8.8.8.8', '172.32.0.1', '11.0.0.1', '192.169.1.1', 'example.com', 'my-alias']) {
+      expect(isLocalNetworkHost(host), host).toBe(false)
     }
   })
 })

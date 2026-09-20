@@ -72,6 +72,8 @@ function FileRow({
 export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace: Workspace }): ReactNode {
   const { t } = useI18n();
   const runId = tab.ref.runId;
+  // 从回合卡里点某一行过来时带着它 —— 只作用于「首次定位」,之后选中态归左列自己管。
+  const wanted = tab.ref.selectedPath;
   // undefined = 加载中;null = 无改动/加载失败
   const [set, setSet] = useState<ReviewChangeSet | null | undefined>(undefined);
   const [selected, setSelected] = useState<string | null>(null);
@@ -83,7 +85,10 @@ export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace
       .then((s) => {
         if (!alive) return;
         setSet(s);
-        if (s !== null && s.files.length > 0) setSelected(s.files[0]!.path);
+        if (s === null || s.files.length === 0) return;
+        // 点的那个文件可能已经不在改动集里(撤销后重开),这时退回第一个而不是空着。
+        const hit = wanted === undefined ? undefined : s.files.find((f) => f.path === wanted);
+        setSelected(hit?.path ?? s.files[0]!.path);
       })
       .catch(() => {
         if (alive) setSet(null);
@@ -91,7 +96,7 @@ export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace
     return () => {
       alive = false;
     };
-  }, [runId]);
+  }, [runId, wanted]);
 
   useEffect(() => {
     if (selected === null) {

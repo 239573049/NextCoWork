@@ -6,7 +6,8 @@ import { agentError } from '../../../shared/agent/error'
 import type { AgentEvent } from '../../../shared/agent/event'
 import type { InterjectItem } from '../../../shared/agent/interject'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
-import { assistantMessage, userMessage } from '../../../shared/agent/message'
+import { assistantMessage, orphanedToolCalls, userMessage } from '../../../shared/agent/message'
+import { applyEvents, emptyTranscript } from '../../../shared/agent/transcript'
 import type { RunRequest } from '../../../shared/agent/run-request'
 import { MAX_TURNS } from '../../../shared/agent/run-request'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
@@ -21,6 +22,7 @@ import {
   type SessionUpstream
 } from '../agent-session'
 import { nodeHost } from '../host'
+import { COMPACTION_SYSTEM } from '../context-assembler'
 import { localEnvironment } from '../../environment/local'
 import { collect, RunHandle } from '../run-registry'
 import { ToolRegistry, type ToolContext } from '../tool/registry'
@@ -2039,6 +2041,7 @@ describe('压缩判据按上游真值校准', () => {
     history: readonly AgentMessage[]
     saveContextCheckpoint?: SessionDeps['saveContextCheckpoint']
     contextCheckpoints?: readonly ContextCheckpoint[]
+    contextManagement?: SessionDeps['contextManagement']
   }): Promise<Ran> {
     const request = req()
     const handle = new RunHandle(request)
@@ -2049,7 +2052,7 @@ describe('压缩判据按上游真值校准', () => {
         tools: registry({ internalId: 'echo' }),
         workspaceRoot: '/ws',
         history: o.history,
-        contextManagement: AUTO_COMPACT,
+        contextManagement: o.contextManagement ?? AUTO_COMPACT,
         ...(o.saveContextCheckpoint !== undefined
           ? { saveContextCheckpoint: o.saveContextCheckpoint }
           : {}),
@@ -2195,5 +2198,145 @@ describe('压缩判据按上游真值校准', () => {
     expect(sent(upstream, 1)).not.toContain(BIG)
     expect(sent(upstream, 1)).toContain(COMPACTED)
     expect(sent(upstream, 1)).toContain(NOTE)
+  })
+
+  /**
+   * ★★ 相位要**活过转录 reducer**。
+   *
+   * session 这边发了 `exhausted`,可紧跟着的 `context_checkpoint` 在
+   * `shared/agent/transcript.ts` 里会把相位推成 `ready`(检查点到达 = 压缩完成,
+   * 那是它该做的)。两条事件的顺序一倒,用户就永远看不到那句唯一可行动的提示:
+   * 占用一路涨过窗口,状态行上只闪过一下「上下文已压缩」。
+   *
+   * ★ 所以这一条**不看 session 发了什么**,只看把事件流放完之后界面拿到的是什么 ——
+   * 只断言前者的话,把顺序改回去它照样绿。
+   */
+  it('★★ exhausted 穿过转录 reducer 之后仍然是 exhausted', async () => {
+    /*
+      大头钉死在第 0 条(`compactMessages` 永远保留原文),后面垫足够多的短消息:
+      折叠区间存在(于是检查点真的会落、`context_checkpoint` 真的会发),
+      但折叠它们一个 token 都省不下 —— 正是 `exhausted` 要描述的那一种局面。
+    */
+    const stubborn: AgentMessage[] = [
+      userMessage('h0', [{ type: 'text', text: 'x'.repeat(700_000) }], 0),
+      ...Array.from({ length: 8 }, (_, i) =>
+        i % 2 === 0
+          ? assistantMessage(`h${i + 1}`, [{ type: 'text', text: `回应 ${i}` }], 0)
+          : userMessage(`h${i + 1}`, [{ type: 'text', text: `追问 ${i}` }], 0)
+      )
+    ]
+    const save = vi.fn()
+    const upstream = fakeUpstream([turnReporting(10, 'c1'), says('好')])
+    const { events } = await run({ upstream, history: stubborn, saveContextCheckpoint: save })
+
+    // 前提:检查点真的发出去了 —— 没有它,这条用例什么都没盯住
+    expect(events.some((e) => e.type === 'context_checkpoint')).toBe(true)
+    expect(applyEvents(emptyTranscript(), events).contextStatus?.phase).toBe('exhausted')
+  })
+})
+
+/**
+ * 摘要压缩(实验模式)—— 它是唯一一条**会自己发模型请求**的压缩路径,
+ * 所以「不收敛」在这里的代价不是空转,而是每一轮多烧半个窗口的输入。
+ */
+describe('摘要压缩的收敛', () => {
+  const SUMMARY_ON = { experimentalMode: true, autoCompact: true }
+
+  /** 摘要请求单独应答的假上游 —— 和正文请求的区别只在 `system`。 */
+  function withSummaryUpstream(
+    turns: ProviderStreamEvent[][],
+    note = '## Task and intent\n重构登录模块'
+  ): FakeUpstream & { summaries: CanonicalRequest[] } {
+    const base = fakeUpstream(turns)
+    const summaries: CanonicalRequest[] = []
+    return {
+      ...base,
+      summaries,
+      async *stream(r, signal, context): AsyncIterable<ProviderStreamEvent> {
+        if (r.system === COMPACTION_SYSTEM) {
+          summaries.push(r)
+          yield { type: 'message_start', model: 'claude-sonnet-4' }
+          yield { type: 'text_delta', index: 0, text: note }
+          yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } }
+          return
+        }
+        yield* base.stream(r, signal, context)
+      }
+    }
+  }
+
+  const toolTurn = (callId: string): ProviderStreamEvent[] => [
+    { type: 'message_start', model: 'claude-sonnet-4' },
+    { type: 'tool_call_start', index: 0, callId, name: 'echo' },
+    { type: 'tool_call_delta', index: 0, callId, argsDelta: '{}' },
+    { type: 'tool_call_end', index: 0, callId },
+    { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } }
+  ]
+
+  async function run(o: {
+    upstream: FakeUpstream
+    history: readonly AgentMessage[]
+  }): Promise<{ events: AgentEvent[] }> {
+    const request = req()
+    const handle = new RunHandle(request)
+    const session = new AgentSession(
+      {
+        host: quietHost(),
+        upstream: o.upstream,
+        tools: registry({ internalId: 'echo' }),
+        workspaceRoot: '/ws',
+        history: o.history,
+        contextManagement: SUMMARY_ON,
+        saveContextCheckpoint: vi.fn(),
+        resumeDelaysMs: []
+      },
+      handle,
+      request
+    )
+    const events = collect(handle)
+    await session.run()
+    return { events: await events }
+  }
+
+  /**
+   * ★★ 本组的主用例。摘要压缩原本是**附加**在全量历史后面的 —— 压完占用不降反升,
+   * 判据下一轮照样为真,于是**每一轮**再摘要一次:一次额外的模型请求、一条新检查点、
+   * 一条新分隔线,永远收敛不了。界面上全程正常,只有账单在涨。
+   *
+   * 这里用一条**裁不动**的历史(全部体积都在第 0 条,整段只有一轮)把那个循环
+   * 逼出来:压不动就该停手,而不是接着发第三次请求。
+   */
+  it('★★ 摘要压了也没降下来时,一个 run 里最多再试到上限就停手', async () => {
+    const huge = userMessage('h0', [{ type: 'text', text: 'x'.repeat(700_000) }], 0)
+    const upstream = withSummaryUpstream([
+      toolTurn('c1'), toolTurn('c2'), toolTurn('c3'), toolTurn('c4'), says('好')
+    ])
+    await run({ upstream, history: [huge] })
+
+    expect(upstream.requests.length).toBeGreaterThanOrEqual(5)
+    expect(upstream.summaries.length).toBe(2)
+  })
+
+  /**
+   * ★ 摘要真的把历史裁掉了 —— 这是 `COMPACTION_SYSTEM` 里那句
+   * 「the transcript itself is gone」第一次成立。
+   */
+  it('★ 压完之后早期历史不再出现在请求里,只剩摘要', async () => {
+    const history: AgentMessage[] = [
+      userMessage('h0', [{ type: 'text', text: '最初的任务' }], 0),
+      ...Array.from({ length: 4 }, (_, i) => [
+        assistantMessage(`a${i}`, [{ type: 'tool_call', callId: `t${i}`, name: 'echo', input: {} }], 0),
+        userMessage(`r${i}`, [{ type: 'tool_result', callId: `t${i}`, output: { content: 'x'.repeat(200_000) }, isError: false }], 0),
+        userMessage(`q${i}`, [{ type: 'text', text: `追问 ${i}` }], 0)
+      ]).flat()
+    ]
+    const upstream = withSummaryUpstream([toolTurn('c1'), says('好')])
+    await run({ upstream, history })
+
+    const after = JSON.stringify(upstream.requests[1]?.messages ?? [])
+    expect(after).toContain('重构登录模块')
+    expect(after).not.toContain('最初的任务')
+    // 裁掉整轮之后不能留下孤儿 tool_use —— 那是下一轮 400 的唯一来源
+    expect(orphanedToolCalls((upstream.requests[1]?.messages ?? []) as AgentMessage[])).toEqual([])
   })
 })

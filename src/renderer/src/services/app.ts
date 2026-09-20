@@ -60,6 +60,17 @@ export function openSessionWindow(workspaceId: string, sessionId: string): Promi
   return invoke('app:openSessionWindow', { workspaceId, sessionId })
 }
 
+/**
+ * 用户已经在「有未保存的改动」对话框里选完了(保存或丢弃),重走一次退出。
+ *
+ * ★ 只在**响应退出**时才调(`DocumentDialogs` 的 `confirmUnload`),不要拿它当
+ * 通用退出入口:它不做任何询问,直接让主进程开始关窗 —— 这一轮里那个
+ * `beforeunload` 已经不会再挡(渲染层把 `allowUnload` 置上了)。
+ */
+export function quitConfirmed(): void {
+  send('app:quitConfirmed', {})
+}
+
 // ─── 设置 ───
 
 export function getSettings(): Promise<AppSettings> {

@@ -13,16 +13,16 @@
  * 一个旧数上 —— 看着像卡住;而真要看用量,回复下方的「任务用量」给的是整轮的
  * 完整口径(含缓存与花费),比这里这个半截的累计值准。
  */
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { TranscriptState } from '../../../../shared/agent/transcript'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
 import { agentErrorText } from '../../i18n/agent'
 import { hasRun } from '../../../../shared/agent/transcript'
 import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
-import { activityOf, type ActivityPhase } from '../../../../shared/domain/activity'
+import { activitySnapshotOf, whimsyBucketOf, type ActivitySnapshot } from '../../../../shared/domain/activity'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
-import { whimsyEn, whimsyZh } from '../../i18n/agent'
+import { whimsyEn, whimsyZh } from '../../i18n/whimsy'
 import type { Locale } from '../../i18n'
 import { Spinner } from '../../components/ui/Spinner'
 
@@ -72,7 +72,7 @@ export function StatusLine({
   const { t, locale } = useI18n()
   const { status, model, contextUsage, notice, contextStatus } = transcript
   // ★ 在 early return 之前调用 —— hooks 不能出现在条件分支后面。
-  const whimsy = useWhimsy(running, activityOf(transcript, waitingForResponse), locale)
+  const whimsy = useWhimsy(running, activitySnapshotOf(transcript, waitingForResponse), locale)
   const showCompacted = useFading(contextStatus?.phase === 'ready', contextStatus)
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
@@ -206,12 +206,18 @@ export function StatusLine({
  * 运行期间轮换一个词。`active` 为假时**不起定时器**,也不推进下标 ——
  * 下一轮运行会从上一轮停住的地方接着走,而不是每次都从同一个词开始。
  *
- * ★ **相位切换时不需要重置下标。** 每个相位是各自一组料,换了相位就是换了一个数组,
+ * ★ **分组切换时不需要重置下标。** 每个分组是各自一组料,换了分组就是换了一个数组,
  * 同一个下标落在新数组上取到的**本来就是另一个词** —— 工具一开跑,那句话当帧就变,
  * 不必等下一个 4 秒,也不必为此多起一次 setState。
+ *
+ * ★ **「这一步跑了多久」在这里量,不在转录里算。** 转录只有工具的 `startedAt`,
+ * 而等首字节、思考、写正文这三段没有任何时间戳;而且旧转录重放时那些戳还可能缺。
+ * 这里按「步」计时(见 `useStepElapsed`),四种时刻用的是同一把尺。
  */
-function useWhimsy(active: boolean, phase: ActivityPhase, locale: Locale): string {
-  const words = locale === 'en-US' ? whimsyEn[phase] : whimsyZh[phase]
+function useWhimsy(active: boolean, snapshot: ActivitySnapshot, locale: Locale): string {
+  const elapsed = useStepElapsed(`${snapshot.phase}:${snapshot.callId ?? ''}`, active)
+  const bucket = whimsyBucketOf(snapshot, elapsed)
+  const words = locale === 'en-US' ? whimsyEn[bucket] : whimsyZh[bucket]
   // 初值随机:否则每个会话的第一句永远是同一个词,轮换就只剩下后面几秒有意思。
   const [index, setIndex] = useState(() => Math.floor(Math.random() * words.length))
   useEffect(() => {
@@ -224,6 +230,22 @@ function useWhimsy(active: boolean, phase: ActivityPhase, locale: Locale): strin
   }, [active, words.length])
   // `?? words[0]` 只是为了闭合 noUncheckedIndexedAccess:取模之后下标不可能越界。
   return words[index % words.length] ?? words[0]
+}
+
+/**
+ * 当前这一步开始了多久。`key` 变了就重新计时。
+ *
+ * ★ **不另起定时器。** 上面那个 4 秒的轮换已经在重渲这一行了,阈值(20/30 秒)
+ * 比它粗一个数量级 —— 再加一个每秒 tick 的定时器,换来的只是「慢了」这句话
+ * 早出现几秒,代价是整个聊天热路径上多一个常驻定时器。
+ *
+ * ★ 渲染期写 ref 是有意的:这里存的是「这一步是什么时候开始的」,属于渲染的派生量,
+ * 放进 state 会为一个纯装饰的判定多跑一轮渲染。
+ */
+function useStepElapsed(key: string, active: boolean): number {
+  const step = useRef({ key, at: Date.now() })
+  if (step.current.key !== key) step.current = { key, at: Date.now() }
+  return active ? Date.now() - step.current.at : 0
 }
 
 function Dot(): ReactNode {

@@ -51,6 +51,7 @@ interface BrowserTabSyncItem {
  */
 export interface TabInit {
   title?: string
+  /** 给 files(文件树里选中的那一项)/ changes(先看哪个文件的 diff)用 */
   selectedPath?: string
   /** 给 doc / draw / preview / files 用;其余 kind 忽略 */
   path?: string
@@ -134,7 +135,11 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
         kind,
         pane,
         title: init.title ?? translate('tab.changes'),
-        ref: { runId: init.runId ?? '', sessionId: init.sessionId ?? '' }
+        ref: {
+          runId: init.runId ?? '',
+          sessionId: init.sessionId ?? '',
+          ...(init.selectedPath === undefined ? {} : { selectedPath: init.selectedPath })
+        }
       }
   }
 }
@@ -211,6 +216,18 @@ interface TabsState {
     title: string,
     parent: { sessionId: string; callId: string }
   ) => void
+  /**
+   * 回合底部那张改动审查卡点一下走这条:在**右侧工作区**开这一轮的改动审查。
+   *
+   * ★ 不能用 `open(ws, 'changes', 'right')`:`open` 找不到 right 分组时会退回
+   * `activeGroupId` —— 右侧工作台还没切出来的时候,审查 tab 会落在**主区**、
+   * 盖在对话上面。这里跟 `openPath` / `openSubagentSession` 用同一套右侧机制。
+   *
+   * ★ 一轮只留一张:点第二个文件是**换这张 tab 看哪个 diff**(改 `selectedPath`),
+   * 不是再开一张一模一样的 —— 否则展开一个 11 个文件的改动集挨个点,
+   * 右边会攒出 11 个同名「改动」。
+   */
+  openChangeReview: (workspaceId: string, runId: string, sessionId?: string, selectedPath?: string) => void
   /**
    * 侧边栏那颗「新建对话」走这条,**也不是 `open`**。
    *
@@ -308,6 +325,27 @@ function groupContainingTab(dock: ReturnType<typeof migrateLegacyInnerTabs>, tab
     return visit(node.first) ?? visit(node.second)
   }
   return visit(dock.root)
+}
+
+/**
+ * 右侧工作台的落点分组;右边还没被切出来过就**当场切一个**。
+ *
+ * ★ 新代码走这条,不要用 `open(ws, kind, 'right')`:`open` 找不到 right 分组时
+ *   会退回 `activeGroupId` —— 右侧工作台从没开过的时候,tab 会落在**主区**、
+ *   盖在对话上面。`openPath`(:742)和 `openSubagentSession`(:813)各手抄了一份
+ *   同样的逻辑,这里没顺手改它们,只是不再抄第三遍。
+ *
+ * 返回的 `dock` 可能是切分之后的新 dock,调用方**必须接着用返回的这个**。
+ */
+function rightGroup(
+  dock: ReturnType<typeof migrateLegacyInnerTabs>
+): { dock: ReturnType<typeof migrateLegacyInnerTabs>; groupId: string | null } {
+  const existing = groupForPane(dock, 'right')
+  if (existing !== null) return { dock, groupId: existing }
+  const base = dock.activeGroupId ?? (dock.root.type === 'group' ? dock.root.id : null)
+  if (base === null) return { dock, groupId: null }
+  const split = splitGroup(dock, base, 'right')
+  return { dock: split, groupId: split.activeGroupId }
 }
 
 /** A split inherits the pane its anchor group sits in, never the drag direction. */
@@ -803,6 +841,51 @@ export const useTabsStore = create<TabsState>((set, get) => {
       if (groupId === null) return
       const nextDock = addTabToGroup(dock, groupId, chat)
       write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', chat.id))
+    },
+
+    openChangeReview(workspaceId, runId, sessionId, selectedPath) {
+      const cur = get().stateOf(workspaceId)
+      // 和 `openPath` 一样:后台工作区也只展开它自己的面板
+      useWindowStore.getState().setRightPanelForWorkspace(workspaceId, true)
+      const dock = get().dockOf(workspaceId)
+      const existing = cur.tabs.find(
+        (t): t is Extract<InnerTab, { kind: 'changes' }> => t.kind === 'changes' && t.ref.runId === runId
+      )
+      // 换一个文件看 = 改这张 tab 的 selectedPath(`ChangeReviewTab` 的 effect 认它)
+      const retarget = (list: readonly InnerTab[]): InnerTab[] =>
+        list.map((t) =>
+          t.id === existing?.id && t.kind === 'changes' && selectedPath !== undefined
+            ? { ...t, ref: { ...t.ref, selectedPath } }
+            : t
+        )
+      if (existing !== undefined) {
+        const sourceGroupId = groupContainingTab(dock, existing.id)
+        if (sourceGroupId === null) return
+        if (paneOf(existing) === 'right') {
+          if (selectedPath !== undefined) write(workspaceId, { ...cur, tabs: retarget(cur.tabs) })
+          get().activateDockTab(workspaceId, sourceGroupId, existing.id)
+          return
+        }
+        // 老布局(或用户自己拖过去的)可能把它留在主区,重开时搬回右侧,不留重复
+        const placed = rightGroup(dock)
+        if (placed.groupId === null) return
+        const movedDock = moveDockTab(placed.dock, existing.id, sourceGroupId, placed.groupId)
+        // 空分组没有 pane 提示可供推断,这里的目的地明确就是右侧工作台
+        const tabs = retarget(movedDock.tabs).map((tab) =>
+          tab.id === existing.id ? { ...tab, pane: 'right' as const } : tab
+        )
+        write(workspaceId, withActive({ ...cur, tabs, dock: { ...movedDock, tabs } }, 'right', existing.id))
+        return
+      }
+      const tab = makeTab('changes', 'right', {
+        runId,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(selectedPath === undefined ? {} : { selectedPath })
+      })
+      const placed = rightGroup(dock)
+      if (placed.groupId === null) return
+      const nextDock = addTabToGroup(placed.dock, placed.groupId, tab)
+      write(workspaceId, withActive({ ...cur, tabs: nextDock.tabs, dock: nextDock }, 'right', tab.id))
     },
 
     newChat(workspaceId) {

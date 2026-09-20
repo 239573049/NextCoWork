@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '../../components/ui/Button'
 import { Dialog } from '../../components/ui/Dialog'
 import { useI18n } from '../../i18n'
+import { quitConfirmed } from '../../services/app'
 import { confirmDocumentChanges, isDocumentDirty, useDocumentsStore } from '../../stores/documents'
 
 /** Kept at the shell root so inactive tabs and workspaces can also be saved. */
@@ -30,7 +31,20 @@ export function DocumentDialogs(): ReactNode {
           if (!proceed) return
           allowUnload.current = true
           if (reload) window.location.reload()
-          else window.close()
+          else {
+            window.close()
+            /*
+              ★ 这次 unload 如果是**退出流程**引起的,上面那个 close() 已经让整次
+              退出作废了(主进程侧的理由见 `main/quit-flow.ts` 文件头:此刻停服务、
+              封库都还没做,作废是安全的)。用户刚刚选的就是「保存 / 丢弃」——
+              那正是「退出」这个意图的延续,所以这里替他把退出重来一次;不重来的话
+              点了退出只会发现应用还在,还得再点一次。
+
+              不是退出流程时(用户自己关窗,而窗口的 close 被拦成隐藏)这条消息
+              没有副作用:主进程那侧对应的是一轮空的退出请求。
+            */
+            quitConfirmed()
+          }
         })
       }, 0)
     }

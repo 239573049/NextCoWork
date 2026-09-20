@@ -32,6 +32,7 @@ import { updateWorkspace } from '../../services/app'
 import { sessionStore, resumeQueue } from '../../stores/session'
 import { Composer, type ComposerValue, type ConversationUsageSummary, type FallbackModel } from './Composer'
 import { type TrayItem } from './AttachmentTray'
+import { deferAttachIntent, takeAttachIntents } from './draft-handoff'
 import { PendingQueue } from './PendingQueue'
 import { Thread } from './Thread'
 import { SubagentLiveFeed } from './subagent-live'
@@ -113,6 +114,10 @@ export function ChatView({
    * 附件和发送两条路径都要过它,而且可能先后发生(先贴图再发送),
    * 所以 `bindChatSession` 是幂等的:第二次拿到的还是第一次那个 id。
    * 见 `stores/tabs.ts` 里它的注释 —— 那里写着为什么贴图也必须铸 id。
+   *
+   * ★ 这里是**整棵树被换掉的唯一入口**:铸出新 id 会改 `tab.ref.sessionId`,
+   * `views/registry.tsx` 的 key 跟着变,本组件立刻卸载重挂。凡是要跨过这一下的
+   * 东西都得显式交接 —— 附件见 `draft-handoff.ts`,焦点见 `Composer` 的挂载 effect。
    */
   const ensureSessionId = useCallback(
     (): string => useTabsStore.getState().bindChatSession(workspace.id, tabId) ?? storeKey,
@@ -325,11 +330,22 @@ export function ChatView({
   // 重试要用原 File,而 TrayItem 是可序列化的展示态,不放 File
   const pendingFiles = useRef(new Map<string, File>())
 
-  // 切会话时清空:附件是**这个会话**的草稿,跟着 draft 走
+  /*
+    切会话时清空:附件是**这个会话**的草稿,跟着 draft 走。
+
+    ★ **草稿铸出自己的 id 不算切会话。** 那一下 `storeKey` 从 tabId 变成
+    sessionId(见 `views/registry.tsx` 里 key 的注释),但它仍是同一段对话 ——
+    照清不误的话,触发绑定的那张图刚进托盘就被自己抹掉,表现正是「第一次
+    粘贴没反应」。草稿文本在 `adoptDraftSession` 那边同理是搬而不是丢。
+  */
+  const previousStoreKey = useRef(storeKey)
   useEffect(() => {
+    const adopted = previousStoreKey.current === tabId
+    previousStoreKey.current = storeKey
+    if (adopted) return
     setTray([])
     pendingFiles.current.clear()
-  }, [storeKey])
+  }, [storeKey, tabId])
 
   /*
     重启后恢复草稿附件区 —— 与 draft / 队列的 hydrate 同级。
@@ -402,11 +418,27 @@ export function ChatView({
   */
   const attachFiles = useCallback(
     (files: File[]) => {
+      const isImageFile = (f: File): boolean => isImageMime(f.type) || isImageMime(mimeOfExt(f.name))
+      /*
+        ★ 要上传就得先有会话 id,而草稿在这一刻铸 id 会让本组件立刻重挂 ——
+        托盘和上传承诺都会随之作废。所以铸出来的是**新** id 时,这一批原样交给
+        重挂后的实例,这里什么都不做(理由与交接办法见 `draft-attachments.ts`)。
+
+        不需要上传的那些(本地环境下的非图片,只取路径)照旧不碰 id:
+        免得拖一个 .pdf 进来就把一张白纸变成「用过的」会话。
+      */
+      if (files.some((f) => remote || isImageFile(f))) {
+        const bound = ensureSessionId()
+        if (bound !== storeKey) {
+          deferAttachIntent(bound, { kind: 'files', files })
+          return
+        }
+      }
       const items = files.map((f) => ({
         key: ulid(),
         name: f.name,
         file: f,
-        isImage: isImageMime(f.type) || isImageMime(mimeOfExt(f.name))
+        isImage: isImageFile(f)
       }))
       setTray((t) => [
         ...t,
@@ -422,7 +454,7 @@ export function ChatView({
         startUpload(key, file)
       }
     },
-    [startUpload, remote]
+    [ensureSessionId, startUpload, remote, storeKey]
   )
 
   /**
@@ -443,8 +475,17 @@ export function ChatView({
    * (只有它拿得到 dialog 选中的真实路径),这里只是把两种形态摊成 chip。
    */
   const pickAttachment = useCallback(() => {
+    // ★ 同 `attachFiles`:草稿在这里铸 id 会把本组件换掉,而系统对话框的结果要到
+    //   几秒之后才回来 —— 那时这棵树已经没了(旧写法的症状:新对话里第一次
+    //   「添加附件」选完文件,托盘里什么也不出现)。先把「开这个对话框」本身
+    //   交给重挂后的实例,由它去开。
+    const bound = ensureSessionId()
+    if (bound !== storeKey) {
+      deferAttachIntent(bound, { kind: 'pick' })
+      return
+    }
     // 走主进程 dialog —— 渲染层不指定路径,路径是用户在系统对话框里选定的
-    void pickAttachments('session', ensureSessionId(), remote).then((list) => {
+    void pickAttachments('session', bound, remote).then((list) => {
       setTray((current) => [
         ...current,
         ...list.map((p): TrayItem => {
@@ -465,7 +506,20 @@ export function ChatView({
         ? agentErrorText(error.error, t) : t('attachment.error.uploadFailed')
       setTray((current) => [...current, { key: ulid(), name: t('composer.addAttachment'), status: 'error', canRetry: false, error: message }])
     })
-  }, [ensureSessionId, remote, t])
+  }, [ensureSessionId, remote, t, storeKey])
+
+  /*
+    ★ 接手草稿期最后那一次附件动作 —— 这个实例正是被那次「铸 id」换上来的。
+    不接的话,新对话里第一次贴图 / 拖拽 / 添加附件会石沉大海,第二次才正常
+    (见 `draft-handoff.ts`)。放在清空托盘那个 effect **之后**:
+    它按 `storeKey` 清,而这一批本来就属于新的 key。
+  */
+  useEffect(() => {
+    for (const intent of takeAttachIntents(storeKey)) {
+      if (intent.kind === 'pick') pickAttachment()
+      else attachFiles(intent.files)
+    }
+  }, [storeKey, attachFiles, pickAttachment])
 
   const removeFromTray = useCallback((key: string) => {
     setTray((t) => {
@@ -726,7 +780,7 @@ export function ChatView({
   */
   if (readOnly) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col" data-testid="chat-readonly">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="chat-readonly">
         {subagentOf !== undefined && sessionId !== null && (
           <SubagentLiveFeed childSessionId={sessionId} parent={subagentOf} />
         )}
@@ -748,7 +802,7 @@ export function ChatView({
 
   if (!started) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 pb-10">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center px-6 pb-10">
         <h1 className="mb-6 px-6 text-center text-[26px] leading-snug font-semibold text-fg">
           {greetingOf(new Date().getHours())}
         </h1>
@@ -763,8 +817,16 @@ export function ChatView({
     )
   }
 
+  /*
+    ★ `min-w-0`:这一列是 `shell/Dock.tsx` 里那个横向 flex 的子项,默认的
+    `min-width:auto` 会让它被**自己内容的最小宽度**撑开 —— 面板一窄,列宽就停在
+    「转录/输入框那排容得下的最小值」(760 + 左右各 24 的内边距)而不再跟着面板走,
+    而 dock 分组是 `overflow-hidden`:表现为窄面板里正文、代码块、输入框连同它下面
+    那排读数一起在面板右边缘被齐刷刷切掉,没有滚动条也没有任何报错。
+    有了它列宽恒等于面板宽,放不下的东西交给各自的容器决定是换行、截断还是隐藏。
+  */
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <SubagentOpenProvider open={openSubagent}>
         <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
           <Thread

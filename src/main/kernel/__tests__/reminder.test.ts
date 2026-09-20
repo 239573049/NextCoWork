@@ -201,6 +201,28 @@ describe('★ 压缩与摘要', () => {
     expect(all(out).split('<system-reminder>').length - 1).toBe(2) // 头块 + 尾块,各一份
     expect(text(out[0] as AgentMessage)).toContain(AGENTS)
   })
+
+  /**
+   * ★★ 摘要压缩会把切点之前的历史**整段移出上下文**(`projectContextWindow`),
+   * 而模型的进度表只住在那条 `TodoWrite` 调用里 —— 它落在被裁掉的那一侧时,
+   * 尾块里的 todo 段会**静默消失**:界面上的 todo 面板照旧(它读的是转录),
+   * 模型却从这一轮起当无事发生,多半会重新写一份把前面的进度抹掉。
+   */
+  it('★★ 投影裁掉了 TodoWrite 的那一轮,todoHistory 仍把进度表救回来', () => {
+    // ★ 锚点靠 id 对上,所以这条尾巴必须有自己的 id(`ask()` 给的全是 'u1')
+    const tail = userMessage('u-tail', [{ type: 'text', text: '继续' }], NOW)
+    const transcript = [ask('帮我改一下'), ...todoCall('跑测试', '改文档'), tail]
+    // 投影:早期那一轮已经不在了(这正是摘要压缩之后的样子)
+    const projected = [tail]
+
+    expect(all(decorate(projected, { todoToolName: TOOL }))).not.toContain('跑测试')
+    expect(all(decorate(projected, { todoToolName: TOOL, todoHistory: transcript }))).toContain('跑测试')
+  })
+
+  it('todoHistory 里找不到锚点时退回投影本身,不去猜一个范围', () => {
+    const out = all(decorate([ask('继续')], { todoToolName: TOOL, todoHistory: [userMessage('别的', [{ type: 'text', text: 'x' }], NOW)] }))
+    expect(out).not.toContain('Your todo list')
+  })
 })
 
 describe('★ Plan 模式的计划文件', () => {

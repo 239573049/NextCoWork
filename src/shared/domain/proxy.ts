@@ -179,6 +179,69 @@ export interface ProxyEndpoint {
   port: number
 }
 
+/** 一个**可以直接拨号**的代理:端口一定是实数,凭据(如果有)已经带上。 */
+export interface ProxyDialTarget extends ProxyEndpoint {
+  username?: string
+  password?: string
+}
+
+/** 各协议的代理默认端口。Chromium 的回程一般带端口,PAC 脚本返回的可能不带。 */
+const DEFAULT_PROXY_PORT: Record<ProxyScheme, number> = { http: 80, https: 443, socks4: 1080, socks5: 1080 }
+
+/**
+ * Chromium `session.resolveProxy()` 的回程 → 一个可拨号的端点,`null` = 直连。
+ *
+ * 回程长这样:`DIRECT`、`PROXY 127.0.0.1:7890`、`SOCKS5 h:p`、
+ * `PROXY a:1;PROXY b:2;DIRECT`(分号分隔的**备选链**)。
+ *
+ * ★ 只取第一个能用的条目,不做故障转移。Chromium 自己会在前一个连不上时往后退,
+ * 而我们这条路(ssh 隧道)一旦建好就由 ssh 持有,没有「换一个再来」的时机 ——
+ * 假装支持备选链只会让失败发生在更晚、更难解释的地方。
+ *
+ * ★ `PROXY` 是 HTTP 代理(PAC 的历史命名),`SOCKS` 不带数字时是 **SOCKS4**,
+ * 这两条是 PAC 规范的约定,不是可以随手改的映射。
+ */
+export function parseResolvedProxy(value: string): ProxyEndpoint | null {
+  for (const entry of value.split(';')) {
+    const [kind, authority] = entry.trim().split(/\s+/)
+    if (kind === undefined || authority === undefined) continue
+    const scheme = SCHEME_BY_PAC_TOKEN[kind.toUpperCase()]
+    if (scheme === undefined) continue
+    const endpoint = parseProxyEndpoint(`${scheme}://${authority}`)
+    if (endpoint === null) continue
+    return endpoint.port > 0 ? endpoint : { ...endpoint, port: DEFAULT_PROXY_PORT[scheme] }
+  }
+  return null
+}
+
+const SCHEME_BY_PAC_TOKEN: Record<string, ProxyScheme | undefined> = {
+  PROXY: 'http', HTTP: 'http', HTTPS: 'https', SOCKS: 'socks4', SOCKS4: 'socks4', SOCKS5: 'socks5'
+}
+
+/**
+ * 这台主机是不是**明摆着在本地网络里**。
+ *
+ * 需求:ssh 跟随系统代理之后,连局域网机器(NAS、跳板机、办公室那台开发机)必须仍然直连。
+ * `DIRECT_BYPASS` 里那几条私有网段只在**手动代理**下才会交给 Chromium;跟随系统时用的是
+ * 系统自己的排除列表,而 macOS 默认只排除 `*.local` 和 `169.254/16`,私有网段并不在内。
+ * 多数代理软件对 `192.168.x` 的 CONNECT 要么直接拒绝要么绕一大圈,于是表现成
+ * 「开了代理之后局域网的 SSH 全连不上」—— 而设置页上任何一处都没提到过这些地址。
+ *
+ * ★ 只认**字面量**,不做 DNS 解析:解析要走网络、会拖住连接,而且本机解析出来的
+ * 地址和 ssh(或代理那侧)解析出来的未必是同一个。判不出来就交回给代理规则。
+ */
+export function isLocalNetworkHost(host: string): boolean {
+  const name = host.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  if (name === 'localhost' || name.endsWith('.localhost') || name.endsWith('.local')) return true
+  if (name === '::1' || name.startsWith('fe80:') || /^f[cd][0-9a-f]{2}:/.test(name)) return true
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name)
+  if (octets === null) return false
+  const first = Number(octets[1] ?? '')
+  const second = Number(octets[2] ?? '')
+  return first === 127 || first === 10 || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168) || (first === 169 && second === 254)
+}
+
 /**
  * 把用户打进来的一行拆成三段。`null` = 不合法。
  *

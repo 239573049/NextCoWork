@@ -56,7 +56,7 @@ import { runScheduledTaskNow } from '../scheduled/scheduler'
 import { scheduledWrites } from '../scheduled/bridge'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
-import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, saveTextFile } from './app'
+import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, requestQuit, saveTextFile } from './app'
 import {
   cancelWorkspaceUpload,
   completeWorkspaceUpload,
@@ -214,6 +214,13 @@ import {
   scheduleAutomaticBackup,
   vacuum
 } from './storage'
+import {
+  getMigrationState,
+  openMigrationDataDirectory,
+  retryMigration,
+  skipMigration,
+  undoMigration
+} from './data-migration'
 
 type Handler<K extends InvokeChannel> = (
   req: InvokeReq<K>,
@@ -462,6 +469,20 @@ const handlers: HandlerMap = {
   'storage:clearHistory': () => clearHistory(),
   'storage:clearLocalData': (req) => clearLocalData(req),
 
+  /*
+    ── 启动迁移闸门(见 db/startup-migration.ts) ──
+
+    ★ 这四条**刻意不 import 任何别的 ipc 模块**,`./data-migration` 只依赖
+    `electron` 的 shell 和 `db/index.ts` 的纯路径函数。理由写在那个文件头:
+    闸门存在的那段时间里数据库还没打开,谁在这里顺手摸一次库,启动就变成
+    先开内存兜底库、再 `openDatabase()` 抛错,而报错完全指不到这里。
+  */
+  'dataMigration:getState': () => getMigrationState(),
+  'dataMigration:retry': () => retryMigration(),
+  'dataMigration:skip': () => skipMigration(),
+  'dataMigration:undoMerge': () => undoMigration(),
+  'dataMigration:openDataDirectory': () => openMigrationDataDirectory(),
+
   // ── 从其他 AI 应用导入(设置 › 导入) ──
   'imports:detect': (req) => detectImports(req),
   'imports:chooseSource': (req) => chooseImportSource(req),
@@ -704,6 +725,9 @@ const sendHandlers: SendHandlerMap = {
     console.log(`[ipc] 窗口就绪 · kind=${kind}`)
   },
   'window:control': ({ action }, ctx) => applyWindowControl(ctx.sender, action),
+  // 用户在「有未保存的改动」对话框里选完了(保存或丢弃),重新走一次退出。
+  // 这一轮里渲染层的 `allowUnload` 已经是 true,不会再顶住 unload —— 见 contract。
+  'app:quitConfirmed': () => requestQuit(),
   'tabs:persistOuter': ({ kind, state }) => persistDebounced(outerTabKey(kind), state),
   'tabs:persistInner': ({ workspaceId, state }) =>
     persistDebounced(innerTabKey(workspaceId), state),
@@ -745,8 +769,57 @@ function safeHandle<K extends InvokeChannel>(channel: K, fn: Handler<K>): void {
   })
 }
 
+/**
+ * 只登记启动迁移闸门那几条频道。
+ *
+ * ★ **它必须能在 `registerIpc()` 之前单独调用。** 闸门存在的那段时间里数据库还
+ * 没打开,而 `registerIpc()` 会拉起导入服务、扫孤儿文件、迁移主题目录 —— 那些
+ * 全都要库。所以启动路径上先调这一个,闸门放行之后才调完整的 `registerIpc()`。
+ *
+ * ★ 这几条 handler 自己也不碰库(见 `./data-migration` 的文件头),所以「先登记
+ * 它们」这件事本身是安全的。
+ */
+/**
+ * 闸门那几条频道。`registerMigrationIpc()` 单独登记它们,`registerIpc()` 跳过它们。
+ *
+ * ★ 必须显式列出来,不能靠 `startsWith('dataMigration:')` 之类的模式 —— 模式匹配
+ * 会在下一个人加频道时**静默**把他那条漏掉(漏掉的后果是「未实现的频道」,
+ * 而不是「注册冲突」,后者至少会当场报错)。
+ */
+const MIGRATION_CHANNELS = [
+  'dataMigration:getState',
+  'dataMigration:retry',
+  'dataMigration:skip',
+  'dataMigration:undoMerge',
+  'dataMigration:openDataDirectory'
+] as const satisfies readonly InvokeChannel[]
+
+const MIGRATION_CHANNEL_SET: ReadonlySet<string> = new Set<string>(MIGRATION_CHANNELS)
+
+/**
+ * 只登记启动迁移闸门那几条频道。
+ *
+ * ★ **它必须能在 `registerIpc()` 之前单独调用。** 闸门存在的那段时间里数据库还
+ * 没打开,而 `registerIpc()` 会拉起导入服务、扫孤儿文件、迁移主题目录 —— 那些
+ * 全都要库。所以启动路径上先调这一个,闸门放行之后才调完整的 `registerIpc()`。
+ *
+ * ★ 这几条 handler 自己也不碰库(见 `./data-migration` 的文件头),所以「先登记
+ * 它们」这件事本身是安全的。
+ */
+export function registerMigrationIpc(): void {
+  for (const channel of MIGRATION_CHANNELS) {
+    safeHandle(channel, handlers[channel] as Handler<InvokeChannel>)
+  }
+}
+
 export function registerIpc(): void {
   for (const channel of Object.keys(INVOKE_CHANNELS) as InvokeChannel[]) {
+    /*
+      ★ 闸门那几条可能已经由 `registerMigrationIpc()` 登记过,而
+      `ipcMain.handle` 对同一个频道注册两次会直接抛错 —— 那会是一条
+      「启动迁移屏跑完之后应用起不来」的故障。这里跳过,而不是让调用方记得别重复调。
+    */
+    if (MIGRATION_CHANNEL_SET.has(channel)) continue
     safeHandle(channel, handlers[channel] as Handler<InvokeChannel>)
   }
 

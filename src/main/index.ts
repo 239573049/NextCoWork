@@ -7,7 +7,15 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { app, shell, BrowserWindow, nativeImage, powerMonitor } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
-import { closeDatabase, DATABASE_DIRNAME, DATA_SUBDIRNAME, defaultProfileRoot, DB_FILENAME, openDatabase } from './db'
+import {
+  closeDatabase,
+  DATABASE_DIRNAME,
+  DATA_SUBDIRNAME,
+  DB_FILENAME,
+  defaultProfileRoot,
+  openDatabase,
+  peekThemePreference
+} from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
 import { electronHost, migrateLegacyCredentials } from './host'
 import { installProductionBrowserBindings, type BrowserBindings } from './browser/bindings'
@@ -15,6 +23,7 @@ import {
   flushPendingPersists,
   prepareStoredAccountScope,
   registerIpc,
+  registerMigrationIpc,
   shutdownClientAuth,
   shutdownRuns,
   shutdownTerminals
@@ -31,6 +40,8 @@ import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments }
 import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
 import { PROFILE_DIRECTORY_SEGMENT } from './db/config-profile'
 import { migrateFlatLayout, rewriteMigratedPaths } from './db/flat-layout'
+import { createMigrationGate, type MigrationGate } from './db/startup-migration'
+import { installMigrationGate, announceMigrationState } from './ipc/data-migration'
 import { CHROMIUM_SUBDIRNAME, migrateChromiumIntoSubdir } from './db/chromium-layout'
 import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
@@ -38,8 +49,9 @@ import { SKILLS_DIR } from './kernel/skill/load'
 import { store } from './state/store'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
+import { QuitFlow } from './quit-flow'
 import { titleBarOptions, watchMaximized } from './window/title-bar'
-import { applyThemePreference, resolveTheme, setSessionWindowOpener } from './ipc/app'
+import { applyThemePreference, resolveTheme, setQuitRequester, setSessionWindowOpener } from './ipc/app'
 import { updateService } from './update/update-service'
 import { reconcileScheduler, startScheduler, stopScheduler } from './scheduled/scheduler'
 
@@ -56,13 +68,15 @@ if (!gotTheLock) {
 // 版本号只有主进程拿得到,所以装配点在这里;`app.getVersion()` 不要求 ready。
 installUserAgent(app.getVersion())
 
-// 标题栏关闭按钮不再等于退出进程 —— 只隐藏窗口,真正退出只能走托盘的
-// 「退出 NextCoWork」(或系统层面的 Cmd+Q/kill)。这两条路径都会先触发
-// `before-quit`,所以在那里把这个标记置 true,窗口的 `close` 处理器
-// 才放行真正的销毁;不然每个窗口都会在 `before-quit` 之后各自 preventDefault
-// 一次,进程永远退不掉。
-let isQuitting = false
-let shutdownComplete = false
+/*
+  退出流程的全部状态都在 `quitFlow` 里 —— 两段式、兜底时限、以及「渲染层顶住
+  unload 时整次退出作废」的规则,连同这么写的理由都在 `quit-flow.ts` 的文件头。
+
+  ★ 这里只留一个绑定,是因为**它必须在 `app.whenReady()` 之前就存在**:托盘、
+  dock、`second-instance` 都可能在启动还没跑完时被点,而那些路径全都要问
+  「现在是不是在退出」。真正的装配在 `app.on('before-quit')` 那段。
+*/
+let quitFlow: QuitFlow | null = null
 let browserBindings: BrowserBindings | null = null
 
 /**
@@ -208,8 +222,13 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
       露出来的底色 —— 写死深色的话,浅色用户看到的是「深色空块 → 界面出来 → 啪一下
       变浅」。两个值取自 theme.css 里的 `--color-app`(深 #2a2d2b / 浅 #f2eee6),
       改那边记得同步这里。
+
+      ★ **不能用 `store.getSettings()`。** 建窗现在排在启动迁移闸门之前,而闸门
+      存在的意义正是「数据库还没打开」—— 在这里读库会先把库以内存兜底方式打开,
+      随后真正的 `openDatabase()` 直接抛错,启动死在那里。
+      `peekThemePreference()` 自己开一个只读连接,不碰那个句柄。
     */
-    backgroundColor: resolveTheme(store.getSettings().theme) === 'light' ? '#f2eee6' : '#2a2d2b',
+    backgroundColor: resolveTheme(peekThemePreference(join(resolveDataRoot(), DB_FILENAME))) === 'light' ? '#f2eee6' : '#2a2d2b',
     // Windows/Linux 的任务栏与窗口图标(macOS 忽略,那边走下面的 app.dock.setIcon)
     icon: nativeImage.createFromPath(appIconPath),
     // macOS:红绿灯嵌进侧边栏(方案 §8)。Windows/Linux:只去掉系统标题栏,
@@ -231,12 +250,32 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
 
   win.on('ready-to-show', () => win.show())
 
-  // 关闭按钮只隐藏,不销毁窗口——保留页面状态(当前会话/滚动位置/未保存的输入),
-  // 靠托盘图标唤回。真正退出时 `isQuitting` 已经在 `before-quit` 里置位,这里放行。
+  /*
+    关闭按钮只隐藏,不销毁窗口 —— 保留页面状态(当前会话/滚动位置/未保存的输入),
+    靠托盘图标唤回。
+
+    ★ 退出流程问的是 `quitFlow.inProgress`,**不是「进程正在退出」**:用户点关闭
+    按钮时进程当然没在退出,所以照旧隐藏;而 `Cmd+Q` / 托盘「退出」时它已经在
+    关窗那一段里,于是放行真正的销毁。这两种「正在关」必须区分开,否则
+    `Cmd+Q` 只会把窗口藏起来、进程留在 Dock 里不走。
+  */
   win.on('close', (event) => {
-    if (isQuitting) return
+    if (quitFlow?.inProgress === true) return
     event.preventDefault()
     win.hide()
+  })
+
+  /*
+    ★ 渲染层顶住了这次 unload —— 有未保存的文件,而用户还没在应用自己的
+    「有未保存的改动」对话框上做决定(`DocumentDialogs`)。
+
+    **刻意不调 `event.preventDefault()`**:那个 API 的语义是「无视 beforeunload,
+    照样把页面卸掉」,也就是**静默丢弃用户的未保存改动**。让它否决生效、整次退出
+    作废才对:此刻停服务、封库都还没做,作废之后应用完全可用(见 `quit-flow.ts`
+    文件头那段两段式)。用户随后在对话框里选完,渲染层会重发一次退出。
+  */
+  win.webContents.on('will-prevent-unload', () => {
+    quitFlow?.veto()
   })
 
   // 任何 window.open / target=_blank 一律不在应用内开新窗口,交给系统浏览器。
@@ -435,7 +474,45 @@ function prepareProjectDatabaseDirectory(): string {
   return targetDir
 }
 
-void app.whenReady().then(() => {
+/**
+ * 启动迁移闸门要检查的旧数据根,**按优先级排**。
+ *
+ * 三个来源,后两个与 `pickLegacyRoot()` 用的是同一份判据:
+ *
+ * 1. **profile 根本身。** ★ 这一条是关键补充。`pickLegacyRoot()` 的候选里没有它,
+ *    而同一个状态在两段代码里含义不同:`migrateFlatLayout` 认为「根下躺着一个库」
+ *    是待迁移的旧布局,`pickLegacyRoot` 不认它。本机就是这么丢的数据 ——
+ *    `data/` 下先被建了一个库,之后用户继续在根层的库上工作几小时,
+ *    下一次启动时新库已是权威,那几小时的会话永远不会出现,而日志里没有线索。
+ * 2. 旧版打包安装的数据根。
+ * 3. dev 运行时 cwd 下的旧根。打包时**不列**(发行版的 cwd 是随机的)。
+ */
+function legacyMigrationSources(targetDir: string): Array<{ root: string; databasePath: string }> {
+  // 显式传了 --user-data-dir = 调用方要的就是一个干净的隔离根,一个字节都不要搬。
+  if (explicitUserDataDir) return []
+  const roots = [resolveProfileRoot(), legacyUserDataPath]
+  if (!app.isPackaged) roots.push(join(process.cwd(), DATABASE_DIRNAME))
+  const seen = new Set<string>()
+  const sources: Array<{ root: string; databasePath: string }> = []
+  for (const root of roots) {
+    if (root === targetDir || seen.has(root)) continue
+    seen.add(root)
+    sources.push({ root, databasePath: join(root, DB_FILENAME) })
+  }
+  return sources
+}
+
+/*
+  ★ 回调是 `async`,因为中间要 `await` 一次启动迁移闸门。`await` 之前的一切照旧
+  同步执行(建窗、托盘都还在闸门之前),所以这个改动不动任何既有顺序。
+
+  ★ 末尾补了 `.catch`。以前这里没有 —— 启动路径上一旦抛出就是一个 unhandled
+  rejection,而 Electron 主进程对它的处理是「打一行警告然后继续跑」,
+  于是应用会停在一个半初始化的状态上。现在至少是一条指名道姓的错误。
+*/
+void app
+  .whenReady()
+  .then(async () => {
   electronApp.setAppUserModelId('com.nextcowork.app')
 
   // ★ dev 与未打包运行时的 dock 图标。打包后的 .app 由 electron-builder 从
@@ -452,6 +529,52 @@ void app.whenReady().then(() => {
   })
 
   logStartupProbe()
+
+  /*
+    ★ **在闸门之前、建窗之前先登记闸门那几条频道。** 窗口加载完就会立刻
+    invoke `dataMigration:getState`,而那一刻闸门正在跑、数据库还没打开。
+    完整的 `registerIpc()` 要等闸门放行才能调(它会拉起导入服务、扫孤儿文件,
+    全都要库),所以这几条必须单独先登记。
+
+    ★ 顺序反了的症状是:窗口起来了、迁移屏永远是空白(那一次 invoke 拿到
+    「未登记的频道」),而用户看到的是一个「什么都没发生」的启动。
+    放在建窗之前是为了不依赖「窗口的加载一定晚于这一行」这个时序假设。
+  */
+  registerMigrationIpc()
+
+  /*
+    ★ **建窗在闸门之前。** 迁移可能跑好几分钟,用户必须能看见它在跑;而这一屏
+    自己需要的四条 IPC(`dataMigration:*`)是唯一在闸门期间可用的频道。
+
+    这个窗口此刻是**被冻结**的:App 的握手 effect 要等 `MigrationGateHost`
+    放行才会跑(见 renderer/main.tsx),所以它不会去碰还没打开的数据库。
+  */
+  createMainWindow()
+
+  // 菜单栏托盘。放在建窗之后:它的「显示窗口」要能拿到已经存在的那个窗口。
+  initTray(showMainWindow)
+
+  // dock 图标点击也走同一套「唤回」逻辑——窗口关闭后是隐藏不是销毁,
+  // 所以这里几乎不会撞见 `length === 0` 的分支,但保留它兜底手动 destroy() 的情况。
+  app.on('activate', showMainWindow)
+
+  /*
+    ★ **启动迁移闸门。** 位置是死的:必须在 `prepareProjectDatabaseDirectory()`
+    之前(它是「目标库不存在就整体拷」,而闸门是「目标库已存在之后」那条路),
+    也必须在 `openDatabase()` 之前(迁移完才轮到开库)。
+
+    ★ 它必须 `await`。放进 `.then()` 里跑的话,下面那些初始化会在迁移进行到一半时
+    开始摸库 —— 表现是「迁移成功了,但设置全丢了」,因为那些写入落进了一个
+    内存兜底库(见 `openDatabase()` 在重复调用时的抛错,那是同一类时序问题的
+    另一道闸)。
+
+    ★ 失败时**不停在闸门里**:`prepareProjectDatabaseDirectory()` 和 `openDatabase()`
+    照常往下走。理由有两条:(1) 用户可能已经在错误页上选了「跳过并继续」;
+    (2) 闸门挂了(比如建不出来)不该等于应用起不来 —— 那种情况下最坏的后果是
+    旧数据这次没合并,而下次启动会再试一次。真正的失败细节由 `console.warn` 留下。
+  */
+  await startMigrationGate()
+  console.log(`[migration] 闸门结束:${migrationGate?.state().phase ?? 'unknown'}`)
 
   /**
    * ★ 必须在 `registerIpc()` 之前:渲染层握手的第一个 invoke 是 `app:getBootstrap`,
@@ -545,6 +668,12 @@ void app.whenReady().then(() => {
     const child = createMainWindow({ workspaceId, sessionId })
     child.once('ready-to-show', () => child.focus())
   })
+  // 渲染层确认过的重新退出(见 contract 的 app:quitConfirmed)。
+  setQuitRequester(() => {
+    if (quitFlow === null) return
+    quitFlow.begin()
+    app.quit()
+  })
   registerIpc()
   powerMonitor.on('suspend', () => { void shutdownEnvironments() })
   /*
@@ -565,16 +694,56 @@ void app.whenReady().then(() => {
     setTimeout(() => { void updateService.check() }, 30_000)
     setInterval(() => { void updateService.check() }, 24 * 60 * 60 * 1000)
   }
+  })
+  .catch((err: unknown) => {
+    console.error('[app] 启动流程失败:', err)
+  })
 
-  createMainWindow()
+/**
+ * 启动迁移闸门。★ 建在模块层是因为 `ipc/data-migration.ts` 的四个 handler 要拿
+ * 同一个实例 —— 而它们不能反过来 import 这个文件(那个文件一被 import 就会跑
+ * 整个 app 引导)。`installMigrationGate()` 是那两者之间唯一的一条线。
+ */
+let migrationGate: MigrationGate | null = null
 
-  // 菜单栏托盘。放在建窗之后:它的「显示窗口」要能拿到已经存在的那个窗口。
-  initTray(showMainWindow)
-
-  // dock 图标点击也走同一套「唤回」逻辑——窗口关闭后是隐藏不是销毁,
-  // 所以这里几乎不会撞见 `length === 0` 的分支,但保留它兜底手动 destroy() 的情况。
-  app.on('activate', showMainWindow)
-})
+/**
+ * 跑一次启动迁移闸门。见 `app.whenReady()` 里那段关于位置与时序的说明。
+ *
+ * ★ 整个函数**不抛错**。它替掉的那段代码最大的问题就是「什么都可能发生,而且
+ * 一个字都不说」—— 这里反过来:任何异常都降级成「这次不迁移」,但一定留下日志。
+ */
+async function startMigrationGate(): Promise<void> {
+  try {
+    const dataRoot = resolveDataRoot()
+    const databasePath = join(dataRoot, DB_FILENAME)
+    migrationGate = createMigrationGate({
+      dataRoot,
+      databasePath,
+      sources: legacyMigrationSources(dataRoot),
+      // 与 `prepareProjectDatabaseDirectory()` 用的是同一个根对。
+      collapseFlatLayout: { from: resolveProfileRoot(), to: dataRoot },
+      /*
+        ★ 进度推给窗口。用 `emitToAll`(全局频道)而不是定向推送:迁移是全局状态,
+        而且此刻窗口可能刚建出来、还没跑过 `window:ready`。
+      */
+      onChange: announceMigrationState
+    })
+    installMigrationGate(migrationGate)
+    const state = await migrationGate.run()
+    /*
+      ★ 只有**失败**才需要留一条日志。`idle`(绝大多数启动)和 `skipped` 都是
+      正常结果,每次都打一行只会让真正的异常淹在噪音里。
+    */
+    if (state.phase === 'failed') {
+      console.warn(
+        `[migration] 数据整理失败(${state.failure?.code ?? 'unknown'}),本次启动将带着部分旧数据继续:`,
+        state.failure?.detail ?? ''
+      )
+    }
+  } catch (err) {
+    console.warn('[migration] 闸门未能启动,跳过本次数据整理:', err)
+  }
+}
 
 /** 从托盘/dock/第二实例唤起:已有窗口就还原、显示并聚焦,一个都没有就新建一个。 */
 function showMainWindow(): void {
@@ -591,8 +760,14 @@ function showMainWindow(): void {
     旧进程退出**就拉起新的,新进程抢不到锁,那次失败的抢锁就是发给旧进程的
     `second-instance`。用户看到的是一个跟热更新毫无关系的崩溃框。
     退出中被唤起本来就不该有任何效果——新界面归新进程管。
+
+    ★ 判据是「退出已经跑完」,不再包含「正在退出」。正在退出时窗口**还在**:
+    这一轮里 `win.close()` 会撞上渲染层的 `beforeunload`,而它有可能会顶住
+    (用户还没在「有未保存的改动」对话框上做决定),那时整次退出会被作废 ——
+    用户再点 Dock 就该把界面唤回来。旧实现在这里直接 return,于是那一下点击
+    什么都不会发生。
   */
-  if (isQuitting || shutdownComplete) return
+  if (quitFlow?.done === true) return
 
   const [win] = BrowserWindow.getAllWindows()
   if (win) {
@@ -609,44 +784,73 @@ app.on('second-instance', () => {
   showMainWindow()
 })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+/*
+  退出流程的状态机。**两段式**,理由与踩过的坑都写在 `quit-flow.ts` 的文件头 ——
+  那里也说明了为什么不能再把「停服务 + 封库」和「关窗」挤在同一个事件里。
+
+  ★ **必须装在 `whenReady()` 之前**(这里就是)。`before-quit` 是全局的,而托盘、
+  dock、`second-instance` 都会问 `quitFlow`,装晚了那几条路径就没有判据可用。
+*/
+quitFlow = new QuitFlow({
+  /*
+    ★ **用注册表,不用 `BrowserWindow.getAllWindows()`**:`windows` 是应用自己的
+    窗口表,里面只有主窗和 ⌥Space 快捷窗。退出时把插件宿主窗一起关掉,那第三方的
+    `beforeunload` 就有机会拖住退出 —— 而它连我们自己的「有未保存的改动」对话框
+    都调不出来,只会变成一个退不掉的进程(见 `window/registry.ts` 的 listWindows)。
+  */
+  windows: () => windows.listWindows(),
+  stopBackground: () => {
+    // Tab 布局是防抖 500ms 落盘的(方案 §9)。退出前不 flush,用户最后一次拖出来
+    // 的顺序就丢了 —— 而那正是他最可能记得的一次操作。
+    flushPendingPersists()
+    // ★ 停调度**在** shutdownRuns 之前:自动同步会去问「哪些 run 在跑」,
+    //   而那张表正要被清空,此时起一轮新扫描等于在关灯的房间里搬东西。
+    stopImportSync()
+    stopUsageRollup()
+    stopScheduler()
+    // 同理:登录态刷新(5 分钟)与配置同步(5 秒)都是 unref 过的 interval,
+    // 停不掉就会在封库之后继续摸库。
+    shutdownClientAuth()
+    shutdownImports()
+    shutdownRuns()
+    shutdownSessionTitles()
+    shutdownTerminals()
+  },
+  drainAsync: () =>
+    Promise.allSettled([
+      shutdownMcp(),
+      shutdownPlugins(),
+      shutdownEnvironments(),
+      browserBindings?.shutdown() ?? Promise.resolve()
+    ]),
+  destroyTray,
+  sealDatabase: () => closeDatabase({ final: true }),
+  quit: () => app.quit(),
+  exit: (code) => app.exit(code)
 })
 
-// Tab 布局是防抖 500ms 落盘的(方案 §9)。退出前不 flush,
-// 用户最后一次拖出来的顺序就丢了 —— 而那正是他最可能记得的一次操作。
-// 顺带停掉所有在跑的 run:它们的定时器/上游流会拖住退出。
-app.on('before-quit', (event) => {
-  if (shutdownComplete) return
-  event.preventDefault()
-  if (isQuitting) return
-  isQuitting = true
-  destroyTray()
-  flushPendingPersists()
-  // ★ 停调度**在** shutdownRuns 之前:自动同步会去问「哪些 run 在跑」,
-  //   而那张表正要被清空,此时起一轮新扫描等于在关灯的房间里搬东西。
-  stopImportSync()
-  stopUsageRollup()
-  stopScheduler()
-  // 同理:登录态刷新(5 分钟)与配置同步(5 秒)都是 unref 过的 interval,
-  // 停不掉就会在下面 closeDatabase 封库之后继续摸库。
-  shutdownClientAuth()
-  shutdownImports()
-  shutdownRuns()
-  shutdownSessionTitles()
-  shutdownTerminals()
-  const finish = (): void => {
-    if (shutdownComplete) return
-    shutdownComplete = true
-    clearTimeout(timer)
-    closeDatabase({ final: true })
+app.on('window-all-closed', () => {
+  /*
+    macOS 上这里**就是**退出流程的第二段入口(关窗那一段跑完了)。
+    非 macOS 维持原语义:窗口关完 = 用户要退出,直接从 `app.quit()` 进来。
+  */
+  if (process.platform !== 'darwin') {
     app.quit()
+    return
   }
-  const timer = setTimeout(finish, 6000)
-  void Promise.allSettled([
-    shutdownMcp(),
-    shutdownPlugins(),
-    shutdownEnvironments(),
-    browserBindings?.shutdown() ?? Promise.resolve()
-  ]).then(finish)
+  quitFlow?.windowsClosed()
+})
+
+/*
+  ★ **整个退出流程唯一的入口。** `Cmd+Q`、托盘「退出 NextCoWork」、`app.quit()`,
+  以及上面非 macOS 的那次调用,全都先落到这个事件上 —— 不再有第二条分叉路径。
+
+  `preventDefault()` 在这里的作用不是「拦住退出」,而是**把退出推迟到窗口关完
+  之后**:关窗要走渲染层的 `beforeunload`,那是异步的。真正放行的是收尾之后
+  那一次 `app.quit()`,那时 `quitFlow.done` 已经是 true,这个处理器直接让路。
+*/
+app.on('before-quit', (event) => {
+  if (quitFlow?.done === true) return
+  event.preventDefault()
+  quitFlow?.begin()
 })

@@ -7,7 +7,8 @@ import { createConnection, createServer, type Socket } from 'node:net'
 import type { SshConnectionProfile } from '../../../shared/domain/environment'
 import type { EnvironmentProcess } from '../contract'
 import { EnvironmentError } from '../errors'
-import { sshTargetArgs } from './command'
+import { proxyTunnelArgs, sshTargetArgs } from './command'
+import type { SshProxyTunnel } from './proxy'
 
 export interface OpenSshOptions {
   env?: NodeJS.ProcessEnv
@@ -18,6 +19,15 @@ export interface OpenSshOptions {
    * (见 `askpass.ts` 的 `shouldAutoAnswer`)。在任何会认证的 ssh 启动**之前**调用。
    */
   onResolved?: (values: Map<string, string>) => void
+  /**
+   * 需求:SSH 连接默认跟随应用/系统代理。返回 `null` = 这台主机该直连。
+   *
+   * ★ 注入而不是在这里自己去问:判断走不走代理要用 Electron 的 `session.resolveProxy`,
+   * 而这个文件**不能碰 electron** —— `ssh-native.test.ts` 直接 import 它并起真实 sshd,
+   * 在 vitest 的 node 环境里 `import { session } from 'electron'` 拿到的是一个路径字符串。
+   * 接口留在这里,实现挂在 `runtime.ts`(见 `net/proxy.ts` 的 `resolveProxyForHost`)。
+   */
+  openProxyTunnel?: (hostname: string, port: number) => Promise<SshProxyTunnel | null>
 }
 
 /**
@@ -96,6 +106,11 @@ function classifyConnectFailure(stderr: string): 'host-key' | 'authentication' |
   return 'connection-failed'
 }
 
+/** `ssh -G` 里「这项没设」有两种写法:键根本不出现,或者字面量 `none`(`askpass.ts` 同样这么判)。 */
+function isConfigured(value: string | undefined): boolean {
+  return value !== undefined && value !== '' && value !== 'none'
+}
+
 export function sshExecutable(): string {
   const candidates = process.platform === 'win32'
     ? [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe'), join(process.env.ProgramFiles ?? 'C:\\Program Files', 'OpenSSH', 'ssh.exe')]
@@ -110,13 +125,16 @@ export class OpenSshTransport {
   private control = ''
   private closed = false
   private closing?: Promise<void>
+  private tunnel?: SshProxyTunnel
+  /** 代理隧道的改道参数,没走代理时是空数组。见 `proxyTunnelArgs` 对顺序的要求。 */
+  private tunnelArgs: string[] = []
   private readonly children = new Set<ChildProcessWithoutNullStreams>()
 
   constructor(readonly profile: SshConnectionProfile, private readonly options: OpenSshOptions = {}) {}
 
   private baseArgs(): string[] {
     return ['-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2', '-o', 'ConnectTimeout=15',
-      ...(this.control ? ['-S', this.control] : []), ...sshTargetArgs(this.profile)]
+      ...(this.control ? ['-S', this.control] : []), ...this.tunnelArgs, ...sshTargetArgs(this.profile)]
   }
 
   private launch(args: string[], closing = false): ChildProcessWithoutNullStreams {
@@ -140,6 +158,7 @@ export class OpenSshTransport {
     if (values.get('remotecommand') && values.get('remotecommand') !== 'none') {
       throw new EnvironmentError('unsupported-config', 'RemoteCommand conflicts with workspace command and SFTP sessions. Use a dedicated Host alias.')
     }
+    await this.prepareProxy(values)
     if (process.platform !== 'win32') {
       this.directory = await mkdtemp(join(tmpdir(), 'ncw-ssh-'))
       await chmod(this.directory, 0o700)
@@ -151,6 +170,27 @@ export class OpenSshTransport {
       await this.close()
       throw new EnvironmentError(classifyConnectFailure(result.stderr), result.stderr.slice(-2000))
     }
+  }
+
+  /**
+   * 需求:SSH 连接默认跟随系统代理。隧道必须在**会认证的那次 ssh 之前**搭好。
+   *
+   * ★ 用户自己配了 ProxyJump / ProxyCommand 就完全不插手:那是他写明的线路,
+   *   再套一层等于悄悄改掉他的拓扑(而且第一跳早就不是 `hostname` 那台机器了)。
+   * ★ `-G` 给不出 hostname/port 时也不插手 —— 退回直连比把 ssh 指到一条
+   *   注定连不上的隧道好:后者表现为「装了代理之后所有 SSH 都连不上」。
+   */
+  private async prepareProxy(values: Map<string, string>): Promise<void> {
+    const open = this.options.openProxyTunnel
+    if (!open) return
+    const hostname = values.get('hostname')
+    const port = Number(values.get('port'))
+    if (hostname === undefined || hostname === '' || !Number.isInteger(port) || port < 1 || port > 65535) return
+    if (isConfigured(values.get('proxyjump')) || isConfigured(values.get('proxycommand'))) return
+    const tunnel = await open(hostname, port)
+    if (tunnel === null) return
+    this.tunnel = tunnel
+    this.tunnelArgs = proxyTunnelArgs(hostname, port, tunnel.port, isConfigured(values.get('hostkeyalias')))
   }
 
   async capture(args: string[], signal: AbortSignal, timeoutMs: number, closing = false): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -252,6 +292,9 @@ export class OpenSshTransport {
     for (const child of this.children) child.kill()
     this.closing = (async () => {
       if (this.control) await this.capture(['-O', 'exit', ...this.baseArgs()], AbortSignal.timeout(2000), 2000, true).catch(() => {})
+      // 隧道最后关:`-O exit` 那一发虽然走的是 control socket,但提前拆掉隧道会让
+      // 还没退干净的 ssh 子进程在重连时打到一个已经消失的端口上。
+      await this.tunnel?.close()
       if (this.directory) await rm(this.directory, { recursive: true, force: true })
     })()
     return this.closing
