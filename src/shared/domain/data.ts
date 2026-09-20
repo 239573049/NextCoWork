@@ -9,7 +9,7 @@ import type { AgentMessage } from '../agent/message'
 import type { ContextCheckpoint } from '../agent/context-management'
 import type { ModelAlias, UpstreamProvider } from './provider'
 import { isModelCatalogOverride } from './provider'
-import { isShellPreference, isUpstreamIdleTimeoutSeconds, MODEL_PROPOSED_GOALS, type AppSettings } from './settings'
+import { isMaxOutputTokens, isShellPreference, isUpstreamIdleTimeoutSeconds, MODEL_PROPOSED_GOALS, type AppSettings } from './settings'
 import type { SearchProviderConfig } from './search'
 import type { Session } from './session'
 import type { Workspace } from './workspace'
@@ -316,6 +316,7 @@ function isAppSettings(value: unknown): boolean {
   // 否则会被 merger 丢弃 —— 静默接受一个坏值会掩盖一份损坏的导出。
   if (has(v, 'upstreamIdleTimeoutSeconds') &&
       !isUpstreamIdleTimeoutSeconds(v.upstreamIdleTimeoutSeconds)) return false
+  if (has(v, 'maxOutputTokens') && !isMaxOutputTokens(v.maxOutputTokens)) return false
   if (has(v, 'themeStudio') && !isThemeStudioSettings(v.themeStudio)) return false
   if (has(v, 'activeThemeProfileId') && v.activeThemeProfileId !== null &&
       (typeof v.activeThemeProfileId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(v.activeThemeProfileId))) return false

@@ -10,14 +10,14 @@
 import { Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { greetingOf } from '../../../../shared/domain/greeting'
+import { dayPartOf, type DayPart } from '../../../../shared/domain/greeting'
 import { selectModelBinding } from '../../../../shared/domain/model-selection'
 import { cacheHitRateOf, hasRun, type RunUsage, type SubagentState } from '../../../../shared/agent/transcript'
 import { tokensPerSecond } from '../../../../shared/agent/duration'
 import { effectiveContextWindow } from '../../../../shared/agent/context-management'
 import type { RunCost } from '../../../../shared/domain/pricing'
 import { latestTodosFrom } from '../../../../main/kernel/tool/builtin/todo'
-import { useI18n } from '../../i18n'
+import { useI18n, type TranslationKey } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
 import { AgentErrorException } from '../../services/ipc'
 import type { ContentPart } from '../../../../shared/agent/message'
@@ -51,11 +51,21 @@ import { clearGoal, getGoal, setGoal } from '../../services/goal'
 import { parseGoalCommand } from '../../../../shared/domain/goal'
 import { resolveMaxOutputTokens, type SendOptions, type SessionMode } from '../../../../shared/agent/run-request'
 
+// 需求:空会话首屏问候按当前语言显示。切点(几点算「晚上」)是 shared 纯函数
+// (dayPartOf),句子住 i18n —— 原先句子硬编码在 shared 里,英文界面下也一直是中文。
+const GREETING_KEYS: Record<DayPart, TranslationKey> = {
+  night: 'chat.greeting.night',
+  morning: 'chat.greeting.morning',
+  afternoon: 'chat.greeting.afternoon',
+  evening: 'chat.greeting.evening'
+}
+
 export function ChatView({
   sessionId,
   tabId,
   workspace,
   fallbackModel,
+  maxOutputTokens,
   runningOverride,
   readOnly = false,
   subagentOf
@@ -65,6 +75,13 @@ export function ChatView({
   tabId: string
   workspace: Workspace
   fallbackModel: FallbackModel
+  /**
+   * 设置 › 通用 › Agent 的「最大输出 Token」,只用来算压力条的输出预留。
+   *
+   * 缺省 = 调用方够不着应用设置(定时任务面板里的那块只读转录),按出厂值算 ——
+   * 那条路上压力条只是个参考读数,不值得为它把设置再穿一层。
+   */
+  maxOutputTokens?: number
   /** Background scheduled runs do not subscribe to the normal renderer run pump. */
   runningOverride?: boolean
   /**
@@ -250,9 +267,10 @@ export function ChatView({
    * ★ 别名走 `editModel` 这条兜底链:它和药丸**同源**(会话记住的 → 工作区选过的 →
    * 应用默认),另起一条查询的话,两个分母又会在某些路径上对不上。绑定必须再走
    * `selectModelBinding`:裸 `models.find` 会在同名别名跨供应商时拿到与路由器不同的一家。
-   * 输出预留和正文请求一样默认封顶 32K,模型目录里更大的协议上限不再抬高它;
-   * 较小的协议上限仍安全收窄。否则压力条会比真实请求更早告警。查不到别名就不传 ——
-   * 那时没有任何本地权威可言,退回主进程的结论。
+   * 输出预留读的是**全局设置项**(设置 › 通用 › Agent),和主进程装配那一侧同一个数;
+   * 模型目录里声明的输出上限不再参与,只有协议上下文窗口会把它收窄。分母两侧对不上时,
+   * 压力条会比真实请求更早(或更晚)告警。查不到别名就不传 —— 那时没有任何本地权威可言,
+   * 退回主进程的结论。
    */
   const contextAlias = useModelsStore((s) => selectModelBinding(
     s.models,
@@ -263,9 +281,9 @@ export function ChatView({
   const contextLimits = useMemo(
     () => contextAlias === undefined ? undefined : {
       window: effectiveContextWindow(contextAlias.contextWindow, workspace.settings.maxContext === true),
-      maxOutputTokens: resolveMaxOutputTokens(contextAlias.maxOutputTokens)
+      maxOutputTokens: resolveMaxOutputTokens(maxOutputTokens, contextAlias.contextWindow)
     },
-    [contextAlias, workspace.settings.maxContext]
+    [contextAlias, maxOutputTokens, workspace.settings.maxContext]
   )
   const started = hasRun(transcript, running)
   const conversationUsage = useMemo(
@@ -849,7 +867,7 @@ export function ChatView({
     return (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center px-6 pb-10">
         <h1 className="mb-6 px-6 text-center text-[26px] leading-snug font-semibold text-fg">
-          {greetingOf(new Date().getHours())}
+          {t(GREETING_KEYS[dayPartOf(new Date().getHours())])}
         </h1>
         <div className="w-full">
           {goalLine}

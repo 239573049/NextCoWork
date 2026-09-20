@@ -27,6 +27,14 @@ extraResources:
   # 应该能被逐行读完(理由见那个文件的头)。
   - from: resources/plugin-preload.cjs
     to: plugin-preload.cjs
+  # 插件视图的运行时(React / nextcowork/ui / nextcowork/view)。由
+  # `scripts/build-plugin-runtime.mjs` 生成、不进版本库,所以这里拷的是构建产物 ——
+  # 漏了它,打包后插件视图一律 `Failed to resolve module specifier "react"`,
+  # 而开发时一切正常。
+  - from: resources/plugin-runtime
+    to: plugin-runtime
+    filter:
+      - '**/*'
 asarUnpack:
   - '**/node_modules/node-pty/**'
   - 'resources/**'

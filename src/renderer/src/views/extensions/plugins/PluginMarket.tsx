@@ -190,6 +190,30 @@ function MarketCard({
         </div>
       )}
 
+      {/*
+        ★ 自带的 Skill 和能力并列画在卡片上,理由却不同。
+
+        能力回答「它能对我做什么」,Skill 回答「它会往模型的目录里塞什么」——
+        后者是插件里唯一一类装上之后**每一轮对话都在场**的贡献。藏到详情页去,
+        等于让用户在不知情的情况下改变了自己每次提问的上下文。
+
+        ★ 名字是**领域值,不翻译**(它就是模型看到的那个 token),所以和能力
+        标签一样用等宽字体 —— 那是这个界面里「这串字符是标识符」的既有信号。
+      */}
+      {item.skills.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          <span className="text-[10.5px] text-fg-faint">{t('plugins.marketSkills')}</span>
+          {item.skills.map((skill) => (
+            <span
+              key={skill}
+              className="rounded-[4px] bg-accent/10 px-1.5 py-px font-mono text-[10.5px] text-fg-muted"
+            >
+              {skill}
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* 失败原因贴在这张卡片上,不是页面顶部 —— 连点了几个之后,顶部那一条说不清是哪个失败了 */}
       {error !== undefined && <p className="mt-2 text-[11.5px] text-danger">{t(error)}</p>}
 

@@ -134,6 +134,19 @@ export type InnerTab =
    * 让它消失意味着用户重启一次就丢了一屏工作区布局,而没有任何提示。
    */
   | (InnerTabBase & { kind: 'custom'; ref: { viewType: string; pluginId: string; path: string } })
+  /**
+   * 插件带进来的**网页应用**(`contributes.webApps`)—— 比如「把哔哩哔哩带进来」。
+   *
+   * ★ 为什么不直接复用 `kind: 'browser'`:那是**用户自己的浏览器标签**,
+   * 有地址栏、能随便导航、关掉时要去销毁主进程那一侧的 BrowserTab。而这个是
+   * 「某个插件的一块界面」:地址由清单写死、导航被限制在声明过的域名内、
+   * 插件没了要降级成一句说明。两者只是恰好都渲染网页。
+   *
+   * ★ `url` 跟着落盘,但**每次打开都以清单里的为准**:插件升级换了地址时,
+   * 盘里那条旧记录不该把用户永远钉在旧站点上。存它只是为了插件不在时
+   * 还能告诉用户「这个 Tab 原本指着哪儿」。
+   */
+  | (InnerTabBase & { kind: 'webapp'; ref: { pluginId: string; webAppId: string; url: string } })
 
 export type InnerTabKind = InnerTab['kind']
 

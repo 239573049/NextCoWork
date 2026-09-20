@@ -7,15 +7,18 @@ import { DEFAULT_PROXY } from '../proxy'
 import { DEFAULT_CUSTOM_SEED } from '../theme'
 import {
   DEFAULT_SETTINGS,
+  MAX_OUTPUT_TOKENS_BOUNDS,
   MODEL_PROPOSED_GOALS,
   PERSONALIZATION_MAX,
   SHELL_PREFERENCES,
+  isMaxOutputTokens,
   isShellPreference,
   mergeSettings,
   shellPreferencesForPlatform,
   type AppSettings,
   type AppSettingsPatch
 } from '../settings'
+import { DEFAULT_MAX_OUTPUT_TOKENS, resolveMaxOutputTokens } from '../../agent/run-request'
 
 const base = (): AppSettings => structuredClone(DEFAULT_SETTINGS)
 
@@ -407,5 +410,63 @@ describe('mergeSettings · 执行 Shell', () => {
       expect(choices).not.toContain('cmd')
       expect(choices).not.toContain('powershell')
     }
+  })
+})
+
+/**
+ * 全局输出额度:一处设置对所有模型生效。模型目录里那条 `maxOutputTokens`
+ * 不再参与,唯一还会收窄它的是模型的上下文窗口。
+ */
+describe('mergeSettings · 最大输出 Token', () => {
+  it('旧库里缺这一项时落回出厂默认 32000', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.maxOutputTokens
+    expect(DEFAULT_SETTINGS.maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
+    expect(mergeSettings(DEFAULT_SETTINGS, legacy).maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
+  })
+
+  it('区间内的整数原样落库', () => {
+    expect(mergeSettings(base(), { maxOutputTokens: 64_000 }).maxOutputTokens).toBe(64_000)
+    for (const value of [MAX_OUTPUT_TOKENS_BOUNDS.min, MAX_OUTPUT_TOKENS_BOUNDS.max]) {
+      expect(mergeSettings(base(), { maxOutputTokens: value }).maxOutputTokens).toBe(value)
+    }
+  })
+
+  it.each([
+    ['小于下限', MAX_OUTPUT_TOKENS_BOUNDS.min - 1],
+    ['大于上限', MAX_OUTPUT_TOKENS_BOUNDS.max + 1],
+    ['小数', 1024.5],
+    ['非数字', '32000'],
+    ['NaN', Number.NaN]
+  ])('%s 时保留当前值,不静默改成默认值', (_label, value) => {
+    const current = mergeSettings(base(), { maxOutputTokens: 48_000 })
+    const next = mergeSettings(current, { maxOutputTokens: value } as unknown as AppSettingsPatch)
+    expect(next.maxOutputTokens).toBe(48_000)
+  })
+
+  it('isMaxOutputTokens 只认区间内的整数', () => {
+    expect(isMaxOutputTokens(DEFAULT_MAX_OUTPUT_TOKENS)).toBe(true)
+    for (const value of [0, -1, 1023, 200_001, 1.5, '32000', null, undefined, {}]) {
+      expect(isMaxOutputTokens(value)).toBe(false)
+    }
+  })
+})
+
+describe('resolveMaxOutputTokens', () => {
+  it('没有设置值时用出厂默认', () => {
+    expect(resolveMaxOutputTokens(undefined, 200_000)).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
+  })
+
+  it('★ 模型声明的输出上限不再压低设置值 —— 那正是「设置 32000、实发 16384」的病因', () => {
+    expect(resolveMaxOutputTokens(32_000, 200_000)).toBe(32_000)
+    expect(resolveMaxOutputTokens(64_000, 1_000_000)).toBe(64_000)
+  })
+
+  it('大于上下文窗口时按窗口收窄 —— 那种请求必然 400', () => {
+    expect(resolveMaxOutputTokens(32_000, 8_000)).toBe(8_000)
+  })
+
+  it('查不到模型(无窗口)时原样下发设置值', () => {
+    expect(resolveMaxOutputTokens(32_000, undefined)).toBe(32_000)
   })
 })

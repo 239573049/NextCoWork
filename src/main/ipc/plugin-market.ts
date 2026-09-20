@@ -372,6 +372,18 @@ function normalizeItem(item: PluginMarketItem & { author?: unknown }): PluginMar
   return {
     ...item,
     permissions: Array.isArray(item.permissions) ? item.permissions : [],
+    /*
+      ★ 老服务端**不返回**这个字段,所以要兜成空数组,不能让 `undefined` 进去。
+
+      不兜的话,渲染层那句 `skills.length > 0` 会当场抛
+      「Cannot read properties of undefined」—— 而这条路只在连到一个尚未升级的
+      市场时才走得到,也就是最不容易在开发机上复现的那种。
+      同上面 `permissions` 那行,一模一样的理由。
+
+      逐条 `String()`:这几个名字要直接画到卡片上,而服务端返回的是 JSON,
+      里面混进数字或 null 不会有任何东西拦它。
+    */
+    skills: Array.isArray(item.skills) ? item.skills.map((name) => String(name)) : [],
     iconUrl: resolveIconUrl(item.iconUrl),
     author: author !== null && typeof author === 'object' ? String((author as { name?: unknown }).name ?? '') : String(author ?? '')
   }

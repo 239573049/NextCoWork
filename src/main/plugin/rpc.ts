@@ -60,12 +60,64 @@ export interface CapabilityContext {
    * 一个 ctx 来测的 handler 都会连带需要一份 electron mock。
    */
   trash: (absolutePath: string) => Promise<void>
+  /**
+   * 交给系统浏览器打开一个网址。
+   *
+   * 需求:插件最朴素的一种形态就是「把一个网站带进来」,这是其中最轻的一档。
+   * 应用内打开走 `tabs.openBrowser`(另有 URL 门),这一条只负责离开应用。
+   * 不满足会怎样:`ncw.env.openExternal()` 抛 `internal_error: no handler` ——
+   * 而它在 d.ts、垫片、文档里全都存在,作者只会去怀疑自己的打包。
+   *
+   * ★ 同 `trash`:由调用方注入,这一层不认识 electron。
+   */
+  openExternal: (url: string) => Promise<void>
+  /**
+   * 剪贴板。能力门已经查过 `clipboard`,这里只负责落地。
+   *
+   * ★ 两个方法都是**异步**的:Electron 这一版的 `clipboard` 就是 Promise 形状的。
+   * 写成同步会在类型上悄悄拿到一个 `Promise<string>` 当字符串发给插件 ——
+   * 症状是插件读到 `{}` 而不是剪贴板内容。
+   */
+  clipboard: {
+    readText: () => Promise<string>
+    writeText: (text: string) => Promise<void>
+  }
+  /**
+   * 版本控制适配器 —— **已经绑好当前工作区**。
+   *
+   * ★ 注入而不是在这里认识 git:真正的实现复用 `ipc/git.ts`(porcelain v2 解析、
+   * path spec 处理都在那边),抄第二份的代价是两处对「路径怎么转义」的理解会分叉。
+   *
+   * ★ 是个**工厂而不是现成对象**:每次 RPC 都要造一份 `CapabilityContext`,
+   * 而绝大多数调用和 git 无关。提前造等于每次读文件都顺带准备一套 git 上下文。
+   */
+  scm: () => PluginScmAdapter
   kv: {
     get(key: string): string | null
     set(key: string, value: string | null): void
     keys(): string[]
     usedBytes(): number
   }
+}
+
+/**
+ * 插件能看见的版本控制面。
+ *
+ * 需求:插件要能读仓库状态做判断(「有未提交改动就别跑发布」),也要能在用户
+ * 明确批准后提交。**没有 push / pull** —— 它们会把本机凭据用到远端,而失败形态
+ * (冲突、鉴权、hook 拒绝)不是一条 RPC 的返回值能如实回答的。
+ *
+ * 每个方法都不接 workspaceId:适配器在构造时就绑死了当前工作区,插件说了不算。
+ */
+export interface PluginScmAdapter {
+  status: () => Promise<{ branch: string; staged: string[]; unstaged: string[] }>
+  diff: (options: { path: string; staged: boolean }) => Promise<{ diff: string; binary: boolean; truncated: boolean }>
+  log: (options: { limit: number }) => Promise<{ commits: { hash: string; subject: string; author: string; at: number }[] }>
+  branches: () => Promise<{ current: string; branches: string[] }>
+  stage: (paths: string[]) => Promise<void>
+  commit: (message: string) => Promise<{ hash: string }>
+  createBranch: (name: string, checkout: boolean) => Promise<void>
+  checkout: (name: string) => Promise<void>
 }
 
 export class CapabilityError extends Error {
@@ -97,6 +149,84 @@ export async function invokeCapability<M extends PluginMethod>(
   switch (method) {
     case 'env.appInfo':
       return { data: { appName: 'NextCoWork', appVersion: appVersion(), language: 'zh-CN' }, summary: 'appInfo' }
+
+    case 'env.openExternal': {
+      const p = params as PluginParams<'env.openExternal'>
+      /*
+        ★ **只允许 https**,与 `narrowFetchUrl` 同一立场 —— 但这里是**另一条**
+        判定,不复用 `hostPermissions`:交给系统浏览器打开的东西离开了应用的
+        信任边界,用户在自己的浏览器里能看见地址栏。真正要挡的是
+        `javascript:` / `file:` / `ncw-plugin:` 这类能在本机取得额外权限的 scheme。
+        不满足会怎样:一个插件可以用 `file:///` 让用户的文件管理器打开任意目录。
+      */
+      const url = normalizeExternalUrl(p.url)
+      await ctx.openExternal(url)
+      return { data: { opened: true }, summary: `openExternal ${new URL(url).host}` }
+    }
+
+    case 'env.clipboardRead':
+      // 能力门已经查过 `clipboard`;读到的内容不进活动日志(剪贴板里可能是密码)。
+      return { data: { text: await ctx.clipboard.readText() }, summary: 'clipboard.read' }
+
+    case 'env.clipboardWrite': {
+      const p = params as PluginParams<'env.clipboardWrite'>
+      if (typeof p.text !== 'string') invalid('text is required')
+      if (p.text.length > MAX_PLUGIN_FILE_BYTES) invalid('clipboard payload is too large')
+      await ctx.clipboard.writeText(p.text)
+      // 摘要只记长度,不记内容 —— 同 `diagnostics.ts` 的「不含参数原文」。
+      return { data: {}, summary: `clipboard.write ${p.text.length} chars` }
+    }
+
+    case 'scm.status':
+      return { data: await ctx.scm().status(), summary: 'scm.status' }
+
+    case 'scm.diff': {
+      const p = params as PluginParams<'scm.diff'>
+      const path = relativeInside(ctx, p.path)
+      const result = await ctx.scm().diff({ path, staged: p.staged === true })
+      return { data: { ...result, diff: truncate(result.diff) }, summary: `scm.diff ${path}` }
+    }
+
+    case 'scm.log': {
+      const p = params as PluginParams<'scm.log'>
+      const limit = Math.min(Math.max(1, p.limit ?? 20), 200)
+      return { data: await ctx.scm().log({ limit }), summary: `scm.log ${limit}` }
+    }
+
+    case 'scm.branches':
+      return { data: await ctx.scm().branches(), summary: 'scm.branches' }
+
+    case 'scm.stage': {
+      const p = params as PluginParams<'scm.stage'>
+      if (!Array.isArray(p.paths) || p.paths.length === 0) invalid('paths is required')
+      if (p.paths.length > 500) invalid('too many paths')
+      // 每一条都过工作区收窄 —— `git add ../../..` 在仓库根之外同样是越界。
+      const paths = p.paths.map((path) => relativeInside(ctx, path))
+      await ctx.scm().stage(paths)
+      return { data: {}, summary: `scm.stage ${paths.length} path(s)` }
+    }
+
+    case 'scm.commit': {
+      const p = params as PluginParams<'scm.commit'>
+      const message = typeof p.message === 'string' ? p.message.trim() : ''
+      if (message === '') invalid('message is required')
+      if (message.length > 4096) invalid('message is too long')
+      return { data: await ctx.scm().commit(message), summary: 'scm.commit' }
+    }
+
+    case 'scm.createBranch': {
+      const p = params as PluginParams<'scm.createBranch'>
+      const name = narrowBranchName(p.name)
+      await ctx.scm().createBranch(name, p.checkout === true)
+      return { data: {}, summary: `scm.createBranch ${name}` }
+    }
+
+    case 'scm.checkout': {
+      const p = params as PluginParams<'scm.checkout'>
+      const name = narrowBranchName(p.name)
+      await ctx.scm().checkout(name)
+      return { data: {}, summary: `scm.checkout ${name}` }
+    }
 
     case 'workspace.folders':
       return {
@@ -183,17 +313,15 @@ export async function invokeCapability<M extends PluginMethod>(
 
     case 'process.exec': {
       const p = params as PluginParams<'process.exec'>
-      const narrowed = narrowCommand(ctx.allowedCommands, p.command, p.args)
-      if (!narrowed.ok) invalid(narrowed.reason)
-      const cwd = p.cwd === undefined ? ctx.workspaceRoot : (await resolveInside(ctx, p.cwd))
-      if (cwd === '') invalid('no workspace is open')
-      const shell = ctx.host.platform.shell
-      const line = `${narrowed.value.command} ${narrowed.value.args.map((arg) => quoteArg(arg, shell)).join(' ')}`.trim()
-      if (!(await ctx.approve({ kind: 'exec', detail: line }))) rejected('the command was not approved')
+      const prepared = await prepareExec(ctx, p)
       const controller = new AbortController()
-      const timeoutMs = Math.min(Math.max(1000, p.timeoutMs ?? 60_000), 120_000)
-      const result = await ctx.host.spawn(line, { cwd, signal: controller.signal, timeoutMs, shell })
-      return { data: result, summary: `exec ${narrowed.value.command}` }
+      const result = await ctx.host.spawn(prepared.line, {
+        cwd: prepared.cwd,
+        signal: controller.signal,
+        timeoutMs: prepared.timeoutMs,
+        shell: prepared.shell
+      })
+      return { data: result, summary: `exec ${prepared.command}` }
     }
 
     case 'net.fetch': {
@@ -264,6 +392,89 @@ export async function invokeCapability<M extends PluginMethod>(
     default:
       throw new CapabilityError('internal_error', `method ${method} has no handler`)
   }
+}
+
+/**
+ * 跑命令前的**全部门**:参数门(白名单 + 元字符)→ cwd 收窄 → 引号化 → 审批。
+ *
+ * ★ 导出给 `manager.ts` 的 `process.execStream` 复用。一次性 exec 与流式 exec
+ * 是同一件事的两种取出方式,而**门必须只有一套** —— 抄第二份的话,两条路上
+ * 「哪些命令算被批准过」迟早会分叉,而分叉的那一侧不会有人为它写测试。
+ *
+ * ★ 审批只在这里问**一次**。流式那条不逐 chunk 问:逐 chunk 问的结果是
+ * 用户为了一条命令点二十次「允许」。
+ */
+export async function prepareExec(
+  ctx: CapabilityContext,
+  params: { command: string; args: string[]; cwd?: string; timeoutMs?: number }
+): Promise<{ command: string; line: string; cwd: string; shell: string; timeoutMs: number }> {
+  const narrowed = narrowCommand(ctx.allowedCommands, params.command, params.args)
+  if (!narrowed.ok) invalid(narrowed.reason)
+  const cwd = params.cwd === undefined ? ctx.workspaceRoot : (await resolveInside(ctx, params.cwd))
+  if (cwd === '') invalid('no workspace is open')
+  const shell = ctx.host.platform.shell
+  const line = `${narrowed.value.command} ${narrowed.value.args.map((arg) => quoteArg(arg, shell)).join(' ')}`.trim()
+  if (!(await ctx.approve({ kind: 'exec', detail: line }))) rejected('the command was not approved')
+  return {
+    command: narrowed.value.command,
+    line,
+    cwd,
+    shell,
+    timeoutMs: Math.min(Math.max(1000, params.timeoutMs ?? 60_000), 120_000)
+  }
+}
+
+/**
+ * 交给系统浏览器的地址。
+ *
+ * ★ 只放行 https。`http:` 也拒:一条明文地址由谁应答是中间人说了算,而这里
+ * 打开的是**用户自己的浏览器**,出了应用边界就再没有第二道检查。
+ * 不满足会怎样:`file:///` / `javascript:` 能让插件在用户机器上撬开别的东西。
+ */
+function normalizeExternalUrl(raw: unknown): string {
+  if (typeof raw !== 'string' || raw === '') invalid('url is required')
+  if (raw.length > 2048) invalid('url is too long')
+  let parsed: URL
+  try { parsed = new URL(raw) } catch { invalid('url is not a valid URL') }
+  if (parsed.protocol !== 'https:') invalid('only https:// can be opened externally')
+  if (parsed.username !== '' || parsed.password !== '') invalid('credentials in the URL are not allowed')
+  return parsed.toString()
+}
+
+/**
+ * 分支名收窄。
+ *
+ * ★ 挡的是**会被 git 当成选项或路径的形状**:`-` 开头会变成一个 flag,
+ * `..` / 空格 / 控制字符在 refname 里非法或有歧义。挡在这里而不是指望
+ * git 自己报错,是因为报错会以一句 git 原文出现在插件那边,对不上原因。
+ */
+function narrowBranchName(raw: unknown): string {
+  const name = typeof raw === 'string' ? raw.trim() : ''
+  if (name === '') invalid('branch name is required')
+  if (name.length > 255) invalid('branch name is too long')
+  if (name.startsWith('-') || name.includes('..') || /[\s~^:?*[\\\0]/.test(name)) {
+    invalid(`not a valid branch name: ${name}`)
+  }
+  return name
+}
+
+/**
+ * scm 这一路的路径参数:**先过工作区收窄,再原样把相对路径交给 git**。
+ *
+ * ★ 不做 realpath(不像 `resolveInside`):git 的 pathspec 要的就是仓库相对路径,
+ * 而且这些路径可能指向已经被删掉的文件(`scm.diff` 一个删除项是常态),
+ * 那时 realpath 一定失败 —— 用它会让「看一眼我删了什么」变成 `invalid_argument`。
+ */
+function relativeInside(ctx: CapabilityContext, path: unknown): string {
+  if (typeof path !== 'string' || path === '') invalid('path is required')
+  const narrowed = narrowWorkspacePath(ctx.workspaceRoot, path)
+  if (!narrowed.ok) invalid(narrowed.reason)
+  return path.replaceAll('\\', '/')
+}
+
+/** 超长输出按插件读写上限截断 —— 一个巨大的 diff 不该撑爆一次 RPC。 */
+function truncate(value: string): string {
+  return value.length > MAX_PLUGIN_FILE_BYTES ? `${value.slice(0, MAX_PLUGIN_FILE_BYTES)}\n… (truncated)` : value
 }
 
 /** 词法边界 + realpath 归一。**两层都要**,理由见 `net/attachment-protocol.ts`。 */

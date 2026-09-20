@@ -172,6 +172,8 @@ async function runSession(o: {
   approve?: ApproveFn
   onToolUsage?: SessionDeps['onToolUsage']
   allowedTools?: SessionDeps['allowedTools']
+  /** 设置 › 通用 › Agent 的输出额度;缺省 = 没配置,按 `DEFAULT_MAX_OUTPUT_TOKENS` 走 */
+  maxOutputTokens?: number
   resumeDelaysMs?: readonly number[]
 }): Promise<Ran> {
   const request = o.request ?? req()
@@ -186,6 +188,7 @@ async function runSession(o: {
       ...(o.approve !== undefined ? { approve: o.approve } : {}),
       ...(o.onToolUsage !== undefined ? { onToolUsage: o.onToolUsage } : {}),
       ...(o.allowedTools !== undefined ? { allowedTools: o.allowedTools } : {}),
+      ...(o.maxOutputTokens !== undefined ? { maxOutputTokens: o.maxOutputTokens } : {}),
       // 缺省关掉断流续跑:它只在明确要测的那几条用例里打开,别的用例不该因为
       // 上游脚本里出现一个 error 事件就凭空多跑五轮。
       resumeDelaysMs: o.resumeDelaysMs ?? []
@@ -1202,12 +1205,26 @@ describe('错误与边界', () => {
     expect(upstream.requests[0]?.maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
   })
 
-  it('模型协议上限低于 32000 时仍安全收窄', async () => {
+  /**
+   * ★ 输出额度只认全局设置项。模型目录里声明的输出上限**不再收窄它** ——
+   * 那条收窄以前存在,现在换成了「超过上下文窗口才收窄」(见 resolveMaxOutputTokens)。
+   * 改回去的症状:设置里写 32000,请求里发 16384,长回答被上游截断。
+   */
+  it('模型目录声明的输出上限不再压住全局设置值', async () => {
     const model = { ...ALIAS, maxOutputTokens: 4096 }
     const { upstream } = await runSession({
-      upstream: fakeUpstream([says('好')], { models: [model] })
+      upstream: fakeUpstream([says('好')], { models: [model] }),
+      maxOutputTokens: 32_000
     })
-    expect(upstream.requests[0]?.maxOutputTokens).toBe(4096)
+    expect(upstream.requests[0]?.maxOutputTokens).toBe(32_000)
+  })
+
+  it('设置里的值高于默认时按设置走', async () => {
+    const { upstream } = await runSession({
+      upstream: fakeUpstream([says('好')], { models: [ALIAS] }),
+      maxOutputTokens: 64_000
+    })
+    expect(upstream.requests[0]?.maxOutputTokens).toBe(64_000)
   })
 
   /**
@@ -2068,6 +2085,13 @@ describe('压缩判据按上游真值校准', () => {
         tools: registry({ internalId: 'echo' }),
         workspaceRoot: '/ws',
         history: o.history,
+        /*
+          本组用例的数值夹具(「估算约 175K > 151.8K」这一类)是按 **8192 的输出预留**
+          标定的,所以这里把设置项钉在模型原来的协议上限上。不钉的话默认 32K 预留会让
+          几条大历史的用例在 `validateModelRuntime` 那道硬校验上先行退出 ——
+          一个请求都发不出去,而本组要测的是压缩收敛,不是那道校验。
+        */
+        maxOutputTokens: 8192,
         contextManagement: o.contextManagement ?? AUTO_COMPACT,
         ...(o.saveContextCheckpoint !== undefined
           ? { saveContextCheckpoint: o.saveContextCheckpoint }
@@ -2302,6 +2326,9 @@ describe('摘要压缩的收敛', () => {
         tools: registry({ internalId: 'echo' }),
         workspaceRoot: '/ws',
         history: o.history,
+        // 同上一组:700K 的夹具按 8192 的输出预留标定,默认 32K 预留会让它
+        // 在硬校验处先行退出,一条摘要请求都发不出去。
+        maxOutputTokens: 8192,
         contextManagement: SUMMARY_ON,
         saveContextCheckpoint: vi.fn(),
         resumeDelaysMs: []

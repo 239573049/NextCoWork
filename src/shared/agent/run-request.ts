@@ -63,19 +63,37 @@ export const THINKING_BUDGET: Record<Exclude<ThinkingLevel, 'auto' | 'off'>, num
 }
 
 /**
- * 正文请求默认最多输出 32K,模型目录里更大的协议上限不再扩张每轮预算。
- * 不满足会怎样:大输出模型会从空会话起就挤占上下文压力读数,并让压缩过早触发。
+ * 正文请求每轮输出额度的**默认值**,同时是设置项 `AppSettings.maxOutputTokens`
+ * 的出厂值。32K 这个数的由来没变:大输出模型不该从空会话起就挤占上下文压力读数,
+ * 也不该让压缩过早触发。
  */
 export const DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 
 /**
- * 需求:32K 是正文请求的默认上限,但模型更小的协议输出上限仍是硬边界。
- * 不满足会怎样:32K 上下文或旧模型会收到超过自身能力的额度,每次请求都直接 400。
+ * 需求:每轮输出额度由**唯一一个全局设置项**说了算(设置 › 通用 › Agent),
+ * 模型目录里那条 `maxOutputTokens` 不再参与 —— 在一处改完就该对所有模型生效。
+ *
+ * 原先这里取 `min(32000, alias.maxOutputTokens)`,理由是「模型更小的协议输出上限
+ * 仍是硬边界,否则旧模型每次请求都直接 400」。那条边界现在退到上下文窗口:
+ * 输出额度大于整个窗口的请求必然 400,而那是唯一一条与模型声明无关、永远成立的
+ * 硬约束。目录里声明得偏小的输出上限(常见 16384)不再压住用户设的值 ——
+ * 症状是设置里写着 32000、请求里发出去的却是 16384,长回答被上游截断,
+ * 最后报 `agent.error.outputLimit`。
+ *
+ * 代价写在这里,免得下一个人当成 bug「修」回去:供应商若真的只接受更小的
+ * max_tokens,这一改把那次失败从「静默截断」变成一次显式的上游 400,
+ * 用户照着报错把这个设置项调小即可 —— 一处改,不必逐个模型改。
  */
-export function resolveMaxOutputTokens(protocolLimit: number | undefined): number {
-  return typeof protocolLimit === 'number' && Number.isFinite(protocolLimit) && protocolLimit >= 1
-    ? Math.min(DEFAULT_MAX_OUTPUT_TOKENS, Math.floor(protocolLimit))
+export function resolveMaxOutputTokens(
+  configured: number | undefined,
+  contextWindow: number | undefined
+): number {
+  const wanted = typeof configured === 'number' && Number.isFinite(configured) && configured >= 1
+    ? Math.floor(configured)
     : DEFAULT_MAX_OUTPUT_TOKENS
+  return typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow >= 1
+    ? Math.min(wanted, Math.floor(contextWindow))
+    : wanted
 }
 
 export interface RunRequest {

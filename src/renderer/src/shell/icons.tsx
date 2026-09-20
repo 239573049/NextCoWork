@@ -89,7 +89,13 @@ export const INNER_TAB_ICON: Record<InnerTabKind, LucideIcon> = {
   changes: FileDiff,
   // 插件接管的自定义编辑器。用拼图块而不是让插件给图标:Tab 条上那个字形是
   // 用户判断「这个 Tab 是谁提供的」的地方。
-  custom: Puzzle
+  custom: Puzzle,
+  /*
+    插件带进来的网页应用。用地球而不是拼图块:用户在 Tab 条上首先要认出
+    「这是个网页」——「它由某个插件带进来」是第二位的信息,标题里已经有了。
+    与浏览器 Tab 同字形是**有意**的:它们对用户就是同一类东西。
+  */
+  webapp: Earth
 }
 
 /**

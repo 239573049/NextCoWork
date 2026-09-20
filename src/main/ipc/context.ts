@@ -227,8 +227,8 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
     permissionMode: req.permissionMode,
     webSearch: req.webSearch,
     contextWindow: effectiveContextWindow(alias?.contextWindow, req.maxContext === true),
-    // 需求：预览装配与正文共用 32K 默认上限；当前返回值不暴露 shouldCompact，但不能让两条装配口径分叉。
-    maxOutputTokens: resolveMaxOutputTokens(alias?.maxOutputTokens),
+    // 需求：预览装配与正文共用同一个全局输出额度设置；当前返回值不暴露 shouldCompact，但不能让两条装配口径分叉。
+    maxOutputTokens: resolveMaxOutputTokens(store.getSettings().maxOutputTokens, alias?.contextWindow),
     supportsThinking: alias?.capabilities.thinking ?? false,
     ...(alias?.reasoningEfforts !== undefined ? { reasoningEfforts: alias.reasoningEfforts } : {}),
     ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {}),

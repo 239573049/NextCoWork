@@ -10,7 +10,7 @@
  * (名字、作者、版本、能力、贡献点)和宿主自己的记录(诊断、活动)——
  * 插件的 UI 只出现在受控 webview 里,那是另一期的事。
  */
-import { AlertTriangle, ArrowUpCircle, Package, Puzzle, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowUpCircle, BookOpen, Package, Puzzle, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { InstalledPlugin, PluginStatus } from '../../../../../shared/plugin/state'
 import type { PluginUpdate } from '../../../../../shared/plugin/market'
@@ -22,9 +22,12 @@ import { Toggle } from '../../../components/ui/Toggle'
 import { useI18n, type TranslationKey } from '../../../i18n'
 import { cn } from '../../../lib/cn'
 import { usePluginsStore } from '../../../stores/plugins'
+import { useSkillsStore } from '../../../stores/skills'
+import { useWindowStore } from '../../../stores/window'
 import { PluginConfiguration } from './PluginConfiguration'
 import { PluginMarket } from './PluginMarket'
 import { pluginErrorKey } from './plugin-error'
+import { missingPluginSkills, pluginSkillRows } from './plugin-skills'
 
 const STATUS_KEY: Record<PluginStatus, TranslationKey> = {
   idle: 'plugins.status.idle',
@@ -337,6 +340,8 @@ function PluginDetail({ plugin, update }: { plugin: InstalledPlugin; update: Plu
 
           <PluginConfiguration plugin={plugin} />
 
+          <PluginSkills plugin={plugin} />
+
           {plugin.diagnostics.length > 0 && (
             <>
               <h4 className="mt-4 text-[12px] font-medium text-fg">{t('plugins.diagnostics')}</h4>
@@ -423,5 +428,95 @@ function PermissionRow({
         {granted ? t('plugins.revoke') : t('plugins.grant')}
       </Button>
     </div>
+  )
+}
+
+/**
+ * 这个插件贡献的 Skill。
+ *
+ * ## 为什么读的是 Skill 列表,不是插件自己的清单
+ *
+ * 清单说「我声明了这几个目录」,这一屏要回答的是「模型现在看得见哪几条」。
+ * 两者不同的情形不少(缺 description、撞名、被用户同名的 skill 覆盖),
+ * 判定规则全在 `plugin-skills.ts` 的注释里。照清单画的话,这一页会列出
+ * 一条模型根本看不见的 skill,而作者没有任何线索。
+ *
+ * ## 为什么在这里触发加载
+ *
+ * 用户完全可能没开过 Skill 页就来看插件详情,那时 store 是空的 —— 空的时候
+ * 这一屏会显示「声明了 N 条、一条都没生效」,一句彻底的误报。
+ *
+ * ★ 只在**空且不在加载中**时拉一次,而不是每次挂载都拉:Skill 页可能正开着,
+ * 而 `load()` 会把 items 清空再填 —— 那会让另一个页面的列表闪一下。
+ */
+function PluginSkills({ plugin }: { plugin: InstalledPlugin }): ReactNode {
+  const { t } = useI18n()
+  const workspaceId = useWindowStore((state) => state.activeWorkspaceId)
+  const items = useSkillsStore((state) => state.items)
+  const load = useSkillsStore((state) => state.load)
+
+  const declaredCount = plugin.manifest.contributes.skills.length
+  useEffect(() => {
+    if (declaredCount === 0) return
+    /*
+      ★ `items` / `loading` 在这里**用 getState 读快照**,不作为 effect 依赖。
+
+      作为依赖的话,一台真的扫不出任何 skill 的机器会在「拉完 → 还是空 → 再拉」
+      之间转个不停。而用 `eslint-disable` 把依赖检查关掉是不行的 ——
+      本仓库渲染层的 disable 计数是 0,这条规则见 AGENTS.md §3。
+      读快照两个问题一起解决:依赖列表是完整的,行为也是「只试一次」。
+    */
+    const state = useSkillsStore.getState()
+    if (state.items.length > 0 || state.loading) return
+    void load(workspaceId)
+  }, [workspaceId, declaredCount, load])
+
+  if (declaredCount === 0) return null
+
+  const declared = plugin.manifest.contributes.skills
+  const rows = pluginSkillRows(items, plugin.id)
+  const missing = missingPluginSkills(declared.map((entry) => entry.path), rows)
+
+  return (
+    <>
+      <h4 className="mt-4 text-[12px] font-medium text-fg">{t('plugins.skills')}</h4>
+      <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">{t('plugins.skillsHint')}</p>
+      <ul className="mt-2 space-y-1">
+        {rows.map((row) => (
+          <li key={row.id} className="flex items-start gap-2.5 rounded-[8px] bg-tint px-2.5 py-2">
+            <BookOpen size={13} className={cn('mt-0.5 shrink-0', row.active ? 'text-accent' : 'text-fg-faint')} />
+            <div className="min-w-0 flex-1">
+              {/* ★ skill 名是**领域值**(模型看到的就是它),不翻译、等宽 */}
+              <code className="font-mono text-[11.5px] text-fg">{row.name}</code>
+              <div className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-fg-muted">{row.description}</div>
+            </div>
+            {!row.active && (
+              /*
+                ★ 「已关闭」要说出来。用户在这一页看到插件是启用的,而它的 skill
+                可能被 Skill 页上的开关单独关掉了 —— 不说的话,他只会发现模型
+                从来不用它,而原因在另一个页面上。
+              */
+              <span className="mt-0.5 shrink-0 rounded-[4px] bg-tint-strong px-1 text-[10px] text-fg-faint">
+                {t('plugins.skillInactive')}
+              </span>
+            )}
+          </li>
+        ))}
+        {missing.map((name) => (
+          /*
+            ★ 声明了却没出现的,**单独列出来并说明去向**。这是这一屏存在的主要
+            理由:在此之前,一条加载失败的插件 skill 在任何界面上都不留痕迹。
+            具体原因(缺 description / 撞名 / 被覆盖)在 Skill 页的诊断里。
+          */
+          <li key={`missing:${name}`} className="flex items-start gap-2.5 rounded-[8px] bg-warning/5 px-2.5 py-2">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0 text-warning" />
+            <div className="min-w-0 flex-1">
+              <code className="font-mono text-[11.5px] text-fg">{name}</code>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-fg-muted">{t('plugins.skillMissing')}</div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
   )
 }

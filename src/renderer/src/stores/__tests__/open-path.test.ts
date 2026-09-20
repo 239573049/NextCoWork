@@ -140,6 +140,7 @@ function drawPlugin(over: Partial<InstalledPlugin> = {}): InstalledPlugin {
       id: 'acme.excalidraw',
       name: 'excalidraw',
       publisher: 'acme',
+      kind: 'extension',
       displayName: 'Excalidraw',
       description: '',
       version: '1.0.0',
@@ -162,10 +163,14 @@ function drawPlugin(over: Partial<InstalledPlugin> = {}): InstalledPlugin {
           selector: [{ filenamePattern: '*.excalidraw' }]
         }],
         views: [],
+        webApps: [],
         tools: [],
         cardViews: [],
         keybindings: [],
+        slashCommands: [],
         skills: [],
+        agents: [],
+        modes: [],
         themes: [],
         unsupported: []
       }

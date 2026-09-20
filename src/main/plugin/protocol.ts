@@ -189,10 +189,13 @@ function runtimeJs(pluginId: string): string {
   return `const bridge = globalThis.__ncwPluginBridge
 let nextId = 1
 const pending = new Map()
-const handlers = { activate: null, deactivate: null, commands: new Map(), tools: new Map(), appearance: new Set() }
+const handlers = { activate: null, deactivate: null, commands: new Map(), tools: new Map(), appearance: new Set(), interceptor: null, contextProvider: null, workspaceChanges: new Set() }
 const toolActions = new Map()
 const exposedApiMethods = new Map()
 const eventSubscribers = new Map()
+/* execId → 这次流式命令登记的回调;exit 到达时连同 done 的 resolver 一起清掉。 */
+const execStreams = new Map()
+const execExits = new Map()
 let api = null
 
 function call(method, params) {
@@ -246,10 +249,41 @@ export const workspace = {
     delete: (path) => call('workspace.deleteFile', { path }),
     stat: (path) => call('workspace.stat', { path })
   },
-  findFiles: (glob, limit) => call('workspace.findFiles', { glob, limit }).then((r) => r.paths)
+  findFiles: (glob, limit) => call('workspace.findFiles', { glob, limit }).then((r) => r.paths),
+  /*
+    工作区文件变更。**不是文件系统 watcher** —— 只覆盖经由应用发生的变更
+    (编辑器保存、Agent 工具写入、插件自己的写入)。外部编辑器、git checkout
+    改的文件不会到这里,见协议里 workspace.subscribeChanges 的说明。
+  */
+  onDidChangeFiles(handler, options) {
+    const first = handlers.workspaceChanges.size === 0
+    handlers.workspaceChanges.add(handler)
+    if (first) void call('workspace.subscribeChanges', { globs: options?.globs })
+    return new Disposable(() => {
+      handlers.workspaceChanges.delete(handler)
+      if (handlers.workspaceChanges.size === 0) void call('workspace.unsubscribeChanges')
+    })
+  }
 }
 
-export const process_ = { exec: (command, args, options) => call('process.exec', { command, args: args ?? [], ...(options ?? {}) }) }
+export const process_ = {
+  exec: (command, args, options) => call('process.exec', { command, args: args ?? [], ...(options ?? {}) }),
+  /*
+    流式跑命令。返回一个**句柄对象**,不是子进程 —— 插件拿到的永远是数据
+    (见文件头「剥成数据回传」)。输出经宿主的 event 通道回来,在这里分发给
+    这次调用登记的回调。
+  */
+  execStream(command, args, options) {
+    const handlers_ = { onOutput: options?.onOutput, onExit: options?.onExit }
+    const started = call('process.execStream', { command, args: args ?? [], cwd: options?.cwd, timeoutMs: options?.timeoutMs })
+      .then((r) => { execStreams.set(r.execId, handlers_); return r.execId })
+    return {
+      /* 还没拿到 execId 就调 abort 是常态(用户点得快)—— 等它到手再发。 */
+      abort: () => started.then((execId) => call('process.execAbort', { execId })).then(() => undefined),
+      done: started.then((execId) => new Promise((resolve) => { execExits.set(execId, resolve) }))
+    }
+  }
+}
 export { process_ as process }
 
 export const net = { fetch: (url, init) => call('net.fetch', { url, ...(init ?? {}) }) }
@@ -267,6 +301,23 @@ export const secrets = {
 export const window_ = {
   showMessage: (kind, messageKey, params) => call('window.showMessage', { kind, messageKey, params }),
   showQuickPick: (items, placeholderKey) => call('window.showQuickPick', { items, placeholderKey }).then((r) => r.id),
+  showInputBox: (options) => call('window.showInputBox', options ?? {}).then((r) => r.value),
+  showConfirm: (options) => call('window.showConfirm', options ?? {}).then((r) => r.confirmed),
+  /*
+    进度条。给的是**包住一段异步工作**的形状,而不是裸的 start/end 两条 ——
+    裸的那种一旦中间抛异常,进度条就永远留在状态栏上转,而没有人再去关它。
+  */
+  async withProgress(options, task) {
+    const id = options?.id ?? 'p' + String(nextId++)
+    await call('window.progressStart', { id, titleKey: options?.titleKey ?? '' })
+    try {
+      return await task({
+        report: (update) => { void call('window.progressUpdate', { id, ...(update ?? {}) }) }
+      })
+    } finally {
+      await call('window.progressEnd', { id })
+    }
+  },
   setStatusBarItem: (id, textKey, options) => call('window.setStatusBarItem', { id, textKey, ...(options ?? {}) })
 }
 export { window_ as window }
@@ -289,7 +340,65 @@ export const tools = {
 }
 
 export const tabs = {
-  openCustomEditor: (viewType, path) => call('tabs.openCustomEditor', { viewType, path })
+  openCustomEditor: (viewType, path) => call('tabs.openCustomEditor', { viewType, path }),
+  openWebApp: (webAppId) => call('tabs.openWebApp', { webAppId }).then((r) => r.opened),
+  openBrowser: (url, options) => call('tabs.openBrowser', { url, ...(options ?? {}) }).then((r) => r.opened)
+}
+
+/*
+  配置项。**只读** —— 设置是用户的意思,不是插件的(见 shared 协议里
+  「configuration.get」的说明)。
+
+  ★ 这段曾经整个缺席:主进程早就实现了「configuration.get」,d.ts 也声明了
+  「ncw.configuration.get()」,但垫片里没有这个命名空间 —— 插件侧拿到的是
+  undefined,一调就 TypeError。症状是「读配置这件事在文档里有、在代码里没有」。
+  ★ 注释里不写反引号:这段住在模板字符串里,一个反引号就把模板提前闭合,
+  整个文件从「能编译」变成「语法错误」,而报错位置在几百行之外。
+*/
+export const configuration = {
+  get: () => call('configuration.get').then((r) => r.values)
+}
+
+/*
+  自定义编辑器的脏标记。
+
+  ★ 同样曾经缺席,而它的后果更重:宿主的「plugins:confirmClose」靠这张表回答
+  「关掉这个 Tab 之前有没有没存的东西」,表永远空 = 关 Tab 从不提示,
+  用户的改动静默消失。
+*/
+export const customEditors = {
+  setDirty: (documentId, path, dirty) => call('customEditors.setDirty', { documentId, path, dirty })
+}
+
+/*
+  Agent 集成。
+
+  ★ 主进程侧的拦截器 / 上下文提供者**早就实现了**(还有测试),但垫片里没有
+  「agent」命名空间,也没有处理反向 invocation 的分支 —— 于是「agent.intercept」
+  和「agent.context」两条能力在权限表里躺着,而没有任何插件能用到它们。
+*/
+export const agent = {
+  registerToolInterceptor(handler) {
+    handlers.interceptor = handler
+    void call('agent.registerInterceptor')
+    return new Disposable(() => { handlers.interceptor = null })
+  },
+  registerContextProvider(handler) {
+    handlers.contextProvider = handler
+    void call('agent.registerContextProvider')
+    return new Disposable(() => { handlers.contextProvider = null })
+  }
+}
+
+export const scm = {
+  status: () => call('scm.status'),
+  diff: (path, options) => call('scm.diff', { path, ...(options ?? {}) }),
+  log: (options) => call('scm.log', options ?? {}).then((r) => r.commits),
+  branches: () => call('scm.branches'),
+  stage: (paths) => call('scm.stage', { paths }),
+  commit: (message) => call('scm.commit', { message }).then((r) => r.hash),
+  createBranch: (name, options) => call('scm.createBranch', { name, ...(options ?? {}) }),
+  checkout: (name) => call('scm.checkout', { name })
 }
 
 export const plugins = {
@@ -392,6 +501,27 @@ export function __bootstrap(entry, id) {
       if (fn === undefined) throw new Error('no such api method: ' + payload.method)
       return { value: await fn(...(payload.args ?? [])) }
     }
+    /*
+      工具拦截器 / 上下文提供者。★ 这三个分支曾经**完全没有** —— 主进程一直在发
+      这三种 invocation,而垫片落到最后一行抛「unsupported invocation」,于是
+      agent.intercept / agent.context 两条能力对插件作者来说是不存在的。
+
+      没注册处理函数时回一个**空裁决**(而不是抛):宿主那边按「弃权」处理,
+      fail-open,一个没实现拦截器的插件不该把所有工具调用堵死。
+    */
+    if (kind === 'interceptor.willInvoke') {
+      if (handlers.interceptor === null) return {}
+      return (await handlers.interceptor(payload)) ?? {}
+    }
+    if (kind === 'interceptor.didInvoke') {
+      // didInvoke 是通知型的:插件看一眼结果,回什么都不改变已经发生的事。
+      if (handlers.interceptor?.didInvoke !== undefined) { try { await handlers.interceptor.didInvoke(payload) } catch {} }
+      return {}
+    }
+    if (kind === 'context.provide') {
+      if (handlers.contextProvider === null) return ''
+      return (await handlers.contextProvider(payload)) ?? ''
+    }
     if (kind === 'plugins.event') {
       const set = eventSubscribers.get(payload.topic)
       if (set !== undefined) for (const handler of set) { try { handler(payload.payload, payload.from) } catch {} }
@@ -407,6 +537,24 @@ export function __bootstrap(entry, id) {
         for (const handler of handlers.appearance) {
           try { handler(payload.appearance) } catch {}
         }
+      }
+      if (payload.event === 'workspace.changed') {
+        for (const handler of handlers.workspaceChanges) {
+          try { handler(payload.changes ?? []) } catch {}
+        }
+      }
+      if (payload.event === 'process.output') {
+        const entry = execStreams.get(payload.execId)
+        try { entry?.onOutput?.({ stream: payload.stream, chunk: payload.chunk, truncated: payload.truncated === true }) } catch {}
+      }
+      if (payload.event === 'process.exit') {
+        const entry = execStreams.get(payload.execId)
+        execStreams.delete(payload.execId)
+        const result = { code: payload.code, timedOut: payload.timedOut === true }
+        try { entry?.onExit?.(result) } catch {}
+        const resolve = execExits.get(payload.execId)
+        execExits.delete(payload.execId)
+        resolve?.(result)
       }
       return {}
     }
@@ -462,7 +610,20 @@ function viewShimJs(): string {
       state.tokens = tokens
       for (const key of Object.keys(tokens)) {
         const value = tokens[key]
-        if (typeof value === 'string') root.style.setProperty('--ncw-' + key, value)
+        if (typeof value !== 'string') continue
+        root.style.setProperty('--ncw-' + key, value)
+        /*
+          ★ 同一个值**再写一个 \`--color-<token>\`**。
+
+          那是宿主内部的名字,本不该出现在插件面前 —— 但 \`nextcowork/ui\` 下发的
+          那份 CSS 是拿宿主组件原样生成的,里面的 \`bg-canvas\` 读的就是
+          \`--color-canvas\`。不写这一份,用 \`nextcowork/ui\` 的视图会永远停在
+          静态默认值上:用户换了强调色、调了对比度,宿主变了而插件视图纹丝不动。
+
+          为什么不在那份 CSS 里做 \`--color-x: var(--ncw-x, …)\` 的映射:自引用
+          会让自定义属性成环,**两边一起失效**,整个视图无色且零报错。
+        */
+        root.style.setProperty('--color-' + key, value)
       }
     }
     root.dataset.theme = state.appearance
@@ -482,17 +643,37 @@ function viewShimJs(): string {
 /**
  * 把垫片插进视图 HTML 的 `<head>` 里。**纯函数,单测冲它来。**
  *
+ * 注入三样,顺序就是下面 `tag` 的拼接顺序,而且顺序是有讲究的:
+ *
+ * 1. **import map** —— 必须在任何 `<script type="module">` **之前**。晚了的话
+ *    浏览器已经开始解析模块依赖,map 直接被忽略(控制台一句
+ *    "An import map is added after module script load was triggered"),
+ *    症状是插件视图报 `Failed to resolve module specifier "react"`。
+ * 2. **主题垫片** —— 见下面 `viewShimJs` 的说明。
+ * 3. **`ui.css`** —— `nextcowork/ui` 那批控件的样式。插件不写任何引用就能拿到
+ *    正确外观;交给插件自己引的话,「忘了引」的症状是有布局没颜色,
+ *    而那看起来像是宿主坏了。
+ *
  * ★ 插在 `<head>` **开头**,不是末尾、更不是 `</body>` 前:宿主是在 iframe 的
  * `load` 事件里发第一条 `ncw:theme` 的,而 `load` 晚于全部解析 —— 只要垫片
  * 在文档里出现过,监听器就一定先于那条消息登记。但插件自己的 `<script>` 可能
  * 同步读 `__ncwTheme`,所以要抢在它们前面。
+ *
+ * ★ 插件**自带** import map 的情况:我们这份仍然排在前面。Chromium 129+
+ * 支持多份 import map(Electron 44 = Chromium 140),先出现的那份优先 ——
+ * 也就是插件覆盖不掉 `react` / `nextcowork/ui` 的指向。这是**有意**的:
+ * 那几个名字指向宿主下发的实例,插件换掉它等于自带第二份 React,
+ * 而那的症状是 "Invalid hook call",几乎不可能从现象反推到原因。
  *
  * 没有 `<head>` 的畸形文档(插件手写的片段)走 `<html>` 之后;再没有就顶在
  * 最前面 —— 浏览器会把它收进隐式的 head。**任何一种情况都不能静默跳过注入**,
  * 那等于这个插件的视图永远不跟随主题,而且不报错。
  */
 export function injectViewShim(html: string, nonce: string): string {
-  const tag = `<script nonce="${nonce}">${viewShimJs()}</script>`
+  const tag =
+    `<script nonce="${nonce}" type="importmap">${JSON.stringify({ imports: RUNTIME_IMPORTS })}</script>` +
+    `<script nonce="${nonce}">${viewShimJs()}</script>` +
+    `<link rel="stylesheet" href="${RUNTIME_STYLESHEET}">`
   const head = /<head[^>]*>/i.exec(html)
   if (head !== null) {
     const at = head.index + head[0].length
@@ -506,9 +687,70 @@ export function injectViewShim(html: string, nonce: string): string {
   return tag + html
 }
 
+/**
+ * 插件视图运行时:**URL 路径 → 产物文件名**。
+ *
+ * ## 为什么是宿主下发,而不是插件各打各的
+ *
+ * 插件自己打也能跑(CSP 放行 `'self'` 的外部脚本),代价有三条,且都要装了
+ * 好几个插件之后才显形:每个视图一份 React(N 个 iframe = N 份运行时);
+ * 控件各自重画,宿主一改尺寸配色所有插件同时变歪且无人收到通知;
+ * 插件锁死在它打包那天的 React 版本上。
+ *
+ * ## `__` 前缀
+ *
+ * 和 `__host.html` / `__runtime.js` 同一套命名:这些路径**先于**包内文件匹配,
+ * 所以插件包里同名的文件永远取不到。前缀是为了让这种遮蔽显而易见 ——
+ * 没有前缀的话,一个正好叫 `ui.js` 的插件文件会莫名其妙变成宿主的那份。
+ *
+ * ★ 数据驱动:新增一个下发模块 = 这张表加一行 + 下面 `RUNTIME_IMPORTS` 加一行。
+ */
+const RUNTIME_FILES: Readonly<Record<string, string>> = {
+  '/__react-core.js': 'react-core.js',
+  '/__react.js': 'react.js',
+  '/__react-dom.js': 'react-dom.js',
+  '/__react-dom-client.js': 'react-dom-client.js',
+  '/__jsx-runtime.js': 'jsx-runtime.js',
+  '/__jsx-dev-runtime.js': 'jsx-dev-runtime.js',
+  '/__ui.js': 'ui.js',
+  '/__ui.css': 'ui.css',
+  '/__view.js': 'view.js'
+}
+
+/**
+ * 注入进每个插件视图的 import map:**裸模块名 → 上面那张表里的 URL**。
+ *
+ * ★ `react-dom/client` 和 `react` 必须落在**同一个核**(`react-core.js`)上 ——
+ * 两份 React 实例的症状是 "Invalid hook call",而报错位置指向插件自己的组件,
+ * 几乎不可能从现象反推到「宿主发了两份 React」。
+ */
+const RUNTIME_IMPORTS: Readonly<Record<string, string>> = {
+  react: '/__react.js',
+  'react-dom': '/__react-dom.js',
+  'react-dom/client': '/__react-dom-client.js',
+  'react/jsx-runtime': '/__jsx-runtime.js',
+  'react/jsx-dev-runtime': '/__jsx-dev-runtime.js',
+  'nextcowork/ui': '/__ui.js',
+  'nextcowork/view': '/__view.js'
+}
+
+const RUNTIME_STYLESHEET = '/__ui.css'
+
+/**
+ * 运行时产物目录。由 `ipc/plugins.ts` 注入 —— 同 `PluginRootResolver` 的理由:
+ * **协议层不认识 app**,它只认自己收到的 URL。
+ *
+ * 空串 = 还没注入(或者构建产物不在)。那种情况下这几个 URL 回 404,
+ * 而不是去读一个拼错的路径。
+ */
+let runtimeDir = ''
+
+export function setPluginRuntimeDir(dir: string): void {
+  runtimeDir = dir
+}
+
 /** `<userData>/plugins/<id>` 的解析器。由 `host-window.ts` 注入,协议层不认识 app。 */
 export type PluginRootResolver = (pluginId: string) => { root: string; main: string } | undefined
-
 let resolveRoot: PluginRootResolver = () => undefined
 
 export function setPluginRootResolver(resolver: PluginRootResolver): void {
@@ -586,6 +828,30 @@ export async function handlePluginRequest(
   }
   if (path === '/__runtime.js') {
     return new Response(runtimeJs(pluginId), { status: 200, headers: headers(MIME['.js'] as string) })
+  }
+
+  /*
+    视图运行时(React / nextcowork/ui / nextcowork/view)。
+
+    ★ 匹配放在**包内文件之前**:插件包里恰好同名的文件取不到宿主这份。
+    反过来的话,一个自带 `ui.js` 的插件会把所有视图的控件实现换掉,
+    而 import map 指向的还是这个路径 —— 那是一条能装下任意代码的后门。
+
+    ★ 这些产物**不属于任何一个插件**,但仍然要求 `resolver(pluginId)` 认得
+    调用方(上面已经查过)—— 没装过的插件 origin 连 403 都过不去,
+    自然也拿不到运行时。
+  */
+  const runtimeFile = RUNTIME_FILES[path]
+  if (runtimeFile !== undefined) {
+    if (runtimeDir === '') return new Response('not found', { status: 404 })
+    const target = join(runtimeDir, runtimeFile)
+    try {
+      const response = await net.fetch(pathToFileURL(target).toString())
+      if (!response.ok) return new Response('not found', { status: 404 })
+      return new Response(response.body, { status: 200, headers: headers(mimeOf(runtimeFile)) })
+    } catch {
+      return new Response('not found', { status: 404 })
+    }
   }
 
   const target = resolveInsidePackage(entry.root, path)

@@ -7,8 +7,13 @@ export default tseslint.config(
     `examples/<id>/dist/` 下 —— 那里面是 esbuild 打出来的 8MB bundle,
     让 lint 去读它既没有意义,又会因为「浏览器全局在 Node 配置里没定义」
     刷出几十条假报错。
+
+    `resources/plugin-runtime/**` 同理:那是 `scripts/build-plugin-runtime.mjs`
+    产出的 React 与控件包(压缩过、不进版本库),和 `out/` 是同一类东西。
+    不挡的话 `npm run lint` 会因为它多出一千多条 `'document' is not defined`——
+    而那些「报错」指的是一份本来就只在浏览器里跑的产物。
   */
-  { ignores: ['out/**', 'dist/**', 'examples/*/dist/**', 'node_modules/**', 'packages/*/template/**'] },
+  { ignores: ['out/**', 'dist/**', 'examples/*/dist/**', 'node_modules/**', 'packages/*/template/**', 'resources/plugin-runtime/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -57,11 +62,33 @@ export default tseslint.config(
   },
   {
     /**
+     * `packages/plugin-api/*.d.ts` 是**发布给插件作者**的环境声明包。
+     *
+     * ★ 这里必须用三斜线 `path` 引用:`nextcowork.d.ts` 要把
+     * `nextcowork-view.d.ts`(`nextcowork/ui` 与 `nextcowork/view`)一并带进来,
+     * 而一旦改成 `import`,这个文件就变成了**模块** —— 于是里面的
+     * `declare module 'nextcowork'` 从「声明一个模块」变成「增强一个已存在的模块」,
+     * 而 `nextcowork` 在作者那边并不真的存在(运行期才由宿主注入)。
+     * 结果是作者的 `import * as ncw from 'nextcowork'` 直接报「找不到模块」。
+     *
+     * 分两个文件而不是合成一个,是因为它们描述的是**两个不同的执行环境**:
+     * 插件宿主页(有 preload、有权限链)和视图 iframe(只有一条 postMessage 通道)。
+     */
+    files: ['packages/plugin-api/*.d.ts'],
+    rules: {
+      '@typescript-eslint/triple-slash-reference': 'off'
+    }
+  },
+  {
+    /**
      * 各个包下面的 `template` 目录是**生成给别人的**源码,不是本仓库的源码:
      * 它 import 的 `nextcowork` 在这里根本不存在(那是宿主在运行期注入的),
      * 而里面的 `__PUBLISHER__` 之类占位符也不是合法标识符。
      * 让它进 lint 只会产生一堆必须被忽略的报错。
+     *
+     * `template-view` 是 `--view` 叠加上去的那一份,理由完全相同 ——
+     * 它 import 的 `react` / `nextcowork/ui` 也都是宿主运行期才注入的裸模块名。
      */
-    ignores: ['packages/*/template/**']
+    ignores: ['packages/*/template/**', 'packages/*/template-view/**']
   }
 )

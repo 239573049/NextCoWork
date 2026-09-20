@@ -180,6 +180,11 @@ async function makeManager(
   root: string
   approve: ReturnType<typeof vi.fn>
   trash: ReturnType<typeof vi.fn>
+  openExternal: ReturnType<typeof vi.fn>
+  clipboardBox: { text: string }
+  openTab: ReturnType<typeof vi.fn>
+  requestInteraction: ReturnType<typeof vi.fn>
+  emitProgress: ReturnType<typeof vi.fn>
 }> {
   const { promises: fs } = await import('node:fs')
   const { join } = await import('node:path')
@@ -194,17 +199,36 @@ async function makeManager(
   const runtime = fakeRuntime()
   const approve = vi.fn(async () => true)
   const trash = vi.fn(async () => {})
+  const openExternal = vi.fn(async (_url: string) => {})
+  // 一个能读能写的假剪贴板 —— 读回写进去的东西,才能验出「读到的是不是自己刚写的」
+  const clipboardBox = { text: '' }
+  const openTab = vi.fn()
+  // 缺省一律取消(没有窗口可问)。要验「问到了什么」的测试用 mockResolvedValueOnce 换掉
+  const requestInteraction = vi.fn(async (): Promise<unknown> => null)
+  const emitProgress = vi.fn()
   const manager = new PluginManager({
     host: nodeHost(),
     runtime,
     pluginRoot: root,
     hostVersion: '1.2.0',
+    // 清单声明的是插件 API 版本，不是应用版本(见 shared/plugin/api-version.ts)
+    apiVersion: '1.2.0',
     getKv: (key, fallback) => (kv.has(key) ? (kv.get(key) as typeof fallback) : fallback),
     setKv: (key, value) => { kv.set(key, value) },
     currentWorkspace: () => ({ id: 'ws', rootPath: root }),
     currentAppearance: () => 'dark' as const,
     approve,
     trash,
+    openExternal,
+    clipboard: {
+      readText: async () => clipboardBox.text,
+      writeText: async (text: string) => { clipboardBox.text = text }
+    },
+    // 用到 scm 的测试自己用 depOverrides 换掉它 —— 静默的空状态会让断言在「没接上」时依然是绿的
+    scmFor: () => { throw new Error('scm adapter is not wired in this test') },
+    openTab,
+    requestInteraction,
+    emitProgress,
     emitChanged: () => {},
     publishMessages: () => {},
     unpublishMessages: () => {},
@@ -216,7 +240,7 @@ async function makeManager(
     ...depOverrides
   })
   await manager.start()
-  return { manager, runtime, root, approve, trash }
+  return { manager, runtime, root, approve, trash, openExternal, clipboardBox, openTab, requestInteraction, emitProgress }
 }
 
 beforeEach(() => { clearAllActivity() })
@@ -450,6 +474,41 @@ describe('PluginManager · 激活', () => {
     await manager.setEnabled('acme.demo', false)
     expect(dispose).toHaveBeenCalledWith('acme.demo')
     expect(manager.catalog().plugins[0]?.status).toBe('disabled')
+  })
+})
+
+describe('PluginManager · 自定义编辑器激活', () => {
+  const editorManifest = {
+    ...MANIFEST,
+    activationEvents: ['onCustomEditor:demo.editor'],
+    contributes: {
+      commands: [],
+      menus: {},
+      customEditors: [{ viewType: 'demo.editor', displayName: '%editor%', selector: [{ filenamePattern: '*.demo' }] }]
+    }
+  }
+
+  /*
+    需求:打开编辑器 Tab 之前,渲染层要先 `plugins:activateEditor` 把插件唤醒。
+    不满足会怎样:协议层只为「spawn 过」的插件服务视图文件 —— 没醒的插件
+    iframe 第一个请求就是 403 "forbidden",Tab 里一片 forbidden 且零报错。
+    这条测试钉住的就是那次唤醒真的发生。
+  */
+  it('★ activateCustomEditor 按 onCustomEditor:<viewType> 唤醒插件', async () => {
+    const { manager, runtime } = await makeManager(editorManifest)
+    manager.grant('acme.demo', ['storage'])
+    await manager.setEnabled('acme.demo', true)
+    expect(await manager.activateCustomEditor('acme.demo', 'demo.editor')).toBe(true)
+    expect(runtime.spawned).toEqual(['acme.demo'])
+    expect(manager.catalog().plugins[0]?.status).toBe('active')
+  })
+
+  it('viewType 不在清单里 → false 且不唤醒(渲染层据此走降级态)', async () => {
+    const { manager, runtime } = await makeManager(editorManifest)
+    manager.grant('acme.demo', ['storage'])
+    await manager.setEnabled('acme.demo', true)
+    expect(await manager.activateCustomEditor('acme.demo', 'demo.other')).toBe(false)
+    expect(runtime.spawned).toEqual([])
   })
 })
 

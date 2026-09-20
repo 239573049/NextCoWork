@@ -1,10 +1,20 @@
 {
   "name": "@aidotnet/plugin-api",
-  "version": "0.1.1",
-  "description": "Type definitions for NextCoWork plugins. Zero runtime code.",
+  "version": "0.2.0",
+  "description": "Type definitions for NextCoWork plugins (logic, views and the host UI kit). Zero runtime code.",
   "license": "MIT",
   "types": "./nextcowork.d.ts",
-  "files": ["nextcowork.d.ts", "README.md"],
-  "keywords": ["nextcowork", "plugin", "types"],
-  "publishConfig": { "access": "public" }
+  "files": [
+    "nextcowork.d.ts",
+    "nextcowork-view.d.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "nextcowork",
+    "plugin",
+    "types"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

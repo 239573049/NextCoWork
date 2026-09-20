@@ -18,6 +18,10 @@
  *
  * ★ **查表的键是 `externalName`**(转录里存的那个),不是 `internalId`。
  * 内置工具两者一致,MCP 超长名的差异由 `parseMcpId` 吸收 —— 详见那里的说明。
+ *
+ * ★ **这里不产 UI 文案,只产 key + 参数**(见下面「文案层」):文案住在渲染层
+ * i18n(`renderer/i18n/tool-presenter.ts`),由渲染层启动时把 translate 注入回来。
+ * 在这个文件里写中文字符串等于让英文界面永远显示中文 —— 历史上正是这样。
  */
 import type { ToolOutput } from '../agent/message'
 
@@ -56,6 +60,83 @@ export interface ToolPresenter {
    * 「哪些工具长什么样」住在同一张表里 —— 下一个可停的工具只要在这儿加一个字段。
    */
   stoppable?: boolean
+}
+
+// ─────────────────── 文案层(由渲染层 i18n 注入) ───────────────────
+
+/**
+ * 内置工具卡片全部用户可见文案的 key,一张表同时是类型和清单。
+ *
+ * 需求:标题/摘要是 UI 文案,按仓库规矩必须住在渲染层 i18n 表里(AGENTS.md §6);
+ * 而这个注册表是 shared 纯函数,不能反向 import 渲染层。于是这里只产出
+ * **key + 抽好的参数**,字符串拼接由注入进来的翻译函数完成 —— 与插件 presenter
+ * 的注入层(`renderer/stores/plugins.ts`)是同一个模式。参数名全表统一用
+ * `target` / `count` / `code` / `days` / `time`,文案表因此能写成一族小函数。
+ */
+export const PRESENTER_COPY_KEYS = [
+  // 折叠态标题(动词 + 目标;target 为空串时由文案表退化成「读取…」这类进行时短语)
+  'chat.tool.title.read',
+  'chat.tool.title.ls',
+  'chat.tool.title.write',
+  'chat.tool.title.edit',
+  'chat.tool.title.glob',
+  'chat.tool.title.grep',
+  'chat.tool.title.bash',
+  'chat.tool.title.bashOutput',
+  'chat.tool.title.killShell',
+  'chat.tool.title.webFetch',
+  'chat.tool.title.webSearch',
+  'chat.tool.title.skill',
+  'chat.tool.title.task',
+  'chat.tool.title.taskWithDesc',
+  'chat.tool.title.scheduleCreate',
+  'chat.tool.title.scheduleUpdate',
+  'chat.tool.title.scheduleDelete',
+  'chat.tool.title.todo',
+  'chat.tool.title.scheduleList',
+  // 认不出工具名时的最终兜底标题
+  'chat.tool.fallback',
+  // 折叠态右侧摘要
+  'chat.tool.summary.lines',
+  'chat.tool.summary.items',
+  'chat.tool.summary.files',
+  'chat.tool.summary.matches',
+  'chat.tool.summary.results',
+  'chat.tool.summary.outputLines',
+  'chat.tool.summary.createdLines',
+  'chat.tool.summary.created',
+  'chat.tool.summary.replaced',
+  'chat.tool.summary.exitCode',
+  'chat.tool.summary.noOutput',
+  'chat.tool.summary.running',
+  'chat.tool.summary.stopped',
+  'chat.tool.summary.tasks',
+  'chat.tool.summary.scheduleDaily',
+  'chat.tool.summary.scheduleWeekly'
+] as const
+
+export type PresenterCopyKey = (typeof PRESENTER_COPY_KEYS)[number]
+
+export type PresenterTranslate = (
+  key: PresenterCopyKey,
+  params?: Record<string, string | number>
+) => string
+
+/**
+ * ★ 默认**原样回显 key**:渲染层还没接上(以及 shared 单测没注入替身)时,
+ * 标题会显示成 `chat.tool.title.read` —— 难看但可见、不崩,和渲染层 i18n
+ * 缺 key 时显示 key 本身(`interpolate` 的 missingKey)是同一条策略。
+ */
+let presenterCopy: PresenterTranslate = (key) => key
+
+/**
+ * 渲染层 i18n 在模块加载时调一次(`i18n/index.tsx`)。
+ *
+ * ★ 注入的是翻译函数**本体**而不是预先算好的字符串:每次渲染取 title 时才现查
+ * 当前 locale,切换语言不需要重建任何 presenter —— 已提交的转录卡片也因此自动跟换。
+ */
+export function setPresenterTranslate(t: PresenterTranslate): void {
+  presenterCopy = t
 }
 
 // ─────────────────────────── 取值原语(全部对 unknown 安全) ───────────────────────────
@@ -162,20 +243,20 @@ function lineCount(output: ToolOutput | undefined): number | undefined {
  * 「读取…」比「读取 」或「读取 undefined」都好 —— 前者读起来像正在进行,
  * 后者看着像 bug。流式中途每个工具卡片都会经过这条路径。
  */
-function withTarget(verb: string, target: string): string {
-  return target === '' ? `${verb}…` : `${verb} ${target}`
+function withTarget(key: PresenterCopyKey, target: string): string {
+  return presenterCopy(key, { target })
 }
 
 // ─────────────────────────── 各形态的摘要提取 ───────────────────────────
 
 function readSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   const n = lineCount(o)
-  return n === undefined ? undefined : `${String(n)} 行`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.lines', { count: n })
 }
 
 function lsSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   const n = lineCount(o)
-  return n === undefined ? undefined : `${String(n)} 项`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.items', { count: n })
 }
 
 /**
@@ -189,8 +270,11 @@ function writeSummary(_i: unknown, o: ToolOutput | undefined): string | undefine
   const created = /^Created\b/i.test(o.content)
   const m = /\((\d+)\s+lines?/i.exec(o.content)
   const lines = m?.[1]
-  if (lines === undefined) return created ? '新建' : undefined
-  return created ? `新建 ${lines} 行` : `${lines} 行`
+  if (lines === undefined) return created ? presenterCopy('chat.tool.summary.created') : undefined
+  const count = Number(lines)
+  return created
+    ? presenterCopy('chat.tool.summary.createdLines', { count })
+    : presenterCopy('chat.tool.summary.lines', { count })
 }
 
 /** Edit 的输出形如 `Edited a.ts: replaced 3 occurrence(s).` */
@@ -198,17 +282,17 @@ function editSummary(_i: unknown, o: ToolOutput | undefined): string | undefined
   if (o === undefined) return undefined
   const m = /replaced\s+(\d+)\s+occurrence/i.exec(o.content)
   const n = m?.[1]
-  return n === undefined ? undefined : `替换 ${n} 处`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.replaced', { count: Number(n) })
 }
 
 function globSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   const n = lineCount(o)
-  return n === undefined ? undefined : `${String(n)} 个文件`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.files', { count: n })
 }
 
 function grepSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   const n = lineCount(o)
-  return n === undefined ? undefined : `${String(n)} 处`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.matches', { count: n })
 }
 
 /**
@@ -236,7 +320,7 @@ function webFetchSummary(_i: unknown, o: ToolOutput | undefined): string | undef
 
 function webSearchSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   const n = lineCount(o)
-  return n === undefined ? undefined : `${String(n)} 条`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.results', { count: n })
 }
 
 /**
@@ -251,10 +335,10 @@ function bashSummary(_i: unknown, o: ToolOutput | undefined): string | undefined
   if (o === undefined) return undefined
   const m = /exited with code (\d+)/i.exec(o.content)
   const code = m?.[1]
-  if (code !== undefined) return `退出码 ${code}`
-  if (o.content.startsWith('(command succeeded with no output)')) return '无输出'
+  if (code !== undefined) return presenterCopy('chat.tool.summary.exitCode', { code })
+  if (o.content.startsWith('(command succeeded with no output)')) return presenterCopy('chat.tool.summary.noOutput')
   const n = lineCount(o)
-  return n === undefined ? undefined : `${String(n)} 行输出`
+  return n === undefined ? undefined : presenterCopy('chat.tool.summary.outputLines', { count: n })
 }
 
 /**
@@ -266,11 +350,11 @@ function bashSummary(_i: unknown, o: ToolOutput | undefined): string | undefined
  */
 function bashOutputSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
   if (o === undefined) return undefined
-  if (/is still running/.test(o.content)) return '运行中'
-  if (/was killed/.test(o.content)) return '已停止'
+  if (/is still running/.test(o.content)) return presenterCopy('chat.tool.summary.running')
+  if (/was killed/.test(o.content)) return presenterCopy('chat.tool.summary.stopped')
   const m = /exited with code (\d+)/i.exec(o.content)
   const code = m?.[1]
-  return code === undefined ? undefined : `退出码 ${code}`
+  return code === undefined ? undefined : presenterCopy('chat.tool.summary.exitCode', { code })
 }
 
 /** MCP / 未知工具:拿输出首行当摘要 —— 这是唯一通用且几乎总有意义的东西 */
@@ -281,14 +365,16 @@ function firstLineSummary(_i: unknown, o: ToolOutput | undefined): string | unde
   return text === '' ? undefined : text
 }
 
-const WEEKDAY_MARKS = ['日', '一', '二', '三', '四', '五', '六'] as const
-
 /**
  * 定时任务的规则摘要,从**入参**算。
  *
  * ★ 折叠态右侧那一格是用户唯一不展开就能看见「到底定在什么时候」的地方 ——
  * 而「模型把任务定错了时间」正是这四个工具最需要被一眼看穿的失误。
  * 规则形状对不上(流式中途的半截 JSON)就返回 undefined,不猜。
+ *
+ * 星期以**数字串**传给文案表(`days: '135'`,0=周日…6=周六,与
+ * `Date.prototype.getDay()` 同值域):「周一三五」还是「Mon, Wed, Fri」
+ * 属于 UI 文案,由 i18n 按语言拼,这里只给事实。
  */
 function scheduleSummary(i: unknown): string | undefined {
   if (typeof i !== 'object' || i === null) return undefined
@@ -300,12 +386,12 @@ function scheduleSummary(i: unknown): string | undefined {
     const at = typeof rule['at'] === 'string' ? rule['at'] : ''
     return at === '' ? undefined : at.replace('T', ' ')
   }
-  if (rule['kind'] === 'daily') return time === '' ? undefined : `每天 ${time}`
+  if (rule['kind'] === 'daily') return time === '' ? undefined : presenterCopy('chat.tool.summary.scheduleDaily', { time })
   if (rule['kind'] === 'weekly') {
     const days = Array.isArray(rule['weekdays']) ? rule['weekdays'] : []
-    const marks = days.map((d) => (typeof d === 'number' ? WEEKDAY_MARKS[d] : undefined)).filter((m) => m !== undefined)
-    if (marks.length === 0 || time === '') return undefined
-    return `周${marks.join('')} ${time}`
+    const digits = days.filter((d): d is number => typeof d === 'number' && d >= 0 && d < 7).map((d) => String(d)).join('')
+    if (digits === '' || time === '') return undefined
+    return presenterCopy('chat.tool.summary.scheduleWeekly', { days: digits, time })
   }
   return undefined
 }
@@ -315,7 +401,7 @@ function scheduledListSummary(_i: unknown, o: ToolOutput | undefined): string | 
   if (o === undefined) return undefined
   const m = /"count":\s*(\d+)/.exec(o.content)
   const n = m?.[1]
-  return n === undefined ? '0 条' : `${n} 条`
+  return presenterCopy('chat.tool.summary.tasks', { count: n === undefined ? 0 : Number(n) })
 }
 
 // ─────────────────────────── 注册表 ───────────────────────────
@@ -328,32 +414,32 @@ function scheduledListSummary(_i: unknown, o: ToolOutput | undefined): string | 
 const REGISTRY: Record<string, ToolPresenter> = {
   Read: {
     shape: 'read',
-    title: (i) => withTarget('读取', base(pick(i, 'file_path'))),
+    title: (i) => withTarget('chat.tool.title.read', base(pick(i, 'file_path'))),
     summary: readSummary
   },
   LS: {
     shape: 'read',
-    title: (i) => withTarget('列目录', base(pick(i, 'path'))),
+    title: (i) => withTarget('chat.tool.title.ls', base(pick(i, 'path'))),
     summary: lsSummary
   },
   Write: {
     shape: 'mutate',
-    title: (i) => withTarget('写入', base(pick(i, 'file_path'))),
+    title: (i) => withTarget('chat.tool.title.write', base(pick(i, 'file_path'))),
     summary: writeSummary
   },
   Edit: {
     shape: 'mutate',
-    title: (i) => withTarget('编辑', base(pick(i, 'file_path'))),
+    title: (i) => withTarget('chat.tool.title.edit', base(pick(i, 'file_path'))),
     summary: editSummary
   },
   Glob: {
     shape: 'search',
-    title: (i) => withTarget('查找', clip(pick(i, 'pattern'), 32)),
+    title: (i) => withTarget('chat.tool.title.glob', clip(pick(i, 'pattern'), 32)),
     summary: globSummary
   },
   Grep: {
     shape: 'search',
-    title: (i) => withTarget('搜索', clip(pick(i, 'pattern'), 32)),
+    title: (i) => withTarget('chat.tool.title.grep', clip(pick(i, 'pattern'), 32)),
     summary: grepSummary
   },
   Bash: {
@@ -361,45 +447,46 @@ const REGISTRY: Record<string, ToolPresenter> = {
     /**
      * 优先用模型自己写的 `description`(工具 schema 里要求「5-10 words」),
      * 它比命令本身更接近「这一步在干什么」;没有才退回命令原文。
+     * description 是模型产出的内容,按「不翻译领域值」的规矩原样显示。
      */
     title: (i) => {
       const desc = pick(i, 'description')
       if (desc !== '') return clip(desc, 40)
-      return withTarget('执行', clip(pick(i, 'command'), 40))
+      return withTarget('chat.tool.title.bash', clip(pick(i, 'command'), 40))
     },
     summary: bashSummary,
     stoppable: true
   },
   BashOutput: {
     shape: 'command',
-    title: (i) => withTarget('读后台输出', pick(i, 'bash_id')),
+    title: (i) => withTarget('chat.tool.title.bashOutput', pick(i, 'bash_id')),
     summary: bashOutputSummary
   },
   KillShell: {
     shape: 'command',
-    title: (i) => withTarget('停止后台命令', pick(i, 'shell_id'))
+    title: (i) => withTarget('chat.tool.title.killShell', pick(i, 'shell_id'))
   },
   WebFetch: {
     shape: 'network',
-    title: (i) => withTarget('抓取', hostOf(pick(i, 'url'))),
+    title: (i) => withTarget('chat.tool.title.webFetch', hostOf(pick(i, 'url'))),
     summary: webFetchSummary
   },
   web_search: {
     shape: 'network',
-    title: (i) => withTarget('搜索网络', clip(pick(i, 'query'), 32)),
+    title: (i) => withTarget('chat.tool.title.webSearch', clip(pick(i, 'query'), 32)),
     summary: webSearchSummary
   },
   TodoWrite: {
     shape: 'orchestration',
-    title: () => '更新任务清单',
+    title: () => presenterCopy('chat.tool.title.todo'),
     summary: (i) => todoSummary(i)
   },
   Task: {
     shape: 'orchestration',
     title: (i) => {
       const desc = pick(i, 'description')
-      if (desc !== '') return `子代理:${clip(desc, 30)}`
-      return withTarget('子代理', pick(i, 'subagent_type'))
+      if (desc !== '') return presenterCopy('chat.tool.title.taskWithDesc', { target: clip(desc, 30) })
+      return withTarget('chat.tool.title.task', pick(i, 'subagent_type'))
     },
     summary: (i) => {
       const t = pick(i, 'subagent_type')
@@ -408,16 +495,16 @@ const REGISTRY: Record<string, ToolPresenter> = {
   },
   Skill: {
     shape: 'orchestration',
-    title: (i) => withTarget('技能', pick(i, 'name'))
+    title: (i) => withTarget('chat.tool.title.skill', pick(i, 'name'))
   },
   ListScheduledTasks: {
     shape: 'orchestration',
-    title: () => '查看定时任务',
+    title: () => presenterCopy('chat.tool.title.scheduleList'),
     summary: scheduledListSummary
   },
   CreateScheduledTask: {
     shape: 'orchestration',
-    title: (i) => withTarget('新建定时任务', clip(pick(i, 'name'), 24)),
+    title: (i) => withTarget('chat.tool.title.scheduleCreate', clip(pick(i, 'name'), 24)),
     summary: (i) => scheduleSummary(i)
   },
   UpdateScheduledTask: {
@@ -425,13 +512,13 @@ const REGISTRY: Record<string, ToolPresenter> = {
     /** 改名时显示新名字,只改时间时退回 id —— 两种都比只显示动词有用 */
     title: (i) => {
       const name = pick(i, 'name')
-      return withTarget('修改定时任务', name === '' ? clip(pick(i, 'task_id'), 14) : clip(name, 24))
+      return withTarget('chat.tool.title.scheduleUpdate', name === '' ? clip(pick(i, 'task_id'), 14) : clip(name, 24))
     },
     summary: (i) => scheduleSummary(i)
   },
   DeleteScheduledTask: {
     shape: 'orchestration',
-    title: (i) => withTarget('删除定时任务', clip(pick(i, 'task_id'), 14))
+    title: (i) => withTarget('chat.tool.title.scheduleDelete', clip(pick(i, 'task_id'), 14))
   },
   echo: {
     shape: 'external',
@@ -443,7 +530,7 @@ const REGISTRY: Record<string, ToolPresenter> = {
 /** 名字完全认不出来时的兜底。保持现状行为:通用 JSON 详情。 */
 const FALLBACK: ToolPresenter = {
   shape: 'external',
-  title: () => '工具调用',
+  title: () => presenterCopy('chat.tool.fallback'),
   summary: firstLineSummary
 }
 

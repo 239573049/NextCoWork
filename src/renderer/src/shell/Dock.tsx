@@ -16,14 +16,14 @@ import { useTabMenu } from './tab-menu'
 import { submitTabRename } from './tab-rename-actions'
 import { usePluginsStore } from '../stores/plugins'
 
-export function DockRoot({ workspace, fallbackModel, runningSessionIds, rightVisible = true, bottomVisible = true }: { workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string>; rightVisible?: boolean; bottomVisible?: boolean }): ReactNode {
+export function DockRoot({ workspace, fallbackModel, maxOutputTokens, runningSessionIds, rightVisible = true, bottomVisible = true }: { workspace: Workspace; fallbackModel: FallbackModel; maxOutputTokens: number; runningSessionIds: ReadonlySet<string>; rightVisible?: boolean; bottomVisible?: boolean }): ReactNode {
   const dock = useTabsStore((state) => state.dockOf(workspace.id))
   const root = visibleDockNode(dock.root, dock.tabs, rightVisible, bottomVisible)
   const { t } = useI18n()
-  return <div data-dock-root className="flex min-h-0 min-w-0 flex-1 overflow-hidden">{root ? <DockNodeView key={root.id} node={root} workspace={workspace} fallbackModel={fallbackModel} runningSessionIds={runningSessionIds} /> : <EmptyState title={t('common.empty')} />}</div>
+  return <div data-dock-root className="flex min-h-0 min-w-0 flex-1 overflow-hidden">{root ? <DockNodeView key={root.id} node={root} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} runningSessionIds={runningSessionIds} /> : <EmptyState title={t('common.empty')} />}</div>
 }
 
-function DockNodeView({ node, workspace, fallbackModel, runningSessionIds }: { node: DockNode; workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string> }): ReactNode {
+function DockNodeView({ node, workspace, fallbackModel, maxOutputTokens, runningSessionIds }: { node: DockNode; workspace: Workspace; fallbackModel: FallbackModel; maxOutputTokens: number; runningSessionIds: ReadonlySet<string> }): ReactNode {
   if (node.type === 'split') {
     const horizontal = node.direction === 'horizontal'
     return (
@@ -34,16 +34,16 @@ function DockNodeView({ node, workspace, fallbackModel, runningSessionIds }: { n
           ? { gridTemplateColumns: `minmax(0, ${node.ratio}fr) 4px minmax(0, ${1 - node.ratio}fr)` }
           : { gridTemplateRows: `minmax(0, ${node.ratio}fr) 4px minmax(0, ${1 - node.ratio}fr)` }}
       >
-        <DockNodeView key={node.first.id} node={node.first} workspace={workspace} fallbackModel={fallbackModel} runningSessionIds={runningSessionIds} />
+        <DockNodeView key={node.first.id} node={node.first} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} runningSessionIds={runningSessionIds} />
         <DockSplitter workspaceId={workspace.id} splitId={node.id} direction={node.direction} ratio={node.ratio} />
-        <DockNodeView key={node.second.id} node={node.second} workspace={workspace} fallbackModel={fallbackModel} runningSessionIds={runningSessionIds} />
+        <DockNodeView key={node.second.id} node={node.second} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} runningSessionIds={runningSessionIds} />
       </div>
     )
   }
-  return <DockGroup key={node.id} node={node} workspace={workspace} fallbackModel={fallbackModel} runningSessionIds={runningSessionIds} />
+  return <DockGroup key={node.id} node={node} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} runningSessionIds={runningSessionIds} />
 }
 
-function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node: Extract<DockNode, { type: 'group' }>; workspace: Workspace; fallbackModel: FallbackModel; runningSessionIds: ReadonlySet<string> }): ReactNode {
+function DockGroup({ node, workspace, fallbackModel, maxOutputTokens, runningSessionIds }: { node: Extract<DockNode, { type: 'group' }>; workspace: Workspace; fallbackModel: FallbackModel; maxOutputTokens: number; runningSessionIds: ReadonlySet<string> }): ReactNode {
   const { t } = useI18n()
   const dock = useTabsStore((state) => state.dockOf(workspace.id))
   const tabs = groupTabs(node, dock.tabs)
@@ -165,23 +165,25 @@ function DockGroup({ node, workspace, fallbackModel, runningSessionIds }: { node
         onRename={(tab, value) => { void submitTabRename(workspace.id, tab, value) }}
       />
       {dragZone !== null && <DropOverlay zone={dragZone} />}
-      <DockContent tabs={tabs} active={active} workspace={workspace} fallbackModel={fallbackModel} emptyTitle={t('common.empty')} />
+      <DockContent tabs={tabs} active={active} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} emptyTitle={t('common.empty')} />
     </section>
   )
 }
 
-function DockContent({ tabs, active, workspace, fallbackModel, emptyTitle }: {
+function DockContent({ tabs, active, workspace, fallbackModel, maxOutputTokens, emptyTitle }: {
   tabs: ReturnType<typeof groupTabs>
   active: ReturnType<typeof groupTabs>[number] | undefined
   workspace: Workspace
   fallbackModel: FallbackModel
+  /** 设置 › 通用 › Agent 的输出额度,聊天视图用它算压力条分母,见 InnerViewProps */
+  maxOutputTokens: number
   emptyTitle: string
 }): ReactNode {
   const browsers = tabs.filter((tab) => tab.kind === 'browser')
   if (active === undefined) return <EmptyState title={emptyTitle} className="py-6" />
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1">
-      {active.kind !== 'browser' && <InnerView key={active.id} tab={active} workspace={workspace} fallbackModel={fallbackModel} />}
+      {active.kind !== 'browser' && <InnerView key={active.id} tab={active} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} />}
       {browsers.map((tab) => {
         const visible = tab.id === active.id
         return (
@@ -198,7 +200,7 @@ function DockContent({ tabs, active, workspace, fallbackModel, emptyTitle }: {
               here detaches its CDP target, so an Agent switching between two browser tabs would
               make the first tab impossible to inspect or click until the user selected it again.
             */}
-            <InnerView tab={tab} workspace={workspace} fallbackModel={fallbackModel} />
+            <InnerView tab={tab} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} />
           </div>
         )
       })}

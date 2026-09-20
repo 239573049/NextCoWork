@@ -6,16 +6,31 @@
  * `plugin/host-window.ts`,独立协议、独立白名单、独立能力校验。
  * 两者唯一的交点是 `PluginManager`,而它对两边的信任级别是不一样的。
  */
-import { app, dialog, shell } from 'electron'
+import { app, clipboard, dialog, shell } from 'electron'
 import { join } from 'node:path'
 import type { ResolvedTheme } from '../../shared/domain/settings'
-import { pluginAppearance } from '../plugin/protocol'
+import { pluginAppearance, setPluginRuntimeDir } from '../plugin/protocol'
 import type { PluginPermission } from '../../shared/plugin/permission'
 import type { PluginActivity, PluginCatalog } from '../../shared/plugin/state'
+import { PLUGIN_API_VERSION } from '../../shared/plugin/api-version'
 import { PLUGINS_DIR, PluginManager } from '../plugin/manager'
-import { ElectronPluginRuntime, pluginPreloadPath } from '../plugin/host-window'
+import type { PluginInteractionRequest } from '../../shared/plugin/ui-request'
+import type { PluginScmAdapter } from '../plugin/rpc'
+import { ElectronPluginRuntime, pluginPreloadPath, pluginRuntimeDir } from '../plugin/host-window'
 import { recentActivity } from '../plugin/diagnostics'
+import { setFileChangeListener } from '../kernel/tool/builtin/change-recorder'
+import { setPluginSkillRootsProvider } from '../kernel/skill/load'
 import { store } from '../state/store'
+import {
+  checkoutGitBranch,
+  commitGit,
+  createGitBranch,
+  getGitDiff,
+  getGitOverview,
+  listGitBranches,
+  listGitCommits,
+  stageGitPaths
+} from './git'
 import {
   getHost,
   getTools,
@@ -30,11 +45,78 @@ let manager: PluginManager | null = null
 
 /** 没起来时返回一份空 catalog —— 界面不该因为插件系统没初始化就打不开。 */
 function emptyCatalog(): PluginCatalog {
-  return { plugins: [], hostVersion: app.getVersion() }
+  return { plugins: [], hostVersion: app.getVersion(), apiVersion: PLUGIN_API_VERSION }
 }
 
 export function pluginManager(): PluginManager | null {
   return manager
+}
+
+/**
+ * 插件看得见的那一面 git —— **复用 `ipc/git.ts`,一行 git 命令都不在这里拼**。
+ *
+ * 需求:插件要能读仓库状态做判断(「有未提交改动就别发布」)、在用户批准后提交。
+ * 不满足会怎样:`ncw.scm.status()` 抛 `no handler` —— 而 `scm.read` / `scm.write`
+ * 两条能力在枚举里躺了一整版,任何勾选过它们的用户都被许诺了一件做不到的事。
+ *
+ * ★ 为什么不直接让 `rpc.ts` 去 import `ipc/git.ts`:那会把「插件能力层」钉死在
+ * Electron 的 IPC 层上(`git.ts` 会抛 `IpcError`、认得 `store`),而 `rpc.ts` 现在
+ * 只依赖 `KernelHost`,整层可以脱开 electron 直测。适配器在这里把两边的错误语义
+ * 也对齐了:git 那边的 `IpcError` 在这里变成插件协议里的失败,不会穿过去。
+ *
+ * ★ 「开不出来」(远程工作区 / 没装 git / 不是仓库)不是异常,`getGitOverview`
+ * 返回 `available: false`。这里把它翻译成一条**明确的拒绝**,而不是一份空状态 ——
+ * 空状态会让插件以为「这是个干净的仓库」,然后据此做出错误的决定。
+ */
+function scmAdapterFor(workspaceId: string): PluginScmAdapter {
+  const requireOverview = async (): Promise<Extract<Awaited<ReturnType<typeof getGitOverview>>, { available: true }>> => {
+    if (workspaceId === '') throw new Error('no workspace is open')
+    const overview = await getGitOverview({ workspaceId })
+    if (!overview.available) throw new Error(`git is unavailable here: ${overview.reason}`)
+    return overview
+  }
+  return {
+    status: async () => {
+      const overview = await requireOverview()
+      return {
+        branch: overview.branch,
+        staged: overview.files.filter((f) => f.staged).map((f) => f.path),
+        unstaged: overview.files.filter((f) => f.unstaged || f.untracked).map((f) => f.path)
+      }
+    },
+    diff: async ({ path, staged }) => {
+      await requireOverview()
+      const result = await getGitDiff({ workspaceId, path, staged })
+      return { diff: result.text, binary: result.binary, truncated: result.truncated }
+    },
+    log: async ({ limit }) => {
+      await requireOverview()
+      const commits = await listGitCommits({ workspaceId, limit })
+      return { commits: commits.map((c) => ({ hash: c.hash, subject: c.subject, author: c.author, at: c.timestamp })) }
+    },
+    branches: async () => {
+      await requireOverview()
+      const branches = await listGitBranches({ workspaceId })
+      return { current: branches.find((b) => b.current)?.name ?? '', branches: branches.map((b) => b.name) }
+    },
+    stage: async (paths) => {
+      await requireOverview()
+      await stageGitPaths({ workspaceId, paths })
+    },
+    commit: async (message) => {
+      await requireOverview()
+      const commit = await commitGit({ workspaceId, message })
+      return { hash: commit.hash }
+    },
+    createBranch: async (name, checkout) => {
+      await requireOverview()
+      await createGitBranch({ workspaceId, name, checkout })
+    },
+    checkout: async (branch) => {
+      await requireOverview()
+      await checkoutGitBranch({ workspaceId, branch })
+    }
+  }
 }
 
 /**
@@ -54,6 +136,15 @@ export function notifyPluginsThemeChanged(appearance: ResolvedTheme): void {
 export async function startPlugins(): Promise<void> {
   if (manager !== null) return
   const host = getHost()
+  /*
+    ★ 视图运行时的位置要在**起任何插件之前**告诉协议层:一个 `onStartup` 的
+    插件可能在下一行就打开它的视图,而那时 import map 已经发出去了 ——
+    晚注入的症状是那一次打开的视图报 `Failed to resolve module specifier "react"`,
+    重开一次却好了,典型的「偶现」。
+  */
+  setPluginRuntimeDir(
+    pluginRuntimeDir({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() })
+  )
   const runtime = new ElectronPluginRuntime(
     (pluginId, request) => {
       const current = manager
@@ -142,6 +233,16 @@ export async function startPlugins(): Promise<void> {
       拿到抛错就把整条调用拒掉。撤掉逐次确认框之后,可恢复性只剩这一层。
     */
     trash: async (absolutePath) => { await shell.trashItem(absolutePath) },
+    /*
+      ★ URL 门在 `rpc.ts` 的 `normalizeExternalUrl`(只放行 https),这里只负责落地。
+      两件事分开是因为门要能脱开 electron 直测,而 `shell.openExternal` 不能。
+    */
+    openExternal: async (url) => { await shell.openExternal(url) },
+    clipboard: {
+      readText: () => clipboard.readText(),
+      writeText: (text) => clipboard.writeText(text)
+    },
+    scmFor: (workspaceId) => scmAdapterFor(workspaceId),
     emitChanged: () => { windows.emitToAll('plugins:changed', undefined) },
     publishMessages: (pluginId, locale, dict) => {
       /*
@@ -180,6 +281,14 @@ export async function startPlugins(): Promise<void> {
     */
     openCustomEditor: (pluginId, viewType, path) => {
       windows.emitToAll('plugins:openCustomEditor', { pluginId, viewType, path })
+    },
+    // 网页 / 视图 Tab 同理:只广播,落点由 `stores/tabs.ts` 决定。
+    openTab: (pluginId, target) => {
+      windows.emitToAll('plugins:openTab', { pluginId, target })
+    },
+    requestInteraction: (pluginId, request) => askRenderer(pluginId, request),
+    emitProgress: (pluginId, progress) => {
+      windows.emitToAll('plugins:progress', { pluginId, ...progress })
     },
     onToolsChanged: () => {
       /*
@@ -226,6 +335,30 @@ export async function startPlugins(): Promise<void> {
   installPluginToolProvider(() => manager?.contributedTools() ?? [])
   installPluginInterceptor((input) => manager?.intercept(input) ?? Promise.resolve({}))
   installPluginContextProvider((input) => manager?.provideContext(input) ?? Promise.resolve(''))
+  /*
+    插件自带的 Skill:把「现在有哪几个包内 skill 目录」这个问题接给管理器。
+
+    ★ 和上面三条同一个形状 —— 注册一个**每次现问**的函数,而不是把当前值推过去。
+    推值的话,用户启用/禁用插件之后 skill 目录不会跟着变,而那件事没有任何
+    地方会提示他(症状:禁用了插件,模型下一轮还在用它的 skill)。
+
+    ★ 也是为了断环:内核的扫描器不能 import 这一层(`ipc/plugins` →
+    `plugin/manager` → `kernel/skill/load` → `ipc/plugins`)。环在 ESM 里不报错,
+    只会让某一方在初始化时拿到 undefined。
+  */
+  setPluginSkillRootsProvider(() => manager?.contributedSkillRoots() ?? [])
+  /*
+    ★ 工作区变更的**事实来源**接在这里:Agent 每次写盘都过
+    `kernel/tool/builtin/change-recorder.ts`,那是它唯一的收口。
+
+    它不是文件系统 watcher,覆盖范围写在 `workspace.subscribeChanges` 的协议
+    注释里 —— 外部编辑器、git checkout 改的文件不会到这儿。工作区外的写入
+    直接丢:插件的路径视角只有工作区相对路径,给它一条区外路径它无从理解。
+  */
+  setFileChangeListener((change) => {
+    if (!change.inWorkspace) return
+    manager?.notifyWorkspaceChanged([{ path: change.relPath, kind: change.kind }])
+  })
 }
 
 /**
@@ -242,13 +375,82 @@ export async function startPlugins(): Promise<void> {
  */
 const pendingMessages: { pluginId: string; locale: string; dict: Record<string, string> }[] = []
 
+/**
+ * 向渲染层发起一次交互,等用户回答。
+ *
+ * ## 为什么不用 `dialog.showMessageBox`
+ *
+ * 系统对话框拼的是**裸文本**,既不跟随主题也不跟随语言(本文件里那两个遗留的
+ * `approve` / `requestPermissions` 框就是这个样子,注释里记着「计划 P2 接进
+ * 渲染层」)。插件的每一句话都是 l10n key,只有渲染层 `t()` 得出来。
+ *
+ * ## 超时与取消
+ *
+ * ★ 没有窗口、或者 `PLUGIN_INTERACTION_TIMEOUT_MS` 内没人回 → resolve 成
+ * **取消值**,不是 reject:用户没理会一个弹窗不是故障,而一个 reject 会在插件
+ * 那边变成一条它无从处理的异常。超时也必须有 —— 没有的话,窗口关掉的那一刻
+ * 这个 Promise 会永远挂着,而它背后可能是一个 `interactive` 工具调用。
+ */
+function askRenderer(pluginId: string, request: PluginInteractionRequest): Promise<unknown> {
+  const requestId = `${pluginId}:${String(nextInteractionId++)}`
+  const cancelled = request.kind === 'confirm' ? false : null
+  return new Promise<unknown>((resolve) => {
+    const finish = (value: unknown): void => {
+      if (!pendingInteractions.delete(requestId)) return
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => { finish(cancelled) }, PLUGIN_INTERACTION_TIMEOUT_MS)
+    timer.unref?.()
+    pendingInteractions.set(requestId, finish)
+    windows.emitToAll('plugins:interaction', { requestId, pluginId, request })
+  })
+}
+
+/** 等着用户回答的那几条。`requestId → 收下回执的函数`。 */
+const pendingInteractions = new Map<string, (value: unknown) => void>()
+let nextInteractionId = 1
+
+/**
+ * 一次交互最多等多久。
+ *
+ * ★ 比 `PLUGIN_TIMEOUT.REQUEST_MS`(30s)长:那一条管的是「宿主替插件做一件事
+ * 要多久」,而这一条在等**人**。30 秒读不完一句话再决定是常态。
+ * 但它必须有上限 —— 交互式工具调用的硬闸是 5 分钟,这里取同一档。
+ */
+const PLUGIN_INTERACTION_TIMEOUT_MS = 5 * 60 * 1000
+
+/**
+ * 渲染层把用户的回答送回来。
+ *
+ * ★ 认不出的 requestId **静默丢弃**:窗口重载、插件已被禁用、超时之后才点 ——
+ * 三种都是竞态,不是故障,报错只会在用户什么都没做错时弹一个红框。
+ */
+export function replyPluginInteraction(req: { requestId: string; value: unknown }): void {
+  pendingInteractions.get(req.requestId)?.(req.value)
+}
+
 export async function shutdownPlugins(): Promise<void> {
+  /*
+    ★ 挂起的交互全部按取消收口。不收的话,这些 Promise 会连同它们背后的
+    插件调用一起永远挂着 —— 而应用正在退出,没有任何人会再来回答。
+  */
+  for (const finish of [...pendingInteractions.values()]) finish(null)
+  pendingInteractions.clear()
+  // 变更通知的接线也要摘掉,理由同下面那两条:收尾期间的一次写盘不该再去问一个正在销毁的 manager。
+  setFileChangeListener(null)
   /*
     ★ 先摘接线再关。反过来的话,收尾期间进来的一次工具装配会问一个
     正在销毁的 manager —— 而那次失败会以「工具不存在」的名义出现在转录里。
   */
   installPluginInterceptor(null)
   installPluginContextProvider(null)
+  /*
+    ★ skill 的接线也摘掉,同一条理由。留着的话,退出期间一次 `listSkills`
+    (设置页还开着就可能发生)会去问一个正在销毁的 manager。
+    摘掉之后 provider 回落成「没有插件 skill」—— 那在这一刻正是事实。
+  */
+  setPluginSkillRootsProvider(null)
   await manager?.shutdown()
   manager = null
 }
@@ -388,6 +590,50 @@ export async function runPluginCommand(req: { pluginId: string; commandId: strin
   } catch (error) {
     throw new IpcError('unknown', (error as Error).message)
   }
+}
+
+/**
+ * 用户点了侧边栏上某个网页应用的入口。
+ *
+ * ★ 为什么要绕一趟主进程,而不是渲染层拿着 catalog 里的 URL 直接开 Tab:
+ *
+ * 1. **激活事件**(`onWebApp:<id>`)只有主进程知道怎么发 —— 一个 webapp 插件
+ *    可能同时带着 skills / themes,它们要在第一次打开时才装上去;
+ * 2. 「这个插件此刻能不能用」(禁用 / 待批准 / 装载失败)的判定只有一处
+ *    真源(`isRunnable`),让渲染层各判一次迟早会分叉。
+ *
+ * 校验与广播都在 `manager` 里(同 `tabs.openWebApp` RPC 那条路),这里只是
+ * 把用户的点击翻译成同一次请求。
+ */
+export async function openPluginWebApp(req: { pluginId: string; webAppId: string }): Promise<void> {
+  if (manager === null) throw new IpcError('unknown', 'plugin system is not running')
+  const opened = await manager.openWebApp(req.pluginId, req.webAppId)
+  if (!opened) throw new IpcError('unknown', `plugin ${req.pluginId} has no web app ${req.webAppId}`)
+}
+
+/**
+ * 自定义编辑器视图报上来的脏标记,由宿主代发(视图 iframe 够不着插件那条 RPC)。
+ *
+ * ★ 不抛错:插件已经被禁用 / 卸载时这条到不了任何地方,而那是竞态不是故障 ——
+ * 为它弹一个错误,等于在用户关掉插件之后再骂他一句。
+ */
+export function setPluginEditorDirty(req: {
+  pluginId: string
+  documentId: string
+  path: string
+  dirty: boolean
+}): void {
+  manager?.setEditorDirty(req.pluginId, req.documentId, req.path, req.dirty)
+}
+
+/**
+ * 打开自定义编辑器 Tab 之前的唤醒(见 manager.activateCustomEditor 的注释)。
+ * 返回而不是抛:唤醒失败走「降级态」而不是一次报错 —— 渲染层拿 false 就
+ * 不去渲染注定 403 的 iframe。
+ */
+export async function activatePluginEditor(req: { pluginId: string; viewType: string }): Promise<{ activated: boolean }> {
+  if (manager === null) return { activated: false }
+  return { activated: await manager.activateCustomEditor(req.pluginId, req.viewType) }
 }
 
 /**

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image Studio</title>
+    <!--
+      ★ 这里不写 <meta> CSP:真正生效的那份由协议 handler 强制注入
+      (见 main/plugin/protocol.ts)。页面里再写一份只会造成「两份规则哪份生效」
+      的困惑,而 meta 版是页面内容的一部分 —— 插件自己能改。
+    -->
+    <!-- esbuild 把 `import './styles.css'` 抽成同名的 main.css;忘了引它
+         的话编辑器功能都在,但整排控件没有样式。 -->
+    <link rel="stylesheet" href="./main.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -25,3 +25,7 @@ electron.vite.config.d.ts
 # composite 工程的增量构建缓存,每次 `tsc -p` 都会在 tsconfig 旁边重新生成。
 # 曾经被误提交过(2026-09 清理),纯产物,不入库。
 *.tsbuildinfo
+
+# 插件视图运行时的构建产物(react-core.js / ui.js / ui.css / view.js)。
+# `npm run dev` 与 `npm run build` 都会先跑一次生成,按 mtime 跳过无谓重建。
+resources/plugin-runtime/

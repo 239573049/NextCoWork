@@ -38,10 +38,30 @@ export type CardBlock =
   | { type: 'progress'; fraction: number; label?: string }
   | { type: 'link'; href: string; label?: string }
   /**
+   * 一段 markdown,由**宿主的**受信渲染器解释(`components/markdown/**`)。
+   * 链接照 `link` 块的规矩路由到 openExternal,不允许裸 HTML。
+   *
+   * 需求:`text` 只能给一整段没有结构的字,而插件最常要表达的恰恰是
+   * 「几行要点 + 一个链接」。没有它,作者只能把 markdown 塞进 `text`,
+   * 然后在界面上看到一堆没被解释的 `**` 和 `-`。
+   */
+  | { type: 'markdown'; value: string }
+  /** 一列要点。与 `table` 的区别是它**不承诺列对齐** —— 一行一件事,可带色调。 */
+  | { type: 'list'; items: Array<{ label: string; tone?: CardTone; hint?: string }> }
+  /**
+   * 一个数值格:大字 + 说明 + 可选变化量。仪表类卡片用它,而不是把数字硬塞进
+   * `keyValue` —— 那一栏的字号是给「标签:值」准备的,塞进去读不出重点。
+   */
+  | { type: 'metric'; label: string; value: string; delta?: string; tone?: CardTone }
+  /** 分隔线。纯视觉,没有内容。 */
+  | { type: 'divider' }
+  /**
    * 交互按钮(第 2 层)。点了走反向通道 `plugins:cardAction` 回到**仍在运行**的工具。
    * 工具已结束(liveToolEmits 已撤)时点它无效果 —— 安全,不会打到别处。
+   *
+   * `confirm` = 点下去先要一次确认(危险动作用)。文案是 l10n key,不是句子。
    */
-  | { type: 'button'; actionId: string; label: string; tone?: CardTone }
+  | { type: 'button'; actionId: string; label: string; tone?: CardTone; confirm?: { titleKey: string } }
 
 export type ToolCard =
   | { kind: 'declarative'; blocks: CardBlock[] }
@@ -143,8 +163,60 @@ function sanitizeBlock(raw: unknown): CardBlock | null {
       const label = str(b.label, 256)
       if (actionId === undefined || actionId === '' || label === undefined) return null
       const t = tone(b.tone)
-      return { type: 'button', actionId, label, ...(t === undefined ? {} : { tone: t }) }
+      /*
+        ★ `confirm` 只认 **key 的形状**(不含空格、不太长),不认句子:
+        它会被渲染成一个模态上的问句,而主进程侧一律不产出用户可见的裸文本。
+        查不到的 key 显示成 key 本身 —— 看得见,才改得掉。
+      */
+      const confirmRaw = b.confirm
+      const confirmKey = confirmRaw !== null && typeof confirmRaw === 'object' && !Array.isArray(confirmRaw)
+        ? str((confirmRaw as Record<string, unknown>).titleKey, 128)
+        : undefined
+      const confirm = confirmKey !== undefined && confirmKey !== '' && !/\s/.test(confirmKey)
+        ? { titleKey: confirmKey }
+        : undefined
+      return {
+        type: 'button',
+        actionId,
+        label,
+        ...(t === undefined ? {} : { tone: t }),
+        ...(confirm === undefined ? {} : { confirm })
+      }
     }
+    case 'markdown': {
+      const value = str(b.value)
+      return value === undefined ? null : { type: 'markdown', value }
+    }
+    case 'list': {
+      const items = Array.isArray(b.items) ? b.items : []
+      const out: Array<{ label: string; tone?: CardTone; hint?: string }> = []
+      for (const item of items.slice(0, MAX_TABLE_ROWS)) {
+        if (item === null || typeof item !== 'object') continue
+        const i = item as Record<string, unknown>
+        const label = str(i.label)
+        if (label === undefined) continue
+        const t = tone(i.tone)
+        const hint = str(i.hint, 256)
+        out.push({ label, ...(t === undefined ? {} : { tone: t }), ...(hint === undefined ? {} : { hint }) })
+      }
+      return out.length === 0 ? null : { type: 'list', items: out }
+    }
+    case 'metric': {
+      const label = str(b.label, 256)
+      const value = str(b.value, 256)
+      if (label === undefined || value === undefined) return null
+      const delta = str(b.delta, 64)
+      const t = tone(b.tone)
+      return {
+        type: 'metric',
+        label,
+        value,
+        ...(delta === undefined ? {} : { delta }),
+        ...(t === undefined ? {} : { tone: t })
+      }
+    }
+    case 'divider':
+      return { type: 'divider' }
     default:
       return null
   }

@@ -11,7 +11,7 @@ import {
   ShieldCheck
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { SkillInstallScope, SkillListItem } from '../../../../shared/domain/skill'
+import type { SkillInstallScope, SkillListItem, SkillScope } from '../../../../shared/domain/skill'
 import { Button } from '../../components/ui/Button'
 import { Dialog } from '../../components/ui/Dialog'
 import { IconButton } from '../../components/ui/IconButton'
@@ -37,8 +37,31 @@ import type { SkillMarketItem } from '../../../../shared/domain/skill'
 import { useSkillInWorkspace } from './use-skill'
 
 type ViewMode = 'market' | 'mine'
-type ScopeFilter = 'all' | SkillInstallScope
+/**
+ * ★ 从 `SkillInstallScope` 换成 `SkillScope`。
+
+ * 两者曾经取值相同(global / project),所以当初用哪个都一样。现在不同了:
+ * `SkillInstallScope` 回答「能装到哪一层」(插件那层用户装不进去),
+ * `SkillScope` 回答「它现在在哪一层」—— 筛选器问的是后者。
+ * 继续用前者的话,插件带来的 skill 在任何一个筛选项下都选不中,
+ * 而「全部」里又看得见它,像是筛选器坏了。
+ */
+type ScopeFilter = 'all' | SkillScope
 type StatusFilter = 'all' | 'active' | 'enabled' | 'inactive' | 'untriggered'
+
+/**
+ * scope 的显示名。
+ *
+ * ★ 存在的理由:原先三处各写了一遍 `item.scope ?? t('skills.global')` 或者
+ * `=== 'project' ? … : …`。两个取值时那样写是对的,多了 `plugin` 之后
+ * 那几处会把一个**没翻译的裸英文单词**画到界面上,而且中英文界面长得一样 ——
+ * 三处独立失效,没有任何一处会报错(§6:JSX 里不准出现裸 UI 字符串)。
+ */
+function scopeLabel(scope: SkillScope | undefined, t: Translate): string {
+  if (scope === 'project') return t('skills.project')
+  if (scope === 'plugin') return t('skills.fromPlugin')
+  return t('skills.global')
+}
 
 export function SkillsFeature({
   onClose,
@@ -498,9 +521,25 @@ export function SkillsFeature({
                 </Button>
               ) : (
                 <>
-                  <Button variant="danger" onClick={() => setConfirmUninstall(true)}>
-                    {t('skills.uninstall')}
-                  </Button>
+                  {/*
+                    ★ 插件带来的那条**没有卸载按钮**。
+
+                    它的文件在插件包里,删掉就破坏了包的完整性,而且插件下次
+                    更新又会把它带回来。画出这颗按钮的话,它会去删
+                    `<userData>/skills/<name>` —— 一个根本不存在的路径,
+                    于是用户点了、看见一次失败,而「怎么才能去掉它」仍然没有答案。
+                    答案是去插件页禁用那个插件,下面那行提示说的就是这件事
+                    (§5「不做防御式 UI」:接不了的操作就别画控件)。
+                  */}
+                  {selected.pluginId === undefined ? (
+                    <Button variant="danger" onClick={() => setConfirmUninstall(true)}>
+                      {t('skills.uninstall')}
+                    </Button>
+                  ) : (
+                    <span className="text-[11px] leading-relaxed text-fg-faint">
+                      {t('skills.fromPluginHint', { plugin: selected.pluginId })}
+                    </span>
+                  )}
                   {workspaceId !== null && (
                     <Button
                       variant="accent"
@@ -543,7 +582,14 @@ export function SkillsFeature({
               </div>
               <div className="mt-2 flex items-center justify-between">
                 <span>{t('skills.scopeLabel')}</span>
-                <span className="text-fg">{selected.scope ?? t('skills.global')}</span>
+                {/*
+                  ★ 过 `scopeLabel()`,不要 `selected.scope ?? t('skills.global')`。
+
+                  原来那句在 scope 只有 global/project 两个值时是对的(project 这个
+                  英文单词恰好也能看)。现在多了 `plugin`,直接渲染的话界面上会
+                  出现一个没翻译的裸英文单词,而且中英文界面长得一样。
+                */}
+                <span className="text-fg">{scopeLabel(selected.scope, t)}</span>
               </div>
               {(marketDetail?.version ?? selected.version) && (
                 <div className="mt-2 flex items-center justify-between">
@@ -682,7 +728,10 @@ function MineDashboard({
   const scopeOptions = [
     { value: 'all', label: t('skills.scopeAll') },
     { value: 'global', label: t('skills.global') },
-    { value: 'project', label: t('skills.project') }
+    { value: 'project', label: t('skills.project') },
+    // 插件带来的那一层。用户装不进去,但看得见、筛得到 —— 「这些是谁带来的」
+    // 正是装了一堆插件之后最常问的问题。
+    { value: 'plugin', label: t('skills.fromPlugin') }
   ] as const
   const statusOptions = [
     { value: 'all', label: t('skills.statusAll') },
@@ -797,7 +846,7 @@ function MineDashboard({
               </button>
               <span className="inline-flex w-fit items-center gap-1 rounded-[6px] bg-tint px-2 py-1 text-[11px] text-fg-muted">
                 <Folder size={11} />
-                {item.scope === 'project' ? t('skills.project') : t('skills.global')}
+                {scopeLabel(item.scope, t)}
               </span>
               <div className="flex items-center gap-2">
                 <Toggle
@@ -936,7 +985,7 @@ function SkillCard({
         <div className="flex items-center gap-3 text-[11px] text-fg-muted">
           <span className="inline-flex items-center gap-1">
             <ShieldCheck size={13} />
-            {item.scope ?? t('skills.global')}
+            {scopeLabel(item.scope, t)}
           </span>
           <span className="inline-flex items-center gap-1">
             <Check size={13} />

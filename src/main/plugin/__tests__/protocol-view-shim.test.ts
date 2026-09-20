@@ -35,10 +35,37 @@ describe('插件视图的主题垫片', () => {
     expect(out).toContain("'ncw:theme'")
   })
 
-  it('token 写成 --ncw-* —— 那是给插件作者的公开名字,不是宿主内部的 --color-*', () => {
+  it('token 同时写 --ncw-*(给插件的公开名)与 --color-*(给宿主下发的那份 ui.css)', () => {
+    /*
+      原先这条断言是 `not.toContain('--color-')`,理由是「`--color-*` 是宿主的
+      实现细节,而 `--ncw-*` 才是给插件作者看的公开名字」。**那条理由仍然成立**,
+      所以 `--ncw-*` 一个字没动,文档里也照旧只写它。
+
+      改成两个都写,是因为多了一个当时不存在的消费者:`nextcowork/ui` 把宿主
+      `components/ui/**` 原样下发给视图,那批 CSS 里的 `bg-canvas` 读的就是
+      `--color-canvas`。只写 `--ncw-*` 的话,用了宿主控件的视图会永远停在
+      theme.css 的静态默认值上 —— 用户换了强调色,宿主变了而插件视图纹丝不动。
+
+      为什么不在 ui.css 里做 `--color-x: var(--ncw-x, …)` 的映射:那是自引用,
+      自定义属性成环时两边一起失效,整个视图无色且零报错。
+    */
     const out = injectViewShim('<html><head></head></html>', 'N')
     expect(out).toContain("'--ncw-'")
-    expect(out).not.toContain('--color-')
+    expect(out).toContain("'--color-'")
+  })
+
+  it('★ import map 排在主题垫片之前 —— 它必须先于任何 module script 出现', () => {
+    /*
+      晚于第一个 `<script type="module">` 的 import map 会被浏览器**整份忽略**,
+      控制台只有一句 "added after module script load was triggered",
+      而插件看到的是 `Failed to resolve module specifier "react"`。
+    */
+    const out = injectViewShim('<html><head><script type="module" src="./main.js"></script></head></html>', 'N')
+    expect(out.indexOf('type="importmap"')).toBeLessThan(out.indexOf('src="./main.js"'))
+    expect(out).toContain('"nextcowork/ui"')
+    expect(out).toContain('"react-dom/client"')
+    // 样式表一并注入:插件不写任何引用就该拿到正确外观
+    expect(out).toContain('<link rel="stylesheet" href="/__ui.css">')
   })
 
   it('★ 只认同源的消息 —— 视图是能被插件导航走的', () => {

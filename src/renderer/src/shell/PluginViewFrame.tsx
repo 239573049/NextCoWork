@@ -32,6 +32,7 @@ import { useEffect, useRef, type ReactNode } from 'react'
 import { THEME_TOKENS } from '../../../shared/domain/theme'
 import { cn } from '../lib/cn'
 import { readWorkspaceFile, writeWorkspaceFile } from '../services/workspace-files'
+import { setCustomEditorDirty } from '../services/plugins'
 
 export interface PluginViewFrameProps {
   pluginId: string
@@ -57,7 +58,8 @@ export interface PluginViewFrameProps {
  */
 type DocumentMessage =
   | { type: 'ncw:doc:ready' }
-  | { type: 'ncw:doc:save'; data: string }
+  // `encoding: 'base64'` 见下面保存分支 —— 图片编辑器的存回支线。
+  | { type: 'ncw:doc:save'; data: string; encoding?: 'base64' }
   | { type: 'ncw:doc:dirty'; dirty: boolean }
 
 export function PluginViewFrame({ pluginId, path, label, className, document: bound }: PluginViewFrameProps): ReactNode {
@@ -142,27 +144,67 @@ export function PluginViewFrame({ pluginId, path, label, className, document: bo
         void readWorkspaceFile(bound.workspaceId, bound.path)
           .then((file) => {
             revision = file.revision
-            // 只有文本文件有 `content`。`.excalidraw` 是 JSON,走不到别的分支;
-            // 真走到了就给空串,由视图自己决定画什么。
-            send({ type: 'ncw:doc:open', path: bound.path, data: file.kind === 'text' ? file.content : '' })
+            /*
+              需求:图片编辑类自定义编辑器要收得到图片字节。原来这条通道只送
+              文本 `content`,图片文件会收到空串 —— 表现为编辑器打开后一片空白
+              且零报错。图片给 `dataUrl`(视图可直接喂 <img>/canvas),顺带
+              `mime`;文本之外又读不出的(超限/损坏),维持空串由视图决定画什么。
+            */
+            const payload =
+              file.kind === 'text'
+                ? { data: file.content }
+                : file.kind === 'image'
+                  ? { data: file.dataUrl, mime: file.mime }
+                  : { data: '' }
+            send({ type: 'ncw:doc:open', path: bound.path, ...payload })
           })
           .catch(() => { send({ type: 'ncw:doc:open', path: bound.path, data: '' }) })
         return
       }
 
       if (message.type === 'ncw:doc:save' && typeof message.data === 'string') {
-        void writeWorkspaceFile({ workspaceId: bound.workspaceId, path: bound.path, content: message.data, revision })
+        /*
+          `encoding: 'base64'` 是图片编辑器的存回支线:主进程按 base64 解码并
+          只允许覆写已分类为 image 的文件。缺省不送该字段 = 文本,行为不变。
+        */
+        void writeWorkspaceFile({
+          workspaceId: bound.workspaceId,
+          path: bound.path,
+          content: message.data,
+          revision,
+          ...(message.encoding === 'base64' ? { encoding: 'base64' as const } : {})
+        })
           .then((saved) => {
             revision = saved.revision
             send({ type: 'ncw:doc:saved' })
           })
           .catch(() => { send({ type: 'ncw:doc:saveFailed' }) })
+        return
+      }
+
+      if (message.type === 'ncw:doc:dirty') {
+        /*
+          ★ 这条报文**此前被静默丢弃**:类型里声明着、视图也在发,而这个 switch
+          没有它的分支。后果不是「少个小圆点」—— 宿主的 `plugins:confirmClose`
+          靠这张脏表回答「关掉这个 Tab 之前有没有没存的东西」,表永远空 =
+          **关 Tab 从不挽留**,插件编辑器里没存的改动就这么没了,零提示。
+
+          `documentId` 用「工作区 + 路径」拼:同一个文件在两个 Tab 里打开时,
+          它们说的是同一份脏状态 —— 而那正是主进程按**文件**做挽留判断所需要的
+          (见 `shared/plugin/protocol.ts` 里 `customEditors.setDirty` 的 ★)。
+        */
+        void setCustomEditorDirty(
+          pluginId,
+          `${bound.workspaceId}:${bound.path}`,
+          bound.path,
+          message.dirty === true
+        ).catch(() => undefined)
       }
     }
 
     window.addEventListener('message', onMessage)
     return () => { window.removeEventListener('message', onMessage) }
-  }, [origin, bound?.workspaceId, bound?.path])
+  }, [origin, pluginId, bound?.workspaceId, bound?.path])
 
   return (
     <iframe

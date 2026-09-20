@@ -251,7 +251,14 @@ function assertPackageFiles(
   hasFile: (path: string) => boolean,
   hasDir: (path: string) => boolean
 ): void {
-  if (!hasFile(manifest.main)) throw new PluginInstallError(`main entry "${manifest.main}" is missing from the package`)
+  /*
+    ★ `kind: 'webapp'` 没有 `main`(清单解析那边已经保证了「写了就报错」),
+    所以这一条只对有代码的插件查。对 webapp 查的话,`hasFile('')` 一定是 false,
+    一个完全合法的零代码包会以「入口缺失」的名义装不上。
+  */
+  if (manifest.kind !== 'webapp' && !hasFile(manifest.main)) {
+    throw new PluginInstallError(`main entry "${manifest.main}" is missing from the package`)
+  }
   if (manifest.icon !== undefined && !hasFile(manifest.icon)) {
     throw new PluginInstallError(`icon "${manifest.icon}" is missing from the package`)
   }
@@ -277,8 +284,31 @@ function assertPackageFiles(
   for (const theme of manifest.contributes.themes) {
     if (!hasFile(theme.path)) throw new PluginInstallError(`theme file is missing: ${theme.path}`)
   }
+  /*
+    ★ skill 要连 `SKILL.md` 一起查,不能只查目录在不在。
+
+    扫描器对「目录在、里面却没有 SKILL.md」的处理是**跳过并记一条诊断**
+    (见 `kernel/skill/load.ts`),而那条诊断落在 Skill 页面上 —— 于是用户在
+    插件页看到「提供 2 条 Skill」,在 Skill 列表里只找到 1 条,两个页面谁都不
+    提另一个。在安装这一步拒掉,作者拿到的是一句话说清的失败。
+
+    这里仍然**不**校验 frontmatter(缺 description 之类):那要解析 YAML,而
+    那套规则的唯一权威在扫描器里。两处各写一份迟早会对不上,于是出现
+    「装得上但扫不出来」或者反过来。目录与文件的存在性是两边都同意的事实,
+    判定留给判定者。
+  */
   for (const skill of manifest.contributes.skills) {
     if (!hasDir(skill.path)) throw new PluginInstallError(`skill directory is missing: ${skill.path}`)
+    if (!hasFile(`${skill.path}/SKILL.md`)) {
+      throw new PluginInstallError(`skill "${skill.path}" has no SKILL.md — the skill scanner would skip it silently`)
+    }
+  }
+  // agents / modes 与 skills 同形:一个包内目录,由宿主既有的加载器去读。
+  for (const agent of manifest.contributes.agents) {
+    if (!hasDir(agent.path)) throw new PluginInstallError(`agent directory is missing: ${agent.path}`)
+  }
+  for (const mode of manifest.contributes.modes) {
+    if (!hasDir(mode.path)) throw new PluginInstallError(`mode directory is missing: ${mode.path}`)
   }
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dayPartOf, greetingOf } from '../domain/greeting'
+import { dayPartOf } from '../domain/greeting'
 
 /**
  * 问候语的 bug 只有一种形状:**边界差一小时**。而它在界面上极难发现 ——
@@ -34,10 +34,8 @@ describe('dayPartOf · 四个切点', () => {
   })
 })
 
-describe('greetingOf', () => {
-  it('每一段都有话说,且四句互不相同', () => {
-    const said = [0, 8, 14, 20].map(greetingOf)
-    expect(said.every((s) => s.length > 0)).toBe(true)
-    expect(new Set(said).size).toBe(4)
-  })
-})
+/*
+ * `greetingOf`(句子 → 段位)已删除:问候语文案搬进了渲染层 i18n
+ * (`chat.greeting.*`),shared 只保留切点。句子本身的完整性由 i18n 的
+ * 键一致性测试守着,这里不再重复断言。
+ */

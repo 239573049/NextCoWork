@@ -53,6 +53,9 @@ import { confirmDocumentChanges, useDocumentsStore } from '../stores/documents';
 import { DocumentDialogs } from '../views/files/DocumentDialogs';
 import { OverwriteConfirmDialog } from './OverwriteConfirmDialog';
 import { submitWorkspaceRename } from './tab-rename-actions';
+import { placePluginTab } from './plugin-tab-target';
+import { PluginInteractionHost } from './PluginInteractionHost';
+import { toast } from '../stores/toast';
 import { DockRoot } from './Dock';
 import type { DockNode } from '../../../shared/domain/dock';
 import { ConnectionDialogs } from './ConnectionDialogs';
@@ -128,6 +131,37 @@ export function AppShell({
       title: path.split('/').pop() ?? path
     });
   }), []);
+
+  /*
+    插件请求打开一个网页应用 / 一个网页地址(`contributes.webApps`、`tabs.openBrowser`)。
+
+    ★ 订阅与上面那条同处一室,理由也一样:发起它的可能是侧边栏入口、命令面板,
+    也可能是插件自己 —— 挂在任何一个页面上都会变成「没开过那一页就打不开」。
+
+    ★ 落点的判断在 `plugin-tab-target.ts`(纯函数,可直测),这里只负责拿到
+    当前工作区、翻译标题、开 Tab。安全判断主进程已经做完了。
+  */
+  useEffect(() => on('plugins:openTab', ({ pluginId, target }) => {
+    const workspaceId = useWindowStore.getState().activeWorkspaceId;
+    if (workspaceId === null) return;
+    /*
+      标题:webapp 的 title 是 `%key%`,注册进 i18n 的是 `plugin.<id>.<key>`。
+      ★ 这里就 `t()` 掉,因为 Tab 标题会**跟着布局落盘** —— 落一个 key 进去的话,
+      重启之后 Tab 条上写的就是 `plugin.ncw.bilibili.app.home`。
+    */
+    const title = target.kind === 'webapp'
+      ? t(`plugin.${pluginId}.${target.title.replace(/^%|%$/g, '')}` as Parameters<typeof t>[0])
+      : new URL(target.url).host;
+    const placement = placePluginTab(target, pluginId, title);
+    useTabsStore.getState().open(workspaceId, placement.kind, placement.pane, placement.init);
+    /*
+      ★ 降级要**说出来**。`open: 'feature'`(独立外层 Tab)这一版还没实现,
+      静默按内层 Tab 开的话,作者会以为自己写错了清单 —— 而他没写错。
+    */
+    if (placement.degradedFrom !== undefined) {
+      toast.info(t('pluginWebApp.featureFallback'), `plugin-open-${pluginId}`);
+    }
+  }), [t]);
 
   /*
     ★ **拆包的配套预热。** ChatView 现在是 lazy 的(见 views/registry.tsx 文件头:
@@ -544,7 +578,7 @@ export function AppShell({
                   {t("app.openWorkspace")}
                 </div>
               ) : (
-                <DockRoot workspace={workspace} fallbackModel={{ model: settings.defaultModel, modelProviderId: settings.defaultModelProviderId }} runningSessionIds={runningSessionIds} rightVisible={rightPanelOpen} bottomVisible={bottomPanelOpen} />
+                <DockRoot workspace={workspace} fallbackModel={{ model: settings.defaultModel, modelProviderId: settings.defaultModelProviderId }} maxOutputTokens={settings.maxOutputTokens} runningSessionIds={runningSessionIds} rightVisible={rightPanelOpen} bottomVisible={bottomPanelOpen} />
               )}
             </div>
           </>
@@ -565,6 +599,12 @@ export function AppShell({
       }} />}
       <DocumentDialogs />
       <OverwriteConfirmDialog />
+      {/*
+        插件要问用户一句话时弹出来的框(`window.showQuickPick` / `showInputBox` /
+        `showConfirm`)。挂在外壳上而不是某一页:发问的可能是任何一个插件,
+        而它不知道用户此刻在看哪一屏。
+      */}
+      <PluginInteractionHost />
       <EditWorkspaceDialog
         workspace={workspaces.find((w) => w.id === editWorkspaceId) ?? null}
         onClose={() => setEditWorkspaceId(null)}

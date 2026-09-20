@@ -2,6 +2,7 @@
  * 应用级设置。工作区级的在 workspace.ts。
  */
 import type { PermissionMode } from '../agent/permission'
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../agent/run-request'
 import type { ProxySettings } from './proxy'
 import { DEFAULT_PROXY, migrateLegacyProxy } from './proxy'
 import {
@@ -174,6 +175,25 @@ export const BACKUP_FREQUENCIES: readonly BackupFrequency[] = ['manual', 'daily'
 export const DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS = 600
 export const UPSTREAM_IDLE_TIMEOUT_BOUNDS = { min: 60, max: 3600 } as const
 
+/**
+ * 每轮请求下发给模型的最大输出 Token(设置 › 通用 › Agent)。
+ *
+ * ★ 常量放这里、默认值仍在 `shared/agent/run-request.ts`:那边是请求侧的语义源头
+ * (`resolveMaxOutputTokens` 在没有设置值时仍要有个数可用),这边只负责「设置项
+ * 合法区间」。两处分叉的话,设置页能存进去的值和请求侧认的值会对不上。
+ *
+ * 1024 下限是 thinking 预算留的余量(见 `model-runtime.ts` 的 `MIN_OUTPUT_HEADROOM`,
+ * 再小连最低档思考都放不下);200K 上限拦的是「多打一个 0」——真实模型的输出上限
+ * 今天最大在 128K 量级,再大只会让上下文压力读数整屏泛红。
+ */
+export const MAX_OUTPUT_TOKENS_BOUNDS = { min: 1024, max: 200_000 } as const
+
+/** 只认范围内的整数;坏值由调用点退回当前值(见 `mergeSettings`)。 */
+export function isMaxOutputTokens(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= MAX_OUTPUT_TOKENS_BOUNDS.min && value <= MAX_OUTPUT_TOKENS_BOUNDS.max
+}
+
 /** 只认范围内的整数秒;坏值由调用点退回当前值(见 `mergeSettings`)。 */
 export function isUpstreamIdleTimeoutSeconds(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) &&
@@ -337,6 +357,16 @@ export interface AppSettings {
   upstreamIdleTimeoutSeconds: number
 
   /**
+   * 设置 › 通用 › Agent:每轮请求给模型的最大输出 Token。
+   *
+   * ★ 这是全应用**唯一**决定输出额度的地方 —— 模型目录里那条 `maxOutputTokens`
+   * 只参与模型自身的校验与导入导出,不再压住这个值(理由写在
+   * `shared/agent/run-request.ts` 的 `resolveMaxOutputTokens` 上)。
+   * run 开始时取一次快照,和「默认权限档位」同一个口径:改完下一次新回复生效。
+   */
+  maxOutputTokens: number
+
+  /**
    * 界面「连接 › 网络」那一页。★ 它**真的作用于全应用的出站请求** ——
    * `main/net/proxy.ts` 把它翻译成 `session.defaultSession.setProxy`,
    * 于是模型请求、MCP 的 HTTP 传输、搜索适配器一并跟着走(它们都经 `net.fetch`)。
@@ -394,6 +424,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultModel: '',
   contextManagement: { experimentalMode: false, autoCompact: true },
   upstreamIdleTimeoutSeconds: DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   shell: 'system',
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
@@ -472,6 +503,11 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   //   秒杀,静默放宽/收紧都不是可接受的失败形态(shell 那条同理)。
   if (isUpstreamIdleTimeoutSeconds(patch.upstreamIdleTimeoutSeconds)) {
     next.upstreamIdleTimeoutSeconds = patch.upstreamIdleTimeoutSeconds
+  }
+  // ★ 同理退回当前值:这一项直接变成请求体里的 max_tokens,静默改成默认值
+  //   会让用户以为自己设的额度生效了,而长回答照旧被截断。
+  if (isMaxOutputTokens(patch.maxOutputTokens)) {
+    next.maxOutputTokens = patch.maxOutputTokens
   }
   // ★ 只认枚举:盘上/导入进来的坏值一个都不许落库,也不许被当成 `'system'`
   //   悄悄生效(`next` 是 current 的克隆,拒绝就是保留用户当前那一个)。
@@ -553,6 +589,7 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   defaultModelProviderId: true,
   contextManagement: true,
   upstreamIdleTimeoutSeconds: true,
+  maxOutputTokens: true,
   shell: true,
   subagent: true,
   gateway: true,

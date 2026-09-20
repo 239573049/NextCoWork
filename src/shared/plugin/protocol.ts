@@ -75,16 +75,100 @@ export interface PluginMethodMap {
 
   // process —— 非交互,argv[0] 查白名单,走权限链
   'process.exec': { params: { command: string; args: string[]; cwd?: string; timeoutMs?: number }; result: { code: number; stdout: string; stderr: string } }
+  /**
+   * 流式跑一条命令 —— 输出经 `kind: 'event'` 边跑边推,而不是等它结束。
+   *
+   * 需求:构建、测试、打包这类命令跑几十秒,`process.exec` 的形状让插件在那
+   * 几十秒里一个字都拿不到,只能在结束后一次性倒出来。
+   *
+   * ★ **审批只在 start 时问一次**(同 `process.exec`),不逐 chunk 问 ——
+   * 逐 chunk 问的结果是用户为了一条命令点二十次「允许」。
+   */
+  'process.execStream': { params: { command: string; args: string[]; cwd?: string; timeoutMs?: number }; result: { execId: string } }
+  'process.execAbort': { params: { execId: string }; result: Record<string, never> }
 
   // net —— 逐 URL 匹配 hostPermissions,response 剥成数据
   'net.fetch': { params: { url: string; method?: string; headers?: Record<string, string>; body?: string }; result: { status: number; headers: Record<string, string>; body: string } }
 
-  // scm
+  // scm —— 读类要 scm.read;写类要 scm.write,并且走既有审批链(isMutatingPermission)
   'scm.status': { params: Record<string, never>; result: { branch: string; staged: string[]; unstaged: string[] } }
+  /**
+   * 一个文件的 diff。
+   *
+   * ★ `path` 是**必填**的,没有「整仓 diff」这一档:整仓 diff 在大仓库上是一次
+   * 无上限的输出,而「哪些文件变了」`scm.status` 已经回答了。这条也因此能原样
+   * 落在 `ipc/git.ts` 的 `getGitDiff` 上(含未跟踪文件那条支线),不必另起一套。
+   */
+  'scm.diff': { params: { path: string; staged?: boolean }; result: { diff: string; binary: boolean; truncated: boolean } }
+  'scm.log': { params: { limit?: number }; result: { commits: { hash: string; subject: string; author: string; at: number }[] } }
+  'scm.branches': { params: Record<string, never>; result: { current: string; branches: string[] } }
+  'scm.stage': { params: { paths: string[] }; result: Record<string, never> }
+  'scm.commit': { params: { message: string }; result: { hash: string } }
+  /** `checkout: true` = 建完就切过去(`git switch -c`)。 */
+  'scm.createBranch': { params: { name: string; checkout?: boolean }; result: Record<string, never> }
+  'scm.checkout': { params: { name: string }; result: Record<string, never> }
+  /*
+    ★ **没有 push / pull。** 它们会把本机凭据用到远端,而失败形态(冲突、鉴权、
+    远端 hook 拒绝)不是一条 RPC 的返回值能如实回答的 —— 插件只看到「失败了」,
+    而用户看到的是一次自己没发起、也无从处理的远端操作。
+  */
+
+  // tabs(网页/视图)—— 主进程只校验与广播,Tab 是渲染层的概念,见 `tabs.openCustomEditor`
+  /**
+   * 打开清单里声明过的一个网页应用(`contributes.webApps`)。
+   *
+   * ★ **不需要 `tabs.browser`**:URL 在清单里写死,用户安装时就看得见,
+   * 运行期再问一次是在问一个已经回答过的问题。动态地址走 `tabs.openBrowser`。
+   */
+  'tabs.openWebApp': { params: { webAppId: string }; result: { opened: boolean } }
+  /**
+   * 打开一个任意地址(仍然逐 URL 匹配 `hostPermissions`,且只认 https)。
+   *
+   * ★ 能力 `tabs.browser` + 参数门两道都要过。只有能力没有参数门的话,一个
+   * 「B 站插件」可以在应用内打开任何网站,而用户在安装界面上看到的域名只有 B 站。
+   */
+  'tabs.openBrowser': { params: { url: string; open?: 'tab' | 'feature' | 'right' }; result: { opened: boolean } }
+  /*
+    ★ **没有 `tabs.openView`。** `contributes.views` 里 location 为 sidebar/panel 的
+    视图这一版还打不开,理由见 `shared/plugin/ui-request.ts` 里 `PluginTabTarget`:
+    现有的 `custom` Tab 从定义上就是「某个文件的编辑器」,塞进去只会开出一个
+    读不到任何文档的空编辑器。声明了这类视图的插件会在详情页看到一条诊断,
+    而不是一条点了没反应的入口。
+  */
+
+  // workspace 变更订阅 —— 反向通道走 `kind: 'event'`,见 `PluginInvocation`
+  /**
+   * 订阅工作区文件变更。
+   *
+   * ★ **这不是文件系统 watcher。** 它只覆盖**经由应用发生**的变更(编辑器保存、
+   * Agent 工具写入、插件自己的 `workspace.writeFile`)。外部编辑器、`git checkout`
+   * 改的文件**不会**触发 —— 仓库刻意没有递归 watcher(见 `ipc/workspace-search.ts`
+   * 的说明),把这条说清楚比给一个半真的 watcher 诚实。
+   */
+  'workspace.subscribeChanges': { params: { globs?: string[] }; result: Record<string, never> }
+  'workspace.unsubscribeChanges': { params: Record<string, never>; result: Record<string, never> }
 
   // window —— 宿主渲染的 UI,插件不接触宿主 DOM
   'window.showMessage': { params: { kind: 'info' | 'warn' | 'error'; messageKey: string; params?: Record<string, string | number> }; result: Record<string, never> }
   'window.showQuickPick': { params: { items: { id: string; labelKey: string }[]; placeholderKey?: string }; result: { id: string | null } }
+  /**
+   * 一行输入。`*Key` 是 l10n key 不是文案(同 `showMessage`)。
+   *
+   * ★ 用户直接关掉 = `{ value: null }`,不是错误:没理会一个弹窗不是故障。
+   * `password: true` 时渲染层用掩码输入,并且**回执不进活动日志**。
+   */
+  'window.showInputBox': { params: { titleKey: string; placeholderKey?: string; initial?: string; password?: boolean }; result: { value: string | null } }
+  /** 一次确认。`danger` 只影响渲染层的语气色,不改变行为。 */
+  'window.showConfirm': { params: { titleKey: string; detailKey?: string; danger?: boolean }; result: { confirmed: boolean } }
+  /**
+   * 长任务进度。三条一组(start/update/end),`id` 由插件自己起,同一 id 重复 start 视为更新。
+   *
+   * ★ 没有「自动结束」:插件崩了 / 被禁用时由宿主清空它的全部进度条,
+   * 而不是让一条永远转下去的进度留在状态栏上。
+   */
+  'window.progressStart': { params: { id: string; titleKey: string }; result: Record<string, never> }
+  'window.progressUpdate': { params: { id: string; fraction?: number; messageKey?: string }; result: Record<string, never> }
+  'window.progressEnd': { params: { id: string }; result: Record<string, never> }
   'window.setStatusBarItem': { params: { id: string; textKey: string | null; tooltipKey?: string; command?: string }; result: Record<string, never> }
 
   // commands / tools —— 注册与自查
@@ -97,6 +181,13 @@ export interface PluginMethodMap {
   // agent —— 拦截器与上下文提供者的注册(裁决本身走 invocation 反向通道)
   'agent.registerInterceptor': { params: Record<string, never>; result: Record<string, never> }
   'agent.registerContextProvider': { params: Record<string, never>; result: Record<string, never> }
+  /*
+    ★ **没有 `agent.registerSlashCommand`。** 一条斜杠命令背后就是一条**命令**
+    (`contributes.slashCommands[].command` 必填),它走的是已经存在的
+    `commands.register` + `command.run`。再给它一条独立的注册通道,等于同一件事
+    有两个注册点 —— 而插件作者只会注册其中一个,另一个静默失效。
+    菜单贡献(`contributes.menus`)用的也是同一条路。
+  */
 
   // customEditors
   'customEditors.register': { params: { viewType: string }; result: Record<string, never> }
@@ -200,13 +291,38 @@ export const PLUGIN_METHOD_PERMISSION = {
   'workspace.findFiles': 'workspace.read',
 
   'process.exec': 'process',
+  'process.execStream': 'process',
+  'process.execAbort': 'process',
 
   'net.fetch': 'net',
 
   'scm.status': 'scm.read',
+  'scm.diff': 'scm.read',
+  'scm.log': 'scm.read',
+  'scm.branches': 'scm.read',
+  'scm.stage': 'scm.write',
+  'scm.commit': 'scm.write',
+  'scm.createBranch': 'scm.write',
+  'scm.checkout': 'scm.write',
+
+  /*
+    ★ `openWebApp` / `openView` 不挂能力:它们只能指向**这个插件自己清单里
+    声明过的**条目(主进程逐条核对),而那份清单用户在安装时看过。
+    `openBrowser` 收的是任意 URL,所以要能力 + 参数门两道。
+  */
+  'tabs.openWebApp': null,
+  'tabs.openBrowser': 'tabs.browser',
+
+  'workspace.subscribeChanges': 'workspace.read',
+  'workspace.unsubscribeChanges': 'workspace.read',
 
   'window.showMessage': 'window.notify',
   'window.showQuickPick': null,
+  'window.showInputBox': null,
+  'window.showConfirm': null,
+  'window.progressStart': null,
+  'window.progressUpdate': null,
+  'window.progressEnd': null,
   'window.setStatusBarItem': null,
 
   'commands.register': null,

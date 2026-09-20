@@ -75,6 +75,7 @@ function plugin(
       id,
       name: id.split('.')[1] ?? id,
       publisher: id.split('.')[0] ?? id,
+      kind: 'extension',
       displayName: id,
       description: '',
       version: '1.0.0',
@@ -93,10 +94,14 @@ function plugin(
         menus: {},
         customEditors: editors,
         views: [],
+        webApps: [],
         tools: [],
         cardViews: [],
         keybindings: [],
+        slashCommands: [],
         skills: [],
+        agents: [],
+        modes: [],
         themes: [],
         unsupported: []
       }

@@ -25,6 +25,15 @@ export type WorkspaceFile =
 export interface WorkspaceFileWriteRequest extends WorkspaceFileRequest {
   content: string
   revision: string
+  /**
+   * `content` 按什么解释。缺省是 UTF-8 文本(既有行为,含二进制文本拒绝);
+   * `base64` 给图片编辑器这类**二进制覆写**用:content 是目标字节的 base64,
+   * 且只允许覆写一个已经分类为 `kind: 'image'` 的文件。
+   *
+   * ★ 不加这个分支,插件自定义编辑器只能把图片当文本存——主进程的
+   * `invalid-encoding` 检查会直接拒掉,表现为「编辑器里点保存永远失败」。
+   */
+  encoding?: 'utf8' | 'base64'
 }
 
 export type WorkspaceFileOperation =

@@ -20,7 +20,7 @@
  * 当成侧边栏量了 —— 浮层盖住了扫描线,量到的是它内部的分栏。
  */
 import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
 import type { SessionListItem } from '../../../shared/domain/session'
@@ -31,7 +31,7 @@ import { IconButton } from '../components/ui/IconButton'
 import { cn } from '../lib/cn'
 import { IS_MAC } from '../lib/platform'
 import { ChevronRight, PanelLeft } from 'lucide-react'
-import { FEATURE_ICON } from './icons'
+import { FEATURE_ICON, MENU_ICON } from './icons'
 import { useI18n, type Translate } from '../i18n'
 import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
 import { Dialog } from '../components/ui/Dialog'
@@ -40,6 +40,9 @@ import { duplicateSession, renameSession, setArchived, setFavorited } from '../s
 import { copyText, openSessionWindow } from '../services/app'
 import { Spinner } from '../components/ui/Spinner'
 import { toast } from '../stores/toast'
+import { usePluginsStore } from '../stores/plugins'
+import { openPluginWebApp } from '../services/plugins'
+import { pluginSidebarEntries } from './plugin-sidebar-entries'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'git', 'extensions']
 
@@ -80,6 +83,14 @@ export function Sidebar({
   auth: ClientAuthState
 }): ReactNode {
   const { t } = useI18n()
+  /*
+    插件贡献的网页应用入口。
+    ★ 订阅走 selector(`catalog`),不是整份 store:整份订阅会让插件活动日志
+    刷新也把整条侧边栏重渲一遍(AGENTS.md §9)。派生逻辑在
+    `plugin-sidebar-entries.ts`,useMemo 按 catalog 引用缓存。
+  */
+  const catalog = usePluginsStore((state) => state.catalog)
+  const pluginEntries = useMemo(() => pluginSidebarEntries(catalog), [catalog])
   return (
     <aside className="flex w-[297px] shrink-0 flex-col overflow-hidden rounded-panel bg-surface">
       {/*
@@ -139,6 +150,27 @@ export function Sidebar({
                 ) : undefined
               }
               onClick={() => onOpenFeature(f)}
+            />
+          )
+        })}
+        {/*
+          插件带进来的网页应用(`contributes.webApps`)。
+          ★ 排在内置入口**之后**,同菜单贡献的 clamp 规则(`mergeMenuItems`):
+          装十个插件也不该把「浏览器」挤下去。
+          ★ 失败要说出来 —— 这是个即发即忘的点击,不接的话「点了没反应」没有任何线索。
+        */}
+        {pluginEntries.map((entry) => {
+          const Icon = MENU_ICON[entry.icon]
+          return (
+            <NavItem
+              key={entry.id}
+              icon={<Icon size={16} />}
+              label={t(entry.titleKey as Parameters<typeof t>[0])}
+              onClick={() => {
+                void openPluginWebApp(entry.pluginId, entry.webAppId).catch(() => {
+                  toast.error(t('pluginWebApp.openFailed', { plugin: entry.pluginId }), `plugin-webapp-${entry.id}`)
+                })
+              }}
             />
           )
         })}

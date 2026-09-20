@@ -68,6 +68,17 @@ export type SpawnFn = (
     timeoutMs?: number
     /** 本地调用可冻结本次 run 的 shell，避免设置变更后提示词与执行器分叉。 */
     shell?: string
+    /**
+     * 边跑边拿输出。**可选**,不给就是原来的行为(只在结束时拿全量结果)。
+     *
+     * 需求:插件的 `process.execStream` 要让作者在一条跑几十秒的命令**进行中**
+     * 就拿到输出,而 `SpawnResult` 的形状做不到这件事。加在这个端口上、而不是让
+     * 插件层另写一个 spawn —— 那个实现里的进程组、背压、env 清洗三件事每一件
+     * 写错都会在生产里咬人(见 `node-spawn.ts` 文件头),复制一份等于重挖三个坑。
+     *
+     * ★ 回调抛异常不得影响命令本身,实现方逐个 try。
+     */
+    onOutput?: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void
   }
 ) => Promise<SpawnResult>
 

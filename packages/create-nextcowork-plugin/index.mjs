@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const TEMPLATE = join(here, 'template')
+/** `--view` 时叠加上去的那份:一个用宿主 React 与控件写的自定义编辑器。 */
+const VIEW_TEMPLATE = join(here, 'template-view')
 
 /** 与客户端 `PLUGIN_NAME_RE` 同一形状。这里先挡一次,免得到上传才被拒。 */
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -31,10 +33,17 @@ const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 /**
  * 默认的 engines range。
  *
+ * ★ 这里声明的是**插件 API 版本**,不是应用版本 —— 两者曾被当成同一个,结果是
+ * 宿主拿 `app.getVersion()`(2.x)去比 `^0.2.0`,按本模板生成的插件装上一律
+ * 显示「装载失败」。判定落点见 `shared/plugin/api-version.ts`。
+ *
  * ★ `^0.x` 按 npm 的规矩锁到 **minor** —— 插件 API 在 1.0 之前明确可以 break,
- * 写 `>=0.2.0` 的插件会在下一个 minor 里静默坏掉,而作者不会收到任何通知。
+ * 写 `>=0.3.0` 的插件会在下一个 minor 里静默坏掉,而作者不会收到任何通知。
+ *
+ * ★ 与 `PLUGIN_API_VERSION` 必须同步;`shared/plugin/__tests__/scaffold.test.ts`
+ * 直接读这一行来钉住它,不再自己抄一份默认值。
  */
-const DEFAULT_ENGINES = '^0.2.0'
+const DEFAULT_ENGINES = '^0.3.0'
 
 async function main() {
   const args = process.argv.slice(2)
@@ -50,6 +59,8 @@ async function main() {
     什么都没生成,也没有任何错误。这是 CI 里最难查的一类失败。
     所以:有 TTY 才问,没有就用 flag / 默认值。
   */
+  // `--view`:连带生成一个 React 视图(自定义编辑器)。见下面生成处的说明。
+  const wantsView = args.includes('--view')
   const interactive = process.stdin.isTTY === true && flag('yes') === undefined && !args.includes('--yes')
   const rl = interactive ? createInterface({ input: process.stdin, output: process.stdout }) : null
 
@@ -88,8 +99,55 @@ async function main() {
     if (next !== raw) await writeFile(file, next)
   }
 
+  /*
+    `--view`:再生成一个**用 React 写的自定义编辑器**。
+
+    ★ 为什么一定是自定义编辑器,而不是一个独立面板:插件视图想被打开,当前只有
+    两条路 —— 绑定到某类文件(customEditors),或者是一个网址(webApps)。
+    `contributes.views` 里 location 为 sidebar/panel 的那种解析得了、装得上,
+    但**没有任何地方能打开它**(插件详情页会给一条诊断)。脚手架生成一个点不开
+    的东西,比不生成更糟:作者会以为是自己写错了。
+
+    ★ 绑定到 `*.<name>`(如 `*.hello`)只是一个能立刻跑起来的默认值。
+    改 selector 就能接管别的后缀 —— 但**别用 `*`**:那会让这个插件抢走所有文件
+    的打开方式,包括代码文件。
+  */
+  if (wantsView) {
+    await cp(VIEW_TEMPLATE, dir, { recursive: true })
+    const pkgPath = join(dir, 'package.json')
+    const pkg = JSON.parse(await readFile(pkgPath, 'utf8'))
+    const viewType = `${publisher}.${name}.editor`
+    /*
+      `views` 是给 `nextcowork-plugin build` 看的:源文件 → 产物。
+      它**不是** `contributes.views`(那是给宿主看的贡献点)。两者名字像,
+      职责完全不同 —— 漏了前者的症状是「HTML 引了一个不存在的 .js」。
+    */
+    pkg.views = { 'view/editor.tsx': 'dist/view/editor.js' }
+    pkg.contributes.customEditors = [
+      {
+        viewType,
+        displayName: '%editor.displayName%',
+        selector: [{ filenamePattern: `*.${name}` }],
+        priority: 'default'
+      }
+    ]
+    pkg.contributes.views = [
+      { id: viewType, title: '%editor.displayName%', icon: 'file-pen', path: 'dist/view/editor.html' }
+    ]
+    pkg.activationEvents = [...new Set([...(pkg.activationEvents ?? []), `onCustomEditor:${viewType}`])]
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
+
+    // l10n 两边都要补 —— 少一边,宿主的清单校验会直接拒装(key 必须两份都有)
+    for (const [file, text] of [['zh-CN', '编辑器'], ['en-US', 'Editor']]) {
+      const path = join(dir, 'l10n', `${file}.json`)
+      const dict = JSON.parse(await readFile(path, 'utf8'))
+      dict['editor.displayName'] = text
+      await writeFile(path, `${JSON.stringify(dict, null, 2)}\n`)
+    }
+  }
+
   console.log(`
-✓ ${publisher}.${name} 已生成
+✓ ${publisher}.${name} 已生成${wantsView ? '(含 React 视图)' : ''}
 
   cd ${publisher}.${name}
   npm install
@@ -97,7 +155,11 @@ async function main() {
   npm run package
 
 然后在 NextCoWork 的「扩展 › 插件 › 安装插件」里选那个目录(或 ZIP)。
-改代码时用 npm run dev,它会监听 src/。
+改代码时用 npm run dev,它会监听 src/。${wantsView ? `
+
+视图在 view/editor.tsx,用的是宿主下发的 React 与控件(\`nextcowork/ui\`)——
+**不要**把 react 装进 dependencies,它们在打包时是 external。
+新建一个 .${name} 文件就能打开它。` : ''}
 `)
 }
 

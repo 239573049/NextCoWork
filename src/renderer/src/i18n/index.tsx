@@ -12,6 +12,7 @@ import { documentsZh, documentsEn } from './documents';
 import { filesZh, filesEn } from './files';
 import { editorZh, editorEn } from './editor';
 import { agentZh, agentEn } from './agent';
+import { toolPresenterZh, toolPresenterEn } from './tool-presenter';
 import { markdownZh, markdownEn } from './markdown';
 import { themesZh, themesEn } from './themes';
 import { sshZh, sshEn } from './ssh';
@@ -22,13 +23,16 @@ import { usageZh, usageEn } from './usage';
 import { searchZh, searchEn } from './search';
 import { builtinSearchZh, builtinSearchEn } from './builtin-search';
 import { goalZh, goalEn } from './goal';
+import { pluginSkillsZh, pluginSkillsEn } from './plugin-skills';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
 import { migrationZh, migrationEn } from './migration';
+import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import {
   pluginMessages,
   pluginMessagesVersion,
   subscribePluginMessages,
 } from './plugin-messages';
+import { setPresenterTranslate } from "../../../shared/domain/tool-presenter";
 
 export const SUPPORTED_LOCALES = ["zh-CN", "en-US"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
@@ -47,8 +51,10 @@ const ZH: Messages = {
   ...sshZh,
   ...workspaceZh,
   ...goalZh,
+  ...pluginSkillsZh,
   ...extensionsZh,
   ...gitZh,
+  ...pluginUiZh,
   ...usageZh,
   ...searchZh,
   ...builtinSearchZh,
@@ -56,6 +62,7 @@ const ZH: Messages = {
   ...migrationZh,
   ...themesZh,
   ...agentZh,
+  ...toolPresenterZh,
   ...documentsZh,
   ...filesZh,
   ...editorZh,
@@ -571,6 +578,9 @@ const ZH: Messages = {
   "general.contextManagementHint": "维护任务笔记、检索当前会话历史，并在接近上限时切换上下文窗口。",
   "general.autoCompact": "自动上下文压缩",
   "general.autoCompactHint": "达到上下文阈值时自动整理；关闭后可使用 /compact 手动整理。",
+  "general.maxOutputTokens": "最大输出 Token",
+  "general.maxOutputTokensHint": ({ min, max, fallback }) =>
+    `每轮请求允许模型输出的上限，对所有模型统一生效（${min}–${max}，默认 ${fallback}）。超过模型上下文窗口时按窗口收窄，下一次新回复生效。`,
   "general.shell": "执行 Shell",
   "general.shellSystem": "跟随系统（自动选择）",
   "general.shellHint": "默认跟随系统 Shell；手动选项需已安装并可通过 PATH 启动。仅作用于本机后续任务、命令钩子和新建终端，不影响正在执行的任务或 SSH。",
@@ -627,6 +637,7 @@ const ZH: Messages = {
   "about.updates.retry": "重试",
   "about.updates.later": "稍后",
   "about.updates.releaseNotes": "更新说明",
+  "about.updates.viewReleaseNotes": "查看更新说明",
   "about.updates.mandatory": "此更新是必需的。",
   "about.updates.minimumSupported": ({ version }) => `最低支持版本：${version}`,
   "about.updates.error.network": "无法连接更新服务，请检查网络后重试。",
@@ -2008,10 +2019,13 @@ const EN: Messages = {
   ...sshEn,
   ...workspaceEn,
   ...goalEn,
+  ...pluginSkillsEn,
   ...extensionsEn,
   ...gitEn,
+  ...pluginUiEn,
   ...themesEn,
   ...agentEn,
+  ...toolPresenterEn,
   ...documentsEn,
   ...filesEn,
   ...editorEn,
@@ -2531,6 +2545,9 @@ const EN: Messages = {
   "general.contextManagementHint": "Keeps task notes, searches this conversation, and switches context windows near the limit.",
   "general.autoCompact": "Automatic context compaction",
   "general.autoCompactHint": "Organize context at the threshold automatically; turn this off to use /compact manually.",
+  "general.maxOutputTokens": "Max output tokens",
+  "general.maxOutputTokensHint": ({ min, max, fallback }) =>
+    `Output ceiling sent with every request, shared by all models (${min}–${max}, default ${fallback}). It is narrowed to the model context window when larger, and applies to the next reply.`,
   "general.shell": "Command shell",
   "general.shellSystem": "Follow system (automatic)",
   "general.shellHint": "Uses the system shell by default. Manual choices must be installed and available on PATH. Applies only to subsequent local tasks, command hooks, and new terminals; running tasks and SSH are unchanged.",
@@ -2583,6 +2600,7 @@ const EN: Messages = {
   "about.updates.retry": "Retry",
   "about.updates.later": "Later",
   "about.updates.releaseNotes": "Release notes",
+  "about.updates.viewReleaseNotes": "View release notes",
   "about.updates.mandatory": "This update is required.",
   "about.updates.minimumSupported": ({ version }) => `Minimum supported version: ${version}`,
   "about.updates.error.network": "Unable to connect to the update service. Check your network and try again.",
@@ -4088,6 +4106,15 @@ export function translate(
     key,
   );
 }
+
+/*
+ * 需求:内置工具卡片的标题/摘要文案住在本模块(./tool-presenter 那两张表),
+ * 而拼装它们的注册表在 shared(`shared/domain/tool-presenter.ts`),shared 不能
+ * 反向 import 渲染层 —— 所以在模块加载时把 translate 注入过去。
+ * 注入的是函数本体:注册表每次渲染现查当前 locale,切语言不需要重建 presenter,
+ * 已提交转录里的工具卡片也因此自动跟换语言。
+ */
+setPresenterTranslate((key, params) => translate(key, params));
 
 export function localeLabel(locale: Locale): string {
   return messagesFor(locale)[

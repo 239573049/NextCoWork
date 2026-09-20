@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import type { WorkspaceFile, WorkspaceFileErrorCode, WorkspaceFileMutationRequest, WorkspaceFileMutationResult, WorkspaceFileWriteRequest, WorkspaceRecoveryEntry, WorkspaceRecoveryListing, WorkspaceTextFile } from '../../shared/domain/workspace-file'
-import { WORKSPACE_FILE_ERROR_PREFIX, WORKSPACE_TEXT_LIMIT } from '../../shared/domain/workspace-file'
+import type { WorkspaceFile, WorkspaceFileErrorCode, WorkspaceFileMutationRequest, WorkspaceFileMutationResult, WorkspaceFileWriteRequest, WorkspaceRecoveryEntry, WorkspaceRecoveryListing } from '../../shared/domain/workspace-file'
+import { WORKSPACE_FILE_ERROR_PREFIX, WORKSPACE_IMAGE_LIMIT, WORKSPACE_TEXT_LIMIT } from '../../shared/domain/workspace-file'
 import { classifyWorkspaceFile, contentRevision, decodeWorkspaceText, isBinaryText, workspaceReadLimit } from '../kernel/workspace-file-content'
 import type { EnvironmentStat, WorkspaceEnvironment } from './contract'
 import { EnvironmentError, missingPath } from './errors'
@@ -115,10 +115,16 @@ export class EnvironmentFiles {
     return classifyWorkspaceFile(path, extension, bytes, after)
   }
 
-  async write(request: WorkspaceFileWriteRequest): Promise<WorkspaceTextFile> {
+  async write(request: WorkspaceFileWriteRequest): Promise<WorkspaceFile> {
     const environment = this.environment
     const target = await this.checkedPath(request.path)
     if (typeof request.content !== 'string' || typeof request.revision !== 'string') fail('invalid-encoding')
+    /*
+      需求:图片编辑类自定义编辑器在**远程工作区**里也要能覆写图片字节。
+      与本地支线(`ipc/workspace-files.ts` 的 `writeBase64File`)同一条规矩:
+      严格 base64、只覆写已分类为 image 的文件、乐观锁与临时文件原子替换不变。
+    */
+    if (request.encoding === 'base64') return this.writeBase64(request, target)
     const bytes = Buffer.from(request.content)
     if (bytes.length > WORKSPACE_TEXT_LIMIT) fail('too-large')
     if (decodeWorkspaceText(bytes) !== request.content || isBinaryText(request.content)) fail('invalid-encoding')
@@ -138,6 +144,36 @@ export class EnvironmentFiles {
       if (created) await environment.fs.unlink(temporary).catch(() => {})
     }
     return { kind: 'text', path: request.path, content: request.content, size: bytes.length, revision: contentRevision(bytes) }
+  }
+
+  /** `encoding: 'base64'` 的远程支线 —— 语义与本地 `writeBase64File` 逐条对齐,理由见那边的注释。 */
+  private async writeBase64(request: WorkspaceFileWriteRequest, target: string): Promise<WorkspaceFile> {
+    const environment = this.environment
+    if (request.content.length > WORKSPACE_IMAGE_LIMIT * 2) fail('too-large')
+    // ★ 严格 base64:`Buffer.from` 对非法字符是静默丢弃,不是报错 —— 不挡的话
+    //   半份 payload 会被「成功」写成半张图。
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(request.content)) fail('invalid-encoding')
+    const bytes = Buffer.from(request.content, 'base64')
+    if (bytes.toString('base64') !== request.content) fail('invalid-encoding')
+    if (bytes.length > WORKSPACE_IMAGE_LIMIT) fail('too-large')
+    const current = await this.read(request.path)
+    if (current.kind === 'binary' && current.reason === 'too-large') fail('too-large')
+    if (current.kind !== 'image') return fail('unsupported')
+    if (current.revision !== request.revision) fail('conflict')
+    if (current.revision === contentRevision(bytes)) return current
+    const temporary = environment.path.join(environment.path.dirname(target), `.ncw-save-${randomUUID()}.tmp`)
+    let created = false
+    try {
+      await environment.fs.writeBytes(temporary, bytes, { exclusive: true, mode: (await environment.fs.lstat(target)).mode & 0o777 })
+      created = true
+      if (await this.checkedPath(request.path) !== target || (await this.read(request.path)).revision !== request.revision) fail('conflict')
+      await environment.fs.rename(temporary, target, true)
+      created = false
+    } finally {
+      if (created) await environment.fs.unlink(temporary).catch(() => {})
+    }
+    const dataUrl = `data:${current.mime};base64,${bytes.toString('base64')}`
+    return { kind: 'image', path: request.path, size: bytes.length, revision: contentRevision(bytes), mime: current.mime, dataUrl }
   }
 
   private async requireAbsent(path: string): Promise<void> { if (await this.statIfPresent(path)) fail('exists') }

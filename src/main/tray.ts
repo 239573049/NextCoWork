@@ -13,7 +13,12 @@
  *
  * 交互按 macOS 习惯拆开:左键唤起窗口,右键弹菜单。故意**不**用 `setContextMenu`——
  * 那会让左键也变成弹菜单(mac 的默认),而这里更想要左键=打开窗口。
- * (Linux 部分发行版只认 `setContextMenu`,但本项目的目标平台是 macOS。)
+ *
+ * ★ **Linux 是例外,必须 `setContextMenu`。** 多数 Linux 桌面环境的托盘(基于
+ * `libappindicator` / `StatusNotifierItem`)根本不派发 `click`/`right-click` 事件——
+ * 任何一次点击都只由桌面环境自己弹出通过 `setContextMenu` 注册的菜单。不设
+ * 这个的后果是:整颗图标点了没有任何反应,菜单里的「退出」自然也点不到,
+ * 而这个坏掉的状态在 mac/Windows 上完全复现不出来,只能在真实 Linux 环境里发现。
  */
 import { readFileSync } from 'node:fs'
 import { Menu, Tray, nativeImage } from 'electron'
@@ -41,8 +46,13 @@ export function initTray(showMain: () => void): void {
     { label: '退出 NextCoWork', role: 'quit' }
   ])
 
-  tray.on('click', showMain)
-  tray.on('right-click', () => tray?.popUpContextMenu(menu))
+  if (process.platform === 'linux') {
+    // 见文件头:Linux 上左右键都只会弹这一个菜单,「显示」和「退出」都在里面。
+    tray.setContextMenu(menu)
+  } else {
+    tray.on('click', showMain)
+    tray.on('right-click', () => tray?.popUpContextMenu(menu))
+  }
 }
 
 /** app 退出前销毁,否则图标会残留到进程真正结束那一刻 */

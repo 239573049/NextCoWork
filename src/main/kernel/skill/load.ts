@@ -66,6 +66,25 @@ export interface SkillScanResult {
   diagnostics: SkillDiagnostic[];
 }
 
+/**
+ * 一个已启用插件贡献的**一条** skill。
+ *
+ * ★ 和 `globalRoot` / `projectRoot` 不是同一种东西:那两个是**含若干条的根**
+ * (扫描器 readDir 之后逐个子目录看),这里 `dir` 直接就是那一条 skill 的目录
+ * (`<插件包>/skills/<name>`)。
+ *
+ * 为什么不把 `<插件包>/skills` 整个当成第三个根、让扫描器自己 readDir:那样
+ * 插件的 `contributes.skills` 就形同虚设 —— 包里多放一个目录就自动生效,
+ * 而清单上看不出来、上架审核也审不到。**贡献点必须是清单里写了的那些**,
+ * 这条不变式比少写十行代码重要。
+ */
+export interface PluginSkillRoot {
+  /** `publisher.name`。进诊断文本,也进 `Skill.source.pluginId`。 */
+  pluginId: string;
+  /** 这一条 skill 的**绝对**目录。由插件管理器用包目录拼好,扫描器不做拼接。 */
+  dir: string;
+}
+
 export interface SkillScanInput {
   fs: KernelFs;
   projectFs?: KernelFs;
@@ -74,6 +93,52 @@ export interface SkillScanInput {
   globalRoot: string;
   /** `<workspaceRoot>/.nextcowork/skills`。空串 = 没有工作区。 */
   projectRoot: string;
+  /**
+   * 已启用插件贡献的那几条。**留空 = 一条都没有**,不是「去查一下」。
+   *
+   * ★ 调用方每次都要重新取(`refreshSkills` 每次发送前跑一遍),因为这份清单
+   * 随插件的启用状态变。缓存它的症状是:用户禁用了插件,而模型下一轮仍然看得见
+   * 它带来的 skill —— 且插件页上明明写着它是关的。
+   */
+  pluginRoots?: readonly PluginSkillRoot[];
+}
+
+/**
+ * 「现在有哪些插件 Skill 目录」的**提供者**。
+ *
+ * ## 为什么是注册,不是直接 import
+ *
+ * 唯一知道答案的是 `plugin/manager.ts` 里那个实例,而它的持有者是
+ * `ipc/plugins.ts`。扫描器(内核)去 import IPC 层就成了环:
+ * `ipc/plugins` → `plugin/manager` → `kernel/skill/load` → `ipc/plugins`。
+ * 环在 ESM 里不报错,只是让其中一方在初始化时拿到 `undefined` ——
+ * 症状是「某些启动路径下插件 skill 一条都不出现」,且没有任何报错。
+ *
+ * 同 `protocol.ts` 的 `setPluginRuntimeDir`、`change-recorder.ts` 的
+ * `setFileChangeListener`,本仓库里这是既有答案,不是新造的第二套。
+ *
+ * ★ 默认返回空数组而不是 throw:插件系统可能压根没起来(无头测试、
+ * 插件被整体关掉)。那种情况下「没有插件 skill」是正确答案,不是错误。
+ */
+let pluginSkillRootsProvider: () => readonly PluginSkillRoot[] = () => [];
+
+export function setPluginSkillRootsProvider(provider: (() => readonly PluginSkillRoot[]) | null): void {
+  pluginSkillRootsProvider = provider ?? (() => []);
+}
+
+/**
+ * 调用方拿这个去填 `SkillScanInput.pluginRoots`。
+ *
+ * ★ **每次扫描都重新调**,不要把结果存起来。这份清单随插件启用状态变,
+ * 存下来的症状是:用户禁用了插件,而模型下一轮还看得见它带来的 skill。
+ */
+export function currentPluginSkillRoots(): readonly PluginSkillRoot[] {
+  try {
+    return pluginSkillRootsProvider();
+  } catch {
+    // 插件管理器炸了不该让**所有** skill 都扫不出来 —— 同文件头那条「永不 throw」
+    return [];
+  }
 }
 
 /**
@@ -89,6 +154,15 @@ export async function scanSkills(
   const diagnostics: SkillDiagnostic[] = [];
   const byName = new Map<string, Skill>();
 
+  /*
+    ★ 插件层**最先进**,因为后进的覆盖先进的 —— 也就是插件的优先级最低。
+
+    需求:插件带来的是一个合理默认,用户自己写的那条永远说了算。反过来的话,
+    用户在 `.next-cowork/skills/` 里放一条同名的覆盖规则会毫无反应,
+    而界面上两条都在、没有任何地方解释谁生效。
+  */
+  await scanPluginRoots(input, byName, diagnostics);
+
   // ★ 顺序即优先级:全局先进,项目后进覆盖同名。反过来写,项目里那条
   //   「这个仓库要用我们自己的提交规范」的 Skill 就永远压不过全局那条。
   for (const scope of ["global", "project"] as const) {
@@ -99,13 +173,85 @@ export async function scanSkills(
   }
 
   if (input.projectFs) for (const skill of byName.values()) {
-    if (skill.scope !== "global") continue;
+    /*
+      ★ 这一条现在也管 `plugin` 作用域,不只是 `global`。
+
+      原先写的是「跳过非 global」,理由是项目 skill 的资产就在服务器上、拿得到。
+      插件 skill 和全局 skill 处境相同 —— 文件在**客户端**的插件包里,
+      而这一轮的命令跑在 SSH 服务器上。不管它的话,模型会照着 skill 正文去跑
+      一个只存在于用户笔记本上的 `scripts/check.py`,表现为一条找不到文件的
+      命令失败,而失败信息里那个路径看上去完全合理。
+    */
+    if (skill.scope === "project") continue;
     try {
       const contents = await input.fs.readDir(dirname(skill.source.path));
       if (contents.some((entry) => entry.name !== "SKILL.md" && entry.name !== ".nextcowork-package.json")) skill.unavailableReason = "client-assets";
     } catch { skill.unavailableReason = "client-assets"; }
   }
   return { skills: [...byName.values()], diagnostics };
+}
+
+/**
+ * 逐条读插件贡献的 skill 目录。
+ *
+ * ★ 走的是**本地 fs**(`input.fs`),不是 `projectFs`:插件包永远装在客户端的
+ * `<userData>/plugins/` 下。用远端 fs 去读的话,SSH 工作区里每一条插件 skill
+ * 都会变成一条「目录不存在」的诊断。
+ *
+ * ★ 两个插件贡献同名 skill 时**先来的赢,并且出诊断**。不出诊断的话,
+ * 后装的那个插件的 skill 会凭空消失,而两个插件页上都显示得好好的。
+ * 「先来」按调用方给的顺序(插件管理器按 pluginId 排过),所以结果是确定的 ——
+ * 换成「后来居上」的话,同一台机器上重启一次就可能换一个赢家。
+ */
+async function scanPluginRoots(
+  input: SkillScanInput,
+  out: Map<string, Skill>,
+  diagnostics: SkillDiagnostic[],
+): Promise<void> {
+  const roots = input.pluginRoots ?? [];
+  /** 名字 → 贡献它的插件。只用来认出「第二个人也贡献了这个名字」。 */
+  const owners = new Map<string, string>();
+  for (const root of roots) {
+    if (out.size >= MAX_SKILLS) {
+      diagnostics.push({ path: root.dir, message: `Skill 数量超过 ${String(MAX_SKILLS)} 条,其余未加载` });
+      return;
+    }
+    const dirName = root.dir.split(/[\\/]/).filter((s) => s !== "").pop() ?? "";
+    let loaded: Skill | null;
+    try {
+      /*
+        ★ 和另外两层一样走 `resolveInWorkspace`,而不是直接拼 `${dir}/SKILL.md`。
+
+        插件包里的 `SKILL.md` 可以是一条软链。ZIP 安装那条路已经拒了符号链接,
+        但**目录安装**(开发时的「装本地目录」)没有这道门 —— 一条指向
+        `~/.ssh/id_rsa` 的软链会被原样读进 skill 正文,而正文是要进模型上下文的。
+      */
+      const file = resolveInWorkspace(root.dir, "SKILL.md");
+      loaded = await loadOne(input.fs, file, dirName, "plugin", diagnostics, undefined, root.dir);
+    } catch (err) {
+      if (err instanceof EnvironmentError) throw err;
+      if (err instanceof PathEscapeError) {
+        diagnostics.push({ path: `${root.dir}/SKILL.md`, message: `插件 ${root.pluginId} 的这条 Skill 指向了包外,已跳过` });
+        continue;
+      }
+      diagnostics.push({ path: `${root.dir}/SKILL.md`, message: msg(err) });
+      continue;
+    }
+    if (loaded === null) continue;
+
+    const previous = owners.get(loaded.name);
+    if (previous !== undefined) {
+      diagnostics.push({
+        path: `${root.dir}/SKILL.md`,
+        message: `插件 ${root.pluginId} 和 ${previous} 都提供了名为 "${loaded.name}" 的 Skill,这一条已跳过。禁用其中一个,或让作者改名。`,
+      });
+      continue;
+    }
+    owners.set(loaded.name, root.pluginId);
+    loaded.source.kind = "plugin";
+    loaded.source.pluginId = root.pluginId;
+    out.set(loaded.name, loaded);
+  }
 }
 
 async function scanOneRoot(

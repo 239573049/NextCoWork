@@ -46,6 +46,12 @@ export function tabRenameTarget(tab: InnerTab): TabRenameTarget | null {
     case 'changes':
       // 审查 tab 的标题是派生的(哪一轮),不给改名入口。
       return null
+    case 'webapp':
+      /*
+        网页应用的标题来自插件清单(而且跟着语言走),不给改名入口 ——
+        改了之后插件一升级、或者用户切一次语言,那个别名就和它指向的东西对不上了。
+      */
+      return null
   }
 }
 

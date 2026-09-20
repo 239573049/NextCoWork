@@ -168,6 +168,77 @@ describe('workspace file saves', () => {
   })
 })
 
+/**
+ * `encoding: 'base64'` 支线 —— 图片编辑器把编辑后的字节写回原文件。
+ * 不变式与文本支线逐条对齐:原子替换、mode 保留、乐观锁、超限预拒、
+ * 以及「内容没变就不写」。
+ */
+describe('workspace base64 image saves', () => {
+  const pngBytes = () => Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const saveImage = (path: string, bytes: Buffer, revision: string) =>
+    writeWorkspaceFile({ ...request(path), content: bytes.toString('base64'), revision, encoding: 'base64' })
+
+  it('atomically overwrites an existing image and returns the image shape', () => {
+    const target = join(mocks.root, 'photo.png')
+    writeFileSync(target, pngBytes())
+    chmodSync(target, 0o644)
+    const before = readWorkspaceFile(request('photo.png'))
+    const edited = Buffer.from('89504e470d0a1a0affd8ffe0', 'hex')
+    const saved = saveImage('photo.png', edited, before.revision)
+    expect(saved).toMatchObject({ kind: 'image', path: 'photo.png', mime: 'image/png', size: edited.length })
+    if (saved.kind !== 'image') throw new Error('Expected image')
+    expect(saved.dataUrl).toBe(`data:image/png;base64,${edited.toString('base64')}`)
+    expect(readFileSync(target)).toEqual(edited)
+    expect(statSync(target).mode & 0o777).toBe(0o644)
+    expect(readdirSync(mocks.root)).toEqual(['photo.png'])
+  })
+
+  it('skips the write entirely when the decoded bytes match the file', () => {
+    writeFileSync(join(mocks.root, 'same.png'), pngBytes())
+    const before = readWorkspaceFile(request('same.png'))
+    const mtime = statSync(join(mocks.root, 'same.png')).mtimeMs
+    const saved = saveImage('same.png', pngBytes(), before.revision)
+    expect(saved).toMatchObject({ kind: 'image', revision: before.revision })
+    expect(statSync(join(mocks.root, 'same.png')).mtimeMs).toBe(mtime)
+  })
+
+  it('keeps external changes when the revision is stale', () => {
+    writeFileSync(join(mocks.root, 'stale.png'), pngBytes())
+    const before = readWorkspaceFile(request('stale.png'))
+    const external = Buffer.from('89504e470d0a1a0a1111', 'hex')
+    writeFileSync(join(mocks.root, 'stale.png'), external)
+    expect(() => saveImage('stale.png', pngBytes(), before.revision)).toThrow('workspace_file:conflict')
+    expect(readFileSync(join(mocks.root, 'stale.png'))).toEqual(external)
+  })
+
+  it('refuses base64 writes onto non-image files', () => {
+    writeFileSync(join(mocks.root, 'notes.txt'), 'plain text')
+    const before = readWorkspaceFile(request('notes.txt'))
+    expect(() => saveImage('notes.txt', pngBytes(), before.revision)).toThrow('workspace_file:unsupported')
+    expect(readFileSync(join(mocks.root, 'notes.txt'), 'utf8')).toBe('plain text')
+  })
+
+  it('rejects malformed or truncated base64 without touching the file', () => {
+    writeFileSync(join(mocks.root, 'corrupt.png'), pngBytes())
+    const before = readWorkspaceFile(request('corrupt.png'))
+    // 非法字符:Buffer.from 会静默丢掉空格,这条必须在这里被拦下
+    expect(() => writeWorkspaceFile({ ...request('corrupt.png'), content: `${pngBytes().toString('base64')} !!!`, revision: before.revision, encoding: 'base64' }))
+      .toThrow('workspace_file:invalid-encoding')
+    // 往返不一致:截断后的 base64 解码再编码不再是原文
+    expect(() => writeWorkspaceFile({ ...request('corrupt.png'), content: pngBytes().toString('base64').slice(0, 6), revision: before.revision, encoding: 'base64' }))
+      .toThrow('workspace_file:invalid-encoding')
+    expect(readFileSync(join(mocks.root, 'corrupt.png'))).toEqual(pngBytes())
+  })
+
+  it('rejects oversized payloads before decoding', () => {
+    writeFileSync(join(mocks.root, 'huge.png'), pngBytes())
+    const before = readWorkspaceFile(request('huge.png'))
+    expect(() => writeWorkspaceFile({ ...request('huge.png'), content: 'A'.repeat(WORKSPACE_IMAGE_LIMIT * 2 + 1), revision: before.revision, encoding: 'base64' }))
+      .toThrow('workspace_file:too-large')
+    expect(readFileSync(join(mocks.root, 'huge.png'))).toEqual(pngBytes())
+  })
+})
+
 describe('workspace file management and path boundaries', () => {
   it('creates, renames, copies and moves files and refreshable directory contents', async () => {
     await mutateWorkspaceFile({ ...request('folder'), operation: 'create-directory' })

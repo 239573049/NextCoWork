@@ -1,0 +1,45 @@
+/*
+  `nextcowork/ui` 的样式入口 —— 产出 `resources/plugin-runtime/ui.css`。
+
+  ## 为什么直接 import 宿主的 theme.css
+
+  那里面的数值是**从参考实现的截图上量出来的**(见该文件头),复制一份到这里
+  就等于给同一批颜色开了第二个真源 —— 而第二份永远不会跟着重量测一起更新。
+  插件视图因此会随着版本推进慢慢和宿主偏色,且没有任何人会发现。
+
+  ## @source 为什么要显式写
+
+  Tailwind v4 的自动扫描以这个 CSS 文件所在目录为根,而真正用到 class 的是
+  `../components/ui/**`。不写的话这里只会生成插件自己那点 class,控件全是裸的
+  ——症状是「布局在,但没有颜色、没有圆角」,而且构建一声不吭。
+*/
+@import '../styles/theme.css';
+
+@source '../components/ui/**/*.tsx';
+@source '../plugin-ui/**/*.{ts,tsx}';
+
+/*
+  ★ 这里**不做** `--ncw-*` → `--color-*` 的映射,尽管看上去正该如此。
+
+  `--color-canvas: var(--ncw-canvas, var(--color-canvas))` 是一个自引用,
+  CSS 自定义属性成环时**两边一起失效**(computed-value time 判定),
+  结果是所有 token 变成 unset、整个视图无色 —— 而且构建期一声不吭。
+
+  正确的接法在宿主那一侧:注入的视图垫片(`main/plugin/protocol.ts` 的
+  `viewShimJs`)**同时写两个名字**,`--ncw-x` 给插件自己写 CSS 用(已进文档,
+  不能改名),`--color-x` 覆盖 theme.css 里的静态默认值。于是第一帧用静态值
+  (不闪),消息到达后跟着宿主走。
+*/
+
+/*
+  视图是**一块内容**,不是一个窗口:不要滚动条外框、不要拖拽区。
+  背景给 canvas 而不是透明 —— 透明会让宿主的壁纸从插件内容底下透上来,
+  而插件并不知道自己身后有一张图。
+*/
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-fg);
+}

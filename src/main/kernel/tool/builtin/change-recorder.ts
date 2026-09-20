@@ -48,6 +48,26 @@ function bucket(runId: string): Map<string, PendingChange> {
 }
 
 /**
+ * 「工作区里有文件被改了」的旁路通知。
+ *
+ * 需求:插件的 `workspace.onDidChangeFiles` 要知道 Agent 刚改了什么。仓库里
+ * **没有**文件系统 watcher(理由见 `ipc/workspace-search.ts`),而这里是 Agent
+ * 写盘的唯一收口 —— 挂在这儿能一次覆盖 Write / Edit 全部路径。
+ *
+ * ★ 注入而不是 import:内核不认识插件系统,方向是 `ipc → kernel`(同
+ * `setMcpChangeListener` / `setReviewChangeListener` 的接线方式)。
+ *
+ * ★ 监听器抛异常不得影响这次采集 —— 它只是旁路,调用处逐个 try。
+ */
+export type FileChangeListener = (change: { relPath: string; kind: 'created' | 'modified'; inWorkspace: boolean }) => void
+
+let fileChangeListener: FileChangeListener | null = null
+
+export function setFileChangeListener(listener: FileChangeListener | null): void {
+  fileChangeListener = listener
+}
+
+/**
  * 记一次写盘。`before === null` 表示这次是新建;后续对同一文件的写入只更新
  * `after`,`before` 与 `created` 保持首次的值。
  */
@@ -57,6 +77,20 @@ export function recordChange(
 ): void {
   const m = bucket(runId)
   const existing = m.get(entry.abs)
+  /*
+    ★ 通知**每一次写盘**都发,不只是首次。这张表的去重规则(首个 before 黏住)
+    是为了「这一轮的首尾」;而订阅者关心的是「刚刚又变了一次」。
+    拿这张表的规则去掐通知,表现就是「第二次保存之后插件收不到事件」。
+  */
+  try {
+    fileChangeListener?.({
+      relPath: entry.relPath,
+      kind: entry.before === null && existing === undefined ? 'created' : 'modified',
+      inWorkspace: entry.inWorkspace
+    })
+  } catch {
+    // 旁路监听器的问题,不能连累这次采集
+  }
   if (existing === undefined) {
     m.set(entry.abs, {
       abs: entry.abs,

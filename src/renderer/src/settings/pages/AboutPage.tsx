@@ -3,6 +3,7 @@ import type { Bootstrap } from '../../../../shared/domain/bootstrap'
 import { SettingGroup, SettingRow } from '../Row'
 import { useI18n } from '../../i18n'
 import { Button } from '../../components/ui/Button'
+import { Dialog } from '../../components/ui/Dialog'
 import { updateCheck, updateDownload, updateGetState, updateInstall } from '../../services/app'
 import type { UpdateState } from '../../../../shared/domain/update'
 import { updateErrorKey } from '../../lib/update-error'
@@ -17,6 +18,10 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
   const [result, setResult] = useState<UpdateState | null>(null)
   const [checking, setChecking] = useState(false)
   const [working, setWorking] = useState(false)
+  // 需求:更新说明可能有几十行,直接铺在设置行里会把下面的版本号列表挤出可视区
+  // (原先的问题:整段变更日志常驻占屏)。弹窗只在用户点开时才占地方,关掉后
+  // 设置页照旧是那张短列表。
+  const [notesOpen, setNotesOpen] = useState(false)
   useEffect(() => {
     void updateGetState().then(setResult).catch(() => undefined)
     return on('app:updateChanged', setResult)
@@ -33,6 +38,7 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
     ['Chromium', versions.chrome],
     ['Node', versions.node]
   ]
+  const releaseNotes = result?.state === 'available' ? result.update.releaseNotes : undefined
   return (
     <SettingGroup>
       <SettingRow
@@ -52,7 +58,11 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
         {result?.state === 'disabled' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.devDisabled')}</div>}
         {result?.state === 'idle' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.ready')}</div>}
         {result?.state === 'error' && <div className="mt-1 text-[12px] text-danger">{t(updateErrorKey(result.code))}</div>}
-        {result?.state === 'available' && result.update.releaseNotes && <div className="mt-2 whitespace-pre-wrap text-[12px] text-fg-muted">{result.update.releaseNotes}</div>}
+        {releaseNotes !== undefined && releaseNotes.length > 0 && (
+          <div className="mt-2">
+            <Button size="sm" onClick={() => setNotesOpen(true)}>{t('about.updates.viewReleaseNotes')}</Button>
+          </div>
+        )}
       </SettingRow>
       {rows.map(([k, v], i) => (
         <SettingRow key={k} title={k} last={i === rows.length - 1}>
@@ -60,6 +70,18 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
           <span className="selectable font-mono text-[12.5px] text-fg-muted">{v}</span>
         </SettingRow>
       ))}
+
+      <Dialog
+        title={t('about.updates.releaseNotes')}
+        open={notesOpen}
+        onClose={() => setNotesOpen(false)}
+        footer={<Button size="sm" onClick={() => setNotesOpen(false)}>{t('common.close')}</Button>}
+      >
+        {/* 更新说明是要被读的整段文字,不是标签 —— 全局 user-select:none 在这里得 opt-in */}
+        <div className="selectable whitespace-pre-wrap text-[12.5px] leading-[1.6] text-fg-muted">
+          {releaseNotes}
+        </div>
+      </Dialog>
     </SettingGroup>
   )
 }

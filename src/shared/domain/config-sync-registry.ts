@@ -24,7 +24,9 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   // 自建 SearxNG 实例多半是 `http://localhost:8080` —— 同步到另一台机器上就是个死地址,
   // 和 `shell` 同类:它描述的是**这台机器**上跑着什么。
   builtinSearch: 'device',
-  upstreamIdleTimeoutSeconds: 'device'
+  upstreamIdleTimeoutSeconds: 'device',
+  // 输出额度描述的是「我要多长的回答」,不是这台机器的事实 —— 和 contextManagement 同类。
+  maxOutputTokens: 'preferences'
 }
 export const SYNC_REGISTRY: Record<SyncCategory, { order: number; confirmation: boolean; deviceFields: readonly string[] }> = {
   // 普通 provider 的 API Key/OAuth token 在 providers 密文文档中同步；只有引用名和

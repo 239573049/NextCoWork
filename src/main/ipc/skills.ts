@@ -27,7 +27,7 @@ import { EnvironmentError } from '../environment/errors'
 import { EnvironmentFiles } from '../environment/files'
 import { publishLocalDirectory } from '../environment/artifacts'
 import { installSkillZip } from '../kernel/skill/install'
-import { scanSkills } from '../kernel/skill/load'
+import { currentPluginSkillRoots, scanSkills } from '../kernel/skill/load'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { getClientAccessToken, getClientAuthState } from './client-auth'
@@ -62,6 +62,7 @@ export async function listSkills(req: { workspaceId?: string }): Promise<SkillLi
       category: s.category,
       sourceKind: s.source.kind,
       ...(s.scope !== undefined ? { scope: s.scope } : {}),
+      ...(s.source.pluginId !== undefined ? { pluginId: s.source.pluginId } : {}),
       globalEnabled: !disabled.has(s.id),
       ...(s.unavailableReason ? { unavailableReason: s.unavailableReason } : {}),
       // 空清单 = 全都要,所以此时每一条显示的都是「已启用」
@@ -81,6 +82,15 @@ export async function skillDiagnostics(req: { workspaceId?: string }): Promise<A
     fs: host.fs,
     ...(environment?.remote ? { projectFs: environment.fs, projectPath: environment.path } : {}),
     globalRoot: join(host.paths.userData(), 'skills'),
+    /*
+      ★ 插件那一层也要扫,否则它的诊断永远到不了界面。
+
+      插件 skill 最常见的坏法恰恰是**只有诊断能说清**的那几种:`SKILL.md` 缺
+      `description`(整条作废)、两个插件撞了同一个名字(后来的被跳过)。
+      漏掉这一行的症状是「插件页上写着提供了 3 条,Skill 列表里只有 2 条,
+      而没有任何地方说第三条去哪了」。
+    */
+    pluginRoots: currentPluginSkillRoots(),
     projectRoot: environment?.rootPath ? await environment.path.resolveWithin(environment.rootPath, '.next-cowork/skills') : ''
   })
   return result.diagnostics.map((item) => ({ path: item.path, message: item.message }))

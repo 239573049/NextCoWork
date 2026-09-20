@@ -42,7 +42,9 @@ import {
   type PluginPermission,
   type PluginPermissionState
 } from '../../shared/plugin/permission'
-import { satisfiesEngine, type PluginManifest } from '../../shared/plugin/manifest'
+import type { PluginManifest } from '../../shared/plugin/manifest'
+import { matchesHostPermission } from '../../shared/plugin/manifest'
+import { PLUGIN_API_VERSION, engineCompatibility } from '../../shared/plugin/api-version'
 import type {
   InstalledPlugin,
   PluginCatalog,
@@ -50,15 +52,21 @@ import type {
   PluginStatus,
   PluginStatusBarItem
 } from '../../shared/plugin/state'
+import type {
+  PluginInteractionRequest,
+  PluginProgressUpdate,
+  PluginTabTarget
+} from '../../shared/plugin/ui-request'
 import { installPluginDirectory, installPluginZip, readInstalledManifest } from './installer'
-import { explainUnsupported } from './unsupported'
+import { explainUnsupported, inactiveContributions } from './unsupported'
 import { recordActivity, clearActivity } from './diagnostics'
-import { CapabilityError, invokeCapability, type CapabilityContext } from './rpc'
-import { narrowWorkspacePath, wrapPluginContext } from './capabilities'
+import { CapabilityError, invokeCapability, prepareExec, type CapabilityContext, type PluginScmAdapter } from './rpc'
+import { matchesPathScope, narrowWorkspacePath, wrapPluginContext } from './capabilities'
 import { isValidPluginToolName, pluginToolId, toolRegistrationFor, type PluginToolDeclaration } from './tools'
 import { sanitizeToolCard } from '../../shared/agent/tool-card'
 import type { ToolProgress } from '../../shared/agent/tool'
 import type { ToolRegistration } from '../kernel/tool/registry'
+import type { PluginSkillRoot } from '../kernel/skill/load'
 import { SUPPORTED_LOCALE_FILES, localeOfFile } from './locale-files'
 
 /** 插件目录名。`ipc/storage.ts:148` 的删除清单里已经有它。 */
@@ -66,6 +74,29 @@ export const PLUGINS_DIR = 'plugins'
 
 /** 空闲多久休眠。计划 §2.3:懒激活 + 空闲 5 分钟休眠。 */
 const IDLE_SLEEP_MS = 5 * 60 * 1000
+
+/** 一次 quickPick 最多给几项 —— 再多用户也挑不动,而且那通常意味着该换个 UI。 */
+const MAX_QUICK_PICK_ITEMS = 100
+
+/** 单插件同时最多挂几条进度。理由同状态栏格数上限。 */
+const MAX_PROGRESS_PER_PLUGIN = 3
+
+/** 全宿主同时最多几条流式命令 —— 它们各占一个子进程。 */
+const MAX_CONCURRENT_EXEC_STREAMS = 8
+
+/** 流式输出合批的间隔。50ms 人眼看不出延迟,却能把上百次 invoke 压成几次。 */
+const EXEC_STREAM_BATCH_MS = 50
+
+/** 一条流式命令最多往插件转发多少字符。超了只推一条 `truncated`,不再转发正文。 */
+const MAX_EXEC_STREAM_CHARS = 512 * 1024
+
+/**
+ * 被中断 / 超时的流式命令回给插件的退出码。
+ *
+ * ★ 124 是 `timeout(1)` 的约定,`node-spawn.ts` 的超时分支用的也是它 ——
+ * 两处取同一个值,插件作者只需要认识一个数。
+ */
+const TIMEOUT_EXIT_CODE = 124
 
 /** 持久化的那一小块:用户的决定。清单本身每次从盘上重读。 */
 interface PersistedPlugin {
@@ -117,7 +148,15 @@ export interface PluginManagerDeps {
   runtime: PluginRuntime
   /** 全局插件根。工作区级的走 `<ws>/.next-cowork/plugins/`,由调用方另给 */
   pluginRoot: string
+  /** 应用版本。**不参与 `engines` 判定**(那是 `apiVersion` 的事),只进 catalog 与市场请求 */
   hostVersion: string
+  /**
+   * 这个宿主实现的插件 API 版本。缺省 `PLUGIN_API_VERSION`。
+   *
+   * ★ 可注入而不是直接读常量:`engines` 判定是装载期最关键的一条分支,
+   * 测试必须能在不跟着改常量的前提下钉住它的三种结局(ok / deprecated / incompatible)。
+   */
+  apiVersion?: string
   getKv: <T>(key: string, fallback: T) => T
   setKv: (key: string, value: unknown) => void
   /** 当前工作区。路径类能力全部以它为根 */
@@ -131,6 +170,17 @@ export interface PluginManagerDeps {
   approve: (pluginId: string, summary: { kind: 'exec'; detail: string }) => Promise<boolean>
   /** 把文件挪进系统废纸篓(`shell.trashItem`)。插件删文件唯一的落点。 */
   trash: (absolutePath: string) => Promise<void>
+  /** 交给系统浏览器打开(`shell.openExternal`)。URL 门在 `rpc.ts` 里,这里只负责落地。 */
+  openExternal: (url: string) => Promise<void>
+  /** 剪贴板。能力 `clipboard` 由能力门把关。Electron 这一版的 clipboard 是 Promise 形状的。 */
+  clipboard: { readText: () => Promise<string>; writeText: (text: string) => Promise<void> }
+  /**
+   * 给某个工作区造一个 scm 适配器。
+   *
+   * ★ 按 workspaceId 现造而不是常驻一个:工作区是会切的,而一个记着旧 root 的
+   * 适配器的症状是「插件报告的分支不是我正在看的这个仓库的」。
+   */
+  scmFor: (workspaceId: string) => PluginScmAdapter
   /** catalog 变了,推 `plugins:changed` */
   emitChanged: () => void
   /** 插件的 l10n bundle 注册到渲染层 */
@@ -172,7 +222,34 @@ export interface PluginManagerDeps {
    * 这里把它当成一条广播出去,与 `showMessage` 同一形状。
    */
   openCustomEditor: (pluginId: string, viewType: string, path: string) => void
+  /**
+   * 打开一个网页 / 视图 Tab。
+   *
+   * ★ 形状与理由同 `openCustomEditor`:主进程**只校验与转发**,不认识 Tab ——
+   * 「放哪一格、哪个 dock group、已经开着要不要复用」那些决定全在
+   * `stores/tabs.ts` 里,抄一份到主进程一定会和它分叉。
+   */
+  openTab: (pluginId: string, target: PluginTabTarget) => void
+  /**
+   * 向用户发起一次交互(选项 / 输入 / 确认),等他回答。
+   *
+   * ★ 主进程**不画 UI**:这里只把请求广播出去,由渲染层用既有的
+   * `components/ui/**` 画,再把回执送回来。放主进程画的话,它就得用
+   * `dialog.showMessageBox` 拼裸文本 —— 那既不跟随主题,也不跟随语言
+   * (`ipc/plugins.ts` 里那两个遗留的系统框就是这个样子)。
+   *
+   * 用户直接关掉 = 取消值(`null` / `false`),不是错误。
+   */
+  requestInteraction: (pluginId: string, request: PluginInteractionRequest) => Promise<unknown>
+  /** 进度条的推送与撤销。禁用插件时宿主会把它那几条一起撤掉。 */
+  emitProgress: (pluginId: string, progress: PluginProgressUpdate) => void
 }
+
+/*
+  ★ `PluginTabTarget` / `PluginInteractionRequest` 住在 `shared/plugin/ui-request.ts`,
+  不在这个文件里:它们要穿过 IPC 到渲染层,而 `shared/ipc/contract.ts` 引不到
+  `main/**`(单向依赖)。放这边的话,contract 那边就只能各抄一份形状。
+*/
 
 interface PluginRecord {
   manifest: PluginManifest
@@ -205,6 +282,15 @@ interface PluginRecord {
   exposedApi: Set<string>
   /** 本插件订阅了的事件 topic —— 禁用时要从全局订阅表里摘掉。 */
   subscribedTopics: Set<string>
+  /**
+   * 工作区变更订阅的 glob 前缀。`undefined` = 没订阅,`[]` = 订阅全部。
+   *
+   * ★ 两者必须分得开:空数组当成「没订阅」的话,`onDidChangeFiles(h)`
+   * (不带 glob,意思是「全都要」)会一条都收不到。
+   */
+  watchGlobs?: string[]
+  /** 这一刻它挂着的进度条 id —— 禁用 / 休眠时要全部撤掉,不留下转不停的条。 */
+  progress: Set<string>
 }
 
 export class PluginManager {
@@ -222,6 +308,14 @@ export class PluginManager {
   private readonly liveToolEmits = new Map<string, { pluginId: string; emit: (progress: ToolProgress) => void }>()
   /** 事件总线的订阅表:topic → 订阅它的 pluginId 集合(第 5 层)。 */
   private readonly eventSubscribers = new Map<string, Set<string>>()
+  /**
+   * 正在跑的流式命令:`execId → { 主人, 中断句柄 }`。
+   *
+   * ★ 带 `pluginId` 的理由同 `liveToolEmits`:`process.execAbort` 要核对调用方
+   * 就是这条命令的主人,否则一个插件能掐断另一个插件正在跑的构建。
+   */
+  private readonly execStreams = new Map<string, { pluginId: string; controller: AbortController }>()
+  private nextExecId = 1
 
   constructor(private readonly deps: PluginManagerDeps) {}
 
@@ -267,12 +361,16 @@ export class PluginManager {
   catalog(): PluginCatalog {
     return {
       hostVersion: this.deps.hostVersion,
+      apiVersion: this.apiVersion(),
       plugins: [...this.records.entries()]
         .map(([id, record]) => this.project(id, record))
         .sort((a, b) => a.manifest.displayName.localeCompare(b.manifest.displayName))
     }
   }
 
+  private apiVersion(): string {
+    return this.deps.apiVersion ?? PLUGIN_API_VERSION
+  }
   private project(id: string, record: PluginRecord): InstalledPlugin {
     const permissions: PluginPermissionState = {
       required: record.manifest.permissions,
@@ -330,15 +428,45 @@ export class PluginManager {
     for (const key of manifest.contributes.unsupported) {
       diagnostics.push({ path: `contributes.${key}`, message: explainUnsupported(key), level: 'warn' })
     }
+    /*
+      ★ 「认得、装进来了,但这一版还没接上」的那几个也要出诊断。
+      不出的话就是**静默不生效** —— 作者写了 `contributes.skills`、包也装干净了,
+      然后模型从来不知道有这条 Skill,而日志里一个字都没有。
+    */
+    for (const inactive of inactiveContributions({
+      skills: manifest.contributes.skills.length,
+      agents: manifest.contributes.agents.length,
+      modes: manifest.contributes.modes.length,
+      themes: manifest.contributes.themes.length,
+      slashCommands: manifest.contributes.slashCommands.length,
+      'views.location': manifest.contributes.views.filter((v) => (v.location ?? 'editor') !== 'editor').length
+    })) {
+      diagnostics.push({ ...inactive, level: 'info' })
+    }
 
     let status: PluginStatus = 'idle'
-    if (!satisfiesEngine(manifest.engines, this.deps.hostVersion)) {
+    /*
+      ★ 比的是**插件 API 版本**,不是应用版本。
+      理由与那个「所有插件都被判成红色」的 bug 见 `shared/plugin/api-version.ts`
+      的文件头 —— 这里原本拿 `this.deps.hostVersion`(= `app.getVersion()`,现在是
+      2.x)去比 `^0.2.0`,恒为 false。`hostVersion` 仍然保留在 deps 与 catalog 里:
+      市场请求要用它做灰度,那是另一个问题。
+    */
+    const compatibility = engineCompatibility(manifest.engines, this.apiVersion())
+    if (compatibility === 'incompatible') {
       diagnostics.push({
         path: 'engines.nextcowork',
-        message: `requires ${manifest.engines}, this host is ${this.deps.hostVersion}`,
+        message: `requires ${manifest.engines}, this host implements plugin API ${this.apiVersion()}`,
         level: 'error'
       })
       status = 'error'
+    } else if (compatibility === 'deprecated') {
+      // 弃用但照常跑 —— 这批插件在此之前根本装不上,兼容它们不会破坏任何既有行为。
+      diagnostics.push({
+        path: 'engines.nextcowork',
+        message: `"${manifest.engines}" targets a retired plugin API; update it to ^${this.apiVersion()}`,
+        level: 'warn'
+      })
     }
 
     const approvedRequired = persisted?.approvedRequired ?? []
@@ -384,7 +512,8 @@ export class PluginManager {
       statusBar: new Map(),
       dirtyDocuments: new Map(),
       exposedApi: new Set(),
-      subscribedTopics: new Set()
+      subscribedTopics: new Set(),
+      progress: new Set()
     })
 
     await this.publishLocaleBundles(manifest, root, diagnostics)
@@ -564,6 +693,14 @@ export class PluginManager {
     record.exposedApi.clear()
     for (const topic of record.subscribedTopics) this.eventSubscribers.get(topic)?.delete(pluginId)
     record.subscribedTopics.clear()
+    /*
+      ★ 进度条和工作区订阅也要跟着撤。
+      漏掉进度条的症状是状态栏上留着一条**永远转下去**的进度 —— 它的主人已经
+      不在了,没有任何人会再去调 `progressEnd`,而用户唯一的出路是重启。
+    */
+    for (const id of record.progress) this.deps.emitProgress(pluginId, { id, done: true })
+    record.progress.clear()
+    record.watchGlobs = undefined
     this.deps.onToolsChanged()
     this.deps.runtime.dispose(pluginId)
     this.persist()
@@ -632,6 +769,18 @@ export class PluginManager {
     const record = this.records.get(pluginId)
     if (record === undefined || !record.enabled) return false
     if (record.status === 'error' || record.status === 'pending-approval' || record.status === 'disabled') return false
+    /*
+      ★ **零代码插件永远不 spawn。** `kind: 'webapp'` 的包没有 `main`,
+      它的全部内容就是清单里那几条 `webApps`。走下去的话 `spawn` 会去加载一个
+      不存在的入口,然后把这个插件标成 error —— 而它其实好好的。
+
+      返回 `true`(不是 false):调用方问的是「它能用吗」,而它能用。
+      返回 false 会让 `openWebApp` 以为这个插件坏了。
+    */
+    if (record.manifest.kind === 'webapp') {
+      record.touchedAt = Date.now()
+      return true
+    }
     record.touchedAt = Date.now()
     // status 说 active,但宿主窗口可能已崩(`render-process-gone` 不会回头改 manager 的
     // 状态)。真的还活着才早返回;不在了就往下走重新 spawn —— spawn 会先 dispose 掉
@@ -733,6 +882,71 @@ export class PluginManager {
   }
 
   /**
+   * 打开一个自定义编辑器 Tab 之前的唤醒。
+   *
+   * 需求:插件视图的静态文件经 `ncw-plugin://` 协议服务,而协议层的 roots 表
+   * **只在 spawn 时写入** —— 插件没醒过,iframe 的第一个请求就是 403
+   * "forbidden"。`onCustomEditor:` 这个激活事件此前没有任何派发点(只有
+   * `onStartup` 和 `onCommand:` 真的会触发),所以只声明它的插件(编辑器类
+   * 插件的本分写法)永远打不开。
+   *
+   * 返回 `false` = 没醒成(wake 已把原因写进 diagnostics,渲染层据此留在
+   * 降级态,不渲染注定 403 的 iframe)。
+   */
+  async activateCustomEditor(pluginId: string, viewType: string): Promise<boolean> {
+    const record = this.records.get(pluginId)
+    if (record === undefined) return false
+    if (!record.manifest.contributes.customEditors.some((editor) => editor.viewType === viewType)) return false
+    return this.activateFor(`onCustomEditor:${viewType}`, pluginId)
+  }
+
+  /**
+   * 用户点了某个网页应用的入口(侧边栏 / 命令面板)。
+   *
+   * 需求:「插件 = 打开哔哩哔哩」这条路的落点。校验和转发都在这里,与插件自己
+   * 调 `tabs.openWebApp` 走的是**同一段**代码 —— 两条路各写一份的话,
+   * 「插件能开但用户点不开」这种差异只会在某一条路上被发现。
+   *
+   * 返回 `false` = 这个插件没有这个 webApp(或者它此刻不可用),由调用方
+   * 翻译成一次失败;不抛,同 `activateCustomEditor` 的取向。
+   */
+  /**
+   * 自定义编辑器视图报上来的脏标记(由宿主代发,见 `ipc/plugins.ts`)。
+   *
+   * ★ 和插件自己调 `customEditors.setDirty` 写的是**同一张表**:同一个文件
+   * 可能一边由视图报脏、一边由插件代码报干净,两张表会让「该不该挽留」
+   * 取决于先问哪一张。
+   */
+  setEditorDirty(pluginId: string, documentId: string, path: string, dirty: boolean): void {
+    const record = this.records.get(pluginId)
+    if (record === undefined || documentId === '') return
+    if (dirty) record.dirtyDocuments.set(documentId, path)
+    else record.dirtyDocuments.delete(documentId)
+  }
+
+  async openWebApp(pluginId: string, webAppId: string): Promise<boolean> {    const record = this.records.get(pluginId)
+    if (record === undefined || !record.enabled) return false
+    if (record.status === 'error' || record.status === 'pending-approval') return false
+    const webApp = record.manifest.contributes.webApps.find((w) => w.id === webAppId)
+    if (webApp === undefined) return false
+    /*
+      ★ 激活事件照发:一个 webapp 插件可能同时贡献 skills / themes,而那些要在
+      第一次用到时才挂上去。对 `kind: 'webapp'` 来说 `wake` 是一次空操作
+      (见那里的早返回),所以这一行不会为它起任何进程。
+    */
+    await this.activateFor(`onWebApp:${webAppId}`, pluginId).catch(() => false)
+    this.deps.openTab(pluginId, {
+      kind: 'webapp',
+      webAppId: webApp.id,
+      url: webApp.url,
+      title: webApp.title,
+      ...(webApp.icon === undefined ? {} : { icon: webApp.icon }),
+      open: webApp.open ?? 'tab'
+    })
+    return true
+  }
+
+  /**
    * 主题变了 —— 通知订阅过的插件。
    *
    * ★ **只推给活着且订阅过的**。休眠的插件不唤醒:用户没在用它,为了一次
@@ -751,8 +965,48 @@ export class PluginManager {
     }
   }
 
-  private async activateFor(event: string, pluginId: string): Promise<boolean> {
-    const record = this.records.get(pluginId)
+  /**
+   * 一条流式命令结束了 —— 撤登记 + 给插件推一条 exit。
+   *
+   * ★ 成功、失败、被中断、超时**四条路都要走到这里**。漏掉任何一条的症状是
+   * 插件那边 `await handle.done` 永远不 resolve,而它可能正挂在一次工具调用里。
+   */
+  private finishExec(pluginId: string, execId: string, code: number, timedOut: boolean): void {
+    if (!this.execStreams.delete(execId)) return
+    void this.deps.runtime
+      .invoke(pluginId, { id: 0, kind: 'event', payload: { event: 'process.exit', execId, code, timedOut } }, PLUGIN_TIMEOUT.COMMAND_MS)
+      .catch(() => undefined)
+  }
+
+  /**
+   * 工作区里有文件变了 —— 分发给订阅了的插件。
+   *
+   * ## ★ 这不是文件系统 watcher,而且**故意**不是
+   *
+   * 仓库里没有递归 watcher,理由见 `ipc/workspace-search.ts`(大仓库上开销大、
+   * macOS 上给不出可靠的重命名事件)。为插件单开一个,成本和风险都远大于它的
+   * 收益。所以这条通道的事实来源是**宿主自己知道的那些写入**:编辑器保存、
+   * Agent 工具写文件、插件自己的 `workspace.writeFile` / `deleteFile`。
+   *
+   * **覆盖不到**:外部编辑器、`git checkout`、终端里的 `mv`。这一条写在协议、
+   * d.ts 和文档里 —— 不写清楚的话,作者会把它当 watcher 用,然后在
+   * 「为什么我在 VS Code 里改了没反应」上耗掉一天。
+   */
+  notifyWorkspaceChanged(changes: readonly { path: string; kind: 'created' | 'modified' | 'deleted' }[]): void {
+    if (changes.length === 0) return
+    for (const [pluginId, record] of this.records) {
+      // 睡着的插件**不叫醒**:用户没在用它,一次文件保存不值得为它起一个进程
+      // (同 `notifyAppearanceChanged` 的取向)。它醒来时自己重新读就是了。
+      if (record.status !== 'active' || record.watchGlobs === undefined) continue
+      const mine = changes.filter((change) => matchesPathScope(record.watchGlobs, change.path))
+      if (mine.length === 0) continue
+      void this.deps.runtime
+        .invoke(pluginId, { id: 0, kind: 'event', payload: { event: 'workspace.changed', changes: mine } }, PLUGIN_TIMEOUT.COMMAND_MS)
+        .catch(() => undefined)
+    }
+  }
+
+  private async activateFor(event: string, pluginId: string): Promise<boolean> {    const record = this.records.get(pluginId)
     if (record === undefined) return false
     if (!record.manifest.activationEvents.includes(event) && !record.manifest.activationEvents.includes('onStartup')) {
       /*
@@ -817,27 +1071,14 @@ export class PluginManager {
     record.touchedAt = Date.now()
 
     /*
-      ★ **注册类方法在能力门之后、参数门之前单独处理。**
+      能力上下文**在分派之前**就造好。
 
-      它们和 `workspace.readFile` 那一类不同:后者是「替插件做一件事」,
-      而这些是「插件在宿主这边登记一个东西」——它们改的是宿主自己的表
-      (工具注册表、命令表、授权状态),不碰文件系统也不走权限链。
-      混进 `invokeCapability` 会让那个函数同时背两种职责,而它已经是
-      整个系统里最需要一眼看懂的一段了。
+      ★ 它原本造在 `handleHostMethod` 之后,而 `process.execStream` 这类
+      「既要走参数门与审批、又要按 execId 往回推事件」的方法两边都需要它:
+      门在 `rpc.ts`(纯函数、可直测),事件在这里(只有 manager 拿得到 runtime)。
+      造两份 ctx 的话,两条路的 `allowedCommands` / 工作区根迟早会不一致。
+      构造本身很便宜(全是闭包,scm 适配器也是用到才造)。
     */
-    const hostHandled = await this.handleHostMethod(pluginId, record, method, request.params)
-    if (hostHandled !== undefined) {
-      recordActivity({
-        ts: started,
-        pluginId,
-        method,
-        summary: hostHandled.summary,
-        verdict: 'ok',
-        durationMs: Date.now() - started
-      })
-      return { id: request.id, ok: true, data: hostHandled.data }
-    }
-
     const workspace = this.deps.currentWorkspace()
     const ctx: CapabilityContext = {
       pluginId,
@@ -855,7 +1096,40 @@ export class PluginManager {
       allowedCommands: record.manifest.allowedCommands,
       approve: (summary) => this.deps.approve(pluginId, summary),
       trash: (absolutePath) => this.deps.trash(absolutePath),
+      openExternal: (url) => this.deps.openExternal(url),
+      clipboard: this.deps.clipboard,
+      // ★ 适配器**用到时才造**,并且在这里绑定当前工作区 —— 插件传不进 workspaceId,它说了不算。
+      scm: () => this.deps.scmFor(workspace.id),
       kv: this.kvFor(pluginId)
+    }
+
+    /*
+      ★ **注册类方法在能力门之后、参数门之前单独处理。**
+
+      它们和 `workspace.readFile` 那一类不同:后者是「替插件做一件事」,
+      而这些是「插件在宿主这边登记一个东西」——它们改的是宿主自己的表
+      (工具注册表、命令表、授权状态),不碰文件系统也不走权限链。
+      混进 `invokeCapability` 会让那个函数同时背两种职责,而它已经是
+      整个系统里最需要一眼看懂的一段了。
+    */
+    let hostHandled: { data: unknown; summary: string } | undefined
+    try {
+      hostHandled = await this.handleHostMethod(pluginId, record, method, request.params, ctx)
+    } catch (error) {
+      // execStream 的参数门/审批在这一层抛 CapabilityError,和下面那条路同样翻译。
+      if (error instanceof CapabilityError) return fail(error.code, error.message)
+      return fail('internal_error', (error as Error).message)
+    }
+    if (hostHandled !== undefined) {
+      recordActivity({
+        ts: started,
+        pluginId,
+        method,
+        summary: hostHandled.summary,
+        verdict: 'ok',
+        durationMs: Date.now() - started
+      })
+      return { id: request.id, ok: true, data: hostHandled.data }
     }
 
     try {
@@ -872,6 +1146,21 @@ export class PluginManager {
         verdict: 'ok',
         durationMs: Date.now() - started
       })
+      /*
+        ★ 插件自己的写入也要进变更流,否则订阅者之间是**半聋**的:
+        A 插件改了一个文件,监听同一份文件的 B 插件收不到 —— 而同样的改动由
+        Agent 做出来时它收得到。同一件事有两种结果,是最难查的那类问题。
+
+        通知放在**成功之后**:写失败了没有任何东西变过。
+      */
+      if (method === 'workspace.writeFile' || method === 'workspace.deleteFile') {
+        const path = (request.params as { path?: unknown } | null)?.path
+        if (typeof path === 'string') {
+          this.notifyWorkspaceChanged([
+            { path, kind: method === 'workspace.deleteFile' ? 'deleted' : 'modified' }
+          ])
+        }
+      }
       return { id: request.id, ok: true, data: outcome.data }
     } catch (error) {
       if (error instanceof CapabilityError) return fail(error.code, error.message)
@@ -891,7 +1180,8 @@ export class PluginManager {
     pluginId: string,
     record: PluginRecord,
     method: PluginMethod,
-    rawParams: unknown
+    rawParams: unknown,
+    ctx: CapabilityContext
   ): Promise<{ data: unknown; summary: string } | undefined> {
     switch (method) {
       case 'permissions.contains': {
@@ -1062,6 +1352,48 @@ export class PluginManager {
         return { data: {}, summary: `open ${p.viewType} ${p.path}` }
       }
 
+      /*
+        ───────── 打开网页 / 视图 ─────────
+
+        需求:插件最常见的一种形态就是「把一个网站或一块自有 UI 带进来」——
+        B 站、文档站、内部看板。此前插件**一条通往浏览器的路都没有**:应用内
+        浏览器(InnerTab 的 browser)对它不可见,连交给系统浏览器的
+        `env.openExternal` 都没有 handler。
+
+        三条方法的门各不相同,所以分三个 case,而不是一个带 kind 的大 case:
+        webapp 查清单、browser 查 hostPermissions、view 查视图声明。
+      */
+      case 'tabs.openWebApp': {
+        const p = rawParams as { webAppId: string }
+        const webApp = record.manifest.contributes.webApps.find((w) => w.id === p.webAppId)
+        // 同 `tabs.openCustomEditor`:只认自己清单里声明过的条目,不然一个插件
+        // 可以请求打开别人的东西。
+        if (webApp === undefined) return { data: { opened: false }, summary: `ignored undeclared webApp ${String(p.webAppId)}` }
+        this.deps.openTab(pluginId, {
+          kind: 'webapp',
+          webAppId: webApp.id,
+          url: webApp.url,
+          title: webApp.title,
+          ...(webApp.icon === undefined ? {} : { icon: webApp.icon }),
+          open: webApp.open ?? 'tab'
+        })
+        return { data: { opened: true }, summary: `open webApp ${webApp.id}` }
+      }
+
+      case 'tabs.openBrowser': {
+        const p = rawParams as { url: string; open?: 'tab' | 'feature' | 'right' }
+        /*
+          ★ 能力门(`tabs.browser`)已经过了,这里是**参数门**:地址必须命中
+          `hostPermissions`。少了这一道,一个声明「我只访问 bilibili.com」的插件
+          可以在应用内打开任何网站 —— 而用户在安装界面上看到的域名只有那一个。
+        */
+        if (typeof p.url !== 'string' || !matchesHostPermission(record.manifest.hostPermissions, p.url)) {
+          return { data: { opened: false }, summary: 'rejected url (not in hostPermissions)' }
+        }
+        this.deps.openTab(pluginId, { kind: 'browser', url: p.url, open: p.open ?? 'tab' })
+        return { data: { opened: true }, summary: `open browser ${hostOf(p.url)}` }
+      }
+
       case 'configuration.get':
         return { data: { values: this.configuration(pluginId) }, summary: 'configuration.get' }
 
@@ -1074,6 +1406,169 @@ export class PluginManager {
         */
         this.deps.showMessage(pluginId, p.kind, p.messageKey, p.params ?? {})
         return { data: {}, summary: `${p.kind}: ${p.messageKey}` }
+      }
+
+      /*
+        ───────── 要用户回答的三种交互 ─────────
+
+        需求:插件要问一句话才能继续(选哪个分支、给个名字、这步危险不危险)。
+        此前 `window.showQuickPick` 在协议表、d.ts、垫片里都存在,**唯独没有
+        handler** —— 一调就是 `internal_error: no handler`。
+
+        ★ 三条共用一个「广播请求 → 等回执」的机制(`deps.requestInteraction`),
+        取消一律是取消值而不是错误:用户没理会一个弹窗不是故障。
+      */
+      case 'window.showQuickPick': {
+        const p = rawParams as { items: { id: string; labelKey: string }[]; placeholderKey?: string }
+        const items = (Array.isArray(p.items) ? p.items : [])
+          .filter((item) => item !== null && typeof item === 'object' && typeof item.id === 'string' && typeof item.labelKey === 'string')
+          .slice(0, MAX_QUICK_PICK_ITEMS)
+        if (items.length === 0) return { data: { id: null }, summary: 'quickPick with no valid items' }
+        const picked = await this.deps.requestInteraction(pluginId, {
+          kind: 'quickPick',
+          items,
+          ...(p.placeholderKey === undefined ? {} : { placeholderKey: p.placeholderKey })
+        })
+        // 回执必须是**给出去的那几个 id 之一**。渲染层是可信的,但这条断言让
+        // 「回执错位」成为不可能,而不是变成一个只在特定时序下出现的怪现象。
+        const id = typeof picked === 'string' && items.some((item) => item.id === picked) ? picked : null
+        return { data: { id }, summary: `quickPick → ${id ?? '(cancelled)'}` }
+      }
+
+      case 'window.showInputBox': {
+        const p = rawParams as { titleKey: string; placeholderKey?: string; initial?: string; password?: boolean }
+        if (typeof p.titleKey !== 'string' || p.titleKey === '') return { data: { value: null }, summary: 'rejected input titleKey' }
+        const answer = await this.deps.requestInteraction(pluginId, {
+          kind: 'input',
+          titleKey: p.titleKey,
+          ...(p.placeholderKey === undefined ? {} : { placeholderKey: p.placeholderKey }),
+          ...(typeof p.initial === 'string' ? { initial: p.initial.slice(0, 4096) } : {}),
+          ...(p.password === true ? { password: true } : {})
+        })
+        const value = typeof answer === 'string' ? answer : null
+        // ★ 摘要里**不写内容**:这条可能是一个 token(`password: true` 尤其)。
+        return { data: { value }, summary: `input ${p.titleKey} → ${value === null ? '(cancelled)' : `${value.length} chars`}` }
+      }
+
+      case 'window.showConfirm': {
+        const p = rawParams as { titleKey: string; detailKey?: string; danger?: boolean }
+        if (typeof p.titleKey !== 'string' || p.titleKey === '') return { data: { confirmed: false }, summary: 'rejected confirm titleKey' }
+        const answer = await this.deps.requestInteraction(pluginId, {
+          kind: 'confirm',
+          titleKey: p.titleKey,
+          ...(p.detailKey === undefined ? {} : { detailKey: p.detailKey }),
+          ...(p.danger === true ? { danger: true } : {})
+        })
+        // ★ 只有**明确的 true** 才算确认:超时、窗口关掉、回执畸形一律不算。
+        const confirmed = answer === true
+        return { data: { confirmed }, summary: `confirm ${p.titleKey} → ${String(confirmed)}` }
+      }
+
+      case 'window.progressStart': {
+        const p = rawParams as { id: string; titleKey: string }
+        if (typeof p.id !== 'string' || p.id === '' || p.id.length > 64) return { data: {}, summary: 'rejected progress id' }
+        /*
+          ★ 条数有上限,同状态栏格子的理由:一个插件挂二十条进度,界面上就没有
+          别人的位置了。超出的**静默忽略**而不是替换 —— 替换会让先开的那条永远
+          结束不了(它的 id 已经被挤掉,`progressEnd` 找不到它)。
+        */
+        if (record.progress.size >= MAX_PROGRESS_PER_PLUGIN && !record.progress.has(p.id)) {
+          return { data: {}, summary: 'progress limit reached' }
+        }
+        record.progress.add(p.id)
+        this.deps.emitProgress(pluginId, { id: p.id, titleKey: typeof p.titleKey === 'string' ? p.titleKey : '' })
+        return { data: {}, summary: `progress start ${p.id}` }
+      }
+
+      case 'window.progressUpdate': {
+        const p = rawParams as { id: string; fraction?: number; messageKey?: string }
+        // 没 start 过的 id 直接丢:进度条是「这次工作」的投影,凭空出现的一条
+        // 没有对应的工作,也没有人会去结束它。
+        if (!record.progress.has(p.id)) return { data: {}, summary: 'progress update for an unknown id' }
+        this.deps.emitProgress(pluginId, {
+          id: p.id,
+          ...(typeof p.fraction === 'number' && Number.isFinite(p.fraction) ? { fraction: Math.max(0, Math.min(1, p.fraction)) } : {}),
+          ...(typeof p.messageKey === 'string' ? { messageKey: p.messageKey } : {})
+        })
+        return { data: {}, summary: `progress update ${p.id}` }
+      }
+
+      case 'window.progressEnd': {
+        const p = rawParams as { id: string }
+        record.progress.delete(p.id)
+        this.deps.emitProgress(pluginId, { id: p.id, done: true })
+        return { data: {}, summary: `progress end ${p.id}` }
+      }
+
+      case 'workspace.subscribeChanges': {
+        const p = rawParams as { globs?: string[] }
+        const globs = (Array.isArray(p.globs) ? p.globs : [])
+          .filter((glob): glob is string => typeof glob === 'string' && glob !== '')
+          .slice(0, 32)
+        record.watchGlobs = globs
+        return { data: {}, summary: `subscribe changes ${globs.length === 0 ? '(all)' : globs.join(',')}` }
+      }
+
+      case 'workspace.unsubscribeChanges':
+        record.watchGlobs = undefined
+        return { data: {}, summary: 'unsubscribe changes' }
+
+      /*
+        ───────── 流式跑命令 ─────────
+
+        需求:构建 / 测试 / 打包这类命令跑几十秒,而 `process.exec` 的形状让插件
+        在那几十秒里一个字都拿不到,只能在结束后一次性倒出来 —— 做不出进度,
+        也没法在出第一条错误时就停。
+
+        ★ 门与 `process.exec` **共用同一段** `prepareExec`(参数门 + cwd 收窄 +
+        引号化 + 审批)。抄第二份的代价是「哪些命令算被批准过」在两条路上分叉。
+
+        ★ 放在 manager 而不是 `rpc.ts`:输出要按 execId 经 `kind: 'event'` 推回
+        插件,而只有这里拿得到 runtime。
+      */
+      case 'process.execStream': {
+        const p = rawParams as { command: string; args: string[]; cwd?: string; timeoutMs?: number }
+        const prepared = await prepareExec(ctx, p)
+        if (this.execStreams.size >= MAX_CONCURRENT_EXEC_STREAMS) {
+          throw new CapabilityError('rejected', 'too many concurrent streaming commands')
+        }
+        const execId = `exec-${String(this.nextExecId++)}`
+        const controller = new AbortController()
+        this.execStreams.set(execId, { pluginId, controller })
+        /*
+          ★ 输出**合批**再推:一条 `npm install` 能在一秒里触发上百次 data 事件,
+          逐条发等于一秒上百次跨进程 invoke,而插件那边根本看不出区别。
+        */
+        const pump = new OutputPump((stream, text, truncated) => {
+          void this.deps.runtime
+            .invoke(pluginId, { id: 0, kind: 'event', payload: { event: 'process.output', execId, stream, chunk: text, truncated } }, PLUGIN_TIMEOUT.COMMAND_MS)
+            .catch(() => undefined)
+        })
+        void this.deps.host
+          .spawn(prepared.line, {
+            cwd: prepared.cwd,
+            signal: controller.signal,
+            timeoutMs: prepared.timeoutMs,
+            shell: prepared.shell,
+            onOutput: ({ stream, text }) => { pump.push(stream, text) }
+          })
+          .then(
+            (result) => { pump.flush(); this.finishExec(pluginId, execId, result.code, false) },
+            // 中断 / 超时走这里:插件仍然要收到一条 exit,否则它的 `done` 永远挂着。
+            () => { pump.flush(); this.finishExec(pluginId, execId, TIMEOUT_EXIT_CODE, true) }
+          )
+        return { data: { execId }, summary: `execStream ${prepared.command}` }
+      }
+
+      case 'process.execAbort': {
+        const p = rawParams as { execId: string }
+        const running = this.execStreams.get(p.execId)
+        // 不是自己的 execId 一律当成不存在 —— 否则一个插件能掐断另一个插件的命令。
+        if (running === undefined || running.pluginId !== pluginId) {
+          return { data: {}, summary: `execAbort ignored (unknown execId)` }
+        }
+        running.controller.abort()
+        return { data: {}, summary: `execAbort ${p.execId}` }
       }
 
       case 'commands.execute': {
@@ -1178,6 +1673,41 @@ export class PluginManager {
    * 这一刻所有启用插件贡献的工具。`registerToolProvider` 每次装配都会问一遍 ——
    * 所以禁用一个插件之后,它的工具在**下一次**装配时就没了,不需要额外下线。
    */
+  /**
+   * 现在生效的插件 Skill 目录,**绝对路径**,按 `pluginId` 排序。
+   *
+   * ## 需求
+   *
+   * 插件包里自带的 `skills/<name>/` 要出现在模型的 Skill 目录里,而且**随插件的
+   * 启用状态即时增减** —— 禁用一个插件,它带来的 skill 下一轮就该不在了。
+   *
+   * ## 为什么返回路径而不是返回解析好的 Skill
+   *
+   * 解析 `SKILL.md`(frontmatter、描述上限、正文消毒、名字合法性)整套逻辑在
+   * `kernel/skill/load.ts` 里,而且那套规则**必须**和用户自己装的 skill 完全一致:
+   * 两套解析器的结果只要差一点,就会出现「同一个 SKILL.md 放在插件里能用、
+   * 放在 ~/.nextcowork/skills 里不能用」这种没人能解释的现象。
+   * 所以这里只回答「读哪几个目录」,判定留给唯一那个判定者。
+   *
+   * ## 这几道筛子分别挡什么
+   *
+   * - `enabled` / `status`:与 `contributedTools()` 逐条相同。一个停在
+   *   `pending-approval` 的插件不该往模型上下文里塞东西 —— 那正是用户还没点同意的东西。
+   * - 排序:同名 skill 的赢家由**顺序**决定(先来的赢,见 `scanPluginRoots`)。
+   *   不排的话,赢家取决于 Map 的插入顺序,也就是取决于用户当初的安装顺序 ——
+   *   同样两个插件,在两台机器上可能给出不同的结果。
+   */
+  contributedSkillRoots(): PluginSkillRoot[] {
+    const out: PluginSkillRoot[] = []
+    for (const [pluginId, record] of [...this.records.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (!record.enabled || record.status === 'error' || record.status === 'pending-approval') continue
+      for (const skill of record.manifest.contributes.skills) {
+        out.push({ pluginId, dir: join(record.root, skill.path) })
+      }
+    }
+    return out
+  }
+
   contributedTools(): ToolRegistration[] {
     const out: ToolRegistration[] = []
     for (const [pluginId, record] of this.records) {
@@ -1442,6 +1972,55 @@ function isAssignable(type: string, value: unknown): value is boolean | string |
 
 function defaultFor(type: string): boolean | string | number {
   return type === 'boolean' ? false : type === 'number' ? 0 : ''
+}
+
+/** 活动日志里只记主机名,不记整条 URL —— 查询串里可能有 token。 */
+function hostOf(url: string): string {
+  try { return new URL(url).host } catch { return '(invalid url)' }
+}
+
+/**
+ * 流式输出的合批器。
+ *
+ * ★ 存在的理由是**一次 `npm install` 能在一秒里触发上百次 data 事件**。
+ * 逐条往插件推等于一秒上百次跨进程 invoke,而插件那边根本分辨不出区别 ——
+ * 它只会看到界面变卡。50ms 一批,人眼看不出延迟。
+ *
+ * ★ 总量有上限:超了之后**仍然收数据**(不收会让子进程阻塞在 write 上,
+ * 见 `node-spawn.ts` 的同款说明),只是改推一条 `truncated` 标记,不再转发正文。
+ */
+class OutputPump {
+  private buffers: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' }
+  private timer: NodeJS.Timeout | undefined
+  private sent = 0
+  private truncated = false
+
+  constructor(private readonly emit: (stream: 'stdout' | 'stderr', text: string, truncated: boolean) => void) {}
+
+  push(stream: 'stdout' | 'stderr', text: string): void {
+    if (this.sent >= MAX_EXEC_STREAM_CHARS) {
+      if (!this.truncated) {
+        this.truncated = true
+        this.emit(stream, '', true)
+      }
+      return
+    }
+    this.buffers[stream] += text
+    this.sent += text.length
+    if (this.timer !== undefined) return
+    this.timer = setTimeout(() => { this.flush() }, EXEC_STREAM_BATCH_MS)
+    this.timer.unref?.()
+  }
+
+  flush(): void {
+    if (this.timer !== undefined) { clearTimeout(this.timer); this.timer = undefined }
+    for (const stream of ['stdout', 'stderr'] as const) {
+      const text = this.buffers[stream]
+      if (text === '') continue
+      this.buffers[stream] = ''
+      this.emit(stream, text, false)
+    }
+  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

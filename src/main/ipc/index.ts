@@ -28,6 +28,7 @@ import {
   updateAllPlugins
 } from './plugin-market'
 import {
+  activatePluginEditor,
   confirmPluginClose,
   getPluginConfiguration,
   grantPluginPermissions,
@@ -38,6 +39,9 @@ import {
   revokePluginPermissions,
   runPluginCommand,
   deliverPluginCardAction,
+  openPluginWebApp,
+  replyPluginInteraction,
+  setPluginEditorDirty,
   setPluginConfiguration,
   setPluginEnabled,
   uninstallPlugin
@@ -553,7 +557,11 @@ const handlers: HandlerMap = {
   'plugins:revokePermissions': (req) => revokePluginPermissions(req),
   'plugins:activity': (req) => pluginActivity(req),
   'plugins:runCommand': (req) => runPluginCommand(req),
+  'plugins:activateEditor': (req) => activatePluginEditor(req),
   'plugins:cardAction': (req) => deliverPluginCardAction(req),
+  'plugins:interactionReply': (req) => { replyPluginInteraction(req) },
+  'plugins:openWebApp': (req) => openPluginWebApp(req),
+  'plugins:setEditorDirty': (req) => { setPluginEditorDirty(req) },
   'plugins:confirmClose': (req) => confirmPluginClose(req),
   'plugins:marketList': (req) => listMarketPlugins(req),
   'plugins:marketCategories': () => listMarketPluginCategories(),

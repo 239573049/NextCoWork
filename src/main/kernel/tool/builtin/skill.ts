@@ -19,6 +19,7 @@
  *
  * v1 不防重复加载:重复加载只是浪费一点 token,不是错误。
  */
+import { dirname } from 'node:path'
 import { z } from 'zod'
 import { SKILL_BODY_MAX } from '../../../../shared/domain/skill'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
@@ -94,6 +95,27 @@ export const skillTool: ToolRegistration = defineTool({
     }
 
     if (hit.unavailableReason) return toolFail('This client Skill requires local package assets. Install it as a project Skill on the SSH server before using it. Do not run its scripts on the client.')
+    /*
+      ★ 插件带来的 Skill **必须**把包目录告诉模型,而且是绝对路径。
+
+      需求:这类 Skill 的正文几乎一定会引用同目录下的东西(「照着 template.md 写」
+      「跑一下 scripts/check.py」),而那些文件躺在 `<userData>/plugins/<id>/skills/<name>/`
+      里 —— 一个模型**猜不到**的位置。不给的话,模型会把 `scripts/check.py`
+      当成工作区相对路径去读,得到一条「文件不存在」,然后开始在仓库里乱翻找
+      一个根本不在那儿的脚本。
+
+      ★ 为什么这一条不受下面 `ctx.host.remote` 分支的管:插件包在**客户端**,
+      SSH 会话里那个绝对路径在服务器上不存在。但走到这里时它一定是本地的 ——
+      带资产的插件 Skill 在远端会话里已经被 `unavailableReason` 挡在上一行了
+      (见 `kernel/skill/load.ts` 里那段 client-assets 判定)。
+      只有一个**纯文本**的插件 Skill 能走到这儿并且 remote 为真,而那种没有
+      资产可引用,给出客户端路径反而是误导 —— 所以 remote 时不给。
+    */
+    const packageDir =
+      hit.source.kind === 'plugin' && !ctx.host.remote
+        ? `\n\nSkill package directory (absolute, on this machine): ${dirname(hit.source.path)}` +
+          `\nProvided by plugin ${hit.source.pluginId ?? 'unknown'}. Paths this Skill mentions are relative to that directory, not to the workspace.`
+        : ''
     const source = ctx.host.remote ? hit.scope === 'project'
       ? `\n\nServer package directory: ${ctx.host.path?.dirname(hit.source.path) ?? hit.source.path}`
       : '\n\nSource: client instruction snapshot. Client files and absolute client paths are not available on the server.' : ''
@@ -111,6 +133,6 @@ export const skillTool: ToolRegistration = defineTool({
         ? `\n\n(Tools this Skill suggests using: ${tools.join(', ')})`
         : ''
 
-    return toolOk(`# Skill: ${hit.name}${source}\n\n${body}${hint}${BOUNDARY}`)
+    return toolOk(`# Skill: ${hit.name}${packageDir}${source}\n\n${body}${hint}${BOUNDARY}`)
   }
 })

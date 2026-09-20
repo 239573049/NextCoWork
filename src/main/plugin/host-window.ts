@@ -220,7 +220,15 @@ export class ElectronPluginRuntime implements PluginRuntime {
     this.fail(pluginId, new Error('plugin host disposed'))
     this.byWebContents.delete(entry.webContentsId)
     this.hosts.delete(pluginId)
-    this.roots.delete(pluginId)
+    /*
+      ★ roots **不随 dispose 回收**。它是「包在盘上哪」的静态事实,不是运行态:
+      回收的话,一个开着的插件视图在插件休眠(空闲 5 分钟)之后,懒加载的
+      chunk 会开始 403 —— 症状是「编辑器开着放着,过一会儿代码高亮/图表
+      就加载不出来了」,且零报错。运行期入口(__host.html + __runtime.js)
+      即便仍可服务,没有 spawn 注入的 preload 也执行不了任何插件代码,
+      不因多留这份路径而多出攻击面;卸载/覆盖安装时目录被替换或删除,
+      协议层对不存在的路径本来就走 404。
+    */
     if (!entry.window.isDestroyed()) entry.window.destroy()
   }
 
@@ -252,3 +260,23 @@ export function pluginPreloadPath(input: { packaged: boolean; resourcesPath: str
 }
 
 export const PLUGIN_PRELOAD_FILE = 'plugin-preload.cjs'
+
+/**
+ * 插件**视图运行时**产物目录(`react-core.js` / `ui.js` / `ui.css` / `view.js`)。
+ *
+ * 取法与上面那条 preload 完全一样,而且**有意抄它**:这两份是同一类资源 ——
+ * 既不进 renderer bundle 也不进 main bundle,由 electron-builder 的
+ * `extraResources` 原样拷过去。路径规则一旦分叉,打包后必然是其中一个 404,
+ * 而开发时两个都好好的。
+ *
+ * ★ 产物由 `scripts/build-plugin-runtime.mjs` 生成,**不进版本库**。
+ * 目录缺失时协议层对这几个 URL 回 404,插件那边看到的是
+ * `import 'nextcowork/ui'` 失败 —— 所以 `dev` / `build` 前都会先跑一次生成。
+ */
+export function pluginRuntimeDir(input: { packaged: boolean; resourcesPath: string; appPath: string }): string {
+  return input.packaged
+    ? join(input.resourcesPath, PLUGIN_RUNTIME_DIR)
+    : join(input.appPath, 'resources', PLUGIN_RUNTIME_DIR)
+}
+
+export const PLUGIN_RUNTIME_DIR = 'plugin-runtime'

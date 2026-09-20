@@ -26,6 +26,7 @@ import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain
 import type { ProxyPasswordInfo } from '../domain/proxy'
 import type { PluginPermission } from '../plugin/permission'
 import type { PluginActivity, PluginCatalog } from '../plugin/state'
+import type { PluginInteractionRequest, PluginTabTarget } from '../plugin/ui-request'
 import type { PluginMarketItem, PluginUpdate, PluginUpdateResult } from '../plugin/market'
 import type {
   Attachment,
@@ -76,8 +77,7 @@ import type {
   WorkspaceFileMutationResult,
   WorkspaceRecoveryListing,
   WorkspaceFileRequest,
-  WorkspaceFileWriteRequest,
-  WorkspaceTextFile
+  WorkspaceFileWriteRequest
 } from '../domain/workspace-file'
 import type { BrowserChange, BrowserCuaEvent, BrowserProfile, BrowserTab } from '../domain/browser'
 import type { GitBranchSummary, GitCommitSummary, GitDiff, GitOverview } from '../domain/git'
@@ -348,7 +348,11 @@ export interface IpcInvokeMap {
     res: FileSuggestion[]
   }
   'workspace:readFile': { req: WorkspaceFileRequest; res: WorkspaceFile }
-  'workspace:writeFile': { req: WorkspaceFileWriteRequest; res: WorkspaceTextFile }
+  /*
+    res 放宽为 `WorkspaceFile`:base64 支线(图片编辑器覆写)返回 image 形状,
+    文本支线不变。存量调用方只读 `revision`,不受影响。
+  */
+  'workspace:writeFile': { req: WorkspaceFileWriteRequest; res: WorkspaceFile }
   'workspace:mutateFile': { req: WorkspaceFileMutationRequest; res: WorkspaceFileMutationResult }
   'workspace:revealFile': { req: WorkspaceFileRequest; res: void | { remote: true; path: string; parent: string; name: string } }
   'workspace:listRecovery': { req: { workspaceId: string }; res: WorkspaceRecoveryListing }
@@ -651,10 +655,39 @@ export interface IpcInvokeMap {
   /** 执行一条插件命令 —— 菜单项、命令面板、快捷键三处共用 */
   'plugins:runCommand': { req: { pluginId: string; commandId: string }; res: void }
   /**
+   * 打开插件自定义编辑器的 Tab 之前,请主进程按 `onCustomEditor:<viewType>`
+   * 唤醒该插件。★ 不是权限检查:插件视图的静态文件只对「已被唤醒过」的
+   * 插件可服务(协议层的 roots 表在 spawn 时才填),不先唤醒,iframe 会
+   * 收到 403 —— 症状是 Tab 里一片 "forbidden",且零报错。
+   */
+  'plugins:activateEditor': { req: { pluginId: string; viewType: string }; res: { activated: boolean } }
+  /**
    * 用户点了实时工具卡片上的按钮 —— 送给仍在运行的那次工具调用(第 2 层交互)。
    * 即发即忘:动作到不了(工具已结束 / callId 不属于该插件)时静默丢弃。
    */
   'plugins:cardAction': { req: { pluginId: string; callId: string; actionId: string; value?: unknown }; res: void }
+  /**
+   * 用户回答了 `plugins:interaction` 的那一问。
+   *
+   * ★ `value` 的形状由 `request.kind` 决定:quickPick → 选中的 id(`string`),
+   * input → 输入的文本(`string`),confirm → `boolean`。取消一律是 `null`
+   * (confirm 取消是 `false`)。主进程侧会再核一次(quickPick 的回执必须是
+   * 给出去的那几个 id 之一),所以渲染层的这一条不是安全边界。
+   */
+  'plugins:interactionReply': { req: { requestId: string; value: unknown }; res: void }
+  /** 用户点了侧边栏上某个插件网页应用的入口。 */
+  'plugins:openWebApp': { req: { pluginId: string; webAppId: string }; res: void }
+  /**
+   * 插件的自定义编辑器视图报告「我有没有没存的东西」。
+   *
+   * ★ 这条是**宿主代发**的:视图 iframe 够不着插件自己那条 RPC 通道
+   * (`__runtime.js` 只服务于隐藏的宿主页面),而 `plugins:confirmClose` 的
+   * 挽留判断全靠这张表。没有它,插件编辑器里没存的改动会在关 Tab 时静默消失。
+   */
+  'plugins:setEditorDirty': {
+    req: { pluginId: string; documentId: string; path: string; dirty: boolean }
+    res: void
+  }
   /**
    * 设置项的读写。**独立 kv,不扩 `AppSettings`** —— 那份 blob 是全应用的,
    * 每次写都整份重写、整份同步,一个插件的开关不该有那个代价。
@@ -1104,6 +1137,36 @@ export interface IpcEventMap {
    * 渲染层收到时只决定「放在哪一格」,不再做安全判断。
    */
   'plugins:openCustomEditor': { pluginId: string; viewType: string; path: string }
+  /**
+   * 插件请求打开一个网页 / 视图 Tab。
+   *
+   * ★ 与 `plugins:openCustomEditor` 同一条立场:主进程**只校验与转发**
+   * (webapp 查清单、browser 查 `hostPermissions`、view 查视图声明),
+   * 「放哪一格、要不要复用已经开着的那个」由 `stores/tabs.ts` 决定 ——
+   * 那套布局规则抄进主进程一定会分叉。
+   */
+  'plugins:openTab': { pluginId: string; target: PluginTabTarget }
+  /**
+   * 插件要问用户一句话(选项 / 输入 / 确认),渲染层画、用户答、走
+   * `plugins:interactionReply` 回去。
+   *
+   * ★ 文案全是 **l10n key**:主进程不产出用户可见的裸文本。
+   */
+  'plugins:interaction': { requestId: string; pluginId: string; request: PluginInteractionRequest }
+  /**
+   * 插件的长任务进度。`done: true` = 撤掉这一条。
+   *
+   * ★ 插件被禁用 / 应用退出时宿主会替它把每一条都撤掉 —— 否则状态栏上会留下
+   * 一条永远转下去、而且没有主人的进度。
+   */
+  'plugins:progress': {
+    pluginId: string
+    id: string
+    titleKey?: string
+    fraction?: number
+    messageKey?: string
+    done?: boolean
+  }
   'commands:changed': void
   'agents:changed': void
   'modes:changed': void
@@ -1363,7 +1426,11 @@ export const INVOKE_CHANNELS = {
   'plugins:revokePermissions': 1,
   'plugins:activity': 1,
   'plugins:runCommand': 1,
+  'plugins:activateEditor': 1,
   'plugins:cardAction': 1,
+  'plugins:interactionReply': 1,
+  'plugins:openWebApp': 1,
+  'plugins:setEditorDirty': 1,
   'plugins:confirmClose': 1,
   'plugins:marketList': 1,
   'plugins:marketCategories': 1,
@@ -1516,6 +1583,9 @@ export const EVENT_CHANNELS = {
   'plugins:installProgress': 1,
   'plugins:message': 1,
   'plugins:openCustomEditor': 1,
+  'plugins:openTab': 1,
+  'plugins:interaction': 1,
+  'plugins:progress': 1,
   'commands:changed': 1,
   'agents:changed': 1,
   'modes:changed': 1,

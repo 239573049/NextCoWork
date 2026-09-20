@@ -125,8 +125,16 @@ function thinkingConfigFor(req: CanonicalRequest, c: Candidate, protocol: Upstre
 
 function reasoningFor(req: CanonicalRequest, alias: ModelAlias): ResolvedModelThinking | undefined {
   if (req.thinkingLevel !== undefined && alias.thinkingConfig !== undefined) {
+    /*
+      需求:思考预算的天花板要用**这次真的会发出去的** max_tokens,也就是 req 里那个
+      (由全局设置项决定,见 `shared/agent/run-request.ts` 的 `resolveMaxOutputTokens`)。
+      原先这里还和 `alias.maxOutputTokens` 取小 —— 那是输出额度仍由模型目录说了算时
+      的同一条边界;现在目录里那个数不再进请求体,继续拿它当分母只会把预算按一个
+      没人在用的上限压低(症状:设置里放开到 32K,思考却还是按 16K 的余量算)。
+      Anthropic 的 `budget_tokens >= max_tokens` 那道 400 仍由 encode 侧兜底。
+    */
     return resolveModelThinking(req.thinkingLevel, alias.thinkingConfig,
-      Math.min(req.maxOutputTokens, alias.maxOutputTokens), alias.reasoningEfforts)
+      req.maxOutputTokens, alias.reasoningEfforts)
   }
   if (req.reasoning !== undefined) return req.reasoning
   if (req.thinkingBudget === undefined || alias.thinkingConfig?.mode === 'unsupported') return undefined

@@ -56,7 +56,7 @@ import { loadPlanExecution, type PlanExecutionContext } from './kernel/plan-exec
 import type { ModeDefinition } from '../shared/domain/mode'
 import { normalizeModeId } from '../shared/domain/mode'
 import type { Skill } from '../shared/domain/skill'
-import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, scanSkills } from './kernel/skill/load'
+import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, currentPluginSkillRoots, scanSkills } from './kernel/skill/load'
 import { resetSkillRegistries, skillRegistry } from './kernel/skill/registry'
 import { builtinTools, registerToolProvider } from './kernel/tool/builtin'
 import { taskTool } from './kernel/tool/builtin/task'
@@ -1023,6 +1023,12 @@ export async function refreshSkills(workspaceId: string, environment?: Workspace
     fs: h.fs,
     projectFs: remote?.fs, projectPath: remote?.path,
     globalRoot: join(h.paths.userData(), SKILLS_DIR),
+    /*
+      ★ 每次都重新问一次,不缓存。这份清单随插件的启用状态变 —— 缓存的症状是
+      用户刚禁用了插件,而模型下一轮仍然看得见它带来的 skill,
+      且插件页上明明写着它是关的。取一次只是遍历一张十几项的表。
+    */
+    pluginRoots: currentPluginSkillRoots(),
     projectRoot: root === '' ? '' : remote ? await remote.path.resolveWithin(remote.rootPath, `${PROJECT_SKILLS_PREFIX}/${SKILLS_DIR}`) : join(root, PROJECT_SKILLS_PREFIX, SKILLS_DIR)
   })
   // 诊断只记日志,不阻断:一条坏掉的 SKILL.md 不该让别的都用不了
@@ -2381,6 +2387,9 @@ export async function runAgent(
        */
       history,
       contextManagement: store.getSettings().contextManagement,
+      // 需求:输出额度按 run 开始那一刻的设置冻结,和权限档位同一个口径
+      //(「下一次新回复生效」)—— 跑到一半改设置不该让同一个 run 前后两轮额度不同。
+      maxOutputTokens: store.getSettings().maxOutputTokens,
       contextCheckpoints: store.listContextCheckpoints(req.sessionId),
       saveContextCheckpoint: (checkpoint) => {
         store.upsertContextCheckpoint(checkpoint)

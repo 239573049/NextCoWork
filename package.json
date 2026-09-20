@@ -9,9 +9,10 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
-    "dev": "electron-vite dev --watch",
+    "dev": "npm run build:plugin-runtime && electron-vite dev --watch",
     "start": "electron-vite preview",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && npm run build:plugin-runtime && electron-vite build",
+    "build:plugin-runtime": "node scripts/build-plugin-runtime.mjs",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",

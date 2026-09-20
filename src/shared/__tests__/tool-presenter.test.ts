@@ -11,7 +11,8 @@ import {
   pluginPresentersSnapshot,
   presenterOf,
   registeredToolIds,
-  registerPluginPresenters
+  registerPluginPresenters,
+  setPresenterTranslate
 } from '../domain/tool-presenter'
 
 /**
@@ -20,6 +21,55 @@ import {
  * 2. 新工具静默落进兜底 —— 长得和 MCP 工具一样,而没人会去查一个不报错的地方。
  * 这一组把两种都钉住。
  */
+
+/**
+ * 文案替身。真实文案表在渲染层 i18n,shared 测试不许反向 import(依赖方向),
+ * 而这里的断言关心的是「选了哪个 key、抽出了哪些参数、缺参时退不退化」,
+ * 不是中文句子本身 —— 那边由 i18n 的键一致性测试守着。没覆盖到的 key 回显
+ * key 本身(与注册表的缺省注入行为一致)。
+ */
+setPresenterTranslate((key, p = {}) => {
+  const target = typeof p.target === 'string' ? p.target : ''
+  switch (key) {
+    case 'chat.tool.title.read':
+      return target === '' ? '读取…' : `读取 ${target}`
+    case 'chat.tool.title.bash':
+      return target === '' ? '执行…' : `执行 ${target}`
+    case 'chat.tool.title.edit':
+      return target === '' ? '编辑…' : `编辑 ${target}`
+    case 'chat.tool.title.webFetch':
+      return target === '' ? '抓取…' : `抓取 ${target}`
+    case 'chat.tool.title.taskWithDesc':
+      return `子代理:${target}`
+    case 'chat.tool.fallback':
+      return '工具调用'
+    case 'chat.tool.summary.lines':
+      return `${String(p.count)} 行`
+    case 'chat.tool.summary.files':
+      return `${String(p.count)} 个文件`
+    case 'chat.tool.summary.matches':
+      return `${String(p.count)} 处`
+    case 'chat.tool.summary.createdLines':
+      return `新建 ${String(p.count)} 行`
+    case 'chat.tool.summary.created':
+      return '新建'
+    case 'chat.tool.summary.replaced':
+      return `替换 ${String(p.count)} 处`
+    case 'chat.tool.summary.exitCode':
+      return `退出码 ${String(p.code)}`
+    case 'chat.tool.summary.noOutput':
+      return '无输出'
+    case 'chat.tool.summary.scheduleDaily':
+      return `每天 ${String(p.time)}`
+    case 'chat.tool.summary.scheduleWeekly': {
+      // 与真实 zh 表同构:数字串 → 星期名。替身只关心「参数原样传到」
+      const marks = String(p.days).split('').map((d) => '日一二三四五六'[Number(d)] ?? '').join('')
+      return `周${marks} ${String(p.time)}`
+    }
+    default:
+      return key
+  }
+})
 
 const out = (content: string, extra?: Partial<ToolOutput>): ToolOutput => ({ content, ...extra })
 
@@ -138,6 +188,20 @@ describe('presenterOf · 内置工具', () => {
     const p = presenterOf('TodoWrite')
     const todos = [{ status: 'completed' }, { status: 'in_progress' }, { status: 'pending' }]
     expect(p.summary?.({ todos }, undefined)).toBe('1/3')
+  })
+
+  it('★ 定时任务周规则把星期压成数字串传给文案表 —— 星期名属于 UI 文案,不在这里翻', () => {
+    const p = presenterOf('CreateScheduledTask')
+    expect(
+      p.summary?.({ name: 't', schedule: { kind: 'weekly', weekdays: [1, 3, 5], time: '09:00' } }, undefined)
+    ).toBe('周一三五 09:00')
+    // 越界的星期号直接丢弃,不猜一个名字
+    expect(
+      p.summary?.({ name: 't', schedule: { kind: 'weekly', weekdays: [9, 'x'], time: '09:00' } }, undefined)
+    ).toBeUndefined()
+    expect(p.summary?.({ name: 't', schedule: { kind: 'daily', time: '08:30' } }, undefined)).toBe(
+      '每天 08:30'
+    )
   })
 
   it('WebFetch 摘要用字节数', () => {

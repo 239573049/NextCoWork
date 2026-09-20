@@ -7,6 +7,11 @@ export const agentZh = {
   // 只说「正在重试」没用 —— 用户想知道的是为什么:上游繁忙可以等,配置错了等多久都没用
   'chat.status.retrying': '第 {attempt} 次重试：{reason}',
   'chat.status.providerSwitched': '已切换到「{to}」：{reason}',
+  // 空会话首屏问候。四段切点(dayPartOf)在 shared/domain/greeting.ts,句子按语言住这里
+  'chat.greeting.night': '夜深了,还在忙?',
+  'chat.greeting.morning': '早上好,今天从哪儿开始?',
+  'chat.greeting.afternoon': '下午好,要接着做点什么?',
+  'chat.greeting.evening': '晚上好,有什么要收个尾?',
   'chat.thinkingLevel.auto': '自动',
   'chat.thinkingOn': '开启',
   'models.supportedReasoningEfforts': '支持的思考强度',
@@ -156,6 +161,10 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.status.waitingResponse': 'Waiting for a response…',
   'chat.status.retrying': 'Retry {attempt}: {reason}',
   'chat.status.providerSwitched': 'Switched to "{to}": {reason}',
+  'chat.greeting.night': 'It’s late — still working?',
+  'chat.greeting.morning': 'Good morning — where shall we start today?',
+  'chat.greeting.afternoon': 'Good afternoon — anything to pick back up?',
+  'chat.greeting.evening': 'Good evening — anything to wrap up?',
   'chat.thinkingLevel.auto': 'Auto',
   'chat.thinkingOn': 'On',
   'models.supportedReasoningEfforts': 'Supported reasoning efforts',

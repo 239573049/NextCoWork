@@ -8,6 +8,10 @@
  *
  * ★ **入参是小时数,不是 `Date`。** 取「现在」那一下留给调用方,这个函数本身
  * 没有「今天」的概念 —— 测试于是不必冻结时钟,也不会在 CI 的 UTC 时区里翻车。
+ *
+ * ★ 这里只给**切点**,不给句子:问候语文案住在渲染层 i18n
+ * (`chat.greeting.*`,按语言各一句)。原先句子硬编码在本模块,英文界面下
+ * 首屏永远是中文 —— 句子搬走后 `greetingOf` 一并删除,别再往这里加回字符串。
  */
 
 export type DayPart = 'night' | 'morning' | 'afternoon' | 'evening'
@@ -23,15 +27,4 @@ export function dayPartOf(hour: number): DayPart {
   if (h < 12) return 'morning'
   if (h < 18) return 'afternoon'
   return 'evening'
-}
-
-const GREETING: Record<DayPart, string> = {
-  night: '夜深了,还在忙?',
-  morning: '早上好,今天从哪儿开始?',
-  afternoon: '下午好,要接着做点什么?',
-  evening: '晚上好,有什么要收个尾的?'
-}
-
-export function greetingOf(hour: number): string {
-  return GREETING[dayPartOf(hour)]
 }

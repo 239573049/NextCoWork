@@ -155,6 +155,32 @@ export function PluginInstallDialog({
         </ul>
       )}
 
+      {/*
+        ★ 自带的 Skill 紧跟在能力后面,而且**不画在「没有能力」那条分支里**。
+
+        一个 `permissions: []` 的插件在这一屏上原本只有一句「不需要任何能力」,
+        用户据此判断「它什么也做不了,装吧」—— 而一条 Skill 会进入他此后每一轮
+        对话的上下文。这两件事都要摆在同一屏上,他才是在知情的前提下按下安装。
+
+        名字是领域值,不翻译;等宽字体是这个界面里「这串字符是标识符」的既有信号。
+      */}
+      {shown.skills.length > 0 && (
+        <>
+          <h4 className="mt-4 text-[12px] font-medium text-fg">{t('plugins.marketSkills')}</h4>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">{t('plugins.marketSkillsHint')}</p>
+          <ul className="mt-2 flex flex-wrap gap-1">
+            {shown.skills.map((skill) => (
+              <li
+                key={skill}
+                className="rounded-[4px] bg-accent/10 px-1.5 py-0.5 font-mono text-[11px] text-fg-muted"
+              >
+                {skill}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
       {busy && (
         <div className="mt-4">
           <div className="text-[11.5px] text-fg-muted tabular-nums">{installLabel(progress, t)}</div>

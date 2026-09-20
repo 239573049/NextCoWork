@@ -18,11 +18,12 @@
  * 存坏。能看不能改,是这种时候唯一安全的姿势。
  */
 import { AlertTriangle } from 'lucide-react'
-import { type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { InnerTab } from '../../../../shared/domain/tab'
 import { isRunnable } from '../../../../shared/plugin/state'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { useI18n } from '../../i18n'
+import { activatePluginEditor } from '../../services/plugins'
 import { PluginViewFrame } from '../../shell/PluginViewFrame'
 import { usePluginsStore } from '../../stores/plugins'
 
@@ -41,6 +42,26 @@ export function CustomEditorView({
   // 「能不能跑」的判定只有一份(`shared/plugin/state.ts`)—— 这里、菜单项过滤、
   // 以及「谁来打开这个文件」的挑选,三处必须同时改变,抄成三份迟早会分叉。
   const usable = plugin !== undefined && editor !== undefined && isRunnable(plugin)
+
+  /*
+    需求:渲染 iframe 之前先按 `onCustomEditor:<viewType>` 唤醒插件。
+    不满足会怎样:插件视图的静态文件只对「被唤醒过」的插件可服务
+    (协议层的 roots 表在 spawn 时才填),没醒的插件 iframe 第一个请求
+    就是 403 —— Tab 里一片 "forbidden",且零报错。Excalidraw 之所以
+    没踩中,是它声明了 onStartup(开机即醒);编辑器类插件按规范只声明
+    onCustomEditor,而宿主此前没有任何地方派发这个事件。
+    ★ 唤醒失败(activated=false)不渲染 iframe:渲染了也只是把 403 画出来。
+    失败原因在插件详情页的诊断里,这里交给上面的降级态/下一次 catalog 更新。
+  */
+  const [woken, setWoken] = useState(false)
+  useEffect(() => {
+    if (!usable) return
+    let alive = true
+    void activatePluginEditor(tab.ref.pluginId, tab.ref.viewType)
+      .then((result) => { if (alive && result.activated) setWoken(true) })
+      .catch(() => undefined)
+    return () => { alive = false }
+  }, [usable, tab.ref.pluginId, tab.ref.viewType])
 
   if (!usable) {
     return (
@@ -72,6 +93,15 @@ export function CustomEditorView({
         />
       </div>
     )
+  }
+
+  /*
+    还没醒 / 没醒成:给一块空底色,不给 spinner —— 首次唤醒是一次隐藏窗口
+    的起建(几百毫秒),spinner 一闪而过反而更像卡住;失败的话 catalog 随后
+    会把 status 翻成 error,上面的降级态自然接管。
+  */
+  if (!woken) {
+    return <div className="flex min-h-0 flex-1 flex-col bg-canvas" />
   }
 
   return (

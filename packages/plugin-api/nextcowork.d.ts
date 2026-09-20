@@ -22,9 +22,28 @@
  *
  * 反过来也成立:**清单里没声明的能力,类型对了也会被拒**(第二道门)。
  * 类型系统管不了「用户批没批」,那是 `permissions` 命名空间的事。
+ *
+ * ## 插件的**界面**在另一份声明里
+ *
+ * `nextcowork/ui`(宿主控件)和 `nextcowork/view`(视图侧运行时)在
+ * `nextcowork-view.d.ts`。下面这行把它一并带进来 —— 分成两个 `declare module`
+ * 是因为它们跑在**两个不同的执行环境**里:这一份在插件宿主页(有 preload、
+ * 有权限链),那一份在视图 iframe(只有一条 postMessage 通道)。
+ * 混在一个模块名下的话,作者会在视图里 `import * as ncw from 'nextcowork'`
+ * 然后对着一个恒为 undefined 的 `ncw.workspace` 排查半天。
  */
+/// <reference path="./nextcowork-view.d.ts" />
+
 declare module 'nextcowork' {
-  /** 这份 API 的版本。与宿主的 `engines.nextcowork` 不是一回事。 */
+  /**
+   * 这份垫片的版本。**与清单里的 `engines.nextcowork` 不是一回事**,
+   * 但两者都指向同一个东西的两半:前者是运行期垫片,后者是宿主声明它实现了
+   * 哪一版**插件 API**(当前 `0.3.1`,见 `shared/plugin/api-version.ts`)。
+   *
+   * ★ `engines.nextcowork` 比的**不是应用版本**。这两个曾被当成同一个,结果是
+   * 宿主拿 `app.getVersion()`(2.x)去比 `^0.2.0`,按官方模板写的插件装上一律
+   * 「装载失败」。写 `^0.3.0`。
+   */
   export const version: string
 
   /** 本插件的 `publisher.name`。**由宿主写死**,改它不影响任何一次鉴权。 */
@@ -51,7 +70,15 @@ declare module 'nextcowork' {
 
   export namespace env {
     export function appInfo(): Thenable<{ appName: string; appVersion: string; language: string }>
-    /** 用系统默认程序打开一个外部链接。宿主会问用户。 */
+    /**
+     * 交给**系统浏览器**打开一个网址。
+     *
+     * ★ 只放行 `https:`。`http:` / `file:` / `javascript:` 一律被拒
+     * (`invalid_argument`)—— 这条路离开了应用的信任边界,之后没有第二道检查。
+     *
+     * ★ 想开在**应用内**,用 `tabs.openWebApp`(地址写死在清单里)或
+     * `tabs.openBrowser`(动态地址,要 `tabs.browser` 能力 + `hostPermissions`)。
+     */
     export function openExternal(url: string): Thenable<{ opened: boolean }>
     export const clipboard: {
       /** 需要 `clipboard` 能力;读取还需要一次性确认。 */
@@ -65,6 +92,15 @@ declare module 'nextcowork' {
   export type Permission =
     | 'workspace.read' | 'workspace.write' | 'process' | 'net' | 'secrets' | 'storage'
     | 'scm.read' | 'scm.write' | 'agent.intercept' | 'agent.context' | 'clipboard' | 'window.notify'
+    /**
+     * 在**应用内**打开网页(`tabs.openBrowser`)。
+     *
+     * ★ 能力只说「可以开网页」,开**哪些**由 `hostPermissions` 逐 URL 说了算。
+     * 清单里写死的 `contributes.webApps` 不需要它 —— 那些地址用户安装时就看见了。
+     */
+    | 'tabs.browser'
+    /** 与其它插件通信。目标还必须在你的 `dependencies` 里。 */
+    | 'plugins'
 
   export namespace permissions {
     export function contains(permission: Permission | Permission[]): Thenable<boolean>
@@ -105,6 +141,26 @@ declare module 'nextcowork' {
 
     /** 只支持前缀 glob(`src/**`、`docs/*.md`)。要更强的匹配,取回来自己筛。 */
     export function findFiles(glob: string, limit?: number): Thenable<string[]>
+
+    /**
+     * 工作区里有文件变了。需要 `workspace.read`。
+     *
+     * ## ★★ 这**不是**文件系统 watcher
+     *
+     * 它只覆盖**经由应用发生**的变更:编辑器保存、Agent 的写文件工具、
+     * 以及插件自己的 `workspace.fs.writeFile` / `delete`。
+     *
+     * **收不到**:外部编辑器改的文件、`git checkout`、终端里的 `mv`。
+     * 宿主刻意没有递归 watcher(大仓库上开销大、macOS 上给不出可靠的重命名事件),
+     * 把这条说清楚比给一个半真的 watcher 诚实 —— 否则你会在「为什么我在
+     * VS Code 里改了没反应」上耗掉一天。
+     *
+     * @param options.globs 前缀 glob 过滤(同 `findFiles`)。不给 = 全都要。
+     */
+    export function onDidChangeFiles(
+      handler: (changes: { path: string; kind: 'created' | 'modified' | 'deleted' }[]) => unknown,
+      options?: { globs?: string[] }
+    ): Disposable
   }
 
   // ───────────────────────── process ─────────────────────────
@@ -122,6 +178,33 @@ declare module 'nextcowork' {
       args?: string[],
       options?: { cwd?: string; timeoutMs?: number }
     ): Thenable<{ code: number; stdout: string; stderr: string }>
+
+    /**
+     * 同样跑一条命令,但**边跑边给输出**。
+     *
+     * 需求:构建 / 测试 / 打包跑几十秒,`exec` 的形状让你在那几十秒里一个字都
+     * 拿不到,做不出进度,也没法在第一条错误出现时就停。
+     *
+     * ★ 审批只在**开始时问一次**(和 `exec` 同一道门、同一份白名单),
+     * 不逐段问 —— 逐段问的结果是用户为一条命令点二十次「允许」。
+     * ★ 输出合批推送(50ms 一批);总量超限之后只推一条 `truncated`,
+     * 不再转发正文,但命令本身照常跑完。
+     * ★ 返回的是**句柄对象**,不是子进程:没有任何可以继续操作的流。
+     */
+    export function execStream(
+      command: string,
+      args?: string[],
+      options?: {
+        cwd?: string
+        timeoutMs?: number
+        onOutput?: (chunk: { stream: 'stdout' | 'stderr'; chunk: string; truncated: boolean }) => unknown
+        onExit?: (result: { code: number; timedOut: boolean }) => unknown
+      }
+    ): {
+      /** 请求中断。中断 / 超时同样会走 `onExit`,`code` 是 124(对齐 `timeout(1)`)。 */
+      abort(): Thenable<void>
+      done: Thenable<{ code: number; timedOut: boolean }>
+    }
   }
 
   // ─────────────────────────── net ───────────────────────────
@@ -207,6 +290,38 @@ declare module 'nextcowork' {
       textKey: string | null,
       options?: { tooltipKey?: string; command?: string }
     ): Thenable<void>
+
+    /**
+     * 要一行输入。`*Key` 全是 l10n key,不是句子。
+     *
+     * ★ 用户直接关掉 = `null`,**不是错误**:没理会一个弹窗不是故障。
+     * ★ `password: true` 时宿主用掩码输入,而且那个值不进活动日志。
+     */
+    export function showInputBox(options: {
+      titleKey: string
+      placeholderKey?: string
+      initial?: string
+      password?: boolean
+    }): Thenable<string | null>
+
+    /** 要一次确认。取消 = `false`。`danger` 只影响语气色,不改变行为。 */
+    export function showConfirm(options: {
+      titleKey: string
+      detailKey?: string
+      danger?: boolean
+    }): Thenable<boolean>
+
+    /**
+     * 包住一段异步工作,期间在状态栏上显示进度。
+     *
+     * ★ 给的是**包裹**而不是裸的 start/end:裸的那种一旦中间抛异常,进度条就
+     * 永远留在状态栏上转,而没有人再去关它。这里 `finally` 一定会收掉。
+     * ★ 单插件同时最多 3 条;插件被禁用时宿主替它把每一条都撤掉。
+     */
+    export function withProgress<T>(
+      options: { titleKey: string; id?: string },
+      task: (progress: { report: (update: { fraction?: number; messageKey?: string }) => void }) => Thenable<T> | T
+    ): Thenable<T>
   }
 
   // ────────────────────────── tabs ───────────────────────────
@@ -228,6 +343,98 @@ declare module 'nextcowork' {
      * ★ 没有配套的关闭方法:关 Tab 是**用户**的动作。
      */
     export function openCustomEditor(viewType: string, path: string): Thenable<void>
+
+    /**
+     * 打开你在 `contributes.webApps` 里声明过的一个网页应用。
+     *
+     * ```jsonc
+     * // package.json —— 连 main 都不需要
+     * { "kind": "webapp", "contributes": { "webApps": [
+     *   { "id": "home", "title": "%app.home%", "icon": "tv", "url": "https://www.bilibili.com/" }
+     * ] } }
+     * ```
+     *
+     * ★ **不需要任何能力**:地址写死在清单里,用户安装时就看见了。
+     * ★ 装上之后侧边栏自动有一条入口(`entry: "sidebar"`,缺省),
+     *   所以大多数「把网站带进来」的插件**一行代码都不用写**。
+     */
+    export function openWebApp(webAppId: string): Thenable<boolean>
+
+    /**
+     * 在应用内打开一个**动态**地址。
+     *
+     * ★ 两道门都要过:能力 `tabs.browser` + 地址命中 `hostPermissions`。
+     * 只有能力没有地址门的话,一个声明「我只访问 bilibili.com」的插件可以
+     * 在应用内打开任何网站,而用户在安装界面上看到的域名只有那一个。
+     * ★ 站外链接不会留在这个 Tab 里:宿主拦下来交给系统浏览器。
+     */
+    export function openBrowser(
+      url: string,
+      options?: { open?: 'tab' | 'right' }
+    ): Thenable<boolean>
+  }
+
+  // ─────────────────── customEditors ─────────────────────────
+
+  export namespace customEditors {
+    /**
+     * 报告某份文档有没有没存的改动。
+     *
+     * ★ 宿主的「关 Tab 之前问一句」全靠这张表。不报的话,你的编辑器里没存的
+     * 改动会在用户关 Tab 的那一刻**静默消失** —— 而内置文档是会挽留的,
+     * 两者行为不一致更难被发现。
+     */
+    export function setDirty(documentId: string, path: string, dirty: boolean): Thenable<void>
+  }
+
+  // ─────────────────────────── scm ───────────────────────────
+
+  export namespace scm {
+    /** 需要 `scm.read`。仓库开不出来(远程工作区 / 没装 git / 不是仓库)时这条调用失败。 */
+    export function status(): Thenable<{ branch: string; staged: string[]; unstaged: string[] }>
+    /** 一个文件的 diff。**没有「整仓 diff」**:那是一次无上限的输出,而 `status` 已经说了哪些文件变了。 */
+    export function diff(path: string, options?: { staged?: boolean }): Thenable<{ diff: string; binary: boolean; truncated: boolean }>
+    export function log(options?: { limit?: number }): Thenable<{ hash: string; subject: string; author: string; at: number }[]>
+    export function branches(): Thenable<{ current: string; branches: string[] }>
+    /** 以下四条需要 `scm.write`,并且走和用户手敲命令**同一条**审批链。 */
+    export function stage(paths: string[]): Thenable<void>
+    export function commit(message: string): Thenable<string>
+    export function createBranch(name: string, options?: { checkout?: boolean }): Thenable<void>
+    export function checkout(name: string): Thenable<void>
+    /*
+      ★ 没有 push / pull:它们把本机凭据用到远端,而失败形态(冲突、鉴权、
+      远端 hook)不是一个返回值能如实回答的。
+    */
+  }
+
+  // ────────────────────────── agent ──────────────────────────
+
+  export namespace agent {
+    /**
+     * 工具调用拦截器。需要 `agent.intercept`。
+     *
+     * ★ **只能收紧,不能放宽**:返回 `allow` 不会跳过宿主自己的权限链。
+     * ★ 超时(3s)= 弃权,只记一条诊断 —— 一个卡住的插件不该把所有工具调用堵死。
+     */
+    export function registerToolInterceptor(
+      handler: (call: { tool: string; input: unknown }) => Thenable<ToolVerdict | void> | ToolVerdict | void
+    ): Disposable
+
+    /**
+     * 每轮往上下文里注入一小段。需要 `agent.context`。
+     *
+     * ★ 有长度上限,而且会被宿主**强制包裹**成 `<plugin-context source="…">` ——
+     * 模型必须能看出这一段来自插件,而不是来自用户或系统提示词。
+     */
+    export function registerContextProvider(
+      handler: (input: { sessionId: string }) => Thenable<string | void> | string | void
+    ): Disposable
+  }
+
+  export interface ToolVerdict {
+    decision: 'allow' | 'ask' | 'deny'
+    /** l10n key,不是句子 —— 它会显示给用户。 */
+    reasonKey?: string
   }
 
   // ──────────────────────── commands ─────────────────────────
@@ -266,8 +473,23 @@ declare module 'nextcowork' {
     /**
      * 交互按钮:点了走反向通道回到**仍在运行**的工具(见 `Tool.invoke` 的 `onAction`)。
      * 只在实时卡片(经 `progress`)上有意义;工具已返回后点它无效果。
+     *
+     * `confirm.titleKey` 是 **l10n key**:给了就先弹一次宿主的确认框。
+     * 危险动作(删东西、覆盖)自己标 —— 宿主替你判断不了哪一条危险。
      */
-    | { type: 'button'; actionId: string; label: string; tone?: CardTone }
+    | { type: 'button'; actionId: string; label: string; tone?: CardTone; confirm?: { titleKey: string } }
+    /**
+     * 一段 markdown,由**宿主的**受信渲染器解释(链接同样只走系统浏览器,
+     * 不允许裸 HTML)。`text` 只能给一整段没有结构的字,而你最常要表达的
+     * 是「几行要点 + 一个链接」。
+     */
+    | { type: 'markdown'; value: string }
+    /** 一列要点。与 `table` 的区别是它**不承诺列对齐** —— 一行一件事。 */
+    | { type: 'list'; items: Array<{ label: string; tone?: CardTone; hint?: string }> }
+    /** 一个数值格:大字 + 说明 + 可选变化量。别把数字硬塞进 `keyValue`,那一栏的字号读不出重点。 */
+    | { type: 'metric'; label: string; value: string; delta?: string; tone?: CardTone }
+    /** 分隔线。纯视觉。 */
+    | { type: 'divider' }
 
   /**
    * 工具结果的自定义卡片 —— **只影响 UI,不下发给模型**。

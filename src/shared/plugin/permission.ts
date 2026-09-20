@@ -50,6 +50,17 @@ export const PLUGIN_PERMISSIONS = [
   /** 系统通知。有频率限流。 */
   'window.notify',
   /**
+   * 在**应用内**打开网页(`tabs.openBrowser`)。
+   *
+   * ★ 能力只回答「可以开网页」,开**哪些**由 `hostPermissions` 逐 URL 回答 ——
+   * 两道门缺一不可:只有能力的话,一个声明「我只访问 bilibili.com」的插件
+   * 可以在应用内打开任意网站,而用户在安装界面上看到的域名只有那一个。
+   *
+   * ★ 清单里写死的 `contributes.webApps` **不需要它**:那些地址用户安装时
+   * 就看见了,运行期再问一次是在问一个已经回答过的问题。
+   */
+  'tabs.browser',
+  /**
    * 与其它插件通信(第 5 层):`connect(dep)` 调它们导出的 API、以及事件总线。
    *
    * ★ 能连谁**另有一道门**:目标必须在本插件清单 `dependencies` 里声明过。

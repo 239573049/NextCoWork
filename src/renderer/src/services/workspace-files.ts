@@ -1,4 +1,4 @@
-import type { WorkspaceFile, WorkspaceFileMutationRequest, WorkspaceFileMutationResult, WorkspaceFileWriteRequest, WorkspaceRecoveryListing, WorkspaceTextFile } from '../../../shared/domain/workspace-file'
+import type { WorkspaceFile, WorkspaceFileMutationRequest, WorkspaceFileMutationResult, WorkspaceFileWriteRequest, WorkspaceRecoveryListing } from '../../../shared/domain/workspace-file'
 import { WORKSPACE_FILE_ERROR_PREFIX } from '../../../shared/domain/workspace-file'
 import type { TranslationKey } from '../i18n'
 import { useDocumentsStore } from '../stores/documents'
@@ -27,7 +27,9 @@ export function listWorkspaceRecovery(workspaceId: string): Promise<WorkspaceRec
   return invoke('workspace:listRecovery', { workspaceId })
 }
 
-export async function writeWorkspaceFile(req: WorkspaceFileWriteRequest): Promise<WorkspaceTextFile> {
+// 返回类型随契约放宽为 WorkspaceFile:base64(图片)支线返回 image 形状。
+// 存量文本调用方只读 revision / content,不受影响。
+export async function writeWorkspaceFile(req: WorkspaceFileWriteRequest): Promise<WorkspaceFile> {
   const result = await invoke('workspace:writeFile', req)
   announce({ workspaceId: req.workspaceId, path: req.path, operation: 'save' })
   return result

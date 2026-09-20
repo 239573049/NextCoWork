@@ -187,10 +187,15 @@ export function nodeSpawn(resolveShell: () => string = agentShell): SpawnFn {
         看起来完全不像一个背压问题。
       */
       child.stdout.on('data', (chunk: Buffer) => {
-        if (stdout.length < MAX_STREAM_CHARS) stdout += chunk.toString('utf8')
+        const text = chunk.toString('utf8')
+        if (stdout.length < MAX_STREAM_CHARS) stdout += text
+        // ★ 逐个 try:一个订阅者抛异常不能把命令本身带下去。
+        try { opts.onOutput?.({ stream: 'stdout', text }) } catch { /* 订阅者的问题,不是命令的 */ }
       })
       child.stderr.on('data', (chunk: Buffer) => {
-        if (stderr.length < MAX_STREAM_CHARS) stderr += chunk.toString('utf8')
+        const text = chunk.toString('utf8')
+        if (stderr.length < MAX_STREAM_CHARS) stderr += text
+        try { opts.onOutput?.({ stream: 'stderr', text }) } catch { /* 同上 */ }
       })
 
       const { pid } = child

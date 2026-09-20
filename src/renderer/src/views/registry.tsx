@@ -56,6 +56,7 @@ import { BrowserFeature } from "./browser/BrowserFeature";
   往这个表里加视图之前先把传递依赖跟到底,理由见文件头那段。
 */
 import { CustomEditorView } from "./plugins/CustomEditorView";
+import { PluginWebAppView } from "./plugins/PluginWebAppView";
 
 // `.then(m => ({ default: ... }))` 是因为这几个都是具名导出,React.lazy 要的是默认导出。
 const ChatView = lazy(() => import("./chat/ChatView").then((m) => ({ default: m.ChatView })));
@@ -85,6 +86,15 @@ export interface InnerViewProps {
   workspace: Workspace;
   /** 应用级默认模型;工作区没选过时兜底 */
   fallbackModel: FallbackModel;
+  /**
+   * 设置 › 通用 › Agent 的「最大输出 Token」。
+   *
+   * 需求:聊天视图要用**和主进程同一个数**算上下文压力条的输出预留 ——
+   * 本地那次重判一旦比主进程严格,就会出现「圆环 21%、旁边却写着接近上限」
+   * (理由全文在 `views/chat/context-pressure.ts` 的文件头)。设置的权威在
+   * 主进程,所以只能从 AppShell 一路传下来,不在视图里自己存一份。
+   */
+  maxOutputTokens: number;
 }
 
 export function InnerView(props: InnerViewProps): ReactNode {
@@ -95,7 +105,7 @@ export function InnerView(props: InnerViewProps): ReactNode {
 }
 
 function renderInner(
-  { tab, workspace, fallbackModel }: InnerViewProps,
+  { tab, workspace, fallbackModel, maxOutputTokens }: InnerViewProps,
   t: Translate,
 ): ReactNode {
   switch (tab.kind) {
@@ -127,6 +137,7 @@ function renderInner(
           tabId={tab.id}
           workspace={workspace}
           fallbackModel={fallbackModel}
+          maxOutputTokens={maxOutputTokens}
           readOnly={tab.ref.readOnly === true}
           subagentOf={tab.ref.subagentOf}
         />
@@ -164,6 +175,19 @@ function renderInner(
           key={`${tab.ref.pluginId}:${tab.ref.viewType}:${tab.ref.path}`}
           tab={tab}
           workspaceId={workspace.id}
+        />
+      );
+    case "webapp":
+      /*
+        插件带进来的网页应用。key 挂「插件 + webApp」两样:换任何一样都是换一个
+        站点,webview 必须重建 —— 不重建的话 Electron 会在同一个 webview 里导航,
+        而那条导航要过 `will-navigate` 的域名检查,结果是「换个入口打不开」。
+      */
+      return (
+        <PluginWebAppView
+          key={`${tab.ref.pluginId}:${tab.ref.webAppId}`}
+          tab={tab}
+          workspace={workspace}
         />
       );
   }
@@ -215,4 +239,5 @@ export const INNER_VIEW_KINDS: Record<InnerTabKind, true> = {
   files: true,
   changes: true,
   custom: true,
+  webapp: true,
 };

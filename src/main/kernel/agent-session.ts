@@ -214,6 +214,13 @@ export interface SessionDeps {
   personalization?: PersonalizationSettings
   planExecution?: PlanExecutionContext
   contextManagement?: ContextManagementSettings
+  /**
+   * 设置 › 通用 › Agent 的「最大输出 Token」,run 开始时的快照。
+   *
+   * 需求:输出额度只有这一个真源(`AppSettings.maxOutputTokens`),内核不再从
+   * 模型目录推。缺省 = 纯内核测试没给设置,退回 `DEFAULT_MAX_OUTPUT_TOKENS`。
+   */
+  maxOutputTokens?: number
   contextCheckpoints?: readonly ContextCheckpoint[]
   saveContextCheckpoint?: (checkpoint: ContextCheckpoint) => void
   /**
@@ -728,12 +735,12 @@ export class AgentSession {
         ★ 这里给的是**有效窗口**,不是协议窗口 —— 它决定 `shouldCompact` 的分母和
         圆环的分母。协议窗口那条线在下面的 `validateModelRuntime` 里读 `alias` 原值,
         两条线**故意**不一样:默认夹在 272K 是「不越过计费线」,而不是「模型装不下」。
-        输出额度也不再直接取模型目录声明的协议上限:正文请求默认封顶 32K,避免大输出
-        模型从空会话起就挤高压力读数;低于 32K 的协议上限仍负责安全收窄。
-        见 `shared/agent/run-request.ts` 的默认值说明。
+        输出额度取的是**全局设置项**(设置 › 通用 › Agent),模型目录里那条
+        `maxOutputTokens` 不再参与;只有模型的协议上下文窗口会把它收窄 ——
+        一次请求的输出额度大过整个窗口必然 400。见 `shared/agent/run-request.ts`。
       */
       contextWindow: effectiveContextWindow(alias?.contextWindow, this.req.maxContext === true),
-      maxOutputTokens: resolveMaxOutputTokens(alias?.maxOutputTokens),
+      maxOutputTokens: resolveMaxOutputTokens(this.deps.maxOutputTokens, alias?.contextWindow),
       supportsThinking: alias?.capabilities.thinking ?? false,
       reasoningEfforts: alias?.reasoningEfforts,
       ...(alias?.thinkingConfig !== undefined ? { thinkingConfig: alias.thinkingConfig } : {}),

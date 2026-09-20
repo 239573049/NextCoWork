@@ -53,12 +53,22 @@ async function makeManager(runtime: PluginRuntime, interactive = false): Promise
     runtime,
     pluginRoot: root,
     hostVersion: '1.0.0',
+    // 清单声明的是插件 API 版本，不是应用版本(见 shared/plugin/api-version.ts)
+    apiVersion: '1.0.0',
     getKv: (key, fallback) => (kv.has(key) ? (kv.get(key) as typeof fallback) : fallback),
     setKv: (key, value) => { kv.set(key, value) },
     currentWorkspace: () => ({ id: 'ws', rootPath: root }),
     currentAppearance: () => 'dark' as const,
     approve: async () => true,
     trash: async () => {},
+    openExternal: async () => {},
+    clipboard: { readText: async () => '', writeText: async () => {} },
+    // 用到 scm 的测试自己换掉它 —— 静默返回空状态会让断言在"没接上"时依然是绿的
+    scmFor: () => { throw new Error('scm adapter is not wired in this test') },
+    openTab: () => {},
+    // 没有窗口可问 = 一律取消。用到交互的测试自己换掉它
+    requestInteraction: async () => null,
+    emitProgress: () => {},
     emitChanged: () => {},
     publishMessages: () => {},
     unpublishMessages: () => {},

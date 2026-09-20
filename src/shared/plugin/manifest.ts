@@ -21,6 +21,24 @@ import {
   isPluginPermission,
   type PluginPermission
 } from './permission'
+/*
+  ★ 复用 Skill 那边的名字规则,不在这里另写一条。
+
+  插件贡献的 skill 最终和用户自己装的走**同一个扫描器**(`kernel/skill/load.ts`),
+  那边拿 `SKILL_NAME_RE` 卡目录名。这里松一点的话,清单能过、装得上,
+  而扫描时被静默跳过 —— 作者看到的是「我声明了但它不在」。
+*/
+import { SKILL_NAME_RE } from '../domain/skill'
+
+/**
+ * 插件包里放 skill 的那层目录。
+ *
+ * ★ 写成常量而不是字面量,是因为它同时是**三方约定**:清单校验(这里)、
+ * 打包器的复制清单(`packages/plugin-cli`)、以及服务端上架时的解包校验
+ * (CoWork 的 `PluginEndpoints.InspectPackage`)。三处改不齐的症状是
+ * 「本地装得上、发布之后装不上」,而那要等到用户装失败才会被发现。
+ */
+export const SKILL_CONTRIBUTION_DIR = 'skills'
 
 /** 与后端 `NameRegex` 同一形状。 */
 export const PLUGIN_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -45,10 +63,23 @@ export const ACTIVATION_EVENT_PREFIXES = [
   'onView:',
   'onCustomEditor:',
   'onTool:',
-  'onWorkspaceContains:'
+  'onWorkspaceContains:',
+  /** 用户打开了某个网页应用(`contributes.webApps[].id`) */
+  'onWebApp:',
+  /** 用户在输入框里用了某条斜杠命令 */
+  'onSlashCommand:'
 ] as const
 
 export const ACTIVATION_EVENT_LITERALS = ['onStartup'] as const
+
+/**
+ * 这份清单描述的是哪一类插件。见 `PluginManifest.kind`。
+ *
+ * `webapp` 是**零代码**的那一类:只有 `contributes.webApps`,宿主不为它起任何
+ * 隔离上下文。它的存在是为了让「把一个网站带进来」这种最朴素的需求不必付
+ * 「写 JS + 打包 + 常驻一个进程」的全额成本。
+ */
+export type PluginKind = 'extension' | 'webapp'
 
 export interface PluginCommandContribution {
   command: string
@@ -77,7 +108,75 @@ export interface PluginViewContribution {
   icon?: string
   /** 视图 HTML 在包内的相对路径 */
   path: string
+  /**
+   * 这个视图挂在哪。缺省 `editor`。
+   *
+   * - `editor` —— 自定义编辑器的 UI(必须绑定一个文件才有意义,路径由 Tab 给);
+   * - `sidebar` —— 侧边栏里的常驻面板;
+   * - `panel` —— 可以开在任意一格的内层 Tab。
+   *
+   * ★ 缺省必须是 `editor`:这个字段存在之前,`contributes.views[0]` 就**是**
+   * 「自定义编辑器的 UI」(`views/plugins/CustomEditorView.tsx` 直接取它)。
+   * 缺省改成别的,会让已经装着的编辑器类插件当场打不开文件。
+   */
+  location?: PluginViewLocation
 }
+
+export type PluginViewLocation = 'editor' | 'sidebar' | 'panel'
+
+const VIEW_LOCATIONS: readonly PluginViewLocation[] = ['editor', 'sidebar', 'panel']
+
+/**
+ * 一个「网页应用」—— 清单里写死地址,装上就是一个入口。
+ *
+ * ## 这个贡献点为什么存在
+ *
+ * 最朴素的一种插件是「把哔哩哔哩带进来」:没有逻辑、没有工具,就是一个图标
+ * 加一个网址。在它之前,这种插件同样必须写 JS 入口、打包,并且让宿主为它起
+ * 一个隐藏的 BrowserWindow —— 为一件零逻辑的事付全额成本,而作者八成会在
+ * 「`main` 必须是单文件 ESM」那一步就放弃。
+ *
+ * ★ URL **写死在清单里**,所以不需要 `tabs.browser` 能力:用户在安装界面上
+ * 已经看到了它要开哪个站。动态地址(`tabs.openBrowser`)才需要能力 + 逐 URL 门。
+ */
+export interface PluginWebAppContribution {
+  /** 稳定 id(同 `PLUGIN_NAME_RE` 形状)。落盘的 Tab 按它定位 */
+  id: string
+  /** `%key%`,不是文案 */
+  title: string
+  icon?: string
+  /** https 地址。装载时就过 URL 门,过不了的整份清单拒绝 */
+  url: string
+  /** 打开在哪:内层 Tab / 外层功能 Tab / 右侧面板。缺省 `tab` */
+  open?: PluginWebAppOpen
+  /** 要不要在侧边栏出一个常驻入口。缺省 `sidebar` */
+  entry?: 'sidebar' | 'none'
+}
+
+export type PluginWebAppOpen = 'tab' | 'feature' | 'right'
+
+const WEB_APP_OPENS: readonly PluginWebAppOpen[] = ['tab', 'feature', 'right']
+
+/**
+ * 对话输入框里的一条斜杠命令。
+ *
+ * ★ `command` 必填:一条斜杠命令背后就是一条**已经声明过的命令**,与菜单贡献
+ * 同一条路(`contributes.menus` → command)。另给它一条注册通道的话,同一件事
+ * 就有了两个注册点,而作者只会接上其中一个,另一个静默失效。
+ */
+export interface PluginSlashCommandContribution {
+  /** 用户输入的那个词(`/xxx`) */
+  name: string
+  /** 触发哪条命令。必须在 `contributes.commands` 里 */
+  command: string
+  /** `%key%` */
+  title: string
+  /** `%key%`,可选 */
+  description?: string
+}
+
+/** 斜杠命令的名字 —— 它会**原样出现在输入框里**,所以不许有空格和大写。 */
+export const SLASH_COMMAND_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
 
 /**
  * 工具卡片的形态 —— 决定折叠态图标与展开渲染器。
@@ -158,11 +257,27 @@ export interface PluginContributes {
   menus: Record<string, PluginMenuContribution[]>
   customEditors: PluginCustomEditorContribution[]
   views: PluginViewContribution[]
+  /** 清单里写死地址的网页应用。见 `PluginWebAppContribution` */
+  webApps: PluginWebAppContribution[]
   tools: PluginToolContribution[]
   /** 工具返回 `frame` 卡片时的 HTML 落点,按 viewType 索引 */
   cardViews: PluginCardViewContribution[]
   keybindings: PluginKeybindingContribution[]
+  /** 对话输入框里的 `/xxx`。每条背后必须是一条已声明的命令 */
+  slashCommands: PluginSlashCommandContribution[]
+  /**
+   * 包内自带的 Skill,每条一个目录:`skills/<name>/SKILL.md`。
+   *
+   * 宿主在插件**启用**时把这些目录的绝对路径交给 Skill 扫描器,禁用或卸载时
+   * 即时撤回(见 `main/plugin/manager.ts` 的 `contributedSkillRoots`)。
+   * 名字与描述来自 `SKILL.md` 的 frontmatter,不在这里重复声明 ——
+   * 声明两遍必然会分叉,而分叉之后没有任何一侧是权威的。
+   */
   skills: { path: string }[]
+  /** 包内的子代理定义目录/文件。与 skills 同形 */
+  agents: { path: string }[]
+  /** 包内的模式定义目录/文件。与 skills 同形 */
+  modes: { path: string }[]
   themes: { path: string }[]
   configuration?: PluginConfigurationContribution
   /**
@@ -180,6 +295,17 @@ export interface PluginManifest {
   id: string
   name: string
   publisher: string
+  /**
+   * 这份清单描述的是哪一类插件。缺省 `extension`(老清单零改动)。
+   *
+   * - `extension` —— 有代码:`main` 必填,宿主为它起一个隔离上下文;
+   * - `webapp` —— **没有代码**:只有 `contributes.webApps`,宿主一个进程都不起。
+   *
+   * ★ 为什么不是「`main` 变可选」:那样「有没有代码」会变成一件要在激活、休眠、
+   * `runCommand`、工具装配、关停五处各判断一次的事。`kind` 让它在**装载那一刻**
+   * 就分流,后面每一处只是一次早返回。
+   */
+  kind: PluginKind
   displayName: string
   description: string
   version: string
@@ -187,9 +313,20 @@ export interface PluginManifest {
   icon?: string
   categories: string[]
   keywords: string[]
-  /** 简单 range:`^x.y.z` / `~x.y.z` / `>=x.y.z` / 精确 */
+  /**
+   * 简单 range:`^x.y.z` / `~x.y.z` / `>=x.y.z` / 精确。
+   *
+   * ★ 比的是**插件 API 版本**(`shared/plugin/api-version.ts`),不是应用版本。
+   * 两者曾被当成同一个,结果是按官方模板写的插件装上一律「装载失败」。
+   */
   engines: string
-  /** 单文件 ESM 的相对路径 */
+  /**
+   * 单文件 ESM 的相对路径。
+   *
+   * ★ `kind: 'webapp'` 时是**空串**:那类插件没有代码可跑。写了 `main` 的
+   * webapp 清单会被整份拒绝,而不是忽略掉那个字段 —— 忽略的话作者会以为
+   * 他的代码在跑,然后对着一个永远不执行的 `activate()` 排查。
+   */
   main: string
   /** l10n 目录的相对路径 */
   l10n?: string
@@ -212,8 +349,7 @@ export interface PluginManifest {
   contributes: PluginContributes
 }
 
-export interface ManifestError {
-  /** 出问题的字段路径,给插件作者看的 */
+export interface ManifestError {  /** 出问题的字段路径,给插件作者看的 */
   field: string
   message: string
 }
@@ -250,12 +386,29 @@ export function parsePluginManifest(raw: unknown): ManifestParseResult {
   const displayName = str(r.displayName) || name
   const description = str(r.description)
 
+  /*
+    ★ `kind` 必须**先解析**:后面 `main` 的校验规则、以及 `contributes` 里
+    哪些贡献点算合法,全都由它分流。
+  */
+  const kindRaw = str(r.kind)
+  const kind: PluginKind = kindRaw === '' ? 'extension' : kindRaw === 'webapp' ? 'webapp' : 'extension'
+  if (kindRaw !== '' && kindRaw !== 'extension' && kindRaw !== 'webapp') {
+    errors.push({ field: 'kind', message: `unknown plugin kind "${kindRaw}"; expected "extension" or "webapp"` })
+  }
+
   const engines = str((r.engines as Record<string, unknown> | undefined)?.nextcowork)
   if (engines === '') errors.push({ field: 'engines.nextcowork', message: 'is required' })
   else if (parseRange(engines) === null) errors.push({ field: 'engines.nextcowork', message: `unsupported range: ${engines}` })
 
   const main = str(r.main)
-  if (main === '') errors.push({ field: 'main', message: 'is required' })
+  if (kind === 'webapp') {
+    /*
+      ★ 写了 `main` 的 webapp 清单**整份拒绝**,不是忽略那个字段。
+      忽略的话作者会以为自己的代码在跑,然后对着一个永远不执行的 `activate()`
+      排查打包、排查路径 —— 而真正的原因是「这类插件根本不跑代码」。
+    */
+    if (main !== '') errors.push({ field: 'main', message: 'a "webapp" plugin runs no code; remove "main"' })
+  } else if (main === '') errors.push({ field: 'main', message: 'is required' })
   else if (!isSafeRelativePath(main)) errors.push({ field: 'main', message: 'must be a relative path inside the package' })
   else if (!main.endsWith('.js')) errors.push({ field: 'main', message: 'must be a single-file ESM .js bundle' })
 
@@ -309,7 +462,7 @@ export function parsePluginManifest(raw: unknown): ManifestParseResult {
     warnings.push({ field: 'allowedCommands', message: 'has no effect without the "process" permission' })
   }
 
-  const contributes = parseContributes(r.contributes, errors)
+  const contributes = parseContributes(r.contributes, errors, kind)
 
   // 依赖:pluginId → 版本 range(同 engines 的 range 语法)。自依赖是错误。
   const dependencies: Record<string, string> = {}
@@ -341,6 +494,7 @@ export function parsePluginManifest(raw: unknown): ManifestParseResult {
       id: `${publisher}.${name}`,
       name,
       publisher,
+      kind,
       displayName,
       description,
       version,
@@ -370,13 +524,26 @@ export const SUPPORTED_CONTRIBUTION_KEYS = [
   'menus',
   'customEditors',
   'views',
+  'webApps',
   'tools',
   'cardViews',
   'keybindings',
+  'slashCommands',
   'skills',
+  'agents',
+  'modes',
   'themes',
   'configuration'
 ] as const
+
+/**
+ * `kind: 'webapp'` 允许出现的贡献点。
+ *
+ * ★ 其余的一律**报错而不是忽略**:一个没有代码的插件声明 `tools` / `commands`,
+ * 意味着它注册了一个永远没有处理函数的东西 —— 用户点下去什么也不会发生,
+ * 而日志里一个字都没有。这正是「静默不生效」那类最难查的失败。
+ */
+const WEBAPP_ALLOWED_CONTRIBUTIONS: readonly string[] = ['webApps', 'themes', 'skills', 'agents', 'modes']
 
 /**
  * 工具卡片模板 `{ title?, summary? }` 的解析。
@@ -405,16 +572,20 @@ function parseToolCard(
   return { ...(title === '' ? {} : { title }), ...(summary === '' ? {} : { summary }) }
 }
 
-function parseContributes(raw: unknown, errors: ManifestError[]): PluginContributes {
+function parseContributes(raw: unknown, errors: ManifestError[], kind: PluginKind): PluginContributes {
   const out: PluginContributes = {
     commands: [],
     menus: {},
     customEditors: [],
     views: [],
+    webApps: [],
     tools: [],
     cardViews: [],
     keybindings: [],
+    slashCommands: [],
     skills: [],
+    agents: [],
+    modes: [],
     themes: [],
     unsupported: []
   }
@@ -422,7 +593,14 @@ function parseContributes(raw: unknown, errors: ManifestError[]): PluginContribu
   const r = raw as Record<string, unknown>
 
   for (const key of Object.keys(r)) {
-    if (!(SUPPORTED_CONTRIBUTION_KEYS as readonly string[]).includes(key)) out.unsupported.push(key)
+    if (!(SUPPORTED_CONTRIBUTION_KEYS as readonly string[]).includes(key)) { out.unsupported.push(key); continue }
+    // webapp 只能贡献「不需要代码」的那几种,见 `WEBAPP_ALLOWED_CONTRIBUTIONS`
+    if (kind === 'webapp' && !WEBAPP_ALLOWED_CONTRIBUTIONS.includes(key)) {
+      errors.push({
+        field: `contributes.${key}`,
+        message: `a "webapp" plugin runs no code, so it cannot contribute ${key}`
+      })
+    }
   }
 
   for (const item of objList(r.commands)) {
@@ -476,7 +654,53 @@ function parseContributes(raw: unknown, errors: ManifestError[]): PluginContribu
     if (id === '') { errors.push({ field: 'contributes.views', message: 'view id is required' }); continue }
     if (!L10N_REF_RE.test(title)) { errors.push({ field: `contributes.views.${id}.title`, message: 'must be a %l10nKey% reference' }); continue }
     if (!isSafeRelativePath(path)) { errors.push({ field: `contributes.views.${id}.path`, message: 'must be a relative path inside the package' }); continue }
-    out.views.push({ id, title, path, ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }) })
+    const location = str(item.location)
+    if (location !== '' && !(VIEW_LOCATIONS as readonly string[]).includes(location)) {
+      errors.push({ field: `contributes.views.${id}.location`, message: `unknown location: ${location}` }); continue
+    }
+    out.views.push({
+      id,
+      title,
+      path,
+      ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }),
+      // 不写 location 时**不落这个字段**,而不是补一个 'editor':两者行为一样,
+      // 但落了之后老清单的解析结果就变了,回归对比会挂在一个无意义的差异上。
+      ...(location === '' ? {} : { location: location as PluginViewLocation })
+    })
+  }
+
+  /*
+    网页应用。需求见 `PluginWebAppContribution` 的文件内注释:
+    「装上就是一个图标加一个网址」这类插件必须能零代码表达。
+  */
+  for (const item of objList(r.webApps)) {
+    const id = str(item.id)
+    const title = str(item.title)
+    const url = str(item.url)
+    if (!PLUGIN_NAME_RE.test(id)) { errors.push({ field: 'contributes.webApps', message: `web app id must match ^[a-z0-9][a-z0-9-]{0,63}$: ${id}` }); continue }
+    if (!L10N_REF_RE.test(title)) { errors.push({ field: `contributes.webApps.${id}.title`, message: 'must be a %l10nKey% reference' }); continue }
+    /*
+      ★ URL 在**装载期**就判,不留到打开那一刻。留到运行期的话,一个写错地址的
+      插件会安静地装上、在侧边栏占一个位置,点下去才什么都不发生 ——
+      而作者收不到任何提示。
+    */
+    if (!isWebAppUrl(url)) { errors.push({ field: `contributes.webApps.${id}.url`, message: `must be an https:// URL: ${url}` }); continue }
+    const open = str(item.open)
+    if (open !== '' && !(WEB_APP_OPENS as readonly string[]).includes(open)) {
+      errors.push({ field: `contributes.webApps.${id}.open`, message: `unknown open target: ${open}` }); continue
+    }
+    const entry = str(item.entry)
+    if (entry !== '' && entry !== 'sidebar' && entry !== 'none') {
+      errors.push({ field: `contributes.webApps.${id}.entry`, message: `unknown entry: ${entry}` }); continue
+    }
+    out.webApps.push({
+      id,
+      title,
+      url,
+      ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }),
+      ...(open === '' ? {} : { open: open as PluginWebAppOpen }),
+      ...(entry === '' ? {} : { entry: entry as 'sidebar' | 'none' })
+    })
   }
 
   for (const item of objList(r.tools)) {
@@ -514,10 +738,78 @@ function parseContributes(raw: unknown, errors: ManifestError[]): PluginContribu
     out.keybindings.push({ command, key, ...(str(item.when) === '' ? {} : { when: str(item.when) }) })
   }
 
+  /*
+    斜杠命令。`command` 必须是**本清单里已经声明过的**命令 —— 指向一条不存在的
+    命令时,用户在输入框里能打出它、选中它、然后什么都不发生。
+  */
+  for (const item of objList(r.slashCommands)) {
+    const name = str(item.name)
+    const command = str(item.command)
+    const title = str(item.title)
+    const description = str(item.description)
+    if (!SLASH_COMMAND_RE.test(name)) { errors.push({ field: 'contributes.slashCommands', message: `slash command name must match ${String(SLASH_COMMAND_RE)}: ${name}` }); continue }
+    if (!out.commands.some((c) => c.command === command)) {
+      errors.push({ field: `contributes.slashCommands.${name}.command`, message: `must reference a command declared in contributes.commands: ${command}` }); continue
+    }
+    if (!L10N_REF_RE.test(title)) { errors.push({ field: `contributes.slashCommands.${name}.title`, message: 'must be a %l10nKey% reference' }); continue }
+    if (description !== '' && !L10N_REF_RE.test(description)) {
+      errors.push({ field: `contributes.slashCommands.${name}.description`, message: 'must be a %l10nKey% reference' }); continue
+    }
+    out.slashCommands.push({ name, command, title, ...(description === '' ? {} : { description }) })
+  }
+
+  /*
+    ★ skill 目录必须落在包内的 `skills/<名字>` 下,而不是「包内任意相对路径」。
+
+    三条理由,每条都对应一种只在别人机器上出现的失败:
+
+    1. **打包器只拷固定的那几个目录。** `plugin-cli` 的 `package` 命令复制的是
+       `package.json / dist / l10n / assets / skills / themes`。声明在
+       `my-stuff/foo` 的 skill 在作者本机一切正常(目录真的在),而发布出去的
+       ZIP 里**没有这个目录** —— 用户装上之后凭空少一条,作者复现不出来。
+       在这里拒掉,他在打包之前就知道。
+    2. **宿主要能反推名字。** skill 名来自 `SKILL.md` 的 frontmatter,缺省回落到
+       **目录名**。`skills/<name>` 这个形状保证了「目录名」是一个确定的东西;
+       允许 `a/b/c` 的话,回落该取哪一段就成了一个没人记得住的约定。
+    3. **用户要找得到它。** 详情页给的是包内路径,而七个插件七种放法对翻目录的
+       人毫无帮助。
+
+    只允许两段。`skills` 本身(想把整个目录当成一条 skill)也拒:那样 `SKILL.md`
+    会落在 `skills/SKILL.md`,比「一个子目录一条 skill」的扫描约定正好少一层,
+    症状是扫出来 0 条、且没有任何报错。
+  */
   for (const item of objList(r.skills)) {
     const path = str(item.path)
-    if (isSafeRelativePath(path)) out.skills.push({ path })
-    else errors.push({ field: 'contributes.skills', message: `not a package-relative path: ${path}` })
+    if (!isSafeRelativePath(path)) {
+      errors.push({ field: 'contributes.skills', message: `not a package-relative path: ${path}` }); continue
+    }
+    const segments = path.replace(/\/+$/, '').split('/')
+    if (segments.length !== 2 || segments[0] !== SKILL_CONTRIBUTION_DIR) {
+      errors.push({
+        field: 'contributes.skills',
+        message: `must be "${SKILL_CONTRIBUTION_DIR}/<name>": the packager only ships ${SKILL_CONTRIBUTION_DIR}/, so a skill declared elsewhere is silently absent from the published package (got ${path})`
+      }); continue
+    }
+    if (!SKILL_NAME_RE.test(segments[1] ?? '')) {
+      errors.push({
+        field: 'contributes.skills',
+        message: `skill directory name must match ${String(SKILL_NAME_RE)} — it reaches the model verbatim as the skill name (got ${path})`
+      }); continue
+    }
+    out.skills.push({ path })
+  }
+
+  // agents / modes 与 skills 同形:包内一个目录或文件,由宿主的既有加载器去读。
+  for (const item of objList(r.agents)) {
+    const path = str(item.path)
+    if (isSafeRelativePath(path)) out.agents.push({ path })
+    else errors.push({ field: 'contributes.agents', message: `not a package-relative path: ${path}` })
+  }
+
+  for (const item of objList(r.modes)) {
+    const path = str(item.path)
+    if (isSafeRelativePath(path)) out.modes.push({ path })
+    else errors.push({ field: 'contributes.modes', message: `not a package-relative path: ${path}` })
   }
 
   for (const item of objList(r.themes)) {
@@ -670,6 +962,25 @@ export function isHostPattern(value: string): boolean {
   const host = rest.split('/')[0] ?? ''
   if (host === '' || host === '*' || host.includes('*')) return false
   return /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host)
+}
+
+/**
+ * `contributes.webApps[].url` 的一条合法取值。
+ *
+ * ★ 与 `isHostPattern` 分开:那个判的是**模式**(可以带 `*`),这个判的是一个
+ * **具体地址**。拿模式那套去判地址的话,`https://a.com/*` 会被当成合法 URL
+ * 塞进 webview 的 src —— 浏览器会老老实实去请求一个带星号的路径。
+ *
+ * ★ 只认 https、不认 URL 里的凭据:webapp 的登录态复用工作区浏览器分区,
+ * 明文 http 意味着那份 cookie 会以明文出现在网络上。
+ */
+export function isWebAppUrl(value: string): boolean {
+  if (value === '' || value.length > 2048) return false
+  let parsed: URL
+  try { parsed = new URL(value) } catch { return false }
+  if (parsed.protocol !== 'https:') return false
+  if (parsed.username !== '' || parsed.password !== '') return false
+  return parsed.hostname !== '' && !parsed.hostname.includes('*')
 }
 
 /**

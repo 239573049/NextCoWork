@@ -22,7 +22,7 @@ import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 const require = createRequire(import.meta.url)
 
@@ -62,6 +62,25 @@ function fail(message) {
 }
 
 /**
+ * 视图(iframe 里那一侧)要标成 external 的模块名。
+ *
+ * ★ 这几个由**宿主**经 import map 下发,打进 bundle 会得到第二份实例 ——
+ * 而两份 React 的症状是 "Invalid hook call",报错位置指向插件自己的组件,
+ * 几乎不可能从现象反推到「我把 React 打进去了」。
+ * `nextcowork/view` 打进去则更隐蔽:代码跑得通,但它和宿主之间那条
+ * postMessage 通道永远不会有人接 —— 编辑器打开后一片空白,零报错。
+ */
+const VIEW_EXTERNALS = [
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+  'react/jsx-dev-runtime',
+  'nextcowork/ui',
+  'nextcowork/view'
+]
+
+/**
  * ★ `nextcowork` 必须标 **external**。
  *
  * 不标的话 esbuild 会去 node_modules 里找一个同名包 —— 找不到就报错(还算好),
@@ -90,13 +109,52 @@ async function build({ watch = false } = {}) {
     logLevel: 'info'
   }
 
+  /*
+    视图入口。清单里写了 `views` 字段才编 —— 它是**可选**的:
+    绝大多数插件只有逻辑侧,给它们多跑一次 esbuild 只是白等。
+
+    ```jsonc
+    // package.json
+    "views": { "src/view/editor.tsx": "dist/view/editor.js" }
+    ```
+
+    ★ 开 `splitting`:视图动辄引 CodeMirror / mermaid 这种按需加载的东西,
+    不分割会得到两种坏结果之一 —— 全部内联进一个几 MB 的入口(首屏就要解析它),
+    或者保留了动态 import 却没有对应 chunk(运行期加载失败,表现为
+    「某个功能永远不生效且零报错」)。
+  */
+  const views = pkg.views ?? {}
+  const viewEntries = Object.keys(views)
+  const viewOptions = viewEntries.length === 0 ? null : {
+    entryPoints: viewEntries.map((from) => ({ in: join(dir, from), out: basename(views[from]).replace(/\.js$/, '') })),
+    outdir: join(dir, dirname(views[viewEntries[0]])),
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    target: 'es2022',
+    splitting: true,
+    jsx: 'automatic',
+    external: VIEW_EXTERNALS,
+    sourcemap: false,
+    minify: !watch,
+    logLevel: 'info'
+  }
+
   if (!watch) {
     await esbuild.build(options)
     console.log(`✓ ${outfile}`)
+    if (viewOptions !== null) {
+      await esbuild.build(viewOptions)
+      console.log(`✓ ${viewEntries.length} 个视图入口 → ${dirname(views[viewEntries[0]])}/`)
+    }
     return
   }
   const ctx = await esbuild.context(options)
   await ctx.watch()
+  if (viewOptions !== null) {
+    const viewCtx = await esbuild.context(viewOptions)
+    await viewCtx.watch()
+  }
   console.log('… watching src/')
 }
 

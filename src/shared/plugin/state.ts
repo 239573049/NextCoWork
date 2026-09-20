@@ -104,6 +104,18 @@ export interface InstalledPlugin {
    * 没有贡献工具时省略。
    */
   tools?: PluginToolProjection[]
+  /*
+    ★ 这里**故意没有** `skills` 字段,尽管详情页要显示「这个插件提供了哪几条 Skill」。
+
+    想加的话,manager 得知道「扫描器最后认下了哪几条」—— 而那个判定发生在
+    `kernel/skill/load.ts` 里(缺 description 的会被作废),结果要回灌进 manager。
+    那条回灌路径必然会与真源分叉:插件禁用后 catalog 先更新、skill 重扫在下一次
+    发送前才发生,中间这段时间详情页列着几条已经不在目录里的 skill。
+
+    真源是 skill 注册表,而它**已经有一条到渲染层的路**(`skills:list`,
+    条目上带 `pluginId`)。详情页按 `pluginId` 过滤那份列表即可 ——
+    零新增状态,且按构造就是准的。
+  */
   /**
    * 包内 `l10n/` 的词条,按语言分。
    *
@@ -122,6 +134,16 @@ export interface PluginCatalog {
   plugins: InstalledPlugin[]
   /** 宿主这一版的版本号,用于 `engines` 过滤与市场列表 */
   hostVersion: string
+  /**
+   * 这个宿主实现的**插件 API 版本** —— `engines.nextcowork` 比的是它,不是 `hostVersion`。
+   *
+   * ★ 两者分开的理由见 `shared/plugin/api-version.ts`:应用版本回答「用户装的是哪一版
+   * NextCoWork」(市场灰度按它走),API 版本回答「`nextcowork` 模块的形状是哪一版」。
+   * 合成一个的后果是按官方模板写的插件全部被判装载失败。
+   *
+   * 可选:旧的持久化/旧窗口拿不到这个字段时不显示,而不是显示成 `undefined`。
+   */
+  apiVersion?: string
 }
 
 export function isRunnable(plugin: InstalledPlugin): boolean {

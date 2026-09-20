@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>__DISPLAY_NAME__</title>
+    <!--
+      ★ 这里**什么都不用引**:import map(react / nextcowork/ui / nextcowork/view)、
+      主题垫片、`/__ui.css` 三样都由宿主在下发这份 HTML 时注入。
+
+      也不要写 <meta> CSP:真正生效的那份由协议 handler 强制注入,页面里再写
+      一份只会造成「哪份生效」的困惑,而 meta 版插件自己能改。
+    -->
+    <style>
+      /* 视图要铺满标签页。除此之外的外观交给宿主下发的那份 CSS。 */
+      html, body, #root { height: 100%; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./editor.js"></script>
+  </body>
+</html>

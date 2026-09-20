@@ -63,6 +63,8 @@ export interface TabInit {
   /** 自定义编辑器的身份 —— 哪个插件的哪一个 viewType */
   viewType?: string
   pluginId?: string
+  /** 网页应用的身份 —— 哪个插件的哪一个 webApp(`contributes.webApps[].id`) */
+  webAppId?: string
   /** 给 changes(改动审查)用:定位到哪一轮 run 的改动集 */
   runId?: string
   sessionId?: string
@@ -140,6 +142,23 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
           sessionId: init.sessionId ?? '',
           ...(init.selectedPath === undefined ? {} : { selectedPath: init.selectedPath })
         }
+      }
+    case 'webapp':
+      /*
+        ★ 同 `custom`:网页应用 Tab **只能由调用方带着身份建**(哪个插件、
+        哪个 webApp、什么地址)。`makeTab('webapp')` 三样都拿不到,所以给的是
+        一个明确无效的占位 —— `views/registry.tsx` 认出它并画降级说明,
+        而不是渲染一个空 webview 让人以为网站崩了。
+
+        这也是为什么 `+` 菜单里**没有**「新建网页应用」:那是插件带进来的东西,
+        不是用户能凭空新建的一种 Tab。
+      */
+      return {
+        id,
+        kind,
+        pane,
+        title: init.title ?? translate('tab.newPage'),
+        ref: { pluginId: init.pluginId ?? '', webAppId: init.webAppId ?? '', url: init.url ?? '' }
       }
   }
 }

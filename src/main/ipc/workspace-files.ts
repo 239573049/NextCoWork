@@ -20,6 +20,7 @@ import {
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   WORKSPACE_FILE_ERROR_PREFIX,
+  WORKSPACE_IMAGE_LIMIT,
   WORKSPACE_TEXT_LIMIT,
   type WorkspaceFile,
   type WorkspaceFileErrorCode,
@@ -27,8 +28,7 @@ import {
   type WorkspaceFileMutationResult,
   type WorkspaceFileRequest,
   type WorkspaceFileWriteRequest,
-  type WorkspaceRecoveryListing,
-  type WorkspaceTextFile
+  type WorkspaceRecoveryListing
 } from '../../shared/domain/workspace-file'
 import { PathEscapeError, resolveAnywhere } from '../kernel/tool/path-guard'
 import { store } from '../state/store'
@@ -167,7 +167,7 @@ export async function readWorkspaceDocument(req: WorkspaceFileRequest): Promise<
     try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
   }
 }
-export async function writeWorkspaceDocument(req: WorkspaceFileWriteRequest): Promise<WorkspaceTextFile> {
+export async function writeWorkspaceDocument(req: WorkspaceFileWriteRequest): Promise<WorkspaceFile> {
   try { return await (remoteEditor(req.workspaceId)?.write(req) ?? writeWorkspaceFile(req)) } catch (error) {
     try { remoteFileFailure(error) } catch (failure) { translateError(failure) }
   }
@@ -260,11 +260,18 @@ export function readWorkspaceFile(req: WorkspaceFileRequest): WorkspaceFile {
   }
 }
 
-export function writeWorkspaceFile(req: WorkspaceFileWriteRequest): WorkspaceTextFile {
+export function writeWorkspaceFile(req: WorkspaceFileWriteRequest): WorkspaceFile {
   try {
     const root = workspaceRoot(req.workspaceId)
     const target = checkedPath(root, req.path)
     if (typeof req.content !== 'string' || typeof req.revision !== 'string') fail('invalid-encoding')
+    /*
+      需求:图片编辑类自定义编辑器要把编辑后的字节写回原文件。文本支线的
+      校验(UTF-8 往返 + 拒二进制文本)对图片字节必然失败,这里按 `encoding`
+      分流。二进制支线只对「当前已分类为 image 的文件」开放 —— 路径校验、
+      软链拒绝、乐观锁、临时文件原子替换与文本支线走的是同一条路,不开新门。
+    */
+    if (req.encoding === 'base64') return writeBase64File(root, req, target)
     if (req.content.length > WORKSPACE_TEXT_LIMIT) fail('too-large')
     const bytes = Buffer.from(req.content, 'utf8')
     if (bytes.length > WORKSPACE_TEXT_LIMIT) fail('too-large')
@@ -297,6 +304,56 @@ export function writeWorkspaceFile(req: WorkspaceFileWriteRequest): WorkspaceTex
   } catch (error) {
     translateError(error)
   }
+}
+
+/**
+ * `encoding: 'base64'` 的写入支线 —— 覆写一张**已存在的图片**。
+ *
+ * 与文本支线的唯一差异是「字节从哪来、写到哪类文件」;其余不变式
+ * (乐观锁、软链拒绝、同目录临时文件 + 原子替换、mode 保留)逐条对齐,
+ * 理由都在文本支线里,不在此复述。
+ */
+function writeBase64File(root: string, req: WorkspaceFileWriteRequest, target: string): WorkspaceFile {
+  // ★ 先按长度粗拒再解码:base64 字符串长度约为字节的 4/3,这一挡把
+  //   「解码前就注定超限」的请求挡在 Buffer 分配之前。
+  if (req.content.length > WORKSPACE_IMAGE_LIMIT * 2) fail('too-large')
+  /*
+    ★ 严格校验 base64,不依赖 `Buffer.from` 的宽容:它对非法字符是**静默丢弃**,
+    不报错 —— 一次被截断的 payload 会被「成功」写进半张图。这里的两条
+    (字符表 + 往返一致)合起来只放行规范的补齐 base64,canvas.toDataURL
+    产出的正是这种。
+  */
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(req.content)) fail('invalid-encoding')
+  const bytes = Buffer.from(req.content, 'base64')
+  if (bytes.toString('base64') !== req.content) fail('invalid-encoding')
+  if (bytes.length > WORKSPACE_IMAGE_LIMIT) fail('too-large')
+  const current = readFileAt(root, req.path)
+  if (current.kind === 'binary' && current.reason === 'too-large') fail('too-large')
+  if (current.kind !== 'image') fail('unsupported')
+  if (current.revision !== req.revision) fail('conflict')
+  // 内容没变就不写:与文本支线同一条规矩,免得「只是看了看」也把 mtime 顶起来。
+  if (current.revision === revision(bytes)) return current
+
+  const temporary = resolve(dirname(target), `.ncw-save-${randomUUID()}.tmp`)
+  let created = false
+  try {
+    const fd = openSync(temporary, 'wx', lstatSync(target).mode & 0o777)
+    created = true
+    try {
+      writeFileSync(fd, bytes)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    checkedPath(root, req.path)
+    if (readFileAt(root, req.path).revision !== req.revision) fail('conflict')
+    renameSync(temporary, target)
+    created = false
+  } finally {
+    if (created) rmSync(temporary, { force: true })
+  }
+  const dataUrl = `data:${current.mime};base64,${bytes.toString('base64')}`
+  return { kind: 'image', path: req.path, size: bytes.length, revision: revision(bytes), mime: current.mime, dataUrl }
 }
 
 function requireAbsent(path: string): void {

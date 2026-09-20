@@ -8,18 +8,24 @@
  * ★ `frame` 卡片不由这里画 —— 它交给 `PluginCardFrame`(插件自己的 iframe),
  * pluginId/path 经 externalName 反查(见 `frameCardTarget`)。
  */
-import { useMemo, type ReactNode } from 'react'
+import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import type { CardBlock, CardTone, ToolCard } from '../../../../shared/agent/tool-card'
 import { openExternal } from '../../services/app'
 import { invoke } from '../../services/ipc'
 import { cn } from '../../lib/cn'
-import { useI18n } from '../../i18n'
+import { useI18n, type TranslationKey } from '../../i18n'
 import { ProgressBar } from '../../components/ui/ProgressBar'
+import { Button } from '../../components/ui/Button'
+import { Dialog } from '../../components/ui/Dialog'
+import { AgentMarkdown } from '../../components/markdown'
 import { PluginCardFrame } from '../../shell/PluginCardFrame'
 import { frameCardTarget, pluginIdForTool, usePluginsStore } from '../../stores/plugins'
 
 /** 卡片按钮动作的回传句柄。工具已结束 / 反查不到插件时为 undefined —— 按钮渲染成禁用。 */
 type CardActionSink = ((actionId: string, value?: unknown) => void) | undefined
+
+/** 危险按钮点下去时先问一句。`titleKey` 是插件的 l10n key,由外层 `t()`。 */
+type ConfirmSink = (titleKey: string, proceed: () => void) => void
 
 const TONE_TEXT: Record<CardTone, string> = {
   neutral: 'text-fg-faint',
@@ -43,7 +49,7 @@ function StatusBadge({ label, tone }: { label: string; tone?: CardTone }): React
   )
 }
 
-function Block({ block, onAction }: { block: CardBlock; onAction: CardActionSink }): ReactNode {
+function Block({ block, onAction, onConfirm }: { block: CardBlock; onAction: CardActionSink; onConfirm: ConfirmSink }): ReactNode {
   switch (block.type) {
     case 'keyValue':
       return (
@@ -120,7 +126,18 @@ function Block({ block, onAction }: { block: CardBlock; onAction: CardActionSink
         <button
           type="button"
           disabled={onAction === undefined}
-          onClick={() => onAction?.(block.actionId)}
+          onClick={() => {
+            /*
+              ★ 危险动作先问一句。问句是**插件给的 l10n key**,由宿主 `t()` 出来 ——
+              而且走宿主自己的 `Dialog`,不是 `window.confirm`:后者不跟随主题、
+              不跟随语言,而且会把整个渲染进程同步卡住。
+            */
+            if (block.confirm !== undefined) {
+              onConfirm(block.confirm.titleKey, () => onAction?.(block.actionId))
+              return
+            }
+            onAction?.(block.actionId)
+          }}
           className={cn(
             'inline-flex items-center gap-1 rounded-md border border-line/60 px-2.5 py-1 text-[12px] transition-colors',
             onAction === undefined
@@ -131,6 +148,39 @@ function Block({ block, onAction }: { block: CardBlock; onAction: CardActionSink
           {block.label}
         </button>
       )
+    case 'markdown':
+      /*
+        ★ 走**宿主的**受信 markdown 渲染器,不自己拼 HTML:它已经处理好了
+        「链接路由到 openExternal、不执行裸 HTML」那两件事
+        (`WorkspaceMarkdownProvider`)。自己拼一份等于把那两条重新赌一次。
+      */
+      return <AgentMarkdown content={block.value} variant="compact" className="selectable text-[12.5px] leading-relaxed text-fg" />
+    case 'list':
+      return (
+        <ul className="flex flex-col gap-1 text-[12.5px]">
+          {block.items.map((item, i) => (
+            <li key={i} className="flex items-baseline gap-2">
+              <span className={cn('h-1 w-1 shrink-0 translate-y-[-2px] rounded-full bg-current', TONE_TEXT[item.tone ?? 'neutral'])} />
+              <span className={cn('min-w-0 break-words', TONE_TEXT[item.tone ?? 'neutral'], item.tone === undefined && 'text-fg')}>
+                {item.label}
+              </span>
+              {item.hint !== undefined && <span className="shrink-0 text-[11px] text-fg-faint">{item.hint}</span>}
+            </li>
+          ))}
+        </ul>
+      )
+    case 'metric':
+      return (
+        <div className="flex items-baseline gap-2">
+          <span className={cn('text-[18px] font-medium tabular-nums', TONE_TEXT[block.tone ?? 'neutral'], block.tone === undefined && 'text-fg')}>
+            {block.value}
+          </span>
+          <span className="text-[12px] text-fg-faint">{block.label}</span>
+          {block.delta !== undefined && <span className="text-[11px] text-fg-faint tabular-nums">{block.delta}</span>}
+        </div>
+      )
+    case 'divider':
+      return <hr className="border-0 border-t border-line/40" />
     default:
       // 未知块(旧宿主遇到新原语):静默跳过,别把整张卡打崩。
       return null
@@ -193,14 +243,56 @@ export function CardRenderer({
     }
   }, [catalog, toolName, callId])
 
+  const { t } = useI18n()
+  /*
+    等确认的那个动作。`pluginId` 一起存下来:确认框上的问句是**插件的** l10n key,
+    拼前缀要它 —— 而等用户点确认时,这张卡可能已经因为别的原因重渲过了。
+  */
+  const [pending, setPending] = useState<{ titleKey: string; pluginId: string; proceed: () => void } | null>(null)
+  const askConfirm = useCallback<ConfirmSink>(
+    (titleKey, proceed) => {
+      const pluginId = toolName === undefined ? undefined : pluginIdForTool(catalog, toolName)
+      // 反查不到插件(已卸载)就不问了:那个动作本来也送不到
+      if (pluginId === undefined) return
+      setPending({ titleKey, pluginId, proceed })
+    },
+    [catalog, toolName]
+  )
+
   if (card.kind === 'frame') {
     return <FrameCard viewType={card.viewType} data={card.data} toolName={toolName} callId={callId} />
   }
   return (
     <div className="flex flex-col gap-2">
       {card.blocks.map((block, i) => (
-        <Block key={i} block={block} onAction={onAction} />
+        <Block key={i} block={block} onAction={onAction} onConfirm={askConfirm} />
       ))}
+      {/*
+        危险按钮的那一问。放在卡片这一层而不是每个按钮里:同一张卡上可能有好几个
+        危险动作,而同时弹两个确认框用户分不清哪个是哪个。
+      */}
+      <Dialog
+        title={pending === null ? '' : t(`plugin.${pending.pluginId}.${pending.titleKey.replace(/^%|%$/g, '')}` as TranslationKey)}
+        open={pending !== null}
+        onClose={() => setPending(null)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPending(null)}>{t('pluginAsk.cancel')}</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                pending?.proceed()
+                setPending(null)
+              }}
+            >
+              {t('pluginAsk.confirm')}
+            </Button>
+          </>
+        }
+      >
+        {/* 正文留空:问句本身已经在标题上,再重复一遍只会让这个框变高。 */}
+        <span />
+      </Dialog>
     </div>
   )
 }
