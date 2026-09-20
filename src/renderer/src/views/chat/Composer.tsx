@@ -1887,6 +1887,15 @@ function ContextRing({
               used: used === undefined ? "—" : formatContextWindow(used),
               window: formatContextWindow(total),
             })}
+            {/*
+              需求：这个数说的是**上一次请求实际发出去多大**，不是「此刻还占着多少」。
+              不标来源会怎样：它在两次发送之间一动不动，于是一段已经被自动压缩过的
+              会话，菜单里仍旧挂着压缩前那个越线的读数 —— 用户据此得出「压缩没生效」，
+              而下一条发出去它就自己掉下来了。这一句是把「既成事实」和「下一轮会怎样」
+              分开的唯一标记（圆环本身的语义见本组件抬头第三段）。
+              `used === undefined` 时不标：那时显示的是 `—`，没有任何一次请求可指。
+            */}
+            {used !== undefined && ` · ${t("composer.contextFromLastRequest")}`}
           </MenuLabel>
           <div className="px-2 pb-2 pt-0.5">
             <div className="h-1 w-full overflow-hidden rounded-full bg-tint-strong">

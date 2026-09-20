@@ -480,6 +480,7 @@ const ZH: Messages = {
   "composer.thinkingHeadline": ({ level }) => `思考强度 · ${level}`,
   "composer.contextMenu": "上下文",
   "composer.contextHeadline": ({ used, window }) => `上下文 · ${used} / ${window}`,
+  "composer.contextFromLastRequest": "上一次请求实测",
   "composer.contextOverLimit": ({ threshold }) => `已超出 ${threshold}，本轮按长上下文计费`,
   // ── 占用归因(圆环菜单里的那张分解卡)──
   "composer.contextBreakdown": "占用归因",
@@ -2425,6 +2426,7 @@ const EN: Messages = {
   "composer.thinkingHeadline": ({ level }) => `Thinking · ${level}`,
   "composer.contextMenu": "Context",
   "composer.contextHeadline": ({ used, window }) => `Context · ${used} / ${window}`,
+  "composer.contextFromLastRequest": "last request",
   "composer.contextOverLimit": ({ threshold }) =>
     `Over ${threshold} — this turn bills at the long-context rate`,
   // ── Attribution card inside the context ring menu ──
