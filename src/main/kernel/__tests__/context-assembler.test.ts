@@ -327,6 +327,22 @@ describe('buildSystemPrompt', () => {
     })
     expect(s).toContain('cannot widen your')
   })
+
+  /**
+   * ★ 收尾前同步任务清单的那条规则必须是**条件**的,而且不许点名某个工具。
+   *
+   * 它挡的是「正文里宣布完成、用户看着的清单还停在半路」——回执与界面长期对不上,
+   * 而全程零报错。写成无条件的话,plan 模式(工具白名单里没有任务清单工具)的模型
+   * 会去建一份它根本写不了的清单;写上工具名则会在工具不在快照里时指向一个
+   * 模型拿不到的名字(见 `BASE_PROMPT` 上面那四关的第 3 条)。
+   */
+  it('★ 收尾前同步任务清单的规则是条件的,且不写死工具名', () => {
+    const s = buildSystemPrompt(PROMPT)
+    expect(s).toContain('If you used a task list')
+    expect(s).toContain('still available')
+    expect(s).toContain('is not an update')
+    expect(s).not.toContain('TodoWrite')
+  })
 })
 
 /**

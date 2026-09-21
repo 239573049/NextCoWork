@@ -26,6 +26,7 @@ import { agentErrorText } from '../../i18n/agent'
 import { MessageImage } from './MessageImage'
 import { MentionText } from './MentionText'
 import { MessageFileRef } from './MessageFileRef'
+import { openFileReference } from './file-reference-actions'
 import { SubagentNode, SubagentReportRow, ThinkingBlock, ToolCallCard } from './parts'
 import { useOpenSubagent } from './subagent-open'
 import { InteractionPanel } from './InteractionPanel'
@@ -239,7 +240,7 @@ export const Thread = memo(function Thread({
             return <CompactionDivider key={row.key} checkpoint={row.checkpoint} foldedCount={row.foldedCount} />
           }
           if (row.kind === 'user') {
-            return <UserBubble key={row.key} message={row.message} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
+            return <UserBubble key={row.key} message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
           }
           if (row.kind === 'plan-receipt') {
             // 工作区未知就没法把计划正文读出来 —— 无正文的卡片只剩一句状态,
@@ -587,7 +588,17 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
  * 按 parts 原顺序渲染:发送侧 `partsOf` 把文本放在最前,所以视觉上是
  * 「先说话、后配图」,与用户敲下去的顺序一致。
  */
-function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEdit?: (id: string, text: string, continueRun: boolean) => Promise<void>; disabled: boolean }): ReactNode {
+function UserBubble({ message, workspaceId, onEdit, disabled }: {
+  message: AgentMessage
+  onEdit?: (id: string, text: string, continueRun: boolean) => Promise<void>
+  disabled: boolean
+  /**
+   * 点开气泡里的文件引用要用的工作区。**缺省就不画按钮** —— 只读的子代理面板
+   * 拿不到它(`ChatView` 的只读分支不传 `workspaceId`),而画一枚点了没反应的
+   * chip 比不画更难解释(见 `MessageFileRef`)。
+   */
+  workspaceId?: string
+}): ReactNode {
   const { t } = useI18n()
   const [editing, setEditing] = useState(false)
   const [textDraft, setTextDraft] = useState('')
@@ -602,6 +613,19 @@ function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEd
   const fileRefs = message.parts.filter(
     (p): p is Extract<ContentPart, { type: 'file_ref' }> => p.type === 'file_ref'
   )
+  /*
+    需求：气泡里的文件引用(块状的 `file_ref` 与行内 `@` 引用)点一下就在右侧工作台
+    打开它。引用是**发送那一刻的快照**,文件后来被删掉、改名是常态 —— 所以先确认
+    打得开再开 Tab,否则右侧会多出一个只显示错误的 Tab(判定见 `file-reference-actions.ts`)。
+
+    ★ 收进一个 `const` 再判空:参数 `workspaceId` 是可变的,TS 不把
+    `!== undefined` 的收窄带进箭头函数里 —— 直接写会让下面那行报
+    「string | undefined 不能赋给 string」。
+  */
+  const referenceWorkspace = workspaceId
+  const openReference = referenceWorkspace === undefined
+    ? undefined
+    : (path: string): void => { void openFileReference(referenceWorkspace, path) }
 
   // 文本、图片、文件引用都没有才是真的空
   if (text === '' && images.length === 0 && fileRefs.length === 0) return null
@@ -659,13 +683,13 @@ function UserBubble({ message, onEdit, disabled }: { message: AgentMessage; onEd
             草稿里好好的、一发出去就断头 —— 又是那种「像是发错了」的错觉。
           */
           <p className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
-            <MentionText text={text} />
+            <MentionText text={text} onOpen={openReference} />
           </p>
         )}
         {fileRefs.length > 0 && (
           <div className={cn('flex flex-col gap-1', text !== '' && 'mt-2')}>
             {fileRefs.map((f, i) => (
-              <MessageFileRef key={`${f.path}:${String(i)}`} name={f.name} path={f.path} />
+              <MessageFileRef key={`${f.path}:${String(i)}`} name={f.name} path={f.path} onOpen={openReference} />
             ))}
           </div>
         )}

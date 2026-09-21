@@ -55,6 +55,12 @@ export const toolPresenterZh: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.title.scheduleDelete': verbTitle('删除定时任务'),
   'chat.tool.title.todo': '更新任务清单',
   'chat.tool.title.scheduleList': '查看定时任务',
+  'chat.tool.title.askUser': '向你提问',
+  'chat.tool.title.proposeGoal': '提议完成条件',
+  'chat.tool.title.planReview': '提交计划待审',
+  // target 是模型写的 snake_case 标识(已去下划线),属领域值,原样拼进来
+  'chat.tool.title.widget': verbTitle('画图'),
+  'chat.tool.title.readMe': '加载可视化规范',
   'chat.tool.fallback': '工具调用',
   'chat.tool.summary.lines': '{count} 行',
   'chat.tool.summary.items': '{count} 项',
@@ -70,6 +76,7 @@ export const toolPresenterZh: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.summary.running': '运行中',
   'chat.tool.summary.stopped': '已停止',
   'chat.tool.summary.tasks': '{count} 条',
+  'chat.tool.summary.questions': '{count} 道题',
   'chat.tool.summary.scheduleDaily': '每天 {time}',
   'chat.tool.summary.scheduleWeekly': ({ days, time }: Params) =>
     `周${weekdayZh(String(days ?? ''))} ${String(time ?? '')}`
@@ -95,6 +102,11 @@ export const toolPresenterEn: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.title.scheduleDelete': verbTitle('Deleting scheduled task'),
   'chat.tool.title.todo': 'Update todo list',
   'chat.tool.title.scheduleList': 'View scheduled tasks',
+  'chat.tool.title.askUser': 'Asking you',
+  'chat.tool.title.proposeGoal': 'Proposing a goal',
+  'chat.tool.title.planReview': 'Submitting the plan',
+  'chat.tool.title.widget': verbTitle('Visualizing'),
+  'chat.tool.title.readMe': 'Loading visual guidelines',
   'chat.tool.fallback': 'Tool call',
   'chat.tool.summary.lines': '{count} lines',
   'chat.tool.summary.items': '{count} items',
@@ -111,6 +123,8 @@ export const toolPresenterEn: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.summary.running': 'Running',
   'chat.tool.summary.stopped': 'Stopped',
   'chat.tool.summary.tasks': '{count} tasks',
+  'chat.tool.summary.questions': ({ count }: Params) =>
+    count === 1 ? '1 question' : `${String(count)} questions`,
   'chat.tool.summary.scheduleDaily': 'Daily at {time}',
   'chat.tool.summary.scheduleWeekly': ({ days, time }: Params) =>
     `${weekdayEn(String(days ?? ''))} ${String(time ?? '')}`

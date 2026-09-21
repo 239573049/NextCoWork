@@ -16,7 +16,14 @@ import { parseMentions } from '../../../../shared/domain/file-mention'
 import { cn } from '../../lib/cn'
 import { MENTION_CHIP_CLASS } from './rich-draft'
 
-export function MentionText({ text }: { text: string }): ReactNode {
+export function MentionText({ text, onOpen }: {
+  text: string
+  /**
+   * 打开一枚文件引用（右侧工作台的一个 Tab）。与 `MessageFileRef` 同名同义。
+   * ★ 不给就**不画按钮** —— 只读的子代理面板拿不到工作区上下文。
+   */
+  onOpen?: (path: string) => void
+}): ReactNode {
   const segments = parseMentions(text)
   return (
     <>
@@ -24,7 +31,7 @@ export function MentionText({ text }: { text: string }): ReactNode {
         s.kind === 'text' ? (
           <span key={i}>{s.raw}</span>
         ) : s.kind === 'mention' ? (
-          <MentionChip key={i} name={s.name} path={s.path} />
+          <MentionChip key={i} name={s.name} path={s.path} onOpen={onOpen} />
         ) : (
           <SkillChip key={i} name={s.name} />
         )
@@ -48,16 +55,34 @@ function SkillChip({ name }: { name: string }): ReactNode {
  *
  * ★ 显示的是 `name`,完整路径进 `title` —— 与 `MessageFileRef` 同一条理由:
  * 一条长路径糊进气泡文本会撑出横向滚动条。
+ *
+ * 有 `onOpen` 时它是一枚真按钮(键盘与鼠标走同一条路);没有时保持只读的 `<span>`,
+ * 与改动前完全一致 —— 变宽高或者换行方式都不行,它坐在一句话中间。
  */
-function MentionChip({ name, path }: { name: string; path: string }): ReactNode {
-  return (
-    <span
-      data-testid="mention-chip"
-      title={path}
-      className={cn(MENTION_CHIP_CLASS, 'mx-[1px]')}
-    >
+function MentionChip({ name, path, onOpen }: { name: string; path: string; onOpen?: (path: string) => void }): ReactNode {
+  const content = (
+    <>
       <FileText size={11} className="shrink-0 translate-y-[1.5px] text-fg-faint" aria-hidden />
       <span className="min-w-0 truncate">{name}</span>
-    </span>
+    </>
+  )
+  if (onOpen === undefined) {
+    return (
+      <span data-testid="mention-chip" title={path} className={cn(MENTION_CHIP_CLASS, 'mx-[1px]')}>
+        {content}
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      data-testid="mention-chip"
+      title={path}
+      onClick={() => onOpen(path)}
+      // cursor-pointer 必须显式写:Tailwind v4 的 preflight 把按钮的 cursor 重置成了 default
+      className={cn(MENTION_CHIP_CLASS, 'mx-[1px] cursor-pointer hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50')}
+    >
+      {content}
+    </button>
   )
 }

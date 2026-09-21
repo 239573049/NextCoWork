@@ -36,6 +36,7 @@ import { dialog } from 'electron'
 import { MAX_ATTACHMENT_BYTES } from '../../../shared/domain/attachment'
 import { closeDatabase, openDatabase } from '../../db'
 import * as repo from '../../db/repo'
+import { switchConfigProfile } from '../../db/config-profile'
 import { attachmentRoot, handleAttachmentRequest } from '../../net/attachment-protocol'
 import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadAttachment } from '../attachment'
 import { localEnvironment } from '../../environment/local'
@@ -327,6 +328,55 @@ describe('removeAttachment', () => {
 
   it('删不存在的 id 不抛', () => {
     expect(() => { removeAttachment({ id: 'nope' }) }).not.toThrow()
+  })
+
+  /*
+    ★ 这一组钉的是「列得出来却删不掉」:草稿行的 `session_id` 要等消息提交才填,
+    而归属判定一度对空 `session_id` 一律按 `local` 处理 —— 登录账户之后
+    `getAttachmentRow` 拿不到行,`removeAttachment` 静默 return,而恢复用的
+    `listDraftAttachments` 按 owner 判定照样列得出来。用户看到的是:
+    删掉输入框里的图,切一下会话它又回来了,全程零报错。
+  */
+  describe('登录账户之后', () => {
+    /** 账户作用域下的一个工作区 + 一条会话,附件挂在它下面 */
+    function accountSession(accountId: string, workspaceId: string, sessionId: string): void {
+      switchConfigProfile(accountId)
+      repo.putWorkspace({
+        id: workspaceId, name: workspaceId, rootPath: userDataDir, environment: { kind: 'local' },
+        settings: DEFAULT_WORKSPACE_SETTINGS, createdAt: 1, lastOpenedAt: 1
+      })
+      repo.ensureSession({ id: sessionId, workspaceId, rootPathAtCreation: userDataDir })
+    }
+
+    it('删掉的草稿附件不会在下次列草稿时回来', () => {
+      accountSession('acct-1', 'W1', 'S1')
+      const a = uploadAttachment({
+        scope: 'session', ownerId: 'S1', displayName: 'a.png', mime: 'image/png', bytes: bytesOf('A')
+      })
+      const path = repo.getAttachmentRow(a.id)?.path as string
+
+      removeAttachment({ id: a.id })
+
+      expect(listSessionAttachments({ sessionId: 'S1' })).toHaveLength(0)
+      expect(repo.getAttachmentRow(a.id)).toBeUndefined()
+      expect(existsSync(path)).toBe(false)
+    })
+
+    it('别的账户的草稿附件仍然既列不出也删不掉', () => {
+      accountSession('acct-1', 'W1', 'S1')
+      const a = uploadAttachment({
+        scope: 'session', ownerId: 'S1', displayName: 'a.png', mime: 'image/png', bytes: bytesOf('A')
+      })
+      const path = repo.getAttachmentRow(a.id)?.path as string
+
+      switchConfigProfile('acct-2')
+      expect(listSessionAttachments({ sessionId: 'S1' })).toEqual([])
+      removeAttachment({ id: a.id })
+      // 跨账户是「查不到」而不是「删掉了」—— 文件与记录都必须原样留给 acct-1
+      expect(existsSync(path)).toBe(true)
+      switchConfigProfile('acct-1')
+      expect(listSessionAttachments({ sessionId: 'S1' })).toHaveLength(1)
+    })
   })
 })
 

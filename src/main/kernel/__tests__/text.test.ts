@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampWithEllipsis, stripControlChars } from '../text'
+import { clampWithEllipsis, stripAnsi, stripControlChars } from '../text'
 
 /**
  * 这两个函数各自只有两行,值得单独测的理由在 text.ts 的文件头:
@@ -59,6 +59,53 @@ describe('stripControlChars', () => {
    */
   it('不碰 C1 区间与其他非 ASCII', () => {
     expect(stripControlChars('°é中🙂')).toBe('°é中🙂')
+  })
+})
+
+/**
+ * `stripAnsi` 钉的是「捕获的是管道、但 CLI 照样着色」这件事:
+ * 序列进模型上下文是纯噪声,而 ESC 在界面上不可见,用户只看到一堆 `[32m`。
+ */
+describe('stripAnsi', () => {
+  it('剥掉整条 SGR 着色序列,而不是只剥 ESC', () => {
+    // ★ 和 stripControlChars 的差别就在这一条:那个函数会留下 `[31m`
+    expect(stripAnsi('\u001B[31m危险\u001B[0m')).toBe('危险')
+  })
+
+  it('剥掉 vitest 那种嵌套的着色输出', () => {
+    const line = ' \u001B[32m✓\u001B[39m src/a.test.ts \u001B[2m(7 tests)\u001B[22m'
+    expect(stripAnsi(line)).toBe(' ✓ src/a.test.ts (7 tests)')
+  })
+
+  it('剥掉光标移动与清行 —— 进度条留下的那些', () => {
+    expect(stripAnsi('\u001B[2K\u001B[1G下载中\u001B[?25l')).toBe('下载中')
+  })
+
+  it('剥掉 OSC(窗口标题),两种终止符都认', () => {
+    expect(stripAnsi('\u001B]0;title\u0007ok')).toBe('ok')
+    expect(stripAnsi('\u001B]8;;https://x\u001B\\link')).toBe('link')
+  })
+
+  it('被截断在半路的 OSC 不会把后面的正文放出来', () => {
+    // 512KB 上限可能切在序列中间;留着未终止的 OSC 等于把后续输出全喂给终端
+    expect(stripAnsi('ok\u001B]0;title-without-terminator')).toBe('ok')
+  })
+
+  it('剥掉字符集切换与落单的 ESC', () => {
+    expect(stripAnsi('a\u001B(Bb\u001Bc')).toBe('abc')
+    expect(stripAnsi('a\u001B')).toBe('a')
+  })
+
+  it('保留换行、制表、回车与非 ASCII —— 它们是正文', () => {
+    expect(stripAnsi('第一行\n\t第二行\r\n中🙂')).toBe('第一行\n\t第二行\r\n中🙂')
+  })
+
+  it('不碰长得像转义序列的普通文本', () => {
+    expect(stripAnsi('arr[0-9] 和 [31m 本身不是转义')).toBe('arr[0-9] 和 [31m 本身不是转义')
+  })
+
+  it('空字符串', () => {
+    expect(stripAnsi('')).toBe('')
   })
 })
 

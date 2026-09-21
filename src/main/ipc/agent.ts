@@ -8,7 +8,7 @@
  * 合批逻辑刻意**不**放进 RunRegistry:内核零 electron import,
  * 而「往哪个 webContents 推」是彻头彻尾的 electron 概念。
  */
-import type { AgentEvent, RunSnapshot } from '../../shared/agent/event'
+import type { AgentEvent, ActiveRunEntry, RunSnapshot } from '../../shared/agent/event'
 import type { RunRequest } from '../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../shared/agent/interaction'
 import type { InterjectItem } from '../../shared/agent/interject'
@@ -101,6 +101,35 @@ class RunPump {
 }
 
 const pumps = new Map<string, RunPump>()
+
+/**
+ * 顶层活跃 run 的权威快照。
+ *
+ * 需求:bootstrap 的首帧(`app:getBootstrap`)和之后的 `agent:activeRuns` 广播
+ * 说的是同一件事,所以口径只能有一份 —— 两边各写一遍 `parentRunId` 这个判据的话,
+ * 漏掉的那一边会把子代理也算成一条会话级的 run,表现为工作区 Tab 上多一颗
+ * 永远不灭的圆点(子 run 的结束在渲染层根本没有人在收)。
+ */
+export function activeRunIndex(): ActiveRunEntry[] {
+  return runs.activeRunIds().flatMap((id) => {
+    const run = runs.get(id)
+    return run === undefined || run.parentRunId !== undefined ? [] : [{
+      runId: run.runId, sessionId: run.sessionId, workspaceId: run.workspaceId, status: run.status
+    }]
+  })
+}
+
+/**
+ * 把权威集合播给**所有**窗口。`registerIpc` 里挂一次,run 起止时自动触发。
+ *
+ * ★ 这条不是 `agent:event` 的替代,两者各管一头:事件流按订阅定向推(转录内容
+ * 只给在看的那个窗口),而「谁在跑」是全局事实,所有窗口的角标都读它。
+ * 没有这条广播,没订阅过的 run(定时任务起的、⌘R 之后还没打开的会话)
+ * 结束时渲染层收不到任何东西,角标就一直转着 —— 且全程零报错。
+ */
+export function broadcastActiveRuns(): void {
+  windows.emitToAll('agent:activeRuns', { runs: activeRunIndex() })
+}
 
 // ═══════════════════════════════════════════════════════════════
 // handlers

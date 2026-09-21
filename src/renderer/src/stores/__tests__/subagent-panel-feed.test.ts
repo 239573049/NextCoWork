@@ -23,7 +23,9 @@ vi.mock('../../services/agent', () => ({
   startRun: vi.fn(), attachRun: vi.fn(), abortRun: vi.fn(),
   // ★ 必须返回 Promise:`syncInterject` 直接 `.catch` 它,裸 `vi.fn()` 会抛 TypeError
   interjectRun: vi.fn(async () => {}),
-  onAgentEvent: vi.fn(() => () => {})
+  onAgentEvent: vi.fn(() => () => {}),
+  // 事件泵同时订阅「还有哪些 run 活着」那条广播,缺了它 `startAgentEventPump()` 当场抛
+  onActiveRuns: vi.fn(() => () => {})
 }))
 vi.mock('../../services/app', () => ({
   getSessionInput: vi.fn(async () => null), persistSessionInput: vi.fn()

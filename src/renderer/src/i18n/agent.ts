@@ -45,6 +45,12 @@ export const agentZh = {
   'chat.conversationUsageCost': '会话消耗额度总额',
   'chat.taskChecklist': '任务清单 · {done}/{total} 已完成',
   'chat.taskChecklistRunning': '任务正在执行',
+  // 这一轮已经收尾、清单却没跑完。只报剩余条数,不说「失败」——未跑完不等于出错
+  'chat.taskChecklist.stoppedIncomplete': '运行已结束，仍有 {count} 项未完成',
+  // 快照档的第二行:明说这份清单不是实时进度,否则和历史/入参里的那份分不清
+  'chat.taskChecklist.snapshot': '清单快照',
+  // 转录里 status 仍是 in_progress、但此刻没有人在做的那一项(屏读器用)
+  'chat.taskChecklist.unfinished': '未完成',
   'chat.contextTooltip': '上下文 {used} / {window}',
   'chat.tool.group.reasoning': '{count} 段思考',
   'chat.tool.group.read': '读取了 {count} 个文件',
@@ -53,6 +59,8 @@ export const agentZh = {
   'chat.tool.group.command': '执行了 {count} 条命令',
   'chat.tool.group.network': '访问了 {count} 个网络资源',
   'chat.tool.group.orchestration': '调度了 {count} 项',
+  'chat.tool.group.interaction': '等你表态 {count} 次',
+  'chat.tool.group.widget': '画了 {count} 张图',
   'chat.tool.group.external': '调用了 {count} 个外部工具',
   'chat.workspace.toolCount': '{count} 个工具',
   'chat.workspace.totalTime': '累计 {duration}',
@@ -94,6 +102,9 @@ export const agentZh = {
   'agent.interaction.nextQuestion': '下一题',
   'agent.interaction.answeredMark': '已答',
   'agent.interaction.multiSelect': '可多选',
+  // 工具卡片里那份只读题面下面的一行。★ 必须说清「在哪儿答」：一组灰着的选项
+  // 不解释的话，用户的第一反应是界面坏了，而不是「还没到时候」。
+  'agent.interaction.previewOnly': '这里只是预览，可作答的卡片会出现在下方',
   'agent.interaction.approvePlan': '批准方案',
   'agent.interaction.approveAndExecute': '批准并执行',
   'agent.interaction.executeCurrent': '在当前会话执行',
@@ -198,6 +209,9 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.conversationUsageCost': 'Total conversation cost',
   'chat.taskChecklist': 'Task checklist · {done}/{total} completed',
   'chat.taskChecklistRunning': 'Task in progress',
+  'chat.taskChecklist.stoppedIncomplete': 'Run ended with {count} unfinished task(s)',
+  'chat.taskChecklist.snapshot': 'Checklist snapshot',
+  'chat.taskChecklist.unfinished': 'Unfinished',
   'chat.contextTooltip': 'Context {used} / {window}',
   'chat.tool.group.reasoning': '{count} thinking segments',
   'chat.tool.group.read': '{count} files read',
@@ -206,6 +220,8 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.tool.group.command': '{count} commands run',
   'chat.tool.group.network': '{count} network resources visited',
   'chat.tool.group.orchestration': '{count} tasks orchestrated',
+  'chat.tool.group.interaction': '{count} times your input was needed',
+  'chat.tool.group.widget': '{count} visuals drawn',
   'chat.tool.group.external': '{count} external tools called',
   'chat.workspace.toolCount': '{count} tools',
   'chat.workspace.totalTime': '{duration} cumulative',
@@ -244,6 +260,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'agent.interaction.nextQuestion': 'Next question',
   'agent.interaction.answeredMark': 'Answered',
   'agent.interaction.multiSelect': 'Choose any',
+  'agent.interaction.previewOnly': 'Preview only — the card you can answer appears below',
   'agent.interaction.approvePlan': 'Approve plan',
   'agent.interaction.approveAndExecute': 'Approve and execute',
   'agent.interaction.executeCurrent': 'Execute in this session',

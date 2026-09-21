@@ -27,6 +27,7 @@ import { agentErrorText } from "../../i18n/agent";
 import { AgentMarkdown } from "../../components/markdown";
 import { Surface, SurfaceReveal, SurfaceRow } from "../../components/ui/Surface";
 import { ToolDetail } from "./ToolDetail";
+import { previewOf } from "./interaction-preview";
 import { MAX_PARTIAL_JSON_CHARS, parsePartialJson } from "./partial-json";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 import { abortRun } from "../../services/agent";
@@ -159,7 +160,34 @@ export function ToolCallCard({
   // 失败默认展开:`toolFail` 的文案是设计过的可执行提示(见 fs.ts 里 Edit 失败
   // 那段三段式说明),把它藏在折叠里等于白写。
   // 运行中的实时卡片也默认展开:它可能要用户点(审批/表单),藏起来就没人应答。
-  const open = manual ?? (status === "error" || liveCard !== undefined);
+  /*
+    需求：AskUserQuestion / ProposeGoal 的题面要在模型**还在写参数**时就能读到，
+    而不是等工具开跑、待决面板弹出来才第一次看见（题面到可作答之间常隔好几秒）。
+
+    ★ 判据是 `status === "pending"`，即**这次调用还没开跑**：tool_start 一到，
+    下面那张可作答的卡片就出现了，这张只读预览必须同时收起来 —— 同屏摆两份
+    一模一样的题，用户不知道该点哪一份，而只有一份是真能提交的。
+    `previewOf` 拿不出内容时不展开：ExitPlanMode 的入参是空对象（题面在计划文件里），
+    自动展开只会得到一个永远空着的详情区。
+  */
+  const previewable = presenter.shape === "interaction"
+    && status === "pending"
+    && previewOf(toolName, shownInput) !== null;
+  /*
+    需求：`widget` 形态的产物（`visualize_show_widget` 画的那张图）**默认展开**。
+
+    ★ 判据是形态类，不是工具名 —— 见 `ToolShape` 里 `widget` 那一段。按工具名
+    分叉的话，下一个"自己画一张图"的工具要在这里再开一个口子，而漏掉它不会有
+    任何编译错误：表现是**工具跑完、图上什么也没有**，因为 `SurfaceReveal`
+    在收起态是直接卸载子树（`components/ui/Surface.tsx`），折叠时连 iframe 都
+    不存在。用户看到的会是一个"成功的工具"配一片空白。
+
+    ★ 与上面那条 interaction 预览的区别：那条只看 `pending`（工具一开跑就收起，
+    因为下面会冒出可作答的卡片）；这条**全程展开** —— 生成期是边走边画，
+    跑完就是成品本身，不存在"另一处更权威的展示"。
+  */
+  const inlineWidget = presenter.shape === "widget";
+  const open = manual ?? (status === "error" || liveCard !== undefined || previewable || inlineWidget);
 
   const duration = call === undefined ? undefined : formatCallDuration(call);
   const summary = presenter.summary?.(shownInput, call?.output);
@@ -315,9 +343,18 @@ function StatusSlot({
 export function SubagentNode({
   summary,
   state,
+  pending = false,
 }: {
   summary: string | undefined;
   state?: SubagentState;
+  /**
+   * 子代理**还没派出去**:`Task` 的参数还在流,`subagent_start` 没到。
+   *
+   * 需求:那几秒里卡片就该长成子代理卡的样子(见 `thread-content.ts` 里那段),
+   * 但状态得说实话。★ 不能靠「state 为空」判断 —— 旧转录里的子代理块同样没有 state,
+   * 而它们早就跑完了,下面那行 `?? 'done'` 正是为它们写的。
+   */
+  pending?: boolean;
 }): ReactNode {
   const { t } = useI18n();
   const openSubagent = useOpenSubagent();
@@ -330,7 +367,7 @@ export function SubagentNode({
     return () => window.clearInterval(timer)
   }, [running])
 
-  const status = state?.status ?? 'done';
+  const status = pending && state === undefined ? 'pending' : state?.status ?? 'done';
   const errorText = state?.error === undefined ? undefined : agentErrorText(state.error, t);
   /*
     ★★ 「正在退避重试」以前**只画在主对话的状态行上**,而子代理不看状态行 ——
@@ -427,7 +464,8 @@ export function SubagentNode({
               ? <CircleAlert size={14} />
               : status === 'done'
                 ? <CheckCircle2 size={14} />
-                : background
+                // 还没派出去和「后台排队中」是同一种「还没开始」,共用沙漏/时钟那个图标
+                : background || status === 'pending'
                   ? <Clock3 size={14} />
                   : <Bot size={14} />}
           </span>
@@ -453,7 +491,7 @@ export function SubagentNode({
             <span className={cn("text-[11px] font-medium",
               noticeLabel !== undefined ? "text-danger" : running ? "text-accent" : status === 'error' ? "text-danger" : "text-fg-faint")}
               style={color !== undefined && running && noticeLabel === undefined ? { color } : undefined}>
-              {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted')}
+              {noticeLabel ?? t(`chat.subagent.status.${status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted' | 'chat.subagent.status.pending')}
             </span>
             {duration !== undefined && <span className="font-mono text-[10.5px] text-fg-faint">{duration}</span>}
           </span>

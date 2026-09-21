@@ -28,6 +28,7 @@ import {
 } from '../shared/domain/settings'
 import type { ApproveFn } from './kernel/agent-session'
 import { AgentSession } from './kernel/agent-session'
+import { createTodoReconciler } from './kernel/todo-reconciliation'
 import { abortable } from './kernel/abort'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
@@ -2268,6 +2269,8 @@ export async function runAgent(
   }
 
   const history = store.getHistory(req.sessionId)
+  // 需求：在本 run 提交消息前冻结历史边界；提醒额度只活在这个 run 的闭包里。
+  const reconcileTodos = createTodoReconciler(history.length)
   if (primary) restoreGoal(req.sessionId, history)
 
   /*
@@ -2495,7 +2498,18 @@ export async function runAgent(
         ? {
           onTurnEnd: async (turnEnd) => {
             stopHookFired = true
-            return handleTurnEnd(turnEnd, goalContext)
+            const decision = await handleTurnEnd(turnEnd, goalContext)
+            // 需求：补报进度不能覆盖 Goal/Stop 的续跑、强停或后台等待裁决，也不能催计划模式写平行清单。
+            if (decision !== undefined || turnEnd.signal.aborted || getActiveGoal(req.sessionId) !== undefined
+              || req.mode === 'plan' || activePlanFor(req) !== undefined
+              || runs.activeBackgroundChildrenOfSession(req.sessionId).length > 0) return decision
+            const todo = resources.tools.byInternalId('TodoWrite')
+            const allowed = allowedTools()
+            const toolName = todo !== undefined && (allowed.includes(todo.internalId) || allowed.includes(todo.externalName))
+              ? todo.externalName
+              : undefined
+            // 和 Goal 续跑一样，补报后还要经过 Stop；次数上限独立于会被工具调用清零的空转计数。
+            return reconcileTodos(turnEnd, toolName)
           }
         }
         : {}),

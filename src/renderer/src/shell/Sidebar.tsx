@@ -25,6 +25,8 @@ import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
 import type { SessionListItem } from '../../../shared/domain/session'
 import type { ClientAuthState } from '../../../shared/domain/client-auth'
+// 只借类型:`settings/nav.ts` 是纯数据(零 React 依赖),这里不会把设置页拽进侧边栏的 bundle
+import type { SettingsPageId } from '../settings/nav'
 import { Mark } from '../components/brand/Mark'
 import { EmptyState } from '../components/ui/EmptyState'
 import { IconButton } from '../components/ui/IconButton'
@@ -34,6 +36,7 @@ import { ChevronRight, PanelLeft } from 'lucide-react'
 import { FEATURE_ICON, MENU_ICON } from './icons'
 import { useI18n, type Translate } from '../i18n'
 import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
+import { AccountMenu } from './AccountMenu'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/ui/Button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
@@ -76,7 +79,8 @@ export function Sidebar({
   onNewChat: () => void
   onSearch: () => void
   onOpenFeature: (f: FeatureKind) => void
-  onOpenSettings: () => void
+  /** 打开设置浮层。**页码是可选的** —— 账户菜单的「积分余额」要直接落到钱包页 */
+  onOpenSettings: (page?: SettingsPageId) => void
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>
   onCollapse: () => void
@@ -239,36 +243,18 @@ export function Sidebar({
 
       {/*
         参考实现这里是账户 / 游客模式。NextCoWork 没有账户体系(方案 §10 砍掉了
-        钱包 / 云同步 / 每日回顾那一整块商业化面),所以这个位置换成设置入口 ——
-        形状留着,含义换掉。
+        钱包 / 云同步 / 每日回顾那一整块商业化面),所以这个位置换成「账户菜单 +
+        设置入口」—— 形状留着,含义换掉。
+
+        ★ **两块可点区域必须分开。** 原先整张卡片只有一个 onClick(点哪儿都开设置,
+        齿轮只是那个「先问一下 target 是不是 button」的例外),于是头像 / 昵称 /
+        邮箱、余额、邀请这些只能摊在设置页里。现在左半是 `AccountMenu` 的菜单
+        触发器、右半是齿轮,两块各自有焦点与 hover —— 原来那段规避重复触发的
+        `closest('button')` 判断随之取消,因为它防的就是这个形状。
       */}
-      <div
-        role="button"
-        tabIndex={0}
-        aria-label={t('nav.settings')}
-        onClick={(event) => {
-          // 齿轮本身已经是独立按钮，避免事件冒泡后把打开动作执行两次。
-          if (event.target instanceof Element && event.target.closest('button') !== null) return
-          onOpenSettings()
-        }}
-        onKeyDown={(event) => {
-          // 只处理卡片本身获得焦点时的键盘操作，避免齿轮按钮的按键事件重复触发。
-          if (event.target !== event.currentTarget) return
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            onOpenSettings()
-          }
-        }}
-        className="mx-1.5 mb-1.5 flex shrink-0 cursor-pointer items-center gap-2.5 rounded-card px-3 py-3 transition-colors hover:bg-tint-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-      >
-        <div className="flex size-8 items-center justify-center rounded-pill bg-tint-strong text-fg">
-          <Mark size={16} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[12.5px] text-fg">{auth.mode === 'authenticated' ? (auth.user?.displayName || auth.user?.username || auth.user?.email || t('sidebar.signedIn')) : t('sidebar.localMode')}</p>
-          <p className="truncate text-[11px] text-fg-faint">{auth.mode === 'authenticated' ? t('sidebar.signedInHint') : t('sidebar.localModeHint')}</p>
-        </div>
-        <IconButton label={t('common.settings')} onClick={onOpenSettings}>
+      <div className="mx-1.5 mb-1.5 flex shrink-0 items-center gap-1">
+        <AccountMenu auth={auth} onOpenSettings={onOpenSettings} />
+        <IconButton label={t('common.settings')} onClick={() => onOpenSettings()}>
           <Settings size={15} />
         </IconButton>
       </div>
@@ -490,7 +476,16 @@ function SessionGroupBlock({
                         {selectedIds.has(session.id) && <Check size={11} />}
                       </span>}
                       <span className="min-w-0 flex-1 truncate">{openTab?.title ?? session.title}</span>
-                  {(runningSessionIds.has(session.id) || session.running) && (
+                      {/*
+                        需求:这颗转圈只认 `runningSessionIds`(主进程 RunRegistry 的投影,
+                        由 bootstrap 起头、`agent:activeRuns` 广播维持)。
+                        ★ 原先这里还 `|| session.running`,而那是 `sessions:list` 返回时的
+                        **快照**:run 结束时主进程不发 `sessions:changed`,列表就不会重拉,
+                        那个 true 会一直挂着 —— 表现为对话早就跑完了、消息也停了,
+                        侧边栏这一行还在转圈,直到用户恰好改了某条会话(改名/归档)才消。
+                        一个事实只有一处真源(§9),那一处就是运行中索引。
+                      */}
+                  {runningSessionIds.has(session.id) && (
                     <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
                   )}
                   {session.favorited && <span className="shrink-0 text-accent">★</span>}
@@ -540,7 +535,7 @@ function SessionGroupBlock({
                     setConfirmingDeleteId(menu.session.id)
                     return
                   }
-                  if (runningSessionIds.has(menu.session.id) || menu.session.running === true) {
+                  if (runningSessionIds.has(menu.session.id)) {
                     setMenu(null)
                     setConfirmingDeleteId(null)
                     setRunningBlocked(true)
@@ -660,7 +655,7 @@ function ArchivedSessionItem({
                     setConfirmingDelete(true)
                     return
                   }
-                  if (runningSessionIds.has(session.id) || session.running === true) {
+                  if (runningSessionIds.has(session.id)) {
                     setMenu(null)
                     setConfirmingDelete(false)
                     setRunningBlocked(true)

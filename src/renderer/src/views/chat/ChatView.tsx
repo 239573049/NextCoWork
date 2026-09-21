@@ -36,7 +36,7 @@ import { Composer, type ComposerValue, type ConversationUsageSummary, type Fallb
 import { type TrayItem } from './AttachmentTray'
 import { deferAttachIntent, takeAttachIntents } from './draft-handoff'
 import { PendingQueue } from './PendingQueue'
-import { TaskChecklist } from './TaskChecklist'
+import { TaskChecklist, type TaskChecklistExecution } from './TaskChecklist'
 import { Thread } from './Thread'
 import { SubagentLiveFeed } from './subagent-live'
 import { SubagentOpenProvider } from './subagent-open'
@@ -336,6 +336,33 @@ export function ChatView({
   )
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
+  /*
+    清单此刻算不算「还在跑」。
+
+    需求:转录里的 `in_progress` 既可能正被这一轮推着走,也可能是上一轮留下的死账,
+    而两者长得一模一样。唯一分得清的证据是**这一轮自己写成功过清单** ——
+    判据与 `latestTodosFrom` 同源(配对结果存在且不是错误),只是把消息范围收窄到
+    当前 run:`messageRuns` 是「消息 → 产出它的 run」的表(`stores/session.ts` 的
+    `recordMessageRuns`),本轮写下的 `tool_call` 与它的 `tool_result` 都在里面,
+    所以按 `activeRunId` 过滤之后那一对仍然配对得上。
+
+    ★ `messages` / `messageRuns` 在消息提交时才换引用,纯流式 token 保留它们。
+      不依赖整份 `transcript`,才能避免每个 token 都为运行归属重扫历史。
+
+    需求:收尾后也要核对清单归属,不能把上一轮的遗留项说成刚结束的新问题没做完。
+    只有本窗口收到过 run_end 才判 `stopped`;重载历史没有这份实时证据,按快照展示。
+    ★ 首次更新与长工具同批时,配对结果尚未提交也只能显示快照,不能提前采纳可能失败的清单。
+  */
+  const execution = useMemo<TaskChecklistExecution>(() => {
+    const lastMessage = transcript.messages.at(-1)
+    const scopeRunId = activeRunId ?? (transcript.runEndedAt !== undefined && lastMessage !== undefined
+      ? transcript.messageRuns?.[lastMessage.id]
+      : undefined)
+    if (scopeRunId === undefined || todoToolName === undefined) return 'snapshot'
+    const runMessages = transcript.messages.filter((m) => transcript.messageRuns?.[m.id] === scopeRunId)
+    if (latestTodosFrom(runMessages, todoToolName) === undefined) return 'snapshot'
+    return running === true ? 'running' : 'stopped'
+  }, [activeRunId, running, todoToolName, transcript.messages, transcript.messageRuns, transcript.runEndedAt])
 
   const executePlan = useCallback((ref: { planId: string; path: string }, source: 'current_session' | 'new_session'): void => {
     const options = {
@@ -872,7 +899,7 @@ export function ChatView({
         <div className="w-full">
           {goalLine}
           {queue}
-          {todos !== undefined && <TaskChecklist todos={todos} />}
+          {todos !== undefined && <TaskChecklist todos={todos} execution={execution} />}
           {composer}
           {transferDialog}
         </div>
@@ -918,7 +945,7 @@ export function ChatView({
 
       {goalLine}
       {queue}
-      {todos !== undefined && <TaskChecklist todos={todos} />}
+      {todos !== undefined && <TaskChecklist todos={todos} execution={execution} />}
       {composer}
       {transferDialog}
     </div>

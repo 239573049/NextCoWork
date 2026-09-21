@@ -16,8 +16,10 @@ import {
   FileText,
   Globe,
   ListTree,
+  MessageCircleQuestion,
   Plug,
   Search,
+  Sparkles,
   Terminal,
   type LucideIcon
 } from 'lucide-react'
@@ -39,6 +41,10 @@ export const SHAPE_ICON: Record<ToolShape, LucideIcon> = {
   command: Terminal,
   network: Globe,
   orchestration: ListTree,
+  interaction: MessageCircleQuestion,
+  // 生成式可视化。选 Sparkles 而不是图表/图形类图标:这一档画的东西横跨
+  // SVG 图、图表、仪表盘、表单,任何一个具体的"图"都会在别的用例上误导。
+  widget: Sparkles,
   external: Plug
 }
 

@@ -19,7 +19,7 @@
 
 - Top-level directory named exactly `<publisher>.<name>`, containing `package.json`.
 - Limits: ≤20 MB transfer, ≤50 MB unpacked, ≤2000 files, ≤12 dirs deep, **no symlinks**; `icon` ≤256 KiB (png/jpg/webp).
-- The installer verifies every referenced path exists: `main`, both `l10n` locales, view / cardView / theme / skill paths, `icon`. Ship a **clean manifest** in the ZIP — strip `devDependencies`, `scripts`, dev-only fields.
+- The installer verifies every referenced path exists: `main`, both `l10n` locales, view / cardView / theme / skill paths, `icon`. For `skills` it additionally requires `<path>/SKILL.md` — the scanner skips a directory without one silently, so the check is pulled forward to install time. Ship a **clean manifest** in the ZIP — strip `devDependencies`, `scripts`, dev-only fields.
 - Case-insensitive path dedup: `Foo.js` and `foo.js` collide.
 
 ## Validation before shipping
@@ -68,3 +68,5 @@ Notes:
 | Save always fails on images | binary save needs `encoding: 'base64'` + host ≥0.2.0 |
 | Market 409 on upload | version or content hash already published — bump `version` |
 | Plugin hidden in market | `engines` above the querying client version |
+| Declared a skill, model never sees it | path not `skills/<name>`, `SKILL.md` frontmatter has no `description`, or a same-named skill in the user's own Skill root outranks it — the plugin detail page names which |
+| Declared `agents` / `modes` / `themes` / `slashCommands`, nothing happens | parsed and installed, but nothing reads them yet — see `references/contribution-points.md` |

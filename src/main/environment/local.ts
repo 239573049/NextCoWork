@@ -60,7 +60,19 @@ export function localEnvironment(host: KernelHost, rootPath: string): WorkspaceE
       const env = { ...process.env, ...options.env }
       delete env.ELECTRON_RUN_AS_NODE
       delete env.NODE_OPTIONS
-      const detached = options.detached === true
+      /*
+        调用方传 `detached` 表达的需求是**「kill 要带走整棵树」**,两件事因此分开:
+
+        ★ Windows 上**不给 spawn 传 `detached`**:libuv 会把它翻成 `DETACHED_PROCESS`,
+          而 Windows 一旦看到这个标志就忽略 `CREATE_NO_WINDOW`(即 `windowsHide`),
+          于是每跑一个钩子、每起一条后台 Bash 都会弹出一个独立的控制台窗口。
+          对齐 `kernel/node-spawn.ts:169` 的 `detached: !isWindows`。
+        ★ 杀树用的是 `tree` 而不是 `detached`:Windows 那条路靠 `taskkill /T`,
+          本来就不依赖进程组。混用一个变量的话,Windows 上就退化成「只杀那一个
+          shell」——`npm run dev` 的 node 活下来继续占着端口,而 KillShell 报告已停。
+      */
+      const tree = options.detached === true
+      const detached = tree && process.platform !== 'win32'
       const child = spawn(command, [...args], { cwd: options.cwd, env, stdio: 'pipe', windowsHide: true,
         windowsVerbatimArguments: options.windowsVerbatimArguments, shell: false, detached })
       child.stdin.on('error', () => {})
@@ -75,7 +87,7 @@ export function localEnvironment(host: KernelHost, rootPath: string): WorkspaceE
           `kernel/node-spawn.ts` 的 `killTree`，那里是同一个问题的另一条路径。
         */
         kill: () => {
-          if (detached && child.pid !== undefined) killTree(child.pid, 'SIGTERM')
+          if (tree && child.pid !== undefined) killTree(child.pid, 'SIGTERM')
           else child.kill()
         } }
     },

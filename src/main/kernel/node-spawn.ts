@@ -56,7 +56,10 @@ function childEnv(): NodeJS.ProcessEnv {
 export function killTree(pid: number, signal: NodeJS.Signals): void {
   try {
     if (isWindows) {
-      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' })
+      // ★ `windowsHide` 不能省:主进程是 GUI 程序、自己没有控制台,taskkill 是
+      //   控制台程序,少了它每次停止/超时都会闪一个黑框(Win11 上还可能被
+      //   「默认终端应用」接管成一个真的终端窗口)。
+      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
     } else {
       process.kill(-pid, signal)
     }

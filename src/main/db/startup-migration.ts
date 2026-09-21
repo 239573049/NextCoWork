@@ -94,7 +94,13 @@ const IDLE_STATE: MigrationState = {
   ratio: null,
   failure: null,
   merged: null,
-  undoAvailable: false
+  undoAvailable: false,
+  /*
+    ★ 恒为 false,而且**故意**不在这里维护:闸门不知道主进程有没有跑完
+    `registerIpc()`,那是启动序列的事。播给渲染层的那一份由 `ipc/data-migration.ts`
+    的 `outward()` 盖章(见 `MigrationState.ipcReady`)。
+  */
+  ipcReady: false
 }
 
 /**

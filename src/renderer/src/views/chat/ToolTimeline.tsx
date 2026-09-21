@@ -237,6 +237,8 @@ const GROUP_TITLE_KEYS = {
   command: "chat.tool.group.command",
   network: "chat.tool.group.network",
   orchestration: "chat.tool.group.orchestration",
+  interaction: "chat.tool.group.interaction",
+  widget: "chat.tool.group.widget",
   external: "chat.tool.group.external",
 } as const satisfies Record<ReturnType<typeof shapeOfItem>, TranslationKey>;
 
@@ -258,7 +260,15 @@ function TimelineRow({
     case "thinking":
       return <ThinkingBlock text={item.text} streaming={item.streaming} />;
     case "subagent":
-      return <SubagentNode summary={item.summary} state={item.state ?? subagents[item.callId]} />;
+      return (
+        <SubagentNode
+          summary={item.summary}
+          state={item.state ?? subagents[item.callId]}
+          // 参数还在流、subagent_start 还没到 —— 理由见 thread-content.ts 里那段需求注释。
+          // 这里再核一次 subagents 表:item 是上一帧算出来的,状态可能刚刚到。
+          pending={item.pending === true && item.state === undefined && subagents[item.callId] === undefined}
+        />
+      );
     case "tool":
       return (
         <ToolCallCard

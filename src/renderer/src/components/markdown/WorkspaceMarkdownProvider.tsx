@@ -1,6 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
 import { copyText, openExternal } from '../../services/app'
-import { readWorkspaceFile } from '../../services/workspace-files'
+import { readWorkspaceFile, workspaceFileOpenFailure } from '../../services/workspace-files'
 import { MarkdownProvider, type MarkdownEnvironment } from './MarkdownProvider'
 import { resolveMarkdownTarget } from './links'
 
@@ -15,6 +15,9 @@ export function WorkspaceMarkdownProvider({ workspaceId, documentPath = '', work
   const value = useMemo<MarkdownEnvironment>(() => ({
     resolveLink: (reference) => resolveMarkdownTarget(documentPath, reference, workspaceRoot),
     onOpenFile,
+    // 需求：链接指向的文件已经不在了，就别开那个只会显示错误的 Tab —— 预检失败时
+    // 原因由链接自己画在旁边（`MarkdownLink`），这里只负责问主进程「它还在吗」。
+    checkFile: (path) => workspaceFileOpenFailure(workspaceId, path),
     onOpenExternal: openExternal,
     onCopyCode: copyText,
     loadImage: async (path) => {

@@ -20,6 +20,34 @@ export function readWorkspaceFile(workspaceId: string, path: string): Promise<Wo
 }
 
 /**
+ * 打开一条**文件引用**之前的预检：`null` = 打得开。
+ *
+ * 需求：点开 Markdown 链接 / 消息里的 `file_ref` / 行内 `@` 引用之前先问一句
+ * 「它还打得开吗」—— 打不开就**别在右侧工作台开一个只会显示错误的 Tab**，
+ * 那个 Tab 还占着一个位置、要用户自己去关。引用是**发送那一刻的快照**，
+ * 文件后来被删掉、改名是常态。
+ *
+ * ★ 判定方式是**真读一次**，而不是单独 stat 一遍：一条引用能不能打开取决于
+ * `workspace:readFile` 那一整套判定（存在、是普通文件、不是软链、能解码、没超上限），
+ * 而 stat 只回答其中一问 —— 于是「预检说能开」和「打开是空的」会分叉。
+ * 代价是多读一次内容（引用到的多是几十 KB 的源码）。如果这条开销哪天显出来
+ * （工作区挂在 SSH 上、引用的是十几兆的图片），正确的做法是给主进程加一条只做
+ * stat 的频道，**不要**在这里按扩展名加特判。
+ *
+ * 返回的是**一个 i18n key**而不是译好的句子：三个调用点（Markdown 链接、
+ * `file_ref`、`@` 引用）分处三个组件，各自拼一句话的话，同一个「文件不存在」
+ * 迟早会有三种说法，而且新码加进 `workspaceFileErrorKey` 时总有一处忘了跟。
+ */
+export async function workspaceFileOpenFailure(workspaceId: string, path: string): Promise<TranslationKey | null> {
+  try {
+    await readWorkspaceFile(workspaceId, path)
+    return null
+  } catch (error) {
+    return workspaceFileErrorKey(error)
+  }
+}
+
+/**
  * 可恢复的删除项。★ 从**服务器上的索引**读,不从任何客户端状态读 —— 刷新、切子树根、
  * 重连、重启应用之后它都还在,而组件 state 三种都活不过。
  */

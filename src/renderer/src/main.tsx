@@ -16,6 +16,11 @@ createRoot(container).render(
         握手 effect 一跑就会 invoke `app:getBootstrap` 并失败,把首屏置成
         「握手失败」—— 而闸门一放行,用户看到的就是那一屏错误。
         包在外面,App 的 effect 在闸门结束之前一次都不会跑(见 MigrationGate 文件头)。
+
+        ★ 放行还要多等一条:主进程得把 handler 装完(`MigrationState.ipcReady`)。
+        数据库没打开只是其中一种情况 —— 建窗在 `registerIpc()` 之前,所以**没有
+        迁移的那次启动**同样会撞上「No handler registered for 'app:getBootstrap'」。
+        判据在 `views/migration-release.ts`。
       */}
       <MigrationGateHost>
         <App />

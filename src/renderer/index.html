@@ -17,10 +17,14 @@
       ——「Framing 'ncw-plugin://…' violates … default-src 'self'」。表现是
       自定义编辑器标签页开出来却一片空白,随后 postMessage 还会报
       「recipient window's origin ('null')」,因为那个 frame 根本没加载成。
+
+      ★ `ncw-widget:` 是内置可视化 widget 的外壳(src/main/net/widget-protocol.ts)。
+      和上面那条一模一样的坑:漏了它,一张已经正常生成的图会**渲染成空白**,
+      而工具卡片本身显示"成功"。dev 版同样在 electron.vite.config.ts 的 DEV_CSP 里。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ncw: https: http:; media-src 'self' ncw:; font-src 'self' data:; connect-src 'self' ncw:; frame-src ncw-plugin:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: ncw: https: http:; media-src 'self' ncw:; font-src 'self' data:; connect-src 'self' ncw:; frame-src ncw-plugin: ncw-widget:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     />
     <title>NextCoWork</title>
   </head>

@@ -70,7 +70,8 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, interjectRun, listInteractions, respondInteraction, startChildRun, startRun, stopToolCall } from './agent'
+import { abortRun, attachRun, broadcastActiveRuns, interjectRun, listInteractions, respondInteraction, startChildRun, startRun, stopToolCall } from './agent'
+import { runs } from '../kernel/run-registry'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
@@ -866,6 +867,13 @@ export function registerIpc(): void {
     里那次 `setMcpChangeListener` 是同一种接线。
   */
   installChildRunLauncher(startChildRun)
+  /*
+    ★ 运行中角标的**权威来源**。渲染层那份 run 索引原先只靠 `agent:event` 里的
+    `run_end` 收敛,而那条流没有订阅者时会被整批丢弃 —— 定时任务起的 run、
+    ⌘R 重载后还没打开的会话都属于这一类,于是它们的角标永远停在「运行中」。
+    这里补一条与订阅无关的全量广播,RunRegistry 一变就发。
+  */
+  runs.onActiveChange(broadcastActiveRuns)
   setSessionChangeListener((change) => {
     windows.emitToAll('sessions:changed', change)
   })

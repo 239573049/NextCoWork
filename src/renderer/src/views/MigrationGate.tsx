@@ -22,6 +22,13 @@
  *   而把用户彻底挡在门外连备份都做不了,是另一个极端。
  * - `skipped` —— 一行说明 + 继续。告诉用户旧数据还在、下次还会再试。
  * - `idle`    —— 什么都不画。绝大多数启动落在这里。
+ *
+ * ## 什么时候放行
+ *
+ * 「闸门里没有事要做」**不等于**「可以挂 App」:建窗在 `registerIpc()` 之前,
+ * 所以还得等主进程把 handler 装完(`MigrationState.ipcReady`)。这一条判据单独住在
+ * `migration-release.ts` 里,可测 —— 它错的形态(渲染层比主进程快)起一次 Electron
+ * 也未必撞得上。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { MigrationState, MigrationStepKind } from '../../../shared/domain/data-migration'
@@ -29,6 +36,7 @@ import { Button } from '../components/ui/Button'
 import { ProgressBar } from '../components/ui/ProgressBar'
 import { Spinner } from '../components/ui/Spinner'
 import { useI18n } from '../i18n'
+import { decideMigrationGate } from './migration-release'
 import {
   getMigrationState,
   onMigrationProgress,
@@ -299,6 +307,9 @@ function MigrationSkippedView({ onContinue }: { onContinue: () => void }): React
  * 而那个 effect 一跑就会 invoke `app:getBootstrap` —— 库还没打开,那一次会失败
  * 并把 `fatal` 置上,于是闸门一放行用户看到的是「首屏握手失败」。
  * 让这一层把 App **完全挡住**(而不是叠在上面),App 的 effect 就一次都不会跑。
+ *
+ * ★ 「挡住」的条件不止「迁移跑完了」:主进程还得把 handler 装完。放行判据整个
+ * 抽在 `migration-release.ts` 里(那里写着为什么),这里只负责照它画。
  */
 export function MigrationGateHost({ children }: { children: React.ReactNode }): React.ReactNode {
   const [state, setState] = useState<MigrationState | null>(null)
@@ -328,6 +339,10 @@ export function MigrationGateHost({ children }: { children: React.ReactNode }): 
           是「主进程的 handler 没装」(比如某个只跑 IPC 子集的测试),而那种情况下
           「无需迁移」正是正确答案。在这里显示一屏错误反而会把一个正常的启动
           变成用户眼里的故障。
+
+          ★ 这里置的只是 `resolved`;真正挂 App 还要 `ipcReady`(见
+          `migration-release.ts`)。所以主进程连闸门频道都没登记时这一步不会真的
+          放行 —— 那种情况下放行就是握手失败,而首屏多空一会儿不算故障。
         */
         if (active) setResolved(true)
       })
@@ -346,7 +361,10 @@ export function MigrationGateHost({ children }: { children: React.ReactNode }): 
     所以先什么都不画。空白只有一帧,而画错东西会让用户以为启动坏了。
   */
   if (state === null) return null
-  if (resolved || state.phase === 'idle') return <>{children}</>
+
+  const decision = decideMigrationGate(state, resolved)
+  if (decision === 'blank') return null
+  if (decision === 'app') return <>{children}</>
 
   return <MigrationGate state={state} onResolved={() => setResolved(true)} />
 }

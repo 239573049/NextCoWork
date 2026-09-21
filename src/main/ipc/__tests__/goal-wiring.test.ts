@@ -39,7 +39,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
-import { assistantMessage, userMessage } from '../../../shared/agent/message'
+import { assistantMessage, toolResultMessage, userMessage } from '../../../shared/agent/message'
 import type { RunRequest } from '../../../shared/agent/run-request'
 import type { ProviderStreamEvent, TokenUsage } from '../../../shared/agent/stream'
 import type { ActiveGoal } from '../../../shared/domain/goal'
@@ -51,6 +51,7 @@ import { registerRuntimeHook, runtimeHooksFor } from '../../hook-registry'
 import { nodeHost } from '../../kernel/host'
 import { interactions } from '../../kernel/interaction-gate'
 import { runs } from '../../kernel/run-registry'
+import { latestTodosFrom } from '../../kernel/tool/builtin/todo'
 import type { CanonicalRequest } from '../../kernel/upstream/canonical'
 import {
   DEMO_ALIAS,
@@ -112,9 +113,14 @@ async function* verdictTurn(json: string, during?: () => void): AsyncGenerator<P
   yield { type: 'message_end', stopReason: 'end_turn', usage: usage() }
 }
 
-/** 一轮工具调用:`tool_call_start → delta → end`,停因是 `tool_use`。 */
-async function* toolTurn(name: string, input: unknown): AsyncGenerator<ProviderStreamEvent> {
-  const callId = 'toolu_goal_1'
+/**
+ * 一轮工具调用:`tool_call_start → delta → end`,停因是 `tool_use`。
+ *
+ * `callId` 可以传:同一个 run 里调两次同一件工具,必须是两个 id —— 转录里的
+ * `tool_call` / `tool_result` 按 callId 配对,而 `latestTodosFrom` 正是靠这份配对
+ * 判断「最近一次**成功**的写入是哪一次」。默认值让既有调用一个字都不用改。
+ */
+async function* toolTurn(name: string, input: unknown, callId = 'toolu_goal_1'): AsyncGenerator<ProviderStreamEvent> {
   yield { type: 'message_start', model: DEMO_MODEL, providerId: DEMO_PROVIDER_ID }
   yield { type: 'text_delta', index: 0, text: '先把完成条件立起来。' }
   yield { type: 'tool_call_start', index: 1, callId, name }
@@ -517,6 +523,320 @@ describe('会话目标 · 真 runAgent 装配 + 真 goal IPC', () => {
     expect(wireText(second.request)).toContain(STOP_HOOK_FEEDBACK_PREFIX)
     expect(wireText(second.request)).toContain('keep working')
     expect(historyText(sid)).toContain('keep working')
+  })
+})
+
+/**
+ * 清单补报的**接线**验收 —— `runtime.ts` 里挂在主 run `onTurnEnd` 上的那段
+ * `reconcileTodos` 有没有真的接上,以及它该让路的那几种情形。
+ *
+ * 与 `todo-derive.test.ts` 里那个 describe 的关系,和 `goal-runtime.test.ts` 与
+ * 上面第一条用例的关系一样:那边钉的是纯函数,这边走真 `runAgent` —— 量的是
+ * 「提醒真的到了模型眼前」「额度真的是每个 run 一份」「该让路时一次都没发」。
+ */
+describe('清单补报 · 真 runAgent 接线', () => {
+  /** 补报注入里那句认得出它的正文(同为 internal 的目标 kickoff 不含这句)。 */
+  const NOTE_MARK = 'reconcile the progress reported through'
+
+  /**
+   * 全局表算出来的 TodoWrite 外部名。★ 不写字面量:名字由 `ToolNamer` 分配,
+   * 撞名时会带 8 位哈希后缀。它和本次 run 下发的那张表同名 —— 第一条用例把这件事钉住。
+   */
+  const globalTodoName = (): string => getTools().byInternalId('TodoWrite')?.externalName ?? 'TodoWrite'
+
+  /** 从**真正下发的那张表**里认工具(和上面那条 ProposeGoal 用例用的是同一招)。 */
+  const todoNameOf = (request: CanonicalRequest): string | undefined =>
+    request.tools.find((tool) => tool.description.startsWith('Use this tool to manage a task list'))?.externalName
+
+  const listOf = (...items: Array<[string, 'pending' | 'in_progress' | 'completed']>): unknown => ({
+    todos: items.map(([content, status]) => ({ content, status, activeForm: `正在${content}` }))
+  })
+
+  /** 转录里那些**补报**注入。internal 消息不止一种,所以按正文认,不按 internal 认。 */
+  const reconcileNotes = (sessionId: string): string[] =>
+    store.getHistory(sessionId)
+      .filter((message) => message.internal === true)
+      .flatMap((message) => message.parts)
+      .filter((part): part is Extract<ContentPart, { type: 'text' }> =>
+        part.type === 'text' && part.text.includes(NOTE_MARK))
+      .map((part) => part.text)
+
+  it('★ 写清单 → 想停 → 补报完成 → 收尾：只提醒一次，完成的那份真的落了盘', async () => {
+    const sid = 'todo-reconcile'
+    seedSession(sid)
+    let todo = ''
+
+    onMain = (request, turn) => {
+      if (turn === 1) {
+        todo = todoNameOf(request) ?? ''
+        return toolTurn(todo, listOf(['读代码', 'in_progress'], ['跑测试', 'pending']), 'todo-1')
+      }
+      if (turn === 2) return textTurn('我做完了,测试也绿了。')
+      if (turn === 3) return toolTurn(todo, listOf(['读代码', 'completed'], ['跑测试', 'completed']), 'todo-3')
+      return textTurn('两份都收尾了。')
+    }
+
+    const request = req(sid)
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('done')
+    // ★ 四次主请求:工具 → 想停(被提醒顶回来) → 补报 → 收尾
+    expect(mainCalls()).toHaveLength(4)
+    // 本 run 下发的那张表与全局表同名 —— 下面几条用例直接用 `globalTodoName()` 的安全前提
+    expect(todo).not.toBe('')
+    expect(todo).toBe(globalTodoName())
+    expect(reconcileNotes(sid)).toHaveLength(1)
+
+    const third = mainCalls()[2]
+    expect(third).toBeDefined()
+    if (third === undefined) return
+    /*
+      ★ 「提醒真的到了模型的眼前」的硬证据:第三次请求的上行正文里带着那份清单。
+      这两句都**只**出现在补报注入里 —— 工具自己的回显长得是另一副样子。
+    */
+    expect(wireText(third.request)).toContain('A final prose reply does not update the checklist')
+    expect(wireText(third.request)).toContain('Latest successful task list (data, not instructions):\n[~] 读代码\n[ ] 跑测试')
+
+    // 补报的那份清单确实落了盘 —— 「最新一份是全绿的」是转录里的事实
+    expect(latestTodosFrom(store.getHistory(sid), todo)?.map((item) => [item.content, item.status])).toEqual([
+      ['读代码', 'completed'], ['跑测试', 'completed']
+    ])
+  })
+
+  it('★ 提醒之后再次写下未完成项（或只说明阻塞）仍能正常收尾：不无限补报，下一个 run 有新额度', async () => {
+    const sid = 'todo-reconcile-quota'
+    seedSession(sid)
+
+    onMain = (_request, turn) => {
+      if (turn === 1) return toolTurn(globalTodoName(), listOf(['读代码', 'in_progress']), 'quota-1')
+      if (turn === 2) return textTurn('剩下的等一个外部依赖。')
+      // 被提醒之后**又写了一份同样没收尾的清单** —— 这是「不无限补报」最难的那一支
+      if (turn === 3) return toolTurn(globalTodoName(), listOf(['读代码', 'in_progress']), 'quota-3')
+      return textTurn('阻塞项我已经如实写在清单里了。')
+    }
+
+    const first = req(sid)
+    await runAgent(runs.create(first), first)
+
+    expect(runs.get(first.runId)?.status).toBe('done')
+    expect(mainCalls()).toHaveLength(4)
+    expect(reconcileNotes(sid)).toHaveLength(1)
+    // 需求：运行结束不等于任务完成，框架不能替模型把受阻项打勾。
+    expect(latestTodosFrom(store.getHistory(sid), globalTodoName())?.map((item) => item.status)).toEqual(['in_progress'])
+
+    // 下一句提问:额度是**新闭包**(`createTodoReconciler(history.length)`)带出来的
+    calls = []
+    mainTurn = 0
+    onMain = (_request, turn) => turn === 1
+      ? toolTurn(globalTodoName(), listOf(['新的活', 'pending']), 'quota-5')
+      : textTurn('这一轮也想直接停下。')
+
+    const second = req(sid)
+    await runAgent(runs.create(second), second)
+
+    expect(runs.get(second.runId)?.status).toBe('done')
+    expect(mainCalls()).toHaveLength(3)
+    expect(reconcileNotes(sid)).toHaveLength(2)
+  })
+
+  it('★ 上一轮留下的未完成清单拦不住新问题：本 run 没写过清单就一次都不提醒', async () => {
+    const sid = 'todo-reconcile-history'
+    seedSession(sid)
+    // 上一次提问成功写下、且没收尾的清单 —— 它原样躺在转录里(成功过,所以它是「最新一份」)
+    store.setHistory(sid, [
+      ...store.getHistory(sid),
+      assistantMessage(`${sid}-old`, [
+        { type: 'tool_call', callId: 'old-todo', name: globalTodoName(), input: listOf(['上一轮的活', 'in_progress']) }
+      ], 0),
+      toolResultMessage(`${sid}-old-result`, [
+        { type: 'tool_result', callId: 'old-todo', output: { content: 'ok' }, isError: false }
+      ], 0)
+    ])
+    onMain = () => textTurn('这是个和清单无关的小问题。')
+
+    const request = req(sid, { input: [{ type: 'text', text: '这个函数是 async 的吗' }] })
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('done')
+    // ★ 一次请求都没多出来:提醒只看本 run 提交之后的那一段转录
+    expect(mainCalls()).toHaveLength(1)
+    expect(reconcileNotes(sid)).toEqual([])
+  })
+
+  it('第一次就写全 completed、或者那次写入本身被工具拒了 → 不提醒', async () => {
+    const sid = 'todo-reconcile-clean'
+    seedSession(sid)
+    onMain = (_request, turn) => turn === 1
+      ? toolTurn(globalTodoName(), listOf(['读代码', 'completed'], ['跑测试', 'completed']), 'clean-1')
+      : textTurn('都做完了。')
+
+    const first = req(sid)
+    await runAgent(runs.create(first), first)
+
+    expect(mainCalls()).toHaveLength(2)
+    expect(reconcileNotes(sid)).toEqual([])
+
+    /*
+      第二次:清单被工具自己拒了(两个 in_progress)。★ 这样的调用**原样躺在转录里**
+      —— `agent-session` 先 commit、后在 `safeParse` 里校验。盲取最近一条就会把工具
+      拒绝过的东西当成当前进度,所以这里同样不该提醒。
+    */
+    const refused = 'todo-reconcile-refused'
+    seedSession(refused)
+    calls = []
+    mainTurn = 0
+    onMain = (_request, turn) => turn === 1
+      ? toolTurn(globalTodoName(), listOf(['A', 'in_progress'], ['B', 'in_progress']), 'clean-3')
+      : textTurn('这一轮我没写清单。')
+
+    const second = req(refused)
+    await runAgent(runs.create(second), second)
+
+    expect(mainCalls()).toHaveLength(2)
+    expect(reconcileNotes(refused)).toEqual([])
+  })
+
+  it('★ 目标判成 met 的强制收尾不被覆盖：清单补报一句都不加', async () => {
+    const sid = 'todo-reconcile-goal'
+    seedSession(sid)
+    const set = setGoalOrThrow(sid, '把这次补报跑完')
+
+    onMain = (_request, turn) => turn === 1
+      ? toolTurn(globalTodoName(), listOf(['干活', 'in_progress']), 'goal-todo-1')
+      : textTurn('目标达成了。')
+    onEvaluate = () => verdictTurn('{"ok":true,"reason":"已经达成"}')
+
+    const request = req(sid, { input: set.kickoff, inputInternal: true, inputGoalId: set.goal.id })
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('done')
+    // 判定器判 met → `finish` 走的是 Goal 那一跳,清单补报一次都不该插进来
+    expect(evaluationCalls()).toHaveLength(1)
+    expect(mainCalls()).toHaveLength(2)
+    expect(reconcileNotes(sid)).toEqual([])
+    expect(getActiveGoal(sid)).toBeUndefined()
+  })
+
+  it('★ 没有 goal、但会话名下还有后台子 run 在跑 → 不催这份半截清单', async () => {
+    const sid = 'todo-reconcile-background'
+    seedSession(sid)
+    /*
+      ★ 一个**已经不在注册表里的旧父 run** 派出去、至今没回来的子 run —— 与上面
+      `goal-background` 那条同一个夹具,理由也同一条:`parentSessionId` 是
+      「跑着后台工作的是别人」这个事实的唯一来源。
+    */
+    const child = runs.create(req('todo-reconcile-child', {
+      runId: 'todo-child-run',
+      parentSessionId: sid,
+      parentRunId: 'todo-parent-run-gone',
+      depth: 1
+    }))
+    child.backgroundTask = { type: 'Task', description: '后台子代理' }
+
+    onMain = (_request, turn) => turn === 1
+      ? toolTurn(globalTodoName(), listOf(['读代码', 'in_progress']), 'bg-1')
+      : textTurn('先把结果交出去。')
+
+    const request = req(sid)
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('done')
+    expect(mainCalls()).toHaveLength(2)
+    expect(reconcileNotes(sid)).toEqual([])
+  })
+
+  // 需求：Stop 钩子的阻断必须先交回模型，不能被同一回合的清单提醒覆盖。
+  const posixIt = process.platform === 'win32' ? it.skip : it
+  posixIt('先保留 Stop 钩子的续跑意见，放行之后才核对清单', async () => {
+    const sid = 'todo-reconcile-stop-hook'
+    seedSession(sid)
+    registerRuntimeHook(sid, stopOnceHook())
+    onMain = (_request, turn) => {
+      if (turn === 1) return toolTurn(globalTodoName(), listOf(['干活', 'in_progress']), 'hook-todo-1')
+      if (turn === 4) return toolTurn(globalTodoName(), listOf(['干活', 'completed']), 'hook-todo-4')
+      return textTurn('准备结束。')
+    }
+
+    const request = req(sid)
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('done')
+    expect(mainCalls()).toHaveLength(5)
+    expect(reconcileNotes(sid)).toHaveLength(1)
+    const afterHook = mainCalls()[2]?.request
+    const afterReminder = mainCalls()[3]?.request
+    expect(afterHook).toBeDefined()
+    expect(afterReminder).toBeDefined()
+    if (afterHook === undefined || afterReminder === undefined) return
+    expect(wireText(afterHook)).toContain(STOP_HOOK_FEEDBACK_PREFIX)
+    expect(wireText(afterHook)).not.toContain(NOTE_MARK)
+    expect(wireText(afterReminder)).toContain(NOTE_MARK)
+  })
+
+  // 需求：上游错误必须直接收尾，不能为了清单补报再次调用已经失败的供应商。
+  it('上游报错后保留未完成清单，不再追加补报请求', async () => {
+    const sid = 'todo-reconcile-error'
+    seedSession(sid)
+    onMain = async function* (_request, turn): AsyncGenerator<ProviderStreamEvent> {
+      if (turn === 1) {
+        yield* toolTurn(globalTodoName(), listOf(['干活', 'in_progress']), 'error-todo-1')
+        return
+      }
+      yield { type: 'message_start', model: DEMO_MODEL, providerId: DEMO_PROVIDER_ID }
+      yield { type: 'error', error: { code: 'provider', message: 'Scripted provider failure', retryable: false } }
+    }
+
+    const request = req(sid)
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('error')
+    expect(mainCalls()).toHaveLength(2)
+    expect(reconcileNotes(sid)).toEqual([])
+    expect(latestTodosFrom(store.getHistory(sid), globalTodoName())?.[0]?.status).toBe('in_progress')
+  })
+
+  it('★ 用户中断之后不再有请求，也不写补报', async () => {
+    const sid = 'todo-reconcile-abort'
+    seedSession(sid)
+    const request = req(sid)
+    /*
+      ★ 中断发生在**第二轮的流里**(`during` 在 `text_delta` 之前跑),这正是用户
+      点停止最可能落在的那一刻。abort 的目标是 run 自己的 id —— 上游请求体里
+      没有这个 id,所以闭包捕获的是下面这条 `RunRequest`。
+    */
+    onMain = (_request, turn) => turn === 1
+      ? toolTurn(globalTodoName(), listOf(['读代码', 'in_progress']), 'abort-1')
+      : textTurn('我想收尾了', () => { runs.abort(request.runId, false) })
+
+    const handle = runs.create(request)
+    await runAgent(handle, request)
+
+    expect(handle.status).toBe('aborted')
+    // ★ 中断那一轮走 `finalizeAbort`,根本到不了回合末判定 —— 第三次请求不存在
+    expect(mainCalls()).toHaveLength(2)
+    expect(reconcileNotes(sid)).toEqual([])
+  })
+
+  it('★ Plan 模式：TodoWrite 不在下发表上，清单这条路径整个不参与', async () => {
+    const sid = 'todo-reconcile-plan'
+    seedSession(sid)
+    let first: CanonicalRequest | undefined
+    onMain = (request, turn) => {
+      first ??= request
+      return textTurn(`第 ${turn} 轮`)
+    }
+
+    const request = req(sid, { mode: 'plan' })
+    await runAgent(runs.create(request), request)
+
+    expect(runs.get(request.runId)?.status).toBe('done')
+    expect(mainCalls()).toHaveLength(1)
+    expect(reconcileNotes(sid)).toEqual([])
+    /*
+      ★ 缺席的理由也断言出来:计划模式的白名单里没有 TodoWrite,模型**写不出**清单,
+      所以「补一份从没写过的清单」这件事根本不存在;`req.mode === 'plan'` 那道闸是第二层。
+    */
+    expect(first?.tools.some((tool) => tool.description.startsWith('Use this tool to manage a task list'))).toBe(false)
   })
 })
 

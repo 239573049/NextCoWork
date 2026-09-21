@@ -76,6 +76,7 @@ describe('TodoWrite · 校验', () => {
       ctx()
     )
     expect(r.isError).toBe(true)
+    expect(r.output.content).toContain('At most one')
     expect(r.output.content).toContain('you sent 2')
     // ★ 点名 —— 只说「有多个」的话模型得自己回去数,而它多半会重发一份同样的清单
     expect(r.output.content).toContain('改代码')
@@ -182,6 +183,42 @@ describe('TodoWrite · 回显', () => {
     expect(r.output.content).toContain('跑测试')
     expect(r.output.content).not.toContain('正在跑测试')
   })
+
+  /**
+   * 需求:全绿与「还有没做完的」必须是**两条**回执。
+   *
+   * 一份已经全绿的清单上再催「做完一项就标掉」没有对象可指,只会把模型推回循环 ——
+   * 它反复重发同一份清单,用户看着界面一直亮着「正在……」,而每次重发都在烧一遍上下文。
+   * 所以全绿这条必须**明确说完成**,并且只把「用户请求已完全满足」当作可以收尾的条件。
+   */
+  it('全完成时明确说「清单上的事都做完了」,并且不再催继续', async () => {
+    const r = await todoWriteTool.execute(
+      { todos: [todo('a', 'completed'), todo('b', 'completed')] },
+      ctx()
+    )
+    expect(r.isError).toBeFalsy()
+    expect(r.output.content).toContain('All listed tasks are complete')
+    expect(r.output.content).toContain('fully addressed')
+    expect(r.output.content).not.toContain('As soon as an item is done')
+  })
+
+  /**
+   * 需求:没做完时不能默认放行,也**不能**逼着全绿 —— 受阻/未验证的项本来就该留在
+   * 清单上。所以这条回执要同时做到两件相反的事:保留逐项提醒,并要求收尾前核对。
+   *
+   * 不满足会怎样:要么模型把受阻项勾成 completed 来「清空清单」(界面上的进度变成
+   * 谎话),要么它在还没做完时就直接交最终答复(用户以为干完了)。
+   */
+  it('未完成时保留逐项提醒,并要求收尾前核对,但不强迫全绿', async () => {
+    const r = await todoWriteTool.execute(
+      { todos: [todo('a', 'completed'), todo('b', 'pending')] },
+      ctx()
+    )
+    expect(r.output.content).toContain('As soon as an item is done')
+    expect(r.output.content).toContain('check it against what actually happened')
+    expect(r.output.content).toContain('stay unfinished')
+    expect(r.output.content).not.toContain('All listed tasks are complete')
+  })
 })
 
 describe('TodoWrite · 无状态', () => {
@@ -208,8 +245,48 @@ describe('TodoWrite · 描述里那三条硬规则', () => {
     expect(d).toContain('send the complete list')
   })
 
-  it('★ 说清了同一时刻只能有一项 in_progress —— 和上面那条校验是一对', () => {
-    expect(d).toContain('EXACTLY ONE item may be in_progress')
+  it('★ 说清了同一时刻至多一项 in_progress —— 和上面那条校验是一对', () => {
+    expect(d).toContain('AT MOST ONE item may be in_progress')
+  })
+
+  // 需求：进度更新发生在阶段切换处，不能先做下一项再把完成状态一次性补上。
+  it('要求读完结果后立即更新，且先于下一项开始', () => {
+    expect(d).toContain('read the result you just got')
+    expect(d).toContain('before starting the next item')
+    expect(d).toContain('Send progress updates separately from work or verification calls')
+    expect(d).toContain('wait for a successful receipt')
+  })
+
+  /**
+   * 需求:这条是上面 `AT MOST ONE` 的另一半 —— 只写上界的话,模型会读成「必须
+   * 一直有一项在动」,于是受阻那一轮把一项其实没在动的勾成进行中,界面上的
+   * 「正在……」就成了谎话。零项必须是明说合法的一档。
+   */
+  it('★ 说清了零项 in_progress 合法(做完了,或剩下的都在等)', () => {
+    expect(d).toContain('Zero items in_progress is correct')
+    expect(d).toContain('not started or waiting')
+  })
+
+  it('★ 说清了全部完成时不许留 in_progress —— 收尾前要再核对一遍全量清单', () => {
+    expect(d).toContain('no item may be left in_progress')
+    expect(d).toContain('check it against what actually happened')
+    // 需求：已经准确同步的清单可以直接收尾，不能为了“最后一次”不停重发。
+    expect(d).toContain('An unchanged, accurate list needs no duplicate call')
+  })
+
+  /**
+   * 需求:模型最容易绕开清单的一招是**在正文里宣布完成** —— 它说「都做完了」,
+   * 而用户看着的那份清单还停在半路,回执与界面长期对不上,且全程零报错。
+   * 所以描述里必须明说:文字不是一次工具调用的替代品。
+   */
+  it('★ 说清了文字完成声明不能代替工具调用,也不能与在跑的验证并行标完成', () => {
+    expect(d).toContain('is not a substitute for the tool call')
+    expect(d).toContain('still in flight')
+  })
+
+  /** ★ 受阻/失败/未验证的项保持未完成,而且原因要写进它自己那一条里 */
+  it('★ 说清了受阻/失败/未验证的项保持未完成,并注明原因', () => {
+    expect(d).toContain('blocked, failed, or not verified yet')
   })
 
   it('★ 说清了没验证过不许标 completed', () => {

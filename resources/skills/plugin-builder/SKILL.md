@@ -1,6 +1,6 @@
 ---
 name: plugin-builder
-description: Author, package, and debug NextCoWork plugins — the single entry point. Covers the manifest (package.json) and the permission model with per-call capability gates, custom editors / views / the ncw:doc document channel, agent tools with their result / live-progress / interactive cards, the nextcowork runtime API namespaces, the sandbox and isolation model, build + ZIP + market publishing rules, and the shipped examples. Use for scaffolding a plugin package, choosing which resource type to contribute, writing or reviewing a manifest, picking or debugging a permission, taking over a file type, giving the agent new tools, calling host capabilities, or fixing a plugin that builds, installs, activates, renders, or publishes wrong. The detailed material lives in references/ next to this file.
+description: Author, package, and debug NextCoWork plugins — the single entry point. Covers the manifest (package.json) and the permission model with per-call capability gates, every contribution point (commands, menus, keybindings, custom editors, views, web apps, agent tools, card views, configuration, bundled Skills) including which install cleanly but do nothing yet, the ncw:doc document channel, result / live-progress / interactive cards, the nextcowork runtime API namespaces, the sandbox and isolation model, and build + ZIP + market publishing rules. Use for scaffolding a plugin, choosing what to contribute, writing or reviewing a manifest, picking or debugging a permission, taking over a file type, bundling Skills with a plugin, giving the agent new tools, or fixing a plugin that builds, installs, activates, renders, or publishes wrong. Detailed material lives in references/ next to this file.
 ---
 
 # NextCoWork Plugin Builder
@@ -13,6 +13,7 @@ The details live in `references/`, next to this `SKILL.md`. Read the file that m
 
 | Task | Reference |
 |---|---|
+| **Every `contributes` key, what it does, and which ones do nothing yet** | `references/contribution-points.md` |
 | Manifest fields, the permission model, what needs which capability | `references/manifest-permissions.md` |
 | Method → permission, one row per RPC | `references/permission-map.md` |
 | Taking over file types (custom editors), views, the document channel | `references/custom-editors.md` |

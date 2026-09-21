@@ -273,10 +273,17 @@ describe('注册表完整性', () => {
     'Skill',
     'web_search',
     'Task',
+    'AskUserQuestion',
+    'ProposeGoal',
+    'ExitPlanMode',
     'ListScheduledTasks',
     'CreateScheduledTask',
     'UpdateScheduledTask',
-    'DeleteScheduledTask'
+    'DeleteScheduledTask',
+    // 可视化那一对。`visualize_read_me` 走 `external`、`visualize_show_widget`
+    // 是 `widget` 形态 —— 后者是**内置专用**的形态,见 `ToolShape` 上那段说明。
+    'visualize_read_me',
+    'visualize_show_widget'
   ]
 
   it('每个内置工具都在注册表里', () => {

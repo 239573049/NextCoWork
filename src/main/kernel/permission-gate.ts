@@ -72,7 +72,18 @@ export const TOOLS_NEEDING_NETWORK: ReadonlySet<string> = new Set([
   'browser_press',
   'browser_select',
   'browser_cua_click',
-  'browser_cua_drag'
+  'browser_cua_drag',
+  /*
+    `visualize_show_widget` 自己一个字节都不出网 —— 出网的是**它产出的那张卡片**:
+    widget 里的 `<script src="https://cdn…">` 是规范正文推荐的常规写法
+    (`visualize-guidelines/charts.ts` 让模型去拉 Chart.js)。
+
+    ★ 它本来就在 `visualize.ts` 里申报了 `needsNetwork: true`,这里再列一遍是
+    刻意的双保险:那张表管的是"字段说 false 也得算联网",于是谁哪天把那个
+    字段改回去、或者有人复制它去写一个新工具时抄漏了,这颗药丸还管得住。
+    把这条删掉不会有任何症状 —— 直到用户关掉联网、却仍然从这里出网。
+  */
+  'visualize_show_widget'
 ])
 
 /** 给测试和诊断用:把一次判定压成一行人话。 */

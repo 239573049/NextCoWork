@@ -4,6 +4,7 @@ import type { ContextCheckpoint } from '../../../../shared/agent/context-managem
 import type { LiveBlock, SubagentState } from '../../../../shared/agent/transcript'
 import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import type { TimelineItem } from '../../../../shared/domain/tool-timeline'
+import { MAX_PARTIAL_JSON_CHARS, parsePartialJson } from './partial-json'
 import type { TurnPrompt } from './TurnActions'
 
 export type AssistantBlock = {
@@ -378,6 +379,20 @@ export function isAssistantTextBlock(block: AssistantBlock): boolean {
   return block.liveBlock?.kind === 'text' && block.liveBlock.text.trim() !== ''
 }
 
+/**
+ * 半截入参里的 `description`(`Task` 那句「3-5 个词的说明」)。
+ *
+ * 流式阶段 live 块里装的是**原始 JSON 前缀字符串**,所以这里先过一遍容错解析;
+ * 还没写到 description 就返回 undefined —— 卡片自己有兜底标题,
+ * 宁可先显示那句通用的,也不摆一段半个词的说明。
+ */
+function descriptionOf(source: string): string | undefined {
+  const parsed = parsePartialJson(source.slice(0, MAX_PARTIAL_JSON_CHARS))
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const description = (parsed as Record<string, unknown>)['description']
+  return typeof description === 'string' && description !== '' ? description : undefined
+}
+
 /** Keep prose, images and errors in place; only adjacent process blocks share a timeline. */
 export function assistantSegments(
   blocks: readonly AssistantBlock[],
@@ -409,9 +424,22 @@ export function assistantSegments(
       item = { key, kind: 'thinking', text: liveBlock.text, streaming: block.streaming }
     } else if (liveBlock?.kind === 'tool_use') {
       const liveCallId = liveBlock.callId
-      if (liveBlock.name?.toLowerCase() === 'task' && liveCallId !== undefined && subagents[liveCallId] !== undefined) {
-        item = { key: liveCallId, kind: 'subagent', callId: liveCallId,
-          summary: subagents[liveCallId]?.description, state: subagents[liveCallId] }
+      /*
+        需求：`Task` 的参数还在流的那几秒里就用**子代理卡片本体**渲染,而不是
+        先画一张通用工具卡、等 `subagent_start` 到了再整个换成另一种卡片 ——
+        换的那一下恰好发生在用户盯着看的时刻,而两种卡片高度、图标、布局都不同。
+        状态还没有时打上 `pending`:没有这个标记的话卡片会走 `state` 缺省那条路,
+        显示成「已完成」(见 `SubagentNode`)。
+      */
+      if (liveBlock.name?.toLowerCase() === 'task' && liveCallId !== undefined) {
+        const state = subagents[liveCallId]
+        item = {
+          key: liveCallId,
+          kind: 'subagent',
+          callId: liveCallId,
+          summary: state?.description ?? descriptionOf(liveBlock.text),
+          ...(state === undefined ? { pending: true } : { state })
+        }
       } else {
         item = { key: liveCallId ?? key, kind: 'tool', callId: liveCallId,
           name: liveBlock.name ?? fallbackToolName, input: liveBlock.text }

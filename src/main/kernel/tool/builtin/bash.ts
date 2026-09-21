@@ -26,7 +26,7 @@
  */
 import { z } from 'zod'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
-import { clampWithEllipsis } from '../../text'
+import { clampWithEllipsis, stripAnsi } from '../../text'
 import { isAbortError } from '../../abort'
 import { defineTool } from '../define'
 import type { ToolRegistration } from '../registry'
@@ -68,9 +68,15 @@ const BashInput = z.object({
     )
 })
 
-/** 一段输出的呈现:空的时候要说「空」,不能给一段静默的空白让模型以为没读到。 */
+/**
+ * 一段输出的呈现:空的时候要说「空」,不能给一段静默的空白让模型以为没读到。
+ *
+ * ★ 剥 ANSI 在**截断之前**:很多 CLI 在非 TTY 下照样着色(vitest 用的 picocolors
+ * 在 win32 上无条件开色),留着的话那 30K 预算会被转义序列吃掉一大截,
+ * 而界面上 ESC 不可见,只看得到满屏 `[32m`。
+ */
 function section(title: string, body: string): string {
-  const t = body.trim()
+  const t = stripAnsi(body).trim()
   return t === '' ? '' : `<${title}>\n${clampWithEllipsis(t, MAX_OUTPUT_CHARS)}\n</${title}>`
 }
 

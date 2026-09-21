@@ -1,6 +1,6 @@
 {
   "name": "@aidotnet/plugin-cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Build, package and publish NextCoWork plugins.",
   "license": "MIT",
   "type": "module",

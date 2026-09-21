@@ -160,6 +160,20 @@ export interface RunSnapshot {
   children: string[]
 }
 
+/**
+ * 「现在还有哪些顶层 run 活着」的索引项。
+ *
+ * 需求:渲染层的三处运行中指示(外层工作区 Tab、内层对话 Tab、侧边栏会话行)
+ * 必须与主进程 RunRegistry 一致。bootstrap 的首帧和 `agent:activeRuns` 的后续广播
+ * 说的是同一件事,所以**共用这一个类型**——两边各写一份的话,迟早只有一边会加字段。
+ */
+export interface ActiveRunEntry {
+  runId: string
+  sessionId: string
+  workspaceId: string
+  status: RunStatus
+}
+
 /** run 结束后不再有事件,UI 可以据此收掉 loading 态。 */
 export function isTerminal(s: RunStatus): boolean {
   return s !== 'running'

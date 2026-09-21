@@ -24,7 +24,23 @@ import { presenterOf, type ToolShape } from './tool-presenter'
 export type TimelineItem =
   | { key: string; kind: 'thinking'; text: string; streaming: boolean }
   | { key: string; kind: 'tool'; callId: string | undefined; name: string; input: unknown }
-  | { key: string; kind: 'subagent'; callId: string; summary: string | undefined; state?: SubagentState }
+  | {
+      key: string
+      kind: 'subagent'
+      callId: string
+      summary: string | undefined
+      state?: SubagentState
+      /**
+       * 子代理**还没派出去** —— `Task` 的参数还在流,`subagent_start` 没到。
+       *
+       * 需求:这段时间里卡片要长成子代理卡的样子(而不是先画一张通用工具卡、
+       * 等状态到了再整个换掉),但它不能显示成「已完成」——
+       * `state` 缺省时卡片的兜底状态正是 done,见 `parts.tsx` 的 `SubagentNode`。
+       * 不能用「state 为空」代替这个标记:**旧转录**里的子代理块同样没有 state,
+       * 而它们早就跑完了。
+       */
+      pending?: boolean
+    }
 
 /** 可见的最近工具行数。理由见设计文档 §5.2:约 130px,不把正文挤出视口。 */
 export const TOOL_WINDOW_SIZE = 3
@@ -209,6 +225,8 @@ export function groupTitle(
     command: (c) => (c === 1 ? '执行了 1 条命令' : `执行了 ${String(c)} 条命令`),
     network: (c) => (c === 1 ? '访问了 1 个网络资源' : `访问了 ${String(c)} 个网络资源`),
     orchestration: (c) => (c === 1 ? '调度了 1 项' : `调度了 ${String(c)} 项`),
+    interaction: (c) => (c === 1 ? '等你表态 1 次' : `等你表态 ${String(c)} 次`),
+    widget: (c) => (c === 1 ? '画了 1 张图' : `画了 ${String(c)} 张图`),
     external: (c) => (c === 1 ? '调用了 1 个外部工具' : `调用了 ${String(c)} 个外部工具`)
   }
   return LABEL[shape](n)

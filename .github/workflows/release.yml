@@ -130,11 +130,46 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Check macOS signing credentials
+        # 需求：在打包前把缺失的 secret 一次性点名。
+        # 原先 Windows 与 macOS 都故意不签名，因为当时两个平台都没有证书；现在 macOS 有
+        # Developer ID 了，不签名的包既过不了 Gatekeeper，也过不了 Squirrel.Mac 的
+        # designated requirement 校验(更新包下载成功但装不上，见 src/main/update/update-service.ts)。
+        # 而"签名成功、公证被静默跳过"是最贵的失败：CI 全绿，用户拿到的包依旧报警。
+        # 不满足会怎样：构建日志里只有一行 "skipped macOS notarization"，没人会注意到。
+        # 拆除条件：改用 App Store Connect API Key 公证时，把下面的名字换成 APPLE_API_KEY 那三个。
+        if: matrix.platform == 'macos'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=''
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing"
+            exit 1
+          fi
+          echo "macOS signing credentials present."
+
       - name: Build application
         run: npm run dist:ci -- --${{ matrix.arch }}
         env:
-          # Unsigned Windows and macOS artifacts are intentional for this release flow.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+          # ★ 这一行必须对 macOS 打开。关掉它时 findIdentity() 在没有 CSC_NAME 的情况下直接
+          # 返回 null，macPackager 随即 return false —— 签名和公证会一起静默跳过，
+          # 连 CSC_LINK 都不会被读。Windows / Linux 仍然保持未签名(本流程的既有决定)。
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'macos' && 'true' || 'false' }}
+          # 只在 macOS 行注入证书。CSC_LINK 不能设成全局：Windows 上 getCscLink() 会退回到
+          # CSC_LINK(platformPackager)，拿 mac 的 p12 去签 exe 必然失败。
+          CSC_LINK: ${{ matrix.platform == 'macos' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'macos' && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'macos' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'macos' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'macos' && secrets.APPLE_TEAM_ID || '' }}
 
       - name: Upload platform assets to Release
         if: needs.prepare.outputs.publish == 'true'

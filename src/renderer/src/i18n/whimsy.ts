@@ -72,9 +72,19 @@ export const whimsyZh: Record<WhimsyBucket, Whimsy> = {
     '派活中…', '摇人中…', '点将中…', '分头行动…', '叫帮手…', '分工中…',
     '远程指挥…', '盯梢中…', '排兵布阵…', '等回话…'
   ],
+  // 等用户表态:这一档里 Agent 其实**不在干活**,词得说清是在等人,不是在忙
+  interaction: [
+    '等你一句…', '等你拍板…', '球在你那…', '等你点头…', '等你选…', '候着呢…'
+  ],
   external: [
     '喊外援…', '对接中…', '借力中…', '走外线…', '联络中…', '接上了…',
     '跨界调用…', '递话中…', '搭桥中…'
+  ],
+  // 画图:这一档用户**看得见东西在长**,所以词往"手上在做"上靠,
+  // 而不是"在想"(那是 waiting/reasoning 的活)
+  widget: [
+    '画图中…', '勾勒中…', '描线中…', '配色中…', '布局中…', '打样中…',
+    '排布中…', '上色中…'
   ],
   // 兜底的兜底:知道在跑,但说不出在跑什么(参数还在流、工具还没开跑)
   working: [
@@ -201,9 +211,16 @@ export const whimsyEn: Record<WhimsyBucket, Whimsy> = {
     'Delegating…', 'Dispatching…', 'Rallying…', 'Herding…', 'Deputizing…',
     'Marshalling…', 'Checking in…', 'Handing off…', 'Regrouping…'
   ],
+  interaction: [
+    'Your call…', 'Over to you…', 'Waiting on you', 'Asking you…', 'Your turn…'
+  ],
   external: [
     'Calling out…', 'Bridging…', 'Relaying…', 'Plugging in…', 'Negotiating…',
     'Patching in…', 'Hailing…', 'Linking up…'
+  ],
+  widget: [
+    'Sketching…', 'Drawing…', 'Plotting…', 'Charting…', 'Composing…',
+    'Rendering…', 'Coloring…', 'Diagramming…'
   ],
   working: [
     'Working…', 'Wrangling…', 'Hustling…', 'Cranking…', 'Grinding…', 'Wrenching…',

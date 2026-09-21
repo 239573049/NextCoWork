@@ -60,6 +60,8 @@ describe('联网闸 · 真的内置工具', () => {
       'browser_press',
       'browser_select',
       'browser_type',
+      // 见 `TOOLS_NEEDING_NETWORK`:它产出的 widget 会去拉 CDN
+      'visualize_show_widget',
       'web_search'
     ])
   })

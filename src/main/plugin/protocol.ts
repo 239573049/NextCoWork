@@ -95,8 +95,14 @@ function csp(nonce: string): string {
  * 同样是一片空白,但报的是 frame-ancestors。所以两处必须一起改。
  *
  * 这里返回 origin 而不是写死端口:dev 端口是 vite 分配的,写死等于换台机器就坏。
+ *
+ * ★ **导出是因为它现在有两个使用者**:插件视图与内置 widget 的外壳
+ * (`net/widget-protocol.ts`)。两边的 `frame-ancestors` 必须给出同一个答案 ——
+ * 而这个答案依赖 `ELECTRON_RENDERER_URL` 与 `loadFile` 的分支,复制一份必然会
+ * 在有人改窗口加载方式时只改一处。剩下那一处症状同样是"一片空白",报的是
+ * frame-ancestors,和当初那个 `ncw://main` 的坑一模一样。
  */
-function mainWindowOrigin(): string {
+export function mainWindowOrigin(): string {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl !== undefined && devUrl !== '') {
     try {

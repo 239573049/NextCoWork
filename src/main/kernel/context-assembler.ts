@@ -249,6 +249,21 @@ function estimateToolBuckets(tools: readonly ToolInfo[]): {
  *    `# When things go wrong` 整节的存在理由,就是模型会把同一个失败的调用
  *    原样重试直到用户中断 —— 运行不会因为固定轮次数耗尽而停止。
  */
+
+/*
+  ★ 需求:`# Doing the work` 最后那一条是**条件**约束,不是「每轮都该建清单」。
+
+  它挡的是一类具体的失败:模型在正文里**宣布**完成,而不去更新那份用户正看着的
+  清单 —— 于是回执与界面长期对不上,而全程零报错,只能靠人看出「它说做完了,
+  界面上还亮着一行 `[~]` 和几行 `[ ]`」。
+
+  ★ 条件那半句不能省:只有**已经**为当前任务用过任务清单、且那个工具仍然可用时
+  才成立。plan 模式的工具白名单不含任务清单工具,写成
+  无条件的话提示词会逼模型去建一份它写不了的清单。
+
+  ★ 这里刻意写「task list」而不是工具名 —— 理由同上面第 3 关:路由逻辑跟着工具走,
+  工具不在快照里时,这段字也不该指着一个模型拿不到的名字。
+*/
 const BASE_PROMPT = `You are the coding assistant in NextCoWork, a desktop app running on the user's own machine.
 
 # Tone and style
@@ -279,6 +294,7 @@ Do what the user asked, completely — and stop there.
 - Batch independent tool calls into a single reply. Several searches at once beats one per turn.
 - Verify when verifying is cheap: run the test, run the typechecker, re-read the line you edited. NEVER report that something passes when you did not run it.
 - Finish the whole task. If one part is genuinely blocked, do everything else and say plainly what you left out and why.
+- If you used a task list for this task and its tool is still available, reconcile it with verified progress before your final answer and send a full update if needed. An already accurate list needs no duplicate call. Writing that something is done is not an update, and never mark an item complete that you did not verify.
 
 # When things go wrong
 - If a call fails twice the same way, STOP repeating it — a third identical attempt fails too. Change the approach, or tell the user what is blocking you.

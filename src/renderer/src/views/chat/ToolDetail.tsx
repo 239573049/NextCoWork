@@ -17,6 +17,10 @@ import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import { DiffBlock } from "./DiffView";
 import { CardRenderer } from "./CardRenderer";
+import { InteractionPreviewBlock } from "./InteractionPreviewBlock";
+import { TaskChecklist } from "./TaskChecklist";
+import { WidgetDetail } from "./WidgetDetail";
+import { previewTodos } from "./todo-preview";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -102,8 +106,8 @@ function Truncated({ omitted }: { omitted: number }): ReactNode {
   );
 }
 
-/** 结果块 —— 八个渲染器里有七个都要用,所以抽出来。 */
-function OutputBlock({
+/** 结果块 —— 八个渲染器里有七个都要用,所以抽出来。`WidgetDetail` 用的是它。 */
+export function OutputBlock({
   output,
   label,
   isError = false,
@@ -148,6 +152,15 @@ export interface DetailProps {
   input: unknown;
   output: ToolOutput | undefined;
   isError: boolean;
+  /**
+   * 转录里的工具名(externalName)。
+   *
+   * 需求:`interaction` 这一档的三个工具**入参形状各不相同**(题目数组 / 一句条件 /
+   * 空对象),而形态类只分到「这是一次等你表态」为止。再往下分到具体工具的那一步
+   * 由 `interaction-preview.ts` 的表完成,所以这里必须把名字传下去。
+   * 其余渲染器用不到它 —— 别拿它在别处开按工具名分叉的口子,那正是注册表要消掉的东西。
+   */
+  toolName?: string;
 }
 
 /** read:路径单独一行,输出当代码预览(Read 的输出本身已带 `cat -n` 行号) */
@@ -170,6 +183,12 @@ function ReadDetail({ input, output, isError }: DetailProps): ReactNode {
 /**
  * mutate:**入参里的 `content` / `new_string` 才是重点**,而它们正是现状
  * JSON 化之后最不可读的部分。这里单独拎出来按原文渲染(保留换行)。
+ *
+ * ★ **新文本一律走 `DiffBlock`,参数还在流的时候也一样。** 判据原先是
+ * 「old 和 new 都到齐」,于是一次 Edit 在流式阶段先显示成两块纯文本,
+ * `new_string` 收尾的那一刻整块换成 diff —— 同一件事两套画法,而切换恰好发生在
+ * 用户正盯着看的时刻。只有新文本时(Write 的 `content`、或 new 先到)就是一份
+ * 「全是新增」的 diff,与改动审查里新建文件的画法一致。
  */
 function MutateDetail({ input, output, isError }: DetailProps): ReactNode {
   const { t } = useI18n();
@@ -181,30 +200,18 @@ function MutateDetail({ input, output, isError }: DetailProps): ReactNode {
   return (
     <>
       {path !== "" && <PathLine path={path} />}
-      {oldStr !== "" && newStr !== "" ? (
-        // 两侧都在:统一 diff,词级高亮改动
+      {newStr !== "" && (
         <DiffBlock oldStr={oldStr} newStr={newStr} label={t("chat.tool.change")} />
-      ) : (
-        <>
-          {oldStr !== "" && (
-            <Labeled label={t("chat.tool.before")}>
-              {clipLines(oldStr, 12).text}
-              <Truncated omitted={clipLines(oldStr, 12).omitted} />
-            </Labeled>
-          )}
-          {newStr !== "" && (
-            <Labeled label={t("chat.tool.after")}>
-              {clipLines(newStr, 12).text}
-              <Truncated omitted={clipLines(newStr, 12).omitted} />
-            </Labeled>
-          )}
-        </>
+      )}
+      {/* new 还没开始流:此刻只有「要被换掉的那一段」,没有第二侧可对照 */}
+      {newStr === "" && oldStr !== "" && (
+        <Labeled label={t("chat.tool.before")}>
+          {clipLines(oldStr, 12).text}
+          <Truncated omitted={clipLines(oldStr, 12).omitted} />
+        </Labeled>
       )}
       {content !== "" && (
-        <Labeled label={t("chat.tool.writeContent")}>
-          {clipLines(content, 20).text}
-          <Truncated omitted={clipLines(content, 20).omitted} />
-        </Labeled>
+        <DiffBlock oldStr="" newStr={content} label={t("chat.tool.writeContent")} />
       )}
       <OutputBlock output={output} isError={isError} maxLines={12} />
     </>
@@ -291,15 +298,15 @@ function NetworkDetail({ input, output, isError }: DetailProps): ReactNode {
   );
 }
 
-const TODO_MARK: Record<string, string> = {
-  completed: "✓",
-  in_progress: "▸",
-  pending: "○",
-};
-
 /**
  * orchestration:TodoWrite 的 `todos` 是**结构化数据**,渲染成清单比 JSON
  * 有用得多 —— 这是用户在整个转录里唯一会反复回看的一份状态。
+ *
+ * ★ **清单本体就是输入框上方那张 `TaskChecklist`,不是另画的一份。**
+ * 这里原本有一套自绘的 ○▸✓ 列表,于是同一份 todos 在同一屏里有两种长相
+ * (卡片里是带删除线的文本行,输入框上方是带进度环和 Spinner 的清单),
+ * 改一处必漏一处。半截入参的收窄规则在 `todo-preview.ts`。
+ * 外层定位由 `className` 抹掉 —— 那套居中/限宽是输入框上方那个位置的需求。
  */
 function OrchestrationDetail({
   input,
@@ -307,37 +314,11 @@ function OrchestrationDetail({
   isError,
 }: DetailProps): ReactNode {
   const { t } = useI18n();
-  const todos = field(input, "todos");
-  if (Array.isArray(todos) && todos.length > 0) {
+  const todos = previewTodos(input);
+  if (todos.length > 0) {
     return (
       <>
-        <ul className="scroll-thin mb-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto pr-1">
-          {todos.map((t, i) => {
-            const item = (
-              typeof t === "object" && t !== null ? t : {}
-            ) as Record<string, unknown>;
-            const status =
-              typeof item.status === "string" ? item.status : "pending";
-            const content =
-              typeof item.content === "string" ? item.content : "";
-            return (
-              <li
-                key={i}
-                className={cn(
-                  "flex items-start gap-1.5 text-[12px] leading-relaxed",
-                  status === "completed" && "text-fg-faint line-through",
-                  status === "in_progress" && "text-fg",
-                  status === "pending" && "text-fg-muted",
-                )}
-              >
-                <span className="shrink-0 font-mono">
-                  {TODO_MARK[status] ?? "○"}
-                </span>
-                <span className="min-w-0 flex-1">{content}</span>
-              </li>
-            );
-          })}
-        </ul>
+        <TaskChecklist todos={todos} className="max-w-none px-0 pb-1.5" />
         <OutputBlock output={output} isError={isError} maxLines={6} />
       </>
     );
@@ -371,6 +352,31 @@ function ReasoningDetail({ output }: DetailProps): ReactNode {
     <p className="selectable text-[12.5px] leading-relaxed whitespace-pre-wrap text-fg-faint">
       {output.content}
     </p>
+  );
+}
+
+/**
+ * interaction:入参**就是给人读的题面**,所以整块按题面渲染,而且在参数还在流的
+ * 时候就渲染 —— 见 `InteractionPreviewBlock` 与 `interaction-preview.ts`。
+ *
+ * 结果块照样保留:答完之后那段 JSON 是「用户当时选了什么」的唯一记录,
+ * 而历史转录里那张可作答的卡片早就不在了。
+ */
+function InteractionDetail({
+  input,
+  output,
+  isError,
+  toolName,
+}: DetailProps): ReactNode {
+  return (
+    <>
+      <InteractionPreviewBlock
+        toolName={toolName}
+        input={input}
+        live={output === undefined}
+      />
+      <OutputBlock output={output} isError={isError} maxLines={20} />
+    </>
   );
 }
 
@@ -420,6 +426,13 @@ export const DETAIL_RENDERERS: Record<
   command: CommandDetail,
   network: NetworkDetail,
   orchestration: OrchestrationDetail,
+  interaction: InteractionDetail,
+  /*
+    widget:生成期由它渲染半截 HTML;跑完之后 `ToolDetail` 会先被 `card` 那条
+    短路接走(`if (card !== undefined)`),走 `CardRenderer` 的 widget 分支。
+    两个分支共用同一个 `WidgetFrame` —— 见 `WidgetDetail.tsx` 的文件头。
+  */
+  widget: WidgetDetail,
   external: ExternalDetail,
 };
 
@@ -433,8 +446,11 @@ export function ToolDetail({
   card,
 }: {
   shape: ToolShape;
-  /** 工具的 externalName —— 仅 frame 卡片反查 pluginId 时用 */
-  toolName?: string;
+  /*
+    `toolName` 原先只为 frame 卡片反查 pluginId 而存在,现在同时被 `interaction`
+    渲染器用来分派题面投影 —— 所以它移进了 `DetailProps`(见那里的注释),
+    不再在这里单独声明。
+  */
   callId?: string;
   /**
    * 要渲染的卡片。调用方决定优先级:结果快照(`output.card`)或运行中的实时卡片
@@ -447,5 +463,12 @@ export function ToolDetail({
     return <CardRenderer card={card} toolName={toolName} callId={callId} />;
   }
   const Renderer = DETAIL_RENDERERS[shape];
-  return <Renderer input={input} output={output} isError={isError} />;
+  return (
+    <Renderer
+      input={input}
+      output={output}
+      isError={isError}
+      toolName={toolName}
+    />
+  );
 }

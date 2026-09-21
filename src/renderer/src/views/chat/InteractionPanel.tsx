@@ -113,7 +113,8 @@ const FIELD = [
  * 现在动作由主体里的行承担,底部只剩「退出」和键盘提示。
  */
 function CardShell({
-  kind, title, header, children, errorKey, busy, onSubmit, onKeyDown, bodyClassName, footer, takeFocus = false
+  kind, title, header, children, errorKey, busy, onSubmit, onKeyDown, bodyClassName, footer, takeFocus = false,
+  preview = false
 }: {
   kind: PendingInteraction['kind']
   title: string
@@ -135,16 +136,29 @@ function CardShell({
    * ★ **只在用户没在打字时接**:写到一半被抢走焦点,比没有快捷键糟得多。
    */
   takeFocus?: boolean
+  /**
+   * 这张卡是**工具卡片里的只读预览**(参数还在流),不是待决表里那张可作答的。
+   *
+   * ★ 只改两件事,别让它长成第二套外壳:
+   * 1. **换掉探针属性。** QA 脚本按 `[data-interaction-kind=ask_user]` 找可作答的卡
+   *    并往里填字(`scripts/agent-protocol-qa.mjs:238`);预览在 DOM 里排在它前面,
+   *    带同一套属性的话 `querySelector` 会命中预览,而预览的输入框是 disabled 的 ——
+   *    表现为脚本卡在「填不进去」,却看不出选错了元素。
+   * 2. **不抢焦点。** 用户可能正在输入框里打字,而预览是模型每来一个 token 就重渲一次的。
+   */
+  preview?: boolean
 }): ReactNode {
   const { t } = useI18n()
   const form = useRef<HTMLFormElement>(null)
   useEffect(() => {
-    if (!takeFocus || isEditableTarget(document.activeElement)) return
+    if (!takeFocus || preview || isEditableTarget(document.activeElement)) return
     form.current?.focus({ preventScroll: true })
-  }, [takeFocus])
+  }, [takeFocus, preview])
   return (
-    <form ref={form} tabIndex={takeFocus ? -1 : undefined}
-      onSubmit={onSubmit} onKeyDown={onKeyDown} data-testid="agent-interaction" data-interaction-kind={kind}
+    <form ref={form} tabIndex={takeFocus && !preview ? -1 : undefined}
+      onSubmit={onSubmit} onKeyDown={onKeyDown}
+      data-testid={preview ? 'agent-interaction-preview' : 'agent-interaction'}
+      {...(preview ? { 'data-preview-kind': kind } : { 'data-interaction-kind': kind })}
       className="mb-2 overflow-hidden rounded-card border border-stroke bg-surface-raised/80 text-fg outline-none">
       {/* 需求：审批卡用一块中性表面承载内容，把强调色留给选择与主动作；
           标题和多题导航固定在上方，切题或展开输入区时不能一起滚走。 */}
@@ -190,13 +204,21 @@ function GoalProposalCard({ interaction, onAnswered }: {
   const decide = (approved: boolean): void => respond({ id: interaction.id, kind: 'goal_proposal', approved })
   return <CardShell kind="goal_proposal" title={t('goal.proposal.title')} errorKey={errorKey} busy={busy}
     onSubmit={(event) => event.preventDefault()} footer={<KeyboardHint show={!busy} />}>
-    <p className="mb-2 text-[12px] text-fg-muted">{t('goal.proposal.body')}</p>
-    <p className="selectable mb-2 whitespace-pre-wrap break-words text-[13px]">{interaction.condition}</p>
+    <GoalProposalBody condition={interaction.condition} />
     <ActionRows disabled={busy} ariaLabel={t('goal.proposal.title')} rows={[
       { value: 'approve', label: t('goal.proposal.approve') },
       { value: 'decline', label: t('goal.proposal.decline') }
     ]} onRun={(value) => decide(value === 'approve')} />
   </CardShell>
+}
+
+/** 提案正文。抽出来只为一件事:预览和待决卡读的是同一段版式(见 `GoalProposalPreviewCard`)。 */
+function GoalProposalBody({ condition }: { condition: string }): ReactNode {
+  const { t } = useI18n()
+  return <>
+    <p className="mb-2 text-[12px] text-fg-muted">{t('goal.proposal.body')}</p>
+    <p className="selectable mb-2 whitespace-pre-wrap break-words text-[13px]">{condition}</p>
+  </>
 }
 
 function AskUserCard({ interaction, onAnswered }: {
@@ -274,21 +296,8 @@ function AskUserCard({ interaction, onAnswered }: {
         submit()
       }}
       header={multi ? (
-        // 题头可能长,窄窗口下让它横向滚,而不是把卡片撑破
-        <div className="scroll-thin overflow-x-auto pb-0.5">
-          <Segmented
-            size="sm"
-            disabled={busy}
-            label={t('agent.interaction.question')}
-            value={String(active)}
-            onChange={(value) => setActive(Number(value))}
-            options={questions.map((q, index) => ({
-              value: String(index),
-              // 打钩的那道已经答过 —— 切换条同时是进度表
-              label: (answers[index] ?? []).length > 0 ? `✓ ${q.header}` : q.header
-            }))}
-          />
-        </div>
+        <QuestionTabs questions={questions} answers={answers} active={active} disabled={busy}
+          onChange={setActive} />
       ) : undefined}
       errorKey={errorKey}
       busy={busy}
@@ -326,6 +335,104 @@ function AskUserCard({ interaction, onAnswered }: {
         onTyped={(next) => setDraft((d) => ({ ...d, typed: d.typed.map((v, i) => (i === active ? next : v)) }))}
         t={t}
       />
+    </CardShell>
+  )
+}
+
+/**
+ * 多题时标题下面那条切换条。
+ *
+ * 抽出来是因为**只读预览也要用它**:题是一道一道流出来的,不给切换条的话
+ * 后面几道在写完之前根本看不见 —— 而「一共会问我几件事」恰恰是这张预览的价值。
+ */
+function QuestionTabs({ questions, answers, active, disabled, onChange }: {
+  questions: readonly AskUserQuestion[]
+  /** 与 `questions` 对齐的答案。预览传全空数组 —— 没答过,也就没有钩。 */
+  answers: readonly (readonly string[])[]
+  active: number
+  disabled: boolean
+  onChange: (index: number) => void
+}): ReactNode {
+  const { t } = useI18n()
+  // 题头可能长,窄窗口下让它横向滚,而不是把卡片撑破
+  return (
+    <div className="scroll-thin overflow-x-auto pb-0.5">
+      <Segmented
+        size="sm"
+        disabled={disabled}
+        label={t('agent.interaction.question')}
+        value={String(active)}
+        onChange={(value) => onChange(Number(value))}
+        options={questions.map((question, index) => ({
+          value: String(index),
+          // 打钩的那道已经答过 —— 切换条同时是进度表
+          label: (answers[index] ?? []).length > 0 ? `✓ ${question.header}` : question.header
+        }))}
+      />
+    </div>
+  )
+}
+
+/**
+ * ★ **工具卡片里那张只读的问题卡 —— 与上面那张可作答的是同一套组件。**
+ *
+ * 需求:模型写 `AskUserQuestion` 的参数要好几秒,这几秒里用户应该已经能读到题面,
+ * 只是还不能答(答案无处可交:此刻还没有 `interaction.id`)。
+ *
+ * ★ **不许在这里另画一套版式。** 外壳、切换条、题面全部复用 `CardShell` /
+ * `QuestionTabs` / `QuestionBlock`,否则题面从预览换成可作答的那一瞬间会跳一下,
+ * 而那正是用户盯着看的时刻;两套版式之后也必然各自演化,改一处漏一处。
+ *
+ * ★ **切题可以点,作答不能点。** 切换条只是翻页,点不出任何会失败的承诺;
+ * 选项和输入框走 `busy` 那条路全部 disabled —— 与「正在提交中」共用同一种表达。
+ */
+export function AskUserPreviewCard({ questions }: { questions: readonly AskUserQuestion[] }): ReactNode {
+  const { t } = useI18n()
+  const [active, setActive] = useState(0)
+  // 题在流,数组会变长也可能整体重来;夹住下标,免得越界渲染成一张空卡
+  const index = Math.min(active, questions.length - 1)
+  const question = questions[index]
+  if (question === undefined) return null
+  const empty = questions.map(() => [])
+  return (
+    <CardShell
+      kind="ask_user"
+      preview
+      title={t('agent.interaction.question')}
+      bodyClassName="max-h-[46vh]"
+      errorKey={null}
+      busy={false}
+      onSubmit={(event) => event.preventDefault()}
+      header={questions.length > 1
+        ? <QuestionTabs questions={questions} answers={empty} active={index} disabled={false} onChange={setActive} />
+        : undefined}
+      footer={<span className="text-[11px] text-fg-faint">{t('agent.interaction.previewOnly')}</span>}
+    >
+      <QuestionBlock
+        key={index}
+        question={question}
+        index={index}
+        options={choiceOptions(question, t('agent.interaction.other'))}
+        plain={question.options.length === 0}
+        busy
+        picked={[]}
+        typed=""
+        onPick={() => {}}
+        onTyped={() => {}}
+        t={t}
+      />
+    </CardShell>
+  )
+}
+
+/** 目标提案的只读预览 —— 与 `GoalProposalCard` 同一套版式,理由见上面那张。 */
+export function GoalProposalPreviewCard({ condition }: { condition: string }): ReactNode {
+  const { t } = useI18n()
+  return (
+    <CardShell kind="goal_proposal" preview title={t('goal.proposal.title')} errorKey={null} busy={false}
+      onSubmit={(event) => event.preventDefault()}
+      footer={<span className="text-[11px] text-fg-faint">{t('agent.interaction.previewOnly')}</span>}>
+      <GoalProposalBody condition={condition} />
     </CardShell>
   )
 }

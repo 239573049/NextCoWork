@@ -17,6 +17,12 @@
  * `main/index.ts` 建它、启动它、读它的最终状态;`ipc/index.ts` 的四个 handler
  * 要用同一个实例。放在模块级变量里是这两者之间最短的一条线 —— 而它**不需要**
  * 生命周期管理:进程内只有一个闸门,它自己就是单例。
+ *
+ * ## 它还兼着「主进程能不能应答 IPC」这一位
+ *
+ * 闸门的放行判据除了「没有要迁移的东西」,还有「`registerIpc()` 跑完了」——
+ * 后者的唯一真源在这里(`announceIpcReady()`),因为它的消费者只有渲染层,
+ * 而渲染层在首屏之前能问到的只有这一个频道。见 `MigrationState.ipcReady`。
  */
 import { shell } from 'electron'
 import type { MigrationState } from '../../shared/domain/data-migration'
@@ -26,6 +32,52 @@ import { windows } from '../window/registry'
 
 let gate: MigrationGate | null = null
 let dataChangedListener: (() => void) | null = null
+
+/**
+ * 主进程是否已经把全部 handler 装上了(`registerIpc()` 跑完)。
+ *
+ * 需求:渲染层不能只凭闸门的 `idle` 就挂 App。建窗被提到了 `registerIpc()` **之前**
+ * (窗口必须早于闸门,闸门必须早于 `openDatabase()`,见 `main/index.ts`),而闸门检查完
+ * 也很快就播 `idle` —— 渲染层那一刻挂上 App,握手的第一个 invoke 就撞上还没登记的
+ * handler,首屏变成「首屏握手失败: No handler registered for 'app:getBootstrap'」。
+ *
+ * ★ 它必须是**模块级**的,不能只靠那一次推送:窗口可能起得比推送晚(渲染层加载慢),
+ * 那一份 `dataMigration:progress` 它根本没订阅上,只能回头拉一次
+ * `dataMigration:getState` —— 而这一条恰好是全应用在闸门期间唯一能应答的几条之一,
+ * 所以「主进程还不能应答」这件事只能从这里回答。
+ */
+let ipcReady = false
+
+/**
+ * 播给渲染层的那一份:闸门的状态 + 主进程能不能应答。
+ *
+ * ★ **每一个**流出去的状态都要过这里。漏一处,渲染层拿到的就是闸门那份
+ * `ipcReady: false`,表现是「闸门没有要迁移的东西,但界面一直空白」——
+ * 比握手失败更难查,因为它一个错都不报。
+ */
+function outward(state: MigrationState): MigrationState {
+  return state.ipcReady === ipcReady ? state : { ...state, ipcReady }
+}
+
+/**
+ * 启动完成:`registerIpc()` 已经返回,渲染层的任何 invoke 都能被应答。
+ *
+ * ★ 由 `main/index.ts` 在 `registerIpc()` 之后**立刻**调,而且必须调 —— 漏掉的话
+ * 所有窗口都停在首屏那道闸门上,界面上一个错都不报。
+ *
+ * 放在调用方、而不是塞进 `registerIpc()` 的末尾是有意的:`registerIpc()` 里还夹着
+ * `initImports()` / `sweepOrphans()` 这些启动工作,而「渲染层可以握手了」是启动
+ * 序列上的一个里程碑,读启动顺序的人应该在那一个文件里看到它。
+ */
+export function announceIpcReady(): void {
+  ipcReady = true
+  /*
+    再推一份完整快照:闸门自己那几次 publish 全都发生在这一位还是 false 的时候,
+    所以渲染层手里那份必须被这份覆盖掉(它在 `failed` 那一屏上时尤其如此 ——
+    只翻标志而不重推,用户点「继续」会一直没反应)。
+  */
+  windows.emitToAll('dataMigration:progress', getMigrationState())
+}
 
 export function installMigrationGate(instance: MigrationGate): void {
   gate = instance
@@ -51,9 +103,11 @@ export function setMigrationDataChangedListener(listener: (() => void) | null): 
  * ★ 用 `emitToAll` 而不是 `emitToTopic`:迁移是**全局**状态,而且此刻窗口可能
  *   刚建出来、还没跑过 `window:ready`(topic 还没订阅上)。丢帧的后果是进度条
  *   永远停在 0,而用户没有任何办法让它刷新。
+ *
+ * ★ 出去之前必须盖章(见 `outward`)—— 闸门那份 state 里 `ipcReady` 恒为 false。
  */
 export function announceMigrationState(state: MigrationState): void {
-  windows.emitToAll('dataMigration:progress', state)
+  windows.emitToAll('dataMigration:progress', outward(state))
 }
 
 /**
@@ -76,36 +130,43 @@ const NO_GATE: MigrationState = {
   ratio: null,
   failure: null,
   merged: null,
-  undoAvailable: false
+  undoAvailable: false,
+  /*
+    ★ `ipcReady: false` 不是笔误:闸门没装只说明「没有要迁移的东西」,不说明
+    「可以放行」—— 能不能放行由上面那一位说了算,这里照旧交给 `outward()` 盖章。
+    窗口确实可能早于 `installMigrationGate()` 起来(`main/index.ts` 里建窗在闸门
+    之前),那一瞬间走的正是这条路。
+  */
+  ipcReady: false
 }
 
 export function getMigrationState(): MigrationState {
-  return requireGate()?.state() ?? NO_GATE
+  return outward(requireGate()?.state() ?? NO_GATE)
 }
 
 export async function retryMigration(): Promise<MigrationState> {
   const instance = requireGate()
-  if (instance === null) return NO_GATE
+  if (instance === null) return outward(NO_GATE)
   const state = await instance.run()
   // 需求：失败的重试也可能按会话提交了一部分行；归属清单与每条会话同事务落盘，
   // 必须立刻重连并刷新侧边栏，否则用户看到「重试失败」之外仍是一片空白。
   if (state.merged !== null || state.phase === 'failed') dataChangedListener?.()
-  return state
+  return outward(state)
 }
 
 export function skipMigration(): MigrationState {
   const instance = requireGate()
-  if (instance === null) return NO_GATE
+  if (instance === null) return outward(NO_GATE)
   instance.skip()
-  return instance.state()
+  return outward(instance.state())
 }
 
 export function undoMigration(): MigrationState {
   const instance = requireGate()
-  if (instance === null) return NO_GATE
+  if (instance === null) return outward(NO_GATE)
   instance.undo()
   dataChangedListener?.()
-  return instance.state()
+  return outward(instance.state())
 }
 
 /**

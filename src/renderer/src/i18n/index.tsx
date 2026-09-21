@@ -25,7 +25,9 @@ import { builtinSearchZh, builtinSearchEn } from './builtin-search';
 import { goalZh, goalEn } from './goal';
 import { pluginSkillsZh, pluginSkillsEn } from './plugin-skills';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
+import { widgetZh, widgetEn } from './widget';
 import { migrationZh, migrationEn } from './migration';
+import { accountMenuZh, accountMenuEn } from './account-menu';
 import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import {
   pluginMessages,
@@ -59,6 +61,7 @@ const ZH: Messages = {
   ...searchZh,
   ...builtinSearchZh,
   ...chatNavigationZh,
+  ...widgetZh,
   ...migrationZh,
   ...themesZh,
   ...agentZh,
@@ -67,6 +70,7 @@ const ZH: Messages = {
   ...filesZh,
   ...editorZh,
   ...markdownZh,
+  ...accountMenuZh,
   "app.handshakeFailed": "首屏握手失败：{error}",
   "auth.tagline": "把重复的交给它，时间留给你",
   "auth.login": "登录",
@@ -400,6 +404,8 @@ const ZH: Messages = {
   "chat.subagent.status.done": "已完成",
   "chat.subagent.status.error": "失败",
   "chat.subagent.status.aborted": "已停止",
+  // Task 的参数还在流、子代理还没派出去的那几秒（见 SubagentNode 的 pending）
+  "chat.subagent.status.pending": "准备中",
   "chat.subagent.detail.errorUnknown": "未提供错误详情",
   "chat.subagent.error.noOutput": ({ agent }) => `子代理 ${agent} 结束时没有产出任何文字。请使用更具体的任务说明重试，或直接完成此步骤。`,
   "chat.subagent.mode.background": "后台",
@@ -2034,7 +2040,9 @@ const EN: Messages = {
   ...searchEn,
   ...builtinSearchEn,
   ...chatNavigationEn,
+  ...widgetEn,
   ...migrationEn,
+  ...accountMenuEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",
@@ -2370,6 +2378,7 @@ const EN: Messages = {
   "chat.subagent.status.done": "Completed",
   "chat.subagent.status.error": "Failed",
   "chat.subagent.status.aborted": "Stopped",
+  "chat.subagent.status.pending": "Preparing",
   "chat.subagent.detail.errorUnknown": "No error details were provided",
   "chat.subagent.error.noOutput": ({ agent }) => `The subagent ${agent} finished without producing any text. Retry with a more specific prompt, or do this step yourself.`,
   "chat.subagent.mode.background": "Background",

@@ -30,6 +30,7 @@ import {
 } from '../shared/domain/shell'
 import type { EnvironmentLease, EnvironmentProcess, WorkspaceEnvironment } from './environment/contract'
 import { shellFor, shellVerbatimArguments } from './environment/shell'
+import { stripAnsi } from './kernel/text'
 
 /** 一条已读走的输出缓冲。读取即清空，于是两次读之间不重不漏。 */
 interface Stream {
@@ -143,7 +144,15 @@ export class AgentShells {
 
     const pipe = (source: Readable, stream: Stream): void => {
       source.setEncoding('utf8')
-      source.on('data', (chunk: string) => append(stream, chunk))
+      /*
+        ★ 剥 ANSI 剥在**入口**,不是回读时:
+        - `BashOutput` 的 `filter` 是按行匹配的,行首挂着一段 `ESC[31m` 会让
+          `^error` 这类再正常不过的正则一条都匹配不上,而输出看起来完全正常;
+        - 环形缓冲的 256KB 预算不该被转义序列吃掉。
+        代价:一条序列恰好被切在两个 data 事件之间时剥不干净(极少见,
+        残留是几个可见字符,不会影响后续行)。
+      */
+      source.on('data', (chunk: string) => append(stream, stripAnsi(chunk)))
       // 进程被杀时管道会抛 EPIPE/ECONNRESET。它不是一个要上报的错误，
       // 而没有这个监听器的话 Node 会把它升级成 uncaughtException 打死主进程。
       source.on('error', () => {})

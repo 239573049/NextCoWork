@@ -43,6 +43,34 @@ export type ToolShape =
   | 'command'
   | 'network'
   | 'orchestration'
+  /**
+   * 等用户表态的那几个(`AskUserQuestion` / `ProposeGoal` / `ExitPlanMode`)。
+   *
+   * 需求:它们的入参**就是给人读的题面**,而不是给工具用的参数 —— 详情区要按题面渲染,
+   * 而且要在参数还在流的时候就能读(见 `views/chat/interaction-preview.ts`)。
+   * 归进 `orchestration` 的话,一道四选项的问题会被摊成一坨 JSON,
+   * 而用户接下来正要在下面那张卡里回答它。
+   *
+   * ★ 这里画出来的一切**都不可作答**:可作答的题面只有主进程待决表一个来源。
+   */
+  | 'interaction'
+  /**
+   * 自己画一张图的那一个(`visualize_show_widget`)。
+   *
+   * 需求:它展开后不是一份数据,而是一个**正在长出来的 HTML/SVG**
+   * (`views/chat/WidgetDetail.tsx` → `views/chat/WidgetFrame.tsx`)。参数还在流的时候
+   * 就要开始渲染,所以它不能落进 `external` —— 那会先把半截 JSON 摊成一屏花括号,
+   * 等参数收尾才整块换成图,而"边写边渲染"正是这个功能本身。
+   *
+   * ★ **这一档只有内置工具能选。** 插件侧的形态清单是另一份内联字面量
+   * (`plugin/manifest.ts` 的 `PluginToolShape`,刻意不 import 这个类型),
+   * 里面没有 `widget`,而且不该有:插件工具的入参是**模型生成的**,于是
+   * "让插件声明一个 widget 形态"就等于把"往宿主渲染的 iframe 里塞任意 HTML"
+   * 这条路开给了「插件描述 → 模型 → 用户内容」那一串不可信输入。
+   * 给插件形态清单加这一项之前,先读 `shared/agent/tool-card.ts` 里
+   * `kind: 'widget'` 上那段说明。
+   */
+  | 'widget'
   | 'external'
 
 export interface ToolPresenter {
@@ -94,6 +122,18 @@ export const PRESENTER_COPY_KEYS = [
   'chat.tool.title.scheduleDelete',
   'chat.tool.title.todo',
   'chat.tool.title.scheduleList',
+  // 等用户表态的三个(shape: 'interaction')。标题是静态的:它们的入参是题面本身,
+  // 塞进标题只会把一整道题截断成一行省略号。
+  'chat.tool.title.askUser',
+  'chat.tool.title.proposeGoal',
+  'chat.tool.title.planReview',
+  /*
+    可视化那一对。`readMe` 是静态标题(它的入参只有一串模块名,那是摘要的活);
+    `widget` 带 `target` —— 那个 target 是模型写的 `title`(snake_case 标识)
+    去掉下划线之后的短语,所以它**不翻译**(同模型名、文件名,见 AGENTS §6.5)。
+  */
+  'chat.tool.title.widget',
+  'chat.tool.title.readMe',
   // 认不出工具名时的最终兜底标题
   'chat.tool.fallback',
   // 折叠态右侧摘要
@@ -111,6 +151,7 @@ export const PRESENTER_COPY_KEYS = [
   'chat.tool.summary.running',
   'chat.tool.summary.stopped',
   'chat.tool.summary.tasks',
+  'chat.tool.summary.questions',
   'chat.tool.summary.scheduleDaily',
   'chat.tool.summary.scheduleWeekly'
 ] as const
@@ -404,6 +445,20 @@ function scheduledListSummary(_i: unknown, o: ToolOutput | undefined): string | 
   return presenterCopy('chat.tool.summary.tasks', { count: n === undefined ? 0 : Number(n) })
 }
 
+/**
+ * `AskUserQuestion` 的摘要是**题数**,而且从入参算。
+ *
+ * 需求:多道题的卡片折叠起来只有一行,不写清「一共几道」的话,用户看到下面那张
+ * 待决卡只显示第一题,会以为就问了这一件事。输出那边是回答的 JSON,算不出题数。
+ * 半截 JSON 里只长出了一道题时就报一道 —— 它说的是「此刻已经写出来几道」,不是预言。
+ */
+function askSummary(i: unknown): string | undefined {
+  const questions = pickArray(i, 'questions')
+  return questions.length === 0
+    ? undefined
+    : presenterCopy('chat.tool.summary.questions', { count: questions.length })
+}
+
 // ─────────────────────────── 注册表 ───────────────────────────
 
 /**
@@ -520,10 +575,55 @@ const REGISTRY: Record<string, ToolPresenter> = {
     shape: 'orchestration',
     title: (i) => withTarget('chat.tool.title.scheduleDelete', clip(pick(i, 'task_id'), 14))
   },
+  /*
+    等用户表态的三个。**标题静态、摘要克制**:入参是题面,它在详情区整块渲染
+    (`views/chat/InteractionPreview.tsx`),标题行只负责说清这是哪一类表态。
+  */
+  AskUserQuestion: {
+    shape: 'interaction',
+    title: () => presenterCopy('chat.tool.title.askUser'),
+    summary: (i) => askSummary(i)
+  },
+  ProposeGoal: {
+    shape: 'interaction',
+    title: () => presenterCopy('chat.tool.title.proposeGoal')
+  },
+  /*
+    ★ `ExitPlanMode` 的 schema 是**空对象** —— 计划正文在文件里,工具开跑之后才读。
+    所以它没有任何可以提前预览的入参,这里只换一个说人话的标题;
+    `previewOf()` 对它返回 null,卡片也就不会自动展开一个空详情区。
+  */
+  ExitPlanMode: {
+    shape: 'interaction',
+    title: () => presenterCopy('chat.tool.title.planReview')
+  },
   echo: {
     shape: 'external',
     title: () => 'echo',
     summary: firstLineSummary
+  },
+  /*
+    可视化那一对。
+
+    `visualize_show_widget` 的标题取模型写的 `title`(规范要求它是
+    `q4_revenue_by_product_line` 这种能自解释的标识),`humanize` 把下划线换成空格
+    —— 它不翻译,是领域值。**没有 `summary`**:折叠态右端那一格在同一行里,
+    而这里唯一还能一眼看懂的数就是代码体积,它对用户没有意义。
+
+    `visualize_read_me` 是静态标题 + "加载了哪几段"的摘要 ——
+    规范正文本身有七万字,进不了折叠态那一格,摘要是这里唯一能给出的信息。
+  */
+  visualize_show_widget: {
+    shape: 'widget',
+    title: (i) => withTarget('chat.tool.title.widget', humanize(pick(i, 'title')))
+  },
+  visualize_read_me: {
+    shape: 'external',
+    title: () => presenterCopy('chat.tool.title.readMe'),
+    summary: (i) => {
+      const modules = pickArray(i, 'modules').filter((m): m is string => typeof m === 'string')
+      return modules.length === 0 ? undefined : modules.join(' · ')
+    }
   }
 }
 

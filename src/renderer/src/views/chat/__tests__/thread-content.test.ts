@@ -291,8 +291,26 @@ describe('thread content grouping', () => {
     expect(segments.map((segment) => segment.kind)).toEqual(['process', 'block'])
   })
 
-  it('recognizes the final non-empty assistant text block', () => {
-    const row = threadRows([
+  /**
+   * Task 的参数还在流的那几秒:卡片必须已经是子代理卡,而不是一张过会儿
+   * 会被整个换掉的通用工具卡。`pending` 是它和「旧转录里那些没有 state 的
+   * 子代理块」的唯一区别 —— 后者早就跑完了。
+   */
+  it('renders a streaming Task as a pending subagent node, not a generic tool card', () => {
+    const user = userMessage('u', [{ type: 'text', text: 'Inspect' }], 1)
+    const rows = threadRows([user], [
+      { index: 0, kind: 'tool_use', callId: 'call-task', name: 'Task', text: '{"description":"查调用点","subagent' }
+    ], true)
+    const row = rows[1]
+    expect(row?.kind).toBe('assistant')
+    if (row?.kind !== 'assistant') return
+    expect(assistantSegments(row.blocks, 'tool')[0]).toMatchObject({
+      kind: 'process',
+      items: [{ kind: 'subagent', callId: 'call-task', summary: '查调用点', pending: true }]
+    })
+  })
+
+  it('recognizes the final non-empty assistant text block', () => {    const row = threadRows([
       userMessage('u', [{ type: 'text', text: 'Inspect' }], 1),
       assistantMessage('a', [{ type: 'text', text: 'Done' }], 2)
     ], [], false)[1]

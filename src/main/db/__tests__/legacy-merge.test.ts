@@ -286,23 +286,22 @@ describe('mergeLegacyRows', () => {
   })
 
   it('每条已提交会话与归属清单同事务落盘，后续失败不会丢掉前半批 id', () => {
-    const source = new DatabaseSync(sourcePath)
+    /*
+      ★ 制造「第二条会话必然失败」的手段换过一次:原来靠「第二条会话的消息 id 已经在
+      目标库里」,而现在那种重复被判成正常情况、会被跳过(见上面 `usage_records` 那条
+      用例)—— 它不再是失败。改成一条**悬空的外键**:源库里那条会话指着一个两边都
+      不存在的工作区(那一行是关掉外键写进去的,模拟旧库留下的悬空引用)。
+      非主键的约束坏了仍然必须抛,兜底那条不变式没有因此松动。
+    */
+    const source = new DatabaseSync(sourcePath, { enableForeignKeyConstraints: false })
     source.prepare('INSERT INTO workspaces VALUES (?, ?, ?)').run('z-conflict', 6000, '{"name":"冲突工作区"}')
     source.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)').run(
       'z-conflict',
-      'z-conflict',
+      'w-ghost',
       '后面的冲突会话',
       6000,
       6000,
       sourceDir
-    )
-    // `m-old` 已在目标库里，第二条会话写消息时必然回滚；`s-new` 应已完整提交。
-    source.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?)').run(
-      'm-old',
-      'z-conflict',
-      'user',
-      '"冲突消息"',
-      6000
     )
     source.close()
 
@@ -314,6 +313,46 @@ describe('mergeLegacyRows', () => {
     expect(parsed['workspaces']).toEqual(expect.arrayContaining(['w-new', 'z-conflict']))
     expect(rows(targetPath, "SELECT id FROM sessions WHERE id = 's-new'")).toHaveLength(1)
     expect(rows(targetPath, "SELECT id FROM sessions WHERE id = 'z-conflict'")).toEqual([])
+  })
+
+  it('★ 用量行已经在目标里、而它那条会话缺着时,补会话而不是撞唯一约束', () => {
+    /*
+      真实故障:错误页上是 `UNIQUE constraint failed: usage_records.id`,点重试每次
+      都停在同一处。
+
+      目标库的历史是「这条会话搬进来过、之后被用户删掉」—— 会话和消息被级联带走,
+      而 `usage_records` 只增不删(`schema.ts` 第 20 条)、也没有指向 `sessions` 的外键,
+      `u-kept` 留在库里。旧根那份还在,于是它又成了「目标里缺的会话」,而它的用量行
+      已经在了 —— 「会话缺 ⇒ 它的子行也缺」这个假设在子表上不成立。
+    */
+    const usageSchema = `
+      CREATE TABLE usage_records (
+        id TEXT PRIMARY KEY,
+        at INTEGER NOT NULL,
+        session_id TEXT NOT NULL,
+        upstream_model TEXT NOT NULL
+      );
+    `
+    const target = new DatabaseSync(targetPath)
+    target.exec(usageSchema)
+    target.prepare('INSERT INTO usage_records VALUES (?, ?, ?, ?)').run('u-kept', 100, 's-new', 'gpt-5')
+    target.close()
+
+    const source = new DatabaseSync(sourcePath)
+    source.exec(usageSchema)
+    source.prepare('INSERT INTO usage_records VALUES (?, ?, ?, ?)').run('u-kept', 100, 's-new', 'gpt-5')
+    source.prepare('INSERT INTO usage_records VALUES (?, ?, ?, ?)').run('u-fresh', 200, 's-new', 'gpt-5')
+    source.close()
+
+    const result = merge()
+
+    expect(result.sessions).toBe(1)
+    // 已经在那里的那条一个字节都不动,缺的那条补上 —— 也顺带钉住「判的是子表主键」。
+    expect(rows(targetPath, 'SELECT id FROM usage_records ORDER BY id').map((r) => r['id'])).toEqual([
+      'u-fresh',
+      'u-kept'
+    ])
+    expect(() => merge()).not.toThrow()
   })
 
   it('★ 不动目标库里已有的行,哪怕源库那份更新', () => {

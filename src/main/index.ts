@@ -34,6 +34,7 @@ import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/rollup-task'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
+import { installWidgetProtocol, registerWidgetScheme } from './net/widget-protocol'
 import { installPluginProtocol, registerPluginScheme, setPluginAppearanceResolver } from './plugin/protocol'
 import { shutdownPlugins, startPlugins } from './ipc/plugins'
 import { applyProxy, installProxyAuth } from './net/proxy'
@@ -43,6 +44,7 @@ import { PROFILE_DIRECTORY_SEGMENT } from './db/config-profile'
 import { migrateFlatLayout, rewriteMigratedPaths } from './db/flat-layout'
 import { createMigrationGate, type MigrationGate } from './db/startup-migration'
 import {
+  announceIpcReady,
   announceMigrationState,
   installMigrationGate,
   setMigrationDataChangedListener
@@ -182,6 +184,12 @@ registerAttachmentScheme()
   看起来彼此无关的方式失败。
 */
 registerPluginScheme()
+/*
+  ★ 第三条自定义 scheme,理由同上:必须在 `app.whenReady()` **之前**。
+  内置可视化 widget 的外壳页面走它(`net/widget-protocol.ts`)——
+  放到 ready 之后,外壳页面能加载但 CSP 与沙箱的 privileges 全丢。
+*/
+registerWidgetScheme()
 
 // 步骤 0 的 sqlite 探针。留着不删:将来升 Electron 大版本时,
 // 它是第一个会告诉你出事的地方(方案 §9)。
@@ -553,6 +561,11 @@ void app
 
     这个窗口此刻是**被冻结**的:App 的握手 effect 要等 `MigrationGateHost`
     放行才会跑(见 renderer/main.tsx),所以它不会去碰还没打开的数据库。
+
+    ★ 放行的条件有两半,**缺一不可**:闸门里没有要迁移的东西,以及主进程已经
+    答得上来了(`announceIpcReady()` 那一位)。只有前一半的话,没有迁移、渲染层
+    又起得比主进程快的那些启动会直接拿「未登记的频道」把首屏置成握手失败 ——
+    见 `shared/domain/data-migration.ts` 的 `ipcReady`。
   */
   createMainWindow()
 
@@ -623,6 +636,9 @@ void app
   */
   installAttachmentProtocol()
   installPluginProtocol()
+  // widget 外壳不读磁盘上的内容(它只下发两个自己写的文件),但仍然排在这里:
+  // 三条 scheme 的注册时机与安装时机应该一眼看得出是同一种东西。
+  installWidgetProtocol()
   /*
     ★ 协议层自己不认识 store,深浅色由这里喂进去 —— 它是插件视图垫片的初值,
     决定插件视图的**第一帧**是深是浅。排在 `openDatabase` 之后:`getSettings()`
@@ -677,8 +693,15 @@ void app
   */
   applyThemePreference(store.getSettings().theme)
 
-  // 契约里的每个频道在这里一次性注册完(缺一个就编译不过)。
-  // 必须在建窗之前:渲染层的第一个 invoke 可能在窗口 show 之前就到。
+  /*
+    契约里的每个频道在这里一次性注册完(缺一个就编译不过)。
+
+    ★ 原先这里写的是「必须在建窗之前:渲染层的第一个 invoke 可能在窗口 show 之前就到」。
+    建窗为了迁移进度屏被提到了**前面**(见上面 `createMainWindow()` 那段),所以那条约束
+    不再由这个位置保证,改由渲染层那一侧保证:窗口里的 App 要等 `announceIpcReady()`
+    之后才挂(见 `MigrationState.ipcReady`)。这个位置本身仍然钉死在 `openDatabase()`
+    之后 —— 下面登记的那群 handler 全都要库。
+  */
   setSessionWindowOpener((workspaceId, sessionId) => {
     const child = createMainWindow({ workspaceId, sessionId })
     child.once('ready-to-show', () => child.focus())
@@ -690,6 +713,13 @@ void app
     app.quit()
   })
   registerIpc()
+  /*
+    ★ **紧接着调,不能往后挪、更不能省。** 建窗在 `registerIpc()` 之前,所以此刻
+    已经有窗口在等这一位了;漏掉的症状是窗口停在空白首屏、界面上一个错都不报
+    (渲染层按 `ipcReady` 等,而它永远等不到)。也不能往前挪到 `registerIpc()`
+    之前 —— 那等于让渲染层对着还没登记的 handler 握手,正是这次要修的那个错误。
+  */
+  announceIpcReady()
   powerMonitor.on('suspend', () => { void shutdownEnvironments() })
   /*
     ★ 唤醒补扫。休眠两小时回来,30 秒定时器只会补触发一次,而这两小时里
@@ -711,6 +741,15 @@ void app
   }
   })
   .catch((err: unknown) => {
+    /*
+      ★ 走到这里意味着 `announceIpcReady()` 大概率没跑到 —— 而窗口此刻已经建出来了
+      (建窗在闸门之前),于是它会**一直停在空白首屏**:闸门不放行,它对任何 invoke
+      也答不上来,连一句错误都递不出去。所以这一行 console.error 是这种情况下的
+      唯一线索:排查「启动后一片空白、界面无提示」时先看它,不要先怀疑渲染层。
+
+      需求:这条路径以前能看到的是渲染层的「首屏握手失败: No handler registered」,
+      那个错误指向频道注册,而真正的病因是主进程启动崩了,两者几乎没关系。
+    */
     console.error('[app] 启动流程失败:', err)
   })
 

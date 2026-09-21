@@ -48,8 +48,12 @@ function cspDevPlugin(): Plugin {
       `default-src 'self'`,`ncw-plugin://` 直接被拦 —— 自定义编辑器的
       标签页开得出来却一片空白(同 src/renderer/index.html 里那段说明)。
       自定义 scheme 同样要点名,`*` 覆盖不到。
+
+      `ncw-widget:` 是内置可视化 widget 的外壳,同一个坑:漏了它,生成好的图
+      渲染成空白,而工具卡片显示"成功"。两处 CSP 必须同时有(生产版在
+      src/renderer/index.html)。
     */
-    'frame-src ncw-plugin:',
+    'frame-src ncw-plugin: ncw-widget:',
     "object-src 'none'",
     "base-uri 'none'"
   ].join('; ')
@@ -90,7 +94,28 @@ export default defineConfig({
           主窗口的每一条频道都顺带对插件开放,而那个口子不会有人注意到。
           见 `src/preload/plugin-preload.ts`。
         */
-        input: { index: resolve('src/main/entry.ts') },
+        /*
+          ★ 第二个入口是**内置可视化 widget 的外壳运行时**
+          (`src/main/net/widget-shell/runtime.ts`)。
+          (注意:上面那一段说的是另一个曾经计划过的入口 —— 插件宿主窗口的
+          preload。`src/preload/plugin-preload.ts` 现在全仓都不存在了,
+          本段的 input 里也只有下面这两个键。那段话的理由仍然成立,所以没有删。)
+
+          它跑在 `ncw-widget://shell/` 那个沙箱 iframe 里,由
+          `net/widget-protocol.ts` 按固定文件名 `out/main/widgetShell.js` 读出来下发。
+          放在 main 这一段构建,是因为它的产物就是**一个自包含的浏览器脚本**:
+          只有 `sync.ts` 一个同目录依赖(会被打进同一个文件),不引 electron、
+          不引 node、不引渲染层 —— 所以它既不需要 preload 那套 isolateEntries,
+          也不需要另开一个构建脚本。
+
+          ★ 入口名(键)就是产物文件名,协议层按它定位。改这里必须同时改
+          `widget-protocol.ts` 里的 `widgetShell.js`,否则 widget 会渲染成空白,
+          主进程只会留一行 `[widget] 读不到 widgetShell.js`。
+        */
+        input: {
+          index: resolve('src/main/entry.ts'),
+          widgetShell: resolve('src/main/net/widget-shell/runtime.ts')
+        },
         output: { chunkFileNames: '[name]-[hash].js' }
       }
     }

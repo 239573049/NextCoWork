@@ -239,6 +239,8 @@ describe('TOOLS_NEEDING_NETWORK', () => {
       'browser_press',
       'browser_select',
       'browser_type',
+      // 它自己不出网,但它产出的 widget 会去拉 CDN —— 见 `TOOLS_NEEDING_NETWORK`
+      'visualize_show_widget',
       'web_search'
     ])
   })

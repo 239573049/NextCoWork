@@ -7,6 +7,11 @@
  *
  * ★ `frame` 卡片不由这里画 —— 它交给 `PluginCardFrame`(插件自己的 iframe),
  * pluginId/path 经 externalName 反查(见 `frameCardTarget`)。
+ *
+ * ★ `widget` 卡片**同理不由这里画**(内置可视化,交给 `WidgetFrame` 的沙箱 iframe)。
+ * 两者都不是"声明式原语",所以这里对它们各自只做一次转发;`switch` 里那些
+ * 分支才是这个文件的主体。少了这层转发的话,一张 widget 卡片会掉进下面的
+ * `card.blocks` —— 而那个字段在 widget 卡片上根本不存在。
  */
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import type { CardBlock, CardTone, ToolCard } from '../../../../shared/agent/tool-card'
@@ -20,6 +25,7 @@ import { Dialog } from '../../components/ui/Dialog'
 import { AgentMarkdown } from '../../components/markdown'
 import { PluginCardFrame } from '../../shell/PluginCardFrame'
 import { frameCardTarget, pluginIdForTool, usePluginsStore } from '../../stores/plugins'
+import { WidgetFrame } from './WidgetFrame'
 
 /** 卡片按钮动作的回传句柄。工具已结束 / 反查不到插件时为 undefined —— 按钮渲染成禁用。 */
 type CardActionSink = ((actionId: string, value?: unknown) => void) | undefined
@@ -261,6 +267,15 @@ export function CardRenderer({
 
   if (card.kind === 'frame') {
     return <FrameCard viewType={card.viewType} data={card.data} toolName={toolName} callId={callId} />
+  }
+  if (card.kind === 'widget') {
+    /*
+      `final` 恒为 true:能走到这里的卡片要么是刚跑完的工具结果、要么是从转录里
+      恢复出来的成品,两种情况下 `code` 都是完整的,脚本该执行了。
+      生成期那一段走的是 `WidgetDetail`(shape 分支),那里的 `final` 是 false ——
+      见 `WidgetDetail.tsx` 文件头那张分工表。
+    */
+    return <WidgetFrame code={card.code} final title={card.title} />
   }
   return (
     <div className="flex flex-col gap-2">

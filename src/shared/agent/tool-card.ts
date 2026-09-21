@@ -66,6 +66,28 @@ export type CardBlock =
 export type ToolCard =
   | { kind: 'declarative'; blocks: CardBlock[] }
   | { kind: 'frame'; viewType: string; data: unknown }
+  /**
+   * 内置 `visualize_show_widget` 画的 HTML/SVG —— 卡片自带代码,由宿主自己的
+   * 沙箱 iframe 渲染(`renderer/views/chat/WidgetFrame.tsx`,经 `ncw-widget://` 出)。
+   *
+   * ★ **为什么不是一张 `frame`。** `frame` 的 `viewType` 要经插件清单
+   * (`frameCardTarget`)反查出 `pluginId` 与包内路径,内置工具没有 pluginId,
+   * 那条路根本走不通;而且 frame 的数据是"单向推入一份只读快照",widget 要的是
+   * **边生成边推进的半截 HTML** + 流结束才执行脚本 —— 两种生命周期。
+   *
+   * ★ **代码随卡片走。** 卡片自带 `code`,于是重开对话时不必再向主进程要回
+   * 任何东西(对比 frame:每次展开都要重新加载插件的那个页面)。
+   *
+   * ★ **插件伪造不出这一种。** `sanitizeToolCard` 认不出的 `kind` 一律返回
+   * `undefined`(见那里),而它是插件侧唯一的收口 —— 所以这条通道**只有内置
+   * 工具能走**。这条不变式就是"任意 HTML 不进可信渲染进程"的全部保证,
+   * 改动 `sanitizeToolCard` 前先读一遍这里。
+   *
+   * ★ 它**不受 `MAX_CARD_BYTES` 管**:那笔预算是给插件卡的,而这里的一份
+   * widget 上限是 `visualize.ts` 里的 128K。要给插件放开这条路,得先给
+   * 消毒器写一条自己的策略(白名单域名之类),而不是把 `kind` 加进白名单了事。
+   */
+  | { kind: 'widget'; title: string; code: string }
 
 // ─────────────────────────── 校验上限 ───────────────────────────
 

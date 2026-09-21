@@ -44,7 +44,7 @@ import {
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
-import { abortRun, attachRun, interjectRun, onAgentEvent, startRun } from '../services/agent'
+import { abortRun, attachRun, interjectRun, onActiveRuns, onAgentEvent, startRun } from '../services/agent'
 import { getSessionInput, persistSessionInput } from '../services/app'
 import { compactContext as compactSessionContext } from '../services/context'
 import { replaceHistory } from '../services/sessions'
@@ -1338,6 +1338,76 @@ export function adoptActiveRuns(runs: readonly RunIndexEntry[]): void {
   publishRunIndex()
 }
 
+/**
+ * 把这份投影对齐到主进程推来的**权威集合**(`agent:activeRuns`)。
+ *
+ * 需求:三处「运行中」指示(外层工作区 Tab、内层对话 Tab、侧边栏会话行)读的都是
+ * `runIndex`,而 `runIndex` 原先**只能**靠 `run_end` 事件摘条目。那条事件流按 run
+ * 订阅定向推送,有两类 run 的结束永远送不到这个窗口:
+ *
+ * - 定时任务起的 run —— 没有任何窗口订阅过它,主进程侧整批丢弃(`RunPump.flush`);
+ * - ⌘R 重载后被 bootstrap 补回索引、但对应会话 store 还没建出来的那些 ——
+ *   `drain()` 按 runId 查到会话却 `stores.get()` 拿不到 store,信封原地丢掉。
+ *
+ * 不满足会怎样:**Agent 早就跑完了,角标还在转**,状态行写着「已完成」而
+ * 工作区 Tab 上的圆点一直亮到应用重启,全程零报错。
+ *
+ * ★ 「多出来的」和「少掉的」两个方向都要收:只补不摘的话这个函数解决不了上面那条,
+ * 只摘不补的话第二个窗口里新起的 run 在这个窗口就永远不显示。
+ */
+export function syncActiveRuns(entries: readonly RunIndexEntry[]): void {
+  const authoritative = new Set(entries.map((entry) => entry.runId))
+  const stale = [...runIndex.values()].filter((entry) => !authoritative.has(entry.runId))
+  for (const entry of stale) {
+    runIndex.delete(entry.runId)
+    // 角标是收了,但那个会话自己的 `activeRunId` 也得收 —— 否则输入框、状态行
+    // 和停止按钮还停在运行态(这正是用户说的「三个状态没同步」的第三个)。
+    void settleMissedRun(entry.sessionId, entry.runId)
+  }
+  // 补的方向与 bootstrap 完全一样,所以直接复用它 —— 它顺带把已经建出来的 store
+  // 接回这个 run 并 attach 补齐,那段逻辑不该有第二份。
+  // ★ 放在最后调:它自己会 `publishRunIndex()`,上面那几次删除搭它这一趟车,
+  //   于是一次广播只换一个新数组、只触发一次重渲染。
+  adoptActiveRuns(entries.filter((entry) => !runIndex.has(entry.runId)))
+}
+
+/**
+ * 正常路径上,`run_end` 事件和这条广播是**同一刻**从主进程出发的,只是事件那边还要
+ * 过一次 rAF 合批才落到 store 上。这段宽限就是留给它的:等它落地,下面那次
+ * attach 就完全不必发生。
+ *
+ * ★ 不等的话,**每一次正常结束**都会多打一次 `agent:attach` —— 一次没人需要的
+ * IPC 往返,外加一行「seq 不连续,attach 补齐」的告警,而其实一个事件都没丢。
+ * 250ms 是「肉眼看不出、又远大于一帧」的量级;它只影响**修复**的延迟,
+ * 角标本身在收到广播的那一瞬就已经灭了。
+ */
+const MISSED_RUN_GRACE_MS = 250
+
+/**
+ * 主进程说这个 run 已经结束,而这个会话一个结束事件都没收到时的收尾。
+ *
+ * 先走一次 `resync`:attach 能把最后那截事件(含 `run_end`)补回来,于是用量、
+ * 停止时刻、改动审查卡这些**只存在于事件里**的东西不会凭空缺一块。
+ * ★ attach 失败(run 已被主进程回收)时必须有下半段:那时没有任何事件可补,
+ * 但界面仍然必须离开运行态 —— 宁可少一截尾巴,也不能留一个永远转圈的会话。
+ */
+async function settleMissedRun(sessionId: string, runId: string): Promise<void> {
+  if (stores.get(sessionId)?.getState().activeRunId !== runId) return
+  await new Promise<void>((resolve) => setTimeout(resolve, MISSED_RUN_GRACE_MS))
+  // 宽限期内 store 可能已经被释放(关掉工作区),或者已经开始了下一轮 ——
+  // 两种情况都不该再动它,所以在这里重新取一次,不复用上面那个引用。
+  const store = stores.get(sessionId)
+  if (store === undefined || store.getState().activeRunId !== runId) return
+  await resync(sessionId, runId, store.getState().lastSeq)
+  if (store.getState().activeRunId !== runId) return
+  store.setState((s) => ({
+    activeRunId: null,
+    transcript: { ...s.transcript, live: [], status: s.transcript.status === 'running' ? 'done' : s.transcript.status }
+  }))
+  // 事件补不回来时,库里那份已提交的转录就是最完整的版本。
+  void hydrateHistory(sessionId, true)
+}
+
 export interface ActiveSubagentIndexEntry {
   runId: string
   parentRunId: string
@@ -1570,9 +1640,16 @@ export function startAgentEventPump(): () => void {
   })
 
   const offGoal = onGoalChanged(applyGoalChange)
+  /*
+    ★ 运行中角标的收敛靠这条,**和事件泵挂在同一个生命周期里**:
+    它和 `agent:event` 描述的是同一件事的两面,分开起的话总有一处会忘了退订,
+    而漏退订在 HMR 下就是监听器叠加(方案 §3 规则 4)。
+  */
+  const offRuns = onActiveRuns(syncActiveRuns)
   unsubscribe = () => {
     off()
     offGoal()
+    offRuns()
     if (raf !== 0) cancelAnimationFrame(raf)
     raf = 0
     pending = []

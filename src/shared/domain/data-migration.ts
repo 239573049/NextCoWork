@@ -25,7 +25,7 @@ export type MigrationStepKind = 'collapse-flat-layout' | 'merge-legacy-rows' | '
  * 闸门的四个阶段。
  *
  * - `idle`     —— 什么都不用做。★ 这是绝大多数启动会落到的分支,渲染层**不画任何东西**,
- *                 直接把 App 挂起来。多一层「正在检查」的过场就是一次白闪。
+ *                 在 `ipcReady` 之后把 App 挂起来。多一层「正在检查」的过场就是一次白闪。
  * - `running`  —— 正在搬。全屏盖住,期间数据库还没打开,任何 IPC 都用不了。
  * - `failed`   —— 停在错误页。重试 / 跳过 / 打开数据目录 / 撤销本次合并。
  * - `skipped`  —— 用户在错误页选了「跳过并继续」。库是完整的(合并只 INSERT 且按
@@ -94,4 +94,25 @@ export interface MigrationState {
   merged: MigrationMergeSummary | null
   /** 是否还留着可以撤销的合并记录。 */
   undoAvailable: boolean
+  /**
+   * 主进程**能不能应答 IPC** —— 即 `registerIpc()` 是否已经跑完。
+   *
+   * 需求:渲染层只在这一位为 true 时才放行 App(`views/migration-release.ts`)。
+   * 闸门只说明「库里没有要整理的东西」,它**不**说明「主进程答得上来」—— 而启动路径上
+   * 建窗被提到了 `registerIpc()` 之前(窗口必须早于闸门,闸门必须早于 `openDatabase()`,
+   * 见 `main/index.ts`),所以后者是真的有可能还没到的。
+   *
+   * ★ 它和 `phase` 是两件事,不能合并:`idle` 说的是库里没事干,主进程可能还在开库;
+   * 反过来,`failed` 之后用户点了「跳过并继续」,那一刻 `phase` 不是 `idle`,
+   * 但主进程可能早就答得上来了。
+   *
+   * ★ 闸门这一侧恒为 false —— 它不知道、也不该猜启动序列走到哪了。播出去的那一份由
+   * `main/ipc/data-migration.ts` 的 `outward()` 盖章,`announceIpcReady()` 是唯一
+   * 能把它翻成 true 的地方。
+   *
+   * 不满足会怎样:没有迁移的那次启动里,渲染层起得比主进程快时,首屏被置成
+   * 「首屏握手失败: No handler registered for 'app:getBootstrap'」—— 而重载一次就正常,
+   * 于是看上去像偶发。
+   */
+  ipcReady: boolean
 }

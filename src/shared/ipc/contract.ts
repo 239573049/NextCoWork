@@ -12,7 +12,7 @@
  * | §2 每个 API 方法内部硬编码目标频道 | **由契约生成白名单**,preload 运行时校验 |
  */
 import type { AgentError } from '../agent/error'
-import type { AgentEvent, RunSnapshot } from '../agent/event'
+import type { ActiveRunEntry, AgentEvent, RunSnapshot } from '../agent/event'
 import type { AgentMessage, ContentPart } from '../agent/message'
 import type { ContextCheckpoint, ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
@@ -1071,6 +1071,23 @@ export interface IpcEventMap {
   'connection:changed': void
   'connection:auth': SshAuthRequest
   'agent:event': AgentEventEnvelope
+  /**
+   * 「现在还有哪些顶层 run 活着」的**权威集合**,每次有 run 起止就全量广播一次。
+   *
+   * 需求:渲染层那三处运行中指示(外层工作区 Tab、内层对话 Tab、侧边栏会话行)
+   * 读的是渲染层自己的一份投影,而那份投影原先**只能**靠 `agent:event` 里的
+   * `run_end` 收敛。那条流是按 run 订阅定向推送的,于是有两类 run 的结束永远送不到:
+   * 定时任务起的 run(没有任何窗口订阅过它,`RunPump.flush()` 整批丢弃),
+   * 以及 ⌘R 重载后被 bootstrap 补回索引、但对应会话 store 还没建出来的那些。
+   * 不满足会怎样:**Agent 早就结束了,工作区 Tab 上的圆点还在转**,
+   * 状态行写着「已完成」,重启应用才消 —— 且全程零报错。
+   *
+   * ★ 走 `emitToAll` 而不是 run 主题:谁在跑是**全局事实**,不是「我这个窗口在看的那个 run」。
+   *   它带不了任何转录内容(那仍然只发给订阅者),所以广播不泄露任何东西。
+   * ★ 全量而不是增量:增量要求每条都不丢,而这条广播存在的全部意义就是
+   *   **能在丢过消息之后自己收敛**。
+   */
+  'agent:activeRuns': { runs: ActiveRunEntry[] }
   'terminal:data': { id: string; seq: number; chunk: string }
   'terminal:exit': { id: string; code: number }
   /**
@@ -1569,6 +1586,7 @@ export const EVENT_CHANNELS = {
   'connection:changed': 1,
   'connection:auth': 1,
   'agent:event': 1,
+  'agent:activeRuns': 1,
   'terminal:data': 1,
   'terminal:exit': 1,
   'window:maximized': 1,

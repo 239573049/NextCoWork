@@ -73,7 +73,15 @@ export interface SessionListItem {
   updatedAt: number
   archived: boolean
   favorited: boolean
-  /** 有活跃 run 时侧边栏显示圆点角标;来源是 RunRegistry,不是 UI 状态 */
+  /**
+   * 取列表那一刻 RunRegistry 里有没有活跃 run。
+   *
+   * ★ **这是快照,不是订阅**:它只在有人重拉列表时更新,而 run 结束时主进程
+   * 并不广播 `sessions:changed`。拿它画「运行中」角标的话,对话跑完之后那颗
+   * 转圈会一直挂着,直到用户恰好改了某条会话(改名 / 归档)才消失。
+   * 角标请读渲染层的运行中索引(`stores/session.ts` 的 `useRunIndex`)——
+   * 它由 `agent:activeRuns` 广播维持,run 一结束就收。
+   */
   running: boolean
 }
 

@@ -27,17 +27,18 @@ Authoritative reference for `package.json` (the manifest) and for how plugin cap
   "hostPermissions": ["https://api.acme.com/*"],  // net + in-app browser allow-list, https only
   "allowedCommands": ["git"],                  // process.exec allow-list, bare executable names
   "dependencies": { "acme.core": "^1.0.0" },   // other plugins you connect() to; same range syntax
-  "contributes": { /* commands / menus / views / customEditors / cardViews / tools / webApps / … */ }
+  "contributes": { /* see references/contribution-points.md — 15 keys, 4 of them inert */ }
 }
 ```
 
 ### ★ `engines.nextcowork` is the **plugin API version**, not the app version
 
-The host declares which plugin API it implements (currently `0.3.0`, see
+The host declares which plugin API it implements (currently `0.3.1`, see
 `src/shared/plugin/api-version.ts`); `engines` is matched against **that**, never against
 the app's own version. These two were once conflated — the host compared `^0.2.0` against
 `app.getVersion()` (2.x), so every plugin written from the official template installed as
-**"load failed"**. Write `^0.3.0`. Manifests declaring `^0.2.0` still load, with a
+**"load failed"**. Write `^0.3.0` — as a *floor*, it should name the oldest API you actually
+need, not the newest one that exists. Manifests declaring `^0.2.0` still load, with a
 deprecation diagnostic.
 
 ### `kind: "webapp"` — a plugin with no code at all
@@ -129,7 +130,7 @@ For the method-by-method map (including every `null` method), read `references/p
 
 ## What needs **zero** permissions
 
-- Contributing anything: commands, menus, keybindings, views, custom editors, card views, tools, themes, configuration, **web apps**. Contribution points are declarative; the user saw them at install.
+- Contributing anything: commands, menus, keybindings, views, custom editors, card views, tools, configuration, **web apps**, **bundled Skills**, themes. Contribution points are declarative; the user saw them at install. Full list with per-key status in `references/contribution-points.md`.
 - The **document channel** used by custom editors (read/write the one bound file via `ncw:doc:*` postMessage) — the host proxies it, the path never appears in messages. This is why a pure custom editor (image/markdown/excalidraw-style) needs an empty `permissions` array.
 - `env.appInfo`, `env.openExternal` (https only), `appearance.get/onDidChange`, `permissions.*`, `diagnostics.log`, `window.showQuickPick/showInputBox/showConfirm/progress*/setStatusBarItem`, `tabs.openWebApp` (the URL is fixed in the manifest), `configuration.get`, `commands.register/execute` (own), `tools.register/unregister`, `tool.progress`, `customEditors.setDirty`, `plugins.expose`.
 

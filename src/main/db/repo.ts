@@ -1882,13 +1882,39 @@ export function findAttachmentByChecksum(
  * 附件行 → 是否属于当前作用域。
  *
  * 判据是**它挂的那个会话**:附件没有自己的归属字段,而 `session_id` 就是它
- * 实际归属的那个会话。`session_id` 为空的是「上传了但还没发出去、也没绑定会话」
- * 的裸文件,只在 `local` 可见 —— 与 `workspaceScopeVisible` 对 `''` 的处理同一个道理。
+ * 实际归属的那个会话。
+ *
+ * `session_id` 为空的行原先一律走 `workspaceScopeVisible('')`(即只有 `local`
+ * 可见),理由与 `workspaceScopeVisible` 对 `''` 的处理相同。★ 但 `scope='session'`
+ * 的草稿行不适用那条:它的归属早就写在 `owner_id` 上了(`session_id` 有外键,
+ * 要等消息提交才能填,见 `putDraftAttachment`),所以改用 `draftOwnerScopeVisible`
+ * ——与 `listDraftAttachments` 同一条规则,原先那条对其余 scope 保持不变。
+ *
+ * 不满足会怎样:登录账户后草稿附件「列得出来、却删不掉」——`listDraftAttachments`
+ * 按 owner 判定所以返回它,`getAttachmentRow` 按 `''` 判定所以拿不到,
+ * `removeAttachment` 于是静默 return。表现是用户删掉输入框里的图,切一下会话
+ * 图片又回来了,全程零报错;`prepareWorkspaceUpload` 也会因此一律抛 `unbound`。
  */
 function attachmentScopeVisible(row: AttachmentRow): boolean {
-  return row.sessionId === null || row.sessionId === undefined
-    ? workspaceScopeVisible('')
-    : sessionScopeVisible(row.sessionId)
+  if (row.sessionId !== null && row.sessionId !== undefined) return sessionScopeVisible(row.sessionId)
+  const owner = row.ownerId
+  if (row.scope !== 'session' || owner === null || owner === undefined || owner === '') {
+    return workspaceScopeVisible('')
+  }
+  return draftOwnerScopeVisible(owner)
+}
+
+/**
+ * 草稿附件(`session_id` 还没填)的归属判定:看 `owner_id` 那个会话。
+ *
+ * ★ 「会话行还不存在」不算不可见:草稿附件恰恰是在会话行落库**之前**上传的
+ * (渲染层先铸会话 id,会话行要等首条消息提交才建)。判成不可见的话,新对话里
+ * 传的图既恢复不了也删不掉。没有会话行的草稿也不构成跨账户泄露 —— 它还没挂到
+ * 任何工作区,自然不属于任何账户。
+ */
+function draftOwnerScopeVisible(sessionId: string): boolean {
+  const row = stmt('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId)
+  return row === undefined || workspaceScopeVisible(String(row['workspace_id']))
 }
 
 export function getAttachmentRow(id: string): AttachmentRow | undefined {
@@ -1926,14 +1952,12 @@ export function findAttachmentByOwnerAndFileName(ownerId: string, fileName: stri
  * 不经过 `getSession`,所以它是唯一一条绕过归属判定的入口 —— 少了这一句,
  * 跨账户随便给一个会话 id 就能列出别人的待发附件。
  *
- * ★ 但「会话行还不存在」不算不可见:草稿附件恰恰是在会话行落库**之前**上传的
- * (渲染层先动手生成会话 id,会话行要等首条消息提交才建),这一步判成不可见,
- * 重启后的草稿恢复就永远拿到空列表。没有会话行的草稿也不构成跨账户泄露 ——
- * 它还没挂到任何工作区,自然不属于任何账户。
+ * ★ 但「会话行还不存在」不算不可见,理由见 `draftOwnerScopeVisible` ——
+ * 那条判定现在由它和 `attachmentScopeVisible` 共用:两处各写一份的时候,
+ * 「列得出来却删不掉」正是它们漂开之后的症状。
  */
 export function listDraftAttachments(sessionId: string): AttachmentRow[] {
-  const row = stmt('SELECT workspace_id FROM sessions WHERE id = ?').get(sessionId)
-  if (row !== undefined && !workspaceScopeVisible(String(row['workspace_id']))) return []
+  if (!draftOwnerScopeVisible(sessionId)) return []
   return stmt(
     `SELECT * FROM attachments WHERE owner_id = ? AND status = 'draft' ORDER BY created_at`
   )

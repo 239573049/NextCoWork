@@ -107,7 +107,15 @@ export function DiffBlock({
   maxRows?: number;
 }): ReactNode {
   const { t } = useI18n();
-  const all = computeDiff(oldStr, newStr);
+  /*
+    需求：工具卡片的 diff 现在**在参数还在流的时候就画**（见 ToolDetail 的 MutateDetail），
+    也就是每一个流式帧都会走一次这里。LCS 是 O(n·m)，不 memo 的话一次几百行的
+    Edit 会把它按帧重算 —— 表现为流式写文件时整个界面发涩，而 CPU profile 里
+    只看得到一片 diff 计算，看不出是谁在反复触发。
+    入参没变时这层直接跳过；入参在变时无可避免，那一份预览本来就被
+    `MAX_PARTIAL_JSON_CHARS` 截在 64KB 以内。
+  */
+  const all = useMemo(() => computeDiff(oldStr, newStr), [oldStr, newStr]);
   const rows = all.slice(0, maxRows);
   const omitted = all.length - rows.length;
   return (

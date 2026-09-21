@@ -4,7 +4,7 @@ import { Streamdown } from '@lobehub/streamdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { useI18n } from '../../i18n'
+import { useI18n, type TranslationKey } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { CodeBlock } from './CodeBlock'
 import { MarkdownImage } from './MarkdownImage'
@@ -98,8 +98,10 @@ function MarkdownPre({ node }: ExtraProps): ReactNode {
 function MarkdownLink({ href, title, children, node: _node, ...props }: React.ComponentProps<'a'> & ExtraProps): ReactNode {
   const { t } = useI18n()
   const state = useContext(RenderContext)!
-  const { resolveLink, onOpenFile, onOpenExternal } = useMarkdownEnvironment()
-  const [failed, setFailed] = useState(false)
+  const { resolveLink, onOpenFile, checkFile, onOpenExternal } = useMarkdownEnvironment()
+  // 打不开的原因。外部链接的失败由本组件自己写（`markdown.linkFailed`），
+  // 文件引用则由宿主给一个 key —— 它才知道是「不存在」还是「没权限」。
+  const [failure, setFailure] = useState<TranslationKey | null>(null)
   if (href === INCOMPLETE_LINK) return <>{children}</>
   const target = resolveLink ? resolveLink(href ?? '') : resolveMarkdownTarget('', href ?? '')
   if (target.kind === 'blocked' || target.kind === 'file' && !onOpenFile) {
@@ -110,17 +112,29 @@ function MarkdownLink({ href, title, children, node: _node, ...props }: React.Co
   return <>
     <a {...props} href={destination} title={title} rel="noreferrer noopener" target={target.kind === 'external' ? '_blank' : undefined}
       onClick={(event) => {
-        setFailed(false)
+        setFailure(null)
         if (target.kind === 'external') {
           if (onOpenExternal) {
             event.preventDefault()
-            void Promise.resolve().then(() => onOpenExternal(target.url)).catch(() => setFailed(true))
+            void Promise.resolve().then(() => onOpenExternal(target.url)).catch(() => setFailure('markdown.linkFailed'))
           }
           return
         }
         event.preventDefault()
         if (target.kind === 'file') {
-          void Promise.resolve().then(() => onOpenFile?.(target.path, target.fragment)).catch(() => setFailed(true))
+          /*
+            需求：文件引用要先确认打得开、再开 —— 链接指向的文件被删掉/改名之后，
+            直接开会给右侧工作台留一个只显示「文件不存在」的 Tab，而用户还得自己去关掉它。
+            预检失败时不开 Tab，把宿主给的原因画在链接旁边。
+          */
+          void (async () => {
+            const blocked = checkFile === undefined ? null : await checkFile(target.path)
+            if (blocked !== null) {
+              setFailure(blocked)
+              return
+            }
+            await onOpenFile?.(target.path, target.fragment)
+          })().catch(() => setFailure('markdown.linkFailed'))
         } else {
           const fragment = target.fragment
           const element = !fragment ? state.container.current : Array.from(state.container.current?.querySelectorAll<HTMLElement>('[id]') ?? [])
@@ -128,7 +142,7 @@ function MarkdownLink({ href, title, children, node: _node, ...props }: React.Co
           element?.scrollIntoView({ block: 'start' })
         }
       }}>{children}</a>
-    {failed && <span className="markdown-link-error" role="alert">{t('markdown.linkFailed')}</span>}
+    {failure !== null && <span className="markdown-link-error" role="alert">{t(failure)}</span>}
   </>
 }
 

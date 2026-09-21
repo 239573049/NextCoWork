@@ -260,10 +260,32 @@ export class RunHandle {
 export class RunRegistry {
   private readonly runs = new Map<string, RunHandle>()
   private readonly abortAllListeners = new Set<() => void>()
+  private readonly activeListeners = new Set<() => void>()
 
   onAbortAll(listener: () => void): Unsubscribe {
     this.abortAllListeners.add(listener)
     return () => this.abortAllListeners.delete(listener)
+  }
+
+  /**
+   * 「还有哪些顶层 run 活着」变了。
+   *
+   * 需求:渲染层的运行中指示必须能在**没订阅过那个 run** 的情况下也收敛
+   * (定时任务的 run、⌘R 重载后还没打开的会话)。事件流做不到这件事 ——
+   * 它按 run 主题定向推,没有订阅者时 `RunPump.flush()` 整批丢弃。
+   * 不满足会怎样:run 早就结束了,外层工作区 Tab 上的圆点一直转到应用重启。
+   *
+   * ★ 只为**顶层** run 通知。子 run 的起止不改变这个集合(渲染层的角标本来就
+   * 不数子 run,见 `adoptActiveSubagents`),一次编排派十几个子代理时,
+   * 在这里不设防就是十几次内容完全相同的广播。
+   */
+  onActiveChange(listener: () => void): Unsubscribe {
+    this.activeListeners.add(listener)
+    return () => this.activeListeners.delete(listener)
+  }
+
+  private notifyActiveChange(): void {
+    for (const listener of this.activeListeners) listener()
   }
 
   activeBackgroundChildrenOfSession(sessionId: string): RunHandle[] {
@@ -282,6 +304,17 @@ export class RunRegistry {
 
     if (req.parentRunId !== undefined) {
       this.runs.get(req.parentRunId)?.children.add(req.runId)
+    } else {
+      /*
+        ★ 这个监听器**不影响 `reap()`**:`emit()` 在派发完 run_end 之后会
+        `listeners.clear()`,所以 `listenerCount` 立刻回到 0。
+        (`reap` 拿 listenerCount 当「还有没有人在看」的判据,常驻监听器会让
+        已结束的 run 永远回收不掉,内存里那份事件日志跟着一起留下。)
+      */
+      handle.on((event) => {
+        if (event.type === 'run_end') this.notifyActiveChange()
+      })
+      this.notifyActiveChange()
     }
     return handle
   }

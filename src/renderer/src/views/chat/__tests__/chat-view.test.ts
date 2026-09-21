@@ -2,7 +2,7 @@ import { act, createElement, type ComponentProps } from 'react'
 import { createRoot } from 'react-dom/client'
 import { JSDOM } from 'jsdom'
 import { describe, expect, it, vi } from 'vitest'
-import { assistantMessage, userMessage } from '../../../../../shared/agent/message'
+import { assistantMessage, toolResultMessage, userMessage } from '../../../../../shared/agent/message'
 import { emptyTranscript } from '../../../../../shared/agent/transcript'
 import { DEFAULT_WORKSPACE_SETTINGS, type Workspace } from '../../../../../shared/domain/workspace'
 import { I18nProvider } from '../../../i18n'
@@ -119,6 +119,122 @@ describe('chat history subscription boundary', () => {
     } finally {
       await act(async () => root.unmount())
       releaseSession('history-boundary')
+      useModelsStore.setState(models, true)
+      vi.restoreAllMocks()
+      dom.window.close()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+/**
+ * 清单的「还在跑吗」是 ChatView 推出来、交给 TaskChecklist 展示的。
+ * 这里钉住三档在真实转录数据下的切换：唯一判据是**当前 run 自己写成功过清单**。
+ */
+describe('chat task checklist execution', () => {
+  it('keeps historical and unconfirmed lists as snapshots and stops only the current confirmed list', async () => {
+    const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
+    Object.assign(dom.window, { nextcowork: {
+      getPathForFile: () => '',
+      on: () => () => {},
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'agent:listInteractions' ? []
+        : channel === 'goal:get' ? undefined
+          // 本用例的转录带着 runId，回合底部的改动审查卡会去拉改动集 —— 这里没有改动集
+          : channel === 'review:getChangeSet' ? null
+            : { messages: [], session: { id: 'checklist-run', workspaceId: 'workspace', model: '', mode: 'code' } } })
+    } })
+    vi.stubGlobal('window', dom.window)
+    vi.stubGlobal('document', dom.window.document)
+    vi.stubGlobal('HTMLElement', dom.window.HTMLElement)
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    vi.stubGlobal('requestAnimationFrame', () => 1)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} })
+    const container = document.getElementById('root')!
+    const root = createRoot(container)
+    const models = useModelsStore.getState()
+    useModelsStore.setState({ loaded: true })
+    const session = sessionStore('checklist-run')
+    const workspace: Workspace = { id: 'workspace', name: 'Workspace', rootPath: '/workspace',
+      createdAt: 1, lastOpenedAt: 1, settings: { ...DEFAULT_WORKSPACE_SETTINGS } }
+    const legacyCall = assistantMessage('legacy-call', [
+      { type: 'tool_call', callId: 'legacy-1', name: 'TodoWrite',
+        input: { todos: [{ content: 'Legacy step', activeForm: 'Doing a legacy step', status: 'in_progress' }] } }
+    ], 2)
+    const legacyResult = toolResultMessage('legacy-result', [
+      { type: 'tool_result', callId: 'legacy-1', output: { content: 'ok' }, isError: false }
+    ], 3)
+    const messages = [userMessage('user', [{ type: 'text', text: 'Do the work' }], 1), legacyCall, legacyResult]
+    session.setState({
+      transcript: { ...emptyTranscript(), status: 'done', messages, messageRuns: { 'legacy-call': 'run-1', 'legacy-result': 'run-1' } },
+      activeRunId: null
+    })
+    // 输入框上方那条排在转录之后；工具卡片展开时同屏会有第二条，所以只取最后一条。
+    const lastChecklist = (): Element | null => {
+      const lists = container.querySelectorAll('[data-testid="task-checklist"]')
+      return lists[lists.length - 1] ?? null
+    }
+    const executionState = (): string | null => lastChecklist()?.getAttribute('data-execution-state') ?? null
+    const spinners = (): number => lastChecklist()?.querySelectorAll('.lucide-loader-circle').length ?? -1
+    try {
+      await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
+        createElement(ChatView, { sessionId: 'checklist-run', tabId: 'fixture-tab', workspace, fallbackModel: { model: '' } }) })))
+      // 需求：重载的历史没有本窗口的 run_end 事实，只能显示快照，不能报本轮未完成。
+      expect(executionState()).toBe('snapshot')
+      expect(spinners()).toBe(0)
+      expect(lastChecklist()?.textContent).not.toContain('Doing a legacy step')
+      expect(lastChecklist()?.textContent).not.toContain('Run ended with')
+
+      await act(async () => session.setState({
+        activeRunId: 'run-2',
+        transcript: { ...session.getState().transcript, status: 'running', runStartedAt: 3 }
+      }))
+      expect(executionState()).toBe('snapshot')
+
+      const currentCall = assistantMessage('current-call', [
+        { type: 'tool_call', callId: 'current-1', name: 'TodoWrite', input: { todos: [
+          { content: 'Wire checklist', activeForm: 'Wiring the checklist', status: 'in_progress' },
+          { content: 'Run tests', activeForm: 'Running tests', status: 'pending' },
+          { content: 'Write report', activeForm: 'Writing the report', status: 'completed' }
+        ] } }
+      ], 4)
+      const currentResult = toolResultMessage('current-result', [
+        { type: 'tool_result', callId: 'current-1', output: { content: 'ok' }, isError: false }
+      ], 5)
+      // 需求：长工具同批等待时可能只有 call；没有成功回执，不得提前采纳这份清单。
+      await act(async () => session.getState().applyEvents([{ type: 'message_commit', message: currentCall }]))
+      expect(executionState()).toBe('snapshot')
+      expect(spinners()).toBe(0)
+      expect(lastChecklist()?.textContent).toContain('Legacy step')
+
+      // 走真实事件入口，确认 tool_result 同样归入当前 run，配对成功后才变成实时进度。
+      await act(async () => session.getState().applyEvents([{ type: 'message_commit', message: currentResult }]))
+      expect(executionState()).toBe('running')
+      expect(spinners()).toBe(1)
+      expect(lastChecklist()?.textContent).toContain('Wiring the checklist')
+
+      // run_end 清空 activeRunId，而清单还剩两项没做完。
+      await act(async () => session.getState().applyEvents([{ type: 'run_end', status: 'done', at: 6 }]))
+      expect(executionState()).toBe('stopped')
+      expect(spinners()).toBe(0)
+      expect(lastChecklist()?.textContent).not.toContain('Wiring the checklist')
+      expect(lastChecklist()?.textContent).toContain('Run ended with 2 unfinished task(s)')
+
+      // 需求：无关的新问题结束后，旧清单仍是快照，不能把旧阻塞算到新一轮头上。
+      await act(async () => session.setState({ activeRunId: 'run-3', transcript: {
+        ...session.getState().transcript, status: 'running', runStartedAt: 7, runEndedAt: undefined
+      } }))
+      await act(async () => session.getState().applyEvents([
+        { type: 'message_commit', message: userMessage('unrelated-user', [{ type: 'text', text: 'Another question' }], 7) },
+        { type: 'message_commit', message: assistantMessage('unrelated-answer', [{ type: 'text', text: 'Another answer' }], 8) },
+        { type: 'run_end', status: 'done', at: 9 }
+      ]))
+      expect(executionState()).toBe('snapshot')
+      expect(lastChecklist()?.textContent).not.toContain('Run ended with')
+      expect(lastChecklist()?.textContent).toContain('Task checklist · 1/3 completed')
+    } finally {
+      await act(async () => root.unmount())
+      releaseSession('checklist-run')
       useModelsStore.setState(models, true)
       vi.restoreAllMocks()
       dom.window.close()

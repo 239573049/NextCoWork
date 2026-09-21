@@ -20,6 +20,11 @@
  * 2. **按主键 id 判缺失。** id 是 ULID,两个库各自生成的 id 不可能撞;
  *    本机实测 273 条会话 / 4 万条消息零碰撞。id 也在的话就是同一行,跳过
  *    (而不是比时间戳决定谁赢 —— 那正是第 1 条要避免的判断)。
+ *
+ *    ★ 判据必须覆盖**每一张**表,不能只判 `sessions`:子表的行不一定跟着父表走。
+ *    `usage_records` 只增不删(`schema.ts` 第 20 条)、也没有指向 `sessions` 的外键,
+ *    会话被删掉时它的用量行留在库里 —— 于是「这条会话缺 ⇒ 它的子行也缺」是错的,
+ *    而错的表现是一次启动停在闸门上:`UNIQUE constraint failed: usage_records.id`。
  * 3. **每个会话一个事务。** 一条会话连同它的消息/runs/附件/计划一起进去,
  *    要么全在要么全不在。中途失败时已提交的会话留着,重跑会从缺失的那些继续
  *    —— 于是「重试」是幂等的,不需要先回滚。
@@ -208,6 +213,22 @@ function sharedColumns(target: DatabaseSync, table: string): string[] {
 
 function countRows(d: DatabaseSync, sql: string): number {
   return Number(d.prepare(sql).get()?.['n'] ?? 0)
+}
+
+/**
+ * 目标表的主键列,按主键序号排。
+ *
+ * ★ 从 `PRAGMA table_info` 读,不写死 `id`:本模块插的表里有一张的主键是复合的
+ *   (`file_snapshots` = `run_id` + `file_path`),写死的话那一张的判重会**静默**
+ *   失效 —— 于是又回到「只有唯一约束抛错才发现」的老路,而那正是这次要修的东西。
+ */
+function primaryKeyColumns(target: DatabaseSync, table: string): string[] {
+  return target
+    .prepare(`PRAGMA main.table_info(${table})`)
+    .all()
+    .filter((c) => Number(c['pk'] ?? 0) > 0)
+    .sort((a, b) => Number(a['pk'] ?? 0) - Number(b['pk'] ?? 0))
+    .map((c) => String(c['name']))
 }
 
 /** 差集的统一写法:`源表里 id 不在目标表里的行数`。 */
@@ -420,6 +441,10 @@ function insertSession(target: DatabaseSync, sessionId: string): { messages: num
  *   我们的判断错了 —— 那时候**要让它抛**,让这次会话整体回滚、把错误摆到闸门上。
  *   用 OR IGNORE 的话这种错会静默变成「少了几条消息」,而那正是这次要消灭的
  *   那类故障。
+ *
+ * ★ 子表那条路(`insertByColumn`)把判重写进了 SQL,但同样没有用 OR IGNORE:
+ *   它判的是子表自己的主键,判完之后唯一约束仍然是兜底 —— 非主键的唯一性
+ *   (某个索引、某条外键)坏了照样抛。
  */
 function insertByIds(
   target: DatabaseSync,
@@ -442,6 +467,11 @@ function insertByIds(
  * `parent` 为空时收窄条件就是列本身;给定时先从 `parent` 表里选出属于这条会话的
  * 父行 id,再用它筛子表 —— 这是 `plan_revisions` / `file_snapshots` 这两张
  * 没有 `session_id` 的表唯一能挂上来的方式。
+ *
+ * ★ **判重写在 SQL 里,用的是子表自己的主键。** 子表的「缺」推不出来:会话缺了
+ *   不等于它的每一行都缺(`usage_records` 的行活得比会话长,见文件头第 2 条)。
+ *   只按父表判的话,一条会话重搬时会撞上 `UNIQUE constraint failed:
+ *   usage_records.id` —— 启动停在闸门上,而错误页上那句话完全看不出是「多判了」。
  */
 function insertByColumn(
   target: DatabaseSync,
@@ -458,9 +488,21 @@ function insertByColumn(
     parent === undefined
       ? `"${column}" IN (${placeholders})`
       : `"${column}" IN (SELECT id FROM "${parent.from}" WHERE "${parent.column}" IN (${placeholders}))`
+  const pk = primaryKeyColumns(target, table)
+  /*
+    ★ 没有声明主键的表(理论上会出现)不加这一条 —— 那等于回到旧行为,而不是
+    把它当成「什么都不用判」。主键为 NULL 的行也漏得过去(SQLite 的 UNIQUE 里
+    NULL 互不相等),但那种行本来也撞不上唯一约束,不构成新的故障。
+  */
+  const dedupe =
+    pk.length === 0
+      ? ''
+      : ` AND NOT EXISTS (SELECT 1 FROM "${table}" x WHERE ${pk
+          .map((c) => `x."${c}" = s."${c}"`)
+          .join(' AND ')})`
   const sql =
     `INSERT INTO "${table}" (${list}) ` +
-    `SELECT ${list} FROM ${SOURCE_SCHEMA}."${table}" WHERE ${scope}`
+    `SELECT ${list} FROM ${SOURCE_SCHEMA}."${table}" s WHERE ${scope}${dedupe}`
   return Number(target.prepare(sql).run(...values).changes ?? 0)
 }
 
