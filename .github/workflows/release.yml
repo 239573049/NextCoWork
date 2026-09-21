@@ -80,7 +80,11 @@ jobs:
     name: Build ${{ matrix.name }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    # 需求：30 分钟在 macOS 上不够。Build application 一步包含 electron-builder 的
+    # dmg+zip 双目标构建、签名与公证（公证每份产物都要等 Apple 的队列，一个 job 两份），
+    # v2.2.4 首次启用公证后两个 macOS job 都在 30:20 被 timeout 掐死，publish 因此被跳过、
+    # Release 永远停在草稿。Windows/Ubuntu 实测 6 分钟内完成，上调只放宽上限，不拖慢它们。
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
