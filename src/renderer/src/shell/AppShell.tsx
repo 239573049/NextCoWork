@@ -42,6 +42,7 @@ import { useTabsStore } from "../stores/tabs";
 import { useWindowStore } from "../stores/window";
 import { FeatureView } from "../views/registry";
 import { BrowserFeature } from "../views/browser/BrowserFeature";
+import { RewardsOverlay } from "../views/rewards/RewardsOverlay";
 import { OuterTabBar } from "./OuterTabBar";
 import { UpdateIndicator } from "./UpdateIndicator";
 import { Sidebar } from "./Sidebar";
@@ -102,6 +103,7 @@ export function AppShell({
     bottomPanelOpen,
     settingsPage,
     scheduledUnread,
+    rewardsOpen,
   } = useWindowStore();
   const win = useWindowStore();
   useEffect(() => onScheduledChanged((event) => {
@@ -634,6 +636,12 @@ export function AppShell({
         onNavigate={win.openSettings}
         onClose={win.closeSettings}
       />
+
+      {/*
+        奖励中心（账户菜单 →「邀请好友」）。和设置浮层同处一层、同样不 portal ——
+        理由见 `RewardsOverlay.tsx` 文件头：它同样盖住那条 `app-drag` 的标题栏。
+      */}
+      <RewardsOverlay open={rewardsOpen} onClose={win.closeRewards} />
     </div>
   );
 }

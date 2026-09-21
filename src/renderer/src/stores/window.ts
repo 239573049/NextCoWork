@@ -84,6 +84,18 @@ interface WindowState {
   settingsPage: SettingsPageId | null
 
   /**
+   * 奖励中心（邀请好友）那个全屏浮层开没开。
+   *
+   * ★ **不落盘**，和 `settingsPage` 同类：它是这个窗口此刻的呈现状态，
+   * 不是用户的偏好 —— 启动就自己弹出一个邀请页是 bug 不是恢复。
+   *
+   * 放在 store 而不是 `AppShell` 的 useState：发起它的是侧边栏最下面那颗账户菜单里
+   * 的一项（`AccountMenu`），而浮层挂在 AppShell 上。经 store 走省掉
+   * 「Sidebar 再加一个只为透传的 prop」这一层 —— 同 `settingsPage` 的先例。
+   */
+  rewardsOpen: boolean
+
+  /**
    * 窗口是不是最大化的 —— 自绘的中间那颗窗口按钮据此在「□」和「双叠框」之间换字形
    * (`shell/WindowControls.tsx`,仅 Windows/Linux)。
    *
@@ -114,6 +126,8 @@ interface WindowState {
   setBottomPanelHeight: (px: number) => void
   openSettings: (page?: SettingsPageId) => void
   closeSettings: () => void
+  openRewards: () => void
+  closeRewards: () => void
   setMaximized: (maximized: boolean) => void
 }
 
@@ -255,6 +269,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
     rightPanelWidth: RIGHT_PANEL.def,
     bottomPanelHeight: BOTTOM_PANEL.def,
     settingsPage: null,
+    rewardsOpen: false,
     maximized: false,
     scheduledUnread: false,
     clearScheduledUnread: () => set({ scheduledUnread: false }),
@@ -529,6 +544,14 @@ export const useWindowStore = create<WindowState>((set, get) => {
 
     closeSettings() {
       set({ settingsPage: null })
+    },
+
+    openRewards() {
+      set({ rewardsOpen: true })
+    },
+
+    closeRewards() {
+      set({ rewardsOpen: false })
     },
 
     setMaximized(maximized) {

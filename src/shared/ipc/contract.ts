@@ -69,6 +69,7 @@ import type { Workspace, WorkspaceSettings } from '../domain/workspace'
 import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, PreparedWorkspace, RemoteDirectory, SshAuthRequest, SshAuthResponse } from '../domain/environment'
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
+import type { ReferralState } from '../domain/referral'
 import type { MigrationState } from '../domain/data-migration'
 import type { SyncConflict, SyncPreview, SyncSetupRequest, SyncStatus } from '../domain/config-sync'
 import type {
@@ -243,6 +244,17 @@ export interface IpcInvokeMap {
   'clientAuth:signOut': { req: void; res: ClientAuthState }
   'clientAuth:getUser': { req: void; res: ClientAuthUser | null }
   'clientAuth:getUsage': { req: { from?: string; to?: string }; res: ClientUsageEntry[] }
+  /**
+   * 奖励中心的一次性快照（邀请码 / 链接 / 活动配置 / 统计 / 两张记录表）。
+   *
+   * ★ **没有推送频道，只有拉取。** 邀请数据的变化由对方的注册和消费触发，
+   * 桌面端这边没有任何本地事件能预告它 —— 做成订阅只会是一条永远不发的频道。
+   * 面板打开时拉一次，用户按刷新再拉一次。
+   *
+   * 失败不抛：`res` 自带 `unavailable` 分支（未登录 / 平台没这条接口 / 网络），
+   * 三种空态的文案和用户下一步都不同，见 `shared/domain/referral.ts`。
+   */
+  'referral:get': { req: void; res: ReferralState }
   'configSync:getStatus': { req: void; res: SyncStatus }
   /** 密码只用于本次创建/解锁 vault，不进入设置或事件广播。 */
   'configSync:setup': { req: SyncSetupRequest; res: SyncStatus }
@@ -1311,6 +1323,7 @@ export const INVOKE_CHANNELS = {
   'clientAuth:signOut': 1,
   'clientAuth:getUser': 1,
   'clientAuth:getUsage': 1,
+  'referral:get': 1,
   'configSync:getStatus': 1,
   'configSync:setup': 1,
   'configSync:getConflicts': 1,

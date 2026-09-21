@@ -28,6 +28,7 @@ import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
 import { widgetZh, widgetEn } from './widget';
 import { migrationZh, migrationEn } from './migration';
 import { accountMenuZh, accountMenuEn } from './account-menu';
+import { rewardsZh, rewardsEn } from './rewards';
 import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import {
   pluginMessages,
@@ -71,6 +72,7 @@ const ZH: Messages = {
   ...editorZh,
   ...markdownZh,
   ...accountMenuZh,
+  ...rewardsZh,
   "app.handshakeFailed": "首屏握手失败：{error}",
   "auth.tagline": "把重复的交给它，时间留给你",
   "auth.login": "登录",
@@ -2043,6 +2045,7 @@ const EN: Messages = {
   ...widgetEn,
   ...migrationEn,
   ...accountMenuEn,
+  ...rewardsEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",

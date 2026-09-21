@@ -143,6 +143,7 @@ import {
 } from './import'
 import { initImports, setImportChangeListener, setImportSessionNotifier, setImportWorkspaceNotifier } from '../imports/service'
 import { getClientAuthState, startClientLogin, selectClientTeam, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
+import { getReferralCenter } from './referral'
 import {
   confirmInitialConfigSync,
   getConfigSyncPreview,
@@ -278,6 +279,7 @@ const handlers: HandlerMap = {
   'clientAuth:signOut': () => signOutClient(),
   'clientAuth:getUser': () => getClientUser(),
   'clientAuth:getUsage': (req) => getClientUsage(req),
+  'referral:get': () => getReferralCenter(),
   'configSync:getStatus': () => getConfigSyncStatus(),
   'configSync:setup': (req) => setupConfigSync(req),
   'configSync:getConflicts': () => getConfigSyncConflicts(),
