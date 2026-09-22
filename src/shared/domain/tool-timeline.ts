@@ -295,7 +295,14 @@ export type RunOutcome = 'running' | 'ok' | 'error' | 'aborted'
 export interface WorkspaceDecision {
   /** 是否把过程段收进「工作区」外壳 */
   collapse: boolean
-  /** 收进去了,但默认展开(有失败时) */
+  /**
+   * 收进去之后是否默认展开。
+   *
+   * 需求：本轮正常结束就应该收起，让用户一眼看到结尾正文；曾经有过失败工具调用
+   * 不再是例外——之前「有失败就默认展开」会被后台任务（如更新检查抓取失败）
+   * 永久触发，表现为每次打开会话「用时」面板都是展开的，且看不出是渲染问题还是
+   * 真的出了状况。用户要看失败细节，点开工作区一次就行。
+   */
   defaultOpen: boolean
 }
 
@@ -311,17 +318,15 @@ export interface WorkspaceDecision {
 export function decideWorkspace({
   outcome,
   itemCount,
-  hasTrailingText,
-  errorCount
+  hasTrailingText
 }: {
   outcome: RunOutcome
   itemCount: number
   hasTrailingText: boolean
-  errorCount: number
 }): WorkspaceDecision {
   const collapse =
     outcome === 'ok' && hasTrailingText && itemCount >= WORKSPACE_MIN_ITEMS
-  return { collapse, defaultOpen: collapse && errorCount > 0 }
+  return { collapse, defaultOpen: false }
 }
 
 /**

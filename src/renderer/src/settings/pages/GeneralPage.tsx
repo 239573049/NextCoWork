@@ -1,14 +1,23 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useMemo, type ReactNode } from 'react'
+import { ChevronDown } from 'lucide-react'
 import {
   PERMISSION_MODES,
   type PermissionMode
 } from '../../../../shared/agent/permission'
+import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
 import { Segmented } from '../../components/ui/Segmented'
 import { Slider } from '../../components/ui/Slider'
 import { Toggle } from '../../components/ui/Toggle'
 import { Select } from '../../components/ui/Select'
+import { ProviderModelMenu, type ProviderModelMenuRow } from '../../components/ProviderModelMenu'
+import { cn } from '../../lib/cn'
 import { useModelsStore } from '../../stores/models'
-import { modelOptions } from './model/enabled-models'
+import {
+  modelOptions,
+  providerAliasOptions,
+  roleModelChoice,
+  selectableProviders
+} from './model/enabled-models'
 import {
   modelSelectionKey,
   parseModelSelectionKey
@@ -61,6 +70,46 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
     }))
       return (
         <SettingGroup>
+        {/*
+          需求：默认模型/默认子代理原来放在「模型」设置页,挤在供应商列表那条
+          236px 窄列的 footer 里,和「来 Agent 页配权限/审核模型」不是同一次
+          心智动作——用户得先记得"哦对了默认模型要去另一个页面改"。挪来这里后,
+          跟下面的 AI 审核模型/目标判定模型同属「Agent 用哪个模型」这一类问题,
+          放在同一屏。`entries`/供应商列表上的「默认」徽章原样留在模型设置页,
+          那边展示的是库存视图,不受这次搬迁影响。
+
+          ★ 这两行现在是 `SettingRow wide`,跟同屏的 AI 审核模型/目标判定模型
+          用同一种控件外观(单个下拉触发器)——之前那版拆成「供应商」「模型」
+          两个并排 `Select` 之后用户反馈还是不够贴合这一屏其余行的样子。
+          `ProviderModelMenu` 复刻的是输入框模型选择器那套弹层交互(先选供应商
+          再选模型、当前项打勾),理由和取舍写在该组件的文件头。
+        */}
+        <SettingRow title={t('models.default')} wide>
+          <RoleModelPicker
+            label={t('models.default')}
+            models={models}
+            providers={providers}
+            loaded={loaded}
+            model={settings.defaultModel}
+            modelProviderId={settings.defaultModelProviderId}
+            onChange={(model, modelProviderId) => {
+              patch({ defaultModel: model, defaultModelProviderId: modelProviderId })
+            }}
+          />
+        </SettingRow>
+        <SettingRow title={t('models.defaultSubagent')} wide>
+          <RoleModelPicker
+            label={t('models.defaultSubagent')}
+            models={models}
+            providers={providers}
+            loaded={loaded}
+            model={settings.subagent.model}
+            modelProviderId={settings.subagent.modelProviderId}
+            onChange={(model, modelProviderId) => {
+              patch({ subagent: { model, modelProviderId } })
+            }}
+          />
+        </SettingRow>
         <SettingRow
           title={t('general.defaultPermission')}
           description={
@@ -261,6 +310,112 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
     </>
   )
 }
+
+/**
+ * 「默认模型」/「默认子代理」那一栏 —— **先供应商,再这一家的模型**。
+ * 原本在 `model/ModelPage.tsx`,随这两项设置一起搬到这里(见 `sub === 'agent'`
+ * 分支头部的需求注释)。
+ *
+ * ★ 触发器画成跟 `Select`(`components/ui/Select.tsx`)同款的按钮(高度/边框/
+ * 字号都照抄),点开之后走的是 `ProviderModelMenu`——输入框模型选择器那套
+ * 「先选供应商、进去再选模型、当前项打勾」的弹层交互,而不是原生 `<select>`。
+ * 这一栏之前拆成两个并排 `Select`(供应商一个、模型一个),摆在这一屏其余
+ * 单控件的行里明显不像原生设置,所以换成跟别的行一样「一个下拉触发器」。
+ *
+ * ★★ 两级的结果永远**成对**交给 `onChange`,调用方不需要(也不应该)自己拼:
+ * 存的是 `(别名, 供应商)` 一对,而「A 家的别名 + B 家的锁」拼出来的候选集是空的,
+ * 表现是下一次发送直接失败、错误还指着一个跟这次选择无关的供应商。
+ *
+ * ★★ 不用 `permissionReviewerModel`/`goalEvaluatorModel` 那种合并下拉
+ * (`modelSelectionKey` + `modelOptions`)——理由在 `model/enabled-models.ts`
+ * 那段 ★★ 注释:合并下拉只有一家提供某别名时不显示供应商名,而默认模型/默认
+ * 子代理这两栏存的恰恰是 `(别名, 供应商)` 一对,「哪一家」是它的一半内容。
+ * 触发器上的文案因此**总是**带供应商名(`别名 · 供应商`),不是只在别名冲突时才带。
+ */
+function RoleModelPickerComponent({
+  label,
+  models,
+  providers,
+  loaded,
+  model,
+  modelProviderId,
+  onChange
+}: {
+  label: string
+  models: readonly ModelAlias[]
+  providers: readonly UpstreamProvider[]
+  loaded: boolean
+  model: string
+  modelProviderId: string | undefined
+  /** 别名与供应商**必须一起给**。`("", undefined)` = 跟随对话 */
+  onChange: (model: string, modelProviderId: string | undefined) => void
+}): ReactNode {
+  const { t } = useI18n()
+  const choice = roleModelChoice(models, providers, model, modelProviderId)
+  const providerName = providers.find((p) => p.id === choice.providerId)?.name
+  const triggerLabel =
+    choice.alias === ''
+      ? t('models.followConversation')
+      : providerName === undefined
+        ? choice.alias
+        : `${choice.alias} · ${providerName}`
+  const rows: ProviderModelMenuRow[] = useMemo(
+    () =>
+      selectableProviders(models, providers, choice.providerId).map((p) => {
+        const aliasOptions = providerAliasOptions(models, p.id)
+        return {
+          id: p.id,
+          label: p.name,
+          description: t('chat.availableModels', { count: aliasOptions.length }),
+          selected: p.id === choice.providerId,
+          models: aliasOptions.map((o) => ({
+            value: o.value,
+            label: o.label,
+            selected: p.id === choice.providerId && o.value === choice.alias
+          }))
+        }
+      }),
+    [models, providers, choice.providerId, choice.alias, t]
+  )
+
+  return (
+    <ProviderModelMenu
+      trigger={
+        <>
+          <span className="min-w-0 flex-1 truncate">{triggerLabel}</span>
+          <ChevronDown size={12} className="shrink-0 text-fg-faint" />
+        </>
+      }
+      // 视觉上照抄 `Select` 的触发器类名,这一屏其余控件才不会显得它是外来的。
+      triggerClassName={cn(
+        'group flex h-7 w-full items-center gap-1.5 rounded-[7px] border border-border',
+        'bg-surface-field px-2 text-left text-[11.5px] text-fg outline-none',
+        'transition-[background-color,border-color,box-shadow] duration-150',
+        'hover:bg-tint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15'
+      )}
+      className="w-full"
+      align="start"
+      width={280}
+      ariaLabel={label}
+      menuLabel={t('chat.selectProvider')}
+      loaded={loaded}
+      loadingLabel={t('common.loading')}
+      emptyLabel={t('chat.noModelsConfigured')}
+      rows={rows}
+      topItem={{
+        label: t('models.followConversation'),
+        selected: choice.providerId === '',
+        onSelect: () => onChange('', undefined)
+      }}
+      onSelectModel={(providerId, alias) => onChange(alias, providerId)}
+    />
+  )
+}
+
+// Keep the component reference explicit at module scope. This avoids stale
+// development hot-update modules resolving the JSX symbol before a function
+// declaration is reinstalled.
+const RoleModelPicker = RoleModelPickerComponent
 
 type AppLocale = 'zh-CN' | 'en-US'
 

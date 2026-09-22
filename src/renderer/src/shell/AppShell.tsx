@@ -464,7 +464,7 @@ export function AppShell({
               setSearchOpen(true);
             }}
             onOpenFeature={win.openFeature}
-            // 直接透传:`openSettings(page?)` 的页码被账户菜单的「积分余额」用着,
+            // 直接透传:`openSettings(page?)` 的页码被账户菜单的「余额」用着,
             // 包一层 `() => …` 会把那个参数丢掉(齿轮那条路径不需要页码)。
             onOpenSettings={win.openSettings}
             onSelectSession={selectSession}

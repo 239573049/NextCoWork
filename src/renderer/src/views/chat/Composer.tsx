@@ -45,12 +45,10 @@ import {
 import {
   useEffect,
   useId,
-  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
 import type { PermissionMode } from "../../../../shared/agent/permission";
 import {
   PERMISSION_MODES,
@@ -86,6 +84,10 @@ import type {
   UpstreamProvider,
 } from "../../../../shared/domain/provider";
 import { ProviderIcon } from "../../components/brand/ProviderIcon";
+import {
+  ProviderModelMenu,
+  type ProviderModelMenuRow,
+} from "../../components/ProviderModelMenu";
 import {
   Menu,
   MenuItem,
@@ -2123,6 +2125,11 @@ function ContextBreakdown({
  * 模型选择采用两级结构：第一次打开先选供应商，进入供应商后再选模型。
  * 这样模型别名很多时不会把所有供应商混在一个长菜单里。
  *
+ * ★ 这一对下拉的定位/子菜单机制现在是共享组件 `ProviderModelMenu`
+ * (`components/ProviderModelMenu.tsx`)——设置页「通用 → Agent」的默认模型/
+ * 默认子代理是它的第二个调用方,原因和搬迁细节写在那个文件的文件头。这里只负责
+ * 把 composer 自己的 `providers`/`models` 翻译成它要的 `rows`。
+ *
  * ★ 这里曾经还挂着一个「模型配置 ›」二级页(只有思考强度一项)。它被拆成了
  * 工具栏上的 `ThinkingPill` —— 一个每轮都要调的旋钮不该埋在第四层。
  */
@@ -2146,209 +2153,50 @@ function ModelPicker({
   onModel: (model: string, modelProviderId: string) => void;
 }): ReactNode {
   const { t } = useI18n();
-  const [providerId, setProviderId] = useState<string | null>(null);
-  const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(
-    null,
-  );
-  const providerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const submenuRef = useRef<HTMLDivElement>(null);
-  const closeMenuRef = useRef<() => void>(() => {});
   const availableProviders = providers.filter((p) =>
     models.some((m) => m.providerId === p.id),
   );
-  const openProviderSubmenu = (id: string): void => {
-    setProviderId(id);
-    setSubmenuAnchor(providerRefs.current[id] ?? null);
-  };
+  const rows: ProviderModelMenuRow[] = availableProviders.map((p) => {
+    const providerModels = models.filter((m) => m.providerId === p.id);
+    return {
+      id: p.id,
+      label: p.name,
+      description: t("chat.availableModels", { count: providerModels.length }),
+      selected: p.id === provider?.id,
+      models: providerModels.map((m) => ({
+        value: m.alias,
+        label: m.alias,
+        // ★ 必须带上 providerId:同一个别名在两家的子菜单里都会出现,只比别名的话
+        //   **两边同时打勾**,用户会以为自己选了两个。
+        selected: m.alias === model && m.providerId === modelProviderId,
+      })),
+    };
+  });
 
   return (
-    <>
-      <Menu
-        label={t("chat.modelPicker")}
-        width={300}
-        align="end"
-        // 这一排里**只有模型名可以退让** —— 其余药丸都是短词,压缩它们只会换行。
-        className="min-w-0"
-        triggerClassName="min-w-0"
-        trigger={
-          <Pill className="min-w-0 shrink">
-            <ProviderIcon
-              name={[model, provider?.name, provider?.id]}
-              size={13}
-            />
-            <span className="min-w-0 max-w-[150px] truncate">{modelLabel}</span>
-            <ChevronRight size={12} className="ml-0.5 shrink-0 text-fg-faint" />
-          </Pill>
-        }
-        onOpenChange={(open) => {
-          if (!open) {
-            setProviderId(null);
-            setSubmenuAnchor(null);
-          }
-        }}
-        containsTarget={(target) =>
-          submenuRef.current?.contains(target) ?? false
-        }
-      >
-        {(close) => {
-          closeMenuRef.current = close;
-          return (
-            <>
-              <MenuLabel>
-                <span className="flex items-center gap-1.5">
-                  <Settings2 size={12} />
-                  {t("chat.selectProvider")}
-                </span>
-              </MenuLabel>
-              {!loaded ? (
-                <MenuLabel>{t("common.loading")}</MenuLabel>
-              ) : availableProviders.length === 0 ? (
-                <MenuLabel>{t("chat.noModelsConfigured")}</MenuLabel>
-              ) : (
-                availableProviders.map((p) => {
-                  const count = models.filter(
-                    (m) => m.providerId === p.id,
-                  ).length;
-                  return (
-                    <MenuItem
-                      key={p.id}
-                      checked={p.id === provider?.id}
-                      description={t("chat.availableModels", { count })}
-                      buttonRef={(node) => {
-                        providerRefs.current[p.id] = node;
-                      }}
-                      onHover={() => openProviderSubmenu(p.id)}
-                      onSelect={() => openProviderSubmenu(p.id)}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className="min-w-0 flex-1 truncate">
-                          {p.name}
-                        </span>
-                        <ChevronRight size={13} className="text-fg-faint" />
-                      </span>
-                    </MenuItem>
-                  );
-                })
-              )}
-            </>
-          );
-        }}
-      </Menu>
-      {submenuAnchor !== null &&
-      providerId !== null &&
-      typeof document !== "undefined"
-        ? createPortal(
-            <ModelSubmenu
-              anchor={submenuAnchor}
-              panelRef={(node) => {
-                submenuRef.current = node;
-              }}
-              provider={providers.find((p) => p.id === providerId)}
-              models={models.filter((m) => m.providerId === providerId)}
-              model={model}
-              modelProviderId={modelProviderId}
-              onSelect={(alias, selectedProviderId) => {
-                onModel(alias, selectedProviderId);
-                closeMenuRef.current();
-                setSubmenuAnchor(null);
-                setProviderId(null);
-              }}
-            />,
-            document.body,
-          )
-        : null}
-    </>
-  );
-}
-
-function ModelSubmenu({
-  anchor,
-  panelRef,
-  provider,
-  models,
-  model,
-  modelProviderId,
-  onSelect,
-}: {
-  anchor: HTMLElement;
-  panelRef: (node: HTMLDivElement | null) => void;
-  provider?: UpstreamProvider;
-  models: ModelAlias[];
-  model: string;
-  modelProviderId?: string;
-  onSelect: (alias: string, modelProviderId: string) => void;
-}): ReactNode {
-  const { t } = useI18n();
-  const [position, setPosition] = useState({ top: 0, left: 0 });
-  const width = 300;
-  const panelNode = useRef<HTMLDivElement | null>(null);
-
-  useLayoutEffect(() => {
-    const measure = (): void => {
-      const rect = anchor.getBoundingClientRect();
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.innerHeight;
-      const panelHeight = Math.min(
-        panelNode.current?.scrollHeight ?? 0,
-        Math.max(0, viewportHeight - 16),
-      );
-      const preferredLeft =
-        rect.right + 6 + width <= viewportWidth
-          ? rect.right + 6
-          : rect.left - width - 6;
-      const left = Math.max(
-        8,
-        Math.min(preferredLeft, viewportWidth - width - 8),
-      );
-      // 与触发项顶部对齐；下方空间不足时向上推，确保整个弹层留在视口内。
-      const top = Math.max(
-        8,
-        Math.min(rect.top, viewportHeight - panelHeight - 8),
-      );
-      setPosition({ top, left });
-    };
-    measure();
-    const resizeObserver = new ResizeObserver(measure);
-    if (panelNode.current !== null) resizeObserver.observe(panelNode.current);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-    };
-  }, [anchor, models.length]);
-
-  return (
-    <div
-      ref={(node) => {
-        panelNode.current = node;
-        panelRef(node);
-      }}
-      role="menu"
-      style={{
-        width,
-        top: position.top,
-        left: position.left,
-        maxHeight: "calc(100vh - 16px)",
-      }}
-      className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40"
-    >
-      <MenuLabel>{provider?.name ?? t("chat.modelPicker")}</MenuLabel>
-      {models.map((m) => {
-        return (
-          <MenuItem
-            key={`${m.providerId}/${m.alias}`}
-            // ★ 必须带上 providerId:同一个别名在两家的子菜单里都会出现,只比别名的话
-            //   **两边同时打勾**,用户会以为自己选了两个。
-            checked={m.alias === model && m.providerId === modelProviderId}
-            onSelect={() => onSelect(m.alias, m.providerId)}
-          >
-            {m.alias}
-          </MenuItem>
-        );
-      })}
-    </div>
+    <ProviderModelMenu
+      trigger={
+        <Pill className="min-w-0 shrink">
+          <ProviderIcon
+            name={[model, provider?.name, provider?.id]}
+            size={13}
+          />
+          <span className="min-w-0 max-w-[150px] truncate">{modelLabel}</span>
+          <ChevronRight size={12} className="ml-0.5 shrink-0 text-fg-faint" />
+        </Pill>
+      }
+      // 这一排里**只有模型名可以退让** —— 其余药丸都是短词,压缩它们只会换行。
+      triggerClassName="min-w-0"
+      align="end"
+      width={300}
+      menuLabel={t("chat.selectProvider")}
+      menuIcon={<Settings2 size={12} />}
+      loaded={loaded}
+      loadingLabel={t("common.loading")}
+      emptyLabel={t("chat.noModelsConfigured")}
+      rows={rows}
+      onSelectModel={(selectedProviderId, alias) => onModel(alias, selectedProviderId)}
+    />
   );
 }
 

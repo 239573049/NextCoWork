@@ -198,7 +198,36 @@ export class SshAuthBroker {
       if (process.platform !== 'win32') await chmod(endpoint, 0o600)
       let executable = invocation.executable
       if (process.platform === 'win32') {
-        if (invocation.appPath) throw new EnvironmentError('unsupported-client', 'Use the packaged application for native Windows askpass.')
+        /**
+         * 需求:Windows 上(开发态和打包版都要)用存下的密码连得上去。
+         *
+         * ssh 每问一次密码,就把 SSH_ASKPASS 指向的东西**再起一个进程**,而在 Windows 上
+         * 那个进程只能是 exe:OpenSSH 走 `CreateProcessW(NULL, cmdline, …)`
+         * (`contrib/win32/win32compat/w32fd.c` 的 `spawn_child_internal`),`.cmd` 与 `#!`
+         * 脚本都起不来 —— 下面 Unix 那层 `sh` 包装在这里没有对等物。
+         *
+         * 所以 helper 是**同一个 exe 的 node 形态**(`ELECTRON_RUN_AS_NODE=1`,见 env),
+         * 入口就是这个脚本。必须绕开 Chromium 的两条理由都很实:
+         *
+         * 1. ★ stdout 上除了密码**一个字节都不能有**。OpenSSH 只认第一行
+         *    (`readpass.c`:`buf[strcspn(buf, "\r\n")] = '\0'`),Chromium 启动时先写的
+         *    那个换行会把密码整个吃掉 —— 表现为「密码明明是对的却认证失败」,
+         *    而且没有任何一条错误提到 askpass。
+         * 2. ★ 不能和主窗口抢同一个 Chromium profile(两边都是 `~/.next-cowork`)。
+         *    第二个实例卡在 profile 上,表现为连接一直转圈直到超时。
+         *
+         * ★ SSH_ASKPASS **可以带参数**:它的值被原样拼进命令行(`build_commandline_string`
+         * 对已经加了引号的串照抄),ssh 只在末尾追加提示文本。于是还能多兜两层:
+         * - `--user-data-dir=`:万一哪天 `runAsNode` fuse 被关掉、exe 退回 GUI 形态
+         *   (由 `entry.ts` 的 askpass 分支接住),它至少不会卡在第 2 条上;
+         * - 末尾的 `--`:终止开关解析。提示文本在 keyboard-interactive 下**由远端 sshd
+         *   完全控制**,绝不能落到 Chromium 的开关位置上(同 Unix 分支的理由)。
+         *
+         * 路径直接加引号即可:Windows 文件名里不可能有 `"`。
+         */
+        const client = join(directory, 'askpass.js')
+        await writeFile(client, windowsAskpassClient(), { mode: 0o600 })
+        executable = `"${invocation.executable}" "${client}" --user-data-dir="${join(directory, 'profile')}" --`
       } else {
         // ★ OpenSSH 以 execlp(askpass, askpass, msg) 调用,msg 在 keyboard-interactive 下**由远端 sshd
         //   完全控制**;而打包形态的 executable 就是 Electron 本体,Chromium 会抢在我们的 JS 之前把它
@@ -223,7 +252,14 @@ export class SshAuthBroker {
       await writeFile(secret, token, { mode: 0o600 })
       return {
         env: { SSH_ASKPASS: executable, SSH_ASKPASS_REQUIRE: 'force', DISPLAY: process.env.DISPLAY ?? ':0',
-          NCW_SSH_ASKPASS: '1', NCW_SSH_AUTH_ENDPOINT: endpoint, NCW_SSH_AUTH_SECRET: secret },
+          NCW_SSH_ASKPASS: '1', NCW_SSH_AUTH_ENDPOINT: endpoint, NCW_SSH_AUTH_SECRET: secret,
+          /*
+            ★ 只能放进 **ssh 自己的环境**:Windows 没有 `sh` 可以包一层,helper 的环境
+            就是 ssh 的环境(OpenSSH 用 `CreateProcessW(…, lpEnvironment = NULL, …)`
+            起 askpass,子进程原样继承)。代价是 ProxyCommand 之类的兄弟进程也会看到它 ——
+            对非 Electron 程序无意义,所以 `sshProcessEnvironment` 只对 overrides 放开这一个名字。
+          */
+          ...(process.platform === 'win32' ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
         /**
          * 传输层解析完 `ssh -G` 之后把结果交过来。
          *
@@ -238,11 +274,70 @@ export class SshAuthBroker {
         close: async () => {
           for (const socket of sockets) socket.destroy()
           await new Promise<void>((resolve) => server.close(() => resolve()))
-          await rm(directory, { recursive: true, force: true })
+          /*
+            ★ 删不掉也要往下走。这是整条断开链路的**最后一步**(`ssh/provider.ts` 的
+            `close()`),从这里抛出去的错会变成「断不开连接」。而 Windows 上真会删不掉:
+            GUI 兜底形态留下的 `profile/` 是 Chromium 的 profile,它握着句柄时
+            `force` 也救不了。代价只是临时目录里留下一份垃圾,由系统清理。
+          */
+          await rm(directory, { recursive: true, force: true }).catch(() => {})
         }
       }
     } catch (error) { server.close(); await rm(directory, { recursive: true, force: true }); throw error }
   }
+}
+
+/**
+ * Windows 上 ssh 真正执行的那个 helper 的源码(每次连接尝试生成一份到临时目录)。
+ *
+ * 需求:它要在**不带 Chromium 的 node 形态**里跑完整条问答 —— 理由写在 `open()` 里那段
+ * `win32` 注释。那个形态下拿不到应用的任何模块(入口就是这一个文件),所以它是下面
+ * `requestAskpass` 的第二份实现,说的是同一套线上协议。
+ *
+ * ★ 两份必须一起改。`askpass.test.ts` 按 ssh 的调法真的把这个脚本跑起来对答案,
+ * 改坏了那条用例会挂 —— 而线上坏掉的表现只是「密码不对」,不会有任何报错指向这里。
+ */
+export function windowsAskpassClient(): string {
+  return `'use strict'
+/* 由 src/main/environment/ssh/askpass.ts 生成,不是版本库里的文件。
+   约定:提示是 argv 的最后一个;stdout 的第一行就是答案,别的一个字节都不许写。 */
+const { createConnection } = require('node:net')
+const { readFileSync } = require('node:fs')
+
+const endpoint = process.env.NCW_SSH_AUTH_ENDPOINT
+const secretPath = process.env.NCW_SSH_AUTH_SECRET
+const prompt = process.argv[process.argv.length - 1] || ''
+/* 失败一律用非 0 退出码,绝不往 stdout 写空行:OpenSSH 把非 0 当成「没问到」并放弃,
+   而一行空字符串会被当成**一个空密码**送给服务器(readpass.c 只取第一行)。 */
+const fail = () => { process.exit(1) }
+if (!endpoint || !secretPath || prompt.length > 8192) fail()
+let token = ''
+try { token = readFileSync(secretPath, 'utf8') } catch (error) { fail() }
+if (!token) fail()
+let buffer = ''
+let answered = false
+const socket = createConnection(endpoint)
+socket.setTimeout(${AUTH_TIMEOUT_MS}, fail)
+socket.on('error', fail)
+socket.on('close', () => { if (!answered) fail() })
+socket.on('connect', () => {
+  socket.write(JSON.stringify({ token: token, prompt: prompt, hint: process.env.SSH_ASKPASS_PROMPT }) + '\\n')
+})
+socket.on('data', (bytes) => {
+  buffer += bytes.toString('utf8')
+  if (Buffer.byteLength(buffer) > ${MAX_AUTH_BYTES}) fail()
+  const end = buffer.indexOf('\\n')
+  if (end < 0) return
+  let reply = null
+  try { reply = JSON.parse(buffer.slice(0, end)) } catch (error) { fail() }
+  if (!reply || reply.cancelled || typeof reply.value !== 'string') fail()
+  answered = true
+  socket.destroy()
+  /* ★ 写完再退。stdout 到管道是异步写,直接 process.exit 会把还在队列里的密码丢掉 ——
+     表现为 ssh 收到空密码,而这边看起来一切正常。 */
+  process.stdout.write(reply.value + '\\n', () => { process.exit(0) })
+})
+`
 }
 
 export function requestAskpass(env: NodeJS.ProcessEnv, prompt: string): Promise<string> {

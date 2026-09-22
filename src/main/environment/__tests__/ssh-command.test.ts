@@ -13,10 +13,16 @@ describe('native SSH command construction', () => {
     expect(environment).toEqual({ PATH: '/usr/bin', HOME: '/home/user', SSH_AUTH_SOCK: '/agent', SSH_ASKPASS: '/app/helper', NCW_SSH_AUTH_SECRET: '/tmp/ncw/token' })
   })
 
-  /** overrides 也要过 deny：调用方不该有能力把 NODE_OPTIONS 塞进 ssh 子进程。 */
+  /**
+   * overrides 也要过 deny：调用方不该有能力把 NODE_OPTIONS 塞进 ssh 子进程。
+   *
+   * ★ `ELECTRON_RUN_AS_NODE` 是这条规则上**唯一**的例外,而且只对 overrides 开:
+   * Windows 的 askpass helper 靠它让同一个 exe 以 node 形态启动(那边 SSH_ASKPASS
+   * 只能是 exe,没有 `sh` 可以包一层)。从继承环境里来的那份照样丢掉 —— 见上一条用例。
+   */
   it('refuses Node injection flags even when a caller passes them as overrides', () => {
     const environment = sshProcessEnvironment({ NODE_OPTIONS: '--require=bad', ELECTRON_RUN_AS_NODE: '1' }, { PATH: '/usr/bin' })
-    expect(environment).toEqual({ PATH: '/usr/bin' })
+    expect(environment).toEqual({ PATH: '/usr/bin', ELECTRON_RUN_AS_NODE: '1' })
   })
 
   /**

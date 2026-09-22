@@ -51,6 +51,19 @@ export const agentZh = {
   'chat.taskChecklist.snapshot': '清单快照',
   // 转录里 status 仍是 in_progress、但此刻没有人在做的那一项(屏读器用)
   'chat.taskChecklist.unfinished': '未完成',
+  /*
+    消息里那张清单卡片:先报这次更新改了什么,完整清单收在折叠里。
+    计数里没有变化的那一档由渲染层换成 noChange —— 四条都写「0 项」等于没说。
+  */
+  'chat.todoUpdate.added': '新增 {count} 项',
+  'chat.todoUpdate.removed': '移除 {count} 项',
+  'chat.todoUpdate.completed': '完成 {count} 项',
+  'chat.todoUpdate.started': '开始 {count} 项',
+  'chat.todoUpdate.noChange': '清单无变化',
+  'chat.todoUpdate.showFull': '查看完整清单',
+  'chat.todoUpdate.hideFull': '收起完整清单',
+  // 上一份清单的抬头。★ 数的是**它自己**的完成度,不是本次的 —— 标错了会误导
+  'chat.todoUpdate.previous': '上一次清单 · {done}/{total} 已完成',
   'chat.contextTooltip': '上下文 {used} / {window}',
   'chat.tool.group.reasoning': '{count} 段思考',
   'chat.tool.group.read': '读取了 {count} 个文件',
@@ -212,6 +225,14 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.taskChecklist.stoppedIncomplete': 'Run ended with {count} unfinished task(s)',
   'chat.taskChecklist.snapshot': 'Checklist snapshot',
   'chat.taskChecklist.unfinished': 'Unfinished',
+  'chat.todoUpdate.added': '{count} added',
+  'chat.todoUpdate.removed': '{count} removed',
+  'chat.todoUpdate.completed': '{count} completed',
+  'chat.todoUpdate.started': '{count} started',
+  'chat.todoUpdate.noChange': 'No change to the list',
+  'chat.todoUpdate.showFull': 'Show the full list',
+  'chat.todoUpdate.hideFull': 'Hide the full list',
+  'chat.todoUpdate.previous': 'Previous list · {done}/{total} completed',
   'chat.contextTooltip': 'Context {used} / {window}',
   'chat.tool.group.reasoning': '{count} thinking segments',
   'chat.tool.group.read': '{count} files read',

@@ -56,6 +56,11 @@ export function saveTextFile(defaultName: string, text: string): Promise<{ path:
   return invoke('app:saveTextFile', { defaultName, text })
 }
 
+/** 另存一张 PNG。`base64` **不带** `data:image/png;base64,` 前缀;取消返回 null。 */
+export function saveImageFile(defaultName: string, base64: string): Promise<{ path: string } | null> {
+  return invoke('app:saveImageFile', { defaultName, base64 })
+}
+
 export function openSessionWindow(workspaceId: string, sessionId: string): Promise<void> {
   return invoke('app:openSessionWindow', { workspaceId, sessionId })
 }

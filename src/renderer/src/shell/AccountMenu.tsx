@@ -54,7 +54,7 @@ export function AccountMenu({
   onOpenSettings
 }: {
   auth: ClientAuthState
-  /** 带页码：菜单里「积分余额」那一行要直接落到设置的钱包页，而不是上一次停的那页 */
+  /** 带页码：菜单里「余额」那一行要直接落到设置的钱包页，而不是上一次停的那页 */
   onOpenSettings: (page?: SettingsPageId) => void
 }): ReactNode {
   const { t, locale } = useI18n()

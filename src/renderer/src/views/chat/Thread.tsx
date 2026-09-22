@@ -46,7 +46,8 @@ import { threadTurnGroups, turnNavigationItems } from './turn-navigation'
 import { TurnNavigationRail } from './TurnNavigationRail'
 import { TurnActions, type TurnPrompt } from './TurnActions'
 import { TurnChangeReview } from './TurnChangeReview'
-import { decideWorkspace, statusOfItem } from '../../../../shared/domain/tool-timeline'
+import { decideWorkspace } from '../../../../shared/domain/tool-timeline'
+import { TodoHistoryProvider } from './todo-history'
 
 export const Thread = memo(function Thread({
   sessionId,
@@ -228,6 +229,12 @@ export const Thread = memo(function Thread({
       }}>
       <div ref={content} className={cn('mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6', navigationItems.length > 1 && 'pl-10')}>
         <ContextCheckpointPanel checkpoints={orphans} />
+        {/*
+          需求:消息里那张 TodoWrite 卡片要标出「这次更新改了什么」,而上一份清单只有
+          整条转录能回答。provider 挂在这里(而不是把 `messages` 一路传进卡片)是因为
+          它只被一个渲染器用到 —— 见 `todo-history.tsx` 文件头。
+        */}
+        <TodoHistoryProvider messages={messages}>
         {turns.map((turn) => (
           <section
             key={turn.key}
@@ -313,6 +320,7 @@ export const Thread = memo(function Thread({
           })}
           </section>
         ))}
+        </TodoHistoryProvider>
       </div>
     </div>
     <TurnNavigationRail items={navigationItems} viewportRef={viewport} contentRef={content} />
@@ -801,7 +809,6 @@ function AssistantTurn({
   const trailingSegments = lastProcessIndex < 0 ? segments : segments.slice(lastProcessIndex + 1)
   const goalSegments = processSegments.filter((segment) => segment.kind === 'block' && segment.block.part?.type === 'goal_status')
   const processItems = processSegments.flatMap((segment) => segment.kind === 'process' ? segment.items : [])
-  const errorCount = processItems.filter((item) => statusOfItem(item, tools) === 'error').length
   const hasRunningSubagent = processItems.some((item) => item.kind === 'subagent' && item.state?.status === 'running')
   const hasTrailingText = trailingSegments.some((segment) => segment.kind === 'block' && isAssistantTextBlock(segment.block))
   const outcome = lastKnownStatus === 'done' ? 'ok' : lastKnownStatus
@@ -809,8 +816,7 @@ function AssistantTurn({
     ? decideWorkspace({
         outcome,
         itemCount: processItems.length,
-        hasTrailingText,
-        errorCount
+        hasTrailingText
       })
     : { collapse: false, defaultOpen: false }
   const calls = processItems.flatMap((item) => {

@@ -5,6 +5,10 @@
  * 钉住 `execution` 三档的差别：只有 `running` 才允许出现 activeForm、Spinner 与高亮，
  * 而任务本身的 status 与完成百分比在任何一档下都不许被改写。
  *
+ * 默认折叠态也在这里钉住：展开/收起只改怎么画，`defaultCollapsed` 是挂载初值而不是
+ * 受控值。（消息里那张 TodoWrite 卡片自带标题行与增量，用例在
+ * `todo-write-checklist.test.ts`；它复用的行渲染仍由这个文件覆盖。）
+ *
  * @vitest-environment jsdom
  */
 import { act, createElement } from 'react'
@@ -28,6 +32,7 @@ afterEach(async () => {
 async function mountChecklist(props: {
   todos: readonly TaskChecklistItem[]
   execution?: Execution
+  defaultCollapsed?: boolean
 }): Promise<{ container: HTMLElement; show: (next: { todos: readonly TaskChecklistItem[]; execution?: Execution }) => Promise<void> }> {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   const container = document.createElement('div')
@@ -38,6 +43,7 @@ async function mountChecklist(props: {
       initialLocale: 'en-US',
       children: createElement(TaskChecklist, {
         todos: next.todos,
+        ...(props.defaultCollapsed === undefined ? {} : { defaultCollapsed: props.defaultCollapsed }),
         ...(next.execution === undefined ? {} : { execution: next.execution })
       })
     })))
@@ -65,6 +71,50 @@ function rowStatuses(container: HTMLElement): (string | null)[] {
   return [...container.querySelectorAll('[data-task-status]')].map((row) => row.getAttribute('data-task-status'))
 }
 
+/** 列表容器的展开态由 `aria-hidden` 表态，比读 grid 行高稳。 */
+function listExpanded(container: HTMLElement): boolean {
+  const toggle = container.querySelector('[aria-controls]')
+  const list = document.getElementById(toggle?.getAttribute('aria-controls') ?? '')
+  return list?.getAttribute('aria-hidden') === 'false'
+}
+
+describe('TaskChecklist · default collapsed', () => {
+  it('starts collapsed and keeps the row count, statuses and progress readable from the header', async () => {
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
+
+    expect(container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
+    expect(listExpanded(container)).toBe(false)
+    // 收起的只是列表：报数、百分比、状态序列都还在，不必展开就能读
+    expect(container.textContent).toContain('Task checklist · 1/3 completed')
+    expect(container.textContent).toContain('33%')
+    expect(rowStatuses(container)).toEqual(['completed', 'in_progress', 'pending'])
+    // 标题行那行 activeForm 不属于列表，收起时照旧显示
+    expect(container.textContent).toContain('Updating UI')
+  })
+
+  it('lets a click open the list instead of springing back to the default on the next render', async () => {
+    const { container, show } = await mountChecklist({ todos: TODOS, execution: 'running' })
+
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
+    await act(async () => toggle?.click())
+    expect(listExpanded(container)).toBe(true)
+
+    /*
+      需求：`defaultCollapsed` 是挂载初值而非受控值。流式运行里 ChatView 会不停重渲，
+      受控写法会把用户刚展开的列表按回收起态 —— 表现为「点了没反应」。
+    */
+    await show({ todos: TODOS, execution: 'running' })
+    expect(listExpanded(container)).toBe(true)
+  })
+
+  it('honours defaultCollapsed={false} for callers that open it deliberately', async () => {
+    const { container } = await mountChecklist({ todos: TODOS, defaultCollapsed: false })
+
+    expect(container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true')
+    expect(listExpanded(container)).toBe(true)
+  })
+})
+
 describe('TaskChecklist · real task state', () => {
   it('keeps pending, running and completed rows while the panel is collapsed', async () => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
@@ -80,6 +130,7 @@ describe('TaskChecklist · real task state', () => {
       initialLocale: 'en-US',
       children: createElement(TaskChecklist, {
         execution: 'running',
+        defaultCollapsed: false,
         todos: [
           { content: 'Inspect files', activeForm: 'Inspecting files', status: 'completed' },
           { content: 'Update UI', activeForm: 'Updating UI', status: 'in_progress' },

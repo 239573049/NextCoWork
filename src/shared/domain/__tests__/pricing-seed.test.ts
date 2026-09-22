@@ -370,7 +370,7 @@ describe('抄写校验 · 长上下文档', () => {
   /** xAI 是唯一一家各计费项倍率统一的 —— 所以它**不**走上面那个不对称断言 */
   it('xAI:阈值 200K,所有计费项一律 ×2', () => {
     const grok = rows.filter((p) => p.modelId.startsWith('grok-'))
-    expect(grok.map((p) => p.modelId).sort()).toEqual(['grok-4.3', 'grok-4.5', 'grok-4.6'])
+    expect(grok.map((p) => p.modelId).sort()).toEqual(['grok-4.3', 'grok-4.5', 'grok-4.6', 'grok-4.7'])
     for (const p of grok) {
       expect(p.tiers[0]?.upToInputTokens, p.modelId).toBe(200_000)
       const lo = p.tiers[0]?.rate as TokenRates
@@ -408,6 +408,7 @@ describe('抄写校验 · 长上下文档', () => {
       'grok-4.3',
       'grok-4.5',
       'grok-4.6',
+      'grok-4.7',
       'mai-code-1.1-flash',
       'qwen3-coder-30b-a3b-instruct',
       'qwen3-coder-flash',

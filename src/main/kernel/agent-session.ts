@@ -1421,6 +1421,19 @@ export class AgentSession {
       // 进度是易失的:单独的事件类型,永不写入转录
       emit: (progress) => this.handle.emit({ type: 'tool_progress', callId, progress }),
       /*
+        需求:`TodoWrite` 要把「这次更新改了什么」回显给模型,而它每轮发的是完整
+        清单 —— 上一份只能从**转录**里取。给的是 `contextMessages`(发给模型的那份),
+        与它看到的上下文完全一致;不新存一份状态,`todo.ts` 文件头那条无状态设计不动。
+
+        ★ 工具名从**注册表**查,不从本轮 `advertised` 快照里取:那份快照被
+        `readOnlyOnly` / `allowList` 过滤过,而转录里存的是 `ToolNamer` 分配的外部名
+        —— 撞名时两者会不一致,且不报任何错(见 `shared/agent/todo.ts`)。
+      */
+      messages: this.contextMessages,
+      ...(this.deps.tools.byInternalId('TodoWrite') === undefined
+        ? {}
+        : { todoToolName: this.deps.tools.byInternalId('TodoWrite')?.externalName }),
+      /*
         ★ 没装启动器时**不放这个字段进去**,而不是放一个抛错的函数:
         `Task` 判的是 `ctx.spawnSubagent === undefined`,据此给出一句
         「这个环境里派不了子代理」的人话。放一个会抛的桩,模型看到的

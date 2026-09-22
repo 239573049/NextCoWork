@@ -234,6 +234,14 @@ export interface IpcInvokeMap {
    * 渲染层只给**文件名建议**,永不指定任意路径(方案 §9)。取消时返回 null。
    */
   'app:saveTextFile': { req: { defaultName: string; text: string }; res: { path: string } | null }
+  /**
+   * 存一张 PNG（邀请海报）。`base64` 是画布 `toDataURL` 去掉前缀的那一段。
+   *
+   * ★ 和 `app:saveTextFile` 分开，而不是给它加个「二进制」开关:两者的保存对话框
+   * 过滤器和写入编码都不同,合并之后每个调用点都要带一个「这次是文本还是二进制」
+   * 的参数 —— 传错一次就写出一个内容是 base64 文本的 .png,而且打开之前看不出来。
+   */
+  'app:saveImageFile': { req: { defaultName: string; base64: string }; res: { path: string } | null }
   'app:openSessionWindow': { req: { workspaceId: string; sessionId: string }; res: void }
 
   // ── NextCoWork 账户 ──
@@ -931,13 +939,13 @@ export interface IpcInvokeMap {
 
   // ── 启动迁移闸门(见 shared/domain/data-migration.ts) ──
   /*
-    ★ 这四条是**全应用唯一能在数据库打开之前调用的 IPC**。
+    ★ 这五条是**数据库打开之前唯一能调用的业务 IPC**（无状态窗口控制除外）。
 
     它们必须能通,因为闸门存在的那段时间里数据库还没打开 —— 渲染层这时候只有
     一个窗口、一屏进度,别的什么都调不了(这也是「阻止用户使用」的实现方式:
     不是禁用控件,而是后端根本没起来)。
 
-    ★ 所以这四条的实现里**一个字节的库读写都不能有**。谁哪天顺手往
+    ★ 所以这五条的实现里**一个字节的库读写都不能有**。谁哪天顺手往
     `dataMigration:getState` 里加一句 `store.getSettings()`,表现就是迁移期间
     主进程先开了一个内存兜底库,随后 `openDatabase()` 直接抛错、启动失败。
   */
@@ -1315,6 +1323,7 @@ export const INVOKE_CHANNELS = {
   'app:updateGetState': 1,
   'app:copyText': 1,
   'app:saveTextFile': 1,
+  'app:saveImageFile': 1,
   'app:openSessionWindow': 1,
   'clientAuth:getState': 1,
   'clientAuth:startLogin': 1,

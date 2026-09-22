@@ -2,6 +2,14 @@ import type { BuiltinModelRecord } from '../types'
 import { model, textCapabilities, visionCapabilities, effortThinking, efforts } from '../helpers'
 
 export const XAI: readonly BuiltinModelRecord[] = [
+  // 需求：上新 grok-4.7，上下文窗口按官方口径为 500K（4.6 系列沿用 helpers 的
+  // 200K 默认值未单独核实过，两者互不关联，别顺手把 4.6 也改成 500K）。
+  model('xai', 'grok-4.7', 'Grok 4.7', {
+    capabilities: visionCapabilities({ thinking: true, webSearch: true }),
+    thinkingConfig: effortThinking('reasoning_effort'),
+    reasoningEfforts: efforts,
+    contextWindow: 500_000,
+  }),
   model('xai', 'grok-4.6', 'Grok 4.6', {
     capabilities: visionCapabilities({ thinking: true, webSearch: true }),
     thinkingConfig: effortThinking('reasoning_effort'),

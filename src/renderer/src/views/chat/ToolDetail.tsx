@@ -13,14 +13,14 @@
 import type { ReactNode } from "react";
 import type { ToolOutput } from "../../../../shared/agent/message";
 import type { ToolShape } from "../../../../shared/domain/tool-presenter";
+import { isTodoListTool } from "../../../../shared/domain/tool-presenter";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import { DiffBlock } from "./DiffView";
 import { CardRenderer } from "./CardRenderer";
 import { InteractionPreviewBlock } from "./InteractionPreviewBlock";
-import { TaskChecklist } from "./TaskChecklist";
+import { TodoWriteChecklist } from "./TodoWriteChecklist";
 import { WidgetDetail } from "./WidgetDetail";
-import { previewTodos } from "./todo-preview";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -159,8 +159,19 @@ export interface DetailProps {
    * 空对象),而形态类只分到「这是一次等你表态」为止。再往下分到具体工具的那一步
    * 由 `interaction-preview.ts` 的表完成,所以这里必须把名字传下去。
    * 其余渲染器用不到它 —— 别拿它在别处开按工具名分叉的口子,那正是注册表要消掉的东西。
+   *
+   * (例外:`orchestration` 这一档确实要按名字分流 —— 但判据来自注册表里的
+   * `isTodoListTool`,不是这里现写一个 `toolName === 'TodoWrite'`。)
    */
   toolName?: string;
+  /**
+   * 这次调用的 id。
+   *
+   * 原先只为 frame 卡片反查 pluginId 而存在;现在 `orchestration` 里那个清单渲染器
+   * 也用它去问「这次调用**之前**那份清单是什么」(`views/chat/todo-history.tsx`)——
+   * 那是算增量唯一缺的一块事实。
+   */
+  callId?: string;
 }
 
 /** read:路径单独一行,输出当代码预览(Read 的输出本身已带 `cat -n` 行号) */
@@ -299,26 +310,32 @@ function NetworkDetail({ input, output, isError }: DetailProps): ReactNode {
 }
 
 /**
- * orchestration:TodoWrite 的 `todos` 是**结构化数据**,渲染成清单比 JSON
- * 有用得多 —— 这是用户在整个转录里唯一会反复回看的一份状态。
+ * orchestration 形态下有两条路,判据是 `isTodoListTool(toolName)`
+ * (`shared/domain/tool-presenter.ts` 里那张数据表):
  *
- * ★ **清单本体就是输入框上方那张 `TaskChecklist`,不是另画的一份。**
- * 这里原本有一套自绘的 ○▸✓ 列表,于是同一份 todos 在同一屏里有两种长相
- * (卡片里是带删除线的文本行,输入框上方是带进度环和 Spinner 的清单),
- * 改一处必漏一处。半截入参的收窄规则在 `todo-preview.ts`。
- * 外层定位由 `className` 抹掉 —— 那套居中/限宽是输入框上方那个位置的需求。
+ * - **自带清单的那个**(`TodoWrite`)→ `TodoWriteChecklist`,见它的文件头;
+ * - 其余(`Task` / `Skill` / 四个定时任务工具)→ 下面的提示词 + 输出。
+ *
+ * ★ 判据**不能**是「入参里有没有 `todos`」:模型往任何工具里塞一个 `todos` 字段
+ * 都会让那张卡片改画成清单,而那张卡片可能根本没有清单语义。名字来自注册表,
+ * 与标题行、摘要用的是同一份事实。
  */
 function OrchestrationDetail({
   input,
   output,
   isError,
+  toolName,
+  callId,
 }: DetailProps): ReactNode {
   const { t } = useI18n();
-  const todos = previewTodos(input);
-  if (todos.length > 0) {
+  if (toolName !== undefined && isTodoListTool(toolName)) {
     return (
       <>
-        <TaskChecklist todos={todos} className="max-w-none px-0 pb-1.5" />
+        <TodoWriteChecklist
+          callId={callId}
+          input={input}
+          className="max-w-none px-0 pb-1.5"
+        />
         <OutputBlock output={output} isError={isError} maxLines={6} />
       </>
     );
@@ -447,11 +464,10 @@ export function ToolDetail({
 }: {
   shape: ToolShape;
   /*
-    `toolName` 原先只为 frame 卡片反查 pluginId 而存在,现在同时被 `interaction`
-    渲染器用来分派题面投影 —— 所以它移进了 `DetailProps`(见那里的注释),
-    不再在这里单独声明。
+    `toolName` / `callId` 移进了 `DetailProps`(见那里的注释):前者原先只为 frame
+    卡片反查 pluginId 而存在,现在 `interaction` 的分派与 `orchestration` 的清单
+    分流都要它;后者现在也是清单增量那块的入参。
   */
-  callId?: string;
   /**
    * 要渲染的卡片。调用方决定优先级:结果快照(`output.card`)或运行中的实时卡片
    * (`ToolCallState.card`,第 2 层)。给了它就渲染卡片,**与 shape 正交**。
@@ -469,6 +485,7 @@ export function ToolDetail({
       output={output}
       isError={isError}
       toolName={toolName}
+      callId={callId}
     />
   );
 }

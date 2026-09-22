@@ -16,7 +16,7 @@ import { cacheHitRateOf, hasRun, type RunUsage, type SubagentState } from '../..
 import { tokensPerSecond } from '../../../../shared/agent/duration'
 import { effectiveContextWindow } from '../../../../shared/agent/context-management'
 import type { RunCost } from '../../../../shared/domain/pricing'
-import { latestTodosFrom } from '../../../../main/kernel/tool/builtin/todo'
+import { latestTodosFrom } from '../../../../shared/agent/todo'
 import { useI18n, type TranslationKey } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
 import { AgentErrorException } from '../../services/ipc'

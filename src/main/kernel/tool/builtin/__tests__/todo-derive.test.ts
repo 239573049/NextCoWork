@@ -4,7 +4,8 @@ import { assistantMessage, toolResultMessage, userMessage } from '../../../../..
 import type { TurnEndInput, TurnEndResult } from '../../../agent-session'
 import { compactMessages } from '../../../context-assembler'
 import { createTodoReconciler } from '../../../todo-reconciliation'
-import { MARK, TODO_LIMITS, latestTodosFrom } from '../todo'
+import { MARK, latestTodosFrom } from '../../../../../shared/agent/todo'
+import { TODO_LIMITS } from '../todo'
 
 /**
  * `latestTodosFrom` 的测试 —— 从**转录**反推当前 todo 列表。
@@ -12,6 +13,10 @@ import { MARK, TODO_LIMITS, latestTodosFrom } from '../todo'
  * 这个函数存在的前提是 `todo.ts` 文件头那条设计:**不持久化任何一份 todo**。
  * 唯一真相源就是最近一次成功的 `TodoWrite` 调用,它已经躺在转录里了。
  * 所以这里钉的每一条,本质都是「怎样才算『最近一次成功』」。
+ *
+ * ★ 被钉的函数现在住在 `shared/agent/todo.ts`(渲染层也要用它,见那里的文件头),
+ * 但**判据一条都没改**,所以这组用例原样留在这里 —— 它们同时覆盖着
+ * `todo-reconciliation` 那条消费路径。
  */
 
 const TOOL = 'TodoWrite'

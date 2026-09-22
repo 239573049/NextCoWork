@@ -45,6 +45,27 @@ export const rewardsZh = {
   'rewards.copied': '已复制到剪贴板',
   'rewards.copyFailed': '复制失败，请重试',
   'rewards.openInBrowser': '在浏览器中打开',
+  'rewards.savePoster': '保存邀请海报',
+  'rewards.posterSaving': '正在生成海报…',
+  'rewards.posterSaved': ({ path }: Params) => `海报已保存到 ${path}`,
+  'rewards.posterFailed': '海报生成失败，请重试',
+
+  /*
+    ★ 下面这一组是**画进图片里**的文案，不是界面文案。改的时候注意两件事：
+    ① 它们进的是 SVG 的 `<text>`，**不会自动折行** —— 主标题因此是分开的两条 key；
+    ② 版心固定（1920 宽的左半边），单行超过约 16 个全角字会顶到右边的插画上。
+  */
+  'rewards.poster.tagline': '编码型 Agent 桌面端',
+  'rewards.poster.eyebrow': '好东西，和朋友分享',
+  'rewards.poster.titleLine1': '邀请好友，',
+  'rewards.poster.titleLine2': '一起获得更多。',
+  'rewards.poster.subtitle': '邀请好友注册，双方都能拿到免费额度',
+  'rewards.poster.bullet1': '内置多模型，登录即用',
+  'rewards.poster.bullet2': '终端 / 文件 / 浏览器，一屏搞定',
+  'rewards.poster.bullet3': '会话与配置跨设备同步',
+  'rewards.poster.scanTitle': '扫码注册',
+  'rewards.poster.scanHint': '扫码即自动绑定邀请关系',
+  'rewards.poster.codeLabel': '邀请码',
 
   'rewards.statTotal': '累计邀请',
   'rewards.statRewarded': '已发放',
@@ -114,6 +135,22 @@ export const rewardsEn = {
   'rewards.copied': 'Copied to clipboard',
   'rewards.copyFailed': 'Could not copy. Please try again.',
   'rewards.openInBrowser': 'Open in browser',
+  'rewards.savePoster': 'Save invite poster',
+  'rewards.posterSaving': 'Building the poster…',
+  'rewards.posterSaved': ({ path }: Params) => `Poster saved to ${path}`,
+  'rewards.posterFailed': 'Could not build the poster. Please try again.',
+
+  'rewards.poster.tagline': 'The coding agent desktop',
+  'rewards.poster.eyebrow': 'Share something good',
+  'rewards.poster.titleLine1': 'Invite a friend,',
+  'rewards.poster.titleLine2': 'gain more together.',
+  'rewards.poster.subtitle': 'Both of you get free credit when they sign up',
+  'rewards.poster.bullet1': 'Many models built in, ready at sign-in',
+  'rewards.poster.bullet2': 'Terminal, files and browser in one window',
+  'rewards.poster.bullet3': 'Sessions and settings sync across devices',
+  'rewards.poster.scanTitle': 'Scan to join',
+  'rewards.poster.scanHint': 'Scanning links the invite automatically',
+  'rewards.poster.codeLabel': 'Invite code',
 
   'rewards.statTotal': 'Invited',
   'rewards.statRewarded': 'Rewarded',

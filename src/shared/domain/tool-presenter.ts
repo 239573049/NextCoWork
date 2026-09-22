@@ -634,6 +634,35 @@ const FALLBACK: ToolPresenter = {
   summary: firstLineSummary
 }
 
+// ─────────────── 结果区能画成任务清单的那几个工具 ───────────────
+
+/**
+ * 「这次调用的入参/结果其实是一份任务清单」的工具表 —— 与 `shape` **正交**。
+ *
+ * ★ 为什么不能靠 `shape` 判断:同一个 `orchestration` 形态下还有 `Task` / `Skill` /
+ * 四个定时任务工具,它们的结果都不是清单;而真正决定「怎么画」的是**这次调用的
+ * 数据里有没有清单**,那件事只有跑完才知道(`previewTodos` / `narrowTodos`)。
+ * 所以这里是一张**数据表**,不是 `if (name === 'TodoWrite')` —— 下一个自带清单的
+ * 工具(比如某个插件工具)只要往这里加一行,渲染层一行都不用改。
+ *
+ * 渲染层用它做两件事:`views/chat/todo-history.tsx` 决定「要不要找上一份清单来
+ * 算增量」,`ToolDetail` 决定「结果块画成清单还是画成输出原文」。
+ */
+const TODO_LIST_PRESENTERS: Record<string, true> = {
+  TodoWrite: true
+}
+
+/**
+ * 这个工具的结果区是否该按任务清单渲染。
+ *
+ * ★ 查表键与 `presenterOf` 一样是 **externalName**(转录里存的那个):内置工具两者
+ * 相同,撞名后带哈希后缀的名字会查不到 —— 那时退回通用渲染,而不是拿一张空清单
+ * 去画一个「0/0 已完成」的假面板。
+ */
+export function isTodoListTool(name: string): boolean {
+  return TODO_LIST_PRESENTERS[name] === true
+}
+
 // ─────────────────────────── 插件贡献的 presenter(注入层) ───────────────────────────
 //
 // ★ REGISTRY 之上唯一的可变层。插件的 presenter **算不出来**(依赖清单里的 shape/card

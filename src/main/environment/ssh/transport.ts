@@ -69,8 +69,19 @@ const INHERITED_NAMES = [
 /** 按前缀放行:LC_ 有 14 个,CLOUDSDK_ / TELEPORT_ 数量不定,逐个列会漏。 */
 const INHERITED_PREFIXES = ['lc_', 'cloudsdk_', 'teleport_', 'tsh_']
 
-/** 永不透传,即使调用方在 overrides 里塞进来:它们会改变子进程里 Node/Electron 的行为。 */
+/** 永不从继承来的环境里透传,即使调用方在 overrides 里塞进来:它们会改变子进程里 Node/Electron 的行为。 */
 const DENIED_NAMES = ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS']
+
+/**
+ * overrides 这一路的 deny —— 比上面少一个 `ELECTRON_RUN_AS_NODE`。
+ *
+ * 原先它对 overrides 也封死,理由是「别让它顺着 ssh 扩散到 ProxyCommand 那层」;
+ * 那条理由仍然成立,所以**只**对这一个名字放开,而且只能由我们自己的代码显式传进来:
+ * Windows 的 askpass helper 靠它让同一个 exe 以 node 形态启动(Windows 上 SSH_ASKPASS
+ * 只能是 exe,没有 `sh` 可以包一层,见 `ssh/askpass.ts`)。缺了它,那边的密码认证在
+ * 打包版上必然失败。`NODE_OPTIONS` 依旧全封:那是真正的注入面。
+ */
+const DENIED_OVERRIDE_NAMES = ['NODE_OPTIONS']
 
 export function sshProcessEnvironment(overrides: NodeJS.ProcessEnv = {}, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   /**
@@ -80,6 +91,7 @@ export function sshProcessEnvironment(overrides: NodeJS.ProcessEnv = {}, inherit
    */
   const allowed = new Set(INHERITED_NAMES.map((name) => name.toLowerCase()))
   const denied = new Set(DENIED_NAMES.map((name) => name.toLowerCase()))
+  const deniedOverrides = new Set(DENIED_OVERRIDE_NAMES.map((name) => name.toLowerCase()))
   const env: NodeJS.ProcessEnv = {}
   for (const [name, value] of Object.entries(inherited)) {
     if (value === undefined) continue
@@ -88,7 +100,7 @@ export function sshProcessEnvironment(overrides: NodeJS.ProcessEnv = {}, inherit
     if (allowed.has(lower) || INHERITED_PREFIXES.some((prefix) => lower.startsWith(prefix))) env[name] = value
   }
   for (const [name, value] of Object.entries(overrides)) {
-    if (value === undefined || denied.has(name.toLowerCase())) continue
+    if (value === undefined || deniedOverrides.has(name.toLowerCase())) continue
     env[name] = value
   }
   return env

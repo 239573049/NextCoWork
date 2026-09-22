@@ -46,6 +46,7 @@ import { createMigrationGate, type MigrationGate } from './db/startup-migration'
 import {
   announceIpcReady,
   announceMigrationState,
+  announceStartupFailure,
   installMigrationGate,
   setMigrationDataChangedListener
 } from './ipc/data-migration'
@@ -544,10 +545,10 @@ void app
   logStartupProbe()
 
   /*
-    ★ **在闸门之前、建窗之前先登记闸门那几条频道。** 窗口加载完就会立刻
-    invoke `dataMigration:getState`,而那一刻闸门正在跑、数据库还没打开。
-    完整的 `registerIpc()` 要等闸门放行才能调(它会拉起导入服务、扫孤儿文件,
-    全都要库),所以这几条必须单独先登记。
+    ★ **在闸门之前、建窗之前先登记闸门频道与窗口控制。** 窗口加载完就会立刻
+    invoke `dataMigration:getState`,而那一刻闸门正在跑、数据库还没打开；Windows/Linux
+    又没有原生标题栏。完整的 `registerIpc()` 要等闸门放行才能调(它会拉起导入服务、
+    扫孤儿文件,全都要库),所以这些无数据库依赖的频道必须单独先登记。
 
     ★ 顺序反了的症状是:窗口起来了、迁移屏永远是空白(那一次 invoke 拿到
     「未登记的频道」),而用户看到的是一个「什么都没发生」的启动。
@@ -557,7 +558,7 @@ void app
 
   /*
     ★ **建窗在闸门之前。** 迁移可能跑好几分钟,用户必须能看见它在跑;而这一屏
-    自己需要的四条 IPC(`dataMigration:*`)是唯一在闸门期间可用的频道。
+    只使用提前登记的 `dataMigration:*` 与无状态窗口控制，不会碰尚未打开的数据库。
 
     这个窗口此刻是**被冻结**的:App 的握手 effect 要等 `MigrationGateHost`
     放行才会跑(见 renderer/main.tsx),所以它不会去碰还没打开的数据库。
@@ -743,13 +744,13 @@ void app
   .catch((err: unknown) => {
     /*
       ★ 走到这里意味着 `announceIpcReady()` 大概率没跑到 —— 而窗口此刻已经建出来了
-      (建窗在闸门之前),于是它会**一直停在空白首屏**:闸门不放行,它对任何 invoke
-      也答不上来,连一句错误都递不出去。所以这一行 console.error 是这种情况下的
-      唯一线索:排查「启动后一片空白、界面无提示」时先看它,不要先怀疑渲染层。
+      (建窗在闸门之前)。原先这里只写 console,闸门会永远等着,表现为整窗白屏且用户
+      看不到任何错误；现在必须先把同一异常推给闸门错误页，再保留 console 供终端诊断。
 
-      需求:这条路径以前能看到的是渲染层的「首屏握手失败: No handler registered」,
-      那个错误指向频道注册,而真正的病因是主进程启动崩了,两者几乎没关系。
+      需求:不能放行 App 去制造「首屏握手失败: No handler registered」的假病因；
+      真正的启动异常必须原样显示，并允许用户打开数据目录排查。
     */
+    announceStartupFailure(err)
     console.error('[app] 启动流程失败:', err)
   })
 

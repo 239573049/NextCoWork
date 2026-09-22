@@ -60,7 +60,7 @@ import { runScheduledTaskNow } from '../scheduled/scheduler'
 import { scheduledWrites } from '../scheduled/bridge'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
-import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, requestQuit, saveTextFile } from './app'
+import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, requestQuit, saveImageFile, saveTextFile } from './app'
 import {
   cancelWorkspaceUpload,
   completeWorkspaceUpload,
@@ -271,6 +271,7 @@ const handlers: HandlerMap = {
   'app:updateGetState': () => updateService.getState(),
   'app:copyText': ({ text }) => copyText(text),
   'app:saveTextFile': (req) => saveTextFile(req),
+  'app:saveImageFile': (req) => saveImageFile(req),
   'app:openSessionWindow': (req) => openSessionWindow(req),
   'clientAuth:getState': () => getClientAuthState(),
   'clientAuth:startLogin': () => startClientLogin(),
@@ -784,15 +785,26 @@ function safeHandle<K extends InvokeChannel>(channel: K, fn: Handler<K>): void {
   })
 }
 
+/** send 没有回程信封可以报错，所以每条监听都必须在主进程侧兜住异常。 */
+function safeListen<K extends SendChannel>(channel: K, fn: SendHandler<K>): void {
+  ipcMain.on(channel, (event, payload) => {
+    try {
+      fn(payload, windows.of(event.sender))
+    } catch (err) {
+      console.error(`[ipc] send ${channel} 失败:`, err)
+    }
+  })
+}
+
 /**
- * 只登记启动迁移闸门那几条频道。
+ * 只登记启动界面所需的迁移频道与窗口控制。
  *
  * ★ **它必须能在 `registerIpc()` 之前单独调用。** 闸门存在的那段时间里数据库还
  * 没打开,而 `registerIpc()` 会拉起导入服务、扫孤儿文件、迁移主题目录 —— 那些
  * 全都要库。所以启动路径上先调这一个,闸门放行之后才调完整的 `registerIpc()`。
  *
- * ★ 这几条 handler 自己也不碰库(见 `./data-migration` 的文件头),所以「先登记
- * 它们」这件事本身是安全的。
+ * ★ 这些 handler 都不碰库（迁移约束见 `./data-migration`，窗口控制只操作当前窗口），
+ * 所以「先登记它们」本身是安全的。
  */
 /**
  * 闸门那几条频道。`registerMigrationIpc()` 单独登记它们,`registerIpc()` 跳过它们。
@@ -811,19 +823,29 @@ const MIGRATION_CHANNELS = [
 
 const MIGRATION_CHANNEL_SET: ReadonlySet<string> = new Set<string>(MIGRATION_CHANNELS)
 
+/*
+  需求：Windows/Linux 在完整 IPC 就绪前也会显示启动骨架或诊断页；它们仍处于无标题栏
+  窗口中，所以窗口控制必须和迁移频道一起提前可用，否则错误页连关闭按钮都点不动。
+*/
+const STARTUP_SEND_CHANNELS = ['window:control'] as const satisfies readonly SendChannel[]
+const STARTUP_SEND_CHANNEL_SET: ReadonlySet<string> = new Set<string>(STARTUP_SEND_CHANNELS)
+
 /**
- * 只登记启动迁移闸门那几条频道。
+ * 只登记启动界面所需的迁移频道与窗口控制。
  *
  * ★ **它必须能在 `registerIpc()` 之前单独调用。** 闸门存在的那段时间里数据库还
  * 没打开,而 `registerIpc()` 会拉起导入服务、扫孤儿文件、迁移主题目录 —— 那些
  * 全都要库。所以启动路径上先调这一个,闸门放行之后才调完整的 `registerIpc()`。
  *
- * ★ 这几条 handler 自己也不碰库(见 `./data-migration` 的文件头),所以「先登记
- * 它们」这件事本身是安全的。
+ * ★ 这些 handler 都不碰库（迁移约束见 `./data-migration`，窗口控制只操作当前窗口），
+ * 所以「先登记它们」本身是安全的。
  */
 export function registerMigrationIpc(): void {
   for (const channel of MIGRATION_CHANNELS) {
     safeHandle(channel, handlers[channel] as Handler<InvokeChannel>)
+  }
+  for (const channel of STARTUP_SEND_CHANNELS) {
+    safeListen(channel, sendHandlers[channel] as SendHandler<SendChannel>)
   }
 }
 
@@ -839,16 +861,9 @@ export function registerIpc(): void {
   }
 
   for (const channel of Object.keys(SEND_CHANNELS) as SendChannel[]) {
-    ipcMain.on(channel, (event, payload) => {
-      // send 没有回程信封可以报错。**必须**兜住异常,
-      // 否则一个畸形载荷就是主进程里的 uncaught exception。
-      try {
-        const fn = sendHandlers[channel] as SendHandler<SendChannel>
-        fn(payload, windows.of(event.sender))
-      } catch (err) {
-        console.error(`[ipc] send ${channel} 失败:`, err)
-      }
-    })
+    // 启动页需要的窗口控制已经提前登记；重复监听会让一次点击执行两次。
+    if (STARTUP_SEND_CHANNEL_SET.has(channel)) continue
+    safeListen(channel, sendHandlers[channel] as SendHandler<SendChannel>)
   }
 
   registerThemeBridge()

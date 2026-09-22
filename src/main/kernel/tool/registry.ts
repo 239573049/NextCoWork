@@ -6,6 +6,7 @@
  * 「一等公民」的实际含义,也意味着只有一条权限链路、一套命名方案、一个执行路径。
  */
 import type { ToolInfo, ToolProgress, ToolResult, ToolSource } from '../../../shared/agent/tool'
+import type { AgentMessage } from '../../../shared/agent/message'
 import type { PermissionMode } from '../../../shared/agent/permission'
 import type { Skill } from '../../../shared/domain/skill'
 import type { SchedulingBridge } from '../../../shared/domain/scheduled'
@@ -148,6 +149,26 @@ export interface ToolContext {
   host: ToolHost
   /** 进度是**易失的**:单独的事件类型,永不写入转录 */
   emit(progress: ToolProgress): void
+  /**
+   * 这次 run 的转录(在**这次调用之前**的部分)。
+   *
+   * 需求:工具的结果文案要能对照「自己上一轮做了什么」—— 目前只有 `TodoWrite`
+   * 用得到(它每轮发完整清单,得知道这次改了什么才能把差异回显给模型)。不给的话
+   * 工具只能自己去存一份状态,而那正是 `todo.ts` 文件头明令排除的「幽灵清单」。
+   *
+   * ★ 与 `spawnSubagent` 同一个取舍:**给不出就不放这个字段**(纯内核测试、
+   * 还没有转录的场景),而不是放一个空数组 —— 「不知道」和「历史是空的」在
+   * 派生逻辑里是两件事。
+   */
+  messages?: readonly AgentMessage[]
+  /**
+   * `TodoWrite` 在**本会话**里的外部名(`ToolNamer` 分配的,撞名时带哈希后缀)。
+   *
+   * 同上,只有清单工具用得到,而它必须来自注册表 —— 写字面量 `'TodoWrite'`
+   * 在撞名时**静默**取不到任何东西。见 `shared/agent/todo.ts` 的
+   * `latestTodosFrom`。
+   */
+  todoToolName?: string
   /**
    * 派子代理。只有 `Task` 用得到,所以是可选的 —— 让每个工具的
    * ctx 都必须带上一个它永远不会碰的函数,是没有道理的。

@@ -277,7 +277,9 @@ const GEMINI: readonly ModelPricing[] = [
  */
 const xai = maker(null, 'USD', 'https://cdn.jsdelivr.net/gh/BerriAI/litellm@v1.99.0/model_prices_and_context_window.json')
 
-const XAI: readonly ModelPricing[] = [xai('grok-4.3', 'Grok 4.3', two(200_000, { input: 1.25, output: 2.5, cacheRead: 0.2 }, { input: 2.5, output: 5, cacheRead: 0.4 })), xai('grok-4.5', 'Grok 4.5', two(200_000, { input: 2, output: 6, cacheRead: 0.3 }, { input: 4, output: 12, cacheRead: 0.6 })), xai('grok-4.6', 'Grok 4.6', two(200_000, { input: 2, output: 6, cacheRead: 0.5 }, { input: 4, output: 12, cacheRead: 1.0 }))]
+// 需求：grok-4.7 定价按产品方确认「与 grok-4.6 完全一致」直接抄档，
+// 不是本文件其余行要求的双源核对 —— 4.7 还没有独立的 LiteLLM/OpenRouter 条目。
+const XAI: readonly ModelPricing[] = [xai('grok-4.3', 'Grok 4.3', two(200_000, { input: 1.25, output: 2.5, cacheRead: 0.2 }, { input: 2.5, output: 5, cacheRead: 0.4 })), xai('grok-4.5', 'Grok 4.5', two(200_000, { input: 2, output: 6, cacheRead: 0.3 }, { input: 4, output: 12, cacheRead: 0.6 })), xai('grok-4.6', 'Grok 4.6', two(200_000, { input: 2, output: 6, cacheRead: 0.5 }, { input: 4, output: 12, cacheRead: 1.0 })), xai('grok-4.7', 'Grok 4.7', two(200_000, { input: 2, output: 6, cacheRead: 0.5 }, { input: 4, output: 12, cacheRead: 1.0 }))]
 
 /* ══════════════════════════ 智谱 / Z.AI(USD) ══════════════════════════ */
 
@@ -519,7 +521,22 @@ const MINIMAX: readonly ModelPricing[] = [
 /** 海外 Pay-as-you-go 官方 USD；国内 CNY 是独立区域价，不由汇率反推。 */
 const mimo = maker(null, 'USD', 'https://mimo.mi.com/docs/en-US/pricing')
 
-const MIMO: readonly ModelPricing[] = [mimo('mimo-v2.5-pro', 'MiMo V2.5 Pro', one({ input: 0.435, output: 0.87, cacheRead: 0.0036 })), mimo('mimo-v2.5', 'MiMo V2.5', one({ input: 0.14, output: 0.28, cacheRead: 0.0028 }))]
+/*
+  需求：V2.6-Pro/Flash 的 CNY 官网价与 V2.5-Pro/V2.5 逐档相同(¥0.025/3/6、¥0.02/1/2)，
+  换成 USD 后也和 OpenRouter 挂的 `xiaomi/mimo-v2.6-*` 价格一致 —— 双源吻合，非编造。
+  UltraSpeed 是 V2.6 才有的新档(¥0.25/30/60)，独立入表。
+  ★ 不给这三行单独传 `fetchedAt`——`pricing-seed.test.ts` 的
+  「fetchedAt 全表一致」断言钉死了这张表只能有一个采集日期(`FETCHED_AT` 常量)，
+  这里沿用它，不是漏填；真要标「今天」核实过，得整表批量刷新那个常量，而那个常量
+  同时是好几个按周判定的时段计价用例的锚点，不该为了新增三行模型顺带牵动。
+*/
+const MIMO: readonly ModelPricing[] = [
+  mimo('mimo-v2.6-pro', 'MiMo V2.6 Pro', one({ input: 0.435, output: 0.87, cacheRead: 0.0036 })),
+  mimo('mimo-v2.6-flash', 'MiMo V2.6 Flash', one({ input: 0.14, output: 0.28, cacheRead: 0.0028 })),
+  mimo('mimo-v2.6-pro-ultraspeed', 'MiMo V2.6 Pro UltraSpeed', one({ input: 4.35, output: 8.7, cacheRead: 0.036 })),
+  mimo('mimo-v2.5-pro', 'MiMo V2.5 Pro', one({ input: 0.435, output: 0.87, cacheRead: 0.0036 })),
+  mimo('mimo-v2.5', 'MiMo V2.5', one({ input: 0.14, output: 0.28, cacheRead: 0.0028 })),
+]
 
 /* ══════════════════════════ 字节跳动豆包 / Doubao ══════════════════════════ */
 

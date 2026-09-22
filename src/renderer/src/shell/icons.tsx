@@ -39,6 +39,10 @@ import {
   Upload,
   Wrench,
   FileText,
+  Film,
+  Gamepad2,
+  Music,
+  Tv,
   type LucideIcon
 } from 'lucide-react'
 import type { MenuIconName } from '../../../shared/plugin/contribution'
@@ -140,5 +144,10 @@ export const MENU_ICON: Record<MenuIconName, LucideIcon> = {
   table: Table,
   link: Link,
   bookmark: Bookmark,
-  shield: Shield
+  shield: Shield,
+  // 网页应用那一类(见 shared/plugin/contribution.ts 的 MENU_ICON_NAMES)
+  tv: Tv,
+  film: Film,
+  music: Music,
+  gamepad: Gamepad2
 }

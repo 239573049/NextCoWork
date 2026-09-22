@@ -172,6 +172,31 @@ export async function saveTextFile(req: { defaultName: string; text: string }): 
   return { path: result.filePath }
 }
 
+/**
+ * 存一张 PNG 到用户挑的位置。渲染层给的是 base64（画布 `toDataURL` 的产物去掉前缀），
+ * 主进程负责落盘 —— 和 `saveTextFile` 同一条约定：**路径由 showSaveDialog 产出，
+ * 渲染层永不指定任意路径**。
+ *
+ * ★ base64 在这里校验一次再解码。渲染层传来的本该是自己画的图，但这条频道对
+ * 插件视图同样可达（走的是同一个 preload 桥），不校验就等于「谁都能让主进程
+ * 往任意位置写一个由它决定内容的文件」——虽然路径仍由用户选，内容却不该是
+ * 一段没检查过的东西。非法 base64 直接报错，比写出一个打不开的文件强。
+ */
+export async function saveImageFile(req: { defaultName: string; base64: string }): Promise<{ path: string } | null> {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(req.base64) || req.base64.length < 32) {
+    throw new IpcError('unknown', '图片数据无效')
+  }
+  const safeName = req.defaultName.replace(/[/\\:*?"<>|]/g, '_').slice(0, 120) || 'image.png'
+  const result = await dialog.showSaveDialog({
+    title: '保存图片',
+    defaultPath: join(app.getPath('downloads'), safeName),
+    filters: [{ name: 'PNG', extensions: ['png'] }]
+  })
+  if (result.canceled || !result.filePath) return null
+  await writeFile(result.filePath, Buffer.from(req.base64, 'base64'))
+  return { path: result.filePath }
+}
+
 export function openSessionWindow(req: { workspaceId: string; sessionId: string }): void {
   if (sessionWindowOpener === null) throw new IpcError('unknown', '暂时无法打开新窗口')
   sessionWindowOpener(req.workspaceId, req.sessionId)

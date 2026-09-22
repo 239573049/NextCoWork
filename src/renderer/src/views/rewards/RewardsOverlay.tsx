@@ -19,9 +19,15 @@
  * 本地没有任何事件能预告它（见 `shared/ipc/contract.ts` 的 `referral:get`）。
  * 用户要看最新的就按标题右边那颗刷新。
  */
-import { Gift, RotateCw, X } from 'lucide-react'
+import { Gift, ImageDown, RotateCw, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { ReferralCenter, ReferralState } from '../../../../shared/domain/referral'
+/*
+  ★ 海报上的标用的是**带米色圆角底的应用图标**（`resources/icon.png` 的 256px 版），
+  不是 `assets/mark.png`。后者是透明底的深色符号 —— 画在海报的墨绿底上几乎看不见，
+  而且它是 1254px/481KB，为了一个 96px 的落点背这么大一张也不合算。
+*/
+import brandIcon from '../../assets/brand-icon-256.png'
 import bannerDark from '../../assets/rewards-banner-dark.jpg'
 import bannerLight from '../../assets/rewards-banner-light.jpg'
 import { Button } from '../../components/ui/Button'
@@ -33,11 +39,13 @@ import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { IS_MAC } from '../../lib/platform'
 import { usePresence } from '../../lib/usePresence'
-import { copyText, openExternal } from '../../services/app'
+import { copyText, openExternal, saveImageFile } from '../../services/app'
 import { getReferralCenter } from '../../services/referral'
 import { toast } from '../../stores/toast'
 import { useAppearance } from '../../theme/useAppearance'
 import { RewardsTables } from './RewardsTables'
+import { invitePosterFileName } from './invite-poster'
+import { renderInvitePosterPng } from './poster-export'
 import { bannerRewardLine, giftValidityLine, summaryStats, unavailableKey } from './rewards-view'
 
 /** 和设置浮层同一档开合时长 —— 两个模态用不同的节奏会显得是两个产品。 */
@@ -50,6 +58,7 @@ export function RewardsOverlay({ open, onClose }: { open: boolean; onClose: () =
   const appearance = useAppearance()
   const [state, setState] = useState<ReferralState | null>(null)
   const [loading, setLoading] = useState(false)
+  const [savingPoster, setSavingPoster] = useState(false)
 
   const load = useCallback((): void => {
     setLoading(true)
@@ -91,6 +100,44 @@ export function RewardsOverlay({ open, onClose }: { open: boolean; onClose: () =
     void copyText(text)
       .then(() => toast.success(t('rewards.copied'), 'rewards-copy'))
       .catch(() => toast.error(t('rewards.copyFailed'), 'rewards-copy'))
+  }
+
+  /**
+   * 生成这个用户自己的邀请海报并另存为 PNG。
+   *
+   * ★ 文案在**这里**取（组件里才有 `useI18n()`），再整份传给纯函数 —— 生成器
+   * 自己不认识 i18n，见 `invite-poster.ts` 文件头。切成英文再点一次，出的就是英文海报。
+   *
+   * ★ 用户在系统对话框里按取消时 `saveImageFile` 返回 null：这不是失败，
+   * **不弹任何提示**。给取消也弹一条「已保存」或「失败」都是在说谎。
+   */
+  const savePoster = (center: ReferralCenter): void => {
+    setSavingPoster(true)
+    const input = {
+      code: center.code,
+      inviteUrl: center.inviteUrl,
+      copy: {
+        tagline: t('rewards.poster.tagline'),
+        eyebrow: t('rewards.poster.eyebrow'),
+        titleLine1: t('rewards.poster.titleLine1'),
+        titleLine2: t('rewards.poster.titleLine2'),
+        subtitle: t('rewards.poster.subtitle'),
+        bullets: [t('rewards.poster.bullet1'), t('rewards.poster.bullet2'), t('rewards.poster.bullet3')],
+        scanTitle: t('rewards.poster.scanTitle'),
+        scanHint: t('rewards.poster.scanHint'),
+        codeLabel: t('rewards.poster.codeLabel')
+      }
+    }
+    void renderInvitePosterPng(input, brandIcon)
+      .then((base64) => saveImageFile(invitePosterFileName(center.code), base64))
+      .then((saved) => {
+        if (saved !== null) toast.success(t('rewards.posterSaved', { path: saved.path }), 'rewards-poster')
+      })
+      .catch((error: unknown) => {
+        console.error('[rewards] 生成邀请海报失败', error)
+        toast.error(t('rewards.posterFailed'), 'rewards-poster')
+      })
+      .finally(() => setSavingPoster(false))
   }
 
   if (!presence.mounted) return null
@@ -187,6 +234,8 @@ export function RewardsOverlay({ open, onClose }: { open: boolean; onClose: () =
                   toast.error(t('auth.actionFailedDetail', { message: error instanceof Error ? error.message : String(error) }))
                 })
               }}
+              savingPoster={savingPoster}
+              onSavePoster={() => savePoster(state.center)}
             />
             <div className="grid grid-cols-4 gap-3">
               {summaryStats(state.center, locale, t).map((stat) => (
@@ -213,11 +262,16 @@ export function RewardsOverlay({ open, onClose }: { open: boolean; onClose: () =
 function InviteCard({
   center,
   onCopy,
-  onOpen
+  onOpen,
+  onSavePoster,
+  savingPoster
 }: {
   center: ReferralCenter
   onCopy: (text: string) => void
   onOpen: (url: string) => void
+  /** 生成并另存这个用户自己的邀请海报 */
+  onSavePoster: () => void
+  savingPoster: boolean
 }): ReactNode {
   const { t } = useI18n()
   return (
@@ -236,6 +290,14 @@ function InviteCard({
         <span className="shrink-0 text-[12px] text-fg-faint">{t('rewards.inviteCode')}</span>
         <span className="selectable min-w-0 flex-1 truncate font-mono text-[12.5px] tracking-wider text-fg">{center.code}</span>
         <Button size="sm" onClick={() => onCopy(center.code)}>{t('rewards.copyCode')}</Button>
+        {/*
+          ★ 海报是「这个用户自己那一张」：二维码编的是他的邀请链接，
+          所以按钮只能出现在拿到了 `center` 的地方 —— 没有码就没有海报可出，
+          这也是它不做成账户菜单一项的原因。
+        */}
+        <Button size="sm" variant="accent" icon={<ImageDown size={14} />} disabled={savingPoster} onClick={onSavePoster}>
+          {savingPoster ? t('rewards.posterSaving') : t('rewards.savePoster')}
+        </Button>
       </div>
       <p className="text-[11.5px] text-fg-faint">
         {t('rewards.qualifyHint', { calls: center.qualifyMinPaidCalls })} · {giftValidityLine(center, t)}

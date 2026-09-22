@@ -79,7 +79,7 @@ export function Sidebar({
   onNewChat: () => void
   onSearch: () => void
   onOpenFeature: (f: FeatureKind) => void
-  /** 打开设置浮层。**页码是可选的** —— 账户菜单的「积分余额」要直接落到钱包页 */
+  /** 打开设置浮层。**页码是可选的** —— 账户菜单的「余额」要直接落到钱包页 */
   onOpenSettings: (page?: SettingsPageId) => void
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>

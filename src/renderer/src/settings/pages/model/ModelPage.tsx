@@ -40,7 +40,6 @@ import {
 } from "../../../../../shared/domain/model-catalog-inventory";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Dialog } from "../../../components/ui/Dialog";
-import { Select } from "../../../components/ui/Select";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Toggle } from "../../../components/ui/Toggle";
 import { cn } from "../../../lib/cn";
@@ -62,10 +61,7 @@ import { StubModalityPage } from "./StubModalityPage";
 import { EnabledModelList } from "./EnabledModelList";
 import { ProviderPanel } from "./ProviderPanel";
 import {
-  providerAliasOptions,
   providerEntries,
-  roleModelChoice,
-  selectableProviders,
 } from "./enabled-models";
 import { formatRate, selectCatalogPricing } from "./pricing-table";
 import { parseModelTab } from "./tabs";
@@ -73,18 +69,17 @@ import { useI18n, type TranslationKey } from "../../../i18n";
 import { ModelProtocolEditor, modelProtocolSummary } from "./ModelProtocol";
 import { ImageModelPage } from "./ImageModelPage";
 
-export function ModelPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
+export function ModelPage({ settings, sub }: SettingsPageProps): ReactNode {
   const tab = parseModelTab(sub);
   if (tab === "management") return <ModelConsole />;
   if (tab === "image") return <ImageModelPage />;
   if (tab !== "text") return <StubModalityPage modality={tab} />;
-  return <LegacyTextTab settings={settings} patch={patch} />;
+  return <LegacyTextTab settings={settings} />;
 }
 
 function LegacyTextTab({
   settings,
-  patch,
-}: Omit<SettingsPageProps, "sub">): ReactNode {
+}: Pick<SettingsPageProps, "settings">): ReactNode {
   const { t } = useI18n();
   const providers = useModelsStore((s) => s.providers),
     models = useModelsStore((s) => s.models),
@@ -103,6 +98,13 @@ function LegacyTextTab({
     entries.find((e) => e.provider.id === selectedId) ?? entries[0] ?? null;
   return (
     <>
+      {/*
+        ★ 「默认模型/默认子代理」的选择器搬去了「通用 → Agent」(`GeneralPage.tsx`
+        的 `sub === 'agent'` 分支)—— 用户来这里配权限/审核模型/上下文管理,
+        「Agent 用哪个模型」该跟它们同屏,不该单独留在模型设置页里跟供应商列表
+        抢一条窄列。这里的 `entries`/`isDefault` 徽章原样保留:它是「库存」视图,
+        展示哪家供应商在提供当前默认模型,跟「去哪改默认模型」是两件事。
+      */}
       <div className="flex items-start gap-4">
         <EnabledModelList
           entries={entries}
@@ -114,35 +116,6 @@ function LegacyTextTab({
             setCatalogOpen(false);
           }}
           onAdd={() => setCatalogOpen(true)}
-          footer={
-            <div className="space-y-1.5">
-              {/*
-                ★★ **两栏都是「先供应商、再模型」两级**,理由在 `enabled-models.ts`
-                那一段。这里只负责把两级的结果**成对**写回去 —— 单写别名会留下
-                「新别名 + 旧供应商」,那正是 `model-selection.ts` 整个模块要消灭的形状。
-              */}
-              <RoleModelPicker
-                label={t("models.default")}
-                models={models}
-                providers={providers}
-                model={settings.defaultModel}
-                modelProviderId={settings.defaultModelProviderId}
-                onChange={(model, modelProviderId) => {
-                  patch({ defaultModel: model, defaultModelProviderId: modelProviderId });
-                }}
-              />
-              <RoleModelPicker
-                label={t("models.defaultSubagent")}
-                models={models}
-                providers={providers}
-                model={settings.subagent.model}
-                modelProviderId={settings.subagent.modelProviderId}
-                onChange={(model, modelProviderId) => {
-                  patch({ subagent: { model, modelProviderId } });
-                }}
-              />
-            </div>
-          }
         />
         {/*
           ★★ **目录占的是供应商面板的位置,不再是一个浮层。** 于是右边这一栏
@@ -171,109 +144,6 @@ function LegacyTextTab({
     </>
   );
 }
-
-/**
- * 「默认模型」/「默认子代理」那一栏 —— **先供应商,再这一家的模型**。
- *
- * ★★ 两级的结果永远**成对**交给 `onChange`,调用方不需要(也不应该)自己拼:
- * 存的是 `(别名, 供应商)` 一对,而「A 家的别名 + B 家的锁」拼出来的候选集是空的,
- * 表现是下一次发送直接失败、错误还指着一个跟这次选择无关的供应商。
- *
- * ★ 换供应商时**尽量保住当前别名**(新那家也提供同名模型的话),否则取它的第一个。
- * 直接清空的话,用户在两家之间对比一下就得把模型重选一遍。
- */
-function RoleModelPickerComponent({
-  label,
-  models,
-  providers,
-  model,
-  modelProviderId,
-  onChange,
-}: {
-  label: string;
-  models: readonly ModelAlias[];
-  providers: readonly UpstreamProvider[];
-  model: string;
-  modelProviderId: string | undefined;
-  /** 别名与供应商**必须一起给**。`("", undefined)` = 跟随对话 */
-  onChange: (model: string, modelProviderId: string | undefined) => void;
-}): ReactNode {
-  const { t } = useI18n();
-  const choice = roleModelChoice(models, providers, model, modelProviderId);
-  const providerOptions = useMemo(
-    () => [
-      { value: "", label: t("models.followConversation") },
-      ...selectableProviders(models, providers, choice.providerId).map((p) => ({
-        value: p.id,
-        label: p.name,
-      })),
-    ],
-    [models, providers, choice.providerId, t],
-  );
-  const aliasOptions = useMemo(
-    () => providerAliasOptions(models, choice.providerId),
-    [models, choice.providerId],
-  );
-
-  function pickProvider(id: string): void {
-    if (id === "") {
-      onChange("", undefined);
-      return;
-    }
-    const aliases = providerAliasOptions(models, id);
-    const kept = aliases.some((o) => o.value === choice.alias) ? choice.alias : aliases[0]?.value;
-    // 这一家一个别名都没有(只可能是那条「已经不可选、但还钉着」的路径):
-    // 别落下一个指不到任何绑定的供应商 —— 整对退回「跟随对话」。
-    if (kept === undefined) onChange("", undefined);
-    else onChange(kept, id);
-  }
-
-  return (
-    <div className="overflow-hidden rounded-[10px] border border-border bg-surface-raised">
-      <p className="px-2.5 pt-2 text-[11.5px] text-fg-muted">{label}</p>
-      <label className="flex min-h-9 items-center gap-2 px-2.5 py-1.5">
-        <span className="w-11 shrink-0 truncate text-[11px] text-fg-faint">
-          {t("models.vendor")}
-        </span>
-        <Select
-          value={choice.providerId}
-          onValueChange={pickProvider}
-          ariaLabel={`${label} · ${t("models.vendor")}`}
-          className="min-w-0 flex-1"
-          options={providerOptions}
-        />
-      </label>
-      <label className="flex min-h-9 items-center gap-2 px-2.5 pb-2">
-        <span className="w-11 shrink-0 truncate text-[11px] text-fg-faint">
-          {t("common.model")}
-        </span>
-        {choice.providerId === "" ? (
-          /* ★ 没选供应商时这一级**不是一个空下拉**:空下拉点开什么都没有,
-             看起来像坏了。直说下一步是什么。 */
-          <span className="min-w-0 flex-1 truncate text-[11px] text-fg-faint">
-            {t("models.pickProviderFirst")}
-          </span>
-        ) : (
-          <Select
-            value={choice.alias}
-            // 供应商已经由上一级钉死了,这一级的 value 是裸别名
-            onValueChange={(alias) => {
-              onChange(alias, choice.providerId);
-            }}
-            ariaLabel={`${label} · ${t("common.model")}`}
-            className="min-w-0 flex-1"
-            options={aliasOptions}
-          />
-        )}
-      </label>
-    </div>
-  );
-}
-
-// Keep the component reference explicit at module scope. This avoids stale
-// development hot-update modules resolving the JSX symbol before a function
-// declaration is reinstalled.
-const RoleModelPicker = RoleModelPickerComponent;
 
 type CatalogModel = ModelCatalogEntry;
 type CatalogDraft = ModelCatalogDefinition;
