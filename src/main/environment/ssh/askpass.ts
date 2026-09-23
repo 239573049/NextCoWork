@@ -112,7 +112,35 @@ export class SshAuthBroker {
     }
   }
 
-  async open(profile: SshConnectionProfile, senderId: number, invocation: { executable: string; appPath?: string }): Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve(values: Map<string, string>): void }> {
+  /**
+   * 给内置 SSH 客户端用的一次询问。不经过系统 ssh。
+   *
+   * 需求:Windows 上那条 ssh2 连接自己问密码,而不是再起一个 ssh.exe。
+   * 存过的密码直接返回,不弹窗;没有,或调用方声明上一次被拒了,才弹现有的询问框。
+   * 弹出来的框和系统 ssh 走 SSH_ASKPASS 时是同一个,勾「记住」写的也是同一个槽位。
+   */
+  ask(senderId: number, profile: SshConnectionProfile, prompt: string, options: { rejected?: boolean } = {}): Promise<string> {
+    const ref = credentialRef(profile, 'password', prompt)
+    const canRemember = profile.authMethod !== 'ask' && this.secrets.available()
+    return (async () => {
+      const stored = canRemember && options.rejected !== true ? await this.secrets.get(ref) : null
+      if (stored !== null && options.rejected !== true) return stored
+      const id = randomUUID()
+      const request: SshAuthRequest = {
+        id, connectionId: profile.id, connectionName: profile.name, prompt, kind: 'password',
+        canRemember, hasSaved: stored !== null, ...(options.rejected === true ? { savedRejected: true } : {})
+      }
+      return await new Promise<string>((resolve, reject) => {
+        this.pending.set(id, { senderId, request, ref, answer: (answer) => {
+          if (answer.cancelled || answer.value === undefined) reject(new EnvironmentError('cancelled'))
+          else resolve(answer.value)
+        } })
+        this.notify(senderId, request)
+      })
+    })()
+  }
+
+  async open(profile: SshConnectionProfile, senderId: number, invocation: { executable: string; appPath?: string }): Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve(values: Map<string, string>): void; ask(prompt: string, rejected: boolean): Promise<string> }> {
     const directory = await mkdtemp(join(tmpdir(), 'ncw-auth-'))
     await chmod(directory, 0o700)
     const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\ncw-auth-${randomUUID()}` : join(directory, 'socket')
@@ -271,6 +299,7 @@ export class SshAuthBroker {
         resolve: (values) => {
           session.resolved = { user: values.get('user'), hostname: values.get('hostname'), proxyJump: values.get('proxyjump') }
         },
+        ask: (prompt: string, rejected: boolean) => this.ask(senderId, profile, prompt, { rejected }),
         close: async () => {
           for (const socket of sockets) socket.destroy()
           await new Promise<void>((resolve) => server.close(() => resolve()))
