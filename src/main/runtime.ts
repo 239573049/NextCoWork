@@ -128,7 +128,7 @@ let agentDrafts: AgentDraftGenerator | null = null
 let commitMessages: CommitMessageGenerator | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
-let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void }>) | undefined
+let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void; ask?(prompt: string, rejected: boolean): Promise<string> }>) | undefined
 
 export function installEnvironmentInteraction(authentication: NonNullable<typeof environmentAuthentication>, status: NonNullable<typeof environmentStatusSink>): void {
   environmentAuthentication = authentication
