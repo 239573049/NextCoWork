@@ -97,7 +97,7 @@ describe('selectCatalogPricing', () => {
       ['mimo-v2.5-pro', undefined, 0.435, 'USD'],
       ['step-3.7-flash', undefined, 1.35, 'CNY'],
       ['Baichuan-M3-Plus', undefined, 5, 'CNY'],
-      ['doubao-seed-2-1-pro-260628', 'doubao-seed-2.1-pro', 6, 'CNY'],
+      ['doubao-seed-2-1-pro-260915', 'doubao-seed-2.1-pro', 3, 'CNY'],
       ['ernie-5.1', undefined, 4, 'CNY'],
       ['hy4-preview', undefined, 6, 'CNY'],
       ['SenseNova-V6-5-Pro', undefined, 3, 'CNY'],

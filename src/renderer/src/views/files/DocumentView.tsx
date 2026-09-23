@@ -1,5 +1,7 @@
 import { File, FolderOpen, RefreshCw, Save } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
+import { isLocalEnvironment } from '../../../../shared/domain/environment'
+import { OpenWithChevron, OpenWithMenu } from '../../components/OpenWithMenu'
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { IconButton } from '../../components/ui/IconButton'
@@ -8,6 +10,7 @@ import { useI18n } from '../../i18n'
 import { revealWorkspaceFile, workspaceFileErrorKey } from '../../services/workspace-files'
 import { confirmDocumentChanges, documentKey, isDocumentDirty, previewFormat, useDocumentsStore } from '../../stores/documents'
 import { useTabsStore } from '../../stores/tabs'
+import { useWindowStore } from '../../stores/window'
 import { CodeEditor } from './CodeEditor'
 import { HtmlPreview } from './HtmlPreview'
 import { MarkdownPreview } from './MarkdownPreview'
@@ -19,6 +22,14 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
   const [imageFailed, setImageFailed] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const format = previewFormat(path)
+  /*
+    远端工作区的文件不在本机磁盘上:本机的 VS Code / 访达打开它只会打开一个
+    不存在的路径,所以那半颗按钮不画(与文件树、浏览器那几处同一条判据)。
+  */
+  const local = useWindowStore((state) => {
+    const workspace = state.workspaceTargets[workspaceId]
+    return workspace !== undefined && isLocalEnvironment(workspace.environment)
+  })
 
   useEffect(() => {
     if (path) void load(workspaceId, path)
@@ -62,6 +73,18 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
         )}
         <IconButton label={t('document.reload')} size={26} onClick={() => { if (!saving) void reload() }}><RefreshCw size={14} className={entry?.loading ? 'animate-spin' : undefined} /></IconButton>
         <IconButton label={t('document.reveal')} size={26} onClick={reveal}><FolderOpen size={14} /></IconButton>
+        {/*
+          「打开方式」下拉:同样是「用别的程序打开这个文件」,只是这里多了一条
+          「用编辑器打开」。★ 远端工作区不画 —— 见 `services/open-with.ts` 头上那条。
+        */}
+        {local && (
+          <OpenWithMenu
+            workspaceId={workspaceId}
+            path={path}
+            trigger={<OpenWithChevron size={13} />}
+            triggerClassName="flex size-[26px] items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
+          />
+        )}
         {file?.kind === 'text' && <Button size="sm" variant="accent" disabled={!dirty || saving} onClick={() => { void save(workspaceId, path) }} icon={<Save size={12} />}>{t(saving ? 'document.saving' : 'document.save')}</Button>}
       </div>
 

@@ -36,14 +36,16 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { DirListing, FileEntry, SortBy } from '../../../../shared/domain/file-tree'
+import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import { paneOf, type InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
 import type { WorkspaceFileMutationRequest, WorkspaceRecoveryEntry } from '../../../../shared/domain/workspace-file'
 import type { DockNode } from '../../../../shared/domain/dock'
+import { OpenWithItems } from '../../components/OpenWithMenu'
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { IconButton } from '../../components/ui/IconButton'
-import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
+import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
 import { listDir } from '../../services/app'
@@ -123,6 +125,11 @@ function WorkspaceFilesView({
 
   const toolbar = useRef<HTMLDivElement>(null)
   const compact = useToolbarCompact(toolbar)
+  /*
+    本机工作区才出「打开方式」—— SSH 工作区里那些文件不在本机磁盘上,本机的
+    VS Code / 访达打开它们只会打开一个不存在的路径(与浏览器视图同一条判据)。
+  */
+  const local = isLocalEnvironment(workspace.environment)
 
   const refreshRecovery = useCallback(async (): Promise<void> => {
     try {
@@ -564,6 +571,8 @@ function WorkspaceFilesView({
                   void submitOperation({ workspaceId: workspace.id, operation: 'delete', path: entry.path })
                 }}
                 onReveal={() => void reveal(entry.path)}
+                local={local}
+                workspaceId={workspace.id}
                 onClick={() =>
                   entry.kind === 'dir' ? toggleDir(entry.path) : onOpenFile(entry.path, entry.name)
                 }
@@ -601,6 +610,8 @@ function TreeRow({
   loading,
   selected,
   busy,
+  local,
+  workspaceId,
   onOperation,
   onDelete,
   onReveal,
@@ -613,6 +624,10 @@ function TreeRow({
   loading: boolean
   selected: boolean
   busy: boolean
+  /** 本机工作区才出「打开方式」子菜单 —— 远端那些文件不在本机磁盘上 */
+  local: boolean
+  /** 只给「打开方式」用;它要按工作区把路径交给主进程 */
+  workspaceId: string
   onOperation: (operation: FileOperationTarget['operation']) => void
   onDelete: () => void
   onReveal: () => void
@@ -700,6 +715,27 @@ function TreeRow({
               <MenuItem icon={<FolderOpen size={14} />} onSelect={() => { close(); onReveal() }}>
                 {t('files.manage.reveal')}
               </MenuItem>
+              {/*
+                ★ 这里是**平铺**,不是 `OpenWithMenu`。这一行的菜单本身就是一层
+                `Menu` 面板,而它带着 `translate` / `scale`(入场动效)——
+                那两条会给后代建立包含块,套在里面的第二级 `fixed` 面板于是不再对齐
+                视口,而是按外层面板的坐标摆放,表现是子菜单飞到屏幕外。
+                平铺之后「打开方式」是一段分组标题 + 几行,没有第二层面板。
+              */}
+              {local && (
+                <>
+                  <MenuSeparator />
+                  <MenuLabel>{t('openWith.label')}</MenuLabel>
+                  {/* omitReveal:上面那条「在文件管理器中显示」已经做了同一件事 */}
+                  <OpenWithItems
+                    workspaceId={workspaceId}
+                    path={entry.path}
+                    directory={entry.kind === 'dir'}
+                    omitReveal
+                    close={close}
+                  />
+                </>
+              )}
               <MenuSeparator />
               <MenuItem
                 danger

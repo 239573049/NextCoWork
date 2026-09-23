@@ -1,4 +1,4 @@
-import type { ContextCheckpoint, ContextPreview } from '../../../shared/agent/context-management'
+import type { ContextCheckpoint, ContextPreview, ContextWindowView } from '../../../shared/agent/context-management'
 import type { ContextPreviewRequest } from '../../../shared/ipc/contract'
 import { invoke } from './ipc'
 
@@ -23,4 +23,15 @@ export function compactContext(sessionId: string): Promise<{ checkpoint: Context
  */
 export function previewContext(req: ContextPreviewRequest): Promise<ContextPreview | undefined> {
   return invoke('context:preview', req)
+}
+
+/**
+ * 「这条检查点之后,真正发给模型的是什么」。
+ *
+ * ★ 和 `previewContext` 同样是**按需**拉的:每次调用主进程都要把整段转录重投影
+ * 一遍,而绝大多数压缩分隔线用户从头到尾都不会展开。所以调用点在面板**展开时**,
+ * 不在挂载时。
+ */
+export function contextWindow(sessionId: string, checkpointId: string): Promise<ContextWindowView | undefined> {
+  return invoke('context:window', { sessionId, checkpointId })
 }

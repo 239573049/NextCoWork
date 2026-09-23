@@ -14,7 +14,7 @@
 import type { AgentError } from '../agent/error'
 import type { ActiveRunEntry, AgentEvent, RunSnapshot } from '../agent/event'
 import type { AgentMessage, ContentPart } from '../agent/message'
-import type { ContextCheckpoint, ContextPreview } from '../agent/context-management'
+import type { ContextCheckpoint, ContextPreview, ContextWindowView } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
 import type { RunRequest, SessionMode } from '../agent/run-request'
@@ -46,6 +46,7 @@ import type {
   UpstreamProvider
 } from '../domain/provider'
 import type { ModelCatalogDefinition } from '../domain/model-catalog'
+import type { ProviderAccount } from '../domain/provider-account'
 import type { SearchHit, Session, SessionChange, SessionDetail, SessionListItem } from '../domain/session'
 import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
@@ -80,6 +81,7 @@ import type {
   WorkspaceFileRequest,
   WorkspaceFileWriteRequest
 } from '../domain/workspace-file'
+import type { OpenTarget, WorkspacePathKind } from '../domain/open-target'
 import type { BrowserChange, BrowserCuaEvent, BrowserProfile, BrowserTab } from '../domain/browser'
 import type { GitBranchSummary, GitCommitSummary, GitDiff, GitOverview } from '../domain/git'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../domain/scheduled'
@@ -375,6 +377,27 @@ export interface IpcInvokeMap {
   'workspace:writeFile': { req: WorkspaceFileWriteRequest; res: WorkspaceFile }
   'workspace:mutateFile': { req: WorkspaceFileMutationRequest; res: WorkspaceFileMutationResult }
   'workspace:revealFile': { req: WorkspaceFileRequest; res: void | { remote: true; path: string; parent: string; name: string } }
+  /**
+   * 「打开方式」下拉里那几项:文件管理器 / 终端 / 这台机器上装了的 IDE。
+   *
+   * ★ **res 里没有路径**,只有 `{ id, label, icon }` —— 绝对路径不进渲染层
+   *   (`shared/domain/workspace-file.ts` 顶上那条约定)。菜单内容只取决于
+   *   这台机器装了什么,所以这条**不带 workspaceId**。
+   *
+   * ★ 不登记事件频道:装了新 IDE 不会发通知,菜单下次探测时自然看得见
+   *   (主进程侧缓存一次,失败不缓存)。
+   */
+  'workspace:listOpenTargets': { req: void; res: OpenTarget[] }
+  /**
+   * 用某个程序打开一个文件。`targetId` 只用来查主进程那张表 —— 渲染层指定不了
+   * 要跑什么命令,只能从 `workspace:listOpenTargets` 给过的那几个里挑。
+   */
+  'workspace:openWith': { req: { workspaceId: string; path: string; targetId: string }; res: void }
+  /**
+   * 把路径写进系统剪贴板。★ 返回**真正写进去的那一串**:工作区外的文件复制出来
+   * 的是绝对路径,界面据此如实说明,而不是一律说「已复制相对路径」。
+   */
+  'workspace:copyPath': { req: { workspaceId: string; path: string; kind: WorkspacePathKind }; res: string }
   'workspace:listRecovery': { req: { workspaceId: string }; res: WorkspaceRecoveryListing }
 
   // ── 改动审查(回复底部审查卡 / 右侧 changes tab / 撤销·恢复,schema 第 23 条)──
@@ -531,6 +554,18 @@ export interface IpcInvokeMap {
   'context:preview': {
     req: ContextPreviewRequest
     res: ContextPreview | undefined
+  }
+  /**
+   * 「这条检查点之后,真正发给模型的是什么」—— 压缩分隔线里那个上下文检查器。
+   *
+   * ★ 只出**身份 + 估算 + 每条几行预览**,不搬消息体:一条 tool_result 可以有
+   * 64KB,整份投影过一次 IPC 是几十 MB 的结构化克隆,而完整内容用户本来就在
+   * 转录里看着。★ 它是按当前转录**重算**的,不是压缩当时那一份的录像 ——
+   * 对最新那条检查点二者逐字相同,更早的则是复原(界面上必须说清)。
+   */
+  'context:window': {
+    req: { sessionId: string; checkpointId: string }
+    res: ContextWindowView | undefined
   }
 
   // ── Agent ──
@@ -869,6 +904,50 @@ export interface IpcInvokeMap {
   }
   /** 退出登录。★ 一定成功 —— 删除现有密文不需要主密钥,见 `signOut` 的注释 */
   'provider:signOut': { req: { providerId: string }; res: CredentialInfo }
+
+  // ── 供应商账号(OAuth 多账号,schema 第 24 条) ──
+  /**
+   * ★★ **每一条写频道都回整份账号列表,不回增量。**
+   *
+   * 渲染层于是永远不需要自己合并。回增量的话,「拖拽排序写成功了但列表还是旧顺序」
+   * 这类问题只在两次写挨得很近时出现 —— 而拖拽恰好是最容易连着写两次的操作。
+   *
+   * ★ 列表里**一个 token 字符都没有**(`ProviderAccount` 只有元数据 + 登录态摘要),
+   * 和 `CredentialInfo` 同一条规矩:明文只经 `provider:revealCredential` 单次返回。
+   */
+  'provider:listAccounts': { req: { providerId: string }; res: ProviderAccount[] }
+  /**
+   * 新增一个账号 = 走一遍完整登录。**和 `provider:startOAuth` 同属「长 invoke」**,
+   * 中间进度照样走 `provider:authProgress`。
+   *
+   * ★ 不复用 `startOAuth`:那条的语义是「把这家登录成(替换当前凭证)」,
+   * 老渲染层和导入路径都依赖它。多一个账号是另一件事,分开之后两边的契约
+   * 各自成立 —— 而合并的话,`startOAuth` 会在老界面上悄悄变成「每点一次多一个号」。
+   */
+  'provider:addAccount': { req: { providerId: string }; res: ProviderAccount[] }
+  /** 这条登录失效了,重新登录它(沿用同一条账号行与顺序) */
+  'provider:reauthAccount': { req: { providerId: string; accountId: string }; res: ProviderAccount[] }
+  /** ★ 连带删掉它的密文,见 `db/provider-accounts.ts` 的不变式 */
+  'provider:removeAccount': { req: { providerId: string; accountId: string }; res: ProviderAccount[] }
+  'provider:setAccountEnabled': {
+    req: { providerId: string; accountId: string; enabled: boolean }
+    res: ProviderAccount[]
+  }
+  /** 备注名。空串 = 清掉,显示回落到邮箱 / 上游 id */
+  'provider:setAccountLabel': {
+    req: { providerId: string; accountId: string; label: string }
+    res: ProviderAccount[]
+  }
+  /**
+   * 「设为当前账号」。★ 它决定的是**镜像回旧槽的是谁**和界面上那个标记,
+   * 不改变轮换顺序(轮换看 `order`,见 `selectAccount` 那条注释)。
+   */
+  'provider:setCurrentAccount': { req: { providerId: string; accountId: string }; res: ProviderAccount[] }
+  /** 拖拽排序:整批写。`accountIds` 的下标即新的 `order` */
+  'provider:reorderAccounts': { req: { providerId: string; accountIds: string[] }; res: ProviderAccount[] }
+  /** 「立即解除限流」。用户升级了套餐、或者我们判早了 —— 不该让他干等 */
+  'provider:clearAccountLimit': { req: { providerId: string; accountId: string }; res: ProviderAccount[] }
+
   'provider:listModels': { req: { providerId?: string }; res: ModelAlias[] }
   /**
    * ★★ **叫 `fetchModels` 而不是 `listModels`,因为那个名字已经被上面那条占了 ——
@@ -1270,6 +1349,16 @@ export interface IpcEventMap {
    * 混进去会让每一次登录都触发一遍全应用的模型列表重算。
    */
   'provider:authChanged': { providerId: string; info: CredentialInfo }
+  /**
+   * 某家的**账号列表**变了:登录/删号/排序/停用,以及**限流落闸与解除**、额度快照更新。
+   *
+   * ★★ 限流那一半是这条事件存在的主要理由:落闸发生在一次请求失败的瞬间,
+   * 而用户此刻多半正盯着聊天页。不推的话,他要关掉再打开设置页才知道
+   * 「为什么换号了」—— 而那时闸门可能已经自己到期,他什么都看不到。
+   *
+   * ★ 整份列表下发,不发增量(和那几条写频道的返回值同一个形状、同一条理由)。
+   */
+  'provider:accountsChanged': { providerId: string; accounts: ProviderAccount[] }
   'clientAuth:changed': ClientAuthState
   'configSync:changed': SyncStatus
   'app:updateChanged': UpdateState
@@ -1375,6 +1464,9 @@ export const INVOKE_CHANNELS = {
   'workspace:writeFile': 1,
   'workspace:mutateFile': 1,
   'workspace:revealFile': 1,
+  'workspace:listOpenTargets': 1,
+  'workspace:openWith': 1,
+  'workspace:copyPath': 1,
   'workspace:listRecovery': 1,
   'review:getChangeSet': 1,
   'review:getFileDiff': 1,
@@ -1524,6 +1616,15 @@ export const INVOKE_CHANNELS = {
   'provider:cancelOAuth': 1,
   'provider:submitOAuthCode': 1,
   'provider:signOut': 1,
+  'provider:listAccounts': 1,
+  'provider:addAccount': 1,
+  'provider:reauthAccount': 1,
+  'provider:removeAccount': 1,
+  'provider:setAccountEnabled': 1,
+  'provider:setAccountLabel': 1,
+  'provider:setCurrentAccount': 1,
+  'provider:reorderAccounts': 1,
+  'provider:clearAccountLimit': 1,
   'provider:listModels': 1,
   'provider:fetchModels': 1,
   'provider:setAliases': 1,
@@ -1580,6 +1681,7 @@ export const INVOKE_CHANNELS = {
   , 'context:updateCheckpoint': 1
   , 'context:compact': 1
   , 'context:preview': 1
+  , 'context:window': 1
   , 'scheduled:listTasks': 1
   , 'scheduled:getTask': 1
   , 'scheduled:create': 1
@@ -1635,6 +1737,7 @@ export const EVENT_CHANNELS = {
   'provider:changed': 1,
   'provider:authProgress': 1,
   'provider:authChanged': 1,
+  'provider:accountsChanged': 1,
   'websearch:changed': 1,
   'sessions:changed': 1,
   'review:changed': 1,

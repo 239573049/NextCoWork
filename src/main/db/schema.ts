@@ -973,6 +973,88 @@ CREATE TABLE file_snapshots (
 );
 `
 
+/**
+ * 第 24 条：OAuth 供应商的**多账号**。
+ *
+ * ## 为了什么需求建的
+ *
+ * 订阅制的那几家(Codex / Kimi / GLM …)额度是按账号算的,一个账号被限流时
+ * 另一个账号的额度还在。在这张表之前,一家 provider 只有一个凭证槽,
+ * 「限流了自动换个号」在数据模型上表达不出来。
+ *
+ * ## ★★ 表里一个字节的密文都没有
+ *
+ * token 仍然只住 `credentials` 表(经 `host.secrets` 加解密、经
+ * `physicalCredentialRef` 做账户隔离)。把 access/refresh token 塞进这张业务表
+ * 会绕过整条加密边界,而症状是**没有症状**:功能照常跑,直到有人打开数据库文件。
+ * 这里存的是「哪个账号、排第几、停用没、限流到什么时候、额度快照」这些元数据,
+ * 密文由 `provider:<id>#<account_id>` 这个 ref 指过去。
+ *
+ * ## `is_current` 为什么和排序分开
+ *
+ * `sort_order` 决定**轮换时谁先上**,`is_current` 只决定「镜像回旧槽 `provider:<id>`
+ * 的是谁」和界面上那个「当前」标。合成一个字段的话,限流轮换到下一个账号时会把
+ * 用户显式设的「当前账号」悄悄改掉 —— 他会发现自己的选择莫名其妙变了,而他从没点过。
+ *
+ * ## 存量迁移为什么不在这条 SQL 里
+ *
+ * SQL 读不到密文,判不出 `provider:<id>` 那一行装的是 OAuth 凭证还是一把 API Key,
+ * 而把 API Key 供应商也迁成「账号」会让它的界面整个换成账号列表。迁移因此放在
+ * 主进程启动路径上的一次性 `ensureProviderAccountsSeeded()`(`db/provider-accounts.ts`),
+ * 幂等靠「这家已经有账号行就跳过」,不靠迁移版本号 —— 版本号管不到
+ * 「用户是升级之后才第一次登录的」这种情况。
+ */
+const V24_PROVIDER_ACCOUNTS = `
+CREATE TABLE provider_accounts (
+  id            TEXT PRIMARY KEY,
+  provider_id   TEXT NOT NULL,
+  issuer        TEXT NOT NULL,
+  label         TEXT,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  is_current    INTEGER NOT NULL DEFAULT 0,
+  -- ★★ 从密文里**反范式**出来的一个位:刷新被上游明确拒过(invalid_grant)。
+  -- 真值住在凭证 JSON 的 needsReauth 里,但「这一刻用哪个账号」发生在请求的
+  -- 热路径上、必须同步,而解密是异步的。不反范式的话,每选一次账号都要先解一次
+  -- 密文(四个并发子代理就是四次),且解密失败会让「选账号」这件事本身可能抛。
+  -- 写入点只有一处:ipc/provider-auth.ts 的 announce —— 凭证一变就跟着写这一列。
+  needs_reauth  INTEGER NOT NULL DEFAULT 0,
+  -- 限流闸门。四列同进同出:until 为 NULL 即「没被限流」,其余三列一并无意义
+  limit_until   INTEGER,
+  limit_since   INTEGER,
+  limit_source  TEXT,
+  limit_reason  TEXT,
+  -- ProviderQuotaSnapshot 的 JSON。只有 ChatGPT 那家会有值
+  quota_json    TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+-- 读路径只有一条:「这家的账号,按轮换顺序」。写多了索引只是给每次写多一棵 B 树
+CREATE INDEX provider_accounts_by_provider ON provider_accounts (provider_id, sort_order);
+`
+
+/**
+ * 第 25 条：压缩检查点记下「这一刀实际做了什么」。
+ *
+ * ## 需求
+ *
+ * 在此之前检查点只有 `note` 和一对 token 读数,于是界面上能说的只有「压缩了」三个字。
+ * 用户(和下一个接手的 agent)问的两个问题一个都答不上来:**哪些消息已经不再发给
+ * 模型**、**摘要到底读没读过它们**。后者尤其要命 —— digest 有 token 预算,超了会从
+ * 最早的一侧整条丢,而检查点原先一律把覆盖锚点写成转录的最后一条,于是那些没进
+ * 摘要的消息以「已覆盖」的身份被投影裁掉:既不在摘要里,也不在上下文里。
+ *
+ * ★ 一列 JSON 而不是七个平行列,同 `search_hits` 的先例:这些字段是**一起有、
+ * 一起没有**的一份事实,而且还会长(将来要加「哪几条被降级了」之类)。拆成列的话,
+ * 每加一个字段就是一次 ALTER TABLE,而读路径上它们从不作为查询条件。
+ *
+ * ★ 可空且**不回填**。老检查点无从知道自己丢过什么 —— 猜一个 0 会把「不知道」
+ * 谎报成「一条都没丢」,而界面对这两种必须有不同反应(见 `ContextCompactionDetail`)。
+ */
+const V25_CONTEXT_COMPACTION_DETAIL = `
+ALTER TABLE context_checkpoints ADD COLUMN detail TEXT;
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -999,4 +1081,6 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 21, name: 'import-scan-cache', sql: V21_IMPORT_SCAN_CACHE }
   ,{ version: 22, name: 'config-profiles', sql: V22_CONFIG_PROFILES }
   ,{ version: 23, name: 'file-changes', sql: V23_FILE_CHANGES }
+  ,{ version: 24, name: 'provider-accounts', sql: V24_PROVIDER_ACCOUNTS }
+  ,{ version: 25, name: 'context-compaction-detail', sql: V25_CONTEXT_COMPACTION_DETAIL }
 ]

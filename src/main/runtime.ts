@@ -70,8 +70,10 @@ import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
 import { opencodeGoProtocolFor } from './kernel/upstream/opencode-protocol'
 import { currentConfigScope, defaultWorkspaceIdForScope } from './db/config-profile'
+import { ensureProviderAccountsSeeded } from './db/provider-accounts'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
+import { AccountPool } from './kernel/upstream/account-pool'
 import {
   BUILTIN_PLAN_PROVIDER_ID,
   BUILTIN_PROVIDER_ID,
@@ -213,6 +215,19 @@ let reviewOnChange: ((change: { runId: string; sessionId: string; workspaceId: s
  * 无头测试能跑通的前提)。真正的广播器由 `ipc/index.ts` 在启动时装上。
  */
 let credentialOnChange: ((credentialRef: string) => void) | null = null
+
+/**
+ * 某家供应商的账号列表变了(限流落闸/解除、额度快照更新)。
+ *
+ * ★ 和上面那两个 sink 同一个套路、同一个理由。装配在 `ipc/index.ts`;
+ * 不装的话设置页上的「限流中」要等用户手动重开才更新。
+ */
+let accountsOnChange: ((providerId: string) => void) | null = null
+
+/** 由 `ipc/index.ts` 装上。★ 和 `setCredentialChangeListener` 逐条同形 */
+export function setAccountsChangeListener(fn: ((providerId: string) => void) | null): void {
+  accountsOnChange = fn
+}
 
 /**
  * 装宿主。**必须在第一个 run 之前**,由 `main/index.ts` 在 `app.whenReady()` 里调用 ——
@@ -569,13 +584,52 @@ export function ensureSeeded(): void {
   seed()
 }
 
+/**
+ * 账号池 —— **进程内单例,和路由器共命运。**
+ *
+ * ★★ 单例这件事是它有价值的前提(和 `router.rateLimitGate` 是同一条理由):
+ * 主代理和它派出去的每一个子代理共用同一份「这个账号被限流到几点」,
+ * 于是一条流吃到 429 之后,其余几条**在发请求之前**就会换到别的账号。
+ * 每条流各持一份的话,四个子代理会把同一个账号的额度同时撞光。
+ *
+ * ★ 落库的那一半由 `store` 做,所以重启之后闸门还在(产品决策 D7);
+ * 这个对象自己不缓存任何东西 —— 缓存会和界面上的「立即解除限流」打架。
+ */
+let accountPool: AccountPool | null = null
+
+function getAccountPool(): AccountPool {
+  accountPool ??= new AccountPool({
+    /*
+      ★ 每次现读,不做快照:设置页刚点完「立即解除限流」,下一条请求就该用上它。
+      `auth` 不在这里补(它要解密)—— 账号可用性读的是行上那个反范式的
+      `needsReauth`,见 `shared/domain/provider-account.ts`。
+    */
+    list: (providerId) => store.listProviderAccounts(providerId),
+    setLimit: (accountId, limit) => store.setProviderAccountLimit(accountId, limit),
+    setQuota: (accountId, quota) => store.setProviderAccountQuota(accountId, quota),
+    now: () => getHost().clock.now(),
+    rotationEnabled: () => store.getSettings().providerAccountRotation,
+    // ★ 又一个注入回调(同 `onCredentialChanged` / `onUsageAttempt`):内核拿不到窗口,
+    //   而设置页要立刻看到「限流中」那个徽章亮起来 —— 不推的话用户要关掉再打开设置页
+    onChanged: (providerId) => accountsOnChange?.(providerId)
+  })
+  return accountPool
+}
+
 export function getRouter(): UpstreamRouter {
   seed()
   router ??= new UpstreamRouter(getHost(), providerConfig, {
     idleTimeoutMs: upstreamIdleTimeoutMs,
     onUsageAttempt: persistUsageAttempt,
     priceAttempt: priceAttemptForRouter,
-    onCredentialChanged: (ref) => credentialOnChange?.(ref)
+    onCredentialChanged: (ref) => credentialOnChange?.(ref),
+    /*
+      ★ **只有正文这一个路由器接账号池。** 三个辅助请求(标题、子代理草稿、
+      提交信息)故意不接:它们的失败不该把用户的主力账号关进闸门,
+      而那正是「辅助请求用独立 UpstreamRouter」这条既有设计要挡的东西。
+      不接时 `select()` 返回 null,它们走旧槽(当前账号的镜像)—— 照常能发。
+    */
+    accounts: getAccountPool()
   })
   return router
 }
@@ -985,6 +1039,38 @@ export async function refreshRuntimeForConfigScope(): Promise<void> {
   // 空账户要有默认供应商与默认工作区,否则首屏是一个空的应用。
   seeded = false
   seed()
+  /*
+    ★ 账号表的迁移必须跟着作用域走:每个账户作用域有自己的 `credentials` 行
+    (`physicalCredentialRef` 加前缀),所以 A 账户迁过不代表 B 账户迁过。
+    漏在这里的表现是「切到另一个账户后,原本已登录的 Codex 变成未登录」——
+    而它的凭证其实好好地躺在旧槽里,只是没人把它迁成账号 #1。
+  */
+  await seedProviderAccounts()
+}
+
+/**
+ * 把「升级之前已经登录的那一个账号」迁成账号 #1(schema 第 24 条)。
+ *
+ * ★ 异步,所以不在 `seed()` 里 —— 它要读一次密文(解密是异步的)。
+ * ★ 失败不抛:迁移不成只是「这家暂时还看不到账号列表」,下次启动会再试一遍;
+ *   而在启动路径上抛出去会停在一个半初始化的状态上(见 `index.ts` 那条 `.catch`)。
+ */
+export async function seedProviderAccounts(): Promise<void> {
+  try {
+    ensureSeeded()
+    const host = getHost()
+    const created = await ensureProviderAccountsSeeded(
+      store.listProviders(),
+      {
+        get: (ref) => host.secrets.get(ref),
+        set: (ref, value) => host.secrets.set(ref, value)
+      },
+      host.clock.now()
+    )
+    if (created > 0) host.logger.info(`[provider-account] 已把 ${created} 个已登录账号迁入账号表`)
+  } catch (err) {
+    getHost().logger.warn('[provider-account] 账号迁移失败,下次启动重试', err)
+  }
 }
 
 /**

@@ -14,6 +14,39 @@ export const OPENAI: readonly BuiltinModelRecord[] = [
     reasoningEfforts: openAiAstraEfforts,
     verificationStatus: 'official-api',
   }),
+  /*
+   * 需求:2026-09-23 收录 GPT-6 的两个平价型号,id 与费率来自官方 pricing 页
+   * (用户提供的截图,费率录在 `pricing-seed.ts` 的 OpenAI 段)。
+   * ★ 窗口 / 最大输出 / effort 集合**没有一手依据**,是按同代 gpt-6-astra 推的 ——
+   * 同族同代是本仓库既有的推法(Anthropic 段的 id 也是这么推的)。
+   * 不满足会怎样:effort 集合里出现上游不认的取值,表现为一次可读的 400;
+   * 窗口推大了才会静默(上游 400 由 `validateModelRuntime` 兜,不是无声失败),
+   * 所以真要改这两项,先拿官方 model 页来核,别照本文件其他行「对齐」。
+   */
+  model('openai', 'gpt-6-sol', 'GPT-6 Sol', {
+    capabilities: visionCapabilities({
+      thinking: true,
+      webSearch: true,
+      batch: true,
+    }),
+    contextWindow: 1_050_000,
+    maxOutputTokens: 128_000,
+    thinkingConfig: effortThinking('reasoning.effort'),
+    reasoningEfforts: openAiAstraEfforts,
+    verificationStatus: 'official-api',
+  }),
+  model('openai', 'gpt-6-luna', 'GPT-6 Luna', {
+    capabilities: visionCapabilities({
+      thinking: true,
+      webSearch: true,
+      batch: true,
+    }),
+    contextWindow: 1_050_000,
+    maxOutputTokens: 128_000,
+    thinkingConfig: effortThinking('reasoning.effort'),
+    reasoningEfforts: openAiAstraEfforts,
+    verificationStatus: 'official-api',
+  }),
   model('openai', 'gpt-5.6-sol', 'GPT-5.6 Sol', {
     capabilities: visionCapabilities({
       thinking: true,

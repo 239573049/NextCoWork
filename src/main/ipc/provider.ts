@@ -631,7 +631,7 @@ export function setAliases(providerId: string, models: readonly string[]): Model
  * 对常规状态展示零识别价值。完整 token 只由显式 `revealCredential` 返回,
  * 这里仍一个字符都不带,避免列表刷新把明文常驻窗口状态。
  */
-function infoFor(plaintext: string | null): CredentialInfo {
+export function infoFor(plaintext: string | null): CredentialInfo {
   const available = getHost().secrets.available()
   const cred = parseCredential(plaintext)
   if (cred === null) {

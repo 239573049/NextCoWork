@@ -132,7 +132,12 @@ function LegacyTextTab({
             }}
           />
         ) : selected ? (
-          <ProviderPanel entry={selected} />
+          <ProviderPanel
+            entry={selected}
+            /* 账号列表用它算「下一次请求会用哪个账号」——主进程是设置的唯一权威(§9),
+               所以一路从 props 传下来,不在下面镜像一份 */
+            accountRotation={settings.providerAccountRotation}
+          />
         ) : (
           <EmptyState
             className="min-w-0 flex-1 py-16"

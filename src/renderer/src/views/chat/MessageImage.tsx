@@ -29,6 +29,7 @@ export function MessageImage({
   dataRef,
   siblings,
   index = 0,
+  workspaceId,
 }: {
   mime: string;
   dataRef: string;
@@ -36,6 +37,14 @@ export function MessageImage({
   siblings?: readonly LightboxImage[];
   /** 本图在 siblings 里的位置 */
   index?: number;
+  /**
+   * 这张图属于哪个工作区 —— 灯箱据此决定要不要给「用别的程序打开」。
+   *
+   * ★ 缺省 = 不画。**只读的子代理面板**拿不到工作区上下文(与
+   *   `MessageFileRef.onOpen` 同一条规矩):那种情况下画一枚点了没反应的入口,
+   *   比干脆不画更难解释。
+   */
+  workspaceId?: string;
 }): ReactNode {
   const { t } = useI18n();
   const [failed, setFailed] = useState(false);
@@ -94,6 +103,7 @@ export function MessageImage({
         <ImageLightbox
           images={group}
           startIndex={index}
+          {...(workspaceId === undefined ? {} : { workspaceId })}
           onClose={() => {
             setZoomed(false);
           }}

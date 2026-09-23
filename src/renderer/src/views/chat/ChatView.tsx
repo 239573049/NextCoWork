@@ -41,6 +41,8 @@ import { Thread } from './Thread'
 import { SubagentLiveFeed } from './subagent-live'
 import { SubagentOpenProvider } from './subagent-open'
 import { ToolStopProvider } from './tool-stop'
+import { openFileReference } from './file-reference-actions'
+import { WorkspaceFileProvider } from './workspace-file'
 import { stopToolCall } from '../../services/shell'
 import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
@@ -127,6 +129,15 @@ export function ChatView({
   const openMarkdownFile = useCallback((path: string) => {
     // 由已装插件决定用谁打开 —— 对话里引用一个 `.excalidraw` 也该落进画布
     useTabsStore.getState().openFile(workspace.id, path)
+  }, [workspace.id])
+  /*
+    需求:工具行里的文件名点一下就打开它。
+    ★ 走 `openFileReference` 而不是上面那个直接 `openFile`:工具行指向的是
+    **过去某一刻**读过/改过的文件,删掉、改名是常态 —— 不先问一句就开,
+    留下的是一个只显示错误的 Tab,而用户会以为是编辑器坏了。
+  */
+  const openToolFile = useCallback((path: string) => {
+    void openFileReference(workspace.id, path)
   }, [workspace.id])
 
   /**
@@ -875,16 +886,22 @@ export function ChatView({
           <SubagentLiveFeed childSessionId={sessionId} parent={subagentOf} />
         )}
         <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
-          <Thread
-            sessionId={sessionId ?? undefined}
-            transcript={transcript}
-            runId={activeRunId}
-            model={modelName}
-            providerName={provider?.name}
-            lastSeq={lastSeq}
-            queued={0}
-            readOnly
-          />
+          {/*
+            ★ 只读面板只给 `root`(路径裁成相对),**不给 `open`** —— 这棵树的
+            不变式是「零操作」(见上面那段),给了它文件名就会变成一枚能点的链接。
+          */}
+          <WorkspaceFileProvider root={workspace.rootPath}>
+            <Thread
+              sessionId={sessionId ?? undefined}
+              transcript={transcript}
+              runId={activeRunId}
+              model={modelName}
+              providerName={provider?.name}
+              lastSeq={lastSeq}
+              queued={0}
+              readOnly
+            />
+          </WorkspaceFileProvider>
         </WorkspaceMarkdownProvider>
       </div>
     )
@@ -920,25 +937,27 @@ export function ChatView({
       <SubagentOpenProvider open={openSubagent}>
         <ToolStopProvider stop={stopRunningToolCall}>
           <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
-            <Thread
-              sessionId={sessionId ?? undefined}
-              transcript={transcript}
-              runId={activeRunId}
-              model={modelName}
-              providerName={provider?.name}
-              lastSeq={lastSeq}
-              reportOptions={offComposerOptions}
-              goal={goal}
-              queued={queuedInputs.length}
-              compactError={compactError}
-              {...(contextLimits === undefined ? {} : { contextLimits })}
-              onEditMessage={onEditMessage}
-              onDeleteTurn={deleteTurn}
-              onBranchTurn={onBranchTurn}
-              workspaceId={workspace.id}
-              onOpenPlan={openMarkdownFile}
-              onExecutePlan={executePlan}
-            />
+            <WorkspaceFileProvider root={workspace.rootPath} open={openToolFile}>
+              <Thread
+                sessionId={sessionId ?? undefined}
+                transcript={transcript}
+                runId={activeRunId}
+                model={modelName}
+                providerName={provider?.name}
+                lastSeq={lastSeq}
+                reportOptions={offComposerOptions}
+                goal={goal}
+                queued={queuedInputs.length}
+                compactError={compactError}
+                {...(contextLimits === undefined ? {} : { contextLimits })}
+                onEditMessage={onEditMessage}
+                onDeleteTurn={deleteTurn}
+                onBranchTurn={onBranchTurn}
+                workspaceId={workspace.id}
+                onOpenPlan={openMarkdownFile}
+                onExecutePlan={executePlan}
+              />
+            </WorkspaceFileProvider>
           </WorkspaceMarkdownProvider>
         </ToolStopProvider>
       </SubagentOpenProvider>

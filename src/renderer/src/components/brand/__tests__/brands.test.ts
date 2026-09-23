@@ -55,7 +55,10 @@ const SAMPLES: readonly (readonly [string, Brand])[] = [
   ['RoutinAI', 'routin'],
   ['商汤日日新', 'sensenova'],
   ['vLLM', 'vllm'],
-  ['Z.AI', 'zai']
+  ['Z.AI', 'zai'],
+  ['mimo-v2.6-pro', 'xiaomimimo'],
+  ['xiaomi/mimo-v2.5', 'xiaomimimo'],
+  ['小米 MiMo', 'xiaomimimo']
 ]
 
 describe('resolveBrand', () => {

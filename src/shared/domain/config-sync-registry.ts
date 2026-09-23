@@ -26,7 +26,10 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   builtinSearch: 'device',
   upstreamIdleTimeoutSeconds: 'device',
   // 输出额度描述的是「我要多长的回答」,不是这台机器的事实 —— 和 contextManagement 同类。
-  maxOutputTokens: 'preferences'
+  maxOutputTokens: 'preferences',
+  // 账号轮换是「我这几个号怎么用」,跟着供应商配置走 —— 和 defaultModel 同类,
+  // 不是设备事实(换台机器之后同一批账号仍然该按同样的规矩轮换)。
+  providerAccountRotation: 'providers'
 }
 export const SYNC_REGISTRY: Record<SyncCategory, { order: number; confirmation: boolean; deviceFields: readonly string[] }> = {
   // 普通 provider 的 API Key/OAuth token 在 providers 密文文档中同步；只有引用名和

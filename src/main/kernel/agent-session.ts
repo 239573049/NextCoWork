@@ -44,8 +44,8 @@ import { compactionBoundary, compactionNote, projectContextWindow, tokenCalibrat
 import type { ContextProjection, ContextSummaryRef } from './context-assembler'
 import {
   COMPACTION_SYSTEM,
-  buildCompactionPrompt,
   compactionDigestBudget,
+  compactionRequestBody,
   sanitizeSummaryNote,
   summaryOutputTokens
 } from './context-assembler'
@@ -380,14 +380,23 @@ function isMechanical(checkpoint: ContextCheckpoint): boolean {
   return checkpoint.source === 'mechanical' || checkpoint.source === 'auto'
 }
 
-/** 检查点 → 投影要的那三样。★ 抽出来,是为了两处取法不会有一处漏掉锚点。 */
+/** 检查点 → 投影要的那几样。★ 抽出来,是为了两处取法不会有一处漏掉锚点。 */
 function summaryRefOf(checkpoint: ContextCheckpoint): ContextSummaryRef {
   return {
     note: checkpoint.note,
     id: checkpoint.id,
     ...(checkpoint.coveredThroughMessageId === undefined
       ? {}
-      : { coveredThroughMessageId: checkpoint.coveredThroughMessageId })
+      : { coveredThroughMessageId: checkpoint.coveredThroughMessageId }),
+    /*
+      ★ 这一项和上面那个锚点**必须一起取**。它是「摘要因为 digest 预算没读到的
+      那一段从哪开始」,投影拿它当第二道上界(见 `ContextSummaryRef`)。
+      漏掉它,那些没进摘要的消息会以「已覆盖」的身份被裁掉 —— 既不在摘要里,
+      也不在上下文里,而全程零报错。
+    */
+    ...(checkpoint.detail?.uncoveredFromMessageId === undefined
+      ? {}
+      : { uncoveredFromMessageId: checkpoint.detail.uncoveredFromMessageId })
   }
 }
 
@@ -797,7 +806,19 @@ export class AgentSession {
         */
         if (isEffectiveCompaction(before, usage.used)) this.summaryCompactionFailures = 0
         else this.summaryCompactionFailures += 1
-        const finalized = { ...checkpoint, inputTokensAfter: usage.used, updatedAt: this.deps.host.clock.now() }
+        const finalized: ContextCheckpoint = {
+          ...checkpoint,
+          inputTokensAfter: usage.used,
+          // 摘要这一刀真正移出了多少条 —— 检查点上那对 token 读数说不出这件事。
+          detail: {
+            ...checkpoint.detail,
+            droppedMessages: projected.droppedMessages,
+            ...(projected.droppedThroughMessageId === undefined
+              ? {}
+              : { droppedThroughMessageId: projected.droppedThroughMessageId })
+          },
+          updatedAt: this.deps.host.clock.now()
+        }
         this.deps.saveContextCheckpoint?.(finalized)
         this.handle.emit({ type: 'context_checkpoint', checkpoint: finalized })
         this.handle.emit({ type: 'context_status', status: { phase: 'ready', windowIndex: finalized.windowIndex } })
@@ -807,9 +828,33 @@ export class AgentSession {
           后者是默认配置下每一次自动压缩的正常结果;前者意味着这一轮按原历史发出去,
           下一步很可能就是 400。以前两者都报 `fallback`,用户分不出来。
         */
-        const projected = this.projectContext()
+        let projected = this.projectContext()
+        let projectedUsage = assemble({ ...assembleInput, messages: projected.messages })
+        /*
+          ★★ 需求:清空工具输出**压不动**时,按回合边界真的把最早的一段移出上下文,
+          并在原位留一条骨架消息(`projectContextWindow` 的 `dropWithoutSummary`)。
+
+          不做这一步的症状就是用户报的那个「压缩之后陷入死循环」:默认配置下压缩
+          一条消息都不减,正文和 tool_call 本身撑爆窗口时削不到 5% —— 于是
+          `exhausted` 置位、此后整个 run 不再压缩,而模型看到的是一串
+          `[compacted: …]`,只能把读过的文件重读、把跑过的命令重跑,新结果六条之后
+          又被清空,循环到窗口爆掉为止(`loop()` 没有轮次上限)。
+
+          ★ 先试不丢的那一份,不够才丢:两次 `assemble` 都只是本地估算,不发请求,
+          而「能不丢就不丢」是这条路径唯一能守住的东西。
+        */
+        if (!isEffectiveCompaction(before, projectedUsage.usage.used)) {
+          const trimmed = this.projectContext(true)
+          if (trimmed.droppedMessages > 0) {
+            const trimmedUsage = assemble({ ...assembleInput, messages: trimmed.messages })
+            if (trimmedUsage.usage.used < projectedUsage.usage.used) {
+              projected = trimmed
+              projectedUsage = trimmedUsage
+            }
+          }
+        }
         this.contextMessages = [...projected.messages]
-        ;({ request, usage, calibratedInputTokens } = assemble({ ...assembleInput, messages: projected.messages }))
+        ;({ request, usage, calibratedInputTokens } = projectedUsage)
         /*
           ★ 状态在**压完之后**才发,因为「压了没用」是第三种结局,压之前判不出来。
           发早了的话,榨干那一轮用户先看到一句「已折叠较早的历史」,再看着占用
@@ -829,7 +874,7 @@ export class AgentSession {
           另起会话」会被同一轮的 `ready` 顶掉,而那是这条路径上**唯一**一句
           可行动的提示。症状是占用一路涨过窗口,状态行上什么都没有。
         */
-        this.recordMechanicalCompaction(before, usage.used)
+        this.recordMechanicalCompaction(before, usage.used, projected)
         this.handle.emit({
           type: 'context_status',
           status: {
@@ -1101,8 +1146,12 @@ export class AgentSession {
    *
    * 所以这里只做一件事:**一个入口把这两样一起补齐**,谁重建投影都走它。
    * 规则本身在 `projectContextWindow` 里(和构造函数、手动压缩共用同一份)。
+   *
+   * ★ `dropWithoutSummary` 只由下面那条「机械压缩已经榨不出东西」的路径打开,
+   * 理由写在 `projectContextWindow` 上:还能靠清空工具输出压下去的时候就整条丢消息,
+   * 是在用不可逆的手段解决可逆的问题。
    */
-  private projectContext(): ContextProjection {
+  private projectContext(dropWithoutSummary = false): ContextProjection {
     const isolated = this.messages.map((message) => ({
       ...message,
       parts: this.isolateHistoryPaths(message.parts)
@@ -1110,7 +1159,8 @@ export class AgentSession {
     return projectContextWindow({
       messages: isolated,
       ...(this.contextSummary === undefined ? {} : { summary: this.contextSummary }),
-      now: this.deps.host.clock.now()
+      now: this.deps.host.clock.now(),
+      ...(dropWithoutSummary ? { dropWithoutSummary: true } : {})
     })
   }
 
@@ -1133,8 +1183,16 @@ export class AgentSession {
    * 重挂之后 `contextUsage` 是 undefined,它判断不出这一轮压没压、压到了哪。
    *
    * 边界从 `compactionBoundary` 拿,不在这里重算下标(规则只写一遍)。
+   *
+   * ★ `projection` 带进来的是**真的被移出上下文**的那一段。折叠(清空工具输出)和
+   * 丢弃(整条不再发)是两件事,检查点必须分开记:界面上「折叠了 40 条」和
+   * 「其中 22 条已经彻底不发了」对用户是完全不同的两句话,而后者是不可逆的。
    */
-  private recordMechanicalCompaction(inputTokensBefore: number, inputTokensAfter: number): void {
+  private recordMechanicalCompaction(
+    inputTokensBefore: number,
+    inputTokensAfter: number,
+    projection: ContextProjection
+  ): void {
     const save = this.deps.saveContextCheckpoint
     if (save === undefined) return
     const summary = compactionBoundary(this.messages)
@@ -1146,12 +1204,20 @@ export class AgentSession {
       id: `${this.req.sessionId}:context:${String(windowIndex)}`,
       sessionId: this.req.sessionId,
       windowIndex,
-      note: compactionNote(summary),
+      note: compactionNote(summary, undefined, projection.droppedMessages),
       source: 'mechanical',
       ...(summary.fromMessageId === undefined ? {} : { coveredFromMessageId: summary.fromMessageId }),
       ...(summary.throughMessageId === undefined ? {} : { coveredThroughMessageId: summary.throughMessageId }),
       inputTokensBefore,
       inputTokensAfter,
+      detail: {
+        foldedMessages: summary.foldedMessages,
+        foldedToolOutputs: summary.foldedToolOutputs,
+        droppedMessages: projection.droppedMessages,
+        ...(projection.droppedThroughMessageId === undefined
+          ? {}
+          : { droppedThroughMessageId: projection.droppedThroughMessageId })
+      },
       createdAt: now,
       updatedAt: now,
       revision: 1
@@ -1174,7 +1240,7 @@ export class AgentSession {
       和一串三元表达式拼的 digest —— 而手动那条路上有它们的副本,两份已经开始各自演化。
     */
     const window = effectiveContextWindow(input.alias?.contextWindow, this.req.maxContext === true)
-    const prompt = buildCompactionPrompt({
+    const prompt = compactionRequestBody({
       messages: this.messages,
       ...(input.previousNote === undefined ? {} : { previousNote: input.previousNote }),
       budget: compactionDigestBudget(window)
@@ -1184,7 +1250,7 @@ export class AgentSession {
       // 压缩摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
       ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
       system: COMPACTION_SYSTEM,
-      messages: [userMessage(`${this.req.runId}:context-input`, [{ type: 'text', text: prompt }], this.deps.host.clock.now())],
+      messages: [userMessage(`${this.req.runId}:context-input`, [{ type: 'text', text: prompt.text }], this.deps.host.clock.now())],
       tools: [],
       maxOutputTokens: summaryOutputTokens(input.alias?.maxOutputTokens, window),
       thinkingLevel: 'off' as const
@@ -1214,6 +1280,20 @@ export class AgentSession {
       coveredFromMessageId: this.messages[0]?.id,
       coveredThroughMessageId: this.messages.at(-1)?.id,
       inputTokensBefore: input.inputTokensBefore,
+      /*
+        ★★ digest 的**实际**覆盖面在这里落库,而不是只把 `coveredThrough` 写成
+        转录最后一条就算数。digest 有 token 预算,超了从最早的一侧整条丢
+        (`compactionDigest`)—— 那些消息既没进摘要,又会被 `summaryCutIndex`
+        当成「已覆盖」裁掉。症状是模型对中间某一段完全失忆,而摘要里对那段
+        只字未提,没有任何一处报错。
+      */
+      detail: {
+        digest: prompt.text,
+        digestOmittedMessages: prompt.digest.omittedMessages,
+        ...(prompt.digest.uncoveredFromMessageId === undefined
+          ? {}
+          : { uncoveredFromMessageId: prompt.digest.uncoveredFromMessageId })
+      },
       createdAt: now,
       updatedAt: now,
       revision: 1

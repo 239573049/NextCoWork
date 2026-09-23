@@ -65,6 +65,7 @@ import vertexai from '@lobehub/icons-static-svg/icons/vertexai.svg?raw'
 import vllm from '@lobehub/icons-static-svg/icons/vllm.svg?raw'
 import volcengine from '@lobehub/icons-static-svg/icons/volcengine.svg?raw'
 import xai from '@lobehub/icons-static-svg/icons/xai.svg?raw'
+import xiaomimimo from '@lobehub/icons-static-svg/icons/xiaomimimo.svg?raw'
 import yi from '@lobehub/icons-static-svg/icons/yi.svg?raw'
 import zai from '@lobehub/icons-static-svg/icons/zai.svg?raw'
 import zhipu from '@lobehub/icons-static-svg/icons/zhipu.svg?raw'
@@ -102,7 +103,8 @@ const MARK: Record<Exclude<Brand, RasterBrand>, string> = {
   claude, cohere, deepinfra, deepseek, doubao, fireworks, gemini, groq,
   hunyuan, kimi, lmstudio, menlo, meta, minimax, mistral, moonshot, ollama,
   openai, opencode, openrouter, perplexity, qwen, sensenova, siliconcloud,
-  spark, stepfun, together, vertexai, vllm, volcengine, xai, yi, zai, zhipu
+  spark, stepfun, together, vertexai, vllm, volcengine, xai, xiaomimimo, yi,
+  zai, zhipu
 }
 
 /**

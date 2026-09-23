@@ -580,6 +580,31 @@ body {
   animation: reveal-delayed 160ms ease-out 250ms both;
 }
 
+/*
+  run 正常收束时,过程段整体换装成「用时」摘要行 —— 摘要行淡入的那一帧。
+  换装本身是两棵子树的瞬时交接(理由见 Thread 的 appliedCollapse),没有这
+  180ms,观感是几百像素的过程区「传送」成一行字;淡入让它读作「折进了这一行」。
+  ★ 挂 `both`:首帧就得是 opacity 0,否则先闪一帧不透明的再淡。
+  ★ reduced/off 除了全局 duration 归零兜底,这里照 .skills-view-enter 的
+  写法再显式 animation:none —— both 的 fill 在 0ms 下会直接停在终态,但
+  显式关掉少一次「靠推导成立」。
+*/
+@keyframes run-fold-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.run-fold-enter {
+  animation: run-fold-enter 180ms var(--ease-panel) both;
+}
+:root[data-theme-motion='reduced'] .run-fold-enter,
+:root[data-theme-motion='off'] .run-fold-enter {
+  animation: none;
+}
+
 @keyframes skills-view-enter {
   from {
     opacity: 0;
@@ -651,6 +676,7 @@ body {
 /*
   Agent 活动反馈。需求：思考块和状态行要共享同一套“仍在工作”的信号，
   但不能靠组件内定时器伪造进度；像素波和文字微光都只表达活跃，不表达百分比。
+  （像素波曾按需求删过一轮，后因状态行趣味词是短词、纯微光看不出在动而加回。）
 */
 @keyframes agent-activity-cell {
   0%,
@@ -724,5 +750,8 @@ body {
     200  自绘的三颗窗口按钮(shell/WindowControls.tsx,仅 Windows/Linux)。
          **只有它可以压住模态**,而且必须压住:macOS 的红绿灯是原生层、模态开着
          照样能点,这一档就是为了让另外两个平台不比它差 —— 否则设置面板一开
+         就没法最小化/关窗。别往这一档里放第二样东西。
+*/
+��开
          就没法最小化/关窗。别往这一档里放第二样东西。
 */

@@ -17,6 +17,7 @@ import type { AgentMessage } from '../../shared/agent/message'
 import type { ContextCheckpoint, ContextSearchHit } from '../../shared/agent/context-management'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
+import type { ProviderAccountLimit, ProviderQuotaSnapshot } from '../../shared/domain/provider-account'
 import type { ModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
@@ -39,6 +40,7 @@ import type {
 } from '../../shared/domain/usage'
 import type { SessionCreateInput } from '../db/repo'
 import * as repo from '../db/repo'
+import * as providerAccounts from '../db/provider-accounts'
 import * as usageRollup from '../db/usage-rollup'
 import { ulid } from '../../shared/util/id'
 
@@ -200,9 +202,16 @@ export const store = {
    *
    * 级联现在由 `model_aliases` 上的外键做(`db/schema.ts`),不再是这里的一个循环:
    * 数据库保证的不变式不需要每个写入点都记得。
+   *
+   * ★ 账号行**没有**外键可用(`provider_accounts` 故意不建外键:它还要连带删
+   * `credentials` 里的密文,而那件事外键管不着)。所以这里显式收一次 ——
+   * 漏掉的表现是删掉供应商后库里留着一串再也读不到的 token。
    */
   removeProvider(id: string): void {
-    repo.removeProvider(id)
+    repo.tx(() => {
+      providerAccounts.removeProviderAccountsFor(id)
+      repo.removeProvider(id)
+    })
   },
   /**
    * ★ 别名的主键是 `(providerId, alias)`,不是 alias。
@@ -217,6 +226,56 @@ export const store = {
   },
   removeAlias(providerId: string, alias: string): void {
     repo.removeAlias(providerId, alias)
+  },
+
+  // ── 供应商账号(OAuth 多账号,schema 第 24 条) ──
+  /**
+   * ★ 这一组是**纯转发**,和上面全部访问器同一个理由:全应用没有第二个地方摸持久化。
+   * 读写规则、连带删密文那条不变式都在 `db/provider-accounts.ts` 的文件头。
+   *
+   * ★ 这里出去的是**元数据**,不带登录态摘要(邮箱 / 是否过期)——
+   * 那要解密凭证才知道,由 `ipc/provider-accounts.ts` 在下发前合成。
+   */
+  listProviderAccounts(providerId?: string): providerAccounts.ProviderAccountRow[] {
+    return providerAccounts.listProviderAccounts(providerId)
+  },
+  getProviderAccount(id: string): providerAccounts.ProviderAccountRow | undefined {
+    return providerAccounts.getProviderAccount(id)
+  },
+  putProviderAccount(account: providerAccounts.ProviderAccountRow): providerAccounts.ProviderAccountRow {
+    return providerAccounts.putProviderAccount(account)
+  },
+  /** 连带删密文 —— 见 `db/provider-accounts.ts` 的不变式 */
+  removeProviderAccount(id: string): void {
+    providerAccounts.removeProviderAccount(id)
+  },
+  nextProviderAccountOrder(providerId: string): number {
+    return providerAccounts.nextProviderAccountOrder(providerId)
+  },
+  setProviderAccountOrder(providerId: string, accountIds: readonly string[]): void {
+    providerAccounts.setProviderAccountOrder(providerId, accountIds)
+  },
+  setProviderAccountEnabled(id: string, enabled: boolean): void {
+    providerAccounts.setProviderAccountEnabled(id, enabled)
+  },
+  /** 见 `db/provider-accounts.ts`:凭证变化时同步那个反范式的位,写入点只有 announce */
+  setProviderAccountNeedsReauth(id: string, needsReauth: boolean): void {
+    providerAccounts.setProviderAccountNeedsReauth(id, needsReauth)
+  },
+  setProviderAccountLabel(id: string, label: string): void {
+    providerAccounts.setProviderAccountLabel(id, label)
+  },
+  setProviderAccountLimit(id: string, limit: ProviderAccountLimit | null): void {
+    providerAccounts.setProviderAccountLimit(id, limit)
+  },
+  setProviderAccountQuota(id: string, quota: ProviderQuotaSnapshot): void {
+    providerAccounts.setProviderAccountQuota(id, quota)
+  },
+  setCurrentProviderAccount(providerId: string, accountId: string): void {
+    providerAccounts.setCurrentProviderAccount(providerId, accountId)
+  },
+  currentProviderAccount(providerId: string): providerAccounts.ProviderAccountRow | undefined {
+    return providerAccounts.currentProviderAccount(providerId)
   },
 
   // ── usage ledger ──

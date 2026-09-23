@@ -24,6 +24,7 @@
  * 在这个文件里写中文字符串等于让英文界面永远显示中文 —— 历史上正是这样。
  */
 import type { ToolOutput } from '../agent/message'
+import { countLineDiff } from './line-diff'
 
 /**
  * 展示形态。判据是**「展开后详情区该用哪种渲染器」**,不是工具的功能领域。
@@ -73,12 +74,57 @@ export type ToolShape =
   | 'widget'
   | 'external'
 
+/**
+ * 折叠态那一行的**结构化字段**。
+ *
+ * ★★ 需求:工具行要读起来像一份活动日志,而不是一串句子 ——
+ * 「编辑 · CHANGELOG.md · src/docs/」三段各有各的亮度,扫一眼就能分出
+ * 「做了什么 / 对谁做的 / 在哪儿」。原先这里只有一个拼好的 `title` 字符串
+ * (`'读取 index.ts'`),于是**目录、文件类型、命令原文在拼接的那一刻就丢了**,
+ * 渲染层再想分色显示只能去反向切字符串 —— 那种切法对中英文和 MCP 名各错一次。
+ *
+ * ★ 三段的职责固定,不要按工具临时改用途:
+ *   label   已翻译的动作词。**永不为空**,参数还在流时行里至少有它。
+ *   target  这次动作的主语(文件名 / 命令 / 查询词)。领域值,**不翻译**。
+ *   context 主语的从属信息(所在目录 / 命令原文 / MCP server)。次要,可省。
+ */
+export interface ToolLine {
+  label: string
+  target?: string
+  context?: string
+  /** target 按等宽渲染(命令、glob 模式、id);context 一律等宽,不受它影响 */
+  mono?: boolean
+  /** 这一行指向的文件路径 —— 渲染层据此画文件类型标记。没有文件就别给 */
+  path?: string
+}
+
+/**
+ * 这次调用改了多少行 —— 行右端那个 `+7 −1`。
+ *
+ * ★★ 需求:「编辑了 CHANGELOG.md」回答不了「改动大不大」,而那恰恰是用户决定
+ * 「要不要展开看」的依据。数字**只能来自这次调用自己的数据**(Edit 的
+ * old/new_string、Write 新建时的 content),不许去问改动审查那份按文件聚合的统计 ——
+ * 同一个文件在一轮里可能被改五次,聚合数字挂到每一行上,五行会显示同一个总数。
+ *
+ * ★ 算不出来就**不给**:覆写已有文件时旧内容不在入参里,硬报一个「−0」等于
+ * 告诉用户这次没删过东西。宁可这一格空着。
+ */
+export interface ToolLineStats {
+  additions: number
+  deletions: number
+}
+
 export interface ToolPresenter {
   shape: ToolShape
-  /** 折叠态主标题。★ 拿不到入参时**必须仍返回一个可读串**,不能返回空。 */
-  title: (input: unknown) => string
+  /**
+   * 折叠态那一行。★ 拿不到入参时**必须仍返回一个可读的 label**,不能返回空 ——
+   * 流式中途每一帧都会经过这里。
+   */
+  line: (input: unknown) => ToolLine
   /** 折叠态右侧摘要。信息不足时返回 `undefined`,调用方据此不渲染那一格。 */
   summary?: (input: unknown, output: ToolOutput | undefined) => string | undefined
+  /** 行右端的增删行数。算不准就返回 undefined —— 见 `ToolLineStats`。 */
+  stats?: (input: unknown, output: ToolOutput | undefined) => ToolLineStats | undefined
   /**
    * 运行中能不能被用户**单独**停掉(`shell:stopToolCall`)。
    *
@@ -100,9 +146,14 @@ export interface ToolPresenter {
  * **key + 抽好的参数**,字符串拼接由注入进来的翻译函数完成 —— 与插件 presenter
  * 的注入层(`renderer/stores/plugins.ts`)是同一个模式。参数名全表统一用
  * `target` / `count` / `code` / `days` / `time`,文案表因此能写成一族小函数。
+ *
+ * ★ `chat.tool.title.*` 这一族现在是**纯动作标签**(「读取」「编辑」),不再带
+ * `{target}` —— 目标由 `ToolLine.target` 单独给,拼接发生在渲染层的版式里而不是
+ * 文案里。key 名保持不变是为了不动已落地的两份 catalog 和插件文案前缀检查;
+ * 改名会让这次改动的 diff 淹没在重命名里(§12 最小 diff)。
  */
 export const PRESENTER_COPY_KEYS = [
-  // 折叠态标题(动词 + 目标;target 为空串时由文案表退化成「读取…」这类进行时短语)
+  // 折叠态动作标签(「读取」「执行」;目标是 ToolLine.target,不进这张表)
   'chat.tool.title.read',
   'chat.tool.title.ls',
   'chat.tool.title.write',
@@ -116,7 +167,6 @@ export const PRESENTER_COPY_KEYS = [
   'chat.tool.title.webSearch',
   'chat.tool.title.skill',
   'chat.tool.title.task',
-  'chat.tool.title.taskWithDesc',
   'chat.tool.title.scheduleCreate',
   'chat.tool.title.scheduleUpdate',
   'chat.tool.title.scheduleDelete',
@@ -279,13 +329,54 @@ function lineCount(output: ToolOutput | undefined): number | undefined {
 }
 
 /**
- * 带缺省的标题拼接:字段取不到时只显示动词。
+ * 路径的目录部分,带尾斜杠;过深时只留最后三段并前置省略号。
  *
- * 「读取…」比「读取 」或「读取 undefined」都好 —— 前者读起来像正在进行,
- * 后者看着像 bug。流式中途每个工具卡片都会经过这条路径。
+ * 需求:工具行右边那一格要回答「这个文件在哪儿」,而入参里的路径是**绝对路径**
+ * (`/Users/x/code/proj/src/main/db/a.ts`)。整条画出来会把行撑满,读者真正认得出的
+ * 也只是末尾那几段。
+ *
+ * ★ `root` 给了就先按工作区根裁成**相对路径**(`src/main/db/`)—— 那是用户脑子里
+ * 真正在用的坐标系,绝对路径的前四段对他没有任何信息量。★ 但**根外的文件必须
+ * 仍然显示绝对路径**:读一个仓库外的文件时,把它画成相对路径等于说谎。
+ * root 是渲染层传下来的(workspace.rootPath),这个模块本身不碰 store。
  */
-function withTarget(key: PresenterCopyKey, target: string): string {
-  return presenterCopy(key, { target })
+export function dirOf(path: string, root?: string): string {
+  if (path === '') return ''
+  const at = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (at <= 0) return ''
+  const dir = path.slice(0, at)
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+  const inRoot = insideRoot(dir, root)
+  const parts = (inRoot ?? dir).split(/[/\\]/).filter((p) => p !== '')
+  if (parts.length === 0) return ''
+  const tail = parts.slice(-3)
+  const prefix = parts.length > tail.length ? `…${sep}` : ''
+  return `${prefix}${tail.join(sep)}${sep}`
+}
+
+/**
+ * `dir` 在 `root` 里面时返回去掉根之后的那一段,否则 null。
+ *
+ * ★ 比较前把尾斜杠去掉,并要求边界正好落在分隔符上 —— 否则
+ * `/w/proj` 会把 `/w/project-b/src` 也认成自己的子目录(前缀匹配的经典坑),
+ * 表现为另一个项目的文件被画成本项目的相对路径。
+ */
+function insideRoot(dir: string, root: string | undefined): string | null {
+  if (root === undefined || root === '') return null
+  const base = root.replace(/[/\\]+$/, '')
+  if (dir === base) return ''
+  const next = dir[base.length]
+  if (!dir.startsWith(base) || (next !== '/' && next !== '\\')) return null
+  return dir.slice(base.length + 1)
+}
+
+/**
+ * 把一行拍平成一个字符串 —— 给「只有一格位置」的地方用(测试断言、将来的
+ * tooltip / 命令面板)。渲染层的工具行**不该**用它:那正是要分色显示的三段。
+ */
+export function toolLineText(line: ToolLine): string {
+  const target = line.target === undefined ? '' : line.target.trim()
+  return target === '' ? line.label : `${line.label} ${target}`
 }
 
 // ─────────────────────────── 各形态的摘要提取 ───────────────────────────
@@ -324,6 +415,30 @@ function editSummary(_i: unknown, o: ToolOutput | undefined): string | undefined
   const m = /replaced\s+(\d+)\s+occurrence/i.exec(o.content)
   const n = m?.[1]
   return n === undefined ? undefined : presenterCopy('chat.tool.summary.replaced', { count: Number(n) })
+}
+
+/**
+ * Edit 的 `+X −Y`:两侧都在入参里,所以**流式中途就能算**,不必等工具跑完。
+ * 两侧都空(参数还没到)时不给数字 —— 一行「+0 −0」会被读成「这次什么也没改」。
+ */
+function editStats(i: unknown): ToolLineStats | undefined {
+  const oldStr = pick(i, 'old_string')
+  const newStr = pick(i, 'new_string')
+  if (oldStr === '' && newStr === '') return undefined
+  return countLineDiff(oldStr, newStr)
+}
+
+/**
+ * Write 只在**新建**时给数字。
+ *
+ * ★ 判据是输出里的 `Created`,不是「入参里有 content」:覆写时旧内容不在任何
+ * 入参里,算出来的 `−0` 是假的(`fs.ts` 的输出文案区分 Created / Overwrote)。
+ * 所以流式期间这一格是空的,跑完是新建才填上 —— 宁可晚一点,不要一个错的数。
+ */
+function writeStats(i: unknown, o: ToolOutput | undefined): ToolLineStats | undefined {
+  if (o === undefined || !/^Created\b/i.test(o.content)) return undefined
+  const content = pick(i, 'content')
+  return content === '' ? undefined : countLineDiff(null, content)
 }
 
 function globSummary(_i: unknown, o: ToolOutput | undefined): string | undefined {
@@ -462,6 +577,51 @@ function askSummary(i: unknown): string | undefined {
 // ─────────────────────────── 注册表 ───────────────────────────
 
 /**
+ * 文件类工具的三段行:动作 + 文件名 + 目录。
+ *
+ * 需求:行里要能一眼分出「哪个文件」和「在哪儿」,所以文件名和目录是**两段**,
+ * 不是拼好的一条路径 —— 拼成一条之后,渲染层只能把整条压暗或整条提亮,
+ * 而用户扫的是文件名。`path` 原样带上,给渲染层画文件类型标记。
+ *
+ * ★ 路径还没流到(`path === ''`)时只留动作标签:半个路径比没有路径更误导。
+ */
+function fileLine(key: PresenterCopyKey, path: string): ToolLine {
+  const label = presenterCopy(key)
+  if (path === '') return { label }
+  return { label, target: base(path), context: dirOf(path), path }
+}
+
+/** 动作 + 一个领域值(命令、模式、id、查询词)。`mono` 决定它是不是等宽。 */
+function valueLine(key: PresenterCopyKey, target: string, mono = false): ToolLine {
+  const label = presenterCopy(key)
+  return target === '' ? { label } : { label, target, mono }
+}
+
+/**
+ * 一条 shell 命令的「它到底在干什么」那一截。
+ *
+ * ★★ 需求:模型省掉 `description` 时,行里不能是
+ * `cd /Users/token/Desktop/code/NextCoWork && grep -n "text-\[1…` ——
+ * 前四十个字符全是路径,真正的动作被挤出了可视范围。所以:
+ *
+ *   1. 剥掉**前置的 `cd <路径> &&`**(可以连着好几段);它是每条命令的仪式,
+ *      不是这一步做的事。剥完什么都不剩(命令真的只是 `cd`)就退回原文。
+ *   2. 再截到 48 字 —— 剩下的部分在展开后的终端里,一个字符都不少。
+ *
+ * ★ 只剥**行首**的 `cd`,不碰管道后面的:`git log | cd` 这种写法不存在,
+ * 但 `find … -exec cd …` 存在,剥错了会让一行显示成另一件事。
+ */
+export function commandGist(command: string): string {
+  const flat = command.replace(/\s+/g, ' ').trim()
+  if (flat === '') return ''
+  let rest = flat
+  // 允许带引号的路径:`cd "/a b" && …`
+  const CD = /^cd\s+(?:"[^"]*"|'[^']*'|[^\s&|;]+)\s*&&\s*/
+  while (CD.test(rest)) rest = rest.replace(CD, '')
+  return clip(rest === '' ? flat : rest, 48)
+}
+
+/**
  * ★ 键是 `internalId`(`Read` / `Bash` / `web_search` …),与
  * `kernel/tool/builtin/index.ts` 的清单一一对应。
  * 新增内置工具必须在这里加一行,否则 `index.test.ts` 会失败。
@@ -469,79 +629,99 @@ function askSummary(i: unknown): string | undefined {
 const REGISTRY: Record<string, ToolPresenter> = {
   Read: {
     shape: 'read',
-    title: (i) => withTarget('chat.tool.title.read', base(pick(i, 'file_path'))),
+    line: (i) => fileLine('chat.tool.title.read', pick(i, 'file_path')),
     summary: readSummary
   },
   LS: {
     shape: 'read',
-    title: (i) => withTarget('chat.tool.title.ls', base(pick(i, 'path'))),
+    line: (i) => fileLine('chat.tool.title.ls', pick(i, 'path')),
     summary: lsSummary
   },
   Write: {
     shape: 'mutate',
-    title: (i) => withTarget('chat.tool.title.write', base(pick(i, 'file_path'))),
-    summary: writeSummary
+    line: (i) => fileLine('chat.tool.title.write', pick(i, 'file_path')),
+    summary: writeSummary,
+    stats: writeStats
   },
   Edit: {
     shape: 'mutate',
-    title: (i) => withTarget('chat.tool.title.edit', base(pick(i, 'file_path'))),
-    summary: editSummary
+    line: (i) => fileLine('chat.tool.title.edit', pick(i, 'file_path')),
+    summary: editSummary,
+    stats: (i) => editStats(i)
   },
   Glob: {
     shape: 'search',
-    title: (i) => withTarget('chat.tool.title.glob', clip(pick(i, 'pattern'), 32)),
+    line: (i) => ({
+      ...valueLine('chat.tool.title.glob', clip(pick(i, 'pattern'), 48), true),
+      // 搜索范围是「在哪儿找」,和文件行的目录是同一格,所以走 context
+      context: dirContext(pick(i, 'path'))
+    }),
     summary: globSummary
   },
   Grep: {
     shape: 'search',
-    title: (i) => withTarget('chat.tool.title.grep', clip(pick(i, 'pattern'), 32)),
+    line: (i) => ({
+      ...valueLine('chat.tool.title.grep', clip(pick(i, 'pattern'), 48), true),
+      context: dirContext(pick(i, 'path') || pick(i, 'glob'))
+    }),
     summary: grepSummary
   },
   Bash: {
     shape: 'command',
     /**
      * 优先用模型自己写的 `description`(工具 schema 里要求「5-10 words」),
-     * 它比命令本身更接近「这一步在干什么」;没有才退回命令原文。
-     * description 是模型产出的内容,按「不翻译领域值」的规矩原样显示。
+     * 它比命令本身更接近「这一步在干什么」。
+     *
+     * ★ 有 description 时**收起态完全不画命令**。命令动辄几百字符(ssh、管道、
+     * 内嵌 PowerShell 都常见),在一行里只显示得下一截毫无意义的前缀
+     * (`cd /Users/token/… && s…`),既读不懂又把描述挤没了。
+     * 命令完整地在展开后的终端里(`views/chat/TerminalBlock.tsx`)——
+     * 那里才有它需要的宽度和换行。
+     *
+     * ★★ **`description` 是可省参数,所以兜底必须也说人话。** 省掉它的时候,
+     * 原样显示命令的结果就是一行 `cd /Users/token/Desktop/code/NextCoWork && grep -n "…`
+     * —— 前 40 个字符全是与「它干了什么」无关的路径。所以兜底走 `commandGist`:
+     * 先剥掉 `cd … &&` 这类前置,再截短。完整命令仍在展开的终端里。
      */
-    title: (i) => {
+    line: (i) => {
       const desc = pick(i, 'description')
-      if (desc !== '') return clip(desc, 40)
-      return withTarget('chat.tool.title.bash', clip(pick(i, 'command'), 40))
+      if (desc !== '') return { label: presenterCopy('chat.tool.title.bash'), target: clip(desc, 60) }
+      return valueLine('chat.tool.title.bash', commandGist(pick(i, 'command')), true)
     },
     summary: bashSummary,
     stoppable: true
   },
   BashOutput: {
     shape: 'command',
-    title: (i) => withTarget('chat.tool.title.bashOutput', pick(i, 'bash_id')),
+    line: (i) => valueLine('chat.tool.title.bashOutput', pick(i, 'bash_id'), true),
     summary: bashOutputSummary
   },
   KillShell: {
     shape: 'command',
-    title: (i) => withTarget('chat.tool.title.killShell', pick(i, 'shell_id'))
+    line: (i) => valueLine('chat.tool.title.killShell', pick(i, 'shell_id'), true)
   },
   WebFetch: {
     shape: 'network',
-    title: (i) => withTarget('chat.tool.title.webFetch', hostOf(pick(i, 'url'))),
+    line: (i) => valueLine('chat.tool.title.webFetch', hostOf(pick(i, 'url'))),
     summary: webFetchSummary
   },
   web_search: {
     shape: 'network',
-    title: (i) => withTarget('chat.tool.title.webSearch', clip(pick(i, 'query'), 32)),
+    line: (i) => valueLine('chat.tool.title.webSearch', clip(pick(i, 'query'), 48)),
     summary: webSearchSummary
   },
   TodoWrite: {
     shape: 'orchestration',
-    title: () => presenterCopy('chat.tool.title.todo'),
+    line: () => ({ label: presenterCopy('chat.tool.title.todo') }),
     summary: (i) => todoSummary(i)
   },
   Task: {
     shape: 'orchestration',
-    title: (i) => {
+    line: (i) => {
       const desc = pick(i, 'description')
-      if (desc !== '') return presenterCopy('chat.tool.title.taskWithDesc', { target: clip(desc, 30) })
-      return withTarget('chat.tool.title.task', pick(i, 'subagent_type'))
+      const type = pick(i, 'subagent_type')
+      if (desc === '') return valueLine('chat.tool.title.task', type)
+      return { label: presenterCopy('chat.tool.title.task'), target: clip(desc, 40), context: type }
     },
     summary: (i) => {
       const t = pick(i, 'subagent_type')
@@ -550,76 +730,78 @@ const REGISTRY: Record<string, ToolPresenter> = {
   },
   Skill: {
     shape: 'orchestration',
-    title: (i) => withTarget('chat.tool.title.skill', pick(i, 'name'))
+    line: (i) => valueLine('chat.tool.title.skill', pick(i, 'name'))
   },
   ListScheduledTasks: {
     shape: 'orchestration',
-    title: () => presenterCopy('chat.tool.title.scheduleList'),
+    line: () => ({ label: presenterCopy('chat.tool.title.scheduleList') }),
     summary: scheduledListSummary
   },
   CreateScheduledTask: {
     shape: 'orchestration',
-    title: (i) => withTarget('chat.tool.title.scheduleCreate', clip(pick(i, 'name'), 24)),
+    line: (i) => valueLine('chat.tool.title.scheduleCreate', clip(pick(i, 'name'), 32)),
     summary: (i) => scheduleSummary(i)
   },
   UpdateScheduledTask: {
     shape: 'orchestration',
     /** 改名时显示新名字,只改时间时退回 id —— 两种都比只显示动词有用 */
-    title: (i) => {
+    line: (i) => {
       const name = pick(i, 'name')
-      return withTarget('chat.tool.title.scheduleUpdate', name === '' ? clip(pick(i, 'task_id'), 14) : clip(name, 24))
+      return name === ''
+        ? valueLine('chat.tool.title.scheduleUpdate', clip(pick(i, 'task_id'), 18), true)
+        : valueLine('chat.tool.title.scheduleUpdate', clip(name, 32))
     },
     summary: (i) => scheduleSummary(i)
   },
   DeleteScheduledTask: {
     shape: 'orchestration',
-    title: (i) => withTarget('chat.tool.title.scheduleDelete', clip(pick(i, 'task_id'), 14))
+    line: (i) => valueLine('chat.tool.title.scheduleDelete', clip(pick(i, 'task_id'), 18), true)
   },
   /*
-    等用户表态的三个。**标题静态、摘要克制**:入参是题面,它在详情区整块渲染
+    等用户表态的三个。**标签静态、摘要克制**:入参是题面,它在详情区整块渲染
     (`views/chat/InteractionPreview.tsx`),标题行只负责说清这是哪一类表态。
   */
   AskUserQuestion: {
     shape: 'interaction',
-    title: () => presenterCopy('chat.tool.title.askUser'),
+    line: () => ({ label: presenterCopy('chat.tool.title.askUser') }),
     summary: (i) => askSummary(i)
   },
   ProposeGoal: {
     shape: 'interaction',
-    title: () => presenterCopy('chat.tool.title.proposeGoal')
+    line: () => ({ label: presenterCopy('chat.tool.title.proposeGoal') })
   },
   /*
     ★ `ExitPlanMode` 的 schema 是**空对象** —— 计划正文在文件里,工具开跑之后才读。
-    所以它没有任何可以提前预览的入参,这里只换一个说人话的标题;
+    所以它没有任何可以提前预览的入参,这里只换一个说人话的标签;
     `previewOf()` 对它返回 null,卡片也就不会自动展开一个空详情区。
   */
   ExitPlanMode: {
     shape: 'interaction',
-    title: () => presenterCopy('chat.tool.title.planReview')
+    line: () => ({ label: presenterCopy('chat.tool.title.planReview') })
   },
   echo: {
     shape: 'external',
-    title: () => 'echo',
+    line: () => ({ label: 'echo' }),
     summary: firstLineSummary
   },
   /*
     可视化那一对。
 
-    `visualize_show_widget` 的标题取模型写的 `title`(规范要求它是
+    `visualize_show_widget` 的主语取模型写的 `title`(规范要求它是
     `q4_revenue_by_product_line` 这种能自解释的标识),`humanize` 把下划线换成空格
     —— 它不翻译,是领域值。**没有 `summary`**:折叠态右端那一格在同一行里,
     而这里唯一还能一眼看懂的数就是代码体积,它对用户没有意义。
 
-    `visualize_read_me` 是静态标题 + "加载了哪几段"的摘要 ——
+    `visualize_read_me` 是静态标签 + "加载了哪几段"的摘要 ——
     规范正文本身有七万字,进不了折叠态那一格,摘要是这里唯一能给出的信息。
   */
   visualize_show_widget: {
     shape: 'widget',
-    title: (i) => withTarget('chat.tool.title.widget', humanize(pick(i, 'title')))
+    line: (i) => valueLine('chat.tool.title.widget', humanize(pick(i, 'title')))
   },
   visualize_read_me: {
     shape: 'external',
-    title: () => presenterCopy('chat.tool.title.readMe'),
+    line: () => ({ label: presenterCopy('chat.tool.title.readMe') }),
     summary: (i) => {
       const modules = pickArray(i, 'modules').filter((m): m is string => typeof m === 'string')
       return modules.length === 0 ? undefined : modules.join(' · ')
@@ -627,10 +809,19 @@ const REGISTRY: Record<string, ToolPresenter> = {
   }
 }
 
+/**
+ * 搜索范围那一格。传进来的可能是目录、也可能是 glob(`**\/*.ts`)——
+ * 目录要按 `dirOf` 缩短,glob 原样留着(它本身就是要读的那个模式)。
+ */
+function dirContext(scope: string): string | undefined {
+  if (scope === '') return undefined
+  return scope.includes('*') ? clip(scope, 32) : `${scope.replace(/[/\\]+$/, '')}/`
+}
+
 /** 名字完全认不出来时的兜底。保持现状行为:通用 JSON 详情。 */
 const FALLBACK: ToolPresenter = {
   shape: 'external',
-  title: () => presenterCopy('chat.tool.fallback'),
+  line: () => ({ label: presenterCopy('chat.tool.fallback') }),
   summary: firstLineSummary
 }
 
@@ -718,7 +909,9 @@ export function presenterOf(name: string): ToolPresenter {
   if (mcp !== null) {
     return {
       shape: 'external',
-      title: () => `${mcp.server} · ${clip(humanize(mcp.tool), 28)}`,
+      // server 是「谁提供的」,工具名才是这次做的事 —— 正好落进 label/target 两格,
+      // 原先那个 `server · tool` 的拼接串在行里只能整条压暗。
+      line: () => ({ label: mcp.server, target: clip(humanize(mcp.tool), 32) }),
       summary: firstLineSummary
     }
   }
@@ -734,13 +927,13 @@ export function presenterOf(name: string): ToolPresenter {
   //
   // ★ **必须回填 FALLBACK**:`humanize` 会把下划线全换成空格,
   // 于是一个叫 `____` 的工具(消毒后的中文名就长这样,见 naming.ts 的
-  // sanitizeToolName)会得到一个空标题 —— 界面上是一行只有图标的空白,
-  // 看着像渲染坏了。单测里那条「永不返回空标题」钉的就是这里。
+  // sanitizeToolName)会得到一个空标签 —— 界面上是一行只有图标的空白,
+  // 看着像渲染坏了。单测里那条「永不返回空标签」钉的就是这里。
   const readable = clip(humanize(name), 32)
   if (readable !== '') {
     return {
       shape: 'external',
-      title: () => readable,
+      line: () => ({ label: readable }),
       summary: firstLineSummary
     }
   }

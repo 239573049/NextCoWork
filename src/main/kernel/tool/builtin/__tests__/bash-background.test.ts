@@ -69,7 +69,7 @@ describe('Bash · 后台执行', () => {
   it('★ 没有注册表时明说,而不是悄悄降级成前台跑', async () => {
     const spawn = vi.fn()
     const r = await bashTool.execute(
-      { command: 'npm run dev', run_in_background: true },
+      { command: 'npm run dev', run_in_background: true, description: '测试命令' },
       ctx({ host: nodeHost({ spawn }) })
     )
     expect(r.isError).toBe(true)
@@ -91,14 +91,15 @@ describe('Bash · 后台执行', () => {
     expect(r.output.content).toContain('KillShell')
     // 后台走的是注册表,不是 SpawnFn —— 走错的话这条命令会把整轮卡到超时
     expect(spawn).not.toHaveBeenCalled()
-    expect(shells.start).toHaveBeenCalledWith(expect.objectContaining({ command: 'npm run dev', cwd: '/w' }))
+    // description 是必填,且必须原样转给注册表 —— 后台 shell 列表显示的就是它
+    expect(shells.start).toHaveBeenCalledWith(expect.objectContaining({ command: 'npm run dev', cwd: '/w', description: '起开发服务' }))
   })
 
   it('起不来时把原因原样转给模型', async () => {
     const shells = fakeBridge({
       start: vi.fn(async () => { throw new Error('Too many background shells are already running (8).') })
     })
-    const r = await bashTool.execute({ command: 'npm run dev', run_in_background: true }, ctx({ shells }))
+    const r = await bashTool.execute({ command: 'npm run dev', run_in_background: true, description: '测试命令' }, ctx({ shells }))
     expect(r.isError).toBe(true)
     expect(r.output.content).toContain('Too many background shells')
   })
@@ -120,7 +121,7 @@ describe('Bash · 单条停止', () => {
   it('★ 用户停这一条 = toolFail,不是抛出 —— 抛出会把整轮回复也停掉', async () => {
     const shells = fakeBridge()
     const pending = bashTool.execute(
-      { command: 'sleep 30' },
+      { command: 'sleep 30', description: '测试命令' },
       ctx({ shells, host: nodeHost({ spawn: hangingSpawn }) })
     )
     // hold 在 spawn 之前同步调用,但 execute 本身要先过一遍 schema 校验
@@ -137,7 +138,7 @@ describe('Bash · 单条停止', () => {
     const shells = fakeBridge()
     const run = new AbortController()
     const pending = bashTool.execute(
-      { command: 'sleep 30' },
+      { command: 'sleep 30', description: '测试命令' },
       ctx({ shells, signal: run.signal, host: nodeHost({ spawn: hangingSpawn }) })
     )
     await Promise.resolve()
@@ -148,7 +149,7 @@ describe('Bash · 单条停止', () => {
   it('停止句柄在命令收尾时注销 —— 留着的话下一次点停止会停到一条不存在的命令', async () => {
     const shells = fakeBridge()
     await bashTool.execute(
-      { command: 'true' },
+      { command: 'true', description: '测试命令' },
       ctx({ shells, host: nodeHost({ spawn: async () => ({ code: 0, stdout: '', stderr: '' }) }) })
     )
     expect(shells.held).toEqual([{ runId: 'run_1', callId: 'call_1' }])

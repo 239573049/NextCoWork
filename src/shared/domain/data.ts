@@ -42,6 +42,22 @@ export interface DataExport {
   sessions: ExportSession[]
   providers: UpstreamProvider[]
   aliases: ModelAlias[]
+  /**
+   * OAuth 供应商的账号**元数据**(schema 第 24 条)。
+   *
+   * ★★ **这里没有任何密文** —— token 和其它凭证一样住 `encryptedCredentials`,
+   * 键是 `provider:<id>#<accountId>`。这一段只是「有哪几个账号、排第几、
+   * 停用没、备注名叫什么」。
+   *
+   * ★ **可选**:缺席 = 这份导出早于多账号(或者导出时一个 OAuth 账号都没有)。
+   *   判成非法的表现是**整份旧备份导不进来**,而错误信息只会说「文件格式不对」。
+   *
+   * ★ 限流闸门与额度快照**不导出**(见 `ProviderAccountExport` 的字段列表):
+   *   它们是「此时此地这台机器观察到的上游状态」,几小时后就不成立了。
+   *   带过去的表现是:刚导入的另一台机器上,一个好端端的账号显示「限流中」,
+   *   而用户完全无从知道那是一份从别处搬来的旧判断。
+   */
+  providerAccounts?: ProviderAccountExport[]
   mcpServers: McpServerConfig[]
   searchProviders: SearchProviderConfig[]
   /** IDs of globally disabled skills; skill files themselves are never exported. */
@@ -50,6 +66,18 @@ export interface DataExport {
   encryptedCredentials?: EncryptedCredentials | boolean
   /** Legacy user supplied model catalogue, ignored by current import code. */
   userModelCatalog?: unknown
+}
+
+/** 见 `DataExport.providerAccounts`:元数据,无密文、无限流、无额度 */
+export interface ProviderAccountExport {
+  id: string
+  providerId: string
+  issuer: string
+  label?: string
+  order: number
+  enabled: boolean
+  current: boolean
+  updatedAt: number
 }
 
 export interface EncryptedCredentials {
@@ -224,7 +252,33 @@ export function isDataExport(value: unknown): value is DataExport {
   if (!aliases.every(isModelAlias) || !uniqueBy(aliases, (x) => `${(x as ModelAlias).providerId}\u0000${(x as ModelAlias).alias}`)) return false
   if (!mcpServers.every(isMcpServer) || !uniqueBy(mcpServers, (x) => (x as McpServerConfig).id)) return false
   if (!searchProviders.every(isSearchProvider) || !uniqueBy(searchProviders, (x) => (x as SearchProviderConfig).id)) return false
+  /*
+    ★ 账号是**后加的可选段**:缺席 = 旧备份,照常放行(见 `DataExport.providerAccounts`)。
+    在场就必须逐条合法且 id 不重复 —— 重复 id 会让合并变成顺序相关的,
+    而那种错只在「同一个 id 的两条记录内容不同」时才显形。
+  */
+  if (has(v, 'providerAccounts')) {
+    if (!Array.isArray(v.providerAccounts)) return false
+    const accounts = v.providerAccounts as unknown[]
+    if (!accounts.every(isProviderAccountExport)) return false
+    if (!uniqueBy(accounts, (x) => (x as ProviderAccountExport).id)) return false
+  }
   return true
+}
+
+/** 见 `DataExport.providerAccounts`。★ 宽容未知字段(将来加列不该让旧客户端拒收整份文件) */
+function isProviderAccountExport(value: unknown): value is ProviderAccountExport {
+  if (!isRecord(value)) return false
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.providerId) &&
+    isNonEmptyString(value.issuer) &&
+    optionalString(value, 'label') &&
+    isFiniteNumber(value.order) &&
+    isBoolean(value.enabled) &&
+    isBoolean(value.current) &&
+    isFiniteNumber(value.updatedAt)
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -317,6 +371,8 @@ function isAppSettings(value: unknown): boolean {
   if (has(v, 'upstreamIdleTimeoutSeconds') &&
       !isUpstreamIdleTimeoutSeconds(v.upstreamIdleTimeoutSeconds)) return false
   if (has(v, 'maxOutputTokens') && !isMaxOutputTokens(v.maxOutputTokens)) return false
+  // 账号轮换开关同理:缺席 = 这份导出早于多账号,放行并回落到默认(开启)。
+  if (has(v, 'providerAccountRotation') && typeof v.providerAccountRotation !== 'boolean') return false
   if (has(v, 'themeStudio') && !isThemeStudioSettings(v.themeStudio)) return false
   if (has(v, 'activeThemeProfileId') && v.activeThemeProfileId !== null &&
       (typeof v.activeThemeProfileId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(v.activeThemeProfileId))) return false

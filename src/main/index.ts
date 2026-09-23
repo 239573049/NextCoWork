@@ -38,7 +38,7 @@ import { installWidgetProtocol, registerWidgetScheme } from './net/widget-protoc
 import { installPluginProtocol, registerPluginScheme, setPluginAppearanceResolver } from './plugin/protocol'
 import { shutdownPlugins, startPlugins } from './ipc/plugins'
 import { applyProxy, installProxyAuth } from './net/proxy'
-import { initRuntime, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
+import { initRuntime, seedProviderAccounts, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
 import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
 import { PROFILE_DIRECTORY_SEGMENT } from './db/config-profile'
 import { migrateFlatLayout, rewriteMigratedPaths } from './db/flat-layout'
@@ -210,16 +210,25 @@ function logStartupProbe(): void {
   })
 }
 
-function isSafeBrowserUrl(raw: string): boolean {
+/**
+ * webview 地址的协议闸：可信协议返回它的协议名，凭证不干净或地址解析不了返回 null。
+ *
+ * http/https 一直都可以；`file://` 自 2026-09-22 起也可以 —— 需求是「本地生成的
+ * HTML 报告用 file:// 打开、在右侧工作台里直接看」（风险与决策记在
+ * `kernel/tool/builtin/ssrf.ts` 的 `SsrfRiskOptions.allowFileUrls`，这里不重复）。
+ *
+ * ★ 这个函数只回答「协议是否可信」，**不等于放行**：远程页面跳到 file:// 的那条路
+ * 还要过 `guardNavigation` 的「当前页已经是 file://」那一关（见调用处注释）。
+ * `javascript:`、`data:`、`ncw://` 等一律 null —— webview 永远不加载它们。
+ */
+function browserUrlProtocol(raw: string): string | null {
   try {
     const parsed = new URL(raw)
-    return (
-      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-      parsed.username === '' &&
-      parsed.password === ''
-    )
+    if (parsed.username !== '' || parsed.password !== '') return null
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'file:') return null
+    return parsed.protocol
   } catch {
-    return false
+    return null
   }
 }
 
@@ -316,16 +325,39 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
     webPreferences.disableDialogs = true
     webPreferences.webSecurity = true
     webPreferences.allowRunningInsecureContent = false
-    if (typeof params.src === 'string' && params.src !== '' && !isSafeBrowserUrl(params.src)) event.preventDefault()
+    if (typeof params.src === 'string' && params.src !== '' && browserUrlProtocol(params.src) === null) event.preventDefault()
   })
 
   win.webContents.on('did-attach-webview', (_event, contents) => {
     contents.setWindowOpenHandler(({ url }) => {
-      if (isSafeBrowserUrl(url)) void shell.openExternal(url)
+      /*
+        页面 window.open 出去的一律交给系统浏览器，且**只交 http(s)**：
+        `shell.openExternal('file://…')` 在桌面 OS 上等于「用默认应用打开任意
+        本地路径」—— 本地 HTML 里一句 window.open('file:///…command') 就能借
+        这里点火。file:// 的放行范围只到 webview 内部导航为止。
+      */
+      const protocol = browserUrlProtocol(url)
+      if (protocol === 'http:' || protocol === 'https:') void shell.openExternal(url)
       return { action: 'deny' }
     })
     const guardNavigation = (event: Electron.Event, url: string): void => {
-      if (!isSafeBrowserUrl(url)) event.preventDefault()
+      const protocol = browserUrlProtocol(url)
+      if (protocol === 'http:' || protocol === 'https:') return
+      if (protocol === 'file:') {
+        /*
+          ★ file:// 只对「本来就在本地」的页面放行。需求见 `ssrf.ts` 的
+          `allowFileUrls`：本地 HTML 报告要在 webview 里点链接互相跳。
+          不能无条件放行 —— 那等于把「远程页面 → file:///…」写进白名单；
+          Chromium 自己也挡 http→file 的渲染进程发起导航，但两道一起才算数。
+          症状对照：本地报告点了链接没反应 = 这里拦过头；远程页竟能导航到
+          本地文件并被 snapshot 读走 = 这里放太开。
+          current 为空/about:blank 是首次挂载，对应的初始 src 已在
+          will-attach-webview 验过协议，放行。
+        */
+        const current = contents.getURL()
+        if (current === '' || current === 'about:blank' || current.startsWith('file://')) return
+      }
+      event.preventDefault()
     }
     contents.on('will-navigate', guardNavigation)
     contents.on('will-redirect', guardNavigation)
@@ -661,6 +693,12 @@ void app
     host.logger.warn(`[skill:bundled] ${diagnostic.path}: ${diagnostic.message}`)
   }
   initRuntime(host)
+  /*
+    ★ 已登录账号迁入账号表(schema 第 24 条)。**不 await**:它要解密一次凭证,
+    而首屏不依赖账号列表 —— 设置页拉账号时走的是同一张表,那时必然已经迁完。
+    自己吞掉全部异常(见 `seedProviderAccounts`),一次迁移失败不该挡住启动。
+  */
+  void seedProviderAccounts()
   // Browser IPC handlers are registered below, so their Electron/Playwright bridge must already exist.
   browserBindings = installProductionBrowserBindings(host.logger)
   /*

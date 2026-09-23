@@ -54,11 +54,32 @@ const BashInput = z.object({
     .describe(
       `Optional timeout in milliseconds, up to ${String(MAX_TIMEOUT_MS)}. Defaults to ${String(DEFAULT_TIMEOUT_MS)}`
     ),
+  /*
+    ★★ `description` 在描述里写成**必填**(这一点与 CC 不同,是有意的),
+    但在校验上**缺席时补空串,不拒绝调用**。
+
+    需求:转录里那一行显示的是「这一步在干什么」,而不是命令原文 —— 命令动辄
+    几百字符(`cd … && ssh … "powershell -Command …"`),一行里只显示得下一截
+    全是路径的前缀,用户看到的等于没看到。所以要让模型**每次都写**它。
+
+    ★★ 但**不能因为它缺席就让整条命令失败**。省掉它是模型的疏忽,不是用户的;
+    把 `.min(1)` 挂上去的结果是:正在跑的旧会话里,下一条命令直接变成一条
+    「Invalid arguments」的工具错误,用户看到的是「我的命令怎么跑不了了」,
+    而他什么都没做错。所以缺席时 `.default('')` 补一个空串,界面退回去画
+    `commandGist(command)`(`shared/domain/tool-presenter.ts`)—— 少一句描述,
+    不少一条命令。历史转录里那批没有描述的调用走的也是这条。
+
+    ★ 上限 200 字是护栏,不是目标:描述长到要换行时,它就不再是
+    「一眼扫过去的那句话」了。
+  */
   description: z
     .string()
     .max(200)
-    .optional()
-    .describe('Clear, concise description of what this command does in 5-10 words. The user sees it in the UI'),
+    .default('')
+    .describe(
+      'REQUIRED — always write it. What this command accomplishes, in 5-10 words, written for a person: '
+      + 'say the goal, not the flags. This is the only thing the user sees before expanding the call'
+    ),
   run_in_background: z
     .boolean()
     .optional()
@@ -103,7 +124,7 @@ export const bashTool: ToolRegistration = defineTool({
     'Usage notes:\n' +
     `- command is required. timeout is optional, in milliseconds, up to ${String(MAX_TIMEOUT_MS)} (10 minutes); ` +
     `it defaults to ${String(DEFAULT_TIMEOUT_MS)} (2 minutes)\n` +
-    '- Write a 5-10 word description; that is what the user sees in the UI\n' +
+    '- Write a 5-10 word description; that is REQUIRED and is what the user sees in the UI\n' +
     '- Use the Shell identified in the Environment section. The tool name Bash does not imply Bash or POSIX syntax.\n' +
     `- Output longer than ${String(MAX_OUTPUT_CHARS)} characters is truncated\n` +
     '- IMPORTANT: EVERY CALL GETS A FRESH SHELL AND KEEPS NO STATE. A cd, an export, or a variable you set ' +
@@ -133,9 +154,13 @@ export const bashTool: ToolRegistration = defineTool({
   async run(input, ctx) {
     if (ctx.workspaceRoot === '') return toolFail(NO_WORKSPACE)
 
+    /*
+      ★ 模型省了 description 时补的是空串(见 schema 上那段),所以状态行这里
+      仍要有兜底 —— 空串发出去的话,状态行会显示成一条什么都没写的「执行中」。
+    */
     ctx.emit({
       callId: ctx.callId,
-      message: input.description ?? clampWithEllipsis(input.command, 80)
+      message: input.description === '' ? clampWithEllipsis(input.command, 80) : input.description
     })
 
     if (input.run_in_background === true) {
@@ -154,7 +179,8 @@ export const bashTool: ToolRegistration = defineTool({
         const shell = await ctx.shells.start({
           command: input.command,
           cwd: ctx.workspaceRoot,
-          ...(input.description === undefined ? {} : { description: input.description }),
+          // 空串不往下传:后台 shell 列表拿它当标题,一个空标题比没有标题更难认
+          ...(input.description === '' ? {} : { description: input.description }),
           runId: ctx.runId,
           callId: ctx.callId
         })

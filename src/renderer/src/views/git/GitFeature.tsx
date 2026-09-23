@@ -32,9 +32,11 @@
  *   渲染层这一侧根本拿不到设置:它们是 `App.tsx` 的 state,而 Git 面板走
  *   `FeatureView`,不在那条 props 链上。
  *
- * ★ **diff 的文本解析不在这里,在同目录的 `diff-model.ts`。** 行号推算和「哪一行
- *   算正文」是这个面板里唯一算得上算法的一段,留在组件里就只能靠肉眼验收 ——
- *   而它错了不会报错,只会让行号整体串位。抽出去之后有 `__tests__/diff-model.test.ts`。
+ * ★ **diff 的文本解析不在这里,在 `components/diff/parse-unified.ts`。** 行号推算和
+ *   「哪一行算正文」是这个面板里唯一算得上算法的一段,留在组件里就只能靠肉眼验收 ——
+ *   而它错了不会报错,只会让行号整体串位。抽出去之后有
+ *   `components/diff/__tests__/parse-unified.test.ts`;画行的那一份也一并挪去了
+ *   `components/diff/DiffLines.tsx`,现在和聊天里的 diff 是同一个组件。
  */
 import {
   ArrowDown,
@@ -83,7 +85,9 @@ import {
 } from '../../services/git'
 import { FeatureFrame } from '../../shell/FeatureFrame'
 import { useWindowStore } from '../../stores/window'
-import { parseUnifiedDiff, type DiffRowKind } from './diff-model'
+import { DiffLines } from '../../components/diff/DiffLines'
+import { parseUnifiedDiff } from '../../components/diff/parse-unified'
+import { languageOf } from '../../components/code'
 
 /** 主进程会原样抛回来的 i18n 键。不在表里的一律当作 git 的原话显示。 */
 const KNOWN_ERROR_KEYS = [
@@ -818,15 +822,6 @@ function FileGroup({
   )
 }
 
-/** 一行 diff 的外观。行号栏在两种主题下都只能是最淡的那档,否则它比正文还显眼。 */
-const ROW_STYLE: Record<DiffRowKind, { row: string; text: string; sign: string }> = {
-  hunk: { row: 'bg-tint', text: 'text-accent-soft', sign: '' },
-  meta: { row: '', text: 'text-fg-faint', sign: '' },
-  add: { row: 'bg-accent/10', text: 'text-fg', sign: '+' },
-  del: { row: 'bg-danger/10', text: 'text-fg', sign: '-' },
-  context: { row: '', text: 'text-fg-muted', sign: '' }
-}
-
 /**
  * diff 正文。
  *
@@ -834,11 +829,15 @@ const ROW_STYLE: Record<DiffRowKind, { row: string; text: string; sign: string }
  *   而不是一个「展开全部」—— 展开之后卡的还是同一下,只是换成用户自己按的。
  *
  * ★ 解析放在 `useMemo` 里:面板每次 setState(轮询、忙碌态、输入框敲字)都会
- *   重渲染这棵树,而 diff 本身几乎不变。
+ *   重渲染这棵树,而 diff 本身几乎不变。它同时也是 `DiffLines` 的 prop,
+ *   每帧新建一份等价数组会让语法高亮跟着每帧重算。
  *
- * ★ **正文换行而不是横向滚动**(`whitespace-pre-wrap`)。横向滚动会把左边的行号栏
- *   一起推走 —— 而行号恰恰是滚到一半时最需要的那个东西;这一栏还可能被左侧 340px
- *   挤得很窄,长行在这里是常态而非例外。
+ * ★ **正文换行而不是横向滚动**(`wrap`)。横向滚动会把左边的行号栏一起推走 ——
+ *   而行号恰恰是滚到一半时最需要的那个东西;这一栏还可能被左侧 340px 挤得很窄,
+ *   长行在这里是常态而非例外。
+ *
+ * 行怎么画不在这里:`components/diff/DiffLines.tsx` 是全仓库唯一那一份,聊天里的
+ * 工具卡和「改动审查」画的是同一个组件(原先这边是另一套行样式和另一条行号栏)。
  */
 function DiffView({ t, diff }: { t: Translate; diff: GitDiff }): ReactNode {
   const parsed = useMemo(() => parseUnifiedDiff(diff.text, DIFF_LINE_LIMIT), [diff.text])
@@ -857,45 +856,19 @@ function DiffView({ t, diff }: { t: Translate; diff: GitDiff }): ReactNode {
         </span>
         {diff.truncated && <span className="text-fg-faint">{t('git.diffTruncated')}</span>}
       </div>
-      <div className="selectable font-mono text-[12px] leading-[1.6]">
-        {parsed.rows.map((row, i) => {
-          const style = ROW_STYLE[row.kind]
-          return (
-            <div key={i} className={cn('flex items-start', style.row)}>
-              <LineNumber value={row.oldLine} />
-              <LineNumber value={row.newLine} />
-              {/* ★ 符号列不能 aria-hidden:+/− 是「这一行是增是删」唯一的非颜色线索,
-                  屏幕阅读器和色觉障碍用户都只有它 */}
-              <span className={cn('w-3 shrink-0 select-none text-center', style.text)}>
-                {style.sign}
-              </span>
-              <span className={cn('min-w-0 flex-1 whitespace-pre-wrap break-all pr-4', style.text)}>
-                {row.text === '' ? ' ' : row.text}
-              </span>
-            </div>
-          )
-        })}
-      </div>
-      {parsed.rows.length < parsed.total && (
+      {/* 语法高亮的语言从路径推:diff 文本自己不带这个信息 */}
+      <DiffLines
+        lines={parsed.lines}
+        language={languageOf(diff.path)}
+        lineNumbers
+        className="text-[12px] leading-[1.6]"
+      />
+      {parsed.lines.length < parsed.total && (
         <p className="px-4 pt-2 text-[11px] text-fg-faint">
-          {t('git.diffLinesTruncated', { shown: parsed.rows.length, total: parsed.total })}
+          {t('git.diffLinesTruncated', { shown: parsed.lines.length, total: parsed.total })}
         </p>
       )}
     </div>
-  )
-}
-
-/**
- * 行号栏的一格。
- *
- * ★ `select-none`:行号**不能**进选区,否则用户复制一段 diff 粘到别处时,每一行
- *   前面都挂着两个数字,粘出来的代码不能直接用。`tabular-nums` 让等宽数字不抖。
- */
-function LineNumber({ value }: { value: number | null }): ReactNode {
-  return (
-    <span className="w-11 shrink-0 select-none pr-2 text-right tabular-nums text-fg-faint/70">
-      {value === null ? '' : value}
-    </span>
   )
 }
 

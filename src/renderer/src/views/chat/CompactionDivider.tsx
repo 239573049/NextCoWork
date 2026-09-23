@@ -8,14 +8,18 @@
  * ★ 只复用已有的 token 和结构:线是 `h-px bg-stroke`(装饰性收边,不是控件轮廓 ——
  *   见 `theme.css` 里 `--color-stroke` 那段),药丸是 `rounded-pill bg-tint`,
  *   展开区走公共的 `Surface`。不为这一处新起一套设计语言。
+ *
+ * ★ 展开区的**内容**住在 `CompactionDetail`,和顶部那个检查点面板共用一份:
+ *   两处各写一遍的结果是「分隔线里看得到丢弃统计、顶部面板里看不到」,
+ *   而这种差异不会报错。这里只负责那条线、那枚药丸和 token 对比。
  */
 import { useState, type ReactNode } from 'react'
-import { ChevronDown, Pencil, Save } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import type { ContextCheckpoint } from '../../../../shared/agent/context-management'
 import { useI18n } from '../../i18n'
 import { Surface, SurfaceReveal } from '../../components/ui/Surface'
-import { updateContextCheckpoint } from '../../services/context'
 import { cn } from '../../lib/cn'
+import { CompactionDetail } from './CompactionDetail'
 
 export function CompactionDivider({
   checkpoint,
@@ -28,9 +32,6 @@ export function CompactionDivider({
 }): ReactNode {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const [note, setNote] = useState(checkpoint.note)
-  const [saving, setSaving] = useState(false)
   // `'auto'` 是机械压缩的旧写法,和 `'mechanical'` 同义 —— 与顶部面板保持一致。
   const sourceKey = checkpoint.source === 'auto' ? 'mechanical' : checkpoint.source
   const source = t(`chat.contextSource.${sourceKey}` as 'chat.contextSource.model' | 'chat.contextSource.mechanical' | 'chat.contextSource.manual')
@@ -39,16 +40,6 @@ export function CompactionDivider({
     放出编辑框只会让用户以为改了有用,而改动会无声蒸发。
   */
   const editable = sourceKey !== 'mechanical'
-
-  async function save(): Promise<void> {
-    setSaving(true)
-    try {
-      onRefresh?.(await updateContextCheckpoint(checkpoint.id, note, checkpoint.revision))
-      setEditing(false)
-    } finally {
-      setSaving(false)
-    }
-  }
 
   return (
     <div className="flex flex-col gap-2" data-testid="compaction-divider" data-source={sourceKey}>
@@ -75,32 +66,14 @@ export function CompactionDivider({
         <span aria-hidden className="h-px flex-1 bg-stroke" />
       </div>
 
-      <SurfaceReveal open={open} divider={false}>
-        <Surface className="px-3 py-2">
+      <SurfaceReveal open={open}>
+        <Surface>
           <TokenDelta before={checkpoint.inputTokensBefore} after={checkpoint.inputTokensAfter} />
-          {editing ? (
-            <textarea
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              className="min-h-28 w-full resize-y rounded border border-border bg-surface-input p-2 text-[12px] text-fg outline-none focus:border-accent"
-              aria-label={t('chat.contextNote')}
-            />
-          ) : (
-            <p className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto break-words pr-1 whitespace-pre-wrap text-[12px] leading-[1.5] text-fg-muted">{checkpoint.note}</p>
-          )}
-          <div className="mt-2 flex items-center justify-end gap-1.5">
-            {!editable ? (
-              <span className="text-[11px] text-fg-faint">{t('chat.compaction.readOnly')}</span>
-            ) : editing ? (
-              <button type="button" className="inline-flex items-center gap-1 text-[11px] text-accent" onClick={() => void save()} disabled={saving}>
-                <Save size={12} aria-hidden />{t('chat.contextSave')}
-              </button>
-            ) : (
-              <button type="button" className="inline-flex items-center gap-1 text-[11px] text-fg-faint hover:text-fg" onClick={() => setEditing(true)}>
-                <Pencil size={12} aria-hidden />{t('chat.contextEdit')}
-              </button>
-            )}
-          </div>
+          <CompactionDetail
+            checkpoint={checkpoint}
+            editable={editable}
+            {...(onRefresh === undefined ? {} : { onRefresh })}
+          />
         </Surface>
       </SurfaceReveal>
     </div>

@@ -23,7 +23,7 @@ describe('resolveUsagePricingModelId', () => {
   })
 
   it('resolves Doubao endpoint versions to the official pricing product id', () => {
-    const modelId = resolveUsagePricingModelId('doubao-seed-2-1-pro-260628')
+    const modelId = resolveUsagePricingModelId('doubao-seed-2-1-pro-260915')
 
     expect(modelId).toBe('doubao-seed-2.1-pro')
     expect(findPricing(PRICING_SEED, 'volcengine', modelId, Date.parse('2026-09-05T00:00:00Z'))).toMatchObject({

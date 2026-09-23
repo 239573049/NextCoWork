@@ -56,6 +56,7 @@ import { DEFAULT_SETTINGS, mergeSettings, type ShellPreference, type StorageStat
 import { mcpSecretKind, mcpSecretRef } from '../../shared/domain/mcp'
 import { searchSecretRef } from '../../shared/domain/search'
 import { providerCredentialRef } from '../../shared/domain/provider'
+import { providerAccountCredentialRef } from '../../shared/domain/provider-account'
 import { DRAFT_ATTACHMENT_TTL_MS } from '../../shared/domain/attachment'
 import { databaseDirectory, databaseFilePath, databaseSchemaVersion, checkpointDatabase, closeDatabase, openDatabase, txAsync, vacuumDatabase } from '../db'
 import { MIGRATIONS } from '../db/schema'
@@ -74,6 +75,7 @@ import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { PROXY_PASSWORD_REF } from '../net/proxy'
 import { IpcError } from './errors'
+import { exportProviderAccounts, mergeProviderAccounts } from './provider-accounts-transfer'
 import { isWithin, recordPendingDelete } from './pending-delete'
 import { runs } from '../kernel/run-registry'
 import { jobStatusFor } from '../imports/service'
@@ -705,6 +707,15 @@ function readZip(bytes: Buffer): Map<string, Buffer> {
 function credentialRefs(): string[] {
   const refs = new Set<string>()
   for (const p of store.listProviders()) refs.add(p.credentialRef)
+  /*
+    ★★ 账号密文是**另一族 ref**(`provider:<id>#<accountId>`,schema 第 24 条)。
+    漏在这里的表现分两种,都很难查:导出包里多账号的登录态整个缺失(换台机器后
+    只剩当前那一个),以及导入回滚时账号密文不在快照里 —— 一次失败的导入会把
+    它们留在被改写之后的状态上。
+  */
+  for (const account of store.listProviderAccounts()) {
+    refs.add(providerAccountCredentialRef(account.providerId, account.id))
+  }
   for (const cfg of store.listMcpServers()) refs.add(mcpSecretRef(cfg.id, mcpSecretKind(cfg)))
   for (const c of store.listSearchProviders()) refs.add(searchSecretRef(c.id))
   refs.add(PROXY_PASSWORD_REF)
@@ -748,6 +759,25 @@ function credentialImportPlan(data: DataExport): CredentialImportPlan {
         ? null
         : (local?.credentialRef ?? providerCredentialRef(incoming.id))
     )
+  }
+
+  /*
+    账号密文。**ref 一律在本地重新派生**,绝不接受导入文件里写的那个 ——
+    和上面 provider 那条是同一条规矩(`credentialImportPlan` 的文件头英文注释:
+    一个档案永远不许指定本地的凭证指针)。派生用的是
+    `providerId + accountId`,两者都来自导入记录本身,所以这条映射是自洽的。
+
+    ★ 账号的去留跟着**它所属的 provider** 走:provider 那条被判 `skip`
+    (本地那份更新),它名下的账号密文也不该被覆盖 —— 否则会出现
+    「provider 配置是本地的、登录态是档案里的」这种半新半旧的组合。
+  */
+  const incomingAccounts = data.providerAccounts ?? []
+  for (const account of incomingAccounts) {
+    const source = providerAccountCredentialRef(account.providerId, account.id)
+    const provider = data.providers.find((item) => item.id === account.providerId)
+    const local = localProviders.find((item) => item.id === account.providerId)
+    const decision = provider === undefined ? 'skip' : dataMergeDecision(local, provider)
+    add(source, decision === 'skip' ? null : source)
   }
 
   const localMcp = store.listMcpServers()
@@ -843,7 +873,17 @@ function decryptCredentials(block: EncryptedCredentials, password: string): Reco
 
 async function createExport(includeEncryptedKeys: boolean, password?: string): Promise<DataExport> {
   const base = repo.exportDataSnapshot()
-  const data: DataExport = { ...base }
+  /*
+    ★ 账号**元数据**在这里补上(密文走下面那条凭证通道)。不在
+    `repo.exportDataSnapshot` 里做,是为了不让 `db/repo.ts` 反向依赖
+    `db/provider-accounts.ts` —— 那会是一个循环 import,见
+    `ipc/provider-accounts-transfer.ts` 的文件头。
+  */
+  const providerAccounts = exportProviderAccounts()
+  const data: DataExport = {
+    ...base,
+    ...(providerAccounts.length === 0 ? {} : { providerAccounts })
+  }
   if (includeEncryptedKeys) {
     if (password === undefined || password.length < 8) throw new IpcError('auth', '加密导出密码至少需要 8 个字符')
     if (!getHost().secrets.available()) throw new IpcError('auth', '凭证加密存储不可用，无法导出加密密钥')
@@ -1075,6 +1115,12 @@ export async function importApply(req: { password?: string }, ownerId = 0): Prom
     // 凭证行一起回滚。异步 test host 仍由外层 rollback snapshot 兜底。
     const result = await txAsync(async () => {
       const merged = repo.mergeDataExport(data)
+      /*
+        ★ 账号行排在 `mergeDataExport` **之后**:它要挂在已经写好的 provider 上
+        (挂不上去的会被丢掉,见 `mergeProviderAccounts`)。
+        同一个事务里 —— 导入失败时账号行和其余配置一起回滚。
+      */
+      mergeProviderAccounts(data)
       const secrets = getHost().secrets
       for (const ref of credentialPlan.removals) {
         if (secrets.remove !== undefined) await secrets.remove(ref)

@@ -72,6 +72,7 @@ import { type ProviderEntry } from "./enabled-models";
 import { ImportModelsDialog } from "./ImportModelsDialog";
 import { modelListAvailability } from "./import-models";
 import { ProviderAvatar } from "./ProviderAvatar";
+import { ProviderAccounts } from "./ProviderAccounts";
 import { PROTOCOLS, protocolLabel } from "./ModelProtocol";
 import { baseUrlForProtocol } from "./provider-edit";
 import {
@@ -137,10 +138,19 @@ export function ProviderPanel({
   entry,
   modality = "text",
   preserveAliases = [],
+  accountRotation = true,
 }: {
   entry: ProviderEntry;
   modality?: ModelModality;
   preserveAliases?: readonly ModelAlias[];
+  /**
+   * 设置里的「账号自动切换」。只用来算账号列表顶部那句「下一次会用谁」。
+   *
+   * ★ 默认 `true` 和 `DEFAULT_SETTINGS.providerAccountRotation` 一致 ——
+   * 两处不一致的话,没传这个 prop 的调用点(图片模型页)会把「会用 A」
+   * 算成「会用 B」,而那一句话没有任何地方会提示它是猜的。
+   */
+  accountRotation?: boolean;
 }): ReactNode {
   const { t } = useI18n();
   const { provider: p, aliases } = entry;
@@ -803,6 +813,29 @@ export function ProviderPanel({
                   revealing={revealingCredential}
                   onToggleReveal={toggleCredentialReveal}
                 />
+                {/*
+                  ★★ **账号列表和上面那块登录控件是两件事,所以并排而不是二选一。**
+                  上面那块负责**这一次登录流程**(设备码、粘回调地址、取消),
+                  下面这块负责**已经登录的那些号**(顺序、限流、额度、启停)。
+                  合成一个组件试过一次就会明白:登录中的三个阶段各有自己的界面,
+                  而它们和「三行账号」的布局没有任何共同之处。
+
+                  ★ 登录中把列表藏起来:此刻列表里那几行的状态正要变,
+                  而用户的注意力应该在浏览器那边(见 `oauthView` 的「正在登录时压过一切」)。
+                */}
+                {authView.state !== "signing-in" && (
+                  <div className="mt-2">
+                    <ProviderAccounts
+                      providerId={p.id}
+                      rotation={accountRotation}
+                      busy={busy}
+                      onError={setError}
+                      onSigningInChange={(active) =>
+                        setAuthFlow(active ? { phase: "opening" } : null)
+                      }
+                    />
+                  </div>
+                )}
               </div>
             )}
             {authMode === "oauth" ? null : managed ? (

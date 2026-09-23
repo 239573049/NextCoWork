@@ -64,9 +64,11 @@ import { CreateSshWorkspaceDialog } from './CreateSshWorkspaceDialog';
 import { EditWorkspaceDialog } from './EditWorkspaceDialog';
 
 /**
- * 三格面板开合的时长。**三处必须同一个数** —— 侧边栏收起的同时,主面板的左边界
- * 在往左长、Tab 条的左内边距在往右推、那颗展开按钮在等着淡入,四条曲线只要有一条
- * 不同步,看着就是「分好几批到位」。改这里,别在某个组件里单独写一个 duration。
+ * 面板开合的时长。**侧边栏与右/底部两条 dock 边必须同一个数** ——
+ * 侧边栏收起的同时,主面板的左边界在往左长、Tab 条的左内边距在往右推、
+ * 那颗展开按钮在等着淡入,dock 边的轨道也在同时收/放,几条曲线只要有一条
+ * 不同步,看着就是「分好几批到位」。改这里,别在某个组件里单独写一个 duration
+ * (右/底部那两条的 transition 写在 Dock.tsx,改这个数记得同步 duration-280)。
  *
  * 280 而不是 200:侧边栏是 297px 宽的一大块,200ms 下人眼几乎只看到首尾两帧,
  * 「快」和「闪」是一回事。位移越大需要的时间越长(同样一条曲线,一个图标转 90°
@@ -188,12 +190,21 @@ export function AppShell({
   }, []);
 
   /**
-   * 三格面板都是条件挂载的,直接 `{open && <Panel/>}` 收起时节点当场消失,
+   * 面板的开关都是条件性的,直接 `{open && <Panel/>}` 收起时节点当场消失,
    * 没有东西可以播退场 —— 所以统一过一遍 usePresence(它的文件头写了为什么)。
    * `shown` 驱动尺寸,`mounted` 决定还渲不渲染,`animating` 只在开合那一下为真,
    * 拖分隔条时是假的(否则每拖一帧都排一次插值,手感像拉皮筋)。
+   *
+   * ★ 右/底部两条 dock 边也各过一遍,三个信号交给 Dock 的 DockSplitView 映射:
+   * `mounted` → 开合期间保留 ghost 结构(不摊平、两侧子树不重挂载),
+   * `shown` → 轨道几何的起点/终点(开的第一帧仍是关的几何,双帧起跳,
+   * 和侧边栏同理),`animating` → 只在这 280ms 里给 grid 挂 transition。
+   * 手动点、切工作区、Agent 打开文件掀开右栏 —— 这些都只改 `rightPanelOpen`
+   * 一个事实,所以都走同一条动画,不需要各接一条。
    */
   const sidebar = usePresence(!sidebarCollapsed, PANEL_MS);
+  const rightEdge = usePresence(rightPanelOpen, PANEL_MS);
+  const bottomEdge = usePresence(bottomPanelOpen, PANEL_MS);
 
   const activeOuter = outer.find((t) => t.id === activeOuterId);
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
@@ -582,7 +593,7 @@ export function AppShell({
                   {t("app.openWorkspace")}
                 </div>
               ) : (
-                <DockRoot workspace={workspace} fallbackModel={{ model: settings.defaultModel, modelProviderId: settings.defaultModelProviderId }} maxOutputTokens={settings.maxOutputTokens} runningSessionIds={runningSessionIds} rightVisible={rightPanelOpen} bottomVisible={bottomPanelOpen} />
+                <DockRoot workspace={workspace} fallbackModel={{ model: settings.defaultModel, modelProviderId: settings.defaultModelProviderId }} maxOutputTokens={settings.maxOutputTokens} runningSessionIds={runningSessionIds} right={rightEdge} bottom={bottomEdge} />
               )}
             </div>
           </>

@@ -585,8 +585,8 @@ describe('vendor-first model catalogue', () => {
     const byId = new Map(BUILTIN_MODEL_CATALOG.map((row) => [row.id, row]))
     const priced = [
       ['doubao-seed-evolving', 'doubao-seed-evolving'],
-      ['doubao-seed-2-1-pro-260628', 'doubao-seed-2.1-pro'],
-      ['doubao-seed-2-1-turbo-260628', 'doubao-seed-2.1-turbo'],
+      ['doubao-seed-2-1-pro-260915', 'doubao-seed-2.1-pro'],
+      ['doubao-seed-2-1-lite-260915', 'doubao-seed-2.1-lite'],
       ['doubao-seed-2-0-pro-260215', 'doubao-seed-2.0-pro'],
       ['doubao-seed-2-0-lite-260428', 'doubao-seed-2.0-lite'],
       ['doubao-seed-2-0-mini-260428', 'doubao-seed-2.0-mini'],
@@ -608,8 +608,8 @@ describe('vendor-first model catalogue', () => {
         verificationStatus: 'official-api',
       })
     }
-    expect(byId.get('doubao-seed-2-1-pro-260628')).toMatchObject({
-      contextWindow: 262_144,
+    expect(byId.get('doubao-seed-2-1-pro-260915')).toMatchObject({
+      contextWindow: 1_048_576,
       maxOutputTokens: 262_144,
       capabilities: {
         visionInput: true,
@@ -619,8 +619,17 @@ describe('vendor-first model catalogue', () => {
       },
       thinkingConfig: { mode: 'toggle', parameterPath: 'thinking.type' },
     })
-    expect(findBuiltinModel('doubao-seed-2.1-pro')?.id).toBe('doubao-seed-2-1-pro-260628')
+    expect(findBuiltinModel('doubao-seed-2.1-pro')?.id).toBe('doubao-seed-2-1-pro-260915')
+    expect(findBuiltinModel('doubao-seed-2.1-lite')?.id).toBe('doubao-seed-2-1-lite-260915')
     expect(findBuiltinModel('doubao-seed-2-0-lite-260215')?.id).toBe('doubao-seed-2-0-lite-260428')
+    // ★ 260628 的两行按「退役旧行」删掉,但它们的**产品别名**必须留在新行上 ——
+    // 别名是用户在药丸/默认模型里看见的字符串,漏登记等于老绑定错过目录元数据。
+    for (const retired of ['doubao-seed-2-1-pro-260628', 'doubao-seed-2-1-turbo-260628']) {
+      expect(byId.has(retired), retired).toBe(false)
+    }
+    // ★ Turbo 没有后继行,它的别名也就**不许**被顺手挂到 Lite 上 ——
+    // 挂上去等于用 Lite 的窗口/价格替一款已退役的模型作答。
+    expect(findBuiltinModel('doubao-seed-2.1-turbo')).toBeUndefined()
   })
 
   it('ships current ERNIE endpoints and never models ERNIE thinking as a Token budget', () => {

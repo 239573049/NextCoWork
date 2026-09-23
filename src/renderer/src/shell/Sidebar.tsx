@@ -46,6 +46,7 @@ import { toast } from '../stores/toast'
 import { usePluginsStore } from '../stores/plugins'
 import { openPluginWebApp } from '../services/plugins'
 import { pluginSidebarEntries } from './plugin-sidebar-entries'
+import { useWindowStore } from '../stores/window'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'git', 'extensions']
 
@@ -95,6 +96,9 @@ export function Sidebar({
   */
   const catalog = usePluginsStore((state) => state.catalog)
   const pluginEntries = useMemo(() => pluginSidebarEntries(catalog), [catalog])
+  // 版本号走 store 而不是 prop:它是窗口外壳级的常量,透传只会给 Sidebar 和
+  // 主题预览各加一层。订阅取字段不取整份 store(§9)。
+  const appVersion = useWindowStore((state) => state.appVersion)
   return (
     <aside className="flex w-[297px] shrink-0 flex-col overflow-hidden rounded-panel bg-surface">
       {/*
@@ -130,9 +134,28 @@ export function Sidebar({
         </IconButton>
       </div>
 
+      {/*
+        版本号靠到品牌行**右端**、和字标同一行 —— 它要回答的是「我现在装的是哪一版」,
+        报 bug 时不用先翻设置。单独占一行会在 logo 下面多出一条 22px 的空行
+        (导航、卡片、账户那一整列的纵向节奏全被顶下去),而它本来就只有五个字符宽。
+
+        `ml-auto` 把它推到最右,字号比字标小一档、颜色降一级(`fg-faint`),
+        所以读起来是品牌行的附属信息,不是第二个标题。
+
+        ★ **版本号是数据,不是文案**,所以不进 i18n 表(§6 的「不翻译领域值」)。
+        它和 `v` 前缀合成一个不可见分隔的整串,屏幕阅读器读出来是
+        「NextCoWork 版本 2.2.5」,而不是把 `v` 和数字拆成两截。
+        `appVersion` 为空串时这一颗不渲染 —— 骨架屏 / 主题预览早于 bootstrap 都不会
+        留下一个孤零零的「v」。
+      */}
       <div className="flex items-center gap-2 px-4 pt-1 pb-4 text-fg">
         <Mark />
         <span className="font-brand text-[15px] font-bold tracking-tight">NextCoWork</span>
+        {appVersion !== '' && (
+          <span className="ml-auto font-mono text-[11px] text-fg-faint">
+            <span className="sr-only">{t('sidebar.version')}</span>v{appVersion}
+          </span>
+        )}
       </div>
 
       {/* ── 上半:全局 ──

@@ -17,6 +17,7 @@ import {
   buildSystemPrompt,
   compactMessages,
   compactionBoundary,
+  compactionDigest,
   compactionDigestBudget,
   compactionNote,
   estimateMessages,
@@ -1130,6 +1131,89 @@ describe('projectContextWindow', () => {
     it('锚点缺席(-1)一律不裁', () => {
       expect(summaryCutIndex(history(6), -1)).toBe(0)
     })
+
+    /**
+     * ★★ 这一条盯的是用户报的「压缩之后陷入死循环」。
+     *
+     * 一段「用户只说了一句话、模型跑了几十轮工具」的转录里,除第 0 条之外
+     * 再没有第二条真实 user 消息(工具回执的 role 也是 user)。旧判据因此恒返回 0 ——
+     * 摘要压缩一条历史都裁不掉,只把摘要**加**在前面:占用不降反升,判据下一轮
+     * 照样为真,两次之后自动压缩整个关掉,而这正是最需要压缩的那种会话。
+     */
+    it('★ 单条用户消息 + 一长串工具回合时,切点落在 assistant 边界上', () => {
+      const h: AgentMessage[] = [userMessage('u0', [{ type: 'text', text: '帮我改完这个模块' }], NOW)]
+      for (let i = 0; i < 8; i++) {
+        h.push(assistantMessage(`a${i}`, [{ type: 'tool_call', callId: `c${i}`, name: 'bash', input: {} }], NOW))
+        h.push(userMessage(`r${i}`, [{ type: 'tool_result', callId: `c${i}`, output: { content: 'x'.repeat(4000) }, isError: false }], NOW))
+      }
+      const cut = summaryCutIndex(h, h.length - 1)
+      expect(cut).toBeGreaterThan(0)
+      // 切点自己不能带 tool_result,否则保留侧第一条就是孤儿回执 → 下一轮 400
+      expect(h[cut]?.parts.some((p) => p.type === 'tool_result')).toBe(false)
+
+      const out = projectContextWindow({
+        messages: h,
+        summary: ref({ coveredThroughMessageId: h.at(-1)?.id ?? '' }),
+        now: NOW
+      })
+      expect(orphanedToolCalls(out.messages)).toEqual([])
+      expect(estimateMessages(out.messages)).toBeLessThan(estimateMessages(h))
+    })
+
+    /**
+     * ★ 旧判据的另一头:`isToolResultOnly` 要求 `every`,于是一条
+     * `[tool_result…, 插话文本]` 的混合消息被当成合法切点 —— 那条回执的
+     * tool_call 落在被裁的一侧,正是它要挡的那个 400。
+     */
+    it('★ 混着 tool_result 的插话消息不能当切点', () => {
+      const h: AgentMessage[] = [
+        userMessage('u0', [{ type: 'text', text: '开始' }], NOW),
+        assistantMessage('a0', [{ type: 'tool_call', callId: 'c0', name: 'bash', input: {} }], NOW),
+        userMessage('mix', [
+          { type: 'tool_result', callId: 'c0', output: { content: 'ok' }, isError: false },
+          { type: 'text', text: '顺便看看这个' }
+        ], NOW),
+        assistantMessage('a1', [{ type: 'text', text: '好' }], NOW)
+      ]
+      expect(summaryCutIndex(h, h.length - 1, 1)).not.toBe(2)
+    })
+  })
+
+  /**
+   * 无摘要的兜底裁剪 —— 默认配置(只做机械压缩)下唯一能真正减小上下文的手段。
+   *
+   * ★ 不开 `dropWithoutSummary` 时行为必须和以前**逐字相同**:还能靠清空工具输出
+   * 压下去的时候就整条丢消息,是用不可逆的手段解决可逆的问题。
+   */
+  describe('dropWithoutSummary', () => {
+    it('默认关着 —— 一条都不丢', () => {
+      const h = history(8)
+      const out = projectContextWindow({ messages: h, now: NOW })
+      expect(out.droppedMessages).toBe(0)
+      expect(out.messages).toHaveLength(h.length)
+    })
+
+    it('★ 打开后真的把最早的一段移出上下文,并在原位留一条提要', () => {
+      const h = history(8)
+      const out = projectContextWindow({ messages: h, now: NOW, dropWithoutSummary: true })
+
+      expect(out.droppedMessages).toBeGreaterThan(0)
+      expect(out.messages.length).toBeLessThan(h.length)
+      expect(estimateMessages(out.messages)).toBeLessThan(estimateMessages(h))
+      // 第 0 条(任务的原始表述)永远在
+      expect(out.messages[0]?.id).toBe('u0')
+      // 丢掉的那一段留下一条提要,而且逐字写明不可恢复
+      const skeleton = out.messages[1]
+      expect(skeleton?.id.endsWith(':skeleton')).toBe(true)
+      expect(JSON.stringify(skeleton)).toContain('not recoverable')
+      // 配对不破 —— 这条不变式在哪条路径上都不许让
+      expect(orphanedToolCalls(out.messages)).toEqual([])
+    })
+
+    it('历史还不够长时不丢', () => {
+      const out = projectContextWindow({ messages: history(2), now: NOW, dropWithoutSummary: true })
+      expect(out.droppedMessages).toBe(0)
+    })
   })
 })
 
@@ -1338,6 +1422,55 @@ describe('摘要压缩', () => {
         messages: [userMessage('first', [{ type: 'text', text: '任务' }], NOW)]
       })
       expect(prompt).not.toContain('<previous-summary>')
+    })
+  })
+
+  /**
+   * ★★ digest 漏掉了谁,必须随文本一起回给调用方。
+   *
+   * 检查点原先一律把覆盖锚点写成转录的最后一条,于是被预算丢掉的消息以
+   * 「已覆盖」的身份被 `summaryCutIndex` 裁掉:既没进摘要,又不在上下文里。
+   * 症状是模型对中间某一段完全失忆,而摘要里对那段只字未提,全程零报错。
+   */
+  describe('compactionDigest 的覆盖面', () => {
+    const long = (n: number): AgentMessage[] =>
+      Array.from({ length: n }, (_, i) =>
+        userMessage(`m${i}`, [{ type: 'text', text: `第 ${i} 段 ${'x'.repeat(3000)}` }], NOW)
+      )
+
+    it('预算够时一条都不漏', () => {
+      const out = compactionDigest(long(4), { budget: 1_000_000 })
+      expect(out.omittedMessages).toBe(0)
+      expect(out.uncoveredFromMessageId).toBeUndefined()
+    })
+
+    it('★ 预算不够时报出第一条被丢掉的消息 id', () => {
+      const h = long(40)
+      const out = compactionDigest(h, { budget: 4000 })
+      expect(out.omittedMessages).toBeGreaterThan(0)
+      expect(out.uncoveredFromMessageId).toBeDefined()
+      // 它必须真的是被丢掉的那一条 —— digest 正文里不该再出现它的内容
+      const index = h.findIndex((m) => m.id === out.uncoveredFromMessageId)
+      expect(index).toBeGreaterThan(0)
+      expect(out.text).toContain('omitted from this digest')
+    })
+
+    /** ★ 切点不许越过它:那一段既没被摘要读过,就不能当成「已覆盖」裁掉。 */
+    it('★ 投影的切点停在没被覆盖的那一段之前', () => {
+      const h = long(20)
+      const withGap = projectContextWindow({
+        messages: h,
+        summary: {
+          note: '摘要',
+          id: 'sess:context:1',
+          coveredThroughMessageId: h.at(-1)?.id ?? '',
+          uncoveredFromMessageId: 'm3'
+        },
+        now: NOW
+      })
+      // m3 及其之后一条都不许丢
+      expect(withGap.messages.some((m) => m.id === 'm3')).toBe(true)
+      expect(withGap.messages.some((m) => m.id === 'm4')).toBe(true)
     })
   })
 

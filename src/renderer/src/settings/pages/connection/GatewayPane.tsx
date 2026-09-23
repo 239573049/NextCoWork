@@ -59,6 +59,25 @@ export function GatewayPane({ settings, patch }: SettingsPageProps): ReactNode {
         />
       </SettingRow>
 
+      {/*
+        ★★ **挨着故障切换,但刻意**不**受 `gateway.enabled` 管。**
+        上面那个管的是「这家挂了换**另一家**供应商」;这个管的是
+        「Codex 的 A 号被限流了换 Codex 的 B 号」——后者和网关、和跨供应商切换
+        都无关,钉死某一家供应商的用户**正需要**它继续工作。
+        跟着那个开关置灰的话,多账号这个功能会在绝大多数用户那里(网关默认关)
+        默默失效,而界面上那几个账号都显示"可用"。
+      */}
+      <SettingRow
+        title={t("providerAccount.rotation")}
+        description={t("providerAccount.rotationHint")}
+      >
+        <Toggle
+          label={t("providerAccount.rotation")}
+          checked={settings.providerAccountRotation}
+          onChange={(providerAccountRotation) => patch({ providerAccountRotation })}
+        />
+      </SettingRow>
+
       <TodoRow
         title={t("connection.gateway.address")}
         description={t("connection.gateway.addressHint")}

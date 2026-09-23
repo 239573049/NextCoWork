@@ -5,8 +5,8 @@ import { I18nProvider, type Locale } from '../../../i18n'
 import { AgentMarkdown, type AgentMarkdownProps } from '../AgentMarkdown'
 import { MarkdownProvider, type MarkdownEnvironment } from '../MarkdownProvider'
 import { resolveMarkdownTarget } from '../links'
-import { highlightCode } from '../highlight'
-import { reusableSpans } from '../CodeSource'
+import { highlightCode } from '../../code/highlight'
+import { reusableSpans } from '../../code/CodeSource'
 import { canRenderMermaid } from '../mermaid-policy'
 
 function render(content: string, props: Partial<AgentMarkdownProps> = {}, environment: MarkdownEnvironment = {}, locale: Locale = 'en-US'): string {

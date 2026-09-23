@@ -38,13 +38,25 @@ class WindowRegistry {
   private readonly windows = new Map<number, WindowContext>()
   /** topic → 订阅了它的 webContents id */
   private readonly topics = new Map<string, Set<number>>()
+  /**
+   * 已经挂过 'destroyed' 的 webContents。
+   *
+   * ★ register 不是「一个窗口一次」:帧死掉时 `send` 会把这个窗口 forget 掉,
+   * 而 webContents 本身还活着(⌘R 重载就是这样),重载完的 `window:ready`
+   * 又会重新 register 一次。不去重的话每次重载多挂一个 once,十次之后
+   * Node 开始报 MaxListenersExceededWarning。
+   */
+  private readonly destroyHooked = new WeakSet<WebContents>()
 
   register(sender: WebContents, kind: WindowKind): WindowContext {
     const ctx: WindowContext = { id: sender.id, kind, sender }
     this.windows.set(sender.id, ctx)
     // 窗口销毁时把它从所有 topic 里摘掉,否则 topics 会无限增长,
     // 且每次 emit 都要对着一堆死 webContents 做 isDestroyed 判断
-    sender.once('destroyed', () => this.forget(sender.id))
+    if (!this.destroyHooked.has(sender)) {
+      this.destroyHooked.add(sender)
+      sender.once('destroyed', () => this.forget(sender.id))
+    }
     return ctx
   }
 
@@ -199,10 +211,20 @@ class WindowRegistry {
    *
    * isDestroyed() 判的是 webContents,不是它当前的渲染帧:重载/关闭过程中
    * 帧可能已经先一步销毁,而 webContents 本身要等 'destroyed' 事件才翻转。
-   * 这个窗口期里 `.send()` 会抛 "Render frame was disposed"——不 catch 住的话,
-   * 同一个死掉的订阅者会在它没被 forget 之前的每一次 emit 上重复抛给
-   * Electron 吞掉再打印,直到 'destroyed' 真正触发。抓到就当它已经死了,
-   * 立刻 forget,别等下一个事件循环再来试一次。
+   * 这个窗口期必须**自己判帧**,不能指望 try/catch —— Electron 44 实测:
+   *
+   *   WebContents.send  = function (ch, ...a) { return this.mainFrame.send(ch, ...a) }
+   *   WebFrameMain.send = function (ch, ...a) { try { return this._send(!1, ch, a) }
+   *                                             catch (e) { console.error('Error sending from webFrameMain: ', e) } }
+   *
+   * 也就是说 "Render frame was disposed" 被 Electron **自己吞掉再打印**,
+   * 外层一个 catch 都接不到。于是死掉的订阅者永远等不到 forget,run 每
+   * flush 一次就往 stderr 刷一屏一模一样的栈,直到 'destroyed' 真的来。
+   * 改成先问帧自己死没死:isDestroyed()/detached 读的是 C++ 侧的标志位,
+   * 不走 CheckRenderFrame,所以它们**不抛**。死了就当这个窗口没了。
+   *
+   * 帧刚没的一瞬间连 `.mainFrame` 这个 getter 都会抛(消息里的
+   * "before WebFrameMain could be accessed" 就是它),所以整段仍留在 try 里。
    */
   private send(id: number, channel: string, payload: unknown): void {
     const ctx = this.windows.get(id)
@@ -212,7 +234,12 @@ class WindowRegistry {
       return
     }
     try {
-      ctx.sender.send(channel, payload)
+      const frame = ctx.sender.mainFrame
+      if (frame.isDestroyed() || frame.detached) {
+        this.forget(id)
+        return
+      }
+      frame.send(channel, payload)
     } catch {
       this.forget(id)
     }

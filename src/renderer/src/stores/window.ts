@@ -108,6 +108,20 @@ interface WindowState {
    */
   maximized: boolean
 
+  /**
+   * 应用版本号（`Bootstrap.versions.app`），给侧边栏品牌行下面那行小字用。
+   *
+   * ★ **放在这里是因为它是窗口外壳级的常量，不是因为要在 store 里算。**
+   * 权威值在主进程（`app.getVersion()`，经 bootstrap 的 `versions` 过来），
+   * 这里只是它在渲染层的投影，`hydrate` 时写入一次。
+   *
+   * 不给 `Sidebar` 加一个只为透传的 prop，也不让品牌行自己去读 store 的
+   * `versions` —— 理由同 `rewardsOpen`：视图从 store 取比「AppShell 加 prop、
+   * 再往主题预览那一路透传」少一层。主题预览里的 `Sidebar` 因此也自动带上
+   * 真版本号，不用为它编一个假值。
+   */
+  appVersion: string
+
   hydrate: (b: Bootstrap) => void
   activate: (outerId: string) => Promise<boolean>
   openWorkspace: (workspaceId: string) => Promise<boolean>
@@ -271,6 +285,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
     settingsPage: null,
     rewardsOpen: false,
     maximized: false,
+    appVersion: '',
     scheduledUnread: false,
     clearScheduledUnread: () => set({ scheduledUnread: false }),
 
@@ -306,6 +321,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
       const workspaceId = firstWorkspaceId(outer, activeOuterId)
       set({
         windowKind: b.windowKind,
+        appVersion: b.versions.app,
         outer,
         activeOuterId,
         activeWorkspaceId: workspaceId && !needsPrepare(workspaceId) ? workspaceId : null,

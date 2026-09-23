@@ -4,6 +4,7 @@ import {
   base,
   clearPluginPresenters,
   clip,
+  dirOf,
   humanize,
   isRegisteredTool,
   parseMcpId,
@@ -12,12 +13,13 @@ import {
   presenterOf,
   registeredToolIds,
   registerPluginPresenters,
-  setPresenterTranslate
+  setPresenterTranslate,
+  toolLineText
 } from '../domain/tool-presenter'
 
 /**
  * presenter 的 bug 有两种表现,都不会崩:
- * 1. 标题显示成 "undefined" / 空白 —— 流式中途 input 还是半截 JSON 字符串;
+ * 1. 行里显示成 "undefined" / 空白 —— 流式中途 input 还是半截 JSON 字符串;
  * 2. 新工具静默落进兜底 —— 长得和 MCP 工具一样,而没人会去查一个不报错的地方。
  * 这一组把两种都钉住。
  */
@@ -27,20 +29,21 @@ import {
  * 而这里的断言关心的是「选了哪个 key、抽出了哪些参数、缺参时退不退化」,
  * 不是中文句子本身 —— 那边由 i18n 的键一致性测试守着。没覆盖到的 key 回显
  * key 本身(与注册表的缺省注入行为一致)。
+ *
+ * ★ `chat.tool.title.*` 现在是**纯标签**(不带 {target}):目标由 `ToolLine.target`
+ * 单独给,所以替身也只返回一个词 —— 替身要是还拼 target,这一组就测不出
+ * 「目标是不是真的被拆进了自己那一格」。
  */
 setPresenterTranslate((key, p = {}) => {
-  const target = typeof p.target === 'string' ? p.target : ''
   switch (key) {
     case 'chat.tool.title.read':
-      return target === '' ? '读取…' : `读取 ${target}`
+      return '读取'
     case 'chat.tool.title.bash':
-      return target === '' ? '执行…' : `执行 ${target}`
+      return '终端'
     case 'chat.tool.title.edit':
-      return target === '' ? '编辑…' : `编辑 ${target}`
+      return '编辑'
     case 'chat.tool.title.webFetch':
-      return target === '' ? '抓取…' : `抓取 ${target}`
-    case 'chat.tool.title.taskWithDesc':
-      return `子代理:${target}`
+      return '抓取'
     case 'chat.tool.fallback':
       return '工具调用'
     case 'chat.tool.summary.lines':
@@ -99,6 +102,25 @@ describe('取值原语', () => {
   it('humanize 把下划线换成空格', () => {
     expect(humanize('create_pull_request')).toBe('create pull request')
   })
+
+  /**
+   * 目录那一格是行里回答「在哪儿」的唯一位置。入参是绝对路径,整条画出来会撑满行,
+   * 所以只留末尾三段并前置省略号 —— 断言钉的是「留几段、斜杠在哪、什么时候不画」。
+   */
+  it('dirOf 只留末尾三段,并保留尾斜杠', () => {
+    expect(dirOf('/a/b/c/d/e.ts')).toBe('…/b/c/d/')
+    expect(dirOf('/w/src/index.ts')).toBe('w/src/')
+    expect(dirOf('C:\\a\\b\\c.ts')).toBe('C:\\a\\b\\')
+    // 没有目录可言的两种:裸文件名、根下文件
+    expect(dirOf('index.ts')).toBe('')
+    expect(dirOf('/index.ts')).toBe('')
+    expect(dirOf('')).toBe('')
+  })
+
+  it('toolLineText 把三段拍平成一句(只给「只剩一格」的地方用)', () => {
+    expect(toolLineText({ label: '读取', target: 'a.ts', context: 'src/' })).toBe('读取 a.ts')
+    expect(toolLineText({ label: '读取' })).toBe('读取')
+  })
 })
 
 describe('parseMcpId', () => {
@@ -134,23 +156,44 @@ describe('parseMcpId', () => {
 })
 
 describe('presenterOf · 内置工具', () => {
-  it('Read 标题取文件名,不显示全路径', () => {
+  it('★ Read 把文件名和目录拆成两格 —— 渲染层据此分色,拼成一句就没得分', () => {
     const p = presenterOf('Read')
     expect(p.shape).toBe('read')
-    expect(p.title({ file_path: '/w/src/main/index.ts' })).toBe('读取 index.ts')
+    expect(p.line({ file_path: '/w/src/main/index.ts' })).toEqual({
+      label: '读取',
+      target: 'index.ts',
+      context: 'w/src/main/',
+      path: '/w/src/main/index.ts'
+    })
     expect(p.summary?.({}, out('a\nb\nc'))).toBe('3 行')
   })
 
-  it('★ 流式中途 input 是半截 JSON 字符串时,标题退化成「读取…」而不是崩溃', () => {
-    expect(presenterOf('Read').title('{"file_p')).toBe('读取…')
-    expect(presenterOf('Bash').title('{"comm')).toBe('执行…')
-    expect(presenterOf('Edit').title(undefined)).toBe('编辑…')
+  it('★ 流式中途 input 是半截 JSON 字符串时,行里只剩标签而不是崩溃或半个路径', () => {
+    expect(presenterOf('Read').line('{"file_p')).toEqual({ label: '读取' })
+    expect(presenterOf('Bash').line('{"comm')).toEqual({ label: '终端' })
+    expect(presenterOf('Edit').line(undefined)).toEqual({ label: '编辑' })
   })
 
-  it('Bash 优先用模型写的 description,没有才退回命令原文', () => {
+  it('★ Bash 行只说「干了什么」:有 description 就只画它,命令一个字都不进行里', () => {
     const p = presenterOf('Bash')
-    expect(p.title({ command: 'ls -la', description: '列出文件' })).toBe('列出文件')
-    expect(p.title({ command: 'ls -la' })).toBe('执行 ls -la')
+    expect(p.line({ command: 'ls -la', description: '列出文件' })).toEqual({
+      label: '终端',
+      target: '列出文件'
+    })
+  })
+
+  /**
+   * ★★ `description` 是可省参数,所以兜底也必须说人话。
+   * 原样显示命令时,行里前四十个字符全是 `cd /Users/…/NextCoWork &&` 这种仪式,
+   * 真正的动作被挤出了可视范围 —— 这正是这条用例要守住的那个 bug。
+   */
+  it('★ 没有 description 时剥掉 cd 前缀,只留命令主干', () => {
+    const p = presenterOf('Bash')
+    expect(p.line({ command: 'ls -la' })).toEqual({ label: '终端', target: 'ls -la', mono: true })
+    expect(p.line({ command: 'cd /Users/token/Desktop/code/NextCoWork && npm test' }).target).toBe('npm test')
+    expect(p.line({ command: 'cd "/a b" && cd /c && git status -sb' }).target).toBe('git status -sb')
+    // 命令本身就是 cd:剥完什么都不剩,退回原文而不是显示空白
+    expect(p.line({ command: 'cd /tmp' }).target).toBe('cd /tmp')
   })
 
   it('★ Bash 失败时摘要是退出码 —— 不展开就能分辨 127 和 1', () => {
@@ -206,13 +249,15 @@ describe('presenterOf · 内置工具', () => {
 
   it('WebFetch 摘要用字节数', () => {
     expect(presenterOf('WebFetch').summary?.({}, out('x'.repeat(2048)))).toBe('2.0KB')
-    expect(presenterOf('WebFetch').title({ url: 'https://example.com/a/b' })).toBe(
-      '抓取 example.com'
-    )
+    expect(presenterOf('WebFetch').line({ url: 'https://example.com/a/b' })).toEqual({
+      label: '抓取',
+      target: 'example.com',
+      mono: false
+    })
   })
 
   it('URL 解析不了时不抛异常', () => {
-    expect(presenterOf('WebFetch').title({ url: 'htt' })).toBe('抓取 htt')
+    expect(presenterOf('WebFetch').line({ url: 'htt' }).target).toBe('htt')
   })
 
   it('运行中(output 为 undefined)所有摘要都返回 undefined', () => {
@@ -225,24 +270,24 @@ describe('presenterOf · 内置工具', () => {
 })
 
 describe('presenterOf · 兜底路径', () => {
-  it('MCP 工具走 external,标题带 server 前缀', () => {
+  it('MCP 工具走 external,server 落标签、工具名落目标', () => {
     const p = presenterOf('mcp__github__create_pull_request')
     expect(p.shape).toBe('external')
-    expect(p.title({})).toBe('github · create pull request')
+    expect(p.line({})).toEqual({ label: 'github', target: 'create pull request' })
   })
 
   it('完全未知但可读的名字,显示名字本身 —— 比「工具调用」有用', () => {
-    expect(presenterOf('some_new_tool').title({})).toBe('some new tool')
+    expect(presenterOf('some_new_tool').line({}).label).toBe('some new tool')
   })
 
   it('空名字才落到最终兜底', () => {
-    expect(presenterOf('').title({})).toBe('工具调用')
+    expect(presenterOf('').line({}).label).toBe('工具调用')
   })
 
-  it('★ 任何名字都能拿到 presenter,永不返回 undefined', () => {
+  it('★ 任何名字都能拿到 presenter,标签永不为空', () => {
     for (const n of ['', 'Read', 'mcp__a__b', '???', '__'.repeat(50)]) {
-      expect(presenterOf(n).title({})).toBeTypeOf('string')
-      expect(presenterOf(n).title({})).not.toBe('')
+      expect(presenterOf(n).line({}).label).toBeTypeOf('string')
+      expect(presenterOf(n).line({}).label).not.toBe('')
     }
   })
 })
@@ -296,11 +341,11 @@ describe('注册表完整性', () => {
     expect(extra).toEqual([])
   })
 
-  it('每个注册项的标题在空入参下都可读', () => {
+  it('每个注册项的标签在空入参下都可读', () => {
     for (const id of registeredToolIds()) {
-      const title = presenterOf(id).title({})
-      expect(title, `${id} 的标题为空`).not.toBe('')
-      expect(title).not.toContain('undefined')
+      const { label } = presenterOf(id).line({})
+      expect(label, `${id} 的标签为空`).not.toBe('')
+      expect(label).not.toContain('undefined')
     }
   })
 })
@@ -312,43 +357,43 @@ describe('presenterOf · 插件注入层', () => {
     // 未注入时:插件工具的 externalName 落到 humanize 可读名兜底
     expect(presenterOf('plugin__acme_demo__make_thing').shape).toBe('external')
     registerPluginPresenters([
-      ['plugin__acme_demo__make_thing', { shape: 'mutate', title: () => '造个东西' }]
+      ['plugin__acme_demo__make_thing', { shape: 'mutate', line: () => ({ label: '造个东西' }) }]
     ])
     const p = presenterOf('plugin__acme_demo__make_thing')
     expect(p.shape).toBe('mutate')
-    expect(p.title({})).toBe('造个东西')
+    expect(p.line({}).label).toBe('造个东西')
   })
 
-  it('★ 注入的 title 闭包对半截 JSON 也必须给出可读、无花括号的标题', () => {
+  it('★ 注入的闭包对半截 JSON 也必须给出可读、无花括号的标签', () => {
     // 这里模拟渲染层构建的闭包:参数没齐就回退静态标题(见 stores/plugins.ts)
     registerPluginPresenters([
       [
         'plugin__acme_demo__make_thing',
         {
           shape: 'external',
-          title: (input) => {
+          line: (input) => {
             const name = pick(input, 'name')
-            return name === '' ? '造个东西' : `造:${name}`
+            return { label: name === '' ? '造个东西' : `造:${name}` }
           }
         }
       ]
     ])
     const p = presenterOf('plugin__acme_demo__make_thing')
-    expect(p.title('{"na')).toBe('造个东西') // 半截 JSON → 静态标题
-    expect(p.title('{"na')).not.toContain('{')
-    expect(p.title({ name: '锤子' })).toBe('造:锤子')
+    expect(p.line('{"na').label).toBe('造个东西') // 半截 JSON → 静态标题
+    expect(p.line('{"na').label).not.toContain('{')
+    expect(p.line({ name: '锤子' }).label).toBe('造:锤子')
   })
 
   it('clearPluginPresenters 复位,version 递增', () => {
     const v0 = pluginPresentersSnapshot()
-    registerPluginPresenters([['plugin__acme_demo__x', { shape: 'external', title: () => 'X' }]])
+    registerPluginPresenters([['plugin__acme_demo__x', { shape: 'external', line: () => ({ label: 'X' }) }]])
     expect(pluginPresentersSnapshot()).toBeGreaterThan(v0)
-    expect(presenterOf('plugin__acme_demo__x').title({})).toBe('X')
+    expect(presenterOf('plugin__acme_demo__x').line({}).label).toBe('X')
     const v1 = pluginPresentersSnapshot()
     clearPluginPresenters()
     expect(pluginPresentersSnapshot()).toBeGreaterThan(v1)
     // 复位后回到 humanize 兜底
     expect(presenterOf('plugin__acme_demo__x').shape).toBe('external')
-    expect(presenterOf('plugin__acme_demo__x').title({})).not.toBe('X')
+    expect(presenterOf('plugin__acme_demo__x').line({}).label).not.toBe('X')
   })
 })

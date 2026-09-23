@@ -18,38 +18,54 @@ import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import { DiffBlock } from "./DiffView";
 import { CardRenderer } from "./CardRenderer";
+import { CodeBlock, languageOf } from "../../components/code";
+import { DETAIL_CARD_CLASS, DETAIL_CARD_DANGER_CLASS } from "./detail-card";
+import { parseNumberedOutput } from "./read-output";
+import { MatchList } from "./MatchList";
+import { TerminalBlock } from "./TerminalBlock";
 import { InteractionPreviewBlock } from "./InteractionPreviewBlock";
 import { TodoWriteChecklist } from "./TodoWriteChecklist";
 import { WidgetDetail } from "./WidgetDetail";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
-/** 详情区里的一个带标签的块。样式沿用改造前 `parts.tsx` 的 Labeled,不新增 token。 */
+/**
+ * 详情区里的一个块。
+ *
+ * ★★ `label` 现在是**可选的,而且绝大多数调用点不给**。原先每个块头上都顶着
+ * 一行「内容 / 更改 / 输出 / 命令」的小标题,而展开区是用户**主动点开**的 ——
+ * 他已经知道自己点的是哪一行,再告诉他「这是输出」只是把真正的内容往下推一行。
+ * 参考实现的展开区里一个小标题都没有:点开命令行就是终端,点开编辑行就是 diff。
+ *
+ * ★ 失败那一档**保留标题**:那时块里装的不是这个工具的产物,而是它失败的原因,
+ * 红字能说明「出事了」,说不清「这段文字是错误信息而不是输出」。
+ */
 export function Labeled({
   label,
   children,
   tone = "normal",
 }: {
-  label: string;
+  label?: string;
   children: ReactNode;
   tone?: "normal" | "danger";
 }): ReactNode {
   return (
     <div className="mt-1.5 first:mt-0">
-      <p
-        className={cn(
-          "mb-0.5 text-[11px]",
-          tone === "danger" ? "text-danger" : "text-fg-faint",
-        )}
-      >
-        {label}
-      </p>
+      {label !== undefined && (
+        <p
+          className={cn(
+            "mb-0.5 text-[12px]",
+            tone === "danger" ? "text-danger" : "text-fg-faint",
+          )}
+        >
+          {label}
+        </p>
+      )}
       <pre
         className={cn(
-          "selectable scroll-thin max-h-56 overflow-auto rounded-[7px] px-2.5 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap",
-          tone === "danger"
-            ? "bg-danger/5 text-danger"
-            : "bg-canvas text-fg-muted",
+          "selectable scroll-thin max-h-56 overflow-auto px-3 py-2 font-mono text-[12.5px] leading-[1.6] whitespace-pre-wrap",
+          tone === "danger" ? DETAIL_CARD_DANGER_CLASS : DETAIL_CARD_CLASS,
+          tone === "danger" ? "text-danger" : "text-fg-muted",
         )}
       >
         {children}
@@ -106,7 +122,11 @@ function Truncated({ omitted }: { omitted: number }): ReactNode {
   );
 }
 
-/** 结果块 —— 八个渲染器里有七个都要用,所以抽出来。`WidgetDetail` 用的是它。 */
+/**
+ * 结果块 —— 八个渲染器里有七个都要用,所以抽出来。`WidgetDetail` 用的是它。
+ *
+ * ★ 成功时**不带标题**(见 `Labeled`);失败时带,因为那一段是失败原因,不是产物。
+ */
 export function OutputBlock({
   output,
   label,
@@ -114,17 +134,18 @@ export function OutputBlock({
   maxLines = 40,
 }: {
   output: ToolOutput | undefined;
+  /** 只在少数确实需要区分「这是哪一段」的地方给(目前没有)。默认不画标题 */
   label?: string;
   isError?: boolean;
   maxLines?: number;
 }): ReactNode {
   const { t } = useI18n();
   if (output === undefined) return null;
-  const effectiveLabel = label ?? t("chat.tool.result");
   const { text, omitted } = clipLines(output.content, maxLines);
+  const heading = isError ? t("chat.tool.failureReason") : label;
   return (
     <Labeled
-      label={isError ? t("chat.tool.failureReason") : effectiveLabel}
+      {...(heading === undefined ? {} : { label: heading })}
       tone={isError ? "danger" : "normal"}
     >
       {text}
@@ -174,62 +195,77 @@ export interface DetailProps {
   callId?: string;
 }
 
-/** read:路径单独一行,输出当代码预览(Read 的输出本身已带 `cat -n` 行号) */
+/**
+ * read:文件内容按**带高亮的代码卡**渲染。
+ *
+ * ★ `Read` 给模型的是 `cat -n` 格式(行号 + 制表符 + 正文)。行号必须先拆出来
+ * 再喂给高亮器 —— 每行以数字开头的"源码"解析出来的树和真代码毫无关系,
+ * 染出来的颜色比不染更糟。拆解在 `read-output.ts`,那里写了为什么允许失败。
+ * ★ 路径那一行删了:行本身已经写着文件名和目录(见 `row.tsx` 的版式)。
+ */
 function ReadDetail({ input, output, isError }: DetailProps): ReactNode {
-  const { t } = useI18n();
-  const path = str(input, "file_path") || str(input, "path");
+  if (output === undefined) return null;
+  if (isError) return <OutputBlock output={output} isError maxLines={20} />;
+  const { code, startLine } = parseNumberedOutput(output.content);
   return (
-    <>
-      {path !== "" && <PathLine path={path} />}
-      <OutputBlock
-        output={output}
-        isError={isError}
-        label={t("chat.tool.content")}
-        maxLines={40}
-      />
-    </>
+    <CodeBlock
+      code={code}
+      language={languageOf(str(input, "file_path") || str(input, "path"))}
+      startLine={startLine}
+      maxLines={40}
+      className={DETAIL_CARD_CLASS}
+    />
   );
 }
 
 /**
  * mutate:**入参里的 `content` / `new_string` 才是重点**,而它们正是现状
- * JSON 化之后最不可读的部分。这里单独拎出来按原文渲染(保留换行)。
+ * JSON 化之后最不可读的部分。
  *
- * ★ **新文本一律走 `DiffBlock`,参数还在流的时候也一样。** 判据原先是
+ * ★ **改一段(Edit)走 diff,整份新内容(Write)走带高亮的代码卡。**
+ * 判据是「有没有另一侧可对照」:`Write` 的 `content` 是一份**全新的文件**,
+ * 把它画成「全是新增」的 diff 等于给每一行都刷上绿底并加一个 `+` ——
+ * 那是一份读不动的源码,而这一步用户最想做的就是把新文件读一遍。
+ * 改了多少行仍然在行右端的 `+N`(见 `ToolLineStats`),信息没丢。
+ *
+ * ★ **Edit 的新文本一律走 `DiffBlock`,参数还在流的时候也一样。** 判据原先是
  * 「old 和 new 都到齐」,于是一次 Edit 在流式阶段先显示成两块纯文本,
  * `new_string` 收尾的那一刻整块换成 diff —— 同一件事两套画法,而切换恰好发生在
- * 用户正盯着看的时刻。只有新文本时(Write 的 `content`、或 new 先到)就是一份
- * 「全是新增」的 diff,与改动审查里新建文件的画法一致。
+ * 用户正盯着看的时刻。
+ *
+ * ★ diff 上方的「更改 / 写入内容」小标题删了,路径行同理 —— 见 `Labeled`。
  */
 function MutateDetail({ input, output, isError }: DetailProps): ReactNode {
-  const { t } = useI18n();
-  const path = str(input, "file_path");
   const content = str(input, "content");
   const oldStr = str(input, "old_string");
   const newStr = str(input, "new_string");
+  const language = languageOf(str(input, "file_path"));
 
   return (
     <>
-      {path !== "" && <PathLine path={path} />}
-      {newStr !== "" && (
-        <DiffBlock oldStr={oldStr} newStr={newStr} label={t("chat.tool.change")} />
-      )}
+      {newStr !== "" && <DiffBlock oldStr={oldStr} newStr={newStr} language={language} />}
       {/* new 还没开始流:此刻只有「要被换掉的那一段」,没有第二侧可对照 */}
       {newStr === "" && oldStr !== "" && (
-        <Labeled label={t("chat.tool.before")}>
-          {clipLines(oldStr, 12).text}
-          <Truncated omitted={clipLines(oldStr, 12).omitted} />
-        </Labeled>
+        <CodeBlock code={oldStr} language={language} maxLines={12} className={DETAIL_CARD_CLASS} />
       )}
       {content !== "" && (
-        <DiffBlock oldStr="" newStr={content} label={t("chat.tool.writeContent")} />
+        <CodeBlock code={content} language={language} startLine={1} maxLines={40} className={DETAIL_CARD_CLASS} />
       )}
-      <OutputBlock output={output} isError={isError} maxLines={12} />
+      {/*
+        ★ 成功时的输出是一句「Edited a.ts: replaced 3 occurrence(s).」——
+        行右端的 `+N −M` 已经把同一件事说得更准,所以只在失败时才画这一块。
+      */}
+      {isError && <OutputBlock output={output} isError maxLines={12} />}
     </>
   );
 }
 
-/** search:模式 + 命中列表。命中多时只显示前 40 行,余量注明。 */
+/**
+ * search:模式 + **命中清单**。
+ *
+ * ★ 清单走 `MatchList`(文件名可点开),不是一坨文本:找到了东西之后,
+ * 下一步一定是去看它 —— 让用户把路径复制出来再去文件树里翻是这一步最大的浪费。
+ */
 function SearchDetail({ input, output, isError }: DetailProps): ReactNode {
   const { t } = useI18n();
   const pattern = str(input, "pattern");
@@ -237,8 +273,8 @@ function SearchDetail({ input, output, isError }: DetailProps): ReactNode {
   return (
     <>
       {pattern !== "" && (
-        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-fg-faint">
-          <span className="rounded-[5px] bg-canvas px-1.5 py-0.5 font-mono text-fg-muted">
+        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-fg-faint">
+          <span className="rounded-[5px] border border-stroke bg-surface-raised px-1.5 py-0.5 font-mono text-fg-muted">
             {pattern}
           </span>
           {scope !== "" && (
@@ -248,39 +284,36 @@ function SearchDetail({ input, output, isError }: DetailProps): ReactNode {
           )}
         </div>
       )}
-      <OutputBlock
-        output={output}
-        isError={isError}
-        label={t("chat.tool.match")}
-        maxLines={40}
-      />
+      {isError
+        ? <OutputBlock output={output} isError maxLines={20} />
+        : output !== undefined && <MatchList content={output.content} />}
     </>
   );
 }
 
-/** command:命令原文 + 终端样式输出 */
+/**
+ * command:命令和它的输出是**同一块终端**。
+ *
+ * 渲染细节(输出不折行、两条流分色、`<stdout>` 信封不出现、命令那一行折行)
+ * 全在 `TerminalBlock` 里 —— 那个文件的头注释写了每一条的理由。
+ */
 function CommandDetail({ input, output, isError }: DetailProps): ReactNode {
-  const { t } = useI18n();
-  const command = str(input, "command");
   return (
-    <>
-      {command !== "" && (
-        <Labeled label={t("chat.tool.command")}>
-          <span className="text-accent-soft">$ </span>
-          {command}
-        </Labeled>
-      )}
-      <OutputBlock
-        output={output}
-        isError={isError}
-        label={t("chat.tool.output")}
-        maxLines={60}
-      />
-    </>
+    <TerminalBlock
+      command={str(input, "command")}
+      output={output}
+      isError={isError}
+    />
   );
 }
 
-/** network:URL 可点开性留给将来,先保证它完整可见且不撑破布局 */
+/**
+ * network:URL + 抓回来的正文。
+ *
+ * ★ 正文走 `CodeBlock`:抓回来的东西大多是 JSON 或已经排好版的 Markdown/文本,
+ * 折行会把 JSON 的层级和表格拆散。提示词(`prompt`)相反,那是写给模型的散文,
+ * 所以仍然用会折行的 `Labeled`。
+ */
 function NetworkDetail({ input, output, isError }: DetailProps): ReactNode {
   const { t } = useI18n();
   const url = str(input, "url");
@@ -290,21 +323,16 @@ function NetworkDetail({ input, output, isError }: DetailProps): ReactNode {
     <>
       {url !== "" && <PathLine path={url} />}
       {query !== "" && (
-        <div className="mb-1.5 text-[11.5px] text-fg-muted">
+        <div className="mb-1.5 text-[12.5px] text-fg-muted">
           <span className="text-fg-faint">{t("chat.tool.query")}</span> {query}
         </div>
       )}
-      {prompt !== "" && (
-        <Labeled label={t("chat.tool.prompt")}>
-          {clipLines(prompt, 6).text}
-        </Labeled>
-      )}
-      <OutputBlock
-        output={output}
-        isError={isError}
-        label={t("chat.tool.response")}
-        maxLines={40}
-      />
+      {prompt !== "" && <Labeled>{clipLines(prompt, 6).text}</Labeled>}
+      {isError
+        ? <OutputBlock output={output} isError maxLines={20} />
+        : output !== undefined && (
+          <CodeBlock code={output.content} language={languageOf(url)} maxLines={40} className={DETAIL_CARD_CLASS} />
+        )}
     </>
   );
 }
@@ -347,12 +375,13 @@ function OrchestrationDetail({
   return (
     <>
       {name !== "" && (
-        <div className="mb-1.5 text-[11.5px] text-fg-muted">
+        <div className="mb-1.5 text-[12.5px] text-fg-muted">
           <span className="text-fg-faint">{t("chat.tool.name")}</span> {name}
         </div>
       )}
+      {/* 提示词是写给模型的散文 —— 折行读,所以留在 Labeled 而不是 CodeBlock */}
       {prompt !== "" && (
-        <Labeled label={t("chat.tool.task")}>
+        <Labeled>
           {clipLines(prompt, 10).text}
           <Truncated omitted={clipLines(prompt, 10).omitted} />
         </Labeled>
@@ -397,18 +426,21 @@ function InteractionDetail({
   );
 }
 
-/** external:兜底 —— 通用 JSON。这正是改造前所有工具的行为。 */
+/**
+ * external:兜底 —— 入参与结果都按 JSON 画。
+ *
+ * ★ 这是**唯一对未知输入永远正确**的呈现(见文件头);走 `CodeBlock` 之后
+ * 至少 JSON 的缩进层级保得住 —— 折行的 JSON 和一行行读的 JSON 是两种东西。
+ */
 function ExternalDetail({ input, output, isError }: DetailProps): ReactNode {
-  const { t } = useI18n();
-  const raw = stringify(input);
-  const { text, omitted } = clipLines(raw, 30);
   return (
     <>
-      <Labeled label={t("chat.tool.input")}>
-        {text}
-        <Truncated omitted={omitted} />
-      </Labeled>
-      <OutputBlock output={output} isError={isError} maxLines={40} />
+      <CodeBlock code={stringify(input)} language="json" maxLines={30} className={DETAIL_CARD_CLASS} />
+      {isError
+        ? <OutputBlock output={output} isError maxLines={20} />
+        : output !== undefined && (
+          <CodeBlock code={output.content} maxLines={40} className={cn(DETAIL_CARD_CLASS, "mt-1.5")} />
+        )}
     </>
   );
 }
@@ -416,7 +448,7 @@ function ExternalDetail({ input, output, isError }: DetailProps): ReactNode {
 function PathLine({ path }: { path: string }): ReactNode {
   return (
     <p
-      className="mb-1.5 truncate font-mono text-[11px] text-fg-faint"
+      className="mb-1.5 truncate font-mono text-[12px] text-fg-faint"
       title={path}
       dir="rtl"
     >

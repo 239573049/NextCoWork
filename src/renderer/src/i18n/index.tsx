@@ -20,9 +20,12 @@ import { workspaceZh, workspaceEn } from './workspace';
 import { extensionsZh, extensionsEn } from './extensions';
 import { gitZh, gitEn } from './git';
 import { usageZh, usageEn } from './usage';
+import { providerAccountsZh, providerAccountsEn } from './provider-accounts';
 import { searchZh, searchEn } from './search';
 import { builtinSearchZh, builtinSearchEn } from './builtin-search';
 import { goalZh, goalEn } from './goal';
+import { contextPanelZh, contextPanelEn } from './context-panel';
+import { openWithZh, openWithEn } from './open-with';
 import { pluginSkillsZh, pluginSkillsEn } from './plugin-skills';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
 import { widgetZh, widgetEn } from './widget';
@@ -54,11 +57,14 @@ const ZH: Messages = {
   ...sshZh,
   ...workspaceZh,
   ...goalZh,
+  ...contextPanelZh,
+  ...openWithZh,
   ...pluginSkillsZh,
   ...extensionsZh,
   ...gitZh,
   ...pluginUiZh,
   ...usageZh,
+  ...providerAccountsZh,
   ...searchZh,
   ...builtinSearchZh,
   ...chatNavigationZh,
@@ -316,7 +322,7 @@ const ZH: Messages = {
   "browser.loading": "加载中",
   "browser.loadFailed": "页面加载失败，请检查网址或网络连接。",
   "browser.operationFailed": "浏览器操作失败，请重试。",
-  "browser.invalidUrl": "请输入有效的 http:// 或 https:// 地址。",
+  "browser.invalidUrl": "请输入有效的 http://、https:// 或 file:// 地址。",
   "browser.emptyTitle": "打开一个网页",
   "browser.emptyHint": "浏览器标签和 Cookie 只在当前工作区可见",
   "browser.title": "浏览器",
@@ -360,6 +366,7 @@ const ZH: Messages = {
   "sidebar.localModeHint": "数据只存在这台电脑上",
   "sidebar.signedIn": "已登录",
   "sidebar.signedInHint": "NextCoWork 账户已连接",
+  "sidebar.version": "NextCoWork 版本",
   "workspace.none": "还没有打开工作区",
   "workspace.noneHint": "用顶部的 + 打开一个文件夹",
   "workspace.recentChats": "最近对话",
@@ -2010,6 +2017,8 @@ const ZH: Messages = {
   // 只停这一条命令，不是停整轮（见 `shell:stopToolCall`）。措辞必须和 Composer 上
   // 那颗「停止」区分得开，否则用户会以为它把整段回复也停掉了。
   "chat.tool.stop": "停止这条命令",
+  // 工具行里文件名的 tooltip。路径是领域值，原样插进来（§6.5 不翻译领域值）
+  "chat.tool.openFile": "打开 {path}",
   "chat.tool.running": "执行中",
   "chat.tool.failed": "失败",
   "chat.tool.waiting": "等待",
@@ -2027,6 +2036,8 @@ const EN: Messages = {
   ...sshEn,
   ...workspaceEn,
   ...goalEn,
+  ...contextPanelEn,
+  ...openWithEn,
   ...pluginSkillsEn,
   ...extensionsEn,
   ...gitEn,
@@ -2039,6 +2050,7 @@ const EN: Messages = {
   ...editorEn,
   ...markdownEn,
   ...usageEn,
+  ...providerAccountsEn,
   ...searchEn,
   ...builtinSearchEn,
   ...chatNavigationEn,
@@ -2333,6 +2345,7 @@ const EN: Messages = {
   "sidebar.localModeHint": "Data stays on this computer",
   "sidebar.signedIn": "Signed in",
   "sidebar.signedInHint": "NextCoWork account connected",
+  "sidebar.version": "NextCoWork version",
   "workspace.none": "No workspace open",
   "workspace.noneHint": "Use the + above to open a folder",
   "workspace.plan": "Long-term plan",
@@ -4018,6 +4031,7 @@ const EN: Messages = {
   "chat.tool.runningStatus": "Running",
   "chat.tool.waitingStatus": "Waiting",
   "chat.tool.stop": "Stop this command",
+  "chat.tool.openFile": "Open {path}",
   "chat.tool.running": "Running",
   "chat.tool.failed": "Failed",
   "chat.tool.waiting": "Waiting",

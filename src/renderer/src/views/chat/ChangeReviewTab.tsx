@@ -12,6 +12,7 @@ import type { ReviewChangeSet, ReviewFileDiff, ReviewFileEntry } from "../../../
 import { IconButton } from "../../components/ui/IconButton";
 import { Select } from "../../components/ui/Select";
 import { Spinner } from "../../components/ui/Spinner";
+import { languageOf } from "../../components/code";
 import { useI18n, type Translate } from "../../i18n";
 import { getReviewChangeSet, getReviewFileDiff } from "../../services/review";
 import { useTabsStore } from "../../stores/tabs";
@@ -196,7 +197,12 @@ export function ChangeReviewTab({ tab, workspace }: { tab: ChangesTab; workspace
             {t("chat.review.oversize")}
           </div>
         ) : (
-          <ReviewDiffBlock oldStr={diff.before} newStr={diff.after} />
+          /* 语法高亮的语言从路径推:审查的是文件,而 diff 行本身没有这个信息 */
+          <ReviewDiffBlock
+            oldStr={diff.before}
+            newStr={diff.after}
+            language={languageOf(selectedFile.path)}
+          />
         )}
       </div>
     </div>

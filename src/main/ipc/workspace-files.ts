@@ -1,4 +1,4 @@
-import { shell } from 'electron'
+import { clipboard, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import {
   closeSync,
@@ -18,6 +18,7 @@ import {
   type Stats
 } from 'node:fs'
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import type { OpenTarget, WorkspacePathKind } from '../../shared/domain/open-target'
 import {
   WORKSPACE_FILE_ERROR_PREFIX,
   WORKSPACE_IMAGE_LIMIT,
@@ -38,6 +39,8 @@ import { getWorkspaceEnvironment } from '../runtime'
 import { EnvironmentError } from '../environment/errors'
 import { EnvironmentFileError, EnvironmentFiles, remoteFileFailure } from '../environment/files'
 import { classifyWorkspaceFile, contentRevision as revision, decodeWorkspaceText as decodeText, isBinaryText as binaryText, workspaceReadLimit } from '../kernel/workspace-file-content'
+import { displayPath } from '../kernel/tool/path-guard'
+import { listOpenTargets as systemOpenTargets, openWithTarget } from '../system/open-with'
 
 const MAX_COPY_ENTRIES = 10_000
 const MAX_COPY_BYTES = 256 * 1024 * 1024
@@ -493,4 +496,64 @@ export function revealWorkspaceFile(req: WorkspaceFileRequest): void {
   } catch (error) {
     translateError(error)
   }
+}
+
+/**
+ * 「打开方式」下拉里那几项。
+ *
+ * ★ **不发路径给渲染层,只发 id + 产品名 + 图标 id**(见 `shared/domain/open-target.ts`)。
+ * 菜单是渲染层画的,而绝对路径不进渲染层 —— 这是 `workspace-file.ts` 顶上那条
+ * 约定,「复制绝对路径」因此也由主进程直接写剪贴板(见下面的 `copyWorkspacePath`)。
+ *
+ * ★ 与 `workspace:revealFile` 不同,这条**不需要工作区**:菜单内容只取决于这台
+ * 机器上装了什么,和当前打开的是哪个工作区无关。渲染层在远端工作区里不画这个
+ * 菜单(那些文件不在本机磁盘上),判断在调用点。
+ */
+export function listOpenTargets(): OpenTarget[] {
+  return systemOpenTargets()
+}
+
+/**
+ * 用某个程序打开工作区里的一个文件。
+ *
+ * 两条不变式,和这个文件里其它入口逐条对齐:
+ *
+ * 1. **路径仍走 `checkedPath`** —— 渲染层递进来的 id 查表即用,但路径照样是
+ *    不可信输入(工具卡片给出的绝对路径也落在这条路上)。
+ * 2. **目标 id 只用来查表。** 渲染层指定不了要跑什么命令,只能从
+ *    `listOpenTargets()` 给过的那几个里挑一个。
+ *
+ * ★ **不存在的目标静默忽略。** 这一条不是偷懒:磁盘上的文件可能在这几次
+ * `await` 之间被别的程序删掉/改名,那时编辑器照样能起来、只是打开一个空缓冲;
+ * 而把「文件没了」报成「打开失败」会让用户去查编辑器装没装。真实失败
+ * (编辑器被卸载、没权限)由 `open-with.ts` 那侧清缓存,下一次探测就不再列出它。
+ */
+export async function openWorkspaceFileWith(req: { workspaceId: string; path: string; targetId: string }): Promise<void> {
+  let target: string
+  try {
+    target = checkedPath(workspaceRoot(req.workspaceId), req.path, true)
+    lstatSync(target)
+  } catch {
+    return
+  }
+  await openWithTarget(req.targetId, target)
+}
+
+/**
+ * 把一条路径写进系统剪贴板,**返回真正写进去的那一串**。
+ *
+ * ★ 为什么要主进程做:绝对路径不能进渲染层(这个文件的既有约定),
+ *   而「复制相对路径」在**工作区外**的文件上只能是绝对路径 —— 判定要拿到
+ *   真实根目录才做得对,那也只有主进程有。
+ *
+ * ★ 返回值不是装饰:工作区外的文件复制出来的是绝对路径,界面若还显示
+ *   「已复制相对路径」,用户会以为拿到的是一条相对路径,粘到别处才发现不对。
+ */
+export async function copyWorkspacePath(req: { workspaceId: string; path: string; kind: WorkspacePathKind }): Promise<string> {
+  const root = workspaceRoot(req.workspaceId)
+  const target = checkedPath(root, req.path, true)
+  lstatSync(target)
+  const text = req.kind === 'relative' ? displayPath(root, target) : target
+  clipboard.writeText(text)
+  return text
 }

@@ -136,11 +136,42 @@ describe('子代理卡片 · 不是抽屉', () => {
     expect(container.textContent).not.toContain('7 次工具调用')
   })
 
-  it('使用子代理配置的颜色标记卡片', async () => {
+  /**
+   * 身份色原先染的是整张卡(描边 + 底色 + 左侧内阴影)。改成文本风格后没有卡可染,
+   * 颜色挂在图标和类型名上 —— 所以这条断言跟着搬到图标那一格,而**要守的事没变**:
+   * 「配了颜色的子代理,界面上必须看得出它是哪一个」。
+   */
+  it('使用子代理配置的颜色标记那一行', async () => {
     const { container } = await renderCard(subagent({ color: 'blue' }))
     const card = container.querySelector('[data-testid="subagent-node"]') as HTMLElement | null
+    const icon = container.querySelector('[data-testid="subagent-icon"]') as HTMLElement | null
     expect(card?.dataset.subagentColor).toBe('blue')
-    expect(card?.style.borderColor).not.toBe('')
+    expect(icon?.style.color).not.toBe('')
+  })
+
+  /**
+   * 卡片要能回答「这个子代理跑在哪条模型上」。
+   *
+   * 别名是主进程随 `subagent_start` 带来的(`runtime.ts` 发的是
+   * `childRequestFor` 算出的那个),转录一直存着 `SubagentState.model` ——
+   * 在这次改动之前它没有任何渲染消费者,所以这条测试是它唯一的守卫。
+   */
+  it('副标题同时显示子代理类型和它实际使用的模型别名', async () => {
+    const { container } = await renderCard(subagent({ model: 'claude-fable-5-1' }))
+    expect(container.textContent).toContain('general-purpose')
+    expect(container.textContent).toContain('claude-fable-5-1')
+  })
+
+  /**
+   * ★ 别名和类型之间那个 `·` 是**独立的兄弟节点**,不是拼进文本里的。
+   *
+   * 旧转录没有 `model`(这一格是随 `subagent_start` 才有的),拼字符串的写法会在
+   * 那里留下一个悬空的分隔符 —— 看起来像「类型后面本来还该有点什么」。
+   */
+  it('没有模型时(旧转录)不画那一格,也不留下悬空的分隔符', async () => {
+    const { container } = await renderCard(subagent({ model: undefined }))
+    expect(container.textContent).toContain('general-purpose')
+    expect(container.textContent).not.toContain('·')
   })
 
   it('跑完了就没有停止按钮 —— 没有可掐的东西', async () => {

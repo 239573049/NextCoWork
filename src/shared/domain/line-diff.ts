@@ -1,6 +1,6 @@
 /**
  * 通用 LCS 与「按行数增删计数」—— 主进程封包改动集时算 `+X −Y`,渲染层的
- * `views/chat/diff.ts` 也复用同一份 LCS,避免两处 diff 口径漂移。
+ * `components/diff/compute.ts` 也复用同一份 LCS,避免两处 diff 口径漂移。
  *
  * 纯函数、零依赖(不碰 electron / DOM),所以放 shared,main 与 renderer 都能 import。
  */

@@ -469,7 +469,7 @@ function pluginTranslationKey(pluginId: string, ref: string): TranslationKey {
  * 把 catalog 里每个插件工具的 shape / card 模板构建成 `ToolPresenter`,注入 `tool-presenter`。
  *
  * ★ 在渲染层构建(而非 shared 模块内)的原因:presenter 依赖 i18n 的 `translate` 与当前
- * locale,而 `tool-presenter` 是纯 shared 模块不碰 store。title 闭包在**渲染时**才
+ * locale,而 `tool-presenter` 是纯 shared 模块不碰 store。`line` 闭包在**渲染时**才
  * `translate`,所以 locale 切换自动生效,不必因换语言重建。
  *
  * ★ 半截 JSON 容错(硬约束):流式态 `input` 只有当前已经解析出的参数;字段尚未到达时
@@ -494,11 +494,17 @@ function buildPluginPresenters(catalog: PluginCatalog): Array<[string, ToolPrese
         externalName,
         {
           shape: tool.shape ?? 'external',
-          title: (input) => {
-            if (cardTitleKey === undefined) return staticTitle()
+          /*
+            插件只声明**一个**标题模板,所以它整条落在行的 `label` 那一格。
+            内置工具那种「标签 / 目标 / 目录」三段拆分要求编译期知道字段名
+            (`file_path`、`command`),而插件工具的入参形状不可知 ——
+            硬拆会在某个插件上把参数放错格子,而那不会报错,只会看起来很怪。
+          */
+          line: (input) => {
+            if (cardTitleKey === undefined) return { label: staticTitle() }
             const rendered = translate(cardTitleKey, asTemplateParams(input))
-            if (rendered === '' || UNFILLED_PARAM_RE.test(rendered)) return staticTitle()
-            return rendered
+            if (rendered === '' || UNFILLED_PARAM_RE.test(rendered)) return { label: staticTitle() }
+            return { label: rendered }
           },
           ...(cardSummaryKey === undefined
             ? {}

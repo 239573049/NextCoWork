@@ -1,4 +1,4 @@
-import type { ContextCheckpoint, ContextPreview } from '../../shared/agent/context-management'
+import type { ContextCheckpoint, ContextPreview, ContextWindowView } from '../../shared/agent/context-management'
 import { effectiveContextWindow } from '../../shared/agent/context-management'
 import { normalizeEnvironmentRef } from '../../shared/domain/environment'
 import type { ContextPreviewRequest } from '../../shared/ipc/contract'
@@ -12,13 +12,14 @@ import { ToolRegistry } from '../kernel/tool/registry'
 import {
   COMPACTION_SYSTEM,
   assemble,
-  buildCompactionPrompt,
   compactionDigestBudget,
+  compactionRequestBody,
   estimateMessages,
   projectContextWindow,
   sanitizeSummaryNote,
   summaryOutputTokens
 } from '../kernel/context-assembler'
+import { contextWindowView } from '../kernel/context-view'
 import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
 
@@ -73,6 +74,16 @@ export async function compactContext(req: { sessionId: string }): Promise<{
   const alias = getRouter().resolveModel(session.model, session.modelProviderId)
   const window = effectiveContextWindow(alias?.contextWindow, false)
 
+  /*
+    ★ 请求正文和「这一份 digest 漏掉了谁」一起取回来 —— 后者要落进检查点,
+    否则被预算丢掉的消息会以「已覆盖」的身份被投影裁掉(见 `CompactionDigest`)。
+  */
+  const prompt = compactionRequestBody({
+    messages: history,
+    ...(previous === undefined ? {} : { previousNote: previous.note }),
+    budget: compactionDigestBudget(window)
+  })
+
   let note = ''
   for await (const ev of getRouter().stream(
     {
@@ -82,14 +93,7 @@ export async function compactContext(req: { sessionId: string }): Promise<{
       system: COMPACTION_SYSTEM,
       messages: [userMessage(
         `${req.sessionId}:context-input:${String(now)}`,
-        [{
-          type: 'text',
-          text: buildCompactionPrompt({
-            messages: history,
-            ...(previous === undefined ? {} : { previousNote: previous.note }),
-            budget: compactionDigestBudget(window)
-          })
-        }],
+        [{ type: 'text', text: prompt.text }],
         now
       )],
       tools: [],
@@ -116,12 +120,23 @@ export async function compactContext(req: { sessionId: string }): Promise<{
     切点规则。自己再拼一遍 `withSummary(compactMessages(...))` 的话,这个数会
     偏大一整段被裁掉的历史,而用户看到的「省下 N」是纯编的。
     覆盖锚点给最后一条:摘要读的就是到此为止的全部转录。
+
+    ★ `uncoveredFromMessageId` 和锚点**一起给**:digest 超预算时会从最早的一侧
+    整条丢,那些消息没进摘要,投影的切点就不许越过它们(见 `ContextSummaryRef`)。
+    自动那条路径上是同一份规则,两边不能只有一边守。
   */
   const projected = projectContextWindow({
     messages: history,
-    summary: { note, id, ...(last === undefined ? {} : { coveredThroughMessageId: last.id }) },
+    summary: {
+      note,
+      id,
+      ...(last === undefined ? {} : { coveredThroughMessageId: last.id }),
+      ...(prompt.digest.uncoveredFromMessageId === undefined
+        ? {}
+        : { uncoveredFromMessageId: prompt.digest.uncoveredFromMessageId })
+    },
     now
-  }).messages
+  })
   const checkpoint: ContextCheckpoint = {
     id,
     sessionId: req.sessionId,
@@ -131,13 +146,72 @@ export async function compactContext(req: { sessionId: string }): Promise<{
     ...(first === undefined ? {} : { coveredFromMessageId: first.id }),
     ...(last === undefined ? {} : { coveredThroughMessageId: last.id }),
     inputTokensBefore: estimateMessages(history),
-    inputTokensAfter: estimateMessages(projected),
+    inputTokensAfter: estimateMessages(projected.messages),
+    detail: {
+      digest: prompt.text,
+      digestOmittedMessages: prompt.digest.omittedMessages,
+      droppedMessages: projected.droppedMessages,
+      ...(projected.droppedThroughMessageId === undefined
+        ? {}
+        : { droppedThroughMessageId: projected.droppedThroughMessageId }),
+      ...(prompt.digest.uncoveredFromMessageId === undefined
+        ? {}
+        : { uncoveredFromMessageId: prompt.digest.uncoveredFromMessageId })
+    },
     createdAt: now,
     updatedAt: now,
     revision: 1
   }
   store.upsertContextCheckpoint(checkpoint)
   return { checkpoint, inputTokens: checkpoint.inputTokensAfter ?? 0 }
+}
+
+/**
+ * 「这条检查点之后,真正发给模型的是什么」—— 压缩组件那个可展开面板的数据源。
+ *
+ * ★★ 它是**按当前转录重算的**,不是压缩当时那一份的录像。这是明知的取舍:
+ * 录下来意味着每条检查点都要存一份完整投影(几十 MB 级),而这条通道真正要
+ * 回答的问题是「模型现在看得见什么」—— 对最新那条检查点,重算的结果就是下一次
+ * 请求会发出去的那一份,逐字相同(同一个 `projectContextWindow`)。
+ * 对更早的检查点它是**复原**,所以界面上必须标明这一点,不能画成历史快照。
+ *
+ * ★ 机械压缩那条路径要不要传 `dropWithoutSummary`,只能看检查点自己记下的
+ * `detail.droppedMessages` —— 那一刀丢没丢消息是当时的运行期决定
+ * (取决于清空工具输出够不够),重算时无从推导。老检查点没有这一份,
+ * 于是按「没丢过」复原,这与它们当年的行为一致(丢弃是这一版才有的)。
+ */
+export function contextWindow(req: { sessionId: string; checkpointId: string }):
+  ContextWindowView | undefined {
+  const checkpoint = store.getContextCheckpoint(req.checkpointId)
+  if (checkpoint === undefined || checkpoint.sessionId !== req.sessionId) return undefined
+  const history = store.getHistory(req.sessionId)
+  if (history.length === 0) return undefined
+
+  const mechanical = checkpoint.source === 'mechanical' || checkpoint.source === 'auto'
+  const projected = projectContextWindow({
+    messages: history,
+    now: getHost().clock.now(),
+    ...(mechanical
+      ? { dropWithoutSummary: (checkpoint.detail?.droppedMessages ?? 0) > 0 }
+      : {
+          summary: {
+            note: checkpoint.note,
+            id: checkpoint.id,
+            ...(checkpoint.coveredThroughMessageId === undefined
+              ? {}
+              : { coveredThroughMessageId: checkpoint.coveredThroughMessageId }),
+            ...(checkpoint.detail?.uncoveredFromMessageId === undefined
+              ? {}
+              : { uncoveredFromMessageId: checkpoint.detail.uncoveredFromMessageId })
+          }
+        })
+  })
+  return contextWindowView({
+    checkpointId: checkpoint.id,
+    projection: projected.messages,
+    transcript: history,
+    ...(mechanical ? {} : { summaryId: checkpoint.id })
+  })
 }
 
 /**

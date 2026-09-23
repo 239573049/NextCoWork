@@ -10,7 +10,7 @@ export const DEFAULT_SYNC_SELECTION: SyncSelection = {
 }
 export const SYNC_MAX_CIPHERTEXT_BYTES = 8 * 1024 * 1024
 export const SYNC_RESOURCE_CHUNK_BYTES = 256 * 1024
-export const SYNC_PASSWORD_MIN_LENGTH = 12
+export const SYNC_PASSWORD_MIN_LENGTH = 8
 
 export const SYNC_ERRORS = ['signedOut', 'locked', 'password', 'invalidData', 'unsupported', 'network', 'conflict', 'storage', 'accountChanged', 'deviceRevoked', 'migrationRequired', 'bindingRequired', 'busy'] as const
 export type SyncErrorCode = typeof SYNC_ERRORS[number]

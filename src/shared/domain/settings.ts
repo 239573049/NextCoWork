@@ -346,6 +346,21 @@ export interface AppSettings {
     failover: boolean
   }
 
+  /**
+   * 设置 › 模型:同一家供应商的**多个登录账号**之间自动轮换(schema 第 24 条)。
+   *
+   * ★★ **和 `gateway.failover` 是两件事,所以是两个开关。**
+   * 那一个管的是「这家挂了换**另一家**供应商」,出厂关闭,且用户在模型药丸里
+   * 钉死某家时会被刻意绕过(`router.ts` 的 `candidates`)。这一个管的是
+   * 「Codex 的 A 号被限流了换 Codex 的 B 号」—— 钉死 Codex 的用户**正需要**
+   * 后者继续工作。共用一个开关的表现是:用户钉死了 Codex,于是他的第二个
+   * Codex 账号永远不会被用到,而界面上那两个账号都显示"可用"。
+   *
+   * ★ 出厂**开启**:配了第二个账号这件事本身就是"限流了请用它"的意思。
+   *   关掉之后只用当前账号,失败也不切(见 `selectAccount`)。
+   */
+  providerAccountRotation: boolean
+
   notifications: {
     /** 三类音效,对应 InteractionKind(方案 §4.6) */
     taskComplete: boolean
@@ -428,6 +443,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shell: 'system',
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
+  providerAccountRotation: true,
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
   proxy: structuredClone(DEFAULT_PROXY),
   builtinSearch: { searxngUrl: '' },
@@ -534,6 +550,9 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     if (patch.subagent.model !== undefined) next.subagent.modelProviderId = patch.subagent.modelProviderId
   }
   if (patch.gateway !== undefined) next.gateway = { ...next.gateway, ...patch.gateway }
+  if (patch.providerAccountRotation !== undefined) {
+    next.providerAccountRotation = patch.providerAccountRotation
+  }
   if (patch.notifications !== undefined) {
     next.notifications = { ...next.notifications, ...patch.notifications }
   }
@@ -593,6 +612,7 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   shell: true,
   subagent: true,
   gateway: true,
+  providerAccountRotation: true,
   notifications: true,
   proxy: true,
   builtinSearch: true,

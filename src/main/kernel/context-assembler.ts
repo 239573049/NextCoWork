@@ -1190,9 +1190,24 @@ export function compactionBoundary(
   }
 }
 
-/** 机械压缩落盘时的 note。它是**算出来的事实**,不是笔记 —— 所以只报数字。 */
-export function compactionNote(summary: CompactionSummary, keepRecent = KEEP_RECENT_DEFAULT): string {
-  return `Mechanically compacted ${String(summary.foldedMessages)} message(s), dropping ${String(summary.foldedToolOutputs)} tool output(s). The first message and the latest ${String(keepRecent)} are kept verbatim.`
+/**
+ * 机械压缩落盘时的 note。它是**算出来的事实**,不是笔记 —— 所以只报数字。
+ *
+ * ★ `dropped > 0` 时必须多说一句。折叠(工具输出被清空、骨架还在)和丢弃
+ * (整条不再发给模型)对用户是两件事:前者可以靠「往回翻聊天记录」补回来,
+ * 后者告诉他模型从此**真的**看不见那一段了。一句笼统的「已压缩」会让人
+ * 以为还能靠追问把内容问回来。
+ */
+export function compactionNote(
+  summary: CompactionSummary,
+  keepRecent = KEEP_RECENT_DEFAULT,
+  dropped = 0
+): string {
+  const trimmed =
+    dropped > 0
+      ? ` ${String(dropped)} of them were removed from the context window entirely and replaced by an outline.`
+      : ''
+  return `Mechanically compacted ${String(summary.foldedMessages)} message(s), dropping ${String(summary.foldedToolOutputs)} tool output(s).${trimmed} The first message and the latest ${String(keepRecent)} are kept verbatim.`
 }
 
 /**
@@ -1213,10 +1228,24 @@ export function withSummary(
 /**
  * 摘要覆盖的那段历史,从第几条起**不再发给模型**。返回 0 = 一条都不裁。
  *
- * ★★ 切点只能落在**一轮的起点**上:`role === 'user'` 且不是纯工具结果的那一条。
- * 随手切会把 `tool_use` 和它的 `tool_result` 分到边界两侧,留下的孤儿下一轮
- * 直接 400 —— 和 `compactPart` 守的是同一条不变式,只是这边删得更狠,
- * 所以边界必须自己挑。挑不到(整段历史是一轮)就返回 0,退化成只做机械压缩。
+ * ★★ 切点必须落在**不含任何 `tool_result` 块**的消息上。随手切会把 `tool_use`
+ * 和它的 `tool_result` 分到边界两侧,留下的孤儿下一轮直接 400 —— 和 `compactPart`
+ * 守的是同一条不变式,只是这边删得更狠,所以边界必须自己挑。挑不到就返回 0,
+ * 退化成只做机械压缩。
+ *
+ * ★★ 判据原本是「`role === 'user'` 且不是**纯**工具结果」,那一条同时错在两头,
+ * 两头都有实际症状:
+ *
+ * - **太紧**:一段「用户说一句话、模型跑几十轮工具」的转录里,除了第 0 条
+ *   再没有第二条真实 user 消息(工具回执也是 `role === 'user'`,见
+ *   `shared/agent/message.ts` 的 `toolResultMessage`)。于是这个函数**恒返回 0**,
+ *   摘要压缩一条历史都裁不掉、只把摘要**加**在前面 —— 占用不降反升,判据下一轮
+ *   照样为真,`isEffectiveCompaction` 记两次失败之后自动压缩整个关掉,
+ *   而这正是最需要压缩的那种会话。现在允许切在 assistant 消息上:它的
+ *   `tool_call` 连同后面的 `tool_result` 一起留在保留侧,配对不破。
+ * - **太松**:`isToolResultOnly` 要求 `every`,于是一条 `[tool_result…, 插话文本]`
+ *   的混合消息(`injectInterjections` 真的会产生)被判成合法切点 ——
+ *   那条 tool_result 的 tool_call 落在被裁的一侧,就是它要挡的那个 400。
  *
  * ★★ `coverage` 是**摘要覆盖到的最后一条**的下标,切点绝不许越过它。
  * 摘要是在那一刻生成的,它之后的消息没有任何东西概括过 —— 裁掉就是凭空丢失。
@@ -1232,9 +1261,20 @@ export function summaryCutIndex(
   const limit = Math.min(coverage + 1, messages.length - keepRecent)
   for (let i = limit; i > 0; i--) {
     const m = messages[i]
-    if (m !== undefined && m.role === 'user' && !isToolResultOnly(m)) return i
+    if (m !== undefined && isCutSafe(m)) return i
   }
   return 0
+}
+
+/**
+ * 这条消息能不能当切点 —— 唯一判据是「它自己不带 `tool_result`」。
+ *
+ * 带 tool_result 就意味着配对的 `tool_call` 在**上一条** assistant 消息里,
+ * 切在这里会把那个 tool_call 留在被裁的一侧,于是保留侧第一条就是孤儿回执。
+ * 反过来,assistant 消息里的 `tool_call` 的回执在**后面**,和它一起留下,所以安全。
+ */
+function isCutSafe(m: AgentMessage): boolean {
+  return !m.parts.some((p) => p.type === 'tool_result')
 }
 
 /** 投影时用得上的那几个检查点字段。 */
@@ -1244,12 +1284,24 @@ export interface ContextSummaryRef {
   id: string
   /** 检查点的 `coveredThroughMessageId`。缺席 = 老数据,按「什么都没覆盖」处理。 */
   coveredThroughMessageId?: string
+  /**
+   * 检查点的 `detail.uncoveredFromMessageId` —— 摘要**实际**没读到的那一段的起点。
+   *
+   * ★ 它是 `coveredThroughMessageId` 之外的**第二道**上界,两条都要守。
+   * 前者挡的是「摘要生成之后才发生的事」,后者挡的是「摘要生成时就已经因为
+   * digest 预算被丢掉的事」—— 后一种原先完全没人挡:检查点一律把覆盖锚点写成
+   * 转录最后一条,于是那些没进 digest 的消息以「已覆盖」的身份被裁掉,
+   * 症状是模型对中间某一段完全失忆,而摘要里对那段只字未提。
+   */
+  uncoveredFromMessageId?: string
 }
 
 export interface ContextProjection {
   messages: AgentMessage[]
   /** 这一次投影把历史裁到了哪一条之后。没裁掉任何东西时缺席。 */
   droppedThroughMessageId?: string
+  /** 真正移出上下文的消息条数。0 = 只折叠了内容。 */
+  droppedMessages: number
 }
 
 /**
@@ -1266,31 +1318,155 @@ export interface ContextProjection {
  * 3. 于是 `shouldCompact` 一直为真,每一轮都再摘要一次:一轮一次额外的模型请求、
  *    一条新检查点、一条新分隔线,永远收敛不了。
  *
- * ★ 没有摘要时**一条都不裁**。那种情况下被裁掉的内容没有任何继承者,
- * 而机械压缩至少还留着「调用过什么工具」的骨架。
+ * ★ 没有摘要时**默认**一条都不裁 —— 原话是「被裁掉的内容那时没有任何继承者,
+ * 而机械压缩至少还留着『调用过什么工具』的骨架」。这条理由现在只在
+ * `dropWithoutSummary` 关着时成立:打开它之后被丢掉的那一段会留下一条**骨架消息**
+ * (见 `skeletonMessage`),继承者从「没有」变成了「一份逐条的提要」,
+ * 所以那条不变式在这一支上被有条件地放开,而不是被删掉。
+ *
+ * ★ `dropWithoutSummary` 只由**机械压缩已经榨不出东西**的那条路径打开
+ * (`agent-session.ts` 的 `exhausted` 分支)。默认路径下它必须是关的:
+ * 还能靠清空工具输出压下去的时候就整条丢消息,是在用不可逆的手段解决可逆的问题。
  */
 export function projectContextWindow(input: {
   messages: readonly AgentMessage[]
   summary?: ContextSummaryRef
   now: number
   keepRecent?: number
+  /** 见上面那颗 ★。缺省 = 关。 */
+  dropWithoutSummary?: boolean
 }): ContextProjection {
   const summary = input.summary
-  if (summary === undefined) return { messages: compactMessages(input.messages) }
+  if (summary === undefined) {
+    return input.dropWithoutSummary === true
+      ? dropOldest(input.messages, input.now, input.keepRecent)
+      : { messages: compactMessages(input.messages), droppedMessages: 0 }
+  }
 
-  const coverage =
-    summary.coveredThroughMessageId === undefined
-      ? -1
-      : input.messages.findIndex((m) => m.id === summary.coveredThroughMessageId)
+  const coverage = coverageIndex(input.messages, summary)
   const cut = summaryCutIndex(input.messages, coverage, input.keepRecent)
   const kept = compactMessages(input.messages.slice(cut))
   // 空历史照旧不合成摘要消息:一条只有摘要的请求既没有任务,也解释不清它从哪来。
-  if (kept.length === 0) return { messages: kept }
+  if (kept.length === 0) return { messages: kept, droppedMessages: 0 }
   const droppedThrough = cut === 0 ? undefined : input.messages[cut - 1]?.id
   return {
     messages: withSummary(kept, summary.note, summary.id, input.now),
+    droppedMessages: cut,
     ...(droppedThrough === undefined ? {} : { droppedThroughMessageId: droppedThrough })
   }
+}
+
+/**
+ * 摘要真正覆盖到哪一条 —— 两道上界取小。
+ *
+ * ★ `uncoveredFrom` 指的是**第一条没被覆盖**的消息,所以上界是它的**前一条**。
+ * 两道都查不到(老数据 / 消息已被删)时各自退化成 -1 / 不设限,
+ * 合起来仍然是「分不清就不裁」。
+ */
+function coverageIndex(messages: readonly AgentMessage[], summary: ContextSummaryRef): number {
+  const through =
+    summary.coveredThroughMessageId === undefined
+      ? -1
+      : messages.findIndex((m) => m.id === summary.coveredThroughMessageId)
+  if (summary.uncoveredFromMessageId === undefined) return through
+  const gap = messages.findIndex((m) => m.id === summary.uncoveredFromMessageId)
+  return gap === -1 ? through : Math.min(through, gap - 1)
+}
+
+/**
+ * 没有摘要时的兜底:按安全边界丢掉**最早的一段**,并在原位留一条骨架消息。
+ *
+ * ## 需求
+ *
+ * 默认配置(`experimentalMode: false`)下压缩只做 `compactMessages` —— 清空工具输出,
+ * **一条消息都不减**。一段长任务里正文和 tool_call 本身就能撑爆窗口,于是:
+ * 削不到 5% → `mechanicalCompactionExhausted` 置位 → 此后整个 run 不再压缩 →
+ * 占用一路涨到硬校验报 `context_length` 为止。中间那段时间模型看到的是一串
+ * `[compacted: …]`,它只能把读过的文件重读一遍、把跑过的命令重跑一遍,
+ * 而新产生的结果六条之后又被清空 —— 这就是「压缩之后陷入死循环」。
+ *
+ * ## 为什么丢掉之后一定要留骨架
+ *
+ * 直接删是不行的:模型会**完全不知道**自己已经做过那些事,于是从头再来一遍,
+ * 而且这一次连「我调用过 bash」都看不见。骨架保住的正是那条最低限度的线索 ——
+ * 每条消息一行,做了什么、调了什么工具、报没报错。它同时逐字写明「这些内容
+ * 已经不可恢复,不要猜」,理由同 digest 里那句空缺标记。
+ *
+ * ★★ 切点**和摘要路径共用 `summaryCutIndex`**,不另写一套「丢一半」的启发式。
+ * 试过丢一半:它要好几轮才收敛,而这条路径是在**快要撞窗口**的时候才走的 ——
+ * 中间每一轮都是一次可能 400 的请求。共用同一条规则还顺带保证了两条路径的
+ * 配对不变式只需要证明一次(切点不许带 `tool_result`)。
+ *
+ * ★ `coverage` 传 `length - 1` = 不设覆盖上界。这里没有摘要,所以没有
+ * 「摘要读到哪」这个问题;唯一的上界是 `keepRecent`,它由 `summaryCutIndex` 自己夹。
+ */
+function dropOldest(
+  messages: readonly AgentMessage[],
+  now: number,
+  keepRecent = KEEP_RECENT_DEFAULT
+): ContextProjection {
+  const folded = compactMessages(messages, { keepRecent })
+  const cut = summaryCutIndex(messages, messages.length - 1, keepRecent)
+  // 切不动(历史不够长 / 后半段全是工具回执)—— 和「历史还不够长」同处理。
+  if (cut <= 1) return { messages: folded, droppedMessages: 0 }
+
+  const dropped = messages.slice(1, cut)
+  const first = folded[0]
+  if (first === undefined) return { messages: folded, droppedMessages: 0 }
+  return {
+    messages: [first, skeletonMessage(dropped, now), ...folded.slice(cut)],
+    droppedMessages: dropped.length,
+    ...(dropped.at(-1) === undefined ? {} : { droppedThroughMessageId: dropped.at(-1)?.id })
+  }
+}
+
+/** 骨架整体的字符上限 —— 它自己也在占窗口,不能为了「说清楚」把省下的又吃回去。 */
+const SKELETON_MAX_CHARS = 6000
+/** 骨架里每个块的限额。比 `EARLIER_LIMITS` 更紧:这是提要,不是内容。 */
+const SKELETON_LIMITS: DigestLimits = { text: 300, toolInput: 160, toolResultHead: 120, toolResultTail: 80 }
+
+/**
+ * 被丢掉的那一段 → 一条**合成的** user 消息。
+ *
+ * ★ 合成消息的 id 用被丢掉的最后一条,不是新发一个 ULID:它不进转录
+ * (`this.messages` 原封不动,只有投影里有它),而用真实 id 让「这条骨架代表
+ * 哪一段」在日志和上下文检查器里对得上。★ 角色取 user:一条 assistant 消息
+ * 凭空出现在历史里,会被模型当成自己说过的话。
+ */
+function skeletonMessage(dropped: readonly AgentMessage[], now: number): AgentMessage {
+  const lines: string[] = []
+  let budget = SKELETON_MAX_CHARS
+  let omitted = 0
+  // 从**最新**的一侧往回填:丢得只剩一点篇幅时,近的比远的有用。
+  for (let i = dropped.length - 1; i >= 0; i--) {
+    const m = dropped[i]
+    if (m === undefined) continue
+    const text = digestMessage(m, SKELETON_LIMITS)
+    if (text === '') continue
+    if (text.length > budget) {
+      omitted++
+      continue
+    }
+    budget -= text.length + 1
+    lines.unshift(text)
+  }
+  const tail =
+    omitted === 0 ? '' : `\n[… ${String(omitted)} more message(s) too long to outline here …]`
+  return userMessage(
+    `${dropped.at(-1)?.id ?? 'skeleton'}:skeleton`,
+    [
+      {
+        type: 'text',
+        text:
+          `[context-window trim] ${String(dropped.length)} earlier message(s) were removed from this ` +
+          'context window to keep the request inside the model\'s limit. They are still in the ' +
+          'transcript the user is looking at, but you cannot read them again and they are not ' +
+          'recoverable — do not guess what they contained. This is the outline of what happened, ' +
+          `oldest first:\n${lines.join('\n')}${tail}`
+      }
+    ],
+    now
+  )
 }
 
 // ─────────────────────── 摘要压缩(旁路模型调用) ───────────────────────
@@ -1476,7 +1652,30 @@ export interface CompactionDigestOptions {
 }
 
 /**
- * 转录 → 发给摘要模型的那段文本。
+ * digest 的**产物加事实**:文本,以及「这一份到底漏掉了谁」。
+ *
+ * ★ 漏掉的那部分必须随文本一起回给调用方,不能只留在 digest 正文的一行标记里。
+ * 检查点原先一律把覆盖锚点写成转录的最后一条,于是被预算丢掉的消息以「已覆盖」
+ * 的身份被 `summaryCutIndex` 裁掉 —— 既没进摘要、又不在上下文里,这是真正的
+ * 凭空丢失。有了 `uncoveredFromMessageId`,投影的切点就停在它前面。
+ */
+export interface CompactionDigest {
+  text: string
+  /** 因预算被整条丢弃的消息条数。 */
+  omittedMessages: number
+  /**
+   * 第一条没能进 digest 的消息 id。缺席 = 一条都没漏。
+   *
+   * ★ 判据是「渲染出来了却没被保留」。渲染成空串的消息(只有 thinking / goal_status
+   * 的那些)不算漏:它们对摘要本来就没有可写的内容,把切点为它们顶住只会让
+   * 压缩白白少裁一大段。
+   */
+  uncoveredFromMessageId?: string
+}
+
+/**
+ * 转录 → 发给摘要模型的那段文本。★ 这是 `compactionDigest` 的取文本包装,
+ * 保留它是因为「只要一段文本」的调用点(测试、将来的预览)不该被迫解构一个对象。
  *
  * ★★ **不再先跑 `compactMessages`。** 这是这次改动里最实质的一处:原来 digest 是
  * `compactMessages(messages, { keepRecent: 12 })` 的产物,而那个函数会把第 13 条之前的
@@ -1501,6 +1700,13 @@ export function buildCompactionDigest(
   messages: readonly AgentMessage[],
   opts: CompactionDigestOptions = {}
 ): string {
+  return compactionDigest(messages, opts).text
+}
+
+export function compactionDigest(
+  messages: readonly AgentMessage[],
+  opts: CompactionDigestOptions = {}
+): CompactionDigest {
   const keepRecent = opts.keepRecent ?? DIGEST_KEEP_RECENT
   const recentFrom = Math.max(1, messages.length - keepRecent)
   const rendered = messages
@@ -1517,7 +1723,7 @@ export function buildCompactionDigest(
 
   const budget = opts.budget
   if (budget === undefined || !Number.isFinite(budget) || budget <= 0) {
-    return rendered.map((r) => r.text).join('\n')
+    return { text: rendered.map((r) => r.text).join('\n'), omittedMessages: 0 }
   }
 
   const cost = (text: string): number => estimateTokens(text)
@@ -1570,6 +1776,8 @@ export function buildCompactionDigest(
   */
   const out: string[] = []
   let gap = 0
+  let omitted = 0
+  let uncoveredFrom: string | undefined
   const flush = (): void => {
     if (gap === 0) return
     out.push(
@@ -1580,13 +1788,19 @@ export function buildCompactionDigest(
   for (const r of rendered) {
     if (!kept.has(r.index)) {
       gap++
+      omitted++
+      uncoveredFrom ??= r.message.id
       continue
     }
     flush()
     out.push(r.text)
   }
   flush()
-  return out.join('\n')
+  return {
+    text: out.join('\n'),
+    omittedMessages: omitted,
+    ...(uncoveredFrom === undefined ? {} : { uncoveredFromMessageId: uncoveredFrom })
+  }
 }
 
 export interface CompactionPromptInput {
@@ -1600,7 +1814,21 @@ export interface CompactionPromptInput {
 
 /** 摘要请求里那条 user 消息的正文。system 那一半是 `COMPACTION_SYSTEM`。 */
 export function buildCompactionPrompt(input: CompactionPromptInput): string {
-  const digest = buildCompactionDigest(input.messages, {
+  return compactionRequestBody(input).text
+}
+
+/**
+ * 同上,外加**这一份 digest 漏掉了谁**。
+ *
+ * ★ 两条压缩路径(自动 / 手动)都要落检查点,而检查点的覆盖锚点必须按
+ * digest 的实际内容收窄 —— 见 `CompactionDigest`。所以这里回的是「请求正文 +
+ * 事实」,`buildCompactionPrompt` 退化成取正文的那一半,留给只要文本的调用点。
+ */
+export function compactionRequestBody(input: CompactionPromptInput): {
+  text: string
+  digest: CompactionDigest
+} {
+  const digest = compactionDigest(input.messages, {
     ...(input.budget === undefined ? {} : { budget: input.budget }),
     ...(input.keepRecent === undefined ? {} : { keepRecent: input.keepRecent })
   })
@@ -1608,7 +1836,10 @@ export function buildCompactionPrompt(input: CompactionPromptInput): string {
     input.previousNote === undefined || input.previousNote.trim() === ''
       ? ''
       : `<previous-summary>\n${digestText(input.previousNote)}\n</previous-summary>\n\n`
-  return `${prior}<conversation-transcript>\n${digest}\n</conversation-transcript>\n\n${TRANSCRIPT_BOUNDARY}`
+  return {
+    text: `${prior}<conversation-transcript>\n${digest.text}\n</conversation-transcript>\n\n${TRANSCRIPT_BOUNDARY}`,
+    digest
+  }
 }
 
 /** 有效窗口 → digest 的 token 预算。窗口未知时按兜底窗口算。 */

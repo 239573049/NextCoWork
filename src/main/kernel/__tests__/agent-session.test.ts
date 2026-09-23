@@ -2191,6 +2191,42 @@ describe('压缩判据按上游真值校准', () => {
   })
 
   /**
+   * ★★ 这一条盯的是用户报的「压缩之后陷入死循环」在**默认配置**下的那一半。
+   *
+   * 默认只做机械压缩 —— 清空工具输出、一条消息都不减。体积压在**中段的正文**里时
+   * 它一个 token 都削不掉:于是 `exhausted` 置位,此后整个 run 不再压缩,而模型
+   * 看到的是一串 `[compacted: …]`,只能把读过的东西重读一遍,新结果六条之后
+   * 又被清空 —— 循环到窗口爆掉为止(`loop()` 没有轮次上限)。
+   *
+   * 修法是让机械压缩在削不动时**真的**按安全边界丢掉最早的一段,并留一条提要。
+   * 所以这里断言的是:请求里既没有那些大块,也没有退化成 `exhausted`。
+   */
+  it('★★ 体积在中段时,机械压缩改为真的移出历史而不是报 exhausted', async () => {
+    const BLOB = 'y'.repeat(600_000)
+    const middle: AgentMessage[] = [
+      userMessage('h0', [{ type: 'text', text: '任务' }], 0),
+      ...Array.from({ length: 6 }, (_, i) =>
+        i % 2 === 0
+          ? assistantMessage(`h${i + 1}`, [{ type: 'text', text: `${BLOB} ${i}` }], 0)
+          : userMessage(`h${i + 1}`, [{ type: 'text', text: `追问 ${i}` }], 0)
+      ),
+      ...Array.from({ length: 6 }, (_, i) =>
+        i % 2 === 0
+          ? assistantMessage(`t${i}`, [{ type: 'text', text: `近况 ${i}` }], 0)
+          : userMessage(`t${i}`, [{ type: 'text', text: `再问 ${i}` }], 0)
+      )
+    ]
+    const upstream = fakeUpstream([turnReporting(10, 'c1'), says('好')])
+    const { events } = await run({ upstream, history: middle })
+
+    expect(statuses(events)).toContain('fallback')
+    expect(statuses(events)).not.toContain('exhausted')
+    // 大块真的不在请求里了,而且原位留下了那条提要
+    expect(sent(upstream, 1)).not.toContain(BLOB)
+    expect(sent(upstream, 1)).toContain('context-window trim')
+  })
+
+  /**
    * ★★ 机械压缩**不能把已恢复的模型摘要弄丢**。
    *
    * 构造函数在恢复检查点时把历史投影成 `withSummary(compactMessages(...))`,而到阈值走

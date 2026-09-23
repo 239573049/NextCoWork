@@ -37,6 +37,7 @@ import type { CurrentContextLimits } from './context-pressure'
 import { ToolTimeline } from './ToolTimeline'
 import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
+import { FOLD_HOLD_MS, useFoldAnchor } from './useFoldAnchor'
 import { ContextCheckpointPanel } from './ContextCheckpointPanel'
 import { CompactionDivider } from './CompactionDivider'
 import { GoalStatusCard } from './GoalStatusCard'
@@ -711,6 +712,8 @@ function UserBubble({ message, workspaceId, onEdit, disabled }: {
                 // ★ 同一条消息里的图是一组 —— 灯箱据此给出翻页
                 siblings={images.map((x) => ({ mime: x.mime, dataRef: x.dataRef }))}
                 index={i}
+                // 灯箱里的「用别的程序打开」需要它;没有工作区(只读面板)就整条不画
+                {...(workspaceId === undefined ? {} : { workspaceId })}
               />
             ))}
           </div>
@@ -826,14 +829,55 @@ function AssistantTurn({
   })
   const durationMs = runDurationOf({ runStartedAt, runEndedAt }, calls)
 
-  const body = decision.collapse ? (
+  /*
+    需求:run 正常收束时,整个过程段折进一行「用时」摘要 —— 但**先停
+    FOLD_HOLD_MS** 再折。状态一翻到 done 就瞬时换装的话,最后一段正文看起来
+    像被吞掉了,用户会以为出了错;400ms 足够让注意力从「还在跑」切到
+    「已出结果」,此时收起才会被读成「过程收好了」。
+
+    ★ 只延迟「变收起」:subagent 又开跑要重新展开时必须立刻 —— 慢一拍会把
+    正在跑的过程藏在一行摘要底下,那才是真的把信息藏没了。
+
+    ★ 换装本身保持瞬时:两侧是两棵不同的子树,做跨形变高度交接要在这一层
+    摆 AnimatePresence 倒腾 key,复杂度不成比例。观感交给两件事:
+    `entering` 让新摘要行淡入一帧(.run-fold-enter),`useFoldAnchor` 在同一帧
+    起把正文钉回原位 —— 一个负责「折进了这一行」,一个负责「答案没动」。
+  */
+  const [appliedCollapse, setAppliedCollapse] = useState(decision.collapse)
+  const [justFolded, setJustFolded] = useState(false)
+  useEffect(() => {
+    if (decision.collapse === appliedCollapse) return
+    if (!decision.collapse) {
+      setAppliedCollapse(false)
+      return
+    }
+    const timer = setTimeout(() => {
+      setAppliedCollapse(true)
+      setJustFolded(true)
+    }, FOLD_HOLD_MS)
+    return () => clearTimeout(timer)
+  }, [decision.collapse, appliedCollapse])
+  useEffect(() => {
+    if (!justFolded) return
+    // 比 .run-fold-enter 的 180ms 多一圈余量:类摘早了会把还在播的淡入掐掉
+    const timer = setTimeout(() => setJustFolded(false), 300)
+    return () => clearTimeout(timer)
+  }, [justFolded])
+  const turnRef = useRef<HTMLDivElement>(null)
+  const blockRef = useRef<HTMLDivElement>(null)
+  // 折叠点顶端 = 「用时」那一行(见 RunProcessBlock 的 ref 合并),不是 turn 顶端 ——
+  // 用户翻回本 turn 顶部读提问时,换装发生在视口下方,那次绝不能动视口。
+  useFoldAnchor(turnRef, appliedCollapse, blockRef)
+
+  const body = appliedCollapse ? (
     <>
-      <RunProcessBlock items={processItems} tools={tools} subagents={subagents} durationMs={durationMs} defaultOpen={decision.defaultOpen}>
+      <RunProcessBlock items={processItems} tools={tools} subagents={subagents} durationMs={durationMs} defaultOpen={decision.defaultOpen} entering={justFolded} ref={blockRef}>
         {processSegments.map((segment) => {
           if (segment.kind === 'block' && segment.block.part?.type === 'goal_status') return null
           if (segment.kind === 'block') {
             return <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
-              tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor} />
+              tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor}
+              {...(workspaceId === undefined ? {} : { workspaceId })} />
           }
           return <ToolTimeline key={segment.key} items={segment.items} tools={tools} subagents={subagents} />
         })}
@@ -843,7 +887,8 @@ function AssistantTurn({
         ? <PartBlock key={segment.key} part={segment.block.part} tools={tools} /> : null)}
       {trailingSegments.map((segment) => segment.kind === 'block' ? (
         <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
-          tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor} />
+          tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor}
+          {...(workspaceId === undefined ? {} : { workspaceId })} />
       ) : <ToolTimeline key={segment.key} items={segment.items} tools={tools} subagents={subagents} />)}
     </>
   ) : (
@@ -851,7 +896,8 @@ function AssistantTurn({
       {segments.map((segment) => {
         if (segment.kind === 'block') {
           return <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
-            tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor} />
+            tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor}
+            {...(workspaceId === undefined ? {} : { workspaceId })} />
         }
         return <ToolTimeline key={segment.key} items={segment.items} tools={tools} subagents={subagents} />
       })}
@@ -859,7 +905,7 @@ function AssistantTurn({
   )
 
   return (
-    <div className="group/turn flex flex-col gap-2.5" data-testid="assistant-turn">
+    <div ref={turnRef} className="group/turn flex flex-col gap-2.5" data-testid="assistant-turn">
       <TurnHeader model={model} providerName={providerName} />
       {body}
       {/* 本轮改动审查卡 —— 改过文件才渲染,见 TurnChangeReview 内部。 */}
@@ -896,13 +942,16 @@ function PartBlock({
   liveBlock,
   tools,
   streaming = false,
-  cursor = false
+  cursor = false,
+  workspaceId
 }: {
   part?: ContentPart
   liveBlock?: LiveBlock
   tools: TranscriptState['tools']
   streaming?: boolean
   cursor?: boolean
+  /** 助手消息里的图片也要能在灯箱里交给外部程序打开 —— 只读面板没有它 */
+  workspaceId?: string
 }): ReactNode {
   const { t } = useI18n()
   if (liveBlock) {
@@ -932,7 +981,7 @@ function PartBlock({
     case 'subagent':
       return <SubagentNode summary={part.summary} />
     case 'image':
-      return <MessageImage mime={part.mime} dataRef={part.dataRef} />
+      return <MessageImage mime={part.mime} dataRef={part.dataRef} {...(workspaceId === undefined ? {} : { workspaceId })} />
     // 只出现在用户消息里(ChatView 的 partsOf),渲染由 UserBubble 负责
     case 'file_ref':
       return null

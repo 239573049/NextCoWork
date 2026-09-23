@@ -155,6 +155,8 @@ export function StatusLine({
           色板里没有 warning 这一档,不为这一处新造一个 token。 */}
       <span role="status" className={cn('inline-flex items-center gap-1.5',
         noticeText !== undefined ? 'text-danger' : running && 'text-accent')}>
+        {/* 趣味词是几字即逝的短词，纯微光看不出在动，所以这里保留像素波加载图标
+            （见 AgentActivity 头注释）；思考块和工具状态只留文字微光 */}
         {running && <AgentActivityGrid />}
         {noticeText ?? (running && (waitingForResponse || status === 'running') ? (
           /*

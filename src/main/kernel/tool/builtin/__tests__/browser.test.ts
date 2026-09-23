@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../../../shared/domain/workspace'
-import { browserManager } from '../../../../browser/manager'
+import { browserManager, setBrowserChangeListener } from '../../../../browser/manager'
 import {
   installBrowserAutomationBridge,
   type BrowserAutomationBridge,
@@ -9,7 +9,7 @@ import {
 import { store } from '../../../../state/store'
 import { nodeHost } from '../../../host'
 import type { ToolContext } from '../../registry'
-import { browserClickTool, browserScreenshotTool, browserSnapshotTool } from '../browser'
+import { browserClickTool, browserOpenTool, browserScreenshotTool, browserSnapshotTool } from '../browser'
 
 const opened: string[] = []
 let snapshot: BrowserPageSnapshot
@@ -131,5 +131,31 @@ describe('live browser tools', () => {
       mime: 'image/png',
       dataRef: 'data:image/png;base64,AQID'
     }])
+  })
+
+  /*
+    需求：浏览器工具要能打开 file:// 本地页面（2026-09-22，见 ssrf.ts 的
+    allowFileUrls），并且 Agent 一打开浏览器右侧工作台就必须展开
+    （openRightPanel → 变更事件上的 rightPanelOpen 标记，链条见
+    __tests__/manager.test.ts 同名用例）。这条端到端钉住 tool → manager 这一段：
+    任何一层把 file:// 拒掉、或者把 openRightPanel 丢掉，这里都会红。
+  */
+  it('用 file:// 打开 iab 页面成功，并请求右侧工作台展开', async () => {
+    const changes: Array<{ rightPanelOpen?: boolean }> = []
+    setBrowserChangeListener((change) => changes.push(change))
+
+    const result = await browserOpenTool.execute({ url: 'file:///tmp/report.html' }, ctx())
+
+    expect(result.isError).toBe(false)
+    opened.push(
+      ...browserManager
+        .list('workspace-a')
+        .filter((tab) => tab.url === 'file:///tmp/report.html')
+        .map((tab) => tab.id)
+    )
+    expect(result.output.content).toContain('file:///tmp/report.html')
+    expect(bridge.waitFor).toHaveBeenCalled()
+    expect(changes.length).toBeGreaterThan(0)
+    expect(changes[changes.length - 1]?.rightPanelOpen).toBe(true)
   })
 })

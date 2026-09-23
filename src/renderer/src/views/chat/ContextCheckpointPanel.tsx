@@ -1,9 +1,9 @@
-import { Pencil, RefreshCw, Save, ChevronDown } from 'lucide-react'
+import { RefreshCw, ChevronDown } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { ContextCheckpoint } from '../../../../shared/agent/context-management'
 import { useI18n } from '../../i18n'
-import { updateContextCheckpoint } from '../../services/context'
 import { cn } from '../../lib/cn'
+import { CompactionDetail } from './CompactionDetail'
 
 export function ContextCheckpointPanel({
   checkpoints,
@@ -32,22 +32,8 @@ export function ContextCheckpointPanel({
 function CheckpointRow({ checkpoint, onRefresh }: { checkpoint: ContextCheckpoint; onRefresh?: (checkpoint: ContextCheckpoint) => void }): ReactNode {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const [note, setNote] = useState(checkpoint.note)
-  const [saving, setSaving] = useState(false)
   const sourceKey = checkpoint.source === 'auto' ? 'mechanical' : checkpoint.source
   const source = t(`chat.contextSource.${sourceKey}` as 'chat.contextSource.model' | 'chat.contextSource.mechanical' | 'chat.contextSource.manual')
-
-  async function save(): Promise<void> {
-    setSaving(true)
-    try {
-      const next = await updateContextCheckpoint(checkpoint.id, note, checkpoint.revision)
-      onRefresh?.(next)
-      setEditing(false)
-    } finally {
-      setSaving(false)
-    }
-  }
 
   return (
     <div className="rounded-card border border-hairline bg-surface-raised/40 px-3 py-2">
@@ -58,15 +44,13 @@ function CheckpointRow({ checkpoint, onRefresh }: { checkpoint: ContextCheckpoin
       </button>
       {open && (
         <div className="mt-2 flex flex-col gap-2">
-          {editing ? (
-            <textarea value={note} onChange={(event) => setNote(event.target.value)} className="min-h-28 w-full resize-y rounded border border-border bg-surface-input p-2 text-[12px] text-fg outline-none focus:border-accent" aria-label={t('chat.contextNote')} />
-          ) : <p className="scroll-thin max-h-[min(40vh,320px)] overflow-y-auto break-words pr-1 whitespace-pre-wrap text-[12px] leading-[1.5] text-fg-muted">{checkpoint.note}</p>}
+          {/* 详情与分隔线共用一份 —— 两处各写一遍必然分头演化,见 `CompactionDetail`。 */}
+          <CompactionDetail
+            checkpoint={checkpoint}
+            editable={sourceKey !== 'mechanical'}
+            {...(onRefresh === undefined ? {} : { onRefresh })}
+          />
           <div className="flex items-center justify-end gap-1.5">
-            {editing ? (
-              <button type="button" className="inline-flex items-center gap-1 text-[11px] text-accent" onClick={() => void save()} disabled={saving}><Save size={12} aria-hidden />{t('chat.contextSave')}</button>
-            ) : (
-              <button type="button" className="inline-flex items-center gap-1 text-[11px] text-fg-faint hover:text-fg" onClick={() => setEditing(true)}><Pencil size={12} aria-hidden />{t('chat.contextEdit')}</button>
-            )}
             <button type="button" className="inline-flex items-center gap-1 text-[11px] text-fg-faint hover:text-fg" onClick={() => onRefresh?.(checkpoint)}><RefreshCw size={12} aria-hidden />{t('chat.contextRebuild')}</button>
           </div>
         </div>

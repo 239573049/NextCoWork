@@ -95,19 +95,28 @@ const maker =
  *
  * ★ **Anthropic 当前没有长上下文溢价档。** 对 14 页全文检索过:`CONTEXT WINDOW`
  * 一列只出现 `All` 与 `≤200K` 两种取值,**全文档没有任何一行 `>200K`**。
- * 所以 13 个 SKU 全部是单档 —— 这与 OpenAI / Gemini / xAI 都不同。
+ * 所以 14 个 SKU 全部是单档 —— 这与 OpenAI / Gemini / xAI 都不同。
  * (OpenRouter 至今还给 Sonnet 4/4.5 挂着 `min_prompt_tokens: 200000` 的加价档,
  * 那是陈旧数据,照它算会**凭空多收用户的钱**。以 PDF 为准。)
  *
  * ★★ **模型 ID 的可信度低于价格。** PDF 只给展示名("Claude Sonnet 4.6"),
- * 不给 API id。下面只有四个 id 是有一手依据的(运行环境直接给出):
+ * 不给 API id。下面有五个 id 是有一手依据的(运行环境 / 用户直接给出):
  * `claude-fable-5-1` / `claude-opus-5` / `claude-sonnet-5` /
- * `claude-haiku-4-5-20251001` —— 注意**版本号里的点写成连字符**,
+ * `claude-haiku-4-5-20251001` / `claude-opus-5-5` —— 注意**版本号里的点写成连字符**,
  * 且 4.5 世代带日期后缀而新世代不带。其余九个按这条已证实的构词法推出来。
  *
  * 推错了的代价是**查不到定价**(费用列「—」,并进定价页顶部那张待补表),
  * **不是算错价** —— 而且同族价格本来就一样(Opus 4.5–4.8 全是 5/25)。
  * 所以这里推比不收好:两者的失败表现相同,推对了还能省用户一次手工录入。
+ *
+ * ★ `claude-opus-5-5` 是本表**继 MAI-Code 之后的第二次破例**(2026-09-23):
+ * 费率是用户直接给的口径($4/$20,缓存命中 0.2、5m 写 5、1h 写 8),
+ * 没有第二个独立来源 —— 违反文件头第 2 条,收它是因为缺价的可见性比错价更差,
+ * 而且这行的价格由用户自己核。两处刻意的不一致:
+ * ① `source` 指向官方定价页而不是上面那份 2026-08-31 费率卡 —— 我们没有在
+ *    那份 PDF 里核到这个型号,挂它的链接等于伪造证据;这个 URL 是「下次去哪核」,
+ *    不是「依据」。② `fetchedAt` 沿用全表快照日(结构测试钉死全表一致),
+ *    真实录入日以本注释为准。要改这行必须带着官方价来。
  */
 const anth = maker(null, 'USD', 'https://www-cdn.anthropic.com/files/4zrzovbb/website/9e03129acc36d31970777d336f969bb53dc84355.pdf')
 
@@ -124,6 +133,13 @@ const ANTHROPIC: readonly ModelPricing[] = [
   // ★ 这两行的缓存读是 $0.25(0.025×输入),不是别人的 0.1× —— 见文件头
   anth('claude-mythos-5-1', 'Claude Mythos 5.1', one(claude(10, 50, 12.5, 20, 0.25))),
   anth('claude-fable-5-1', 'Claude Fable 5.1', one(claude(10, 50, 12.5, 20, 0.25))),
+  /*
+    ★ 第三个「缓存读 ≠ 0.1× 输入」的例外:这里是 **0.05×**(0.2 / 4)——
+    比 0.1× 还低一半,而同族 Opus 5 是 0.5/5(0.1×)。数字是用户口径
+    (2026-09-23,见段首注释),不是抄错;结构测试里钉了这个例外的因子。
+    写/读的族内规律倒是照旧成立:5m 写 = 1.25×、1h 写 = 2×、输出 = 5×。
+  */
+  anth('claude-opus-5-5', 'Claude Opus 5.5', one(claude(4, 20, 5, 8, 0.2)), { source: 'https://www.anthropic.com/pricing' }),
   anth('claude-opus-5', 'Claude Opus 5', one(claude(5, 25, 6.25, 10, 0.5))),
   anth('claude-sonnet-5', 'Claude Sonnet 5', one(claude(2, 10, 2.5, 4, 0.2))),
   // 上一代同价位,但缓存读贵 4 倍($1.00)—— 正是「存绝对价、不存倍率」的证据
@@ -149,14 +165,31 @@ const ANTHROPIC: readonly ModelPricing[] = [
  * 仍是「缓存读打折、写入不收费」的经典模式 —— 那些行**不写 `cacheWrite`**,
  * 而不是填 0(填 0 会被算成「写入免费」,是个具体的错)。
  *
- * 只给现代四款(astra / sol / terra / luna)配 272K 双档:它们的缓存写入价
- * 被双源确认过,是报告里明确归入新计费结构的那一批。老型号没有逐款确认过
- * 是否适用 272K 档,按单档收 —— 猜错的方向是**少收**,符合文件头第 1 条。
+ * 只给现代六款(astra、5.6 的 sol / terra / luna、6 世代的 sol / luna)配 272K 双档:
+ * 前四款的缓存写入价被双源确认过,是报告里明确归入新计费结构的那一批;
+ * `gpt-6-sol` / `gpt-6-luna`(2026-09-23)来自**官方 pricing 页本身**(用户截图),
+ * 是单源但一手 —— 官方页正是这条纪律要的更硬的那个来源,而且两行的越档倍率
+ * (输入/缓存 ×2、输出 ×1.5)与族内比值(0.1× / 1.25× / 5×)全中,
+ * 由 `pricing-seed.test.ts` 的结构断言复核。
+ * 老型号没有逐款确认过是否适用 272K 档,按单档收 —— 猜错的方向是**少收**,
+ * 符合文件头第 1 条。★ 截图里那句「区域处理端点 +10%」不收:区域倍率在
+ * `NOT_SEEDED` 里有明确排除记录(§4.5:账户级设置,应用无从得知)。
  */
 const oai = maker(null, 'USD', 'https://openai.com/api/pricing')
 
 const OPENAI: readonly ModelPricing[] = [
   oai('gpt-6-astra', 'GPT-6 Astra', two(272_000, { input: 10, output: 50, cacheRead: 1.0, cacheWrite: 12.5 }, { input: 20, output: 75, cacheRead: 2.0, cacheWrite: 25 })),
+  /*
+    ★ 2026-09-23 收录,费率逐格抄自官方 pricing 页的截图(用户提供的那张):
+    低档 输入 / 缓存读 / 缓存写 / 输出 = 2 / 0.2 / 2.5 / 10,高档 4 / 0.4 / 5 / 15;
+    Luna 是整行 1/20:0.1 / 0.01 / 0.125 / 0.5 与 0.2 / 0.02 / 0.25 / 0.75。
+    ★ 两行都满足族内比值(缓存读 = 0.1× 输入、缓存写 = 1.25×、输出 = 5×)
+    与越档倍率(输入/缓存 ×2、输出 ×1.5)—— 所以列序按
+    [输入, 缓存读, 缓存写, 输出]×两档 解读是自洽的,敲错一列这些关系必挂。
+    fetchedAt 沿用全表快照日(结构测试钉死全表一致),真实录入日以本注释为准。
+  */
+  oai('gpt-6-sol', 'GPT-6 Sol', two(272_000, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, { input: 4, output: 15, cacheRead: 0.4, cacheWrite: 5 })),
+  oai('gpt-6-luna', 'GPT-6 Luna', two(272_000, { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 }, { input: 0.2, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25 })),
   /*
     ★ 收的是**促销价**($4/$20),不是业务页上那个 $5/$30 的标准价 ——
     收「实际被扣的那个」。促销据官方口径**至少**持续到 2026-11-21,
@@ -543,10 +576,17 @@ const MIMO: readonly ModelPricing[] = [
 /** 火山方舟常规在线推理官方 CNY；缓存存储按 Token×小时计费，未混入这里。 */
 const doubao = maker(null, 'CNY', 'https://docs.volcengine.com/docs/82379/1544106')
 
+/*
+  需求:2.1 世代按方舟 2026-09-22 的「在线推理(常规)」表重新核对 ——
+  Pro 由 ¥6/30 降到 ¥3/15(缓存命中 1.2 不变),新增 Lite ¥0.8/2.7(缓存 0.16)。
+  Turbo 整档已从当前价格表消失,而它的目录行同时被官方移出推荐表,
+  两件事对上,所以价目行与目录行一起退役(不是漏抄)。
+  ★ 退役是**删行**:留一行查不到现价的旧价,等于给用户一个看着挺像样的错数字。
+*/
 const DOUBAO: readonly ModelPricing[] = [
   doubao('doubao-seed-evolving', '豆包 Seed Evolving', one({ input: 6, output: 30, cacheRead: 1.2 })),
-  doubao('doubao-seed-2.1-pro', '豆包 Seed 2.1 Pro', one({ input: 6, output: 30, cacheRead: 1.2 })),
-  doubao('doubao-seed-2.1-turbo', '豆包 Seed 2.1 Turbo', one({ input: 3, output: 15, cacheRead: 0.6 })),
+  doubao('doubao-seed-2.1-pro', '豆包 Seed 2.1 Pro', one({ input: 3, output: 15, cacheRead: 1.2 })),
+  doubao('doubao-seed-2.1-lite', '豆包 Seed 2.1 Lite', one({ input: 0.8, output: 2.7, cacheRead: 0.16 })),
   doubao('doubao-seed-2.0-pro', '豆包 Seed 2.0 Pro', three(32_000, { input: 3.2, output: 16, cacheRead: 0.64 }, 128_000, { input: 4.8, output: 24, cacheRead: 0.96 }, { input: 9.6, output: 48, cacheRead: 1.92 })),
   doubao('doubao-seed-2.0-lite', '豆包 Seed 2.0 Lite', three(32_000, { input: 0.6, output: 3.6, cacheRead: 0.12 }, 128_000, { input: 0.9, output: 5.4, cacheRead: 0.18 }, { input: 1.8, output: 10.8, cacheRead: 0.36 })),
   doubao('doubao-seed-2.0-mini', '豆包 Seed 2.0 Mini', three(32_000, { input: 0.2, output: 2, cacheRead: 0.04 }, 128_000, { input: 0.4, output: 4, cacheRead: 0.08 }, { input: 0.8, output: 8, cacheRead: 0.16 })),
@@ -663,7 +703,8 @@ const MUSE: readonly ModelPricing[] = [muse('muse-spark-1.3', 'Muse Spark 1.3', 
 /*
  * 需求:2026-09-20 用户点名收录 MAI-Code 1.1 Flash,并明示「定价与 GPT-5.6
  * Luna 完全一致」(用户口径,当时无官方定价页可核)。这违反文件头第 2 条的
- * 双源纪律,是本表唯一一次破例 —— 数字照 OPENAI 那边 `gpt-5.6-luna` 一行
+ * 双源纪律,当时是本表唯一一次破例(2026-09-23 的 `claude-opus-5-5` 是第二次,
+ * 理由与两处刻意的不一致见 Anthropic 段)—— 数字照 OPENAI 那边 `gpt-5.6-luna` 一行
  * 逐值抄,含 272K 长上下文双档与缓存读写价。
  * 用户随后要求**独立成行、不依赖 Luna**:这里存绝对价,目录行的
  * pricingModelId 也是自身 id。此后两条价目各自演进 —— Luna 调价不会自动
@@ -712,7 +753,7 @@ export const NOT_SEEDED: readonly { what: string; why: string }[] = [
   },
   {
     what: '豆包输出长度分档、音频输入、缓存存储与媒体生成费用',
-    why: '已收录当前可以按输入 Token 档位无损表达的豆包文本模型，并通过官方接入点 alias 映射价格。Seed 1.8、Seed 1.6 与 Seed 1.6 Lite 的首档还依赖输出是否超过 200 Token；音频输入有独立单价，缓存存储按 Token×小时，生图与视频又按张或秒计费，现有 TokenRates 无法准确表达这些维度。',
+    why: '已收录当前可以按输入 Token 档位无损表达的豆包文本模型，并通过官方接入点 alias 映射价格。音频输入有独立单价(2.1 Lite 是 ¥6/百万)，缓存存储按 Token×小时，生图与视频又按张或秒计费(Seedream 5.0、Seedance 2.0/2.5 一律如此)，现有 TokenRates 无法准确表达这些维度 —— 目录里那 11 行 Seedream/Seedance 因此没有价目行，是查不到价显示「—」，不是漏抄。',
   },
   {
     what: '百度千帆按次搜索、批量折扣、量包与未公开标准价型号',

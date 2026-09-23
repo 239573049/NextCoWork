@@ -43,6 +43,18 @@ class FakeWebContents {
   send(channel: string, payload: unknown): void {
     this.sent.push({ channel, payload })
   }
+
+  /**
+   * WindowRegistry 判「帧还活不活」靠的是这里,不是 send 抛不抛 ——
+   * 真实的 `webFrameMain.send` 自己把异常吞了(见 window/registry.ts)。
+   */
+  get mainFrame(): { isDestroyed: () => boolean; detached: boolean; send: (channel: string, payload: unknown) => void } {
+    return {
+      isDestroyed: () => this.isDestroyed(),
+      detached: false,
+      send: (channel, payload) => this.send(channel, payload)
+    }
+  }
   destroy(): void {
     this.destroyed = true
   }

@@ -16,7 +16,7 @@
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import type { RunUsage } from '../../shared/agent/transcript'
 import type { RunCost } from '../../shared/domain/pricing'
-import type { ContextCheckpoint, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
+import type { ContextCheckpoint, ContextCompactionDetail, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
 import { orphanedCheckpoints } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
@@ -812,6 +812,23 @@ function parseContextCheckpoint(row: Record<string, unknown>): ContextCheckpoint
   } catch {
     searchHits = undefined
   }
+  /*
+    ★ 解析失败一律当「没有这一份」,不抛。这一列是**派生事实**(压缩时算出来的
+    统计与 digest),它坏掉的代价只是界面上少一块面板;而一次抛异常会让
+    `listContextCheckpoints` 整条失败 —— 连压缩分隔线都画不出来了。
+    同上面 `search_hits` 那条的立场。
+  */
+  let detail: ContextCompactionDetail | undefined
+  try {
+    const parsed: unknown = row['detail'] === null || row['detail'] === undefined
+      ? undefined
+      : JSON.parse(String(row['detail']))
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      detail = parsed as ContextCompactionDetail
+    }
+  } catch {
+    detail = undefined
+  }
   return {
     id: String(row['id']),
     sessionId: String(row['session_id']),
@@ -823,6 +840,7 @@ function parseContextCheckpoint(row: Record<string, unknown>): ContextCheckpoint
     ...(row['input_tokens_before'] == null ? {} : { inputTokensBefore: Number(row['input_tokens_before']) }),
     ...(row['input_tokens_after'] == null ? {} : { inputTokensAfter: Number(row['input_tokens_after']) }),
     ...(searchHits === undefined ? {} : { searchHits }),
+    ...(detail === undefined ? {} : { detail }),
     createdAt: Number(row['created_at']),
     updatedAt: Number(row['updated_at']),
     revision: Number(row['revision'] ?? 1)
@@ -845,14 +863,15 @@ export function upsertContextCheckpoint(checkpoint: ContextCheckpoint): ContextC
     stmt(
       `INSERT INTO context_checkpoints
        (id, session_id, window_index, note, source, covered_from_message_id, covered_through_message_id,
-        input_tokens_before, input_tokens_after, search_hits, created_at, updated_at, revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        input_tokens_before, input_tokens_after, search_hits, detail, created_at, updated_at, revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET note = excluded.note, source = excluded.source,
          covered_from_message_id = excluded.covered_from_message_id,
          covered_through_message_id = excluded.covered_through_message_id,
          input_tokens_before = excluded.input_tokens_before,
          input_tokens_after = excluded.input_tokens_after,
-         search_hits = excluded.search_hits, updated_at = excluded.updated_at,
+         search_hits = excluded.search_hits, detail = excluded.detail,
+         updated_at = excluded.updated_at,
          revision = excluded.revision`
     ).run(
       checkpoint.id,
@@ -865,6 +884,7 @@ export function upsertContextCheckpoint(checkpoint: ContextCheckpoint): ContextC
       checkpoint.inputTokensBefore ?? null,
       checkpoint.inputTokensAfter ?? null,
       checkpoint.searchHits === undefined ? null : JSON.stringify(checkpoint.searchHits),
+      checkpoint.detail === undefined ? null : JSON.stringify(checkpoint.detail),
       checkpoint.createdAt,
       checkpoint.updatedAt,
       checkpoint.revision

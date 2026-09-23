@@ -233,6 +233,44 @@ export interface ContextSearchHit {
   snippet: string
 }
 
+/**
+ * 这一刀**实际**做了什么 —— 检查点上那条 note 之外的全部事实。
+ *
+ * ## 需求:压缩过后必须能回答「我丢了什么」
+ *
+ * 在此之前检查点只有 `note` 和一对 token 读数,于是用户(和下一个 agent)看到的
+ * 是「压缩了」三个字,看不到**哪些消息不再发给模型**、**摘要有没有真的读过它们**。
+ * 而这两件事恰恰是「压缩之后模型像换了个人」的全部解释。
+ *
+ * ★ 合成一个可选对象而不是往 `ContextCheckpoint` 上铺七个平行可选字段:
+ * 落库只多一列 JSON(同 `searchHits` 的先例),老行读出来是 `undefined` ——
+ * 界面对「没有这份事实」和「事实是 0」必须有不同反应,平铺成 0 会把老会话
+ * 谎报成「一条都没丢」。
+ */
+export interface ContextCompactionDetail {
+  /** 被削掉内容(工具输出清空 / 丢思考 / 图换占位)的消息条数。 */
+  foldedMessages?: number
+  /** 其中被清空的工具输出处数 —— 体积的大头。 */
+  foldedToolOutputs?: number
+  /** 真正**移出上下文**的消息条数。0 / 缺席 = 只折叠了内容,一条都没移走。 */
+  droppedMessages?: number
+  /** 最后一条被移出上下文的消息;它之前的都不再发给模型。 */
+  droppedThroughMessageId?: string
+  /**
+   * 摘要**没有**覆盖到的那一段从哪条消息开始。
+   *
+   * ★ 它存在的理由是一个真实的凭空丢失:digest 有 token 预算,超了就从最早的一侧
+   * 整条丢(见 `buildCompactionDigest`),而检查点原先一律把 `coveredThroughMessageId`
+   * 写成转录的最后一条 —— 于是那些**没进摘要**的消息被当成「已覆盖」裁掉了。
+   * 有了这一条,`projectContextWindow` 的切点就不会越过它。
+   */
+  uncoveredFromMessageId?: string
+  /** digest 因预算被整条丢弃的消息条数。 */
+  digestOmittedMessages?: number
+  /** 真正发给摘要模型的那段 digest 原文。机械压缩没有这一项(它不发请求)。 */
+  digest?: string
+}
+
 export interface ContextCheckpoint {
   id: string
   sessionId: string
@@ -244,9 +282,42 @@ export interface ContextCheckpoint {
   inputTokensBefore?: number
   inputTokensAfter?: number
   searchHits?: ContextSearchHit[]
+  /** 见 `ContextCompactionDetail`。老检查点没有这一份。 */
+  detail?: ContextCompactionDetail
   createdAt: number
   updatedAt: number
   revision: number
+}
+
+/**
+ * 「压缩之后,这一轮真正发给模型的是什么」—— 上下文检查器的数据形状。
+ *
+ * ★ 它是**投影的投影**:不搬运整份消息体(一条 tool_result 可以有 64KB),
+ * 只带每条的身份、估算占用和一行预览。界面要回答的是「谁还在、谁被削过、
+ * 谁彻底没了」,不是「把转录再渲染一遍」——那一份用户本来就在屏幕上看着。
+ */
+export type ContextWindowEntryKind = 'summary' | 'skeleton' | 'folded' | 'verbatim'
+
+export interface ContextWindowEntry {
+  /** 转录里的消息 id。摘要 / 骨架这类合成消息给的是它们自己的 id。 */
+  id: string
+  role: AgentMessage['role']
+  kind: ContextWindowEntryKind
+  tokens: number
+  /** 每个块一行的预览,已限长。 */
+  lines: string[]
+}
+
+export interface ContextWindowView {
+  checkpointId: string
+  /** 投影里的消息,顺序即发送顺序。 */
+  entries: ContextWindowEntry[]
+  /** 转录里存在、但这一份投影里已经没有的消息 id。 */
+  droppedMessageIds: string[]
+  /** 消息部分的估算占用(不含系统提示词与工具定义)。 */
+  messageTokens: number
+  /** 压缩前同一段转录的估算占用,用来给出「省了多少」。 */
+  transcriptTokens: number
 }
 
 /**

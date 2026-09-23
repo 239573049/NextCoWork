@@ -76,7 +76,7 @@ import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
 import { getEnvironments } from '../runtime'
-import { getTools, installChildRunLauncher, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener } from '../runtime'
+import { getTools, installChildRunLauncher, setAccountsChangeListener, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
@@ -95,12 +95,23 @@ import {
 import { exportProviders, importProviders } from './provider-transfer'
 import { collectImportableProviders } from '../imports/provider-import'
 import {
+  addOrReauthAccount,
   announceCredentialRef,
   cancelOAuth,
   signOut,
   startOAuth,
   submitOAuthCode
 } from './provider-auth'
+import {
+  announceAccountsSafe,
+  clearProviderAccountLimit,
+  listProviderAccounts,
+  removeProviderAccount,
+  reorderProviderAccounts,
+  setCurrentProviderAccount,
+  setProviderAccountEnabled,
+  setProviderAccountLabel
+} from './provider-accounts'
 import {
   listUserModelCatalog,
   removeUserModelCatalog,
@@ -184,10 +195,10 @@ import {
   pickWorkspace,
   updateWorkspace
 } from './workspace'
-import { listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
+import { copyWorkspacePath, listOpenTargets, listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, openWorkspaceFileWith, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
 import { getReviewChangeSet, getReviewFileDiff, precheckReviewUndo, redoReviewChangeSet, undoReviewChangeSet } from './review'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
-import { compactContext, listContextCheckpoints, previewContext, updateContextCheckpoint } from './context'
+import { compactContext, contextWindow, listContextCheckpoints, previewContext, updateContextCheckpoint } from './context'
 import {
   branchSession,
   createSession,
@@ -333,6 +344,9 @@ const handlers: HandlerMap = {
   'workspace:writeFile': (req) => writeWorkspaceFile(req),
   'workspace:mutateFile': (req) => mutateWorkspaceFile(req),
   'workspace:revealFile': (req) => revealWorkspaceFile(req),
+  'workspace:listOpenTargets': () => listOpenTargets(),
+  'workspace:openWith': (req) => openWorkspaceFileWith(req),
+  'workspace:copyPath': (req) => copyWorkspacePath(req),
   'workspace:listRecovery': (req) => listWorkspaceRecovery(req),
   'review:getChangeSet': (req) => getReviewChangeSet(req),
   'review:getFileDiff': (req) => getReviewFileDiff(req),
@@ -462,6 +476,7 @@ const handlers: HandlerMap = {
   'context:updateCheckpoint': (req) => updateContextCheckpoint(req),
   'context:compact': (req) => compactContext(req),
   'context:preview': (req) => previewContext(req),
+  'context:window': (req) => contextWindow(req),
   'storage:getStats': () => getStats(),
   'storage:vacuum': () => vacuum(),
   'storage:openDataDirectory': () => openDataDirectory(),
@@ -634,6 +649,22 @@ const handlers: HandlerMap = {
   'provider:cancelOAuth': ({ providerId }) => cancelOAuth(providerId),
   'provider:submitOAuthCode': ({ providerId, code }) => submitOAuthCode(providerId, code),
   'provider:signOut': ({ providerId }) => signOut(providerId),
+  // ── 供应商账号(OAuth 多账号,schema 第 24 条) ──
+  // ★ 写频道一律回整份列表,渲染层因此不需要自己合并(见 contract 那段注释)
+  'provider:listAccounts': ({ providerId }) => listProviderAccounts(providerId),
+  'provider:addAccount': ({ providerId }) => addOrReauthAccount(providerId),
+  'provider:reauthAccount': ({ providerId, accountId }) => addOrReauthAccount(providerId, accountId),
+  'provider:removeAccount': ({ providerId, accountId }) => removeProviderAccount(providerId, accountId),
+  'provider:setAccountEnabled': ({ providerId, accountId, enabled }) =>
+    setProviderAccountEnabled(providerId, accountId, enabled),
+  'provider:setAccountLabel': ({ providerId, accountId, label }) =>
+    setProviderAccountLabel(providerId, accountId, label),
+  'provider:setCurrentAccount': ({ providerId, accountId }) =>
+    setCurrentProviderAccount(providerId, accountId),
+  'provider:reorderAccounts': ({ providerId, accountIds }) =>
+    reorderProviderAccounts(providerId, accountIds),
+  'provider:clearAccountLimit': ({ providerId, accountId }) =>
+    clearProviderAccountLimit(providerId, accountId),
   // Agent 上游已支持三种协议;独立连接测试入口仍待接入。
   'provider:test': todo('provider:test', '步骤 13(独立连接测试入口)'),
   'model:update': (req) => updateModel(req),
@@ -899,6 +930,14 @@ export function registerIpc(): void {
   })
   // 刷新 token 之后（含刷失败标记 needsReauth）把新的登录态推给设置页
   setCredentialChangeListener(announceCredentialRef)
+  /*
+    账号被限流落闸 / 闸门解除 / 额度快照更新之后,把整份账号列表推给设置页。
+
+    ★ 这条和上面那条是两件事:上面那条由凭证刷新触发,这条由**一次上游请求失败**
+    触发。少了它,用户要关掉再打开设置页才知道「为什么刚才换号了」——
+    而那时闸门可能已经自己到期,他什么都看不到。
+  */
+  setAccountsChangeListener(announceAccountsSafe)
 
   /*
     导入服务的接线,和上面 `setMcpChangeListener` 是同一种:
