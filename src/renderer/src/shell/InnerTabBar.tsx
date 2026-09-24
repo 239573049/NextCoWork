@@ -65,6 +65,21 @@ function revealTab(strip: HTMLDivElement | null, id: string | null): void {
   activeTab?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
 }
 
+/**
+ * `+` 菜单项的图标。带 `iconUrl`(插件 `iconFile` 经主进程转出的 data URL)时
+ * 画品牌图,否则走名字闭集查 lucide。
+ *
+ * ★ `<img>` 是**非脚本上下文**,svg 里的脚本不会执行;尺寸钉在 14px,与
+ * lucide 同框不突兀。改名/主题换色都不影响它 —— 品牌图本来就是彩色的。
+ */
+function menuIcon(item: TabMenuItem): ReactNode {
+  if (item.iconUrl !== undefined) {
+    return <img src={item.iconUrl} alt="" draggable={false} className="size-[14px] rounded-[3px] object-contain" />;
+  }
+  const Icon = MENU_ICON[item.icon];
+  return <Icon size={14} />;
+}
+
 export function InnerTabBar({
   tabs,
   groupId,
@@ -325,10 +340,7 @@ export function InnerTabBar({
                 */}
                 {needsSeparator(menu.items[index - 1], item) && <MenuSeparator />}
                 <MenuItem
-                  icon={(() => {
-                    const Icon = MENU_ICON[item.icon];
-                    return <Icon size={14} />;
-                  })()}
+                  icon={menuIcon(item)}
                   accelerator={prettyAccelerator(item.accelerator)}
                   onSelect={() => {
                     onOpen(item);
@@ -350,10 +362,7 @@ export function InnerTabBar({
                 {group.items.map((item) => (
                   <MenuItem
                     key={item.id}
-                    icon={(() => {
-                      const Icon = MENU_ICON[item.icon];
-                      return <Icon size={14} />;
-                    })()}
+                    icon={menuIcon(item)}
                     onSelect={() => {
                       onOpen(item);
                       close();

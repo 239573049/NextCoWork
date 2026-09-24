@@ -372,6 +372,35 @@ declare module 'nextcowork' {
       url: string,
       options?: { open?: 'tab' | 'right' }
     ): Thenable<boolean>
+
+    /**
+     * 在指定工作区的**根目录**开一个终端 Tab,并在里面启动 `command`。
+     *
+     * ```ts
+     * // claude-code 插件:把用户的 baseURL / key / 模型以环境变量带进 CLI
+     * const result = await ncw.tabs.openTerminal({
+     *   workspaceId, command: 'claude', env: { ANTHROPIC_BASE_URL: baseUrl }
+     * })
+     * if (result.opened === false) throw new Error(result.reason)
+     * ```
+     *
+     * - 需要 `process` 能力,且 `command` 的基名必须命中清单 `allowedCommands`
+     *   —— 与 `process.exec` 同一份白名单,能进交互式终端的命令不比能一次性
+     *   执行的更宽;
+     * - `env` 会注入终端子进程环境(不落盘、不进终端回滚缓冲),最多 16 项、
+     *   单值 ≤4096 字符;
+     * - **不接受 `cwd`**:恒为该工作区的根目录;
+     * - `title` 是 `%key%` 形式的 l10n key 片段,作为终端 Tab 的标题;
+     * - `opened: false` 表示没开成,`reason: 'remote'` = SSH 远程工作区
+     *   (一期不支持),`'declined'` = 工作区不存在或参数被拒。
+     */
+    export function openTerminal(options: {
+      workspaceId: string
+      command: string
+      args?: string[]
+      env?: Record<string, string>
+      title?: string
+    }): Thenable<{ opened: boolean; reason?: 'remote' | 'declined' }>
   }
 
   // ─────────────────── customEditors ─────────────────────────
@@ -444,6 +473,9 @@ declare module 'nextcowork' {
      * @param commandId 必须是清单 `contributes.commands` 里声明过的 ——
      * 没声明的会被静默忽略(菜单、快捷键、命令面板都按 id 分发,
      * 允许运行期注册任意 id 等于让插件能劫持别人的命令)。
+     * @param handler 的 `args` 是**宿主调用点上下文**,不是用户输入:
+     * `+` 菜单触发的调用带 `{ workspaceId }`(菜单在哪个工作区点的)。
+     * 它只是来源信息,命令的语义仍由清单声明。
      */
     export function registerCommand(commandId: string, handler: (args?: unknown) => unknown): Disposable
     /** ★ 只能执行**自己**贡献的命令。跨插件调用会被拒。 */

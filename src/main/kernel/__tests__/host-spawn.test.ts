@@ -133,6 +133,53 @@ describe.skipIf(process.platform === 'win32')('spawn 的 env 清洗', () => {
       else process.env.NEXTCOWORK_SPAWN_PROBE = before
     }
   })
+
+  /**
+   * 需求:Agent 的 shell 命令默认跟随应用/系统代理 —— `nodeSpawn` 的 `extraEnv`
+   * 是那撮代理变量的入口(electron 侧由 `shellProxyEnv` 提供),这里钉两件事:
+   * 变量真的进了子进程;同步版和 Promise 版 provider 都被接受。
+   */
+  describe('extraEnv 注入(代理跟随的入口)', () => {
+    it('注入的变量被子进程看到,同步与 Promise 两种 provider 都行', async () => {
+      const sync = nodeSpawn(() => '/bin/sh', () => ({ NCW_SPAWN_EXTRA: 'sync' }))
+      const r1 = await sync('echo "${NCW_SPAWN_EXTRA}"', opts())
+      expect(r1.stdout.trim()).toBe('sync')
+
+      const async = nodeSpawn(() => '/bin/sh', async () => ({ NCW_SPAWN_EXTRA: 'async' }))
+      const r2 = await async('echo "${NCW_SPAWN_EXTRA}"', opts())
+      expect(r2.stdout.trim()).toBe('async')
+    })
+
+    /** ★ 注入不越过用户自己的环境:provider 里带了同名键也不该盖掉 process.env */
+    it('注入的键与父进程撞名时不覆盖父进程', async () => {
+      const before = process.env.NCW_SPAWN_PARENT
+      process.env.NCW_SPAWN_PARENT = 'parent'
+      try {
+        const s = nodeSpawn(() => '/bin/sh', () => ({ NCW_SPAWN_PARENT: 'injected' }))
+        const r = await s('echo "${NCW_SPAWN_PARENT}"', opts())
+        expect(r.stdout.trim()).toBe('parent')
+      } finally {
+        if (before === undefined) delete process.env.NCW_SPAWN_PARENT
+        else process.env.NCW_SPAWN_PARENT = before
+      }
+    })
+
+    /**
+     * ★ 代理变量是异步问来的,await 期间 run 可能已被中断 —— 这条钉的是
+     * 「不会先把命令跑起来再被杀」:aborted 的 signal 必须连进程都不起。
+     */
+    it('await 期间 signal 已响时不启动进程,直接按中断抛出', async () => {
+      const ac = new AbortController()
+      const deferred = new Promise<Record<string, string>>((resolve) => {
+        setTimeout(() => {
+          ac.abort()
+          resolve({})
+        }, 20)
+      })
+      const s = nodeSpawn(() => '/bin/sh', () => deferred)
+      await expect(s('echo hi', opts({ signal: ac.signal }))).rejects.toSatisfy(isAbortError)
+    })
+  })
 })
 
 describe.skipIf(process.platform === 'win32')('spawn 超时', () => {

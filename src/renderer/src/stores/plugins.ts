@@ -63,7 +63,7 @@ interface PluginsState {
   grant: (pluginId: string, permissions: PluginPermission[]) => Promise<void>
   revoke: (pluginId: string, permissions: PluginPermission[]) => Promise<void>
   loadActivity: (pluginId?: string) => Promise<void>
-  runCommand: (pluginId: string, commandId: string) => Promise<void>
+  runCommand: (pluginId: string, commandId: string, args?: { workspaceId: string }) => Promise<void>
   loadMarket: (query?: { q?: string; category?: string }) => Promise<void>
   installFromMarket: (slug: string, version?: string) => Promise<void>
   checkUpdates: (force?: boolean) => Promise<void>
@@ -253,7 +253,7 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
     set({ activity })
   },
 
-  async runCommand(pluginId, commandId) {
+  async runCommand(pluginId: string, commandId: string, args?: { workspaceId: string }): Promise<void> {
     /*
       ★ **失败必须说出来。**
 
@@ -266,14 +266,22 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
       收口在这一层而不是每个调用点:漏一个调用点就漏一种静默失败。
     */
     try {
-      await invoke('plugins:runCommand', { pluginId, commandId })
+      await invoke('plugins:runCommand', { pluginId, commandId, ...(args === undefined ? {} : { args }) })
     } catch (error) {
       /*
         面向用户的是一句人话;原始错误进 console 供排查 —— 主进程那边抛出来的
         是英文诊断句(比如 `plugin acme.excalidraw could not be activated`),
         它不该出现在界面上,但排查时又不能没有。`[plugins]` 前缀同 App.tsx。
+
+        ★ `remote-unsupported` 是宿主与自家 CLI 插件(claude-code / codex)的
+        约定标记:插件在 `tabs.openTerminal` 拿到 `reason: 'remote'` 后抛这个
+        词。对它给一句**说得到点上**的话,其余失败维持通用文案。
       */
       console.error(`[plugins] ${pluginId} 的命令 ${commandId} 执行失败`, error)
+      if (error instanceof Error && error.message.includes('remote-unsupported')) {
+        toast.error(translate('plugins.terminalRemote'), `plugin-command-${commandId}`)
+        return
+      }
       toast.error(translate('plugins.commandFailed', { plugin: pluginId }), `plugin-command-${commandId}`)
     }
   },
@@ -374,6 +382,10 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
           // 清单里写的是 `%cmd.new%`,注册进 i18n 的是 `plugin.<id>.cmd.new`。
           titleKey: `plugin.${plugin.id}.${command.title.slice(1, -1)}`,
           icon: normalizeMenuIcon(command.icon),
+          // 品牌图标(iconFile)主进程已转成 data URL 随 catalog 下来;没有就走名字闭集。
+          ...(plugin.commandIcons?.[contribution.command] !== undefined
+            ? { iconUrl: plugin.commandIcons[contribution.command] }
+            : {}),
           group,
           order,
           pluginId: plugin.id,

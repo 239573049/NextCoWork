@@ -61,7 +61,7 @@ import { installPluginDirectory, installPluginZip, readInstalledManifest } from 
 import { explainUnsupported, inactiveContributions } from './unsupported'
 import { recordActivity, clearActivity } from './diagnostics'
 import { CapabilityError, invokeCapability, prepareExec, type CapabilityContext, type PluginScmAdapter } from './rpc'
-import { matchesPathScope, narrowWorkspacePath, wrapPluginContext } from './capabilities'
+import { matchesPathScope, narrowCommand, narrowLaunchEnv, narrowWorkspacePath, wrapPluginContext } from './capabilities'
 import { isValidPluginToolName, pluginToolId, toolRegistrationFor, type PluginToolDeclaration } from './tools'
 import { sanitizeToolCard } from '../../shared/agent/tool-card'
 import type { ToolProgress } from '../../shared/agent/tool'
@@ -231,6 +231,20 @@ export interface PluginManagerDeps {
    */
   openTab: (pluginId: string, target: PluginTabTarget) => void
   /**
+   * 在指定工作区根目录开一个终端 Tab 并启动命令(`tabs.openTerminal` 的落地)。
+   *
+   * ★ 分工:manager 那边只做**清单级参数门**(allowedCommands / env 体量),
+   * 「工作区存不存在、是不是远程、spec 备在哪」这些要碰工作区存储与
+   * TerminalHost 的事全在这一侧 —— 测试里的假 deps 因此不必起任何 pty。
+   *
+   * 返回 `opened: false` 而不是抛:同 `openWebApp`,「这个工作区开不了」
+   * 是调用方(插件)要拿去给用户的一句话,不是一次系统故障。
+   */
+  launchTerminal: (
+    pluginId: string,
+    spec: { workspaceId: string; command: string; args: string[]; env: Record<string, string>; title?: string }
+  ) => { opened: boolean; reason?: 'remote' | 'declined' }
+  /**
    * 向用户发起一次交互(选项 / 输入 / 确认),等他回答。
    *
    * ★ 主进程**不画 UI**:这里只把请求广播出去,由渲染层用既有的
@@ -278,6 +292,11 @@ interface PluginRecord {
   statusBar: Map<string, PluginStatusBarItem>
   /** 有未保存改动的自定义编辑器文档:`documentId → 文件路径` */
   dirtyDocuments: Map<string, string>
+  /**
+   * 命令的品牌图标(`iconFile`)读出的 data URL,按 commandId 索引。
+   * 装载时读一次;catalog 投影(`project`)原样带走 —— 菜单在激活前就要画。
+   */
+  commandIcons: Record<string, string>
   /** 本插件对外导出的 API 方法名(`ncw.plugins.exposeApi`)。禁用时清空。 */
   exposedApi: Set<string>
   /** 本插件订阅了的事件 topic —— 禁用时要从全局订阅表里摘掉。 */
@@ -387,6 +406,7 @@ export class PluginManager {
       name: t.name,
       externalName: this.deps.reserveName(pluginToolId(id, t.name))
     }))
+    const commandIcons = record.commandIcons
     return {
       id,
       manifest: record.manifest,
@@ -401,8 +421,43 @@ export class PluginManager {
       updatedAt: record.updatedAt,
       statusBar: [...record.statusBar.values()],
       ...(tools.length > 0 ? { tools } : {}),
+      ...(Object.keys(commandIcons).length > 0 ? { commandIcons } : {}),
       ...(pending.length > 0 ? { pendingPermissions: pending } : {})
     }
+  }
+
+  /**
+   * 读清单里每条命令的 `iconFile`,转成 data URL 随 catalog 下发。
+   *
+   * ★ **读不出来不是装载失败**。图标是装饰,一个被升级/迁移弄丢的 svg 不该把
+   * 整个插件顶成 `error` —— 丢的是这一条命令的图标,菜单回落到名字闭集,
+   * 诊断里留一条 warn 供作者排查。与 `publishLocaleBundles` 同一取向。
+   *
+   * ★ 尺寸上限在这里落:装载时读进内存、再随每次 catalog 广播整体复制,
+   * 不设限的话一个「图标」就是一条常驻的内存税。
+   */
+  private async readCommandIcons(
+    manifest: PluginManifest,
+    root: string,
+    diagnostics: PluginDiagnostic[]
+  ): Promise<Record<string, string>> {
+    const out: Record<string, string> = {}
+    const maxBytes = 32 * 1024
+    for (const command of manifest.contributes.commands) {
+      if (command.iconFile === undefined) continue
+      try {
+        const bytes = await fs.readFile(join(root, command.iconFile))
+        if (bytes.byteLength > maxBytes) {
+          diagnostics.push({ path: `contributes.commands.${command.command}.iconFile`, message: `icon file is larger than ${maxBytes} bytes; ignored`, level: 'warn' })
+          continue
+        }
+        const mime = command.iconFile.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+        out[command.command] = `data:${mime};base64,${bytes.toString('base64')}`
+      } catch (error) {
+        diagnostics.push({ path: `contributes.commands.${command.command}.iconFile`, message: `icon file could not be read: ${(error as Error).message}`, level: 'warn' })
+      }
+    }
+    return out
   }
 
   // ─────────────────────────── 装载 ───────────────────────────
@@ -507,6 +562,7 @@ export class PluginManager {
       touchedAt: 0,
       commands: new Set(),
       tools: new Map(),
+      commandIcons: await this.readCommandIcons(manifest, root, diagnostics),
       interceptor: false,
       contextProvider: false,
       appearanceSubscriber: false,
@@ -856,7 +912,7 @@ export class PluginManager {
 
   // ─────────────────────────── 命令 ───────────────────────────
 
-  async runCommand(pluginId: string, commandId: string): Promise<void> {
+  async runCommand(pluginId: string, commandId: string, args?: Record<string, unknown>): Promise<void> {
     const record = this.records.get(pluginId)
     if (record === undefined) throw new Error(`unknown plugin: ${pluginId}`)
     if (!record.manifest.contributes.commands.some((c) => c.command === commandId)) {
@@ -877,7 +933,11 @@ export class PluginManager {
     }
     await this.deps.runtime.invoke(
       pluginId,
-      { id: 0, kind: 'command.run', payload: { commandId } },
+      /*
+        args 是宿主**调用点上下文**(目前只有 `+` 菜单附带的 workspaceId),
+        不是插件的入参通道 —— 命令的语义由清单声明,这里只透传来源信息。
+      */
+      { id: 0, kind: 'command.run', payload: { commandId, ...(args === undefined ? {} : { args }) } },
       PLUGIN_TIMEOUT.COMMAND_MS
     )
   }
@@ -1393,6 +1453,40 @@ export class PluginManager {
         }
         this.deps.openTab(pluginId, { kind: 'browser', url: p.url, open: p.open ?? 'tab' })
         return { data: { opened: true }, summary: `open browser ${hostOf(p.url)}` }
+      }
+
+      /*
+        ───────── 打开终端 ─────────
+
+        与 `process.exec` 共用 `narrowCommand` 这一份白名单门 —— 能开进交互式
+        终端的命令不比能一次性执行的更宽,两处各挂一份清单迟早分叉。
+        「工作区存不存在、是不是远程」manager 判不了(它看不到工作区存储),
+        交给 `deps.launchTerminal`;那边的拒绝同样以 `opened: false` 回,
+        插件拿 reason 去给用户一句话。
+      */
+      case 'tabs.openTerminal': {
+        const p = rawParams as { workspaceId: string; command: string; args?: string[]; env?: Record<string, string>; title?: string }
+        if (typeof p.workspaceId !== 'string' || p.workspaceId === '') {
+          return { data: { opened: false, reason: 'declined' as const }, summary: 'rejected terminal: no workspace' }
+        }
+        const narrowed = narrowCommand(record.manifest.allowedCommands, p.command, p.args ?? [])
+        if (!narrowed.ok) return { data: { opened: false, reason: 'declined' as const }, summary: `rejected terminal command: ${narrowed.reason}` }
+        const env = narrowLaunchEnv(p.env)
+        if (!env.ok) return { data: { opened: false, reason: 'declined' as const }, summary: `rejected terminal env: ${env.reason}` }
+        const title = typeof p.title === 'string' && p.title.length > 0 && p.title.length <= 128 && p.title.startsWith('%') && p.title.endsWith('%')
+          ? p.title
+          : undefined
+        const result = this.deps.launchTerminal(pluginId, {
+          workspaceId: p.workspaceId,
+          command: narrowed.value.command,
+          args: narrowed.value.args,
+          env: env.value,
+          ...(title === undefined ? {} : { title })
+        })
+        return {
+          data: result,
+          summary: result.opened ? `open terminal: ${narrowed.value.command}` : `terminal declined: ${result.reason ?? 'unknown'}`
+        }
       }
 
       case 'configuration.get':

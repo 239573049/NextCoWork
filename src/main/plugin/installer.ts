@@ -333,6 +333,13 @@ function assertPackageFiles(
   if (manifest.icon !== undefined && !hasFile(manifest.icon)) {
     throw new PluginInstallError(`icon "${manifest.icon}" is missing from the package`)
   }
+  // 命令的品牌图标(iconFile)与包级 icon 同一条规矩:引用了就得真的在包里。
+  // 缺了的话菜单会在运行期静默回落到拼图块,而作者不会收到任何提示。
+  for (const command of manifest.contributes.commands) {
+    if (command.iconFile !== undefined && !hasFile(command.iconFile)) {
+      throw new PluginInstallError(`command "${command.command}" iconFile "${command.iconFile}" is missing from the package`)
+    }
+  }
   if (manifest.l10n !== undefined) {
     if (!hasDir(manifest.l10n)) throw new PluginInstallError(`l10n directory "${manifest.l10n}" is missing`)
     for (const file of SUPPORTED_LOCALE_FILES) {

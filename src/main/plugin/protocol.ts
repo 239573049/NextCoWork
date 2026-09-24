@@ -349,7 +349,8 @@ export const tools = {
 export const tabs = {
   openCustomEditor: (viewType, path) => call('tabs.openCustomEditor', { viewType, path }),
   openWebApp: (webAppId) => call('tabs.openWebApp', { webAppId }).then((r) => r.opened),
-  openBrowser: (url, options) => call('tabs.openBrowser', { url, ...(options ?? {}) }).then((r) => r.opened)
+  openBrowser: (url, options) => call('tabs.openBrowser', { url, ...(options ?? {}) }).then((r) => r.opened),
+  openTerminal: (options) => call('tabs.openTerminal', options ?? {}).then((r) => ({ opened: r.opened === true, ...(r.reason === undefined ? {} : { reason: r.reason }) }))
 }
 
 /*

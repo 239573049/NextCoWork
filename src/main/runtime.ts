@@ -1676,8 +1676,13 @@ function childRequestFor(
       ★ 取 min,不是取子代理声明的那个。否则一个被投毒的 MCP 工具描述
       可以诱导主 agent 派一个子 agent 去做它自己不被允许做的事 ——
       这是**真实的提权路径**,不是理论风险(见 `minPermission` 的注释)。
+
+      ★ 取 `parent.permissionMode`(父 run 此刻的活值),不取
+      `parentReq.permissionMode`(父 run 开始时的快照)——用户在派子代理之前
+      把档位调宽,子代理理应看见那次调整,而不是继续背着父 run 起跑那一刻
+      早就作废的旧档位。
     */
-    permissionMode: minPermission(parentReq.permissionMode, def.permissionMode ?? 'full'),
+    permissionMode: minPermission(parent.permissionMode, def.permissionMode ?? 'full'),
     ...selection,
     skillIds: parentReq.skillIds,
     skillSelectionMode: parentReq.skillSelectionMode,
@@ -2098,9 +2103,14 @@ async function reviewSensitiveOperation(
 }
 
 function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceEnvironment): ApproveFn {
-  // 与 permissionMode 一样按 run 冻结，避免用户改设置后同一轮请求前后使用不同审核器。
+  // 审核器按 run 冻结，避免用户改设置后同一轮请求前后使用不同审核器。
   // ★ 别名和供应商必须在**同一刻**冻结:一个冻结一个现取的话,用户中途换了供应商
   //   就会拼出「旧别名 + 新供应商」,而这一轮的审核器是谁将无从解释。
+  //
+  // ★ 权限档位**不**在此列——曾经也按 run 冻结,现在改成读 `handle.permissionMode`
+  //   (`RunHandle` 上的活值,见其字段注释)。理由:审核器换了会让「同一轮前后用不同
+  //   AI 审核」这种事无法解释,但权限档位调宽是用户在这个 run 还没结束时主动做的
+  //   选择,冻结它的代价是「切到完全访问却要等下一句话」——这正是本次要修的问题。
   const { permissionReviewerModel: reviewerModel,
     permissionReviewerModelProviderId: reviewerModelProviderId } = store.getSettings()
   // 契约要求返回 Promise;策略本身是同步的纯函数
@@ -2110,7 +2120,7 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
     const trustedPlanFileTool = planWorkflowEnabled
       && ['EnterPlanMode', 'Write', 'Edit', 'ExitPlanMode'].includes(tool.internalId)
     const outcome = evaluate({
-      mode: req.permissionMode,
+      mode: handle.permissionMode,
       // Plan mode fences Write/Edit to one generated .plan file, so its workflow does not prompt twice.
       readOnly: tool.readOnly || trustedPlanFileTool,
       destructive: tool.destructive,
@@ -2181,7 +2191,7 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
       },
       askRule: matchPermissionRules(local.permissions.ask, tool.internalId, input),
       allowRule: matchPermissionRules(local.permissions.allow, tool.internalId, input),
-      autoReview: req.permissionMode === 'auto' && tool.destructive
+      autoReview: handle.permissionMode === 'auto' && tool.destructive
     })
     if (verdict.kind === 'deny') return { kind: 'deny', reason: verdict.reason }
     if (verdict.kind === 'allow') return { kind: 'allow_once' }

@@ -12,6 +12,7 @@ import type { AgentEvent, ActiveRunEntry, RunSnapshot } from '../../shared/agent
 import type { RunRequest } from '../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../shared/agent/interaction'
 import type { InterjectItem } from '../../shared/agent/interject'
+import type { PermissionMode } from '../../shared/agent/permission'
 import { interactions } from '../kernel/interaction-gate'
 import { agentShells } from '../agent-shells'
 import { IpcError, toAgentError } from './errors'
@@ -325,6 +326,27 @@ export function interjectRun(
     throw new IpcError('unknown', '当前窗口没有订阅这个运行')
   }
   handle.setInterject(req.items)
+}
+
+/**
+ * 权限档位药丸切换时调用,让**这个正在跑的 run**接下来的工具审批立刻改用新档位
+ * ——契约注释里那句「不必等到下一条新消息」就是靠这条频道兑现的。
+ *
+ * ★ run 不在、或已经跑完时静默返回,不抛错:同一类竞态见 `interjectRun` 的注释
+ * (用户点下拉的瞬间 run 正好收尾是正常情况,不算失败)。
+ *
+ * ★ 订阅校验与 `interjectRun` 同源:runId 是渲染层 mint 的,光有 id 不构成授权。
+ */
+export function setRunPermissionMode(
+  req: { runId: string; mode: PermissionMode },
+  ctx: WindowContext
+): void {
+  const handle = runs.get(req.runId)
+  if (handle === undefined || handle.status !== 'running') return
+  if (!windows.isSubscribed(runTopic(req.runId), ctx.sender)) {
+    throw new IpcError('unknown', '当前窗口没有订阅这个运行')
+  }
+  handle.setPermissionMode(req.mode)
 }
 
 /**

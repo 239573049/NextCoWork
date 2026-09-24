@@ -189,7 +189,8 @@ function DockGroup({ node, workspace, fallbackModel, maxOutputTokens, runningSes
       return
     }
     if (item.pluginId === undefined) return
-    void usePluginsStore.getState().runCommand(item.pluginId, item.action.commandId)
+    // args 带上菜单所在的工作区:插件终端这类能力要知道「在哪个工作区里起」。
+    void usePluginsStore.getState().runCommand(item.pluginId, item.action.commandId, { workspaceId: workspace.id })
   }
   const onClose = async (id: string): Promise<void> => {
     const target = tabs.find((tab) => tab.id === id)

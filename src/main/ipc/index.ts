@@ -70,7 +70,7 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, broadcastActiveRuns, interjectRun, listInteractions, respondInteraction, startChildRun, startRun, stopToolCall } from './agent'
+import { abortRun, attachRun, broadcastActiveRuns, interjectRun, listInteractions, respondInteraction, setRunPermissionMode, startChildRun, startRun, stopToolCall } from './agent'
 import { runs } from '../kernel/run-registry'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
@@ -529,6 +529,7 @@ const handlers: HandlerMap = {
   'agent:attach': (req, ctx) => attachRun(req, ctx),
   'agent:abort': (req) => abortRun(req),
   'agent:interject': (req, ctx) => interjectRun(req, ctx),
+  'agent:setPermissionMode': (req, ctx) => setRunPermissionMode(req, ctx),
   'agent:respondInteraction': respondInteraction,
   'agent:listInteractions': listInteractions,
   'agent:listTools': ({ workspaceId }) => {

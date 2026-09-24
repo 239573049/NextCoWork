@@ -16,6 +16,7 @@ import type { AgentError } from '../../shared/agent/error'
 import type { AgentEvent, RunSnapshot, RunStatus } from '../../shared/agent/event'
 import type { PendingInteraction } from '../../shared/agent/interaction'
 import type { InterjectItem } from '../../shared/agent/interject'
+import type { PermissionMode } from '../../shared/agent/permission'
 import type { RunRequest } from '../../shared/agent/run-request'
 
 export type RunListener = (event: AgentEvent, seq: number) => void
@@ -72,6 +73,24 @@ export class RunHandle {
   private interject: InterjectItem[] = []
   private readonly internalInterject = new Map<string, InterjectItem>()
 
+  /**
+   * 权限档位的**当前生效值**——初始等于 `RunRequest.permissionMode`(那份是
+   * run 开始时的快照,定义见 `run-request.ts:143`,永远不变,给「重新生成」
+   * 「目标续跑」这类要读「这轮当初是什么样」的地方用)。
+   *
+   * 需求:用户中途把界面上的权限药丸调宽,应该立刻对这个 run **接下来**的
+   * 工具调用生效,而不必等到下一条新消息(旧行为,原因是 `approveWith` 直接读
+   * `req.permissionMode`,而那是不可变快照)。这里额外开一个可变字段,由
+   * `agent:setPermissionMode` 写入,`approveWith`/`childRequestFor` 改读它。
+   * 不满足会怎样:用户已经点了「完全访问」,这一轮后续每一次工具调用依然
+   * 弹出审批,和界面上刚选的档位对不上,只能等下一句话才生效。
+   *
+   * ★ 只影响**还没做出的**审批判定,不会回头解出已经在等用户点的那个弹窗——
+   * 那个弹窗可能是因为钩子/工作区 ask 规则强制问人(`decideAfterHooks` 里
+   * `forcedAsk` 压过档位),放宽档位不该替用户把它自动点掉。
+   */
+  private livePermissionMode: PermissionMode
+
   constructor(req: RunRequest) {
     this.runId = req.runId
     this.sessionId = req.sessionId
@@ -79,6 +98,17 @@ export class RunHandle {
     this.parentRunId = req.parentRunId
     this.parentSessionId = req.parentSessionId
     this.depth = req.depth
+    this.livePermissionMode = req.permissionMode
+  }
+
+  /** 当前生效的权限档位——见 `livePermissionMode` 字段注释 */
+  get permissionMode(): PermissionMode {
+    return this.livePermissionMode
+  }
+
+  /** `agent:setPermissionMode` 的落点:切换发生在**这个 run 身上**,不改 `RunRequest` 快照 */
+  setPermissionMode(mode: PermissionMode): void {
+    this.livePermissionMode = mode
   }
 
   /** ★ 必传给每个工具的 ctx.signal(方案 §4.3)—— 只断 SSE 不断工具会留下僵尸进程 */

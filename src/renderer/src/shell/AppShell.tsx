@@ -146,16 +146,25 @@ export function AppShell({
     当前工作区、翻译标题、开 Tab。安全判断主进程已经做完了。
   */
   useEffect(() => on('plugins:openTab', ({ pluginId, target }) => {
-    const workspaceId = useWindowStore.getState().activeWorkspaceId;
+    /*
+      ★ 插件终端开在**目标工作区**(菜单在哪个工作区点的,target.workspaceId
+      就是哪个),不是「当前活动」的那个 —— 后者只做其余目标的兜底。
+    */
+    const workspaceId = target.kind === 'terminal' ? target.workspaceId : useWindowStore.getState().activeWorkspaceId;
     if (workspaceId === null) return;
     /*
       标题:webapp 的 title 是 `%key%`,注册进 i18n 的是 `plugin.<id>.<key>`。
       ★ 这里就 `t()` 掉,因为 Tab 标题会**跟着布局落盘** —— 落一个 key 进去的话,
       重启之后 Tab 条上写的就是 `plugin.ncw.bilibili.app.home`。
+      插件终端同理;title 缺省时交给 makeTab 落「终端」默认文案。
     */
-    const title = target.kind === 'webapp'
-      ? t(`plugin.${pluginId}.${target.title.replace(/^%|%$/g, '')}` as Parameters<typeof t>[0])
-      : new URL(target.url).host;
+    const title = target.kind === 'terminal'
+      ? (target.title !== undefined
+          ? t(`plugin.${pluginId}.${target.title.replace(/^%|%$/g, '')}` as Parameters<typeof t>[0])
+          : undefined)
+      : target.kind === 'webapp'
+        ? t(`plugin.${pluginId}.${target.title.replace(/^%|%$/g, '')}` as Parameters<typeof t>[0])
+        : new URL(target.url).host;
     const placement = placePluginTab(target, pluginId, title);
     useTabsStore.getState().open(workspaceId, placement.kind, placement.pane, placement.init);
     /*

@@ -68,6 +68,12 @@ export interface TabInit {
   /** 给 changes(改动审查)用:定位到哪一轮 run 的改动集 */
   runId?: string
   sessionId?: string
+  /**
+   * 插件终端(`tabs.openTerminal`):主进程按这个 id 备好了启动 spec(env + argv),
+   * Tab 必须原样引用。★ 不传(普通新建终端)就本地铸一个 —— 换 id 的症状是
+   * create 起了一个裸 shell,插件注入的配置**静默丢失**,零报错。
+   */
+  terminalId?: string
 }
 
 /**
@@ -96,7 +102,7 @@ function makeTab(kind: InnerTabKind, pane: TabPane, init: TabInit = {}): InnerTa
       */
       return { id, kind, pane, title: init.title ?? translate('tab.newChat'), ref: { sessionId: null } }
     case 'terminal':
-      return { id, kind, pane, title: init.title ?? translate('tab.terminal'), ref: { terminalId: ulid() } }
+      return { id, kind, pane, title: init.title ?? translate('tab.terminal'), ref: { terminalId: init.terminalId ?? ulid() } }
     case 'doc':
       return { id, kind, pane, title: init.title ?? translate('tab.untitledDoc'), ref: { path } }
     case 'draw':

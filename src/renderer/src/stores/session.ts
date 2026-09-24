@@ -43,7 +43,7 @@ import {
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import { hasSeqGap } from '../../../shared/ipc/contract'
 import { ulid } from '../../../shared/util/id'
-import { abortRun, attachRun, interjectRun, onActiveRuns, onAgentEvent, startRun } from '../services/agent'
+import { abortRun, attachRun, interjectRun, onActiveRuns, onAgentEvent, setRunPermissionMode, startRun } from '../services/agent'
 import { getSessionInput, persistSessionInput } from '../services/app'
 import { compactContext as compactSessionContext } from '../services/context'
 import { replaceHistory } from '../services/sessions'
@@ -103,12 +103,15 @@ export interface SessionState {
   editInput: (id: string, text: string) => void
   /**
    * 权限档位药丸切换时调用:还没被消费的排队消息**改用新档位**,
-   * 而不是继续背着入队那一刻冻结的旧档位。
+   * 而不是继续背着入队那一刻冻结的旧档位;**以及**如果这个会话正有一个 run
+   * 在跑,把新档位同步推给它(`agent:setPermissionMode`),让它接下来的工具
+   * 调用立刻改用新档位,不必等这个 run 跑完、发一条新消息才生效。
    *
    * ★ 只改 `permissionMode` 这一个字段,不动 `options` 里的模型/思考强度/联网开关 ——
    * 那几个字段「逐条冻结」的既有设计(见 `queued-input.ts` 头注)仍然成立,
    * 这里是刻意为「审批档位」单独开的例外:用户切到完全访问,图的就是不想再被后面
-   * 排着的每一条追问打断,那份意图理应立刻覆盖到整条队列,而不是只对新排的消息生效。
+   * 排着的每一条追问打断,那份意图理应立刻覆盖到整条队列和正在跑的这个 run,
+   * 而不是只对新排的消息生效。
    */
   retagQueuedPermission: (mode: PermissionMode) => void
   /**
@@ -345,6 +348,11 @@ function createSessionStore(sessionId: string): SessionStore {
 
     retagQueuedPermission(mode) {
       const s = get()
+      if (s.activeRunId !== null) {
+        void setRunPermissionMode(s.activeRunId, mode).catch((err: unknown) => {
+          console.error('[agent] 同步权限档位失败:', err)
+        })
+      }
       if (s.queuedInputs.length === 0) return
       set({
         queuedInputs: s.queuedInputs.map((q) =>

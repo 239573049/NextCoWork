@@ -1,16 +1,18 @@
 /**
  * KernelHost 的 Electron 实现 —— **electron 只在这里泄漏**(方案 §2 的拓扑图)。
  *
- * `host.ts` 已经把 `nodeHost()` 定义成真实默认值,所以这里只覆盖三项:
+ * `host.ts` 已经把 `nodeHost()` 定义成真实默认值,所以这里只覆盖四项:
  *
  * | 端口 | 为什么非 Electron 不可 |
  * |---|---|
  * | `paths`   | 统一的用户级 `~/.next-cowork` 数据根与系统临时目录 |
  * | `secrets` | 程序主密钥加密后存 SQLite;旧 safeStorage 密文仍需 Electron 解密迁移 |
  * | `fetch`   | `net.fetch` 走 Chromium 网络栈,于是 `net/proxy.ts` 那一次 `setProxy` 对全应用的出站请求一起生效 |
+ * | `childEnv`| Agent 子进程的代理环境变量 —— 系统代理/PAC 只有 Chromium 的 session 知道,`shellProxyEnv` 负责去问 |
  *
  * 其余端口(clock / logger / fs / spawn)在 Electron 里和在 Node 里是同一件事,
- * 覆盖它们只会多一份要同步维护的代码。
+ * 覆盖它们只会多一份要同步维护的代码。(spawn 会**消费** childEnv,见 nodeHost;
+ * 那是转发,不是覆盖。)
  */
 import { app, net, safeStorage } from 'electron'
 import {
@@ -33,6 +35,7 @@ import {
 } from '../secrets/credential-crypto'
 import { configProfileDirectory } from '../db/config-profile'
 import { attachmentRoot } from '../net/attachment-protocol'
+import { shellProxyEnv } from '../net/proxy'
 import type { KernelHost } from '../kernel/host'
 import { nodeHost } from '../kernel/host'
 import { agentShell } from '../kernel/node-spawn'
@@ -172,7 +175,9 @@ export function electronHost(): KernelHost {
         temp: () => app.getPath('temp')
       },
       secrets: electronSecrets(),
-      fetch: electronFetch
+      fetch: electronFetch,
+      // Agent 的 shell 命令默认跟随应用/系统代理 —— 见上面表格里 childEnv 那一行
+      childEnv: shellProxyEnv
     }, () => agentShell(getSettings().shell))
   )
 }

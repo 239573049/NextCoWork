@@ -7,6 +7,7 @@
  * 两者唯一的交点是 `PluginManager`,而它对两边的信任级别是不一样的。
  */
 import { app, clipboard, dialog, shell } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { ResolvedTheme } from '../../shared/domain/settings'
 import { pluginAppearance, setPluginRuntimeDir } from '../plugin/protocol'
@@ -40,6 +41,7 @@ import {
   installPluginToolProvider
 } from '../runtime'
 import { windows } from '../window/registry'
+import { terminalHost } from '../terminal-host'
 import { IpcError } from './errors'
 
 let manager: PluginManager | null = null
@@ -286,6 +288,41 @@ export async function startPlugins(): Promise<void> {
     // 网页 / 视图 Tab 同理:只广播,落点由 `stores/tabs.ts` 决定。
     openTab: (pluginId, target) => {
       windows.emitToAll('plugins:openTab', { pluginId, target })
+    },
+    /*
+      `tabs.openTerminal` 的落地。清单级参数门(allowedCommands / env 体量)
+      已经在 manager 那边过了,这里只剩要碰工作区存储与 TerminalHost 的三件事:
+
+      1. 工作区必须存在 —— 不存在按 `declined` 拒,插件拿不到一个模糊的失败;
+      2. ★ **远程工作区一律拒**(`reason: 'remote'`):env 无法直接注入远程 pty,
+         而行内 export 的方案会把 API Key 回显进终端回滚缓冲。这是一期能力
+         边界,不是 bug;
+      3. 先备好一次性启动 spec(terminalId 由主进程铸),再广播开 Tab ——
+         顺序反了的话,渲染层 create 会命中一个不存在的 spec,起一个裸 shell。
+
+      spec 是**一次性**的:渲染层带着同一个 terminalId 来 create 时消费掉,
+      复用会话重连不重放。见 `terminal-host.ts` 的 launchSpecs。
+    */
+    launchTerminal: (pluginId, spec) => {
+      const workspace = store.listWorkspaces().find((w) => w.id === spec.workspaceId)
+      if (workspace === undefined) return { opened: false, reason: 'declined' }
+      if ((workspace.environment?.kind ?? 'local') === 'connection') return { opened: false, reason: 'remote' }
+      const terminalId = randomUUID()
+      terminalHost.setLaunchSpec(terminalId, {
+        workspaceId: spec.workspaceId,
+        env: spec.env,
+        argv: [spec.command, ...spec.args]
+      })
+      windows.emitToAll('plugins:openTab', {
+        pluginId,
+        target: {
+          kind: 'terminal',
+          terminalId,
+          workspaceId: spec.workspaceId,
+          ...(spec.title === undefined ? {} : { title: spec.title })
+        }
+      })
+      return { opened: true }
     },
     requestInteraction: (pluginId, request) => askRenderer(pluginId, request),
     emitProgress: (pluginId, progress) => {
@@ -585,10 +622,10 @@ export function setPluginConfiguration(req: {
   return getPluginConfiguration(req)
 }
 
-export async function runPluginCommand(req: { pluginId: string; commandId: string }): Promise<void> {
+export async function runPluginCommand(req: { pluginId: string; commandId: string; args?: Record<string, unknown> }): Promise<void> {
   if (manager === null) throw new IpcError('unknown', 'plugin system is not running')
   try {
-    await manager.runCommand(req.pluginId, req.commandId)
+    await manager.runCommand(req.pluginId, req.commandId, req.args)
   } catch (error) {
     throw new IpcError('unknown', (error as Error).message)
   }

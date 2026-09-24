@@ -8,6 +8,7 @@ import type { ActiveRunEntry, RunSnapshot } from '../../../shared/agent/event'
 import type { RunRequest } from '../../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../../shared/agent/interaction'
 import type { InterjectItem } from '../../../shared/agent/interject'
+import type { PermissionMode } from '../../../shared/agent/permission'
 import type { AgentEventEnvelope } from '../../../shared/ipc/contract'
 import type { Unsubscribe } from '../../../shared/ipc/contract'
 import { invoke, on } from './ipc'
@@ -41,6 +42,14 @@ export function abortRun(runId: string, cascade = true): Promise<void> {
  */
 export function interjectRun(runId: string, items: InterjectItem[]): Promise<void> {
   return invoke('agent:interject', { runId, items })
+}
+
+/**
+ * 权限档位药丸切换时,把新档位立刻推给这个正在跑的 run——见 `agent:setPermissionMode`
+ * 的契约注释。run 已经不在跑了会被主进程静默忽略,这里不必特殊处理。
+ */
+export function setRunPermissionMode(runId: string, mode: PermissionMode): Promise<void> {
+  return invoke('agent:setPermissionMode', { runId, mode })
 }
 
 export function onAgentEvent(cb: (env: AgentEventEnvelope) => void): Unsubscribe {

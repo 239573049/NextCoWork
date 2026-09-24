@@ -88,6 +88,16 @@ export interface PluginCommandContribution {
   /** `%key%`,不是文案 */
   title: string
   icon?: string
+  /**
+   * 命令自己的品牌图标(包内相对路径,`.svg` / `.png`)。
+   *
+   * 需求:claude-code / codex 这类插件要求用**官方 logo** 出现在 `+` 菜单里,
+   * 而名字闭集(`MENU_ICON_NAMES`)里没有、也不该有品牌字形。`iconFile` 是
+   * 并行的第二条路:文件来自**用户已安装的这个包**、由主进程读出后转 data URL
+   * 随 catalog 下发(渲染层 CSP 的 `img-src` 已含 `data:`),只出现在带该插件
+   * 署名的菜单条目上。见 `renderer/shell/icons.tsx` 头注释里对这条放宽的完整说明。
+   */
+  iconFile?: string
 }
 
 export interface PluginMenuContribution {
@@ -706,7 +716,22 @@ function parseContributes(raw: unknown, errors: ManifestError[], kind: PluginKin
     const title = str(item.title)
     if (command === '') { errors.push({ field: 'contributes.commands', message: 'command id is required' }); continue }
     if (!L10N_REF_RE.test(title)) { errors.push({ field: `contributes.commands.${command}.title`, message: 'must be a %l10nKey% reference, not literal copy' }); continue }
-    out.commands.push({ command, title, ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }) })
+    const iconFile = str(item.iconFile)
+    /*
+      ★ 形状在这里查(包内相对路径 + 扩展名),**存在**在安装器查
+      (`assertPackageFiles`,与 `icon` / `main` 同一分工)。扩展名收窄是因为
+      这个文件会被主进程读成 data URL 塞进 `<img>`:svg/png 之外的东西
+      (html 等)哪怕写进 img 不执行脚本,也没有任何正当用途。
+    */
+    if (iconFile !== '') {
+      if (!isSafeRelativePath(iconFile)) {
+        errors.push({ field: `contributes.commands.${command}.iconFile`, message: 'must be a relative path inside the package' }); continue
+      }
+      if (!/\.(svg|png)$/i.test(iconFile)) {
+        errors.push({ field: `contributes.commands.${command}.iconFile`, message: 'must be an .svg or .png file' }); continue
+      }
+    }
+    out.commands.push({ command, title, ...(str(item.icon) === '' ? {} : { icon: str(item.icon) }), ...(iconFile === '' ? {} : { iconFile }) })
   }
 
   const menus = r.menus

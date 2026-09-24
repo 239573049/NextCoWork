@@ -80,6 +80,9 @@ export async function connectSshEnvironment(profile: SshConnectionProfile,
       },
       openTerminal: async (request) => {
         assertReady()
+        // request.env 刻意忽略:一期插件终端仅本地(拒绝在 ipc/plugins.ts 的
+        // launchTerminal 里做),这里不消费只是兜底 —— 远程 pty 的 env 注入
+        // 要动 remoteTerminalCommand 的行内拼接,留到那一期一起做。
         const canonical = await filesystem!.realpath(request.cwd)
         if (!(await filesystem!.stat(canonical)).isDir) throw new EnvironmentError('invalid-path')
         const invocation = transport.terminalArgs(remoteTerminalCommand(platform.os, platform.shell, canonical))

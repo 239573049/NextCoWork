@@ -103,6 +103,32 @@ export function narrowCommand(
   return { ok: true, value: { command: stem, args: [...args] } }
 }
 
+/**
+ * `tabs.openTerminal` 的 env 门。**只做形状与体量**,不做语义:
+ * 插件往子进程环境里写什么(`ANTHROPIC_BASE_URL` 之类)是它自己的事,
+ * 这一层拦的是「借环境变量夹带」—— 上百个键、几 MB 的值,或者拿环境变量
+ * 当一条隐蔽的 IPC 通道用。
+ *
+ * ★ 键名必须长得像环境变量名:宿主要把它们合进 pty 子进程的 env
+ * (`{ ...process.env, ...env }`),带 `=`、空格或空串的键在 POSIX 上不可设,
+ * 在 Windows 的进程块里则是未定义行为。
+ */
+export function narrowLaunchEnv(env: unknown): NarrowResult<Record<string, string>> {
+  if (env === undefined) return { ok: true, value: {} }
+  if (env === null || typeof env !== 'object' || Array.isArray(env)) return deny('env must be an object')
+  const entries = Object.entries(env as Record<string, unknown>)
+  if (entries.length > 16) return deny('too many env entries (max 16)')
+  const out: Record<string, string> = {}
+  for (const [key, value] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return deny(`env key "${key.slice(0, 64)}" is not a valid name`)
+    if (typeof value !== 'string') return deny(`env value for "${key}" must be a string`)
+    if (value.length > 4096) return deny(`env value for "${key}" is too long (max 4096)`)
+    if (value.includes('\0')) return deny(`env value for "${key}" contains a NUL byte`)
+    out[key] = value
+  }
+  return { ok: true, value: out }
+}
+
 /** `net.fetch` 的 URL 门。**在主进程做**,不信 CSP。 */
 export function narrowFetchUrl(
   hostPermissions: readonly string[],

@@ -17,6 +17,7 @@ import type { AgentMessage, ContentPart } from '../agent/message'
 import type { ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
+import type { PermissionMode } from '../agent/permission'
 import type { RunRequest, SessionMode } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
@@ -583,6 +584,16 @@ export interface IpcInvokeMap {
    * ★ 空数组是合法且有意义的载荷:它就是「取消全部插话」。
    */
   'agent:interject': { req: { runId: string; items: InterjectItem[] }; res: void }
+  /**
+   * 权限档位药丸切到更宽松/更严格的一档时,立刻对**这个正在跑的 run**接下来的
+   * 工具调用生效,而不必等到下一条新消息——`RunRequest.permissionMode` 是
+   * run 开始时冻的快照(见其注释),这条频道改的是 `RunHandle` 上的活值
+   * (`run-registry.ts` 的 `livePermissionMode`)。
+   *
+   * ★ 不影响已经在等用户点的那个审批弹窗:那个弹窗可能是钩子/工作区规则
+   * 强制问人,不是纯档位决定的,放宽档位不该替用户把它自动点掉。
+   */
+  'agent:setPermissionMode': { req: { runId: string; mode: PermissionMode }; res: void }
   /** ★ 审批 / 反问 / 计划确认三种 kind 共用这一个(方案 §4.6) */
   'agent:respondInteraction': { req: InteractionResponse; res: void }
   'agent:listInteractions': { req: { runId?: string; sessionId?: string }; res: PendingInteraction[] }
@@ -707,7 +718,8 @@ export interface IpcInvokeMap {
   /** 活动日志(环形缓冲)。插件详情页的「活动」标签直接展示 */
   'plugins:activity': { req: { pluginId?: string }; res: PluginActivity[] }
   /** 执行一条插件命令 —— 菜单项、命令面板、快捷键三处共用 */
-  'plugins:runCommand': { req: { pluginId: string; commandId: string }; res: void }
+  /** args:调用点上下文(目前只有 `+` 菜单附带的 workspaceId),随 command.run 透传给插件 handler */
+  'plugins:runCommand': { req: { pluginId: string; commandId: string; args?: Record<string, unknown> }; res: void }
   /**
    * 打开插件自定义编辑器的 Tab 之前,请主进程按 `onCustomEditor:<viewType>`
    * 唤醒该插件。★ 不是权限检查:插件视图的静态文件只对「已被唤醒过」的
@@ -1551,6 +1563,7 @@ export const INVOKE_CHANNELS = {
   'agent:attach': 1,
   'agent:abort': 1,
   'agent:interject': 1,
+  'agent:setPermissionMode': 1,
   'agent:respondInteraction': 1,
   'agent:listInteractions': 1,
   'agent:listTools': 1,

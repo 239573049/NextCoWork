@@ -162,6 +162,19 @@ export interface KernelHost {
   logger: Logger
   fs: KernelFs
   spawn: SpawnFn
+  /**
+   * 本地子进程(Agent 的 Bash 工具、后台 shell、本地钩子)额外继承的环境变量。
+   *
+   * 需求:这些命令默认跟随应用/系统代理 —— CLI 只认 `HTTP_PROXY` 一类环境变量,
+   * 而 Electron 从 Finder/Dock 启动时 `process.env` 里没有它们。值由 electron 侧
+   * `net/proxy.ts` 的 `shellProxyEnv` 给出;这里只定义「怎么送进子进程」,
+   * 不定义「是什么」。同一撮变量同时喂给 `nodeSpawn`(前台命令)和
+   * `environment/local.ts` 的 `openProcess`(后台命令/钩子)—— 两条路一份答案。
+   *
+   * ★ 纯 Node 默认值**没有**这一项(undefined = 不注入):无头/测试环境没有
+   *   Chromium session 可问,注入也只能是错的。
+   */
+  childEnv?: () => Record<string, string> | Promise<Record<string, string>>
   fetch: typeof fetch
 }
 
@@ -210,7 +223,8 @@ export function nodeHost(
     platform: { os: process.platform, osVersion: release(), get shell() { return resolveShell() } },
     logger: consoleLogger,
     fs: nodeFs(),
-    spawn: nodeSpawn(resolveShell),
+    // childEnv 只作转发:同一份注入也给 openProcess 那条路用(local.ts 读 host.childEnv)
+    spawn: nodeSpawn(resolveShell, overrides.childEnv),
     // 绑定到 globalThis:直接传 `fetch` 引用在某些运行时会丢 this
     fetch: (input, init) => globalThis.fetch(input, init),
     ...overrides

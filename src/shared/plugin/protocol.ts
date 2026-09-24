@@ -128,6 +128,33 @@ export interface PluginMethodMap {
    * 「B 站插件」可以在应用内打开任何网站,而用户在安装界面上看到的域名只有 B 站。
    */
   'tabs.openBrowser': { params: { url: string; open?: 'tab' | 'feature' | 'right' }; result: { opened: boolean } }
+  /**
+   * 在**当前工作区根目录**开一个终端 Tab,并在里面启动插件指定的命令。
+   *
+   * 需求:claude-code / codex 这类 CLI 插件的落点 —— 「点一下菜单,工作区里
+   * 起一个带着我的配置的交互式 CLI」。`process.exec` 是一次性取回输出的,
+   * 给不了交互式 TTY,所以这是另一条方法,而不是一个参数。
+   *
+   * ★ 能力 `process` + 参数门(`capabilities.ts` 的 `narrowCommand`,argv[0]
+   * 必须命中清单 `allowedCommands`)两道都要过,与 `process.exec` 同一套白名单
+   * —— 放行到交互式终端的命令不会比一次性执行更宽松。`env` 的键数与单值长度
+   * 有上限(防借环境变量夹带),`cwd` **不接受插件指定**:恒为工作区根,
+   * 由宿主解析。「cwd 想指哪就指哪」等于绕过工作区边界。
+   *
+   * ★ 一期仅本地工作区:远程环境返回 `{ opened: false, reason: 'remote' }`,
+   * env 无法直接注入远程 pty(见 `main/terminal-host.ts` 的 launchSpecs)。
+   */
+  'tabs.openTerminal': {
+    params: {
+      workspaceId: string
+      command: string
+      args?: string[]
+      env?: Record<string, string>
+      /** `%key%` 形式的 l10n key 片段,渲染层拼 `plugin.<id>.<key>` 后作为 Tab 标题 */
+      title?: string
+    }
+    result: { opened: boolean; reason?: 'remote' | 'declined' }
+  }
   /*
     ★ **没有 `tabs.openView`。** `contributes.views` 里 location 为 sidebar/panel 的
     视图这一版还打不开,理由见 `shared/plugin/ui-request.ts` 里 `PluginTabTarget`:
@@ -312,6 +339,12 @@ export const PLUGIN_METHOD_PERMISSION = {
   */
   'tabs.openWebApp': null,
   'tabs.openBrowser': 'tabs.browser',
+  /*
+    ★ 与 `process.exec` 同一条能力、同一份 `allowedCommands` 白名单:能被开进
+    交互式终端的命令,没有理由比能一次性执行的更宽。两处门若各挂一份清单,
+    「exec 批了、terminal 没批」这类不一致迟早出现。
+  */
+  'tabs.openTerminal': 'process',
 
   'workspace.subscribeChanges': 'workspace.read',
   'workspace.unsubscribeChanges': 'workspace.read',
