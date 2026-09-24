@@ -23,6 +23,7 @@ import { Check, ChevronDown } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useI18n } from '../../i18n'
 import { Spinner } from '../../components/ui/Spinner'
+import { Tooltip } from '../../components/ui/Tooltip'
 import { cn } from '../../lib/cn'
 import { motionScale, useMotionLevel } from '../../theme/useMotionLevel'
 
@@ -375,12 +376,21 @@ export function TaskChecklist({
     t('chat.taskChecklist.restore', { done, total: todos.length }),
     ...(unfinishedAfterStop ? [t('chat.taskChecklist.stoppedIncomplete', { count: todos.length - done })] : [])
   ].join(' · ')
+  /*
+    需求:鼠标停在那颗球上要能看到**此刻正在做哪一项** —— 收起之后标题行那句
+    activeForm 就没地方显示了,而球上只有一个完成数,看不出进度停在哪。
+    判据与标题行第二行**完全同一条**(`isActive && active !== undefined`):没有人在
+    推进这份清单时不显示,否则悬停会把上一轮留下的死账说成「正在做」。
+    没有可说的就交 `undefined`:`Tooltip` 收到 undefined 时退化成纯包裹层、不挂任何
+    监听(见它的 `content` 注释),所以「不显示」不是画一个空浮层。
+  */
+  const activeHint = isActive && active !== undefined ? active.activeForm : undefined
 
   return (
     <div
       /*
         ★ `contents`:这一层只是给测试认的标记,**不能自己成为一个盒子**。
-        Shell 在收起那 150ms 里返回的是两个各自带 `col-start-1 row-start-1`(球)与
+        Shell 在收起那 150ms 里返回的是两个各自带 `col-start-1` + `self-end`(球)与
         `col-span-full`(卡片)的格子(见 `TaskChecklistShell` 与 ChatView 的
         `composer-notices`)—— 中间夹一层普通 div,这两组定位类就全成了空操作:
         表现为收起时小球被 `mx-auto` 按正在淡出的卡片宽度**居中**在半空中,
@@ -396,31 +406,51 @@ export function TaskChecklist({
         className={className}
         {...(minimizeToBall ? {
           ball: (restore: () => void) => (
-            <button
-              type="button"
-              data-testid="task-checklist-ball"
-              aria-label={ballLabel}
-              title={ballLabel}
-              onClick={restore}
-              className={cn(
-                'relative flex size-9 items-center justify-center rounded-pill border border-stroke bg-surface-raised/70',
-                /*
-                  ★ 入场动画走 `theme.css` 里的 `checklist-ball-enter`,**不写成 `starting:`**。
-                  两个理由:一是小球这一档是**画**出来的(收起来的球=一颗缩小的进度环),
-                  `starting:scale-*` 只是 `scale` 的起始值、没有配对的状态变化,浏览器不一定
-                  重放它;二是 `cn` 里同时出现 `scale-*` 与 `transition-*` 时,后者是
-                  `transition-property` 这一绘图属性、会按 twMerge 的冲突表吃掉前者。
-                  ★ 这里的 transition 只剩 hover 底色,和上面那几段各管各的。
-                */
-                'checklist-ball-enter transition-colors duration-150 ease-out hover:bg-tint-hover',
-                'motion-reduce:transition-none'
+            <Tooltip
+              // `flex`:浮层的锚点是个 span,默认 inline 会在球底下垫出一条基线空隙,
+              // 而球是靠 `self-end` 贴着那一格底边的(见 Shell),垫高就对不齐了
+              className="flex"
+              align="center"
+              content={activeHint === undefined ? undefined : (
+                <span className="block">
+                  <span className="block text-[11px] text-fg">{activeHint}</span>
+                  <span className="mt-0.5 block text-[10.5px] text-fg-faint">
+                    {t('chat.taskChecklist', { done, total: todos.length })}
+                  </span>
+                </span>
               )}
             >
-              <ProgressRing progress={progress} done={done} />
-              {unfinishedAfterStop && (
-                <span aria-hidden className="absolute top-0 right-0 size-2 rounded-pill bg-warning" />
-              )}
-            </button>
+              <button
+                type="button"
+                data-testid="task-checklist-ball"
+                aria-label={ballLabel}
+                /*
+                  ★ 有富浮层可显示时**不再挂原生 `title`**:两者都由悬停触发,同时挂会
+                  在球边上先弹出浮层、一秒后再叠一个系统小黄条,两份说的还是同一件事。
+                  没有正在做的那一项时浮层不存在,`title` 就是唯一的悬停说明,必须留着。
+                */
+                {...(activeHint === undefined ? { title: ballLabel } : {})}
+                onClick={restore}
+                className={cn(
+                  'relative flex size-9 items-center justify-center rounded-pill border border-stroke bg-surface-raised/70',
+                  /*
+                    ★ 入场动画走 `theme.css` 里的 `checklist-ball-enter`,**不写成 `starting:`**。
+                    两个理由:一是小球这一档是**画**出来的(收起来的球=一颗缩小的进度环),
+                    `starting:scale-*` 只是 `scale` 的起始值、没有配对的状态变化,浏览器不一定
+                    重放它;二是 `cn` 里同时出现 `scale-*` 与 `transition-*` 时,后者是
+                    `transition-property` 这一绘图属性、会按 twMerge 的冲突表吃掉前者。
+                    ★ 这里的 transition 只剩 hover 底色,和上面那几段各管各的。
+                  */
+                  'checklist-ball-enter transition-colors duration-150 ease-out hover:bg-tint-hover',
+                  'motion-reduce:transition-none'
+                )}
+              >
+                <ProgressRing progress={progress} done={done} />
+                {unfinishedAfterStop && (
+                  <span aria-hidden className="absolute top-0 right-0 size-2 rounded-pill bg-warning" />
+                )}
+              </button>
+            </Tooltip>
           )
         } : {})}
         list={<TaskChecklistRows todos={todos} isActive={isActive} />}

@@ -169,6 +169,38 @@ describe('TaskChecklist · collapse turns into the ball', () => {
       .toBe('Show task checklist (1/3 completed) · Run ended with 2 unfinished task(s)')
   })
 
+  /*
+    悬停在球上要能读到「此刻正在做哪一项」—— 收起之后标题行那句 activeForm 没地方显示了。
+    判据与标题行第二行同一条:没人在推进这份清单时**什么都不弹**,否则悬停会把上一轮
+    留下的死账说成「正在做」。
+  */
+  const hover = async (element: Element | null): Promise<void> => {
+    // React 的 onPointerEnter 是靠 pointerover 代理出来的,所以这里派发会冒泡的那一个
+    await act(async () => { element?.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })) })
+    await act(async () => { vi.advanceTimersByTime(100) })
+  }
+
+  it('tells what is running when the pointer rests on the ball', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
+
+    await hover(ball(container))
+    const tip = document.body.querySelector('[role="tooltip"]')
+    expect(tip?.textContent).toContain('Updating UI')
+    expect(tip?.textContent).toContain('Task checklist · 1/3 completed')
+    // 有浮层就不再叠一个系统 title:两者都由悬停触发,说的还是同一件事
+    expect(ball(container)?.hasAttribute('title')).toBe(false)
+  })
+
+  it('stays silent on hover when nobody is pushing the checklist, keeping only the native one-liner', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'snapshot' })
+
+    await hover(ball(container))
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
+    expect(ball(container)?.getAttribute('title')).toBe('Show task checklist (1/3 completed)')
+  })
+
   it('stays a collapsible header row when the caller opts out of the ball', async () => {
     const { container } = await mountChecklist({ todos: TODOS, execution: 'running', minimizeToBall: false })
 
