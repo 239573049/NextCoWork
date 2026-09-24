@@ -31,6 +31,11 @@ import {
   type ShellPreference
 } from '../../../../shared/domain/settings'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../../../shared/agent/run-request'
+import {
+  INHERIT_THINKING,
+  isSubagentThinking,
+  SUBAGENT_THINKING_CHOICES
+} from '../../../../shared/domain/subagent-thinking'
 import { DraftInput } from '../DraftInput'
 import { DefaultOpenTargetSelect } from './DefaultOpenTargetSelect'
 import { LandsAt, SettingGroup, SettingRow } from '../Row'
@@ -108,6 +113,21 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             modelProviderId={settings.subagent.modelProviderId}
             onChange={(model, modelProviderId) => {
               patch({ subagent: { model, modelProviderId } })
+            }}
+          />
+        </SettingRow>
+        <SettingRow title={t('general.subagentThinking')} description={t('general.subagentThinkingHint')} wide>
+          <Select
+            value={settings.subagent.thinking}
+            options={SUBAGENT_THINKING_CHOICES.map((value) => ({
+              value,
+              label: value === INHERIT_THINKING ? t('models.followConversation') : t(`chat.thinkingLevel.${value}`)
+            }))}
+            ariaLabel={t('general.subagentThinking')}
+            onValueChange={(value) => {
+              // ★ 只认枚举,认不出的值一个都不许落库(和其它枚举行的写法一致)
+              if (!isSubagentThinking(value)) return
+              patch({ subagent: { thinking: value } })
             }}
           />
         </SettingRow>

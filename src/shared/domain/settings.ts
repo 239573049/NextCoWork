@@ -6,6 +6,7 @@ import { DEFAULT_MAX_OUTPUT_TOKENS } from '../agent/run-request'
 import { isOpenTargetPreference } from './open-target'
 import type { ProxySettings } from './proxy'
 import { DEFAULT_PROXY, migrateLegacyProxy } from './proxy'
+import { INHERIT_THINKING, isSubagentThinking, type SubagentThinking } from './subagent-thinking'
 import {
   DEFAULT_COLOR_THEME_ID,
   DEFAULT_CUSTOM_SEED,
@@ -345,6 +346,14 @@ export interface AppSettings {
     model: string
     /** 与 `model` 成对,见 `defaultModelProviderId` */
     modelProviderId?: string
+    /**
+     * 界面:「子代理思考深度」。`'inherit'` = 跟随本轮对话(父 run 这一轮的档位)。
+     *
+     * ★ 和 `model` 是**两个独立的选择**:换一个便宜模型跑量的子代理,照样可能
+     *   需要在难题上想深一点。三档来源(子代理文件 > 这一栏 > 父 run)连同
+     *   「为什么还要按子代理自己的模型归一化一次」都在 `subagent-thinking.ts`。
+     */
+    thinking: SubagentThinking
     /** 界面:「单对话子代理上限(推荐 4)」 */
     perSessionLimit: number
     /** 全局子代理池,对应界面「并发上限 0–10」 */
@@ -455,7 +464,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   shell: 'system',
   defaultOpenTarget: '',
-  subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
+  // 思考档位出厂「跟随本轮对话」—— 这正是引入这一栏之前的行为,老用户升级后
+  // 子代理的档位一个字都不变(见 `subagent-thinking.ts`)。
+  subagent: { model: '', thinking: INHERIT_THINKING, perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   providerAccountRotation: true,
   notifications: { taskComplete: true, permissionApproval: true, planApproval: true },
@@ -564,6 +575,17 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     // ★ 这一行是那条「成对写」规则在**浅合并**下的补丁:上面的 spread 只覆盖
     //   patch 里出现过的键,于是只给 `model` 时旧的 `modelProviderId` 会原样留下。
     if (patch.subagent.model !== undefined) next.subagent.modelProviderId = patch.subagent.modelProviderId
+    /*
+      ★ 思考档位只认枚举,坏值退回**当前值**(不是 `'inherit'`)—— 上面那个 spread
+      已经把它写进去了,所以这里判的是合并之后的结果。
+
+      不拦会怎样:一个认不出的档位会原样进 `RunRequest.thinking`,而它取
+      `THINKING_BUDGET[档位]` 得到 undefined,再经 `clampBudget` 变成 **NaN**
+      写进请求体的思考预算 —— 上游收到的是个 NaN,而界面上那一栏看起来完全正常。
+      退回当前值而不是缺省值,是因为静默改成「跟随对话」会让用户以为自己选的档位
+      在生效,而那正是这一栏唯一要说清的事。
+    */
+    if (!isSubagentThinking(next.subagent.thinking)) next.subagent.thinking = current.subagent.thinking
   }
   if (patch.gateway !== undefined) next.gateway = { ...next.gateway, ...patch.gateway }
   if (patch.providerAccountRotation !== undefined) {

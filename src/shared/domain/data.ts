@@ -18,6 +18,7 @@ import { THINKING_LEVELS } from '../agent/run-request'
 import { MODE_ID_RE } from './mode'
 import { PROXY_SCHEMES } from './proxy'
 import { isOpenTargetPreference } from './open-target'
+import { isSubagentThinking } from './subagent-thinking'
 
 export const DATA_EXPORT_TYPE = 'nextcowork-data-export' as const
 export const DATA_EXPORT_VERSION = 1
@@ -434,6 +435,9 @@ function isSubagentSettings(value: unknown): boolean {
   if (!isRecord(value)) return false
   return (
     typeof value.model === 'string' &&
+    // ★ 思考档位是后加的:缺席 = 这份导出早于这一栏,放行并回落到默认('inherit');
+    //   在场就必须是已知档位 —— 坏值会被 merger 丢掉,静默接受一份坏导出只会掩盖它坏了。
+    (value.thinking === undefined || isSubagentThinking(value.thinking)) &&
     optionalString(value, 'modelProviderId') &&
     isIntegerAtLeast(value.perSessionLimit, 1) &&
     isIntegerAtLeast(value.globalLimit, 0)

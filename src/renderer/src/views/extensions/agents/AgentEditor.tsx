@@ -25,6 +25,7 @@ import {
   modelSelectionKey,
   parseModelSelectionKey
 } from '../../../../../shared/domain/model-selection'
+import { INHERIT_THINKING, SUBAGENT_THINKING_CHOICES } from '../../../../../shared/domain/subagent-thinking'
 import { Button } from '../../../components/ui/Button'
 import { Dialog } from '../../../components/ui/Dialog'
 import { IconButton } from '../../../components/ui/IconButton'
@@ -380,6 +381,19 @@ export function AgentEditor({
                 })
               }}
               ariaLabel={t('ext.field.model')}
+              className="max-w-[320px]"
+            />
+          </Row>
+
+          <Row label={t('ext.field.thinking')}>
+            <Select
+              value={form.thinking === '' ? INHERIT_THINKING : form.thinking}
+              options={SUBAGENT_THINKING_CHOICES.map((value) => ({
+                value,
+                label: value === INHERIT_THINKING ? t('ext.field.inheritDefault') : t(`chat.thinkingLevel.${value}`)
+              }))}
+              onValueChange={(v) => setForm({ ...form, thinking: v === INHERIT_THINKING ? '' : v })}
+              ariaLabel={t('ext.field.thinking')}
               className="max-w-[320px]"
             />
           </Row>

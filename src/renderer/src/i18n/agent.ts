@@ -26,6 +26,9 @@ export const agentZh = {
   'chat.thinkingLevel.higher': '超高',
   'chat.thinkingLevel.max': '最高',
   'chat.thinkingLevelDescription': '思考强度 · {level}',
+  'general.subagentThinking': '子代理思考深度',
+  'general.subagentThinkingHint':
+    '子代理默认用哪一档思考；「跟随对话」= 用本轮对话的档位。不支持该参数的模型会自动忽略。',
   'chat.taskUsage': '任务用量',
   'chat.taskUsageSummary': '输入 {input} · 输出 {output}',
   'chat.taskUsageInput': '输入 {count}',
@@ -216,6 +219,9 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.thinkingLevel.higher': 'Extra high',
   'chat.thinkingLevel.max': 'Maximum',
   'chat.thinkingLevelDescription': 'Thinking level · {level}',
+  'general.subagentThinking': 'Subagent thinking depth',
+  'general.subagentThinkingHint':
+    'Which thinking depth subagents use by default; "Follow conversation" uses this turn\'s level. Models that don\'t support it ignore this setting automatically.',
   'chat.taskUsage': 'Task usage',
   'chat.taskUsageSummary': 'Input {input} · Output {output}',
   'chat.taskUsageInput': 'Input {count}',

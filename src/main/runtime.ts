@@ -14,7 +14,7 @@
  */
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { RunRequest } from '../shared/agent/run-request'
+import type { RunRequest, ThinkingLevel } from '../shared/agent/run-request'
 import { MAX_DEPTH } from '../shared/agent/run-request'
 import type { AgentEvent, RunStatus } from '../shared/agent/event'
 import { agentError, type AgentError } from '../shared/agent/error'
@@ -83,6 +83,8 @@ import {
 } from '../shared/domain/presets'
 import type { ModelAlias, UpstreamProtocol } from '../shared/domain/provider'
 import { subagentModelSelection } from '../shared/domain/model-selection'
+import { normalizeModelThinkingLevel } from '../shared/domain/model-runtime'
+import { subagentThinkingSelection, type SubagentThinking } from '../shared/domain/subagent-thinking'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
@@ -1631,8 +1633,14 @@ function childRequestFor(
   def: AgentDefinition,
   childRunId: string,
   prompt: string,
-  configuredModel: { model: string; modelProviderId?: string }
+  configuredModel: { model: string; modelProviderId?: string },
+  configuredThinking: SubagentThinking
 ): RunRequest {
+  /*
+    ★ 别名和供应商必须成对决定 —— 三档来源的优先级连同理由都在
+    `subagentModelSelection` 里。`configuredModel` 已经过可用性校验(见调用点)。
+  */
+  const selection = subagentModelSelection(declaredSubagentModel(def), configuredModel, parentReq)
   return {
     runId: childRunId,
     /*
@@ -1659,7 +1667,7 @@ function childRequestFor(
     input: [{ type: 'text', text: prompt }],
     // 子代理始终按编程模式运行。Plan 模式没有 Task，ACP 则必须把实施交给子代理。
     mode: 'code',
-    thinking: parentReq.thinking,
+    thinking: childThinkingFor(def, configuredThinking, parentReq, selection),
     // 联网是用户的硬开关,子代理放宽不了
     webSearch: parentReq.webSearch,
     // 同理:子代理不能替用户决定多花一倍的钱,也不该在用户明确开了之后被压回 272K。
@@ -1670,13 +1678,41 @@ function childRequestFor(
       这是**真实的提权路径**,不是理论风险(见 `minPermission` 的注释)。
     */
     permissionMode: minPermission(parentReq.permissionMode, def.permissionMode ?? 'full'),
-    // ★ 别名和供应商必须成对决定 —— 三档来源的优先级连同理由都在
-    //   `subagentModelSelection` 里。`configuredModel` 已经过可用性校验(见调用点)。
-    ...subagentModelSelection(declaredSubagentModel(def), configuredModel, parentReq),
+    ...selection,
     skillIds: parentReq.skillIds,
     skillSelectionMode: parentReq.skillSelectionMode,
     agentType: def.name
   }
+}
+
+/**
+ * 子 run 这一轮用哪个思考档位。
+ *
+ * 三档来源和模型那一套逐字相同(声明的 > 设置里那一栏 > 父 run),理由见
+ * `subagent-thinking.ts`。取完之后**还要按子 run 自己的模型归一化一次** ——
+ * 档位是模型的属性,而子 run 的模型和父 run 未必是同一个。
+ *
+ * ★ 不归一化会怎样:模型不认这个档位时,适配器要到**发请求那一刻**才抛
+ * 「模型不支持推理强度「high」」,于是每一次派发全数失败,而父代理只会转述一句
+ * 「子代理失败了」—— 用户看不到那条真正的原因,也无从知道该改哪一栏。
+ * 归一化是**静默降级**(档位是偏好,不是硬约束;硬约束是药丸上那个显式选择),
+ * 与 `availableSubagentModel` 同一个取舍,降级时留一条 warn,免得连日志里都查不到。
+ */
+function childThinkingFor(
+  def: AgentDefinition,
+  configured: SubagentThinking,
+  parentReq: RunRequest,
+  selection: { model: string; modelProviderId?: string }
+): ThinkingLevel {
+  const wanted = subagentThinkingSelection(def.thinking, configured, parentReq.thinking)
+  const alias = getRouter().resolveModel(selection.model, selection.modelProviderId)
+  const effective = normalizeModelThinkingLevel(wanted, alias)
+  if (effective !== wanted) {
+    getHost().logger.warn(
+      `[subagent] ${def.name} 的思考档位 ${wanted} 在 ${selection.model} 上不可用,按 ${effective} 跑`
+    )
+  }
+  return effective
 }
 
 /**
@@ -1784,7 +1820,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
 
     const childRunId = `${parent.runId}:sub:${String(++childSeq)}`
     const childReq = childRequestFor(
-      parentReq, parent, def, childRunId, sub.prompt, availableSubagentModel(configured)
+      parentReq, parent, def, childRunId, sub.prompt, availableSubagentModel(configured), configured.thinking
     )
 
     /*

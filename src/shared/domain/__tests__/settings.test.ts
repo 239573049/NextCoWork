@@ -81,7 +81,7 @@ describe('mergeSettings', () => {
       subagent: { globalLimit: 8 },
       proxy: { host: '127.0.0.1', port: 7890 }
     })
-    expect(s.subagent).toEqual({ model: '', perSessionLimit: 4, globalLimit: 8 })
+    expect(s.subagent).toEqual({ model: '', thinking: 'inherit', perSessionLimit: 4, globalLimit: 8 })
     // 只给了两段,另外六段是缺省值 —— 这一条钉的就是「兄弟属性还在」
     expect(s.proxy).toEqual({
       ...DEFAULT_PROXY,
@@ -289,6 +289,15 @@ describe('mergeSettings 的模型配对', () => {
     expect(next.subagent.modelProviderId).toBeUndefined()
     // 兄弟属性照旧不受影响 —— 那是这个函数本来的职责
     expect(next.subagent.perSessionLimit).toBe(DEFAULT_SETTINGS.subagent.perSessionLimit)
+  })
+
+  it('思考档位:合法值落库,坏值退回当前值而不是默认值', () => {
+    let s = mergeSettings(base(), { subagent: { thinking: 'high' } })
+    expect(s.subagent.thinking).toBe('high')
+    // ★ 当前值是 'high'(上一步刚写的),不是 DEFAULT_SETTINGS 的 'inherit' ——
+    //   坏值要回落到「合并前那一刻」的值,而不是无条件重置成默认档。
+    s = mergeSettings(s, { subagent: { thinking: 'deep' as unknown as AppSettings['subagent']['thinking'] } })
+    expect(s.subagent.thinking).toBe('high')
   })
 
   it('★ 审核模型同理', () => {
