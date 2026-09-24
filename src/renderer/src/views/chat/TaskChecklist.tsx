@@ -19,10 +19,18 @@
  * 在同一屏里上下相邻,改一处漏一处一眼就能看出来。
  */
 import { Check, ChevronDown } from 'lucide-react'
-import { useId, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useI18n } from '../../i18n'
 import { Spinner } from '../../components/ui/Spinner'
 import { cn } from '../../lib/cn'
+import { useIdleMinimize } from './useIdleMinimize'
+
+/**
+ * 输入框上方那条收起后多久没人碰就缩成小球。
+ * 取 15s:读完标题行那一眼远用不了这么久;再短的话,用户正盯着进度看、
+ * 鼠标却不在它上面时(这是常态),它会在眼皮底下缩走。
+ */
+export const TASK_CHECKLIST_IDLE_MINIMIZE_MS = 15_000
 
 /**
  * 清单里的一项。导出是因为**工具卡片的详情区也渲染这张清单**
@@ -54,6 +62,7 @@ export function TaskChecklistShell({
   header,
   list,
   defaultCollapsed,
+  idleMinimize,
   className
 }: {
   /**
@@ -63,13 +72,63 @@ export function TaskChecklistShell({
   header: (props: { toggle: () => void; collapsed: boolean; listId: string }) => ReactNode
   list: ReactNode
   defaultCollapsed: boolean
+  /**
+   * 收起后长时间无操作就缩成最左边一颗小球(计时规则见 `useIdleMinimize.ts`)。
+   * 缺省 = 永不缩:消息里那张 TodoWrite 卡片是转录的一部分,缩掉它等于改写历史的版式。
+   * `ball` 画那颗球,必须把给回来的 `restore` 接到它的点击上。
+   */
+  idleMinimize?: { afterMs: number; ball: (restore: () => void) => ReactNode }
   className?: string
 }): ReactNode {
   const listId = useId()
   const [collapsed, setCollapsed] = useState(defaultCollapsed)
+  const { minimized, restore, bindings } = useIdleMinimize({
+    enabled: idleMinimize !== undefined && collapsed,
+    afterMs: idleMinimize?.afterMs ?? 0
+  })
+  const cardRef = useRef<HTMLDivElement>(null)
+  const restoredRef = useRef(false)
+  /*
+    需求:点小球恢复后焦点落回标题行那颗开合按钮。小球在恢复的同一次提交里被卸载,
+    不接住的话焦点掉回 body —— 键盘用户按 Enter 恢复后得从页首重新 Tab 一遍。
+    只在「刚从小球恢复」时做:首次挂载就抢焦点会打断用户正在输入框里打的字。
+  */
+  useEffect(() => {
+    if (minimized || !restoredRef.current) return
+    restoredRef.current = false
+    cardRef.current?.querySelector<HTMLElement>(`[aria-controls="${listId}"]`)?.focus()
+  }, [minimized, listId])
+  /*
+    需求:点小球是「我现在要看这份清单」,所以一次点击直接把列表完全展开 ——
+    原先只恢复成收起的标题行,用户必须再点一次才看得到内容,而那一行本身就是
+    他刚才没在看、才被缩走的东西。
+    ★ 因此这里**顺带清掉 collapsed**:`enabled` 依赖 `collapsed`,展开后计时器
+    自然停掉,不会在用户正读清单时又缩走。用户主动收起后,该计时器照旧恢复。
+  */
+  const restoreFromBall = useCallback(() => {
+    restoredRef.current = true
+    setCollapsed(false)
+    restore()
+  }, [restore])
+  const outerClassName = cn('mx-auto w-full max-w-[760px] px-6 pb-2', className)
+
+  /*
+    ★ 缩成小球时只换掉卡片这一层 DOM,Shell 自己不卸载:`collapsed` 留在这里,
+    恢复后不用重建组件就能决定展开还是收起。原先的语义是「恢复出来仍是缩之前
+    那一行(必然收起)」;现在点球即完全展开(见 `restoreFromBall`),而「状态住在
+    Shell 里」这条理由不变 —— 展开态是由这里的 setState 改出来的。
+  */
+  if (idleMinimize !== undefined && minimized) {
+    return <div className={outerClassName}>{idleMinimize.ball(restoreFromBall)}</div>
+  }
+
   return (
-    <div className={cn('mx-auto w-full max-w-[760px] px-6 pb-2', className)}>
-      <div className="overflow-hidden rounded-card border border-stroke bg-surface-raised/70">
+    <div className={outerClassName}>
+      <div
+        ref={cardRef}
+        {...(idleMinimize === undefined ? {} : bindings)}
+        className="overflow-hidden rounded-card border border-stroke bg-surface-raised/70"
+      >
         {header({ toggle: () => setCollapsed((value) => !value), collapsed, listId })}
         <div
           id={listId}
@@ -166,6 +225,7 @@ export function TaskChecklist({
   todos,
   execution = 'snapshot',
   defaultCollapsed = true,
+  minimizeWhenIdle = true,
   className
 }: {
   /** TodoWrite 的当前完整快照；顺序由 agent 决定，组件只负责展示。 */
@@ -195,6 +255,14 @@ export function TaskChecklist({
    */
   defaultCollapsed?: boolean
   /**
+   * 收起后 `TASK_CHECKLIST_IDLE_MINIMIZE_MS` 无操作就缩成最左边一颗进度球,点击直接展开完整清单。
+   *
+   * 需求:收起的那一行仍夹在正文与输入框之间,用户不看它时它该把这一行让出来。
+   * 默认开,理由同 `defaultCollapsed`:缺省值服务「输入框上方」这个最常见的位置;
+   * 嵌进别处(卡片详情之类)的调用方传 `false`。
+   */
+  minimizeWhenIdle?: boolean
+  /**
    * 外层定位的覆盖位。默认那套(居中、760 上限、左右留白)是**输入框上方**那个
    * 位置的需求;嵌在工具卡片详情里时由调用方传 `max-w-none px-0 pb-0` 抹掉 ——
    * 卡片本体不因此分叉出第二套版式。
@@ -205,13 +273,22 @@ export function TaskChecklist({
   const done = todos.filter((item) => item.status === 'completed').length
   const active = todos.find((item) => item.status === 'in_progress')
   const progress = todos.length === 0 ? 0 : done / todos.length
-  const circumference = 2 * Math.PI * 9
   /*
     只有 `running` 才谈得上「正在做」。其余两档里 `in_progress` 是**转录留下的一个
     事实**——那一项当年确实开着,但此刻没有人在推进它,所以不转圈、不高亮、不报
     「任务正在执行」,而是按「未完成」陈列。
   */
   const isActive = execution === 'running'
+  /*
+    需求:小球上放不下第二行那句「仍有 N 项未完成」,但这句不能因为缩起来就丢 ——
+    否则停在半截的进度环看起来像还在跑(理由见标题行那段)。所以球角挂一个警示点,
+    完整句子进无障碍标签和 title。判据与标题行那段同一条。
+  */
+  const unfinishedAfterStop = execution === 'stopped' && todos.length - done > 0
+  const ballLabel = [
+    t('chat.taskChecklist.restore', { done, total: todos.length }),
+    ...(unfinishedAfterStop ? [t('chat.taskChecklist.stoppedIncomplete', { count: todos.length - done })] : [])
+  ].join(' · ')
 
   return (
     <div
@@ -222,6 +299,30 @@ export function TaskChecklist({
       <TaskChecklistShell
         defaultCollapsed={defaultCollapsed}
         className={className}
+        {...(minimizeWhenIdle ? {
+          idleMinimize: {
+            afterMs: TASK_CHECKLIST_IDLE_MINIMIZE_MS,
+            ball: (restore: () => void) => (
+              <button
+                type="button"
+                data-testid="task-checklist-ball"
+                aria-label={ballLabel}
+                title={ballLabel}
+                onClick={restore}
+                className={cn(
+                  'relative flex size-9 items-center justify-center rounded-pill border border-stroke bg-surface-raised/70',
+                  'transition-[opacity,scale,background-color] duration-200 ease-out hover:bg-tint-hover',
+                  'starting:scale-50 starting:opacity-0 motion-reduce:transition-none'
+                )}
+              >
+                <ProgressRing progress={progress} done={done} />
+                {unfinishedAfterStop && (
+                  <span aria-hidden className="absolute top-0 right-0 size-2 rounded-pill bg-warning" />
+                )}
+              </button>
+            )
+          }
+        } : {})}
         list={<TaskChecklistRows todos={todos} isActive={isActive} />}
         header={({ toggle, collapsed, listId }) => (
           <button
@@ -231,24 +332,7 @@ export function TaskChecklist({
             className="flex h-11 w-full min-w-0 items-center gap-2.5 px-2.5 text-left"
             onClick={toggle}
           >
-            <span aria-hidden className="relative flex size-6 shrink-0 items-center justify-center">
-              <svg className="absolute inset-0 -rotate-90" width="24" height="24" viewBox="0 0 24 24" aria-hidden>
-                <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-stroke)" strokeWidth="2" />
-                <circle
-                  cx="12"
-                  cy="12"
-                  r="9"
-                  fill="none"
-                  stroke="var(--color-accent)"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeDasharray={circumference}
-                  strokeDashoffset={circumference * (1 - progress)}
-                  className="transition-[stroke-dashoffset] duration-500 motion-reduce:transition-none"
-                />
-              </svg>
-              <span className="relative text-[9px] font-semibold tabular-nums text-fg">{done}</span>
-            </span>
+            <ProgressRing progress={progress} done={done} />
 
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[12.5px] font-medium text-fg">
@@ -292,5 +376,34 @@ export function TaskChecklist({
         )}
       />
     </div>
+  )
+}
+
+const RING_CIRCUMFERENCE = 2 * Math.PI * 9
+
+/**
+ * 进度环 + 完成数。标题行和缩起后的小球画的是**同一颗**:小球是这一行缩出来的,
+ * 两处长得不一样,用户就认不出它们是同一个东西。
+ */
+function ProgressRing({ progress, done }: { progress: number; done: number }): ReactNode {
+  return (
+    <span aria-hidden className="relative flex size-6 shrink-0 items-center justify-center">
+      <svg className="absolute inset-0 -rotate-90" width="24" height="24" viewBox="0 0 24 24" aria-hidden>
+        <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-stroke)" strokeWidth="2" />
+        <circle
+          cx="12"
+          cy="12"
+          r="9"
+          fill="none"
+          stroke="var(--color-accent)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray={RING_CIRCUMFERENCE}
+          strokeDashoffset={RING_CIRCUMFERENCE * (1 - progress)}
+          className="transition-[stroke-dashoffset] duration-500 motion-reduce:transition-none"
+        />
+      </svg>
+      <span className="relative text-[9px] font-semibold tabular-nums text-fg">{done}</span>
+    </span>
   )
 }

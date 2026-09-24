@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { Translate } from '../../../../i18n'
-import type { PluginInstallProgress } from '../../../../stores/plugins'
-import { installLabel, installRatio } from '../install-progress'
+import type { Translate } from '../../i18n'
+import { installLabel, installRatio, type InstallProgress } from '../install-progress'
 
 /** 把 key 和参数原样吐出来 —— 这里要测的是「选了哪条文案」,不是文案本身 */
 const t: Translate = (key, params = {}) =>
@@ -9,7 +8,7 @@ const t: Translate = (key, params = {}) =>
     ? key
     : `${key}:${Object.values(params).map(String).join(',')}`
 
-function progress(patch: Partial<PluginInstallProgress>): PluginInstallProgress {
+function progress(patch: Partial<InstallProgress>): InstallProgress {
   return { phase: 'downloading', startedAt: 0, ...patch }
 }
 
@@ -46,5 +45,16 @@ describe('installLabel', () => {
 
   it('有比例时报整数百分比', () => {
     expect(installLabel(progress({ received: 640, total: 2048 }), t)).toBe('plugins.downloadingPercent:31')
+  })
+
+  /*
+    Skill 那边的文案是同样的中文、另一套 key。测它是因为「共用这段逻辑」和
+    「共用这几句文案」是两件事:插件的措辞要改的时候,Skill 这一侧不该跟着变。
+  */
+  it('换个命名空间就报另一套 key', () => {
+    expect(installLabel(progress({ phase: 'preparing' }), t, 'skills')).toBe('skills.preparing')
+    expect(installLabel(progress({ phase: 'installing' }), t, 'skills')).toBe('skills.installing')
+    expect(installLabel(progress({ received: 512 }), t, 'skills')).toBe('skills.downloading')
+    expect(installLabel(progress({ received: 640, total: 2048 }), t, 'skills')).toBe('skills.downloadingPercent:31')
   })
 })

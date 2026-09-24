@@ -1055,6 +1055,34 @@ const V25_CONTEXT_COMPACTION_DETAIL = `
 ALTER TABLE context_checkpoints ADD COLUMN detail TEXT;
 `
 
+/**
+ * 第 26 条：检查点表随上下文压缩重写一并退役。
+ *
+ * ## 需求
+ *
+ * 压缩按 Claude Code 的模型重写之后,「这段对话从哪里开始发给模型」由转录里的
+ * 一条边界消息回答(`compact_boundary` 块,见 `shared/agent/compaction.ts`),
+ * 不再由另一张表回答。两处并存就会出现「界面按检查点画线、请求却按边界切」
+ * 这类**零报错**的错位 —— 那正是上一版最难查的那一类 bug。
+ *
+ * ## 为什么是 DROP 而不是留着不读
+ *
+ * 留着的代价不是零:它有 `ON DELETE CASCADE` 外键、唯一约束和一条索引,
+ * 每一次 `deleteSession` / 导入合并都还在为它付账;更要紧的是,下一个人读到
+ * 建表语句会以为压缩状态住在这里。**没有读路径的表不是零成本,是一份会骗人的文档。**
+ *
+ * ★ 老检查点**不迁移**成边界消息。检查点记的是「窗口序号 + 一段笔记」,
+ * 而边界消息要的是摘要正文和压缩前后的真实读数 —— 前者推不出后者,硬造出来的
+ * 是一段编的摘要,而模型会当真。老会话因此退回「整段历史照发」,到阈值时
+ * 自动压缩会立刻给它建一条真的边界。这是明知的代价,换的是不撒谎。
+ *
+ * ★ `IF EXISTS`:V9 之前建库、又从没跑过 V9 的库不存在(迁移是顺序执行的),
+ * 但导入 / 合并路径上可能拿到一份缺表的库,而一次建表失败会让整个迁移事务回滚。
+ */
+const V26_DROP_CONTEXT_CHECKPOINTS = `
+DROP TABLE IF EXISTS context_checkpoints;
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -1083,4 +1111,5 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 23, name: 'file-changes', sql: V23_FILE_CHANGES }
   ,{ version: 24, name: 'provider-accounts', sql: V24_PROVIDER_ACCOUNTS }
   ,{ version: 25, name: 'context-compaction-detail', sql: V25_CONTEXT_COMPACTION_DETAIL }
+  ,{ version: 26, name: 'drop-context-checkpoints', sql: V26_DROP_CONTEXT_CHECKPOINTS }
 ]

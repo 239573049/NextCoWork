@@ -380,10 +380,18 @@ function SessionGroupList({
       return next
     })
   }
+  /*
+    需求:「最近 7 天」是**点开才加载**的一组,默认只留标题那一行。
+    不满足会怎样:七天里攒下的会话会全部铺在侧边栏里,把「今天」和下面的
+    「归档」挤出可视区 —— 用户要的那几条今天的对话反而要滚动才看得到。
+
+    `today` / `earlier` 仍是默认展开:「今天」是当前在用的(必须一进来就在),
+    「更早」是用户自己往下翻才会碰到的一档 —— 只有中间这档是纯粹的噪音。
+  */
   const groups = [
-    { key: 'today', title: t('workspace.today'), items: allSessions.filter((s) => s.updatedAt >= startOfToday) },
-    { key: 'recent', title: t('workspace.last7Days'), items: allSessions.filter((s) => s.updatedAt < startOfToday && s.updatedAt >= startOfRecent) },
-    { key: 'earlier', title: t('workspace.earlier'), items: allSessions.filter((s) => s.updatedAt < startOfRecent) }
+    { key: 'today', title: t('workspace.today'), defaultOpen: true, items: allSessions.filter((s) => s.updatedAt >= startOfToday) },
+    { key: 'recent', title: t('workspace.last7Days'), defaultOpen: false, items: allSessions.filter((s) => s.updatedAt < startOfToday && s.updatedAt >= startOfRecent) },
+    { key: 'earlier', title: t('workspace.earlier'), defaultOpen: true, items: allSessions.filter((s) => s.updatedAt < startOfRecent) }
   ] as const
 
   return (
@@ -395,8 +403,17 @@ function SessionGroupList({
         if (items.length === 0) return null
         return (
           <SessionGroupBlock
-            key={group.key}
+            /*
+              需求:分组的展开态是**每个工作区各一份**的。`SessionGroupList` 在切工作区时
+              不重挂,光靠 `defaultOpen` 的话「最近 7 天」只会在第一个工作区里收起 ——
+              用户点开过一次,之后每换一个工作区看到的都是铺开的列表。
+              不满足会怎样:表现为「这个功能时灵时不灵」,而且没有任何报错。
+              key 里带 workspaceId 顺带把上下文菜单也收掉(菜单里存的是上一个工作区的
+              会话),否则切完工作区菜单还开着、点下去操作的是别的项目里的对话。
+            */
+            key={`${workspaceId}:${group.key}`}
             title={group.title}
+            defaultOpen={group.defaultOpen}
             items={items}
             chatTabs={chatTabs}
             activeSessionId={activeSessionId}
@@ -421,6 +438,7 @@ function SessionGroupList({
 
 function SessionGroupBlock({
   title,
+  defaultOpen,
   items,
   chatTabs,
   activeSessionId,
@@ -435,6 +453,12 @@ function SessionGroupBlock({
   workspaceId
 }: {
   title: string
+  /**
+   * 进来时的展开态。**只在首次挂载生效** —— 之后 `open` 归这一行自己所有,
+   * 所以用户手动点开「最近 7 天」之后,列表因 `sessions:changed` 重拉
+   * (发了一条消息、改了条会话)不会把它又打回收起态。
+   */
+  defaultOpen: boolean
   items: readonly SessionListItem[]
   chatTabs: readonly InnerTab[]
   activeSessionId: string | null
@@ -448,7 +472,7 @@ function SessionGroupBlock({
   onToggleMultiSelect: () => void
   workspaceId: string
 }): ReactNode {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(defaultOpen)
   const [menu, setMenu] = useState<{ session: SessionListItem; position: ContextMenuPosition } | null>(null)
   const [dialog, setDialog] = useState<{ kind: 'rename'; session: SessionListItem } | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)

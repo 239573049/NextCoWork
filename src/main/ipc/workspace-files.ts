@@ -1,4 +1,4 @@
-import { clipboard, shell } from 'electron'
+import { app, clipboard, dialog, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import {
   closeSync,
@@ -17,8 +17,8 @@ import {
   writeFileSync,
   type Stats
 } from 'node:fs'
-import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
-import type { OpenTarget, WorkspacePathKind } from '../../shared/domain/open-target'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { DEFAULT_APP_TARGET_ID, REVEAL_TARGET_ID, type OpenTarget, type WorkspacePathKind } from '../../shared/domain/open-target'
 import {
   WORKSPACE_FILE_ERROR_PREFIX,
   WORKSPACE_IMAGE_LIMIT,
@@ -536,7 +536,57 @@ export async function openWorkspaceFileWith(req: { workspaceId: string; path: st
   } catch {
     return
   }
+  /*
+    需求:「打开方式」子菜单里的「文件管理器」「默认应用」两项要真的能用 ——
+    它们不是可执行文件,`system/open-with.ts` 那张表里查不到,原先落进那边的
+    `unknown open target` 分支,表现是点了「文件管理器」只弹一句「无法用这个程序打开」。
+    两者都是 Electron 的 `shell` 能力,所以在这一层分流,而不是让 `system/open-with.ts`
+    去依赖 Electron(那个文件只管真实进程)。
+  */
+  if (req.targetId === REVEAL_TARGET_ID) {
+    shell.showItemInFolder(target)
+    return
+  }
+  if (req.targetId === DEFAULT_APP_TARGET_ID) {
+    // ★ openPath 失败不抛,返回一段错误文本(没有关联程序时就是这种)。不检查的话
+    //   用户点了没反应、也没有任何提示。
+    const failure = await shell.openPath(target)
+    if (failure !== '') throw new IpcError('unknown', failure)
+    return
+  }
   await openWithTarget(req.targetId, target)
+}
+
+/**
+ * 文件树右键「另存为…」:把工作区里的一个文件复制到用户在系统对话框里挑的位置。
+ *
+ * 和 `app:saveTextFile` 同一条约定:**落点由 showSaveDialog 产出**,渲染层只给
+ * 工作区相对路径;源文件照样走 `checkedPath`(软链、越界一律拒)。只做本机工作区 ——
+ * 远端文件不在本机磁盘上,`workspaceRoot` 会直接拒掉。
+ *
+ * 返回 false = 用户取消;调用方据此区分「没存」和「存失败」(后者抛错)。
+ * 不回传目标路径:渲染层用不着它,也就不必让一条本机绝对路径进渲染层。
+ */
+export async function saveWorkspaceFileAs(req: { workspaceId: string; path: string }): Promise<boolean> {
+  let source: string
+  try {
+    source = checkedPath(workspaceRoot(req.workspaceId), req.path)
+    if (!lstatSync(source).isFile()) fail('not-file')
+  } catch (error) {
+    translateError(error)
+  }
+  const result = await dialog.showSaveDialog({
+    defaultPath: join(app.getPath('downloads'), basename(source))
+  })
+  if (result.canceled || !result.filePath) return false
+  // ★ 挑了源文件自己:复制到自身在部分平台上会先截断再读,等于把文件清空。
+  if (resolve(result.filePath) === source) return true
+  try {
+    copyFileSync(source, result.filePath)
+  } catch (error) {
+    translateError(error)
+  }
+  return true
 }
 
 /**

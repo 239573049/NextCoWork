@@ -36,6 +36,7 @@ import {
   getTools,
   installPluginContextProvider,
   installPluginInterceptor,
+  installPluginToolPreparation,
   installPluginToolProvider
 } from '../runtime'
 import { windows } from '../window/registry'
@@ -333,6 +334,7 @@ export async function startPlugins(): Promise<void> {
       不该出现在工具表里。provider 每次装配现问一遍,所以这里只接一次。
   */
   installPluginToolProvider(() => manager?.contributedTools() ?? [])
+  installPluginToolPreparation(() => manager?.prepareContributedTools() ?? Promise.resolve())
   installPluginInterceptor((input) => manager?.intercept(input) ?? Promise.resolve({}))
   installPluginContextProvider((input) => manager?.provideContext(input) ?? Promise.resolve(''))
   /*

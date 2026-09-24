@@ -444,10 +444,33 @@ export const useTabsStore = create<TabsState>((set, get) => {
     }
     return { ...state, tabs: dock.tabs, dock }
   }
+  /**
+   * 需求:右侧工作台 / 底部面板里最后一个 Tab 没了之后,开关必须跟着落回收起态。
+   *
+   * 那一格空掉以后 `visibleDockNode` 就把它当空组滤掉了(见 shell/dock-layout.ts),
+   * 屏幕上什么都没有,而 `rightPanelOpen` 还留着 true。不满足会怎样:表现为
+   * 「展开右侧工作区要点两下」—— 第一下只是把这个已经没有画面的 true 翻成 false
+   * (看上去毫无反应),第二下才真的展开(`AppShell.toggleDockEdge` 只在 opening
+   * 那一支才补 Tab),期间顶栏那颗开关一直亮着「已展开」。
+   *
+   * ★ 只同步 **有 → 没有** 这个跳变,不能无条件写 false:`openPath` /
+   * `openSubagentSession` / `openChangeReview` 都是**先**掀开面板、**再** write
+   * 补 Tab 的,无条件写会把它们刚打开的开关当场抹掉。
+   */
+  const syncEmptyEdgePanels = (workspaceId: string, before: readonly InnerTab[], after: readonly InnerTab[]): void => {
+    const win = useWindowStore.getState()
+    for (const pane of ['right', 'bottom'] as const) {
+      if (tabsInPane(before, pane).length === 0 || tabsInPane(after, pane).length > 0) continue
+      if (pane === 'right') win.setRightPanelForWorkspace(workspaceId, false)
+      else win.setBottomPanelForWorkspace(workspaceId, false)
+    }
+  }
   const write = (workspaceId: string, next: InnerTabState): void => {
+    const before = get().byWorkspace[workspaceId]?.tabs ?? []
     const normalized = withDock(next)
     set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: normalized } })
     persistInnerTabs(workspaceId, normalized)
+    syncEmptyEdgePanels(workspaceId, before, normalized.tabs)
   }
 
   /** 正在取持久化布局的工作区。`ensure` 挂在 effect 上,会被重入。 */
@@ -999,7 +1022,8 @@ export const useTabsStore = create<TabsState>((set, get) => {
 
       /*
         「关掉最后一个就补一个空对话」**只对主区成立**。底部那条空掉是合法状态 ——
-        它对应「把底部面板关掉」这个动作(AppShell 看到最后一个被关就收起面板)。
+        它对应「把底部面板关掉」这个动作(收起开关由上面的 `syncEmptyEdgePanels`
+        在这一格空掉时同步;原注释说的是 AppShell,那条逻辑已经不在 AppShell 里了)。
         照搬到底部的话,面板就永远关不掉:关一个补一个。
       */
       if (pane === 'main' && !tabs.some((tab) => tab.kind === 'chat' && paneOf(tab) === 'main')) {

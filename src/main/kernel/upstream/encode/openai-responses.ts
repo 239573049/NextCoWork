@@ -18,6 +18,7 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
     for (const part of message.parts) {
       switch (part.type) {
         case 'goal_status':
+        case 'compact_boundary':
           break // UI-only: do not flush or create an input item.
         case 'text':
           if (part.text !== '') content.push({ type: message.role === 'user' ? 'input_text' : 'output_text', text: part.text })

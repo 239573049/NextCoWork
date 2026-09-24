@@ -644,6 +644,7 @@ export function AppShell({
         page={settingsPage ?? DEFAULT_SETTINGS_PAGE}
         settings={settings}
         versions={versions}
+        auth={auth}
         onNavigate={win.openSettings}
         onClose={win.closeSettings}
       />

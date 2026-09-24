@@ -591,6 +591,8 @@ function machineLevelPatch(settings: AppSettings): AppSettingsPatch {
     gateway: structuredClone(settings.gateway),
     proxy: structuredClone(settings.proxy),
     shell: settings.shell,
+    // 和 shell 同理:描述的是这台机器上装了哪些程序,不随账户换
+    defaultOpenTarget: settings.defaultOpenTarget,
     data: { backupDirectory: settings.data.backupDirectory }
   }
 }

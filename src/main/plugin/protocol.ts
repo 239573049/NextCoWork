@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto'
 import { lstat, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { isNativePackagePath } from '../../shared/plugin/native-component'
 
 export const PLUGIN_SCHEME = 'ncw-plugin'
 
@@ -877,6 +878,8 @@ export async function handlePluginRequest(
       `~/.ssh/id_rsa` 的软链会被原样读出来 —— 而词法检查完全看不出来。
     */
     if (!isWithin(canonicalRoot, canonicalTarget)) return new Response('forbidden', { status: 403 })
+    // ★ 软链之后再拦一次原生区:包里一个视图文件软链到 `native/` 下,词法检查看不出来
+    if (isNativePackagePath(relative(canonicalRoot, canonicalTarget))) return new Response('forbidden', { status: 403 })
     const targetStat = await lstat(canonicalTarget)
     if (!targetStat.isFile()) return new Response('not found', { status: 404 })
 
@@ -911,6 +914,13 @@ export function resolveInsidePackage(root: string, pathname: string): string | n
   const rel = pathname.replace(/^\/+/, '')
   if (rel === '') return null
   if (rel.split('/').some((segment) => segment === '..' || segment === '.')) return null
+  /*
+    需求:插件包里 `native/` 下是原生引擎(办公插件自带的 LibreOffice helper 与动态库),
+    只能由主进程校验后 spawn,**绝不能**当静态资源发给 iframe。不拦的话,任何一个
+    视图都能 fetch 走引擎二进制,协议层还会把它当 octet-stream 发出去(见
+    `shared/plugin/native-component.ts` 文件头第 1 条)。
+  */
+  if (isNativePackagePath(rel)) return null
   const target = resolve(join(root, rel))
   return isWithin(root, target) ? target : null
 }

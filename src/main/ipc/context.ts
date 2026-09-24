@@ -1,217 +1,105 @@
-import type { ContextCheckpoint, ContextPreview, ContextWindowView } from '../../shared/agent/context-management'
+import type { ContextPreview } from '../../shared/agent/context-management'
 import { effectiveContextWindow } from '../../shared/agent/context-management'
+import { messagesForModel } from '../../shared/agent/compaction'
 import { normalizeEnvironmentRef } from '../../shared/domain/environment'
 import type { ContextPreviewRequest } from '../../shared/ipc/contract'
 import { resolveMaxOutputTokens } from '../../shared/agent/run-request'
+import type { AgentMessage } from '../../shared/agent/message'
 import { userMessage } from '../../shared/agent/message'
+import { ulid } from '../../shared/util/id'
 import { agentRegistry } from '../kernel/agent/registry'
 import { modePromptFor, modeRegistry } from '../kernel/mode/registry'
 import { skillRegistry } from '../kernel/skill/registry'
 import { taskTool } from '../kernel/tool/builtin/task'
 import { ToolRegistry } from '../kernel/tool/registry'
-import {
-  COMPACTION_SYSTEM,
-  assemble,
-  compactionDigestBudget,
-  compactionRequestBody,
-  estimateMessages,
-  projectContextWindow,
-  sanitizeSummaryNote,
-  summaryOutputTokens
-} from '../kernel/context-assembler'
-import { contextWindowView } from '../kernel/context-view'
+import { resolveAnywhere } from '../kernel/tool/path-guard'
+import { assemble, estimateMessages } from '../kernel/context-assembler'
+import { compactConversation } from '../kernel/compaction/compact'
+import { readAttachableFile, type AttachmentToolNames } from '../kernel/compaction/attachments'
 import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
-
-export function listContextCheckpoints(req: { sessionId: string }): ContextCheckpoint[] {
-  return store.listContextCheckpoints(req.sessionId)
-}
-
-export function updateContextCheckpoint(req: { checkpointId: string; note: string; revision: number }): ContextCheckpoint {
-  /*
-    ★ 走 `sanitizeSummaryNote`,不再就地写一条正则。原来那条
-    `replace(/[\u0000-\u001f\u007f]/g, '')` 的字符区间**连换行一起削** —— 用户在
-    分隔线里分好段落的笔记一存就被压成一整段,而界面上不会有任何提示。
-    摘要本身现在是八节 Markdown,更加丢不起换行。
-  */
-  const note = sanitizeSummaryNote(req.note)
-  if (note === '') throw new Error('上下文笔记不能为空')
-  return store.updateContextCheckpoint(req.checkpointId, note, req.revision, Date.now())
-}
 
 const SUMMARY_TIMEOUT_MS = 180_000
 
 /**
- * 手动压缩 —— `AgentSession` 那条自动路径的同胞,区别只在触发者是用户。
+ * 手动压缩(/compact)—— `AgentSession.compact` 那条自动路径的同胞,区别只在触发者
+ * 是用户、可以带一句「重点保留什么」,以及续接语不要求模型接着干(用户会自己发下一句)。
  *
- * ★ 提示词、digest、输出上限、消毒**四样都和自动那条读同一份**
- * (`context-assembler.ts` 的「摘要压缩」一节)。这里原先有它们的一整套副本,
- * 而两份已经开始分头演化 —— 只改一侧的结果是「自动压出来有八节、手动压出来只有一段」,
- * 且不报任何错。
+ * ★ 摘要提示词、PTL 重试、重附件、边界消息的形状全部来自 `kernel/compaction/compact.ts`,
+ * 和自动那条读同一份 —— 原先这里有旧摘要提示词和 digest 的一整套副本,两份各自演化。
  *
- * ★ 落的是一条普通的 `ContextCheckpoint`,**不动 `messages`**。下一次 run 的构造
- * 函数会自己挑出 `windowIndex` 最大的那条并套上 `withSummary`;在这里顺手把历史也
- * 裁掉的话,完整转录就没了 —— 而那正是「双轨」一直守住的东西。
+ * ★ 结果是一条**提交进转录**的边界消息,不再是另一张表里的检查点:下一次 run 从
+ * `messagesForModel` 读到的就是它,重开会话也一样;完整转录仍在,界面照常画出边界之前的对话。
+ *
+ * ★ 只在会话空闲时调用(界面在生成中禁用了入口):跑着的 run 把上下文冻在内存里,
+ * 此时插一条边界会和它随后提交的消息交错。
  */
-export async function compactContext(req: { sessionId: string }): Promise<{
-  checkpoint: ContextCheckpoint
+export async function compactContext(req: { sessionId: string; instructions?: string }): Promise<{
+  message: AgentMessage
   inputTokens: number
 }> {
   const session = store.getSession(req.sessionId)
   if (session === undefined) throw new Error('会话不存在')
-
   const history = store.getHistory(req.sessionId)
   if (history.length === 0) throw new Error('这段对话还没有可压缩的内容')
 
-  const previous = [...store.listContextCheckpoints(req.sessionId)]
-    .sort((a, b) => b.windowIndex - a.windowIndex)[0]
-  const now = getHost().clock.now()
-
-  /*
-    ★ 这条路径不知道会话有没有开「最大上下文」——那是 `RunRequest` 上的字段,
-    而这里来自一次菜单点击。按**关**算:预算取小只会让 digest 更紧,不会让请求超窗。
-  */
   const alias = getRouter().resolveModel(session.model, session.modelProviderId)
-  const window = effectiveContextWindow(alias?.contextWindow, false)
+  const signal = AbortSignal.timeout(SUMMARY_TIMEOUT_MS)
+  const root = session.rootPathAtCreation
+  const workspace = store.getWorkspace(session.workspaceId)
+  // 远端工作区的文件在另一台机器上,这条菜单路径不为重附件去租一条 SSH 连接 —— 少附文件,摘要照常。
+  const local = workspace === undefined || normalizeEnvironmentRef(workspace.environment).kind !== 'connection'
 
-  /*
-    ★ 请求正文和「这一份 digest 漏掉了谁」一起取回来 —— 后者要落进检查点,
-    否则被预算丢掉的消息会以「已覆盖」的身份被投影裁掉(见 `CompactionDigest`)。
-  */
-  const prompt = compactionRequestBody({
+  const result = await compactConversation({
     messages: history,
-    ...(previous === undefined ? {} : { previousNote: previous.note }),
-    budget: compactionDigestBudget(window)
+    trigger: 'manual',
+    ...(req.instructions === undefined ? {} : { instructions: req.instructions }),
+    preTokens: estimateMessages(messagesForModel(history)),
+    autoContinue: false,
+    // 协议窗口:摘要请求只受模型真实上限约束,和「最大上下文」计费开关无关。
+    protocolWindow: effectiveContextWindow(alias?.contextWindow, true),
+    send: (request) => getRouter().stream(
+      {
+        model: session.model,
+        // 摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
+        ...(session.modelProviderId === undefined ? {} : { modelProviderId: session.modelProviderId }),
+        system: request.system,
+        messages: request.messages,
+        tools: [],
+        maxOutputTokens: request.maxOutputTokens,
+        thinkingLevel: 'off' as const
+      },
+      signal,
+      { workspaceId: session.workspaceId, runId: `${req.sessionId}:compact:manual`, sessionId: req.sessionId }
+    ),
+    attachments: {
+      tools: attachmentTools(),
+      readFile: async (path) => {
+        if (!local) return undefined
+        try {
+          return await readAttachableFile(getHost().fs, resolveAnywhere(root, path).abs)
+        } catch {
+          return undefined
+        }
+      }
+    },
+    newId: () => ulid(),
+    now: getHost().clock.now(),
+    signal
   })
-
-  let note = ''
-  for await (const ev of getRouter().stream(
-    {
-      model: session.model,
-      // 摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
-      ...(session.modelProviderId === undefined ? {} : { modelProviderId: session.modelProviderId }),
-      system: COMPACTION_SYSTEM,
-      messages: [userMessage(
-        `${req.sessionId}:context-input:${String(now)}`,
-        [{ type: 'text', text: prompt.text }],
-        now
-      )],
-      tools: [],
-      maxOutputTokens: summaryOutputTokens(alias?.maxOutputTokens, window),
-      thinkingLevel: 'off' as const
-    },
-    AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
-    { workspaceId: session.workspaceId, runId: `${req.sessionId}:context:manual`, sessionId: req.sessionId }
-  )) {
-    if (ev.type === 'text_delta') note += ev.text
-    if (ev.type === 'error') throw new Error(ev.error.message)
-  }
-
-  note = sanitizeSummaryNote(note)
-  if (note === '') throw new Error('模型没有返回可用的摘要')
-
-  const windowIndex = (previous?.windowIndex ?? 0) + 1
-  const id = `${req.sessionId}:context:${String(windowIndex)}`
-  const first = history[0]
-  const last = history.at(-1)
-  /*
-    ★ 「省了多少」必须按**下一次 run 真的会发出去的那一份**算,所以这里走
-    `projectContextWindow` —— 和 `AgentSession` 恢复检查点时是同一个函数、同一套
-    切点规则。自己再拼一遍 `withSummary(compactMessages(...))` 的话,这个数会
-    偏大一整段被裁掉的历史,而用户看到的「省下 N」是纯编的。
-    覆盖锚点给最后一条:摘要读的就是到此为止的全部转录。
-
-    ★ `uncoveredFromMessageId` 和锚点**一起给**:digest 超预算时会从最早的一侧
-    整条丢,那些消息没进摘要,投影的切点就不许越过它们(见 `ContextSummaryRef`)。
-    自动那条路径上是同一份规则,两边不能只有一边守。
-  */
-  const projected = projectContextWindow({
-    messages: history,
-    summary: {
-      note,
-      id,
-      ...(last === undefined ? {} : { coveredThroughMessageId: last.id }),
-      ...(prompt.digest.uncoveredFromMessageId === undefined
-        ? {}
-        : { uncoveredFromMessageId: prompt.digest.uncoveredFromMessageId })
-    },
-    now
-  })
-  const checkpoint: ContextCheckpoint = {
-    id,
-    sessionId: req.sessionId,
-    windowIndex,
-    note,
-    source: 'manual',
-    ...(first === undefined ? {} : { coveredFromMessageId: first.id }),
-    ...(last === undefined ? {} : { coveredThroughMessageId: last.id }),
-    inputTokensBefore: estimateMessages(history),
-    inputTokensAfter: estimateMessages(projected.messages),
-    detail: {
-      digest: prompt.text,
-      digestOmittedMessages: prompt.digest.omittedMessages,
-      droppedMessages: projected.droppedMessages,
-      ...(projected.droppedThroughMessageId === undefined
-        ? {}
-        : { droppedThroughMessageId: projected.droppedThroughMessageId }),
-      ...(prompt.digest.uncoveredFromMessageId === undefined
-        ? {}
-        : { uncoveredFromMessageId: prompt.digest.uncoveredFromMessageId })
-    },
-    createdAt: now,
-    updatedAt: now,
-    revision: 1
-  }
-  store.upsertContextCheckpoint(checkpoint)
-  return { checkpoint, inputTokens: checkpoint.inputTokensAfter ?? 0 }
+  if (!result.ok) throw new Error(result.error.message)
+  store.commitMessage(req.sessionId, result.message)
+  return { message: result.message, inputTokens: result.boundary.postTokens }
 }
 
-/**
- * 「这条检查点之后,真正发给模型的是什么」—— 压缩组件那个可展开面板的数据源。
- *
- * ★★ 它是**按当前转录重算的**,不是压缩当时那一份的录像。这是明知的取舍:
- * 录下来意味着每条检查点都要存一份完整投影(几十 MB 级),而这条通道真正要
- * 回答的问题是「模型现在看得见什么」—— 对最新那条检查点,重算的结果就是下一次
- * 请求会发出去的那一份,逐字相同(同一个 `projectContextWindow`)。
- * 对更早的检查点它是**复原**,所以界面上必须标明这一点,不能画成历史快照。
- *
- * ★ 机械压缩那条路径要不要传 `dropWithoutSummary`,只能看检查点自己记下的
- * `detail.droppedMessages` —— 那一刀丢没丢消息是当时的运行期决定
- * (取决于清空工具输出够不够),重算时无从推导。老检查点没有这一份,
- * 于是按「没丢过」复原,这与它们当年的行为一致(丢弃是这一版才有的)。
- */
-export function contextWindow(req: { sessionId: string; checkpointId: string }):
-  ContextWindowView | undefined {
-  const checkpoint = store.getContextCheckpoint(req.checkpointId)
-  if (checkpoint === undefined || checkpoint.sessionId !== req.sessionId) return undefined
-  const history = store.getHistory(req.sessionId)
-  if (history.length === 0) return undefined
-
-  const mechanical = checkpoint.source === 'mechanical' || checkpoint.source === 'auto'
-  const projected = projectContextWindow({
-    messages: history,
-    now: getHost().clock.now(),
-    ...(mechanical
-      ? { dropWithoutSummary: (checkpoint.detail?.droppedMessages ?? 0) > 0 }
-      : {
-          summary: {
-            note: checkpoint.note,
-            id: checkpoint.id,
-            ...(checkpoint.coveredThroughMessageId === undefined
-              ? {}
-              : { coveredThroughMessageId: checkpoint.coveredThroughMessageId }),
-            ...(checkpoint.detail?.uncoveredFromMessageId === undefined
-              ? {}
-              : { uncoveredFromMessageId: checkpoint.detail.uncoveredFromMessageId })
-          }
-        })
-  })
-  return contextWindowView({
-    checkpointId: checkpoint.id,
-    projection: projected.messages,
-    transcript: history,
-    ...(mechanical ? {} : { summaryId: checkpoint.id })
-  })
+/** 同 `AgentSession.attachmentTools`:外部名从注册表查,撞名加后缀时字面量会静默失配。 */
+function attachmentTools(): AttachmentToolNames {
+  const registry = getTools()
+  const name = (id: string): string | undefined => registry.byInternalId(id)?.externalName
+  const file = new Set([name('Read'), name('Write'), name('Edit')].filter((n): n is string => n !== undefined))
+  const todo = name('TodoWrite')
+  const skill = name('Skill')
+  return { file, ...(todo === undefined ? {} : { todo }), ...(skill === undefined ? {} : { skill }) }
 }
 
 /**
@@ -278,7 +166,8 @@ export async function previewContext(req: ContextPreviewRequest): Promise<Contex
     预览要回答的是「我下一条发出去会占多少」,所以把那条消息先摆上是**更准**不是更假;
     它自己只贡献一份消息开销(几个 token),落在 `messages` 档里,也是真花的。
   */
-  const history = req.sessionId === '' ? [] : store.getHistory(req.sessionId)
+  // 只算最后一条压缩边界之后的那段 —— 那才是下一次请求真会发出去的。
+  const history = req.sessionId === '' ? [] : messagesForModel(store.getHistory(req.sessionId))
   const messages = history.length > 0
     ? history
     : [userMessage('preview', [{ type: 'text', text: '' }], 0)]

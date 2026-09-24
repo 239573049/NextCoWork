@@ -57,6 +57,12 @@ describe('模型绑定选择', () => {
 })
 
 describe('下拉框复合键', () => {
+  it('空别名对应空选项，审核模型和目标判定模型不会显示成空白', () => {
+    expect(modelSelectionKey(undefined, '')).toBe('')
+    expect(parseModelSelectionKey(modelSelectionKey(undefined, '')))
+      .toEqual({ modelProviderId: undefined, alias: '' })
+  })
+
   it('别名里的斜杠原样保留 —— 只切第一个分隔符', () => {
     const key = modelSelectionKey('openrouter', 'openrouter/claude-sonnet-4')
     expect(parseModelSelectionKey(key))

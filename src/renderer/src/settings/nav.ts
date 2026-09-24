@@ -35,11 +35,17 @@ export interface SettingsPage {
   label: string
   /** 子 Tab(参考图里「通用」下的 应用|Agent|任务)。没有就是单页 */
   subs?: readonly SettingsSub[]
+  /**
+   * 只在登录 NextCoWork 账户后出现在导航与搜索里。
+   * 需求：钱包的一切（余额、充值、消费记录）都属于账户，本地模式下这一页没有任何能做的事 ——
+   * 画出来就是一个点进去只剩「请登录」的入口。过滤只在 `visibleSettingsPages` 一处做。
+   */
+  requiresSignIn?: true
 }
 
 export const SETTINGS_PAGES: readonly SettingsPage[] = [
   { id: 'account', label: '账户' },
-  { id: 'wallet', label: '钱包' },
+  { id: 'wallet', label: '钱包', requiresSignIn: true },
   {
     id: 'general',
     label: '通用',
@@ -130,6 +136,20 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
 ]
 
 export const DEFAULT_SETTINGS_PAGE: SettingsPageId = 'general'
+
+/** 当前登录态下导航里该出现的页。`SETTINGS_PAGES` 仍是全集（搜索目录、文案校验都按全集）。 */
+export function visibleSettingsPages(signedIn: boolean): SettingsPage[] {
+  return SETTINGS_PAGES.filter((p) => signedIn || p.requiresSignIn !== true)
+}
+
+/**
+ * 真正要渲染的页。需求：未登录时即便有人请求钱包页（登录在浮层开着时失效、
+ * 或旧的深链），也不能落在一个导航里看不见的页上 —— 送去账户页，那里有登录入口。
+ */
+export function resolveSettingsPage(page: SettingsPageId, signedIn: boolean): SettingsPageId {
+  const def = SETTINGS_PAGES.find((p) => p.id === page)
+  return def?.requiresSignIn === true && !signedIn ? 'account' : page
+}
 
 export const PAGE_LABEL: Readonly<Record<SettingsPageId, string>> = Object.fromEntries(
   SETTINGS_PAGES.map((p) => [p.id, p.label])
@@ -440,9 +460,12 @@ export function matchRows(query: string): SettingsRow[] {
   })
 }
 
-/** 页面本身命中(用户打「关于」时那一页没有任何行,但页名该出现) */
-export function matchPages(query: string): SettingsPage[] {
+/**
+ * 页面本身命中(用户打「关于」时那一页没有任何行,但页名该出现)。
+ * `signedIn` 必填而不给默认值:漏传就会把钱包页搜给本地模式的用户,而那一页导航里看不见。
+ */
+export function matchPages(query: string, signedIn: boolean): SettingsPage[] {
   const q = query.trim().toLowerCase()
   if (q === '') return []
-  return SETTINGS_PAGES.filter((p) => p.label.toLowerCase().includes(q))
+  return visibleSettingsPages(signedIn).filter((p) => p.label.toLowerCase().includes(q))
 }

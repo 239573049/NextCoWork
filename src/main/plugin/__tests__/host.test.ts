@@ -436,6 +436,20 @@ describe('PluginManager · 授权上界', () => {
 })
 
 describe('PluginManager · 激活', () => {
+  it('在装配工具前唤醒 onTool 插件，而不唤醒仅提供命令的插件', async () => {
+    const { manager, runtime } = await makeManager({
+      activationEvents: ['onTool:read_export'],
+      contributes: { tools: [{ name: 'read_export', title: '%tool.read%' }] }
+    })
+    manager.grant('acme.demo', ['storage'])
+    await manager.setEnabled('acme.demo', true)
+    await manager.prepareContributedTools()
+    expect(runtime.spawned).toEqual(['acme.demo'])
+    expect(runtime.invocations).toContain('activate')
+    await manager.prepareContributedTools()
+    expect(runtime.spawned).toHaveLength(1)
+  })
+
   it('命令触发激活,并把 activate 与 command.run 各发一次', async () => {
     const { manager, runtime } = await makeManager()
     manager.grant('acme.demo', ['storage'])

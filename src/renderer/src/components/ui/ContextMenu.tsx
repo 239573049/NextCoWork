@@ -15,12 +15,19 @@ export function ContextMenu({
   label,
   width = 192,
   onClose,
+  containsTarget,
   children
 }: {
   position: ContextMenuPosition
   label: string
   width?: number
   onClose: () => void
+  /**
+   * 需求:二级菜单(文件树右键的「打开方式 ›」)portal 在 body 下,DOM 上不在这个面板里。
+   * 不把它算作「里面」的话,点子菜单那一下 pointerdown 会先把整个菜单关掉,
+   * 表现是子菜单里的项永远点不中。与 `Menu` 的同名参数同义。
+   */
+  containsTarget?: (target: Node) => boolean
   children: (close: () => void) => ReactNode
 }): ReactNode {
   const panelRef = useRef<HTMLDivElement>(null)
@@ -73,8 +80,10 @@ export function ContextMenu({
 
   useEffect(() => {
     if (closing) return
+    const inside = (target: Node): boolean =>
+      panelRef.current?.contains(target) === true || containsTarget?.(target) === true
     const onPointerDown = (event: PointerEvent): void => {
-      if (!panelRef.current?.contains(event.target as Node)) close()
+      if (!inside(event.target as Node)) close()
     }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
@@ -82,17 +91,23 @@ export function ContextMenu({
       close()
     }
     const onViewportChange = (): void => close()
+    // 菜单自己(或它的子菜单)内部滚动不是「视口变了」:子菜单项多到要滚时,
+    // 不排除的话一滚轮就把整份菜单关掉。
+    const onScroll = (event: Event): void => {
+      if (event.target instanceof Node && inside(event.target)) return
+      close()
+    }
     document.addEventListener('pointerdown', onPointerDown, true)
     document.addEventListener('keydown', onKeyDown)
     window.addEventListener('resize', onViewportChange)
-    document.addEventListener('scroll', onViewportChange, true)
+    document.addEventListener('scroll', onScroll, true)
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true)
       document.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('resize', onViewportChange)
-      document.removeEventListener('scroll', onViewportChange, true)
+      document.removeEventListener('scroll', onScroll, true)
     }
-  }, [close, closing])
+  }, [close, closing, containsTarget])
 
   return createPortal(
     <div

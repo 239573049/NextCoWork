@@ -16,8 +16,7 @@
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import type { RunUsage } from '../../shared/agent/transcript'
 import type { RunCost } from '../../shared/domain/pricing'
-import type { ContextCheckpoint, ContextCompactionDetail, ContextSearchHit, ContextCheckpointSource } from '../../shared/agent/context-management'
-import { orphanedCheckpoints } from '../../shared/agent/context-management'
+import type { ContextSearchHit } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import { mcpSecretRef } from '../../shared/domain/mcp'
@@ -641,7 +640,6 @@ export function getSessionDetail(id: string): SessionDetail | undefined {
   return {
     session,
     messages: getHistory(id) as AgentMessage[],
-    contextCheckpoints: listContextCheckpoints(id),
     messageRuns: messageRunsOf(id),
     runUsage: runUsageOf(id),
     runModel: runModelOf(id)
@@ -796,109 +794,9 @@ function sessionDetailsOf(rows: readonly unknown[]): ExportSession[] {
     // 在这条路径上是按会话数乘出去的。
     return session === undefined ? [] : [{
       session,
-      messages: [...getHistory(id)],
-      contextCheckpoints: [...listContextCheckpoints(id)]
+      messages: [...getHistory(id)]
     }]
   })
-}
-
-function parseContextCheckpoint(row: Record<string, unknown>): ContextCheckpoint {
-  let searchHits: ContextSearchHit[] | undefined
-  try {
-    const parsed: unknown = row['search_hits'] === null || row['search_hits'] === undefined
-      ? undefined
-      : JSON.parse(String(row['search_hits']))
-    if (Array.isArray(parsed)) searchHits = parsed as ContextSearchHit[]
-  } catch {
-    searchHits = undefined
-  }
-  /*
-    ★ 解析失败一律当「没有这一份」,不抛。这一列是**派生事实**(压缩时算出来的
-    统计与 digest),它坏掉的代价只是界面上少一块面板;而一次抛异常会让
-    `listContextCheckpoints` 整条失败 —— 连压缩分隔线都画不出来了。
-    同上面 `search_hits` 那条的立场。
-  */
-  let detail: ContextCompactionDetail | undefined
-  try {
-    const parsed: unknown = row['detail'] === null || row['detail'] === undefined
-      ? undefined
-      : JSON.parse(String(row['detail']))
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      detail = parsed as ContextCompactionDetail
-    }
-  } catch {
-    detail = undefined
-  }
-  return {
-    id: String(row['id']),
-    sessionId: String(row['session_id']),
-    windowIndex: Number(row['window_index']),
-    note: String(row['note'] ?? ''),
-    source: String(row['source']) as ContextCheckpointSource,
-    ...(row['covered_from_message_id'] == null ? {} : { coveredFromMessageId: String(row['covered_from_message_id']) }),
-    ...(row['covered_through_message_id'] == null ? {} : { coveredThroughMessageId: String(row['covered_through_message_id']) }),
-    ...(row['input_tokens_before'] == null ? {} : { inputTokensBefore: Number(row['input_tokens_before']) }),
-    ...(row['input_tokens_after'] == null ? {} : { inputTokensAfter: Number(row['input_tokens_after']) }),
-    ...(searchHits === undefined ? {} : { searchHits }),
-    ...(detail === undefined ? {} : { detail }),
-    createdAt: Number(row['created_at']),
-    updatedAt: Number(row['updated_at']),
-    revision: Number(row['revision'] ?? 1)
-  }
-}
-
-export function listContextCheckpoints(sessionId: string): ContextCheckpoint[] {
-  return stmt('SELECT * FROM context_checkpoints WHERE session_id = ? ORDER BY window_index, id')
-    .all(sessionId)
-    .map((row) => parseContextCheckpoint(row as Record<string, unknown>))
-}
-
-export function getContextCheckpoint(id: string): ContextCheckpoint | undefined {
-  const row = stmt('SELECT * FROM context_checkpoints WHERE id = ?').get(id)
-  return row === undefined ? undefined : parseContextCheckpoint(row as Record<string, unknown>)
-}
-
-export function upsertContextCheckpoint(checkpoint: ContextCheckpoint): ContextCheckpoint {
-  tx(() => {
-    stmt(
-      `INSERT INTO context_checkpoints
-       (id, session_id, window_index, note, source, covered_from_message_id, covered_through_message_id,
-        input_tokens_before, input_tokens_after, search_hits, detail, created_at, updated_at, revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET note = excluded.note, source = excluded.source,
-         covered_from_message_id = excluded.covered_from_message_id,
-         covered_through_message_id = excluded.covered_through_message_id,
-         input_tokens_before = excluded.input_tokens_before,
-         input_tokens_after = excluded.input_tokens_after,
-         search_hits = excluded.search_hits, detail = excluded.detail,
-         updated_at = excluded.updated_at,
-         revision = excluded.revision`
-    ).run(
-      checkpoint.id,
-      checkpoint.sessionId,
-      checkpoint.windowIndex,
-      checkpoint.note,
-      checkpoint.source,
-      checkpoint.coveredFromMessageId ?? null,
-      checkpoint.coveredThroughMessageId ?? null,
-      checkpoint.inputTokensBefore ?? null,
-      checkpoint.inputTokensAfter ?? null,
-      checkpoint.searchHits === undefined ? null : JSON.stringify(checkpoint.searchHits),
-      checkpoint.detail === undefined ? null : JSON.stringify(checkpoint.detail),
-      checkpoint.createdAt,
-      checkpoint.updatedAt,
-      checkpoint.revision
-    )
-  })
-  return checkpoint
-}
-
-export function updateContextCheckpoint(id: string, note: string, revision: number, now: number): ContextCheckpoint {
-  const current = getContextCheckpoint(id)
-  if (current === undefined) throw new Error(`上下文检查点不存在: ${id}`)
-  if (current.revision !== revision) throw new Error('上下文检查点已被其它窗口更新，请重新加载后再保存')
-  const next = { ...current, note, updatedAt: now, revision: revision + 1 }
-  return upsertContextCheckpoint(next)
 }
 
 export function renameSession(id: string, title: string): void {
@@ -1247,16 +1145,6 @@ export function replaceHistory(sessionId: string, messages: readonly AgentMessag
     for (const id of removed) stmt('DELETE FROM messages WHERE id = ?').run(id)
     if (removed.length > 0) {
       stmt('DELETE FROM messages_fts WHERE session_id = ? AND message_id NOT IN (SELECT id FROM messages WHERE session_id = ?)').run(sessionId, sessionId)
-      /*
-        ★ **改写历史要连着清理检查点,而且必须在同一个事务里。**
-        判据见 `orphanedCheckpoints`。放在这里而不是各个调用点上,是因为
-        这个函数是「用户有意改写转录」的**唯一**入口(删一轮、编辑消息、
-        编辑后重跑都汇到这儿)—— 分散到调用点就总有一条路会忘。
-        没删过消息就不可能产生新孤儿,所以只在 `removed` 非空时走一趟。
-      */
-      for (const orphan of orphanedCheckpoints(ids, listContextCheckpoints(sessionId))) {
-        stmt('DELETE FROM context_checkpoints WHERE id = ?').run(orphan.id)
-      }
     }
     for (const { message, ordinal, changed } of entries) {
       if (changed) writeMessage(session, message, ordinal)
@@ -1705,10 +1593,7 @@ export function mergeDataExport(data: DataExport): ImportApplyResult {
       if (decision === 'overwrite') overwritten++
       putSession(item.session)
       replaceHistory(item.session.id, item.messages)
-      // 检查点与会话历史一起导入；旧导出没有该字段时按空数组处理。
-      for (const checkpoint of item.contextCheckpoints ?? []) {
-        upsertContextCheckpoint(checkpoint)
-      }
+      // 旧导出里的 `contextCheckpoints` 刻意不导:压缩已改成转录里的边界消息,检查点表不再被读取。
       imported++
       sessionsImported++
       messagesImported += item.messages.length
@@ -2808,6 +2693,13 @@ function usageLogWhere(query: UsageRequestLogsQuery): {
   if (query.status === 'success') clauses.push('ok = 1')
   else if (query.status === 'failed') clauses.push('ok = 0')
   return { sql: clauses.join(' AND '), params }
+}
+
+/** 需求：费用浮层逐模型核算整条会话；不分页，否则长会话会漏算旧请求。 */
+export function getSessionUsageAttempts(sessionId: string): UsageAttemptRecord[] {
+  return stmt('SELECT * FROM usage_records WHERE session_id = ? ORDER BY at, id')
+    .all(sessionId)
+    .map(usageRecordFromRow)
 }
 
 export function getUsageRequestLogs(query: UsageRequestLogsQuery): UsageRequestLogsPage {

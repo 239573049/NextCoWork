@@ -43,7 +43,7 @@ import { useI18n, type TranslationKey } from '../../../i18n'
 import { usePluginsStore, type PluginInstallProgress } from '../../../stores/plugins'
 import { PluginIcon } from './PluginIcon'
 import { PluginInstallDialog } from './PluginInstallDialog'
-import { installLabel, installRatio } from './install-progress'
+import { installLabel, installRatio } from '../../../lib/install-progress'
 
 export function PluginMarket(): ReactNode {
   const { t } = useI18n()

@@ -109,6 +109,11 @@ function toBlock(p: ContentPart): unknown | null {
       // 「上一轮没达成」辩解 —— 既没用,又占窗口。
       return null
 
+    case 'compact_boundary':
+      // 压缩边界只是一枚书签:摘要正文就在同一条消息的 text 块里,模型读那一份。
+      // 把这里的 summary 也编码上去,等于把摘要发两遍。
+      return null
+
     default:
       return null
   }

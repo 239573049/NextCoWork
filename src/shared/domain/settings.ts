@@ -3,6 +3,7 @@
  */
 import type { PermissionMode } from '../agent/permission'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../agent/run-request'
+import { isOpenTargetPreference } from './open-target'
 import type { ProxySettings } from './proxy'
 import { DEFAULT_PROXY, migrateLegacyProxy } from './proxy'
 import {
@@ -65,14 +66,17 @@ export interface DataSettings {
 }
 
 /**
- * Agent 上下文整理偏好。实验模式包含笔记、当前会话历史检索和窗口切换。
+ * Agent 上下文整理偏好。
  *
- * ★ 两个开关不是并列的:`autoCompact` 是总闸,关掉它 `experimentalMode` 也不会
- * 触发(见 `agent-session.ts` 到达阈值那一段)。默认给的是「只开总闸」——
- * 到阈值走机械压缩,实验模式留给用户自己开。
+ * ★ 原先这里还有一个 `experimentalMode`:它区分的是「机械折叠」和「模型摘要」
+ * 两条压缩路径。按 Claude Code 重写之后只剩模型摘要一条路(机械折叠会把工具输出
+ * 清空成骨架,省不下多少又让模型看不见自己刚做过什么),这个开关没有剩下的语义,
+ * 所以删掉 —— 留一个不改变任何行为的开关,比没有开关更让人困惑。
+ *
+ * ★ `autoCompact` 保留,它现在是**唯一**的总闸:关掉之后到阈值也不压缩,
+ * 上下文一路涨到上游报超长为止(被动压缩同样受它管)。
  */
 export interface ContextManagementSettings {
-  experimentalMode: boolean
   autoCompact: boolean
 }
 
@@ -326,6 +330,15 @@ export interface AppSettings {
    */
   shell: ShellPreference
 
+  /**
+   * 设置 › 通用:文件树右键菜单第一行「在 X 中打开」用哪个程序。值是
+   * `workspace:listOpenTargets` 给出的 id;空串 = 自动(见 `pickPrimaryTarget` 的落点顺序)。
+   *
+   * ★ 和 `shell` 同类,是**机器本地**的选择 —— 它描述的是这台机器上装了什么,
+   *   换配置档不该把它换掉(见 `config-profile.ts` 的 `machineLevelPatch`)。
+   */
+  defaultOpenTarget: string
+
   /** 子代理(方案 §4.9 / 界面「Agent 资源调度」) */
   subagent: {
     /** 界面:「默认子代理模型」 */
@@ -437,10 +450,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   goalEvaluatorModel: '',
   modelProposedGoals: 'auto',
   defaultModel: '',
-  contextManagement: { experimentalMode: false, autoCompact: true },
+  contextManagement: { autoCompact: true },
   upstreamIdleTimeoutSeconds: DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
   maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   shell: 'system',
+  defaultOpenTarget: '',
   subagent: { model: '', perSessionLimit: 4, globalLimit: 4 },
   gateway: { enabled: false, preferredPort: 19836, failover: false },
   providerAccountRotation: true,
@@ -528,6 +542,8 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   // ★ 只认枚举:盘上/导入进来的坏值一个都不许落库,也不许被当成 `'system'`
   //   悄悄生效(`next` 是 current 的克隆,拒绝就是保留用户当前那一个)。
   if (isShellPreference(patch.shell)) next.shell = patch.shell
+  // 同理只认形状合法的 id;「这个 id 本机有没有」不在这里判,见 `isOpenTargetPreference`
+  if (isOpenTargetPreference(patch.defaultOpenTarget)) next.defaultOpenTarget = patch.defaultOpenTarget
 
   // 六个嵌套块:深一层。再深就没有了 —— AppSettings 只有两层,
   // 通用深合并在这里是纯粹的负担(它还得决定数组怎么办)。
@@ -610,6 +626,7 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   upstreamIdleTimeoutSeconds: true,
   maxOutputTokens: true,
   shell: true,
+  defaultOpenTarget: true,
   subagent: true,
   gateway: true,
   providerAccountRotation: true,

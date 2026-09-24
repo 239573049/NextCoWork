@@ -1,6 +1,6 @@
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
-import type { ContextCheckpoint } from '../../../../shared/agent/context-management'
+import { compactBoundaryOf, type CompactBoundary } from '../../../../shared/agent/compaction'
 import type { LiveBlock, SubagentState } from '../../../../shared/agent/transcript'
 import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import type { TimelineItem } from '../../../../shared/domain/tool-timeline'
@@ -29,8 +29,13 @@ export type ThreadRow =
   /**
    * 一次上下文压缩发生的位置。不是消息,是消息**之间**的一条线。
    * `foldedCount` 是上一条线到这条线之间的可见消息数 —— 也就是这一刀切掉的范围。
+   *
+   * 需求:压缩边界现在**就住在转录里**(一条 internal user 消息上的
+   * `compact_boundary` 块,见 `shared/agent/compaction.ts`),不再来自另一张
+   * 检查点表。因此这条线的位置天然正确:删轮 / 编辑重跑把那条消息删掉,线随之消失,
+   * 不会再出现「线还在、模型其实拿的是全量」这种零报错的错位。
    */
-  | { kind: 'divider'; key: string; checkpoint: ContextCheckpoint; foldedCount: number }
+  | { kind: 'divider'; key: string; boundary: CompactBoundary; messageId: string; foldedCount: number }
   /**
    * 一个后台子代理的结果**回到主线的那一刻**。
    *
@@ -69,16 +74,15 @@ export function threadRows(
   messages: readonly AgentMessage[],
   live: readonly LiveBlock[],
   running: boolean,
-  messageRuns: Readonly<Record<string, string>> = {},
-  checkpoints: readonly ContextCheckpoint[] = []
+  messageRuns: Readonly<Record<string, string>> = {}
 ): ThreadRow[] {
   const rows: ThreadRow[] = []
   let preceding = 'start'
   let precedingAt: number | undefined
   /*
-    ★ **分隔行就落在锚点上，必要时把一轮切成两行。**
+    ★ **分隔行就落在边界消息所在的位置，必要时把一轮切成两行。**
 
-    这里曾经是反过来的 —— 命中锚点先压进一个 `pending`，等到「下一行真正开始」才入列，
+    这里曾经是反过来的 —— 命中位置先压进一个 `pending`，等到「下一行真正开始」才入列，
     因此一轮永远不会被切断。那条约束在**一轮里有下一条可见消息**时只是「线晚半轮」，
     但工具循环里根本没有那个下一条:一整个会话可以是 1 条提问 + 50 条工具回执，
     它们全部并进同一个 assistant 行，`assistant()` 一直命中复用分支、从不入列，
@@ -86,13 +90,12 @@ export function threadRows(
     而且要等用户发下一条消息才归位。又因为 `lastTurnIndex` 会跳过分隔行，
     状态行挂在它前面那个 assistant 行上，观感就是「运行中…」下面压着一条压缩线。
 
-    现在命中锚点就直接入列，后续内容另起一个 assistant 行。关键是这**不会**引起
+    现在遇到边界消息就直接入列，后续内容另起一个 assistant 行。关键是这**不会**引起
     当初担心的那种重挂:行 key 取创建那一瞬的 `preceding`，而切开前后两行创建时的
     `preceding` 必定不同 —— 两次「新建 assistant 行」之间隔着至少一条可见消息，
     而可见消息一定推进 `preceding`。流式那一行更是从创建到提交都拿同一个
     `preceding`(工具回执不可见、不推进它)，key 全程不变。有用例钉这一点。
   */
-  const anchored = checkpointsByAnchor(checkpoints)
   const planRows = latestPlanReceipts(messages)
   const assistant = (): Extract<ThreadRow, { kind: 'assistant' }> => {
     const last = rows.at(-1)
@@ -118,11 +121,22 @@ export function threadRows(
   let foldedBase = 0
   for (const message of messages) {
     /*
-      ★ **锚点要在可见性过滤之外认。** 一轮内部触发的自动压缩,
-      `coveredThroughMessageId` 多半指着一条工具回执 —— 界面上根本不存在的消息。
-      跟着下面的 `continue` 一起跳过去的话,「工具回合之间压缩」那条线一条都画不出来,
-      而且不报错:检查点在库里、顶部面板里也有,就是线不出现。
+      ★ 边界消息**先于可见性过滤**结算,并且结算完就 `continue`。
+
+      它是一条 `internal` user 消息(摘要正文住在它的 text 块里),照常走下面的分支
+      会被 `shown` 挡掉 —— 那样一条压缩线都画不出来,而且不报错:模型那边确实只拿到了
+      边界之后的内容,界面却看不出这里断过。`continue` 是因为它**不是一条消息**,
+      是消息之间的一条线:让它推进 `preceding` 或计进 `visible`,折叠计数就会多一条。
     */
+    const boundary = compactBoundaryOf(message)
+    if (boundary !== undefined) {
+      rows.push({
+        kind: 'divider', key: `compaction:${message.id}`,
+        boundary, messageId: message.id, foldedCount: visible - foldedBase
+      })
+      foldedBase = visible
+      continue
+    }
     const shown = message.internal !== true && !isToolResultOnly(message)
     /*
       ★ 后台汇报**是**一条消息,不是消息之间的一条线 —— 所以它和可见消息一样
@@ -180,22 +194,10 @@ export function threadRows(
       precedingAt = message.createdAt
       visible += 1
     }
-
-    /*
-      ★ 锚点结算要在 `shown` 分支**之后**:锚在一条可见消息上时(手动压缩最常见的
-      形态就是锚在刚发出的那条提问上),线该落在它下面,而不是上面。
-    */
-    for (const checkpoint of anchored.get(message.id) ?? []) {
-      rows.push({
-        kind: 'divider', key: `compaction:${checkpoint.id}`,
-        checkpoint, foldedCount: visible - foldedBase
-      })
-      foldedBase = visible
-    }
   }
 
   /*
-    ★ 判断依据是最后一个**回合**行，不是 `rows.at(-1)`。锚在整段最后一条消息上时
+    ★ 判断依据是最后一个**回合**行，不是 `rows.at(-1)`。边界消息是整段最后一条时
     (手动压缩)末尾就是分隔行，照旧看 `rows.at(-1)` 会在线**下面**再补一个空回合 ——
     一条压缩线孤零零地夹在两段之间，下面跟着一个什么都没有的回合。
   */
@@ -276,42 +278,6 @@ function backgroundReportOf(
   if (message.internal !== true) return undefined
   return message.parts.find(
     (part): part is Extract<ContentPart, { type: 'subagent' }> => part.type === 'subagent'
-  )
-}
-
-/**
- * 按 `coveredThroughMessageId` 归拢检查点。
- * 锚点缺失的(压缩位置写进库之前的老数据)直接跳过 —— 它们由
- * `unanchoredCheckpoints` 交给顶部面板兜底。
- */
-function checkpointsByAnchor(
-  checkpoints: readonly ContextCheckpoint[]
-): Map<string, ContextCheckpoint[]> {
-  const byAnchor = new Map<string, ContextCheckpoint[]>()
-  for (const checkpoint of [...checkpoints].sort((a, b) => a.windowIndex - b.windowIndex)) {
-    const anchor = checkpoint.coveredThroughMessageId
-    if (anchor === undefined) continue
-    const bucket = byAnchor.get(anchor)
-    if (bucket === undefined) byAnchor.set(anchor, [checkpoint])
-    else bucket.push(checkpoint)
-  }
-  return byAnchor
-}
-
-/**
- * 在消息流里**锚不住**的检查点:没有位置字段的老数据,或者锚点那条消息
- * 已经被「删除这一轮」截掉了。它们画不出线,但笔记还得能看能改,
- * 所以仍旧交给顶部那个面板。
- */
-export function unanchoredCheckpoints(
-  messages: readonly AgentMessage[],
-  checkpoints: readonly ContextCheckpoint[]
-): ContextCheckpoint[] {
-  const ids = new Set(messages.map((message) => message.id))
-  return checkpoints.filter(
-    (checkpoint) =>
-      checkpoint.coveredThroughMessageId === undefined ||
-      !ids.has(checkpoint.coveredThroughMessageId)
   )
 }
 

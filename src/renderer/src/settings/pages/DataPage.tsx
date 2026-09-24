@@ -360,7 +360,12 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
             <Button
               size="sm"
               disabled={busyNow}
-              onClick={() => setModal({ kind: "syncSetup" })}
+              onClick={() => {
+                // 需求：弹窗内联显示的是页面共享的 error，打开前清掉上一轮残留，
+                // 否则一打开就挂着与本次输入无关的旧报错。
+                setError(null);
+                setModal({ kind: "syncSetup" });
+              }}
             >
               {syncStatus.control.phase === "off"
                 ? t("data.cloudSyncSetPassword")
@@ -747,6 +752,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
         passwordAgain={syncPasswordAgain}
         remember={rememberSyncKey}
         busy={busyNow}
+        error={modal?.kind === "syncSetup" ? error : null}
         onPassword={setSyncPassword}
         onPasswordAgain={setSyncPasswordAgain}
         onRemember={setRememberSyncKey}
@@ -807,6 +813,7 @@ function SyncSetupDialog({
   passwordAgain,
   remember,
   busy,
+  error,
   onPassword,
   onPasswordAgain,
   onRemember,
@@ -819,6 +826,11 @@ function SyncSetupDialog({
   passwordAgain: string;
   remember: boolean;
   busy: boolean;
+  /**
+   * 需求：校验失败 / 主进程 setup 失败时必须在弹窗里就地可见。
+   * 不满足会怎样：页面底部那条 error 被全窗遮罩盖住，表现为点「创建并开始同步」毫无反馈。
+   */
+  error: string | null;
   onPassword: (value: string) => void;
   onPasswordAgain: (value: string) => void;
   onRemember: (value: boolean) => void;
@@ -838,7 +850,12 @@ function SyncSetupDialog({
           <Button size="sm" className="border border-border bg-transparent" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button size="sm" onClick={onSubmit} disabled={busy || password.length < SYNC_PASSWORD_MIN_LENGTH}>
+          <Button
+            size="sm"
+            onClick={onSubmit}
+            disabled={busy || password.length < SYNC_PASSWORD_MIN_LENGTH}
+            icon={busy ? <Spinner size="sm" /> : undefined}
+          >
             {existing ? t("data.cloudSyncUnlock") : t("data.cloudSyncCreate")}
           </Button>
         </div>
@@ -873,6 +890,12 @@ function SyncSetupDialog({
           <Toggle checked={remember} onChange={onRemember} label={t("data.cloudSyncRemember")} />
         </div>
         <p className="text-[11px] leading-[1.6] text-fg-faint">{t("data.cloudSyncEncryptionHint")}</p>
+        {error !== null && (
+          <p className="flex items-start gap-1.5 text-[11.5px] text-danger" role="alert">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            {error}
+          </p>
+        )}
       </div>
     </Dialog>
   );

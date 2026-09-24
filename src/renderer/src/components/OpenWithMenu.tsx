@@ -13,14 +13,22 @@
  *
  * - `OpenWithMenu` —— 一枚 ▾ 触发器 + 面板。给工具条与卡片用。
  * - `OpenWithItems` —— **只有条目**,由调用方决定把它放进哪个面板。
+ * - `OpenTargetItem` —— 单独一行。文件树右键菜单自己排版(默认那一行 + 「打开方式 ›」
+ *   子菜单),但每一行的图标 / 名字 / 点击后的错误处理必须和这里一致,所以只借这一行。
  *
  * ★ 文件树那一行必须是后者。那一行的菜单自己是一个 `Menu` 面板,而 `Menu` 的面板
  *   带着 `translate` / `scale`(入场动效)—— 那两条 CSS 属性会给后代建立
  *   **包含块**,于是套在里面的第二级 `fixed` 面板不再对齐视口,而是按外层面板的
  *   坐标摆放。表现是子菜单**飞到屏幕外**(`ProviderModelMenu` 为此专门走
  *   `createPortal` 到 body,那是它那一层需要的解法)。平铺就没有这个问题。
+ *   (文件树那一行后来按参考截图改成了真正的二级菜单「打开方式 ›」,走的正是
+ *   portal 那条路:`views/files/FileRowMenu.tsx` + `components/ui/Submenu.tsx`,
+ *   只借 `OpenTargetItem` 这一行。上面这条理由对仍然嵌在 `Menu` 里的调用点照样成立。)
  *
  * ## 探测结果按会话缓存一次
+ *
+ * (缓存本体已挪到 `useOpenTargets.ts` —— 文件树右键菜单和设置页也要读同一份,
+ *  下面两条理由随它一起搬过去了,这里留作索引。)
  *
  * ★ 十几颗按钮挂载时同时去问主进程,等于同一次扫描跑十几遍(macOS 上那是一串
  *   目录列举)。所以模块级缓存一份 promise,**失败不缓存** —— 失败被记住的话,
@@ -35,34 +43,24 @@
  * 用本机的 VS Code 打开只会打开一个不存在的路径。菜单自己拿不到工作区,
  * 也不该猜 —— 这一条写在 `services/open-with.ts` 的头上,调用点照做。
  */
-import { useEffect, useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { ChevronDown, Copy, FolderOpen, SquareTerminal } from 'lucide-react'
 import {
+  DEFAULT_APP_TARGET_ID,
   REVEAL_TARGET_ID,
   TERMINAL_TARGET_ID,
+  isGenericTarget,
+  targetsForEntry,
   type OpenTarget,
   type WorkspacePathKind
 } from '../../../shared/domain/open-target'
-import { copyWorkspacePath, listOpenTargets, openWithTarget } from '../services/open-with'
-import { useI18n } from '../i18n'
+import { copyWorkspacePath, openWithTarget } from '../services/open-with'
+import { useI18n, type TranslationKey } from '../i18n'
 import { toast } from '../stores/toast'
 import { cn } from '../lib/cn'
 import { EditorIcon } from './brand/EditorIcon'
 import { Menu, MenuItem, MenuSeparator } from './ui/Menu'
-
-/**
- * 探测结果的单飞缓存。★ 存的是 promise 本身,不是结果 —— 十几颗按钮在同一帧里
- * 挂载时,它们拿到的必须是**同一个** promise。
- */
-let targets: Promise<OpenTarget[]> | null = null
-
-function loadTargets(): Promise<OpenTarget[]> {
-  targets ??= listOpenTargets().catch((error: unknown) => {
-    targets = null
-    throw error
-  })
-  return targets
-}
+import { useOpenTargets } from './useOpenTargets'
 
 /** 一枚 ▾ 触发器 + 面板。工具条、卡片、灯箱用这个。 */
 export function OpenWithMenu({
@@ -132,26 +130,8 @@ export function OpenWithItems({
   close: () => void
 }): ReactNode {
   const { t } = useI18n()
-  const [found, setFound] = useState<OpenTarget[] | null>(null)
-
   // 条目只在面板打开时才挂载,所以「挂载即探测」正好是「打开菜单才探测」
-  useEffect(() => {
-    let alive = true
-    void loadTargets()
-      .then((list) => { if (alive) setFound(list) })
-      .catch(() => { if (alive) setFound([]) })
-    return () => { alive = false }
-  }, [])
-
-  const label = (target: OpenTarget): string => {
-    if (target.id === REVEAL_TARGET_ID) return t('openWith.reveal')
-    if (target.id === TERMINAL_TARGET_ID) return t('openWith.terminal')
-    return target.label
-  }
-
-  const open = (target: OpenTarget): void => {
-    void openWithTarget(workspaceId, path, target.id).catch(() => toast.error(t('openWith.openFailed'), 'open-with'))
-  }
+  const found = useOpenTargets()
 
   const copy = (kind: WorkspacePathKind): void => {
     void copyWorkspacePath(workspaceId, path, kind)
@@ -167,31 +147,19 @@ export function OpenWithItems({
   // 还没探测回来:一行提示,而不是空面板(空面板看起来像坏了)
   if (found === null) return <MenuItem disabled onSelect={() => undefined}>{t('common.loading')}</MenuItem>
 
-  const items = found
-    .filter((target) => !directory || target.id === REVEAL_TARGET_ID || target.id === TERMINAL_TARGET_ID)
+  const items = targetsForEntry(found, directory)
     .filter((target) => !omitReveal || target.id !== REVEAL_TARGET_ID)
 
   return (
     <>
       {items.map((target) => (
-        <MenuItem
-          key={target.id}
-          icon={
-            target.id === REVEAL_TARGET_ID ? <FolderOpen size={14} />
-              : target.id === TERMINAL_TARGET_ID ? <SquareTerminal size={14} />
-                : <EditorIcon icon={target.icon} />
-          }
-          description={target.id === TERMINAL_TARGET_ID ? t('openWith.terminalHint') : undefined}
-          onSelect={() => {
-            close()
-            open(target)
-          }}
-        >
-          {label(target)}
-        </MenuItem>
+        <OpenTargetItem key={target.id} workspaceId={workspaceId} path={path} target={target} close={close} />
       ))}
-      {/* 一台 IDE 都没装(或探测全失败)时,至少要让用户看见「复制路径」还在 */}
-      {!directory && items.length <= (omitReveal ? 1 : 2) && (
+      {/*
+        一台 IDE 都没装(或探测全失败)时,至少要让用户看见「复制路径」还在。
+        原先按「条目数 ≤ 通用目标数」判;通用目标多了「默认应用」之后改成直接看有没有编辑器。
+      */}
+      {!directory && !items.some((target) => !isGenericTarget(target.id)) && (
         <MenuItem disabled onSelect={() => undefined}>{t('openWith.empty')}</MenuItem>
       )}
       <MenuSeparator />
@@ -214,6 +182,57 @@ export function OpenWithItems({
         {t('openWith.copyRelative')}
       </MenuItem>
     </>
+  )
+}
+
+/** 三个通用目标的名字。主进程给的是空 label(见 `shared/domain/open-target.ts` 文件头)。 */
+const GENERIC_LABEL: Record<string, TranslationKey> = {
+  [REVEAL_TARGET_ID]: 'openWith.reveal',
+  [TERMINAL_TARGET_ID]: 'openWith.terminal',
+  [DEFAULT_APP_TARGET_ID]: 'openWith.defaultApp'
+}
+
+/** 一个目标在界面上叫什么:通用目标走 i18n,编辑器用产品名(不翻译)。 */
+export function openTargetLabel(t: (key: TranslationKey) => string, target: OpenTarget): string {
+  const key = GENERIC_LABEL[target.id]
+  return key === undefined ? target.label : t(key)
+}
+
+/**
+ * 「用这个程序打开」的一行。图标 / 名字 / 失败提示三件事只在这里写一遍 ——
+ * `OpenWithItems` 和文件树右键菜单都画它。
+ */
+export function OpenTargetItem({
+  workspaceId,
+  path,
+  target,
+  label,
+  close
+}: {
+  workspaceId: string
+  path: string
+  target: OpenTarget
+  /** 覆盖默认名字。只有右键菜单第一行要写成「在 X 中打开」 */
+  label?: string
+  /** 选中之后关掉外层面板 */
+  close: () => void
+}): ReactNode {
+  const { t } = useI18n()
+  return (
+    <MenuItem
+      icon={
+        target.id === REVEAL_TARGET_ID ? <FolderOpen size={14} />
+          : target.id === TERMINAL_TARGET_ID ? <SquareTerminal size={14} />
+            : <EditorIcon icon={target.icon} />
+      }
+      description={target.id === TERMINAL_TARGET_ID ? t('openWith.terminalHint') : undefined}
+      onSelect={() => {
+        close()
+        void openWithTarget(workspaceId, path, target.id).catch(() => toast.error(t('openWith.openFailed'), 'open-with'))
+      }}
+    >
+      {label ?? openTargetLabel(t, target)}
+    </MenuItem>
   )
 }
 

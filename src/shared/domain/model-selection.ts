@@ -60,6 +60,7 @@ export function selectModelBinding(
 
 /**
  * 下拉框的 `value` / Map 的键。**只用在这两处**,不落盘、不进 IPC。
+ * 空别名代表未指定模型，下拉框必须与值为 `''` 的选项一致；否则会显示空白。
  *
  * ★ 分隔符是 `/`,而且**只切第一个** —— 顺序必须是 `providerId/alias` 而不是
  * 反过来。别名里真的会有斜杠(`openrouter/claude-sonnet-4`),而 providerId
@@ -72,6 +73,8 @@ export function selectModelBinding(
  * `Composer.tsx` 那个列表 key 已经在用的写法。
  */
 export function modelSelectionKey(modelProviderId: string | undefined, alias: string): string {
+  // 需求：未配置与「跟随对话」共用空值；编码成 '/' 会让 Select 找不到选项，触发器显示空白。
+  if (alias === '') return ''
   return `${modelProviderId ?? ''}/${alias}`
 }
 

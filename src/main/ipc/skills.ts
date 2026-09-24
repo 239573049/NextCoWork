@@ -40,6 +40,38 @@ function broadcast(): void {
 }
 
 /**
+ * 装一条 Skill 走到哪一步了。市场安装与本地 ZIP 共用。
+ *
+ * ★ 全局广播,不是定向推:装 Skill 是全局副作用,别的窗口的市场页也该看到
+ * 那颗按钮在跑。形状照抄 `plugins.ts` 的 `emitInstallProgress` —— 可选字段
+ * 一律展开进去,不给 `undefined`(它穿过结构化克隆会变成「有这个键但没有值」)。
+ */
+function emitInstallProgress(
+  key: string,
+  phase: 'preparing' | 'downloading' | 'installing' | 'done' | 'failed',
+  extra: { received?: number; total?: number; messageKey?: string } = {}
+): void {
+  windows.emitToAll('skills:installProgress', {
+    key,
+    phase,
+    ...(extra.received === undefined ? {} : { received: extra.received }),
+    ...(extra.total === undefined ? {} : { total: extra.total }),
+    ...(extra.messageKey === undefined ? {} : { messageKey: extra.messageKey })
+  })
+}
+
+/**
+ * 主进程抛的是 key 不是句子 —— 认不出来的退回一句通用的。
+ *
+ * ★ 不能把 `error.message` 原样推出去:这条路上的错误有一半是
+ * 「ZIP 包含非法路径」这种**给开发者看的**诊断,推到别的窗口就直接画在卡片上了。
+ */
+function installMessageKey(error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  return message.startsWith('skills.') ? message : 'skills.operationFailed'
+}
+
+/**
  * 列出当前装了哪些。
  *
  * ★ **每次都重扫**,不返回上一次的缓存。用户刚往 `skills/` 里拖了一个目录
@@ -128,12 +160,27 @@ export async function pickSkillZip(): Promise<{ path: string; name: string } | n
 
 export async function installZip(req: { path: string; workspaceId?: string; scope?: SkillInstallScope }): Promise<SkillListItem> {
   const scope = req.scope ?? 'global'
-  const installed = await installPackage(req.path, scope, req.workspaceId)
-  const items = await listSkills(req.workspaceId === undefined ? {} : { workspaceId: req.workspaceId })
-  const found = items.find((item) => item.name === installed.name)
-  if (!found) throw new Error('Skill 安装后未能加载')
-  broadcast()
-  return found
+  /*
+    ★ key 里带上路径,不是一个固定的 `'local'`:多窗口、或者接连装两个本地包时,
+    两条进度会挤在同一个 key 上互相覆盖 —— 表现是先装的那条被后装的接管,
+    看起来像「卡住之后忽然跳完了」。同 `plugins.ts:installPlugin`。
+  */
+  const key = `local:${req.path}`
+  // 本地包没有下载阶段。校验 + 解压通常是毫秒级,大包也就几秒 —— 但在那几秒里
+  // 那颗按钮以前完全没有反馈。
+  emitInstallProgress(key, 'installing')
+  try {
+    const installed = await installPackage(req.path, scope, req.workspaceId)
+    const items = await listSkills(req.workspaceId === undefined ? {} : { workspaceId: req.workspaceId })
+    const found = items.find((item) => item.name === installed.name)
+    if (!found) throw new Error('Skill 安装后未能加载')
+    broadcast()
+    emitInstallProgress(key, 'done')
+    return found
+  } catch (error) {
+    emitInstallProgress(key, 'failed', { messageKey: installMessageKey(error) })
+    throw error
+  }
 }
 
 async function marketRequest(path: string): Promise<unknown> {
@@ -179,6 +226,24 @@ function resolveMarketIconUrl(value: string | null | undefined): string | null {
 }
 
 export async function installMarketSkill(req: { slug: string; version?: string; workspaceId?: string; scope?: SkillInstallScope }): Promise<SkillListItem> {
+  const key = `market:${req.slug}`
+  try {
+    return await runMarketInstall(key, req)
+  } catch (error) {
+    /*
+      ★ 终态一定要推出去,成功失败都是。只 catch 不推的话,发起安装的那个窗口
+      能从 invoke 的 rejection 里知道结果,而**别的窗口**手上只有事件 ——
+      它们那颗按钮会一直转下去,直到 3 分钟的兜底把它扫掉。
+    */
+    emitInstallProgress(key, 'failed', { messageKey: installMessageKey(error) })
+    throw error
+  }
+}
+
+async function runMarketInstall(key: string, req: { slug: string; version?: string; workspaceId?: string; scope?: SkillInstallScope }): Promise<SkillListItem> {
+  // 授权、问详情、要摘要都在这一档里:它们加起来常常比下载还久,而且一个
+  // 百分比都报不出来 —— 渲染层据此画滚动斜纹,不是一条停在 0% 的条子。
+  emitInstallProgress(key, 'preparing')
   if (getClientAuthState().mode !== 'authenticated') throw new Error('skills.authRequired')
   const access = await getClientAccessToken()
   if (!access) throw new Error('skills.authRequired')
@@ -197,7 +262,21 @@ export async function installMarketSkill(req: { slug: string; version?: string; 
   if (granted.version !== version || !expectedSha256 || !/^[a-f0-9]{64}$/i.test(expectedSha256)) throw new Error('skills.digestMismatch')
   const response = await getHost().fetch(`${MARKET_API_BASE}skills/${encodeURIComponent(req.slug)}/versions/${encodeURIComponent(version)}/download`)
   if (!response.ok) throw new Error(response.status === 404 ? 'skills.versionUnavailable' : 'skills.networkFailed')
-  const bytes = await readDownload(response)
+  /*
+    content-length 拿不到时退回详情页报的 fileSize —— 两个都没有的话 `total`
+    就是 undefined,渲染层据此画一条没有百分比的条子。**不要在这里编一个估计值**:
+    一条走到 80% 就停下不动的进度条,比一条明说「不知道还有多久」的更像卡死。
+  */
+  const declared = detail.versions?.find((item) => item.version === version)?.fileSize
+  const header = Number(response.headers.get('content-length'))
+  const total = Number.isFinite(header) && header > 0 ? header : declared
+  emitInstallProgress(key, 'downloading', { received: 0, ...(total === undefined ? {} : { total }) })
+  const bytes = await readDownload(response, (received) => {
+    emitInstallProgress(key, 'downloading', { received, ...(total === undefined ? {} : { total }) })
+  })
+  // 解压 + 校验 + 重扫目录。没有百分比,但它不是瞬间 —— 尤其 project scope 还要
+  // 把整个目录推到远端机器上。
+  emitInstallProgress(key, 'installing')
   const tempDir = await fs.mkdtemp(join(getHost().paths.temp(), 'nextcowork-skill-'))
   const temp = join(tempDir, `skill-v${version.replace(/[^0-9A-Za-z.+-]/g, '')}.zip`)
   try {
@@ -207,17 +286,24 @@ export async function installMarketSkill(req: { slug: string; version?: string; 
     const found = items.find((item) => item.name === installed.name)
     if (!found) throw new Error('Skill 安装后未能加载')
     broadcast()
+    emitInstallProgress(key, 'done')
     return found
   } finally { await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined) }
 }
 
-async function readDownload(response: Response): Promise<Buffer> {
+/** 进度推送的节流:至少隔这么久,或者又收了这么多字节,才推下一帧 */
+const PROGRESS_MIN_INTERVAL_MS = 120
+const PROGRESS_MIN_BYTES = 256 * 1024
+
+async function readDownload(response: Response, onProgress?: (received: number) => void): Promise<Buffer> {
   const maxBytes = 20 * 1024 * 1024
   if (Number(response.headers.get('content-length')) > maxBytes) throw new Error('skills.packageTooLarge')
   if (!response.body) throw new Error('skills.networkFailed')
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
+  let reportedAt = 0
+  let reportedBytes = 0
   try {
     for (;;) {
       const chunk = await reader.read()
@@ -225,8 +311,21 @@ async function readDownload(response: Response): Promise<Buffer> {
       size += chunk.value.byteLength
       if (size > maxBytes) { await reader.cancel(); throw new Error('skills.packageTooLarge') }
       chunks.push(chunk.value)
+      /*
+        ★ 节流是必需的,不是优化:一个 chunk 一帧的话,20MB 的包会推出上千条
+        IPC 事件,而每一条都要在**每个窗口**里触发一次 zustand 更新和重渲染。
+        进度条本身只有 100 个可见状态,多出来的那些帧一像素都改不动。
+      */
+      const now = Date.now()
+      if (reportedAt === 0 || now - reportedAt >= PROGRESS_MIN_INTERVAL_MS || size - reportedBytes >= PROGRESS_MIN_BYTES) {
+        reportedAt = now
+        reportedBytes = size
+        onProgress?.(size)
+      }
     }
   } finally { reader.releaseLock() }
+  // 节流会把最后一帧吞掉,于是条子停在 97% 而包其实已经下完了 —— 补一帧
+  if (reportedBytes !== size) onProgress?.(size)
   return Buffer.concat(chunks, size)
 }
 

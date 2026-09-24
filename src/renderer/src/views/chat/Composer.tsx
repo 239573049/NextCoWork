@@ -32,6 +32,7 @@ import {
   Percent,
   Paperclip,
   Plus,
+  Puzzle,
   RefreshCw,
   Server,
   Settings2,
@@ -98,12 +99,15 @@ import { Slider } from "../../components/ui/Slider";
 import { Tooltip } from "../../components/ui/Tooltip";
 import { cn } from "../../lib/cn";
 import { GoalPanel, GoalPill } from './GoalPanel';
+import { ConversationCostDetails } from './ConversationCostDetails';
 import { parseGoalCommand, type ActiveGoal } from '../../../../shared/domain/goal';
 import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
 import { listConnections, onConnectionsChanged } from "../../services/connections";
 import { previewContext } from "../../services/context";
 import { useModelsStore } from "../../stores/models";
+import { usePluginsStore } from "../../stores/plugins";
+import { pluginToolList } from './plugin-tool-list';
 import { AttachmentTray, type TrayItem } from "./AttachmentTray";
 import { MentionInput, type MentionInputHandle } from "./MentionInput";
 import { MentionPopup } from "./MentionPopup";
@@ -282,6 +286,10 @@ export function Composer({
 }): ReactNode {
   const { t } = useI18n();
   const [goalPanelOpen, setGoalPanelOpen] = useState(false);
+  // 需求：工具目录随插件启用/禁用更新；只订阅 catalog，不订阅活动日志等高频字段。
+  const pluginCatalog = usePluginsStore((state) => state.catalog);
+  const pluginTools = pluginToolList(pluginCatalog);
+  const [pluginToolsOpen, setPluginToolsOpen] = useState(false);
   const { models: configuredModels, providers, loaded, providerOf, load } = useModelsStore();
   const models = configuredModels.filter((m) => m.enabled !== false &&
     providers.some((p) => p.id === m.providerId && p.enabled));
@@ -923,6 +931,7 @@ export function Composer({
           <Menu
             label={t("composer.more")}
             width={320}
+            onOpenChange={(open) => { if (!open) setPluginToolsOpen(false); }}
             panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
             triggerClassName="group rounded-full focus-visible:outline-2 focus-visible:outline-accent"
             trigger={
@@ -937,7 +946,24 @@ export function Composer({
               </span>
             }
           >
-            {(close) => (
+            {(close) => pluginToolsOpen ? (
+              <>
+                <button type="button" role="menuitem" className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-fg hover:bg-tint focus-visible:outline-2 focus-visible:outline-accent" onClick={() => setPluginToolsOpen(false)}>
+                  <span aria-hidden="true">←</span>{t('pluginTools.back')}
+                </button>
+                <div className="px-2 pt-1.5 pb-1 text-[11px] text-fg-faint">{t('pluginTools.hint')}</div>
+                {pluginTools.map((plugin) => (
+                  <div key={plugin.pluginId} className="px-2 py-1">
+                    <div className="truncate text-[11px] font-medium text-fg-muted">{plugin.displayName}</div>
+                    {plugin.tools.map((tool) => (
+                      <div key={tool.name} className="truncate py-1 pl-3 text-[12px] text-fg" title={tool.name}>
+                        {t(tool.titleKey as Parameters<typeof t>[0])}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </>
+            ) : (
               <>
                 <div className="px-2 pt-1.5 pb-1 text-[11px] text-fg-faint">{t("composer.add")}</div>
                 <ComposerMenuItem
@@ -957,6 +983,13 @@ export function Composer({
                     setSkillQuery(null); setMention(null); setSkillPickerQuery(''); setActiveSkill(0);
                     close(); setSkillPickerOpen(true);
                   }}>{t('composer.skills')}</ComposerMenuItem>
+                {pluginTools.length > 0 && (
+                  <ComposerMenuItem
+                    icon={<Puzzle size={16} />}
+                    description={t('pluginTools.hint')}
+                    onSelect={() => setPluginToolsOpen(true)}
+                  >{t('pluginTools.list')}</ComposerMenuItem>
+                )}
                 <MenuSeparator />
                 <div className="px-2 pt-1 pb-1 text-[11px] text-fg-faint">{t("common.settings")}</div>
                 <ComposerMenuItem
@@ -1193,7 +1226,7 @@ export function Composer({
             藏掉也不丢信息:每一轮的完整用量在转录里那张「任务用量」上。 */}
         {conversationUsage !== undefined && usageFits && (
           <div className="flex min-w-0 flex-1 justify-end pl-3">
-            <ConversationUsage usage={conversationUsage} />
+            <ConversationUsage usage={conversationUsage} sessionId={sessionId ?? null} />
           </div>
         )}
       </div>
@@ -1291,7 +1324,7 @@ function useUsageFits(ref: React.RefObject<HTMLElement | null>): boolean {
   return fits;
 }
 
-function ConversationUsage({ usage }: { usage: ConversationUsageSummary }): ReactNode {
+function ConversationUsage({ usage, sessionId }: { usage: ConversationUsageSummary; sessionId: string | null }): ReactNode {
   const { t, locale } = useI18n();
   const exact = (value: number): string => value.toLocaleString(locale);
   /*
@@ -1376,14 +1409,19 @@ function ConversationUsage({ usage }: { usage: ConversationUsageSummary }): Reac
         <Tooltip
           key={metric.key}
           align="center"
-          content={
-            <>
-              <div className="font-medium">{metric.label}</div>
-              {/* 缩写和精确值相同时（TPS、花费）不重复写一遍 */}
-              {metric.exact !== metric.value && (
-                <div className="tabular-nums text-fg-muted">{metric.exact}</div>
-              )}
-            </>
+          interactive={metric.key === "cost"}
+          contentClassName={metric.key === "cost" ? "max-h-[min(60vh,480px)] overflow-y-auto" : undefined}
+          content={metric.key === "cost"
+            // 需求：总费用悬停要展开当前会话的逐模型与逐类账目；其余读数保留原精确值提示。
+            ? <ConversationCostDetails sessionId={sessionId} cost={usage.cost}
+                revision={`${usage.inputTokens}:${usage.outputTokens}:${usage.cacheReadTokens}:${usage.cacheWriteTokens}:${usage.cost?.micros ?? ''}`} />
+            : <>
+                <div className="font-medium">{metric.label}</div>
+                {/* 原先 TPS、花费的精确值都不重复；现在花费另有明细，这里只处理普通读数。 */}
+                {metric.exact !== metric.value && (
+                  <div className="tabular-nums text-fg-muted">{metric.exact}</div>
+                )}
+              </>
           }
         >
           <span

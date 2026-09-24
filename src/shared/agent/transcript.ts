@@ -15,7 +15,7 @@ import type { AgentEvent, RunNotice, RunStatus, SubagentPhase } from './event'
 import { mergeGoalStatusMessage, visibleText, type AgentMessage, type ContentPart, type SubagentResult, type ToolOutput } from './message'
 import type { TokenUsage } from './stream'
 import type { RunCost } from '../domain/pricing'
-import type { ContextCheckpoint, ContextSegment, ContextStatus } from './context-management'
+import type { ContextSegment, ContextStatus } from './context-management'
 
 /**
  * 一张子代理卡片留几条「最近做了什么」。
@@ -179,7 +179,6 @@ export interface TranscriptState {
    * 拿它除以窗口很快就会超过 100%。上下文占用是个**瞬时量**,只能看最后一次。
    */
   lastInputTokens?: number
-  contextCheckpoints: ContextCheckpoint[]
   contextStatus?: ContextStatus
   /**
    * 重试 / 故障切换的**瞬时**提示,活到下一次 `message_start` 或 `error` 为止。
@@ -203,7 +202,7 @@ export interface TranscriptState {
 export type { RunNotice }
 
 export function emptyTranscript(): TranscriptState {
-  return { messages: [], live: [], tools: {}, subagents: {}, contextCheckpoints: [], status: 'running' }
+  return { messages: [], live: [], tools: {}, subagents: {}, status: 'running' }
 }
 
 /**
@@ -670,15 +669,15 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         }
       }
 
-    case 'context_status':
-      return { ...s, contextStatus: e.status }
-
-    case 'context_checkpoint': {
-      const existing = s.contextCheckpoints.findIndex((item) => item.id === e.checkpoint.id)
-      const checkpoints = existing < 0
-        ? [...s.contextCheckpoints, e.checkpoint]
-        : s.contextCheckpoints.map((item, index) => (index === existing ? e.checkpoint : item))
-      return { ...s, contextCheckpoints: checkpoints, contextStatus: { phase: 'ready', windowIndex: e.checkpoint.windowIndex } }
+    case 'context_status': {
+      if (e.status.phase !== 'compacted') return { ...s, contextStatus: e.status }
+      /*
+        需求:压完之后圆环必须立刻回落。`lastInputTokens` 是压缩**之前**那次请求的真值
+        (比如 624K),不清掉的话它要等到下一次上游回包才会被覆盖 —— 压缩成功了,
+        圆环却还写着「已超出」。清掉后界面退回 session 紧接着发的那条 `context_usage` 估算。
+      */
+      const { lastInputTokens: _stale, ...rest } = s
+      return { ...rest, contextStatus: e.status }
     }
 
     case 'subagent_start':

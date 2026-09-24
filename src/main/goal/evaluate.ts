@@ -1,7 +1,8 @@
 /**
  * 判定调用 —— 一次**无工具、禁思考、只读对话**的旁路模型请求。
  *
- * 形状照抄 `agent-session.ts` 的 `createContextCheckpoint`（那条旁路调用已经验证过），
+ * 形状照抄压缩那条旁路调用（原先是 `agent-session.ts` 的 `createContextCheckpoint`，
+ * 上下文压缩重写后改叫 `kernel/compaction/compact.ts` 的 `summarizeOnce`；那条调用已经验证过），
  * 差别只在输出契约：这里要的是一个 `{ok, reason, impossible}` 的 JSON 结论。
  *
  * ★ 上游端口是**注入**的（`GoalEvaluatorPort`），不 import `getRouter()` ——

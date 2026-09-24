@@ -155,6 +155,7 @@ import {
 import { initImports, setImportChangeListener, setImportSessionNotifier, setImportWorkspaceNotifier } from '../imports/service'
 import { getClientAuthState, startClientLogin, selectClientTeam, useOffline, signOutClient, getClientUser, getClientUsage } from './client-auth'
 import { getReferralCenter } from './referral'
+import { createRechargeCheckout, getRechargeOptions, getRechargeOrder } from './recharge'
 import {
   confirmInitialConfigSync,
   getConfigSyncPreview,
@@ -195,10 +196,10 @@ import {
   pickWorkspace,
   updateWorkspace
 } from './workspace'
-import { copyWorkspacePath, listOpenTargets, listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, openWorkspaceFileWith, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
+import { copyWorkspacePath, listOpenTargets, listWorkspaceRecovery, mutateWorkspaceDocument as mutateWorkspaceFile, openWorkspaceFileWith, readWorkspaceDocument as readWorkspaceFile, revealWorkspaceDocument as revealWorkspaceFile, saveWorkspaceFileAs, writeWorkspaceDocument as writeWorkspaceFile } from './workspace-files'
 import { getReviewChangeSet, getReviewFileDiff, precheckReviewUndo, redoReviewChangeSet, undoReviewChangeSet } from './review'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
-import { compactContext, contextWindow, listContextCheckpoints, previewContext, updateContextCheckpoint } from './context'
+import { compactContext, previewContext } from './context'
 import {
   branchSession,
   createSession,
@@ -292,6 +293,9 @@ const handlers: HandlerMap = {
   'clientAuth:getUser': () => getClientUser(),
   'clientAuth:getUsage': (req) => getClientUsage(req),
   'referral:get': () => getReferralCenter(),
+  'recharge:getOptions': () => getRechargeOptions(),
+  'recharge:checkout': (req) => createRechargeCheckout(req.amount),
+  'recharge:getOrder': (req) => getRechargeOrder(req.orderNo),
   'configSync:getStatus': () => getConfigSyncStatus(),
   'configSync:setup': (req) => setupConfigSync(req),
   'configSync:getConflicts': () => getConfigSyncConflicts(),
@@ -347,6 +351,7 @@ const handlers: HandlerMap = {
   'workspace:listOpenTargets': () => listOpenTargets(),
   'workspace:openWith': (req) => openWorkspaceFileWith(req),
   'workspace:copyPath': (req) => copyWorkspacePath(req),
+  'workspace:saveFileAs': (req) => saveWorkspaceFileAs(req),
   'workspace:listRecovery': (req) => listWorkspaceRecovery(req),
   'review:getChangeSet': (req) => getReviewChangeSet(req),
   'review:getFileDiff': (req) => getReviewFileDiff(req),
@@ -472,11 +477,8 @@ const handlers: HandlerMap = {
   'sessions:setFavorited': (req) => setFavorited(req),
   'sessions:delete': (req) => deleteSession(req),
   'conversations:searchAll': (req) => searchAll(req),
-  'context:list': (req) => listContextCheckpoints(req),
-  'context:updateCheckpoint': (req) => updateContextCheckpoint(req),
   'context:compact': (req) => compactContext(req),
   'context:preview': (req) => previewContext(req),
-  'context:window': (req) => contextWindow(req),
   'storage:getStats': () => getStats(),
   'storage:vacuum': () => vacuum(),
   'storage:openDataDirectory': () => openDataDirectory(),
@@ -675,6 +677,7 @@ const handlers: HandlerMap = {
   'modelCatalog:remove': ({ id }) => removeUserModelCatalog(id),
   'usage:getSummary': (window) => store.getUsageSummary(window),
   'usage:getRequestLogs': (query) => store.getUsageRequestLogs(query),
+  'usage:getSessionAttempts': ({ sessionId }) => store.getSessionUsageAttempts(sessionId),
   'usage:getProviderStats': (window) => store.getUsageProviderStats(window),
   'usage:getModelStats': (window) => store.getUsageModelStats(window),
   /*

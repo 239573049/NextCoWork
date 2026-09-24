@@ -21,7 +21,7 @@ import {
   type DetectionDeps
 } from '../editors'
 import { listOpenTargets } from '../open-with'
-import { REVEAL_TARGET_ID, TERMINAL_TARGET_ID } from '../../../shared/domain/open-target'
+import { DEFAULT_APP_TARGET_ID, REVEAL_TARGET_ID, TERMINAL_TARGET_ID } from '../../../shared/domain/open-target'
 
 /** 一份可控的只读视图:存在的路径、PATH 上的可执行名、注册表里的键值各给一张表。 */
 function deps(overrides: Partial<DetectionDeps> = {}): DetectionDeps {
@@ -42,11 +42,12 @@ function deps(overrides: Partial<DetectionDeps> = {}): DetectionDeps {
 }
 
 describe('detectTargets', () => {
-  it('空机器上一台编辑器都探测不到 —— 菜单里只剩两个通用目标', () => {
+  it('空机器上一台编辑器都探测不到 —— 菜单里只剩不需要探测的通用目标', () => {
     const found = detectTargets(deps())
     expect(found).toEqual([])
     expect(buildTargets(found, null)).toEqual([
-      { id: REVEAL_TARGET_ID, label: '', icon: 'file-manager' }
+      { id: REVEAL_TARGET_ID, label: '', icon: 'file-manager' },
+      { id: DEFAULT_APP_TARGET_ID, label: '', icon: 'default-app' }
     ])
   })
 
@@ -159,12 +160,12 @@ describe('detectTerminal', () => {
 })
 
 describe('buildTargets', () => {
-  it('顺序是「文件管理器 → 终端 → 编辑器」,不是按探测顺序拼起来', () => {
+  it('顺序是「文件管理器 → 默认应用 → 终端 → 编辑器」,不是按探测顺序拼起来', () => {
     const editors = detectTargets(deps({
       exists: (path) => path === '/Applications/Rider.app'
     }))
     const targets = buildTargets(editors, { file: 'kitty', args: () => [], cwd: false })
-    expect(targets.map((target) => target.id)).toEqual([REVEAL_TARGET_ID, TERMINAL_TARGET_ID, 'rider'])
+    expect(targets.map((target) => target.id)).toEqual([REVEAL_TARGET_ID, DEFAULT_APP_TARGET_ID, TERMINAL_TARGET_ID, 'rider'])
   })
 
   it('两个通用目标的 label 是空串 —— 名字由渲染层按 i18n 出,不是产品名', () => {

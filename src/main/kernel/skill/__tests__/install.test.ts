@@ -103,6 +103,61 @@ describe("installSkillZip", () => {
     );
   });
 
+  it("installs a SKILL.md whose description is a block scalar", async () => {
+    // Market packages write multi-line descriptions as `description: |`. The
+    // installer rejects any frontmatter it cannot read whole, so a parser that
+    // skipped block scalars failed the install with "frontmatter 无法识别".
+    const { root, zip } = archive(
+      "---\nname: demo\ndescription: |\n  第一行\n  第二行\n---\nbody\n",
+    );
+    const installRoot = join(root, "installed");
+
+    const result = await installSkillZip(zip, installRoot, "global");
+
+    expect(result.name).toBe("demo");
+    const scanned = await scanSkills({
+      fs: nodeHost().fs,
+      globalRoot: installRoot,
+      projectRoot: "",
+    });
+    expect(scanned.skills[0]?.description).toBe("第一行\n第二行");
+    expect(scanned.diagnostics).toHaveLength(0);
+  });
+
+  it("installs a market SKILL.md with a metadata block", async () => {
+    // Verbatim shape of a published skill: a nested `metadata:` map the app
+    // reads nothing from. It used to fail the whole install on its own.
+    const { root, zip } = archive(
+      [
+        "---",
+        "name: programming-tutor",
+        'description: "全能 AI 编程导师"',
+        "license: MIT",
+        "metadata:",
+        '  author: "Samuel Kahessay"',
+        '  version: "1.0.1"',
+        '  category: "education"',
+        "---",
+        "body",
+        "",
+      ].join("\n"),
+      "programming-tutor",
+    );
+    const installRoot = join(root, "installed");
+
+    const result = await installSkillZip(zip, installRoot, "global");
+
+    expect(result.name).toBe("programming-tutor");
+    expect(result.version).toBe("1.0.1");
+    const scanned = await scanSkills({
+      fs: nodeHost().fs,
+      globalRoot: installRoot,
+      projectRoot: "",
+    });
+    expect(scanned.skills[0]?.name).toBe("programming-tutor");
+    expect(scanned.diagnostics).toHaveLength(0);
+  });
+
   it("uses frontmatter name when SKILL.md is at the archive root", async () => {
     const { root, zip } = flatArchive();
     const installRoot = join(root, "installed");
@@ -166,8 +221,10 @@ describe("installSkillZip", () => {
   });
 
   it("rejects unsupported frontmatter syntax", async () => {
+    // Two levels of nesting stay unreadable, and name/description are both
+    // present here: the install must still fail, on the skipped line alone.
     const { root, zip } = archive(
-      "---\ndescription: d\nunsupported: |\n---\nbody\n",
+      "---\nname: demo\ndescription: d\na:\n  b:\n    c: 1\n---\nbody\n",
     );
     await expect(
       installSkillZip(zip, join(root, "installed"), "global"),

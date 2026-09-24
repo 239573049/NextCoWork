@@ -22,17 +22,18 @@ import {
 import { registerPluginMessages, translate, unregisterPluginMessages, type TranslationKey } from '../i18n'
 import { registerPluginPresenters, type ToolPresenter } from '../../../shared/domain/tool-presenter'
 import { invoke, on } from '../services/ipc'
+import type { InstallProgress } from '../lib/install-progress'
 import { pluginErrorKey, pluginMessageKey } from '../views/extensions/plugins/plugin-error'
 import { toast } from './toast'
 
-/** 一次安装正在进行到哪一步。装完 / 失败之后这条就从表里消失 */
-export interface PluginInstallProgress {
-  phase: 'preparing' | 'downloading' | 'installing'
-  received?: number
-  total?: number
-  /** 兜底清理用 —— 主进程崩了的话,终态那一帧永远不会来 */
-  startedAt: number
-}
+/**
+ * 一次安装正在进行到哪一步。装完 / 失败之后这条就从表里消失。
+ *
+ * ★ 类型本体搬去了 `lib/install-progress.ts` —— Skill 那边的安装推的是**同一个
+ * 形状**,两处各写一份的话,主进程某天加个字段只会在其中一处露出来。这里留一个
+ * 别名是为了不动插件那一侧十几处 `PluginInstallProgress` 的引用。
+ */
+export type PluginInstallProgress = InstallProgress
 
 interface PluginsState {
   catalog: PluginCatalog

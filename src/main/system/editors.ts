@@ -18,7 +18,7 @@
  * 3. **`label` 是产品名,不翻译。** 和模型名、供应商名同一条规矩。
  */
 import type { OpenTarget, OpenTargetIcon } from '../../shared/domain/open-target'
-import { REVEAL_TARGET_ID, TERMINAL_TARGET_ID } from '../../shared/domain/open-target'
+import { DEFAULT_APP_TARGET_ID, REVEAL_TARGET_ID, TERMINAL_TARGET_ID } from '../../shared/domain/open-target'
 
 /** 一个编辑器在各平台上怎么找、怎么起。缺席的字段 = 这个平台上不考虑它。 */
 export interface EditorDefinition {
@@ -389,9 +389,15 @@ export function detectTerminal(deps: DetectionDeps): TerminalDefinition | null {
  * ★ 顺序是**刻意的**:文件管理器 → 终端 → 编辑器(按 rank)。前两项是「这个文件
  *   在磁盘上的位置」,后一组是「用谁写它」;把编辑器混在中间会让「在文件管理器里
  *   显示」这种高频动作每次都要在列表里找位置。
+ *   默认应用排在文件管理器之后、终端之前:它同样不属于「用谁写它」那一组,
+ *   是「交给系统」的通用出口(见 `shared/domain/open-target.ts` 的 `DEFAULT_APP_TARGET_ID`)。
  */
 export function buildTargets(editors: readonly DetectedEditor[], terminal: TerminalDefinition | null): OpenTarget[] {
-  const targets: OpenTarget[] = [{ id: REVEAL_TARGET_ID, label: '', icon: 'file-manager' }]
+  const targets: OpenTarget[] = [
+    { id: REVEAL_TARGET_ID, label: '', icon: 'file-manager' },
+    // 系统默认应用和文件管理器一样不需要探测:`shell.openPath` 各平台都有(见 open-target.ts)
+    { id: DEFAULT_APP_TARGET_ID, label: '', icon: 'default-app' }
+  ]
   if (terminal !== null) targets.push({ id: TERMINAL_TARGET_ID, label: '', icon: 'terminal' })
   for (const editor of editors) targets.push({ id: editor.id, label: editor.label, icon: editor.icon })
   return targets

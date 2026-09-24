@@ -9,7 +9,7 @@
  * 之后都会多出一个空白的用户气泡 —— 而它长得完全像一个 bug,查起来却要
  * 一路翻到消息模型才明白。
  */
-import { memo, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { CheckCircle2, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
@@ -26,6 +26,7 @@ import { agentErrorText } from '../../i18n/agent'
 import { MessageImage } from './MessageImage'
 import { MentionText } from './MentionText'
 import { MessageFileRef } from './MessageFileRef'
+import { userMessageFileRefs } from './user-message-attachments'
 import { openFileReference } from './file-reference-actions'
 import { SubagentNode, SubagentReportRow, ThinkingBlock, ToolCallCard } from './parts'
 import { useOpenSubagent } from './subagent-open'
@@ -38,11 +39,10 @@ import { ToolTimeline } from './ToolTimeline'
 import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { FOLD_HOLD_MS, useFoldAnchor } from './useFoldAnchor'
-import { ContextCheckpointPanel } from './ContextCheckpointPanel'
 import { CompactionDivider } from './CompactionDivider'
 import { GoalStatusCard } from './GoalStatusCard'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
-import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, unanchoredCheckpoints, type AssistantBlock, type ThreadRow } from './thread-content'
+import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
 import { threadTurnGroups, turnNavigationItems } from './turn-navigation'
 import { TurnNavigationRail } from './TurnNavigationRail'
 import { TurnActions, type TurnPrompt } from './TurnActions'
@@ -172,7 +172,7 @@ export const Thread = memo(function Thread({
     </div>
   )
 
-  const rows = threadRows(messages, live, running, transcript.messageRuns, transcript.contextCheckpoints)
+  const rows = threadRows(messages, live, running, transcript.messageRuns)
   const turns = threadTurnGroups(rows)
   const navigationItems = turnNavigationItems(turns, t('chat.navigation.untitled'))
   /*
@@ -181,18 +181,6 @@ export const Thread = memo(function Thread({
     `feedback` 整块不渲染,而且全程不报错。
   */
   const lastTurn = lastTurnIndex(rows)
-  /*
-    ★ 这里**必须 useMemo**:`ContextCheckpointPanel` 内部是
-    `useEffect(() => setItems(checkpoints), [checkpoints])`,依赖是数组引用。
-    每次渲染喂一个新数组 = 每次渲染都 setState = 渲染死循环。
-    (`rows` 反过来**不能**套 useMemo:memo 边界已经挡住了多余渲染,
-     套上只会让 chat-view 那条「改草稿不重算」的 spy 断言变成假绿。)
-  */
-  const orphans = useMemo(
-    () => unanchoredCheckpoints(messages, transcript.contextCheckpoints),
-    [messages, transcript.contextCheckpoints]
-  )
-
   return (
     <div className="relative min-h-0 flex-1">
     <div ref={viewport} className="scroll-thin fade-top h-full min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]" data-testid="thread"
@@ -229,7 +217,6 @@ export const Thread = memo(function Thread({
         lastSeen.current = { top, height }
       }}>
       <div ref={content} className={cn('mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6', navigationItems.length > 1 && 'pl-10')}>
-        <ContextCheckpointPanel checkpoints={orphans} />
         {/*
           需求:消息里那张 TodoWrite 卡片要标出「这次更新改了什么」,而上一份清单只有
           整条转录能回答。provider 挂在这里(而不是把 `messages` 一路传进卡片)是因为
@@ -245,7 +232,7 @@ export const Thread = memo(function Thread({
           {turn.rows.map(({ row, index }) => {
           const isLast = index === lastTurn
           if (row.kind === 'divider') {
-            return <CompactionDivider key={row.key} checkpoint={row.checkpoint} foldedCount={row.foldedCount} />
+            return <CompactionDivider key={row.key} boundary={row.boundary} foldedCount={row.foldedCount} />
           }
           if (row.kind === 'user') {
             return <UserBubble key={row.key} message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
@@ -594,15 +581,15 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
  * 消息因为 `text === ''` 被整条 return null —— 那条消息从界面上彻底消失,
  * 尽管它已经发给模型了。而「拖张图进来直接问」正是最常见的用法之一。
  *
- * 按 parts 原顺序渲染:发送侧 `partsOf` 把文本放在最前,所以视觉上是
- * 「先说话、后配图」,与用户敲下去的顺序一致。
+ * 发送侧 `partsOf` 把文本放在最前；展示时文字仍在上方气泡，图片和
+ * 文件引用在气泡下方独立成卡片。这样只发图的消息也不会消失。
  */
 function UserBubble({ message, workspaceId, onEdit, disabled }: {
   message: AgentMessage
   onEdit?: (id: string, text: string, continueRun: boolean) => Promise<void>
   disabled: boolean
   /**
-   * 点开气泡里的文件引用要用的工作区。**缺省就不画按钮** —— 只读的子代理面板
+   * 点开正文或下方卡片里的文件引用要用的工作区。**缺省就不画按钮** —— 只读的子代理面板
    * 拿不到它(`ChatView` 的只读分支不传 `workspaceId`),而画一枚点了没反应的
    * chip 比不画更难解释(见 `MessageFileRef`)。
    */
@@ -619,9 +606,7 @@ function UserBubble({ message, workspaceId, onEdit, disabled }: {
   const images = message.parts.filter(
     (p): p is Extract<ContentPart, { type: 'image' }> => p.type === 'image'
   )
-  const fileRefs = message.parts.filter(
-    (p): p is Extract<ContentPart, { type: 'file_ref' }> => p.type === 'file_ref'
-  )
+  const fileRefs = userMessageFileRefs(text, message.parts)
   /*
     需求：气泡里的文件引用(块状的 `file_ref` 与行内 `@` 引用)点一下就在右侧工作台
     打开它。引用是**发送那一刻的快照**,文件后来被删掉、改名是常态 —— 所以先确认
@@ -678,37 +663,37 @@ function UserBubble({ message, workspaceId, onEdit, disabled }: {
 
   return (
     <div className="flex justify-end">
-      <div className="group relative max-w-[85%] rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5">
+      <div className="group relative flex max-w-[85%] flex-col items-end gap-1.5" data-testid="user-message">
         {text !== '' && (
-          /*
-            ★ 用 `MentionText` 而不是直接铺 `{text}`:输入框里 `@` 选出来的
-            文件在草稿里是一段 markdown 链接,它在气泡里也得是同一个 chip ——
-            否则发送那一下,用户眼里的 chip 会「变回」一串方括号,
-            看起来像是发错了(而其实发出去的一直是同一个字符串)。
+          <div className="group relative max-w-full rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5" data-testid="user-message-bubble">
+            {/*
+              ★ 用 `MentionText` 而不是直接铺 `{text}`:输入框里 `@` 选出来的
+              文件在草稿里是一段 markdown 链接,它在气泡里也得是同一个 chip ——
+              否则发送那一下,用户眼里的 chip 会「变回」一串方括号,
+              看起来像是发错了(而其实发出去的一直是同一个字符串)。
 
-            ★ `break-words`:`whitespace-pre-wrap` 只在空白处断行,一段没有空格的
-            长串(粘进来的 SQL、URL、base64)会整条冲出气泡右边被切掉。输入框
-            (`MentionInput`)本来就带 `break-words`,这里不带的话,同一段文字在
-            草稿里好好的、一发出去就断头 —— 又是那种「像是发错了」的错觉。
-          */
-          <p className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
-            <MentionText text={text} onOpen={openReference} />
-          </p>
-        )}
-        {fileRefs.length > 0 && (
-          <div className={cn('flex flex-col gap-1', text !== '' && 'mt-2')}>
-            {fileRefs.map((f, i) => (
-              <MessageFileRef key={`${f.path}:${String(i)}`} name={f.name} path={f.path} onOpen={openReference} />
-            ))}
+              ★ `break-words`:`whitespace-pre-wrap` 只在空白处断行,一段没有空格的
+              长串(粘进来的 SQL、URL、base64)会整条冲出气泡右边被切掉。输入框
+              (`MentionInput`)本来就带 `break-words`,这里不带的话,同一段文字在
+              草稿里好好的、一发出去就断头 —— 又是那种「像是发错了」的错觉。
+            */}
+            <p className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
+              <MentionText text={text} onOpen={openReference} />
+            </p>
           </div>
         )}
-        {images.length > 0 && (
-          <div className={cn('flex flex-wrap gap-1.5', (text !== '' || fileRefs.length > 0) && 'mt-2')}>
+        {(fileRefs.length > 0 || images.length > 0) && (
+          // 需求：附件脱离文字气泡且限制单卡高度，纯图片消息也能独立显示。
+          <div className="flex max-w-full flex-wrap justify-end gap-1.5" data-testid="user-message-attachments">
+            {fileRefs.map((f) => (
+              <MessageFileRef key={f.path} name={f.name} path={f.path} onOpen={openReference} />
+            ))}
             {images.map((img, i) => (
               <MessageImage
                 key={`${img.dataRef}:${String(i)}`}
                 mime={img.mime}
                 dataRef={img.dataRef}
+                compact
                 // ★ 同一条消息里的图是一组 —— 灯箱据此给出翻页
                 siblings={images.map((x) => ({ mime: x.mime, dataRef: x.dataRef }))}
                 index={i}
@@ -726,7 +711,7 @@ function UserBubble({ message, workspaceId, onEdit, disabled }: {
             title={t('chat.editMessage')}
             data-testid="user-message-edit"
             onClick={() => { setTextDraft(text); setEditing(true) }}
-            className="absolute -left-8 top-1/2 -translate-y-1/2 rounded-[6px] p-1 text-fg-faint opacity-0 transition-opacity hover:bg-tint-hover hover:text-fg-muted group-hover:opacity-100 disabled:pointer-events-none"
+            className="absolute -left-8 top-1 rounded-[6px] p-1 text-fg-faint opacity-0 transition-opacity hover:bg-tint-hover hover:text-fg-muted group-hover:opacity-100 disabled:pointer-events-none"
           >
             <Pencil size={13} />
           </button>
@@ -987,12 +972,27 @@ function PartBlock({
       return null
     case 'error':
       return (
-        <p className="selectable font-mono text-[12.5px] text-danger">
+        /*
+          需求:`break-words` 是必须的。上游 400 的原文常常是一整串没有空格的 JSON
+          (`context_length: {"error":{…`),等宽字体下它比正文列宽出好几百 px,
+          而 `<p>` 自己的边框盒仍然只有列宽 —— 表现为消息本身看着一切正常,
+          整个转录区底部却多出一条横向滚动条(实测溢出 348px / 列宽 502px),
+          而且在 DevTools 里按 `getBoundingClientRect()` 查谁溢出**一个都查不到**。
+        */
+        <p className="selectable font-mono text-[12.5px] break-words text-danger">
           {part.error.code}: {agentErrorText(part.error, t)}
         </p>
       )
     // 和 `error` 并排:两者都是**只存在于 UI 那一轨**的标记(编码器一律 return null)
     case 'goal_status':
       return <GoalStatusCard part={part} />
+    /*
+      压缩边界由 `threadRows` 提成一条 `divider` 行(`CompactionDivider`),
+      走不到这里 —— 但这个 switch 是穷尽的,少一个 case 就是 TS7030。
+      ★ 真要走到这里也必须是 `null`:同一次压缩在界面上画两遍(一条线 + 一个气泡)
+      比不画更难解释。
+    */
+    case 'compact_boundary':
+      return null
   }
 }

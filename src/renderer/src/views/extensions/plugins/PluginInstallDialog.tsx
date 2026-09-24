@@ -30,7 +30,7 @@ import { useI18n, type TranslationKey } from '../../../i18n'
 import { cn } from '../../../lib/cn'
 import { usePluginsStore } from '../../../stores/plugins'
 import { PluginIcon } from './PluginIcon'
-import { installLabel, installRatio } from './install-progress'
+import { installLabel, installRatio } from '../../../lib/install-progress'
 
 export function PluginInstallDialog({
   item,

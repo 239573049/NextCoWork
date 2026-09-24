@@ -81,6 +81,36 @@ export type ContentPart =
     /** 这一条是「目标已被清除」那种标记。 */
     cleared?: boolean
   }
+  /**
+   * 压缩边界:它所在的那条消息**之前**的历史不再发给模型。
+   *
+   * 需求:上下文压缩按 Claude Code 的模型重写 —— 边界是转录里的一条消息,
+   * 不是旁边一张检查点表。原先的表要靠 `coveredThroughMessageId` 锚回转录,
+   * 删轮、编辑重跑、digest 预算漏读都会让锚点和事实错位(真实症状:压完仍 309K,
+   * 随后一路涨到 624K 没再压过)。放进转录后,「哪些历史生效」只剩一个判据:
+   * 最后一个边界之后的消息(`shared/agent/compaction.ts` 的 `messagesForModel`)。
+   *
+   * ★★ **只存在于 UI 那一轨**,同 `goal_status`:编码器 `return null`,估算算 0。
+   *   模型看到的是同一条消息里紧跟着的那段 text(续接语 + 摘要 + 重附的文件)。
+   *
+   * ★ 它所在的消息是 `internal: true` 的 user 消息:聊天界面只画一条分隔线,
+   *   不把摘要当成用户说的话。
+   */
+  | {
+    type: 'compact_boundary'
+    /** 自动(阈值 / 上游报超长)还是用户 /compact。 */
+    trigger: 'auto' | 'manual'
+    /** 压缩前的上下文占用(上游真值优先,见 `AgentSession.contextTokens`)。 */
+    preTokens: number
+    /** 压缩后这条消息自身的估算占用。 */
+    postTokens: number
+    /** 模型写的摘要(已去掉 `<analysis>`)。UI 展开看的就是它。领域值,不翻译。 */
+    summary: string
+    /** /compact 后面跟的那段用户补充指令。 */
+    instructions?: string
+    /** 压缩后重附进上下文的文件路径,按重附顺序。 */
+    restoredFiles?: string[]
+  }
 
 /** Preserve out-of-band goal markers when an older stream commit arrives later. */
 export function mergeGoalStatusMessage(message: AgentMessage, latest?: AgentMessage): AgentMessage {

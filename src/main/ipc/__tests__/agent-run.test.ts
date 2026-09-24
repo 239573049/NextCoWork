@@ -36,6 +36,7 @@ import type { KernelHost } from '../../kernel/host'
 import { nodeHost } from '../../kernel/host'
 import { runs } from '../../kernel/run-registry'
 import { defineTool } from '../../kernel/tool/define'
+import type { ToolRegistration } from '../../kernel/tool/registry'
 import {
   DEMO_ALIAS,
   DEMO_ALIASES,
@@ -49,8 +50,16 @@ import {
   BUILTIN_PROVIDER_ID,
   findPreset
 } from '../../../shared/domain/presets'
+import { pluginToolId } from '../../plugin/tools'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
-import { getRouter, getTools, installHost, resetRuntimeForTest } from '../../runtime'
+import {
+  getRouter,
+  getTools,
+  installHost,
+  installPluginToolPreparation,
+  installPluginToolProvider,
+  resetRuntimeForTest
+} from '../../runtime'
 import { store } from '../../state/store'
 import type { WindowContext } from '../../window/registry'
 import { abortRun, startRun } from '../agent'
@@ -852,5 +861,89 @@ describe('AGENTS.md 与运行时状态注入', () => {
     startRun(rb, b.ctx)
     await waitForEnd(rb.runId)
     expect(firstUsed(wc)).toBe(firstUsed(b.wc))
+  })
+})
+
+/**
+ * ★ 插件工具进 Agent 工具表的**接线**验收。
+ *
+ * 上面那些 describe 量的是内核自己的线,这一段量的是**插件那条线**。它有三个环节,
+ * 少任何一个,症状都是同一句话 ——「插件明明白白列在『已启用插件提供的 Agent 工具』
+ * 里,模型却说没有这个工具」,而且全程零报错:
+ *
+ * 1. `prepareContributedTools()`:只声明 `onTool:` 的插件在这一步之前一个工具都报不上来;
+ * 2. `syncPluginTools()`:把上一步报上来的工具并进 `getTools()` 单例;
+ * 3. 之后才 `snapshotRunTools()` 截本轮快照。
+ *
+ * 摆位按**线上真实的先后**:先把单例建出来,再挂 provider。反过来的话,provider 会被
+ * 首次装配读到,这段用例就整段空绿 —— 接不接线都过。
+ */
+describe('插件工具 · 单例建好之后才注册的插件也要进本轮工具表', () => {
+  /** `installPluginToolProvider` 的注销函数;不注销的话它会跨用例留着 */
+  let disposeProvider: (() => void) | undefined
+
+  afterEach(() => {
+    disposeProvider?.()
+    disposeProvider = undefined
+  })
+
+  it('★ 声明 onTool 的插件:本轮请求的 tools 里要有它的工具', async () => {
+    // 线上顺序的第一步:单例先建出来(`initRuntime()` 里 `getMcp()` 那一跳就把
+    // `getTools()` 建好了,而 `startPlugins()` 在它**之后**)。
+    getTools()
+
+    const internalId = pluginToolId('acme.wechat-exports', 'list_exports')
+    /** 插件在 `activate()` 里才 `registerTool` —— 被唤醒之前它报不上来任何工具 */
+    let activated = false
+    const contribute = (): ToolRegistration[] => activated
+      ? [{
+          internalId,
+          description: 'list exported WeChat archives',
+          inputSchema: { type: 'object' },
+          readOnly: true,
+          destructive: false,
+          needsNetwork: false,
+          source: { kind: 'plugin', pluginId: 'acme.wechat-exports' },
+          execute: async () => toolOk('ok')
+        }]
+      : []
+    disposeProvider = installPluginToolProvider(contribute)
+    installPluginToolPreparation(async () => {
+      activated = true
+    })
+
+    /*
+      断言打在**真的发出去的请求体**上,不是内存里那张表:表里有而下发没有,
+      用户看到的症状一模一样,而后者正是「快照取早了」这一类 bug 的样子。
+    */
+    const bodies: string[] = []
+    const host = withDemo(nodeHost(), { chunkDelayMs: 0 })
+    installHost({
+      ...host,
+      fetch: (input, init) => {
+        bodies.push(String(init?.body ?? ''))
+        return host.fetch(input, init)
+      }
+    })
+
+    const { ctx } = fakeWindow()
+    const r = req({ sessionId: 'sess-plugin-tool' })
+    startRun(r, ctx)
+    await waitForEnd(r.runId)
+
+    expect(runs.get(r.runId)?.status).toBe('done')
+    expect(bodies.length).toBeGreaterThan(0)
+    const advertised = bodies.flatMap((body) => {
+      try {
+        const parsed = JSON.parse(body) as { tools?: Array<{ name?: string }> }
+        return (parsed.tools ?? []).map((tool) => tool.name)
+      } catch {
+        // 不是 JSON 的请求不参与断言,不该让它变成一次解析崩溃
+        return []
+      }
+    })
+    // 没撞名时 externalName 就等于 internalId(`ToolNamer` 只在撞名时加后缀),
+    // 而这里要钉的正是**上游真正看到的名字**。
+    expect(advertised).toContain(internalId)
   })
 })

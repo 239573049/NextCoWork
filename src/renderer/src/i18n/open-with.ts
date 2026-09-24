@@ -14,8 +14,9 @@
  *   带插值的条目值是函数不是 string,标了整张表都不匹配。zh/en 的键对齐由
  *   `index.test.ts` 在运行时逐键比对。
  *
- * 这一域**目前没有带插值的条目**(所以不声明 `Params` 那个别名)——
- * 加带参数的句子时照 `provider-accounts.ts` 补一个 `type Params = …`。
+ * 这一域**目前没有函数形态的插值条目**(所以不声明 `Params` 那个别名)——
+ * 加带参数的函数时照 `provider-accounts.ts` 补一个 `type Params = …`。
+ * `'{name}'` 这种字符串占位符由 `t()` 统一替换,不需要那个别名(`files.ts` 同样这么写)。
  */
 
 export const openWithZh = {
@@ -28,7 +29,21 @@ export const openWithZh = {
   'openWith.copyRelative': '复制相对路径',
   'openWith.copied': '已复制路径',
   'openWith.empty': '没有检测到可用的编辑器',
-  'openWith.openFailed': '无法用这个程序打开，请检查它是否仍然安装。'
+  'openWith.openFailed': '无法用这个程序打开，请检查它是否仍然安装。',
+  /** 第三个通用目标:系统按文件类型关联的那个程序。和「文件管理器」一样不是产品名 */
+  'openWith.defaultApp': '默认应用',
+  /** 文件树右键第一行。`{name}` 是产品名(VS Code)或上面那几个通用目标的译名 */
+  'openWith.openIn': '在 {name} 中打开',
+  'openWith.saveAs': '另存为…',
+  'openWith.saveFailed': '另存失败，请检查目标位置是否可写。',
+  /** 右键菜单里那一行只写「复制路径」(参考截图);复制的是绝对路径,相对路径另有一行 */
+  'openWith.copyPath': '复制路径',
+  'openWith.settingGroup': '文件',
+  'openWith.settingTitle': '默认打开方式',
+  'openWith.settingHint': '文件列表右键菜单第一项「在 … 中打开」使用的程序。',
+  'openWith.settingAuto': '自动（优先使用检测到的编辑器）',
+  /** 存着的那个 id 本机现在探测不到(卸载了 / 设置来自另一台机器) */
+  'openWith.settingUnavailable': '已选的程序当前不可用'
 }
 
 export const openWithEn = {
@@ -40,5 +55,15 @@ export const openWithEn = {
   'openWith.copyRelative': 'Copy relative path',
   'openWith.copied': 'Path copied',
   'openWith.empty': 'No editor detected',
-  'openWith.openFailed': 'Could not open with this app. Check that it is still installed.'
+  'openWith.openFailed': 'Could not open with this app. Check that it is still installed.',
+  'openWith.defaultApp': 'Default app',
+  'openWith.openIn': 'Open in {name}',
+  'openWith.saveAs': 'Save As…',
+  'openWith.saveFailed': 'Could not save the file. Check that the destination is writable.',
+  'openWith.copyPath': 'Copy path',
+  'openWith.settingGroup': 'Files',
+  'openWith.settingTitle': 'Default app for files',
+  'openWith.settingHint': 'Used by “Open in …”, the first item in the file list context menu.',
+  'openWith.settingAuto': 'Automatic (prefer a detected editor)',
+  'openWith.settingUnavailable': 'The selected app is not available'
 }

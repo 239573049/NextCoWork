@@ -470,3 +470,27 @@ describe('resolveMaxOutputTokens', () => {
     expect(resolveMaxOutputTokens(32_000, undefined)).toBe(32_000)
   })
 })
+
+/** 文件树右键第一行「在 X 中打开」的 X。机器本地的选择,坏值保留当前值(同 shell)。 */
+describe('mergeSettings · 默认打开方式', () => {
+  it('旧设置里没有这一项时落回空串(= 自动)', () => {
+    const legacy = structuredClone(DEFAULT_SETTINGS) as Partial<AppSettings>
+    delete legacy.defaultOpenTarget
+    expect(mergeSettings(DEFAULT_SETTINGS, legacy).defaultOpenTarget).toBe('')
+  })
+
+  it('合法 id 原样落库,改回空串也能落库', () => {
+    const zed = mergeSettings(base(), { defaultOpenTarget: 'zed' })
+    expect(zed.defaultOpenTarget).toBe('zed')
+    expect(mergeSettings(zed, { defaultOpenTarget: '' }).defaultOpenTarget).toBe('')
+  })
+
+  it.each([
+    ['非字符串', 42],
+    ['带路径的串', '/Applications/Zed.app']
+  ])('%s 时保留当前选择', (_label, value) => {
+    const current = mergeSettings(base(), { defaultOpenTarget: 'vscode' })
+    const next = mergeSettings(current, { defaultOpenTarget: value } as unknown as AppSettingsPatch)
+    expect(next.defaultOpenTarget).toBe('vscode')
+  })
+})

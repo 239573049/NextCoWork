@@ -14,7 +14,7 @@
  * 原样跑过。
  */
 import type { AgentMessage } from '../../shared/agent/message'
-import type { ContextCheckpoint, ContextSearchHit } from '../../shared/agent/context-management'
+import type { ContextSearchHit } from '../../shared/agent/context-management'
 import type { McpServerConfig } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
 import type { ProviderAccountLimit, ProviderQuotaSnapshot } from '../../shared/domain/provider-account'
@@ -291,6 +291,9 @@ export const store = {
   getUsageRequestLogs(query: UsageRequestLogsQuery): UsageRequestLogsPage {
     return repo.getUsageRequestLogs(query)
   },
+  getSessionUsageAttempts(sessionId: string): UsageAttemptRecord[] {
+    return repo.getSessionUsageAttempts(sessionId)
+  },
   getUsageProviderStats(window: UsageWindow): UsageDimensionStat[] {
     return repo.getUsageProviderStats(window)
   },
@@ -493,18 +496,6 @@ export const store = {
   },
   searchSessions(q: string, workspaceId?: string, limit = 50): SearchHit[] {
     return repo.searchAll(q, workspaceId, limit)
-  },
-  listContextCheckpoints(sessionId: string): ContextCheckpoint[] {
-    return repo.listContextCheckpoints(sessionId)
-  },
-  getContextCheckpoint(id: string): ContextCheckpoint | undefined {
-    return repo.getContextCheckpoint(id)
-  },
-  upsertContextCheckpoint(checkpoint: ContextCheckpoint): ContextCheckpoint {
-    return repo.upsertContextCheckpoint(checkpoint)
-  },
-  updateContextCheckpoint(id: string, note: string, revision: number, now: number): ContextCheckpoint {
-    return repo.updateContextCheckpoint(id, note, revision, now)
   },
   searchSessionHistory(sessionId: string, q: string, limit = 5): ContextSearchHit[] {
     return repo.searchSessionHistory(sessionId, q, limit)

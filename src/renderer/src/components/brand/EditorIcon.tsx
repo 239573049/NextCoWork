@@ -15,7 +15,7 @@
  *
  * ## 为什么是两张表
  *
- * `MARK` 只覆盖「有字形」的那些 id,文件管理器与终端走 `FALLBACK` 里两颗
+ * `MARK` 只覆盖「有字形」的那些 id,文件管理器 / 终端 / 默认应用走 `FALLBACK` 里的
  * lucide 图标:系统的文件管理器叫什么、终端是哪个 app,各平台都不同,
  * 拿某一个产品的 logo 去代表「文件管理器」是错的(装了别的终端的用户会觉得
  * 我们在说另一个东西)。
@@ -24,7 +24,7 @@
  * 也编译不过(和 `ProviderIcon` 的 `RASTER` 同一条规矩)。
  */
 import type { ReactNode } from 'react'
-import { FolderOpen, TerminalSquare } from 'lucide-react'
+import { AppWindow, FolderOpen, TerminalSquare } from 'lucide-react'
 import type { OpenTargetIcon } from '../../../../shared/domain/open-target'
 import { cn } from '../../lib/cn'
 
@@ -45,7 +45,7 @@ import xcode from '../../assets/editors/xcode.svg?raw'
 import zed from '../../assets/editors/zed.svg?raw'
 
 /** 有品牌字形的那些 id。 */
-type MarkIcon = Exclude<OpenTargetIcon, 'file-manager' | 'terminal'>
+type MarkIcon = Exclude<OpenTargetIcon, 'file-manager' | 'terminal' | 'default-app'>
 
 const MARK: Record<MarkIcon, string> = {
   vscode, cursor, windsurf, zed, sublime, intellij, pycharm, webstorm,
@@ -60,9 +60,11 @@ const MARK: Record<MarkIcon, string> = {
  *   当场编译不过。没有这一步,漏配的表现是一列菜单里出现一颗空白(严格说是
  *   上一项的图标),而它不报错。
  */
-const FALLBACK: Record<Extract<OpenTargetIcon, 'file-manager' | 'terminal'>, ReactNode> = {
+const FALLBACK: Record<Extract<OpenTargetIcon, 'file-manager' | 'terminal' | 'default-app'>, ReactNode> = {
   'file-manager': <FolderOpen />,
-  terminal: <TerminalSquare />
+  terminal: <TerminalSquare />,
+  // 系统默认应用是「交给系统挑」,没有哪一个产品的 logo 能代表它
+  'default-app': <AppWindow />
 }
 
 /**

@@ -125,8 +125,8 @@ export const usageZh = {
   'usage.granularity.cumulative': '累计',
   'usage.granularityLabel': '统计粒度',
 
-  // 每日趋势
-  'usage.trend.title': '每日 Token 趋势',
+  // Token 趋势。★ 标题不带「每日」:粒度切到每周 / 累计时它就是错的
+  'usage.trend.title': 'Token 趋势',
   'usage.trend.tokens': 'Token 数',
   'usage.trend.requests': '请求数',
   'usage.trend.empty': '所选时间范围内没有数据',
@@ -136,6 +136,8 @@ export const usageZh = {
   'usage.models.total': '总计',
   'usage.models.others': '其他',
   'usage.models.empty': '所选时间范围内没有模型用量',
+  'usage.models.requests': ({ count }: Params) => `${count} 次请求`,
+  'usage.models.legendLabel': '模型图例',
 
   // 费用统计
   'usage.cost.title': '模型费用',
@@ -260,7 +262,7 @@ export const usageEn = {
   'usage.granularity.cumulative': 'Cumulative',
   'usage.granularityLabel': 'Granularity',
 
-  'usage.trend.title': 'Daily token trend',
+  'usage.trend.title': 'Token trend',
   'usage.trend.tokens': 'Tokens',
   'usage.trend.requests': 'Requests',
   'usage.trend.empty': 'No data in the selected time range',
@@ -269,6 +271,8 @@ export const usageEn = {
   'usage.models.total': 'Total',
   'usage.models.others': 'Others',
   'usage.models.empty': 'No model usage in the selected time range',
+  'usage.models.requests': ({ count }: Params) => `${count} requests`,
+  'usage.models.legendLabel': 'Model legend',
 
   'usage.cost.title': 'Cost by model',
   'usage.cost.model': 'Model',

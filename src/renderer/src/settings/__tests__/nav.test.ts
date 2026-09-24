@@ -4,8 +4,10 @@ import {
   DEFAULT_SETTINGS_PAGE,
   matchPages,
   matchRows,
+  resolveSettingsPage,
   SETTINGS_INDEX,
   SETTINGS_PAGES,
+  visibleSettingsPages,
   type SettingsPageId
 } from '../nav'
 
@@ -149,9 +151,27 @@ describe('matchRows', () => {
 
 describe('matchPages', () => {
   it('页名命中', () => {
-    expect(matchPages('关于').map((p) => p.id)).toEqual(['about'])
+    expect(matchPages('关于', true).map((p) => p.id)).toEqual(['about'])
   })
   it('空查询返回空', () => {
-    expect(matchPages('')).toEqual([])
+    expect(matchPages('', true)).toEqual([])
+  })
+  it('未登录时搜不到钱包页 —— 导航里看不见的页不能从搜索进去', () => {
+    expect(matchPages('钱包', false)).toEqual([])
+    expect(matchPages('钱包', true).map((p) => p.id)).toEqual(['wallet'])
+  })
+})
+
+describe('需要登录的页', () => {
+  it('未登录时导航里只少钱包这一页，顺序不变', () => {
+    const all = SETTINGS_PAGES.map((p) => p.id)
+    expect(visibleSettingsPages(true).map((p) => p.id)).toEqual(all)
+    expect(visibleSettingsPages(false).map((p) => p.id)).toEqual(all.filter((id) => id !== 'wallet'))
+  })
+
+  it('未登录时请求钱包页会落到账户页（那里有登录入口），其余页原样', () => {
+    expect(resolveSettingsPage('wallet', false)).toBe('account')
+    expect(resolveSettingsPage('wallet', true)).toBe('wallet')
+    expect(resolveSettingsPage('general', false)).toBe('general')
   })
 })

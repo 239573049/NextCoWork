@@ -32,6 +32,7 @@ import {
 } from '../../../../shared/domain/settings'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../../../shared/agent/run-request'
 import { DraftInput } from '../DraftInput'
+import { DefaultOpenTargetSelect } from './DefaultOpenTargetSelect'
 import { LandsAt, SettingGroup, SettingRow } from '../Row'
 import type { SettingsPageProps } from '../props'
 import { useI18n } from '../../i18n'
@@ -178,10 +179,6 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             }}
           />
         </SettingRow>
-        <SettingRow title={t('general.contextManagement')} description={t('general.contextManagementHint')}>
-          <Toggle label={t('general.contextManagement')} checked={settings.contextManagement.experimentalMode}
-            onChange={(experimentalMode) => patch({ contextManagement: { experimentalMode } })} />
-        </SettingRow>
         <SettingRow title={t('general.autoCompact')} description={t('general.autoCompactHint')}>
           <Toggle label={t('general.autoCompact')} checked={settings.contextManagement.autoCompact}
             onChange={(autoCompact) => patch({ contextManagement: { autoCompact } })} />
@@ -273,6 +270,16 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
               { value: 'en-US', label: t('settings.english') }
             ]}
             onChange={(locale) => patch({ locale })}
+          />
+        </SettingRow>
+      </SettingGroup>
+
+      {/* 需求:文件树右键第一行「在 X 中打开」的 X 在这里选(见 `DefaultOpenTargetSelect` 文件头) */}
+      <SettingGroup title={t('openWith.settingGroup')}>
+        <SettingRow title={t('openWith.settingTitle')} description={t('openWith.settingHint')} wide last>
+          <DefaultOpenTargetSelect
+            value={settings.defaultOpenTarget}
+            onChange={(defaultOpenTarget) => patch({ defaultOpenTarget })}
           />
         </SettingRow>
       </SettingGroup>

@@ -6,7 +6,6 @@
  * JSON 的类型里没有明文凭证字段。
  */
 import type { AgentMessage } from '../agent/message'
-import type { ContextCheckpoint } from '../agent/context-management'
 import type { ModelAlias, UpstreamProvider } from './provider'
 import { isModelCatalogOverride } from './provider'
 import { isMaxOutputTokens, isShellPreference, isUpstreamIdleTimeoutSeconds, MODEL_PROPOSED_GOALS, type AppSettings } from './settings'
@@ -18,6 +17,7 @@ import { PERMISSION_MODES } from '../agent/permission'
 import { THINKING_LEVELS } from '../agent/run-request'
 import { MODE_ID_RE } from './mode'
 import { PROXY_SCHEMES } from './proxy'
+import { isOpenTargetPreference } from './open-target'
 
 export const DATA_EXPORT_TYPE = 'nextcowork-data-export' as const
 export const DATA_EXPORT_VERSION = 1
@@ -26,8 +26,11 @@ export const BACKUP_FORMAT_VERSION = 2
 export interface ExportSession {
   session: Session
   messages: AgentMessage[]
-  /** Optional for exports produced before context management was added. */
-  contextCheckpoints?: ContextCheckpoint[]
+  /**
+   * 旧版导出里的上下文检查点。★ 只为能导入老备份而保留在类型上,导入时忽略:
+   * 压缩现在是转录里的一条边界消息(`compact_boundary`),随 `messages` 一起走。
+   */
+  contextCheckpoints?: unknown[]
 }
 
 export interface DataExport {
@@ -366,6 +369,8 @@ function isAppSettings(value: unknown): boolean {
   // When it is present it has to be a known shell: an unknown one would only
   // be discarded by the merger, so silently accepting it hides a bad export.
   if (has(v, 'shell') && !isShellPreference(v.shell)) return false
+  // 默认打开方式同理:缺席 = 旧存档放行,在场就必须是合法形状。
+  if (has(v, 'defaultOpenTarget') && !isOpenTargetPreference(v.defaultOpenTarget)) return false
   // 后加的字段:缺席 = 旧存档,放行(和 default defaults 合并);在场就必须在范围内,
   // 否则会被 merger 丢弃 —— 静默接受一个坏值会掩盖一份损坏的导出。
   if (has(v, 'upstreamIdleTimeoutSeconds') &&
@@ -406,7 +411,13 @@ function isThemeStudioSettings(value: unknown): boolean {
 
 function isContextManagementSettings(value: unknown): boolean {
   if (!isRecord(value)) return false
-  return isBoolean(value.experimentalMode) && isBoolean(value.autoCompact)
+  /*
+    ★ 只校验 `autoCompact`。`experimentalMode` 已随压缩重写删除,而**老备份里它还在** ——
+    继续要求它存在的话,一份 v25 之前导出的备份会整份过不了校验,导入端拒绝的是
+    整个文件而不是这一个字段(症状见 schema.ts 里 V11 那段注释)。多出来的键
+    由 `mergeSettings` 按未知字段丢掉。
+  */
+  return isBoolean(value.autoCompact)
 }
 
 function isColorThemeChoice(value: unknown): boolean {
@@ -518,20 +529,7 @@ function isExportSession(value: unknown): value is ExportSession {
   if (!isRecord(value) || !isSession(value.session) || !Array.isArray(value.messages)) return false
   const messages = value.messages as unknown[]
   if (!messages.every(isAgentMessage) || !uniqueBy(messages, (message) => (message as AgentMessage).id)) return false
-  if (value.contextCheckpoints === undefined) return true
-  return Array.isArray(value.contextCheckpoints) && value.contextCheckpoints.every(isContextCheckpoint)
-}
-
-function isContextCheckpoint(value: unknown): value is ContextCheckpoint {
-  if (!isRecord(value)) return false
-  return isNonEmptyString(value.id) && isNonEmptyString(value.sessionId) &&
-    isIntegerAtLeast(value.windowIndex, 0) && typeof value.note === 'string' &&
-    enumValue(value.source, ['model', 'mechanical', 'manual', 'auto']) &&
-    optionalString(value, 'coveredFromMessageId') && optionalString(value, 'coveredThroughMessageId') &&
-    optionalIntegerAtLeast(value, 'inputTokensBefore', 0) && optionalIntegerAtLeast(value, 'inputTokensAfter', 0) &&
-    (value.searchHits === undefined || Array.isArray(value.searchHits)) &&
-    isIntegerAtLeast(value.createdAt, 0) && isIntegerAtLeast(value.updatedAt, 0) &&
-    isIntegerAtLeast(value.revision, 1)
+  return value.contextCheckpoints === undefined || Array.isArray(value.contextCheckpoints)
 }
 
 function isAgentMessage(value: unknown): value is AgentMessage {
@@ -576,6 +574,12 @@ function isContentPart(value: unknown): boolean {
         && (!has(value, 'iterations') || isIntegerAtLeast(value.iterations, 0))
         && (!has(value, 'durationMs') || isIntegerAtLeast(value.durationMs, 0))
         && (!has(value, 'tokens') || isIntegerAtLeast(value.tokens, 0))
+    case 'compact_boundary':
+      // ★ `summary` 必填:边界之前的历史从此不再发给模型,摘要丢了就是整段失忆。
+      return enumValue(value.trigger, ['auto', 'manual'])
+        && isIntegerAtLeast(value.preTokens, 0) && isIntegerAtLeast(value.postTokens, 0)
+        && typeof value.summary === 'string' && optionalString(value, 'instructions')
+        && (!has(value, 'restoredFiles') || (Array.isArray(value.restoredFiles) && value.restoredFiles.every((f) => typeof f === 'string')))
     default:
       return false
   }

@@ -61,6 +61,7 @@ import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, currentPluginSkillRoots, scanSkills 
 import { resetSkillRegistries, skillRegistry } from './kernel/skill/registry'
 import { builtinTools, registerToolProvider } from './kernel/tool/builtin'
 import { taskTool } from './kernel/tool/builtin/task'
+import { syncPluginTools } from './kernel/tool/plugin-tools'
 import type { SpawnSubagentFn, ToolRegistration } from './kernel/tool/registry'
 import { ToolRegistry } from './kernel/tool/registry'
 import { McpManager } from './mcp/manager'
@@ -798,6 +799,8 @@ export function getTools(): ToolRegistry {
     // 且都经**同一个** register —— 那是消毒与命名的唯一收口点(方案 §4.4)。
     // 插件贡献的工具也走这里:它们经 `registerToolProvider` 进 `builtinTools()`,
     // 于是消毒、命名、去重一条都不会被绕过。
+    // ★ 但单例只在这里读一次 provider —— 之后才激活/禁用的插件靠每轮 run 开头的
+    //   `syncPluginTools` 对齐,不要以为这一行能看到插件的后续变化。
     for (const reg of builtinTools()) tools.register(reg)
   }
   return tools
@@ -812,7 +815,25 @@ export function getTools(): ToolRegistry {
  * 模型还在调它的工具」——一次静默的越权。
  */
 export function installPluginToolProvider(provide: () => ToolRegistration[]): () => void {
-  return registerToolProvider('plugin', provide)
+  livePluginTools = provide
+  const unregister = registerToolProvider('plugin', provide)
+  return () => {
+    unregister()
+    if (livePluginTools === provide) livePluginTools = () => []
+  }
+}
+
+/**
+ * 插件工具的**现报**来源 —— 每轮 run 开头交给 `syncPluginTools` 对齐单例。
+ * ★ 光靠 `registerToolProvider` 不够:它只在 `getTools()` 首次建单例时被读一次,
+ *   之后才激活的 `onTool:` 插件的工具永远进不了 Agent 工具表(见 plugin-tools.ts)。
+ */
+let livePluginTools: () => ToolRegistration[] = () => []
+
+/** 需求：注册表快照前先让 onTool 插件注册工具，不让声明过的工具永远不可见。 */
+let preparePluginTools: () => Promise<void> = async () => {}
+export function installPluginToolPreparation(prepare: () => Promise<void>): void {
+  preparePluginTools = prepare
 }
 
 /**
@@ -2411,6 +2432,24 @@ export async function runAgent(
   const fileReferenceSource: FileReferenceSource = ref.kind === 'connection'
     ? { kind: 'workspace', workspaceId: workspace.id, environment: ref, rootPath: environment.rootPath, connectionRevision: store.getConnectionProfile(ref.connectionId)?.revision ?? -1 }
     : { kind: 'local' }
+  /*
+    ★ 三步缺一不可，且顺序不能动:先唤醒插件 → 再把它们的工具并进全局注册表 →
+    最后才截本轮工具快照。
+
+    - 少了 `preparePluginTools()`:只声明 `onTool:` 的插件还没注册任何工具。
+    - 少了 `syncPluginTools()`:那些工具仍然停在 `getTools()` 单例之外 —— 单例只在
+      首次构建时读过一次 provider,而那一次发生在 `startPlugins()` **之前**,
+      所以装着微信插件的进程里,模型看到的一直是一张没有插件工具的表。
+      症状:插件明明白白列在「已启用插件提供的 Agent 工具」里,模型却说没有这个工具,
+      而且全程零报错。
+
+    `syncPluginTools` 同时负责撤下被禁用/卸载插件的工具(见 `plugin-tools.ts` 的 ★),
+    所以它必须每轮都跑,不能只在启用时跑一次。
+  */
+  if (inheritedResources === undefined) {
+    await preparePluginTools()
+    syncPluginTools(getTools(), livePluginTools())
+  }
   const resources: RunResources = inheritedResources ?? { environment, fileReferenceSource, agents: runAgents, tools: snapshotRunTools(environment, runAgents, scopedMcpTools) }
   const baseAllowedTools = intersectToolLists(runMode.tools, agent?.tools)
   const modeToolPool = baseAllowedTools ?? resources.tools.info().map((tool) => tool.internalId)
@@ -2479,13 +2518,6 @@ export async function runAgent(
       // 需求:输出额度按 run 开始那一刻的设置冻结,和权限档位同一个口径
       //(「下一次新回复生效」)—— 跑到一半改设置不该让同一个 run 前后两轮额度不同。
       maxOutputTokens: store.getSettings().maxOutputTokens,
-      contextCheckpoints: store.listContextCheckpoints(req.sessionId),
-      saveContextCheckpoint: (checkpoint) => {
-        store.upsertContextCheckpoint(checkpoint)
-      },
-      // ★ 现查,不复用上面那份快照 —— run 跑到一半用户可以手动压一次。见 `nextWindowIndex`。
-      latestContextWindowIndex: () =>
-        store.listContextCheckpoints(req.sessionId).reduce((max, c) => Math.max(max, c.windowIndex), 0),
       ...(primary ? goalProposalsFor({
         handle, context: goalContext, gate: interactions, interactive: session.origin !== 'scheduled',
         planning: () => req.mode === 'plan' || activePlanFor(req) !== undefined,
@@ -2786,6 +2818,10 @@ export function resetRuntimeForTest(): void {
   agentDrafts = null
   commitMessages = null
   tools = null
+  preparePluginTools = async () => {}
+  // ★ 和上一行同理:现报函数是模块级的,留着的话上一个用例的插件工具会
+  //   经下一份注册表的 `syncPluginTools` 复活 —— 而它们指向的 runtime 已经销毁。
+  livePluginTools = () => []
   // 不 await shutdown:这个函数是同步的(beforeEach 里调),而留着的
   // manager 会攥着上一个用例的 ToolRegistry —— 那正是要断开的引用
   mcp = null

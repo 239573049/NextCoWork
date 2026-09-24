@@ -9,7 +9,7 @@ import type { AgentMessage } from './message'
      模型明明吃得下,我们自己先报错是纯粹的自伤。
   2. **有效窗口** = `effectiveContextWindow()`。回答「我自愿用到多少」。
      它是 `shouldCompact` 的分母,也是圆环的分母。默认被 `LONG_CONTEXT_THRESHOLD` 夹住。
-  3. **压缩阈值** = 有效窗口 × `COMPACT_THRESHOLD`(0.8)+ 输出预留,见 `shouldCompactAt()`。
+  3. **压缩阈值** = 有效窗口 − 摘要输出预留 − 缓冲,见 `autoCompactThreshold()`(Claude Code 的公式)。
      回答「什么时候开始压」。原先只长在 kernel/context-assembler.ts 里(所以这里写着
      「本文件不管这一层」),现在渲染层的状态行也要按当前窗口重判同一条不等式,
      故下沉到本文件,装配器改为调用它 —— 判据仍然只有一份。
@@ -52,52 +52,65 @@ export function effectiveContextWindow(
   return maxContext ? protocol : Math.min(protocol, LONG_CONTEXT_THRESHOLD)
 }
 
-/** 超过窗口的这个比例就该压缩了 */
-export const COMPACT_THRESHOLD = 0.8
+/*
+  ★★ 压缩阈值 —— 照 Claude Code 的 autocompact 公式:
 
-/**
- * 输出预留最多吃掉窗口的这个比例。
- *
- * ★ **`maxOutputTokens` 和有效窗口不同源,不封顶就会算出一个恒为真的判据。**
- * 前者是别名上的原值(按模型的**协议**窗口标的),后者默认被 `LONG_CONTEXT_THRESHOLD`
- * 夹到 272K。一个 1M 窗口、384K 最大输出的模型,关掉「最大上下文」之后
- * 预留一项就是 384K —— 已经超过 272K×0.8 的阈值本身,于是 `used` 填 0 都判该压缩:
- * 自动压缩从会话第一条消息起每轮触发一次,而且压完仍然为真,永远收敛不了。
- * 症状是压力条几乎空着、旁边却写着「接近上限」。
- *
- * 封顶到 1/4 之后,最坏情况下压缩也要等占用过半才触发,判据重新跟历史长度有关。
- * 这不是在猜模型真实会输出多少 —— 一轮回复本来就不可能写满协议上限,
- * 而真正兜住「输入塞得下、输出被截断」的是 `validateModelRuntime` 那条硬校验,
- * 它读协议窗口原值,不受这里影响。
- */
-export const OUTPUT_RESERVE_CAP = 0.25
+      有效窗口 − min(maxOutputTokens, 摘要输出上限 20K) − 缓冲 13K
+
+  原先是「输入 + min(maxOut, 窗口×0.25) > 窗口×0.8」。改的理由:
+  1. 旧公式在 272K 窗口、32K 输出下于 185K 触发,留出来的 87K 大半浪费;
+     CC 的公式给摘要请求自己的输出(20K)和一次工具回执的余量(13K)留位置,
+     其余全部给对话 —— 272K 窗口下在 239K 触发。
+  2. 分母读的仍是**有效窗口**(默认夹在 272K 计费线),不是协议窗口:
+     「最大上下文」开关的语义没有变。
+
+  ★ `MIN_THRESHOLD_RATIO` 是我们对 CC 的唯一偏离:CC 只对接 200K 级窗口,
+  这里还有 8K / 32K 的本地模型,光减 33K 就是负数 —— 那样每轮都会压缩,
+  压完仍然为真,永远收敛不了。封底到窗口的一半。
+*/
+
+/** 摘要请求的输出上限,同 CC 的 `COMPACT_MAX_OUTPUT_TOKENS`。阈值里也为它留位置。 */
+export const COMPACT_MAX_OUTPUT_TOKENS = 20_000
+/** 阈值与有效窗口之间的缓冲,同 CC 的 `AUTOCOMPACT_BUFFER_TOKENS`。 */
+export const AUTOCOMPACT_BUFFER_TOKENS = 13_000
+/** 状态行提前多少开始提示「接近上限」,同 CC 的 `WARNING_THRESHOLD_BUFFER_TOKENS`。 */
+export const WARNING_BUFFER_TOKENS = 20_000
+/** 阈值封底:窗口的这个比例。见上面那段 ★。 */
+export const MIN_THRESHOLD_RATIO = 0.5
+
+/** 自动压缩在占用达到多少时触发。主进程判据与渲染层状态行共用这一份。 */
+export function autoCompactThreshold(contextWindow: number, maxOutputTokens: number): number {
+  const reserve = Math.min(Math.max(0, maxOutputTokens), COMPACT_MAX_OUTPUT_TOKENS)
+  const threshold = contextWindow - reserve - AUTOCOMPACT_BUFFER_TOKENS
+  return Math.max(threshold, Math.floor(contextWindow * MIN_THRESHOLD_RATIO))
+}
 
 /**
  * 「这一轮该压缩了吗」。
  *
- * ★ 把输出预留算进来:上下文窗口是**输入加输出**共用的。只比较输入的话,
- * 你会在「输入刚好塞得下、回复写到一半被截断」时才发现该压缩了 —— 而那时
- * 这一轮已经浪费了。预留取 `maxOutputTokens` 但**必须封顶**,见 `OUTPUT_RESERVE_CAP`。
+ * 需求:主进程(真正触发自动压缩)和渲染层状态行(「接近上限,可 /compact」按**当前**
+ * 有效窗口重判 —— 用户中途打开「最大上下文」之后旧建议要立刻回落)必须读同一个公式。
+ * 各写一份的话,状态行会和真正的判据悄悄分叉。
  *
- * 需求:这三样原先长在 `kernel/context-assembler.ts` 里(主进程装配时判一次,
- * 结果随 `context_usage` 发到渲染层)。下沉到这里是因为状态行那句「接近上限,可 /compact」
- * 现在要按**当前**有效窗口重判一次 —— 用户中途打开「最大上下文」之后,
- * 上一轮在 272K 下判出来的那条建议已经不成立了,而它要到下一次发送才会自己回落。
- * 两边必须读同一个公式:各写一份的话,状态行会和真正触发自动压缩的那条判据悄悄分叉。
- *
- * ★ 渲染层传进来的 `inputTokens` 是上一轮装配的**未校准估算**(`contextUsage.used`),
- * 主进程传的是**校准后的估算**(见 assembler 的 `tokenCalibration`)。校准系数下界为 1,
- * 所以渲染层重判不会比主进程更严格;这个函数只负责两边共用的那条不等式。
+ * `inputTokens` 在主进程是「上一次上游真值 + 其后新增消息的估算」
+ * (见 `AgentSession.contextTokens`,同 CC 的 `tokenCountWithEstimation`),
+ * 在渲染层是上一轮的上游真值。
  */
 export function shouldCompactAt(input: {
   inputTokens: number
   contextWindow: number
   maxOutputTokens: number
 }): boolean {
-  return (
-    input.inputTokens + Math.min(input.maxOutputTokens, input.contextWindow * OUTPUT_RESERVE_CAP) >
-    input.contextWindow * COMPACT_THRESHOLD
-  )
+  return input.inputTokens >= autoCompactThreshold(input.contextWindow, input.maxOutputTokens)
+}
+
+/** 状态行开始提示的那条线。 */
+export function shouldWarnAt(input: {
+  inputTokens: number
+  contextWindow: number
+  maxOutputTokens: number
+}): boolean {
+  return input.inputTokens >= autoCompactThreshold(input.contextWindow, input.maxOutputTokens) - WARNING_BUFFER_TOKENS
 }
 
 /**
@@ -213,18 +226,18 @@ export interface ContextPreview {
   segments: ContextSegment[]
 }
 
-export type ContextCheckpointSource = 'model' | 'mechanical' | 'manual' | 'auto'
 /**
- * 自动压缩这一轮的结局。
+ * 自动 / 手动压缩这一轮的状态,随 `context_status` 事件发给渲染层。
  *
- * ★ `fallback` 与 `exhausted` **必须分开**:前者是默认配置下每次自动压缩的正常结果
- * (折叠了较早的历史,占用真的降下来了),后者是「折叠完还是这么大」——
- * 机械压缩只动倒数第 6 条之前的工具输出 / 思考 / 图,大头在保留区或纯正文里时
- * 它一个 token 都削不掉。两者报成同一句话的话,用户会盯着一句「已折叠较早的历史」
- * 看着占用一路涨过窗口,而**此时唯一有用的动作全在他那边**(开摘要压缩、
- * 换更大的窗口、另起一个会话)。
+ * 需求:压缩要发一次模型请求(几秒到几十秒),这段时间状态行必须说「正在压缩」,
+ * 失败了必须说「压缩失败」—— 否则用户看到的是一次无缘无故变长的停顿。
+ *
+ * ★ 原先还有 `fallback` / `exhausted` 两档,描述机械压缩「折叠了 / 折叠不动」。
+ * 机械压缩已随 Claude Code 式重写删除(压缩只剩模型摘要这一条路),两档一并删除。
+ * `disabled` 是熔断:同一个 run 里连续失败 `MAX_CONSECUTIVE_COMPACT_FAILURES` 次后
+ * 不再自动重试 —— 此时唯一有用的动作在用户那边(/compact、换模型、另起会话)。
  */
-export type ContextStatusPhase = 'preparing' | 'ready' | 'fallback' | 'exhausted' | 'error'
+export type ContextStatusPhase = 'compacting' | 'compacted' | 'failed' | 'disabled'
 
 export interface ContextSearchHit {
   messageId: string
@@ -233,128 +246,7 @@ export interface ContextSearchHit {
   snippet: string
 }
 
-/**
- * 这一刀**实际**做了什么 —— 检查点上那条 note 之外的全部事实。
- *
- * ## 需求:压缩过后必须能回答「我丢了什么」
- *
- * 在此之前检查点只有 `note` 和一对 token 读数,于是用户(和下一个 agent)看到的
- * 是「压缩了」三个字,看不到**哪些消息不再发给模型**、**摘要有没有真的读过它们**。
- * 而这两件事恰恰是「压缩之后模型像换了个人」的全部解释。
- *
- * ★ 合成一个可选对象而不是往 `ContextCheckpoint` 上铺七个平行可选字段:
- * 落库只多一列 JSON(同 `searchHits` 的先例),老行读出来是 `undefined` ——
- * 界面对「没有这份事实」和「事实是 0」必须有不同反应,平铺成 0 会把老会话
- * 谎报成「一条都没丢」。
- */
-export interface ContextCompactionDetail {
-  /** 被削掉内容(工具输出清空 / 丢思考 / 图换占位)的消息条数。 */
-  foldedMessages?: number
-  /** 其中被清空的工具输出处数 —— 体积的大头。 */
-  foldedToolOutputs?: number
-  /** 真正**移出上下文**的消息条数。0 / 缺席 = 只折叠了内容,一条都没移走。 */
-  droppedMessages?: number
-  /** 最后一条被移出上下文的消息;它之前的都不再发给模型。 */
-  droppedThroughMessageId?: string
-  /**
-   * 摘要**没有**覆盖到的那一段从哪条消息开始。
-   *
-   * ★ 它存在的理由是一个真实的凭空丢失:digest 有 token 预算,超了就从最早的一侧
-   * 整条丢(见 `buildCompactionDigest`),而检查点原先一律把 `coveredThroughMessageId`
-   * 写成转录的最后一条 —— 于是那些**没进摘要**的消息被当成「已覆盖」裁掉了。
-   * 有了这一条,`projectContextWindow` 的切点就不会越过它。
-   */
-  uncoveredFromMessageId?: string
-  /** digest 因预算被整条丢弃的消息条数。 */
-  digestOmittedMessages?: number
-  /** 真正发给摘要模型的那段 digest 原文。机械压缩没有这一项(它不发请求)。 */
-  digest?: string
-}
-
-export interface ContextCheckpoint {
-  id: string
-  sessionId: string
-  windowIndex: number
-  note: string
-  source: ContextCheckpointSource
-  coveredFromMessageId?: string
-  coveredThroughMessageId?: string
-  inputTokensBefore?: number
-  inputTokensAfter?: number
-  searchHits?: ContextSearchHit[]
-  /** 见 `ContextCompactionDetail`。老检查点没有这一份。 */
-  detail?: ContextCompactionDetail
-  createdAt: number
-  updatedAt: number
-  revision: number
-}
-
-/**
- * 「压缩之后,这一轮真正发给模型的是什么」—— 上下文检查器的数据形状。
- *
- * ★ 它是**投影的投影**:不搬运整份消息体(一条 tool_result 可以有 64KB),
- * 只带每条的身份、估算占用和一行预览。界面要回答的是「谁还在、谁被削过、
- * 谁彻底没了」,不是「把转录再渲染一遍」——那一份用户本来就在屏幕上看着。
- */
-export type ContextWindowEntryKind = 'summary' | 'skeleton' | 'folded' | 'verbatim'
-
-export interface ContextWindowEntry {
-  /** 转录里的消息 id。摘要 / 骨架这类合成消息给的是它们自己的 id。 */
-  id: string
-  role: AgentMessage['role']
-  kind: ContextWindowEntryKind
-  tokens: number
-  /** 每个块一行的预览,已限长。 */
-  lines: string[]
-}
-
-export interface ContextWindowView {
-  checkpointId: string
-  /** 投影里的消息,顺序即发送顺序。 */
-  entries: ContextWindowEntry[]
-  /** 转录里存在、但这一份投影里已经没有的消息 id。 */
-  droppedMessageIds: string[]
-  /** 消息部分的估算占用(不含系统提示词与工具定义)。 */
-  messageTokens: number
-  /** 压缩前同一段转录的估算占用,用来给出「省了多少」。 */
-  transcriptTokens: number
-}
-
-/**
- * 历史被改写之后**锚不回去**的检查点 —— 它描述的那段消息已经不在了。
- *
- * 删一轮 / 编辑后重跑都会截掉一段消息,而检查点表**不跟着动**:留下来的孤儿
- * 有两重害处。界面上它落进顶部那个「上下文检查点」面板赖着不走(画不出线,
- * 因为锚点没了);更要命的是 `agent-session` 启动时会把最新那条非机械检查点
- * 当作 `contextNote` 恢复回来,于是一段**描述已删内容**的摘要被继续塞进每一次
- * 请求 —— 用户删了消息,模型却还记得,而且全程不报错。
- *
- * ★ **判据只看锚点消息在不在,不看覆盖范围。** 删掉一轮早期对话时,后面那条
- * 检查点的摘要里确实混着被删内容,但它同时概括了大量**还在**的消息;为那几句
- * 整条丢掉,压缩线和折叠计数会一起凭空消失。锚点还在 = 这条线还有地方可落。
- *
- * ★ **没有锚点字段的老数据一律留着。** 分不清它是「历史还在」还是「被删了」,
- * 而误删不可逆。它们由 `unanchoredCheckpoints` 交给顶部面板兜底。
- */
-export function orphanedCheckpoints(
-  keptMessageIds: ReadonlySet<string>,
-  checkpoints: readonly ContextCheckpoint[]
-): ContextCheckpoint[] {
-  return checkpoints.filter(
-    (checkpoint) =>
-      checkpoint.coveredThroughMessageId !== undefined &&
-      !keptMessageIds.has(checkpoint.coveredThroughMessageId)
-  )
-}
-
 export interface ContextStatus {
   phase: ContextStatusPhase
-  windowIndex?: number
-}
-
-/** 发送给摘要模型的旧历史边界，避免把内部状态混入 AgentMessage。 */
-export interface ContextCompactionInput {
-  messages: readonly AgentMessage[]
-  previousNote?: string
-  force: boolean
+  trigger?: 'auto' | 'manual'
 }

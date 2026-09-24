@@ -14,7 +14,7 @@
 import type { AgentError } from '../agent/error'
 import type { ActiveRunEntry, AgentEvent, RunSnapshot } from '../agent/event'
 import type { AgentMessage, ContentPart } from '../agent/message'
-import type { ContextCheckpoint, ContextPreview, ContextWindowView } from '../agent/context-management'
+import type { ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
 import type { RunRequest, SessionMode } from '../agent/run-request'
@@ -71,6 +71,7 @@ import type { ConnectionProfile, ConnectionProfileInput, ConnectionStatus, Prepa
 import type { UpdateCheckResult, UpdateState } from '../domain/update'
 import type { ClientAuthState, ClientAuthUser, ClientUsageEntry } from '../domain/client-auth'
 import type { ReferralState } from '../domain/referral'
+import type { RechargeCheckoutResult, RechargeOptionsState, RechargeOrderState } from '../domain/recharge'
 import type { MigrationState } from '../domain/data-migration'
 import type { SyncConflict, SyncPreview, SyncSetupRequest, SyncStatus } from '../domain/config-sync'
 import type {
@@ -111,6 +112,7 @@ import type {
 import type { ImportableProviders } from '../domain/provider-import'
 import type {
   UsageActivityStats,
+  UsageAttemptRecord,
   UsageDailyBucket,
   UsageDimensionStat,
   UsageRequestLogsPage,
@@ -265,6 +267,14 @@ export interface IpcInvokeMap {
    * 三种空态的文案和用户下一步都不同，见 `shared/domain/referral.ts`。
    */
   'referral:get': { req: void; res: ReferralState }
+  /**
+   * 钱包充值（`/api/client/recharge/*`）。三条都**失败不抛**，原因分流见
+   * `shared/domain/recharge.ts`。`checkout` 成功时主进程已经把 Stripe 收银页交给系统
+   * 浏览器，渲染层只拿订单号去轮询 —— 收银地址不经过渲染层。
+   */
+  'recharge:getOptions': { req: void; res: RechargeOptionsState }
+  'recharge:checkout': { req: { amount: number }; res: RechargeCheckoutResult }
+  'recharge:getOrder': { req: { orderNo: string }; res: RechargeOrderState }
   'configSync:getStatus': { req: void; res: SyncStatus }
   /** 密码只用于本次创建/解锁 vault，不进入设置或事件广播。 */
   'configSync:setup': { req: SyncSetupRequest; res: SyncStatus }
@@ -398,6 +408,11 @@ export interface IpcInvokeMap {
    * 的是绝对路径,界面据此如实说明,而不是一律说「已复制相对路径」。
    */
   'workspace:copyPath': { req: { workspaceId: string; path: string; kind: WorkspacePathKind }; res: string }
+  /**
+   * 文件树右键「另存为…」。落点由主进程的 showSaveDialog 产出(同 `app:saveTextFile`),
+   * 渲染层只给工作区相对路径。`false` = 用户取消。
+   */
+  'workspace:saveFileAs': { req: { workspaceId: string; path: string }; res: boolean }
   'workspace:listRecovery': { req: { workspaceId: string }; res: WorkspaceRecoveryListing }
 
   // ── 改动审查(回复底部审查卡 / 右侧 changes tab / 撤销·恢复,schema 第 23 条)──
@@ -525,20 +540,16 @@ export interface IpcInvokeMap {
     req: { q: string; workspaceId?: string; limit: number }
     res: SearchHit[]
   }
-  'context:list': { req: { sessionId: string }; res: ContextCheckpoint[] }
-  'context:updateCheckpoint': {
-    req: { checkpointId: string; note: string; revision: number }
-    res: ContextCheckpoint
-  }
   /**
-   * 手动压缩上下文 —— 让模型总结一遍旧历史,落一个新检查点。
+   * 手动压缩上下文(/compact)—— 让模型总结边界之后的对话,提交一条压缩边界消息。
+   * `instructions` 是 `/compact <文字>` 里用户要求重点保留的内容。
    *
-   * ★ 只在会话**空闲**时可用:跑着的那个 run 已经把自己的投影冻在内存里,
-   * 此时落检查点不会影响它,却会让界面上的读数和模型实际看到的对不上。
+   * ★ 只在会话**空闲**时可用:跑着的那个 run 已经把自己的上下文冻在内存里,
+   * 此时插一条边界会和它随后提交的消息交错。
    */
   'context:compact': {
-    req: { sessionId: string }
-    res: { checkpoint: ContextCheckpoint; inputTokens: number }
+    req: { sessionId: string; instructions?: string }
+    res: { message: AgentMessage; inputTokens: number }
   }
   /**
    * 还没发过请求时的占用归因 —— 装配一次但**不发出去**。
@@ -554,18 +565,6 @@ export interface IpcInvokeMap {
   'context:preview': {
     req: ContextPreviewRequest
     res: ContextPreview | undefined
-  }
-  /**
-   * 「这条检查点之后,真正发给模型的是什么」—— 压缩分隔线里那个上下文检查器。
-   *
-   * ★ 只出**身份 + 估算 + 每条几行预览**,不搬消息体:一条 tool_result 可以有
-   * 64KB,整份投影过一次 IPC 是几十 MB 的结构化克隆,而完整内容用户本来就在
-   * 转录里看着。★ 它是按当前转录**重算**的,不是压缩当时那一份的录像 ——
-   * 对最新那条检查点二者逐字相同,更早的则是复原(界面上必须说清)。
-   */
-  'context:window': {
-    req: { sessionId: string; checkpointId: string }
-    res: ContextWindowView | undefined
   }
 
   // ── Agent ──
@@ -984,6 +983,8 @@ export interface IpcInvokeMap {
   // ── 使用统计 ──
   'usage:getSummary': { req: UsageWindow; res: UsageSummary }
   'usage:getRequestLogs': { req: UsageRequestLogsQuery; res: UsageRequestLogsPage }
+  /** 当前会话的逐次账目；不能用搜索日志代替，搜索不是 session_id 精确匹配。 */
+  'usage:getSessionAttempts': { req: { sessionId: string }; res: UsageAttemptRecord[] }
   'usage:getProviderStats': { req: UsageWindow; res: UsageDimensionStat[] }
   'usage:getModelStats': { req: UsageWindow; res: UsageDimensionStat[] }
   /**
@@ -1202,6 +1203,30 @@ export interface IpcEventMap {
   'theme:libraryChanged': { profiles: ThemeProfile[]; images: ImageTheme[] }
   'workspace:changed': { workspaces: Workspace[] }
   'skills:changed': void
+  /**
+   * 装一条 Skill 走到哪一步了。形状与 `plugins:installProgress` 严格一致 ——
+   * 两边的渲染层共用同一个 `installLabel` / `installRatio`,字段一分叉,
+   * 共用的那份就得改成两套。
+   *
+   * ★ 同样走全局广播:装 Skill 是全局副作用,B 窗口的市场页也该看到那颗
+   * 按钮在跑。代价一样 —— 渲染层基于 `key` 的渲染必须是纯查表。
+   */
+  'skills:installProgress': {
+    /** `market:<slug>` 或 `local:<路径>`,同插件那边的规矩 */
+    key: string
+    phase: 'preparing' | 'downloading' | 'installing' | 'done' | 'failed'
+    /** `downloading` 阶段的已收字节 */
+    received?: number
+    /** content-length 或版本表里的 fileSize;两个都没有 → 渲染层走 indeterminate */
+    total?: number
+    /**
+     * 只在 `failed` 上有值,而且是 **key 不是句子**。
+     *
+     * ★ 必须有:`emitToAll` 把事件推给所有窗口,但只有发起那个窗口能 catch 到
+     * invoke 的 rejection。没有它,其他窗口看到的是进度条凭空消失。
+     */
+    messageKey?: string
+  }
   /** 插件装/卸/启/禁/激活状态变了。渲染层收到后重新 `plugins:list` */
   'plugins:changed': void
   /**
@@ -1422,6 +1447,9 @@ export const INVOKE_CHANNELS = {
   'clientAuth:getUser': 1,
   'clientAuth:getUsage': 1,
   'referral:get': 1,
+  'recharge:getOptions': 1,
+  'recharge:checkout': 1,
+  'recharge:getOrder': 1,
   'configSync:getStatus': 1,
   'configSync:setup': 1,
   'configSync:getConflicts': 1,
@@ -1467,6 +1495,7 @@ export const INVOKE_CHANNELS = {
   'workspace:listOpenTargets': 1,
   'workspace:openWith': 1,
   'workspace:copyPath': 1,
+  'workspace:saveFileAs': 1,
   'workspace:listRecovery': 1,
   'review:getChangeSet': 1,
   'review:getFileDiff': 1,
@@ -1637,6 +1666,7 @@ export const INVOKE_CHANNELS = {
   'modelCatalog:remove': 1,
   'usage:getSummary': 1,
   'usage:getRequestLogs': 1,
+  'usage:getSessionAttempts': 1,
   'usage:getProviderStats': 1,
   'usage:getModelStats': 1,
   'usage:getDailySeries': 1,
@@ -1677,11 +1707,8 @@ export const INVOKE_CHANNELS = {
   , 'dataMigration:skip': 1
   , 'dataMigration:undoMerge': 1
   , 'dataMigration:openDataDirectory': 1
-  , 'context:list': 1
-  , 'context:updateCheckpoint': 1
   , 'context:compact': 1
   , 'context:preview': 1
-  , 'context:window': 1
   , 'scheduled:listTasks': 1
   , 'scheduled:getTask': 1
   , 'scheduled:create': 1
@@ -1721,6 +1748,7 @@ export const EVENT_CHANNELS = {
   'theme:libraryChanged': 1,
   'workspace:changed': 1,
   'skills:changed': 1,
+  'skills:installProgress': 1,
   'plugins:changed': 1,
   'plugins:installProgress': 1,
   'plugins:message': 1,

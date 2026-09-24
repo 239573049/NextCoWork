@@ -15,13 +15,14 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../../i18n'
-import { TaskChecklist, type TaskChecklistItem, type TaskChecklistExecution as Execution } from '../TaskChecklist'
+import { TASK_CHECKLIST_IDLE_MINIMIZE_MS, TaskChecklist, type TaskChecklistItem, type TaskChecklistExecution as Execution } from '../TaskChecklist'
 
 let teardown: (() => Promise<void>) | null = null
 
 afterEach(async () => {
   await teardown?.()
   teardown = null
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -33,6 +34,7 @@ async function mountChecklist(props: {
   todos: readonly TaskChecklistItem[]
   execution?: Execution
   defaultCollapsed?: boolean
+  minimizeWhenIdle?: boolean
 }): Promise<{ container: HTMLElement; show: (next: { todos: readonly TaskChecklistItem[]; execution?: Execution }) => Promise<void> }> {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   const container = document.createElement('div')
@@ -44,6 +46,7 @@ async function mountChecklist(props: {
       children: createElement(TaskChecklist, {
         todos: next.todos,
         ...(props.defaultCollapsed === undefined ? {} : { defaultCollapsed: props.defaultCollapsed }),
+        ...(props.minimizeWhenIdle === undefined ? {} : { minimizeWhenIdle: props.minimizeWhenIdle }),
         ...(next.execution === undefined ? {} : { execution: next.execution })
       })
     })))
@@ -201,5 +204,76 @@ describe('TaskChecklist · real task state', () => {
     expect(container.textContent).toContain('Task checklist · 1/3 completed')
     expect(container.querySelector('[data-task-status="in_progress"] .sr-only')?.textContent).toBe('Unfinished')
     expect(container.querySelector('[data-task-status="pending"] .sr-only')?.textContent).toBe('Waiting')
+  })
+})
+
+/*
+  收起后长时间无操作缩成小球(`useIdleMinimize.ts`)。计时器用假时钟推进,
+  React 的状态更新包在 act 里,否则断言读到的是缩之前的那一帧。
+*/
+describe('TaskChecklist · idle minimize', () => {
+  const ball = (container: HTMLElement): HTMLButtonElement | null =>
+    container.querySelector<HTMLButtonElement>('[data-testid="task-checklist-ball"]')
+  const idle = async (ms: number): Promise<void> => {
+    await act(async () => { vi.advanceTimersByTime(ms) })
+  }
+
+  it('shrinks to a ball after sitting collapsed and untouched, and a click expands the list with focus on the toggle', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
+
+    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS - 1)
+    expect(ball(container)).toBeNull()
+    await idle(1)
+    expect(ball(container)).not.toBeNull()
+    expect(container.querySelector('[aria-controls]')).toBeNull()
+    // 缩起来只改怎么画:进度数仍在球上,标签给出完整报数
+    expect(ball(container)?.getAttribute('aria-label')).toBe('Show task checklist (1/3 completed)')
+
+    await act(async () => ball(container)?.click())
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
+    expect(ball(container)).toBeNull()
+    // 点球 = 「我现在要看这份清单」,所以一次点击就到完全展开,不用再点一次标题行
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement).toBe(toggle)
+  })
+
+  it('never shrinks while the list is expanded or the pointer rests on the card', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
+
+    await act(async () => toggle?.click())
+    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS * 2)
+    expect(ball(container)).toBeNull()
+
+    // 收回去之后,只要鼠标还停在卡片上就照样不缩;移开后才从头计时
+    await act(async () => toggle?.click())
+    const card = toggle?.parentElement
+    await act(async () => { card?.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })) })
+    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS * 2)
+    expect(ball(container)).toBeNull()
+
+    await act(async () => { card?.dispatchEvent(new MouseEvent('pointerout', { bubbles: true })) })
+    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS)
+    expect(ball(container)).not.toBeNull()
+  })
+
+  it('keeps the unfinished-after-stop warning on the ball instead of dropping it', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'stopped' })
+
+    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS)
+    expect(ball(container)?.getAttribute('aria-label'))
+      .toBe('Show task checklist (1/3 completed) · Run ended with 2 unfinished task(s)')
+  })
+
+  it('stays a full row when the caller opts out', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, minimizeWhenIdle: false })
+
+    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS * 2)
+    expect(ball(container)).toBeNull()
+    expect(container.querySelector('[aria-controls]')).not.toBeNull()
   })
 })

@@ -439,7 +439,8 @@ export class PluginManager {
       modes: manifest.contributes.modes.length,
       themes: manifest.contributes.themes.length,
       slashCommands: manifest.contributes.slashCommands.length,
-      'views.location': manifest.contributes.views.filter((v) => (v.location ?? 'editor') !== 'editor').length
+      'views.location': manifest.contributes.views.filter((v) => (v.location ?? 'editor') !== 'editor').length,
+      documentEngines: manifest.contributes.documentEngines?.length ?? 0
     })) {
       diagnostics.push({ ...inactive, level: 'info' })
     }
@@ -1706,6 +1707,20 @@ export class PluginManager {
       }
     }
     return out
+  }
+
+  /**
+   * 需求：模型装配工具表之前激活已启用的工具插件；声明 onTool 的插件
+   * 还没有运行期注册表项，若等到工具调用时才唤醒，它永远不会进模型工具清单。
+   * 每轮只唤醒声明了 onTool 的插件，休眠后下一轮能重新注册。
+   */
+  async prepareContributedTools(): Promise<void> {
+    for (const [id, record] of this.records) {
+      if (!record.enabled || record.status === 'error' || record.status === 'pending-approval') continue
+      const tool = record.manifest.contributes.tools.find((item) =>
+        record.manifest.activationEvents.includes(`onTool:${item.name}`))
+      if (tool !== undefined) await this.wake(id)
+    }
   }
 
   contributedTools(): ToolRegistration[] {

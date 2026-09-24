@@ -22,6 +22,7 @@
 import { Search, X } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Bootstrap } from '../../../shared/domain/bootstrap'
+import type { ClientAuthState } from '../../../shared/domain/client-auth'
 import type { AppSettings, AppSettingsPatch } from '../../../shared/domain/settings'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
@@ -36,7 +37,9 @@ import { SETTINGS_ICON } from './icons'
 import {
   matchPages,
   matchRows,
+  resolveSettingsPage,
   SETTINGS_PAGES,
+  visibleSettingsPages,
   type SettingsPageId,
   type SettingsRow
 } from './nav'
@@ -51,6 +54,7 @@ import { UsagePage } from './pages/usage/UsagePage'
 import { StubPage } from './pages/StubPage'
 import { useI18n, type Translate } from '../i18n'
 import { AccountPage } from './pages/AccountPage'
+import { WalletPage } from './pages/wallet/WalletPage'
 import { Dialog } from '../components/ui/Dialog'
 import { themeDraftDirty, useThemeProfiles } from '../stores/themeProfiles'
 
@@ -60,6 +64,7 @@ export function SettingsOverlay({
   page,
   settings,
   versions,
+  auth,
   onNavigate,
   onClose
 }: {
@@ -67,18 +72,22 @@ export function SettingsOverlay({
   page: SettingsPageId
   settings: AppSettings
   versions: Bootstrap['versions']
+  /** App 级登录态：决定钱包页是否出现（`requiresSignIn`），也是钱包页余额的唯一真源 */
+  auth: ClientAuthState
   onNavigate: (p: SettingsPageId) => void
   onClose: () => void
 }): ReactNode {
   const presence = usePresence(open, 280)
   const panelRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const signedIn = auth.mode === 'authenticated'
   const lastOpenPage = useRef<SettingsPageId>(page)
   if (open) lastOpenPage.current = page
   // AppShell keeps this component mounted so the close transition can finish.
   // Keep the last real page visible while the parent store is switching back to
   // its default value after close, avoiding a one-frame flash of General.
-  const visiblePage = open ? page : lastOpenPage.current
+  // 需求：未登录时请求到的钱包页改落账户页（见 nav.ts 的 `resolveSettingsPage`）。
+  const visiblePage = resolveSettingsPage(open ? page : lastOpenPage.current, signedIn)
   const [query, setQuery] = useState('')
   const [sub, setSub] = useState<string>('')
   const [seenPage, setSeenPage] = useState(page)
@@ -126,7 +135,7 @@ export function SettingsOverlay({
   }
 
   const rows = matchRows(query)
-  const pages = matchPages(query)
+  const pages = matchPages(query, signedIn)
   const searching = query.trim() !== ''
 
   const goto = (target: SettingsPageId, targetSub?: string): void => {
@@ -187,7 +196,7 @@ export function SettingsOverlay({
           </div>
 
           <ul className="scroll-thin flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-2 pb-2">
-            {SETTINGS_PAGES.map((p) => {
+            {visibleSettingsPages(signedIn).map((p) => {
               const Icon = SETTINGS_ICON[p.id]
               const on = p.id === visiblePage && !searching
               return (
@@ -247,6 +256,7 @@ export function SettingsOverlay({
                 sub={activeSub}
                 settings={settings}
                 versions={versions}
+                auth={auth}
                 patch={patch}
               />
             )}
@@ -271,12 +281,14 @@ function PageBody({
   sub,
   settings,
   versions,
+  auth,
   patch
 }: {
   page: SettingsPageId
   sub: string
   settings: AppSettings
   versions: Bootstrap['versions']
+  auth: ClientAuthState
   patch: (p: AppSettingsPatch) => void
 }): ReactNode {
   const props = { settings, sub, patch }
@@ -309,8 +321,12 @@ function PageBody({
     case 'about':
       return <AboutPage versions={versions} />
     default:
-      if (page === 'account') return <AccountPage settings={settings} sub={sub} patch={patch} walletOnly={false} />
-      if (page === 'wallet') return <AccountPage settings={settings} sub={sub} patch={patch} walletOnly />
+      if (page === 'account') return <AccountPage settings={settings} sub={sub} patch={patch} />
+      /*
+        ★ 不吃 `SettingsPageProps` —— 钱包一个 `AppSettings` 字段都不读，它读的是登录态。
+        以前这里是 `AccountPage` 的 `walletOnly` 分支；钱包重写成独立页之后那个分支已删除。
+      */
+      if (page === 'wallet') return <WalletPage auth={auth} />
       return <StubPage page={page} />
   }
 }

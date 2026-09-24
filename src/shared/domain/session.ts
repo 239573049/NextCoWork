@@ -3,7 +3,6 @@
  */
 import type { AgentMessage } from '../agent/message'
 import type { SessionMode, ThinkingLevel } from '../agent/run-request'
-import type { ContextCheckpoint } from '../agent/context-management'
 import type { RunUsage } from '../agent/transcript'
 
 export type SessionChange = {
@@ -88,7 +87,6 @@ export interface SessionListItem {
 export interface SessionDetail {
   session: Session
   messages: AgentMessage[]
-  contextCheckpoints?: ContextCheckpoint[]
   /**
    * 消息 → 产出它的 run。只有第 12 条迁移之后落盘的消息有归属,老对话这张表是空的。
    */

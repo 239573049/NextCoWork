@@ -148,6 +148,37 @@
   --color-warning: #e0a33a;
 
   /*
+    ── 图表分类色(使用统计页:按模型着色)──
+
+    需求:用量页要能一眼分出「哪一块是哪个模型」,并且**同一个模型在环形图、
+    趋势堆叠图、费用条里是同一个颜色**。早先的做法是 accent 往 tint 里掺出一条
+    单色相梯度(见 `settings/pages/usage/charts/colors.ts` 的历史注释),8 个以上
+    模型时相邻两片只差十来个百分点,肉眼分不开 —— 图例上八个点全是同一个色。
+
+    **这组值是推的,不是量的**:参考实现里没有分类色。取法是 8 个色相按
+    「相邻两项色相差尽量大」排序(蓝 → 琥珀 → 紫 → 青绿 → 珊瑚 → 青 → 粉 → 橄榄),
+    深色下统一抬到中高明度:8 色在 surface #232726 上对比度 5.4–8.1:1(算的,
+    WCAG 相对亮度公式),other 为 3.0:1。
+
+    ★ 它们**不进 `THEME_TOKENS`**,和 warning 同理:这是数据编码,不是品牌色 ——
+    跟着换色器走的话,换一次 accent 可能把第 3 类和第 5 类换成同一个色,
+    而图表不会报错,只会「看不出区别」。换色器照旧只影响 accent 及其派生
+    (热力图、总量折线仍然是 accent)。
+
+    `chart-other` 是「其他(合并的尾部)」专用的中性灰 —— 它不是一个模型,
+    不该抢一个分类色。
+  */
+  --color-chart-1: #5b9cf5;
+  --color-chart-2: #f2b14c;
+  --color-chart-3: #a98bfa;
+  --color-chart-4: #2fc4a4;
+  --color-chart-5: #f07a6a;
+  --color-chart-6: #4cc3e0;
+  --color-chart-7: #ec78b4;
+  --color-chart-8: #a9c95a;
+  --color-chart-other: #6b706e;
+
+  /*
     ★ **遮罩是纯黑 + 透明度,不是一个实色。** 反解 v1.1.15 的设置浮层截图:
     同一张图里侧边栏 #3d4041 → #27292a、画布 #333636 → #232426,**两处压出来的
     结果不一样**,说明遮罩是半透明的。设遮罩为纯黑、不透明度 a,则 c×(1−a) = 结果:
@@ -228,6 +259,19 @@
   --color-danger: #c4412c;
   /* 浅色下压暗一档:#e0a33a 在近白底上只有 2.1:1,读不出来 */
   --color-warning: #9a6b12;
+
+  /* 图表分类色:色相顺序同深色,明度压到中低档 —— 深色那套在近白底上
+     琥珀 / 橄榄远低于 3:1,色块边界会糊。这套在 surface #f6f4ef 上 3.3–4.9:1,
+     过非文本 3:1 线(推的 + 算的,理由见 @theme 里那段) */
+  --color-chart-1: #2f6bd0;
+  --color-chart-2: #b87a10;
+  --color-chart-3: #7353cf;
+  --color-chart-4: #13866f;
+  --color-chart-5: #c94c3a;
+  --color-chart-6: #16859c;
+  --color-chart-7: #bd4486;
+  --color-chart-8: #6c8a1c;
+  --color-chart-other: #b3b1aa;
 
   --color-scrim: #2b2a27; /* 暖近黑 —— 浅色下压暗要压暖,压蓝会发灰(无参考,按规律推) */
 }
@@ -644,6 +688,33 @@ body {
 }
 
 /*
+  文件树展开目录时,新露出来的子项从上方 6px 处淡入落下,逐行错开(错开量在
+  `views/files/tree-rows.ts` 的 `enterDelays`)。
+  ★ 数值不是量出来的:照搬 beUI File Tree 的 `ROW_ENTER`
+  (`{ opacity: 0, y: -6 }`,0.22s,EASE_OUT = cubic-bezier(0.16, 1, 0.3, 1))。
+  ★ 用 CSS 而不是 Motion:一次展开可能摊出上千行,每行一个 motion 组件太重;
+  `both` 让错开等待期间停在 opacity 0,而不是先闪一帧再淡入。
+  ★ reduced/off 显式 animation:none,写法同上面的 .skills-view-enter。
+*/
+@keyframes file-tree-row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.file-tree-row-enter {
+  animation: file-tree-row-enter 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+:root[data-theme-motion='reduced'] .file-tree-row-enter,
+:root[data-theme-motion='off'] .file-tree-row-enter {
+  animation: none;
+}
+
+/*
   进度条在「不知道还要多久」时的斜纹。装插件的授权、解压两段没有百分比可报,
   而一条一动不动的空槽和一条卡死的进度条在界面上是一模一样的。
 
@@ -750,8 +821,5 @@ body {
     200  自绘的三颗窗口按钮(shell/WindowControls.tsx,仅 Windows/Linux)。
          **只有它可以压住模态**,而且必须压住:macOS 的红绿灯是原生层、模态开着
          照样能点,这一档就是为了让另外两个平台不比它差 —— 否则设置面板一开
-         就没法最小化/关窗。别往这一档里放第二样东西。
-*/
-��开
          就没法最小化/关窗。别往这一档里放第二样东西。
 */

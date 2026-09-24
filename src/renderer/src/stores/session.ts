@@ -28,7 +28,6 @@ import {
   type SubagentState,
   type TranscriptState
 } from '../../../shared/agent/transcript'
-import { orphanedCheckpoints, type ContextCheckpoint } from '../../../shared/agent/context-management'
 import type { QueuedInput } from '../../../shared/domain/queued-input'
 import {
   QUEUE_MAX_ITEMS,
@@ -257,14 +256,20 @@ function createSessionStore(sessionId: string): SessionStore {
       if (s.activeRunId !== null || s.compacting) return
       set({ compacting: true, compactError: null })
       try {
-        const { checkpoint, inputTokens } = await compactSessionContext(s.sessionId)
+        const { message, inputTokens } = await compactSessionContext(s.sessionId)
         set((st) => ({
           transcript: {
             ...st.transcript,
-            contextCheckpoints: [
-              ...st.transcript.contextCheckpoints.filter((c) => c.id !== checkpoint.id),
-              checkpoint
-            ],
+            /*
+              ★ 本地先把边界消息接上,不等 hydrate。
+              手动压缩走的是一条**没有 run** 的 IPC,不会有 `message_commit` 事件推回来;
+              只依赖下一次全量回填的话,症状是点完 /compact 界面上什么都没变,
+              用户会以为没生效并再点一次 —— 而每一次都是一次真实的摘要请求。
+              按 id 去重是为了和随后的 hydrate 对上,不至于出现两条同样的分隔线。
+            */
+            messages: st.transcript.messages.some((m) => m.id === message.id)
+              ? st.transcript.messages
+              : [...st.transcript.messages, message],
             /*
               ★ 换成**估算值**,而不是等下一轮真实 usage 回来。
               等的话,用户压完看到读数纹丝不动,只会再点两次 ——
@@ -388,9 +393,6 @@ function createSessionStore(sessionId: string): SessionStore {
           // 则等到下一次发送 —— 两种情况显示 `–` 都比显示一个对不上的数诚实。
           lastInputTokens: undefined,
           contextUsage: undefined,
-          ...(continueRun
-            ? { contextCheckpoints: pruneCheckpoints(messages, state.transcript.contextCheckpoints) }
-            : {}),
           live: continueRun ? [] : state.transcript.live,
           tools: continueRun ? {} : state.transcript.tools,
           subagents: continueRun ? {} : state.transcript.subagents,
@@ -441,7 +443,6 @@ function createSessionStore(sessionId: string): SessionStore {
         transcript: {
           ...state.transcript,
           messages: next,
-          contextCheckpoints: pruneCheckpoints(next, state.transcript.contextCheckpoints),
           /*
             ★ 这两个读数量的是「**这段历史**有多大」,不是某一轮的账 —— 删掉任意一轮
             之后它们描述的那段历史就不存在了,而圆环和压力条会原样继续显示那个旧数
@@ -952,26 +953,6 @@ async function hydrateInput(sessionId: string): Promise<void> {
 }
 
 /**
- * 改写历史之后,本地同步剪掉锚不回去的检查点。
- *
- * 库里那几条主进程已经在同一次 `replaceHistory` 的事务里删掉了(判据见
- * `orphanedCheckpoints`),这里只是让界面**当帧**对上 —— 否则那条孤儿会一直
- * 挂在顶部的「上下文检查点」面板上,直到下一次全量回填才消失,而删完消息
- * 恰恰是用户盯着看的那一刻。
- *
- * 没有孤儿时原样返回同一个数组:zustand 靠引用比较,换新数组就是白重渲染一遍。
- */
-function pruneCheckpoints(
-  messages: readonly AgentMessage[],
-  checkpoints: ContextCheckpoint[]
-): ContextCheckpoint[] {
-  const orphans = orphanedCheckpoints(new Set(messages.map((m) => m.id)), checkpoints)
-  if (orphans.length === 0) return checkpoints
-  const ids = new Set(orphans.map((c) => c.id))
-  return checkpoints.filter((c) => !ids.has(c.id))
-}
-
-/**
  * 会话级(而非 run 级)的转录状态。
  *
  * ★ 每一处 `...emptyTranscript()` 都是在「只清本轮」,而这两张表和 `messages`
@@ -981,22 +962,22 @@ function pruneCheckpoints(
  */
 function conversationScoped(
   t: TranscriptState
-): Pick<TranscriptState, 'runUsage' | 'runModel' | 'messageRuns' | 'lastInputTokens' | 'contextCheckpoints'> {
+): Pick<TranscriptState, 'runUsage' | 'runModel' | 'messageRuns' | 'lastInputTokens'> {
   return {
     ...(t.runUsage === undefined ? {} : { runUsage: t.runUsage }),
     ...(t.runModel === undefined ? {} : { runModel: t.runModel }),
     ...(t.messageRuns === undefined ? {} : { messageRuns: t.messageRuns }),
     // 上下文占用是**整段对话**的属性:新一轮还没发出请求之前,
     // 圆环该继续显示上一轮结束时的读数,而不是空着。
-    ...(t.lastInputTokens === undefined ? {} : { lastInputTokens: t.lastInputTokens }),
+    ...(t.lastInputTokens === undefined ? {} : { lastInputTokens: t.lastInputTokens })
     /*
-      ★ 检查点标的是**消息流里的位置**,它比任何一轮都活得久 ——
-      漏带这一处,用户一发下条消息,消息流里所有压缩分隔线就一起消失,
-      要等下一次 authoritative hydrate 才回来。
+      ★ 压缩边界不在这张表里 —— 它现在**就是 `messages` 里的一条消息**(见
+      `shared/agent/compaction.ts`),跟着消息走,天然活得比任何一轮久。
+      原先这里带着 `contextCheckpoints`,是因为检查点住在另一张表上,漏带就会让
+      所有压缩分隔线在发下条消息时一起消失;换成转录内边界之后这条约束自动成立。
       ★ `contextStatus` 是**本轮**的瞬时相位,故意不带:上一轮的「正在压缩…」
       跟到新一轮就是一句谎话。
     */
-    contextCheckpoints: t.contextCheckpoints
   }
 }
 
@@ -1059,7 +1040,6 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
           live: [],
           tools: toolsFromMessages(messages, s.transcript.tools),
           subagents: subagentsFromMessages(messages, s.transcript.subagents),
-          contextCheckpoints: detail.contextCheckpoints ?? s.transcript.contextCheckpoints,
           // 重启之后逐轮用量的唯一来源。内存里那份 `usage` 只说得清当前 run,
           // 这两张表说的是整段对话的账,来自 SQLite。
           runUsage: detail.runUsage ?? s.transcript.runUsage,

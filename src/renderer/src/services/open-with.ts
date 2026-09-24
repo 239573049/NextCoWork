@@ -30,3 +30,11 @@ export function openWithTarget(workspaceId: string, path: string, targetId: stri
 export function copyWorkspacePath(workspaceId: string, path: string, kind: WorkspacePathKind): Promise<string> {
   return invoke('workspace:copyPath', { workspaceId, path, kind })
 }
+
+/**
+ * 「另存为…」:主进程弹系统保存框,再把这个工作区文件复制过去。
+ * 返回 false = 用户取消(不是失败,调用方不该报错)。只对本机工作区有意义。
+ */
+export function saveWorkspaceFileAs(workspaceId: string, path: string): Promise<boolean> {
+  return invoke('workspace:saveFileAs', { workspaceId, path })
+}

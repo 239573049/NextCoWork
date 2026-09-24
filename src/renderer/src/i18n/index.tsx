@@ -24,7 +24,6 @@ import { providerAccountsZh, providerAccountsEn } from './provider-accounts';
 import { searchZh, searchEn } from './search';
 import { builtinSearchZh, builtinSearchEn } from './builtin-search';
 import { goalZh, goalEn } from './goal';
-import { contextPanelZh, contextPanelEn } from './context-panel';
 import { openWithZh, openWithEn } from './open-with';
 import { pluginSkillsZh, pluginSkillsEn } from './plugin-skills';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
@@ -32,6 +31,7 @@ import { widgetZh, widgetEn } from './widget';
 import { migrationZh, migrationEn } from './migration';
 import { accountMenuZh, accountMenuEn } from './account-menu';
 import { rewardsZh, rewardsEn } from './rewards';
+import { walletZh, walletEn } from './wallet';
 import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import {
   pluginMessages,
@@ -57,7 +57,6 @@ const ZH: Messages = {
   ...sshZh,
   ...workspaceZh,
   ...goalZh,
-  ...contextPanelZh,
   ...openWithZh,
   ...pluginSkillsZh,
   ...extensionsZh,
@@ -79,6 +78,7 @@ const ZH: Messages = {
   ...markdownZh,
   ...accountMenuZh,
   ...rewardsZh,
+  ...walletZh,
   "app.handshakeFailed": "首屏握手失败：{error}",
   "auth.tagline": "把重复的交给它，时间留给你",
   "auth.login": "登录",
@@ -270,6 +270,10 @@ const ZH: Messages = {
   "skills.inactive": "工作区未启用",
   "skills.installed": "已安装",
   "skills.install": "安装 Skill",
+  "skills.preparing": "正在准备…",
+  "skills.downloading": "正在下载…",
+  "skills.downloadingPercent": ({ percent }) => `下载 ${percent}%`,
+  "skills.installing": "正在安装…",
   "skills.globalToggle": "全局启用 Skill",
   "skills.workspaceToggle": "在工作区启用 Skill",
   "skills.empty": "暂无匹配的 Skill",
@@ -589,8 +593,6 @@ const ZH: Messages = {
   "general.permissionReviewerModel": "AI 审核模型",
   "general.permissionReviewerModelHint": "“为我批准”会先让这个模型评估高风险操作；未配置或无法判断时改为询问你。",
   "general.permissionReviewerModelEmpty": "未配置（回退人工审批）",
-  "general.contextManagement": "智能上下文管理",
-  "general.contextManagementHint": "维护任务笔记、检索当前会话历史，并在接近上限时切换上下文窗口。",
   "general.autoCompact": "自动上下文压缩",
   "general.autoCompactHint": "达到上下文阈值时自动整理；关闭后可使用 /compact 手动整理。",
   "general.maxOutputTokens": "最大输出 Token",
@@ -599,31 +601,28 @@ const ZH: Messages = {
   "general.shell": "执行 Shell",
   "general.shellSystem": "跟随系统（自动选择）",
   "general.shellHint": "默认跟随系统 Shell；手动选项需已安装并可通过 PATH 启动。仅作用于本机后续任务、命令钩子和新建终端，不影响正在执行的任务或 SSH。",
-  "chat.contextCheckpoint": ({ window }) => `上下文检查点 · 窗口 ${window}`,
-  "chat.contextCheckpointHint": "检查点只影响后续请求，完整对话历史仍会保留。",
-  "chat.contextNote": "上下文笔记",
-  "chat.contextEdit": "编辑",
-  "chat.contextSave": "保存",
-  "chat.contextRebuild": "重建",
-  "chat.contextSource.model": "模型生成",
-  "chat.contextSource.mechanical": "自动压缩",
-  "chat.contextSource.manual": "手动生成",
-  // 压缩的瞬时相位(状态行)。`fallback` 是**默认路径的正常结果**,不是故障,
-  // 所以它和 `error` 分开两句 —— 合成一句的话用户会把每一次正常压缩都当成出错。
-  "chat.contextStatus.preparing": "正在压缩上下文…",
-  "chat.contextStatus.ready": "上下文已压缩",
-  "chat.contextStatus.readySaved": ({ saved }) => `上下文已压缩 · 省下 ${saved}`,
-  "chat.contextStatus.fallback": "已折叠较早的历史",
-  // ★ 和上一句分开:折叠已经削不动了,占用只会继续涨。这一句要让人**去做一件事**,
-  // 所以写「可以怎么办」而不是「发生了什么」。
-  "chat.contextStatus.exhausted": "已无可折叠的历史，请开启摘要压缩或另起会话",
-  "chat.contextStatus.error": "上下文压缩失败，本轮按原历史发送",
+  // 压缩的瞬时相位(状态行)。★ `failed` 与 `disabled` 分开两句:前者是事后播报
+  // (这一轮按原历史发出去了,下一轮还会再试),后者是熔断 —— 自动压缩**不会再试**,
+  // 所以它要让人去做一件事,而不是描述发生了什么。
+  "chat.contextStatus.compacting": "正在压缩上下文…",
+  "chat.contextStatus.compacted": "上下文已压缩",
+  "chat.contextStatus.compactedSaved": ({ saved }) => `上下文已压缩 · 省下 ${saved}`,
+  "chat.contextStatus.failed": "上下文压缩失败，本轮按原历史发送",
+  "chat.contextStatus.disabled": "压缩连续失败，已暂停自动压缩 —— 请手动 /compact 或另起会话",
   // 消息流里那条线
   "chat.compaction.label": "上下文在此压缩",
+  "chat.compaction.auto": "自动",
+  "chat.compaction.manual": "手动",
   "chat.compaction.folded": ({ count }) => `折叠 ${count} 条`,
   "chat.compaction.toggle": "展开压缩详情",
-  "chat.compaction.readOnly": "自动压缩按固定规则重算，改了也会被下一次压缩覆盖。",
+  // ★ 这一句守的是「聊天记录没少」:用户会把那条线读成「上面的对话被删了」。
+  "chat.compaction.hint": "这条线之前的对话不再发给模型，只留下面这份摘要。聊天记录仍然完整。",
+  "chat.compaction.restored": ({ count }) => `压缩后重新附上 ${count} 个文件`,
+  "chat.compaction.instructions": "补充要求",
   "chat.compaction.tokens": ({ before, after }) => `${before} → ${after}`,
+  // 压缩失败时从主进程带上来的 messageKey(见 kernel/compaction/compact.ts)
+  "chat.compaction.nothingToCompact": "这段对话还没有可压缩的内容",
+  "chat.compaction.emptySummary": "模型没有写出摘要，这次压缩已取消",
   "general.perSessionSubagentsHint":
     "一段对话里最多同时运行几个子代理（方案 §4.9）。超出的排队等空位，不会失败。",
   "general.globalSubagentsHint":
@@ -2036,7 +2035,6 @@ const EN: Messages = {
   ...sshEn,
   ...workspaceEn,
   ...goalEn,
-  ...contextPanelEn,
   ...openWithEn,
   ...pluginSkillsEn,
   ...extensionsEn,
@@ -2058,6 +2056,7 @@ const EN: Messages = {
   ...migrationEn,
   ...accountMenuEn,
   ...rewardsEn,
+  ...walletEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",
@@ -2247,6 +2246,10 @@ const EN: Messages = {
   "skills.inactive": "Inactive in workspace",
   "skills.installed": "Installed",
   "skills.install": "Install Skill",
+  "skills.preparing": "Preparing…",
+  "skills.downloading": "Downloading…",
+  "skills.downloadingPercent": ({ percent }) => `Downloading ${percent}%`,
+  "skills.installing": "Installing…",
   "skills.globalToggle": "Enable Skill globally",
   "skills.workspaceToggle": "Enable Skill in workspace",
   "skills.empty": "No matching Skills",
@@ -2566,8 +2569,6 @@ const EN: Messages = {
   "general.permissionReviewerModel": "AI review model",
   "general.permissionReviewerModelHint": "Approve for me asks this model to assess high-risk actions first; missing or uncertain results fall back to asking you.",
   "general.permissionReviewerModelEmpty": "Not configured (manual approval)",
-  "general.contextManagement": "Smart context management",
-  "general.contextManagementHint": "Keeps task notes, searches this conversation, and switches context windows near the limit.",
   "general.autoCompact": "Automatic context compaction",
   "general.autoCompactHint": "Organize context at the threshold automatically; turn this off to use /compact manually.",
   "general.maxOutputTokens": "Max output tokens",
@@ -2576,26 +2577,22 @@ const EN: Messages = {
   "general.shell": "Command shell",
   "general.shellSystem": "Follow system (automatic)",
   "general.shellHint": "Uses the system shell by default. Manual choices must be installed and available on PATH. Applies only to subsequent local tasks, command hooks, and new terminals; running tasks and SSH are unchanged.",
-  "chat.contextCheckpoint": ({ window }) => `Context checkpoint · window ${window}`,
-  "chat.contextCheckpointHint": "Checkpoints affect future requests; the full conversation history is preserved.",
-  "chat.contextNote": "Context note",
-  "chat.contextEdit": "Edit",
-  "chat.contextSave": "Save",
-  "chat.contextRebuild": "Rebuild",
-  "chat.contextSource.model": "Model generated",
-  "chat.contextSource.mechanical": "Automatic compaction",
-  "chat.contextSource.manual": "Manual",
-  "chat.contextStatus.preparing": "Compacting context…",
-  "chat.contextStatus.ready": "Context compacted",
-  "chat.contextStatus.readySaved": ({ saved }) => `Context compacted · saved ${saved}`,
-  "chat.contextStatus.fallback": "Older history folded",
-  "chat.contextStatus.exhausted": "Nothing left to fold — enable summary compaction or start a new session",
-  "chat.contextStatus.error": "Context compaction failed; sending the full history",
+  "chat.contextStatus.compacting": "Compacting context…",
+  "chat.contextStatus.compacted": "Context compacted",
+  "chat.contextStatus.compactedSaved": ({ saved }) => `Context compacted · saved ${saved}`,
+  "chat.contextStatus.failed": "Context compaction failed; sending the full history",
+  "chat.contextStatus.disabled": "Compaction failed repeatedly — automatic compaction is paused. Run /compact or start a new session.",
   "chat.compaction.label": "Context compacted here",
+  "chat.compaction.auto": "Automatic",
+  "chat.compaction.manual": "Manual",
   "chat.compaction.folded": ({ count }) => `${count} folded`,
   "chat.compaction.toggle": "Show compaction details",
-  "chat.compaction.readOnly": "Automatic compaction is recomputed by rule; edits are overwritten next time.",
+  "chat.compaction.hint": "Messages above this line are no longer sent to the model — only the summary below is. The transcript itself is unchanged.",
+  "chat.compaction.restored": ({ count }) => `${count} file(s) re-attached after compaction`,
+  "chat.compaction.instructions": "Extra instructions",
   "chat.compaction.tokens": ({ before, after }) => `${before} → ${after}`,
+  "chat.compaction.nothingToCompact": "There is nothing to compact yet",
+  "chat.compaction.emptySummary": "The model returned no summary; this compaction was cancelled",
   "general.perSessionSubagentsHint":
     "How many subagents one conversation may have running at the same time (plan §4.9). Dispatches beyond that wait in a queue instead of failing.",
   "general.globalSubagentsHint":
