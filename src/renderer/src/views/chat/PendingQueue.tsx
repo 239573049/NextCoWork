@@ -31,7 +31,8 @@ export function PendingQueue({
   onEdit,
   onDrop,
   onMoveToDraft,
-  onResume
+  onResume,
+  className
 }: {
   items: QueuedInput[]
   /** 生成中 vs 已停下。决定折叠头的文案与是否给「继续执行」 */
@@ -41,6 +42,13 @@ export function PendingQueue({
   onDrop: (id: string) => void
   onMoveToDraft: (id: string) => void
   onResume: () => void
+  /**
+   * 外层定位的覆盖位。默认那套(居中、760 上限、左右留白)是**它自己占一行**时的需求;
+   * 与输入框上方那条清单缩成的小球共用一行时(见 ChatView 的 `composer-notices`),
+   * 调用方传 `max-w-none px-0 pb-0` 抹掉 —— 同一份版式只由那一层决定,
+   * 卡片本体不为「在行里」再分叉一套(与 `TaskChecklist.className` 同一个理由)。
+   */
+  className?: string
 }): ReactNode {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
@@ -57,7 +65,7 @@ export function PendingQueue({
 
   return (
     <div
-      className="mx-auto w-full max-w-[760px] px-6 pb-2"
+      className={cn('mx-auto w-full max-w-[760px] px-6 pb-2', className)}
       data-testid="pending-queue"
       data-count={items.length}
       data-promoted={promotedCount}

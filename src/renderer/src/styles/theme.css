@@ -715,6 +715,77 @@ body {
 }
 
 /*
+  输入框上方那条任务清单的收 / 展。两个方向都是**换一棵子树**(收起是小球、展开是整张
+  卡片,见 `views/chat/TaskChecklist.tsx` 的 `TaskChecklistShell`),换装本身是瞬时的 ——
+  没有这一段,观感是卡片被凭空抽走 / 凭空砸下来,而它旁边那颗球就是刚刚那张卡片的化身。
+
+  ★ 四段分工:
+    - 收起:卡片留在原地淡出(`-card-exit`)+ 小球 pop 入场(`-ball-enter`),
+      交叉的那 150ms 就是「过渡」本身。摘掉卡片的那一帧由 Shell 的 timeout 交回,
+      时长与这里的 150ms 是一对(见 `TaskChecklist.CARD_LEAVE_MS`)。
+    - 展开:卡片淡入并轻微放大(`-card-enter`),列表**随后**铺开(`-list-enter` 延迟
+      75ms),两拍读起来像「卡片先落位、内容再展开」。
+  ★ 四段都挂 `both`:入场那几段的首帧必须是起点,否则会先闪一帧终态;
+    `-card-exit` 还靠它停在 opacity 0,直到 Shell 把它从 DOM 里摘掉。
+  ★ reduced/off 显式 animation:none,写法同上面的 .skills-view-enter —— 这两档下
+    Shell 也不进「离开态」,卡片当场卸载,不会留一段静止的残影。
+*/
+@keyframes checklist-card-enter {
+  from {
+    opacity: 0;
+    scale: 0.98;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+@keyframes checklist-card-exit {
+  from {
+    opacity: 1;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+@keyframes checklist-ball-enter {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+@keyframes checklist-list-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.checklist-card-enter {
+  animation: checklist-card-enter 150ms ease-out both;
+}
+.checklist-card-exit {
+  animation: checklist-card-exit 150ms ease-out both;
+}
+.checklist-ball-enter {
+  animation: checklist-ball-enter 150ms ease-out both;
+}
+.checklist-list-enter {
+  animation: checklist-list-enter 200ms ease-out 75ms both;
+}
+:root[data-theme-motion='reduced'] :is(.checklist-card-enter, .checklist-card-exit, .checklist-ball-enter, .checklist-list-enter),
+:root[data-theme-motion='off'] :is(.checklist-card-enter, .checklist-card-exit, .checklist-ball-enter, .checklist-list-enter) {
+  animation: none;
+}
+
+/*
   进度条在「不知道还要多久」时的斜纹。装插件的授权、解压两段没有百分比可报,
   而一条一动不动的空槽和一条卡死的进度条在界面上是一模一样的。
 

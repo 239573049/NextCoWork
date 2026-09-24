@@ -851,18 +851,44 @@ export function ChatView({
   )
 
   /*
-    ★ **队列区跟着输入框走,不跟着转录走。** 它属于「还没发出去的东西」那一侧,
-    所以空态和常驻态两棵子树都要有它 —— 用户在空会话里连发两条同样会排队。
+    ★ **队列区和清单跟着输入框走,不跟着转录走。** 它们属于「还没发出去的东西」那一侧,
+    所以空态和常驻态两棵子树都要有它们 —— 用户在空会话里连发两条同样会排队。
+
+    需求:清单收起后是**一颗小球**,它不能自己再占一行 —— 那一行本来就被发送队列占着,
+    球只吃掉队列左边的一小块(截图:球在队列左边、同一行)。所以两者进同一个 grid:
+    **第 1 列是球的格子(36px)、第 2 列是队列**(`minmax(0,1fr)` 吃满余下),两列一起看
+    就是「一小块 + 一个队列框」;清单展开时它跨满两列、落到第 2 行,回到「队列在上、
+    清单在下」这个原有次序(见 `TaskChecklistShell`)。
+    ★ 队列那一格是**显式 `col-start-2`** 的:它不靠 DOM 顺序落格,所以第 1 列里有没有球、
+      清单是收着还是展开,都不会把它挪到别处 —— 没有球时第 1 列(空着)自然是 0 宽,
+      队列照旧占满整行。
+    ★ 清单自己带着球与卡片两个格子的定位(球是 `col-start-1` + `self-end`,卡片是
+      `col-span-full`,各自落哪一行见 `TaskChecklistShell` —— 收起的那 150ms 里两者同格),
+      同样与 DOM 顺序无关;所以这里只按**读起来顺**的次序排:队列在前、清单在后。
+    ★ 两个子组件的 `className` 都用来抹掉它们自己的居中/限宽/内边距:整块版式只由
+      这一层决定(见它们各自的 `className` 注释)。
   */
-  const queue = (    <PendingQueue
-      items={queuedInputs}
-      running={running}
-      onPromote={promoteInput}
-      onEdit={editInput}
-      onDrop={dropInput}
-      onMoveToDraft={moveInputToDraft}
-      onResume={() => resumeQueue(storeKey)}
-    />
+  const notices = (
+    <div
+      className="mx-auto grid w-full max-w-[760px] grid-cols-[auto_minmax(0,1fr)] items-end gap-2 px-6 pb-2"
+      data-testid="composer-notices"
+    >
+      {queuedInputs.length > 0 && (
+        <PendingQueue
+          className="col-start-2 max-w-none px-0 pb-0"
+          items={queuedInputs}
+          running={running}
+          onPromote={promoteInput}
+          onEdit={editInput}
+          onDrop={dropInput}
+          onMoveToDraft={moveInputToDraft}
+          onResume={() => resumeQueue(storeKey)}
+        />
+      )}
+      {todos !== undefined && (
+        <TaskChecklist className="max-w-none px-0 pb-0" todos={todos} execution={execution} />
+      )}
+    </div>
   )
 
   /*
@@ -875,7 +901,7 @@ export function ChatView({
     ★★ 只读态是**另一棵树**,不是「把输入框藏起来的那棵」。
 
     分支写在这里(而不是给每个控件挂 `!readOnly &&`),是因为「零操作」这件事
-    要能一眼验证:下面这棵树里没有 `composer` / `queue` / `todos` / `transferDialog`
+    要能一眼验证:下面这棵树里没有 `composer` / `notices` / `todos` / `transferDialog`
     任何一个标识符,所以以后谁往常驻布局里加一个新按钮,都不会顺手漏进只读面板。
     空态那一屏同理跳过 —— 它的全部内容就是问候语加一个输入框。
   */
@@ -915,8 +941,7 @@ export function ChatView({
         </h1>
         <div className="w-full">
           {goalLine}
-          {queue}
-          {todos !== undefined && <TaskChecklist todos={todos} execution={execution} />}
+          {notices}
           {composer}
           {transferDialog}
         </div>
@@ -963,8 +988,7 @@ export function ChatView({
       </SubagentOpenProvider>
 
       {goalLine}
-      {queue}
-      {todos !== undefined && <TaskChecklist todos={todos} execution={execution} />}
+      {notices}
       {composer}
       {transferDialog}
     </div>

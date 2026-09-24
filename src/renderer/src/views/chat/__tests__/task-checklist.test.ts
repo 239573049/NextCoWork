@@ -5,9 +5,10 @@
  * 钉住 `execution` 三档的差别：只有 `running` 才允许出现 activeForm、Spinner 与高亮，
  * 而任务本身的 status 与完成百分比在任何一档下都不许被改写。
  *
- * 默认折叠态也在这里钉住：展开/收起只改怎么画，`defaultCollapsed` 是挂载初值而不是
- * 受控值。（消息里那张 TodoWrite 卡片自带标题行与增量，用例在
- * `todo-write-checklist.test.ts`；它复用的行渲染仍由这个文件覆盖。）
+ * 折叠的两档也在这里钉住：输入框上方那条**收起即小球**（`minimizeToBall`，点球一次到完全
+ * 展开，不留标题行），传 `false` 的调用方（消息里那张卡片）收起只收列表、标题行留着。
+ * `defaultCollapsed` 是挂载初值而不是受控值。（消息里那张 TodoWrite 卡片自带标题行与
+ * 增量，用例在 `todo-write-checklist.test.ts`；它复用的行渲染仍由这个文件覆盖。）
  *
  * @vitest-environment jsdom
  */
@@ -15,7 +16,7 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../../i18n'
-import { TASK_CHECKLIST_IDLE_MINIMIZE_MS, TaskChecklist, type TaskChecklistItem, type TaskChecklistExecution as Execution } from '../TaskChecklist'
+import { CARD_LEAVE_MS, TaskChecklist, type TaskChecklistItem, type TaskChecklistExecution as Execution } from '../TaskChecklist'
 
 let teardown: (() => Promise<void>) | null = null
 
@@ -34,7 +35,7 @@ async function mountChecklist(props: {
   todos: readonly TaskChecklistItem[]
   execution?: Execution
   defaultCollapsed?: boolean
-  minimizeWhenIdle?: boolean
+  minimizeToBall?: boolean
 }): Promise<{ container: HTMLElement; show: (next: { todos: readonly TaskChecklistItem[]; execution?: Execution }) => Promise<void> }> {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   const container = document.createElement('div')
@@ -46,7 +47,7 @@ async function mountChecklist(props: {
       children: createElement(TaskChecklist, {
         todos: next.todos,
         ...(props.defaultCollapsed === undefined ? {} : { defaultCollapsed: props.defaultCollapsed }),
-        ...(props.minimizeWhenIdle === undefined ? {} : { minimizeWhenIdle: props.minimizeWhenIdle }),
+        ...(props.minimizeToBall === undefined ? {} : { minimizeToBall: props.minimizeToBall }),
         ...(next.execution === undefined ? {} : { execution: next.execution })
       })
     })))
@@ -81,10 +82,97 @@ function listExpanded(container: HTMLElement): boolean {
   return list?.getAttribute('aria-hidden') === 'false'
 }
 
-describe('TaskChecklist · default collapsed', () => {
-  it('starts collapsed and keeps the row count, statuses and progress readable from the header', async () => {
+/*
+  收起 = 一颗小球，展开 = 完整清单，没有中间态。原先收起后先留一行标题行、过 15 秒
+  没人碰才缩成球（`useIdleMinimize.ts`），现在「收起」这一下就是用户自己按的，按下就缩。
+  交接的那 `CARD_LEAVE_MS` 是过渡动画本身(四段动画的分工写在 `theme.css`)。
+*/
+describe('TaskChecklist · collapse turns into the ball', () => {
+  const ball = (container: HTMLElement): HTMLButtonElement | null =>
+    container.querySelector<HTMLButtonElement>('[data-testid="task-checklist-ball"]')
+
+  it('mounts collapsed as a ball and opens the whole list on one click', async () => {
     const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
 
+    // 收起来的那一刻就没有标题行：整张卡片被小球换掉
+    expect(ball(container)).not.toBeNull()
+    expect(container.querySelector('[aria-controls]')).toBeNull()
+    // 缩起来只改怎么画:进度数仍在球上,完整报数进无障碍标签
+    expect(ball(container)?.getAttribute('aria-label')).toBe('Show task checklist (1/3 completed)')
+
+    await act(async () => ball(container)?.click())
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
+    expect(ball(container)).toBeNull()
+    // 点球 = 「我现在要看这份清单」,所以一次点击就到完全展开,不用再点一次标题行
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true')
+    expect(listExpanded(container)).toBe(true)
+    expect(rowStatuses(container)).toEqual(['completed', 'in_progress', 'pending'])
+    expect(container.textContent).toContain('Updating UI')
+    // 焦点跟到标题行那颗开合按钮上,键盘用户不必从页首重新 Tab
+    expect(document.activeElement).toBe(toggle)
+  })
+
+  it('turns into the ball on collapse instead of leaving a header row behind', async () => {
+    vi.useFakeTimers()
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running', defaultCollapsed: false })
+
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
+    expect(container.textContent).toContain('Task checklist · 1/3 completed')
+    await act(async () => toggle?.click())
+
+    /*
+      需求:收起是两棵子树的交接,所以按下这一下**两棵都在**:球已经就位,卡片还在原地
+      淡出(`checklist-card-exit`,见 `TaskChecklistShell`)。少了这段,观感是卡片被凭空抽走。
+    */
+    expect(ball(container)).not.toBeNull()
+    expect(container.textContent).toContain('Task checklist · 1/3 completed')
+    expect(container.querySelector('.checklist-card-exit')).not.toBeNull()
+
+    // 淡出结束才摘掉卡片:标题行一并消失 —— 它上面报的数小球上也报,留着就是白占那一行
+    await act(async () => { vi.advanceTimersByTime(CARD_LEAVE_MS) })
+    expect(container.querySelector('[aria-controls]')).toBeNull()
+    expect(container.textContent).not.toContain('Task checklist · 1/3 completed')
+  })
+
+  it('drops the fade-out altogether when motion is off, so no still card is left behind', async () => {
+    vi.useFakeTimers()
+    // 关掉动效档:theme.css 里那几段动画是 `animation: none`,留一个不动的残影比直接换掉更像卡住
+    document.documentElement.dataset['themeMotion'] = 'off'
+    try {
+      const { container } = await mountChecklist({ todos: TODOS, execution: 'running', defaultCollapsed: false })
+      await act(async () => container.querySelector<HTMLButtonElement>('[aria-controls]')?.click())
+
+      expect(ball(container)).not.toBeNull()
+      expect(container.querySelector('[aria-controls]')).toBeNull()
+    } finally {
+      // 恢复档位本身也会推一次订阅(useMotionLevel 观察 documentElement 的属性),包在 act 里
+      await act(async () => { delete document.documentElement.dataset['themeMotion'] })
+    }
+  })
+
+  it('enters each way with its own animation class', async () => {
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running', defaultCollapsed: false })
+
+    // 展开方向:卡片淡入,列表延后一档铺开(分工写在 theme.css)
+    expect(container.querySelector('.checklist-card-enter')).not.toBeNull()
+    expect(container.querySelector('.checklist-list-enter')).not.toBeNull()
+
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-controls]')?.click())
+    // 收起方向:小球 pop 入场
+    expect(ball(container)?.className).toContain('checklist-ball-enter')
+  })
+
+  it('keeps the unfinished-after-stop warning on the ball instead of dropping it', async () => {
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'stopped' })
+
+    expect(ball(container)?.getAttribute('aria-label'))
+      .toBe('Show task checklist (1/3 completed) · Run ended with 2 unfinished task(s)')
+  })
+
+  it('stays a collapsible header row when the caller opts out of the ball', async () => {
+    const { container } = await mountChecklist({ todos: TODOS, execution: 'running', minimizeToBall: false })
+
+    expect(ball(container)).toBeNull()
     expect(container.querySelector('[aria-expanded]')?.getAttribute('aria-expanded')).toBe('false')
     expect(listExpanded(container)).toBe(false)
     // 收起的只是列表：报数、百分比、状态序列都还在，不必展开就能读
@@ -96,7 +184,7 @@ describe('TaskChecklist · default collapsed', () => {
   })
 
   it('lets a click open the list instead of springing back to the default on the next render', async () => {
-    const { container, show } = await mountChecklist({ todos: TODOS, execution: 'running' })
+    const { container, show } = await mountChecklist({ todos: TODOS, execution: 'running', minimizeToBall: false })
 
     const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
     await act(async () => toggle?.click())
@@ -134,6 +222,9 @@ describe('TaskChecklist · real task state', () => {
       children: createElement(TaskChecklist, {
         execution: 'running',
         defaultCollapsed: false,
+        // 这份用例读的是「收起只收列表」那一档(aria-hidden / inert);收起即小球的那条在
+        // 上面那组用例里,两者是同一次点击的两个不同出口。
+        minimizeToBall: false,
         todos: [
           { content: 'Inspect files', activeForm: 'Inspecting files', status: 'completed' },
           { content: 'Update UI', activeForm: 'Updating UI', status: 'in_progress' },
@@ -158,7 +249,8 @@ describe('TaskChecklist · real task state', () => {
   })
 
   it('drops the spinner and activeForm, keeps every status and count, and reports unfinished items once the run stops', async () => {
-    const { container, show } = await mountChecklist({ todos: TODOS, execution: 'running' })
+    // 默认收起 = 一颗小球,读不到行;这几档要比的是清单本体,所以显式展开
+    const { container, show } = await mountChecklist({ todos: TODOS, execution: 'running', defaultCollapsed: false })
 
     expect(container.querySelector('[data-testid="task-checklist"]')?.getAttribute('data-execution-state')).toBe('running')
     expect(container.textContent).toContain('Task checklist · 1/3 completed')
@@ -184,6 +276,7 @@ describe('TaskChecklist · real task state', () => {
   it('stays quiet when a stopped checklist has nothing left to finish', async () => {
     const { container } = await mountChecklist({
       execution: 'stopped',
+      defaultCollapsed: false,
       todos: [{ content: 'Run tests', activeForm: 'Running tests', status: 'completed' }]
     })
 
@@ -193,7 +286,7 @@ describe('TaskChecklist · real task state', () => {
   })
 
   it('labels an unattached checklist as a snapshot instead of showing work in progress', async () => {
-    const { container } = await mountChecklist({ todos: TODOS })
+    const { container } = await mountChecklist({ todos: TODOS, defaultCollapsed: false })
 
     expect(container.querySelector('[data-testid="task-checklist"]')?.getAttribute('data-execution-state')).toBe('snapshot')
     expect(container.textContent).toContain('Checklist snapshot')
@@ -204,76 +297,5 @@ describe('TaskChecklist · real task state', () => {
     expect(container.textContent).toContain('Task checklist · 1/3 completed')
     expect(container.querySelector('[data-task-status="in_progress"] .sr-only')?.textContent).toBe('Unfinished')
     expect(container.querySelector('[data-task-status="pending"] .sr-only')?.textContent).toBe('Waiting')
-  })
-})
-
-/*
-  收起后长时间无操作缩成小球(`useIdleMinimize.ts`)。计时器用假时钟推进,
-  React 的状态更新包在 act 里,否则断言读到的是缩之前的那一帧。
-*/
-describe('TaskChecklist · idle minimize', () => {
-  const ball = (container: HTMLElement): HTMLButtonElement | null =>
-    container.querySelector<HTMLButtonElement>('[data-testid="task-checklist-ball"]')
-  const idle = async (ms: number): Promise<void> => {
-    await act(async () => { vi.advanceTimersByTime(ms) })
-  }
-
-  it('shrinks to a ball after sitting collapsed and untouched, and a click expands the list with focus on the toggle', async () => {
-    vi.useFakeTimers()
-    const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
-
-    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS - 1)
-    expect(ball(container)).toBeNull()
-    await idle(1)
-    expect(ball(container)).not.toBeNull()
-    expect(container.querySelector('[aria-controls]')).toBeNull()
-    // 缩起来只改怎么画:进度数仍在球上,标签给出完整报数
-    expect(ball(container)?.getAttribute('aria-label')).toBe('Show task checklist (1/3 completed)')
-
-    await act(async () => ball(container)?.click())
-    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
-    expect(ball(container)).toBeNull()
-    // 点球 = 「我现在要看这份清单」,所以一次点击就到完全展开,不用再点一次标题行
-    expect(toggle?.getAttribute('aria-expanded')).toBe('true')
-    expect(document.activeElement).toBe(toggle)
-  })
-
-  it('never shrinks while the list is expanded or the pointer rests on the card', async () => {
-    vi.useFakeTimers()
-    const { container } = await mountChecklist({ todos: TODOS, execution: 'running' })
-    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls]')
-
-    await act(async () => toggle?.click())
-    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS * 2)
-    expect(ball(container)).toBeNull()
-
-    // 收回去之后,只要鼠标还停在卡片上就照样不缩;移开后才从头计时
-    await act(async () => toggle?.click())
-    const card = toggle?.parentElement
-    await act(async () => { card?.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })) })
-    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS * 2)
-    expect(ball(container)).toBeNull()
-
-    await act(async () => { card?.dispatchEvent(new MouseEvent('pointerout', { bubbles: true })) })
-    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS)
-    expect(ball(container)).not.toBeNull()
-  })
-
-  it('keeps the unfinished-after-stop warning on the ball instead of dropping it', async () => {
-    vi.useFakeTimers()
-    const { container } = await mountChecklist({ todos: TODOS, execution: 'stopped' })
-
-    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS)
-    expect(ball(container)?.getAttribute('aria-label'))
-      .toBe('Show task checklist (1/3 completed) · Run ended with 2 unfinished task(s)')
-  })
-
-  it('stays a full row when the caller opts out', async () => {
-    vi.useFakeTimers()
-    const { container } = await mountChecklist({ todos: TODOS, minimizeWhenIdle: false })
-
-    await idle(TASK_CHECKLIST_IDLE_MINIMIZE_MS * 2)
-    expect(ball(container)).toBeNull()
-    expect(container.querySelector('[aria-controls]')).not.toBeNull()
   })
 })

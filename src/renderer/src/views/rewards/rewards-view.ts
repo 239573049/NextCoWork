@@ -107,6 +107,57 @@ export function giftValidityLine(
     : t('rewards.giftValidDays', { days: center.giftValidDays })
 }
 
+/**
+ * 邀请链接复制出去时要跟在后面的文案池。
+ *
+ * 需求：邀请链接是用户自己复制到聊天里发出去的，一条光秃秃的 URL 既没说明这是什么、
+ * 也没说清对朋友有什么好处，收到的人多半不会点。所以复制时随机跟一句，让这条消息
+ * **自带说明** —— 原话是「复制到剪贴板的内容，URL 地址后面要接文案」。
+ *
+ * ★ 这些句子是写给**收到链接的人**看的，不是界面确认：每一句都得能脱离界面单独
+ * 成立，「已复制」这类话放在这里全是错位的（界面的复制确认仍然是 toast）。
+ *
+ * ★ 类型是**非空元组**而不是 `TranslationKey[]`：空表会让 `pickShareNote` 取不到
+ * 东西、只能吐 undefined（同 `i18n/whimsy.ts` 的 `Whimsy`）。句子是**料**而不是
+ * 产品概念，中英两条不必是彼此的译文；但八个 key 在两张表里都得有值，缺一条就会有
+ * 一条邀请把 key 本身发给朋友 —— `__tests__/rewards-view.test.ts` 钉着。
+ */
+export const SHARE_NOTE_KEYS: readonly [TranslationKey, ...TranslationKey[]] = [
+  'rewards.shareNote1',
+  'rewards.shareNote2',
+  'rewards.shareNote3',
+  'rewards.shareNote4',
+  'rewards.shareNote5',
+  'rewards.shareNote6',
+  'rewards.shareNote7',
+  'rewards.shareNote8'
+]
+
+/**
+ * 随机挑一句。
+ *
+ * `random` 注入（默认 `Math.random`）：随机行为在测试里必须能钉死，否则只能断言
+ * 「结果是池子里的某一条」，那等于没测 —— 池子少写一条、下标算错一位都照样过。
+ */
+export function pickShareNote(random: () => number = Math.random): TranslationKey {
+  const index = Math.min(SHARE_NOTE_KEYS.length - 1, Math.floor(random() * SHARE_NOTE_KEYS.length))
+  return SHARE_NOTE_KEYS[index] ?? SHARE_NOTE_KEYS[0]
+}
+
+/**
+ * 复制进剪贴板的那段文本 = 邀请链接 + 一句文案。
+ *
+ * ★ **链接在最前面且原样**：后面那些字是给人和聊天软件看的，链接本身一个字都不能动
+ * —— 加前缀、整体加引号、或对链接做 URL 编码都会让朋友点不开。这个函数存在的意义
+ * 就是把这套格式钉在一处并且可测，而不是散在组件的模板字符串里。
+ *
+ * ★ 中间是**一个空格**而不是换行：URL 与正文直接相接时，链接的边界靠空白划出来，
+ * 少了它有的客户端会把后面的字一起算进链接。
+ */
+export function inviteShareText(inviteUrl: string, note: TranslationKey, t: Translate): string {
+  return `${inviteUrl} ${t(note)}`
+}
+
 export interface RewardsStat {
   /** 统计卡标题的文案 key。 */
   key: TranslationKey

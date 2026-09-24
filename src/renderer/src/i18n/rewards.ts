@@ -42,6 +42,21 @@ export const rewardsZh = {
   'rewards.inviteCode': '邀请码',
   'rewards.copyLink': '复制链接',
   'rewards.copyCode': '复制邀请码',
+  /*
+    ★ 下面八条是**复制邀请链接时随机挑一条**、跟在 URL 后面的池子
+    （`rewards-view.ts` 的 `SHARE_NOTE_KEYS`）。两条约束：
+    ① 它们是写给**收到链接的人**看的，必须能脱离界面单独成立 —— 「已复制」这类
+       界面确认的话放在这里全是错位的（界面确认是 `rewards.copied`）；
+    ② 序号只是编号，中英两条不必是彼此的译文（改文案时不用两边对着改）。
+  */
+  'rewards.shareNote1': '用这个链接注册，我俩都能拿到额度',
+  'rewards.shareNote2': '好东西不独享，注册后双方都有奖励',
+  'rewards.shareNote3': '终端、文件、浏览器一屏搞定，先安利为敬',
+  'rewards.shareNote4': '我用着挺顺手，推荐给你试试',
+  'rewards.shareNote5': '编码 Agent 桌面端，登录就能开工',
+  'rewards.shareNote6': '一起用吧，效率高一点，下班早一点',
+  'rewards.shareNote7': '这个工具挺省事，你也装一个',
+  'rewards.shareNote8': '顺手分享给你，好东西不该只有我知道',
   'rewards.copied': '已复制到剪贴板',
   'rewards.copyFailed': '复制失败，请重试',
   'rewards.openInBrowser': '在浏览器中打开',
@@ -132,6 +147,15 @@ export const rewardsEn = {
   'rewards.inviteCode': 'Invite code',
   'rewards.copyLink': 'Copy link',
   'rewards.copyCode': 'Copy code',
+  // 同中文那份的池子说明：这些句子是写给收到链接的人看的，不是界面确认。
+  'rewards.shareNote1': 'Sign up with this link and we both get credit',
+  'rewards.shareNote2': 'Good things are for sharing — we both get rewarded on sign-up',
+  'rewards.shareNote3': 'Terminal, files and browser in one window. Consider this a recommendation.',
+  'rewards.shareNote4': 'I have been using this and like it. Give it a go.',
+  'rewards.shareNote5': 'A coding agent desktop app — sign in and start working',
+  'rewards.shareNote6': 'Use it with me: a bit more done, a bit earlier home',
+  'rewards.shareNote7': 'Handy little tool, you should install it too',
+  'rewards.shareNote8': 'Sharing this on a whim — good things should not stay with one person',
   'rewards.copied': 'Copied to clipboard',
   'rewards.copyFailed': 'Could not copy. Please try again.',
   'rewards.openInBrowser': 'Open in browser',

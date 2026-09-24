@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import type { Translate } from '../../../i18n'
+import { messagesFor, type Translate } from '../../../i18n'
 import {
+  SHARE_NOTE_KEYS,
   bannerRewardLine,
   formatDay,
   formatMoment,
   formatMoney,
   giftValidityLine,
+  inviteShareText,
   inviteStatusKey,
+  pickShareNote,
   rewardSideKey,
   summaryStats,
   unavailableKey
@@ -95,5 +98,39 @@ describe('message keys', () => {
     expect(inviteStatusKey('Rewarded')).toBe('rewards.status.Rewarded')
     expect(rewardSideKey('invitee')).toBe('rewards.side.invitee')
     expect(unavailableKey('unsupported')).toBe('rewards.unavailable.unsupported')
+  })
+})
+
+describe('pickShareNote / inviteShareText', () => {
+  const INVITE_URL = 'https://nextco.work/login?ref=e837e871b2ea'
+
+  it('每条都有两种语言的译文 —— 缺一条就会把 key 本身当成邀请文案发给朋友', () => {
+    for (const key of SHARE_NOTE_KEYS) {
+      expect(messagesFor('zh-CN')[key], key).toBeDefined()
+      expect(messagesFor('en-US')[key], key).toBeDefined()
+    }
+  })
+
+  it('池子至少两条 —— 只有一条时「随机挑一句」是假的', () => {
+    expect(SHARE_NOTE_KEYS.length).toBeGreaterThan(1)
+  })
+
+  it('按 random 落在池子里的那一条上', () => {
+    expect(pickShareNote(() => 0)).toBe(SHARE_NOTE_KEYS[0])
+    expect(pickShareNote(() => 0.999)).toBe(SHARE_NOTE_KEYS[SHARE_NOTE_KEYS.length - 1])
+  })
+
+  it('★ 每一条都取得到 —— 取不到的那条等于没内置', () => {
+    // 把 [0,1) 铺满，等于把每个可能的下标都试一遍
+    const seen = new Set<string>()
+    for (let i = 0; i < 200; i++) seen.add(pickShareNote(() => i / 200))
+    expect(seen.size).toBe(SHARE_NOTE_KEYS.length)
+  })
+
+  it('★ 链接原样在最前面 —— 加前缀或做编码都会让朋友点不开', () => {
+    for (const key of SHARE_NOTE_KEYS) {
+      const text = inviteShareText(INVITE_URL, key, t)
+      expect(text.startsWith(`${INVITE_URL} `), key).toBe(true)
+    }
   })
 })

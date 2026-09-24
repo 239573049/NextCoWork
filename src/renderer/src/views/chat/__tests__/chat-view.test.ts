@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom'
 import { describe, expect, it, vi } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage } from '../../../../../shared/agent/message'
 import { emptyTranscript } from '../../../../../shared/agent/transcript'
+import { makeQueuedInput } from '../../../../../shared/domain/queued-input'
 import { DEFAULT_WORKSPACE_SETTINGS, type Workspace } from '../../../../../shared/domain/workspace'
 import { I18nProvider } from '../../../i18n'
 import { pickAttachments, uploadFile } from '../../../services/attachment'
@@ -179,6 +180,11 @@ describe('chat task checklist execution', () => {
     try {
       await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
         createElement(ChatView, { sessionId: 'checklist-run', tabId: 'fixture-tab', workspace, fallbackModel: { model: '' } }) })))
+      /*
+        需求:输入框上方那条清单挂载时就是**一颗小球**(见 `TaskChecklist.minimizeToBall`),
+        而这个用例要断言的正是清单内容 —— 先点开它,一次点击到完全展开。
+      */
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="task-checklist-ball"]')?.click())
       // 需求：重载的历史没有本窗口的 run_end 事实，只能显示快照，不能报本轮未完成。
       expect(executionState()).toBe('snapshot')
       expect(spinners()).toBe(0)
@@ -232,6 +238,28 @@ describe('chat task checklist execution', () => {
       expect(executionState()).toBe('snapshot')
       expect(lastChecklist()?.textContent).not.toContain('Run ended with')
       expect(lastChecklist()?.textContent).toContain('Task checklist · 1/3 completed')
+
+      /*
+        需求:清单收起来时是**一颗小球**,而它不许自己再占一行 —— 和发送队列共用
+        `composer-notices` 那一行(见 ChatView 里那段注释)。队列在跑完一轮后会被立刻
+        消费掉,所以这一步放在最后:这里只是把一条队列条目摆上去。
+      */
+      await act(async () => session.setState({
+        queuedInputs: [makeQueuedInput('queued-1', 'Queued follow-up', {
+          workspaceId: workspace.id,
+          depth: 0,
+          mode: 'code',
+          thinking: 'auto',
+          webSearch: false,
+          permissionMode: 'auto',
+          model: '',
+          skillIds: []
+        }, 1)]
+      }))
+      await act(async () => (lastChecklist()?.querySelector('[aria-controls]') as HTMLButtonElement).click())
+      const notices = container.querySelector('[data-testid="composer-notices"]')
+      expect(notices?.querySelector('[data-testid="pending-queue"]')).not.toBeNull()
+      expect(notices?.querySelector('[data-testid="task-checklist-ball"]')).not.toBeNull()
     } finally {
       await act(async () => root.unmount())
       releaseSession('checklist-run')

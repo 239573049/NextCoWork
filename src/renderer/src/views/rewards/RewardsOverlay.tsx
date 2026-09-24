@@ -46,7 +46,7 @@ import { useAppearance } from '../../theme/useAppearance'
 import { RewardsTables } from './RewardsTables'
 import { invitePosterFileName } from './invite-poster'
 import { renderInvitePosterPng } from './poster-export'
-import { bannerRewardLine, giftValidityLine, summaryStats, unavailableKey } from './rewards-view'
+import { bannerRewardLine, giftValidityLine, inviteShareText, pickShareNote, summaryStats, unavailableKey } from './rewards-view'
 
 /** 和设置浮层同一档开合时长 —— 两个模态用不同的节奏会显得是两个产品。 */
 const OVERLAY_MS = 280
@@ -96,6 +96,11 @@ export function RewardsOverlay({ open, onClose }: { open: boolean; onClose: () =
     return () => document.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
+  /*
+    复制本身：写剪贴板 + 界面确认。
+    ★ 成功仍然走 toast：复制进剪贴板的那段文本当中有半句是写给**收到链接的人**看的
+    邀请文案（`inviteShareText`），拿它当界面确认是错位的 —— 它里面根本没有「已复制」。
+  */
   const copy = (text: string): void => {
     void copyText(text)
       .then(() => toast.success(t('rewards.copied'), 'rewards-copy'))
@@ -274,6 +279,14 @@ function InviteCard({
   savingPoster: boolean
 }): ReactNode {
   const { t } = useI18n()
+
+  /*
+    需求：复制出去的链接后面要跟一句邀请文案（池子见 `pickShareNote`），否则朋友
+    收到的是一条光秃秃的 URL，看不出这是什么、也没说清对他有什么好处。
+    ★ 抽签在**点击这一刻**发生，所以连点两次拿到的是两句不同的。
+  */
+  const copyLink = (): void => onCopy(inviteShareText(center.inviteUrl, pickShareNote(), t))
+
   return (
     <section className="flex flex-col gap-3 rounded-panel bg-surface px-5 py-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -283,12 +296,16 @@ function InviteCard({
           不参与任何翻译或省略号截断之外的加工。
         */}
         <span className="selectable min-w-0 flex-1 truncate font-mono text-[12.5px] text-fg">{center.inviteUrl}</span>
-        <Button size="sm" onClick={() => onCopy(center.inviteUrl)}>{t('rewards.copyLink')}</Button>
+        <Button size="sm" onClick={copyLink}>{t('rewards.copyLink')}</Button>
         <Button size="sm" variant="ghost" onClick={() => onOpen(center.inviteUrl)}>{t('rewards.openInBrowser')}</Button>
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <span className="shrink-0 text-[12px] text-fg-faint">{t('rewards.inviteCode')}</span>
         <span className="selectable min-w-0 flex-1 truncate font-mono text-[12.5px] tracking-wider text-fg">{center.code}</span>
+        {/*
+          ★ 邀请码**不跟文案**，原样复制（和链接不同）。它是要被填进注册页输入框的
+          值，多一个字就填不进去 —— 没人会先手动删干净再粘贴。
+        */}
         <Button size="sm" onClick={() => onCopy(center.code)}>{t('rewards.copyCode')}</Button>
         {/*
           ★ 海报是「这个用户自己那一张」：二维码编的是他的邀请链接，
