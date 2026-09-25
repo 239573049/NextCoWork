@@ -1093,7 +1093,7 @@ describe('PluginManager · tabs.openTerminal 的清单级参数门', () => {
   }
 
   function launchStub() {
-    return vi.fn(() => ({ opened: true as const }))
+    return vi.fn((_pluginId: string, _spec: { workspaceId: string; command: string; args: string[]; env: Record<string, string>; title?: string }) => ({ opened: true as const }))
   }
 
   async function readyWithLaunch(): Promise<{ made: Awaited<ReturnType<typeof makeManager>>; launchTerminal: ReturnType<typeof launchStub> }> {

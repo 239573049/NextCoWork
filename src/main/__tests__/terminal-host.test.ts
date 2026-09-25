@@ -121,7 +121,8 @@ describe('terminal launch specs', () => {
     const driver: TerminalDriver = { write: vi.fn(), resize: vi.fn(), kill: vi.fn(),
       onData: () => ({ dispose() {} }), onExit: (listener) => { listeners.add(listener); return { dispose() {} } } }
     const environment = { ...localEnvironment(nodeHost(), '/workspace'),
-      openTerminal: vi.fn(async () => driver), assertReady: () => {} }
+      openTerminal: vi.fn(async (_options: { cwd: string; cols: number; rows: number; env?: Record<string, string> }): Promise<TerminalDriver> => driver),
+      assertReady: () => {} }
     environment.path.resolveWithin = async (_root, path) => path
     environment.fs.stat = async () => ({ isDir: true, isFile: false, isSymbolicLink: false, mode: 0o755, size: 0, mtimeMs: 0 })
     const acquire = () => ({ environment, release: vi.fn() })
@@ -169,8 +170,8 @@ describe('terminal launch specs', () => {
     })()
     const grant = state.host.approve(intent.id, true, state.sender)!
     await state.host.create({ ...state.request, approval: grant }, state.sender)
-    const options = state.environment.openTerminal.mock.calls[0]?.[0] as { env?: Record<string, string> }
-    expect(options.env?.KEY).toBeUndefined()
+    const options = state.environment.openTerminal.mock.calls[0]?.[0]
+    expect(options?.env?.KEY).toBeUndefined()
     expect(state.driver.write).not.toHaveBeenCalled()
     state.host.shutdown()
   })
