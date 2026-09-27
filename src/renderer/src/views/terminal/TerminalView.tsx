@@ -1,4 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
@@ -89,6 +90,22 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(host)
+    /*
+      GPU 渲染。需求:xterm 6 的默认 DOM 渲染器逐字符改 DOM,而 codex / claude
+      这类全屏 TUI 每帧清屏重画 —— 在 DOM 渲染器上表现为整屏高频闪烁。
+      WebGL 渲染器把重绘压到一次 canvas 绘制,这是消除 TUI 闪烁的正解。
+
+      ★ 必须兜底:webgl 上下文创建失败(无 GPU / 远程桌面 / 上下文数耗尽)会抛,
+        GPU 重置时走 onContextLoss —— 两条路都退回 DOM 渲染器:慢,但能跑。
+        不能让渲染器选择权变成「终端打不开」。
+    */
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => { webgl.dispose() })
+      terminal.loadAddon(webgl)
+    } catch {
+      // 回落 DOM 渲染器。
+    }
     xtermRef.current = terminal
     fitRef.current = fit
 

@@ -1,17 +1,22 @@
-import { ArrowLeft, Image as ImageIcon, Info, Plus, Search, Settings2, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, Image as ImageIcon, Info, Plus, Search, Settings2, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { ModelAlias, UpstreamProvider } from "../../../../../shared/domain/provider";
-import { PROVIDER_PRESETS } from "../../../../../shared/domain/presets";
+import { isImageModelAlias, type ModelAlias, type UpstreamProvider } from "../../../../../shared/domain/provider";
+import { selectModelBinding } from "../../../../../shared/domain/model-selection";
+import type { AppSettings } from "../../../../../shared/domain/settings";
+import { PROVIDER_PRESETS, CLIENT_PROVIDER_ID } from "../../../../../shared/domain/presets";
 import { Button } from "../../../components/ui/Button";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { TextInput } from "../../../components/ui/TextInput";
+import { Toggle } from "../../../components/ui/Toggle";
+import { ProviderModelMenu, type ProviderModelMenuRow } from "../../../components/ProviderModelMenu";
 import { cn } from "../../../lib/cn";
 import { useI18n } from "../../../i18n";
 import { useModelsStore } from "../../../stores/models";
 import { setProviderAliases, updateModel, upsertProvider } from "../../../services/provider";
+import type { SettingsPageProps } from "../../props";
 import { ProviderAvatar } from "./ProviderAvatar";
 import { ProviderPanel } from "./ProviderPanel";
-import { providerEntries, type ProviderEntry } from "./enabled-models";
+import { providerAliasOptions, providerEntries, roleModelChoice, selectableProviders, type ProviderEntry } from "./enabled-models";
 import { providerFromPreset, seedModelsForPreset } from "./provider-edit";
 
 type ImagePreset = {
@@ -34,47 +39,207 @@ const IMAGE_PRESETS: readonly ImagePreset[] = [
 ];
 
 function isImageModel(model: ModelAlias): boolean {
-  return model.modality === "image" || model.capabilities.imageOutput === true;
+  return isImageModelAlias(model);
 }
 
-export function ImageModelPage(): ReactNode {
+export function ImageModelPage({ settings, patch }: Pick<SettingsPageProps, "settings" | "patch">): ReactNode {
   const { t } = useI18n();
   const providers = useModelsStore((s) => s.providers);
   const models = useModelsStore((s) => s.models);
+  const loaded = useModelsStore((s) => s.loaded);
   const load = useModelsStore((s) => s.load);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [catalogOpen, setCatalogOpen] = useState(false);
   useEffect(() => { void load(); }, [load]);
 
-  const entries = useMemo(() => providerEntries(
-    providers,
-    models.filter(isImageModel),
-    "",
-  ).filter((entry) => entry.aliases.length > 0), [providers, models]);
+  const entries = useMemo(() => {
+    const list = providerEntries(
+      providers,
+      models.filter(isImageModel),
+      "",
+    ).filter((entry) => entry.aliases.length > 0);
+    /*
+      需求:登录后 NextCoWork 内置提供商要**像文本页一样常驻左列**,哪怕它此刻
+      一条图片别名都没有(老用户登录同步跑在本功能之前、或平台列表暂时没有图片模型)。
+
+      不这样做的死循环:它没有图片别名 → 不进左列 → 打不开它的面板 → 面板里那颗
+      「从服务商拉取模型列表」(图片模态的导入弹窗)永远够不着 → 它的图片模型
+      **永远加不进来**,且全程零报错。
+
+      供应商记录存在 ≡ 已登录:登录流程种下它(`ipc/client-auth.ts` 的
+      `ensureClientProvider`),登出删除,所以这里不需要另查登录态。
+      排到末尾追加,不打散已有顺序 —— 默认选中是 `entries[0]`,插在前面会把
+      「打开图片页默认选中第一家真·生图供应商」顶成一家空的内置提供商。
+    */
+    const client = providers.find((p) => p.id === CLIENT_PROVIDER_ID);
+    if (client !== undefined && !list.some((entry) => entry.provider.id === CLIENT_PROVIDER_ID)) {
+      const [entry] = providerEntries([client], [], "");
+      if (entry !== undefined) list.push(entry);
+    }
+    return list;
+  }, [providers, models]);
   const selected = entries.find((entry) => entry.provider.id === selectedId) ?? entries[0] ?? null;
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 gap-4">
-      <ImageProviderList entries={entries} onAdd={() => setCatalogOpen(true)} selectedId={catalogOpen ? null : selected?.provider.id ?? null} onSelect={(id) => { setSelectedId(id); setCatalogOpen(false); }} />
-      {catalogOpen ? (
-        <ImageProviderCatalog providers={providers} onClose={() => setCatalogOpen(false)} onAdded={(id) => { setSelectedId(id); setCatalogOpen(false); }} />
-      ) : selected ? (
-        <ProviderPanel
-          entry={selected}
-          modality="image"
-          preserveAliases={models.filter(
-            (model) => model.providerId === selected.provider.id && !isImageModel(model),
-          )}
-        />
-      ) : (
-        <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas px-3 py-3">
-          <div className="mb-3 flex items-start gap-2 rounded-[9px] bg-tint px-3 py-2.5 text-[11.5px] leading-[1.6] text-fg-muted">
-            <Info size={14} className="mt-0.5 shrink-0 text-icon" />
-            <span>{t("models.imageEmptyHint")}</span>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+      <div className="flex min-h-0 min-w-0 flex-1 gap-4">
+        <ImageProviderList entries={entries} onAdd={() => setCatalogOpen(true)} selectedId={catalogOpen ? null : selected?.provider.id ?? null} onSelect={(id) => { setSelectedId(id); setCatalogOpen(false); }} />
+        {catalogOpen ? (
+          <ImageProviderCatalog providers={providers} onClose={() => setCatalogOpen(false)} onAdded={(id) => { setSelectedId(id); setCatalogOpen(false); }} />
+        ) : selected ? (
+          <ProviderPanel
+            entry={selected}
+            modality="image"
+            preserveAliases={models.filter(
+              (model) => model.providerId === selected.provider.id && !isImageModel(model),
+            )}
+          />
+        ) : (
+          <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas px-3 py-3">
+            <div className="mb-3 flex items-start gap-2 rounded-[9px] bg-tint px-3 py-2.5 text-[11.5px] leading-[1.6] text-fg-muted">
+              <Info size={14} className="mt-0.5 shrink-0 text-icon" />
+              <span>{t("models.imageEmptyHint")}</span>
+            </div>
+            <EmptyState icon={<ImageIcon size={22} />} title={t("models.imageNoProvider")} hint={t("models.imageAddHint")} />
           </div>
-          <EmptyState icon={<ImageIcon size={22} />} title={t("models.imageNoProvider")} hint={t("models.imageAddHint")} />
-        </div>
-      )}
+        )}
+      </div>
+      <ImageGenToggleRow settings={settings} patch={patch} />
+      <ImageGenModelRow settings={settings} patch={patch} models={models} providers={providers} loaded={loaded} />
+    </div>
+  );
+}
+
+/**
+ * 页脚「对话生图」开关一行。
+ *
+ * 需求:生图有**自己的**开关(`AppSettings.imageGenerationEnabled`),不再跟着输入框
+ * 「联网搜索」那颗药丸 —— 那颗现在只管网页搜索与抓取。原先生图藏在那颗药丸后面,
+ * 症状是「选好了生图模型,对话里却找不到工具」,且界面上无从查起。
+ *
+ * ★ 放在模型行**上面**、同在页脚:两者都是页面级设置(与左列选中哪家无关),
+ * 而「要不要画」逻辑上先于「用谁画」。
+ * ★ 关掉时**不清空**所选模型:开关回答「要不要画」,模型回答「用谁画」,
+ * 临时关一下不该让用户丢掉自己挑好的模型。
+ */
+function ImageGenToggleRow({
+  settings,
+  patch
+}: {
+  settings: AppSettings;
+  patch: SettingsPageProps["patch"];
+}): ReactNode {
+  const { t } = useI18n();
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-t border-hairline px-1 pt-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-[12.5px] text-fg">{t("imageGen.enabled")}</p>
+        <p className="mt-0.5 text-[11px] text-fg-faint">{t("imageGen.enabledHint")}</p>
+      </div>
+      <Toggle
+        label={t("imageGen.enabled")}
+        checked={settings.imageGenerationEnabled}
+        onChange={(imageGenerationEnabled) => patch({ imageGenerationEnabled })}
+      />
+    </div>
+  );
+}
+
+/**
+ * 页面底部「对话生图使用的模型」一行。
+ *
+ * 需求:生图模型由用户点名(`AppSettings.imageModel` 那一对,必选、不设自动档),
+ * 对话里的「生成图片 / 编辑图片」只用这一个绑定 —— 这一行是它的唯一入口。
+ * 选择器**只列图片模型**:列文本模型等于画一个选了就废的选项(桥解析不到图片
+ * 能力,工具直接不下发),而这一整页管的就是图片模型的增删。
+ *
+ * ★ 位置在页脚:它是页面级的选择(和左列选中哪家供应商无关),放供应商面板里
+ * 会让人以为是那一家的属性 —— 换一家它并不跟着变。
+ * ★ patch 成对无条件写(`imageModel` + `imageModelProviderId`):只给别名会留下
+ * 「新别名 + 旧供应商」的脏配对(见 `mergeSettings` 那段成对写的理由)。
+ * ★ 没选/选的失效了,状态写在说明行里而不是弹窗:这是个常驻设置,不是一次操作。
+ */
+function ImageGenModelRow({
+  settings,
+  patch,
+  models,
+  providers,
+  loaded
+}: {
+  settings: AppSettings;
+  patch: SettingsPageProps["patch"];
+  models: readonly ModelAlias[];
+  providers: readonly UpstreamProvider[];
+  loaded: boolean;
+}): ReactNode {
+  const { t } = useI18n();
+  const imageModels = models.filter(isImageModelAlias);
+  const choice = roleModelChoice(models, providers, settings.imageModel, settings.imageModelProviderId);
+  const binding =
+    settings.imageModel === ""
+      ? undefined
+      : selectModelBinding(models, providers, settings.imageModel, settings.imageModelProviderId);
+  const missing = settings.imageModel !== "" && (binding === undefined || !isImageModelAlias(binding));
+  const providerName = providers.find((p) => p.id === choice.providerId)?.name;
+  const triggerLabel =
+    choice.alias === ""
+      ? t("imageGen.modelPick")
+      : providerName === undefined
+        ? choice.alias
+        : `${choice.alias} · ${providerName}`;
+  const rows: ProviderModelMenuRow[] = selectableProviders(imageModels, providers, choice.providerId).map((p) => {
+    const aliasOptions = providerAliasOptions(imageModels, p.id);
+    return {
+      id: p.id,
+      label: p.name,
+      description: t("chat.availableModels", { count: aliasOptions.length }),
+      selected: p.id === choice.providerId,
+      models: aliasOptions.map((o) => ({
+        value: o.value,
+        label: o.label,
+        selected: p.id === choice.providerId && o.value === choice.alias
+      }))
+    };
+  });
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-t border-hairline px-1 pt-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-[12.5px] text-fg">{t("imageGen.model")}</p>
+        <p className="mt-0.5 text-[11px] text-fg-faint">
+          {settings.imageModel === ""
+            ? t("imageGen.modelUnset")
+            : missing
+              ? t("imageGen.modelMissing")
+              : t("imageGen.modelHint")}
+        </p>
+      </div>
+      <div className="w-[240px] shrink-0">
+        <ProviderModelMenu
+          trigger={
+            <>
+              <span className="min-w-0 flex-1 truncate">{triggerLabel}</span>
+              <ChevronDown size={12} className="shrink-0 text-fg-faint" />
+            </>
+          }
+          // 视觉上照抄 `Select` 的触发器类名(与 GeneralPage 的 RoleModelPicker 同款)
+          triggerClassName={cn(
+            "group flex h-7 w-full items-center gap-1.5 rounded-[7px] border border-border",
+            "bg-surface-field px-2 text-left text-[11.5px] text-fg outline-none",
+            "transition-[background-color,border-color,box-shadow] duration-150",
+            "hover:bg-tint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15"
+          )}
+          className="w-full"
+          align="end"
+          width={280}
+          ariaLabel={t("imageGen.model")}
+          menuLabel={t("imageGen.modelPick")}
+          loaded={loaded}
+          loadingLabel={t("common.loading")}
+          emptyLabel={t("imageGen.noImageModels")}
+          rows={rows}
+          onSelectModel={(providerId, alias) => patch({ imageModel: alias, imageModelProviderId: providerId })}
+        />
+      </div>
     </div>
   );
 }

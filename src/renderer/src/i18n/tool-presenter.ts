@@ -58,6 +58,8 @@ export const toolPresenterZh: Record<PresenterCopyKey, MessageValue> = {
   // target 是模型写的 snake_case 标识(已去下划线),属领域值,由 ToolLine.target 给
   'chat.tool.title.widget': '画图',
   'chat.tool.title.readMe': '加载可视化规范',
+  'chat.tool.title.generateImage': '生成图片',
+  'chat.tool.title.editImage': '编辑图片',
   'chat.tool.fallback': '工具调用',
   'chat.tool.summary.lines': '{count} 行',
   'chat.tool.summary.items': '{count} 项',
@@ -103,6 +105,8 @@ export const toolPresenterEn: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.title.planReview': 'Submitting the plan',
   'chat.tool.title.widget': 'Visualize',
   'chat.tool.title.readMe': 'Loading visual guidelines',
+  'chat.tool.title.generateImage': 'Generate image',
+  'chat.tool.title.editImage': 'Edit image',
   'chat.tool.fallback': 'Tool call',
   'chat.tool.summary.lines': '{count} lines',
   'chat.tool.summary.items': '{count} items',

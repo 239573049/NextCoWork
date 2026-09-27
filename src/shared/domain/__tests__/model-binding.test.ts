@@ -44,6 +44,25 @@ describe('catalogue-backed provider metadata', () => {
     expect(raw.capabilities.thinking).toBe(false)
   })
 
+  /*
+    ★★ **「选了图片模型却说没有工具」那次事故的前提就在这。**
+    目录收录的图片模型,落库记录可能一行图片信息都没写,甚至带着
+    `imageOutput: false` 的导入默认值(登录同步/老导入发生在目录收录之前):
+    **原始记录**因此长得像文本模型,**解析后**才有 `modality: 'image'` /
+    `imageOutput: true`。消费方是 `kernel/image-gen.ts` 的桥 —— 它判断「设置里
+    点名的是不是图片模型」时必须吃 `listResolvedModels()`(runtime.ts 的装配点),
+    吃 `store.listAliases()` 的症状是:设置页下拉里能选中(那边是解析后的)、
+    保存成功,但对话里 `generate_image` 整体不下发,零报错。
+  */
+  it('目录才知道是图片的模型:原始记录没写模态(还带着 imageOutput:false 的导入默认值),解析后才是图片模型', () => {
+    const raw = imported({ alias: 'gpt-image-2.5-sunburst', upstreamModel: 'gpt-image-2.5-sunburst' })
+    expect(raw.modality).toBeUndefined()
+    expect(raw.capabilities.imageOutput).toBe(false)
+    const model = modelBindingResolver().resolve(raw)
+    expect(model.modality).toBe('image')
+    expect(model.capabilities.imageOutput).toBe(true)
+  })
+
   it('keeps identifiable legacy provider customizations while filling other metadata', () => {
     // ★ 这里用 caching 而不是 tools 举例:`tools: false` 曾经是目录默认值,
     // 于是旧记录上的它**无法**和「从没设过」区分开(见下一条测试)。caching 没这个历史包袱。

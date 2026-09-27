@@ -69,10 +69,11 @@ import { useI18n, type TranslationKey } from "../../../i18n";
 import { ModelProtocolEditor, modelProtocolSummary } from "./ModelProtocol";
 import { ImageModelPage } from "./ImageModelPage";
 
-export function ModelPage({ settings, sub }: SettingsPageProps): ReactNode {
+export function ModelPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
   const tab = parseModelTab(sub);
   if (tab === "management") return <ModelConsole />;
-  if (tab === "image") return <ImageModelPage />;
+  // 图片页要 settings/patch:页脚那行「对话生图使用的模型」是全局设置(见 ImageGenModelRow)
+  if (tab === "image") return <ImageModelPage settings={settings} patch={patch} />;
   if (tab !== "text") return <StubModalityPage modality={tab} />;
   return <LegacyTextTab settings={settings} />;
 }

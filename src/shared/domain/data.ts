@@ -356,8 +356,19 @@ function isAppSettings(value: unknown): boolean {
     (has(v, 'goalEvaluatorModel') && typeof v.goalEvaluatorModel !== 'string') ||
     !optionalString(v, 'goalEvaluatorModelProviderId') ||
     (has(v, 'modelProposedGoals') && !enumValue(v.modelProposedGoals, MODEL_PROPOSED_GOALS)) ||
+    // ★ 压缩模型那一对和档位同理:缺席 = 这份导出早于这两栏,必须放行并与默认值合并
+    //   (默认就是「跟随会话模型 / 跟随会话档位」,也就是这两栏出现之前的行为)。
+    (has(v, 'compactModel') && typeof v.compactModel !== 'string') ||
+    !optionalString(v, 'compactModelProviderId') ||
+    (has(v, 'compactThinking') && !isSubagentThinking(v.compactThinking)) ||
     typeof v.defaultModel !== 'string' ||
     !optionalString(v, 'defaultModelProviderId') ||
+    // ★ 生图模型那一对同理:缺席 = 旧导出,放行并与默认值合并(默认是「没选过」,
+    //   `generate_image` 不下发,正是这一栏出现之前的行为)。
+    (has(v, 'imageModel') && typeof v.imageModel !== 'string') ||
+    !optionalString(v, 'imageModelProviderId') ||
+    // 生图开关同理:缺席 = 旧导出,放行(默认开启);在场就必须是布尔
+    (has(v, 'imageGenerationEnabled') && typeof v.imageGenerationEnabled !== 'boolean') ||
     (has(v, 'contextManagement') && !isContextManagementSettings(v.contextManagement)) ||
     !isSubagentSettings(v.subagent) ||
     !isGatewaySettings(v.gateway) ||
@@ -504,6 +515,12 @@ function isWorkspaceSettings(value: unknown): boolean {
     // ★ 必须是 optionalBoolean:改动之前导出的备份里没有这一项,用 isBoolean
     //   会让整份 DataExport 在导入时被拒(isWorkspaceSettings → isWorkspace → 全份失败)。
     optionalBoolean(value, 'maxContext') &&
+    // 压缩覆盖那三项同理:缺席 = 旧备份,放行。★ `compactModel` 允许 `null` ——
+    // 那是「显式跟随会话模型」,和「没配」是两个答案(见 workspace.ts 的三态)。
+    (value.compactModel === undefined || value.compactModel === null || typeof value.compactModel === 'string') &&
+    optionalString(value, 'compactModelProviderId') &&
+    // `compactThinking` 的 `null` 是「改回跟随全局设置」写进来的值(浅合并清不掉键)。
+    (value.compactThinking === undefined || value.compactThinking === null || isSubagentThinking(value.compactThinking)) &&
     stringArray(value.activeSkillIds) &&
     (value.skillSelectionMode === undefined || enumValue(value.skillSelectionMode, ['all', 'explicit'] as const))
   )
@@ -584,9 +601,25 @@ function isContentPart(value: unknown): boolean {
         && isIntegerAtLeast(value.preTokens, 0) && isIntegerAtLeast(value.postTokens, 0)
         && typeof value.summary === 'string' && optionalString(value, 'instructions')
         && (!has(value, 'restoredFiles') || (Array.isArray(value.restoredFiles) && value.restoredFiles.every((f) => typeof f === 'string')))
+        // 写摘要的那个模型:后加的字段,缺席 = 这条边界压缩于它出现之前,放行。
+        && (!has(value, 'summaryModel') || isCompactSummaryModel(value.summaryModel))
     default:
       return false
   }
+}
+
+/**
+ * 压缩边界上「写这份摘要的是谁」。
+ *
+ * ★ `thinking` 只校验成字符串枚举中的一个 —— 它是**当时实际下发的档位**,是一条历史事实,
+ *   不是待执行的配置;拿今天的模型声明去判它合不合法会把一份老存档整份拒掉。
+ */
+function isCompactSummaryModel(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return isNonEmptyString(value.model)
+    && optionalString(value, 'modelProviderId')
+    && enumValue(value.thinking, THINKING_LEVELS)
+    && optionalBoolean(value, 'fellBack')
 }
 
 function isSubagentResult(value: unknown): boolean {

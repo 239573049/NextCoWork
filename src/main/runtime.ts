@@ -32,7 +32,7 @@ import { createTodoReconciler } from './kernel/todo-reconciliation'
 import { abortable } from './kernel/abort'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
-import { TOOLS_NEEDING_NETWORK, evaluate } from './kernel/permission-gate'
+import { NETWORK_SWITCH_TOOLS, evaluate } from './kernel/permission-gate'
 import { decideAfterHooks, decideBeforeHooks } from './kernel/permission-decision'
 import { addLocalPermissionRule, readLocalSettings } from './kernel/local-settings'
 import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/permission-rule'
@@ -83,13 +83,16 @@ import {
 } from '../shared/domain/presets'
 import type { ModelAlias, UpstreamProtocol } from '../shared/domain/provider'
 import { subagentModelSelection } from '../shared/domain/model-selection'
-import { normalizeModelThinkingLevel } from '../shared/domain/model-runtime'
+import { auxiliaryThinkingLevel, normalizeModelThinkingLevel } from '../shared/domain/model-runtime'
 import { subagentThinkingSelection, type SubagentThinking } from '../shared/domain/subagent-thinking'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
 import { store } from './state/store'
 import { schedulingBridgeFor } from './scheduled/bridge'
 import { shellBridgeFor } from './agent-shells'
+import { imageGenBridgeFor } from './kernel/image-gen'
+import { resolveImageDataRef } from './kernel/upstream/images'
+import { parseCredential } from '../shared/domain/credential'
 import { listResolvedModels } from './state/model-bindings'
 import { PRICING_SEED } from '../shared/domain/pricing-seed'
 import { findPricing, priceOf } from '../shared/domain/pricing'
@@ -2011,10 +2014,12 @@ function slotRefusalReason(reason: SlotRefusal, perSessionLimit: number, globalL
  * `evaluate()` 是纯策略判断;`ask` 的异步审批由 InteractionGate 持有,
  * 所以窗口重载不会丢掉待决项,中断也能结束等待。
  *
- * ★ `needsNetwork` 是**取或**,不是二选一:工具自己声明的那个字段,
- * 加上 `TOOLS_NEEDING_NETWORK` 这张下限表。表里的名字无论字段怎么填都算联网,
- * 所以一个字段被写错(或将来某个注册路径忘了填)也放不宽这道闸。
- * 为什么不只留表、也不只留字段,`TOOLS_NEEDING_NETWORK` 的注释写全了。
+ * ★ 喂给闸门的 `needsNetwork` **只看 `NETWORK_SWITCH_TOOLS` 名单**(WebFetch / web_search),
+ * 不再看工具自己的 `needsNetwork` 字段。原先这里是「字段 || `TOOLS_NEEDING_NETWORK`
+ * 下限表」取或,理由是「字段写错也放不宽这道闸」——那是开关管所有出网工具时的设计;
+ * 用户把开关收窄成「只管网页搜索与抓取」之后(见名单注释),字段只剩事实描述,
+ * 再取或就会把浏览器、生图、远程 MCP 重新拉回这道闸,和快照过滤分家
+ * (`registry.snapshot({ network })` 读的是同一张名单)。
  *
  * ★ 判定顺序在 `approveWith` 里,**顺序即语义**:
  * 联网开关 → 本地 `deny` → 本地 `ask`(压过下面两步)→ 档位 → 本地 `allow` → AI 审核 → 问人。
@@ -2038,7 +2043,8 @@ async function reviewSensitiveOperation(
 ): Promise<ReviewResult> {
   reviewerModel = reviewerModel.trim()
   if (reviewerModel === '') return 'unknown'
-  if (getRouter().resolveModel(reviewerModel, reviewerModelProviderId) === undefined) {
+  const reviewerAlias = getRouter().resolveModel(reviewerModel, reviewerModelProviderId)
+  if (reviewerAlias === undefined) {
     getHost().logger.warn(`[permission-review] configured model is unavailable: ${reviewerModel}`)
     return 'unknown'
   }
@@ -2063,7 +2069,15 @@ async function reviewSensitiveOperation(
     messages: [userMessage(ulid(getHost().clock.now()), [{ type: 'text', text: prompt }], getHost().clock.now())],
     tools: [],
     maxOutputTokens: 128,
-    thinkingLevel: 'off'
+    /*
+      需求:审核请求要短要快,能不思考就不思考。★ 但**不能硬发 `'off'`**:
+      `gpt-6-*` 这类 effort 模型的 `reasoningEfforts` 不含 `'none'`,`thinking-adapter`
+      会直接抛「该模型不支持关闭推理」—— 这里 catch 到之后返回 `unknown`,于是
+      「为我批准」在这些模型上**每一次都退回人工审批**,而用户只会觉得这个功能没生效。
+      `auxiliaryThinkingLevel` 在关不掉的模型上降到最低可用档,绝不抛(压缩、目标判定、
+      会话标题共用这一个规则)。
+    */
+    thinkingLevel: auxiliaryThinkingLevel('off', reviewerAlias)
   }
   let text = ''
   try {
@@ -2124,7 +2138,7 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
       // Plan mode fences Write/Edit to one generated .plan file, so its workflow does not prompt twice.
       readOnly: tool.readOnly || trustedPlanFileTool,
       destructive: tool.destructive,
-      needsNetwork: tool.needsNetwork || TOOLS_NEEDING_NETWORK.has(tool.internalId),
+      needsNetwork: NETWORK_SWITCH_TOOLS.has(tool.internalId),
       webSearch: req.webSearch
     })
     const host = getHost()
@@ -2561,6 +2575,19 @@ export async function runAgent(
        */
       history,
       contextManagement: store.getSettings().contextManagement,
+      /*
+        需求:压缩用哪个模型 / 哪个思考档位,同样按 run 开始那一刻的设置冻结
+        (同下面的输出额度)。三档来源是「工作区 > 全局 > 会话模型」,
+        所以两份都要传 —— 只传全局的话,圆环菜单里那两栏在自动压缩上永远不生效。
+      */
+      compaction: {
+        model: store.getSettings().compactModel,
+        ...(store.getSettings().compactModelProviderId === undefined
+          ? {}
+          : { modelProviderId: store.getSettings().compactModelProviderId }),
+        thinking: store.getSettings().compactThinking
+      },
+      workspaceCompaction: workspace.settings,
       // 需求:输出额度按 run 开始那一刻的设置冻结,和权限档位同一个口径
       //(「下一次新回复生效」)—— 跑到一半改设置不该让同一个 run 前后两轮额度不同。
       maxOutputTokens: store.getSettings().maxOutputTokens,
@@ -2596,6 +2623,49 @@ export async function runAgent(
         environment,
         retain: () => getEnvironments().retain(environment),
         now: () => getHost().clock.now()
+      }),
+      /*
+        对话内生图的通道。★ 和 `scheduling` / `shells` 一样**每个 run 都装**:
+        有没有生图模型由桥自己的 `available()` 现答(它读的是设置页那份配置),
+        「装不装桥」不该随配置变化 —— 否则改一次设置就多一条装配路径。
+
+        ★ 密钥在这里读、在桥里用:内核拿到的只有 `credential(ref)` 这一个回调,
+        `secrets` 本体不进工具链(理由同 `ToolHost` 刻意少了 `secrets` 那两条)。
+      */
+      imageGen: imageGenBridgeFor({
+        providers: () => store.listProviders(),
+        /*
+          ★★ 必须是**解析后**的别名(`listResolvedModels`,与路由器 `providerConfig.aliases`
+          和设置页 `provider:listModels` 同一个口径),不能用 `store.listAliases()` 的
+          原始落库记录:目录收录的图片模型,它的 modality/能力位可能从来没写进库
+          (登录同步/老导入发生在目录收录之前),原始记录因此长得像文本模型。
+          用原始记录的症状是:「图片生成」设置页的下拉里**能选中**这个模型(那边读
+          解析后的),保存也成功,但对话里 `generate_image` 整体不下发,零报错 ——
+          用户看到的就是「选了图片模型却说没有工具」。
+        */
+        aliases: () => listResolvedModels(),
+        /*
+          用户点名的生图模型(`AppSettings.imageModel` 那一对)。★ 每次现读,
+          不缓存:设置的唯一权威在主进程,缓存一份的表现是改完设置对话里还用旧模型。
+          空串 = 没选过 → 桥答「没有可用模型」,工具不下发。
+        */
+        preferredModel: () => {
+          const settings = store.getSettings()
+          return settings.imageModel === ''
+            ? null
+            : { alias: settings.imageModel, providerId: settings.imageModelProviderId }
+        },
+        // 「对话生图」开关,同样现读(理由同上):关掉后下一轮起工具不再下发
+        enabled: () => store.getSettings().imageGenerationEnabled === true,
+        credential: async (ref) => parseCredential(await getHost().secrets.get(ref)),
+        fetch: (input, init) => getHost().fetch(input, init),
+        /*
+          改图的源图解析。★ 复用 `resolveImageDataRef`(发上游请求时解析附件的
+          同一个函数):会话归属、路径围栏、大小、魔数那套校验只有一份,
+          两份实现迟早漏一份,而漏的那份就是能读到别的会话附件的路。
+          sessionId 给的是**这次 run 所属的会话** —— 和上游请求那侧同一个口径。
+        */
+        resolveImage: (source, signal) => resolveImageDataRef(source, getHost(), { sessionId: req.sessionId }, signal)
       }),
       acceptsGoalInput: (goalId) => primary && getActiveGoal(req.sessionId)?.id === goalId,
       prepareMessage: (message) => primary ? prepareGoalMessage(req.sessionId, message) : message,

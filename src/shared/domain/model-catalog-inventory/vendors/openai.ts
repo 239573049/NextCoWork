@@ -300,6 +300,37 @@ export const OPENAI: readonly BuiltinModelRecord[] = [
 ]
 
 export const OPENAI_MEDIA: readonly BuiltinModelRecord[] = [
+  /*
+   * 需求:把 GPT-Image-2.5 世代补进目录(2026-09-25 从官方模型页核对)。
+   * 没有这两行的症状:「模型管理」里查不到它们,登录/拉列表拿到这两个 ID 时
+   * `model-binding` 目录落空 —— modality 保持 text、imageOutput 保持 false,
+   * 于是它们既不出现在「图片生成」页,也不会被识别成生图模型。
+   *
+   * ★ 两款只走 `v1/images/generations` 与 `v1/images/edits`,**chat/completions
+   * 与 responses 都是 Not supported**(官方 Endpoints 表)—— 目录不记协议,
+   * 发错端点的表现是上游一句 404/405,读不出和「这模型不走对话端点」的关系。
+   * ★ 计价按 token(图输出 $30/1M),不是按张;`pricingModelId` 沿用 id。
+   */
+  model('openai', 'gpt-image-2.5-sunburst', 'GPT Image 2.5 Sunburst', {
+    modality: 'image',
+    capabilities: imageCapabilities({
+      vision: true,
+      visionInput: true,
+      fileInput: true,
+    }),
+    source: { url: 'https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst', fetchedAt: '2026-09-25' },
+    verificationStatus: 'official-api',
+  }),
+  model('openai', 'gpt-image-2.5-flare', 'GPT Image 2.5 Flare', {
+    modality: 'image',
+    capabilities: imageCapabilities({
+      vision: true,
+      visionInput: true,
+      fileInput: true,
+    }),
+    source: { url: 'https://developers.openai.com/api/docs/models/gpt-image-2.5-flare', fetchedAt: '2026-09-25' },
+    verificationStatus: 'official-api',
+  }),
   model('openai', 'gpt-image-2', 'GPT Image 2', {
     modality: 'image',
     capabilities: imageCapabilities({

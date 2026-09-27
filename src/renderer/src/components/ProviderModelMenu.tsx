@@ -58,7 +58,8 @@ export function ProviderModelMenu({
   emptyLabel,
   rows,
   topItem,
-  onSelectModel
+  onSelectModel,
+  onOpenChange
 }: {
   /** 触发按钮的内容;按钮本身由内部的 `Menu` 渲染。 */
   trigger: ReactNode
@@ -93,6 +94,11 @@ export function ProviderModelMenu({
    */
   topItem?: { label: string; selected: boolean; onSelect: () => void }
   onSelectModel: (providerId: string, alias: string) => void
+  /**
+   * 打开/关闭回调。★ 对话模型选择器用它做「打开时校正」(见 `useChatModelGuard`);
+   * 可选,缺省不影响任何现有调用方的行为。
+   */
+  onOpenChange?: (open: boolean) => void
 }): ReactNode {
   const [openRowId, setOpenRowId] = useState<string | null>(null)
   const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(null)
@@ -120,6 +126,7 @@ export function ProviderModelMenu({
             setOpenRowId(null)
             setSubmenuAnchor(null)
           }
+          onOpenChange?.(open)
         }}
         containsTarget={(target) => submenuRef.current?.contains(target) ?? false}
       >

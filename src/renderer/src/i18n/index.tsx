@@ -19,6 +19,7 @@ import { sshZh, sshEn } from './ssh';
 import { workspaceZh, workspaceEn } from './workspace';
 import { extensionsZh, extensionsEn } from './extensions';
 import { gitZh, gitEn } from './git';
+import { compactionZh, compactionEn } from './compaction';
 import { usageZh, usageEn } from './usage';
 import { providerAccountsZh, providerAccountsEn } from './provider-accounts';
 import { searchZh, searchEn } from './search';
@@ -33,6 +34,7 @@ import { accountMenuZh, accountMenuEn } from './account-menu';
 import { rewardsZh, rewardsEn } from './rewards';
 import { walletZh, walletEn } from './wallet';
 import { pluginUiZh, pluginUiEn } from './plugin-ui';
+import { imageGenZh, imageGenEn } from './image-gen';
 import {
   pluginMessages,
   pluginMessagesVersion,
@@ -61,6 +63,8 @@ const ZH: Messages = {
   ...pluginSkillsZh,
   ...extensionsZh,
   ...gitZh,
+  ...compactionZh,
+  ...imageGenZh,
   ...pluginUiZh,
   ...usageZh,
   ...providerAccountsZh,
@@ -498,7 +502,7 @@ const ZH: Messages = {
   "composer.skills": "Skills",
   "composer.skillsHint": "在这次提示词中插入 Skill",
   "composer.webSearch": "联网搜索",
-  "composer.webSearchHint": "完全访问档位也受它约束",
+  "composer.webSearchHint": "只管网页搜索与网页抓取；完全访问档位也受它约束",
   "composer.approvalHint": "AI 操作如何审批？更改会在下一次新回复生效",
   "composer.stopGeneration": "停止生成",
   "composer.noAvailableModel": "还没有可用的模型",
@@ -2040,6 +2044,8 @@ const EN: Messages = {
   ...pluginSkillsEn,
   ...extensionsEn,
   ...gitEn,
+  ...compactionEn,
+  ...imageGenEn,
   ...pluginUiEn,
   ...themesEn,
   ...agentEn,
@@ -2473,7 +2479,7 @@ const EN: Messages = {
   "composer.skills": "Skills",
   "composer.skillsHint": "Insert a Skill into this prompt",
   "composer.webSearch": "Web search",
-  "composer.webSearchHint": "This is still restricted by the permission level",
+  "composer.webSearchHint": "Controls web search and web fetch only; applies even in full access",
   "composer.approvalHint":
     "How should AI actions be approved? Changes apply to the next reply",
   "composer.stopGeneration": "Stop generation",

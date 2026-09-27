@@ -23,6 +23,7 @@ import { Dialog } from '../components/ui/Dialog'
 import { Segmented } from '../components/ui/Segmented'
 import { Select } from '../components/ui/Select'
 import { TextInput } from '../components/ui/TextInput'
+import { useChatModelGuard } from '../components/useChatModelGuard'
 import { useI18n } from '../i18n'
 import { updateWorkspace } from '../services/app'
 import { modelOptions } from '../settings/pages/model/enabled-models'
@@ -70,6 +71,21 @@ export function EditWorkspaceDialog({
   const [deleting, setDeleting] = useState(false)
   const [armDelete, setArmDelete] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  /*
+    需求:工作区默认模型也只列文本模型,存量里选中了图片模型的在**打开选择器时**
+    校正成第一个文本模型并提示(见 `useChatModelGuard` 文件头;改的是这个弹窗的
+    草稿态,落盘仍走「保存」—— 那是这个弹窗一贯的语义)。
+  */
+  const guardChatModel = useChatModelGuard(
+    models,
+    providers,
+    { model, modelProviderId },
+    (nextModel, nextProviderId) => {
+      setModel(nextModel)
+      setModelProviderId(nextProviderId)
+    }
+  )
 
   /*
     需求：换一个工作区（或者弹窗整个关掉）都要把草稿和「已经按过一次删除」的
@@ -205,6 +221,7 @@ export function EditWorkspaceDialog({
               options={modelOptionList}
               ariaLabel={t('workspace.defaultModel')}
               inModal
+              onOpenChange={guardChatModel}
               onValueChange={(value) => {
                 const selected = parseModelSelectionKey(value)
                 setModel(selected.alias)

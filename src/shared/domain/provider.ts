@@ -284,6 +284,33 @@ export function effectiveModelProtocol(
   return alias.protocolOverride ?? provider.protocol
 }
 
+/**
+ * 这条别名是**图片模型**吗。
+ *
+ * 需求:三个消费方共用同一条判据,分家的症状各不相同但都不报错 ——
+ * 1. 「图片生成」设置页的供应商列表/模型选择器(`ImageModelPage`)过滤;
+ * 2. 对话模型选择器(输入框、通用页、工作区、Hooks)**反向**过滤,不让图片模型
+ *    混进聊天模型列表 —— 选中它发消息是一次注定失败的对话;
+ * 3. 生图桥(`kernel/image-gen.ts`)确认点名的模型确实是图片模型。
+ *
+ * ★ 判据是 `modality === 'image' || capabilities.imageOutput === true` 两路取或:
+ *   目录收录的模型带 modality,拉取/手建的只有能力位,缺一边都会漏一族。
+ */
+export function isImageModelAlias(alias: Pick<ModelAlias, 'modality' | 'capabilities'>): boolean {
+  return alias.modality === 'image' || alias.capabilities.imageOutput === true
+}
+
+/**
+ * 这条别名能当**对话模型**吗(与 `isImageModelAlias` 互补 + 排除纯输出非文本的)。
+ *
+ * 需求:所有「选对话模型」的选择器都用它过滤(见 `isImageModelAlias` 的消费方清单第 2 条)。
+ * `textOutput !== false` 那半排除的是显式标了「不产文本」的模型(纯生图/纯视频),
+ * 它们即使没被认成图片模型,照样不是聊天候选 —— 让用户选中它是画一个失效的控件。
+ */
+export function isChatModelAlias(alias: Pick<ModelAlias, 'modality' | 'capabilities'>): boolean {
+  return !isImageModelAlias(alias) && alias.capabilities.textOutput !== false
+}
+
 export const MODEL_METADATA_FIELDS = [
   'displayName', 'modality', 'contextWindow', 'maxOutputTokens',
   'thinkingConfig', 'reasoningEfforts', 'requestAdapter', 'source'

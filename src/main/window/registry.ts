@@ -48,14 +48,29 @@ class WindowRegistry {
    */
   private readonly destroyHooked = new WeakSet<WebContents>()
 
+  /**
+   * 应用自己的窗口(主窗 / ⌥Space 快捷窗)的 webContents。**只有窗口真的销毁时才移除。**
+   *
+   * ★ 和上面那张 `windows` 表的区别正是**移除时机**:`windows` 会被 `send()` 在
+   * 「帧已经死了」的那一刻顺手 forget 掉(⌘R 重载就是这样,重载完 `window:ready`
+   * 再 register 回来)。那对推送是对的 —— 一个收不到消息的订阅者就该摘掉;
+   * 但「这扇窗还在不在」不能拿它来答:重载的那一瞬间会答成「一扇都没有」,
+   * 于是点 Dock 又开出一扇一模一样的新窗、退出时这扇窗没人关只能等 6 秒兜底。
+   */
+  private readonly liveWindows = new Map<number, WebContents>()
+
   register(sender: WebContents, kind: WindowKind): WindowContext {
     const ctx: WindowContext = { id: sender.id, kind, sender }
     this.windows.set(sender.id, ctx)
+    this.liveWindows.set(sender.id, sender)
     // 窗口销毁时把它从所有 topic 里摘掉,否则 topics 会无限增长,
     // 且每次 emit 都要对着一堆死 webContents 做 isDestroyed 判断
     if (!this.destroyHooked.has(sender)) {
       this.destroyHooked.add(sender)
-      sender.once('destroyed', () => this.forget(sender.id))
+      sender.once('destroyed', () => {
+        this.liveWindows.delete(sender.id)
+        this.forget(sender.id)
+      })
     }
     return ctx
   }
@@ -176,9 +191,17 @@ class WindowRegistry {
     return this.topics.get(topic)?.has(sender.id) === true
   }
 
-  /** Bring the existing main window back when a background notification is clicked. */
+  /**
+   * Bring the existing main window back when a background notification is clicked.
+   *
+   * ★ 只在**本注册表**里找,不用 `BrowserWindow.getAllWindows()`:后者还包含每个
+   * 插件一扇的隐藏宿主窗(`plugin/host-window.ts`,`show:false`,页面是空壳)。
+   * 主窗已经销毁的那几个时刻(退出第一段刚关掉它、`forceClose()` 之后)取「第一扇
+   * 没销毁的窗」拿到的正是它,于是点一下通知弹出来的是**一扇纯白空窗**,
+   * 而要唤回的界面根本没出现。`listWindows()` 只有主窗与 ⌥Space 快捷窗,且已滤掉已销毁的。
+   */
   showMainWindow(): void {
-    const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed())
+    const [win] = this.listWindows()
     if (win === undefined) return
     if (win.isMinimized()) win.restore()
     win.show()
@@ -250,19 +273,25 @@ class WindowRegistry {
   }
 
   /**
-   * 注册表里的窗口,取回 `BrowserWindow` —— 退出流程要关它们(`main/quit-flow.ts`)。
+   * 注册表里的窗口,取回 `BrowserWindow` —— 退出流程要关它们(`main/quit-flow.ts`),
+   * 唤回路径要显示它们(`showMainWindow`)。
    *
    * ★ **插件宿主窗不在这里**,它们住在 `plugin/host-window.ts` 自己的表里,这是
    * 有意的:退出时不去关第三方代码的窗口,那等于让它的 `beforeunload` 有机会
    * 拖住退出,而它连我们自己的「有未保存的改动」对话框都调不出来。
+   *
+   * ★ 遍历的是 `liveWindows` 而不是 `windows`:后者会被 `send()` 在帧死掉的那一刻
+   * forget 掉,而那一刻窗口其实还在(见 `liveWindows` 的注释)。原先遍历
+   * `windows` 时,渲染层重载的那一瞬间这里会返回空数组。
    *
    * `fromWebContents` 可能返回 null(窗口刚销毁、上下文还留着),所以逐个判,
    * 不假设一定拿得到。
    */
   listWindows(): BrowserWindow[] {
     const found: BrowserWindow[] = []
-    for (const ctx of this.windows.values()) {
-      const win = BrowserWindow.fromWebContents(ctx.sender)
+    for (const sender of this.liveWindows.values()) {
+      if (sender.isDestroyed()) continue
+      const win = BrowserWindow.fromWebContents(sender)
       if (win !== null && !win.isDestroyed()) found.push(win)
     }
     return found

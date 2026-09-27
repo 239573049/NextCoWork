@@ -23,6 +23,7 @@ import {
 } from '../../../../../shared/domain/model-selection'
 import type { InvokeReq } from '../../../../../shared/ipc/contract'
 import { Button } from '../../../components/ui/Button'
+import { useChatModelGuard } from '../../../components/useChatModelGuard'
 import { Dialog } from '../../../components/ui/Dialog'
 import { EmptyState } from '../../../components/ui/EmptyState'
 import { NumberInput } from '../../../components/ui/NumberInput'
@@ -93,6 +94,26 @@ export function HooksPanel(): ReactNode {
    * 那正是「预览」这个词最坏的一种失效方式。
    */
   const [testResult, setTestResult] = useState<HookRunReport | null>(null)
+
+  /*
+    需求:prompt 型钩子的模型选择器只列文本模型,存量钩子里钉着图片模型的在
+    **打开选择器时**校正成第一个文本模型并提示(见 `useChatModelGuard` 文件头;
+    改的是编辑草稿,落盘仍走「保存」)。
+  */
+  const guardChatModel = useChatModelGuard(
+    models,
+    providers,
+    {
+      model: editing?.draft.model ?? '',
+      modelProviderId: editing?.draft.modelProviderId.trim() === ''
+        ? undefined
+        : editing?.draft.modelProviderId
+    },
+    (model, modelProviderId) => {
+      if (editing === null) return
+      setEditing({ ...editing, draft: { ...editing.draft, model, modelProviderId } })
+    }
+  )
 
   useEffect(() => {
     if (!modelsLoaded) void loadModels()
@@ -424,6 +445,7 @@ export function HooksPanel(): ReactNode {
                     value={currentModelKey}
                     options={promptModelOptions}
                     ariaLabel={t('hooks.prompt.model')}
+                    onOpenChange={guardChatModel}
                     onValueChange={(key) => {
                       const { alias, modelProviderId } = parseModelSelectionKey(key)
                       // 空键 = 两半一起清掉:只留一个 providerId 配不出任何一条绑定。

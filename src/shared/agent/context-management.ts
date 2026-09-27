@@ -69,7 +69,15 @@ export function effectiveContextWindow(
   压完仍然为真,永远收敛不了。封底到窗口的一半。
 */
 
-/** 摘要请求的输出上限,同 CC 的 `COMPACT_MAX_OUTPUT_TOKENS`。阈值里也为它留位置。 */
+/**
+ * 摘要请求的输出上限,同 CC 的 `COMPACT_MAX_OUTPUT_TOKENS`。阈值里也为它留位置。
+ *
+ * ★ 它现在**只**服务于下面 `autoCompactThreshold` 那一层的预留 —— 回答的是
+ * 「正文什么时候该压」。摘要请求**实际**发多大的 `max_tokens` 不再读它:那个跟随
+ * 全局设置项、再按压缩模型自己的窗口夹(`main/kernel/compaction/binding.ts`)。
+ * 两个数**不是同一个东西,别合并**:这一层的分母是会话模型的有效窗口,
+ * 那一层的分母是压缩模型的协议窗口,而这两个模型现在可以不是同一个。
+ */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000
 /** 阈值与有效窗口之间的缓冲,同 CC 的 `AUTOCOMPACT_BUFFER_TOKENS`。 */
 export const AUTOCOMPACT_BUFFER_TOKENS = 13_000

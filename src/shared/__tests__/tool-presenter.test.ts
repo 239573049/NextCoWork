@@ -328,7 +328,9 @@ describe('注册表完整性', () => {
     // 可视化那一对。`visualize_read_me` 走 `external`、`visualize_show_widget`
     // 是 `widget` 形态 —— 后者是**内置专用**的形态,见 `ToolShape` 上那段说明。
     'visualize_read_me',
-    'visualize_show_widget'
+    'visualize_show_widget',
+    // 对话内生图 —— `network` 形态,行的主语是 prompt 片段
+    'generate_image'
   ]
 
   it('每个内置工具都在注册表里', () => {

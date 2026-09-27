@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentMessage } from '../../agent/message'
 import type { ModelAlias, ThinkingConfig } from '../provider'
-import { modelThinkingLevels, normalizeModelThinkingLevel, resolveModelThinking, validateModelRuntime } from '../model-runtime'
+import { auxiliaryThinkingLevel, modelThinkingLevels, normalizeModelThinkingLevel, resolveModelThinking, validateModelRuntime } from '../model-runtime'
 
 const message = (types: string[]): AgentMessage => ({
   id: 'm1',
@@ -153,5 +153,49 @@ describe('validateModelRuntime', () => {
       estimatedInputTokens: 7_000,
       maxOutputTokens: 2_000
     }).map((issue) => issue.code)).not.toContain('context_length')
+  })
+})
+
+/**
+ * 需求:压缩 / 目标判定 / 权限审核 / 会话标题这些旁路请求想「尽量别思考」,
+ * 但**绝不能因为档位不可用而失败**。这一组盯的正是那条失败:
+ * `gpt-6-*` 的 reasoningEfforts 不含 'none',硬发 'off' 会被 thinking-adapter
+ * 抛成不可重试的错 —— 压缩每次必败、三次熔断、上下文再也压不下去,全程零报错。
+ */
+describe('auxiliaryThinkingLevel', () => {
+  it('keeps the wanted level when the model accepts it', () => {
+    const model = alias({ thinkingConfig: { mode: 'effort', defaultEnabled: true },
+      reasoningEfforts: ['none', 'low', 'high'] })
+    expect(auxiliaryThinkingLevel('off', model)).toBe('off')
+    expect(auxiliaryThinkingLevel('high', model)).toBe('high')
+  })
+
+  it('★ falls back to the lowest available strength when the model cannot disable reasoning', () => {
+    // gpt-6-astra / sol / luna 的档位集合(openAiAstraEfforts):没有 none。
+    const gpt6 = alias({ thinkingConfig: { mode: 'effort', defaultEnabled: true },
+      reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    expect(auxiliaryThinkingLevel('off', gpt6)).toBe('low')
+  })
+
+  it('steps down to the closest weaker level instead of returning auto', () => {
+    const model = alias({ thinkingConfig: { mode: 'effort', defaultEnabled: true },
+      reasoningEfforts: ['none', 'low', 'max'] })
+    // high 不在表里 —— 取「不超过它的最强一档」= low,而不是 normalize 的 'auto'。
+    expect(auxiliaryThinkingLevel('high', model)).toBe('low')
+    expect(normalizeModelThinkingLevel('high', model)).toBe('auto')
+  })
+
+  it('returns auto for auto, for reasoning-only models and when the model is unknown', () => {
+    const always = alias({ thinkingConfig: { mode: 'always', defaultEnabled: true } })
+    expect(auxiliaryThinkingLevel('auto', alias())).toBe('auto')
+    expect(auxiliaryThinkingLevel('off', always)).toBe('auto')
+    expect(auxiliaryThinkingLevel('off', undefined)).toBe('auto')
+  })
+
+  it('keeps Off available on toggle models', () => {
+    const toggle = alias({ thinkingConfig: { mode: 'toggle', defaultEnabled: true } })
+    expect(auxiliaryThinkingLevel('off', toggle)).toBe('off')
+    // 轨道只有 ['auto','medium','off'],high 降到 medium。
+    expect(auxiliaryThinkingLevel('high', toggle)).toBe('medium')
   })
 })

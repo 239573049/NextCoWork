@@ -2,6 +2,7 @@ import type { AgentMessage } from '../agent/message'
 import {
   THINKING_BUDGET,
   THINKING_LEVELS,
+  THINKING_STRENGTH,
   type ThinkingLevel
 } from '../agent/run-request'
 import type { ModelAlias, ModelCapabilities, ReasoningEffort, ThinkingConfig } from './provider'
@@ -48,6 +49,40 @@ export function modelThinkingLevels(model: ThinkingModel | undefined): readonly 
 export function normalizeModelThinkingLevel(level: ThinkingLevel, model: ThinkingModel | undefined): ThinkingLevel {
   const levels = modelThinkingLevels(model)
   return levels.includes(level) ? level : 'auto'
+}
+
+/**
+ * 旁路请求(上下文压缩 / 目标判定 / 权限审核 / 会话标题)这一次该用哪个档位。
+ *
+ * 需求:这些请求要么想省钱关掉思考、要么想跟随会话档位,但**都不能因为档位不可用而失败**。
+ * 在这个函数出现之前,压缩硬发 `'off'`,而 `gpt-6-*` 这类 effort 模型的 `reasoningEfforts`
+ * 不含 `'none'` —— `thinking-adapter.ts` 会直接抛「该模型不支持关闭推理」,router 把它包成
+ * 不可重试的错。表现是:压缩每一次都失败,三次后熔断,此后整个 run 再也不压缩,
+ * 上下文一路涨到上游报超长,而界面上一个报错都没有。
+ *
+ * 规则:想要的档位可用就用它;不可用就在这个模型**支持的档位**里取「不超过它的最强一档」;
+ * 模型最低的那一档都比它强时取那一档(`'off'` 关不掉的模型走的就是这一支);再没有就 `'auto'`。
+ *
+ * ★ 与 `normalizeModelThinkingLevel` 的差别是**故意的**,不要合并成一个:
+ *   那个服务于界面上换模型(落回 `'auto'` = 「交给模型自己定」,是用户看得见的中性结果);
+ *   这个服务于后台请求(没有界面可看,落回 `'auto'` 会让一次「尽量别思考」的短请求
+ *   悄悄按模型默认的高档位去想,而账单上才看得出来)。
+ * ★ 绝不抛,绝不返回一个这个模型不支持的档位。
+ */
+export function auxiliaryThinkingLevel(wanted: ThinkingLevel, model: ThinkingModel | undefined): ThinkingLevel {
+  const levels = modelThinkingLevels(model)
+  if (levels.includes(wanted)) return wanted
+  // `'auto'` 不在强度轴上,没有「更弱的一档」可退;而它恒在 `modelThinkingLevels` 里,
+  // 所以走到这里的 wanted 一定是个强度档。
+  const wantedAt = THINKING_STRENGTH.indexOf(wanted)
+  if (wantedAt < 0) return 'auto'
+  const available = THINKING_STRENGTH
+    .map((level, index): { level: ThinkingLevel; index: number } => ({ level, index }))
+    .filter((entry) => levels.includes(entry.level))
+  const weaker = available.filter((entry) => entry.index <= wantedAt)
+  // 一个都不比它弱(模型最低档也比要的强)时取最低的那一档 —— 宁可多想一点,也不能让请求失败。
+  const picked = weaker.length > 0 ? weaker[weaker.length - 1] : available[0]
+  return picked?.level ?? 'auto'
 }
 
 function effortFor(level: ThinkingLevel, fallback: ModelReasoningEffort): ModelReasoningEffort {

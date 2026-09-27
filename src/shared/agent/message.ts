@@ -6,6 +6,7 @@
  */
 import type { AgentError } from './error'
 import type { FileReferenceSource } from '../domain/attachment'
+import type { ThinkingLevel } from './run-request'
 import type { ToolCard } from './tool-card'
 
 export interface AgentMessage {
@@ -110,6 +111,24 @@ export type ContentPart =
     instructions?: string
     /** 压缩后重附进上下文的文件路径,按重附顺序。 */
     restoredFiles?: string[]
+    /**
+     * 写这份摘要的是谁。领域值,**不翻译**(§6.5)。
+     *
+     * 需求:压缩模型可以单独配置之后,「这份摘要是谁写的」不再等于「会话模型是谁」。
+     * 摘要一旦写坏(漏了用户原话、把已做完的事又列成待办),用户唯一能行动的信息
+     * 就是这一组 —— 没有它,他只能得出「压缩没用」这个结论。
+     *
+     * 缺席 = 这条边界是这个字段出现之前压缩出来的,界面上那两处一律不画
+     * (不做防御式 UI:没有事实就不画字段)。
+     */
+    summaryModel?: {
+      model: string
+      modelProviderId?: string
+      /** 实际下发的档位 —— 已按压缩模型归一化过,不是用户配的那个原值。 */
+      thinking: ThinkingLevel
+      /** true = 配置的压缩模型当时解析不到,回落成了会话模型。 */
+      fellBack?: boolean
+    }
   }
 
 /** Preserve out-of-band goal markers when an older stream commit arrives later. */

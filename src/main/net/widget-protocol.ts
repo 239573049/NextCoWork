@@ -72,7 +72,9 @@ const CDN_SOURCES = [
  *   的问题;收紧到白名单反而会让模型贴一张外链图时**静默空白**,而它看不出来。
  * - `connect-src <CDN>` —— 程序化出网收在白名单内。这里比 img 严:它是
  *   "模型写的代码主动发起请求"的通道,而 `visualize_show_widget` 申报了
- *   `needsNetwork: true` 正是为了这件事不是隐形的。
+ *   `needsNetwork: true` 正是为了这件事不是隐形的。(那个字段现在只作事实描述:
+ *   「联网搜索」开关已收窄为只管网页搜索与抓取,不再拦这张卡片 —— 所以这条
+ *   白名单是它出网的**唯一**收口,别放宽。)
  * - `frame-ancestors` —— 只允许主窗口嵌它,防止这段 HTML 被别处套用。
  */
 function csp(nonce: string): string {

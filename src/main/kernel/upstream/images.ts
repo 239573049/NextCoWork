@@ -30,7 +30,6 @@ export async function prepareRequestImages(
 ): Promise<CanonicalRequest> {
   if (!request.messages.some((m) => m.parts.some((p) => p.type === 'image'))) return request
   const resolved = new Map<string, { mime: string; dataRef: string }>()
-  const limit = MAX_ATTACHMENT_BYTES / 1024 / 1024
   const messages: AgentMessage[] = []
   for (const message of request.messages) {
     const parts: ContentPart[] = []
@@ -44,62 +43,13 @@ export async function prepareRequestImages(
       const cacheKey = `${mime}:${part.dataRef}`
       let image = resolved.get(cacheKey)
       if (image === undefined) {
-        if (part.dataRef.startsWith('data:')) {
-          if (part.dataRef.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 128) {
-            throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
-          }
-          const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(part.dataRef)
-          if (match === null || normalizeImageMime(match[1]!) !== mime) {
-            throw new ImageInputError('Invalid image data URL', 'invalidImageData')
-          }
-          const data = match[2]!
-          const bytes = Buffer.from(data, 'base64')
-          const encoded = bytes.toString('base64')
-          if (encoded.replace(/=+$/, '') !== data.replace(/=+$/, '')) {
-            throw new ImageInputError('Invalid image data URL', 'invalidImageData')
-          }
-          if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) {
-            throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
-          }
-          const actualMime = imageMimeOfBytes(bytes) ?? mime
-          image = { mime: actualMime, dataRef: `data:${actualMime};base64,${encoded}` }
-        } else {
-          const locator = parseNcwUrl(part.dataRef)
-          if (locator === null) throw new ImageInputError('Invalid image attachment location', 'invalidLocation')
-          if (locator.scope !== 'session' || locator.ownerId === undefined || locator.ownerId !== context.sessionId) {
-            throw new ImageInputError('Image attachment does not belong to this session', 'foreignSession')
-          }
-          const rel = attachmentRelPath(locator)
-          if (rel === null) throw new ImageInputError('Invalid image attachment location', 'invalidLocation')
-          let stage: 'storage' | 'file' | 'read' = 'storage'
-          try {
-            const root = await host.fs.realpath(host.paths.attachments())
-            const expectedOwnerRoot = join(root, 'sessions', locator.ownerId)
-            const ownerRoot = await host.fs.realpath(expectedOwnerRoot)
-            stage = 'file'
-            const file = await host.fs.realpath(join(root, rel))
-            if (relative(expectedOwnerRoot, ownerRoot) !== '' || !within(root, ownerRoot)
-              || !within(ownerRoot, file)) throw new ImageInputError('Image attachment escaped its session directory', 'unsafePath')
-            const stat = await host.fs.stat(file)
-            if (stat.isDir) throw new ImageInputError('Image attachment is a directory', 'invalidLocation')
-            if (stat.size === 0 || stat.size > MAX_ATTACHMENT_BYTES) {
-              throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
-            }
-            stage = 'read'
-            const bytes = await host.fs.readFileBytes(file, stat.size + 1)
-            if (bytes.length !== stat.size) {
-              throw new ImageInputError('Image attachment changed or was not read completely', 'incompleteRead', { name: locator.fileName })
-            }
-            const actualMime = imageMimeOfBytes(bytes) ?? mime
-            image = { mime: actualMime, dataRef: `data:${actualMime};base64,${Buffer.from(bytes).toString('base64')}` }
-          } catch (error) {
-            signal.throwIfAborted()
-            if (error instanceof ImageInputError) throw error
-            const code = (error as NodeJS.ErrnoException)?.code ?? 'UNKNOWN'
-            const reason = stage === 'storage' ? 'storageUnavailable' : code === 'ENOENT' ? 'missing' : 'unreadable'
-            throw new ImageInputError(`Image attachment is missing or unreadable (${stage}: ${code})`, reason, { name: locator.fileName, code })
-          }
-        }
+        /*
+          ★ 单张解析抽成了 `resolveImageDataRef`:对话内生图的改图
+          (`kernel/image-gen.ts`)要复用**同一条**「dataRef → 可外发 data URL」
+          的安全校验(会话归属、路径围栏、大小、魔数)。复制一份出去的表现是
+          两处以后各改各的,而漏改的那一处就是一条能读到别的会话附件的路。
+        */
+        image = await resolveImageDataRef(part, host, context, signal)
         resolved.set(cacheKey, image)
       }
       parts.push({ ...part, ...image })
@@ -108,4 +58,89 @@ export async function prepareRequestImages(
   }
   signal.throwIfAborted()
   return { ...request, messages }
+}
+
+/**
+ * 单张图的 `dataRef` → 可外发的 data URL。
+ *
+ * 需求:两个消费方共用**同一条**校验 —— 发往上游的请求(`prepareRequestImages`)
+ * 和对话内生图的改图(`kernel/image-gen.ts` 的 `edit`)。它拥有这几条不变式:
+ *
+ * - `ncw://` 附件只认**本会话**的托管图(`scope === 'session'` 且 ownerId 相符),
+ *   realpath 之后必须仍然落在 `attachments/sessions/<本会话>/` 之内 —— 软链、
+ *   `..`、跨会话引用全在这两行里被拒,复制第二份实现迟早漏掉其中一种;
+ * - 大小/魔数复核以**读回来的字节**为准,不信 part 自报的 mime;
+ * - `data:` 分支做 base64 往返回环校验,拒绝畸形 data URL。
+ *
+ * ★ 只读不写:产出的 data URL 留在「要发出去的那份拷贝」里,转录里的 part
+ * 原样不动(这正是 `prepareRequestImages` 的文件头约定)。
+ */
+export async function resolveImageDataRef(
+  part: { mime: string; dataRef: string },
+  host: KernelHost,
+  context: { sessionId?: string },
+  signal: AbortSignal
+): Promise<{ mime: string; dataRef: string }> {
+  signal.throwIfAborted()
+  const mime = normalizeImageMime(part.mime)
+  if (mime === null) {
+    throw new ImageInputError(`Unsupported image media type: ${part.mime}`, 'unsupportedImage', { mime: part.mime })
+  }
+  const limit = MAX_ATTACHMENT_BYTES / 1024 / 1024
+  if (part.dataRef.startsWith('data:')) {
+    if (part.dataRef.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 128) {
+      throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
+    }
+    const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(part.dataRef)
+    if (match === null || normalizeImageMime(match[1]!) !== mime) {
+      throw new ImageInputError('Invalid image data URL', 'invalidImageData')
+    }
+    const data = match[2]!
+    const bytes = Buffer.from(data, 'base64')
+    const encoded = bytes.toString('base64')
+    if (encoded.replace(/=+$/, '') !== data.replace(/=+$/, '')) {
+      throw new ImageInputError('Invalid image data URL', 'invalidImageData')
+    }
+    if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) {
+      throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
+    }
+    const actualMime = imageMimeOfBytes(bytes) ?? mime
+    return { mime: actualMime, dataRef: `data:${actualMime};base64,${encoded}` }
+  }
+
+  const locator = parseNcwUrl(part.dataRef)
+  if (locator === null) throw new ImageInputError('Invalid image attachment location', 'invalidLocation')
+  if (locator.scope !== 'session' || locator.ownerId === undefined || locator.ownerId !== context.sessionId) {
+    throw new ImageInputError('Image attachment does not belong to this session', 'foreignSession')
+  }
+  const rel = attachmentRelPath(locator)
+  if (rel === null) throw new ImageInputError('Invalid image attachment location', 'invalidLocation')
+  let stage: 'storage' | 'file' | 'read' = 'storage'
+  try {
+    const root = await host.fs.realpath(host.paths.attachments())
+    const expectedOwnerRoot = join(root, 'sessions', locator.ownerId)
+    const ownerRoot = await host.fs.realpath(expectedOwnerRoot)
+    stage = 'file'
+    const file = await host.fs.realpath(join(root, rel))
+    if (relative(expectedOwnerRoot, ownerRoot) !== '' || !within(root, ownerRoot)
+      || !within(ownerRoot, file)) throw new ImageInputError('Image attachment escaped its session directory', 'unsafePath')
+    const stat = await host.fs.stat(file)
+    if (stat.isDir) throw new ImageInputError('Image attachment is a directory', 'invalidLocation')
+    if (stat.size === 0 || stat.size > MAX_ATTACHMENT_BYTES) {
+      throw new ImageInputError('Invalid image attachment size', 'invalidSize', { limit })
+    }
+    stage = 'read'
+    const bytes = await host.fs.readFileBytes(file, stat.size + 1)
+    if (bytes.length !== stat.size) {
+      throw new ImageInputError('Image attachment changed or was not read completely', 'incompleteRead', { name: locator.fileName })
+    }
+    const actualMime = imageMimeOfBytes(bytes) ?? mime
+    return { mime: actualMime, dataRef: `data:${actualMime};base64,${Buffer.from(bytes).toString('base64')}` }
+  } catch (error) {
+    signal.throwIfAborted()
+    if (error instanceof ImageInputError) throw error
+    const code = (error as NodeJS.ErrnoException)?.code ?? 'UNKNOWN'
+    const reason = stage === 'storage' ? 'storageUnavailable' : code === 'ENOENT' ? 'missing' : 'unreadable'
+    throw new ImageInputError(`Image attachment is missing or unreadable (${stage}: ${code})`, reason, { name: locator.fileName, code })
+  }
 }

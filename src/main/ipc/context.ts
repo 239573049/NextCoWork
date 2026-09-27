@@ -15,6 +15,7 @@ import { ToolRegistry } from '../kernel/tool/registry'
 import { resolveAnywhere } from '../kernel/tool/path-guard'
 import { assemble, estimateMessages } from '../kernel/context-assembler'
 import { compactConversation } from '../kernel/compaction/compact'
+import { resolveCompactBinding } from '../kernel/compaction/binding'
 import { readAttachableFile, type AttachmentToolNames } from '../kernel/compaction/attachments'
 import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
@@ -43,12 +44,39 @@ export async function compactContext(req: { sessionId: string; instructions?: st
   const history = store.getHistory(req.sessionId)
   if (history.length === 0) throw new Error('这段对话还没有可压缩的内容')
 
-  const alias = getRouter().resolveModel(session.model, session.modelProviderId)
   const signal = AbortSignal.timeout(SUMMARY_TIMEOUT_MS)
   const root = session.rootPathAtCreation
   const workspace = store.getWorkspace(session.workspaceId)
   // 远端工作区的文件在另一台机器上,这条菜单路径不为重附件去租一条 SSH 连接 —— 少附文件,摘要照常。
   const local = workspace === undefined || normalizeEnvironmentRef(workspace.environment).kind !== 'connection'
+
+  /*
+    需求:压缩可以配成另一个模型、另一个思考档位(设置 › 通用 › Agent,工作区可覆盖)。
+    解析、回落(配置的模型当前解析不到就静默换回会话模型)与档位归一化和自动压缩
+    **共用同一份** —— `kernel/compaction/binding.ts`。各写一份的话,两条路径会分头演化,
+    而症状是「菜单里压出来的摘要和自动压出来的不是一个模型写的」,没有任何报错。
+
+    ★ `'inherit'` 在这条路径上落到 `session.thinking`:手动 /compact 时没有 run,
+    「本轮档位」这个东西不存在,会话记录上那个才是用户此刻选的。
+  */
+  const settings = store.getSettings()
+  const binding = resolveCompactBinding({
+    resolveModel: (model, modelProviderId) => getRouter().resolveModel(model, modelProviderId),
+    settings: {
+      model: settings.compactModel,
+      ...(settings.compactModelProviderId === undefined ? {} : { modelProviderId: settings.compactModelProviderId }),
+      thinking: settings.compactThinking
+    },
+    ...(workspace === undefined ? {} : { workspace: workspace.settings }),
+    session: {
+      model: session.model,
+      ...(session.modelProviderId === undefined ? {} : { modelProviderId: session.modelProviderId }),
+      thinking: session.thinking
+    },
+    maxOutputTokens: settings.maxOutputTokens,
+    warn: (message) => { getHost().logger.warn(message) }
+  })
+  if (binding === undefined) throw new Error('压缩模型不可用')
 
   const result = await compactConversation({
     messages: history,
@@ -56,18 +84,30 @@ export async function compactContext(req: { sessionId: string; instructions?: st
     ...(req.instructions === undefined ? {} : { instructions: req.instructions }),
     preTokens: estimateMessages(messagesForModel(history)),
     autoContinue: false,
-    // 协议窗口:摘要请求只受模型真实上限约束,和「最大上下文」计费开关无关。
-    protocolWindow: effectiveContextWindow(alias?.contextWindow, true),
+    // 协议窗口:摘要请求只受**压缩模型**真实上限约束,和「最大上下文」计费开关无关。
+    protocolWindow: binding.protocolWindow,
+    summaryMaxOutputTokens: binding.maxOutputTokens,
+    summaryThinking: binding.thinking,
+    summaryModel: {
+      model: binding.model,
+      ...(binding.modelProviderId === undefined ? {} : { modelProviderId: binding.modelProviderId }),
+      thinking: binding.thinking,
+      fellBack: binding.fellBack
+    },
     send: (request) => getRouter().stream(
       {
-        model: session.model,
-        // 摘要要和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
-        ...(session.modelProviderId === undefined ? {} : { modelProviderId: session.modelProviderId }),
+        model: binding.model,
+        /*
+          摘要**默认**和正文走同一家:它读的是同一段对话,漂到另一家既换了口径也换了账单。
+          这条理由没变 —— 变的是它现在由配置表达(`compactModel` 出厂是空串 = 跟随会话),
+          只有用户显式选了别的压缩模型,这里才会是另一家。
+        */
+        ...(binding.modelProviderId === undefined ? {} : { modelProviderId: binding.modelProviderId }),
         system: request.system,
         messages: request.messages,
         tools: [],
         maxOutputTokens: request.maxOutputTokens,
-        thinkingLevel: 'off' as const
+        thinkingLevel: request.thinkingLevel
       },
       signal,
       { workspaceId: session.workspaceId, runId: `${req.sessionId}:compact:manual`, sessionId: req.sessionId }

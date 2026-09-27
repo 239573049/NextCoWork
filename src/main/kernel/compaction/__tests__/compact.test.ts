@@ -62,6 +62,9 @@ function input(over: Partial<CompactInput> = {}): CompactInput {
     preTokens: 200_000,
     autoContinue: true,
     protocolWindow: 200_000,
+    summaryMaxOutputTokens: 20_000,
+    summaryThinking: 'off',
+    summaryModel: { model: 'sum-model', thinking: 'off', fellBack: false },
     send: () => streamOf(SUMMARY),
     attachments: { tools: { file: new Set(['Read']) }, readFile: async () => undefined },
     newId: () => 'boundary-1',
@@ -197,6 +200,51 @@ describe('compactConversation', () => {
     expect(boundary?.preTokens).toBe(624_000)
     expect(boundary?.postTokens).toBeGreaterThan(0)
     expect(boundary?.postTokens).toBeLessThan(624_000)
+  })
+
+  /**
+   * ★ 档位和输出额度由**调用方**给(解析与归一化在 `binding.ts`),本模块只负责原样带上。
+   * 原先这两样写死在这里(`'off'` + 20K),而 `gpt-6-*` 这类关不掉推理的模型会因为
+   * 那个 `'off'` 被上游拒 —— 压缩每次必败,三次后熔断。
+   */
+  it('★ 摘要请求带上调用方给的档位与输出额度', async () => {
+    const send = vi.fn((_r: SummaryRequest) => streamOf(SUMMARY))
+    await compactConversation(input({ send, summaryThinking: 'low', summaryMaxOutputTokens: 12_345 }))
+    expect(send.mock.calls[0]?.[0].thinkingLevel).toBe('low')
+    expect(send.mock.calls[0]?.[0].maxOutputTokens).toBe(12_345)
+  })
+
+  it('边界记下写这份摘要的模型、档位,以及回落发生过', async () => {
+    const result = await compactConversation(input({
+      summaryThinking: 'low',
+      summaryModel: { model: 'gpt-6-luna', modelProviderId: 'openai', thinking: 'low', fellBack: true }
+    }))
+    const boundary = result.ok ? compactBoundaryOf(result.message) : undefined
+    expect(boundary?.summaryModel).toEqual({
+      model: 'gpt-6-luna', modelProviderId: 'openai', thinking: 'low', fellBack: true
+    })
+  })
+
+  /** 没回落就不写 `fellBack` —— 一个恒为 false 的字段会落在每一条边界上。 */
+  it('没有回落时边界上不写 fellBack', async () => {
+    const result = await compactConversation(input())
+    const boundary = result.ok ? compactBoundaryOf(result.message) : undefined
+    expect(boundary?.summaryModel).toEqual({ model: 'sum-model', thinking: 'off' })
+  })
+
+  /**
+   * ★★ 输出额度现在跟随全局设置(默认 32K),而压缩模型可能只有 8K / 32K 窗口 ——
+   * 那时「窗口 − 输出 − 指令」是负数。不封底的话 while 会一路 `truncateHead` 到
+   * 只剩一条消息,然后拿那一条去写「整段对话的摘要」:压缩显示成功,摘要却只提到
+   * 最后一句话,而且零报错。
+   */
+  it('★★ 输出额度吃光窗口时输入预算封底,不把请求裁成一条', async () => {
+    const send = vi.fn((_r: SummaryRequest) => streamOf(SUMMARY))
+    const long = [ask('u1', '开始'), ...toolTurn(1), ask('u2', '继续'), ...toolTurn(2), ask('u3', '再继续'), ...toolTurn(3)]
+    await compactConversation(input({
+      send, messages: long, protocolWindow: 8_000, summaryMaxOutputTokens: 32_000
+    }))
+    expect(send.mock.calls[0]?.[0].messages.length).toBeGreaterThan(1)
   })
 })
 

@@ -5,11 +5,13 @@ import {
   type PermissionMode
 } from '../../../../shared/agent/permission'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
+import { isChatModelAlias } from '../../../../shared/domain/provider'
 import { Segmented } from '../../components/ui/Segmented'
 import { Slider } from '../../components/ui/Slider'
 import { Toggle } from '../../components/ui/Toggle'
 import { Select } from '../../components/ui/Select'
 import { ProviderModelMenu, type ProviderModelMenuRow } from '../../components/ProviderModelMenu'
+import { useChatModelGuard } from '../../components/useChatModelGuard'
 import { cn } from '../../lib/cn'
 import { useModelsStore } from '../../stores/models'
 import {
@@ -51,6 +53,28 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
   useEffect(() => {
     if (sub === 'agent' && !loaded) void load()
   }, [sub, loaded, load])
+  /*
+    需求:AI 审核模型 / 目标判定模型这两个 `Select` 也只列文本模型,存量里选中了
+    图片模型的在**打开选择器时**校正(见 `useChatModelGuard` 文件头)。
+    hook 在分支**之外**调用(Rules of Hooks),校正动作挂在这两个 Select 的
+    `onOpenChange` 上 —— 用户不打开就一个字节不动他的配置。
+  */
+  const guardReviewerModel = useChatModelGuard(
+    models,
+    providers,
+    { model: settings.permissionReviewerModel, modelProviderId: settings.permissionReviewerModelProviderId },
+    (model, modelProviderId) => {
+      patch({ permissionReviewerModel: model, permissionReviewerModelProviderId: modelProviderId })
+    }
+  )
+  const guardGoalEvaluatorModel = useChatModelGuard(
+    models,
+    providers,
+    { model: settings.goalEvaluatorModel, modelProviderId: settings.goalEvaluatorModelProviderId },
+    (model, modelProviderId) => {
+      patch({ goalEvaluatorModel: model, goalEvaluatorModelProviderId: modelProviderId })
+    }
+  )
   if (sub === 'agent') {
     // 一条绑定一个选项 —— 同一别名挂在多家上时,「用哪一家审核」是用户要选的东西
     const reviewerOptions = [
@@ -158,6 +182,7 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             value={modelSelectionKey(settings.permissionReviewerModelProviderId, settings.permissionReviewerModel)}
             options={reviewerOptions}
             ariaLabel={t('general.permissionReviewerModel')}
+            onOpenChange={guardReviewerModel}
             onValueChange={(key) => {
               const { alias, modelProviderId } = parseModelSelectionKey(key)
               patch({ permissionReviewerModel: alias, permissionReviewerModelProviderId: modelProviderId })
@@ -173,6 +198,7 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             value={modelSelectionKey(settings.goalEvaluatorModelProviderId, settings.goalEvaluatorModel)}
             options={goalEvaluatorOptions}
             ariaLabel={t('settings.goal.evaluatorModel')}
+            onOpenChange={guardGoalEvaluatorModel}
             onValueChange={(key) => {
               const { alias, modelProviderId } = parseModelSelectionKey(key)
               patch({ goalEvaluatorModel: alias, goalEvaluatorModelProviderId: modelProviderId })
@@ -202,6 +228,42 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
         <SettingRow title={t('general.autoCompact')} description={t('general.autoCompactHint')}>
           <Toggle label={t('general.autoCompact')} checked={settings.contextManagement.autoCompact}
             onChange={(autoCompact) => patch({ contextManagement: { autoCompact } })} />
+        </SettingRow>
+        {/*
+          需求:压缩可以交给另一个模型(它是一次长输入、短输出的机械活)。空值 =
+          跟随会话模型,和上面目标判定模型那一栏是**同一种东西**,所以用同一张候选表、
+          同一种控件 —— 用户在这一屏里对「Agent 用哪个模型」只学一套交互。
+          工作区还能在圆环菜单里单独覆盖这两栏(三档:工作区 > 这里 > 会话模型)。
+        */}
+        <SettingRow title={t('compaction.model')} description={t('compaction.modelHint')} wide>
+          <RoleModelPicker
+            label={t('compaction.model')}
+            models={models}
+            providers={providers}
+            loaded={loaded}
+            model={settings.compactModel}
+            modelProviderId={settings.compactModelProviderId}
+            emptyLabel={t('compaction.followSession')}
+            onChange={(model, modelProviderId) => {
+              // ★ 成对写:只给别名的话主进程会留着旧的 providerId,拼出「新别名 + 旧供应商」。
+              patch({ compactModel: model, compactModelProviderId: modelProviderId })
+            }}
+          />
+        </SettingRow>
+        <SettingRow title={t('compaction.thinking')} description={t('compaction.thinkingHint')} wide>
+          <Select
+            value={settings.compactThinking}
+            options={SUBAGENT_THINKING_CHOICES.map((value) => ({
+              value,
+              label: value === INHERIT_THINKING ? t('compaction.thinkingInherit') : t(`chat.thinkingLevel.${value}`)
+            }))}
+            ariaLabel={t('compaction.thinking')}
+            onValueChange={(value) => {
+              // ★ 只认枚举,认不出的值一个都不许落库(同上面子代理思考深度那一栏)。
+              if (!isSubagentThinking(value)) return
+              patch({ compactThinking: value })
+            }}
+          />
         </SettingRow>
         <SettingRow
           title={t('general.maxOutputTokens')}
@@ -366,6 +428,7 @@ function RoleModelPickerComponent({
   loaded,
   model,
   modelProviderId,
+  emptyLabel,
   onChange
 }: {
   label: string
@@ -374,22 +437,36 @@ function RoleModelPickerComponent({
   loaded: boolean
   model: string
   modelProviderId: string | undefined
+  /**
+   * 空值那一项怎么称呼。缺省是「跟随对话」。
+   *
+   * ★ 可覆盖是因为**空值的含义按角色不同**:默认模型那栏空着是「跟随对话」,
+   *   压缩那栏空着是「跟随会话模型」—— 后者还有第三档(工作区可以反盖),
+   *   两处说成同一句话会让人以为它们是同一个开关。
+   */
+  emptyLabel?: string
   /** 别名与供应商**必须一起给**。`("", undefined)` = 跟随对话 */
   onChange: (model: string, modelProviderId: string | undefined) => void
 }): ReactNode {
   const { t } = useI18n()
+  const emptyText = emptyLabel ?? t('models.followConversation')
+  // 打开时校正存量的「选中了图片模型」(默认模型/默认子代理/压缩三栏都走这里)
+  const guardChatModel = useChatModelGuard(models, providers, { model, modelProviderId }, onChange)
+  // ★ 只列文本模型:这三个角色(默认模型/默认子代理/压缩)全是对话岗,图片模型
+  //   选中了也发不出请求(判据收口在 `isChatModelAlias`)
+  const chatModels = useMemo(() => models.filter(isChatModelAlias), [models])
   const choice = roleModelChoice(models, providers, model, modelProviderId)
   const providerName = providers.find((p) => p.id === choice.providerId)?.name
   const triggerLabel =
     choice.alias === ''
-      ? t('models.followConversation')
+      ? emptyText
       : providerName === undefined
         ? choice.alias
         : `${choice.alias} · ${providerName}`
   const rows: ProviderModelMenuRow[] = useMemo(
     () =>
-      selectableProviders(models, providers, choice.providerId).map((p) => {
-        const aliasOptions = providerAliasOptions(models, p.id)
+      selectableProviders(chatModels, providers, choice.providerId).map((p) => {
+        const aliasOptions = providerAliasOptions(chatModels, p.id)
         return {
           id: p.id,
           label: p.name,
@@ -402,7 +479,7 @@ function RoleModelPickerComponent({
           }))
         }
       }),
-    [models, providers, choice.providerId, choice.alias, t]
+    [chatModels, providers, choice.providerId, choice.alias, t]
   )
 
   return (
@@ -430,11 +507,12 @@ function RoleModelPickerComponent({
       emptyLabel={t('chat.noModelsConfigured')}
       rows={rows}
       topItem={{
-        label: t('models.followConversation'),
+        label: emptyText,
         selected: choice.providerId === '',
         onSelect: () => onChange('', undefined)
       }}
       onSelectModel={(providerId, alias) => onChange(alias, providerId)}
+      onOpenChange={guardChatModel}
     />
   )
 }

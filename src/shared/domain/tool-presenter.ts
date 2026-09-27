@@ -184,6 +184,10 @@ export const PRESENTER_COPY_KEYS = [
   */
   'chat.tool.title.widget',
   'chat.tool.title.readMe',
+  // 对话内生图。行的主语是模型收到的 prompt 片段(领域值,不翻译)
+  'chat.tool.title.generateImage',
+  // 改图那半:入参带了源图(`image`)就是它,否则是上面那个
+  'chat.tool.title.editImage',
   // 认不出工具名时的最终兜底标题
   'chat.tool.fallback',
   // 折叠态右侧摘要
@@ -806,6 +810,20 @@ const REGISTRY: Record<string, ToolPresenter> = {
       const modules = pickArray(i, 'modules').filter((m): m is string => typeof m === 'string')
       return modules.length === 0 ? undefined : modules.join(' · ')
     }
+  },
+  /*
+    对话内生图。形态 `network`(它真出网:POST 生图接口);行 = 动作 + prompt 片段
+    —— prompt 是「要画什么」,是这一行唯一有信息量的主语。
+    ★ 不给 summary:右端那格没有比图本身更有用的数字,猜一个只会是噪声。
+  */
+  generate_image: {
+    shape: 'network',
+    line: (i) =>
+      valueLine(
+        // 带了源图就是改图 —— 同一工具两种动作,行标签跟着入参走
+        pick(i, 'image') === '' ? 'chat.tool.title.generateImage' : 'chat.tool.title.editImage',
+        clip(pick(i, 'prompt'), 48)
+      )
   }
 }
 

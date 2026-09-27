@@ -61,9 +61,12 @@ export interface ToolInfo {
    * (那是我们库里的配置),而**不是**读服务器自报的 annotations ——
    * 否则一个远程 MCP 服务器只要声明「我不联网」,用户那颗联网开关就被它关掉了。
    *
-   * 两处消费者:`registry.snapshot({network})` 决定这一轮要不要下发它,
-   * `permission-gate.ts` 那张表的第 1 行决定要不要放行这一次调用。
-   * 前者省掉一次白跑的轮次,后者是兜底 —— 缺了任何一个都还站得住。
+   * ★ 现在它**只是事实描述,不参与任何开关判定**。原先两处消费者
+   * (`registry.snapshot({network})` 决定下不下发、`permission-gate.ts` 第 1 行决定放不放行)
+   * 都读它;输入框「联网搜索」开关收窄成只管网页搜索与抓取之后(用户决定,见
+   * `permission-gate.ts` 的 `NETWORK_SWITCH_TOOLS`),两处都改成按那张名单判。
+   * 留着这个字段(而不是删掉)是因为插件协议 `tools.register` 与 MCP 桥都在填它,
+   * 将来要按「会不会出网」加任何管控时,事实已经在这里。
    */
   needsNetwork: boolean
   source: ToolSource

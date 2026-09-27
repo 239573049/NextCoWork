@@ -37,7 +37,7 @@ import { removeCredential } from '../db/repo'
 import { parseCredential } from '../../shared/domain/credential'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { catalogDefinitionFromAlias, isModelCatalogDefinition } from '../../shared/domain/model-catalog'
-import { defaultProtocolForModel } from '../../shared/domain/model-catalog-inventory'
+import { defaultProtocolForModel, isImageModelId } from '../../shared/domain/model-catalog-inventory'
 import { listResolvedModels } from '../state/model-bindings'
 import {
   modelListErrorMessage,
@@ -604,6 +604,22 @@ export function setAliases(providerId: string, models: readonly string[]): Model
       : undefined
     // ★ 别名默认等于上游模型名(和 seed 那条一致)。这里不加任何前缀/后缀 ——
     // 别名是用户在药丸和 `defaultModel` 里看见的字符串,加工过就对不上他在上游文档里读到的名字
+    /*
+      ★★ 需求:拉取模型列表时,**生图模型要自动带上 image 模态**。模型列表端点
+      一律不报模态,目录又只认得已收录的 ID —— 预览期/私有的生图 ID(如
+      `grok-imagine-image-edit`)落下来就是一条普通文本模型:「图片生成」页按
+      `modality === 'image' || imageOutput` 过滤,看不见它,零报错,用户会以为
+      这家没有生图模型。判据用共享的 `isImageModelId`(目录优先、名字启发式兜底),
+      和图片页导入弹窗的过滤是同一条 —— 弹窗里能勾上的,存进来就是图片模型。
+
+      ★ 只钉**新建**的那支,已存在的一个字不改(同上一条协议钉法的理由):
+      用户在「编辑模型」里把这个模态改回 text 是显式覆盖,重拉一次列表不许顶掉。
+      ★ 目录命中时 `resolver.resolve` 会用目录的 modality/capabilities 覆盖这里
+      写的值,所以这里只对目录不认识的 ID 起作用 —— 正是要救的那批;能力位照
+      目录里 image 行的形状给(`textOutput: false`、`imageOutput: true`,
+      `textInput` 留 true:生图模型收的就是文本 prompt)。
+    */
+    const imageImported = existing === undefined && isImageModelId(m)
     store.putAlias(resolver.resolve(
       existing === undefined
         ? {
@@ -613,6 +629,12 @@ export function setAliases(providerId: string, models: readonly string[]): Model
             upstreamModel: m,
             priority,
             ...(pinned === undefined ? {} : { protocolOverride: pinned }),
+            ...(imageImported
+              ? {
+                  modality: 'image' as const,
+                  capabilities: { ...IMPORTED_ALIAS_DEFAULTS.capabilities, textOutput: false, imageOutput: true }
+                }
+              : {}),
             catalogOverrides: []
           }
         : { ...existing, priority }

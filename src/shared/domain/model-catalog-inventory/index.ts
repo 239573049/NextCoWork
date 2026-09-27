@@ -113,6 +113,33 @@ export function findBuiltinModel(modelId: string): BuiltinModelRecord | undefine
 }
 
 /**
+ * Provider model-list endpoints do not expose a modality field. For image
+ * imports we therefore use the bundled catalogue first, then a conservative
+ * ID heuristic for preview/private image models that are not catalogued yet.
+ *
+ * 需求:两个消费方共用这一条判断,别再写第二份 ——
+ * 1. 渲染层「导入模型」弹窗的图片模态过滤(`settings/pages/model/import-models.ts`);
+ *    分家的表现是同一个 ID 在图片页「拉取列表」时被过滤掉、换个入口又冒出来。
+ * 2. 主进程登录灌模型(`ipc/client-auth.ts` 的 `syncClientModels`):平台的
+ *    `/v1/models` 不标模态,不补的话登录拿到的生图模型 modality 是 text,
+ *    「图片生成」页看不见它,且**全程零报错**。
+ *
+ * 目录优先、正则兜底:目录认得的以目录为准(有官方核对背书),认不得的
+ * 预览/私有 ID 只保守按名字猜 —— 猜漏只是少列一条,猜错会把文本模型塞进图片页。
+ */
+export function isImageModelId(modelId: string): boolean {
+  const wanted = modelId.trim().toLowerCase()
+  const known = BUILTIN_MODEL_CATALOG.find((model) =>
+    [model.id, ...(model.aliases ?? [])].some((id) => {
+      const value = id.toLowerCase()
+      return wanted === value || wanted.endsWith(`/${value}`)
+    }),
+  )
+  if (known !== undefined) return known.modality === 'image'
+  return /(?:^|[/_:-])(image|imagen|dall[-_]?e|dalle|flux|seedream|seedance|z[-_]?image|imagegen|imagine|wanx|kolors|sdxl|stable[-_]?diffusion|ideogram|midjourney|recraft|qwen[-_]?image|pixart|playground)(?:$|[/:.-])/i.test(wanted)
+}
+
+/**
  * ★★ 厂商默认线形协议 —— 必须是**数据表**,不能散成各处的 `if (id.startsWith('claude'))`。
  * 「claude 系模型默认走 anthropic 线形」这条规则有三个消费方:内置种子
  * (`runtime.ts` 的 `builtinAlias`)、拉取模型列表(`ipc/provider.ts` 的 `setAliases`)

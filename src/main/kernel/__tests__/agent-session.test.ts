@@ -22,6 +22,7 @@ import {
 } from '../agent-session'
 import { nodeHost } from '../host'
 import { COMPACT_SYSTEM, MAX_CONSECUTIVE_COMPACT_FAILURES } from '../compaction/compact'
+import { INHERIT_THINKING } from '../../../shared/domain/subagent-thinking'
 import { localEnvironment } from '../../environment/local'
 import { collect, RunHandle } from '../run-registry'
 import { ToolRegistry, type ToolContext } from '../tool/registry'
@@ -2035,6 +2036,23 @@ describe('自动压缩', () => {
   /** 估算约 100K —— 阈值(200K − 8192 − 13K ≈ 178.8K)的一半多点,不靠真值就不会压。 */
   const BIG = 'x'.repeat(400_000)
   const NOTE = '## 意图\n用户在重构登录模块'
+  /** 「换个便宜模型压缩」的那一条绑定。 */
+  const CHEAP: ModelAlias = {
+    alias: 'cheap-model', providerId: 'p2', upstreamModel: 'cheap-model',
+    capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    contextWindow: 200_000, maxOutputTokens: 8192
+  }
+  /**
+   * `gpt-6-*` 那一族:effort 模型,`reasoningEfforts` 里**没有 `none`** ——
+   * 也就是「关不掉推理」的那一类,本次修的 bug 就发生在它身上。
+   */
+  const GPT6: ModelAlias = {
+    alias: 'gpt-6-astra', providerId: 'p3', upstreamModel: 'gpt-6-astra',
+    capabilities: { tools: true, vision: true, thinking: true, caching: true },
+    contextWindow: 200_000, maxOutputTokens: 8192,
+    thinkingConfig: { mode: 'effort', defaultEnabled: true },
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max']
+  }
 
   const ends = (inputTokens: number, stopReason: 'end_turn' | 'tool_use'): ProviderStreamEvent => ({
     type: 'message_end',
@@ -2057,9 +2075,10 @@ describe('自动压缩', () => {
    */
   function withSummaryUpstream(
     turns: ProviderStreamEvent[][],
-    opts: { note?: string; fail?: boolean } = {}
+    opts: { note?: string; fail?: boolean; model?: ModelAlias } = {}
   ): FakeUpstream & { summaries: CanonicalRequest[] } {
-    const base = fakeUpstream(turns)
+    // 配了压缩模型的用例要让路由器**查得到**那条绑定,否则会走回落那一支。
+    const base = fakeUpstream(turns, opts.model === undefined ? {} : { models: [ALIAS, opts.model] })
     const summaries: CanonicalRequest[] = []
     return {
       ...base,
@@ -2098,6 +2117,8 @@ describe('自动压缩', () => {
     upstream: FakeUpstream
     history: readonly AgentMessage[]
     contextManagement?: SessionDeps['contextManagement']
+    compaction?: SessionDeps['compaction']
+    workspaceCompaction?: SessionDeps['workspaceCompaction']
   }): Promise<Ran> {
     const request = req()
     const handle = new RunHandle(request)
@@ -2116,6 +2137,8 @@ describe('自动压缩', () => {
         */
         maxOutputTokens: 8192,
         contextManagement: o.contextManagement ?? AUTO_COMPACT,
+        ...(o.compaction === undefined ? {} : { compaction: o.compaction }),
+        ...(o.workspaceCompaction === undefined ? {} : { workspaceCompaction: o.workspaceCompaction }),
         resumeDelaysMs: []
       },
       handle,
@@ -2175,8 +2198,8 @@ describe('自动压缩', () => {
   })
 
   /**
-   * ★ 摘要要和正文走**同一家、同一个模型**:它读的是同一段对话,
-   * 漂到另一家既换了口径也换了账单。
+   * ★ 摘要**默认**和正文走同一家、同一个模型:它读的是同一段对话,
+   * 漂到另一家既换了口径也换了账单。只有用户显式配了压缩模型才会换(见下面两条)。
    */
   it('★ 摘要请求与正文同模型,且不带工具', async () => {
     const upstream = withSummaryUpstream([turnReporting(200_000, 'c1'), says('好')])
@@ -2184,6 +2207,75 @@ describe('自动压缩', () => {
 
     expect(upstream.summaries[0]?.model).toBe('claude-sonnet-4')
     expect(upstream.summaries[0]?.tools).toEqual([])
+  })
+
+  /**
+   * ★★ 本次改动的核心回归:配置了压缩模型时,**只有摘要**漂过去,正文仍发会话模型。
+   * 两者搞混的表现是「我只是想让压缩便宜点,结果整条对话都换模型了」。
+   */
+  it('★★ 配置了压缩模型时,摘要发给它、正文仍发会话模型', async () => {
+    const upstream = withSummaryUpstream([turnReporting(200_000, 'c1'), says('好')], { model: CHEAP })
+    await run({
+      upstream,
+      history: historyWithBlob(),
+      compaction: { model: 'cheap-model', modelProviderId: 'p2', thinking: INHERIT_THINKING }
+    })
+
+    expect(upstream.summaries[0]?.model).toBe('cheap-model')
+    expect(upstream.summaries[0]?.modelProviderId).toBe('p2')
+    expect(upstream.requests.every((r) => r.model === 'claude-sonnet-4')).toBe(true)
+  })
+
+  /**
+   * ★★ 这条盯的就是用户报的那个 bug。
+   *
+   * 压缩模型是 `gpt-6-*` 那一族(effort 模型,`reasoningEfforts` 里没有 `none`)时,
+   * 过去这里硬发 `thinkingLevel: 'off'` —— `thinking-adapter` 对这种组合直接抛
+   * 「该模型不支持关闭推理」,router 包成不可重试的错,压缩每次必败、三次后熔断,
+   * 上下文再也压不下去(全程零报错)。现在档位按压缩模型归一化到最低可用档。
+   */
+  it('★★ 压缩模型关不掉推理时,下发的是它认的最低档而不是 off', async () => {
+    const upstream = withSummaryUpstream([turnReporting(200_000, 'c1'), says('好')], { model: GPT6 })
+    const { events } = await run({
+      upstream,
+      history: historyWithBlob(),
+      compaction: { model: 'gpt-6-astra', modelProviderId: 'p3', thinking: 'off' }
+    })
+
+    expect(upstream.summaries[0]?.thinkingLevel).toBe('low')
+    expect(statuses(events)).toEqual(['compacting', 'compacted'])
+  })
+
+  /**
+   * ★ 过期配置(供应商被删 / 别名改名)**不能把压缩打死** —— 那正是
+   * 「上下文一路涨到上游报超长」的老症状。静默回落会话模型,并在边界上留个记号。
+   */
+  it('★ 配置的压缩模型解析不到时回落会话模型,压缩照常成功', async () => {
+    const upstream = withSummaryUpstream([turnReporting(200_000, 'c1'), says('好')])
+    const { events, history } = await run({
+      upstream,
+      history: historyWithBlob(),
+      compaction: { model: 'deleted-alias', modelProviderId: 'gone', thinking: INHERIT_THINKING }
+    })
+
+    expect(upstream.summaries[0]?.model).toBe('claude-sonnet-4')
+    expect(statuses(events)).toEqual(['compacting', 'compacted'])
+    const boundary = history.flatMap((m) => m.parts).find((p) => p.type === 'compact_boundary')
+    expect(boundary).toMatchObject({ summaryModel: { model: 'claude-sonnet-4', fellBack: true } })
+  })
+
+  /** 工作区那一档压过全局 —— 圆环菜单里那两栏存在的全部理由。 */
+  it('工作区的覆盖压过全局设置', async () => {
+    const upstream = withSummaryUpstream([turnReporting(200_000, 'c1'), says('好')], { model: CHEAP })
+    await run({
+      upstream,
+      history: historyWithBlob(),
+      compaction: { model: 'cheap-model', modelProviderId: 'p2', thinking: INHERIT_THINKING },
+      // null = 这个工作区显式退回会话模型
+      workspaceCompaction: { compactModel: null }
+    })
+
+    expect(upstream.summaries[0]?.model).toBe('claude-sonnet-4')
   })
 
   /**

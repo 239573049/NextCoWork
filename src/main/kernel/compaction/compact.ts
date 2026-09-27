@@ -11,10 +11,17 @@
  * 真实会话因此从 330K 一路涨到 624K,每一轮都按长上下文计费。
  *
  * 不变式:
- * - 摘要请求发**原始对话** + 末尾一条压缩指令,不下发工具 schema,不开思考。
+ * - 摘要请求发**原始对话** + 末尾一条压缩指令,不下发工具 schema。
+ * - 摘要用哪个模型、哪个思考档位、多大输出额度,**由调用方决定并传进来**
+ *   (三档来源在 `shared/domain/compaction-model.ts`,解析与回落在 `./binding.ts`)。
+ *   本模块只负责把它们原样带进请求、并记进边界消息。
  * - 上游报 prompt 太长时从最早一侧按轮丢弃重试,最多 `MAX_PTL_RETRIES` 次(CC 同款)。
  *   丢的只是**这次摘要请求**的输入,转录本身一条不动。
  * - 失败返回 `{ ok: false }`,不抛(取消除外):失败计数、熔断、界面提示由调用方决定。
+ *
+ * 故意不做的:历史里的 `tool_call` / `tool_result` **不拍平成文本**,哪怕压缩模型声明
+ * `capabilities.tools === false` —— 目前 OpenAI / Anthropic 两条线都接受「历史里有工具块、
+ * 请求不带 tools」。拆除条件:真的遇到某家上游因此拒收,再在 `prepareForSummary` 里拍平。
  *
  * 这个模块不碰数据库、不发事件、不知道 run —— 发请求和读文件都由调用方注入,
  * 所以 session 的自动压缩和 IPC 的手动 /compact 走的是同一份代码,且能在纯单测里跑。
@@ -24,7 +31,7 @@ import { agentError } from '../../../shared/agent/error'
 import type { AgentMessage, ContentPart } from '../../../shared/agent/message'
 import { userMessage } from '../../../shared/agent/message'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
-import { COMPACT_MAX_OUTPUT_TOKENS } from '../../../shared/agent/context-management'
+import type { ThinkingLevel } from '../../../shared/agent/run-request'
 import { messagesForModel, type CompactBoundary } from '../../../shared/agent/compaction'
 import { isAbortError } from '../abort'
 import { estimateMessages, estimateTokens } from '../context-assembler'
@@ -45,6 +52,25 @@ export interface SummaryRequest {
   system: string
   messages: AgentMessage[]
   maxOutputTokens: number
+  /**
+   * 这次摘要下发的思考档位。
+   *
+   * ★ 原先这里没有这一项,`send` 的两个实现各自硬写 `'off'` —— 而 effort 模型
+   * (`gpt-6-*`)的 `reasoningEfforts` 不含 `'none'`,`thinking-adapter` 会直接抛
+   * 「该模型不支持关闭推理」。表现是压缩每次必败、三次熔断、上下文再也压不下去,
+   * 全程零报错。档位现在由调用方按压缩模型归一化后给出(`auxiliaryThinkingLevel`)。
+   */
+  thinkingLevel: ThinkingLevel
+}
+
+/** 写这份摘要的是谁 —— 原样记进边界消息,给界面看。 */
+export interface SummaryModel {
+  model: string
+  modelProviderId?: string
+  /** 实际下发的档位(已按压缩模型归一化)。 */
+  thinking: ThinkingLevel
+  /** true = 配置的压缩模型当时解析不到,回落成了会话模型。 */
+  fellBack: boolean
 }
 
 export interface CompactInput {
@@ -57,10 +83,19 @@ export interface CompactInput {
   /** 自动压缩 = true:续接语里要求模型接着干,别停下来问。见 `continuationText`。 */
   autoContinue: boolean
   /**
-   * 模型的**协议**窗口。摘要请求的输入先按它预裁一次:再往上发必然被拒,
-   * 白白花一次往返才进 PTL 重试。
+   * **压缩模型**的协议窗口(不是会话模型的)。摘要请求的输入先按它预裁一次:
+   * 再往上发必然被拒,白白花一次往返才进 PTL 重试。
+   *
+   * ★ 压缩模型可以和会话模型不是同一个,窗口也就可能更小 —— 继续拿会话模型的窗口
+   * 当分母,等于拿 1M 的预算去喂一个 128K 的压缩模型,预裁形同虚设。
    */
   protocolWindow: number
+  /** 摘要这次的输出额度(调用方已按压缩模型的窗口夹过)。 */
+  summaryMaxOutputTokens: number
+  /** 摘要这次的思考档位(调用方已按压缩模型归一化过)。 */
+  summaryThinking: ThinkingLevel
+  /** 记进边界、给界面看的那一组事实。 */
+  summaryModel: SummaryModel
   send: (request: SummaryRequest) => AsyncIterable<ProviderStreamEvent>
   attachments: {
     tools: AttachmentToolNames
@@ -83,7 +118,7 @@ export async function compactConversation(input: CompactInput): Promise<CompactR
   }
 
   let request = prepareForSummary(history)
-  const inputBudget = input.protocolWindow - COMPACT_MAX_OUTPUT_TOKENS - estimateTokens(compactPrompt(input.instructions))
+  const inputBudget = summaryInputBudget(input)
   while (request.length > 1 && estimateMessages(request) > inputBudget) {
     const next = truncateHead(request)
     if (next === undefined) break
@@ -133,7 +168,15 @@ export async function compactConversation(input: CompactInput): Promise<CompactR
     postTokens: estimateMessages([draft]),
     summary,
     ...(input.instructions === undefined || input.instructions.trim() === '' ? {} : { instructions: input.instructions.trim() }),
-    ...(attachments.restoredFiles.length === 0 ? {} : { restoredFiles: attachments.restoredFiles })
+    ...(attachments.restoredFiles.length === 0 ? {} : { restoredFiles: attachments.restoredFiles }),
+    summaryModel: {
+      model: input.summaryModel.model,
+      ...(input.summaryModel.modelProviderId === undefined ? {} : { modelProviderId: input.summaryModel.modelProviderId }),
+      thinking: input.summaryModel.thinking,
+      // 没有回落就不写这个键 —— 边界是落盘的历史记录,一个恒为 false 的字段会在
+      // 每一条边界上占位,而它要表达的是一件**例外**发生过。
+      ...(input.summaryModel.fellBack ? { fellBack: true } : {})
+    }
   }
   /*
     ★ `internal: true`:这条是我们替用户写的,聊天界面只画分隔线,不当成用户气泡;
@@ -144,6 +187,20 @@ export async function compactConversation(input: CompactInput): Promise<CompactR
   return { ok: true, message, boundary }
 }
 
+/**
+ * 摘要请求的输入还能占多少 token:压缩模型的窗口 − 这次的输出额度 − 压缩指令本身。
+ *
+ * ★ 必须封底。输出额度现在跟随全局设置(默认 32K),而压缩模型可能是个 8K / 32K 窗口的
+ * 小模型 —— 那时上面这个减法是**负数**,`while` 会一路 `truncateHead` 到只剩一条消息,
+ * 然后拿这一条去写「整段对话的摘要」。表现是压缩成功、摘要却只提到最后一句话,
+ * 而且一个报错都没有。封底到窗口的一半:宁可发出去被上游拒(那是一条能看懂的错),
+ * 也不要静默地摘要一段空气。
+ */
+function summaryInputBudget(input: CompactInput): number {
+  const budget = input.protocolWindow - input.summaryMaxOutputTokens - estimateTokens(compactPrompt(input.instructions))
+  return budget > 0 ? budget : Math.floor(input.protocolWindow / 2)
+}
+
 async function summarizeOnce(
   input: CompactInput,
   history: readonly AgentMessage[]
@@ -151,7 +208,8 @@ async function summarizeOnce(
   const request: SummaryRequest = {
     system: COMPACT_SYSTEM,
     messages: withCompactInstruction(history, compactPrompt(input.instructions), input.now),
-    maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS
+    maxOutputTokens: input.summaryMaxOutputTokens,
+    thinkingLevel: input.summaryThinking
   }
   let text = ''
   try {
@@ -171,7 +229,10 @@ async function summarizeOnce(
  *
  * - 图片(含工具截图)换成一句占位:摘要不需要看图,而图片是最贵的输入;
  *   CC 同样在压缩前剥图。
- * - 思考块去掉:摘要请求不开思考,带着签名过的旧思考块发过去,部分上游会拒。
+ * - 思考块去掉。原先的理由是「摘要请求不开思考,带着签名过的旧思考块发过去部分上游会拒」;
+ *   现在摘要**可能**开思考(档位跟随会话,见文件头),但这一条照样成立且更强了:
+ *   那些签名是**会话模型**在别的轮次里生成的,而写摘要的可能根本是另一个模型 ——
+ *   带着别人的签名块过去,上游拒得更干脆。
  * - 剥完变成空消息的整条去掉(只含图片的 user 消息)。
  */
 export function prepareForSummary(history: readonly AgentMessage[]): AgentMessage[] {

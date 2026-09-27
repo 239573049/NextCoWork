@@ -17,7 +17,17 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   imageTheme: 'preferences', defaultPermissionMode: 'automation', permissionReviewerModel: 'providers',
   permissionReviewerModelProviderId: 'providers', goalEvaluatorModel: 'providers',
   goalEvaluatorModelProviderId: 'providers', modelProposedGoals: 'providers',
+  // 压缩模型指向的是某一家供应商的别名 —— 和 goalEvaluatorModel 同类,跟着供应商配置走。
+  // ★ 不能因为「它管的是上下文压缩」就归到 contextManagement 那一档('preferences'):
+  //   那会把一个别名搬到另一台机器上,而那台机器未必有这家供应商。档位跟着模型归同一档,
+  //   拆开会出现「模型同步过去了、档位没有」的半套配置。
+  compactModel: 'providers', compactModelProviderId: 'providers', compactThinking: 'providers',
   defaultModel: 'providers', defaultModelProviderId: 'providers',
+  // 生图模型同样是「某家供应商的别名」——和 defaultModel 同档同理由。
+  imageModel: 'providers', imageModelProviderId: 'providers',
+  // 生图开关跟着生图模型走同一档:拆开会出现「模型同步过去了、开关没有」的半套配置
+  //(同上面压缩模型那段的理由)。
+  imageGenerationEnabled: 'providers',
   contextManagement: 'preferences', subagent: 'split', gateway: 'device', notifications: 'preferences',
   proxy: 'device', data: 'split', personalization: 'preferences', shortcuts: 'preferences', themeStudio: 'preferences',
   shell: 'device',

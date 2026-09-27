@@ -22,6 +22,7 @@ export function Select({
   className,
   disabled = false,
   inModal = false,
+  onOpenChange,
 }: {
   value: string;
   options: readonly SelectOption[];
@@ -38,6 +39,11 @@ export function Select({
    * 症状不是「样式错位」而是「点了没反应」:菜单开了,只是看不见。
    */
   inModal?: boolean;
+  /**
+   * 打开/关闭回调。★ 对话模型选择器用它做「打开时校正」(见 `useChatModelGuard`);
+   * 可选,缺省不影响任何现有调用方的行为。
+   */
+  onOpenChange?: (open: boolean) => void;
 }): ReactNode {
   // Radix 把空串保留给“尚未选择”的内部状态；设置里的“跟随对话”恰好以空串持久化。
   // 为这个选项映射一个仅在组件内部使用、且不会和调用方值冲突的值。
@@ -53,6 +59,7 @@ export function Select({
       onValueChange={(nextValue) =>
         onValueChange(nextValue === emptyValue ? "" : nextValue)
       }
+      onOpenChange={onOpenChange}
     >
       <SelectPrimitive.Trigger
         aria-label={ariaLabel}

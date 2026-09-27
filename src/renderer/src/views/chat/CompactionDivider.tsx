@@ -55,6 +55,18 @@ export function CompactionDivider({
           <span>{t('chat.compaction.label')}</span>
           <span aria-hidden className="text-fg-faint/50">·</span>
           <span>{trigger}</span>
+          {/*
+            需求:压缩模型可以单独配置之后,「这份摘要是谁写的」不再等于「会话模型是谁」。
+            药丸上只放模型名(别名是领域值,不翻译 §6.5);档位和回落说明放进展开区 ——
+            这一行在窄窗口下已经要和 `foldedCount` 抢位置了。
+            ★ 旧边界没有这个字段,那时一个字都不画:没有事实就不画字段(§5 不做防御式 UI)。
+          */}
+          {boundary.summaryModel !== undefined && (
+            <>
+              <span aria-hidden className="text-fg-faint/50">·</span>
+              <span className="max-w-[14ch] truncate">{boundary.summaryModel.model}</span>
+            </>
+          )}
           {foldedCount > 0 && (
             <>
               <span aria-hidden className="text-fg-faint/50">·</span>
@@ -73,6 +85,22 @@ export function CompactionDivider({
             聊天记录一个字都没少,变的只是**下一次请求发出去的范围**。
           */}
           <p className="mb-2 text-[11px] text-fg-faint">{t('chat.compaction.hint')}</p>
+          {/*
+            谁写的、想了多深。★ 回落那一句**必须显示**:静默回落是我们刻意的设计
+            (配置过期不该让压缩失败),但用户得能知道「我配的那个模型这次没用上」,
+            否则他只会觉得配置没生效。
+          */}
+          {boundary.summaryModel !== undefined && (
+            <p className="mb-2 text-[11px] text-fg-faint" data-testid="compaction-summary-model">
+              {t('chat.compaction.writtenBy', {
+                model: boundary.summaryModel.model,
+                level: t(`chat.thinkingLevel.${boundary.summaryModel.thinking}`)
+              })}
+              {boundary.summaryModel.fellBack === true && (
+                <span className="ml-1 text-warning">{t('chat.compaction.fellBack')}</span>
+              )}
+            </p>
+          )}
           {boundary.restoredFiles !== undefined && boundary.restoredFiles.length > 0 && (
             <div className="mb-2 flex flex-col gap-0.5" data-testid="compaction-restored">
               <span className="text-[11px] text-fg-faint">

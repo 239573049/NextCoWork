@@ -303,14 +303,23 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
 
   // 任何 window.open / target=_blank 一律不在应用内开新窗口,交给系统浏览器。
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     // Renderer-controlled session links open another app window, while all
     // other external targets continue to use the system browser policy.
     const appUrl = win.webContents.getURL().split('#')[0]
     const devUrl = process.env['ELECTRON_RENDERER_URL']
-    if ((typeof appUrl === 'string' && appUrl !== '' && url.startsWith(appUrl)) || (typeof devUrl === 'string' && url.startsWith(devUrl))) {
+    /*
+      ★ 两条分支**互斥,且本应用的地址先判**。原来外链那一句排在最前面、判完不返回,
+      于是 dev 下(appUrl 与 `ELECTRON_RENDERER_URL` 都是 http://localhost:5173)
+      一个指向开发服务器的 `window.open` 会**同时**走系统浏览器和 `action: 'allow'`,
+      凭空多出一扇 Electron 窗口 —— 而它多半停在空白上。
+
+      `devUrl !== ''` 不是防御性判断:空串的 `startsWith('')` 恒为 true,少了它,
+      环境变量被设成空串的那一次运行会把**任意外链**都当成本应用的地址放进新窗口。
+    */
+    if ((typeof appUrl === 'string' && appUrl !== '' && url.startsWith(appUrl)) || (typeof devUrl === 'string' && devUrl !== '' && url.startsWith(devUrl))) {
       return { action: 'allow' }
     }
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
 
@@ -559,6 +568,21 @@ function legacyMigrationSources(targetDir: string): Array<{ root: string; databa
 void app
   .whenReady()
   .then(async () => {
+  /*
+    ★ **抢锁失败的那个进程必须在这里止步。** 文件顶部那句 `app.quit()` 不中断模块
+    求值 —— 它只是排了一次退出,而 `ready` 通常先于退出真正落地,于是这个将死的
+    进程会照样往下建窗、开库。
+
+    症状:应用已经在跑时再点一次图标(Dock / 访达,`electron-vite dev --watch`
+    热更新重拉进程也算),第一实例被 `second-instance` 唤到前面的**同时,多弹出
+    一扇空白窗**。那扇窗不是坏了,它等的是本进程永远不会发出的
+    `announceIpcReady()`(见下面 `registerIpc()` 后面那段),几百毫秒后随进程一起消失。
+
+    判据放在回调里而不是把整段启动缩进进 `if`:退出流程、`second-instance` 这些
+    模块级装配对两种进程都无害,真正不能跑第二遍的是**建窗和开库**,而它们全在这里面。
+  */
+  if (!gotTheLock) return
+
   electronApp.setAppUserModelId('com.nextcowork.app')
 
   // ★ dev 与未打包运行时的 dock 图标。打包后的 .app 由 electron-builder 从
@@ -862,7 +886,17 @@ function showMainWindow(): void {
   */
   if (quitFlow?.done === true) return
 
-  const [win] = BrowserWindow.getAllWindows()
+  /*
+    ★ **取窗口用注册表,不用 `BrowserWindow.getAllWindows()`** —— 和下面退出流程
+    那一处同一个理由:`getAllWindows()` 里还有**每个插件一扇**的隐藏宿主窗
+    (`plugin/host-window.ts`,`show:false`,页面只是空壳 `__host.html`)。
+
+    需求:唤回的必须是应用自己的窗口。主窗此刻已经销毁的那几个时刻(退出第一段
+    刚把它关掉而另一扇还在跑 `beforeunload`、`forceClose()` 之后)取「第一扇窗」
+    拿到的就是插件宿主窗,于是这一下点击把一扇**纯白空窗**推到用户面前,
+    而真正要唤回的界面没有出现。注册表里只有主窗与 ⌥Space 快捷窗。
+  */
+  const [win] = windows.listWindows()
   if (win) {
     if (win.isMinimized()) win.restore()
     win.show()
@@ -943,6 +977,12 @@ app.on('window-all-closed', () => {
   那一次 `app.quit()`,那时 `quitFlow.done` 已经是 true,这个处理器直接让路。
 */
 app.on('before-quit', (event) => {
+  /*
+    抢锁失败的进程直接放行:它没有建过窗、没有开过库(上面 `whenReady` 第一行就
+    返回了),退出流程对它没有任何意义 —— 拦这一下只会让一个本该立刻消失的进程
+    多活到收尾跑完。
+  */
+  if (!gotTheLock) return
   if (quitFlow?.done === true) return
   event.preventDefault()
   quitFlow?.begin()

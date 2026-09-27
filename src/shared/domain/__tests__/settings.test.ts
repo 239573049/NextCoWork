@@ -274,6 +274,8 @@ describe('mergeSettings 的模型配对', () => {
     defaultModel: 'shared', defaultModelProviderId: 'codex',
     permissionReviewerModel: 'shared', permissionReviewerModelProviderId: 'codex',
     goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'codex',
+    compactModel: 'shared', compactModelProviderId: 'codex',
+    imageModel: 'shared', imageModelProviderId: 'codex',
     subagent: { ...base().subagent, model: 'shared', modelProviderId: 'codex' }
   })
 
@@ -312,17 +314,56 @@ describe('mergeSettings 的模型配对', () => {
     expect(next.goalEvaluatorModelProviderId).toBeUndefined()
   })
 
+  it('★ 压缩模型同理 —— 只给别名时旧供应商被清掉', () => {
+    const next = mergeSettings(pinned(), { compactModel: 'other' })
+    expect(next.compactModel).toBe('other')
+    expect(next.compactModelProviderId).toBeUndefined()
+  })
+
+  it('★ 生图模型同理 —— 只给别名时旧供应商被清掉', () => {
+    const next = mergeSettings(pinned(), { imageModel: 'other' })
+    expect(next.imageModel).toBe('other')
+    expect(next.imageModelProviderId).toBeUndefined()
+  })
+
+  /**
+   * 生图开关:出厂开启(选了模型就是要生图);只认布尔,坏值退回当前值 ——
+   * 一个非布尔值落库后桥的 `=== true` 会把它静默读成「关」,症状又是「工具不见了」。
+   * 关掉开关不动所选模型:「要不要画」和「用谁画」是两件事。
+   */
+  it('生图开关:默认开启,只认布尔,坏值退回当前值,且不牵动所选模型', () => {
+    expect(DEFAULT_SETTINGS.imageGenerationEnabled).toBe(true)
+    let s = mergeSettings(pinned(), { imageGenerationEnabled: false })
+    expect(s.imageGenerationEnabled).toBe(false)
+    expect(s.imageModel).toBe('shared')
+    expect(s.imageModelProviderId).toBe('codex')
+    s = mergeSettings(s, { imageGenerationEnabled: 'yes' as unknown as boolean })
+    expect(s.imageGenerationEnabled).toBe(false)
+  })
+
+  /**
+   * 压缩档位和子代理那一栏同一条规则:坏值退回**当前值**。
+   * 静默改成 'inherit' 会让用户以为自己选的档位在生效,而账单在按另一档走。
+   */
+  it('压缩思考档位:合法值落库,坏值退回当前值', () => {
+    let s = mergeSettings(base(), { compactThinking: 'minimal' })
+    expect(s.compactThinking).toBe('minimal')
+    s = mergeSettings(s, { compactThinking: 'deep' as unknown as AppSettings['compactThinking'] })
+    expect(s.compactThinking).toBe('minimal')
+  })
+
   it('成对给出时两个都写进去', () => {
     const next = mergeSettings(pinned(), { defaultModel: 'other', defaultModelProviderId: 'routin' })
     expect(next).toMatchObject({ defaultModel: 'other', defaultModelProviderId: 'routin' })
   })
 
-  it('没提到模型的 patch 不动这四对', () => {
+  it('没提到模型的 patch 不动这五对', () => {
     const next = mergeSettings(pinned(), { theme: 'dark' })
     expect(next.defaultModelProviderId).toBe('codex')
     expect(next.subagent.modelProviderId).toBe('codex')
     expect(next.permissionReviewerModelProviderId).toBe('codex')
     expect(next.goalEvaluatorModelProviderId).toBe('codex')
+    expect(next.compactModelProviderId).toBe('codex')
   })
 })
 

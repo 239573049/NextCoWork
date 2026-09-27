@@ -9,7 +9,14 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 
-vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
+vi.mock('electron', () => ({
+  BrowserWindow: {
+    getAllWindows: () => [],
+    // listWindows 靠它把 webContents 换回窗口;假 sender 自带一扇假窗,
+    // 没带的(上面那几个只测推送的)换不回来,于是自然不出现在结果里。
+    fromWebContents: (sender: { window?: unknown }) => sender.window ?? null
+  }
+}))
 
 import { runTopic, windows } from '../registry'
 
@@ -76,5 +83,39 @@ describe('WindowRegistry.send', () => {
 
     expect(() => windows.emitToTopic(topic, 'agent:event', envelope(1))).not.toThrow()
     expect(windows.hasSubscribers(topic)).toBe(false)
+  })
+})
+
+/**
+ * 「这扇窗还在不在」与「它还收不收得到消息」是两个问题,答案来自两张表。
+ * 混用的症状:⌘R 重载的那一瞬间点 Dock,应用**再开一扇一模一样的窗**
+ * (唤回路径以为一扇都没有了);退出时这扇窗也没人关,只能等 6 秒兜底。
+ */
+describe('WindowRegistry.listWindows', () => {
+  it('★ keeps a reloading window listed after send() forgot its dead frame', () => {
+    const window = { isDestroyed: () => false }
+    let destroyed = (): void => {}
+    const sender = {
+      id: 10,
+      isDestroyed: () => false,
+      window,
+      // 重载中的窗口:帧已经死了,webContents 还活着。
+      mainFrame: { isDestroyed: () => true, detached: false, send: () => {} },
+      once: (_event: string, handler: () => void) => {
+        destroyed = handler
+      }
+    }
+    windows.register(sender as never, 'main')
+    const topic = runTopic('reloading')
+    windows.subscribe(topic, sender as never)
+
+    windows.emitToTopic(topic, 'agent:event', envelope(1))
+    // 推送这一侧照旧摘掉它 —— 一个收不到消息的订阅者就该摘掉。
+    expect(windows.hasSubscribers(topic)).toBe(false)
+    // 但窗口本身还在,唤回和退出关窗都必须看得见它。
+    expect(windows.listWindows()).toEqual([window])
+
+    destroyed()
+    expect(windows.listWindows()).toEqual([])
   })
 })

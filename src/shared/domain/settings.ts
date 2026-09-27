@@ -307,6 +307,25 @@ export interface AppSettings {
   goalEvaluatorModel: string
   /** 与 `goalEvaluatorModel` 成对,见 `defaultModelProviderId` */
   goalEvaluatorModelProviderId?: string
+  /**
+   * 上下文压缩用哪个模型；空字符串 = 跟随会话模型（出厂默认）。
+   *
+   * 需求：压缩是一次长输入、短输出的机械活，用户有理由把它交给另一个更便宜的模型；
+   * 而它读的是同一段对话，所以**默认必须仍然跟随会话模型**（换一家既换口径也换账单）。
+   * 三档来源（工作区 > 这一栏 > 会话模型）在 `domain/compaction-model.ts`。
+   */
+  compactModel: string
+  /** 与 `compactModel` 成对,见 `defaultModelProviderId` */
+  compactModelProviderId?: string
+  /**
+   * 压缩请求的思考强度。`'inherit'` = 跟随会话本轮档位（出厂默认）。
+   *
+   * ★ 这一栏不只是省钱开关，它是**正确性开关**：原先压缩硬发 `'off'`，而 effort 模型
+   *   （`gpt-6-*`）的 `reasoningEfforts` 不含 `'none'`，于是每次压缩都被 `thinking-adapter`
+   *   拒掉、三次后熔断，上下文再也压不下去。实际下发前还会按压缩模型归一化一次
+   *   （`auxiliaryThinkingLevel`），所以这里选什么都不会让请求失败。
+   */
+  compactThinking: SubagentThinking
   /** 模型自提目标：默认放开，按用户原话直接设立。 */
   modelProposedGoals: ModelProposedGoals
   defaultModel: string
@@ -318,6 +337,35 @@ export interface AppSettings {
    * `mergeSettings` 按这条规则成对写入,否则会留下「新别名 + 旧供应商」的脏配对。
    */
   defaultModelProviderId?: string
+
+  /**
+   * 「对话生图使用的模型」(设置 › 模型 › 图片生成)。**必选、不设自动档**:
+   * 生成和改图共用这一个选择,只用点名的那个绑定,失败即失败(不按 priority
+   * 跨家兜底 —— 跨家兜底的症状是「我明明点名了 A,画出来的却是 B 家的」)。
+   *
+   * ★ 空字符串 = **没选过**,`generate_image` 工具整体不下发(`image-gen.ts` 的
+   * `available()`):不画一个注定失败的承诺。升级上来的库里这项就是空,
+   * 用户要自己去图片页点一次 —— 这是「必选」决定的直接后果,不是遗漏。
+   *
+   * 与 `defaultModel` 成对,见那边 `defaultModelProviderId` 的说明:
+   * 改 `imageModel` 的 patch 必须同时给 `imageModelProviderId`。
+   */
+  imageModel: string
+  /** 与 `imageModel` 成对,见 `defaultModelProviderId` */
+  imageModelProviderId?: string
+  /**
+   * 「对话生图」开关(设置 › 模型 › 图片生成)。关掉 = `generate_image` 不下发、调用被拒。
+   *
+   * 需求:生图有**自己的**开关,不再挂在输入框「联网搜索」那颗药丸上 —— 那颗现在
+   * 只管网页搜索与抓取(`permission-gate.ts` 的 `NETWORK_SWITCH_TOOLS`)。原先生图跟着
+   * 它一起消失,症状是「选好了生图模型,对话里却找不到工具」,且无从查起。
+   *
+   * ★ 出厂**开启**:选了生图模型本身就是「我要在对话里生图」的意思;默认关的话,
+   *   用户还得去找第二个开关,正是这次要消灭的那种「配好了却不生效」。
+   * ★ 与 `imageModel` 分开是因为两者回答不同问题:模型是「用谁画」,开关是「要不要画」——
+   *   临时关掉生图不该让用户丢掉自己挑好的模型。
+   */
+  imageGenerationEnabled: boolean
 
   /** 上下文管理：默认只开自动压缩，智能窗口模式要用户自己打开。 */
   contextManagement: ContextManagementSettings
@@ -458,7 +506,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   permissionReviewerModel: '',
   goalEvaluatorModel: '',
   modelProposedGoals: 'auto',
+  // 压缩出厂「跟随会话模型 + 跟随会话档位」—— 除了档位不再硬编码 off,
+  // 这就是引入这两栏之前的行为,老用户升级后压缩发给谁一个字都不变。
+  compactModel: '',
+  compactThinking: INHERIT_THINKING,
   defaultModel: '',
+  // 空 = 没选过生图模型,`generate_image` 不下发(见 AppSettings.imageModel 的说明)
+  imageModel: '',
+  // 生图开关出厂开启 —— 理由见 AppSettings.imageGenerationEnabled
+  imageGenerationEnabled: true,
   contextManagement: { autoCompact: true },
   upstreamIdleTimeoutSeconds: DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
   maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -514,12 +570,12 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.defaultPermissionMode !== undefined) {
     next.defaultPermissionMode = patch.defaultPermissionMode
   }
-  // ★★ 四个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
+  // ★★ 六个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
   //    供应商就跟着 patch 走,哪怕 patch 里它是 `undefined`(那是「取消锁定」,
   //    供应商被删时的降级路径就靠这个)。
   //    只写别名、让旧 providerId 留下来的话,就会得到「新别名 + 旧供应商」——
   //    正是 `model-selection.ts` 那一整个模块要消灭的那个 bug,在它自己的
-  //    合并函数里复活一次。这四处一个都不能漏。
+  //    合并函数里复活一次。这六处一个都不能漏。
   if (patch.permissionReviewerModel !== undefined) {
     next.permissionReviewerModel = patch.permissionReviewerModel
     next.permissionReviewerModelProviderId = patch.permissionReviewerModelProviderId
@@ -527,6 +583,19 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.goalEvaluatorModel !== undefined) {
     next.goalEvaluatorModel = patch.goalEvaluatorModel
     next.goalEvaluatorModelProviderId = patch.goalEvaluatorModelProviderId
+  }
+  if (patch.compactModel !== undefined) {
+    next.compactModel = patch.compactModel
+    next.compactModelProviderId = patch.compactModelProviderId
+  }
+  /*
+    ★ 坏值退回**当前值**,同 `subagent.thinking`(那一段写了完整理由):
+    认不出的档位会一路流到 `THINKING_BUDGET[档位]` 变成 NaN 写进请求体,
+    而界面上那一栏看起来完全正常;静默改成 `'inherit'` 则会让用户以为
+    自己选的档位在生效。
+  */
+  if (patch.compactThinking !== undefined && isSubagentThinking(patch.compactThinking)) {
+    next.compactThinking = patch.compactThinking
   }
   // ★ 三档白名单:坏值退回**当前值**(不是硬退回 `'auto'`)—— 这一项管的是
   //   「要不要弹审批」,静默放宽成 `'auto'` 是这一整类改动里最不该出现的失败形态。
@@ -536,6 +605,15 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.defaultModel !== undefined) {
     next.defaultModel = patch.defaultModel
     next.defaultModelProviderId = patch.defaultModelProviderId
+  }
+  if (patch.imageModel !== undefined) {
+    next.imageModel = patch.imageModel
+    next.imageModelProviderId = patch.imageModelProviderId
+  }
+  // 只认布尔,坏值退回当前值:这一项会从磁盘/云同步读回,一个非布尔值落库后
+  // 桥那边的 `=== true` 会把它静默读成「关」,症状又是「工具不见了」
+  if (typeof patch.imageGenerationEnabled === 'boolean') {
+    next.imageGenerationEnabled = patch.imageGenerationEnabled
   }
   if (patch.contextManagement !== undefined) {
     next.contextManagement = { ...next.contextManagement, ...patch.contextManagement }
@@ -642,8 +720,14 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   goalEvaluatorModel: true,
   goalEvaluatorModelProviderId: true,
   modelProposedGoals: true,
+  compactModel: true,
+  compactModelProviderId: true,
+  compactThinking: true,
   defaultModel: true,
   defaultModelProviderId: true,
+  imageModel: true,
+  imageModelProviderId: true,
+  imageGenerationEnabled: true,
   contextManagement: true,
   upstreamIdleTimeoutSeconds: true,
   maxOutputTokens: true,

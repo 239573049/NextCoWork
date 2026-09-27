@@ -25,11 +25,14 @@ const ORIGINATOR = 'codex_cli_rs'
  * 需求:codex 这条线的**出站请求要自报成 Codex CLI**,UA 与 originator 同族 ——
  * 在这之前业务请求发的是 `NextCoWork/<版本> (darwin; arm64)`,与 originator 自相矛盾。
  *
- * 实测依据(2026-09-23):本机全局装的 `@openai/codex` 是 **0.154.0**
- * (`/usr/local/lib/node_modules/@openai/codex/package.json`);Codex 源码
+ * 实测依据(2026-09-27):npm `latest` 的 `@openai/codex` 是 **0.157.1** ——
+ * 从 registry 拉了 `0.157.1-darwin-arm64` 平台包,二进制里留有同族的
+ * `codex-doctor/0.157.1` 字面量,`codex_cli_rs` 仍在源码路径
+ * `login/src/auth/default_client.rs` 下,client id 未变。Codex 源码
  * `codex-rs/login/src/auth/default_client.rs` 的 `get_codex_user_agent()` 拼的正是
- * `{originator}/{CARGO_PKG_VERSION} (OS 版本; 架构) …` —— 二进制里也留着同族的
- * `codex-doctor/0.154.0` 字面量,版本格式与这里一致。
+ * `{originator}/{CARGO_PKG_VERSION} (OS 版本; 架构) …`,版本格式与这里一致。
+ * 注:本机全局还装着 0.154.0 未升级,但 registry 上的 latest(0.157.1)才是
+ * 大多数用户真实在跑的版本,UA 跟后者。
  *
  * ★ 版本号写死一个**真实存在过的**值,理由同 `zcode.ts` 那条:编一个不存在的版本号
  * 是在赌上游不做版本白名单,赌输了是一个不解释原因的 403。
@@ -42,7 +45,7 @@ const ORIGINATOR = 'codex_cli_rs'
  * **不带**它 —— 见 `kernel/user-agent.ts` 文件头那张表的第 1 行。
  * 不满足会怎样:表现是 403 或被静默降级,而错误信息里不会出现 UA 一个字。
  */
-const CODEX_USER_AGENT = 'codex_cli_rs/0.154.0'
+const CODEX_USER_AGENT = 'codex_cli_rs/0.157.1'
 
 /**
  * ★ 这是 Codex CLI 的**公开** client id(public client + PKCE,没有 client_secret ——

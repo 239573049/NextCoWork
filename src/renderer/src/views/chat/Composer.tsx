@@ -14,9 +14,11 @@
  */
 import {
   ArrowUp,
+  Bot,
   BrainCircuit,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleDollarSign,
   Code2,
@@ -80,15 +82,32 @@ import type {
   WorkspaceSettings,
 } from "../../../../shared/domain/workspace";
 import { normalizeEnvironmentRef } from "../../../../shared/domain/environment";
+import type { WorkspaceCompactionOverride } from "../../../../shared/domain/compaction-model";
+import {
+  INHERIT_THINKING,
+  SUBAGENT_THINKING_CHOICES,
+} from "../../../../shared/domain/subagent-thinking";
+import { parseModelSelectionKey } from "../../../../shared/domain/model-selection";
+import {
+  compactModelOptions,
+  compactModelPatch,
+  compactModelValue,
+  compactThinkingPatch,
+  compactThinkingValue,
+  FOLLOW_GLOBAL,
+  FOLLOW_SESSION,
+} from "./compact-choice";
 import type {
   ModelAlias,
   UpstreamProvider,
 } from "../../../../shared/domain/provider";
+import { isChatModelAlias } from "../../../../shared/domain/provider";
 import { ProviderIcon } from "../../components/brand/ProviderIcon";
 import {
   ProviderModelMenu,
   type ProviderModelMenuRow,
 } from "../../components/ProviderModelMenu";
+import { useChatModelGuard } from "../../components/useChatModelGuard";
 import {
   Menu,
   MenuItem,
@@ -681,6 +700,22 @@ export function Composer({
   }
 
   /**
+   * 压缩那两栏的写回。
+   *
+   * ★ **不走上面的 `patch`**,因为它不是 `ComposerValue` 的一部分:那个对象描述的是
+   * 「这一条消息怎么发」,每次发送都读一遍;而压缩模型是工作区的一条常设配置,
+   * 只有自动压缩和 /compact 读它。混进去会让每次切权限档位都顺带重写一遍压缩配置。
+   * `toSettings` 不含这三个键,所以两条写回路径不会互相覆盖(主进程是浅合并)。
+   *
+   * 值直接读 `workspace.settings` —— 它由工作区 store 维持,写回成功后自己会更新。
+   */
+  function patchCompaction(p: Partial<WorkspaceSettings>): void {
+    void updateWorkspace({ id: workspace.id, settings: p }).catch((err: unknown) => {
+      console.error("[composer] 压缩配置写回失败:", err);
+    });
+  }
+
+  /**
    * 生效模型 = 工作区选过的 → 应用默认 → 列表第一个。
    *
    * **兜底结果不写回工作区**:用户没选过,那 `defaultModel` 就该继续是空的。
@@ -1058,6 +1093,12 @@ export function Composer({
             model={selectedModel}
             maxContext={value.maxContext}
             onMaxContext={(next) => patch({ maxContext: next })}
+            compaction={{
+              override: workspace.settings,
+              models,
+              providers,
+              onChange: patchCompaction,
+            }}
             running={running}
             compacting={contextCompacting}
             onCompact={onCompactContext}
@@ -1727,6 +1768,20 @@ function ThinkingPill({
 }
 
 /**
+ * 圆环菜单里压缩那两栏要的全部东西 —— `ContextRing` 和它的二级视图共用。
+ *
+ * ★ 一个对象而不是四个散 prop:它们是**一件事**的四个面(当前值 / 候选绑定 /
+ * 供应商名 / 怎么写回),拆开之后任何一次改动都要同时动两个组件的签名。
+ */
+interface CompactionMenuProps {
+  /** 当前工作区设置里那三项(三态见 `shared/domain/workspace.ts`)。 */
+  override: WorkspaceCompactionOverride;
+  models: readonly ModelAlias[];
+  providers: readonly UpstreamProvider[];
+  onChange: (patch: Partial<WorkspaceSettings>) => void;
+}
+
+/**
  * 上下文余量圆环 —— 同时是「最大上下文」开关和手动压缩的入口。
  *
  * ★ 分子是**最近一次请求**报回来的输入 token,不是整轮累加 ——
@@ -1749,6 +1804,7 @@ function ContextRing({
   model,
   maxContext,
   onMaxContext,
+  compaction,
   running,
   compacting,
   onCompact,
@@ -1763,6 +1819,14 @@ function ContextRing({
   model?: ModelAlias;
   maxContext: boolean;
   onMaxContext: (next: boolean) => void;
+  /**
+   * 压缩那两栏(工作区级覆盖)。
+   *
+   * ★ 一个对象而不是四个散 prop:这个组件的参数表已经很长,而这四样是**一件事**
+   * 的四个面(当前值 / 候选 / 候选的供应商名 / 怎么写回),拆开之后任何一次改动
+   * 都要同时动四处签名。
+   */
+  compaction: CompactionMenuProps;
   running: boolean;
   compacting: boolean;
   onCompact?: () => void;
@@ -1791,6 +1855,15 @@ function ContextRing({
   onManageMcp?: () => void;
 }): ReactNode {
   const { t } = useI18n();
+  /*
+    菜单的三个视图。压缩模型 / 压缩档位各自是一张候选表,塞进主面板会把这张
+    「还装得下多少」的卡片撑成一屏下拉。
+
+    ★ 用**同一个 Menu 的内部视图**,不嵌 `Select`:这个 `Menu` 是自绘的,靠
+    「面板外 pointerdown 就关」收场,而 Radix 的 Select 把浮层 portal 到 body ——
+    点它的选项等于点在面板外,菜单会在选中的同一瞬间关掉。症状是「点了没反应」。
+  */
+  const [view, setView] = useState<"main" | "compactModel" | "compactThinking">("main");
   const protocolWindow = model?.contextWindow;
   const total = effectiveContextWindow(protocolWindow, maxContext);
   const tickRatio = longContextTickRatio(protocolWindow, maxContext);
@@ -1822,8 +1895,7 @@ function ContextRing({
     pricingModelId === undefined
       ? undefined
       : longContextSurcharge(PRICING_SEED, model?.providerId ?? null, pricingModelId, Date.now());
-  const protocolLabel = formatContextWindow(effectiveContextWindow(protocolWindow, true));
-  const maxContextHint = !canMax
+  const protocolLabel = formatContextWindow(effectiveContextWindow(protocolWindow, true));  const maxContextHint = !canMax
     ? t("composer.maxContextUnavailable", { window: protocolLabel })
     : surcharge !== undefined
       ? t("composer.maxContextHint", {
@@ -1839,6 +1911,32 @@ function ContextRing({
             threshold: formatContextWindow(LONG_CONTEXT_THRESHOLD),
           });
 
+  /*
+    菜单行上显示**当前落在哪一档**,而不是一句「去设置」。
+    ★ 缺省态也要显示出来(「跟随全局设置」):看不见落点,用户就无从判断自己
+    上次到底改没改过 —— 而这两栏的缺省态恰恰是绝大多数会话的实际状态。
+  */
+  const compactModelKey = compactModelValue(compaction.override);
+  const compactModelLabel =
+    compactModelKey === FOLLOW_GLOBAL
+      ? t("compaction.followGlobal")
+      : compactModelKey === FOLLOW_SESSION
+        ? t("compaction.followSession")
+        : compactModelOptions(compaction.models, compaction.providers).find(
+            (o) => o.value === compactModelKey,
+          )?.label
+          // 配过的那条绑定现在查不到了(供应商被删/别名改名):显示别名本身,
+          // 而不是退回「跟随全局」—— 那会让人以为自己没配过。真正的回落发生在
+          // 主进程压缩那一刻(`kernel/compaction/binding.ts`),这里只是如实显示配置。
+          ?? parseModelSelectionKey(compactModelKey).alias;
+  const compactThinkingKey = compactThinkingValue(compaction.override);
+  const compactThinkingLabel =
+    compactThinkingKey === FOLLOW_GLOBAL
+      ? t("compaction.followGlobal")
+      : compactThinkingKey === INHERIT_THINKING
+        ? t("compaction.thinkingInherit")
+        : t(`chat.thinkingLevel.${compactThinkingKey as ThinkingLevel}`);
+
   return (
     <Menu
       label={compacting
@@ -1848,6 +1946,9 @@ function ContextRing({
       align="end"
       onOpenChange={(open) => {
         if (open) onMenuOpen?.();
+        // 关掉时回到主视图 —— 下次打开不该停在上一次翻到的那一页(`Menu` 的这个
+        // prop 正是为此存在的,见它的注释)。
+        else setView("main");
       }}
       /*
         双击 = 立刻压缩,保住改造之前就有的肌肉记忆。为什么不能直接包
@@ -1925,6 +2026,19 @@ function ContextRing({
     >
       {(close) => (
         <>
+          {/*
+            ── 二级视图:压缩模型 / 压缩思考强度 ──
+            选完回主视图而不是关菜单:这两栏常常要一起调(换了便宜模型多半也想换档位),
+            每选一项就把面板关掉等于让人重开一次。
+          */}
+          {view !== "main" ? (
+            <CompactionChoiceView
+              kind={view}
+              compaction={compaction}
+              onBack={() => setView("main")}
+            />
+          ) : (
+          <>
           <MenuLabel>
             {t("composer.contextHeadline", {
               used: used === undefined ? "—" : formatContextWindow(used),
@@ -1992,6 +2106,26 @@ function ContextRing({
             {t("composer.maxContext")}
           </ComposerMenuItem>
           <MenuSeparator />
+          {/*
+            压缩用谁、想多深 —— 和上面那颗「最大上下文」同属「这条会话的上下文怎么管」,
+            所以放在同一张菜单里、紧挨「压缩上下文」那条动作。这两栏是**工作区级**的,
+            缺省跟随设置 › 通用 › Agent 里的全局值。
+          */}
+          <ComposerMenuItem
+            icon={<Bot size={16} />}
+            description={compactModelLabel}
+            onSelect={() => setView("compactModel")}
+          >
+            {t("compaction.model")}
+          </ComposerMenuItem>
+          <ComposerMenuItem
+            icon={<BrainCircuit size={16} />}
+            description={compactThinkingLabel}
+            onSelect={() => setView("compactThinking")}
+          >
+            {t("compaction.thinking")}
+          </ComposerMenuItem>
+          <MenuSeparator />
           <ComposerMenuItem
             icon={<RefreshCw size={16} />}
             disabled={blocked}
@@ -2014,9 +2148,75 @@ function ContextRing({
           >
             {t("composer.compactNow")}
           </ComposerMenuItem>
+          </>
+          )}
         </>
       )}
     </Menu>
+  );
+}
+
+/**
+ * 圆环菜单的二级视图:压缩模型 / 压缩思考强度的候选表。
+ *
+ * ★ 每一项都带勾,而且「跟随全局设置」「跟随会话模型」也在表里占一行 ——
+ *   它们是**缺省态**,不是「没选」:看不见当前落在哪一档,用户就没法判断
+ *   自己上次到底改没改过。
+ */
+function CompactionChoiceView({
+  kind,
+  compaction,
+  onBack,
+}: {
+  kind: "compactModel" | "compactThinking";
+  compaction: CompactionMenuProps;
+  onBack: () => void;
+}): ReactNode {
+  const { t } = useI18n();
+  const isModel = kind === "compactModel";
+  const current = isModel
+    ? compactModelValue(compaction.override)
+    : compactThinkingValue(compaction.override);
+  const options: { value: string; label: string }[] = isModel
+    ? [
+        { value: FOLLOW_GLOBAL, label: t("compaction.followGlobal") },
+        { value: FOLLOW_SESSION, label: t("compaction.followSession") },
+        ...compactModelOptions(compaction.models, compaction.providers),
+      ]
+    : [
+        { value: FOLLOW_GLOBAL, label: t("compaction.followGlobal") },
+        ...SUBAGENT_THINKING_CHOICES.map((value) => ({
+          value,
+          label:
+            value === INHERIT_THINKING
+              ? t("compaction.thinkingInherit")
+              : t(`chat.thinkingLevel.${value}`),
+        })),
+      ];
+
+  return (
+    <>
+      <MenuLabel>{t(isModel ? "compaction.model" : "compaction.thinking")}</MenuLabel>
+      <MenuItem icon={<ChevronLeft size={14} />} onSelect={onBack}>
+        {t("compaction.back")}
+      </MenuItem>
+      <MenuSeparator />
+      {options.map((option) => (
+        <MenuItem
+          key={option.value}
+          checked={option.value === current}
+          // 选完回主视图,不关菜单 —— 理由见调用点那段注释。
+          onSelect={() => {
+            compaction.onChange(
+              isModel ? compactModelPatch(option.value) : compactThinkingPatch(option.value),
+            );
+            onBack();
+          }}
+        >
+          {option.label}
+        </MenuItem>
+      ))}
+    </>
   );
 }
 
@@ -2191,11 +2391,21 @@ function ModelPicker({
   onModel: (model: string, modelProviderId: string) => void;
 }): ReactNode {
   const { t } = useI18n();
+  // 打开选择器时校正存量的「选中了图片模型」(见 useChatModelGuard 文件头的需求说明)
+  const guardChatModel = useChatModelGuard(
+    models,
+    providers,
+    { model, modelProviderId },
+    onModel,
+  );
+  // ★ 对话输入框只列文本模型:图片模型发不出对话请求,出现在这里就是一个选了就废的
+  // 选项(判据收口在 `isChatModelAlias`,别在下面的过滤里再写一份)。
+  const chatModels = models.filter(isChatModelAlias);
   const availableProviders = providers.filter((p) =>
-    models.some((m) => m.providerId === p.id),
+    chatModels.some((m) => m.providerId === p.id),
   );
   const rows: ProviderModelMenuRow[] = availableProviders.map((p) => {
-    const providerModels = models.filter((m) => m.providerId === p.id);
+    const providerModels = chatModels.filter((m) => m.providerId === p.id);
     return {
       id: p.id,
       label: p.name,
@@ -2234,6 +2444,7 @@ function ModelPicker({
       emptyLabel={t("chat.noModelsConfigured")}
       rows={rows}
       onSelectModel={(selectedProviderId, alias) => onModel(alias, selectedProviderId)}
+      onOpenChange={guardChatModel}
     />
   );
 }

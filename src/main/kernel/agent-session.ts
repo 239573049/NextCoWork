@@ -33,6 +33,7 @@ import {
 import type { Skill } from '../../shared/domain/skill'
 import type { SchedulingBridge } from '../../shared/domain/scheduled'
 import type { ShellBridge } from '../../shared/domain/shell'
+import type { ImageGenBridge } from './image-gen'
 import type { PlanExecutionContext } from './plan-execution'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
@@ -45,6 +46,8 @@ import { messagesForModel } from '../../shared/agent/compaction'
 import { effectiveContextWindow } from '../../shared/agent/context-management'
 import { compactConversation, MAX_CONSECUTIVE_COMPACT_FAILURES } from './compaction/compact'
 import type { SummaryRequest } from './compaction/compact'
+import { resolveCompactBinding, type CompactBinding, type CompactionSettings } from './compaction/binding'
+import type { WorkspaceCompactionOverride } from '../../shared/domain/compaction-model'
 import { readAttachableFile, type AttachmentToolNames } from './compaction/attachments'
 import { resolvePath } from './tool/builtin/paths'
 import { promptTokensOf } from '../../shared/agent/transcript'
@@ -151,6 +154,13 @@ export interface SessionDeps {
    */
   shells?: ShellBridge
   /**
+   * 对话内生图的通道。缺省 = 这个环境里生不了图,`generate_image` 整体不下发。
+   *
+   * ★ 形状同 `scheduling` / `shells`:内核只认这个窄接口,供应商选择、密钥、
+   * `/images/generations` 请求全部留在 `main/kernel/image-gen.ts`。内核零 electron、可单测。
+   */
+  imageGen?: ImageGenBridge
+  /**
    * 回合末的一次询问 —— 「这一轮真的可以停了吗」。
    *
    * ★★ **只有主 run 装配**（装配点在 `main/runtime.ts`）。子 run 没有「停止」这回事：
@@ -210,6 +220,14 @@ export interface SessionDeps {
   personalization?: PersonalizationSettings
   planExecution?: PlanExecutionContext
   contextManagement?: ContextManagementSettings
+  /**
+   * 设置 › 通用 › Agent 的压缩模型那一对 + 档位,run 开始时的快照(同 `maxOutputTokens`)。
+   * 缺省 = 纯内核测试没给设置,按「跟随会话模型 / 跟随本轮档位」—— 也就是这两栏
+   * 出现之前的行为。三档来源在 `shared/domain/compaction-model.ts`。
+   */
+  compaction?: CompactionSettings
+  /** 这个工作区对上面那组的覆盖(圆环菜单里的两栏)。缺席的字段 = 跟随全局。 */
+  workspaceCompaction?: WorkspaceCompactionOverride
   /**
    * 设置 › 通用 › Agent 的「最大输出 Token」,run 开始时的快照。
    *
@@ -540,7 +558,8 @@ export class AgentSession {
       ...(allowedTools !== undefined ? { allowList: allowedTools } : {}),
       /*
         ★ Composer 上那颗「联网搜索」药丸第一次真的控制住东西的地方。
-        关掉时联网工具连下发都不下发,模型不会先白跑一轮再被拒。
+        关掉时受它管的工具(`NETWORK_SWITCH_TOOLS`:WebFetch / web_search)连下发都不下发,
+        模型不会先白跑一轮再被拒。
       */
       network: this.req.webSearch,
       /*
@@ -937,6 +956,16 @@ export class AgentSession {
   private async compact(input: { alias: ModelAlias | undefined; preTokens: number }): Promise<boolean> {
     if (this.compactFailures >= MAX_CONSECUTIVE_COMPACT_FAILURES) return false
     this.handle.emit({ type: 'context_status', status: { phase: 'compacting', trigger: 'auto' } })
+    /*
+      需求:压缩可以配成另一个模型/另一个档位(设置 › 通用 › Agent,工作区可覆盖)。
+      ★ 解析放在 `compacting` 事件**之后**:它可能 warn 一行并回落,而那不该让
+      界面上的「正在压缩」晚出现。`input.alias`(会话模型)仍然只管 `preTokens` 那一侧。
+    */
+    const binding = this.summaryBinding()
+    if (binding === undefined) {
+      // 连会话模型都解析不到 —— 走和这次改动之前一样的失败路径。
+      return this.compactFailed('压缩模型不可用')
+    }
     let result: { ok: true; message: AgentMessage } | { ok: false; error: AgentError }
     try {
       result = await compactConversation({
@@ -944,8 +973,16 @@ export class AgentSession {
         trigger: 'auto',
         preTokens: input.preTokens,
         autoContinue: true,
-        protocolWindow: effectiveContextWindow(input.alias?.contextWindow, true),
-        send: (request) => this.sendSummaryRequest(request),
+        protocolWindow: binding.protocolWindow,
+        summaryMaxOutputTokens: binding.maxOutputTokens,
+        summaryThinking: binding.thinking,
+        summaryModel: {
+          model: binding.model,
+          ...(binding.modelProviderId === undefined ? {} : { modelProviderId: binding.modelProviderId }),
+          thinking: binding.thinking,
+          fellBack: binding.fellBack
+        },
+        send: (request) => this.sendSummaryRequest(request, binding),
         attachments: { tools: this.attachmentTools(), readFile: (path) => this.readForAttachment(path) },
         newId: () => ulid(),
         now: this.deps.host.clock.now(),
@@ -955,13 +992,7 @@ export class AgentSession {
       if (isAbortError(error) || this.handle.signal.aborted) throw error
       result = { ok: false, error: toRunError(error) }
     }
-    if (!result.ok) {
-      this.compactFailures += 1
-      this.deps.host.logger.warn('[session] 自动压缩失败', result.error.message)
-      const phase = this.compactFailures >= MAX_CONSECUTIVE_COMPACT_FAILURES ? 'disabled' : 'failed'
-      this.handle.emit({ type: 'context_status', status: { phase, trigger: 'auto' } })
-      return false
-    }
+    if (!result.ok) return this.compactFailed(result.error.message)
     this.compactFailures = 0
     this.commit(result.message)
     this.contextMessages = this.buildContext()
@@ -970,16 +1001,54 @@ export class AgentSession {
     return true
   }
 
-  /** 摘要请求:和正文同一个模型、同一家供应商 —— 它读的是同一段对话,漂到另一家既换口径也换账单。 */
-  private sendSummaryRequest(request: SummaryRequest): AsyncIterable<ProviderStreamEvent> {
+  /** 失败计数 + 熔断相位。恒返回 false,让调用点写成 `return this.compactFailed(...)`。 */
+  private compactFailed(reason: string): false {
+    this.compactFailures += 1
+    this.deps.host.logger.warn('[session] 自动压缩失败', reason)
+    const phase = this.compactFailures >= MAX_CONSECUTIVE_COMPACT_FAILURES ? 'disabled' : 'failed'
+    this.handle.emit({ type: 'context_status', status: { phase, trigger: 'auto' } })
+    return false
+  }
+
+  /**
+   * 这次压缩发给谁、用什么参数。三档来源与回落规则在 `compaction/binding.ts`,
+   * 手动 /compact 走的是同一份。
+   *
+   * ★ `'inherit'` 在这里落到**本轮 run 的档位**(`this.req.thinking`),不是会话记录上
+   * 那个 —— 用户这一轮临时调高了档位,压缩就该跟着这一轮走。
+   */
+  private summaryBinding(): CompactBinding | undefined {
+    return resolveCompactBinding({
+      resolveModel: (model, modelProviderId) => this.deps.upstream.resolveModel(model, modelProviderId),
+      ...(this.deps.compaction === undefined ? {} : { settings: this.deps.compaction }),
+      ...(this.deps.workspaceCompaction === undefined ? {} : { workspace: this.deps.workspaceCompaction }),
+      session: {
+        model: this.req.model,
+        ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
+        thinking: this.req.thinking
+      },
+      ...(this.deps.maxOutputTokens === undefined ? {} : { maxOutputTokens: this.deps.maxOutputTokens }),
+      warn: (message) => { this.deps.host.logger.warn(message) }
+    })
+  }
+
+  /**
+   * 摘要请求。
+   *
+   * ★ 原先这里钉死「和正文同一个模型、同一家供应商」,理由是它读的是同一段对话,
+   * 漂到另一家既换口径也换账单。那条理由仍然成立,所以**默认**依然如此
+   * (`compactModel` 出厂是空串 = 跟随会话模型);现在只有用户在设置里显式选了
+   * 另一个模型时才会换 —— 换言之,漂走这件事从「可能悄悄发生」变成「他自己选的」。
+   */
+  private sendSummaryRequest(request: SummaryRequest, binding: CompactBinding): AsyncIterable<ProviderStreamEvent> {
     const canonical = {
-      model: this.req.model,
-      ...(this.req.modelProviderId === undefined ? {} : { modelProviderId: this.req.modelProviderId }),
+      model: binding.model,
+      ...(binding.modelProviderId === undefined ? {} : { modelProviderId: binding.modelProviderId }),
       system: request.system,
       messages: request.messages,
       tools: [],
       maxOutputTokens: request.maxOutputTokens,
-      thinkingLevel: 'off' as const
+      thinkingLevel: request.thinkingLevel
     }
     return abortableStream(this.deps.upstream.stream(canonical, this.handle.signal, {
       workspaceId: this.req.workspaceId, runId: `${this.req.runId}:compact`, sessionId: this.req.sessionId
@@ -1234,7 +1303,8 @@ export class AgentSession {
       ...(this.deps.canProposeGoal === undefined ? {} : { canProposeGoal: this.deps.canProposeGoal }),
       ...(this.deps.proposeGoal === undefined ? {} : { proposeGoal: this.deps.proposeGoal }),
       ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling }),
-      ...(this.deps.shells === undefined ? {} : { shells: this.deps.shells })
+      ...(this.deps.shells === undefined ? {} : { shells: this.deps.shells }),
+      ...(this.deps.imageGen === undefined ? {} : { imageGen: this.deps.imageGen })
     }
   }
 

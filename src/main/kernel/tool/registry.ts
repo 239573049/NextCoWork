@@ -14,7 +14,9 @@ import type { ShellBridge } from '../../../shared/domain/shell'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
+import type { ImageGenBridge } from '../image-gen'
 import type { InteractFn } from '../interaction-gate'
+import { NETWORK_SWITCH_TOOLS } from '../permission-gate'
 import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
 
 /**
@@ -132,6 +134,15 @@ export interface ToolContext {
    */
   scheduling?: SchedulingBridge
   /**
+   * 对话内生图的读写通道。缺省 = 这个环境里生不了图(纯内核测试、没装配),
+   * `generate_image` 整体不下发(`isEnabled`)—— 见 `kernel/image-gen.ts` 文件头。
+   *
+   * ★ 形状同 `scheduling` / `shells`:内核只认这个窄接口,「store 在哪、密钥怎么读、
+   * `/images/generations` 怎么发」全部留在 `main/kernel/image-gen.ts` +
+   * `runtime.ts` 的装配点。内核仍然零 electron、可单测。
+   */
+  imageGen?: ImageGenBridge
+  /**
    * Agent 手上那些 shell(前台停止句柄 + 后台进程)。缺省 = 这个环境里
    * 既停不了单条命令、也起不了后台命令(纯内核测试),`BashOutput` / `KillShell`
    * 整体不下发,`Bash` 的 `run_in_background` 会当场说清楚而不是假装起了。
@@ -207,9 +218,10 @@ export interface SnapshotFilter {
    */
   allowList?: readonly string[]
   /**
-   * 工作区的「联网」开关(`WorkspaceSettings.webSearch`)。
+   * 工作区的「联网搜索」开关(`WorkspaceSettings.webSearch`)。
    *
-   * ★ 关掉时**根本不下发**联网工具,而不是下发了再在调用时拒绝。
+   * ★ 关掉时**根本不下发**受它管的工具(`permission-gate.ts` 的 `NETWORK_SWITCH_TOOLS`,
+   * 目前只有 `WebFetch` / `web_search`),而不是下发了再在调用时拒绝。
    * 后者也拦得住(`permission-gate.ts` 那张表的第 1 行),但代价是模型先花一轮
    * 去调一个注定被拒的工具 —— 用户看到的是「它先试了一次搜索,被拒,才回答」。
    * 那道闸仍然留着:它挡的是「这一轮下发之后开关被关掉」的窗口,以及
@@ -315,7 +327,9 @@ export class ToolRegistry {
     const out: Tool[] = []
     for (const t of this.tools.values()) {
       if (filter.context !== undefined && t.isEnabled?.(filter.context) === false) continue
-      if (filter.network === false && t.needsNetwork) continue
+      // ★ 按名单而不是 `t.needsNetwork`:开关只管网页搜索与抓取(见 NETWORK_SWITCH_TOOLS)。
+      //   必须和 runtime.ts `approveWith` 读同一张表,分家就是「列表里没有,调用却放行」。
+      if (filter.network === false && NETWORK_SWITCH_TOOLS.has(t.internalId)) continue
       if (filter.noInteraction === true && INTERACTIVE_TOOLS.has(t.internalId)) continue
       if (allow !== undefined && !allow.has(t.internalId) && !allow.has(t.externalName)) continue
       out.push(t)

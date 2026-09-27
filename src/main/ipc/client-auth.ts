@@ -9,7 +9,7 @@ import { windows } from '../window/registry'
 import { CLIENT_PROVIDER_ID } from '../../shared/domain/presets'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { IMPORTED_ALIAS_DEFAULTS } from '../../shared/domain/provider'
-import { defaultProtocolForModel, findBuiltinModel } from '../../shared/domain/model-catalog-inventory'
+import { defaultProtocolForModel, findBuiltinModel, isImageModelId } from '../../shared/domain/model-catalog-inventory'
 import { shutdownConfigSync, stopConfigSync } from './config-sync'
 import { prepareAccountSwitch, startSyncForAccount } from '../account-switch'
 import {
@@ -340,12 +340,26 @@ async function syncClientModels(access: string): Promise<void> {
         ? IMPORTED_ALIAS_DEFAULTS.capabilities
         : { ...IMPORTED_ALIAS_DEFAULTS.capabilities,
             tools: caps.has('tools'), vision: caps.has('vision') || caps.has('imageinput'),
-            thinking: caps.has('thinking'), caching: caps.has('caching') }
+            thinking: caps.has('thinking'), caching: caps.has('caching'),
+            imageOutput: caps.has('imageoutput') || caps.has('image-output') }
+      /*
+        ★★ 需求:登录灌进来的**生图模型必须带上 image 模态**,否则「图片生成」页
+        (`ImageModelPage` 按 `modality === 'image' || imageOutput` 过滤)看不见它 ——
+        平台的 `/v1/models` 不报 modality,目录又只认得已收录的 ID,新上架/预览期的
+        图片模型两边都落空,表现是设置页里那家 NextCoWork 只有文本模型,零报错。
+
+        判据两路取或:平台显式标了 imageOutput,或 ID 命中共享的图片模型启发式
+        (`isImageModelId`,和图片页「拉取模型列表」的过滤是同一条,别在这写第二份)。
+        目录命中时 `resolver.resolve` 会用目录的 modality 覆盖这里写的值,
+        所以这里只对**目录不认识**的 ID 起作用 —— 正是要救的那批。
+      */
+      const imageOutput = platformCapabilities.imageOutput === true || isImageModelId(m.id)
       store.putAlias(resolver.resolve({
         alias: m.id, providerId: CLIENT_PROVIDER_ID, upstreamModel: m.id, priority: index * 10,
         ...(anthropicOverrideFor(m.id) === undefined ? {} : { protocolOverride: anthropicOverrideFor(m.id) }),
+        ...(imageOutput ? { modality: 'image' as const } : {}),
         displayName: m.display_name ?? m.displayName,
-        capabilities: { ...platformCapabilities },
+        capabilities: { ...platformCapabilities, imageOutput },
         contextWindow: Number.isFinite(m.context_window) && (m.context_window ?? 0) > 0 ? m.context_window! : IMPORTED_ALIAS_DEFAULTS.contextWindow,
         maxOutputTokens: Number.isFinite(m.max_output_tokens) && (m.max_output_tokens ?? 0) > 0 ? m.max_output_tokens! : IMPORTED_ALIAS_DEFAULTS.maxOutputTokens,
         catalogOverrides: [], enabled: true

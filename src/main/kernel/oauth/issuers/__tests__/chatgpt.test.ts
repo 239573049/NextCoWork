@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { CHATGPT_OAUTH } from '../chatgpt'
 
 describe('chatgpt/codex 的私货 UA', () => {
-  it('OAuth 换 token / 刷新也带 codex_cli_rs/0.154.0,不漏成通用 UA', () => {
-    expect(CHATGPT_OAUTH.oauthHeaders?.['user-agent']).toBe('codex_cli_rs/0.154.0')
+  it('OAuth 换 token / 刷新也带 codex_cli_rs/0.157.1,不漏成通用 UA', () => {
+    expect(CHATGPT_OAUTH.oauthHeaders?.['user-agent']).toBe('codex_cli_rs/0.157.1')
   })
 })
