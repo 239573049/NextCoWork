@@ -15,6 +15,7 @@ import {
   FilePen,
   FileText,
   Globe,
+  ImageIcon,
   ListTree,
   MessageCircleQuestion,
   Plug,
@@ -47,6 +48,8 @@ export const SHAPE_ICON: Record<ToolShape, LucideIcon> = {
   // 生成式可视化。选 Sparkles 而不是图表/图形类图标:这一档画的东西横跨
   // SVG 图、图表、仪表盘、表单,任何一个具体的"图"都会在别的用例上误导。
   widget: Sparkles,
+  // 生图:产物就是一张图,图标直说,不和 widget 的 Sparkles 混用(那一档是"画代码")
+  image: ImageIcon,
   external: Plug
 }
 

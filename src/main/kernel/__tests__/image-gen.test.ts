@@ -188,6 +188,69 @@ describe('生图桥 · 回包解析', () => {
   })
 })
 
+describe('生图桥 · 一次多张', () => {
+  /*
+    需求:多张 = 逐张并发发 n=1 的请求(不透传 n —— dall-e-3 等会拒 n>1),
+    每张到手立刻回调;挂了几张时保留已到手的,全挂才整体失败。
+  */
+  it('count=3 发 3 个 n=1 请求,每张到手回调一次(带格子序号),结果按格子序号排列', async () => {
+    const bodies: unknown[] = []
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return json({ data: [{ b64_json: PNG_B64 }] })
+    })
+    const seen: number[] = []
+    const bridge = imageGenBridgeFor(deps({ fetch: fetchMock }))
+    const result = await bridge.generate('cats', new AbortController().signal, { count: 3, onImage: (index) => seen.push(index) })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(bodies.every((b) => (b as { n?: unknown }).n === 1)).toBe(true)
+    expect([...seen].sort()).toEqual([0, 1, 2])
+    expect(result.images).toHaveLength(3)
+    expect(result.requested).toBe(3)
+    expect(result.failures).toEqual([])
+  })
+
+  it('count 超上限被钳到 MAX_IMAGE_COUNT —— 桥不信任调用方', async () => {
+    const fetchMock = vi.fn(async () => json({ data: [{ b64_json: PNG_B64 }] }))
+    const bridge = imageGenBridgeFor(deps({ fetch: fetchMock }))
+    const result = await bridge.generate('x', new AbortController().signal, { count: 99 })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(result.requested).toBe(4)
+  })
+
+  it('部分失败:保留成功的那几张,失败原因进 failures,不整体抛错', async () => {
+    let call = 0
+    const fetchMock = vi.fn(async (): Promise<Response> => {
+      call += 1
+      return call === 2 ? json({ error: 'rate limited' }, 429) : json({ data: [{ b64_json: PNG_B64 }] })
+    })
+    const seen: number[] = []
+    const bridge = imageGenBridgeFor(deps({ fetch: fetchMock }))
+    const result = await bridge.generate('x', new AbortController().signal, { count: 3, onImage: (index) => seen.push(index) })
+    expect(result.images).toHaveLength(2)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0]).toMatch(/HTTP 429/u)
+    // 失败那一格不回调 —— 卡片上它保持占位,直到 tool_end 以最终结果为准
+    expect(seen).toHaveLength(2)
+  })
+
+  it('全部失败才整体抛错,带供应商名 —— 和单张时同一句', async () => {
+    const bridge = imageGenBridgeFor(deps({ fetch: vi.fn(async () => json({ error: 'bad key' }, 401)) }))
+    await expect(bridge.generate('x', new AbortController().signal, { count: 2 }))
+      .rejects.toThrow(/OpenAI: HTTP 401/u)
+  })
+
+  it('用户中断原样上抛,不被收成「某一格失败」', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn(async (): Promise<Response> => {
+      controller.abort()
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    })
+    const bridge = imageGenBridgeFor(deps({ fetch: fetchMock }))
+    await expect(bridge.generate('x', controller.signal, { count: 2 })).rejects.toThrow(/abort/iu)
+  })
+})
+
 describe('downloadImage · URL 下载(工具入参与上游回包共用)', () => {
   it('重定向逐跳跟:跨域公网跳转允许,每跳重新过 ssrfRisk', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {

@@ -6,6 +6,7 @@ import {
   clip,
   dirOf,
   humanize,
+  isPinnedShape,
   isRegisteredTool,
   parseMcpId,
   pick,
@@ -329,13 +330,25 @@ describe('注册表完整性', () => {
     // 是 `widget` 形态 —— 后者是**内置专用**的形态,见 `ToolShape` 上那段说明。
     'visualize_read_me',
     'visualize_show_widget',
-    // 对话内生图 —— `network` 形态,行的主语是 prompt 片段
+    // 对话内生图 —— `image` 形态(专属图片卡),行的主语是 prompt 片段
     'generate_image'
   ]
 
   it('每个内置工具都在注册表里', () => {
     const missing = BUILTIN_IDS.filter((id) => !isRegisteredTool(id))
     expect(missing).toEqual([])
+  })
+
+  /*
+    ★ 生图原先归在 `network`,而 network 的详情渲染器成功时只画 output.content ——
+    图在 output.images 里,界面上一张都看不到。形态退回 network 就是这个回归。
+  */
+  it('generate_image 是 image 形态,且它是唯一不随过程折叠的形态', () => {
+    expect(presenterOf('generate_image').shape).toBe('image')
+    expect(isPinnedShape('image')).toBe(true)
+    for (const shape of ['read', 'mutate', 'search', 'command', 'network', 'orchestration', 'interaction', 'widget', 'external', 'reasoning'] as const) {
+      expect(isPinnedShape(shape), shape).toBe(false)
+    }
   })
 
   it('注册表里没有多余的键', () => {

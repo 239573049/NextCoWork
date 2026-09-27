@@ -86,6 +86,11 @@ export const whimsyZh: Record<WhimsyBucket, Whimsy> = {
     '画图中…', '勾勒中…', '描线中…', '配色中…', '布局中…', '打样中…',
     '排布中…', '上色中…'
   ],
+  // 生图:等的是上游把整张图交回来 —— 用户在卡片上看着加载格,词往"出片"上靠
+  image: [
+    '出图中…', '显影中…', '调色中…', '构图中…', '落笔中…', '冲洗中…',
+    '洗照片…', '等出片…'
+  ],
   // 兜底的兜底:知道在跑,但说不出在跑什么(参数还在流、工具还没开跑)
   working: [
     '忙活中…', '开工中…', '动手中…', '撸起袖子…', '跑腿中…', '连轴转…',
@@ -221,6 +226,10 @@ export const whimsyEn: Record<WhimsyBucket, Whimsy> = {
   widget: [
     'Sketching…', 'Drawing…', 'Plotting…', 'Charting…', 'Composing…',
     'Rendering…', 'Coloring…', 'Diagramming…'
+  ],
+  image: [
+    'Painting…', 'Developing…', 'Framing…', 'Exposing…', 'Imagining…',
+    'Brushing…', 'Composing…', 'Printing…'
   ],
   working: [
     'Working…', 'Wrangling…', 'Hustling…', 'Cranking…', 'Grinding…', 'Wrenching…',

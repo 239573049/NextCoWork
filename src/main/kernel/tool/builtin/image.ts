@@ -5,6 +5,9 @@
  * 1. 文生图:只给 `prompt`;
  * 2. 改图:`image: "latest"`(对话里最近一张图——用户刚上传的附件、或上一轮
  *    自己生成的那张)、`image: <工作区图片路径>`,或 `image: <http(s) 图片 URL>`。
+ * 3. 一次多张:`n`(1–4)。用户要「几个备选 / 几种风格」时一次调用出齐,
+ *    而不是让模型连调四次 —— 四次调用是四张各自折叠的卡片,也没法并排挑。
+ *    每到手一张就经 `ctx.emit` 推一张给生成期的卡片(`ToolProgress.image`)。
  *
  * 这个工具只负责「把 prompt 和源图递出去、把图接回来」;用哪个模型、哪把密钥、
  * `/images/edits` 的形状兼容、`ncw://` 附件的安全解析全在桥里
@@ -28,8 +31,9 @@ import type { AgentMessage } from '../../../../shared/agent/message'
 import type { ToolResult } from '../../../../shared/agent/tool'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import { imageMimeOfBytes, MAX_ATTACHMENT_BYTES } from '../../../../shared/domain/attachment'
+import { MAX_IMAGE_COUNT } from '../../../../shared/domain/image-count'
 import { defineTool } from '../define'
-import { downloadImage, type ImageSource } from '../../image-gen'
+import { downloadImage, type ImageGenOptions, type ImageSource } from '../../image-gen'
 import type { ToolContext, ToolRegistration } from '../registry'
 import { resolvePath } from './paths'
 
@@ -45,6 +49,16 @@ const GenerateImageInput = z.object({
     .describe(
       'Which image to edit: "latest" for the most recent image in this conversation, a workspace file path, ' +
         'or an http(s) URL of an image. Omit it to generate a new image from the prompt alone.'
+    ),
+  n: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_IMAGE_COUNT)
+    .optional()
+    .describe(
+      `How many images to produce in this one call (1–${String(MAX_IMAGE_COUNT)}, default 1). ` +
+        'Use more than 1 only when the user wants several options or variations — each image is billed separately.'
     )
 })
 
@@ -110,6 +124,7 @@ const generateImageTool: ToolRegistration = defineTool({
     '(Settings > Models > Image generation). The resulting image is returned inline in the tool result so the user can see it.\n' +
     '- Generate: pass only `prompt`.\n' +
     '- Edit: pass `image` as "latest" to modify the most recent image in this conversation, a workspace file path, or an image URL.\n' +
+    '- Several options: pass `n` (up to 4) to get multiple images from one call instead of calling the tool repeatedly.\n' +
     'A URL that cannot be downloaded is an error — the tool will not fall back to generating a new image.\n' +
     'Use it whenever the user asks to draw, paint, illustrate, render, generate, or modify a picture, photo, or artwork. ' +
     'It does not write files — use Write when the user wants the image saved to disk.',
@@ -155,13 +170,41 @@ const generateImageTool: ToolRegistration = defineTool({
       }
     }
 
+    const count = input.n ?? 1
+    let delivered = 0
+    const options: ImageGenOptions = {
+      count,
+      /*
+        需求:生成期卡片逐张把占位换成真图。`message` 只写 `2/4` 这种语言无关的计数 ——
+        它会原样出现在工具行右端,主进程这里写任何一种语言的句子,切了界面语言都不会跟着变。
+      */
+      onImage: (index, image) => {
+        delivered += 1
+        ctx.emit({
+          callId: ctx.callId,
+          message: `${String(delivered)}/${String(count)}`,
+          fraction: delivered / count,
+          image: { index, image }
+        })
+      }
+    }
     const result =
       source === undefined
-        ? await ctx.imageGen.generate(input.prompt, ctx.signal)
-        : await ctx.imageGen.edit(input.prompt, source, ctx.signal)
+        ? await ctx.imageGen.generate(input.prompt, ctx.signal, options)
+        : await ctx.imageGen.edit(input.prompt, source, ctx.signal, options)
     const action = source === undefined ? 'Generated' : 'Edited'
+    const got = result.images.length
+    const noun = got === 1 ? 'image' : 'images'
+    const attached = got === 1 ? 'The image is attached below.' : 'The images are attached below.'
+    /*
+      ★ 部分失败**必须写进回执**:要 4 张拿到 3 张时,不写的话模型只看得见 3 张图,
+      却会按用户的原话宣布「画好了 4 张」。原因去重后附上,同一条限流报四遍没有信息量。
+    */
+    const failed = result.failures.length === 0
+      ? ''
+      : ` ${String(result.failures.length)} of ${String(result.requested)} requested images failed: ${[...new Set(result.failures)].join('; ')}`
     return toolOk(
-      `${action} 1 image with ${result.model} via ${result.providerName}. The image is attached below.`,
+      `${action} ${String(got)} ${noun} with ${result.model} via ${result.providerName}. ${attached}${failed}`,
       { images: result.images }
     )
   }

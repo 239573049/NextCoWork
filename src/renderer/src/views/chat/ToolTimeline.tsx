@@ -265,6 +265,7 @@ const GROUP_TITLE_KEYS = {
   orchestration: "chat.tool.group.orchestration",
   interaction: "chat.tool.group.interaction",
   widget: "chat.tool.group.widget",
+  image: "chat.tool.group.image",
   external: "chat.tool.group.external",
 } as const satisfies Record<ReturnType<typeof shapeOfItem>, TranslationKey>;
 

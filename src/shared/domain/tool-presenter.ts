@@ -72,6 +72,19 @@ export type ToolShape =
    * `kind: 'widget'` 上那段说明。
    */
   | 'widget'
+  /**
+   * 对话内生图那一个(`generate_image`)。
+   *
+   * 需求:它展开后是一张**图片卡**(`views/chat/ImageGenDetail.tsx`):生成期按 `n`
+   * 画几格专属加载动画、逐张换成真图,跑完是可点开放大的图片网格。原先它归在
+   * `network`,而 `NetworkDetail` 成功时只把 `output.content` 画成代码块、根本不读
+   * `output.images` —— 表现为「模型说画好了,卡片里只有一句英文」。
+   *
+   * ★ 与 `widget` 分开:那一档画的是模型**写出来的代码**(边流边渲染 HTML),
+   * 这一档画的是工具**取回来的图**(入参里只有 prompt 和张数),两套生命周期。
+   * ★ 它的产物不随过程折叠收起 —— 见 `isPinnedShape`。
+   */
+  | 'image'
   | 'external'
 
 /**
@@ -812,12 +825,14 @@ const REGISTRY: Record<string, ToolPresenter> = {
     }
   },
   /*
-    对话内生图。形态 `network`(它真出网:POST 生图接口);行 = 动作 + prompt 片段
-    —— prompt 是「要画什么」,是这一行唯一有信息量的主语。
-    ★ 不给 summary:右端那格没有比图本身更有用的数字,猜一个只会是噪声。
+    对话内生图。形态 `image`(见 `ToolShape` 那一档的说明:图片卡 + 专属加载动画);
+    行 = 动作 + prompt 片段 —— prompt 是「要画什么」,是这一行唯一有信息量的主语。
+    (原先是 `network`:它确实出网,但判据是「展开后用哪种渲染器」,不是功能领域,
+    而 network 的渲染器画不出图。)
+    ★ 不给 summary:张数与进度由卡片本身和进度 chip(`2/4`)说,再猜一个只会是噪声。
   */
   generate_image: {
-    shape: 'network',
+    shape: 'image',
     line: (i) =>
       valueLine(
         // 带了源图就是改图 —— 同一工具两种动作,行标签跟着入参走
@@ -870,6 +885,40 @@ const TODO_LIST_PRESENTERS: Record<string, true> = {
  */
 export function isTodoListTool(name: string): boolean {
   return TODO_LIST_PRESENTERS[name] === true
+}
+
+// ─────────────── 产物不随过程折叠收起的那几档形态 ───────────────
+
+/**
+ * 「这一档的产物就是回答本身」的形态表 —— 工具卡默认展开,且**不进**过程折叠。
+ *
+ * 需求:生成的图片是用户要的东西,不是过程。原先生图卡片和 Read/Grep 一样住在过程段里,
+ * 于是 (1) 连续几个调用都成功后整组自动收起(`isCompletedToolGroup`);(2) 一轮收尾后
+ * 整段过程折进一行「用时」(`decideWorkspace`)—— 表现为模型说「画好了」,图却被
+ * 藏在两层折叠底下。渲染层据此把这类调用提成独立块(`thread-content.ts` 的
+ * `assistantSegments`,以及 `Thread.tsx` 里和 goal_status 同一处的提出逻辑)。
+ *
+ * ★ `Record<ToolShape, boolean>` 而不是 `Set`:新增一种形态时编译期就要求在这里表态,
+ * 忘了写的代价是「新产物类工具的结果被折叠吞掉」,而那不会有任何报错。
+ * ★ `widget` 暂为 false:可视化卡片目前按原行为留在过程段里(它的默认展开由
+ * `parts.tsx` 自己判),要不要一并提出来是另一个产品决定。
+ */
+const PINNED_SHAPES: Record<ToolShape, boolean> = {
+  reasoning: false,
+  read: false,
+  mutate: false,
+  search: false,
+  command: false,
+  network: false,
+  orchestration: false,
+  interaction: false,
+  widget: false,
+  image: true,
+  external: false
+}
+
+export function isPinnedShape(shape: ToolShape): boolean {
+  return PINNED_SHAPES[shape]
 }
 
 // ─────────────────────────── 插件贡献的 presenter(注入层) ───────────────────────────

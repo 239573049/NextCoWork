@@ -42,7 +42,7 @@ import { FOLD_HOLD_MS, useFoldAnchor } from './useFoldAnchor'
 import { CompactionDivider } from './CompactionDivider'
 import { GoalStatusCard } from './GoalStatusCard'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
-import { assistantSegments, assistantText, isAssistantTextBlock, lastTurnIndex, promptOf, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
+import { assistantSegments, assistantText, isAssistantTextBlock, isPinnedToolBlock, lastTurnIndex, promptOf, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
 import { threadTurnGroups, turnNavigationItems } from './turn-navigation'
 import { TurnNavigationRail } from './TurnNavigationRail'
 import { TurnActions, type TurnPrompt } from './TurnActions'
@@ -796,6 +796,8 @@ function AssistantTurn({
   const processSegments = lastProcessIndex < 0 ? [] : segments.slice(0, lastProcessIndex + 1)
   const trailingSegments = lastProcessIndex < 0 ? segments : segments.slice(lastProcessIndex + 1)
   const goalSegments = processSegments.filter((segment) => segment.kind === 'block' && segment.block.part?.type === 'goal_status')
+  // 需求:生图这类「产物即回答」的卡片在过程折进「用时」后仍要留在外面(同 goal_status 的理由,见 isPinnedToolBlock)
+  const pinnedSegments = processSegments.filter((segment) => segment.kind === 'block' && isPinnedToolBlock(segment.block))
   const processItems = processSegments.flatMap((segment) => segment.kind === 'process' ? segment.items : [])
   const hasRunningSubagent = processItems.some((item) => item.kind === 'subagent' && item.state?.status === 'running')
   const hasTrailingText = trailingSegments.some((segment) => segment.kind === 'block' && isAssistantTextBlock(segment.block))
@@ -859,6 +861,7 @@ function AssistantTurn({
       <RunProcessBlock items={processItems} tools={tools} subagents={subagents} durationMs={durationMs} defaultOpen={decision.defaultOpen} entering={justFolded} ref={blockRef}>
         {processSegments.map((segment) => {
           if (segment.kind === 'block' && segment.block.part?.type === 'goal_status') return null
+          if (segment.kind === 'block' && isPinnedToolBlock(segment.block)) return null
           if (segment.kind === 'block') {
             return <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
               tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor}
@@ -867,6 +870,12 @@ function AssistantTurn({
           return <ToolTimeline key={segment.key} items={segment.items} tools={tools} subagents={subagents} />
         })}
       </RunProcessBlock>
+      {/* 生成的图片是回答本身,不随过程折叠 —— 摆在「用时」那一行下面、结论正文上面 */}
+      {pinnedSegments.map((segment) => segment.kind === 'block' ? (
+        <PartBlock key={segment.key} part={segment.block.part} liveBlock={segment.block.liveBlock}
+          tools={tools} streaming={segment.block.streaming} cursor={segment.block.cursor}
+          {...(workspaceId === undefined ? {} : { workspaceId })} />
+      ) : null)}
       {/* Goal changes, particularly the direct-set disclosure, must not disappear in a collapsed timeline. */}
       {goalSegments.map((segment) => segment.kind === 'block'
         ? <PartBlock key={segment.key} part={segment.block.part} tools={tools} /> : null)}

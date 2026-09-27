@@ -26,6 +26,10 @@
  *   (`permission-gate.ts` 的 `NETWORK_SWITCH_TOOLS`);生图的出网去的是用户自己
  *   在设置里配的供应商,和对话请求本身是同一性质。
  * - 不做流式进度。一张图一次返回,中间没有模型可读的中间态,进度只会是假的。
+ *   (一次要多张时会**按张**回调 `onImage` —— 那是真实的「这一张到了」,不是
+ *   单张内部的假进度,所以不违背这一条。)
+ * - 多张不走上游的 `n` 参数,而是**逐张并发**请求 —— 见 `run` 里那段理由。
+ *   代价是按张计费的张数 = 请求数,上限由 `MAX_IMAGE_COUNT` 卡住。
  * - 不看供应商的 chat 协议(`openai-chat` / `anthropic` …):生图/改图走事实标准
  *   `{baseUrl}/images/generations|edits`(OpenAI 兼容,xAI 文档同样是这个形状)。
  *   配错的上游会以 HTTP 状态的形式落进失败原因,不会打崩对话。
@@ -35,6 +39,7 @@
  */
 import { extOfMime, imageMimeOfBytes, MAX_ATTACHMENT_BYTES } from '../../shared/domain/attachment'
 import type { ProviderCredential } from '../../shared/domain/credential'
+import { clampImageCount } from '../../shared/domain/image-count'
 import { selectModelBinding } from '../../shared/domain/model-selection'
 import { isImageModelAlias, type ModelAlias, type UpstreamProvider } from '../../shared/domain/provider'
 import { ssrfRisk } from './tool/builtin/ssrf'
@@ -56,10 +61,31 @@ export interface ImageSource {
 }
 
 export interface ImageGenResult {
+  /** 成功的那几张,按请求里的格子序号排列(失败的格子不占位) */
   images: GeneratedImage[]
   /** 实际使用的上游模型名 —— 回给模型,它要告诉用户是哪个模型画的 */
   model: string
   providerName: string
+  /** 这次一共要了几张(`ImageGenOptions.count` 钳过之后的值) */
+  requested: number
+  /**
+   * 失败格子的原因(不带供应商名)。**全失败时不会走到这里** —— 那种情况整体抛错。
+   *
+   * 需求:多张里挂了一两张时,已到手的图必须留下(用户已经在卡片上看见它们了),
+   * 同时模型得知道「要 4 张只拿到 3 张、为什么」,否则它会宣布「画好了 4 张」。
+   */
+  failures: string[]
+}
+
+/** 单次调用的附加选项。缺省 = 一张、不逐张回调(旧调用方的行为不变)。 */
+export interface ImageGenOptions {
+  /** 要几张,钳在 1..MAX_IMAGE_COUNT(`shared/domain/image-count.ts`) */
+  count?: number
+  /**
+   * 每成功一张**立刻**回调 —— 工具据此把这一张推给生成期的卡片。
+   * `index` 是格子序号(0 起),与完成顺序无关。
+   */
+  onImage?: (index: number, image: GeneratedImage) => void
 }
 
 export interface ImageGenBridge {
@@ -72,9 +98,9 @@ export interface ImageGenBridge {
    * 调用时得到一句 `no API key` 的失败 —— 那句话本身就是可行动的反馈。
    */
   available(): boolean
-  generate(prompt: string, signal: AbortSignal): Promise<ImageGenResult>
+  generate(prompt: string, signal: AbortSignal, options?: ImageGenOptions): Promise<ImageGenResult>
   /** 改图。`source` 解析失败(跨会话附件、坏 data URL)在进选路之前就抛。 */
-  edit(prompt: string, source: ImageSource, signal: AbortSignal): Promise<ImageGenResult>
+  edit(prompt: string, source: ImageSource, signal: AbortSignal, options?: ImageGenOptions): Promise<ImageGenResult>
 }
 
 export interface ImageGenDeps {
@@ -433,7 +459,8 @@ export function imageGenBridgeFor(deps: ImageGenDeps): ImageGenBridge {
   async function run(
     prompt: string,
     source: ImageSource | undefined,
-    signal: AbortSignal
+    signal: AbortSignal,
+    options: ImageGenOptions | undefined
   ): Promise<ImageGenResult> {
     /*
       ★ 开关先于一切(连源图都不解析):`isEnabled` 挡住了正常路径,这里兜的是
@@ -462,32 +489,66 @@ export function imageGenBridgeFor(deps: ImageGenDeps): ImageGenBridge {
     */
     const { provider, alias } = candidate
     signal.throwIfAborted()
-    let outcome: Attempt
-    try {
-      outcome = await attempt(provider, alias, prompt, resolved, signal)
-    } catch (err) {
-      /*
-        ★★ 只有**外层** signal 确认中止时才算中断,不看 `isAbortError(err)`:
-        内层 `AbortSignal.timeout` 超时抛的 TimeoutError,其 message 是
-        "…was aborted due to timeout",`isAbortError` 的 `/abort/i` 会误判成
-        用户中断 —— 那样一次上游卡死会把整场对话中止掉,而用户什么都没按。
-        超时/解析失败按「这一次失败了」带供应商名抛出,不换下一家
-        (点名了就只用那一个,见文件头)。
-      */
-      if (signal.aborted) throw err
-      // ★ 带上 cause:原错误的类型/栈在诊断里比这句拼出来的消息有用
-      //   (超时是 TimeoutError、解析是 ImageInputError,光看字符串分不出来)
-      throw new Error(`${provider.name}: ${err instanceof Error ? err.message : String(err)}`, { cause: err })
+    const count = clampImageCount(options?.count ?? 1)
+
+    /** 一格的结局:成功带图,失败带原因(和原错误,给 cause 用)。只有中断会抛出去。 */
+    const slot = async (index: number): Promise<Attempt | { reason: string; cause: unknown }> => {
+      try {
+        const outcome = await attempt(provider, alias, prompt, resolved, signal)
+        // 到手即推:卡片上这一格的占位立刻换成图,不等同批里最慢的那一张
+        if ('image' in outcome) options?.onImage?.(index, outcome.image)
+        return outcome
+      } catch (err) {
+        /*
+          ★★ 只有**外层** signal 确认中止时才算中断,不看 `isAbortError(err)`:
+          内层 `AbortSignal.timeout` 超时抛的 TimeoutError,其 message 是
+          "…was aborted due to timeout",`isAbortError` 的 `/abort/i` 会误判成
+          用户中断 —— 那样一次上游卡死会把整场对话中止掉,而用户什么都没按。
+          超时/解析失败按「这一次失败了」带供应商名抛出,不换下一家
+          (点名了就只用那一个,见文件头)。
+        */
+        if (signal.aborted) throw err
+        // ★ 留住原错误当 cause:原错误的类型/栈在诊断里比这句拼出来的消息有用
+        //   (超时是 TimeoutError、解析是 ImageInputError,光看字符串分不出来)
+        return { reason: err instanceof Error ? err.message : String(err), cause: err }
+      }
     }
-    if ('image' in outcome) {
-      return { images: [outcome.image], model: alias.upstreamModel, providerName: provider.name }
+
+    /*
+      需求:一次要多张。**逐张并发发 n=1 的请求**,不把 `n` 透传给上游:
+      dall-e-3 等模型明确拒收 `n > 1`(400),国内网关对 `n` 的支持参差不齐 ——
+      透传的症状是「换一家供应商,要多张就整体失败」。逐张请求对所有兼容
+      `/images/*` 的上游都成立,而且每张独立成败,能逐张推给卡片。
+      ★ 用 `Promise.all` 而不是 `allSettled`:`slot` 自己把非中断失败收成结果,
+      唯一会冒出来的拒绝就是中断 —— 那正要原样上抛。
+    */
+    const outcomes = await Promise.all(Array.from({ length: count }, (_, index) => slot(index)))
+    const images: GeneratedImage[] = []
+    const failures: Array<{ reason: string; cause?: unknown }> = []
+    for (const outcome of outcomes) {
+      if ('image' in outcome) images.push(outcome.image)
+      else failures.push(outcome)
     }
-    throw new Error(`${provider.name}: ${outcome.reason}`)
+    if (images.length > 0) {
+      return {
+        images,
+        model: alias.upstreamModel,
+        providerName: provider.name,
+        requested: count,
+        failures: failures.map((f) => f.reason)
+      }
+    }
+    // 全部失败:和单张时一样整体抛错、带供应商名。多格同因时只报第一条 —— 重复四遍同一句没有信息量
+    const first = failures[0]
+    throw new Error(
+      `${provider.name}: ${first?.reason ?? 'no image was produced'}`,
+      first?.cause === undefined ? undefined : { cause: first.cause }
+    )
   }
 
   return {
     available: () => deps.enabled() && candidateOf(deps) !== null,
-    generate: (prompt, signal) => run(prompt, undefined, signal),
-    edit: (prompt, source, signal) => run(prompt, source, signal)
+    generate: (prompt, signal, options) => run(prompt, undefined, signal, options),
+    edit: (prompt, source, signal, options) => run(prompt, source, signal, options)
   }
 }

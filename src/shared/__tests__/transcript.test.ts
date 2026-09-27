@@ -180,6 +180,20 @@ describe('applyEvent · 工具状态', () => {
     expect(s.tools['c1']?.card).toBeUndefined()
   })
 
+  it('★ 生图逐张进度按格子序号累加进 partialImages(乱序到达也各归各格),tool_end 时清掉', () => {
+    const img = (tag: string): { mime: 'image/png'; dataRef: string } => ({ mime: 'image/png', dataRef: `data:image/png;base64,${tag}` })
+    let s = applyEvent(emptyTranscript(), start)
+    s = applyEvent(s, { type: 'tool_progress', callId: 'c1', progress: { callId: 'c1', message: '1/3', image: { index: 2, image: img('CC') } } })
+    s = applyEvent(s, { type: 'tool_progress', callId: 'c1', progress: { callId: 'c1', message: '2/3', image: { index: 0, image: img('AA') } } })
+    // 不带图的普通进度不能把已到手的图冲掉
+    s = applyEvent(s, { type: 'tool_progress', callId: 'c1', progress: { callId: 'c1', message: '2/3' } })
+    expect(s.tools['c1']?.partialImages).toEqual({ 0: img('AA'), 2: img('CC') })
+    expect(s.tools['c1']?.progress).toBe('2/3')
+    s = applyEvent(s, { type: 'tool_end', callId: 'c1', output: { content: 'ok', images: [img('AA'), img('CC')] }, isError: false })
+    expect(s.tools['c1']?.partialImages).toBeUndefined()
+    expect(s.tools['c1']?.output?.images).toHaveLength(2)
+  })
+
   it('★ 没见过 start 的 tool_end 不能丢 —— 重放裁剪后可能真的只剩 end', () => {
     const s = applyEvent(emptyTranscript(), {
       type: 'tool_end',

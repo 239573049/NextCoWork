@@ -4,7 +4,7 @@
  * 类型放在 shared 是因为渲染层要渲染它们(审批弹窗要显示工具名与入参、
  * 设置页要列 MCP 工具)。**运行时的 Tool 对象只有主进程有**,因为 execute 是闭包。
  */
-import type { SubagentResult, ToolOutput } from './message'
+import type { SubagentResult, ToolOutput, ToolOutputImage } from './message'
 import type { ToolCard } from './tool-card'
 
 /**
@@ -95,6 +95,17 @@ export interface ToolProgress {
    * 这张是过程态。用户在它上面点动作 → 反向通道回到挂起的工具。
    */
   card?: ToolCard
+  /**
+   * 生图工具**刚到手的那一张**图(`index` = 它在这次请求里的第几格,0 起)。
+   *
+   * 需求:一次要多张时,生成期的图片卡要逐张把占位换成真图,而不是让用户对着
+   * N 格加载动画等到最慢的那一张。只推「新到的这一张」而不是累计数组:每张是
+   * 几 MB 的 data URL,累计推送会让第 4 张到来时把前 3 张再过一遍 IPC。
+   * ★ 同样易失、不进转录 —— 落盘的是最终 `output.images`;`tool_end` 时清掉。
+   * ★ 只有内置 `generate_image` 会填它:插件进度由 `plugin/manager.ts` 逐字段
+   * 重建,插件伪造不出这一项。
+   */
+  image?: { index: number; image: ToolOutputImage }
 }
 
 export interface ToolResult {

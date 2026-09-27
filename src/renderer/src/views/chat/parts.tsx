@@ -16,6 +16,7 @@ import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
 import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
 import {
+  isPinnedShape,
   presenterOf,
   pluginPresentersSnapshot,
   subscribePluginPresenters,
@@ -196,8 +197,12 @@ export function ToolCallCard({
     ★ 与上面那条 interaction 预览的区别：那条只看 `pending`（工具一开跑就收起，
     因为下面会冒出可作答的卡片）；这条**全程展开** —— 生成期是边走边画，
     跑完就是成品本身，不存在"另一处更权威的展示"。
+
+    `image` 形态（`generate_image` 的图片卡）同理全程展开：生成期是加载格与逐张出图，
+    跑完是图本身。判据走 `isPinnedShape` 那张表（产物即回答的形态），不在这里再写
+    第二个形态名。
   */
-  const inlineWidget = presenter.shape === "widget";
+  const inlineWidget = presenter.shape === "widget" || isPinnedShape(presenter.shape);
   const open = manual ?? (status === "error" || liveCard !== undefined || previewable || inlineWidget);
 
   const duration = call === undefined ? undefined : formatCallDuration(call);
@@ -303,6 +308,7 @@ export function ToolCallCard({
           toolName={toolName}
           callId={call?.callId}
           card={card}
+          partialImages={call?.partialImages}
         />
       </SurfaceReveal>
     </Surface>

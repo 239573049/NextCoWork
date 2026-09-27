@@ -859,6 +859,61 @@ body {
 }
 
 /*
+  生图卡片的专属加载格(`views/chat/ImageGenDetail.tsx`)。
+
+  需求:一张图要十几秒,这段时间里每一格占位都得**看得出在动**,而且要和「空白框」
+  「加载失败」一眼分开 —— 所以是一道斜向的光带从左往右扫过整格(像相纸显影),
+  而不是一个转圈:一次出 4 张时四个 spinner 各转各的,正是 `ToolIcon.tsx` 文件头
+  记过的那种噪音。光带用 `--color-fg` 的 7% 叠色,不新增颜色 token,深浅主题自然跟着走
+  (数值是推的,不是量的:取和 `.progress-stripes` 同一档的 7%)。
+
+  `image-gen-reveal`:图到手那一刻从占位淡入,避免一格从光带瞬间「跳」成图。
+
+  ★ reduced/off 档下两者都显式关掉(同 `.run-fold-enter` 的写法);减弱档的「还活着」
+  由组件用 Motion 做无位移呼吸补上(见组件里 `useMotionLevel` 那段),关闭档保持静止。
+*/
+@keyframes image-gen-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.image-gen-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    105deg,
+    transparent 30%,
+    color-mix(in srgb, var(--color-fg) 7%, transparent) 50%,
+    transparent 70%
+  );
+  animation: image-gen-sweep 1.8s ease-in-out infinite;
+}
+@keyframes image-gen-reveal {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.image-gen-reveal {
+  animation: image-gen-reveal 260ms var(--ease-panel) both;
+}
+/* ★ `::after` 不能放进 `:is()`(伪元素不是合法的选择器列表项,整条规则会被丢弃),所以拆开写 */
+:root[data-theme-motion='reduced'] .image-gen-sweep::after,
+:root[data-theme-motion='off'] .image-gen-sweep::after,
+:root[data-theme-motion='reduced'] .image-gen-reveal,
+:root[data-theme-motion='off'] .image-gen-reveal {
+  animation: none;
+}
+
+/*
   系统里勾了「减弱动态效果」就别播 —— 前庭功能敏感的人看这类大块位移会晕。
   不写 0 而写 0.01ms:`transitionend` / `animationend` 照常触发,靠事件收尾的
   逻辑不会因为「动画从来没开始过」而卡住。usePresence 用的是定时器,不受影响。

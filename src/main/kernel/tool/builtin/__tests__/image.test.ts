@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentMessage } from '../../../../../shared/agent/message'
-import type { ImageGenBridge } from '../../../image-gen'
+import type { ToolProgress } from '../../../../../shared/agent/tool'
+import type { ImageGenBridge, ImageGenOptions } from '../../../image-gen'
 import { nodeHost } from '../../../host'
 import type { ToolContext } from '../../registry'
 import { generateImageTool } from '../image'
@@ -22,12 +23,16 @@ function bridge(over: Partial<ImageGenBridge> = {}): ImageGenBridge {
     generate: vi.fn(async () => ({
       images: [{ mime: 'image/png' as const, dataRef: 'data:image/png;base64,AAAA' }],
       model: 'gpt-image-2',
-      providerName: 'OpenAI'
+      providerName: 'OpenAI',
+      requested: 1,
+      failures: []
     })),
     edit: vi.fn(async () => ({
       images: [{ mime: 'image/png' as const, dataRef: 'data:image/png;base64,BBBB' }],
       model: 'gpt-image-2',
-      providerName: 'OpenAI'
+      providerName: 'OpenAI',
+      requested: 1,
+      failures: []
     })),
     ...over
   }
@@ -74,7 +79,7 @@ describe('generate_image · 执行', () => {
     expect(result.output.images).toEqual([{ mime: 'image/png', dataRef: 'data:image/png;base64,AAAA' }])
     expect(result.output.content).toContain('gpt-image-2')
     expect(result.output.content).toContain('OpenAI')
-    expect(fake.generate).toHaveBeenCalledWith('a lighthouse at dawn', expect.any(AbortSignal))
+    expect(fake.generate).toHaveBeenCalledWith('a lighthouse at dawn', expect.any(AbortSignal), expect.objectContaining({ count: 1 }))
   })
 
   it('桥不在了(快照之后被摘)按工具失败上报,不能报成功', async () => {
@@ -94,6 +99,52 @@ describe('generate_image · 执行', () => {
     const result = await generateImageTool.execute({ prompt: '' }, ctx({ imageGen: bridge() }))
     expect(result.isError).toBe(true)
     expect(result.output.content).toMatch(/Invalid arguments/u)
+  })
+})
+
+describe('generate_image · 一次多张', () => {
+  const img = (tag: string): { mime: 'image/png'; dataRef: string } => ({ mime: 'image/png', dataRef: `data:image/png;base64,${tag}` })
+
+  it('n 透传给桥;每到手一张就 emit 一条带格子序号的进度,回执写实际张数', async () => {
+    const emitted: ToolProgress[] = []
+    const fake = bridge({
+      generate: vi.fn(async (_prompt: string, _signal: AbortSignal, options?: ImageGenOptions) => {
+        // 模拟并发完成顺序与格子序号无关:第 2 格先到
+        options?.onImage?.(1, img('BBBB'))
+        options?.onImage?.(0, img('AAAA'))
+        options?.onImage?.(2, img('CCCC'))
+        return { images: [img('AAAA'), img('BBBB'), img('CCCC')], model: 'gpt-image-2', providerName: 'OpenAI', requested: 3, failures: [] }
+      })
+    })
+    const result = await generateImageTool.execute({ prompt: 'three cats', n: 3 }, ctx({ imageGen: fake, emit: (p) => emitted.push(p) }))
+    expect(result.isError).toBe(false)
+    expect(fake.generate).toHaveBeenCalledWith('three cats', expect.any(AbortSignal), expect.objectContaining({ count: 3 }))
+    expect(emitted.map((p) => [p.image?.index, p.message])).toEqual([[1, '1/3'], [0, '2/3'], [2, '3/3']])
+    expect(emitted.every((p) => p.callId === 'call_1')).toBe(true)
+    expect(result.output.images).toHaveLength(3)
+    expect(result.output.content).toMatch(/^Generated 3 images with gpt-image-2 via OpenAI\. The images are attached below\.$/u)
+  })
+
+  it('部分失败:保留已到手的图,回执写清「几张失败、为什么」—— 否则模型会宣布画齐了', async () => {
+    const fake = bridge({
+      generate: vi.fn(async () => ({
+        images: [img('AAAA')], model: 'gpt-image-2', providerName: 'OpenAI', requested: 3,
+        failures: ['HTTP 429 rate limited', 'HTTP 429 rate limited']
+      }))
+    })
+    const result = await generateImageTool.execute({ prompt: 'x', n: 3 }, ctx({ imageGen: fake }))
+    expect(result.isError).toBe(false)
+    expect(result.output.images).toHaveLength(1)
+    // 同因去重:一条限流报两遍没有信息量
+    expect(result.output.content).toContain('2 of 3 requested images failed: HTTP 429 rate limited')
+    expect(result.output.content).not.toContain('rate limited; HTTP 429')
+  })
+
+  it('n 超出上限被 schema 拦下,一个请求都不发', async () => {
+    const fake = bridge()
+    const result = await generateImageTool.execute({ prompt: 'x', n: 9 }, ctx({ imageGen: fake }))
+    expect(result.isError).toBe(true)
+    expect(fake.generate).not.toHaveBeenCalled()
   })
 })
 
@@ -129,7 +180,8 @@ describe('generate_image · 改图', () => {
     expect(fake.edit).toHaveBeenCalledWith(
       'make it noir',
       { mime: 'image/png', dataRef: 'data:image/png;base64,AAAA' },
-      expect.any(AbortSignal)
+      expect.any(AbortSignal),
+      expect.objectContaining({ count: 1 })
     )
   })
 
@@ -161,7 +213,8 @@ describe('generate_image · 改图', () => {
       expect(fake.edit).toHaveBeenCalledWith(
         'crop it',
         expect.objectContaining({ mime: 'image/png' }),
-        expect.any(AbortSignal)
+        expect.any(AbortSignal),
+        expect.objectContaining({ count: 1 })
       )
       const source = vi.mocked(fake.edit).mock.calls[0]?.[1] as { dataRef: string }
       expect(source.dataRef.startsWith('data:image/png;base64,')).toBe(true)

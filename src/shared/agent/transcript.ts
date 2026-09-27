@@ -49,6 +49,14 @@ export interface ToolCallState {
    * 有它时渲染层自动展开工具卡并交给 `CardRenderer`。
    */
   card?: import('./tool-card').ToolCard
+  /**
+   * 生图工具运行中已经到手的那几张,键是请求里的格子序号(`ToolProgress.image.index`)。
+   * **易失,不进转录** —— 落盘的是 `output.images`,`tool_end` 时清掉。
+   *
+   * 需求:多图生成期逐张显示。用格子序号做键而不是数组:并发请求的完成顺序不定,
+   * 第 3 格先到时它必须出现在第 3 格,而不是挤到第 1 格让后面的占位整体错位。
+   */
+  partialImages?: Readonly<Record<number, import('./message').ToolOutputImage>>
   output?: ToolOutput
   /**
    * `tool_start` 到达时的墙钟毫秒。
@@ -622,7 +630,11 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             ...prev,
             progress: e.progress.message,
             // 实时卡片易失,但一旦推出就覆盖上一张;不推(card 缺省)则保留上一张。
-            ...(e.progress.card === undefined ? {} : { card: e.progress.card })
+            ...(e.progress.card === undefined ? {} : { card: e.progress.card }),
+            // 逐张到达的生图结果按格子序号**累加**(每条进度只带新到的那一张)
+            ...(e.progress.image === undefined
+              ? {}
+              : { partialImages: { ...prev.partialImages, [e.progress.image.index]: e.progress.image.image } })
           }
         }
       }
@@ -648,6 +660,8 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             // 实时卡片也随结束清掉 —— 让展示切到最终 output.card(结果快照);
             // 否则那张过程态的卡会一直盖在结果上。
             card: undefined,
+            // 过程态的逐张图同理:结束后以 output.images 为准,不留两份
+            partialImages: undefined,
             endedAt: e.at ?? Date.now()
           }
         }

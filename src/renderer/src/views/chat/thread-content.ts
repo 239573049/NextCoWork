@@ -4,6 +4,7 @@ import { compactBoundaryOf, type CompactBoundary } from '../../../../shared/agen
 import type { LiveBlock, SubagentState } from '../../../../shared/agent/transcript'
 import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import type { TimelineItem } from '../../../../shared/domain/tool-timeline'
+import { isPinnedShape, presenterOf } from '../../../../shared/domain/tool-presenter'
 import { MAX_PARTIAL_JSON_CHARS, parsePartialJson } from './partial-json'
 import type { TurnPrompt } from './TurnActions'
 
@@ -359,6 +360,26 @@ function descriptionOf(source: string): string | undefined {
   return typeof description === 'string' && description !== '' ? description : undefined
 }
 
+/**
+ * 这一块是不是「产物即回答」的那类工具调用(目前 = 生图),要留在过程折叠之外。
+ *
+ * 需求:生成的图是用户要的东西。它若按普通工具进过程段,会先被连续工具组的自动收起
+ * 藏一层,再在一轮收尾时被整段折进「用时」藏第二层 —— 表现为模型说「画好了」,
+ * 界面上却看不到图。判据来自 presenter 的形态表(`isPinnedShape`),不按工具名写死。
+ *
+ * ★ 两种来源都认:已提交的 `tool_call` part 和还在流的 `tool_use` 块。只认前者的话,
+ * 生成期卡片在过程段里、提交那一刻跳到段外,正好在用户盯着看的时候挪一次位置。
+ * 流式块的名字还没到时认不出,先按普通工具走 —— 名字几乎总是随第一段增量一起到。
+ */
+export function isPinnedToolBlock(block: AssistantBlock): boolean {
+  const name = block.part?.type === 'tool_call'
+    ? block.part.name
+    : block.liveBlock?.kind === 'tool_use'
+      ? block.liveBlock.name
+      : undefined
+  return name !== undefined && isPinnedShape(presenterOf(name).shape)
+}
+
 /** Keep prose, images and errors in place; only adjacent process blocks share a timeline. */
 export function assistantSegments(
   blocks: readonly AssistantBlock[],
@@ -371,6 +392,17 @@ export function assistantSegments(
     let item: TimelineItem | undefined
     if (part?.type === 'tool_result') continue
     if (part?.type === 'text' && part.text.trim() === '') continue
+    if (isPinnedToolBlock(block)) {
+      /*
+        产物类工具调用单独成块,不进过程段(理由见 `isPinnedToolBlock`)。
+        ★ 段 key 取 callId:流式块和提交后的 part 的 `block.key` 不保证相同(同一轮里
+        第二条起的 assistant 消息用自己的 message id 作前缀,见 `threadRows`),
+        用它的话生成期那张卡片可能在提交瞬间被卸载重建 —— 灯箱开合、淡入状态全丢。
+      */
+      const callId = part?.type === 'tool_call' ? part.callId : liveBlock?.kind === 'tool_use' ? liveBlock.callId : undefined
+      segments.push({ kind: 'block', key: callId === undefined ? key : `pinned:${callId}`, block })
+      continue
+    }
     if (part?.type === 'thinking') {
       if (part.text.trim() === '') continue
       item = { key, kind: 'thinking', text: part.text, streaming: false }

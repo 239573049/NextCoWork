@@ -7,6 +7,9 @@
  * 生图另有自己的开关(`AppSettings.imageGenerationEnabled`),说明行里要讲清它
  * 不受「联网搜索」管 —— 原先两者绑在一起,正是「找不到工具」那次事故的根因。
  * 这个域此前不存在,按 §6.3 新建独立文件,不往 index.tsx 那三千行里堆。
+ *
+ * `imageGen.card.*` 是对话里那张生图卡片(`views/chat/ImageGenDetail.tsx`)的文案:
+ * 加载格的状态字与读屏标签、成品网格的放大入口、部分失败时的那行说明。
  */
 export const imageGenZh = {
   'imageGen.enabled': '对话生图',
@@ -17,7 +20,13 @@ export const imageGenZh = {
   'imageGen.modelUnset': '未选择——对话里将无法生成图片。',
   'imageGen.modelMissing': '所选模型已不可用，请重新选择。',
   'imageGen.noImageModels': '还没有图片模型，先在左侧添加一家图片供应商。',
-  'imageGen.notChatModel': '图片模型不能用于对话，已切换为 {model}'
+  'imageGen.notChatModel': '图片模型不能用于对话，已切换为 {model}',
+  'imageGen.card.region': '生成的图片',
+  'imageGen.card.generating': '生成中',
+  'imageGen.card.editing': '编辑中',
+  'imageGen.card.slot': '第 {index}/{total} 张',
+  'imageGen.card.open': '放大查看第 {index} 张图片',
+  'imageGen.card.partial': '成功生成 {done}/{total} 张'
 }
 
 export const imageGenEn: Record<keyof typeof imageGenZh, string> = {
@@ -29,5 +38,11 @@ export const imageGenEn: Record<keyof typeof imageGenZh, string> = {
   'imageGen.modelUnset': 'Not selected — image generation is unavailable in chat.',
   'imageGen.modelMissing': 'The selected model is unavailable. Pick another one.',
   'imageGen.noImageModels': 'No image models yet — add an image provider on the left first.',
-  'imageGen.notChatModel': 'Image models cannot chat; switched to {model}'
+  'imageGen.notChatModel': 'Image models cannot chat; switched to {model}',
+  'imageGen.card.region': 'Generated images',
+  'imageGen.card.generating': 'Generating',
+  'imageGen.card.editing': 'Editing',
+  'imageGen.card.slot': 'Image {index} of {total}',
+  'imageGen.card.open': 'View image {index}',
+  'imageGen.card.partial': '{done} of {total} generated'
 }

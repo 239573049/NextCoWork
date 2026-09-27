@@ -11,7 +11,7 @@
  * 对未知输入永远正确的呈现。
  */
 import type { ReactNode } from "react";
-import type { ToolOutput } from "../../../../shared/agent/message";
+import type { ToolOutput, ToolOutputImage } from "../../../../shared/agent/message";
 import type { ToolShape } from "../../../../shared/domain/tool-presenter";
 import { isTodoListTool } from "../../../../shared/domain/tool-presenter";
 import { useI18n } from "../../i18n";
@@ -26,6 +26,7 @@ import { TerminalBlock } from "./TerminalBlock";
 import { InteractionPreviewBlock } from "./InteractionPreviewBlock";
 import { TodoWriteChecklist } from "./TodoWriteChecklist";
 import { WidgetDetail } from "./WidgetDetail";
+import { ImageGenDetail } from "./ImageGenDetail";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -193,6 +194,13 @@ export interface DetailProps {
    * 那是算增量唯一缺的一块事实。
    */
   callId?: string;
+  /**
+   * 生图工具运行中已经到手的那几张(`ToolCallState.partialImages`,按格子序号)。
+   *
+   * 需求:`image` 形态的卡片要逐张把加载格换成图,而那几张在 `tool_end` 之前只存在于
+   * 易失的调用状态里,`output` 还没有。只有 `ImageGenDetail` 读它。
+   */
+  partialImages?: Readonly<Record<number, ToolOutputImage>>;
 }
 
 /**
@@ -482,6 +490,8 @@ export const DETAIL_RENDERERS: Record<
     两个分支共用同一个 `WidgetFrame` —— 见 `WidgetDetail.tsx` 的文件头。
   */
   widget: WidgetDetail,
+  // image:生图的专属图片卡 —— 加载格、逐张出图、成品网格都在 `ImageGenDetail.tsx`
+  image: ImageGenDetail,
   external: ExternalDetail,
 };
 
@@ -493,6 +503,7 @@ export function ToolDetail({
   toolName,
   callId,
   card,
+  partialImages,
 }: {
   shape: ToolShape;
   /*
@@ -518,6 +529,7 @@ export function ToolDetail({
       isError={isError}
       toolName={toolName}
       callId={callId}
+      partialImages={partialImages}
     />
   );
 }

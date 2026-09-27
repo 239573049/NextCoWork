@@ -227,6 +227,7 @@ export function groupTitle(
     orchestration: (c) => (c === 1 ? '调度了 1 项' : `调度了 ${String(c)} 项`),
     interaction: (c) => (c === 1 ? '等你表态 1 次' : `等你表态 ${String(c)} 次`),
     widget: (c) => (c === 1 ? '画了 1 张图' : `画了 ${String(c)} 张图`),
+    image: (c) => (c === 1 ? '生成了 1 次图片' : `生成了 ${String(c)} 次图片`),
     external: (c) => (c === 1 ? '调用了 1 个外部工具' : `调用了 ${String(c)} 个外部工具`)
   }
   return LABEL[shape](n)
