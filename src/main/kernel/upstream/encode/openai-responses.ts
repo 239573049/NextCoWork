@@ -33,9 +33,36 @@ export function toOpenAIResponsesInput(messages: readonly AgentMessage[]): unkno
         case 'thinking': {
           const opaque = record(part.opaque)
           const item = record(opaque?.item)
-          if (opaque?.protocol === 'openai-responses' && item?.type === 'reasoning') {
+          const replay = opaque?.protocol === 'openai-responses' && item !== undefined && item.type === 'reasoning'
+            ? reasoningInputItem(item)
+            : undefined
+          /*
+            ★★ **转录里这条思考只要有正文,`input` 里就必须有一个带正文的 reasoning item。**
+            DeepSeek 的思考模式把这条写成了硬校验:带 tools 的请求,历史每一轮的
+            reasoning_text 必须完整回传,缺失即 400 ——
+            `The \`reasoning_text\` in the thinking mode must be passed back to the API`。
+
+            而 opaque 只是回传的载体,不是思考正文的唯一来源。三种情况下旧逻辑
+            (按协议键门控、只认 opaque)会一个字节都不上行,表现是**界面上思考好好的、
+            转录也完整,请求却 400,且本地全程零报错**:
+            - 流在 `output_item.done` 之前被打断,或网关不发 reasoning 的 done 事件;
+            - 会话里混进另一条协议产生的思考轮次(中途换过模型/供应商),协议键对不上;
+            - 上游 item 经上面的字段白名单过滤后没剩下任何正文(只剩 id 之类)。
+            这三种情况全文都还在 `part.text` 里 —— 本条分支的需求就是把它补回上行链路。
+
+            ★ 有 summary / content 正文 / encrypted_content 的 item **一个字节都不改**:
+            那条路径是官方 OpenAI 那侧验证过的;给它再补一份 content 等于回传两份正文,
+            输入 token 随之翻倍。合成/补全出来的只带 content:不编造 id、不搬
+            encrypted_content(那是上游签发给它自己的密文,换个服务商毫无意义)。
+          */
+          if (replay !== undefined) {
             flush()
-            input.push(reasoningInputItem(item))
+            input.push(!reasoningCarriesText(replay) && part.text !== ''
+              ? { ...replay, content: [{ type: 'reasoning_text', text: part.text }] }
+              : replay)
+          } else if (part.text !== '') {
+            flush()
+            input.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: part.text }] })
           }
           break
         }
@@ -89,6 +116,31 @@ function reasoningInputItem(item: Record<string, unknown>): Record<string, unkno
     if (item[key] !== undefined) out[key] = structuredClone(item[key])
   }
   return out
+}
+
+/**
+ * 回传物里还有没有**上游读得动的**推理正文。
+ *
+ * 需求:没有的话,调用方必须用转录里的 `part.text` 补 `content`,否则思考模式的
+ * 上游会以「reasoning_text 必须回传」400 拒掉整轮(见 `case 'thinking'` 那段注释)。
+ *
+ * ★ 判成「有」的三种载体各有各的读者:`content` 是纯文本、`summary` 和
+ * `encrypted_content` 只对签发它们的那家有意义 —— 但共同点是**回传物里确实带着
+ * 上游给过的推理信息**,原样发出去就是零改动路径。补 content 的判断只需要回答
+ * 「这条 item 是不是空的」,不需要分辨对面是谁:编码器看不到供应商,那是 router
+ * 那一层的事实。
+ */
+function reasoningCarriesText(item: Record<string, unknown>): boolean {
+  if (typeof item['encrypted_content'] === 'string' && item['encrypted_content'] !== '') return true
+  for (const key of ['content', 'summary']) {
+    const parts = item[key]
+    if (!Array.isArray(parts)) continue
+    for (const part of parts) {
+      const text = record(part)?.text
+      if (typeof text === 'string' && text !== '') return true
+    }
+  }
+  return false
 }
 
 function stringText(value: unknown): string {

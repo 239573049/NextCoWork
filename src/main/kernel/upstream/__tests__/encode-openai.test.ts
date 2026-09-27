@@ -124,6 +124,55 @@ describe('OpenAI request encoders', () => {
     expect(JSON.stringify(input)).not.toContain('status')
   })
 
+  /*
+    ★ DeepSeek 思考模式的硬校验:带 tools 时历史每一轮的 reasoning_text 必须回传,
+    缺失即 400。opaque 缺席 / 协议键对不上时,思考全文只存在于 part.text ——
+    这组用例钉住「正文必须回传」和「有载体的 item 不许被改写」两条边界。
+  */
+  it('replays thinking text as a reasoning item when opaque is missing or from another protocol', () => {
+    const messages = [assistantMessage('a', [
+      { type: 'thinking', text: '先想清楚', opaque: { protocol: 'openai-chat', field: 'reasoning_content' } },
+      { type: 'thinking', text: '再动手', opaque: { signature: 'anthropic-sig' } },
+      { type: 'thinking', text: '断流那次没留下 opaque' },
+      { type: 'tool_call', callId: 'c', name: 'Echo', input: {} }
+    ], 0)]
+    const before = structuredClone(messages)
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'deepseek-flash', 'k').body as { input: unknown[] }).input
+    expect(input).toContainEqual({ type: 'reasoning', content: [{ type: 'reasoning_text', text: '先想清楚' }] })
+    expect(input).toContainEqual({ type: 'reasoning', content: [{ type: 'reasoning_text', text: '再动手' }] })
+    expect(input).toContainEqual({ type: 'reasoning', content: [{ type: 'reasoning_text', text: '断流那次没留下 opaque' }] })
+    expect(input).toContainEqual({ type: 'function_call', call_id: 'c', name: 'Echo', arguments: '{}' })
+    expect(messages).toEqual(before)
+  })
+
+  it('fills content from the transcript when the replayed item lost its text', () => {
+    const messages = [assistantMessage('a', [{ type: 'thinking', text: '全文还在', opaque: {
+      protocol: 'openai-responses', item: { type: 'reasoning', id: 'rs-9' }
+    } }], 0)]
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'deepseek-flash', 'k').body as { input: unknown[] }).input
+    expect(input[0]).toEqual({ type: 'reasoning', id: 'rs-9', content: [{ type: 'reasoning_text', text: '全文还在' }] })
+  })
+
+  it('keeps an item that already carries reasoning bytes untouched even when the transcript has text', () => {
+    const messages = [assistantMessage('a', [{ type: 'thinking', text: '检查参数。', opaque: {
+      protocol: 'openai-responses', item: { type: 'reasoning', id: 'rs-1', encrypted_content: 'enc' }
+    } }], 0)]
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'gpt-test', 'k').body as { input: unknown[] }).input
+    expect(input[0]).toEqual({ type: 'reasoning', id: 'rs-1', encrypted_content: 'enc' })
+    // ★ 带引号匹配字段名,`encrypted_content` 自己也含 "content" 子串
+    expect(JSON.stringify(input)).not.toContain('"content"')
+  })
+
+  it('does not invent reasoning for thinking blocks that have no text at all', () => {
+    const messages = [assistantMessage('a', [
+      { type: 'thinking', text: '', opaque: { signature: 'anthropic-sig' } },
+      { type: 'tool_call', callId: 'c', name: 'Echo', input: {} }
+    ], 0)]
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'gpt-test', 'k').body as { input: unknown[] }).input
+    expect(input[0]).toEqual({ type: 'function_call', call_id: 'c', name: 'Echo', arguments: '{}' })
+    expect(JSON.stringify(input)).not.toContain('reasoning')
+  })
+
   it('encodes vision blocks and omits tools for tool-free requests', () => {
     const request = { ...REQUEST, tools: [], messages: [userMessage('u', [
       { type: 'text', text: '看图' }, { type: 'image', mime: 'image/png', dataRef: 'data:image/png;base64,aGVsbG8=' }
