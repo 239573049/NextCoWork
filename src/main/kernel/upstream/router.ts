@@ -23,6 +23,7 @@ import { DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS } from '../../../shared/domain/se
 import {
   applyThinkingAdapter,
   enforceThinkingPreference,
+  reasoningReplayFor,
   ThinkingAdapterError,
   type ThinkingAdapterInput
 } from '../../../shared/domain/thinking-adapter'
@@ -637,15 +638,22 @@ export class UpstreamRouter {
       */
       const apiKey = bearerOf(cred)
       const cacheTtl = anthropicCacheTtlOf(c.provider)
+      /*
+        需求:Responses 的回传方言必须在**下发请求体之前**定好,而它和思考线形读的是
+        同一份 thinkingConfig(显式声明、standardWire 都在里面)。提上来共用一次调用,
+        不在下面再判一遍 —— 两处判据迟早会分叉。
+      */
+      const thinkingConfig = thinkingConfigFor(req, c, protocol)
       const prepared = await waitFor(() => prepareRequestImages(req, this.host, context, signal))
       const enc = encodeUpstream(protocol, prepared, c.alias.upstreamModel, apiKey, {
         userId: context.workspaceId,
-        cacheTtl
+        cacheTtl,
+        reasoningReplay: reasoningReplayFor(thinkingConfig, c.alias.upstreamModel)
       })
       const thinkingInput: ThinkingAdapterInput = {
         protocol,
         upstreamModel: c.alias.upstreamModel,
-        config: thinkingConfigFor(req, c, protocol),
+        config: thinkingConfig,
         reasoning: reasoningFor(req, c.alias),
         maxOutputTokens: req.maxOutputTokens,
         // Legacy bindings without a request adapter must retain automatic

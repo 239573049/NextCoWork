@@ -216,6 +216,16 @@ export type ModelModality = 'text' | 'image' | 'video' | 'speech' | 'transcripti
 export type ThinkingMode = 'unsupported' | 'always' | 'toggle' | 'effort' | 'budget'
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
+/**
+ * Responses 协议回传历史思考的两种方言,见 `ThinkingConfig.reasoningReplay`。
+ *
+ * - `opaque-only`:只回传上游自己签发过的载体(`id` / `summary` / `encrypted_content`),
+ *   推理正文(`content`)一律剥掉 —— 这是官方 OpenAI 输入侧的约束。
+ * - `text-required`:除了载体,还要用转录里的思考正文补 `content` —— 这是 DeepSeek
+ *   思考模式的硬校验。
+ */
+export type ReasoningReplay = 'opaque-only' | 'text-required'
+
 export interface ThinkingConfig {
   mode: ThinkingMode
   defaultEnabled: boolean
@@ -237,6 +247,21 @@ export interface ThinkingConfig {
    * 官方供应商的条目不声明,行为一个字节不变。
    */
   standardWire?: boolean
+  /**
+   * ★★ Responses 协议回传历史 reasoning item 时的方言开关。缺席 = `opaque-only`。
+   *
+   * 存在的理由:官方 OpenAI 的**输入侧**对 reasoning item 的 `content`(推理正文)
+   * 上限是 0 —— 带非空 `content` 的 item 会被整轮 400(`array_above_max_length`);
+   * 而 DeepSeek 思考模式反过来**要求**历史每轮的 reasoning_text 全文回传,缺了同样 400。
+   * 两边互斥,只能按上游分流。
+   *
+   * 判定顺序见 `thinking-adapter.ts` 的 `reasoningReplayFor`:显式声明 >
+   * `standardWire`(声明读标准线形的托管方按标准约束走,照 `standardWire` 自己的先例)>
+   * 模型名兜底 > 默认 `opaque-only`。
+   *
+   * 代码里**不按供应商分支**:供应商属于路由器那一层的事实,编码器只看这个开关。
+   */
+  reasoningReplay?: ReasoningReplay
 }
 
 export interface RequestPatchRule {

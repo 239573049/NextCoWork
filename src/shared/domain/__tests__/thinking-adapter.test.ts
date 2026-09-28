@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ResolvedModelThinking } from '../model-runtime'
-import { applyThinkingAdapter, removeUnsupportedThinking, ThinkingAdapterError } from '../thinking-adapter'
+import { applyThinkingAdapter, reasoningReplayFor, removeUnsupportedThinking, ThinkingAdapterError } from '../thinking-adapter'
 import { OLLAMA_STANDARD_THINKING } from '../model-catalog-inventory'
 import { modelBindingResolver } from '../model-binding'
 import { modelThinkingLevels, resolveModelThinking } from '../model-runtime'
@@ -958,5 +958,34 @@ describe('端到端 · ollama-cloud 上的 glm-5.3', () => {
       }
     ) as Record<string, unknown>
     expect(body['reasoning_effort']).toBe('high')
+  })
+})
+
+/* ================================================================
+ * 回传方言(Responses 协议的历史 reasoning item)—— 两家的输入侧约束互斥:
+ * 官方 OpenAI 给 `content` 的上限是 0,DeepSeek 反过来要求正文全文回传。
+ * 判错的症状是会话从某一轮起每轮 400,且本地零报错。
+ * ================================================================ */
+describe('reasoningReplayFor', () => {
+  const effortConfig = { mode: 'effort' as const, defaultEnabled: true, parameterPath: 'reasoning_effort' }
+
+  it('★★★ 默认走官方那条;deepseek 名字兜底走要求正文那条', () => {
+    expect(reasoningReplayFor(undefined, 'gpt-5')).toBe('opaque-only')
+    expect(reasoningReplayFor(effortConfig, 'gpt-5')).toBe('opaque-only')
+    expect(reasoningReplayFor(effortConfig, 'deepseek-v4-pro')).toBe('text-required')
+    expect(reasoningReplayFor(effortConfig, 'deepseek-v4-pro:0813')).toBe('text-required')
+  })
+
+  it('★★★ 显式声明压过名字启发式(声明了就不看模型名)', () => {
+    expect(reasoningReplayFor({ ...effortConfig, reasoningReplay: 'text-required' }, 'some-relay-model'))
+      .toBe('text-required')
+  })
+
+  it('★★★ standardWire(托管方的标准线形)压过名字:Ollama 上的 deepseek 不许被拉回官方方言', () => {
+    expect(reasoningReplayFor(OLLAMA_STANDARD_THINKING, 'deepseek-v4-pro:0813')).toBe('opaque-only')
+  })
+
+  it('★ 显式声明本身也压过 standardWire(逃生口,顺序与 kindFor 一致)', () => {
+    expect(reasoningReplayFor({ ...OLLAMA_STANDARD_THINKING, reasoningReplay: 'text-required' }, 'gpt-oss:120b')).toBe('text-required')
   })
 })

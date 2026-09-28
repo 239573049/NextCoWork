@@ -1,6 +1,6 @@
 import { THINKING_BUDGET } from '../agent/run-request'
 import type { ResolvedModelThinking } from './model-runtime'
-import type { ReasoningEffort, RequestAdapterConfig, ThinkingConfig, UpstreamProtocol } from './provider'
+import type { ReasoningEffort, ReasoningReplay, RequestAdapterConfig, ThinkingConfig, UpstreamProtocol } from './provider'
 
 export class ThinkingAdapterError extends Error {
   constructor(message: string) {
@@ -63,6 +63,17 @@ function stripThinking(body: Record<string, unknown>): void {
   for (const key of THINKING_ROOTS) delete body[key]
 }
 
+/**
+ * 模型名里带的厂商族。抽出来是给 `kindFor` 与 `reasoningReplayFor` **共用同一份正则** ——
+ * 两处各抄一份,迟早只改一处,表现是请求线形按一家走、历史思考的回传按另一家走。
+ */
+function nameFamily(upstreamModel: string): 'deepseek' | 'glm' | 'hunyuan' | undefined {
+  if (/(?:^|\/)(?:deepseek|deep-seek)[/:._-]/iu.test(upstreamModel)) return 'deepseek'
+  if (/(?:^|\/)(?:glm|chatglm)[/:._-]/iu.test(upstreamModel)) return 'glm'
+  if (/(?:^|\/)(?:hy4-preview|hy3(?:-preview)?)(?:$|[/:._-])/iu.test(upstreamModel)) return 'hunyuan'
+  return undefined
+}
+
 function kindFor(input: ThinkingAdapterInput): AdapterKind {
   switch (input.preset) {
     case 'anthropic':
@@ -84,17 +95,38 @@ function kindFor(input: ThinkingAdapterInput): AdapterKind {
    * 就是名字启发式补上它家要的 thinking:{type},顺序反了会改掉官方渠道的行为。
    */
   if (input.config?.standardWire === true) return input.protocol
-  if (/(?:^|\/)(?:deepseek|deep-seek)[/:._-]/iu.test(input.upstreamModel)) return 'deepseek'
-  if (/(?:^|\/)(?:glm|chatglm)[/:._-]/iu.test(input.upstreamModel)) return 'glm'
-  if (/(?:^|\/)(?:hy4-preview|hy3(?:-preview)?)(?:$|[/:._-])/iu.test(input.upstreamModel)) {
-    return 'hunyuan'
-  }
+  const family = nameFamily(input.upstreamModel)
+  if (family !== undefined) return family
   if (
     input.config?.parameterPath !== undefined &&
     !['reasoning_effort', 'reasoning.effort'].includes(input.config.parameterPath)
   )
     return 'custom'
   return input.protocol
+}
+
+/**
+ * 这次请求该按哪种方言回传历史思考(语义见 provider.ts 的 `ThinkingConfig.reasoningReplay`)。
+ *
+ * 需求:官方 OpenAI 的 `input` 里 reasoning item 的 `content` 上限是 0,带非空正文的
+ * item 会让整轮 400(`array_above_max_length`);DeepSeek 思考模式反过来要求正文全文
+ * 回传,缺了同样 400。两边互斥,所以这个判定必须发生在**知道上游是谁**的这一层,
+ * 编码器只收结论(它看不到供应商,那是路由器那一层的事实)。
+ *
+ * 不满足会怎样:出事的 item 埋在转录里、每轮都被重放,表现是**会话从某一轮起每轮都
+ * 发不出去,`input[N]` 的 N 随历史长度漂移,且本地零报错**。
+ *
+ * 顺序照 `standardWire` 自己的先例:显式声明 > 声明读标准线形的托管方 > 模型名兜底。
+ */
+export function reasoningReplayFor(
+  config: ThinkingConfig | undefined,
+  upstreamModel: string,
+): ReasoningReplay {
+  if (config?.reasoningReplay !== undefined) return config.reasoningReplay
+  // Ollama 这类托管方跑的是 deepseek-* 名字的模型,但读的是标准线形 —— 回传同样按
+  // 标准约束走,不能被下面的名字启发式抓回 DeepSeek 官方方言。
+  if (config?.standardWire === true) return 'opaque-only'
+  return nameFamily(upstreamModel) === 'deepseek' ? 'text-required' : 'opaque-only'
 }
 
 function budgetForEffort(

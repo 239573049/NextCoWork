@@ -923,6 +923,8 @@ describe('vendor-first model catalogue', () => {
           defaultEnabled: true,
           defaultEffort: 'high',
           parameterPath: 'reasoning_effort',
+          // 这家的思考模式要求历史 reasoning_text 全文回传(见 reasoningReplayFor)
+          reasoningReplay: 'text-required',
         },
         reasoningEfforts: ['none', 'low', 'high', 'max'],
         verificationStatus: 'official-api',
