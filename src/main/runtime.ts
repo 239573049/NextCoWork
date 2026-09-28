@@ -91,6 +91,7 @@ import { store } from './state/store'
 import { schedulingBridgeFor } from './scheduled/bridge'
 import { shellBridgeFor } from './agent-shells'
 import { imageGenBridgeFor } from './kernel/image-gen'
+import { sessionImageStoreFor } from './session-images'
 import { resolveImageDataRef } from './kernel/upstream/images'
 import { parseCredential } from '../shared/domain/credential'
 import { listResolvedModels } from './state/model-bindings'
@@ -2667,6 +2668,12 @@ export async function runAgent(
         */
         resolveImage: (source, signal) => resolveImageDataRef(source, getHost(), { sessionId: req.sessionId }, signal)
       }),
+      /*
+        本会话的图片仓:生成图落成 `ncw://` 会话附件、`SaveImage` 按地址读回字节。
+        ★ 与 `imageGen.resolveImage` 同一个 sessionId 口径 —— 地址只在它所属的会话里解析得通,
+        子代理的 run 因此拿到的是**子会话**的仓(它生成的图父代理点不到名,这是会话隔离本身)。
+      */
+      sessionImages: sessionImageStoreFor({ sessionId: req.sessionId, host: getHost }),
       acceptsGoalInput: (goalId) => primary && getActiveGoal(req.sessionId)?.id === goalId,
       prepareMessage: (message) => primary ? prepareGoalMessage(req.sessionId, message) : message,
       onMessageCommit: (message) => {

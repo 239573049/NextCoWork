@@ -402,8 +402,27 @@ function createSessionStore(sessionId: string): SessionStore {
           lastInputTokens: undefined,
           contextUsage: undefined,
           live: continueRun ? [] : state.transcript.live,
-          tools: continueRun ? {} : state.transcript.tools,
-          subagents: continueRun ? {} : state.transcript.subagents,
+          /*
+            需求:截断重跑之后,**留下来的那部分历史**里的工具卡片仍要认得出自己。
+
+            ★ 这两行曾经是 `tools: {}` / `subagents: {}`,而它就是用户报的那条卡片的
+            成因:一次生图跑完、之后编辑(或点「重新生成」)一条**更晚**的消息重跑,
+            更早那张生成图卡片会退回「等待」+「生成中」。判据是 `tools[callId]` 还在
+            不在 —— 不在时 `ToolCallCard` 把行状态读成 `pending`(「等待」),而
+            `ImageGenDetail` 拿到的 `output` 是 `undefined`,图像卡的未结算分支就摆出
+            加载格(「生成中」)。input 来自消息里的 `tool_call` part,所以提示词照常
+            显示 —— 看上去像「这一张还没生成完」,而它其实早就落库了。
+
+            ★ 而且它不会自己好:`loadHistory` 在 run 期间拒绝水合,run 正常结束后也
+            没有人再水合一次,于是这份缺失一直留到重开这个会话。
+
+            清空的**本意**只是「别把被切掉那一轮的工具状态留着」,`toolsFromMessages`
+            正好只做这件事:留下的消息重建,切掉的 callId 自然不在结果里。把当前值当
+            `live` 传进去是照 `loadHistory` 的口径 —— 已提交的 part 说了算,`live` 只
+            补它没有的(耗时、后台子代理的遥测)。
+          */
+          tools: continueRun ? toolsFromMessages(messages, state.transcript.tools) : state.transcript.tools,
+          subagents: continueRun ? subagentsFromMessages(messages, state.transcript.subagents) : state.transcript.subagents,
           ...(continueRun ? { status: 'done' as const, error: undefined, usage: undefined } : {})
         }
       }))

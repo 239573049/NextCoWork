@@ -957,16 +957,24 @@ function commitManagedAttachment(
 
 function recordMessageAttachments(session: Session, message: AgentMessage): void {
   const imageParts = message.parts.filter((p): p is Extract<ContentPart, { type: 'image' }> => p.type === 'image')
+  /*
+    需求:`generate_image` 的产出落成本会话的 draft 附件,地址存在 tool_result 的
+    `output.images` 里。它们必须和用户附件一样在这里转 committed —— 否则 7 天后
+    被当成过期草稿回收,转录里的 `ncw://` 地址从此是一张裂图、模型点名也解析不到。
+    ★ 只收 `ncw://`:截图等内联 data URL 不是文件,绝不能掉进下面「外部路径」那一支。
+    ★ 序号接在 image part 之后:`managed:<index>` 与外部 `<messageId>:<index>` 的既有 id
+    因此一个都不变,重放旧消息仍然幂等。
+  */
+  const toolImageRefs = message.parts.flatMap((p) =>
+    p.type === 'tool_result' ? (p.output.images ?? []).map((image) => image.dataRef).filter((ref) => parseNcwUrl(ref) !== null) : []
+  )
 
   // 受管理的(ncw://)与外部的(绝对路径)分开处理
   const managed: ManagedAttachmentCandidate[] = []
   const external: Array<{ part: Extract<ContentPart, { type: 'image' }>; index: number }> = []
-  imageParts.forEach((part, index) => {
-    const loc = parseNcwUrl(part.dataRef)
-    if (loc === null) {
-      external.push({ part, index })
-      return
-    }
+  const addManaged = (dataRef: string, index: number): void => {
+    const loc = parseNcwUrl(dataRef)
+    if (loc === null) return
 
     // A renderer can construct an otherwise valid ncw:// URL for another
     // session. Never let that URL re-home an attachment into this message;
@@ -989,7 +997,15 @@ function recordMessageAttachments(session: Session, message: AgentMessage): void
     // diverged. Owner and basename are both required before claiming a row.
     const fallback = findAttachmentByOwnerAndFileName(session.id, loc.fileName)
     if (fallback !== undefined) managed.push({ row: fallback, index })
+  }
+  imageParts.forEach((part, index) => {
+    if (parseNcwUrl(part.dataRef) === null) {
+      external.push({ part, index })
+      return
+    }
+    addManaged(part.dataRef, index)
   })
+  toolImageRefs.forEach((ref, offset) => { addManaged(ref, imageParts.length + offset) })
 
   const currentRows = attachmentRowsForMessage(message.id)
   const usedIds = new Set<string>()

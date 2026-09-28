@@ -15,6 +15,7 @@ import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
 import type { ImageGenBridge } from '../image-gen'
+import type { SessionImageStore } from '../session-images'
 import type { InteractFn } from '../interaction-gate'
 import { NETWORK_SWITCH_TOOLS } from '../permission-gate'
 import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
@@ -142,6 +143,12 @@ export interface ToolContext {
    * `runtime.ts` 的装配点。内核仍然零 electron、可单测。
    */
   imageGen?: ImageGenBridge
+  /**
+   * 本会话的图片仓:生成图落成 `ncw://` 会话附件、按地址把图读回字节。
+   * 缺省 = 纯内核测试没装配 —— `generate_image` 退回内联 data URL(回执里不列地址),
+   * `SaveImage` 整体不下发(`isEnabled`)。见 `kernel/session-images.ts` 文件头。
+   */
+  sessionImages?: SessionImageStore
   /**
    * Agent 手上那些 shell(前台停止句柄 + 后台进程)。缺省 = 这个环境里
    * 既停不了单条命令、也起不了后台命令(纯内核测试),`BashOutput` / `KillShell`

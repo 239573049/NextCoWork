@@ -41,10 +41,10 @@ import { attachmentRoot, handleAttachmentRequest } from '../../net/attachment-pr
 import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadAttachment } from '../attachment'
 import { localEnvironment } from '../../environment/local'
 import { nodeHost } from '../../kernel/host'
-import { prepareRequestImages } from '../../kernel/upstream/images'
+import { imageUrlNote, prepareRequestImages } from '../../kernel/upstream/images'
 import { encodeUpstream } from '../../kernel/upstream/codec'
 import { REQUEST } from '../../kernel/upstream/__tests__/openai-fixtures'
-import { userMessage } from '../../../shared/agent/message'
+import { toolResultMessage, userMessage } from '../../../shared/agent/message'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import type { WindowContext } from '../../window/registry'
 
@@ -147,8 +147,12 @@ describe('uploadAttachment', () => {
     const prepared = await prepareRequestImages(request, host, { workspaceId: 'workspace', sessionId }, new AbortController().signal)
     for (const protocol of ['anthropic', 'openai-chat', 'openai-responses'] as const) {
       const encoded = encodeUpstream(protocol, prepared, 'vision-model', 'test-key', { userId: 'workspace', cacheTtl: '5m' })
-      expect(JSON.stringify(encoded.body)).toContain(png.toString('base64'))
-      expect(JSON.stringify(encoded.body)).not.toContain('ncw://')
+      const body = JSON.stringify(encoded.body)
+      expect(body).toContain(png.toString('base64'))
+      // 地址只以图后那行文本出现(让 Agent 能点名这张图);图像块本身必须是字节
+      const note = imageUrlNote(attachment!.url)
+      expect(body).toContain(note)
+      expect(body.split(note).join('')).not.toContain('ncw://')
     }
     expect(request).toEqual(before)
   })
@@ -310,6 +314,30 @@ describe('listSessionAttachments', () => {
     repo.commitAttachmentsByPath([row?.path as string], 'M1', 'S1')
     expect(listSessionAttachments({ sessionId: 'S1' })).toHaveLength(0)
     expect(repo.getAttachmentRow(a.id)?.status).toBe('committed')
+  })
+
+  /*
+    需求:生成图落成本会话 draft 附件,地址只在 tool_result 的 output.images 里。
+    不随消息转 committed 的话,7 天后被当过期草稿回收,转录里那张图从此是裂图。
+  */
+  it('tool_result 里的本会话 ncw 图随消息一起转 committed,内联图与别的会话的图不受影响', () => {
+    repo.ensureSession({ id: 'S1', workspaceId: 'W1', rootPathAtCreation: '/tmp' })
+    const mine = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'generated.png', mime: 'image/png', bytes: bytesOf('G') })
+    const other = uploadAttachment({ scope: 'session', ownerId: 'S2', displayName: 'generated.png', mime: 'image/png', bytes: bytesOf('H') })
+    const message = toolResultMessage('M2', [{
+      type: 'tool_result', callId: 'c1', isError: false,
+      output: { content: 'Generated', images: [
+        { mime: 'image/png', dataRef: mine.url },
+        { mime: 'image/png', dataRef: 'data:image/png;base64,AAAA' },
+        { mime: 'image/png', dataRef: other.url }
+      ] }
+    }], Date.now())
+    repo.commitMessage('S1', message)
+    // 重放同一条消息(编辑重跑 / 恢复)必须幂等
+    repo.commitMessage('S1', message)
+    expect(repo.getAttachmentRow(mine.id)?.status).toBe('committed')
+    expect(repo.getAttachmentRow(other.id)?.status).toBe('draft')
+    expect(listSessionAttachments({ sessionId: 'S1' })).toHaveLength(0)
   })
 })
 

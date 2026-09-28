@@ -34,6 +34,7 @@ import type { Skill } from '../../shared/domain/skill'
 import type { SchedulingBridge } from '../../shared/domain/scheduled'
 import type { ShellBridge } from '../../shared/domain/shell'
 import type { ImageGenBridge } from './image-gen'
+import type { SessionImageStore } from './session-images'
 import type { PlanExecutionContext } from './plan-execution'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
@@ -160,6 +161,12 @@ export interface SessionDeps {
    * `/images/generations` 请求全部留在 `main/kernel/image-gen.ts`。内核零 electron、可单测。
    */
   imageGen?: ImageGenBridge
+  /**
+   * 本会话的图片仓(生成图 → `ncw://` 会话附件;地址 → 字节)。缺省 = 纯内核测试,
+   * 生成图留在内联 data URL、`SaveImage` 不下发。形状与理由同 `imageGen`,
+   * 见 `kernel/session-images.ts` 文件头。
+   */
+  sessionImages?: SessionImageStore
   /**
    * 回合末的一次询问 —— 「这一轮真的可以停了吗」。
    *
@@ -1304,7 +1311,8 @@ export class AgentSession {
       ...(this.deps.proposeGoal === undefined ? {} : { proposeGoal: this.deps.proposeGoal }),
       ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling }),
       ...(this.deps.shells === undefined ? {} : { shells: this.deps.shells }),
-      ...(this.deps.imageGen === undefined ? {} : { imageGen: this.deps.imageGen })
+      ...(this.deps.imageGen === undefined ? {} : { imageGen: this.deps.imageGen }),
+      ...(this.deps.sessionImages === undefined ? {} : { sessionImages: this.deps.sessionImages })
     }
   }
 

@@ -138,6 +138,49 @@ describe('生图卡片 · DOM', () => {
     expect(document.querySelector('[data-testid="lightbox-image"]')?.getAttribute('src')).toBe(img('BB').dataRef)
   })
 
+  it('提示词区:两行装得下时不画「展开」,装不下才画,点了去掉裁切', async () => {
+    const { container, close } = stubDom()
+    const root = createRoot(container)
+    teardown = async () => {
+      await act(async () => root.unmount())
+      close()
+    }
+    const input = { prompt: 'a very long prompt' }
+    const call: ToolCallState = { callId: 'gen', name: 'generate_image', input, status: 'ok', output: { content: 'ok', images: [img('AA')] } }
+    const render = async (): Promise<void> => {
+      await act(async () => root.render(createElement(I18nProvider, {
+        initialLocale: 'zh-CN',
+        children: createElement(ToolCallCard, { call, name: 'generate_image', input })
+      })))
+    }
+    // jsdom 不排版:scrollHeight/clientHeight 恒为 0,即「装得下」
+    await render()
+    expect(container.querySelector('[data-testid="image-gen-prompt"]')?.textContent).toBe('a very long prompt')
+    expect(container.querySelector('[data-testid="image-gen-prompt-toggle"]')).toBeNull()
+    expect(container.querySelector('[data-testid="image-gen-prompt-copy"]')).not.toBeNull()
+
+    await act(async () => root.unmount())
+    const proto = window.HTMLElement.prototype
+    Object.defineProperty(proto, 'scrollHeight', { configurable: true, get: () => 80 })
+    Object.defineProperty(proto, 'clientHeight', { configurable: true, get: () => 40 })
+    const next = createRoot(container)
+    teardown = async () => {
+      await act(async () => next.unmount())
+      close()
+    }
+    await act(async () => next.render(createElement(I18nProvider, {
+      initialLocale: 'zh-CN',
+      children: createElement(ToolCallCard, { call, name: 'generate_image', input })
+    })))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="image-gen-prompt-toggle"]')
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('[data-testid="image-gen-prompt"]')?.className).toContain('line-clamp-2')
+    await act(async () => toggle?.click())
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true')
+    expect(toggle?.textContent).toBe('收起')
+    expect(container.querySelector('[data-testid="image-gen-prompt"]')?.className).not.toContain('line-clamp-2')
+  })
+
   it('★ 一轮收尾、过程折进「用时」之后,生成的图仍在折叠外可见', async () => {
     const { container, close } = stubDom()
     const root = createRoot(container)

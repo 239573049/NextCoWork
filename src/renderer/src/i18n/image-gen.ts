@@ -10,6 +10,7 @@
  *
  * `imageGen.card.*` 是对话里那张生图卡片(`views/chat/ImageGenDetail.tsx`)的文案:
  * 加载格的状态字与读屏标签、成品网格的放大入口、部分失败时的那行说明。
+ * `imageGen.card.prompt*` 是卡片底部提示词区的标签、展开/收起与复制按钮。
  */
 export const imageGenZh = {
   'imageGen.enabled': '对话生图',
@@ -26,7 +27,13 @@ export const imageGenZh = {
   'imageGen.card.editing': '编辑中',
   'imageGen.card.slot': '第 {index}/{total} 张',
   'imageGen.card.open': '放大查看第 {index} 张图片',
-  'imageGen.card.partial': '成功生成 {done}/{total} 张'
+  'imageGen.card.partial': '成功生成 {done}/{total} 张',
+  'imageGen.card.prompt': '提示词',
+  'imageGen.card.promptExpand': '展开',
+  'imageGen.card.promptCollapse': '收起',
+  'imageGen.card.promptCopy': '复制提示词',
+  'imageGen.card.promptCopied': '已复制',
+  'imageGen.card.promptCopyFailed': '复制失败'
 }
 
 export const imageGenEn: Record<keyof typeof imageGenZh, string> = {
@@ -44,5 +51,11 @@ export const imageGenEn: Record<keyof typeof imageGenZh, string> = {
   'imageGen.card.editing': 'Editing',
   'imageGen.card.slot': 'Image {index} of {total}',
   'imageGen.card.open': 'View image {index}',
-  'imageGen.card.partial': '{done} of {total} generated'
+  'imageGen.card.partial': '{done} of {total} generated',
+  'imageGen.card.prompt': 'Prompt',
+  'imageGen.card.promptExpand': 'Show more',
+  'imageGen.card.promptCollapse': 'Show less',
+  'imageGen.card.promptCopy': 'Copy prompt',
+  'imageGen.card.promptCopied': 'Copied',
+  'imageGen.card.promptCopyFailed': 'Copy failed'
 }

@@ -14,6 +14,7 @@ import type { AgentMessage } from '../../../../../shared/agent/message'
 import type { ToolProgress } from '../../../../../shared/agent/tool'
 import type { ImageGenBridge, ImageGenOptions } from '../../../image-gen'
 import { nodeHost } from '../../../host'
+import type { SessionImageStore } from '../../../session-images'
 import type { ToolContext } from '../../registry'
 import { generateImageTool } from '../image'
 
@@ -301,5 +302,71 @@ describe('generate_image · 改图(URL 源)', () => {
     expect(result.isError).toBe(true)
     expect(result.output.content).toMatch(/not a recognized image/u)
     expect(fake.edit).not.toHaveBeenCalled()
+  })
+})
+
+/*
+  需求:生成图要能被点名(改图的 `image`、SaveImage 的 `url`)。地址必须写进回执正文 ——
+  模型读不到 `output.images` 里的 dataRef。
+*/
+describe('generate_image · 会话图片地址', () => {
+  function store(over: Partial<SessionImageStore> = {}): SessionImageStore {
+    let n = 0
+    return {
+      save: vi.fn(async (image) => {
+        n += 1
+        return { mime: image.mime, dataRef: `ncw://attachments/sessions/s1/img${String(n)}.png` }
+      }),
+      read: vi.fn(async () => ({ mime: 'image/png' as const, bytes: new Uint8Array([1]) })),
+      ...over
+    }
+  }
+
+  it('每张图落成会话附件:output.images 存 ncw 地址,回执逐张列出', async () => {
+    const images = store()
+    const fake = bridge({
+      generate: vi.fn(async () => ({
+        images: [
+          { mime: 'image/png' as const, dataRef: 'data:image/png;base64,AAAA' },
+          { mime: 'image/png' as const, dataRef: 'data:image/png;base64,BBBB' }
+        ],
+        model: 'gpt-image-2', providerName: 'OpenAI', requested: 2, failures: []
+      }))
+    })
+    const result = await generateImageTool.execute({ prompt: 'x', n: 2 }, ctx({ imageGen: fake, sessionImages: images }))
+    expect(result.isError).toBe(false)
+    expect(result.output.images).toEqual([
+      { mime: 'image/png', dataRef: 'ncw://attachments/sessions/s1/img1.png' },
+      { mime: 'image/png', dataRef: 'ncw://attachments/sessions/s1/img2.png' }
+    ])
+    expect(result.output.content).toContain('- ncw://attachments/sessions/s1/img1.png\n- ncw://attachments/sessions/s1/img2.png')
+    expect(result.output.content).toContain('SaveImage')
+  })
+
+  it('存不下来的那张退回内联,调用仍成功,回执写明它没有地址和原因', async () => {
+    const images = store({ save: vi.fn(async () => { throw new Error('disk full') }) })
+    const result = await generateImageTool.execute({ prompt: 'x' }, ctx({ imageGen: bridge(), sessionImages: images }))
+    expect(result.isError).toBe(false)
+    expect(result.output.images).toEqual([{ mime: 'image/png', dataRef: 'data:image/png;base64,AAAA' }])
+    expect(result.output.content).toContain('1 image(s) could not be stored and have no URL: disk full')
+    expect(result.output.content).not.toContain('Image URLs')
+  })
+
+  it('image 传 ncw 地址:不读文件,原样交给桥的 edit 去做会话归属校验', async () => {
+    const fake = bridge()
+    const host = nodeHost()
+    const read = vi.spyOn(host.fs, 'readFileBytes')
+    const result = await generateImageTool.execute(
+      { prompt: 'noir', image: 'ncw://attachments/sessions/s1/photo.jpg' },
+      ctx({ imageGen: fake, host })
+    )
+    expect(result.isError).toBe(false)
+    expect(fake.edit).toHaveBeenCalledWith(
+      'noir',
+      { mime: 'image/jpeg', dataRef: 'ncw://attachments/sessions/s1/photo.jpg' },
+      expect.any(AbortSignal),
+      expect.objectContaining({ count: 1 })
+    )
+    expect(read).not.toHaveBeenCalled()
   })
 })

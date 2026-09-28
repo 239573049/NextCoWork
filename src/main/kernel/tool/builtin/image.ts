@@ -4,10 +4,14 @@
  * 需求:设置页「图片生成」tab 配好的生图供应商,要在对话里真的能用:
  * 1. 文生图:只给 `prompt`;
  * 2. 改图:`image: "latest"`(对话里最近一张图——用户刚上传的附件、或上一轮
- *    自己生成的那张)、`image: <工作区图片路径>`,或 `image: <http(s) 图片 URL>`。
+ *    自己生成的那张)、`image: <ncw:// 会话图片地址>`、`image: <工作区图片路径>`,
+ *    或 `image: <http(s) 图片 URL>`。
  * 3. 一次多张:`n`(1–4)。用户要「几个备选 / 几种风格」时一次调用出齐,
  *    而不是让模型连调四次 —— 四次调用是四张各自折叠的卡片,也没法并排挑。
  *    每到手一张就经 `ctx.emit` 推一张给生成期的卡片(`ToolProgress.image`)。
+ * 4. 生成图要能被**点名**:每张图经 `ctx.sessionImages` 落成本会话附件,
+ *    `output.images` 存 `ncw://` 地址,回执逐张列出 —— 模型拿它改图、或交给
+ *    `SaveImage` 写进工作区(见 `kernel/session-images.ts`)。
  *
  * 这个工具只负责「把 prompt 和源图递出去、把图接回来」;用哪个模型、哪把密钥、
  * `/images/edits` 的形状兼容、`ncw://` 附件的安全解析全在桥里
@@ -20,17 +24,19 @@
  * 同步谓词答不了,而调用时那句 `no API key` 本身就是可行动的反馈
  * (理由全文见 `ImageGenBridge.available` 上那段)。
  *
- * ★ `readOnly: true`:它不写盘、不改任何工作区状态,产出只挂在这条工具结果上
+ * ★ `readOnly: true`:它不写工作区、不改任何工作区状态,产出只挂在这条工具结果上
  * —— 与 `browser_screenshot` / `visualize_show_widget` 同一档(代价是权限闸门
- * 对它一路放行)。原先还有「联网开关仍然管得住它」这层兜底;用户把「联网搜索」
+ * 对它一路放行)。生成图落进的是**应用自己的会话附件存储**(与用户粘贴的图同一处,
+ * 随会话删除),不是工作区,所以这一档不变;写进工作区是 `SaveImage` 的事,它不是只读。
+ * 原先还有「联网开关仍然管得住它」这层兜底;用户把「联网搜索」
  * 收窄成只管网页搜索与抓取之后,管住它的是它**自己的**开关
  * (`AppSettings.imageGenerationEnabled`,经桥的 `available()` / `enabled()` 生效)。
  */
 import { z } from 'zod'
-import type { AgentMessage } from '../../../../shared/agent/message'
+import type { AgentMessage, ToolOutputImage } from '../../../../shared/agent/message'
 import type { ToolResult } from '../../../../shared/agent/tool'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
-import { imageMimeOfBytes, MAX_ATTACHMENT_BYTES } from '../../../../shared/domain/attachment'
+import { imageMimeOfBytes, MAX_ATTACHMENT_BYTES, mimeOfExt, NCW_SCHEME } from '../../../../shared/domain/attachment'
 import { MAX_IMAGE_COUNT } from '../../../../shared/domain/image-count'
 import { defineTool } from '../define'
 import { downloadImage, type ImageGenOptions, type ImageSource } from '../../image-gen'
@@ -47,8 +53,8 @@ const GenerateImageInput = z.object({
     .min(1)
     .optional()
     .describe(
-      'Which image to edit: "latest" for the most recent image in this conversation, a workspace file path, ' +
-        'or an http(s) URL of an image. Omit it to generate a new image from the prompt alone.'
+      'Which image to edit: "latest" for the most recent image in this conversation, an ncw:// image URL shown in ' +
+        'this conversation, a workspace file path, or an http(s) URL of an image. Omit it to generate a new image from the prompt alone.'
     ),
   n: z
     .number()
@@ -68,9 +74,11 @@ const GenerateImageInput = z.object({
  * 需求:模型**看不到**图片的 dataRef(图是以图像块发给它的,转录里的引用字符串
  * 不进它的上下文),所以它没法「点名」某张图 —— 只能由我们替它认最近那张。
  * 用户说「把这张改成黑白」时,「这张」几乎总是刚发来的附件或刚生成的那张。
+ * (现在 `ncw://` 图会在上下文里附一行地址、生成图的地址写在回执里,模型**能**点名了;
+ * `latest` 仍保留,因为「刚才那张」是最常见的说法,且旧转录里的内联图没有地址。)
  *
  * ★ 两种来源都要认:消息里的 `image` part(用户附件,可能是 `ncw://` 未解析引用)
- * 和工具结果里的 `output.images`(截图 / 上一轮生图,内联 data URL)。
+ * 和工具结果里的 `output.images`(截图是内联 data URL;生成图是 `ncw://`,旧转录里是内联)。
  * 从**后往前**扫 —— 取到的就是「刚才那张」。
  */
 function latestImage(messages: readonly AgentMessage[] | undefined): ImageSource | null {
@@ -121,13 +129,14 @@ const generateImageTool: ToolRegistration = defineTool({
   internalId: 'generate_image',
   description:
     'Generate an image from a text prompt, or edit an existing one, using the image provider configured in this app ' +
-    '(Settings > Models > Image generation). The resulting image is returned inline in the tool result so the user can see it.\n' +
+    '(Settings > Models > Image generation). The resulting image is returned inline in the tool result so the user can see it, ' +
+    'and the result text lists an ncw:// URL for each image.\n' +
     '- Generate: pass only `prompt`.\n' +
-    '- Edit: pass `image` as "latest" to modify the most recent image in this conversation, a workspace file path, or an image URL.\n' +
+    '- Edit: pass `image` as "latest" to modify the most recent image in this conversation, an ncw:// image URL, a workspace file path, or an image URL.\n' +
     '- Several options: pass `n` (up to 4) to get multiple images from one call instead of calling the tool repeatedly.\n' +
     'A URL that cannot be downloaded is an error — the tool will not fall back to generating a new image.\n' +
     'Use it whenever the user asks to draw, paint, illustrate, render, generate, or modify a picture, photo, or artwork. ' +
-    'It does not write files — use Write when the user wants the image saved to disk.',
+    'It does not write into the workspace — use SaveImage with the ncw:// URL when the user wants the image saved as a file.',
   schema: GenerateImageInput,
   readOnly: true,
   destructive: false,
@@ -153,6 +162,14 @@ const generateImageTool: ToolRegistration = defineTool({
           return toolFail('There is no image in this conversation to edit. Ask the user to attach one, or pass a workspace file path or an image URL.')
         }
         source = latest
+      } else if (input.image.startsWith(`${NCW_SCHEME}://`)) {
+        /*
+          需求:模型把上下文里看到的 `ncw://` 地址原样传回来,改的就是那一张。
+          这里**不读文件** —— 源图原样交给 `edit()`,由桥的 `resolveImage`
+          (= `resolveImageDataRef`)做会话归属与路径围栏;在这儿先读一遍等于多一条
+          绕过那套校验的路。mime 只是按扩展名给的猜测,解析时以字节为准。
+        */
+        source = { mime: mimeOfExt(input.image), dataRef: input.image }
       } else if (input.image.startsWith('http://') || input.image.startsWith('https://')) {
         /*
           ★ 需求:模型传了图片 URL 就是要改**这一张** —— 下载失败 / 404 / 不是图片
@@ -203,11 +220,51 @@ const generateImageTool: ToolRegistration = defineTool({
     const failed = result.failures.length === 0
       ? ''
       : ` ${String(result.failures.length)} of ${String(result.requested)} requested images failed: ${[...new Set(result.failures)].join('; ')}`
+    const stored = await storeImages(result.images, ctx)
     return toolOk(
-      `${action} ${String(got)} ${noun} with ${result.model} via ${result.providerName}. ${attached}${failed}`,
-      { images: result.images }
+      `${action} ${String(got)} ${noun} with ${result.model} via ${result.providerName}. ${attached}${failed}${stored.note}`,
+      { images: stored.images }
     )
   }
 })
+
+/**
+ * 生成图 → 本会话附件,并写出回执里那段地址清单。
+ *
+ * 需求:模型要能在后续调用里点名这几张图(改图的 `image`、`SaveImage` 的 `url`)。
+ * 它看不到 dataRef,所以地址必须**写进回执正文** —— 只换 `output.images` 的话,
+ * 地址存在转录里,模型却一个字也读不到。
+ *
+ * ★ 存不下来的那张**退回内联 data URL**,不让整次调用失败:图已经生成、已经计费、
+ * 用户已经在卡片上看见了。回执里写明哪几张没有地址、为什么 —— 否则模型会对着
+ * 一张没有地址的图编一个出来。没装配仓(纯内核测试)时一律内联、不列地址。
+ */
+async function storeImages(
+  images: readonly ToolOutputImage[],
+  ctx: ToolContext
+): Promise<{ images: ToolOutputImage[]; note: string }> {
+  const store = ctx.sessionImages
+  if (store === undefined || images.length === 0) return { images: [...images], note: '' }
+  const out: ToolOutputImage[] = []
+  const urls: string[] = []
+  const reasons: string[] = []
+  for (const image of images) {
+    try {
+      const saved = await store.save(image)
+      out.push(saved)
+      urls.push(saved.dataRef)
+    } catch (error) {
+      out.push(image)
+      reasons.push(error instanceof Error ? error.message : String(error))
+    }
+  }
+  const list = urls.length === 0
+    ? ''
+    : `\nImage URLs (pass one as \`image\` to edit it, or to SaveImage to write it into the workspace):\n${urls.map((url) => `- ${url}`).join('\n')}`
+  const lost = reasons.length === 0
+    ? ''
+    : `\n${String(reasons.length)} image(s) could not be stored and have no URL: ${[...new Set(reasons)].join('; ')}`
+  return { images: out, note: `${list}${lost}` }
+}
 
 export { generateImageTool }

@@ -85,6 +85,24 @@ export type ToolShape =
    * ★ 它的产物不随过程折叠收起 —— 见 `isPinnedShape`。
    */
   | 'image'
+  /**
+   * 浏览器页面的截图(`browser_screenshot`)。
+   *
+   * 需求:截图是**模型看得见、用户看不见**的那一类结果 —— 它落在 `output.images`
+   * 里,而这一档原先没有形态,于是整族浏览器工具落进 `external` 的通用 JSON 渲染器,
+   * 那里根本不读 `output.images`。表现为「让 Agent 去看看这个页面长什么样」,
+   * 对话里只有一行英文回执,图只进了模型的上下文。
+   *
+   * ★ 与 `image` 分开,虽然两者展开后都是「一张图」:判据是生命周期不同,
+   * 而形态类的判据本来就是「用哪种渲染器」而不是「产物是不是图」。
+   * 生图那张卡要摆 N 格占位、逐张换图、底下挂提示词区(入参里有 `n` 与 `prompt`);
+   * 截图**没有生成期、没有提示词**,只有一帧视口 —— 复用生图卡的话,
+   * 它会显示「生成中」并在图旁边留一块永远空着的提示词区。
+   *
+   * ★ 同样不进过程折叠(见 `isPinnedShape`):它是「那个页面此刻长什么样」的
+   * 唯一证据,而 Agent 一大半的浏览器动作(text/click)的结果都是**它**。
+   */
+  | 'screenshot'
   | 'external'
 
 /**
@@ -201,6 +219,31 @@ export const PRESENTER_COPY_KEYS = [
   'chat.tool.title.generateImage',
   // 改图那半:入参带了源图(`image`)就是它,否则是上面那个
   'chat.tool.title.editImage',
+  // 把对话里的图写进工作区(SaveImage)。行的主语是目标文件,同 Write
+  'chat.tool.title.saveImage',
+  /*
+    浏览器那一族的动作标签(`browser_*`)。
+    ★ 需求:这一族此前**全都**没登记,兜底路径把 internalId 的可读化结果直接画到行里
+    —— 中文界面上是一列「browser click / browser type / browser screenshot」。
+    这一族也是「新增内置工具忘了登记展示规则」那条不变式唯一没守住的缺口
+    (清单在 `__tests__/tool-presenter.test.ts` 的 BUILTIN_IDS,原先把它们整族漏了)。
+  */
+  'chat.tool.title.browserOpen',
+  'chat.tool.title.browserNavigate',
+  'chat.tool.title.browserSnapshot',
+  'chat.tool.title.browserScreenshot',
+  'chat.tool.title.browserClick',
+  'chat.tool.title.browserType',
+  'chat.tool.title.browserPress',
+  'chat.tool.title.browserSelect',
+  'chat.tool.title.browserScroll',
+  'chat.tool.title.browserCuaClick',
+  'chat.tool.title.browserCuaDrag',
+  'chat.tool.title.browserTabs',
+  'chat.tool.title.browserUserTabs',
+  'chat.tool.title.browserClaim',
+  'chat.tool.title.browserProfiles',
+  'chat.tool.title.browserClose',
   // 认不出工具名时的最终兜底标题
   'chat.tool.fallback',
   // 折叠态右侧摘要
@@ -608,10 +651,54 @@ function fileLine(key: PresenterCopyKey, path: string): ToolLine {
   return { label, target: base(path), context: dirOf(path), path }
 }
 
-/** 动作 + 一个领域值(命令、模式、id、查询词)。`mono` 决定它是不是等宽。 */
+/**
+ * 动作 + 一个领域值(命令、模式、id、查询词)。`mono` 决定它是不是等宽。
+ */
 function valueLine(key: PresenterCopyKey, target: string, mono = false): ToolLine {
   const label = presenterCopy(key)
   return target === '' ? { label } : { label, target, mono }
+}
+
+/**
+ * 一条**浏览器动作行**:动作 + 主语 + 所属标签页。
+ *
+ * 需求:一个工作区里可以同时开着几个页面(`browser_tabs` 会列出来),而每一次
+ * 点击/输入都是「对**哪一个**页面做的」—— 行里不写这一格的话,转录里连着出现的
+ * 「点击 e12」指代不明,而同一时刻用户屏幕上可能开着三个 tab。
+ *
+ * ★ 主语一律 `mono`:ref(`e12`)、按键组合、坐标、选项值都是**标识**不是句子。
+ * ★ 标签页落在 `context` 那一格(次要、可省)—— 和文件行里「目录」是同一个位置。
+ */
+function browserLine(key: PresenterCopyKey, target: string, tabId: string): ToolLine {
+  return {
+    ...valueLine(key, target, true),
+    ...(tabId === '' ? {} : { context: tabId })
+  }
+}
+
+/** 字符串数组字段的安全拼接 —— 按键组合(`["Control","Enter"]`)、选中的选项值。 */
+function listOf(input: unknown, key: string, sep: string): string {
+  return pickArray(input, key)
+    .filter((v): v is string => typeof v === 'string' && v !== '')
+    .join(sep)
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+/**
+ * `(x, y)` 坐标那一格。**两个数都到齐才给** —— 半个坐标比没有更误导(同 `fileLine`
+ * 对半个路径的处理),而流式半截 JSON 里最常见的残留正是一个写了一半的数。
+ */
+function pointText(value: unknown): string {
+  const source = recordOf(value)
+  const x = source?.['x']
+  const y = source?.['y']
+  if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return ''
+  return `(${String(Math.round(x))}, ${String(Math.round(y))})`
 }
 
 /**
@@ -839,6 +926,121 @@ const REGISTRY: Record<string, ToolPresenter> = {
         pick(i, 'image') === '' ? 'chat.tool.title.generateImage' : 'chat.tool.title.editImage',
         clip(pick(i, 'prompt'), 48)
       )
+  },
+  /*
+    把对话里的图写进工作区。形态 `mutate`:它和 `Write` 一样是「改了哪个文件」,行的主语是
+    目标文件(`file_path`),不是那串 `ncw://` 地址 —— 地址对人没有信息量。
+    ★ 不给 stats:写的是二进制,没有「行」可数;硬报 `+0` 等于说这次什么都没写。
+  */
+  SaveImage: {
+    shape: 'mutate',
+    line: (i) => fileLine('chat.tool.title.saveImage', pick(i, 'file_path'))
+  },
+  /*
+    浏览器那一族(16 个 `browser_*`)。整族此前**没有任何登记**,于是每一行都走
+    兜底路径 `humanize(internalId)` —— 界面上一列 `browser click` / `browser
+    screenshot`。这一组现在只做两件事:给出中文动作标签,以及**行的主语**。
+
+    ★ 形态怎么分的(判据始终是「展开后用哪种渲染器」,不是功能领域):
+      · 导航类(`open` / `navigate` / `claim` / `tabs` / `user_tabs` / `profiles` /
+        `close`)→ `network`:它们的结果都是「一份关于页面的信息」,`NetworkDetail`
+        给的正是 URL + 正文,和 WebFetch 落在同一档;
+      · 动作类(`click` / `type` / `press` / `select` / `scroll` / 两个 `cua_*`)
+        → `network` 同上(结果是页面状态的变化说明);
+      · 页面快照(`snapshot`)→ `read`(结果是一棵可逐行读的树);
+      · **截图(`screenshot`)→ 专属的 `screenshot` 形态**,它是这一族里唯一
+        产出**图**的:原先它落进 `external` 的通用 JSON 渲染器,而那里根本不读
+        `output.images` —— 表现为模型看得见那张图、用户一个字也看不见。
+
+    ★ 主语尽量取**人认得的东西**:导航取主机名(同 WebFetch),动作取 ref / 按键 /
+    坐标,标签页落在 `context` 那一格。`tabId` 单独一格是因为一个工作区里可以同时
+    开着几个页面,「点了哪一个」不写出来就指代不明。
+
+    ★ **`browser_type` 刻意不回显输入的文字**:Agent 常被要求往表单里填账号密码,
+    而转录是会被翻、会被导出的。行里只留 ref,完整入参仍在展开区(那是用户主动
+    点开的,和「一屏行里随手可见」不是一回事)。
+  */
+  browser_open: {
+    shape: 'network',
+    line: (i) => valueLine('chat.tool.title.browserOpen', hostOf(pick(i, 'url')))
+  },
+  browser_navigate: {
+    shape: 'network',
+    line: (i) => valueLine('chat.tool.title.browserNavigate', hostOf(pick(i, 'url')))
+  },
+  browser_snapshot: {
+    shape: 'read',
+    line: (i) => browserLine('chat.tool.title.browserSnapshot', pick(i, 'tabId'), ''),
+    // 快照的行数就是这棵树的规模 —— 一个几千行的快照值得在折叠态就看出「别展开」
+    summary: readSummary
+  },
+  browser_screenshot: {
+    shape: 'screenshot',
+    line: (i) => browserLine('chat.tool.title.browserScreenshot', pick(i, 'tabId'), '')
+  },
+  browser_click: {
+    shape: 'network',
+    line: (i) => browserLine('chat.tool.title.browserClick', pick(i, 'ref'), pick(i, 'tabId'))
+  },
+  browser_type: {
+    shape: 'network',
+    line: (i) => browserLine('chat.tool.title.browserType', pick(i, 'ref'), pick(i, 'tabId'))
+  },
+  browser_press: {
+    shape: 'network',
+    line: (i) => browserLine('chat.tool.title.browserPress', listOf(i, 'keys', '+'), pick(i, 'tabId'))
+  },
+  browser_select: {
+    shape: 'network',
+    // 选中的值比 ref 有意义(用户要核对的就是「选了什么」),ref 留在展开区
+    line: (i) => browserLine('chat.tool.title.browserSelect', clip(listOf(i, 'values', ' · '), 40), pick(i, 'tabId'))
+  },
+  browser_scroll: {
+    shape: 'network',
+    line: (i) => {
+      const y = recordOf(i)?.['scrollY']
+      const amount = typeof y === 'number' && Number.isFinite(y) ? `y=${String(Math.round(y))}` : ''
+      return browserLine('chat.tool.title.browserScroll', amount, pick(i, 'tabId'))
+    }
+  },
+  browser_cua_click: {
+    shape: 'network',
+    // 坐标还没流到时退回「只有标签」,不画半个 `(12, )`
+    line: (i) => browserLine('chat.tool.title.browserCuaClick', pointText(recordOf(i)), pick(i, 'tabId'))
+  },
+  browser_cua_drag: {
+    shape: 'network',
+    line: (i) => {
+      const path = pickArray(i, 'path')
+      const from = pointText(recordOf(path[0]))
+      const to = pointText(recordOf(path[path.length - 1]))
+      // 两端都认得出来才画箭头:半个坐标连不成一条路径
+      const points = from === '' || to === '' ? '' : `${from} → ${to}`
+      return browserLine('chat.tool.title.browserCuaDrag', points, pick(i, 'tabId'))
+    }
+  },
+  browser_tabs: {
+    shape: 'network',
+    line: () => ({ label: presenterCopy('chat.tool.title.browserTabs') }),
+    summary: lsSummary
+  },
+  browser_user_tabs: {
+    shape: 'network',
+    line: () => ({ label: presenterCopy('chat.tool.title.browserUserTabs') }),
+    summary: lsSummary
+  },
+  browser_claim: {
+    shape: 'network',
+    line: (i) => browserLine('chat.tool.title.browserClaim', pick(i, 'tabId'), '')
+  },
+  browser_profiles: {
+    shape: 'network',
+    line: () => ({ label: presenterCopy('chat.tool.title.browserProfiles') }),
+    summary: lsSummary
+  },
+  browser_close: {
+    shape: 'network',
+    line: (i) => browserLine('chat.tool.title.browserClose', pick(i, 'tabId'), '')
   }
 }
 
@@ -902,6 +1104,8 @@ export function isTodoListTool(name: string): boolean {
  * 忘了写的代价是「新产物类工具的结果被折叠吞掉」,而那不会有任何报错。
  * ★ `widget` 暂为 false:可视化卡片目前按原行为留在过程段里(它的默认展开由
  * `parts.tsx` 自己判),要不要一并提出来是另一个产品决定。
+ * ★ `screenshot` 为 true,理由与 `image` 同一句但更强一层:截图**没有正文**
+ * —— 图就是这次调用的全部结果,折进过程段等于这次调用在界面上只剩下一个标题。
  */
 const PINNED_SHAPES: Record<ToolShape, boolean> = {
   reasoning: false,
@@ -914,6 +1118,7 @@ const PINNED_SHAPES: Record<ToolShape, boolean> = {
   interaction: false,
   widget: false,
   image: true,
+  screenshot: true,
   external: false
 }
 

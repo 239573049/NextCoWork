@@ -33,7 +33,9 @@ import { userMessage } from '../../../shared/agent/message'
 import type { ProviderStreamEvent } from '../../../shared/agent/stream'
 import type { ThinkingLevel } from '../../../shared/agent/run-request'
 import { messagesForModel, type CompactBoundary } from '../../../shared/agent/compaction'
+import { parseNcwUrl } from '../../../shared/domain/attachment'
 import { isAbortError } from '../abort'
+import { imageUrlNote } from '../upstream/images'
 import { estimateMessages, estimateTokens } from '../context-assembler'
 import { buildPostCompactAttachments, type AttachmentToolNames } from './attachments'
 import { compactPrompt, continuationText, formatCompactSummary } from './prompt'
@@ -242,7 +244,11 @@ export function prepareForSummary(history: readonly AgentMessage[]): AgentMessag
     for (const part of message.parts) {
       if (part.type === 'thinking') continue
       if (part.type === 'image') {
-        parts.push({ type: 'text', text: '[image]' })
+        /*
+          托管图(`ncw://`)占位里带上地址:摘要是压缩后模型唯一的记忆,
+          地址丢了,它就再也点不了名(改图、`SaveImage`)。内联图没有地址可带。
+        */
+        parts.push({ type: 'text', text: parseNcwUrl(part.dataRef) === null ? '[image]' : `[image] ${imageUrlNote(part.dataRef)}` })
         continue
       }
       if (part.type === 'tool_result' && part.output.images !== undefined) {

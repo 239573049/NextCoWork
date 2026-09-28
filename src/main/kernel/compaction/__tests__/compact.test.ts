@@ -263,6 +263,21 @@ describe('prepareForSummary', () => {
     expect(JSON.stringify(out)).toContain('[image]')
   })
 
+  /** 摘要是压缩后模型唯一的记忆:托管图的地址丢了,它就再也点不了名(改图、SaveImage)。 */
+  it('ncw 托管图的占位带上地址,内联图只留 [image]', () => {
+    const url = 'ncw://attachments/sessions/s1/01ABC.png'
+    const out = prepareForSummary([
+      userMessage('u1', [
+        { type: 'image', mime: 'image/png', dataRef: url },
+        { type: 'image', mime: 'image/png', dataRef: 'data:image/png;base64,AAAA' }
+      ], NOW)
+    ])
+    expect(out[0]?.parts).toEqual([
+      { type: 'text', text: `[image] [Image URL: ${url}]` },
+      { type: 'text', text: '[image]' }
+    ])
+  })
+
   /** 剥完变成空消息的整条丢掉 —— 一条 parts 为空的消息有的上游直接判非法。 */
   it('只含思考块的消息被整条去掉', () => {
     const out = prepareForSummary([

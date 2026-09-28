@@ -91,7 +91,13 @@ export const agentZh = {
   'chat.tool.group.interaction': '等你表态 {count} 次',
   'chat.tool.group.widget': '画了 {count} 张图',
   'chat.tool.group.image': '生成了 {count} 次图片',
+  // 页面截图(browser_screenshot)。它不进过程段(见 isPinnedShape),但一个组里
+  // 仍可能混进它(卡片还没提交、或用户手动展开了工作区)—— 少了这一条,
+  // 那个组的标题会显示成 key 本身(`ToolTimeline` 的 GROUP_TITLE_KEYS 钉着完整性)。
+  'chat.tool.group.screenshot': '截了 {count} 张页面图',
   'chat.tool.group.external': '调用了 {count} 个外部工具',
+  // 截图卡片在图还没到时的等待文案(见 views/chat/ScreenshotDetail.tsx)
+  'chat.screenshot.capturing': '正在截取页面…',
   'chat.workspace.toolCount': '{count} 个工具',
   'chat.workspace.totalTime': '累计 {duration}',
   'chat.workspace.fileChanges': '{count} 个文件变更',
@@ -276,7 +282,9 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.tool.group.interaction': '{count} times your input was needed',
   'chat.tool.group.widget': '{count} visuals drawn',
   'chat.tool.group.image': '{count} image generations',
+  'chat.tool.group.screenshot': '{count} page screenshots',
   'chat.tool.group.external': '{count} external tools called',
+  'chat.screenshot.capturing': 'Capturing the page…',
   'chat.workspace.toolCount': '{count} tools',
   'chat.workspace.totalTime': '{duration} cumulative',
   'chat.workspace.fileChanges': '{count} file changes',

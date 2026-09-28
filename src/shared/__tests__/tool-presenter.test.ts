@@ -331,7 +331,32 @@ describe('注册表完整性', () => {
     'visualize_read_me',
     'visualize_show_widget',
     // 对话内生图 —— `image` 形态(专属图片卡),行的主语是 prompt 片段
-    'generate_image'
+    'generate_image',
+    // 把对话里的图写进工作区 —— `mutate` 形态,行的主语是目标文件
+    'SaveImage',
+    /*
+      浏览器那一族(16 个 `browser_*`)。★ 整族此前**一个都没登记**,于是每一行
+      都落进 `humanize(internalId)` 的可读名兜底 —— 中文界面上一列 `browser click` /
+      `browser screenshot`。这是「新增内置工具忘了登记展示规则」那条不变式
+      **唯一没守住的缺口**,把清单补全正是为了让这里重新变成一道闸门。
+      形态怎么分的写在 `shared/domain/tool-presenter.ts` 的浏览器那一段。
+    */
+    'browser_open',
+    'browser_navigate',
+    'browser_snapshot',
+    'browser_screenshot',
+    'browser_click',
+    'browser_type',
+    'browser_press',
+    'browser_select',
+    'browser_scroll',
+    'browser_cua_click',
+    'browser_cua_drag',
+    'browser_tabs',
+    'browser_user_tabs',
+    'browser_claim',
+    'browser_profiles',
+    'browser_close'
   ]
 
   it('每个内置工具都在注册表里', () => {
@@ -342,13 +367,31 @@ describe('注册表完整性', () => {
   /*
     ★ 生图原先归在 `network`,而 network 的详情渲染器成功时只画 output.content ——
     图在 output.images 里,界面上一张都看不到。形态退回 network 就是这个回归。
+    ★ 截图(`browser_screenshot`)同理,但它先前连形态都没有,整族落进 `external`
+    的通用 JSON 渲染器 —— 那里同样不读 `output.images`。以下是这两档的回归线。
   */
-  it('generate_image 是 image 形态,且它是唯一不随过程折叠的形态', () => {
+  it('image 与 screenshot 是「产物即回答」的形态,其余形态都随过程折叠', () => {
     expect(presenterOf('generate_image').shape).toBe('image')
+    expect(presenterOf('browser_screenshot').shape).toBe('screenshot')
     expect(isPinnedShape('image')).toBe(true)
+    expect(isPinnedShape('screenshot')).toBe(true)
     for (const shape of ['read', 'mutate', 'search', 'command', 'network', 'orchestration', 'interaction', 'widget', 'external', 'reasoning'] as const) {
       expect(isPinnedShape(shape), shape).toBe(false)
     }
+  })
+
+  /*
+    ★ 截图是这一族里唯一产出**图**的那个,其余 15 个的结果都是文字。
+    形态给错了不会报错,只表现为「模型看得见那张图、用户一个字也看不见」——
+    所以这里连带钉住它的行主语(tabId)与标签都非空。
+  */
+  it('browser_screenshot 的行报出 tabId,且不落进 external 的通用 JSON', () => {
+    const p = presenterOf('browser_screenshot')
+    expect(p.shape).toBe('screenshot')
+    expect(p.line({ tabId: 'tab-2' })).toMatchObject({ target: 'tab-2' })
+    // 参数还在流(半截 JSON)时仍然给得出标签,不留半个 tabId
+    expect(p.line('{"tabI').target).toBeUndefined()
+    expect(p.line('{"tabI').label).not.toBe('')
   })
 
   it('注册表里没有多余的键', () => {

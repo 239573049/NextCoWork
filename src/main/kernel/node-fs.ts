@@ -95,6 +95,14 @@ export function nodeFs(): KernelFs {
       } catch {
         return false
       }
+    },
+
+    /**
+     * 需求:`SaveImage` 在本地工作区写图片字节。`exclusive` 映射到 `wx`,
+     * 让「不覆盖」由文件系统原子地判定,而不是先 exists 再写(两步之间可能被抢先)。
+     */
+    async writeBytes(abs, bytes, options = {}) {
+      await fsp.writeFile(abs, bytes, { flag: options.exclusive === true ? 'wx' : 'w', ...(options.mode === undefined ? {} : { mode: options.mode }) })
     }
   }
 }

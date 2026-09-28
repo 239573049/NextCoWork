@@ -35,6 +35,7 @@ import { scheduledTaskTools } from './scheduled'
 import { enterPlanModeTool, exitPlanModeTool } from './plan-file'
 import { visualizeReadMeTool, visualizeShowWidgetTool } from './visualize'
 import { generateImageTool } from './image'
+import { saveImageTool } from './save-image'
 
 /**
  * 代码里写死的那一批。**只有这张表保证顺序**(见文件头 echo 那条),
@@ -73,6 +74,12 @@ function coreTools(): ToolRegistration[] {
       ★ 它有自己的 `isEnabled`(没配生图模型就整体不下发),见 `image.ts` 文件头。
     */
     generateImageTool,
+    /*
+      把对话里的图(用户附件 / 生成图的 `ncw://` 地址)写进工作区。紧跟生图:
+      它是「画完之后存下来」那一步。顺序上仍然只有 echo 那条约束(见文件头)。
+      ★ 它也有自己的 `isEnabled`(宿主写不了二进制就不下发),见 `save-image.ts` 文件头。
+    */
+    saveImageTool,
     /*
       ★ `Task` 是唯一一个**每次现造**的内置工具:它的 description 里逐字带着
       当前可用的子代理清单(照搬 CC),而那份清单会随目录重扫而变。
@@ -147,6 +154,7 @@ export { webSearchTool } from './web-search'
 export { browserTools } from './browser'
 export { visualizeReadMeTool, visualizeShowWidgetTool } from './visualize'
 export { generateImageTool } from './image'
+export { saveImageTool } from './save-image'
 export {
   AVAILABLE_MODULES as VISUALIZE_MODULES,
   getGuidelines as visualizeGuidelines,

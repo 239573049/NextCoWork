@@ -117,7 +117,15 @@ export function CompactionDivider({
               {t('chat.compaction.instructions')}: {boundary.instructions}
             </p>
           )}
-          <AgentMarkdown content={boundary.summary} variant="compact" />
+          {/*
+            需求:摘要限高。它是九节模板写出来的整篇文档,不限高时一展开就是一整屏,
+            把这条线前后的消息全部顶出视口 —— 分隔线的语义是「标位置」,不该占据整屏。
+            限高值跟 TerminalBlock / Thread 里滚动区的既有档位一致(min(50vh,420px)),
+            内部滚动,`pr-1` 给滚动条留槽,不压正文右缘。
+          */}
+          <div className="scroll-thin max-h-[min(50vh,420px)] overflow-y-auto pr-1">
+            <AgentMarkdown content={boundary.summary} variant="compact" />
+          </div>
         </Surface>
       </SurfaceReveal>
     </div>

@@ -27,6 +27,7 @@ import { InteractionPreviewBlock } from "./InteractionPreviewBlock";
 import { TodoWriteChecklist } from "./TodoWriteChecklist";
 import { WidgetDetail } from "./WidgetDetail";
 import { ImageGenDetail } from "./ImageGenDetail";
+import { ScreenshotDetail } from "./ScreenshotDetail";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -492,6 +493,12 @@ export const DETAIL_RENDERERS: Record<
   widget: WidgetDetail,
   // image:生图的专属图片卡 —— 加载格、逐张出图、成品网格都在 `ImageGenDetail.tsx`
   image: ImageGenDetail,
+  /*
+    screenshot:浏览器页面截图(`browser_screenshot`)的卡片 —— 见它的文件头。
+    与 `image` 分开的理由写在 `ToolShape` 里那一段:生图有生成期与提示词,
+    截图只有一帧,复用那张卡会在图上多出一块永远空着的提示词区。
+  */
+  screenshot: ScreenshotDetail,
   external: ExternalDetail,
 };
 

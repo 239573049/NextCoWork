@@ -48,6 +48,15 @@ export interface KernelFs {
   mkdirp(absPath: string): Promise<void>
   /** 存在性是个问句不是个异常 —— 用 stat 抛错表达它,每个调用点都会变成 try/catch。 */
   exists(absPath: string): Promise<boolean>
+  /**
+   * 写原始字节(不经 utf8 编码)。需求:`SaveImage` 要把图片写进工作区,
+   * 而 `writeFile(string)` 会把二进制按 utf8 编码成一堆乱码。
+   *
+   * ★ 可选:缺席 = 这个宿主写不了二进制,`SaveImage` 整体不下发(不画注定失败的承诺)。
+   * 签名与 `EnvironmentFs.writeBytes` 逐字相同 —— 本地/SSH 两种工作区环境的 fs
+   * 因此天然满足它,不必各自再包一层。
+   */
+  writeBytes?(absPath: string, bytes: Uint8Array, options?: { exclusive?: boolean; mode?: number }): Promise<void>
 }
 
 export interface SpawnResult {

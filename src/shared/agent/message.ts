@@ -164,7 +164,12 @@ export function fileRefMarkdown(p: { name: string; path: string }): string {
  */
 export interface ToolOutputImage {
   mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
-  /** Tool screenshots are already resolved data URLs, not attachment protocol references. */
+  /**
+   * Tool screenshots are already resolved data URLs, not attachment protocol references.
+   * Exception: `generate_image` stores its results as this session's `ncw://` attachments so the
+   * model can name them later (edit / SaveImage); `prepareRequestImages` resolves those to data URLs
+   * in the outgoing copy only, so encoders still never see `ncw://`.
+   */
   dataRef: string
 }
 
