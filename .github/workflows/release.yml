@@ -85,6 +85,20 @@ jobs:
     # v2.2.4 首次启用公证后两个 macOS job 都在 30:20 被 timeout 掐死，publish 因此被跳过、
     # Release 永远停在草稿。Windows/Ubuntu 实测 6 分钟内完成，上调只放宽上限，不拖慢它们。
     timeout-minutes: 60
+    # ★★ 这个 env 不能省,也不能只靠 .npmrc。v2.2.11 的 macOS Intel job 就是死在
+    #    postinstall 的 `electron-builder install-app-deps` 上:
+    #    `ConnectTimeoutError: www.electronjs.org:443 (timeout: 10000ms)` ——
+    #    node-pty 重编译要下 Electron 的 headers,而两条下载路径都读下面这个键:
+    #    - electron-builder 的 getGypEnv() 拿它当 node-gyp 的 disturl,缺席就退回
+    #      https://electronjs.org/headers(再 302 到 GitHub 的 release 资产);
+    #    - @electron/get 也读 npm_config_electron_mirror 找 electron 二进制。
+    #    而 .npmrc 里那个 `electron_mirror` 在 npm 11 上**不再**被导出成
+    #    npm_config_* 环境变量 —— runner 日志里那行
+    #    `npm warn Unknown project config "electron_mirror"` 就是它。于是镜像配置
+    #    静默失效、下载全部回落到 GitHub,过不过只看当时那条链路快不快。
+    #    症状因此很误导:一个平台失败、另外三个通过,看着像「那台 runner 抽风」。
+    env:
+      npm_config_electron_mirror: https://cdn.npmmirror.com/binaries/electron/
     strategy:
       fail-fast: false
       matrix:
