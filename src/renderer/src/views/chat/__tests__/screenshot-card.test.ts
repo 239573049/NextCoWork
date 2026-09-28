@@ -127,7 +127,7 @@ describe('截图卡片 · DOM', () => {
     const { container, render } = await mount()
     await render({
       callId: 'shot', name: 'browser_screenshot', input, status: 'error',
-      output: { content: 'No tab with id tab-1', isError: true }
+      output: { content: 'No tab with id tab-1' }
     })
     expect(container.querySelector('[data-testid="screenshot-card"]')).toBeNull()
     expect(container.textContent).toContain('No tab with id tab-1')
