@@ -1,6 +1,34 @@
 ﻿# 更新日志
 
 
+## v2.2.11
+
+### 修复
+
+**GPT / Responses 协议输入侧 400:历史思考的正文被当成输入回传**
+
+- 症状:`provider: OpenAI response error: {"message":"Invalid 'input[23].content': array too long. Expected an array with maximum length 0, but got an array with length 1 instead.","type":"invalid_request_error","param":"input[23].content","code":"array_above_max_length"}` —— 界面上思考好好的、转录也完整、本地全程零报错。出事的 item 埋在历史里、**每一轮都会被重放**,所以这个会话从某一轮起每轮都发不出去,`input[N]` 的 N 还随历史长度漂移(报错里的 23 与 66 是同一个病)。**不需要切模型**:纯 GPT 会话一样踩得到 —— 上游给过推理正文的轮次,或思考块丢了 `opaque` 而正文还在 `part.text` 里
+- 根因:官方 OpenAI 的**输入侧**给 reasoning item 的 `content`(推理正文)上限是 **0** —— 正文只出不进,续链靠 `encrypted_content`;而 v2.2.10 为修 DeepSeek 的硬校验,把回传改成了「历史思考一律把正文补回去」。两家的校验正好相反,原先那句「有 content 的 item 一个字节都不改」只对 `summary` / `encrypted_content` 成立
+- 修复:回传方言按上游分流。新增 `ThinkingConfig.reasoningReplay`(`opaque-only` / `text-required`),判据收在 `thinking-adapter.ts` 的 `reasoningReplayFor`(显式声明 > `standardWire` > 模型名兜底 > 默认 `opaque-only`),由路由器判定后随编码选项下发 —— 编码器依旧看不到供应商,只收结论
+- 官方那支(默认):剥掉载体里的 `content`、不再用转录正文补全或合成、没有 `id` 的载体不上行(输入侧 `id` 必填);DeepSeek 那支原样保留,条目在目录里**显式声明** `text-required`,不靠名字启发式
+- ★ 清洁放在**编码期**而不是解码期:出事的 item 已经在历史里,存量转录下一轮自动不再触发,不需要数据迁移。代价是少一段推理上下文,比整个会话发不出去小得多
+- 顺带把编码选项袋改成它实际的名字:`AnthropicEncodeOptions` → `UpstreamEncodeOptions`(它经 `codec.ts` 早就不只服务 Anthropic)
+
+**右键菜单:Agent 跑着的时候一闪就没**
+
+- 症状:run 执行期间右键标签栏,菜单刚出现就消失,全程零报错。流式内容每长一段,`Thread` 的 `follow()` 就往聊天区写一次 `scrollTop`、派发一个 scroll 事件(见 `views/chat/Thread.tsx` 的 `selfScrolled` 注释),而原先所有滚动都被当成「视口变了」
+- 修复:「滚动即关」只关**菜单指着的那块表面**滚了的情况,判据是**几何**而不是 DOM 归属 —— 调用方只给了坐标、没给被点的元素,而滚动容器的盒子盖住右键那一点 ⇔ 被点的那块内容就在这个容器里;`document` / `window` 没有盒子,整页滚动维持原本的关闭行为。无关面板在滚(聊天区自动跟随、工具卡片里的子滚动条)不再把菜单关掉
+
+**版本工具:生成的标题缺 `v` 前缀,打 tag 时找不到条目**
+
+- 症状:`scripts/version-analyze.mjs update` 写出的标题是 `## 2.2.11`,而 release workflow 按 `## v${tag}` **精确匹配** CHANGELOG(.github/workflows/release.yml 两处都这么切):发布时抛 `No changelog entry found for v2.2.11`。这条链路只在打 tag 时才跑,平时看不出来;另外新条目与下一条之间少一个空行
+
+### 测试
+
+- 新增 12 项:Responses 回传方言 9 项(官方默认剥掉正文、无 `opaque` 不再合成、无 `id` 不上行、DeepSeek 载体零改动、方言经 `encodeUpstream` 真的落到请求体,以及 `reasoningReplayFor` 的四条判定顺序)+ 右键菜单的滚动关闭 3 项;另在目录测试里钉住 DeepSeek 条目的 `reasoningReplay` 声明
+- 全量套件 6345 项通过(23 skipped),12 项失败全部落在 v2.2.10 已记录的既有红项(`session-mux`、`native-host` 依赖本机 `python`;`provider-registry`、`document-rpc`、`document-scope` 是测试在库、源文件从未入库);`typecheck`(node + web)与 `lint` 通过(0 error,4 个既有 any warning)
+- 上游协议套件 88 个文件 / 1815 项全过
+
 ## v2.2.10
 
 ### 新增

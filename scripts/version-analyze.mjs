@@ -84,7 +84,10 @@ function getNextVersion(currentVersion) {
 }
 
 function generateChangelogEntry(version, analysis) {
-  let entry = `## ${version}\n\n`;
+  // ★ 标题必须带 `v` 前缀:release workflow 按 `## v${tag}` 精确匹配 CHANGELOG
+  // (.github/workflows/release.yml 两处),缺 v 会在打 tag 时抛
+  // `No changelog entry found for vX.Y.Z` —— 而那条链路平时跑不到。
+  let entry = `## v${version}\n\n`;
 
   if (Object.keys(analysis.commits).length === 0) {
     entry += '无重大变化\n\n';
@@ -126,7 +129,8 @@ function updateChangelog(newVersion, analysis) {
   }
 
   if (insertIndex > 0) {
-    lines.splice(insertIndex, 0, '', entry.trim());
+    // 尾部那个空行不能省:去掉它,新条目最后一行会紧贴下一条 `## vX.Y.Z`
+    lines.splice(insertIndex, 0, '', entry.trimEnd(), '');
     fs.writeFileSync(changelogPath, lines.join('\n'));
     return true;
   }
