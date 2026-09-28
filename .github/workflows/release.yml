@@ -85,20 +85,6 @@ jobs:
     # v2.2.4 首次启用公证后两个 macOS job 都在 30:20 被 timeout 掐死，publish 因此被跳过、
     # Release 永远停在草稿。Windows/Ubuntu 实测 6 分钟内完成，上调只放宽上限，不拖慢它们。
     timeout-minutes: 60
-    # ★★ 这个 env 不能省,也不能只靠 .npmrc。v2.2.11 的 macOS Intel job 就是死在
-    #    postinstall 的 `electron-builder install-app-deps` 上:
-    #    `ConnectTimeoutError: www.electronjs.org:443 (timeout: 10000ms)` ——
-    #    node-pty 重编译要下 Electron 的 headers,而两条下载路径都读下面这个键:
-    #    - electron-builder 的 getGypEnv() 拿它当 node-gyp 的 disturl,缺席就退回
-    #      https://electronjs.org/headers(再 302 到 GitHub 的 release 资产);
-    #    - @electron/get 也读 npm_config_electron_mirror 找 electron 二进制。
-    #    而 .npmrc 里那个 `electron_mirror` 在 npm 11 上**不再**被导出成
-    #    npm_config_* 环境变量 —— runner 日志里那行
-    #    `npm warn Unknown project config "electron_mirror"` 就是它。于是镜像配置
-    #    静默失效、下载全部回落到 GitHub,过不过只看当时那条链路快不快。
-    #    症状因此很误导:一个平台失败、另外三个通过,看着像「那台 runner 抽风」。
-    env:
-      npm_config_electron_mirror: https://cdn.npmmirror.com/binaries/electron/
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +132,33 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        # ★★ 这里必须重试:v2.2.11 的 macOS Intel job 就死在这一步,报
+        #    `ConnectTimeoutError: www.electronjs.org:443 (timeout: 10000ms)` ——
+        #    而 Publish 因此被跳过、Release 永远停在草稿,另外三台同样的步骤却过了。
+        #
+        #    这一步的 postinstall 会让 electron-builder 用 node-gyp 为 Electron
+        #    重编译 node-pty,headers 只能取自 `www.electronjs.org/headers`,而那个
+        #    地址**改不掉**:@electron/rebuild 把它作为**命令行参数** --dist-url 传给
+        #    node-gyp(rebuild.js 里的默认值),electron-builder 调的是它的 API、不传
+        #    headerURL;electron-builder 自己的镜像配置(getGypEnv 读
+        #    npm_config_electron_mirror)只作用于它那条 legacy 路径。所以 .npmrc 里的
+        #    electron_mirror 在这一步用不上 —— 它照旧管着 electron 二进制的下载,
+        #    npm 11 那句 `Unknown project config` 只是警告,不是失效。
+        #
+        #    把 node-gyp 顶到 npmmirror 也走不通:实测那边 v44.1.1 的 SHASUMS256.txt
+        #    里没有 `node-v44.1.1-headers.tar.gz`,node-gyp 会以
+        #    `local checksum … not match remote undefined` 回滚(headers 只发在
+        #    electronjs.org/headers)。于是这条链路就是「外部依赖 + 10 秒连接超时」,
+        #    唯一可靠的办法是重试:瞬时失败不再废掉整轮发布,而确定性的编译错误
+        #    三次都失败、照样红。
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci --no-audit --no-fund; then exit 0; fi
+            echo "::warning::npm ci 第 ${attempt} 次失败（多为 electron headers 下载超时），重试"
+            sleep $((attempt * 20))
+          done
+          exit 1
 
       - name: Check macOS signing credentials
         # 需求：在打包前把缺失的 secret 一次性点名。
