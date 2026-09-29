@@ -409,6 +409,17 @@ export const scm = {
   checkout: (name) => call('scm.checkout', { name })
 }
 
+// 需求：已接通的会话 RPC 必须能从 nextcowork 调用；callId 由每次调用显式传入，不能用全局当前工具。
+export const documents = {
+  open: (params) => call('documents.open', params),
+  apply: (params) => call('documents.apply', params),
+  save: (params) => call('documents.save', params),
+  exportDocument: (params) => call('documents.export', params),
+  getState: (params) => call('documents.getState', params),
+  getOperation: (params) => call('documents.getOperation', params),
+  close: (params) => call('documents.close', params)
+}
+
 export const plugins = {
   exposeApi(methods) {
     const names = Object.keys(methods ?? {})

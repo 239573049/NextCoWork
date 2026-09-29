@@ -19,7 +19,7 @@
  * 也没有分隔条。中途一度以为它在 235~312 之间浮动,那是把设置浮层的左侧导航栏
  * 当成侧边栏量了 —— 浮层盖住了扫描线,量到的是它内部的分栏。
  */
-import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks } from 'lucide-react'
+import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks, Sparkles } from 'lucide-react'
 import { useMemo, useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
@@ -47,6 +47,7 @@ import { usePluginsStore } from '../stores/plugins'
 import { openPluginWebApp } from '../services/plugins'
 import { pluginSidebarEntries } from './plugin-sidebar-entries'
 import { useWindowStore } from '../stores/window'
+import { skillExtractionErrorKey, startSkillExtraction } from '../views/skills/skill-extraction'
 
 const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'git', 'extensions']
 
@@ -88,6 +89,15 @@ export function Sidebar({
   auth: ClientAuthState
 }): ReactNode {
   const { t } = useI18n()
+  /*
+    需求:右键「提炼为 Skill」—— 另开一条提炼会话,源会话就是被右键的那一条。
+    工作区从这一层取(它是侧边栏唯一持有完整 `Workspace` 的地方),往下只传这个回调。
+  */
+  const extractSkill = (session: SessionListItem): void => {
+    if (workspace === null) return
+    void startSkillExtraction({ workspace, sourceSessionId: session.id, sourceTitle: session.title, hint: '', t })
+      .catch((error: unknown) => toast.error(t(skillExtractionErrorKey(error)), 'skill-extraction'))
+  }
   /*
     插件贡献的网页应用入口。
     ★ 订阅走 selector(`catalog`),不是整份 store:整份订阅会让插件活动日志
@@ -235,6 +245,7 @@ export function Sidebar({
                     runningSessionIds={runningSessionIds}
                     onSelectSession={onSelectSession}
                     onDeleteSession={onDeleteSession}
+                    onExtractSkill={extractSkill}
                     t={t}
                   />
                 </ul>
@@ -254,6 +265,7 @@ export function Sidebar({
                       runningSessionIds={runningSessionIds}
                       onSelectSession={onSelectSession}
                       onDeleteSession={onDeleteSession}
+                      onExtractSkill={extractSkill}
                       t={t}
                     />
                   ))}
@@ -345,6 +357,7 @@ function SessionGroupList({
   runningSessionIds,
   onSelectSession,
   onDeleteSession,
+  onExtractSkill,
   t
 }: {
   workspaceId: string
@@ -354,6 +367,8 @@ function SessionGroupList({
   runningSessionIds: ReadonlySet<string>
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>
+  /** 右键「提炼为 Skill」。失败提示由提供方负责。 */
+  onExtractSkill: (session: SessionListItem) => void
   t: SidebarI18n
 }): ReactNode {
   /*
@@ -420,6 +435,7 @@ function SessionGroupList({
             runningSessionIds={runningSessionIds}
             onSelectSession={onSelectSession}
             onDeleteSession={onDeleteSession}
+            onExtractSkill={onExtractSkill}
             t={t}
             multiSelect={multiSelect}
             selectedIds={selectedIds}
@@ -445,6 +461,7 @@ function SessionGroupBlock({
   runningSessionIds,
   onSelectSession,
   onDeleteSession,
+  onExtractSkill,
   t,
   multiSelect,
   selectedIds,
@@ -465,6 +482,8 @@ function SessionGroupBlock({
   runningSessionIds: ReadonlySet<string>
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>
+  /** 右键「提炼为 Skill」。见 `Sidebar` 里 `extractSkill` 的说明。 */
+  onExtractSkill: (session: SessionListItem) => void
   t: SidebarI18n
   multiSelect: boolean
   selectedIds: ReadonlySet<string>
@@ -563,6 +582,12 @@ function SessionGroupBlock({
                   await duplicateSession(menu.session.id, t('session.copyTitle', { title: menu.session.title }))
                 })
               }} />
+              {/* 提炼会话自己不给这一项:主进程会拒绝「提炼的提炼」 */}
+              {menu.session.skillExtraction !== true && !runningSessionIds.has(menu.session.id) && (
+                <MenuAction icon={<Sparkles size={15} />} label={t('skillify.menu')} onSelect={() => {
+                  void run(async () => { onExtractSkill(menu.session) })
+                }} />
+              )}
               <MenuAction icon={<Link size={15} />} label={t('session.copyLink')} onSelect={() => {
                 void run(async () => {
                   await copyText(`${window.location.href.split('#')[0]}#session=${encodeURIComponent(workspaceId)}/${encodeURIComponent(menu.session.id)}`)
@@ -648,6 +673,7 @@ function ArchivedSessionItem({
   runningSessionIds,
   onSelectSession,
   onDeleteSession,
+  onExtractSkill,
   t
 }: {
   session: SessionListItem
@@ -656,6 +682,8 @@ function ArchivedSessionItem({
   runningSessionIds: ReadonlySet<string>
   onSelectSession: (sessionId: string) => void
   onDeleteSession: (sessionId: string) => Promise<void>
+  /** 归档的会话同样可以提炼 —— 做完归档正是「这段经验该沉淀了」的时刻。 */
+  onExtractSkill: (session: SessionListItem) => void
   t: SidebarI18n
 }): ReactNode {
   const [menu, setMenu] = useState<ContextMenuPosition | null>(null)
@@ -690,6 +718,11 @@ function ArchivedSessionItem({
               <MenuAction icon={<Copy size={15} />} label={t('session.copy')} onSelect={() => {
                 void run(async () => { await duplicateSession(session.id, t('session.copyTitle', { title: session.title })) })
               }} />
+              {session.skillExtraction !== true && !runningSessionIds.has(session.id) && (
+                <MenuAction icon={<Sparkles size={15} />} label={t('skillify.menu')} onSelect={() => {
+                  void run(async () => { onExtractSkill(session) })
+                }} />
+              )}
               <div role="separator" className="my-1 h-px bg-border" />
               <MenuAction icon={<Archive size={15} />} label={t('session.unarchive')} onSelect={() => void run(() => setArchived(session.id, false))} />
               <div role="separator" className="my-1 h-px bg-border" />

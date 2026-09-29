@@ -68,6 +68,7 @@ import type { ToolProgress } from '../../shared/agent/tool'
 import type { ToolRegistration } from '../kernel/tool/registry'
 import type { PluginSkillRoot } from '../kernel/skill/load'
 import { SUPPORTED_LOCALE_FILES, localeOfFile } from './locale-files'
+import { PluginCapabilityError, type DocumentCallScope, type PluginDocumentsBridge } from './document-rpc'
 
 /** 插件目录名。`ipc/storage.ts:148` 的删除清单里已经有它。 */
 export const PLUGINS_DIR = 'plugins'
@@ -161,6 +162,10 @@ export interface PluginManagerDeps {
   setKv: (key: string, value: unknown) => void
   /** 当前工作区。路径类能力全部以它为根 */
   currentWorkspace: () => { id: string; rootPath: string }
+  /** 活动文档桥。旧测试 / 旧宿主可省略；调用 documents.* 时省略即报宿主未接线。 */
+  documents?: PluginDocumentsBridge
+  /** 按受信 workspaceId 解析本地工作区；远程或已关闭工作区返回 null。 */
+  resolveWorkspace?: (workspaceId: string) => { id: string; rootPath: string } | null
   /** 宿主当前的深浅色。插件只读,不挂权限(见 `PLUGIN_METHOD_PERMISSION`) */
   currentAppearance: () => 'light' | 'dark'
   /**
@@ -308,6 +313,8 @@ interface PluginRecord {
    * (不带 glob,意思是「全都要」)会一条都收不到。
    */
   watchGlobs?: string[]
+  /** 文档变更通知绑定订阅时的工作区，后台写入不能污染前台订阅。 */
+  watchWorkspaceId?: string
   /** 这一刻它挂着的进度条 id —— 禁用 / 休眠时要全部撤掉,不留下转不停的条。 */
   progress: Set<string>
 }
@@ -324,7 +331,9 @@ export class PluginManager {
    * 否则一个插件能拿别人工具的 callId 往它的卡片上推东西(callId 虽不易猜,但
    * 「不易猜」不是授权)。
    */
-  private readonly liveToolEmits = new Map<string, { pluginId: string; emit: (progress: ToolProgress) => void }>()
+  private readonly liveToolEmits = new Map<string, { pluginId: string; workspaceId?: string; signal: AbortSignal; emit: (progress: ToolProgress) => void }>()
+  // 需求：先排空文档请求再检查 dirty；收尾期间的新写入不能越过这次检查。
+  private documentsClosing = false
   /** 事件总线的订阅表:topic → 订阅它的 pluginId 集合(第 5 层)。 */
   private readonly eventSubscribers = new Map<string, Set<string>>()
   /**
@@ -369,12 +378,44 @@ export class PluginManager {
     this.persist()
   }
 
-  async shutdown(): Promise<void> {
-    if (this.sleepTimer !== undefined) clearInterval(this.sleepTimer)
-    for (const [id, record] of this.records) {
-      if (record.status === 'active') await this.deactivate(id).catch(() => undefined)
+  /** 需求：退出/切账户在关窗与切库前排空文档请求；否决退出时可恢复文档调用。 */
+  async guardDocumentClose(discardChanges = false): Promise<() => void> {
+    if (this.documentsClosing) throw new CapabilityError('rejected', 'document sessions are closing')
+    this.documentsClosing = true
+    try {
+      // 需求：只有宿主拿到用户的明确丢弃确认才走此分支，普通退出永远只做 dirty 检查。
+      if (discardChanges) await this.deps.documents?.discardAll?.()
+      await withTimeout(this.deps.documents?.assertCanRelease?.() ?? Promise.resolve(), PLUGIN_TIMEOUT.REQUEST_MS)
+      return () => { this.documentsClosing = false }
+    } catch (error) {
+      this.documentsClosing = false
+      throw error
     }
-    this.deps.runtime.disposeAll()
+  }
+
+  async shutdown(guarded = false): Promise<void> {
+    if (!guarded) await this.guardDocumentClose()
+    else if (!this.documentsClosing) throw new CapabilityError('rejected', 'document close guard is not held')
+    try {
+      // 需求：安全检查在销毁插件之前完成，失败时仍可回到原插件保存文档。
+      if (this.sleepTimer !== undefined) clearInterval(this.sleepTimer)
+      for (const [id, record] of this.records) {
+        if (record.status === 'active') await this.deactivate(id).catch(() => undefined)
+        await this.deps.documents?.releasePlugin(id)
+      }
+      this.deps.runtime.disposeAll()
+    } catch (error) {
+      this.documentsClosing = false
+      throw error
+    }
+  }
+
+  /** 需求：原生 helper 沿用 process 的行为审批，不能只有能力授权就绕过既有执行确认。 */
+  async approveNativeHelper(pluginId: string, entry: string): Promise<boolean> {
+    const record = this.records.get(pluginId)
+    if (record === undefined || !record.enabled || !record.granted.includes('process')) return false
+    const approved = await this.deps.approve(pluginId, { kind: 'exec', detail: entry })
+    return approved && this.records.get(pluginId) === record && record.enabled && record.granted.includes('process')
   }
 
   catalog(): PluginCatalog {
@@ -622,10 +663,25 @@ export class PluginManager {
    * 市场那一条的 slug,只有市场安装传。见 `PersistedPlugin.slug`。
    */
   async install(path: string, expectedSha256?: string, slug?: string): Promise<void> {
+    if (this.documentsClosing) throw new CapabilityError('rejected', 'document sessions are closing')
+    this.documentsClosing = true
+    try {
+      await this.installAfterDocuments(path, expectedSha256, slug)
+    } finally {
+      this.documentsClosing = false
+    }
+  }
+
+  private async installAfterDocuments(path: string, expectedSha256?: string, slug?: string): Promise<void> {
     const stat = await fs.stat(path)
+    // 需求：安装器识别目标清单后、替换目录前做定向检查，不能让 A 的脏文档挡住 B 的安装。
+    const beforeReplace = async (manifest: PluginManifest): Promise<void> => {
+      await this.deps.documents?.assertCanRelease?.(manifest.id)
+      await this.deps.documents?.releasePlugin(manifest.id)
+    }
     const installed = stat.isDirectory()
-      ? await installPluginDirectory(path, this.deps.pluginRoot)
-      : await installPluginZip(path, this.deps.pluginRoot, expectedSha256)
+      ? await installPluginDirectory(path, this.deps.pluginRoot, beforeReplace)
+      : await installPluginZip(path, this.deps.pluginRoot, expectedSha256, beforeReplace)
     /*
       ★★ **旧配置必须在 `disable()` 之前读出来。**
 
@@ -648,7 +704,10 @@ export class PluginManager {
     */
     this.suppressChanged = true
     try {
-      if (this.records.has(installed.manifest.id)) await this.disable(installed.manifest.id)
+      if (this.records.has(installed.manifest.id)) {
+        await this.deps.documents?.releasePlugin(installed.manifest.id)
+        await this.disableAfterDocuments(installed.manifest.id)
+      }
       await this.load(installed.target, 'global', persisted)
     } finally {
       this.suppressChanged = false
@@ -726,6 +785,21 @@ export class PluginManager {
   }
 
   private async disable(pluginId: string): Promise<void> {
+    // 需求：未装文档桥的旧宿主保留原来的同步下线时机，不能因 await undefined 延迟撤权。
+    if (this.deps.documents === undefined) return this.disableAfterDocuments(pluginId)
+    if (this.documentsClosing) throw new CapabilityError('rejected', 'document sessions are closing')
+    this.documentsClosing = true
+    try {
+      // 需求：禁用不等于丢弃。先排空在途操作并拒绝未保存内容，再撤销插件及引擎。
+      await this.deps.documents?.assertCanRelease?.(pluginId)
+      await this.deps.documents?.releasePlugin(pluginId)
+      await this.disableAfterDocuments(pluginId)
+    } finally {
+      this.documentsClosing = false
+    }
+  }
+
+  private async disableAfterDocuments(pluginId: string): Promise<void> {
     const record = this.records.get(pluginId)
     if (record === undefined) return
     if (record.status === 'active' || record.status === 'activating') {
@@ -798,7 +872,16 @@ export class PluginManager {
       能力门拒掉,而作者和用户都看不出为什么 —— 不如直接停下来。
     */
     if (record.manifest.permissions.some((p) => !record.granted.includes(p))) {
-      void this.disable(pluginId)
+      // 需求：撤权不是普通禁用，必须同步拒绝新调用；未保存模型保留，不能借 dirty 延迟撤权。
+      record.enabled = false
+      void this.disable(pluginId).catch(async (error: unknown) => {
+        record.diagnostics.push({ path: 'documents', message: `permissions revoked; document state retained: ${String(error)}`, level: 'warn' })
+        await this.disableAfterDocuments(pluginId)
+      }).catch((error: unknown) => {
+        this.deps.host.logger.warn(`[plugins] revoked plugin cleanup failed: ${String(error)}`)
+      })
+      this.persist()
+      this.deps.emitChanged()
       return
     }
     this.persist()
@@ -1053,12 +1136,13 @@ export class PluginManager {
    * d.ts 和文档里 —— 不写清楚的话,作者会把它当 watcher 用,然后在
    * 「为什么我在 VS Code 里改了没反应」上耗掉一天。
    */
-  notifyWorkspaceChanged(changes: readonly { path: string; kind: 'created' | 'modified' | 'deleted' }[]): void {
+  notifyWorkspaceChanged(changes: readonly { path: string; kind: 'created' | 'modified' | 'deleted' }[], workspaceId?: string): void {
     if (changes.length === 0) return
     for (const [pluginId, record] of this.records) {
       // 睡着的插件**不叫醒**:用户没在用它,一次文件保存不值得为它起一个进程
       // (同 `notifyAppearanceChanged` 的取向)。它醒来时自己重新读就是了。
       if (record.status !== 'active' || record.watchGlobs === undefined) continue
+      if (workspaceId !== undefined && record.watchWorkspaceId !== workspaceId) continue
       const mine = changes.filter((change) => matchesPathScope(record.watchGlobs, change.path))
       if (mine.length === 0) continue
       void this.deps.runtime
@@ -1231,6 +1315,33 @@ export class PluginManager {
   }
 
   /**
+   * 从受信工具上下文派生 documents.* 的工作区作用域。
+   *
+   * 需求：后台 Agent 的文档请求必须跟随产生 callId 的那次工具调用，而不是跟随用户
+   * 此刻聚焦的工作区；callId 结束或属于别的插件时绝不能回退到前台。
+   * 不满足会怎样：用户在 A 工作区运行任务、切到 B 后，插件会静默把修改写进 B，
+   * 或者恶意插件借一个猜中的 callId 读到另一轮任务的文件。
+   */
+  private resolveDocumentScope(pluginId: string, rawParams: unknown): DocumentCallScope {
+    const callId = rawParams !== null && typeof rawParams === 'object' && !Array.isArray(rawParams)
+      ? (rawParams as Record<string, unknown>).callId
+      : undefined
+    if (callId === undefined) {
+      const workspace = this.deps.currentWorkspace()
+      return { workspaceId: workspace.id, workspaceRoot: workspace.rootPath }
+    }
+    if (typeof callId !== 'string' || callId === '') throw new CapabilityError('invalid_argument', 'callId is invalid')
+    const live = this.liveToolEmits.get(callId)
+    if (live === undefined || live.pluginId !== pluginId || live.signal.aborted) throw new CapabilityError('rejected', '[call_scope] the tool call is not active or not owned by this plugin')
+    if (live.workspaceId === undefined || this.deps.resolveWorkspace === undefined) {
+      throw new CapabilityError('invalid_argument', '[unsupported_environment] the tool call has no local workspace')
+    }
+    const workspace = this.deps.resolveWorkspace(live.workspaceId)
+    if (workspace === null) throw new CapabilityError('invalid_argument', '[unsupported_environment] the workspace is not available locally')
+    return { workspaceId: workspace.id, workspaceRoot: workspace.rootPath }
+  }
+
+  /**
    * 「在宿主这边登记一个东西」类的方法。
    *
    * 返回 `undefined` = 这个方法不归我管,交给 `invokeCapability`。
@@ -1244,6 +1355,26 @@ export class PluginManager {
     rawParams: unknown,
     ctx: CapabilityContext
   ): Promise<{ data: unknown; summary: string } | undefined> {
+    if (method.startsWith('documents.')) {
+      if (this.documentsClosing) throw new CapabilityError('rejected', 'document sessions are closing')
+      const documents = this.deps.documents
+      if (documents === undefined) throw new CapabilityError('internal_error', 'document bridge is not configured')
+      const scope = this.resolveDocumentScope(pluginId, rawParams)
+      try {
+        const result = await documents.handle(pluginId, record.manifest, method, rawParams, scope)
+        // 需求：只有成功写盘才通知，并保留请求最初的后台工作区而不是重新读焦点。
+        if (result.changed !== undefined) this.notifyWorkspaceChanged([result.changed], scope.workspaceId)
+        return result
+      } catch (error) {
+        if (error instanceof PluginCapabilityError) {
+          const code = error.code === 'invalid_argument' || error.code === 'rejected' || error.code === 'internal_error'
+            ? error.code
+            : 'internal_error'
+          throw new CapabilityError(code, error.message)
+        }
+        throw error
+      }
+    }
     switch (method) {
       case 'permissions.contains': {
         const p = rawParams as { permissions: PluginPermission[] }
@@ -1601,6 +1732,7 @@ export class PluginManager {
           .filter((glob): glob is string => typeof glob === 'string' && glob !== '')
           .slice(0, 32)
         record.watchGlobs = globs
+        record.watchWorkspaceId = ctx.workspaceId
         return { data: {}, summary: `subscribe changes ${globs.length === 0 ? '(all)' : globs.join(',')}` }
       }
 
@@ -1825,11 +1957,11 @@ export class PluginManager {
       const cardViewTypes = new Set(record.manifest.contributes.cardViews.map((v) => v.viewType))
       for (const declaration of record.tools.values()) {
         out.push(
-          toolRegistrationFor(pluginId, declaration, async (name, input, callId, signal, emit) => {
+          toolRegistrationFor(pluginId, declaration, async (name, input, callId, signal, emit, workspaceId) => {
             // 工具调用本身也是一次「碰一下」,免得跑着跑着被休眠扫走。
             record.touchedAt = Date.now()
-            // 登记这次调用的 emit,让 `tool.progress` RPC 找得到它;结束即撤。
-            this.liveToolEmits.set(callId, { pluginId, emit })
+            // 登记这次调用的 emit 与 workspace 作用域,让 documents.* RPC 找得到它;结束即撤。
+            this.liveToolEmits.set(callId, { pluginId, workspaceId, signal, emit })
             // 交互式工具会挂起等用户点按钮,60s 太短 —— 放宽到宿主硬上限(fork B)。
             const timeoutMs = declaration.interactive === true ? PLUGIN_TIMEOUT.INTERACTIVE_TOOL_MS : PLUGIN_TIMEOUT.TOOL_MS
             const invocation = this.deps.runtime.invoke(

@@ -22,7 +22,8 @@ describe('OpenAI Chat Completions decoding', () => {
         completion_tokens_details: { reasoning_tokens: 20 } } }, '[DONE]'
     )))
     expect(accumulated(output).parts).toEqual([
-      { type: 'thinking', text: '让我思考。', opaque: { protocol: 'openai-chat', field: 'reasoning_content' } },
+      // tokens: 夹具里 usage 报了 reasoning_tokens 20,这次回复只有一块思考,归给它(见 block-accumulator)
+      { type: 'thinking', text: '让我思考。', opaque: { protocol: 'openai-chat', field: 'reasoning_content' }, tokens: 20 },
       { type: 'text', text: '你好！' }
     ])
     expect(output.at(-1)).toEqual({ type: 'message_end', stopReason: 'end_turn', usage: {
@@ -185,7 +186,7 @@ describe('OpenAI Responses decoding', () => {
       responseDone([reasoningItem, functionItem])
     )))
     expect(accumulated(output).parts).toEqual([
-      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem }, tokens: 20 },
       { type: 'tool_call', callId: 'call-1', name: 'Echo', input: { text: 'hello' } }
     ])
     expect(output.filter((e) => e.type === 'tool_call_start')).toHaveLength(1)
@@ -280,7 +281,7 @@ describe('OpenAI Responses decoding', () => {
   it('decodes reasoning text and prefers it over the summary', async () => {
     const snapshot = await collect(decodeOpenAIResponses(events(responseDone([reasoningContentItem]))))
     expect(accumulated(snapshot).parts).toEqual([
-      { type: 'thinking', text: '先看参数是否齐全。', opaque: { protocol: 'openai-responses', item: reasoningContentItem } }
+      { type: 'thinking', text: '先看参数是否齐全。', opaque: { protocol: 'openai-responses', item: reasoningContentItem }, tokens: 20 }
     ])
 
     const streamed = await collect(decodeOpenAIResponses(events(
@@ -292,7 +293,7 @@ describe('OpenAI Responses decoding', () => {
       responseDone([reasoningContentItem])
     )))
     expect(accumulated(streamed).parts).toEqual([
-      { type: 'thinking', text: '先看参数是否齐全。', opaque: { protocol: 'openai-responses', item: reasoningContentItem } }
+      { type: 'thinking', text: '先看参数是否齐全。', opaque: { protocol: 'openai-responses', item: reasoningContentItem }, tokens: 20 }
     ])
   })
 
@@ -325,7 +326,7 @@ describe('OpenAI Responses decoding', () => {
     )))
     expect(output.some((e) => e.type === 'error')).toBe(false)
     expect(accumulated(output).parts).toEqual([
-      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem }, tokens: 20 },
       { type: 'text', text: '完成' }
     ])
   })
@@ -340,7 +341,7 @@ describe('OpenAI Responses decoding', () => {
     )))
     expect(output.some((e) => e.type === 'error')).toBe(false)
     expect(accumulated(output).parts).toEqual([
-      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem }, tokens: 20 },
       { type: 'text', text: '完成' }
     ])
   })
@@ -356,7 +357,7 @@ describe('OpenAI Responses decoding', () => {
     )))
     expect(output.some((e) => e.type === 'error')).toBe(false)
     expect(accumulated(output).parts).toEqual([
-      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } },
+      { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem }, tokens: 20 },
       { type: 'text', text: '完成' }
     ])
   })

@@ -14,6 +14,13 @@ import { Bot, Brain, CheckCircle2, CircleAlert, Clock3, ListChecks, Square } fro
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
+import {
+  thinkingElapsedMs,
+  thinkingTokenReading,
+  type ThinkingStats,
+  type ThinkingTokenReading,
+} from "../../../../shared/agent/thinking-stats";
+import { formatTokenCount } from "../../../../shared/agent/tokens";
 import type { SubagentState, ToolCallState } from "../../../../shared/agent/transcript";
 import {
   isPinnedShape,
@@ -49,15 +56,32 @@ import { AgentShimmerText } from "./AgentActivity";
 export function ThinkingBlock({
   text,
   streaming,
+  stats,
 }: {
   text: string;
   streaming: boolean;
+  /**
+   * 标题行右端「用时 · token」读数的来源,见 `shared/agent/thinking-stats.ts`。
+   * 缺席或里面没有事实(旧转录、导入的会话)时,用时那一格不画 —— 不拿 0 兜底;
+   * token 仍按正文估一个约数,因为那只需要正文。
+   */
+  stats?: ThinkingStats;
 }): ReactNode {
   const { t } = useI18n();
   const [manual, setManual] = useState<boolean | null>(null);
   const body = useRef<HTMLDivElement>(null);
   const followBottom = useRef(true);
   const open = manual ?? streaming;
+  /*
+    需求:标题行显示思考正文的 token 数。流式中每个增量都会重估一遍整段 ——
+    估算是一次线性扫描,同一帧里 AgentMarkdown 重新解析整段正文的开销远大于它,
+    所以不为它做增量计数(那得把估算的内部状态搬进 reducer)。
+  */
+  const reportedTokens = stats?.tokens;
+  const tokens = useMemo(
+    () => thinkingTokenReading(text, reportedTokens === undefined ? {} : { tokens: reportedTokens }),
+    [text, reportedTokens],
+  );
 
   useEffect(() => {
     if (!streaming || !open || !followBottom.current || body.current === null) return;
@@ -83,6 +107,7 @@ export function ThinkingBlock({
             ? <AgentShimmerText>{t("chat.thinkingNow")}</AgentShimmerText>
             : t("chat.thinking")}
         </span>
+        <ThinkingStatsSlot stats={stats} streaming={streaming} tokens={tokens} />
         <RowChevron open={open} />
       </button>
       <SurfaceReveal open={open}>
@@ -108,6 +133,57 @@ export function ThinkingBlock({
         </div>
       </SurfaceReveal>
     </Surface>
+  );
+}
+
+/**
+ * 思考卡片标题行右端的「12s · 1.23K tokens」(估算值按需求也不加 ≈,见下方 data-estimated)。
+ *
+ * ★ 单独成组件是为了**把走表关在这一格里**:流式中每 100ms 刷一次 `now`,
+ * 写在 ThinkingBlock 里的话,整段思考正文(AgentMarkdown)会跟着每秒重渲十次。
+ */
+function ThinkingStatsSlot({
+  stats,
+  streaming,
+  tokens,
+}: {
+  stats: ThinkingStats | undefined;
+  streaming: boolean;
+  tokens: ThinkingTokenReading | undefined;
+}): ReactNode {
+  const { t } = useI18n();
+  // 只有「还在长、且有起点」的流式块需要走表;已提交的块读落盘值,不必起定时器
+  const ticking = streaming && stats?.durationMs === undefined && stats?.startedAt !== undefined;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!ticking) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [ticking]);
+
+  const elapsed = stats === undefined ? undefined : thinkingElapsedMs(stats, streaming, now);
+  if (elapsed === undefined && tokens === undefined) return null;
+  return (
+    <span data-testid="thinking-stats" className="flex shrink-0 items-center gap-1.5 font-mono text-[12px] text-fg-faint">
+      {elapsed !== undefined && (
+        <span data-testid="thinking-duration" title={t("chat.thinkingStats.durationHint")}>
+          {formatDuration(elapsed)}
+        </span>
+      )}
+      {/* 分隔符是独立节点:任一格缺席时不留悬空的「·」(同 SubagentNode 的做法) */}
+      {elapsed !== undefined && tokens !== undefined && <span aria-hidden>·</span>}
+      {tokens !== undefined && (
+        <span
+          data-testid="thinking-tokens"
+          // 真值还是估算,只有这一格和悬停提示分得开 —— 按需求读数本身不加「≈」
+          data-estimated={tokens.estimated ? "true" : "false"}
+          title={t(tokens.estimated ? "chat.thinkingStats.tokensEstimatedHint" : "chat.thinkingStats.tokensReportedHint")}
+        >
+          {t("chat.thinkingStats.tokens", { count: formatTokenCount(tokens.count) })}
+        </span>
+      )}
+    </span>
   );
 }
 

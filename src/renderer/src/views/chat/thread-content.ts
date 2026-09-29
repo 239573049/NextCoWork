@@ -2,6 +2,7 @@ import type { AgentMessage, ContentPart } from '../../../../shared/agent/message
 import { isToolResultOnly, visibleText } from '../../../../shared/agent/message'
 import { compactBoundaryOf, type CompactBoundary } from '../../../../shared/agent/compaction'
 import type { LiveBlock, SubagentState } from '../../../../shared/agent/transcript'
+import { thinkingStatsOfLive, thinkingStatsOfPart } from '../../../../shared/agent/thinking-stats'
 import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import type { TimelineItem } from '../../../../shared/domain/tool-timeline'
 import { isPinnedShape, presenterOf } from '../../../../shared/domain/tool-presenter'
@@ -405,7 +406,7 @@ export function assistantSegments(
     }
     if (part?.type === 'thinking') {
       if (part.text.trim() === '') continue
-      item = { key, kind: 'thinking', text: part.text, streaming: false }
+      item = { key, kind: 'thinking', text: part.text, streaming: false, stats: thinkingStatsOfPart(part) }
     } else if (part?.type === 'tool_call') {
       if (part.name.toLowerCase() === 'task' && subagents[part.callId] !== undefined) {
         item = { key: part.callId, kind: 'subagent', callId: part.callId,
@@ -419,7 +420,7 @@ export function assistantSegments(
       item = { key: part.callId, kind: 'subagent', callId: part.callId, summary: part.summary, state: subagents[part.callId] }
     } else if (liveBlock?.kind === 'thinking') {
       if (!block.streaming && liveBlock.text.trim() === '') continue
-      item = { key, kind: 'thinking', text: liveBlock.text, streaming: block.streaming }
+      item = { key, kind: 'thinking', text: liveBlock.text, streaming: block.streaming, stats: thinkingStatsOfLive(liveBlock) }
     } else if (liveBlock?.kind === 'tool_use') {
       const liveCallId = liveBlock.callId
       /*

@@ -26,8 +26,9 @@
  * 只用 node:fs 与纯函数,和 `kernel/**` 同一立场:无头测试能直接构造它。
  */
 import { randomUUID } from 'node:crypto'
-import { realpath, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import type { Stats } from 'node:fs'
+import { lstat, realpath, rm, stat } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import {
   DocumentEngineError,
   documentFormatOf,
@@ -37,7 +38,9 @@ import {
   type DocumentCapabilities,
   type DocumentFormat,
   type DocumentOperation,
-  type DocumentQuery
+  type DocumentQuery,
+  type DocumentRenderRequest,
+  type DocumentRenderResult
 } from '../../shared/document-engine/protocol'
 import {
   applyPrecondition,
@@ -47,7 +50,7 @@ import {
   type DocumentSessionEvent,
   type DocumentSessionSnapshot
 } from '../../shared/document-engine/session'
-import { commitSave, createWorkingCopy } from './file-store'
+import { commitExport, commitSave, createWorkingCopy, digestFile } from './file-store'
 
 /** 引擎打开的一份文档。实现方是原生 helper 的适配层(或测试里的 fake)。 */
 export interface DocumentEngineHandle {
@@ -57,6 +60,10 @@ export interface DocumentEngineHandle {
   saveTo(outputPath: string, signal: AbortSignal): Promise<void>
   /** 只读查询。可选:不支持查询的引擎不实现它,管理器如实报 `unsupported_operation` */
   query?(request: DocumentQuery, signal: AbortSignal): Promise<unknown>
+  /** 预览 tile。可选:不支持画布的引擎不能伪造一张空图。 */
+  render?(request: DocumentRenderRequest, signal: AbortSignal): Promise<DocumentRenderResult>
+  /** 导出到核心指定的工作区外部产物路径,不改变当前 session 的保存状态。 */
+  exportTo?(outputPath: string, format: DocumentFormat, signal: AbortSignal): Promise<void>
   close(): Promise<void>
 }
 
@@ -104,9 +111,35 @@ interface Session {
   queue: Promise<unknown>
   /** 首次打开完成(成功或失败)时 settle。并发打开同一文件的第二个调用方等它 */
   loading: Promise<void>
+  /**
+   * 正在进行的 `handle.close()`。★ 崩溃时 `markCrashed` 会 fire-and-forget 地起一次
+   * 关闭;之后 `closeAll` 再进来时 `handle` 已经是 null,若不复用这个 promise,收尾会
+   * 在 helper 真正退出**之前**就完成,私有目录被删而子进程还在跑。
+   */
+  closing: Promise<void> | null
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
+/**
+ * 单次 tile 的**像素**边长上限。★ 画布请求来自插件视图,不能因为一个错误的缩放值就让
+ * helper 分配超大 RGBA 缓冲;`width * height * 4` 到 `2048 * 2048 * 4` 就是 16 MiB ——
+ * 这个预算是我们**推的,不是量出来的**(没有跑过真实 helper 的峰值内存),所以它只
+ * 约束要分配的像素缓冲,不约束文档单位。超过上限会在进入会话队列前被拒绝,表现为
+ * 明确的 `invalid_operation`,而不是把编辑器和其它文档一起拖慢。
+ */
+const MAX_RENDER_DIMENSION = 2048
+/**
+ * 文档单位坐标 / tile 尺寸的上限。
+ *
+ * 需求:`x` / `y` / `tileWidth` / `tileHeight` 是**文档坐标**,不是像素。A1 表格最后一列
+ * (16384)或 CAD 图纸的坐标轻松超过 2048,用像素上限去卡它们会把正常文档判成非法。
+ * 这里只保证它们是**有界的正 safe integer** —— 有界是为了让 helper 拿到不可能溢出的数,
+ * 1e9 远大于任何真实文档坐标。
+ *
+ * ★ 不要因为一个假 helper 的测试期望就把这些值收到 2048:那是在为测试改产品约束
+ * (看起来是「顺手收紧」,实际会让真实文档的预览失效)。
+ */
+const MAX_RENDER_TILE_UNITS = 1_000_000_000
 /** 回执表上限。★ 不设上限的话一个长会话里 Agent 每次调用都留一条,永不释放 */
 const MAX_OPERATION_RECORDS = 2000
 
@@ -194,7 +227,8 @@ export class DocumentSessionManager {
       workingDir: join(this.options.privateDir, sessionId),
       views: new Set(),
       queue: Promise.resolve(),
-      loading: new Promise<void>((resolve) => { settle = resolve })
+      loading: new Promise<void>((resolve) => { settle = resolve }),
+      closing: null
     }
     this.sessions.set(sessionId, session)
     this.byKey.set(key, sessionId)
@@ -343,6 +377,122 @@ export class DocumentSessionManager {
   }
 
   /**
+   * 从当前活动模型渲染一个 RGBA tile。渲染和修改共用同一条队列，避免 helper 在
+   * 用户输入与 Agent 批次之间读到半更新模型。
+   *
+   * ★ 附件缺失、尺寸不符或协议返回多余字节都按引擎故障处理并标记 crashed；若把
+   * 这类结果当成空白预览，用户会继续编辑一个实际已经失去同步的文档。
+   */
+  render(input: { sessionId: string; scope: DocumentCallerScope; request: unknown }): Promise<DocumentRenderResult & { generation: number; modelRevision: number }> {
+    const session = this.require(input.sessionId, input.scope)
+    const request = validateRenderRequest(input.request)
+    if (typeof request === 'string') return Promise.reject(new DocumentEngineError('invalid_operation', request))
+    return this.enqueue(session, async () => {
+      const handle = session.handle
+      if (session.snapshot.status === 'crashed' || session.snapshot.status === 'recovering' || session.snapshot.status === 'loading' || handle === null) {
+        throw new DocumentEngineError('engine_unavailable', `cannot render while ${session.snapshot.status}`)
+      }
+      // ★ 可选方法只取一次:下面每个分支都用同一个绑定,避免 `?.` 与 `??` 各判一次还各造一个错误
+      const render = handle.render
+      if (render === undefined) throw new DocumentEngineError('unsupported_operation', 'this document engine does not support rendering')
+      const boundRender = render.bind(handle)
+      let rendered: DocumentRenderResult
+      try {
+        rendered = await this.withTimeout((signal) => boundRender(request, signal))
+      } catch (error) {
+        if (error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation')) throw error
+        this.markCrashed(session)
+        throw error instanceof DocumentEngineError ? error : new DocumentEngineError('io', (error as Error).message)
+      }
+      const expectedBytes = request.width * request.height * 4
+      if (rendered.width !== request.width || rendered.height !== request.height || rendered.format !== 'rgba' || rendered.bytes.byteLength !== expectedBytes) {
+        this.markCrashed(session)
+        throw new DocumentEngineError('io', 'document engine returned an invalid render attachment')
+      }
+      return { ...rendered, generation: session.snapshot.generation, modelRevision: session.snapshot.modelRevision }
+    })
+  }
+
+  /**
+   * 导出当前模型到调用方已校验的产物路径。导出不是保存:不改变 dirty / diskRevision,
+   * 也不把 helper 的文件失败记成引擎崩溃。
+   *
+   * ★ 路径由 document RPC 在进入这里前收窄,provider 只能拿到核心决定的路径,且请求的
+   * 是**会话私有目录**里的临时路径 —— helper 一次都不直接写工作区;发布由 `commitExport`
+   * 在临时产物校验通过之后做。
+   *
+   * `overwrite` 默认 false:目标已存在时拒绝而不是覆盖(导出常见于「另存为」,盖掉别人
+   * 放在那里的文件是静默丢数据)。为 true 时用**开始时**目标的摘要做外部冲突检查。
+   */
+  exportDocument(input: {
+    sessionId: string
+    scope: DocumentCallerScope
+    outputPath: string
+    format: DocumentFormat
+    overwrite?: boolean
+  }): Promise<{ snapshot: DocumentSessionSnapshot; outputPath: string }> {
+    const session = this.require(input.sessionId, input.scope)
+    const overwrite = input.overwrite === true
+    return this.enqueue(session, async () => {
+      const handle = session.handle
+      if (session.snapshot.status !== 'ready' || handle === null) throw new DocumentEngineError('engine_unavailable', `cannot export while ${session.snapshot.status}`)
+      if (!handle.capabilities.canExport.includes(input.format)) throw new DocumentEngineError('unsupported_operation', `this document engine cannot export ${input.format}`)
+      // ★ 可选方法只取一次:下面只判一次 undefined,不重复造保护分支
+      const exportMethod = handle.exportTo
+      if (exportMethod === undefined) throw new DocumentEngineError('unsupported_operation', 'this document engine does not support exporting')
+      const exportTo = exportMethod.bind(handle)
+
+      /*
+        需求:导出绝不能落到这个会话(或任何活动会话)正在编辑的**原文件**上 —— 那绕过
+        会话的修订号直接改盘,之后保存的冲突检查就对不上真实内容了。判定必须比 inode:
+        同一个文件经硬链 / 符号链 / 大小写差异有多个名字,只比路径字符串挡不住。
+        不满足会怎样:导出覆盖正在编辑的文件后,会话仍以为盘上是它上次读到的版本。
+      */
+      const targetInfo = await lstatExportTarget(input.outputPath)
+      await this.assertExportTargetAllowed(session, input.outputPath, targetInfo)
+      if (targetInfo !== null && !overwrite) throw new DocumentEngineError('invalid_operation', 'export target already exists; pass overwrite to replace it')
+
+      /*
+        ★ 目标父目录的规范路径在等待 helper 期间必须不变。rpc 进场时检查过一次,但那一次
+        挡不住等待窗口里有人把父目录换成软链 —— 产物于是写到链接指向的别处。realpath 失败
+        直接抛(不吞),否则「解析不了」会被当成「没变化」。
+      */
+      const parentBefore = await this.resolveParent(input.outputPath)
+      const expectedDiskRevision = targetInfo === null ? null : await digestFile(input.outputPath)
+
+      const produced = join(session.workingDir, `export-${this.newId()}.${input.format}`)
+      try {
+        /*
+          需求:helper 调用失败和文件发布失败要分开记账 —— 前者说明引擎可能已经不可用,
+          按崩溃处理;后者只是这一步的文件操作失败,会话账目(dirty / revision)不该被
+          连带改掉,更不能标 crashed。两者混在同一个 catch 里就会把「目标已存在」这种
+          纯发布错误也记成引擎崩溃。
+        */
+        try {
+          await this.withTimeout((signal) => exportTo(produced, input.format, signal))
+        } catch (error) {
+          if (error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation')) throw error
+          this.markCrashed(session)
+          throw error instanceof DocumentEngineError ? error : new DocumentEngineError('io', (error as Error).message)
+        }
+
+        const parentAfter = await this.resolveParent(input.outputPath)
+        if (parentAfter !== parentBefore) throw new DocumentEngineError('io', 'export directory changed while exporting')
+        // helper 跑着的时候目标可能被换成了软链 / 换成非普通文件;lstatExportTarget 会当场抛 io
+        const publishedTarget = await lstatExportTarget(input.outputPath)
+        // 需求：等待导出时别的会话也可能打开目标，发布前必须再核对一次归属。
+        await this.assertExportTargetAllowed(session, input.outputPath, publishedTarget)
+
+        await commitExport(input.outputPath, produced, { overwrite, expectedDiskRevision })
+      } finally {
+        // 临时产物无论发布成功还是失败都清掉,不留半份导出物在私有目录里
+        await rm(produced, { force: true })
+      }
+      return { snapshot: session.snapshot, outputPath: input.outputPath }
+    })
+  }
+
+  /**
    * 保存到原文件。冲突(盘上被别人改过)进入 `conflict`,**不覆盖**。
    * 没有修改时是 no-op,不顶 mtime。
    */
@@ -359,11 +509,16 @@ export class DocumentSessionManager {
       */
       if (!handle.capabilities.canSave) throw new DocumentEngineError('unsupported_operation', 'this document engine cannot save this format in place')
       if (!isSessionDirty(session.snapshot)) return session.snapshot
+      // 需求：helper 保存期间父目录也可能被换成软链，提交前必须核对原始落点未改变。
+      const sourceBefore = await this.resolveRealPath(session.absolutePath)
       const savedModelRevision = session.snapshot.modelRevision
       this.dispatch(session, { type: 'saveStarted' })
       const produced = join(session.workingDir, `save-${this.newId()}.${session.snapshot.format}`)
       try {
         await this.withTimeout((signal) => handle.saveTo(produced, signal))
+        if (await this.resolveRealPath(session.absolutePath) !== sourceBefore) {
+          throw new DocumentEngineError('disk_conflict', 'document path changed while saving')
+        }
         const diskRevision = await commitSave(session.absolutePath, produced, session.snapshot.diskRevision)
         this.dispatch(session, { type: 'saved', diskRevision, savedModelRevision })
         return session.snapshot
@@ -428,10 +583,21 @@ export class DocumentSessionManager {
   /**
    * 收掉某个引擎的全部会话(插件禁用 / 卸载),或者不给 providerId 时收掉全部(退出 / 切账户)。
    * 调用方应先用 `dirtySessions` 处理未保存改动;这里不再询问。
+   * `onlyClean` 是 provider 撤销时的安全分支:脏会话留给上层保存或明确丢弃。
    */
-  async closeAll(providerId?: string): Promise<void> {
+  async closeAll(providerId?: string, options?: { onlyClean?: boolean }): Promise<void> {
+    const onlyClean = options?.onlyClean === true
     const targets = [...this.sessions.values()].filter((s) => providerId === undefined || s.providerId === providerId)
-    await Promise.all(targets.map((session) => this.enqueue(session, () => this.shutdown(session)).catch(() => undefined)))
+    await Promise.all(targets.map((session) => this.enqueue(session, async () => {
+      /*
+        ★ 脏 / 干净必须在**轮到这一刻**重判,不能只按排入队列时的快照过滤:
+        队列里可能已经排着一次保存(它会把这个会话改干净)或一次修改(把它变脏),
+        按排队时的判断收尾就会把「刚被保存的干净会话」留下,或者把「刚变脏的会话」
+        静默关掉。症状是退出时丢了用户还没来得及保存的改动,且全程零报错。
+      */
+      if (onlyClean && isSessionDirty(session.snapshot)) return
+      await this.shutdown(session)
+    }).catch(() => undefined)))
   }
 
   // ─────────────────────────── 内部 ───────────────────────────
@@ -487,10 +653,20 @@ export class DocumentSessionManager {
     void this.closeHandle(session)
   }
 
-  private async closeHandle(session: Session): Promise<void> {
+  /**
+   * 关掉活动 handle 并返回**这次(或上一次仍在进行的)关闭**的 promise。
+   *
+   * ★ 必须是共享的一个 promise,不能每次调用各起一次或直接返回:崩溃路径
+   * (`markCrashed`)是 fire-and-forget 起的关闭,随后 `closeAll` 再进来时 `handle` 已是
+   * null。若这时直接返回,收尾会在 helper 真正退出前完成 —— 私有目录被删、子进程还活着。
+   */
+  private closeHandle(session: Session): Promise<void> {
     const handle = session.handle
-    session.handle = null
-    if (handle !== null) await handle.close().catch(() => undefined)
+    if (handle !== null) {
+      session.handle = null
+      session.closing = handle.close().catch(() => undefined)
+    }
+    return session.closing ?? Promise.resolve()
   }
 
   private async shutdown(session: Session): Promise<void> {
@@ -507,5 +683,100 @@ export class DocumentSessionManager {
       const oldest = this.operations.keys().next().value
       if (oldest !== undefined) this.operations.delete(oldest)
     }
+  }
+
+  /**
+   * 目标父目录的规范路径。解析不了直接抛 io,**不吞**:调用方把「解析失败」当成
+   * 「没变化」会让等待窗口里的替换(父目录被换成软链)蒙混过关。
+   */
+  private async resolveParent(path: string): Promise<string> {
+    try {
+      return await this.resolveRealPath(dirname(path))
+    } catch (error) {
+      throw new DocumentEngineError('io', `cannot resolve export directory: ${(error as Error).message}`)
+    }
+  }
+
+  /**
+   * 需求:导出目标不能是任何**活动会话的原文件** —— 那会绕过它的修订号直接改盘。
+   * 自己这个会话的文件报 `documents.save`(那是正确的写回路径),别的会话的文件只报冲突。
+   */
+  private async assertExportTargetAllowed(session: Session, outputPath: string, targetInfo: Stats | null): Promise<void> {
+    for (const other of this.sessions.values()) {
+      if (other.snapshot.status === 'closed') continue
+      if (!(await this.sameFile(outputPath, targetInfo, other.absolutePath))) continue
+      if (other === session) throw new DocumentEngineError('invalid_operation', 'use documents.save to write the open document')
+      throw new DocumentEngineError('invalid_operation', 'cannot export over a document that is open in another session')
+    }
+  }
+
+  /**
+   * 两个路径是否指向同一个文件。先比 inode(`dev` + `ino`),挡得住硬链与大小写差异;
+   * 目标不存在时退化为规范路径比较(`realpath`),两边任一解析不了就当作不同。
+   */
+  private async sameFile(a: string, aInfo: Stats | null, b: string): Promise<boolean> {
+    // 需求：源文件被外部删除也不能借 export 同路径重建来绕过保存的冲突检查。
+    if (a === b) return true
+    if (aInfo !== null) {
+      try {
+        const bInfo = await stat(b)
+        if (aInfo.dev === bInfo.dev && aInfo.ino === bInfo.ino) return true
+      } catch { /* 另一个会话的原文件按理存在;stat 失败时退回路径比较,不在这里报错 */ }
+    }
+    try {
+      const [ra, rb] = await Promise.all([this.resolveRealPath(a), this.resolveRealPath(b)])
+      return ra === rb
+    } catch {
+      return false
+    }
+  }
+}
+
+/**
+ * 目标当前状态:不存在 → `null`;存在时必须是普通文件(软链写穿会改到别处,非文件不是导出目标)。
+ * 需求:导出前与 helper 返回后各查一次,字段变化(尤其是「变成了软链」)要能被看见。
+ */
+async function lstatExportTarget(path: string): Promise<Stats | null> {
+  try {
+    const info = await lstat(path)
+    if (info.isSymbolicLink()) throw new DocumentEngineError('io', 'export target is a symbolic link')
+    if (!info.isFile()) throw new DocumentEngineError('io', 'export target is not a regular file')
+    return info
+  } catch (error) {
+    if (error instanceof DocumentEngineError) throw error
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw new DocumentEngineError('io', `cannot inspect export target: ${(error as Error).message}`)
+  }
+}
+
+function validateRenderRequest(raw: unknown): DocumentRenderRequest | string {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'render request must be an object'
+  const request = raw as Record<string, unknown>
+  /*
+    需求:像素尺寸与文档坐标是两回事(见 MAX_RENDER_DIMENSION / MAX_RENDER_TILE_UNITS)。
+    `x` / `y` / `tileWidth` / `tileHeight` 只要求是有界正 safe integer,`width` / `height`
+    才是要分配 RGBA 缓冲的像素边长。把两者混在一个上限里会让 A1 表格或 CAD 图纸的正常
+    坐标被判成非法 —— 那是为了迁就假 helper 的测试而收紧产品约束。
+  */
+  const units = ['x', 'y', 'tileWidth', 'tileHeight'] as const
+  for (const key of units) {
+    const value = request[key]
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_RENDER_TILE_UNITS) return `${key} is invalid`
+  }
+  const tileWidth = request.tileWidth as number
+  const tileHeight = request.tileHeight as number
+  if (tileWidth === 0 || tileHeight === 0) return 'render tile dimensions must be positive'
+  const pixels = ['width', 'height'] as const
+  for (const key of pixels) {
+    const value = request[key]
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0 || value > MAX_RENDER_DIMENSION) return `${key} is invalid`
+  }
+  return {
+    x: request.x as number,
+    y: request.y as number,
+    tileWidth,
+    tileHeight,
+    width: request.width as number,
+    height: request.height as number
   }
 }

@@ -724,3 +724,35 @@ describe('applyEvent · 上下文压缩', () => {
     expect(s.lastInputTokens).toBe(624_000)
   })
 })
+
+describe('applyEvent · 思考卡片的实时计时', () => {
+  it('thinking 块起点取上一条内容事件的 at,终点随每个思考增量前移', () => {
+    const s = applyEvents(emptyTranscript(), [
+      { type: 'stream', delta: { type: 'message_start', model: 'm' }, at: 1_000 },
+      { type: 'stream', delta: { type: 'thinking_delta', index: 0, text: '想' }, at: 31_000 },
+      { type: 'stream', delta: { type: 'thinking_delta', index: 0, text: '完' }, at: 32_000 }
+    ])
+    expect(s.live[0]).toMatchObject({ kind: 'thinking', text: '想完', startedAt: 1_000, endedAt: 32_000 })
+  })
+
+  it('正文开始后思考块的终点不再前移 —— 否则正文输出期间思考时长还在涨', () => {
+    const s = applyEvents(emptyTranscript(), [
+      { type: 'stream', delta: { type: 'message_start', model: 'm' }, at: 0 },
+      { type: 'stream', delta: { type: 'thinking_delta', index: 0, text: '想' }, at: 200 },
+      { type: 'stream', delta: { type: 'text_delta', index: 1, text: '答' }, at: 900 },
+      { type: 'stream', delta: { type: 'text_delta', index: 1, text: '案' }, at: 1_500 }
+    ])
+    expect(s.live[0]).toMatchObject({ kind: 'thinking', startedAt: 0, endedAt: 200 })
+    expect(s.live[1]).not.toHaveProperty('startedAt')
+  })
+
+  it('续跑的 message_start 重置起点,不把被丢弃那次尝试的时间算进去', () => {
+    const s = applyEvents(emptyTranscript(), [
+      { type: 'stream', delta: { type: 'message_start', model: 'm' }, at: 0 },
+      { type: 'stream', delta: { type: 'text_delta', index: 0, text: '断' }, at: 100 },
+      { type: 'stream', delta: { type: 'message_start', model: 'm' }, at: 5_000 },
+      { type: 'stream', delta: { type: 'thinking_delta', index: 0, text: '重想' }, at: 6_000 }
+    ])
+    expect(s.live[0]).toMatchObject({ kind: 'thinking', startedAt: 5_000, endedAt: 6_000 })
+  })
+})

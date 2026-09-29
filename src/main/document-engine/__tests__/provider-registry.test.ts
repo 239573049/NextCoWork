@@ -106,6 +106,18 @@ describe('DocumentEngineProviderRegistry', () => {
     expect(closed).toEqual([{ id: 'ncw.office-runtime/office', onlyClean: true }])
   })
 
+  it('refuses a cached entry after disable or after its installation root changes', async () => {
+    const { registry, created, setPlugin } = setup()
+    const before = registry.ensure('ncw.office-runtime/office')
+    const resolveEntry = created[0]?.resolveEntry
+    expect(resolveEntry).toBeDefined()
+    setPlugin(null)
+    await expect(resolveEntry?.()).rejects.toMatchObject({ code: 'engine_unavailable' })
+    setPlugin({ ...hostPlugin(), root: '/replacement/ncw.office-runtime' })
+    await expect(resolveEntry?.()).rejects.toMatchObject({ code: 'engine_unavailable' })
+    expect(registry.ensure('ncw.office-runtime/office')).not.toBe(before)
+  })
+
   it('splits provider ids into plugin and engine parts', () => {
     expect(splitProviderId('ncw.office-runtime/office')).toEqual({ pluginId: 'ncw.office-runtime', engineId: 'office' })
     expect(splitProviderId('/office')).toBeNull()

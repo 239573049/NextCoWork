@@ -36,7 +36,8 @@ import { satisfiesEngine } from './manifest'
  * (图片/Markdown 编辑器类)可以把下限写成 `>=0.3.1`,在 0.3.0 宿主上会以
  * 明确诊断拒绝装载,而不是开出一个 403 的 iframe。
  */
-export const PLUGIN_API_VERSION = '0.3.1'
+// 需求：0.3.2 新增 documents 会话 API；依赖它的插件不能在缺少桥接的旧宿主上激活。
+export const PLUGIN_API_VERSION = '0.3.2'
 
 /**
  * 认得、但已经弃用的 range —— **照常装载,只推一条 warn**。

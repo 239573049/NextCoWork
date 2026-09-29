@@ -106,13 +106,13 @@ export const ACCEPTED_BUT_INACTIVE: readonly UnsupportedContribution[] = [
   },
   {
     /*
-      文档引擎(办公插件的 LibreOffice 承载)。清单、原生组件描述与会话协议已经落地
-      (`shared/document-engine/`、`main/document-engine/`),但原生安装器、helper 进程
-      接线与视图会话通道还没接上 —— 不出这条诊断的话,作者装上引擎插件后打开 .docx
-      会落回普通编辑器,且零提示。接上之后删这一行。
+      文档引擎(办公插件的 LibreOffice 承载)。原先原生安装器、helper 进程与视图通道
+      都没接上；现在宿主会话/RPC 与 helper 已接通，但视图会话通道仍未实现。
+      保留诊断的理由不变：作者装上引擎插件后打开 .docx 仍会落回普通编辑器，不能零提示。
+      视图会话通道接上之后删这一行。
     */
     key: 'documentEngines',
-    reason: 'Document engines are validated, but this host does not install native components or start engine helpers yet. Editors bound to a documentEngine still open through the regular custom-editor path.'
+    reason: 'Document session RPC and native helpers are available, but the editor view session channel is not implemented yet. Editors bound to a documentEngine still open through the regular custom-editor path.'
   }
 ]
 

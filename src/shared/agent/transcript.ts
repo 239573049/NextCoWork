@@ -35,6 +35,16 @@ export interface LiveBlock {
   text: string
   callId?: string
   name?: string
+  /**
+   * 只有 thinking 块写这两格:思考的起点与**最近一次思考增量**的墙钟毫秒。
+   *
+   * 需求:思考卡片实时显示「已思考 N 秒」,提交后换成落盘的 `durationMs` 时不能跳。
+   * 所以起点的口径必须和 `main/kernel/block-accumulator.ts` 逐条一致 ——
+   * 取「这块出现之前最后一条内容事件」(`lastStreamAt`)而不是这块的首个增量,
+   * 理由写在那边 `ThinkingBlock` 的注释里。改这里就得同时改那边。
+   */
+  startedAt?: number
+  endedAt?: number
 }
 
 export interface ToolCallState {
@@ -137,6 +147,11 @@ export interface TranscriptState {
   /** Wall-clock bounds for the currently displayed run. */
   runStartedAt?: number
   runEndedAt?: number
+  /**
+   * 最近一条**内容性**上游事件(`message_start` 与各类内容增量)的墙钟毫秒。
+   * 只给新出现的 thinking 块当起点用,见 `LiveBlock.startedAt`。
+   */
+  lastStreamAt?: number
   model?: string
   /**
    * 这次回复**实际由哪家给的**。★ 和 `RunRequest.modelProviderId`(用户选的那家)
@@ -514,19 +529,25 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             providerId: d.providerId,
             notice: undefined,
             error: undefined,
-            live: []
+            live: [],
+            lastStreamAt: e.at ?? Date.now()
           }
 
         case 'text_delta':
         case 'thinking_delta': {
           const kind = d.type === 'text_delta' ? 'text' : 'thinking'
+          const at = e.at ?? Date.now()
           return {
             ...s,
+            lastStreamAt: at,
             live: upsertBlock(
               s.live,
               d.index,
-              () => ({ index: d.index, kind, text: '' }),
-              (b) => ({ ...b, text: b.text + d.text })
+              // 起点口径见 `LiveBlock.startedAt`:与 block-accumulator 逐条一致
+              () => (kind === 'thinking'
+                ? { index: d.index, kind, text: '', startedAt: s.lastStreamAt ?? at }
+                : { index: d.index, kind, text: '' }),
+              (b) => (b.kind === 'thinking' ? { ...b, text: b.text + d.text, endedAt: at } : { ...b, text: b.text + d.text })
             )
           }
         }
@@ -534,6 +555,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         case 'tool_call_start':
           return {
             ...s,
+            lastStreamAt: e.at ?? Date.now(),
             live: upsertBlock(
               s.live,
               d.index,
@@ -545,6 +567,7 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
         case 'tool_call_delta':
           return {
             ...s,
+            lastStreamAt: e.at ?? Date.now(),
             live: upsertBlock(
               s.live,
               d.index,

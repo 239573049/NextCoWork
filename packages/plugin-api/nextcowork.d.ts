@@ -38,7 +38,7 @@ declare module 'nextcowork' {
   /**
    * 这份垫片的版本。**与清单里的 `engines.nextcowork` 不是一回事**,
    * 但两者都指向同一个东西的两半:前者是运行期垫片,后者是宿主声明它实现了
-   * 哪一版**插件 API**(当前 `0.3.1`,见 `shared/plugin/api-version.ts`)。
+   * 哪一版**插件 API**(当前 `0.3.2`,见 `shared/plugin/api-version.ts`)。
    *
    * ★ `engines.nextcowork` 比的**不是应用版本**。这两个曾被当成同一个,结果是
    * 宿主拿 `app.getVersion()`(2.x)去比 `^0.2.0`,按官方模板写的插件装上一律
@@ -64,6 +64,71 @@ declare module 'nextcowork' {
      * 那些监听器还挂着,而下一次激活会再注册一遍。
      */
     readonly subscriptions: { dispose(): unknown }[]
+  }
+
+  /**
+   * 需求：Office 插件通过受控会话而非整文件覆盖修改文档。仅插件宿主页可调用，
+   * 不是 iframe 的预览画布 API；需要 >=0.3.2。后台工具必须逐次携带 invoke 的 callId。
+   */
+  export namespace documents {
+    export type Format = 'docx' | 'docm' | 'xlsx' | 'xlsm' | 'pptx' | 'pptm' | 'pdf'
+    export interface Scope { callId?: string }
+    export interface SessionRequest extends Scope { sessionId: string }
+    export interface Snapshot {
+      sessionId: string
+      format: Format
+      status: 'loading' | 'ready' | 'saving' | 'conflict' | 'crashed' | 'recovering' | 'closed'
+      generation: number
+      modelRevision: number
+      savedRevision: number
+      diskRevision: string
+      seq: number
+    }
+    export interface Target { generation: number; ref: string }
+    export type Operation =
+      | { kind: 'text.replace'; target: Target; text: string }
+      | { kind: 'text.insert'; target: Target; position: 'before' | 'after' | 'start' | 'end'; text: string }
+      | { kind: 'style.apply'; target: Target; style: string }
+      | { kind: 'cells.set'; sheet: string; range: string; values: (string | number | boolean | null)[][] }
+      | { kind: 'cells.formula'; sheet: string; cell: string; formula: string }
+      | { kind: 'sheet.insert'; name: string; index?: number }
+      | { kind: 'slide.insert'; index: number; layout?: string }
+      | { kind: 'slide.move'; from: number; to: number }
+      | { kind: 'object.delete'; target: Target }
+      | { kind: 'pdf.annotate'; page: number; rect: [number, number, number, number]; text: string }
+      | { kind: 'pdf.formFill'; field: string; value: string }
+    export interface Capabilities {
+      format: Format
+      engineVersion: string
+      operations: Operation['kind'][]
+      canSave: boolean
+      canExport: Format[]
+      canUndo: boolean
+      macros: { list: boolean; run: boolean }
+    }
+    export interface ApplyResult {
+      operationId: string
+      appliedRevision: number
+      dirty: boolean
+      warnings: string[]
+      undoable: boolean
+    }
+    /** 读权限；引擎只能来自自身清单或已声明依赖，不执行文档宏。 */
+    export function open(params: Scope & { path: string; engine?: string }): Thenable<{ sessionId: string; viewId: string; path: string; snapshot: Snapshot; capabilities: Capabilities }>
+    /** 写权限；成功表示活动模型已改变，不代表写盘。 */
+    export function apply(params: SessionRequest & { generation: number; modelRevision: number; operationId: string; operations: Operation[] }): Thenable<ApplyResult>
+    export function save(params: SessionRequest): Thenable<{ snapshot: Snapshot }>
+    /** 写权限；默认不覆盖，禁止替代 documents.save 写回当前文件。 */
+    export function exportDocument(params: SessionRequest & { path: string; format: Format; overwrite?: boolean }): Thenable<{ snapshot: Snapshot; path: string }>
+    export function getState(params: SessionRequest): Thenable<Snapshot>
+    export function getOperation(params: SessionRequest & { operationId: string }): Thenable<
+      | { status: 'missing' }
+      | { status: 'applied'; sessionId: string; result: ApplyResult }
+      | { status: 'rejected'; sessionId: string; code: string }
+      | { status: 'unknown'; sessionId: string }
+    >
+    /** 放下调用方租约；脏模型保留，之后 open 可重新加入。 */
+    export function close(params: SessionRequest): Thenable<{ closed: boolean; dirty: boolean }>
   }
 
   // ─────────────────────────── env ───────────────────────────

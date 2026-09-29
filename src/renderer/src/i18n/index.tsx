@@ -28,6 +28,7 @@ import { goalZh, goalEn } from './goal';
 import { openWithZh, openWithEn } from './open-with';
 import { pluginSkillsZh, pluginSkillsEn } from './plugin-skills';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
+import { thinkingStatsZh, thinkingStatsEn } from './thinking-stats';
 import { widgetZh, widgetEn } from './widget';
 import { migrationZh, migrationEn } from './migration';
 import { accountMenuZh, accountMenuEn } from './account-menu';
@@ -35,6 +36,7 @@ import { rewardsZh, rewardsEn } from './rewards';
 import { walletZh, walletEn } from './wallet';
 import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import { imageGenZh, imageGenEn } from './image-gen';
+import { skillifyZh, skillifyEn } from './skillify';
 import {
   pluginMessages,
   pluginMessagesVersion,
@@ -64,6 +66,7 @@ const ZH: Messages = {
   ...extensionsZh,
   ...gitZh,
   ...compactionZh,
+  ...skillifyZh,
   ...imageGenZh,
   ...pluginUiZh,
   ...usageZh,
@@ -71,6 +74,7 @@ const ZH: Messages = {
   ...searchZh,
   ...builtinSearchZh,
   ...chatNavigationZh,
+  ...thinkingStatsZh,
   ...widgetZh,
   ...migrationZh,
   ...themesZh,
@@ -2045,6 +2049,7 @@ const EN: Messages = {
   ...extensionsEn,
   ...gitEn,
   ...compactionEn,
+  ...skillifyEn,
   ...imageGenEn,
   ...pluginUiEn,
   ...themesEn,
@@ -2059,6 +2064,7 @@ const EN: Messages = {
   ...searchEn,
   ...builtinSearchEn,
   ...chatNavigationEn,
+  ...thinkingStatsEn,
   ...widgetEn,
   ...migrationEn,
   ...accountMenuEn,

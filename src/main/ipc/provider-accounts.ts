@@ -22,14 +22,22 @@
  *   这里只把 `limit.until` 原样下发,格式化成「还有 12 分钟」是渲染层的事。
  */
 import type { CredentialInfo } from '../../shared/domain/provider'
-import { parseCredential } from '../../shared/domain/credential'
+import { bearerOf, parseCredential } from '../../shared/domain/credential'
 import type { ProviderAccount } from '../../shared/domain/provider-account'
 import { providerAccountCredentialRef } from '../../shared/domain/provider-account'
 import { findPreset } from '../../shared/domain/presets'
+import {
+  codingPlanQuotaErrorMessage,
+  codingPlanQuotaRequest,
+  parseCodingPlanQuota
+} from '../kernel/upstream/coding-plan-quota'
+import { codingPlanFamilyFor } from '../../shared/domain/coding-plan'
 import type { ProviderAccountRow } from '../db/provider-accounts'
 import { ensureSeeded, getHost } from '../runtime'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
+import { userAgent } from '../kernel/user-agent'
+import { redactSecrets } from '../kernel/upstream/model-list'
 import { IpcError } from './errors'
 import { infoFor } from './provider'
 
@@ -193,6 +201,90 @@ export async function clearProviderAccountLimit(
 ): Promise<ProviderAccount[]> {
   const row = requireAccount(providerId, accountId)
   store.setProviderAccountLimit(row.id, null)
+  return announceAccounts(providerId)
+}
+
+/**
+ * 主动拉一次这个账号的订阅额度(GLM Coding Plan),快照落进账号行。
+ *
+ * ## 为了什么需求建的
+ *
+ * GLM Coding Plan 的对话响应**不带**额度头,`codex-quota.ts` 那条搭便车的路
+ * 在这家不存在 —— 「还剩多少」只能显式问上游。入口是两处界面的「刷新额度」
+ * (设置页账号行、聊天圆环菜单),不自动轮询:查询本身不耗套餐额度,但一个
+ * 后台定时器会把「看一眼额度」变成一个永远在跑的网络面。
+ *
+ * ## 它依赖谁
+ *
+ * 鉴权头就是这把账号凭证(`bearerOf`):OAuth 登录的 `accessToken` 本来就是
+ * 登录第四跳供应出来的**真 API Key**(`issuers/zcode-bigmodel.ts` 的
+ * `apiKeyProvision`),粘贴的订阅 key 更是 —— 两种凭证在这里同构。
+ */
+export async function fetchProviderAccountQuota(
+  providerId: string,
+  accountId: string
+): Promise<ProviderAccount[]> {
+  const row = requireAccount(providerId, accountId)
+  const provider = store.listProviders().find((p) => p.id === providerId)
+  const family = codingPlanFamilyFor(providerId)
+  if (family === null || provider === undefined) {
+    throw new IpcError('unknown', `供应商「${provider?.name ?? providerId}」不支持订阅额度查询`)
+  }
+  const raw = await getHost().secrets.get(providerAccountCredentialRef(providerId, row.id))
+  const credential = parseCredential(raw)
+  if (credential === null) {
+    throw new IpcError('unknown', '这个账号还没有可用的订阅密钥，请先登录或填入 API Key')
+  }
+  const request = codingPlanQuotaRequest(family, bearerOf(credential))
+
+  let res: Response
+  try {
+    /*
+      ★ 必须有超时(同 `ipc/provider.ts` 的 fetchModels):一个不回包的地址会让
+      「刷新额度」的按钮永远转下去,用户唯一的出路是关掉应用。额度是个轻查询,
+      15 秒(ZCode 同款)足够慢网络,又短到不至于让人以为卡死了。
+    */
+    res = await getHost().fetch(request.url, {
+      headers: { ...request.headers, 'user-agent': userAgent() },
+      signal: AbortSignal.timeout(15_000)
+    })
+  } catch (e) {
+    const reason = e instanceof Error && e.name === 'TimeoutError' ? '超时(15 秒)' : redactSecrets(String(e))
+    throw new IpcError('unknown', `连不上 ${request.url} —— ${reason}`)
+  }
+
+  if (!res.ok) {
+    // ★ body 必须读完,否则连接不会被释放(和 `ipc/provider.ts` 那处同一个理由)
+    const text = await res.text().catch(() => '')
+    throw new IpcError('unknown', codingPlanQuotaErrorMessage(res.status, text))
+  }
+
+  // ★ body 先读成文本再解析:解析失败时要把**原文**记进日志,否则「格式变了」
+  //   和「账号没开通」在界面上是同一句话(2026-09-29 CREDIT_LIMIT 事故的教训)。
+  //   读完文本也顺带释放连接(同上面 `!res.ok` 那条的理由)。
+  const body = await res.text().catch(() => '')
+  let payload: unknown = null
+  try {
+    payload = JSON.parse(body) as unknown
+  } catch {
+    /* 保持 null —— parseCodingPlanQuota 会把它归为 unrecognized,原文在下面日志里 */
+  }
+  const parsed = parseCodingPlanQuota(payload, Date.now())
+  if (parsed.kind === 'unrecognized') {
+    console.error(`[coding-plan-quota] 额度响应无法识别(${parsed.detail}):`, body.slice(0, 800))
+    throw new IpcError('unknown', '额度接口的响应无法识别，可能是上游改了格式')
+  }
+  if (parsed.kind === 'no-quota') {
+    /*
+      ★ 「信封合法但没有可展示的窗口」**不是失败**(同 ZCode 的 noQuotaLimits):
+      未开通套餐、或窗口字段不够画,界面回落到各自的空态。这里**不写库** ——
+      没有可写的快照,而把上一次的旧数清掉需要一个专门的清空通路;留着它 + 界面
+      已有的「N 小时前的数据」标注,比新开一条写路径更诚实。
+    */
+    console.warn(`[coding-plan-quota] 账号没有可展示的额度(provider=${providerId}): ${parsed.detail}`)
+    return announceAccounts(providerId)
+  }
+  store.setProviderAccountQuota(row.id, parsed.snapshot)
   return announceAccounts(providerId)
 }
 

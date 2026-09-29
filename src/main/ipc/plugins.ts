@@ -12,12 +12,13 @@ import { join } from 'node:path'
 import type { ResolvedTheme } from '../../shared/domain/settings'
 import { pluginAppearance, setPluginRuntimeDir } from '../plugin/protocol'
 import type { PluginPermission } from '../../shared/plugin/permission'
-import type { PluginActivity, PluginCatalog } from '../../shared/plugin/state'
+import { isRunnable, type InstalledPlugin, type PluginActivity, type PluginCatalog } from '../../shared/plugin/state'
 import { PLUGIN_API_VERSION } from '../../shared/plugin/api-version'
 import { PLUGINS_DIR, PluginManager } from '../plugin/manager'
 import type { PluginInteractionRequest } from '../../shared/plugin/ui-request'
 import type { PluginScmAdapter } from '../plugin/rpc'
 import { ElectronPluginRuntime, pluginPreloadPath, pluginRuntimeDir } from '../plugin/host-window'
+import { NativeComponentError } from '../plugin/native-installer'
 import { recentActivity } from '../plugin/diagnostics'
 import { setFileChangeListener } from '../kernel/tool/builtin/change-recorder'
 import { setPluginSkillRootsProvider } from '../kernel/skill/load'
@@ -43,8 +44,24 @@ import {
 import { windows } from '../window/registry'
 import { terminalHost } from '../terminal-host'
 import { IpcError } from './errors'
+import { DocumentSessionManager } from '../document-engine/manager'
+import { DocumentEngineProviderRegistry, splitProviderId } from '../document-engine/provider-registry'
+import { NativeDocumentEngineProvider } from '../document-engine/native-host'
+import { PluginDocuments } from '../plugin/document-rpc'
+import { currentConfigScope } from '../db/config-profile'
+import { engineContributionRefusal, helperSpawnRefusal } from './plugin-engines'
 
 let manager: PluginManager | null = null
+let documentLeaseTimer: ReturnType<typeof setInterval> | undefined
+
+/**
+ * 当前这套插件系统在用的文档会话表。
+ *
+ * ★ 留在模块级而不是关在 `startPlugins()` 里,是因为**退出与切账户还要用它**:
+ * 插件系统关掉之后仍然可能有「provider 已经撤销、但会话还挂着」的干净会话,
+ * 那些 helper 没有任何人再去收(见 `shutdownPlugins` 的收尾)。
+ */
+let documentSessions: DocumentSessionManager | null = null
 
 /** 没起来时返回一份空 catalog —— 界面不该因为插件系统没初始化就打不开。 */
 function emptyCatalog(): PluginCatalog {
@@ -136,6 +153,44 @@ export function notifyPluginsThemeChanged(appearance: ResolvedTheme): void {
   manager?.notifyAppearanceChanged(appearance)
 }
 
+/** catalog 里这个插件的投影。插件系统没起来时 catalog 是空的,于是这里拿到 `undefined`。 */
+function catalogPlugin(pluginId: string): InstalledPlugin | undefined {
+  return manager?.catalog().plugins.find((item) => item.id === pluginId)
+}
+
+/**
+ * provider 建立之前的启动门 —— 判据与理由写在 `plugin-engines.ts` 的文件头。
+ *
+ * 返回拒的理由串(`null` = 放行)。**没有插件系统 / 插件不在表里也返回理由**,不返回
+ * 放行:这里少判一种情况,`ensure()` 就会去建一个不该存在的 provider。
+ */
+function providerRefusal(providerId: string): string | null {
+  const parts = splitProviderId(providerId)
+  if (parts === null) return `invalid engine id: ${providerId}`
+  const plugin = catalogPlugin(parts.pluginId)
+  if (plugin === undefined) return `plugin ${parts.pluginId} is not installed`
+  // 同一句判据也写在 `lookupPlugin` 里(那一处回答「能不能当引擎用」)。两处都要:少了
+  // 这里的,`ensureProvider` 会在插件已被停用时放行;少了那一处的,登记表会持有一个
+  // 已经不可用的插件。
+  if (!isRunnable(plugin)) return `plugin ${parts.pluginId} is not enabled`
+  return engineContributionRefusal(plugin, parts.engineId, process.platform, process.arch)
+}
+
+/**
+ * helper **真正 spawn 之前**的那一次现查 —— 按实际入口路径收窄,理由同上。
+ *
+ * ★ 不是 provider 建立时那一次的重复:provider 是缓存的,而插件可能在缓存建立之后被
+ * 禁用 / 撤权(`revokePermissions` 只对必选能力停用插件)/ 升级替换(见
+ * `plugin-engines.ts` 文件头第 2 条)。
+ */
+function helperRefusal(providerId: string, entry: string): string | null {
+  const parts = splitProviderId(providerId)
+  if (parts === null) return `invalid engine id: ${providerId}`
+  const plugin = catalogPlugin(parts.pluginId)
+  if (plugin === undefined) return `plugin ${parts.pluginId} is not installed`
+  return helperSpawnRefusal(plugin, entry)
+}
+
 export async function startPlugins(): Promise<void> {
   if (manager !== null) return
   const host = getHost()
@@ -159,9 +214,101 @@ export async function startPlugins(): Promise<void> {
     pluginPreloadPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() })
   )
 
+  /*
+    需求：插件 API 与原生 helper 共用同一份会话表，不能各自创建一份 DocumentSessionManager。
+    私有目录放在当前账户的数据树下；lookup 用惰性闭包查最新 catalog，禁用/升级后不会
+    继续把旧 provider 当作可用引擎。
+  */
+  const documentRoot = join(host.paths.userData(), 'document-engine')
+  const sessions = new DocumentSessionManager({ privateDir: join(documentRoot, 'sessions') })
+  documentSessions = sessions
+  const providers = new DocumentEngineProviderRegistry({
+    sessions,
+    workRoot: join(documentRoot, 'helpers'),
+    platform: process.platform,
+    arch: process.arch,
+    lookupPlugin: (pluginId) => {
+      const plugin = manager?.catalog().plugins.find((item) => item.id === pluginId)
+      if (plugin === undefined || !isRunnable(plugin)) return null
+      return { pluginId: plugin.id, root: plugin.path, manifest: plugin.manifest }
+    },
+    /*
+      ★ 生产环境的 provider 换掉登记表里那份默认实现,**只为了在 `resolveEntry` 外面多
+      包一层启动门**:`provider` 是缓存的,而插件可能在它建立之后被禁用、被撤权或被升级,
+      真正起进程的时刻是 `NativeDocumentEngineProvider.open` —— 那是唯一拿得到「这次
+      到底要跑哪个文件」的地方(见 `plugin-engines.ts` 文件头第 2 条)。
+
+      ★ 其余字段与登记表的默认实现**保持同一形状**(默认实现见
+      `document-engine/provider-registry.ts` 的构造函数)。这里不是自定义 provider 的地方:
+      要改引擎行为应该改那边,而不是让两份实现慢慢分叉。
+    */
+    createProvider: (options) => new NativeDocumentEngineProvider({
+      id: options.id,
+      formats: options.formats,
+      workRoot: options.workRoot,
+      ...(options.args === undefined ? {} : { args: options.args }),
+      resolveEntry: async () => {
+        const entry = await options.resolveEntry()
+        const refusal = helperRefusal(options.id, entry)
+        if (refusal !== null) {
+          host.logger.warn(`[documents] refused to launch ${options.id}: ${refusal}`)
+          throw new NativeComponentError(`document engine helper may not be launched: ${refusal}`)
+        }
+        const owner = splitProviderId(options.id)?.pluginId
+        if (owner === undefined || await manager?.approveNativeHelper(owner, entry) !== true) {
+          throw new NativeComponentError('document engine helper execution was declined')
+        }
+        // 审批期间可能撤权或替换入口，真正 spawn 前再核一次身份和文件摘要。
+        const verified = await options.resolveEntry()
+        if (verified !== entry || helperRefusal(options.id, verified) !== null) throw new NativeComponentError('document engine changed during approval')
+        return verified
+      }
+    })
+  })
+  const documents = new PluginDocuments({
+    sessions,
+    engineVersion: (id) => catalogPlugin(id)?.manifest.version ?? null,
+    ensureProvider: (id) => {
+      /*
+        ★ provider 建立之前就要过启动门。放在这里而不是 `lookupPlugin` 里,是因为这一层
+        知道**请求的是哪一个引擎贡献**(providerId 里带着 engineId),判定能精确到那一条
+        贡献。拒掉的效果:`PluginDocuments.open` 会继续试下一个候选引擎,一个都没有时
+        报 `engine_unavailable` —— 而不是把 helper 起起来再失败。
+      */
+      const refusal = providerRefusal(id)
+      if (refusal !== null) {
+        host.logger.warn(`[documents] engine ${id} is not usable: ${refusal}`)
+        return null
+      }
+      return providers.ensure(id)
+    },
+    /*
+      ★ **只 retire 这个插件自己**的引擎(providerId 前缀是它的 id)。
+
+      这里以前把 `manifest.dependencies` 里的插件也一并 retire 了 —— 而依赖的语义是
+      「我用了它」,不是「我拥有它」。办公插件族(writer / sheets / slides)共用同一个
+      `ncw.office-runtime`,于是禁用其中一个会把**另外两个**正在编辑的文档会话连着
+      helper 一起收掉;症状是「禁用一个插件,别的插件里开着的表格全没了」,而那两个
+      插件之间看起来毫无关系。
+
+      这个插件自己的 lease / 视图由 `releasePlugin` 收(`document-rpc.ts`);引擎插件
+      自身的 disable / uninstall 会走它自己的 `retireEngines`,不需要邻居代劳。
+    */
+    retireEngines: async (id) => { await providers.retire(id) },
+    accountScope: () => currentConfigScope()
+  })
+  documentLeaseTimer = setInterval(() => { void documents.sweepIdle().catch((error: unknown) => { host.logger.warn(`[documents] idle lease cleanup failed: ${String(error)}`) }) }, 60_000)
+  documentLeaseTimer.unref?.()
+
   manager = new PluginManager({
     host,
     runtime,
+    documents,
+    resolveWorkspace: (id) => {
+      const workspace = store.listWorkspaces().find((item) => item.id === id)
+      if (workspace === undefined || (workspace.environment?.kind ?? 'local') === 'connection') return null
+      return { id: workspace.id, rootPath: workspace.rootPath }
+    },
     pluginRoot: join(host.paths.userData(), PLUGINS_DIR),
     hostVersion: app.getVersion(),
     getKv: (key, fallback) => store.getKv(key, fallback),
@@ -469,7 +616,16 @@ export function replyPluginInteraction(req: { requestId: string; value: unknown 
   pendingInteractions.get(req.requestId)?.(req.value)
 }
 
-export async function shutdownPlugins(): Promise<void> {
+export async function shutdownPlugins(guarded = false): Promise<void> {
+  // 需求：无外部预检的调用也必须先检查 dirty，失败时不能摘接线、丢掉仍可保存的 manager。
+  if (!guarded) {
+    await acquireDocumentGuard()
+    guarded = manager !== null
+  }
+  if (documentLeaseTimer !== undefined) {
+    clearInterval(documentLeaseTimer)
+    documentLeaseTimer = undefined
+  }
   /*
     ★ 挂起的交互全部按取消收口。不收的话,这些 Promise 会连同它们背后的
     插件调用一起永远挂着 —— 而应用正在退出,没有任何人会再来回答。
@@ -490,8 +646,62 @@ export async function shutdownPlugins(): Promise<void> {
     摘掉之后 provider 回落成「没有插件 skill」—— 那在这一刻正是事实。
   */
   setPluginSkillRootsProvider(null)
-  await manager?.shutdown()
-  manager = null
+  const current = manager
+  try {
+    /*
+      ★ `guarded` 由调用方给,判据只有一条:它**已经**自己拿过
+      `acquireDocumentGuard()` 了(退出 / 切账户那两条路都是)。
+      不能在这里重新拿一次:拿过之后 `manager.guardDocumentClose()` 会直接抛,而它抛在
+      哪个 allSettled 里,插件与 helper 就一起收不掉了(理由见 `acquireDocumentGuard`)。
+    */
+    await current?.shutdown(guarded)
+  } finally {
+    manager = null
+    /*
+      需求:插件系统关掉之后不能再留下任何 helper 进程 —— 登记表只 retire「有主人的
+      provider」,而 provider 被升级替换、会话视图已经关掉的那些干净会话没有 lease,
+      谁也轮不到它们去收。切账户尤其致命:那些 helper 的私有工作目录属于**上一个账户**。
+
+      ★ **只收干净会话。** 脏会话一律留着:宁可多留一个进程,也绝不用 `force` 去覆盖
+      用户没保存的文档(`closeAll` 的 `onlyClean` 就是为这条存在的)。
+      包在 `try/finally` 里是因为上面那一步可能抛(会话收尾失败):抛出去之后这几条
+      干净会话仍然必须被收掉,而原来的错误不能被这个收尾覆盖掉。
+    */
+    const sessions = documentSessions
+    documentSessions = null
+    if (sessions !== null) {
+      await sessions.closeAll(undefined, { onlyClean: true }).catch((error: unknown) => {
+        console.warn(`[documents] closing leftover document sessions failed: ${String(error)}`)
+      })
+    }
+  }
+}
+
+/**
+ * 退出 / 切账户之前的**文档安全预检**。
+ *
+ * 需求:在**关窗与切库之前**就问一次「现在能不能收文档会话」—— 它做三件事:挡住新的
+ * `documents.*` 调用、把在途请求排空、并且在还有未保存内容时**拒绝**。拿到返回值 =
+ * 三步都过了。
+ *
+ * ★ 为什么必须在这里,而不是等收尾时各层自己 assert:收尾那一层是
+ * `QuitFlow` 的 `Promise.allSettled`(见 `quit-flow.ts` 的 `drainAsync`),而它**吞掉
+ * 所有失败**。一个「脏 → assert 抛 → 被吞」的收尾,表现是窗口关完了、进程退了、
+ * 用户的改动没了,而全程零报错 —— 这正是这条预检要堵的那一类。所以判据必须发生在
+ * **不可逆的那一步(关窗)之前**,判负时由调用方作废整个退出。
+ *
+ * ★ 拿到之后必须收口:
+ *   - 退出真的开始 → `shutdownPlugins(true)` 接手,闸门一直举到进程结束;
+ *   - 退出被作废(渲染层顶住 unload)→ 调用方**必须调用返回的函数**解除。
+ *     不解除的症状是:界面上什么都没变,但任何文档都打不开,直到重启。
+ *
+ * 返回 `null` = 没有插件系统(没起来过 / 已经关掉),也就没有任何文档会话 ——
+ * 调用方按「无需闸门」继续。
+ */
+export async function acquireDocumentGuard(discardChanges = false): Promise<(() => void) | null> {
+  const current = manager
+  if (current === null) return null
+  return await current.guardDocumentClose(discardChanges)
 }
 
 /**

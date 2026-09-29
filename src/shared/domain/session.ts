@@ -30,6 +30,18 @@ export interface Session {
   parentSessionId?: string
   /** Session created by the scheduler; it is opened from the task history instead of chat navigation. */
   origin?: 'chat' | 'scheduled'
+  /**
+   * 非 undefined = 这是一条「从会话提炼 Skill」的会话,值指向源会话。
+   *
+   * 需求:提炼会话的**每一个** run(包括用户追问的后续轮次)都要看到源会话的摘要,
+   * 所以它必须挂在会话上,而不是像 `planExecution` 那样只挂在某一次 RunRequest 上 ——
+   * 挂在 run 上的症状是第二轮追问时 agent 忽然「忘了」要提炼的是哪段对话。
+   *
+   * ★ 只活在 json 里,没有提列 —— 照 `titleSource` / `modelProviderId` 的先例
+   * (它不参与任何 WHERE / 级联)。源会话被删掉之后这里**不清理**:
+   * 注入侧(`kernel/skill/extraction.ts`)会把它渲染成「源会话已删除」。
+   */
+  skillSource?: { sessionId: string }
   title: string
   /** Stored in session JSON; absent on older exports. Manual names are never auto-replaced. */
   titleSource?: 'default' | 'generated' | 'manual'
@@ -82,6 +94,12 @@ export interface SessionListItem {
    * 它由 `agent:activeRuns` 广播维持,run 一结束就收。
    */
   running: boolean
+  /**
+   * 这一条本身是提炼会话(`Session.skillSource` 有值)。
+   * 需求:侧边栏据此**不画**「提炼为 Skill」菜单项 —— 主进程会拒绝「提炼的提炼」,
+   * 画出来就是一个必然失败的按钮。
+   */
+  skillExtraction?: true
 }
 
 export interface SessionDetail {

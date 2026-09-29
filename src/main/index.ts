@@ -4,7 +4,7 @@
  */
 import { dirname, join } from 'node:path'
 import { copyFileSync, cpSync, existsSync, mkdirSync, statSync } from 'node:fs'
-import { app, shell, BrowserWindow, nativeImage, powerMonitor } from 'electron'
+import { app, shell, BrowserWindow, dialog, nativeImage, powerMonitor } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import appIconPath from '../../resources/icon.png?asset'
 import {
@@ -36,7 +36,7 @@ import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/ro
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
 import { installWidgetProtocol, registerWidgetScheme } from './net/widget-protocol'
 import { installPluginProtocol, registerPluginScheme, setPluginAppearanceResolver } from './plugin/protocol'
-import { shutdownPlugins, startPlugins } from './ipc/plugins'
+import { shutdownPlugins, startPlugins, acquireDocumentGuard } from './ipc/plugins'
 import { applyProxy, installProxyAuth } from './net/proxy'
 import { initRuntime, seedProviderAccounts, shutdownMcp, shutdownSessionTitles, shutdownEnvironments } from './runtime'
 import { GLOBAL_SETTINGS_FILENAME } from './kernel/local-settings'
@@ -55,9 +55,12 @@ import { installUserAgent } from './kernel/user-agent'
 import { installBundledSkills } from './kernel/skill/bundled'
 import { SKILLS_DIR } from './kernel/skill/load'
 import { store } from './state/store'
+import { isAccountSwitchInFlight } from './account-switch'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
 import { QuitFlow } from './quit-flow'
+import { DocumentQuitGuard } from './document-engine/quit-guard'
+import { documentEngineMessage } from '../shared/i18n/document-engine'
 import { titleBarOptions, watchMaximized } from './window/title-bar'
 import { applyThemePreference, resolveTheme, setQuitRequester, setSessionWindowOpener } from './ipc/app'
 import { updateService } from './update/update-service'
@@ -86,6 +89,30 @@ installUserAgent(app.getVersion())
 */
 let quitFlow: QuitFlow | null = null
 let browserBindings: BrowserBindings | null = null
+
+/**
+ * 退出前的**文档闸门**(见 `ipc/plugins.ts` 的 `acquireDocumentGuard`)。
+ *
+ * ★ acquired 为 true 有三个含义,每个都有对应的收口:
+ *   1. 已经排空并且确认没有未保存的文档会话 —— 所以 `before-quit` 里那次关窗
+ *      **可以**开始了(关窗之后渲染层的 `beforeunload` 顶不住也没关系);
+ *   2. 它**没有**被任何 `Promise.allSettled` 吞掉:拿没拿到就是这一处的事实;
+ *   3. 收尾 (`drainAsync`) 必须按 `guarded = true` 调 `shutdownPlugins`,否则那一次
+ *      会重新去拿闸门并抛,插件与 helper 一个都收不掉。
+ *
+ * 退出被作废(渲染层顶住 unload)时必须 `releaseDocumentGuard()` —— 应用要回到完全可用。
+ */
+const documentQuitGuard = new DocumentQuitGuard({
+  isQuitting: () => quitFlow === null || quitFlow.done || quitFlow.inProgress,
+  acquire: acquireDocumentGuard,
+  begin: () => { quitFlow?.begin() },
+  confirmDiscard: async (error) => {
+    // 需求：账户切换占用闸门不是 dirty，不能把它误报为文档未保存、更不能丢弃旧账户。
+    if (isAccountSwitchInFlight()) return false
+    console.warn('[quit] 文档预检未通过:', error)
+    return explainQuitBlocked()
+  }
+})
 
 /**
  * 命令行显式给过 `--user-data-dir` 吗?
@@ -299,6 +326,13 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
   */
   win.webContents.on('will-prevent-unload', () => {
     quitFlow?.veto()
+    /*
+      需求:整次退出作废 = 应用必须**完全可用**,文档也要照常打得开。
+      `veto()` 只管退出状态机,文档闸门在别处(主进程的 `acquireDocumentGuard()`,
+      见 `main/index.ts` 的 `before-quit`);不在这里放开的话,用户选完「取消」之后
+      界面看起来一切正常,而任何文档都打不开(每次调用都被拒),直到重启。
+    */
+    releaseDocumentGuard()
   })
 
   // 任何 window.open / target=_blank 一律不在应用内开新窗口,交给系统浏览器。
@@ -769,12 +803,15 @@ void app
     const child = createMainWindow({ workspaceId, sessionId })
     child.once('ready-to-show', () => child.focus())
   })
-  // 渲染层确认过的重新退出(见 contract 的 app:quitConfirmed)。
-  setQuitRequester(() => {
-    if (quitFlow === null) return
-    quitFlow.begin()
-    app.quit()
-  })
+  /*
+    渲染层确认过的重新退出(见 contract 的 `app:quitConfirmed`)。
+
+    ★ 走**同一个** `requestQuit()`:这条路紧跟在渲染层的「保存 / 丢弃」之后,但主进程
+    并不知道用户刚刚答的是什么 —— 文档会话那一半仍然要再过一次预检。直接
+    `begin()` 的话,一次「用户刚点了取消」的重新退出会把会话在脏的状态下关掉,
+    或者在闸门举着的情况下抛在收尾里被吞掉。
+  */
+  setQuitRequester(() => { requestQuit() })
   registerIpc()
   /*
     ★ **紧接着调,不能往后挪、更不能省。** 建窗在 `registerIpc()` 之前,所以此刻
@@ -946,7 +983,17 @@ quitFlow = new QuitFlow({
   drainAsync: () =>
     Promise.allSettled([
       shutdownMcp(),
-      shutdownPlugins(),
+      /*
+        ★ 闸门是**关窗之前**拿的(见 `requestQuit()`),这里必须把这件事告诉插件系统。
+
+        不告诉的话它会照着自己的默认值再拿一次 —— 而那一刻闸门已经举着,`shutdown()`
+        直接抛 `CapabilityError`,那一声被 `allSettled` 吞掉之后**插件与 helper 一个都
+        收不掉**,表现是「退出之后还有 helper 进程留在机器上」,而日志里什么都没有。
+
+        `documentQuitGuard.acquired === false` 只有一种情况:没有插件系统可闸(启动没过、或插件系统
+        已经关掉),那时 `shutdownPlugins(false)` 只是把接线摘干净。
+      */
+      shutdownPlugins(documentQuitGuard.acquired),
       shutdownEnvironments(),
       browserBindings?.shutdown() ?? Promise.resolve()
     ]),
@@ -975,6 +1022,9 @@ app.on('window-all-closed', () => {
   `preventDefault()` 在这里的作用不是「拦住退出」,而是**把退出推迟到窗口关完
   之后**:关窗要走渲染层的 `beforeunload`,那是异步的。真正放行的是收尾之后
   那一次 `app.quit()`,那时 `quitFlow.done` 已经是 true,这个处理器直接让路。
+
+  ★ 推迟之后**先做文档安全预检再关窗**(`requestQuit()`),这也是 `preventDefault()`
+  第一次承担「这一刻能不能退」这个判断:关窗是整条路上最不可逆的一步。
 */
 app.on('before-quit', (event) => {
   /*
@@ -985,5 +1035,58 @@ app.on('before-quit', (event) => {
   if (!gotTheLock) return
   if (quitFlow?.done === true) return
   event.preventDefault()
-  quitFlow?.begin()
+  requestQuit()
 })
+
+/**
+ * 退出请求的统一入口 —— `before-quit`(上面)与渲染层确认过的那次重新请求都用它。
+ *
+ * ## 为什么不是一行 `quitFlow.begin()`
+ *
+ * `begin()` 会开始关窗，渲染层的 `beforeunload` 可以否决，但不能替主进程判断文档会话。
+ * **文档会话是主进程知道、渲染层不知道的东西**(办公插件打开的
+ * 文件走 `documents.*`,不经过 `stores/documents.ts` 那张表),所以「现在有没有未保存
+ * 的文档」只有主进程答得上来 —— 必须在关窗**之前**问,答不上来时整次退出作废。
+ *
+ * 原先在这里分别记闸门和在途 Promise；现在由可单测的 DocumentQuitGuard 统一拥有：
+ * 退出已在进行时不关第二次窗，预检还在排队时不重拿闸门，窗口否决时释放文档调用。
+ * 原来的理由仍然成立：否则重复点退出会误弹「未保存」，或者取消退出后文档永久不可用。
+ */
+function requestQuit(): void {
+  /*
+    ★ `catch` 不是装饰:预检自己抛(比如读设置拿文案时库已经不在了)时,这是个没人 await
+    的 promise —— 一个未捕获拒绝在 Electron 主进程里只留一行警告,而退出会静默地
+    停在「什么都没发生」上。这里至少留下一条指名道姓的日志。
+  */
+  // 需求：预检错误不能交给收尾的 allSettled 吞掉。begin 自己负责关窗，此处不再 app.quit 重入。
+  void documentQuitGuard.request().catch((error: unknown) => { console.error('[quit] 退出前的文档预检失败:', error) })
+}
+
+/** 退出作废时把闸门放开。幂等 —— 没有举着的时候什么都不做。 */
+function releaseDocumentGuard(): void {
+  documentQuitGuard.veto()
+}
+
+/**
+ * 「还有未保存的文档,这次退出取消了」。
+ *
+ * ★ 为什么是系统对话框:这一刻**不能**把错误交给渲染层 —— 它能显示的东西全都来自
+ * `stores/documents.ts` 那张表,而挡住这次退出的文档在**主进程**(办公插件打开的
+ * 文件)。要么主进程自己说一句,要么用户看到的是「点了退出什么都没有发生」。
+ *
+ * ★ 原先因主进程没有 i18n store 而在这里分支中英文；现在文案在 shared/i18n 的纯表里。
+ * 不引 renderer 的理由保留：预检早于关窗，不应要求一个可用的 React 窗口才能报告失败。
+ */
+async function explainQuitBlocked(): Promise<boolean> {
+  const locale = store.getSettings().locale
+  const { response } = await dialog.showMessageBox({
+    type: 'warning',
+    buttons: [documentEngineMessage(locale, 'documents.quit.cancel'), documentEngineMessage(locale, 'documents.quit.discard')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    message: documentEngineMessage(locale, 'documents.quit.blocked'),
+    detail: documentEngineMessage(locale, 'documents.quit.detail')
+  })
+  return response === 1
+}

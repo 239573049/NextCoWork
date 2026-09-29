@@ -230,8 +230,20 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
     setStatus('declined')
   }
 
+  /*
+    ★ 布局上的两条约束,缺一条都会让终端尺寸进入自激循环:
+    1. 根节点必须 `min-w-0`。xterm 把 `.xterm-screen` 写成 `cols × 字宽` 的定宽像素,
+       flex 子项默认 `min-width: auto` 会被它撑开 → ResizeObserver → fit 多算一列 →
+       再撑开……每帧 +1 列、永不停止;外层 `overflow-hidden` 把多出来的部分裁掉,
+       所以肉眼只看到**跑 claude / codex 时整屏持续闪烁**(每次 resize 都是一次
+       SIGWINCH,全屏 TUI 会清屏重画;普通 shell 几乎不重画,所以看不出来)。
+    2. 内边距不能加在 `hostRef` 上。FitAddon 量的是 xterm 父元素的 computed
+       width/height,border-box 下包含 padding,只扣 `.xterm` 自身的 padding ——
+       padding 放在父元素上会让它多算 ~3 列 / 1 行,右侧被裁,也正是第 1 条循环的推力。
+       所以 padding 落在外面这层 wrapper 上,`hostRef` 保持零 padding。
+  */
   return (
-    <div className="terminal-surface flex min-h-0 flex-1 flex-col" data-terminal-status={status}>
+    <div className="terminal-surface flex min-h-0 min-w-0 flex-1 flex-col" data-terminal-status={status}>
       {status === 'awaiting-approval' && intent && (
         <div className="shrink-0 border-b border-border px-4 py-3 text-[12px]">
           <div className="mb-2 flex items-center gap-2 text-fg"><ShieldCheck size={15} />{t('ssh.terminal.title')}</div>
@@ -251,7 +263,9 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
           <Button size="sm" icon={<Play size={13} />} onClick={() => { void startRef.current?.() }}>{t(status === 'declined' ? 'ssh.terminal.request' : 'ssh.terminal.restart')}</Button>
         </div>
       )}
-      <div ref={hostRef} className="terminal-host min-h-0 flex-1 px-3 py-2" />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2">
+        <div ref={hostRef} className="terminal-host min-h-0 min-w-0 flex-1" />
+      </div>
     </div>
   )
 }

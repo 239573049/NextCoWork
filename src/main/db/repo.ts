@@ -435,6 +435,8 @@ export interface SessionCreateInput {
   thinking?: ThinkingLevel
   rootPathAtCreation?: string
   createdAt?: number
+  /** 提炼会话的源会话。见 `Session.skillSource`。 */
+  skillSource?: { sessionId: string }
 }
 
 function sessionFromRow(row: Record<string, unknown>): Session {
@@ -467,6 +469,9 @@ function sessionFromRow(row: Record<string, unknown>): Session {
       正说明了这种不一致要用硬规则去压。
     */
     ...(typeof parsed.modelProviderId === 'string' ? { modelProviderId: parsed.modelProviderId } : {}),
+    // 同上,只活在 json 里。严格收窄:json 是可以被导入/手改的,形状不对就当没有。
+    ...(typeof parsed.skillSource === 'object' && parsed.skillSource !== null && typeof parsed.skillSource.sessionId === 'string'
+      ? { skillSource: { sessionId: parsed.skillSource.sessionId } } : {}),
     mode: normalizeModeId(row['mode'] ?? parsed.mode),
     thinking: (row['thinking'] ?? parsed.thinking ?? 'auto') as ThinkingLevel,
     rootPathAtCreation: String(row['root_path_at_creation'] ?? parsed.rootPathAtCreation ?? ''),
@@ -498,6 +503,7 @@ export function createSession(input: SessionCreateInput): Session {
     mode: normalizeModeId(input.mode),
     thinking: input.thinking ?? 'auto',
     rootPathAtCreation: input.rootPathAtCreation ?? '',
+    ...(input.skillSource === undefined ? {} : { skillSource: { sessionId: input.skillSource.sessionId } }),
     status: 'idle',
     archived: false,
     favorited: false,
@@ -623,13 +629,15 @@ export function listSessions(workspaceId: string, archived?: boolean): SessionLi
   return rows.map((row) => {
     const r = row as Record<string, unknown>
     const id = String(r['id'])
+    const full = getSession(id)
     return {
       id,
       title: String(r['title']),
       updatedAt: Number(r['updated_at']),
       archived: Number(r['archived']) !== 0,
-      favorited: Boolean(Number((getSession(id) as Session | undefined)?.favorited ?? 0)),
-      running: false
+      favorited: Boolean(Number(full?.favorited ?? 0)),
+      running: false,
+      ...(full?.skillSource === undefined ? {} : { skillExtraction: true as const })
     }
   }).filter((item) => getSession(item.id)?.origin !== 'scheduled')
 }

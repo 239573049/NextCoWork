@@ -119,6 +119,8 @@ import { Tooltip } from "../../components/ui/Tooltip";
 import { cn } from "../../lib/cn";
 import { GoalPanel, GoalPill } from './GoalPanel';
 import { ConversationCostDetails } from './ConversationCostDetails';
+import { CodingPlanQuotaSection } from './CodingPlanQuotaSection';
+import { codingPlanFamilyFor } from '../../../../shared/domain/coding-plan';
 import { parseGoalCommand, type ActiveGoal } from '../../../../shared/domain/goal';
 import { useI18n } from "../../i18n";
 import { updateWorkspace } from "../../services/app";
@@ -226,6 +228,7 @@ export function Composer({
   contextCompacting = false,
   onCompactContext,
   onGoalCommand,
+  onSkillifyCommand,
   goal,
   onManageMcp,
   conversationUsage,
@@ -298,6 +301,12 @@ export function Composer({
    */
   goal?: ActiveGoal;
   onGoalCommand?: (args: string, value: ComposerValue) => boolean | void | Promise<boolean | void>;
+  /**
+   * `/skillify [补充说明]` 的去处:把当前会话提炼成项目 Skill(另开一条提炼会话)。
+   * 缺省 = 这一刻提炼不了(草稿、还没聊过、或自己就是提炼会话),弹层里就不出现这一项 ——
+   * 不画一个注定被主进程拒绝的命令。
+   */
+  onSkillifyCommand?: (args: string) => void;
   /** 归因卡里 MCP 那一行的去处。缺省 = 那一行不可点。 */
   onManageMcp?: () => void;
   /** 整个会话的累计用量，以及最近一轮可计算的输出速度。 */
@@ -581,6 +590,14 @@ export function Composer({
         if (args.trim() === '') setGoalPanelOpen(true);
         else void onGoalCommand(args, value);
       }
+    }]),
+    /*
+      `/skillify` 破例的理由同 `/goal`:它的效果是**另开一条会话**,不是往这条会话里发一段提示词 ——
+      展开成文本发出去,只会让当前会话里的 agent 口头总结一遍,Skill 文件一个都不会落地。
+    */
+    ...(onSkillifyCommand === undefined ? [] : [{
+      command: { name: 'skillify', description: t('composer.command.skillify'), prompt: '', scope: 'builtin' as const, source: '' },
+      run: (args: string): void => onSkillifyCommand(args)
     }])
   ];
   const slashItems: SlashItem[] = [
@@ -767,6 +784,9 @@ export function Composer({
     const action = call === null
       ? undefined
       : localActions.find((a) => a.command.name === call.name.toLowerCase());
+    // 需求:入口不可用时手输 /skillify 不能退化成普通模型请求;用户明确安装的同名模板仍可展开。
+    if (call?.name.toLowerCase() === 'skillify' && action === undefined
+      && !commands.some((command) => command.name.toLowerCase() === 'skillify')) return;
     if (action !== undefined) {
       /*
         ★ 把**此刻**药丸的值一起递出去：`/goal` 设立成功后要注入一条 kickoff，
@@ -2092,6 +2112,16 @@ function ContextRing({
                   }
             }
           />
+          {/*
+            ── 套餐额度 ──
+            需求:GLM Coding Plan 订阅按 5 小时 / 每周窗口扣额度,跑满时请求会失败。
+            圆环回答「窗口装不装得下」,这一块回答「套餐放不放行」—— 两个不同的
+            门槛,后者在订阅制供应商上才存在(判据收口在 shared/domain/coding-plan.ts)。
+            数据与设置页账号行同源(账号行 quota 快照),这里只是第二个视口。
+          */}
+          {model !== undefined && codingPlanFamilyFor(model.providerId) !== null && (
+            <CodingPlanQuotaSection providerId={model.providerId} />
+          )}
           <MenuSeparator />
           <ComposerMenuItem
             icon={<Maximize2 size={16} />}

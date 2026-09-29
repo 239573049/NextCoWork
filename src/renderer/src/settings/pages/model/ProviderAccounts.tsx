@@ -28,6 +28,7 @@ import { useI18n } from "../../../i18n";
 import {
   addProviderAccount,
   clearProviderAccountLimit,
+  fetchProviderAccountQuota,
   listProviderAccounts,
   removeProviderAccount,
   reorderProviderAccounts,
@@ -48,6 +49,7 @@ export function ProviderAccounts({
   providerId,
   rotation,
   busy,
+  quotaFetchable,
   onError,
   onSigningInChange,
 }: {
@@ -56,6 +58,8 @@ export function ProviderAccounts({
   rotation: boolean;
   /** 面板整体的忙态(保存供应商配置等)—— 账号操作自己的忙态在下面单独有一个 */
   busy: boolean;
+  /** 这家是不是订阅制 Coding Plan(决定每行画不画「刷新额度」)。判据收口在 `shared/domain/coding-plan.ts` */
+  quotaFetchable: boolean;
   onError: (message: string) => void;
   /** 登录中要让外面那个面板知道:添加账号是一条会等好几分钟的 invoke */
   onSigningInChange: (signingIn: boolean) => void;
@@ -160,6 +164,7 @@ export function ProviderAccounts({
               now={now}
               isActive={account.id === active}
               busy={disabled}
+              quotaFetchable={quotaFetchable}
               onSetCurrent={() => run(() => setCurrentProviderAccount(providerId, account.id))}
               onToggleEnabled={(enabled) =>
                 run(() => setProviderAccountEnabled(providerId, account.id, enabled))
@@ -169,6 +174,10 @@ export function ProviderAccounts({
               onClearLimit={() => run(() => clearProviderAccountLimit(providerId, account.id))}
               onRename={(label) => run(() => setProviderAccountLabel(providerId, account.id, label))}
               onMove={(delta) => move(account.id, delta)}
+              /* ★ 回的是整份列表(契约约定),直接 setAccounts,不自己合并 */
+              onRefreshQuota={() =>
+                run(() => fetchProviderAccountQuota(providerId, account.id))
+              }
             />
           ))}
         </ul>

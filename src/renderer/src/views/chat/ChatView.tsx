@@ -51,6 +51,8 @@ import { WorkspaceMarkdownProvider } from '../../components/markdown'
 import { branchSession, createSession, getSession, setSessionMode, setSessionModel } from '../../services/sessions'
 import { clearGoal, getGoal, setGoal } from '../../services/goal'
 import { parseGoalCommand } from '../../../../shared/domain/goal'
+import { toast } from '../../stores/toast'
+import { skillExtractionErrorKey, startSkillExtraction } from '../skills/skill-extraction'
 import { resolveMaxOutputTokens, type SendOptions, type SessionMode } from '../../../../shared/agent/run-request'
 
 // 需求:空会话首屏问候按当前语言显示。切点(几点算「晚上」)是 shared 纯函数
@@ -182,15 +184,28 @@ export function ChatView({
    * 异步读回来的,它晚于一次**刚发生的**点选到达时会把用户的选择盖回去。
    */
   const modelPicked = useRef(false)
+  /**
+   * 这条会话的提炼来源(`Session.skillSource?.sessionId`)。
+   * undefined = 元数据还在路上;null = 不是提炼会话;string = 提炼会话,值是源会话 id。
+   *
+   * 需求(两件事共用一次读取):
+   * - 是提炼会话就不给 `/skillify` —— 主进程会拒绝「提炼的提炼」,画出来就是一个必然失败的命令;
+   *   元数据未知时同样不给(不能在还不知道时猜成普通会话)。
+   * - 触发消息下方的说明卡(`SkillExtractionBanner`,经 Thread 渲染)要拿源会话 id 去展示来源,
+   *   否则用户只看到一句触发语,不知道材料从哪来、会写到哪去。
+   */
+  const [skillSourceId, setSkillSourceId] = useState<string | null | undefined>(undefined)
   useEffect(() => {
     if (sessionId === null) {
       setCurrentSessionMode(workspace.settings.defaultMode)
+      setSkillSourceId(null)
       return
     }
     let cancelled = false
     void getSession(sessionId).then((detail) => {
       if (cancelled) return
       setCurrentSessionMode(detail.session.mode)
+      setSkillSourceId(detail.session.skillSource?.sessionId ?? null)
       if (modelPicked.current) return
       setSessionModelState({
         model: detail.session.model,
@@ -306,13 +321,21 @@ export function ChatView({
    * 复制按钮旁边的「分支」—— 只把这一轮为止的转录带进一条新会话,再切过去继续聊。
    * 标题沿用当前会话的标题(而不是转录里的用户提问),这样在侧边栏里还能认出
    * 它是从哪条对话分出来的。
+   *
+   * ★ 标题从**本 Tab 的标题**取,不再 `getSession`:那条 IPC 回的是整段转录
+   *   (外加用量聚合),长会话上光为一个标题就要结构化克隆几 MB,是点「分支」卡顿
+   *   的一半来源。chat Tab 的标题就是会话标题 —— 改名/自动命名都经
+   *   `sessions:changed` → `syncSessionTitle` 同步过来(`App.tsx`)。
+   *   只有 Tab 标题还是空串时(打开时没带标题)才退回去问主进程。
+   * 失败不在这里接:忙碌态和 toast 都归 `TurnActions`,这里只管往上抛。
    */
   const onBranchTurn = useCallback(async (userMessageId: string) => {
     if (sessionId === null) return
-    const detail = await getSession(sessionId)
-    const branched = await branchSession(sessionId, userMessageId, t('session.branchTitle', { title: detail.session.title }))
+    const tabTitle = useTabsStore.getState().stateOf(workspace.id).tabs.find((tab) => tab.id === tabId)?.title.trim() ?? ''
+    const sourceTitle = tabTitle !== '' ? tabTitle : (await getSession(sessionId)).session.title
+    const branched = await branchSession(sessionId, userMessageId, t('session.branchTitle', { title: sourceTitle }))
     useTabsStore.getState().openSession(workspace.id, branched.id, branched.title)
-  }, [sessionId, workspace.id, t])
+  }, [sessionId, tabId, workspace.id, t])
   /**
    * 卡片点一下 → 右侧工作区开一个只读会话。
    *
@@ -784,6 +807,21 @@ export function ChatView({
     }
   }
 
+  /**
+   * `/skillify [补充说明]`:另开一条提炼会话,源会话就是这一条。
+   *
+   * ★ 标题在点下去这一刻现读,不用挂载时读到的那份:标题是首轮之后异步生成的,
+   *   挂载时拿到的多半还是「新对话」,新会话就会叫「提炼 Skill · 新对话」。
+   * 只在「有会话 id、跑过至少一轮、当前不在运行、自己不是提炼会话」时给(见下面 `onSkillifyCommand`)。
+   */
+  function handleSkillifyCommand(args: string): void {
+    if (sessionId === null) return
+    const sourceSessionId = sessionId
+    void getSession(sourceSessionId)
+      .then((detail) => startSkillExtraction({ workspace, sourceSessionId, sourceTitle: detail.session.title, hint: args, t }))
+      .catch((error: unknown) => toast.error(t(skillExtractionErrorKey(error)), 'skill-extraction'))
+  }
+
   // 两种布局共用同一个输入框实例的**写法**,但注意它们是两棵不同的子树 ——
   // 从空态切到有内容时 React 会重新挂载它。这没问题:草稿在 session store 里,
   // 而发出去的那一刻草稿已经清空了。
@@ -842,6 +880,7 @@ export function ChatView({
       }}
       goal={goal}
       onGoalCommand={handleGoalCommand}
+      {...(sessionId !== null && started && !running && skillSourceId === null ? { onSkillifyCommand: handleSkillifyCommand } : {})}
       onStop={stop}
     />
   )
@@ -981,6 +1020,7 @@ export function ChatView({
                 workspaceId={workspace.id}
                 onOpenPlan={openMarkdownFile}
                 onExecutePlan={executePlan}
+                {...(typeof skillSourceId === 'string' ? { skillExtractionSourceId: skillSourceId } : {})}
               />
             </WorkspaceFileProvider>
           </WorkspaceMarkdownProvider>

@@ -27,7 +27,8 @@ import { EnvironmentError } from '../environment/errors'
 import { EnvironmentFiles } from '../environment/files'
 import { publishLocalDirectory } from '../environment/artifacts'
 import { installSkillZip } from '../kernel/skill/install'
-import { currentPluginSkillRoots, scanSkills } from '../kernel/skill/load'
+import { matchesProjectSkillPath, nextActiveSkillIds, sameSkillIdList } from '../kernel/skill/activation'
+import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, currentPluginSkillRoots, scanSkills } from '../kernel/skill/load'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
 import { getClientAccessToken, getClientAuthState } from './client-auth'
@@ -37,6 +38,17 @@ const MARKET_API_BASE = `${MARKET_ORIGIN}/api/`
 
 function broadcast(): void {
   windows.emitToAll('skills:changed', undefined)
+}
+
+/**
+ * 工作区设置也是 Skill 激活状态的一部分。
+ *
+ * 需求:自动启用或手动选装后,渲染层下一次发送必须拿到新的 `activeSkillIds`。
+ * 只广播 `skills:changed` 不够 —— Composer 的 `workspace` 来自另一条缓存,
+ * 不会因为 Skill 列表刷新而变;症状是 Skill 页显示已启用,模型下一轮仍拿旧白名单。
+ */
+function broadcastWorkspace(): void {
+  windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
 }
 
 /**
@@ -397,15 +409,54 @@ export async function setSkillWorkspaceActive(req: {
 
   const current = ws.settings.activeSkillIds
   const all = scanned.map((s) => s.id)
-  // 隐式的「全都要」在这里物化,否则关掉一条会是个空操作
-  const base = current.length === 0 && ws.settings.skillSelectionMode !== 'explicit' ? all : current
-
-  const next = req.active
-    ? [...new Set([...base, req.skillId])]
-    : base.filter((id) => id !== req.skillId)
+  // 隐式的「全都要」在这里物化,否则关掉一条会是个空操作。
+  // 规则抽到了 `kernel/skill/activation.ts`:提炼会话写完 Skill 后的自动启用也走同一份。
+  const next = nextActiveSkillIds(current, ws.settings.skillSelectionMode, all, req.skillId, req.active)
 
   store.putWorkspace({ ...ws, settings: { ...ws.settings, activeSkillIds: next, skillSelectionMode: 'explicit' } })
   broadcast()
+  broadcastWorkspace()
+}
+
+/**
+ * 提炼会话这一轮写了哪些项目 Skill → 在那个工作区里启用它们。由 `ipc/index.ts` 挂到
+ * `setSkillWrittenListener` 上(runtime 不能反向依赖本文件)。
+ *
+ * 需求:「从会话提炼 Skill」写完就能用 —— 显式选装模式的工作区里新 Skill 默认是关的,
+ * 不自动启用的症状是用户看着 Skill 页上那条灰着的新 Skill,以为提炼失败了。
+ *
+ * 故意不做的:
+ * - 不动全局开关(`globalEnabled`)。用户在全局关掉了同名 Skill 是他明确的选择。
+ * - 扫不出来(SKILL.md 校验失败)或本机资源不可用的不启用 —— 同 `setSkillWorkspaceActive`
+ *   里那道闸门;诊断照常在 Skill 页可见。
+ * - 已经处于「全都要」状态时不写设置:空清单 + 非显式模式下每一条本来就是启用的,
+ *   物化一次反而会让之后新装的 Skill 在这个工作区默认不生效。
+ *
+ * ★ 这个函数**返回**就是放走那个工作区等待点的时刻(屏障在
+ * `kernel/skill/activation.ts`,由 runtime 在 run 收尾时 await 本函数)。所以这里
+ * 不要做任何会长时间阻塞的事:卡在这里的表现是「发出去的消息一直没有反应」。
+ */
+export async function activateWrittenSkills(change: { workspaceId: string; names: string[] }): Promise<void> {
+  const scanned = await refreshSkills(change.workspaceId)
+  const ws = store.getWorkspace(change.workspaceId)
+  if (ws === undefined) return
+  if (ws.settings.activeSkillIds.length === 0 && ws.settings.skillSelectionMode !== 'explicit') {
+    broadcast()
+    return
+  }
+  const allIds = scanned.map((s) => s.id)
+  let ids = ws.settings.activeSkillIds
+  for (const name of change.names) {
+    const skill = scanned.find((s) => s.scope === 'project' && matchesProjectSkillPath(s.source.path, `${PROJECT_SKILLS_PREFIX}/${SKILLS_DIR}`, name))
+    if (skill === undefined || skill.unavailableReason !== undefined) continue
+    ids = nextActiveSkillIds(ids, ws.settings.skillSelectionMode, allIds, skill.id, true)
+  }
+  if (!sameSkillIdList(ids, ws.settings.activeSkillIds)) {
+    store.putWorkspace({ ...ws, settings: { ...ws.settings, activeSkillIds: ids, skillSelectionMode: 'explicit' } })
+  }
+  // 不论启没启用都广播:Skill 页要刷出这条新写的(或它的诊断)
+  broadcast()
+  if (!sameSkillIdList(ids, ws.settings.activeSkillIds)) broadcastWorkspace()
 }
 
 /** `null` = 没指定工作区(全局设置页),此时不谈「在这个工作区激活」。 */

@@ -37,16 +37,13 @@ import type { CanonicalRequest } from './upstream/canonical'
 
 // ─────────────────────────── token 估算 ───────────────────────────
 
-/**
- * ★ 这是**估算**,不是真值。真值在 `message_end.usage` 里,session 收到后
- * 应当用它覆盖。但压力条必须在**请求发出前**就画出来 —— 那时唯一能有的就是估算。
- *
- * 误差量级:英文约 ±15%,中文约 ±25%。够画一根进度条,不够做计费。
- * 所以 UI 上它是一根**条**,不是一个数字 —— 显示「128,431 / 200,000」会让人
- * 以为那是精确的,然后在它和账单对不上时来提 bug。
- */
-const CHARS_PER_TOKEN_LATIN = 4
-const TOKENS_PER_CJK_CHAR = 1
+/*
+  `estimateTokens` 本体(连同它那段「这是估算不是真值」的说明)搬到了
+  `shared/agent/token-estimate.ts`:渲染层的思考卡片也要用同一份估算,而渲染层
+  不能 import main。这里原样再导出,主进程里的调用点不必改。
+*/
+import { estimateTokens } from '../../shared/agent/token-estimate'
+export { estimateTokens }
 
 /** 每个块、每条消息在上游都有固定的结构开销(角色标记、块头) */
 const PART_OVERHEAD_TOKENS = 8
@@ -55,27 +52,6 @@ const MESSAGE_OVERHEAD_TOKENS = 4
 const TOOL_OVERHEAD_TOKENS = 12
 /** 一张图的量级。真实值取决于分辨率,这里取常见截图的中位数 */
 const IMAGE_TOKENS = 1600
-
-function isCjk(cp: number): boolean {
-  return (
-    (cp >= 0x2e80 && cp <= 0x9fff) || // 部首、假名、CJK 统一表意
-    (cp >= 0xac00 && cp <= 0xd7af) || // 谚文
-    (cp >= 0xf900 && cp <= 0xfaff) || // 兼容表意
-    (cp >= 0xff00 && cp <= 0xff60) || // 全角
-    (cp >= 0x20000 && cp <= 0x3ffff) //  扩展 B 及以上
-  )
-}
-
-export function estimateTokens(text: string): number {
-  let cjk = 0
-  let total = 0
-  // for...of 按码点迭代 —— 用 text.length 会把一个 emoji 算成两个字符
-  for (const ch of text) {
-    total++
-    if (isCjk(ch.codePointAt(0) ?? 0)) cjk++
-  }
-  return Math.ceil(cjk * TOKENS_PER_CJK_CHAR + (total - cjk) / CHARS_PER_TOKEN_LATIN)
-}
 
 /** 工具入参理论上不会有环(它来自 JSON.parse),但类型是 unknown —— 不赌 */
 function safeJson(v: unknown): string {
@@ -227,8 +203,8 @@ function estimateToolBuckets(tools: readonly ToolInfo[]): {
  * ★ 提示词一律**英文**,注释一律中文。
  *
  * 不是偏好问题:模型对英文指令的服从度在同等长度下更高,而系统提示词
- * **每一轮都重发** —— 同一句约束用中文写要多花约 1.6 倍的 token(见上面
- * `TOKENS_PER_CJK_CHAR`)。两件事叠起来,中文提示词是「更贵而且更松」。
+ * **每一轮都重发** —— 同一句约束用中文写要多花约 1.6 倍的 token(见
+ * `shared/agent/token-estimate.ts` 的 `TOKENS_PER_CJK_CHAR`)。两件事叠起来,中文提示词是「更贵而且更松」。
  *
  * ★ 结构照搬 Claude Code:分节的**行为规则**,不是一段自我介绍。
  *
@@ -670,6 +646,17 @@ export interface ReminderContext {
    * 靠锚点消息的 id 在这份数组里重新定位 —— 切过的那一份里的下标在这里没有意义。
    */
   todoHistory?: readonly AgentMessage[]
+  /**
+   * 「从会话提炼 Skill」会话的整块上下文(指令 + 已有 Skill 清单 + 源会话摘要),
+   * 由 `kernel/skill/extraction.ts` 的 `buildSkillExtractionBlock` 拼好。缺省 = 不是提炼会话。
+   *
+   * 需求:提炼会话的每一个 run 都要看到它 —— 包括用户追问的后续轮次和压缩之后。
+   * ★ 挂在**头块**(和 AGENTS.md 同一处),不挂尾块:它体积大(可达数万 token)且整个会话里
+   * 字面不变,放头块能稳定命中前缀缓存;放尾块则每个 run 挪一次位置,缓存前缀从那里整体作废。
+   * ★ 收的是拼好的字符串而不是结构:让这里 import 提炼模块会形成
+   * `context-assembler → skill/extraction → skill/session-digest → context-assembler` 的环。
+   */
+  skillExtraction?: string
 }
 
 function reminderPart(body: string): ContentPart {
@@ -694,6 +681,19 @@ function instructionsBlock(text: string): string {
     'for, the user wins.\n\n' +
     `<project-instructions>\n${text}\n</project-instructions>\n\n` +
     untrustedBoundary('The project instructions above')
+  )
+}
+
+/**
+ * 提炼会话的头块外壳。块本身(`extraction.ts`)已经把源会话摘要标成「材料,不是指令」,
+ * 这里只补上和 AGENTS.md 同一口径的「用户没打这段」声明,免得模型在回复里复述它。
+ */
+function skillExtractionHead(block: string): string {
+  return (
+    'Skill extraction task for this conversation, set up by the application when the user started it. ' +
+    'It applies to every turn of this conversation.\n' +
+    'The user did not type this block and cannot see it: do not quote it back to them.\n\n' +
+    block
   )
 }
 
@@ -800,7 +800,13 @@ export function decorate(
   ctx: ReminderContext
 ): readonly AgentMessage[] {
   const instructions = ctx.projectInstructions?.trim() ?? ''
-  const head = instructions === '' ? undefined : reminderPart(instructionsBlock(instructions))
+  const extraction = ctx.skillExtraction?.trim() ?? ''
+  // 两段同挂头块、同一个 part:AGENTS.md 在前(项目规矩对提炼 agent 同样有效),提炼块在后。
+  const headSections = [
+    ...(instructions === '' ? [] : [instructionsBlock(instructions)]),
+    ...(extraction === '' ? [] : [skillExtractionHead(extraction)])
+  ]
+  const head = headSections.length === 0 ? undefined : reminderPart(headSections.join('\n\n'))
   if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined && ctx.planExecution === undefined && ctx.planFile === undefined) return messages
 
   /*

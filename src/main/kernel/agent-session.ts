@@ -226,6 +226,11 @@ export interface SessionDeps {
    */
   personalization?: PersonalizationSettings
   planExecution?: PlanExecutionContext
+  /**
+   * 提炼会话的头块(`kernel/skill/extraction.ts` 拼好的整块)。run 开始时读一次的快照,
+   * 只对主 run 给;缺省 = 这不是提炼会话。注入位置与理由见 `ReminderContext.skillExtraction`。
+   */
+  skillExtraction?: string
   contextManagement?: ContextManagementSettings
   /**
    * 设置 › 通用 › Agent 的压缩模型那一对 + 档位,run 开始时的快照(同 `maxOutputTokens`)。
@@ -617,6 +622,7 @@ export class AgentSession {
           ? { projectInstructions: this.deps.projectInstructions }
           : {}),
         ...(this.deps.git !== undefined ? { git: this.deps.git } : {}),
+        ...(this.deps.skillExtraction !== undefined ? { skillExtraction: this.deps.skillExtraction } : {}),
         /*
           ★ 从**注册表**查外部名,不从上面那份 `advertised` 快照里取。
           那份被 `readOnlyOnly` / `allowList` / `network` 过滤过 —— 一个 `tools:`
@@ -868,8 +874,10 @@ export class AgentSession {
       sessionId: this.req.sessionId
     }), this.handle.signal)) {
       this.handle.signal.throwIfAborted()
-      this.handle.emit({ type: 'stream', delta: ev })
-      acc.apply(ev)
+      // 同一个戳给事件和 accumulator:思考卡片的实时计时与落盘时长必须同一只表(见 event.ts `stream.at`)
+      const at = this.deps.host.clock.now()
+      this.handle.emit({ type: 'stream', delta: ev, at })
+      acc.apply(ev, at)
       if (ev.type === 'message_end') {
         stopReason = ev.stopReason
         ended = true

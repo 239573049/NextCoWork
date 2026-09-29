@@ -17,6 +17,7 @@ import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../
 import { formatTokenCount } from '../../../../shared/agent/tokens'
 import { formatCostMicros } from '../../../../shared/domain/pricing'
 import type { LiveBlock, SubagentState, TranscriptState } from '../../../../shared/agent/transcript'
+import { thinkingStatsOfLive, thinkingStatsOfPart } from '../../../../shared/agent/thinking-stats'
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { AgentMarkdown } from '../../components/markdown'
 import { Tooltip } from '../../components/ui/Tooltip'
@@ -40,6 +41,7 @@ import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { FOLD_HOLD_MS, useFoldAnchor } from './useFoldAnchor'
 import { CompactionDivider } from './CompactionDivider'
+import { SkillExtractionBanner } from './SkillExtractionBanner'
 import { GoalStatusCard } from './GoalStatusCard'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
 import { assistantSegments, assistantText, isAssistantTextBlock, isPinnedToolBlock, lastTurnIndex, promptOf, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
@@ -68,6 +70,7 @@ export const Thread = memo(function Thread({
   workspaceId,
   onOpenPlan,
   onExecutePlan,
+  skillExtractionSourceId,
   readOnly = false
 }: {
   sessionId?: string
@@ -103,6 +106,14 @@ export const Thread = memo(function Thread({
   workspaceId?: string
   onOpenPlan?: (path: string) => void
   onExecutePlan?: (ref: { planId: string; path: string }, source: 'current_session' | 'new_session') => void
+  /**
+   * 提炼会话的源会话 id。给了就在**触发消息下方**渲染说明卡
+   * (`SkillExtractionBanner`)—— 用户要知道材料从哪来、会写到哪去,
+   * 而触发消息本身只有一句标题。缺省 = 不是提炼会话,什么都不渲染。
+   * 判定用「转录第一条消息的 id」定位触发语:它就是首条 user 消息,
+   * 用户删掉那一轮时卡片随之消失,是合理的跟随行为。
+   */
+  skillExtractionSourceId?: string
   /** 助手消息上方那行 `供应商 / 模型`(截图:`RoutinAI / claude-fable-5-1`) */
   providerName: string | undefined
   /**
@@ -173,6 +184,12 @@ export const Thread = memo(function Thread({
   )
 
   const rows = threadRows(messages, live, running, transcript.messageRuns)
+  /*
+    需求:提炼说明卡要贴在**触发消息下方**(用户的阅读顺序:一句话 → 这条会话
+    在干什么),不是钉在视图顶部。定位用转录第一条消息的 id —— 它就是触发语;
+    那一轮被删掉时卡片跟着消失,不额外做防御。
+  */
+  const extractionTriggerId = skillExtractionSourceId === undefined ? undefined : messages[0]?.id
   const turns = threadTurnGroups(rows)
   const navigationItems = turnNavigationItems(turns, t('chat.navigation.untitled'))
   /*
@@ -235,6 +252,15 @@ export const Thread = memo(function Thread({
             return <CompactionDivider key={row.key} boundary={row.boundary} foldedCount={row.foldedCount} />
           }
           if (row.kind === 'user') {
+            // 提炼触发语下面挂说明卡;其余 user 消息照旧。
+            if (extractionTriggerId !== undefined && row.message.id === extractionTriggerId) {
+              return (
+                <div key={row.key} className="flex flex-col gap-2.5">
+                  <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
+                  {skillExtractionSourceId !== undefined && <SkillExtractionBanner sourceSessionId={skillExtractionSourceId} />}
+                </div>
+              )
+            }
             return <UserBubble key={row.key} message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
           }
           if (row.kind === 'plan-receipt') {
@@ -953,7 +979,7 @@ function PartBlock({
       case 'text':
         return <AgentMarkdown content={liveBlock.text} streaming={cursor} />
       case 'thinking':
-        return <ThinkingBlock text={liveBlock.text} streaming={streaming} />
+        return <ThinkingBlock text={liveBlock.text} streaming={streaming} stats={thinkingStatsOfLive(liveBlock)} />
       case 'tool_use':
         return <ToolCallCard call={liveBlock.callId === undefined ? undefined : tools[liveBlock.callId]}
           name={liveBlock.name ?? t('chat.tool.name')} input={liveBlock.text} />
@@ -964,7 +990,7 @@ function PartBlock({
     case 'text':
       return part.text.trim() === '' ? null : <AgentMarkdown content={part.text} />
     case 'thinking':
-      return <ThinkingBlock text={part.text} streaming={false} />
+      return <ThinkingBlock text={part.text} streaming={false} stats={thinkingStatsOfPart(part)} />
     case 'tool_call':
       return (
         <ToolCallCard call={tools[part.callId]} name={part.name} input={part.input} />

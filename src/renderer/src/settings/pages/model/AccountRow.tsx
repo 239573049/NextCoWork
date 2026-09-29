@@ -19,7 +19,7 @@
  * - **不画后端接不住的控件**(§5):没有限流就没有「立即解除」按钮。
  */
 import { useState, type ReactNode } from "react";
-import { Check, LogIn, Star, Trash2, GripVertical } from "lucide-react";
+import { Check, LogIn, RefreshCw, Star, Trash2, GripVertical } from "lucide-react";
 import type { ProviderAccount } from "../../../../../shared/domain/provider-account";
 import { accountDisplay } from "../../../../../shared/domain/provider-account";
 import { Button } from "../../../components/ui/Button";
@@ -57,6 +57,7 @@ export function AccountRow({
   now,
   isActive,
   busy,
+  quotaFetchable,
   onSetCurrent,
   onToggleEnabled,
   onRemove,
@@ -64,6 +65,7 @@ export function AccountRow({
   onClearLimit,
   onRename,
   onMove,
+  onRefreshQuota,
 }: {
   account: ProviderAccount;
   /** 由父组件的单一 tick 喂进来 —— 每行自己起定时器会让它们互相错开半秒 */
@@ -71,6 +73,14 @@ export function AccountRow({
   /** 「下一次请求会用它」。★ 和 `account.current` 是两件事,见 selectAccount 的注释 */
   isActive: boolean;
   busy: boolean;
+  /**
+   * 这家的订阅额度能不能主动拉(GLM Coding Plan 那两家)。
+   *
+   * ★ 需求:额度数据有两类来源 —— Codex 从响应头搭便车(GLM 没有这个来源),
+   * 订阅制那两家只能显式发一次查询。没有这个标志的话,要么给所有家画一个
+   * 点了必 400 的按钮,要么让订阅账号永远没有入口。
+   */
+  quotaFetchable: boolean;
   onSetCurrent: () => void;
   onToggleEnabled: (enabled: boolean) => void;
   onRemove: () => void;
@@ -79,6 +89,7 @@ export function AccountRow({
   onRename: (label: string) => void;
   /** 键盘路径:鼠标能拖的,键盘也要能移(§8「要么都通,要么都不画」) */
   onMove: (delta: -1 | 1) => void;
+  onRefreshQuota: () => void;
 }): ReactNode {
   const { t, locale } = useI18n();
   const [renaming, setRenaming] = useState(false);
@@ -174,6 +185,19 @@ export function AccountRow({
               {t("providerAccount.clearLimit")}
             </Button>
           )}
+          {/* ★ 只在订阅制那两家出现:额度是显式查询来的,不是搭便车(见 props 注释) */}
+          {quotaFetchable && (
+            <button
+              type="button"
+              title={t("providerAccount.quota.refresh")}
+              aria-label={t("providerAccount.quota.refresh")}
+              disabled={busy}
+              onClick={onRefreshQuota}
+              className="flex size-7 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-tint-strong hover:text-fg disabled:opacity-40 motion-reduce:transition-none"
+            >
+              <RefreshCw size={13} aria-hidden />
+            </button>
+          )}
           {badge === "needs-reauth" && (
             <Button size="sm" variant="accent" icon={<LogIn size={12} />} disabled={busy} onClick={onReauth}>
               {t("providerAccount.reauth")}
@@ -247,26 +271,44 @@ export function AccountRow({
         </div>
       </div>
 
-      <AccountQuota account={account} now={now} />
+      <AccountQuota account={account} now={now} quotaFetchable={quotaFetchable} />
     </li>
   );
 }
 
 /**
- * Codex 的两条额度条。
+ * 账号行下的额度条(5 小时 / 每周)。
  *
- * ★ 其余 issuer 的 `quota` 恒为 undefined(主进程只给 ChatGPT 解析),
- * 所以这里不需要按 issuer 判断 —— 少一处会和主进程分叉的地方。
+ * ★ 两类来源在「没有数据」时说**不同的话**:Codex 的数据只在发消息时搭便车回来
+ * (提示「发一条消息后更新」),订阅制那两家是显式查询来的(提示去点「刷新额度」)。
+ * 合成一句话的表现是:GLM 用户照着「发一条消息」等一个永远不会来的更新。
  */
-function AccountQuota({ account, now }: { account: ProviderAccount; now: number }): ReactNode {
+function AccountQuota({
+  account,
+  now,
+  quotaFetchable,
+}: {
+  account: ProviderAccount;
+  now: number;
+  quotaFetchable: boolean;
+}): ReactNode {
   const { t, locale } = useI18n();
-  if (account.issuer !== "chatgpt") return null;
 
   const quota = account.quota;
   if (quota === undefined) {
-    return (
-      <p className="mt-1.5 pl-6 text-[11px] text-fg-faint">{t("providerAccount.quota.empty")}</p>
-    );
+    if (account.issuer === "chatgpt") {
+      return (
+        <p className="mt-1.5 pl-6 text-[11px] text-fg-faint">{t("providerAccount.quota.empty")}</p>
+      );
+    }
+    if (quotaFetchable) {
+      return (
+        <p className="mt-1.5 pl-6 text-[11px] text-fg-faint">
+          {t("providerAccount.quota.fetchableEmpty")}
+        </p>
+      );
+    }
+    return null;
   }
 
   const bars = [quotaBar(quota.primary), quotaBar(quota.secondary)].filter(

@@ -33,6 +33,7 @@ vi.mock('../../../services/attachment', () => ({
 vi.mock('../Composer', () => ({
   Composer: (props: ComponentProps<typeof Composer>) => createElement('div', null,
     createElement('input', { 'data-testid': 'draft', readOnly: true, value: props.draft }),
+    createElement('span', { 'data-testid': 'skillify-available' }, String(props.onSkillifyCommand !== undefined)),
     createElement('button', { 'data-testid': 'attach', onClick: props.onPickAttachment }),
     createElement('button', { 'data-testid': 'attach-unknown-mime', onClick: () => props.onAttachFiles?.([
       new File(['pixels'], 'photo.png', { type: 'application/octet-stream' })
@@ -44,6 +45,84 @@ vi.mock('../Composer', () => ({
     createElement('span', { 'data-testid': 'attachment-errors' }, props.attachments?.map((item) => item.error ?? '').join('|')),
     createElement(AttachmentTray, { items: props.attachments ?? [], onRemove: props.onRemoveAttachment ?? (() => {}), onRetry: props.onRetryAttachment ?? (() => {}) }))
 }))
+
+/** 需求:元数据未知、正在运行和提炼会话都不能露出必然失败的 /skillify 入口。 */
+describe('Skillify command availability', () => {
+  it.each([false, true])('waits for source metadata and guards extraction=%s', async (extraction) => {
+    const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
+    let resolveMetadata!: (value: unknown) => void
+    const metadata = new Promise((resolve) => { resolveMetadata = resolve })
+    Object.assign(dom.window, { nextcowork: {
+      on: () => () => {},
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'sessions:get'
+        ? await metadata : channel === 'agent:listInteractions' ? [] : undefined })
+    } })
+    vi.stubGlobal('window', dom.window)
+    vi.stubGlobal('document', dom.window.document)
+    vi.stubGlobal('HTMLElement', dom.window.HTMLElement)
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    vi.stubGlobal('requestAnimationFrame', () => 1)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} })
+    const container = document.getElementById('root')!
+    const root = createRoot(container)
+    const models = useModelsStore.getState()
+    useModelsStore.setState({ loaded: true })
+    const sessionId = `skillify-availability-${String(extraction)}`
+    const session = sessionStore(sessionId)
+    const messages = [userMessage('user', [{ type: 'text', text: 'Question' }], 1)]
+    session.setState({ transcript: { ...emptyTranscript(), status: 'done', messages } })
+    const workspace: Workspace = { id: 'workspace', name: 'Workspace', rootPath: '/workspace',
+      createdAt: 1, lastOpenedAt: 1, settings: { ...DEFAULT_WORKSPACE_SETTINGS } }
+    const available = (): string | null => container.querySelector('[data-testid="skillify-available"]')?.textContent ?? null
+    const banner = (): Element | null => container.querySelector('[data-testid="skill-extraction-banner"]')
+    const bannerToggle = (): HTMLButtonElement | null => container.querySelector('[data-testid="skill-extraction-banner-toggle"]')
+    const bannerDetails = (): Element | null => container.querySelector('[data-testid="skill-extraction-banner-details"]')
+    try {
+      await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
+        createElement(ChatView, { sessionId, tabId: 'fixture-tab', workspace, fallbackModel: { model: '' } }) })))
+      expect(available()).toBe('false')
+      expect(banner()).toBeNull()
+      await act(async () => resolveMetadata({ messages, session: { id: sessionId, workspaceId: 'workspace', model: '', mode: 'code',
+        title: extraction ? '源会话标题' : '', createdAt: 1_700_000_000_000,
+        ...(extraction ? { skillSource: { sessionId: 'source' } } : {}) } }))
+      expect(available()).toBe(String(!extraction))
+      // 需求:提炼会话的说明卡贴在触发消息下方,能看到源会话标题;普通会话不该出现这张卡。
+      if (extraction) {
+        expect(banner()).not.toBeNull()
+        expect(banner()?.textContent).toContain('Source conversation:')
+        expect(banner()?.textContent).toContain('源会话标题')
+      } else {
+        expect(banner()).toBeNull()
+      }
+      await act(async () => session.setState({ activeRunId: 'active' }))
+      expect(available()).toBe('false')
+      await act(async () => session.setState({ activeRunId: null }))
+      expect(available()).toBe(String(!extraction))
+      // 需求:点击卡片展开完整信息(源会话 ID / 消息数等),收起态不占篇幅。
+      if (extraction) {
+        expect(bannerToggle()?.getAttribute('aria-expanded')).toBe('false')
+        expect(bannerDetails()?.hasAttribute('hidden')).toBe(true)
+        await act(async () => bannerToggle()?.click())
+        expect(bannerToggle()?.getAttribute('aria-expanded')).toBe('true')
+        expect(bannerDetails()?.hasAttribute('hidden')).toBe(false)
+        expect(banner()?.textContent).toContain('Source session ID')
+        expect(banner()?.textContent).toContain('source')
+        expect(banner()?.textContent).toContain('1')
+        await act(async () => bannerToggle()?.click())
+        expect(bannerToggle()?.getAttribute('aria-expanded')).toBe('false')
+        expect(bannerDetails()?.hasAttribute('hidden')).toBe(true)
+      }
+    } finally {
+      resolveMetadata({ messages: [], session: { id: sessionId, model: '', mode: 'code' } })
+      await act(async () => root.unmount())
+      releaseSession(sessionId)
+      useModelsStore.setState(models, true)
+      dom.window.close()
+      vi.unstubAllGlobals()
+    }
+  })
+})
 
 describe('chat history subscription boundary', () => {
   it('skips history work for draft, attachment and same-length queue edits', async () => {

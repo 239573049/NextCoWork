@@ -19,10 +19,13 @@
  * - 产物字节和盘上一致时保存是 no-op(不顶 mtime,Agent 不会误读成「刚被改过」)。
  * - 摘要对不上 → `disk_conflict`,**不覆盖**。
  * - 原文件是软链时拒绝:写穿一条链改到的是别处的文件。
+ * - 导出(`commitExport`)是保存的**只增不改**版本:已有目标默认拒绝,目标不存在时
+ *   先写同目录临时文件再 `link` 过去 —— 并发创建者赢,不出现半写损坏。
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { copyFile, lstat, mkdir, open, rename, rm, stat } from 'node:fs/promises'
+import type { Stats } from 'node:fs'
+import { chmod, copyFile, link, lstat, mkdir, open, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { DocumentEngineError } from '../../shared/document-engine/protocol'
 
@@ -130,4 +133,80 @@ export async function commitSave(target: string, producedPath: string, expectedD
     if (created) await rm(temporary, { force: true })
   }
   return produced
+}
+
+export interface ExportPublishOptions {
+  /** 调用方是否允许替换已存在的目标。默认 false:导出绝不悄悄盖掉别人放在那里的文件 */
+  overwrite?: boolean
+  /**
+   * 导出**开始那一刻**目标的字节摘要;目标当时不存在时为 `null`。
+   *
+   * 需求:overwrite 时它作为 `commitSave` 的期望值,挡住「导出期间目标被外部改写」
+   * 然后被我们覆盖的情况。不用「发布这一刻现取」的摘要 —— 那等于自己给自己背书,
+   * 外部改动会被当成基线吞掉。
+   */
+  expectedDiskRevision: string | null
+}
+
+/**
+ * 把引擎在**私有目录**产出的导出物发布到工作区目标路径。
+ *
+ * 需求:导出和保存不同 —— 目标是用户可见的产物,可能已经存在(默认不许覆盖),也
+ * 可能在导出期间被另一个进程创建或改写。所以两条路分开:
+ *
+ * - 目标已存在:必须先拿到调用方的 overwrite 同意,再走 `commitSave` 的外部冲突检查;
+ *   目标是软链 / 非普通文件一律拒绝(写穿一条链改到的是别处)。
+ * - 目标不存在:**先写目标同目录的随机临时文件,再 `link` 过去**。`link` 在目标已
+ *   存在时以 `EEXIST` 失败,于是「导出期间有人抢先建了这个文件」这一方赢,我们绝不
+ *   覆盖它;而且目标要么不存在、要么是完整内容,不出现半写损坏。
+ *
+ * ★ 不满足会怎样:直接以 `open(target, 'w')` 写,会在并发创建时静默覆盖别人的文件,
+ * 并在 helper 写一半失败时留下一个内容截断、谁也认不出的目标。
+ */
+export async function commitExport(
+  target: string,
+  producedPath: string,
+  options: ExportPublishOptions
+): Promise<void> {
+  const producedSize = await assertRegularFile(producedPath)
+  if (producedSize === 0) {
+    // ★ 引擎 0 字节产物几乎一定是导出失败 —— 发布过去就是在目标位置留一个空文件
+    throw new DocumentEngineError('io', 'engine produced an empty export')
+  }
+
+  let existing: Stats | null = null
+  try {
+    existing = await lstat(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new DocumentEngineError('io', `cannot inspect export target: ${(error as Error).message}`)
+  }
+
+  if (existing !== null) {
+    if (existing.isSymbolicLink()) throw new DocumentEngineError('io', 'export target is a symbolic link')
+    if (!existing.isFile()) throw new DocumentEngineError('io', 'export target is not a regular file')
+    if (options.overwrite !== true) throw new DocumentEngineError('invalid_operation', 'export target already exists; pass overwrite to replace it')
+    if (options.expectedDiskRevision === null) {
+      // 开始时目标不存在,现在却在 → 并发创建,不覆盖
+      throw new DocumentEngineError('disk_conflict', 'export target was created while exporting')
+    }
+    await commitSave(target, producedPath, options.expectedDiskRevision)
+    return
+  }
+
+  // 需求：外部删除也是一次冲突，不能把已删除的文件在导出结束时悄悄复活。
+  if (options.expectedDiskRevision !== null) throw new DocumentEngineError('disk_conflict', 'export target was removed while exporting')
+  const temporary = join(dirname(target), `.ncw-export-${randomUUID()}.tmp`)
+  try {
+    await copyFile(producedPath, temporary)
+    // 新文件给 0o600:导出物是文档内容,不该因为 umask 宽松而全局可读
+    await chmod(temporary, 0o600)
+    try {
+      await link(temporary, target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new DocumentEngineError('disk_conflict', 'export target was created while exporting')
+      throw new DocumentEngineError('io', `cannot publish export: ${(error as Error).message}`)
+    }
+  } finally {
+    await rm(temporary, { force: true })
+  }
 }

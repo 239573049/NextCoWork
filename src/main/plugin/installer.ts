@@ -135,7 +135,8 @@ async function writeEntry(entry: unzipper.File, destination: string, limit: numb
 export async function installPluginZip(
   zipPath: string,
   root: string,
-  expectedSha256?: string
+  expectedSha256?: string,
+  beforeReplace?: (manifest: PluginManifest) => Promise<void>
 ): Promise<InstalledPluginPackage> {
   const stat = await fs.stat(zipPath)
   // 读清单之前只能按原生包的外层上限约束;是不是原生包要看清单,见文件头
@@ -237,7 +238,7 @@ export async function installPluginZip(
       await fs.mkdir(dirname(destination), { recursive: true })
       actual += await writeEntry(entry, destination, limits.maxExpandedBytes - actual)
     }
-  }, manifest)
+  }, manifest, beforeReplace)
 
   return { manifest, target, sha256 }
 }
@@ -251,7 +252,8 @@ export async function installPluginZip(
  */
 export async function installPluginDirectory(
   sourceDir: string,
-  root: string
+  root: string,
+  beforeReplace?: (manifest: PluginManifest) => Promise<void>
 ): Promise<InstalledPluginPackage> {
   const stat = await fs.lstat(sourceDir)
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new PluginInstallError('source must be a real directory')
@@ -286,7 +288,7 @@ export async function installPluginDirectory(
       if (written > limits.maxExpandedBytes) throw new PluginInstallError('package expands beyond the size limit')
       await fs.copyFile(join(sourceDir, rel), destination, fs.constants.COPYFILE_EXCL)
     }
-  }, manifest)
+  }, manifest, beforeReplace)
 
   return { manifest, target }
 }
@@ -416,7 +418,7 @@ function resolveTarget(root: string, id: string): string {
  * 删 backup。任何一步炸了都把 backup 挪回来 —— 升级失败之后用户手里应该是
  * **旧版本**,而不是一个装了一半的目录。
  */
-async function materialize(target: string, fill: (staging: string) => Promise<void>, manifest?: PluginManifest): Promise<void> {
+async function materialize(target: string, fill: (staging: string) => Promise<void>, manifest?: PluginManifest, beforeReplace?: (manifest: PluginManifest) => Promise<void>): Promise<void> {
   const stamp = `${String(Date.now())}-${Math.random().toString(36).slice(2)}`
   const staging = `${target}.installing-${stamp}`
   const backup = `${target}.backup-${stamp}`
@@ -434,6 +436,9 @@ async function materialize(target: string, fill: (staging: string) => Promise<vo
         throw new PluginInstallError((error as Error).message)
       })
     }
+    // 需求：清单已校验且尚未替换旧目录，此时只检查目标插件的脏文档并收掉它的干净 helper。
+    // 回调拒绝会走 staging 回滚；无关插件的未保存文档不能阻断这次安装。
+    if (manifest !== undefined) await beforeReplace?.(manifest)
     try {
       await fs.rename(target, backup)
       backedUp = true

@@ -176,6 +176,16 @@ export function clearProviderAccountLimit(providerId: string, accountId: string)
   return invoke('provider:clearAccountLimit', { providerId, accountId })
 }
 
+/**
+ * 主动拉一次该账号的**订阅额度**(GLM Coding Plan)。**真发一次网络请求**,
+ * 没有密钥 / 不是订阅制供应商 / 上游拒绝都会抛,调用点必须接住。
+ *
+ * ★ 和上面那组一样回整份账号列表 —— 快照在账号行的 `quota` 上,直接 `setAccounts(次)`。
+ */
+export function fetchProviderAccountQuota(providerId: string, accountId: string): Promise<ProviderAccount[]> {
+  return invoke('provider:fetchQuota', { providerId, accountId })
+}
+
 export function updateModel(model: ModelAlias): Promise<ModelAlias> {
   return invoke('model:update', model)
 }

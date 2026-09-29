@@ -29,7 +29,14 @@ export type RunNotice =
   | { kind: 'switch'; to: string; reason: string }
 
 export type AgentEvent =
-  | { type: 'stream'; delta: ProviderStreamEvent }
+  /**
+   * `at` 是主进程收到这条上游事件时的墙钟毫秒 —— 和 `tool_start.at` 同一个约定。
+   *
+   * 需求：思考卡片的实时计时要和提交后落盘的 `durationMs` 用**同一只表**。渲染层自己
+   * `Date.now()` 的话，重载后重放日志时所有增量都挤在同一毫秒里，计时从 0 重来，
+   * 而提交那一刻又跳回主进程算的真值。可选：fake-emitter 与旧日志没有它，reducer 退回本地时钟。
+   */
+  | { type: 'stream'; delta: ProviderStreamEvent; at?: number }
   /** ★ 落盘边界 —— db 只在这里写,绝不在 delta 上写(方案 §9) */
   | { type: 'message_commit'; message: AgentMessage }
   /**

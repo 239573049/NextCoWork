@@ -76,7 +76,7 @@ import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
 import { getEnvironments } from '../runtime'
-import { getTools, installChildRunLauncher, setAccountsChangeListener, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener } from '../runtime'
+import { getTools, installChildRunLauncher, setAccountsChangeListener, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener, setSkillWrittenListener } from '../runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
@@ -105,6 +105,7 @@ import {
 import {
   announceAccountsSafe,
   clearProviderAccountLimit,
+  fetchProviderAccountQuota,
   listProviderAccounts,
   removeProviderAccount,
   reorderProviderAccounts,
@@ -181,7 +182,7 @@ import {
   unstageGitPaths
 } from './git'
 import { updateService } from '../update/update-service'
-import { installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
+import { activateWrittenSkills, installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
 import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } from './commands'
 import { agentDiagnostics, generateAgent, listAgents, setAgentEnabled } from './agents'
 import { listModes } from './modes'
@@ -203,6 +204,7 @@ import { compactContext, previewContext } from './context'
 import {
   branchSession,
   createSession,
+  createSkillExtractionSession,
   duplicateSession,
   deleteSession,
   getSession,
@@ -471,6 +473,7 @@ const handlers: HandlerMap = {
   'sessions:create': (req) => createSession(req),
   'sessions:duplicate': (req) => duplicateSession(req),
   'sessions:branch': (req) => branchSession(req),
+  'sessions:createSkillExtraction': (req) => createSkillExtractionSession(req),
   'sessions:rename': (req) => renameSession(req),
   'sessions:setMode': (req) => setMode(req),
   'sessions:setModel': (req) => setModel(req),
@@ -669,6 +672,8 @@ const handlers: HandlerMap = {
     reorderProviderAccounts(providerId, accountIds),
   'provider:clearAccountLimit': ({ providerId, accountId }) =>
     clearProviderAccountLimit(providerId, accountId),
+  'provider:fetchQuota': ({ providerId, accountId }) =>
+    fetchProviderAccountQuota(providerId, accountId),
   // Agent 上游已支持三种协议;独立连接测试入口仍待接入。
   'provider:test': todo('provider:test', '步骤 13(独立连接测试入口)'),
   'model:update': (req) => updateModel(req),
@@ -932,6 +937,15 @@ export function registerIpc(): void {
   })
   setReviewChangeListener((change) => {
     windows.emitToAll('review:changed', change)
+  })
+  // 提炼会话写完 SKILL.md → 在该工作区自动启用。失败只记日志:文件已经写好,
+  // 用户仍可以去 Skill 页手动打开,不值得为此让 run 收尾报错。
+  setSkillWrittenListener(async (change) => {
+    try {
+      await activateWrittenSkills(change)
+    } catch (error: unknown) {
+      console.warn('[skills] 提炼会话写入的 Skill 自动启用失败', error)
+    }
   })
   // 刷新 token 之后（含刷失败标记 needsReauth）把新的登录态推给设置页
   setCredentialChangeListener(announceCredentialRef)

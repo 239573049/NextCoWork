@@ -135,6 +135,8 @@ const MANAGED_DATA_PATHS = [
   'commands',
   'modes',
   'plugins',
+  // 文档引擎的私有副本与 helper 临时目录也属于应用数据，清理时不能留下用户文档副本。
+  'document-engine',
   'workspaces',
   // credentials 表的 NCK1 密文离了这 32 字节就永远解不开。
   CREDENTIAL_KEY_FILENAME,

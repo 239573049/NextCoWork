@@ -5,7 +5,7 @@
  * 不起真 LibreOffice:那要插件携带的原生构建(计划 §12 A,尚未完成)。这里测的是
  * 宿主这一侧的协议与进程管理,任何一个真 helper 都必须满足同样的契约。
  */
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -16,6 +16,9 @@ let root: string
 
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'ncw-native-host-')) })
 afterEach(() => { rmSync(root, { recursive: true, force: true }) })
+
+/** 让出一段真实时间:下面几条用例钉的是「帧到达的先后」,不是同步调度顺序 */
+const pause = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
 /** 假 helper:MODE 环境不可用(白名单会过滤),所以行为由 argv 决定。 */
 const FAKE_HELPER = String.raw`
@@ -59,9 +62,26 @@ function handle(msg) {
     const size = params.width * params.height * 4
     const binary = (bytes) => { const h = Buffer.alloc(5); h.writeUInt32BE(bytes.length, 0); h.writeUInt8(1, 4); process.stdout.write(Buffer.concat([h, bytes])) }
     const reply = { v: 1, id, ok: true, result: { width: params.width, height: params.height, format: 'rgba', attachment: true } }
+    /* 一条二进制帧拆成三次 write(帧头 / 前 8 字节 / 其余),间隔 10ms 保证宿主分多次读到 */
+    const binaryChunked = (bytes, done) => {
+      const h = Buffer.alloc(5); h.writeUInt32BE(bytes.length, 0); h.writeUInt8(1, 4)
+      process.stdout.write(h)
+      setTimeout(() => {
+        process.stdout.write(bytes.subarray(0, 8))
+        setTimeout(() => { process.stdout.write(bytes.subarray(8)); done() }, 10)
+      }, 10)
+    }
     if (mode === 'render-missing') return send(reply)
     if (mode === 'render-short') { binary(Buffer.alloc(size - 4, 9)); return send(reply) }
     if (mode === 'render-double') { binary(Buffer.alloc(size, 9)); binary(Buffer.alloc(size, 9)); return send(reply) }
+    if (mode === 'render-double-chunked') { const b = Buffer.alloc(size, 7); binaryChunked(b, () => binaryChunked(b, () => send(reply))); return }
+    if (mode === 'render-chunked') { binaryChunked(Buffer.alloc(size, 8), () => send(reply)); return }
+    /* 违反 v1 的帧顺序:回执(声明了 attachment)先发,字节后发 */
+    if (mode === 'render-reply-first') { send(reply); setTimeout(() => binary(Buffer.alloc(size, 5)), 50); return }
+    /* 取消用例:字节立刻到,回执拖到 400ms —— 取消发生在「附件在途」那一刻 */
+    if (mode === 'render-late-bytes') { binary(Buffer.alloc(size, 6)); setTimeout(() => send(reply), 400); return }
+    /* 填充值跟着尺寸变:附件串台时长度与内容都对不上 */
+    if (mode === 'render-fill') { binary(Buffer.alloc(size, size % 256)); return send(reply) }
     binary(Buffer.alloc(size, 9))
     return send(reply)
   }
@@ -161,6 +181,30 @@ describe('NativeDocumentEngineProvider through the session manager', () => {
     expect(manager.snapshot(snapshot.sessionId, SCOPE).status).toBe('crashed')
     await manager.closeAll()
   })
+
+  it('exports through the helper saveAs method without touching the source file', async () => {
+    const file = join(root, 'export.docx')
+    writeFileSync(file, 'hello')
+    const manager = new DocumentSessionManager({ privateDir: join(root, 'private-export'), timeoutMs: 5000 })
+    manager.registerProvider(provider())
+    const { snapshot } = await manager.open({ scope: SCOPE, absolutePath: file, providerId: 'ncw.office-runtime/office' })
+    try {
+      const target = join(root, 'export.pdf')
+      /*
+        ★ 这条同时钉住协议:假 helper 只实现 document.saveAs。若宿主改回发
+        document.exportAs(协议里没有这个方法),这次调用会一直等不到回执,直到
+        会话超时——用例会以 timeout 失败,而不是无声地放过去。
+      */
+      const exported = await manager.exportDocument({ sessionId: snapshot.sessionId, scope: SCOPE, outputPath: target, format: 'pdf' })
+      expect(exported.outputPath).toBe(target)
+      expect(readFileSync(target, 'utf8')).toBe('hello')
+      // 导出 ≠ 保存:源文件与 dirty 账目都不动
+      expect(readFileSync(file, 'utf8')).toBe('hello')
+      expect(exported.snapshot.modelRevision).toBe(exported.snapshot.savedRevision)
+    } finally {
+      await manager.closeAll()
+    }
+  })
 })
 
 describe('rendering through a real helper process', () => {
@@ -207,6 +251,77 @@ describe('rendering through a real helper process', () => {
     await expect(manager.render({ sessionId, scope: SCOPE, request: RENDER })).rejects.toBeDefined()
     expect(manager.snapshot(sessionId, SCOPE).status).toBe('crashed')
     await manager.closeAll()
+  })
+
+  it('keeps two consecutive renders of different sizes on their own attachments', async () => {
+    const { manager, sessionId } = await openWith('render-fill')
+    try {
+      // 填充值就是字节数(24 = 3×2×4,64 = 4×4×4):附件一旦串台,长度和内容同时对不上
+      const first = await manager.render({ sessionId, scope: SCOPE, request: RENDER })
+      expect(first.bytes.byteLength).toBe(24)
+      expect(first.bytes[0]).toBe(24)
+      const second = await manager.render({ sessionId, scope: SCOPE, request: { ...RENDER, width: 4, height: 4 } })
+      expect(second.bytes.byteLength).toBe(64)
+      expect(second.bytes[0]).toBe(64)
+      expect(manager.snapshot(sessionId, SCOPE).status).toBe('ready')
+    } finally {
+      await manager.closeAll()
+    }
+  })
+
+  it('reassembles a binary attachment the helper wrote in several chunks', async () => {
+    const { manager, sessionId } = await openWith('render-chunked')
+    try {
+      const image = await manager.render({ sessionId, scope: SCOPE, request: RENDER })
+      expect(image.bytes.byteLength).toBe(24)
+      expect(image.bytes[0]).toBe(8)
+      expect(manager.snapshot(sessionId, SCOPE).status).toBe('ready')
+    } finally {
+      await manager.closeAll()
+    }
+  })
+
+  it('★ kills a helper that sends a second attachment even when both are split across chunks', async () => {
+    const { manager, sessionId } = await openWith('render-double-chunked')
+    try {
+      await expect(manager.render({ sessionId, scope: SCOPE, request: RENDER })).rejects.toBeDefined()
+      expect(manager.snapshot(sessionId, SCOPE).status).toBe('crashed')
+    } finally {
+      await manager.closeAll()
+    }
+  })
+
+  it('rejects a response that declares its attachment before the binary frame arrives', async () => {
+    const { manager, sessionId } = await openWith('render-reply-first')
+    try {
+      await expect(manager.render({ sessionId, scope: SCOPE, request: RENDER })).rejects.toMatchObject({ code: 'io' })
+      expect(manager.snapshot(sessionId, SCOPE).status).toBe('crashed')
+      // 通道已作废:迟到的 binary 与后续请求都不能再成功(不存在「先 JSON 再 binary」这条协议)
+      await expect(manager.render({ sessionId, scope: SCOPE, request: RENDER })).rejects.toMatchObject({ code: 'engine_unavailable' })
+    } finally {
+      await manager.closeAll()
+    }
+  })
+
+  it('invalidates the channel when a render is cancelled, so its late attachment cannot reach the next request', async () => {
+    const connection = await NativeHelperConnection.start({ command: process.execPath, args: [helperScript(), 'render-late-bytes'], workDir: join(root, 'h4') })
+    try {
+      const crashes: string[] = []
+      connection.onExit((reason) => { crashes.push(reason) })
+      const controller = new AbortController()
+      const render = connection.requestAttachment('document.render', RENDER, 24, controller.signal)
+      // 附件在途时别的请求当场拒绝:否则那条无 id 的附件字节流会有两种解释
+      await expect(connection.request('env', {})).rejects.toMatchObject({ code: 'invalid_operation' })
+      await pause(200) // helper 立刻发 tile,回执被拖到 400ms:此刻附件已到、请求未完成
+      controller.abort()
+      await expect(render).rejects.toMatchObject({ code: 'timeout' })
+      // ★ 崩溃必须在取消这一刻同步通知到会话管理器,而不是等真实 exit 事件
+      expect(crashes).toHaveLength(1)
+      await pause(400) // 迟到回执的窗口过去之后,这条通道仍然接不了新请求
+      await expect(connection.request('env', {})).rejects.toMatchObject({ code: 'engine_crashed' })
+    } finally {
+      await connection.close()
+    }
   })
 })
 

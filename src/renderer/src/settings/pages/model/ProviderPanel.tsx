@@ -23,6 +23,7 @@ import {
 import {
   findPreset,
 } from "../../../../../shared/domain/presets";
+import { codingPlanFamilyFor } from "../../../../../shared/domain/coding-plan";
 import type {
   AnthropicCacheTtl,
   CredentialInfo,
@@ -829,6 +830,7 @@ export function ProviderPanel({
                       providerId={p.id}
                       rotation={accountRotation}
                       busy={busy}
+                      quotaFetchable={codingPlanFamilyFor(p.id) !== null}
                       onError={setError}
                       onSigningInChange={(active) =>
                         setAuthFlow(active ? { phase: "opening" } : null)

@@ -547,6 +547,12 @@ export interface IpcInvokeMap {
   'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
   /** 从某一轮「分支」：只克隆到这一轮为止的转录，之后的内容不带过去。 */
   'sessions:branch': { req: { sessionId: string; uptoMessageId: string; title: string }; res: Session }
+  /**
+   * 从一条已有会话开一条「提炼 Skill」会话(`Session.skillSource` 指向源会话)。
+   * 模型 / 供应商 / 思考档位沿用源会话;`title` 由渲染层翻译好传入。
+   * 拒绝时带 `messageKey`(`skills.extraction.*`),渲染层直接翻成 toast。
+   */
+  'sessions:createSkillExtraction': { req: { sourceSessionId: string; title: string }; res: Session }
   'sessions:rename': { req: { sessionId: string; title: string }; res: void }
   'sessions:setMode': { req: { sessionId: string; mode: SessionMode }; res: void }
   /**
@@ -979,6 +985,15 @@ export interface IpcInvokeMap {
   'provider:reorderAccounts': { req: { providerId: string; accountIds: string[] }; res: ProviderAccount[] }
   /** 「立即解除限流」。用户升级了套餐、或者我们判早了 —— 不该让他干等 */
   'provider:clearAccountLimit': { req: { providerId: string; accountId: string }; res: ProviderAccount[] }
+  /**
+   * 主动拉一次这个账号的**订阅额度**(GLM Coding Plan,见
+   * `kernel/upstream/coding-plan-quota.ts` 的端点注释)。真发一次网络请求,
+   * 没有密钥 / 这家不是订阅制 / 上游拒绝都会抛。
+   *
+   * ★ 回整份账号列表 —— 快照写进了账号行的 `quota`,和其它账号写频道共用
+   * 「渲染层不需要自己合并」那条约定。设置页和圆环菜单因此读同一份数据。
+   */
+  'provider:fetchQuota': { req: { providerId: string; accountId: string }; res: ProviderAccount[] }
 
   'provider:listModels': { req: { providerId?: string }; res: ModelAlias[] }
   /**
@@ -1574,6 +1589,7 @@ export const INVOKE_CHANNELS = {
   'sessions:create': 1,
   'sessions:duplicate': 1,
   'sessions:branch': 1,
+  'sessions:createSkillExtraction': 1,
   'sessions:rename': 1,
   'sessions:setMode': 1,
   'sessions:setModel': 1,
@@ -1689,6 +1705,7 @@ export const INVOKE_CHANNELS = {
   'provider:setCurrentAccount': 1,
   'provider:reorderAccounts': 1,
   'provider:clearAccountLimit': 1,
+  'provider:fetchQuota': 1,
   'provider:listModels': 1,
   'provider:fetchModels': 1,
   'provider:setAliases': 1,

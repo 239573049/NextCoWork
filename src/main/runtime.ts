@@ -59,6 +59,8 @@ import { normalizeModeId } from '../shared/domain/mode'
 import type { Skill } from '../shared/domain/skill'
 import { PROJECT_SKILLS_PREFIX, SKILLS_DIR, currentPluginSkillRoots, scanSkills } from './kernel/skill/load'
 import { resetSkillRegistries, skillRegistry } from './kernel/skill/registry'
+import { SkillActivationBarrier } from './kernel/skill/activation'
+import { buildSkillExtractionBlock, writtenProjectSkillNames } from './kernel/skill/extraction'
 import { builtinTools, registerToolProvider } from './kernel/tool/builtin'
 import { taskTool } from './kernel/tool/builtin/task'
 import { syncPluginTools } from './kernel/tool/plugin-tools'
@@ -215,6 +217,16 @@ let sessionOnChange: ((change: SessionChange) => void) | null = null
 let reviewOnChange: ((change: { runId: string; sessionId: string; workspaceId: string }) => void) | null = null
 
 /**
+ * 提炼会话这一轮用 Write/Edit 写了哪些项目 Skill(按名字)。
+ * ★ 和上面几个 sink 同一个套路:启用 Skill 要改工作区设置并广播 `skills:changed`,
+ * 那是 `ipc/skills.ts` 的事,runtime 不能反向依赖它。由 `ipc/index.ts` 装上。
+ */
+let skillWrittenOnChange: ((change: { workspaceId: string; sessionId: string; names: string[] }) => Promise<void>) | null = null
+
+// 需求:只登记尚未结束的激活工作,不缓存第二份 activeSkillIds;工作区设置始终是唯一真源。
+const skillActivationBarrier = new SkillActivationBarrier()
+
+/**
  * 某条凭证被刷新、或者被标成需要重新登录了。
  *
  * ★ 和上面那个 sink 是同一个套路、同一个理由:内核里的 `CredentialResolver`
@@ -242,6 +254,7 @@ export function setAccountsChangeListener(fn: ((providerId: string) => void) | n
  */
 export function installHost(h: KernelHost): void {
   shutdownSessionTitles()
+  skillActivationBarrier.clear()
   void environments?.shutdown()
   environments = null
   host = h
@@ -995,6 +1008,11 @@ export function setReviewChangeListener(fn: NonNullable<typeof reviewOnChange>):
   reviewOnChange = fn
 }
 
+/** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。理由见 `skillWrittenOnChange`。 */
+export function setSkillWrittenListener(fn: NonNullable<typeof skillWrittenOnChange>): void {
+  skillWrittenOnChange = fn
+}
+
 /** 同上。刷新 token 改写凭证后，把新的登录态推给可能正开着设置页的窗口。 */
 export function setCredentialChangeListener(fn: NonNullable<typeof credentialOnChange>): void {
   credentialOnChange = fn
@@ -1163,6 +1181,25 @@ export async function refreshSkills(workspaceId: string, environment?: Workspace
 }
 
 /**
+ * 提炼会话的头块:取源会话转录与本工作区的项目 Skill 清单,交给纯函数拼字。
+ *
+ * ★ 源会话查不到(被删了)时**不让 run 失败**:块里会写「源会话已删除」,
+ * 用户仍能在提炼会话里继续追问、修改已写好的 Skill。
+ * ★ 窗口取本 run 所用模型的协议窗口 —— 摘要预算按它算,小窗口模型不能被摘要吃掉一半。
+ */
+function loadSkillExtraction(sourceSessionId: string, skills: readonly Skill[], req: RunRequest): string {
+  const source = store.getSession(sourceSessionId)
+  return buildSkillExtractionBlock({
+    sourceSessionId,
+    source: source === undefined ? undefined : { title: source.title, messages: store.getHistory(sourceSessionId) },
+    existingSkills: skills
+      .filter((skill) => skill.scope === 'project')
+      .map((skill) => ({ name: skill.name, description: skill.description })),
+    contextWindow: getRouter().resolveModel(req.model, req.modelProviderId)?.contextWindow
+  })
+}
+
+/**
  * 读这个工作区的 `AGENTS.md`(全局一份 + 项目一份,拼接后消毒)。
  *
  * ★ 和 `refreshSkills` / `refreshAgents` 不同,这里**不建注册表单例**:
@@ -1237,11 +1274,18 @@ async function loadManagedInstructions(workspaceId: string): Promise<string> {
  * (空清单 = 全都要,理由在 `SkillRegistry.resolve` 上),
  * `globalEnabled` 回答「用户有没有在设置里把它整个关掉」。
  */
-function activeSkills(req: RunRequest, snapshot?: readonly Skill[]): readonly Skill[] {
+function activeSkills(
+  req: RunRequest,
+  snapshot?: readonly Skill[],
+  selection?: Pick<RunRequest, 'skillIds' | 'skillSelectionMode'>
+): readonly Skill[] {
   const disabled = new Set(store.getDisabledSkillIds())
   const registry = skillRegistry(req.workspaceId)
   const source = snapshot ?? registry.list()
-  return (snapshot === undefined ? registry.resolve(req.skillIds, req.skillSelectionMode ?? 'all') : resolveSkillsSnapshot(source, req))
+  const selected = selection ?? req
+  return (snapshot === undefined
+    ? registry.resolve(selected.skillIds, selected.skillSelectionMode ?? 'all')
+    : resolveSkillsSnapshot(source, { ...req, skillIds: selected.skillIds, skillSelectionMode: selected.skillSelectionMode }))
     .filter((s) => !disabled.has(s.id) && !s.unavailableReason)
 }
 
@@ -2292,6 +2336,30 @@ function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceE
 }
 
 /**
+ * 这条 run 属于哪一条**提炼会话**(`Session.skillSource` 非空)—— 不属于则返回 undefined。
+ *
+ * 需求:一个 run 该不该参与 Skill 激活(挂等待点、白名单改用工作区设置),判据是
+ * 「它的根会话是不是提炼会话」。子 run 的 `req.sessionId` 是自己那条派生会话(`:sub:`),
+ * 所以要沿**落盘的** `parentSessionId` 往上走到根。
+ *
+ * ★ 不靠 `runId` 里那个 `:sub:` 前缀反推,也不靠 `runs` 里的父子链:前者是递归拼出来的
+ * (见 `db/schema.ts` 第 10 条),后者会因为父 handle 被 reap 而断掉。
+ * 不满足会怎样:真正写 SKILL.md 的子代理不被认成提炼会话的 run —— 文件写好了,
+ * Skill 页上却一直是关的,而且零报错。
+ */
+function skillExtractionRoot(sessionId: string): string | undefined {
+  const seen = new Set<string>()
+  let session = store.getSession(sessionId)
+  while (session !== undefined && session.parentSessionId !== undefined && !seen.has(session.id)) {
+    seen.add(session.id)
+    const parent = store.getSession(session.parentSessionId)
+    if (parent === undefined) break
+    session = parent
+  }
+  return session?.skillSource === undefined ? undefined : session.id
+}
+
+/**
  * 生产路径的 run 驱动 —— **`ipc/agent.ts` 的默认驱动**。
  * 假发射器从此只是 pump 测试的夹具。
  *
@@ -2320,6 +2388,30 @@ export async function runAgent(
   // Freeze the evaluator alias and provider before the first await of this run.
   const goalSettings = store.getSettings()
   if (primary) {
+    /*
+      需求:上一轮提炼会话写完 SKILL.md 之后的激活是**异步**的 —— run_end 先到渲染层,
+      而 `activateWrittenSkills`(扫目录 + 写工作区设置 + 广播)还要一会儿。同一条会话
+      排着队的下一轮必须等它做完再开跑,否则刚写的 Skill 不在这一轮的系统提示词里,
+      表现是「提炼完了,但下一次提问它还是不知道」。
+
+      ★ 位置:在挂自己的 `beforeFinish` **之前**、在重扫 Skill 目录之前 —— 这一轮读到的
+      注册表与工作区设置必须已经是激活之后的那一份。
+      ★ 只有 primary 等。子 run 和父 run 共用同一工作区的等待点,而父 run 的那个要等
+      子 run 收尾、激活做完才放 —— 子 run 也等的话就是父子互等,表现为整条会话
+      卡死到用户点停止为止。
+      ★ 用 abortable 而不是裸 await:等待期间用户按停止必须能立刻退出。
+    */
+    try {
+      await abortable(() => skillActivationBarrier.wait(req.workspaceId), handle.signal)
+    } catch (error) {
+      /*
+        中断不是失败:这一轮从来没有开始过,所以不写 run 记录(同上面 `inputGoalId`
+        那条早退)。但 `finish` 仍要走 —— 渲染层在等最后那条 run_end。
+      */
+      if (!handle.signal.aborted) throw error
+      handle.finish('aborted')
+      return
+    }
     const pause = (): void => pauseGoal(req.sessionId)
     handle.signal.addEventListener('abort', pause, { once: true })
     handle.beforeFinish((status) => {
@@ -2341,6 +2433,17 @@ export async function runAgent(
     thinking: req.thinking,
     rootPathAtCreation: workspaceRootFor(req.workspaceId)
   })
+  /*
+    需求:提炼会话的收尾要异步等激活做完,而 run_end 一到渲染层就会把排队中的下一轮
+    发出来 —— 所以等待点必须在 run_end **之前**同步挂上:注册表的 `beforeFinish`
+    在 `finish()` 里同步跑,早于它 emit 那条 run_end。
+
+    ★ 只给提炼会话这一条线上的 run 挂:真正写 SKILL.md 的常常是它派出去的子 run,
+    所以子 run 也要挂(归属沿落盘的 `parentSessionId` 往上找,见 `skillExtractionRoot`)。
+    普通 run 不挂 —— 它们不产生激活,挂了只会让同一工作区里无关的下一轮白等。
+  */
+  const extractionRootId = skillExtractionRoot(req.sessionId)
+  let releaseActivation = (): void => {}
   // 新会话第一次发送时把模型/模式冻结到元数据；后续 run 不覆盖用户改过的标题。
   // ★ 比较里必须带上 modelProviderId:同一个会话里从 RoutinAI 切到 Codex 时别名没变,
   //   漏了这一项的话会话元数据会一直停在旧供应商上。
@@ -2381,6 +2484,7 @@ export async function runAgent(
   let runMode = modeRegistry(req.workspaceId).resolve(req.mode)
   let release = (): void => {}
   let planExecution: PlanExecutionContext | undefined
+  let skillExtraction: string | undefined
   let projectInstructions: string
   let git: GitContext | undefined
   try {
@@ -2404,6 +2508,15 @@ export async function runAgent(
       runSkills = await abortable(() => refreshSkills(req.workspaceId, environment), handle.signal)
       runAgents = await abortable(() => refreshAgents(req.workspaceId, environment), handle.signal)
       scopedMcpTools = await abortable(() => prepareWorkspaceMcp(req.workspaceId, environment), handle.signal)
+    }
+    /*
+      需求:提炼会话的每个主 run 都带上源会话摘要(`Session.skillSource`)。
+      每个 run 现算而不是建会话时存一份:源会话之后可能又追加了消息,或者被删了。
+      子 run 不给 —— 它拿到的是父 run 派下来的具体任务,几万 token 的摘要只是负担。
+      复用上面刚扫出来的 `runSkills`,不再扫一次目录。
+    */
+    if (primary && session.skillSource !== undefined) {
+      skillExtraction = loadSkillExtraction(session.skillSource.sessionId, runSkills ?? [], req)
     }
 
     /*
@@ -2566,6 +2679,31 @@ export async function runAgent(
     })
   }
   if (primary) bindGoalRun(req.sessionId, goalContext, req.input.length > 0 && req.inputInternal !== true)
+  /*
+    需求:提炼会话的 Skill 激活状态以主进程工作区设置为准。
+    普通 run 继续使用 `RunRequest` 的冻结快照,否则用户在一轮运行中改设置会改变
+    这一轮的工具目录;提炼 run 是例外,因为它自己负责刚写入 Skill 并广播工作区设置。
+    不满足会怎样:渲染层还没收到 `workspace:changed` 时,新一轮会拿旧白名单,
+    Skill 已在磁盘上却不会进系统提示词。
+
+    ★ 原先这里把「刚写进去、激活还没跑完的名字」投影进白名单(`pendingSkillNamesByWorkspace`),
+    那条路已经拆掉:上一轮的激活有屏障挡着,这一轮开跑之前它必然已经做完,工作区设置
+    就是唯一真源。留两份真源(设置 + 内存里待激活的名字)迟早对不上,而对不上的表现是
+    「同一个工作区里两条会话看到的 Skill 目录不一样」。
+    ★ 整条提炼会话线(主 run 与它派出去的子 run)都用这份设置:子 run 的 `req` 是父 run
+    快照的副本,只认 `req` 的话,刚激活的那条 Skill 在子代理眼里根本不存在。
+    ★ 启动时读一次就冻结(`runSkills` 刚扫完、屏障也等过了),这一轮中途不再重读。
+  */
+  const extractionSkillSelection = extractionRootId === undefined
+    ? undefined
+    : (() => {
+      const settings = store.getWorkspace(req.workspaceId)?.settings
+      if (settings === undefined) return undefined
+      return {
+        skillIds: settings.activeSkillIds,
+        ...(settings.skillSelectionMode === undefined ? {} : { skillSelectionMode: settings.skillSelectionMode })
+      }
+    })()
   let agentSession: AgentSession
   try { agentSession = new AgentSession(
     {
@@ -2783,7 +2921,7 @@ export async function runAgent(
         `Skill` 工具去取(渐进披露)。传的仍然是完整的 `Skill` 对象,
         是因为注册表本来就有它,而多一份裁剪过的类型只会多一处要同步的地方。
       */
-      skills: activeSkills(req, runSkills),
+      skills: activeSkills(req, runSkills, extractionSkillSelection),
       /*
         ★ 角色提示词是**追加**的(见 `buildSystemPrompt` 里那段),
         工具清单是**收窄**的(`snapshot` 只过滤不新增)。两个方向都只能变严,
@@ -2821,7 +2959,8 @@ export async function runAgent(
         「什么都没填」这件事只该有一个地方知道,多一处判断就多一处会漂移的判断。
       */
       personalization: store.getSettings().personalization,
-      ...(planExecution === undefined ? {} : { planExecution })
+      ...(planExecution === undefined ? {} : { planExecution }),
+      ...(skillExtraction === undefined ? {} : { skillExtraction })
     },
     handle,
     req
@@ -2832,6 +2971,15 @@ export async function runAgent(
    * 一堆没有配对 tool_result 的 tool_call 上行 —— 那正是方案 §4.8
    * 花了整节篇幅避免的 400。
    */
+  /*
+    需求:只有即将进入 running.finally 的 run 才能登记激活等待点。
+    原先为抢在 run_end 之前在 ensureSession 后注册,但启动扫描取消、提交钩子拒绝、
+    构造失败都不会进入下面的 finally,表现为整个工作区后续对话永久卡住。
+    现在在启动步骤全部成功后、run() 之前同步注册,既先于 finish,又保证有清理路径。
+  */
+  if (extractionRootId !== undefined) {
+    handle.beforeFinish(() => { releaseActivation = skillActivationBarrier.begin(req.workspaceId) })
+  }
   const running = agentSession.run()
   if (agent === undefined && req.depth === 0 && history.length === 0 && req.input.length > 0 && !handle.signal.aborted) {
     // The primary stream has already started. Title generation is detached from
@@ -2844,8 +2992,12 @@ export async function runAgent(
       getHost().logger.warn('[session-title] Could not start background title generation.')
     }
   }
-  return running.finally(() => {
-    release()
+  /*
+    需求:提炼会话写完 SKILL.md 之后的激活是异步的(扫目录 + 写工作区设置 + 广播),
+    而这条 run 真正的收尾要等它做完 —— 下一轮的等待点靠这一刻才被放走。
+    ★ 收尾本来就是异步续延(见下面 `store.setHistory` 那条注释),这里再多等一步激活。
+  */
+  return running.finally(async () => {
     if (primary) {
       releaseGoalRun(req.sessionId)
       clearRuntimeHooks(req.sessionId)
@@ -2889,6 +3041,7 @@ export async function runAgent(
      * 封库后写入会抛 —— 抛在 finally 里会变成无人接管的 rejection,所以在这里收住,
      * 并留一条日志:这一条转录确实没落盘,不能假装它落了。
      */
+    let writtenSkills: string[] = []
     try {
       const latest = store.getHistory(req.sessionId)
       store.setHistory(req.sessionId, mergeGoalStatusHistory(mergeLatestSubagentReceipts(agentSession.history, latest), latest))
@@ -2932,10 +3085,44 @@ export async function runAgent(
         })
         // 落盘之后再广播,渲染层的审查卡/tab 收到才能拉到已存在的改动集(避开竞态)。
         reviewOnChange?.({ runId: rootRunId, sessionId: rootSessionId, workspaceId: req.workspaceId })
+        /*
+          需求:提炼会话写完 SKILL.md 后自动在当前工作区启用(显式选装模式下新 Skill 默认是关的)。
+          判据取**落盘的会话归属**(`skillExtractionRoot`),不取上面那个 `rootSessionId`:
+          真正写盘的多半是提炼会话派出去的子 agent,而父 handle 可能已经被 reap,
+          `runs` 那条链断掉时会把子 run 的名字当成根 —— 表现为 Skill 写好了却没人启用。
+          ★ 真正的激活在下面 await(它要扫目录 + 写设置 + 广播),不放进这个 try:
+          这个 catch 说的是「收尾写入没落盘」,激活失败是另一件事。
+        */
+        if (extractionRootId !== undefined) {
+          writtenSkills = writtenProjectSkillNames(changes.filter((c) => c.inWorkspace).map((c) => c.relPath))
+        }
       }
     } catch (error) {
       getHost().logger.warn(`[runtime] run ${req.runId} 的收尾写入没有落盘:${error instanceof Error ? error.message : String(error)}`)
     }
+    /*
+      需求:提炼会话(含它派出去的子 run)这一轮写进磁盘的项目 Skill,要在放走等待者
+      **之前**启用完 —— 同一条会话排队的下一轮靠这个屏障保证「它开跑时工作区设置里
+      已经有这条 Skill」。
+      ★ 失败不把这一轮判成失败:文件已经落盘,用户仍可以去 Skill 页手动打开它。
+    */
+    if (extractionRootId !== undefined && writtenSkills.length > 0) {
+      try {
+        await skillWrittenOnChange?.({ workspaceId: req.workspaceId, sessionId: extractionRootId, names: writtenSkills })
+      } catch (error) {
+        getHost().logger.warn(`[skill] 提炼写入的 Skill 自动启用失败:${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }).finally(() => {
+    /*
+      ★ 放等待者走**必须**在这一层(`finally` 的 `finally`):激活抛了、收尾写入抛了,
+      都要放。留一个永不释放的等待点,同一工作区里下一轮会一直卡在屏障上,而用户
+      看到的只是「消息发出去了没反应」。
+      ★ `release()`(环境租约)也挪到了这里 —— 上面的激活要用它:远端工作区的 fs
+      走的就是这条连接,先放租约的话激活可能撞上空闲回收,表现为静默失败。
+    */
+    releaseActivation()
+    release()
   })
 }
 
@@ -2962,6 +3149,10 @@ export function resetRuntimeForTest(): void {
   mcpOnChange = null
   sessionOnChange = null
   reviewOnChange = null
+  skillWrittenOnChange = null
+  // ★ 必须清:留着的话,下一个用例第一个 primary run 会等一个永远不会放的等待点,
+  //   表现为一串莫名其妙的超时。
+  skillActivationBarrier.clear()
   childRunLauncher = null
   childSeq = 0
   // ★ 必须清:留着的话,等待者和它那个 interval 会跨用例泄漏 ——

@@ -289,7 +289,7 @@ function TimelineRow({
 }): ReactNode {
   switch (item.kind) {
     case "thinking":
-      return <ThinkingBlock text={item.text} streaming={item.streaming} />;
+      return <ThinkingBlock text={item.text} streaming={item.streaming} stats={item.stats} />;
     case "subagent":
       return (
         <SubagentNode

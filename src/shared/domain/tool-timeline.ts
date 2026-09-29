@@ -10,6 +10,7 @@
  * 这里**不 import 任何 React**。组件只负责把这些函数的输出摆进版式。
  */
 import { durationOf } from '../agent/duration'
+import type { ThinkingStats } from '../agent/thinking-stats'
 import type { SubagentState, ToolCallState } from '../agent/transcript'
 import { presenterOf, type ToolShape } from './tool-presenter'
 
@@ -22,7 +23,8 @@ import { presenterOf, type ToolShape } from './tool-presenter'
  * 见 `groupKey` 的说明。
  */
 export type TimelineItem =
-  | { key: string; kind: 'thinking'; text: string; streaming: boolean }
+  /** `stats`:思考卡片的用时与 token 读数来源,见 `shared/agent/thinking-stats.ts`。缺席 = 不画读数。 */
+  | { key: string; kind: 'thinking'; text: string; streaming: boolean; stats?: ThinkingStats }
   | { key: string; kind: 'tool'; callId: string | undefined; name: string; input: unknown }
   | {
       key: string

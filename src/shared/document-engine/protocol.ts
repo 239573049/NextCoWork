@@ -96,6 +96,28 @@ export interface DocumentCapabilities {
   macros: { list: boolean; run: boolean }
 }
 
+/**
+ * 一次预览 tile 的请求。坐标与尺寸都由宿主限制后才会送进 native helper。
+ *
+ * 需求：文档预览和编辑画布必须复用同一个活动模型，但画布不能把任意大图交给
+ * helper；因此协议只描述有限的 RGBA tile，不携带原始文档字节或 UI 状态。
+ */
+export interface DocumentRenderRequest {
+  x: number
+  y: number
+  tileWidth: number
+  tileHeight: number
+  width: number
+  height: number
+}
+
+export interface DocumentRenderResult {
+  width: number
+  height: number
+  format: 'rgba'
+  bytes: Uint8Array
+}
+
 // ─────────────────────────── 操作 ───────────────────────────
 
 /**

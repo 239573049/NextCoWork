@@ -34,7 +34,27 @@ export interface SubagentResult {
 
 export type ContentPart =
   | { type: 'text'; text: string }
-  | { type: 'thinking'; text: string; opaque?: unknown }
+  | {
+    type: 'thinking'
+    text: string
+    opaque?: unknown
+    /**
+     * 需求：思考卡片显示「思考了多久」。由 `BlockAccumulator` 按主进程时钟算出，
+     * 口径见那边 `ThinkingBlock` 上的注释（含首个增量之前那段隐藏推理的等待）。
+     *
+     * ★ **只走 UI 轨**：编码器都是按字段挑着读 `text` / `opaque` 的，这两个字段不会上行。
+     * 缺席 = 旧转录或导入的会话 —— 界面上就不画时长（没有事实就不画字段），不拿 0 兜底。
+     */
+    durationMs?: number
+    /**
+     * 上游**明确报出**的这一块思考的 token 数（`usage.reasoningTokens`，且这次回复里
+     * 只有这一块思考、归属无歧义时才写）。
+     *
+     * ★ 只存真值，不存估算：估算由渲染层按 `text` 现算，这样旧转录也能显示一个约数，
+     * 而「真值 / 约数」的区别一直由这个字段在不在来表达 —— 存了估算就分不开了。
+     */
+    tokens?: number
+  }
   | { type: 'tool_call'; callId: string; name: string; input: unknown }
   | { type: 'tool_result'; callId: string; output: ToolOutput; isError: boolean; subagent?: SubagentResult }
   | { type: 'subagent'; callId: string; childRunId: string; summary?: string }

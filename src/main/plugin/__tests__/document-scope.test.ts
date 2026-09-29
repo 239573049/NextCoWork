@@ -29,7 +29,9 @@ const MANIFEST = {
 }
 
 const roots: string[] = []
+const managers: PluginManager[] = []
 afterEach(async () => {
+  for (const manager of managers.splice(0)) await manager.shutdown()
   for (const r of roots.splice(0)) await fs.rm(r, { recursive: true, force: true })
 })
 
@@ -45,7 +47,8 @@ function ctx(callId: string, workspaceId: string | undefined): ToolContext {
 async function makeManager(
   runtime: PluginRuntime,
   seen: Seen[],
-  workspaces: Record<string, string> = { bg: '/ws/background' }
+  workspaces: Record<string, string> = { bg: '/ws/background' },
+  documentOverrides: Partial<PluginDocumentsBridge> = {}
 ): Promise<PluginManager> {
   const root = await fs.mkdtemp(join(tmpdir(), 'ncw-doc-scope-'))
   roots.push(root)
@@ -59,7 +62,8 @@ async function makeManager(
       seen.push({ method, scope })
       return { data: {}, summary: method }
     },
-    releasePlugin: async () => undefined
+    releasePlugin: async () => undefined,
+    ...documentOverrides
   }
   const manager = new PluginManager({
     host: { logger: { warn() {}, info() {}, error() {} } } as never,
@@ -77,6 +81,8 @@ async function makeManager(
     clipboard: { readText: async () => '', writeText: async () => {} },
     scmFor: () => { throw new Error('scm adapter is not wired in this test') },
     openTab: () => {},
+    // 文档作用域用例不启动终端，但依赖契约仍要完整，不能为测试放宽生产接口。
+    launchTerminal: () => ({ opened: false, reason: 'declined' }),
     requestInteraction: async () => null,
     emitProgress: () => {},
     emitChanged: () => {},
@@ -91,6 +97,7 @@ async function makeManager(
     resolveWorkspace: (id) => (workspaces[id] === undefined ? null : { id, rootPath: workspaces[id] })
   })
   await manager.start()
+  managers.push(manager)
   manager.grant('acme.writer', ['workspace.read', 'workspace.write'])
   await manager.setEnabled('acme.writer', true)
   await manager.wake('acme.writer')
@@ -126,7 +133,150 @@ function tool(manager: PluginManager): NonNullable<ReturnType<PluginManager['con
   return reg
 }
 
+describe('documents.* lifecycle', () => {
+  it('discards only after explicit host confirmation and holds the close guard afterwards', async () => {
+    let dirty = true
+    let discards = 0
+    const manager = await makeManager({ spawn: async () => {}, dispose: () => {}, disposeAll: () => {}, invoke: async () => ({}) }, [], {}, {
+      assertCanRelease: async () => { if (dirty) throw new Error('unsaved document') },
+      discardAll: async () => { discards += 1; dirty = false }
+    })
+    try {
+      await expect(manager.guardDocumentClose()).rejects.toThrow('unsaved')
+      expect(discards).toBe(0)
+      const release = await manager.guardDocumentClose(true)
+      expect(discards).toBe(1)
+      release()
+    } finally { dirty = false }
+  })
+
+  it('checks only the plugin being replaced and leaves the old installation intact on refusal', async () => {
+    let dirty = true
+    const checked: (string | undefined)[] = []
+    const manager = await makeManager({ spawn: async () => {}, dispose: () => {}, disposeAll: () => {}, invoke: async () => ({}) }, [], {}, {
+      assertCanRelease: async (id) => { checked.push(id); if (dirty && id === 'acme.writer') throw new Error('unsaved document') }
+    })
+    const source = await fs.mkdtemp(join(tmpdir(), 'ncw-doc-install-'))
+    roots.push(source)
+    await fs.mkdir(join(source, 'dist'))
+    await fs.writeFile(join(source, 'dist', 'extension.js'), 'export function activate(){}')
+    await fs.writeFile(join(source, 'package.json'), JSON.stringify({ ...MANIFEST, name: 'other', activationEvents: [], contributes: {} }))
+    try {
+      await manager.install(source)
+      expect(checked).toEqual(['acme.other'])
+      await fs.writeFile(join(source, 'package.json'), JSON.stringify({ ...MANIFEST, version: '1.1.0', activationEvents: [], contributes: {} }))
+      await expect(manager.install(source)).rejects.toThrow('unsaved')
+      const installed = manager.catalog().plugins.find((item) => item.id === 'acme.writer')
+      expect(installed?.manifest.version).toBe('1.0.0')
+      const manifest = JSON.parse(await fs.readFile(join(installed!.path, 'package.json'), 'utf8')) as { version: string }
+      expect(manifest.version).toBe('1.0.0')
+    } finally { dirty = false }
+  })
+
+  it('refuses disable and uninstall before deactivation when documents are unsaved', async () => {
+    let dirty = true
+    const released: string[] = []
+    const disposed: string[] = []
+    const manager = await makeManager({ spawn: async () => {}, dispose: (id) => { disposed.push(id) }, disposeAll: () => {}, invoke: async () => ({}) }, [], {}, {
+      assertCanRelease: async () => { if (dirty) throw new Error('unsaved document') },
+      releasePlugin: async (id) => { released.push(id) }
+    })
+    try {
+      await expect(manager.setEnabled('acme.writer', false)).rejects.toThrow('unsaved')
+      await expect(manager.uninstall('acme.writer')).rejects.toThrow('unsaved')
+      expect(manager.catalog().plugins[0]).toMatchObject({ enabled: true, status: 'active' })
+      expect(disposed).toEqual([])
+      expect(released).toEqual([])
+    } finally { dirty = false }
+    await manager.setEnabled('acme.writer', false)
+    expect(released).toEqual(['acme.writer'])
+    // 既有 deactivate 与 disable 都调用幂等 dispose；这里只确认成功后才发生销毁。
+    expect(disposed).toEqual(['acme.writer', 'acme.writer'])
+  })
+
+  it('revokes access immediately even when dirty documents refuse ordinary disable', async () => {
+    let dirty = true
+    const manager = await makeManager({ spawn: async () => {}, dispose: () => {}, disposeAll: () => {}, invoke: async () => ({}) }, [], {}, {
+      assertCanRelease: async () => { if (dirty) throw new Error('unsaved document') }
+    })
+    try {
+      manager.revoke('acme.writer', ['workspace.write'])
+      expect(manager.catalog().plugins[0]?.enabled).toBe(false)
+      expect(await manager.handleRequest('acme.writer', { id: 3, method: 'documents.save', params: { sessionId: 's' } })).toMatchObject({ ok: false, error: { code: 'permission_denied' } })
+      // 让撤权的异步收尾完成；它不能因为 dirty 拒绝形成未处理的 Promise rejection。
+      await new Promise<void>((resolve) => { setImmediate(resolve) })
+    } finally { dirty = false }
+  })
+
+  it('blocks document RPC while a close guard is held and resumes after a veto', async () => {
+    const seen: Seen[] = []
+    const manager = await makeManager({ spawn: async () => {}, dispose: () => {}, disposeAll: () => {}, invoke: async () => ({}) }, seen)
+    const release = await manager.guardDocumentClose()
+    const request = { id: 9, method: 'documents.open', params: { path: 'a.docx' } }
+    try {
+      expect(await manager.handleRequest('acme.writer', request)).toMatchObject({ ok: false, error: { code: 'rejected' } })
+      expect(seen).toEqual([])
+    } finally { release() }
+    expect(await manager.handleRequest('acme.writer', request)).toMatchObject({ ok: true })
+  })
+
+  it('keeps the host usable when shutdown is refused for unsaved documents', async () => {
+    let dirty = true
+    let disposed = false
+    const manager = await makeManager({ spawn: async () => {}, dispose: () => {}, disposeAll: () => { disposed = true }, invoke: async () => ({}) }, [], {}, {
+      assertCanRelease: async () => { if (dirty) throw new Error('unsaved document') }
+    })
+    try {
+      await expect(manager.shutdown()).rejects.toThrow('unsaved')
+      expect(disposed).toBe(false)
+      expect(await manager.handleRequest('acme.writer', { id: 1, method: 'documents.getState', params: {} })).toMatchObject({ ok: true })
+    } finally { dirty = false }
+  })
+})
+
 describe('documents.* scope', () => {
+  it('rejects an aborted call even if its tool has not returned yet', async () => {
+    const seen: Seen[] = []
+    const controller = new AbortController()
+    let response: unknown
+    const runtime: PluginRuntime = {
+      spawn: async () => {}, dispose: () => {}, disposeAll: () => {},
+      invoke: async (_pluginId, invocation) => {
+        if (invocation.kind !== 'tool.execute') return {}
+        controller.abort()
+        response = await manager.handleRequest('acme.writer', { id: 8, method: 'documents.open', params: { path: 'a.docx', callId: 'cancelled' } })
+        return { content: [{ text: 'done' }] }
+      }
+    }
+    const manager = await makeManager(runtime, seen)
+    await tool(manager).execute({}, { ...ctx('cancelled', 'bg'), signal: controller.signal })
+    expect(response).toMatchObject({ ok: false, error: { code: 'rejected' } })
+    expect(seen).toEqual([])
+  })
+
+  it('notifies only the workspace subscription matching a successful document save', async () => {
+    const events: unknown[] = []
+    const runtime: PluginRuntime = {
+      spawn: async () => {}, dispose: () => {}, disposeAll: () => {},
+      invoke: async (_pluginId, invocation) => {
+        if (invocation.kind === 'event') events.push(invocation.payload)
+        if (invocation.kind === 'tool.execute') {
+          await manager.handleRequest('acme.writer', { id: 9, method: 'documents.save', params: { sessionId: 's', callId: 'bg-save' } })
+          return { content: [{ text: 'done' }] }
+        }
+        return {}
+      }
+    }
+    const manager = await makeManager(runtime, [], undefined, {
+      handle: async () => ({ data: {}, summary: 'saved', changed: { path: 'a.docx', kind: 'modified' } })
+    })
+    await manager.handleRequest('acme.writer', { id: 1, method: 'workspace.subscribeChanges', params: {} })
+    await tool(manager).execute({}, ctx('bg-save', 'bg'))
+    expect(events).toEqual([])
+    await manager.handleRequest('acme.writer', { id: 2, method: 'documents.save', params: { sessionId: 's' } })
+    expect(events).toEqual([{ event: 'workspace.changed', changes: [{ path: 'a.docx', kind: 'modified' }] }])
+  })
+
   it('scopes a tool-call document request to the run\'s workspace, not the foreground one', async () => {
     const seen: Seen[] = []
     const outcome: { error?: unknown } = {}

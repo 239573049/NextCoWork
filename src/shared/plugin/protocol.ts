@@ -24,6 +24,11 @@
  * 插件作者拼错一个方法名会收到一条完全误导的错误。
  */
 import type { PluginPermission } from './permission'
+import type { DocumentApplyResult, DocumentCapabilities, DocumentFormat, DocumentOperation } from '../document-engine/protocol'
+import type { DocumentSessionSnapshot } from '../document-engine/session'
+
+/** 需求：callId 只是查找受信工具上下文的索引，插件不能直接指定 workspaceId。 */
+type DocumentSessionParams = { sessionId: string; callId?: string }
 
 // ─────────────────────────── 方法表 ───────────────────────────
 
@@ -240,6 +245,27 @@ export interface PluginMethodMap {
    */
   'customEditors.setDirty': { params: { documentId: string; path: string; dirty: boolean }; result: Record<string, never> }
 
+  // documents —— 类型描述调用契约，document-rpc 仍逐项校验运行时的不可信输入。
+  'documents.open': {
+    params: { path: string; engine?: string; callId?: string }
+    result: { sessionId: string; viewId: string; path: string; snapshot: DocumentSessionSnapshot; capabilities: DocumentCapabilities }
+  }
+  'documents.apply': {
+    params: DocumentSessionParams & { generation: number; modelRevision: number; operationId: string; operations: DocumentOperation[] }
+    result: DocumentApplyResult
+  }
+  'documents.save': { params: DocumentSessionParams; result: { snapshot: DocumentSessionSnapshot } }
+  'documents.export': {
+    params: DocumentSessionParams & { path: string; format: DocumentFormat; overwrite?: boolean }
+    result: { snapshot: DocumentSessionSnapshot; path: string }
+  }
+  'documents.getState': { params: DocumentSessionParams; result: DocumentSessionSnapshot }
+  'documents.getOperation': {
+    params: DocumentSessionParams & { operationId: string }
+    result: { status: 'missing' } | { status: 'applied'; sessionId: string; result: DocumentApplyResult } | { status: 'rejected'; sessionId: string; code: string } | { status: 'unknown'; sessionId: string }
+  }
+  'documents.close': { params: DocumentSessionParams; result: { closed: boolean; dirty: boolean } }
+
   /**
    * 设置项 —— 用户在插件详情页里拨的那些开关。
    *
@@ -369,6 +395,15 @@ export const PLUGIN_METHOD_PERMISSION = {
 
   'customEditors.register': 'workspace.read',
   'customEditors.setDirty': null,
+
+  'documents.open': 'workspace.read',
+  'documents.apply': 'workspace.write',
+  'documents.save': 'workspace.write',
+  'documents.export': 'workspace.write',
+  'documents.getState': 'workspace.read',
+  'documents.getOperation': 'workspace.read',
+  'documents.close': 'workspace.read',
+
   /*
     读能力就够:它打开的是一个**只读到文件内容**的编辑器视图。
     真正的写发生在视图保存时,那条路由渲染层按 Tab 绑定的文件代发,

@@ -58,7 +58,16 @@ export const providerAccountsZh = {
   'providerAccount.quota.resetsAt': ({ time }: Params) => `${time} 重置`,
   /* ★ 「没有数据」和「0%」必须是两句话 —— 见 provider-accounts.ts 的 QuotaBar 注释 */
   'providerAccount.quota.empty': '尚未获取，发一条消息后更新',
+  'providerAccount.quota.fetchableEmpty': '尚未获取，点「刷新额度」拉取',
   'providerAccount.quota.stale': ({ hours }: Params) => `${hours} 小时前的数据`,
+  'providerAccount.quota.refresh': '刷新额度',
+  'providerAccount.quota.refreshing': '正在获取…',
+  'providerAccount.quota.failed': '额度获取失败',
+  /* ── 聊天圆环菜单里的「套餐额度」区块(数据同上,布局更窄) ── */
+  'providerAccount.quota.menuTitle': '套餐额度',
+  'providerAccount.quota.remaining': ({ percent }: Params) => `剩 ${percent}%`,
+  'providerAccount.quota.menuEmpty': '这个账号还没有额度数据',
+  'providerAccount.quota.noAccount': '未找到可查询额度的账号',
 
   'providerAccount.rotation': '账号自动切换',
   'providerAccount.rotationHint': '某个账号被限流时自动换到下一个；关闭后只用当前账号。'
@@ -110,7 +119,15 @@ export const providerAccountsEn = {
   'providerAccount.quota.used': ({ percent }: Params) => `${percent}% used`,
   'providerAccount.quota.resetsAt': ({ time }: Params) => `resets at ${time}`,
   'providerAccount.quota.empty': 'No data yet — updates after your next message',
+  'providerAccount.quota.fetchableEmpty': 'No data yet — use “Refresh quota”',
   'providerAccount.quota.stale': ({ hours }: Params) => `${hours}h old`,
+  'providerAccount.quota.refresh': 'Refresh quota',
+  'providerAccount.quota.refreshing': 'Fetching…',
+  'providerAccount.quota.failed': 'Failed to fetch quota',
+  'providerAccount.quota.menuTitle': 'Plan quota',
+  'providerAccount.quota.remaining': ({ percent }: Params) => `${percent}% left`,
+  'providerAccount.quota.menuEmpty': 'No quota data for this account yet',
+  'providerAccount.quota.noAccount': 'No account to query quota for',
 
   'providerAccount.rotation': 'Switch accounts automatically',
   'providerAccount.rotationHint':

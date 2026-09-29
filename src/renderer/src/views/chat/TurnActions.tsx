@@ -14,8 +14,10 @@ import { Check, Copy, Download, GitBranch, RotateCcw, Trash2 } from 'lucide-reac
 import { formatDuration } from '../../../../shared/agent/duration'
 import { copyText, saveTextFile } from '../../services/app'
 import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
+import { Spinner } from '../../components/ui/Spinner'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
+import { toast } from '../../stores/toast'
 
 /** 待确认状态自动复位的时长。与代码块「已复制」的 2.2s 同量级,但留得久一点。 */
 const CONFIRM_TIMEOUT_MS = 4000
@@ -56,6 +58,13 @@ export function TurnActions({
   const [copy, setCopy] = useTransientStatus()
   const [exported, setExported] = useTransientStatus()
   const [branched, setBranched] = useTransientStatus()
+  /*
+    需求:分支要复制一段转录(含图片),长会话上要等一会儿。原先按钮在这段时间里
+    毫无变化,用户以为没点上就再点,于是一次建出好几条一模一样的分支。
+    进行中:按钮禁用 + 转圈;失败:除了图标的 tooltip,再给一条 toast ——
+    tooltip 只有悬停才看得见,等于没报错。主进程另有同键去重,这里只是别让人白点。
+  */
+  const [branching, setBranching] = useState(false)
   const [confirm, setConfirm] = useState<'none' | 'regenerate' | 'delete'>('none')
 
   // 正文变了就撤掉「已复制」—— 那个钩子说的是上一份文本,留着会指错东西。
@@ -96,13 +105,22 @@ export function TurnActions({
 
       {canRewrite && onBranch !== undefined && (
         <ActionIconButton
-          label={t(branched === 'failed' ? 'chat.turn.branchFailed' : branched === 'done' ? 'chat.turn.branched' : 'chat.turn.branch')}
+          label={t(branching ? 'chat.turn.branching' : branched === 'failed' ? 'chat.turn.branchFailed' : branched === 'done' ? 'chat.turn.branched' : 'chat.turn.branch')}
           testId="turn-branch"
+          disabled={branching}
           onClick={() => {
-            void onBranch(prompt.id).then(() => setBranched('done')).catch(() => setBranched('failed'))
+            if (branching) return
+            setBranching(true)
+            void onBranch(prompt.id)
+              .then(() => setBranched('done'))
+              .catch(() => {
+                setBranched('failed')
+                toast.error(t('chat.turn.branchFailed'), 'chat-turn-branch')
+              })
+              .finally(() => setBranching(false))
           }}
         >
-          {branched === 'done' ? <Check size={13} /> : <GitBranch size={13} />}
+          {branching ? <Spinner size="sm" /> : branched === 'done' ? <Check size={13} /> : <GitBranch size={13} />}
         </ActionIconButton>
       )}
 
