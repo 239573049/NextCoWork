@@ -51,6 +51,7 @@ import {
   findPreset
 } from '../../../shared/domain/presets'
 import { pluginToolId } from '../../plugin/tools'
+import { MODEL_DEFAULTS_SEEDED_KEY } from '../../db/config-profile'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../../../shared/domain/workspace'
 import {
   getRouter,
@@ -618,8 +619,33 @@ describe('运行时自播种', () => {
 
     expect(store.getSettings().defaultModel).toBe('用户自己选的')
 
-    // 还原成全新安装的样子 —— store 是模块级单例,不还原会影响后面的用例
+    // 还原成全新安装的样子 —— store 是模块级单例,不还原会影响后面的用例。
+    // 种子现在按一次性标记判(见 runtime.ts `seed()`),所以标记也要一起撤掉
     store.updateSettings({ defaultModel: '' })
+    store.setKv(MODEL_DEFAULTS_SEEDED_KEY, false)
+  })
+
+  it('★ 选了「跟随对话」(空串)之后重启不再被顶回内置模型 —— 否则表现为保存了、重启又变回 deepseek', async () => {
+    const { store } = await import('../../state/store')
+    getRouter() // 第一次启动:种下内置默认
+    expect(store.getSettings().defaultModel).toBe('deepseek-v4-pro')
+
+    store.updateSettings({
+      defaultModel: '',
+      defaultModelProviderId: undefined,
+      subagent: { model: '', modelProviderId: undefined }
+    })
+
+    // 模拟重启:进程内的 `seeded` 清掉,库还是那个库
+    resetRuntimeForTest()
+    installHost(withDemo(nodeHost(), { chunkDelayMs: 0 }))
+    getRouter()
+
+    expect(store.getSettings().defaultModel, '重启把「跟随对话」顶回去了').toBe('')
+    expect(store.getSettings().subagent.model, '重启把子代理的「跟随对话」顶回去了').toBe('')
+
+    // 还原成全新安装的样子(同上一条)
+    store.setKv(MODEL_DEFAULTS_SEEDED_KEY, false)
   })
 
   it('★ 换宿主之后路由器必须重建,否则新装的宿主完全不起作用', async () => {

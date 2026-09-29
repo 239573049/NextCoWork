@@ -70,7 +70,7 @@ import type { McpServerConfig, McpServerStatus } from '../shared/domain/mcp'
 import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
 import { opencodeGoProtocolFor } from './kernel/upstream/opencode-protocol'
-import { currentConfigScope, defaultWorkspaceIdForScope } from './db/config-profile'
+import { currentConfigScope, defaultWorkspaceIdForScope, MODEL_DEFAULTS_SEEDED_KEY } from './db/config-profile'
 import { ensureProviderAccountsSeeded } from './db/provider-accounts'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
@@ -339,17 +339,28 @@ function seed(): void {
    *
    * 常量留在 main 侧而不是写进 `DEFAULT_SETTINGS`:`src/shared/` 不能
    * 反向 import `src/main/`,而上游是 main 的东西。
+   *
+   * ★★ 「没配过」靠 `MODEL_DEFAULTS_SEEDED_KEY` 判,**不靠值是不是空串**。
+   * 原先写的是 `=== ''` 就种,但空串在设置页是一个可选项(「跟随对话」),
+   * 而 `seed()` 每次进程启动 / 每次切账户都会重跑 —— 于是用户选了「跟随对话」,
+   * 重启后又被顶回 deepseek,表现为「保存了,重启就变回去」,且零报错。
+   * 现在每个配置作用域只种一次;标记跟着作用域走(登记在
+   * `db/config-profile.ts` 的 `PROFILE_KV_KEYS`),所以新账户的空作用域照样会种。
+   * 代价:升级后第一次启动时还没有标记,已经选了「跟随对话」的人会被最后顶回一次。
    */
-  const builtin = findPreset(BUILTIN_PROVIDER_ID)?.suggestedModels ?? []
-  const settings = store.getSettings()
-  const [defaultModel, subagentModel] = [builtin[0], builtin[1]]
+  if (store.getKv<unknown>(MODEL_DEFAULTS_SEEDED_KEY, false) !== true) {
+    store.setKv(MODEL_DEFAULTS_SEEDED_KEY, true)
+    const builtin = findPreset(BUILTIN_PROVIDER_ID)?.suggestedModels ?? []
+    const settings = store.getSettings()
+    const [defaultModel, subagentModel] = [builtin[0], builtin[1]]
 
-  if (defaultModel !== undefined && settings.defaultModel === '') {
-    // 种子时把供应商一并写死是对的:这一刻只有内置上游一家,不存在「按优先级择优」的余地。
-    store.updateSettings({ defaultModel, defaultModelProviderId: BUILTIN_PROVIDER_ID })
-  }
-  if (subagentModel !== undefined && settings.subagent.model === '') {
-    store.updateSettings({ subagent: { model: subagentModel, modelProviderId: BUILTIN_PROVIDER_ID } })
+    if (defaultModel !== undefined && settings.defaultModel === '') {
+      // 种子时把供应商一并写死是对的:这一刻只有内置上游一家,不存在「按优先级择优」的余地。
+      store.updateSettings({ defaultModel, defaultModelProviderId: BUILTIN_PROVIDER_ID })
+    }
+    if (subagentModel !== undefined && settings.subagent.model === '') {
+      store.updateSettings({ subagent: { model: subagentModel, modelProviderId: BUILTIN_PROVIDER_ID } })
+    }
   }
 
   seedDefaultWorkspace()

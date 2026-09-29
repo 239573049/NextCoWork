@@ -111,6 +111,17 @@ const PROFILE_TABLES = [
 ] as const
 
 /**
+ * `runtime.ts` 的 `seed()` 种默认模型 / 默认子代理的一次性标记。
+ *
+ * 需求:这两项只在「这个作用域从没种过」时种一次,之后用户选什么(包括空串
+ * 「跟随对话」)都原样保留 —— 以前按「值为空」判,重启就把「跟随对话」顶回 deepseek。
+ *
+ * ★ 必须随作用域走(所以登记在下面的 `PROFILE_KV_KEYS`):留在全局的话,
+ * 切到一个新账户时标记还在,新账户的空作用域拿不到种子,首屏模型选择器是空的。
+ */
+export const MODEL_DEFAULTS_SEEDED_KEY = 'settings.model-defaults-seeded'
+
+/**
  * 随作用域走的 kv 键 —— **白名单,不是黑名单**。
  *
  * ★ 白名单是这里唯一安全的写法。黑名单意味着「以后任何人往 kv 里多写一个键,
@@ -128,7 +139,8 @@ const PROFILE_KV_KEYS = [
   // client 供应商的一次性迁移标记。跟着供应商走,否则切回账户时
   // 那个「把出厂 openai-chat 抬到 Responses」的一次性动作会重跑一次并覆盖用户的选择。
   'client-auth.responses-default',
-  'client-auth.deepseek-zhipu-xiaomi-qwen-anthropic-override-v3'
+  'client-auth.deepseek-zhipu-xiaomi-qwen-anthropic-override-v3',
+  MODEL_DEFAULTS_SEEDED_KEY
 ] as const
 
 const PROFILE_KV_PREFIXES = ['tabs.outer.', 'tabs.inner.', 'session.input.'] as const
