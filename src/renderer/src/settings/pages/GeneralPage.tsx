@@ -40,7 +40,7 @@ import {
 } from '../../../../shared/domain/subagent-thinking'
 import { DraftInput } from '../DraftInput'
 import { DefaultOpenTargetSelect } from './DefaultOpenTargetSelect'
-import { LandsAt, SettingGroup, SettingRow } from '../Row'
+import { SettingGroup, SettingRow } from '../Row'
 import type { SettingsPageProps } from '../props'
 import { useI18n } from '../../i18n'
 
@@ -367,14 +367,7 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
       </SettingGroup>
 
       <SettingGroup title={t('settings.sounds')}>
-        <SettingRow
-          title={t('settings.taskCompleteSound')}
-          description={
-            <>
-              {t('settings.taskCompleteSoundHint')} <LandsAt>InteractionKind</LandsAt>
-            </>
-          }
-        >
+        <SettingRow title={t('settings.taskCompleteSound')} description={t('settings.taskCompleteSoundHint')}>
           <Toggle
             label={t('settings.taskCompleteSound')}
             checked={settings.notifications.taskComplete}

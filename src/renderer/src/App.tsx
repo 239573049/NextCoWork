@@ -21,6 +21,7 @@ import { AppShell } from './shell/AppShell'
 import { AppSkeleton } from './shell/AppSkeleton'
 import { WindowControls } from './shell/WindowControls'
 import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
+import { setSoundPreferences, startNotificationSounds } from './stores/notification-sounds'
 import { useImageThemes } from './stores/imageTheme'
 import { usePluginsStore } from './stores/plugins'
 import { useWindowStore, startActiveWorkspaceReporting } from './stores/window'
@@ -55,6 +56,12 @@ export default function App(): React.JSX.Element {
   }, [settings, setLocale])
 
   useEffect(() => startAgentEventPump(), [])
+
+  // 需求:设置 › 通用 › 提示音。和事件泵同理只起一次,否则一个 run 跑完响 N 声(见该文件头)
+  useEffect(() => startNotificationSounds(), [])
+  useEffect(() => {
+    if (settings !== null) setSoundPreferences(settings.notifications)
+  }, [settings])
 
   /*
     ★ 上报当前工作区。**放在事件泵旁边而不是握手那个 effect 里**:它不依赖
