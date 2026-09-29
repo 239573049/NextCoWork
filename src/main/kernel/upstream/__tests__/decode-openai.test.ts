@@ -71,6 +71,37 @@ describe('OpenAI Chat Completions decoding', () => {
     expect(accumulated(output).calls).toEqual([{ ok: true, callId: 'call-1', name: 'Echo', input: { text: 'ok' } }])
   })
 
+  it('accepts a frozen tool call that omits tool_calls[].index', async () => {
+    // ★ 逐字复刻 Google 的 OpenAI 兼容层实测分片:一个调用一次性给全,没有 index,
+    //   还多带一个我们不认识的 extra_content。以前这一帧被判成 invalid tool call,
+    //   症状是「用 Gemini 只要调工具就整轮中止、正文为空」。
+    const output = await collect(decodeOpenAIChat(events(
+      chunk({ role: 'assistant', content: '' }),
+      chunk({ tool_calls: [{
+        extra_content: { google: { thought_signature: 'sig' } },
+        function: { arguments: '{"text":"一"}', name: 'Echo' },
+        id: 'call_297140', type: 'function'
+      }] }),
+      chunk({}, 'tool_calls'), '[DONE]'
+    )))
+    expect(accumulated(output).calls).toEqual([
+      { ok: true, callId: 'call_297140', name: 'Echo', input: { text: '一' } }
+    ])
+    expect(output.at(-1)).toMatchObject({ stopReason: 'tool_use' })
+  })
+
+  it('keeps index-less parallel tool calls in separate slots', async () => {
+    const output = await collect(decodeOpenAIChat(events(
+      chunk({ tool_calls: [{ id: 'call-a', function: { name: 'Echo', arguments: '{"text":"一"}' } }] }),
+      chunk({ tool_calls: [{ id: 'call-b', function: { name: 'Echo', arguments: '{"text":"二"}' } }] }),
+      chunk({}, 'tool_calls'), '[DONE]'
+    )))
+    expect(accumulated(output).calls).toEqual([
+      { ok: true, callId: 'call-a', name: 'Echo', input: { text: '一' } },
+      { ok: true, callId: 'call-b', name: 'Echo', input: { text: '二' } }
+    ])
+  })
+
   it('accepts a complete JSON response with message.tool_calls', async () => {
     const output = await collect(decodeOpenAIChat(events({ model: 'deepseek-test', choices: [{ index: 0, finish_reason: 'tool_calls', message: {
       reasoning_content: '先查一下。', content: null,
