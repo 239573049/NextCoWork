@@ -60,7 +60,7 @@ import { runScheduledTaskNow } from '../scheduled/scheduler'
 import { scheduledWrites } from '../scheduled/bridge'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
-import { checkForUpdates, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, requestQuit, saveImageFile, saveTextFile } from './app'
+import { checkForUpdates, copyImage, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, requestQuit, saveImageFile, saveTextFile } from './app'
 import {
   cancelWorkspaceUpload,
   completeWorkspaceUpload,
@@ -282,6 +282,7 @@ const handlers: HandlerMap = {
   'app:updateInstall': () => updateService.install(),
   'app:updateGetState': () => updateService.getState(),
   'app:copyText': ({ text }) => copyText(text),
+  'app:copyImage': ({ base64 }) => copyImage(base64),
   'app:saveTextFile': (req) => saveTextFile(req),
   'app:saveImageFile': (req) => saveImageFile(req),
   'app:openSessionWindow': (req) => openSessionWindow(req),

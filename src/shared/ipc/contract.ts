@@ -235,16 +235,37 @@ export interface IpcInvokeMap {
   'app:updateGetState': { req: void; res: UpdateState }
   'app:copyText': { req: { text: string }; res: void }
   /**
+   * 把一张图写进系统剪贴板。`base64` 是**原图字节**,不带 `data:` 前缀。
+   *
+   * ★ 需求:对话里生成的图此前没有任何出口(灯箱的「用别的程序打开」只对磁盘上的
+   * 绝对路径出现,而生成图是 `ncw://` 附件或内联 data URL)。用户要把一张图贴进
+   * 别的应用,唯一的做法是让 Agent 调 `SaveImage` 落盘再自己找 —— 而剪贴板是
+   * 这一步最短的路。
+   *
+   * ★ 和 `app:copyText` 分开,而不是给它加一个「这次是图」的开关:Electron 里
+   * `writeText` 与 `write(ClipboardItem)` 是两套 API,走错一条**不报错** ——
+   * 用户粘出来是一串 base64 文本。
+   *
+   * ★ 不带 mime:主进程按**字节的魔数**判格式(同 `imageMimeOfBytes` 在别处的用法),
+   * 不信渲染层自报 —— 一张自报成 png 的 jpeg 在粘贴板上会被当成 png 贴出去。
+   *
+   * ★ 不走渲染层的 `navigator.clipboard`(它也能写图):仓库里所有复制都经主进程
+   * (见 `services/app.ts` 的 `copyText` 与那条钉住它的测试),一处校验、一处失败面。
+   */
+  'app:copyImage': { req: { base64: string }; res: void }
+  /**
    * 存一段文本到用户挑的位置。路径由主进程的 showSaveDialog 产出 ——
    * 渲染层只给**文件名建议**,永不指定任意路径(方案 §9)。取消时返回 null。
    */
   'app:saveTextFile': { req: { defaultName: string; text: string }; res: { path: string } | null }
   /**
-   * 存一张 PNG（邀请海报）。`base64` 是画布 `toDataURL` 去掉前缀的那一段。
+   * 存一张图片（邀请海报 / 对话里生成的图）。`base64` 是原图字节去掉前缀的那一段。
    *
    * ★ 和 `app:saveTextFile` 分开，而不是给它加个「二进制」开关:两者的保存对话框
    * 过滤器和写入编码都不同,合并之后每个调用点都要带一个「这次是文本还是二进制」
    * 的参数 —— 传错一次就写出一个内容是 base64 文本的 .png,而且打开之前看不出来。
+   *
+   * ★ 也不带 mime:扩展名与过滤器由主进程按字节判(理由见上面那条)。
    */
   'app:saveImageFile': { req: { defaultName: string; base64: string }; res: { path: string } | null }
   'app:openSessionWindow': { req: { workspaceId: string; sessionId: string }; res: void }
@@ -1448,6 +1469,7 @@ export const INVOKE_CHANNELS = {
   'app:updateInstall': 1,
   'app:updateGetState': 1,
   'app:copyText': 1,
+  'app:copyImage': 1,
   'app:saveTextFile': 1,
   'app:saveImageFile': 1,
   'app:openSessionWindow': 1,

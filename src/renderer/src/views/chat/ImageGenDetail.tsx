@@ -9,7 +9,9 @@
  *   3. 跑完显示成品网格,点任意一张进灯箱、左右翻页;悬停/聚焦时图角浮出放大标,
  *      否则「能点开」这件事只有鼠标指针变形这一个线索;
  *   4. 单张时卡片**收到图的宽度**,不撑满整列 —— 竖图配一张满宽的卡,右边大半是空底色;
- *   5. 提示词是卡片底部独立的一区:标签 + 默认两行 + 超出才给「展开」+ 复制。
+ *   5. 提示词是卡片底部独立的一区:标签 + 默认两行 + 超出才给「展开」+ 复制;
+ *   6. 每张图自己带**复制 / 下载**(`ImageActions.tsx`):这张图是产物,用户要能把它
+ *      贴进别的应用或存到磁盘 —— 在此之前唯一的出口是求 Agent 调一次 `SaveImage`。
  * 「这一刻摆什么」全部由 `image-gen-view.ts` 算,这里只负责摆。
  *
  * ★ 为什么不复用 `MessageImage`:它只画 `ncw://`(附件协议),遇到 `data:` 会
@@ -36,6 +38,7 @@ import { copyText } from '../../services/app'
 import { useMotionLevel, type MotionLevel } from '../../theme/useMotionLevel'
 import { AgentShimmerText } from './AgentActivity'
 import { DETAIL_CARD_CLASS } from './detail-card'
+import { ImageActions } from './ImageActions'
 import { imageGenView, type ImageGenSlot } from './image-gen-view'
 import { ImageLightbox } from './ImageLightbox'
 import { OutputBlock, type DetailProps } from './ToolDetail'
@@ -97,6 +100,7 @@ export function ImageGenDetail({ input, output, isError, partialImages }: Detail
               // 只给**生成期到手**的那几张播淡入:跑完/重开历史会话时整片图一起淡入是开场动画,不是反馈
               reveal={!settled}
               label={t('imageGen.card.open', { index: position + 1 })}
+              index={position + 1}
               onOpen={() => setZoomed(position)}
             />
           )
@@ -173,6 +177,7 @@ function ImageSlot({
   single,
   reveal,
   label,
+  index,
   onOpen
 }: {
   slot: Extract<ImageGenSlot, { kind: 'image' }>
@@ -182,37 +187,56 @@ function ImageSlot({
   reveal: boolean
   /** 读屏标签「放大查看第 N 张图片」 */
   label: string
+  /** 这张在本次调用里的位置(从 1 数)—— 复制 / 下载那排动作据此取名 */
+  index: number
   onOpen: () => void
 }): ReactNode {
   return (
-    // button 而不是给 img 挂 onClick:键盘要能 Tab 到并回车打开(同 MessageImage 的理由)
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={label}
-      title={label}
+    /*
+      ★ 图片按钮与动作条(复制 / 下载)是**兄弟**:图片整个包在 button 里(键盘要能
+      Tab 到并回车放大),而 button 里再放 button 是非法结构 —— 浏览器会把内层那个
+      弹到图片外面,表现为「点复制打开了灯箱」。这一层只做两件事:当 `group`
+      (动作条默认透明,靠 `group-hover` / `group-focus-within` 浮出)与定位锚点。
+      ★ 裁切与圆角留在**按钮自己**身上,不挪到这一层:`overflow-hidden` 会连按钮
+      自己的聚焦轮廓一起裁掉 —— 键盘用户 Tab 到图上时那道轮廓是唯一的落点提示。
+    */
+    <div
       className={cn(
-        'app-no-drag group relative block cursor-zoom-in overflow-hidden rounded-[8px] focus-visible:outline-2 focus-visible:outline-accent',
+        'group relative block',
+        // 生成期到手的那几张才播淡入
         reveal && 'image-gen-reveal'
       )}
     >
-      <img
-        src={slot.image.dataRef}
-        alt=""
-        data-testid="image-gen-image"
-        className={cn(
-          'block',
-          single ? 'max-h-[360px] max-w-full object-contain' : 'aspect-square w-full object-cover'
-        )}
-      />
-      {/* 需求 3:悬停/键盘聚焦时浮出的放大标 —— 纯装饰,读屏已由按钮的 aria-label 说清 */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={label}
+        title={label}
+        className="app-no-drag block w-full cursor-zoom-in overflow-hidden rounded-[8px] focus-visible:outline-2 focus-visible:outline-accent"
+      >
+        <img
+          src={slot.image.dataRef}
+          alt=""
+          data-testid="image-gen-image"
+          className={cn(
+            'block',
+            single ? 'max-h-[360px] max-w-full object-contain' : 'aspect-square w-full object-cover'
+          )}
+        />
+      </button>
+      {/*
+        需求 3:悬停/键盘聚焦时浮出的放大标。**挪到左上角**是因为右上角现在是动作条
+        (复制 / 下载),两簇浮层叠在一起会互相压住 —— 而它仍然只是提示:
+        真正可点的是整张图(按钮在上面的 aria-label 里已经说清)。
+      */}
       <span
         aria-hidden
-        className="pointer-events-none absolute top-1.5 right-1.5 flex rounded-[6px] border border-stroke bg-surface-raised/85 p-1 text-fg-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none"
+        className="pointer-events-none absolute top-1.5 left-1.5 flex rounded-[6px] border border-stroke bg-surface-raised/85 p-1 text-fg-muted opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none"
       >
         <ZoomIn size={13} />
       </span>
-    </button>
+      <ImageActions image={slot.image} index={index} />
+    </div>
   )
 }
 

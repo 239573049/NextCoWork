@@ -51,12 +51,20 @@ export function copyText(text: string): Promise<void> {
   return invoke('app:copyText', { text })
 }
 
+/** 把一张图写进系统剪贴板。`base64` 是**原图字节**,不带 `data:` 前缀。 */
+export function copyImage(base64: string): Promise<void> {
+  return invoke('app:copyImage', { base64 })
+}
+
 /** 另存为。`defaultName` 只是建议名,落点由主进程弹出的系统对话框决定;取消返回 null。 */
 export function saveTextFile(defaultName: string, text: string): Promise<{ path: string } | null> {
   return invoke('app:saveTextFile', { defaultName, text })
 }
 
-/** 另存一张 PNG。`base64` **不带** `data:image/png;base64,` 前缀;取消返回 null。 */
+/**
+ * 另存一张图片。`base64` **不带** `data:image/png;base64,` 前缀;取消返回 null。
+ * 扩展名由主进程按字节判 —— 调用方给的 `defaultName` 只是名字,不必带对扩展名。
+ */
 export function saveImageFile(defaultName: string, base64: string): Promise<{ path: string } | null> {
   return invoke('app:saveImageFile', { defaultName, base64 })
 }

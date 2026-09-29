@@ -14,10 +14,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage, type ToolOutputImage } from '../../../../../shared/agent/message'
 import { emptyTranscript, toolsFromMessages, type ToolCallState } from '../../../../../shared/agent/transcript'
 import { I18nProvider } from '../../../i18n'
+import { copyImage, saveImageFile } from '../../../services/app'
 import { imageGenView } from '../image-gen-view'
 import { ToolCallCard } from '../parts'
 import { Thread } from '../Thread'
 import { assistantSegments, isPinnedToolBlock, type AssistantBlock } from '../thread-content'
+
+/** 复制 / 下载那两颗按钮的落地通道:断言的是**送给它们的是什么**(见下面那组用例) */
+vi.mock('../../../services/app', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../services/app')>()),
+  copyImage: vi.fn(async () => {}),
+  saveImageFile: vi.fn(async () => ({ path: '/tmp/image-1.png' }))
+}))
 
 const img = (tag: string): ToolOutputImage => ({ mime: 'image/png', dataRef: `data:image/png;base64,${tag}` })
 
@@ -100,6 +108,7 @@ afterEach(async () => {
   await teardown?.()
   teardown = null
   vi.unstubAllGlobals()
+  vi.clearAllMocks()
 })
 
 describe('生图卡片 · DOM', () => {
@@ -211,5 +220,70 @@ describe('生图卡片 · DOM', () => {
     const images = [...container.querySelectorAll('[data-testid="image-gen-image"]')]
     expect(images).toHaveLength(2)
     expect(images.every((image) => process?.contains(image) !== true)).toBe(true)
+  })
+})
+
+/**
+ * 复制 / 下载。★ 这一组盯的是**送出去的载荷**,不是「按钮在不在」:
+ * 两颗按钮的文案与图标在两种状态下都长得像,而送错的那张图(比如把第 1 张的字节
+ * 送给第 2 张那颗按钮)在界面上**看不出任何异常** —— 用户粘出来才发现是另一张。
+ * 所以断言用 `toBe`/`toEqual` 精确比,不用 `toContain`。
+ */
+describe('生图卡片 · 每张图的复制 / 下载', () => {
+  async function mountCard(images: ToolOutputImage[]): Promise<HTMLElement> {
+    const { container, close } = stubDom()
+    const root = createRoot(container)
+    teardown = async () => {
+      await act(async () => root.unmount())
+      close()
+    }
+    const input = { prompt: 'two cats', n: images.length }
+    await act(async () => root.render(createElement(I18nProvider, {
+      initialLocale: 'zh-CN',
+      children: createElement(ToolCallCard, {
+        call: { callId: 'gen', name: 'generate_image', input, status: 'ok', output: { content: 'ok', images } },
+        name: 'generate_image',
+        input
+      })
+    })))
+    return container
+  }
+
+  it('复制送的是**这张图**的字节,复制完按钮自己换成「图片已复制」', async () => {
+    const container = await mountCard([img('AA'), img('BB')])
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="image-action-copy"]')]
+    expect(buttons).toHaveLength(2)
+
+    await act(async () => buttons[1]?.click())
+    expect(copyImage).toHaveBeenCalledWith('BB')
+    expect(buttons[1]?.getAttribute('aria-label')).toBe('图片已复制')
+    // 另一张那颗不许跟着变 —— 「已复制」标在错的那一张上等于告诉用户复制了它
+    expect(buttons[0]?.getAttribute('aria-label')).toBe('复制图片')
+  })
+
+  it('下载送的是建议名 + 这张图的字节,取消保存不闪任何状态', async () => {
+    const container = await mountCard([img('AA'), img('BB')])
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="image-action-download"]')]
+
+    await act(async () => buttons[1]?.click())
+    // 序号是本次调用里的位置:第 2 张就是 image-2(扩展名由主进程按字节补)
+    expect(saveImageFile).toHaveBeenCalledWith('image-2', 'BB')
+    expect(buttons[1]?.getAttribute('aria-label')).toBe('图片已保存')
+
+    // 用户在系统对话框里按取消(主进程回 null)—— 那不是失败,不许标「失败」也不许标「已保存」
+    vi.mocked(saveImageFile).mockResolvedValueOnce(null)
+    await act(async () => buttons[0]?.click())
+    expect(buttons[0]?.getAttribute('aria-label')).toBe('下载图片')
+  })
+
+  it('读不到字节(附件没了)时闪失败态,而不是把空内容送出去', async () => {
+    const container = await mountCard([{ mime: 'image/png', dataRef: 'ncw://attachments/sessions/s1/gone.png' }])
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="image-action-copy"]')
+    // 只给 imageBase64 真正读的那两个字段 —— jsdom 里不必凑一个真 Response
+    vi.stubGlobal('fetch', async () => ({ ok: false, status: 404 }))
+
+    await act(async () => button?.click())
+    expect(copyImage).not.toHaveBeenCalled()
+    expect(button?.getAttribute('aria-label')).toBe('复制图片失败')
   })
 })
