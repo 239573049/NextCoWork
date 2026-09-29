@@ -34,6 +34,7 @@ import { EnvironmentError, missingPath } from '../../../environment/errors'
 import { defineTool } from '../define'
 import type { ToolContext, ToolRegistration } from '../registry'
 import { compileGlob, normalizeGlobPath } from './glob-match'
+import { literalPrefilter } from './grep-prefilter'
 import { defaultSkip } from './ignore'
 import { looksBinary, relOf, resolvePath, walkBaseOf } from './paths'
 import { redosRisk } from './redos'
@@ -55,6 +56,22 @@ const SEARCH_BUDGET_MS = 5000
 /** 比这大的文件不进 Grep —— 多半是数据或产物 */
 const MAX_GREP_FILE_BYTES = 5 * 1024 * 1024
 const SNIFF_BYTES = 4096
+/**
+ * 不大于这个的文件**一次读完**再嗅探;更大的先读 `SNIFF_BYTES` 嗅探、是文本才全量读。
+ *
+ * 需求:源码文件绝大多数在几十 KB 以内,原先「stat → 嗅探读 → 全量读」每个文件要付
+ * 两次 open/close,是串行 IO 里最大的一块。而大文件里二进制(图片、包、数据库)
+ * 占比高,为它们全量读几 MB 再丢掉不划算 —— 所以只对小文件合并成一次读。
+ */
+const SINGLE_READ_MAX_BYTES = 256 * 1024
+/**
+ * 同时在搜的文件数。
+ *
+ * 需求:原先逐个文件 `await`,IO 完全串行 —— 本地是 libuv 线程池空转,
+ * SSH 工作区是每个文件 5~8 个网络往返首尾相接,几千个文件就把 5 秒预算烧完。
+ * 上限同时也是内存上限:最坏 16 × 5MB 的文件内容同时在手里。
+ */
+const GREP_CONCURRENCY = 16
 /** 每这么多个文件查一次中断 */
 const SIGNAL_EVERY = 32
 
@@ -260,7 +277,7 @@ interface FileHits {
   rel: string
   /** 命中的行号,从 1 开始,升序 */
   lines: number[]
-  /** 该文件所有行(已按 MAX_LINE_CHARS 截断),content 模式取上下文要用 */
+  /** 该文件所有行(已按 MAX_LINE_CHARS 截断),content 模式取上下文要用。没命中时为空数组 */
   text: string[]
 }
 
@@ -270,6 +287,8 @@ async function grepFile(
   abs: string,
   rel: string,
   re: RegExp,
+  /** 整文件字面量预筛,`null` = 正则里抽不出必经字面量,只能逐行扫 */
+  prefilter: ((text: string) => boolean) | null,
   multiline: boolean,
   budget: number
 ): Promise<FileHits | null> {
@@ -283,31 +302,48 @@ async function grepFile(
   }
   if (size === 0 || size > MAX_GREP_FILE_BYTES) return null
 
-  // ★ 先嗅探再解码:大多数二进制文件在这里就被挡掉了,全量读只发生在文本文件上
+  /*
+    ★ 先嗅探再解码:探测在**字节**上做完才解码成字符串,二进制文件永远不会被
+    解成一堆 U+FFFD。原先对每个文件都是「嗅探读 4KB → 再全量读」两趟;现在小文件
+    (≤ SINGLE_READ_MAX_BYTES)合并成一趟读完、在内存里嗅探前 4KB —— 判据不变,
+    省掉一次 open/close。大文件仍走两趟,理由见 `SINGLE_READ_MAX_BYTES`。
+    ★ 读的长度是 `size` 而不是 `size + 1`:SFTP 的实现会为多出来的那 1 字节
+    再发一次读请求等 EOF,每个文件白付一个网络往返。
+  */
+  let bytes: Uint8Array
   try {
-    if (looksBinary(await fs.readFileBytes(abs, SNIFF_BYTES))) return null
+    if (size <= SINGLE_READ_MAX_BYTES) {
+      bytes = await fs.readFileBytes(abs, size)
+      if (looksBinary(bytes.subarray(0, SNIFF_BYTES))) return null
+    } else {
+      if (looksBinary(await fs.readFileBytes(abs, SNIFF_BYTES))) return null
+      bytes = await fs.readFileBytes(abs, size)
+    }
   } catch (error) {
     rethrowRemoteFailure(error, ctx)
     return null
   }
+  // 与 `fs.readFile(abs, 'utf8')` 同一种解码(不剥 BOM、坏字节换成 U+FFFD);零拷贝包一层
+  const raw = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8')
 
-  let raw: string
-  try {
-    raw = await fs.readFile(abs)
-  } catch (error) {
-    rethrowRemoteFailure(error, ctx)
-    return null
-  }
+  // 需求:整文件字面量预筛。绝大多数文件不含要找的标识符,直接跳过切行和逐行正则。
+  // 预筛只许误报不许漏报,见 `grep-prefilter.ts` 的文件头。
+  if (prefilter !== null && !prefilter(raw)) return { rel, lines: [], text: [] }
 
-  const text = raw
-    .split('\n')
-    // ★ 截断在**匹配之前**。灾难性回溯的代价随行长指数增长,截完就封了顶
-    .map((l) => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) : l))
+  /** 切行 + 截断。★ 截断在**匹配之前**。灾难性回溯的代价随行长指数增长,截完就封了顶 */
+  const splitLines = (): string[] =>
+    raw.split('\n').map((l) => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) : l))
 
   const lines: number[] = []
 
+  /*
+    ★ `re` 带 `g` 标志,`lastIndex` 是它身上的共享状态,而多个文件是并发在搜的。
+    之所以安全,是因为下面两个分支从「重置 lastIndex」到「用完它」之间**没有 await**
+    —— 单线程里别的文件插不进来。往这两段循环里加任何 await 都会让并发的文件
+    互相踩 lastIndex,表现为随机漏掉命中行,且零报错。
+  */
   if (multiline) {
-    const joined = text.join('\n').slice(0, MAX_MULTILINE_CHARS)
+    const joined = splitLines().join('\n').slice(0, MAX_MULTILINE_CHARS)
     re.lastIndex = 0
     let m: RegExpExecArray | null
     while ((m = re.exec(joined)) !== null) {
@@ -320,18 +356,111 @@ async function grepFile(
       if (lines.length >= MAX_GREP_MATCHES) break
     }
   } else {
-    for (let i = 0; i < text.length; i++) {
+    /*
+      需求:逐行扫描时不先把整篇切成数组。没命中的文件(占绝大多数)只需要知道
+      「没有」,为它们分配一整个行数组纯属浪费;行数组只给有命中的文件建(见下面
+      的 `splitLines`),content 模式取上下文要用。
+      行的切法与 `split('\n')` 逐项一致(末尾换行后还有一个空行),行号因此对得上。
+    */
+    let start = 0
+    for (let n = 1; start <= raw.length; n++) {
+      let end = raw.indexOf('\n', start)
+      if (end === -1) end = raw.length
+      const line = raw.slice(start, end - start > MAX_LINE_CHARS ? start + MAX_LINE_CHARS : end)
       re.lastIndex = 0
-      if (re.test(text[i] as string)) {
-        lines.push(i + 1)
+      if (re.test(line)) {
+        lines.push(n)
         if (lines.length >= MAX_GREP_MATCHES) break
       }
       // 一个文件内部也要能被时间预算掐断 —— 单个 5MB 的文件本身就够慢
-      if ((i & 0x3ff) === 0 && ctx.host.clock.now() > budget) break
+      if ((n & 0x3ff) === 1 && ctx.host.clock.now() > budget) break
+      start = end + 1
     }
   }
 
-  return { rel, lines, text }
+  return { rel, lines, text: lines.length === 0 ? [] : splitLines() }
+}
+
+interface ScanResult {
+  /** 有命中的文件,**按遍历顺序**,累计命中条数到 MAX_GREP_MATCHES 为止 */
+  hits: FileHits[]
+  totalMatches: number
+  /** 实际开搜过的文件数 —— 永远是 `files` 的一个前缀的长度 */
+  scanned: number
+  budgetHit: boolean
+}
+
+/**
+ * 以 `GREP_CONCURRENCY` 路并发搜一批文件,结果按**原顺序**汇总。
+ *
+ * 需求:并发是为了速度(见 `GREP_CONCURRENCY`),但输出必须和串行时**逐字节一致**:
+ * - 结果顺序 = 遍历顺序(BFS,靠近根的在前),不能是「谁先读完谁在前」——
+ *   否则同一次搜索跑两遍结果顺序不同,模型会以为仓库变了;
+ * - 撞上命中上限时截在哪个文件,也要和串行时一样。
+ *
+ * 做法:文件按下标**依次领取**,所以开搜过的永远是一个前缀 `[0, next)`;
+ * 另外维护「已连续完成的前缀」上的累计命中数,它够了就不再领新文件。
+ * 最后按下标顺序拼结果、在上限处截断 —— 多搜的最多 `GREP_CONCURRENCY - 1` 个文件被丢弃。
+ *
+ * ★ 某个文件抛错(远程断线,见 `rethrowRemoteFailure`)时让所有 worker 停手再抛,
+ * 而不是 `Promise.all` 的「第一个错就返回」—— 后者会让其余 worker 在后台
+ * 继续对一条已经断掉的连接发请求。
+ */
+async function scanFiles<F>(
+  files: readonly F[],
+  budget: number,
+  ctx: ToolContext,
+  searchOne: (file: F) => Promise<FileHits | null>
+): Promise<ScanResult> {
+  /** `undefined` = 还没搜完;`null` = 跳过或没命中 */
+  const results: Array<FileHits | null | undefined> = new Array<FileHits | null | undefined>(files.length)
+  let next = 0
+  let completed = 0
+  let prefixEnd = 0
+  let prefixMatches = 0
+  let budgetHit = false
+  let failure: { error: unknown } | null = null
+
+  const worker = async (): Promise<void> => {
+    while (next < files.length && failure === null) {
+      if (prefixMatches >= MAX_GREP_MATCHES) return
+      // ★ 中断要能在搜索途中生效。不查的话,停止按钮要等整个仓库搜完才有反应
+      if (ctx.signal.aborted) return
+      if (ctx.host.clock.now() > budget) {
+        budgetHit = true
+        return
+      }
+      const index = next++
+      let fh: FileHits | null
+      try {
+        fh = await searchOne(files[index] as F)
+      } catch (error) {
+        failure ??= { error }
+        return
+      }
+      results[index] = fh !== null && fh.lines.length > 0 ? fh : null
+      if (++completed % SIGNAL_EVERY === 0) {
+        ctx.emit({ callId: ctx.callId, message: `Searched ${String(completed)} files` })
+      }
+      while (prefixEnd < files.length && results[prefixEnd] !== undefined) {
+        prefixMatches += results[prefixEnd]?.lines.length ?? 0
+        prefixEnd++
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(GREP_CONCURRENCY, files.length) }, worker))
+  if (failure !== null) throw (failure as { error: unknown }).error
+
+  const hits: FileHits[] = []
+  let totalMatches = 0
+  for (let i = 0; i < next && totalMatches < MAX_GREP_MATCHES; i++) {
+    const fh = results[i]
+    if (fh === undefined || fh === null) continue
+    hits.push(fh)
+    totalMatches += fh.lines.length
+  }
+  return { hits, totalMatches, scanned: next, budgetHit }
 }
 
 /** content 模式的渲染。格式对齐 ripgrep:命中行用 `:`,上下文行用 `-`。 */
@@ -454,28 +583,9 @@ export const grepTool: ToolRegistration = defineTool({
         .map((e) => ({ rel: walkBase.display(e.rel), abs: e.abs }))
     }
 
-    const hits: FileHits[] = []
-    let totalMatches = 0
-    let scanned = 0
-    let budgetHit = false
-
-    for (const f of files) {
-      if (++scanned % SIGNAL_EVERY === 0) {
-        // ★ 中断要能在搜索途中生效。不查的话,停止按钮要等整个仓库搜完才有反应
-        if (ctx.signal.aborted) break
-        ctx.emit({ callId: ctx.callId, message: `Searched ${String(scanned)} files` })
-      }
-      if (ctx.host.clock.now() > budget) {
-        budgetHit = true
-        break
-      }
-
-      const fh = await grepFile(ctx, f.abs, f.rel, re, multiline, budget)
-      if (fh === null || fh.lines.length === 0) continue
-      hits.push(fh)
-      totalMatches += fh.lines.length
-      if (totalMatches >= MAX_GREP_MATCHES) break
-    }
+    const prefilter = literalPrefilter(input.pattern, input['-i'] === true)
+    const scan = await scanFiles(files, budget, ctx, (f) => grepFile(ctx, f.abs, f.rel, re, prefilter, multiline, budget))
+    const { hits, totalMatches, scanned, budgetHit } = scan
 
     const notes: string[] = []
     if (totalMatches >= MAX_GREP_MATCHES) {
@@ -547,7 +657,8 @@ export const SEARCH_LIMITS = {
   MAX_LINE_CHARS,
   MAX_MULTILINE_CHARS,
   SEARCH_BUDGET_MS,
-  MAX_GREP_FILE_BYTES
+  MAX_GREP_FILE_BYTES,
+  GREP_CONCURRENCY
 } as const
 
 /** `type` 参数认识的名字,给测试和文档用 */

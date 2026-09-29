@@ -23,7 +23,7 @@ export function nodeFs(): KernelFs {
     writeFile: (abs, content) => fsp.writeFile(abs, content, 'utf8'),
 
     /**
-     * ★ `withFileTypes` 之后**再逐项 stat**,而不是直接信 `d.isDirectory()`。
+     * ★ `withFileTypes` 之后**对软链再 stat**,而不是直接信 `d.isDirectory()`。
      *
      * `readdir` 给的是 lstat 语义:指向目录的软链会被报成「文件」,于是它在树里
      * 展不开、在 walk 里被当成叶子。`stat` 跟随软链,与 `resolveInWorkspace` 的
@@ -31,11 +31,17 @@ export function nodeFs(): KernelFs {
      *
      * 而 stat 会对**断掉的**软链抛错,所以那一项吞掉异常按文件处理:
      * 一个坏软链不该让整次列目录失败(`ipc/workspace.ts` 已经写下过这条教训)。
+     *
+     * 原先是**逐项**都 stat;现在只对软链 stat。非软链项的 lstat 与 stat 结果相同,
+     * 所以上面那条世界观不变,而 `Grep`/`Glob`/`@` 检索遍历一个两万文件的仓库
+     * 少掉两万次系统调用。文件系统报不出类型(DT_UNKNOWN)时 Node 自己会补 lstat,
+     * 仍落在「非软链可信、软链再 stat」这两条路径里。
      */
     async readDir(abs) {
       const raw = await fsp.readdir(abs, { withFileTypes: true })
       return Promise.all(
         raw.map(async (d) => {
+          if (!d.isSymbolicLink()) return { name: d.name, isDir: d.isDirectory() }
           try {
             const st = await fsp.stat(`${abs}/${d.name}`)
             return { name: d.name, isDir: st.isDirectory() }
