@@ -7,7 +7,8 @@ import { model, visionCapabilities, budgetThinking } from '../helpers'
  * 设置页窗口列、「最大上下文」开关的判据(`supportsMaxContext`)全按 200K 算 ——
  * 窗口被静默压小,而且没有任何报错指向目录。费率卡对超 200K 不加价
  * (pricing-seed.ts 文件头的 PDF 证据),所以不需要配套的长上下文价格档。
- * (2026-09-23 新增 claude-opus-5-5 后共 17 行,同样显式写 1M,不破这条不变式。)
+ * (2026-09-23 新增 claude-opus-5-5、2026-09-29 新增 claude-sonnet-5-5 后共 18 行,
+ * 同样显式写 1M,不破这条不变式。)
  */
 export const ANTHROPIC: readonly BuiltinModelRecord[] = [
   /*
@@ -25,6 +26,16 @@ export const ANTHROPIC: readonly BuiltinModelRecord[] = [
     capabilities: visionCapabilities({ thinking: true }),
     contextWindow: 1_000_000,
     thinkingConfig: budgetThinking('thinking.budget_tokens', 64_000),
+  }),
+  /*
+   * 需求:2026-09-29 用户点名收录 Sonnet 5.5(费率见 pricing-seed 的 Anthropic 段)。
+   * 窗口 / 思考预算没有独立依据,按同族 Sonnet 5 推 —— 1M + 32K budget 就是本文件里
+   * 那条族内规律,推错的方向是「预算给多/给少一次思考」,不是窗口被压小。
+   */
+  model('anthropic', 'claude-sonnet-5-5', 'Claude Sonnet 5.5', {
+    capabilities: visionCapabilities({ thinking: true }),
+    contextWindow: 1_000_000,
+    thinkingConfig: budgetThinking('thinking.budget_tokens', 32_000),
   }),
   model('anthropic', 'claude-sonnet-5', 'Claude Sonnet 5', {
     capabilities: visionCapabilities({ thinking: true }),

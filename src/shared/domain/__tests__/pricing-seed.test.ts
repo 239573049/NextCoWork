@@ -287,8 +287,8 @@ describe('种子表 × presets', () => {
 describe('抄写校验 · Anthropic', () => {
   const anth = rows.filter((p) => p.modelId.startsWith('claude-'))
 
-  it('14 个 SKU,全部单档(官方费率卡已无 >200K 档)', () => {
-    expect(anth.length).toBe(14)
+  it('15 个 SKU,全部单档(官方费率卡已无 >200K 档)', () => {
+    expect(anth.length).toBe(15)
     for (const p of anth) expect(p.tiers.length, p.modelId).toBe(1)
   })
 
@@ -340,7 +340,7 @@ describe('抄写校验 · Anthropic', () => {
     })
   })
 
-  it('输出 = 5× 输入(全 14 条都成立)', () => {
+  it('输出 = 5× 输入(全 15 条都成立)', () => {
     for (const p of anth) {
       const r = p.tiers[0]?.rate as TokenRates
       expect(r.output, p.modelId).toBeCloseTo(r.input * 5, 6)

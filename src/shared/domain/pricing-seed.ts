@@ -95,14 +95,15 @@ const maker =
  *
  * ★ **Anthropic 当前没有长上下文溢价档。** 对 14 页全文检索过:`CONTEXT WINDOW`
  * 一列只出现 `All` 与 `≤200K` 两种取值,**全文档没有任何一行 `>200K`**。
- * 所以 14 个 SKU 全部是单档 —— 这与 OpenAI / Gemini / xAI 都不同。
+ * 所以 15 个 SKU 全部是单档 —— 这与 OpenAI / Gemini / xAI 都不同。
  * (OpenRouter 至今还给 Sonnet 4/4.5 挂着 `min_prompt_tokens: 200000` 的加价档,
  * 那是陈旧数据,照它算会**凭空多收用户的钱**。以 PDF 为准。)
  *
  * ★★ **模型 ID 的可信度低于价格。** PDF 只给展示名("Claude Sonnet 4.6"),
- * 不给 API id。下面有五个 id 是有一手依据的(运行环境 / 用户直接给出):
+ * 不给 API id。下面有六个 id 是有一手依据的(运行环境 / 用户直接给出):
  * `claude-fable-5-1` / `claude-opus-5` / `claude-sonnet-5` /
- * `claude-haiku-4-5-20251001` / `claude-opus-5-5` —— 注意**版本号里的点写成连字符**,
+ * `claude-haiku-4-5-20251001` / `claude-opus-5-5` / `claude-sonnet-5-5` ——
+ * 注意**版本号里的点写成连字符**,
  * 且 4.5 世代带日期后缀而新世代不带。其余九个按这条已证实的构词法推出来。
  *
  * 推错了的代价是**查不到定价**(费用列「—」,并进定价页顶部那张待补表),
@@ -141,6 +142,17 @@ const ANTHROPIC: readonly ModelPricing[] = [
   */
   anth('claude-opus-5-5', 'Claude Opus 5.5', one(claude(4, 20, 5, 8, 0.2)), { source: 'https://www.anthropic.com/pricing' }),
   anth('claude-opus-5', 'Claude Opus 5', one(claude(5, 25, 6.25, 10, 0.5))),
+  /*
+    需求:2026-09-29 用户点名收录 Sonnet 5.5,费率随官方定价页截图一起给的
+    (输入 2 / 输出 10 / 5m 写 2.5 / 1h 写 4 / 命中 0.2)。五个数与同族 Sonnet 5
+    **逐值相同** —— 这里仍按各行存自己的绝对价,不和下面那行联动。
+    ★ 单源但一手:截图是官方定价页,**不是**下面那份 2026-08-31 费率卡 PDF
+    (我们没在那份 PDF 里核到这个型号)。所以 `source` 指向官方定价页 ——
+    挂一份没核过的 PDF 等于伪造证据,那个 URL 是「下次去哪核」,不是「依据」
+    (同 claude-opus-5-5 那条的两处刻意不一致)。
+    截图里那句「Batch API 输入输出 5 折」不收:批处理在 NOT_SEEDED 有排除记录。
+  */
+  anth('claude-sonnet-5-5', 'Claude Sonnet 5.5', one(claude(2, 10, 2.5, 4, 0.2)), { source: 'https://www.anthropic.com/pricing' }),
   anth('claude-sonnet-5', 'Claude Sonnet 5', one(claude(2, 10, 2.5, 4, 0.2))),
   // 上一代同价位,但缓存读贵 4 倍($1.00)—— 正是「存绝对价、不存倍率」的证据
   anth('claude-mythos-5', 'Claude Mythos 5', one(claude(10, 50, 12.5, 20, 1.0))),
