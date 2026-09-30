@@ -84,6 +84,24 @@ import type {
   WorkspaceFileWriteRequest
 } from '../domain/workspace-file'
 import type { OpenTarget, WorkspacePathKind } from '../domain/open-target'
+import type {
+  DocumentViewChanged,
+  DocumentViewCommandRequest,
+  DocumentViewHeaders,
+  DocumentViewHeadersRequest,
+  DocumentViewInputRequest,
+  DocumentViewList,
+  DocumentViewListRequest,
+  DocumentViewInputResult,
+  DocumentViewLayout,
+  DocumentViewLayoutRequest,
+  DocumentViewOpenRequest,
+  DocumentViewOpened,
+  DocumentViewRenderRequest,
+  DocumentViewRenderResult,
+  DocumentViewState,
+  DocumentViewTokenRequest
+} from '../document-engine/view'
 import type { BrowserChange, BrowserCuaEvent, BrowserProfile, BrowserTab } from '../domain/browser'
 import type { GitBranchSummary, GitCommitSummary, GitDiff, GitOverview } from '../domain/git'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../domain/scheduled'
@@ -304,6 +322,8 @@ export interface IpcInvokeMap {
   'configSync:getPreview': { req: void; res: SyncPreview }
   'configSync:confirmInitial': { req: void; res: void }
   'configSync:resolve': { req: { id: string; useRemote: boolean }; res: void }
+  /** 数据页「同步使用统计」开关;关掉会丢弃本机持有的其它设备统计。 */
+  'configSync:setUsage': { req: { enabled: boolean }; res: SyncStatus }
 
   // ── 设置 ──
   'settings:get': { req: void; res: AppSettings }
@@ -819,6 +839,22 @@ export interface IpcInvokeMap {
     req: { pluginId: string; key: string; value: boolean | string | number | null }
     res: Record<string, boolean | string | number>
   }
+
+  // ── 文档引擎编辑器画布(形状与不变式见 `shared/document-engine/view.ts`)──
+  /*
+    ★ `open` 的 workspace / path / plugin / viewType 由渲染层从 **Tab 绑定**取,不是插件视图报的;
+    之后只凭 token。token 在主进程侧绑定发起窗口,别的窗口拿着也用不了。
+  */
+  'documentEngine:open': { req: DocumentViewOpenRequest; res: DocumentViewOpened }
+  'documentEngine:render': { req: DocumentViewRenderRequest; res: DocumentViewRenderResult }
+  'documentEngine:input': { req: DocumentViewInputRequest; res: DocumentViewInputResult }
+  'documentEngine:command': { req: DocumentViewCommandRequest; res: DocumentViewInputResult }
+  'documentEngine:list': { req: DocumentViewListRequest; res: DocumentViewList }
+  'documentEngine:headers': { req: DocumentViewHeadersRequest; res: DocumentViewHeaders }
+  'documentEngine:layout': { req: DocumentViewLayoutRequest; res: DocumentViewLayout }
+  'documentEngine:state': { req: DocumentViewTokenRequest; res: DocumentViewState }
+  'documentEngine:save': { req: DocumentViewTokenRequest; res: DocumentViewState }
+  'documentEngine:close': { req: DocumentViewTokenRequest; res: void }
 
   // ── 斜杠命令(`/命令`)──
   /*
@@ -1356,6 +1392,12 @@ export interface IpcEventMap {
     messageKey?: string
     done?: boolean
   }
+  /**
+   * 编辑器画布打开的那个会话状态变了(Agent 改了、保存了、引擎崩了)。
+   * ★ **定向**推给打开这个视图的窗口(`TargetedEventChannel`),不广播:别的窗口不该知道
+   * 这边开着哪些文档。视图收到后拉取失效区域重画。
+   */
+  'documentEngine:changed': DocumentViewChanged
   'commands:changed': void
   'agents:changed': void
   'modes:changed': void
@@ -1505,6 +1547,7 @@ export const INVOKE_CHANNELS = {
   'configSync:getPreview': 1,
   'configSync:confirmInitial': 1,
   'configSync:resolve': 1,
+  'configSync:setUsage': 1,
   'settings:get': 1,
   'settings:update': 1,
   'theme:importImage': 1,
@@ -1650,6 +1693,16 @@ export const INVOKE_CHANNELS = {
   'plugins:checkUpdates': 1,
   'plugins:updateAll': 1,
   'plugins:getConfiguration': 1,
+  'documentEngine:open': 1,
+  'documentEngine:render': 1,
+  'documentEngine:input': 1,
+  'documentEngine:command': 1,
+  'documentEngine:list': 1,
+  'documentEngine:headers': 1,
+  'documentEngine:layout': 1,
+  'documentEngine:state': 1,
+  'documentEngine:save': 1,
+  'documentEngine:close': 1,
   'plugins:setConfiguration': 1,
   'skills:list': 1,
   'skills:pickZip': 1,
@@ -1808,6 +1861,7 @@ export const EVENT_CHANNELS = {
   'plugins:openTab': 1,
   'plugins:interaction': 1,
   'plugins:progress': 1,
+  'documentEngine:changed': 1,
   'commands:changed': 1,
   'agents:changed': 1,
   'modes:changed': 1,

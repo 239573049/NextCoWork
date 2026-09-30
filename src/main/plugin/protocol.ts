@@ -416,6 +416,7 @@ export const documents = {
   save: (params) => call('documents.save', params),
   exportDocument: (params) => call('documents.export', params),
   getState: (params) => call('documents.getState', params),
+  query: (params) => call('documents.query', params),
   getOperation: (params) => call('documents.getOperation', params),
   close: (params) => call('documents.close', params)
 }

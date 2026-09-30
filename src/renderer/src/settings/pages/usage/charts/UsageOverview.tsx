@@ -139,6 +139,13 @@ export function UsageOverview({ usageWindow }: { usageWindow: UsageWindow }): Re
     // 这一页住在设置浮层里,内容区只有视口一半左右 —— 原先用 `min-[900px]:` 这类
     // 视口断点,视口一宽就强行两栏 / 六栏,面板被挤到三百来像素,模型名全被截断。
     <div className="@container space-y-3">
+      {/* 需求:概览合并了其它设备同步来的数据、下方请求日志只含本机,两处数字会对不上 ——
+          不把口径说出来,用户只会以为统计算错了。没有其它设备时不画 */}
+      {activity !== null && activity.syncedDevices > 0 && (
+        <p className="px-1 text-[11px] leading-[1.6] text-fg-faint">
+          {t('usage.sync.merged', { count: activity.syncedDevices })}
+        </p>
+      )}
       <OverviewCards totals={totals} activity={activity} loading={loading} />
 
       {/* 热力图固定看最近一年、不受粒度影响,所以这里不放粒度切换 ——

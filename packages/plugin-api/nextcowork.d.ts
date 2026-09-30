@@ -38,7 +38,7 @@ declare module 'nextcowork' {
   /**
    * 这份垫片的版本。**与清单里的 `engines.nextcowork` 不是一回事**,
    * 但两者都指向同一个东西的两半:前者是运行期垫片,后者是宿主声明它实现了
-   * 哪一版**插件 API**(当前 `0.3.2`,见 `shared/plugin/api-version.ts`)。
+   * 哪一版**插件 API**(当前 `0.3.3`,见 `shared/plugin/api-version.ts`)。
    *
    * ★ `engines.nextcowork` 比的**不是应用版本**。这两个曾被当成同一个,结果是
    * 宿主拿 `app.getVersion()`(2.x)去比 `^0.2.0`,按官方模板写的插件装上一律
@@ -97,6 +97,17 @@ declare module 'nextcowork' {
       | { kind: 'object.delete'; target: Target }
       | { kind: 'pdf.annotate'; page: number; rect: [number, number, number, number]; text: string }
       | { kind: 'pdf.formFill'; field: string; value: string }
+      /** 按字面文字定位（Word）。expectedCount 与实际命中数不符时整批拒绝，文档不变 */
+      | { kind: 'text.findReplace'; find: string; replace: string; matchCase?: boolean; expectedCount?: number }
+      | { kind: 'paragraph.style'; find: string; style: string; matchCase?: boolean; expectedCount?: number }
+      /** 锚点必须恰好命中一处 */
+      | { kind: 'paragraph.insert'; anchor: string; position: 'before' | 'after'; text: string; matchCase?: boolean }
+    export type Query =
+      | { kind: 'outline' }
+      | { kind: 'text'; maxChars?: number }
+      | { kind: 'cells'; sheet: string; range: string; maxChars?: number }
+      /** 页 / 工作表 / 幻灯片的尺寸与 Writer 页矩形，单位 twips */
+      | { kind: 'layout'; part?: number }
     export interface Capabilities {
       format: Format
       engineVersion: string
@@ -105,6 +116,8 @@ declare module 'nextcowork' {
       canExport: Format[]
       canUndo: boolean
       macros: { list: boolean; run: boolean }
+      /** 画布交互输入(键盘 / 鼠标 / 输入法)。缺省 = 引擎只能只读预览这份文档 */
+      interaction?: { keyboard: boolean; mouse: boolean; textInput: boolean }
     }
     export interface ApplyResult {
       operationId: string
@@ -112,6 +125,8 @@ declare module 'nextcowork' {
       dirty: boolean
       warnings: string[]
       undoable: boolean
+      /** 与批次逐条对应；按文字定位的操作带命中数。引擎不回报时省略 */
+      results?: { matches?: number }[]
     }
     /** 读权限；引擎只能来自自身清单或已声明依赖，不执行文档宏。 */
     export function open(params: Scope & { path: string; engine?: string }): Thenable<{ sessionId: string; viewId: string; path: string; snapshot: Snapshot; capabilities: Capabilities }>
@@ -121,6 +136,8 @@ declare module 'nextcowork' {
     /** 写权限；默认不覆盖，禁止替代 documents.save 写回当前文件。 */
     export function exportDocument(params: SessionRequest & { path: string; format: Format; overwrite?: boolean }): Thenable<{ snapshot: Snapshot; path: string }>
     export function getState(params: SessionRequest): Thenable<Snapshot>
+    /** 读权限；读的是活动模型（含未保存修改），结果有字符上限 */
+    export function query(params: SessionRequest & { request: Query }): Thenable<{ generation: number; modelRevision: number; result: unknown }>
     export function getOperation(params: SessionRequest & { operationId: string }): Thenable<
       | { status: 'missing' }
       | { status: 'applied'; sessionId: string; result: ApplyResult }

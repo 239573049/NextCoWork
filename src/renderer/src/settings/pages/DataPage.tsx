@@ -300,6 +300,10 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
   const frequency = settings.data?.backupFrequency ?? "manual";
   const backupDirectory = settings.data?.backupDirectory ?? null;
   const busyNow = busy !== null;
+  // 需求：使用统计同步只在同步已经跑起来(已解锁并确认)时才有意义；此前画出开关
+  // 也没有后端能力接住它。
+  const usageSyncAvailable =
+    syncStatus?.control?.phase === "ready" || syncStatus?.control?.phase === "syncing";
   const riskDisabled = running || busyNow;
   const statValues = useMemo(
     () =>
@@ -349,7 +353,7 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
               : syncErrorMessage(new Error(syncStatus.lastError), t)
           }
           density="compact"
-          last
+          last={!usageSyncAvailable}
         >
           {syncStatus?.accountId === null || syncStatus === null ? (
             <span className="text-[12px] text-muted-fg">{t("data.cloudSyncSignedOut")}</span>
@@ -383,6 +387,24 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
             </span>
           )}
         </DataRow>
+        {usageSyncAvailable && (
+          <DataRow
+            title={t("usage.sync.toggle")}
+            description={t("usage.sync.toggleHint")}
+            density="compact"
+            last
+          >
+            {/* 状态以主进程为准：切换后由 configSync:changed 广播回来，页面不留镜像 */}
+            <Toggle
+              checked={syncStatus?.control?.selection.usage === true}
+              onChange={(enabled) => {
+                void run("sync-usage", () => configSyncService.setUsageSync(enabled), undefined, false);
+              }}
+              label={t("usage.sync.toggle")}
+              disabled={busyNow}
+            />
+          </DataRow>
+        )}
         {syncConflicts.length > 0 && (
           <DataRow
             title={t("data.cloudSyncConflicts", { count: syncConflicts.length })}

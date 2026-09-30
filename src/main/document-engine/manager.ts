@@ -38,10 +38,13 @@ import {
   type DocumentCapabilities,
   type DocumentFormat,
   type DocumentOperation,
+  type DocumentOperationResult,
   type DocumentQuery,
   type DocumentRenderRequest,
   type DocumentRenderResult
 } from '../../shared/document-engine/protocol'
+import { validateInputEvents, type DocumentInputEvent, type DocumentInputResult } from '../../shared/document-engine/interaction'
+import { validateCommand, type CommandArgs, type DocumentCommandId } from '../../shared/document-engine/commands'
 import {
   applyPrecondition,
   initialSession,
@@ -55,7 +58,7 @@ import { commitExport, commitSave, createWorkingCopy, digestFile } from './file-
 /** 引擎打开的一份文档。实现方是原生 helper 的适配层(或测试里的 fake)。 */
 export interface DocumentEngineHandle {
   readonly capabilities: DocumentCapabilities
-  apply(operations: DocumentOperation[], signal: AbortSignal): Promise<{ warnings: string[]; undoable: boolean }>
+  apply(operations: DocumentOperation[], signal: AbortSignal): Promise<{ warnings: string[]; undoable: boolean; results?: DocumentOperationResult[] }>
   /** 把当前模型写到核心给出的路径。★ 路径由核心决定,引擎不能自选保存位置 */
   saveTo(outputPath: string, signal: AbortSignal): Promise<void>
   /** 只读查询。可选:不支持查询的引擎不实现它,管理器如实报 `unsupported_operation` */
@@ -64,6 +67,10 @@ export interface DocumentEngineHandle {
   render?(request: DocumentRenderRequest, signal: AbortSignal): Promise<DocumentRenderResult>
   /** 导出到核心指定的工作区外部产物路径,不改变当前 session 的保存状态。 */
   exportTo?(outputPath: string, format: DocumentFormat, signal: AbortSignal): Promise<void>
+  /** 画布交互输入。可选:只读引擎不实现;事件已由管理器按 `capabilities.interaction` 收窄 */
+  input?(events: DocumentInputEvent[], signal: AbortSignal): Promise<DocumentInputResult>
+  /** 功能区命令。可选:没有命令表的引擎不实现;命令已由管理器按 `capabilities.commands` 收窄 */
+  command?(command: DocumentCommandId, args: CommandArgs | undefined, signal: AbortSignal): Promise<DocumentInputResult>
   close(): Promise<void>
 }
 
@@ -316,17 +323,18 @@ export class DocumentSessionManager {
         this.record(input.operationId, { status: 'rejected', sessionId: session.snapshot.sessionId, code: 'stale_generation' })
         throw new DocumentEngineError('stale_generation', 'an operation target comes from an older engine generation; query the document again')
       }
-      let outcome: { warnings: string[]; undoable: boolean }
+      let outcome: { warnings: string[]; undoable: boolean; results?: DocumentOperationResult[] }
       try {
         outcome = await this.withTimeout((signal) => handle.apply(validated.operations, signal))
       } catch (error) {
         /*
-          ★ 引擎没有给出明确「未生效」的拒绝(`invalid_operation` / `unsupported_operation`)
+          ★ 引擎没有给出明确「未生效」的拒绝(`invalid_operation` / `unsupported_operation` / `busy`,见 `isEngineRefusal`)
           时,一律按**结果未知**处理并把会话标为崩溃:超时或 helper 中途退出之后,
           模型可能已经改了一半。继续在上面叠修改,修订号就和真实内容对不上了。
         */
-        if (error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation')) {
-          this.record(input.operationId, { status: 'rejected', sessionId: session.snapshot.sessionId, code: error.code })
+        if (isEngineRefusal(error)) {
+          // busy 不是对这批操作的裁决(只是用户正在组字):不记账,同一个 operationId 稍后可以原样重试
+          if (error.code !== 'busy') this.record(input.operationId, { status: 'rejected', sessionId: session.snapshot.sessionId, code: error.code })
           throw error
         }
         this.record(input.operationId, { status: 'unknown', sessionId: session.snapshot.sessionId })
@@ -340,7 +348,8 @@ export class DocumentSessionManager {
         appliedRevision: revision,
         dirty: isSessionDirty(session.snapshot),
         warnings: outcome.warnings,
-        undoable: outcome.undoable
+        undoable: outcome.undoable,
+        ...(outcome.results === undefined ? {} : { results: outcome.results })
       }
       this.record(input.operationId, { status: 'applied', sessionId: session.snapshot.sessionId, result })
       return result
@@ -369,7 +378,7 @@ export class DocumentSessionManager {
         const result = await this.withTimeout((signal) => query(request, signal))
         return { generation: session.snapshot.generation, modelRevision: session.snapshot.modelRevision, result }
       } catch (error) {
-        if (error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation')) throw error
+        if (isEngineRefusal(error)) throw error
         this.markCrashed(session)
         throw error
       }
@@ -400,7 +409,7 @@ export class DocumentSessionManager {
       try {
         rendered = await this.withTimeout((signal) => boundRender(request, signal))
       } catch (error) {
-        if (error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation')) throw error
+        if (isEngineRefusal(error)) throw error
         this.markCrashed(session)
         throw error instanceof DocumentEngineError ? error : new DocumentEngineError('io', (error as Error).message)
       }
@@ -410,6 +419,88 @@ export class DocumentSessionManager {
         throw new DocumentEngineError('io', 'document engine returned an invalid render attachment')
       }
       return { ...rendered, generation: session.snapshot.generation, modelRevision: session.snapshot.modelRevision }
+    })
+  }
+
+  /**
+   * 画布上的一批交互输入(键鼠 / 输入法 / 切换部分),以及输入之后迟到事件的拉取(空批次)。
+   *
+   * 需求:用户在画布上的输入必须与 Agent 修改进同一条串行队列、共用一套修订号 ——
+   * 用户打了字,Agent 手里基于旧修订号的批次就要被 `stale_revision` 挡下,而不是把
+   * 刚打的字覆盖掉。
+   *
+   * - ★ 只在引擎回报 `modified` 时推进 modelRevision。方向键、点选、输入法组字不改模型,
+   *   若也推进,Agent 每读一次就被用户挪一下光标作废一次。
+   * - `generation` 必须等于当前代:坐标是视图按**当时**的版面算的,引擎重启后同一坐标
+   *   指到的是别处。modelRevision 不校验 —— 用户边看 Agent 改边打字是正常用法,
+   *   按键落在引擎当前的光标处,不依赖视图读到的修订号。
+   * - 引擎明确拒绝(`invalid_operation` / `unsupported_operation`)= 整批未投递,原样抛;
+   *   其它失败(超时、helper 退出、回执不可解析)= 不知道按键进没进模型,标崩溃,
+   *   与 `apply` 的「结果未知」同一处理 —— 继续在上面叠输入,修订号就和真实内容对不上了。
+   */
+  input(input: { sessionId: string; scope: DocumentCallerScope; generation: number; events: unknown }): Promise<DocumentInputResult & { generation: number; modelRevision: number }> {
+    return this.interactive(input, 'input', (handle) => {
+      const interaction = handle.capabilities.interaction
+      const send = handle.input
+      if (interaction === undefined || send === undefined) throw new DocumentEngineError('unsupported_operation', 'this document engine does not take interactive input')
+      const validated = validateInputEvents(input.events, interaction)
+      if (!validated.ok) {
+        throw new DocumentEngineError(validated.reason.includes('unsupported_operation') ? 'unsupported_operation' : 'invalid_operation', validated.reason)
+      }
+      const boundSend = send.bind(handle)
+      return (signal) => boundSend(validated.events, signal)
+    })
+  }
+
+  /**
+   * 功能区命令(加粗、字号、对齐、插入表格……),在用户光标 / 选区处执行。
+   *
+   * 需求:与画布输入同一种账目 —— 它就是一次「用户操作」,只是来自工具栏而不是键盘:
+   * 同一条队列、同一套修订号、`modified` 才推进、结果不明标崩溃(见 `input` 的说明)。
+   * 命令先按 `commands.ts` 的封闭表与引擎声明的 `capabilities.commands` 收窄,不认识的不送进引擎。
+   */
+  command(input: { sessionId: string; scope: DocumentCallerScope; generation: number; command: unknown; args?: unknown }): Promise<DocumentInputResult & { generation: number; modelRevision: number }> {
+    return this.interactive(input, 'command', (handle) => {
+      const run = handle.command
+      if (run === undefined) throw new DocumentEngineError('unsupported_operation', 'this document engine does not run ribbon commands')
+      const validated = validateCommand(input.command, input.args, handle.capabilities.commands ?? [])
+      if (!validated.ok) {
+        throw new DocumentEngineError(validated.reason.startsWith('unsupported_operation') ? 'unsupported_operation' : 'invalid_operation', validated.reason)
+      }
+      const boundRun = run.bind(handle)
+      return (signal) => boundRun(validated.command, validated.args, signal)
+    })
+  }
+
+  /**
+   * 画布输入与功能区命令共用的账目:状态门、generation 门、超时即结果不明、`modified` 才推进修订号。
+   * (原先内联在 `input` 里;加了功能区命令之后抽出,两份复制的话迟早只改一份。)
+   * `prepare` 在队列里、状态门之后执行:收窄失败直接抛,不碰引擎。
+   */
+  private interactive(
+    input: { sessionId: string; scope: DocumentCallerScope; generation: number },
+    what: 'input' | 'command',
+    prepare: (handle: DocumentEngineHandle) => (signal: AbortSignal) => Promise<DocumentInputResult>
+  ): Promise<DocumentInputResult & { generation: number; modelRevision: number }> {
+    const session = this.require(input.sessionId, input.scope)
+    return this.enqueue(session, async () => {
+      const handle = session.handle
+      const status = session.snapshot.status
+      if (status === 'crashed' || status === 'recovering' || status === 'loading' || handle === null) {
+        throw new DocumentEngineError('engine_unavailable', `cannot take ${what} while ${status}`)
+      }
+      if (input.generation !== session.snapshot.generation) throw new DocumentEngineError('stale_generation', 'the view was laid out by an older engine generation; reload the view')
+      const send = prepare(handle)
+      let result: DocumentInputResult
+      try {
+        result = await this.withTimeout(send)
+      } catch (error) {
+        if (isEngineRefusal(error)) throw error
+        this.markCrashed(session)
+        throw new DocumentEngineError('result_unknown', `the engine did not confirm the ${what}: ${(error as Error).message}`)
+      }
+      if (result.modified) this.dispatch(session, { type: 'applied', revision: session.snapshot.modelRevision + 1 })
+      return { ...result, generation: session.snapshot.generation, modelRevision: session.snapshot.modelRevision }
     })
   }
 
@@ -471,7 +562,7 @@ export class DocumentSessionManager {
         try {
           await this.withTimeout((signal) => exportTo(produced, input.format, signal))
         } catch (error) {
-          if (error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation')) throw error
+          if (isEngineRefusal(error)) throw error
           this.markCrashed(session)
           throw error instanceof DocumentEngineError ? error : new DocumentEngineError('io', (error as Error).message)
         }
@@ -749,6 +840,18 @@ async function lstatExportTarget(path: string): Promise<Stats | null> {
   }
 }
 
+/**
+ * 引擎是否明确回答了「这次什么都没做」。
+ *
+ * 需求:只有这几种拒绝能证明模型没被碰过,可以原样抛给调用方、会话照常可用;其余失败
+ * (超时、helper 退出、回执不可解析)都可能改了一半,必须按结果未知 / 崩溃处理。
+ * `busy`(用户正在输入法组字)属于前者 —— 把它当故障的话,用户打中文时 Agent 每读一次,
+ * 会话就被标成崩溃一次。
+ */
+function isEngineRefusal(error: unknown): error is DocumentEngineError {
+  return error instanceof DocumentEngineError && (error.code === 'invalid_operation' || error.code === 'unsupported_operation' || error.code === 'busy')
+}
+
 function validateRenderRequest(raw: unknown): DocumentRenderRequest | string {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'render request must be an object'
   const request = raw as Record<string, unknown>
@@ -771,12 +874,16 @@ function validateRenderRequest(raw: unknown): DocumentRenderRequest | string {
     const value = request[key]
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0 || value > MAX_RENDER_DIMENSION) return `${key} is invalid`
   }
+  // ★ 形状不对要拒，不能丢掉 part 退回默认部分：那会把别的工作表画进当前画布，且看起来正常
+  if (request.part !== undefined && !(typeof request.part === 'number' && Number.isSafeInteger(request.part) && request.part >= 0)) return 'part is invalid'
   return {
     x: request.x as number,
     y: request.y as number,
     tileWidth,
     tileHeight,
     width: request.width as number,
-    height: request.height as number
+    height: request.height as number,
+    // part 的范围只有引擎知道（工作表 / 幻灯片数随编辑变化），这里只收窄形状
+    ...(request.part === undefined ? {} : { part: request.part as number })
   }
 }

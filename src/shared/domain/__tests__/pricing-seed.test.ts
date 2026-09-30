@@ -363,7 +363,7 @@ describe('抄写校验 · 长上下文档', () => {
 
   it('OpenAI:阈值 272K,输入/缓存 ×2、输出 ×1.5', () => {
     const tiered = rows.filter((p) => p.modelId.startsWith('gpt-') && p.tiers.length > 1)
-    expect(tiered.map((p) => p.modelId).sort()).toEqual(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol'])
+    expect(tiered.map((p) => p.modelId).sort()).toEqual(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol'])
     for (const p of tiered) asymmetric(p, 272_000)
   })
 
@@ -430,6 +430,7 @@ describe('抄写校验 · 长上下文档', () => {
       'gpt-6-astra',
       'gpt-6-luna',
       'gpt-6-sol',
+      'gpt-6.1-sol',
       'grok-4.3',
       'grok-4.5',
       'grok-4.6',

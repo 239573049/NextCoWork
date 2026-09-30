@@ -547,6 +547,8 @@ describe('engineCandidates / toCapabilityError', () => {
   it('maps document codes onto the fixed plugin error codes by how the caller should react', () => {
     expect(toCapabilityError(new DocumentEngineError('invalid_operation', 'm')).code).toBe('invalid_argument')
     expect(toCapabilityError(new DocumentEngineError('result_unknown', 'm')).code).toBe('rejected')
+    // 组字中的 busy 是「稍后重试」,不是参数错也不是故障:Agent 看到 [busy] 就知道该等一下再来
+    expect(toCapabilityError(new DocumentEngineError('busy', 'm'))).toMatchObject({ code: 'rejected', message: '[busy] m' })
     expect(toCapabilityError(new DocumentEngineError('engine_crashed', 'm'))).toMatchObject({ code: 'internal_error', message: '[engine_crashed] m' })
   })
 })

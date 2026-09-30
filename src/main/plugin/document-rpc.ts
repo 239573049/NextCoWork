@@ -125,6 +125,33 @@ interface SessionOwner {
   providerId: string
 }
 
+/**
+ * 主窗口里一个编辑器画布对文档会话的占用(见 `openEditorView`)。
+ *
+ * 需求:画布与插件逻辑 / Agent 工具要落到**同一个**会话,但画布的生命周期跟 Tab 走,
+ * 不跟插件 RPC 的租约走 —— 租约 5 分钟不用就会被 `sweepIdle` 收掉,而用户盯着一页
+ * 文档看五分钟不动是常态;画布若挂在租约上,下一次重画就是 session_closed。
+ * 所以它是一个独立的会话视图,只在 Tab 关闭 / 窗口销毁时释放。
+ */
+export interface DocumentEditorView {
+  pluginId: string
+  sessionId: string
+  viewId: string
+  workspaceId: string
+  /** 打开时冻结的账户作用域;之后每次调用都要与当前账户相同 */
+  accountScope: string
+  /** 规范工作区根(`realpath` 之后) */
+  workspaceRoot: string
+  /** 规范绝对路径 */
+  absolutePath: string
+  /** 工作区相对路径,`/` 分隔 */
+  path: string
+  providerId: string
+}
+
+/** 保存前重验路径门所需的最小信息 —— 租约与编辑器视图共用 */
+type SaveTarget = Pick<DocumentEditorView, 'sessionId' | 'workspaceId' | 'accountScope' | 'workspaceRoot' | 'absolutePath' | 'path'>
+
 export class PluginCapabilityError extends Error {
   constructor(readonly code: PluginErrorCode, message: string) {
     super(message)
@@ -177,6 +204,7 @@ export class PluginDocuments {
           case 'documents.save': return await this.save(pluginId, rawParams, scope, accountScope)
           case 'documents.export': return await this.export(pluginId, rawParams, scope, accountScope)
           case 'documents.getState': return await this.getState(pluginId, rawParams, scope, accountScope)
+          case 'documents.query': return await this.query(pluginId, rawParams, scope, accountScope)
           case 'documents.getOperation': return await this.getOperation(pluginId, rawParams, scope, accountScope)
           case 'documents.close': return await this.close(pluginId, rawParams, scope, accountScope)
           default: throw new PluginCapabilityError('unknown_method', `unknown method: ${method}`)
@@ -244,6 +272,95 @@ export class PluginDocuments {
       this.leases.clear()
       this.leasesByPath.clear()
       this.owners.clear()
+    })
+  }
+
+  /**
+   * 为主窗口里的编辑器画布打开 Tab 绑定的那个文件(不建租约,见 `DocumentEditorView`)。
+   *
+   * 引擎只取 `customEditors[viewType].documentEngine`:画布是那个编辑器的 UI,
+   * 不应该退到插件别的引擎上。路径门、依赖版本门、格式过滤与插件 RPC 的 `open` 相同,
+   * 走同一条串行队列、在入口冻结账户作用域(理由见 `handle`)。
+   * 会话记入归属表:画布里没保存的改动,在禁用 / 卸载这个插件时同样要被 `assertCanRelease` 拦下。
+   */
+  async openEditorView(
+    pluginId: string,
+    manifest: PluginManifest,
+    viewType: string,
+    path: string,
+    scope: DocumentCallScope
+  ): Promise<{ view: DocumentEditorView; snapshot: DocumentSessionSnapshot; capabilities: DocumentCapabilities }> {
+    const accountScope = this.options.accountScope()
+    return this.enqueue(async () => {
+      if (this.options.accountScope() !== accountScope) throw sessionClosed()
+      try {
+        const editor = manifest.contributes.customEditors.find((item) => item.viewType === viewType)
+        if (editor?.documentEngine === undefined) throw invalidArgument(`custom editor ${viewType} is not bound to a document engine`)
+        const providerId = qualifyEngine(pluginId, editor.documentEngine)
+        if (splitProviderId(providerId) === null) throw invalidArgument('engine is invalid')
+        assertEngineDependency(pluginId, manifest, providerId)
+        const target = await resolveWorkspacePath(scope, requiredString(path, 'path'), 'read')
+        const provider = this.ensureProvider(pluginId, manifest, providerId)
+        if (provider === null) throw engineUnavailable(providerId)
+        const format = documentFormatOf(target.absolutePath)
+        if (format === null || !provider.formats.includes(format)) throw new DocumentEngineError('unsupported_format', `document engine ${providerId} cannot open this file type`)
+        const managerScope = { accountScope, workspaceId: scope.workspaceId }
+        const opened = await this.options.sessions.open({ scope: managerScope, absolutePath: target.absolutePath, providerId })
+        // 需求同 `open`:打开期间账户被切走,新视图属于已易主的账户,放掉再拒绝
+        if (this.options.accountScope() !== accountScope) {
+          await this.options.sessions.release({ sessionId: opened.snapshot.sessionId, scope: managerScope, viewId: opened.viewId }).catch(() => undefined)
+          throw sessionClosed()
+        }
+        const owner = this.owners.get(opened.snapshot.sessionId)
+        if (owner === undefined) this.owners.set(opened.snapshot.sessionId, { pluginIds: new Set([pluginId]), providerId })
+        else owner.pluginIds.add(pluginId)
+        const view: DocumentEditorView = {
+          pluginId,
+          sessionId: opened.snapshot.sessionId,
+          viewId: opened.viewId,
+          workspaceId: scope.workspaceId,
+          accountScope,
+          workspaceRoot: target.root,
+          absolutePath: target.absolutePath,
+          path: target.relative,
+          providerId
+        }
+        return { view, snapshot: opened.snapshot, capabilities: opened.capabilities }
+      } catch (error) {
+        throw toCapabilityError(error)
+      }
+    })
+  }
+
+  /** 保存编辑器画布打开的文档。与插件 RPC 的 `save` 同一套写回前路径重验 */
+  async saveEditorView(view: DocumentEditorView): Promise<DocumentSessionSnapshot> {
+    const accountScope = this.options.accountScope()
+    return this.enqueue(async () => {
+      if (accountScope !== view.accountScope || this.options.accountScope() !== accountScope) throw sessionClosed()
+      try {
+        return (await this.saveResolved(view)).snapshot
+      } catch (error) {
+        throw toCapabilityError(error)
+      }
+    })
+  }
+
+  /**
+   * 放掉编辑器画布的那个会话视图。★ 非 force:脏会话留在会话表里(重开能找回),
+   * 与租约释放同一条规矩。会话已经不在(崩溃后被收、账户已切)不算错误。
+   */
+  async closeEditorView(view: DocumentEditorView): Promise<{ closed: boolean; dirty: boolean }> {
+    return this.enqueue(async () => {
+      try {
+        return await this.options.sessions.release({
+          sessionId: view.sessionId,
+          scope: { accountScope: view.accountScope, workspaceId: view.workspaceId },
+          viewId: view.viewId
+        })
+      } catch (error) {
+        if (error instanceof DocumentEngineError && error.code === 'session_closed') return { closed: true, dirty: false }
+        throw toCapabilityError(error)
+      }
     })
   }
 
@@ -412,26 +529,35 @@ export class PluginDocuments {
     const params = objectParams(rawParams)
     const sessionId = requiredString(params.sessionId, 'sessionId')
     const lease = await this.requireLease(pluginId, sessionId, scope, accountScope)
+    const { snapshot, changed } = await this.saveResolved(lease)
+    lease.lastUsed = this.now()
+    return {
+      data: { snapshot },
+      summary: `saved ${lease.path}`,
+      ...(changed === undefined ? {} : { changed })
+    }
+  }
+
+  /**
+   * 写回原文件。租约(插件 RPC)与编辑器画布共用这一份,路径重验只写一次。
+   * (原先内联在 `save` 里;画布保存加进来之后抽出,两处复制的话迟早只改一份。)
+   */
+  private async saveResolved(target: SaveTarget): Promise<{ snapshot: DocumentSessionSnapshot; changed?: DocumentChanged }> {
     /*
       需求：写回原文件之前，把租约里的相对路径**重新走一遍路径门**，并确认算出来的规范
       路径与租约里的逐字相同。打开与保存之间父目录可能被换成软链（或目标被换成软链 /
       非普通文件）—— 只信打开时那一次的结果，保存就会写穿链接，落到工作区外面。
       不满足会怎样：表现为「保存成功」而工作区里的文件纹丝不动，内容出现在别的目录。
     */
-    const recheck = await resolveWorkspacePath({ workspaceId: lease.workspaceId, workspaceRoot: lease.workspaceRoot }, lease.path, 'read')
-    if (recheck.absolutePath !== lease.absolutePath) throw invalidArgument('document path changed on disk')
-    const managerScope = { accountScope: lease.accountScope, workspaceId: lease.workspaceId }
-    const before = this.options.sessions.snapshot(sessionId, managerScope)
-    const snapshot = await this.options.sessions.save({ sessionId, scope: managerScope })
-    lease.lastUsed = this.now()
+    const recheck = await resolveWorkspacePath({ workspaceId: target.workspaceId, workspaceRoot: target.workspaceRoot }, target.path, 'read')
+    if (recheck.absolutePath !== target.absolutePath) throw invalidArgument('document path changed on disk')
+    const managerScope = { accountScope: target.accountScope, workspaceId: target.workspaceId }
+    const before = this.options.sessions.snapshot(target.sessionId, managerScope)
+    const snapshot = await this.options.sessions.save({ sessionId: target.sessionId, scope: managerScope })
     const changed = before.modelRevision !== before.savedRevision
-      ? { path: lease.path, kind: 'modified' as const }
+      ? { path: target.path, kind: 'modified' as const }
       : undefined
-    return {
-      data: { snapshot },
-      summary: `saved ${lease.path}`,
-      ...(changed === undefined ? {} : { changed })
-    }
+    return { snapshot, ...(changed === undefined ? {} : { changed }) }
   }
 
   private async export(
@@ -494,6 +620,30 @@ export class PluginDocuments {
     const snapshot = this.options.sessions.snapshot(sessionId, { accountScope: lease.accountScope, workspaceId: lease.workspaceId })
     lease.lastUsed = this.now()
     return { data: snapshot, summary: `read state for ${lease.path}` }
+  }
+
+  /**
+   * 只读查询（正文 / 单元格 / 大纲 / 版面）。
+   * 需求：Agent 改文档前必须先读到**活动模型**里的内容（含未保存的修改）；普通 Read 工具对
+   * OOXML 只会报二进制，读盘上文件又会漏掉用户还没保存的输入。
+   * `request` 原样交给会话管理器，由 `validateQuery` 统一收窄，这里不另写一份规则。
+   */
+  private async query(
+    pluginId: string,
+    rawParams: unknown,
+    scope: DocumentCallScope,
+    accountScope: string
+  ): Promise<PluginDocumentResponse> {
+    const params = objectParams(rawParams)
+    const sessionId = requiredString(params.sessionId, 'sessionId')
+    const lease = await this.requireLease(pluginId, sessionId, scope, accountScope)
+    const result = await this.options.sessions.query({
+      sessionId,
+      scope: { accountScope: lease.accountScope, workspaceId: lease.workspaceId },
+      request: params.request
+    })
+    lease.lastUsed = this.now()
+    return { data: result, summary: `queried ${lease.path}` }
   }
 
   private async getOperation(
@@ -667,6 +817,7 @@ function documentErrorToPluginCode(code: DocumentEngineError['code']): PluginErr
     case 'disk_conflict':
     case 'session_closed':
     case 'result_unknown':
+    case 'busy':
       return 'rejected'
     case 'engine_unavailable':
     case 'engine_crashed':

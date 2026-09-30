@@ -1083,6 +1083,60 @@ const V26_DROP_CONTEXT_CHECKPOINTS = `
 DROP TABLE IF EXISTS context_checkpoints;
 `
 
+/**
+ * 第 27 条：其它设备同步来的使用统计。
+ *
+ * ## 需求
+ *
+ * 使用统计概览要合并同一账户下多台设备的数据（云同步 `usage` category，
+ * 见 `config-sync-usage-snapshot.ts`）。这两张表存的是**别的设备**的日汇总，
+ * 本机自己的仍在 `usage_daily`；请求日志（`usage_records`）不跨设备。
+ *
+ * ★ 不能并进 `usage_daily`：刷新器发现时区变了会 `DELETE FROM usage_daily` 整表重建
+ *   （`usage-rollup.ts`），远端数据混在里面会被一起清掉，而本机算不回来 ——
+ *   表现为换个时区之后其它设备的用量从图上消失，零报错。
+ * ★ 带 `account_id`：换账号登录后，上一个账号同步来的用量不能出现在这个账号的图上；
+ *   按账号隔离而不是直接删，是为了切回来时不用重新拉。
+ */
+const V27_USAGE_REMOTE = `
+CREATE TABLE usage_daily_remote (
+  account_id            TEXT NOT NULL,
+  -- 写入设备的 originId（那台机器的 ensureSyncDeviceId），一台设备一片
+  origin_id             TEXT NOT NULL,
+  day                   TEXT NOT NULL,
+  provider_id           TEXT NOT NULL,
+  provider_name         TEXT NOT NULL DEFAULT '',
+  upstream_model        TEXT NOT NULL,
+  alias                 TEXT NOT NULL DEFAULT '',
+  currency              TEXT NOT NULL DEFAULT '',
+  request_count         INTEGER NOT NULL DEFAULT 0,
+  success_count         INTEGER NOT NULL DEFAULT 0,
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens    INTEGER NOT NULL DEFAULT 0,
+  cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+  thinking_tokens       INTEGER NOT NULL DEFAULT 0,
+  -- ★ 与 usage_daily 同义：NULL = 这一桶一条也算不出钱，不是 0
+  cost_micros           INTEGER,
+  priced_count          INTEGER NOT NULL DEFAULT 0,
+  latency_sum           INTEGER NOT NULL DEFAULT 0,
+  ttft_sum              INTEGER NOT NULL DEFAULT 0,
+  ttft_count            INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, origin_id, day, provider_id, upstream_model, currency)
+);
+CREATE INDEX usage_daily_remote_by_day ON usage_daily_remote (account_id, day);
+
+-- 每台远端设备一行：它自己算出的「最长一场聊天」（依赖 messages，本机替它算不了）。
+-- 行数本身也是「这个账号下有几台别的设备贡献了数据」的来源。
+CREATE TABLE usage_remote_origin (
+  account_id      TEXT NOT NULL,
+  origin_id       TEXT NOT NULL,
+  longest_chat_ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, origin_id)
+);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -1112,4 +1166,5 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 24, name: 'provider-accounts', sql: V24_PROVIDER_ACCOUNTS }
   ,{ version: 25, name: 'context-compaction-detail', sql: V25_CONTEXT_COMPACTION_DETAIL }
   ,{ version: 26, name: 'drop-context-checkpoints', sql: V26_DROP_CONTEXT_CHECKPOINTS }
+  ,{ version: 27, name: 'usage-remote', sql: V27_USAGE_REMOTE }
 ]

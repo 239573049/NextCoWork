@@ -59,6 +59,7 @@ import { isAccountSwitchInFlight } from './account-switch'
 import { initTray, destroyTray } from './tray'
 import { windows } from './window/registry'
 import { QuitFlow } from './quit-flow'
+import { armQuitWatchdog } from './quit-watchdog'
 import { DocumentQuitGuard } from './document-engine/quit-guard'
 import { documentEngineMessage } from '../shared/i18n/document-engine'
 import { titleBarOptions, watchMaximized } from './window/title-bar'
@@ -1002,6 +1003,9 @@ quitFlow = new QuitFlow({
   quit: () => app.quit(),
   exit: (code) => app.exit(code)
 })
+
+// 需求：只有窗口与收尾均已放行才启动独立兜底；取消退出时不能留下延迟强杀。
+app.once('will-quit', armQuitWatchdog)
 
 app.on('window-all-closed', () => {
   /*

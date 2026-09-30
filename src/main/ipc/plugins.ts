@@ -48,6 +48,8 @@ import { DocumentSessionManager } from '../document-engine/manager'
 import { DocumentEngineProviderRegistry, splitProviderId } from '../document-engine/provider-registry'
 import { NativeDocumentEngineProvider } from '../document-engine/native-host'
 import { PluginDocuments } from '../plugin/document-rpc'
+import { DocumentViewChannel } from '../plugin/document-view'
+import { notifyDocumentViewsChanged, setDocumentViewChannel } from './document-engine'
 import { currentConfigScope } from '../db/config-profile'
 import { engineContributionRefusal, helperSpawnRefusal } from './plugin-engines'
 
@@ -220,7 +222,11 @@ export async function startPlugins(): Promise<void> {
     继续把旧 provider 当作可用引擎。
   */
   const documentRoot = join(host.paths.userData(), 'document-engine')
-  const sessions = new DocumentSessionManager({ privateDir: join(documentRoot, 'sessions') })
+  const sessions = new DocumentSessionManager({
+    privateDir: join(documentRoot, 'sessions'),
+    // 编辑器画布要知道 Agent 改了、存了、崩了(定向推送,见 `./document-engine.ts`)
+    onChange: (snapshot) => { notifyDocumentViewsChanged(snapshot) }
+  })
   documentSessions = sessions
   const providers = new DocumentEngineProviderRegistry({
     sessions,
@@ -297,6 +303,25 @@ export async function startPlugins(): Promise<void> {
     retireEngines: async (id) => { await providers.retire(id) },
     accountScope: () => currentConfigScope()
   })
+  /*
+    编辑器画布的通道。★ 与插件 RPC 用**同一个** `documents` / `sessions`:画布、插件逻辑、
+    Agent 工具改的是同一个活动模型,换一份实例就是两个模型。
+  */
+  setDocumentViewChannel(new DocumentViewChannel({
+    documents,
+    sessions,
+    accountScope: () => currentConfigScope(),
+    lookupPlugin: (pluginId) => {
+      const plugin = catalogPlugin(pluginId)
+      return plugin !== undefined && isRunnable(plugin) ? plugin.manifest : null
+    },
+    lookupWorkspaceRoot: (workspaceId) => {
+      // 与插件的 resolveWorkspace 同一口径:远程工作区的路径在本机不存在
+      const workspace = store.listWorkspaces().find((item) => item.id === workspaceId)
+      if (workspace === undefined || (workspace.environment?.kind ?? 'local') === 'connection') return null
+      return workspace.rootPath
+    }
+  }))
   documentLeaseTimer = setInterval(() => { void documents.sweepIdle().catch((error: unknown) => { host.logger.warn(`[documents] idle lease cleanup failed: ${String(error)}`) }) }, 60_000)
   documentLeaseTimer.unref?.()
 
@@ -626,6 +651,8 @@ export async function shutdownPlugins(guarded = false): Promise<void> {
     clearInterval(documentLeaseTimer)
     documentLeaseTimer = undefined
   }
+  // 画布通道随会话表一起下线:之后的画布请求报 engine_unavailable,而不是打到一个正在收尾的会话表上
+  setDocumentViewChannel(null)
   /*
     ★ 挂起的交互全部按取消收口。不收的话,这些 Promise 会连同它们背后的
     插件调用一起永远挂着 —— 而应用正在退出,没有任何人会再来回答。

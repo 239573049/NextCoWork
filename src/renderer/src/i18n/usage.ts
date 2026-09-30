@@ -95,6 +95,11 @@ export const usageZh = {
   'usage.overview.title': '概览',
   'usage.overview.refresh': '刷新统计',
   'usage.overview.empty': '所选时间范围内还没有用量记录',
+  // 使用统计云同步:概览合并其它设备,请求日志只含本机 —— 口径差必须说出来
+  'usage.sync.merged': ({ count }: Params) =>
+    `概览已合并另外 ${count} 台设备同步来的用量；请求日志与明细统计只含本机。`,
+  'usage.sync.toggle': '同步使用统计',
+  'usage.sync.toggleHint': '在已登录同一账号的设备间合并使用统计概览；请求日志不会上传。',
 
   // 指标卡(参考图顶部那一排)
   'usage.metric.totalTokens': '累计 Token 数',
@@ -235,6 +240,10 @@ export const usageEn = {
   'usage.overview.title': 'Overview',
   'usage.overview.refresh': 'Refresh stats',
   'usage.overview.empty': 'No usage recorded in the selected time range',
+  'usage.sync.merged': ({ count }: Params) =>
+    `Overview includes usage synced from ${count} other ${Number(count) === 1 ? 'device' : 'devices'}; request logs and breakdowns cover this device only.`,
+  'usage.sync.toggle': 'Sync usage statistics',
+  'usage.sync.toggleHint': 'Merge the usage overview across devices signed in to the same account. Request logs are never uploaded.',
 
   'usage.metric.totalTokens': 'Total tokens',
   'usage.metric.totalCost': 'Total cost',

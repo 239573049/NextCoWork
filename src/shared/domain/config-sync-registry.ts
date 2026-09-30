@@ -51,7 +51,10 @@ export const SYNC_REGISTRY: Record<SyncCategory, { order: number; confirmation: 
   connections: { order: 3, confirmation: true, deviceFields: ['cwd', 'identityFile', 'knownHostsFile', 'cookies'] },
   extensions: { order: 1, confirmation: true, deviceFields: ['absolutePath', 'executionApproval'] },
   workspaces: { order: 4, confirmation: true, deviceFields: ['rootPath', 'environment', 'lastOpenedAt'] },
-  automation: { order: 5, confirmation: true, deviceFields: ['nextRunAt', 'lastRunAt', 'approvalHistory'] }
+  automation: { order: 5, confirmation: true, deviceFields: ['nextRunAt', 'lastRunAt', 'approvalHistory'] },
+  // 使用统计:每台设备只写自己那一片,合并无损,所以不需要首次确认;
+  // 请求日志(usage_records)整张表留在本机,不进快照。
+  usage: { order: 6, confirmation: false, deviceFields: ['requestLogs'] }
 }
 
 export function portableProvider(provider: UpstreamProvider): Omit<UpstreamProvider, 'credentialRef'> {

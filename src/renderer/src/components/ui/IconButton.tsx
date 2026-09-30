@@ -19,6 +19,7 @@ export function IconButton({
   label,
   onClick,
   active = false,
+  pressed,
   disabled = false,
   size = 28,
   width,
@@ -29,6 +30,12 @@ export function IconButton({
   label: string
   onClick?: () => void
   active?: boolean
+  /**
+   * 开关按钮(加粗、倾斜……)的按下状态,给读屏读「已按下 / 未按下」。
+   * ★ 和 `active` 分开:`active` 在宿主里多半是「这个面板正开着 / 当前项」,不是开关,
+   *   一律报 aria-pressed 会把导航项读成开关。缺省 = 不是开关,不输出这个属性。
+   */
+  pressed?: boolean
   disabled?: boolean
   /** 边长(方形)。给了 `width` 时它只当高度用 */
   size?: number
@@ -46,6 +53,7 @@ export function IconButton({
     <button
       type="button"
       aria-label={label}
+      aria-pressed={pressed}
       title={title ?? label}
       disabled={disabled}
       onClick={onClick}

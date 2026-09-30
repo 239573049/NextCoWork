@@ -21,7 +21,7 @@ import type { WindowKind } from '../../shared/domain/tab'
  * ⌥Space 快捷窗的还原按钮不该跟着换字形)。
  */
 export type TargetedEventChannel =
-  'agent:event' | 'terminal:data' | 'terminal:exit' | 'window:maximized' | 'connection:auth'
+  'agent:event' | 'terminal:data' | 'terminal:exit' | 'window:maximized' | 'connection:auth' | 'documentEngine:changed'
 /** 真·全局状态变更,所有窗口都该知道 */
 export type GlobalEventChannel = Exclude<EventChannel, TargetedEventChannel>
 

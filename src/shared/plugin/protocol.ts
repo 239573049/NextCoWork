@@ -24,7 +24,7 @@
  * 插件作者拼错一个方法名会收到一条完全误导的错误。
  */
 import type { PluginPermission } from './permission'
-import type { DocumentApplyResult, DocumentCapabilities, DocumentFormat, DocumentOperation } from '../document-engine/protocol'
+import type { DocumentApplyResult, DocumentCapabilities, DocumentFormat, DocumentOperation, DocumentQuery } from '../document-engine/protocol'
 import type { DocumentSessionSnapshot } from '../document-engine/session'
 
 /** 需求：callId 只是查找受信工具上下文的索引，插件不能直接指定 workspaceId。 */
@@ -260,6 +260,10 @@ export interface PluginMethodMap {
     result: { snapshot: DocumentSessionSnapshot; path: string }
   }
   'documents.getState': { params: DocumentSessionParams; result: DocumentSessionSnapshot }
+  'documents.query': {
+    params: DocumentSessionParams & { request: DocumentQuery }
+    result: { generation: number; modelRevision: number; result: unknown }
+  }
   'documents.getOperation': {
     params: DocumentSessionParams & { operationId: string }
     result: { status: 'missing' } | { status: 'applied'; sessionId: string; result: DocumentApplyResult } | { status: 'rejected'; sessionId: string; code: string } | { status: 'unknown'; sessionId: string }
@@ -401,6 +405,7 @@ export const PLUGIN_METHOD_PERMISSION = {
   'documents.save': 'workspace.write',
   'documents.export': 'workspace.write',
   'documents.getState': 'workspace.read',
+  'documents.query': 'workspace.read',
   'documents.getOperation': 'workspace.read',
   'documents.close': 'workspace.read',
 

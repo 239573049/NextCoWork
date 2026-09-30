@@ -2,6 +2,26 @@ import type { BuiltinModelRecord } from '../types'
 import { model, textCapabilities, visionCapabilities, imageCapabilities, videoCapabilities, effortThinking, efforts, openAiModernEfforts, openAiAstraEfforts } from '../helpers'
 
 export const OPENAI: readonly BuiltinModelRecord[] = [
+  /*
+   * 需求:2026-09-29 用户点名收录 gpt-6.1-sol。窗口 / 最大输出 / effort 集合这次
+   * 有**一手依据**(官方 model 页当日核对):1,050,000 / 128,000 /
+   * reasoning.effort = low|medium(默认)|high|xhigh|max,不支持 none / minimal
+   * —— 与 openAiAstraEfforts 逐值相同。不满足会怎样见下面 gpt-6-sol 那条注释。
+   * 费率录在 `pricing-seed.ts` 的 OpenAI 段。
+   */
+  model('openai', 'gpt-6.1-sol', 'GPT-6.1 Sol', {
+    capabilities: visionCapabilities({
+      thinking: true,
+      webSearch: true,
+      batch: true,
+    }),
+    contextWindow: 1_050_000,
+    maxOutputTokens: 128_000,
+    thinkingConfig: effortThinking('reasoning.effort'),
+    reasoningEfforts: openAiAstraEfforts,
+    source: { url: 'https://developers.openai.com/api/docs/models/gpt-6.1-sol', fetchedAt: '2026-09-29' },
+    verificationStatus: 'official-api',
+  }),
   model('openai', 'gpt-6-astra', 'GPT-6 Astra', {
     capabilities: visionCapabilities({
       thinking: true,

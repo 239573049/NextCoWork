@@ -1,0 +1,46 @@
+{
+  "publisher": "ncw",
+  "name": "writer",
+  "displayName": "%writer.displayName%",
+  "description": "%writer.description%",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "categories": ["编辑器"],
+  "keywords": ["docx", "word", "office"],
+  "engines": { "nextcowork": "^0.3.3" },
+  "main": "./dist/extension.js",
+  "source": "src/extension.ts",
+  "l10n": "./l10n",
+  "activationEvents": ["onCustomEditor:ncw.writer.docx"],
+  "dependencies": { "ncw.office-runtime": "^0.1.0" },
+  "permissions": [],
+  "optionalPermissions": [],
+  "hostPermissions": [],
+  "views": {
+    "view/editor.tsx": "dist/view/editor.js"
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "ncw.writer.docx",
+        "displayName": "%writer.editorName%",
+        "selector": [{ "filenamePattern": "*.docx" }, { "filenamePattern": "*.docm" }],
+        "priority": "default",
+        "viewId": "ncw.writer.view",
+        "documentEngine": "ncw.office-runtime/office"
+      }
+    ],
+    "views": [
+      {
+        "id": "ncw.writer.view",
+        "title": "%writer.editorName%",
+        "icon": "file-text",
+        "path": "dist/view/editor.html",
+        "location": "editor"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

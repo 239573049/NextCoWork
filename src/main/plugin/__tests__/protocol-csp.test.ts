@@ -44,7 +44,7 @@ describe('文档会话垫片', () => {
         }
       }
     }) as Record<string, (params: unknown) => Promise<unknown>>
-    const methods = { open: 'open', apply: 'apply', save: 'save', exportDocument: 'export', getState: 'getState', getOperation: 'getOperation', close: 'close' }
+    const methods = { open: 'open', apply: 'apply', save: 'save', exportDocument: 'export', getState: 'getState', query: 'query', getOperation: 'getOperation', close: 'close' }
     for (const [name, rpc] of Object.entries(methods)) {
       const params = { sessionId: 'session', callId: `call-${name}` }
       expect(await runtime[name]?.(params)).toEqual({ received: params })

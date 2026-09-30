@@ -84,6 +84,15 @@ function syncAccount(): { accountId: string; deviceId: string; enabled: boolean 
     ? { accountId: value.accountId, deviceId: value.deviceId, enabled: value.enabled === true } : undefined
 }
 
+/**
+ * 当前启用同步的账户;未登录或未启用时为 null。
+ * 需求:使用统计只合并**这个账户**同步来的其它设备数据(`usage_daily_remote` 按账户隔离)。
+ */
+export function getActiveSyncAccountId(): string | null {
+  const account = syncAccount()
+  return account !== undefined && account.enabled ? account.accountId : null
+}
+
 export function ensureSyncDeviceId(): string {
   const current = getKv<unknown>(SYNC_DEVICE_KEY, null)
   if (typeof current === 'string' && current.length >= 16) return current

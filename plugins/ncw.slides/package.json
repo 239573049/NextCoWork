@@ -1,0 +1,66 @@
+{
+  "publisher": "ncw",
+  "name": "slides",
+  "displayName": "%slides.displayName%",
+  "description": "%slides.description%",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "categories": [
+    "编辑器"
+  ],
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "presentation",
+    "office"
+  ],
+  "engines": {
+    "nextcowork": "^0.3.3"
+  },
+  "main": "./dist/extension.js",
+  "source": "src/extension.ts",
+  "l10n": "./l10n",
+  "activationEvents": [
+    "onCustomEditor:ncw.slides.pptx"
+  ],
+  "dependencies": {
+    "ncw.office-runtime": "^0.1.0"
+  },
+  "permissions": [],
+  "optionalPermissions": [],
+  "hostPermissions": [],
+  "views": {
+    "view/editor.tsx": "dist/view/editor.js"
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "ncw.slides.pptx",
+        "displayName": "%slides.editorName%",
+        "selector": [
+          {
+            "filenamePattern": "*.pptx"
+          },
+          {
+            "filenamePattern": "*.pptm"
+          }
+        ],
+        "priority": "default",
+        "viewId": "ncw.slides.view",
+        "documentEngine": "ncw.office-runtime/office"
+      }
+    ],
+    "views": [
+      {
+        "id": "ncw.slides.view",
+        "title": "%slides.editorName%",
+        "icon": "image",
+        "path": "dist/view/editor.html",
+        "location": "editor"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

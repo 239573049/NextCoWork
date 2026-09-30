@@ -192,6 +192,15 @@ const oai = maker(null, 'USD', 'https://openai.com/api/pricing')
 const OPENAI: readonly ModelPricing[] = [
   oai('gpt-6-astra', 'GPT-6 Astra', two(272_000, { input: 10, output: 50, cacheRead: 1.0, cacheWrite: 12.5 }, { input: 20, output: 75, cacheRead: 2.0, cacheWrite: 25 })),
   /*
+    ★ 2026-09-29 收录,费率核自官方 pricing 页 + 官方 model 页(同日两页互证):
+    低档 输入 / 缓存读 / 缓存写 / 输出 = 2 / 0.1 / 2.5 / 10,高档 4 / 0.2 / 5 / 15。
+    ★ 缓存读是 **0.05× 输入**(官方页原话:cached input 按 uncached 输入价的 5% 计),
+    不是族内 gpt-6-sol 的 0.1× —— 按 0.1×「对齐」会凭空多收一倍,别顺手统一;
+    越档倍率(输入/缓存 ×2、输出 ×1.5)照旧成立,由 `pricing-seed.test.ts` 复核。
+    fetchedAt 沿用全表快照日(结构测试钉死全表一致),真实录入日以本注释为准。
+  */
+  oai('gpt-6.1-sol', 'GPT-6.1 Sol', two(272_000, { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, { input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 })),
+  /*
     ★ 2026-09-23 收录,费率逐格抄自官方 pricing 页的截图(用户提供的那张):
     低档 输入 / 缓存读 / 缓存写 / 输出 = 2 / 0.2 / 2.5 / 10,高档 4 / 0.4 / 5 / 15;
     Luna 是整行 1/20:0.1 / 0.01 / 0.125 / 0.5 与 0.2 / 0.02 / 0.25 / 0.75。

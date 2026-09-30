@@ -46,6 +46,18 @@ import {
   setPluginEnabled,
   uninstallPlugin
 } from './plugins'
+import {
+  closeDocumentView,
+  commandDocumentView,
+  documentViewState,
+  headersDocumentView,
+  listDocumentView,
+  inputDocumentView,
+  layoutDocumentView,
+  openDocumentView,
+  renderDocumentView,
+  saveDocumentView
+} from './document-engine'
 import type { SessionInputState } from '../../shared/domain/queued-input'
 import { isValidSessionInput } from '../../shared/domain/queued-input'
 import {
@@ -163,6 +175,7 @@ import {
   getConfigSyncStatus,
   getConfigSyncConflicts,
   resolveConfigSyncConflict,
+  setConfigSyncUsage,
   setupConfigSync
 } from './config-sync'
 import { browserManager, setBrowserChangeListener } from '../browser/manager'
@@ -305,6 +318,7 @@ const handlers: HandlerMap = {
   'configSync:getPreview': () => getConfigSyncPreview(),
   'configSync:confirmInitial': () => confirmInitialConfigSync(),
   'configSync:resolve': (req) => resolveConfigSyncConflict(req.id, req.useRemote),
+  'configSync:setUsage': ({ enabled }) => setConfigSyncUsage(enabled),
   'settings:get': () => getSettings(),
   'settings:update': (patch) => updateSettings(patch),
   'theme:importImage': () => importImage(),
@@ -597,6 +611,17 @@ const handlers: HandlerMap = {
   'plugins:updateAll': () => updateAllPlugins(),
   'plugins:getConfiguration': (req) => getPluginConfiguration(req),
   'plugins:setConfiguration': (req) => setPluginConfiguration(req),
+  // ── 文档引擎编辑器画布(见 `./document-engine.ts`)──
+  'documentEngine:open': (req, ctx) => openDocumentView(req, ctx),
+  'documentEngine:render': (req, ctx) => renderDocumentView(req, ctx),
+  'documentEngine:input': (req, ctx) => inputDocumentView(req, ctx),
+  'documentEngine:command': (req, ctx) => commandDocumentView(req, ctx),
+  'documentEngine:list': (req, ctx) => listDocumentView(req, ctx),
+  'documentEngine:headers': (req, ctx) => headersDocumentView(req, ctx),
+  'documentEngine:layout': (req, ctx) => layoutDocumentView(req, ctx),
+  'documentEngine:state': (req, ctx) => documentViewState(req, ctx),
+  'documentEngine:save': (req, ctx) => saveDocumentView(req, ctx),
+  'documentEngine:close': (req, ctx) => closeDocumentView(req, ctx),
 
   'skills:list': (req) => listSkills(req),
   'skills:pickZip': () => pickSkillZip(),

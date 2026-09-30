@@ -20,7 +20,9 @@
  *
  * 方法:`document.open { path, format }` → `{ capabilities }`;
  * `document.apply { operations }` → `{ warnings, undoable }`;
- * `document.saveAs { path, format }` → `{}`;`shutdown {}` → `{}`。
+ * `document.saveAs { path, format }` → `{}`;`shutdown {}` → `{}`;
+ * `document.input { events }` → `{ modified, invalidations, cursor?, … }`(形状见 `interaction.ts`)。
+ * `document.command { command, args? }` → 与 input 同形的回执(功能区命令,见 `commands.ts`)。
  *
  * ## 不变式
  *
@@ -46,6 +48,7 @@ import {
   DocumentEngineError,
   isDocumentFormat,
   isDocumentOperationKind,
+  parseOperationResults,
   type DocumentCapabilities,
   type DocumentErrorCode,
   type DocumentFormat,
@@ -54,6 +57,8 @@ import {
   type DocumentRenderRequest,
   type DocumentRenderResult
 } from '../../shared/document-engine/protocol'
+import { parseInputResult, parseInteraction, type DocumentInputEvent, type DocumentInputResult } from '../../shared/document-engine/interaction'
+import { parseCommandIds, type CommandArgs, type DocumentCommandId } from '../../shared/document-engine/commands'
 import { NATIVE_PROTOCOL_VERSION } from '../../shared/plugin/native-component'
 import { killTree } from '../kernel/node-spawn'
 import type { DocumentEngineHandle, DocumentEngineProvider } from './manager'
@@ -66,7 +71,7 @@ const STDERR_TAIL_BYTES = 16 * 1024
 
 const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set<DocumentErrorCode>([
   'unsupported_format', 'unsupported_operation', 'invalid_operation', 'stale_revision', 'stale_generation',
-  'disk_conflict', 'timeout', 'macro_denied', 'io', 'engine_crashed'
+  'disk_conflict', 'timeout', 'macro_denied', 'io', 'engine_crashed', 'busy'
 ])
 
 export type SpawnHelper = (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams
@@ -538,6 +543,8 @@ export function parseCapabilities(raw: unknown, format: DocumentFormat, engineVe
   const operations = Array.isArray(caps.operations) ? [...new Set(caps.operations.filter(isDocumentOperationKind))] : []
   const canExport = Array.isArray(caps.canExport) ? [...new Set(caps.canExport.filter(isDocumentFormat))] : []
   const macros = (caps.macros ?? {}) as Record<string, unknown>
+  const interaction = parseInteraction(caps.interaction)
+  const commands = parseCommandIds(caps.commands)
   return {
     format,
     engineVersion,
@@ -545,7 +552,9 @@ export function parseCapabilities(raw: unknown, format: DocumentFormat, engineVe
     canSave: caps.canSave === true,
     canExport,
     canUndo: caps.canUndo === true,
-    macros: { list: macros.list === true, run: macros.run === true }
+    macros: { list: macros.list === true, run: macros.run === true },
+    ...(interaction === undefined ? {} : { interaction }),
+    ...(commands === undefined ? {} : { commands })
   }
 }
 
@@ -600,7 +609,8 @@ export class NativeDocumentEngineProvider implements DocumentEngineProvider {
       apply: async (operations: DocumentOperation[], applySignal: AbortSignal) => {
         const raw = (await connection.request('document.apply', { operations }, applySignal) ?? {}) as Record<string, unknown>
         const warnings = Array.isArray(raw.warnings) ? raw.warnings.filter((w): w is string => typeof w === 'string').slice(0, 50).map((w) => w.slice(0, 500)) : []
-        return { warnings, undoable: raw.undoable === true }
+        const results = parseOperationResults(raw.results, operations.length)
+        return { warnings, undoable: raw.undoable === true, ...(results === undefined ? {} : { results }) }
       },
       saveTo: async (outputPath: string, saveSignal: AbortSignal) => {
         await connection.request('document.saveAs', { path: outputPath, format: input.format }, saveSignal)
@@ -628,6 +638,18 @@ export class NativeDocumentEngineProvider implements DocumentEngineProvider {
       },
       // 查询请求已由管理器 `validateQuery` 收窄过;结果是 helper 的回执,原样交回调用方
       query: async (request: DocumentQuery, querySignal: AbortSignal) => connection.request('document.query', request, querySignal),
+      input: async (events: DocumentInputEvent[], inputSignal: AbortSignal): Promise<DocumentInputResult> => {
+        const parsed = parseInputResult(await connection.request('document.input', { events }, inputSignal))
+        // ★ 回执形状不对 = 不知道这批按键有没有改模型;按引擎故障上抛,由管理器标崩溃,不猜
+        if (parsed === null) throw new DocumentEngineError('io', 'input response is invalid')
+        return parsed
+      },
+      command: async (command: DocumentCommandId, args: CommandArgs | undefined, commandSignal: AbortSignal): Promise<DocumentInputResult> => {
+        const parsed = parseInputResult(await connection.request('document.command', args === undefined ? { command } : { command, args }, commandSignal))
+        // 同 input:回执说不清改没改模型,就按引擎故障处理
+        if (parsed === null) throw new DocumentEngineError('io', 'command response is invalid')
+        return parsed
+      },
       close: async () => {
         unsubscribe()
         await connection.close()

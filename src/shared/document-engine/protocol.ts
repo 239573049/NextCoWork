@@ -26,6 +26,8 @@
  * - 不定义引擎内部的文档树形状:那由引擎插件按 capability 回答,核心不代言。
  * - 不依赖 Node / Electron:渲染层、插件 SDK 类型、主进程都要能 import 它。
  */
+import type { DocumentInteraction } from './interaction'
+import type { DocumentCommandId } from './commands'
 
 // ─────────────────────────── 格式 ───────────────────────────
 
@@ -94,6 +96,16 @@ export interface DocumentCapabilities {
   canUndo: boolean
   /** 能否枚举 / 执行宏。只对 `MACRO_FORMATS` 有意义 */
   macros: { list: boolean; run: boolean }
+  /**
+   * 画布交互输入(键盘 / 鼠标 / 输入法)。缺省 = 只读预览,视图不得画出可编辑的光标。
+   * 可选而非必填:旧 helper 与只读引擎(PDF 经 Draw 导入)不回报它,见 `interaction.ts`。
+   */
+  interaction?: DocumentInteraction
+  /**
+   * 功能区命令(见 `commands.ts`)。缺省 = 这份文档没有可用的功能区命令(只读、旧 helper)。
+   * ★ 视图只画这里有的按钮:没有后端能力的按钮是一次必失败的承诺(AGENTS §5)。
+   */
+  commands?: DocumentCommandId[]
 }
 
 /**
@@ -109,6 +121,11 @@ export interface DocumentRenderRequest {
   tileHeight: number
   width: number
   height: number
+  /**
+   * 表格的工作表 / 演示文稿的幻灯片序号。Writer 没有 part，给了由引擎拒绝。
+   * 需求：渲染非当前部分时不能先切换部分——那会改变用户正在编辑的那一张。
+   */
+  part?: number
 }
 
 export interface DocumentRenderResult {
@@ -146,6 +163,16 @@ export type DocumentOperation =
   | { kind: 'object.delete'; target: DocumentTargetRef }
   | { kind: 'pdf.annotate'; page: number; rect: [number, number, number, number]; text: string }
   | { kind: 'pdf.formFill'; field: string; value: string }
+  /*
+    需求：Word 修改要能定位到「用户说的那段文字」，而引擎目前给不出稳定的语义 ref。
+    这三支按**字面文字**定位（ncw-office-runtime helper 已对真实 LibreOffice 实测并读回核对），
+    `expectedCount` 让调用方声明预期命中数，不符整批拒绝。
+    不满足会怎样：宿主协议里没有这三支时 `parseCapabilities` 把它们过滤掉，Word 文档经宿主
+    只能在文首/文末追加，Agent 改不了任何现有内容，且零报错。
+  */
+  | { kind: 'text.findReplace'; find: string; replace: string; matchCase?: boolean; expectedCount?: number }
+  | { kind: 'paragraph.style'; find: string; style: string; matchCase?: boolean; expectedCount?: number }
+  | { kind: 'paragraph.insert'; anchor: string; position: 'before' | 'after'; text: string; matchCase?: boolean }
 
 export type DocumentOperationKind = DocumentOperation['kind']
 
@@ -161,7 +188,10 @@ const OPERATION_KINDS = {
   'slide.move': true,
   'object.delete': true,
   'pdf.annotate': true,
-  'pdf.formFill': true
+  'pdf.formFill': true,
+  'text.findReplace': true,
+  'paragraph.style': true,
+  'paragraph.insert': true
 } satisfies Record<DocumentOperationKind, true>
 
 export function isDocumentOperationKind(value: unknown): value is DocumentOperationKind {
@@ -294,6 +324,50 @@ function validateOne(item: unknown): DocumentOperation | string {
       if (field === null || value === null) return 'field and value are required'
       return { kind: 'pdf.formFill', field, value }
     }
+    case 'text.findReplace': {
+      const find = lineOf(o.find)
+      if (find === null) return 'find must be non-empty single-line text'
+      // 替换为空串是合法的（删除命中的文字）；多行替换引擎不支持，拒掉而不是截断
+      if (typeof o.replace !== 'string' || o.replace.length > MAX_OPERATION_TEXT || /[\r\n]/.test(o.replace)) return 'replace must be single-line text'
+      const options = matchOptions(o)
+      return typeof options === 'string' ? options : { kind: 'text.findReplace', find, replace: o.replace, ...options }
+    }
+    case 'paragraph.style': {
+      const find = lineOf(o.find)
+      if (find === null) return 'find must be non-empty single-line text'
+      const style = shortOf(o.style)
+      if (style === null) return 'style is invalid'
+      const options = matchOptions(o)
+      return typeof options === 'string' ? options : { kind: 'paragraph.style', find, style, ...options }
+    }
+    case 'paragraph.insert': {
+      const anchor = lineOf(o.anchor)
+      if (anchor === null) return 'anchor must be non-empty single-line text'
+      if (o.position !== 'before' && o.position !== 'after') return 'position must be before or after'
+      const text = textOf(o.text)
+      if (text === null || text === '') return 'text is invalid'
+      // ★ 锚点必须恰好命中一处由引擎判；这里不接受 expectedCount，免得调用方以为能插到多处
+      if (o.expectedCount !== undefined) return 'paragraph.insert does not take expectedCount; the anchor must match exactly once'
+      const options = matchOptions(o)
+      if (typeof options === 'string') return options
+      return { kind: 'paragraph.insert', anchor, position: o.position, text, ...(options.matchCase === undefined ? {} : { matchCase: options.matchCase }) }
+    }
+  }
+}
+
+/** 单行、非空、有界的查找串。换行拒掉：引擎的查找是按段落内文字进行的 */
+function lineOf(raw: unknown): string | null {
+  const value = textOf(raw)
+  return value === null || value === '' || /[\r\n]/.test(value) ? null : value
+}
+
+/** 按文字定位的公共选项。`expectedCount` 缺省 = 不核对数量（引擎仍要求至少一处） */
+function matchOptions(o: Record<string, unknown>): { matchCase?: boolean; expectedCount?: number } | string {
+  if (o.matchCase !== undefined && typeof o.matchCase !== 'boolean') return 'matchCase must be a boolean'
+  if (o.expectedCount !== undefined && !(isIndex(o.expectedCount) && o.expectedCount >= 1)) return 'expectedCount must be a positive integer'
+  return {
+    ...(o.matchCase === undefined ? {} : { matchCase: o.matchCase as boolean }),
+    ...(o.expectedCount === undefined ? {} : { expectedCount: o.expectedCount as number })
   }
 }
 
@@ -339,6 +413,12 @@ export type DocumentErrorCode =
   | 'session_closed'
   | 'timeout'
   | 'result_unknown'
+  /**
+   * 引擎此刻不能安全执行,**什么都没做**,稍后原样重试即可。目前唯一来源:用户正在输入法
+   * 组字(拼音已在模型里,此时读会读到拼音、写会被下一次组字更新吞掉、存会把拼音写进文件)。
+   * ★ 不是故障:会话不标崩溃、不记 result_unknown。
+   */
+  | 'busy'
   | 'macro_denied'
   | 'io'
 
@@ -357,6 +437,26 @@ export interface DocumentApplyResult {
   /** 引擎回报的保真警告(例如「该对象在保存时会被简化」)。原文是领域值 */
   warnings: string[]
   undoable: boolean
+  /**
+   * 与请求批次一一对应的逐条结果（按文字定位的操作带 `matches`）。可选：引擎不回报时省略。
+   * 需求：Agent 要知道「替换了几处」才能判断是否改对了地方；只回一个 applied 会让它
+   * 在零命中之外的错误数量上无从察觉。
+   */
+  results?: DocumentOperationResult[]
+}
+
+/** 一条操作的结果。只保留宿主认得、且有界的字段（引擎回执是不可信输入） */
+export interface DocumentOperationResult {
+  matches?: number
+}
+
+/** 从引擎回执里收窄出逐条结果；形状不对或条数与批次不符时整份丢弃，不拼半份 */
+export function parseOperationResults(raw: unknown, expected: number): DocumentOperationResult[] | undefined {
+  if (!Array.isArray(raw) || raw.length !== expected) return undefined
+  return raw.map((item) => {
+    const record = item !== null && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {}
+    return isIndex(record.matches) ? { matches: record.matches } : {}
+  })
 }
 
 // ─────────────────────────── 查询 ───────────────────────────
@@ -372,6 +472,18 @@ export type DocumentQuery =
   | { kind: 'outline' }
   | { kind: 'text'; maxChars?: number }
   | { kind: 'cells'; sheet: string; range: string; maxChars?: number }
+  /**
+   * 版面：某一部分（工作表 / 幻灯片）的文档尺寸与 Writer 的页矩形，单位 twips。
+   * 需求：画布要先知道页在哪、多大，才能按视口算出 render 的 twips 区域；没有它视图只能猜。
+   * `part` 只对表格 / 演示文稿有意义，由引擎核对范围。
+   */
+  | { kind: 'layout'; part?: number }
+  /** 引擎里可用的字体族名(功能区的字体框) */
+  | { kind: 'fonts' }
+  /** 文档的段落样式名(功能区的样式框;只对文字文档) */
+  | { kind: 'styles' }
+  /** 表格当前工作表在可见区域(twips)里的行列头:每行 / 列的结束位置与标签 */
+  | { kind: 'headers'; x: number; y: number; width: number; height: number }
 
 export const MAX_QUERY_CHARS = 200_000
 
@@ -392,6 +504,19 @@ export function validateQuery(raw: unknown): DocumentQuery | string {
       if (typeof q.sheet !== 'string' || q.sheet === '' || q.sheet.length > 512) return 'sheet is required'
       if (typeof q.range !== 'string' || !/^\$?[A-Z]{1,3}\$?[0-9]{1,7}(:\$?[A-Z]{1,3}\$?[0-9]{1,7})?$/.test(q.range)) return 'range must look like A1 or A1:C10'
       return { kind: 'cells', sheet: q.sheet, range: q.range, ...limit }
+    }
+    case 'layout':
+      if (q.part !== undefined && !isIndex(q.part)) return 'part must be a non-negative integer'
+      return { kind: 'layout', ...(q.part === undefined ? {} : { part: q.part as number }) }
+    case 'fonts':
+      return { kind: 'fonts' }
+    case 'styles':
+      return { kind: 'styles' }
+    case 'headers': {
+      const box = ['x', 'y', 'width', 'height'].map((key) => q[key])
+      if (!box.every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000)) return 'x, y, width and height must be twips coordinates'
+      const [x, y, width, height] = box as number[]
+      return { kind: 'headers', x: x ?? 0, y: y ?? 0, width: width ?? 0, height: height ?? 0 }
     }
     default:
       return `unknown query kind ${String(q.kind)}`
