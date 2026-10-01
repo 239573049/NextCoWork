@@ -28,7 +28,7 @@ import type { ProxyPasswordInfo } from '../domain/proxy'
 import type { PluginPermission } from '../plugin/permission'
 import type { PluginActivity, PluginCatalog } from '../plugin/state'
 import type { PluginInteractionRequest, PluginTabTarget } from '../plugin/ui-request'
-import type { PluginMarketItem, PluginUpdate, PluginUpdateResult } from '../plugin/market'
+import type { PluginMarketItem, PluginMarketPage, PluginUpdate, PluginUpdateResult } from '../plugin/market'
 import type {
   Attachment,
   AttachmentScope,
@@ -814,7 +814,7 @@ export interface IpcInvokeMap {
    */
   'plugins:confirmClose': { req: { path?: string }; res: { safe: boolean } }
   // ── 插件市场 ──
-  'plugins:marketList': { req: { q?: string; category?: string }; res: PluginMarketItem[] }
+  'plugins:marketList': { req: { q?: string; category?: string; page?: number }; res: PluginMarketPage }
   'plugins:marketCategories': { req: void; res: string[] }
   'plugins:marketDetail': { req: { slug: string }; res: PluginMarketItem & { versions?: { version: string; changelog?: string; permissionEscalated?: boolean }[] } }
   'plugins:installMarket': { req: { slug: string; version?: string }; res: PluginCatalog }

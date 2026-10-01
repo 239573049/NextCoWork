@@ -194,6 +194,8 @@ interface TabsState {
    * ——截图里从来没有空 Tab 条。异步但签名是 void,它挂在 effect 上。
    */
   ensure: (workspaceId: string) => void
+  /** 专注会话窗口的临时布局:只放入目标会话,不读取或写回主窗口布局。 */
+  openFocusedSession: (workspaceId: string, sessionId: string, title?: string) => void
   open: (workspaceId: string, kind: InnerTabKind, pane?: TabPane, init?: TabInit) => void
   /** 在已有会话上打开一个新 Tab（侧边栏历史会话使用）。 */
   openSession: (workspaceId: string, sessionId: string, title?: string) => void
@@ -301,6 +303,7 @@ interface TabsState {
     tabs: ReadonlyArray<{
       id: string
       clientTabId?: string
+      ownerSessionId?: string
       url: string
       title: string
       source: 'user' | 'agent'
@@ -475,7 +478,8 @@ export const useTabsStore = create<TabsState>((set, get) => {
     const before = get().byWorkspace[workspaceId]?.tabs ?? []
     const normalized = withDock(next)
     set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: normalized } })
-    persistInnerTabs(workspaceId, normalized)
+    // 专注会话窗口的工作台只在本窗口有效，不能覆盖主窗口的项目布局。
+    if (useWindowStore.getState().windowKind !== 'quick') persistInnerTabs(workspaceId, normalized)
     syncEmptyEdgePanels(workspaceId, before, normalized.tabs)
   }
 
@@ -687,6 +691,11 @@ export const useTabsStore = create<TabsState>((set, get) => {
 
     ensure(workspaceId) {
       if (get().byWorkspace[workspaceId] !== undefined || loading.has(workspaceId)) return
+      if (useWindowStore.getState().windowKind === 'quick') {
+        const chat = makeTab('chat', 'main')
+        write(workspaceId, { tabs: [chat], activeTabId: chat.id, bottomActiveTabId: null, rightActiveTabId: null })
+        return
+      }
       loading.add(workspaceId)
       void loadOrSeed(workspaceId)
         .catch((err: unknown) => {
@@ -707,6 +716,33 @@ export const useTabsStore = create<TabsState>((set, get) => {
           pendingTitles.delete(workspaceId)
           applyPendingBrowser(workspaceId)
         })
+    },
+
+    openFocusedSession(workspaceId, sessionId, title) {
+      const current = get().byWorkspace[workspaceId]
+      const first = current?.tabs.length === 1 ? current.tabs[0] : undefined
+      if (current !== undefined && first?.kind === 'chat' && first.ref.sessionId === sessionId) {
+        if (title !== undefined && first.title !== title) {
+          set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: { ...current, tabs: [{ ...first, title }] } } })
+        }
+        return
+      }
+      const chat: InnerTab = {
+        id: ulid(),
+        kind: 'chat',
+        pane: 'main',
+        title: title?.trim() ?? '',
+        ref: { sessionId }
+      }
+      const state = withDock({
+        tabs: [chat],
+        activeTabId: chat.id,
+        bottomActiveTabId: null,
+        rightActiveTabId: null
+      })
+      dockCache.delete(workspaceId)
+      set({ byWorkspace: { ...get().byWorkspace, [workspaceId]: state } })
+      applyPendingBrowser(workspaceId)
     },
 
     open(workspaceId, kind, pane = 'main', init) {
@@ -1091,6 +1127,16 @@ export const useTabsStore = create<TabsState>((set, get) => {
     },
 
     syncBrowserTabs(workspaceId, remoteTabs) {
+      if (useWindowStore.getState().windowKind === 'quick') {
+        const current = get().byWorkspace[workspaceId]
+        // 全局浏览器广播不能让专注窗口恢复其他项目或其他会话的工作台。
+        if (current === undefined) return
+        const sessions = new Set(current.tabs.flatMap((tab) => tab.kind === 'chat' && tab.ref.sessionId !== null ? [tab.ref.sessionId] : []))
+        remoteTabs = remoteTabs.filter((remote) =>
+          (remote.ownerSessionId !== undefined && sessions.has(remote.ownerSessionId))
+          || current.tabs.some((tab) => tab.kind === 'browser' && (tab.ref.browserId === remote.id || tab.id === remote.clientTabId))
+        )
+      }
       if (get().byWorkspace[workspaceId] === undefined) {
         pendingBrowser.set(workspaceId, [...remoteTabs])
         get().ensure(workspaceId)

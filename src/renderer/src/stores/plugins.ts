@@ -43,6 +43,8 @@ interface PluginsState {
   market: PluginMarketItem[]
   marketLoading: boolean
   marketError: string | null
+  marketPage: number
+  marketHasNext: boolean
   /**
    * 正在装的那些,按 `market:<slug>` / `local:<路径>` 索引。
    *
@@ -64,7 +66,7 @@ interface PluginsState {
   revoke: (pluginId: string, permissions: PluginPermission[]) => Promise<void>
   loadActivity: (pluginId?: string) => Promise<void>
   runCommand: (pluginId: string, commandId: string, args?: { workspaceId: string }) => Promise<void>
-  loadMarket: (query?: { q?: string; category?: string }) => Promise<void>
+  loadMarket: (query?: { q?: string; category?: string; page?: number }) => Promise<void>
   installFromMarket: (slug: string, version?: string) => Promise<void>
   checkUpdates: (force?: boolean) => Promise<void>
   updateAll: () => Promise<void>
@@ -165,6 +167,8 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
   market: [],
   marketLoading: false,
   marketError: null,
+  marketPage: 1,
+  marketHasNext: false,
   installProgress: {},
   installError: {},
   updates: [],
@@ -289,7 +293,8 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
   async loadMarket(query = {}) {
     set({ marketLoading: true, marketError: null })
     try {
-      set({ market: await invoke('plugins:marketList', query), marketLoading: false })
+      const result = await invoke('plugins:marketList', query)
+      set({ market: result.items, marketPage: result.page, marketHasNext: result.hasNext, marketLoading: false })
     } catch (error) {
       /*
         ★ 市场拉不动**不是空列表**。给空列表的话,界面上写着「还没有插件」,

@@ -1,12 +1,15 @@
 /**
  * 需求：正文引用在气泡里保留，同时在气泡下与发送的图片/文件一起展示；
  * 草稿里只有上传完的图片可打开预览，不改变发送内容或附件的其他操作。
+ * 超长正文的折叠、尺寸变化和编辑返回不得丢失文本或附件。
+ *
+ * @vitest-environment jsdom
  */
-import { act, createElement, type ReactNode } from 'react'
+import { act, createElement, type ComponentProps, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { JSDOM } from 'jsdom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { userMessage } from '../../../../../shared/agent/message'
+import { userMessage, type AgentMessage } from '../../../../../shared/agent/message'
 import { emptyTranscript } from '../../../../../shared/agent/transcript'
 import { I18nProvider } from '../../../i18n'
 import { AttachmentTray, type TrayItem } from '../AttachmentTray'
@@ -14,14 +17,16 @@ import { Thread } from '../Thread'
 import { userMessageFileRefs } from '../user-message-attachments'
 
 let cleanup: (() => Promise<void>) | null = null
+let rerender: ((children: ReactNode) => Promise<void>) | null = null
 
 afterEach(async () => {
   await cleanup?.()
   cleanup = null
+  rerender = null
   vi.unstubAllGlobals()
 })
 
-async function render(children: ReactNode): Promise<HTMLElement> {
+async function render(children: ReactNode, prepare?: (dom: JSDOM) => void): Promise<HTMLElement> {
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
   Object.assign(dom.window, { nextcowork: { on: () => () => {} } })
   vi.stubGlobal('window', dom.window)
@@ -31,13 +36,17 @@ async function render(children: ReactNode): Promise<HTMLElement> {
   vi.stubGlobal('requestAnimationFrame', () => 1)
   vi.stubGlobal('cancelAnimationFrame', () => {})
   vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} })
+  prepare?.(dom)
   const container = document.getElementById('root')!
   const root = createRoot(container)
   cleanup = async () => {
     await act(async () => root.unmount())
     dom.window.close()
   }
-  await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'zh-CN', children })))
+  rerender = async (next) => {
+    await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'zh-CN', children: next })))
+  }
+  await rerender(children)
   return container
 }
 
@@ -102,6 +111,184 @@ describe('用户消息附件', () => {
     expect(attachments.querySelectorAll('[data-testid="message-file-ref"]')).toHaveLength(1)
     expect(attachments.querySelector('[data-testid="message-file-ref"]')?.tagName).toBe('DIV')
     expect(attachments.parentElement).toBe(bubble.parentElement)
+  })
+})
+
+const longMessage = Array.from({ length: 24 }, (_, i) => `第 ${i + 1} 行内容`).join('\n')
+
+function foldFixture(messages: AgentMessage[], props: Partial<ComponentProps<typeof Thread>> = {}): ReactNode {
+  return createElement(Thread, {
+    transcript: { ...emptyTranscript(), messages }, runId: null, lastSeq: 0,
+    queued: 0, model: undefined, providerName: undefined, ...props
+  })
+}
+
+function mockTextHeight(dom: JSDOM, height: () => number): void {
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get() { return this.tagName === 'P' ? height() : 0 }
+  })
+}
+
+describe('用户消息折叠', () => {
+  it('短消息无需折叠，保留可读、可选择的正文', async () => {
+    const container = await render(foldFixture([userMessage('u', [{ type: 'text', text: '短消息' }], 1)]),
+      (dom) => mockTextHeight(dom, () => 44))
+    const text = container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!
+    expect(text.textContent).toBe('短消息')
+    expect(text.hasAttribute('inert')).toBe(false)
+    expect(text.getAttribute('aria-hidden')).toBeNull()
+    expect(container.querySelector('[data-testid="user-message-expand"]')).toBeNull()
+    expect(container.querySelector('[data-testid="user-message-fade"]')).toBeNull()
+  })
+
+  it('超长正文默认折叠，展开及收起不卸载或截断原文和附件', async () => {
+    const message = userMessage('u', [
+      { type: 'text', text: longMessage },
+      { type: 'file_ref', name: 'a.ts', path: 'src/a.ts' },
+      { type: 'image', mime: 'image/png', dataRef: 'ncw://attachments/one' }
+    ], 1)
+    const container = await render(foldFixture([message], { readOnly: true }),
+      (dom) => mockTextHeight(dom, () => 560))
+    const text = container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!
+    const paragraph = text.querySelector('p')!
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="user-message-expand"]')!
+    const fade = container.querySelector('[data-testid="user-message-fade"]')!
+    const attachments = container.querySelector('[data-testid="user-message-attachments"]')!
+    expect(toggle.getAttribute('aria-controls')).toBe(text.id)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(toggle.textContent).toBe('展开消息全文')
+    expect(text.style.maxHeight).toBe('220px')
+    expect(text.hasAttribute('inert')).toBe(false)
+    expect(text.getAttribute('aria-hidden')).toBeNull()
+    expect(paragraph.textContent).toBe(longMessage)
+    expect(fade.className).toContain('opacity-100')
+    expect(container.querySelector('[data-testid="user-message-edit"]')).toBeNull()
+
+    await act(async () => toggle.click())
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(toggle.textContent).toBe('收起消息')
+    expect(text.style.maxHeight).toBe('560px')
+    expect(fade.className).toContain('opacity-0')
+    expect(text.querySelector('p')).toBe(paragraph)
+    expect(container.querySelector('[data-testid="user-message-attachments"]')).toBe(attachments)
+
+    await act(async () => toggle.click())
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(text.style.maxHeight).toBe('220px')
+    expect(fade.className).toContain('opacity-100')
+    expect(paragraph.textContent).toBe(longMessage)
+    expect(attachments.querySelectorAll('[data-testid="message-file-ref"]')).toHaveLength(1)
+    expect(attachments.querySelectorAll('[data-testid="message-image"]')).toHaveLength(1)
+  })
+
+  it('重新测量窗口缩放后的正文高度，保留手动展开状态', async () => {
+    let height = 90
+    const resizeCallbacks: Array<() => void> = []
+    const container = await render(foldFixture([userMessage('u', [{ type: 'text', text: longMessage }], 1)]), (dom) => {
+      mockTextHeight(dom, () => height)
+      vi.stubGlobal('ResizeObserver', class {
+        constructor(callback: ResizeObserverCallback) {
+          resizeCallbacks.push(() => callback([], this as unknown as ResizeObserver))
+        }
+        observe(): void {}
+        disconnect(): void {}
+      })
+    })
+    const text = container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!
+    expect(container.querySelector('[data-testid="user-message-expand"]')).toBeNull()
+    height = 640
+    await act(async () => resizeCallbacks.forEach((callback) => callback()))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="user-message-expand"]')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => toggle.click())
+    expect(text.style.maxHeight).toBe('640px')
+    height = 960
+    await act(async () => resizeCallbacks.forEach((callback) => callback()))
+    expect(text.style.maxHeight).toBe('960px')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    height = 150
+    await act(async () => resizeCallbacks.forEach((callback) => callback()))
+    expect(container.querySelector('[data-testid="user-message-expand"]')).toBeNull()
+    expect(text.style.maxHeight).toBe('150px')
+  })
+
+  it('手动展开时暂停贴底，用户滚回底部后恢复跟随', async () => {
+    let threadHeight = 430
+    const resizeCallbacks: Array<() => void> = []
+    const container = await render(foldFixture([userMessage('u', [{ type: 'text', text: longMessage }], 1)]), (dom) => {
+      Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get() { return this.tagName === 'P' ? 560 : this.dataset.testid === 'thread' ? threadHeight : 0 }
+      })
+      Object.defineProperty(dom.window.HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        get() { return this.dataset.testid === 'thread' ? 480 : 0 }
+      })
+      vi.stubGlobal('ResizeObserver', class {
+        constructor(callback: ResizeObserverCallback) {
+          resizeCallbacks.push(() => callback([], this as unknown as ResizeObserver))
+        }
+        observe(): void {}
+        disconnect(): void {}
+      })
+    })
+    const viewport = container.querySelector<HTMLElement>('[data-testid="thread"]')!
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="user-message-expand"]')!.click())
+    threadHeight = 900
+    await act(async () => resizeCallbacks.forEach((callback) => callback()))
+    expect(viewport.scrollTop).toBe(0)
+    await act(async () => {
+      viewport.scrollTop = threadHeight - viewport.clientHeight
+      viewport.dispatchEvent(new window.Event('scroll'))
+    })
+    threadHeight = 960
+    await act(async () => resizeCallbacks.forEach((callback) => callback()))
+    expect(viewport.scrollTop).toBe(480)
+  })
+
+  it('每条消息独立展开，控制目标不重复', async () => {
+    const container = await render(foldFixture([
+      userMessage('u1', [{ type: 'text', text: longMessage }], 1),
+      userMessage('u2', [{ type: 'text', text: longMessage }], 2)
+    ]), (dom) => mockTextHeight(dom, () => 560))
+    const toggles = container.querySelectorAll<HTMLButtonElement>('[data-testid="user-message-expand"]')
+    expect(toggles).toHaveLength(2)
+    expect(toggles[0]!.getAttribute('aria-controls')).not.toBe(toggles[1]!.getAttribute('aria-controls'))
+    await act(async () => toggles[0]!.click())
+    expect(toggles[0]!.getAttribute('aria-expanded')).toBe('true')
+    expect(toggles[1]!.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('键盘进入正文文件引用时展开，避免聚焦到不可见内容', async () => {
+    const container = await render(foldFixture([
+      userMessage('u', [{ type: 'text', text: `${longMessage}\n看 [a](src/a.ts)` }], 1)
+    ], { workspaceId: 'w' }), (dom) => mockTextHeight(dom, () => 560))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="user-message-expand"]')!
+    const chip = container.querySelector<HTMLButtonElement>('[data-testid="user-message-text"] [data-testid="mention-chip"]')!
+    await act(async () => chip.focus())
+    expect(document.activeElement).toBe(chip)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!.style.maxHeight).toBe('560px')
+  })
+
+  it('编辑时使用全文，取消后重新测量，内容更新后恢复默认折叠', async () => {
+    const onEditMessage = vi.fn(async () => {})
+    const message = userMessage('u', [{ type: 'text', text: longMessage }], 1)
+    let height = 560
+    const container = await render(foldFixture([message], { onEditMessage }),
+      (dom) => mockTextHeight(dom, () => height))
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="user-message-expand"]')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="user-message-edit"]')!.click())
+    expect(container.querySelector<HTMLTextAreaElement>('[data-testid="user-message-editor"]')!.value).toBe(longMessage)
+    height = 740
+    await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '取消')!.click())
+    expect(container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!.style.maxHeight).toBe('740px')
+    expect(container.querySelector('[data-testid="user-message-expand"]')!.getAttribute('aria-expanded')).toBe('true')
+    await rerender!(foldFixture([{ ...message, parts: [{ type: 'text', text: `${longMessage}\n新增内容` }] }], { onEditMessage }))
+    expect(container.querySelector('[data-testid="user-message-expand"]')!.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!.style.maxHeight).toBe('220px')
+    expect(container.querySelector('[data-testid="user-message-text"]')!.textContent).toBe(`${longMessage}\n新增内容`)
   })
 })
 

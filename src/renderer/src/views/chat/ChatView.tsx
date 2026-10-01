@@ -317,6 +317,7 @@ export function ChatView({
     [transcript.runUsage, transcript.usage]
   )
   const { t } = useI18n()
+  const quickWindow = useWindowStore((s) => s.windowKind === 'quick')
   /**
    * 复制按钮旁边的「分支」—— 只把这一轮为止的转录带进一条新会话,再切过去继续聊。
    * 标题沿用当前会话的标题(而不是转录里的用户提问),这样在侧边栏里还能认出
@@ -842,7 +843,7 @@ export function ChatView({
       onSetDefaultMode={(mode) => {
         void updateWorkspace({ id: workspace.id, settings: { defaultMode: mode } }).catch(() => undefined)
       }}
-      onManageModes={() => {
+      onManageModes={quickWindow ? undefined : () => {
         sessionStorage.setItem('next-cowork:extensions-tab', 'modes')
         useWindowStore.getState().openFeature('extensions')
       }}

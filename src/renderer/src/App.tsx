@@ -35,6 +35,15 @@ import { ClientTeamSelectionView } from './views/ClientTeamSelectionView'
 import { ToastViewport } from './components/ui/ToastViewport'
 import { useThemeProfiles } from './stores/themeProfiles'
 
+function sessionRouteFromLocation(): { workspaceId: string; sessionId: string | null } | null {
+  const raw = window.location.hash.match(/^#\/([^/]+)(?:\/([^/]+))?$/)
+  if (raw === null) return null
+  return {
+    workspaceId: decodeURIComponent(raw[1]!),
+    sessionId: raw[2] === undefined ? null : decodeURIComponent(raw[2])
+  }
+}
+
 export default function App(): React.JSX.Element {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
@@ -42,6 +51,8 @@ export default function App(): React.JSX.Element {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [fatal, setFatal] = useState<string | null>(null)
   const [auth, setAuth] = useState<ClientAuthState | null>(null)
+  const quickWindow = useMemo(() => new URLSearchParams(window.location.search).get('window') === 'quick', [])
+  const initialSessionRoute = useMemo(sessionRouteFromLocation, [])
   const hydrate = useWindowStore((s) => s.hydrate)
   const openWorkspace = useWindowStore((s) => s.openWorkspace)
   const openSession = useTabsStore((s) => s.openSession)
@@ -70,6 +81,8 @@ export default function App(): React.JSX.Element {
   useEffect(() => startActiveWorkspaceReporting(), [])
 
   useEffect(() => {
+    // 先写窗口身份，再开始握手，避免 quick 窗口的早到事件按 main 布局落盘。
+    useWindowStore.setState({ windowKind: quickWindow ? 'quick' : 'main' })
     const offSettings = on('settings:changed', setSettings)
     const offTheme = on('theme:changed', ({ resolved }) => setAppearance(resolved))
     const offLibrary = on('theme:libraryChanged', ({ profiles, images }) => {
@@ -88,8 +101,12 @@ export default function App(): React.JSX.Element {
     })
     const offBrowser = onBrowserChanged((change) => {
       // Headless pages intentionally have no workspace tab; their lifecycle is Agent-only.
+      const before = useTabsStore.getState().stateOf(change.workspaceId).tabs
       syncBrowserTabs(change.workspaceId, change.tabs.filter((tab) => tab.backend === 'iab'))
-      if (change.rightPanelOpen === true) setRightPanelForWorkspace(change.workspaceId, true)
+      const addedBrowser = quickWindow && useTabsStore.getState().stateOf(change.workspaceId).tabs.some(
+        (tab) => tab.kind === 'browser' && !before.some((previous) => previous.id === tab.id)
+      )
+      if (change.rightPanelOpen === true && (!quickWindow || addedBrowser)) setRightPanelForWorkspace(change.workspaceId, true)
     })
     /*
       ★ **必须排在 announceReady() 之前。** 主进程在 `window:ready` 的 handler 里
@@ -111,7 +128,7 @@ export default function App(): React.JSX.Element {
     */
     const offPlugins = on('plugins:changed', () => { void usePluginsStore.getState().load() })
 
-    announceReady('main')
+    announceReady(quickWindow ? 'quick' : 'main')
     void getBootstrap()
       .then((b) => {
         setBoot(b)
@@ -141,6 +158,10 @@ export default function App(): React.JSX.Element {
           })
           .catch((error: unknown) => setFatal(error instanceof Error ? error.message : String(error)))
         hydrate(b)
+        // 在工作区激活与首屏挂载之前建立目标会话，避免空布局先改写 hash。
+        if (b.windowKind === 'quick' && initialSessionRoute?.sessionId != null) {
+          useTabsStore.getState().openFocusedSession(initialSessionRoute.workspaceId, initialSessionRoute.sessionId)
+        }
         // ⌘R 重载后主进程里还活着的 run —— 角标要立刻正确,不能等下一个事件
         adoptActiveRuns(b.activeRuns)
         // A background child may outlive its parent run and still needs a
@@ -154,11 +175,11 @@ export default function App(): React.JSX.Element {
           用完即弃),现在是常驻状态 —— 激活哪个 Tab 它就写成什么,见 AppShell
           里那个同步 effect。清掉的话下一帧就被同步回来,中间白闪一次。
         */
-        const raw = window.location.hash.match(/^#\/([^/]+)(?:\/([^/]+))?$/)
-        if (raw !== null) {
-          const workspaceId = decodeURIComponent(raw[1]!)
-          const sessionId = raw[2] === undefined ? null : decodeURIComponent(raw[2])
-          void openWorkspace(workspaceId).then((opened) => { if (opened && sessionId !== null) openSession(workspaceId, sessionId) })
+        if (initialSessionRoute !== null) {
+          const { workspaceId, sessionId } = initialSessionRoute
+          void openWorkspace(workspaceId).then((opened) => {
+            if (opened && sessionId !== null && !quickWindow) openSession(workspaceId, sessionId)
+          })
         }
       })
       .catch((e: unknown) => setFatal(e instanceof Error ? e.message : String(e)))
@@ -175,7 +196,7 @@ export default function App(): React.JSX.Element {
       offClientAuth()
       offPlugins()
     }
-  }, [hydrate, openSession, openWorkspace, setMaximized, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
+  }, [hydrate, initialSessionRoute, openSession, openWorkspace, quickWindow, setMaximized, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
 
   /**
    * ★ **深浅和颜色是两路来的,必须汇到一处再落地。**
@@ -246,13 +267,13 @@ export default function App(): React.JSX.Element {
     return (
       <>
         <WindowControls />
-        <AppSkeleton />
+        <AppSkeleton focusMode={quickWindow} />
       </>
     )
   }
 
   if (auth === null) {
-    return <><WindowControls /><AppSkeleton /></>
+    return <><WindowControls /><AppSkeleton focusMode={quickWindow} /></>
   }
   if (auth.mode === 'undecided') {
     return <><WindowControls /><WelcomeView onComplete={() => { void getClientAuthState().then(setAuth) }} /></>
@@ -267,6 +288,7 @@ export default function App(): React.JSX.Element {
       <AppShell
         settings={settings}
         versions={boot.versions}
+        windowKind={boot.windowKind}
         workspaces={workspaces}
         runningSessionIds={runningSessionIds}
         runningWorkspaceIds={runningWorkspaceIds}

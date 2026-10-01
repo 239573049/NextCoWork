@@ -113,7 +113,7 @@ export function Dialog({
         tabIndex={-1}
         style={{ width }}
         className={cn(
-          'relative flex max-h-full w-full flex-col overflow-hidden bg-surface',
+          'relative flex max-h-full w-full max-w-[calc(100vw-20px)] flex-col overflow-hidden bg-surface',
           'rounded-panel shadow-2xl shadow-black/40 outline-none',
           'transition-[opacity,transform,translate,scale] duration-220 ease-panel motion-reduce:transition-none motion-reduce:transform-none motion-reduce:translate-y-0 motion-reduce:scale-100',
           visible ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-2 scale-[.98] opacity-0'

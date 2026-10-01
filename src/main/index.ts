@@ -66,6 +66,7 @@ import { titleBarOptions, watchMaximized } from './window/title-bar'
 import { applyThemePreference, resolveTheme, setQuitRequester, setSessionWindowOpener } from './ipc/app'
 import { updateService } from './update/update-service'
 import { reconcileScheduler, startScheduler, stopScheduler } from './scheduled/scheduler'
+import type { WindowKind } from '../shared/domain/tab'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 单实例锁 —— 必须在 whenReady 之前。方案 §9:两个实例开同一个 SQLite 文件,
@@ -260,12 +261,16 @@ function browserUrlProtocol(raw: string): string | null {
   }
 }
 
-function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: string }): BrowserWindow {
+function createMainWindow(
+  sessionRoute?: { workspaceId: string; sessionId: string },
+  windowKind: WindowKind = 'main'
+): BrowserWindow {
+  const quickWindow = windowKind === 'quick'
   const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 900,
-    minHeight: 600,
+    width: quickWindow ? 1120 : 1280,
+    height: quickWindow ? 760 : 820,
+    minWidth: quickWindow ? 860 : 900,
+    minHeight: quickWindow ? 560 : 600,
     show: false,
     autoHideMenuBar: true,
     /*
@@ -418,7 +423,7 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
 
   // 先登记再加载:渲染层的 window:ready 一到就要能查到 kind。
   // 登记晚了,markReady 会走 of() 的兜底分支,kind 判断不准。
-  windows.register(win.webContents, 'main')
+  windows.register(win.webContents, windowKind)
 
   // 自绘的最大化/还原按钮要跟着窗口的**真实**状态走 —— 用户也可能拖窗口边缘、
   // 双击 Tab 条、按 Win+↑。挂在 register 之后:push 走的就是 registry。
@@ -433,10 +438,13 @@ function createMainWindow(sessionRoute?: { workspaceId: string; sessionId: strin
   const route = sessionRoute === undefined
     ? undefined
     : `/${encodeURIComponent(sessionRoute.workspaceId)}/${encodeURIComponent(sessionRoute.sessionId)}`
+  const windowQuery = windowKind === 'quick' ? '?window=quick' : ''
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}${route === undefined ? '' : `#${route}`}`)
+    void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}${windowQuery}${route === undefined ? '' : `#${route}`}`)
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'), route === undefined ? undefined : { hash: route })
+    void win.loadFile(join(__dirname, '../renderer/index.html'), route === undefined
+      ? (windowQuery === '' ? undefined : { search: windowQuery })
+      : { search: windowQuery, hash: route })
   }
 
   return win
@@ -801,7 +809,7 @@ void app
     之后 —— 下面登记的那群 handler 全都要库。
   */
   setSessionWindowOpener((workspaceId, sessionId) => {
-    const child = createMainWindow({ workspaceId, sessionId })
+    const child = createMainWindow({ workspaceId, sessionId }, 'quick')
     child.once('ready-to-show', () => child.focus())
   })
   /*
@@ -934,7 +942,7 @@ function showMainWindow(): void {
     拿到的就是插件宿主窗,于是这一下点击把一扇**纯白空窗**推到用户面前,
     而真正要唤回的界面没有出现。注册表里只有主窗与 ⌥Space 快捷窗。
   */
-  const [win] = windows.listWindows()
+  const [win] = windows.listWindows('main')
   if (win) {
     if (win.isMinimized()) win.restore()
     win.show()

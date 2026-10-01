@@ -92,6 +92,59 @@ describe('WindowRegistry.send', () => {
  * (唤回路径以为一扇都没有了);退出时这扇窗也没人关,只能等 6 秒兜底。
  */
 describe('WindowRegistry.listWindows', () => {
+  function registeredWindow(id: number, kind: 'main' | 'quick') {
+    const window = { isDestroyed: () => false, isMinimized: () => false, show: vi.fn(), focus: vi.fn(), restore: vi.fn() }
+    let destroyed = (): void => {}
+    const sender = {
+      ...fakeSender(id, { isDestroyed: () => false, detached: false, send: vi.fn() }),
+      window,
+      once: (_event: string, handler: () => void) => { destroyed = handler }
+    }
+    windows.register(sender as never, kind)
+    return { window, sender, destroy: () => destroyed() }
+  }
+
+  it('唤回主窗口时不会选中更早注册的专注会话窗口', () => {
+    const quick = registeredWindow(20, 'quick')
+    const main = registeredWindow(21, 'main')
+    try {
+      expect(windows.listWindows('quick')).toEqual([quick.window])
+      expect(windows.listWindows('main')).toEqual([main.window])
+      windows.showMainWindow()
+      expect(main.window.show).toHaveBeenCalledOnce()
+      expect(main.window.focus).toHaveBeenCalledOnce()
+      expect(quick.window.show).not.toHaveBeenCalled()
+    } finally {
+      quick.destroy()
+      main.destroy()
+    }
+  })
+
+  it('专注窗口重载后、重新握手之前仍保留 quick 身份', () => {
+    const quick = registeredWindow(22, 'quick')
+    try {
+      windows.forget(quick.sender.id)
+      expect(windows.listWindows('quick')).toEqual([quick.window])
+      expect(windows.listWindows('main')).toEqual([])
+      expect(windows.of(quick.sender as never).kind).toBe('quick')
+      expect(windows.markReady(quick.sender as never, 'quick').kind).toBe('quick')
+      expect(windows.listWindows('quick')).toEqual([quick.window])
+    } finally {
+      quick.destroy()
+    }
+  })
+
+  it('markReady 更新身份时存活窗口的筛选结果同步更新', () => {
+    const quick = registeredWindow(23, 'quick')
+    try {
+      windows.markReady(quick.sender as never, 'main')
+      expect(windows.listWindows('quick')).toEqual([])
+      expect(windows.listWindows('main')).toEqual([quick.window])
+    } finally {
+      quick.destroy()
+    }
+  })
+
   it('★ keeps a reloading window listed after send() forgot its dead frame', () => {
     const window = { isDestroyed: () => false }
     let destroyed = (): void => {}
@@ -114,8 +167,11 @@ describe('WindowRegistry.listWindows', () => {
     expect(windows.hasSubscribers(topic)).toBe(false)
     // 但窗口本身还在,唤回和退出关窗都必须看得见它。
     expect(windows.listWindows()).toEqual([window])
+    expect(windows.listWindows('main')).toEqual([window])
+    expect(windows.listWindows('quick')).toEqual([])
 
     destroyed()
     expect(windows.listWindows()).toEqual([])
+    expect(windows.listWindows('main')).toEqual([])
   })
 })

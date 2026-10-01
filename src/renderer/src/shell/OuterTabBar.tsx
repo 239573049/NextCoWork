@@ -11,20 +11,21 @@
  * `.app-no-drag`**,否则 OS 吞掉 pointer 事件,表现是「Tab 拖不动,整个窗口跟着鼠标跑」。
  * 留给窗口拖动的只有 Tab **之间和右侧**的空白。
  */
-import { Check, ChevronDown, Folder, PanelBottom, PanelRight, Pencil, Pin, PinOff, Plus, Server, X } from "lucide-react";
+import { ChevronDown, Folder, PanelBottom, PanelRight, Pencil, Pin, PinOff, Plus, Server, X } from "lucide-react";
 import { isLocalEnvironment } from '../../../shared/domain/environment';
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { FeatureKind, OuterTab } from "../../../shared/domain/tab";
 import type { Workspace } from "../../../shared/domain/workspace";
 import { ContextMenu, type ContextMenuPosition } from "../components/ui/ContextMenu";
 import { IconButton } from "../components/ui/IconButton";
-import { Menu, MenuItem, MenuSeparator } from "../components/ui/Menu";
+import { Menu, MenuItem } from "../components/ui/Menu";
 import { cn } from "../lib/cn";
 import { FEATURE_ICON } from "./icons";
 import { useDragReorder } from "./useDragReorder";
 import { TabRenameInput } from "./TabRenameInput";
 import { useI18n, type Translate } from "../i18n";
 import { Spinner } from '../components/ui/Spinner'
+import { WorkspacePickerDialog } from './WorkspacePickerDialog'
 
 function featureLabel(t: Translate, feature: FeatureKind): string {
   return t(`view.feature.${feature}` as Parameters<Translate>[0]);
@@ -33,6 +34,8 @@ function featureLabel(t: Translate, feature: FeatureKind): string {
 export function OuterTabBar({
   tabs,
   activeId,
+  activeWorkspaceId,
+  compact = false,
   workspaces,
   runningWorkspaceIds,
   onActivate,
@@ -53,6 +56,10 @@ export function OuterTabBar({
 }: {
   tabs: readonly OuterTab[];
   activeId: string | null;
+  /** 当前工作区，即使当前激活的是功能 Tab 也要让切换弹窗标出它。 */
+  activeWorkspaceId?: string | null;
+  /** 专注会话窗口只展示当前项目，不渲染工作区 Tab 列表与切换入口。 */
+  compact?: boolean;
   workspaces: readonly Workspace[];
   /** 有 run 在跑的工作区 —— Tab 上那个小圆点。数据源是 RunRegistry 聚合,不是任何 UI 状态 */
   runningWorkspaceIds: ReadonlySet<string>;
@@ -71,7 +78,7 @@ export function OuterTabBar({
    */
   onRenameWorkspace?: (workspaceId: string, name: string) => void;
   onOpenWorkspace: (workspaceId: string) => void;
-  /** 「+」菜单里每个工作区行悬停出现的铅笔 —— 打开 `EditWorkspaceDialog`（名称/默认模型/删除）。 */
+  /** 工作区切换弹窗里每个卡片悬停出现的铅笔 —— 打开 `EditWorkspaceDialog`（名称/默认模型/删除）。 */
   onEditWorkspace: (workspaceId: string) => void;
   onPickWorkspace: () => void;
   onCreateWorkspace: () => void;
@@ -94,6 +101,7 @@ export function OuterTabBar({
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
   const [contextMenu, setContextMenu] = useState<{ tabId: string; position: ContextMenuPosition } | null>(null);
   const [hiddenTabIds, setHiddenTabIds] = useState<readonly string[]>([]);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
   const contextTab = contextMenu === null ? undefined : tabs.find((tab) => tab.id === contextMenu.tabId);
 
@@ -138,6 +146,11 @@ export function OuterTabBar({
   /* 编辑态提升到条这一层:同一时刻只有一个 Tab 在改名(同 InnerTabBar) */
   const [editingId, setEditingId] = useState<string | null>(null);
   const canRename = (tab: OuterTab): boolean => onRenameWorkspace !== undefined && tab.kind === "workspace";
+  const compactWorkspace = activeWorkspaceId === null || activeWorkspaceId === undefined
+    ? undefined
+    : workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+  const CompactIcon = compactWorkspace === undefined || isLocalEnvironment(compactWorkspace.environment) ? Folder : Server;
+  const compactLabel = compactWorkspace?.name ?? t("nav.unknownWorkspace");
 
   return (
     /*
@@ -152,6 +165,16 @@ export function OuterTabBar({
       和以前逐像素相同),只有 `self-center` 的那一组挪回真正的条心。
     */
     <div className="flex min-w-0 flex-1 self-stretch items-end gap-0.5">
+      {compact ? (
+        <div
+          className="flex h-[30px] max-w-[55%] min-w-0 items-center gap-2 self-center px-2 text-[13px] text-fg"
+          title={compactWorkspace?.rootPath ?? compactLabel}
+        >
+          <CompactIcon size={13} className="shrink-0 text-icon" />
+          <span className="min-w-0 truncate">{compactLabel}</span>
+        </div>
+      ) : (
+        <>
       {/*
         Keep the + trigger outside the scrollable tab list. Previously it shared the
         same non-wrapping flex row as every tab, so a full strip let the last tab's
@@ -292,87 +315,32 @@ export function OuterTabBar({
         </Menu>
       )}
 
-      <Menu
-        label={t("nav.openWorkspace")}
-        width={300}
-        className="mb-0.5 ml-0.5 shrink-0"
-        trigger={<Plus size={15} />}
-        triggerClassName="flex size-[26px] items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
-      >
-        {(close) => (
-          <>
-            {workspaces.map((w) => {
-              const opened = tabs.some((t) => t.kind === "workspace" && t.ref.workspaceId === w.id);
-              return (
-                /*
-                  需求：每一行要同时容纳「点了就打开」和「悬停出现的编辑按钮」两个
-                  独立的可点区域 —— MenuItem 本身整行就是一个 <button>，装不下第二个
-                  嵌套按钮（无效 HTML，且两个 onClick 会互相抢事件）。所以这里改用
-                  普通 <div> 当布局容器，两个动作各自是 role="menuitem" 的 <button>，
-                  和 OuterTabBar 自己的外层 Tab 行（激活区 + 独立关闭键）同一个模式。
-                */
-                <div
-                  key={w.id}
-                  className="group/wsrow flex items-center gap-1 rounded-[7px] transition-colors hover:bg-tint-strong"
-                >
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      onOpenWorkspace(w.id);
-                      close();
-                    }}
-                    className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[13px] text-fg"
-                  >
-                    <span className="shrink-0 text-accent-soft">
-                      {isLocalEnvironment(w.environment) ? <Folder size={14} /> : <Server size={14} />}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{w.name}</span>
-                      <span className="mt-0.5 block truncate text-[11px] text-fg-faint">{w.rootPath}</span>
-                    </span>
-                    <Check size={14} className={cn("shrink-0 text-accent", !opened && "invisible")} />
-                  </button>
-                  <IconButton
-                    label={t("workspace.edit")}
-                    size={26}
-                    className={cn(
-                      "mr-1 shrink-0 opacity-0 transition-opacity",
-                      "group-hover/wsrow:opacity-100 focus-visible:opacity-100",
-                    )}
-                    onClick={() => {
-                      onEditWorkspace(w.id);
-                      close();
-                    }}
-                  >
-                    <Pencil size={13} />
-                  </IconButton>
-                </div>
-              );
-            })}
-            <MenuSeparator />
-            <MenuItem
-              icon={<Folder size={14} />}
-              onSelect={() => {
-                onPickWorkspace();
-                close();
-              }}
-            >
-              {t("nav.openFolder")}
-            </MenuItem>
-            <MenuItem
-              icon={<Plus size={14} />}
-              onSelect={() => {
-                onCreateWorkspace();
-                close();
-              }}
-            >
-              {t("nav.createWorkspace")}
-            </MenuItem>
-            <MenuItem icon={<Server size={14} />} onSelect={() => { onCreateSshWorkspace(); close(); }}>{t('nav.createSshWorkspace')}</MenuItem>
-          </>
-        )}
-      </Menu>
+      {!compact && (
+        <>
+          <IconButton
+            label={t("nav.openWorkspace")}
+            size={28}
+            className="mb-0.5 ml-0.5 shrink-0"
+            onClick={() => setWorkspacePickerOpen(true)}
+          >
+            <Plus size={15} />
+          </IconButton>
+          <WorkspacePickerDialog
+            open={workspacePickerOpen}
+            onClose={() => setWorkspacePickerOpen(false)}
+            workspaces={workspaces}
+            tabs={tabs}
+            activeWorkspaceId={activeWorkspaceId}
+            onOpenWorkspace={onOpenWorkspace}
+            onEditWorkspace={onEditWorkspace}
+            onPickWorkspace={onPickWorkspace}
+            onCreateWorkspace={onCreateWorkspace}
+            onCreateSshWorkspace={onCreateSshWorkspace}
+          />
+        </>
+      )}
+        </>
+      )}
 
       {/* ★ 这块弹性空白是**故意**留给窗口拖动的 —— 整条 Tab 区唯一没有 no-drag 的地方 */}
       <div className="h-[30px] min-w-6 flex-1" />

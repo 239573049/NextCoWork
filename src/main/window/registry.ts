@@ -57,12 +57,12 @@ class WindowRegistry {
    * 但「这扇窗还在不在」不能拿它来答:重载的那一瞬间会答成「一扇都没有」,
    * 于是点 Dock 又开出一扇一模一样的新窗、退出时这扇窗没人关只能等 6 秒兜底。
    */
-  private readonly liveWindows = new Map<number, WebContents>()
+  private readonly liveWindows = new Map<number, WindowContext>()
 
   register(sender: WebContents, kind: WindowKind): WindowContext {
     const ctx: WindowContext = { id: sender.id, kind, sender }
     this.windows.set(sender.id, ctx)
-    this.liveWindows.set(sender.id, sender)
+    this.liveWindows.set(sender.id, ctx)
     // 窗口销毁时把它从所有 topic 里摘掉,否则 topics 会无限增长,
     // 且每次 emit 都要对着一堆死 webContents 做 isDestroyed 判断
     if (!this.destroyHooked.has(sender)) {
@@ -87,7 +87,7 @@ class WindowRegistry {
 
   /** handler 里拿到 event.sender 后换成上下文;未注册的一律当主窗 */
   of(sender: WebContents): WindowContext {
-    return this.windows.get(sender.id) ?? this.register(sender, 'main')
+    return this.windows.get(sender.id) ?? this.register(sender, this.liveWindows.get(sender.id)?.kind ?? 'main')
   }
 
   forget(id: number): void {
@@ -201,7 +201,7 @@ class WindowRegistry {
    * 而要唤回的界面根本没出现。`listWindows()` 只有主窗与 ⌥Space 快捷窗,且已滤掉已销毁的。
    */
   showMainWindow(): void {
-    const [win] = this.listWindows()
+    const [win] = this.listWindows('main')
     if (win === undefined) return
     if (win.isMinimized()) win.restore()
     win.show()
@@ -287,10 +287,12 @@ class WindowRegistry {
    * `fromWebContents` 可能返回 null(窗口刚销毁、上下文还留着),所以逐个判,
    * 不假设一定拿得到。
    */
-  listWindows(): BrowserWindow[] {
+  listWindows(kind?: WindowKind): BrowserWindow[] {
     const found: BrowserWindow[] = []
-    for (const sender of this.liveWindows.values()) {
+    for (const context of this.liveWindows.values()) {
+      const { sender } = context
       if (sender.isDestroyed()) continue
+      if (kind !== undefined && context.kind !== kind) continue
       const win = BrowserWindow.fromWebContents(sender)
       if (win !== null && !win.isDestroyed()) found.push(win)
     }

@@ -1267,13 +1267,15 @@ export function Composer({
               >
                 {t('composer.mode.setDefault')}
               </ComposerMenuItem>
-              <ComposerMenuItem
-                icon={<Settings2 size={16} />}
-                description={t('composer.mode.manageHint')}
-                onSelect={() => { close(); onManageModes?.(); }}
-              >
-                {t('composer.mode.manage')}
-              </ComposerMenuItem>
+              {onManageModes !== undefined && (
+                <ComposerMenuItem
+                  icon={<Settings2 size={16} />}
+                  description={t('composer.mode.manageHint')}
+                  onSelect={() => { close(); onManageModes(); }}
+                >
+                  {t('composer.mode.manage')}
+                </ComposerMenuItem>
+              )}
             </>
           )}
         </Menu>

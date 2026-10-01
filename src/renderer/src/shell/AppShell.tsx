@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Bootstrap } from "../../../shared/domain/bootstrap";
 import type { AppSettings } from "../../../shared/domain/settings";
 import type { Workspace } from "../../../shared/domain/workspace";
+import type { WindowKind } from "../../../shared/domain/tab";
 import type { SessionListItem } from "../../../shared/domain/session";
 import type { ClientAuthState } from "../../../shared/domain/client-auth";
 import { IconButton } from "../components/ui/IconButton";
@@ -80,6 +81,7 @@ const PANEL_MS = 280;
 export function AppShell({
   settings,
   versions,
+  windowKind,
   workspaces,
   runningSessionIds,
   runningWorkspaceIds,
@@ -88,6 +90,7 @@ export function AppShell({
   settings: AppSettings;
   /** 「关于」页那四个版本号。来自 bootstrap,不是 preload 的 `versions()` */
   versions: Bootstrap["versions"];
+  windowKind: WindowKind;
   workspaces: readonly Workspace[];
   /** 来自 RunRegistry 的聚合,不是任何 UI 状态(方案 §8) */
   runningSessionIds: ReadonlySet<string>;
@@ -108,6 +111,7 @@ export function AppShell({
     rewardsOpen,
   } = useWindowStore();
   const win = useWindowStore();
+  const quickWindow = windowKind === 'quick';
   useEffect(() => onScheduledChanged((event) => {
     if (event.kind === 'run' && (event.status === 'success' || event.status === 'error' || event.status === 'skipped') && useWindowStore.getState().activeStandaloneFeature !== 'scheduled') useWindowStore.setState({ scheduledUnread: true })
   }), []);
@@ -267,7 +271,7 @@ export function AppShell({
   }, [activeWorkspaceId]);
 
   // 工作区一露面就保证它至少有一个对话 Tab —— 空的内层 Tab 条没有任何可做的事。
-  // 依赖取的是 action 而不是整个 `tabs`:后者每次写入都换新引用,而 ensure 本身会写。
+  // 专注窗口已由 App 建立目标会话；缺少会话路由时 ensure 只补临时草稿。
   useEffect(() => {
     if (activeWorkspaceId !== null) ensureTabs(activeWorkspaceId);
   }, [activeWorkspaceId, ensureTabs]);
@@ -293,28 +297,25 @@ export function AppShell({
     于是插件既顶不掉一条同名命令,也抢不走一个已经被内置占着的组合键。
   */
   const pluginCommands = usePluginCommands();
-  const commands = useMemo<Command[]>(
-    () =>
-      mergeCommands(
-        [
-          {
-            id: "builtin.openSettings",
-            titleKey: "feature.settings",
-            icon: "settings",
-            accelerator: openSettingsShortcut,
-            run: openSettings
-          },
-          {
-            id: "builtin.search",
-            titleKey: "nav.search",
-            icon: "search",
-            run: () => setSearchOpen(true)
-          }
-        ],
-        pluginCommands
-      ),
-    [openSettings, openSettingsShortcut, pluginCommands]
-  );
+  const commands = useMemo<Command[]>(() => {
+    const builtin: Command[] = [];
+    if (!quickWindow) {
+      builtin.push({
+        id: "builtin.openSettings",
+        titleKey: "feature.settings",
+        icon: "settings",
+        accelerator: openSettingsShortcut,
+        run: openSettings
+      });
+    }
+    builtin.push({
+      id: "builtin.search",
+      titleKey: "nav.search",
+      icon: "search",
+      run: () => setSearchOpen(true)
+    });
+    return mergeCommands(builtin, quickWindow ? [] : pluginCommands);
+  }, [openSettings, openSettingsShortcut, pluginCommands, quickWindow]);
   useCommandShortcuts(commands);
 
   const inner =
@@ -382,7 +383,8 @@ export function AppShell({
     if (t !== undefined) currentTabs.activate(target, t.id);
     else {
       const item = sessionItems.find((x) => x.id === sessionId);
-      currentTabs.openSession(target, sessionId, item?.title);
+      if (quickWindow && currentTabs.stateOf(target).tabs.length === 0) currentTabs.openFocusedSession(target, sessionId, item?.title);
+      else currentTabs.openSession(target, sessionId, item?.title);
     }
   };
 
@@ -457,11 +459,12 @@ export function AppShell({
           className={cn(
             "flex shrink-0 overflow-hidden rounded-panel",
             "transition-[width,margin-right] duration-280 ease-panel",
-            sidebar.shown ? "mr-2 w-[297px]" : "mr-0 w-0",
+            sidebar.shown ? (quickWindow ? "mr-2 w-[240px]" : "mr-2 w-[297px]") : "mr-0 w-0",
           )}
         >
           <Sidebar
             auth={auth}
+            focusMode={quickWindow}
             workspace={workspace ?? null}
             chatTabs={inner?.tabs.filter((t) => t.kind === "chat") ?? []}
             sessions={sessionItems}
@@ -570,6 +573,8 @@ export function AppShell({
               <OuterTabBar
                 tabs={outer}
                 activeId={activeOuterId}
+                activeWorkspaceId={activeWorkspaceId}
+                compact={quickWindow}
                 workspaces={workspaces}
                 runningWorkspaceIds={runningWorkspaceIds}
                 onActivate={win.activate}
@@ -586,7 +591,7 @@ export function AppShell({
                 bottomPanelOpen={bottomPanelOpen}
                 onToggleRightPanel={() => toggleDockEdge('right')}
                 onToggleBottomPanel={() => toggleDockEdge('bottom')}
-                updateIndicator={<UpdateIndicator />}
+                updateIndicator={quickWindow ? undefined : <UpdateIndicator />}
               />
             </div>
 
@@ -615,7 +620,7 @@ export function AppShell({
         (那几页换掉的是 34px 的 Tab 条,不是窗口底边)。
         一格都没有时它自己不渲染,见 `shell/StatusBar.tsx`。
       */}
-      <StatusBar />
+      {!quickWindow && <StatusBar />}
       {createSshOpen && <CreateSshWorkspaceDialog hidden={settingsPage !== null} onClose={() => setCreateSshOpen(false)} onCreated={async (created) => {
         const state = useWindowStore.getState();
         state.updateWorkspaces([...Object.values(state.workspaceTargets).filter((item) => item.id !== created.id), created]);

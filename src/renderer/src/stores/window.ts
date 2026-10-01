@@ -253,6 +253,8 @@ export const useWindowStore = create<WindowState>((set, get) => {
   /** 每次结构性变更都落盘。主进程侧防抖 500ms,这里不用自己攒。 */
   const persist = (outer: OuterTab[], activeOuterId: string | null): void => {
     const { windowKind, rightPanelWidth, bottomPanelHeight } = get()
+    // 专注会话窗口只承载一次打开的工作区，不把临时布局写回窗口级状态。
+    if (windowKind === 'quick') return
     persistOuterTabs(windowKind, {
       outer,
       activeOuterId,
@@ -305,11 +307,14 @@ export const useWindowStore = create<WindowState>((set, get) => {
         好让这个已经退役的值还能写在这儿。
       */
       const NON_TAB_FEATURES: readonly string[] = ['settings', 'browser', 'extensions', 'scheduled', 'git', 'skills']
-      const persisted = b.tabState.outer.filter(
+      const quickWindow = b.windowKind === 'quick'
+      const persisted = quickWindow ? [] : b.tabState.outer.filter(
         (t) => !(t.kind === 'feature' && NON_TAB_FEATURES.includes(t.ref.feature))
       )
       const orderedPersisted = orderOuterTabs(persisted)
-      const outer = orderedPersisted.length > 0 ? orderedPersisted : initialTabs(b.workspaces)
+      const outer = quickWindow
+        ? []
+        : (orderedPersisted.length > 0 ? orderedPersisted : initialTabs(b.workspaces))
       const requestedActiveId = b.tabState.activeOuterId
       const desiredActiveId = outer.some((tab) => tab.id === requestedActiveId)
         ? requestedActiveId
@@ -318,7 +323,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
       const waitForRemote = desiredTab?.kind === 'workspace' && needsPrepare(desiredTab.ref.workspaceId)
       const activeOuterId = waitForRemote
         ? outer.find((tab) => tab.kind === 'workspace' && !needsPrepare(tab.ref.workspaceId))?.id ?? null : desiredActiveId
-      const workspaceId = firstWorkspaceId(outer, activeOuterId)
+      const workspaceId = quickWindow ? null : firstWorkspaceId(outer, activeOuterId)
       set({
         windowKind: b.windowKind,
         appVersion: b.versions.app,
@@ -365,6 +370,8 @@ export const useWindowStore = create<WindowState>((set, get) => {
     },
 
     async openWorkspace(workspaceId) {
+      const { windowKind, activeWorkspaceId } = get()
+      if (windowKind === 'quick' && activeWorkspaceId !== null && workspaceId !== activeWorkspaceId) return false
       const existing = get().outer.find((t) => t.kind === 'workspace' && t.ref.workspaceId === workspaceId)
       if (existing !== undefined) {
         return get().activate(existing.id)
@@ -394,6 +401,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
     },
 
     openFeature(feature) {
+      if (get().windowKind === 'quick') return
       cancelPending()
       // 设置是模态浮层,不是 Tab —— 改道,不建 Tab、不落盘(见 hydrate 里的过滤)
       if (feature === 'settings') {

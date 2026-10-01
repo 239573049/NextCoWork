@@ -50,11 +50,16 @@ export function PluginMarket(): ReactNode {
   const market = usePluginsStore((state) => state.market)
   const loading = usePluginsStore((state) => state.marketLoading)
   const marketError = usePluginsStore((state) => state.marketError)
+  const marketPage = usePluginsStore((state) => state.marketPage)
+  const marketHasNext = usePluginsStore((state) => state.marketHasNext)
   const loadMarket = usePluginsStore((state) => state.loadMarket)
   const installProgress = usePluginsStore((state) => state.installProgress)
   const installError = usePluginsStore((state) => state.installError)
   const catalog = usePluginsStore((state) => state.catalog)
   const [query, setQuery] = useState('')
+  const loadPage = (page: number): void => {
+    void loadMarket({ q: query, page })
+  }
   /*
     ★ 存**整条**而不是 slug。存 slug 的话,一次「刷新」把某个条目从列表里换掉,
     弹窗会当场变空 —— 而用户正在读的就是那一屏。列表是可变的,他手上这一份不是。
@@ -73,7 +78,7 @@ export function PluginMarket(): ReactNode {
           placeholder={t('plugins.marketSearch')}
           ariaLabel={t('plugins.marketSearch')}
         />
-        <Button size="sm" disabled={loading} onClick={() => { void loadMarket({ q: query }) }}>
+        <Button size="sm" disabled={loading} onClick={() => { loadPage(1) }}>
           {t('common.refresh')}
         </Button>
       </div>
@@ -121,6 +126,18 @@ export function PluginMarket(): ReactNode {
               />
             ))}
           </div>
+        </div>
+      )}
+
+      {marketError === null && (marketPage > 1 || marketHasNext) && (
+        <div className="mt-3 flex shrink-0 items-center justify-center gap-3 border-t border-hairline pt-3">
+          <Button size="sm" disabled={loading || marketPage <= 1} onClick={() => { loadPage(marketPage - 1) }}>
+            {t('plugins.marketPreviousPage')}
+          </Button>
+          <span className="text-[12px] text-fg-muted tabular-nums">{t('plugins.marketPage', { page: marketPage })}</span>
+          <Button size="sm" disabled={loading || !marketHasNext} onClick={() => { loadPage(marketPage + 1) }}>
+            {t('plugins.marketNextPage')}
+          </Button>
         </div>
       )}
 

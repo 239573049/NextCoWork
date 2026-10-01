@@ -9,8 +9,8 @@
  * 之后都会多出一个空白的用户气泡 —— 而它长得完全像一个 bug,查起来却要
  * 一路翻到消息模型才明白。
  */
-import { memo, useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { CheckCircle2, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
+import { memo, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
@@ -131,6 +131,8 @@ export const Thread = memo(function Thread({
   const viewport = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const followBottom = useRef(true)
+  // 手动展开是在读这条提问，不应被内容长高触发的贴底滚动带到消息末尾。
+  const pauseFollowing = (): void => { followBottom.current = false }
   /**
    * 上一次**我们自己**把 scrollTop 写到的位置;`-1` = 没有待确认的程序化滚动。
    * 一次程序化写入最多派发一个 scroll 事件,认领掉就把它清空。
@@ -256,12 +258,12 @@ export const Thread = memo(function Thread({
             if (extractionTriggerId !== undefined && row.message.id === extractionTriggerId) {
               return (
                 <div key={row.key} className="flex flex-col gap-2.5">
-                  <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
+                  <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
                   {skillExtractionSourceId !== undefined && <SkillExtractionBanner sourceSessionId={skillExtractionSourceId} />}
                 </div>
               )
             }
-            return <UserBubble key={row.key} message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} />
+            return <UserBubble key={row.key} message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
           }
           if (row.kind === 'plan-receipt') {
             // 工作区未知就没法把计划正文读出来 —— 无正文的卡片只剩一句状态,
@@ -599,6 +601,8 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
   )
 }
 
+const USER_MESSAGE_COLLAPSED_HEIGHT = 220
+
 /**
  * 用户气泡。
  *
@@ -610,10 +614,11 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
  * 发送侧 `partsOf` 把文本放在最前；展示时文字仍在上方气泡，图片和
  * 文件引用在气泡下方独立成卡片。这样只发图的消息也不会消失。
  */
-function UserBubble({ message, workspaceId, onEdit, disabled }: {
+function UserBubble({ message, workspaceId, onEdit, disabled, onExpand }: {
   message: AgentMessage
   onEdit?: (id: string, text: string, continueRun: boolean) => Promise<void>
   disabled: boolean
+  onExpand: () => void
   /**
    * 点开正文或下方卡片里的文件引用要用的工作区。**缺省就不画按钮** —— 只读的子代理面板
    * 拿不到它(`ChatView` 的只读分支不传 `workspaceId`),而画一枚点了没反应的
@@ -629,6 +634,28 @@ function UserBubble({ message, workspaceId, onEdit, disabled }: {
     .map((p) => p.text)
     .join('')
     .trim()
+  const textId = useId()
+  const textRef = useRef<HTMLParagraphElement>(null)
+  const [textHeight, setTextHeight] = useState(0)
+  const [expanded, setExpanded] = useState(false)
+  useLayoutEffect(() => {
+    const element = textRef.current
+    if (element === null) return
+    const measure = (): void => setTextHeight(element.scrollHeight)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [editing, text])
+  useLayoutEffect(() => {
+    setExpanded(false)
+  }, [text])
+  const canExpand = textHeight > USER_MESSAGE_COLLAPSED_HEIGHT + 1
+  const textMaxHeight = expanded && textHeight > 0 ? textHeight : USER_MESSAGE_COLLAPSED_HEIGHT
+  const expandMessage = (): void => {
+    onExpand()
+    setExpanded(true)
+  }
   const images = message.parts.filter(
     (p): p is Extract<ContentPart, { type: 'image' }> => p.type === 'image'
   )
@@ -703,9 +730,48 @@ function UserBubble({ message, workspaceId, onEdit, disabled }: {
               (`MentionInput`)本来就带 `break-words`,这里不带的话,同一段文字在
               草稿里好好的、一发出去就断头 —— 又是那种「像是发错了」的错觉。
             */}
-            <p className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
-              <MentionText text={text} onOpen={openReference} />
-            </p>
+            <div className="relative">
+              <div
+                id={textId}
+                data-testid="user-message-text"
+                // 只折叠视觉高度，保留文字选择与读屏；键盘进入引用时展开，避免焦点落到裁切区。
+                onFocusCapture={() => { if (canExpand && !expanded) expandMessage() }}
+                className="overflow-clip transition-[max-height] duration-280 ease-panel motion-reduce:transition-none"
+                style={{ maxHeight: `${textMaxHeight}px` }}
+              >
+                <p ref={textRef} className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
+                  <MentionText text={text} onOpen={openReference} />
+                </p>
+              </div>
+              {canExpand && (
+                <div
+                  data-testid="user-message-fade"
+                  aria-hidden="true"
+                  className={cn(
+                    'pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-tint to-transparent transition-opacity duration-200 ease-panel motion-reduce:transition-none',
+                    expanded ? 'opacity-0' : 'opacity-100'
+                  )}
+                />
+              )}
+            </div>
+            {canExpand && (
+              <button
+                type="button"
+                data-testid="user-message-expand"
+                aria-expanded={expanded}
+                aria-controls={textId}
+                aria-label={t(expanded ? 'chat.message.collapse' : 'chat.message.expand')}
+                onClick={() => { if (expanded) setExpanded(false); else expandMessage() }}
+                className="mt-1 flex w-full cursor-pointer items-center justify-end gap-1 rounded-[5px] px-1.5 py-0.5 text-[11.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              >
+                <span>{t(expanded ? 'chat.message.collapse' : 'chat.message.expand')}</span>
+                <ChevronDown
+                  size={13}
+                  aria-hidden="true"
+                  className={cn('transition-transform duration-200 ease-panel motion-reduce:transition-none', expanded && 'rotate-180')}
+                />
+              </button>
+            )}
           </div>
         )}
         {(fileRefs.length > 0 || images.length > 0) && (

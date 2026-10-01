@@ -20,7 +20,7 @@
  * 当成侧边栏量了 —— 浮层盖住了扫描线,量到的是它内部的分栏。
  */
 import { Archive, Check, Copy, ExternalLink, Link, MessageSquarePlus, Pin, Search, Settings, SquarePen, Trash2, Pencil, ListChecks, Sparkles } from 'lucide-react'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { type FeatureKind, type InnerTab } from '../../../shared/domain/tab'
 import type { Workspace } from '../../../shared/domain/workspace'
 import type { SessionListItem } from '../../../shared/domain/session'
@@ -53,6 +53,7 @@ const NAV_FEATURES: readonly FeatureKind[] = ['scheduled', 'browser', 'git', 'ex
 
 export function Sidebar({
   workspace,
+  focusMode = false,
   chatTabs,
   sessions,
   activeFeature,
@@ -70,6 +71,8 @@ export function Sidebar({
 }: {
   /** 当前工作区。null = 一个都没打开(下半整体降级为空态) */
   workspace: Workspace | null
+  /** quick 窗口只保留当前项目的会话入口，隐藏全局导航与账户入口。 */
+  focusMode?: boolean
   /** 当前工作区里已打开的对话 Tab —— 步骤 6 接上 SQLite 后换成真正的历史会话表 */
   chatTabs: readonly InnerTab[]
   /** 数据库中的全部会话；未打开的历史会话也应出现在侧边栏。 */
@@ -110,7 +113,7 @@ export function Sidebar({
   // 主题预览各加一层。订阅取字段不取整份 store(§9)。
   const appVersion = useWindowStore((state) => state.appVersion)
   return (
-    <aside className="flex w-[297px] shrink-0 flex-col overflow-hidden rounded-panel bg-surface">
+    <aside className={cn('flex shrink-0 flex-col overflow-hidden rounded-panel bg-surface', focusMode ? 'w-[240px]' : 'w-[297px]')}>
       {/*
         macOS hiddenInset 把红绿灯放在窗口左上角,而侧边栏面板正好在那里 ——
         `pl-[74px]` 是给它们让出来的位置,不是随手写的边距。**所以它只给 macOS**:
@@ -144,36 +147,34 @@ export function Sidebar({
         </IconButton>
       </div>
 
-      {/*
-        版本号靠到品牌行**右端**、和字标同一行 —— 它要回答的是「我现在装的是哪一版」,
-        报 bug 时不用先翻设置。单独占一行会在 logo 下面多出一条 22px 的空行
-        (导航、卡片、账户那一整列的纵向节奏全被顶下去),而它本来就只有五个字符宽。
+      {!focusMode && (
+        <>
+          {/*
+            版本号靠到品牌行**右端**、和字标同一行 —— 它要回答的是「我现在装的是哪一版」,
+            报 bug 时不用先翻设置。单独占一行会在 logo 下面多出一条 22px 的空行
+            (导航、卡片、账户那一整列的纵向节奏全被顶下去),而它本来就只有五个字符宽。
+          */}
+          <div className="flex items-center gap-2 px-4 pt-1 pb-4 text-fg">
+            <Mark />
+            <span className="font-brand text-[15px] font-bold tracking-tight">NextCoWork</span>
+            {appVersion !== '' && (
+              <span className="ml-auto font-mono text-[11px] text-fg-faint">
+                <span className="sr-only">{t('sidebar.version')}</span>v{appVersion}
+              </span>
+            )}
+          </div>
+        </>
+      )}
 
-        `ml-auto` 把它推到最右,字号比字标小一档、颜色降一级(`fg-faint`),
-        所以读起来是品牌行的附属信息,不是第二个标题。
-
-        ★ **版本号是数据,不是文案**,所以不进 i18n 表(§6 的「不翻译领域值」)。
-        它和 `v` 前缀合成一个不可见分隔的整串,屏幕阅读器读出来是
-        「NextCoWork 版本 2.2.5」,而不是把 `v` 和数字拆成两截。
-        `appVersion` 为空串时这一颗不渲染 —— 骨架屏 / 主题预览早于 bootstrap 都不会
-        留下一个孤零零的「v」。
-      */}
-      <div className="flex items-center gap-2 px-4 pt-1 pb-4 text-fg">
-        <Mark />
-        <span className="font-brand text-[15px] font-bold tracking-tight">NextCoWork</span>
-        {appVersion !== '' && (
-          <span className="ml-auto font-mono text-[11px] text-fg-faint">
-            <span className="sr-only">{t('sidebar.version')}</span>v{appVersion}
-          </span>
-        )}
-      </div>
-
-      {/* ── 上半:全局 ──
-        五个入口各自占一行、撑满宽度,文字常驻可见,纵向堆叠。 */}
-      <nav className="flex flex-col gap-1.5 px-2.5">
+      {/* 专注窗口只保留当前项目的会话动作；主窗口继续展示完整全局导航。 */}
+      <nav className={cn('flex gap-1.5 px-2.5', focusMode ? 'items-center pt-2' : 'flex-col')}>
         <NavItem icon={<SquarePen size={16} />} label={t('nav.newChat')} onClick={onNewChat} />
-        <NavItem icon={<Search size={16} />} label={t('nav.search')} onClick={onSearch} />
-        {NAV_FEATURES.map((f) => {
+        {focusMode ? (
+          <IconButton label={t('nav.search')} size={32} onClick={onSearch} className="shrink-0">
+            <Search size={16} />
+          </IconButton>
+        ) : <NavItem icon={<Search size={16} />} label={t('nav.search')} onClick={onSearch} />}
+        {!focusMode && NAV_FEATURES.map((f) => {
           const Icon = FEATURE_ICON[f]
           return (
             <NavItem
@@ -190,13 +191,7 @@ export function Sidebar({
             />
           )
         })}
-        {/*
-          插件带进来的网页应用(`contributes.webApps`)。
-          ★ 排在内置入口**之后**,同菜单贡献的 clamp 规则(`mergeMenuItems`):
-          装十个插件也不该把「浏览器」挤下去。
-          ★ 失败要说出来 —— 这是个即发即忘的点击,不接的话「点了没反应」没有任何线索。
-        */}
-        {pluginEntries.map((entry) => {
+        {!focusMode && pluginEntries.map((entry) => {
           const Icon = MENU_ICON[entry.icon]
           return (
             <NavItem
@@ -226,11 +221,12 @@ export function Sidebar({
             <Section
               title={t('workspace.recentChats')}
               defaultOpen
-              action={
+              revealSessionId={focusMode && sessions.some((session) => !session.archived && session.id === activeSessionId) ? activeSessionId : null}
+              action={focusMode ? undefined : (
                 <IconButton label={t('nav.newChat')} size={22} onClick={onNewChat}>
                   <SquarePen size={13} />
                 </IconButton>
-              }
+              )}
             >
               {sessions.filter((s) => !s.archived).length === 0 &&
               chatTabs.every((tab) => tab.kind !== 'chat' || sessions.some((s) => s.id === tab.ref.sessionId && s.archived)) ? (
@@ -239,6 +235,7 @@ export function Sidebar({
                 <ul className="flex flex-col gap-0.5 pb-1">
                   <SessionGroupList
                     workspaceId={workspace.id}
+                    focusMode={focusMode}
                     sessions={sessions}
                     chatTabs={chatTabs}
                     activeSessionId={activeSessionId}
@@ -252,7 +249,8 @@ export function Sidebar({
               )}
             </Section>
 
-            <Section title={t('workspace.archived')} defaultOpen={false}>
+            <Section title={t('workspace.archived')} defaultOpen={false}
+              revealSessionId={focusMode && sessions.some((session) => session.archived && session.id === activeSessionId) ? activeSessionId : null}>
               {sessions.filter((s) => s.archived).length === 0 ? (
                 <EmptyState title={t('workspace.noArchived')} className="py-6" />
               ) : (
@@ -261,6 +259,7 @@ export function Sidebar({
                     <ArchivedSessionItem
                       key={s.id}
                       session={s}
+                      active={focusMode && s.id === activeSessionId}
                       workspaceId={workspace.id}
                       runningSessionIds={runningSessionIds}
                       onSelectSession={onSelectSession}
@@ -287,12 +286,14 @@ export function Sidebar({
         触发器、右半是齿轮,两块各自有焦点与 hover —— 原来那段规避重复触发的
         `closest('button')` 判断随之取消,因为它防的就是这个形状。
       */}
-      <div className="mx-1.5 mb-1.5 flex shrink-0 items-center gap-1">
-        <AccountMenu auth={auth} onOpenSettings={onOpenSettings} />
-        <IconButton label={t('common.settings')} onClick={() => onOpenSettings()}>
-          <Settings size={15} />
-        </IconButton>
-      </div>
+      {!focusMode && (
+        <div className="mx-1.5 mb-1.5 flex shrink-0 items-center gap-1">
+          <AccountMenu auth={auth} onOpenSettings={onOpenSettings} />
+          <IconButton label={t('common.settings')} onClick={() => onOpenSettings()}>
+            <Settings size={15} />
+          </IconButton>
+        </div>
+      )}
     </aside>
   )
 }
@@ -351,6 +352,7 @@ type SidebarI18n = Translate
  */
 function SessionGroupList({
   workspaceId,
+  focusMode,
   sessions,
   chatTabs,
   activeSessionId,
@@ -361,6 +363,7 @@ function SessionGroupList({
   t
 }: {
   workspaceId: string
+  focusMode: boolean
   sessions: readonly SessionListItem[]
   chatTabs: readonly InnerTab[]
   activeSessionId: string | null
@@ -429,6 +432,7 @@ function SessionGroupList({
             key={`${workspaceId}:${group.key}`}
             title={group.title}
             defaultOpen={group.defaultOpen}
+            revealActive={focusMode && items.some((session) => session.id === activeSessionId)}
             items={items}
             chatTabs={chatTabs}
             activeSessionId={activeSessionId}
@@ -455,6 +459,7 @@ function SessionGroupList({
 function SessionGroupBlock({
   title,
   defaultOpen,
+  revealActive = false,
   items,
   chatTabs,
   activeSessionId,
@@ -476,6 +481,7 @@ function SessionGroupBlock({
    * (发了一条消息、改了条会话)不会把它又打回收起态。
    */
   defaultOpen: boolean
+  revealActive?: boolean
   items: readonly SessionListItem[]
   chatTabs: readonly InnerTab[]
   activeSessionId: string | null
@@ -491,7 +497,10 @@ function SessionGroupBlock({
   onToggleMultiSelect: () => void
   workspaceId: string
 }): ReactNode {
-  const [open, setOpen] = useState(defaultOpen)
+  const [open, setOpen] = useState(defaultOpen || revealActive)
+  useEffect(() => {
+    if (revealActive) setOpen(true)
+  }, [activeSessionId, revealActive])
   const [menu, setMenu] = useState<{ session: SessionListItem; position: ContextMenuPosition } | null>(null)
   const [dialog, setDialog] = useState<{ kind: 'rename'; session: SessionListItem } | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
@@ -669,6 +678,7 @@ function MenuAction({ icon, label, danger = false, onSelect }: { icon: ReactNode
  */
 function ArchivedSessionItem({
   session,
+  active = false,
   workspaceId,
   runningSessionIds,
   onSelectSession,
@@ -677,6 +687,7 @@ function ArchivedSessionItem({
   t
 }: {
   session: SessionListItem
+  active?: boolean
   workspaceId: string
   /** 和 SessionGroupBlock 同一份运行中集合 —— 归档会话也可能挂着正在跑的 run。 */
   runningSessionIds: ReadonlySet<string>
@@ -703,7 +714,9 @@ function ArchivedSessionItem({
           event.preventDefault()
           setMenu({ x: event.clientX, y: event.clientY })
         }}
-        className="flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
+        aria-current={active ? 'page' : undefined}
+        className={cn('flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
+          active ? 'bg-canvas text-fg' : 'text-fg-muted hover:bg-tint-hover hover:text-fg')}
       >
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
         {session.favorited && <span className="shrink-0 text-accent">★</span>}
@@ -771,7 +784,8 @@ function Section({
   title,
   children,
   action,
-  defaultOpen
+  defaultOpen,
+  revealSessionId = null
 }: {
   title: string
   children: ReactNode
@@ -783,8 +797,12 @@ function Section({
    */
   action?: ReactNode
   defaultOpen: boolean
+  revealSessionId?: string | null
 }): ReactNode {
-  const [open, setOpen] = useState(defaultOpen)
+  const [open, setOpen] = useState(defaultOpen || revealSessionId !== null)
+  useEffect(() => {
+    if (revealSessionId !== null) setOpen(true)
+  }, [revealSessionId])
   return (
     <section className="shrink-0 overflow-hidden rounded-card bg-surface-raised">
       <div className="flex items-center gap-2 px-2.5 py-2">
