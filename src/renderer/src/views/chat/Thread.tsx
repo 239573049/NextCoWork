@@ -9,7 +9,7 @@
  * 之后都会多出一个空白的用户气泡 —— 而它长得完全像一个 bug,查起来却要
  * 一路翻到消息模型才明白。
  */
-import { memo, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
@@ -44,8 +44,9 @@ import { CompactionDivider } from './CompactionDivider'
 import { SkillExtractionBanner } from './SkillExtractionBanner'
 import { GoalStatusCard } from './GoalStatusCard'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
-import { assistantSegments, assistantText, isAssistantTextBlock, isPinnedToolBlock, lastTurnIndex, promptOf, threadRows, type AssistantBlock, type ThreadRow } from './thread-content'
-import { threadTurnGroups, turnNavigationItems } from './turn-navigation'
+import { assistantSegments, assistantText, isAssistantTextBlock, isPinnedToolBlock, lastTurnIndex, liveTailRow, promptOf, threadHistoryRows, type AssistantBlock, type ThreadHistory, type ThreadRow } from './thread-content'
+import { threadTurnGroups, turnNavigationItems, type ThreadTurnGroup } from './turn-navigation'
+import { TranscriptTablesProvider, useTranscriptSubagents, useTranscriptTools } from './thread-tables'
 import { TurnNavigationRail } from './TurnNavigationRail'
 import { TurnActions, type TurnPrompt } from './TurnActions'
 import { TurnChangeReview } from './TurnChangeReview'
@@ -65,12 +66,15 @@ export const Thread = memo(function Thread({
   contextLimits,
   reportOptions,
   onEditMessage,
-  onDeleteTurn,
+  onDeleteReply,
   onBranchTurn,
   workspaceId,
   onOpenPlan,
   onExecutePlan,
   skillExtractionSourceId,
+  historyHasMore = false,
+  loadingEarlier = false,
+  onLoadEarlier,
   readOnly = false
 }: {
   sessionId?: string
@@ -78,6 +82,13 @@ export const Thread = memo(function Thread({
   runId: string | null
   lastSeq: number
   queued: number
+  /**
+   * 手上这页之前库里还有更早的消息(转录只读最近的一页,见 `HISTORY_PAGE_SIZE`)。
+   * 给了 `onLoadEarlier` 才画「加载更早的消息」,滚到顶也会自动取下一页。
+   */
+  historyHasMore?: boolean
+  loadingEarlier?: boolean
+  onLoadEarlier?: () => void
   /**
    * **别人的会话,只能看**(右侧的子代理面板)。关掉一切会写回去的东西:
    * 逐轮的重跑/删除/编辑、审批面板、后台任务中心里那颗「处理」。
@@ -99,8 +110,10 @@ export const Thread = memo(function Thread({
    */
   reportOptions?: SendOptions
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
-  /** 删除一整轮问答。传入的是引出该轮的 user 消息 id。 */
-  onDeleteTurn?: (userMessageId: string) => Promise<void>
+  /**
+   * 删除一条助手回复,**引出它的提问留着**。传入的是这一行的消息跨度(`ThreadRow.span`)。
+   */
+  onDeleteReply?: (fromId: string, toId: string) => Promise<void>
   /** 从这一轮分支出一条新会话。传入的同样是引出该轮的 user 消息 id。 */
   onBranchTurn?: (userMessageId: string) => Promise<void>
   workspaceId?: string
@@ -125,7 +138,7 @@ export const Thread = memo(function Thread({
   model: string | undefined
 }): ReactNode {
   const { t } = useI18n()
-  const { messages, live, tools, subagents, error, usage, runModel } = transcript
+  const { messages, live, error, usage, runModel } = transcript
   const running = runId !== null
   const visible = messages.filter((m) => !m.internal && !isToolResultOnly(m))
   const viewport = useRef<HTMLDivElement>(null)
@@ -142,30 +155,61 @@ export const Thread = memo(function Thread({
   const lastSeen = useRef({ top: 0, height: 0 })
   const needsReply = live.length === 0 && visible.at(-1)?.role !== 'assistant'
 
+  /*
+    ★ `follow` 只在**挂载时**需要(下面那个 ResizeObserver 的 effect 依赖是 [])。
+    提成 useCallback 是为了给那两条 effect 一个明明白白的空依赖表 —— 写成内联函数
+    再让依赖表写 [] 会留下一条 eslint 看着像 bug、读代码的人要逐个变量核对的生命周期漏洞。
+  */
+  const follow = useCallback((): void => {
+    const scroller = viewport.current
+    if (scroller === null) return
+    if (followBottom.current) {
+      const bottom = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+      // 已经在底就**不写**。写了也不会派发 scroll 事件,却会留下一个永远等不到
+      // 确认的 token —— 而那个 token 会把用户「滚回底部」的那一下吃掉。
+      if (scroller.scrollTop !== bottom) {
+        scroller.scrollTop = bottom
+        selfScrolled.current = scroller.scrollTop
+      }
+    }
+    lastSeen.current = { top: scroller.scrollTop, height: scroller.scrollHeight }
+  }, [])
+
+  /*
+    需求:往前接一页时,正在看的那段不许跳走。
+    ★ 滚动容器是 `overflow-anchor: none`(贴底跟随要自己管),浏览器不会替我们锚定,
+    所以记下「离底多远」,新的一页接到上面之后按同样的离底距离放回去。
+  */
+  const prependAnchor = useRef<number | null>(null)
+  const firstMessageId = messages[0]?.id
+  useLayoutEffect(() => {
+    const scroller = viewport.current
+    const distance = prependAnchor.current
+    if (scroller === null || distance === null || loadingEarlier) return
+    prependAnchor.current = null
+    scroller.scrollTop = Math.max(0, scroller.scrollHeight - distance)
+    selfScrolled.current = scroller.scrollTop
+    lastSeen.current = { top: scroller.scrollTop, height: scroller.scrollHeight }
+  }, [firstMessageId, loadingEarlier])
+  const loadEarlier = useCallback((): void => {
+    if (onLoadEarlier === undefined || !historyHasMore || loadingEarlier) return
+    const scroller = viewport.current
+    if (scroller !== null) prependAnchor.current = scroller.scrollHeight - scroller.scrollTop
+    onLoadEarlier()
+  }, [historyHasMore, loadingEarlier, onLoadEarlier])
+
   // Follow growing replies and newly arriving interactions only while the user
   // is near the bottom. Reading older messages must not trigger a forced jump.
   useEffect(() => {
     const scroller = viewport.current
     const body = content.current
     if (scroller === null || body === null) return
-    const follow = (): void => {
-      if (followBottom.current) {
-        const bottom = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
-        // 已经在底就**不写**。写了也不会派发 scroll 事件,却会留下一个永远等不到
-        // 确认的 token —— 而那个 token 会把用户「滚回底部」的那一下吃掉。
-        if (scroller.scrollTop !== bottom) {
-          scroller.scrollTop = bottom
-          selfScrolled.current = scroller.scrollTop
-        }
-      }
-      lastSeen.current = { top: scroller.scrollTop, height: scroller.scrollHeight }
-    }
     const observer = new ResizeObserver(follow)
     observer.observe(body)
     observer.observe(scroller)
     follow()
     return () => observer.disconnect()
-  }, [])
+  }, [follow])
 
   const feedback = (
     <div className="flex flex-col gap-2.5" data-testid="assistant-feedback">
@@ -185,21 +229,55 @@ export const Thread = memo(function Thread({
     </div>
   )
 
-  const rows = threadRows(messages, live, running, transcript.messageRuns)
+  /*
+    ★★ **历史与 live 分开算 —— 这是长会话每 token 不重扫全部历史的关键。**
+
+    `threadHistoryRows` 只读 `messages` / `messageRuns`,所以它被 `useMemo` 锁在
+    「历史变了」这一档上;流式期间每来一个 token 变的只有 `live`,历史行数组
+    **引用不变**。下游 `threadTurnGroups`、以及那些按行 memo 的 `<HistoryRow>`
+    因此一个都不重算 —— 以前是每个 token 重新分组、重算导航预览、逐轮 diff。
+
+    ★ 佣金不能省过头:`live` 一变,`liveTailRow` 仍然要按原来的规则决定「顶上
+    末尾那个空回合」还是「另起一行」,提交前后 key 一个字节不变(有用例钉着)。
+  */
+  const history = useMemo<ThreadHistory>(() => threadHistoryRows(messages, transcript.messageRuns), [messages, transcript.messageRuns])
+  const rows = useMemo<ThreadRow[]>(() => live.length === 0 ? history.rows : (() => {
+    const tail = liveTailRow(history, live, running)
+    return tail.replaced ? [...history.rows.slice(0, -1), tail.row] : [...history.rows, tail.row]
+  })(), [history, live, running])
   /*
     需求:提炼说明卡要贴在**触发消息下方**(用户的阅读顺序:一句话 → 这条会话
     在干什么),不是钉在视图顶部。定位用转录第一条消息的 id —— 它就是触发语;
     那一轮被删掉时卡片跟着消失,不额外做防御。
   */
   const extractionTriggerId = skillExtractionSourceId === undefined ? undefined : messages[0]?.id
-  const turns = threadTurnGroups(rows)
-  const navigationItems = turnNavigationItems(turns, t('chat.navigation.untitled'))
-  /*
-    ★ **不能是「最后一个元素」。** 手动压缩的分隔线就落在整段末尾,那时
-    `rows.at(-1)` 是那条线 —— 按下标比的话没有任何一行算末轮,
-    `feedback` 整块不渲染,而且全程不报错。
-  */
   const lastTurn = lastTurnIndex(rows)
+  /*
+    ★★ **只重建最后一个回合。** 历史行的分组是纯函数(`threadTurnGroups`),只依赖
+    `history.rows`;流式每来一个 token,唯一会变的只有末尾那一顿(要么顶掉历史
+    末尾那个空回合,要么追加一行)。所以历史分组 memo 一次,尾部那一组在这一层
+    按同一套规则改写 —— 其余几个回合对象**引用不变**,`ThreadTurn` 的 memo 才不会
+    被一个 token 全部打掉。
+
+    对照组是直接 `threadTurnGroups(rows)`:`rows` 每 token 换一次身份,于是一千
+    个历史回合的分组、以及每轮的导航预览一起重算。
+  */
+  const historyTurns = useMemo(() => threadTurnGroups(history.rows), [history])
+  const turns = useMemo<ThreadTurnGroup[]>(() => {
+    if (live.length === 0) return historyTurns
+    const tail = liveTailRow(history, live, running)
+    const last = historyTurns.at(-1)
+    if (last === undefined) return threadTurnGroups([tail.row])
+    const lastRows = tail.replaced
+      ? [...last.rows.slice(0, -1), { row: tail.row, index: last.rows.at(-1)?.index ?? 0 }]
+      : [...last.rows, { row: tail.row, index: (last.rows.at(-1)?.index ?? -1) + 1 }]
+    return [...historyTurns.slice(0, -1), { ...last, rows: lastRows }]
+  }, [historyTurns, history, live, running])
+  /*
+    ★ 导航刻度里每个已有回合的预览是**按组对象缓存**的(见 `turn-navigation.ts`),
+    所以这里每 token 只为一个组真正重算。
+  */
+  const navigationItems = useMemo(() => turnNavigationItems(turns, t('chat.navigation.untitled')), [turns, t])
   return (
     <div className="relative min-h-0 flex-1">
     <div ref={viewport} className="scroll-thin fade-top h-full min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]" data-testid="thread"
@@ -234,116 +312,303 @@ export const Thread = memo(function Thread({
           followBottom.current = height - top - el.clientHeight < 80
         }
         lastSeen.current = { top, height }
+        // 用户自己滚到了顶:接上更早的一页(程序化滚动不触发)
+        if (top < 40 && followBottom.current === false) loadEarlier()
       }}>
       <div ref={content} className={cn('mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6', navigationItems.length > 1 && 'pl-10')}>
+        {historyHasMore && onLoadEarlier !== undefined && (
+          <button
+            type="button"
+            onClick={loadEarlier}
+            disabled={loadingEarlier}
+            data-testid="load-earlier"
+            className="self-center rounded-pill px-3 py-1 text-[12px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg disabled:opacity-60"
+          >
+            {loadingEarlier ? t('chat.loadingEarlier') : t('chat.loadEarlier')}
+          </button>
+        )}
         {/*
           需求:消息里那张 TodoWrite 卡片要标出「这次更新改了什么」,而上一份清单只有
           整条转录能回答。provider 挂在这里(而不是把 `messages` 一路传进卡片)是因为
           它只被一个渲染器用到 —— 见 `todo-history.tsx` 文件头。
         */}
         <TodoHistoryProvider messages={messages}>
-        {turns.map((turn) => (
-          <section
-            key={turn.key}
-            data-turn-navigation-id={turn.navigationId}
-            className="flex flex-col gap-5"
-          >
-          {turn.rows.map(({ row, index }) => {
-          const isLast = index === lastTurn
-          if (row.kind === 'divider') {
-            return <CompactionDivider key={row.key} boundary={row.boundary} foldedCount={row.foldedCount} />
-          }
-          if (row.kind === 'user') {
-            // 提炼触发语下面挂说明卡;其余 user 消息照旧。
-            if (extractionTriggerId !== undefined && row.message.id === extractionTriggerId) {
-              return (
-                <div key={row.key} className="flex flex-col gap-2.5">
-                  <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
-                  {skillExtractionSourceId !== undefined && <SkillExtractionBanner sourceSessionId={skillExtractionSourceId} />}
-                </div>
-              )
-            }
-            return <UserBubble key={row.key} message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
-          }
-          if (row.kind === 'plan-receipt') {
-            // 工作区未知就没法把计划正文读出来 —— 无正文的卡片只剩一句状态,
-            // 不如不占这个位置。
-            if (workspaceId === undefined) return null
-            return <ResolvedPlanCard key={row.key} workspaceId={workspaceId} receipt={row.receipt} onOpenPlan={onOpenPlan} />
-          }
-          if (row.kind === 'subagent-report') {
-            /*
-              ★ 卡片状态按 `callId` 查 —— 汇报行自己只带摘要,而「是哪个子代理、
-              能不能点开完整记录」都在 `subagents` 里。查不到(老转录)就退化成
-              一行没有子代理名的通用文案,仍然比整条消息不存在强。
-            */
-            return <SubagentReportRow key={row.key} summary={row.summary} state={subagents[row.callId]} />
-          }
+        <TranscriptTablesProvider tools={transcript.tools} subagents={transcript.subagents}>
+        {turns.map((turn) => {
+          /**
+           * ★ 判据是「本组**含**末轮那一行」,不是「本组最后一行是末轮」——
+           * 手动压缩的线就落在末轮之后,那时本组最后一行是分隔线,而要挂
+           * 状态行/反馈的仍是上面那个助手回合(见 `lastTurnIndex` 的注释)。
+           */
+          const isLast = turn.rows.some((entry) => entry.index === lastTurn)
+          /*
+            ★★ **只有最后一轮拿到会变的那几样。** 历史回合的 props 在流式期间
+            一个都不变,`ThreadTurn` 的 memo 才不会因为某个只在末轮才有意义的
+            ReactNode(feedback)在每 token 新建而失效 —— 那正是「一千个历史回合
+            跟着一个 token 一起 reconcile」的成因。
+          */
+          const last = isLast
+            ? {
+                model,
+                status: transcript.status,
+                runStartedAt: transcript.runStartedAt,
+                runEndedAt: transcript.runEndedAt,
+                liveUsage: runId === null ? usage : undefined,
+                feedback
+              }
+            : undefined
           return (
-            <AssistantTurn
-              key={row.key}
-              blocks={row.blocks}
-              tools={tools}
-              subagents={subagents}
-              /*
-                ★ **按行各取各的,别名版。** 只有最后一行才对得上 `ChatView` 传下来的
-                `model`(那是最新一次发送时的选择,存在渲染进程内存里,没跑完也知道 ——
-                不必等回包);更早的历史轮次必须查 `transcript.runModel`,否则会像
-                修复前那样,所有历史行一起显示"最新一轮"选的模型。
-              */
-              model={turnModel(row, isLast ? model : undefined, runModel)}
-              providerName={providerName}
-              runStatus={isLast ? transcript.status : undefined}
-              /*
-                ★ **run 级的起止只属于最后一轮。** `transcript.runStartedAt` 说的是
-                「当前(或刚结束的)那一次 run」,历史回合与它无关。以前无条件优先于
-                `row.startedAt` 也看不出问题 —— 用时只在 RunProcessBlock 里显示,
-                而那个块只对末轮渲染。一旦把用时铺到每一轮,满屏回合就会显示同一个数字。
-                更早的回合只能用自己那段「提问 → 收尾发言」的时间差。
-              */
-              runStartedAt={isLast ? transcript.runStartedAt ?? row.startedAt : row.startedAt}
-              runEndedAt={isLast ? transcript.runEndedAt ?? row.endedAt : row.endedAt}
-              feedback={isLast ? feedback : undefined}
-              // 助手回合永远紧跟在引出它的提问之后 —— threadRows 会把连续的模型
-              // 回复并成一行,所以前一行要么是那条提问,要么(开局补的空回合)什么都没有。
-              // 中间可能夹着一条压缩分隔线,`promptOf` 会跳过去。
-              prompt={promptOf(rows, index)}
-              isLast={isLast}
+            <ThreadTurn
+              key={turn.key}
+              group={turn}
+              lastTurnIndex={lastTurn}
               running={running}
-              /*
-                ★ **两个来源,按轮次各取各的。** `transcript.usage` 是**当前**这一次
-                run 流式累加出来的,只对最后一轮成立 —— 挂到每一轮上就是把同一个
-                数字重复报四遍。更早的回合查 `runUsage`:那是从 `usage_records`
-                聚合回来的落盘账,每个 run 一份,所以逐轮显示是准的。
-
-                ★ 顺带这也是「重启后用量消失」的修法:内存里那份随进程一起没了,
-                查表这条路不受重启影响。老对话(第 12 条迁移之前)的消息没有 run
-                归属,`row.runId` 是 undefined,照旧不显示 —— 宁可不显示,
-                也不按时间窗去猜它属于哪个 run。
-              */
-              usage={turnUsage(row, isLast && runId === null ? usage : undefined, transcript.runUsage)}
-              onRegenerate={readOnly || onEditMessage === undefined
-                ? undefined
-                : (id, text) => onEditMessage(id, text, true)}
-              onDeleteTurn={readOnly ? undefined : onDeleteTurn}
-              onBranchTurn={readOnly ? undefined : onBranchTurn}
               readOnly={readOnly}
-              runId={row.runId}
-              workspaceId={workspaceId}
-              sessionId={sessionId}
+              {...(workspaceId === undefined ? {} : { workspaceId })}
+              {...(sessionId === undefined ? {} : { sessionId })}
+              {...(extractionTriggerId === undefined ? {} : { extractionTriggerId })}
+              {...(skillExtractionSourceId === undefined ? {} : { skillExtractionSourceId })}
+              providerName={providerName}
+              runModel={runModel}
+              runUsage={transcript.runUsage}
+              {...(onEditMessage === undefined ? {} : { onEditMessage })}
+              {...(onDeleteReply === undefined ? {} : { onDeleteReply })}
+              {...(onBranchTurn === undefined ? {} : { onBranchTurn })}
+              {...(onOpenPlan === undefined ? {} : { onOpenPlan })}
+              pauseFollowing={pauseFollowing}
+              {...(last === undefined ? {} : { last })}
             />
           )
-          })}
-          </section>
-        ))}
+        })}
+        </TranscriptTablesProvider>
         </TodoHistoryProvider>
       </div>
     </div>
     <TurnNavigationRail items={navigationItems} viewportRef={viewport} contentRef={content} />
-    <SubagentTaskCenter sessionId={sessionId} subagents={subagents} readOnly={readOnly} reportOptions={reportOptions} />
+    <SubagentTaskCenter sessionId={sessionId} subagents={transcript.subagents} readOnly={readOnly} reportOptions={reportOptions} />
     </div>
   )
 })
+
+/**
+ * 只属于**末轮**、会随流式变化的那几样。
+ *
+ * ★ 这个对象只在最后一轮构造。历史回合拿到的 `last` 是 `undefined`,所以
+ * 它们那份 props 在流式期间**逐字段引用稳定**,memo 才有意义。
+ */
+interface LastTurnLive {
+  model: string | undefined
+  status: TranscriptState['status']
+  runStartedAt?: number
+  runEndedAt?: number
+  liveUsage: TranscriptState['usage']
+  feedback: ReactNode
+}
+
+/**
+ * 一整轮 —— 一个 `<section>` 加上它下面那几行。
+ *
+ * ★ memo 的价值全看 props 稳不稳,所以这里刻意**不接收 `rows` / `blocks` 数组
+ * 以外会每帧变化的东西**:两张会话级表走 context 取(见 `thread-tables.tsx`),
+ * 末轮那几样收进一个只在末轮构造的 `last`,回调由上层 `useCallback` 锁住。
+ */
+const ThreadTurn = memo(function ThreadTurn({
+  group,
+  lastTurnIndex,
+  running,
+  readOnly,
+  ...rest
+}: {
+  group: ThreadTurnGroup
+  /** 末轮那一行的**全局**下标;末轮不一定是本组最后一行(末尾可能挂着压缩线)。 */
+  lastTurnIndex: number
+  running: boolean
+  readOnly: boolean
+  workspaceId?: string
+  sessionId?: string
+  extractionTriggerId?: string
+  skillExtractionSourceId?: string
+  providerName: string | undefined
+  runModel: TranscriptState['runModel']
+  runUsage: TranscriptState['runUsage']
+  onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
+  onDeleteReply?: (fromId: string, toId: string) => Promise<void>
+  onBranchTurn?: (userMessageId: string) => Promise<void>
+  onOpenPlan?: (path: string) => void
+  pauseFollowing: () => void
+  last?: LastTurnLive
+}): ReactNode {
+  const { workspaceId, sessionId, extractionTriggerId, skillExtractionSourceId, providerName, runModel, runUsage, onEditMessage, onDeleteReply, onBranchTurn, onOpenPlan, pauseFollowing, last } = rest
+  const subagents = useTranscriptSubagents()
+  // 一次算出本组的行序列,免得逐行 `promptOf` 各自重建一份
+  const rows = group.rows.map((entry) => entry.row)
+  return (
+    <section data-turn-navigation-id={group.navigationId} className="flex flex-col gap-5">
+      {group.rows.map(({ row, index }, position) => (
+        <HistoryRow
+          key={row.key}
+          row={row}
+          prompt={row.kind === 'assistant' ? promptOf(rows, position) : undefined}
+          isLast={index === lastTurnIndex}
+          running={running}
+          readOnly={readOnly}
+          {...(workspaceId === undefined ? {} : { workspaceId })}
+          {...(sessionId === undefined ? {} : { sessionId })}
+          {...(extractionTriggerId === undefined ? {} : { extractionTriggerId })}
+          {...(skillExtractionSourceId === undefined ? {} : { skillExtractionSourceId })}
+          {...(providerName === undefined ? {} : { providerName })}
+          {...(runModel === undefined ? {} : { runModel })}
+          {...(runUsage === undefined ? {} : { runUsage })}
+          {...(onEditMessage === undefined ? {} : { onEditMessage })}
+          {...(onDeleteReply === undefined ? {} : { onDeleteReply })}
+          {...(onBranchTurn === undefined ? {} : { onBranchTurn })}
+          {...(onOpenPlan === undefined ? {} : { onOpenPlan })}
+          pauseFollowing={pauseFollowing}
+          {...(index === lastTurnIndex && last !== undefined ? { last } : {})}
+          subagentState={row.kind === 'subagent-report' ? subagents[row.callId] : undefined}
+        />
+      ))}
+    </section>
+  )
+})
+
+/** 一行 —— 四种行各自的分支,和拆分之前逐字一致。 */
+const HistoryRow = memo(function HistoryRow({
+  row,
+  prompt,
+  isLast,
+  running,
+  readOnly,
+  workspaceId,
+  sessionId,
+  extractionTriggerId,
+  skillExtractionSourceId,
+  providerName,
+  runModel,
+  runUsage,
+  onEditMessage,
+  onDeleteReply,
+  onBranchTurn,
+  onOpenPlan,
+  pauseFollowing,
+  last,
+  subagentState
+}: {
+  row: ThreadRow
+  prompt?: TurnPrompt
+  isLast: boolean
+  running: boolean
+  readOnly: boolean
+  workspaceId?: string
+  sessionId?: string
+  extractionTriggerId?: string
+  skillExtractionSourceId?: string
+  providerName?: string
+  runModel?: TranscriptState['runModel']
+  runUsage?: TranscriptState['runUsage']
+  onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
+  onDeleteReply?: (fromId: string, toId: string) => Promise<void>
+  onBranchTurn?: (userMessageId: string) => Promise<void>
+  onOpenPlan?: (path: string) => void
+  pauseFollowing: () => void
+  last?: LastTurnLive
+  subagentState?: SubagentState
+}): ReactNode {
+  if (row.kind === 'divider') {
+    return <CompactionDivider boundary={row.boundary} foldedCount={row.foldedCount} />
+  }
+  if (row.kind === 'user') {
+    // 提炼触发语下面挂说明卡;其余 user 消息照旧。
+    if (extractionTriggerId !== undefined && row.message.id === extractionTriggerId) {
+      return (
+        <div className="flex flex-col gap-2.5">
+          <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
+          {skillExtractionSourceId !== undefined && <SkillExtractionBanner sourceSessionId={skillExtractionSourceId} />}
+        </div>
+      )
+    }
+    return <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
+  }
+  if (row.kind === 'plan-receipt') {
+    // 工作区未知就没法把计划正文读出来 —— 无正文的卡片只剩一句状态,
+    // 不如不占这个位置。
+    if (workspaceId === undefined) return null
+    return <ResolvedPlanCard workspaceId={workspaceId} receipt={row.receipt} onOpenPlan={onOpenPlan} />
+  }
+  if (row.kind === 'subagent-report') {
+    /*
+      ★ 卡片状态按 `callId` 查 —— 汇报行自己只带摘要,而「是哪个子代理、
+      能不能点开完整记录」都在 `subagents` 里。查不到(老转录)就退化成
+      一行没有子代理名的通用文案,仍然比整条消息不存在强。
+    */
+    return <SubagentReportRow summary={row.summary} state={subagentState} />
+  }
+  return (
+    <AssistantTurn
+      blocks={row.blocks}
+      /*
+        ★ **按行各取各的,别名版。** 只有最后一行才对得上 `ChatView` 传下来的
+        `model`(那是最新一次发送时的选择,存在渲染进程内存里,没跑完也知道 ——
+        不必等回包);更早的历史轮次必须查 `transcript.runModel`,否则会像
+        修复前那样,所有历史行一起显示"最新一轮"选的模型。
+      */
+      model={turnModel(row, last?.model, runModel)}
+      providerName={providerName}
+      runStatus={isLast ? last?.status : undefined}
+      /*
+        ★ **run 级的起止只属于最后一轮。** `transcript.runStartedAt` 说的是
+        「当前(或刚结束的)那一次 run」,历史回合与它无关。以前无条件优先于
+        `row.startedAt` 也看不出问题 —— 用时只在 RunProcessBlock 里显示,
+        而那个块只对末轮渲染。一旦把用时铺到每一轮,满屏回合就会显示同一个数字。
+        更早的回合只能用自己那段「提问 → 收尾发言」的时间差。
+      */
+      runStartedAt={isLast ? last?.runStartedAt ?? row.startedAt : row.startedAt}
+      runEndedAt={isLast ? last?.runEndedAt ?? row.endedAt : row.endedAt}
+      feedback={isLast ? last?.feedback : undefined}
+      // 助手回合永远紧跟在引出它的提问之后 —— threadRows 会把连续的模型
+      // 回复并成一行,所以前一行要么是那条提问,要么(开局补的空回合)什么都没有。
+      // 中间可能夹着一条压缩分隔线,`promptOf` 会跳过去。
+      prompt={prompt}
+      isLast={isLast}
+      running={running}
+      /*
+        ★ **两个来源,按轮次各取各的。** `transcript.usage` 是**当前**这一次
+        run 流式累加出来的,只对最后一轮成立 —— 挂到每一轮上就是把同一个
+        数字重复报四遍。更早的回合查 `runUsage`:那是从 `usage_records`
+        聚合回来的落盘账,每个 run 一份,所以逐轮显示是准的。
+
+        ★ 顺带这也是「重启后用量消失」的修法:内存里那份随进程一起没了,
+        查表这条路不受重启影响。老对话(第 12 条迁移之前)的消息没有 run
+        归属,`row.runId` 是 undefined,照旧不显示 —— 宁可不显示,
+        也不按时间窗去猜它属于哪个 run。
+      */
+      usage={turnUsage(row, isLast ? last?.liveUsage : undefined, runUsage)}
+      onRegenerate={readOnly || onEditMessage === undefined
+        ? undefined
+        : (id, text) => onEditMessage(id, text, true)}
+      onDeleteReply={readOnly ? undefined : onDeleteReply}
+      span={row.span}
+      onBranchTurn={readOnly ? undefined : onBranchTurn}
+      readOnly={readOnly}
+      runId={row.runId}
+      workspaceId={workspaceId}
+      sessionId={sessionId}
+    />
+  )
+})
+
+/**
+ * 计划卡片里画的那一截。卡片是 220px 高的裁切盒,看得见的只有开头 —— 把一份几千行的计划
+ * 整段渲染成 Markdown 再藏掉,只是白占 DOM;全文由「打开完整计划」去看。
+ * 在行边界切,免得切在一个代码块或表格的半截。
+ */
+const PLAN_EXCERPT_CHARS = 3_000
+
+function planExcerpt(content: string): string {
+  if (content.length <= PLAN_EXCERPT_CHARS) return content
+  const cut = content.lastIndexOf('\n', PLAN_EXCERPT_CHARS)
+  return content.slice(0, cut > 0 ? cut : PLAN_EXCERPT_CHARS)
+}
 
 function ResolvedPlanCard({ workspaceId, receipt, onOpenPlan }: {
   workspaceId: string
@@ -383,7 +648,7 @@ function ResolvedPlanCard({ workspaceId, receipt, onOpenPlan }: {
     </div>
     <button type="button" onClick={() => onOpenPlan?.(receipt.path)} aria-label={t('agent.interaction.openPlan')}
       className="group relative block h-[220px] w-full overflow-hidden rounded-lg border border-border bg-app p-3 text-left hover:border-accent/50">
-      {content === '' ? <span className="text-[12px] text-fg-faint">{receipt.path}</span> : <AgentMarkdown content={content} />}
+      {content === '' ? <span className="text-[12px] text-fg-faint">{receipt.path}</span> : <AgentMarkdown content={planExcerpt(content)} />}
       <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-app to-transparent" />
       <span className="absolute right-2 bottom-2 rounded-pill bg-surface-raised px-2 py-1 text-[11px] text-fg-muted shadow-sm group-hover:text-fg">
         {t('agent.interaction.openFullPlan')}
@@ -602,6 +867,12 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
 }
 
 const USER_MESSAGE_COLLAPSED_HEIGHT = 220
+/**
+ * 收起时最多画这么多字。220px 的裁切盒里本来就只看得见开头那几行 ——
+ * 一段贴进来的几万字日志整段铺进 DOM、再用 max-height 藏掉,只是白占内存。
+ * 展开时才画全文。
+ */
+const USER_MESSAGE_PREVIEW_CHARS = 2_000
 
 /**
  * 用户气泡。
@@ -650,7 +921,9 @@ function UserBubble({ message, workspaceId, onEdit, disabled, onExpand }: {
   useLayoutEffect(() => {
     setExpanded(false)
   }, [text])
-  const canExpand = textHeight > USER_MESSAGE_COLLAPSED_HEIGHT + 1
+  const clipped = !expanded && text.length > USER_MESSAGE_PREVIEW_CHARS
+  const shownText = clipped ? text.slice(0, USER_MESSAGE_PREVIEW_CHARS) : text
+  const canExpand = textHeight > USER_MESSAGE_COLLAPSED_HEIGHT + 1 || text.length > USER_MESSAGE_PREVIEW_CHARS
   const textMaxHeight = expanded && textHeight > 0 ? textHeight : USER_MESSAGE_COLLAPSED_HEIGHT
   const expandMessage = (): void => {
     onExpand()
@@ -740,7 +1013,7 @@ function UserBubble({ message, workspaceId, onEdit, disabled, onExpand }: {
                 style={{ maxHeight: `${textMaxHeight}px` }}
               >
                 <p ref={textRef} className="selectable text-[13.5px] leading-relaxed break-words whitespace-pre-wrap text-fg">
-                  <MentionText text={text} onOpen={openReference} />
+                  <MentionText text={shownText} onOpen={openReference} />
                 </p>
               </div>
               {canExpand && (
@@ -838,8 +1111,6 @@ function TurnHeader({
 
 function AssistantTurn({
   blocks,
-  tools,
-  subagents,
   model,
   providerName,
   runStatus,
@@ -851,7 +1122,8 @@ function AssistantTurn({
   running,
   usage,
   onRegenerate,
-  onDeleteTurn,
+  onDeleteReply,
+  span,
   onBranchTurn,
   readOnly,
   runId,
@@ -859,8 +1131,6 @@ function AssistantTurn({
   sessionId
 }: {
   blocks: readonly AssistantBlock[]
-  tools: TranscriptState['tools']
-  subagents: TranscriptState['subagents']
   model: string | undefined
   providerName: string | undefined
   runStatus: TranscriptState['status'] | undefined
@@ -872,7 +1142,9 @@ function AssistantTurn({
   running: boolean
   usage?: ReactNode
   onRegenerate?: (id: string, text: string) => Promise<void>
-  onDeleteTurn?: (userMessageId: string) => Promise<void>
+  onDeleteReply?: (fromId: string, toId: string) => Promise<void>
+  /** 这一行已落盘的消息跨度;没有(纯流式 / 开局补的空回合)就没有可删的东西。 */
+  span: { from: string; to: string } | undefined
   onBranchTurn?: (userMessageId: string) => Promise<void>
   readOnly: boolean
   /** 这一轮的顶层 runId,用来拉「本轮改动集」；老转录(v12 前)为 undefined。 */
@@ -881,9 +1153,16 @@ function AssistantTurn({
   sessionId?: string
 }): ReactNode {
   const { t } = useI18n()
+  // ★ 两张会话级表从 context 取:prop 下去的话,每个历史回合的 memo 都会被
+  //   它们每一次身份变化打掉(见 `thread-tables.tsx`)。
+  const tools = useTranscriptTools()
+  const subagents = useTranscriptSubagents()
   const [lastKnownStatus, setLastKnownStatus] = useState(runStatus ?? 'done')
   if (runStatus !== undefined && runStatus !== lastKnownStatus) setLastKnownStatus(runStatus)
-  const segments = assistantSegments(blocks, t('chat.tool.name'), subagents)
+  // ★ `segments` 只在积木本身或两张表变时重算 —— 这一句才是「每 token 不重扫
+  //   历史回合」落到实处的地方:历史回合的 `blocks` 引用是稳定的,所以一个 token
+  //   也不会把它们的段重新切一遍。
+  const segments = useMemo(() => assistantSegments(blocks, t('chat.tool.name'), subagents), [blocks, subagents, t])
   const lastProcessIndex = segments.reduce((last, segment, index) => segment.kind === 'process' ? index : last, -1)
   const processSegments = lastProcessIndex < 0 ? [] : segments.slice(0, lastProcessIndex + 1)
   const trailingSegments = lastProcessIndex < 0 ? segments : segments.slice(lastProcessIndex + 1)
@@ -1014,7 +1293,7 @@ function AssistantTurn({
           durationMs={durationMs}
           usage={usage}
           onRegenerate={onRegenerate}
-          onDelete={onDeleteTurn}
+          onDelete={onDeleteReply === undefined || span === undefined ? undefined : () => onDeleteReply(span.from, span.to)}
           onBranch={onBranchTurn}
         />
       )}

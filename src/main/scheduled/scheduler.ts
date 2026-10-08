@@ -12,6 +12,7 @@ import { toAgentError } from '../ipc/errors'
 let timer: NodeJS.Timeout | null = null
 let stopped = true
 const runningTasks = new Set<string>()
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 function emit(kind: 'task' | 'run', taskId?: string, runId?: string, status?: ScheduledRun['status']): void {
   windows.emitToAll('scheduled:changed', { kind, ...(taskId === undefined ? {} : { taskId }), ...(runId === undefined ? {} : { runId }), ...(status === undefined ? {} : { status }) })
@@ -23,7 +24,9 @@ function reschedule(): void {
   if (stopped) return
   const next = store.listScheduledTasks().filter((task) => task.enabled && task.nextRunAt !== null).sort((a, b) => (a.nextRunAt ?? Infinity) - (b.nextRunAt ?? Infinity))[0]
   if (next === undefined || next.nextRunAt === null) return
-  timer = setTimeout(() => { void tick(false) }, Math.max(0, next.nextRunAt - Date.now()))
+  // Node 对超过有符号 32 位的延迟会改成 1ms；分段唤醒后仍由 tick 判断是否到期。
+  const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, next.nextRunAt - Date.now()))
+  timer = setTimeout(() => { void tick(false) }, delay)
 }
 
 async function tick(reconcileOnly: boolean): Promise<void> {
@@ -90,7 +93,9 @@ async function execute(task: ScheduledTask, scheduledAt: number, trigger: 'sched
       skillIds: workspace.settings.activeSkillIds, skillSelectionMode: workspace.settings.skillSelectionMode
     }
     const handle = runs.create(request)
+    const release = runs.retainSessionForRun(handle)
     try { await runAgent(handle, request) } catch (error) { handle.finish('error', toAgentError(error)) }
+    finally { release() }
     // `runAgent` is expected to resolve only after AgentSession has finished.
     // Keep the scheduler from leaving a durable row stuck in `running` if a
     // future driver violates that contract.

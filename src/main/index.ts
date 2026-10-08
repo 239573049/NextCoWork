@@ -25,6 +25,7 @@ import {
   reconcileMigratedWorkspacesForStoredAccount,
   registerIpc,
   registerMigrationIpc,
+  setWindowContentVisible,
   shutdownClientAuth,
   shutdownRuns,
   shutdownTerminals
@@ -305,6 +306,18 @@ function createMainWindow(
   })
 
   win.on('ready-to-show', () => win.show())
+
+  /*
+    需求:藏起来的窗口(最小化、点关闭按钮隐藏到托盘)不再接收、也不再累积任何 run 正文 ——
+    Agent 照常在主进程跑,窗口回来时按快照 + 历史重建它在看的会话。
+    ★ 失焦**不算**:副屏上还开着的窗口仍然要看见新内容。
+  */
+  const contentHidden = (): void => setWindowContentVisible(win.webContents, false)
+  const contentShown = (): void => setWindowContentVisible(win.webContents, true)
+  win.on('minimize', contentHidden)
+  win.on('hide', contentHidden)
+  win.on('restore', contentShown)
+  win.on('show', contentShown)
 
   /*
     关闭按钮只隐藏,不销毁窗口 —— 保留页面状态(当前会话/滚动位置/未保存的输入),

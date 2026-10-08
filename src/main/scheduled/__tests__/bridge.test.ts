@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../../../shared/domain/scheduled'
 import { normalizeScheduledTaskInput, SCHEDULED_AGENT_LIMITS } from '../../../shared/domain/scheduled'
 
@@ -50,13 +50,9 @@ vi.mock('../../state/store', () => ({
 vi.mock('../../window/registry', () => ({
   windows: { emitToAll: (_channel: string, payload: unknown) => state.emitted.push(payload) }
 }))
-vi.mock('../scheduler', () => ({
-  refreshScheduler: () => {
-    state.refreshed += 1
-  }
-}))
 
 import { schedulingBridgeFor } from '../bridge'
+import { resetSchedulerRefreshForTest, setSchedulerRefresh } from '../refresh'
 
 function bridge(overrides: Partial<Parameters<typeof schedulingBridgeFor>[0]> = {}) {
   return schedulingBridgeFor({
@@ -98,6 +94,11 @@ beforeEach(() => {
   state.refreshed = 0
   state.emitted = []
   state.nextId = 0
+  setSchedulerRefresh(() => { state.refreshed += 1 })
+})
+
+afterEach(() => {
+  resetSchedulerRefreshForTest()
 })
 
 describe('schedulingBridgeFor · 创建', () => {

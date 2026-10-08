@@ -19,6 +19,9 @@ import { resolveCompactBinding } from '../kernel/compaction/binding'
 import { readAttachableFile, type AttachmentToolNames } from '../kernel/compaction/attachments'
 import { connectedWorkspaceMcpTools, getHost, getRouter, getTools, loadInstructions } from '../runtime'
 import { store } from '../state/store'
+import { runs } from '../kernel/run-registry'
+import { currentConfigScope } from '../db/config-profile'
+import { IpcError } from './errors'
 
 const SUMMARY_TIMEOUT_MS = 180_000
 
@@ -39,10 +42,20 @@ export async function compactContext(req: { sessionId: string; instructions?: st
   message: AgentMessage
   inputTokens: number
 }> {
+  const release = runs.acquireSessionOperation(req.sessionId)
+  try { return await compactSessionContext(req) } finally { release() }
+}
+
+async function compactSessionContext(req: { sessionId: string; instructions?: string }): Promise<{
+  message: AgentMessage
+  inputTokens: number
+}> {
   const session = store.getSession(req.sessionId)
   if (session === undefined) throw new Error('会话不存在')
   const history = store.getHistory(req.sessionId)
   if (history.length === 0) throw new Error('这段对话还没有可压缩的内容')
+  const scope = currentConfigScope()
+  const revision = JSON.stringify(history)
 
   const signal = AbortSignal.timeout(SUMMARY_TIMEOUT_MS)
   const root = session.rootPathAtCreation
@@ -128,6 +141,11 @@ export async function compactContext(req: { sessionId: string; instructions?: st
     signal
   })
   if (!result.ok) throw new Error(result.error.message)
+  // 目标状态、导入同步等并非 run，也可能改写历史。旧摘要不能隐藏这期间的新消息。
+  if (currentConfigScope() !== scope || store.getSession(req.sessionId)?.workspaceId !== session.workspaceId
+    || JSON.stringify(store.getHistory(req.sessionId)) !== revision) {
+    throw new IpcError('conflict', '摘要期间会话内容已变化，请重新压缩上下文')
+  }
   store.commitMessage(req.sessionId, result.message)
   return { message: result.message, inputTokens: result.boundary.postTokens }
 }

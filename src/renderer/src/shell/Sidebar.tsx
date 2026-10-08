@@ -42,6 +42,7 @@ import { Button } from '../components/ui/Button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
 import { copyText, openSessionWindow } from '../services/app'
 import { Spinner } from '../components/ui/Spinner'
+import { useAttentionSessionIds } from '../stores/session'
 import { toast } from '../stores/toast'
 import { usePluginsStore } from '../stores/plugins'
 import { openPluginWebApp } from '../services/plugins'
@@ -498,6 +499,8 @@ function SessionGroupBlock({
   workspaceId: string
 }): ReactNode {
   const [open, setOpen] = useState(defaultOpen || revealActive)
+  // 没在看的会话停下来等审批 / 等回答:应用内标一下,不强制切过去
+  const attentionSessionIds = useAttentionSessionIds()
   useEffect(() => {
     if (revealActive) setOpen(true)
   }, [activeSessionId, revealActive])
@@ -560,7 +563,9 @@ function SessionGroupBlock({
                         侧边栏这一行还在转圈,直到用户恰好改了某条会话(改名/归档)才消。
                         一个事实只有一处真源(§9),那一处就是运行中索引。
                       */}
-                  {runningSessionIds.has(session.id) && (
+                  {attentionSessionIds.has(session.id) ? (
+                    <span title={t('chat.pendingInteraction')} aria-label={t('chat.pendingInteraction')} className="size-1.5 shrink-0 rounded-full bg-warning" />
+                  ) : runningSessionIds.has(session.id) && (
                     <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
                   )}
                   {session.favorited && <span className="shrink-0 text-accent">★</span>}

@@ -7,16 +7,25 @@ vi.mock('../../services/agent', () => ({
   startRun: vi.fn(), attachRun: vi.fn(), abortRun: vi.fn(), onAgentEvent: vi.fn(() => () => {})
 }))
 vi.mock('../../services/app', () => ({
-  getSessionInput: vi.fn(async () => null), persistSessionInput: vi.fn()
+  getSessionInput: vi.fn(async () => null), persistSessionDraft: vi.fn()
 }))
 /*
   ★ `replaceHistory` 也得在:恢复一个「跑完了还没汇报」的后台子代理时,
   汇报那条路现在会走到底 —— 拿不到发消息的档位就置 `blocked` 并落盘,
   而以前它在拿不到档位时直接 return,一个 store 写入都没有。
 */
-vi.mock('../../services/sessions', () => ({
-  getSession: vi.fn(), replaceHistory: vi.fn(async () => {})
-}))
+vi.mock('../../services/sessions', () => {
+  const getSession = vi.fn()
+  return {
+    getSession,
+    // 转录按页读(`getSessionPage`):委托给各用例摆好的整段历史,一页就是全部
+    getSessionPage: vi.fn(async (sessionId: string) => {
+      const detail = await getSession(sessionId)
+      return detail == null ? detail : { ...detail, hasMore: false }
+    }),
+  replaceHistory: vi.fn(async () => {})
+  }
+})
 
 import { attachRun } from '../../services/agent'
 import { getSession } from '../../services/sessions'

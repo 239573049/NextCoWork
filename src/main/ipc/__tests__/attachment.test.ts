@@ -38,6 +38,7 @@ import { closeDatabase, openDatabase } from '../../db'
 import * as repo from '../../db/repo'
 import { switchConfigProfile } from '../../db/config-profile'
 import { attachmentRoot, handleAttachmentRequest } from '../../net/attachment-protocol'
+import { ThumbnailCache } from '../../net/attachment-thumbnail'
 import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadAttachment } from '../attachment'
 import { localEnvironment } from '../../environment/local'
 import { nodeHost } from '../../kernel/host'
@@ -155,6 +156,41 @@ describe('uploadAttachment', () => {
       expect(body.split(note).join('')).not.toContain('ncw://')
     }
     expect(request).toEqual(before)
+  })
+
+  /*
+    需求:卡片里的图走 `?preview=thumb` 拿缩略档,原图校验一步不少;缩不了就回原图。
+  */
+  it('serves the generated thumbnail for ?preview=thumb and the original otherwise', async () => {
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 10, 0, 0, 0, 5, 160, 0, 0])
+    const uploaded = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'shot.png', mime: 'image/png', bytes: png })
+    const thumbDir = join(userDataDir, 'thumbs')
+    const render = vi.fn(() => new Uint8Array([7, 7, 7]))
+    const thumbs = new ThumbnailCache(() => thumbDir, { render })
+
+    const thumb = await handleAttachmentRequest(new Request(`${uploaded.url}?preview=thumb`), attachmentRoot(), thumbs)
+    expect(thumb.status).toBe(200)
+    expect(thumb.headers.get('content-type')).toBe('image/png')
+    expect([...new Uint8Array(await thumb.arrayBuffer())]).toEqual([7, 7, 7])
+    expect(render).toHaveBeenCalledTimes(1)
+
+    const original = await handleAttachmentRequest(new Request(uploaded.url), attachmentRoot(), thumbs)
+    expect(new Uint8Array(await original.arrayBuffer())).toEqual(png)
+
+    // 解码器说缩不了(另一个空缓存目录):回原图
+    const failing = new ThumbnailCache(() => join(userDataDir, 'thumbs-empty'), { render: () => null })
+    const fallback = await handleAttachmentRequest(new Request(`${uploaded.url}?preview=thumb`), attachmentRoot(), failing)
+    expect(new Uint8Array(await fallback.arrayBuffer())).toEqual(png)
+  })
+
+  it('rejects unknown preview values and still refuses escaping paths with a preview', async () => {
+    const thumbs = new ThumbnailCache(() => join(userDataDir, 'thumbs'), { render: vi.fn(() => new Uint8Array([1])) })
+    const uploaded = uploadAttachment({ scope: 'session', ownerId: 'S1', displayName: 'shot.png', mime: 'image/png', bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]) })
+
+    expect((await handleAttachmentRequest(new Request(`${uploaded.url}?preview=full`), attachmentRoot(), thumbs)).status).toBe(400)
+    expect((await handleAttachmentRequest(new Request(`${uploaded.url}?preview=thumb&preview=thumb`), attachmentRoot(), thumbs)).status).toBe(400)
+    expect((await handleAttachmentRequest(new Request('ncw://attachments/sessions/%2e%2e/%2e%2e/x.png?preview=thumb'), attachmentRoot(), thumbs)).status).toBe(403)
+    expect((await handleAttachmentRequest(new Request('ncw://attachments/sessions/S1/MISSING.png?preview=thumb'), attachmentRoot(), thumbs)).status).toBe(404)
   })
 
   it('uses the image bytes rather than a misleading MIME label for storage and restored metadata', () => {

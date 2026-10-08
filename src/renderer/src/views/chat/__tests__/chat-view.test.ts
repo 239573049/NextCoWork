@@ -21,7 +21,7 @@ vi.mock('../../../services/app', async (importOriginal) => ({
   persistInnerTabs: vi.fn(),
   persistOuterTabs: vi.fn(),
   getSessionInput: vi.fn(async () => null),
-  persistSessionInput: vi.fn(),
+  persistSessionDraft: vi.fn(),
   updateWorkspace: vi.fn()
 }))
 vi.mock('../../../services/attachment', () => ({
@@ -54,8 +54,10 @@ describe('Skillify command availability', () => {
     const metadata = new Promise((resolve) => { resolveMetadata = resolve })
     Object.assign(dom.window, { nextcowork: {
       on: () => () => {},
-      invoke: async (channel: string) => ({ ok: true, data: channel === 'sessions:get'
-        ? await metadata : channel === 'agent:listInteractions' ? [] : undefined })
+      // 元数据走 `sessions:getSummary`,转录按页走 `sessions:getPage` —— 两条都等同一份「库里的会话」
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'sessions:getSummary' || channel === 'sessions:getPage'
+        ? { ...(await metadata as object), hasMore: false, messageCount: 1 }
+        : channel === 'agent:listInteractions' ? [] : undefined })
     } })
     vi.stubGlobal('window', dom.window)
     vi.stubGlobal('document', dom.window.document)
@@ -153,7 +155,10 @@ describe('chat history subscription boundary', () => {
     session.setState({ transcript: { ...emptyTranscript(), status: 'done', messages } })
     const workspace: Workspace = { id: 'workspace', name: 'Workspace', rootPath: '/workspace',
       createdAt: 1, lastOpenedAt: 1, settings: { ...DEFAULT_WORKSPACE_SETTINGS } }
-    const rows = vi.spyOn(content, 'threadRows')
+    // ★ 长历史隔离之后,`Thread` 不再调 `threadRows`(那是纯函数门面),真正常驻的
+    //   记录点是「历史那半有没有重算」—— `threadHistoryRows`。这条用例要钉的正是
+    //   它:draft/附件/等长队列更新都不该触发历史重算。
+    const rows = vi.spyOn(content, 'threadHistoryRows')
     try {
       await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
         createElement(ChatView, { sessionId: 'history-boundary', tabId: 'fixture-tab', workspace, fallbackModel: { model: '' } }) })))

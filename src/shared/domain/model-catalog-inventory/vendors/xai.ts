@@ -1,5 +1,5 @@
 import type { BuiltinModelRecord } from '../types'
-import { model, textCapabilities, visionCapabilities, imageCapabilities, effortThinking, efforts } from '../helpers'
+import { model, textCapabilities, visionCapabilities, imageCapabilities, effortThinking, efforts , videoCapabilities } from '../helpers'
 
 export const XAI: readonly BuiltinModelRecord[] = [
   // 需求：上新 grok-4.7，上下文窗口按官方口径为 500K（4.6 系列沿用 helpers 的
@@ -73,6 +73,33 @@ export const XAI: readonly BuiltinModelRecord[] = [
     modality: 'image',
     capabilities: imageCapabilities(),
     source: { url: 'https://docs.x.ai/developers/models', fetchedAt: '2026-09-25' },
+    verificationStatus: 'official-api',
+  }),
+  /*
+   * 需求:视频档案表按目录型号查绑定,所以 Grok 的视频型号要进目录。
+   * ★ 走 `/v1/videos/generations|edits|extensions`,不是 chat/responses,
+   * 也不走生图那条 `/v1/images/*`。按「秒 / 分辨率」计费,同豆包 Seedance 那条,
+   * 定价种子表查不到价显示「—」。
+   */
+  model('xai', 'grok-imagine-video-1.5', 'Grok Imagine Video 1.5', {
+    modality: 'video',
+    capabilities: videoCapabilities(),
+    // ★ 别名**不能**是另一条的规范 id(`grok-imagine-video` 就是下面那条)——
+    //   目录测试钉着这条不变式,而它守的是"同一个名字只能有一个归属"。
+    aliases: ['grok-imagine-video-1-5'],
+    source: { url: 'https://docs.x.ai/developers/model-capabilities/video/generation', fetchedAt: '2026-10-05' },
+    verificationStatus: 'official-api',
+  }),
+  model('xai', 'grok-imagine-video', 'Grok Imagine Video', {
+    modality: 'video',
+    capabilities: videoCapabilities(),
+    source: { url: 'https://docs.x.ai/developers/model-capabilities/video/generation', fetchedAt: '2026-10-05' },
+    verificationStatus: 'official-api',
+  }),
+  model('xai', 'grok-imagine-video-1.5-image', 'Grok Imagine Video 1.5(图生视频)', {
+    modality: 'video',
+    capabilities: videoCapabilities(),
+    source: { url: 'https://docs.x.ai/developers/model-capabilities/video/generation', fetchedAt: '2026-10-05' },
     verificationStatus: 'official-api',
   }),
 ]

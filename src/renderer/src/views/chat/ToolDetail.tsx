@@ -14,6 +14,7 @@ import type { ReactNode } from "react";
 import type { ToolOutput, ToolOutputImage } from "../../../../shared/agent/message";
 import type { ToolShape } from "../../../../shared/domain/tool-presenter";
 import { isTodoListTool } from "../../../../shared/domain/tool-presenter";
+import { ncwPreviewUrl } from "../../../../shared/domain/attachment";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import { DiffBlock } from "./DiffView";
@@ -27,6 +28,7 @@ import { InteractionPreviewBlock } from "./InteractionPreviewBlock";
 import { TodoWriteChecklist } from "./TodoWriteChecklist";
 import { WidgetDetail } from "./WidgetDetail";
 import { ImageGenDetail } from "./ImageGenDetail";
+import { VideoGenDetail } from "./VideoGenDetail";
 import { ScreenshotDetail } from "./ScreenshotDetail";
 
 // ─────────────────────────── 原语 ───────────────────────────
@@ -160,7 +162,7 @@ export function OutputBlock({
       {(output.images ?? []).map((image, index) => (
         <img
           key={`${image.dataRef.slice(0, 48)}:${index}`}
-          src={image.dataRef}
+          src={ncwPreviewUrl(image.dataRef)}
           alt={t("chat.tool.result")}
           className="mt-2 max-h-96 max-w-full rounded-lg border border-hairline object-contain"
         />
@@ -493,6 +495,8 @@ export const DETAIL_RENDERERS: Record<
   widget: WidgetDetail,
   // image:生图的专属图片卡 —— 加载格、逐张出图、成品网格都在 `ImageGenDetail.tsx`
   image: ImageGenDetail,
+  // video:生成视频的专属卡片 —— 异步任务的生命周期 + 播放器,见那边的文件头
+  video: VideoGenDetail,
   /*
     screenshot:浏览器页面截图(`browser_screenshot`)的卡片 —— 见它的文件头。
     与 `image` 分开的理由写在 `ToolShape` 里那一段:生图有生成期与提示词,

@@ -61,6 +61,10 @@ export const toolPresenterZh: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.title.generateImage': '生成图片',
   'chat.tool.title.editImage': '编辑图片',
   'chat.tool.title.saveImage': '保存图片',
+  'chat.tool.title.generateVideo': '生成视频',
+  'chat.tool.title.checkVideo': '查询视频任务',
+  'chat.tool.title.cancelVideo': '取消视频任务',
+  'chat.tool.title.saveVideo': '保存视频',
   /*
     浏览器那一族(16 个 `browser_*`)。★ 全族此前没有动作标签,于是每一行都走
     `humanize(internalId)` 兜底 —— 中文界面上一列「browser click / browser type」。
@@ -131,6 +135,10 @@ export const toolPresenterEn: Record<PresenterCopyKey, MessageValue> = {
   'chat.tool.title.generateImage': 'Generate image',
   'chat.tool.title.editImage': 'Edit image',
   'chat.tool.title.saveImage': 'Save image',
+  'chat.tool.title.generateVideo': 'Generate video',
+  'chat.tool.title.checkVideo': 'Check video job',
+  'chat.tool.title.cancelVideo': 'Cancel video job',
+  'chat.tool.title.saveVideo': 'Save video',
   'chat.tool.title.browserOpen': 'Open page',
   'chat.tool.title.browserNavigate': 'Navigate',
   'chat.tool.title.browserSnapshot': 'Read page tree',

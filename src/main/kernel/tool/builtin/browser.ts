@@ -9,6 +9,7 @@
  * Node tests must not initialize either graphical runtime.
  */
 import { z } from 'zod'
+import type { ToolOutputImage } from '../../../../shared/agent/message'
 import type { ToolResult } from '../../../../shared/agent/tool'
 import { toolFail, toolOk } from '../../../../shared/agent/tool'
 import type { BrowserTab } from '../../../../shared/domain/browser'
@@ -87,17 +88,36 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-function screenshotResult(tabId: string, screenshot: {
+/**
+ * 截图 → 工具结果。
+ *
+ * ★ 图落成**本会话附件**(`ctx.sessionImages`,与生图同一条路),`output.images` 只存一个
+ * `ncw://` 地址,不再把整张 PNG 的 base64 塞进转录。不这样的话,每一次截图(上限 8MiB,
+ * base64 后约 10.7MB 字符)都要过一次结构化克隆推给渲染层、落进 SQLite、随会话常驻内存。
+ * 发往上游时 `prepareRequestImages` 会把本会话的 `ncw://` 换回 data URL —— 模型看到的
+ * 字节与原来完全一样,回执正文也一字不改。
+ *
+ * ★ 存不下来(没有装配仓、磁盘满、超限)就退回内联 data URL,截图本身不失败。
+ */
+async function screenshotResult(tabId: string, screenshot: {
   data: Uint8Array
   mimeType: 'image/png' | 'image/jpeg'
   width: number
   height: number
   viewport: { width: number; height: number }
-}): ToolResult {
-  const dataRef = `data:${screenshot.mimeType};base64,${Buffer.from(screenshot.data).toString('base64')}`
+}, ctx: ToolContext): Promise<ToolResult> {
+  const inline: ToolOutputImage = { mime: screenshot.mimeType, dataRef: `data:${screenshot.mimeType};base64,${Buffer.from(screenshot.data).toString('base64')}` }
+  let image = inline
+  if (ctx.sessionImages !== undefined) {
+    try {
+      image = await ctx.sessionImages.save(inline)
+    } catch {
+      image = inline
+    }
+  }
   return toolOk(
     `Captured browser tab ${tabId}: image ${String(screenshot.width)}x${String(screenshot.height)} pixels, CSS viewport ${String(screenshot.viewport.width)}x${String(screenshot.viewport.height)}. Coordinate actions use CSS viewport pixels; scale image coordinates when these sizes differ.`,
-    { images: [{ mime: screenshot.mimeType, dataRef }] }
+    { images: [image] }
   )
 }
 
@@ -315,7 +335,7 @@ const browserScreenshotTool: ToolRegistration = defineTool({
   async run(input, ctx) {
     const tab = ownedTab(input.tabId, ctx)
     const runtime = await readyRuntime(tab, ctx)
-    return screenshotResult(tab.id, await runtime.screenshot(tab.id))
+    return screenshotResult(tab.id, await runtime.screenshot(tab.id), ctx)
   }
 })
 

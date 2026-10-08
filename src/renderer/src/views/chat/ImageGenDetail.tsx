@@ -32,6 +32,7 @@ import { motion } from 'motion/react'
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { pick } from '../../../../shared/domain/tool-presenter'
 import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
+import { ncwPreviewUrl } from '../../../../shared/domain/attachment'
 import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { copyText } from '../../services/app'
@@ -215,7 +216,7 @@ function ImageSlot({
         className="app-no-drag block w-full cursor-zoom-in overflow-hidden rounded-[8px] focus-visible:outline-2 focus-visible:outline-accent"
       >
         <img
-          src={slot.image.dataRef}
+          src={ncwPreviewUrl(slot.image.dataRef)}
           alt=""
           data-testid="image-gen-image"
           className={cn(

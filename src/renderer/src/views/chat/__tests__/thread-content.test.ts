@@ -85,6 +85,30 @@ describe('thread content grouping', () => {
   })
 
   /*
+    需求:后台汇报引出的回复前面没有提问,删除键以前因为拿不到提问而整颗消失。
+    删除的跨度改由行自己给出 —— 跨过工具回执,但不越过汇报。
+  */
+  it('assistant 行带上自己的消息跨度,汇报之后的那一行也有', () => {
+    const report = {
+      ...userMessage('rep', [
+        { type: 'text' as const, text: 'report' },
+        { type: 'subagent' as const, callId: 'task-1', childRunId: 'run-9' }
+      ], 5),
+      internal: true
+    }
+    const rows = threadRows([
+      userMessage('u', [{ type: 'text', text: '开始' }], 1),
+      assistantMessage('a1', [{ type: 'tool_call', callId: 'c1', name: 'Read', input: {} }], 2),
+      toolResultMessage('r1', [{ type: 'tool_result', callId: 'c1', output: { content: 'ok' }, isError: false }], 3),
+      assistantMessage('a2', [{ type: 'text', text: '好' }], 4),
+      report,
+      assistantMessage('a3', [{ type: 'text', text: '收到' }], 6)
+    ], [], false)
+    const spans = rows.flatMap((row) => row.kind === 'assistant' ? [row.span] : [])
+    expect(spans).toEqual([{ from: 'a1', to: 'a2' }, { from: 'a3', to: 'a3' }])
+  })
+
+  /*
     计划回执行:一次审批落槌的记录。以前它不是「一行」,而是整段对话之后
     无条件追加的一张卡 —— 所以永远贴在输入框上面,关不掉。
   */

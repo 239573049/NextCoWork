@@ -42,6 +42,15 @@ export const whimsyZh: Record<WhimsyBucket, Whimsy> = {
     '顺着想…', '反着想…', '再想想…', '想深一层…', '推演中…', '权衡中…',
     '找漏洞…', '自我辩论…', '反复横跳…', '钻牛角尖…', '理因果…', '解扣中…'
   ],
+  /*
+    对话内生视频。★ 与生图分开:这一段描述的是**后台在跑一个几分钟的任务**,
+    而"生成中"那个词放在视频上比放在图片上更准(用户确实要等很久)。
+    必须有这一项 —— `WhimsyBucket` 是从 `ToolShape` 派生的,新增形态会编译期要求它。
+  */
+  video: [
+    '生成视频…', '渲染中…', '合成中…', '出片中…', '剪片中…', '等渲染…',
+    '还在画…', '帧在排队…', '导出中…', '出成片…'
+  ],
   // 正文在流:已经开始写了
   writing: [
     '下笔中…', '码字中…', '打字中…', '组织语言…', '斟酌用词…', '一字一句…',
@@ -192,6 +201,18 @@ export const whimsyEn: Record<WhimsyBucket, Whimsy> = {
   reasoning: [
     'Reasoning…', 'Deducing…', 'Inferring…', 'Unpacking…', 'Backtracking…', 'Rechecking…',
     'Zooming in…', 'Arguing…', 'Doubting…', 'Connecting…'
+  ],
+  /*
+    Video generation. It runs for minutes in the background, so the words are about
+    rendering/exporting rather than "drawing".
+  */
+  /*
+    ★ 英文压在 14 字符以内(`i18n/index.test.ts` 钉着这个数):
+    这句话右边紧跟着「· 队列 2」和用量读数,长一个字符整排就左右抖。
+  */
+  video: [
+    'Rendering…', 'Encoding…', 'Compositing…', 'Frames…', 'Cutting…',
+    'Waiting…', 'Still going…', 'Exporting…', 'Almost…', 'Assembling…'
   ],
   writing: [
     'Writing…', 'Drafting…', 'Typing…', 'Composing…', 'Phrasing…', 'Wording it…',

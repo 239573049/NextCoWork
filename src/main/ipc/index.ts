@@ -58,18 +58,16 @@ import {
   renderDocumentView,
   saveDocumentView
 } from './document-engine'
-import type { SessionInputState } from '../../shared/domain/queued-input'
-import { isValidSessionInput } from '../../shared/domain/queued-input'
 import {
   EMPTY_OUTER,
   innerTabKey,
   outerTabKey,
-  sessionInputKey,
   store
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
-import { runScheduledTaskNow } from '../scheduled/scheduler'
+import { refreshScheduler, runScheduledTaskNow } from '../scheduled/scheduler'
 import { scheduledWrites } from '../scheduled/bridge'
+import { setSchedulerRefresh } from '../scheduled/refresh'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
 import { checkForUpdates, copyImage, copyText, getBootstrap, openExternal, openSessionWindow, registerThemeBridge, requestQuit, saveImageFile, saveTextFile } from './app'
@@ -82,13 +80,14 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, broadcastActiveRuns, interjectRun, listInteractions, respondInteraction, setRunPermissionMode, startChildRun, startRun, stopToolCall } from './agent'
+import { abortRun, attachRun, broadcastActiveRuns, interjectRun, listInteractions, queueSessionInput, reportBackgroundChild, respondInteraction, sessionRuntime, setRunPermissionMode, startChildRun, startRun, stopToolCall, unwatchRun } from './agent'
 import { runs } from '../kernel/run-registry'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
 import { getEnvironments } from '../runtime'
-import { getTools, installChildRunLauncher, setAccountsChangeListener, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener, setSkillWrittenListener } from '../runtime'
+import { getTools, installBackgroundChildHandler, installChildRunLauncher, setAccountsChangeListener, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener, setSkillWrittenListener, setVideoJobChangeListener } from '../runtime'
+import { setGoalLauncher } from '../goal/runtime'
 import { NotImplementedError, toAgentError } from './errors'
 import {
   fetchModels,
@@ -130,6 +129,14 @@ import {
   removeUserModelCatalog,
   upsertUserModelCatalog
 } from './model-catalog'
+import {
+  announceVideoJob,
+  cancelVideoJob,
+  getVideoJob,
+  listVideoJobs,
+  retryVideoRetrieval,
+  saveVideoJobFile
+} from './video'
 import {
   getMcpSecretsInfo,
   listMcpServers,
@@ -218,9 +225,15 @@ import {
   branchSession,
   createSession,
   createSkillExtractionSession,
+  deleteReply,
+  deleteTurn,
   duplicateSession,
   deleteSession,
+  editMessage,
+  getLastAssistant,
   getSession,
+  getSessionPage,
+  getSessionSummary,
   listSessions,
   renameSession,
   replaceHistory,
@@ -240,7 +253,7 @@ import {
   createBackup,
   exportData,
   getBackupStatus,
-  getStats,
+  getStatsAsync,
   importApply,
   importPreview,
   openDataDirectory,
@@ -469,7 +482,9 @@ const handlers: HandlerMap = {
     flushPendingPersists(key)
     return store.getInnerTabs(workspaceId)
   },
-  'session:getInput': ({ sessionId }) => readSessionInput(sessionId),
+  'session:getInput': ({ sessionId }) => sessionRuntime.getInput(sessionId),
+  'session:queue': (req) => queueSessionInput(req),
+  'session:reportBackground': (req) => reportBackgroundChild(req),
 
   // ── 附件(读取走 ncw:// 协议,不占 IPC) ──
   'attachment:upload': (req) => uploadAttachment(req),
@@ -484,6 +499,12 @@ const handlers: HandlerMap = {
   'sessions:list': (req) => listSessions(req),
   'sessions:get': (req) => getSession(req),
   'sessions:replaceHistory': (req) => replaceHistory(req),
+  'sessions:getPage': (req) => getSessionPage(req),
+  'sessions:getSummary': (req) => getSessionSummary(req),
+  'sessions:lastAssistant': (req) => getLastAssistant(req),
+  'sessions:editMessage': (req) => editMessage(req),
+  'sessions:deleteTurn': (req) => deleteTurn(req),
+  'sessions:deleteReply': (req) => deleteReply(req),
   'sessions:create': (req) => createSession(req),
   'sessions:duplicate': (req) => duplicateSession(req),
   'sessions:branch': (req) => branchSession(req),
@@ -497,7 +518,7 @@ const handlers: HandlerMap = {
   'conversations:searchAll': (req) => searchAll(req),
   'context:compact': (req) => compactContext(req),
   'context:preview': (req) => previewContext(req),
-  'storage:getStats': () => getStats(),
+  'storage:getStats': () => getStatsAsync(),
   'storage:vacuum': () => vacuum(),
   'storage:openDataDirectory': () => openDataDirectory(),
   'storage:export': (req) => exportData(req),
@@ -545,6 +566,7 @@ const handlers: HandlerMap = {
   // ── 步骤 3–5:RunRegistry / AgentSession / 交互 ──
   'agent:run': (req, ctx) => startRun(req, ctx),
   'agent:attach': (req, ctx) => attachRun(req, ctx),
+  'agent:unwatch': (req, ctx) => unwatchRun(req, ctx),
   'agent:abort': (req) => abortRun(req),
   'agent:interject': (req, ctx) => interjectRun(req, ctx),
   'agent:setPermissionMode': (req, ctx) => setRunPermissionMode(req, ctx),
@@ -704,6 +726,12 @@ const handlers: HandlerMap = {
   'model:update': (req) => updateModel(req),
   'model:rename': ({ providerId, alias, nextAlias }) => renameModel(providerId, alias, nextAlias),
   'model:remove': ({ providerId, alias }) => removeModel(providerId, alias),
+  // ── 视频生成任务(见 contract 里那段:它不走 agent:event)──
+  'video:listBySession': (req) => listVideoJobs(req),
+  'video:get': (req) => getVideoJob(req),
+  'video:cancel': (req) => cancelVideoJob(req),
+  'video:retryRetrieval': (req) => retryVideoRetrieval(req),
+  'video:saveFile': (req) => saveVideoJobFile(req),
   'modelCatalog:list': () => listUserModelCatalog(),
   'modelCatalog:upsert': (req) => upsertUserModelCatalog(req),
   'modelCatalog:remove': ({ id }) => removeUserModelCatalog(id),
@@ -767,25 +795,6 @@ function persistDebounced(key: string, value: unknown, immediate = false): void 
   pendingPersists.set(key, { timer, value })
 }
 
-/**
- * 读回未发出的输入。**校验在主进程侧做**,渲染层拿到的要么可用,要么是 null。
- *
- * ★ 读到失效存档时**顺手删键** —— 这就是「30 天兜底清扫」的全部实现。
- * 单独跑一个扫描任务是过度设计:一份存档只有在被读的时候才有意义,
- * 而没人读的键留在 kv 里除了占几 KB 没有别的影响。
- */
-function readSessionInput(sessionId: string): SessionInputState | null {
-  const key = sessionInputKey(sessionId)
-  flushPendingPersists(key)
-  const raw = store.getKv<unknown>(key, null)
-  if (raw === null) return null
-  if (!isValidSessionInput(raw, Date.now())) {
-    store.setKv(key, null)
-    return null
-  }
-  return raw
-}
-
 /** Flush before reads and app quit so pending UI state survives renderer reloads. */
 export function flushPendingPersists(onlyKey?: string): void {
   for (const [key, { timer, value }] of pendingPersists) {
@@ -794,6 +803,8 @@ export function flushPendingPersists(onlyKey?: string): void {
     store.setKv(key, value)
     pendingPersists.delete(key)
   }
+  // 草稿的防抖住在会话运行时里(它和队列共用一个键,必须整份写)
+  if (onlyKey === undefined) sessionRuntime.flush()
 }
 
 const sendHandlers: SendHandlerMap = {
@@ -813,8 +824,8 @@ const sendHandlers: SendHandlerMap = {
   'tabs:persistOuter': ({ kind, state }) => persistDebounced(outerTabKey(kind), state),
   'tabs:persistInner': ({ workspaceId, state }) =>
     persistDebounced(innerTabKey(workspaceId), state),
-  'session:persistInput': ({ sessionId, state, immediate }) =>
-    persistDebounced(sessionInputKey(sessionId), state, immediate),
+  'session:persistDraft': ({ sessionId, draft, immediate }) =>
+    sessionRuntime.setDraft(sessionId, draft, immediate),
 
   'terminal:write': ({ id, data }, ctx) => terminalHost.write(id, data, ctx.sender),
   'terminal:resize': ({ id, cols, rows }, ctx) => terminalHost.resize(id, cols, rows, ctx.sender)
@@ -951,6 +962,12 @@ export function registerIpc(): void {
   */
   installChildRunLauncher(startChildRun)
   /*
+    ★ 后台子代理的结果回传、目标的空闲检查:都由主进程的会话运行时直接投递,
+    不再转交给「恰好在看这条会话的那个窗口」—— 没人在看时它们也得发生。
+  */
+  installBackgroundChildHandler((report, status) => sessionRuntime.childFinished(report, status))
+  setGoalLauncher((sessionId, parts, options, goalId) => sessionRuntime.wakeGoal(sessionId, parts, options, goalId))
+  /*
     ★ 运行中角标的**权威来源**。渲染层那份 run 索引原先只靠 `agent:event` 里的
     `run_end` 收敛,而那条流没有订阅者时会被整批丢弃 —— 定时任务起的 run、
     ⌘R 重载后还没打开的会话都属于这一类,于是它们的角标永远停在「运行中」。
@@ -982,6 +999,20 @@ export function registerIpc(): void {
     而那时闸门可能已经自己到期,他什么都看不到。
   */
   setAccountsChangeListener(announceAccountsSafe)
+  /*
+    视频任务状态变化的广播口。★ 和上面 `setMcpChangeListener` / `setSessionChangeListener`
+    是同一种接线:视频 manager 活在 runtime 里,而广播要 `windows.emitToAll`
+    (`ipc/video.ts` 拖着 electron)—— runtime 静态 import 它就会破那条
+    「零 electron import」铁律、断掉无头链路(见 runtime.ts 文件头)。
+  */
+  setVideoJobChangeListener(announceVideoJob)
+  /*
+    定时任务写入后的重排口。★ 同一种接线:方向必须是「ipc 依赖 runtime」——
+    `scheduler.ts` import 了 `runAgent`(runtime),若让 `scheduled/bridge.ts` 直接
+    import `scheduler.ts`,就会冒出 `bridge → scheduler → runtime → bridge` 的值环。
+    装在这里之后 bridge 只认 `scheduled/refresh.ts` 那个叶子插槽。
+  */
+  setSchedulerRefresh(refreshScheduler)
 
   /*
     导入服务的接线,和上面 `setMcpChangeListener` 是同一种:
@@ -1016,7 +1047,7 @@ export function registerIpc(): void {
 }
 
 export { EMPTY_OUTER }
-export { shutdownRuns } from './agent'
+export { setWindowContentVisible, shutdownRuns } from './agent'
 export {
   prepareStoredAccountScope,
   reconcileMigratedWorkspacesForStoredAccount,

@@ -40,7 +40,7 @@ export function TurnActions({
 }: {
   /** 这一轮的散文正文。为空(纯工具轮)时复制与导出没有意义。 */
   text: string
-  /** 引出这一轮的用户提问。缺失时不能重新生成,也不能删除,也不能分支。 */
+  /** 引出这一轮的用户提问。缺失时不能重新生成,也不能分支(删除不依赖它,见 `onDelete`)。 */
   prompt?: TurnPrompt
   /** 最后一轮常驻显示;更早的回合悬停才浮现,避免整屏都是按钮。 */
   alwaysVisible: boolean
@@ -50,7 +50,13 @@ export function TurnActions({
   /** 用量读数(带缓存明细的浮层)。只有携带 run 用量的那一轮会传。 */
   usage?: ReactNode
   onRegenerate?: (id: string, text: string) => Promise<void>
-  onDelete?: (id: string) => Promise<void>
+  /**
+   * 只删这条回复,提问留着。
+   *
+   * ★ 不挂在 `prompt` 上:后台汇报引出的回复前面没有提问,以前因此整颗删除键消失。
+   * 有没有东西可删由调用方决定(这一行有没有已落盘的消息),没有就不传。
+   */
+  onDelete?: () => Promise<void>
   /** 从这一轮分支出一条新会话,只带上到这一轮为止的转录。 */
   onBranch?: (id: string) => Promise<void>
 }): ReactNode {
@@ -77,9 +83,10 @@ export function TurnActions({
 
   const hasText = text.trim() !== ''
   const canRewrite = prompt !== undefined && !disabled
+  const canDelete = onDelete !== undefined && !disabled
 
   // 一整轮都没产出散文、又没有提问可依附时,这条操作条没有任何可点的东西。
-  if (!hasText && !canRewrite && usage === undefined && durationMs === undefined) return null
+  if (!hasText && !canRewrite && !canDelete && usage === undefined && durationMs === undefined) return null
 
   return (
     <div
@@ -155,7 +162,7 @@ export function TurnActions({
         </ActionIconButton>
       )}
 
-      {canRewrite && onDelete !== undefined && (
+      {canDelete && (
         <ActionIconButton
           label={confirm === 'delete' ? t('common.confirmDelete') : t('chat.turn.delete')}
           testId="turn-delete"
@@ -164,7 +171,7 @@ export function TurnActions({
           onClick={() => {
             if (confirm !== 'delete') { setConfirm('delete'); return }
             setConfirm('none')
-            void onDelete(prompt.id)
+            void onDelete?.()
           }}
         >
           <Trash2 size={13} />

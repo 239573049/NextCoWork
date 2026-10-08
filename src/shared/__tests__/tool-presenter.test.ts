@@ -334,6 +334,10 @@ describe('注册表完整性', () => {
     'generate_image',
     // 把对话里的图写进工作区 —— `mutate` 形态,行的主语是目标文件
     'SaveImage',
+    // 对话内生视频 —— `video` 形态(异步任务卡 + 播放器),行的主语是 prompt 片段
+    'generate_video',
+    // 把对话里的视频写进工作区 —— `mutate` 形态,同 SaveImage
+    'SaveVideo',
     /*
       浏览器那一族(16 个 `browser_*`)。★ 整族此前**一个都没登记**,于是每一行
       都落进 `humanize(internalId)` 的可读名兜底 —— 中文界面上一列 `browser click` /

@@ -5,6 +5,8 @@
  * 才谈得上「切到下一个」。它同时是网关 GET /v1/models 的数据源。
  */
 import type { OAuthIssuerId } from './oauth-issuer'
+import type { SignatureScheme } from './credential'
+import type { VideoAdapterId } from './video-generation'
 
 export type UpstreamProtocol = 'anthropic' | 'openai-chat' | 'openai-responses'
 
@@ -126,6 +128,51 @@ export interface UpstreamProvider {
   enabled: boolean
   /** Protocol-specific settings. Missing on legacy provider JSON. */
   protocolOptions?: ProviderProtocolOptions
+  /**
+   * 视频生成的连接配置。缺席 = 这家不提供视频生成(绝大多数聊天供应商)。
+   *
+   * ★★ **和 `protocol` / `baseUrl` 是两件事,所以是两个字段。**
+   * 视频接口既不是 `openai-chat` 也不是 `anthropic`,而且**地址常常不同** ——
+   * 火山方舟的聊天是 `/api/v3`,`contents/generations/tasks` 挂在同一 host 上;
+   * 百炼的 chat compatible-mode 是 `/compatible-mode/v1`,而**原生视频任务**
+   * 是 `/api/v1/services/aigc/…`。把视频地址塞进 `baseUrl` 会让聊天请求 404,
+   * 反过来把视频请求发到 compatible-mode 上则是另一句读不出所以然的 404。
+   */
+  videoGeneration?: ProviderVideoGeneration
+}
+
+/**
+ * 一个视频连接描述的是**怎么出网**,不是**能生成什么** —— 后者的真源是
+ * `ModelAlias` 上的档案(`videoProfileId`),因为同一家不同型号的能力差得很远。
+ */
+export interface ProviderVideoGeneration {
+  adapter: VideoAdapterId
+  /** 视频接口的基地址。规范形式:不带尾斜杠 */
+  baseUrl: string
+  /** 阿里百炼这类"模型/Key/地域必须同属一地"的选择;仅诊断与请求修正用 */
+  region?: string
+  /**
+   * AWS Nova Reel 这类以 S3 为输出的:成品落在哪。
+   * ★ 刻意**只存桶与前缀**,不存凭据 —— 凭据在 `credentialRef` 指的那个槽里。
+   */
+  s3?: { bucket: string; prefix?: string; region?: string }
+}
+
+/**
+ * 一条视频绑定引用的档案 —— 「这个型号的这条绑定,按哪套请求形状发」。
+ *
+ * ★ 两级(`provider.videoGeneration` + `alias.videoProfileId`)是因为聚合商:
+ * 同一个 `veo-3.1-generate-preview` 名字挂在 Google 原生和某聚合站上,
+ * 出网方式完全不同,而档案是按**出网方式**写的。
+ */
+export interface ModelVideoBinding {
+  /** `VideoProfile.id`。认不出的档案 = 这条不可调用(但不影响别的模态) */
+  profileId: string
+  /**
+   * 上游真实模型/endpoint id。缺席 = 用 `upstreamModel`。
+   * fal / Replicate 这类"型号即 endpoint"的商城要靠它填 `fal-ai/…`。
+   */
+  endpointId?: string
 }
 
 /**
@@ -179,6 +226,17 @@ export interface CredentialInfo {
    * 否则一家 OAuth 供应商在**还没登录**时会退化成 API Key 表单。
    */
   auth?: CredentialAuthInfo
+  /**
+   * 这条槽里装的是**签名凭证**(腾讯 TC3 / AWS SigV4)时,它的方案。
+   *
+   * ★ 界面据此把"密钥输入框"换成"AccessKeyId + SecretKey"那一对,并且
+   *   **不显示 last4** —— 签名凭证的尾四位是 SecretKey 的尾四位,
+   *   等于把密钥的一部分印在屏幕上,而它对"这是哪一把"毫无帮助
+   *   (真正的身份标识是 AccessKeyId,那个本来就不是秘密)。
+   */
+  signatureScheme?: SignatureScheme
+  /** 签名凭证的 AccessKeyId —— **不是秘密**,设置页用它显示"用的是哪一把"。 */
+  accessKeyId?: string
 }
 
 /**
@@ -188,6 +246,7 @@ export interface CredentialInfo {
 export type RevealedCredential =
   | { kind: 'api-key'; apiKey: string }
   | { kind: 'oauth'; accessToken: string; refreshToken: string }
+  | { kind: 'signature'; scheme: SignatureScheme; accessKeyId: string; secretKey: string; region: string | null; sessionToken?: string }
 
 export interface ModelCapabilities {
   tools: boolean
@@ -296,6 +355,8 @@ export interface ModelAlias {
   reasoningEfforts?: readonly ReasoningEffort[]
   requestAdapter?: RequestAdapterConfig
   source?: { url: string; fetchedAt: string; verifiedAt?: string }
+  /** 视频绑定的档案引用。只在视频模型上有;缺席 = 这条不能用来生成视频。 */
+  video?: ModelVideoBinding
   /** Fields explicitly customized for this binding. Other fields follow the catalogue.
    * Missing on legacy records; an empty list explicitly opts into all catalogue defaults. */
   catalogOverrides?: readonly ModelCatalogOverride[]
@@ -326,19 +387,39 @@ export function isImageModelAlias(alias: Pick<ModelAlias, 'modality' | 'capabili
 }
 
 /**
- * 这条别名能当**对话模型**吗(与 `isImageModelAlias` 互补 + 排除纯输出非文本的)。
+ * 这条别名是**视频生成模型**吗。
+ *
+ * 需求:与 `isImageModelAlias` 一一对应,三个消费方共用同一条判据 ——
+ * 1. 「视频生成」设置页的供应商列表/模型选择器(`VideoModelPage`)过滤;
+ * 2. 对话模型选择器**反向**过滤,不让视频模型混进聊天列表(选中它发消息
+ *    是一次注定失败的对话,而且它多半连 `textOutput` 都没声明);
+ * 3. 视频桥(`kernel/video-gen.ts`)确认点名的模型确实是视频模型。
+ *
+ * ★ 判据是 `modality === 'video' || capabilities.videoOutput === true` 两路取或,
+ *   与图片那条同构:目录收录的带 modality,拉取/手建的只有能力位。
+ */
+export function isVideoModelAlias(alias: Pick<ModelAlias, 'modality' | 'capabilities'>): boolean {
+  return alias.modality === 'video' || alias.capabilities.videoOutput === true
+}
+
+/**
+ * 这条别名能当**对话模型**吗(与两个生成模态互补 + 排除纯输出非文本的)。
  *
  * 需求:所有「选对话模型」的选择器都用它过滤(见 `isImageModelAlias` 的消费方清单第 2 条)。
  * `textOutput !== false` 那半排除的是显式标了「不产文本」的模型(纯生图/纯视频),
- * 它们即使没被认成图片模型,照样不是聊天候选 —— 让用户选中它是画一个失效的控件。
+ * 它们即使没被认成任一种生成模型,照样不是聊天候选 —— 让用户选中它是画一个失效的控件。
+ *
+ * ★ 视频那半必须是**独立的一次判断**,不能靠 `textOutput !== false` 兜:
+ *   用户手建一条视频绑定、只勾了 `videoOutput` 时,`textOutput` 缺席(旧记录)或
+ *   仍是 `true`(目录默认),那次判断放它过去,于是视频模型出现在聊天下拉里。
  */
 export function isChatModelAlias(alias: Pick<ModelAlias, 'modality' | 'capabilities'>): boolean {
-  return !isImageModelAlias(alias) && alias.capabilities.textOutput !== false
+  return !isImageModelAlias(alias) && !isVideoModelAlias(alias) && alias.capabilities.textOutput !== false
 }
 
 export const MODEL_METADATA_FIELDS = [
   'displayName', 'modality', 'contextWindow', 'maxOutputTokens',
-  'thinkingConfig', 'reasoningEfforts', 'requestAdapter', 'source'
+  'thinkingConfig', 'reasoningEfforts', 'requestAdapter', 'source', 'video'
 ] as const
 
 export type ModelCatalogOverride = typeof MODEL_METADATA_FIELDS[number] | `capabilities.${keyof ModelCapabilities}`

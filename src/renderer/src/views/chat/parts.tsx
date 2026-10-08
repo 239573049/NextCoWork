@@ -41,7 +41,7 @@ import { previewOf } from "./interaction-preview";
 import { MAX_PARTIAL_JSON_CHARS, parsePartialJson } from "./partial-json";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
 import { abortRun } from "../../services/agent";
-import { getSession } from "../../services/sessions";
+import { getLastAssistantMessage } from "../../services/sessions";
 import { visibleText } from "../../../../shared/agent/message";
 import { useOpenSubagent } from "./subagent-open";
 import { useStopToolCall } from "./tool-stop";
@@ -722,11 +722,11 @@ export function SubagentReportRow({
     requested.current = childSessionId;
     let cancelled = false;
     setLoading(true);
-    void getSession(childSessionId)
-      .then((detail) => {
+    // 只取最后一条助手消息 —— 子代理交差的正文就是它,不为它读整段子转录
+    void getLastAssistantMessage(childSessionId)
+      .then((last) => {
         if (cancelled) return;
-        const last = [...detail.messages].reverse().find((m) => m.role === "assistant");
-        const body = last === undefined ? "" : visibleText(last).trim();
+        const body = last === null ? "" : visibleText(last).trim();
         if (body === "") setFailed(true);
         else setFull(body);
       })

@@ -86,10 +86,24 @@ describe('session title IPC', () => {
     }
   })
 
+  it('blocks deletion and history edits while manual compaction owns a descendant session', () => {
+    store.createSession({ id: 'parent', workspaceId: 'workspace' })
+    store.createSession({ id: 'child', workspaceId: 'workspace', parentSessionId: 'parent' })
+    const release = runs.acquireSessionOperation('child')
+    try {
+      expect(() => deleteSession({ sessionId: 'parent' })).toThrow('Agent')
+      expect(() => replaceHistory({ sessionId: 'child', messages: [] })).toThrow(/历史操作/)
+      expect(store.getSession('parent')).toBeDefined()
+      expect(store.getSession('child')).toBeDefined()
+    } finally { release() }
+    expect(() => deleteSession({ sessionId: 'parent' })).not.toThrow()
+  })
+
   it('blocks deletion only for a run inside the deleted subtree, not for unrelated runs', () => {
     store.createSession({ id: 'retained', workspaceId: 'workspace' })
     store.createSession({ id: 'busy', workspaceId: 'workspace' })
     store.createSession({ id: 'busy-child', workspaceId: 'workspace', parentSessionId: 'busy' })
+    store.createSession({ id: 'busy-grandchild', workspaceId: 'workspace', parentSessionId: 'busy-child' })
     const active = vi.spyOn(runs, 'activeRunIds').mockReturnValue(['run-1'])
     const get = vi.spyOn(runs, 'get').mockReturnValue({ sessionId: 'busy' } as never)
     try {
@@ -105,6 +119,9 @@ describe('session title IPC', () => {
       // run 落在被删会话的子代理转录上 —— 同样拦下(级联会连它一起删)
       expect(() => deleteSession({ sessionId: 'busy' })).toThrow('Agent')
       expect(store.getSession('busy-child')).toBeDefined()
+      get.mockReturnValue({ sessionId: 'busy-grandchild' } as never)
+      expect(() => deleteSession({ sessionId: 'busy' })).toThrow('Agent')
+      expect(store.getSession('busy-grandchild')).toBeDefined()
     } finally {
       get.mockRestore()
       active.mockRestore()

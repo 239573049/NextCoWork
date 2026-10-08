@@ -57,6 +57,7 @@ import { useI18n, type TranslationKey } from "../i18n";
 import { documentKey, isDocumentDirty, useDocumentsStore } from '../stores/documents';
 import { DOCK_TAB_MIME } from './dock-layout';
 import { Spinner } from '../components/ui/Spinner'
+import { useAttentionSessionIds } from '../stores/session'
 
 function revealTab(strip: HTMLDivElement | null, id: string | null): void {
   if (strip === null || id === null) return;
@@ -132,6 +133,8 @@ export function InnerTabBar({
 }): ReactNode {
   const { t } = useI18n();
   const drafts = useDocumentsStore((state) => state.entries);
+  // 没在看的会话停下来等审批 / 等回答:应用内标一下,不强制切过去
+  const attentionSessionIds = useAttentionSessionIds();
   const { dragging, onPointerDown, styleFor } = useDragReorder(onMove);
   const mainChatCount = tabs.filter((tab) => tab.kind === 'chat' && paneOf(tab) === 'main').length;
   const stripRef = useRef<HTMLDivElement>(null);
@@ -232,6 +235,10 @@ export function InnerTabBar({
             tab.kind === "chat" &&
             tab.ref.sessionId !== null &&
             runningSessionIds.has(tab.ref.sessionId);
+          const waiting =
+            tab.kind === "chat" &&
+            tab.ref.sessionId !== null &&
+            attentionSessionIds.has(tab.ref.sessionId);
           const Icon = INNER_TAB_ICON[tab.kind];
           const draft = workspaceId && (tab.kind === 'doc' || tab.kind === 'preview') ? drafts[documentKey(workspaceId, tab.ref.path)] : undefined;
           const dirty = draft !== undefined && isDocumentDirty(draft);
@@ -297,7 +304,9 @@ export function InnerTabBar({
                 <span className="min-w-0 flex-1 truncate">{tab.title}</span>
               )}
               {dirty && <span title={t('document.unsaved')} aria-label={t('document.unsaved')} className="size-1.5 shrink-0 rounded-full bg-accent" />}
-              {running && (
+              {waiting ? (
+                <span title={t('chat.pendingInteraction')} aria-label={t('chat.pendingInteraction')} className="size-1.5 shrink-0 rounded-full bg-warning" />
+              ) : running && (
                 <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
               )}
               <button

@@ -199,10 +199,38 @@ declare module 'nextcowork' {
     export function remove(permissions: Permission[]): Thenable<void>
   }
 
+  /**
+   * 工作区类调用的**可选作用域**。`workspace.*` / `process.*` / `scm.*` /
+   * `storage.workspace.*` 都接受它。需要 >=0.3.3。
+   *
+   * ## 为什么需要它
+   *
+   * 一个 Agent 工具在后台工作区(A)里跑,而用户此刻正看着 B。此前这类调用
+   * 一律按**当前聚焦的工作区**定位,于是工具给 A 画的东西**写进了 B**。
+   * 带上产生这次调用的 `callId`,宿主就把作用域钉在那次工具调用的工作区上
+   * —— 和 `documents.*` 的 callId 是同一套东西。
+   *
+   * ## 不填会怎样
+   *
+   * - 这个插件**恰好一次**工具调用在跑 → 按那一次推断(插件无从选择,安全);
+   * - **多次**在跑 → 调用被拒,不替你猜一个工作区;
+   * - 没有工具调用在跑(菜单、命令面板、视图里的 UI 代码)→ 按发起时的工作区,
+   *   与不带这个参数时的旧行为一致。
+   *
+   * ## 它不能用来指定任意工作区
+   *
+   * 值必须是**你正在跑**的一次工具调用的 callId。填别的插件的、已经结束的、
+   * 或者根本猜的,只会拿到一条 `rejected` / `invalid_argument`——**不会**回退到
+   * 当前聚焦的工作区。
+   */
+  export interface Scope {
+    callId?: string
+  }
+
   // ──────────────────────── workspace ────────────────────────
 
   export namespace workspace {
-    export function folders(): Thenable<{ id: string; name: string; path: string }[]>
+    export function folders(options?: Scope): Thenable<{ id: string; name: string; path: string }[]>
 
     export const fs: {
       /**
@@ -211,18 +239,20 @@ declare module 'nextcowork' {
        * UNC 路径上各有各的坑。
        * @returns `revision` 是写回时的乐观锁凭据。
        */
-      readFile(path: string, encoding?: 'utf8' | 'base64'): Thenable<{ data: string; revision: number }>
+      readFile(path: string, encoding?: 'utf8' | 'base64', options?: Scope): Thenable<{ data: string; revision: number }>
       /**
        * @param options.revision 上次读到的 revision。盘上变过就拒绝写入 ——
        * **Agent 和你可能在同时改同一个文件**。
+       * @param options.callId 见 `Scope` —— 在后台工具的调用里写文件时**务必带上**,
+       * 否则作用域按当前聚焦的工作区算。
        */
-      writeFile(path: string, data: string, options?: { encoding?: 'utf8' | 'base64'; revision?: number }): Thenable<{ revision: number }>
-      delete(path: string): Thenable<void>
-      stat(path: string): Thenable<{ kind: 'file' | 'dir' | 'missing'; size: number; mtimeMs: number }>
+      writeFile(path: string, data: string, options?: { encoding?: 'utf8' | 'base64'; revision?: number } & Scope): Thenable<{ revision: number }>
+      delete(path: string, options?: Scope): Thenable<void>
+      stat(path: string, options?: Scope): Thenable<{ kind: 'file' | 'dir' | 'missing'; size: number; mtimeMs: number }>
     }
 
     /** 只支持前缀 glob(`src/**`、`docs/*.md`)。要更强的匹配,取回来自己筛。 */
-    export function findFiles(glob: string, limit?: number): Thenable<string[]>
+    export function findFiles(glob: string, limit?: number, options?: Scope): Thenable<string[]>
 
     /**
      * 工作区里有文件变了。需要 `workspace.read`。
@@ -258,7 +288,7 @@ declare module 'nextcowork' {
     export function exec(
       command: string,
       args?: string[],
-      options?: { cwd?: string; timeoutMs?: number }
+      options?: { cwd?: string; timeoutMs?: number; callId?: string }
     ): Thenable<{ code: number; stdout: string; stderr: string }>
 
     /**
@@ -279,6 +309,8 @@ declare module 'nextcowork' {
       options?: {
         cwd?: string
         timeoutMs?: number
+        /** 见 `Scope` —— 后台工具的调用里**务必带上**,否则 cwd 按当前聚焦的工作区算。 */
+        callId?: string
         onOutput?: (chunk: { stream: 'stdout' | 'stderr'; chunk: string; truncated: boolean }) => unknown
         onExit?: (result: { code: number; timedOut: boolean }) => unknown
       }
@@ -299,11 +331,17 @@ declare module 'nextcowork' {
      * 都必须走这里 —— 于是「这个插件访问了哪些域名」变成主进程可校验、
      * 可审计、可关闭的一条通道。
      * ★ 逐 URL 匹配清单里的 `hostPermissions`;内网与环回地址一律拒绝。
+     * ★ **重定向不自动跟**:每一跳都重过一遍同一道 URL 门,最多 5 跳。
+     *   跨 host 的跳转会被拒 —— 跟着走等于让远端替你改掉 `hostPermissions`。
+     * ★ 正文按**字节**截到 8MB。
      * ★ 回来的是**数据**,不是 `Response`:没有流句柄可以继续操作。
+     * ★ `init.callId` 是**取消凭据**,不是工作区作用域(net.fetch 与工作区无关)。
+     *   在工具的调用里带上产生这次调用的 `callId`,用户点停止时已经发出的请求
+     *   会被真正中断,而不只是「阻止下一次请求」。见 `Scope` 的 callId 取值规则。
      */
     export function fetch(
       url: string,
-      init?: { method?: string; headers?: Record<string, string>; body?: string }
+      init?: { method?: string; headers?: Record<string, string>; body?: string; callId?: string }
     ): Thenable<{ status: number; headers: Record<string, string>; body: string }>
   }
 
@@ -318,8 +356,12 @@ declare module 'nextcowork' {
   export const storage: {
     /** 跟着这台机器走。 */
     global: Memento
-    /** 跟着当前工作区走。 */
-    workspace: Memento
+    /** 跟着**这次调用**的工作区走(见 `Scope`)。 */
+    workspace: {
+      get(key: string, options?: Scope): Thenable<string | null>
+      set(key: string, value: string | null, options?: Scope): Thenable<void>
+      keys(options?: Scope): Thenable<string[]>
+    }
   }
 
   /** `safeStorage` 加密。key 会被宿主自动加上 `plugin:<id>:` 前缀。 */
@@ -502,16 +544,16 @@ declare module 'nextcowork' {
 
   export namespace scm {
     /** 需要 `scm.read`。仓库开不出来(远程工作区 / 没装 git / 不是仓库)时这条调用失败。 */
-    export function status(): Thenable<{ branch: string; staged: string[]; unstaged: string[] }>
+    export function status(options?: Scope): Thenable<{ branch: string; staged: string[]; unstaged: string[] }>
     /** 一个文件的 diff。**没有「整仓 diff」**:那是一次无上限的输出,而 `status` 已经说了哪些文件变了。 */
-    export function diff(path: string, options?: { staged?: boolean }): Thenable<{ diff: string; binary: boolean; truncated: boolean }>
-    export function log(options?: { limit?: number }): Thenable<{ hash: string; subject: string; author: string; at: number }[]>
-    export function branches(): Thenable<{ current: string; branches: string[] }>
+    export function diff(path: string, options?: { staged?: boolean } & Scope): Thenable<{ diff: string; binary: boolean; truncated: boolean }>
+    export function log(options?: { limit?: number } & Scope): Thenable<{ hash: string; subject: string; author: string; at: number }[]>
+    export function branches(options?: Scope): Thenable<{ current: string; branches: string[] }>
     /** 以下四条需要 `scm.write`,并且走和用户手敲命令**同一条**审批链。 */
-    export function stage(paths: string[]): Thenable<void>
-    export function commit(message: string): Thenable<string>
-    export function createBranch(name: string, options?: { checkout?: boolean }): Thenable<void>
-    export function checkout(name: string): Thenable<void>
+    export function stage(paths: string[], options?: Scope): Thenable<void>
+    export function commit(message: string, options?: Scope): Thenable<string>
+    export function createBranch(name: string, options?: { checkout?: boolean } & Scope): Thenable<void>
+    export function checkout(name: string, options?: Scope): Thenable<void>
     /*
       ★ 没有 push / pull:它们把本机凭据用到远端,而失败形态(冲突、鉴权、
       远端 hook)不是一个返回值能如实回答的。

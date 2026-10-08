@@ -156,6 +156,40 @@ describe('PluginDocuments', () => {
     expect(saved.changed).toEqual({ path: 'report.docx', kind: 'modified' })
   })
 
+  it('marks model mutation as a side effect before dispatching apply', async () => {
+    const { docs, scope } = setup()
+    const sessionId = await openReport(docs, scope)
+    let marked = 0
+    const applied = await docs.handle('ncw.writer', WRITER, 'documents.apply', {
+      sessionId, generation: 1, modelRevision: 0, operationId: 'marked-apply', operations: replace(' world')
+    }, { ...scope, markSideEffectStarted: () => { marked++ } })
+    expect(marked).toBe(1)
+    expect(applied.data).toMatchObject({ appliedRevision: 1, dirty: true })
+  })
+
+  it('cancelled opens release the view instead of leaving an unreachable lease', async () => {
+    let reached: () => void = () => {}
+    let release: () => void = () => {}
+    const started = new Promise<void>((resolve) => { reached = resolve })
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { docs, sessions, engine, scope } = setupSwitchable({ slowResolvePath: { reached, gate } })
+    const existing = await openReport(docs, scope)
+    writeFileSync(join(workspace, 'other.docx'), 'other')
+    const controller = new AbortController()
+    const opening = openReport(docs, { ...scope, signal: controller.signal }, 'ncw.writer', WRITER, 'other.docx')
+    await started
+    controller.abort()
+    release()
+    await expect(opening).rejects.toThrow()
+    expect(engine.opened).toBe(2)
+    expect(engine.closed).toBe(1)
+    expect(sessions.dirtySessions()).toEqual([])
+    expect((await docs.handle('ncw.writer', WRITER, 'documents.getState', { sessionId: existing }, scope)).data).toMatchObject({ sessionId: existing })
+    const reopened = await openReport(docs, scope, 'ncw.writer', WRITER, 'other.docx')
+    expect(reopened).toBeTruthy()
+    expect(engine.opened).toBe(3)
+  })
+
   it('does not report a change when saving a document that has no edits', async () => {
     const { docs, scope } = setup()
     const sessionId = await openReport(docs, scope)
@@ -279,6 +313,50 @@ describe('PluginDocuments', () => {
     await docs.releasePlugin('ncw.writer')
     expect(retired).toEqual(['ncw.writer'])
     await expect(docs.handle('ncw.writer', WRITER, 'documents.getState', { sessionId }, scope)).rejects.toMatchObject({ message: expect.stringContaining('[session_closed]') })
+  })
+
+  it('★ 排队期间这次调用被取消 → 轮到它时不再动手,报普通取消(而不是 result_unknown)', async () => {
+    const { docs, sessions, scope } = setup()
+    const sessionId = await openReport(docs, scope)
+    // 用一次**挂住的导出**占住串行队列,让后面的 apply 真的排在它后面。
+    let releaseFirst: () => void = () => {}
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const realExport = sessions.exportDocument.bind(sessions)
+    sessions.exportDocument = async (input) => { await firstGate; return realExport(input) }
+
+    const first = docs.handle('ncw.writer', WRITER, 'documents.export', { sessionId, path: 'first.pdf', format: 'pdf' }, scope)
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+
+    const controller = new AbortController()
+    const queued = docs.handle('ncw.writer', WRITER, 'documents.apply', {
+      sessionId, generation: 1, modelRevision: 0, operationId: 'op-cancelled', operations: replace(' never')
+    }, { ...scope, signal: controller.signal })
+    // 还在排队时这次调用被取消(工具停止 / RPC 到点)
+    controller.abort()
+    releaseFirst()
+    await first
+    await expect(queued).rejects.toMatchObject({ code: 'rejected', message: 'the call was cancelled' })
+    // 没有应用到模型上 —— 重试是安全的。
+    expect(readFileSync(join(workspace, 'report.docx'), 'utf8')).toBe('hello')
+  })
+
+  it('★★ 保存 / 导出这一类会写盘的动作,在越过路径重验之后才记「副作用点」', async () => {
+    const { docs, scope } = setup()
+    const sessionId = await openReport(docs, scope)
+    await docs.handle('ncw.writer', WRITER, 'documents.apply', { sessionId, generation: 1, modelRevision: 0, operationId: 'a', operations: replace('!') }, scope)
+    const marks: number[] = []
+    const saved = await docs.handle('ncw.writer', WRITER, 'documents.save', { sessionId }, {
+      ...scope,
+      markSideEffectStarted: () => { marks.push(1) }
+    })
+    /*
+      ★ 这一份值就是 manager 判 result_unknown 的凭据:保存一旦越过它就被交给会话
+      管理器,再取消也拿不回来(所以之后必须报「结果未知」而不是可安全重试)。
+      路径重验(`resolveWorkspacePath` 那一道)排在它**之前** —— 被那道门拒绝的
+      保存不该被算成「可能已经写了」。
+    */
+    expect(marks).toHaveLength(1)
+    expect(saved.changed).toEqual({ path: 'report.docx', kind: 'modified' })
   })
 })
 

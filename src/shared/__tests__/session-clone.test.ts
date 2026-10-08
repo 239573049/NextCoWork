@@ -13,6 +13,15 @@ const ref = (ownerId: string, fileName: string): string =>
 
 const text = (value: string): { type: 'text'; text: string } => ({ type: 'text', text: value })
 
+function toolResultWithVideos(id: string, urls: string[]): AgentMessage {
+  return toolResultMessage(id, [{
+    type: 'tool_result',
+    callId: `call-${id}`,
+    isError: false,
+    output: { content: 'ok', videos: urls.map((url) => ({ url, mime: 'video/mp4', size: 100 })) }
+  }], 1)
+}
+
 function toolResultWithImages(id: string, dataRefs: string[]): AgentMessage {
   return toolResultMessage(id, [{
     type: 'tool_result',
@@ -55,6 +64,15 @@ describe('ownedImageFileNames', () => {
     ]
     expect(ownedImageFileNames(messages, 'src')).toEqual(['a.png', 'b.png'])
   })
+
+  it('★ 生成的视频也要收 —— 漏掉它,新会话里的地址指向源会话目录,读不出来', () => {
+    const messages = [
+      userMessage('u1', [{ type: 'image', mime: 'image/png', dataRef: ref('src', 'a.png') }], 1),
+      toolResultWithVideos('r2', [ref('src', 'clip.mp4'), ref('other', 'theirs.mp4'), 'https://cdn/x.mp4'])
+    ]
+    // 顺序:图片在前、视频接在它之后(既有条目的序号因此一个都不变)
+    expect(ownedImageFileNames(messages, 'src')).toEqual(['a.png', 'clip.mp4'])
+  })
 })
 
 describe('rehomeImageRefs', () => {
@@ -78,5 +96,18 @@ describe('rehomeImageRefs', () => {
   it('returns the same message object when nothing needs rewriting', () => {
     const plain = assistantMessage('a1', [text('hi')], 1)
     expect(rehomeImageRefs(plain, 'src', moved)).toBe(plain)
+  })
+
+  it('★ 视频地址同样改写(用户附件与工具产出两条都要)', () => {
+    const tool = toolResultWithVideos('r2', [ref('src', 'clip.mp4'), ref('other', 'theirs.mp4')])
+    const next = rehomeImageRefs(tool, 'src', moved)
+    const videos = next.parts[0]?.type === 'tool_result' ? next.parts[0].output.videos : undefined
+    // 自己那份改成新地址,别人的原样保留
+    expect(videos?.map((video) => video.url)).toEqual([ref('dst', 'clip.mp4'), ref('other', 'theirs.mp4')])
+  })
+
+  it('搬不动的视频保留原引用(源文件已丢,分支不比源会话更坏)', () => {
+    const tool = toolResultWithVideos('r2', [ref('src', 'lost.png')])
+    expect(rehomeImageRefs(tool, 'src', moved)).toBe(tool)
   })
 })

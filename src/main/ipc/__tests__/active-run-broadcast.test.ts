@@ -102,7 +102,7 @@ describe('agent:activeRuns', () => {
     const off = wire()
     const wc = bystander()
     const parent = runs.create(req())
-    const child = runs.create(req({ runId: 'child-run', parentRunId: parent.runId, depth: 1 }))
+    const child = runs.create(req({ runId: 'child-run', sessionId: 'child-session', parentRunId: parent.runId, parentSessionId: parent.sessionId, depth: 1 }))
 
     // 子 run 既不进集合,也不该单独触发一次内容相同的广播。
     expect(wc.broadcasts()).toHaveLength(1)

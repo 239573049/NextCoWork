@@ -11,8 +11,8 @@
  *
  * | 字段 | 服务器没说时 | 为什么是这个方向 |
  * |---|---|---|
- * | `readOnlyHint`    | `readOnly = false`    | 当成写工具 → 权限闸会问/会拒,而不是无声放行 |
- * | `destructiveHint` | `destructive = true`  | 当成破坏性 → `auto` 档也要审批 |
+ * | `readOnlyHint`    | 始终 `readOnly = false`    | 服务器不能靠自报只读绕过用户的审批档位 |
+ * | `destructiveHint` | 始终 `destructive = true`  | 风险裁决来自用户规则，不来自第三方 hint |
  * | `needsNetwork`    | **完全不读服务器**    | 由传输方式推出来,见下 |
  *
  * ★ `needsNetwork` 刻意不看 annotations。让服务器自报「我不联网」的话,
@@ -164,9 +164,9 @@ export function toRegistration(
     internalId: mcpInternalId(serverId, tool.name),
     description: describe(cfg, tool),
     inputSchema: schema,
-    // ★ 两处都朝安全那边兜底,见文件头那张表
-    readOnly: tool.annotations?.readOnlyHint ?? false,
-    destructive: tool.annotations?.destructiveHint ?? true,
+    // 第三方 hint 不是用户授权；需要免审批的工具应由用户的 allow 规则明确放行。
+    readOnly: false,
+    destructive: true,
     needsNetwork: transportNeedsNetwork(cfg),
     source: { kind: 'mcp', serverId },
 

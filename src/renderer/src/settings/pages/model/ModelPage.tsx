@@ -68,12 +68,16 @@ import { parseModelTab } from "./tabs";
 import { useI18n, type TranslationKey } from "../../../i18n";
 import { ModelProtocolEditor, modelProtocolSummary } from "./ModelProtocol";
 import { ImageModelPage } from "./ImageModelPage";
+import { VideoModelPage } from "./VideoModelPage";
 
 export function ModelPage({ settings, sub, patch }: SettingsPageProps): ReactNode {
   const tab = parseModelTab(sub);
   if (tab === "management") return <ModelConsole />;
   // 图片页要 settings/patch:页脚那行「对话生图使用的模型」是全局设置(见 ImageGenModelRow)
   if (tab === "image") return <ImageModelPage settings={settings} patch={patch} />;
+  // 视频页同理 —— 它有自己的开关(`videoGenerationEnabled`)与点名模型(`videoModel`),
+  // 而两者的语义与生图那条**不同**(关掉只挡新建,见 settings.ts 上那段)。
+  if (tab === "video") return <VideoModelPage settings={settings} patch={patch} />;
   if (tab !== "text") return <StubModalityPage modality={tab} />;
   return <LegacyTextTab settings={settings} />;
 }

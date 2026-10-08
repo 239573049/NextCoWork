@@ -287,16 +287,20 @@ describe('种子表 × presets', () => {
 describe('抄写校验 · Anthropic', () => {
   const anth = rows.filter((p) => p.modelId.startsWith('claude-'))
 
-  it('15 个 SKU,全部单档(官方费率卡已无 >200K 档)', () => {
-    expect(anth.length).toBe(15)
-    for (const p of anth) expect(p.tiers.length, p.modelId).toBe(1)
+  /** 两档行(目前只有 Haiku 5.5)每一档都要过下面的倍率校验,不能只看 tiers[0] */
+  const anthRates = (p: ModelPricing): TokenRates[] => p.tiers.map((t) => t.rate as TokenRates)
+
+  it('16 个 SKU,除 Haiku 5.5 外全部单档(官方费率卡已无 >200K 档)', () => {
+    expect(anth.length).toBe(16)
+    for (const p of anth) expect(p.tiers.length, p.modelId).toBe(p.modelId === 'claude-haiku-5-5' ? 2 : 1)
   })
 
   it('缓存写 = 1.25× 输入,1h 写 = 2× 输入', () => {
     for (const p of anth) {
-      const r = p.tiers[0]?.rate as TokenRates
-      expect(r.cacheWrite, p.modelId).toBeCloseTo(r.input * 1.25, 6)
-      expect(r.cacheWrite1h, p.modelId).toBeCloseTo(r.input * 2, 6)
+      for (const r of anthRates(p)) {
+        expect(r.cacheWrite, p.modelId).toBeCloseTo(r.input * 1.25, 6)
+        expect(r.cacheWrite1h, p.modelId).toBeCloseTo(r.input * 2, 6)
+      }
     }
   })
 
@@ -316,9 +320,8 @@ describe('抄写校验 · Anthropic', () => {
       ['claude-opus-5-5', 0.05],
     ])
     for (const p of anth) {
-      const r = p.tiers[0]?.rate as TokenRates
       const factor = exceptionFactor.get(p.modelId) ?? 0.1
-      expect(r.cacheRead, p.modelId).toBeCloseTo(r.input * factor, 6)
+      for (const r of anthRates(p)) expect(r.cacheRead, p.modelId).toBeCloseTo(r.input * factor, 6)
     }
     // 上一代同价位机型确实是 0.1x($1.00)—— 证明这个例外是**代际**差异,不是笔误
     expect(byId('claude-fable-5').tiers[0]?.rate.cacheRead).toBe(1.0)
@@ -340,10 +343,21 @@ describe('抄写校验 · Anthropic', () => {
     })
   })
 
-  it('输出 = 5× 输入(全 15 条都成立)', () => {
+  /**
+   * 需求:2026-10-08 收录 Haiku 5.5,官方定价页按 prompt 长度分两档。
+   * 钉**阈值与绝对数**:阈值是 100K(写成别家的 200K / 272K 会让 100K–200K 的请求
+   * 少收 5 倍),高档是低档 ×5(不是 OpenAI 那种输入 ×2 / 输出 ×1.5 的不对称)。
+   */
+  it('Haiku 5.5:阈值 100K,两档数值钉死,高档五项一律 ×5', () => {
+    expect(byId('claude-haiku-5-5').tiers).toEqual([
+      { upToInputTokens: 100_000, rate: { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheWrite1h: 0.2, cacheRead: 0.01 } },
+      { upToInputTokens: null, rate: { input: 0.5, output: 2.5, cacheWrite: 0.625, cacheWrite1h: 1, cacheRead: 0.05 } },
+    ])
+  })
+
+  it('输出 = 5× 输入(全 16 条、每一档都成立)', () => {
     for (const p of anth) {
-      const r = p.tiers[0]?.rate as TokenRates
-      expect(r.output, p.modelId).toBeCloseTo(r.input * 5, 6)
+      for (const r of anthRates(p)) expect(r.output, p.modelId).toBeCloseTo(r.input * 5, 6)
     }
   })
 })
@@ -412,6 +426,7 @@ describe('抄写校验 · 长上下文档', () => {
     const tiered = rows.filter((p) => p.tiers.length > 1).map((p) => p.modelId)
     expect(tiered.sort()).toEqual([
       'MiniMax-M3',
+      'claude-haiku-5-5',
       'doubao-seed-1.6-flash',
       'doubao-seed-1.6-vision',
       'doubao-seed-2.0-code',

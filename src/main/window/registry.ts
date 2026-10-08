@@ -21,7 +21,7 @@ import type { WindowKind } from '../../shared/domain/tab'
  * ⌥Space 快捷窗的还原按钮不该跟着换字形)。
  */
 export type TargetedEventChannel =
-  'agent:event' | 'terminal:data' | 'terminal:exit' | 'window:maximized' | 'connection:auth' | 'documentEngine:changed'
+  'agent:event' | 'terminal:data' | 'terminal:exit' | 'window:maximized' | 'window:visibility' | 'connection:auth' | 'documentEngine:changed'
 /** 真·全局状态变更,所有窗口都该知道 */
 export type GlobalEventChannel = Exclude<EventChannel, TargetedEventChannel>
 
@@ -157,6 +157,26 @@ class WindowRegistry {
     if (!set) return
     set.delete(sender.id)
     if (set.size === 0) this.topics.delete(topic)
+  }
+
+  /** 这个主题从此不会再有事件(run 已被回收):所有窗口的订阅一起摘掉,主题表不随 run 数增长 */
+  dropTopic(topic: string): void {
+    this.topics.delete(topic)
+  }
+
+  /**
+   * 这个窗口不再看任何 run 的正文(最小化 / 隐藏)。
+   *
+   * ★ 只摘 run 主题,终端主题不动:终端流本来就只在终端 Tab 挂着时订阅,而它的
+   * 回滚缓冲由主进程封顶;摘掉的话恢复可见时终端会缺一段输出,且没有补齐路径。
+   * run 正文有 —— 窗口回来时按快照 + 历史重建(渲染层 `startAgentEventPump`)。
+   */
+  unsubscribeRuns(sender: WebContents): void {
+    for (const [topic, ids] of this.topics) {
+      if (!topic.startsWith('run:')) continue
+      ids.delete(sender.id)
+      if (ids.size === 0) this.topics.delete(topic)
+    }
   }
 
   /**

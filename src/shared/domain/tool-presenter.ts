@@ -103,6 +103,17 @@ export type ToolShape =
    * 唯一证据,而 Agent 一大半的浏览器动作(text/click)的结果都是**它**。
    */
   | 'screenshot'
+  /**
+   * 对话内生成视频那一个(`generate_video`)。
+   *
+   * 需求:它展开后是一张**视频卡**:一张 `<video controls>` 加一条任务状态行。
+   * 原先归在 `network`,`NetworkDetail` 成功时只把 `output.content` 画成代码块、
+   * 完全不读 `output.videos` —— 表现为"模型说好了,卡片里只有一句英文回执"。
+   *
+   * ★ 与 `image` 分开:图片卡是"按格出图 + 提示词区",而视频卡的核心是
+   * **一条异步任务的生命周期**(排队/生成/下载/完成),那在图片上不存在。
+   */
+  | 'video'
   | 'external'
 
 /**
@@ -221,6 +232,15 @@ export const PRESENTER_COPY_KEYS = [
   'chat.tool.title.editImage',
   // 把对话里的图写进工作区(SaveImage)。行的主语是目标文件,同 Write
   'chat.tool.title.saveImage',
+  /*
+    对话内生成视频。三个动作各有标签:提交/查询/取消 —— 行的主语是 prompt 片段
+    (提交)或什么都不给(查询/取消,因为它们的入参里只有 job_id,对人没有信息量)。
+  */
+  'chat.tool.title.generateVideo',
+  'chat.tool.title.checkVideo',
+  'chat.tool.title.cancelVideo',
+  // 把对话里的视频写进工作区(SaveVideo)。主语同 SaveImage,是目标文件
+  'chat.tool.title.saveVideo',
   /*
     浏览器那一族的动作标签(`browser_*`)。
     ★ 需求:这一族此前**全都**没登记,兜底路径把 internalId 的可读化结果直接画到行里
@@ -918,6 +938,23 @@ const REGISTRY: Record<string, ToolPresenter> = {
     而 network 的渲染器画不出图。)
     ★ 不给 summary:张数与进度由卡片本身和进度 chip(`2/4`)说,再猜一个只会是噪声。
   */
+  generate_video: {
+    shape: 'video',
+    line: (i) =>
+      valueLine(
+        // 提交/查询/取消是三种动作,行标签跟着 action 走(缺省 = 生成)
+        pick(i, 'action') === 'status'
+          ? 'chat.tool.title.checkVideo'
+          : pick(i, 'action') === 'cancel'
+            ? 'chat.tool.title.cancelVideo'
+            : 'chat.tool.title.generateVideo',
+        clip(pick(i, 'prompt'), 48)
+      )
+  },
+  SaveVideo: {
+    shape: 'mutate',
+    line: (i) => fileLine('chat.tool.title.saveVideo', pick(i, 'file_path'))
+  },
   generate_image: {
     shape: 'image',
     line: (i) =>
@@ -1118,6 +1155,7 @@ const PINNED_SHAPES: Record<ToolShape, boolean> = {
   interaction: false,
   widget: false,
   image: true,
+  video: true,
   screenshot: true,
   external: false
 }

@@ -171,13 +171,14 @@ export function getSessionInput(sessionId: string): Promise<SessionInputState | 
 }
 
 /**
- * ★ `immediate` 两档(协议里写了完整理由):草稿按键走防抖,
- * 队列的增删改走立即落盘 —— 丢一整条排队消息与丢半个词的代价不对等。
+ * 草稿落盘。★ `immediate` 两档:按键走主进程 500ms 防抖;绑定会话、撤回到输入框这类
+ * 离散动作立即写。**只有草稿** —— 队列由主进程独占(见 `services/agent.ts` 的
+ * `queueSessionInput`),渲染层整份覆盖会把已经续跑掉的排队消息写回去。
  */
-export function persistSessionInput(
+export function persistSessionDraft(
   sessionId: string,
-  state: SessionInputState,
+  draft: string,
   immediate = false
 ): void {
-  send('session:persistInput', { sessionId, state, immediate })
+  send('session:persistDraft', { sessionId, draft, immediate })
 }

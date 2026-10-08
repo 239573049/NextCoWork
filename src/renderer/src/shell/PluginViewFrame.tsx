@@ -31,7 +31,8 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { THEME_TOKENS } from '../../../shared/domain/theme'
 import { cn } from '../lib/cn'
-import { readWorkspaceFile, writeWorkspaceFile } from '../services/workspace-files'
+import { readWorkspaceFile } from '../services/workspace-files'
+import { saveDocumentFile } from '../actions/workspace-files'
 import { setCustomEditorDirty } from '../services/plugins'
 
 export interface PluginViewFrameProps {
@@ -174,7 +175,7 @@ export function PluginViewFrame({ pluginId, path, label, className, document: bo
           `encoding: 'base64'` 是图片编辑器的存回支线:主进程按 base64 解码并
           只允许覆写已分类为 image 的文件。缺省不送该字段 = 文本,行为不变。
         */
-        void writeWorkspaceFile({
+        void saveDocumentFile({
           workspaceId: bound.workspaceId,
           path: bound.path,
           content: message.data,

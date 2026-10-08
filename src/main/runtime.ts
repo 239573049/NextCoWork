@@ -18,7 +18,7 @@ import type { RunRequest, ThinkingLevel } from '../shared/agent/run-request'
 import { MAX_DEPTH } from '../shared/agent/run-request'
 import type { AgentEvent, RunStatus } from '../shared/agent/event'
 import { agentError, type AgentError } from '../shared/agent/error'
-import { userMessage, visibleText, type AgentMessage, type SubagentResult } from '../shared/agent/message'
+import { visibleText, type AgentMessage, type SubagentResult } from '../shared/agent/message'
 import type { AgentDefinition } from '../shared/domain/agent-def'
 import { minPermission } from '../shared/agent/permission'
 import { DEFAULT_WORKSPACE_SETTINGS } from '../shared/domain/workspace'
@@ -26,16 +26,12 @@ import {
   DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
   isUpstreamIdleTimeoutSeconds
 } from '../shared/domain/settings'
-import type { ApproveFn } from './kernel/agent-session'
 import { AgentSession } from './kernel/agent-session'
 import { createTodoReconciler } from './kernel/todo-reconciliation'
 import { abortable } from './kernel/abort'
 import type { KernelHost } from './kernel/host'
 import { nodeHost } from './kernel/host'
-import { NETWORK_SWITCH_TOOLS, evaluate } from './kernel/permission-gate'
-import { decideAfterHooks, decideBeforeHooks } from './kernel/permission-decision'
-import { addLocalPermissionRule, readLocalSettings } from './kernel/local-settings'
-import { matchPermissionRules, suggestPermissionRule } from '../shared/agent/permission-rule'
+import { createApprovalFn, type ApprovalDeps, type ApprovalPluginInterceptor } from './kernel/approval'
 import { interactions, type InteractionDraft } from './kernel/interaction-gate'
 import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
@@ -48,7 +44,7 @@ import { readGitContext } from './kernel/git-context'
 import { INSTRUCTIONS_MAX, sanitizeInstructions, scanInstructions } from './kernel/instructions'
 import { clampWithEllipsis } from './kernel/text'
 import { readTextBounded } from './imports/assets'
-import { managedInstructionsPath } from './imports/service'
+import { managedInstructionsPath } from './imports/managed-paths'
 import { agentRegistry, resetAgentRegistries } from './kernel/agent/registry'
 import { MODES_DIR, PROJECT_MODES_PREFIX, scanModes } from './kernel/mode/load'
 import { modePromptFor, modeRegistry, resetModeRegistries } from './kernel/mode/registry'
@@ -63,6 +59,7 @@ import { SkillActivationBarrier } from './kernel/skill/activation'
 import { buildSkillExtractionBlock, writtenProjectSkillNames } from './kernel/skill/extraction'
 import { builtinTools, registerToolProvider } from './kernel/tool/builtin'
 import { taskTool } from './kernel/tool/builtin/task'
+import { installSkillToolPorts, resetSkillToolPortsForTest } from './kernel/tool/skill-port'
 import { syncPluginTools } from './kernel/tool/plugin-tools'
 import type { SpawnSubagentFn, ToolRegistration } from './kernel/tool/registry'
 import { ToolRegistry } from './kernel/tool/registry'
@@ -85,7 +82,7 @@ import {
 } from '../shared/domain/presets'
 import type { ModelAlias, UpstreamProtocol } from '../shared/domain/provider'
 import { subagentModelSelection } from '../shared/domain/model-selection'
-import { auxiliaryThinkingLevel, normalizeModelThinkingLevel } from '../shared/domain/model-runtime'
+import { normalizeModelThinkingLevel } from '../shared/domain/model-runtime'
 import { subagentThinkingSelection, type SubagentThinking } from '../shared/domain/subagent-thinking'
 import { searchSecretRef } from '../shared/domain/search'
 import { searchStatuses } from './search/status'
@@ -94,6 +91,11 @@ import { schedulingBridgeFor } from './scheduled/bridge'
 import { shellBridgeFor } from './agent-shells'
 import { imageGenBridgeFor } from './kernel/image-gen'
 import { sessionImageStoreFor } from './session-images'
+import { videoGenBridgeFor } from './video-gen'
+import { sessionVideoStoreFor } from './session-videos'
+import { getVideoManager, installVideoRuntime } from './video-generation/runtime'
+import { getVideoJob as getVideoJobRow, listRecoverableVideoJobs, listVideoJobsForSession, putVideoJob, removeVideoJob } from './db/video-jobs'
+import type { VideoJobView } from '../shared/domain/video-generation'
 import { resolveImageDataRef } from './kernel/upstream/images'
 import { parseCredential } from '../shared/domain/credential'
 import { listResolvedModels } from './state/model-bindings'
@@ -107,9 +109,8 @@ import { SessionTitleGenerator } from './session-title'
 import { AgentDraftGenerator } from './agent-draft'
 import { CommitMessageGenerator } from './commit-message'
 import type { SessionChange } from '../shared/domain/session'
-import type { CanonicalRequest } from './kernel/upstream/canonical'
 import { ulid } from '../shared/util/id'
-import { clearHookFailuresForTest, runHookEvent } from './hooks'
+import { clearHookFailuresForTest, installHookHostPorts, resetHookHostPortsForTest, runHookEvent } from './hooks'
 import {
   bindGoalRun, goalProposalsFor, handleTurnEnd, installGoalHost, pauseGoal, prepareGoalMessage, releaseGoalRun,
   resetGoalRuntimeForTest, restoreGoal, stopAllGoals, wakeGoal, type TurnEndContext
@@ -137,7 +138,7 @@ let agentDrafts: AgentDraftGenerator | null = null
 let commitMessages: CommitMessageGenerator | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
-let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<{ env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void; ask?(prompt: string, rejected: boolean): Promise<string> }>) | undefined
+let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<Parameters<typeof connectSshEnvironment>[2]>) | undefined
 
 export function installEnvironmentInteraction(authentication: NonNullable<typeof environmentAuthentication>, status: NonNullable<typeof environmentStatusSink>): void {
   environmentAuthentication = authentication
@@ -249,6 +250,22 @@ export function setAccountsChangeListener(fn: ((providerId: string) => void) | n
 }
 
 /**
+ * 某条视频任务的状态变了（提交成功 / 进度 / 落盘 / 失败）。
+ *
+ * ★ 和上面那几个 sink 是同一个套路、同一个理由：视频广播要 `windows.emitToAll`
+ * (`ipc/video.ts`)，而那个模块拖着 `electron` —— runtime 一旦静态 import 它，
+ * 文件头那条「零 electron import」当场破，`agent-run.test.ts` 的无头链路随之断。
+ * 所以真正的广播器由 `ipc/index.ts` 在 `registerIpc()` 时装上，
+ * 没装（纯内核测试）时是一次 no-op。
+ */
+let videoOnChange: ((view: VideoJobView) => void) | null = null
+
+/** 由 `ipc/index.ts` 在注册阶段安装；纯 Node 测试中保持 no-op。 */
+export function setVideoJobChangeListener(fn: (view: VideoJobView) => void): void {
+  videoOnChange = fn
+}
+
+/**
  * 装宿主。**必须在第一个 run 之前**,由 `main/index.ts` 在 `app.whenReady()` 里调用 ——
  * `safeStorage` 与 `net.fetch` 都要求 app ready。
  */
@@ -279,6 +296,24 @@ export function installHost(h: KernelHost): void {
   // 辅助请求那几个路由器同样抓着旧 host(`shutdownSessionTitles` 已经处理了标题那一个)
   agentDrafts = null
   commitMessages = null
+  /*
+    ★ 钩子执行器(零 runtime import)的宿主口。访问器全部**现取**,不做快照 ——
+    换宿主之后同一批判定钩子该走新的上游与新的时钟(和上面 `installSearchConfig`
+    捕获 `h` 的理由相反:那几个捕获的是入参,这几个必须闭包到 `getHost()`/`getRouter()`)。
+  */
+  installHookHostPorts({
+    host: () => getHost(),
+    upstream: () => getRouter(),
+    history: (sessionId) => store.getHistory(sessionId),
+    session: (sessionId) => store.getSession(sessionId)
+  })
+  /*
+    ★ Skill 工具的遥测口。内核那侧零 store 依赖(见 `kernel/tool/skill-port.ts`),
+    这一行是它在生产上的唯一来源;端口没装时工具只是不记遥测,正文照取。
+  */
+  installSkillToolPorts({
+    recordSkillTrigger: (skillId, workspaceId) => { store.recordSkillTrigger(skillId, workspaceId) }
+  })
 }
 
 export function getHost(): KernelHost {
@@ -287,8 +322,8 @@ export function getHost(): KernelHost {
    * 已经把 `nodeHost()` 定义成真实默认值,Electron 侧只覆盖 paths/secrets/fetch 三项。
    * 于是无头测试跑的是和 dev 完全同一条装配路径,只是宿主换了一层皮。
    */
-  host ??= withDemo(nodeHost())
-  return host
+  if (host === null) installHost(withDemo(nodeHost()))
+  return host!
 }
 
 /**
@@ -867,22 +902,37 @@ export function installPluginToolPreparation(prepare: () => Promise<void>): void
 }
 
 /**
- * 插件的工具拦截器。`approveWith` 在 `decideAfterHooks` 那一步问它。
+ * 插件的工具拦截器。审批策略(`kernel/approval.ts`)在 `decideAfterHooks` 那一步问它。
  *
  * ★ 没装(纯内核测试、插件系统还没起来)时是一个**弃权**的默认值,
  * 不是一个抛错的桩:一条工具调用不该因为插件系统没初始化就走不下去。
+ *
+ * ★ 类型是 `ApprovalPluginInterceptor` 的别名 —— 判定逻辑搬去 `kernel/approval.ts`
+ * 之后,接口的**归属**也跟过去,这里只保留 runtime 侧那个安装口(ipc 依赖 runtime)。
  */
-export type PluginInterceptor = (input: {
-  toolName: string
-  toolInput: unknown
-  readOnly: boolean
-  destructive: boolean
-}) => Promise<{ deny?: string; ask?: boolean }>
+export type PluginInterceptor = ApprovalPluginInterceptor
 
 let pluginInterceptor: PluginInterceptor | null = null
 
 export function installPluginInterceptor(fn: PluginInterceptor | null): void {
   pluginInterceptor = fn
+}
+
+/**
+ * 审批策略的注入口。分配一次、闭包读模块级单例(和上面那排 sink 同一个套路):
+ * 于是 `installPluginInterceptor` 之后跑起来的 run 会用上新的拦截器,不必重装依赖。
+ */
+const approvalDeps: ApprovalDeps = {
+  upstream: () => getRouter(),
+  runHooks: (context) => runHookEvent(context),
+  interactions,
+  modeFor: (workspaceId, mode) => modeRegistry(workspaceId).resolve(mode),
+  reviewer: () => {
+    const { permissionReviewerModel: model, permissionReviewerModelProviderId: modelProviderId } = store.getSettings()
+    return { model, ...(modelProviderId === undefined ? {} : { modelProviderId }) }
+  },
+  host: () => getHost(),
+  pluginInterceptor: () => pluginInterceptor
 }
 
 /**
@@ -1032,6 +1082,7 @@ export async function shutdownMcp(): Promise<void> {
 export function initRuntime(h: KernelHost): void {
   installHost(h)
   seed()
+  installVideoManager()
   /*
     ★ **后台拉起,不 await。**每台服务器的握手有 30 秒预算,而 stdio 那一支
     还要先 `npx` 下一个包 —— 串起来足够让首屏白屏十几秒。
@@ -1039,6 +1090,53 @@ export function initRuntime(h: KernelHost): void {
     设置页照实显示;对话那一侧只是少几个工具,不是启动不了。
   */
   getMcp().connectEnabledInBackground(store.listMcpServers())
+}
+
+/**
+ * 装配视频后台 manager(幂等)。
+ *
+ * ★ 依赖**全部延迟取**:provider / 别名 / 凭据 / 设置都是函数,manager 每次用
+ * 现读 —— 于是改设置、切账户立刻对它生效(与 `providerConfig` 那条同一条规矩)。
+ *
+ * ★ 必须在这里装配而不是在 `initRuntime` 里一次性接死:manager 是**进程级单例**
+ * (任务要跨 run、跨会话存活),而 `installVideoRuntime` 会在切换账户时被重装 ——
+ * 那时旧的那个要先 `shutdown`(它停的是本机 worker,**不取消云端任务**)。
+ */
+function installVideoManager(): void {
+  installVideoRuntime({
+    store: {
+      get: (id) => getVideoJobRow(id),
+      put: (job) => putVideoJob(job, JSON.stringify(job)),
+      remove: (id) => removeVideoJob(id),
+      listRecoverable: (profile) => listRecoverableVideoJobs(profile),
+      listForSession: (sessionId) => listVideoJobsForSession(sessionId)
+    },
+    providers: () => store.listProviders(),
+    aliases: () => listResolvedModels(),
+    preferredModel: () => {
+      const settings = store.getSettings()
+      return settings.videoModel === ''
+        ? null
+        : { alias: settings.videoModel, providerId: settings.videoModelProviderId }
+    },
+    // ★ 「对话视频生成」开关:**只管新建**(见 settings.ts 上那段)。
+    enabled: () => store.getSettings().videoGenerationEnabled === true,
+    credential: async (ref) => parseCredential(await getHost().secrets.get(ref)),
+    fetch: (input, init) => getHost().fetch(input, init),
+    now: () => getHost().clock.now(),
+    schedule: (ms, fn) => {
+      const timer = setTimeout(fn, ms)
+      return { cancel: () => { clearTimeout(timer) } }
+    },
+    retrieve: async (job, asset) =>
+      sessionVideoStoreFor({ sessionId: job.sessionId, host: getHost }).download(
+        { url: asset.url, ...(asset.headers === undefined ? {} : { headers: asset.headers }), ...(asset.mime === undefined ? {} : { mime: asset.mime }) },
+        new AbortController().signal
+      ),
+    onChange: (view) => videoOnChange?.(view)
+  })
+  // ★ 启动恢复:只查询/下载,**绝不重复提交**(见 manager.resume)。
+  getVideoManager()?.resume(currentConfigScope())
 }
 
 /**
@@ -1072,6 +1170,13 @@ export async function refreshRuntimeForConfigScope(): Promise<void> {
   // 哪家限流过),留着会让新账户的第一个会话绕开一家其实没问题的供应商。
   shutdownSessionTitles()
 
+  /*
+    ★ 视频 manager 也要重装:它攥着**上一账户的凭据读法**,而任务表按
+    config profile 分开 —— 不重装的话,新账户的 manager 会拿旧账户的
+    provider 列表去续查旧任务(见 `manager.resume` 里那条凭据指纹判断)。
+    `installVideoRuntime` 自己会先 shutdown 掉旧的那个(停本机 worker)。
+  */
+  installVideoManager()
   // 惰性单例:下一次 `getTools()` / `getRouter()` / `getEnvironments()` 会按新作用域重建。
   tools = null
   router = null
@@ -1423,6 +1528,96 @@ export function installChildRunLauncher(fn: ChildRunLauncher): void {
   childRunLauncher = fn
 }
 
+/**
+ * 后台子代理跑完之后,谁来把结果交回主代理。
+ *
+ * ★ 原先是渲染层:它收到子 run 的 `run_end` 才调一次 `send()`。没有窗口在看那条
+ * 会话时这一步就不会发生,结果烂在库里。现在由 `main/session-runtime.ts` 接手,
+ * 插槽的接线方向同 `installChildRunLauncher`(ipc 依赖 runtime,反之不然)。
+ * 没装(纯内核测试)时什么都不做,回执停在 pending —— 与旧行为下「没有窗口」一致。
+ */
+export type BackgroundChildHandler = (
+  report: { sessionId: string; callId: string; childRunId: string; subagentType?: string; text: string; summary?: string },
+  status: RunStatus
+) => void
+
+let backgroundChildHandler: BackgroundChildHandler | null = null
+
+export function installBackgroundChildHandler(fn: BackgroundChildHandler | null): void {
+  backgroundChildHandler = fn
+}
+
+/** 截 Task 回执上那截预览的长度 —— 与 `subagent_end.summary` 同一个口径 */
+const SUBAGENT_SUMMARY_CHARS = 240
+
+/**
+ * 从父会话的 Task 回执恢复一个后台子代理的交付物 —— 重启之后用户手动点「处理」走这条。
+ *
+ * ★ 全文读子会话的**最后一条助手消息**(`lastAssistantMessage`),不解析整段子转录。
+ * 子会话 id 的派生与 `childRequestFor` 完全一致。
+ */
+export function readBackgroundReport(sessionId: string, callId: string): {
+  sessionId: string
+  callId: string
+  childRunId: string
+  subagentType?: string
+  text: string
+  summary?: string
+  reportStatus?: NonNullable<SubagentResult['reportStatus']>
+} | undefined {
+  let receipt: SubagentResult | undefined
+  let subagentType: string | undefined
+  for (const message of store.getHistory(sessionId)) {
+    for (const part of message.parts) {
+      if (part.type === 'tool_result' && part.callId === callId && part.subagent !== undefined) receipt = part.subagent
+      if (part.type === 'tool_call' && part.callId === callId && typeof part.input === 'object' && part.input !== null) {
+        const record = part.input as Record<string, unknown>
+        const declared = record['subagent_type'] ?? record['subagentType']
+        if (typeof declared === 'string' && declared.trim() !== '') subagentType = declared
+      }
+    }
+  }
+  if (receipt === undefined || receipt.background !== true) return undefined
+  const last = store.lastAssistantMessage(`${sessionId}:sub:${receipt.childRunId}`)
+  return {
+    sessionId,
+    callId,
+    childRunId: receipt.childRunId,
+    ...(subagentType === undefined ? {} : { subagentType }),
+    text: last === undefined ? '' : visibleText(last),
+    ...(receipt.summary === undefined ? {} : { summary: receipt.summary }),
+    ...(receipt.reportStatus === undefined ? {} : { reportStatus: receipt.reportStatus })
+  }
+}
+
+/**
+ * 把汇报进度写进库里的 Task 回执。
+ *
+ * ★ 父 run 还在跑时,它在 `finally` 里会整段写回自己那份内存转录;那条写入经
+ * `mergeLatestSubagentReceipts` 以库里最新的 `reportStatus` 为准,所以这里写的值
+ * 不会被那份旧快照盖回去。
+ */
+export function persistSubagentReportStatus(
+  sessionId: string,
+  callId: string,
+  status: NonNullable<SubagentResult['reportStatus']>
+): void {
+  const history = store.getHistory(sessionId)
+  let changed = false
+  const messages = history.map((message) => {
+    let messageChanged = false
+    const parts = message.parts.map((part) => {
+      if (part.type !== 'tool_result' || part.callId !== callId || part.subagent === undefined) return part
+      if (part.subagent.reportStatus === status) return part
+      messageChanged = true
+      changed = true
+      return { ...part, subagent: { ...part.subagent, reportStatus: status } }
+    })
+    return messageChanged ? { ...message, parts } : message
+  })
+  if (changed) store.setHistory(sessionId, messages)
+}
+
 /** 配置损坏时的安全回退值。正常值来自 settings.subagent。 */
 const DEFAULT_CONCURRENT_SUBAGENTS = 4
 
@@ -1545,11 +1740,26 @@ function monitorChildRun(
       这些路径压根走不到这一行,靠的就是那次兜底重扫。
     */
     subagentQueue.notify()
-    const history = store.getHistory(childReq.sessionId)
-    const last = [...history].reverse().find((m) => m.role === 'assistant')
+    // 只读最后一条助手消息 —— 子代理交差的正文就是它,整段子转录不必解析一遍
+    const last = store.lastAssistantMessage(childReq.sessionId)
     const text = last === undefined ? '' : visibleText(last)
     const endedAt = child.endedAt
     persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text, error, background)
+    if (background) {
+      try {
+        const summary = text.trim() === '' ? undefined : text.trim().slice(0, SUBAGENT_SUMMARY_CHARS)
+        backgroundChildHandler?.({
+          sessionId: parent.sessionId,
+          callId,
+          childRunId: child.runId,
+          ...(child.backgroundTask?.type === undefined ? {} : { subagentType: child.backgroundTask.type }),
+          text,
+          ...(summary === undefined ? {} : { summary })
+        }, status)
+      } catch (handlerError) {
+        getHost().logger.warn(`[subagent] background report failed: ${child.runId}`, handlerError)
+      }
+    }
     /*
       SubagentStop 钩子。★ fire-and-forget，理由同 Stop。
       本地沿用子 run 继承的 Shell 快照；远端仍按工作区取得有效租约。
@@ -1921,6 +2131,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
         */
         ((_p: RunHandle, r: RunRequest, driver: (h: RunHandle, rr: RunRequest) => Promise<void>) => {
           const h = runs.create(r)
+          const release = runs.retainSessionForRun(h)
           /*
             ★ **必须接住 driver 的 rejection**(`ipc/agent.ts` 的 `launch` 早就这么做了,
             只有这条降级路径漏了)。`runAgent` 在 `new AgentSession(...)` 那一步是会
@@ -1932,8 +2143,8 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
             if (h.signal.aborted) h.finish('aborted')
             else h.finish('error', agentError('unknown', error instanceof Error ? error.message : String(error)))
           }
-          try { void Promise.resolve(driver(h, r)).catch(failed) }
-          catch (error) { failed(error) }
+          try { void Promise.resolve(driver(h, r)).catch(failed).finally(release) }
+          catch (error) { try { failed(error) } finally { release() } }
           return h
         })
 
@@ -2063,277 +2274,6 @@ function slotRefusalReason(reason: SlotRefusal, perSessionLimit: number, globalL
   }
 }
 
-/**
- * 权限闸门的**接线**处 —— 策略在 `kernel/permission-gate.ts`,这里只负责把
- * 一次 run 的档位、联网开关和被调工具的标记喂进去,再把结果翻译成 `PermissionDecision`。
- *
- * `evaluate()` 是纯策略判断;`ask` 的异步审批由 InteractionGate 持有,
- * 所以窗口重载不会丢掉待决项,中断也能结束等待。
- *
- * ★ 喂给闸门的 `needsNetwork` **只看 `NETWORK_SWITCH_TOOLS` 名单**(WebFetch / web_search),
- * 不再看工具自己的 `needsNetwork` 字段。原先这里是「字段 || `TOOLS_NEEDING_NETWORK`
- * 下限表」取或,理由是「字段写错也放不宽这道闸」——那是开关管所有出网工具时的设计;
- * 用户把开关收窄成「只管网页搜索与抓取」之后(见名单注释),字段只剩事实描述,
- * 再取或就会把浏览器、生图、远程 MCP 重新拉回这道闸,和快照过滤分家
- * (`registry.snapshot({ network })` 读的是同一张名单)。
- *
- * ★ 判定顺序在 `approveWith` 里,**顺序即语义**:
- * 联网开关 → 本地 `deny` → 本地 `ask`(压过下面两步)→ 档位 → 本地 `allow` → AI 审核 → 问人。
- * 联网必须排第一 —— 一条写进 `.next-cowork/settings.local.json` 的 allow 规则,
- * 不该能把用户亲手关掉的开关重新打开。
- */
-type ReviewResult = 'allow' | 'deny' | 'unknown'
-
-/**
- * “为我批准”的 AI 审核器。它是一个无工具、短输出的独立请求，不能继承
- * 当前 agent 的权限，也不能通过审核器再次调用工具。任何网络/解析/模型错误
- * 都返回 unknown，由调用方回退到人工审批，避免“审核器挂了却放行”。
- */
-async function reviewSensitiveOperation(
-  req: RunRequest,
-  reviewerModel: string,
-  reviewerModelProviderId: string | undefined,
-  toolName: string,
-  input: unknown,
-  signal: AbortSignal
-): Promise<ReviewResult> {
-  reviewerModel = reviewerModel.trim()
-  if (reviewerModel === '') return 'unknown'
-  const reviewerAlias = getRouter().resolveModel(reviewerModel, reviewerModelProviderId)
-  if (reviewerAlias === undefined) {
-    getHost().logger.warn(`[permission-review] configured model is unavailable: ${reviewerModel}`)
-    return 'unknown'
-  }
-  let payload: string
-  try {
-    payload = JSON.stringify(input) ?? '{}'
-  } catch {
-    return 'unknown'
-  }
-  const prompt = [
-    'You are a safety reviewer for an AI computer-use agent.',
-    'Decide whether the proposed tool call is safe and consistent with the user task.',
-    'Reply with exactly one JSON object and no markdown: {"decision":"allow"} or {"decision":"deny"}.',
-    `User task: ${req.input.filter((part) => part.type === 'text').map((part) => part.text).join('\n').slice(0, 8000)}`,
-    `Tool: ${toolName}`,
-    `Input: ${payload.slice(0, 12000)}`
-  ].join('\n')
-  const reviewRequest: CanonicalRequest = {
-    model: reviewerModel,
-    ...(reviewerModelProviderId === undefined ? {} : { modelProviderId: reviewerModelProviderId }),
-    system: 'Be conservative. Deny destructive, irreversible, credential-related, or ambiguous actions.',
-    messages: [userMessage(ulid(getHost().clock.now()), [{ type: 'text', text: prompt }], getHost().clock.now())],
-    tools: [],
-    maxOutputTokens: 128,
-    /*
-      需求:审核请求要短要快,能不思考就不思考。★ 但**不能硬发 `'off'`**:
-      `gpt-6-*` 这类 effort 模型的 `reasoningEfforts` 不含 `'none'`,`thinking-adapter`
-      会直接抛「该模型不支持关闭推理」—— 这里 catch 到之后返回 `unknown`,于是
-      「为我批准」在这些模型上**每一次都退回人工审批**,而用户只会觉得这个功能没生效。
-      `auxiliaryThinkingLevel` 在关不掉的模型上降到最低可用档,绝不抛(压缩、目标判定、
-      会话标题共用这一个规则)。
-    */
-    thinkingLevel: auxiliaryThinkingLevel('off', reviewerAlias)
-  }
-  let text = ''
-  try {
-    for await (const event of getRouter().stream(reviewRequest, signal, {
-      workspaceId: req.workspaceId,
-      runId: `${req.runId}:permission-review`,
-      sessionId: req.sessionId
-    })) {
-      if (event.type === 'text_delta') text += event.text
-      if (event.type === 'error') return 'unknown'
-    }
-  } catch {
-    getHost().logger.warn(`[permission-review] model request failed for ${reviewerModel}`)
-    return 'unknown'
-  }
-  const normalized = text.trim()
-  // 兼容模型常见的 ```json 包裹、前后解释文字，以及中文“允许/拒绝”。
-  // 只接受明确的 decision 字段或整句明确答案；含糊内容仍然回退人工审批。
-  const candidates = [normalized]
-  const fenced = normalized.match(/```(?:json)?\s*([\s\S]*?)\s*```/iu)?.[1]
-  if (fenced !== undefined) candidates.push(fenced.trim())
-  const embedded = normalized.match(/\{\s*["']decision["']\s*:\s*["'](?:allow|deny)["']\s*\}/iu)?.[0]
-  if (embedded !== undefined) candidates.push(embedded)
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate) as { decision?: unknown }
-      if (parsed.decision === 'allow') return 'allow'
-      if (parsed.decision === 'deny') return 'deny'
-    } catch {
-      // Try the next representation.
-    }
-  }
-  if (/\bdecision\s*[:=]\s*["']?allow\b|(?:^|\s)(?:allow|allowed|approve|approved|允许|同意)(?:[.!。]|$)/iu.test(normalized)) return 'allow'
-  if (/\bdecision\s*[:=]\s*["']?deny\b|(?:^|\s)(?:deny|denied|拒绝|禁止)(?:[.!。]|$)/iu.test(normalized)) return 'deny'
-  getHost().logger.warn(`[permission-review] model returned an unrecognized decision for ${reviewerModel}`)
-  return 'unknown'
-}
-
-function approveWith(req: RunRequest, handle: RunHandle, environment: WorkspaceEnvironment): ApproveFn {
-  // 审核器按 run 冻结，避免用户改设置后同一轮请求前后使用不同审核器。
-  // ★ 别名和供应商必须在**同一刻**冻结:一个冻结一个现取的话,用户中途换了供应商
-  //   就会拼出「旧别名 + 新供应商」,而这一轮的审核器是谁将无从解释。
-  //
-  // ★ 权限档位**不**在此列——曾经也按 run 冻结,现在改成读 `handle.permissionMode`
-  //   (`RunHandle` 上的活值,见其字段注释)。理由:审核器换了会让「同一轮前后用不同
-  //   AI 审核」这种事无法解释,但权限档位调宽是用户在这个 run 还没结束时主动做的
-  //   选择,冻结它的代价是「切到完全访问却要等下一句话」——这正是本次要修的问题。
-  const { permissionReviewerModel: reviewerModel,
-    permissionReviewerModelProviderId: reviewerModelProviderId } = store.getSettings()
-  // 契约要求返回 Promise;策略本身是同步的纯函数
-  return async ({ tool, callId, input }) => {
-    const mode = modeRegistry(req.workspaceId).resolve(req.mode)
-    const planWorkflowEnabled = mode.id === 'plan' || mode.tools?.includes('EnterPlanMode') === true
-    const trustedPlanFileTool = planWorkflowEnabled
-      && ['EnterPlanMode', 'Write', 'Edit', 'ExitPlanMode'].includes(tool.internalId)
-    const outcome = evaluate({
-      mode: handle.permissionMode,
-      // Plan mode fences Write/Edit to one generated .plan file, so its workflow does not prompt twice.
-      readOnly: tool.readOnly || trustedPlanFileTool,
-      destructive: tool.destructive,
-      needsNetwork: NETWORK_SWITCH_TOOLS.has(tool.internalId),
-      webSearch: req.webSearch
-    })
-    const host = getHost()
-    environment.assertReady()
-    const root = environment.rootPath
-    const filesystem = environment.remote ? environment.fs : host.fs
-    const scope = environment.remote ? { path: environment.path, namespace: environment.key } : undefined
-    // 规则用 internalId 匹配 —— externalName 会被注册表截断去重,跨会话不稳定。
-    const local = await readLocalSettings(filesystem, root, host.logger, scope)
-
-    /*
-      ★ 判定顺序在 `kernel/permission-decision.ts`，那里一条一条写明了为什么是这个次序。
-      拆成「钩子之前 / 钩子之后」两段，是因为跑钩子会 fork 进程：拿到 early deny 就
-      直接 return，物理上到不了跑钩子那一步。
-    */
-    const early = decideBeforeHooks(outcome, matchPermissionRules(local.permissions.deny, tool.internalId, input))
-    if (early.kind === 'deny') return { kind: 'deny', reason: early.reason }
-    /*
-      PreToolUse 钩子。★ **顺序即语义**，这个位置是设计的一部分：
-
-      - 排在 `deny` 桶**之后** —— `deny` 是「连档位都放宽不了」的那一层
-        （见 `shared/domain/local-settings.ts` 文件头），一条钩子不该能把它打开。
-      - 排在 `ask` / `allow` 桶**之前** —— 钩子的 deny 必须压得过一条 allow 规则，
-        否则用户点过一次「以后都允许」，就等于永久绕开了所有安全钩子。
-
-      钩子失败（超时 / 起不来 / 非 0 非 2 退出）**不阻断**，理由见 `hook/run.ts`
-      文件头那段 fail-open。
-    */
-    const hookReports = await runHookEvent({
-      event: 'PreToolUse',
-      environment,
-      sessionId: req.sessionId,
-      runId: req.runId,
-      tool: { internalId: tool.internalId, externalName: tool.externalName, input },
-      signal: handle.signal
-    })
-    const blockedBy = hookReports.find((r) => r.outcome === 'blocked' || r.decision === 'deny')
-    /*
-      插件拦截器和钩子**并到同一次表决里**,而不是另起一道门。
-
-      ★ 它**只能收紧**:`deny` 与 `ask` 会合进 `HookVerdict`,而插件返回的
-      `allow` 在 `plugin/manager.ts` 里就已经被当成弃权丢掉了 —— 让一个第三方
-      插件把审批弹窗关掉,等于把整条权限链的最后一道门交给它。
-
-      ★ 超时 = 弃权(fail-open),同 `hook/run.ts` 的取向:一个卡住的插件
-      不该把所有工具调用堵死。
-    */
-    const pluginVerdict = pluginInterceptor === null
-      ? {}
-      : await pluginInterceptor({
-        toolName: tool.internalId,
-        toolInput: input,
-        readOnly: tool.readOnly,
-        destructive: tool.destructive
-      }).catch(() => ({}))
-    const verdict = decideAfterHooks({
-      gate: outcome,
-      hook: {
-        ...(blockedBy === undefined
-          ? pluginVerdict.deny === undefined ? {} : { deny: pluginVerdict.deny }
-          : { deny: blockedBy.reason ?? 'A PreToolUse hook blocked this call.' }),
-        allow: hookReports.some((r) => r.decision === 'allow'),
-        ask: hookReports.some((r) => r.decision === 'ask') || pluginVerdict.ask === true
-      },
-      askRule: matchPermissionRules(local.permissions.ask, tool.internalId, input),
-      allowRule: matchPermissionRules(local.permissions.allow, tool.internalId, input),
-      autoReview: handle.permissionMode === 'auto' && tool.destructive
-    })
-    if (verdict.kind === 'deny') return { kind: 'deny', reason: verdict.reason }
-    if (verdict.kind === 'allow') return { kind: 'allow_once' }
-    if (verdict.kind === 'review') {
-      const review = await reviewSensitiveOperation(req, reviewerModel, reviewerModelProviderId, tool.externalName, input, handle.signal)
-      if (review === 'allow') return { kind: 'allow_once' }
-      if (review === 'deny') return { kind: 'deny', reason: 'The configured AI reviewer denied this potentially unsafe operation.' }
-    }
-
-    const suggestedRule = suggestPermissionRule(tool.internalId, input)
-
-    /*
-      ★★ 子代理到此为止 —— **它没有人可问**。
-
-      下面那句 `interactions.request` 没有任何超时(设计如此:审批只该由人或中断
-      来结束)。而一个子代理的待决项在界面上根本走不到用户面前:`InteractionPanel`
-      挂在父 run 的 `activeRunId` 上,父 run 一结束它就卸载;`listInteractions`
-      在父 handle 被回收后返回空数组;`applyChildEvent` 又把 `interaction_request`
-      当未知事件丢掉。三条路全断,于是这次 await 永远不会结算 ——
-      子代理就停在那次工具调用上,卡片上只剩一个不动的「运行中」。
-      这是真实发生过的死锁(跑满一小时、六百多次工具调用之后毫无进展)。
-
-      所以这里**当场拒绝**,而不是挂起。拒绝进转录、模型看得见,它可以换个做法
-      或者把这一步交回给主代理 —— 这正是 `Task` 的工具描述里已经承诺过的语义。
-
-      ★ 位置在钩子与本地规则**之后**:一条 `allow` 规则仍然应该让子代理跑起来,
-      变的只是「没有规则时,从无限等待变成一句说得清的拒绝」。
-      与 `ToolRegistry.snapshot({ noInteraction })` 是对称的两道闸:那道摘掉
-      主动提问的工具,这道挡住权限审批,缺一处就还是能挂起。
-    */
-    if (req.parentRunId !== undefined) {
-      return {
-        kind: 'deny',
-        reason:
-          `This tool needs the user's approval, and a subagent cannot ask for it. ` +
-          `Either do this step without ${tool.externalName}, or report back that the parent agent must run it. ` +
-          (root === ''
-            ? ''
-            : `To allow it unattended in future runs, the user can add "${suggestedRule}" to permissions.allow in .next-cowork/settings.local.json.`)
-      }
-    }
-
-    /*
-      Notification 钩子 —— 「有个弹窗在等你」的那一刻。典型用法是
-      `osascript -e 'display notification …'`。
-      ★ fire-and-forget：不 await、不看结果。审批弹窗已经在等人了，
-      再为一条通知脚本多等几秒只会让用户更晚看到它。
-    */
-    void runHookEvent({
-      event: 'Notification',
-      environment,
-      sessionId: req.sessionId,
-      runId: req.runId,
-      tool: { internalId: tool.internalId, externalName: tool.externalName, input },
-      extra: { notification: { kind: 'tool_permission', toolName: tool.externalName } },
-      signal: handle.signal
-    }).catch(() => undefined)
-
-    const response = await interactions.request(handle, {
-      kind: 'tool_permission', callId, toolName: tool.externalName,
-      input, readOnly: tool.readOnly, destructive: tool.destructive,
-      ...(root === '' ? {} : { suggestedRule })
-    }, getHost().clock.now())
-    if (response.kind !== 'tool_permission') return { kind: 'deny' }
-    const decision = response.decision
-    if (decision.kind !== 'allow_always') return decision
-    // 落盘失败不该把用户刚点下的「允许」变成「拒绝」—— 这一次照常放行,只是没记住。
-    const saved = await addLocalPermissionRule(filesystem, root, 'allow', suggestedRule, host.logger, scope)
-    if (!saved.ok) host.logger.warn(`[permission] 未能记住规则 ${suggestedRule}: ${saved.reason}`)
-    return { kind: 'allow_once' }
-  }
-}
 
 /**
  * 这条 run 属于哪一条**提炼会话**(`Session.skillSource` 非空)—— 不属于则返回 undefined。
@@ -2823,6 +2763,22 @@ export async function runAgent(
         子代理的 run 因此拿到的是**子会话**的仓(它生成的图父代理点不到名,这是会话隔离本身)。
       */
       sessionImages: sessionImageStoreFor({ sessionId: req.sessionId, host: getHost }),
+      /*
+        视频生成的后台通道。★ 与生图那条的关键差别就是**异步**:
+        这里给的是 `submit` / `status` / `cancel` 三个动词,成品由 manager
+        在几分钟后落成本会话附件(见 `video-generation/manager.ts` 的文件头)。
+
+        ★ 与 `imageGen` 同一条口径:有没有视频模型由桥现答,「装不装」不随配置变化。
+        ★ `retrieve` 复用**同一个** `sessionVideoStoreFor` —— 于是下载走的
+        落盘路径与 `SaveVideo` 读回的是同一条(会话归属、realpath 围栏、魔数)。
+      */
+      videoGen: videoGenBridgeFor({
+        sessionId: req.sessionId,
+        manager: getVideoManager,
+        configProfile: currentConfigScope,
+        workspaceId: () => req.workspaceId
+      }),
+      sessionVideos: sessionVideoStoreFor({ sessionId: req.sessionId, host: getHost }),
       acceptsGoalInput: (goalId) => primary && getActiveGoal(req.sessionId)?.id === goalId,
       prepareMessage: (message) => primary ? prepareGoalMessage(req.sessionId, message) : message,
       onMessageCommit: (message) => {
@@ -2872,7 +2828,7 @@ export async function runAgent(
           ...(blocked ? { isError: true } : {})
         }
       },
-      approve: approveWith(req, handle, environment),
+      approve: createApprovalFn(req, handle, environment, approvalDeps),
       /*
         ★★ 回合末判定 —— **只装在主 run 上**（`agent === undefined` 且没有父 run）。
 
@@ -3150,6 +3106,9 @@ export function resetRuntimeForTest(): void {
   sessionOnChange = null
   reviewOnChange = null
   skillWrittenOnChange = null
+  // ★ 视频广播口也是模块级的:留着的话上一个用例装的广播器会收到下一个用例的
+  //   任务通知,而它指向的窗口注册表早就换了一份(同 `livePluginTools` 的理由)。
+  videoOnChange = null
   // ★ 必须清:留着的话,下一个用例第一个 primary run 会等一个永远不会放的等待点,
   //   表现为一串莫名其妙的超时。
   skillActivationBarrier.clear()
@@ -3165,6 +3124,8 @@ export function resetRuntimeForTest(): void {
   resetGoalRuntimeForTest()
   resetGoalsForTest()
   clearHookFailuresForTest()
+  resetHookHostPortsForTest()
+  resetSkillToolPortsForTest()
   clearRuntimeHooks()
   /*
     ★ 也必须清注册表。`afterEach` 走的是 `runs.abortAll()`,而 `abort()` 不置 status ——

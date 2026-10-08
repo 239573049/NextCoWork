@@ -50,6 +50,19 @@ import { narrowWorkspacePath } from './capabilities'
 export interface DocumentCallScope {
   workspaceId: string
   workspaceRoot: string
+  /**
+   * 这次调用的中止信号(`manager.handleRequest` 传进来,与 `ctx.signal` 同一个)。
+   *
+   * ★ 可选,是因为这个类型也被纯内存单测直接构造。缺席 = 不检查 —— 旧行为,
+   * 那些测试关心的不是取消。
+   */
+  signal?: AbortSignal
+  /**
+   * 「这一次调用已经越过可安全重试的边界」—— 与 `CapabilityContext.markSideEffectStarted`
+   * **同一个回调**,由 manager 传下来。导出 / 保存原文件之前调一次,让一次已经
+   * 写盘之后的取消报 `[result_unknown]` 而不是「可以安全重试」。
+   */
+  markSideEffectStarted?: () => void
 }
 
 export interface DocumentChanged {
@@ -197,6 +210,17 @@ export class PluginDocuments {
     const accountScope = this.options.accountScope()
     return this.enqueue(async () => {
       if (this.options.accountScope() !== accountScope) throw sessionClosed()
+      /*
+        需求：**排队的动作在真正执行之前再查一次「这次调用还算不算数」。**
+        串行队列可能让一次请求等上几百毫秒到几秒（另一次 open 在起引擎 / 复制
+        工作副本），这期间 RPC 可能已经超时、插件被禁用、产生它的工具被中止。
+        不查的话，那次调用会越过自己的 deadline 去改文档 —— 而插件那边早就收到
+        失败并以为可以重试。★ 检查放在 `enqueue` 里面（真正轮到它时），不是入口：
+        入口那次冻结的是账户，不是「还活着」。
+        ★ 报 `rejected`（与 manager 那句「the call was cancelled」同一口径），
+        让 abort 的两个来源（超时 / 取消）由上层按 reason 分类，这里不猜。
+      */
+      if (scope.signal?.aborted === true) throw new PluginCapabilityError('rejected', 'the call was cancelled')
       try {
         switch (method) {
           case 'documents.open': return await this.open(pluginId, manifest, rawParams, scope, accountScope)
@@ -454,6 +478,7 @@ export class PluginDocuments {
       if (providerId === undefined) throw new DocumentEngineError('engine_unavailable', '[engine_unavailable] no declared document engine is available')
     }
 
+    scope.signal?.throwIfAborted()
     const managerScope = { accountScope, workspaceId: scope.workspaceId }
     const opened = await this.options.sessions.open({ scope: managerScope, absolutePath: target.absolutePath, providerId })
     /*
@@ -461,8 +486,9 @@ export class PluginDocuments {
       这时新拿到的视图属于一个已经易主的账户，必须自己放掉（非 force）再拒绝。
       不满足会怎样：表现为切换账户之后，某份文档的视图永远留在会话表里，谁也关不掉它。
     */
-    if (this.options.accountScope() !== accountScope) {
+    if (this.options.accountScope() !== accountScope || scope.signal?.aborted === true) {
       await this.options.sessions.release({ sessionId: opened.snapshot.sessionId, scope: managerScope, viewId: opened.viewId }).catch(() => undefined)
+      scope.signal?.throwIfAborted()
       throw sessionClosed()
     }
 
@@ -508,6 +534,8 @@ export class PluginDocuments {
     const generation = requiredInteger(params.generation, 'generation')
     const modelRevision = requiredInteger(params.modelRevision, 'modelRevision')
     const operationId = requiredString(params.operationId, 'operationId')
+    scope.signal?.throwIfAborted()
+    scope.markSideEffectStarted?.()
     const result = await this.options.sessions.apply({
       sessionId,
       scope: { accountScope: lease.accountScope, workspaceId: lease.workspaceId },
@@ -529,7 +557,7 @@ export class PluginDocuments {
     const params = objectParams(rawParams)
     const sessionId = requiredString(params.sessionId, 'sessionId')
     const lease = await this.requireLease(pluginId, sessionId, scope, accountScope)
-    const { snapshot, changed } = await this.saveResolved(lease)
+    const { snapshot, changed } = await this.saveResolved(lease, scope)
     lease.lastUsed = this.now()
     return {
       data: { snapshot },
@@ -542,7 +570,7 @@ export class PluginDocuments {
    * 写回原文件。租约(插件 RPC)与编辑器画布共用这一份,路径重验只写一次。
    * (原先内联在 `save` 里;画布保存加进来之后抽出,两处复制的话迟早只改一份。)
    */
-  private async saveResolved(target: SaveTarget): Promise<{ snapshot: DocumentSessionSnapshot; changed?: DocumentChanged }> {
+  private async saveResolved(target: SaveTarget, scope?: DocumentCallScope): Promise<{ snapshot: DocumentSessionSnapshot; changed?: DocumentChanged }> {
     /*
       需求：写回原文件之前，把租约里的相对路径**重新走一遍路径门**，并确认算出来的规范
       路径与租约里的逐字相同。打开与保存之间父目录可能被换成软链（或目标被换成软链 /
@@ -551,6 +579,16 @@ export class PluginDocuments {
     */
     const recheck = await resolveWorkspacePath({ workspaceId: target.workspaceId, workspaceRoot: target.workspaceRoot }, target.path, 'read')
     if (recheck.absolutePath !== target.absolutePath) throw invalidArgument('document path changed on disk')
+    /*
+      需求：**过了路径重验、动手写回之前**结算一次。这会话可能刚从队列里排出来
+      （另一次 open 在起引擎），期间 RPC 已经超时 / 插件已被禁用 / 工具被中止 ——
+      越过去才写的画，插件那边已经收到失败，重试就会把这一次的写又做一遍。
+      ★ 只检查，不回滚：`sessions.save` 一旦开始就取消不了（见 export 的同款说明）。
+    */
+    if (scope !== undefined) {
+      scope.signal?.throwIfAborted()
+      scope.markSideEffectStarted?.()
+    }
     const managerScope = { accountScope: target.accountScope, workspaceId: target.workspaceId }
     const before = this.options.sessions.snapshot(target.sessionId, managerScope)
     const snapshot = await this.options.sessions.save({ sessionId: target.sessionId, scope: managerScope })
@@ -588,6 +626,14 @@ export class PluginDocuments {
     if (target.existed && await sameFile(target.absolutePath, lease.absolutePath)) {
       throw invalidArgument('use documents.save to write the open document')
     }
+    /*
+      需求：**导出引擎是一段我们取消不了的外部工作**（解码 / 重排 / 写盘都在
+      helper 里）。一旦发起，取消只能变成「我们不再等它」—— 它可能已经把文件
+      写到一半。所以越过这一点之前的失败是普通拒绝（路径门 / 覆盖门 / 排队），
+      之后的取消必须报 result_unknown，让插件不要把导出做第二遍。
+    */
+    scope.signal?.throwIfAborted()
+    scope.markSideEffectStarted?.()
     const result = await this.options.sessions.exportDocument({
       sessionId,
       scope: { accountScope: lease.accountScope, workspaceId: lease.workspaceId },

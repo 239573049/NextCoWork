@@ -19,7 +19,7 @@
  */
 import { ImageOff } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { NCW_SCHEME } from "../../../../shared/domain/attachment";
+import { NCW_SCHEME, ncwPreviewUrl } from "../../../../shared/domain/attachment";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../i18n";
 import { ImageLightbox, type LightboxImage } from "./ImageLightbox";
@@ -86,7 +86,7 @@ export function MessageImage({
         className="block cursor-zoom-in"
       >
         <img
-          src={dataRef}
+          src={ncwPreviewUrl(dataRef)}
           alt=""
           data-testid="message-image"
           loading="lazy"

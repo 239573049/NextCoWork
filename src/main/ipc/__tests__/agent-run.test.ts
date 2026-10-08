@@ -19,7 +19,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { WebContents } from 'electron'
 import type { AgentEvent } from '../../../shared/agent/event'
@@ -34,7 +34,7 @@ import { hasSeqGap, type AgentEventEnvelope } from '../../../shared/ipc/contract
 import { abortableSleep } from '../../kernel/abort'
 import type { KernelHost } from '../../kernel/host'
 import { nodeHost } from '../../kernel/host'
-import { runs } from '../../kernel/run-registry'
+import { FINISHED_RUN_TTL_MS, runs } from '../../kernel/run-registry'
 import { defineTool } from '../../kernel/tool/define'
 import type { ToolRegistration } from '../../kernel/tool/registry'
 import {
@@ -63,7 +63,7 @@ import {
 } from '../../runtime'
 import { store } from '../../state/store'
 import type { WindowContext } from '../../window/registry'
-import { abortRun, startRun } from '../agent'
+import { abortRun, attachRun, reapFinishedRuns, startRun } from '../agent'
 
 class FakeWebContents {
   readonly sent: Array<{ channel: string; payload: unknown }> = []
@@ -226,6 +226,28 @@ describe('agent:run 走默认驱动 · 真 session + 内置演示上游', () => 
     expect(runs.get(r.runId)?.status).toBe('done')
   })
 
+  /*
+    需求:已结束的 run 不能在主进程里线性常驻。TTL 内还能 attach 到终态快照;过了 TTL 被回收,
+    再 attach 得到明确的「run 不存在」(渲染层据此退回库里的历史),而转录一条不少。
+  */
+  it('★ 已结束的 run:TTL 内留着,过了 TTL 回收,转录仍在库里', async () => {
+    const { ctx } = fakeWindow()
+    const r = req()
+    startRun(r, ctx)
+    await waitForEnd(r.runId)
+    await vi.waitFor(() => expect(runs.isSessionBusy('s1')).toBe(false))
+    const endedAt = runs.get(r.runId)!.endedAt!
+
+    expect(reapFinishedRuns(endedAt + 1000)).toBe(0)
+    expect(attachRun({ runId: r.runId, sinceSeq: 0 }, ctx).status).toBe('done')
+
+    expect(reapFinishedRuns(endedAt + FINISHED_RUN_TTL_MS)).toBe(1)
+    expect(runs.get(r.runId)).toBeUndefined()
+    expect(() => attachRun({ runId: r.runId, sinceSeq: 0 }, ctx)).toThrow(/run 不存在/)
+    const page = store.getSessionPage('s1', 50)
+    expect(page?.messages.flatMap((m) => m.parts).map((p) => p.type)).toEqual(['text', 'text', 'tool_call', 'tool_result', 'text'])
+  })
+
   it('★ 别名被翻译成上游模型名:请求写 alias,回来的是 upstreamModel', async () => {
     const { wc, ctx } = fakeWindow()
     const r = req()
@@ -330,11 +352,11 @@ describe('agent:run 走默认驱动 · 真 session + 内置演示上游', () => 
     expect(parts.some((p) => p.type === 'thinking')).toBe(true)
   })
 
-  it('两个 run 并行不串台:各自的事件只推给各自的订阅者', async () => {
+  it('两个会话的 run 并行不串台:各自的事件只推给各自的订阅者', async () => {
     const a = fakeWindow()
     const b = fakeWindow()
-    const ra = req()
-    const rb = req()
+    const ra = req({ sessionId: 'parallel-a' })
+    const rb = req({ sessionId: 'parallel-b' })
 
     startRun(ra, a.ctx)
     startRun(rb, b.ctx)

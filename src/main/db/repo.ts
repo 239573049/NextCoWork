@@ -14,6 +14,7 @@
  * (`ipc/workspace.ts` 的 `updateWorkspace` / `listDir`)都是展开取值,不改返回对象。
  */
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
+import { isTurnStart } from '../../shared/agent/history-edit'
 import type { RunUsage } from '../../shared/agent/transcript'
 import type { RunCost } from '../../shared/domain/pricing'
 import type { ContextSearchHit } from '../../shared/agent/context-management'
@@ -50,6 +51,8 @@ import type {
   UsageWindow
 } from '../../shared/domain/usage'
 import { fileStats, stmt, tx } from './index'
+import { searchableMessageText } from './message-text'
+export { searchableMessageText } from './message-text'
 import {
   ConfigProfileError,
   credentialScopePrefix,
@@ -61,6 +64,7 @@ import {
 } from './config-profile'
 
 import { ulid } from '../../shared/util/id'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -68,7 +72,7 @@ import type { SyncCategory, SyncConfigKind, SyncConflict, SyncMutation } from '.
 
 const SYNC_ACCOUNT_KEY = 'config-sync.account'
 const SYNC_DEVICE_KEY = 'config-sync.device'
-let syncApplying = false
+const syncApplying = new AsyncLocalStorage<boolean>()
 
 export { tx } from './index'
 
@@ -211,16 +215,14 @@ export function getConfigCategoryDirty(
  * `listPendingSyncMutations` / `ack*` 因此原样留着。
  */
 export function enqueueSyncMutation(_kind: SyncConfigKind, _entityId: string, _payload: unknown, _operation: SyncMutation['operation'] = 'upsert', _workspaceId?: string): void {
-  if (syncApplying) return
+  if (syncApplying.getStore() === true) return
   const account = syncAccount()
   if (account === undefined || !account.enabled) return
   setConfigCategoryDirty(categoryForSyncKind(_kind), account.accountId)
 }
 
 export function withSyncApply<T>(fn: () => T): T {
-  const previous = syncApplying
-  syncApplying = true
-  try { return fn() } finally { syncApplying = previous }
+  return syncApplying.run(true, fn)
 }
 
 /**
@@ -228,9 +230,7 @@ export function withSyncApply<T>(fn: () => T): T {
  * 立刻撤掉围栏,后半段写入被当成本地改动再次上传,两台设备从此互相回声。
  */
 export async function withSyncApplyAsync<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = syncApplying
-  syncApplying = true
-  try { return await fn() } finally { syncApplying = previous }
+  return await syncApplying.run(true, fn)
 }
 
 export function saveSyncConflict(conflict: Omit<SyncConflict, 'status'>): void {
@@ -834,25 +834,13 @@ export function setSessionFavorited(id: string, favorited: boolean): void {
   putSession({ ...current, favorited, updatedAt: Date.now() })
 }
 
-function textForParts(parts: readonly ContentPart[]): string {
-  const chunks: string[] = []
-  for (const part of parts) {
-    if (part.type === 'text' || part.type === 'thinking') chunks.push(part.text)
-    else if (part.type === 'tool_call') chunks.push(part.name, JSON.stringify(part.input))
-    else if (part.type === 'tool_result') chunks.push(part.output.content)
-    else if (part.type === 'subagent' && part.summary) chunks.push(part.summary)
-    else if (part.type === 'error') chunks.push(part.error.message)
-  }
-  return chunks.filter(Boolean).join('\n')
-}
-
 function upsertFts(session: Session, message: AgentMessage): void {
   stmt('DELETE FROM messages_fts WHERE message_id = ?').run(message.id)
   stmt('INSERT INTO messages_fts (message_id, session_id, title, content) VALUES (?, ?, ?, ?)').run(
     message.id,
     session.id,
     session.title,
-    textForParts(message.parts)
+    searchableMessageText(message.parts)
   )
 }
 
@@ -985,6 +973,20 @@ function recordMessageAttachments(session: Session, message: AgentMessage): void
   const toolImageRefs = message.parts.flatMap((p) =>
     p.type === 'tool_result' ? (p.output.images ?? []).map((image) => image.dataRef).filter((ref) => parseNcwUrl(ref) !== null) : []
   )
+  /*
+    ★★ 视频产物走**和图片完全同一条**生命周期。少了这一段,生成的视频会:
+      - 停在 draft,七天后的草稿回收把它删掉,转录里的 `ncw://` 从此播不了;
+      - 更糟的是下面那句"删除不在保留集合里的附件"会在**消息重放**时
+        把这一行删掉 —— 而视频已经下载过一次,再下要重新向上游要(多半已过期)。
+    所以这里必须收,而且序号接在图片之后(既有 id 一个都不变,重放仍幂等)。
+
+    ★ 与图片的唯一区别:视频**没有内联那一条路**(`url` 永远是 `ncw://`,
+    见 `ToolOutputVideo`),所以它不进 `external` 那一支 —— 那一支会把一个
+    `https://…` 当本机绝对路径去 `statSync`,而那是另一个 bug 的入口。
+  */
+  const toolVideoRefs = message.parts.flatMap((p) =>
+    p.type === 'tool_result' ? (p.output.videos ?? []).map((video) => video.url).filter((ref) => parseNcwUrl(ref) !== null) : []
+  )
 
   // 受管理的(ncw://)与外部的(绝对路径)分开处理
   const managed: ManagedAttachmentCandidate[] = []
@@ -1023,6 +1025,8 @@ function recordMessageAttachments(session: Session, message: AgentMessage): void
     addManaged(part.dataRef, index)
   })
   toolImageRefs.forEach((ref, offset) => { addManaged(ref, imageParts.length + offset) })
+  // ★ 视频接在图片之后,序号连续 —— 既有条目的 id 因此一个都不变。
+  toolVideoRefs.forEach((ref, offset) => { addManaged(ref, imageParts.length + toolImageRefs.length + offset) })
 
   const currentRows = attachmentRowsForMessage(message.id)
   const usedIds = new Set<string>()
@@ -1104,6 +1108,34 @@ function writeMessage(session: Session, message: AgentMessage, ordinal: number, 
   recordMessageAttachments(session, message)
 }
 
+/**
+ * 只换一条消息的 parts —— **前提是它还是读出来时的那一份**(比较并替换)。
+ *
+ * 需求:旧转录里内联的 base64 图在被读到时转存成附件,消息里换成 `ncw://` 地址。
+ * 转存的那一小段时间里用户可能编辑、删除了这条消息,或者导入同步改写了它:
+ * 那时这次替换必须放弃,而不是拿一份旧快照盖回去。返回是否真的写了。
+ *
+ * ★ 走 `writeMessage`:附件登记(draft → committed、清掉不再引用的行)与全文索引
+ * 和正常提交完全同一条路。ordinal、run 归属、时间都不动。
+ */
+export function replaceMessagePartsIfUnchanged(
+  sessionId: string,
+  messageId: string,
+  expectedParts: string,
+  parts: ContentPart[]
+): boolean {
+  return tx(() => {
+    const session = getSession(sessionId)
+    if (session === undefined) return false
+    const row = stmt(
+      'SELECT id, role, parts, schema_version, created_at, internal, ordinal FROM messages WHERE id = ? AND session_id = ?'
+    ).get(messageId, sessionId) as Record<string, unknown> | undefined
+    if (row === undefined || String(row['parts']) !== expectedParts) return false
+    writeMessage(session, { ...messageOfRow(row), parts }, Number(row['ordinal']))
+    return true
+  })
+}
+
 export function commitMessage(sessionId: string, message: AgentMessage, runId?: string): void {
   tx(() => {
     const session = getSession(sessionId)
@@ -1135,6 +1167,93 @@ export function getHistory(sessionId: string): readonly AgentMessage[] {
       ...(Number(r['internal'] ?? 0) !== 0 ? { internal: true } : {})
     }
   })
+}
+
+/**
+ * 一条会话里**最后一条助手消息**。子代理交差的正文就是它 ——
+ * 为了取这一条去 `getHistory` 解析整段子转录,在长子任务上是成百上千条消息的白读。
+ */
+export function lastAssistantMessage(sessionId: string): AgentMessage | undefined {
+  const row = stmt(
+    `SELECT id, role, parts, schema_version, created_at, internal FROM messages
+     WHERE session_id = ? AND role = 'assistant' ORDER BY ordinal DESC, id DESC LIMIT 1`
+  ).get(sessionId) as Record<string, unknown> | undefined
+  if (row === undefined) return undefined
+  const parts: ContentPart[] = (() => {
+    try { return parse<ContentPart[]>(row['parts']) } catch { return [] }
+  })()
+  return {
+    id: String(row['id']),
+    role: 'assistant',
+    parts,
+    createdAt: Number(row['created_at']),
+    schemaVersion: Number(row['schema_version'] ?? 1) as 1,
+    ...(Number(row['internal'] ?? 0) !== 0 ? { internal: true } : {})
+  }
+}
+
+/** 一条会话有几条消息 —— 元数据卡片要的就是这个数,不必为它把整段转录读出来 */
+export function countMessages(sessionId: string): number {
+  const row = stmt('SELECT COUNT(*) AS n FROM messages WHERE session_id = ?').get(sessionId) as Record<string, unknown> | undefined
+  return Number(row?.['n'] ?? 0)
+}
+
+function messageOfRow(r: Record<string, unknown>): AgentMessage {
+  const parts: ContentPart[] = (() => {
+    try { return parse<ContentPart[]>(r['parts']) } catch { return [] }
+  })()
+  return {
+    id: String(r['id']),
+    role: String(r['role']) as AgentMessage['role'],
+    parts,
+    createdAt: Number(r['created_at']),
+    schemaVersion: Number(r['schema_version'] ?? 1) as 1,
+    ...(Number(r['internal'] ?? 0) !== 0 ? { internal: true } : {})
+  }
+}
+
+/** 页首往前补到一轮开头时,最多再多读这么多条 —— 一轮里几百次工具调用也不该让一页无界 */
+const PAGE_TURN_EXTENSION_MAX = 500
+
+/**
+ * 转录的一页:`beforeMessageId` 之前(缺省 = 最新)的 `limit` 条,**从一轮的开头切起**。
+ *
+ * ★ 页首必须是一条可见提问:从一轮中间切开的话,页首那条 tool_result 找不到它的 tool_call,
+ * 卡片画不出来。所以先按条数取,再往前补到最近的一轮开头(有上限)。
+ * ★ 只解析这一页的 parts —— 不为一页显示去解析整段会话。
+ */
+export function getHistoryPage(
+  sessionId: string,
+  limit: number,
+  beforeMessageId?: string
+): { messages: AgentMessage[]; hasMore: boolean } {
+  let upper = Number.MAX_SAFE_INTEGER
+  if (beforeMessageId !== undefined) {
+    const anchor = stmt('SELECT ordinal FROM messages WHERE id = ? AND session_id = ?').get(beforeMessageId, sessionId) as Record<string, unknown> | undefined
+    if (anchor === undefined) return { messages: [], hasMore: false }
+    upper = Number(anchor['ordinal'])
+  }
+  const rows = stmt(
+    `SELECT id, role, parts, schema_version, created_at, internal, ordinal FROM messages
+     WHERE session_id = ? AND ordinal < ? ORDER BY ordinal DESC, id DESC LIMIT ?`
+  ).all(sessionId, upper, Math.max(1, Math.floor(limit))) as Array<Record<string, unknown>>
+  const messages = rows.reverse().map(messageOfRow)
+  let first = rows[0]
+  let extended = 0
+  while (first !== undefined && messages[0] !== undefined && !isTurnStart(messages[0]) && extended < PAGE_TURN_EXTENSION_MAX) {
+    const previous = stmt(
+      `SELECT id, role, parts, schema_version, created_at, internal, ordinal FROM messages
+       WHERE session_id = ? AND ordinal < ? ORDER BY ordinal DESC, id DESC LIMIT 1`
+    ).get(sessionId, Number(first['ordinal'])) as Record<string, unknown> | undefined
+    if (previous === undefined) break
+    messages.unshift(messageOfRow(previous))
+    first = previous
+    extended += 1
+  }
+  const hasMore = first !== undefined && stmt(
+    'SELECT 1 FROM messages WHERE session_id = ? AND ordinal < ? LIMIT 1'
+  ).get(sessionId, Number(first['ordinal'])) !== undefined
+  return { messages, hasMore }
 }
 
 /** 权威历史对账；未变化的消息保留正文、索引、附件和 run 归属。 */
@@ -2164,10 +2283,17 @@ export function searchSessionHistory(sessionId: string, q: string, limit = 5): C
 }
 
 function messageBytes(): { count: number; bytes: number } {
-  const rows = stmt('SELECT parts FROM messages').all()
-  let bytes = 0
-  for (const row of rows) bytes += Buffer.byteLength(String((row as Record<string, unknown>)['parts'] ?? ''), 'utf8')
-  return { count: rows.length, bytes }
+  /*
+    ★ 在 SQL 里求和,不把每一行的 `parts` 拉进 JS 再 `Buffer.byteLength`。
+    `cleanupPreview('history')` 和 `storage:getStats` 都走这里,而 `parts` 是
+    整条消息的 JSON —— 有历史的库把这个字符串搬到 V8 堆上,光这一次就要多占
+    与库同量级的内存,换来一个本来一行 SQL 就能给的数。
+
+    `LENGTH(CAST(parts AS BLOB))` 而不是 `LENGTH(parts)`:后者对 TEXT 数的是
+    字符数,中文消息会被算成 UTF-8 字节数的三分之一左右。
+  */
+  const row = stmt('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(CAST(parts AS BLOB))), 0) AS bytes FROM messages').get() as Record<string, unknown>
+  return { count: Number(row['n'] ?? 0), bytes: Number(row['bytes'] ?? 0) }
 }
 
 export function deleteAllHistory(): CleanupResult {
@@ -2300,6 +2426,81 @@ export function storageStats(dataDirectory: string, attachmentDirectory: string,
     dataDirectory,
     lastBackupAt
   }
+}
+
+/**
+ * `getStats` 的**异步**版本,供 UI 的 `storage:getStats` IPC 用。
+ *
+ * ★ 和同步版的区别只有一件:附件目录的字节数走异步、有界的遍历
+ *   (`lstat`/`readdir` promise 版,不跟符号链接),而不是把整棵目录同步读
+ *   一遍。目录大的时候前者能让出事件循环,后者会在主进程上卡住。
+ *
+ * 数字口径与 `getStats` 完全一致:库/WAL 用 `fileStats`,会话/消息/字节直接
+ * 查库(见 `messageBytes`)。**不做缓存、不用 0 顶替** —— 「暂时读不出来」和
+ * 「真的是 0」在界面上是两件事,拿旧值或 0 冒充实时是另一种误导。
+ */
+export function getStatsAsync(
+  dataDirectory: string,
+  attachmentDirectory: string,
+  lastBackupAt: number | null
+): Promise<import('../../shared/domain/settings').StorageStats> {
+  const files = fileStats()
+  const c = messageBytes()
+  const s = stmt('SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id IS NULL').get() as Record<string, unknown>
+  const a = stmt('SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes FROM attachments').get() as Record<string, unknown>
+  return collectDirectoryBytesBounded(attachmentDirectory, ATTACHMENT_SCAN_MAX_ENTRIES).then((attachmentBytes) => ({
+    dbBytes: files.dbBytes,
+    walBytes: files.walBytes,
+    conversationBytes: Number(c.bytes ?? 0),
+    attachmentBytes,
+    conversationCount: Number(s.n ?? 0),
+    messageCount: Number(c.count ?? 0),
+    attachmentCount: Number(a.n ?? 0),
+    dataDirectory,
+    lastBackupAt
+  }))
+}
+
+/** 一次统计最多看多少个目录条目 —— 有界,不把大目录读成全盘扫描。 */
+const ATTACHMENT_SCAN_MAX_ENTRIES = 200_000
+
+class AttachmentScanBudgetError extends Error {
+  constructor() { super('附件目录条目超过统计预算，结果不完整，请稍后重试'); this.name = 'AttachmentScanBudgetError' }
+}
+
+/**
+ * 异步、有界、不跟符号链接地数一棵树的字节数。
+ *
+ * 符号链接(以及任何非目录条目)只按它自己的 `lstat().size` 计,绝不递归进
+ * 链接目标 —— 手动放进数据目录的一个链接不该让统计去读一个外部目录。
+ */
+async function collectDirectoryBytesBounded(root: string, budget: number): Promise<number> {
+  const { lstat, opendir } = await import('node:fs/promises')
+  let scanned = 0
+  const walk = async (dir: string): Promise<number> => {
+    let entryStat
+    try { entryStat = await lstat(dir) } catch { return 0 }
+    if (entryStat.isSymbolicLink() || !entryStat.isDirectory()) return entryStat.size
+    let total = 0
+    let entries
+    try { entries = await opendir(dir) } catch { return total }
+    // 增量读取，不把整个大目录的名字先分配进主线程堆；退出迭代时自动关闭目录句柄。
+    for await (const entry of entries) {
+      if (scanned >= budget) throw new AttachmentScanBudgetError()
+      scanned += 1
+      const child = join(dir, entry.name)
+      try {
+        const stat = await lstat(child)
+        if (stat.isDirectory() && !stat.isSymbolicLink()) total += await walk(child)
+        else total += stat.size
+      } catch (error) {
+        if (error instanceof AttachmentScanBudgetError) throw error
+        // 扫描期间消失的条目不计入，预算到期不能冒充精确结果或零字节。
+      }
+    }
+    return total
+  }
+  return walk(root)
 }
 
 // ── 上游供应商 / 模型别名 ────────────────────────────────────────────────────

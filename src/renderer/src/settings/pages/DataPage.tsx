@@ -335,6 +335,8 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
     { value: "weekly", label: t("data.frequency.weekly") },
   ];
   const ageOptions: ReadonlyArray<{ value: CleanupAge; label: string }> = [
+    { value: "15d", label: t("data.age.15d") },
+    { value: 1, label: t("data.age.1") },
     { value: 3, label: t("data.age.3") },
     { value: 6, label: t("data.age.6") },
     { value: 12, label: t("data.age.12") },
@@ -631,7 +633,9 @@ export function DataPage({ settings, patch }: SettingsPageProps): ReactNode {
                 label: x.label,
               }))}
               className="w-[114px]"
-              onChange={(value) => setAge(Number(value) as CleanupAge)}
+              onChange={(value) =>
+                setAge(value === "15d" ? "15d" : (Number(value) as CleanupAge))
+              }
             />
             <Button
               size="sm"

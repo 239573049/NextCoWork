@@ -18,7 +18,7 @@ import type { ContextPreview } from '../agent/context-management'
 import type { InteractionResponse, PendingInteraction } from '../agent/interaction'
 import type { InterjectItem } from '../agent/interject'
 import type { PermissionMode } from '../agent/permission'
-import type { RunRequest, SessionMode } from '../agent/run-request'
+import type { RunRequest, SendOptions, SessionMode } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
 import type { DirListing, FileSuggestion } from '../domain/file-tree'
@@ -35,7 +35,14 @@ import type {
   AttachmentUploadRequest,
   PickedAttachment
 } from '../domain/attachment'
-import type { SessionInputState } from '../domain/queued-input'
+import type {
+  SessionInputState,
+  SessionQueueOp,
+  SessionQueueResult,
+  SessionQueueSnapshot,
+  SubagentReportStatus
+} from '../domain/queued-input'
+import type { VideoJobView } from '../domain/video-generation'
 import type { SearchProviderId, SearchProviderStatus } from '../domain/search'
 import type {
   CredentialInfo,
@@ -48,7 +55,7 @@ import type {
 } from '../domain/provider'
 import type { ModelCatalogDefinition } from '../domain/model-catalog'
 import type { ProviderAccount } from '../domain/provider-account'
-import type { SearchHit, Session, SessionChange, SessionDetail, SessionListItem } from '../domain/session'
+import type { SearchHit, Session, SessionChange, SessionDetail, SessionListItem, SessionPage } from '../domain/session'
 import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
 import type { ImageTheme, ThemeProfile } from '../domain/theme'
@@ -531,6 +538,20 @@ export interface IpcInvokeMap {
    * 校验在主进程侧做,渲染层拿到的要么是可用的,要么是 null。
    */
   'session:getInput': { req: { sessionId: string }; res: SessionInputState | null }
+  /**
+   * 队列的写操作。★ **主进程是队列唯一的写入者**(`main/session-runtime.ts`):
+   * 续跑在那边决定,所以没有窗口在看这条会话时,排队的消息照样会被发出去。
+   * 回执即新的权威队列;同样的快照也经 `session:queueChanged` 广播给所有窗口。
+   */
+  'session:queue': { req: { sessionId: string; op: SessionQueueOp }; res: SessionQueueResult }
+  /**
+   * 用户在后台子代理卡片上点「处理」。`options` 是渲染层按工作区默认值拼的兜底档位 ——
+   * 本进程没见过这条会话发消息(重启之后)时,汇报靠它才发得出去。
+   */
+  'session:reportBackground': {
+    req: { sessionId: string; callId: string; options?: SendOptions }
+    res: { status: SubagentReportStatus }
+  }
 
   // ── 附件(上传走 invoke;读取走 ncw:// 协议,不经 IPC) ──
   /**
@@ -563,6 +584,21 @@ export interface IpcInvokeMap {
   'sessions:list': { req: { workspaceId: string; archived?: boolean }; res: SessionListItem[] }
   'sessions:get': { req: { sessionId: string }; res: SessionDetail }
   'sessions:replaceHistory': { req: { sessionId: string; messages: AgentMessage[] }; res: void }
+  /**
+   * 转录的一页(见 `SessionPage`)。渲染层打开会话、往上翻都走它 —— 不再一次读整段历史。
+   */
+  'sessions:getPage': { req: { sessionId: string; limit: number; beforeMessageId?: string }; res: SessionPage }
+  /** 会话元数据 + 消息条数,不读正文。只想知道模式 / 模型 / 标题的地方用它,别为此读整段转录 */
+  'sessions:getSummary': { req: { sessionId: string }; res: { session: Session; messageCount: number } }
+  /** 最后一条助手消息(后台子代理交差的正文),不读整段转录 */
+  'sessions:lastAssistant': { req: { sessionId: string }; res: AgentMessage | null }
+  /**
+   * 按消息 id 改写转录。★ 主进程在**完整历史**上改:渲染层手里只有一页,
+   * 拿那一页整段 `sessions:replaceHistory` 会把页外的历史当成「删掉了」。
+   */
+  'sessions:editMessage': { req: { sessionId: string; messageId: string; text: string; truncate: boolean }; res: void }
+  'sessions:deleteTurn': { req: { sessionId: string; userMessageId: string }; res: void }
+  'sessions:deleteReply': { req: { sessionId: string; fromId: string; toId: string }; res: void }
   'sessions:create': { req: { workspaceId: string; title?: string; sessionId?: string; mode?: SessionMode }; res: Session }
   'sessions:duplicate': { req: { sessionId: string; title: string }; res: Session }
   /** 从某一轮「分支」：只克隆到这一轮为止的转录，之后的内容不带过去。 */
@@ -616,9 +652,18 @@ export interface IpcInvokeMap {
   }
 
   // ── Agent ──
-  /** ★ runId 由调用方传入,不由这里返回(方案 §3 规则 2) */
-  'agent:run': { req: RunRequest; res: void }
+  /**
+   * ★ runId 由调用方传入,不由这里返回(方案 §3 规则 2)。
+   * `started: false` = 这条会话其实已经在跑(排队消息刚续上、或另一个窗口先发了),
+   * 这句话被放进了队列;回执里是新的队列,调用方据此撤掉乐观消息。
+   */
+  'agent:run': { req: RunRequest; res: { started: true } | { started: false; queue: SessionQueueResult } }
   'agent:attach': { req: { runId: string; sinceSeq: number }; res: RunSnapshot }
+  /**
+   * 这个窗口不再看这个 run(及其子代理)的正文 —— 会话 Tab 关了 / 切走一段时间了。
+   * ★ 只摘**调用方自己**的订阅,不停 run、不影响别的窗口。再看时走 `agent:attach`。
+   */
+  'agent:unwatch': { req: { runId: string }; res: void }
   'agent:abort': { req: { runId: string; cascade: boolean }; res: void }
   /**
    * 插话 —— 把这些条目排进正在跑的那个 run,由它在**下一个轮次边界**注入。
@@ -941,7 +986,16 @@ export interface IpcInvokeMap {
   }
   'goal:clear': { req: { sessionId: string }; res: void }
 
+
+
   // ── 供应商 / 模型别名 ──
+  // ── 视频生成任务(见下面未实现清单上那段:它不走 agent:event)──
+  'video:listBySession': { req: { sessionId: string }; res: VideoJobView[] }
+  'video:get': { req: { id: string }; res: VideoJobView | undefined }
+  'video:cancel': { req: { id: string }; res: { ok: true; state: 'requested' | 'already-done' } | { ok: false; reason: string } }
+  'video:retryRetrieval': { req: { id: string }; res: { ok: boolean; reason?: string } }
+  'video:saveFile': { req: { id: string; defaultName?: string }; res: { path: string } | null }
+
   'provider:list': { req: void; res: UpstreamProvider[] }
   /** 解析本机 Claude Code / Codex / OpenCode 里配置的提供商供审核。★ 只回元数据,不回密钥值。 */
   'providers:listImportable': { req: { sourceKind: ImportSourceKind; pickedDir?: string }; res: ImportableProviders }
@@ -1225,18 +1279,16 @@ export interface IpcSendMap {
   'tabs:persistInner': { workspaceId: string; state: InnerTabState }
 
   /**
-   * 未发出的输入落盘。★ **`immediate` 分两档,这是与 Tab 布局唯一的不同**:
+   * 草稿落盘。主进程侧防抖 500ms(`immediate` 跳过防抖,用于草稿 Tab 绑定会话、撤回到输入框这类
+   * 离散动作)。
    *
-   * - 草稿每次按键都变 → `false`,走同一个 500ms 防抖,丢失窗口 ≤500ms,代价是半个词。
-   * - 入队/插话/编辑/删除是离散低频动作 → `true`,立即写。丢一整条排队消息的代价
-   *   远高于丢半个词,而这类操作的频率低到根本不值得防抖。
-   *
-   * 强杀(kill -9)拦不住任何一档 —— 这正是队列走立即写、只让草稿承担
-   * 那 500ms 风险窗口的原因。
+   * ★ **只有草稿,不带队列。** 队列由主进程独占(见 `session:queue`);渲染层整份覆盖的话,
+   * 一次迟到的草稿防抖会把主进程刚刚消费掉的排队消息写回去,同一句话被续跑两次。
+   * 强杀(kill -9)仍拦不住那 500ms 的草稿窗口 —— 代价是半个词。
    */
-  'session:persistInput': {
+  'session:persistDraft': {
     sessionId: string
-    state: SessionInputState
+    draft: string
     immediate: boolean
   }
 }
@@ -1272,6 +1324,14 @@ export interface IpcEventMap {
    *   **能在丢过消息之后自己收敛**。
    */
   'agent:activeRuns': { runs: ActiveRunEntry[] }
+  /**
+   * 某条会话的排队消息变了(入队、插话、续跑消费、送达回执)。**全量 + 全局广播**:
+   * 队列是「这条会话还欠着什么」的事实,与谁在看哪个 run 无关,且条数有上限(20 条)。
+   * `rev` 单调递增,渲染层只收比手上更新的那份 —— 它与 `session:queue` 的回执可能乱序到达。
+   */
+  'session:queueChanged': SessionQueueSnapshot
+  /** 后台子代理的结果交回主代理到了哪一步。卡片上的「待汇报 / 已汇报」读它 */
+  'session:subagentReport': { sessionId: string; callId: string; status: SubagentReportStatus }
   'terminal:data': { id: string; seq: number; chunk: string }
   'terminal:exit': { id: string; code: number }
   /**
@@ -1280,8 +1340,24 @@ export interface IpcEventMap {
    * (`shell/WindowControls.tsx`)据此在「□」和「双叠框」之间换字形。
    */
   'window:maximized': { maximized: boolean }
+  /**
+   * 这个窗口被最小化 / 隐藏(`false`)或者又露出来了(`true`)。**每窗口一份**,定向推。
+   *
+   * ★ `false` 发出之前主进程已经摘掉了它对所有 run 正文的订阅 —— 藏着的窗口
+   * 不再接收、也不再累积任何正文。`true` 时渲染层按快照 + 历史重建它正在看的会话。
+   * 失焦不算:副屏上还开着的窗口仍然要看见新内容。
+   */
+  'window:visibility': { visible: boolean }
   'gateway:status': GatewayStatus
   'gateway:failover': FailoverEvent
+  /**
+   * 视频任务状态变化。**全量广播**(谁在跑视频是应用级事实,不是"我这个窗口
+   * 在看的那一个"),带一个单调递增的 revision,渲染层据此做增量合并。
+   *
+   * ★ 与 `agent:activeRuns` 同一个理由:它必须能在丢过消息之后自己收敛 ——
+   * 而渲染层还可以用 `video:listBySession` 主动补齐。
+   */
+  'video:jobChanged': VideoJobView
   'settings:changed': AppSettings
   'theme:changed': { resolved: ResolvedTheme }
   'theme:libraryChanged': { profiles: ThemeProfile[]; images: ImageTheme[] }
@@ -1619,6 +1695,8 @@ export const INVOKE_CHANNELS = {
   'git:generateCommitMessage': 1,
   'tabs:getInner': 1,
   'session:getInput': 1,
+  'session:queue': 1,
+  'session:reportBackground': 1,
   'attachment:upload': 1,
   'attachment:pick': 1,
   'attachment:remove': 1,
@@ -1629,6 +1707,12 @@ export const INVOKE_CHANNELS = {
   'sessions:list': 1,
   'sessions:get': 1,
   'sessions:replaceHistory': 1,
+  'sessions:getPage': 1,
+  'sessions:getSummary': 1,
+  'sessions:lastAssistant': 1,
+  'sessions:editMessage': 1,
+  'sessions:deleteTurn': 1,
+  'sessions:deleteReply': 1,
   'sessions:create': 1,
   'sessions:duplicate': 1,
   'sessions:branch': 1,
@@ -1642,6 +1726,7 @@ export const INVOKE_CHANNELS = {
   'conversations:searchAll': 1,
   'agent:run': 1,
   'agent:attach': 1,
+  'agent:unwatch': 1,
   'agent:abort': 1,
   'agent:interject': 1,
   'agent:setPermissionMode': 1,
@@ -1736,6 +1821,11 @@ export const INVOKE_CHANNELS = {
   'goal:get': 1,
   'goal:set': 1,
   'goal:clear': 1,
+  'video:listBySession': 1,
+  'video:get': 1,
+  'video:cancel': 1,
+  'video:retryRetrieval': 1,
+  'video:saveFile': 1,
   'provider:list': 1,
   'providers:listImportable': 1,
   'provider:upsert': 1,
@@ -1834,7 +1924,7 @@ export const SEND_CHANNELS = {
   'app:quitConfirmed': 1,
   'tabs:persistOuter': 1,
   'tabs:persistInner': 1,
-  'session:persistInput': 1
+  'session:persistDraft': 1
 } as const satisfies Record<keyof IpcSendMap, 1>
 
 export const EVENT_CHANNELS = {
@@ -1843,9 +1933,12 @@ export const EVENT_CHANNELS = {
   'connection:auth': 1,
   'agent:event': 1,
   'agent:activeRuns': 1,
+  'session:queueChanged': 1,
+  'session:subagentReport': 1,
   'terminal:data': 1,
   'terminal:exit': 1,
   'window:maximized': 1,
+  'window:visibility': 1,
   'gateway:status': 1,
   'gateway:failover': 1,
   'settings:changed': 1,
@@ -1886,6 +1979,8 @@ export const EVENT_CHANNELS = {
   ,'scheduled:changed': 1
   ,'scheduled:focusRun': 1
   ,'dataMigration:progress': 1
+  // 视频任务状态变化(revision 单调递增,渲染层据此做增量合并)。
+  ,'video:jobChanged': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

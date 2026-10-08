@@ -16,7 +16,7 @@ import type { AgentMessage } from '../../../../shared/agent/message'
 import type { SendOptions } from '../../../../shared/agent/run-request'
 
 vi.mock('../../services/agent', () => ({
-  startRun: vi.fn(async () => undefined),
+  startRun: vi.fn(async () => ({ started: true })),
   attachRun: vi.fn(),
   abortRun: vi.fn(),
   onAgentEvent: vi.fn(() => () => {})
@@ -27,13 +27,24 @@ vi.mock('../../services/app', () => ({
   persistInnerTabs: vi.fn(),
   persistOuterTabs: vi.fn(),
   getSessionInput: vi.fn(async () => null),
-  persistSessionInput: vi.fn()
+  persistSessionDraft: vi.fn()
 }))
 
-vi.mock('../../services/sessions', () => ({
+vi.mock('../../services/sessions', () => {
+  const getSession = vi.fn(async (_sessionId: string): Promise<unknown> => null)
+  return {
+    getSession,
+    // 转录按页读(`getSessionPage`):委托给各用例摆好的整段历史,一页就是全部
+    getSessionPage: vi.fn(async (sessionId: string) => {
+      const detail = await getSession(sessionId)
+      return detail == null ? detail : { ...(detail as object), hasMore: false }
+    }),
   replaceHistory: vi.fn(async () => undefined),
-  getSession: vi.fn(async () => null)
-}))
+    editSessionMessage: vi.fn(async () => undefined),
+    deleteSessionTurn: vi.fn(async () => undefined),
+    deleteSessionReply: vi.fn(async () => undefined),
+  }
+})
 
 import { releaseSession, sessionStore } from '../session'
 

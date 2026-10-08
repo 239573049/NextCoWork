@@ -18,9 +18,9 @@ import type { Workspace } from '../../../shared/domain/workspace'
 import { isLocalEnvironment } from '../../../shared/domain/environment'
 import { ulid } from '../../../shared/util/id'
 import { DEFAULT_SETTINGS_PAGE, type SettingsPageId } from '../settings/nav'
-import { persistOuterTabs } from '../services/app'
+import { persistInnerTabs, persistOuterTabs } from '../services/app'
 import { invoke } from '../services/ipc'
-import { useTabsStore } from './tabs'
+import { installShellWindowPort, shellTabs } from './shell-port'
 import { cancelConnectionRequest, commitWorkspaceActivation, connectionErrorKey, prepareWorkspace, releaseWorkspaceActivation } from '../services/connections'
 
 interface WindowState {
@@ -459,7 +459,7 @@ export const useWindowStore = create<WindowState>((set, get) => {
         还有没有别的 Tab 引用它。**正在跑的 run 不受影响** —— 它活在主进程,
         `releaseSession` 会拒绝放掉那些会话。
       */
-      if (closed?.kind === 'workspace') useTabsStore.getState().forget(closed.ref.workspaceId)
+      if (closed?.kind === 'workspace') shellTabs()?.forgetTabsForWorkspace(closed.ref.workspaceId)
       return true
       }
       if (nextWorkspaceId && needsPrepare(nextWorkspaceId) && (activeOuterId === outerId || nextWorkspaceId !== get().activeWorkspaceId)) {
@@ -584,6 +584,24 @@ export const useWindowStore = create<WindowState>((set, get) => {
   }
 })
 
+/*
+  ★ 这一半由本模块自己装到 port 上(见 `shell-port.ts`)。`tabs` store 那一半
+  在它自己的文件里装。两边都**不 import 对方**,`write` 的落盘与面板同步却仍然
+  照原样走到这里。
+
+  `persistInnerTabs` 在这里丢掉专注窗口那一路 —— 那个判断原先写死在
+  `tabs.ts` 的 `write` 里,而它读的正是本 store 的 `windowKind`,放到安装处
+  只有一份,不会再出现「两处各判一次、判据不一样」。
+*/
+installShellWindowPort({
+  windowKind: () => useWindowStore.getState().windowKind,
+  setRightPanelForWorkspace: (workspaceId, open) => useWindowStore.getState().setRightPanelForWorkspace(workspaceId, open),
+  setBottomPanelForWorkspace: (workspaceId, open) => useWindowStore.getState().setBottomPanelForWorkspace(workspaceId, open),
+  persistInnerTabs: (workspaceId, state) => {
+    if (useWindowStore.getState().windowKind === 'quick') return
+    persistInnerTabs(workspaceId, state)
+  }
+})
 /**
  * 把 `activeWorkspaceId` 上报给主进程。
  *

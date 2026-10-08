@@ -12,6 +12,7 @@
 import { promises as fsp } from 'node:fs'
 import { dirname } from 'node:path'
 import type { KernelFs } from './host'
+import { writeStreamToFile, type StreamSink, type StreamTarget } from './stream-write'
 
 /** 二进制探测的默认取样长度。够看清 ELF/PNG/zip 头和前几行文本,又不至于读大。 */
 const SNIFF_BYTES = 4096
@@ -109,6 +110,36 @@ export function nodeFs(): KernelFs {
      */
     async writeBytes(abs, bytes, options = {}) {
       await fsp.writeFile(abs, bytes, { flag: options.exclusive === true ? 'wx' : 'w', ...(options.mode === undefined ? {} : { mode: options.mode }) })
-    }
+    },
+
+    /**
+     * 需求:`SaveVideo` 把几十到几百兆的视频写进工作区(见 `host.ts` 上那段理由)。
+     * 本地这一份就是把 `fsp.open` 拿到的 FileHandle 包成 `StreamSink`。
+     */
+    writeStream: (abs, source, options, signal) =>
+      writeStreamToFile(localStreamTarget(), abs, source, options, signal)
+  }
+}
+
+/** 本地工作区的流式写目标 —— 逻辑在 `stream-write.ts`,这里只提供文件系统动作。 */
+function localStreamTarget(): StreamTarget {
+  return {
+    async openSink(path, exclusive, mode): Promise<StreamSink> {
+      const handle = await fsp.open(path, exclusive ? 'wx' : 'w', mode)
+      return {
+        write: async (chunk) => { await handle.write(chunk) },
+        sync: async () => { await handle.sync() },
+        close: async () => { await handle.close() }
+      }
+    },
+    rename: async (from, to, replace) => {
+      void replace
+      await fsp.rename(from, to)
+    },
+    unlink: (path) => fsp.unlink(path),
+    exists: async (path) => {
+      try { await fsp.stat(path); return true } catch { return false }
+    },
+    mkdirp: async (path) => { await fsp.mkdir(dirname(path), { recursive: true }) }
   }
 }

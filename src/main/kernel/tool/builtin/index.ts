@@ -36,6 +36,8 @@ import { enterPlanModeTool, exitPlanModeTool } from './plan-file'
 import { visualizeReadMeTool, visualizeShowWidgetTool } from './visualize'
 import { generateImageTool } from './image'
 import { saveImageTool } from './save-image'
+import { generateVideoTool } from './video'
+import { saveVideoTool } from './save-video'
 
 /**
  * 代码里写死的那一批。**只有这张表保证顺序**(见文件头 echo 那条),
@@ -80,6 +82,19 @@ function coreTools(): ToolRegistration[] {
       ★ 它也有自己的 `isEnabled`(宿主写不了二进制就不下发),见 `save-image.ts` 文件头。
     */
     saveImageTool,
+    /*
+      对话内生成视频。紧跟生图那一对:同属「这一轮产出一个给人看的东西」。
+      ★ 与生图不同的是它**异步** —— 提交返回的是任务回执,成品由后台 worker
+      落成本会话附件(见 kernel/video-gen.ts 与 video-generation/manager.ts)。
+      ★ 它有**自己**的 `isEnabled`(没配视频模型就不下发)。
+    */
+    generateVideoTool,
+    /*
+      把对话里的视频写进工作区。紧跟生成视频 —— 它是「生成完之后存下来」那一步。
+      ★ 它写的是**流**(几十到几百兆),所以要求宿主有 `writeStream`;
+      宿主没有时整体不下发。见 save-video.ts 文件头。
+    */
+    saveVideoTool,
     /*
       ★ `Task` 是唯一一个**每次现造**的内置工具:它的 description 里逐字带着
       当前可用的子代理清单(照搬 CC),而那份清单会随目录重扫而变。
@@ -155,6 +170,8 @@ export { browserTools } from './browser'
 export { visualizeReadMeTool, visualizeShowWidgetTool } from './visualize'
 export { generateImageTool } from './image'
 export { saveImageTool } from './save-image'
+export { generateVideoTool } from './video'
+export { saveVideoTool } from './save-video'
 export {
   AVAILABLE_MODULES as VISUALIZE_MODULES,
   getGuidelines as visualizeGuidelines,

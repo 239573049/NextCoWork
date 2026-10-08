@@ -36,6 +36,7 @@ import { rewardsZh, rewardsEn } from './rewards';
 import { walletZh, walletEn } from './wallet';
 import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import { imageGenZh, imageGenEn } from './image-gen';
+import { videoGenZh, videoGenEn } from './video-gen';
 import { skillifyZh, skillifyEn } from './skillify';
 import {
   pluginMessages,
@@ -68,6 +69,7 @@ const ZH: Messages = {
   ...compactionZh,
   ...skillifyZh,
   ...imageGenZh,
+  ...videoGenZh,
   ...pluginUiZh,
   ...usageZh,
   ...providerAccountsZh,
@@ -1552,6 +1554,8 @@ const ZH: Messages = {
   "data.frequency.manual": "手动",
   "data.frequency.daily": "每天",
   "data.frequency.weekly": "每周",
+  "data.age.15d": "15 天前",
+  "data.age.1": "1 个月前",
   "data.age.3": "3 个月前",
   "data.age.6": "6 个月前",
   "data.age.12": "1 年前",
@@ -2053,6 +2057,7 @@ const EN: Messages = {
   ...compactionEn,
   ...skillifyEn,
   ...imageGenEn,
+  ...videoGenEn,
   ...pluginUiEn,
   ...themesEn,
   ...agentEn,
@@ -3548,6 +3553,8 @@ const EN: Messages = {
   "data.frequency.manual": "Manual",
   "data.frequency.daily": "Daily",
   "data.frequency.weekly": "Weekly",
+  "data.age.15d": "Older than 15 days",
+  "data.age.1": "Older than 1 month",
   "data.age.3": "Older than 3 months",
   "data.age.6": "Older than 6 months",
   "data.age.12": "Older than 1 year",

@@ -31,7 +31,8 @@ import { connectionErrorKey } from '../../services/connections'
 import { Dialog } from '../../components/ui/Dialog'
 import { Button } from '../../components/ui/Button'
 import { updateWorkspace } from '../../services/app'
-import { sessionStore, resumeQueue } from '../../stores/session'
+import { sessionStore, resumeQueue, retainSessionView } from '../../stores/session'
+import { useVideoJobsStore } from '../../stores/video-jobs'
 import { Composer, type ComposerValue, type ConversationUsageSummary, type FallbackModel } from './Composer'
 import { type TrayItem } from './AttachmentTray'
 import { deferAttachIntent, takeAttachIntents } from './draft-handoff'
@@ -48,7 +49,7 @@ import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
 import { WorkspaceMarkdownProvider } from '../../components/markdown'
-import { branchSession, createSession, getSession, setSessionMode, setSessionModel } from '../../services/sessions'
+import { branchSession, createSession, getSessionSummary, setSessionMode, setSessionModel } from '../../services/sessions'
 import { clearGoal, getGoal, setGoal } from '../../services/goal'
 import { parseGoalCommand } from '../../../../shared/domain/goal'
 import { toast } from '../../stores/toast'
@@ -106,26 +107,34 @@ export function ChatView({
   const storeKey = sessionId ?? tabId
   const remote = !isLocalEnvironment(workspace.environment)
   const useSession = sessionStore(storeKey)
-  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions } = useSession(useShallow((state) => ({
+  /*
+    这个视图挂着,这条会话的转录就留着;卸载(切走 / 关掉)之后宽限一小段时间再放,
+    run 照常在主进程跑 —— 见 `retainSessionView`。
+  */
+  useEffect(() => retainSessionView(storeKey), [storeKey])
+  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions, historyHasMore, loadingEarlier } = useSession(useShallow((state) => ({
     activeRunId: state.activeRunId,
     lastSeq: state.lastSeq,
     transcript: state.transcript,
     queuedInputs: state.queuedInputs,
     compacting: state.compacting,
     compactError: state.compactError,
-    lastOptions: state.lastOptions
+    lastOptions: state.lastOptions,
+    historyHasMore: state.historyHasMore,
+    loadingEarlier: state.loadingEarlier
   })))
   const {
     stop,
     promoteInput,
     editInput,
     editMessage,
-    deleteTurn,
+    deleteReply,
     dropInput,
     moveInputToDraft,
     retagQueuedPermission,
     retagQueuedMode,
-    compactContext
+    compactContext,
+    loadEarlier
   } = useSession.getState()
   const providerById = useModelsStore((s) => s.providerById)
   const openMarkdownFile = useCallback((path: string) => {
@@ -195,6 +204,19 @@ export function ChatView({
    *   否则用户只看到一句触发语,不知道材料从哪来、会写到哪去。
    */
   const [skillSourceId, setSkillSourceId] = useState<string | null | undefined>(undefined)
+  /*
+    ★★ 视频任务要**主动拉一次**:那张卡片靠任务状态显示进度与播放器,而状态
+    有两个来源 —— 实时的 `video:jobChanged` 与这里的初次加载。只订阅实时的话,
+    ⌘R 重载、换窗口、或者在一个**已经完成的**任务上重新打开这条会话,卡片会
+    停在"生成中" —— 因为那条广播早就过去了,而任务其实早就好了。
+
+    ★ 与 `getSession` 那几条并列而不是塞进它们的 then:视频任务与"这条会话用什么
+    模式/模型"无关,失败也不该影响那两样。
+  */
+  useEffect(() => {
+    if (sessionId === null) return
+    void useVideoJobsStore.getState().load(sessionId)
+  }, [sessionId])
   useEffect(() => {
     if (sessionId === null) {
       setCurrentSessionMode(workspace.settings.defaultMode)
@@ -202,7 +224,8 @@ export function ChatView({
       return
     }
     let cancelled = false
-    void getSession(sessionId).then((detail) => {
+    // 只要元数据:不为读一个模式/模型把整段转录读过来
+    void getSessionSummary(sessionId).then((detail) => {
       if (cancelled) return
       setCurrentSessionMode(detail.session.mode)
       setSkillSourceId(detail.session.skillSource?.sessionId ?? null)
@@ -333,7 +356,7 @@ export function ChatView({
   const onBranchTurn = useCallback(async (userMessageId: string) => {
     if (sessionId === null) return
     const tabTitle = useTabsStore.getState().stateOf(workspace.id).tabs.find((tab) => tab.id === tabId)?.title.trim() ?? ''
-    const sourceTitle = tabTitle !== '' ? tabTitle : (await getSession(sessionId)).session.title
+    const sourceTitle = tabTitle !== '' ? tabTitle : (await getSessionSummary(sessionId)).session.title
     const branched = await branchSession(sessionId, userMessageId, t('session.branchTitle', { title: sourceTitle }))
     useTabsStore.getState().openSession(workspace.id, branched.id, branched.title)
   }, [sessionId, tabId, workspace.id, t])
@@ -818,7 +841,7 @@ export function ChatView({
   function handleSkillifyCommand(args: string): void {
     if (sessionId === null) return
     const sourceSessionId = sessionId
-    void getSession(sourceSessionId)
+    void getSessionSummary(sourceSessionId)
       .then((detail) => startSkillExtraction({ workspace, sourceSessionId, sourceTitle: detail.session.title, hint: args, t }))
       .catch((error: unknown) => toast.error(t(skillExtractionErrorKey(error)), 'skill-extraction'))
   }
@@ -1016,11 +1039,14 @@ export function ChatView({
                 compactError={compactError}
                 {...(contextLimits === undefined ? {} : { contextLimits })}
                 onEditMessage={onEditMessage}
-                onDeleteTurn={deleteTurn}
+                onDeleteReply={deleteReply}
                 onBranchTurn={onBranchTurn}
                 workspaceId={workspace.id}
                 onOpenPlan={openMarkdownFile}
                 onExecutePlan={executePlan}
+                historyHasMore={historyHasMore}
+                loadingEarlier={loadingEarlier}
+                onLoadEarlier={loadEarlier}
                 {...(typeof skillSourceId === 'string' ? { skillExtractionSourceId: skillSourceId } : {})}
               />
             </WorkspaceFileProvider>

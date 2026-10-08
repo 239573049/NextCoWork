@@ -42,6 +42,12 @@ export interface GoalHost {
 
 let host: GoalHost | undefined
 let publish: ((change: GoalChange, sourceRunId?: string) => boolean) | undefined
+/**
+ * 空闲检查由谁来真的开跑。装上之后(`ipc/index.ts` 接 `main/session-runtime.ts`)
+ * 检查在主进程直接起一轮,不再转交给「订阅着那个 run 的窗口」—— 原先没有窗口在看
+ * 这条会话时,检查就投递失败,只能一直退避重试。
+ */
+let launcher: ((sessionId: string, parts: ContentPart[], options: SendOptions, goalId: string) => boolean) | undefined
 const pendingStatuses = new Map<string, GoalStatus[]>()
 /** Only out-of-band markers, never a second copy of the whole conversation. */
 const durableStatuses = new Map<string, Map<string, GoalStatus[]>>()
@@ -51,6 +57,7 @@ const timers = new Map<string, ReturnType<typeof setTimeout>>()
 
 export function installGoalHost(next: GoalHost): void { host = next }
 export function setGoalChangeListener(listener: NonNullable<typeof publish>): void { publish = listener }
+export function setGoalLauncher(next: typeof launcher): void { launcher = next }
 
 const now = (): number => host?.now() ?? Date.now()
 function log(event: string, fields: Record<string, string | number>): void {
@@ -219,6 +226,7 @@ export function resetGoalRuntimeForTest(): void {
   stopAllGoals()
   host = undefined
   publish = undefined
+  launcher = undefined
 }
 
 export function goalCheckinInterval(count: number, baseMs = DEFAULT_CHECKIN_MS): number {
@@ -302,11 +310,17 @@ function advanceCheckin(sessionId: string, goal: ActiveGoal, trigger: 'idle_time
   })
 }
 
-/** Deliver to a live run, or to one owning renderer which calls the same internal send API. */
+/** Deliver to an idle session: started in-process when a launcher is installed, otherwise via the owning renderer. */
 export function wakeGoal(sessionId: string, parts: ContentPart[], goalId: string): boolean {
   if (getActiveGoal(sessionId)?.id !== goalId) return false
   const context = contexts.get(sessionId)
   if (context?.options === undefined) return false
+  if (launcher !== undefined) {
+    const delivered = launcher(sessionId, parts, context.options, goalId)
+    // 状态照常广播给所有窗口;检查本身不再经过任何窗口
+    if (delivered) publish?.({ sessionId, goal: getActiveGoal(sessionId) })
+    return delivered
+  }
   return publish?.({ sessionId, goal: getActiveGoal(sessionId), input: { goalId, parts, options: context.options } }, context.runId) ?? false
 }
 

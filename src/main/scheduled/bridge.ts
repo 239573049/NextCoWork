@@ -35,10 +35,10 @@ import {
 } from '../../shared/domain/scheduled'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
-import { refreshScheduler } from './scheduler'
+import { refreshScheduledTasks } from './refresh'
 
 function announce(taskId: string): void {
-  refreshScheduler()
+  refreshScheduledTasks()
   windows.emitToAll('scheduled:changed', { kind: 'task', taskId })
 }
 

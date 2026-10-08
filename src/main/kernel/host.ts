@@ -57,6 +57,27 @@ export interface KernelFs {
    * 因此天然满足它,不必各自再包一层。
    */
   writeBytes?(absPath: string, bytes: Uint8Array, options?: { exclusive?: boolean; mode?: number }): Promise<void>
+  /**
+   * 把一个**流**写进工作区文件,全程有上限、有背压、失败即清理。
+   *
+   * 需求:`SaveVideo` 要把一段几十到几百兆的视频写进工作区,而 `writeBytes` 拿的是
+   * "已经完整在内存里的 Uint8Array" —— 视频那个量级下那意味着主进程先分配几百兆,
+   * 而 SSH 那侧还有自己的 32 MiB 上限。所以单开一条:
+   *
+   * - **边拉边写**,不出现"完整视频"的 Buffer;
+   * - `maxBytes` 超出时**当场断并清理**半截文件(而不是写完再删);
+   * - 失败不碰旧文件:写临时名,成功才 rename;`exclusive` 时由文件系统原子判定;
+   * - `signal` 中断同样清理。
+   *
+   * ★ 可选:缺席 = 这个宿主存不了大文件,`SaveVideo` 整体不下发
+   *   (不画一个会在几百兆时才失败的承诺)。
+   */
+  writeStream?(
+    absPath: string,
+    source: ReadableStream<Uint8Array>,
+    options: { exclusive?: boolean; mode?: number; maxBytes: number },
+    signal: AbortSignal
+  ): Promise<{ ok: true; size: number } | { ok: false; reason: string }>
 }
 
 export interface SpawnResult {

@@ -388,6 +388,14 @@ export function imageGenBridgeFor(deps: ImageGenDeps): ImageGenBridge {
   ): Promise<Attempt> {
     const cred = await deps.credential(provider.credentialRef)
     if (cred === null) return { reason: 'no API key' }
+    /*
+      ★ 签名凭证(腾讯 TC3 / AWS SigV4)在这条路上**明确失败**,不给一个半段 token。
+      生图接口按定义是 Bearer 的(`/images/generations`),签名凭证不适用;
+      静默拿它的某个字段拼头只会得到一个读不懂的 401。
+    */
+    if (cred.kind === 'signature') {
+      return { reason: 'this provider uses a signature credential, which image generation does not support' }
+    }
     const token = cred.kind === 'api-key' ? cred.apiKey : cred.accessToken
     const base = provider.baseUrl.replace(/\/+$/u, '')
 

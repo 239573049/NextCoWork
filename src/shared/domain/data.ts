@@ -195,11 +195,18 @@ export interface CleanupResult extends CleanupPreview {
   deleted: number
 }
 
-export type CleanupAge = 3 | 6 | 12
+/** `'15d'` 表示 15 天；数字表示日历月数。 */
+export type CleanupAge = '15d' | 1 | 3 | 6 | 12
 
-/** 截止时间：当前时刻往前 N 个月，按日历月而不是固定 90 天。 */
-export function cutoffForAge(now: number, months: CleanupAge): number {
+/** 截止时间：当前时刻往前 15 天，或往前 N 个月（按日历月而不是固定 90 天）。 */
+export function cutoffForAge(now: number, age: CleanupAge): number {
   const date = new Date(now)
+  if (age === '15d') {
+    // 按日历日回退，跨夏令时也保留同一时分秒。
+    date.setDate(date.getDate() - 15)
+    return date.getTime()
+  }
+  const months = age
   const day = date.getDate()
   // Move through day 1 first. Native Date#setMonth overflows at month ends
   // (May 31 - 3 months becomes March 3), which would delete several extra

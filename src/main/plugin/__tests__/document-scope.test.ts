@@ -284,14 +284,77 @@ describe('documents.* scope', () => {
     manager = await makeManager(runtimeCalling(() => manager!, 'acme.writer', outcome), seen)
     await tool(manager).execute({}, ctx('call-1', 'bg'))
     expect(outcome.error).toBeUndefined()
-    expect(seen).toEqual([{ method: 'documents.open', scope: { workspaceId: 'bg', workspaceRoot: '/ws/background' } }])
+    // scope 现在还带着这次调用的 signal 与副作用钩子(见 DocumentCallScope),只断言作用域那两个字段。
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.method).toBe('documents.open')
+    expect(seen[0]?.scope).toMatchObject({ workspaceId: 'bg', workspaceRoot: '/ws/background' })
+    expect(seen[0]?.scope.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('infers the single live tool workspace for document requests without a callId', async () => {
+    const seen: Seen[] = []
+    let response: unknown
+    const runtime: PluginRuntime = {
+      spawn: async () => {}, dispose: () => {}, disposeAll: () => {},
+      invoke: async (_pluginId, invocation) => {
+        if (invocation.kind !== 'tool.execute') return {}
+        response = await manager.handleRequest('acme.writer', { id: 10, method: 'documents.open', params: { path: 'a.docx' } })
+        return { content: [{ text: 'done' }] }
+      }
+    }
+    const manager = await makeManager(runtime, seen)
+    await tool(manager).execute({}, ctx('unambiguous-document', 'bg'))
+    expect(response).toMatchObject({ ok: true })
+    expect(seen[0]?.scope).toMatchObject({ workspaceId: 'bg', workspaceRoot: '/ws/background' })
+  })
+
+  it('refuses unscoped document requests during concurrent tools instead of guessing the foreground', async () => {
+    const seen: Seen[] = []
+    const responses: unknown[] = []
+    let started = 0
+    let release: () => void = () => {}
+    const both = new Promise<void>((resolve) => { release = resolve })
+    const runtime: PluginRuntime = {
+      spawn: async () => {}, dispose: () => {}, disposeAll: () => {},
+      invoke: async (_pluginId, invocation) => {
+        if (invocation.kind !== 'tool.execute') return {}
+        if (++started === 2) release()
+        await both
+        responses.push(await manager.handleRequest('acme.writer', { id: 11, method: 'documents.open', params: { path: 'a.docx' } }))
+        return { content: [{ text: 'done' }] }
+      }
+    }
+    const manager = await makeManager(runtime, seen, { bg: '/ws/background', second: '/ws/second' })
+    await Promise.all([tool(manager).execute({}, ctx('document-first', 'bg')), tool(manager).execute({}, ctx('document-second', 'second'))])
+    expect(responses).toHaveLength(2)
+    for (const response of responses) expect(response).toMatchObject({ ok: false, error: { code: 'rejected', message: expect.stringContaining('[call_scope]') } })
+    expect(seen).toEqual([])
+  })
+
+  it('does not fall back to the foreground when an inferred tool has been aborted', async () => {
+    const seen: Seen[] = []
+    const controller = new AbortController()
+    let response: unknown
+    const runtime: PluginRuntime = {
+      spawn: async () => {}, dispose: () => {}, disposeAll: () => {},
+      invoke: async (_pluginId, invocation) => {
+        if (invocation.kind !== 'tool.execute') return {}
+        controller.abort()
+        response = await manager.handleRequest('acme.writer', { id: 12, method: 'documents.open', params: { path: 'a.docx' } })
+        return { content: [{ text: 'done' }] }
+      }
+    }
+    const manager = await makeManager(runtime, seen)
+    await tool(manager).execute({}, { ...ctx('aborted-inferred', 'bg'), signal: controller.signal })
+    expect(response).toMatchObject({ ok: false, error: { code: 'rejected' } })
+    expect(seen).toEqual([])
   })
 
   it('uses the foreground workspace for requests without a callId', async () => {
     const seen: Seen[] = []
     const manager = await makeManager({ spawn: async () => {}, dispose: () => {}, disposeAll: () => {}, invoke: async () => ({}) }, seen)
     await manager.handleRequest('acme.writer', { id: 3, method: 'documents.open', params: { path: 'a.docx' } })
-    expect(seen[0]?.scope).toEqual({ workspaceId: 'fg', workspaceRoot: '/ws/foreground' })
+    expect(seen[0]?.scope).toMatchObject({ workspaceId: 'fg', workspaceRoot: '/ws/foreground' })
   })
 
   it('★ rejects another plugin reusing this call\'s callId instead of falling back to the foreground', async () => {

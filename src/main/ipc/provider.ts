@@ -22,6 +22,7 @@ import type {
   FetchedModel,
   ModelAlias,
   ProviderProtocolOptions,
+  ProviderVideoGeneration,
   RevealedCredential,
   UpstreamProvider
 } from '../../shared/domain/provider'
@@ -38,6 +39,7 @@ import { parseCredential } from '../../shared/domain/credential'
 import { modelBindingResolver } from '../../shared/domain/model-binding'
 import { catalogDefinitionFromAlias, isModelCatalogDefinition } from '../../shared/domain/model-catalog'
 import { defaultProtocolForModel, isImageModelId } from '../../shared/domain/model-catalog-inventory'
+import { isVideoAdapterId } from '../../shared/domain/video-generation'
 import { listResolvedModels } from '../state/model-bindings'
 import {
   modelListErrorMessage,
@@ -265,6 +267,72 @@ function mergeProtocolOptions(
 }
 
 /**
+ * 校验并规范 `videoGeneration`(视频出网配置)。
+ *
+ * ★ incoming 为 undefined = 旧版渲染层根本不知道这个字段 —— 保留库里那份,
+ *   和 `protocolOptions` 同一条规矩;给了就必须**整体合法**:视频配置描述的是
+ *   「把密钥发到哪个地址」,半个字段都含糊不得,校验必须在落库之前完成。
+ *
+ * ★★ 只重建认识的四个字段(adapter / baseUrl / region / s3),**未知字段一律
+ *   不采信** —— 经 IPC 递进来的多余字段落库,等于给未来的读取方埋一份来历
+ *   不明的配置。s3 刻意只存桶与前缀,凭据永远在 `credentialRef` 指的槽里。
+ *
+ * ★ baseUrl 复用 `normalizeBaseUrl`(http/https 白名单的理由见那边),再去掉
+ *   尾斜杠 —— `ProviderVideoGeneration.baseUrl` 的规范形式不带尾斜杠,
+ *   `kernel/upstream/video/*` 的适配器直接在它后面拼 path。
+ *
+ * ★ 可选段(region / s3.prefix / s3.region)trim 之后空串视同没填,不落库;
+ *   s3.bucket 允许空串 —— 内置 AWS 预设先存空桶,用户选好 region 之后才填桶名。
+ *   全对象更新可以替换这些可选段;需要「保留」的只有整个字段省略这一种情况。
+ */
+function mergeVideoGeneration(
+  existing: ProviderVideoGeneration | undefined,
+  incoming: unknown
+): ProviderVideoGeneration | undefined {
+  if (incoming === undefined) return existing
+  const raw = record(incoming)
+  if (raw === undefined) throw new Error('videoGeneration 必须是一个对象')
+  const adapter = raw['adapter']
+  if (!isVideoAdapterId(adapter)) throw new Error(`未知的视频适配器:${String(adapter)}`)
+  if (typeof raw['baseUrl'] !== 'string') throw new Error('视频 API 地址必须是字符串')
+  const baseUrl = normalizeBaseUrl(raw['baseUrl']).replace(/\/+$/, '')
+
+  const regionRaw = raw['region']
+  if (regionRaw !== undefined && typeof regionRaw !== 'string') throw new Error('视频地域必须是字符串')
+  const region = typeof regionRaw === 'string' ? regionRaw.trim() : undefined
+
+  let s3: ProviderVideoGeneration['s3']
+  if (raw['s3'] !== undefined) {
+    const s3Raw = record(raw['s3'])
+    if (s3Raw === undefined) throw new Error('videoGeneration.s3 必须是一个对象')
+    const bucket = s3Raw['bucket']
+    if (typeof bucket !== 'string') throw new Error('videoGeneration.s3.bucket 必须是字符串')
+    const prefixRaw = s3Raw['prefix']
+    if (prefixRaw !== undefined && typeof prefixRaw !== 'string') {
+      throw new Error('videoGeneration.s3.prefix 必须是字符串')
+    }
+    const s3RegionRaw = s3Raw['region']
+    if (s3RegionRaw !== undefined && typeof s3RegionRaw !== 'string') {
+      throw new Error('videoGeneration.s3.region 必须是字符串')
+    }
+    const prefix = typeof prefixRaw === 'string' ? prefixRaw.trim() : undefined
+    const s3Region = typeof s3RegionRaw === 'string' ? s3RegionRaw.trim() : undefined
+    s3 = {
+      bucket,
+      ...(prefix !== undefined && prefix !== '' ? { prefix } : {}),
+      ...(s3Region !== undefined && s3Region !== '' ? { region: s3Region } : {})
+    }
+  }
+
+  return {
+    adapter,
+    baseUrl,
+    ...(region !== undefined && region !== '' ? { region } : {}),
+    ...(s3 === undefined ? {} : { s3 })
+  }
+}
+
+/**
  * 新建或更新一个上游供应商。
  *
  * ★★ **`credentialRef` 一律不采信渲染层传来的值。**
@@ -318,6 +386,15 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
   const baseUrl = platform?.baseUrl ?? normalizeBaseUrl(input.baseUrl)
 
   const protocolOptions = mergeProtocolOptions(existing?.protocolOptions, input.protocolOptions)
+  /*
+    ★★ 托管那条**不接受传入的视频路由**,一律沿用库里那份。视频配置描述的正是
+    「把凭证发往哪个地址」,而 NextCoWork 这条的凭证是平台发的 access token ——
+    采信渲染层的 `videoGeneration.baseUrl`,等于允许把这个 token 发往任意主机,
+    和地址锁死(`platform?.baseUrl`)是同一条边界,所以入参一个字不看。
+  */
+  const videoGeneration = managed
+    ? existing?.videoGeneration
+    : mergeVideoGeneration(existing?.videoGeneration, input.videoGeneration)
   const saved = store.putProvider({
     id,
     name,
@@ -326,7 +403,8 @@ export function upsertProvider(input: UpstreamProvider): UpstreamProvider {
     credentialRef: existing?.credentialRef ?? providerCredentialRef(id),
     priority: Number.isFinite(input.priority) ? input.priority : 50,
     enabled: input.enabled,
-    ...(protocolOptions === undefined ? {} : { protocolOptions })
+    ...(protocolOptions === undefined ? {} : { protocolOptions }),
+    ...(videoGeneration === undefined ? {} : { videoGeneration })
   })
   broadcast()
   return saved
@@ -443,6 +521,24 @@ function repointDanglingDefaults(): void {
   if (goalEvaluator !== undefined) {
     patch.goalEvaluatorModel = goalEvaluator.model
     patch.goalEvaluatorModelProviderId = goalEvaluator.modelProviderId
+  }
+  /*
+    ★ 视频模型和上面几个的降级方向不同:**绑定失效就清空整对**,不解锁成裸别名、
+    更不换另一家同名模型。视频按秒/分辨率计费,静默换家的代价比对话模型更大
+    (见 settings.ts `videoModel` 那段);而且视频出网还要看供应商的
+    `videoGeneration` 配置 —— 同名别名挂在别家,多半根本出不了网。所以有明确的
+    绑定失效时,唯一允许的降级是回到「没选过」(`videoModel: ''`)。
+    `videoModelProviderId` 缺席的旧数据沿用运行时的解析口径:别名还指得到就不动,
+    彻底消失才清空。为空(= 没选过)时一个字不动。
+  */
+  if (before.videoModel !== '') {
+    const aliveVideo = before.videoModelProviderId !== undefined
+      ? aliveBindings.has(modelSelectionKey(before.videoModelProviderId, before.videoModel))
+      : aliveAliases.has(before.videoModel)
+    if (!aliveVideo) {
+      patch.videoModel = ''
+      patch.videoModelProviderId = undefined
+    }
   }
   if (Object.keys(patch).length === 0) return
 
@@ -663,6 +759,24 @@ export function infoFor(plaintext: string | null): CredentialInfo {
     // 常规状态只回后四位;完整明文只走显式 revealCredential
     return { hasKey: true, last4: cred.apiKey.slice(-4), encryptionAvailable: available }
   }
+  /*
+    ★★ 签名凭证(腾讯 TC3 / AWS SigV4)走**另一支**,原因有两条且都不容商量:
+
+    1. `last4` 对它无意义且有害 —— 它会露出 **SecretKey 的尾四位**,而签名凭证的
+       身份标识是 `accessKeyId`(那不是秘密)。所以这里回 `accessKeyId`,
+       并且**不回** last4。
+    2. 它没有 `issuer`/`expiresAt` 这些东西,硬塞进 `auth`(OAuth 的形状)会让
+       设置页画出"已登录 / 已过期"那一套对签名凭证根本不存在的状态。
+  */
+  if (cred.kind === 'signature') {
+    return {
+      hasKey: true,
+      last4: null,
+      encryptionAvailable: available,
+      signatureScheme: cred.scheme,
+      accessKeyId: cred.accessKeyId
+    }
+  }
   return {
     hasKey: true,
     last4: null,
@@ -713,11 +827,24 @@ export async function revealCredential(providerId: string): Promise<RevealedCred
   if (p === undefined) throw new Error(`没有这个供应商:${providerId}`)
   const credential = parseCredential(await getHost().secrets.get(p.credentialRef))
   if (credential === null) throw new Error('还没有配置密钥')
-  return credential.kind === 'api-key'
-    ? { kind: 'api-key', apiKey: credential.apiKey }
-    : {
-        kind: 'oauth',
-        accessToken: credential.accessToken,
-        refreshToken: credential.refreshToken
-      }
+  if (credential.kind === 'api-key') return { kind: 'api-key', apiKey: credential.apiKey }
+  /*
+    ★ 签名凭证也允许显式查看 —— 用户要能确认自己填的是哪一把 AccessKeyId,
+    而"密钥栏里的点"对识别它是没有用的。查看动作仍然是显式的、单次的。
+  */
+  if (credential.kind === 'signature') {
+    return {
+      kind: 'signature',
+      scheme: credential.scheme,
+      accessKeyId: credential.accessKeyId,
+      secretKey: credential.secretKey,
+      region: credential.region,
+      ...(credential.sessionToken === undefined ? {} : { sessionToken: credential.sessionToken })
+    }
+  }
+  return {
+    kind: 'oauth',
+    accessToken: credential.accessToken,
+    refreshToken: credential.refreshToken
+  }
 }

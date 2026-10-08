@@ -23,6 +23,7 @@ import {
   Search,
   Sparkles,
   Terminal,
+  Video,
   type LucideIcon
 } from 'lucide-react'
 import type { ReactNode } from 'react'
@@ -51,6 +52,8 @@ export const SHAPE_ICON: Record<ToolShape, LucideIcon> = {
   widget: Sparkles,
   // 生图:产物就是一张图,图标直说,不和 widget 的 Sparkles 混用(那一档是"画代码")
   image: ImageIcon,
+  // 生成视频:产物是一段视频,用摄像机图标直说(与 image 的相纸、screenshot 的相机区分开)
+  video: Video,
   // 页面截图:同属「产物是一张图」,但出处是浏览器 —— 相机把「拍下来的」这件事说清,
   // 和生图的相纸图标区分开(一个是画的,一个是拍的)
   screenshot: Camera,

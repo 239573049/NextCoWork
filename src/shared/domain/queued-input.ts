@@ -26,7 +26,8 @@
  * 顺序与合并规则是这套机制里最容易出错的部分,它必须能在没有时钟的情况下被断言。
  */
 import type { ContentPart } from '../agent/message'
-import type { SendOptions } from '../agent/run-request'
+import type { SendOptions, SessionMode } from '../agent/run-request'
+import type { PermissionMode } from '../agent/permission'
 // ★ mime 推断只有一份 —— 附件域已经有了,队列不再自带一张扩展名表
 import { mimeOfExt } from './attachment'
 
@@ -87,6 +88,42 @@ export interface SessionInputState {
 }
 
 export const SESSION_INPUT_VERSION = 1
+
+/**
+ * 队列的写操作。**主进程是队列唯一的写入者**(`main/session-runtime.ts`):
+ * 渲染层只发意图、收回执,不再自己决定下一轮什么时候开跑 —— 否则没有窗口在看
+ * 这条会话时,排队的消息就永远等不到续跑。
+ *
+ * - `take`:出队并把文本交回调用方(「撤回到输入框」),草稿由渲染层拼接后另行落盘。
+ * - `resume`:用户在停止/报错/重启之后手动继续,与自动续跑走同一条路径。
+ */
+export type SessionQueueOp =
+  | { kind: 'enqueue'; text: string; options: SendOptions; attachments: QueuedAttachment[] }
+  | { kind: 'promote'; id: string }
+  | { kind: 'edit'; id: string; text: string }
+  | { kind: 'drop'; id: string }
+  | { kind: 'take'; id: string }
+  | { kind: 'retagPermission'; mode: PermissionMode }
+  | { kind: 'retagMode'; mode: SessionMode }
+  | { kind: 'resume' }
+
+/**
+ * 队列的权威快照。`rev` 单调递增:回执与广播可能乱序到达,渲染层只收更新的那份。
+ */
+export interface SessionQueueSnapshot {
+  sessionId: string
+  queued: QueuedInput[]
+  rev: number
+}
+
+export interface SessionQueueResult extends SessionQueueSnapshot {
+  /** `enqueue` 超过 `QUEUE_MAX_ITEMS` 时为 false —— 调用方据此保留草稿 */
+  accepted: boolean
+  /** `take` 取回的文本 */
+  text?: string
+}
+
+export type SubagentReportStatus = 'none' | 'pending' | 'injecting' | 'reported' | 'blocked'
 
 /** 队列条目数软上限。超过就不是队列了,是便签本(§9) */
 export const QUEUE_MAX_ITEMS = 20

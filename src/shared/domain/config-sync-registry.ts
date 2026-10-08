@@ -5,12 +5,23 @@ import type { SyncCategory } from './config-sync'
 /** Exhaustive compile-time inventory: new domain fields require an explicit sync decision. */
 export const PROVIDER_SYNC_FIELDS: Record<keyof UpstreamProvider, 'copy' | 'local'> = {
   id: 'copy', name: 'copy', protocol: 'copy', baseUrl: 'copy', credentialRef: 'local',
-  priority: 'copy', enabled: 'copy', protocolOptions: 'copy'
+  priority: 'copy', enabled: 'copy', protocolOptions: 'copy',
+  /*
+    ★ 视频连接配置跟着供应商一起同步:它描述的是"这家怎么出网"(adapter +
+    video base URL + 地域 / S3 桶),和聊天那份 baseUrl 同类 —— 两台机器上
+    应当指向同一家。**凭据仍在 `credentialRef` 指的本地密文槽里**,不跟着走。
+    ★ 它必须显式登记而不是靠"默认 copy":`Record<keyof …>` 是编译期清单,
+      漏一个字段在这里就编译不过 —— 那条约束正是为了让这个决定被当面做出。
+  */
+  videoGeneration: 'copy'
 }
 export const MODEL_SYNC_FIELDS: Record<keyof ModelAlias, 'copy'> = {
   alias: 'copy', providerId: 'copy', upstreamModel: 'copy', protocolOverride: 'copy', priority: 'copy',
   capabilities: 'copy', contextWindow: 'copy', maxOutputTokens: 'copy', displayName: 'copy', modality: 'copy',
-  enabled: 'copy', thinkingConfig: 'copy', reasoningEfforts: 'copy', requestAdapter: 'copy', source: 'copy', catalogOverrides: 'copy'
+  enabled: 'copy', thinkingConfig: 'copy', reasoningEfforts: 'copy', requestAdapter: 'copy', source: 'copy',
+  // 视频档案引用也是"这条绑定怎么发",和 protocolOverride 同类,跟着模型走。
+  video: 'copy',
+  catalogOverrides: 'copy'
 }
 export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'device' | 'split'> = {
   theme: 'preferences', activeThemeProfileId: 'preferences', locale: 'preferences', colorTheme: 'preferences',
@@ -28,6 +39,9 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   // 生图开关跟着生图模型走同一档:拆开会出现「模型同步过去了、开关没有」的半套配置
   //(同上面压缩模型那段的理由)。
   imageGenerationEnabled: 'providers',
+  // 视频那三项与生图同档同理由:模型是"某家供应商的别名",开关跟着它走,
+  // 拆开会出现「模型同步过去了、开关没有」的半套配置。
+  videoModel: 'providers', videoModelProviderId: 'providers', videoGenerationEnabled: 'providers',
   contextManagement: 'preferences', subagent: 'split', gateway: 'device', notifications: 'preferences',
   proxy: 'device', data: 'split', personalization: 'preferences', shortcuts: 'preferences', themeStudio: 'preferences',
   shell: 'device',

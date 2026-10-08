@@ -127,6 +127,20 @@ export interface SessionDetail {
   runModel?: Record<string, string>
 }
 
+/**
+ * 转录的**一页**:最近的那段(或某条消息之前的那段),从一轮的开头切起。
+ *
+ * 需求:打开一条长会话不该把整段历史 —— 连同每一次工具输出和截图 —— 一次性读进渲染层。
+ * 显示从最近的一页开始,往上翻时再按页往前取。改写转录(编辑 / 删除 / 重跑)按消息 id
+ * 在主进程的完整历史上做,所以渲染层手里只有一页也不会误删页外的消息。
+ *
+ * `messageRuns` 只覆盖本页的消息;`runUsage` / `runModel` 是整段会话的汇总(很小)。
+ */
+export interface SessionPage extends SessionDetail {
+  /** 这一页之前还有更早的消息 */
+  hasMore: boolean
+}
+
 /** conversations:searchAll 的命中项。FTS5 给出的 snippet 带高亮标记。 */
 export interface SearchHit {
   sessionId: string

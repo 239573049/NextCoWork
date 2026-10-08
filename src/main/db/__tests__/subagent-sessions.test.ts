@@ -207,14 +207,14 @@ describe('第 10 条迁移:把已经泄漏进侧边栏的存量脏行清掉', ()
     )
     const putMessage = raw.prepare(
       `INSERT INTO messages (id, session_id, ordinal, role, parts, schema_version, created_at)
-       VALUES (?, ?, 0, 'assistant', '[]', 1, 1)`
+       VALUES (?, ?, 0, 'assistant', ?, 1, 1)`
     )
     const putFts = raw.prepare(
       `INSERT INTO messages_fts (message_id, session_id, title, content) VALUES (?, ?, '新对话', 'leakneedle')`
     )
     for (const id of [PARENT, CHILD, GRANDCHILD]) {
       putSession.run(id)
-      putMessage.run(`m-${id}`, id)
+      putMessage.run(`m-${id}`, id, JSON.stringify([{ type: 'text', text: 'leakneedle' }]))
       putFts.run(`m-${id}`, id)
     }
     raw.close()

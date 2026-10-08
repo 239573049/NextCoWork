@@ -1,4 +1,4 @@
-import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../../shared/domain/session'
+import type { Session, SessionDetail, SessionListItem, SessionPage, SearchHit } from '../../../shared/domain/session'
 import type { AgentMessage } from '../../../shared/agent/message'
 import type { SessionMode } from '../../../shared/agent/run-request'
 import { invoke } from './ipc'
@@ -7,8 +7,40 @@ export function listSessions(workspaceId: string, archived?: boolean): Promise<S
   return invoke('sessions:list', archived === undefined ? { workspaceId } : { workspaceId, archived })
 }
 
+/**
+ * ★ 整段历史。渲染层显示转录**不要**用它 —— 用 `getSessionPage`;只读会话元数据用
+ * `getSessionSummary`。它留给确实需要整段的地方(以及旧测试)。
+ */
 export function getSession(sessionId: string): Promise<SessionDetail> {
   return invoke('sessions:get', { sessionId })
+}
+
+/** 转录的一页:`beforeMessageId` 之前(缺省 = 最新)的约 `limit` 条,从一轮的开头切起 */
+export function getSessionPage(sessionId: string, limit: number, beforeMessageId?: string): Promise<SessionPage> {
+  return invoke('sessions:getPage', beforeMessageId === undefined ? { sessionId, limit } : { sessionId, limit, beforeMessageId })
+}
+
+/** 会话元数据 + 消息条数。不读任何消息正文 */
+export function getSessionSummary(sessionId: string): Promise<{ session: Session; messageCount: number }> {
+  return invoke('sessions:getSummary', { sessionId })
+}
+
+/** 会话里最后一条助手消息(子代理交差的正文)。不读整段转录 */
+export function getLastAssistantMessage(sessionId: string): Promise<AgentMessage | null> {
+  return invoke('sessions:lastAssistant', { sessionId })
+}
+
+/** 按消息 id 改写转录 —— 主进程在完整历史上改,见 `shared/agent/history-edit.ts` */
+export function editSessionMessage(sessionId: string, messageId: string, text: string, truncate: boolean): Promise<void> {
+  return invoke('sessions:editMessage', { sessionId, messageId, text, truncate })
+}
+
+export function deleteSessionTurn(sessionId: string, userMessageId: string): Promise<void> {
+  return invoke('sessions:deleteTurn', { sessionId, userMessageId })
+}
+
+export function deleteSessionReply(sessionId: string, fromId: string, toId: string): Promise<void> {
+  return invoke('sessions:deleteReply', { sessionId, fromId, toId })
 }
 
 export function replaceHistory(sessionId: string, messages: AgentMessage[]): Promise<void> {

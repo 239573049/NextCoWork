@@ -20,6 +20,7 @@
 import { useState, type ReactNode } from 'react'
 import { Camera, ZoomIn } from 'lucide-react'
 import { pick } from '../../../../shared/domain/tool-presenter'
+import { ncwPreviewUrl } from '../../../../shared/domain/attachment'
 import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { AgentShimmerText } from './AgentActivity'
@@ -76,7 +77,7 @@ export function ScreenshotDetail({ input, output, isError }: DetailProps): React
         className="app-no-drag group relative block cursor-zoom-in overflow-hidden rounded-[8px] focus-visible:outline-2 focus-visible:outline-accent"
       >
         <img
-          src={image.dataRef}
+          src={ncwPreviewUrl(image.dataRef)}
           alt=""
           data-testid="screenshot-image"
           className="block max-h-[360px] max-w-full object-contain"

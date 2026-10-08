@@ -367,6 +367,40 @@ export interface AppSettings {
    */
   imageGenerationEnabled: boolean
 
+  /**
+   * 「对话视频生成使用的模型」(设置 › 模型 › 视频生成)。
+   *
+   * ★ 与 `imageModel` **同构、同一条规矩**:必选、不设自动档,只用点名的那个绑定,
+   *   失败就是失败(不跨家兜底)。理由是同一句话,只是代价更大 —— 视频按秒/分辨率
+   *   计费,「我点名了 A、出片的却是 B」既更贵,又更难发现(要等好几分钟)。
+   *
+   * ★ 空字符串 = **没选过**,`generate_video` 的**新建**动作整体不下发
+   *   (`kernel/video-gen.ts`)。已提交任务的查询/取消**不看它** ——
+   *   那是另一条路径,见下面 `videoGenerationEnabled` 那段。
+   *
+   * 与 `defaultModel` 成对,见那边 `defaultModelProviderId` 的说明:
+   * 改 `videoModel` 的 patch 必须同时给 `videoModelProviderId`。
+   */
+  videoModel: string
+  /** 与 `videoModel` 成对,见 `defaultModelProviderId` */
+  videoModelProviderId?: string
+  /**
+   * 「对话视频生成」开关(设置 › 模型 › 视频生成)。关掉 = **不新建**任务。
+   *
+   * ★★ **这一项和 `imageGenerationEnabled` 有一处关键不同,写在字段上免得被后人
+   *    "顺手统一":** 关掉生图 = `generate_image` 整体不下发、调用被拒,因为生图是
+   *    同步的,不存在"已经提交出去了"这回事。关掉视频生成**只禁止新建** ——
+   *    已经提交到云端的任务照常查询、照常收取成品。
+   *
+   *    理由:一个视频任务在云端可能已经跑了五分钟、**已经计过费**;关掉本地开关
+   *    不会让它停下来,也不会退款。这时把它从界面上藏起来,只会让用户永远不知道
+   *    结果。要停某一个任务,用那张结果卡上**独立**的取消按钮。
+   *
+   * ★ 出厂开启:与生图同一条理由 —— 选好模型本身就是"我要生成视频"的意思。
+   * ★ 与 `videoModel` 分开,理由同为"模型答'用谁生成'、开关答'要不要新建'"。
+   */
+  videoGenerationEnabled: boolean
+
   /** 上下文管理：默认只开自动压缩，智能窗口模式要用户自己打开。 */
   contextManagement: ContextManagementSettings
 
@@ -515,6 +549,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   imageModel: '',
   // 生图开关出厂开启 —— 理由见 AppSettings.imageGenerationEnabled
   imageGenerationEnabled: true,
+  // 空 = 没选过视频模型,`generate_video` 的**新建**动作不下发(见 AppSettings.videoModel)
+  videoModel: '',
+  // 视频生成开关出厂开启 —— ★ 它只管"要不要新建",已提交任务照常收取,
+  // 理由写在 AppSettings.videoGenerationEnabled 那段。
+  videoGenerationEnabled: true,
   contextManagement: { autoCompact: true },
   upstreamIdleTimeoutSeconds: DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
   maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -614,6 +653,14 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   // 桥那边的 `=== true` 会把它静默读成「关」,症状又是「工具不见了」
   if (typeof patch.imageGenerationEnabled === 'boolean') {
     next.imageGenerationEnabled = patch.imageGenerationEnabled
+  }
+  // 视频:成对写 + 布尔白名单,与生图那两处逐字同构(理由见上面那两段)。
+  if (patch.videoModel !== undefined) {
+    next.videoModel = patch.videoModel
+    next.videoModelProviderId = patch.videoModelProviderId
+  }
+  if (typeof patch.videoGenerationEnabled === 'boolean') {
+    next.videoGenerationEnabled = patch.videoGenerationEnabled
   }
   if (patch.contextManagement !== undefined) {
     next.contextManagement = { ...next.contextManagement, ...patch.contextManagement }
@@ -728,6 +775,9 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   imageModel: true,
   imageModelProviderId: true,
   imageGenerationEnabled: true,
+  videoModel: true,
+  videoModelProviderId: true,
+  videoGenerationEnabled: true,
   contextManagement: true,
   upstreamIdleTimeoutSeconds: true,
   maxOutputTokens: true,

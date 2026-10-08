@@ -134,6 +134,32 @@ describe('live browser tools', () => {
   })
 
   /*
+    需求:截图不再以整段 base64 留在转录里 —— 每张最多 8MiB,过 IPC、落库、常驻渲染层内存。
+    它落成本会话附件,转录里只存 `ncw://` 地址;发往上游时再换回 data URL,模型看到的字节不变。
+  */
+  it('★ 有会话图片仓时:截图落成附件,output.images 只存 ncw:// 地址,回执正文不变', async () => {
+    const tab = openAgentTab()
+    const save = vi.fn(async () => ({ mime: 'image/png' as const, dataRef: 'ncw://attachments/sessions/s/shot.png' }))
+    const inline = await browserScreenshotTool.execute({ tabId: tab.id }, ctx())
+
+    const result = await browserScreenshotTool.execute({ tabId: tab.id }, { ...ctx(), sessionImages: { save, read: vi.fn() } })
+
+    expect(save).toHaveBeenCalledWith({ mime: 'image/png', dataRef: 'data:image/png;base64,AQID' })
+    expect(result.output.images).toEqual([{ mime: 'image/png', dataRef: 'ncw://attachments/sessions/s/shot.png' }])
+    expect(result.output.content).toBe(inline.output.content)
+  })
+
+  it('图片仓存不下来:退回内联 data URL,截图本身不失败', async () => {
+    const tab = openAgentTab()
+    const save = vi.fn(async () => { throw new Error('disk full') })
+
+    const result = await browserScreenshotTool.execute({ tabId: tab.id }, { ...ctx(), sessionImages: { save, read: vi.fn() } })
+
+    expect(result.isError).toBe(false)
+    expect(result.output.images).toEqual([{ mime: 'image/png', dataRef: 'data:image/png;base64,AQID' }])
+  })
+
+  /*
     需求：浏览器工具要能打开 file:// 本地页面（2026-09-22，见 ssrf.ts 的
     allowFileUrls），并且 Agent 一打开浏览器右侧工作台就必须展开
     （openRightPanel → 变更事件上的 rightPanelOpen 标记，链条见

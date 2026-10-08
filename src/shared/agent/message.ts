@@ -185,18 +185,44 @@ export function fileRefMarkdown(p: { name: string; path: string }): string {
 export interface ToolOutputImage {
   mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
   /**
-   * Tool screenshots are already resolved data URLs, not attachment protocol references.
-   * Exception: `generate_image` stores its results as this session's `ncw://` attachments so the
-   * model can name them later (edit / SaveImage); `prepareRequestImages` resolves those to data URLs
-   * in the outgoing copy only, so encoders still never see `ncw://`.
+   * Either an inline data URL or this session's `ncw://` attachment. `generate_image` and
+   * `browser_screenshot` store their results as session attachments (falling back to inline when
+   * saving fails), and legacy inline images are converted when their page is read
+   * (`main/inline-images.ts`). `prepareRequestImages` resolves `ncw://` to data URLs in the
+   * outgoing copy only, so encoders still never see `ncw://`.
    */
   dataRef: string
+}
+
+/**
+ * 一个视频产物。★ 与图片分开而不是复用 `ToolOutputImage`:
+ * 视频**从不内联** —— 它只以 `ncw://` 会话附件地址存在(见
+ * `main/video-generation/download.ts`)。一个"可能内联也可能不内联"的类型会让
+ * 每个消费方都要判断一次,而其中一处判错就是把几百兆塞进 IPC。
+ */
+export interface ToolOutputVideo {
+  /**
+   * 永远是 `ncw://attachments/sessions/<会话>/<ULID>.<ext>`,**不可能是 data: 前缀**
+   * —— 视频没有"退回内联"那条路(那正是图片那侧能退回的原因,而这里不行)。
+   */
+  url: string
+  mime: string
+  size: number
+  /** 封面/缩略图地址(上游给的话),同样是 `ncw://` */
+  posterUrl?: string
+  /** 产出它的后台任务 id —— 卡片据此在工具调用结束后继续跟进状态 */
+  jobId?: string
 }
 
 export interface ToolOutput {
   content: string
   /** Visual evidence returned by tools such as browser_screenshot. */
   images?: ToolOutputImage[]
+  /**
+   * 视频产物(目前只有 `generate_video` 会填)。**走 UI 轨,编码器不下发** ——
+   * 文本对话的模型看不到视频内容,它只从 `content` 里读那几句说明与地址。
+   */
+  videos?: ToolOutputVideo[]
   /** 被截断时为 true,UI 据此显示「输出已截断」 */
   truncated?: boolean
   /** 截断前的原始字节数,给 UI 显示「共 N MB」 */

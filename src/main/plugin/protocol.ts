@@ -249,14 +249,14 @@ export const permissions = {
 }
 
 export const workspace = {
-  folders: () => call('workspace.folders').then((r) => r.folders),
+  folders: (options) => call('workspace.folders', options ?? {}).then((r) => r.folders),
   fs: {
-    readFile: (path, encoding) => call('workspace.readFile', { path, encoding }),
+    readFile: (path, encoding, options) => call('workspace.readFile', { path, encoding, ...(options ?? {}) }),
     writeFile: (path, data, options) => call('workspace.writeFile', { path, data, ...(options ?? {}) }),
-    delete: (path) => call('workspace.deleteFile', { path }),
-    stat: (path) => call('workspace.stat', { path })
+    delete: (path, options) => call('workspace.deleteFile', { path, ...(options ?? {}) }),
+    stat: (path, options) => call('workspace.stat', { path, ...(options ?? {}) })
   },
-  findFiles: (glob, limit) => call('workspace.findFiles', { glob, limit }).then((r) => r.paths),
+  findFiles: (glob, limit, options) => call('workspace.findFiles', { glob, limit, ...(options ?? {}) }).then((r) => r.paths),
   /*
     工作区文件变更。**不是文件系统 watcher** —— 只覆盖经由应用发生的变更
     (编辑器保存、Agent 工具写入、插件自己的写入)。外部编辑器、git checkout
@@ -282,7 +282,7 @@ export const process_ = {
   */
   execStream(command, args, options) {
     const handlers_ = { onOutput: options?.onOutput, onExit: options?.onExit }
-    const started = call('process.execStream', { command, args: args ?? [], cwd: options?.cwd, timeoutMs: options?.timeoutMs })
+    const started = call('process.execStream', { command, args: args ?? [], cwd: options?.cwd, timeoutMs: options?.timeoutMs, callId: options?.callId })
       .then((r) => { execStreams.set(r.execId, handlers_); return r.execId })
     return {
       /* 还没拿到 execId 就调 abort 是常态(用户点得快)—— 等它到手再发。 */
@@ -293,11 +293,17 @@ export const process_ = {
 }
 export { process_ as process }
 
-export const net = { fetch: (url, init) => call('net.fetch', { url, ...(init ?? {}) }) }
-
+export const net = {
+  /*
+    init.callId 是**取消凭据**,不是工作区作用域 —— 见 shared/plugin/protocol.ts
+    里 net.fetch 的说明:带上它,用户在工具里点停止时已经发出的请求会被真正中断。
+    ★ 这段住在模板字符串里,注释里不能出现反引号(见 configuration 那段)。
+  */
+  fetch: (url, init) => call('net.fetch', { url, ...(init ?? {}) })
+}
 export const storage = {
   global: { get: (key) => call('storage.get', { scope: 'global', key }).then((r) => r.value), set: (key, value) => call('storage.set', { scope: 'global', key, value }), keys: () => call('storage.keys', { scope: 'global' }).then((r) => r.keys) },
-  workspace: { get: (key) => call('storage.get', { scope: 'workspace', key }).then((r) => r.value), set: (key, value) => call('storage.set', { scope: 'workspace', key, value }), keys: () => call('storage.keys', { scope: 'workspace' }).then((r) => r.keys) }
+  workspace: { get: (key, options) => call('storage.get', { scope: 'workspace', key, ...(options ?? {}) }).then((r) => r.value), set: (key, value, options) => call('storage.set', { scope: 'workspace', key, value, ...(options ?? {}) }), keys: (options) => call('storage.keys', { scope: 'workspace', ...(options ?? {}) }).then((r) => r.keys) }
 }
 
 export const secrets = {
@@ -399,14 +405,14 @@ export const agent = {
 }
 
 export const scm = {
-  status: () => call('scm.status'),
+  status: (options) => call('scm.status', options ?? {}),
   diff: (path, options) => call('scm.diff', { path, ...(options ?? {}) }),
   log: (options) => call('scm.log', options ?? {}).then((r) => r.commits),
-  branches: () => call('scm.branches'),
-  stage: (paths) => call('scm.stage', { paths }),
-  commit: (message) => call('scm.commit', { message }).then((r) => r.hash),
+  branches: (options) => call('scm.branches', options ?? {}),
+  stage: (paths, options) => call('scm.stage', { paths, ...(options ?? {}) }),
+  commit: (message, options) => call('scm.commit', { message, ...(options ?? {}) }).then((r) => r.hash),
   createBranch: (name, options) => call('scm.createBranch', { name, ...(options ?? {}) }),
-  checkout: (name) => call('scm.checkout', { name })
+  checkout: (name, options) => call('scm.checkout', { name, ...(options ?? {}) })
 }
 
 // 需求：已接通的会话 RPC 必须能从 nextcowork 调用；callId 由每次调用显式传入，不能用全局当前工具。

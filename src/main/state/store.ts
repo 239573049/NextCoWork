@@ -26,7 +26,7 @@ import type { Workspace } from '../../shared/domain/workspace'
 import type { ConnectionProfile } from '../../shared/domain/environment'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../../shared/domain/scheduled'
 import { normalizeScheduledTaskInput, nextScheduledOccurrence } from '../../shared/domain/scheduled'
-import type { Session, SessionDetail, SessionListItem, SearchHit } from '../../shared/domain/session'
+import type { Session, SessionDetail, SessionListItem, SessionPage, SearchHit } from '../../shared/domain/session'
 import type { ChangeSetState, ReviewChangeSet, ReviewFileDiff } from '../../shared/domain/review'
 import type {
   UsageActivityStats,
@@ -431,6 +431,14 @@ export const store = {
   getHistory(sessionId: string): readonly AgentMessage[] {
     return repo.getHistory(sessionId)
   },
+  /** 只取最后一条助手消息 —— 子代理交差正文,不必解析整段子转录 */
+  lastAssistantMessage(sessionId: string): AgentMessage | undefined {
+    return repo.lastAssistantMessage(sessionId)
+  },
+  /** 一条消息仍是读出来时那一份时才换 parts(见 `repo.replaceMessagePartsIfUnchanged`) */
+  replaceMessagePartsIfUnchanged(sessionId: string, messageId: string, expectedParts: string, parts: AgentMessage['parts']): boolean {
+    return repo.replaceMessagePartsIfUnchanged(sessionId, messageId, expectedParts, parts)
+  },
   setHistory(sessionId: string, messages: readonly AgentMessage[]): void {
     const existing = repo.getSession(sessionId)
     if (existing === undefined) {
@@ -465,6 +473,27 @@ export const store = {
   getSessionDetail(sessionId: string): SessionDetail | undefined {
     return repo.getSessionDetail(sessionId)
   },
+  /** 会话元数据 + 消息条数,不读任何消息正文 */
+  getSessionSummary(sessionId: string): { session: Session; messageCount: number } | undefined {
+    const session = repo.getSession(sessionId)
+    return session === undefined ? undefined : { session, messageCount: repo.countMessages(sessionId) }
+  },
+  /** 转录的一页(见 `SessionPage`)。`messageRuns` 只覆盖本页的消息 */
+  getSessionPage(sessionId: string, limit: number, beforeMessageId?: string): SessionPage | undefined {
+    const session = repo.getSession(sessionId)
+    if (session === undefined) return undefined
+    const { messages, hasMore } = repo.getHistoryPage(sessionId, limit, beforeMessageId)
+    const ids = new Set(messages.map((message) => message.id))
+    const messageRuns = Object.fromEntries(Object.entries(repo.messageRunsOf(sessionId)).filter(([id]) => ids.has(id)))
+    return {
+      session,
+      messages,
+      hasMore,
+      messageRuns,
+      runUsage: repo.runUsageOf(sessionId),
+      runModel: repo.runModelOf(sessionId)
+    }
+  },
   getSessionRunUsage(sessionId: string): ReturnType<typeof repo.runUsageOf> {
     return repo.runUsageOf(sessionId)
   },
@@ -488,6 +517,9 @@ export const store = {
   },
   setSessionFavorited(sessionId: string, favorited: boolean): void {
     repo.setSessionFavorited(sessionId, favorited)
+  },
+  sessionSubtreeIds(sessionId: string): string[] {
+    return repo.sessionSubtreeIds(sessionId)
   },
   deleteSession(sessionId: string): string[] {
     // 未发出的输入、以及派生出来的子代理转录,都由 `repo.deleteSession` 一起收 ——

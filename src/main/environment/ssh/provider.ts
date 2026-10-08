@@ -5,18 +5,33 @@ import type { ConnectionContext } from '../manager'
 import { EnvironmentError } from '../errors'
 import { createWorkspacePaths } from '../paths'
 import { POSIX_PROBE, remoteCommand, remoteProcessRequest, remoteTerminalCommand, shellQuote, WINDOWS_PROBE } from './command'
-import { BundledSshClient } from './bundled-client'
+import { BundledSshClient, type HostKeyVerifier } from './bundled-client'
 import { OpenSshTransport, type OpenSshOptions } from './transport'
 import { SftpFileSystem } from './sftp'
 
+/** 内置客户端这条路要的认证能力。`askHostKey` / `secrets` 强制要求 —— 缺了就不走这条路(见下)。 */
+type BundledAuthentication = {
+  close(): Promise<void>
+  ask(prompt: string, rejected: boolean): Promise<string>
+  askHostKey(prompt: string): Promise<boolean>
+  secrets: HostKeyVerifier['secrets']
+}
+
 export async function connectSshEnvironment(profile: SshConnectionProfile,
   context: ConnectionContext & { generation: number; assertCurrent(): void; onDisconnect(): void },
-  authentication: { env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void; ask?(prompt: string, rejected: boolean): Promise<string> },
+  authentication: { env: NodeJS.ProcessEnv; close(): Promise<void>; resolve?(values: Map<string, string>): void; ask?(prompt: string, rejected: boolean): Promise<string>; askHostKey?(prompt: string): Promise<boolean>; secrets?: HostKeyVerifier['secrets'] },
   options: Pick<OpenSshOptions, 'executable' | 'openProxyTunnel'> = {}): Promise<EnvironmentConnection> {
-  // Windows 上手动填写的连接走内置客户端:一条连接认证一次,后面的命令不再起 ssh。
-  // 配置型别名读不到 ~/.ssh/config,继续走系统 ssh。
-  if (process.platform === 'win32' && authentication.ask && BundledSshClient.supports(profile)) {
-    return connectBundled(profile, context, authentication as { close(): Promise<void>; ask(prompt: string, rejected: boolean): Promise<string> })
+  /**
+   * Windows 上手动填写的连接走内置客户端:一条连接认证一次,后面的命令不再起 ssh。
+   * 配置型别名读不到 ~/.ssh/config,继续走系统 ssh。
+   *
+   * ★ `askHostKey` 是**进门条件**,不是可选装饰:内置客户端不读 known_hosts,没有主机密钥
+   * 确认就没有任何东西能验指纹。缺了它宁可退回系统 ssh(那条自己会验),也绝不建一条
+   * "谁都信"的连接 —— 这正是原先 `hostVerifier: () => true` 的病根。
+   */
+  if (process.platform === 'win32' && authentication.ask && authentication.askHostKey && authentication.secrets
+    && BundledSshClient.supports(profile)) {
+    return connectBundled(profile, context, authentication as BundledAuthentication)
   }
   let closed = false
   let filesystem: SftpFileSystem | undefined
@@ -105,10 +120,11 @@ export async function connectSshEnvironment(profile: SshConnectionProfile,
  */
 async function connectBundled(profile: SshConnectionProfile,
   context: ConnectionContext & { generation: number; assertCurrent(): void; onDisconnect(): void },
-  authentication: { close(): Promise<void>; ask(prompt: string, rejected: boolean): Promise<string> }): Promise<EnvironmentConnection> {
+  authentication: BundledAuthentication): Promise<EnvironmentConnection> {
   let closed = false
   let filesystem: SftpFileSystem | undefined
-  const client = new BundledSshClient(profile, authentication.ask)
+  const client = new BundledSshClient(profile, authentication.ask,
+    { secrets: authentication.secrets, confirm: (prompt) => authentication.askHostKey(prompt) })
   const assertReady = (): void => {
     context.assertCurrent()
     if (closed) throw new EnvironmentError('disconnected')

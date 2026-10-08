@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -229,5 +230,69 @@ describe("installSkillZip", () => {
     await expect(
       installSkillZip(zip, join(root, "installed"), "global"),
     ).rejects.toThrow(/frontmatter/);
+  });
+});
+
+describe("nextcowork-remotion package", () => {
+  const source = new URL(
+    "../../../../../examples/skills/nextcowork-remotion/",
+    import.meta.url,
+  );
+  const content = (): string =>
+    new TextDecoder("utf-8", { fatal: true }).decode(
+      readFileSync(new URL("SKILL.md", source)),
+    );
+
+  it("installs as a self-contained global Skill, including in a remote snapshot", async () => {
+    expect(readdirSync(source)).toEqual(["SKILL.md"]);
+    const { root, zip } = archive(content(), "nextcowork-remotion");
+    const installRoot = join(root, "installed");
+    const result = await installSkillZip(zip, installRoot, "global");
+    const fs = nodeHost().fs;
+    const scanned = await scanSkills({
+      fs,
+      projectFs: fs,
+      globalRoot: installRoot,
+      projectRoot: "",
+    });
+
+    expect(result).toMatchObject({
+      name: "nextcowork-remotion",
+      version: "1.0.0",
+    });
+    expect(scanned.diagnostics).toEqual([]);
+    expect(scanned.skills).toHaveLength(1);
+    expect(scanned.skills[0]).toMatchObject({
+      name: "nextcowork-remotion",
+      category: "内容创作",
+      scope: "global",
+      globalEnabled: true,
+      frontmatter: {},
+      source: { kind: "zip", version: "1.0.0", sha256: result.sha256 },
+    });
+    expect(scanned.skills[0]?.unavailableReason).toBeUndefined();
+    expect(scanned.skills[0]?.frontmatter).toEqual({});
+    expect(readFileSync(join(result.target, "SKILL.md"), "utf8")).toBe(
+      content(),
+    );
+  });
+
+  it("is discoverable as a project Skill without a global installation", async () => {
+    const { root, zip } = archive(content(), "nextcowork-remotion");
+    const projectRoot = join(root, "project", ".next-cowork", "skills");
+    await installSkillZip(zip, projectRoot, "project");
+    const scanned = await scanSkills({
+      fs: nodeHost().fs,
+      globalRoot: "",
+      projectRoot,
+    });
+
+    expect(scanned.diagnostics).toEqual([]);
+    expect(scanned.skills).toHaveLength(1);
+    expect(scanned.skills[0]).toMatchObject({
+      id: "nextcowork-remotion",
+      scope: "project",
+    });
+    expect(scanned.skills[0]?.unavailableReason).toBeUndefined();
   });
 });

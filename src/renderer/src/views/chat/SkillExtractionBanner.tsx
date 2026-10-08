@@ -6,7 +6,7 @@
  * 「怎么只有一句话就开跑了」。收起态只占两行(标题 + 来源);点击展开后给出完整信息:
  * 注入说明、源会话 ID / 消息数 / 创建时间、产出位置。
  *
- * 数据来源:源会话详情本来就是为标题取的(`getSession` 顺带带回 messages 与 createdAt),
+ * 数据来源:源会话的元数据与消息条数(`getSessionSummary`,不读正文),
  * 展开内容零额外 IPC。摘要本身(轮数 / token 数 / 是否截断)在主进程逐 run 现算、
  * 不落库,渲染层拿不到 —— 故意不在卡片里假装展示它;写盘结果由既有的改动审查卡展示。
  *
@@ -17,7 +17,7 @@ import { useEffect, useId, useState, type ReactNode } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
-import { getSession } from '../../services/sessions'
+import { getSessionSummary } from '../../services/sessions'
 
 interface SourceFacts {
   title: string
@@ -34,10 +34,10 @@ export function SkillExtractionBanner({ sourceSessionId }: { sourceSessionId: st
   useEffect(() => {
     let cancelled = false
     setSource(undefined)
-    void getSession(sourceSessionId).then(
+    void getSessionSummary(sourceSessionId).then(
       (detail) => {
         if (cancelled) return
-        setSource({ title: detail.session.title, messageCount: detail.messages.length, createdAt: detail.session.createdAt })
+        setSource({ title: detail.session.title, messageCount: detail.messageCount, createdAt: detail.session.createdAt })
       },
       () => { if (!cancelled) setSource(null) }
     )

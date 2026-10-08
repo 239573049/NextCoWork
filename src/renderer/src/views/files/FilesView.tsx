@@ -51,7 +51,8 @@ import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
 import { listDir } from '../../services/app'
-import { listWorkspaceRecovery, mutateWorkspaceFile, isResultUnknown, revealWorkspaceFile, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
+import { listWorkspaceRecovery, isResultUnknown, workspaceFileErrorKey, type WorkspaceFilesChanged } from '../../services/workspace-files'
+import { awaitDocumentSaves, mutateWorkspaceFile, revealWorkspaceFile } from '../../actions/workspace-files'
 import { confirmDocumentChanges } from '../../stores/documents'
 import { fileTreeViewKey, pruneListings, useFileTreeStore } from '../../stores/file-tree'
 import { useTabsStore } from '../../stores/tabs'
@@ -311,6 +312,12 @@ function WorkspaceFilesView({
     try {
       if (request.operation === 'rename' || request.operation === 'move' || request.operation === 'delete') {
         setConfirmingChanges(true)
+        // 破坏性操作前先等源/目标路径上还在飞的保存(闸门在 `mutateWorkspaceFile` 里,
+        // 这里提前一次是为了让挽留对话框在保存落定之后才弹)。
+        await awaitDocumentSaves(workspace.id, [
+          request.path,
+          ...(request.destination === undefined ? [] : [request.destination])
+        ])
         const confirmed = await confirmDocumentChanges(workspace.id, request.path)
         if (!alive.current) return
         setConfirmingChanges(false)

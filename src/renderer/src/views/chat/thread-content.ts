@@ -27,6 +27,16 @@ export type ThreadRow =
       endedAt?: number
       /** 产出这一轮的 run。用来查它落盘的用量;老对话没有归属,留 undefined。 */
       runId?: string
+      /**
+       * 这一行已提交的**第一条与最后一条** assistant 消息 id —— 「删除这条回复」的跨度。
+       *
+       * ★ 跨度取自行本身,而不是从提问往下数:一行只会跨过不可见的消息(工具回执、
+       * 目标续跑之类的 internal 注入),所以 `from..to` 恰好就是界面上这一块。
+       * 从提问往下数的话,前面是后台汇报(没有提问)的回复拿不到锚点,
+       * 而被压缩线、计划回执切成两行的同一轮又会删多或删少。
+       * 纯流式、还没落盘任何消息的行没有它 —— 那时也没有东西可删。
+       */
+      span?: { from: string; to: string }
     }
   /**
    * 一次上下文压缩发生的位置。不是消息,是消息**之间**的一条线。
@@ -71,13 +81,73 @@ export type ThreadRow =
       summary?: string
     }
 
-/** Tool receipts are invisible boundaries; consecutive model replies form one assistant turn. */
-export function threadRows(
-  messages: readonly AgentMessage[],
+/**
+ * 已提交部分的折叠结果,外加流式尾部需要的坐标。
+ *
+ * ★ **拆出来是为了让它能只算一次。** `threadRows` 每来一个 token 就被调一次,
+ * 而它要扫全部消息、解析全部计划回执(`latestPlanReceipts` 里逐条 `JSON.parse`
+ * 工具输出)、重建全部块 key。历史部分只依赖 `messages`,和还在流的 `live`
+ * 无关 —— 分开之后历史那半可以 memo,每 token 只剩尾部那一行要重算。
+ *
+ * `preceding` 是尾部块的 key 前缀(见下),`precedingAt` 是补空回合时的起点时间。
+ *
+ * ★ 它算出来的 `rows` **引用稳定**:只要 `messages` 没变就是同一个数组,于是下游
+ * 的历史分组 memo 与逐行 memo 都不会被流式打掉。流式尾部由 `liveTailRow` 单独
+ * 拼出来 —— 那份必然是新对象(它本来就变了),所以**末轮**每个 token 重算一次
+ * `assistantSegments` 是应该的;要挡住的是「历史那几百轮跟着一起重算」。
+ */
+export interface ThreadHistory {
+  rows: ThreadRow[]
+  preceding: string
+  precedingAt?: number
+}
+
+/** 尾部块的 key 取自**最后一条推进了 preceding 的可见消息**,提交前后必须一致。 */
+function liveBlocks(history: ThreadHistory, live: readonly LiveBlock[], running: boolean): AssistantBlock[] {
+  return live.map((liveBlock, index) => ({
+    // The preceding visible message is known before this reply's committed ID.
+    // Matching keys retain Markdown controls and tool-group choices on commit.
+    // A later block means the earlier one has finished; only the tail can still grow.
+    key: `${history.preceding}:${index}`,
+    liveBlock,
+    streaming: running && index === live.length - 1,
+    cursor: running && index === live.length - 1 && liveBlock.kind === 'text'
+  }))
+}
+
+/**
+ * `live` 要落到的那一行,以及它是**替换**末尾那一行还是**追加**一行。
+ *
+ * 追加的判据是 `rows.at(-1)` 而**不是**最后一个回合行:末尾是压缩分隔线时,
+ * 流式内容属于线**之后**,必须新起一行;否则会把压缩后的内容塞回线上方那一行。
+ */
+export function liveTailRow(
+  history: ThreadHistory,
   live: readonly LiveBlock[],
-  running: boolean,
+  running: boolean
+): { row: Extract<ThreadRow, { kind: 'assistant' }>; replaced: boolean } {
+  const blocks = liveBlocks(history, live, running)
+  const last = history.rows.at(-1)
+  if (last?.kind === 'assistant') return { row: { ...last, blocks: [...last.blocks, ...blocks] }, replaced: true }
+  return {
+    row: {
+      kind: 'assistant', key: `reply:${history.preceding}`, blocks,
+      ...(history.precedingAt === undefined ? {} : { startedAt: history.precedingAt })
+    },
+    replaced: false
+  }
+}
+
+/**
+ * 只算**已提交**的那部分行 —— 与 `threadRows` 的差别仅在于不含 `live`。
+ *
+ * 末尾可能补一个空助手行(最后一个回合行不是助手时),它由随后的流式内容
+ * 顶上(见 `liveTailRow` 的 replaced 分支),所以「有没有在跑」不改变这半边的形状。
+ */
+export function threadHistoryRows(
+  messages: readonly AgentMessage[],
   messageRuns: Readonly<Record<string, string>> = {}
-): ThreadRow[] {
+): ThreadHistory {
   const rows: ThreadRow[] = []
   let preceding = 'start'
   let precedingAt: number | undefined
@@ -171,6 +241,7 @@ export function threadRows(
           row.blocks.push({ key: `${keyPrefix}:${index}`, part, streaming: false, cursor: false })
         })
         row.endedAt = message.createdAt
+        row.span = { from: row.span?.from ?? message.id, to: message.id }
         /*
           ★ 一整轮的消息同属一个 run,所以取哪一条都一样 —— 但**不能只取第一条**:
           一轮里最早那条 assistant 消息可能是迁移之前落盘的(没有归属),
@@ -202,19 +273,26 @@ export function threadRows(
     ★ 判断依据是最后一个**回合**行，不是 `rows.at(-1)`。边界消息是整段最后一条时
     (手动压缩)末尾就是分隔行，照旧看 `rows.at(-1)` 会在线**下面**再补一个空回合 ——
     一条压缩线孤零零地夹在两段之间，下面跟着一个什么都没有的回合。
+
+    ★ 这里**不看 `live` / `running`**：补出来的空行会被流式尾部原样顶上
+    (见 `liveTailRow` 的 replaced 分支),所以这半边的形状与有没有在跑无关 ——
+    正是这一点让它可以被 memo。
   */
-  if (live.length > 0 || lastTurnRow()?.kind !== 'assistant') {
-    const row = assistant()
-    live.forEach((liveBlock, index) => {
-      // The preceding visible message is known before this reply's committed ID.
-      // Matching keys retain Markdown controls and tool-group choices on commit.
-      // A later block means the earlier one has finished; only the tail can still grow.
-      const streaming = running && index === live.length - 1
-      row.blocks.push({ key: `${preceding}:${index}`, liveBlock, streaming,
-        cursor: running && index === live.length - 1 && liveBlock.kind === 'text' })
-    })
-  }
-  return rows
+  if (lastTurnRow()?.kind !== 'assistant') assistant()
+  return { rows, preceding, precedingAt }
+}
+
+/** Tool receipts are invisible boundaries; consecutive model replies form one assistant turn. */
+export function threadRows(
+  messages: readonly AgentMessage[],
+  live: readonly LiveBlock[],
+  running: boolean,
+  messageRuns: Readonly<Record<string, string>> = {}
+): ThreadRow[] {
+  const history = threadHistoryRows(messages, messageRuns)
+  if (live.length === 0) return history.rows
+  const { row, replaced } = liveTailRow(history, live, running)
+  return replaced ? [...history.rows.slice(0, -1), row] : [...history.rows, row]
 }
 
 /**

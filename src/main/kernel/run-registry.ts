@@ -26,6 +26,8 @@ export type Unsubscribe = () => void
 interface LogEntry {
   seq: number
   event: AgentEvent
+  /** `approxEventBytes` 的估算,进出日志时记账用 */
+  bytes: number
 }
 
 /**
@@ -33,6 +35,39 @@ interface LogEntry {
  * 这个数只防「一个 run 跑了一万轮工具却一条消息都没提交」的极端情况。
  */
 const MAX_LOG_ENTRIES = 2000
+
+/**
+ * 单个 run 事件日志的字节预算(按字符粗算)。
+ *
+ * ★ 这是**回放**预算,不是模型上下文:模型看到的转录在 `AgentSession` 里,一个字都不受影响。
+ * 截掉的只是渲染层重载时用来重建界面的那份副本;已提交的消息在库里,重建时从库里读
+ * (快照会带 `logTrimmed`)。条数上限挡不住「几十条大工具输出」,所以要有这一道。
+ */
+export const RUN_LOG_MAX_BYTES = 16 * 1024 * 1024
+/**
+ * 已结束的 run 在内存里留多久。这段时间里重载窗口、晚到的 attach 还能拿到终态快照;
+ * 过后再看这条会话走库里的终态(`sessions:getPage`),渲染层不会因此停在「运行中」。
+ */
+export const FINISHED_RUN_TTL_MS = 2 * 60 * 1000
+/** 已结束 run 的日志总预算。超了不等 TTL,按结束时间从早到晚回收 */
+export const FINISHED_RUN_CACHE_BYTES = 64 * 1024 * 1024
+
+/**
+ * 一条事件大约占多少(字符数 + 少量结构开销)。只用于预算,不求精确 ——
+ * 精确的做法是 `JSON.stringify`,那要为每条事件多分配一整份字符串。
+ */
+export function approxEventBytes(value: unknown, depth = 0): number {
+  if (typeof value === 'string') return value.length
+  if (typeof value !== 'object' || value === null) return 8
+  if (depth > 12) return 64
+  let n = 16
+  if (Array.isArray(value)) {
+    for (const item of value) n += approxEventBytes(item, depth + 1)
+  } else {
+    for (const [key, item] of Object.entries(value)) n += key.length + approxEventBytes(item, depth + 1)
+  }
+  return n
+}
 
 export interface AbortReason {
   /** 'user' = 点了停止;'parent' = 父 run 级联下来;'shutdown' = app 退出 */
@@ -59,6 +94,10 @@ export class RunHandle {
   readonly children = new Set<string>()
 
   private readonly log: LogEntry[] = []
+  /** 日志里现存条目的 `bytes` 之和 */
+  private logBytes = 0
+  /** 头部被条数/字节上限截掉过(见 `RunSnapshot.logTrimmed`) */
+  private logTrimmed = false
   private readonly listeners = new Set<RunListener>()
   private readonly beforeFinishListeners = new Set<(status: RunStatus, error?: AgentError) => void>()
   private readonly controller = new AbortController()
@@ -126,7 +165,9 @@ export class RunHandle {
     }
 
     const seq = ++this.seq
-    this.log.push({ seq, event })
+    const bytes = approxEventBytes(event)
+    this.log.push({ seq, event, bytes })
+    this.logBytes += bytes
 
     // 待决交互表跟着事件走,attach 时才有东西可还原(方案 §4.6)
     if (event.type === 'interaction_request') {
@@ -138,17 +179,55 @@ export class RunHandle {
       this.children.add(event.childRunId)
     } else if (event.type === 'message_commit') {
       this.trimSupersededDeltas()
+    } else if (event.type === 'tool_end') {
+      this.trimSupersededProgress(event.callId)
     } else if (event.type === 'run_end') {
       this.status = event.status
+      this.endedAt ??= event.at ?? Date.now()
     }
 
-    if (this.log.length > MAX_LOG_ENTRIES) {
-      this.log.splice(0, this.log.length - MAX_LOG_ENTRIES)
+    if (this.log.length > MAX_LOG_ENTRIES) this.dropHead(this.log.length - MAX_LOG_ENTRIES)
+    if (this.logBytes > RUN_LOG_MAX_BYTES) {
+      // 从头数到够为止;最新那一条永远留着(它正要推给订阅者,快照里也得有它)
+      let excess = this.logBytes - RUN_LOG_MAX_BYTES
+      let n = 0
+      while (n < this.log.length - 1 && excess > 0) excess -= this.log[n++]!.bytes
+      this.dropHead(n)
     }
 
     for (const l of this.listeners) l(event, seq)
     if (event.type === 'run_end') this.listeners.clear()
     return seq
+  }
+
+  /** 这份日志现在大约占多少字节 —— 注册表回收已结束 run 时按它记账 */
+  get retainedLogBytes(): number {
+    return this.logBytes
+  }
+
+  private dropHead(n: number): void {
+    if (n <= 0) return
+    for (const entry of this.log.splice(0, n)) this.logBytes -= entry.bytes
+    this.logTrimmed = true
+  }
+
+  private removeAt(i: number): void {
+    const [entry] = this.log.splice(i, 1)
+    if (entry !== undefined) this.logBytes -= entry.bytes
+  }
+
+  /**
+   * 一次工具调用结束时,它之前的 `tool_progress` 全部作废 —— 渲染层的 reducer 在 `tool_end`
+   * 处把过程文字、实时卡片、逐张到达的生图(`partialImages`)一并清掉,以 `output` 为准。
+   * 所以清掉它们对重放是**无损**的;不清的话,一次生图的每张过程图都会在日志里多留一份。
+   */
+  private trimSupersededProgress(callId: string): void {
+    for (let i = this.log.length - 2; i >= 0; i--) {
+      const event = this.log[i]?.event
+      if (event === undefined) continue
+      if (event.type === 'tool_start' && event.callId === callId) break
+      if (event.type === 'tool_progress' && event.callId === callId) this.removeAt(i)
+    }
   }
 
   /**
@@ -178,7 +257,7 @@ export class RunHandle {
       // them so a renderer reload can reconstruct the same run totals.
       if (entry.event.type === 'stream'
         && entry.event.delta.type !== 'message_start'
-        && entry.event.delta.type !== 'message_end') this.log.splice(i, 1)
+        && entry.event.delta.type !== 'message_end') this.removeAt(i)
     }
   }
 
@@ -226,7 +305,8 @@ export class RunHandle {
       seq: this.seq,
       events: this.since(sinceSeq),
       pendingInteractions: [...this.pendingInteractions],
-      children: [...this.children]
+      children: [...this.children],
+      ...(this.logTrimmed ? { logTrimmed: true } : {})
     }
   }
 
@@ -287,8 +367,16 @@ export class RunHandle {
   }
 }
 
+export class SessionBusyError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`会话 ${sessionId} 有运行中的 Agent 或历史操作，请等待完成后再试`)
+    this.name = 'SessionBusyError'
+  }
+}
+
 export class RunRegistry {
   private readonly runs = new Map<string, RunHandle>()
+  private readonly sessionOperations = new Map<string, { token: object; runId?: string }>()
   private readonly abortAllListeners = new Set<() => void>()
   private readonly activeListeners = new Set<() => void>()
 
@@ -323,11 +411,53 @@ export class RunRegistry {
       && handle.backgroundTask !== undefined && handle.status === 'running' && !handle.signal.aborted)
   }
 
+  isSessionBusy(sessionId: string): boolean {
+    return this.sessionOperations.has(sessionId) || [...this.runs.values()]
+      .some((handle) => handle.sessionId === sessionId && handle.status === 'running')
+  }
+
+  /** 这条会话此刻正在跑的**顶层** run(子代理有自己的派生会话,不算在内) */
+  activeTopLevelRun(sessionId: string): RunHandle | undefined {
+    for (const handle of this.runs.values()) {
+      if (handle.sessionId === sessionId && handle.depth === 0 && handle.status === 'running') return handle
+    }
+    return undefined
+  }
+
+  hasSessionOperations(): boolean {
+    return this.sessionOperations.size > 0
+  }
+
+  /** 检查必须早于订阅和导入脱离等副作用；真正 create 时仍再次检查。 */
+  assertCanCreate(req: RunRequest): void {
+    if (this.runs.has(req.runId)) throw new Error(`run 已存在: ${req.runId}`)
+    if (this.isSessionBusy(req.sessionId)) throw new SessionBusyError(req.sessionId)
+  }
+
+  /** 手动压缩等跨 await 的历史操作，由主进程持有互斥，而不是依赖某个窗口的按钮。 */
+  acquireSessionOperation(sessionId: string): Unsubscribe {
+    if (this.isSessionBusy(sessionId)) throw new SessionBusyError(sessionId)
+    return this.reserveSession(sessionId)
+  }
+
+  /** run_end 先于驱动的 finally；收尾落盘完成前不能让下一轮使用同一会话。 */
+  retainSessionForRun(handle: RunHandle): Unsubscribe {
+    if (this.runs.get(handle.runId) !== handle || this.sessionOperations.has(handle.sessionId)) {
+      throw new SessionBusyError(handle.sessionId)
+    }
+    return this.reserveSession(handle.sessionId, handle.runId)
+  }
+
+  private reserveSession(sessionId: string, runId?: string): Unsubscribe {
+    const token = {}
+    this.sessionOperations.set(sessionId, { token, ...(runId === undefined ? {} : { runId }) })
+    return () => {
+      if (this.sessionOperations.get(sessionId)?.token === token) this.sessionOperations.delete(sessionId)
+    }
+  }
+
   create(req: RunRequest): RunHandle {
-    const existing = this.runs.get(req.runId)
-    // ★ runId 由渲染层 mint,重复就是 bug(连按两次回车)。
-    // 静默复用比抛错危险:两个 run 共享一份转录,消息会交错(方案 §8)。
-    if (existing) throw new Error(`run 已存在: ${req.runId}`)
+    this.assertCanCreate(req)
 
     const handle = new RunHandle(req)
     this.runs.set(req.runId, handle)
@@ -429,18 +559,69 @@ export class RunRegistry {
    */
   clearForTest(): void {
     this.runs.clear()
+    this.sessionOperations.clear()
   }
 
-  /** 已结束且没人订阅的 run 可以回收。步骤 6 之后转录在 SQLite 里,内存日志就没用了。 */
-  reap(): number {
-    let n = 0
+  /**
+   * 回收已结束的 run。转录在 SQLite 里,内存里那份事件日志只是给重载/晚到的 attach 用的。
+   *
+   * 一个 run 只有同时满足这些才回收:
+   * - 已结束,且驱动的收尾已经放开会话互斥(`retainSessionForRun` 那把锁);
+   * - 没有监听者(`run_end` 之后监听者会被清空,还挂着的说明有人在等它);
+   * - 没有还在跑的子 run —— 父 run 的 Task 卡片要靠它找子代理;
+   * - 调用方没有钉住它(`pinned`:比如还有挂在它名下、等人点的交互);
+   * - 已经结束满 `ttlMs`;或者已结束 run 的日志总量超过 `budgetBytes`,那就从最早结束的回收起,
+   *   直到降回预算 —— 但上面几条照样要满足。
+   *
+   * 缺省参数(`ttlMs = 0`、不限预算)= 「能收的立刻全收」,与这个方法最初的语义一致。
+   */
+  reap(options: {
+    now?: number
+    ttlMs?: number
+    budgetBytes?: number
+    pinned?: (handle: RunHandle) => boolean
+    /** 每回收一个调一次 —— 让外层摘掉挂在它身上的订阅等引用 */
+    onReap?: (handle: RunHandle) => void
+  } = {}): number {
+    const now = options.now ?? Date.now()
+    const ttlMs = options.ttlMs ?? 0
+    const budget = options.budgetBytes ?? Number.POSITIVE_INFINITY
+    const candidates: RunHandle[] = []
+    let finishedBytes = 0
     for (const [id, h] of this.runs) {
-      if (h.status !== 'running' && h.listenerCount === 0) {
-        this.runs.delete(id)
-        n++
-      }
+      if (h.status === 'running') continue
+      finishedBytes += h.retainedLogBytes
+      if (h.listenerCount === 0
+        && this.sessionOperations.get(h.sessionId)?.runId !== id
+        && !this.hasRunningDescendant(id, new Set())
+        && options.pinned?.(h) !== true) candidates.push(h)
+    }
+    candidates.sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0))
+    let n = 0
+    for (const h of candidates) {
+      const expired = now - (h.endedAt ?? 0) >= ttlMs
+      if (!expired && finishedBytes <= budget) continue
+      this.runs.delete(h.runId)
+      finishedBytes -= h.retainedLogBytes
+      n++
+      options.onReap?.(h)
     }
     return n
+  }
+
+  /**
+   * 子孙里还有没有在跑的。★ 要往下走到底:后台子代理的收尾(变更集归属、交差)要沿
+   * `parentRunId` 一路爬到根,中间任何一层被回收,那条链就断在那里。
+   */
+  private hasRunningDescendant(runId: string, seen: Set<string>): boolean {
+    if (seen.has(runId)) return false
+    seen.add(runId)
+    for (const childId of this.runs.get(runId)?.children ?? []) {
+      const child = this.runs.get(childId)
+      if (child === undefined) continue
+      if (child.status === 'running' || this.hasRunningDescendant(childId, seen)) return true
+    }
+    return false
   }
 }
 

@@ -8,19 +8,29 @@
  * 合批逻辑刻意**不**放进 RunRegistry:内核零 electron import,
  * 而「往哪个 webContents 推」是彻头彻尾的 electron 概念。
  */
+import type { WebContents } from 'electron'
 import type { AgentEvent, ActiveRunEntry, RunSnapshot } from '../../shared/agent/event'
-import type { RunRequest } from '../../shared/agent/run-request'
+import type { RunRequest, SendOptions } from '../../shared/agent/run-request'
 import type { InteractionResponse, PendingInteraction } from '../../shared/agent/interaction'
 import type { InterjectItem } from '../../shared/agent/interject'
 import type { PermissionMode } from '../../shared/agent/permission'
+import {
+  isValidSessionInput,
+  partsToAttachments,
+  type SessionQueueOp,
+  type SessionQueueResult,
+  type SubagentReportStatus
+} from '../../shared/domain/queued-input'
+import { ulid } from '../../shared/util/id'
 import { interactions } from '../kernel/interaction-gate'
 import { agentShells } from '../agent-shells'
 import { IpcError, toAgentError } from './errors'
-import { RunHandle, runs } from '../kernel/run-registry'
-import { ensureGoalRuntime, runAgent } from '../runtime'
+import { FINISHED_RUN_CACHE_BYTES, FINISHED_RUN_TTL_MS, RunHandle, runs } from '../kernel/run-registry'
+import { ensureGoalRuntime, persistSubagentReportStatus, readBackgroundReport, runAgent } from '../runtime'
 import { pauseGoal, restoreGoal } from '../goal/runtime'
 import { getActiveGoal } from '../goal/state'
-import { store } from '../state/store'
+import { SessionRuntime } from '../session-runtime'
+import { sessionInputKey, store } from '../state/store'
 import { runTopic, windows, type WindowContext } from '../window/registry'
 import { updateService } from '../update/update-service'
 
@@ -73,6 +83,11 @@ class RunPump {
     if (!isCoalescable(event) || this.buf.length >= MAX_BATCH) {
       this.flush()
       if (event.type === 'run_end') pumps.delete(this.handle.runId)
+      /*
+        ★ 「有个审批在等你」走全局角标,不走正文:没有窗口在看这条会话时正文一条都不推,
+        而那时恰恰最该让用户知道。子代理的审批同样要算到它所属的顶层会话上。
+      */
+      if (event.type === 'interaction_request' || event.type === 'interaction_resolved') broadcastActiveRuns()
       return
     }
     if (this.timer === null) this.timer = setTimeout(() => this.flush(), FLUSH_MS)
@@ -114,10 +129,20 @@ const pumps = new Map<string, RunPump>()
 export function activeRunIndex(): ActiveRunEntry[] {
   return runs.activeRunIds().flatMap((id) => {
     const run = runs.get(id)
-    return run === undefined || run.parentRunId !== undefined ? [] : [{
-      runId: run.runId, sessionId: run.sessionId, workspaceId: run.workspaceId, status: run.status
+    if (run === undefined || run.parentRunId !== undefined) return []
+    const pending = pendingInteractionCount(run)
+    return [{
+      runId: run.runId, sessionId: run.sessionId, workspaceId: run.workspaceId, status: run.status,
+      ...(pending === 0 ? {} : { pendingInteractions: pending })
     }]
   })
+}
+
+/** 一个顶层 run 连同它派出的子代理,一共有几条审批 / 提问在等用户 */
+function pendingInteractionCount(handle: RunHandle): number {
+  let count = handle.pendingInteractions.length
+  for (const childId of descendantRunIds(handle)) count += runs.get(childId)?.pendingInteractions.length ?? 0
+  return count
 }
 
 /**
@@ -150,6 +175,13 @@ export function broadcastActiveRuns(): void {
 export type RunDriver = (handle: RunHandle, req: RunRequest) => void | Promise<void>
 
 /**
+ * `agent:run` 的结果。`started: false` = 这条会话其实已经有一个 run 在跑
+ * (排队的消息刚续上、或者另一个窗口先发了),这句话被**放进了队列**,
+ * 回执里是新的队列 —— 渲染层据此撤掉乐观消息,而不是把它当成一次失败。
+ */
+export type AgentRunStart = { started: true } | { started: false; queue: SessionQueueResult }
+
+/**
  * ★ 订阅在前、启动在后(方案 §3 规则 2)。
  *
  * runId 由渲染层 mint 正是为了这个顺序成立:两件事都在这个同步块里做完,
@@ -157,15 +189,96 @@ export type RunDriver = (handle: RunHandle, req: RunRequest) => void | Promise<v
  * 如果 runId 是 agent:run 的返回值,渲染层就只能在 await 之后才知道要订阅谁,
  * 而那时首批事件早发完了。
  */
-export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver = runAgent): void {
+export function startRun(req: RunRequest, ctx: WindowContext, driver: RunDriver = runAgent): AgentRunStart {
   updateService.configure()
   if (!updateService.canStartNewRuns()) throw new IpcError('unknown', '必须安装客户端更新后才能开始新的任务')
   if (req.inputGoalId !== undefined && getActiveGoal(req.sessionId)?.id !== req.inputGoalId) {
     throw new IpcError('unknown', 'The goal was cleared or replaced before this input was sent.')
   }
+  /*
+    ★ 渲染层以为这条会话空着,主进程这边却已经有一轮在跑 —— 排队的消息刚被续上,
+    或者另一个窗口先发了。用户按的是回车,要的是「这句话会被发出去」,
+    所以把它排进队列,而不是报一个「会话忙」让他重打一遍。
+    只对用户自己的输入这样做;内部输入(汇报、目标检查)各有自己的投递路径。
+  */
+  if (req.inputInternal !== true && req.inputGoalId === undefined && req.parentRunId === undefined
+    && runs.activeTopLevelRun(req.sessionId) !== undefined) {
+    return {
+      started: false,
+      queue: sessionRuntime.queue(req.sessionId, {
+        kind: 'enqueue',
+        text: req.input.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n\n'),
+        options: sendOptionsOf(req),
+        attachments: partsToAttachments(req.input)
+      })
+    }
+  }
+  runs.assertCanCreate(req)
   detachImportedSession(req)
   windows.subscribe(runTopic(req.runId), ctx.sender)
   launch(req, driver)
+  return { started: true }
+}
+
+/**
+ * 主进程自己发起的顶层 run(续跑排队消息、后台汇报、目标检查)。
+ *
+ * ★ **不订阅任何窗口。** 在看这条会话的窗口会从 `agent:activeRuns` 广播得知它,
+ * 再经 `agent:attach` 补齐;没人在看就一条正文都不推。闸门与 `startRun` 完全一致。
+ */
+export function launchDetachedRun(req: RunRequest, driver: RunDriver = runAgent): void {
+  updateService.configure()
+  if (!updateService.canStartNewRuns()) throw new IpcError('unknown', '必须安装客户端更新后才能开始新的任务')
+  if (req.inputGoalId !== undefined && getActiveGoal(req.sessionId)?.id !== req.inputGoalId) {
+    throw new IpcError('unknown', 'The goal was cleared or replaced before this input was sent.')
+  }
+  runs.assertCanCreate(req)
+  detachImportedSession(req)
+  launch(req, driver)
+}
+
+function sendOptionsOf(req: RunRequest): SendOptions {
+  const {
+    runId: _runId, sessionId: _sessionId, input: _input, inputMessageId: _inputMessageId,
+    inputInternal: _inputInternal, inputGoalId: _inputGoalId, ...options
+  } = req
+  return options
+}
+
+/**
+ * 「下一轮什么时候开跑」的唯一决定者。见 `main/session-runtime.ts` 文件头。
+ */
+export const sessionRuntime = new SessionRuntime({
+  now: () => Date.now(),
+  newId: () => ulid(),
+  readInput: (sessionId) => {
+    const key = sessionInputKey(sessionId)
+    const raw = store.getKv<unknown>(key, null)
+    if (raw === null) return null
+    // ★ 读到失效存档时顺手删键 —— 这就是「30 天兜底清扫」的全部实现
+    if (!isValidSessionInput(raw, Date.now())) {
+      store.setKv(key, null)
+      return null
+    }
+    return raw
+  },
+  writeInput: (sessionId, state) => store.setKv(sessionInputKey(sessionId), state),
+  activeRun: (sessionId) => runs.activeTopLevelRun(sessionId),
+  isBusy: (sessionId) => runs.isSessionBusy(sessionId),
+  launch: (req) => launchDetachedRun(req),
+  emitQueue: (snapshot) => windows.emitToAll('session:queueChanged', snapshot),
+  emitReport: (sessionId, callId, status) => windows.emitToAll('session:subagentReport', { sessionId, callId, status }),
+  readReport: (sessionId, callId) => readBackgroundReport(sessionId, callId),
+  persistReportStatus: (sessionId, callId, status) => persistSubagentReportStatus(sessionId, callId, status),
+  log: (message, error) => console.warn(message, ...(error === undefined ? [] : [error]))
+})
+
+export function queueSessionInput(req: { sessionId: string; op: SessionQueueOp }): SessionQueueResult {
+  return sessionRuntime.queue(req.sessionId, req.op)
+}
+
+export function reportBackgroundChild(req: { sessionId: string; callId: string; options?: SendOptions }): { status: SubagentReportStatus } {
+  return { status: sessionRuntime.reportManually(req.sessionId, req.callId, req.options) }
 }
 
 /**
@@ -204,14 +317,59 @@ function detachImportedSession(req: RunRequest): void {
  */
 function launch(req: RunRequest, driver: RunDriver): RunHandle {
   const handle = runs.create(req)
+  const release = runs.retainSessionForRun(handle)
   pumps.set(req.runId, new RunPump(handle))
+  // 在 driver 发出第一个事件之前登记,插话回执(`message_commit`)一条都不漏
+  sessionRuntime.runStarted(handle, req)
+  /*
+    ★ 续跑的入口是**释放互斥之后**,不是 `run_end`:后者比收尾落盘早,
+    在那之后立刻起下一轮只会撞上 `SessionBusyError`。
+  */
+  const settle = (): void => {
+    release()
+    try { sessionRuntime.runSettled(handle) } catch (error) { console.warn(`[session] settle failed: ${handle.runId}`, error) }
+    reapFinishedRuns()
+  }
   const failed = (error: unknown): void => {
     if (handle.signal.aborted) handle.finish('aborted')
     else handle.finish('error', toAgentError(error))
   }
-  try { void Promise.resolve(driver(handle, req)).catch(failed) }
-  catch (error) { failed(error) }
+  ensureReapTimer()
+  try { void Promise.resolve(driver(handle, req)).catch(failed).finally(settle) }
+  catch (error) { try { failed(error) } finally { settle() } }
   return handle
+}
+
+/** 定期回收的间隔。TTL 是 2 分钟,半分钟扫一次足够,且扫描本身只是遍历一张小表 */
+const REAP_INTERVAL_MS = 30_000
+let reapTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * 回收已结束的 run(条件见 `RunRegistry.reap`)。还有挂在它名下、等人点的交互
+ * (例如会话级的目标提议,run 结束后仍然有效)时钉住不收。
+ *
+ * 回收之后再看这条会话:活跃索引里早就没有它,渲染层按库里的终态显示;晚到的 attach
+ * 拿到「run 不存在」,渲染层据此退回库里的历史(见 `stores/session.ts` 的 `resync`)。
+ */
+export function reapFinishedRuns(now = Date.now()): number {
+  const pinned = new Set(interactions.list().map((interaction) => interaction.runId))
+  return runs.reap({
+    now,
+    ttlMs: FINISHED_RUN_TTL_MS,
+    budgetBytes: FINISHED_RUN_CACHE_BYTES,
+    pinned: (h) => pinned.has(h.runId),
+    onReap: (h) => {
+      pumps.delete(h.runId)
+      windows.dropTopic(runTopic(h.runId))
+    }
+  })
+}
+
+function ensureReapTimer(): void {
+  if (reapTimer !== null) return
+  reapTimer = setInterval(() => { reapFinishedRuns() }, REAP_INTERVAL_MS)
+  // 不能拖住进程退出(测试进程、app 退出)
+  reapTimer.unref?.()
 }
 
 /**
@@ -232,6 +390,7 @@ export function startChildRun(
   req: RunRequest,
   driver: RunDriver = runAgent
 ): RunHandle {
+  runs.assertCanCreate(req)
   windows.inherit(runTopic(parent.runId), runTopic(req.runId))
   return launch(req, driver)
 }
@@ -259,6 +418,32 @@ export function attachRun(req: { runId: string; sinceSeq: number }, ctx: WindowC
   windows.subscribe(runTopic(req.runId), ctx.sender)
   for (const childId of descendantRunIds(handle)) windows.subscribe(runTopic(childId), ctx.sender)
   return handle.snapshot(req.sinceSeq)
+}
+
+/**
+ * 这个窗口不再看这个 run 的正文。`attachRun` 的反向。
+ *
+ * ★ 只摘**调用方自己**的订阅,所以不需要额外授权:它不停 run、不碰别的窗口,
+ * 最坏结果是调用方自己少收几条。run 已经被回收时照样摘 —— 主题可能还挂着。
+ */
+export function unwatchRun(req: { runId: string }, ctx: WindowContext): void {
+  windows.unsubscribe(runTopic(req.runId), ctx.sender)
+  const handle = runs.get(req.runId)
+  if (handle === undefined) return
+  for (const childId of descendantRunIds(handle)) windows.unsubscribe(runTopic(childId), ctx.sender)
+}
+
+/**
+ * 窗口最小化 / 隐藏(`false`)或者露出来(`true`)。由 `main/index.ts` 的窗口生命周期调用。
+ *
+ * ★ 藏起来时先摘掉这个窗口的全部 run 正文订阅,再通知它 —— 顺序反过来的话,
+ * 通知到达之前还会有一批正文推过去,落进一个已经不打算显示它们的渲染层。
+ * 露出来时只通知:由渲染层按快照 + 历史重建它真正在看的那几个会话。
+ */
+export function setWindowContentVisible(sender: WebContents, visible: boolean): void {
+  if (sender.isDestroyed()) return
+  if (!visible) windows.unsubscribeRuns(sender)
+  windows.emitTo(sender, 'window:visibility', { visible })
 }
 
 function descendantRunIds(handle: RunHandle): string[] {
@@ -378,4 +563,8 @@ export function shutdownRuns(): void {
   agentShells.shutdown()
   for (const pump of pumps.values()) pump.flush()
   pumps.clear()
+  // 还挂在防抖里的草稿要写掉,不是丢掉
+  sessionRuntime.flush()
+  if (reapTimer !== null) clearInterval(reapTimer)
+  reapTimer = null
 }

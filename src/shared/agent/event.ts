@@ -167,6 +167,12 @@ export interface RunSnapshot {
   pendingInteractions: PendingInteraction[]
   /** 子 run 的 id,UI 上是可展开节点 */
   children: string[]
+  /**
+   * 主进程的事件日志**头部被截掉过**(超过条数/字节上限)。`events` 因此不是这个 run
+   * 从头到尾的完整回放 —— 已提交的消息要从库里读(`sessions:getPage`),不能只靠这份快照重建。
+   * 缺省 = 日志完整(除去那些被后来的提交/工具结束取代、重放不需要的增量)。
+   */
+  logTrimmed?: boolean
 }
 
 /**
@@ -181,6 +187,14 @@ export interface ActiveRunEntry {
   sessionId: string
   workspaceId: string
   status: RunStatus
+  /**
+   * 这个 run(含它派出的子代理)正等着用户处理的审批 / 提问数。
+   *
+   * ★ 走全局广播而不是正文事件:没有窗口在看这条会话时正文一条都不推,
+   * 而「有个审批在等你」恰恰是那时最该让用户知道的事 —— 应用内标一下,不强制切换。
+   * 缺席 = 0。
+   */
+  pendingInteractions?: number
 }
 
 /** run 结束后不再有事件,UI 可以据此收掉 loading 态。 */

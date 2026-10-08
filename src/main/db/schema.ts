@@ -1137,6 +1137,47 @@ CREATE TABLE usage_remote_origin (
 );
 `
 
+/**
+ * 第 28 条:视频生成任务。
+ *
+ * ★★ **这张表是后台视频生命周期的唯一真源**(见 shared/domain/video-generation.ts
+ * 的 `VideoJob`)。它必须落盘而不是只留在内存里,因为一个视频任务要跑几分钟,
+ * 而应用随时可能被退出、重启、切账户 —— 恢复查询全靠这里的上游任务身份。
+ *
+ * ★ 三处刻意的列选择,都按"查询形状"来(schema.ts 文件头那条规矩):
+ *   - `credential_fingerprint` **提成真列**:恢复前要按它筛"哪些任务还能用当前
+ *     凭据继续查",而那是恢复路径每一次启动都要跑的一次过滤;
+ *   - `cloud` / `retrieval` 也是真列:前者决定"还要不要轮询",后者决定
+ *     "云端成功了但文件没取回来"那条最容易被漏掉的分支;
+ *   - 其余整块塞进 `json`,因为它们永远是整行读写,没有按字段查的需求。
+ *
+ * ★★ **一个字节的视频都不进这张表**:只存上游 URL 与本地附件引用。
+ *   把 base64 视频写进 SQLite 会让库膨胀到几百兆,而那条库是每次启动都要打开的。
+ *
+ * ★ 外键指向 sessions:会话删了,它的任务行也跟着走(与 attachments 同规)。
+ *   但**云端任务不会被这行删除自动取消** —— 那件事由 manager 尽力而为,
+ *   且不能宣称"删了就等于退款"。
+ */
+const V28_VIDEO_JOBS = `
+CREATE TABLE video_generation_jobs (
+  id                     TEXT PRIMARY KEY,
+  session_id             TEXT REFERENCES sessions (id) ON DELETE CASCADE,
+  workspace_id           TEXT NOT NULL,
+  config_profile         TEXT NOT NULL,
+  cloud                  TEXT NOT NULL,
+  retrieval              TEXT NOT NULL,
+  credential_fingerprint TEXT,
+  upstream_id            TEXT,
+  created_at             INTEGER NOT NULL,
+  updated_at             INTEGER NOT NULL,
+  revision               INTEGER NOT NULL,
+  json                   TEXT NOT NULL
+);
+CREATE INDEX video_jobs_by_session ON video_generation_jobs (session_id, created_at DESC);
+CREATE INDEX video_jobs_by_recovery ON video_generation_jobs (cloud, retrieval, updated_at);
+`
+
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -1167,4 +1208,7 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 25, name: 'context-compaction-detail', sql: V25_CONTEXT_COMPACTION_DETAIL }
   ,{ version: 26, name: 'drop-context-checkpoints', sql: V26_DROP_CONTEXT_CHECKPOINTS }
   ,{ version: 27, name: 'usage-remote', sql: V27_USAGE_REMOTE }
+  ,{ version: 28, name: 'video-jobs', sql: V28_VIDEO_JOBS }
+  // 正文提取在 index.ts 中与正常写入共用，迁移与重建在同一事务内。
+  ,{ version: 29, name: 'rebuild-message-search', sql: 'DELETE FROM messages_fts;' }
 ]

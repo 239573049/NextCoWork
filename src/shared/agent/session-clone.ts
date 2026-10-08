@@ -42,11 +42,15 @@ function ownedFileName(dataRef: string, ownerId: string): string | null {
 }
 
 /**
- * 转录里所有属于 `ownerId` 的托管图片文件名,去重、按首次出现排序。
+ * 转录里所有属于 `ownerId` 的托管媒材文件名,去重、按首次出现排序。
  *
- * 两处都要搜:用户贴的图(`image` part)和工具产出的图(`tool_result.output.images`,
- * 目前只有 `generate_image` 会写 `ncw://`,截图是内联 data URL,不在此列)。
- * 去重的需求:同一张图在长会话里可能被引用多次,主进程按这张表逐个读盘,
+ * 三处都要搜:用户贴的图(`image` part)、工具产出的图(`tool_result.output.images`)
+ * 与**工具产出的视频**(`tool_result.output.videos`)。视频是后加的,而漏掉它
+ * 的后果比漏一张图更重:一次"复制会话"之后,新会话里的视频地址指向源会话的目录
+ * —— 而那条路径在新会话里**读不出来**(会话归属校验会拒),表现为一张永远黑屏的卡,
+ * 且没有任何报错指向"分支时少搬了一个文件"。
+ *
+ * 去重的需求:同一份媒材在长会话里可能被引用多次,主进程按这张表逐个读盘,
  * 不去重就是同一个文件读 N 遍。
  */
 export function ownedImageFileNames(messages: readonly AgentMessage[], ownerId: string): string[] {
@@ -58,7 +62,10 @@ export function ownedImageFileNames(messages: readonly AgentMessage[], ownerId: 
   for (const message of messages) {
     for (const part of message.parts) {
       if (part.type === 'image') visit(part.dataRef)
-      else if (part.type === 'tool_result') for (const image of part.output.images ?? []) visit(image.dataRef)
+      else if (part.type === 'tool_result') {
+        for (const image of part.output.images ?? []) visit(image.dataRef)
+        for (const video of part.output.videos ?? []) visit(video.url)
+      }
     }
   }
   return [...seen]
@@ -88,17 +95,34 @@ export function rehomeImageRefs(
       changed = true
       return { ...part, dataRef: next }
     }
-    if (part.type === 'tool_result' && part.output.images !== undefined) {
+    if (part.type === 'tool_result' && (part.output.images !== undefined || part.output.videos !== undefined)) {
       let moved = false
-      const images = part.output.images.map((image) => {
+      const images = (part.output.images ?? []).map((image) => {
         const next = target(image.dataRef)
         if (next === undefined) return image
         moved = true
         return { ...image, dataRef: next }
       })
+      /*
+        ★ 视频同样要改写(见本文件头那段:不改写的话新会话读到的是源会话的
+        `ncw://` 地址,而那在新会话里被会话归属校验拒掉)。
+      */
+      const videos = (part.output.videos ?? []).map((video) => {
+        const next = target(video.url)
+        if (next === undefined) return video
+        moved = true
+        return { ...video, url: next }
+      })
       if (!moved) return part
       changed = true
-      return { ...part, output: { ...part.output, images } }
+      return {
+        ...part,
+        output: {
+          ...part.output,
+          ...(part.output.images === undefined ? {} : { images }),
+          ...(part.output.videos === undefined ? {} : { videos })
+        }
+      }
     }
     return part
   })

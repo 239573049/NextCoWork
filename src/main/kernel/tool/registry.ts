@@ -16,6 +16,8 @@ import type { AgentError } from '../../../shared/agent/error'
 import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
 import type { ImageGenBridge } from '../image-gen'
 import type { SessionImageStore } from '../session-images'
+import type { VideoGenBridge } from '../video-gen'
+import type { SessionVideoStore } from '../session-videos'
 import type { InteractFn } from '../interaction-gate'
 import { NETWORK_SWITCH_TOOLS } from '../permission-gate'
 import { isValidExternalName, sanitizeDescription, ToolNamer } from './naming'
@@ -149,6 +151,20 @@ export interface ToolContext {
    * `SaveImage` 整体不下发(`isEnabled`)。见 `kernel/session-images.ts` 文件头。
    */
   sessionImages?: SessionImageStore
+  /**
+   * 对话内生成视频的异步通道。缺省 = 这个环境里生不了视频,
+   * `generate_video` 整体不下发(`isEnabled`)—— 见 \`kernel/video-gen.ts\`。
+   *
+   * ★ 与 `imageGen` 的关键差别:提交返回的是**任务**,成品由后台 worker
+   * 落成本会话附件;`status` / `cancel` 对**已有任务**有效,与当前选中的
+   * 模型和开关都无关。
+   */
+  videoGen?: VideoGenBridge
+  /**
+   * 本会话的视频仓。缺省 = 纯内核测试没装配 —— `SaveVideo` 整体不下发
+   * (它靠这个按 \`ncw://\` 地址读回字节)。见 \`kernel/session-videos.ts\`。
+   */
+  sessionVideos?: SessionVideoStore
   /**
    * Agent 手上那些 shell(前台停止句柄 + 后台进程)。缺省 = 这个环境里
    * 既停不了单条命令、也起不了后台命令(纯内核测试),`BashOutput` / `KillShell`

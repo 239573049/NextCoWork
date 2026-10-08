@@ -15,11 +15,13 @@
  * - 应用数据库默认落在**用户主目录**的 `.next-cowork/data/` 下 —— 与 cwd、与是否打包
  *   都无关;调用方仍可通过 `openDatabase(dir)` 为测试或特殊部署指定目录。
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { lstatSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { MIGRATIONS } from './schema'
+import { rebuildMessageFts } from './message-text'
 
 /** 库文件名。`-wal` / `-shm` 是 SQLite 自己在同目录建的兄弟文件。 */
 export const DB_FILENAME = 'nextcowork.db'
@@ -81,6 +83,73 @@ export class DatabaseClosedError extends Error {
     super('数据库已在应用退出时关闭,这次写入没有落盘')
     this.name = 'DatabaseClosedError'
   }
+}
+
+/** 同步访问不能排队：明确拒绝，绝不借用另一个异步调用尚未提交的事务。 */
+export class DatabaseBusyError extends Error {
+  constructor() {
+    super('数据库正在执行异步事务，请等待完成后再试')
+    this.name = 'DatabaseBusyError'
+  }
+}
+
+export class DatabaseTransactionClosedError extends Error {
+  constructor() {
+    super('事务已经结束，迟到的异步读写没有执行')
+    this.name = 'DatabaseTransactionClosedError'
+  }
+}
+
+interface TransactionOwner {
+  database: DatabaseSync
+  kind: 'sync' | 'async'
+  active: boolean
+}
+
+const transactionContext = new AsyncLocalStorage<TransactionOwner>()
+let activeTransaction: TransactionOwner | undefined
+let asyncTransactionQueue: Promise<void> = Promise.resolve()
+
+function assertTransactionAccess(): void {
+  const owner = transactionContext.getStore()
+  if (owner !== undefined && !owner.active) throw new DatabaseTransactionClosedError()
+  if (activeTransaction !== undefined && activeTransaction !== owner) throw new DatabaseBusyError()
+}
+
+function releaseTransaction(owner: TransactionOwner): void {
+  owner.active = false
+  if (activeTransaction === owner) activeTransaction = undefined
+}
+
+/** 缓存的 statement 也在执行时复检，不能先取句柄、再在别人的事务中搭车。 */
+function guardStatement(statement: StatementSync, database: DatabaseSync): StatementSync {
+  const check = (): void => {
+    assertTransactionAccess()
+    if (handle !== database) throw new DatabaseClosedError()
+  }
+  return new Proxy(statement, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target)
+      if (typeof value !== 'function') return value
+      return (...args: unknown[]): unknown => {
+        check()
+        const result: unknown = Reflect.apply(value, target, args)
+        if (property !== 'iterate' || result === null || typeof result !== 'object') return result
+        const guarded: object = new Proxy(result, {
+          get(iterator, key): unknown {
+            if (key === Symbol.iterator) return () => guarded
+            const method: unknown = Reflect.get(iterator, key, iterator)
+            if (typeof method !== 'function') return method
+            return (...input: unknown[]): unknown => {
+              if (key === 'next') check()
+              return Reflect.apply(method, iterator, input)
+            }
+          }
+        })
+        return guarded
+      }
+    }
+  })
 }
 
 /**
@@ -153,6 +222,7 @@ function migrate(d: DatabaseSync): void {
         }
       }
       d.exec(m.sql)
+      if (m.version === 29) rebuildMessageFts(d)
       // 审计时间戳走 Date.now() 而不是 `host.clock` 端口:数据库层够不着宿主,
       // 而这个值只用于「什么时候升的级」,没有任何测试或计价逻辑读它。
       insert.run(m.version, m.name, Date.now())
@@ -187,6 +257,7 @@ function migrate(d: DatabaseSync): void {
  * 所以没人会怀疑到调用顺序上去。
  */
 export function openDatabase(dir: string): void {
+  assertTransactionAccess()
   if (handle !== null) {
     throw new Error(
       handlePath === MEMORY
@@ -216,6 +287,7 @@ export function openDatabase(dir: string): void {
  * @internal 只给 `src/main/db/` 内部用。外面拿到句柄就等于外面开始写 SQL 了。
  */
 export function db(): DatabaseSync {
+  assertTransactionAccess()
   if (sealed) {
     /**
      * ★ 封库之后**不能**再走下面那条内存兜底 —— 那会凭空开一个跑完整套迁移的新库,
@@ -236,9 +308,10 @@ export function db(): DatabaseSync {
  * @internal 同 `db()`。
  */
 export function stmt(sql: string): StatementSync {
+  const database = db()
   const cached = prepared.get(sql)
   if (cached !== undefined) return cached
-  const s = db().prepare(sql)
+  const s = guardStatement(database.prepare(sql), database)
   prepared.set(sql, s)
   return s
 }
@@ -254,16 +327,32 @@ export function stmt(sql: string): StatementSync {
  */
 export function tx<T>(fn: () => T): T {
   const d = db()
-  if (d.isTransaction) return fn()
-  d.exec('BEGIN')
-  try {
-    const out = fn()
-    d.exec('COMMIT')
-    return out
-  } catch (err) {
-    d.exec('ROLLBACK')
-    throw err
+  if (d.isTransaction) {
+    const owner = transactionContext.getStore()
+    if (owner === undefined || activeTransaction !== owner || owner.database !== d) throw new DatabaseBusyError()
+    return fn()
   }
+  const owner: TransactionOwner = { database: d, kind: 'sync', active: true }
+  activeTransaction = owner
+  return transactionContext.run(owner, () => {
+    try {
+      d.exec('BEGIN')
+      const out = fn()
+      if (out !== null && (typeof out === 'object' || typeof out === 'function')
+        && typeof (out as { then?: unknown }).then === 'function') {
+        // Promise 回调不能从同步事务逃逸；迟到的续体也会被所有者检查拦住。
+        void Promise.resolve(out).catch(() => undefined)
+        throw new TypeError('同步事务不能返回 Promise，请使用 txAsync')
+      }
+      d.exec('COMMIT')
+      return out
+    } catch (err) {
+      try { if (d.isTransaction) d.exec('ROLLBACK') } catch { /* 保留原始错误 */ }
+      throw err
+    } finally {
+      releaseTransaction(owner)
+    }
+  })
 }
 
 /**
@@ -271,25 +360,50 @@ export function tx<T>(fn: () => T): T {
  *
  * `DatabaseSync` 本身是同步句柄，但导入的凭证写入接口是 Promise。若先
  * 提交 SQLite、再写凭证，第二个写入失败时就无法满足「导入失败 = 完全不变」。
- * 这里让事务保持打开直到 Promise 完成；嵌套调用沿用外层事务，和 `tx` 的
- * 语义一致。主进程同一时刻只有一个导入操作，因此不会出现两个异步事务交叉。
+ * 同一异步调用链的嵌套访问沿用外层事务；不同所有者的异步事务按 FIFO 排队。
+ * await 期间无关同步读写明确报 busy，不能把它们静默并入或一起回滚。
  */
 export async function txAsync<T>(fn: () => T | Promise<T>): Promise<T> {
-  const d = db()
-  if (d.isTransaction) return await fn()
-  d.exec('BEGIN')
+  const current = transactionContext.getStore()
+  if (current !== undefined) {
+    assertTransactionAccess()
+    if (current.kind === 'sync') throw new TypeError('同步事务不能嵌套异步事务，请使用 txAsync')
+    return await fn()
+  }
+  // 排队时可以记下原连接，但不能读取未提交行；换库后的旧请求绝不写入新库。
+  const d = handle ?? db()
+  const previous = asyncTransactionQueue
+  let next: () => void = () => {}
+  asyncTransactionQueue = new Promise<void>((resolve) => { next = resolve })
+  await previous
   try {
-    const out = await fn()
-    d.exec('COMMIT')
-    return out
-  } catch (err) {
-    try { d.exec('ROLLBACK') } catch { /* 原始错误更有用 */ }
-    throw err
+    if (handle !== d) throw new DatabaseClosedError()
+    assertTransactionAccess()
+    if (d.isTransaction) throw new DatabaseBusyError()
+    const owner: TransactionOwner = { database: d, kind: 'async', active: true }
+    activeTransaction = owner
+    return await transactionContext.run(owner, async () => {
+      try {
+        d.exec('BEGIN')
+        const out = await fn()
+        d.exec('COMMIT')
+        return out
+      } catch (err) {
+        try { if (d.isTransaction) d.exec('ROLLBACK') } catch { /* 原始错误更有用 */ }
+        throw err
+      } finally {
+        releaseTransaction(owner)
+      }
+    })
+  } finally {
+    next()
   }
 }
 
 /** 关库。退出前调,或测试里重置。 */
 export function closeDatabase(options: { final?: boolean } = {}): void {
+  assertTransactionAccess()
+  if (activeTransaction !== undefined) throw new DatabaseBusyError()
   prepared.clear()
   handle?.close()
   handle = null

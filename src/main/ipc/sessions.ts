@@ -1,17 +1,26 @@
 /** 会话实体 IPC：所有读写都经过 state/store，避免 handler 直接写 SQL。 */
 import { readFile } from 'node:fs/promises'
-import { basename } from 'node:path'
-import type { Session, SessionChange } from '../../shared/domain/session'
+import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
+import { createHash } from 'node:crypto'
+import { basename, dirname, extname, join } from 'node:path'
+import type { Session, SessionChange, SessionPage } from '../../shared/domain/session'
 import type { AgentMessage } from '../../shared/agent/message'
 import { isToolResultOnly } from '../../shared/agent/message'
+import { editUserMessage, removeSpan, replySpan, turnSpan } from '../../shared/agent/history-edit'
 import { ownedImageFileNames, rehomeImageRefs, turnEndIndex } from '../../shared/agent/session-clone'
+import { isVideoMime } from '../../shared/domain/attachment'
+import { buildNcwUrl } from '../../shared/domain/attachment'
+import { attachmentRoot } from '../net/attachment-protocol'
 import type { SessionMode } from '../../shared/agent/run-request'
 import { normalizeModeId } from '../../shared/domain/mode'
-import { mimeOfExt } from '../../shared/domain/attachment'
+import { extOfMime, mimeOfExt } from '../../shared/domain/attachment'
+import { convertInlineImages, type InlineImageDeps } from '../inline-images'
 import { ulid } from '../../shared/util/id'
 import { runs } from '../kernel/run-registry'
 import { windows } from '../window/registry'
 import { store } from '../state/store'
+import { putDraftAttachment } from '../db/repo'
 import { removeSessionAttachmentFiles } from './storage'
 import { uploadAttachment } from './attachment'
 import { endGoalSession, restoreGoal } from '../goal/runtime'
@@ -45,9 +54,90 @@ export function getSession(req: { sessionId: string }) {
 
 /** Replace a session transcript after an intentional user edit. */
 export function replaceHistory(req: { sessionId: string; messages: AgentMessage[] }): void {
-  if (runs.activeRunIds().some((id) => runs.get(id)?.sessionId === req.sessionId)) {
-    throw new Error('有运行中的 Agent，请先停止任务后再编辑消息')
+  if (runs.isSessionBusy(req.sessionId)) {
+    throw new Error('有运行中的 Agent 或历史操作，请先等待任务完成后再编辑消息')
   }
+  commitEditedHistory(req.sessionId, req.messages)
+}
+
+/**
+ * 转录的一页。渲染层打开会话、往上翻页都走这条,不再一次读整段历史(见 `SessionPage`)。
+ */
+export function getSessionPage(req: { sessionId: string; limit: number; beforeMessageId?: string }): SessionPage {
+  const page = store.getSessionPage(req.sessionId, req.limit, req.beforeMessageId)
+  if (page === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+  if (page.session.parentSessionId === undefined) {
+    ensureGoalRuntime()
+    // 目标恢复要看整段历史里的标记:让它自己读库,而不是拿这一页去猜
+    restoreGoal(req.sessionId)
+  }
+  // 旧转录里的内联 base64 图在被读到时按需转存成附件(有上限,失败保持原样)
+  const messages = convertInlineImages(req.sessionId, page.messages, inlineImageDeps)
+  return messages === page.messages ? page : { ...page, messages }
+}
+
+const inlineImageDeps: InlineImageDeps = {
+  isBusy: (sessionId) => runs.isSessionBusy(sessionId),
+  save: (sessionId, mime, bytes) => uploadAttachment({
+    scope: 'session',
+    ownerId: sessionId,
+    displayName: `inline${extOfMime(mime)}`,
+    mime,
+    bytes
+  }).url,
+  replaceIfUnchanged: (sessionId, messageId, expectedParts, parts) =>
+    store.replaceMessagePartsIfUnchanged(sessionId, messageId, expectedParts, parts),
+  log: (message, error) => { console.warn(message, error) }
+}
+
+/** 会话元数据 + 消息条数。对话视图读模式/模型、提炼横幅读标题,都不需要正文 */
+export function getSessionSummary(req: { sessionId: string }): { session: Session; messageCount: number } {
+  const summary = store.getSessionSummary(req.sessionId)
+  if (summary === undefined) throw new Error(`会话不存在: ${req.sessionId}`)
+  return summary
+}
+
+/** 会话里最后一条助手消息 —— 后台子代理交差的正文 */
+export function getLastAssistant(req: { sessionId: string }): AgentMessage | null {
+  return store.lastAssistantMessage(req.sessionId) ?? null
+}
+
+/**
+ * 编辑一条提问;`truncate` = 从这条起重跑(这条和之后的全部移除,新提问由调用方另起一轮发出)。
+ *
+ * ★ 按 id 在**完整历史**上改:渲染层手里只有一页,拿那一页整段 `replaceHistory`
+ * 会把页外的历史当成「删掉了」。
+ */
+export function editMessage(req: { sessionId: string; messageId: string; text: string; truncate: boolean }): void {
+  editHistory(req.sessionId, (history) => editUserMessage(history, req.messageId, req.text, req.truncate))
+}
+
+/** 删一整轮(提问 + 它引出的全部回复与工具回执)。规则见 `turnSpan` */
+export function deleteTurn(req: { sessionId: string; userMessageId: string }): void {
+  editHistory(req.sessionId, (history) => {
+    const span = turnSpan(history, req.userMessageId)
+    return span === null ? null : removeSpan(history, span)
+  })
+}
+
+/** 只删一条助手回复,提问留着。规则见 `replySpan` */
+export function deleteReply(req: { sessionId: string; fromId: string; toId: string }): void {
+  editHistory(req.sessionId, (history) => {
+    const span = replySpan(history, req.fromId, req.toId)
+    return span === null ? null : removeSpan(history, span)
+  })
+}
+
+function editHistory(sessionId: string, edit: (history: readonly AgentMessage[]) => AgentMessage[] | null): void {
+  if (runs.isSessionBusy(sessionId)) {
+    throw new Error('有运行中的 Agent 或历史操作，请先等待任务完成后再编辑消息')
+  }
+  const next = edit(store.getHistory(sessionId))
+  if (next === null) throw new Error('要改写的消息已经不在这条会话里了')
+  commitEditedHistory(sessionId, next)
+}
+
+function commitEditedHistory(sessionId: string, messages: readonly AgentMessage[]): void {
   /*
     ★★ 手动编辑转录 = 永久脱离导入来源,且必须和替换**在同一个事务里**。
 
@@ -58,11 +148,11 @@ export function replaceHistory(req: { sessionId: string; messages: AgentMessage[
     因为那些而丢掉正常同步,用户会觉得收藏一下就"坏了"。
   */
   store.tx(() => {
-    store.replaceHistory(req.sessionId, req.messages)
-    store.detachImportedSession(req.sessionId)
+    store.replaceHistory(sessionId, messages)
+    store.detachImportedSession(sessionId)
   })
-  const session = store.getSession(req.sessionId)
-  changed({ kind: 'history', sessionIds: [req.sessionId], workspaceId: session?.workspaceId })
+  const session = store.getSession(sessionId)
+  changed({ kind: 'history', sessionIds: [sessionId], workspaceId: session?.workspaceId })
 }
 
 export function createSession(req: { workspaceId: string; title?: string; sessionId?: string; mode?: SessionMode }): Session {
@@ -120,6 +210,53 @@ interface SourceImage {
  * 读失败(文件已被清理)不算失败:这张图不进表,`rehomeImageRefs` 会保留原引用。
  * 源会话里它本来就是坏的,分支不比源会话更坏;原先是整个分支跟着失败。
  */
+/**
+ * 视频**不读进内存**。
+ *
+ * ★★ 上一版把"托管的图"扩成了"托管的媒材",于是这个函数会把生成的视频也一起
+ * 收进来 —— 一段 4K 几十秒就是几百兆,而它是 `readFileSync` 的形状、
+ * 紧接着还有"一口气同步建会话"那一段(见 `cloneIntoNewSession` 的注释)。
+ * 表现正是这个函数当初被重写成异步要修掉的那个:**点下「分支」,整个应用冻住**。
+ *
+ * 所以视频走**磁盘到磁盘的流式拷贝**:先 `copyFile`(它发生在异步阶段,
+ * 与读图并行),再由同步阶段只登记附件行 —— 全程没有一份几百兆的 Buffer。
+ */
+async function copySourceVideos(sourceSessionId: string, fileNames: readonly string[]): Promise<Map<string, { path: string; size: number; checksum: string; mime: string }>> {
+  const loaded = await Promise.all(fileNames.map(async (fileName): Promise<[string, { path: string; size: number; checksum: string; mime: string }] | null> => {
+    const row = store.getAttachmentRowByOwnerAndFileName(sourceSessionId, fileName)
+    if (row === undefined) return null
+    const staging = join(dirname(row.path), `.clone-${ulid()}${extname(row.path)}`)
+    /*
+      ★ 边拷边哈希 —— 只读一遍。分两步(先 copy 再读一遍算校验和)在几百兆上
+      就是白白多读一次盘;而附件表的 `checksum` 是去重与诊断的依据,
+      不能因为"视频大"就留空。
+    */
+    try {
+      const { stat } = await import('node:fs/promises')
+      const source = await stat(row.path)
+      if (!source.isFile()) return null
+      const hash = createHash('sha256')
+      let written = 0
+      await pipeline(
+        createReadStream(row.path),
+        async function* (chunks: AsyncIterable<Buffer>) {
+          for await (const chunk of chunks) {
+            hash.update(chunk)
+            written += chunk.length
+            yield chunk
+          }
+        },
+        createWriteStream(staging, { flags: 'wx', mode: 0o600 })
+      )
+      return [fileName, { path: staging, size: written, checksum: hash.digest('hex'), mime: mimeOfExt(row.path) }]
+    } catch {
+      try { rmSync(staging, { force: true }) } catch { /* 尽力而为 */ }
+      return null
+    }
+  }))
+  return new Map(loaded.filter((entry): entry is [string, { path: string; size: number; checksum: string; mime: string }] => entry !== null))
+}
+
 async function readSourceImages(sourceSessionId: string, fileNames: readonly string[]): Promise<Map<string, SourceImage>> {
   const loaded = await Promise.all(fileNames.map(async (fileName): Promise<[string, SourceImage] | null> => {
     const row = store.getAttachmentRowByOwnerAndFileName(sourceSessionId, fileName)
@@ -146,7 +283,19 @@ async function readSourceImages(sourceSessionId: string, fileNames: readonly str
  */
 async function cloneIntoNewSession(sourceSession: Session, title: string, messages: readonly AgentMessage[]): Promise<Session> {
   const sourceSessionId = sourceSession.id
-  const images = await readSourceImages(sourceSessionId, ownedImageFileNames(messages, sourceSessionId))
+  /*
+    ★ 分两拨:图片读进内存(它们小),视频**流式拷贝**(它们大)。
+    `ownedImageFileNames` 名字没改,但它返回的是"这条转录引用的全部托管媒材" ——
+    图片与视频一起(见 `session-clone.ts` 文件头那段:漏掉视频会让新会话里的
+    地址指向源会话目录,而那在新会话里被会话归属校验拒掉)。
+  */
+  const ownedNames = ownedImageFileNames(messages, sourceSessionId)
+  const videoNames = ownedNames.filter((name) => isVideoMime(mimeOfExt(name)))
+  const imageNames = ownedNames.filter((name) => !isVideoMime(mimeOfExt(name)))
+  const [images, videos] = await Promise.all([
+    readSourceImages(sourceSessionId, imageNames),
+    copySourceVideos(sourceSessionId, videoNames)
+  ])
 
   const sessionId = ulid()
   const session = store.createSession({
@@ -179,8 +328,38 @@ async function cloneIntoNewSession(sourceSession: Session, title: string, messag
       const done = moved.get(fileName)
       if (done !== undefined) return done
       const image = images.get(fileName)
-      if (image === undefined) return undefined
-      const url = uploadAttachment({ scope: 'session', ownerId: sessionId, ...image }).url
+      if (image !== undefined) {
+        const url = uploadAttachment({ scope: 'session', ownerId: sessionId, ...image }).url
+        moved.set(fileName, url)
+        return url
+      }
+      /*
+        ★ 视频:把**已经拷好**的那份登记成新会话的附件,再删掉暂存。
+        这里没有 `writeBytes`,只有一次 rename —— 那正是"同步阶段不许 await"
+        与"不能有几百兆 Buffer"两条约束下唯一可行的形态。
+      */
+      const video = videos.get(fileName)
+      if (video === undefined) return undefined
+      const id = ulid()
+      const target = join(attachmentRoot(), 'sessions', sessionId, `${id}${extname(video.path)}`)
+      try {
+        mkdirSync(dirname(target), { recursive: true })
+        renameSync(video.path, target)
+        putDraftAttachment({
+          id,
+          scope: 'session',
+          ownerId: sessionId,
+          path: target,
+          size: video.size,
+          checksum: video.checksum,
+          displayName: `cloned${extname(target)}`,
+          createdAt: Date.now()
+        })
+      } catch {
+        return undefined
+      }
+      const url = buildNcwUrl({ scope: 'session', ownerId: sessionId, fileName: `${id}${extname(target)}` })
+      if (url === null) return undefined
       moved.set(fileName, url)
       return url
     }
@@ -194,6 +373,11 @@ async function cloneIntoNewSession(sourceSession: Session, title: string, messag
     store.deleteSession(sessionId)
     removeSessionAttachmentFiles(paths)
     throw error
+  } finally {
+    // ★ 暂存的视频副本:成功时已经被 rename 走,失败时留在这里成了垃圾 —— 都删一遍。
+    for (const video of videos.values()) {
+      try { rmSync(video.path, { force: true }) } catch { /* 尽力而为 */ }
+    }
   }
   changed({ kind: 'metadata', sessionIds: [session.id], workspaceId: sourceSession.workspaceId })
   return session
@@ -387,14 +571,11 @@ function requireSessionAttachmentPaths(sessionId: string): string[] {
 
 /**
  * 待删会话的级联子树里是否有正在运行的 run。子代理 run 的 sessionId 是子会话
- * 自己的 id,但删除父会话时会连它一起删掉,所以按 `parentSessionId` 追一层。
+ * 自己的 id,但删除父会话时会连它一起删掉,所以必须检查完整的递归子树。
  */
 function runsInDeletionSubtree(rootSessionId: string, activeSessionIds: ReadonlySet<string>): boolean {
-  for (const activeId of activeSessionIds) {
-    if (activeId === rootSessionId) return true
-    if (store.getSession(activeId)?.parentSessionId === rootSessionId) return true
-  }
-  return false
+  const subtree = store.sessionSubtreeIds(rootSessionId)
+  return subtree.some((sessionId) => activeSessionIds.has(sessionId) || runs.isSessionBusy(sessionId))
 }
 
 export function searchAll(req: { q: string; workspaceId?: string; limit: number }) {

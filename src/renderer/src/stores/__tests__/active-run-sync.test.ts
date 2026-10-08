@@ -19,11 +19,20 @@ vi.mock('../../services/agent', () => ({
   onActiveRuns: vi.fn(() => () => {})
 }))
 vi.mock('../../services/app', () => ({
-  getSessionInput: vi.fn(async () => null), persistSessionInput: vi.fn()
+  getSessionInput: vi.fn(async () => null), persistSessionDraft: vi.fn()
 }))
-vi.mock('../../services/sessions', () => ({
-  getSession: vi.fn(), replaceHistory: vi.fn(async () => {})
-}))
+vi.mock('../../services/sessions', () => {
+  const getSession = vi.fn()
+  return {
+    getSession,
+    // 转录按页读(`getSessionPage`):委托给各用例摆好的整段历史,一页就是全部
+    getSessionPage: vi.fn(async (sessionId: string) => {
+      const detail = await getSession(sessionId)
+      return detail == null ? detail : { ...(detail as object), hasMore: false }
+    }),
+    replaceHistory: vi.fn(async () => {})
+  }
+})
 vi.mock('../../services/goal', () => ({ getGoal: vi.fn(async () => undefined), onGoalChanged: vi.fn(() => () => {}) }))
 
 import { attachRun } from '../../services/agent'
@@ -86,6 +95,18 @@ describe('active run index convergence', () => {
     syncActiveRuns([])
 
     await vi.waitFor(() => expect(store.getState().activeRunId).toBeNull())
+    expect(useRunIndex.getState()).toEqual([])
+  })
+
+  it('★ a run reaped before its attach lands settles from the database instead of spinning forever', async () => {
+    // 主进程按 TTL/预算回收了已结束的 run:attach 只能拿到「run 不存在」
+    vi.mocked(attachRun).mockRejectedValue(new Error('run 不存在: ghost-run'))
+    adoptActiveRuns([entry])
+    const store = sessionStore(entry.sessionId)
+
+    await vi.waitFor(() => expect(store.getState().activeRunId).toBeNull())
+    await vi.waitFor(() => expect(store.getState().transcript.messages.map((m) => m.id)).toEqual(['answer']))
+    expect(store.getState().transcript.status).toBe('done')
     expect(useRunIndex.getState()).toEqual([])
   })
 

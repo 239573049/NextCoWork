@@ -35,6 +35,8 @@ import type { SchedulingBridge } from '../../shared/domain/scheduled'
 import type { ShellBridge } from '../../shared/domain/shell'
 import type { ImageGenBridge } from './image-gen'
 import type { SessionImageStore } from './session-images'
+import type { VideoGenBridge } from './video-gen'
+import type { SessionVideoStore } from './session-videos'
 import type { PlanExecutionContext } from './plan-execution'
 import { fileReferenceMatches, type FileReferenceSource } from '../../shared/domain/attachment'
 import { EnvironmentError } from '../../shared/domain/environment'
@@ -167,6 +169,19 @@ export interface SessionDeps {
    * 见 `kernel/session-images.ts` 文件头。
    */
   sessionImages?: SessionImageStore
+  /**
+   * 视频生成的后台通道。缺省 = 这个环境里生不了视频,`generate_video` 不下发。
+   *
+   * ★ 与 `imageGen` 的形状差别就是整个模块的核心:视频是**异步**的,
+   * 所以桥上有 `submit` / `status` / `cancel` 三个动词,而不是一个
+   * "提交并等结果"(见 `video-gen.ts` 的文件头)。
+   */
+  videoGen?: VideoGenBridge
+  /**
+   * 本会话的视频仓:\`SaveVideo\` 按 \`ncw://\` 地址读回字节。
+   * 缺省 = 纯内核测试没装配,`SaveVideo` 不下发。
+   */
+  sessionVideos?: SessionVideoStore
   /**
    * 回合末的一次询问 —— 「这一轮真的可以停了吗」。
    *
@@ -1320,7 +1335,9 @@ export class AgentSession {
       ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling }),
       ...(this.deps.shells === undefined ? {} : { shells: this.deps.shells }),
       ...(this.deps.imageGen === undefined ? {} : { imageGen: this.deps.imageGen }),
-      ...(this.deps.sessionImages === undefined ? {} : { sessionImages: this.deps.sessionImages })
+      ...(this.deps.sessionImages === undefined ? {} : { sessionImages: this.deps.sessionImages }),
+      ...(this.deps.videoGen === undefined ? {} : { videoGen: this.deps.videoGen }),
+      ...(this.deps.sessionVideos === undefined ? {} : { sessionVideos: this.deps.sessionVideos })
     }
   }
 

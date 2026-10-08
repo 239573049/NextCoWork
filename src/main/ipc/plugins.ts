@@ -89,8 +89,34 @@ export function pluginManager(): PluginManager | null {
  * ★ 「开不出来」(远程工作区 / 没装 git / 不是仓库)不是异常,`getGitOverview`
  * 返回 `available: false`。这里把它翻译成一条**明确的拒绝**,而不是一份空状态 ——
  * 空状态会让插件以为「这是个干净的仓库」,然后据此做出错误的决定。
+ *
+ * ★ **每个工作区一份 scm 适配器**(只留最近用到的那个)。
+ * 原因不是性能:工作区类 RPC 现在会**冻结**「这次调用的工作区」(见 manager 的
+ * `resolveCallWorkspace`),而适配器若不跟着那份选择走,症状就是「插件在 A 的
+ * 工具调用里 stage 了 B 的文件」。缓存键取 id + root —— 同一个 id 被重新指向
+ * 另一个根时,旧适配器必须作废,否则它还会对着老仓库跑 git。
+ * 只留一份(进新条目就清表),所以两个工作区交替调用时会各重建一次 ——
+ * 适配器本身全是闭包,真正的 IO 每次都现查,重建不改变任何行为。
  */
+const scmAdapters = new Map<string, PluginScmAdapter>()
+
 function scmAdapterFor(workspaceId: string): PluginScmAdapter {
+  if (workspaceId === '') throw new Error('no workspace is open')
+  const workspace = store.listWorkspaces().find((item) => item.id === workspaceId)
+  if (workspace === undefined || (workspace.environment?.kind ?? 'local') === 'connection') {
+    // 远程 / 已关闭的工作区在本机没有可跑的 git —— 明确拒绝,不给一份空状态。
+    throw new Error(`git is unavailable here: workspace ${workspaceId} is not a local workspace`)
+  }
+  const cacheKey = `${workspaceId}\u0000${workspace.rootPath}`
+  const cached = scmAdapters.get(cacheKey)
+  if (cached !== undefined) return cached
+  const adapter = buildScmAdapter(workspaceId)
+  scmAdapters.clear()
+  scmAdapters.set(cacheKey, adapter)
+  return adapter
+}
+
+function buildScmAdapter(workspaceId: string): PluginScmAdapter {
   const requireOverview = async (): Promise<Extract<Awaited<ReturnType<typeof getGitOverview>>, { available: true }>> => {
     if (workspaceId === '') throw new Error('no workspace is open')
     const overview = await getGitOverview({ workspaceId })

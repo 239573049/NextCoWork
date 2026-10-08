@@ -59,6 +59,11 @@ export const agentZh = {
   'chat.cost.noRecords': '暂无计费记录',
   'chat.taskChecklist': '任务清单 · {done}/{total} 已完成',
   'chat.taskChecklistRunning': '任务正在执行',
+  // 没在看这条会话时,它停下来等审批 / 等回答 —— 只在应用里标一下,不强制切过去
+  'chat.pendingInteraction': '等待你的处理',
+  // 转录只读最近的一页,更早的按需往前取
+  'chat.loadEarlier': '加载更早的消息',
+  'chat.loadingEarlier': '正在加载…',
   // 这一轮已经收尾、清单却没跑完。只报剩余条数,不说「失败」——未跑完不等于出错
   'chat.taskChecklist.stoppedIncomplete': '运行已结束，仍有 {count} 项未完成',
   // 快照档的第二行:明说这份清单不是实时进度,否则和历史/入参里的那份分不清
@@ -91,6 +96,7 @@ export const agentZh = {
   'chat.tool.group.interaction': '等你表态 {count} 次',
   'chat.tool.group.widget': '画了 {count} 张图',
   'chat.tool.group.image': '生成了 {count} 次图片',
+  'chat.tool.group.video': '生成了 {count} 段视频',
   // 页面截图(browser_screenshot)。它不进过程段(见 isPinnedShape),但一个组里
   // 仍可能混进它(卡片还没提交、或用户手动展开了工作区)—— 少了这一条,
   // 那个组的标题会显示成 key 本身(`ToolTimeline` 的 GROUP_TITLE_KEYS 钉着完整性)。
@@ -111,7 +117,7 @@ export const agentZh = {
   'chat.turn.export': '导出为 Markdown',
   'chat.turn.exported': '已导出',
   'chat.turn.exportFailed': '导出失败，请重试',
-  'chat.turn.delete': '删除这一轮',
+  'chat.turn.delete': '删除这条回复',
   'chat.turn.branch': '分支到新会话',
   'chat.turn.branching': '正在分支…',
   'chat.turn.branched': '已分支',
@@ -260,6 +266,9 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.cost.noRecords': 'No billing records yet',
   'chat.taskChecklist': 'Task checklist · {done}/{total} completed',
   'chat.taskChecklistRunning': 'Task in progress',
+  'chat.pendingInteraction': 'Waiting for your input',
+  'chat.loadEarlier': 'Load earlier messages',
+  'chat.loadingEarlier': 'Loading…',
   'chat.taskChecklist.stoppedIncomplete': 'Run ended with {count} unfinished task(s)',
   'chat.taskChecklist.snapshot': 'Checklist snapshot',
   'chat.taskChecklist.unfinished': 'Unfinished',
@@ -283,6 +292,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.tool.group.interaction': '{count} times your input was needed',
   'chat.tool.group.widget': '{count} visuals drawn',
   'chat.tool.group.image': '{count} image generations',
+  'chat.tool.group.video': '{count} video generations',
   'chat.tool.group.screenshot': '{count} page screenshots',
   'chat.tool.group.external': '{count} external tools called',
   'chat.screenshot.capturing': 'Capturing the page…',
@@ -299,7 +309,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.turn.export': 'Export as Markdown',
   'chat.turn.exported': 'Exported',
   'chat.turn.exportFailed': 'Export failed. Try again',
-  'chat.turn.delete': 'Delete this turn',
+  'chat.turn.delete': 'Delete this reply',
   'chat.turn.branch': 'Branch to new chat',
   'chat.turn.branching': 'Branching…',
   'chat.turn.branched': 'Branched',
