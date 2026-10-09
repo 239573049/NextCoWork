@@ -900,6 +900,24 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     verification: 'probed'
   },
   {
+    id: 'opper',
+    name: 'Opper',
+    category: 'aggregator',
+    endpoints: [
+      oa('https://api.opper.ai/v3/compat', true),
+      resp('https://api.opper.ai/v3/compat', true),
+      anth('https://api.opper.ai/v3/compat')
+    ],
+    docsUrl: 'https://docs.opper.ai',
+    apiKeyUrl: 'https://platform.opper.ai',
+    suggestedModels: ['claude-fable-5-1', 'kimi-k3', 'glm-5.3'],
+    notes:
+      '模型 ID 用不带厂商前缀的池化短名(如 claude-sonnet-4-6),由 Opper 为每个请求选线路;' +
+      '写成 provider/model(如 anthropic/claude-sonnet-4-6)可固定一条线路。' +
+      '模型列表要先填 key 才能拉。服务托管在欧盟(AWS 斯德哥尔摩)。',
+    verification: 'probed'
+  },
+  {
     id: 'siliconflow',
     name: '硅基流动(国内)',
     category: 'aggregator',
