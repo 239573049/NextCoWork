@@ -15,7 +15,8 @@ export const PROVIDER_SYNC_FIELDS: Record<keyof UpstreamProvider, 'copy' | 'loca
   */
   videoGeneration: 'copy'
 }
-export const MODEL_SYNC_FIELDS: Record<keyof ModelAlias, 'copy'> = {
+// Effective protocol is recomputed on reads; only persisted model fields are portable.
+export const MODEL_SYNC_FIELDS: Record<Exclude<keyof ModelAlias, 'runtimeProtocol'>, 'copy'> = {
   alias: 'copy', providerId: 'copy', upstreamModel: 'copy', protocolOverride: 'copy', priority: 'copy',
   capabilities: 'copy', contextWindow: 'copy', maxOutputTokens: 'copy', displayName: 'copy', modality: 'copy',
   enabled: 'copy', thinkingConfig: 'copy', reasoningEfforts: 'copy', requestAdapter: 'copy', source: 'copy',

@@ -6,6 +6,7 @@ import {
   type ThinkingLevel
 } from '../agent/run-request'
 import type { ModelAlias, ModelCapabilities, ReasoningEffort, ThinkingConfig } from './provider'
+import { adaptiveAnthropicBinding } from './model-catalog-inventory/vendors/anthropic'
 
 export type ModelReasoningEffort = NonNullable<ThinkingConfig['defaultEffort']>
 
@@ -26,16 +27,26 @@ export interface ResolvedModelThinking {
 const MIN_THINKING_BUDGET = 1024
 const MIN_OUTPUT_HEADROOM = 1024
 
-type ThinkingModel = Pick<ModelAlias, 'thinkingConfig' | 'reasoningEfforts' | 'capabilities'>
+type ThinkingModel = Pick<ModelAlias, 'thinkingConfig' | 'reasoningEfforts' | 'capabilities'> &
+  Partial<Pick<ModelAlias, 'upstreamModel' | 'runtimeProtocol' | 'protocolOverride' | 'requestAdapter'>>
+
+/** Read-only thinking declaration matching the wire adapter, including legacy budgets. */
+export function effectiveModelThinking(model: ThinkingModel): Pick<ModelAlias, 'thinkingConfig' | 'reasoningEfforts'> {
+  return adaptiveAnthropicBinding(
+    model.upstreamModel ?? '', model.thinkingConfig,
+    model.runtimeProtocol ?? model.protocolOverride, model.requestAdapter?.preset, model.reasoningEfforts
+  ) ?? model
+}
 
 /** UI choices describe the selected binding, including provider overrides. */
 export function modelThinkingLevels(model: ThinkingModel | undefined): readonly ThinkingLevel[] {
   if (model === undefined) return ['auto']
-  const mode = model.thinkingConfig?.mode
+  const effective = effectiveModelThinking(model)
+  const mode = effective.thinkingConfig?.mode
   if (mode === 'unsupported' || mode === 'always') return ['auto']
   if (mode === 'toggle') return ['auto', 'medium', 'off'] // medium is the legacy enabled value; UI labels it On.
   if (mode === 'effort') {
-    const efforts = model.reasoningEfforts
+    const efforts = effective.reasoningEfforts
     if (efforts === undefined) return THINKING_LEVELS
     return THINKING_LEVELS.filter((level) => level === 'auto' || efforts.includes(
       level === 'off' ? 'none' : level === 'higher' ? 'xhigh' : level

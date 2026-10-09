@@ -3,7 +3,8 @@ import type { ContentPart } from '../../shared/agent/message'
 import type { RunRequest } from '../../shared/agent/run-request'
 import { nextScheduledOccurrence, SCHEDULED_PERMISSION_MODE, type ScheduledRun, type ScheduledTask } from '../../shared/domain/scheduled'
 import { ulid } from '../../shared/util/id'
-import { runAgent } from '../runtime'
+import { getRouter, runAgent } from '../runtime'
+import { normalizeModelThinkingLevel } from '../../shared/domain/model-runtime'
 import { runs } from '../kernel/run-registry'
 import { store } from '../state/store'
 import { windows } from '../window/registry'
@@ -77,7 +78,9 @@ async function execute(task: ScheduledTask, scheduledAt: number, trigger: 'sched
   try {
     const workspace = store.getWorkspace(task.workspaceId)
     if (workspace === undefined) throw new Error('scheduled.workspaceUnavailable')
-    const session = store.createSession({ id: sessionId, workspaceId: task.workspaceId, title: task.name, origin: 'scheduled', model: task.model, modelProviderId: task.modelProviderId, mode: workspace.settings.defaultMode, thinking: workspace.settings.defaultThinking, rootPathAtCreation: workspace.rootPath })
+    const model = getRouter().resolveModel(task.model, task.modelProviderId)
+    const thinking = normalizeModelThinkingLevel(workspace.settings.defaultThinking, model)
+    const session = store.createSession({ id: sessionId, workspaceId: task.workspaceId, title: task.name, origin: 'scheduled', model: task.model, modelProviderId: task.modelProviderId, mode: workspace.settings.defaultMode, thinking, rootPathAtCreation: workspace.rootPath })
     void session
     const startedAt = Date.now()
     const runningRun = store.putScheduledRun({ ...run, status: 'running', startedAt })
@@ -85,7 +88,7 @@ async function execute(task: ScheduledTask, scheduledAt: number, trigger: 'sched
     const request: RunRequest = {
       runId, sessionId, workspaceId: task.workspaceId, depth: 0,
       input: [{ type: 'text', text: task.prompt }], mode: workspace.settings.defaultMode,
-      thinking: workspace.settings.defaultThinking, webSearch: workspace.settings.webSearch,
+      thinking, webSearch: workspace.settings.webSearch,
       // 定时任务没有输入框,唯一档位来源就是工作区默认值 —— 漏了这行,用户开了
       // 「最大上下文」但半夜的任务仍按 272K 压缩,且无处可查。
       maxContext: workspace.settings.maxContext === true,

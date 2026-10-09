@@ -20,6 +20,10 @@ describe('encrypted configuration contract', () => {
     expect(copy.protocolOptions).toEqual(provider.protocolOptions)
     expect(copy.protocolOptions).not.toBe(provider.protocolOptions)
   })
+  it('never includes read-only effective protocol in portable model fields', () => {
+    expect(MODEL_SYNC_FIELDS).not.toHaveProperty('runtimeProtocol')
+    expect(MODEL_SYNC_FIELDS.protocolOverride).toBe('copy')
+  })
   it('keeps advanced model configuration through document serialization', () => {
     const model: ModelAlias = { alias: 'model', providerId: 'custom', upstreamModel: 'upstream', ...IMPORTED_ALIAS_DEFAULTS, protocolOverride: 'openai-responses', priority: 5, enabled: false, displayName: 'Custom', modality: 'text', thinkingConfig: { mode: 'effort', defaultEnabled: true, defaultEffort: 'high', effortMap: { high: 'deep' }, standardWire: true }, reasoningEfforts: ['low', 'high'], requestAdapter: { preset: 'custom', patches: [{ op: 'add', path: 'extra', value: { flag: true } }] }, source: { url: 'https://example.com', fetchedAt: '2026-09-15' }, catalogOverrides: ['thinkingConfig', 'capabilities.tools'], video: { profileId: 'google-veo-3.1' } }
     expect(Object.keys(model).sort()).toEqual(Object.keys(MODEL_SYNC_FIELDS).sort())

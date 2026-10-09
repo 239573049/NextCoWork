@@ -732,6 +732,7 @@ function isCapabilities(value: unknown): boolean {
 function isThinkingConfig(value: unknown): boolean {
   if (!isRecord(value)) return false
   if (!enumValue(value.mode, ['unsupported', 'always', 'toggle', 'effort', 'budget']) || !isBoolean(value.defaultEnabled) || (has(value, 'defaultEffort') && !enumValue(value.defaultEffort, ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])) || (has(value, 'defaultBudgetTokens') && !isIntegerAtLeast(value.defaultBudgetTokens, 0)) || !optionalString(value, 'parameterPath')) return false
+  if (has(value, 'anthropicAdaptive') && (!isBoolean(value.anthropicAdaptive) || (value.anthropicAdaptive && value.mode !== 'effort'))) return false
   if ((has(value, 'enabledValue') && !isJsonValue(value.enabledValue)) || (has(value, 'disabledValue') && !isJsonValue(value.disabledValue))) return false
   const parameterPath = typeof value.parameterPath === 'string' ? value.parameterPath.trim() : ''
   const leaf = parameterPath.split('.').at(-1)

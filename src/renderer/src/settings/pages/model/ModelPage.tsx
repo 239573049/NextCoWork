@@ -904,6 +904,11 @@ function CatalogModelEditor({
       (draft.thinkingConfig.defaultBudgetTokens !== undefined &&
         (!Number.isInteger(draft.thinkingConfig.defaultBudgetTokens) ||
           draft.thinkingConfig.defaultBudgetTokens < 0)) ||
+      (draft.thinkingConfig.anthropicAdaptive === true &&
+        draft.thinkingConfig.mode === "effort" &&
+        draft.thinkingConfig.parameterPath?.trim() === "output_config.effort" &&
+        !draft.thinkingConfig.defaultEnabled &&
+        !draft.reasoningEfforts?.includes("none")) ||
       (draft.thinkingConfig.mode === "effort" &&
         (draft.thinkingConfig.defaultEffort === undefined ||
           draft.reasoningEfforts === undefined ||
@@ -958,6 +963,10 @@ function CatalogModelEditor({
       },
       thinkingConfig: {
         ...draft.thinkingConfig,
+        ...(draft.thinkingConfig.mode === "effort" &&
+        draft.thinkingConfig.parameterPath?.trim() === "output_config.effort"
+          ? {}
+          : { anthropicAdaptive: undefined }),
         ...(draft.thinkingConfig.defaultBudgetTokens === undefined
           ? {}
           : {

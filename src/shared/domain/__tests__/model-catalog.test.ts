@@ -39,6 +39,28 @@ const binding = (providerId: string, upstreamModel: string, enabled = true): Mod
 })
 
 describe('vendor-first model catalogue', () => {
+  it('accepts adaptive effort only for effort-based declarations', () => {
+    const row = findBuiltinModel('claude-opus-5-5')!
+    expect(isModelCatalogDefinition(row)).toBe(true)
+    expect(isModelCatalogDefinition({ ...row, thinkingConfig: {
+      mode: 'budget', defaultEnabled: true, anthropicAdaptive: true
+    } })).toBe(false)
+    expect(isModelCatalogDefinition({ ...row, thinkingConfig: {
+      ...row.thinkingConfig, anthropicAdaptive: 'true'
+    } })).toBe(false)
+  })
+  it('rejects a default adaptive Off without confirmed Off support', () => {
+    const row = findBuiltinModel('claude-opus-5-5')!
+    const thinkingConfig = { ...row.thinkingConfig, defaultEnabled: false }
+    expect(isModelCatalogDefinition({ ...row, thinkingConfig })).toBe(false)
+    expect(isModelCatalogDefinition({ ...row, thinkingConfig, reasoningEfforts: undefined })).toBe(false)
+    expect(isModelCatalogDefinition({ ...row, thinkingConfig,
+      reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] })).toBe(true)
+    const offSupported = findBuiltinModel('claude-opus-5')!
+    expect(isModelCatalogDefinition({ ...offSupported,
+      thinkingConfig: { ...offSupported.thinkingConfig, defaultEnabled: false } })).toBe(true)
+  })
+
   it('validates request adapters with the shared Patch security rules', () => {
     const row = definition('adapter-boundary')
     expect(
