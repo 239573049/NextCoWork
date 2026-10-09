@@ -76,7 +76,7 @@ import { PRICING_SEED } from "../../../../shared/domain/pricing-seed";
 import { formatTokensPerSecond } from "../../../../shared/agent/duration";
 import { formatTokenCount } from "../../../../shared/agent/tokens";
 import { findBuiltinModel } from "../../../../shared/domain/model-catalog-inventory";
-import { modelThinkingLevels, normalizeModelThinkingLevel } from "../../../../shared/domain/model-runtime";
+import { effectiveModelThinking, modelThinkingLevels, normalizeModelThinkingLevel } from "../../../../shared/domain/model-runtime";
 import type {
   Workspace,
   WorkspaceSettings,
@@ -1625,7 +1625,7 @@ function ThinkingPill({
 }): ReactNode {
   const { t } = useI18n();
   const levels = modelThinkingLevels(model);
-  const config = model?.thinkingConfig;
+  const config = model === undefined ? undefined : effectiveModelThinking(model).thinkingConfig;
   const label = (level: ThinkingLevel): string =>
     t(
       config?.mode === "toggle" && level === "medium"

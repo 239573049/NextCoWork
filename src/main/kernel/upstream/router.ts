@@ -353,9 +353,15 @@ export class UpstreamRouter {
    * 被静默跳过 —— 那是个只在供应商刚挂过之后才复现的幽灵 bug。
    */
   resolveModel(model: string, modelProviderId?: string): ModelAlias | undefined {
-    return modelBindingsFor(
-      this.config.aliases(), this.config.providers(), model, modelProviderId
+    const providers = this.config.providers()
+    const alias = modelBindingsFor(
+      this.config.aliases(), providers, model, modelProviderId
     )[0]
+    if (alias === undefined) return undefined
+    const provider = providers.find((p) => p.id === alias.providerId)
+    return provider === undefined
+      ? undefined
+      : { ...alias, runtimeProtocol: effectiveModelProtocol(provider, alias) }
   }
 
   health(): ProviderHealth[] {
@@ -655,6 +661,7 @@ export class UpstreamRouter {
         upstreamModel: c.alias.upstreamModel,
         config: thinkingConfig,
         reasoning: reasoningFor(req, c.alias),
+        ...(req.thinkingLevel === undefined ? {} : { thinkingLevel: req.thinkingLevel }),
         maxOutputTokens: req.maxOutputTokens,
         // Legacy bindings without a request adapter must retain automatic
         // model-specific thinking detection. Explicit adapters still win;

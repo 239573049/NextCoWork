@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentMessage } from '../../agent/message'
 import type { ModelAlias, ThinkingConfig } from '../provider'
-import { auxiliaryThinkingLevel, modelThinkingLevels, normalizeModelThinkingLevel, resolveModelThinking, validateModelRuntime } from '../model-runtime'
+import { auxiliaryThinkingLevel, effectiveModelThinking, modelThinkingLevels, normalizeModelThinkingLevel, resolveModelThinking, validateModelRuntime } from '../model-runtime'
 
 const message = (types: string[]): AgentMessage => ({
   id: 'm1',
@@ -92,6 +92,84 @@ describe('resolveModelThinking', () => {
     }, 8_192)).toMatchObject({ enabled: true, budgetTokens: 7_168 })
     expect(resolveModelThinking('off', { mode: 'always', defaultEnabled: true }, 8_192))
       .toMatchObject({ mode: 'always', enabled: true })
+  })
+})
+
+describe('legacy Anthropic budget controls', () => {
+  const budget: ThinkingConfig = {
+    mode: 'budget', defaultEnabled: true, defaultBudgetTokens: 60_000,
+    parameterPath: 'thinking.budget_tokens'
+  }
+  const legacy = (over: Partial<ModelAlias> = {}): ModelAlias => alias({
+    upstreamModel: 'claude-opus-5-5', runtimeProtocol: 'anthropic',
+    thinkingConfig: { ...budget }, ...over
+  })
+
+  it.each([
+    ['claude-opus-5', 'high', true],
+    ['claude-opus-5-5', 'medium', false],
+    ['claude-sonnet-5-5', 'high', false],
+    ['claude-opus-6-1', 'high', false]
+  ] as const)('shares %s defaults and supported Off with the sender', (upstreamModel, defaultEffort, off) => {
+    const model = legacy({ upstreamModel })
+    const saved = structuredClone(model)
+    const effective = effectiveModelThinking(model)
+    expect(effective.thinkingConfig).toMatchObject({ mode: 'effort', anthropicAdaptive: true, defaultEffort })
+    expect(modelThinkingLevels(model).includes('off')).toBe(off)
+    expect(modelThinkingLevels(model)).not.toContain('minimal')
+    expect(auxiliaryThinkingLevel('off', model)).toBe(off ? 'off' : 'low')
+    expect(normalizeModelThinkingLevel('off', model)).toBe(off ? 'off' : 'auto')
+    expect(resolveModelThinking('auto', effective.thinkingConfig, 1024, effective.reasoningEfforts)?.effort).toBe(defaultEffort)
+    expect(model).toEqual(saved)
+  })
+
+  it('projects explicit effort restrictions onto UI and auxiliary choices', () => {
+    const model = legacy({ reasoningEfforts: ['none', 'medium', 'high'] })
+    expect(modelThinkingLevels(model)).toEqual(['auto', 'medium', 'high'])
+    expect(auxiliaryThinkingLevel('off', model)).toBe('medium')
+    expect(auxiliaryThinkingLevel('higher', model)).toBe('high')
+    expect(normalizeModelThinkingLevel('higher', model)).toBe('auto')
+  })
+
+  it('repairs legacy default Off without pretending that explicit Off is supported', () => {
+    const model = legacy({ thinkingConfig: { ...budget, defaultEnabled: false } })
+    expect(effectiveModelThinking(model).thinkingConfig).toMatchObject({ defaultEnabled: true, defaultEffort: 'medium' })
+    expect(modelThinkingLevels(model)).not.toContain('off')
+    expect(model.thinkingConfig?.defaultEnabled).toBe(false)
+  })
+
+  it.each(['claude-opus-4-5', 'claude-opus-4-6'])('keeps valid %s manual controls', (upstreamModel) => {
+    const model = legacy({ upstreamModel })
+    expect(effectiveModelThinking(model)).toBe(model)
+    expect(modelThinkingLevels(model)).toContain('minimal')
+    expect(auxiliaryThinkingLevel('off', model)).toBe('off')
+  })
+
+  it('uses declared protocol context, including preset overrides, not the Claude name', () => {
+    for (const model of [
+      legacy({ runtimeProtocol: undefined }),
+      legacy({ runtimeProtocol: 'openai-chat' }),
+      legacy({ requestAdapter: { preset: 'openai-responses', patches: [] } }),
+      legacy({ thinkingConfig: { ...budget, standardWire: true } }),
+      legacy({ thinkingConfig: { ...budget, anthropicAdaptive: false } }),
+      legacy({ thinkingConfig: { ...budget, parameterPath: 'thinking_budget' },
+        requestAdapter: { preset: 'custom', patches: [] } })
+    ]) {
+      expect(effectiveModelThinking(model)).toBe(model)
+      expect(modelThinkingLevels(model)).toContain('off')
+    }
+    for (const model of [
+      legacy({ runtimeProtocol: undefined, protocolOverride: 'anthropic' }),
+      legacy({ runtimeProtocol: 'openai-chat', requestAdapter: { preset: 'anthropic', patches: [] } }),
+      legacy({ requestAdapter: { preset: 'custom', patches: [] } })
+    ]) expect(modelThinkingLevels(model)).not.toContain('off')
+  })
+
+  it('exposes only Auto for an empty accepted set and does not retain a stale default', () => {
+    const model = legacy({ reasoningEfforts: [], thinkingConfig: { ...budget, defaultEffort: 'max' } })
+    expect(modelThinkingLevels(model)).toEqual(['auto'])
+    expect(auxiliaryThinkingLevel('off', model)).toBe('auto')
+    expect(effectiveModelThinking(model).thinkingConfig?.defaultEffort).toBeUndefined()
   })
 })
 

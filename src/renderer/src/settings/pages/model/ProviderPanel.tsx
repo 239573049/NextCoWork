@@ -1831,7 +1831,9 @@ function ThinkingDialog({
     const nextBudget = budget === "" ? undefined : Number(budget);
     if (
       (nextBudget !== undefined && (!Number.isInteger(nextBudget) || nextBudget < 0)) ||
-      (mode === 'effort' && !efforts.includes(defaultEffort))
+      (mode === 'effort' && (!efforts.includes(defaultEffort) ||
+        (original?.anthropicAdaptive === true && parameterPath.trim() === 'output_config.effort' &&
+          !defaultEnabled && !efforts.includes('none'))))
     ) {
       setInvalid(true);
       return;
@@ -1842,6 +1844,9 @@ function ThinkingDialog({
       defaultEnabled:
         mode === "unsupported" ? false : mode === "always" || defaultEnabled,
       ...(mode === "effort" ? { defaultEffort } : { defaultEffort: undefined }),
+      ...(mode === "effort" && parameterPath.trim() === "output_config.effort"
+        ? {}
+        : { anthropicAdaptive: undefined }),
       ...(mode === "toggle" || mode === "budget" || mode === "effort"
         ? { parameterPath: parameterPath.trim() || undefined }
         : { parameterPath: undefined }),

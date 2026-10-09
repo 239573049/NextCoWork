@@ -306,6 +306,8 @@ export interface ThinkingConfig {
    * 官方供应商的条目不声明,行为一个字节不变。
    */
   standardWire?: boolean
+  /** Anthropic adaptive thinking sends thinking.type=adaptive with output_config.effort. */
+  anthropicAdaptive?: boolean
   /**
    * ★★ Responses 协议回传历史 reasoning item 时的方言开关。缺席 = `opaque-only`。
    *
@@ -342,6 +344,8 @@ export interface ModelAlias {
   upstreamModel: string
   /** Optional protocol override for this provider×model binding. Missing means inherit provider.protocol. */
   protocolOverride?: UpstreamProtocol
+  /** Read-only effective provider protocol for thinking controls, never persisted. */
+  runtimeProtocol?: UpstreamProtocol
   /** 同一供应商内的优先级；数字越小越靠前。旧记录缺失时按别名稳定排序。 */
   priority?: number
   capabilities: ModelCapabilities
