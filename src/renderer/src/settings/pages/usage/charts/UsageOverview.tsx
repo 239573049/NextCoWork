@@ -20,8 +20,8 @@ import type {
   UsageWindow
 } from '../../../../../../shared/domain/usage'
 import { localDayOf } from '../../../../../../shared/domain/usage-activity'
-import { EmptyState } from '../../../../components/ui/EmptyState'
-import { Segmented } from '../../../../components/ui/Segmented'
+import { EmptyState } from '../../../../components/arc/empty-state/empty-state'
+import SegmentedControl from '../../../../components/arc/segmented-control/segmented-control'
 import { useI18n } from '../../../../i18n'
 import { getUsageActivityStats, getUsageDailySeries } from '../../../../services/usage'
 import { formatCompactNumber } from '../usage-format'
@@ -156,7 +156,7 @@ export function UsageOverview({ usageWindow }: { usageWindow: UsageWindow }): Re
 
       {empty ? (
         <Panel title={t('usage.overview.title')}>
-          <EmptyState title={t('usage.overview.empty')} />
+          <EmptyState title={t('usage.overview.empty')} description="" />
         </Panel>
       ) : (
         <>
@@ -167,15 +167,13 @@ export function UsageOverview({ usageWindow }: { usageWindow: UsageWindow }): Re
                 <span className="text-[10.5px] tabular-nums text-fg-faint">
                   {formatCompactNumber(totals.tokens, locale)}
                 </span>
-                <Segmented
+                <SegmentedControl
                   value={granularity}
                   options={GRANULARITIES.map((item) => ({
                     value: item,
                     label: t(`usage.granularity.${item}` as never)
                   }))}
-                  onChange={setGranularity}
-                  size="sm"
-                  shape="pill"
+                  onValueChange={(v) => setGranularity(v as UsageGranularity)}
                   label={t('usage.granularityLabel')}
                 />
               </div>

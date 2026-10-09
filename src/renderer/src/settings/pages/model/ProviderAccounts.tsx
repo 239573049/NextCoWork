@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Plus } from "lucide-react";
 import type { ProviderAccount } from "../../../../../shared/domain/provider-account";
-import { Button } from "../../../components/ui/Button";
+import { Button } from "../../../components/arc/button/button";
 import { Spinner } from "../../../components/ui/Spinner";
 import { useI18n } from "../../../i18n";
 import {
@@ -185,11 +185,12 @@ export function ProviderAccounts({
 
       <div className="flex items-center gap-2">
         <Button
-          size="sm"
-          icon={signingIn ? <Spinner size="xs" /> : <Plus size={13} />}
+          type="button"
+          variant="secondary"
           disabled={disabled}
           onClick={addAccount}
         >
+          {signingIn ? <Spinner size="xs" /> : <Plus size={13} />}
           {signingIn ? t("providerAccount.adding") : t("providerAccount.add")}
         </Button>
         {ordered.length > 1 && (

@@ -17,7 +17,7 @@ import {
   writeTerminal
 } from '../../services/terminal'
 import type { InnerTab } from '../../../../shared/domain/tab'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import { useI18n } from '../../i18n'
 import { connectionErrorKey } from '../../services/connections'
 
@@ -253,14 +253,14 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
             <dt>{t('ssh.terminal.shell')}</dt><dd className="break-all font-mono">{intent.shell}</dd>
           </dl>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" variant="accent" icon={<ShieldCheck size={13} />} onClick={() => { void approve() }}>{t('ssh.terminal.allow')}</Button>
-            <Button size="sm" icon={<X size={13} />} onClick={decline}>{t('common.cancel')}</Button>
+            <Button type="button" size="sm" variant="primary" onClick={() => { void approve() }}><ShieldCheck size={13} />{t('ssh.terminal.allow')}</Button>
+            <Button type="button" size="sm" variant="secondary" onClick={decline}><X size={13} />{t('common.cancel')}</Button>
           </div>
         </div>
       )}
       {(status === 'error' || status === 'exited' || status === 'declined') && (
         <div className="shrink-0 border-b border-border px-3 py-2">
-          <Button size="sm" icon={<Play size={13} />} onClick={() => { void startRef.current?.() }}>{t(status === 'declined' ? 'ssh.terminal.request' : 'ssh.terminal.restart')}</Button>
+          <Button type="button" size="sm" variant="secondary" onClick={() => { void startRef.current?.() }}><Play size={13} />{t(status === 'declined' ? 'ssh.terminal.request' : 'ssh.terminal.restart')}</Button>
         </div>
       )}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2">

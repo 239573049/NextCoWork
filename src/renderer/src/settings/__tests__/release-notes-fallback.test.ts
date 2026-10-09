@@ -1,3 +1,9 @@
+/*
+ * @vitest-environment jsdom
+ * ★ 必须在模块加载时就有 document:Radix 的 useLayoutEffect 在 import 那一刻判断
+ *   `globalThis.document` 是否存在,不存在就换成空函数 —— 之后再 stubGlobal 也晚了,
+ *   弹窗的 Portal 永远挂不上;Motion 也要全局的 getComputedStyle。
+ */
 /**
  * 「更新说明」弹窗:**Markdown 渲染器到达之前**那一帧。
  *

@@ -74,7 +74,7 @@ function fingerprint() {
     用到的工具类是从它们的源码里生成进 ui.css 的。不算进来的话,插件新写一个 class 而运行时不重建,
     那个 class 就不存在 —— 表现为「布局对、某一处没样式」,且零报错。
   */
-  for (const dir of [join(src, 'components/ui'), join(src, 'plugin-ui'), join(src, 'lib'), join(src, 'theme'), join(src, 'styles'), join(root, 'src/shared/document-engine'), join(root, 'plugins')]) {
+  for (const dir of [join(src, 'components/ui'), join(src, 'components/arc'), join(src, 'plugin-ui'), join(src, 'lib'), join(src, 'theme'), join(src, 'styles'), join(root, 'src/shared/document-engine'), join(root, 'plugins')]) {
     if (existsSync(dir)) walk(dir)
   }
   files.push(fileURLToPath(import.meta.url))

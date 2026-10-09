@@ -20,7 +20,7 @@ import { invoke } from '../../services/ipc'
 import { cn } from '../../lib/cn'
 import { useI18n, type TranslationKey } from '../../i18n'
 import { ProgressBar } from '../../components/ui/ProgressBar'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import { Dialog } from '../../components/ui/Dialog'
 import { AgentMarkdown } from '../../components/markdown'
 import { PluginCardFrame } from '../../shell/PluginCardFrame'
@@ -292,8 +292,9 @@ export function CardRenderer({
         onClose={() => setPending(null)}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setPending(null)}>{t('pluginAsk.cancel')}</Button>
+            <Button type="button" variant="secondary" onClick={() => setPending(null)}>{t('pluginAsk.cancel')}</Button>
             <Button
+              type="button"
               variant="danger"
               onClick={() => {
                 pending?.proceed()

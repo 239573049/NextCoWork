@@ -8,8 +8,8 @@ import type {
   UsageSummary
 } from '../../../../../shared/domain/usage'
 import { TextInput } from '../../../components/ui/TextInput'
-import { Segmented } from '../../../components/ui/Segmented'
-import { Toggle } from '../../../components/ui/Toggle'
+import SegmentedControl from '../../../components/arc/segmented-control/segmented-control'
+import { Switch } from '../../../components/arc/switch/switch'
 import { useI18n, type Locale, type Translate } from '../../../i18n'
 import { cn } from '../../../lib/cn'
 import {
@@ -146,12 +146,10 @@ export function UsagePage(): ReactNode {
   return (
     <div data-testid="usage-page" className="min-w-0 pb-5 pt-1">
       <div className="mb-4 flex items-center justify-end gap-2">
-        <Segmented
+        <SegmentedControl
           value={range}
           options={RANGES.map((item) => ({ value: item, label: rangeLabel(t, item) }))}
-          onChange={chooseRange}
-          size="sm"
-          shape="pill"
+          onValueChange={(next) => chooseRange(next as UsageRange)}
           label={t('usage.rangeLabel')}
         />
         <button
@@ -187,12 +185,10 @@ export function UsagePage(): ReactNode {
           </div>
 
           <div className="mt-4 w-fit max-w-full">
-            <Segmented
+            <SegmentedControl
               value={section}
               options={SECTIONS.map((item) => ({ value: item, label: sectionLabel(t, item) }))}
-              onChange={setSection}
-              size="sm"
-              shape="pill"
+              onValueChange={(next) => setSection(next as UsageSection)}
               label={t('usage.sectionLabel')}
             />
           </div>
@@ -414,10 +410,10 @@ function RequestLogs({
         <span className="flex-1" />
         <label className="flex items-center gap-2 text-[11px] text-fg-muted">
           {t('usage.showDetails')}
-          <Toggle
+          <Switch
             checked={showAllDetails}
-            onChange={onShowAllDetails}
-            label={t('usage.showDetails')}
+            onCheckedChange={onShowAllDetails}
+            aria-label={t('usage.showDetails')}
           />
         </label>
         <span className="text-[11px] text-fg-faint">

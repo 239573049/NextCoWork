@@ -1,3 +1,5 @@
+/* Arc 的 token 必须是最低的一层 —— 理由见 arc.css 文件头 */
+@import './arc.css' layer(arc);
 @import 'tailwindcss';
 
 /*

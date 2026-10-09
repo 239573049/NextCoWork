@@ -218,6 +218,7 @@ export function nodeSpawn(
         let stdout = ''
         let stderr = ''
         let killedBy: 'timeout' | 'abort' | null = null
+        let detached = false
         let graceTimer: NodeJS.Timeout | undefined
         let timeoutTimer: NodeJS.Timeout | undefined
 
@@ -227,17 +228,19 @@ export function nodeSpawn(
           永不退出。症状是「命令挂住了」,而 stdout 里已经有正确的前 512KB,
           看起来完全不像一个背压问题。
         */
-        child.stdout.on('data', (chunk: Buffer) => {
+        const onStdout = (chunk: Buffer): void => {
           const text = chunk.toString('utf8')
           if (stdout.length < MAX_STREAM_CHARS) stdout += text
           // ★ 逐个 try:一个订阅者抛异常不能把命令本身带下去。
           try { opts.onOutput?.({ stream: 'stdout', text }) } catch { /* 订阅者的问题,不是命令的 */ }
-        })
-        child.stderr.on('data', (chunk: Buffer) => {
+        }
+        const onStderr = (chunk: Buffer): void => {
           const text = chunk.toString('utf8')
           if (stderr.length < MAX_STREAM_CHARS) stderr += text
           try { opts.onOutput?.({ stream: 'stderr', text }) } catch { /* 同上 */ }
-        })
+        }
+        child.stdout.on('data', onStdout)
+        child.stderr.on('data', onStderr)
 
         const { pid } = child
 
@@ -261,19 +264,63 @@ export function nodeSpawn(
           }, opts.timeoutMs)
         }
 
+        /*
+          转去后台:把进程连同两条管道原样交出去,这个 Promise 就此了结。
+
+          ★ 已经在被杀(超时 / 中断)或已经收尾的不转 —— 转出去的会是一个
+          正在死的进程,接手方会把「被我们杀掉」误报成「自己退出了」。
+          ★ 我们自己的 data 监听要摘掉:留着的话两份缓冲各攒一遍,而这边那份
+          已经没有人会读了。接手方在同一个同步块里挂上它自己的。
+        */
+        const onDetach = (): void => {
+          if (killedBy !== null || detached || child.exitCode !== null || child.signalCode !== null) return
+          detached = true
+          cleanup()
+          child.stdout.off('data', onStdout)
+          child.stderr.off('data', onStderr)
+          /*
+            ★ 摘掉最后一个 data 监听**不会**让流停下来:它仍在 flowing 模式,
+            接手方挂上监听之前到的那几块会直接丢掉。显式 pause,由接手方 resume。
+          */
+          child.stdout.pause()
+          child.stderr.pause()
+          resolve({
+            code: 0,
+            stdout,
+            stderr,
+            detached: {
+              stdout: child.stdout,
+              stderr: child.stderr,
+              exited: new Promise((done) => {
+                child.once('close', (code, signalName) => done({ code, signal: signalName }))
+                child.once('error', () => done({ code: null }))
+              }),
+              kill: () => {
+                if (pid !== undefined) killTree(pid, 'SIGTERM')
+                else child.kill()
+              }
+            }
+          })
+        }
+        if (opts.detach?.aborted === true) queueMicrotask(onDetach)
+        else opts.detach?.addEventListener('abort', onDetach, { once: true })
+
         function cleanup(): void {
           opts.signal.removeEventListener('abort', onAbort)
+          opts.detach?.removeEventListener('abort', onDetach)
           if (graceTimer !== undefined) clearTimeout(graceTimer)
           if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
         }
 
         child.on('error', (err: Error) => {
+          if (detached) return
           cleanup()
           // 命令根本没起来。这是工具错误,不是中断 —— 让模型看见原因,它能自己改。
           resolve({ code: SPAWN_FAILED_CODE, stdout, stderr: `${stderr}${err.message}` })
         })
 
         child.on('close', (code, signalName) => {
+          if (detached) return
           cleanup()
 
           /*

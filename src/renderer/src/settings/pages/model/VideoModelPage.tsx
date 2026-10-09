@@ -30,11 +30,11 @@ import type { VideoAdapterId, VideoProfile } from '../../../../../shared/domain/
 import { isCallableProfile, VIDEO_PROFILES, videoProfile } from '../../../../../shared/domain/video-profiles'
 import { VIDEO_PROVIDER_PRESETS, type VideoProviderPreset } from '../../../../../shared/domain/video-provider-presets'
 import { BUILTIN_MODEL_CATALOG } from '../../../../../shared/domain/model-catalog-inventory'
-import { Button } from '../../../components/ui/Button'
-import { EmptyState } from '../../../components/ui/EmptyState'
+import { Button } from '../../../components/arc/button/button'
+import { EmptyState } from '../../../components/arc/empty-state/empty-state'
 import { Select } from '../../../components/ui/Select'
 import { TextInput } from '../../../components/ui/TextInput'
-import { Toggle } from '../../../components/ui/Toggle'
+import { Switch } from '../../../components/arc/switch/switch'
 import { ProviderModelMenu, type ProviderModelMenuRow } from '../../../components/ProviderModelMenu'
 import { cn } from '../../../lib/cn'
 import { useI18n, type TranslationKey } from '../../../i18n'
@@ -178,7 +178,7 @@ export function VideoModelPage({ settings, patch }: Pick<SettingsPageProps, 'set
               <Info size={14} className="mt-0.5 shrink-0 text-icon" />
               <span>{t('videoGen.catalogHint')}</span>
             </div>
-            <EmptyState icon={<Video size={22} />} title={t('videoGen.noVideoModels')} hint={t('videoGen.addProvider')} />
+            <EmptyState icon={<Video size={22} />} title={t('videoGen.noVideoModels')} description={t('videoGen.addProvider')} />
           </div>
         ) : (
           <ProviderDetail
@@ -299,11 +299,13 @@ function ProviderDetail({ row, models, busy, error, onAdd, onBusyChange }: { row
         <span className="min-w-0 flex-1 truncate text-[13px] text-fg">{row.name}</span>
         {busy === row.id && <Loader2 size={13} className="animate-spin text-fg-faint" />}
         {row.provider === undefined ? (
-          <Button size="sm" icon={<Plus size={12} />} disabled={busy !== null} onClick={onAdd}>
+          <Button type="button" size="sm" variant="secondary" disabled={busy !== null} onClick={onAdd}>
+            <Plus size={12} />
             {t('videoGen.addProvider')}
           </Button>
         ) : canConfigure && (
-          <Button size="sm" icon={<Settings2 size={12} />} disabled={busy !== null} onClick={() => setEditing(true)}>
+          <Button type="button" size="sm" variant="secondary" disabled={busy !== null} onClick={() => setEditing(true)}>
+            <Settings2 size={12} />
             {t('videoGen.configureProvider')}
           </Button>
         )}
@@ -325,7 +327,7 @@ function ProviderDetail({ row, models, busy, error, onAdd, onBusyChange }: { row
         )}
         <p className="mb-2 text-[12px] text-fg-muted">{t('videoGen.modelsTitle')}</p>
         {entries.length === 0 ? (
-          <EmptyState className="py-10" icon={<Video size={20} />} title={t('videoGen.modelsEmpty')} />
+          <EmptyState className="py-10" icon={<Video size={20} />} title={t('videoGen.modelsEmpty')} description="" />
         ) : (
           <table className="w-full border-collapse text-[11.5px]">
             <thead>
@@ -364,8 +366,9 @@ function ProviderDetail({ row, models, busy, error, onAdd, onBusyChange }: { row
       {row.preset === undefined && row.provider !== undefined && (
         <div className="flex items-center gap-2 border-t border-hairline px-4 py-3">
           <p className="min-w-0 flex-1 text-[11.5px] text-fg-faint">{t('provider.deleteHint')}</p>
-          {confirmDelete && <Button size="sm" disabled={busy !== null} onClick={() => setConfirmDelete(false)}>{t('common.cancel')}</Button>}
-          <Button size="sm" variant={confirmDelete ? 'danger' : 'ghost'} icon={<Trash2 size={12} />} disabled={busy !== null} onClick={() => { if (confirmDelete) void remove(); else setConfirmDelete(true) }}>
+          {confirmDelete && <Button type="button" variant="secondary" size="sm" disabled={busy !== null} onClick={() => setConfirmDelete(false)}>{t('common.cancel')}</Button>}
+          <Button type="button" size="sm" variant={confirmDelete ? 'danger' : 'secondary'} disabled={busy !== null} onClick={() => { if (confirmDelete) void remove(); else setConfirmDelete(true) }}>
+            <Trash2 size={12} />
             {confirmDelete ? t('common.confirmDelete') : t('provider.delete')}
           </Button>
         </div>
@@ -404,7 +407,7 @@ function ProviderCatalog({ rows, busy, error, onClose, onAdd, onAdded, onBusyCha
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[12px] border border-border bg-canvas">
       <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
         <span className="flex-1 text-[13px] text-fg">{t(custom ? 'videoGen.customProvider' : 'videoGen.addProvider')}</span>
-        <Button size="sm" disabled={busy !== null} onClick={onClose}>{t('common.close')}</Button>
+        <Button type="button" variant="secondary" size="sm" disabled={busy !== null} onClick={onClose}>{t('common.close')}</Button>
       </div>
       {custom ? (
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
@@ -421,7 +424,10 @@ function ProviderCatalog({ rows, busy, error, onClose, onAdd, onAdded, onBusyCha
           <div className="min-w-0 flex-1">
             <TextInput size="sm" value={query} onChange={setQuery} placeholder={t('videoGen.searchProvider')} ariaLabel={t('videoGen.searchProvider')} icon={<Search size={13} />} />
           </div>
-          <Button size="sm" icon={<Settings2 size={13} />} disabled={busy !== null} onClick={() => setCustom(true)}>{t('videoGen.customProvider')}</Button>
+          <Button type="button" size="sm" variant="secondary" disabled={busy !== null} onClick={() => setCustom(true)}>
+            <Settings2 size={13} />
+            {t('videoGen.customProvider')}
+          </Button>
         </div>
         <div className="mt-3 grid grid-cols-2 gap-2">
           {list.map((preset) => {
@@ -636,10 +642,13 @@ function VideoProviderForm({ provider, preset, models, onCancel, onSaved, onBusy
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
             <p className="text-[12px] text-fg-muted">{t('videoGen.modelsTitle')}</p>
-            <Button size="sm" icon={<Plus size={12} />} disabled={saving} onClick={() => {
+            <Button type="button" size="sm" variant="secondary" disabled={saving} onClick={() => {
               nextRow.current += 1
               setModelDrafts((current) => [...current, { key: `new-${String(nextRow.current)}`, model: '', profileId: profiles[0]?.id ?? '', endpointId: '' }])
-            }}>{t('provider.addModel')}</Button>
+            }}>
+              <Plus size={12} />
+              {t('provider.addModel')}
+            </Button>
           </div>
           {modelDrafts.map((entry, index) => (
             <div key={entry.key} className="space-y-2 rounded-[10px] border border-border p-3">
@@ -670,8 +679,11 @@ function VideoProviderForm({ provider, preset, models, onCancel, onSaved, onBusy
         </div>
       )}
       <div className="flex justify-end gap-2">
-        <Button size="sm" disabled={saving} onClick={onCancel}>{t('common.cancel')}</Button>
-        <Button size="sm" variant="accent" icon={saving ? <Loader2 size={12} className="animate-spin" /> : undefined} disabled={saving} onClick={() => void submit()}>{t('common.save')}</Button>
+        <Button type="button" variant="secondary" size="sm" disabled={saving} onClick={onCancel}>{t('common.cancel')}</Button>
+        <Button type="button" size="sm" variant="primary" disabled={saving} onClick={() => void submit()}>
+          {saving ? <Loader2 size={12} className="animate-spin" /> : undefined}
+          {t('common.save')}
+        </Button>
       </div>
     </div>
   )
@@ -692,7 +704,7 @@ function VideoGenToggleRow({ settings, patch }: { settings: AppSettings; patch: 
         <p className="text-[12.5px] text-fg">{t('videoGen.enabled')}</p>
         <p className="mt-0.5 text-[11px] text-fg-faint">{t('videoGen.enabledHint')}</p>
       </div>
-      <Toggle label={t('videoGen.enabled')} checked={settings.videoGenerationEnabled} onChange={(videoGenerationEnabled) => patch({ videoGenerationEnabled })} />
+      <Switch aria-label={t('videoGen.enabled')} checked={settings.videoGenerationEnabled} onCheckedChange={(videoGenerationEnabled) => patch({ videoGenerationEnabled })} />
     </div>
   )
 }

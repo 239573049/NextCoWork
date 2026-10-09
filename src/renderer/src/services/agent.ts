@@ -71,6 +71,11 @@ export function abortRun(runId: string, cascade = true): Promise<void> {
   return invoke('agent:abort', { runId, cascade })
 }
 
+/** 把一个前台子代理转去后台,父代理不再等它。`false` = 没转成(已跑完等),不是错误 */
+export function backgroundSubagent(childRunId: string): Promise<boolean> {
+  return invoke('agent:backgroundSubagent', { childRunId })
+}
+
 /**
  * 把当前**全部**已引入(promoted)的排队条目同步给正在跑的 run。
  *

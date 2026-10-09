@@ -853,11 +853,26 @@ export function Composer({
       {/*
         ★ `surface-input` 不是 `surface-raised`:深色下两者同值,浅色下输入框是**纯白**
         (#ffffff),而 raised 卡片是 #f2eee6。合并了浅色主题下输入框就沉进背景里。
+
+        ★ 边框分两层意思:
+          - 静息用 `stroke`(装饰性收边),聚焦才换成 `border`。`border` 会被可读性护栏
+            提亮到 3:1,那是给小输入框保轮廓用的;这么大一块输入区常亮那一圈太重,
+            而且原来聚焦前后看不出区别。
+          - 边框颜色报状态:Agent 运行中是淡强调色,「完全访问」是淡警示色
+            (和那颗药丸同一件事)。运行中优先 —— 它是此刻正在发生的事,
+            完全访问是一直在的设置,药丸上本来就看得见。拖文件进来时最优先,
+            那是「松手就会发生什么」的提示。
       */}
       <div
         className={cn(
           "relative mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors",
-          dragging ? "border-accent" : "border-border",
+          dragging
+            ? "border-accent"
+            : running
+              ? "border-accent/35 focus-within:border-accent/60"
+              : value.permissionMode === "full"
+                ? "border-warning/35 focus-within:border-warning/60"
+                : "border-stroke focus-within:border-border",
         )}
         onDragOver={(e) => {
           if (onAttachFiles === undefined) return;

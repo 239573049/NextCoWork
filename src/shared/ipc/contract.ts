@@ -110,7 +110,7 @@ import type {
   DocumentViewTokenRequest
 } from '../document-engine/view'
 import type { BrowserChange, BrowserCuaEvent, BrowserProfile, BrowserTab } from '../domain/browser'
-import type { GitBranchSummary, GitCommitSummary, GitDiff, GitOverview } from '../domain/git'
+import type { GitBranchSummary, GitCommitSummary, GitDiff, GitDiffSides, GitOverview } from '../domain/git'
 import type { ScheduledRun, ScheduledTask, ScheduledTaskInput } from '../domain/scheduled'
 import type {
   BackupStatus,
@@ -499,6 +499,8 @@ export interface IpcInvokeMap {
   'git:listCommits': { req: { workspaceId: string; limit?: number }; res: GitCommitSummary[] }
   /** 单个文件的 diff。`staged` 选择看暂存区还是工作区。 */
   'git:getDiff': { req: { workspaceId: string; path: string; staged: boolean }; res: GitDiff }
+  /** 同一份 diff 两侧的完整文本(代码对比视图用)。`null` = 没法按全文对比,退回 unified 文本 */
+  'git:getDiffSides': { req: { workspaceId: string; path: string; staged: boolean }; res: GitDiffSides | null }
   'git:stage': { req: { workspaceId: string; paths: string[] }; res: void }
   'git:unstage': { req: { workspaceId: string; paths: string[] }; res: void }
   /** 提交暂存区。`message` 空白一律拒 —— 空提交信息没有任何意义。 */
@@ -666,6 +668,13 @@ export interface IpcInvokeMap {
   'agent:unwatch': { req: { runId: string }; res: void }
   'agent:abort': { req: { runId: string; cascade: boolean }; res: void }
   /**
+   * 把一个**前台**子代理转去后台:父代理那次 `Task` 调用不再等它、当场返回,
+   * 子代理继续跑,结论之后按后台子代理那条路送回主代理。
+   *
+   * 返回 `false` = 没转成(它已经跑完 / 本来就是后台 / 不在这个进程里)。不是错误。
+   */
+  'agent:backgroundSubagent': { req: { childRunId: string }; res: boolean }
+  /**
    * 插话 —— 把这些条目排进正在跑的那个 run,由它在**下一个轮次边界**注入。
    *
    * ★ **全量替换,不是追加。** 渲染层每次「引入/取消引入/编辑/删除」都把当前
@@ -704,6 +713,16 @@ export interface IpcInvokeMap {
    * 调用方不必提示 —— 用户要的结果已经达成。
    */
   'shell:stopToolCall': { req: { runId: string; callId: string }; res: boolean }
+  /**
+   * 把**这一条**正在跑的前台命令转去后台 —— 工具卡片上那颗「转后台」按钮。
+   *
+   * 命令不被杀,只是不再被等:这次工具调用当场返回(带上到目前为止的输出和一个
+   * shell id),命令作为后台 shell 继续跑,模型之后用 `BashOutput` / `KillShell` 管它。
+   *
+   * 返回 `false` = 没转成:已经跑完了、这个环境转不了(SSH),或后台 shell 名额已满。
+   * 与 `shell:stopToolCall` 同理不是错误。
+   */
+  'shell:backgroundToolCall': { req: { runId: string; callId: string }; res: boolean }
 
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
@@ -1685,6 +1704,7 @@ export const INVOKE_CHANNELS = {
   'git:listBranches': 1,
   'git:listCommits': 1,
   'git:getDiff': 1,
+  'git:getDiffSides': 1,
   'git:stage': 1,
   'git:unstage': 1,
   'git:commit': 1,
@@ -1728,12 +1748,14 @@ export const INVOKE_CHANNELS = {
   'agent:attach': 1,
   'agent:unwatch': 1,
   'agent:abort': 1,
+  'agent:backgroundSubagent': 1,
   'agent:interject': 1,
   'agent:setPermissionMode': 1,
   'agent:respondInteraction': 1,
   'agent:listInteractions': 1,
   'agent:listTools': 1,
   'shell:stopToolCall': 1,
+  'shell:backgroundToolCall': 1,
   'terminal:create': 1,
   'terminal:prepare': 1,
   'terminal:approve': 1,

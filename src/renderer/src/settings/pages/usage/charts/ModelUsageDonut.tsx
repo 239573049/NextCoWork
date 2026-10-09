@@ -17,7 +17,7 @@
 import { useState } from 'react'
 import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts'
 import { useI18n } from '../../../../i18n'
-import { EmptyState } from '../../../../components/ui/EmptyState'
+import { EmptyState } from '../../../../components/arc/empty-state/empty-state'
 import { cn } from '../../../../lib/cn'
 import { formatCompactNumber, formatNumber, formatPercent } from '../usage-format'
 import type { TrendSeries } from './DailyTrendChart'
@@ -41,7 +41,7 @@ export function ModelUsageDonut({
   const { t, locale } = useI18n()
   const [activeKey, setActiveKey] = useState<string | null>(null)
 
-  if (items.length === 0) return <EmptyState title={t('usage.models.empty')} />
+  if (items.length === 0) return <EmptyState title={t('usage.models.empty')} description="" />
 
   const active = activeKey === null ? undefined : items.find((item) => item.key === activeKey)
   const dimmed = (key: string): boolean => activeKey !== null && activeKey !== key

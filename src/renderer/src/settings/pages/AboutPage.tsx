@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import type { Bootstrap } from '../../../../shared/domain/bootstrap'
 import { SettingGroup, SettingRow } from '../Row'
 import { useI18n } from '../../i18n'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import { ReleaseNotesDialog } from './ReleaseNotesDialog'
 import { updateCheck, updateDownload, updateGetState, updateInstall } from '../../services/app'
 import type { UpdateState } from '../../../../shared/domain/update'
@@ -48,9 +48,9 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
       />
       <SettingRow title={t('about.updates.title')} description={t('about.updates.description')}>
         <div className="flex items-center gap-2">
-          <Button size="sm" disabled={checking || working} onClick={() => void check()}>{checking ? t('about.updates.checking') : t('about.updates.check')}</Button>
-          {result?.state === 'available' && <Button size="sm" variant="accent" disabled={working} onClick={() => void download()}>{t('about.updates.download', { version: result.update.version })}</Button>}
-          {result?.state === 'downloaded' && <Button size="sm" variant="accent" disabled={working} onClick={() => void install()}>{t('about.updates.restartAndInstall')}</Button>}
+          <Button type="button" variant="secondary" size="sm" disabled={checking || working} onClick={() => void check()}>{checking ? t('about.updates.checking') : t('about.updates.check')}</Button>
+          {result?.state === 'available' && <Button type="button" size="sm" variant="primary" disabled={working} onClick={() => void download()}>{t('about.updates.download', { version: result.update.version })}</Button>}
+          {result?.state === 'downloaded' && <Button type="button" size="sm" variant="primary" disabled={working} onClick={() => void install()}>{t('about.updates.restartAndInstall')}</Button>}
         </div>
         {result?.state === 'up-to-date' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.upToDate')}</div>}
         {result?.state === 'downloading' && <div className="mt-1 text-[12px] text-fg-muted">{t('about.updates.downloading', { percent: Math.round(result.progress?.percent ?? 0) })}</div>}
@@ -61,7 +61,7 @@ export function AboutPage({ versions }: { versions: Bootstrap['versions'] }): Re
         {result?.state === 'error' && <div className="mt-1 text-[12px] text-danger">{t(updateErrorKey(result.code))}</div>}
         {releaseNotes !== undefined && releaseNotes.length > 0 && (
           <div className="mt-2">
-            <Button size="sm" onClick={() => setNotesOpen(true)}>{t('about.updates.viewReleaseNotes')}</Button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => setNotesOpen(true)}>{t('about.updates.viewReleaseNotes')}</Button>
           </div>
         )}
       </SettingRow>

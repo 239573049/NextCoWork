@@ -91,6 +91,14 @@ export interface SessionState {
    * 更早的由 `loadEarlier` 按页往前取。
    */
   historyHasMore: boolean
+  /**
+   * 打开时那一页历史已经读回来过(成功、失败、或库里本来就没有这条会话都算)。
+   *
+   * ★ 需求:长会话的首页要等一次 IPC,这段时间转录是空的 —— 只看 `messages` 的话
+   * 视图会把它当成「全新会话」画成问候语 + 居中输入框,用户以为记录丢了。
+   * 视图据此在读回来之前画骨架。
+   */
+  historyLoaded: boolean
   loadingEarlier: boolean
   /** 往前再取一页,接在手上那页前面 */
   loadEarlier: () => Promise<void>
@@ -182,6 +190,7 @@ function createSessionStore(sessionId: string): SessionStore {
     queuedInputs: [],
     queueRev: 0,
     historyHasMore: false,
+    historyLoaded: false,
     loadingEarlier: false,
     lastOptions: null,
     draft: '',
@@ -510,7 +519,8 @@ function createSessionStore(sessionId: string): SessionStore {
           */
           lastInputTokens: undefined,
           contextUsage: undefined,
-          ...(trailing ? { error: undefined, usage: undefined, runStartedAt: undefined, runEndedAt: undefined } : {})
+          // status 也要复位:被删掉的那一轮留下的「已停止 / 出错」说的是一个已经不存在的回复。
+          ...(trailing ? { error: undefined, usage: undefined, runStartedAt: undefined, runEndedAt: undefined, status: 'done' as const } : {})
         }
       }))
     },
@@ -540,7 +550,8 @@ function createSessionStore(sessionId: string): SessionStore {
           // 窗口占用与末轮账单的处理口径同 `deleteTurn`,理由见那里的注释。
           lastInputTokens: undefined,
           contextUsage: undefined,
-          ...(trailing ? { error: undefined, usage: undefined, runStartedAt: undefined, runEndedAt: undefined } : {})
+          // status 也要复位:被删掉的那一轮留下的「已停止 / 出错」说的是一个已经不存在的回复。
+          ...(trailing ? { error: undefined, usage: undefined, runStartedAt: undefined, runEndedAt: undefined, status: 'done' as const } : {})
         }
       }))
     },
@@ -793,12 +804,20 @@ const hydrated = new Set<string>()
  * 需求:长会话不再把整段历史 —— 连同每次工具输出与截图 —— 一次性读进渲染层。
  */
 export const HISTORY_PAGE_SIZE = 200
+/**
+ * 打开一条会话时**首屏**读多少条。
+ *
+ * ★ 比翻页那一档小:首屏只需要盖满视口,滚到顶会自动接着取(`Thread` 的顶部哨兵)。
+ * 长会话里一条工具回执就可能是几十 KB,首屏读 200 条意味着主进程解析、IPC 结构化克隆、
+ * 渲染层逐条建卡片全都按 200 条付钱,而用户第一眼只看得到最后几轮。
+ */
+export const HISTORY_INITIAL_PAGE_SIZE = 60
 /** 刷新时把已经翻出来的那几页一并重取,但再多就不要了 */
 export const HISTORY_PAGE_MAX = 2_000
 
 /** 刷新一个已经翻过页的会话时取多少条 —— 不把用户翻出来的那几页收回去 */
 function pageLimitFor(transcript: TranscriptState | undefined): number {
-  return Math.min(HISTORY_PAGE_MAX, Math.max(HISTORY_PAGE_SIZE, transcript?.messages.length ?? 0))
+  return Math.min(HISTORY_PAGE_MAX, Math.max(HISTORY_INITIAL_PAGE_SIZE, transcript?.messages.length ?? 0))
 }
 const deletedHistory = new Set<string>()
 const historyLoads = new Map<string, {
@@ -887,6 +906,8 @@ function hydrateHistory(sessionId: string, authoritative = false): Promise<void>
     } while (request.dirty && historyLoads.get(sessionId) === request && !deletedHistory.has(sessionId))
   })().finally(() => {
     if (historyLoads.get(sessionId) === request) historyLoads.delete(sessionId)
+    // 读成什么样都算「读过了」:失败或被正在跑的 run 让掉时,也不能让骨架一直挂着
+    if (stores.get(sessionId) === store && !store.getState().historyLoaded) store.setState({ historyLoaded: true })
   })
   return request.promise
 }
@@ -923,6 +944,8 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
       return {
         ...s,
         historyHasMore: detail.hasMore,
+        // 与转录同一次 setState:中间不能有一帧「已读完但转录还空着」被画成问候语
+        historyLoaded: true,
         transcript: {
           ...s.transcript,
           messages,
@@ -997,6 +1020,9 @@ export function sessionStore(sessionId: string): SessionStore {
     if (!deletedHistory.has(sessionId)) {
       void hydrateInput(sessionId)
       void hydrateHistory(sessionId)
+    } else {
+      // 已删除的会话不再读库 —— 没人会把它标成「读过了」,骨架就会一直挂着
+      s.setState({ historyLoaded: true })
     }
   }
   return s
@@ -1013,7 +1039,7 @@ export function sessionStore(sessionId: string): SessionStore {
  * 续跑、汇报、目标检查都不需要渲染层(见 `main/session-runtime.ts`)。
  * ★ 留一小段宽限而不是立刻放:来回切两个 Tab 是常态,每切一次就整段重读一遍历史不划算。
  */
-export const SESSION_IDLE_RELEASE_MS = 20_000
+export const SESSION_IDLE_RELEASE_MS = 8_000
 
 /** 每个会话 store 此刻被几个挂着的视图(对话视图、子代理只读面板)用着 */
 const viewRefs = new Map<string, number>()
@@ -1183,7 +1209,8 @@ export function adoptDraftSession(draftKey: string, sessionId: string): void {
   if (draftKey === sessionId) return
   const draftStore = stores.get(draftKey)
   const draft = draftStore?.getState().draft ?? ''
-  if (draft !== '') sessionStore(sessionId).setState({ draft })
+  // 刚铸出来的 id,库里必然是空的:不必等首页回来才认定它是新会话(否则重挂那一下会闪一帧骨架)
+  sessionStore(sessionId).setState(draft === '' ? { historyLoaded: true } : { draft, historyLoaded: true })
   persistSessionDraft(draftKey, '', true)
   releaseSession(draftKey)
 }
@@ -1203,7 +1230,7 @@ export async function refreshHydratedSessions(change?: SessionChange): Promise<v
         || [...childRunIndex.values()].some((run) => run.sessionId === sessionId)) continue
       deletedHistory.add(sessionId)
       historyLoads.delete(sessionId)
-      store?.setState({ draft: '', queuedInputs: [], transcript: { ...emptyTranscript(), status: 'done' } })
+      store?.setState({ draft: '', queuedInputs: [], historyLoaded: true, transcript: { ...emptyTranscript(), status: 'done' } })
     }
     return
   }

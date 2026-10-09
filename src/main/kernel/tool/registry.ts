@@ -13,7 +13,7 @@ import type { SchedulingBridge } from '../../../shared/domain/scheduled'
 import type { ShellBridge } from '../../../shared/domain/shell'
 import type { RunStatus } from '../../../shared/agent/event'
 import type { AgentError } from '../../../shared/agent/error'
-import type { KernelHost, PlatformInfo, WorkspacePaths } from '../host'
+import type { DetachedProcess, KernelHost, PlatformInfo, WorkspacePaths } from '../host'
 import type { ImageGenBridge } from '../image-gen'
 import type { SessionImageStore } from '../session-images'
 import type { VideoGenBridge } from '../video-gen'
@@ -94,6 +94,13 @@ export type SubagentOutcome =
        * 分成两支只会让 `Task` 里多一条除了措辞之外完全一样的分支。
        */
       queued?: boolean
+      /**
+       * 前台派出去的,跑到一半被**用户**转去了后台。
+       *
+       * ★ 单独标出来,因为对模型的措辞不同:它不是自己选的后台,得知道是用户
+       * 不想再等,以及结论之后会自己送回来 —— 不然它会以为子任务丢了,再派一次。
+       */
+      detached?: boolean
     }
 
 export type SpawnSubagentFn = (req: SubagentRequest) => Promise<SubagentOutcome>
@@ -170,7 +177,7 @@ export interface ToolContext {
    * 既停不了单条命令、也起不了后台命令(纯内核测试),`BashOutput` / `KillShell`
    * 整体不下发,`Bash` 的 `run_in_background` 会当场说清楚而不是假装起了。
    */
-  shells?: ShellBridge
+  shells?: ShellBridge<DetachedProcess>
   /**
    * ★ 宿主**从 ctx 传进来,不在工具里闭包捕获**。
    *

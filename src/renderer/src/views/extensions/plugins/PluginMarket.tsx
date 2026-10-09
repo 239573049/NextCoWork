@@ -35,8 +35,8 @@
 import { AlertTriangle, Download, Puzzle } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import type { PluginMarketItem } from '../../../../../shared/plugin/market'
-import { Button } from '../../../components/ui/Button'
-import { EmptyState } from '../../../components/ui/EmptyState'
+import { Button } from '../../../components/arc/button/button'
+import { EmptyState } from '../../../components/arc/empty-state/empty-state'
 import { ProgressBar } from '../../../components/ui/ProgressBar'
 import { TextInput } from '../../../components/ui/TextInput'
 import { useI18n, type TranslationKey } from '../../../i18n'
@@ -78,7 +78,7 @@ export function PluginMarket(): ReactNode {
           placeholder={t('plugins.marketSearch')}
           ariaLabel={t('plugins.marketSearch')}
         />
-        <Button size="sm" disabled={loading} onClick={() => { loadPage(1) }}>
+        <Button type="button" variant="secondary" size="sm" disabled={loading} onClick={() => { loadPage(1) }}>
           {t('common.refresh')}
         </Button>
       </div>
@@ -88,12 +88,12 @@ export function PluginMarket(): ReactNode {
           className="my-auto"
           icon={<AlertTriangle size={26} />}
           title={t('plugins.marketUnavailable')}
-          hint={t('plugins.marketUnavailableHint')}
+          description={t('plugins.marketUnavailableHint')}
         />
       ) : loading ? (
         <div className="py-14 text-center text-[13px] text-fg-faint">{t('common.loading')}</div>
       ) : market.length === 0 ? (
-        <EmptyState className="my-auto" icon={<Puzzle size={26} />} title={t('plugins.marketEmpty')} />
+        <EmptyState className="my-auto" icon={<Puzzle size={26} />} title={t('plugins.marketEmpty')} description="" />
       ) : (
         <div className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1">
           {/*
@@ -131,11 +131,11 @@ export function PluginMarket(): ReactNode {
 
       {marketError === null && (marketPage > 1 || marketHasNext) && (
         <div className="mt-3 flex shrink-0 items-center justify-center gap-3 border-t border-hairline pt-3">
-          <Button size="sm" disabled={loading || marketPage <= 1} onClick={() => { loadPage(marketPage - 1) }}>
+          <Button type="button" variant="secondary" size="sm" disabled={loading || marketPage <= 1} onClick={() => { loadPage(marketPage - 1) }}>
             {t('plugins.marketPreviousPage')}
           </Button>
           <span className="text-[12px] text-fg-muted tabular-nums">{t('plugins.marketPage', { page: marketPage })}</span>
-          <Button size="sm" disabled={loading || !marketHasNext} onClick={() => { loadPage(marketPage + 1) }}>
+          <Button type="button" variant="secondary" size="sm" disabled={loading || !marketHasNext} onClick={() => { loadPage(marketPage + 1) }}>
             {t('plugins.marketNextPage')}
           </Button>
         </div>
@@ -255,14 +255,15 @@ function MarketCard({
         <div className="w-[120px] shrink-0">
           {progress === undefined ? (
             <Button
+              type="button"
               className="w-full"
               size="sm"
-              variant={installed ? 'ghost' : 'accent'}
+              variant={installed ? 'secondary' : 'primary'}
               disabled={installed}
-              icon={<Download size={13} />}
               /* ★ 这颗按钮**不直接开装**,它打开确认弹窗 —— 真正的安装在那一屏上 */
               onClick={onOpen}
             >
+              <Download size={13} />
               {installed ? t('plugins.installed') : t('plugins.install')}
             </Button>
           ) : (

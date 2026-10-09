@@ -18,9 +18,9 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { THINKING_LEVELS, type ThinkingLevel } from '../../../shared/agent/run-request'
 import { modelSelectionKey, parseModelSelectionKey } from '../../../shared/domain/model-selection'
 import type { Workspace } from '../../../shared/domain/workspace'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { Dialog } from '../components/ui/Dialog'
-import { Segmented } from '../components/ui/Segmented'
+import SegmentedControl from '../components/arc/segmented-control/segmented-control'
 import { Select } from '../components/ui/Select'
 import { TextInput } from '../components/ui/TextInput'
 import { useChatModelGuard } from '../components/useChatModelGuard'
@@ -175,17 +175,18 @@ export function EditWorkspaceDialog({
       footer={
         <div className="flex w-full items-center justify-between">
           <Button
+            type="button"
             variant="danger"
             size="sm"
-            icon={<Trash2 size={13} />}
             disabled={deleting}
             onClick={() => { void remove() }}
           >
+            <Trash2 size={13} />
             {armDelete ? t('common.confirmDelete') : t('workspace.delete')}
           </Button>
           <div className="flex items-center gap-2">
-            <Button size="sm" onClick={onClose}>{t('common.cancel')}</Button>
-            <Button size="sm" variant="accent" disabled={saving || name.trim() === ''} onClick={() => { void save() }}>
+            <Button variant="secondary" type="button" size="sm" onClick={onClose}>{t('common.cancel')}</Button>
+            <Button type="button" size="sm" variant="primary" disabled={saving || name.trim() === ''} onClick={() => { void save() }}>
               {t('common.save')}
             </Button>
           </div>
@@ -228,12 +229,11 @@ export function EditWorkspaceDialog({
                 setModelProviderId(selected.modelProviderId)
               }}
             />
-            <Segmented
+            <SegmentedControl
               label={t('workspace.thinkingLevel')}
-              size="sm"
               value={thinking}
               options={thinkingOptions}
-              onChange={setThinking}
+              onValueChange={(v) => setThinking(v as ThinkingLevel)}
               className="flex-wrap"
             />
           </div>

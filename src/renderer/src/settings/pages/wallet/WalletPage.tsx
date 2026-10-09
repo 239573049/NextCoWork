@@ -22,8 +22,8 @@ import { Plus, RefreshCw, UserCircle, Users, Wallet } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import type { ClientAuthState } from '../../../../../shared/domain/client-auth'
 import type { RechargeOptionsState } from '../../../../../shared/domain/recharge'
-import { Button } from '../../../components/ui/Button'
-import { EmptyState } from '../../../components/ui/EmptyState'
+import { Button } from '../../../components/arc/button/button'
+import { EmptyState } from '../../../components/arc/empty-state/empty-state'
 import { IconButton } from '../../../components/ui/IconButton'
 import { Spinner } from '../../../components/ui/Spinner'
 import { useI18n, type Translate } from '../../../i18n'
@@ -88,7 +88,7 @@ export function WalletPage({
   }, [refresh, teamId, signedIn, contextRequired])
 
   if (user === null) {
-    return <EmptyState icon={<UserCircle size={28} />} title={t('auth.notSignedIn')} hint={t('auth.signInFromWelcome')} />
+    return <EmptyState icon={<UserCircle size={28} />} title={t('auth.notSignedIn')} description={t('auth.signInFromWelcome')} />
   }
   if (contextRequired) {
     /* 选完 Team 后主进程会广播 `clientAuth:changed`，新的 auth 经 props 回来，这里无需接结果。 */
@@ -130,13 +130,14 @@ export function WalletPage({
             </IconButton>
             {gate.kind === 'ready' && (
               <Button
-                variant="accent"
-                icon={<Plus size={14} />}
+                type="button"
+                variant="primary"
                 onClick={() => {
                   setRechargeSession((n) => n + 1)
                   setRechargeOpen(true)
                 }}
               >
+                <Plus size={14} />
                 {t('wallet.recharge')}
               </Button>
             )}
@@ -186,7 +187,8 @@ function BlockedNotice({ reason, t }: { reason: RechargeGateReason; t: Translate
       <span className="min-w-0 flex-1">{t(`wallet.blocked.${reason}`)}</span>
       {reason === 'unsupported' && (
         <Button
-          size="sm"
+          type="button"
+          variant="secondary"
           onClick={() => {
             void openExternal(WEB_WALLET_URL).catch((error: unknown) => {
               console.warn('[wallet] 打开网页钱包失败:', error)

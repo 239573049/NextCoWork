@@ -30,6 +30,7 @@ import type {
   RevealedCredential,
   ModelAlias,
   ModelModality,
+  ProtocolFamily,
   ReasoningEffort,
   ThinkingConfig,
   ThinkingMode,
@@ -43,12 +44,12 @@ import {
   MAX_ALIASES_PER_PROVIDER,
   splitProtocol,
 } from "../../../../../shared/domain/provider";
-import { Button } from "../../../components/ui/Button";
+import { Button } from "../../../components/arc/button/button";
 import { Dialog } from "../../../components/ui/Dialog";
-import { Segmented } from "../../../components/ui/Segmented";
+import SegmentedControl from "../../../components/arc/segmented-control/segmented-control";
 import { Select } from "../../../components/ui/Select";
 import { TextInput } from "../../../components/ui/TextInput";
-import { Toggle } from "../../../components/ui/Toggle";
+import { Switch } from "../../../components/arc/switch/switch";
 import { cn } from "../../../lib/cn";
 import { openExternal } from "../../../services/app";
 import {
@@ -632,10 +633,12 @@ export function ProviderPanel({
           {busy && (
             <Spinner size="sm" className="text-fg-faint" />
           )}
-          <Button size="sm" icon={<Download size={12} />} disabled={busy} onClick={() => { setError(null); setTransferOpen("export"); }}>
+          <Button type="button" variant="secondary" disabled={busy} onClick={() => { setError(null); setTransferOpen("export"); }}>
+            <Download size={12} />
             {t("provider.export")}
           </Button>
-          <Button size="sm" icon={<Upload size={12} />} disabled={busy} onClick={() => { setError(null); setTransferOpen("import"); }}>
+          <Button type="button" variant="secondary" disabled={busy} onClick={() => { setError(null); setTransferOpen("import"); }}>
+            <Upload size={12} />
             {t("provider.import")}
           </Button>
         </div>
@@ -716,19 +719,20 @@ export function ProviderPanel({
           ) : (
             <>
               <Field label={t("provider.apiFormat")}>
-                <Segmented
-                  label={t("provider.apiFormat")}
-                  className="w-full"
-                  value={family}
-                  options={[
-                    { value: "openai", label: t("provider.openaiFormat") },
-                    { value: "anthropic", label: t("provider.anthropicFormat") },
-                  ]}
-                  disabled={busy}
-                  onChange={(f) =>
-                    switchProtocol(joinProtocol(f, f === "openai" && responses))
-                  }
-                />
+                <fieldset disabled={busy} className="contents">
+                  <SegmentedControl
+                    label={t("provider.apiFormat")}
+                    className="w-full"
+                    value={family}
+                    options={[
+                      { value: "openai", label: t("provider.openaiFormat") },
+                      { value: "anthropic", label: t("provider.anthropicFormat") },
+                    ]}
+                    onValueChange={(f) =>
+                      switchProtocol(joinProtocol(f as ProtocolFamily, f === "openai" && responses))
+                    }
+                  />
+                </fieldset>
               </Field>
 
               {/* ★ 只在 OpenAI 族下出现 —— 三个协议值到「两控件」的投影,见 provider.ts */}
@@ -741,11 +745,11 @@ export function ProviderPanel({
                     </p>
                   </div>
                   <div className="shrink-0 pt-0.5">
-                    <Toggle
+                    <Switch
                       checked={responses}
                       disabled={busy}
-                      onChange={(on) => switchProtocol(joinProtocol("openai", on))}
-                      label={t("provider.responsesApi")}
+                      onCheckedChange={(on) => switchProtocol(joinProtocol("openai", on))}
+                      aria-label={t("provider.responsesApi")}
                     />
                   </div>
                 </div>
@@ -758,17 +762,17 @@ export function ProviderPanel({
               label={t("provider.cache")}
               hint={t("provider.cacheHint")}
             >
-              <Segmented
-                label={t("provider.cache")}
-                size="sm"
-                value={cacheTtl}
-                options={[
-                  { value: "5m", label: t("provider.fiveMinutes") },
-                  { value: "1h", label: t("provider.oneHour") },
-                ]}
-                disabled={busy}
-                onChange={changeCacheTtl}
-              />
+              <fieldset disabled={busy} className="contents">
+                <SegmentedControl
+                  label={t("provider.cache")}
+                  value={cacheTtl}
+                  options={[
+                    { value: "5m", label: t("provider.fiveMinutes") },
+                    { value: "1h", label: t("provider.oneHour") },
+                  ]}
+                  onValueChange={(ttl) => changeCacheTtl(ttl as AnthropicCacheTtl)}
+                />
+              </fieldset>
             </Field>
           )}
 
@@ -784,10 +788,11 @@ export function ProviderPanel({
               /* ★ 纯走登录的那家没有「创建 API Key」页面，预设里也没给 apiKeyUrl */
               authMode !== "oauth" && apiKeyUrl !== undefined ? (
                 <Button
-                  size="sm"
-                  icon={<ExternalLink size={12} />}
+                  type="button"
+                  variant="secondary"
                   onClick={() => void openExternal(apiKeyUrl)}
                 >
+                  <ExternalLink size={12} />
                   {apiKeyActionLabel}
                 </Button>
               ) : undefined
@@ -868,8 +873,8 @@ export function ProviderPanel({
                   />
                 </div>
                 <Button
-                  size="sm"
-                  variant="accent"
+                  type="button"
+                  variant="primary"
                   disabled={busy || keyDraft.trim() === ""}
                   onClick={saveKey}
                 >
@@ -877,7 +882,8 @@ export function ProviderPanel({
                 </Button>
                 {hasKey && (
                   <Button
-                    size="sm"
+                    type="button"
+                    variant="secondary"
                     disabled={busy}
                     onClick={() => {
                       setKeyDraft("");
@@ -902,7 +908,8 @@ export function ProviderPanel({
                   onToggle={toggleCredentialReveal}
                 />
                 <Button
-                  size="sm"
+                  type="button"
+                  variant="secondary"
                   disabled={busy}
                   onClick={() => {
                     revealRequest.current += 1;
@@ -955,10 +962,11 @@ export function ProviderPanel({
                   </span>
                 )}
                 <Button
-                  size="sm"
-                  icon={<CloudDownload size={13} />}
+                  type="button"
+                  variant="secondary"
                   onClick={() => setImportOpen(true)}
                 >
+                  <CloudDownload size={13} />
                   {t("provider.fetchModels")}
                 </Button>
               </>
@@ -1013,8 +1021,8 @@ export function ProviderPanel({
                 </div>
               ) : (
                 <Button
-                  size="sm"
-                  icon={<Plus size={14} />}
+                  type="button"
+                  variant="secondary"
                   onClick={() => {
                     setError(null);
                     setModelDraft("");
@@ -1022,6 +1030,7 @@ export function ProviderPanel({
                   }}
                   className="w-full justify-start rounded-[16px]"
                 >
+                  <Plus size={14} />
                   {t("provider.addModel")}
                 </Button>
               )}
@@ -1130,7 +1139,8 @@ export function ProviderPanel({
             </p>
             {confirmDelete && (
               <Button
-                size="sm"
+                type="button"
+                variant="secondary"
                 disabled={busy}
                 onClick={() => setConfirmDelete(false)}
               >
@@ -1138,15 +1148,15 @@ export function ProviderPanel({
               </Button>
             )}
             <Button
-              size="sm"
-              variant={confirmDelete ? "danger" : undefined}
-              icon={<Trash2 size={12} />}
+              type="button"
+              variant={confirmDelete ? "danger" : "secondary"}
               disabled={busy || managed}
               onClick={() => {
                 if (confirmDelete) remove();
                 else setConfirmDelete(true);
               }}
             >
+              <Trash2 size={12} />
               {confirmDelete ? t("common.confirmDelete") : t("provider.delete")}
             </Button>
           </div>
@@ -1169,8 +1179,8 @@ export function ProviderPanel({
         description={t("provider.transferHint")}
         footer={
           <>
-            <Button size="sm" disabled={transferBusy} onClick={closeTransfer}>{t("common.cancel")}</Button>
-            <Button size="sm" variant="accent" disabled={transferBusy || (transferOpen === "export" && transferCredentials && transferPassword.length < 8)} onClick={runTransfer}>
+            <Button type="button" variant="secondary" disabled={transferBusy} onClick={closeTransfer}>{t("common.cancel")}</Button>
+            <Button type="button" variant="primary" disabled={transferBusy || (transferOpen === "export" && transferCredentials && transferPassword.length < 8)} onClick={runTransfer}>
               {transferOpen === "export" ? t("provider.export") : t("provider.import")}
             </Button>
           </>
@@ -1179,7 +1189,7 @@ export function ProviderPanel({
         {error !== null && <p className="mb-3 rounded-[8px] bg-danger/10 px-3 py-2 text-[12px] leading-[1.6] text-danger">{error}</p>}
         {transferOpen === "export" ? (
           <div className="space-y-3">
-            <Toggle checked={transferCredentials} onChange={setTransferCredentials} label={t("provider.includeCredentials")} />
+            <Switch checked={transferCredentials} onCheckedChange={setTransferCredentials} aria-label={t("provider.includeCredentials")} />
             <p className="text-[11.5px] leading-[1.6] text-fg-faint">{t("provider.credentialsHint")}</p>
             {transferCredentials && (
               <TextInput value={transferPassword} onChange={setTransferPassword} ariaLabel={t("provider.exportPassword")} placeholder={t("provider.exportPasswordPlaceholder")} type="password" />
@@ -1326,8 +1336,8 @@ function ProviderAuthField({
               </span>
             </div>
             <Button
-              size="sm"
-              icon={<Copy size={12} />}
+              type="button"
+              variant="secondary"
               onClick={() => {
                 /*
                   ★ 复制失败**不报错**:剪贴板权限被拒时码仍然明晃晃地显示在
@@ -1336,9 +1346,10 @@ function ProviderAuthField({
                 void navigator.clipboard?.writeText(device.userCode).catch(() => undefined);
               }}
             >
+              <Copy size={12} />
               {t("common.copy")}
             </Button>
-            <Button size="sm" onClick={onCancel}>
+            <Button type="button" variant="secondary" onClick={onCancel}>
               {t("common.cancel")}
             </Button>
           </div>
@@ -1374,14 +1385,14 @@ function ProviderAuthField({
               />
             </div>
             <Button
-              size="sm"
-              variant="accent"
+              type="button"
+              variant="primary"
               disabled={pasteDraft.trim() === ""}
               onClick={submit}
             >
               {t("provider.authPasteSubmit")}
             </Button>
-            <Button size="sm" onClick={onCancel}>
+            <Button type="button" variant="secondary" onClick={onCancel}>
               {t("common.cancel")}
             </Button>
           </div>
@@ -1406,7 +1417,7 @@ function ProviderAuthField({
             {phaseLabel}
           </span>
         </div>
-        <Button size="sm" onClick={onCancel}>
+        <Button type="button" variant="secondary" onClick={onCancel}>
           {t("common.cancel")}
         </Button>
       </div>
@@ -1415,7 +1426,8 @@ function ProviderAuthField({
 
   if (view.state === "signed-out") {
     return (
-      <Button size="sm" variant="accent" icon={<ExternalLink size={12} />} onClick={onSignIn}>
+      <Button type="button" variant="primary" onClick={onSignIn}>
+        <ExternalLink size={12} />
         {signInLabel}
       </Button>
     );
@@ -1451,20 +1463,22 @@ function ProviderAuthField({
           )}
         </div>
         {expired && (
-          <Button size="sm" variant="accent" disabled={busy} onClick={onSignIn}>
+          <Button type="button" variant="primary" disabled={busy} onClick={onSignIn}>
             {t("provider.reSignIn")}
           </Button>
         )}
         <Button
-          size="sm"
+          type="button"
+          variant="secondary"
           disabled={busy || revealing}
-          icon={revealed === null ? <Eye size={12} /> : <EyeOff size={12} />}
           onClick={onToggleReveal}
         >
+          {revealed === null ? <Eye size={12} /> : <EyeOff size={12} />}
           {revealed === null ? t("provider.viewToken") : t("provider.hideToken")}
         </Button>
         <Button
-          size="sm"
+          type="button"
+          variant="secondary"
           disabled={busy}
           onClick={() => {
             if (confirmOut) onSignOut();
@@ -1674,10 +1688,10 @@ function ModelEditDialog({
       width={460}
       footer={
         <>
-          <Button disabled={busy} onClick={onClose}>
+          <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>
             {t("common.cancel")}
           </Button>
-          <Button variant="accent" disabled={busy} onClick={save}>
+          <Button type="button" variant="primary" disabled={busy} onClick={save}>
             {t("common.save")}
           </Button>
         </>
@@ -1846,10 +1860,10 @@ function ThinkingDialog({
       width={440}
       footer={
         <>
-          <Button disabled={busy} onClick={onClose}>
+          <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>
             {t("common.cancel")}
           </Button>
-          <Button variant="accent" disabled={busy} onClick={save}>
+          <Button type="button" variant="primary" disabled={busy} onClick={save}>
             {t("common.save")}
           </Button>
         </>
@@ -1975,7 +1989,7 @@ function DialogToggle({
   return (
     <div className="flex items-center justify-between gap-3 rounded-[7px] border border-border bg-surface-field px-2.5 py-1.5">
       <span className="text-[11.5px] text-fg-muted">{label}</span>
-      <Toggle checked={checked} onChange={onChange} label={label} />
+      <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
     </div>
   );
 }

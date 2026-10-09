@@ -54,18 +54,19 @@ import type {
   GitBranchSummary,
   GitCommitSummary,
   GitDiff,
+  GitDiffSides,
   GitFileChange,
   GitOverview,
   GitUnavailableReason
 } from '../../../../shared/domain/git'
-import { Button } from '../../components/ui/Button'
-import { EmptyState } from '../../components/ui/EmptyState'
+import { Button } from '../../components/arc/button/button'
+import { EmptyState } from '../../components/arc/empty-state/empty-state'
 import { IconButton } from '../../components/ui/IconButton'
-import { Segmented } from '../../components/ui/Segmented'
+import SegmentedControl from '../../components/arc/segmented-control/segmented-control'
 import { Select } from '../../components/ui/Select'
 import { Spinner } from '../../components/ui/Spinner'
 import { TextInput } from '../../components/ui/TextInput'
-import { Toggle } from '../../components/ui/Toggle'
+import { Switch } from '../../components/arc/switch/switch'
 import { useI18n, type Translate } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { iconFor } from '../../lib/file-icon'
@@ -75,6 +76,7 @@ import {
   createGitBranch,
   generateGitCommitMessage,
   getGitDiff,
+  getGitDiffSides,
   getGitOverview,
   listGitBranches,
   listGitCommits,
@@ -86,6 +88,7 @@ import {
 import { FeatureFrame } from '../../shell/FeatureFrame'
 import { useWindowStore } from '../../stores/window'
 import { DiffLines } from '../../components/diff/DiffLines'
+import { CodeDiffViewer } from '../../components/diff/CodeDiffViewer'
 import { parseUnifiedDiff } from '../../components/diff/parse-unified'
 import { languageOf } from '../../components/code'
 
@@ -170,6 +173,8 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
   const [pane, setPane] = useState<Pane>('changes')
   const [selection, setSelection] = useState<Selection | null>(null)
   const [diff, setDiff] = useState<GitDiff | null>(null)
+  /** 两侧全文。`null` = 没法按全文对比(二进制 / 超限 / 冲突),退回 unified 文本 */
+  const [sides, setSides] = useState<GitDiffSides | null>(null)
   const [message, setMessage] = useState('')
   const [creating, setCreating] = useState(false)
   const [newBranch, setNewBranch] = useState('')
@@ -280,16 +285,28 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
   useEffect(() => {
     if (selection === null || workspaceId === null) {
       setDiff(null)
+      setSides(null)
       return
     }
     let alive = true
-    getGitDiff(workspaceId, selection.path, selection.staged)
-      .then((next) => {
-        if (alive) setDiff(next)
+    /*
+      unified 文本和两侧全文一起取、一起落地:前者判「二进制 / 没有文本改动」,
+      后者喂对比视图。分开落地的话,中间那一帧会先画一次兜底的 unified 视图再换掉。
+      全文那一路失败不算错 —— 退回 unified 文本就是了。
+    */
+    Promise.all([
+      getGitDiff(workspaceId, selection.path, selection.staged),
+      getGitDiffSides(workspaceId, selection.path, selection.staged).catch(() => null)
+    ])
+      .then(([next, nextSides]) => {
+        if (!alive) return
+        setDiff(next)
+        setSides(nextSides)
       })
       .catch((e: unknown) => {
         if (!alive) return
         setDiff(null)
+        setSides(null)
         setError(errorText(e, t))
       })
     return () => {
@@ -333,7 +350,7 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
           className="m-auto"
           icon={<GitBranch size={26} />}
           title={t('git.noWorkspace')}
-          hint={t('git.noWorkspaceHint')}
+          description={t('git.noWorkspaceHint')}
         />
       </Shell>
     )
@@ -357,9 +374,9 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
           className="m-auto"
           icon={<GitBranch size={26} />}
           title={t(`git.unavailable.${reason}`)}
-          hint={
+          description={
             reason === 'git-missing'
-              ? undefined
+              ? ''
               : t(`git.unavailable.${reason as HintedReason}Hint`)
           }
         />
@@ -444,21 +461,23 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
           </div>
           <div className="mt-2.5 flex items-center gap-2">
             <Button
+              type="button"
               size="sm"
-              variant="ghost"
-              icon={pending === 'pull' ? <Spinner size="sm" /> : <ArrowDown size={13} />}
+              variant="secondary"
               disabled={busy}
               onClick={() => void run(() => pullGit(workspaceId), 'pull')}
             >
+              {pending === 'pull' ? <Spinner size="sm" /> : <ArrowDown size={13} />}
               {t('git.pull')}
             </Button>
             <Button
+              type="button"
               size="sm"
-              variant="ghost"
-              icon={pending === 'push' ? <Spinner size="sm" /> : <ArrowUp size={13} />}
+              variant="secondary"
               disabled={busy}
               onClick={() => void run(() => pushGit(workspaceId), 'push')}
             >
+              {pending === 'push' ? <Spinner size="sm" /> : <ArrowUp size={13} />}
               {t('git.push')}
             </Button>
             <IconButton
@@ -495,14 +514,14 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
               />
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-2 text-[12px] text-fg-muted">
-                  <Toggle
+                  <Switch
                     checked={newCheckout}
-                    onChange={setNewCheckout}
-                    label={t('git.newBranchCheckout')}
+                    onCheckedChange={setNewCheckout}
+                    aria-label={t('git.newBranchCheckout')}
                   />
                   {t('git.newBranchCheckout')}
                 </span>
-                <Button size="sm" variant="accent" disabled={busy} onClick={createBranch}>
+                <Button type="button" size="sm" variant="primary" disabled={busy} onClick={createBranch}>
                   {t('git.create')}
                 </Button>
               </div>
@@ -521,7 +540,7 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
             <EmptyState
               className="py-8"
               title={t('git.clean')}
-              hint={t('git.cleanHint')}
+              description={t('git.cleanHint')}
             />
           ) : (
             <>
@@ -581,8 +600,9 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
                 {generating ? <Spinner size="sm" /> : <Sparkles size={14} />}
               </IconButton>
               <Button
+                type="button"
                 size="sm"
-                variant="accent"
+                variant="primary"
                 disabled={busy || generating || staged.length === 0 || message.trim() === ''}
                 onClick={commit}
               >
@@ -596,15 +616,14 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
       {/* ── 右栏:diff / 历史 ── */}
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-3 border-b border-hairline px-4 py-2.5">
-          <Segmented<Pane>
-            size="sm"
+          <SegmentedControl
             value={pane}
             label={t('git.title')}
             options={[
               { value: 'changes', label: t('git.tab.changes') },
               { value: 'history', label: t('git.tab.history') }
             ]}
-            onChange={setPane}
+            onValueChange={(v) => setPane(v as Pane)}
           />
           {pane === 'changes' && selection !== null && (
             <span className="truncate text-[12px] text-fg-muted" title={selection.path}>
@@ -637,10 +656,10 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
           {pane === 'history' ? (
             commits.length === 0 ? (
-              <EmptyState className="m-auto" title={t('git.noCommits')} />
+              <EmptyState className="m-auto" title={t('git.noCommits')} description="" />
             ) : (
               <ul className="px-4 py-3">
                 {commits.map((c) => (
@@ -658,15 +677,18 @@ export function GitFeature({ onClose }: { onClose?: () => void } = {}): ReactNod
               </ul>
             )
           ) : selection === null ? (
-            <EmptyState className="m-auto" title={t('git.selectFile')} />
+            <EmptyState className="m-auto" title={t('git.selectFile')} description="" />
           ) : diff === null ? (
             <p role="status" className="p-6 text-[13px] text-fg-muted">
               {t('git.loading')}
             </p>
           ) : diff.binary ? (
-            <EmptyState className="m-auto" title={t('git.diffBinary')} />
-          ) : diff.text === '' ? (
-            <EmptyState className="m-auto" title={t('git.diffEmpty')} />
+            <EmptyState className="m-auto" title={t('git.diffBinary')} description="" />
+          ) : diff.text === '' || (sides !== null && sides.original === sides.modified) ? (
+            // 后一种:只改了文件模式之类 —— git 有输出,但两侧正文一字不差
+            <EmptyState className="m-auto" title={t('git.diffEmpty')} description="" />
+          ) : sides !== null ? (
+            <CodeDiffViewer original={sides.original} modified={sides.modified} path={diff.path} />
           ) : (
             <DiffView t={t} diff={diff} />
           )}
@@ -823,7 +845,9 @@ function FileGroup({
 }
 
 /**
- * diff 正文。
+ * diff 正文的**兜底**画法 —— 只在拿不到两侧全文时用(二进制以外的那几种:
+ * 单侧超过 1MB、冲突中、子模块,见主进程 `getGitDiffSides`)。正常情况画的是
+ * `components/diff/CodeDiffViewer`,那边有横向滚动、并排对比和折叠。
  *
  * ★ **封顶在 `DIFF_LINE_LIMIT` 行**,见那个常量上的注释。超出的部分给一句说明
  *   而不是一个「展开全部」—— 展开之后卡的还是同一下,只是换成用户自己按的。

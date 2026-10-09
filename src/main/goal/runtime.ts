@@ -34,6 +34,14 @@ type GoalStatus = Extract<ContentPart, { type: 'goal_status' }>
 export interface GoalHost {
   now(): number
   history(sessionId: string): readonly AgentMessage[]
+  /**
+   * 目标重载恢复要的那一小段:只需含**最后一条带 `goal_status` 的助手消息**
+   * (`restorableGoalCondition` 只看它)。缺省时退回 `history`。
+   *
+   * ★ 需求:打开长会话时 `restoreGoal` 走 `history` 会把整段转录全部解析一遍,
+   *   主进程同步卡住,首页历史迟迟回不来。
+   */
+  goalHistory?(sessionId: string): readonly AgentMessage[]
   commit(sessionId: string, message: AgentMessage): void
   exists(sessionId: string): boolean
   tokens(sessionId: string): number
@@ -100,11 +108,18 @@ function recordStatus(sessionId: string, part: GoalStatus): void {
   publish?.({ sessionId, goal: getActiveGoal(sessionId), message })
 }
 
-/** Idempotent restoration, with no kickoff, run launch, or idle timer. */
-export function restoreGoal(sessionId: string, messages = host?.history(sessionId) ?? []): ActiveGoal | undefined {
+/**
+ * Idempotent restoration, with no kickoff, run launch, or idle timer.
+ *
+ * ★ 历史**只在第一次**才读。原先写成默认参数 `messages = host.history(...)`,而默认参数
+ *   在函数体之前求值 —— 已初始化过的会话每次 `sessions:getPage` / `goal:get` 也照样把
+ *   整段转录读出来解析一遍再丢掉,长会话每打开、每往上翻一页都要付这笔钱。
+ */
+export function restoreGoal(sessionId: string, messages?: readonly AgentMessage[]): ActiveGoal | undefined {
   if (goalWasInitialized(sessionId)) return getActiveGoal(sessionId)
   markGoalInitialized(sessionId)
-  const condition = restorableGoalCondition(messages)
+  const history = messages ?? host?.goalHistory?.(sessionId) ?? host?.history(sessionId) ?? []
+  const condition = restorableGoalCondition(history)
   if (condition !== null) activateGoal({ sessionId, condition, origin: 'restored', now: now() })
   return getActiveGoal(sessionId)
 }

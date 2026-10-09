@@ -19,6 +19,7 @@ import { sshZh, sshEn } from './ssh';
 import { workspaceZh, workspaceEn } from './workspace';
 import { extensionsZh, extensionsEn } from './extensions';
 import { gitZh, gitEn } from './git';
+import { diffZh, diffEn } from './diff';
 import { compactionZh, compactionEn } from './compaction';
 import { usageZh, usageEn } from './usage';
 import { providerAccountsZh, providerAccountsEn } from './provider-accounts';
@@ -66,6 +67,7 @@ const ZH: Messages = {
   ...pluginSkillsZh,
   ...extensionsZh,
   ...gitZh,
+  ...diffZh,
   ...compactionZh,
   ...skillifyZh,
   ...imageGenZh,
@@ -468,6 +470,7 @@ const ZH: Messages = {
   "chat.subagent.notice.retry": ({ attempt }) => `重试 ${attempt}`,
   "chat.subagent.notice.switch": ({ to }) => `已切到 ${to}`,
   "chat.subagent.stop": "停止子代理",
+  "chat.subagent.toBackground": "转为后台运行",
   "chat.status.generating": "生成中",
   "chat.status.done": "已完成",
   "chat.status.error": "出错",
@@ -636,8 +639,9 @@ const ZH: Messages = {
   // 压缩失败时从主进程带上来的 messageKey(见 kernel/compaction/compact.ts)
   "chat.compaction.nothingToCompact": "这段对话还没有可压缩的内容",
   "chat.compaction.emptySummary": "模型没有写出摘要，这次压缩已取消",
+  // ★ 描述给用户看,不写「方案 §4.9」这类只有本仓库看得懂的引用
   "general.perSessionSubagentsHint":
-    "一段对话里最多同时运行几个子代理（方案 §4.9）。超出的排队等空位，不会失败。",
+    "一段对话里最多同时运行几个子代理。超出的排队等空位，不会失败。",
   "general.globalSubagentsHint":
     "全应用同时运行的子代理数上限，超出的排队等待。0 = 不允许派子代理。",
   "permission.ask": "询问批准",
@@ -2031,6 +2035,8 @@ const ZH: Messages = {
   // 只停这一条命令，不是停整轮（见 `shell:stopToolCall`）。措辞必须和 Composer 上
   // 那颗「停止」区分得开，否则用户会以为它把整段回复也停掉了。
   "chat.tool.stop": "停止这条命令",
+  // 不杀命令，只是不再等它（见 `shell:backgroundToolCall`）
+  "chat.tool.background": "转为后台运行",
   // 工具行里文件名的 tooltip。路径是领域值，原样插进来（§6.5 不翻译领域值）
   "chat.tool.openFile": "打开 {path}",
   "chat.tool.running": "执行中",
@@ -2054,6 +2060,7 @@ const EN: Messages = {
   ...pluginSkillsEn,
   ...extensionsEn,
   ...gitEn,
+  ...diffEn,
   ...compactionEn,
   ...skillifyEn,
   ...imageGenEn,
@@ -2447,6 +2454,7 @@ const EN: Messages = {
   "chat.subagent.notice.retry": ({ attempt }) => `Retry ${attempt}`,
   "chat.subagent.notice.switch": ({ to }) => `Switched to ${to}`,
   "chat.subagent.stop": "Stop subagent",
+  "chat.subagent.toBackground": "Move to background",
   "chat.status.generating": "Generating",
   "chat.status.done": "Done",
   "chat.status.error": "Error",
@@ -2617,7 +2625,7 @@ const EN: Messages = {
   "chat.compaction.nothingToCompact": "There is nothing to compact yet",
   "chat.compaction.emptySummary": "The model returned no summary; this compaction was cancelled",
   "general.perSessionSubagentsHint":
-    "How many subagents one conversation may have running at the same time (plan §4.9). Dispatches beyond that wait in a queue instead of failing.",
+    "How many subagents one conversation may have running at the same time. Dispatches beyond that wait in a queue instead of failing.",
   "general.globalSubagentsHint":
     "How many subagents may run at the same time across the whole app; the rest queue up. 0 disables subagent dispatch.",
   "permission.ask": "Ask for approval",
@@ -4053,6 +4061,7 @@ const EN: Messages = {
   "chat.tool.runningStatus": "Running",
   "chat.tool.waitingStatus": "Waiting",
   "chat.tool.stop": "Stop this command",
+  "chat.tool.background": "Move to background",
   "chat.tool.openFile": "Open {path}",
   "chat.tool.running": "Running",
   "chat.tool.failed": "Failed",

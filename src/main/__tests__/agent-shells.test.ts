@@ -84,6 +84,37 @@ describe('AgentShells · 前台停止句柄', () => {
   })
 })
 
+describe('AgentShells · 前台转后台', () => {
+  it('登记了 detach 的才转得了,转的是那一条', () => {
+    const shells = new AgentShells()
+    const detach = vi.fn()
+    shells.hold({ runId: 'run_1', callId: 'call_1', command: 'a' }, vi.fn(), detach)
+    shells.hold({ runId: 'run_1', callId: 'call_2', command: 'b' }, vi.fn())
+
+    expect(shells.detachCall('run_1', 'call_2')).toBe(false)
+    expect(shells.detachCall('run_1', 'call_1')).toBe(true)
+    expect(detach).toHaveBeenCalledOnce()
+  })
+
+  it('★ 后台名额满了当场拒绝,不先转走再收编失败', () => {
+    const shells = new AgentShells()
+    for (let i = 0; i < BACKGROUND_SHELL_LIMITS.MAX_RUNNING; i++) adopt(shells, { callId: `bg_${String(i)}` })
+    const detach = vi.fn()
+    shells.hold({ runId: 'run_1', callId: 'call_1', command: 'a' }, vi.fn(), detach)
+
+    expect(shells.detachCall('run_1', 'call_1')).toBe(false)
+    expect(detach).not.toHaveBeenCalled()
+  })
+
+  it('注销之后再点转后台是 false', () => {
+    const shells = new AgentShells()
+    const detach = vi.fn()
+    shells.hold({ runId: 'run_1', callId: 'call_1', command: 'a' }, vi.fn(), detach)()
+    expect(shells.detachCall('run_1', 'call_1')).toBe(false)
+    expect(detach).not.toHaveBeenCalled()
+  })
+})
+
 describe('AgentShells · 后台读取', () => {
   it('★ 读过即清空:第二次读只拿到这之后的新输出', async () => {
     const shells = new AgentShells()

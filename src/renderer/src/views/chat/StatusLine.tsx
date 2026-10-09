@@ -20,6 +20,7 @@ import type { TranscriptState } from '../../../../shared/agent/transcript'
 import type { ActiveGoal } from '../../../../shared/domain/goal'
 import { agentErrorText } from '../../i18n/agent'
 import { hasRun } from '../../../../shared/agent/transcript'
+import { isToolResultOnly } from '../../../../shared/agent/message'
 import type { ContextStatusPhase } from '../../../../shared/agent/context-management'
 import { compactBoundaryOf, lastCompactBoundaryIndex } from '../../../../shared/agent/compaction'
 import { activitySnapshotOf, whimsyBucketOf, type ActivitySnapshot } from '../../../../shared/domain/activity'
@@ -92,6 +93,12 @@ export function StatusLine({
   // 还没发过消息的空会话没有「状态」可言 —— 参考实现在这一屏是一句问候加输入框,
   // 输入框上方什么都没有(截图 c6184031)。见 `hasRun` 说明为什么不能只看 status。
   if (!hasRun(transcript, running) && goal === undefined) return null
+  /*
+    回复被删光后只剩提问:没有任何一次「已完成」可言。`done` 是正常收尾的默认值,
+    此时再摆一句「已完成」是在给一个不存在的回复报状态。停止 / 出错仍照常显示。
+  */
+  if (!running && status === 'done' && goal === undefined && transcript.live.length === 0
+    && transcript.warning === undefined && endsWithUnansweredPrompt(transcript.messages)) return null
 
   /*
     ★ 重试 / 切换提示**压过**那句「正在等待回复…」,而不是并排再加一行:
@@ -267,6 +274,16 @@ function useStepElapsed(key: string, active: boolean): number {
 
 function Dot(): ReactNode {
   return <span aria-hidden className="text-fg-faint/50">·</span>
+}
+
+/** 最后一条可见消息是用户提问(其后没有任何助手回复)。 */
+function endsWithUnansweredPrompt(messages: TranscriptState['messages']): boolean {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message === undefined || message.internal === true || isToolResultOnly(message)) continue
+    return message.role === 'user'
+  }
+  return false
 }
 
 /**

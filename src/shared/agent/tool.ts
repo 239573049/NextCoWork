@@ -106,6 +106,15 @@ export interface ToolProgress {
    * 重建,插件伪造不出这一项。
    */
   image?: { index: number; image: ToolOutputImage }
+  /**
+   * 这次调用此刻**能被用户转去后台**(前台 `Bash` 且环境支持)。
+   *
+   * ★ 走进度事件而不是 presenter 的静态能力声明:能不能转取决于**这一次**跑在哪
+   * (本地能、SSH 不能),同一个工具名给不出一个固定答案。同样易失、不进转录 ——
+   * `tool_end` 之后这条调用也就无所谓转不转了。
+   * ★ 只有内置 `Bash` 会填它:插件进度由 `plugin/manager.ts` 逐字段重建,伪造不出。
+   */
+  detachable?: boolean
 }
 
 export interface ToolResult {

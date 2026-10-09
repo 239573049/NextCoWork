@@ -2,8 +2,8 @@ import { File, FolderOpen, RefreshCw, Save } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { isLocalEnvironment } from '../../../../shared/domain/environment'
 import { OpenWithChevron, OpenWithMenu } from '../../components/OpenWithMenu'
-import { Button } from '../../components/ui/Button'
-import { EmptyState } from '../../components/ui/EmptyState'
+import { Button } from '../../components/arc/button/button'
+import { EmptyState } from '../../components/arc/empty-state/empty-state'
 import { IconButton } from '../../components/ui/IconButton'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
@@ -38,7 +38,7 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
     setActionError(null)
   }, [load, workspaceId, path])
 
-  if (!path) return <EmptyState icon={<File size={26} />} title={t('document.empty')} hint={t('document.emptyHint')} />
+  if (!path) return <EmptyState icon={<File size={26} />} title={t('document.empty')} description={t('document.emptyHint')} />
   const dirty = entry !== undefined && isDocumentDirty(entry)
   const file = entry?.file
   const saving = entry?.saving ?? false
@@ -86,10 +86,10 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
             triggerClassName="flex size-[26px] items-center justify-center rounded-[8px] text-icon transition-colors hover:bg-tint-hover hover:text-fg"
           />
         )}
-        {file?.kind === 'text' && <Button size="sm" variant="accent" disabled={!dirty || saving} onClick={() => { void save(workspaceId, path) }} icon={<Save size={12} />}>{t(saving ? 'document.saving' : 'document.save')}</Button>}
+        {file?.kind === 'text' && <Button type="button" variant="primary" size="sm" disabled={!dirty || saving} onClick={() => { void save(workspaceId, path) }}><Save size={12} />{t(saving ? 'document.saving' : 'document.save')}</Button>}
       </div>
 
-      {(entry?.error || actionError) && <div role="alert" className="flex shrink-0 items-center gap-3 border-b border-danger/20 bg-danger/5 px-4 py-2 text-[12px] text-danger"><span className="flex-1">{t(entry?.error ?? actionError!)}</span><Button size="sm" onClick={() => { void reload() }}>{t('document.reload')}</Button></div>}
+      {(entry?.error || actionError) && <div role="alert" className="flex shrink-0 items-center gap-3 border-b border-danger/20 bg-danger/5 px-4 py-2 text-[12px] text-danger"><span className="flex-1">{t(entry?.error ?? actionError!)}</span><Button type="button" variant="secondary" size="sm" onClick={() => { void reload() }}>{t('document.reload')}</Button></div>}
       {!entry || entry.loading ? <div role="status" className="p-6 text-[13px] text-fg-muted">{t('common.loading')}</div> : file?.kind === 'text' ? (
         format && entry.mode === 'preview'
           ? format === 'html'
@@ -98,10 +98,10 @@ export function DocumentView({ workspaceId, path }: { workspaceId: string; path:
           : <CodeEditor path={path} value={entry.draft} onChange={(value) => edit(workspaceId, path, value)} onSave={() => { void save(workspaceId, path) }} />
       ) : file?.kind === 'image' ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6">
-          {imageFailed ? <EmptyState title={t('document.imageFailed')} /> : <img src={file.dataUrl} alt={path} onError={() => setImageFailed(true)} className="max-h-full max-w-full object-contain" />}
+          {imageFailed ? <EmptyState title={t('document.imageFailed')} description="" /> : <img src={file.dataUrl} alt={path} onError={() => setImageFailed(true)} className="max-h-full max-w-full object-contain" />}
         </div>
       ) : file?.kind === 'binary' ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><EmptyState icon={<File size={28} />} title={path.split('/').pop() ?? path} hint={t(`document.binary.${file.reason}`)} /><Button onClick={reveal}>{t('document.reveal')}</Button></div>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><EmptyState icon={<File size={28} />} title={path.split('/').pop() ?? path} description={t(`document.binary.${file.reason}`)} /><Button type="button" variant="secondary" onClick={reveal}>{t('document.reveal')}</Button></div>
       ) : null}
 
       {file && <div className="flex shrink-0 items-center gap-3 border-t border-hairline px-4 py-1.5 text-[11px] text-fg-faint">

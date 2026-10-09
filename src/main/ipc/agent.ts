@@ -26,7 +26,7 @@ import { interactions } from '../kernel/interaction-gate'
 import { agentShells } from '../agent-shells'
 import { IpcError, toAgentError } from './errors'
 import { FINISHED_RUN_CACHE_BYTES, FINISHED_RUN_TTL_MS, RunHandle, runs } from '../kernel/run-registry'
-import { ensureGoalRuntime, persistSubagentReportStatus, readBackgroundReport, runAgent } from '../runtime'
+import { detachForegroundSubagent, ensureGoalRuntime, persistSubagentReportStatus, readBackgroundReport, runAgent } from '../runtime'
 import { pauseGoal, restoreGoal } from '../goal/runtime'
 import { getActiveGoal } from '../goal/state'
 import { SessionRuntime } from '../session-runtime'
@@ -550,6 +550,35 @@ export function stopToolCall(req: { runId: string; callId: string }, ctx: Window
     throw new IpcError('unknown', '当前窗口没有订阅这个运行')
   }
   return agentShells.stopCall(req.runId, req.callId)
+}
+
+/**
+ * 把**一次工具调用**里那条正在跑的前台命令转去后台 —— 工具卡片上那颗「转后台」按钮。
+ *
+ * ★ 和 `stopToolCall` 同一套订阅校验,同一个「false 不是错误」的契约:
+ * false = 它已经跑完了、这个环境转不了(SSH),或后台 shell 名额已满。
+ */
+export function backgroundToolCall(req: { runId: string; callId: string }, ctx: WindowContext): boolean {
+  if (!windows.isSubscribed(runTopic(req.runId), ctx.sender)) {
+    throw new IpcError('unknown', '当前窗口没有订阅这个运行')
+  }
+  return agentShells.detachCall(req.runId, req.callId)
+}
+
+/**
+ * 把一个**前台**子代理转去后台 —— 子代理卡片上那颗「转后台」按钮。父代理不再等它,
+ * 它跑完之后结论按后台子代理那条路送回主代理。
+ *
+ * ★ 订阅校验认子 run 自己的主题,也认父 run 的:子主题是从父主题继承来的
+ * (`startChildRun`),而重载之后窗口重新挂上的是父 run。
+ */
+export function backgroundSubagent(req: { childRunId: string }, ctx: WindowContext): boolean {
+  const parentRunId = runs.get(req.childRunId)?.parentRunId
+  if (!windows.isSubscribed(runTopic(req.childRunId), ctx.sender)
+    && (parentRunId === undefined || !windows.isSubscribed(runTopic(parentRunId), ctx.sender))) {
+    throw new IpcError('unknown', '当前窗口没有订阅这个运行')
+  }
+  return detachForegroundSubagent(req.childRunId)
 }
 
 /** app 退出前:停掉所有 run,冲掉所有泵。留着的 setTimeout 会拖住退出。 */

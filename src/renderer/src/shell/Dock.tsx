@@ -3,7 +3,7 @@ import { findGroup, type DockNode } from '../../../shared/domain/dock'
 import type { InnerTab, InnerTabKind } from '../../../shared/domain/tab'
 import type { TabMenuItem } from '../../../shared/plugin/contribution'
 import type { Workspace } from '../../../shared/domain/workspace'
-import { EmptyState } from '../components/ui/EmptyState'
+import { EmptyState } from '../components/arc/empty-state/empty-state'
 import type { FallbackModel } from '../views/chat/Composer'
 import { cn } from '../lib/cn'
 import { useI18n } from '../i18n'
@@ -34,7 +34,7 @@ export function DockRoot({ workspace, fallbackModel, maxOutputTokens, runningSes
   */
   const root = structural !== null && edgeHidden(structural, dock.tabs, right.shown, bottom.shown) ? null : structural
   const { t } = useI18n()
-  return <div data-dock-root className="flex min-h-0 min-w-0 flex-1 overflow-hidden">{root ? <DockNodeView key={root.id} node={root} tabs={dock.tabs} right={right} bottom={bottom} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} runningSessionIds={runningSessionIds} /> : <EmptyState title={t('common.empty')} />}</div>
+  return <div data-dock-root className="flex min-h-0 min-w-0 flex-1 overflow-hidden">{root ? <DockNodeView key={root.id} node={root} tabs={dock.tabs} right={right} bottom={bottom} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} runningSessionIds={runningSessionIds} /> : <EmptyState title={t('common.empty')} description="" />}</div>
 }
 
 function DockNodeView({ node, tabs, right, bottom, workspace, fallbackModel, maxOutputTokens, runningSessionIds }: { node: DockNode; tabs: readonly InnerTab[]; right: Presence; bottom: Presence; workspace: Workspace; fallbackModel: FallbackModel; maxOutputTokens: number; runningSessionIds: ReadonlySet<string> }): ReactNode {
@@ -289,7 +289,7 @@ function DockContent({ tabs, active, workspace, fallbackModel, maxOutputTokens, 
   emptyTitle: string
 }): ReactNode {
   const browsers = tabs.filter((tab) => tab.kind === 'browser')
-  if (active === undefined) return <EmptyState title={emptyTitle} className="py-6" />
+  if (active === undefined) return <EmptyState title={emptyTitle} description="" className="py-6" />
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1">
       {active.kind !== 'browser' && <InnerView key={active.id} tab={active} workspace={workspace} fallbackModel={fallbackModel} maxOutputTokens={maxOutputTokens} />}

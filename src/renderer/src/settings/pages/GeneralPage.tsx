@@ -6,9 +6,9 @@ import {
 } from '../../../../shared/agent/permission'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
 import { isChatModelAlias } from '../../../../shared/domain/provider'
-import { Segmented } from '../../components/ui/Segmented'
+import SegmentedControl from '../../components/arc/segmented-control/segmented-control'
 import { Slider } from '../../components/ui/Slider'
-import { Toggle } from '../../components/ui/Toggle'
+import { Switch } from '../../components/arc/switch/switch'
 import { Select } from '../../components/ui/Select'
 import { ProviderModelMenu, type ProviderModelMenuRow } from '../../components/ProviderModelMenu'
 import { useChatModelGuard } from '../../components/useChatModelGuard'
@@ -166,11 +166,11 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           }
           wide
         >
-          <Segmented<PermissionMode>
+          <SegmentedControl
             label={t('general.defaultPermission')}
             value={settings.defaultPermissionMode}
             options={PERMISSION_MODES.map((m) => ({ value: m, label: t(`permission.${m}` as 'permission.ask' | 'permission.auto' | 'permission.full') }))}
-            onChange={(defaultPermissionMode) => patch({ defaultPermissionMode })}
+            onValueChange={(defaultPermissionMode) => patch({ defaultPermissionMode: defaultPermissionMode as PermissionMode })}
           />
         </SettingRow>
         <SettingRow
@@ -226,8 +226,8 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           />
         </SettingRow>
         <SettingRow title={t('general.autoCompact')} description={t('general.autoCompactHint')}>
-          <Toggle label={t('general.autoCompact')} checked={settings.contextManagement.autoCompact}
-            onChange={(autoCompact) => patch({ contextManagement: { autoCompact } })} />
+          <Switch aria-label={t('general.autoCompact')} checked={settings.contextManagement.autoCompact}
+            onCheckedChange={(autoCompact) => patch({ contextManagement: { autoCompact } })} />
         </SettingRow>
         {/*
           需求:压缩可以交给另一个模型(它是一次长输入、短输出的机械活)。空值 =
@@ -344,14 +344,14 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
           wide
           last
         >
-          <Segmented<AppLocale>
+          <SegmentedControl
             label={t('settings.language')}
             value={settings.locale}
             options={[
               { value: 'zh-CN', label: t('settings.simplifiedChinese') },
               { value: 'en-US', label: t('settings.english') }
             ]}
-            onChange={(locale) => patch({ locale })}
+            onValueChange={(locale) => patch({ locale: locale as AppLocale })}
           />
         </SettingRow>
       </SettingGroup>
@@ -368,24 +368,24 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
 
       <SettingGroup title={t('settings.sounds')}>
         <SettingRow title={t('settings.taskCompleteSound')} description={t('settings.taskCompleteSoundHint')}>
-          <Toggle
-            label={t('settings.taskCompleteSound')}
+          <Switch
+            aria-label={t('settings.taskCompleteSound')}
             checked={settings.notifications.taskComplete}
-            onChange={(taskComplete) => patch({ notifications: { taskComplete } })}
+            onCheckedChange={(taskComplete) => patch({ notifications: { taskComplete } })}
           />
         </SettingRow>
         <SettingRow title={t('settings.permissionSound')} description={t('settings.permissionSoundHint')}>
-          <Toggle
-            label={t('settings.permissionSound')}
+          <Switch
+            aria-label={t('settings.permissionSound')}
             checked={settings.notifications.permissionApproval}
-            onChange={(permissionApproval) => patch({ notifications: { permissionApproval } })}
+            onCheckedChange={(permissionApproval) => patch({ notifications: { permissionApproval } })}
           />
         </SettingRow>
         <SettingRow title={t('settings.planSound')} description={t('settings.planSoundHint')} last>
-          <Toggle
-            label={t('settings.planSound')}
+          <Switch
+            aria-label={t('settings.planSound')}
             checked={settings.notifications.planApproval}
-            onChange={(planApproval) => patch({ notifications: { planApproval } })}
+            onCheckedChange={(planApproval) => patch({ notifications: { planApproval } })}
           />
         </SettingRow>
       </SettingGroup>

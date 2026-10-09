@@ -43,9 +43,9 @@ import { paneOf, type InnerTab } from '../../../../shared/domain/tab'
 import type { Workspace } from '../../../../shared/domain/workspace'
 import type { WorkspaceFileMutationRequest, WorkspaceRecoveryEntry } from '../../../../shared/domain/workspace-file'
 import type { DockNode } from '../../../../shared/domain/dock'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import type { ContextMenuPosition } from '../../components/ui/ContextMenu'
-import { EmptyState } from '../../components/ui/EmptyState'
+import { EmptyState } from '../../components/arc/empty-state/empty-state'
 import { IconButton } from '../../components/ui/IconButton'
 import { Menu, MenuItem, MenuSeparator } from '../../components/ui/Menu'
 import { cn } from '../../lib/cn'
@@ -655,19 +655,20 @@ function WorkspaceFilesView({
         className="scroll-thin min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
       >
         {scope === 'conversation' ? (
-          <EmptyState title={t('files.noConversation')} hint={t('files.noConversationHint')} className="py-10" />
+          <EmptyState title={t('files.noConversation')} description={t('files.noConversationHint')} className="py-10" />
         ) : failed.has(rootPath) ? (
           <div className="flex flex-col items-center py-8">
-            <EmptyState title={t('files.unreadable')} hint={t('files.unreadableHint')} className="pb-4" />
-            <Button size="sm" onClick={() => load(rootPath)} disabled={loading.has(rootPath)}>
+            <EmptyState title={t('files.unreadable')} description={t('files.unreadableHint')} className="pb-4" />
+            <Button type="button" variant="secondary" size="sm" onClick={() => load(rootPath)} disabled={loading.has(rootPath)}>
               {t(loading.has(rootPath) ? 'common.loading' : 'common.retry')}
             </Button>
           </div>
         ) : root === undefined ? (
-          <EmptyState title={t('common.loading')} className="py-10" />
+          <EmptyState title={t('common.loading')} description="" className="py-10" />
         ) : rows.length === 0 ? (
           <EmptyState
             title={query !== null && query !== '' ? t('files.noMatch') : t('files.empty')}
+            description=""
             className="py-10"
           />
         ) : (

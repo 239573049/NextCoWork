@@ -1,14 +1,15 @@
 /**
- * 展开区与「改动审查」两处 diff 的**外框** —— 卡壳、标题、空态、超限提示。
+ * 聊天展开区里那份 diff 的**外框** —— 卡壳、标题、截断提示。
  *
- * 行怎么画已经不在这里了:那一份实现在 `components/diff/DiffLines.tsx`,Git 面板
- * 画的是同一个组件(原先那边是另一套行样式)。这个文件只剩 chat 侧自己的事:
- * 套哪张卡(`detail-card.ts` 规定展开区所有产物块必须长成同一张)、
- * 渲染前截断多少行、超限和无改动时说哪句话。
+ * 行怎么画已经不在这里了:那一份实现在 `components/diff/DiffLines.tsx`。
+ * (「改动审查」整页和 Git 面板画的是 `components/diff/CodeDiffViewer`,一个基于
+ * CodeMirror 的对比视图 —— 那边要横向滚动、并排和折叠,这张小卡片不需要。)
+ * 这个文件只剩 chat 侧自己的事:套哪张卡(`detail-card.ts` 规定展开区所有产物块
+ * 必须长成同一张)、渲染前截断多少行。
  */
 import { useMemo, type ReactNode } from "react";
 import { DiffLines } from "../../components/diff/DiffLines";
-import { computeDiff, computeDiffHunks, hunkLines } from "../../components/diff/compute";
+import { computeDiff } from "../../components/diff/compute";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/cn";
 import { DETAIL_CARD_CLASS } from "./detail-card";
@@ -63,51 +64,5 @@ export function DiffBlock({
         )}
       </div>
     </div>
-  );
-}
-
-/**
- * 改动审查专用的全宽 diff：只呈现 hunk 和邻近上下文，并显示双侧行号。
- *
- * 需求：大文件打开后直接看到改动，同时让代码列占满整个审查面板；可打开的
- * 完整文件由顶部入口承接，不在这里重新铺开成几千行无关上下文。
- */
-export function ReviewDiffBlock({
-  oldStr,
-  newStr,
-  language = "",
-}: {
-  oldStr: string;
-  newStr: string;
-  language?: string;
-}): ReactNode {
-  const { t } = useI18n();
-  const hunks = useMemo(() => computeDiffHunks(oldStr, newStr), [oldStr, newStr]);
-  // hunk 标题行由 `hunkLines` 统一拼(`@@ -a,b +c,d @@`),和 git 解析出来的那一行同形。
-  const lines = useMemo(() => (hunks === null ? null : hunkLines(hunks)), [hunks]);
-  // 需求：极端整文件重写宁可提示打开文件，也不能在渲染线程分配无界 LCS 矩阵。
-  if (lines === null) {
-    return (
-      <div className="flex min-h-full items-center justify-center p-6 text-[12px] text-fg-faint">
-        {t("chat.review.diffTooLarge")}
-      </div>
-    );
-  }
-  if (lines.length === 0) {
-    return (
-      <div className="flex min-h-full items-center justify-center p-6 text-[12px] text-fg-faint">
-        {t("chat.review.noTextChanges")}
-      </div>
-    );
-  }
-
-  return (
-    <DiffLines
-      lines={lines}
-      language={language}
-      lineNumbers
-      wrap={false}
-      className="min-w-full py-2 text-[11.5px] leading-relaxed"
-    />
   );
 }

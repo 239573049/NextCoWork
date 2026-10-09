@@ -5,10 +5,10 @@ import type { Workspace } from '../../../shared/domain/workspace'
 import { isLocalEnvironment } from '../../../shared/domain/environment'
 import { useI18n } from '../i18n'
 import { cn } from '../lib/cn'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { Dialog } from '../components/ui/Dialog'
 import { IconButton } from '../components/ui/IconButton'
-import { Segmented } from '../components/ui/Segmented'
+import SegmentedControl from '../components/arc/segmented-control/segmented-control'
 import { TextInput } from '../components/ui/TextInput'
 
 type WorkspaceFilter = 'all' | 'recent' | 'opened' | 'ssh'
@@ -94,13 +94,16 @@ export function WorkspacePickerDialog({
         <div className="flex w-full flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] text-fg-faint">{t('workspace.switchHint')}</span>
           <div className="flex flex-wrap justify-end gap-2">
-            <Button size="sm" icon={<FolderOpen size={13} />} onClick={() => { onPickWorkspace(); onClose() }}>
+            <Button variant="secondary" type="button" size="sm" onClick={() => { onPickWorkspace(); onClose() }}>
+              <FolderOpen size={13} />
               {t('nav.openFolder')}
             </Button>
-            <Button size="sm" icon={<Folder size={13} />} onClick={() => { onCreateWorkspace(); onClose() }}>
+            <Button variant="secondary" type="button" size="sm" onClick={() => { onCreateWorkspace(); onClose() }}>
+              <Folder size={13} />
               {t('nav.createWorkspace')}
             </Button>
-            <Button size="sm" icon={<Server size={13} />} onClick={() => { onCreateSshWorkspace(); onClose() }}>
+            <Button variant="secondary" type="button" size="sm" onClick={() => { onCreateSshWorkspace(); onClose() }}>
+              <Server size={13} />
               {t('nav.createSshWorkspace')}
             </Button>
           </div>
@@ -118,12 +121,10 @@ export function WorkspacePickerDialog({
             inputRef={searchRef}
             className="min-w-0 flex-1"
           />
-          <Segmented
+          <SegmentedControl
             value={filter}
             options={filterOptions}
-            onChange={setFilter}
-            size="sm"
-            shape="pill"
+            onValueChange={(v) => setFilter(v as WorkspaceFilter)}
             label={t('workspace.filterLabel')}
             className="max-w-full shrink-0 self-start sm:self-auto"
           />

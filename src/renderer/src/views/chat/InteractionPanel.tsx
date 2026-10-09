@@ -10,7 +10,7 @@ import { useI18n, type Translate } from '../../i18n'
 import { AgentMarkdown } from '../../components/markdown'
 import { CheckboxCards, RadioCards, type ChoiceOption } from '../../components/ui/ChoiceCards'
 import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
-import { Segmented } from '../../components/ui/Segmented'
+import SegmentedControl from '../../components/arc/segmented-control/segmented-control'
 import { listInteractions, onAgentEvent, respondInteraction } from '../../services/agent'
 import { onGoalChanged } from '../../services/goal'
 import { copyText, saveTextFile } from '../../services/app'
@@ -357,18 +357,18 @@ function QuestionTabs({ questions, answers, active, disabled, onChange }: {
   // 题头可能长,窄窗口下让它横向滚,而不是把卡片撑破
   return (
     <div className="scroll-thin overflow-x-auto pb-0.5">
-      <Segmented
-        size="sm"
-        disabled={disabled}
-        label={t('agent.interaction.question')}
-        value={String(active)}
-        onChange={(value) => onChange(Number(value))}
-        options={questions.map((question, index) => ({
-          value: String(index),
-          // 打钩的那道已经答过 —— 切换条同时是进度表
-          label: (answers[index] ?? []).length > 0 ? `✓ ${question.header}` : question.header
-        }))}
-      />
+      <fieldset disabled={disabled} className="contents">
+        <SegmentedControl
+          label={t('agent.interaction.question')}
+          value={String(active)}
+          onValueChange={(value) => onChange(Number(value))}
+          options={questions.map((question, index) => ({
+            value: String(index),
+            // 打钩的那道已经答过 —— 切换条同时是进度表
+            label: (answers[index] ?? []).length > 0 ? `✓ ${question.header}` : question.header
+          }))}
+        />
+      </fieldset>
     </div>
   )
 }

@@ -10,7 +10,7 @@
  * 这个文件只负责把 presenter 的输出摆进版式里。新增一个工具的展示规则
  * 不需要动这里一行。
  */
-import { Bot, Brain, CheckCircle2, CircleAlert, Clock3, ListChecks, Square } from "lucide-react";
+import { ArrowDownToLine, Bot, Brain, CheckCircle2, CircleAlert, Clock3, ListChecks, Square } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { formatCallDuration } from "../../../../shared/agent/duration";
 import { elapsedOf, formatDuration } from "../../../../shared/agent/duration";
@@ -40,11 +40,11 @@ import { useWorkspaceFile } from "./workspace-file";
 import { previewOf } from "./interaction-preview";
 import { MAX_PARTIAL_JSON_CHARS, parsePartialJson } from "./partial-json";
 import { ToolIcon, type ToolViewStatus } from "./ToolIcon";
-import { abortRun } from "../../services/agent";
+import { abortRun, backgroundSubagent } from "../../services/agent";
 import { getLastAssistantMessage } from "../../services/sessions";
 import { visibleText } from "../../../../shared/agent/message";
 import { useOpenSubagent } from "./subagent-open";
-import { useStopToolCall } from "./tool-stop";
+import { useBackgroundToolCall, useStopToolCall } from "./tool-stop";
 import { AgentShimmerText } from "./AgentActivity";
 
 /**
@@ -301,6 +301,16 @@ export function ToolCallCard({
   const stop = stopToolCall === undefined || stoppableCallId === undefined
     ? undefined
     : (): void => { stopToolCall(stoppableCallId) };
+  /*
+    需求:跑得比预想久的前台命令(构建、长测试)可以**让它接着跑、但别再等它**。
+    ★ 判据是这一次调用自己报的 `detachable`(主进程只在环境真能收编时才报),
+      不是工具名 —— SSH 上的 Bash 转不了,画出来就是一颗按了没反应的按钮。
+  */
+  const backgroundToolCall = useBackgroundToolCall();
+  const detachableCallId = call?.detachable === true && status === "running" ? call.callId : undefined;
+  const background = backgroundToolCall === undefined || detachableCallId === undefined
+    ? undefined
+    : (): void => { backgroundToolCall(detachableCallId) };
 
   /*
     需求:图标要按目标文件的扩展名选(`.tsx` → 蓝色 TS 图标),所以行内容得先算出来。
@@ -360,18 +370,34 @@ export function ToolCallCard({
             <StatusSlot status={status} duration={duration} />
           </>
         }
-        actions={stop === undefined ? undefined : (
-          /* 停止按钮是行的**兄弟**,不是展开按钮的子节点 —— 按钮不能套按钮 */
-          <button
-            type="button"
-            data-testid="tool-stop"
-            onClick={stop}
-            aria-label={t("chat.tool.stop")}
-            title={t("chat.tool.stop")}
-            className="ml-1.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-danger transition-colors hover:bg-danger/10 motion-reduce:transition-none"
-          >
-            <Square size={10} />
-          </button>
+        actions={stop === undefined && background === undefined ? undefined : (
+          /* 动作按钮是行的**兄弟**,不是展开按钮的子节点 —— 按钮不能套按钮 */
+          <>
+            {background !== undefined && (
+              <button
+                type="button"
+                data-testid="tool-background"
+                onClick={background}
+                aria-label={t("chat.tool.background")}
+                title={t("chat.tool.background")}
+                className="ml-1.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg motion-reduce:transition-none"
+              >
+                <ArrowDownToLine size={12} />
+              </button>
+            )}
+            {stop !== undefined && (
+              <button
+                type="button"
+                data-testid="tool-stop"
+                onClick={stop}
+                aria-label={t("chat.tool.stop")}
+                title={t("chat.tool.stop")}
+                className="ml-1.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-danger transition-colors hover:bg-danger/10 motion-reduce:transition-none"
+              >
+                <Square size={10} />
+              </button>
+            )}
+          </>
         )}
       />
 
@@ -527,6 +553,15 @@ export function SubagentNode({
     if (state?.childRunId !== undefined) void abortRun(state.childRunId, true)
   }
   /*
+    需求:前台子代理跑得比预想久时,让主代理先接着干别的 —— 子代理不停,
+    结论跑完后按后台那条路送回来。只对**还在跑的前台**子代理成立。
+    ★ 失败静默:false 只意味着它刚好跑完了,用户要的「别再等」已经成立。
+  */
+  const childRunId = state?.childRunId
+  const toBackground = running && !background && childRunId !== undefined
+    ? (): void => { void backgroundSubagent(childRunId).catch(() => {}) }
+    : undefined
+  /*
     ★ 没有 `childSessionId` 的是**旧转录**(那个字段是随这次改动才加进
     `subagent_start` 的)。它们点开会是一个空面板,所以这里索性不让点 ——
     一张点了没反应的卡片比一张不能点的卡片难解释得多。
@@ -625,6 +660,18 @@ export function SubagentNode({
             {duration !== undefined && <span className="font-mono text-[11.5px] text-fg-faint">{duration}</span>}
           </span>
         </button>
+        {toBackground !== undefined && (
+          <button
+            type="button"
+            data-testid="subagent-background"
+            onClick={toBackground}
+            aria-label={t('chat.subagent.toBackground')}
+            title={t('chat.subagent.toBackground')}
+            className="ml-1.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg"
+          >
+            <ArrowDownToLine size={12} />
+          </button>
+        )}
         {running && (
           <button
             type="button"

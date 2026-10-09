@@ -4,10 +4,10 @@ import { isImageModelAlias, type ModelAlias, type UpstreamProvider } from "../..
 import { selectModelBinding } from "../../../../../shared/domain/model-selection";
 import type { AppSettings } from "../../../../../shared/domain/settings";
 import { PROVIDER_PRESETS, CLIENT_PROVIDER_ID } from "../../../../../shared/domain/presets";
-import { Button } from "../../../components/ui/Button";
-import { EmptyState } from "../../../components/ui/EmptyState";
+import { Button } from "../../../components/arc/button/button";
+import { EmptyState } from "../../../components/arc/empty-state/empty-state";
 import { TextInput } from "../../../components/ui/TextInput";
-import { Toggle } from "../../../components/ui/Toggle";
+import { Switch } from "../../../components/arc/switch/switch";
 import { ProviderModelMenu, type ProviderModelMenuRow } from "../../../components/ProviderModelMenu";
 import { cn } from "../../../lib/cn";
 import { useI18n } from "../../../i18n";
@@ -100,7 +100,7 @@ export function ImageModelPage({ settings, patch }: Pick<SettingsPageProps, "set
               <Info size={14} className="mt-0.5 shrink-0 text-icon" />
               <span>{t("models.imageEmptyHint")}</span>
             </div>
-            <EmptyState icon={<ImageIcon size={22} />} title={t("models.imageNoProvider")} hint={t("models.imageAddHint")} />
+            <EmptyState icon={<ImageIcon size={22} />} title={t("models.imageNoProvider")} description={t("models.imageAddHint")} />
           </div>
         )}
       </div>
@@ -136,10 +136,10 @@ function ImageGenToggleRow({
         <p className="text-[12.5px] text-fg">{t("imageGen.enabled")}</p>
         <p className="mt-0.5 text-[11px] text-fg-faint">{t("imageGen.enabledHint")}</p>
       </div>
-      <Toggle
-        label={t("imageGen.enabled")}
+      <Switch
+        aria-label={t("imageGen.enabled")}
         checked={settings.imageGenerationEnabled}
-        onChange={(imageGenerationEnabled) => patch({ imageGenerationEnabled })}
+        onCheckedChange={(imageGenerationEnabled) => patch({ imageGenerationEnabled })}
       />
     </div>
   );
@@ -297,5 +297,5 @@ function CustomImageProviderForm({ onCancel, onAdded }: { onCancel: () => void; 
   const { t } = useI18n();
   const [name, setName] = useState(""); const [baseUrl, setBaseUrl] = useState(""); const [model, setModel] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const submit = async (): Promise<void> => { const id = `image-${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"}`; if (!name.trim() || !baseUrl.trim() || !model.trim()) return; setBusy(true); setError(null); try { await upsertProvider({ id, name: name.trim(), baseUrl: baseUrl.trim(), protocol: "openai-chat", credentialRef: `provider:${id}`, priority: 60, enabled: true }); const aliases = await setProviderAliases(id, [model.trim()]); await Promise.all(aliases.map((entry) => updateModel({ ...entry, modality: "image", capabilities: { ...entry.capabilities, textInput: false, textOutput: false, imageOutput: true } }))); onAdded(id); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(false); } };
-  return <div className="space-y-3 px-4 py-4"><p className="text-[12px] leading-[1.6] text-fg-muted">{t("models.imageCustomHint")}</p>{error !== null && <p className="rounded-[8px] bg-danger/10 px-3 py-2 text-[11.5px] text-danger">{error}</p>}<label className="block text-[11.5px] text-fg-muted">{t("provider.name")}<TextInput value={name} onChange={setName} ariaLabel={t("provider.name")} /></label><label className="block text-[11.5px] text-fg-muted">{t("provider.apiAddress")}<TextInput value={baseUrl} onChange={setBaseUrl} ariaLabel={t("provider.apiAddress")} inputMode="url" /></label><label className="block text-[11.5px] text-fg-muted">{t("provider.modelIdLabel")}<TextInput value={model} onChange={setModel} ariaLabel={t("provider.modelIdLabel")} /></label><div className="flex justify-end gap-2"><Button size="sm" onClick={onCancel}>{t("common.cancel")}</Button><Button size="sm" variant="accent" disabled={busy} onClick={() => void submit()}>{t("common.save")}</Button></div></div>;
+  return <div className="space-y-3 px-4 py-4"><p className="text-[12px] leading-[1.6] text-fg-muted">{t("models.imageCustomHint")}</p>{error !== null && <p className="rounded-[8px] bg-danger/10 px-3 py-2 text-[11.5px] text-danger">{error}</p>}<label className="block text-[11.5px] text-fg-muted">{t("provider.name")}<TextInput value={name} onChange={setName} ariaLabel={t("provider.name")} /></label><label className="block text-[11.5px] text-fg-muted">{t("provider.apiAddress")}<TextInput value={baseUrl} onChange={setBaseUrl} ariaLabel={t("provider.apiAddress")} inputMode="url" /></label><label className="block text-[11.5px] text-fg-muted">{t("provider.modelIdLabel")}<TextInput value={model} onChange={setModel} ariaLabel={t("provider.modelIdLabel")} /></label><div className="flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onCancel}>{t("common.cancel")}</Button><Button type="button" variant="primary" disabled={busy} onClick={() => void submit()}>{t("common.save")}</Button></div></div>;
 }

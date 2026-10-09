@@ -9,7 +9,7 @@ import type {
   UsageWindow
 } from '../../../../../shared/domain/usage'
 import { TextInput } from '../../../components/ui/TextInput'
-import { Toggle } from '../../../components/ui/Toggle'
+import { Switch } from '../../../components/arc/switch/switch'
 import { useI18n, type Locale, type Translate } from '../../../i18n'
 import { cn } from '../../../lib/cn'
 import {
@@ -477,10 +477,10 @@ function RequestLogs({
         <span className="flex-1" />
         <label className="flex items-center gap-2 text-[11px] text-fg-muted">
           {t('usage.showDetails')}
-          <Toggle
+          <Switch
             checked={showAllDetails}
-            onChange={onShowAllDetails}
-            label={t('usage.showDetails')}
+            onCheckedChange={onShowAllDetails}
+            aria-label={t('usage.showDetails')}
           />
         </label>
         <span className="text-[11px] text-fg-faint">

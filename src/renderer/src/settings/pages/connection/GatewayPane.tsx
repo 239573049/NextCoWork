@@ -7,7 +7,7 @@
  */
 import type { ReactNode } from "react";
 import { NumberInput } from "../../../components/ui/NumberInput";
-import { Toggle } from "../../../components/ui/Toggle";
+import { Switch } from "../../../components/arc/switch/switch";
 import { useI18n } from "../../../i18n";
 import { LandsAt, SettingGroup, SettingRow, TodoRow } from "../../Row";
 import type { SettingsPageProps } from "../../props";
@@ -26,10 +26,10 @@ export function GatewayPane({ settings, patch }: SettingsPageProps): ReactNode {
           </>
         }
       >
-        <Toggle
-          label={t("connection.gateway.enable")}
+        <Switch
+          aria-label={t("connection.gateway.enable")}
           checked={g.enabled}
-          onChange={(enabled) => patch({ gateway: { enabled } })}
+          onCheckedChange={(enabled) => patch({ gateway: { enabled } })}
         />
       </SettingRow>
 
@@ -51,11 +51,11 @@ export function GatewayPane({ settings, patch }: SettingsPageProps): ReactNode {
         title={t("connection.gateway.failover")}
         description={t("connection.gateway.failoverHint")}
       >
-        <Toggle
-          label={t("connection.gateway.failover")}
+        <Switch
+          aria-label={t("connection.gateway.failover")}
           checked={g.failover}
           disabled={!g.enabled}
-          onChange={(failover) => patch({ gateway: { failover } })}
+          onCheckedChange={(failover) => patch({ gateway: { failover } })}
         />
       </SettingRow>
 
@@ -71,10 +71,10 @@ export function GatewayPane({ settings, patch }: SettingsPageProps): ReactNode {
         title={t("providerAccount.rotation")}
         description={t("providerAccount.rotationHint")}
       >
-        <Toggle
-          label={t("providerAccount.rotation")}
+        <Switch
+          aria-label={t("providerAccount.rotation")}
           checked={settings.providerAccountRotation}
-          onChange={(providerAccountRotation) => patch({ providerAccountRotation })}
+          onCheckedChange={(providerAccountRotation) => patch({ providerAccountRotation })}
         />
       </SettingRow>
 

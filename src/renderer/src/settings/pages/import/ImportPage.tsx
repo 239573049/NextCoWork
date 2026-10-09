@@ -25,8 +25,8 @@ import type {
 import type { ImportSourceKind } from '../../../../../shared/domain/import'
 import { IMPORT_LIMITS } from '../../../../../shared/domain/import'
 import type { Workspace } from '../../../../../shared/domain/workspace'
-import { Button } from '../../../components/ui/Button'
-import { Toggle } from '../../../components/ui/Toggle'
+import { Button } from '../../../components/arc/button/button'
+import { Switch } from '../../../components/arc/switch/switch'
 import { cn } from '../../../lib/cn'
 import { useI18n, type Translate, type TranslationKey } from '../../../i18n'
 import * as importService from '../../../services/import'
@@ -155,8 +155,8 @@ export function ImportPage(): ReactNode {
             </>
           }
         >
-          <Toggle
-            label={t('import.autoSync')}
+          <Switch
+            aria-label={t('import.autoSync')}
             checked={sync?.enabled === true}
             /*
               ★ 没检测到来源、或还没授权任何类别时**开不了**。
@@ -164,7 +164,7 @@ export function ImportPage(): ReactNode {
               用户会以为功能坏了,而其实是他还没选内容。
             */
             disabled={!detected || busy !== null || (sync?.categories.length ?? 0) === 0}
-            onChange={(enabled) => {
+            onCheckedChange={(enabled) => {
               void run('sync-toggle', async () => {
                 setState(await importService.updateSync(sourceId, { enabled }))
               })
@@ -181,16 +181,18 @@ export function ImportPage(): ReactNode {
           }
         >
           <div className="flex items-center gap-2">
-            <Button disabled={!detected} onClick={() => setModal({ kind: 'sync' })}>
+            <Button type="button" variant="secondary" disabled={!detected} onClick={() => setModal({ kind: 'sync' })}>
               {t('import.customize')}
             </Button>
             <Button
+              type="button"
+              variant="secondary"
               disabled={!detected || sync?.enabled !== true || running || busy !== null}
-              icon={busy === 'sync-now' ? <Spinner size="sm" /> : <RefreshCw size={13} />}
               onClick={() => {
                 void run('sync-now', () => importService.syncNow(sourceId))
               }}
             >
+              {busy === 'sync-now' ? <Spinner size="sm" /> : <RefreshCw size={13} />}
               {t('import.syncNow')}
             </Button>
           </div>
@@ -200,16 +202,16 @@ export function ImportPage(): ReactNode {
       {/* ── 来源 ── */}
       <Section title={t('import.fromOtherApps')}>
         <div className="mb-2 flex items-center gap-2">
-          <Button variant={sourceKind === 'claude-code' ? 'accent' : undefined} onClick={() => { setSourceKind('claude-code') }}>
+          <Button type="button" variant={sourceKind === 'claude-code' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('claude-code') }}>
             {t('import.sourceClaude')}
           </Button>
-          <Button variant={sourceKind === 'codex' ? 'accent' : undefined} onClick={() => { setSourceKind('codex') }}>
+          <Button type="button" variant={sourceKind === 'codex' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('codex') }}>
             {t('import.sourceCodex')}
           </Button>
-          <Button variant={sourceKind === 'opencode' ? 'accent' : undefined} onClick={() => { setSourceKind('opencode') }}>
+          <Button type="button" variant={sourceKind === 'opencode' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('opencode') }}>
             {t('import.sourceOpencode')}
           </Button>
-          <Button variant={sourceKind === 'opencowork' ? 'accent' : undefined} onClick={() => { setSourceKind('opencowork') }}>
+          <Button type="button" variant={sourceKind === 'opencowork' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('opencowork') }}>
             {t('import.sourceOpencowork')}
           </Button>
         </div>
@@ -247,7 +249,8 @@ export function ImportPage(): ReactNode {
         >
           <div className="flex items-center gap-2">
             <Button
-              icon={busy === 'detect' ? <Spinner size="sm" /> : <RefreshCw size={13} />}
+              type="button"
+              variant="secondary"
               disabled={busy !== null}
               onClick={() => {
                   void run('detect', async () => {
@@ -255,10 +258,12 @@ export function ImportPage(): ReactNode {
                 })
               }}
             >
+              {busy === 'detect' ? <Spinner size="sm" /> : <RefreshCw size={13} />}
               {t('import.detect')}
             </Button>
             <Button
-              icon={<FolderOpen size={13} />}
+              type="button"
+              variant="secondary"
               disabled={busy !== null}
               onClick={() => {
                 void run('choose', async () => {
@@ -266,16 +271,18 @@ export function ImportPage(): ReactNode {
                 })
               }}
             >
+              <FolderOpen size={13} />
               {t('import.chooseDirectory')}
             </Button>
             <Button
-              variant="accent"
-              icon={busy === 'preview' ? <Spinner size="sm" /> : <DownloadCloud size={13} />}
+              type="button"
+              variant="primary"
               disabled={!detected || running || busy !== null}
               onClick={() => {
                 void openSelection()
               }}
             >
+              {busy === 'preview' ? <Spinner size="sm" /> : <DownloadCloud size={13} />}
               {t('import.startImport')}
             </Button>
           </div>
@@ -309,7 +316,7 @@ export function ImportPage(): ReactNode {
             last
           >
             {running ? (
-              <Button onClick={() => void importService.cancel(job.jobId)}>{t('import.cancel')}</Button>
+              <Button type="button" variant="secondary" onClick={() => void importService.cancel(job.jobId)}>{t('import.cancel')}</Button>
             ) : (
               /* 进度条只在跑的时候有意义;跑完之后这里留一条时间,而不是一颗死按钮。 */
               <span className="text-[11.5px] text-fg-faint">
@@ -339,12 +346,16 @@ export function ImportPage(): ReactNode {
               })}
             </span>
             <Button
+              type="button"
+              variant="secondary"
               disabled={historyOffset === 0}
               onClick={() => void refreshHistory(Math.max(0, historyOffset - IMPORT_LIMITS.pageSize))}
             >
               {t('import.prevPage')}
             </Button>
             <Button
+              type="button"
+              variant="secondary"
               disabled={historyOffset + IMPORT_LIMITS.pageSize >= historyTotal}
               onClick={() => void refreshHistory(historyOffset + IMPORT_LIMITS.pageSize)}
             >
@@ -475,6 +486,8 @@ function BatchRow({
                     <span className="text-[11px] text-fg-faint">{t('import.targetMissing')}</span>
                   ) : (
                     <Button
+                      type="button"
+                      variant="secondary"
                       size="sm"
                       onClick={() => {
                         openSession(item.targetWorkspaceId ?? '', item.targetId ?? '', item.title)

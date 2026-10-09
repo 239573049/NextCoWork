@@ -1349,3 +1349,22 @@ describe('定价与用量的表结构', () => {
     d.close()
   })
 })
+
+describe('lastGoalStatusMessage · 目标恢复只读最后一条标记', () => {
+  const assistant = (id: string, parts: AgentMessage['parts']): AgentMessage =>
+    ({ id, role: 'assistant', parts, createdAt: 1, schemaVersion: 1 })
+
+  it('取最后一条真带 goal_status 的助手消息;正文里恰好出现那串字符的不算', () => {
+    const goal = (condition: string) => ({ type: 'goal_status' as const, met: false, condition })
+    store.setHistory('goal-session', [
+      assistant('a1', [{ type: 'text', text: '好' }, goal('旧目标')]),
+      assistant('a2', [{ type: 'text', text: '好' }, goal('新目标')]),
+      // 转义后的引号让它不会命中;下划线是 LIKE 通配,换成别的字符的那一条会命中候选但要被解析排除
+      assistant('a3', [{ type: 'text', text: '"type":"goal_status"' }]),
+      assistant('a4', [{ type: 'text', text: '好' }, { type: 'goal-status' } as never]),
+      { id: 'u1', role: 'user', parts: [{ type: 'text', text: '继续' }], createdAt: 2, schemaVersion: 1 }
+    ])
+    expect(store.lastGoalStatusMessage('goal-session')?.id).toBe('a2')
+    expect(store.lastGoalStatusMessage('no-such-session')).toBeUndefined()
+  })
+})

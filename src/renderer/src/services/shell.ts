@@ -17,3 +17,12 @@ import { invoke } from './ipc'
 export function stopToolCall(runId: string, callId: string): Promise<boolean> {
   return invoke('shell:stopToolCall', { runId, callId })
 }
+
+/**
+ * 把某次工具调用正在跑的命令转去后台:不杀它,只是不再等它。
+ *
+ * 返回 `false` = 没转成(已经跑完 / 环境不支持 / 后台名额已满)。同样不是错误。
+ */
+export function backgroundToolCall(runId: string, callId: string): Promise<boolean> {
+  return invoke('shell:backgroundToolCall', { runId, callId })
+}

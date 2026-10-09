@@ -1,7 +1,7 @@
 import { ArrowRight, Building2, UserRound } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import type { ClientAuthState, ClientTeamOption } from '../../../shared/domain/client-auth'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { Mark } from '../components/brand/Mark'
 import { useI18n } from '../i18n'
 import { selectClientTeam } from '../services/client-auth'
@@ -40,7 +40,8 @@ export function ClientTeamSelectionView({ auth, onComplete }: { auth: ClientAuth
           {teams.map((team) => (
             <Button
               key={team.id}
-              variant="ghost"
+              type="button"
+              variant="secondary"
               disabled={busy !== null}
               onClick={() => void choose(team)}
               className="group flex h-auto w-full items-center justify-start gap-3 rounded-[12px] border border-white/10 bg-white/[.045] px-4 py-3 text-left text-white hover:border-accent/50 hover:bg-white/[.09]"

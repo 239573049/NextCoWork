@@ -25,6 +25,7 @@ import { useDragReorder } from "./useDragReorder";
 import { TabRenameInput } from "./TabRenameInput";
 import { useI18n, type Translate } from "../i18n";
 import { Spinner } from '../components/ui/Spinner'
+import { Tabs } from "radix-ui";
 import { WorkspacePickerDialog } from './WorkspacePickerDialog'
 
 function featureLabel(t: Translate, feature: FeatureKind): string {
@@ -181,7 +182,20 @@ export function OuterTabBar({
         close button overlap the trigger. The list can now scroll while + always has
         its own fixed hit target.
       */}
-      <div ref={stripRef} className="app-no-drag tab-strip-scroll flex w-max min-w-0 max-w-full flex-initial items-end gap-0.5 overflow-x-auto overflow-y-hidden">
+      {/*
+        ★ 键盘操作交给 Radix 的 Tabs(只用 Root / List / Trigger,不用 Content):
+        tablist 语义、只有一个 Tab 在 Tab 键序里(roving tabindex)、←/→/Home/End 移动焦点,
+        都是它的。`activationMode="manual"`:方向键只挪焦点,Enter / 空格才切过去 ——
+        自动激活的话,用方向键扫过一排工作区就会依次把它们全部打开一遍。
+        Delete 关闭、F2 改名、菜单键开右键菜单是这里补的(`onTabKeyDown`)。
+      */}
+      <Tabs.Root asChild value={activeId ?? ""} onValueChange={onActivate} activationMode="manual">
+      <div className="flex min-w-0 flex-initial">
+      <Tabs.List
+        ref={stripRef}
+        aria-label={t("nav.allTabs")}
+        className="app-no-drag tab-strip-scroll flex w-max min-w-0 max-w-full flex-initial items-end gap-0.5 overflow-x-auto overflow-y-hidden"
+      >
         {tabs.map((tab, i) => {
         const active = tab.id === activeId;
         const running =
@@ -197,10 +211,21 @@ export function OuterTabBar({
             : featureLabel(t, tab.ref.feature);
         const Icon =
           tab.kind === "workspace" ? (isLocalEnvironment(ws?.environment) ? Folder : Server) : FEATURE_ICON[tab.ref.feature];
+        // 分隔线只画在两张未激活的 Tab 之间:挨着激活的那张时,舌头自己就是分界
+        const separator = !active && i < tabs.length - 1 && tabs[i + 1]?.id !== activeId;
+        const close = (): void => {
+          onClose(tab.id);
+          // 键盘关掉之后焦点别掉回 body:落到原位置上的那张(没有就是前一张)
+          requestAnimationFrame(() => {
+            const remaining = stripRef.current?.querySelectorAll<HTMLElement>("[data-outer-tab-id]");
+            if (remaining === undefined || remaining.length === 0) return;
+            remaining[Math.min(i, remaining.length - 1)]?.focus();
+          });
+        };
 
           return (
+          <Tabs.Trigger key={tab.id} value={tab.id} asChild>
           <div
-            key={tab.id}
             data-outer-tab-id={tab.id}
             style={styleFor(i)}
             onPointerDown={(e) => {
@@ -214,20 +239,59 @@ export function OuterTabBar({
               // `e.detail >= 2` 判双击,理由同 InnerTabBar(不用计时器消歧)
               if (e.detail >= 2 && canRename(tab)) setEditingId(tab.id);
             }}
+            onKeyDown={(e) => {
+              // 改名输入框里的按键会冒泡上来,那些不归这里管
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Delete" || e.key === "Backspace") {
+                e.preventDefault();
+                close();
+              } else if (e.key === "F2" && canRename(tab)) {
+                e.preventDefault();
+                setEditingId(tab.id);
+              } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                e.preventDefault();
+                const box = e.currentTarget.getBoundingClientRect();
+                setContextMenu({ tabId: tab.id, position: { x: box.left, y: box.bottom } });
+              }
+            }}
             onContextMenu={(event) => {
               event.preventDefault();
               setContextMenu({ tabId: tab.id, position: { x: event.clientX, y: event.clientY } });
             }}
-            role="tab"
-            aria-selected={active}
             title={ws?.rootPath ?? label}
             className={cn(
               "app-no-drag group relative flex h-[30px] max-w-[200px] min-w-0 shrink-0 items-center",
-              "gap-1.5 rounded-t-[10px] pr-1.5 pl-3 text-[13px] select-none",
+              "gap-1.5 rounded-t-[10px] text-[13px] select-none",
+              // Tab 在横向滚动的容器里,上下会被裁:键盘焦点框往里收,不然只剩两条竖边
+              "[--focus-outline-offset:-2px]",
               !dragging && "transition-[transform,background-color]",
+              /*
+                `--tab-bg` 是这张 Tab 此刻**不透明**的底色。悬停出现的关闭按钮压在文字尾巴上,
+                它左侧那段渐隐要渐到这个颜色才看不出接缝 —— 所以悬停色不能直接用
+                半透明的 `tint-hover/60`,而是先和条底 `chrome` 混成实色。
+              */
               active
-                ? "bg-canvas text-fg"
-                : "text-fg-muted hover:bg-tint-hover/60 hover:text-fg",
+                ? "bg-canvas pr-1.5 pl-3 text-fg [--tab-bg:var(--color-canvas)]"
+                : cn(
+                    "px-3 text-fg-muted [--tab-bg:var(--color-chrome)] hover:text-fg",
+                    "hover:bg-(--tab-bg) hover:[--tab-bg:color-mix(in_oklab,var(--color-tint-hover)_60%,var(--color-chrome))]",
+                  ),
+              /*
+                激活 Tab 底部两侧的反向圆角:舌头往两边弯出去,和下面的画布连成一体,
+                而不是一个方块直直插进内容区。用画布色的径向渐变挖出四分之一圆。
+              */
+              active && [
+                "before:pointer-events-none before:absolute before:bottom-0 before:-left-2.5 before:size-2.5",
+                "before:bg-[radial-gradient(circle_at_0_0,transparent_10px,var(--color-canvas)_10.5px)]",
+                "after:pointer-events-none after:absolute after:-right-2.5 after:bottom-0 after:size-2.5",
+                "after:bg-[radial-gradient(circle_at_100%_0,transparent_10px,var(--color-canvas)_10.5px)]",
+              ],
+              separator && [
+                "after:pointer-events-none after:absolute after:top-1/2 after:right-[-2px] after:h-3.5 after:w-px",
+                "after:-translate-y-1/2 after:bg-hairline after:transition-opacity",
+                // 自己或右边那张被悬停时,它的底色就是分界,竖线收掉
+                "hover:after:opacity-0 [&:has(+*:hover)]:after:opacity-0",
+              ],
             )}
           >
             {/*
@@ -254,29 +318,55 @@ export function OuterTabBar({
             ) : (
               <span className="min-w-0 flex-1 truncate">{label}</span>
             )}
-            {running && (
-              <Spinner size="xs" label={t('chat.taskChecklistRunning')} className="text-accent" />
+            {/*
+              尾部只有一个槽,不再给「运行中」和「关闭」各留一格:
+                - 激活的 Tab:槽常驻,平时是 ×,运行中是转圈,悬停 / 聚焦时转圈换成 ×;
+                - 未激活的 Tab:不留槽(原来那 18px 平时是空白)。运行中的转圈照常排在
+                  文字后面;× 只在悬停 / 聚焦时**压**在尾部,左边一段渐隐盖住文字尾巴。
+              × 不进 Tab 键序:键盘上关闭是 Delete,同一个动作没必要停两次。
+            */}
+            {active ? (
+              <span className="relative flex size-[18px] shrink-0 items-center justify-center">
+                {running && (
+                  <Spinner
+                    size="xs"
+                    label={t("chat.taskChecklistRunning")}
+                    className="text-accent transition-opacity group-focus-within:opacity-0 group-hover:opacity-0"
+                  />
+                )}
+                <TabCloseButton
+                  label={t("nav.closeTab", { label })}
+                  onClose={close}
+                  className={running ? "absolute inset-0 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100" : undefined}
+                />
+              </span>
+            ) : (
+              <>
+                {running && (
+                  <Spinner size="xs" label={t("chat.taskChecklistRunning")} className="text-accent" />
+                )}
+                <span
+                  className={cn(
+                    "pointer-events-none absolute inset-y-0 right-0 flex items-center rounded-tr-[10px] pr-1.5 pl-5",
+                    "bg-linear-to-r from-transparent to-(--tab-bg) to-45%",
+                    "opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100",
+                  )}
+                >
+                  <TabCloseButton
+                    label={t("nav.closeTab", { label })}
+                    onClose={close}
+                    className="pointer-events-auto"
+                  />
+                </span>
+              </>
             )}
-            <button
-              type="button"
-              aria-label={t("nav.closeTab", { label })}
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation();
-                onClose(tab.id);
-              }}
-              className={cn(
-                "app-no-drag flex size-[18px] shrink-0 items-center justify-center rounded-[5px]",
-                "text-fg-faint opacity-0 transition-opacity group-hover:opacity-100",
-                "hover:bg-tint-strong hover:text-fg focus-visible:opacity-100",
-              )}
-            >
-              <X size={12} />
-            </button>
           </div>
+          </Tabs.Trigger>
           );
         })}
+      </Tabs.List>
       </div>
+      </Tabs.Root>
 
       {hiddenTabIds.length > 0 && (
         <Menu
@@ -424,5 +514,40 @@ export function OuterTabBar({
         </ContextMenu>
       )}
     </div>
+  );
+}
+
+/**
+ * Tab 尾部的 ×。按下时拦住冒泡:不拦的话 pointerdown 会先触发外层的拖排序,
+ * click 会先激活这张 Tab 再关掉它。
+ */
+function TabCloseButton({
+  label,
+  onClose,
+  className,
+}: {
+  label: string;
+  onClose: () => void;
+  className?: string;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      aria-label={label}
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClose();
+      }}
+      className={cn(
+        "app-no-drag flex size-[18px] shrink-0 items-center justify-center rounded-[5px]",
+        "text-fg-faint transition-opacity hover:bg-tint-strong hover:text-fg",
+        className,
+      )}
+    >
+      <X size={12} />
+    </button>
   );
 }

@@ -197,6 +197,46 @@ describe.skipIf(process.platform === 'win32')('spawn 超时', () => {
   })
 })
 
+describe.skipIf(process.platform === 'win32')('spawn 转后台', () => {
+  it('★ detach 后立刻返回已有输出,进程原样交出且超时不再生效', async () => {
+    const detach = new AbortController()
+    const p = spawn('echo early; sleep 0.6; echo late', { ...opts({ timeoutMs: 300 }), detach: detach.signal })
+    await new Promise((r) => setTimeout(r, 150))
+    detach.abort()
+    const r = await p
+    expect(r.detached).toBeDefined()
+    expect(r.stdout).toContain('early')
+    // 交出去的管道继续出数据;超时 300ms 已经卸掉,进程能活到自己退出
+    let tail = ''
+    r.detached!.stdout.on('data', (chunk: Buffer) => { tail += chunk.toString('utf8') })
+    // 交出来的流是 pause 过的:接手方负责 resume(见 node-spawn 的 onDetach)
+    r.detached!.stdout.resume()
+    r.detached!.stderr.resume()
+    const exit = await r.detached!.exited
+    expect(exit.code).toBe(0)
+    expect(tail).toContain('late')
+  })
+
+  it('交出去的进程 kill 时带走整棵树', async () => {
+    const pidFile = join(root, 'detach.pid')
+    const detach = new AbortController()
+    const p = spawn(`sleep 30 & echo $! > ${pidFile}; wait`, { ...opts(), detach: detach.signal })
+    const pid = await waitPidFile(pidFile)
+    detach.abort()
+    const r = await p
+    r.detached!.kill()
+    await expect(waitGone(pid)).resolves.toBe(true)
+  })
+
+  it('已经跑完的命令不会被 detach 改写成「转走了」', async () => {
+    const detach = new AbortController()
+    const r = await spawn('echo done', { ...opts(), detach: detach.signal })
+    detach.abort()
+    expect(r.detached).toBeUndefined()
+    expect(r.code).toBe(0)
+  })
+})
+
 describe.skipIf(process.platform === 'win32')('spawn 中断', () => {
   it('★ 中断**抛出** AbortError,不返回一个普通结果', async () => {
     const ac = new AbortController()

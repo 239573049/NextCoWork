@@ -80,7 +80,7 @@ import {
   removeAttachment,
   uploadAttachment
 } from './attachment'
-import { abortRun, attachRun, broadcastActiveRuns, interjectRun, listInteractions, queueSessionInput, reportBackgroundChild, respondInteraction, sessionRuntime, setRunPermissionMode, startChildRun, startRun, stopToolCall, unwatchRun } from './agent'
+import { abortRun, attachRun, backgroundSubagent, backgroundToolCall, broadcastActiveRuns, interjectRun, listInteractions, queueSessionInput, reportBackgroundChild, respondInteraction, sessionRuntime, setRunPermissionMode, startChildRun, startRun, stopToolCall, unwatchRun } from './agent'
 import { runs } from '../kernel/run-registry'
 import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
@@ -193,6 +193,7 @@ import {
   createGitBranch,
   generateGitCommitMessage,
   getGitDiff,
+  getGitDiffSides,
   getGitOverview,
   listGitBranches,
   listGitCommits,
@@ -451,6 +452,7 @@ const handlers: HandlerMap = {
   'git:listBranches': (req) => listGitBranches(req),
   'git:listCommits': (req) => listGitCommits(req),
   'git:getDiff': (req) => getGitDiff(req),
+  'git:getDiffSides': (req) => getGitDiffSides(req),
   'git:stage': (req) => stageGitPaths(req),
   'git:unstage': (req) => unstageGitPaths(req),
   'git:commit': (req) => commitGit(req),
@@ -578,6 +580,8 @@ const handlers: HandlerMap = {
   },
   // ── Agent 的 shell:只停这一条命令,run 继续 ──
   'shell:stopToolCall': (req, ctx) => stopToolCall(req, ctx),
+  'shell:backgroundToolCall': (req, ctx) => backgroundToolCall(req, ctx),
+  'agent:backgroundSubagent': (req, ctx) => backgroundSubagent(req, ctx),
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
   'terminal:prepare': (req, ctx) => terminalHost.prepare(req, ctx.sender),

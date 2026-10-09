@@ -24,7 +24,7 @@ import {
   YAxis
 } from 'recharts'
 import { useI18n, type Locale, type Translate } from '../../../../i18n'
-import { EmptyState } from '../../../../components/ui/EmptyState'
+import { EmptyState } from '../../../../components/arc/empty-state/empty-state'
 import { formatCompactNumber, formatDayLong, formatDayShort, formatNumber } from '../usage-format'
 import type { ModelTrendPoint } from '../usage-model-trend'
 
@@ -101,7 +101,7 @@ export function DailyTrendChart({
 }): React.ReactNode {
   const { t, locale } = useI18n()
 
-  if (points.length === 0) return <EmptyState title={t('usage.trend.empty')} />
+  if (points.length === 0) return <EmptyState title={t('usage.trend.empty')} description="" />
 
   return (
     <div className="min-w-0">

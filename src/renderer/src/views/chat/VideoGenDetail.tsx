@@ -25,7 +25,7 @@ import { AlertTriangle, Check, Copy, Download, Loader2, RotateCw, X } from 'luci
 import { useState, type ReactNode } from 'react'
 import { pick } from '../../../../shared/domain/tool-presenter'
 import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { copyText } from '../../services/app'
@@ -179,8 +179,9 @@ function CancelButton({ jobId, requested }: { jobId: string; requested: boolean 
   return (
     <>
       <Button
+        type="button"
+        variant="secondary"
         size="sm"
-        icon={busy ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
         disabled={busy || requested}
         onClick={() => {
           setBusy(true)
@@ -197,7 +198,7 @@ function CancelButton({ jobId, requested }: { jobId: string; requested: boolean 
             .finally(() => setBusy(false))
         }}
       >
-        {requested ? t('videoGen.card.canceling') : t('videoGen.card.cancel')}
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}{requested ? t('videoGen.card.canceling') : t('videoGen.card.cancel')}
       </Button>
       {error !== null && (
         /* ★ 不支持取消的家会走到这里 —— 那句话必须**留在界面上**(而不是悬停提示) */
@@ -214,15 +215,16 @@ function RetryRetrievalButton({ jobId }: { jobId: string }): ReactNode {
   const [busy, setBusy] = useState(false)
   return (
     <Button
+      type="button"
+      variant="secondary"
       size="sm"
-      icon={busy ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
       disabled={busy}
       onClick={() => {
         setBusy(true)
         void retryVideoRetrieval(jobId).finally(() => setBusy(false))
       }}
     >
-      {t('videoGen.card.retryRetrieval')}
+      {busy ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}{t('videoGen.card.retryRetrieval')}
     </Button>
   )
 }
@@ -232,8 +234,9 @@ function SaveButton({ jobId }: { jobId: string }): ReactNode {
   const [status, setStatus] = useTransientStatus()
   return (
     <Button
+      type="button"
+      variant="secondary"
       size="sm"
-      icon={status === 'done' ? <Check size={12} /> : <Download size={12} />}
       onClick={() => {
         void saveVideoFile(jobId)
           .then((saved) => {
@@ -243,7 +246,7 @@ function SaveButton({ jobId }: { jobId: string }): ReactNode {
           .catch(() => setStatus('failed'))
       }}
     >
-      {t('videoGen.card.save')}
+      {status === 'done' ? <Check size={12} /> : <Download size={12} />}{t('videoGen.card.save')}
     </Button>
   )
 }

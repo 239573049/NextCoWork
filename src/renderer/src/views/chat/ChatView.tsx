@@ -29,7 +29,7 @@ import { ulid } from '../../../../shared/util/id'
 import { cancelWorkspaceUpload, completeWorkspaceUpload, listSessionAttachments, pickAttachments, prepareWorkspaceUpload, removeAttachment, uploadFile } from '../../services/attachment'
 import { connectionErrorKey } from '../../services/connections'
 import { Dialog } from '../../components/ui/Dialog'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import { updateWorkspace } from '../../services/app'
 import { sessionStore, resumeQueue, retainSessionView } from '../../stores/session'
 import { useVideoJobsStore } from '../../stores/video-jobs'
@@ -44,7 +44,7 @@ import { SubagentOpenProvider } from './subagent-open'
 import { ToolStopProvider } from './tool-stop'
 import { openFileReference } from './file-reference-actions'
 import { WorkspaceFileProvider } from './workspace-file'
-import { stopToolCall } from '../../services/shell'
+import { backgroundToolCall, stopToolCall } from '../../services/shell'
 import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
 import { useWindowStore } from '../../stores/window'
@@ -63,6 +63,39 @@ const GREETING_KEYS: Record<DayPart, TranslationKey> = {
   morning: 'chat.greeting.morning',
   afternoon: 'chat.greeting.afternoon',
   evening: 'chat.greeting.evening'
+}
+
+/** 一块占位条。和 `shell/AppSkeleton` 同一档填充 */
+function SkeletonBar({ className }: { className: string }): ReactNode {
+  return <div className={`rounded-md bg-tint ${className}`} />
+}
+
+/**
+ * 首页历史还在路上时占住转录的位置(见 `ChatView` 里 `historyLoaded` 那段)。
+ *
+ * ★ 列宽、内边距照抄 `Thread` 的内容列(760 / px-6 / py-6),数据回来时是「骨架被填满」
+ *   而不是整列横向一跳。
+ * ★ 和 `AppSkeleton` 一样静止,不做 shimmer —— 这个仓库的动效基调很克制。
+ * ★ 骨架贴底排:常驻布局里最新的那几轮就在输入框正上方,数据回来时视线不用挪。
+ */
+function ThreadSkeleton({ label }: { label: string }): ReactNode {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden" role="status" aria-busy="true" aria-label={label} data-testid="thread-skeleton">
+      <div className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
+        {[0, 1].map((turn) => (
+          <div key={turn} className="flex flex-col gap-5">
+            <SkeletonBar className="h-9 w-[46%] self-end rounded-card" />
+            <div className="flex flex-col gap-2">
+              <SkeletonBar className="h-3.5 w-[92%]" />
+              <SkeletonBar className="h-3.5 w-[84%]" />
+              <SkeletonBar className="h-3.5 w-[61%]" />
+            </div>
+            <SkeletonBar className="h-8 w-[38%]" />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export function ChatView({
@@ -112,7 +145,7 @@ export function ChatView({
     run 照常在主进程跑 —— 见 `retainSessionView`。
   */
   useEffect(() => retainSessionView(storeKey), [storeKey])
-  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions, historyHasMore, loadingEarlier } = useSession(useShallow((state) => ({
+  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions, historyHasMore, historyLoaded, loadingEarlier } = useSession(useShallow((state) => ({
     activeRunId: state.activeRunId,
     lastSeq: state.lastSeq,
     transcript: state.transcript,
@@ -121,6 +154,7 @@ export function ChatView({
     compactError: state.compactError,
     lastOptions: state.lastOptions,
     historyHasMore: state.historyHasMore,
+    historyLoaded: state.historyLoaded,
     loadingEarlier: state.loadingEarlier
   })))
   const {
@@ -129,6 +163,7 @@ export function ChatView({
     editInput,
     editMessage,
     deleteReply,
+    deleteTurn,
     dropInput,
     moveInputToDraft,
     retagQueuedPermission,
@@ -390,6 +425,16 @@ export function ChatView({
     () => activeRunId === null
       ? undefined
       : (callId: string): void => { void stopToolCall(activeRunId, callId).catch(() => {}) },
+    [activeRunId]
+  )
+  /*
+    需求:一条跑得比预想久的前台命令,让它接着跑、但模型别再等它(转成后台 shell)。
+    ★ 失败静默,理由同上:false 只意味着它刚好跑完了 / 后台名额已满,此刻弹错误只会误导。
+  */
+  const backgroundRunningToolCall = useMemo(
+    () => activeRunId === null
+      ? undefined
+      : (callId: string): void => { void backgroundToolCall(activeRunId, callId).catch(() => {}) },
     [activeRunId]
   )
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
@@ -726,8 +771,8 @@ export function ChatView({
   }
 
   const transferDialog = <Dialog open={uploadIntent !== null} title={t('ssh.uploadToServer')} onClose={() => { if (!transferring) cancelTransfer() }} footer={<>
-    <Button variant="ghost" disabled={transferring} onClick={cancelTransfer}>{t('common.cancel')}</Button>
-    <Button disabled={transferring} onClick={confirmTransfer}><Upload size={14} />{t(transferring ? 'chat.uploading' : 'ssh.uploadToServer')}</Button>
+    <Button type="button" variant="secondary" disabled={transferring} onClick={cancelTransfer}>{t('common.cancel')}</Button>
+    <Button type="button" variant="secondary" disabled={transferring} onClick={confirmTransfer}><Upload size={14} />{t(transferring ? 'chat.uploading' : 'ssh.uploadToServer')}</Button>
   </>}>
     {uploadIntent && <dl className="space-y-3 break-words text-[13px]">
       <div><dt className="text-fg-muted">{t('ssh.uploadSource')}</dt><dd>{uploadIntent.intent.name}</dd></div>
@@ -997,6 +1042,24 @@ export function ChatView({
   }
 
   if (!started) {
+    /*
+      ★ 有会话 id、首页历史还没回来 = **不知道它是不是空的**,不能先画问候语。
+      长会话首页要等一次 IPC,这段时间转录是空的;照问候语那一屏画,用户看到的是
+      「记录没了、输入框跑到了中间」,等数据回来整屏再跳一次。
+      这里直接摆常驻布局(转录位置画骨架、输入框贴底):数据回来时只是骨架被填满,
+      版式不动;真是空会话的,读回来之后才切到问候语那一屏。草稿(无 id)不走这里。
+    */
+    if (sessionId !== null && !historyLoaded) {
+      return (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <ThreadSkeleton label={t('chat.loadingHistory')} />
+          {goalLine}
+          {notices}
+          {composer}
+          {transferDialog}
+        </div>
+      )
+    }
     return (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center px-6 pb-10">
         <h1 className="mb-6 px-6 text-center text-[26px] leading-snug font-semibold text-fg">
@@ -1023,7 +1086,7 @@ export function ChatView({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <SubagentOpenProvider open={openSubagent}>
-        <ToolStopProvider stop={stopRunningToolCall}>
+        <ToolStopProvider stop={stopRunningToolCall} background={backgroundRunningToolCall}>
           <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
             <WorkspaceFileProvider root={workspace.rootPath} open={openToolFile}>
               <Thread
@@ -1040,6 +1103,7 @@ export function ChatView({
                 {...(contextLimits === undefined ? {} : { contextLimits })}
                 onEditMessage={onEditMessage}
                 onDeleteReply={deleteReply}
+                onDeleteTurn={deleteTurn}
                 onBranchTurn={onBranchTurn}
                 workspaceId={workspace.id}
                 onOpenPlan={openMarkdownFile}

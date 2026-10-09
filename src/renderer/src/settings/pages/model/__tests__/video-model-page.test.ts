@@ -107,8 +107,18 @@ async function mount(options: { providers?: UpstreamProvider[]; models?: ModelAl
   return patch
 }
 
+/**
+ * 按钮上**当前**的文字。Arc 的 Button 换文案时,旧文案标成 aria-hidden 播完退场才卸载,
+ * jsdom 里动画不会结束,所以 `textContent` 会是新旧两段拼在一起。
+ */
+function visibleText(node: Node): string {
+  if (node.nodeType === node.TEXT_NODE) return node.textContent ?? ''
+  if (node instanceof Element && node.getAttribute('aria-hidden') === 'true') return ''
+  return [...node.childNodes].map(visibleText).join('')
+}
+
 function button(label: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.getAttribute('aria-label') === label || item.textContent?.trim() === label)
+  const found = [...document.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.getAttribute('aria-label') === label || visibleText(item).trim() === label)
   expect(found, `button: ${label}`).toBeDefined()
   return found!
 }
@@ -181,10 +191,14 @@ describe('VideoModelPage · 自定义视频供应商', () => {
     expect(aliases[1]?.video?.profileId).toBe('xai-video-classic')
     expect(container.querySelector('input[type="password"]')).toBeNull()
 
-    await click('Model for video generation in chat')
-    const providerItem = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.includes('Internal relay'))!
+    // 模型选择器是 Radix 的下拉菜单:触发器在 pointerdown 上开,先点供应商、再在子菜单里点模型
+    await act(async () => {
+      button('Model for video generation in chat').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    })
+    const providerItem = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent?.includes('Internal relay'))!
     await act(async () => providerItem.click())
-    await click('my-private-model')
+    const modelItem = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.title === 'my-private-model')!
+    await act(async () => modelItem.click())
     expect(patch).toHaveBeenCalledWith({ videoModel: 'my-private-model', videoModelProviderId: saved.id })
   })
 

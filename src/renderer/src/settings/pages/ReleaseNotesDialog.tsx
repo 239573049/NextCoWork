@@ -24,7 +24,7 @@
  * 就发起,常挂的话 About 页一打开就会替所有人拉那 1.0MB。
  */
 import { lazy, Suspense, type ReactNode } from 'react'
-import { Button } from '../../components/ui/Button'
+import { Button } from '../../components/arc/button/button'
 import { Dialog } from '../../components/ui/Dialog'
 import { useI18n } from '../../i18n'
 
@@ -46,7 +46,7 @@ export function ReleaseNotesDialog({
       title={t('about.updates.releaseNotes')}
       open={open}
       onClose={onClose}
-      footer={<Button size="sm" onClick={onClose}>{t('common.close')}</Button>}
+      footer={<Button type="button" variant="secondary" size="sm" onClick={onClose}>{t('common.close')}</Button>}
     >
       {open && (
         <Suspense fallback={<PlainNotes notes={notes} />}>

@@ -16,10 +16,10 @@ import type {
   McpConnectionState,
   McpServerStatus,
 } from "../../../../../shared/domain/mcp";
-import { Button } from "../../../components/ui/Button";
-import { EmptyState } from "../../../components/ui/EmptyState";
+import { Button } from "../../../components/arc/button/button";
+import { EmptyState } from "../../../components/arc/empty-state/empty-state";
 import { IconButton } from "../../../components/ui/IconButton";
-import { Toggle } from "../../../components/ui/Toggle";
+import { Switch } from "../../../components/arc/switch/switch";
 import { useI18n } from "../../../i18n";
 import { cn } from "../../../lib/cn";
 import { testMcpConnection } from "../../../services/mcp";
@@ -60,11 +60,11 @@ export function McpPane(): ReactNode {
           </p>
         </div>
         <Button
-          size="sm"
-          variant="accent"
-          icon={<Plus size={13} />}
+          type="button"
+          variant="primary"
           onClick={() => setDialog({ open: true, editing: null })}
         >
+          <Plus size={13} />
           {t("connection.mcp.add")}
         </Button>
       </div>
@@ -86,7 +86,7 @@ export function McpPane(): ReactNode {
         <EmptyState
           icon={<Cable size={22} />}
           title={t("connection.mcp.empty")}
-          hint={t("connection.mcp.emptyHint")}
+          description={t("connection.mcp.emptyHint")}
         />
       ) : (
         <ul className="border-t border-hairline">
@@ -256,10 +256,10 @@ function ServerRow({
           >
             <Trash2 size={14} />
           </IconButton>
-          <Toggle
-            label={t("connection.mcp.enable", { name: config.name })}
+          <Switch
+            aria-label={t("connection.mcp.enable", { name: config.name })}
             checked={config.enabled}
-            onChange={onToggle}
+            onCheckedChange={onToggle}
           />
         </div>
       </div>

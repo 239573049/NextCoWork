@@ -24,9 +24,9 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Bootstrap } from '../../../shared/domain/bootstrap'
 import type { ClientAuthState } from '../../../shared/domain/client-auth'
 import type { AppSettings, AppSettingsPatch } from '../../../shared/domain/settings'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { IconButton } from '../components/ui/IconButton'
-import { Segmented } from '../components/ui/Segmented'
+import SegmentedControl from '../components/arc/segmented-control/segmented-control'
 import { TextInput } from '../components/ui/TextInput'
 import { useFocusTrap } from '../components/ui/useFocusTrap'
 import { prettyAccelerator } from '../lib/accelerator'
@@ -233,12 +233,11 @@ export function SettingsOverlay({
           <header className="flex shrink-0 items-center gap-4 px-6 pt-5 pb-3">
             <h2 className="text-[15px] text-fg">{searching ? t('settings.searchResults') : pageLabel(t, visiblePage)}</h2>
             {!searching && availableSubs !== undefined && (
-              <Segmented
-                size="sm"
+              <SegmentedControl
                 label={`${pageLabel(t, visiblePage)}${t('settings.categorySuffix')}`}
                 value={activeSub}
                 options={(availableSubs ?? []).map((s) => ({ value: s.id, label: s.label }))}
-                onChange={setSub}
+                onValueChange={setSub}
               />
             )}
             <span className="flex-1" />
@@ -263,13 +262,13 @@ export function SettingsOverlay({
           </div>
 
           <footer className="flex h-[82px] shrink-0 items-center justify-end px-6">
-            <Button variant="accent" onClick={requestClose}>
+            <Button type="button" variant="primary" onClick={requestClose}>
               {t('common.done')}
             </Button>
           </footer>
         </div>
       </div>
-      <Dialog open={confirmClose} title={t('themeStudio.unsaved')} onClose={() => setConfirmClose(false)} footer={<><Button variant="ghost" onClick={() => setConfirmClose(false)}>{t('common.cancel')}</Button><Button onClick={() => { discardThemeDraft(); setConfirmClose(false); onClose() }}>{t('themeStudio.discard')}</Button></>}>
+      <Dialog open={confirmClose} title={t('themeStudio.unsaved')} onClose={() => setConfirmClose(false)} footer={<><Button type="button" variant="secondary" onClick={() => setConfirmClose(false)}>{t('common.cancel')}</Button><Button type="button" variant="secondary" onClick={() => { discardThemeDraft(); setConfirmClose(false); onClose() }}>{t('themeStudio.discard')}</Button></>}>
         <p>{t('themeStudio.discardHint')}</p>
       </Dialog>
     </div>

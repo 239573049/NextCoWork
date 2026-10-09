@@ -14,7 +14,7 @@
 import { CheckSquare, Gift, Users } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { ReferralCenter } from '../../../../shared/domain/referral'
-import { EmptyState } from '../../components/ui/EmptyState'
+import { EmptyState } from '../../components/arc/empty-state/empty-state'
 import { useI18n } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { formatDay, formatMoment, formatMoney, inviteStatusKey, rewardSideKey } from './rewards-view'
@@ -29,7 +29,7 @@ export function RewardsTables({ center }: { center: ReferralCenter }): ReactNode
           <span>{t('rewards.colProgress')}</span>
           <span>{t('rewards.colReward')}</span>
         </Row>
-        <EmptyState icon={<CheckSquare size={18} />} title={t('rewards.tasksEmpty')} />
+        <EmptyState icon={<CheckSquare size={18} />} title={t('rewards.tasksEmpty')} description="" />
       </Section>
 
       <Section title={t('rewards.invitesTitle')}>
@@ -40,7 +40,7 @@ export function RewardsTables({ center }: { center: ReferralCenter }): ReactNode
           <span>{t('rewards.colInviteTime')}</span>
         </Row>
         {center.invites.length === 0 ? (
-          <EmptyState icon={<Users size={18} />} title={t('rewards.invitesEmpty')} />
+          <EmptyState icon={<Users size={18} />} title={t('rewards.invitesEmpty')} description="" />
         ) : (
           center.invites.map((invite) => (
             /*
@@ -70,7 +70,7 @@ export function RewardsTables({ center }: { center: ReferralCenter }): ReactNode
           <span>{t('rewards.colRewardTime')}</span>
         </Row>
         {center.rewards.length === 0 ? (
-          <EmptyState icon={<Gift size={18} />} title={t('rewards.rewardsEmpty')} />
+          <EmptyState icon={<Gift size={18} />} title={t('rewards.rewardsEmpty')} description="" />
         ) : (
           center.rewards.map((reward) => (
             <Row key={`${reward.side}-${reward.at}`} columns={REWARD_COLUMNS}>

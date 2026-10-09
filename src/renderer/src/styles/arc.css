@@ -1,0 +1,26 @@
+/*
+  Arc 组件库的设计 token。由 theme.css 以 `layer(arc)` 引入,并且排在 tailwindcss 之前。
+
+  ★ **为什么要放进层、而且是最低的那一层。** foundation.css 写的是 `:root { … }`,
+    其中有几个名字和本应用的 Tailwind token 撞了:`--radius-panel`(应用 12px / Arc 26px)、
+    `--radius-pill`、`--text-xl` 以上几档、`--ease-in-out`。不分层的话它是无层样式,
+    会盖过 Tailwind 的 `@layer theme`,侧边栏、面板的圆角会一起变成 26px。
+    放进最低层之后,撞名的那几个以应用为准,其余全部以 Arc 为准。
+
+  ★ Arc 组件自己的样式是 CSS Modules,**不在任何层里**,所以永远压得住 Tailwind 的
+    工具类 —— 往 Arc 组件上传 `h-7`、`px-3` 这类类名是不会生效的,要调尺寸就改下面的 token。
+*/
+@import '../components/arc/foundation.css';
+@import '@fontsource-variable/inter/index.css';
+@import '@fontsource-variable/geist/index.css';
+
+/*
+  桌面端密度。Arc 默认是网页尺寸(36 / 44 / 50px 高、18px 圆角),而本应用的
+  标题栏、工具栏、设置行都是按 24–34px 排的。只改 token,不改组件内部样式。
+*/
+:root {
+  --control-height-sm: 1.75rem;
+  --control-height-md: 2rem;
+  --control-height-lg: 2.25rem;
+  --radius-control: 0.5rem;
+}

@@ -38,10 +38,10 @@ import {
   MODEL_MANUFACTURERS,
   type ReasoningEffort,
 } from "../../../../../shared/domain/model-catalog-inventory";
-import { EmptyState } from "../../../components/ui/EmptyState";
+import { EmptyState } from "../../../components/arc/empty-state/empty-state";
 import { Dialog } from "../../../components/ui/Dialog";
 import { TextInput } from "../../../components/ui/TextInput";
-import { Toggle } from "../../../components/ui/Toggle";
+import { Switch } from "../../../components/arc/switch/switch";
 import { cn } from "../../../lib/cn";
 import {
   listModels,
@@ -147,7 +147,7 @@ function LegacyTextTab({
           <EmptyState
             className="min-w-0 flex-1 py-16"
             title={t("models.noProvider")}
-            hint={t("models.addProviderHint")}
+            description={t("models.addProviderHint")}
           />
         )}
       </div>
@@ -541,7 +541,7 @@ function ModelConsole(): ReactNode {
                 className="py-12"
                 icon={<Cpu size={20} />}
                 title={t("models.noMatch")}
-                hint={
+                description={
                   loaded && catalogLoaded
                     ? t("models.adjustFilters")
                     : t("models.readingCatalog")
@@ -1395,7 +1395,7 @@ function CatalogModelEditor({
                   "opacity-60",
               )}
             >
-              <Toggle
+              <Switch
                 checked={
                   thinking.mode === "unsupported"
                     ? false
@@ -1403,7 +1403,7 @@ function CatalogModelEditor({
                       ? true
                     : thinking.defaultEnabled
                 }
-                onChange={(value) => {
+                onCheckedChange={(value) => {
                   if (
                     thinking.mode === "unsupported" ||
                     thinking.mode === "always"
@@ -1417,7 +1417,7 @@ function CatalogModelEditor({
                     },
                   }));
                 }}
-                label={t("models.fieldDefaultEnabled")}
+                aria-label={t("models.fieldDefaultEnabled")}
               />
             </div>
           </EditorField>
@@ -1705,7 +1705,7 @@ function Capability({
       <span className="min-w-0 flex-1 text-[11.5px] text-fg-muted">
         {label}
       </span>
-      <Toggle checked={value} onChange={onChange} label={label} />
+      <Switch checked={value} onCheckedChange={onChange} aria-label={label} />
     </div>
   );
 }

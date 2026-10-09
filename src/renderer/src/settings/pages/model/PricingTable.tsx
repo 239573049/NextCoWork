@@ -3,7 +3,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import type { Currency, ModelPricing } from '../../../../../shared/domain/pricing'
 import { PRICING_SEED } from '../../../../../shared/domain/pricing-seed'
 import { findPreset } from '../../../../../shared/domain/presets'
-import { EmptyState } from '../../../components/ui/EmptyState'
+import { EmptyState } from '../../../components/arc/empty-state/empty-state'
 import { TextInput } from '../../../components/ui/TextInput'
 import { cn } from '../../../lib/cn'
 import { openExternal } from '../../../services/app'
@@ -77,7 +77,7 @@ export function PricingTable(): ReactNode {
           className="py-10"
           icon={<Search size={22} />}
           title={t('models.pricingNoMatch')}
-          hint={t('models.pricingNoMatchHint', { query: query.trim(), count: PRICING_SEED.length })}
+          description={t('models.pricingNoMatchHint', { query: query.trim(), count: PRICING_SEED.length })}
         />
       ) : (
         groups.map((g) => (

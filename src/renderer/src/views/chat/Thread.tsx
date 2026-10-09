@@ -10,7 +10,7 @@
  * 一路翻到消息模型才明白。
  */
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, X } from 'lucide-react'
+import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, Trash2, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
@@ -67,6 +67,7 @@ export const Thread = memo(function Thread({
   reportOptions,
   onEditMessage,
   onDeleteReply,
+  onDeleteTurn,
   onBranchTurn,
   workspaceId,
   onOpenPlan,
@@ -114,6 +115,8 @@ export const Thread = memo(function Thread({
    * 删除一条助手回复,**引出它的提问留着**。传入的是这一行的消息跨度(`ThreadRow.span`)。
    */
   onDeleteReply?: (fromId: string, toId: string) => Promise<void>
+  /** 删除一整轮:传入的是引出该轮的 user 消息 id,提问与它引出的回复一并删掉。 */
+  onDeleteTurn?: (userMessageId: string) => Promise<void>
   /** 从这一轮分支出一条新会话。传入的同样是引出该轮的 user 消息 id。 */
   onBranchTurn?: (userMessageId: string) => Promise<void>
   workspaceId?: string
@@ -373,6 +376,7 @@ export const Thread = memo(function Thread({
               runUsage={transcript.runUsage}
               {...(onEditMessage === undefined ? {} : { onEditMessage })}
               {...(onDeleteReply === undefined ? {} : { onDeleteReply })}
+              {...(onDeleteTurn === undefined ? {} : { onDeleteTurn })}
               {...(onBranchTurn === undefined ? {} : { onBranchTurn })}
               {...(onOpenPlan === undefined ? {} : { onOpenPlan })}
               pauseFollowing={pauseFollowing}
@@ -433,12 +437,13 @@ const ThreadTurn = memo(function ThreadTurn({
   runUsage: TranscriptState['runUsage']
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   onDeleteReply?: (fromId: string, toId: string) => Promise<void>
+  onDeleteTurn?: (userMessageId: string) => Promise<void>
   onBranchTurn?: (userMessageId: string) => Promise<void>
   onOpenPlan?: (path: string) => void
   pauseFollowing: () => void
   last?: LastTurnLive
 }): ReactNode {
-  const { workspaceId, sessionId, extractionTriggerId, skillExtractionSourceId, providerName, runModel, runUsage, onEditMessage, onDeleteReply, onBranchTurn, onOpenPlan, pauseFollowing, last } = rest
+  const { workspaceId, sessionId, extractionTriggerId, skillExtractionSourceId, providerName, runModel, runUsage, onEditMessage, onDeleteReply, onDeleteTurn, onBranchTurn, onOpenPlan, pauseFollowing, last } = rest
   const subagents = useTranscriptSubagents()
   // 一次算出本组的行序列,免得逐行 `promptOf` 各自重建一份
   const rows = group.rows.map((entry) => entry.row)
@@ -461,6 +466,7 @@ const ThreadTurn = memo(function ThreadTurn({
           {...(runUsage === undefined ? {} : { runUsage })}
           {...(onEditMessage === undefined ? {} : { onEditMessage })}
           {...(onDeleteReply === undefined ? {} : { onDeleteReply })}
+          {...(onDeleteTurn === undefined ? {} : { onDeleteTurn })}
           {...(onBranchTurn === undefined ? {} : { onBranchTurn })}
           {...(onOpenPlan === undefined ? {} : { onOpenPlan })}
           pauseFollowing={pauseFollowing}
@@ -488,6 +494,7 @@ const HistoryRow = memo(function HistoryRow({
   runUsage,
   onEditMessage,
   onDeleteReply,
+  onDeleteTurn,
   onBranchTurn,
   onOpenPlan,
   pauseFollowing,
@@ -508,6 +515,7 @@ const HistoryRow = memo(function HistoryRow({
   runUsage?: TranscriptState['runUsage']
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   onDeleteReply?: (fromId: string, toId: string) => Promise<void>
+  onDeleteTurn?: (userMessageId: string) => Promise<void>
   onBranchTurn?: (userMessageId: string) => Promise<void>
   onOpenPlan?: (path: string) => void
   pauseFollowing: () => void
@@ -518,16 +526,17 @@ const HistoryRow = memo(function HistoryRow({
     return <CompactionDivider boundary={row.boundary} foldedCount={row.foldedCount} />
   }
   if (row.kind === 'user') {
+    const onDelete = readOnly || onDeleteTurn === undefined ? undefined : () => onDeleteTurn(row.message.id)
     // 提炼触发语下面挂说明卡;其余 user 消息照旧。
     if (extractionTriggerId !== undefined && row.message.id === extractionTriggerId) {
       return (
         <div className="flex flex-col gap-2.5">
-          <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
+          <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} onDelete={onDelete} disabled={running} onExpand={pauseFollowing} />
           {skillExtractionSourceId !== undefined && <SkillExtractionBanner sourceSessionId={skillExtractionSourceId} />}
         </div>
       )
     }
-    return <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} disabled={running} onExpand={pauseFollowing} />
+    return <UserBubble message={row.message} workspaceId={workspaceId} onEdit={readOnly ? undefined : onEditMessage} onDelete={onDelete} disabled={running} onExpand={pauseFollowing} />
   }
   if (row.kind === 'plan-receipt') {
     // 工作区未知就没法把计划正文读出来 —— 无正文的卡片只剩一句状态,
@@ -822,6 +831,11 @@ function TaskUsage({ usage }: { usage: TranscriptState['usage'] }): ReactNode {
   // 压缩之后原始数字在界面上就没有别处可看了,挂到 title 上留一手
   const exact = (n: number): string => n.toLocaleString(locale)
   return (
+    /*
+      ★ 这里刻意不用 Arc 的 Tooltip:每一回合都有一条用量行,Arc 的提示每个实例都自带
+        Radix Provider + Root,200 回合的长历史渲染时间翻了一倍多(thread-isolation 测试
+        从 12s 涨到 27s、超时)。这个轻量版只在悬停时才挂浮层。
+    */
     <Tooltip
       className="block"
       content={
@@ -885,9 +899,11 @@ const USER_MESSAGE_PREVIEW_CHARS = 2_000
  * 发送侧 `partsOf` 把文本放在最前；展示时文字仍在上方气泡，图片和
  * 文件引用在气泡下方独立成卡片。这样只发图的消息也不会消失。
  */
-function UserBubble({ message, workspaceId, onEdit, disabled, onExpand }: {
+function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand }: {
   message: AgentMessage
   onEdit?: (id: string, text: string, continueRun: boolean) => Promise<void>
+  /** 删掉这条提问所在的整轮。缺省(只读面板)就不画删除键。 */
+  onDelete?: () => Promise<void>
   disabled: boolean
   onExpand: () => void
   /**
@@ -899,6 +915,13 @@ function UserBubble({ message, workspaceId, onEdit, disabled, onExpand }: {
 }): ReactNode {
   const { t } = useI18n()
   const [editing, setEditing] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  // 确认态超时复位:用户点了一下走开,回来时不该还停在「再点就删」上。
+  useEffect(() => {
+    if (!confirmDelete) return
+    const timer = setTimeout(() => setConfirmDelete(false), 4000)
+    return () => clearTimeout(timer)
+  }, [confirmDelete])
   const [textDraft, setTextDraft] = useState('')
   const text = message.parts
     .filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
@@ -1068,18 +1091,51 @@ function UserBubble({ message, workspaceId, onEdit, disabled, onExpand }: {
             ))}
           </div>
         )}
-        {onEdit !== undefined && (
-          <button
-            type="button"
-            disabled={disabled}
-            aria-label={t('chat.editMessage')}
-            title={t('chat.editMessage')}
-            data-testid="user-message-edit"
-            onClick={() => { setTextDraft(text); setEditing(true) }}
-            className="absolute -left-8 top-1 rounded-[6px] p-1 text-fg-faint opacity-0 transition-opacity hover:bg-tint-hover hover:text-fg-muted group-hover:opacity-100 disabled:pointer-events-none"
-          >
-            <Pencil size={13} />
-          </button>
+        {(onEdit !== undefined || onDelete !== undefined) && (
+          // 操作条在气泡**下方**、右对齐;平时透明(占位不变,悬停时不会把下面的内容顶开)。
+          <div className={cn(
+            'flex items-center gap-0.5 text-fg-faint transition-opacity focus-within:opacity-100',
+            confirmDelete ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+          )} data-testid="user-message-actions">
+            {onEdit !== undefined && (
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={t('chat.editMessage')}
+                title={t('chat.editMessage')}
+                data-testid="user-message-edit"
+                onClick={() => { setTextDraft(text); setEditing(true) }}
+                className="rounded-[6px] p-1 hover:bg-tint-hover hover:text-fg-muted disabled:pointer-events-none disabled:opacity-40"
+              >
+                <Pencil size={13} />
+              </button>
+            )}
+            {onDelete !== undefined && (
+              /*
+                ★ 删提问 = 删整轮(提问 + 它引出的回复与工具回执),单删提问会留下无头的回复。
+                不可撤销,所以和「删除回复」一样走两次点击确认,超时自动复位。
+              */
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={confirmDelete ? t('common.confirmDelete') : t('chat.message.delete')}
+                title={confirmDelete ? t('common.confirmDelete') : t('chat.message.delete')}
+                data-testid="user-message-delete"
+                onClick={() => {
+                  if (!confirmDelete) { setConfirmDelete(true); return }
+                  setConfirmDelete(false)
+                  void onDelete()
+                }}
+                className={cn(
+                  'flex items-center gap-1 rounded-[6px] p-1 disabled:pointer-events-none disabled:opacity-40',
+                  confirmDelete ? 'bg-danger/10 px-1.5 text-[11.5px] text-danger' : 'hover:bg-tint-hover hover:text-fg-muted'
+                )}
+              >
+                <Trash2 size={13} />
+                {confirmDelete && <span>{t('common.confirmDelete')}</span>}
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -1284,7 +1340,12 @@ function AssistantTurn({
         复制和导出本身无害,但参考形态是「标题 + 正文」;留两颗按钮在那儿,
         这个面板就又变回了一个半能用的对话界面。用时与用量在顶上的身份栏里。
       */}
-      {!readOnly && !(isLast && running) && (
+      {/*
+        ★ 回复被删光后留下的空末轮(没有任何内容、状态也是正常收尾)不出操作条:
+        复制/导出/删除本来就没有对象,分支和重新生成挂在一个空回合下面只会像删除没删干净。
+        停止 / 出错的空回合照旧保留重新生成 —— 那时它是唯一的补救入口。
+      */}
+      {!readOnly && !(isLast && running) && !(blocks.length === 0 && outcome === 'ok') && (
         <TurnActions
           text={assistantText(blocks)}
           prompt={prompt}

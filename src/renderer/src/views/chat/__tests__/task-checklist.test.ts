@@ -175,9 +175,9 @@ describe('TaskChecklist · collapse turns into the ball', () => {
     留下的死账说成「正在做」。
   */
   const hover = async (element: Element | null): Promise<void> => {
-    // React 的 onPointerEnter 是靠 pointerover 代理出来的,所以这里派发会冒泡的那一个
-    await act(async () => { element?.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })) })
-    await act(async () => { vi.advanceTimersByTime(100) })
+    // 提示是 Arc 的 Tooltip(Radix):它在 pointermove 上开、带 250ms 延迟,不认 pointerenter
+    await act(async () => { element?.dispatchEvent(new MouseEvent('pointermove', { bubbles: true })) })
+    await act(async () => { vi.advanceTimersByTime(300) })
   }
 
   it('tells what is running when the pointer rests on the ball', async () => {

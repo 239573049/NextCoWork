@@ -28,7 +28,7 @@ import type { ClientAuthState } from '../../../shared/domain/client-auth'
 // 只借类型:`settings/nav.ts` 是纯数据(零 React 依赖),这里不会把设置页拽进侧边栏的 bundle
 import type { SettingsPageId } from '../settings/nav'
 import { Mark } from '../components/brand/Mark'
-import { EmptyState } from '../components/ui/EmptyState'
+import { EmptyState } from '../components/arc/empty-state/empty-state'
 import { IconButton } from '../components/ui/IconButton'
 import { cn } from '../lib/cn'
 import { IS_MAC } from '../lib/platform'
@@ -38,7 +38,7 @@ import { useI18n, type Translate } from '../i18n'
 import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
 import { AccountMenu } from './AccountMenu'
 import { Dialog } from '../components/ui/Dialog'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
 import { copyText, openSessionWindow } from '../services/app'
 import { Spinner } from '../components/ui/Spinner'
@@ -215,7 +215,7 @@ export function Sidebar({
           <EmptyState
             icon={<MessageSquarePlus size={22} />}
             title={t('workspace.none')}
-            hint={t('workspace.noneHint')}
+            description={t('workspace.noneHint')}
           />
         ) : (
           <>
@@ -231,7 +231,7 @@ export function Sidebar({
             >
               {sessions.filter((s) => !s.archived).length === 0 &&
               chatTabs.every((tab) => tab.kind !== 'chat' || sessions.some((s) => s.id === tab.ref.sessionId && s.archived)) ? (
-                <EmptyState title={t('workspace.noChats')} className="py-6" />
+                <EmptyState title={t('workspace.noChats')} description="" className="py-6" />
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
                   <SessionGroupList
@@ -253,7 +253,7 @@ export function Sidebar({
             <Section title={t('workspace.archived')} defaultOpen={false}
               revealSessionId={focusMode && sessions.some((session) => session.archived && session.id === activeSessionId) ? activeSessionId : null}>
               {sessions.filter((s) => s.archived).length === 0 ? (
-                <EmptyState title={t('workspace.noArchived')} className="py-6" />
+                <EmptyState title={t('workspace.noArchived')} description="" className="py-6" />
               ) : (
                 <ul className="flex flex-col gap-0.5 pb-1">
                   {sessions.filter((s) => s.archived).map((s) => (
@@ -645,7 +645,7 @@ function SessionGroupBlock({
         onClose={() => setRunningBlocked(false)}
         title={t('session.deleteRunningTitle')}
         width={420}
-        footer={<Button size="sm" variant="accent" onClick={() => setRunningBlocked(false)}>{t('common.close')}</Button>}
+        footer={<Button type="button" size="sm" variant="primary" onClick={() => setRunningBlocked(false)}>{t('common.close')}</Button>}
       >
         <p className="text-[12.5px] text-fg-muted">{t('session.deleteRunningMessage')}</p>
       </Dialog>
@@ -656,8 +656,8 @@ function SessionGroupBlock({
         width={420}
         footer={
           <>
-            <Button size="sm" onClick={() => setDialog(null)}>{t('common.cancel')}</Button>
-            <Button size="sm" variant="accent" disabled={renameDraft.trim().length === 0} onClick={() => {
+            <Button variant="secondary" type="button" size="sm" onClick={() => setDialog(null)}>{t('common.cancel')}</Button>
+            <Button type="button" size="sm" variant="primary" disabled={renameDraft.trim().length === 0} onClick={() => {
               if (dialog?.kind !== 'rename') return
               void run(() => renameSession(dialog.session.id, renameDraft)).then(() => setDialog(null))
             }}>{t('common.save')}</Button>
@@ -776,7 +776,7 @@ function ArchivedSessionItem({
         onClose={() => setRunningBlocked(false)}
         title={t('session.deleteRunningTitle')}
         width={420}
-        footer={<Button size="sm" variant="accent" onClick={() => setRunningBlocked(false)}>{t('common.close')}</Button>}
+        footer={<Button type="button" size="sm" variant="primary" onClick={() => setRunningBlocked(false)}>{t('common.close')}</Button>}
       >
         <p className="text-[12.5px] text-fg-muted">{t('session.deleteRunningMessage')}</p>
       </Dialog>

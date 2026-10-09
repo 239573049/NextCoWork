@@ -14,6 +14,7 @@
  */
 import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import { nodeFs } from './node-fs'
 import { agentShell, nodeSpawn } from './node-spawn'
 import type { EnvironmentFacts } from '../../shared/domain/environment'
@@ -84,6 +85,26 @@ export interface SpawnResult {
   code: number
   stdout: string
   stderr: string
+  /**
+   * 命令被**转去后台**了(`detach` 信号响了且进程还活着)。
+   *
+   * 有这一格时 `code` 没有意义,`stdout` / `stderr` 是转走那一刻之前攒下的输出;
+   * 进程本身连同两条管道交给调用方 —— 从这一刻起超时与 `signal` 都不再管它,
+   * 它的生死归接手的人(`main/agent-shells.ts`)。
+   */
+  detached?: DetachedProcess
+}
+
+/**
+ * 一条从前台转走、仍在跑的进程。形状是 `EnvironmentProcess` 去掉 stdin 的那部分 ——
+ * 前台命令的 stdin 本来就是关着的。
+ */
+export interface DetachedProcess {
+  stdout: Readable
+  stderr: Readable
+  exited: Promise<{ code: number | null; signal?: string | null }>
+  /** 杀整棵进程树(同前台停止的那一条路径),不是只杀 shell。 */
+  kill(): void
 }
 
 /**
@@ -109,6 +130,16 @@ export type SpawnFn = (
      * ★ 回调抛异常不得影响命令本身,实现方逐个 try。
      */
     onOutput?: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void
+    /**
+     * 这条信号一响,命令**不再被等**:超时与 `signal` 一起卸掉,进程原样交出去
+     * (`SpawnResult.detached`)。需求:用户在工具卡上把一条跑得比预想久的前台命令
+     * 转成后台,而不是只能二选一地「干等」或「掐掉重来」。
+     *
+     * ★ 可选,且**实现方可以不支持**(SSH 那条路今天就不支持)。不支持的实现
+     * 忽略它即可 —— 调用方据 `SpawnResult.detached` 是否存在判断转没转走,
+     * 是否画那颗按钮由 `ShellBridge.adopt` 是否存在决定。
+     */
+    detach?: AbortSignal
   }
 ) => Promise<SpawnResult>
 

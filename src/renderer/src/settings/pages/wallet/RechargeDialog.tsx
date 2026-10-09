@@ -17,7 +17,7 @@
 import { CircleCheck, CircleX, Clock } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { RechargeCheckoutResult, RechargeOptions } from '../../../../../shared/domain/recharge'
-import { Button } from '../../../components/ui/Button'
+import { Button } from '../../../components/arc/button/button'
 import { Dialog } from '../../../components/ui/Dialog'
 import { Spinner } from '../../../components/ui/Spinner'
 import { useI18n, type Translate } from '../../../i18n'
@@ -150,9 +150,9 @@ export function RechargeDialog({
         onRetry={() => setStep({ kind: 'pick', error: null, offerWeb: false })}
         onOpenWeb={openWeb} />
     : <>
-        <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
-        <Button variant="accent" disabled={busy || amount <= 0} onClick={pay}
-          icon={busy ? <Spinner size="sm" /> : undefined}>
+        <Button type="button" variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
+        <Button type="button" variant="primary" disabled={busy || amount <= 0} onClick={pay}>
+          {busy ? <Spinner size="sm" /> : undefined}
           {busy ? t('wallet.recharge.creating') : payLabel}
         </Button>
       </>
@@ -196,7 +196,7 @@ export function RechargeDialog({
             {step.kind === 'pick' && step.error !== null && (
               <div role="alert" className="flex flex-wrap items-center gap-2 text-[12px] text-danger">
                 <span className="min-w-0 flex-1">{step.error}</span>
-                {step.offerWeb && <Button size="sm" onClick={openWeb}>{t('wallet.openWeb')}</Button>}
+                {step.offerWeb && <Button type="button" variant="secondary" onClick={openWeb}>{t('wallet.openWeb')}</Button>}
               </div>
             )}
           </div>
@@ -262,28 +262,28 @@ function OrderFooter({
 }): React.JSX.Element {
   if (step.timedOut) {
     return <>
-      <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>
-      <Button variant="accent" onClick={onCheckAgain}>{t('wallet.order.checkAgain')}</Button>
+      <Button type="button" variant="secondary" onClick={onClose}>{t('common.close')}</Button>
+      <Button type="button" variant="primary" onClick={onCheckAgain}>{t('wallet.order.checkAgain')}</Button>
     </>
   }
   switch (step.phase) {
     case 'completed':
-      return <Button variant="accent" onClick={onClose}>{t('common.done')}</Button>
+      return <Button type="button" variant="primary" onClick={onClose}>{t('common.done')}</Button>
     case 'cancelled':
     case 'failed':
     case 'refunded':
       return <>
-        <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>
-        <Button variant="accent" onClick={onRetry}>{t('wallet.order.retry')}</Button>
+        <Button type="button" variant="secondary" onClick={onClose}>{t('common.close')}</Button>
+        <Button type="button" variant="primary" onClick={onRetry}>{t('wallet.order.retry')}</Button>
       </>
     case 'not-found':
       return <>
-        <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>
-        <Button variant="accent" onClick={onOpenWeb}>{t('wallet.openWeb')}</Button>
+        <Button type="button" variant="secondary" onClick={onClose}>{t('common.close')}</Button>
+        <Button type="button" variant="primary" onClick={onOpenWeb}>{t('wallet.openWeb')}</Button>
       </>
     case 'waiting':
     case 'paid':
     case 'signed-out':
-      return <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>
+      return <Button type="button" variant="secondary" onClick={onClose}>{t('common.close')}</Button>
   }
 }

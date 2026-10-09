@@ -34,7 +34,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import type { UpdateInfo, UpdateState } from '../../../shared/domain/update'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { IconButton } from '../components/ui/IconButton'
 import { Spinner } from '../components/ui/Spinner'
 import { useI18n } from '../i18n'
@@ -284,11 +284,11 @@ export function UpdateIndicator(): ReactNode {
               {!downloading && !installing && (
                 <div className="mt-3 flex justify-end">
                   {ready ? (
-                    <Button size="sm" variant="accent" disabled={busy} onClick={() => void run(updateInstall)()}>
+                    <Button type="button" size="sm" variant="primary" disabled={busy} onClick={() => void run(updateInstall)()}>
                       {t('about.updates.restartAndInstall')}
                     </Button>
                   ) : (
-                    <Button size="sm" variant="accent" disabled={busy} onClick={() => void run(updateDownload)()}>
+                    <Button type="button" size="sm" variant="primary" disabled={busy} onClick={() => void run(updateDownload)()}>
                       {failed
                         ? t('about.updates.retry')
                         : t('about.updates.download', { version: info.version })}

@@ -25,11 +25,12 @@
  * 不是这个工具的用法;搬过来会让描述长一倍,而其中每一句都在教模型做我们没验证过的事。
  */
 import { z } from 'zod'
-import { toolFail, toolOk } from '../../../../shared/agent/tool'
+import { toolFail, toolOk, type ToolResult } from '../../../../shared/agent/tool'
 import { clampWithEllipsis, stripAnsi } from '../../text'
 import { isAbortError } from '../../abort'
+import type { DetachedProcess } from '../../host'
 import { defineTool } from '../define'
-import type { ToolRegistration } from '../registry'
+import type { ToolContext, ToolRegistration } from '../registry'
 import { NO_WORKSPACE } from './paths'
 
 /** 和 CC 一致:默认 2 分钟。 */
@@ -112,6 +113,51 @@ const STOPPED_BY_USER =
   'The user stopped this command from the UI. It did not fail — do not run it again or work around it. '
   + 'Ask what to do next, or continue with something else.'
 
+/**
+ * 用户把一条前台命令转去了后台:收编进程,告诉模型它现在是哪个 shell id。
+ *
+ * ★ 措辞要说清三件事:是**用户**转的(不是命令自己结束了)、它**还在跑**、
+ * 下一步怎么读它 / 停它。只回一段「到目前为止的输出」的话,模型会把它当成
+ * 完整结果去下结论 —— 而那条构建可能还要跑五分钟。
+ *
+ * ★ 收编失败时**杀掉它**再报错:此刻进程已经脱离了前台,没人杀的话它会成为
+ * 一个谁也看不见、也停不了的孤儿。
+ */
+function adoptDetached(
+  input: z.infer<typeof BashInput>,
+  ctx: ToolContext,
+  stdout: string,
+  stderr: string,
+  process: DetachedProcess
+): ToolResult {
+  let id: string
+  try {
+    if (ctx.shells?.adopt === undefined) throw new Error('Background commands are unavailable in this environment.')
+    id = ctx.shells.adopt({
+      command: input.command,
+      cwd: ctx.workspaceRoot,
+      ...(input.description === '' ? {} : { description: input.description }),
+      runId: ctx.runId,
+      callId: ctx.callId,
+      process
+    }).id
+  } catch (error) {
+    process.kill()
+    return toolFail(
+      'The user tried to move this command to the background, but it could not be adopted, so it was stopped: '
+      + (error instanceof Error ? error.message : String(error))
+    )
+  }
+  const parts = [section('stdout', stdout), section('stderr', stderr)].filter((s) => s !== '')
+  return toolOk(
+    `The user moved this command to the background while it was still running. It keeps running as shell id ${id}; `
+    + 'its timeout no longer applies.\n'
+    + (parts.length === 0 ? '(no output so far)\n' : `Output so far:\n${parts.join('\n')}\n`)
+    + `Read its new output with BashOutput({ bash_id: "${id}" }) — each read returns only what arrived since the `
+    + 'previous one. Stop it with KillShell when you no longer need it.'
+  )
+}
+
 export const bashTool: ToolRegistration = defineTool({
   internalId: 'Bash',
   description:
@@ -145,7 +191,9 @@ export const bashTool: ToolRegistration = defineTool({
     '- Quote paths that contain spaces: `cd "path with spaces"`\n' +
     '- A non-zero exit code comes back to you as an error, with stdout and stderr included\n' +
     '- The user can stop a single running command from the UI. That comes back as a tool error saying so; ' +
-    'it is not a failure of the command and must not be retried',
+    'it is not a failure of the command and must not be retried\n' +
+    '- The user can also move a running command to the background from the UI. You then get its output so far ' +
+    'and a shell id; it is still running, so read the rest with BashOutput instead of running it again',
   schema: BashInput,
   readOnly: false,
   // ★ 破坏性:一条 shell 命令能做的事没有上界。`auto` 档下会走到「需要询问」。
@@ -155,12 +203,20 @@ export const bashTool: ToolRegistration = defineTool({
     if (ctx.workspaceRoot === '') return toolFail(NO_WORKSPACE)
 
     /*
+      这条前台命令能不能被用户转去后台:要有注册表、且注册表能收编(本地环境)。
+      ★ 能的话在第一条进度里就告诉界面,卡片据此画那颗按钮 —— 见 `ToolProgress.detachable`。
+    */
+    const shells = ctx.shells
+    const detachable = input.run_in_background !== true && shells?.adopt !== undefined
+
+    /*
       ★ 模型省了 description 时补的是空串(见 schema 上那段),所以状态行这里
       仍要有兜底 —— 空串发出去的话,状态行会显示成一条什么都没写的「执行中」。
     */
     ctx.emit({
       callId: ctx.callId,
-      message: input.description === '' ? clampWithEllipsis(input.command, 80) : input.description
+      message: input.description === '' ? clampWithEllipsis(input.command, 80) : input.description,
+      ...(detachable ? { detachable: true } : {})
     })
 
     if (input.run_in_background === true) {
@@ -213,9 +269,15 @@ export const bashTool: ToolRegistration = defineTool({
     // 「run 已中断」这件事传不到 spawn,于是它会先把命令跑起来再被杀。
     if (ctx.signal.aborted) onRunAbort()
     else ctx.signal.addEventListener('abort', onRunAbort, { once: true })
-    const release = ctx.shells?.hold(
+    /*
+      「转去后台」是第三个信号,和上面两个都不同:它不杀任何东西,只是不再等。
+      `SpawnFn` 收到它后把还活着的进程原样交回(`SpawnResult.detached`)。
+    */
+    const detacher = detachable ? new AbortController() : undefined
+    const release = shells?.hold(
       { runId: ctx.runId, callId: ctx.callId, command: input.command },
-      () => stopper.abort()
+      () => stopper.abort(),
+      detacher === undefined ? undefined : () => detacher.abort()
     )
 
     try {
@@ -229,8 +291,11 @@ export const bashTool: ToolRegistration = defineTool({
       const r = await ctx.host.spawn(input.command, {
         cwd: ctx.workspaceRoot,
         signal: stopper.signal,
-        timeoutMs
+        timeoutMs,
+        ...(detacher === undefined ? {} : { detach: detacher.signal })
       })
+
+      if (r.detached !== undefined) return adoptDetached(input, ctx, r.stdout, r.stderr, r.detached)
 
       const parts = [section('stdout', r.stdout), section('stderr', r.stderr)].filter((s) => s !== '')
 

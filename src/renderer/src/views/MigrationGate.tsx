@@ -32,7 +32,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import type { MigrationState, MigrationStepKind } from '../../../shared/domain/data-migration'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/arc/button/button'
 import { ProgressBar } from '../components/ui/ProgressBar'
 import { Spinner } from '../components/ui/Spinner'
 import { useI18n } from '../i18n'
@@ -192,17 +192,19 @@ function MigrationFailureView({ state }: { state: MigrationState }): React.React
         )}
 
         <div className="mt-6 flex flex-wrap items-center gap-2">
-          <Button variant="ghost" onClick={() => { void retryMigration().catch(() => undefined) }}>
+          <Button type="button" variant="secondary" onClick={() => { void retryMigration().catch(() => undefined) }}>
             {t('migration.action.retry')}
           </Button>
           <Button
-            variant="ghost"
+            type="button"
+            variant="secondary"
             onClick={() => { void skipMigration().catch(() => undefined) }}
           >
             {t('migration.action.skip')}
           </Button>
           <Button
-            variant="ghost"
+            type="button"
+            variant="secondary"
             onClick={() => { void openMigrationDataDirectory().catch(() => undefined) }}
           >
             {t('migration.action.openDataDirectory')}
@@ -228,6 +230,7 @@ function UndoButton(): React.ReactNode {
   const [busy, setBusy] = useState(false)
   return (
     <Button
+      type="button"
       variant="danger"
       disabled={busy}
       onClick={() => {
@@ -259,8 +262,9 @@ function DiagnosticBlock({ detail }: { detail: string }): React.ReactNode {
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-fg-faint">{t('migration.error.detailLabel')}</span>
         <Button
+          type="button"
           size="sm"
-          variant="ghost"
+          variant="secondary"
           onClick={() => {
             void navigator.clipboard
               .writeText(detail)
@@ -296,7 +300,7 @@ function MigrationSkippedView({ onContinue }: { onContinue: () => void }): React
         <h1 className="text-[15px] font-medium text-fg">{t('migration.skipped.title')}</h1>
         <p className="mt-2 text-[13px] text-fg-muted">{t('migration.skipped.body')}</p>
         <div className="mt-6">
-          <Button variant="accent" onClick={onContinue}>
+          <Button type="button" variant="primary" onClick={onContinue}>
             {t('migration.skipped.continue')}
           </Button>
         </div>
@@ -314,7 +318,7 @@ function StartupFailureView({ detail, timedOut }: { detail: string; timedOut: bo
       <div className="w-full max-w-md">
         <h1 className="text-[15px] font-medium text-danger">{t(timedOut ? 'migration.startup.delayedTitle' : 'migration.startup.failedTitle')}</h1>
         <p className="mt-2 text-[13px] text-fg-muted">{t(timedOut ? 'migration.startup.delayedBody' : 'migration.startup.failedBody')}</p>
-        <Button className="mt-6" variant="ghost" onClick={() => {
+        <Button type="button" className="mt-6" variant="secondary" onClick={() => {
           setOpenFailed(false)
           void openMigrationDataDirectory().catch(() => setOpenFailed(true))
         }}>

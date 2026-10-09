@@ -18,7 +18,7 @@ vi.mock('../../services/sessions', () => ({ getSessionPage: vi.fn() }))
 vi.mock('../../services/goal', () => ({ getGoal: vi.fn(async () => undefined), onGoalChanged: vi.fn(() => () => {}) }))
 
 import { getSessionPage } from '../../services/sessions'
-import { HISTORY_PAGE_SIZE, refreshHydratedSessions, releaseSession, sessionStore } from '../session'
+import { HISTORY_INITIAL_PAGE_SIZE, HISTORY_PAGE_SIZE, refreshHydratedSessions, releaseSession, sessionStore } from '../session'
 
 const turn = (n: number): AgentMessage[] => [
   userMessage(`u${n}`, [{ type: 'text', text: `问题 ${n}` }], n * 10),
@@ -42,8 +42,30 @@ describe('按页读转录', () => {
     const store = sessionStore('paged')
 
     await vi.waitFor(() => expect(ids(store.getState().transcript.messages)).toEqual(ids(turn(2))))
-    expect(getSessionPage).toHaveBeenCalledWith('paged', HISTORY_PAGE_SIZE)
+    // 首屏只读一小页;往上翻才按整页取
+    expect(getSessionPage).toHaveBeenCalledWith('paged', HISTORY_INITIAL_PAGE_SIZE)
     expect(store.getState().historyHasMore).toBe(true)
+  })
+
+  it('★ 首页回来之前不算「读过了」—— 视图据此画骨架而不是问候语', async () => {
+    let resolve!: (value: SessionPage) => void
+    vi.mocked(getSessionPage).mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const store = sessionStore('paged')
+    expect(store.getState().historyLoaded).toBe(false)
+
+    resolve(page(turn(1), false))
+    await vi.waitFor(() => expect(store.getState().historyLoaded).toBe(true))
+    // 转录与「读过了」同一次落地:不存在「已读完但转录还空着」的那一帧
+    expect(ids(store.getState().transcript.messages)).toEqual(ids(turn(1)))
+  })
+
+  it('读失败也要结束加载态,不能让骨架一直挂着', async () => {
+    vi.mocked(getSessionPage).mockRejectedValueOnce(new Error('boom'))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const store = sessionStore('paged')
+    await vi.waitFor(() => expect(store.getState().historyLoaded).toBe(true))
+    expect(store.getState().transcript.messages).toEqual([])
+    error.mockRestore()
   })
 
   it('★ 往上翻:前一页接在前面,工具卡片跟着认出来,翻到头不再显示', async () => {

@@ -22,10 +22,10 @@ import { useState, type ReactNode } from "react";
 import { Check, LogIn, RefreshCw, Star, Trash2, GripVertical } from "lucide-react";
 import type { ProviderAccount } from "../../../../../shared/domain/provider-account";
 import { accountDisplay } from "../../../../../shared/domain/provider-account";
-import { Button } from "../../../components/ui/Button";
+import { Button } from "../../../components/arc/button/button";
 import { ProgressBar } from "../../../components/ui/ProgressBar";
 import { TextInput } from "../../../components/ui/TextInput";
-import { Toggle } from "../../../components/ui/Toggle";
+import { Switch } from "../../../components/arc/switch/switch";
 import { useI18n } from "../../../i18n";
 import { cn } from "../../../lib/cn";
 import {
@@ -181,7 +181,7 @@ export function AccountRow({
         <div className="flex shrink-0 items-center gap-1">
           {/* ★ 只在限流时出现:画一个永远灰着的按钮是一次会失败的承诺(§5) */}
           {badge === "limited" && (
-            <Button size="sm" disabled={busy} onClick={onClearLimit}>
+            <Button type="button" variant="secondary" disabled={busy} onClick={onClearLimit}>
               {t("providerAccount.clearLimit")}
             </Button>
           )}
@@ -199,7 +199,8 @@ export function AccountRow({
             </button>
           )}
           {badge === "needs-reauth" && (
-            <Button size="sm" variant="accent" icon={<LogIn size={12} />} disabled={busy} onClick={onReauth}>
+            <Button type="button" variant="primary" disabled={busy} onClick={onReauth}>
+              <LogIn size={12} />
               {t("providerAccount.reauth")}
             </Button>
           )}
@@ -215,11 +216,11 @@ export function AccountRow({
               <Star size={13} aria-hidden />
             </button>
           )}
-          <Toggle
+          <Switch
             checked={account.enabled}
             disabled={busy}
-            onChange={onToggleEnabled}
-            label={account.enabled ? t("providerAccount.disable") : t("providerAccount.enable")}
+            onCheckedChange={onToggleEnabled}
+            aria-label={account.enabled ? t("providerAccount.disable") : t("providerAccount.enable")}
           />
           <button
             type="button"

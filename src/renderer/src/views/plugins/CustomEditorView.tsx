@@ -21,7 +21,7 @@ import { AlertTriangle } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { InnerTab } from '../../../../shared/domain/tab'
 import { isRunnable } from '../../../../shared/plugin/state'
-import { EmptyState } from '../../components/ui/EmptyState'
+import { EmptyState } from '../../components/arc/empty-state/empty-state'
 import { useI18n } from '../../i18n'
 import { activatePluginEditor } from '../../services/plugins'
 import { PluginViewFrame } from '../../shell/PluginViewFrame'
@@ -71,7 +71,7 @@ export function CustomEditorView({
           icon={<AlertTriangle size={26} />}
           title={t('customEditor.unavailable')}
           // ★ 说清「是哪个插件」。只说「编辑器不可用」的话,用户根本不知道去禁用列表里找谁。
-          hint={t('customEditor.unavailableHint', { plugin: tab.ref.pluginId })}
+          description={t('customEditor.unavailableHint', { plugin: tab.ref.pluginId })}
         />
       </div>
     )
@@ -95,7 +95,7 @@ export function CustomEditorView({
         <EmptyState
           icon={<AlertTriangle size={26} />}
           title={t('customEditor.noView')}
-          hint={t('customEditor.noViewHint', { plugin: tab.ref.pluginId })}
+          description={t('customEditor.noViewHint', { plugin: tab.ref.pluginId })}
         />
       </div>
     )

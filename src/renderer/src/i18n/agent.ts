@@ -64,6 +64,8 @@ export const agentZh = {
   // 转录只读最近的一页,更早的按需往前取
   'chat.loadEarlier': '加载更早的消息',
   'chat.loadingEarlier': '正在加载…',
+  // 打开会话、首页历史还没读回来时骨架屏的无障碍标签
+  'chat.loadingHistory': '正在加载对话记录…',
   // 这一轮已经收尾、清单却没跑完。只报剩余条数,不说「失败」——未跑完不等于出错
   'chat.taskChecklist.stoppedIncomplete': '运行已结束，仍有 {count} 项未完成',
   // 快照档的第二行:明说这份清单不是实时进度,否则和历史/入参里的那份分不清
@@ -118,6 +120,7 @@ export const agentZh = {
   'chat.turn.exported': '已导出',
   'chat.turn.exportFailed': '导出失败，请重试',
   'chat.turn.delete': '删除这条回复',
+  'chat.message.delete': '删除这条提问及其回复',
   'chat.turn.branch': '分支到新会话',
   'chat.turn.branching': '正在分支…',
   'chat.turn.branched': '已分支',
@@ -269,6 +272,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.pendingInteraction': 'Waiting for your input',
   'chat.loadEarlier': 'Load earlier messages',
   'chat.loadingEarlier': 'Loading…',
+  'chat.loadingHistory': 'Loading conversation…',
   'chat.taskChecklist.stoppedIncomplete': 'Run ended with {count} unfinished task(s)',
   'chat.taskChecklist.snapshot': 'Checklist snapshot',
   'chat.taskChecklist.unfinished': 'Unfinished',
@@ -310,6 +314,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.turn.exported': 'Exported',
   'chat.turn.exportFailed': 'Export failed. Try again',
   'chat.turn.delete': 'Delete this reply',
+  'chat.message.delete': 'Delete this message and its reply',
   'chat.turn.branch': 'Branch to new chat',
   'chat.turn.branching': 'Branching…',
   'chat.turn.branched': 'Branched',

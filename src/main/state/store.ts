@@ -435,6 +435,10 @@ export const store = {
   lastAssistantMessage(sessionId: string): AgentMessage | undefined {
     return repo.lastAssistantMessage(sessionId)
   },
+  /** 最后一条带目标标记的助手消息 —— 目标重载恢复只看它,不解析整段转录 */
+  lastGoalStatusMessage(sessionId: string): AgentMessage | undefined {
+    return repo.lastGoalStatusMessage(sessionId)
+  },
   /** 一条消息仍是读出来时那一份时才换 parts(见 `repo.replaceMessagePartsIfUnchanged`) */
   replaceMessagePartsIfUnchanged(sessionId: string, messageId: string, expectedParts: string, parts: AgentMessage['parts']): boolean {
     return repo.replaceMessagePartsIfUnchanged(sessionId, messageId, expectedParts, parts)

@@ -180,6 +180,10 @@ export function ensureGoalRuntime(): void {
   installGoalHost({
     now: () => getHost().clock.now(),
     history: (sessionId) => store.getHistory(sessionId),
+    goalHistory: (sessionId) => {
+      const last = store.lastGoalStatusMessage(sessionId)
+      return last === undefined ? [] : [last]
+    },
     commit: (sessionId, message) => { store.commitMessage(sessionId, message) },
     exists: (sessionId) => store.getSession(sessionId) !== undefined,
     tokens: (sessionId) => Object.values(store.getSessionRunUsage(sessionId))
@@ -1655,6 +1659,24 @@ const subagentQueue = new SubagentQueue(subagentCapacity, {
 let childSeq = 0
 
 /**
+ * 正在被父代理**前台等着**的子代理:childRunId → 「转去后台」。
+ *
+ * 需求:一个前台子代理跑得比预想久(半小时还没回来),用户想让主代理先接着干别的,
+ * 而不是只能干等或者停掉它重来。表项只在父代理真正 await 的那段时间里存在。
+ */
+const foregroundSubagents = new Map<string, () => boolean>()
+
+/**
+ * 把一个前台子代理转去后台。返回「转成了」。
+ *
+ * false 不是错误:它已经跑完 / 本来就是后台 / 根本不是这个进程里的 run ——
+ * 这些情况下用户要的「别再等它」要么已经成立,要么无从谈起。
+ */
+export function detachForegroundSubagent(childRunId: string): boolean {
+  return foregroundSubagents.get(childRunId)?.() ?? false
+}
+
+/**
  * 等一个 run 结束。
  *
  * ★ 先判 `status` 再挂监听,两件事都要做:`RunHandle.emit` 在发出 `run_end`
@@ -1693,7 +1715,13 @@ function monitorChildRun(
   child: RunHandle,
   childReq: RunRequest,
   callId: string,
-  background: boolean,
+  /**
+   * ★ 一个**可变**的盒子而不是布尔值:前台子代理可以在半路被用户转去后台
+   * (`detachForegroundSubagent`),而「要不要按后台收尾」要在**结束那一刻**读。
+   * 派出时读一次的话,被转走的那个会按前台收尾 —— 回执上没有 pending,
+   * 结论也不会送回主代理,用户转出去的那份活就这样没了下文。
+   */
+  mode: { readonly background: boolean },
   environment: WorkspaceEnvironment,
   finished?: Promise<void>
 ): Promise<ChildRunResult> {
@@ -1744,6 +1772,7 @@ function monitorChildRun(
     const last = store.lastAssistantMessage(childReq.sessionId)
     const text = last === undefined ? '' : visibleText(last)
     const endedAt = child.endedAt
+    const background = mode.background
     persistSubagentCompletion(parent.sessionId, callId, child.runId, status, text, error, background)
     if (background) {
       try {
@@ -2102,6 +2131,8 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
       理由见 `subagent-queue.ts` 里 `SlotRequest.start` 的注释(不这么做的话,
       `runs.create` 会落在微任务里,同一个空位会被唤醒的多个等待者同时认领)。
     */
+    const mode = { background: sub.background === true }
+    let childHandle: RunHandle | undefined
     const start = (): { result: Promise<ChildRunResult> } => {
       /*
         ★ 环境要**再断言一次**。排队可能排了几分钟,而工作区租约在这期间
@@ -2162,8 +2193,9 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
         finished = runAgent(h, r, def, parentSkills, resources)
         return finished
       })
+      childHandle = child
       return {
-        result: monitorChildRun(parent, child, childReq, sub.callId, sub.background === true, resources.environment, finished)
+        result: monitorChildRun(parent, child, childReq, sub.callId, mode, resources.environment, finished)
       }
     }
 
@@ -2230,7 +2262,49 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
       return { kind: 'refused', reason: slotRefusalReason(acquired.reason, perSessionLimit, globalLimit) }
     }
 
-    const completed = await acquired.value.result
+    /*
+      前台在等结果 —— 但用户随时可能在卡片上把它转去后台(`detachForegroundSubagent`)。
+      两件事谁先到听谁的:结果先到,照常交回;转后台先到,这次调用当场以「后台」收场,
+      子 run 原样跑下去,结束时由 `monitorChildRun` 按后台收尾(读的是 `mode`)。
+    */
+    const result = acquired.value.result
+    let detach = (): void => {}
+    const detached = new Promise<'detached'>((resolve) => { detach = () => resolve('detached') })
+    foregroundSubagents.set(childRunId, () => {
+      /*
+        ★ 只认「还在跑」的。run_end 已经发出、收尾还没做完的那一小段里转后台,
+        `monitorChildRun` 可能已经读过 `mode` 了 —— 这时改它,卡片会被标成后台,
+        结论却按前台交回,两边对不上。拒掉,前台的结果马上就到。
+      */
+      if (mode.background || childHandle === undefined || childHandle.status !== 'running') return false
+      mode.background = true
+      // ★ 补上后台任务的身份:`activeBackgroundChildrenOfSession`(目标续跑判「还有后台活」)
+      //   和交差时的 subagentType 都认它
+      childHandle.backgroundTask = { type: def.name, description: sub.description }
+      detach()
+      return true
+    })
+    let raced: ChildRunResult | 'detached'
+    try {
+      raced = await Promise.race([result, detached])
+    } finally {
+      foregroundSubagents.delete(childRunId)
+    }
+
+    if (raced === 'detached') {
+      void result.catch((error: unknown) => {
+        getHost().logger.warn(`[subagent] detached child failed: ${childRunId}`, error)
+      })
+      getHost().logger.info(`[subagent] moved to background by user: ${childRunId}`)
+      return {
+        kind: 'background',
+        childRunId,
+        detached: true,
+        ...(def.color === undefined ? {} : { color: def.color })
+      }
+    }
+
+    const completed = raced
     return {
       kind: 'finished', childRunId, status: completed.status, text: completed.text,
       ...(def.color === undefined ? {} : { color: def.color }),

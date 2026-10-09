@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import './styles/theme.css'
+import './styles/arc-integration.css'
 import { I18nProvider } from './i18n'
 import { MigrationGateHost } from './views/MigrationGate'
 

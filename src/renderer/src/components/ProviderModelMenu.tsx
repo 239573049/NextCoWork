@@ -1,33 +1,40 @@
 /**
- * 供应商 → 模型的两级弹层菜单:先选供应商,选中后在旁边弹出这一家的模型子菜单。
+ * 供应商 → 模型的两级弹层菜单:先选供应商,悬停或点开后在旁边弹出这一家的模型子菜单。
  *
- * 从 `views/chat/Composer.tsx` 原来的 `ModelPicker`/`ModelSubmenu` 抽出来——
- * 设置页「通用 → Agent」的默认模型/默认子代理现在要一模一样的交互(先选供应商、
- * 再选模型、当前项打勾),而子菜单这套定位逻辑(贴着被悬停的那一行弹出、
- * 视口边界内会翻到另一侧、跟着 resize/scroll 重新量高度)不是能随手抄一遍的东西——
- * 抄错一处的症状是「面板飞到屏幕外」或「面板不跟手」,两个都不报错、只能肉眼看见。
- * 两处需求一致,所以抽成共享组件,而不是复制一份改改字段名。
+ * 输入框的模型药丸、设置页「通用 → Agent」的默认模型 / 默认子代理、图片模型、视频模型
+ * 共用这一个 —— 四处要的是同一套交互(先选供应商、再选模型、当前项打勾)。
  *
- * ★★ 不用 `components/ui/Menu.tsx` 自带的（唯一一层）面板:那个组件假设自己的
- * 面板挂在**触发器**上,而这里的第二级要挂在**被悬停的那一行按钮**上,且第二级
- * 开着时点第二级不能被外层判定成「点了外面」从而关闭——所以第二级是手写的
- * `createPortal` + 外层 `Menu` 的 `containsTarget`,这一点和 Composer 原来的
- * 做法一致,没有改逻辑,只是搬了地方。
+ * ## 菜单本身用 Radix 的 DropdownMenu(含 Sub / SubTrigger / SubContent)
+ *
+ * 之前是 `ui/Menu` 套一个手写的二级面板(`createPortal` + 自己量位置、贴边翻转、
+ * 跟 resize/scroll 重算 + 外层 `containsTarget` 防误关)。那一版有四个只能肉眼或键盘
+ * 才发现的问题,这里都交给 Radix 解决:
+ *   1. 鼠标从供应商行**斜着**移向子菜单时会扫过下面几行,子菜单跟着换成别家
+ *      —— Radix 的子菜单有指针「安全区」,斜穿过去不会切换;
+ *   2. 面板里没有方向键导航,二级面板挂在 body 末尾、焦点进不去
+ *      —— ↑↓ 移动、→ / Enter 进子菜单、← 退回、首字母跳转都是原生的;
+ *   3. 二级面板的定位、翻转、限高是手写的 —— 现在由 Radix 的 Popper 负责;
+ *   4. 二级面板 `z-[60]` 挂在 body 下,压不过 z-100 的设置浮层
+ *      —— Radix 的浮层统一由 `styles/arc-integration.css` 抬到 150。
+ *
+ * Arc 的 `dropdown-menu` 不能用在这里:它的触发器是固定的「文字 + 箭头」按钮,
+ * 也没有二级菜单。Radix 是 Arc 菜单本身的底座,也是本仓库 `ui/Select` 用的同一个库。
+ *
+ * ★ `modal={false}`:和原来的 `ui/Menu` 一样,菜单开着时外面的页面照常能滚动。
+ * ★ Esc 由 Radix 处理,它会 `preventDefault`,设置浮层那个 document 级的 Esc 监听
+ *   看到 `defaultPrevented` 就不会连带关掉整个设置面板。
+ * ★ 设置浮层里的菜单要夹在内容列里(`data-menu-bounds`,见 `ui/Menu.tsx`),
+ *   这里把那块元素交给 Radix 当 `collisionBoundary`。
  *
  * ★ 这个组件不知道「供应商 / 模型该怎么过滤、怎么排序」——`rows` 由调用方算好
- * 再传进来。聊天输入框和设置页对「同一个别名能不能显示成待选项」的规则并不一样
- * (设置页要在供应商已停用时仍然把它留在列表里方便改,输入框不需要),
- * 把这条规则拉平进共享层只会逼一边迁就另一边的隐藏假设。
+ *   再传进来。聊天输入框和设置页对「同一个别名能不能显示成待选项」的规则并不一样
+ *   (设置页要在供应商已停用时仍然把它留在列表里方便改,输入框不需要),
+ *   把这条规则拉平进共享层只会逼一边迁就另一边的隐藏假设。
  */
-import {
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react'
-import { createPortal } from 'react-dom'
-import { ChevronRight } from 'lucide-react'
-import { Menu, MenuItem, MenuLabel } from './ui/Menu'
+import { Check, ChevronRight } from 'lucide-react'
+import { DropdownMenu } from 'radix-ui'
+import { useRef, useState, type ReactNode } from 'react'
+import { cn } from '../lib/cn'
 
 export interface ProviderModelMenuModelOption {
   value: string
@@ -43,6 +50,20 @@ export interface ProviderModelMenuRow {
   selected: boolean
   models: readonly ProviderModelMenuModelOption[]
 }
+
+/** 两级面板共用的外观 —— 与 `ui/Menu` 的面板同一套 token,入场用 @starting-style 淡入。 */
+const PANEL = cn(
+  'app-no-drag scroll-thin overflow-y-auto rounded-card border border-border bg-surface-raised p-1',
+  'shadow-2xl shadow-black/40 outline-none',
+  'transition-[opacity,scale] duration-150 ease-panel starting:scale-[.98] starting:opacity-0',
+  'motion-reduce:transition-none'
+)
+
+const ITEM = cn(
+  'flex w-full cursor-default select-none items-center gap-2.5 rounded-[7px] px-2.5 py-[7px]',
+  'text-left text-[13px] text-fg outline-none transition-colors',
+  'data-[highlighted]:bg-tint-strong data-[disabled]:opacity-40'
+)
 
 export function ProviderModelMenu({
   trigger,
@@ -61,13 +82,13 @@ export function ProviderModelMenu({
   onSelectModel,
   onOpenChange
 }: {
-  /** 触发按钮的内容;按钮本身由内部的 `Menu` 渲染。 */
+  /** 触发按钮的内容;按钮本身由这里渲染(带 `app-no-drag`)。 */
   trigger: ReactNode
   triggerClassName?: string
   /**
-   * 转发给内部 `Menu` 的 `className`(外层包裹 `div`)。composer 的药丸要
-   * `shrink`,设置页的行内下拉要撑满控件列——**默认值只满足前者**,后者必须
-   * 显式传 `'w-full'`,不然按钮会缩成内容宽度,在 318px 的控件列里贴左。
+   * 外层包裹 `div` 的类名。composer 的药丸要 `shrink`,设置页的行内下拉要撑满控件列
+   * ——**默认值只满足前者**,后者必须显式传 `'w-full'`,不然按钮会缩成内容宽度,
+   * 在 318px 的控件列里贴左。
    */
   className?: string
   /**
@@ -100,173 +121,106 @@ export function ProviderModelMenu({
    */
   onOpenChange?: (open: boolean) => void
 }): ReactNode {
-  const [openRowId, setOpenRowId] = useState<string | null>(null)
-  const [submenuAnchor, setSubmenuAnchor] = useState<HTMLButtonElement | null>(null)
-  const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({})
-  const submenuRef = useRef<HTMLDivElement>(null)
-  const closeMenuRef = useRef<() => void>(() => {})
-
-  const openRow = (id: string): void => {
-    setOpenRowId(id)
-    setSubmenuAnchor(rowRefs.current[id] ?? null)
-  }
-  const openRowData = rows.find((r) => r.id === openRowId)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const [bounds, setBounds] = useState<Element | null>(null)
 
   return (
-    <>
-      <Menu
-        label={ariaLabel ?? menuLabel}
-        width={width}
-        align={align}
-        className={className ?? 'min-w-0'}
-        triggerClassName={triggerClassName}
-        trigger={trigger}
+    <div className={cn('relative flex', className ?? 'min-w-0')}>
+      <DropdownMenu.Root
+        modal={false}
         onOpenChange={(open) => {
-          if (!open) {
-            setOpenRowId(null)
-            setSubmenuAnchor(null)
-          }
+          if (open) setBounds(triggerRef.current?.closest('[data-menu-bounds]') ?? null)
           onOpenChange?.(open)
         }}
-        containsTarget={(target) => submenuRef.current?.contains(target) ?? false}
       >
-        {(close) => {
-          closeMenuRef.current = close
-          return (
-            <>
-              <MenuLabel>
-                <span className="flex items-center gap-1.5">
-                  {menuIcon}
-                  {menuLabel}
-                </span>
-              </MenuLabel>
-              {topItem !== undefined && (
-                <MenuItem
-                  checked={topItem.selected}
-                  onSelect={() => {
-                    topItem.onSelect()
-                    close()
-                  }}
-                >
-                  {topItem.label}
-                </MenuItem>
-              )}
-              {!loaded ? (
-                <MenuLabel>{loadingLabel}</MenuLabel>
-              ) : rows.length === 0 ? (
-                <MenuLabel>{emptyLabel}</MenuLabel>
-              ) : (
-                rows.map((row) => (
-                  <MenuItem
-                    key={row.id}
-                    checked={row.selected}
-                    description={row.description}
-                    buttonRef={(node) => {
-                      rowRefs.current[row.id] = node
-                    }}
-                    onHover={() => openRow(row.id)}
-                    onSelect={() => openRow(row.id)}
-                  >
-                    <span className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate">{row.label}</span>
-                      <ChevronRight size={13} className="text-fg-faint" />
+        <DropdownMenu.Trigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            aria-label={ariaLabel ?? menuLabel}
+            className={cn('app-no-drag disabled:opacity-40', triggerClassName)}
+          >
+            {trigger}
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            align={align}
+            side="bottom"
+            sideOffset={4}
+            collisionPadding={8}
+            collisionBoundary={bounds ?? undefined}
+            style={{ width }}
+            className={cn(PANEL, 'max-h-[var(--radix-dropdown-menu-content-available-height)]')}
+          >
+            <DropdownMenu.Label className="px-2.5 pt-2 pb-1 text-[11px] text-fg-faint">
+              <span className="flex items-center gap-1.5">
+                {menuIcon}
+                {menuLabel}
+              </span>
+            </DropdownMenu.Label>
+            {topItem !== undefined && (
+              <DropdownMenu.Item className={ITEM} onSelect={topItem.onSelect}>
+                <span className="min-w-0 flex-1 truncate">{topItem.label}</span>
+                <Tick on={topItem.selected} />
+              </DropdownMenu.Item>
+            )}
+            {!loaded ? (
+              <Note>{loadingLabel}</Note>
+            ) : rows.length === 0 ? (
+              <Note>{emptyLabel}</Note>
+            ) : (
+              rows.map((row) => (
+                <DropdownMenu.Sub key={row.id}>
+                  <DropdownMenu.SubTrigger className={cn(ITEM, 'data-[state=open]:bg-tint-strong')}>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">{row.label}</span>
+                      {row.description !== undefined && (
+                        <span className="mt-0.5 block truncate text-[11px] text-fg-faint">{row.description}</span>
+                      )}
                     </span>
-                  </MenuItem>
-                ))
-              )}
-            </>
-          )
-        }}
-      </Menu>
-      {submenuAnchor !== null && openRowData !== undefined && typeof document !== 'undefined'
-        ? createPortal(
-            <ModelSubmenu
-              anchor={submenuAnchor}
-              panelRef={(node) => {
-                submenuRef.current = node
-              }}
-              title={openRowData.label}
-              models={openRowData.models}
-              onSelect={(alias) => {
-                onSelectModel(openRowData.id, alias)
-                closeMenuRef.current()
-                setSubmenuAnchor(null)
-                setOpenRowId(null)
-              }}
-            />,
-            document.body
-          )
-        : null}
-    </>
+                    <Tick on={row.selected} />
+                    <ChevronRight size={13} aria-hidden className="shrink-0 text-fg-faint" />
+                  </DropdownMenu.SubTrigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.SubContent
+                      sideOffset={6}
+                      alignOffset={-5}
+                      collisionPadding={8}
+                      style={{ width }}
+                      className={cn(PANEL, 'max-h-[var(--radix-dropdown-menu-content-available-height)]')}
+                    >
+                      <DropdownMenu.Label className="px-2.5 pt-2 pb-1 text-[11px] text-fg-faint">
+                        {row.label}
+                      </DropdownMenu.Label>
+                      {row.models.map((m) => (
+                        <DropdownMenu.Item
+                          key={m.value}
+                          className={ITEM}
+                          title={m.label}
+                          onSelect={() => onSelectModel(row.id, m.value)}
+                        >
+                          <span className="min-w-0 flex-1 truncate">{m.label}</span>
+                          <Tick on={m.selected} />
+                        </DropdownMenu.Item>
+                      ))}
+                    </DropdownMenu.SubContent>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Sub>
+              ))
+            )}
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+    </div>
   )
 }
 
-function ModelSubmenu({
-  anchor,
-  panelRef,
-  title,
-  models,
-  onSelect
-}: {
-  anchor: HTMLElement
-  panelRef: (node: HTMLDivElement | null) => void
-  title: string
-  models: readonly ProviderModelMenuModelOption[]
-  onSelect: (alias: string) => void
-}): ReactNode {
-  const [position, setPosition] = useState({ top: 0, left: 0 })
-  const width = 300
-  const panelNode = useRef<HTMLDivElement | null>(null)
+/** 勾选位:没勾时仍占位,免得勾上勾下整列跳动(同 `ui/Menu` 的 `MenuItem`)。 */
+function Tick({ on }: { on: boolean }): ReactNode {
+  return <Check size={14} aria-hidden className={cn('shrink-0 text-accent', !on && 'invisible')} />
+}
 
-  useLayoutEffect(() => {
-    const measure = (): void => {
-      const rect = anchor.getBoundingClientRect()
-      const viewportWidth = window.innerWidth
-      const viewportHeight = window.innerHeight
-      const panelHeight = Math.min(
-        panelNode.current?.scrollHeight ?? 0,
-        Math.max(0, viewportHeight - 16)
-      )
-      const preferredLeft =
-        rect.right + 6 + width <= viewportWidth ? rect.right + 6 : rect.left - width - 6
-      const left = Math.max(8, Math.min(preferredLeft, viewportWidth - width - 8))
-      // 与触发项顶部对齐；下方空间不足时向上推，确保整个弹层留在视口内。
-      const top = Math.max(8, Math.min(rect.top, viewportHeight - panelHeight - 8))
-      setPosition({ top, left })
-    }
-    measure()
-    const resizeObserver = new ResizeObserver(measure)
-    if (panelNode.current !== null) resizeObserver.observe(panelNode.current)
-    window.addEventListener('resize', measure)
-    window.addEventListener('scroll', measure, true)
-    return () => {
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', measure)
-      window.removeEventListener('scroll', measure, true)
-    }
-  }, [anchor, models.length])
-
-  return (
-    <div
-      ref={(node) => {
-        panelNode.current = node
-        panelRef(node)
-      }}
-      role="menu"
-      style={{
-        width,
-        top: position.top,
-        left: position.left,
-        maxHeight: 'calc(100vh - 16px)'
-      }}
-      className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40"
-    >
-      <MenuLabel>{title}</MenuLabel>
-      {models.map((m) => (
-        <MenuItem key={m.value} checked={m.selected} onSelect={() => onSelect(m.value)}>
-          {m.label}
-        </MenuItem>
-      ))}
-    </div>
-  )
+function Note({ children }: { children: ReactNode }): ReactNode {
+  return <DropdownMenu.Label className="px-2.5 pt-2 pb-1 text-[11px] text-fg-faint">{children}</DropdownMenu.Label>
 }

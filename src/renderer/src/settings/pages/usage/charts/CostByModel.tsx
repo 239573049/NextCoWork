@@ -12,7 +12,7 @@
  * 历史账。所以这里只是求和,不做任何重算。
  */
 import { useI18n } from '../../../../i18n'
-import { EmptyState } from '../../../../components/ui/EmptyState'
+import { EmptyState } from '../../../../components/arc/empty-state/empty-state'
 import { formatCostMicros, formatNumber, formatPercent } from '../usage-format'
 import type { CostBreakdown } from '../usage-overview'
 import { colorOf } from './colors'
@@ -35,12 +35,12 @@ export function CostByModel({
     return (
       <EmptyState
         title={t('usage.cost.empty')}
-        hint={
+        description={
           breakdown.unpricedRequests > 0
             ? t('usage.cost.unpricedHint', {
                 count: formatNumber(breakdown.unpricedRequests, locale)
               })
-            : undefined
+            : ''
         }
       />
     )

@@ -21,9 +21,9 @@ import type {
   McpServerStatus,
   McpTransport,
 } from "../../../../../shared/domain/mcp";
-import { Button } from "../../../components/ui/Button";
+import { Button } from "../../../components/arc/button/button";
 import { Dialog } from "../../../components/ui/Dialog";
-import { Segmented } from "../../../components/ui/Segmented";
+import SegmentedControl from "../../../components/arc/segmented-control/segmented-control";
 import { TextInput } from "../../../components/ui/TextInput";
 import { useI18n } from "../../../i18n";
 import { cn } from "../../../lib/cn";
@@ -166,10 +166,10 @@ export function McpServerDialog({
       width={560}
       footer={
         <div className="flex items-center justify-end gap-2">
-          <Button size="sm" onClick={onClose} disabled={busy}>
+          <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button size="sm" variant="accent" onClick={save} disabled={busy}>
+          <Button type="button" variant="primary" onClick={save} disabled={busy}>
             {busy ? (
               <Spinner size="sm" />
             ) : (
@@ -196,12 +196,11 @@ export function McpServerDialog({
           }
         >
           {/* ★ 用 Segmented 不用 Menu —— Menu 在滚动区里会被裁(ModelPage.tsx 记着这条) */}
-          <Segmented
+          <SegmentedControl
             label={t("connection.mcp.dialog.transport")}
-            size="sm"
             value={draft.transport}
-            options={transports}
-            onChange={(t) => set("transport", t)}
+            options={[...transports]}
+            onValueChange={(t) => set("transport", t as McpTransport)}
           />
         </Field>
 

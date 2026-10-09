@@ -30,8 +30,8 @@ import type { ReferralCenter, ReferralState } from '../../../../shared/domain/re
 import brandIcon from '../../assets/brand-icon-256.png'
 import bannerDark from '../../assets/rewards-banner-dark.jpg'
 import bannerLight from '../../assets/rewards-banner-light.jpg'
-import { Button } from '../../components/ui/Button'
-import { EmptyState } from '../../components/ui/EmptyState'
+import { Button } from '../../components/arc/button/button'
+import { EmptyState } from '../../components/arc/empty-state/empty-state'
 import { IconButton } from '../../components/ui/IconButton'
 import { Spinner } from '../../components/ui/Spinner'
 import { useFocusTrap } from '../../components/ui/useFocusTrap'
@@ -217,15 +217,16 @@ export function RewardsOverlay({ open, onClose }: { open: boolean; onClose: () =
         </section>
 
         {state === null ? (
-          <EmptyState icon={<Spinner size="sm" />} title={t('rewards.loading')} />
+          <EmptyState icon={<Spinner size="sm" />} title={t('rewards.loading')} description="" />
         ) : state.kind === 'unavailable' ? (
           <EmptyState
             icon={<Gift size={22} />}
             title={t(unavailableKey(state.reason))}
+            description=""
             action={
               // 「没登录」重试没有意义（要去登录），另外两种给一颗重试
               state.reason === 'signed-out' ? undefined : (
-                <Button size="sm" onClick={load} disabled={loading}>{t('common.retry')}</Button>
+                <Button variant="secondary" type="button" size="sm" onClick={load} disabled={loading}>{t('common.retry')}</Button>
               )
             }
           />
@@ -296,8 +297,8 @@ function InviteCard({
           不参与任何翻译或省略号截断之外的加工。
         */}
         <span className="selectable min-w-0 flex-1 truncate font-mono text-[12.5px] text-fg">{center.inviteUrl}</span>
-        <Button size="sm" onClick={copyLink}>{t('rewards.copyLink')}</Button>
-        <Button size="sm" variant="ghost" onClick={() => onOpen(center.inviteUrl)}>{t('rewards.openInBrowser')}</Button>
+        <Button variant="secondary" type="button" size="sm" onClick={copyLink}>{t('rewards.copyLink')}</Button>
+        <Button type="button" size="sm" variant="secondary" onClick={() => onOpen(center.inviteUrl)}>{t('rewards.openInBrowser')}</Button>
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <span className="shrink-0 text-[12px] text-fg-faint">{t('rewards.inviteCode')}</span>
@@ -306,13 +307,14 @@ function InviteCard({
           ★ 邀请码**不跟文案**，原样复制（和链接不同）。它是要被填进注册页输入框的
           值，多一个字就填不进去 —— 没人会先手动删干净再粘贴。
         */}
-        <Button size="sm" onClick={() => onCopy(center.code)}>{t('rewards.copyCode')}</Button>
+        <Button variant="secondary" type="button" size="sm" onClick={() => onCopy(center.code)}>{t('rewards.copyCode')}</Button>
         {/*
           ★ 海报是「这个用户自己那一张」：二维码编的是他的邀请链接，
           所以按钮只能出现在拿到了 `center` 的地方 —— 没有码就没有海报可出，
           这也是它不做成账户菜单一项的原因。
         */}
-        <Button size="sm" variant="accent" icon={<ImageDown size={14} />} disabled={savingPoster} onClick={onSavePoster}>
+        <Button type="button" size="sm" variant="primary" disabled={savingPoster} onClick={onSavePoster}>
+          <ImageDown size={14} />
           {savingPoster ? t('rewards.posterSaving') : t('rewards.savePoster')}
         </Button>
       </div>

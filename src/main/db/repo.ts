@@ -1198,6 +1198,29 @@ export function countMessages(sessionId: string): number {
   return Number(row?.['n'] ?? 0)
 }
 
+/**
+ * 最后一条**带目标标记**(`goal_status` part)的助手消息 —— 目标重载恢复只看它。
+ *
+ * ★ 需求:打开一条长会话时,`restoreGoal` 原先要 `getHistory` 把整段转录(连同每次工具输出)
+ *   全部 `JSON.parse` 一遍,只为找最后一条标记;主进程同步卡在这里,首页历史就迟迟回不来。
+ *   这里先用 LIKE 在原文上筛(不解析),再逐条解析确认 —— `_` 是 LIKE 通配、文本里
+ *   也可能恰好出现这串字符,所以筛出来的只是候选,真有那个 part 才算。
+ * ★ 和 `restorableGoalCondition` 等价:它从后往前找最后一条助手消息里的最后一个标记,
+ *   而那条消息正是这里返回的这一条。
+ */
+export function lastGoalStatusMessage(sessionId: string): AgentMessage | undefined {
+  const rows = stmt(
+    `SELECT id, role, parts, schema_version, created_at, internal FROM messages
+     WHERE session_id = ? AND role = 'assistant' AND parts LIKE '%"type":"goal_status"%'
+     ORDER BY ordinal DESC, id DESC`
+  ).iterate(sessionId) as IterableIterator<Record<string, unknown>>
+  for (const row of rows) {
+    const message = messageOfRow(row)
+    if (message.parts.some((part) => part.type === 'goal_status')) return message
+  }
+  return undefined
+}
+
 function messageOfRow(r: Record<string, unknown>): AgentMessage {
   const parts: ContentPart[] = (() => {
     try { return parse<ContentPart[]>(r['parts']) } catch { return [] }
