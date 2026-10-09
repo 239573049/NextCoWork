@@ -24,8 +24,8 @@ import { resolveBrand, type Brand } from '../../../../components/brand/brands'
 
 /**
  * `null` = 我们**故意**不给它图标,退回首字母。
- * 五家都是 lobehub 根本没收字形的(逐个在 `@lobehub/icons-static-svg/icons/`
- * 下找过):Requesty、Opper、OhMyGPT、LocalAI,以及 llama.cpp —— 最后这个是 ggerganov 的
+ * 六家都是 lobehub 根本没收字形的(逐个在 `@lobehub/icons-static-svg/icons/`
+ * 下找过):Requesty、Opper、API Route、OhMyGPT、LocalAI,以及 llama.cpp —— 最后这个是 ggerganov 的
  * 独立项目,不是 Meta 的东西。
  *
  * ★ 编一个「差不多的」图标比没有图标更糟:用户看见 Meta 的 ∞ 会以为
@@ -84,6 +84,7 @@ const EXPECTED: Readonly<Record<string, Brand | null>> = {
   openrouter: 'openrouter',
   requesty: null,
   opper: null,
+  'api-route': null,
   siliconflow: 'siliconcloud',
   'siliconflow-intl': 'siliconcloud',
   together: 'together',
@@ -126,10 +127,10 @@ describe('内置预设的品牌图标', () => {
    * 「null 只有这么几家」:某天规则表改窄了让一堆家一起掉进 null,
    * 这里会红,而界面上只会安静地多出几个字母。
    */
-  it('没有图标的就是这五家,不多不少', () => {
+  it('没有图标的就是这六家,不多不少', () => {
     const blank = PROVIDER_PRESETS.filter((p) => resolveBrand(p.name, p.id) === null).map(
       (p) => p.id
     )
-    expect(blank).toEqual(['requesty', 'opper', 'ohmygpt', 'llamacpp', 'localai'])
+    expect(blank).toEqual(['requesty', 'opper', 'api-route', 'ohmygpt', 'llamacpp', 'localai'])
   })
 })

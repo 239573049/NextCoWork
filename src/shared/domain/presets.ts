@@ -918,6 +918,19 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     verification: 'probed'
   },
   {
+    id: 'api-route',
+    name: 'API Route',
+    category: 'aggregator',
+    endpoints: [oa('https://global.api-route.com/v1', true)],
+    docsUrl: 'https://www.api-route.com/docs/quickstart',
+    apiKeyUrl: 'https://www.api-route.com/api-keys',
+    suggestedModels: ['gpt-6.1-sol'],
+    notes:
+      '模型列表需要 API Key，可用模型取决于密钥的分组与权限。' +
+      '使用模型列表返回的完整 ID（如 gpt-6.1-sol），无需添加厂商前缀。',
+    verification: 'probed'
+  },
+  {
     id: 'siliconflow',
     name: '硅基流动(国内)',
     category: 'aggregator',

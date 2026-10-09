@@ -18,6 +18,10 @@ NextCoWork brings agent-driven development to the desktop: multiple workspaces s
 - **Plugins** — a manifest-driven plugin system with per-call capability gates. Plugins can contribute commands, menus, keybindings, custom editors, views, web apps, agent tools and bundled skills.
 - **Native experience** — light/dark themes, accent colors, motion-level control, auto-update, and full Simplified Chinese / English localization.
 
+## API Route setup
+
+In the model settings provider catalog, add **API Route**, save your API key, then fetch and import models. The preset uses the OpenAI Chat Completions endpoint at `https://global.api-route.com/v1`. Available models depend on your key's group and permissions; use the exact IDs returned by the catalog (for example `gpt-6.1-sol`) without adding a vendor prefix. See the [API Route quickstart](https://www.api-route.com/docs/quickstart) for key setup.
+
 ## Download
 
 Installers are published for:
