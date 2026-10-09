@@ -487,8 +487,7 @@ export const store = {
     const session = repo.getSession(sessionId)
     if (session === undefined) return undefined
     const { messages, hasMore } = repo.getHistoryPage(sessionId, limit, beforeMessageId)
-    const ids = new Set(messages.map((message) => message.id))
-    const messageRuns = Object.fromEntries(Object.entries(repo.messageRunsOf(sessionId)).filter(([id]) => ids.has(id)))
+    const messageRuns = repo.messageRunsOf(sessionId, messages.map((message) => message.id))
     return {
       session,
       messages,

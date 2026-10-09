@@ -79,6 +79,38 @@ describe('按页读', () => {
     const history = seed(1)
     expect(repo.getHistoryPage('s', 200)).toEqual({ messages: history, hasMore: false })
   })
+
+  it('单轮含数百条工具消息时限制补齐数量，继续翻页仍不重不漏', () => {
+    const history = [
+      userMessage('long-question', [{ type: 'text', text: 'Long task' }], 0),
+      ...Array.from({ length: 720 }, (_, index) => assistantMessage(`step-${index}`, [
+        { type: 'text', text: `Step ${index}` }
+      ], index + 1))
+    ]
+    repo.replaceHistory('s', history)
+    const latest = repo.getHistoryPage('s', 60)
+    expect(latest.messages).toHaveLength(560)
+    expect(latest.messages.at(-1)?.id).toBe('step-719')
+    expect(latest.hasMore).toBe(true)
+    const earlier = repo.getHistoryPage('s', 60, latest.messages[0]!.id)
+    expect(earlier.hasMore).toBe(false)
+    expect([...earlier.messages, ...latest.messages]).toEqual(history)
+    // Breaking the boundary iterator must release it so a subsequent read still works.
+    expect(repo.getHistoryPage('s', 60)).toEqual(latest)
+  })
+
+  it('只返回本页消息的 run 归属，并隔离其他会话和无归属消息', () => {
+    const history = seed(3)
+    for (const message of history) repo.commitMessage('s', message, 'run-s')
+    const legacy = userMessage('legacy', [{ type: 'text', text: 'Legacy' }], 100)
+    repo.commitMessage('s', legacy)
+    repo.createSession({ id: 'other', workspaceId: 'w', rootPathAtCreation: '/w' })
+    repo.commitMessage('other', userMessage('foreign', [{ type: 'text', text: 'Other' }], 1), 'run-other')
+
+    expect(repo.messageRunsOf('s', ['u3', 'b3', 'legacy', 'foreign', 'missing'])).toEqual({ u3: 'run-s', b3: 'run-s' })
+    expect(repo.messageRunsOf('s', [])).toEqual({})
+    expect(Object.keys(repo.messageRunsOf('s'))).toHaveLength(history.length)
+  })
 })
 
 describe('按 id 改写(共享规则)', () => {

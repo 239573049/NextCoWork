@@ -668,9 +668,16 @@ export function getSessionDetail(id: string): SessionDetail | undefined {
  * (而不是给一个占位 id ——「不知道」和「属于某个 run」在界面上是两件事:
  * 前者不显示用量,后者会去查一个查不到的 run 然后显示 0 token)。
  */
-export function messageRunsOf(sessionId: string): Record<string, string> {
+export function messageRunsOf(sessionId: string, messageIds?: readonly string[]): Record<string, string> {
   const runs: Record<string, string> = {}
-  for (const row of stmt('SELECT id, run_id FROM messages WHERE session_id = ? AND run_id IS NOT NULL').all(sessionId)) {
+  // CROSS JOIN keeps the page IDs first, so SQLite probes the primary key instead of scanning the session index.
+  const rows = messageIds === undefined
+    ? stmt('SELECT id, run_id FROM messages WHERE session_id = ? AND run_id IS NOT NULL').all(sessionId)
+    : stmt(`SELECT m.id, m.run_id FROM json_each(?) AS page
+            CROSS JOIN messages AS m ON m.id = page.value
+            WHERE m.session_id = ? AND m.run_id IS NOT NULL`)
+      .all(JSON.stringify(messageIds), sessionId)
+  for (const row of rows) {
     const r = row as Record<string, unknown>
     runs[String(r['id'])] = String(r['run_id'])
   }
@@ -1260,23 +1267,26 @@ export function getHistoryPage(
     `SELECT id, role, parts, schema_version, created_at, internal, ordinal FROM messages
      WHERE session_id = ? AND ordinal < ? ORDER BY ordinal DESC, id DESC LIMIT ?`
   ).all(sessionId, upper, Math.max(1, Math.floor(limit))) as Array<Record<string, unknown>>
-  const messages = rows.reverse().map(messageOfRow)
-  let first = rows[0]
-  let extended = 0
-  while (first !== undefined && messages[0] !== undefined && !isTurnStart(messages[0]) && extended < PAGE_TURN_EXTENSION_MAX) {
-    const previous = stmt(
+  // Keep newest-first until the boundary is found, avoiding hundreds of queries and array unshifts in a long turn.
+  const messages = rows.map(messageOfRow)
+  let first = rows.at(-1)
+  const oldest = messages.at(-1)
+  if (first !== undefined && oldest !== undefined && !isTurnStart(oldest)) {
+    const previousRows = stmt(
       `SELECT id, role, parts, schema_version, created_at, internal, ordinal FROM messages
-       WHERE session_id = ? AND ordinal < ? ORDER BY ordinal DESC, id DESC LIMIT 1`
-    ).get(sessionId, Number(first['ordinal'])) as Record<string, unknown> | undefined
-    if (previous === undefined) break
-    messages.unshift(messageOfRow(previous))
-    first = previous
-    extended += 1
+       WHERE session_id = ? AND ordinal < ? ORDER BY ordinal DESC, id DESC LIMIT ?`
+    ).iterate(sessionId, Number(first['ordinal']), PAGE_TURN_EXTENSION_MAX) as IterableIterator<Record<string, unknown>>
+    for (const previous of previousRows) {
+      const message = messageOfRow(previous)
+      messages.push(message)
+      first = previous
+      if (isTurnStart(message)) break
+    }
   }
   const hasMore = first !== undefined && stmt(
     'SELECT 1 FROM messages WHERE session_id = ? AND ordinal < ? LIMIT 1'
   ).get(sessionId, Number(first['ordinal'])) !== undefined
-  return { messages, hasMore }
+  return { messages: messages.reverse(), hasMore }
 }
 
 /** 权威历史对账；未变化的消息保留正文、索引、附件和 run 归属。 */

@@ -39,6 +39,7 @@ import { deferAttachIntent, takeAttachIntents } from './draft-handoff'
 import { PendingQueue } from './PendingQueue'
 import { TaskChecklist, type TaskChecklistExecution } from './TaskChecklist'
 import { Thread } from './Thread'
+import { ThreadLoadError, ThreadSkeleton } from './ThreadLoading'
 import { SubagentLiveFeed } from './subagent-live'
 import { SubagentOpenProvider } from './subagent-open'
 import { ToolStopProvider } from './tool-stop'
@@ -63,39 +64,6 @@ const GREETING_KEYS: Record<DayPart, TranslationKey> = {
   morning: 'chat.greeting.morning',
   afternoon: 'chat.greeting.afternoon',
   evening: 'chat.greeting.evening'
-}
-
-/** 一块占位条。和 `shell/AppSkeleton` 同一档填充 */
-function SkeletonBar({ className }: { className: string }): ReactNode {
-  return <div className={`rounded-md bg-tint ${className}`} />
-}
-
-/**
- * 首页历史还在路上时占住转录的位置(见 `ChatView` 里 `historyLoaded` 那段)。
- *
- * ★ 列宽、内边距照抄 `Thread` 的内容列(760 / px-6 / py-6),数据回来时是「骨架被填满」
- *   而不是整列横向一跳。
- * ★ 和 `AppSkeleton` 一样静止,不做 shimmer —— 这个仓库的动效基调很克制。
- * ★ 骨架贴底排:常驻布局里最新的那几轮就在输入框正上方,数据回来时视线不用挪。
- */
-function ThreadSkeleton({ label }: { label: string }): ReactNode {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden" role="status" aria-busy="true" aria-label={label} data-testid="thread-skeleton">
-      <div className="mx-auto flex w-full max-w-[760px] flex-col gap-5 px-6 py-6">
-        {[0, 1].map((turn) => (
-          <div key={turn} className="flex flex-col gap-5">
-            <SkeletonBar className="h-9 w-[46%] self-end rounded-card" />
-            <div className="flex flex-col gap-2">
-              <SkeletonBar className="h-3.5 w-[92%]" />
-              <SkeletonBar className="h-3.5 w-[84%]" />
-              <SkeletonBar className="h-3.5 w-[61%]" />
-            </div>
-            <SkeletonBar className="h-8 w-[38%]" />
-          </div>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 export function ChatView({
@@ -145,7 +113,7 @@ export function ChatView({
     run 照常在主进程跑 —— 见 `retainSessionView`。
   */
   useEffect(() => retainSessionView(storeKey), [storeKey])
-  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions, historyHasMore, historyLoaded, loadingEarlier } = useSession(useShallow((state) => ({
+  const { activeRunId, lastSeq, transcript, queuedInputs, compacting, compactError, lastOptions, historyHasMore, historyLoaded, historyError, loadingEarlier } = useSession(useShallow((state) => ({
     activeRunId: state.activeRunId,
     lastSeq: state.lastSeq,
     transcript: state.transcript,
@@ -155,6 +123,7 @@ export function ChatView({
     lastOptions: state.lastOptions,
     historyHasMore: state.historyHasMore,
     historyLoaded: state.historyLoaded,
+    historyError: state.historyError,
     loadingEarlier: state.loadingEarlier
   })))
   const {
@@ -169,7 +138,8 @@ export function ChatView({
     retagQueuedPermission,
     retagQueuedMode,
     compactContext,
-    loadEarlier
+    loadEarlier,
+    retryHistory
   } = useSession.getState()
   const providerById = useModelsStore((s) => s.providerById)
   const openMarkdownFile = useCallback((path: string) => {
@@ -1013,13 +983,21 @@ export function ChatView({
     任何一个标识符,所以以后谁往常驻布局里加一个新按钮,都不会顺手漏进只读面板。
     空态那一屏同理跳过 —— 它的全部内容就是问候语加一个输入框。
   */
+  // A run can already be active while its saved history and first events are still in flight.
+  // Only show the welcome screen after a successful empty read, including in read-only panels.
+  const historyPlaceholder = sessionId !== null && !hasRun(transcript, false) && !historyLoaded
+    ? historyError !== null
+      ? <ThreadLoadError onRetry={() => { void retryHistory() }} />
+      : <ThreadSkeleton />
+    : null
+
   if (readOnly) {
     return (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="chat-readonly">
         {subagentOf !== undefined && sessionId !== null && (
           <SubagentLiveFeed childSessionId={sessionId} parent={subagentOf} />
         )}
-        <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
+        {historyPlaceholder ?? <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
           {/*
             ★ 只读面板只给 `root`(路径裁成相对),**不给 `open`** —— 这棵树的
             不变式是「零操作」(见上面那段),给了它文件名就会变成一枚能点的链接。
@@ -1036,30 +1014,24 @@ export function ChatView({
               readOnly
             />
           </WorkspaceFileProvider>
-        </WorkspaceMarkdownProvider>
+        </WorkspaceMarkdownProvider>}
+      </div>
+    )
+  }
+
+  if (historyPlaceholder !== null) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {historyPlaceholder}
+        {goalLine}
+        {notices}
+        {composer}
+        {transferDialog}
       </div>
     )
   }
 
   if (!started) {
-    /*
-      ★ 有会话 id、首页历史还没回来 = **不知道它是不是空的**,不能先画问候语。
-      长会话首页要等一次 IPC,这段时间转录是空的;照问候语那一屏画,用户看到的是
-      「记录没了、输入框跑到了中间」,等数据回来整屏再跳一次。
-      这里直接摆常驻布局(转录位置画骨架、输入框贴底):数据回来时只是骨架被填满,
-      版式不动;真是空会话的,读回来之后才切到问候语那一屏。草稿(无 id)不走这里。
-    */
-    if (sessionId !== null && !historyLoaded) {
-      return (
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <ThreadSkeleton label={t('chat.loadingHistory')} />
-          {goalLine}
-          {notices}
-          {composer}
-          {transferDialog}
-        </div>
-      )
-    }
     return (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center px-6 pb-10">
         <h1 className="mb-6 px-6 text-center text-[26px] leading-snug font-semibold text-fg">

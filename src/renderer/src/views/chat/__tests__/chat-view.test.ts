@@ -1,11 +1,12 @@
 import { act, createElement, type ComponentProps } from 'react'
 import { createRoot } from 'react-dom/client'
 import { JSDOM } from 'jsdom'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { assistantMessage, toolResultMessage, userMessage } from '../../../../../shared/agent/message'
 import { emptyTranscript } from '../../../../../shared/agent/transcript'
 import { makeQueuedInput } from '../../../../../shared/domain/queued-input'
 import { DEFAULT_WORKSPACE_SETTINGS, type Workspace } from '../../../../../shared/domain/workspace'
+import type { SessionPage } from '../../../../../shared/domain/session'
 import { I18nProvider } from '../../../i18n'
 import { pickAttachments, uploadFile } from '../../../services/attachment'
 import { AttachmentTray } from '../AttachmentTray'
@@ -45,6 +46,134 @@ vi.mock('../Composer', () => ({
     createElement('span', { 'data-testid': 'attachment-errors' }, props.attachments?.map((item) => item.error ?? '').join('|')),
     createElement(AttachmentTray, { items: props.attachments ?? [], onRemove: props.onRemoveAttachment ?? (() => {}), onRetry: props.onRetryAttachment ?? (() => {}) }))
 }))
+
+describe('conversation loading feedback', () => {
+  const sessionId = 'loading-feedback'
+  const tabId = 'loading-feedback-tab'
+  const workspace: Workspace = { id: 'workspace', name: 'Workspace', rootPath: '/workspace',
+    createdAt: 1, lastOpenedAt: 1, settings: { ...DEFAULT_WORKSPACE_SETTINGS } }
+  const page = (id = sessionId, empty = false): SessionPage => ({
+    session: { id, workspaceId: workspace.id, title: 'History', model: '', mode: 'code', thinking: 'auto',
+      rootPathAtCreation: '/workspace', status: 'idle', archived: false, favorited: false, createdAt: 1, updatedAt: 2 },
+    messages: empty ? [] : [
+      userMessage(`${id}-user`, [{ type: 'text', text: `Question ${id}` }], 1),
+      assistantMessage(`${id}-answer`, [{ type: 'text', text: `Answer ${id}` }], 2)
+    ],
+    hasMore: false, messageRuns: {}, runModel: {}, runUsage: {}
+  })
+  const loadPage = vi.fn<() => Promise<SessionPage>>()
+  let resolve!: (value: SessionPage) => void
+  let reject!: (error: Error) => void
+  let dom: JSDOM
+  let root: ReturnType<typeof createRoot>
+  let container: HTMLElement
+  let models: ReturnType<typeof useModelsStore.getState>
+
+  beforeEach(() => {
+    loadPage.mockReset().mockReturnValueOnce(new Promise((res, rej) => { resolve = res; reject = rej }))
+    dom = new JSDOM('<html data-theme-motion="off"><body><div id="root"></div></body></html>', { url: 'http://localhost' })
+    Object.assign(dom.window, { nextcowork: {
+      on: () => () => {},
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'sessions:getPage' ? await loadPage()
+        : channel === 'sessions:getSummary' ? { session: page().session, messageCount: 2 }
+          : channel === 'agent:listInteractions' ? [] : undefined })
+    } })
+    vi.stubGlobal('window', dom.window)
+    vi.stubGlobal('document', dom.window.document)
+    vi.stubGlobal('HTMLElement', dom.window.HTMLElement)
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    vi.stubGlobal('requestAnimationFrame', () => 1)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} })
+    container = document.getElementById('root')!
+    root = createRoot(container)
+    models = useModelsStore.getState()
+    useModelsStore.setState({ loaded: true })
+  })
+
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    for (const id of [sessionId, 'loading-next', tabId]) releaseSession(id)
+    resolve(page())
+    await Promise.resolve()
+    useModelsStore.setState(models, true)
+    dom.window.close()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  const show = async (id: string | null = sessionId, readOnly = false): Promise<void> => {
+    await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
+      createElement(ChatView, { key: id ?? tabId, sessionId: id, tabId, workspace, readOnly, fallbackModel: { model: '' } }) })))
+  }
+
+  it.each([false, true])('shows history skeleton until the page arrives, readOnly=%s', async (readOnly) => {
+    await show(sessionId, readOnly)
+    const skeleton = container.querySelector('[data-testid="thread-skeleton"]')
+    expect(skeleton?.getAttribute('aria-busy')).toBe('true')
+    expect(skeleton?.textContent).toContain('Loading conversation…')
+    expect(container.querySelector('h1')).toBeNull()
+    const draft = container.querySelector('[data-testid="draft"]')
+    expect(draft === null).toBe(readOnly)
+    if (!readOnly) await act(async () => sessionStore(sessionId).getState().setDraft('Keep typing'))
+
+    await act(async () => resolve(page()))
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).toBeNull()
+    expect(container.textContent).toContain(`Answer ${sessionId}`)
+    expect(container.querySelector('h1')).toBeNull()
+    if (!readOnly) {
+      expect(container.querySelector('[data-testid="draft"]')).toBe(draft)
+      expect((draft as HTMLInputElement).value).toBe('Keep typing')
+    }
+  })
+
+  it('keeps a pending active conversation in the loading layout', async () => {
+    await show()
+    await act(async () => sessionStore(sessionId).setState({ activeRunId: 'restoring' }))
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).not.toBeNull()
+    expect(container.querySelector('h1')).toBeNull()
+  })
+
+  it('shows the welcome screen immediately for drafts and after confirming an empty saved session', async () => {
+    await show(null)
+    expect(container.querySelector('h1')).not.toBeNull()
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).toBeNull()
+    loadPage.mockReturnValueOnce(Promise.resolve(page(sessionId, true)))
+    await show()
+    expect(container.querySelector('h1')).not.toBeNull()
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).toBeNull()
+  })
+
+  it('replaces a failed load with a retry action and restores the conversation on retry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await show()
+    await act(async () => reject(new Error('Read failed')))
+    expect(container.querySelector('[data-testid="thread-load-error"]')?.textContent).toContain('Unable to load this conversation')
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).toBeNull()
+    expect(container.querySelector('h1')).toBeNull()
+
+    let finish!: (value: SessionPage) => void
+    loadPage.mockReturnValueOnce(new Promise((res) => { finish = res }))
+    await act(async () => (container.querySelector('[data-testid="thread-load-error"] button') as HTMLButtonElement).click())
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).not.toBeNull()
+    await act(async () => finish(page()))
+    expect(container.querySelector('[data-testid="thread-load-error"]')).toBeNull()
+    expect(container.textContent).toContain(`Answer ${sessionId}`)
+  })
+
+  it('keeps the selected conversation loading when the previous conversation resolves late', async () => {
+    await show()
+    let finish!: (value: SessionPage) => void
+    loadPage.mockReturnValueOnce(new Promise((res) => { finish = res }))
+    await show('loading-next')
+    await act(async () => resolve(page()))
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).not.toBeNull()
+    expect(container.textContent).not.toContain(`Answer ${sessionId}`)
+    await act(async () => finish(page('loading-next')))
+    expect(container.querySelector('[data-testid="thread-skeleton"]')).toBeNull()
+    expect(container.textContent).toContain('Answer loading-next')
+  })
+})
 
 /** 需求:元数据未知、正在运行和提炼会话都不能露出必然失败的 /skillify 入口。 */
 describe('Skillify command availability', () => {

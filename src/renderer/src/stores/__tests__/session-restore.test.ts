@@ -64,6 +64,22 @@ describe('active conversation recovery', () => {
     type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 100, outputTokens }
   } })
 
+  it('reads history once and displays it while the live snapshot is still pending', async () => {
+    let resolve!: (value: RunSnapshot) => void
+    vi.mocked(attachRun).mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    adoptActiveRuns([reference])
+    const store = sessionStore(reference.sessionId)
+    expect(store.getState().historyLoaded).toBe(false)
+    await vi.waitFor(() => expect(attachRun).toHaveBeenCalled())
+    expect(getSession).toHaveBeenCalledTimes(1)
+    expect(store.getState().historyLoaded).toBe(true)
+    expect(store.getState().transcript.messages).toEqual([user, answer])
+    expect(liveText(store.getState().transcript)).toBe('')
+    resolve(snapshot())
+    await vi.waitFor(() => expect(liveText(store.getState().transcript)).toBe('Live reply'))
+    expect(store.getState().transcript.messages).toEqual([user, answer])
+  })
+
   it('rebuilds usage from a full snapshot without adding already received usage again', async () => {
     let resolve!: (value: RunSnapshot) => void
     vi.mocked(attachRun).mockImplementation(() => new Promise((r) => { resolve = r }))

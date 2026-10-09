@@ -13,7 +13,7 @@
 import { useMemo } from 'react'
 import { create, type UseBoundStore, type StoreApi } from 'zustand'
 import type { PermissionMode } from '../../../shared/agent/permission'
-import type { SessionChange } from '../../../shared/domain/session'
+import type { SessionChange, SessionPage } from '../../../shared/domain/session'
 import type { AgentEvent } from '../../../shared/agent/event'
 import { mergeGoalStatusMessage, userMessage, type AgentMessage, type ContentPart } from '../../../shared/agent/message'
 import { editUserMessage, editedParts, removeSpan, replySpan, turnSpan } from '../../../shared/agent/history-edit'
@@ -92,13 +92,16 @@ export interface SessionState {
    */
   historyHasMore: boolean
   /**
-   * 打开时那一页历史已经读回来过(成功、失败、或库里本来就没有这条会话都算)。
+   * 打开时那一页历史已经成功读回(库里本来就没有这条会话也算)。
    *
    * ★ 需求:长会话的首页要等一次 IPC,这段时间转录是空的 —— 只看 `messages` 的话
    * 视图会把它当成「全新会话」画成问候语 + 居中输入框,用户以为记录丢了。
    * 视图据此在读回来之前画骨架。
    */
   historyLoaded: boolean
+  /** 读取失败不能当作空会话；保留错误直到重试或读到历史。 */
+  historyError: string | null
+  retryHistory: () => Promise<void>
   loadingEarlier: boolean
   /** 往前再取一页,接在手上那页前面 */
   loadEarlier: () => Promise<void>
@@ -191,6 +194,8 @@ function createSessionStore(sessionId: string): SessionStore {
     queueRev: 0,
     historyHasMore: false,
     historyLoaded: false,
+    historyError: null,
+    retryHistory: () => hydrateHistory(sessionId, true),
     loadingEarlier: false,
     lastOptions: null,
     draft: '',
@@ -891,6 +896,9 @@ function conversationScoped(
 function hydrateHistory(sessionId: string, authoritative = false): Promise<void> {
   const store = stores.get(sessionId)
   if (!store || deletedHistory.has(sessionId)) return Promise.resolve()
+  // Active-run restoration already reads the page. Do not issue another read that will be discarded.
+  const activeRunId = store.getState().activeRunId
+  if (activeRunId !== null) return ensureActiveRunRestored(sessionId, activeRunId)
   const pending = historyLoads.get(sessionId)
   if (pending?.store === store) {
     pending.authoritative ||= authoritative
@@ -899,6 +907,7 @@ function hydrateHistory(sessionId: string, authoritative = false): Promise<void>
   }
   const request = { store, authoritative, dirty: false, promise: Promise.resolve() }
   historyLoads.set(sessionId, request)
+  store.setState({ historyError: null })
   request.promise = (async () => {
     do {
       request.dirty = false
@@ -906,8 +915,6 @@ function hydrateHistory(sessionId: string, authoritative = false): Promise<void>
     } while (request.dirty && historyLoads.get(sessionId) === request && !deletedHistory.has(sessionId))
   })().finally(() => {
     if (historyLoads.get(sessionId) === request) historyLoads.delete(sessionId)
-    // 读成什么样都算「读过了」:失败或被正在跑的 run 让掉时,也不能让骨架一直挂着
-    if (stores.get(sessionId) === store && !store.getState().historyLoaded) store.setState({ historyLoaded: true })
   })
   return request.promise
 }
@@ -929,9 +936,13 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
     store.setState((s) => {
       // IPC 往返期间可能刚好启动了新的 run；不要用旧数据库快照覆盖
       // 正在流式显示的内容。
-      if (s.transcript !== before || s.activeRunId !== null
-        || [...runIndex.values()].some((r) => r.sessionId === sessionId)
-        || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return s
+      if (s.activeRunId !== null || [...runIndex.values()].some((r) => r.sessionId === sessionId)) return s
+      if ([...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return mergeRestoredHistory(s, detail)
+      if (s.transcript !== before) {
+        if (hasRun(s.transcript, false)) return { historyLoaded: true, historyError: null }
+        request.dirty = true
+        return s
+      }
 
       const databaseIds = new Set(detail.messages.map((m) => m.id))
       // 正常情况下当前 renderer 消息都已经先于事件写入数据库；这里只
@@ -946,6 +957,7 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
         historyHasMore: detail.hasMore,
         // 与转录同一次 setState:中间不能有一帧「已读完但转录还空着」被画成问候语
         historyLoaded: true,
+        historyError: null,
         transcript: {
           ...s.transcript,
           messages,
@@ -970,11 +982,14 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
     // 新 Tab 可能还没有主进程会话记录；真正发送时 runtime 会补齐。
     if (err instanceof Error && /会话不存在|不存在该会话|session.*not found/i.test(err.message)) {
       store.setState((s) => {
-        if (s.transcript !== before || s.activeRunId !== null
+        if (s.activeRunId !== null
           || [...runIndex.values()].some((r) => r.sessionId === sessionId)
           || [...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return s
+        if (s.transcript !== before) return { historyLoaded: true, historyError: null }
         return {
           ...s,
+          historyLoaded: true,
+          historyError: null,
           transcript: {
             ...s.transcript,
             messages: [],
@@ -991,6 +1006,7 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
         }
       })
     } else {
+      store.setState({ historyError: err instanceof Error ? err.message : String(err) })
       console.error('[agent] 加载会话历史失败:', err)
     }
   }
@@ -1230,7 +1246,7 @@ export async function refreshHydratedSessions(change?: SessionChange): Promise<v
         || [...childRunIndex.values()].some((run) => run.sessionId === sessionId)) continue
       deletedHistory.add(sessionId)
       historyLoads.delete(sessionId)
-      store?.setState({ draft: '', queuedInputs: [], historyLoaded: true, transcript: { ...emptyTranscript(), status: 'done' } })
+      store?.setState({ draft: '', queuedInputs: [], historyLoaded: true, historyError: null, transcript: { ...emptyTranscript(), status: 'done' } })
     }
     return
   }
@@ -1514,17 +1530,46 @@ async function restoreChildSnapshot(entry: ActiveSubagentIndexEntry): Promise<vo
   }
 }
 
+/** Show durable messages immediately; live snapshots may take longer to attach. */
+function mergeRestoredHistory(state: SessionState, page: SessionPage): Partial<SessionState> {
+  const messages = [...new Map([...page.messages, ...state.transcript.messages].map((m) => [m.id, m])).values()]
+  const runUsage = { ...page.runUsage, ...state.transcript.runUsage }
+  // The active snapshot rebuilds this run's usage; including its persisted subtotal would count it twice.
+  if (state.activeRunId !== null) delete runUsage[state.activeRunId]
+  return {
+    historyHasMore: page.hasMore,
+    historyLoaded: true,
+    historyError: null,
+    transcript: {
+      ...state.transcript,
+      messages,
+      tools: toolsFromMessages(messages, state.transcript.tools),
+      subagents: subagentsFromMessages(messages, state.transcript.subagents),
+      runUsage,
+      runModel: { ...page.runModel, ...state.transcript.runModel },
+      messageRuns: { ...page.messageRuns, ...state.transcript.messageRuns },
+      status: state.activeRunId === null ? 'done' : state.transcript.status
+    }
+  }
+}
+
 async function restoreDetachedParent(
   sessionId: string,
   parentRunId: string,
   owner: ActiveSubagentIndexEntry
 ): Promise<void> {
+  const store = stores.get(sessionId)
+  if (store === undefined) return
+  store.setState({ historyError: null })
   try {
-    const loaded = stores.get(sessionId)?.getState().transcript
-    const detail = await getSessionPage(sessionId, pageLimitFor(loaded)).catch(() => undefined)
+    const detail = await getSessionPage(sessionId, pageLimitFor(store.getState().transcript)).catch((err: unknown) => {
+      if (stores.get(sessionId) === store) store.setState({ historyError: err instanceof Error ? err.message : String(err) })
+      return undefined
+    })
+    if (stores.get(sessionId) !== store || store.getState().activeRunId !== null) return
+    if (detail !== undefined) store.setState((s) => mergeRestoredHistory(s, detail))
     const snap = await attachRun(parentRunId, 0)
-    const store = stores.get(sessionId)
-    if (store === undefined) return
+    if (stores.get(sessionId) !== store) return
     store.setState((s) => {
       // A user may have started a new turn while the detached snapshot was in
       // flight. Preserve that live turn rather than replacing it with old data.
@@ -1581,15 +1626,20 @@ async function restoreActiveRun(sessionId: string, runId: string): Promise<void>
     ★ 调用方一律是 `void ensureActiveRunRestored(...)`:这里漏出去的任何异常都会变成一次
     没人接的 rejection。读页失败就退化成「只按快照重建」,和读不到历史时一样。
   */
-  const loaded = stores.get(sessionId)?.getState().transcript
+  const store = stores.get(sessionId)
+  if (store === undefined) return
+  const loaded = store.getState().transcript
+  store.setState({ historyError: null })
   let detail: Awaited<ReturnType<typeof getSessionPage>> | undefined
   try {
     detail = await getSessionPage(sessionId, pageLimitFor(loaded))
-  } catch {
+  } catch (err) {
+    if (stores.get(sessionId) === store) store.setState({ historyError: err instanceof Error ? err.message : String(err) })
     detail = undefined
   }
+  if (stores.get(sessionId) !== store || store.getState().activeRunId !== runId) return
+  if (detail !== undefined) store.setState((s) => mergeRestoredHistory(s, detail))
   await resync(sessionId, runId, 0, detail?.messages)
-  if (detail !== undefined) stores.get(sessionId)?.setState({ historyHasMore: detail.hasMore })
 }
 
 const restoreInFlight = new Map<string, Promise<void>>()

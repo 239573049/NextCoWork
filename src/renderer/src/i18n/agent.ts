@@ -64,8 +64,9 @@ export const agentZh = {
   // 转录只读最近的一页,更早的按需往前取
   'chat.loadEarlier': '加载更早的消息',
   'chat.loadingEarlier': '正在加载…',
-  // 打开会话、首页历史还没读回来时骨架屏的无障碍标签
+  // 打开会话时的加载提示与失败重试
   'chat.loadingHistory': '正在加载对话记录…',
+  'chat.historyLoadFailed': '对话记录加载失败，请重试。',
   // 这一轮已经收尾、清单却没跑完。只报剩余条数,不说「失败」——未跑完不等于出错
   'chat.taskChecklist.stoppedIncomplete': '运行已结束，仍有 {count} 项未完成',
   // 快照档的第二行:明说这份清单不是实时进度,否则和历史/入参里的那份分不清
@@ -273,6 +274,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.loadEarlier': 'Load earlier messages',
   'chat.loadingEarlier': 'Loading…',
   'chat.loadingHistory': 'Loading conversation…',
+  'chat.historyLoadFailed': 'Unable to load this conversation. Please try again.',
   'chat.taskChecklist.stoppedIncomplete': 'Run ended with {count} unfinished task(s)',
   'chat.taskChecklist.snapshot': 'Checklist snapshot',
   'chat.taskChecklist.unfinished': 'Unfinished',

@@ -59,13 +59,69 @@ describe('按页读转录', () => {
     expect(ids(store.getState().transcript.messages)).toEqual(ids(turn(1)))
   })
 
-  it('读失败也要结束加载态,不能让骨架一直挂着', async () => {
+  it('读失败不把未知历史当成空会话，重试成功后才结束加载态', async () => {
     vi.mocked(getSessionPage).mockRejectedValueOnce(new Error('boom'))
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     const store = sessionStore('paged')
-    await vi.waitFor(() => expect(store.getState().historyLoaded).toBe(true))
+    await vi.waitFor(() => expect(store.getState().historyError).toBe('boom'))
+    expect(store.getState().historyLoaded).toBe(false)
     expect(store.getState().transcript.messages).toEqual([])
+    let resolve!: (value: SessionPage) => void
+    vi.mocked(getSessionPage).mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const retry = store.getState().retryHistory()
+    expect(store.getState().historyError).toBeNull()
+    expect(store.getState().historyLoaded).toBe(false)
+    resolve(page(turn(1), false))
+    await retry
+    expect(store.getState().historyLoaded).toBe(true)
+    expect(store.getState().historyError).toBeNull()
+    expect(ids(store.getState().transcript.messages)).toEqual(ids(turn(1)))
     error.mockRestore()
+  })
+
+  it('尚未落盘的新会话可以正常进入空态', async () => {
+    vi.mocked(getSessionPage).mockRejectedValueOnce(new Error('会话不存在: paged'))
+    const store = sessionStore('paged')
+    await vi.waitFor(() => expect(store.getState().historyLoaded).toBe(true))
+    expect(store.getState().historyError).toBeNull()
+    expect(store.getState().transcript.messages).toEqual([])
+  })
+
+  it('关闭后重开时，旧请求的回包不能结束新请求的加载态', async () => {
+    let resolveOld!: (value: SessionPage) => void
+    let resolveNew!: (value: SessionPage) => void
+    vi.mocked(getSessionPage).mockReturnValueOnce(new Promise((r) => { resolveOld = r }))
+    const previous = sessionStore('paged')
+    releaseSession('paged')
+    vi.mocked(getSessionPage).mockReturnValueOnce(new Promise((r) => { resolveNew = r }))
+    const current = sessionStore('paged')
+    expect(current).not.toBe(previous)
+    resolveOld(page(turn(1), false))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(current.getState().historyLoaded).toBe(false)
+    expect(current.getState().transcript.messages).toEqual([])
+    resolveNew(page(turn(2), false))
+    await vi.waitFor(() => expect(current.getState().historyLoaded).toBe(true))
+    expect(ids(current.getState().transcript.messages)).toEqual(ids(turn(2)))
+  })
+
+  it('首次加载期间历史被更新时，继续等待更新后的那一页', async () => {
+    let resolveOld!: (value: SessionPage) => void
+    let resolveNew!: (value: SessionPage) => void
+    vi.mocked(getSessionPage)
+      .mockReturnValueOnce(new Promise((r) => { resolveOld = r }))
+      .mockReturnValueOnce(new Promise((r) => { resolveNew = r }))
+    const store = sessionStore('paged')
+    const refresh = refreshHydratedSessions({ kind: 'history', sessionIds: ['paged'] })
+    resolveOld(page(turn(1), false))
+    await vi.waitFor(() => expect(getSessionPage).toHaveBeenCalledTimes(2))
+    expect(store.getState().historyLoaded).toBe(false)
+    expect(store.getState().transcript.messages).toEqual([])
+    resolveNew(page(turn(2), false))
+    await refresh
+    expect(store.getState().historyLoaded).toBe(true)
+    expect(ids(store.getState().transcript.messages)).toEqual(ids(turn(2)))
   })
 
   it('★ 往上翻:前一页接在前面,工具卡片跟着认出来,翻到头不再显示', async () => {
