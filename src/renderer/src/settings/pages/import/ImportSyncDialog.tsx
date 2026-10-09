@@ -58,8 +58,8 @@ export function ImportSyncDialog({
       width={440}
       footer={
         <>
-          <Button type="button" variant="secondary" onClick={onClose}>{t('import.cancel')}</Button>
-          <Button type="button" variant="primary" disabled={busy} onClick={() => onSave([...draft])}>
+          <Button size="sm" type="button" variant="secondary" onClick={onClose}>{t('import.cancel')}</Button>
+          <Button size="sm" type="button" variant="primary" disabled={busy} onClick={() => onSave([...draft])}>
             {t('import.save')}
           </Button>
         </>

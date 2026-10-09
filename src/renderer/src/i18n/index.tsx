@@ -433,6 +433,8 @@ const ZH: Messages = {
   // Task 的参数还在流、子代理还没派出去的那几秒（见 SubagentNode 的 pending）
   "chat.subagent.status.pending": "准备中",
   "chat.subagent.detail.errorUnknown": "未提供错误详情",
+  "chat.subagent.detail.errors": ({ count }) => `${count} 次失败`,
+  "chat.subagent.detail.empty": "还没有可展示的进度。",
   "chat.subagent.error.noOutput": ({ agent }) => `子代理 ${agent} 结束时没有产出任何文字。请使用更具体的任务说明重试，或直接完成此步骤。`,
   "chat.subagent.mode.background": "后台",
   "chat.subagent.phase.starting": "启动中",
@@ -2427,6 +2429,8 @@ const EN: Messages = {
   "chat.subagent.status.aborted": "Stopped",
   "chat.subagent.status.pending": "Preparing",
   "chat.subagent.detail.errorUnknown": "No error details were provided",
+  "chat.subagent.detail.errors": ({ count }) => `${count} failed`,
+  "chat.subagent.detail.empty": "No progress to show yet.",
   "chat.subagent.error.noOutput": ({ agent }) => `The subagent ${agent} finished without producing any text. Retry with a more specific prompt, or do this step yourself.`,
   "chat.subagent.mode.background": "Background",
   "chat.subagent.phase.starting": "Starting",

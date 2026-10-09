@@ -19,6 +19,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { placeSubmenu, type SubmenuPlacement } from './menu-position'
+import { MenuHighlightReset } from './Menu'
 
 export function Submenu({
   anchor,
@@ -91,7 +92,7 @@ export function Submenu({
       }}
       className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/35"
     >
-      {children}
+      <MenuHighlightReset>{children}</MenuHighlightReset>
     </div>,
     document.body
   )

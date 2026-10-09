@@ -59,7 +59,7 @@ export function McpPane(): ReactNode {
             {t("connection.mcp.hint")}
           </p>
         </div>
-        <Button
+        <Button size="sm"
           type="button"
           variant="primary"
           onClick={() => setDialog({ open: true, editing: null })}

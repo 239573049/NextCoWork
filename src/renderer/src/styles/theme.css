@@ -638,6 +638,22 @@ body {
 }
 
 /*
+  共享 `Select` 面板的入场:从触发器那一侧轻轻展开(借自 beUI Select 的「面板分离」)。
+  transform-origin 由 Radix 给的 `--radix-select-content-transform-origin` 决定,
+  面板翻到触发器上方时会自动跟着翻,这里不用分上下两套。
+*/
+@keyframes select-unfold {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+/*
   run 正常收束时,过程段整体换装成「用时」摘要行 —— 摘要行淡入的那一帧。
   换装本身是两棵子树的瞬时交接(理由见 Thread 的 appliedCollapse),没有这
   180ms,观感是几百像素的过程区「传送」成一行字;淡入让它读作「折进了这一行」。

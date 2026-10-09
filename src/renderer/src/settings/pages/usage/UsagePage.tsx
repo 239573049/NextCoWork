@@ -7,6 +7,7 @@ import type {
   UsageStatusFilter,
   UsageSummary
 } from '../../../../../shared/domain/usage'
+import { Select } from '../../../components/ui/Select'
 import { TextInput } from '../../../components/ui/TextInput'
 import SegmentedControl from '../../../components/arc/segmented-control/segmented-control'
 import { Switch } from '../../../components/arc/switch/switch'
@@ -397,16 +398,19 @@ function RequestLogs({
           size="sm"
           className="w-[220px]"
         />
-        <select
-          value={status}
-          onChange={(event) => onStatus(event.target.value as UsageStatusFilter)}
-          aria-label={t('usage.statusFilterLabel')}
-          className="h-7 rounded-[8px] border border-border bg-surface-field px-2 text-[11.5px] text-fg outline-none focus:border-accent"
-        >
-          <option value="all">{t('usage.status.all')}</option>
-          <option value="success">{t('usage.status.success')}</option>
-          <option value="failed">{t('usage.status.failed')}</option>
-        </select>
+        <div className="w-[104px]">
+          <Select
+            inModal
+            value={status}
+            ariaLabel={t('usage.statusFilterLabel')}
+            onValueChange={(next) => onStatus(next as UsageStatusFilter)}
+            options={[
+              { value: 'all', label: t('usage.status.all') },
+              { value: 'success', label: t('usage.status.success') },
+              { value: 'failed', label: t('usage.status.failed') }
+            ]}
+          />
+        </div>
         <span className="flex-1" />
         <label className="flex items-center gap-2 text-[11px] text-fg-muted">
           {t('usage.showDetails')}

@@ -488,7 +488,7 @@ function RoleModelPickerComponent({
         'group flex h-7 w-full items-center gap-1.5 rounded-[7px] border border-border',
         'bg-surface-field px-2 text-left text-[11.5px] text-fg outline-none',
         'transition-[background-color,border-color,box-shadow] duration-150',
-        'hover:bg-tint focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/15'
+        'hover:bg-tint focus-visible:border-fg-faint focus-visible:ring-2 focus-visible:ring-fg-faint/15'
       )}
       className="w-full"
       align="start"

@@ -24,6 +24,7 @@ import type {
 import { Button } from "../../../components/arc/button/button";
 import { Dialog } from "../../../components/ui/Dialog";
 import SegmentedControl from "../../../components/arc/segmented-control/segmented-control";
+import { Select } from "../../../components/ui/Select";
 import { TextInput } from "../../../components/ui/TextInput";
 import { useI18n } from "../../../i18n";
 import { cn } from "../../../lib/cn";
@@ -166,10 +167,10 @@ export function McpServerDialog({
       width={560}
       footer={
         <div className="flex items-center justify-end gap-2">
-          <Button type="button" variant="secondary" onClick={onClose} disabled={busy}>
+          <Button size="sm" type="button" variant="secondary" onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </Button>
-          <Button type="button" variant="primary" onClick={save} disabled={busy}>
+          <Button size="sm" type="button" variant="primary" onClick={save} disabled={busy}>
             {busy ? (
               <Spinner size="sm" />
             ) : (
@@ -181,11 +182,18 @@ export function McpServerDialog({
     >
       <div className="flex flex-col gap-3.5">
         <Field label={t('ssh.mcp.target')}>
-          <select value={workspaceId} aria-label={t('ssh.mcp.target')} onChange={(event) => setWorkspaceId(event.target.value)} className="h-8 w-full min-w-0 rounded-[6px] border border-border bg-canvas px-2 text-[12px] text-fg">
-            <option value="">{t('ssh.mcp.local')}</option>
-            {workspaceId && !workspaces[workspaceId] && <option value={workspaceId}>{workspaceId}</option>}
-            {Object.values(workspaces).map((workspace) => <option key={workspace.id} value={workspace.id}>{t('ssh.mcp.scope', { name: workspace.name })}</option>)}
-          </select>
+          <Select
+            inModal
+            value={workspaceId}
+            ariaLabel={t('ssh.mcp.target')}
+            onValueChange={setWorkspaceId}
+            className="h-8 text-[13px]"
+            options={[
+              { value: '', label: t('ssh.mcp.local') },
+              ...(workspaceId && !workspaces[workspaceId] ? [{ value: workspaceId, label: workspaceId }] : []),
+              ...Object.values(workspaces).map((workspace) => ({ value: workspace.id, label: t('ssh.mcp.scope', { name: workspace.name }) }))
+            ]}
+          />
         </Field>
         <Field
           label={t("connection.mcp.dialog.transport")}
@@ -332,7 +340,7 @@ export function McpServerDialog({
             className={cn(
               "app-no-drag selectable w-full resize-none rounded-[8px] border border-hairline",
               "bg-surface-field px-2.5 py-2 font-mono text-[12px] leading-[1.7] text-fg outline-none",
-              "placeholder:text-fg-faint focus:border-accent",
+              "placeholder:text-fg-faint focus:border-fg-faint",
             )}
           />
           {stored.names.length > 0 && (

@@ -415,7 +415,7 @@ function ProxyPasswordField({ disabled }: { disabled: boolean }): ReactNode {
         <span className="flex-1 text-[12.5px] text-fg-muted">
           {t("connection.network.saved")}
         </span>
-        <Button
+        <Button size="sm"
           type="button"
           variant="secondary"
           disabled={disabled || busy}
@@ -440,7 +440,7 @@ function ProxyPasswordField({ disabled }: { disabled: boolean }): ReactNode {
           icon={<Eye size={13} />}
         />
       </div>
-      <Button
+      <Button size="sm"
         type="button"
         variant="primary"
         disabled={disabled || busy || draft === ""}

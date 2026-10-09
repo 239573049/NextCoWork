@@ -249,7 +249,7 @@ function ProviderRow({
                       disabled={busy}
                     />
                   </div>
-                  <Button
+                  <Button size="sm"
                     type="button"
                     variant="primary"
                     disabled={busy || draft.trim() === ""}
@@ -258,7 +258,7 @@ function ProviderRow({
                     {t("common.save")}
                   </Button>
                   {meta !== undefined && (
-                    <Button
+                    <Button size="sm"
                       type="button"
                       variant="secondary"
                       onClick={() => void openExternal(meta.keyUrl)}
@@ -270,13 +270,13 @@ function ProviderRow({
                 </div>
               ) : (
                 <div className="flex items-center gap-1.5">
-                  <Button type="button" variant="secondary" onClick={() => setEditing(true)}>
+                  <Button size="sm" type="button" variant="secondary" onClick={() => setEditing(true)}>
                     {t("connection.search.replaceKey")}
                   </Button>
-                  <Button type="button" variant="secondary" onClick={onClearKey}>
+                  <Button size="sm" type="button" variant="secondary" onClick={onClearKey}>
                     {t("connection.search.clear")}
                   </Button>
-                  <Button
+                  <Button size="sm"
                     type="button"
                     variant="secondary"
                     disabled={busy}

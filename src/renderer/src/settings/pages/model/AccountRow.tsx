@@ -181,7 +181,7 @@ export function AccountRow({
         <div className="flex shrink-0 items-center gap-1">
           {/* ★ 只在限流时出现:画一个永远灰着的按钮是一次会失败的承诺(§5) */}
           {badge === "limited" && (
-            <Button type="button" variant="secondary" disabled={busy} onClick={onClearLimit}>
+            <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={onClearLimit}>
               {t("providerAccount.clearLimit")}
             </Button>
           )}
@@ -199,7 +199,7 @@ export function AccountRow({
             </button>
           )}
           {badge === "needs-reauth" && (
-            <Button type="button" variant="primary" disabled={busy} onClick={onReauth}>
+            <Button size="sm" type="button" variant="primary" disabled={busy} onClick={onReauth}>
               <LogIn size={12} />
               {t("providerAccount.reauth")}
             </Button>

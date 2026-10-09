@@ -222,7 +222,7 @@ function ModeEditor({ file, tools, taken, saving, error, onSave, onDelete, onClo
       </div>
       <div className="mt-4 max-w-3xl">{fields}</div>
       <label className="mt-4 mb-1 block text-[12px] text-fg-muted">{t('ext.modes.prompt')}</label>
-      <textarea className="selectable min-h-56 w-full max-w-3xl rounded-lg border border-border bg-surface-field p-3 text-[13px] leading-5 text-fg outline-none focus:border-accent"
+      <textarea className="selectable min-h-56 w-full max-w-3xl rounded-lg border border-border bg-surface-field p-3 text-[13px] leading-5 text-fg outline-none focus:border-fg-faint"
         value={body} onChange={(event) => setBody(event.target.value)} aria-label={t('ext.modes.prompt')} />
     </div>
   </div>

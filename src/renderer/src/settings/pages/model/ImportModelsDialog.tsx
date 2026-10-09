@@ -153,10 +153,10 @@ export function ImportModelsDialog({
       width={560}
       footer={
         <>
-          <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>
+          <Button size="sm" type="button" variant="secondary" onClick={onClose} disabled={saving}>
             {t("common.cancel")}
           </Button>
-          <Button
+          <Button size="sm"
             type="button"
             variant="primary"
             disabled={rows === null || saving || selected.size === 0}
@@ -178,7 +178,7 @@ export function ImportModelsDialog({
             </p>
           </div>
           {rows === null && (
-            <Button type="button" variant="secondary" onClick={() => setAttempt((n) => n + 1)}>
+            <Button size="sm" type="button" variant="secondary" onClick={() => setAttempt((n) => n + 1)}>
               {t("common.retry")}
             </Button>
           )}

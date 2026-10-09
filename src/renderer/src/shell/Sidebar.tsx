@@ -665,7 +665,7 @@ function SessionGroupBlock({
         }
       >
         <label className="block text-[12px] text-fg-muted" htmlFor="session-rename-input">{t('session.renamePrompt')}</label>
-        <input id="session-rename-input" autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} className="selectable mt-2 h-9 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent" />
+        <input id="session-rename-input" autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} className="selectable mt-2 h-9 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-fg-faint" />
       </Dialog>
     </li>
   )

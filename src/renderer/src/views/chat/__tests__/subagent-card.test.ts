@@ -1,14 +1,12 @@
 /**
- * 子代理卡片的 DOM 级回归 —— 钉的是「这张卡片不再是抽屉」。
+ * 子代理卡片的 DOM 级回归 —— 钉的是「点标题行就地展开,但停止/打开记录不受展开影响」。
  *
- * 这三条都抓不到的东西:纯函数测试。它们全是**某块 UI 在或不在**:
+ * 这些都抓不到的东西:纯函数测试。它们全是**某块 UI 在或不在**:
  *
- * 1. 卡片上不该再有 `aria-expanded` —— 手风琴没了。留着一个的话,读屏用户
- *    会被告知「可展开」,点下去却是换了个面板,而视觉用户根本看不出区别。
- * 2. 点整张卡片要把动作交给 `openSubagent`,而不是就地 `setState`。
- * 3. **停止按钮在不展开的情况下就能按。** 这条是这次改动的由头:
- *    它以前藏在默认折叠的面板里 —— 想掐掉一个卡住的子代理,得先点开一张
- *    从外面完全看不出异常的卡片,而会去点的人首先得怀疑它有异常。
+ * 1. 标题行是展开开关(`aria-expanded`),点一下展开区出现、再点收起。
+ * 2. 「完整记录」是**独立按钮**,把动作交给 `openSubagent`,不和展开抢同一次点击。
+ * 3. **停止按钮在不展开的情况下就能按。** 它以前藏在默认折叠的面板里 —— 想掐掉
+ *    一个卡住的子代理,得先点开一张从外面完全看不出异常的卡片。
  *
  * 样板抄 `thread-content.test.ts` 的 `renderThread`(JSDOM 手搓,没有全局
  * jsdom 环境,也没有 testing-library —— 见 `vitest.config.ts`)。
@@ -91,26 +89,34 @@ const click = async (el: Element | null): Promise<void> => {
   })
 }
 
-describe('子代理卡片 · 不是抽屉', () => {
-  it('★ 整张卡片上没有任何 aria-expanded —— 手风琴已经拆掉了', async () => {
-    const { container } = await renderCard(subagent())
-    expect(container.querySelector('[aria-expanded]')).toBeNull()
-    // 顺带钉住它确实渲染出来了,免得上面那条因为「什么都没画」而假绿
-    expect(container.querySelector('[data-testid="subagent-node"]')).not.toBeNull()
+describe('子代理卡片 · 点标题行就地展开', () => {
+  it('★ 标题行是展开开关:点一下出现详情,再点收起', async () => {
+    const { container } = await renderCard(subagent({ phase: 'tool', toolCalls: 7 }))
+    const toggle = container.querySelector('[data-testid="subagent-toggle"]')
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('[data-testid="subagent-detail"]')).toBeNull()
     expect(container.textContent).toContain('查配置读取处')
+
+    await click(toggle)
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true')
+    const detail = container.querySelector('[data-testid="subagent-detail"]')
+    expect(detail).not.toBeNull()
+    expect(detail?.textContent).toContain('调用工具')
+    expect(detail?.textContent).toContain('7 次工具调用')
+
+    await click(toggle)
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('★ 点卡片 = 交给 openSubagent,卡片自己不展开任何东西', async () => {
+  it('★ 「完整记录」是独立按钮:交给 openSubagent,而且不会顺带展开卡片', async () => {
     const state = subagent()
     const { container, opened } = await renderCard(state)
-    const before = container.innerHTML
 
     await click(container.querySelector('[data-testid="subagent-open"]'))
 
     expect(opened).toHaveLength(1)
     expect(opened[0]?.childSessionId).toBe(state.childSessionId)
-    // ★ 点完 DOM 一个字节都没变 —— 有任何就地展开都会在这里露馅
-    expect(container.innerHTML).toBe(before)
+    expect(container.querySelector('[data-testid="subagent-detail"]')).toBeNull()
   })
 
   /**
@@ -130,7 +136,7 @@ describe('子代理卡片 · 不是抽屉', () => {
     expect(abortRun).toHaveBeenCalledWith(CHILD_RUN, true)
   })
 
-  it('运行卡片不再显示阶段和工具调用次数', async () => {
+  it('运行卡片收起时不显示阶段和工具调用次数(展开后才有)', async () => {
     const { container } = await renderCard(subagent({ phase: 'starting', toolCalls: 7 }))
     expect(container.textContent).not.toContain('启动中')
     expect(container.textContent).not.toContain('7 次工具调用')
@@ -183,11 +189,11 @@ describe('子代理卡片 · 不是抽屉', () => {
    * `childSessionId` 是随这次改动才加进 `subagent_start` 的,所以**旧转录没有**。
    * 点开会是一个空面板 —— 一张点了没反应的卡片比一张明确不能点的卡片难解释得多。
    */
-  it('旧转录(没有 childSessionId)不可点', async () => {
+  it('旧转录(没有 childSessionId)没有「完整记录」按钮,但卡片照样能展开', async () => {
     const { container, opened } = await renderCard(subagent({ childSessionId: undefined }))
-    const open = container.querySelector('[data-testid="subagent-open"]')
-    expect((open as HTMLButtonElement | null)?.disabled).toBe(true)
-    await click(open)
+    expect(container.querySelector('[data-testid="subagent-open"]')).toBeNull()
+    await click(container.querySelector('[data-testid="subagent-toggle"]'))
+    expect(container.querySelector('[data-testid="subagent-detail"]')).not.toBeNull()
     expect(opened).toHaveLength(0)
   })
 

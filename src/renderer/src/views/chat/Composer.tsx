@@ -869,7 +869,7 @@ export function Composer({
           dragging
             ? "border-accent"
             : running
-              ? "border-accent/35 focus-within:border-accent/60"
+              ? "border-accent/35 focus-within:border-fg-faint/60"
               : value.permissionMode === "full"
                 ? "border-warning/35 focus-within:border-warning/60"
                 : "border-stroke focus-within:border-border",
@@ -1506,7 +1506,7 @@ function ConversationUsage({ usage, sessionId }: { usage: ConversationUsageSumma
             role="group"
             tabIndex={0}
             aria-label={`${metric.label}: ${metric.exact}`}
-            className="inline-flex cursor-help items-center gap-1 whitespace-nowrap rounded-[3px] outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+            className="inline-flex cursor-help items-center gap-1 whitespace-nowrap rounded-[3px] outline-none focus-visible:ring-2 focus-visible:ring-fg-faint/50"
           >
             <span aria-hidden="true" className="text-fg-muted">{metric.icon}</span>
             <span>{metric.value}</span>

@@ -505,7 +505,7 @@ function ImportProvidersForm({
       )}
 
       <div className="flex items-center justify-end gap-2 border-t border-hairline pt-3">
-        <Button
+        <Button size="sm"
           type="button"
           variant="primary"
           disabled={busy || loading || chosen.length === 0}
@@ -666,7 +666,7 @@ function CustomProviderForm({
         <p className="min-w-0 flex-1 text-[11.5px] leading-[1.6] text-fg-faint">
           {t("models.customProviderKeyHint")}
         </p>
-        <Button
+        <Button size="sm"
           type="button"
           variant="primary"
           disabled={busy}

@@ -184,7 +184,7 @@ export function ProviderAccounts({
       )}
 
       <div className="flex items-center gap-2">
-        <Button
+        <Button size="sm"
           type="button"
           variant="secondary"
           disabled={disabled}

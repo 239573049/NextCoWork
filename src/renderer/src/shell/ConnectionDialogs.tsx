@@ -83,7 +83,7 @@ function AuthenticationDialog({ request, onDone }: { request: SshAuthRequest; on
       {t(`ssh.auth.${request.kind}`)}
       <input type="password" autoComplete="off" value={value} autoFocus aria-label={t(`ssh.auth.${request.kind}`)}
         onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) submit() }}
-        className="h-8 w-full rounded-[6px] border border-border bg-canvas px-2 font-mono outline-none focus:border-accent" />
+        className="h-8 w-full rounded-[6px] border border-border bg-canvas px-2 font-mono outline-none focus:border-fg-faint" />
     </label>}
     {request.canRemember && <label className="mt-3 flex items-center gap-2 text-[12px] text-fg-muted">
       <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />{t('ssh.auth.remember')}

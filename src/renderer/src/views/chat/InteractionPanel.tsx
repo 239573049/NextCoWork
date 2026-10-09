@@ -101,7 +101,7 @@ const GHOST_BUTTON = `${BUTTON} hover:bg-tint`
 const PRIMARY_BUTTON = `${BUTTON} bg-accent text-accent-fg hover:opacity-90`
 const FIELD = [
   'w-full resize-none rounded-[8px] border border-border bg-surface-field px-2.5 py-2 text-[13px]',
-  'leading-[1.6] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent',
+  'leading-[1.6] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-fg-faint',
   'disabled:opacity-40'
 ].join(' ')
 

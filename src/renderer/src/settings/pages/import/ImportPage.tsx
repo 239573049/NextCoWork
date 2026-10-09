@@ -26,7 +26,9 @@ import type { ImportSourceKind } from '../../../../../shared/domain/import'
 import { IMPORT_LIMITS } from '../../../../../shared/domain/import'
 import type { Workspace } from '../../../../../shared/domain/workspace'
 import { Button } from '../../../components/arc/button/button'
+import SegmentedControl from '../../../components/arc/segmented-control/segmented-control'
 import { Switch } from '../../../components/arc/switch/switch'
+import { Collapsible, CollapsibleContent, CollapsibleIndicator, CollapsibleTrigger } from '../../../components/ui/Collapsible'
 import { cn } from '../../../lib/cn'
 import { useI18n, type Translate, type TranslationKey } from '../../../i18n'
 import * as importService from '../../../services/import'
@@ -181,11 +183,11 @@ export function ImportPage(): ReactNode {
           }
         >
           <div className="flex items-center gap-2">
-            <Button type="button" variant="secondary" disabled={!detected} onClick={() => setModal({ kind: 'sync' })}>
+            <Button type="button" size="sm" variant="secondary" disabled={!detected} onClick={() => setModal({ kind: 'sync' })}>
               {t('import.customize')}
             </Button>
             <Button
-              type="button"
+              type="button" size="sm"
               variant="secondary"
               disabled={!detected || sync?.enabled !== true || running || busy !== null}
               onClick={() => {
@@ -201,19 +203,18 @@ export function ImportPage(): ReactNode {
 
       {/* ── 来源 ── */}
       <Section title={t('import.fromOtherApps')}>
-        <div className="mb-2 flex items-center gap-2">
-          <Button type="button" variant={sourceKind === 'claude-code' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('claude-code') }}>
-            {t('import.sourceClaude')}
-          </Button>
-          <Button type="button" variant={sourceKind === 'codex' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('codex') }}>
-            {t('import.sourceCodex')}
-          </Button>
-          <Button type="button" variant={sourceKind === 'opencode' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('opencode') }}>
-            {t('import.sourceOpencode')}
-          </Button>
-          <Button type="button" variant={sourceKind === 'opencowork' ? 'primary' : 'secondary'} onClick={() => { setSourceKind('opencowork') }}>
-            {t('import.sourceOpencowork')}
-          </Button>
+        <div className="mb-2 flex">
+          <SegmentedControl
+            value={sourceKind}
+            options={[
+              { value: 'claude-code', label: t('import.sourceClaude') },
+              { value: 'codex', label: t('import.sourceCodex') },
+              { value: 'opencode', label: t('import.sourceOpencode') },
+              { value: 'opencowork', label: t('import.sourceOpencowork') }
+            ]}
+            onValueChange={(next) => setSourceKind(next as ImportSourceKind)}
+            label={t('import.fromOtherApps')}
+          />
         </div>
         <Row
           title={t(sourceNameKey(sourceKind))}
@@ -249,7 +250,7 @@ export function ImportPage(): ReactNode {
         >
           <div className="flex items-center gap-2">
             <Button
-              type="button"
+              type="button" size="sm"
               variant="secondary"
               disabled={busy !== null}
               onClick={() => {
@@ -262,7 +263,7 @@ export function ImportPage(): ReactNode {
               {t('import.detect')}
             </Button>
             <Button
-              type="button"
+              type="button" size="sm"
               variant="secondary"
               disabled={busy !== null}
               onClick={() => {
@@ -275,7 +276,7 @@ export function ImportPage(): ReactNode {
               {t('import.chooseDirectory')}
             </Button>
             <Button
-              type="button"
+              type="button" size="sm"
               variant="primary"
               disabled={!detected || running || busy !== null}
               onClick={() => {
@@ -316,7 +317,7 @@ export function ImportPage(): ReactNode {
             last
           >
             {running ? (
-              <Button type="button" variant="secondary" onClick={() => void importService.cancel(job.jobId)}>{t('import.cancel')}</Button>
+              <Button type="button" size="sm" variant="secondary" onClick={() => void importService.cancel(job.jobId)}>{t('import.cancel')}</Button>
             ) : (
               /* 进度条只在跑的时候有意义;跑完之后这里留一条时间,而不是一颗死按钮。 */
               <span className="text-[11.5px] text-fg-faint">
@@ -337,7 +338,7 @@ export function ImportPage(): ReactNode {
           ))
         )}
         {historyTotal > IMPORT_LIMITS.pageSize && (
-          <div className="flex items-center justify-end gap-2 border-t border-hairline py-2.5">
+          <div className="flex items-center justify-end gap-2 border-t border-border/50 py-2.5">
             <span className="mr-auto text-[11.5px] text-fg-faint">
               {t('import.pageOf', {
                 from: historyOffset + 1,
@@ -346,7 +347,7 @@ export function ImportPage(): ReactNode {
               })}
             </span>
             <Button
-              type="button"
+              type="button" size="sm"
               variant="secondary"
               disabled={historyOffset === 0}
               onClick={() => void refreshHistory(Math.max(0, historyOffset - IMPORT_LIMITS.pageSize))}
@@ -354,7 +355,7 @@ export function ImportPage(): ReactNode {
               {t('import.prevPage')}
             </Button>
             <Button
-              type="button"
+              type="button" size="sm"
               variant="secondary"
               disabled={historyOffset + IMPORT_LIMITS.pageSize >= historyTotal}
               onClick={() => void refreshHistory(historyOffset + IMPORT_LIMITS.pageSize)}
@@ -434,12 +435,8 @@ function BatchRow({
   }, [open, items.length, batch.id])
 
   return (
-    <div className={cn(!last && 'border-b border-hairline')}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="app-no-drag flex w-full items-center gap-3 py-2.5 text-left"
-      >
+    <Collapsible open={open} onOpenChange={setOpen} className={cn(!last && 'border-b border-border/50')}>
+      <CollapsibleTrigger className="py-2.5">
         <div className="min-w-0 flex-1">
           <p className="text-[12.5px] text-fg">
             {t(sourceNameKey(batch.sourceKind))} ·{' '}
@@ -449,10 +446,12 @@ function BatchRow({
             {formatTime(batch.startedAt, locale)} · <CountsLine counts={batch.counts} />
           </p>
         </div>
-        <ChevronDown size={13} className={cn('shrink-0 transition-transform', !open && '-rotate-90')} />
-      </button>
+        <CollapsibleIndicator>
+          <ChevronDown size={13} />
+        </CollapsibleIndicator>
+      </CollapsibleTrigger>
 
-      {open && (
+      <CollapsibleContent>
         <ul className="pb-2">
           {/*
             ★ 右侧三块**定宽**。原来诊断文字是自然宽度,于是每一行的「结果」和
@@ -502,8 +501,8 @@ function BatchRow({
             </li>
           ))}
         </ul>
-      )}
-    </div>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -591,7 +590,7 @@ function Section({ title, children }: { title: string; children: ReactNode }): R
       症状极像「布局溢出」,而实际上量出来 `scrollHeight === clientHeight`,
       因为卡片是被压成了那个高度,不是内容撑破了它。
     */
-    <section className="mb-3.5 shrink-0 overflow-hidden rounded-[18px] border border-border bg-surface-field px-4">
+    <section className="mb-3 shrink-0 overflow-hidden rounded-[18px] bg-surface px-4">
       <h3 className="pt-4 pb-0.5 text-[13px] text-fg">{title}</h3>
       {children}
     </section>
@@ -624,7 +623,7 @@ function Row({
       className={cn(
         'flex flex-wrap items-center gap-x-5 gap-y-2',
         density === 'single' ? 'min-h-[48px] py-2' : density === 'compact' ? 'min-h-[58px] py-2.5' : 'min-h-[62px] py-3',
-        !last && 'border-b border-hairline'
+        !last && 'border-b border-border/50'
       )}
     >
       <div className="min-w-[220px] flex-1 basis-0">

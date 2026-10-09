@@ -192,7 +192,7 @@ export function ThemePane({
                   {importError}
                 </span>
               )}
-              <Button
+              <Button size="sm"
                 type="button"
                 variant="secondary"
                 disabled={importing}

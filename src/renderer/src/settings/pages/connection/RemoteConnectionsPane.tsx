@@ -147,7 +147,7 @@ export function ServerEditor({ editing, hasPassword, onClose }: { editing: Conne
         {field(t('ssh.mode'), <fieldset disabled={busy} className="contents"><SegmentedControl label={t('ssh.mode')} value={mode} options={[{ value: 'manual', label: t('ssh.manual') }, { value: 'config', label: t('ssh.nativeConfig') }]} onValueChange={(value) => { setMode(value as 'manual' | 'config'); setConfirmed(false) }} /></fieldset>)}
         {field(t(mode === 'config' ? 'ssh.alias' : 'ssh.host'), <div className="flex min-w-0 gap-2">
           <div className="min-w-0 flex-1"><TextInput value={host} onChange={setHost} ariaLabel={t(mode === 'config' ? 'ssh.alias' : 'ssh.host')} /></div>
-          {mode === 'manual' && <input type="number" min={1} max={65535} value={port} aria-label={t('ssh.port')} aria-invalid={!validPort || undefined} onChange={(event) => setPort(event.target.value)} className="selectable h-8 w-[72px] shrink-0 rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent aria-invalid:border-danger" />}
+          {mode === 'manual' && <input type="number" min={1} max={65535} value={port} aria-label={t('ssh.port')} aria-invalid={!validPort || undefined} onChange={(event) => setPort(event.target.value)} className="selectable h-8 w-[72px] shrink-0 rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-fg-faint aria-invalid:border-danger" />}
         </div>, t(mode === 'config' ? 'ssh.configHint' : 'ssh.addressHint'))}
         {mode === 'config' && field(t('ssh.configFile'), filePicker(configFile, setConfigFile, t('ssh.configFile')))}
       </section>
@@ -166,7 +166,7 @@ export function ServerEditor({ editing, hasPassword, onClose }: { editing: Conne
               <input type="password" autoComplete="off" value={password} aria-label={t('ssh.password')} disabled={clearPassword}
                 placeholder={t(hasPassword && !clearPassword ? 'ssh.passwordSaved' : 'ssh.optional')}
                 onChange={(event) => setPassword(event.target.value)}
-                className="selectable h-8 min-w-0 flex-1 rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-accent disabled:opacity-40" />
+                className="selectable h-8 min-w-0 flex-1 rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-fg-faint disabled:opacity-40" />
               {hasPassword && !clearPassword && <Button type="button" variant="secondary" size="sm" onClick={() => { setPassword(''); setClearPassword(true) }}>{t('ssh.passwordClear')}</Button>}
             </div>
             <p className="text-[11px] leading-relaxed text-fg-faint">{t(clearPassword ? 'ssh.passwordCleared' : 'ssh.passwordHint')}</p>

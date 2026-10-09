@@ -40,6 +40,7 @@ import {
 } from "../../../../../shared/domain/model-catalog-inventory";
 import { EmptyState } from "../../../components/arc/empty-state/empty-state";
 import { Dialog } from "../../../components/ui/Dialog";
+import { Select, type SelectOption } from "../../../components/ui/Select";
 import { TextInput } from "../../../components/ui/TextInput";
 import { Switch } from "../../../components/arc/switch/switch";
 import { cn } from "../../../lib/cn";
@@ -435,49 +436,45 @@ function ModelConsole(): ReactNode {
                 icon={<Search size={13} />}
               />
             </div>
-            <select
-              value={modalityFilter}
-              onChange={(e) => setModalityFilter(e.target.value)}
-              className="h-8 rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"
-            >
-              <option value="all">{t("models.allTypes")}</option>
-              <option value="text">{t("models.text")}</option>
-              <option value="image">{t("models.image")}</option>
-              <option value="video">{t("models.video")}</option>
-              <option value="speech">{t("models.speech")}</option>
-              <option value="transcription">{t("models.transcription")}</option>
-            </select>
-            <select
-              value={capability}
-              onChange={(e) => setCapability(e.target.value)}
-              className="h-8 rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg"
-            >
-              <option value="all">{t("models.allCapabilities")}</option>
-              <option value="vision">{t("models.capabilityVision")}</option>
-              <option value="file">{t("models.capabilityFile")}</option>
-              <option value="video">{t("models.capabilityVideo")}</option>
-              <option value="audio">{t("models.capabilityAudioInput")}</option>
-              <option value="web">{t("models.webSearch")}</option>
-              <option value="tools">{t("models.capabilityTools")}</option>
-              <option value="think">{t("models.reasoning")}</option>
-              <option value="image-output">
-                {t("models.imageGeneration")}
-              </option>
-              <option value="video-output">
-                {t("models.capabilityVideoOutput")}
-              </option>
-              <option value="audio-output">
-                {t("models.capabilityAudioOutput")}
-              </option>
-              <option value="structured">
-                {t("models.capabilityStructuredOutput")}
-              </option>
-              <option value="streaming">
-                {t("models.capabilityStreaming")}
-              </option>
-              <option value="batch">{t("models.capabilityBatch")}</option>
-              <option value="caching">{t("models.capabilityCaching")}</option>
-            </select>
+            <div className="w-[116px]">
+              <EditorSelect
+                value={modalityFilter}
+                ariaLabel={t("models.allTypes")}
+                onValueChange={setModalityFilter}
+                options={[
+                  { value: "all", label: t("models.allTypes") },
+                  { value: "text", label: t("models.text") },
+                  { value: "image", label: t("models.image") },
+                  { value: "video", label: t("models.video") },
+                  { value: "speech", label: t("models.speech") },
+                  { value: "transcription", label: t("models.transcription") },
+                ]}
+              />
+            </div>
+            <div className="w-[136px]">
+              <EditorSelect
+                value={capability}
+                ariaLabel={t("models.allCapabilities")}
+                onValueChange={setCapability}
+                options={[
+                  { value: "all", label: t("models.allCapabilities") },
+                  { value: "vision", label: t("models.capabilityVision") },
+                  { value: "file", label: t("models.capabilityFile") },
+                  { value: "video", label: t("models.capabilityVideo") },
+                  { value: "audio", label: t("models.capabilityAudioInput") },
+                  { value: "web", label: t("models.webSearch") },
+                  { value: "tools", label: t("models.capabilityTools") },
+                  { value: "think", label: t("models.reasoning") },
+                  { value: "image-output", label: t("models.imageGeneration") },
+                  { value: "video-output", label: t("models.capabilityVideoOutput") },
+                  { value: "audio-output", label: t("models.capabilityAudioOutput") },
+                  { value: "structured", label: t("models.capabilityStructuredOutput") },
+                  { value: "streaming", label: t("models.capabilityStreaming") },
+                  { value: "batch", label: t("models.capabilityBatch") },
+                  { value: "caching", label: t("models.capabilityCaching") },
+                ]}
+              />
+            </div>
             <button
               type="button"
               onClick={() =>
@@ -771,8 +768,37 @@ function ModelRow({
   );
 }
 
+/** 检查器里的下拉：共享 `Select`（Radix），避免原生 select 露出系统控件样式。 */
+function EditorSelect({
+  value,
+  options,
+  onValueChange,
+  ariaLabel,
+  disabled = false,
+  className,
+}: {
+  value: string;
+  options: readonly SelectOption[];
+  onValueChange: (value: string) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  className?: string;
+}): ReactNode {
+  return (
+    <Select
+      inModal
+      value={value}
+      options={options}
+      onValueChange={onValueChange}
+      ariaLabel={ariaLabel}
+      disabled={disabled}
+      className={cn("h-8", disabled && "opacity-60", className)}
+    />
+  );
+}
+
 const editorInputClass =
-  "h-8 w-full rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg outline-none focus:border-accent";
+  "h-8 w-full rounded-[9px] border border-border bg-surface-field px-2.5 text-[11.5px] text-fg outline-none transition-[border-color,box-shadow] duration-200 focus:border-fg-faint focus:ring-2 focus:ring-fg-faint/15";
 
 function cloneCatalogDraft(model: ModelCatalogDefinition): CatalogDraft {
   return {
@@ -1107,75 +1133,67 @@ function CatalogModelEditor({
             />
           </EditorField>
           <EditorField label={t("models.manufacturer")}>
-            <select
+            <EditorSelect
               value={draft.manufacturerId}
               disabled={builtin}
-              onChange={(event) => {
+              ariaLabel={t("models.manufacturer")}
+              options={MODEL_MANUFACTURERS.map((manufacturer) => ({
+                value: manufacturer.id,
+                label:
+                  manufacturer.id === "other"
+                    ? t("models.otherVendor")
+                    : manufacturer.label,
+              }))}
+              onValueChange={(value) => {
                 const manufacturer = MODEL_MANUFACTURERS.find(
-                  (item) => item.id === event.target.value,
+                  (item) => item.id === value,
                 );
                 setDraft((current) => ({
                   ...current,
-                  manufacturerId: event.target.value,
+                  manufacturerId: value,
                   manufacturerLabel:
                     manufacturer?.label ?? current.manufacturerLabel,
                 }));
               }}
-              className={cn(editorInputClass, builtin && "opacity-60")}
-            >
-              {MODEL_MANUFACTURERS.map((manufacturer) => (
-                <option key={manufacturer.id} value={manufacturer.id}>
-                  {manufacturer.id === "other"
-                    ? t("models.otherVendor")
-                    : manufacturer.label}
-                </option>
-              ))}
-            </select>
+            />
           </EditorField>
           <EditorField label={t("models.columns.type")}>
-            <select
+            <EditorSelect
               value={draft.modality}
-              onChange={(event) =>
+              ariaLabel={t("models.columns.type")}
+              options={[
+                { value: "text", label: t("models.text") },
+                { value: "image", label: t("models.image") },
+                { value: "video", label: t("models.video") },
+                { value: "speech", label: t("models.speech") },
+                { value: "transcription", label: t("models.transcription") },
+              ]}
+              onValueChange={(value) =>
                 setDraft((current) => ({
                   ...current,
-                  modality: event.target.value as ModelModality,
+                  modality: value as ModelModality,
                 }))
               }
-              className={editorInputClass}
-            >
-              <option value="text">{t("models.text")}</option>
-              <option value="image">{t("models.image")}</option>
-              <option value="video">{t("models.video")}</option>
-              <option value="speech">{t("models.speech")}</option>
-              <option value="transcription">{t("models.transcription")}</option>
-            </select>
+            />
           </EditorField>
           <EditorField label={t("models.verificationStatus")}>
-            <select
+            <EditorSelect
               value={draft.verificationStatus ?? "unverified"}
               disabled={builtin}
-              onChange={(event) =>
+              ariaLabel={t("models.verificationStatus")}
+              options={[
+                { value: "official-api", label: t("models.verificationOfficialApi") },
+                { value: "official-model-card", label: t("models.verificationOfficialCard") },
+                { value: "aggregator-reference", label: t("models.verificationAggregator") },
+                { value: "unverified", label: t("models.verificationUnverified") },
+              ]}
+              onValueChange={(value) =>
                 setDraft((current) => ({
                   ...current,
-                  verificationStatus: event.target
-                    .value as ModelCatalogVerificationStatus,
+                  verificationStatus: value as ModelCatalogVerificationStatus,
                 }))
               }
-              className={cn(editorInputClass, builtin && "opacity-60")}
-            >
-              <option value="official-api">
-                {t("models.verificationOfficialApi")}
-              </option>
-              <option value="official-model-card">
-                {t("models.verificationOfficialCard")}
-              </option>
-              <option value="aggregator-reference">
-                {t("models.verificationAggregator")}
-              </option>
-              <option value="unverified">
-                {t("models.verificationUnverified")}
-              </option>
-            </select>
+            />
           </EditorField>
           <EditorField label={t("models.fieldContextWindow")}>
             <input
@@ -1320,10 +1338,18 @@ function CatalogModelEditor({
       <InspectorSection title={t("models.reasoning")}>
         <div className="grid grid-cols-2 gap-2.5">
           <EditorField label={t("models.reasoning")}>
-            <select
+            <EditorSelect
               value={thinking.mode}
-              onChange={(event) => {
-                const mode = event.target.value as ThinkingMode;
+              ariaLabel={t("models.reasoning")}
+              options={[
+                { value: "unsupported", label: t("models.unsupported") },
+                { value: "always", label: t("models.always") },
+                { value: "toggle", label: t("models.toggle") },
+                { value: "effort", label: t("models.effort") },
+                { value: "budget", label: t("models.budget") },
+              ]}
+              onValueChange={(value) => {
+                const mode = value as ThinkingMode;
                 setDraft((current) => ({
                   ...current,
                   capabilities: {
@@ -1351,14 +1377,7 @@ function CatalogModelEditor({
                     : {}),
                 }));
               }}
-              className={editorInputClass}
-            >
-              <option value="unsupported">{t("models.unsupported")}</option>
-              <option value="always">{t("models.always")}</option>
-              <option value="toggle">{t("models.toggle")}</option>
-              <option value="effort">{t("models.effort")}</option>
-              <option value="budget">{t("models.budget")}</option>
-            </select>
+            />
           </EditorField>
           <EditorField label={t("models.fieldParameterPath")}>
             <input
@@ -1422,14 +1441,21 @@ function CatalogModelEditor({
             </div>
           </EditorField>
           <EditorField label={t("models.fieldDefaultEffort")}>
-            <select
+            <EditorSelect
               value={thinking.defaultEffort ?? ""}
               disabled={thinking.mode !== "effort"}
-              onChange={(event) => {
+              ariaLabel={t("models.fieldDefaultEffort")}
+              options={[
+                { value: "", label: t("models.defaultOption") },
+                ...(efforts.length > 0 ? efforts : REASONING_EFFORTS).map(
+                  (effort) => ({ value: effort, label: effort }),
+                ),
+              ]}
+              onValueChange={(value) => {
                 const defaultEffort =
-                  event.target.value === ""
+                  value === ""
                     ? undefined
-                    : (event.target.value as ReasoningEffort);
+                    : (value as ReasoningEffort);
                 setDraft((current) => ({
                   ...current,
                   thinkingConfig: {
@@ -1447,20 +1473,7 @@ function CatalogModelEditor({
                       }),
                 }));
               }}
-              className={cn(
-                editorInputClass,
-                thinking.mode !== "effort" && "opacity-60",
-              )}
-            >
-              <option value="">{t("models.defaultOption")}</option>
-              {(efforts.length > 0 ? efforts : REASONING_EFFORTS).map(
-                (effort) => (
-                  <option key={effort} value={effort}>
-                    {effort}
-                  </option>
-                ),
-              )}
-            </select>
+            />
           </EditorField>
           <EditorField label={t("models.fieldDefaultBudgetTokens")}>
             <input
@@ -1540,31 +1553,32 @@ function CatalogModelEditor({
       </InspectorSection>
 
       <InspectorSection title={t("models.requestAdapter")}>
-        <select
+        <EditorSelect
           value={adapter.preset}
-          onChange={(event) =>
+          ariaLabel={t("models.requestAdapter")}
+          options={[
+            { value: "auto", label: t("models.autoDetect") },
+            { value: "anthropic", label: "Anthropic" },
+            { value: "openai-chat", label: "OpenAI Chat" },
+            { value: "openai-responses", label: "OpenAI Responses" },
+            { value: "custom", label: t("models.customPatch") },
+          ]}
+          onValueChange={(value) =>
             setDraft((current) => ({
               ...current,
               requestAdapter: {
-                preset: event.target.value as RequestAdapterConfig["preset"],
+                preset: value as RequestAdapterConfig["preset"],
                 patches: current.requestAdapter?.patches ?? [],
               },
             }))
           }
-          className={editorInputClass}
-        >
-          <option value="auto">{t("models.autoDetect")}</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openai-chat">OpenAI Chat</option>
-          <option value="openai-responses">OpenAI Responses</option>
-          <option value="custom">{t("models.customPatch")}</option>
-        </select>
+        />
         <EditorField label="JSON Patch">
           <textarea
             value={patchText}
             onChange={(event) => setPatchText(event.target.value)}
             spellCheck={false}
-            className="selectable mt-2 min-h-[112px] w-full resize-y rounded-[7px] border border-border bg-surface-field p-2 font-mono text-[10.5px] text-fg outline-none focus:border-accent"
+            className="selectable mt-2 min-h-[112px] w-full resize-y rounded-[7px] border border-border bg-surface-field p-2 font-mono text-[10.5px] text-fg outline-none focus:border-fg-faint"
           />
         </EditorField>
         <p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">
@@ -1619,17 +1633,17 @@ function CatalogModelEditor({
       {providers.length > 0 && (
         <InspectorSection title={t("models.saveToConnection")}>
           <div className="flex gap-2">
-            <select
-              value={bindingProviderId}
-              onChange={(event) => setBindingProviderId(event.target.value)}
-              className={cn(editorInputClass, "min-w-0 flex-1")}
-            >
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name}
-                </option>
-              ))}
-            </select>
+            <div className="min-w-0 flex-1">
+              <EditorSelect
+                value={bindingProviderId}
+                ariaLabel={t("models.saveToConnection")}
+                options={providers.map((provider) => ({
+                  value: provider.id,
+                  label: provider.name,
+                }))}
+                onValueChange={setBindingProviderId}
+              />
+            </div>
             <button
               type="button"
               onClick={() => void bind()}

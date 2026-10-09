@@ -462,18 +462,16 @@ function StatusSlot({
 }
 
 /**
- * 子代理卡片 —— **一张摘要,不是一个抽屉。**
+ * 子代理卡片 —— 点标题行**就地展开**,展开区里有进度、最近动作、结果摘要,
+ * 以及「完整记录」入口(在右侧工作区开一个只读会话,复用主智能体那套渲染)。
  *
- * ★ 它以前是个手风琴:点标题行展开,里面塞着详情网格、活动列表、错误框,
- * 以及**停止按钮**。那个形态是「跑了一个钟头没人看出它卡死了」的一半原因:
+ * ★ 这个形态以前拆过一次(改成「点一下直接开右侧面板」),理由是停止按钮藏在折叠里、
+ * 详情摊在对话流里。这次恢复展开,但**那两条理由仍然成立,所以保留它们的解法**:
  *
- * 1. **停止按钮藏在折叠里。** 想掐掉一个卡住的子代理,得先点开一张
- *    从外面完全看不出异常的卡片 —— 而会去点的人,首先得怀疑它有异常。
- * 2. **详情摊在对话流中间。** 一张展开的卡片能把转录顶掉半屏,于是没人愿意展开;
- *    可那几格(停在哪个阶段、距上次事件多久、工具数/错误数)恰恰是排查时唯一要看的。
- *
- * 现在整张卡片点一下,在**右侧工作区**开一个只读会话(复用主智能体那套渲染),
- * 详情搬进那边的身份栏;停止按钮提到标题行上 —— 不展开就能按。
+ * 1. 停止 / 转后台按钮仍然是标题行的兄弟,**不展开就能按**。
+ * 2. 展开区有高度上限(摘要区内部滚动),不会把转录顶掉半屏。
+ * 3. 「打开完整记录」是**独立的一颗按钮**,不再和展开抢同一次点击 ——
+ *    旧转录没有 `childSessionId` 时只是没有这颗按钮,卡片本身照样能展开。
  */
 export function SubagentNode({
   summary,
@@ -494,6 +492,7 @@ export function SubagentNode({
   const { t } = useI18n();
   const openSubagent = useOpenSubagent();
   const [now, setNow] = useState(() => Date.now());
+  const [open, setOpen] = useState(false);
   const running = state?.status === 'running';
 
   useEffect(() => {
@@ -581,11 +580,10 @@ export function SubagentNode({
       <div className="flex w-full min-w-0 items-center">
         <button
           type="button"
-          data-testid="subagent-open"
-          disabled={!canOpen}
-          title={canOpen ? t('chat.subagent.open') : undefined}
-          onClick={() => { if (state !== undefined) openSubagent?.(state) }}
-          className={cn(ROW_CLASS, "flex-1", canOpen && "cursor-pointer")}
+          data-testid="subagent-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className={cn(ROW_CLASS, "flex-1 cursor-pointer")}
         >
           {/*
             ★ 子代理的身份色原先画在**整张卡**上(描边 + 5% 底色 + 左侧内阴影)。
@@ -659,7 +657,19 @@ export function SubagentNode({
             </span>
             {duration !== undefined && <span className="font-mono text-[11.5px] text-fg-faint">{duration}</span>}
           </span>
+          <RowChevron open={open} />
         </button>
+        {canOpen && (
+          <button
+            type="button"
+            data-testid="subagent-open"
+            onClick={() => { if (state !== undefined) openSubagent?.(state) }}
+            title={t('chat.subagent.open')}
+            className="ml-1.5 shrink-0 rounded-[5px] px-1.5 py-0.5 text-[12px] text-accent transition-colors hover:bg-accent/10"
+          >
+            {t('chat.subagent.report.openRecord')}
+          </button>
+        )}
         {toBackground !== undefined && (
           <button
             type="button"
@@ -685,6 +695,41 @@ export function SubagentNode({
           </button>
         )}
       </div>
+      <SurfaceReveal open={open} className="selectable">
+        <div data-testid="subagent-detail" className="space-y-1.5 text-[12px] text-fg-muted">
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            {state?.phase !== undefined && (
+              <span>{t(`chat.subagent.phase.${state.phase}` as 'chat.subagent.phase.starting')}</span>
+            )}
+            <span>{t('chat.subagent.activityCount', { count: state?.toolCalls ?? 0 })}</span>
+            {(state?.toolErrors ?? 0) > 0 && (
+              <span className="text-danger">{t('chat.subagent.detail.errors', { count: state?.toolErrors ?? 0 })}</span>
+            )}
+          </p>
+          {running && state?.currentTool !== undefined && (
+            <p className="truncate font-mono text-[11.5px] text-fg-faint">
+              {state.currentTool}{state.currentTarget === undefined ? '' : ` ${state.currentTarget}`}
+            </p>
+          )}
+          {(state?.activity?.length ?? 0) > 0 && (
+            <ul className="space-y-0.5">
+              {state?.activity?.slice(0, 5).map((entry, index) => (
+                <li key={`${entry.toolName}-${String(index)}`} className="truncate font-mono text-[11.5px] text-fg-faint">
+                  {entry.toolName}{entry.target === undefined ? '' : ` ${entry.target}`}
+                </li>
+              ))}
+            </ul>
+          )}
+          {state?.summary !== undefined && state.summary.trim() !== '' && (
+            <div className="scroll-thin max-h-[min(30vh,240px)] overflow-y-auto pr-1">
+              <AgentMarkdown content={state.summary} variant="compact" />
+            </div>
+          )}
+          {state === undefined && (
+            <p className="text-fg-faint">{t('chat.subagent.detail.empty')}</p>
+          )}
+        </div>
+      </SurfaceReveal>
       {noticeDetail !== undefined && (
         <SurfaceRow
           data-testid="subagent-notice"

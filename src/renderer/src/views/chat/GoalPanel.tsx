@@ -96,7 +96,7 @@ export function GoalPanel({ open, goal, tokens, onClose, onSet, onClear }: {
         {t('goal.panel.condition')}
         <textarea value={condition} onChange={(event) => setCondition(event.target.value)} rows={4} disabled={busy}
           aria-label={t('goal.panel.condition')} placeholder={t('goal.panel.placeholder')}
-          className="w-full resize-y rounded-lg border border-border bg-surface-input p-2 text-fg outline-none focus:border-accent" />
+          className="w-full resize-y rounded-lg border border-border bg-surface-input p-2 text-fg outline-none focus:border-fg-faint" />
       </label>
       <p className="text-[11px] text-fg-faint">{t('composer.goal.hint')}</p>
       {goal !== undefined && <>

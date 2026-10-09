@@ -993,7 +993,7 @@ export function ProviderPanel({
                     aria-label={t("provider.modelIdLabel")}
                     placeholder={t("provider.modelIdPlaceholder")}
                     disabled={busy}
-                    className="selectable min-w-0 flex-1 rounded-[7px] border border-border bg-canvas px-2 text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-accent"
+                    className="selectable min-w-0 flex-1 rounded-[7px] border border-border bg-canvas px-2 text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-fg-faint"
                   />
                   <button
                     type="button"
@@ -1614,7 +1614,7 @@ function RowAction({
 }
 
 const modelDialogInputClass =
-  "h-8 w-full rounded-[7px] border border-border bg-surface-field px-2 text-[11.5px] text-fg outline-none focus:border-accent";
+  "h-8 w-full rounded-[9px] border border-border bg-surface-field px-2.5 text-[11.5px] text-fg outline-none transition-[border-color,box-shadow] duration-200 focus:border-fg-faint focus:ring-2 focus:ring-fg-faint/15";
 
 function ModelEditDialog({
   model,
@@ -1876,22 +1876,25 @@ function ThinkingDialog({
           </p>
         )}
         <DialogField label={t("models.reasoning")}>
-          <select
+          <Select
+            inModal
             value={mode}
-            onChange={(event) => {
-              const nextMode = event.target.value as ThinkingMode;
+            ariaLabel={t("models.reasoning")}
+            className="h-8 text-[13px]"
+            options={[
+              { value: "unsupported", label: t("models.unsupported") },
+              { value: "always", label: t("models.always") },
+              { value: "toggle", label: t("models.toggle") },
+              { value: "effort", label: t("models.effort") },
+              { value: "budget", label: t("models.budget") },
+            ]}
+            onValueChange={(value) => {
+              const nextMode = value as ThinkingMode;
               setMode(nextMode);
               if (nextMode !== mode) setParameterPath(nextMode === 'effort' ? 'reasoning_effort'
                 : nextMode === 'budget' ? 'thinking.budget_tokens' : 'thinking.type');
             }}
-            className={modelDialogInputClass}
-          >
-            <option value="unsupported">{t("models.unsupported")}</option>
-            <option value="always">{t("models.always")}</option>
-            <option value="toggle">{t("models.toggle")}</option>
-            <option value="effort">{t("models.effort")}</option>
-            <option value="budget">{t("models.budget")}</option>
-          </select>
+          />
         </DialogField>
         {(mode === "toggle" || mode === "budget" || mode === "effort") && (
           <>
@@ -1912,19 +1915,14 @@ function ThinkingDialog({
         {mode === "effort" && (
           <>
           <DialogField label={t("models.fieldDefaultEffort")}>
-            <select
+            <Select
+              inModal
               value={defaultEffort}
-              onChange={(event) =>
-                setDefaultEffort(event.target.value as ReasoningEffort)
-              }
-              className={modelDialogInputClass}
-            >
-              {efforts.map((effort) => (
-                <option key={effort} value={effort}>
-                  {effort}
-                </option>
-              ))}
-            </select>
+              ariaLabel={t("models.fieldDefaultEffort")}
+              className="h-8 text-[13px]"
+              options={efforts.map((effort) => ({ value: effort, label: effort }))}
+              onValueChange={(value) => setDefaultEffort(value as ReasoningEffort)}
+            />
           </DialogField>
           <fieldset className="space-y-2">
             <legend className="text-[11.5px] text-fg-muted">{t('models.supportedReasoningEfforts')}</legend>

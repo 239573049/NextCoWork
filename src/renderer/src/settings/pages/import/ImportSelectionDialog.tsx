@@ -191,8 +191,8 @@ export function ImportSelectionDialog({
       width={640}
       footer={
         <>
-          <Button type="button" variant="secondary" onClick={onClose}>{t('import.cancel')}</Button>
-          <Button
+          <Button size="sm" type="button" variant="secondary" onClick={onClose}>{t('import.cancel')}</Button>
+          <Button size="sm"
             type="button"
             variant="primary"
             disabled={busy || loading || !blockers.ok}
