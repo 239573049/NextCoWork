@@ -854,25 +854,13 @@ export function Composer({
         ★ `surface-input` 不是 `surface-raised`:深色下两者同值,浅色下输入框是**纯白**
         (#ffffff),而 raised 卡片是 #f2eee6。合并了浅色主题下输入框就沉进背景里。
 
-        ★ 边框分两层意思:
-          - 静息用 `stroke`(装饰性收边),聚焦才换成 `border`。`border` 会被可读性护栏
-            提亮到 3:1,那是给小输入框保轮廓用的;这么大一块输入区常亮那一圈太重,
-            而且原来聚焦前后看不出区别。
-          - 边框颜色报状态:Agent 运行中是淡强调色,「完全访问」是淡警示色
-            (和那颗药丸同一件事)。运行中优先 —— 它是此刻正在发生的事,
-            完全访问是一直在的设置,药丸上本来就看得见。拖文件进来时最优先,
-            那是「松手就会发生什么」的提示。
+        背景和柔和阴影区分输入区,聚焦时略微抬高阴影。权限由药丸显示,
+        运行状态由停止按钮显示;只有拖入文件时才显示轮廓,提示可放置区域。
       */}
       <div
         className={cn(
-          "relative mx-auto w-full max-w-[760px] rounded-panel border bg-surface-input transition-colors",
-          dragging
-            ? "border-accent"
-            : running
-              ? "border-accent/35 focus-within:border-fg-faint/60"
-              : value.permissionMode === "full"
-                ? "border-warning/35 focus-within:border-warning/60"
-                : "border-stroke focus-within:border-border",
+          "relative mx-auto w-full max-w-[760px] rounded-panel bg-surface-input shadow-sm shadow-black/10 transition-shadow duration-200 focus-within:shadow-md focus-within:shadow-black/15 motion-reduce:transition-none",
+          dragging && "ring-2 ring-accent/60",
         )}
         onDragOver={(e) => {
           if (onAttachFiles === undefined) return;
@@ -962,7 +950,6 @@ export function Composer({
           <Menu
             label={t("composer.permission")}
             width={280}
-            panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
             triggerClassName="rounded-full focus-visible:outline-2 focus-visible:outline-accent"
             trigger={
               <Pill accent={value.permissionMode === "full"}>
@@ -990,7 +977,7 @@ export function Composer({
                     {t(`permission.${m}` as "permission.ask" | "permission.auto" | "permission.full")}
                   </ComposerMenuItem>
                 ))}
-                <div className="mx-2 mt-1 border-t border-border pt-1.5 pb-1 text-[10px] leading-4 text-fg-faint">
+                <div className="mx-2 mt-2 pt-1.5 pb-1 text-[10px] leading-4 text-fg-faint">
                   {t("composer.approvalHint")}
                 </div>
               </>
@@ -1002,7 +989,6 @@ export function Composer({
             label={t("composer.more")}
             width={320}
             onOpenChange={(open) => { if (!open) setPluginToolsOpen(false); }}
-            panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
             triggerClassName="group rounded-full focus-visible:outline-2 focus-visible:outline-accent"
             trigger={
               <span className={cn(
@@ -1234,7 +1220,6 @@ export function Composer({
         <Menu
           label={t('composer.mode.label')}
           width={320}
-          panelClassName="rounded-xl bg-surface-input p-1 shadow-lg shadow-black/10"
           triggerClassName="rounded-full focus-visible:outline-2 focus-visible:outline-accent"
           trigger={
             <Pill accent={value.mode !== 'code'}>
@@ -2331,10 +2316,10 @@ function ContextBreakdown({
           /*
             ★ 这一行才是整张卡的由头:下面六行是「占掉的那些是什么」(分母是已用量),
             这一行是「还没开口就已经占掉多少窗口」(分母是窗口)。两个分母不一样,
-            所以它在线上面、措辞也不同 —— 混进去会让人把 42% 读成 42% 的窗口。
+            所以它单独放在明细之前、措辞也不同 —— 混进去会让人把 42% 读成 42% 的窗口。
           */
           <div
-            className="mb-1.5 flex items-center gap-2 border-b border-border pb-1.5"
+            className="mb-2 flex items-center gap-2 pb-1.5"
             title={t("composer.contextPreviewNote")}
           >
             <span className="min-w-0 flex-1 truncate text-fg-muted">
@@ -2387,11 +2372,11 @@ function ContextBreakdown({
         })}
         {cacheHitRate !== undefined && (
           /*
-            ★ 它和上面六行**不是一件事**,所以隔一条线:上面说的是「窗口被谁占了」,
+            ★ 它和上面六行**不是一件事**,所以用留白分组:上面说的是「窗口被谁占了」,
             这一行说的是「这些 token 里有多少是从缓存读的」(便宜那部分)。
             并排列进去会让人以为缓存也是六档里的一档。
           */
-          <div className="mt-1 flex items-center gap-2 border-t border-border pt-1.5">
+          <div className="mt-2 flex items-center gap-2 pt-1.5">
             <span className="min-w-0 flex-1 truncate text-fg-muted">
               {t("composer.contextCacheHit")}
             </span>

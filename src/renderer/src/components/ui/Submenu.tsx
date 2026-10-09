@@ -90,7 +90,7 @@ export function Submenu({
         // 量到位置之前先渲染出来(否则量不到高度),但别让人看见左上角那一帧
         visibility: placed === null ? 'hidden' : undefined
       }}
-      className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/35"
+      className="app-no-drag scroll-thin fixed z-[60] overflow-y-auto rounded-panel border-0 bg-surface-menu p-1.5 shadow-menu"
     >
       <MenuHighlightReset>{children}</MenuHighlightReset>
     </div>,

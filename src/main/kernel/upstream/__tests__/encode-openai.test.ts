@@ -128,6 +128,53 @@ describe('OpenAI request encoders', () => {
     expect(JSON.stringify(input)).not.toContain('status')
   })
 
+  it.each([65, 428])('omits reasoning with a %i-character id without changing the transcript or tool receipts', (length) => {
+    const item = { ...reasoningItem, id: 'r'.repeat(length) }
+    const messages = structuredClone(history)
+    messages[1]!.parts.unshift({ type: 'thinking', text: '', opaque: { protocol: 'openai-responses', item } })
+    messages[1]!.parts[1] = { type: 'thinking', text: '检查参数。', opaque: { protocol: 'openai-responses', item: reasoningItem } }
+    const before = structuredClone(messages)
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'gpt-test', 'k').body as { input: unknown[] }).input
+
+    expect(input).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: '你好' }] },
+      reasoningItem,
+      { role: 'assistant', content: '查询中' },
+      { type: 'function_call', call_id: 'call-1', name: 'Echo', arguments: '{"text":"hello"}' },
+      { type: 'function_call', call_id: 'call-2', name: 'Echo', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call-1', output: 'hello' },
+      { type: 'function_call_output', call_id: 'call-2', output: 'denied' }
+    ])
+    expect(messages).toEqual(before)
+  })
+
+  it.each(['opaque-only', 'text-required'] as const)('preserves a reasoning id at the 64-character limit for %s', (reasoningReplay) => {
+    const item = { ...reasoningItem, id: `rs_${'a'.repeat(61)}` }
+    const messages = [assistantMessage('a', [{ type: 'thinking', text: '检查参数。', opaque: {
+      protocol: 'openai-responses', item
+    } }], 0)]
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'gpt-test', 'k', {
+      ...REPLAY_DEEPSEEK, reasoningReplay
+    }).body as { input: unknown[] }).input
+    expect(input).toEqual([item])
+  })
+
+  it.each([true, false])('removes an oversized id while preserving text-required reasoning (has content: %s)', (hasContent) => {
+    const content = [{ type: 'reasoning_text', text: '原始推理正文' }]
+    const item = { type: 'reasoning', id: 'r'.repeat(428), ...(hasContent ? { content, encrypted_content: 'enc' } : {}) }
+    const messages = [assistantMessage('a', [{ type: 'thinking', text: '转录里的完整推理', opaque: {
+      protocol: 'openai-responses', item
+    } }], 0)]
+    const before = structuredClone(messages)
+    const input = (encodeOpenAIResponses({ ...REQUEST, messages }, 'deepseek-flash', 'k', REPLAY_DEEPSEEK).body as { input: unknown[] }).input
+
+    expect(input).toEqual([hasContent
+      ? { type: 'reasoning', content, encrypted_content: 'enc' }
+      : { type: 'reasoning', content: [{ type: 'reasoning_text', text: '转录里的完整推理' }] }
+    ])
+    expect(messages).toEqual(before)
+  })
+
   /*
     ★ DeepSeek 思考模式的硬校验:带 tools 时历史每一轮的 reasoning_text 必须回传,
     缺失即 400。opaque 缺席 / 协议键对不上时,思考全文只存在于 part.text ——

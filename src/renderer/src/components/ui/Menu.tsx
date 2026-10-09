@@ -260,7 +260,7 @@ export function Menu({
           className={cn(
             'app-no-drag scroll-thin fixed z-50 overflow-y-auto rounded-[12px]',
             align === 'end' ? 'origin-top-right' : 'origin-top-left',
-            'border border-border bg-surface-raised p-1 shadow-2xl shadow-black/40',
+            'border-0 bg-surface-menu p-1.5 shadow-menu',
             'transition-[opacity,transform,translate,scale] duration-180 ease-panel motion-reduce:transition-none motion-reduce:transform-none motion-reduce:translate-y-0 motion-reduce:scale-100',
             presence.shown
               ? 'translate-y-0 scale-100 opacity-100'
@@ -362,7 +362,7 @@ export function MenuItem({
 }
 
 export function MenuSeparator(): ReactNode {
-  return <div role="separator" className="my-1 h-px bg-border" />
+  return <div role="separator" className="my-2 h-0" />
 }
 
 export function MenuLabel({ children }: { children: ReactNode }): ReactNode {

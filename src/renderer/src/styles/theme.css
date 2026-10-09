@@ -96,6 +96,10 @@
   --color-surface-field: #343a37;
   --color-surface-sunken: #252b28; /* 按下 / 激活的图标按钮:从 chrome 往下挖(推的) */
 
+  /* 菜单与子菜单以底色和阴影浮起,避免被 border 的对比度护栏提亮出一圈描边。 */
+  --color-surface-menu: color-mix(in srgb, var(--color-surface-raised), var(--color-surface-field) 50%);
+  --shadow-menu: 0 10px 15px -3px rgb(0 0 0 / 0.2), 0 4px 6px -4px rgb(0 0 0 / 0.2);
+
   /* ── 交互态 ── */
   --color-tint: #2b2e2d; /* 激活的内层 Tab(实测)/ 控件槽 / 用户气泡 */
   --color-tint-hover: #363b38; /* 悬停(推的:+11,带绿) */
@@ -116,7 +120,7 @@
     「功能性轮廓」和「装饰性收边」两个职责,护栏只能按前者算,后者必然被牺牲。
 
     所以分工是:
-      border  → 输入框 / 下拉 / 菜单 / 对话框,**要被人点的东西的轮廓**,受护栏保护
+      border  → 输入框 / 下拉触发器 / 对话框,**要被人点的东西的轮廓**,受护栏保护
       stroke  → 卡片 / 面板 / 区块的收边,**纯装饰**,永远是设计值
     分隔线仍然走 `hairline`(卡片**内部**的横线),这三个别混。
   */

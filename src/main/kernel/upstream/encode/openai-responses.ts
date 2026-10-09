@@ -88,7 +88,7 @@ export function toOpenAIResponsesInput(
               flush()
               input.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: part.text }] })
             }
-          } else if (carrier !== undefined && hasReasoningId(carrier)) {
+          } else if (carrier !== undefined && hasReplayableReasoningId(carrier)) {
             flush()
             input.push(carrier)
           }
@@ -136,7 +136,7 @@ export function toOpenAIResponsesInput(
  * 不会把我们打回同一个坑。反过来,`encrypted_content` 少传一个字节,
  * 无状态续轮就丢掉整条推理链,所以这几个字段一个都不能漏。
  *
- * ★★ `content`(推理正文)是白名单里唯一的例外,**只对 `text-required` 放行**:
+ * ★★ `content`(推理正文)**只对 `text-required` 放行**:
  * 官方 OpenAI 的输入侧给它的上限是 0(症状见 `case 'thinking'` 那段注释),
  * 原样搬运等于替上游造一个每轮必 400 的 item。原先「一个都不能漏」那句是照
  * DeepSeek 的硬校验写的,对官方恰好反了 —— 现在按方言分。
@@ -146,6 +146,7 @@ const REASONING_INPUT_FIELDS = ['type', 'id', 'summary', 'content', 'encrypted_c
 function reasoningInputItem(item: Record<string, unknown>, replay: ReasoningReplay): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const key of REASONING_INPUT_FIELDS) {
+    if (key === 'id' && !hasReplayableReasoningId(item)) continue
     if (key === 'content' && replay !== 'text-required') continue
     if (item[key] !== undefined) out[key] = structuredClone(item[key])
   }
@@ -153,15 +154,16 @@ function reasoningInputItem(item: Record<string, unknown>, replay: ReasoningRepl
 }
 
 /**
- * `opaque-only` 下这条载体还值不值得上行。
+ * Responses 输入侧的推理 id 必须是非空且不超过 64 字符的字符串。
  *
- * 需求:官方输入侧的 `input[].id` 是**必填**(类型上不是 Optional),而没有 id 的载体
- * 只剩 summary / encrypted_content,带不动任何续链信息。宁可整条不上行,也不要发一个
- * 校验不过的 item —— 那正是本次要消灭的症状:一个坏 item 让整个会话每轮都废。
- * `text-required` 不走这里:那一支允许合成只带 content 的 item,本来就没有 id。
+ * 部分上游返回过 428 字符的 id,原样回传会让后续每轮都被 400 拒绝。
+ * 不截断或哈希上游签发的标识,避免伪造引用:opaque-only 跳过无法回传的 item;
+ * text-required 允许无 id 的正文载体,只去掉无效 id,正文仍按原有规则保留或补全。
+ * 只在编码期过滤,不改转录,这样存量会话重试时也能恢复。
  */
-function hasReasoningId(item: Record<string, unknown>): boolean {
-  return typeof item['id'] === 'string' && item['id'] !== ''
+function hasReplayableReasoningId(item: Record<string, unknown>): boolean {
+  const id = item['id']
+  return typeof id === 'string' && id.length > 0 && id.length <= 64
 }
 
 /**

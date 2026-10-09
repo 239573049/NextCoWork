@@ -53,8 +53,8 @@ export interface ProviderModelMenuRow {
 
 /** 两级面板共用的外观 —— 与 `ui/Menu` 的面板同一套 token,入场用 @starting-style 淡入。 */
 const PANEL = cn(
-  'app-no-drag scroll-thin overflow-y-auto rounded-card border border-border bg-surface-raised p-1',
-  'shadow-2xl shadow-black/40 outline-none',
+  'app-no-drag scroll-thin overflow-y-auto rounded-panel border-0 bg-surface-menu p-1.5',
+  'shadow-menu outline-none',
   'transition-[opacity,scale] duration-150 ease-panel starting:scale-[.98] starting:opacity-0',
   'motion-reduce:transition-none'
 )

@@ -113,8 +113,8 @@ export function Select({
           className={cn(
             "app-no-drag max-h-[min(240px,var(--radix-select-content-available-height))]",
             inModal ? "z-[150]" : "z-[60]",
-            "w-[var(--radix-select-trigger-width)] overflow-hidden rounded-[12px] border border-border",
-            "bg-surface-raised p-1 shadow-2xl shadow-black/40 outline-none",
+            "w-[var(--radix-select-trigger-width)] overflow-hidden rounded-[12px] border-0",
+            "bg-surface-menu p-1.5 shadow-menu outline-none",
             // 入场:从触发器那一侧轻轻展开。transform-origin 用 Radix 算好的锚点,翻到上方时自动跟着翻
             "origin-[var(--radix-select-content-transform-origin)]",
             "data-[state=open]:animate-[select-unfold_0.22s_cubic-bezier(0.16,1,0.3,1)] motion-reduce:animate-none",

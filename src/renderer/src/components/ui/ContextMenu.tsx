@@ -142,7 +142,7 @@ export function ContextMenu({
         visibility: placed === null ? 'hidden' : undefined
       }}
       className={cn(
-        'app-no-drag fixed z-50 rounded-card border border-border bg-surface-raised p-1 shadow-2xl shadow-black/35 outline-none',
+        'app-no-drag fixed z-50 rounded-panel border-0 bg-surface-menu p-1.5 shadow-menu outline-none',
         'transition-[opacity,transform,translate,scale] duration-150 ease-panel motion-reduce:transition-none motion-reduce:transform-none motion-reduce:translate-y-0 motion-reduce:scale-100',
         shown && !closing
           ? 'translate-y-0 scale-100 opacity-100'
