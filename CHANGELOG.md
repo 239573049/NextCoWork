@@ -1,6 +1,57 @@
 ﻿# 更新日志
 
 
+## v2.5.5
+
+### 新增
+
+**前台命令与前台子代理可以「转为后台运行」:不杀、不重来,只是不再等**
+
+- `Bash` 工具卡在命令跑动期间多一颗「转为后台运行」按钮(新通道 `shell:backgroundToolCall`):命令**不被杀**,这次工具调用当场返回「到目前为止的输出 + 一个 shell id」,命令作为后台 shell 继续跑、超时不再适用,模型之后用 `BashOutput` / `KillShell` 管它。`SpawnFn` 新增 `detach` 信号与 `SpawnResult.detached`,`nodeSpawn` 在转走时摘掉自己的 data 监听、显式 `pause()` 两条管道,由 `agent-shells.ts` 收编时 `resume()` —— 转走那一刻到收编之间到达的输出不会丢
+- 按钮是否出现由**这一次调用**自己报的 `ToolProgress.detachable` 决定,不是按工具名:只有本地环境能收编进程(`ShellBridge.adopt` 仅本地提供),SSH 上不画这颗按钮,而不是画一颗按了没反应的。后台名额(`MAX_RUNNING`)已满时**当场拒绝**、前台照旧在等,不会先转走再在收编时失败;收编失败则杀掉进程再报错,不留孤儿
+- 回给模型的措辞写明三件事:是**用户**转的、它**还在跑**、怎么读 / 怎么停 —— 避免把「到目前为止的输出」当完整结果去下结论
+- 子代理卡片同样有「转为后台运行」(新通道 `agent:backgroundSubagent`):父代理那次 `Task` 调用不再等它、当场返回,子代理继续跑,结论之后按后台子代理那条路送回主代理。`monitorChildRun` 改为在**结束那一刻**读可变的 `mode`,被转走的子代理按后台收尾;只认还在 `running` 的 run,避免 run_end 已发出、收尾读过 `mode` 之后再转造成「卡片说后台、结论按前台交回」。工具回执明确告诉模型「不要再派一次」
+
+**Git 面板与「改动审查」换成 CodeMirror 对比视图:行内 / 并排、折叠、横向滚动**
+
+- 新 `CodeDiffViewer`(基于 `@codemirror/merge`):行内(unified)与并排(split)两种布局,折叠未改动的上下文,行号栏不随横向滚动走;并排模式改为每边各自滚动、两边同步,横向滚动条不再埋在文档最底部。语法高亮与聊天里的代码块共用同一套配色。聊天工具卡里的小 diff 仍用轻量的 `DiffLines`,不被拖进 CodeMirror 的 chunk
+- 新通道 `git:getDiffSides`:取一份 diff 两侧的**完整文本**。比较基准与 `git diff` 一致(工作区看「暂存区 → 工作区」,暂存区看「HEAD → 暂存区」);用 `cat-file blob` 读对象(不走 textconv),符号链接读链接本身而不跟进目标;新文件 / 已删除 / 空仓库那一侧为空串。二进制、单侧超过 1MB、冲突中、子模块返回 `null`,界面退回 unified 文本。只改文件模式、两侧正文一致时显示「无差异」
+- 抽出 `resolveInRepo`:`readUntracked` 与新增的工作区读取共用同一条越界拦截
+
+**外层标签栏:键盘可操作,视觉重做**
+
+- 底层换成 Radix `Tabs`(Root / List / Trigger):tablist 语义、roving tabindex、←/→/Home/End 移动焦点;`activationMode="manual"`,方向键只挪焦点、Enter / 空格才切换,不会扫一遍就把所有工作区依次打开。补上 Delete / Backspace 关闭、F2 改名、菜单键 / Shift+F10 打开右键菜单;键盘关闭后焦点落回原位置的那张
+- 激活 Tab 底部两侧加反向圆角,和画布连成一体;两张未激活 Tab 之间画分隔线;尾部只留一个槽(激活 Tab 平时是 ×、运行中是转圈、悬停 / 聚焦时换成 ×),未激活 Tab 的 × 悬停时压在尾部并带渐隐,不再常驻留 18px 空白
+
+**聊天里可以单独删掉一整轮**
+
+- 用户提问气泡新增删除键(`onDeleteTurn`),提问连同它引出的回复一并删除;只读的子代理面板不画
+
+### 改动
+
+**Arc 组件库全面接入**
+
+- 新增 `components/arc/`(Radix 底座):action-button、button、context-menu、dialog、dropdown-menu、empty-state、input、number-field、progress、radio-cards、search-field、segmented-control、select、slider、switch、textarea、toast-stack、tooltip,附 `foundation.css` / 动效 token 与 `components.json`;新增依赖 `@radix-ui/react-{dialog,dropdown-menu,select,switch,tooltip}`、`@codemirror/merge`、`@fontsource-variable/{geist,inter}`
+- 设置页、扩展、文件、Git、技能、计划任务、奖励等视图的按钮 / 开关 / 分段控件 / 空态 / 弹窗改用 Arc;`ui/Dialog` 保留为薄封装,集中处理 `app-no-drag`(标题栏拖拽区会吞掉 pointer 事件)、z 轴(模态 100,Radix 浮层统一抬到 150)、Esc 只关最上一层、按内容给宽度这四条对 49 个调用点都成立的约束;`ui/Segmented` 只为插件 API(`nextcowork/ui`)保留旧签名,宿主代码直接用 Arc 的 `SegmentedControl`
+- 模型选择菜单(`ProviderModelMenu`)改用 Radix `DropdownMenu` 的 Sub / SubTrigger / SubContent,解决四个老问题:斜着移向子菜单时扫过别家供应商导致子菜单跳变(Radix 有指针安全区)、没有方向键导航、二级面板定位与翻转靠手写、二级面板压不过 z-100 的设置浮层。输入框模型药丸、默认模型 / 默认子代理、图片模型、视频模型共用
+- 每回合的用量行刻意**不**用 Arc 的 Tooltip(每个实例自带 Radix Provider,200 回合长历史渲染耗时翻倍),继续用只在悬停时才挂浮层的轻量版
+
+**长会话打开更快**
+
+- 首屏只读最近 60 条(`HISTORY_INITIAL_PAGE_SIZE`),翻页仍为 200;滚到顶由哨兵自动接着取。新增 `historyLoaded`:首页读回来之前画骨架,不再把空转录当成「全新会话」闪出问候语 + 居中输入框;读失败、会话已删除、新铸出的会话都算「读过了」,骨架不会一直挂着
+- 目标重载恢复只读「最后一条带 `goal_status` 的助手消息」(`lastGoalStatusMessage`:先用 LIKE 在原文上筛候选、再解析确认),不再把整段转录 `JSON.parse` 一遍;`restoreGoal` 的历史改为**只在第一次**才读 —— 原先写成默认参数,已初始化的会话每次 `sessions:getPage` / `goal:get` 也白读一遍再丢掉
+- 离屏会话 store 的释放宽限从 20 秒缩到 8 秒
+
+### 修复
+
+- 删除 / 重新生成把末轮回复删掉后,会话状态复位为 `done`:之前被删掉那一轮留下的「已停止 / 出错」会继续挂在状态行上;只剩一条未回复的提问时,状态行不再显示一句不存在的回复的「已完成」(停止 / 出错照常显示)
+- 设置里子代理并发数的说明文字去掉了只有本仓库看得懂的「方案 §4.9」引用
+
+### 测试
+
+- 新增 3 个测试文件:`git-diff-sides`、`provider-model-menu`、`outer-tab-bar`;补充 `bash-background`、`host-spawn`、`agent-shells`、`task-tool`、`goal-runtime`、`roundtrip`、`subagent-queue-wiring`、`history-paging` 等用例;更新说明弹窗的测试显式声明 jsdom 环境(Radix 的 `useLayoutEffect` 在 import 那一刻判断 `document`)
+- 全量套件 **7159 项通过**(29 skipped),零失败;`typecheck`(node + web + plugins)通过
+
 ## v2.5.4
 
 ### 新增
