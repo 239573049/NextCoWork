@@ -18,6 +18,10 @@ NextCoWork 把 Agent 驱动的开发带到桌面端：多工作区并排开、�
 - **插件系统** —— 清单驱动、逐调用能力门控。插件可贡献命令、菜单、快捷键、自定义编辑器、视图、Web 应用、Agent 工具和捆绑技能。
 - **原生体验** —— 深浅主题、强调色、动效档位、自动更新，简体中文 / English 完整双语言。
 
+## 配置 API Route
+
+在模型设置的服务商目录中添加 **API Route**，保存 API Key 后拉取并导入模型。预设使用 OpenAI Chat Completions 协议，地址为 `https://global.api-route.com/v1`。可用模型取决于密钥的分组与权限；请直接使用列表返回的完整 ID（例如 `gpt-6.1-sol`），无需添加厂商前缀。密钥配置可参考 [API Route 快速开始](https://www.api-route.com/docs/quickstart)。
+
 ## 下载
 
 安装包发布平台：
