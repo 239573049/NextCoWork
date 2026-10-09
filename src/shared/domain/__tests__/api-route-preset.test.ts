@@ -41,11 +41,11 @@ describe('API Route preset setup', () => {
 
   it('preserves unprefixed upstream model IDs through discovery and import rows', () => {
     const fetched = parseModelList('openai-chat', {
-      data: [{ id: 'gpt-6.1-sol' }, { id: 'claude-fable-5.1' }]
+      data: [{ id: 'gpt-6.1-sol' }, { id: 'claude-fable-5-1' }]
     })
     expect(importRows(fetched, []).map((row) => row.id)).toEqual([
       'gpt-6.1-sol',
-      'claude-fable-5.1'
+      'claude-fable-5-1'
     ])
     expect(findPreset('api-route')?.recommended).toBeUndefined()
   })
