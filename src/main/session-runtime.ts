@@ -123,6 +123,12 @@ export class SessionRuntime {
   /** 本进程里已经开始汇报的 `会话 + callId`。持久化的 reportStatus 管跨重启,这里管并发 */
   private readonly reporting = new Set<string>()
   /**
+   * ★ 还没被 run 消费的内部输入:runId → inputMessageId → 输入。
+   * 「入信箱 / launch 成功」不等于送达 —— 只有 run 把它注入成**同 id** 的 user 消息
+   * (发出 `message_commit`)才算;run 收尾时还没确认的,从这里接回去重投或退回。
+   */
+  private readonly unconfirmed = new Map<string, Map<string, DeferredInput>>()
+  /**
    * ★ 全局单调递增,而不是每会话各数各的:会话条目在空了之后会被丢掉,
    * 重新建出来时每会话计数会回到 0,渲染层就会把新快照当成旧的丢掉。
    */
@@ -185,6 +191,7 @@ export class SessionRuntime {
     this.deferred.clear()
     this.retries.clear()
     this.reporting.clear()
+    this.unconfirmed.clear()
     this.lastOptions.clear()
   }
 
@@ -355,6 +362,8 @@ export class SessionRuntime {
     this.rememberOptions(req.sessionId, optionsOf(req))
     handle.on((event) => {
       if (event.type === 'message_commit' && event.message.role === 'user') {
+        // 内部输入:同 id 的 user message_commit 是「已被消费」的回执,这时才 done(true)
+        this.confirmInternal(handle.runId, event.message.id)
         this.reapCommitted(handle.sessionId, event.message.id)
       }
     })
@@ -368,8 +377,29 @@ export class SessionRuntime {
    */
   runSettled(handle: SessionRunHandle): void {
     if (handle.depth !== 0) return
+    this.reclaimUnconfirmed(handle)
     if (this.flushDeferred(handle.sessionId)) return
     if (handle.status === 'done') this.drain(handle.sessionId)
+  }
+
+  /**
+   * run 收尾:接回它名下还没被消费的内部输入。
+   *
+   * 正常结束 → 按原投递顺序放回 deferred **队首**,优先于排队的用户消息继续投递;
+   * aborted / error(或 signal 已中止)→ 不自动续跑,done(false) 把报告退回 pending,
+   * 由用户在卡片上自己点「处理」。
+   */
+  private reclaimUnconfirmed(handle: SessionRunHandle): void {
+    const pending = this.unconfirmed.get(handle.runId)
+    if (pending === undefined) return
+    this.unconfirmed.delete(handle.runId)
+    if (handle.status !== 'done' || handle.signal.aborted) {
+      for (const input of pending.values()) input.done?.(false)
+      return
+    }
+    if (pending.size === 0) return
+    const list = this.deferred.get(handle.sessionId) ?? []
+    this.deferred.set(handle.sessionId, [...pending.values(), ...list])
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -406,7 +436,8 @@ export class SessionRuntime {
     const receipt = this.deps.readReport(sessionId, callId)
     if (receipt === undefined) return 'none'
     const status = receipt.reportStatus ?? 'pending'
-    if (status !== 'pending' && status !== 'blocked') return status
+    if (status !== 'pending' && status !== 'blocked' && status !== 'injecting') return status
+    // 旧版本留下的 injecting 可以重试;本进程真正投递中的报告仍由 reporting 去重。
     return this.report(receipt, fallback)
   }
 
@@ -459,7 +490,8 @@ export class SessionRuntime {
 
   private setReportStatus(sessionId: string, callId: string, status: SubagentReportStatus): void {
     try {
-      this.deps.persistReportStatus(sessionId, callId, status)
+      // injecting 是运行期状态:未确认消费前落盘仍为 pending,崩溃重启后才能手动重试。
+      this.deps.persistReportStatus(sessionId, callId, status === 'injecting' ? 'pending' : status)
     } catch (error) {
       this.deps.log(`[session] could not persist report status: ${sessionId}`, error)
     }
@@ -468,18 +500,21 @@ export class SessionRuntime {
 
   /**
    * 投递一条内部输入:run 在跑就进它的信箱,会话正在收尾就排到收尾之后,
-   * 空闲就开一个新 run。
+   * 空闲就开一个新 run。两条路都只是「发出去了」—— `done(true)` 要等同 id 的
+   * `message_commit` 回执,由 `confirmInternal` 兑现。
    */
   private deliverInternal(sessionId: string, input: DeferredInput): Delivery {
     const active = this.deps.activeRun(sessionId)
     if (active !== undefined && active.status === 'running' && !active.signal.aborted) {
+      // ★ 先登记再入信箱:入队成功不算送达
+      const id = this.deps.newId()
+      this.trackInternal(active.runId, id, input)
       active.enqueueInternal({
-        id: this.deps.newId(),
+        id,
         parts: input.parts,
         internal: true,
         ...(input.goalId === undefined ? {} : { goalId: input.goalId })
       })
-      input.done?.(true)
       return 'interjected'
     }
     if (this.deps.isBusy(sessionId)) {
@@ -493,23 +528,57 @@ export class SessionRuntime {
   }
 
   private launchInternal(sessionId: string, input: DeferredInput): boolean {
+    // ★ 在 launch 之前 mint 并登记:run 可能同步提交输入,回执早于本函数返回
+    const runId = this.deps.newId()
+    const inputMessageId = this.deps.newId()
+    this.trackInternal(runId, inputMessageId, input)
     try {
       this.deps.launch({
         ...input.options,
-        runId: this.deps.newId(),
+        runId,
         sessionId,
         input: input.parts,
-        inputMessageId: this.deps.newId(),
+        inputMessageId,
         inputInternal: true,
         ...(input.goalId === undefined ? {} : { inputGoalId: input.goalId })
       })
-      input.done?.(true)
       return true
     } catch (error) {
+      // 启动被拒:清掉自己的未确认项再 done(false),免得之后收尾被重复接回
+      this.untrackInternal(runId, inputMessageId)
       this.deps.log(`[session] internal input could not start: ${sessionId}`, error)
       input.done?.(false)
       return false
     }
+  }
+
+  /** 按 runId → inputMessageId 登记一条等回执的内部输入。 */
+  private trackInternal(runId: string, inputMessageId: string, input: DeferredInput): void {
+    // 目标检查没有送达回调;过期项仍由内核丢弃,不能因这次报告确认改动而重新启动。
+    if (input.done === undefined) return
+    let pending = this.unconfirmed.get(runId)
+    if (pending === undefined) {
+      pending = new Map()
+      this.unconfirmed.set(runId, pending)
+    }
+    pending.set(inputMessageId, input)
+  }
+
+  /** 同 id 的 user message_commit 到了:摘掉表项(空了删 run 键)并 done(true)。 */
+  private confirmInternal(runId: string, inputMessageId: string): void {
+    const pending = this.unconfirmed.get(runId)
+    const input = pending?.get(inputMessageId)
+    if (pending === undefined || input === undefined) return
+    pending.delete(inputMessageId)
+    if (pending.size === 0) this.unconfirmed.delete(runId)
+    input.done?.(true)
+  }
+
+  private untrackInternal(runId: string, inputMessageId: string): void {
+    const pending = this.unconfirmed.get(runId)
+    if (pending === undefined) return
+    pending.delete(inputMessageId)
+    if (pending.size === 0) this.unconfirmed.delete(runId)
   }
 
   /** 会话空出来了:投递第一条等着的内部输入。起了新 run 返回 true */

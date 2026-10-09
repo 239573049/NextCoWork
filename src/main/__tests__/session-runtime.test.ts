@@ -54,6 +54,12 @@ class FakeRun implements SessionRunHandle {
   emit(event: AgentEvent): void { for (const listener of this.listeners) listener(event, 0) }
   setInterject(items: readonly InterjectItem[]): void { this.interjects.push([...items]) }
   enqueueInternal(item: InterjectItem): void { this.internal.push(item) }
+  /** 生产路径:run 把信箱里的内部输入注入成 user 消息,同 id 的 message_commit 就是消费回执 */
+  consumeInternal(): void {
+    for (const item of this.internal) {
+      this.emit({ type: 'message_commit', message: userMessage(item.id, item.parts, 1) })
+    }
+  }
 }
 
 /** 一个最小的「主进程」:run 表、会话互斥、kv、广播 */
@@ -100,6 +106,10 @@ class Harness {
     this.active.set(req.sessionId, run)
     this.launched.push(req)
     this.runtime.runStarted(run, req)
+    // 生产路径:run 把这一轮输入落成 user 消息时会发同 id 的 message_commit —— 内部输入靠它确认
+    if (req.inputInternal === true) {
+      run.emit({ type: 'message_commit', message: userMessage(req.inputMessageId ?? '', req.input ?? [], 1) })
+    }
     return run
   }
 
@@ -399,14 +409,131 @@ describe('后台子代理汇报', () => {
     expect(h.reports.map((r) => r.status)).toEqual(['injecting', 'reported'])
   })
 
-  it('父会话还在跑:进它的信箱,不并发第二个 run', () => {
+  it('父会话还在跑:先进信箱标 injecting,同 id 的 message_commit 之后才算 reported', () => {
     const run = h.send('s', '还在跑')
     h.runtime.childFinished(report(), 'done')
 
     expect(h.launched).toHaveLength(1)
     expect(run.internal).toHaveLength(1)
     expect(run.internal[0]?.internal).toBe(true)
+    // 入信箱 ≠ 送达:run 还没把它注入成 user 消息
+    expect(h.reports.at(-1)?.status).toBe('injecting')
+    expect(h.persisted.get('s/task-bg')).toBe('pending')
+
+    run.consumeInternal()
     expect(h.persisted.get('s/task-bg')).toBe('reported')
+    expect(h.reports.map((r) => r.status)).toEqual(['injecting', 'reported'])
+  })
+
+  it('回传中崩溃重启:落盘仍可重试,不会永久停在 injecting', () => {
+    h.send('s', '还在跑')
+    h.runtime.childFinished(report(), 'done')
+    const saved = { ...report(), reportStatus: h.persisted.get('s/task-bg')! }
+    expect(saved.reportStatus).toBe('pending')
+
+    const restarted = new Harness()
+    restarted.receipts.set('s/task-bg', saved)
+    expect(restarted.runtime.reportManually('s', 'task-bg', OPTS)).toBe('reported')
+    expect(restarted.launched).toHaveLength(1)
+    expect(inputText(restarted.launched[0])).toContain('legacy/loader.ts')
+  })
+
+  it('旧版本残留的 injecting 可以手动重试,本进程仍在投递的不能重复', () => {
+    h.receipts.set('s/task-bg', { ...report(), reportStatus: 'injecting' })
+    const run = h.send('s', '还在跑')
+    expect(h.runtime.reportManually('s', 'task-bg', OPTS)).toBe('injecting')
+    expect(run.internal).toHaveLength(1)
+    expect(h.runtime.reportManually('s', 'task-bg', OPTS)).toBe('injecting')
+    expect(run.internal).toHaveLength(1)
+    run.consumeInternal()
+    expect(h.persisted.get('s/task-bg')).toBe('reported')
+  })
+
+  it('★ 入了信箱但正常收尾时还没被消费:接回来重投,且排在排队的用户消息之前', () => {
+    const first = h.send('s', '第一条')
+    h.enqueue('s', '排队的')
+    h.runtime.childFinished(report(), 'done')
+    expect(first.internal).toHaveLength(1)
+
+    // 收尾时没人确认消费 —— 报告不能就这么丢了
+    h.finish(first)
+    expect(h.launched[1]?.inputInternal).toBe(true)
+    expect(h.queued('s').map((q) => q.text)).toEqual(['排队的'])
+
+    // 汇报那一轮收尾,用户那条才续上
+    h.finish(h.active.get('s')!)
+    expect(inputText(h.launched[2])).toBe('排队的')
+  })
+
+  it('已确认消费的不再重投', () => {
+    const first = h.send('s', '第一条')
+    h.runtime.childFinished(report(), 'done')
+    first.consumeInternal()
+    expect(h.persisted.get('s/task-bg')).toBe('reported')
+
+    h.finish(first)
+    expect(h.launched).toHaveLength(1)
+    expect(h.reports.map((r) => r.status)).toEqual(['injecting', 'reported'])
+  })
+
+  it('★ run 被停止:没被消费的报告退回 pending,不自动开新对话', () => {
+    h.receipts.set('s/task-bg', report())
+    const first = h.send('s', '第一条')
+    h.runtime.childFinished(report(), 'done')
+    expect(first.internal).toHaveLength(1)
+
+    h.finish(first, 'aborted')
+    expect(h.launched).toHaveLength(1)
+    expect(h.persisted.get('s/task-bg')).toBe('pending')
+
+    // 报告没有丢:用户点「处理」仍能汇报
+    h.runtime.reportManually('s', 'task-bg', OPTS)
+    expect(h.launched[1]?.inputInternal).toBe(true)
+  })
+
+  it('报错收尾同理:没被消费的报告退回 pending', () => {
+    const first = h.send('s', '第一条')
+    h.runtime.childFinished(report(), 'done')
+
+    h.finish(first, 'error')
+    expect(h.launched).toHaveLength(1)
+    expect(h.persisted.get('s/task-bg')).toBe('pending')
+  })
+
+  it('手动处理在 injecting 期间不重复:同一份报告只入一次信箱', () => {
+    h.receipts.set('s/task-bg', report())
+    const run = h.send('s', '还在跑')
+    h.runtime.childFinished(report(), 'done')
+    expect(run.internal).toHaveLength(1)
+
+    expect(h.runtime.reportManually('s', 'task-bg', OPTS)).toBe('injecting')
+    expect(run.internal).toHaveLength(1)
+    expect(h.launched).toHaveLength(1)
+  })
+
+  it('★ launch 期间同步提交的确认不会错过:登记先于 launch,收尾后不留残余', () => {
+    h.finish(h.send('s', '派个后台任务'))
+    h.runtime.childFinished(report(), 'done')
+    // Harness.start 在 launch 返回前就发了同 id 的 message_commit —— done(true) 必须已经发生
+    expect(h.persisted.get('s/task-bg')).toBe('reported')
+
+    h.finish(h.active.get('s')!)
+    expect(h.launched).toHaveLength(2)
+    expect(h.reports.map((r) => r.status)).toEqual(['injecting', 'reported'])
+  })
+
+  it('launch 被拒:不留未确认状态,之后收尾不会被重复接回', () => {
+    h.finish(h.send('s', '派个后台任务'))
+    h.refuse = new Error('需要先安装更新')
+    h.runtime.childFinished(report(), 'done')
+    expect(h.persisted.get('s/task-bg')).toBe('pending')
+    expect(h.reports.map((r) => r.status)).toEqual(['injecting', 'pending'])
+
+    h.refuse = null
+    h.finish(h.send('s', '随便聊聊'))
+    expect(h.launched).toHaveLength(2)
+    expect(h.persisted.get('s/task-bg')).toBe('pending')
+    expect(h.reports.map((r) => r.status)).toEqual(['injecting', 'pending'])
   })
 
   it('★ 父会话正在收尾(run_end 已发、互斥未放):等收尾完再起,且排在排队的用户消息之前', () => {
@@ -470,6 +597,14 @@ describe('后台子代理汇报', () => {
 })
 
 describe('目标空闲检查', () => {
+  it('目标检查不参与后台报告重投:被内核丢弃且未提交的检查不能重开 run', () => {
+    const run = h.send('s', '还在跑')
+    expect(h.runtime.wakeGoal('s', [{ type: 'text', text: '旧目标检查' }], OPTS, 'old-goal')).toBe(true)
+    expect(run.internal).toHaveLength(1)
+    h.finish(run)
+    expect(h.launched).toHaveLength(1)
+  })
+
   it('★ 空闲:主进程直接起一轮 internal + goalId,不经过任何窗口', () => {
     const parts = [{ type: 'text' as const, text: '目标检查' }]
     expect(h.runtime.wakeGoal('s', parts, OPTS, 'goal-1')).toBe(true)

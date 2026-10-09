@@ -369,7 +369,8 @@ function writeSubagentResult(subagents: TranscriptState['subagents'], part: Extr
     ...(metadata.summary === undefined ? {} : { summary: metadata.summary }),
     ...(metadata.error === undefined ? {} : { error: metadata.error }),
     ...(metadata.reportStatus === undefined
-      ? (metadata.background === true && status === 'done' ? { reportStatus: 'pending' as const } : {})
+      ? (metadata.background === true && status === 'done' && previous?.reportStatus === undefined
+          ? { reportStatus: 'pending' as const } : {})
       : { reportStatus: metadata.reportStatus })
   }
 }
@@ -722,7 +723,8 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
       return { ...rest, contextStatus: e.status }
     }
 
-    case 'subagent_start':
+    case 'subagent_start': {
+      const previous = s.subagents[e.callId]
       return {
         ...s,
         subagents: {
@@ -741,10 +743,13 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             toolCalls: 0,
             toolErrors: 0,
             lastEventAt: e.at ?? Date.now(),
-            ...(e.at === undefined ? {} : { startedAt: e.at })
+            ...(e.at === undefined ? {} : { startedAt: e.at }),
+            ...(previous?.childRunId === e.childRunId && previous.reportStatus !== undefined
+              ? { reportStatus: previous.reportStatus } : {})
           }
         }
       }
+    }
 
     case 'subagent_update': {
       const previous = s.subagents[e.callId]
@@ -812,7 +817,9 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             ...(e.error === undefined ? {} : { error: e.error }),
             ...(e.childSeq === undefined ? {} : { childSeq: e.childSeq }),
             ...(e.at === undefined ? {} : { endedAt: e.at }),
-            ...(previous.background === true ? { reportStatus: 'pending' as const } : {})
+            // 回传状态由主进程确认;迟到的结束事件不能把 injecting/reported 打回 pending。
+            ...(previous.background === true && previous.reportStatus === undefined
+              ? { reportStatus: 'pending' as const } : {})
           }
         }
       }

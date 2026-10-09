@@ -937,24 +937,21 @@ async function loadHistory(sessionId: string, request: NonNullable<ReturnType<ty
       // IPC 往返期间可能刚好启动了新的 run；不要用旧数据库快照覆盖
       // 正在流式显示的内容。
       if (s.activeRunId !== null || [...runIndex.values()].some((r) => r.sessionId === sessionId)) return s
-      if ([...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return mergeRestoredHistory(s, detail)
+      if ([...childRunIndex.values()].some((r) => r.sessionId === sessionId)) return mergeRestoredHistory(s, detail, before.messages)
       if (s.transcript !== before) {
         if (hasRun(s.transcript, false)) return { historyLoaded: true, historyError: null }
         request.dirty = true
         return s
       }
 
-      const databaseIds = new Set(detail.messages.map((m) => m.id))
-      // 正常情况下当前 renderer 消息都已经先于事件写入数据库；这里只
-      // 追加极短竞态窗口里尚未返回的本地消息，并且始终把数据库的
-      // `ordinal` 顺序放在前面，绝不按 createdAt 重新排序。
-      const localOnly = request.authoritative
-        ? []
-        : s.transcript.messages.filter((m) => !databaseIds.has(m.id))
-      const messages = [...detail.messages, ...localOnly]
+      // 权威刷新可以删除消息;普通回填须保留页外旧轮次的位置,而不是一律追加到末尾。
+      const messages = request.authoritative
+        ? detail.messages
+        : mergeHistoryMessages(detail.messages, s.transcript.messages, s.historyLoaded && detail.hasMore)
+      const retainedPrefix = s.historyLoaded && messages[0]?.id !== detail.messages[0]?.id
       return {
         ...s,
-        historyHasMore: detail.hasMore,
+        historyHasMore: detail.hasMore && (!retainedPrefix || s.historyHasMore),
         // 与转录同一次 setState:中间不能有一帧「已读完但转录还空着」被画成问候语
         historyLoaded: true,
         historyError: null,
@@ -1350,8 +1347,21 @@ export function adoptActiveRuns(runs: readonly RunIndexEntry[]): void {
   for (const r of runs) {
     runIndex.set(r.runId, r)
     const store = stores.get(r.sessionId)
-    if (store !== undefined && store.getState().activeRunId === null) {
-      store.setState({ activeRunId: r.runId })
+    if (store !== undefined) {
+      const activeRunId = store.getState().activeRunId
+      // 新一轮广播可能先于旧 run_end 的 rAF 批次到达;旧运行已不在权威索引时立即接管。
+      if (activeRunId === r.runId || (activeRunId !== null && runIndex.has(activeRunId))) continue
+      store.setState((state) => ({
+        activeRunId: r.runId,
+        lastSeq: 0,
+        transcript: {
+          ...emptyTranscript(),
+          messages: state.transcript.messages,
+          tools: state.transcript.tools,
+          subagents: state.transcript.subagents,
+          ...conversationScoped(state.transcript)
+        }
+      }))
       void ensureActiveRunRestored(r.sessionId, r.runId)
     }
   }
@@ -1398,7 +1408,7 @@ export function syncActiveRuns(entries: readonly RunIndexEntry[]): void {
   // 接回这个 run 并 attach 补齐,那段逻辑不该有第二份。
   // ★ 放在最后调:它自己会 `publishRunIndex()`,上面那几次删除搭它这一趟车,
   //   于是一次广播只换一个新数组、只触发一次重渲染。
-  adoptActiveRuns(entries.filter((entry) => !runIndex.has(entry.runId)))
+  adoptActiveRuns(entries.map((entry) => runIndex.get(entry.runId) ?? entry))
 }
 
 /**
@@ -1530,14 +1540,60 @@ async function restoreChildSnapshot(entry: ActiveSubagentIndexEntry): Promise<vo
   }
 }
 
+/** 按共同消息定位本地片段,保留页外的早期轮次;不能用时间戳代替数据库顺序。 */
+function mergeHistoryMessages(
+  history: readonly AgentMessage[],
+  local: readonly AgentMessage[],
+  localPrecedesHistory = false
+): AgentMessage[] {
+  const historyIds = new Set(history.map((message) => message.id))
+  const localById = new Map(local.map((message) => [message.id, message]))
+  const before = new Map<string, AgentMessage[]>()
+  let pending: AgentMessage[] = []
+  let anchored = false
+  for (const message of localById.values()) {
+    if (!historyIds.has(message.id)) {
+      pending.push(message)
+      continue
+    }
+    anchored = true
+    before.set(message.id, pending)
+    pending = []
+  }
+  if (!anchored && localPrecedesHistory) return [...localById.values(), ...history]
+  const messages = history.flatMap((message) => [
+    ...(before.get(message.id) ?? []), localById.get(message.id) ?? message
+  ])
+  return [...messages, ...pending]
+}
+
+/** 已落盘但不在当前历史窗口内的旧提交,不能被快照重新追加到尾部。 */
+function restoredEvents(events: readonly AgentEvent[], state: SessionState, detached = false): AgentEvent[] {
+  if (!state.historyLoaded) return [...events]
+  const known = new Set(state.transcript.messages.map((message) => message.id))
+  let lastKnown = -1
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]!
+    if (event.type === 'message_commit' && known.has(event.message.id)) lastKnown = index
+  }
+  return events.filter((event, index) => event.type !== 'message_commit'
+    || known.has(event.message.id) || (!detached && index > lastKnown))
+}
+
 /** Show durable messages immediately; live snapshots may take longer to attach. */
-function mergeRestoredHistory(state: SessionState, page: SessionPage): Partial<SessionState> {
-  const messages = [...new Map([...page.messages, ...state.transcript.messages].map((m) => [m.id, m])).values()]
+function mergeRestoredHistory(
+  state: SessionState,
+  page: SessionPage,
+  loaded: readonly AgentMessage[] = state.transcript.messages
+): Partial<SessionState> {
+  const base = mergeHistoryMessages(page.messages, loaded, state.historyLoaded && page.hasMore)
+  const messages = mergeHistoryMessages(base, state.transcript.messages)
+  const retainedPrefix = state.historyLoaded && messages[0]?.id !== page.messages[0]?.id
   const runUsage = { ...page.runUsage, ...state.transcript.runUsage }
   // The active snapshot rebuilds this run's usage; including its persisted subtotal would count it twice.
   if (state.activeRunId !== null) delete runUsage[state.activeRunId]
   return {
-    historyHasMore: page.hasMore,
+    historyHasMore: page.hasMore && (!retainedPrefix || state.historyHasMore),
     historyLoaded: true,
     historyError: null,
     transcript: {
@@ -1561,13 +1617,14 @@ async function restoreDetachedParent(
   const store = stores.get(sessionId)
   if (store === undefined) return
   store.setState({ historyError: null })
+  const loaded = store.getState().transcript
   try {
-    const detail = await getSessionPage(sessionId, pageLimitFor(store.getState().transcript)).catch((err: unknown) => {
+    const detail = await getSessionPage(sessionId, pageLimitFor(loaded)).catch((err: unknown) => {
       if (stores.get(sessionId) === store) store.setState({ historyError: err instanceof Error ? err.message : String(err) })
       return undefined
     })
     if (stores.get(sessionId) !== store || store.getState().activeRunId !== null) return
-    if (detail !== undefined) store.setState((s) => mergeRestoredHistory(s, detail))
+    if (detail !== undefined) store.setState((s) => mergeRestoredHistory(s, detail, loaded.messages))
     const snap = await attachRun(parentRunId, 0)
     if (stores.get(sessionId) !== store) return
     store.setState((s) => {
@@ -1581,13 +1638,13 @@ async function restoreDetachedParent(
         subagents: s.transcript.subagents,
         ...conversationScoped(s.transcript)
       }
+      const events = restoredEvents(snap.events, s, true)
       const transcript = recordMessageRuns(
-        archiveRunUsage(applyEvents(base, snap.events), parentRunId, snap.events),
+        archiveRunUsage(applyEvents(base, events), parentRunId, events),
         parentRunId,
-        snap.events
+        events
       )
-      const messages = [...new Map([...(detail?.messages ?? []), ...transcript.messages]
-        .map((m) => [m.id, m])).values()]
+      const messages = transcript.messages
       return {
         transcript: {
           ...transcript,
@@ -1638,8 +1695,8 @@ async function restoreActiveRun(sessionId: string, runId: string): Promise<void>
     detail = undefined
   }
   if (stores.get(sessionId) !== store || store.getState().activeRunId !== runId) return
-  if (detail !== undefined) store.setState((s) => mergeRestoredHistory(s, detail))
-  await resync(sessionId, runId, 0, detail?.messages)
+  if (detail !== undefined) store.setState((s) => mergeRestoredHistory(s, detail, loaded.messages))
+  await resync(sessionId, runId, 0)
 }
 
 const restoreInFlight = new Map<string, Promise<void>>()
@@ -1698,7 +1755,7 @@ function applyWindowVisibility(visible: boolean): void {
   }
 }
 
-async function resync(sessionId: string, runId: string, sinceSeq: number, history?: AgentMessage[]): Promise<void> {
+async function resync(sessionId: string, runId: string, sinceSeq: number): Promise<void> {
   const store = stores.get(sessionId)
   if (!store) return
   console.warn(`[agent] seq 不连续,attach 补齐 · run=${runId} since=${sinceSeq}`)
@@ -1714,7 +1771,7 @@ async function resync(sessionId: string, runId: string, sinceSeq: number, histor
     // An incremental snapshot may overlap events received while attach was in
     // flight. Ask again from the new cursor instead of counting usage twice.
     if (sinceSeq !== 0 && current.lastSeq > sinceSeq && current.lastSeq < snap.seq) {
-      await resync(sessionId, runId, current.lastSeq, history)
+      await resync(sessionId, runId, current.lastSeq)
       return
     }
     store.setState((s) => {
@@ -1729,16 +1786,17 @@ async function resync(sessionId: string, runId: string, sinceSeq: number, histor
             ...(s.transcript.runStartedAt === undefined ? {} : { runStartedAt: s.transcript.runStartedAt })
           }
         : s.transcript
+      const events = sinceSeq === 0 ? restoredEvents(snap.events, s) : snap.events
       const transcript = recordMessageRuns(
         archiveRunUsage(
-          s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, snap.events),
+          s.lastSeq >= snap.seq ? s.transcript : applyEvents(base, events),
           runId,
-          snap.events
+          events
         ),
         runId,
-        snap.events
+        events
       )
-      const messages = [...new Map([...(history ?? []), ...transcript.messages].map((m) => [m.id, m])).values()]
+      const messages = transcript.messages
       return {
         transcript: {
           ...transcript, messages,

@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '../../../../shared/agent/event'
 import type { SendOptions } from '../../../../shared/agent/run-request'
+import { userMessage } from '../../../../shared/agent/message'
 
 vi.mock('../../services/agent', () => ({
   startRun: vi.fn(async () => ({ started: true })), attachRun: vi.fn(), abortRun: vi.fn(),
@@ -80,6 +81,31 @@ describe('后台子代理回传 · 渲染层', () => {
     expect(reportBackground).not.toHaveBeenCalled()
     expect(startRun).not.toHaveBeenCalled()
     expect(replaceHistory).not.toHaveBeenCalled()
+  })
+
+  it.each(['injecting', 'reported', 'blocked'] as const)('迟到的子代理结束事件不能把 %s 打回 pending', (status) => {
+    const sessionId = restoredSession(`late-end-${status}`)
+    const store = sessionStore(sessionId)
+    store.getState().setSubagentReportStatus(CALL_ID, status)
+    store.getState().applyEvents([restored[1]!])
+    expect(store.getState().transcript.subagents[CALL_ID]?.reportStatus).toBe(status)
+
+    store.getState().applyChildEvents(CHILD_RUN, [{ type: 'run_end', status: 'done' }])
+    expect(store.getState().transcript.subagents[CALL_ID]?.reportStatus).toBe(status)
+  })
+
+  it.each(['injecting', 'reported'] as const)('重放 Task 起止和旧回执不能覆盖实时 %s 状态', (status) => {
+    const sessionId = restoredSession(`replay-${status}`)
+    const store = sessionStore(sessionId)
+    store.getState().setSubagentReportStatus(CALL_ID, status)
+    store.getState().applyEvents(restored)
+    expect(store.getState().transcript.subagents[CALL_ID]?.reportStatus).toBe(status)
+
+    store.getState().applyEvents([{ type: 'message_commit', message: userMessage('old-receipt', [{
+      type: 'tool_result', callId: CALL_ID, output: { content: 'Started in the background' }, isError: false,
+      subagent: { childRunId: CHILD_RUN, background: true, status: 'running' }
+    }], 1) }])
+    expect(store.getState().transcript.subagents[CALL_ID]?.reportStatus).toBe(status)
   })
 
   it('★ 点「处理」:兜底档位交给主进程,采用它回答的状态', async () => {
