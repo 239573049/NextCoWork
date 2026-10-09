@@ -17,7 +17,10 @@ import {
   peekThemePreference
 } from './db'
 import { probeSqlite, type SqliteProbeResult } from './db/probe'
-import { electronHost, migrateLegacyCredentials } from './host'
+import { electronHost, migrateLegacyCredentials, migrateProvidersToFile } from './host'
+import { PROVIDER_FILE_NAME, ProviderFileStore } from './db/provider-file'
+import { useProviderFileStore } from './db/repo'
+import { onProviderFileChanged } from './ipc/provider'
 import { installProductionBrowserBindings, type BrowserBindings } from './browser/bindings'
 import {
   flushPendingPersists,
@@ -764,6 +767,33 @@ void app
   if (credentialMigration.migrated > 0 || credentialMigration.failed > 0) {
     host.logger.info(
       `[credentials] 旧密文迁移完成:成功 ${credentialMigration.migrated},保留 ${credentialMigration.failed}`
+    )
+  }
+  /*
+    ★ 用户添加的供应商 / 别名 / 密钥放进 `~/.next-cowork/providers.json`(见 `db/provider-file.ts`)。
+    必须在 `initRuntime` 之前装上 —— `seed()` 要靠它判断「文件模式下不种内置上游」。
+    迁移失败(整库快照做不了、文件损坏…)**不装文件模式**,继续按库运行:
+    宁可这次启动用旧路径,也不能让库里的供应商在界面上凭空消失。
+  */
+  const providerFile = new ProviderFileStore(join(resolveProfileRoot(), PROVIDER_FILE_NAME))
+  try {
+    const migration = migrateProvidersToFile(providerFile)
+    useProviderFileStore(providerFile)
+    providerFile.onExternalChange(() => onProviderFileChanged())
+    providerFile.startWatching()
+    if (migration.status === 'migrated') {
+      host.logger.info(
+        `[providers] 已迁移到 ${PROVIDER_FILE_NAME}:供应商 ${migration.providers},` +
+          `丢弃未配置的内置预设 ${migration.skippedBuiltin},密钥解不开 ${migration.keysFailed}`
+      )
+    }
+    for (const problem of providerFile.problems) {
+      host.logger.warn(`[providers] ${PROVIDER_FILE_NAME}${problem.providerId === undefined ? '' : ` / ${problem.providerId}`}: ${problem.message}`)
+    }
+    if (providerFile.error !== undefined) host.logger.warn(`[providers] ${providerFile.error}`)
+  } catch (error) {
+    host.logger.error(
+      `[providers] 迁移到 ${PROVIDER_FILE_NAME} 失败,本次启动仍使用数据库:${error instanceof Error ? error.message : String(error)}`
     )
   }
   const bundledSkillsRoot = app.isPackaged

@@ -51,6 +51,7 @@ import type {
   UsageWindow
 } from '../../shared/domain/usage'
 import { fileStats, stmt, tx } from './index'
+import { MANAGED_PROVIDER_ID, type ProviderFileStore } from './provider-file'
 import { searchableMessageText } from './message-text'
 export { searchableMessageText } from './message-text'
 import {
@@ -2538,16 +2539,99 @@ async function collectDirectoryBytesBounded(root: string, budget: number): Promi
 
 // ── 上游供应商 / 模型别名 ────────────────────────────────────────────────────
 
-export function listProviders(): UpstreamProvider[] {
-  // priority 相同时用 id 兜底,保证顺序是确定的 —— 故障切换按这个顺序挑候选,
-  // 「今天先切到 A、明天先切到 B」比切错还难查
+/**
+ * ★★ 用户自己添加的供应商 / 别名 / 密钥放在 `providers.json`(见 `provider-file.ts`),
+ * 只有托管的 `nextcowork` 仍在库里。**只有显式装上文件存储才切换**(`useProviderFileStore`,
+ * 由 `main/index.ts` 在开库之后做):没装(单元测试、旧调用方)时下面每个函数仍是
+ * 原来的纯库实现,行为一个字不变。
+ *
+ * 文件模式下库里残留的非托管行(旧版本留下的备份、从旧归档恢复出来的)一律**不读**,
+ * 否则同一个 id 会同时有两个来源。`model_aliases` 对 `providers` 有外键,所以文件里供应商的
+ * 别名也不可能放进库 —— 它们跟着供应商条目走。
+ */
+let providerFile: ProviderFileStore | null = null
+
+export function useProviderFileStore(store: ProviderFileStore | null): void {
+  providerFile = store
+}
+
+export function providerFileStore(): ProviderFileStore | null {
+  return providerFile
+}
+
+/** 文件模式下,这个 provider id 是否归文件管(托管供应商永远归库)。 */
+function fileOwns(providerId: string): boolean {
+  return providerFile !== null && providerId !== MANAGED_PROVIDER_ID
+}
+
+/**
+ * 逻辑凭证 ref(`provider:<id>`)对应的、由文件管理的供应商 id;不归文件管就是 null。
+ * `host.secrets` 靠它决定一把密钥走文件(明文)还是走库(NCK1 密文)。
+ */
+export function fileCredentialProviderId(ref: string): string | null {
+  if (providerFile === null || !ref.startsWith('provider:')) return null
+  const id = ref.slice('provider:'.length)
+  return id !== '' && id !== MANAGED_PROVIDER_ID ? id : null
+}
+
+/**
+ * 迁移专用:库里**原始**的非托管供应商 / 别名行,绕开文件模式的过滤。
+ * 业务代码不要用它 —— 文件模式下这些行不是权威来源。
+ */
+export function listLegacyDbProviders(): UpstreamProvider[] {
   return stmt('SELECT json FROM providers ORDER BY priority, id')
     .all()
     .map((r) => normalizeUpstreamProvider(parse<UpstreamProvider>(r['json'])))
+    .filter((p) => p.id !== MANAGED_PROVIDER_ID)
+}
+
+export function listLegacyDbAliases(): ModelAlias[] {
+  return stmt('SELECT json FROM model_aliases ORDER BY provider_id, alias')
+    .all()
+    .map((r) => parse<ModelAlias>(r['json']))
+    .filter((a) => a.providerId !== MANAGED_PROVIDER_ID)
+}
+
+/**
+ * 迁移成功之后清掉库里的旧行(别名由外键级联)。`credentialRefs` 只清**迁移成功**的那几把
+ * (当前作用域),没能解密的密文原样留着,方便事后找回。
+ */
+export function purgeLegacyDbProviders(providerIds: readonly string[], credentialRefs: readonly string[]): void {
+  tx(() => {
+    for (const id of providerIds) {
+      if (id !== MANAGED_PROVIDER_ID) stmt('DELETE FROM providers WHERE id = ?').run(id)
+    }
+    for (const ref of credentialRefs) stmt('DELETE FROM credentials WHERE ref = ?').run(physicalCredentialRef(ref))
+  })
+}
+
+/**
+ * 把整个库一致地拷到另一个文件(`VACUUM INTO`,WAL 下也是完整快照)。
+ * 迁移会删旧行,这是回滚用的那份。目标已存在会抛错 —— 调用方先判断。
+ */
+export function backupDatabaseTo(path: string): void {
+  stmt('VACUUM INTO ?').run(path)
+}
+
+export function listProviders(): UpstreamProvider[] {
+  // priority 相同时用 id 兜底,保证顺序是确定的 —— 故障切换按这个顺序挑候选,
+  // 「今天先切到 A、明天先切到 B」比切错还难查
+  const rows = stmt('SELECT json FROM providers ORDER BY priority, id')
+    .all()
+    .map((r) => normalizeUpstreamProvider(parse<UpstreamProvider>(r['json'])))
+  if (providerFile === null) return rows
+  return [...rows.filter((p) => p.id === MANAGED_PROVIDER_ID), ...providerFile.listProviders()]
+    .sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
 export function putProvider(p: UpstreamProvider): UpstreamProvider {
   const normalized = normalizeUpstreamProvider(p)
+  if (fileOwns(normalized.id)) {
+    const saved = providerFile!.putProvider(normalized)
+    const { credentialRef: _credentialRef, ...cloud } = normalized
+    enqueueSyncMutation('provider', normalized.id, cloud)
+    return saved
+  }
   tx(() => { stmt(
     `INSERT INTO providers (id, priority, json) VALUES (?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET priority = excluded.priority, json = excluded.json`
@@ -2563,19 +2647,32 @@ export function putProvider(p: UpstreamProvider): UpstreamProvider {
 /**
  * 别名**不用**在这里手动删。`model_aliases.provider_id` 上的
  * `ON DELETE CASCADE` 接着(见 `schema.ts`),前提是连接开了 `foreign_keys`
- * —— `index.ts` 的 `openAt()` 用构造参数打开的。
+ * —— `index.ts` 的 `openAt()` 用构造参数打开的。文件里的供应商,别名本来就在它的条目里。
  */
 export function removeProvider(id: string): void {
+  if (fileOwns(id)) {
+    providerFile!.removeProvider(id)
+    enqueueSyncMutation('provider', id, { id }, 'delete')
+    return
+  }
   tx(() => { stmt('DELETE FROM providers WHERE id = ?').run(id); if (id !== 'nextcowork') enqueueSyncMutation('provider', id, { id }, 'delete') })
 }
 
 export function listAliases(): ModelAlias[] {
-  return stmt('SELECT json FROM model_aliases ORDER BY provider_id, alias')
+  const rows = stmt('SELECT json FROM model_aliases ORDER BY provider_id, alias')
     .all()
     .map((r) => parse<ModelAlias>(r['json']))
+  if (providerFile === null) return rows
+  return [...rows.filter((a) => a.providerId === MANAGED_PROVIDER_ID), ...providerFile.listAliases()]
+    .sort((a, b) => (a.providerId < b.providerId ? -1 : a.providerId > b.providerId ? 1 : a.alias < b.alias ? -1 : a.alias > b.alias ? 1 : 0))
 }
 
 export function putAlias(a: ModelAlias): ModelAlias {
+  if (fileOwns(a.providerId)) {
+    providerFile!.putAlias(a)
+    enqueueSyncMutation('modelAlias', `${a.providerId}/${a.alias}`, a)
+    return a
+  }
   tx(() => { stmt(
     `INSERT INTO model_aliases (provider_id, alias, json) VALUES (?, ?, ?)
      ON CONFLICT (provider_id, alias) DO UPDATE SET json = excluded.json`
@@ -2584,6 +2681,11 @@ export function putAlias(a: ModelAlias): ModelAlias {
 }
 
 export function removeAlias(providerId: string, alias: string): void {
+  if (fileOwns(providerId)) {
+    providerFile!.removeAlias(providerId, alias)
+    enqueueSyncMutation('modelAlias', `${providerId}/${alias}`, { providerId, alias }, 'delete')
+    return
+  }
   tx(() => { stmt('DELETE FROM model_aliases WHERE provider_id = ? AND alias = ?').run(providerId, alias); if (providerId !== 'nextcowork') enqueueSyncMutation('modelAlias', `${providerId}/${alias}`, { providerId, alias }, 'delete') })
 }
 
@@ -3241,6 +3343,12 @@ export function putCredential(ref: string, blob: Uint8Array): void {
  * 所以「只删当前作用域」对它们而言恰好等于「删它们自己」。
  */
 export function removeCredential(ref: string): void {
+  const fileProviderId = fileCredentialProviderId(ref)
+  if (fileProviderId !== null) {
+    providerFile!.removeCredential(fileProviderId)
+    enqueueSyncMutation('provider', fileProviderId, {}, 'delete')
+    return
+  }
   tx(() => {
     stmt('DELETE FROM credentials WHERE ref = ?').run(physicalCredentialRef(ref))
     if (ref.startsWith('provider:')) enqueueSyncMutation('provider', ref.slice('provider:'.length), {}, 'delete')

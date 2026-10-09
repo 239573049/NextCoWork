@@ -373,7 +373,14 @@ function upstreamIdleTimeoutMs(): number {
 function seed(): void {
   if (seeded) return
   seeded = true
-  seedBuiltinUpstream()
+  /*
+    ★★ 文件模式(`providers.json`)里**不种内置上游,也不种指向它们的默认模型**:
+    文件只放用户自己添加的供应商,模板在「添加供应商」的预设列表里,不该每次启动
+    都被写回(删掉的还会复活)。旧库里没配过 key 的内置上游由迁移直接丢弃,见 host 的
+    `migrateProvidersToFile`。
+  */
+  const fileMode = store.usesProviderFile()
+  if (!fileMode) seedBuiltinUpstream()
   backfillOpencodeGoProtocol()
 
   /**
@@ -400,7 +407,7 @@ function seed(): void {
    * `db/config-profile.ts` 的 `PROFILE_KV_KEYS`),所以新账户的空作用域照样会种。
    * 代价:升级后第一次启动时还没有标记,已经选了「跟随对话」的人会被最后顶回一次。
    */
-  if (store.getKv<unknown>(MODEL_DEFAULTS_SEEDED_KEY, false) !== true) {
+  if (!fileMode && store.getKv<unknown>(MODEL_DEFAULTS_SEEDED_KEY, false) !== true) {
     store.setKv(MODEL_DEFAULTS_SEEDED_KEY, true)
     const builtin = findPreset(BUILTIN_PROVIDER_ID)?.suggestedModels ?? []
     const settings = store.getSettings()

@@ -16,14 +16,18 @@
  */
 import { app, net, safeStorage } from 'electron'
 import {
+  fileCredentialProviderId,
   getCredential,
   getSettings,
   listAllCredentialBlobs,
+  providerFileStore,
   putCredential,
   putCredentialBlobAtPhysicalRef,
   removeCredential
 } from '../db/repo'
 import { databaseDirectory } from '../db'
+import type { ProviderFileStore } from '../db/provider-file'
+import { migrateProvidersToFileWith, type ProviderFileMigrationResult } from '../db/provider-file-migration'
 import {
   decryptCredentialValue,
   encryptCredentialValue,
@@ -67,6 +71,14 @@ function decryptBlob(blob: Uint8Array): string {
 
 function electronSecrets(): KernelHost['secrets'] {
   const setSync = (ref: string, value: string): void => {
+      // `provider:<id>` 的密钥在文件模式下归 providers.json(明文),不走 NCK1。
+      const fileProviderId = fileCredentialProviderId(ref)
+      if (fileProviderId !== null) {
+        const file = providerFileStore()
+        if (value === '') file?.removeCredential(fileProviderId)
+        else file?.setCredential(fileProviderId, value)
+        return
+      }
       // 库里已有 NCK1 说明它们和某一把 key 绑定。key 文件丢了或不匹配
       // 就必须抛错;生成新 key 会让同一张表出现两套不可兼容密文。
       const programRow = listAllCredentialBlobs().find((row) => isProgramEncrypted(row.blob))
@@ -79,6 +91,8 @@ function electronSecrets(): KernelHost['secrets'] {
   const removeSync = (ref: string): void => removeCredential(ref)
   return {
     get: async (ref) => {
+      const fileProviderId = fileCredentialProviderId(ref)
+      if (fileProviderId !== null) return providerFileStore()?.getCredential(fileProviderId) ?? null
       const blob = getCredential(ref)
       return blob === undefined ? null : decryptBlob(blob)
     },
@@ -90,6 +104,13 @@ function electronSecrets(): KernelHost['secrets'] {
     // 会在第一次 get/set 时抛出,而不是把密钥静默降级成明文。
     available: () => true
   }
+}
+
+export { PROVIDER_FILE_BACKUP_NAME, type ProviderFileMigrationResult } from '../db/provider-file-migration'
+
+/** 启动期一次性迁移,见 `db/provider-file-migration.ts`。这里只负责把「怎么解密」递进去。 */
+export function migrateProvidersToFile(file: ProviderFileStore): ProviderFileMigrationResult {
+  return migrateProvidersToFileWith(file, decryptBlob)
 }
 
 /**

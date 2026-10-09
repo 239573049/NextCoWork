@@ -193,6 +193,10 @@ export const store = {
   listProviders(): UpstreamProvider[] {
     return repo.listProviders()
   },
+  /** 供应商是否由 `providers.json` 管理(见 `db/provider-file.ts`)。 */
+  usesProviderFile(): boolean {
+    return repo.providerFileStore() !== null
+  },
   putProvider(p: UpstreamProvider): UpstreamProvider {
     return repo.putProvider(p)
   },
