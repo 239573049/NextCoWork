@@ -1178,6 +1178,197 @@ CREATE INDEX video_jobs_by_recovery ON video_generation_jobs (cloud, retrieval, 
 `
 
 
+/**
+ * 第 32 条:控制端持久化基础 —— 控制端 UI 状态与推送**订阅登记**。
+ *
+ * ## 隔离键:为什么有 `controller_id`,没有 `client_session_id` / `binding_epoch`
+ *
+ * 两张表都用 `(device_id, data_epoch, config_scope, controller_id)`,这是刻意的:
+ *
+ * - ★ **有 `controller_id`**:同设备上多个控制端不能互相覆盖对方的草稿,
+ *   也不能互相改对方的订阅。网络入参里**没有** controllerId 这个字段 ——
+ *   它只由已认证连接的绑定得出(`DeviceRequestContext.binding`)。
+ * - ★ **没有 `client_session_id` / `binding_epoch`**:两者都是"这一次连接"的
+ *   控制端本地概念,重连就会变。放进键里的话,同一个控制端每重连一次就读不回
+ *   自己刚写的草稿、也要重新登记一次订阅 —— 而这两个功能的存在理由正是"重连后还在"。
+ * - `data_epoch` / `config_scope` 仍然在键里:换账号或数据恢复之后,旧作用域的行
+ *   不能被新作用域读到(`scopeEpoch` 已由 `data_epoch` 覆盖,见 `controller-state.ts` 头)。
+ *
+ * ## `device_notification_subscriptions.registration_ref` 是不透明引用
+ *
+ * ★ 它**不是** APNs / FCM 的 device token,也**不允许**是 URL 或任意收件地址:
+ *   写入口用 `registrationRefSchema` 约束形状(1..128 个 `[A-Za-z0-9_.-]`,首字符字母数字),
+ *   所以 `https://…` / `mailto:…` / `data:abc` 这类值进不了库。它只是将来安全存储 /
+ *   推送网关按引用取真 token 的句柄 —— 那张表因此没法被当成"往任意地址发消息"的地址簿。
+ *   形状合规只是"进得来",不是授权,更不是凭证。
+ *
+ * ★ 删除是**软删除**:`deleted` 列(第 33 条迁移追加)为 1 的行是墓碑,
+ *   读路径当它不存在,但 `revision` 继续 +1 —— 见 `V33_DEVICE_NOTIFICATION_TOMBSTONES`。
+ *
+ * ## 列的类型不通约
+ *
+ * - `device_controller_state.value` 是 `BLOB NOT NULL`,存的是 msgpack 编码的
+ *   `DeviceValue`(`shared/device/codec.ts`)—— 与 `device_events.data` 同一个约定。
+ *   空值存成 1 字节的 `nil`,**不会**退化成 SQL NULL,所以"清空"与"没有这一行"
+ *   在结构上就分得开。
+ * - `enabled` 是 `INTEGER`:0/1 的来自控制端的布尔位,不是三态。
+ * - 两张表的 `revision` 都是"控制端 CAS 用的版本",从 1 起,每次成功写入 +1
+ *   (`expectedRevision` 首次要求 0)—— 版本管理在访问器里,不在 SQL 里。
+ *
+ * ## 为什么没有外键
+ *
+ * 这两张表属于**设备账号作用域**,不是某条会话/某个 provider 的从属行;
+ * 仓里也没有一张"设备"表可以引用(设备身份来自传输层认证,不是本地行)。
+ * 级联删除因此不存在 —— 清账号作用域要靠 `data_epoch` / `config_scope` 换键,
+ * 这正是把它们放进主键的原因。
+ */
+const V32_DEVICE_CONTROLLER_STATE = `
+CREATE TABLE device_controller_state (
+  device_id     TEXT NOT NULL,
+  data_epoch    TEXT NOT NULL,
+  config_scope  TEXT NOT NULL,
+  controller_id TEXT NOT NULL,
+  -- 控制端自己编的稳定视图键(renderer 草稿布局等),名字复用 deviceIdSchema 的形状约束
+  view_key      TEXT NOT NULL,
+  revision      INTEGER NOT NULL,
+  -- msgpack 编码的 DeviceValue;空值是一个字节的 nil,不是 NULL
+  value         BLOB NOT NULL,
+  updated_at    INTEGER,
+  PRIMARY KEY (device_id, data_epoch, config_scope, controller_id, view_key)
+);
+
+-- 一个控制端只有一条推送订阅登记,所以 controller_id 之后没有第二个维度。
+-- registration_ref 是不透明引用(见文件头),platform 是投递侧的稳定枚举。
+CREATE TABLE device_notification_subscriptions (
+  device_id        TEXT NOT NULL,
+  data_epoch       TEXT NOT NULL,
+  config_scope     TEXT NOT NULL,
+  controller_id    TEXT NOT NULL,
+  registration_ref TEXT NOT NULL,
+  platform         TEXT NOT NULL CHECK(platform IN ('ios','android')),
+  enabled          INTEGER,
+  revision         INTEGER,
+  updated_at       INTEGER,
+  PRIMARY KEY (device_id, data_epoch, config_scope, controller_id)
+);
+`
+
+/**
+ * 第 33 条:推送订阅的**墓碑**。
+ *
+ * ## 需求:删除再创建不能把版本打回 1
+ *
+ * 第 32 条里删除是真删行。于是同一个控制端"建 → 删 → 再建"会拿到一条
+ * `revision` 又从 1 开始的新行 —— 这正是 ABA:控制端以为自己在建版本 1,
+ * 而**旧的版本 1 指令可能还在路上**,迟到之后它照样能改这条新行。
+ *
+ * ## 做法:软删除,版本只增不减
+ *
+ * `deleted=1` 的行是墓碑,读路径一律当它不存在(`getNotificationSubscription` → `null`),
+ * 但**行还在**,`revision` 跟着墓碑一起继续 +1。重新登记时必须 `expectedRevision === 0`,
+ * 却沿用墓碑的 `revision + 1`(不回到 1)—— 于是"旧 active 版本"的迟到更新 / 删除
+ * 在新行上必然是 `conflict`。
+ *
+ * ★ 软删除时 `registration_ref` 置空串:墓碑不是"往哪台设备推"的句柄,留着等于把
+ *   已注销的登记引用继续留在库里。`enabled` 也归 0。
+ *
+ * ★ `deleted` 加 `CHECK(deleted IN (0,1))`:0 / 1 两位,不是三态。
+ *
+ * ★ **不重写第 32 条**:那条迁移已经发布过,改它会让升过级的库和新装出来的库长得
+ *   不一样。默认值 0 也是既有行的正确回填 —— 加这列之前不可能有墓碑。
+ */
+const V33_DEVICE_NOTIFICATION_TOMBSTONES = `
+ALTER TABLE device_notification_subscriptions ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1));
+`
+
+/**
+ * 第 34 条:已提交的用户输入**回执**。
+ *
+ * ## 记的是什么
+ *
+ * 一条 user 消息一落进 `messages`,它就已经被**消费**过了 —— 定时的任务队列、
+ * 插话队列、重试路径都可能再看见同一份输入,而它们该看的判据只有这一个:
+ * 「这条消息有没有已经提交过」。所以这里一行 = 一次已提交的输入,
+ * 主键 `(session_id, message_id)` 让重复提交天然幂等。
+ *
+ * ## 为什么**不**引用 `messages(id)`
+ *
+ * ★★ 这是这条迁移唯一需要想清楚的地方。加 `REFERENCES messages(id) ON DELETE CASCADE`
+ * 看起来更严,而它**恰好会把这条回执的意义消掉**:转录压缩、编辑历史、删除某几条
+ * 消息都会把 `messages` 行带走,级联一到,回执跟着消失 —— 于是那条输入重新变成
+ * 「没提交过」,在重启或下一轮队列清理之后被**再执行一次**。
+ * 用户看到的是「同一句话发了两遍,模型答了两遍」,而库里没有任何痕迹指向这里。
+ *
+ * 所以 `message_id` 是一个**裸 id**,不是外键。孤儿行是这个设计的一部分:
+ * 消费这件事发生过,就不因为正文后来被删掉而没发生过。
+ *
+ * 真正需要级联的只有**会话整体被删**(用户删对话、按时长清理)—— 那时这行回执
+ * 也只是垃圾,所以 `session_id` 保留对 `sessions(id)` 的外键 + `ON DELETE CASCADE`。
+ *
+ * ## 为什么回填旧消息
+ *
+ * 升级之前已经提交过的 user 消息同样是已消费的输入。不回填的话,升级后第一次
+ * 重启就会把它们当成「还没提交」再执行一遍 —— 而这个 bug 只在升级路径上出现,
+ * 新装的库一辈子都测不出来。
+ */
+const V34_SESSION_INPUT_RECEIPTS = `
+CREATE TABLE session_input_receipts (
+  -- 有外键:会话整体被删时这些回执也只是垃圾,跟着走
+  session_id   TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
+  -- ★ 裸 id,**没有**外键 —— 见上面那段:转录压缩/删除不能抹掉消费事实
+  message_id   TEXT NOT NULL,
+  committed_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, message_id)
+);
+
+-- 回填:第 34 条之前提交过的 user 消息全都是已消费的输入。
+-- 这里能安全地 SELECT messages —— 迁移跑的这一刻它们还在。
+INSERT OR IGNORE INTO session_input_receipts (session_id, message_id, committed_at)
+  SELECT session_id, id, created_at FROM messages WHERE role = 'user';
+`
+
+/**
+ * 设备信任记录:已配对的控制端与一次性邀请。
+ *
+ * ★ 邀请只存 sha256(token),**不存明文** —— 库文件被拷走也换不出可用邀请。
+ * ★ 控制端被撤销后保留行(`revoked_at`),不是删除:指纹列 UNIQUE,所以同一把
+ *   密钥不能悄悄重新配对,撤销之后必须换新密钥。
+ */
+const V35_DEVICE_TRUST = `
+CREATE TABLE device_controllers (
+  controller_id      TEXT PRIMARY KEY,
+  fingerprint_sha256 TEXT NOT NULL UNIQUE CHECK (length(fingerprint_sha256) = 64),
+  label              TEXT NOT NULL,
+  paired_at          INTEGER NOT NULL,
+  revoked_at         INTEGER
+);
+
+CREATE TABLE device_enrollments (
+  token_hash  TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  consumed_at INTEGER,
+  consumed_by TEXT
+);
+CREATE INDEX idx_device_enrollments_expiry ON device_enrollments (expires_at);
+`
+
+/**
+ * 服务接管标记:这份数据根已经被独立设备服务接管(原地,不复制)。
+ *
+ * 单行表(`id = 1`)。只**追加**:不改动任何旧表。它同时是「旧桌面共用迁移后数据不受支持」
+ * 的依据 —— 新版本据此拒绝在没有明确确认的情况下回退到旧布局。
+ */
+const V36_SERVICE_OWNERSHIP = `
+CREATE TABLE service_ownership (
+  id             INTEGER PRIMARY KEY CHECK (id = 1),
+  device_id      TEXT NOT NULL,
+  journal_id     TEXT NOT NULL,
+  backup_ref     TEXT NOT NULL,
+  taken_over_at  INTEGER NOT NULL
+);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -1211,4 +1402,61 @@ export const MIGRATIONS: readonly Migration[] = [
   ,{ version: 28, name: 'video-jobs', sql: V28_VIDEO_JOBS }
   // 正文提取在 index.ts 中与正常写入共用，迁移与重建在同一事务内。
   ,{ version: 29, name: 'rebuild-message-search', sql: 'DELETE FROM messages_fts;' }
+  ,{ version: 30, name: 'device-command-receipts', sql: `
+CREATE TABLE device_commands (
+  device_id TEXT NOT NULL,
+  data_epoch TEXT NOT NULL,
+  config_scope TEXT NOT NULL,
+  controller_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  method TEXT NOT NULL,
+  params_digest TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK(status IN ('accepting','accepted','running','succeeded','failed','unknown','interrupted')),
+  result BLOB,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (device_id, data_epoch, config_scope, controller_id, idempotency_key)
+);
+CREATE TABLE device_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id TEXT NOT NULL,
+  data_epoch TEXT NOT NULL,
+  config_scope TEXT NOT NULL,
+  controller_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  data BLOB NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX device_events_by_scope ON device_events(device_id, data_epoch, config_scope, controller_id, seq);
+` }
+  ,{ version: 31, name: 'device-interactions', sql: `
+CREATE TABLE device_interactions (
+  device_id TEXT NOT NULL,
+  data_epoch TEXT NOT NULL,
+  config_scope TEXT NOT NULL,
+  id TEXT NOT NULL,
+  scope_epoch TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('permission','question','plan','plugin','goal')),
+  payload BLOB NOT NULL,
+  payload_digest TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','resolved','cancelled')),
+  answer BLOB,
+  resolved_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  PRIMARY KEY (device_id, data_epoch, config_scope, id)
+);
+-- 待决列表按状态扫描,再按时间排;账号代际和 run 各留一条,便于恢复时局部收敛。
+CREATE INDEX device_interactions_by_status ON device_interactions(device_id, data_epoch, config_scope, status, created_at);
+CREATE INDEX device_interactions_by_account ON device_interactions(device_id, data_epoch, config_scope, scope_epoch, created_at);
+CREATE INDEX device_interactions_by_run ON device_interactions(device_id, data_epoch, config_scope, run_id, created_at);
+` }
+  ,{ version: 32, name: 'device-controller-state', sql: V32_DEVICE_CONTROLLER_STATE }
+  ,{ version: 33, name: 'device-notification-tombstones', sql: V33_DEVICE_NOTIFICATION_TOMBSTONES }
+  ,{ version: 34, name: 'session-input-receipts', sql: V34_SESSION_INPUT_RECEIPTS }
+  ,{ version: 35, name: 'device-trust', sql: V35_DEVICE_TRUST }
+  ,{ version: 36, name: 'service-ownership', sql: V36_SERVICE_OWNERSHIP }
 ]

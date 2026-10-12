@@ -13,9 +13,8 @@
  * - `import type { X } from …` / `import { type X } from …`(整条子句都是 type)
  *   编译后被擦除,**不构成运行时依赖** —— 例如 `oauth/registry.ts` 对
  *   `upstream/transport.ts` 就只有 type-only 边,那是有意为之,不算环。
- * - 动态 `import('…')` 是**协议边界**(按需加载、常常正是用来打破环的手法),
- *   不算静态值边。本仓库用它有两处:**runtime ▸ net/proxy**、
- *   **imports/service ▸ ipc/attachment**(后者注释里明说了「动态 import」)。
+ * - 动态 import/require 不算静态循环边，但必须计入独立 Agent 和跨端客户端的
+ *   运行时可达检查。延迟加载不能成为把 Electron 偷带进无头运行时的出口。
  *
  * ## 范围
  *
@@ -84,6 +83,9 @@ interface Edges {
   type: Set<string>
   /** 裸模块说明符(非相对)的值 import,例如 `'electron'` / `'node:fs'`。 */
   bare: Set<string>
+  /** 与静态循环分析分开，但无头边界检查必须遍历。 */
+  dynamic?: Set<string>
+  dynamicBare?: Set<string>
 }
 
 function edgesOf(file: string, text = readFileSync(file, 'utf8')): Edges {
@@ -92,6 +94,27 @@ function edgesOf(file: string, text = readFileSync(file, 'utf8')): Edges {
   const value = new Set<string>()
   const type = new Set<string>()
   const bare = new Set<string>()
+  const dynamic = new Set<string>()
+  const dynamicBare = new Set<string>()
+  const requireNames = new Set(['require'])
+  const factories = new Set<string>()
+  // createRequire 的本地别名同样能加载模块，不能只认字面量 require。
+  for (const statement of source.statements) {
+    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)
+      && statement.moduleSpecifier.text === 'node:module' && statement.importClause?.namedBindings
+      && ts.isNamedImports(statement.importClause.namedBindings)) {
+      for (const binding of statement.importClause.namedBindings.elements) {
+        if (!binding.isTypeOnly && (binding.propertyName?.text ?? binding.name.text) === 'createRequire') factories.add(binding.name.text)
+      }
+    }
+  }
+  const aliases = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression)
+      && factories.has(node.initializer.expression.text)) requireNames.add(node.name.text)
+    ts.forEachChild(node, aliases)
+  }
+  aliases(source)
 
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
@@ -107,11 +130,27 @@ function edgesOf(file: string, text = readFileSync(file, 'utf8')): Edges {
       if (target !== null) (onlyTypes ? type : value).add(target)
       else if (!onlyTypes) bare.add(node.moduleSpecifier.text)
     }
-    // 动态 `import('…')` 有意**不**收集 —— 见文件头。
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+      || (ts.isIdentifier(node.expression) && requireNames.has(node.expression.text)))) {
+      const spec = node.arguments[0]
+      if (spec && (ts.isStringLiteral(spec) || ts.isNoSubstitutionTemplateLiteral(spec))) {
+        const target = resolveSpecifier(file, spec.text)
+        if (target !== null) dynamic.add(target)
+        else dynamicBare.add(spec.text)
+      } else dynamicBare.add('<computed-module>')
+    }
+    if (ts.isImportEqualsDeclaration(node) && !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference)) {
+      const spec = node.moduleReference.expression
+      if (ts.isStringLiteral(spec)) {
+        const target = resolveSpecifier(file, spec.text)
+        if (target !== null) value.add(target)
+        else bare.add(spec.text)
+      }
+    }
     ts.forEachChild(node, visit)
   }
   visit(source)
-  return { value, type, bare }
+  return { value, type, bare, dynamic, dynamicBare }
 }
 
 function buildGraph(): Map<string, Edges> {
@@ -166,6 +205,27 @@ function valueCyclesOf(graph: Map<string, Edges>): string[][] {
   }
   for (const node of graph.keys()) if (!index.has(node)) connect(node)
   return cycles
+}
+
+function runtimeViolations(graph: Map<string, Edges>, roots: string[], disallowedFile: (file: string) => boolean,
+  disallowedModule: (specifier: string) => boolean): string[] {
+  const violations: string[] = []
+  const seen = new Set<string>()
+  const queue = roots.map((root) => [root])
+  for (let index = 0; index < queue.length; index++) {
+    const chain = queue[index]!
+    const file = chain[chain.length - 1]!
+    if (seen.has(file)) continue
+    seen.add(file)
+    if (disallowedFile(file)) { violations.push(chain.map(rel).join(' → ')); continue }
+    const edges = graph.get(file)
+    if (!edges) continue
+    for (const spec of new Set([...edges.bare, ...(edges.dynamicBare ?? [])])) {
+      if (disallowedModule(spec)) violations.push(`${chain.map(rel).join(' → ')} → ${spec}`)
+    }
+    for (const target of new Set([...edges.value, ...(edges.dynamic ?? [])])) queue.push([...chain, target])
+  }
+  return violations
 }
 
 describe('架构边界 · 值 import', () => {
@@ -233,13 +293,7 @@ describe('架构边界 · 值 import', () => {
   })
 
   it('③ runtime 零 Electron / ipc / window **直接**值依赖 —— 无头链路的铁律', () => {
-    /*
-      断言的是 `runtime.ts` **自身**的静态值依赖(文件头那条「本文件零 electron
-      import」)。刻意**不做传递闭包**:runtime 现在经 `scheduled/bridge` 等到
-      `window/registry`、经 `session-images` 到 `ipc/attachment`,那是别的批次/线程
-      要处理的既有耦合,**不是本次解耦掉的环** —— 把它算进来会把一条真实的既有问题
-      伪装成这次改动引入的失败。等那些边界也收口了,再把这条升级成传递闭包。
-    */
+    // 保留直接层次约束；下方再检查包括动态加载的完整源码依赖闭包。
     const runtimeFile = resolve(SRC, 'main/runtime.ts')
     const edges = GRAPH.get(runtimeFile)
     expect(edges).toBeDefined()
@@ -263,6 +317,52 @@ describe('架构边界 · 值 import', () => {
       }
     }
     expect(violations).toEqual([])
+  })
+})
+
+describe('设备服务 · 运行时依赖闭包', () => {
+  it('识别动态 import、require、createRequire 别名和 import-equals，忽略类型导入', () => {
+    const edges = edgesOf(join(SRC, 'main/__synthetic.ts'), `
+      import type { WebContents } from 'electron';
+      import { createRequire as factory } from 'node:module';
+      const load = factory(import.meta.url);
+      await import('@main/window/registry');
+      require('electron');
+      load('node:fs');
+      import updater = require('electron-updater');
+      await import(variableName);
+    `)
+    expect([...edges.dynamic!]).toEqual([join(SRC, 'main/window/registry.ts')])
+    expect([...edges.dynamicBare!].sort()).toEqual(['<computed-module>', 'electron', 'node:fs'])
+    expect([...edges.bare].sort()).toEqual(['electron-updater', 'node:module'])
+  })
+
+  it('传递边不会漏掉间接动态导入的 Electron，也不会因循环无限遍历', () => {
+    const a = join(SRC, 'main/a.ts'), b = join(SRC, 'main/b.ts')
+    const graph = new Map<string, Edges>([
+      [a, { value: new Set([b]), type: new Set(), bare: new Set() }],
+      [b, { value: new Set([a]), type: new Set(), bare: new Set(), dynamicBare: new Set(['electron']) }]
+    ])
+    expect(runtimeViolations(graph, [a], () => false, (spec) => spec === 'electron'))
+      .toEqual(['main/a.ts → main/b.ts → electron'])
+  })
+
+  it('Agent 装配、附件与后台运行时不能传递加载 Electron 或窗口模块', () => {
+    const roots = ['main/runtime.ts', 'main/session-runtime.ts', 'main/agent-shells.ts', 'main/services/attachments.ts']
+      .map((file) => join(SRC, file))
+    for (const root of roots) expect(GRAPH.has(root)).toBe(true)
+    expect(runtimeViolations(GRAPH, roots,
+      (file) => rel(file).startsWith('renderer/') || rel(file).startsWith('main/window/'),
+      (spec) => spec === 'electron' || spec === 'electron-updater' || spec.startsWith('@electron-') || spec === '<computed-module>'))
+      .toEqual([])
+  })
+
+  it('共享控制端只依赖平台无关源码与经过选择的纯协议库', () => {
+    const roots = [...GRAPH.keys()].filter((file) => rel(file).startsWith('controller-client/') || rel(file).startsWith('shared/device/'))
+    expect(roots.length).toBeGreaterThan(0)
+    expect(runtimeViolations(GRAPH, roots,
+      (file) => !rel(file).startsWith('controller-client/') && !rel(file).startsWith('shared/'),
+      (spec) => !['zod', '@msgpack/msgpack'].includes(spec))).toEqual([])
   })
 })
 

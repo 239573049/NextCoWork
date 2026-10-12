@@ -542,6 +542,18 @@ export const store = {
   commitMessage(sessionId: string, message: AgentMessage, runId?: string): void {
     repo.commitMessage(sessionId, message, runId)
   },
+  /**
+   * 给定的 messageId 里哪些**已经提交过**(消费回执,schema 第 34 条)。
+   *
+   * ★ 纯转发 —— SQL 仍然只在 `db/repo.ts`(见本文件头:全应用没有第二个地方
+   *   摸持久化)。回执的写入是同层 `commitMessage` 顺手做掉的,不需要单独入口。
+   *
+   * ★ 这**不是**网络授权 API:调用者仍须自己验证会话归属(谁的 run 在服务哪条
+   *   会话),这一层只回答「库里记没记过」。
+   */
+  committedInputIds(sessionId: string, ids: readonly string[]): string[] {
+    return repo.committedInputIds(sessionId, ids)
+  },
   setRunRecord(id: string, sessionId: string, status: string, startedAt: number, endedAt?: number): void {
     repo.setRunRecord(id, sessionId, status, startedAt, endedAt)
   },

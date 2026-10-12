@@ -66,7 +66,7 @@ import {
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
 import { refreshScheduler, runScheduledTaskNow } from '../scheduled/scheduler'
-import { scheduledWrites } from '../scheduled/bridge'
+import { scheduledWrites, setScheduledChangeListener } from '../scheduled/bridge'
 import { setSchedulerRefresh } from '../scheduled/refresh'
 import { applyWindowControl, pushMaximized } from '../window/title-bar'
 import { shutdownTerminals, terminalHost } from '../terminal-host'
@@ -203,13 +203,15 @@ import {
   unstageGitPaths
 } from './git'
 import { updateService } from '../update/update-service'
-import { activateWrittenSkills, installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, pickSkillZip, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
+import { activateWrittenSkills, installMarketSkill, installZip, listMarketCategories, listMarketSkills, listSkills, marketSkillDetail, setSkillGlobalEnabled, setSkillWorkspaceActive, uninstallSkill, skillDiagnostics } from './skills'
+import { pickSkillZip } from './skills-dialog'
 import { commandDiagnostics, listAllCommands, listCommands, setCommandEnabled } from './commands'
 import { agentDiagnostics, generateAgent, listAgents, setAgentEnabled } from './agents'
 import { listModes } from './modes'
 import { deleteResource, getResource, saveResource } from './markdown-resource'
 import { deleteHook, hookDiagnostics, listHooks, registerHookDiagnosticsBridge, saveHook, setHookEnabledIpc, testHookIpc } from './hooks'
 import { clearGoal, getGoal, registerGoalBridge, setGoal } from './goal'
+import { getDevicesState, inspectDeviceInvitation, pairDevice, removeDevice, routeInvoke, routeSend, selectDevice, setDeviceRelay, useLocalDevice } from './device'
 import { deleteImage, importImage, listImages, migrateLegacyThemesDir, readImage, saveImage, sweepOrphans, listProfiles, saveProfile, deleteProfile, renameProfile, initializeThemeLibrary } from './theme'
 import {
   closeWorkspace,
@@ -300,9 +302,23 @@ const handlers: HandlerMap = {
   // ── 已实现 ──
   'app:getBootstrap': (_req, ctx) => {
     // A renderer reload can arrive before the tab/input debounce expires.
-    flushPendingPersists()
+    /*
+      ★ **这一段的失败只影响一句提示,不能顶掉首屏。** 刷不下去(磁盘满、没写权限)
+      是「有草稿 / 布局还没保住」,而不是「读不到库」—— 把后者也变成首屏失败
+      会把一次可恢复的写入问题说成应用起不来。真读库的异常在下面那两行照旧抛,
+      由渲染层的握手失败分支显示:两者的用户动作完全不同。
+    */
+    let persistenceWarning = false
+    try {
+      flushPendingPersists()
+    } catch (error) {
+      persistenceWarning = true
+      console.warn('[ipc] pending UI state could not be flushed before bootstrap', error)
+    }
     initializeThemeLibrary()
-    return getBootstrap(ctx.kind)
+    const boot = getBootstrap(ctx.kind)
+    // 只在真的没刷成功时才带上这个字段 —— 渲染层据此弹一条持久错误 toast
+    return persistenceWarning ? { ...boot, persistenceWarning } : boot
   },
   'app:openExternal': ({ url }) => openExternal(url),
   'app:checkForUpdates': () => checkForUpdates(),
@@ -311,6 +327,13 @@ const handlers: HandlerMap = {
   'app:updateInstall': () => updateService.install(),
   'app:updateGetState': () => updateService.getState(),
   'app:copyText': ({ text }) => copyText(text),
+  'device:getState': () => getDevicesState(),
+  'device:inspectInvitation': (req) => inspectDeviceInvitation(req),
+  'device:pair': (req) => pairDevice(req),
+  'device:select': (req) => selectDevice(req),
+  'device:useLocal': () => useLocalDevice(),
+  'device:remove': (req) => removeDevice(req),
+  'device:setRelay': (req) => setDeviceRelay(req),
   'app:copyImage': ({ base64 }) => copyImage(base64),
   'app:saveTextFile': (req) => saveTextFile(req),
   'app:saveImageFile': (req) => saveImageFile(req),
@@ -799,16 +822,44 @@ function persistDebounced(key: string, value: unknown, immediate = false): void 
   pendingPersists.set(key, { timer, value })
 }
 
-/** Flush before reads and app quit so pending UI state survives renderer reloads. */
+/**
+ * Flush before reads and app quit so pending UI state survives renderer reloads.
+ *
+ * ★ **每个键独立成败。** 一条写不进去(磁盘满、目录没写权限)不能把后面那些
+ * 还等着落盘的草稿一起连坐 —— 它们各自的写入面是独立的,而「第一条失败就
+ * 中断」的实际后果是:用户退出应用时,排在坏键后面的**全部** Tab 布局与草稿
+ * 一起丢了。所以这里逐个 `try`,**只有写成功才 delete**。
+ *
+ * ★ 失败**照旧抛给调用方**(单个可原错误,多条 AggregateError):显式保存 /
+ * 退出这条路上,「没写成功」必须让上层知道 —— 静默吞掉等于把一次丢数据
+ * 描述成成功。留在 `pendingPersists` 里的那些键都是没落盘的,退出流程重试
+ * 或者下一次读同一把键时的 flush 还能再试一次。
+ */
 export function flushPendingPersists(onlyKey?: string): void {
+  const errors: unknown[] = []
   for (const [key, { timer, value }] of pendingPersists) {
     if (onlyKey !== undefined && key !== onlyKey) continue
     clearTimeout(timer)
-    store.setKv(key, value)
+    try {
+      store.setKv(key, value)
+    } catch (error) {
+      // 定时器已经清了,这个键得留在表里 —— 它此刻是这份值唯一的去处
+      errors.push(error)
+      continue
+    }
     pendingPersists.delete(key)
   }
-  // 草稿的防抖住在会话运行时里(它和队列共用一个键,必须整份写)
-  if (onlyKey === undefined) sessionRuntime.flush()
+  // 草稿的防抖住在会话运行时里(它和队列共用一个键,必须整份写)。
+  // 它自己已经做到「先试所有条目再抛」,这里的失败同样不能挡住上面那些断言。
+  if (onlyKey === undefined) {
+    try {
+      sessionRuntime.flush()
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) throw new AggregateError(errors, 'Some pending UI state could not be persisted')
 }
 
 const sendHandlers: SendHandlerMap = {
@@ -847,7 +898,9 @@ const sendHandlers: SendHandlerMap = {
 function safeHandle<K extends InvokeChannel>(channel: K, fn: Handler<K>): void {
   ipcMain.handle(channel, async (event, req): Promise<IpcResult<InvokeRes<K>>> => {
     try {
-      const data = await fn(req as InvokeReq<K>, windows.of(event.sender))
+      // 选了远程设备时,device 类频道在这里被转发或拒绝(绝不悄悄改在本机跑);没选则原样本机处理。
+      const ctx = windows.of(event.sender)
+      const data = await routeInvoke(channel, req as InvokeReq<K>, () => fn(req as InvokeReq<K>, ctx), ctx)
       return { ok: true, data }
     } catch (err) {
       const error = toAgentError(err)
@@ -870,7 +923,9 @@ function safeHandle<K extends InvokeChannel>(channel: K, fn: Handler<K>): void {
 function safeListen<K extends SendChannel>(channel: K, fn: SendHandler<K>): void {
   ipcMain.on(channel, (event, payload) => {
     try {
-      fn(payload, windows.of(event.sender))
+      // 选了远程设备时,device 类 send 频道在这里转给设备或丢弃(不落到本机的同 id 终端)。
+      const ctx = windows.of(event.sender)
+      routeSend(channel, payload as IpcSendMap[K], () => fn(payload, ctx))
     } catch (err) {
       console.error(`[ipc] send ${channel} 失败:`, err)
     }
@@ -1017,6 +1072,12 @@ export function registerIpc(): void {
     装在这里之后 bridge 只认 `scheduled/refresh.ts` 那个叶子插槽。
   */
   setSchedulerRefresh(refreshScheduler)
+  /*
+    定时任务写入后的**广播**口。★ 同一种接线、同一条理由(见 `scheduled/refresh.ts`
+    的文件头):`bridge.ts` 是内核侧要能在无头 Node 里跑的叶子,而广播要
+    `windows.emitToAll` —— 那个模块拖着 electron,所以由这一侧装进去。
+  */
+  setScheduledChangeListener((change) => windows.emitToAll('scheduled:changed', change))
 
   /*
     导入服务的接线,和上面 `setMcpChangeListener` 是同一种:

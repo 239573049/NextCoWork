@@ -10,10 +10,25 @@
  * - `emitToAll`   只接受 GlobalEventChannel(设置、主题、工作区列表这类真·全局变更)
  * 想拿 emitToAll 推 agent:event,编译期就过不去。
  */
-import { BrowserWindow } from 'electron'
-import type { WebContents } from 'electron'
+import type { BrowserWindow, WebContents } from 'electron'
 import type { EventChannel, IpcEventMap } from '../../shared/ipc/contract'
 import type { WindowKind } from '../../shared/domain/tab'
+
+/**
+ * 窗口后端:注册表需要向 Electron 问两件事(焦点窗口、webContents 对应的窗口)。
+ *
+ * ★ 由**桌面入口**在启动时注入,而不是在这里 `import { BrowserWindow } from 'electron'`:
+ *   那是值导入,会把 Electron 拖进每个只想广播一条全局事件的模块 —— 包括无头设备服务里复用的
+ *   IPC 逻辑。没有后端(服务、测试)时窗口表本来就是空的,广播是空操作,这两个查询答「没有」。
+ */
+export interface WindowBackend {
+  getFocusedWindow(): BrowserWindow | null
+  fromWebContents(contents: WebContents): BrowserWindow | null
+}
+let windowBackend: WindowBackend | null = null
+export function installWindowBackend(backend: WindowBackend | null): void {
+  windowBackend = backend
+}
 
 /**
  * 必须定向推送的频道:一个窗口只该收到它自己在看的那个 run / 终端,
@@ -127,7 +142,7 @@ class WindowRegistry {
    * 主窗。返回 `undefined` = 没有任何窗口报过,调用方自己决定怎么兜底。
    */
   activeWorkspaceOfFocused(): string | undefined {
-    const focused = BrowserWindow.getFocusedWindow()
+    const focused = windowBackend?.getFocusedWindow() ?? null
     if (focused !== null) {
       const reported = this.activeWorkspace.get(focused.webContents.id)
       if (reported !== undefined) return reported
@@ -313,7 +328,7 @@ class WindowRegistry {
       const { sender } = context
       if (sender.isDestroyed()) continue
       if (kind !== undefined && context.kind !== kind) continue
-      const win = BrowserWindow.fromWebContents(sender)
+      const win = windowBackend?.fromWebContents(sender) ?? null
       if (win !== null && !win.isDestroyed()) found.push(win)
     }
     return found

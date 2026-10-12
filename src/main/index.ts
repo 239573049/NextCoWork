@@ -34,10 +34,22 @@ import {
   shutdownTerminals
 } from './ipc'
 import { sweepPendingDelete } from './ipc/pending-delete'
+import { closeDeviceManager } from './ipc/device'
 import { shutdownImports } from './imports/service'
 import { resumeImportSync, startImportSync, stopImportSync } from './imports/sync'
 import { resumeUsageRollup, startUsageRollup, stopUsageRollup } from './usage/rollup-task'
 import { installAttachmentProtocol, registerAttachmentScheme } from './net/attachment-protocol'
+import { installWindowBackend } from './window/registry'
+import { installExternalOpener } from './services/external-opener'
+import { installClientAuthPort } from './services/client-auth-port'
+import { getClientAccessToken, getClientAuthState } from './ipc/client-auth'
+
+// 窗口注册表本身不导入 Electron(无头服务要复用);桌面在这里把真实的 BrowserWindow 接进去。
+installWindowBackend(BrowserWindow)
+// 登录流程要打开系统浏览器:同样由桌面入口注入,服务里没有这个能力时会明确失败。
+installExternalOpener((url) => shell.openExternal(url))
+// 技能市场安装要平台访问令牌:登录服务由桌面注入,无头服务不装 = 未登录。
+installClientAuthPort({ authenticated: () => getClientAuthState().mode === 'authenticated', accessToken: getClientAccessToken })
 import { installWidgetProtocol, registerWidgetScheme } from './net/widget-protocol'
 import { installPluginProtocol, registerPluginScheme, setPluginAppearanceResolver } from './plugin/protocol'
 import { shutdownPlugins, startPlugins, acquireDocumentGuard } from './ipc/plugins'
@@ -1031,6 +1043,7 @@ quitFlow = new QuitFlow({
     shutdownRuns()
     shutdownSessionTitles()
     shutdownTerminals()
+    closeDeviceManager()
   },
   drainAsync: () =>
     Promise.allSettled([

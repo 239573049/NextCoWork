@@ -16,7 +16,7 @@
  */
 import type { ToolOutputImage } from '../shared/agent/message'
 import { extOfMime, imageMimeOfBytes, mimeOfExt, parseNcwUrl } from '../shared/domain/attachment'
-import { uploadAttachment } from './ipc/attachment'
+import { uploadAttachment } from './services/attachments'
 import type { KernelHost } from './kernel/host'
 import type { SessionImageStore } from './kernel/session-images'
 import { resolveImageDataRef } from './kernel/upstream/images'

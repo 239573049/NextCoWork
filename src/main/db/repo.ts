@@ -1156,8 +1156,44 @@ export function commitMessage(sessionId: string, message: AgentMessage, runId?: 
       ? Number((stmt('SELECT COALESCE(MAX(ordinal), -1) AS n FROM messages WHERE session_id = ?').get(sessionId) as Record<string, unknown>)['n'] ?? -1) + 1
       : Number(existing['ordinal'])
     writeMessage(session, message, ordinal, runId)
+    /*
+      ★ 用户消息一提交就留下**消费回执**,和消息在**同一个事务**里 —— 见 schema 第 34 条。
+
+      这是「这条输入已经执行过」的唯一持久事实,它必须和消息同生:分开两次写的话,
+      中间任何一次失败(或者进程被杀)都会留下一条已落盘却「没被消费过」的消息,
+      而队列清理、重启恢复都会据此再执行一遍。
+
+      assistant / tool 消息不记:它们不是「用户交进来、可能被重复投递」的输入。
+    */
+    if (message.role === 'user') {
+      stmt('INSERT OR IGNORE INTO session_input_receipts (session_id, message_id, committed_at) VALUES (?, ?, ?)')
+        .run(sessionId, message.id, message.createdAt)
+    }
     putSession({ ...session, updatedAt: Math.max(session.updatedAt, message.createdAt) })
   })
+}
+
+/**
+ * 给定的 messageId 里,**哪些已经有消费回执**。
+ *
+ * ★ 队列判定唯一的收口:插话队列、定时任务、重试路径问的都是同一个问题,
+ *   答案只可能来自这里。返回数组而不是 Set —— SQL 层不替调用方决定形状。
+ *
+ * ★ 只查**指定会话**的行。跨会话的同名 messageId 读不到:别的会话的回执
+ *   不构成「这次输入提交过」的证据,读串了就等于放行了一条本该被拒的输入。
+ *
+ * ★ 参数化 + `json_each`,不把 ids 拼进 SQL 字符串(那会给每一种长度在
+ *   `db/index.ts` 的 prepared 缓存里留一条永不失效的语句,见 `sessionSubtreeIds`)。
+ *   不解析任何正文。**不做静默截断** —— 实际队列最多 20 条,但给了多少就查多少,
+ *   少查就是少判,也就是可能再执行一次。
+ */
+export function committedInputIds(sessionId: string, ids: readonly string[]): string[] {
+  const unique = [...new Set(ids)]
+  if (unique.length === 0) return []
+  return stmt(
+    `SELECT message_id AS id FROM session_input_receipts
+      WHERE session_id = ? AND message_id IN (SELECT value FROM json_each(?))`
+  ).all(sessionId, JSON.stringify(unique)).map((row) => String((row as Record<string, unknown>)['id']))
 }
 
 export function getHistory(sessionId: string): readonly AgentMessage[] {

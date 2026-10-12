@@ -21,6 +21,7 @@ import type { PermissionMode } from '../agent/permission'
 import type { RunRequest, SendOptions, SessionMode } from '../agent/run-request'
 import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
+import type { DeviceInvitationPreview, DevicesState } from '../domain/device-connection'
 import type { DirListing, FileSuggestion } from '../domain/file-tree'
 import type { ReviewChangeSet, ReviewFileDiff, ReviewMutationResult } from '../domain/review'
 import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
@@ -36,6 +37,7 @@ import type {
   PickedAttachment
 } from '../domain/attachment'
 import type {
+  SessionInputPersistence,
   SessionInputState,
   SessionQueueOp,
   SessionQueueResult,
@@ -259,6 +261,21 @@ export interface IpcInvokeMap {
   'app:updateInstall': { req: void; res: void }
   'app:updateGetState': { req: void; res: UpdateState }
   'app:copyText': { req: { text: string }; res: void }
+  // ── 设备(控制端本地:设备清单与配对凭据只在这台电脑上) ──
+  /** 已配对设备清单 + 当前选择与连接状态。不含证书/私钥。 */
+  'device:getState': { req: void; res: DevicesState }
+  /** 只解码并校验邀请(不联网),返回要让用户核对的设备指纹。 */
+  'device:inspectInvitation': { req: { text: string }; res: DeviceInvitationPreview }
+  /** 配对。`confirmedFingerprint` 必须是用户核对过的那一个,与邀请不一致即拒绝。 */
+  'device:pair': { req: { text: string; label: string; confirmedFingerprint: string }; res: DevicesState }
+  /** 切换到某台已配对设备并记住选择;连不上时保持「离线」,不回退本机。 */
+  'device:select': { req: { id: string }; res: DevicesState }
+  /** 回到本机。 */
+  'device:useLocal': { req: void; res: DevicesState }
+  /** 移除本机保存的连接(含私钥)。**不会**撤销设备上的配对。 */
+  'device:remove': { req: { id: string }; res: DevicesState }
+  /** 设置/清除(`url: null`)这台设备的备用中转(wss://…,自签证书可附 `caPem`)。直连永远优先。 */
+  'device:setRelay': { req: { id: string; url: string | null; caPem?: string }; res: DevicesState }
   /**
    * 把一张图写进系统剪贴板。`base64` 是**原图字节**,不带 `data:` 前缀。
    *
@@ -1351,6 +1368,15 @@ export interface IpcEventMap {
   'session:queueChanged': SessionQueueSnapshot
   /** 后台子代理的结果交回主代理到了哪一步。卡片上的「待汇报 / 已汇报」读它 */
   'session:subagentReport': { sessionId: string; callId: string; status: SubagentReportStatus }
+  /**
+   * 某条会话的输入(草稿 + 队列)这一次落盘成没成。**全量 + 全局广播**:
+   * 「这条会话的话还没保住」是应用级事实,与谁在看哪个 run 无关。
+   *
+   * ★ 载荷里**没有异常**:见 `SessionInputPersistence` 的注释。
+   * ★ 生产端是 `session-runtime` 的 `onPersistenceChange`(经 `services/agent.ts`
+   *   的投递端口转发),渲染层据此弹 / 撤一条持久错误 toast。
+   */
+  'session:inputPersistence': SessionInputPersistence
   'terminal:data': { id: string; seq: number; chunk: string }
   'terminal:exit': { id: string; code: number }
   /**
@@ -1497,6 +1523,8 @@ export interface IpcEventMap {
   'agents:changed': void
   'modes:changed': void
   'hooks:changed': void
+  /** 已配对设备清单或连接状态变了(配对、切换、掉线、移除)。 */
+  'device:changed': DevicesState
   /** 某条会话的目标变了（设立 / 轮数推进 / 清除）。`goal` 缺席 = 现在没有目标。 */
   'goal:changed': GoalChange
   'mcp:changed': { servers: McpServerStatus[] }
@@ -1621,6 +1649,13 @@ export const INVOKE_CHANNELS = {
   'app:updateInstall': 1,
   'app:updateGetState': 1,
   'app:copyText': 1,
+  'device:getState': 1,
+  'device:inspectInvitation': 1,
+  'device:pair': 1,
+  'device:select': 1,
+  'device:useLocal': 1,
+  'device:remove': 1,
+  'device:setRelay': 1,
   'app:copyImage': 1,
   'app:saveTextFile': 1,
   'app:saveImageFile': 1,
@@ -1957,6 +1992,7 @@ export const EVENT_CHANNELS = {
   'agent:activeRuns': 1,
   'session:queueChanged': 1,
   'session:subagentReport': 1,
+  'session:inputPersistence': 1,
   'terminal:data': 1,
   'terminal:exit': 1,
   'window:maximized': 1,
@@ -1981,6 +2017,7 @@ export const EVENT_CHANNELS = {
   'agents:changed': 1,
   'modes:changed': 1,
   'hooks:changed': 1,
+  'device:changed': 1,
   'goal:changed': 1,
   'mcp:changed': 1,
   'provider:changed': 1,

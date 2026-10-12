@@ -37,6 +37,7 @@ import { FEATURE_ICON, MENU_ICON } from './icons'
 import { useI18n, type Translate } from '../i18n'
 import { ContextMenu, type ContextMenuPosition } from '../components/ui/ContextMenu'
 import { AccountMenu } from './AccountMenu'
+import { DeviceSwitcher } from './DeviceSwitcher'
 import { Dialog } from '../components/ui/Dialog'
 import { Button } from '../components/arc/button/button'
 import { duplicateSession, renameSession, setArchived, setFavorited } from '../services/sessions'
@@ -290,6 +291,7 @@ export function Sidebar({
       {!focusMode && (
         <div className="mx-1.5 mb-1.5 flex shrink-0 items-center gap-1">
           <AccountMenu auth={auth} onOpenSettings={onOpenSettings} />
+          <DeviceSwitcher onOpenSettings={onOpenSettings} />
           <IconButton label={t('common.settings')} onClick={() => onOpenSettings()}>
             <Settings size={15} />
           </IconButton>

@@ -3,7 +3,7 @@
  *
  * ## 为什么必须单开一条
  *
- * 图片那侧的上传(`ipc/attachment.ts` 的 \`uploadAttachment`)拿的是**已经内联的
+ * 图片那侧的上传(`services/attachments.ts` 的 \`uploadAttachment`)拿的是**已经内联的
  * Uint8Array**,上限 32 MiB。那对图片是对的(量级由"一次 IPC 结构化克隆"决定),
  * 但视频有两个它兜不住的性质:**大**(1080p 十几秒就几十兆,4K 上几百兆)、
  * **在远端**(成品是上游给的 URL,要边下边写,而不是先整个收进内存)。
@@ -30,7 +30,7 @@ import { basename, join } from 'node:path'
 import type { VideoAssetRef } from '../../shared/domain/video-generation'
 import { MAX_GENERATED_VIDEO_BYTES, videoExtOfMime, videoMimeOfBytes } from '../../shared/domain/video-generation'
 import { buildNcwUrl, extOfMime } from '../../shared/domain/attachment'
-import { attachmentRoot } from '../net/attachment-protocol'
+import { attachmentRoot } from '../services/attachment-paths'
 import * as repo from '../db/repo'
 import { ulid } from '../../shared/util/id'
 

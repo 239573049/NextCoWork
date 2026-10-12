@@ -14,7 +14,7 @@ export default tseslint.config(
     而那些「报错」指的是一份本来就只在浏览器里跑的产物。
   */
   // `plugins/*/dist/` 与 examples 的 dist 同理:第一方插件(办公编辑器)的构建产物
-  { ignores: ['out/**', 'dist/**', 'examples/*/dist/**', 'plugins/*/dist/**', 'node_modules/**', 'packages/*/template/**', 'resources/plugin-runtime/**'] },
+  { ignores: ['out/**', 'dist/**', '.tscache/device-components/**', 'examples/*/dist/**', 'plugins/*/dist/**', 'node_modules/**', 'packages/*/template/**', 'resources/plugin-runtime/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

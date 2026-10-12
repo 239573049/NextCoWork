@@ -157,12 +157,15 @@ export function getEnvironments(): EnvironmentManager {
           所以在这里替它问一次「连这台主机该走哪个代理」,再把它接到一条本地隧道上
           (`environment/ssh/proxy.ts`)。判定与凭据全部来自 `net/proxy.ts`,和模型请求同一份。
 
-          ★ 动态 import:`net/proxy.ts` 自己要 `getHost()`,静态引就成了 runtime ⇄ net/proxy
-          的循环依赖 —— 这个文件被几乎所有主进程模块引用,循环一旦成立,踩到的人不是这里。
+          ★ 走的是**宿主端口**(`KernelHost.resolveProxyForHost`),不是 import `net/proxy`:
+          后者自己也要 `getHost()`,引进来就成了 runtime ⇄ net/proxy 的循环依赖 ——
+          这个文件被几乎所有主进程模块引用,循环一旦成立,踩到的人不是这里。
+          端口由 electron 侧(`host/index.ts`)注入同一份实现。
+
+          ★ 端口缺席(纯 Node 宿主、测试)就是直连:那正是「没设置过代理」时的默认行为。
         */
         openProxyTunnel: async (hostname, port) => {
-          const { resolveProxyForHost } = await import('./net/proxy')
-          const target = await resolveProxyForHost(hostname, port)
+          const target = await getHost().resolveProxyForHost?.(hostname, port) ?? null
           if (target === null) return null
           getHost().logger.info(`[proxy] ssh ${hostname}:${String(port)} → ${target.scheme}://${target.host}:${String(target.port)}`)
           return openSshProxyTunnel(target, hostname, port,

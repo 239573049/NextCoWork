@@ -1,4 +1,4 @@
-import { shell } from 'electron'
+import { openExternalUrl } from '../services/external-opener'
 import { createServer, type Server } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import type { ClientAuthState, ClientAuthUser, ClientTeamOption, ClientUsageEntry } from '../../shared/domain/client-auth'
@@ -593,7 +593,7 @@ export async function startClientLogin(): Promise<ClientAuthState> {
         ★★ 改这一串之后**必须重新登录**,刷新 token 不会补上新 scope。
       */
       authorize.searchParams.set('scope', 'profile:read wallet:read usage:read models:read inference:write config:read config:write config:secret:read config:secret:write skills:read skills:install plugins:read plugins:install')
-      void shell.openExternal(authorize.toString()).catch(fail)
+      void openExternalUrl(authorize.toString()).catch(fail)
     })
   })
   const response = await getHost().fetch(`${API_ROOT}/api/client/oauth/token`, {

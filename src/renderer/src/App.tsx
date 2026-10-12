@@ -27,13 +27,23 @@ import { usePluginsStore } from './stores/plugins'
 import { useWindowStore, startActiveWorkspaceReporting } from './stores/window'
 import { useTabsStore } from './stores/tabs'
 import { applyTheme } from './theme/apply'
-import { useI18n } from './i18n'
+import { translate, useI18n } from './i18n'
 import type { ClientAuthState } from '../../shared/domain/client-auth'
 import { getClientAuthState, getClientUser } from './services/client-auth'
 import { WelcomeView } from './views/WelcomeView'
 import { ClientTeamSelectionView } from './views/ClientTeamSelectionView'
 import { ToastViewport } from './components/ui/ToastViewport'
+import { toast, useToastStore } from './stores/toast'
 import { useThemeProfiles } from './stores/themeProfiles'
+
+/**
+ * 「这份输入 / 布局还没保住」那条 toast 的固定 key。
+ *
+ * ★ 必须固定:`push` 对同 key 是**就地替换 + 计数**,而主进程每次刷盘失败都会
+ * 推一条 `session:inputPersistence` —— 用随机 key 的话,磁盘满的时候屏幕上
+ * 会堆满互相覆盖的同一条提示(上限 3 条也拦不住它反复顶掉别的通知)。
+ */
+const PERSISTENCE_TOAST_KEY = 'session-input-persistence'
 
 function sessionRouteFromLocation(): { workspaceId: string; sessionId: string | null } | null {
   const raw = window.location.hash.match(/^#\/([^/]+)(?:\/([^/]+))?$/)
@@ -136,6 +146,18 @@ export default function App(): React.JSX.Element {
         setWorkspaces(b.workspaces)
         setAppearance(b.resolvedTheme)
         /*
+          ★ **首屏刷盘失败要说话。** 主进程为了让这次重载拿到完整的 Tab 布局 /
+          草稿,会先把防抖里那些键冲一遍;冲不下去时它照旧把首屏给我们,只在
+          `persistenceWarning` 上留一个标记 —— 不报的话,用户看到的是一切正常,
+          而他刚拖出来的 Tab 顺序已经没了。
+
+          走 `translate` 而不是上面的 `t`:这里是握手回调,`t` 进了这个 effect 的
+          依赖数组就意味着一句文案改动会重跑整段握手。key 固定,重复触发只替换。
+        */
+        if (b.persistenceWarning === true) {
+          toast.error(translate('app.persistenceWarning'), PERSISTENCE_TOAST_KEY)
+        }
+        /*
           ★ **首屏不等网络。** `getClientAuthState()` 只读主进程里那行 SQLite 快照
           (实测 1ms),拿到就渲染;`getClientUser()` 是一次真实 HTTP 往返
           (实测 2219ms),降级成后台刷新。
@@ -197,6 +219,35 @@ export default function App(): React.JSX.Element {
       offPlugins()
     }
   }, [hydrate, initialSessionRoute, openSession, openWorkspace, quickWindow, setMaximized, setRightPanelForWorkspace, syncBrowserTabs, syncSessionTitle])
+
+  /**
+   * 会话输入(草稿 + 队列)这一次落盘成没成。
+   *
+   * ★ **单独一个 effect,不并进上面那个握手块。** 那一块的依赖数组里是
+   * `hydrate` / `openSession` 这些 store 动作和 `t` —— 把这条订阅挂进去,
+   * 以后任何一次文案或 store 标识变化都会退订重订整段握手,而这个频道只在
+   * 主进程刷盘真的失败时才有事件,重订等于漏掉它。
+   *
+   * ★ 文案在事件里现取(用 `translate`),不进依赖数组:切语言时 toast 里
+   * 已经发出去的那句会留在原语言,但下一次事件会带新语言 —— 而这个订阅
+   * 全程不退订,正是它该有的样子。
+   *
+   * ★ `saved` **只**关掉这条提示,不 `clear()`:用户手上别的 toast(比如
+   * 「更新已就绪」)不该被一条保存成功顺带抹掉。
+   */
+  useEffect(() => on('session:inputPersistence', ({ state }) => {
+    if (state === 'saved') {
+      const { toasts, dismiss } = useToastStore.getState()
+      for (const item of toasts) {
+        if (item.key === PERSISTENCE_TOAST_KEY) dismiss(item.id)
+      }
+      return
+    }
+    toast.error(
+      translate(state === 'retrying' ? 'session.inputPersistence.retrying' : 'session.inputPersistence.blocked'),
+      PERSISTENCE_TOAST_KEY
+    )
+  }), [])
 
   /**
    * ★ **深浅和颜色是两路来的,必须汇到一处再落地。**

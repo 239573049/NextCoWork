@@ -72,8 +72,23 @@ class Harness {
   readonly queues: SessionQueueSnapshot[] = []
   readonly reports: Array<{ sessionId: string; callId: string; status: SubagentReportStatus }> = []
   readonly persisted = new Map<string, SubagentReportStatus>()
+  readonly logs: string[] = []
   receipts = new Map<string, BackgroundReport & { reportStatus?: SubagentReportStatus }>()
   refuse: Error | null = null
+  /** 写盘一律抛这个错(sticky)—— 模拟落盘失败 */
+  writeFails: Error | null = null
+  /** 从第 N 次写盘开始抛(1-based)。0 = 不启用;用来让前几次成功、某一次恰好失败 */
+  writeFailFrom = 0
+  /** 已经尝试过多少次写盘 */
+  writeCalls = 0
+  /** 广播抛这个错 */
+  failEmit: Error | null = null
+  /** 已提交用户消息的消费回执(sessionId → messageId) */
+  readonly committed = new Map<string, Set<string>>()
+  /** 读消费回执时抛这个错;验证「读不到就不据它删条目」 */
+  failCommitted: Error | null = null
+  /** 未落盘输入的状态提示,按发生顺序 */
+  readonly persistence: Array<{ sessionId: string; state: 'retrying' | 'blocked' | 'saved' }> = []
   private id = 0
   readonly runtime: SessionRuntime
 
@@ -82,16 +97,38 @@ class Harness {
       now: () => 1_000 + this.id,
       newId: () => `id-${++this.id}`,
       readInput: (sessionId) => this.kv.get(sessionId) ?? null,
-      writeInput: (sessionId, state) => { this.kv.set(sessionId, state) },
+      writeInput: (sessionId, state) => {
+        this.writeCalls += 1
+        if (this.writeFails !== null || (this.writeFailFrom > 0 && this.writeCalls >= this.writeFailFrom)) {
+          throw this.writeFails ?? new Error('write failed')
+        }
+        this.kv.set(sessionId, state)
+      },
+      committedInputIds: (sessionId, ids) => {
+        if (this.failCommitted !== null) throw this.failCommitted
+        const set = this.committed.get(sessionId)
+        return set === undefined ? [] : ids.filter((id) => set.has(id))
+      },
       activeRun: (sessionId) => this.active.get(sessionId),
       isBusy: (sessionId) => this.active.has(sessionId) || this.settling.has(sessionId),
       launch: (req) => this.start(req),
-      emitQueue: (snapshot) => { this.queues.push(snapshot) },
+      emitQueue: (snapshot) => {
+        if (this.failEmit !== null) throw this.failEmit
+        this.queues.push(snapshot)
+      },
       emitReport: (sessionId, callId, status) => { this.reports.push({ sessionId, callId, status }) },
       readReport: (sessionId, callId) => this.receipts.get(`${sessionId}/${callId}`),
       persistReportStatus: (sessionId, callId, status) => { this.persisted.set(`${sessionId}/${callId}`, status) },
-      log: () => {}
+      onPersistenceChange: (change) => { this.persistence.push(change) },
+      log: (message) => { this.logs.push(message) }
     })
+  }
+
+  /** run 提交一条用户消息之后,持久消费回执就该在(与生产 repo.commitMessage 同一时刻)。 */
+  markCommitted(sessionId: string, messageId: string): void {
+    const set = this.committed.get(sessionId) ?? new Set<string>()
+    set.add(messageId)
+    this.committed.set(sessionId, set)
   }
 
   /** 用户在窗口里发出的一轮(`agent:run`) */
@@ -621,5 +658,229 @@ describe('目标空闲检查', () => {
     h.finish(h.start({ ...OPTS, runId: 'r1', sessionId: 's', input: [], planExecution: { path: 'plan.md' } as never }))
     h.runtime.childFinished({ sessionId: 's', callId: 'c', childRunId: 'r1:sub:1', text: '完成' }, 'done')
     expect(h.launched[1]?.planExecution).toBeUndefined()
+  })
+})
+
+/**
+ * 落盘失败时的诚实性:写不进去就不能回 `accepted:true`,也不能让一条没保存的
+ * 消息被续跑发出去;内存里那份要留着,等下一次成功的写补上。
+ */
+describe('队列写盘失败', () => {
+  it('★ enqueue 写失败:抛错、不是 accepted、不广播、也不启动未落盘的那条', () => {
+    const run = h.send('s', '第一条')
+    h.writeFails = new Error('磁盘满了')
+
+    expect(() => h.enqueue('s', '第二条')).toThrow('磁盘满了')
+
+    expect(h.launched).toHaveLength(1)
+    expect(h.queues).toHaveLength(0)
+    expect(run.interjects).toEqual([])
+  })
+
+  it('enqueue 写失败后内存仍是失败前的旧队列;重试成功只多出一条', () => {
+    h.send('s', '第一条')
+    h.enqueue('s', '甲')
+    const before = h.queued('s').map((q) => q.text)
+    h.writeFails = new Error('磁盘满了')
+
+    expect(() => h.enqueue('s', '乙')).toThrow()
+
+    expect(h.queued('s').map((q) => q.text)).toEqual(before)
+
+    h.writeFails = null
+    h.enqueue('s', '乙')
+    expect(h.queued('s').map((q) => q.text)).toEqual(['甲', '乙'])
+    expect(h.kv.get('s')?.queued.map((q) => q.text)).toEqual(['甲', '乙'])
+    expect(h.launched).toHaveLength(1)
+  })
+
+  it('edit 写失败:文本与档位快照都回到编辑前', () => {
+    h.send('s', '第一条')
+    h.enqueue('s', '原文', { ...OPTS, model: 'sonnet' })
+    const item = h.queued('s')[0]!
+    h.writeFails = new Error('磁盘满了')
+
+    expect(() => h.runtime.queue('s', { kind: 'edit', id: item.id, text: '改过的' })).toThrow()
+
+    const after = h.queued('s')[0]!
+    expect(after.text).toBe('原文')
+    expect(after.options.model).toBe('sonnet')
+  })
+
+  it('drop 写失败:条目回到队列', () => {
+    h.send('s', '第一条')
+    h.enqueue('s', '甲')
+    h.enqueue('s', '乙')
+    const [甲] = h.queued('s')
+    h.writeFails = new Error('磁盘满了')
+
+    expect(() => h.runtime.queue('s', { kind: 'drop', id: 甲!.id })).toThrow()
+
+    expect(h.queued('s').map((q) => q.text)).toEqual(['甲', '乙'])
+  })
+
+  it('retag 写失败:权限档位回到改前,不留下假的新档位', () => {
+    h.send('s', '第一条')
+    h.enqueue('s', '甲', { ...OPTS, model: 'sonnet' })
+    h.writeFails = new Error('磁盘满了')
+
+    expect(() => h.runtime.queue('s', { kind: 'retagPermission', mode: 'full' })).toThrow()
+
+    expect(h.queued('s')[0]?.options.permissionMode).toBe('ask')
+  })
+})
+
+describe('续跑写盘失败', () => {
+  it('★ drain 移交队列失败:不启动、队列未丢,内存里原样还在', () => {
+    const first = h.send('s', '第一条')
+    h.enqueue('s', '第二条')
+    h.writeFailFrom = h.writeCalls + 1
+
+    expect(() => h.finish(first)).toThrow()
+
+    expect(h.launched).toHaveLength(1)
+    expect(h.queued('s').map((q) => q.text)).toEqual(['第二条'])
+  })
+
+  it('launch 失败后把条目放回队首的那次写再失败:抛出去,队列仍在内存里', () => {
+    const first = h.send('s', '第一条')
+    h.enqueue('s', '第二条')
+    h.refuse = new Error('需要先安装更新')
+    h.writeFailFrom = h.writeCalls + 1
+
+    expect(() => h.finish(first)).toThrow()
+
+    expect(h.launched).toHaveLength(1)
+    expect(h.queued('s').map((q) => q.text)).toEqual(['第二条'])
+  })
+})
+
+describe('草稿写盘失败', () => {
+  it('★ 防抖写失败不炸出 uncaught;flush 能把这份草稿补上', () => {
+    vi.useFakeTimers()
+    h.writeFails = new Error('磁盘满了')
+    h.runtime.setDraft('s', '写了一半', false)
+
+    // 定时器回调自己吞下异常(记日志),而不是变成 uncaught
+    expect(() => vi.advanceTimersByTime(DRAFT_DEBOUNCE_MS)).not.toThrow()
+    expect(h.kv.has('s')).toBe(false)
+    expect(h.logs.some((m) => m.includes('could not persist draft'))).toBe(true)
+
+    h.writeFails = null
+    h.runtime.flush()
+    expect(h.kv.get('s')?.draft).toBe('写了一半')
+  })
+
+  it('immediate 写失败抛给调用方,留下的草稿由 flush 重试', () => {
+    h.writeFails = new Error('磁盘满了')
+    expect(() => h.runtime.setDraft('s', '正文', true)).toThrow('磁盘满了')
+    expect(h.kv.has('s')).toBe(false)
+
+    h.writeFails = null
+    h.runtime.flush()
+    expect(h.kv.get('s')?.draft).toBe('正文')
+  })
+
+  it('flush 遇到一条失败:抛出去,但这份草稿的 dirty 留着还能再试;其他条目不受牵连', () => {
+    vi.useFakeTimers()
+    h.runtime.setDraft('s', '会话 s 的草稿', false)
+    h.runtime.setDraft('t', '会话 t 的草稿', false)
+    h.writeFails = new Error('磁盘满了')
+
+    // 两条都试过才抛:第一条失败不能挡住后面的草稿(AggregateError 的 message 不重复每条原因)。
+    expect(() => h.runtime.flush()).toThrow(/could not be saved/)
+    expect(h.kv.has('s')).toBe(false)
+    expect(h.kv.has('t')).toBe(false)
+    expect(h.persistence).toEqual([
+      { sessionId: 's', state: 'blocked' },
+      { sessionId: 't', state: 'blocked' }
+    ])
+
+    h.writeFails = null
+    h.runtime.flush()
+    expect(h.kv.get('s')?.draft).toBe('会话 s 的草稿')
+    expect(h.kv.get('t')?.draft).toBe('会话 t 的草稿')
+    expect(h.persistence.at(-1)).toEqual({ sessionId: 't', state: 'saved' })
+  })
+
+  it('防抖还没触发就 flush:草稿写掉(与旧行为一致)', () => {
+    vi.useFakeTimers()
+    h.runtime.setDraft('s', '半句', false)
+    h.runtime.flush()
+    expect(h.kv.get('s')?.draft).toBe('半句')
+  })
+})
+
+describe('已提交输入的消费回执', () => {
+  it('★★ 清队列写失败后,同一条插话不会被续跑再发一次', () => {
+    const run = h.send('s', '第一条')
+    h.enqueue('s', '甲')
+    h.enqueue('s', '插一句')
+    const 条目 = h.queued('s')[1]!
+    h.runtime.queue('s', { kind: 'promote', id: 条目.id })
+
+    // run 注入成功:消息落盘 → 消费回执先于清队列的写
+    h.markCommitted('s', 条目.id)
+    h.writeFailFrom = h.writeCalls + 1
+    run.emit({ type: 'message_commit', message: userMessage(条目.id, [{ type: 'text', text: '插一句' }], 1) })
+
+    // 那一刻写盘失败,内存里**不能**把它放回队列
+    expect(h.queued('s').map((q) => q.text)).toEqual(['甲'])
+    expect(h.logs.some((m) => m.includes('could not reap committed input'))).toBe(true)
+
+    h.writeFailFrom = 0
+    h.finish(run)
+    // 续跑只发「甲」,绝不把已经执行过的那句再发一遍
+    expect(h.launched.map(inputText)).toEqual(['第一条', '甲'])
+  })
+
+  it('★ 重启后旧队列行不推翻已提交的消息:回执在,条目就不再被发出去', () => {
+    h.kv.set('s', {
+      v: SESSION_INPUT_VERSION, draft: '', savedAt: 1,
+      queued: [
+        { id: 'done-1', text: '上一轮已经发过的', attachments: [], status: 'pending', options: OPTS, enqueuedAt: 1 },
+        { id: 'live-1', text: '还没发过的', attachments: [], status: 'pending', options: OPTS, enqueuedAt: 2 }
+      ]
+    })
+    h.markCommitted('s', 'done-1')
+
+    h.runtime.queue('s', { kind: 'resume' })
+
+    expect(h.launched.map(inputText)).toEqual(['还没发过的'])
+    // 已提交那条既没被发出去,也不再留在持久队列里(下次冷启动不会又捞出来)
+    expect(h.kv.get('s')?.queued.map((q) => q.id) ?? []).toEqual([])
+    expect(h.kv.get('s')?.queued.some((q) => q.id === 'done-1')).toBe(false)
+  })
+
+  it('读不到消费回执时不据它删条目 —— 宁可多留一条,也不能凭失败的查询丢掉输入', () => {
+    h.kv.set('s', {
+      v: SESSION_INPUT_VERSION, draft: '', savedAt: 1,
+      queued: [{ id: 'q-1', text: '还没发过的', attachments: [], status: 'pending', options: OPTS, enqueuedAt: 1 }]
+    })
+    const run = h.send('s', '第一条')
+    h.failCommitted = new Error('回执表暂不可用')
+
+    // 运行中引入这条插话:回执查询失败,但它必须照常进 run 的信箱、也留在队列里
+    h.runtime.queue('s', { kind: 'promote', id: 'q-1' })
+
+    expect(h.logs.some((m) => m.includes('could not read committed inputs'))).toBe(true)
+    expect(run.interjects.at(-1)).toEqual([{ id: 'q-1', parts: [{ type: 'text', text: '还没发过的' }] }])
+    expect(h.queued('s').map((q) => q.id)).toEqual(['q-1'])
+  })
+})
+
+describe('广播失败', () => {
+  it('★ emitQueue 抛错:已落盘的那条不算失败,也不能重复入队', () => {
+    h.send('s', '第一条')
+    h.failEmit = new Error('没有窗口在听')
+
+    expect(() => h.enqueue('s', '甲')).not.toThrow()
+    expect(h.kv.get('s')?.queued.map((q) => q.text)).toEqual(['甲'])
+    expect(h.queued('s').map((q) => q.text)).toEqual(['甲'])
+    expect(h.logs.some((m) => m.includes('could not broadcast queue'))).toBe(true)
+
+    h.failEmit = null
+    h.enqueue('s', '乙')
+    expect(h.queued('s').map((q) => q.text)).toEqual(['甲', '乙'])
   })
 })

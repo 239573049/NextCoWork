@@ -18,6 +18,7 @@ import type { Readable } from 'node:stream'
 import { nodeFs } from './node-fs'
 import { agentShell, nodeSpawn } from './node-spawn'
 import type { EnvironmentFacts } from '../../shared/domain/environment'
+import type { ProxyDialTarget } from '../../shared/domain/proxy'
 
 export interface Logger {
   debug(msg: string, ...args: unknown[]): void
@@ -236,6 +237,18 @@ export interface KernelHost {
    *   Chromium session 可问,注入也只能是错的。
    */
   childEnv?: () => Record<string, string> | Promise<Record<string, string>>
+  /**
+   * 「连这台主机该走哪个代理」;`null` = 直连。
+   *
+   * 需求:SSH 连接默认跟随应用/系统代理,而 ssh 是子进程,`session.setProxy` 管不到它
+   * ——只能反过来问。答案(手动代理 / 系统代理 / PAC / 直连白名单)由 electron 侧
+   * `net/proxy.ts` 的 `resolveProxyForHost` 给出,和模型请求同一份。
+   *
+   * ★ 可选:纯 Node 默认值**没有**这一项(undefined = 直连)。无头/测试环境没有
+   *   `defaultSession` 可问,也没有「用户设过的代理」;此时返回 null 正是我想要的行为。
+   *   `environment/ssh/transport.ts` 的 `prepareProxy` 就是按缺席即不插手写的。
+   */
+  resolveProxyForHost?(hostname: string, port: number): Promise<ProxyDialTarget | null>
   fetch: typeof fetch
 }
 

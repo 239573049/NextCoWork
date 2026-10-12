@@ -8,17 +8,16 @@
  * 从测试里抹掉了(线上表现:同一个死订阅者每 flush 一次刷一屏栈)。
  */
 import { describe, expect, it, vi } from 'vitest'
+import type { BrowserWindow, WebContents } from 'electron'
+import { installWindowBackend, runTopic, windows } from '../registry'
 
-vi.mock('electron', () => ({
-  BrowserWindow: {
-    getAllWindows: () => [],
-    // listWindows 靠它把 webContents 换回窗口;假 sender 自带一扇假窗,
-    // 没带的(上面那几个只测推送的)换不回来,于是自然不出现在结果里。
-    fromWebContents: (sender: { window?: unknown }) => sender.window ?? null
-  }
-}))
-
-import { runTopic, windows } from '../registry'
+// 注册表不再导入 Electron,窗口后端由入口注入。
+// listWindows 靠 fromWebContents 把 webContents 换回窗口;假 sender 自带一扇假窗,
+// 没带的(上面那几个只测推送的)换不回来,于是自然不出现在结果里。
+installWindowBackend({
+  getFocusedWindow: () => null,
+  fromWebContents: (sender: WebContents) => ((sender as unknown as { window?: BrowserWindow }).window ?? null)
+})
 
 /** Electron 语义的替身:帧死了以后 send 静默无效,判死靠 mainFrame 自己。 */
 function fakeSender(id: number, frame: unknown): {

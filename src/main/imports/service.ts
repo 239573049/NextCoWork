@@ -2258,7 +2258,7 @@ async function materializeMessages(
   sourceSessionId: string,
   targetSessionId: string
 ): Promise<AgentMessage[]> {
-  const { uploadAttachment } = await import('../ipc/attachment')
+  const { uploadAttachment } = await import('../services/attachments')
   const result: AgentMessage[] = []
 
   for (const message of source) {

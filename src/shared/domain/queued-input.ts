@@ -90,6 +90,22 @@ export interface SessionInputState {
 export const SESSION_INPUT_VERSION = 1
 
 /**
+ * 一次会话输入落盘的结果 —— 广播给所有窗口的那一条。
+ *
+ * ★ **只带 `sessionId` 与状态,不带异常、路径、SQL。** 渲染层要做的只有
+ * 「显示一句人话 / 关掉那句人话」,而底层异常的正文里会有绝对路径、库文件名,
+ * 甚至一行 SQL —— 那些东西一旦进了事件就会出现在界面上(方案 §9)。
+ *
+ * - `retrying`:这一份还没写成功,但运行时会继续重试(内存里那份还在)。
+ * - `blocked`:重试也没写进去,用户需要自己处理(磁盘满、没写权限)。
+ * - `saved`:写成功了 —— 唯一允许渲染层**撤掉**那条提示的状态。
+ */
+export interface SessionInputPersistence {
+  sessionId: string
+  state: 'retrying' | 'blocked' | 'saved'
+}
+
+/**
  * 队列的写操作。**主进程是队列唯一的写入者**(`main/session-runtime.ts`):
  * 渲染层只发意图、收回执,不再自己决定下一轮什么时候开跑 —— 否则没有窗口在看
  * 这条会话时,排队的消息就永远等不到续跑。

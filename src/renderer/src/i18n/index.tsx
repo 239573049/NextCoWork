@@ -39,6 +39,7 @@ import { pluginUiZh, pluginUiEn } from './plugin-ui';
 import { imageGenZh, imageGenEn } from './image-gen';
 import { videoGenZh, videoGenEn } from './video-gen';
 import { skillifyZh, skillifyEn } from './skillify';
+import { deviceZh, deviceEn } from './device';
 import {
   pluginMessages,
   pluginMessagesVersion,
@@ -60,6 +61,7 @@ export type Messages = Record<string, MessageValue>;
  * translated here.
  */
 const ZH: Messages = {
+  ...deviceZh,
   ...sshZh,
   ...workspaceZh,
   ...goalZh,
@@ -92,6 +94,12 @@ const ZH: Messages = {
   ...rewardsZh,
   ...walletZh,
   "app.handshakeFailed": "首屏握手失败：{error}",
+  // 首屏刷盘失败(Bootstrap.persistenceWarning)与会话输入落盘的状态。
+  // ★ 三句都**不带原因**:底层错误的正文里有绝对路径和库文件名,而这三条是要
+  //   显示在界面上的(toast 的正文)。
+  "app.persistenceWarning": "部分草稿或布局尚未保存。请检查磁盘空间和写入权限后重试。",
+  "session.inputPersistence.retrying": "会话输入尚未保存，正在重试。",
+  "session.inputPersistence.blocked": "会话输入保存失败，请检查存储后重试。",
   "auth.tagline": "把重复的交给它，时间留给你",
   "auth.login": "登录",
   "auth.openingBrowser": "正在打开浏览器…",
@@ -2055,6 +2063,7 @@ const ZH: Messages = {
 };
 
 const EN: Messages = {
+  ...deviceEn,
   ...sshEn,
   ...workspaceEn,
   ...goalEn,
@@ -2087,6 +2096,9 @@ const EN: Messages = {
   ...rewardsEn,
   ...walletEn,
   "app.handshakeFailed": "Initial handshake failed: {error}",
+  "app.persistenceWarning": "Some drafts or layout could not be saved. Check disk space and write permissions, then try again.",
+  "session.inputPersistence.retrying": "Session input is not saved yet; retrying.",
+  "session.inputPersistence.blocked": "Session input could not be saved. Check your storage and try again.",
   "auth.tagline": "Hand off the repetitive work, keep the time",
   "auth.login": "Sign in",
   "auth.openingBrowser": "Opening browser…",

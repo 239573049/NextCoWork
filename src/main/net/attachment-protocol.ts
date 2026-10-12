@@ -44,14 +44,16 @@ import {
   parseNcwUrl
 } from '../../shared/domain/attachment'
 import { configProfileDirectory } from '../db/config-profile'
+import { ATTACHMENTS_DIR, attachmentRoot } from '../services/attachment-paths'
 import { THUMBNAIL_CACHE_DIR, ThumbnailCache, type ThumbnailCodec } from './attachment-thumbnail'
 
-/** 附件根。★ 必须与 `ipc/storage.ts` 的 `attachmentDirectory()` 是同一个目录 —— 清理扫的就是它 */
-export const ATTACHMENTS_DIR = 'attachments'
-
-export function attachmentRoot(): string {
-  return join(databaseDirectory(), ATTACHMENTS_DIR)
-}
+/*
+  附件根搬去了 `services/attachment-paths`(那边零 Electron)。这里**原样重新导出**,
+  于是旧调用点(`ipc/*`、`host/index`、测试)的 `from '../net/attachment-protocol'`
+  一行都不用改。★ 根本身仍必须与 `ipc/storage.ts` 的 `attachmentDirectory()`
+  是同一个目录 —— 清理扫的就是它。
+*/
+export { ATTACHMENTS_DIR, attachmentRoot }
 
 /**
  * ★ 与 `ipc/storage.ts` 的 `isWithin` 同源。

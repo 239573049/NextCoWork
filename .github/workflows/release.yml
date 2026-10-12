@@ -232,10 +232,59 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # 独立设备服务包(无 Electron,Node >= 24):随桌面版本同一个 Release 发布,**手动下载安装**,
+  # 没有自动更新通道(桌面更新器只认 exe/AppImage/dmg/zip,见 scripts/upload-client-release.mjs)。
+  # 包里没有任何机密;依赖由 `npm install --omit=dev` 在目标机上安装。
+  device-service:
+    name: Device service package
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Install dependencies
+        # 只需要 vite/tsc 构建 bundle;跳过 postinstall,避免为 Electron 重编译原生模块
+        # (那一步要下载 electronjs.org headers,见 build 任务里的说明)。
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: Build, package and verify outside the repository
+        run: npm run build:agent && npm run package:agent -- --verify
+
+      - name: Write checksum
+        run: cd out && sha256sum nextcowork-device-service-*.tgz > nextcowork-device-service.sha256
+
+      - name: Upload to Release
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG_NAME" out/nextcowork-device-service-*.tgz out/nextcowork-device-service.sha256 --clobber
+
+      - name: Upload build-only artifact
+        if: needs.prepare.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextcowork-device-service
+          path: |
+            out/nextcowork-device-service-*.tgz
+            out/nextcowork-device-service.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Publish GitHub Release
     if: needs.prepare.outputs.publish == 'true'
-    needs: [prepare, build]
+    needs: [prepare, build, device-service]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

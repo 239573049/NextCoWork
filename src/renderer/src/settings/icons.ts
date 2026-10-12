@@ -11,6 +11,7 @@ import {
   Database,
   DownloadCloud,
   Info,
+  MonitorSmartphone,
   Plug,
   SlidersHorizontal,
   Sparkles,
@@ -35,6 +36,7 @@ export const SETTINGS_ICON: Record<SettingsPageId, LucideIcon> = {
   usage: ChartColumn,
   review: FEATURE_ICON.review,
   connection: Plug,
+  devices: MonitorSmartphone,
   computer: FEATURE_ICON.browser,
   data: Database,
   about: Info

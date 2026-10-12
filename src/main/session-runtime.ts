@@ -74,6 +74,8 @@ export interface SessionRuntimeDeps {
   newId(): string
   readInput(sessionId: string): SessionInputState | null
   writeInput(sessionId: string, state: SessionInputState): void
+  /** 已落盘的用户消息消费回执；清队列失败或压缩历史后也不能重发它们。 */
+  committedInputIds(sessionId: string, ids: readonly string[]): readonly string[]
   /** 这条会话此刻正在跑的**顶层** run */
   activeRun(sessionId: string): SessionRunHandle | undefined
   /** 有 run 或历史操作占着这条会话 —— 包括 `run_end` 之后、收尾落盘之前那一段 */
@@ -85,7 +87,18 @@ export interface SessionRuntimeDeps {
   /** 从库里的 Task 回执恢复一个子代理的交付物 —— 重启之后的手动汇报走这条 */
   readReport(sessionId: string, callId: string): (BackgroundReport & { reportStatus?: SubagentReportStatus }) | undefined
   persistReportStatus(sessionId: string, callId: string, status: SubagentReportStatus): void
+  /**
+   * 未落盘输入的状态变化。可选:没有订阅者(无头服务)时不传。
+   * ★ 只报状态,不报异常正文 —— 界面据此提示,而磁盘路径/SQL 细节不出这一层。
+   */
+  onPersistenceChange?(change: SessionInputPersistence): void
   log(message: string, error?: unknown): void
+}
+
+/** 未落盘输入的当前状态;渲染层只按它决定提示哪一种。 */
+export interface SessionInputPersistence {
+  sessionId: string
+  state: 'retrying' | 'blocked' | 'saved'
 }
 
 /** 草稿按键级频率变化,走防抖;队列的增删改是离散动作,立即落盘。 */
@@ -103,7 +116,18 @@ interface Entry {
   draft: string
   queued: QueuedInput[]
   timer: ReturnType<typeof setTimeout> | null
+  /**
+   * ★ 内存里的这一份还没成功落盘。写失败(或防抖还没写)时留着 —— `flush` 靠它
+   * 重试,`evictIfIdle` 也不淘汰它,否则一条没保存成功的草稿会随条目一起消失。
+   */
+  dirty: boolean
 }
+
+/** 离散操作前只拷会变的状态;`timer` 是调度对象,不是数据,不拷。 */
+type EntrySnapshot = Pick<Entry, 'draft' | 'queued' | 'dirty'>
+
+/** 一次变更:只给要改的字段,没给的保持原样(`draft` 不因 `queued` 操作被抹掉)。 */
+type EntryPatch = Partial<EntrySnapshot>
 
 /** 一条等会话空出来再投递的内部输入(后台汇报、目标检查)。 */
 interface DeferredInput {
@@ -128,6 +152,15 @@ export class SessionRuntime {
    * (发出 `message_commit`)才算;run 收尾时还没确认的,从这里接回去重投或退回。
    */
   private readonly unconfirmed = new Map<string, Map<string, DeferredInput>>()
+  /**
+   * 未落盘输入的状态,以及它此刻有没有人在等一次成功写(flush)。
+   *
+   * ★ 两者分开是必要的:反复尝试都失败时,状态会从 `retrying` 落到 `blocked`,
+   *   而界面必须能看到这一次降级;只发一次 `retrying` 会让「一直在失败」看起来
+   *   和「正在重试」完全一样。
+   */
+  private readonly persistence = new Map<string, 'retrying' | 'blocked'>()
+  private readonly flushWaiters = new Set<string>()
   /**
    * ★ 全局单调递增,而不是每会话各数各的:会话条目在空了之后会被丢掉,
    * 重新建出来时每会话计数会回到 0,渲染层就会把新快照当成旧的丢掉。
@@ -160,25 +193,55 @@ export class SessionRuntime {
   setDraft(sessionId: string, draft: string, immediate: boolean): void {
     const entry = this.load(sessionId)
     entry.draft = draft
+    entry.dirty = true
     if (immediate) {
+      // 写失败会抛给调用方;draft 与 dirty 都还留着,flush 能重试。
       this.write(sessionId, entry)
       return
     }
     if (entry.timer !== null) clearTimeout(entry.timer)
     entry.timer = setTimeout(() => {
       entry.timer = null
-      this.write(sessionId, entry)
+      try {
+        this.write(sessionId, entry)
+      } catch (error) {
+        // 防抖回调是后台定时器,抛出去就是 uncaught;这里记下来,留给 flush 重试。
+        // entry.dirty 仍是 true,这份草稿不会因为这一次失败被当成已保存。
+        this.deps.log(`[session] could not persist draft: ${sessionId}`, error)
+      }
     }, DRAFT_DEBOUNCE_MS)
   }
 
-  /** 退出、整库替换之前:把还挂在防抖里的草稿写掉,而不是丢掉。 */
+  /**
+   * 退出、整库替换之前:把还 dirty 的条目写掉,而不是丢掉。
+   *
+   * ★ 遍历条件是「没成功落盘」而不是「挂着防抖定时器」—— 防抖回调写失败之后
+   * timer 已经是 null,但那份草稿仍然只在内存里。
+   */
   flush(): void {
-    for (const [sessionId, entry] of [...this.entries]) {
-      if (entry.timer === null) continue
-      clearTimeout(entry.timer)
-      entry.timer = null
-      this.write(sessionId, entry)
+    const errors: unknown[] = []
+    const entering = [...this.entries].filter(([, entry]) => entry.dirty).map(([sessionId]) => sessionId)
+    for (const sessionId of entering) this.flushWaiters.add(sessionId)
+    try {
+      for (const [sessionId, entry] of [...this.entries]) {
+        if (entry.timer !== null) {
+          clearTimeout(entry.timer)
+          entry.timer = null
+        }
+        if (!entry.dirty) continue
+        try { this.write(sessionId, entry) } catch (error) { errors.push(error) }
+      }
+    } finally {
+      for (const sessionId of entering) this.flushWaiters.delete(sessionId)
+      for (const sessionId of entering) {
+        const entry = this.entries.get(sessionId)
+        if (entry === undefined || !entry.dirty) continue
+        this.reportPersistence(sessionId, 'blocked')
+      }
     }
+    // 先尝试所有会话,再向显式保存/退出调用方报告失败,不能牵连后面的草稿。
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'Some session inputs could not be saved')
   }
 
   /** 数据库整个换掉之后:内存里那份是旧库的,丢掉重读。不写回。 */
@@ -206,11 +269,13 @@ export class SessionRuntime {
         // ★ 软上限:超过就不是队列了,是便签本。**拒绝入队**,由调用方保留草稿 ——
         // 静默丢弃会让用户以为消息进了队列。
         if (entry.queued.length >= QUEUE_MAX_ITEMS) return { ...this.snapshot(sessionId, entry), accepted: false }
-        entry.queued = [
+        const attempted: QueuedInput[] = [
           ...entry.queued,
           makeQueuedInput(this.deps.newId(), op.text.slice(0, QUEUE_MAX_TEXT), op.options, this.deps.now(), op.attachments)
         ]
-        const result = this.commit(sessionId, entry)
+        // ★ 先写盘再确认:写失败会回滚内存并抛错,绝不回 accepted:true,
+        // 也不去 drain —— 否则一条没落盘的消息会被续跑发出去。
+        const result = this.mutate(sessionId, entry, { queued: attempted })
         // 渲染层以为还在跑,其实那一轮已经收尾了 —— 这时入队就等于「接着发」。
         if (this.deps.activeRun(sessionId) === undefined) this.drain(sessionId)
         return result
@@ -225,12 +290,12 @@ export class SessionRuntime {
         */
         const maxAt = entry.queued.reduce((m, q) => Math.max(m, q.promotedAt ?? 0), 0)
         const at = Math.max(this.deps.now(), maxAt + 1)
-        entry.queued = entry.queued.map((q) => q.id !== op.id
+        const attempted = entry.queued.map((q) => q.id !== op.id
           ? q
           : q.status === 'promoted'
             ? { ...withoutPromotedAt(q), status: 'pending' as const }
             : { ...q, status: 'promoted' as const, promotedAt: at })
-        const result = this.commit(sessionId, entry)
+        const result = this.mutate(sessionId, entry, { queued: attempted })
         // 空闲态被点插话 = 立即发送;运行中才是插话的正题,推给 run 的信箱
         if (this.deps.activeRun(sessionId) === undefined) this.drain(sessionId)
         else this.syncInterject(sessionId)
@@ -238,37 +303,37 @@ export class SessionRuntime {
       }
       case 'edit': {
         // ★ 不动档位快照,也不动 promotedAt —— 编辑不改变加塞顺序
-        entry.queued = entry.queued.map((q) => q.id === op.id ? { ...q, text: op.text.slice(0, QUEUE_MAX_TEXT) } : q)
-        const result = this.commit(sessionId, entry)
+        const attempted = entry.queued.map((q) => q.id === op.id ? { ...q, text: op.text.slice(0, QUEUE_MAX_TEXT) } : q)
+        const result = this.mutate(sessionId, entry, { queued: attempted })
         // run 信箱里存的是旧文本,必须重发覆盖
         this.syncInterject(sessionId)
         return result
       }
       case 'drop': {
-        entry.queued = entry.queued.filter((q) => q.id !== op.id)
-        const result = this.commit(sessionId, entry)
+        const attempted = entry.queued.filter((q) => q.id !== op.id)
+        const result = this.mutate(sessionId, entry, { queued: attempted })
         this.syncInterject(sessionId)
         return result
       }
       case 'take': {
         const item = entry.queued.find((q) => q.id === op.id)
         if (item === undefined) return { ...this.snapshot(sessionId, entry), accepted: false }
-        entry.queued = entry.queued.filter((q) => q.id !== op.id)
-        const result = this.commit(sessionId, entry)
+        const attempted = entry.queued.filter((q) => q.id !== op.id)
+        const result = this.mutate(sessionId, entry, { queued: attempted })
         this.syncInterject(sessionId)
         return { ...result, text: item.text }
       }
       case 'retagPermission': {
-        entry.queued = entry.queued.map((q) => q.options.permissionMode === op.mode
+        const attempted = entry.queued.map((q) => q.options.permissionMode === op.mode
           ? q
           : { ...q, options: { ...q.options, permissionMode: op.mode } })
-        return this.commit(sessionId, entry)
+        return this.mutate(sessionId, entry, { queued: attempted })
       }
       case 'retagMode': {
-        entry.queued = entry.queued.map((q) => q.options.mode === op.mode
+        const attempted = entry.queued.map((q) => q.options.mode === op.mode
           ? q
           : { ...q, options: { ...q.options, mode: op.mode } })
-        return this.commit(sessionId, entry)
+        return this.mutate(sessionId, entry, { queued: attempted })
       }
       case 'resume': {
         this.drain(sessionId)
@@ -286,6 +351,8 @@ export class SessionRuntime {
   private drain(sessionId: string): boolean {
     if (this.deps.isBusy(sessionId)) return false
     const entry = this.load(sessionId)
+    this.removeCommittedInputs(sessionId, entry)
+    if (entry.dirty) this.write(sessionId, entry)
     const batch = pickNextBatch(entry.queued)
     if (batch.length === 0) {
       this.evictIfIdle(sessionId, entry)
@@ -301,10 +368,19 @@ export class SessionRuntime {
     const sent = batch.filter((q) => !deferredIds.has(q.id))
     const sentIds = new Set(sent.map((q) => q.id))
     const before = entry.queued
-    entry.queued = before
+    const attempted = before
       .filter((q) => !sentIds.has(q.id))
       .map((q) => deferredIds.has(q.id) ? { ...withoutPromotedAt(q), status: 'pending' as const } : q)
-    this.commit(sessionId, entry)
+    /*
+      ★ 去掉这批之前先落盘。写失败就恢复 `before`(那一刻队列还在)并把错误抛给
+      调用方 —— 一条都没启动,而内存里也不能留下「已经移出队列」的假状态。
+    */
+    try {
+      this.commit(sessionId, entry, { queued: attempted })
+    } catch (error) {
+      entry.queued = before
+      throw error
+    }
 
     try {
       this.deps.launch({
@@ -317,9 +393,13 @@ export class SessionRuntime {
       return true
     } catch (error) {
       this.deps.log(`[session] queued input could not start: ${sessionId}`, error)
-      // 没发出去就原样放回 —— 宁可多等一轮,也不能让用户排的话消失
-      entry.queued = [...sent, ...entry.queued.filter((q) => !sentIds.has(q.id))]
-      this.commit(sessionId, entry)
+      // 没发出去就原样放回 —— 宁可多等一轮,也不能让用户排的话消失。
+      // ★ 上一次提交把队列清空后条目可能已被淘汰,按 id 取回活的那份再放回。
+      const live = this.load(sessionId)
+      live.queued = [...sent, ...live.queued.filter((q) => !sentIds.has(q.id))]
+      // ★ 放回本身也要落盘。这一步再失败就抛出去(由 runSettled 的调用方记日志),
+      // 不能静默算作回放成功 —— 否则重启后这几句话就没了。
+      this.commit(sessionId, live)
       return false
     }
   }
@@ -334,6 +414,7 @@ export class SessionRuntime {
     const active = this.deps.activeRun(sessionId)
     if (active === undefined) return
     const entry = this.load(sessionId)
+    this.removeCommittedInputs(sessionId, entry)
     const items = pickNextBatch(entry.queued)
       .filter((q) => q.status === 'promoted')
       .map((q) => ({ id: q.id, parts: batchToParts(mergeBatch([q])) }))
@@ -344,12 +425,51 @@ export class SessionRuntime {
   /**
    * run 把插话注入成用户消息时复用了条目 id,所以一条同 id 的 `message_commit`
    * 就是「已送达」的回执 —— 这时才移出队列,run 半路挂了消息也不会丢。
+   *
+   * 消费已经是事实，清队列写失败也不能把条目放回可执行队列。内存保留移除并标脏；
+   * 冷启动再以持久消费回执过滤，不能以旧队列行推翻已提交的用户消息。
    */
   private reapCommitted(sessionId: string, messageId: string): void {
     const entry = this.entries.get(sessionId)
     if (entry === undefined || !entry.queued.some((q) => q.id === messageId)) return
-    entry.queued = entry.queued.filter((q) => q.id !== messageId)
-    this.commit(sessionId, entry)
+    const before = entry.queued
+    try {
+      this.commit(sessionId, entry, { queued: before.filter((q) => q.id !== messageId) })
+    } catch (error) {
+      /*
+        ★ **不回滚成 `before`。** 消息已经提交了,这条输入已经执行过;
+        放回队列等于让下一次 `drain` 把同一句话再跑一遍。写失败时内存里保持
+        「已移除」并标脏(commit → apply 已经置 dirty),由 flush 或下一次
+        `removeCommittedInputs` 补写;盘上那份旧队列靠持久消费回执挡住。
+      */
+      this.deps.log(`[session] could not reap committed input: ${sessionId}`, error)
+    }
+  }
+
+  /**
+   * 按持久消费回执过滤队列中的条目(冷启动、以及每一次 drain/syncInterject 之前)。
+   *
+   * ★ 这一条才是「已执行的输入绝不会再发一次」的硬保证:清队列的写可能失败,
+   *   转录也可能被压缩/改写,而回执按 `(sessionId, messageId)` 独立留痕。
+   *   读到回执却没有待清理队列时必须**写回** —— 否则下次冷启动又会把它们捞出来。
+   */
+  private removeCommittedInputs(sessionId: string, entry: Entry): void {
+    if (entry.queued.length === 0) return
+    let committed: readonly string[]
+    try {
+      committed = this.deps.committedInputIds(sessionId, entry.queued.map((q) => q.id))
+    } catch (error) {
+      // 读不到回执时**不**据此删条目:宁可多留一条,也不能凭失败的查询丢掉输入。
+      this.deps.log(`[session] could not read committed inputs: ${sessionId}`, error)
+      return
+    }
+    if (committed.length === 0) return
+    const done = new Set(committed)
+    const queued = entry.queued.filter((q) => !done.has(q.id))
+    if (queued.length === entry.queued.length) return
+    entry.queued = queued
+    // 写失败只标脏并提示:内存里已经不含它们,不会再被本进程发出去。
+    try { this.write(sessionId, entry) } catch { /* write 已置 dirty 并记日志 */ }
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -672,7 +792,8 @@ export class SessionRuntime {
     const entry: Entry = {
       draft: saved?.draft ?? '',
       queued: (saved?.queued ?? []).filter(isLive),
-      timer: null
+      timer: null,
+      dirty: false
     }
     this.entries.set(sessionId, entry)
     return entry
@@ -686,15 +807,54 @@ export class SessionRuntime {
     return { sessionId, queued: entry.queued.filter(isLive), rev: this.rev }
   }
 
-  /** 队列变了:立即落盘、广播,返回带新 rev 的回执。 */
-  private commit(sessionId: string, entry: Entry): SessionQueueResult {
+  /**
+   * 队列变了:先落盘,成功之后才递增 rev 并广播,返回回执。
+   *
+   * ★ 顺序不能反。`write` 失败时会抛,调用方据此回滚内存并抛给上层 ——
+   * 若先递增 rev,一条没保存的消息会拿到一个「比谁都新」的回执;
+   * 若广播抛在写盘之后,那盘上其实已经写好了,不能被报成失败。
+   */
+  private commit(sessionId: string, entry: Entry, next?: EntryPatch): SessionQueueResult {
+    this.apply(entry, next)
+    this.write(sessionId, entry)
     this.rev += 1
     const snapshot = { sessionId, queued: entry.queued.filter(isLive), rev: this.rev }
-    this.write(sessionId, entry)
-    this.deps.emitQueue(snapshot)
+    try {
+      this.deps.emitQueue(snapshot)
+    } catch (error) {
+      // 已经落盘成功:广播失败只是这一次没送到界面,下一份快照会补上,不能报成失败。
+      this.deps.log(`[session] could not broadcast queue: ${sessionId}`, error)
+    }
     return { ...snapshot, accepted: true }
   }
 
+  /**
+   * 离散的队列操作:先快照、再尝试 commit,失败就把内存回滚到操作前并重新抛出。
+   *
+   * ★ 快照只拷会变的状态,不含 `timer`(调度对象,不是数据)。`queued` 在
+   * 各个操作里都是 immutable 映射,拷一个数组引用就够了。
+   */
+  private mutate(sessionId: string, entry: Entry, next: EntryPatch): SessionQueueResult {
+    const before: EntrySnapshot = { draft: entry.draft, queued: entry.queued, dirty: entry.dirty }
+    try {
+      return this.commit(sessionId, entry, next)
+    } catch (error) {
+      this.apply(entry, before)
+      throw error
+    }
+  }
+
+  private apply(entry: Entry, next?: EntryPatch): void {
+    if (next === undefined) return
+    if (next.draft !== undefined) entry.draft = next.draft
+    if (next.queued !== undefined) entry.queued = next.queued
+    entry.dirty = next.dirty ?? true
+  }
+
+  /**
+   * 落盘。**写失败必须重抛** —— 调用方靠这个异常回滚内存、拒绝回 accepted。
+   * `dirty` 只有写成功才清:这条会话在没读写盘之前一直留着,`flush` 还能重试。
+   */
   private write(sessionId: string, entry: Entry): void {
     if (entry.timer !== null) {
       clearTimeout(entry.timer)
@@ -703,14 +863,40 @@ export class SessionRuntime {
     try {
       this.deps.writeInput(sessionId, this.stateOf(entry))
     } catch (error) {
+      entry.dirty = true
       this.deps.log(`[session] could not persist input: ${sessionId}`, error)
+      /*
+        ★ 有 flush 在跑时**先不报**:那一次可能接着就成功了,而每次按键都降级成
+        `blocked` 会让「正在重试」和「一直失败」在界面上没有区别。flush 收尾时
+        仍 dirty 才报 blocked（见 `flush`）。
+      */
+      if (!this.flushWaiters.has(sessionId)) this.reportPersistence(sessionId, 'retrying')
+      throw error
     }
+    entry.dirty = false
+    // 只在之前报过问题时发一次恢复,避免每次按键都推一条「已保存」。
+    if (this.persistence.has(sessionId)) this.reportPersistence(sessionId, 'saved')
     this.evictIfIdle(sessionId, entry)
+  }
+
+  /** 只报状态变化;同一状态不重复推,`saved` 把该会话从表里摘掉。 */
+  private reportPersistence(sessionId: string, state: SessionInputPersistence['state']): void {
+    if (state === 'saved') this.persistence.delete(sessionId)
+    else this.persistence.set(sessionId, state)
+    try {
+      this.deps.onPersistenceChange?.({ sessionId, state })
+    } catch (error) {
+      // 提示送不出去不能反过来影响输入本身。
+      this.deps.log(`[session] persistence notice failed: ${sessionId}`, error)
+    }
   }
 
   /** 空条目不常驻:开过几百个会话,这张表也只留着真有未发输入的那几个。 */
   private evictIfIdle(sessionId: string, entry: Entry): void {
-    if (entry.timer === null && entry.draft === '' && entry.queued.length === 0) this.entries.delete(sessionId)
+    // ★ dirty 的条目不能丢:内存里是唯一一份还没保存的输入,淘汰等于把它弄丢。
+    if (entry.timer === null && !entry.dirty && entry.draft === '' && entry.queued.length === 0) {
+      this.entries.delete(sessionId)
+    }
   }
 }
 

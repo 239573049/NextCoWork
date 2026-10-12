@@ -5,7 +5,7 @@
  * `net/oauth-loopback.ts` 里,零 Electron、可直测。这里只做四件事:
  * 查规格、把 `shell.openExternal` 和 `host.fetch` 注入进去、把结果落库、广播。
  */
-import { shell } from 'electron'
+import { openExternalUrl } from '../services/external-opener'
 import type { CredentialInfo } from '../../shared/domain/provider'
 import type { OAuthCredential } from '../../shared/domain/credential'
 import { parseCredential, serializeCredential } from '../../shared/domain/credential'
@@ -186,7 +186,7 @@ async function runFlow(providerId: string, spec: OAuthProviderSpec): Promise<OAu
         授权 URL 带着我们自己生成的 state,不该从渲染层过一遍手 —— 那等于把
         CSRF 防线交给了它。这里直接用 shell,`src/main/ipc/` 本来就允许碰 Electron。
       */
-      openBrowser: (url) => shell.openExternal(url),
+      openBrowser: (url) => openExternalUrl(url),
       /*
         ★ 「这次要不要粘」是从 `spec.grant` 现算的,不是渲染层猜的。
         渲染层拿它决定 `waiting` 阶段画输入框还是画 spinner —— 猜错的表现是

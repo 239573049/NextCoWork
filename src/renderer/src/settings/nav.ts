@@ -21,6 +21,7 @@ export type SettingsPageId =
   | 'usage'
   | 'review'
   | 'connection'
+  | 'devices'
   | 'computer'
   | 'data'
   | 'about'
@@ -130,6 +131,11 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
       { id: 'network', label: '网络' }
     ]
   },
+  /**
+   * 第十三页:控制端本地的「已配对设备」。它和「连接」页的 SSH/MCP 是两回事 —— 那些是这台设备
+   * 去连别的东西,这一页是这台电脑去控制别的 NextCoWork 设备。
+   */
+  { id: 'devices', label: '设备' },
   { id: 'computer', label: '电脑操作' },
   { id: 'data', label: '数据' },
   { id: 'about', label: '关于' }

@@ -161,7 +161,12 @@ function guardStatement(statement: StatementSync, database: DatabaseSync): State
  */
 const prepared = new Map<string, StatementSync>()
 
-function openAt(path: string): DatabaseSync {
+export interface DatabaseOpenOptions {
+  /** 独立服务确认命令前需要 FULL；现有桌面默认值保持不变。 */
+  durability?: 'normal' | 'full'
+}
+
+function openAt(path: string, options: DatabaseOpenOptions = {}): DatabaseSync {
   const d = new DatabaseSync(path, {
     // 默认就是 true,写出来是因为 model_aliases 的 ON DELETE CASCADE 全靠它。
     // ★ 这是**连接级**开关,不是存在文件里的属性:换个连接忘了开,
@@ -172,7 +177,7 @@ function openAt(path: string): DatabaseSync {
   // WAL:读不挡写。`:memory:` 上这句是无害的空转(内存库没有日志文件)。
   d.exec('PRAGMA journal_mode = WAL')
   // WAL 下 NORMAL 是标准搭配:崩溃不会坏库,最坏丢掉最后几个已提交事务。
-  d.exec('PRAGMA synchronous = NORMAL')
+  d.exec(options.durability === 'full' ? 'PRAGMA synchronous = FULL' : 'PRAGMA synchronous = NORMAL')
   /*
     单实例锁(`main/index.ts`)保证同一时刻只有一个进程开这个文件,所以争用
     几乎只会来自外面挂着的一个 sqlite3 CLI。超时取 2 秒而不是常见的 5 秒:
@@ -256,7 +261,7 @@ function migrate(d: DatabaseSync): void {
  * 那些行凭空消失 → 症状是「配置重启后没了」,而这恰恰是**没有持久化时的原症状**,
  * 所以没人会怀疑到调用顺序上去。
  */
-export function openDatabase(dir: string): void {
+export function openDatabase(dir: string, options: DatabaseOpenOptions = {}): void {
   assertTransactionAccess()
   if (handle !== null) {
     throw new Error(
@@ -273,7 +278,7 @@ export function openDatabase(dir: string): void {
   */
   mkdirSync(dir, { recursive: true })
   handlePath = join(dir, DB_FILENAME)
-  handle = openAt(handlePath)
+  handle = openAt(handlePath, options)
   sealed = false
 }
 
