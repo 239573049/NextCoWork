@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process'
 import { accessSync, constants, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { ensurePtyHelperExecutable } from './pty-helper'
 
 export class DiagnoseUsageError extends Error {}
 export interface DiagnoseIo { out(line: string): void; err(line: string): void }
@@ -54,10 +55,22 @@ export const realProbes: Probes = {
     } finally { database.close() }
   },
   async pty() {
+    /*
+      先补 helper 的执行位(npm ≥ 12 不跑依赖的 install script,装出来的 spawn-helper 是 644,
+      真正的失败会是原生层一句 `posix_spawnp failed`)。补不上时把原因带进详情:那才是要改的东西。
+    */
+    const helperProblem = ensurePtyHelperExecutable()
     const pty = await import('node-pty')
     const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
     const args = process.platform === 'win32' ? ['/c', 'echo ncw-diagnose'] : ['-c', 'echo ncw-diagnose']
-    const child = pty.spawn(shell, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd: process.cwd(), env: process.env as Record<string, string> })
+    let child: import('node-pty').IPty
+    try {
+      child = pty.spawn(shell, args, { name: 'xterm-256color', cols: 80, rows: 24, cwd: process.cwd(), env: process.env as Record<string, string> })
+    } catch (error) {
+      // 可操作的那一句放前面:原生层的 `posix_spawnp failed` 本身指不出要改什么。
+      const failure = error instanceof Error ? error.message : 'the pseudo-terminal could not be started'
+      throw new Error(helperProblem === null ? failure : `${helperProblem}; ${failure}`, { cause: error })
+    }
     let output = ''
     child.onData((chunk) => { output += chunk })
     const exited = new Promise<void>((resolve) => child.onExit(() => resolve()))

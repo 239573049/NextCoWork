@@ -53,7 +53,17 @@ async function main() {
       target: 'node24',
       minify: false,
       sourcemap: true,
-      rollupOptions: { output: { format: 'es', entryFileNames: 'bin.mjs', inlineDynamicImports: true } }
+      rollupOptions: {
+        output: {
+          format: 'es', entryFileNames: 'bin.mjs', inlineDynamicImports: true,
+          /*
+            产物要能当命令直接跑:`npm i -g` 给 bin 建的是指向本文件的软链(POSIX),
+            内核按 shebang 决定怎么执行它 —— 没有 shebang 就会把它当 shell 脚本读,
+            报一行 `syntax error near unexpected token`。所以 shebang 属于产物本身。
+          */
+          banner: '#!/usr/bin/env node'
+        }
+      }
     },
     ssr: { target: 'node', noExternal: [] },
     resolve: { conditions: ['node'] }

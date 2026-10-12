@@ -21,6 +21,7 @@ import { installAgentStartGuard, shutdownRuns } from '../../main/services/agent'
 import { DeviceProtocolError } from '../../shared/device/errors'
 import { DeviceEventHub } from './events'
 import { registerCoreMethods } from './methods/core'
+import { ensurePtyHelperExecutable } from './pty-helper'
 import { startDeviceService, type DeviceService } from './service'
 
 export interface CliIo {
@@ -69,6 +70,12 @@ export function parseArgs(argv: readonly string[]): CliOptions {
 
 /** 启动并返回运行中的服务;调用方负责在信号到来时 `stop()`。 */
 export async function runDeviceService(options: CliOptions, io: CliIo): Promise<DeviceService> {
+  /*
+    终端是**可选**能力:从 tgz / `npm i -g` 装的 node-pty 缺执行位(见 pty-helper.ts),
+    这里补一次。补不上也只警告,不拦服务启动 —— 其余能力照常,`diagnose` 会如实报 pty 失败。
+  */
+  const ptyProblem = ensurePtyHelperExecutable()
+  if (ptyProblem !== null) io.err(`warning: terminals are unavailable: ${ptyProblem}`)
   const hub = new DeviceEventHub()
   let uninstall: (() => void) | null = null
   const advertiseHosts = options.advertise.length > 0 ? options.advertise : [options.host]

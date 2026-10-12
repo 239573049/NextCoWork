@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { bareSpecifiers, buildPackageJson, runtimeDependencies } from './package-agent.mjs'
+import { bareSpecifiers, buildPackageJson, packedFilename, runtimeDependencies } from './package-agent.mjs'
 
 const deps = { ws: '8.22.0', zod: '^4.5.4', 'node-pty': '^1.1.0', '@msgpack/msgpack': '3.1.3', unused: '1.0.0' }
 
@@ -34,5 +34,14 @@ test('produces a manifest that pins the Node floor and the repository versions',
   assert.equal(manifest.version, '1.2.3')
   assert.equal(manifest.type, 'module')
   assert.equal(manifest.engines.node, '>=24')
+  // 装完得有命令可跑:只有 main 时用户还得自己拼 node_modules 里的路径。
+  assert.deepEqual(manifest.bin, { 'ncw-device-service': 'bin.mjs' })
   assert.deepEqual(manifest.dependencies, { ws: '8.22.0' })
+})
+
+test('reads the tarball name from either `npm pack --json` shape', () => {
+  const entry = { filename: 'nextcowork-device-service-1.2.3.tgz' }
+  assert.equal(packedFilename(JSON.stringify([entry])), entry.filename) // npm ≤ 11
+  assert.equal(packedFilename(JSON.stringify({ 'nextcowork-device-service': entry })), entry.filename) // npm ≥ 12
+  assert.throws(() => packedFilename('{}'), /no filename/)
 })

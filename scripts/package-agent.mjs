@@ -69,12 +69,25 @@ export function buildPackageJson(pkg, code) {
       description: 'NextCoWork standalone device service (no Electron)',
       type: 'module',
       main: 'bin.mjs',
+      // 命令名与 bin.ts 里的用法一致:`ncw-device-service --data-dir <d>`(或 service/diagnose/takeover 子命令)。
+      bin: { 'ncw-device-service': 'bin.mjs' },
       engines: { node: '>=24' },
       files: ['bin.mjs', 'bin.mjs.map', 'RUNTIME.json'],
       dependencies
     },
     missing
   }
+}
+
+/**
+ * `npm pack --json` 的产物文件名。npm ≥ 12 输出的是**按包名索引的对象**,npm ≤ 11 是数组 —— 两种都认,
+ * 认不出来就当失败(报出原文),而不是让 `.filename` 抛一个看不出所以然的 TypeError。
+ */
+export function packedFilename(stdout) {
+  const parsed = JSON.parse(stdout)
+  const first = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0]
+  if (typeof first?.filename !== 'string') throw new Error(`npm pack produced no filename:\n${stdout}`)
+  return first.filename
 }
 
 function main() {
@@ -92,7 +105,7 @@ function main() {
 
   const packed = spawnSync('npm', ['pack', '--pack-destination', join(root, 'out'), '--json'], { cwd: packageDir, encoding: 'utf8', shell: process.platform === 'win32' })
   if (packed.status !== 0) throw new Error(`npm pack failed:\n${packed.stderr}`)
-  const tarball = JSON.parse(packed.stdout)[0].filename
+  const tarball = packedFilename(packed.stdout)
   console.log(`device service package ready: ${join(root, 'out', tarball)} (${Object.keys(manifest.dependencies).length} runtime dependencies)`)
   return { tarball: join(root, 'out', tarball) }
 }
@@ -103,7 +116,15 @@ async function verify(tarball) {
   let child = null
   try {
     const shell = process.platform === 'win32'
-    const install = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--prefix', work, tarball], { encoding: 'utf8', shell })
+    /*
+      `npm run` 会把用户 .npmrc 里的配置导出成 `npm_config_*` 交给脚本。用户 npmrc 里若写了
+      `allow-scripts=…`(npm ≥ 12 的常见配置),嵌套的 npm 会把它当成命令行上的 `--allow-scripts`,
+      而项目级安装里那个标志是**直接报错**的:与被装的包无关,却会让 verify 永远跑不通。
+      只摘这一个变量:registry / 镜像等其它配置(本机与镜像站都靠它们)照旧继承。
+    */
+    const env = { ...process.env }
+    delete env.npm_config_allow_scripts
+    const install = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--prefix', work, tarball], { encoding: 'utf8', shell, env })
     if (install.status !== 0) throw new Error(`install failed:\n${install.stderr}`)
     const entry = join(work, 'node_modules', 'nextcowork-device-service', 'bin.mjs')
     child = spawn(process.execPath, [entry, '--data-dir', join(work, 'data')], { stdio: ['ignore', 'pipe', 'pipe'] })
