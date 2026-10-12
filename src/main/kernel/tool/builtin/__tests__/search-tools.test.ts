@@ -7,6 +7,7 @@ import { EnvironmentError } from '../../../../environment/errors'
 import type { ToolContext } from '../../registry'
 import { defaultSkip } from '../ignore'
 import { redosRisk } from '../redos'
+import { setGrepBackendsForTest } from '../grep-native'
 import { globTool, grepTool, SEARCH_LIMITS } from '../search'
 import { walk } from '../walk'
 
@@ -341,6 +342,10 @@ describe('Grep · 过滤与选项', () => {
  * 模型会以为仓库变了;撞上限时截在哪个文件也不能随「谁先读完」漂移。
  */
 describe('Grep · 并发扫描', () => {
+  // JS 引擎自己的并发调度,原生后端关掉
+  beforeEach(() => { setGrepBackendsForTest([]) })
+  afterEach(() => { setGrepBackendsForTest(null) })
+
   it('keeps traversal order and cuts at the match cap exactly where a serial scan would', async () => {
     // 每个文件 10 条命中,40 个文件 → 上限 200 恰好落在第 20 个文件
     for (let i = 0; i < 40; i++) put(`f${String(i).padStart(2, '0')}.txt`, 'hit\n'.repeat(10))
@@ -410,6 +415,10 @@ describe('Grep · 并发扫描', () => {
  * 谁把 `redos.ts` 那道筛查去掉,这里会直接超时,而不是给出一个错误答案。
  */
 describe('★ Grep · 灾难性回溯', () => {
+  // 静态筛查只挡 JS 这条路 —— 原生程序在独立进程里,卡住了由 spawn 超时整树杀掉
+  beforeEach(() => { setGrepBackendsForTest([]) })
+  afterEach(() => { setGrepBackendsForTest(null) })
+
   const EVIL: string[] = ['(a+)+$', '^(a+)+$', '(\\s*\\w+)*$', '(a{2,})+$', '((a+)b)+$']
 
   it('嵌套无界量词被静态筛查拦下', () => {

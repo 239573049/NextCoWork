@@ -4,16 +4,21 @@
  * 名字、参数、描述结构全部对齐 Claude Code(`output_mode` / `-i` / `-n` /
  * `-A` / `-B` / `-C` / `head_limit` / `multiline` 都是 CC 的原参数名)。
  *
- * ★ 但有一处**故意不照抄**:CC 的 Grep 描述里写的是「built on ripgrep」,
- * 我们底下是 **JavaScript 的 RegExp**。这一条必须照实说 —— 两种引擎的转义规则
- * 不一样(ripgrep 里 `\{` 要转义、JS 里不用;JS 没有 `\p{...}` 之外的那套
- * ripgrep 扩展)。描述里写 ripgrep 的话,模型会按 ripgrep 的规矩写正则,
- * 然后拿到一堆「正则不合法」或者更糟的**静默的空结果**。
+ * ## Grep 的后端:原生优先,JS 兜底
  *
- * 两个工具都走 `walk.ts` 在内核侧自己遍历,而不是加一个 `KernelHost.walk` 端口 ——
- * 理由写在 `walk.ts` 的文件头:遍历带着忽略规则,忽略规则是策略,端口是能力。
+ * 优先级 `rg` > `git grep` > `grep` > JS 引擎(见 `grep-native.ts`)。原生程序在宿主上
+ * 经 `host.spawn` 跑,只交回「哪些文件的哪些行」,行正文、上下文与三种输出模式的渲染
+ * 都在这里,所以换后端不换输出格式。任何一个原生后端用不了(没装、方言不认、多行匹配)
+ * 都顺延到下一个,最后落到下面这条 JS 实现。
  *
- * ## ★ Grep 的 ReDoS:正则**不在主线程跑**
+ * ★ 描述按 **ripgrep 语法**写:它是首选后端,而 PCRE(`grep -P` / `git grep -P`)与
+ * JS 在常用子集上和它一致。描述同时如实说出「可能落到 JS」,并给出可移植的子集 ——
+ * 让模型按某一种引擎的独有写法去写,换到别的后端上就是「正则不合法」或静默的空结果。
+ *
+ * Glob 与 Grep 的 JS 路径都走 `walk.ts` 在内核侧自己遍历,而不是加一个 `KernelHost.walk`
+ * 端口 —— 理由写在 `walk.ts` 的文件头:遍历带着忽略规则,忽略规则是策略,端口是能力。
+ *
+ * ## ★ Grep 的 ReDoS(JS 路径):正则**不在主线程跑**
  *
  * 正则是**模型给的**。原先直接 `new RegExp` 之后在主线程上匹配,一个嵌套无界量词
  * 就能让主进程彻底无响应 —— 单线程,V8 的匹配又是原子的:跑进一次灾难性回溯后
@@ -41,16 +46,18 @@
  * 对应的测试断言的是「**在 X 毫秒内返回**」,不是结果正确 —— 那是行为测试,
  * 改这个文件的时候别把它当成一条可以放宽的断言。
  */
+import { relative } from 'node:path'
 import { z } from 'zod'
-import { toolFail, toolOk } from '../../../../shared/agent/tool'
+import { toolFail, toolOk, type ToolResult } from '../../../../shared/agent/tool'
 import { EnvironmentError, missingPath } from '../../../environment/errors'
 import { defineTool } from '../define'
 import type { ToolContext, ToolRegistration } from '../registry'
 import { compileGlob, normalizeGlobPath } from './glob-match'
 import { GREP_REGEX_LIMITS, GrepRegexPool, MAX_FILE_BYTES, RegexBudgetError } from './grep-regex'
+import { nativeNameHints, runNativeGrep, type NativeGrepOutcome } from './grep-native'
 import { literalPrefilter } from './grep-prefilter'
 import { defaultSkip } from './ignore'
-import { looksBinary, relOf, resolvePath, walkBaseOf } from './paths'
+import { looksBinary, relOf, resolvePath, walkBaseOf, type WalkBase } from './paths'
 import { redosRisk } from './redos'
 import { walk } from './walk'
 
@@ -117,6 +124,13 @@ export function resetGrepRegexDeadlineForTest(): void {
  * 封它的入参长度(见 `grep-regex.ts` 的 `MAX_FILE_BYTES`:长度与磁盘字节数同口径)。
  */
 const MAX_GREP_FILE_BYTES = MAX_FILE_BYTES
+/**
+ * 原生后端(`grep-native.ts`)单次进程的超时(真实时间,由 spawn 计)。
+ *
+ * ★ 比 JS 的 5 秒宽:rg 在大仓库上为了有序输出(`--sort path`)放弃了并行,
+ * 而它即使这样也比 JS 那条路快得多 —— 宁可多等几秒拿全结果。超时同样返回部分结果 + 说明。
+ */
+const NATIVE_TIMEOUT_MS = 10_000
 const SNIFF_BYTES = 4096
 /**
  * 不大于这个的文件**一次读完**再嗅探;更大的先读 `SNIFF_BYTES` 嗅探、是文本才全量读。
@@ -151,6 +165,15 @@ const IGNORE_NOTE =
   'Dependency and build directories (node_modules, .git, dist, out, build, target, coverage, …) are ' +
   'skipped automatically. This is a fixed list; .gitignore is NOT read. To search inside those ' +
   'directories, use Bash instead.'
+
+/**
+ * Grep 的忽略说明。★ 和 Glob 不同:rg / git grep 原生遵守 `.gitignore`,
+ * 这一点必须告诉模型,否则它会把「被忽略的文件里没搜到」当成「仓库里没有」。
+ */
+const GREP_IGNORE_NOTE =
+  'Dependency and build directories (node_modules, .git, dist, out, build, target, coverage, …) are ' +
+  'always skipped. When ripgrep or git grep does the search, files ignored by .gitignore are skipped too. ' +
+  'To search inside those, use Bash instead.'
 
 /**
  * `type` 参数认识的语言别名。
@@ -552,16 +575,19 @@ export const grepTool: ToolRegistration = defineTool({
     'Usage:\n' +
     '- ALWAYS use Grep to search file contents. NEVER shell out to grep or rg through Bash — this tool ' +
     'applies the ignore list, skips binaries, and has a timeout budget that the shell versions do not\n' +
-    '- Supports full JAVASCRIPT regular expression syntax (e.g. "log.*Error", "function\\s+\\w+"). ' +
-    'This is NOT ripgrep: { } need no escaping here, and ripgrep-specific extensions do not exist\n' +
+    '- Supports full regex syntax (e.g. "log.*Error", "function\\s+\\w+"). Pattern syntax is ripgrep style: ' +
+    'escape literal braces (use "interface\\{\\}" to find "interface{}" in Go code)\n' +
+    '- Runs on ripgrep when it is installed, otherwise git grep / grep, otherwise a built-in JavaScript regex engine. ' +
+    'For portable results stick to the common subset: \\d \\w \\s \\b, character classes, groups, alternation, ' +
+    'lazy quantifiers\n' +
     '- Filter files with glob (e.g. "*.js", "**/*.tsx") or with type by language (e.g. "js", "py")\n' +
     '- output_mode: "content" returns matching lines, "files_with_matches" returns just paths (DEFAULT), ' +
     '"count" returns a match count per file\n' +
     '- For an open-ended question that will take several rounds of searching, use Task to launch a subagent instead\n' +
     '- Matching is WITHIN A SINGLE LINE by default. Pass multiline: true to match across lines ' +
     '(e.g. "interface\\s+X[\\s\\S]*?field")\n' +
-    '- Binary files and files over 5MB are skipped\n' +
-    `- ${IGNORE_NOTE}`,
+    '- Binary files are skipped; files over 5MB may be skipped\n' +
+    `- ${GREP_IGNORE_NOTE}`,
   schema: GrepInput,
   readOnly: true,
   destructive: false,
@@ -570,19 +596,7 @@ export const grepTool: ToolRegistration = defineTool({
     const r = await resolvePath(ctx, input.path ?? '')
     if (!r.ok) return r.result
 
-    // ★ 真实墙钟从这里起算:遍历 + 匹配共用这一个安全预算,不是「遍历 5s 再匹配 5s」
-    const wallStartMs = Date.now()
     const multiline = input.multiline === true
-
-    /*
-      ★ 静态筛查是一道**便宜的快速拒绝**:嵌套无界量词当场给模型一句「改成什么」。
-      它只认识一个家族,交替式(如 ^(a|aa)+$ )和有界内层但外层无界的写法会漏过去 ——
-      漏过去的由下面的隔离池兜底(见 `grep-regex.ts`)。所以这道闸**不再是唯一**
-      承重那道,但保留它是因为对最常见的危险写法,「当场拒绝并说明怎么改」比
-      「跑几秒再超时」对模型友好得多。
-    */
-    const risk = redosRisk(input.pattern)
-    if (risk !== null) return toolFail(risk)
 
     // ★ 认不出的 type 要报错,不能当成「不过滤」—— 静默放宽范围是查不出来的错
     if (input.type !== undefined && TYPE_GLOBS[input.type] === undefined) {
@@ -599,6 +613,56 @@ export const grepTool: ToolRegistration = defineTool({
 
     const nameFilterPattern = input.glob ?? (input.type === undefined ? undefined : TYPE_GLOBS[input.type])
     const nameFilter = nameFilterPattern === undefined ? null : compileGlob(nameFilterPattern)
+    const needText = input.output_mode === 'content'
+
+    /*
+      ★ 先交给原生程序(rg > git grep > grep,见 `grep-native.ts`)。它们跑在独立进程里,
+      回溯卡死的是它们自己,超时由 spawn 整树杀掉 —— 所以下面那道 ReDoS 静态筛查
+      只拦 JS 这条路。任何一个原生后端用不了都顺延,最后才落到 JS。
+    */
+    const native = await runNativeGrep(ctx, {
+      pattern: input.pattern,
+      ignoreCase: input['-i'] === true,
+      multiline,
+      target: r.abs,
+      isDir: st.isDir,
+      nameHints: nameFilterPattern === undefined ? null : nativeNameHints(nameFilterPattern),
+      maxPerFile: MAX_GREP_MATCHES,
+      timeoutMs: NATIVE_TIMEOUT_MS
+    })
+    if (native.kind === 'ok') {
+      const nativeHits = await collectNativeHits(ctx, native, { abs: r.abs, isDir: st.isDir }, walkBase, nameFilter, needText)
+      const notes: string[] = []
+      if (nativeHits.totalMatches >= MAX_GREP_MATCHES) notes.push(matchCapNote())
+      if (native.timedOut || native.truncated) {
+        notes.push(
+          `${native.backend} 搜索${native.timedOut ? `超过 ${String(NATIVE_TIMEOUT_MS)}ms 被中止` : '输出超过上限'},` +
+            `结果不完整。请用 path、glob 或 type 缩小范围再搜一次`
+        )
+      }
+      return formatGrepResult(
+        input,
+        nativeHits.hits,
+        notes,
+        notes.length > 0
+          ? `No matches found under ${base}.\n[${notes.join('; ')}]`
+          : `No content matching "${input.pattern}" under ${base}.`
+      )
+    }
+
+    // ★ 真实墙钟从这里起算:遍历 + 匹配共用这一个安全预算,不是「遍历 5s 再匹配 5s」
+    const wallStartMs = Date.now()
+
+    /*
+      ★ 静态筛查是一道**便宜的快速拒绝**:嵌套无界量词当场给模型一句「改成什么」。
+      它只认识一个家族,交替式(如 ^(a|aa)+$ )和有界内层但外层无界的写法会漏过去 ——
+      漏过去的由下面的隔离池兜底(见 `grep-regex.ts`)。所以这道闸**不再是唯一**
+      承重那道,但保留它是因为对最常见的危险写法,「当场拒绝并说明怎么改」比
+      「跑几秒再超时」对模型友好得多。
+    */
+    const risk = redosRisk(input.pattern)
+    if (risk !== null) return toolFail(risk)
+
     const budget = ctx.host.clock.now() + SEARCH_BUDGET_MS
     // path 直接指到一个文件时就只搜那一个,不必遍历
     let files: Array<{ rel: string; abs: string }>
@@ -658,17 +722,16 @@ export const grepTool: ToolRegistration = defineTool({
       // 编译在 worker 里做 —— 语法错误拿到的是 V8 的原话,成句留给下面
       const compileError = await pool.compiled()
       if (compileError !== null) {
+        // ★ rg 也说不合法时报 rg 的原话 —— 描述里告诉模型的是 ripgrep 语法
         return toolFail(
-          `Invalid regular expression: ${compileError}. ` +
-            `This is JavaScript regex syntax; when searching for a literal, escape . ( ) [ ] * + ? with a backslash.`
+          native.regexError !== undefined
+            ? `Invalid regular expression: ${native.regexError}`
+            : `Invalid regular expression: ${compileError} (checked by the built-in JavaScript regex engine). ` +
+              `When searching for a literal, escape . ( ) [ ] { } * + ? with a backslash.`
         )
       }
       const prefilter = literalPrefilter(input.pattern, input['-i'] === true)
-      /*
-        ★ 只有 content 模式才需要行正文(`renderContent` 取上下文用)。命中路径 /
-        计数用不到 —— 传下去让它别在主线程切整文件(见 `grepFile` 的 `needText`)
-      */
-      const needText = input.output_mode === 'content'
+      // ★ needText:只有 content 模式才需要行正文,见 `grepFile` 的同名参数
       scan = await scanFiles(files, budget, ctx, (f) => grepFile(ctx, f.abs, f.rel, pool, prefilter, needText))
     } catch (error) {
       if (!(error instanceof RegexBudgetError)) throw error
@@ -682,11 +745,7 @@ export const grepTool: ToolRegistration = defineTool({
     const { hits, totalMatches, scanned, budgetHit, timedOut } = scan
 
     const notes: string[] = []
-    if (totalMatches >= MAX_GREP_MATCHES) {
-      notes.push(
-        `hit the ${String(MAX_GREP_MATCHES)} match cap; narrow the pattern, glob, or path and search again`
-      )
-    }
+    if (totalMatches >= MAX_GREP_MATCHES) notes.push(matchCapNote())
     /*
       ★ 超时**必须说出来**。静默返回部分结果的话,模型会据此断言
       「这个字符串在仓库里不存在」—— 而那是个看起来很有说服力的错误答案。
@@ -707,50 +766,133 @@ export const grepTool: ToolRegistration = defineTool({
     }
     if (walkTruncated) notes.push('traversal limit reached; some directories were not scanned')
 
-    const tail = notes.length > 0 ? `\n\n[${notes.join('; ')}]` : ''
-
-    if (hits.length === 0) {
-      return toolOk(notes.length > 0
+    return formatGrepResult(
+      input,
+      hits,
+      notes,
+      notes.length > 0
         ? `No matches found in the ${String(scanned)} files scanned under ${base}.\n[${notes.join('; ')}]`
         : `No content matching "${input.pattern}" in the ${String(files.length)} files under ${base}.`
-      )
-    }
-
-    const mode = input.output_mode ?? 'files_with_matches'
-    const limit = input.head_limit
-
-    if (mode === 'files_with_matches') {
-      const paths = hits.map((h) => h.rel)
-      const shown = limit === undefined ? paths : paths.slice(0, limit)
-      return toolOk(
-        shown.join('\n') +
-          (shown.length < paths.length ? `\n[showing the first ${String(shown.length)} files]` : '') +
-          tail
-      )
-    }
-
-    if (mode === 'count') {
-      const rows = hits.map((h) => `${h.rel}:${String(h.lines.length)}`)
-      const shown = limit === undefined ? rows : rows.slice(0, limit)
-      return toolOk(
-        shown.join('\n') +
-          (shown.length < rows.length ? `\n[showing the first ${String(shown.length)} files]` : '') +
-          tail
-      )
-    }
-
-    const ctxLines = input['-C']
-    const before = ctxLines ?? input['-B'] ?? 0
-    const after = ctxLines ?? input['-A'] ?? 0
-    const rendered = renderContent(hits, before, after, input['-n'] === true)
-    const shown = limit === undefined ? rendered : rendered.slice(0, limit)
-    return toolOk(
-      shown.join('\n') +
-        (shown.length < rendered.length ? `\n[showing the first ${String(shown.length)} lines]` : '') +
-        tail
     )
   }
 })
+
+function matchCapNote(): string {
+  return `hit the ${String(MAX_GREP_MATCHES)} match cap; narrow the pattern, glob, or path and search again`
+}
+
+/** 三种 `output_mode` 的渲染,JS 与原生两条路共用 —— 换后端不能换输出格式。`empty` = 没有命中时的整句 */
+function formatGrepResult(
+  input: z.infer<typeof GrepInput>,
+  hits: FileHits[],
+  notes: string[],
+  empty: string
+): ToolResult {
+  if (hits.length === 0) return toolOk(empty)
+  const tail = notes.length > 0 ? `\n\n[${notes.join('; ')}]` : ''
+
+  const mode = input.output_mode ?? 'files_with_matches'
+  const limit = input.head_limit
+
+  if (mode === 'files_with_matches') {
+    const paths = hits.map((h) => h.rel)
+    const shown = limit === undefined ? paths : paths.slice(0, limit)
+    return toolOk(
+      shown.join('\n') +
+        (shown.length < paths.length ? `\n[showing the first ${String(shown.length)} files]` : '') +
+        tail
+    )
+  }
+
+  if (mode === 'count') {
+    const rows = hits.map((h) => `${h.rel}:${String(h.lines.length)}`)
+    const shown = limit === undefined ? rows : rows.slice(0, limit)
+    return toolOk(
+      shown.join('\n') +
+        (shown.length < rows.length ? `\n[showing the first ${String(shown.length)} files]` : '') +
+        tail
+    )
+  }
+
+  const ctxLines = input['-C']
+  const before = ctxLines ?? input['-B'] ?? 0
+  const after = ctxLines ?? input['-A'] ?? 0
+  const rendered = renderContent(hits, before, after, input['-n'] === true)
+  const shown = limit === undefined ? rendered : rendered.slice(0, limit)
+  return toolOk(
+    shown.join('\n') +
+      (shown.length < rendered.length ? `\n[showing the first ${String(shown.length)} lines]` : '') +
+      tail
+  )
+}
+
+/**
+ * 把原生后端的「绝对路径 → 行号」变成和 JS 那条路同形的 `FileHits`。
+ *
+ * ★ 忽略表与文件名过滤在这里**再做一遍**:原生侧的下推只是为了少搜(cmd 下还可能
+ * 整个下推不了),正确性以这里为准 —— 判据与 `walk()` + `compileGlob` 完全相同。
+ * 顺序与 `walk()` 的 BFS 同向:浅的在前,同层按路径逐段比较 —— 撞上命中上限时留下的
+ * 是靠近根的文件。截断规则与 `scanFiles` 一致(整文件计入,累计到上限为止)。
+ */
+async function collectNativeHits(
+  ctx: ToolContext,
+  native: Extract<NativeGrepOutcome, { kind: 'ok' }>,
+  target: { abs: string; isDir: boolean },
+  walkBase: WalkBase,
+  nameFilter: RegExp | null,
+  needText: boolean
+): Promise<{ hits: FileHits[]; totalMatches: number }> {
+  const rel = (from: string, to: string): string => (ctx.host.path ? ctx.host.path.relative(from, to) : relative(from, to))
+  const rows: Array<{ key: string[]; rel: string; abs: string; lines: number[] }> = []
+  for (const [abs, lines] of native.hits) {
+    // 单文件:和 JS 那条路一样,不过滤、直接用它的展示路径
+    if (!target.isDir) {
+      rows.push({ key: [], rel: relOf(ctx, abs), abs, lines })
+      continue
+    }
+    const parts = normalizeGlobPath(rel(target.abs, abs)).split('/')
+    const file = parts.pop() ?? ''
+    if (parts.some((d) => defaultSkip(d, true)) || defaultSkip(file, false)) continue
+    const fromRoot = rel(walkBase.root, abs)
+    if (nameFilter !== null && !nameFilter.test(normalizeGlobPath(fromRoot))) continue
+    rows.push({ key: normalizeGlobPath(fromRoot).split('/'), rel: walkBase.display(fromRoot), abs, lines })
+  }
+  rows.sort((a, b) => {
+    if (a.key.length !== b.key.length) return a.key.length - b.key.length
+    for (let i = 0; i < a.key.length; i++) {
+      const x = a.key[i] ?? ''
+      const y = b.key[i] ?? ''
+      if (x !== y) return x < y ? -1 : 1
+    }
+    return 0
+  })
+
+  const hits: FileHits[] = []
+  let totalMatches = 0
+  for (const row of rows) {
+    if (totalMatches >= MAX_GREP_MATCHES) break
+    const lines = row.lines.slice(0, MAX_GREP_MATCHES)
+    hits.push({ rel: row.rel, lines, text: [] })
+    totalMatches += lines.length
+  }
+  if (needText) {
+    // 行正文自己读(原生输出里只要了行号),切行与截断和 JS 那条路一致
+    for (let i = 0; i < hits.length; i += GREP_CONCURRENCY) {
+      await Promise.all(
+        hits.slice(i, i + GREP_CONCURRENCY).map(async (h, j) => {
+          const abs = rows[i + j]?.abs ?? ''
+          try {
+            const raw = await ctx.host.fs.readFile(abs)
+            h.text = raw.split('\n').map((l) => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) : l))
+          } catch (error) {
+            rethrowRemoteFailure(error, ctx)
+          }
+        })
+      )
+    }
+  }
+  return { hits, totalMatches }
+}
 
 /** 给测试用的常量出口,避免测试里再抄一份魔法数字 */
 export const SEARCH_LIMITS = {

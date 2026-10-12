@@ -19,6 +19,7 @@ import {
   SEARCH_LIMITS,
   setGrepRegexDeadlineForTest
 } from '../search'
+import { setGrepBackendsForTest } from '../grep-native'
 
 /**
  * `Grep` 正则**隔离执行**的测试。
@@ -139,6 +140,8 @@ function pool(pattern: string, over: Partial<ConstructorParameters<typeof GrepRe
 }
 
 beforeEach(() => {
+  // 这份测试测的是 JS 引擎的隔离池本身,原生后端一律关掉
+  setGrepBackendsForTest([])
   const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'ncw-grep-regex-')))
   root = join(base, 'ws')
   mkdirSync(root)
@@ -148,6 +151,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  setGrepBackendsForTest(null)
   resetGrepRegexDeadlineForTest()
   for (const p of pools.splice(0)) await p.dispose()
   rmSync(join(root, '..'), { recursive: true, force: true })
