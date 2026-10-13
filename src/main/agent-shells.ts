@@ -43,6 +43,14 @@ interface BackgroundEntry {
   info: BackgroundShellInfo
   stdout: Stream
   stderr: Stream
+  /**
+   * 给界面看的输出尾巴(stdout 与 stderr 按到达顺序交错)。
+   *
+   * ★ 与上面两条缓冲**分开记**:那两条是「读走即清空」,专为 `BashOutput` 的
+   * 「两次读之间不重不漏」服务。界面若也去读它们,就会把模型还没读到的输出吃掉 ——
+   * 模型下一次 `BashOutput` 什么都拿不到,而它会据此断定「服务没有任何输出」。
+   */
+  tail: string
   process: AdoptableProcess
   /** 环境租约。★ 必须活到进程结束——SSH 连接空闲 60s 就会被回收，见 manager.ts。 */
   release: () => void
@@ -69,6 +77,9 @@ function append(stream: Stream, chunk: string): void {
   stream.dropped = true
 }
 
+/** 尾巴只留最后这么多字符。界面上只看最后几十行,不需要更多。 */
+const TAIL_CHARS = 8 * 1024
+
 /** 读走并清空。`filter` 是按**行**过滤的正则，调用方已经筛过 ReDoS。 */
 function take(stream: Stream, filter: RegExp | undefined): string {
   const text = stream.buffer
@@ -87,6 +98,30 @@ export class AgentShells {
    * 而两边都不会报错。
    */
   private sequence = 0
+  private readonly listeners = new Set<() => void>()
+
+  /**
+   * 后台列表变了(新开、退出、被杀、被淘汰)。返回退订函数。
+   *
+   * ★ 只说「变了」,不带增量:监听方(IPC 广播)每次发全量,丢过一次通知也能自己收敛。
+   * 输出增长**不**算变化 —— 一个刷日志的 dev server 每秒几十次,全量广播会被它淹没。
+   */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  private changed(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener()
+      } catch {
+        // 一个坏掉的监听方不能挡住进程状态本身的推进
+      }
+    }
+  }
 
   // ─────────────────────────── 前台 ───────────────────────────
 
@@ -160,6 +195,7 @@ export class AgentShells {
       },
       stdout: emptyStream(),
       stderr: emptyStream(),
+      tail: '',
       process: req.process,
       release: req.release
     }
@@ -175,7 +211,11 @@ export class AgentShells {
         代价:一条序列恰好被切在两个 data 事件之间时剥不干净(极少见,
         残留是几个可见字符,不会影响后续行)。
       */
-      source.on('data', (chunk: string) => append(stream, stripAnsi(chunk)))
+      source.on('data', (chunk: string) => {
+        const text = stripAnsi(chunk)
+        append(stream, text)
+        entry.tail = (entry.tail + text).slice(-TAIL_CHARS)
+      })
       // 进程被杀时管道会抛 EPIPE/ECONNRESET。它不是一个要上报的错误，
       // 而没有这个监听器的话 Node 会把它升级成 uncaughtException 打死主进程。
       source.on('error', () => {})
@@ -195,8 +235,10 @@ export class AgentShells {
       }
       entry.info.endedAt = Date.now()
       this.evict()
+      this.changed()
     })
     this.evict()
+    this.changed()
     return { ...entry.info }
   }
 
@@ -229,12 +271,23 @@ export class AgentShells {
       entry.info.status = 'killed'
       entry.info.endedAt = Date.now()
       entry.process.kill()
+      this.changed()
     }
     return { ...entry.info }
   }
 
   list(): BackgroundShellInfo[] {
     return [...this.background.values()].map((entry) => ({ ...entry.info }))
+  }
+
+  /**
+   * 界面看一眼输出尾巴。**不消费**模型那两条缓冲(理由见 `BackgroundEntry.tail`)。
+   * 找不到时返回 `undefined` 而不是 throw:界面上那条可能刚好被淘汰,这不是错误。
+   */
+  peek(id: string): { info: BackgroundShellInfo; output: string } | undefined {
+    const entry = this.background.get(id)
+    if (entry === undefined) return undefined
+    return { info: { ...entry.info }, output: entry.tail }
   }
 
   /**
@@ -254,6 +307,7 @@ export class AgentShells {
     }
     this.background.clear()
     this.foreground.clear()
+    this.changed()
   }
 
   /** 只淘汰**已结束**的，从最早结束的那条开始。还在跑的一律不动。 */
