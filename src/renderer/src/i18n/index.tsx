@@ -1614,6 +1614,11 @@ const ZH: Messages = {
   "data.cloudSyncErrorConflict": "本机与云端配置同时发生了变化，请处理冲突。",
   "data.cloudSyncErrorStorage": "加密同步空间暂时不可用或已达容量限制。",
   "data.cloudSyncErrorLocked": "请先输入同步密码解锁。",
+  "data.cloudSyncErrorSignedOut": "登录已失效，请重新登录 NextCoWork 账户后再试。",
+  "data.cloudSyncErrorInvalidData": "同步服务拒绝了这次请求，数据校验未通过。请更新到最新版本后重试。",
+  "data.cloudSyncErrorAccountChanged": "账户已切换，本次同步操作已取消。",
+  "data.cloudSyncErrorBusy": "正在处理其他操作，请稍后重试。",
+  "data.cloudSyncErrorUnknown": "同步失败，请稍后重试。",
   "data.cloudSyncReview": "首次同步预览",
   'data.cloudSyncReviewHint':
     '请确认要合并当前设备和云端的基础配置。会话、附件和本地路径不会同步。',
@@ -3625,6 +3630,11 @@ const EN: Messages = {
   "data.cloudSyncErrorConflict": "Local and cloud configuration changed at the same time. Resolve the conflict to continue.",
   "data.cloudSyncErrorStorage": "The encrypted sync space is unavailable or has reached its storage limit.",
   "data.cloudSyncErrorLocked": "Enter your sync password to unlock sync.",
+  "data.cloudSyncErrorSignedOut": "Your session has expired. Sign in to your NextCoWork account again and retry.",
+  "data.cloudSyncErrorInvalidData": "The sync service rejected the request because the data failed validation. Update to the latest version and retry.",
+  "data.cloudSyncErrorAccountChanged": "The account changed, so this sync operation was cancelled.",
+  "data.cloudSyncErrorBusy": "Another operation is in progress. Try again shortly.",
+  "data.cloudSyncErrorUnknown": "Sync failed. Try again later.",
   "data.cloudSyncReview": "Review first sync",
   'data.cloudSyncReviewHint':
     "Confirm whether to merge this device's basic settings with the cloud. Sessions, attachments, and local paths are never synced.",
