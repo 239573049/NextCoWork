@@ -225,6 +225,7 @@ import { copyWorkspacePath, listOpenTargets, listWorkspaceRecovery, mutateWorksp
 import { getReviewChangeSet, getReviewFileDiff, precheckReviewUndo, redoReviewChangeSet, undoReviewChangeSet } from './review'
 import { forgetFileIndex, searchWorkspaceFiles } from './workspace-search'
 import { compactContext, previewContext } from './context'
+import { widgetComplete, widgetGetState, widgetRunAction, widgetSaveFile, widgetSetState, widgetSubmit } from './widget'
 import {
   branchSession,
   createSession,
@@ -598,6 +599,12 @@ const handlers: HandlerMap = {
   'agent:setPermissionMode': (req, ctx) => setRunPermissionMode(req, ctx),
   'agent:respondInteraction': respondInteraction,
   'agent:listInteractions': listInteractions,
+  'widget:getState': (req) => widgetGetState(req),
+  'widget:setState': (req) => { widgetSetState(req) },
+  'widget:submit': (req, ctx) => { widgetSubmit(req, ctx) },
+  'widget:runAction': (req) => widgetRunAction(req),
+  'widget:complete': (req) => widgetComplete(req),
+  'widget:saveFile': (req) => widgetSaveFile(req),
   'agent:listTools': ({ workspaceId }) => {
     if (store.getWorkspace(workspaceId) === undefined) throw new Error('Workspace does not exist')
     return getTools().info()

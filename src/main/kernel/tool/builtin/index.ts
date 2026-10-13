@@ -25,6 +25,7 @@ import { editTool, lsTool, readTool, writeTool } from './fs'
 import { globTool, grepTool } from './search'
 import { skillTool } from './skill'
 import { taskTool } from './task'
+import { workflowTool } from './workflow'
 import { todoWriteTool } from './todo'
 import { webFetchTool } from './web'
 import { webSearchTool } from './web-search'
@@ -33,7 +34,7 @@ import { askUserTool } from './interaction'
 import { proposeGoalTool } from './goal'
 import { scheduledTaskTools } from './scheduled'
 import { enterPlanModeTool, exitPlanModeTool } from './plan-file'
-import { visualizeReadMeTool, visualizeShowWidgetTool } from './visualize'
+import { visualizeEditWidgetTool, visualizeReadMeTool, visualizeShowWidgetTool, visualizeUpdateWidgetTool } from './visualize'
 import { generateImageTool } from './image'
 import { saveImageTool } from './save-image'
 import { generateVideoTool } from './video'
@@ -70,6 +71,8 @@ function coreTools(): ToolRegistration[] {
     // 它们和 `EnterPlanMode` 一样属于"改变这一轮怎么表达"的工具,不是文件操作。
     visualizeReadMeTool,
     visualizeShowWidgetTool,
+    visualizeEditWidgetTool,
+    visualizeUpdateWidgetTool,
     /*
       对话内生图。跟在可视化那对后面:同属「这一轮产出一张给人看的东西」的工具,
       不是文件操作。顺序上仍然只有 echo 那条约束(见文件头)。
@@ -101,7 +104,12 @@ function coreTools(): ToolRegistration[] {
       `runtime.ts` 在每次 run 之前会用新的清单再 `register()` 一次 ——
       注册表按 internalId 幂等替换且保住 externalName,所以历史转录不会失配。
     */
-    taskTool()
+    taskTool(),
+    /*
+      把多个子代理编排成依赖图并行执行。紧跟 `Task`:它就是「一次派好几个、还管先后」的那一个。
+      ★ 实验功能,有自己的 `isEnabled`(设置 › 实验 › Workflow,出厂关闭)。
+    */
+    workflowTool
   ]
 }
 
@@ -167,7 +175,7 @@ export { todoWriteTool } from './todo'
 export { webFetchTool } from './web'
 export { webSearchTool } from './web-search'
 export { browserTools } from './browser'
-export { visualizeReadMeTool, visualizeShowWidgetTool } from './visualize'
+export { visualizeEditWidgetTool, visualizeReadMeTool, visualizeShowWidgetTool, visualizeUpdateWidgetTool } from './visualize'
 export { generateImageTool } from './image'
 export { saveImageTool } from './save-image'
 export { generateVideoTool } from './video'

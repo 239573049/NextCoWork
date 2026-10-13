@@ -232,6 +232,11 @@ export interface ToolOutput {
    * `output.content` 与显式的 `output.images`。跟着 `output` 一起落盘/恢复。
    */
   card?: ToolCard
+  /**
+   * `Workflow` 工具的最终节点状态 —— 同 `card`,**只走 UI 轨,编码器不下发**,
+   * 跟着 `output` 落盘,画布据此重画。见 `shared/agent/workflow.ts`。
+   */
+  workflow?: import('./workflow').WorkflowState
 }
 
 /**

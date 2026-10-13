@@ -37,7 +37,7 @@ import type { RunHandle } from './kernel/run-registry'
 import { runs } from './kernel/run-registry'
 import { takeChanges } from './kernel/tool/builtin/change-recorder'
 import type { Capacity, SlotRefusal } from './kernel/subagent-queue'
-import { QUEUE_MAX_WAIT_MS, SubagentQueue } from './kernel/subagent-queue'
+import { SubagentQueue } from './kernel/subagent-queue'
 import { AGENTS_DIR, PROJECT_AGENTS_PREFIX, scanAgents } from './kernel/agent/load'
 import type { GitContext } from './kernel/git-context'
 import { readGitContext } from './kernel/git-context'
@@ -102,7 +102,7 @@ import { listResolvedModels } from './state/model-bindings'
 import { PRICING_SEED } from '../shared/domain/pricing-seed'
 import { findPricing, priceOf } from '../shared/domain/pricing'
 import type { ModelPricing, PriceResult, RunCost } from '../shared/domain/pricing'
-import type { TokenUsage } from '../shared/agent/stream'
+import { addTokenUsage, type TokenUsage } from '../shared/agent/stream'
 import { defaultProtocolForModel, findBuiltinModel } from '../shared/domain/model-catalog-inventory'
 import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
@@ -136,6 +136,7 @@ let seeded = false
 let sessionTitles: SessionTitleGenerator | null = null
 let agentDrafts: AgentDraftGenerator | null = null
 let commitMessages: CommitMessageGenerator | null = null
+let widgetUpstream: UpstreamRouter | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
 let environmentAuthentication: ((profile: SshConnectionProfile, senderId: number) => Promise<Parameters<typeof connectSshEnvironment>[2]>) | undefined
@@ -303,6 +304,7 @@ export function installHost(h: KernelHost): void {
   // 辅助请求那几个路由器同样抓着旧 host(`shutdownSessionTitles` 已经处理了标题那一个)
   agentDrafts = null
   commitMessages = null
+  widgetUpstream = null
   /*
     ★ 钩子执行器(零 runtime import)的宿主口。访问器全部**现取**,不做快照 ——
     换宿主之后同一批判定钩子该走新的上游与新的时钟(和上面 `installSearchConfig`
@@ -788,6 +790,25 @@ export function getCommitMessageGenerator(): CommitMessageGenerator {
 }
 
 /**
+ * widget 里 `host.complete()` 用的那条上游。
+ *
+ * ★ 又一个独立的路由器,理由同上面几条:widget 是模型写的,一个写坏的循环可能连发
+ *   几十次请求,它们的失败不该把正文侧的供应商标成不健康;用量照常落账。
+ */
+export function getWidgetUpstream(): UpstreamRouter {
+  if (widgetUpstream !== null) return widgetUpstream
+  const router = new UpstreamRouter(getHost(), providerConfig, {
+    idleTimeoutMs: upstreamIdleTimeoutMs,
+    onUsageAttempt: (record) => {
+      if (widgetUpstream === router) persistUsageAttempt(record)
+    },
+    priceAttempt: priceAttemptForRouter
+  })
+  widgetUpstream = router
+  return router
+}
+
+/**
  * Freeze pricing at the attempt boundary. Later seed updates must never change
  * historical spend, and an unavailable rate remains NULL rather than silently
  * turning into a plausible-looking zero.
@@ -1196,6 +1217,7 @@ export async function refreshRuntimeForConfigScope(): Promise<void> {
   router = null
   agentDrafts = null
   commitMessages = null
+  widgetUpstream = null
 
   /*
     ★ 三张注册表**主动整体丢掉**,不是留着等下一次 run 覆盖:
@@ -1714,6 +1736,7 @@ interface ChildRunResult {
   text: string
   error?: AgentError
   endedAt?: number
+  usage?: TokenUsage
 }
 
 /**
@@ -1737,7 +1760,11 @@ function monitorChildRun(
 ): Promise<ChildRunResult> {
   let toolCalls = 0
   let toolErrors = 0
+  let usage: TokenUsage | undefined
   const off = child.on((event, childSeq) => {
+    if (event.type === 'stream' && event.delta.type === 'message_end' && event.delta.usage !== undefined) {
+      usage = addTokenUsage(usage, event.delta.usage)
+    }
     if (event.type === 'tool_start') {
       toolCalls++
       if (parent.status === 'running') parent.emit({
@@ -1827,7 +1854,12 @@ function monitorChildRun(
       // is still delivered through the inherited child topic for the renderer.
       getHost().logger.info(`[subagent] background child finished after parent: ${child.runId}`)
     }
-    return { status, text, ...(error === undefined ? {} : { error }), ...(endedAt === undefined ? {} : { endedAt }) }
+    return {
+      status, text,
+      ...(error === undefined ? {} : { error }),
+      ...(endedAt === undefined ? {} : { endedAt }),
+      ...(usage === undefined ? {} : { usage })
+    }
   })()
 }
 
@@ -1942,13 +1974,17 @@ function childRequestFor(
   childRunId: string,
   prompt: string,
   configuredModel: { model: string; modelProviderId?: string },
-  configuredThinking: SubagentThinking
+  configuredThinking: SubagentThinking,
+  /** 这一次派发自己钉的模型/档位(`SubagentRequest.model/thinking`),压过其余所有来源 */
+  pinned: { model?: string; thinking?: ThinkingLevel } = {}
 ): RunRequest {
   /*
     ★ 别名和供应商必须成对决定 —— 三档来源的优先级连同理由都在
     `subagentModelSelection` 里。`configuredModel` 已经过可用性校验(见调用点)。
   */
-  const selection = subagentModelSelection(declaredSubagentModel(def), configuredModel, parentReq)
+  const selection = pinned.model !== undefined
+    ? { model: pinned.model }
+    : subagentModelSelection(declaredSubagentModel(def), configuredModel, parentReq)
   return {
     runId: childRunId,
     /*
@@ -1975,7 +2011,9 @@ function childRequestFor(
     input: [{ type: 'text', text: prompt }],
     // 子代理始终按编程模式运行。Plan 模式没有 Task，ACP 则必须把实施交给子代理。
     mode: 'code',
-    thinking: childThinkingFor(def, configuredThinking, parentReq, selection),
+    thinking: childThinkingFor(
+      pinned.thinking === undefined ? def : { ...def, thinking: pinned.thinking }, configuredThinking, parentReq, selection
+    ),
     // 联网是用户的硬开关,子代理放宽不了
     webSearch: parentReq.webSearch,
     // 同理:子代理不能替用户决定多花一倍的钱,也不该在用户明确开了之后被压回 272K。
@@ -2131,9 +2169,17 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
     // 上限单独走 `subagentCapacity()`:队列每个 tick 也要重读同一份归一化逻辑。
     const { perSessionLimit, globalLimit } = subagentCapacity()
 
+    if (sub.model !== undefined && getRouter().resolveModel(sub.model) === undefined) {
+      return {
+        kind: 'refused',
+        reason: `There is no model named "${sub.model}". Available: ${[...new Set(getRouter().listModels().map((alias) => alias.alias))].join(', ')}.`
+      }
+    }
+
     const childRunId = `${parent.runId}:sub:${String(++childSeq)}`
     const childReq = childRequestFor(
-      parentReq, parent, def, childRunId, sub.prompt, availableSubagentModel(configured), configured.thinking
+      parentReq, parent, def, childRunId, sub.prompt, availableSubagentModel(configured), configured.thinking,
+      { ...(sub.model === undefined ? {} : { model: sub.model }), ...(sub.thinking === undefined ? {} : { thinking: sub.thinking }) }
     )
 
     /*
@@ -2269,7 +2315,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
           `[subagent] slot deadlock (${String(perSessionLimit)}/${String(globalLimit)}): ${childRunId}`
         )
       }
-      return { kind: 'refused', reason: slotRefusalReason(acquired.reason, perSessionLimit, globalLimit) }
+      return { kind: 'refused', reason: slotRefusalReason(acquired.reason, globalLimit) }
     }
 
     /*
@@ -2318,7 +2364,8 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
     return {
       kind: 'finished', childRunId, status: completed.status, text: completed.text,
       ...(def.color === undefined ? {} : { color: def.color }),
-      ...(completed.error === undefined ? {} : { error: completed.error })
+      ...(completed.error === undefined ? {} : { error: completed.error }),
+      ...(completed.usage === undefined ? {} : { usage: completed.usage })
     }
   }
 }
@@ -2330,7 +2377,7 @@ function spawnSubagentFor(parent: RunHandle, parentReq: RunRequest, parentSkills
  * 只说「达到上限」的话,模型会换一个 `subagent_type` 再试一次 —— 它会以为
  * 是那个子代理的问题(和 `task.ts` 里深度闸门那条注释同一个道理)。
  */
-function slotRefusalReason(reason: SlotRefusal, perSessionLimit: number, globalLimit: number): string {
+function slotRefusalReason(reason: SlotRefusal, globalLimit: number): string {
   switch (reason) {
     case 'disabled':
       return (
@@ -2341,12 +2388,6 @@ function slotRefusalReason(reason: SlotRefusal, perSessionLimit: number, globalL
       return (
         `All ${String(globalLimit)} concurrent subagent slots are held by subagents that are ` +
         'themselves waiting for a slot, so none will free up. Do this step yourself.'
-      )
-    case 'timeout':
-      return (
-        `No subagent slot became free within ${String(Math.round(QUEUE_MAX_WAIT_MS / 60_000))} minutes ` +
-        `(limits: ${String(perSessionLimit)} per conversation, ${String(globalLimit)} overall). ` +
-        'Do this step yourself, or try again later.'
       )
     case 'overflow':
       return (
@@ -2798,6 +2839,9 @@ export async function runAgent(
         retain: () => getEnvironments().retain(environment),
         now: () => getHost().clock.now()
       }),
+      // 设置 › 实验:现读,同生图开关 —— 改了设置下一轮起工具就跟着上/下
+      experimentalEnabled: (feature) => store.getSettings().experimental?.[feature] === true,
+      subagentModels: () => [...new Set(getRouter().listModels().map((alias) => alias.alias))],
       /*
         对话内生图的通道。★ 和 `scheduling` / `shells` 一样**每个 run 都装**:
         有没有生图模型由桥自己的 `available()` 现答(它读的是设置页那份配置),
@@ -3178,6 +3222,7 @@ export function resetRuntimeForTest(): void {
   router = null
   agentDrafts = null
   commitMessages = null
+  widgetUpstream = null
   tools = null
   preparePluginTools = async () => {}
   // ★ 和上一行同理:现报函数是模块级的,留着的话上一个用例的插件工具会

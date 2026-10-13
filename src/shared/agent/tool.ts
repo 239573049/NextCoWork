@@ -115,6 +115,11 @@ export interface ToolProgress {
    * ★ 只有内置 `Bash` 会填它:插件进度由 `plugin/manager.ts` 逐字段重建,伪造不出。
    */
   detachable?: boolean
+  /**
+   * `Workflow` 工具此刻的整份节点状态(见 `shared/agent/workflow.ts`)。
+   * ★ 同样易失、不进转录 —— 落盘的是最终 `output.workflow`;`tool_end` 时清掉。
+   */
+  workflow?: import('./workflow').WorkflowState
 }
 
 export interface ToolResult {

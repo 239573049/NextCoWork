@@ -377,6 +377,8 @@ function isAppSettings(value: unknown): boolean {
     // 生图开关同理:缺席 = 旧导出,放行(默认开启);在场就必须是布尔
     (has(v, 'imageGenerationEnabled') && typeof v.imageGenerationEnabled !== 'boolean') ||
     (has(v, 'contextManagement') && !isContextManagementSettings(v.contextManagement)) ||
+    // 实验块是后加的:缺席 = 旧导出,放行(默认全关);在场就必须形状正确
+    (has(v, 'experimental') && !isExperimentalSettings(v.experimental)) ||
     !isSubagentSettings(v.subagent) ||
     !isGatewaySettings(v.gateway) ||
     !isNotificationSettings(v.notifications) ||
@@ -426,6 +428,10 @@ function isThemeStudioSettings(value: unknown): boolean {
     isRecord(v.overrides) &&
     Object.values(v.overrides).every((c) => typeof c === 'string')
   )
+}
+
+function isExperimentalSettings(value: unknown): boolean {
+  return isRecord(value) && optionalBoolean(value, 'workflow') && optionalBoolean(value, 'workflowConfirm')
 }
 
 function isContextManagementSettings(value: unknown): boolean {

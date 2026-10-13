@@ -334,6 +334,51 @@ export function ToolCallCard({
   */
   const { open: openPath } = useWorkspaceFile();
 
+  /*
+    需求:工作流只显示画布,不要外面那一行工具标题。
+    ★ 那一行的标题/节点数/状态和画布自己的标题栏(标题 + 进度 + 全屏)完全重复,
+      叠在一起读起来是同一件事说了两遍。画布本身就是这一步的产物(pinned 形态),
+      也就没有「收起」的必要 —— 去掉行,连同它的展开开关一起去掉。
+  */
+  if (presenter.shape === "workflow") {
+    return (
+      <div data-testid="tool-call" data-tool-status={status} data-tool-shape={presenter.shape}>
+        <ToolDetail
+          shape={presenter.shape}
+          input={shownInput}
+          output={call?.output}
+          isError={status === "error"}
+          toolName={toolName}
+          callId={call?.callId}
+          workflow={call?.workflow}
+        />
+      </div>
+    );
+  }
+
+  /*
+    需求:widget 直接长在对话里 —— 没有卡片框、没有标题行,和正文同一块底。
+    ★ 那一行写的是「可视化 · <title>」,而图本身就在下面;叠一层框和一行字,读起来像是
+      「这里引用了一张图」而不是「这里就是那张图」。复制源码 / 重新渲染挪到图右上角的悬停按钮里。
+    ★ **失败例外**,仍然走下面的卡片:失败时没有图,只剩那句给模型也给人看的原因,
+      它需要那一行告诉用户这是哪个工具、失败在哪。
+  */
+  if (presenter.shape === "widget" && status !== "error") {
+    return (
+      <div data-testid="tool-call" data-tool-status={status} data-tool-shape={presenter.shape} className="my-1">
+        <ToolDetail
+          shape={presenter.shape}
+          input={shownInput}
+          output={call?.output}
+          isError={false}
+          toolName={toolName}
+          callId={call?.callId}
+          card={card}
+        />
+      </div>
+    );
+  }
+
   return (
     <Surface
       // 状态同时给一个机器可读的属性:e2e 探针读它,而不是去正则「完成/失败」
@@ -414,6 +459,7 @@ export function ToolCallCard({
           callId={call?.callId}
           card={card}
           partialImages={call?.partialImages}
+          workflow={call?.workflow}
         />
       </SurfaceReveal>
     </Surface>

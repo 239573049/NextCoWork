@@ -612,6 +612,8 @@ const TODO_TEXT_MAX = 200
 
 export interface ReminderContext {
   planExecution?: PlanExecutionContext
+  /** widget 发布的状态摘要(`RunRequest.widgetContext`)。只在这一个 run 里出现 */
+  widgetContext?: ReadonlyArray<{ title: string; text: string }>
   /**
    * Plan 模式当前那份计划文件的工作区相对路径。缺省 = 不在计划模式,或还没进入计划文件阶段。
    *
@@ -739,11 +741,24 @@ function todoScope(
   return k === -1 ? fallback : source.slice(0, k + 1)
 }
 
+/**
+ * widget 状态摘要。用户发这条消息时它们挂在输入框上方,所以模型该把它们当成"用户此刻
+ * 在看的东西"—— 但文字是模型写的 widget 产出的,按不可信材料包起来。
+ */
+function widgetContextSection(entries: ReadonlyArray<{ title: string; text: string }>): string {
+  const body = entries
+    .slice(0, 8)
+    .map((entry) => `[widget ${clean(entry.title, 64)}]\n${neutralizeReminderTags(clean(entry.text, 4096))}`)
+    .join('\n\n')
+  return `${untrustedBoundary('The widget state below', 'material')}The user sent their message while looking at these widgets in the conversation; their current state:\n\n${body}`
+}
+
 function stateBlock(ctx: ReminderContext, messages: readonly AgentMessage[]): string | undefined {
   const sections: string[] = []
   if (ctx.planExecution !== undefined) sections.push(`Approved plan file: ${clean(ctx.planExecution.path, 256)}\n\n${clean(ctx.planExecution.content, PLAN_FILE_MAX_BYTES)}`)
   if (ctx.planFile !== undefined) sections.push(planFileSection(ctx.planFile))
   if (ctx.git !== undefined) sections.push(gitSection(ctx.git))
+  if (ctx.widgetContext !== undefined && ctx.widgetContext.length > 0) sections.push(widgetContextSection(ctx.widgetContext))
 
   /*
     ★ todo 从**转录**反推,不引入任何服务端状态 —— 唯一真相源仍然是那条
@@ -807,7 +822,7 @@ export function decorate(
     ...(extraction === '' ? [] : [skillExtractionHead(extraction)])
   ]
   const head = headSections.length === 0 ? undefined : reminderPart(headSections.join('\n\n'))
-  if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined && ctx.planExecution === undefined && ctx.planFile === undefined) return messages
+  if (head === undefined && ctx.git === undefined && ctx.todoToolName === undefined && ctx.planExecution === undefined && ctx.planFile === undefined && (ctx.widgetContext?.length ?? 0) === 0) return messages
 
   /*
     ★ 两处定位都不能写成 `messages[0]` / `messages.at(-1)`。

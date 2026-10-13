@@ -175,6 +175,14 @@ export const INVOKE_BOUNDARIES = {
   'agent:setPermissionMode': 'device',
   'agent:respondInteraction': 'device',
   'agent:listInteractions': 'device',
+  // widget 的宿主能力:状态 / 提交 / 动作 / 模型调用都落在跑这个会话的那台设备上;
+  // 存文件走控制端本地的保存对话框
+  'widget:getState': 'device',
+  'widget:setState': 'device',
+  'widget:submit': 'device',
+  'widget:runAction': 'device',
+  'widget:complete': 'device',
+  'widget:saveFile': 'controller-local',
   'agent:listTools': 'device',
   'shell:stopToolCall': 'device',
   'shell:backgroundToolCall': 'device',

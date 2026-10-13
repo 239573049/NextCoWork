@@ -132,6 +132,18 @@ export interface SessionState {
    */
   compactContext: () => Promise<void>
   setDraft: (v: string) => void
+  /** 把一段文字接在草稿后面(已有草稿时空一行),不覆盖用户正在写的内容。widget 的 `draft()` 走它 */
+  appendDraft: (text: string) => void
+  /**
+   * widget 经 `host.setContext()` 发布、等着随下一条消息一起交给模型的状态摘要。
+   * 键是 widget 的 callId:同一张卡再发布一次是替换,不是追加。
+   *
+   * ★ 只活在内存里、只在**直接起 run** 时取走:排队的消息由主进程续跑,带不上它,
+   *   所以排队时它留着,等下一条直接发出的消息。
+   */
+  widgetContext: Array<{ key: string; title: string; text: string }>
+  setWidgetContext: (key: string, title: string, text: string) => void
+  removeWidgetContext: (key: string) => void
   /** 插话 —— toggle:pending ⇄ promoted。不发起任何请求 */
   promoteInput: (id: string) => void
   editInput: (id: string, text: string) => void
@@ -199,6 +211,7 @@ function createSessionStore(sessionId: string): SessionStore {
     loadingEarlier: false,
     lastOptions: null,
     draft: '',
+    widgetContext: [],
     compacting: false,
     compactError: null,
 
@@ -278,7 +291,10 @@ function createSessionStore(sessionId: string): SessionStore {
       const now = Date.now()
       const inputMessage = { ...userMessage(inputMessageId, [...input], now), ...(internal ? { internal: true } : {}) }
       registerRun(runId, sessionId, opts.workspaceId)
+      // widget 的状态摘要随这条(用户亲手发的)消息走一次;内部消息不带
+      const widgetContext = internal ? [] : s.widgetContext.map(({ title, text: body }) => ({ title, text: body }))
       set({
+        ...(internal ? {} : { widgetContext: [] }),
         activeRunId: runId,
         lastSeq: 0,
         // ★ 只清「本轮」的部分。`messages` 和 `tools` 必须留着 —— 它们是**整段对话**,
@@ -320,7 +336,8 @@ function createSessionStore(sessionId: string): SessionStore {
       let started: Awaited<ReturnType<typeof startRun>>
       try {
         started = await startRun({ ...opts, runId, sessionId, input, inputMessageId, ...(internal ? { inputInternal: true } : {}),
-          ...(goalId === undefined ? {} : { inputGoalId: goalId }) })
+          ...(goalId === undefined ? {} : { inputGoalId: goalId }),
+          ...(widgetContext.length === 0 ? {} : { widgetContext }) })
       } catch (err) {
         rollback()
         throw err
@@ -387,6 +404,23 @@ function createSessionStore(sessionId: string): SessionStore {
       set({ draft: v })
       // ★ 按键级频率,走防抖。丢失窗口 ≤500ms,代价是半个词
       persistDraft(sessionId, false)
+    },
+
+    appendDraft(text) {
+      if (text === '') return
+      set((state) => ({ draft: state.draft === '' ? text : `${state.draft}\n\n${text}` }))
+      persistDraft(sessionId, true)
+    },
+
+    setWidgetContext(key, title, text) {
+      set((state) => {
+        const rest = state.widgetContext.filter((entry) => entry.key !== key)
+        return { widgetContext: text.trim() === '' ? rest : [...rest, { key, title, text }] }
+      })
+    },
+
+    removeWidgetContext(key) {
+      set((state) => ({ widgetContext: state.widgetContext.filter((entry) => entry.key !== key) }))
     },
 
     /**

@@ -43,7 +43,10 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   // 视频那三项与生图同档同理由:模型是"某家供应商的别名",开关跟着它走,
   // 拆开会出现「模型同步过去了、开关没有」的半套配置。
   videoModel: 'providers', videoModelProviderId: 'providers', videoGenerationEnabled: 'providers',
-  contextManagement: 'preferences', subagent: 'split', gateway: 'device', notifications: 'preferences',
+  contextManagement: 'preferences',
+  // 「我要不要用实验功能」是用户的偏好,不是这台机器的事实 —— 同 contextManagement
+  experimental: 'preferences',
+  subagent: 'split', gateway: 'device', notifications: 'preferences',
   proxy: 'device', data: 'split', personalization: 'preferences', shortcuts: 'preferences', themeStudio: 'preferences',
   shell: 'device',
   // 自建 SearxNG 实例多半是 `http://localhost:8080` —— 同步到另一台机器上就是个死地址,

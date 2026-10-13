@@ -10,7 +10,7 @@
  * 一路翻到消息模型才明白。
  */
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, Copy, ListChecks, Pencil, PanelRight, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, Copy, Pencil, Trash2 } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
@@ -32,14 +32,12 @@ import { MessageFileRef } from './MessageFileRef'
 import { userMessageFileRefs } from './user-message-attachments'
 import { openFileReference } from './file-reference-actions'
 import { SubagentNode, SubagentReportRow, ThinkingBlock, ToolCallCard } from './parts'
-import { useOpenSubagent } from './subagent-open'
 import { InteractionPanel } from './InteractionPanel'
 import type { PlanToolReceipt } from '../../../../shared/domain/plan-file'
 import { readWorkspaceFile } from '../../services/workspace-files'
 import { StatusLine } from './StatusLine'
 import type { CurrentContextLimits } from './context-pressure'
 import { ToolTimeline } from './ToolTimeline'
-import { reportBackgroundChild, type SendOptions } from '../../stores/session'
 import { RunProcessBlock } from './RunProcessBlock'
 import { FOLD_HOLD_MS, useFoldAnchor } from './useFoldAnchor'
 import { CompactionDivider } from './CompactionDivider'
@@ -66,7 +64,6 @@ export const Thread = memo(function Thread({
   compactError,
   goal,
   contextLimits,
-  reportOptions,
   onEditMessage,
   onDeleteReply,
   onDeleteTurn,
@@ -105,13 +102,6 @@ export const Thread = memo(function Thread({
   goal?: ActiveGoal
   /** 透给状态行:此刻药丸说了算的有效窗口与最大输出。语义见 `StatusLine` 的同名 prop。 */
   contextLimits?: CurrentContextLimits
-  /**
-   * 手动回传后台子代理结果时用的档位。
-   *
-   * ★ 必须由外面传进来:store 里的 `lastOptions` 只在 `send` 里写、不落盘,
-   * 重启之后是 null —— 而跨重启正是「处理」这颗按钮唯一还有用的场景。
-   */
-  reportOptions?: SendOptions
   onEditMessage?: (id: string, text: string, continueRun: boolean) => Promise<void>
   /**
    * 删除一条助手回复,**引出它的提问留着**。传入的是这一行的消息跨度(`ThreadRow.span`)。
@@ -393,7 +383,6 @@ export const Thread = memo(function Thread({
       </div>
     </div>
     <TurnNavigationRail items={navigationItems} viewportRef={viewport} contentRef={content} />
-    <SubagentTaskCenter sessionId={sessionId} subagents={transcript.subagents} readOnly={readOnly} reportOptions={reportOptions} />
     </div>
   )
 })
@@ -668,112 +657,6 @@ function ResolvedPlanCard({ workspaceId, receipt, onOpenPlan }: {
       </span>
     </button>
   </section>
-}
-
-/**
- * 任务面板里一条目的排序档位:**在跑的排最前,其次是等你收结果的**。
- *
- * ★ 以前是 `Object.values` 的插入序 —— 于是一个跑了半小时的子代理会被压在
- * 四五条「已完成」中间,而这个面板存在的唯一理由就是回答「现在还有什么在跑」。
- */
-function centerRank(item: SubagentState): number {
-  if (item.status === 'running') return 0
-  return item.reportStatus === 'pending' || item.reportStatus === 'blocked' ? 1 : 2
-}
-
-/**
- * 只有「成功结束且结果已经回到主代理」才算可收起的历史项。
- *
- * 需求：待处理、正在回传、失败和停止的任务仍要直接露出，否则默认收起会把用户
- * 还需要关注的状态一起藏掉，表现为任务消失但主对话没有拿到结果。
- */
-function isCompletedBackground(item: SubagentState): boolean {
-  return item.background === true && item.status === 'done' && item.reportStatus === 'reported'
-}
-
-/** 导出只为测试:面板本身仍然只由 `Thread` 挂载 */
-export function SubagentTaskCenter({ sessionId, subagents, readOnly = false, reportOptions }: { sessionId?: string; subagents: Readonly<Record<string, SubagentState>>; readOnly?: boolean; reportOptions?: SendOptions }): ReactNode {
-  const { t } = useI18n()
-  const openSubagent = useOpenSubagent()
-  const [open, setOpen] = useState(false)
-  // 需求：折叠按钮必须关联它控制的历史任务区域，屏幕阅读器才能识别展开目标。
-  const completedItemsId = useId()
-  // 需求：任务面板首次挂载时把已归档的后台任务收起；用户手动展开后不因面板开关而丢失选择。
-  const [completedOpen, setCompletedOpen] = useState(false)
-  /*
-    ★★ 在跑的**前台**子代理也算一条任务。
-
-    以前这里只收 `background === true`:父代理同步等着的那个子代理,卡片上在转、
-    面板里却一条都没有,于是「两个在跑,角标写 1」—— 点开之后还是找不到另一个,
-    因为它压根不在列表里。角标数的是「此刻有几个子代理在跑」,那它就得把两种
-    派发方式都算上;前台的跑完就从面板里退场(它的结果已经同步回到主对话,
-    没有「等你来收」这一步),所以列表不会被历史前台任务堆满。
-  */
-  const entries = Object.values(subagents)
-    .filter((item) => item.background === true || item.status === 'running')
-    .sort((a, b) => centerRank(a) - centerRank(b))
-  if (entries.length === 0) return null
-  const currentEntries = entries.filter((item) => !isCompletedBackground(item))
-  const completedEntries = entries.filter(isCompletedBackground)
-  const running = entries.filter((item) => item.status === 'running').length
-  /* blocked = 「结果在库里,但当时没有可用的发送档位」。对用户来说它和 pending 是同一件事:等你点一下。 */
-  const pending = entries.filter((item) => item.reportStatus === 'pending' || item.reportStatus === 'blocked').length
-  /*
-    ★ 以前这里是 `scrollIntoView` 跳到那张卡片上 —— 而后台子代理的卡片可能在
-    几百轮之前,跳过去之后用户看到的还是那张什么都不说的摘要,得再点开它。
-    现在和卡片走同一个动作:直接在右侧开它的完整记录。
-    跳不动的(旧转录没有 `childSessionId`)就还是滚过去,聊胜于无。
-  */
-  const reveal = (item: SubagentState): void => {
-    if (item.childSessionId !== undefined && openSubagent !== undefined) {
-      openSubagent(item)
-      return
-    }
-    document.querySelector(`[data-subagent-call-id="${CSS.escape(item.callId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-  // 需求：展开归档区后复用同一条目行为，避免历史任务和活跃任务的打开、回传动作漂移。
-  const renderEntry = (item: SubagentState): ReactNode => {
-    const state = item.status === 'error' ? 'error' : item.status === 'running' ? 'running' : (item.reportStatus === 'pending' || item.reportStatus === 'blocked') ? 'pending' : 'done'
-    return <div key={item.callId} data-testid="subagent-center-row" data-center-call-id={item.callId} data-center-state={state} className="flex w-full items-start gap-2 rounded-[6px] px-2 py-2 text-left transition hover:bg-tint-hover/60">
-      {state === 'running' ? <Clock3 size={13} className="mt-0.5 shrink-0 animate-pulse text-accent" /> : state === 'error' ? <CircleAlert size={13} className="mt-0.5 shrink-0 text-danger" /> : state === 'pending' ? <ListChecks size={13} className="mt-0.5 shrink-0 text-accent" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-500" />}
-      <button type="button" onClick={() => reveal(item)} className="min-w-0 flex-1 text-left">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg">{item.description ?? item.summary ?? t('chat.subagent.default')}</span>
-          {/* 前台和后台现在同列一张表,那这一格就得说清它是哪一种 —— 只有后台那种才会有「汇报」这一步 */}
-          {item.background === true && <span className="shrink-0 rounded-full bg-accent/10 px-1.5 py-px text-[9.5px] font-medium text-accent">{t('chat.subagent.mode.background')}</span>}
-        </span>
-        <span className="mt-0.5 block truncate text-[10.5px] text-fg-faint">{item.currentTool ?? (state === 'pending' ? t('chat.subagent.report.pending') : t(`chat.subagent.status.${item.status}` as 'chat.subagent.status.running' | 'chat.subagent.status.done' | 'chat.subagent.status.error' | 'chat.subagent.status.aborted'))}</span>
-      </button>
-      {!readOnly && state === 'pending' && sessionId !== undefined && <button type="button" onClick={() => void reportBackgroundChild(sessionId, item.callId, reportOptions)} className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10">{t('chat.subagent.report.action')}</button>}
-    </div>
-  }
-  return (
-    <div className="pointer-events-none absolute right-4 top-4 z-20 flex flex-col items-end gap-2">
-      <button type="button" aria-expanded={open} aria-label={t('chat.subagent.center.open')} onClick={() => setOpen((value) => !value)} className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-raised/95 px-3 py-1.5 text-[11.5px] text-fg-muted shadow-lg backdrop-blur transition hover:text-fg">
-        <PanelRight size={13} />
-        <span>{t('chat.subagent.center.title')}</span>
-        {running > 0 && <span className="font-mono text-accent">{running}</span>}
-        {pending > 0 && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
-      </button>
-      {open && <div className="pointer-events-auto w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-card border border-border bg-surface-raised/98 shadow-xl backdrop-blur">
-        <div className="flex items-center justify-between border-b border-hairline px-3 py-2.5">
-          <div><div className="text-[12px] font-medium text-fg">{t('chat.subagent.center.title')}</div><div className="mt-0.5 text-[10.5px] text-fg-faint">{t('chat.subagent.center.count', { count: entries.length })}</div></div>
-          <button type="button" aria-label={t('common.close')} onClick={() => setOpen(false)} className="rounded p-1 text-fg-faint hover:bg-tint-hover hover:text-fg"><X size={13} /></button>
-        </div>
-        <div className="max-h-[min(52vh,420px)] overflow-y-auto p-1.5">
-          {currentEntries.map(renderEntry)}
-          {completedEntries.length > 0 && <div className={cn(currentEntries.length > 0 && 'mt-1 border-t border-hairline pt-1')}>
-            <button type="button" data-testid="subagent-center-completed-toggle" aria-expanded={completedOpen} aria-controls={completedItemsId} onClick={() => setCompletedOpen((value) => !value)} className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-1.5 text-[10.5px] text-fg-faint hover:bg-tint-hover/60 hover:text-fg-muted">
-              <ChevronRight size={12} aria-hidden className={cn('shrink-0 transition-transform duration-200 motion-reduce:transition-none', completedOpen && 'rotate-90')} />
-              <span>{t('chat.subagent.status.done')}</span>
-              <span className="font-mono">{completedEntries.length}</span>
-            </button>
-            <div id={completedItemsId}>{completedOpen && completedEntries.map(renderEntry)}</div>
-          </div>}
-        </div>
-      </div>}
-    </div>
-  )
 }
 
 /**
@@ -1343,6 +1226,14 @@ function AssistantTurn({
       })}
     </>
   )
+
+  /*
+    ★ 回复被删光后留下的空回合(没有内容、正常收尾、也不在等这一轮的回复)整行不画:
+    只剩「模型名」页眉挂在那里,看起来就是删除没删干净。`feedback` 照常交出去 ——
+    审批面板和状态行挂在末轮上,不能跟着页眉一起消失。
+    停止 / 出错的空回合照旧画,理由同下面操作条那段。
+  */
+  if (blocks.length === 0 && outcome === 'ok' && !(isLast && running)) return feedback ?? null
 
   return (
     <div ref={turnRef} className="group/turn flex flex-col gap-2.5" data-testid="assistant-turn">

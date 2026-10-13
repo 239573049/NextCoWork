@@ -46,6 +46,7 @@ import { SubagentOpenProvider } from './subagent-open'
 import { ToolStopProvider } from './tool-stop'
 import { openFileReference } from './file-reference-actions'
 import { WorkspaceFileProvider } from './workspace-file'
+import { WidgetHostProvider, type WidgetHostContextValue } from './widget-host'
 import { backgroundToolCall, stopToolCall } from '../../services/shell'
 import { useModelsStore } from '../../stores/models'
 import { useTabsStore } from '../../stores/tabs'
@@ -392,6 +393,22 @@ export function ChatView({
     ★ 失败静默:唯一的失败是「这条命令刚好在点击的同一刻结束」,而那时用户
       想要的结果已经达成,弹一条错误只会让人以为出了别的事。
   */
+  /*
+    需求:对话里的 widget 能把文字填进输入框、给下一条消息附上它的状态、打开工作区文件。
+    ★ 草稿 Tab 还没有会话 id 时不给 —— 那时对话里也不可能有 widget(它是一次 run 的产物)。
+  */
+  const widgetHost = useMemo<WidgetHostContextValue | undefined>(() => {
+    if (sessionId === null || sessionId === undefined) return undefined
+    const target = sessionStore(sessionId)
+    return {
+      sessionId,
+      workspaceRoot: workspace.rootPath,
+      draft: (text) => { target.getState().appendDraft(text) },
+      setContext: (key, title, text) => { target.getState().setWidgetContext(key, title, text) },
+      openFile: openToolFile
+    }
+  }, [sessionId, workspace.rootPath, openToolFile])
+
   const stopRunningToolCall = useMemo(
     () => activeRunId === null
       ? undefined
@@ -954,6 +971,7 @@ export function ChatView({
           onResume={() => resumeQueue(storeKey)}
         />
       )}
+      <WidgetContextChips storeKey={storeKey} />
     </div>
   )
 
@@ -1049,30 +1067,31 @@ export function ChatView({
         <ToolStopProvider stop={stopRunningToolCall} background={backgroundRunningToolCall}>
           <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
             <WorkspaceFileProvider root={workspace.rootPath} open={openToolFile}>
-              <Thread
-                sessionId={sessionId ?? undefined}
-                transcript={transcript}
-                runId={activeRunId}
-                model={modelName}
-                providerName={provider?.name}
-                lastSeq={lastSeq}
-                reportOptions={offComposerOptions}
-                goal={goal}
-                queued={queuedInputs.length}
-                compactError={compactError}
-                {...(contextLimits === undefined ? {} : { contextLimits })}
-                onEditMessage={onEditMessage}
-                onDeleteReply={deleteReply}
-                onDeleteTurn={deleteTurn}
-                onBranchTurn={onBranchTurn}
-                workspaceId={workspace.id}
-                onOpenPlan={openMarkdownFile}
-                onExecutePlan={executePlan}
-                historyHasMore={historyHasMore}
-                loadingEarlier={loadingEarlier}
-                onLoadEarlier={loadEarlier}
-                {...(typeof skillSourceId === 'string' ? { skillExtractionSourceId: skillSourceId } : {})}
-              />
+              <WidgetHostProvider value={widgetHost}>
+                <Thread
+                  sessionId={sessionId ?? undefined}
+                  transcript={transcript}
+                  runId={activeRunId}
+                  model={modelName}
+                  providerName={provider?.name}
+                  lastSeq={lastSeq}
+                  goal={goal}
+                  queued={queuedInputs.length}
+                  compactError={compactError}
+                  {...(contextLimits === undefined ? {} : { contextLimits })}
+                  onEditMessage={onEditMessage}
+                  onDeleteReply={deleteReply}
+                  onDeleteTurn={deleteTurn}
+                  onBranchTurn={onBranchTurn}
+                  workspaceId={workspace.id}
+                  onOpenPlan={openMarkdownFile}
+                  onExecutePlan={executePlan}
+                  historyHasMore={historyHasMore}
+                  loadingEarlier={loadingEarlier}
+                  onLoadEarlier={loadEarlier}
+                  {...(typeof skillSourceId === 'string' ? { skillExtractionSourceId: skillSourceId } : {})}
+                />
+              </WidgetHostProvider>
             </WorkspaceFileProvider>
           </WorkspaceMarkdownProvider>
         </ToolStopProvider>
@@ -1139,6 +1158,42 @@ function summarizeConversationUsage(
     ...(latestTps === undefined ? {} : { latestTps }),
     ...(cost === undefined ? {} : { cost })
   }
+}
+
+/**
+ * widget 经 `host.setContext()` 发布、会随下一条消息交给模型的状态摘要。
+ *
+ * ★ 必须让用户看得见、删得掉:那段文字是模型写的 widget 产出的,而它会以用户这条消息的
+ *   名义进模型上下文。悄悄附上去,等于让一张图替用户补了半句话。
+ */
+function WidgetContextChips({ storeKey }: { storeKey: string }): ReactNode {
+  const { t } = useI18n()
+  const useSession = sessionStore(storeKey)
+  const entries = useSession((state) => state.widgetContext)
+  const remove = useSession((state) => state.removeWidgetContext)
+  if (entries.length === 0) return null
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 pt-1" data-testid="widget-context">
+      <span className="text-[11px] text-fg-faint">{t('widget.context.label')}</span>
+      {entries.map((entry) => (
+        <span
+          key={entry.key}
+          title={entry.text}
+          className="inline-flex max-w-[260px] items-center gap-1 rounded-pill bg-tint px-2 py-0.5 text-[11px] text-fg-muted"
+        >
+          <span className="truncate">{entry.title.replace(/_/g, ' ')}</span>
+          <button
+            type="button"
+            aria-label={t('widget.context.remove')}
+            className="cursor-pointer border-0 bg-transparent p-0 text-fg-faint hover:text-fg"
+            onClick={() => { remove(entry.key) }}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  )
 }
 
 function SessionComposer({ storeKey, ...props }: { storeKey: string } & Omit<ComponentProps<typeof Composer>, 'draft' | 'onDraft'>): ReactNode {

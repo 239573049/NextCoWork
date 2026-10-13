@@ -24,6 +24,7 @@ export type SettingsPageId =
   | 'devices'
   | 'computer'
   | 'data'
+  | 'experimental'
   | 'about'
 
 export interface SettingsSub {
@@ -138,6 +139,11 @@ export const SETTINGS_PAGES: readonly SettingsPage[] = [
   { id: 'devices', label: '设备' },
   { id: 'computer', label: '电脑操作' },
   { id: 'data', label: '数据' },
+  /**
+   * 尚未定型的功能,每一项都出厂关闭(见 `ExperimentalSettings`)。
+   * 放在「关于」前面、所有常规页之后:它不该是用户找东西时先看到的那一页。
+   */
+  { id: 'experimental', label: '实验' },
   { id: 'about', label: '关于' }
 ]
 
@@ -447,6 +453,18 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   { page: 'data', title: '清理范围', keywords: ['cleanup', 'range', '清理', '范围'] },
   { page: 'data', title: '清空对话历史', keywords: ['delete', 'history', '清空', '对话'] },
   { page: 'data', title: '删除并退出', keywords: ['delete', 'reset', '退出', '删除'] },
+
+  // ── 实验 ──
+  {
+    page: 'experimental',
+    title: 'Workflow 工作流',
+    keywords: ['experimental', 'labs', 'beta', 'workflow', 'canvas', '实验', '工作流', '画布', '编排']
+  },
+  {
+    page: 'experimental',
+    title: '运行前确认',
+    keywords: ['workflow', 'confirm', 'approval', '工作流', '确认', '审批']
+  },
 
   // ── 关于 ──
   { page: 'about', title: '版本', keywords: ['version', 'about', '版本'] }

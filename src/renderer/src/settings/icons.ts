@@ -10,6 +10,7 @@ import {
   Cpu,
   Database,
   DownloadCloud,
+  FlaskConical,
   Info,
   MonitorSmartphone,
   Plug,
@@ -39,5 +40,6 @@ export const SETTINGS_ICON: Record<SettingsPageId, LucideIcon> = {
   devices: MonitorSmartphone,
   computer: FEATURE_ICON.browser,
   data: Database,
+  experimental: FlaskConical,
   about: Info
 }

@@ -105,6 +105,11 @@ export const whimsyZh: Record<WhimsyBucket, Whimsy> = {
     '截图…', '瞄准中…', '取景中…', '对焦中…', '按下快门…', '定格里…',
     '咔嚓…', '成像中…'
   ],
+  // 工作流:一群子代理在按图干活,词往"调度/编排"上靠
+  workflow: [
+    '编排中…', '调度中…', '分派中…', '并行推进…', '接力中…', '汇总中…',
+    '排兵布阵…', '流水作业…'
+  ],
   // 兜底的兜底:知道在跑,但说不出在跑什么(参数还在流、工具还没开跑)
   working: [
     '忙活中…', '开工中…', '动手中…', '撸起袖子…', '跑腿中…', '连轴转…',
@@ -260,6 +265,10 @@ export const whimsyEn: Record<WhimsyBucket, Whimsy> = {
   screenshot: [
     'Capturing…', 'Aiming…', 'Framing…', 'Focusing…', 'Shutter…', 'Snapping…',
     'Click…', 'Freezing it…'
+  ],
+  workflow: [
+    'Orchestrating…', 'Dispatching…', 'Fanning out…', 'In parallel…', 'Relaying…',
+    'Merging…', 'Arranging…', 'Pipelining…'
   ],
   working: [
     'Working…', 'Wrangling…', 'Hustling…', 'Cranking…', 'Grinding…', 'Wrenching…',

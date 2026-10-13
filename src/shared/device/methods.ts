@@ -199,8 +199,12 @@ export const interactionResponseSchema = z.discriminatedUnion('kind', [
   z.strictObject({ id: idSchema, kind: z.literal('ask_user'),
     answers: z.array(z.array(z.string().min(1).max(32_768)).min(1).max(64)).max(16).nullable() }),
   z.strictObject({ id: idSchema, kind: z.literal('goal_proposal'), approved: z.boolean() }),
+  z.strictObject({ id: idSchema, kind: z.literal('widget_submit'), value: z.string().max(32 * 1024).nullable() }),
   z.strictObject({ id: idSchema, kind: z.literal('plan_approval'),
     action: z.enum(['approve_current', 'approve_new_session', 'request_revision', 'reject']),
+    feedback: z.string().max(32_000).optional() }),
+  z.strictObject({ id: idSchema, kind: z.literal('workflow_approval'),
+    action: z.enum(['run', 'revise', 'cancel']),
     feedback: z.string().max(32_000).optional() })
 ])
 export const interactionsRespondParams = z.strictObject({ response: interactionResponseSchema })

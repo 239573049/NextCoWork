@@ -82,6 +82,27 @@ export interface ContextManagementSettings {
 }
 
 /**
+ * 设置 › 实验:尚未定型的功能。每一项都**出厂关闭** —— 打开它是用户在说
+ * 「我愿意用一个还会变的东西」,这句话不能替他说。
+ *
+ * ★ 一项转正后就从这里搬走、换成它自己的设置(或干脆不要开关),
+ *   而不是在这里永久留一个永远是 true 的开关。
+ */
+export interface ExperimentalSettings {
+  /**
+   * `Workflow` 工具:模型把任务编排成一张依赖图,按依赖并行派子代理执行,
+   * 对话里画成画布。关掉 = 工具不下发(`kernel/tool/builtin/workflow.ts` 的 `isEnabled`)。
+   */
+  workflow: boolean
+  /**
+   * 工作流派出任何节点之前先给用户看一眼图,点「运行」才开跑。
+   * ★ 出厂**开**,和别的实验项相反:一张图一次就是十几个子代理的 token,
+   *   模型画错图(汇总节点没接上游之类)时,开跑之前是唯一不花钱的拦截点。
+   */
+  workflowConfirm: boolean
+}
+
+/**
  * 界面「偏好 › 个性化」那三栏。**它是唯一一块会被原样拼进系统提示词的设置** ——
  * 见 `main/kernel/context-assembler.ts` 的 `buildPersonalizationSection`。
  *
@@ -404,6 +425,9 @@ export interface AppSettings {
   /** 上下文管理：默认只开自动压缩，智能窗口模式要用户自己打开。 */
   contextManagement: ContextManagementSettings
 
+  /** 设置 › 实验。见 `ExperimentalSettings` */
+  experimental: ExperimentalSettings
+
   /**
    * 执行本地命令 / 命令钩子 / 新建终端用哪个 shell。
    *
@@ -555,6 +579,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // 理由写在 AppSettings.videoGenerationEnabled 那段。
   videoGenerationEnabled: true,
   contextManagement: { autoCompact: true },
+  // 实验功能一律出厂关闭 —— 理由见 ExperimentalSettings
+  experimental: { workflow: false, workflowConfirm: true },
   upstreamIdleTimeoutSeconds: DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECONDS,
   maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
   shell: 'system',
@@ -664,6 +690,13 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   }
   if (patch.contextManagement !== undefined) {
     next.contextManagement = { ...next.contextManagement, ...patch.contextManagement }
+  }
+  // 只认布尔(同 imageGenerationEnabled):非布尔落库后 `=== true` 会把它静默读成「关」
+  if (typeof patch.experimental?.workflow === 'boolean') {
+    next.experimental = { ...next.experimental, workflow: patch.experimental.workflow }
+  }
+  if (typeof patch.experimental?.workflowConfirm === 'boolean') {
+    next.experimental = { ...next.experimental, workflowConfirm: patch.experimental.workflowConfirm }
   }
   // ★ 范围外的坏值退回当前值而不是默认值 —— 这一项改小了会把慢模型全数
   //   秒杀,静默放宽/收紧都不是可接受的失败形态(shell 那条同理)。
@@ -779,6 +812,7 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   videoModelProviderId: true,
   videoGenerationEnabled: true,
   contextManagement: true,
+  experimental: true,
   upstreamIdleTimeoutSeconds: true,
   maxOutputTokens: true,
   shell: true,

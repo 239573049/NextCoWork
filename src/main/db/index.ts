@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { MIGRATIONS } from './schema'
-import { rebuildMessageFts } from './message-text'
+import { rebuildMessageFts, reconcileMessageFts } from './message-text'
 
 /** 库文件名。`-wal` / `-shm` 是 SQLite 自己在同目录建的兄弟文件。 */
 export const DB_FILENAME = 'nextcowork.db'
@@ -187,6 +187,8 @@ function openAt(path: string, options: DatabaseOpenOptions = {}): DatabaseSync {
   d.exec('PRAGMA busy_timeout = 2000')
 
   migrate(d)
+  // 旧版本开过这个库会留下无映射的 FTS 行,不补上的话下一条消息就写不进去
+  reconcileMessageFts(d)
   return d
 }
 

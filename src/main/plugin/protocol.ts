@@ -775,6 +775,15 @@ export function setPluginRuntimeDir(dir: string): void {
   runtimeDir = dir
 }
 
+/**
+ * 同一份运行时目录,给内置 widget 外壳(`net/widget-protocol.ts`)读。
+ * ★ 只读出去、不另设一份:两处各注入一次的话,迟早有一处漏注入,
+ * 表现为 TSX widget 一片空白而插件视图正常。
+ */
+export function pluginRuntimeDirectory(): string {
+  return runtimeDir
+}
+
 /** `<userData>/plugins/<id>` 的解析器。由 `host-window.ts` 注入,协议层不认识 app。 */
 export type PluginRootResolver = (pluginId: string) => { root: string; main: string } | undefined
 let resolveRoot: PluginRootResolver = () => undefined

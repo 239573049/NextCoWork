@@ -31,6 +31,8 @@ import { pluginSkillsZh, pluginSkillsEn } from './plugin-skills';
 import { chatNavigationZh, chatNavigationEn } from './chat-navigation';
 import { thinkingStatsZh, thinkingStatsEn } from './thinking-stats';
 import { widgetZh, widgetEn } from './widget';
+import { workflowZh, workflowEn } from './workflow';
+import { experimentalZh, experimentalEn } from './experimental';
 import { migrationZh, migrationEn } from './migration';
 import { accountMenuZh, accountMenuEn } from './account-menu';
 import { rewardsZh, rewardsEn } from './rewards';
@@ -82,6 +84,8 @@ const ZH: Messages = {
   ...chatNavigationZh,
   ...thinkingStatsZh,
   ...widgetZh,
+  ...workflowZh,
+  ...experimentalZh,
   ...migrationZh,
   ...themesZh,
   ...agentZh,
@@ -468,9 +472,6 @@ const ZH: Messages = {
   "chat.subagent.report.partialLegacy": "这条记录来自旧版本,只存下了开头的一段。",
   // ★ 这个面板现在同时列前台和后台子代理(角标数的是「此刻有几个在跑」),
   //   所以标题不能再写「后台任务」—— 那样列表里的前台任务就成了自相矛盾的一行
-  "chat.subagent.center.title": "子代理任务",
-  "chat.subagent.center.open": "打开子代理任务",
-  "chat.subagent.center.count": ({ count }) => `${count} 个任务`,
   "chat.subagent.open": "在右侧打开完整记录",
   // ★ 终态下这一格问的不是「它在干嘛」,而是「它停在哪一步」—— `subagent_end` 曾经
   //   把 phase 硬写成「收尾中」,于是每一张终态卡片都说收尾中,这一栏等于零信息
@@ -2097,6 +2098,8 @@ const EN: Messages = {
   ...chatNavigationEn,
   ...thinkingStatsEn,
   ...widgetEn,
+  ...workflowEn,
+  ...experimentalEn,
   ...migrationEn,
   ...accountMenuEn,
   ...rewardsEn,
@@ -2469,9 +2472,6 @@ const EN: Messages = {
   "chat.subagent.report.loading": "Loading the full result…",
   "chat.subagent.report.partialFailed": "The full result could not be loaded; this is only the opening. Open the full record to read it.",
   "chat.subagent.report.partialLegacy": "This record predates full-result storage; only the opening was kept.",
-  "chat.subagent.center.title": "Subagent tasks",
-  "chat.subagent.center.open": "Open subagent tasks",
-  "chat.subagent.center.count": ({ count }) => `${count} tasks`,
   "chat.subagent.open": "Open the full record on the right",
   "chat.subagent.notice.retry": ({ attempt }) => `Retry ${attempt}`,
   "chat.subagent.notice.switch": ({ to }) => `Switched to ${to}`,

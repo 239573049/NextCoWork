@@ -192,6 +192,13 @@ export interface RunRequest {
   agentType?: string
   /** Approved Markdown plan file injected by the main process for an execution run. */
   planExecution?: PlanExecutionRef
+  /**
+   * 对话里 widget 经 `host.setContext()` 发布的状态摘要,随这条消息交给模型一次
+   * (进系统提醒尾块,不进转录、不显示在气泡里)。用户在输入框上方看得见、能移除。
+   *
+   * ★ 内容是模型写的 widget 产出的,在 `context-assembler.ts` 里按**不可信材料**包起来。
+   */
+  widgetContext?: Array<{ title: string; text: string }>
 }
 
 /**

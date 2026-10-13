@@ -35,6 +35,7 @@ describe('导航表与行目录的自洽', () => {
       'devices',
       'computer',
       'data',
+      'experimental',
       'about'
     ])
   })

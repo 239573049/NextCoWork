@@ -30,6 +30,7 @@ import { WidgetDetail } from "./WidgetDetail";
 import { ImageGenDetail } from "./ImageGenDetail";
 import { VideoGenDetail } from "./VideoGenDetail";
 import { ScreenshotDetail } from "./ScreenshotDetail";
+import { WorkflowDetail } from "./WorkflowDetail";
 
 // ─────────────────────────── 原语 ───────────────────────────
 
@@ -204,6 +205,11 @@ export interface DetailProps {
    * 易失的调用状态里,`output` 还没有。只有 `ImageGenDetail` 读它。
    */
   partialImages?: Readonly<Record<number, ToolOutputImage>>;
+  /**
+   * `Workflow` 运行中的整份节点状态(`ToolCallState.workflow`)。同 `partialImages`:
+   * `tool_end` 之前只存在于易失的调用状态里。只有 `WorkflowDetail` 读它。
+   */
+  workflow?: import("../../../../shared/agent/workflow").WorkflowState;
 }
 
 /**
@@ -503,6 +509,8 @@ export const DETAIL_RENDERERS: Record<
     截图只有一帧,复用那张卡会在图上多出一块永远空着的提示词区。
   */
   screenshot: ScreenshotDetail,
+  // workflow:工作流画布(实验功能),懒加载 @xyflow/react,见 `WorkflowCanvas.tsx` 文件头
+  workflow: WorkflowDetail,
   external: ExternalDetail,
 };
 
@@ -515,6 +523,7 @@ export function ToolDetail({
   callId,
   card,
   partialImages,
+  workflow,
 }: {
   shape: ToolShape;
   /*
@@ -541,6 +550,7 @@ export function ToolDetail({
       toolName={toolName}
       callId={callId}
       partialImages={partialImages}
+      workflow={workflow}
     />
   );
 }

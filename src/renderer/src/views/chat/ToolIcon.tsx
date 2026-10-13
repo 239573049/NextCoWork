@@ -24,6 +24,7 @@ import {
   Sparkles,
   Terminal,
   Video,
+  Workflow,
   type LucideIcon
 } from 'lucide-react'
 import type { ReactNode } from 'react'
@@ -57,6 +58,8 @@ export const SHAPE_ICON: Record<ToolShape, LucideIcon> = {
   // 页面截图:同属「产物是一张图」,但出处是浏览器 —— 相机把「拍下来的」这件事说清,
   // 和生图的相纸图标区分开(一个是画的,一个是拍的)
   screenshot: Camera,
+  // 工作流:产物是一张节点图,lucide 的 Workflow 图标就是两个连着的方块
+  workflow: Workflow,
   external: Plug
 }
 

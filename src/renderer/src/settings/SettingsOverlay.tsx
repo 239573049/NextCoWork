@@ -46,6 +46,7 @@ import {
 import { AboutPage } from './pages/AboutPage'
 import { ConnectionPage } from './pages/ConnectionPage'
 import { DataPage } from './pages/DataPage'
+import { ExperimentalPage } from './pages/ExperimentalPage'
 import { DevicesPage } from './pages/DevicesPage'
 import { ImportPage } from './pages/import/ImportPage'
 import { GeneralPage } from './pages/GeneralPage'
@@ -321,6 +322,8 @@ function PageBody({
     /* ★ 不吃 `SettingsPageProps`:设备清单是这台电脑本地的,不属于会同步到账户的设置。 */
     case 'devices':
       return <DevicesPage />
+    case 'experimental':
+      return <ExperimentalPage {...props} />
     case 'about':
       return <AboutPage versions={versions} />
     default:

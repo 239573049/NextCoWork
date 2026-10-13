@@ -69,6 +69,8 @@ export interface ToolCallState {
   partialImages?: Readonly<Record<number, import('./message').ToolOutputImage>>
   /** 运行中能被转去后台(见 `ToolProgress.detachable`)。易失,`tool_end` 时清掉。 */
   detachable?: boolean
+  /** `Workflow` 运行中的节点状态(见 `ToolProgress.workflow`)。易失,`tool_end` 时清掉。 */
+  workflow?: import('./workflow').WorkflowState
   output?: ToolOutput
   /**
    * `tool_start` 到达时的墙钟毫秒。
@@ -662,7 +664,9 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
               ? {}
               : { partialImages: { ...prev.partialImages, [e.progress.image.index]: e.progress.image.image } }),
             // 同 `card`:推了就以这一条为准,没推则保留上一条的说法
-            ...(e.progress.detachable === undefined ? {} : { detachable: e.progress.detachable })
+            ...(e.progress.detachable === undefined ? {} : { detachable: e.progress.detachable }),
+            // 整份快照,推了就替换(见 shared/agent/workflow.ts 文件头)
+            ...(e.progress.workflow === undefined ? {} : { workflow: e.progress.workflow })
           }
         }
       }
@@ -691,6 +695,8 @@ export function applyEvent(s: TranscriptState, e: AgentEvent): TranscriptState {
             // 过程态的逐张图同理:结束后以 output.images 为准,不留两份
             partialImages: undefined,
             detachable: undefined,
+            // 结束后以 output.workflow 为准
+            workflow: undefined,
             endedAt: e.at ?? Date.now()
           }
         }

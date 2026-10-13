@@ -114,6 +114,15 @@ export type ToolShape =
    * **一条异步任务的生命周期**(排队/生成/下载/完成),那在图片上不存在。
    */
   | 'video'
+  /**
+   * 编排一张子代理依赖图的那一个(`Workflow`,实验功能)。
+   *
+   * 需求:它展开后是一张**画布**(`views/chat/WorkflowCanvas.tsx`):节点 + 依赖连线,
+   * 每个节点的状态实时变。归进 `orchestration` 的话会和 `Task` 一样画成一行摘要,
+   * 而「哪些在并行、谁在等谁」正是这张图要给人看的东西。
+   * ★ 不进过程折叠(见 `isPinnedShape`):图就是这一步的产物。
+   */
+  | 'workflow'
   | 'external'
 
 /**
@@ -225,7 +234,11 @@ export const PRESENTER_COPY_KEYS = [
     去掉下划线之后的短语,所以它**不翻译**(同模型名、文件名,见 AGENTS §6.5)。
   */
   'chat.tool.title.widget',
+  'chat.tool.title.widgetEdit',
+  'chat.tool.title.widgetUpdate',
   'chat.tool.title.readMe',
+  // 工作流(实验)。target 是模型写的 `title`,领域值,不翻译
+  'chat.tool.title.workflow',
   // 对话内生图。行的主语是模型收到的 prompt 片段(领域值,不翻译)
   'chat.tool.title.generateImage',
   // 改图那半:入参带了源图(`image`)就是它,否则是上面那个
@@ -269,6 +282,7 @@ export const PRESENTER_COPY_KEYS = [
   // 折叠态右侧摘要
   'chat.tool.summary.lines',
   'chat.tool.summary.items',
+  'chat.tool.summary.nodes',
   'chat.tool.summary.files',
   'chat.tool.summary.matches',
   'chat.tool.summary.results',
@@ -852,6 +866,14 @@ const REGISTRY: Record<string, ToolPresenter> = {
       return t === '' ? undefined : t
     }
   },
+  Workflow: {
+    shape: 'workflow',
+    line: (i) => valueLine('chat.tool.title.workflow', clip(pick(i, 'title'), 40)),
+    summary: (i) => {
+      const nodes = (i as { nodes?: unknown } | null)?.nodes
+      return Array.isArray(nodes) ? presenterCopy('chat.tool.summary.nodes', { count: nodes.length }) : undefined
+    }
+  },
   Skill: {
     shape: 'orchestration',
     line: (i) => valueLine('chat.tool.title.skill', pick(i, 'name'))
@@ -922,6 +944,18 @@ const REGISTRY: Record<string, ToolPresenter> = {
   visualize_show_widget: {
     shape: 'widget',
     line: (i) => valueLine('chat.tool.title.widget', humanize(pick(i, 'title')))
+  },
+  /*
+    改图与推数据。改图的产物是一张新 widget,形态同 show_widget;推数据没有自己的画面
+    (数据由同名那张图读),所以是一行普通的 `external`。
+  */
+  visualize_edit_widget: {
+    shape: 'widget',
+    line: (i) => valueLine('chat.tool.title.widgetEdit', humanize(pick(i, 'new_title') || pick(i, 'title')))
+  },
+  visualize_update_widget: {
+    shape: 'external',
+    line: (i) => valueLine('chat.tool.title.widgetUpdate', humanize(pick(i, 'title')))
   },
   visualize_read_me: {
     shape: 'external',
@@ -1157,6 +1191,7 @@ const PINNED_SHAPES: Record<ToolShape, boolean> = {
   image: true,
   video: true,
   screenshot: true,
+  workflow: true,
   external: false
 }
 

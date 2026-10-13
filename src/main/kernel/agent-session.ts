@@ -163,6 +163,10 @@ export interface SessionDeps {
    * `/images/generations` 请求全部留在 `main/kernel/image-gen.ts`。内核零 electron、可单测。
    */
   imageGen?: ImageGenBridge
+  /** 设置 › 实验 的现读口。见 `ToolContext.experimentalEnabled` */
+  experimentalEnabled?: ToolContext['experimentalEnabled']
+  /** 见 `ToolContext.subagentModels` */
+  subagentModels?: ToolContext['subagentModels']
   /**
    * 本会话的图片仓(生成图 → `ncw://` 会话附件;地址 → 字节)。缺省 = 纯内核测试,
    * 生成图留在内联 data URL、`SaveImage` 不下发。形状与理由同 `imageGen`,
@@ -632,6 +636,9 @@ export class AgentSession {
       webSearch: this.req.webSearch,
       reminder: {
         ...(this.deps.planExecution !== undefined ? { planExecution: this.deps.planExecution } : {}),
+        ...(this.req.widgetContext !== undefined && this.req.widgetContext.length > 0
+          ? { widgetContext: this.req.widgetContext }
+          : {}),
         ...(planFile !== undefined ? { planFile } : {}),
         ...(this.deps.projectInstructions !== undefined
           ? { projectInstructions: this.deps.projectInstructions }
@@ -1335,6 +1342,8 @@ export class AgentSession {
       ...(this.deps.scheduling === undefined ? {} : { scheduling: this.deps.scheduling }),
       ...(this.deps.shells === undefined ? {} : { shells: this.deps.shells }),
       ...(this.deps.imageGen === undefined ? {} : { imageGen: this.deps.imageGen }),
+      ...(this.deps.experimentalEnabled === undefined ? {} : { experimentalEnabled: this.deps.experimentalEnabled }),
+      ...(this.deps.subagentModels === undefined ? {} : { subagentModels: this.deps.subagentModels }),
       ...(this.deps.sessionImages === undefined ? {} : { sessionImages: this.deps.sessionImages }),
       ...(this.deps.videoGen === undefined ? {} : { videoGen: this.deps.videoGen }),
       ...(this.deps.sessionVideos === undefined ? {} : { sessionVideos: this.deps.sessionVideos })

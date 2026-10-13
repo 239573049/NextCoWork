@@ -11,6 +11,7 @@
  * | §6 长任务无序号、不可重放 | **信封带 seq,可 attach(sinceSeq) 重放** |
  * | §2 每个 API 方法内部硬编码目标频道 | **由契约生成白名单**,preload 运行时校验 |
  */
+import type { WidgetActionPreflight, WidgetActionResult } from '../domain/widget'
 import type { AgentError } from '../agent/error'
 import type { ActiveRunEntry, AgentEvent, RunSnapshot } from '../agent/event'
 import type { AgentMessage, ContentPart } from '../agent/message'
@@ -716,6 +717,19 @@ export interface IpcInvokeMap {
   /** ★ 审批 / 反问 / 计划确认三种 kind 共用这一个(方案 §4.6) */
   'agent:respondInteraction': { req: InteractionResponse; res: void }
   'agent:listInteractions': { req: { runId?: string; sessionId?: string }; res: PendingInteraction[] }
+  /**
+   * 对话里 widget 的宿主能力(`main/ipc/widget.ts`)。iframe 碰不到 IPC,这几条都由
+   * 渲染层 `WidgetFrame` 在校验过 iframe 报文之后代发。
+   */
+  'widget:getState': { req: { sessionId: string; callId: string }; res: unknown }
+  'widget:setState': { req: { sessionId: string; callId: string; state: unknown }; res: void }
+  'widget:submit': { req: { callId: string; value: string | null }; res: void }
+  'widget:runAction': {
+    req: { sessionId: string; callId: string; actionId: string; params: Record<string, unknown>; confirmed: boolean }
+    res: WidgetActionPreflight | ({ kind: 'result' } & WidgetActionResult)
+  }
+  'widget:complete': { req: { sessionId: string; prompt: string; system?: string; maxTokens?: number }; res: string }
+  'widget:saveFile': { req: { name: string; data: string; encoding: 'utf8' | 'base64' }; res: { path: string } | null }
   'agent:listTools': { req: { workspaceId: string }; res: ToolInfo[] }
 
   // ── Agent 的 shell ──
@@ -1812,6 +1826,12 @@ export const INVOKE_CHANNELS = {
   'agent:setPermissionMode': 1,
   'agent:respondInteraction': 1,
   'agent:listInteractions': 1,
+  'widget:getState': 1,
+  'widget:setState': 1,
+  'widget:submit': 1,
+  'widget:runAction': 1,
+  'widget:complete': 1,
+  'widget:saveFile': 1,
   'agent:listTools': 1,
   'shell:stopToolCall': 1,
   'shell:backgroundToolCall': 1,

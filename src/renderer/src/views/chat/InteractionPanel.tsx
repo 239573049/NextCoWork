@@ -6,6 +6,7 @@ import type {
   InteractionResponse,
   PendingInteraction
 } from '../../../../shared/agent/interaction'
+import { workflowLayers } from '../../../../shared/agent/workflow'
 import { useI18n, type Translate } from '../../i18n'
 import { AgentMarkdown } from '../../components/markdown'
 import { CheckboxCards, RadioCards, type ChoiceOption } from '../../components/ui/ChoiceCards'
@@ -191,7 +192,32 @@ function InteractionCard({ interaction, workspaceId, onOpenPlan, onExecute, onAn
   if (interaction.kind === 'ask_user') return <AskUserCard interaction={interaction} onAnswered={onAnswered} />
   if (interaction.kind === 'plan_approval') return <PlanApprovalCard interaction={interaction} workspaceId={workspaceId}
     onOpenPlan={onOpenPlan} onExecute={onExecute} onAnswered={onAnswered} />
+  if (interaction.kind === 'workflow_approval') return <WorkflowApprovalCard interaction={interaction} onAnswered={onAnswered} />
+  if (interaction.kind === 'widget_submit') return <WidgetSubmitNotice interaction={interaction} onAnswered={onAnswered} />
   return <ToolApprovalCard interaction={interaction} onAnswered={onAnswered} />
+}
+
+/**
+ * 交互模式的 widget 在等提交。**题面就是对话里那张图**,这里不再画一张卡 —— 只留一行
+ * 说明 run 为什么停着,和一个"不提交了"的出口(否则用户只能停掉整轮)。
+ */
+function WidgetSubmitNotice({ interaction, onAnswered }: {
+  interaction: Extract<PendingInteraction, { kind: 'widget_submit' }>
+  onAnswered: () => void
+}): ReactNode {
+  const { t } = useI18n()
+  const { busy, errorKey, respond } = useRespond(onAnswered)
+  return (
+    <div data-testid="agent-interaction" data-interaction-kind="widget_submit"
+      className="mb-2 flex items-center gap-2 px-1 text-[12px] text-fg-muted">
+      <span className="min-w-0 flex-1 truncate">{t('widget.submit.waiting', { title: interaction.title.replace(/_/g, ' ') })}</span>
+      {errorKey !== null && <span role="alert" className="text-danger">{t(errorKey)}</span>}
+      <button type="button" disabled={busy} className={GHOST_BUTTON}
+        onClick={() => respond({ id: interaction.id, kind: 'widget_submit', value: null })}>
+        {t('widget.submit.dismiss')}
+      </button>
+    </div>
+  )
 }
 
 function GoalProposalCard({ interaction, onAnswered }: {
@@ -729,6 +755,88 @@ function PlanApprovalCard({ interaction, workspaceId, onOpenPlan, onExecute, onA
                 说不出「还差什么」,而这里差的东西就在上面那个空框里。 */}
             {feedback.trim() !== '' && <button type="button" disabled={disabled} className={PRIMARY_BUTTON}
               onClick={() => { void decide('request_revision') }}>
+              {t('agent.interaction.sendRevision')}
+            </button>}
+          </div>
+        </>
+      )}
+    />
+  </CardShell>
+}
+
+/**
+ * 工作流开跑前的确认。对话里那张画布已经把图画出来了(入参推出来的全 `pending` 结构),
+ * 这里只按层列一份清单 —— 再画一张画布,同一屏就有两张一模一样的图。
+ *
+ * ★ 按层列而不是按入参顺序:用户要确认的恰恰是「谁和谁同时跑、谁等谁」,
+ *   截图里那种「汇总节点和被汇总的排在同一层」一眼就能看出来。
+ */
+function WorkflowApprovalCard({ interaction, onAnswered }: {
+  interaction: Extract<PendingInteraction, { kind: 'workflow_approval' }>
+  onAnswered: () => void
+}): ReactNode {
+  const { t } = useI18n()
+  const { busy, errorKey, respond } = useRespond(onAnswered)
+  const [feedback, setFeedback] = useState('')
+  const { workflow } = interaction
+  const byId = new Map(workflow.nodes.map((node) => [node.id, node]))
+  const layers = workflowLayers(workflow.nodes.map((node) => ({ id: node.id, depends_on: node.dependsOn })))
+    ?? [workflow.nodes.map((node) => node.id)]
+  const decide = (action: 'run' | 'revise' | 'cancel'): void => {
+    if (busy) return
+    respond({ id: interaction.id, kind: 'workflow_approval', action,
+      ...(action === 'revise' && feedback.trim() !== '' ? { feedback: feedback.trim() } : {}) })
+  }
+  return <CardShell
+    kind="workflow_approval"
+    title={t('workflow.approval.title', { title: workflow.title })}
+    errorKey={errorKey}
+    busy={busy}
+    footer={<>
+      <KeyboardHint show={!busy} />
+      <button type="button" disabled={busy} className={`${GHOST_BUTTON} ml-auto`} onClick={() => decide('cancel')}>
+        {t('workflow.approval.cancel')}
+      </button>
+    </>}
+    onSubmit={(event) => { event.preventDefault() }}
+  >
+    <p className="mb-2 text-[12px] text-fg-muted">{t('workflow.approval.body', { count: workflow.nodes.length })}</p>
+    <ol data-testid="workflow-approval-layers" className="mb-2 space-y-1.5">
+      {layers.map((layer, index) => (
+        <li key={layer.join('|')} className="flex gap-2 text-[12px]">
+          <span className="w-12 shrink-0 tabular-nums text-fg-faint">{t('workflow.approval.step', { n: index + 1 })}</span>
+          <span className="flex min-w-0 flex-wrap gap-1">
+            {layer.map((id) => {
+              const node = byId.get(id)!
+              return <span key={id} title={node.model === undefined ? node.agent : `${node.agent} · ${node.model}`}
+                className="rounded-[6px] border border-stroke bg-app px-1.5 py-0.5 text-fg">
+                {node.title}
+                {node.mapOver !== undefined && <span className="ml-1 text-fg-faint">· {t('workflow.node.each')}</span>}
+              </span>
+            })}
+          </span>
+        </li>
+      ))}
+    </ol>
+    <ActionRows
+      disabled={busy}
+      ariaLabel={t('workflow.approval.title', { title: workflow.title })}
+      rows={[
+        { value: 'run', label: t('workflow.approval.run') },
+        { value: 'revise', label: t('workflow.approval.revise'), icon: <Pencil aria-hidden size={13} className="text-fg-faint" />, expands: true }
+      ]}
+      onRun={(value) => { if (value === 'run') decide('run') }}
+      renderExpanded={(value, collapse) => value !== 'revise' ? null : (
+        <>
+          <textarea autoFocus aria-label={t('workflow.approval.feedback')} placeholder={t('workflow.approval.feedback')}
+            value={feedback} onChange={(event) => setFeedback(event.target.value)} rows={3} maxLength={32000}
+            disabled={busy} className={FIELD} />
+          <div className="mt-1.5 flex items-center justify-end gap-2">
+            <button type="button" disabled={busy} className={GHOST_BUTTON} onClick={collapse}>
+              {t('agent.interaction.cancelRevision')}
+            </button>
+            {feedback.trim() !== '' && <button type="button" disabled={busy} className={PRIMARY_BUTTON}
+              onClick={() => decide('revise')}>
               {t('agent.interaction.sendRevision')}
             </button>}
           </div>

@@ -74,7 +74,7 @@ function fingerprint() {
     用到的工具类是从它们的源码里生成进 ui.css 的。不算进来的话,插件新写一个 class 而运行时不重建,
     那个 class 就不存在 —— 表现为「布局对、某一处没样式」,且零报错。
   */
-  for (const dir of [join(src, 'components/ui'), join(src, 'components/arc'), join(src, 'plugin-ui'), join(src, 'lib'), join(src, 'theme'), join(src, 'styles'), join(root, 'src/shared/document-engine'), join(root, 'plugins')]) {
+  for (const dir of [join(src, 'components/ui'), join(src, 'components/arc'), join(src, 'plugin-ui'), join(src, 'widget-kit'), join(src, 'lib'), join(src, 'theme'), join(src, 'styles'), join(root, 'src/shared/document-engine'), join(root, 'plugins')]) {
     if (existsSync(dir)) walk(dir)
   }
   files.push(fileURLToPath(import.meta.url))
@@ -117,13 +117,31 @@ const i18nStub = {
   }
 }
 
+/*
+  ★ widget 套件(`widget-kit/index.tsx`)按**相对路径**转发 `plugin-ui/ui` —— 这样它在宿主的
+  类型检查里是一个普通模块。打包时要把那条相对 import 换回裸名 `nextcowork/ui` 并标 external:
+  否则 widget.js 里会再装一份控件实现(连同第二份 Radix 状态),和 ui.css 对不上的那种。
+*/
+const uiExternal = {
+  name: 'ncw-widget-ui-external',
+  enforce: 'pre',
+  resolveId(source, importer) {
+    if (importer === undefined || !importer.startsWith(join(src, 'widget-kit'))) return null
+    const target = resolve(dirname(importer), source)
+    if (target === join(src, 'plugin-ui/ui') || target === join(src, 'plugin-ui/ui.ts')) {
+      return { id: 'nextcowork/ui', external: true }
+    }
+    return null
+  }
+}
+
 /** 一次 vite lib 构建。`external` 里的东西由 import map 在运行期给。 */
 async function bundle(entry, fileName, external) {
   await build({
     root,
     configFile: false,
     logLevel: 'warn',
-    plugins: [react(), tailwind(), i18nStub],
+    plugins: [react(), tailwind(), i18nStub, uiExternal],
     /*
       ★ Vite 的 lib 模式**不替换** `process.env.NODE_ENV`(它假设产物会再被使用方的打包器处理),
       而这两份产物是直接下发给浏览器的 ESM:`ui.js` 里 framer-motion 的那一句
@@ -221,9 +239,15 @@ const runtimeExternals = ['react', 'react-dom', 'react-dom/client', 'react/jsx-r
 await bundle('plugin-ui/ui.ts', 'ui.js', runtimeExternals)
 await bundle('plugin-ui/view.tsx', 'view.js', runtimeExternals)
 
+// ── 3. TSX widget 的模块(`ncw-widget://shell/` 下发,见 net/widget-protocol.ts) ──
+const widgetExternals = [...runtimeExternals, 'nextcowork/ui']
+await bundle('widget-kit/index.tsx', 'widget.js', widgetExternals)
+await bundle('widget-kit/charts.tsx', 'charts.js', widgetExternals)
+await bundle('widget-kit/lucide.ts', 'lucide.js', widgetExternals)
+
 writeFileSync(stampFile, stamp)
 
-for (const file of ['react-core.js', 'react.js', 'react-dom.js', 'react-dom-client.js', 'jsx-runtime.js', 'jsx-dev-runtime.js', 'ui.js', 'ui.css', 'view.js']) {
+for (const file of ['react-core.js', 'react.js', 'react-dom.js', 'react-dom-client.js', 'jsx-runtime.js', 'jsx-dev-runtime.js', 'ui.js', 'ui.css', 'view.js', 'widget.js', 'charts.js', 'lucide.js']) {
   const path = join(out, file)
   if (!existsSync(path)) {
     // ★ 缺产物直接失败。让它悄悄通过的话,协议层会对每个视图 404,

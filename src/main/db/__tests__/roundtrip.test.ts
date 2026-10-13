@@ -466,6 +466,34 @@ describe('★ 关库重开之后,配置一样都不少', () => {
     expect(mapRows()).toBe(before)
   })
 
+  it('★ V37 之前的版本开过同一个库后,新消息照样写得进去、旧版写的也搜得到', () => {
+    const session = repo.ensureSession({ id: 'fts-legacy', workspaceId: 'workspace', title: 'LegacyTitle' })
+    const message = (id: string, text: string, createdAt: number): AgentMessage => ({
+      id, role: 'assistant', parts: [{ type: 'text', text }], createdAt, schemaVersion: 1
+    })
+    repo.commitMessage(session.id, message('legacy-a', 'firstword', 1))
+    // 旧版写法:按 message_id 删、不带 rowid 插,不碰映射表
+    const legacyWrite = (id: string, text: string): void => {
+      stmt('DELETE FROM messages_fts WHERE message_id = ?').run(id)
+      stmt('INSERT INTO messages_fts (message_id, session_id, title, content) VALUES (?, ?, ?, ?)').run(id, session.id, 'LegacyTitle', text)
+    }
+    const insertMessage = stmt(`INSERT INTO messages (id, session_id, ordinal, role, parts, created_at, schema_version)
+      VALUES (?, ?, ?, 'assistant', '[]', ?, 1)`)
+    insertMessage.run('legacy-b', session.id, 100, 2)
+    insertMessage.run('legacy-c', session.id, 101, 3)
+    legacyWrite('legacy-a', 'rewrittenword')
+    legacyWrite('legacy-b', 'legacyword')
+    legacyWrite('legacy-c', 'thirdword')
+    restart()
+    expect(() => repo.commitMessage(session.id, message('legacy-d', 'newword', 4))).not.toThrow()
+    expect(repo.searchAll('rewrittenword')).toHaveLength(1)
+    expect(repo.searchAll('legacyword')).toHaveLength(1)
+    expect(repo.searchAll('thirdword')).toHaveLength(1)
+    expect(repo.searchAll('newword')).toHaveLength(1)
+    const unmapped = stmt('SELECT COUNT(*) AS n FROM messages_fts WHERE rowid NOT IN (SELECT fts_rowid FROM messages_fts_rowid)').get()
+    expect(Number(unmapped?.['n'])).toBe(0)
+  })
+
   it('供应商 / 别名 / 工作区 / 设置 / kv 全部读得回来', () => {
     store.putProvider(provider('主', 0))
     store.putProvider(provider('备', 1))

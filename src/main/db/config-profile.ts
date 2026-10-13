@@ -143,7 +143,7 @@ const PROFILE_KV_KEYS = [
   MODEL_DEFAULTS_SEEDED_KEY
 ] as const
 
-const PROFILE_KV_PREFIXES = ['tabs.outer.', 'tabs.inner.', 'session.input.'] as const
+const PROFILE_KV_PREFIXES = ['tabs.outer.', 'tabs.inner.', 'session.input.', 'session.widget.'] as const
 
 /** 物理 ref 的分隔符。U+0000 不可能出现在任何一个 ref 构造器里。 */
 const SCOPE_SEPARATOR = '\u0000'

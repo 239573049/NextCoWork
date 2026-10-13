@@ -114,6 +114,18 @@ describe('mergeSettings', () => {
  * 主题那两块单拎出来:它们是「主题」页上**紧挨着的两组控件**,
  * 而这一页正是最容易连点的一页(挑一张卡、再挑一个渲染方式、再重掷一次随机)。
  */
+describe('mergeSettings · 实验', () => {
+  it('老库里只存了 workflow 的,运行前确认按出厂值开着', () => {
+    const merged = mergeSettings(DEFAULT_SETTINGS, { experimental: { workflow: true } } as never)
+    expect(merged.experimental).toEqual({ workflow: true, workflowConfirm: true })
+  })
+
+  it('两项各改各的,互不覆盖', () => {
+    const off = mergeSettings(DEFAULT_SETTINGS, { experimental: { workflowConfirm: false } } as never)
+    expect(off.experimental).toEqual({ workflow: false, workflowConfirm: false })
+  })
+})
+
 describe('mergeSettings · 主题', () => {
   /**
    * ★ 这一条就是 `imageTheme.id` 写成可空**字段**、而不是把整块写成可空的理由。

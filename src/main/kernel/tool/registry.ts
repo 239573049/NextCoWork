@@ -58,6 +58,13 @@ export interface SubagentRequest {
   callId: string
   /** 不等待结果，让父代理继续工作；子 run 仍在主进程中独立运行。 */
   background?: boolean
+  /**
+   * 这一次派发钉死用哪个模型别名,优先于子代理文件和设置页。
+   * ★ 调用方要先用 `ToolContext.subagentModels` 校验过 —— 这里查不到就 `refused`。
+   */
+  model?: string
+  /** 这一次派发的思考档位,优先于子代理文件和设置页;仍按子 run 的模型归一化 */
+  thinking?: import('../../../shared/agent/run-request').ThinkingLevel
 }
 
 /**
@@ -81,6 +88,8 @@ export type SubagentOutcome =
       color?: import('../../../shared/domain/agent-def').AgentColor
       /** `status === 'error'` 时的原因 */
       error?: AgentError | string
+      /** 子 run 各轮用量之和。上游没报用量时缺省 */
+      usage?: import('../../../shared/agent/stream').TokenUsage
     }
   | {
       kind: 'background'
@@ -215,6 +224,16 @@ export interface ToolContext {
    * ctx 都必须带上一个它永远不会碰的函数,是没有道理的。
    */
   spawnSubagent?: SpawnSubagentFn
+  /**
+   * 此刻可用的模型别名(去重)。`Workflow` 要在派出任何节点之前校验节点钉的 `model` ——
+   * 派到一半才发现名字不对,前面的节点已经白跑了。
+   */
+  subagentModels?: () => readonly string[]
+  /**
+   * 设置 › 实验 里某一项此刻开没开。**现读**,改了设置下一轮就生效。
+   * 缺省 = 这个环境里没有设置可读(纯内核测试),一律当作关 —— 实验功能的默认就是关。
+   */
+  experimentalEnabled?: (feature: keyof import('../../../shared/domain/settings').ExperimentalSettings) => boolean
   interact?: InteractFn
   canProposeGoal?: () => boolean
   proposeGoal?: (condition: string, askUser: boolean) => Promise<'set' | 'pending'>

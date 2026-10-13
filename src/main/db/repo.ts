@@ -1635,6 +1635,8 @@ export function deleteSession(id: string): string[] {
       // 因此不能只依赖 CASCADE；owner_id 是它们的会话归属。
       stmt("DELETE FROM attachments WHERE scope = 'session' AND owner_id = ?").run(sid)
       removeKv(`session.input.${sid}`)
+      // 对话里 widget 的持久化状态(`ipc/widget.ts`)。同 session.input:kv 没有外键,得手删
+      removeKv(`session.widget.${sid}`)
       /*
         ★★ 导入来的会话留 tombstone,**不删映射行**。
 
@@ -2385,6 +2387,7 @@ export function deleteAllHistory(): CleanupResult {
     // unreachable rows as well; deleting only the relational tables leaves
     // stale text that can reappear when an id is reused.
     stmt("DELETE FROM kv WHERE key LIKE 'session.input.%'").run()
+    stmt("DELETE FROM kv WHERE key LIKE 'session.widget.%'").run()
     /*
       ★ 「清空对话历史」同样要留墓碑,而且必须整表一次改完 —— 这条路径**不**
       走 `deleteSession`(它是一次性 DELETE,没有逐条循环),所以上面那处墓碑
@@ -2410,6 +2413,7 @@ export function clearSessionDataForTest(): void {
     stmt('DELETE FROM messages').run()
     stmt('DELETE FROM sessions').run()
     stmt("DELETE FROM kv WHERE key LIKE 'session.input.%'").run()
+    stmt("DELETE FROM kv WHERE key LIKE 'session.widget.%'").run()
   })
 }
 

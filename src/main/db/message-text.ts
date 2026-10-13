@@ -94,6 +94,12 @@ export function writeMessageFts(
   if (existing === undefined) {
     rowid = prepare('INSERT INTO messages_fts_rowid (message_id, session_id) VALUES (?, ?)').run(messageId, sessionId)
       .lastInsertRowid
+    /*
+      ★ 新分到的 rowid 按理在 FTS 里是空位。占着它的只可能是 V37 之前的版本写进来的
+      无映射行(见 `reconcileMessageFts`);不先腾掉,下面的 INSERT 会被 FTS5 拒成
+      一句不带上下文的 `constraint failed`,整条消息落不了盘。
+    */
+    prepare('DELETE FROM messages_fts WHERE rowid = ?').run(rowid)
   } else {
     rowid = existing['fts_rowid'] as number | bigint
     prepare('DELETE FROM messages_fts WHERE rowid = ?').run(rowid)
@@ -171,6 +177,47 @@ export function backfillSessionFts(database: DatabaseSync, sessionId: string): n
   if (hasRowidMap(database)) deleteSessionFts((sql) => database.prepare(sql), sessionId)
   else database.prepare('DELETE FROM messages_fts WHERE session_id = ?').run(sessionId)
   return indexMessageRows(database, sessionId)
+}
+
+/**
+ * 把映射表最大 rowid 之后、没有映射的 FTS 行补进映射。每次开库跑一遍。
+ *
+ * ★ 来源:V37 之前的版本(例如 /Applications 里还没升级的那份)开了同一个库。
+ *   它按 message_id 删、不带 rowid 插,FTS 自增出的 rowid 全落在映射之外;
+ *   新版下一次分配映射 rowid 就会撞上它们,发消息直接报 `constraint failed`。
+ *
+ * - 只看 `rowid > 映射最大值` 那一段:FTS 按 rowid 走 B 树,正常库上是一次空查找。
+ * - 同一条消息有映射也有新行时,映射改指向新行(旧版写新行之前已经按 message_id
+ *   删了旧行);同一条消息多个新行按 rowid 升序处理,最后留下的是最新那行。
+ * - 剩下仍无映射的行(消息已不在)直接删掉。
+ * - 尽力而为:索引坏了/没了(`searchAll` 有 LIKE 兜底)不能拦住开库,失败只回滚这一段。
+ */
+export function reconcileMessageFts(database: DatabaseSync): void {
+  if (!hasRowidMap(database)) return
+  database.exec('SAVEPOINT reconcile_fts')
+  try {
+    const row = database.prepare('SELECT coalesce(max(fts_rowid), 0) AS max FROM messages_fts_rowid').get()
+    /*
+      ★ 必须按 BigInt 绑定。node:sqlite 把 JS number 绑成 REAL,FTS5 遇到 REAL 的
+      `rowid > ?` 不走 rowid 区间而是整表扫(本机库实测 220ms vs 2ms);
+      `rowid = ?` 不受影响。
+    */
+    const max = BigInt((row?.['max'] as number | bigint | undefined) ?? 0)
+    database.prepare(
+      `INSERT INTO messages_fts_rowid (fts_rowid, message_id, session_id)
+         SELECT f.rowid, f.message_id, f.session_id FROM messages_fts f
+         WHERE f.rowid > ? AND EXISTS (SELECT 1 FROM messages m WHERE m.id = f.message_id) ORDER BY f.rowid
+       ON CONFLICT(message_id) DO UPDATE SET fts_rowid = excluded.fts_rowid, session_id = excluded.session_id`
+    ).run(max)
+    database.prepare(
+      'DELETE FROM messages_fts WHERE rowid > ? AND rowid NOT IN (SELECT fts_rowid FROM messages_fts_rowid WHERE fts_rowid > ?)'
+    ).run(max, max)
+    database.exec('RELEASE reconcile_fts')
+  } catch (err) {
+    database.exec('ROLLBACK TO reconcile_fts')
+    database.exec('RELEASE reconcile_fts')
+    console.warn('[db] 全文索引映射对账失败,跳过:', err)
+  }
 }
 
 /** 一次性修复历史漏索引，同时清掉已删除消息的幽灵结果。 */

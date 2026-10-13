@@ -104,6 +104,7 @@ export const agentZh = {
   // 仍可能混进它(卡片还没提交、或用户手动展开了工作区)—— 少了这一条,
   // 那个组的标题会显示成 key 本身(`ToolTimeline` 的 GROUP_TITLE_KEYS 钉着完整性)。
   'chat.tool.group.screenshot': '截了 {count} 张页面图',
+  'chat.tool.group.workflow': '运行了 {count} 个工作流',
   'chat.tool.group.external': '调用了 {count} 个外部工具',
   // 截图卡片在图还没到时的等待文案(见 views/chat/ScreenshotDetail.tsx)
   'chat.screenshot.capturing': '正在截取页面…',
@@ -328,6 +329,7 @@ export const agentEn: Record<keyof typeof agentZh, string> = {
   'chat.tool.group.image': '{count} image generations',
   'chat.tool.group.video': '{count} video generations',
   'chat.tool.group.screenshot': '{count} page screenshots',
+  'chat.tool.group.workflow': '{count} workflows',
   'chat.tool.group.external': '{count} external tools called',
   'chat.screenshot.capturing': 'Capturing the page…',
   'chat.workspace.toolCount': '{count} tools',
