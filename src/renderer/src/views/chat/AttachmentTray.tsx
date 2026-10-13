@@ -111,7 +111,7 @@ function AttachmentChip({
       data-status={item.status}
       title={item.status === "error" ? item.error : item.name}
       className={cn(
-        "group relative flex h-9 max-w-[180px] items-center gap-1.5 rounded-[7px] border pr-1 pl-1.5 text-[11.5px]",
+        "group relative flex h-9 max-w-[180px] items-center gap-1.5 rounded-[8px] border pr-1 pl-1.5 text-[11.5px]",
         item.status === "error"
           ? "border-danger/40 bg-danger/8 text-danger"
           : "border-border bg-tint text-fg-muted",

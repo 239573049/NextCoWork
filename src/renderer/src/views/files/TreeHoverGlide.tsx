@@ -71,7 +71,7 @@ export function TreeHoverGlide({ container }: {
               opacity: { duration: 0.12 * scale }
             }
       }
-      className="pointer-events-none absolute inset-x-0 top-0 rounded-[7px] bg-tint-hover"
+      className="pointer-events-none absolute inset-x-0 top-0 rounded-[8px] bg-tint-hover"
     />
   )
 }

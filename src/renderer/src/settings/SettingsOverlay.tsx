@@ -160,15 +160,15 @@ export function SettingsOverlay({
       aria-modal="true"
       aria-label={t('common.settings')}
     >
-      {/* 纯黑 35% —— 这个数是从参考图反解出来的,见 theme.css 的 --color-scrim */}
-      <div className="absolute inset-0 bg-scrim/35 backdrop-blur-[2px]" onClick={requestClose} />
+      {/* 苹果风格:轻遮罩、不模糊 —— 面板自己是毛玻璃,背景糊掉反而看不出玻璃感 */}
+      <div className="absolute inset-0 bg-scrim/20" onClick={requestClose} />
 
       <div
         ref={panelRef}
         tabIndex={-1}
         className={cn(
           'relative flex h-[720px] max-h-full w-full max-w-[1058px] overflow-hidden',
-          'rounded-panel shadow-2xl shadow-black/40 outline-none',
+          'apple-sheet outline-none',
           // Menu uses viewport coordinates while remaining inside this panel;
           // keep the ancestor transform-free so its fixed positioning stays exact.
           'transition-opacity duration-280 ease-panel motion-reduce:transition-none',
@@ -209,11 +209,11 @@ export function SettingsOverlay({
                     className={cn(
                       'flex h-[34px] w-full items-center gap-2.5 rounded-[8px] px-2.5',
                       'text-left text-[13px] transition-colors',
-                      // 选中 = 往暗里挖,悬停 = 往暖里偏。两个维度,不互相盖
-                      on ? 'bg-surface-sunken text-fg' : 'text-fg hover:bg-tint-hover'
+                      // 苹果风格:选中 = 强调色实底白字(系统设置的侧栏),悬停只淡淡一层
+                      on ? 'bg-accent text-accent-fg' : 'text-fg hover:bg-fg/6'
                     )}
                   >
-                    <span className="shrink-0 text-icon">
+                    <span className={cn('shrink-0', on ? 'text-accent-fg' : 'text-icon')}>
                       <Icon size={15} />
                     </span>
                     <span className="min-w-0 flex-1 truncate">{pageLabel(t, p.id)}</span>

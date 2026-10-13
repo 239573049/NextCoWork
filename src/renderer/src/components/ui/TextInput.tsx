@@ -84,7 +84,7 @@ export function TextInput({
       ref={fieldRef}
       data-state={hasError ? 'error' : success ? 'success' : 'idle'}
       className={cn(
-        'app-no-drag flex items-center gap-2 rounded-[9px] border transition-[border-color,box-shadow] duration-200',
+        'apple-field app-no-drag flex items-center gap-2',
         'bg-surface-field',
         size === 'sm' ? 'h-7 px-2' : 'h-8 px-2.5',
         hasError

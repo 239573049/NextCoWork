@@ -60,7 +60,7 @@ const PANEL = cn(
 )
 
 const ITEM = cn(
-  'flex w-full cursor-default select-none items-center gap-2.5 rounded-[7px] px-2.5 py-[7px]',
+  'flex w-full cursor-default select-none items-center gap-2.5 rounded-[8px] px-2.5 py-[7px]',
   'text-left text-[13px] text-fg outline-none transition-colors',
   'data-[highlighted]:bg-tint-strong data-[disabled]:opacity-40'
 )

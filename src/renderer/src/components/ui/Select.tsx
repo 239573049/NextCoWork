@@ -82,12 +82,12 @@ export function Select({
         aria-label={ariaLabel}
         disabled={disabled}
         className={cn(
-          "app-no-drag group flex h-7 w-full items-center gap-1.5 rounded-[9px] border border-border",
-          "bg-surface-field px-2.5 text-left text-[11.5px] text-fg outline-none",
+          "app-no-drag group flex h-7 w-full items-center gap-1.5 rounded-full border border-[var(--border-strong)]",
+          "bg-[var(--surface)] px-3 text-left text-[12px] text-fg outline-none",
           "transition-[background-color,border-color,box-shadow,border-radius] duration-150",
-          "hover:bg-tint focus-visible:border-fg-faint focus-visible:ring-2 focus-visible:ring-fg-faint/15",
-          // 展开时朝向面板的那条边先收平,面板再分离出去 —— 两者像是一整块被捏开
-          "data-[state=open]:border-fg-faint data-[state=open]:bg-tint data-[state=open]:rounded-b-[4px]",
+          "hover:bg-tint focus-visible:ring-3 focus-visible:ring-accent/50",
+          // 苹果风格:弹出按钮展开时只压暗一档,不再改圆角
+          "data-[state=open]:bg-tint",
           className,
         )}
       >
@@ -113,8 +113,8 @@ export function Select({
           className={cn(
             "app-no-drag max-h-[min(240px,var(--radix-select-content-available-height))]",
             inModal ? "z-[150]" : "z-[60]",
-            "w-[var(--radix-select-trigger-width)] overflow-hidden rounded-[12px] border-0",
-            "bg-surface-menu p-1.5 shadow-menu outline-none",
+            "w-[var(--radix-select-trigger-width)] overflow-hidden rounded-[10px] border-0",
+            "bg-surface-menu p-[5px] shadow-menu outline-none",
             // 入场:从触发器那一侧轻轻展开。transform-origin 用 Radix 算好的锚点,翻到上方时自动跟着翻
             "origin-[var(--radix-select-content-transform-origin)]",
             "data-[state=open]:animate-[select-unfold_0.22s_cubic-bezier(0.16,1,0.3,1)] motion-reduce:animate-none",
@@ -135,14 +135,14 @@ export function Select({
                   <motion.div
                     variants={reduce ? undefined : ITEM}
                     className={cn(
-                      "relative flex min-h-7 cursor-default select-none items-center rounded-[8px] py-1 pr-6 pl-2",
+                      "group/opt relative flex min-h-6 cursor-default select-none items-center rounded-[5px] py-[3px] pr-6 pl-2",
                       "text-[11.5px] text-fg-muted outline-none transition-colors",
-                      "data-[highlighted]:bg-tint-hover data-[highlighted]:text-fg",
-                      "data-[state=checked]:bg-tint data-[state=checked]:text-fg",
+                      "data-[highlighted]:bg-accent data-[highlighted]:text-accent-fg",
+                      "data-[state=checked]:font-medium",
                     )}
                   >
                     <SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText>
-                    <SelectPrimitive.ItemIndicator className="absolute right-2 inline-flex items-center text-accent">
+                    <SelectPrimitive.ItemIndicator className="absolute right-2 inline-flex items-center text-accent group-data-[highlighted]/opt:text-accent-fg">
                       <Check aria-hidden size={11} />
                     </SelectPrimitive.ItemIndicator>
                   </motion.div>

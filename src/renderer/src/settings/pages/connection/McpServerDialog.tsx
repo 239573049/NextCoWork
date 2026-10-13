@@ -338,7 +338,7 @@ export function McpServerDialog({
             }
             onChange={(e) => set("secretsText", e.target.value)}
             className={cn(
-              "app-no-drag selectable w-full resize-none rounded-[8px] border border-hairline",
+              "apple-field app-no-drag selectable w-full resize-none rounded-[8px] border border-hairline",
               "bg-surface-field px-2.5 py-2 font-mono text-[12px] leading-[1.7] text-fg outline-none",
               "placeholder:text-fg-faint focus:border-fg-faint",
             )}

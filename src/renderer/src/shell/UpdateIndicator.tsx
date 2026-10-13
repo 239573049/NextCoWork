@@ -231,7 +231,7 @@ export function UpdateIndicator(): ReactNode {
               style={{ left: pos?.left ?? -9999, top: pos?.top ?? -9999, width: CARD_WIDTH }}
               // z-150:portal 到 body 的浮层那一档,见 theme.css 末尾 z 轴那段。
               // 和 `Tooltip` 同档 —— 它俩不会同时出现在同一个位置上。
-              className="app-no-drag fixed z-[150] rounded-card border border-stroke bg-surface-raised p-3 text-fg shadow-lg"
+              className="app-no-drag fixed z-[150] rounded-[14px] bg-surface-menu p-3 text-fg shadow-menu"
             >
               <div className="text-[12.5px] font-medium">
                 {t('about.updates.banner', { version: info.version })}

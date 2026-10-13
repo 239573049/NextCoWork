@@ -96,12 +96,11 @@ function useRespond(onAnswered: () => void, onResolved?: () => void): {
   }
 }
 
-const BUTTON = 'rounded-lg border border-border px-3 py-1.5 text-[12px] transition-colors disabled:opacity-50'
-const GHOST_BUTTON = `${BUTTON} hover:bg-tint`
-const PRIMARY_BUTTON = `${BUTTON} bg-accent text-accent-fg hover:opacity-90`
+// 苹果风格:胶囊按钮 / 玻璃输入框,样式在 theme.css 的 .apple-btn / .apple-field
+const GHOST_BUTTON = 'apple-btn'
+const PRIMARY_BUTTON = 'apple-btn-primary'
 const FIELD = [
-  'w-full resize-none rounded-[8px] border border-border bg-surface-field px-2.5 py-2 text-[13px]',
-  'leading-[1.6] text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-fg-faint',
+  'apple-field w-full resize-none py-2 text-[13px] leading-[1.6]',
   'disabled:opacity-40'
 ].join(' ')
 

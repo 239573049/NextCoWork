@@ -1,11 +1,11 @@
 .field { display: grid; min-width: 0; }
 .label { margin-bottom: var(--space-2); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; line-height: var(--leading-body); }
 /* Focus answers with the border colour alone (no rings or halos); the field itself never changes size. */
-.input { width: 100%; min-height: var(--control-height-md); padding: 0 var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--surface); color: var(--foreground); font: inherit; font-size: var(--text-sm); line-height: var(--leading-body); letter-spacing: var(--tracking-body); outline: none; transition: border-color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard); }
+.input { width: 100%; min-height: var(--control-height-md); padding: 0 var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-control); padding-inline: 14px; background: var(--surface); color: var(--foreground); font: inherit; font-size: var(--text-sm); line-height: var(--leading-body); letter-spacing: var(--tracking-body); outline: none; transition: border-color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard); }
 .input::placeholder { color: var(--text-muted); }
-@media (hover: hover) and (pointer: fine) { .input:hover:not(:disabled, [aria-invalid="true"]) { border-color: var(--foreground); } }
-.input:focus-visible { border-color: var(--foreground); }
-.input[aria-invalid="true"] { border-color: var(--danger); }
+@media (hover: hover) and (pointer: fine) { .input:hover:not(:disabled, [aria-invalid="true"]) { border-color: var(--border-strong); } }
+.input:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-outline); }
+.input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 30%, transparent); }
 .input:disabled { cursor: not-allowed; opacity: .5; background: var(--surface-muted); }
 /* The row's space is padding inside the clipped slot, so the height animates from a true zero. */
 .messageSlot { display: block; overflow: hidden; }

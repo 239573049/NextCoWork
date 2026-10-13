@@ -239,7 +239,7 @@ export function UsageTab(): ReactNode {
           <button
             type="button"
             onClick={retry}
-            className="rounded-[7px] bg-accent px-3 py-1.5 text-[11.5px] text-accent-fg"
+            className="rounded-[8px] bg-accent px-3 py-1.5 text-[11.5px] text-accent-fg"
           >
             {t('common.retry')}
           </button>
@@ -544,7 +544,7 @@ function RequestLogs({
           type="button"
           onClick={onPrevious}
           disabled={page === null || page.offset === 0 || loading}
-          className="rounded-[7px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
+          className="rounded-[8px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
         >
           {t('usage.previousPage')}
         </button>
@@ -552,7 +552,7 @@ function RequestLogs({
           type="button"
           onClick={onNext}
           disabled={page === null || page.offset + page.items.length >= page.total || loading}
-          className="rounded-[7px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
+          className="rounded-[8px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
         >
           {t('usage.nextPage')}
         </button>

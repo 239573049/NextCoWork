@@ -859,7 +859,10 @@ export function Composer({
       */}
       <div
         className={cn(
-          "relative mx-auto w-full max-w-[760px] rounded-panel bg-surface-input shadow-sm shadow-black/10 transition-shadow duration-200 focus-within:shadow-md focus-within:shadow-black/15 motion-reduce:transition-none",
+          // 苹果风格:大圆角玻璃输入框 —— 半透明底 + 浅色描边,聚焦时描边换成强调色。
+          // ★ 不能加 backdrop-blur:它会让这个框成为 fixed 定位的包含块,框里弹出的
+          //   上下文 / 权限等浮层就改成相对输入框定位,整块飞到右下角(见 ui/Menu.tsx 文件头)
+          "relative mx-auto w-full max-w-[760px] rounded-[22px] border border-[var(--border-strong)] bg-surface-input/80 shadow-[0_8px_24px_rgb(0_0_0/0.08)] transition-[border-color,box-shadow] duration-200 focus-within:border-accent/60 focus-within:shadow-[0_0_0_3px_var(--focus-outline),0_8px_24px_rgb(0_0_0/0.1)] motion-reduce:transition-none",
           dragging && "ring-2 ring-accent/60",
         )}
         onDragOver={(e) => {

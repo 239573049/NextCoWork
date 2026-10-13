@@ -214,7 +214,7 @@ export function PendingQueueItem({
       className={cn(
         // ★ h-9 = 36px 固定。promoted 用左侧竖条表达,**不加徽章** ——
         //   徽章会挤压本就只有一行的文本
-        'group flex h-9 items-center gap-2 rounded-[7px] pr-1 pl-2 transition-colors hover:bg-tint-hover/40',
+        'group flex h-9 items-center gap-2 rounded-[8px] pr-1 pl-2 transition-colors hover:bg-tint-hover/40',
         promoted && 'bg-accent/8 border-l-2 border-l-accent pl-1.5'
       )}
     >
