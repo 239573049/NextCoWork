@@ -269,7 +269,7 @@ export function TaskChecklistRows({
             // 始终是转录里的原值:档位只改怎么画,不改这一项究竟是什么状态
             data-task-status={item.status}
             className={cn(
-              'flex min-h-8 items-center gap-2 rounded-[7px] px-1.5 py-1 text-[12px]',
+              'flex min-h-8 items-center gap-2 rounded-[8px] px-1.5 py-1 text-[12px]',
               showActive && 'bg-accent/[0.045]',
               highlight?.has(item.content) === true && 'bg-tint-hover/50'
             )}
@@ -522,7 +522,7 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * 9
  * 进度环 + 完成数。标题行和缩起后的小球画的是**同一颗**:小球是这一行缩出来的,
  * 两处长得不一样,用户就认不出它们是同一个东西。
  */
-function ProgressRing({ progress, done }: { progress: number; done: number }): ReactNode {
+export function ProgressRing({ progress, done }: { progress: number; done: number }): ReactNode {
   return (
     <span aria-hidden className="relative flex size-6 shrink-0 items-center justify-center">
       <svg className="absolute inset-0 -rotate-90" width="24" height="24" viewBox="0 0 24 24" aria-hidden>

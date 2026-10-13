@@ -62,6 +62,7 @@ import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from 
 import type { InnerTabState, WindowKind, WindowTabState } from '../domain/tab'
 import type { ImageTheme, ThemeProfile } from '../domain/theme'
 import type { TerminalBuffer, TerminalCreateRequest, TerminalInfo, TerminalPreparation } from '../domain/terminal'
+import type { BackgroundShellInfo } from '../domain/shell'
 import type { SkillListItem, SkillMarketItem, SkillInstallScope } from '../domain/skill'
 import type { CommandDefinition } from '../domain/command'
 import type { AgentDraft } from '../domain/agent-def'
@@ -740,6 +741,23 @@ export interface IpcInvokeMap {
    * 与 `shell:stopToolCall` 同理不是错误。
    */
   'shell:backgroundToolCall': { req: { runId: string; callId: string }; res: boolean }
+  /**
+   * 这个工作区里 agent 开过的后台 shell(含已结束、还没被淘汰的)—— 右上角活动胶囊的
+   * 初始数据。之后的变化走 `shell:backgroundChanged`。
+   */
+  'shell:listBackground': { req: { workspaceId: string }; res: BackgroundShellInfo[] }
+  /**
+   * 看一眼某个后台 shell 的输出尾巴。★ **不消费**模型那份 `BashOutput` 缓冲 ——
+   * 界面看过一眼,模型下次照样读得到(见 `agent-shells.ts` 的 `tail`)。
+   * `null` = 它已经被淘汰了,不是错误。
+   */
+  'shell:peekBackground': { req: { id: string }; res: { info: BackgroundShellInfo; output: string } | null }
+  /**
+   * 用户在活动面板里停掉一个后台 shell。与模型调 `KillShell` 是同一件事,
+   * 状态记成 `killed`,模型下次 `BashOutput` 会读到「被停了」。
+   * `null` = 它已经被淘汰了。
+   */
+  'shell:killBackground': { req: { id: string }; res: BackgroundShellInfo | null }
 
   // ── 终端 ──
   'terminal:create': { req: TerminalCreateRequest; res: TerminalInfo }
@@ -1403,6 +1421,12 @@ export interface IpcEventMap {
    * 而渲染层还可以用 `video:listBySession` 主动补齐。
    */
   'video:jobChanged': VideoJobView
+  /**
+   * 后台 shell 列表变了(新开、退出、被杀、被淘汰)。**全量 + 全局广播**,
+   * 理由同 `agent:activeRuns`:丢过一条之后下一条自己收敛。渲染层按 `workspaceId` 自己筛。
+   * ★ 输出增长不发 —— 刷日志的进程会把这条频道淹没,输出由面板展开时自己去 peek。
+   */
+  'shell:backgroundChanged': { shells: BackgroundShellInfo[] }
   'settings:changed': AppSettings
   'theme:changed': { resolved: ResolvedTheme }
   'theme:libraryChanged': { profiles: ThemeProfile[]; images: ImageTheme[] }
@@ -1791,6 +1815,9 @@ export const INVOKE_CHANNELS = {
   'agent:listTools': 1,
   'shell:stopToolCall': 1,
   'shell:backgroundToolCall': 1,
+  'shell:listBackground': 1,
+  'shell:peekBackground': 1,
+  'shell:killBackground': 1,
   'terminal:create': 1,
   'terminal:prepare': 1,
   'terminal:approve': 1,
@@ -2040,6 +2067,7 @@ export const EVENT_CHANNELS = {
   ,'dataMigration:progress': 1
   // 视频任务状态变化(revision 单调递增,渲染层据此做增量合并)。
   ,'video:jobChanged': 1
+  ,'shell:backgroundChanged': 1
 } as const satisfies Record<keyof IpcEventMap, 1>
 
 // ═══════════════════════════════════════════════════════════════

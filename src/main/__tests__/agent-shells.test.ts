@@ -250,3 +250,38 @@ describe('AgentShells · 收工', () => {
     expect(second.info.id).not.toBe(first.info.id)
   })
 })
+
+describe('AgentShells · 界面旁观', () => {
+  it('★ peek 不消费模型的缓冲 —— 界面看过一眼,BashOutput 照样读得到', async () => {
+    const shells = new AgentShells()
+    const { info, process } = adopt(shells)
+    process.emit('stdout', 'ready\n')
+    process.emit('stderr', 'warn\n')
+    await flush()
+    expect(shells.peek(info.id)?.output).toBe('ready\nwarn\n')
+    expect(shells.read(info.id).stdout).toBe('ready\n')
+    // 模型读走之后,界面的尾巴不跟着清空
+    expect(shells.peek(info.id)?.output).toBe('ready\nwarn\n')
+  })
+
+  it('peek 认不出的 id 返回 undefined,不 throw —— 界面上那条可能刚被淘汰', () => {
+    expect(new AgentShells().peek('bash_404')).toBeUndefined()
+  })
+
+  it('开、杀、退出各通知一次;输出增长不通知', async () => {
+    const shells = new AgentShells()
+    const listener = vi.fn()
+    shells.onChange(listener)
+    const first = adopt(shells)
+    expect(listener).toHaveBeenCalledTimes(1)
+    first.process.emit('stdout', 'log line\n')
+    await flush()
+    expect(listener).toHaveBeenCalledTimes(1)
+    shells.kill(first.info.id)
+    expect(listener).toHaveBeenCalledTimes(2)
+    const second = adopt(shells, { callId: 'call_2' })
+    second.process.finish(0)
+    await flush()
+    expect(listener).toHaveBeenCalledTimes(4)
+  })
+})

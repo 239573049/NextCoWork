@@ -170,7 +170,7 @@ export function UsagePage(): ReactNode {
           <button
             type="button"
             onClick={retry}
-            className="rounded-[7px] bg-accent px-3 py-1.5 text-[11.5px] text-accent-fg"
+            className="rounded-[8px] bg-accent px-3 py-1.5 text-[11.5px] text-accent-fg"
           >
             {t('common.retry')}
           </button>
@@ -475,7 +475,7 @@ function RequestLogs({
           type="button"
           onClick={onPrevious}
           disabled={page === null || page.offset === 0 || loading}
-          className="rounded-[7px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
+          className="rounded-[8px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
         >
           {t('usage.previousPage')}
         </button>
@@ -483,7 +483,7 @@ function RequestLogs({
           type="button"
           onClick={onNext}
           disabled={page === null || page.offset + page.items.length >= page.total || loading}
-          className="rounded-[7px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
+          className="rounded-[8px] border border-border px-2 py-1 text-fg-muted disabled:opacity-35"
         >
           {t('usage.nextPage')}
         </button>
@@ -540,8 +540,11 @@ function RequestRow({
         <td className="px-2 text-right">
           <span
             className={cn(
-              'rounded-pill px-2 py-0.5 text-[10px] tabular-nums',
-              record.ok ? 'bg-accent/10 text-accent' : 'bg-danger/10 text-danger'
+              'rounded-pill border px-2 py-0.5 text-[10px] tabular-nums',
+              // 苹果风格:成功是系统绿描边药丸,失败是系统红
+              record.ok
+                ? 'border-success/45 bg-success/12 text-success'
+                : 'border-danger/45 bg-danger/10 text-danger'
             )}
           >
             {record.httpStatus ??

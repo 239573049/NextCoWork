@@ -178,6 +178,9 @@ export const INVOKE_BOUNDARIES = {
   'agent:listTools': 'device',
   'shell:stopToolCall': 'device',
   'shell:backgroundToolCall': 'device',
+  'shell:listBackground': 'device',
+  'shell:peekBackground': 'device',
+  'shell:killBackground': 'device',
   'terminal:create': 'device',
   'terminal:prepare': 'device',
   'terminal:approve': 'device',
@@ -428,4 +431,5 @@ export const EVENT_BOUNDARIES = {
   'scheduled:focusRun': 'composed',
   'dataMigration:progress': 'device',
   'video:jobChanged': 'device',
+  'shell:backgroundChanged': 'device',
 } as const satisfies Record<EventChannel, IpcBoundary>

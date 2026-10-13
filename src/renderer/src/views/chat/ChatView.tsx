@@ -37,7 +37,8 @@ import { Composer, type ComposerValue, type ConversationUsageSummary, type Fallb
 import { type TrayItem } from './AttachmentTray'
 import { deferAttachIntent, takeAttachIntents } from './draft-handoff'
 import { PendingQueue } from './PendingQueue'
-import { TaskChecklist, type TaskChecklistExecution } from './TaskChecklist'
+import { type TaskChecklistExecution } from './TaskChecklist'
+import { ActivityCapsule } from './ActivityCapsule'
 import { Thread } from './Thread'
 import { ThreadLoadError, ThreadSkeleton } from './ThreadLoading'
 import { SubagentLiveFeed } from './subagent-live'
@@ -407,6 +408,7 @@ export function ChatView({
       : (callId: string): void => { void backgroundToolCall(activeRunId, callId).catch(() => {}) },
     [activeRunId]
   )
+  const subagentList = useMemo(() => Object.values(transcript.subagents), [transcript.subagents])
   const todoToolName = transcript.messages.flatMap((m) => m.parts).find((p): p is Extract<ContentPart, { type: 'tool_call' }> => p.type === 'tool_call' && p.name.includes('TodoWrite'))?.name
   const todos = todoToolName === undefined ? undefined : latestTodosFrom(transcript.messages, todoToolName)
   /*
@@ -932,28 +934,17 @@ export function ChatView({
     ★ **队列区和清单跟着输入框走,不跟着转录走。** 它们属于「还没发出去的东西」那一侧,
     所以空态和常驻态两棵子树都要有它们 —— 用户在空会话里连发两条同样会排队。
 
-    需求:清单收起后是**一颗小球**,它不能自己再占一行 —— 那一行本来就被发送队列占着,
-    球只吃掉队列左边的一小块(截图:球在队列左边、同一行)。所以两者进同一个 grid:
-    **第 1 列是球的格子(36px)、第 2 列是队列**(`minmax(0,1fr)` 吃满余下),两列一起看
-    就是「一小块 + 一个队列框」;清单展开时它跨满两列、落到第 2 行,回到「队列在上、
-    清单在下」这个原有次序(见 `TaskChecklistShell`)。
-    ★ 队列那一格是**显式 `col-start-2`** 的:它不靠 DOM 顺序落格,所以第 1 列里有没有球、
-      清单是收着还是展开,都不会把它挪到别处 —— 没有球时第 1 列(空着)自然是 0 宽,
-      队列照旧占满整行。
-    ★ 清单自己带着球与卡片两个格子的定位(球是 `col-start-1` + `self-end`,卡片是
-      `col-span-full`,各自落哪一行见 `TaskChecklistShell` —— 收起的那 150ms 里两者同格),
-      同样与 DOM 顺序无关;所以这里只按**读起来顺**的次序排:队列在前、清单在后。
-    ★ 两个子组件的 `className` 都用来抹掉它们自己的居中/限宽/内边距:整块版式只由
-      这一层决定(见它们各自的 `className` 注释)。
+    任务清单原先也住在这里(收起是队列左边的一颗球),现在搬到了右上角的活动胶囊
+    (`ActivityCapsule`),这一块只剩发送队列。
   */
   const notices = (
     <div
-      className="mx-auto grid w-full max-w-[760px] grid-cols-[auto_minmax(0,1fr)] items-end gap-2 px-6 pb-2"
+      className="mx-auto w-full max-w-[760px] px-6 pb-2"
       data-testid="composer-notices"
     >
       {queuedInputs.length > 0 && (
         <PendingQueue
-          className="col-start-2 max-w-none px-0 pb-0"
+          className="max-w-none px-0 pb-0"
           items={queuedInputs}
           running={running}
           onPromote={promoteInput}
@@ -962,9 +953,6 @@ export function ChatView({
           onMoveToDraft={moveInputToDraft}
           onResume={() => resumeQueue(storeKey)}
         />
-      )}
-      {todos !== undefined && (
-        <TaskChecklist className="max-w-none px-0 pb-0" todos={todos} execution={execution} />
       )}
     </div>
   )
@@ -1056,7 +1044,7 @@ export function ChatView({
     有了它列宽恒等于面板宽,放不下的东西交给各自的容器决定是换行、截断还是隐藏。
   */
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <SubagentOpenProvider open={openSubagent}>
         <ToolStopProvider stop={stopRunningToolCall} background={backgroundRunningToolCall}>
           <WorkspaceMarkdownProvider workspaceId={workspace.id} workspaceRoot={workspace.rootPath} onOpenFile={openMarkdownFile}>
@@ -1094,6 +1082,18 @@ export function ChatView({
       {notices}
       {composer}
       {transferDialog}
+      {/*
+        任务清单、子代理、后台命令收进右上角这一颗胶囊(原先清单是输入框上方的一张卡片)。
+        浮在转录上方、不占版式 —— 见 `ActivityCapsule` 的文件头。
+        ★ 排在最后:插在前面会挪动后面兄弟的位置,加载完历史时输入框会被重建、丢焦点。
+      */}
+      <ActivityCapsule
+        workspaceId={workspace.id}
+        todos={todos}
+        execution={execution}
+        subagents={subagentList}
+        onOpenSubagent={openSubagent}
+      />
     </div>
   )
 }

@@ -993,7 +993,7 @@ export function ProviderPanel({
                     aria-label={t("provider.modelIdLabel")}
                     placeholder={t("provider.modelIdPlaceholder")}
                     disabled={busy}
-                    className="selectable min-w-0 flex-1 rounded-[7px] border border-border bg-canvas px-2 text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-fg-faint"
+                    className="apple-field selectable min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-2 text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-fg-faint"
                   />
                   <button
                     type="button"
@@ -1614,7 +1614,7 @@ function RowAction({
 }
 
 const modelDialogInputClass =
-  "h-8 w-full rounded-[9px] border border-border bg-surface-field px-2.5 text-[11.5px] text-fg outline-none transition-[border-color,box-shadow] duration-200 focus:border-fg-faint focus:ring-2 focus:ring-fg-faint/15";
+  "apple-field h-8 w-full text-[12px]";
 
 function ModelEditDialog({
   model,
@@ -1699,7 +1699,7 @@ function ModelEditDialog({
     >
       <div className="space-y-3">
         {invalid && (
-          <p className="rounded-[7px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11.5px] text-danger">
+          <p className="rounded-[8px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11.5px] text-danger">
             {t("models.modelInvalid")}
           </p>
         )}
@@ -1876,7 +1876,7 @@ function ThinkingDialog({
     >
       <div className="space-y-3">
         {invalid && (
-          <p className="rounded-[7px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11.5px] text-danger">
+          <p className="rounded-[8px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11.5px] text-danger">
             {t("models.modelInvalid")}
           </p>
         )}
@@ -1990,7 +1990,7 @@ function DialogToggle({
   onChange: (checked: boolean) => void;
 }): ReactNode {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-[7px] border border-border bg-surface-field px-2.5 py-1.5">
+    <div className="flex items-center justify-between gap-3 rounded-[8px] border border-border bg-surface-field px-2.5 py-1.5">
       <span className="text-[11.5px] text-fg-muted">{label}</span>
       <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
     </div>

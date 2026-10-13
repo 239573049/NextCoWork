@@ -242,7 +242,7 @@ function LocalBrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
                     isSelected ? 'bg-tint-strong' : 'hover:bg-tint-hover'
                   )}
                 >
-                  <span className="flex size-7 shrink-0 items-center justify-center rounded-[7px] bg-tint text-fg-muted">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-[8px] bg-tint text-fg-muted">
                     <Globe2 size={14} />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -435,7 +435,7 @@ function LocalBrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder={t('browser.profileNamePlaceholder')}
-              className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-fg-faint"
+              className="apple-field mt-1 h-9 w-full rounded-[8px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-fg-faint"
             />
           </label>
           <label className="block text-[12px] text-fg-muted">
@@ -444,7 +444,7 @@ function LocalBrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
               value={domains}
               onChange={(event) => setDomains(event.target.value)}
               placeholder={t('browser.profileDomainsPlaceholder')}
-              className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-fg-faint"
+              className="apple-field mt-1 h-9 w-full rounded-[8px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-fg-faint"
             />
           </label>
           <label className="block text-[12px] text-fg-muted">
@@ -453,7 +453,7 @@ function LocalBrowserFeature({ onClose }: { onClose?: () => void }): ReactNode {
               value={startUrl}
               onChange={(event) => setStartUrl(event.target.value)}
               placeholder={t('browser.profileStartUrlPlaceholder')}
-              className="mt-1 h-9 w-full rounded-[9px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-fg-faint"
+              className="apple-field mt-1 h-9 w-full rounded-[8px] border border-hairline bg-canvas px-2.5 text-[12px] text-fg outline-none focus:border-fg-faint"
             />
           </label>
         </div>

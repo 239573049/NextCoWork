@@ -65,6 +65,7 @@ import {
   store
 } from '../state/store'
 import { windows, type WindowContext } from '../window/registry'
+import { agentShells } from '../agent-shells'
 import { refreshScheduler, runScheduledTaskNow } from '../scheduled/scheduler'
 import { scheduledWrites, setScheduledChangeListener } from '../scheduled/bridge'
 import { setSchedulerRefresh } from '../scheduled/refresh'
@@ -604,6 +605,10 @@ const handlers: HandlerMap = {
   // ── Agent 的 shell:只停这一条命令,run 继续 ──
   'shell:stopToolCall': (req, ctx) => stopToolCall(req, ctx),
   'shell:backgroundToolCall': (req, ctx) => backgroundToolCall(req, ctx),
+  // ── 后台 shell:右上角活动面板。按 id 操作,与模型的 BashOutput / KillShell 同一张表 ──
+  'shell:listBackground': ({ workspaceId }) => agentShells.list().filter((shell) => shell.workspaceId === workspaceId),
+  'shell:peekBackground': ({ id }) => agentShells.peek(id) ?? null,
+  'shell:killBackground': ({ id }) => agentShells.peek(id) === undefined ? null : agentShells.kill(id),
   'agent:backgroundSubagent': (req, ctx) => backgroundSubagent(req, ctx),
   // ── 步骤 8:终端 ──
   'terminal:create': (req, ctx) => terminalHost.create(req, ctx.sender),
@@ -1078,6 +1083,8 @@ export function registerIpc(): void {
     `windows.emitToAll` —— 那个模块拖着 electron,所以由这一侧装进去。
   */
   setScheduledChangeListener((change) => windows.emitToAll('scheduled:changed', change))
+  // 同一种接线:`agent-shells.ts` 不认识窗口,广播由这一侧装进去
+  agentShells.onChange(() => windows.emitToAll('shell:backgroundChanged', { shells: agentShells.list() }))
 
   /*
     导入服务的接线,和上面 `setMcpChangeListener` 是同一种:

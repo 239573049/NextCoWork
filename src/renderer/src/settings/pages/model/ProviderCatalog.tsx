@@ -133,7 +133,7 @@ export function ProviderCatalog({
             onClick={() => setView("catalog")}
             className={cn(
               "app-no-drag flex size-6 shrink-0 items-center justify-center",
-              "rounded-[7px] text-icon transition-colors hover:bg-tint hover:text-fg",
+              "rounded-[8px] text-icon transition-colors hover:bg-tint hover:text-fg",
             )}
           >
             <ArrowLeft size={14} />
@@ -152,7 +152,7 @@ export function ProviderCatalog({
           onClick={onClose}
           className={cn(
             "app-no-drag flex size-6 shrink-0 items-center justify-center",
-            "rounded-[7px] text-icon transition-colors hover:bg-tint hover:text-fg",
+            "rounded-[8px] text-icon transition-colors hover:bg-tint hover:text-fg",
           )}
         >
           <X size={14} />
@@ -248,7 +248,7 @@ function CustomProviderCard({ onOpen }: { onOpen: () => void }): ReactNode {
       type="button"
       onClick={onOpen}
       className={cn(
-        "app-no-drag min-w-0 rounded-[9px] border border-border bg-canvas px-2.5 py-2 text-left",
+        "app-no-drag min-w-0 rounded-[8px] border border-border bg-canvas px-2.5 py-2 text-left",
         "transition-colors hover:bg-tint/60",
       )}
     >
@@ -291,7 +291,7 @@ function ImportFromAppsCard({ onOpen }: { onOpen: () => void }): ReactNode {
       type="button"
       onClick={onOpen}
       className={cn(
-        "app-no-drag min-w-0 rounded-[9px] border border-border bg-canvas px-2.5 py-2 text-left",
+        "app-no-drag min-w-0 rounded-[8px] border border-border bg-canvas px-2.5 py-2 text-left",
         "transition-colors hover:bg-tint/60",
       )}
     >
@@ -464,7 +464,7 @@ function ImportProvidersForm({
                 disabled={!selectable}
                 onClick={() => toggle(p.sourceKey)}
                 className={cn(
-                  "app-no-drag flex w-full min-w-0 items-start gap-2.5 rounded-[9px] border px-2.5 py-2 text-left transition-colors",
+                  "app-no-drag flex w-full min-w-0 items-start gap-2.5 rounded-[8px] border px-2.5 py-2 text-left transition-colors",
                   selectable ? "border-border hover:bg-tint/60" : "border-hairline opacity-60",
                   active && selectable && "border-accent bg-accent/5",
                 )}
@@ -745,7 +745,7 @@ function PresetCard({
   return (
     <div
       title={detailTooltip(p, rows)}
-      className="min-w-0 rounded-[9px] border border-border bg-canvas px-2.5 py-2"
+      className="min-w-0 rounded-[8px] border border-border bg-canvas px-2.5 py-2"
     >
       <div className="flex items-center gap-1.5">
         <ProviderAvatar name={p.name} id={p.id} size="sm" />

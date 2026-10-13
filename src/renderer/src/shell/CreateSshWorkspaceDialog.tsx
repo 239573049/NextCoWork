@@ -81,7 +81,7 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
   </>}>
     <div className="flex flex-col gap-3">
       <div className="flex min-w-0 items-center gap-2">
-        <select value={selected} aria-label={t('ssh.selectServer')} disabled={busy} className="h-8 min-w-0 flex-1 rounded-[6px] border border-border bg-canvas px-2 text-[12px] text-fg" onChange={(event) => {
+        <select value={selected} aria-label={t('ssh.selectServer')} disabled={busy} className="apple-field h-8 min-w-0 flex-1 rounded-[6px] border border-border bg-canvas px-2 text-[12px] text-fg" onChange={(event) => {
           if (browseId.current) void closeBrowse(browseId.current).catch(() => {})
           browseId.current = null; setSelected(event.target.value); setDirectory(null); setAllowed(false)
         }}><option value="" disabled>{t('ssh.selectServer')}</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.target.host}</option>)}</select>
@@ -96,7 +96,7 @@ export function CreateSshWorkspaceDialog({ hidden, onClose, onCreated }: { hidde
           </span>)}
         </nav>
         <div className="flex min-w-0 items-center gap-2">
-          {directory.facts.os === 'win32' && directory.roots.length > 0 && <select aria-label={t('ssh.volume')} value={directory.roots.find((root) => directory.path.toLowerCase().startsWith(root.toLowerCase())) ?? ''} disabled={busy} className="h-8 max-w-24 rounded-[6px] border border-border bg-canvas px-1 text-[12px]" onChange={(event) => { void loadDirectory(event.target.value) }}><option value="" disabled>{t('ssh.volume')}</option>{directory.roots.map((root) => <option key={root} value={root}>{root}</option>)}</select>}
+          {directory.facts.os === 'win32' && directory.roots.length > 0 && <select aria-label={t('ssh.volume')} value={directory.roots.find((root) => directory.path.toLowerCase().startsWith(root.toLowerCase())) ?? ''} disabled={busy} className="apple-field h-8 max-w-24 text-[12px]" onChange={(event) => { void loadDirectory(event.target.value) }}><option value="" disabled>{t('ssh.volume')}</option>{directory.roots.map((root) => <option key={root} value={root}>{root}</option>)}</select>}
           <IconButton label={t('ssh.parent')} disabled={busy || directory.parent === directory.path} onClick={() => { void loadDirectory(directory.parent) }}><ArrowUp size={14} /></IconButton>
           <div className="min-w-0 flex-1" onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !busy) void loadDirectory(path) }}><TextInput value={path} onChange={setPath} ariaLabel={t('ssh.path')} /></div>
           <Button variant="secondary" type="button" size="sm" disabled={busy} onClick={() => { void loadDirectory(path) }}>{t('ssh.go')}</Button>

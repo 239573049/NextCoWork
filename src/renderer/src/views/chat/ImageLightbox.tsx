@@ -154,7 +154,7 @@ export function ImageLightbox({
         // ★ 非 macOS 上让开右上角那三颗窗口按钮 —— 写死 right-4 的话这个 ✕ 正压在
         //   窗口关闭键底下,点下去关掉的是整个应用。见文件头。
         className={cn(
-          "absolute top-4 rounded-[7px] p-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white",
+          "absolute top-4 rounded-[8px] p-2 text-white/70 transition-colors hover:bg-white/10 hover:text-white",
           IS_MAC ? "right-4" : "right-window-controls",
         )}
       >

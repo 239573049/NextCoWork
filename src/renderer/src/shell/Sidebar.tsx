@@ -548,7 +548,7 @@ function SessionGroupBlock({
                     setMenu({ session, position: { x: event.clientX, y: event.clientY } })
                   }}
                   className={cn(
-                    'flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
+                    'flex w-full items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
                     active ? 'bg-canvas text-fg' : 'text-fg-muted hover:bg-tint-hover hover:text-fg'
                   )}
                 >
@@ -667,14 +667,14 @@ function SessionGroupBlock({
         }
       >
         <label className="block text-[12px] text-fg-muted" htmlFor="session-rename-input">{t('session.renamePrompt')}</label>
-        <input id="session-rename-input" autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} className="selectable mt-2 h-9 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-fg-faint" />
+        <input id="session-rename-input" autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} className="apple-field selectable mt-2 h-9 w-full rounded-[8px] border border-border bg-surface-field px-2.5 text-[13px] text-fg outline-none focus:border-fg-faint" />
       </Dialog>
     </li>
   )
 }
 
 function MenuAction({ icon, label, danger = false, onSelect }: { icon: ReactNode; label: string; danger?: boolean; onSelect: () => void }): ReactNode {
-  return <button type="button" role="menuitem" onClick={onSelect} className={cn('flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[13px] transition-colors hover:bg-tint-strong', danger ? 'text-danger' : 'text-fg')}><span className={danger ? 'text-danger' : 'text-accent-soft'}>{icon}</span><span className="truncate">{label}</span></button>
+  return <button type="button" role="menuitem" onClick={onSelect} className={cn('flex w-full items-center gap-2.5 rounded-[8px] px-2.5 py-[7px] text-left text-[13px] transition-colors hover:bg-tint-strong', danger ? 'text-danger' : 'text-fg')}><span className={danger ? 'text-danger' : 'text-accent-soft'}>{icon}</span><span className="truncate">{label}</span></button>
 }
 
 /**
@@ -722,7 +722,7 @@ function ArchivedSessionItem({
           setMenu({ x: event.clientX, y: event.clientY })
         }}
         aria-current={active ? 'page' : undefined}
-        className={cn('flex w-full items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
+        className={cn('flex w-full items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left text-[12.5px] transition-colors',
           active ? 'bg-canvas text-fg' : 'text-fg-muted hover:bg-tint-hover hover:text-fg')}
       >
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
