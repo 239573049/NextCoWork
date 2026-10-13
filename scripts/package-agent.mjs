@@ -5,6 +5,8 @@
  *
  * `build:agent` 的产物里依赖是外部 import(原生模块不打进包),所以单独拷贝 bin.mjs 在没有仓库的机器上跑不起来。
  * 这里生成一份**只含服务实际引用的运行时依赖**的 package.json(版本取自仓库 package.json,不是猜的),
+ * 依赖清单读的是产物旁边那份 `BUNDLE_IMPORTS.json`(**rollup 的 metafile**),不扫产物正文 ——
+ * 正文里混着给模型看的示例代码,按正则扫会把文档当 import 读。
  * 部署方在包目录里 `npm install --omit=dev` 即可,不需要 Electron、不需要仓库源码。
  *
  * 用法:
@@ -26,45 +28,44 @@ const packageDir = join(root, 'out', 'agent-package')
 /** 包里的 README 就是这份文档:仓库里一份、npm 页面上同一份,不各写一遍。 */
 const readmeSource = join(root, 'docs', 'device-service.md')
 
-const NPM_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/
-
 /**
- * 产物里的裸说明符(非 node: 内建、非相对路径),归一到包名。只认真正的 import/export/require 语句:
- * 静态 import 必须在语句开头,所以字符串里的 `from "sat"` 这类文字、`https://…` 都不算。
+ * `build:agent` 写下的**产物真实外部依赖**清单(`out/agent/BUNDLE_IMPORTS.json`,取自 rollup 的
+ * 模块图)。缺了或读不动就当失败 —— 退回扫产物正文会把文档里的示例代码当成 import:
+ * 症状是把一个根本没被引用的包报成「产物引用了它」,打包直接红(见 `build-agent.mjs` 的
+ * `externalSpecifiers`)。导出以便单元测试。
  */
-export function bareSpecifiers(code) {
-  const found = new Set()
-  const patterns = [
-    /(?:^|[;}\n])\s*(?:import|export)(?=[\s{*])[^;]*?\bfrom\s*["']([^"']+)["']/g,
-    /(?:^|[;}\n])\s*import\s*["']([^"']+)["']/g,
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g
-  ]
-  for (const pattern of patterns) {
-    for (const match of code.matchAll(pattern)) {
-      const spec = match[1]
-      if (spec.startsWith('node:') || spec.startsWith('.') || spec.startsWith('/')) continue
-      const parts = spec.split('/')
-      const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
-      if (NPM_NAME.test(name)) found.add(name)
-    }
+export function readBundleExternals(file) {
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    throw new Error(`${file} not found or unreadable; run \`npm run build:agent\` first`)
   }
-  return [...found].sort()
+  const external = parsed?.external
+  if (!Array.isArray(external) || !external.every((name) => typeof name === 'string')) {
+    throw new Error(`${file} has no "external" list; run \`npm run build:agent\` again`)
+  }
+  // 清单是产物旁边的普通文件,可能被人手改 —— 装不上的说明符在这里再挡一道。
+  return external.filter((name) => !name.startsWith('node:') && !name.startsWith('.') && !name.startsWith('/'))
 }
 
 /**
- * 产物实际引用了哪些 `dependencies` 里的包。导出以便单元测试。
+ * 产物实际引用了哪些 `dependencies` 里的包 —— 清单里出现、且仓库 `dependencies` 声明过的。
+ * 导出以便单元测试。
  */
-export function runtimeDependencies(code, dependencies) {
-  const imported = new Set(bareSpecifiers(code))
+export function runtimeDependencies(external, dependencies = {}) {
+  const imported = new Set(external)
   return Object.fromEntries(Object.entries(dependencies).filter(([name]) => imported.has(name)).sort(([a], [b]) => a.localeCompare(b)))
 }
 
-export function buildPackageJson(pkg, code) {
-  const dependencies = runtimeDependencies(code, pkg.dependencies ?? {})
-  const declared = new Set(Object.keys(pkg.dependencies ?? {}))
-  // 裸说明符里既不是依赖、也不是产物自带的,说明包会在目标机上缺模块 —— 打包就该失败,而不是发出去才发现。
-  const missing = bareSpecifiers(code).filter((name) => !declared.has(name))
+/**
+ * 清单里既不是 `dependencies` 也不是 `optionalDependencies` 的,说明包会在目标机上缺模块 ——
+ * 打包就该失败,而不是发出去才发现。
+ */
+export function buildPackageJson(pkg, external) {
+  const dependencies = runtimeDependencies(external, pkg.dependencies ?? {})
+  const declared = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.optionalDependencies ?? {})])
+  const missing = [...new Set(external)].filter((name) => !declared.has(name)).sort()
   return {
     manifest: {
       // 发布到 npm 的 aidotnet 作用域下(与 GitHub 上的 AIDotNet 同一个归属),`npm i -g` 装得到;
@@ -77,7 +78,8 @@ export function buildPackageJson(pkg, code) {
       // 命令名与 bin.ts 里的用法一致:`ncw-device-service --data-dir <d>`(或 service/diagnose/takeover 子命令)。
       bin: { 'ncw-device-service': 'bin.mjs' },
       engines: { node: '>=24' },
-      files: ['bin.mjs', 'bin.mjs.map', 'RUNTIME.json', 'README.md'],
+      // BUNDLE_IMPORTS.json 随包走:装完之后仍能一眼看出这份产物按什么清单装配的。
+      files: ['bin.mjs', 'bin.mjs.map', 'RUNTIME.json', 'BUNDLE_IMPORTS.json', 'README.md'],
       dependencies
     },
     missing
@@ -99,8 +101,7 @@ function main() {
   const entry = join(agentDir, 'bin.mjs')
   if (!existsSync(entry)) throw new Error('out/agent/bin.mjs not found; run `npm run build:agent` first')
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  const code = readFileSync(entry, 'utf8')
-  const { manifest, missing } = buildPackageJson(pkg, code)
+  const { manifest, missing } = buildPackageJson(pkg, readBundleExternals(join(agentDir, 'BUNDLE_IMPORTS.json')))
   if (missing.length > 0) throw new Error(`bundle imports packages that package.json does not declare: ${missing.join(', ')}`)
 
   // 文档是包的一部分:缺了就**打包失败**,而不是发一个 npm 页面上什么都没有的包。

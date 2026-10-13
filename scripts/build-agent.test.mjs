@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { FORBIDDEN_IMPORTS, REQUIRED_BUILTINS, inspectBundle } from './build-agent.mjs'
+import { FORBIDDEN_IMPORTS, REQUIRED_BUILTINS, externalSpecifiers, inspectBundle, packageName } from './build-agent.mjs'
 
 const good = 'import { DatabaseSync } from "node:sqlite";\nimport WebSocket from "ws";\nexport {};'
 
@@ -30,4 +30,27 @@ test('fails when the sqlite builtin import disappears', () => {
 test('the check lists stay in sync with what the service actually requires', () => {
   assert.deepEqual(FORBIDDEN_IMPORTS, ['electron'])
   assert.deepEqual(REQUIRED_BUILTINS, ['node:sqlite'])
+})
+
+/**
+ * ★ 这几条守的是「别再去扫产物正文」。rollup 的模块图里带子路径
+ * (`@modelcontextprotocol/sdk/client/index.js`),要归一到包名;而正文里混着给模型看的
+ * TSX 示例(`visualize-guidelines/components.ts` 的模板字符串里写着
+ * `import { TrendingUp } from 'lucide-react'`),按正文判依赖会把它当成真 import,
+ * 把打包卡死在一个根本没被引用的包上。
+ */
+test('reads external package names from the chunk module graph, normalized', () => {
+  const imports = ['node:sqlite', './chunk.js', 'ws', 'zod', 'sucrase', '@modelcontextprotocol/sdk/client/index.js', 'ssh2-streams']
+  assert.deepEqual(externalSpecifiers(imports), ['@modelcontextprotocol/sdk', 'ssh2-streams', 'sucrase', 'ws', 'zod'])
+})
+
+test('normalizes scoped and subpath specifiers to the installable package name', () => {
+  assert.equal(packageName('@scope/pkg/sub/x.js'), '@scope/pkg')
+  assert.equal(packageName('zod/v4'), 'zod')
+  assert.equal(packageName('ws'), 'ws')
+})
+
+test('an empty import list yields no externals instead of throwing', () => {
+  assert.deepEqual(externalSpecifiers([]), [])
+  assert.deepEqual(externalSpecifiers([undefined, 42, '']), [])
 })

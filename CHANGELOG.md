@@ -41,6 +41,11 @@
 
 ### 修复
 
+**设备服务打包不再读产物正文**
+
+- `package:agent` 以前按正则扫 `out/agent/bin.mjs` 的正文找依赖,而这一版把 TSX widget 的写法示例(模板字符串)打进了产物 —— 示例里那句 `import { TrendingUp } from 'lucide-react'` 被当成真 import,打包于是报「bundle imports packages that package.json does not declare: lucide-react, nextcowork, react」,`Device service package` 这一步红掉,连带 `Publish GitHub Release` 被跳过
+- 改成 `build:agent` 把 rollup **模块图**里的外部包名写成 `out/agent/BUNDLE_IMPORTS.json`,打包只读那份(内建与相对路径丢掉),不再碰产物正文。顺带把子路径归一到包名(`@modelcontextprotocol/sdk/client/index.js` → `@modelcontextprotocol/sdk`)、`optionalDependencies`(cpu-features 这类可选原生模块)不再被报成「缺声明」,清单本身也随包发出
+
 **FTS 映射表与旧版写进来的行对账**
 
 - 映射表(`messages_fts_rowid`)之外的 FTS 行会让下一条消息**写不进去**:V37 之前的版本(例如 `/Applications` 里还没升级的那份)开同一个库时,按 message_id 删、不带 rowid 插,FTS 自增出的 rowid 全落在映射之外,新版下一次分配映射 rowid 就撞上它们,发消息直接报一句不带上下文的 `constraint failed`。新增 `reconcileMessageFts`,每次开库把映射最大 rowid 之后那一段补进映射(同一条消息既有映射又有多条新行时,映射改指向最新那行),剩下仍无映射的(消息已不在)直接删掉;分配新 rowid 前先把那个位置上的残留行腾掉
