@@ -145,7 +145,12 @@ async function verify(tarball) {
     child.stdout.on('data', (chunk) => { output += chunk })
     child.stderr.on('data', (chunk) => { output += chunk })
     const deadline = Date.now() + 30_000
-    while (!/listening on 127\.0\.0\.1:\d+/.test(output)) {
+    /*
+      监听行里的地址不写死:`--host` 的默认值归服务定义(现在是 127.0.0.1),改了默认值不该让打包
+      莫名其妙地永远等下去 —— 这里要证明的只是「它把端口听起来了」,地址由服务自己报。
+      主机名可能带方括号(IPv6),所以从行尾认端口。
+    */
+    while (!/listening on \S+:\d+/.test(output)) {
       if (child.exitCode !== null) throw new Error(`service exited early (${child.exitCode}):\n${output}`)
       if (Date.now() > deadline) throw new Error(`service did not start in time:\n${output}`)
       await sleep(100)

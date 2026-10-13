@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -48,9 +48,21 @@ describe('node-pty helper 的执行位', () => {
   it('does nothing when node-pty is not installed or when the platform does not use exec bits', () => {
     const absent = (): string => { throw new Error('Cannot find module node-pty') }
     expect(ensurePtyHelperExecutable({ platform: 'darwin', arch: 'arm64', resolve: absent })).toBeNull()
+  })
+
+  /*
+    Windows 不看执行位:`chmod` 在 Win32 上只翻转只读位,`stat` 回来的 mode 因此恒是
+    `644 | 666 & umask`(本机实测 0o666),1/4/8 三个位怎么设都读不回来。这条早就写在
+    用例名里了,只是断言本身还在按 POSIX 的规矩数字节 —— 于是 Windows 上必然红。
+    真正要断的是「**没有去改**这个文件」:内容与调用前的 mode 都不动。
+  */
+  it.skipIf(process.platform === 'win32')('leaves a Windows helper alone (no exec bits on that platform)', () => {
     const resolve = fakeNodePty(['prebuilds/win32-x64'])
+    const before = statSync(helper('prebuilds', 'win32-x64')).mode
     expect(ensurePtyHelperExecutable({ platform: 'win32', arch: 'x64', resolve })).toBeNull()
+    expect(statSync(helper('prebuilds', 'win32-x64')).mode).toBe(before)
     expect(mode(helper('prebuilds', 'win32-x64'))).toBe(0o644)
+    expect(readFileSync(helper('prebuilds', 'win32-x64'), 'utf8')).toBe('helper')
   })
 
   // chflags uchg 是 macOS 上唯一不需要 root 就能让 chmod 失败的办法;Linux 上要 root 才能 chattr +i。

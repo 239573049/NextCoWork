@@ -45,6 +45,18 @@
 
 - `package:agent` 以前按正则扫 `out/agent/bin.mjs` 的正文找依赖,而这一版把 TSX widget 的写法示例(模板字符串)打进了产物 —— 示例里那句 `import { TrendingUp } from 'lucide-react'` 被当成真 import,打包于是报「bundle imports packages that package.json does not declare: lucide-react, nextcowork, react」,`Device service package` 这一步红掉,连带 `Publish GitHub Release` 被跳过
 - 改成 `build:agent` 把 rollup **模块图**里的外部包名写成 `out/agent/BUNDLE_IMPORTS.json`,打包只读那份(内建与相对路径丢掉),不再碰产物正文。顺带把子路径归一到包名(`@modelcontextprotocol/sdk/client/index.js` → `@modelcontextprotocol/sdk`)、`optionalDependencies`(cpu-features 这类可选原生模块)不再被报成「缺声明」,清单本身也随包发出
+- `--verify` 等的那行监听地址不再写死 `127.0.0.1`:`--host` 的默认值归服务定义,改了默认值不该让打包永远等下去
+
+**设备服务在 Linux 上真正过上 CI**
+
+- CI 的 `service-platforms` 矩阵补上 `ubuntu-latest`(此前只有 macos / windows,注释里那句「Linux 在 quality 里跑」说的是整仓质量检查,而 `smoke:agent` 把构建产物当真实进程跑一遍这件事从来没在 Linux 上发生过 —— 偏偏它是一大票用户自部署设备服务的目标机)。smoke 的判据从 `runner.os == 'macOS'` 改成「不是 Windows」:脚本自己会在 Windows 上跳过
+- `--data-dir` / `--node` / `--bin` 的绝对性按 `--platform` 判,不再一律按 POSIX 判:`C:\…` 混进 Linux 的 unit、`/var/lib/…` 混进 WinSW 配置、以及 `/C:/…` 这种把 Windows 路径当 POSIX 路径拼出来的伪路径,都在 plan 阶段拒掉,而不是等 systemd / 服务管理器报一个看不懂的错
+- `service-cli` 的用例改用**本平台**的路径:真实路径有别名(macOS 的 `/var/…` 底下是 `/private/var/…`,Windows 给 8.3 短名 `C:\Users\RUNNER~1\…`),拿别名路径去喂另一套路径规则本来就对不上。这正是 Windows job 上那几条 `dataDir must be an absolute path` 的来源
+- `pty-helper` 的 win32 用例在 Windows 上跳过:`chmod` 在 Win32 上只翻转只读位,`stat` 回来的 mode 恒是 `644 | 666 & umask`,断言按 POSIX 的数三位字节必然红;要断的是「没有去改这个文件」
+
+**发到 npm 的那一步从来没成功过**
+
+- `npm publish out/aidotnet-nextcowork-device-service-*.tgz` 里的路径被 npm 当成了 GitHub 简写(`owner/repo`),于是它去 `ssh://git@github.com/out/aidotnet-nextcowork-device-service-2.7.2.tgz.git` 取包,报 `git@github.com: Permission denied (publickey)` —— 看起来像 NPM_TOKEN / 密钥的问题,实际是**路径解析**:带上 `./` 之后同一份 tarball 直接进 `npm notice 📦` 的发布流程。v2.7.x 的发版每次都在这里断,`Publish GitHub Release` 因此一直是 skipped(它 needs 这个 job)。`BUNDLE_IMPORTS.json` 也随之进了包(装完之后仍能看出这份产物按什么清单装配的)
 
 **FTS 映射表与旧版写进来的行对账**
 

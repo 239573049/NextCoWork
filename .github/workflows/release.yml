@@ -292,8 +292,12 @@ jobs:
           if npm view "$name@$version" version >/dev/null 2>&1; then
             echo "$name@$version is already on npm; nothing to publish"
           else
-            # 作用域包首发必须显式 public(npm 默认按私有算,会直接拒)
-            npm publish out/aidotnet-nextcowork-device-service-*.tgz --access public
+            # ★ 文件名前面必须有 `./`。npm 把**路径**与 GitHub 简写(owner/repo)一起解析,而
+            #   `out/aidotnet-nextcowork-device-service-2.7.2.tgz` 正好长得像后者 —— 不带 `./` 时
+            #   npm 去 `ssh://git@github.com/out/…tgz.git` 取包,报的是「Permission denied (publickey)」,
+            #   看起来像凭据问题,其实是路径被当成了仓库名。只传 Tarball 文件名也**不行**:同样落进
+            #   GitHub 简写,这里必须带目录前缀。
+            npm publish ./out/aidotnet-nextcowork-device-service-*.tgz --access public
           fi
 
       - name: Upload build-only artifact

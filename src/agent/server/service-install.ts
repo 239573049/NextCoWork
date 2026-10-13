@@ -65,8 +65,14 @@ const CONTROL = /[\u0000-\u001f\u007f]/
 
 function requireAbsolute(value: string, label: string, platform: ServicePlatform): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 1024 || CONTROL.test(value)) reject(`${label} is invalid`)
-  const ok = platform === 'win32' ? win32.isAbsolute(value) : posix.isAbsolute(value)
-  if (!ok) reject(`${label} must be an absolute path`)
+  const windows = platform === 'win32'
+  const ok = windows ? win32.isAbsolute(value) : posix.isAbsolute(value)
+  /*
+    `win32.isAbsolute` 也认 `/d` 与 `/C:/x` —— 它们会被 `win32.resolve` 解析成「当前盘符下的路径」,
+    写进 WinSW 配置之后启动必然失败。按 `--platform win32` 时要求明确指出盘符或 UNC 根。
+  */
+  const okWindows = win32.isAbsolute(value) && /^(?:[A-Za-z]:[\\/]|\\\\)/.test(value)
+  if (!(windows ? okWindows : ok) || (!windows && /^\/[A-Za-z]:/.test(value))) reject(`${label} must be an absolute path`)
   return value
 }
 
