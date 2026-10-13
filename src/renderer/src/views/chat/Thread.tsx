@@ -10,7 +10,7 @@
  * 一路翻到消息模型才明白。
  */
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, ListChecks, Pencil, PanelRight, Trash2, X } from 'lucide-react'
+import { Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, Copy, ListChecks, Pencil, PanelRight, Trash2, X } from 'lucide-react'
 import type { AgentMessage, ContentPart } from '../../../../shared/agent/message'
 import { isToolResultOnly } from '../../../../shared/agent/message'
 import { formatTokensPerSecond, runDurationOf, tokensPerSecond } from '../../../../shared/agent/duration'
@@ -21,6 +21,8 @@ import { thinkingStatsOfLive, thinkingStatsOfPart } from '../../../../shared/age
 import { ProviderIcon } from '../../components/brand/ProviderIcon'
 import { AgentMarkdown } from '../../components/markdown'
 import { Tooltip } from '../../components/ui/Tooltip'
+import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
+import { copyText } from '../../services/app'
 import { cn } from '../../lib/cn'
 import { useI18n } from '../../i18n'
 import { agentErrorText } from '../../i18n/agent'
@@ -924,6 +926,7 @@ function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand
     const timer = setTimeout(() => setConfirmDelete(false), 4000)
     return () => clearTimeout(timer)
   }, [confirmDelete])
+  const [copy, setCopy] = useTransientStatus()
   const [textDraft, setTextDraft] = useState('')
   const text = message.parts
     .filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
@@ -1053,6 +1056,7 @@ function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand
               )}
             </div>
             {canExpand && (
+              // 需求：展开键是一颗居中的小胶囊而不是整行色条 —— 整行底色悬停时像一块多出来的卡片。
               <button
                 type="button"
                 data-testid="user-message-expand"
@@ -1060,7 +1064,7 @@ function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand
                 aria-controls={textId}
                 aria-label={t(expanded ? 'chat.message.collapse' : 'chat.message.expand')}
                 onClick={() => { if (expanded) setExpanded(false); else expandMessage() }}
-                className="mt-1 flex w-full cursor-pointer items-center justify-end gap-1 rounded-[5px] px-1.5 py-0.5 text-[11.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                className="mx-auto mt-1.5 flex cursor-pointer items-center gap-1 rounded-full border border-stroke bg-surface-raised/70 px-2.5 py-0.5 text-[11.5px] text-fg-muted transition-colors hover:bg-tint-hover hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 <span>{t(expanded ? 'chat.message.collapse' : 'chat.message.expand')}</span>
                 <ChevronDown
@@ -1093,12 +1097,25 @@ function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand
             ))}
           </div>
         )}
-        {(onEdit !== undefined || onDelete !== undefined) && (
+        {(text !== '' || onEdit !== undefined || onDelete !== undefined) && (
           // 操作条在气泡**下方**、右对齐;平时透明(占位不变,悬停时不会把下面的内容顶开)。
           <div className={cn(
             'flex items-center gap-0.5 text-fg-faint transition-opacity focus-within:opacity-100',
-            confirmDelete ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            confirmDelete || copy !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           )} data-testid="user-message-actions">
+            {text !== '' && (
+              // 复制不改任何状态,只读面板里也给。复制的是原文(含 `@` 引用的 markdown),不是折叠后的预览。
+              <ActionIconButton
+                label={t(copy === 'failed' ? 'chat.message.copyFailed' : copy === 'done' ? 'chat.message.copied' : 'chat.message.copy')}
+                tone={copy === 'failed' ? 'danger' : 'plain'}
+                testId="user-message-copy"
+                onClick={() => {
+                  void copyText(text).then(() => setCopy('done')).catch(() => setCopy('failed'))
+                }}
+              >
+                {copy === 'done' ? <Check size={13} /> : <Copy size={13} />}
+              </ActionIconButton>
+            )}
             {onEdit !== undefined && (
               <button
                 type="button"

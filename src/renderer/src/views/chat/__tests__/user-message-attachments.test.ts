@@ -15,6 +15,12 @@ import { I18nProvider } from '../../../i18n'
 import { AttachmentTray, type TrayItem } from '../AttachmentTray'
 import { Thread } from '../Thread'
 import { userMessageFileRefs } from '../user-message-attachments'
+import { copyText } from '../../../services/app'
+
+vi.mock('../../../services/app', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../services/app')>(),
+  copyText: vi.fn(async () => {})
+}))
 
 let cleanup: (() => Promise<void>) | null = null
 let rerender: ((children: ReactNode) => Promise<void>) | null = null
@@ -289,6 +295,18 @@ describe('用户消息折叠', () => {
     expect(container.querySelector('[data-testid="user-message-expand"]')!.getAttribute('aria-expanded')).toBe('false')
     expect(container.querySelector<HTMLElement>('[data-testid="user-message-text"]')!.style.maxHeight).toBe('220px')
     expect(container.querySelector('[data-testid="user-message-text"]')!.textContent).toBe(`${longMessage}\n新增内容`)
+  })
+})
+
+describe('用户消息复制', () => {
+  it('只读面板也能复制,复制的是原文而不是折叠预览', async () => {
+    const container = await render(foldFixture([userMessage('u', [{ type: 'text', text: longMessage }], 1)], { readOnly: true }),
+      (dom) => mockTextHeight(dom, () => 560))
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="user-message-copy"]')!
+    expect(button.getAttribute('aria-label')).toBe('复制消息')
+    await act(async () => button.click())
+    expect(copyText).toHaveBeenCalledWith(longMessage)
+    expect(button.getAttribute('aria-label')).toBe('已复制')
   })
 })
 
