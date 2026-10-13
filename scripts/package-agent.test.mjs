@@ -37,6 +37,8 @@ test('produces a manifest that pins the Node floor and the repository versions',
   assert.equal(manifest.engines.node, '>=24')
   // 装完得有命令可跑:只有 main 时用户还得自己拼 node_modules 里的路径。
   assert.deepEqual(manifest.bin, { 'ncw-device-service': 'bin.mjs' })
+  // 文档随包走:npm 页面上看到的就是 docs/device-service.md。
+  assert.ok(manifest.files.includes('README.md'))
   assert.deepEqual(manifest.dependencies, { ws: '8.22.0' })
 })
 

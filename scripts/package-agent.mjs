@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const agentDir = join(root, 'out', 'agent')
 const packageDir = join(root, 'out', 'agent-package')
+/** 包里的 README 就是这份文档:仓库里一份、npm 页面上同一份,不各写一遍。 */
+const readmeSource = join(root, 'docs', 'device-service.md')
 
 const NPM_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/
 
@@ -75,7 +77,7 @@ export function buildPackageJson(pkg, code) {
       // 命令名与 bin.ts 里的用法一致:`ncw-device-service --data-dir <d>`(或 service/diagnose/takeover 子命令)。
       bin: { 'ncw-device-service': 'bin.mjs' },
       engines: { node: '>=24' },
-      files: ['bin.mjs', 'bin.mjs.map', 'RUNTIME.json'],
+      files: ['bin.mjs', 'bin.mjs.map', 'RUNTIME.json', 'README.md'],
       dependencies
     },
     missing
@@ -101,9 +103,13 @@ function main() {
   const { manifest, missing } = buildPackageJson(pkg, code)
   if (missing.length > 0) throw new Error(`bundle imports packages that package.json does not declare: ${missing.join(', ')}`)
 
+  // 文档是包的一部分:缺了就**打包失败**,而不是发一个 npm 页面上什么都没有的包。
+  if (!existsSync(readmeSource)) throw new Error('docs/device-service.md not found; it is the package README')
+
   rmSync(packageDir, { recursive: true, force: true })
   mkdirSync(packageDir, { recursive: true })
   for (const file of readdirSync(agentDir)) copyFileSync(join(agentDir, file), join(packageDir, file))
+  copyFileSync(readmeSource, join(packageDir, 'README.md'))
   writeFileSync(join(packageDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 
   const packed = spawnSync('npm', ['pack', '--pack-destination', join(root, 'out'), '--json'], { cwd: packageDir, encoding: 'utf8', shell: process.platform === 'win32' })
@@ -129,7 +135,10 @@ async function verify(tarball) {
     delete env.npm_config_allow_scripts
     const install = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--prefix', work, tarball], { encoding: 'utf8', shell, env })
     if (install.status !== 0) throw new Error(`install failed:\n${install.stderr}`)
-    const entry = join(work, 'node_modules', '@aidotnet', 'nextcowork-device-service', 'bin.mjs')
+    const installed = join(work, 'node_modules', '@aidotnet', 'nextcowork-device-service')
+    // 装下来的是不是一份「有说明的包」:少了 README,npm 页面上就只有一段命令,用户不知道该怎么用。
+    if (!existsSync(join(installed, 'README.md'))) throw new Error('the tarball does not ship README.md')
+    const entry = join(installed, 'bin.mjs')
     child = spawn(process.execPath, [entry, '--data-dir', join(work, 'data')], { stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''
     child.stdout.on('data', (chunk) => { output += chunk })

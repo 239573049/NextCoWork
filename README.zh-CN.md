@@ -32,6 +32,18 @@ NextCoWork 把 Agent 驱动的开发带到桌面端：多工作区并排开、�
 
 请访问 <https://nextco.work> 获取最新稳定版。
 
+## 运行设备服务
+
+Agent 不必跑在应用里。无界面的设备服务（无 Electron，要求 Node.js 24+）可以把业务库、工作区、Git 与终端放在另一台机器上，关掉桌面它也继续跑；桌面用固定证书的连接与它配对。
+
+```bash
+npm i -g @aidotnet/nextcowork-device-service
+ncw-device-service diagnose
+ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --invite
+```
+
+把打印出来的 `ncwpair1.…` 邀请粘贴到**设置 → 设备 → 添加设备**，核对指纹后配对。装成开机常驻的服务（systemd / LaunchDaemon / WinSW）、从已有桌面数据根原地接管、以及排障，见 [docs/device-service.md](./docs/device-service.md)。
+
 ## 开发
 
 环境要求：Node.js `^20.19.0 || >=22.12.0` 与 npm。
