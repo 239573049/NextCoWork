@@ -51,8 +51,9 @@
 
 - CI 的 `service-platforms` 矩阵补上 `ubuntu-latest`(此前只有 macos / windows,注释里那句「Linux 在 quality 里跑」说的是整仓质量检查,而 `smoke:agent` 把构建产物当真实进程跑一遍这件事从来没在 Linux 上发生过 —— 偏偏它是一大票用户自部署设备服务的目标机)。smoke 的判据从 `runner.os == 'macOS'` 改成「不是 Windows」:脚本自己会在 Windows 上跳过
 - `--data-dir` / `--node` / `--bin` 的绝对性按 `--platform` 判,不再一律按 POSIX 判:`C:\…` 混进 Linux 的 unit、`/var/lib/…` 混进 WinSW 配置、以及 `/C:/…` 这种把 Windows 路径当 POSIX 路径拼出来的伪路径,都在 plan 阶段拒掉,而不是等 systemd / 服务管理器报一个看不懂的错
-- `service-cli` 的用例改用**本平台**的路径:真实路径有别名(macOS 的 `/var/…` 底下是 `/private/var/…`,Windows 给 8.3 短名 `C:\Users\RUNNER~1\…`),拿别名路径去喂另一套路径规则本来就对不上。这正是 Windows job 上那几条 `dataDir must be an absolute path` 的来源
-- `pty-helper` 的 win32 用例在 Windows 上跳过:`chmod` 在 Win32 上只翻转只读位,`stat` 回来的 mode 恒是 `644 | 666 & umask`,断言按 POSIX 的数三位字节必然红;要断的是「没有去改这个文件」
+- `service-cli` 的用例分成两套:`plan` 类是**参数**用例(系统单元 / plist / WinSW 配置只由 `--platform` 决定),用不着本机临时目录,也就不该因为「在 Windows 上跑」而换成另一套分支;`apply` 类才真的落盘,用本平台的路径。上一版把整套都改成宿主平台,那三条 `plan`/`apply --root` 于是拿 WinSW 配置去断言 systemd unit,自己把自己跑红了
+- `agent-smoke` 等邀请,而不是赌它到:邀请是监听行之后的**下一次** `write`(main.ts 先报监听、再签发邀请),两行不保证在同一个 chunk 里到 —— macOS runner 上就是这么红过一次(「agent did not print an invitation」)
+- `pty-helper` 的整组用例在 Windows 上跳过:`chmod` 在 Win32 上只翻转只读位,`stat` 回来的 mode 恒是 `644 | 666 & umask`,断言执行位有没有设上、有没有被动过,在这个平台上根本表达不出来(不是断言写错了平台)。win32 分支本身留在单独一组、在 Windows 上也跑:断的是「一个字节都不许动」
 
 **发到 npm 的那一步从来没成功过**
 

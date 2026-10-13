@@ -51,7 +51,12 @@ try {
   const data = join(dir, 'data')
   const service = start(agent, ['--data-dir', data, '--invite'])
   await until(() => /listening on 127\.0\.0\.1:\d+/.test(service.out), 'the agent to listen')
-  check(service.out.includes('ncwpair1.'), 'agent did not print an invitation')
+  /*
+    邀请是监听行之后的**下一次** write(main.ts 先报监听、再签发邀请),两行不一定在同一个
+    chunk 里到 —— 监听行一到就断言邀请,等于赌这两次 write 被合成一次到达。macOS runner 上
+    就是这么红过一次(「agent did not print an invitation」)。等它到,而不是赌它到。
+  */
+  await until(() => service.out.includes('ncwpair1.'), 'the agent to print an invitation')
   for (const entry of ['device-identity.json', 'nextcowork.db', 'pki', 'service.lock']) check(existsSync(join(data, entry)), `agent data root lacks ${entry}`)
   const second = spawnSync(process.execPath, [agent, '--data-dir', data], { encoding: 'utf8', timeout: 20_000 })
   check(second.status !== 0, 'a second agent on the same data root must be refused')
