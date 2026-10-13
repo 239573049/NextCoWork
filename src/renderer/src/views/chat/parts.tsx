@@ -323,7 +323,10 @@ export function ToolCallCard({
     需求:编辑/写入这一行右端直接给出 `+7 −1`,不展开就知道这次动了多大。
     数字来自 presenter(见 `ToolLineStats`),算不准的情况它自己返回 undefined。
   */
-  const lineStats = presenter.stats?.(shownInput, call?.output);
+  // ★ Edit 的统计要对新旧两段跑一次行级 LCS。卡片在流式期间每帧都会重渲,
+  // 入参没变就不该重算。
+  const output = call?.output;
+  const lineStats = useMemo(() => presenter.stats?.(shownInput, output), [presenter, shownInput, output]);
   /*
     需求:点文件名直接打开那个文件。
     ★ 没有工作区入口(只读的子代理面板)时传 undefined —— 行会把文件名画成纯文本,

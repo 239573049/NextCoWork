@@ -58,7 +58,7 @@ import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { MigrationErrorCode } from '../../shared/domain/data-migration'
-import { backfillSessionFts } from './message-text'
+import { backfillSessionFts, deleteSessionFts } from './message-text'
 
 /**
  * 撤销清单在 `kv` 里的键。
@@ -705,7 +705,9 @@ export function undoMerge(targetPath: string, manifest: UndoManifest): void {
         const placeholders = ids.map(() => '?').join(', ')
         target.prepare(`DELETE FROM "${table}" WHERE id IN (${placeholders})`).run(...ids)
       }
-      if (tableExists(target, 'messages_fts')) {
+      if (tableExists(target, 'messages_fts_rowid')) {
+        for (const sessionId of manifest.sessions) deleteSessionFts((sql) => target.prepare(sql), sessionId)
+      } else if (tableExists(target, 'messages_fts')) {
         const removeFts = target.prepare('DELETE FROM messages_fts WHERE session_id = ?')
         for (const sessionId of manifest.sessions) removeFts.run(sessionId)
       }

@@ -426,7 +426,7 @@ describe('★ 关库重开之后,配置一样都不少', () => {
 
   it('updates every search title only when the normalized session title changes', () => {
     const session = repo.ensureSession({ id: 'title-cost', workspaceId: 'workspace', title: 'OriginalTitle' })
-    const updates = vi.spyOn(stmt('UPDATE messages_fts SET title = ? WHERE session_id = ?'), 'run')
+    const updates = vi.spyOn(stmt('UPDATE messages_fts SET title = ? WHERE rowid IN (SELECT fts_rowid FROM messages_fts_rowid WHERE session_id = ?)'), 'run')
     const messages: AgentMessage[] = Array.from({ length: 20 }, (_, index) => ({
       id: `title-cost-${index}`, role: 'assistant', parts: [{ type: 'text', text: 'searchable content' }], createdAt: index + 1, schemaVersion: 1
     }))
@@ -441,6 +441,29 @@ describe('★ 关库重开之后,配置一样都不少', () => {
     updates.mockRestore()
     restart()
     expect(repo.searchAll('RenamedTitle')).toHaveLength(20)
+  })
+
+  it('keeps one FTS row per message, addressed by rowid, through rewrites and deletes', () => {
+    const session = repo.ensureSession({ id: 'fts-rowid', workspaceId: 'workspace', title: 'RowidTitle' })
+    const message = (id: string, text: string, createdAt: number): AgentMessage => ({
+      id, role: 'assistant', parts: [{ type: 'text', text }], createdAt, schemaVersion: 1
+    })
+    const ftsRows = (): number => Number(stmt('SELECT COUNT(*) AS n FROM messages_fts').get()?.['n'])
+    const mapRows = (): number => Number(stmt('SELECT COUNT(*) AS n FROM messages_fts_rowid').get()?.['n'])
+    const before = ftsRows()
+    repo.commitMessage(session.id, message('fts-a', 'alphaword', 1))
+    repo.commitMessage(session.id, message('fts-b', 'betaword', 2))
+    repo.replaceHistory(session.id, [message('fts-a', 'gammaword', 1), message('fts-b', 'betaword', 2)])
+    expect(ftsRows() - before).toBe(2)
+    expect(mapRows()).toBe(ftsRows())
+    expect(repo.searchAll('alphaword')).toEqual([])
+    expect(repo.searchAll('gammaword')).toHaveLength(1)
+    repo.replaceHistory(session.id, [message('fts-a', 'gammaword', 1)])
+    expect(repo.searchAll('betaword')).toEqual([])
+    expect(mapRows()).toBe(ftsRows())
+    repo.deleteSession(session.id)
+    expect(ftsRows()).toBe(before)
+    expect(mapRows()).toBe(before)
   })
 
   it('供应商 / 别名 / 工作区 / 设置 / kv 全部读得回来', () => {

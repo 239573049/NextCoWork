@@ -195,15 +195,15 @@ export interface CleanupResult extends CleanupPreview {
   deleted: number
 }
 
-/** `'15d'` 表示 15 天；数字表示日历月数。 */
-export type CleanupAge = '15d' | 1 | 3 | 6 | 12
+/** `'7d'` / `'15d'` 表示天数；数字表示日历月数。 */
+export type CleanupAge = '7d' | '15d' | 1 | 3 | 6 | 12
 
-/** 截止时间：当前时刻往前 15 天，或往前 N 个月（按日历月而不是固定 90 天）。 */
+/** 截止时间：当前时刻往前 N 天，或往前 N 个月（按日历月而不是固定 90 天）。 */
 export function cutoffForAge(now: number, age: CleanupAge): number {
   const date = new Date(now)
-  if (age === '15d') {
+  if (typeof age === 'string') {
     // 按日历日回退，跨夏令时也保留同一时分秒。
-    date.setDate(date.getDate() - 15)
+    date.setDate(date.getDate() - (age === '7d' ? 7 : 15))
     return date.getTime()
   }
   const months = age

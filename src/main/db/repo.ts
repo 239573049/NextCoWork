@@ -52,7 +52,14 @@ import type {
 } from '../../shared/domain/usage'
 import { fileStats, stmt, tx } from './index'
 import { MANAGED_PROVIDER_ID, type ProviderFileStore } from './provider-file'
-import { searchableMessageText } from './message-text'
+import {
+  clearMessageFts,
+  deleteOrphanSessionFts,
+  deleteSessionFts,
+  renameSessionFts,
+  searchableMessageText,
+  writeMessageFts
+} from './message-text'
 export { searchableMessageText } from './message-text'
 import {
   ConfigProfileError,
@@ -618,7 +625,7 @@ export function putSession(session: Session): Session {
   // by conversation title do not continue returning the old title until the
   // next message is committed.
   if (previous !== undefined && previous['title'] !== normalized.title) {
-    stmt('UPDATE messages_fts SET title = ? WHERE session_id = ?').run(normalized.title, normalized.id)
+    renameSessionFts(stmt, normalized.id, normalized.title)
   }
   return normalized
 }
@@ -843,13 +850,7 @@ export function setSessionFavorited(id: string, favorited: boolean): void {
 }
 
 function upsertFts(session: Session, message: AgentMessage): void {
-  stmt('DELETE FROM messages_fts WHERE message_id = ?').run(message.id)
-  stmt('INSERT INTO messages_fts (message_id, session_id, title, content) VALUES (?, ?, ?, ?)').run(
-    message.id,
-    session.id,
-    session.title,
-    searchableMessageText(message.parts)
-  )
+  writeMessageFts(stmt, message.id, session.id, session.title, searchableMessageText(message.parts))
 }
 
 /**
@@ -1366,7 +1367,7 @@ export function replaceHistory(sessionId: string, messages: readonly AgentMessag
     if (renumber) stmt('UPDATE messages SET ordinal = -ordinal - 1 WHERE session_id = ?').run(sessionId)
     for (const id of removed) stmt('DELETE FROM messages WHERE id = ?').run(id)
     if (removed.length > 0) {
-      stmt('DELETE FROM messages_fts WHERE session_id = ? AND message_id NOT IN (SELECT id FROM messages WHERE session_id = ?)').run(sessionId, sessionId)
+      deleteOrphanSessionFts(stmt, sessionId)
     }
     for (const { message, ordinal, changed } of entries) {
       if (changed) writeMessage(session, message, ordinal)
@@ -1628,7 +1629,7 @@ export function deleteSession(id: string): string[] {
     // 先叶后根。sessions 之间没有真外键(理由见 schema.ts 第 10 条),
     // 顺序其实无所谓;保持和 CASCADE 同向,便于将来真加外键时不用重排。
     for (const sid of [...ids].reverse()) {
-      stmt('DELETE FROM messages_fts WHERE session_id = ?').run(sid)
+      deleteSessionFts(stmt, sid)
       stmt('DELETE FROM sessions WHERE id = ?').run(sid)
       // 草稿附件没有 session_id（外键要求上传时会话可以尚未创建），
       // 因此不能只依赖 CASCADE；owner_id 是它们的会话归属。
@@ -2369,7 +2370,7 @@ function messageBytes(): { count: number; bytes: number } {
 export function deleteAllHistory(): CleanupResult {
   return tx(() => {
     const p = cleanupPreview('history')
-    stmt('DELETE FROM messages_fts').run()
+    clearMessageFts(stmt)
     stmt('DELETE FROM sessions').run()
     // committed 行随 sessions 级联；没有 session_id 的会话草稿按 scope
     // 显式删除。主题/导出附件不属于对话历史，必须保留。
@@ -2401,7 +2402,7 @@ export function deleteAllHistory(): CleanupResult {
 /** 测试隔离：只清会话相关表，不触碰设置、供应商和工作区。 */
 export function clearSessionDataForTest(): void {
   tx(() => {
-    stmt('DELETE FROM messages_fts').run()
+    clearMessageFts(stmt)
     stmt('DELETE FROM runs').run()
     stmt('DELETE FROM file_snapshots').run()
     stmt('DELETE FROM file_change_sets').run()
@@ -2607,6 +2608,13 @@ function fileOwns(providerId: string): boolean {
 export function fileCredentialProviderId(ref: string): string | null {
   if (providerFile === null || !ref.startsWith('provider:')) return null
   const id = ref.slice('provider:'.length)
+  /*
+    ★★ 账号密文 `provider:<id>#<accountId>` 共用 `provider:` 前缀,但**不归文件管**,
+    一律走库(NCK1)。providers.json 一家只有一个凭证槽,放行的表现是:写入落进
+    `pendingCredentials` 再也不落盘,读回来恒为 null —— 设置页旧槽显示「已登录」,
+    账号行没有邮箱(「未命名账号」),一发消息就报「还没有配置密钥」。
+  */
+  if (id.includes('#')) return null
   return id !== '' && id !== MANAGED_PROVIDER_ID ? id : null
 }
 

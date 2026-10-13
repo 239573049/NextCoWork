@@ -1369,6 +1369,29 @@ CREATE TABLE service_ownership (
 );
 `
 
+/**
+ * FTS 行的 rowid 映射。为什么需要它,见 `message-text.ts` 里「FTS 行一律按 rowid 增删改」。
+ *
+ * 从现有 FTS 行补齐映射,不重新分词:重建 21 万条消息要把近 1 GB 正文重新解析一遍,
+ * 而这里只需读一遍 FTS 内容表。
+ *
+ * - 同一 message_id 有多行时(旧写法下理论上不会,但不信任它)保留 rowid 最大的那行,
+ *   也就是最近写入的那行;其余行没有映射,由最后一条 DELETE 收掉。
+ * - 消息已经不在 `messages` 里的幽灵行一并清掉。
+ */
+const V37_MESSAGE_FTS_ROWID = `
+CREATE TABLE messages_fts_rowid (
+  fts_rowid   INTEGER PRIMARY KEY,
+  message_id  TEXT NOT NULL UNIQUE,
+  session_id  TEXT NOT NULL
+);
+INSERT OR IGNORE INTO messages_fts_rowid (fts_rowid, message_id, session_id)
+  SELECT rowid, message_id, session_id FROM messages_fts ORDER BY rowid DESC;
+DELETE FROM messages_fts_rowid WHERE message_id NOT IN (SELECT id FROM messages);
+DELETE FROM messages_fts WHERE rowid NOT IN (SELECT fts_rowid FROM messages_fts_rowid);
+CREATE INDEX messages_fts_rowid_by_session ON messages_fts_rowid (session_id);
+`
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'core', sql: V1_CORE },
   { version: 2, name: 'connections', sql: V2_CONNECTIONS },
@@ -1459,4 +1482,5 @@ CREATE INDEX device_interactions_by_run ON device_interactions(device_id, data_e
   ,{ version: 34, name: 'session-input-receipts', sql: V34_SESSION_INPUT_RECEIPTS }
   ,{ version: 35, name: 'device-trust', sql: V35_DEVICE_TRUST }
   ,{ version: 36, name: 'service-ownership', sql: V36_SERVICE_OWNERSHIP }
+  ,{ version: 37, name: 'message-fts-rowid', sql: V37_MESSAGE_FTS_ROWID }
 ]

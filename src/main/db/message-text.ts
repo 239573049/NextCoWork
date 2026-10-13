@@ -16,7 +16,7 @@
  * 容错是刻意的:整条不是数组就当空,单个坏块(循环引用、getter 抛错)只丢它
  * 自己。迁移路径上一条畸形行都不该让整次启动失败,而搜索少一个词远好过卡住。
  */
-import type { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync, StatementSync } from 'node:sqlite'
 import type { ContentPart } from '../../shared/agent/message'
 
 export function searchableMessageText(parts: unknown): string {
@@ -63,18 +63,104 @@ export function searchableMessageText(parts: unknown): string {
   return chunks.filter(Boolean).join('\n')
 }
 
-/** 接受调用方的真实连接，启动迁移不得触发应用的内存库兜底。调用方负责事务。 */
+/*
+  ## FTS 行一律按 rowid 增删改
+
+  `messages_fts` 的 `message_id` / `session_id` 是 UNINDEXED 列。FTS5 只认 rowid 和
+  MATCH 两种索引,`WHERE message_id = ?` 是**全表扫描**,要把 `%_content` 整张读一遍
+  —— 本机 21 万条消息、约 1 GB 的索引上实测每次 0.3~0.65 秒,而它曾经挂在每条消息
+  落盘的同步路径上,发一次消息就让主进程卡几秒。
+
+  `messages_fts_rowid`(V37)是一张普通表,把 message_id / session_id 映射到 FTS 行的
+  rowid。它独立于 `messages` 的 rowid:`messages` 是 TEXT 主键,VACUUM 会重排它的
+  隐式 rowid,FTS 那边却不会跟着变。
+
+  下面的函数是读写这两张表的**唯一入口**。`prepare` 由调用方给:repo 传带缓存的
+  `stmt`,迁移和旧库合并传裸连接的 `prepare`。
+*/
+
+export type PrepareStatement = (sql: string) => StatementSync
+
+/** 写入或替换一条消息的索引行,沿用它原有的 FTS rowid。调用方负责事务。 */
+export function writeMessageFts(
+  prepare: PrepareStatement,
+  messageId: string,
+  sessionId: string,
+  title: string,
+  content: string
+): void {
+  const existing = prepare('SELECT fts_rowid FROM messages_fts_rowid WHERE message_id = ?').get(messageId)
+  let rowid: number | bigint
+  if (existing === undefined) {
+    rowid = prepare('INSERT INTO messages_fts_rowid (message_id, session_id) VALUES (?, ?)').run(messageId, sessionId)
+      .lastInsertRowid
+  } else {
+    rowid = existing['fts_rowid'] as number | bigint
+    prepare('DELETE FROM messages_fts WHERE rowid = ?').run(rowid)
+    prepare('UPDATE messages_fts_rowid SET session_id = ? WHERE fts_rowid = ?').run(sessionId, rowid)
+  }
+  prepare('INSERT INTO messages_fts (rowid, message_id, session_id, title, content) VALUES (?, ?, ?, ?, ?)').run(
+    rowid,
+    messageId,
+    sessionId,
+    title,
+    content
+  )
+}
+
+/** 删掉一个会话的全部索引行。 */
+export function deleteSessionFts(prepare: PrepareStatement, sessionId: string): void {
+  prepare('DELETE FROM messages_fts WHERE rowid IN (SELECT fts_rowid FROM messages_fts_rowid WHERE session_id = ?)').run(sessionId)
+  prepare('DELETE FROM messages_fts_rowid WHERE session_id = ?').run(sessionId)
+}
+
+/** 删掉一个会话里、`messages` 表已经没有的那些消息的索引行。 */
+export function deleteOrphanSessionFts(prepare: PrepareStatement, sessionId: string): void {
+  const orphans = `SELECT fts_rowid FROM messages_fts_rowid
+    WHERE session_id = ? AND message_id NOT IN (SELECT id FROM messages WHERE session_id = ?)`
+  prepare(`DELETE FROM messages_fts WHERE rowid IN (${orphans})`).run(sessionId, sessionId)
+  prepare(`DELETE FROM messages_fts_rowid WHERE fts_rowid IN (${orphans})`).run(sessionId, sessionId)
+}
+
+/** 会话改名后同步索引里冗余的标题列。 */
+export function renameSessionFts(prepare: PrepareStatement, sessionId: string, title: string): void {
+  prepare('UPDATE messages_fts SET title = ? WHERE rowid IN (SELECT fts_rowid FROM messages_fts_rowid WHERE session_id = ?)').run(
+    title,
+    sessionId
+  )
+}
+
+/** 清空整个索引。 */
+export function clearMessageFts(prepare: PrepareStatement): void {
+  prepare('DELETE FROM messages_fts').run()
+  prepare('DELETE FROM messages_fts_rowid').run()
+}
+
+function hasRowidMap(database: DatabaseSync): boolean {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_rowid'").get() !== undefined
+}
+
+/**
+ * 接受调用方的真实连接，启动迁移不得触发应用的内存库兜底。调用方负责事务。
+ *
+ * ★ 旧库合并跑在迁移之前,目标库可能还停在 V37 之前,没有映射表。那时退回旧写法
+ * (不写 rowid、按 UNINDEXED 列删);之后 V37 会从现有 FTS 行补齐映射。
+ */
 function indexMessageRows(database: DatabaseSync, sessionId?: string): number {
   const rows = database.prepare(
     `SELECT m.id, m.session_id, m.parts, s.title FROM messages m JOIN sessions s ON s.id = m.session_id
      ${sessionId === undefined ? '' : 'WHERE m.session_id = ?'} ORDER BY m.id`
   ).iterate(...(sessionId === undefined ? [] : [sessionId]))
+  const mapped = hasRowidMap(database)
+  const prepare: PrepareStatement = (sql) => database.prepare(sql)
   const insert = database.prepare('INSERT INTO messages_fts (message_id, session_id, title, content) VALUES (?, ?, ?, ?)')
   let count = 0
   for (const row of rows) {
     let parts: unknown = []
     try { parts = JSON.parse(String(row['parts'])) } catch { /* 损坏正文只索引标题 */ }
-    insert.run(String(row['id']), String(row['session_id']), String(row['title'] ?? ''), searchableMessageText(parts))
+    const args = [String(row['id']), String(row['session_id']), String(row['title'] ?? ''), searchableMessageText(parts)] as const
+    if (mapped) writeMessageFts(prepare, ...args)
+    else insert.run(...args)
     count++
   }
   return count
@@ -82,12 +168,14 @@ function indexMessageRows(database: DatabaseSync, sessionId?: string): number {
 
 export function backfillSessionFts(database: DatabaseSync, sessionId: string): number {
   if (sessionId === '') return 0
-  database.prepare('DELETE FROM messages_fts WHERE session_id = ?').run(sessionId)
+  if (hasRowidMap(database)) deleteSessionFts((sql) => database.prepare(sql), sessionId)
+  else database.prepare('DELETE FROM messages_fts WHERE session_id = ?').run(sessionId)
   return indexMessageRows(database, sessionId)
 }
 
 /** 一次性修复历史漏索引，同时清掉已删除消息的幽灵结果。 */
 export function rebuildMessageFts(database: DatabaseSync): number {
   database.exec('DELETE FROM messages_fts')
+  if (hasRowidMap(database)) database.exec('DELETE FROM messages_fts_rowid')
   return indexMessageRows(database)
 }

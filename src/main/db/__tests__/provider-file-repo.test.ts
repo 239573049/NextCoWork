@@ -118,6 +118,8 @@ describe('repo in file mode', () => {
     expect(repo.fileCredentialProviderId('provider:nextcowork')).toBeNull()
     expect(repo.fileCredentialProviderId('nextcowork:client-access')).toBeNull()
     expect(repo.fileCredentialProviderId('provider-account:x:1')).toBeNull()
+    // 多账号密文(`providerAccountCredentialRef`)留在库里,不能落进 providers.json
+    expect(repo.fileCredentialProviderId('provider:x#01ACCOUNT')).toBeNull()
   })
 })
 

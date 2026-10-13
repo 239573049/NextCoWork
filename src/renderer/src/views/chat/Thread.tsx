@@ -148,7 +148,9 @@ export const Thread = memo(function Thread({
   const content = useRef<HTMLDivElement>(null)
   const followBottom = useRef(true)
   // 手动展开是在读这条提问，不应被内容长高触发的贴底滚动带到消息末尾。
-  const pauseFollowing = (): void => { followBottom.current = false }
+  // ★ 必须是稳定引用:它一路传给每个 ThreadTurn / HistoryRow,每次渲染换一个新函数,
+  // 历史回合的 memo 就全部失效,流式期间每帧把整页回合重新协调一遍。
+  const pauseFollowing = useCallback((): void => { followBottom.current = false }, [])
   /**
    * 上一次**我们自己**把 scrollTop 写到的位置;`-1` = 没有待确认的程序化滚动。
    * 一次程序化写入最多派发一个 scroll 事件,认领掉就把它清空。
