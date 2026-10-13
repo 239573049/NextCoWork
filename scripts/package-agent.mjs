@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * 把设备服务的构建产物打成**可独立部署**的包:`out/agent-package/` + `out/ncw-device-service-<version>.tgz`。
+ * 把设备服务的构建产物打成**可独立部署**的包:`out/agent-package/` + `out/aidotnet-nextcowork-device-service-<version>.tgz`
+ * (清单里的名字是 npm 上的 `@aidotnet/nextcowork-device-service`,装完即有 `ncw-device-service` 命令)。
  *
  * `build:agent` 的产物里依赖是外部 import(原生模块不打进包),所以单独拷贝 bin.mjs 在没有仓库的机器上跑不起来。
  * 这里生成一份**只含服务实际引用的运行时依赖**的 package.json(版本取自仓库 package.json,不是猜的),
@@ -64,7 +65,9 @@ export function buildPackageJson(pkg, code) {
   const missing = bareSpecifiers(code).filter((name) => !declared.has(name))
   return {
     manifest: {
-      name: 'nextcowork-device-service',
+      // 发布到 npm 的 aidotnet 作用域下(与 GitHub 上的 AIDotNet 同一个归属),`npm i -g` 装得到;
+      // 作用域包首发必须显式 `--access public`(npm 默认按私有算,会被拒)。
+      name: '@aidotnet/nextcowork-device-service',
       version: pkg.version,
       description: 'NextCoWork standalone device service (no Electron)',
       type: 'module',
@@ -126,7 +129,7 @@ async function verify(tarball) {
     delete env.npm_config_allow_scripts
     const install = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--prefix', work, tarball], { encoding: 'utf8', shell, env })
     if (install.status !== 0) throw new Error(`install failed:\n${install.stderr}`)
-    const entry = join(work, 'node_modules', 'nextcowork-device-service', 'bin.mjs')
+    const entry = join(work, 'node_modules', '@aidotnet', 'nextcowork-device-service', 'bin.mjs')
     child = spawn(process.execPath, [entry, '--data-dir', join(work, 'data')], { stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''
     child.stdout.on('data', (chunk) => { output += chunk })

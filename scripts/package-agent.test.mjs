@@ -31,6 +31,7 @@ test('fails the package when the bundle imports something package.json does not 
 test('produces a manifest that pins the Node floor and the repository versions', () => {
   const { manifest, missing } = buildPackageJson({ version: '1.2.3', dependencies: deps }, 'import a from "ws";\nimport "node:sqlite";')
   assert.deepEqual(missing, [])
+  assert.equal(manifest.name, '@aidotnet/nextcowork-device-service')
   assert.equal(manifest.version, '1.2.3')
   assert.equal(manifest.type, 'module')
   assert.equal(manifest.engines.node, '>=24')
@@ -40,8 +41,8 @@ test('produces a manifest that pins the Node floor and the repository versions',
 })
 
 test('reads the tarball name from either `npm pack --json` shape', () => {
-  const entry = { filename: 'nextcowork-device-service-1.2.3.tgz' }
+  const entry = { filename: 'aidotnet-nextcowork-device-service-1.2.3.tgz' }
   assert.equal(packedFilename(JSON.stringify([entry])), entry.filename) // npm ≤ 11
-  assert.equal(packedFilename(JSON.stringify({ 'nextcowork-device-service': entry })), entry.filename) // npm ≥ 12
+  assert.equal(packedFilename(JSON.stringify({ '@aidotnet/nextcowork-device-service': entry })), entry.filename) // npm ≥ 12
   assert.throws(() => packedFilename('{}'), /no filename/)
 })

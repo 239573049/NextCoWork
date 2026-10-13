@@ -260,24 +260,26 @@ jobs:
       - name: Build, package and verify outside the repository
         run: npm run build:agent && npm run package:agent -- --verify
 
+      # 包名是 npm 上的 @aidotnet/nextcowork-device-service,`npm pack` 出来的文件名把作用域拍平
+      # (`@scope/name` → `scope-name`),所以这里的通配符要跟着走,否则 Release 会传空资产而静默失败。
       - name: Write checksum
-        run: cd out && sha256sum nextcowork-device-service-*.tgz > nextcowork-device-service.sha256
+        run: cd out && sha256sum aidotnet-nextcowork-device-service-*.tgz > aidotnet-nextcowork-device-service.sha256
 
       - name: Upload to Release
         if: needs.prepare.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare.outputs.tag }}
-        run: gh release upload "$TAG_NAME" out/nextcowork-device-service-*.tgz out/nextcowork-device-service.sha256 --clobber
+        run: gh release upload "$TAG_NAME" out/aidotnet-nextcowork-device-service-*.tgz out/aidotnet-nextcowork-device-service.sha256 --clobber
 
       - name: Upload build-only artifact
         if: needs.prepare.outputs.publish != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: nextcowork-device-service
+          name: aidotnet-nextcowork-device-service
           path: |
-            out/nextcowork-device-service-*.tgz
-            out/nextcowork-device-service.sha256
+            out/aidotnet-nextcowork-device-service-*.tgz
+            out/aidotnet-nextcowork-device-service.sha256
           if-no-files-found: error
           retention-days: 1
 
