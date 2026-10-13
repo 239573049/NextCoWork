@@ -1,6 +1,48 @@
 ﻿# 更新日志
 
 
+## v2.7.1
+
+### 新增
+
+**苹果风格界面与活动胶囊**
+
+- 基准色板换成 macOS 系统语义色（浅色 `#f5f5f7` / `#1d1d1f`，深色 systemGray6→4 的阶梯），强调色两个外观都用 apple.com 的 `#0071e3` —— 白字压在系统蓝 `#007aff` / `#0a84ff` 上过不了可读性护栏要求的 4.5:1；旧的墨绿整套留在主题列表里当一档，默认档换成新的 apple。控件跟着走：菜单选中行改成强调色实底白字，各面板统一到 8px 圆角，输入框 / 按钮 / 设置与搜索面板分别抽成 `.apple-field` / `.apple-btn` / `.apple-sheet`；macOS 上窗口开 vibrancy，渲染层按 `data-vibrancy` 把窗口底和主面板改成半透明玻璃
+- 转录右上角新增活动胶囊，任务清单 / 子代理 / 后台命令收进同一个入口：原先任务清单是输入框上方那张卡片、子代理只能去转录里翻，而模型 `run_in_background` 起的后台 shell 根本没有界面，用户既看不到也停不掉。后台栏读主进程注册表（按工作区筛、不随 run 结束），`peek` 看的是与 `BashOutput` 分开记的一条尾巴（界面看一眼不会把模型还没读到的输出吃掉），停止走 `KillShell` 那条路、状态记成 `killed`
+
+**用户消息复制与设备服务的命令行发行包**
+
+- 用户气泡下新增「复制消息」：只读面板里也给（复制不改任何状态），复制的是原文（含 `@` 引用的 markdown）而不是折叠预览，成功后短暂显示对勾、失败标红可重试；展开键从整行宽的对齐色条改成一枚居中的小胶囊，悬停时不再像气泡下多出一张卡片
+- 设备服务打成可用 npm 安装的命令行包：`build:agent` 产物补上 shebang（`npm i -g` 的 bin 软链按 shebang 执行，缺了会被当 shell 脚本读），打包清单加 `bin` 与 `docs/device-service.md` 拷来的 README，装完即有 `ncw-device-service` 命令，不必自己拼 `node_modules` 路径；包名是 npm 上的 `@aidotnet/nextcowork-device-service`
+- 服务启动与 `diagnose` 探测前补 `node-pty` 的 spawn-helper 执行位：npm ≥ 12 默认不跑依赖的 install script，从 tgz 或 `npm i -g` 装出来的 `node-pty` 只剩 644 的 prebuilds spawn-helper，`pty.spawn()` 只会报一句 `posix_spawnp failed`；补不上时只警告（服务照常起）并把原因带进 `diagnose` 详情
+
+### 修复
+
+**消息搜索的 FTS 行改为按 rowid 增删改**
+
+- `messages_fts` 的 `message_id` / `session_id` 是 UNINDEXED 列，FTS5 只认 rowid 和 MATCH 两种索引，`WHERE message_id = ?` 其实是全表扫描 —— 本机 21 万条消息、约 1 GB 的索引上实测每次 0.3~0.65 秒，而它挂在每条消息落盘的同步路径上。新增 `messages_fts_rowid`（V37，普通表，message_id 唯一）把两张 id 映射到 FTS 行的 rowid，并从现有 FTS 行补齐（含同一 message_id 多行时取最近写入的那行、清掉 `messages` 里已经没有的幽灵行），不重新分词
+- 写入、删除、改名、清空与「清孤儿」收敛到 `message-text.ts` 里的唯一入口，repo 与迁移路径都只经过它；映射表建起来之前（旧库合并跑在迁移之前）自动退回旧写法，之后由 V37 补齐
+
+**设备页与用户消息的两处打磨**
+
+- 设备页补上「还没在别的机器上装服务?」那一段：三步 + 三条原样可复制的命令（与 `docs/device-service.md` 同一份），一台设备都没有时默认展开，已有设备的用户不点就不占地方；数据页把 configSync 的 `signedOut` / `invalidData` / `accountChanged` / `busy` 各自映射成文案、未知码兜底成通用失败文案，不再把 i18n key 原样丢给用户
+- 消息列表两处重算收窄：`pauseFollowing` 改成稳定引用（每次渲染换一个新函数会让历史回合的 memo 全部失效，流式期间每帧把整页回合重新协调一遍），Edit 卡片的行级 LCS 统计按入参加 `useMemo`
+- 修无上限的 LCS 比较：`line-diff` 去掉公共首尾后按两行滚动数组求长度，超过 1600 万格子退化成按行计数的多重集差 —— 数字略偏好过让渲染层或主进程同步跑上几亿次比较
+
+**用户供应商凭据不再漏给文件**（未能归类的历史修复）
+
+- `provider:<id>#<accountId>` 形式的账号密文共用 `provider:` 前缀但不归 `providers.json` 管，一律走库（NCK1）：放行的表现是写入落进 `pendingCredentials` 再也不落盘、读回来恒为 null —— 设置页旧槽显示「已登录」、账号行没有邮箱、一发消息就报「还没有配置密钥」
+- npm ≥ 12 下 `package:agent` 跑不通的两处：`npm pack --json` 返回的是按包名索引的对象而非数组；`npm run` 会把用户 npmrc 的 `allow-scripts` 导成 `npm_config_allow_scripts`，嵌套的项目级安装直接 EALLOWSCRIPTS
+
+### 文档
+
+- 新增 `docs/device-service.md`：安装（npm / Release 的 tgz）、启动参数与数据根、配对流程、开机常驻（systemd / LaunchDaemon / WinSW）、从桌面数据根原地接管、排障、自己打包；这份文档同时是 npm 包的 README，缺了直接打包失败。README 在「下载」之后加一节「运行设备服务」，模型接入改为 NextCoWork 账户渠道、移除 API Route 引导
+
+### 测试
+
+- 本节新增消息行 rowid 映射、`node-pty` spawn-helper 修复、用户消息复制、苹果色板与可读性护栏、活动胶囊与后台 shell 等相关用例
+- `npm run typecheck`（node / web / plugins / controller-client）、`npm run lint` 通过；`npm test` 519 个文件 7912 项通过（6 个文件 40 项因本机缺少原生环境跳过）
+
 ## v2.7.0
 
 ### 新增

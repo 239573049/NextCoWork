@@ -23,18 +23,27 @@ const commitTypes = {
   'ci': 'CI'
 };
 
+/**
+ * 上一次发版的 tag。
+ * ★ 必须取**当前分支可达**的那个:`git tag -l --sort=-creatordate` 按创建时间排,
+ *   会挑到别的分支上更新的 tag,范围于是变成空集合(或把上一版的提交又数一遍),
+ *   生成的日志一路漏到没人发现。`git describe` 只看祖先,顺序也是拓扑的。
+ */
+function lastReachableTag() {
+  try {
+    return execSync('git describe --tags --abbrev=0 --match "v[0-9]*"', { encoding: 'utf-8' }).trim();
+  } catch {
+    // 仓库里还没有可达的 v* tag(首个版本),交给调用方退化到 HEAD~10。
+    return '';
+  }
+}
+
 function parseCommits() {
   try {
-    // 获取上一个版本的 tag
-    const tags = execSync('git tag -l --sort=-creatordate', { encoding: 'utf-8' })
-      .trim()
-      .split('\n')
-      .filter(tag => tag.startsWith('v'));
-
-    const lastTag = tags[0] || 'HEAD~10';
+    const lastTag = lastReachableTag();
 
     // 获取提交历史
-    const range = tags.length > 0 ? `${lastTag}..HEAD` : 'HEAD~10..HEAD';
+    const range = lastTag ? `${lastTag}..HEAD` : 'HEAD~10..HEAD';
     const commits = execSync(`git log ${range} --format=%B%n---COMMIT_END---`, {
       encoding: 'utf-8'
     }).split('---COMMIT_END---').filter(Boolean);
