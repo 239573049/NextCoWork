@@ -1,11 +1,14 @@
-import { Laptop, Loader, MonitorSmartphone, WifiOff } from 'lucide-react'
+import { Check, ChevronDown, Copy, Laptop, Loader, MonitorSmartphone, WifiOff } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { DeviceConnectionState, DeviceInvitationPreview, DeviceSummary } from '../../../../shared/domain/device-connection'
 import { Button } from '../../components/arc/button/button'
+import { ActionIconButton, useTransientStatus } from '../../components/ui/ActionIconButton'
+import { Collapsible, CollapsibleContent, CollapsibleIndicator, CollapsibleTrigger } from '../../components/ui/Collapsible'
 import { TextInput } from '../../components/ui/TextInput'
-import { useI18n, type Translate } from '../../i18n'
+import { useI18n, type Translate, type TranslationKey } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { useDeviceStore } from '../../stores/device'
+import { copyText } from '../../services/app'
 import { inspectDeviceInvitation } from '../../services/device'
 import { SettingGroup } from '../Row'
 
@@ -19,6 +22,31 @@ const STATE_TONE = {
 } as const satisfies Record<DeviceConnectionState, string>
 
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error)
+
+/**
+ * 在一台新设备上把服务装起来的三步。
+ *
+ * ★ 三条命令**原样可复制**。这一页真正会失败的地方不是点错按钮,而是照着文档敲错一条命令 ——
+ *   所以命令就写在这一页上,每条配一颗复制按钮,用户不必先去翻包里的 README。
+ * ★ 文本与 `docs/device-service.md` 是同一份:界面上一处、文档里一处,不一致时用户会以界面上的为准。
+ */
+const INSTALL_STEPS: ReadonlyArray<{ title: TranslationKey; note: TranslationKey; command: string }> = [
+  {
+    title: 'devices.installStep1',
+    note: 'devices.installStep1Note',
+    command: 'npm i -g @aidotnet/nextcowork-device-service'
+  },
+  {
+    title: 'devices.installStep2',
+    note: 'devices.installStep2Note',
+    command: 'ncw-device-service diagnose'
+  },
+  {
+    title: 'devices.installStep3',
+    note: 'devices.installStep3Note',
+    command: 'ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --invite'
+  }
+]
 
 /** 把指纹按 4 位一组展示,方便和设备上显示的逐位核对。 */
 export const groupFingerprint = (fingerprint: string): string => fingerprint.replace(/(.{4})/g, '$1 ').trim()
@@ -40,6 +68,12 @@ export function DevicesPage(): ReactNode {
   const load = useDeviceStore((s) => s.load)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /*
+    安装步骤的展开状态。`null` = 还没被用户点过,这时按「有没有设备」决定:
+    一台都没有的人正要的就是这一段,而已经有设备的人多半是来粘贴邀请的。
+    ★ 用户点过之后就以他的选择为准 —— 让清单的变化把刚展开的那段收回去,是最讨厌的一种动。
+  */
+  const [stepGuide, setStepGuide] = useState<boolean | null>(null)
 
   useEffect(() => { void load() }, [load])
 
@@ -83,11 +117,14 @@ export function DevicesPage(): ReactNode {
             <li className="flex flex-col items-center justify-center gap-1.5 rounded-card border border-dashed border-border bg-surface-raised px-6 py-6 text-center">
               <MonitorSmartphone aria-hidden size={18} className="text-fg-faint" />
               <span className="text-[12px] text-fg-muted">{t('devices.empty')}</span>
+              {/* 空的时候不能只留一句「还没有」—— 用户下一步该干什么,必须写在同一张卡上。 */}
+              <span className="text-[11.5px] leading-[1.5] text-fg-faint">{t('devices.emptyHint')}</span>
             </li>
           )}
         </ul>
       </SettingGroup>
-      <AddDevice busy={busy} t={t} run={run} />
+      {/* 一台都没有 = 打开这一段:它是这一页唯一的「从零开始」。 */}
+      <AddDevice busy={busy} t={t} run={run} guideOpen={stepGuide ?? state?.devices.length === 0} onGuideOpenChange={setStepGuide} />
     </div>
   )
 }
@@ -223,7 +260,13 @@ function DeviceRow({ device, busy, t, run }: {
   )
 }
 
-function AddDevice({ busy, t, run }: { busy: boolean; t: Translate; run: (action: () => Promise<void>) => Promise<void> }): ReactNode {
+function AddDevice({ busy, t, run, guideOpen, onGuideOpenChange }: {
+  busy: boolean
+  t: Translate
+  run: (action: () => Promise<void>) => Promise<void>
+  guideOpen: boolean
+  onGuideOpenChange: (open: boolean) => void
+}): ReactNode {
   const [text, setText] = useState('')
   const [preview, setPreview] = useState<DeviceInvitationPreview | null>(null)
   const [label, setLabel] = useState('')
@@ -232,7 +275,7 @@ function AddDevice({ busy, t, run }: { busy: boolean; t: Translate; run: (action
   return (
     <SettingGroup title={t('devices.add')}>
       <p className="px-1 pb-2 text-[12px] leading-[1.5] text-fg-muted">{t('devices.addDescription')}</p>
-      <div className="flex flex-col gap-3 px-1 pb-4">
+      <div className="flex flex-col gap-3 px-1 pb-2">
         <TextInput
           value={text}
           // 改了邀请文本,之前核对过的指纹就不再对应它 —— 必须重新检查。
@@ -265,6 +308,84 @@ function AddDevice({ busy, t, run }: { busy: boolean; t: Translate; run: (action
           </div>
         )}
       </div>
+      {/*
+        ★ 安装步骤放在粘贴框**下面**:已经有邀请的人先看到该粘的地方,而正要装一台新设备的人
+          看到的是展开着的一段。顺序反过来就成了「每次都先读一遍安装教程才能粘贴」。
+      */}
+      <div className="border-t border-hairline px-1">
+        <DeviceInstallGuide open={guideOpen} onOpenChange={onGuideOpenChange} t={t} />
+      </div>
     </SettingGroup>
+  )
+}
+
+/**
+ * 「还没装过服务」的那一段。三步 + 三条可复制的命令 + 一句回到上面输入框的收尾。
+ *
+ * ★ 它**不联网、也不探测**:界面判断不出你手上那台机器装没装、装的是哪个版本,
+ *   所以这里只写步骤,不写「已安装」这种界面猜出来的状态。
+ */
+function DeviceInstallGuide({ open, onOpenChange, t }: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  t: Translate
+}): ReactNode {
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange}>
+      <CollapsibleTrigger className="py-2.5">
+        <div className="min-w-0 flex-1">
+          <p className="text-[12.5px] text-fg">{t('devices.installTitle')}</p>
+          <p className="mt-0.5 text-[11.5px] leading-[1.6] text-fg-muted">{t('devices.installHint')}</p>
+        </div>
+        <CollapsibleIndicator><ChevronDown size={13} /></CollapsibleIndicator>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ol className="flex flex-col gap-3 pt-1 pb-2">
+          {INSTALL_STEPS.map((step, index) => (
+            <li key={step.title} className="flex gap-2.5">
+              {/* 编号只是「这是第几步」的视觉锚点,顺序本身由 `<ol>` 给出。 */}
+              <span aria-hidden className="mt-px flex size-[17px] shrink-0 items-center justify-center rounded-pill bg-tint text-[10.5px] tabular-nums text-fg-muted">
+                {index + 1}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[12.5px] text-fg">{t(step.title)}</p>
+                <p className="mt-0.5 text-[11.5px] leading-[1.6] text-fg-muted">{t(step.note)}</p>
+                <CommandLine command={step.command} testId={`device-install-command-${String(index + 1)}`} t={t} />
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p className="pb-1 text-[11.5px] leading-[1.6] text-fg-muted">{t('devices.installFinish')}</p>
+        <p className="pb-3 text-[11.5px] leading-[1.6] text-fg-faint">{t('devices.installMore')}</p>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+/**
+ * 一条可复制的命令。
+ *
+ * ★ 复制失败**不弹错误**:命令就在左边明晃晃地写着,手动选中即可 —— 为一次复制失败
+ *   弹一条红字,只会让人以为这一步本身坏了(同 `ProviderPanel` 里那段)。
+ */
+function CommandLine({ command, testId, t }: { command: string; testId: string; t: Translate }): ReactNode {
+  const [status, setStatus] = useTransientStatus()
+  return (
+    <div className="mt-1.5 flex items-start gap-1.5">
+      {/* 换行按词边界断(`break-words`),不是 `break-all`:命令是照着读/对照敲的,
+          `--pairing-port` 被切成 `--pairing-po` / `rt` 就白写了这一行。 */}
+      <code className="selectable min-w-0 flex-1 break-words rounded-md border border-hairline bg-surface-field px-2.5 py-1.5 font-mono text-[11.5px] leading-[1.6] text-fg">
+        {command}
+      </code>
+      <span className="mt-0.5 shrink-0">
+        <ActionIconButton
+          testId={testId}
+          label={t(status === 'failed' ? 'devices.copyFailed' : status === 'done' ? 'devices.copied' : 'common.copy')}
+          onClick={() => { void copyText(command).then(() => setStatus('done')).catch(() => setStatus('failed')) }}
+        >
+          {status === 'done' ? <Check size={12} /> : <Copy size={12} />}
+        </ActionIconButton>
+      </span>
+    </div>
   )
 }

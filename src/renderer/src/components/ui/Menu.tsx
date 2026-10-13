@@ -258,9 +258,9 @@ export function Menu({
             visibility: pos === null ? 'hidden' : undefined
           }}
           className={cn(
-            'app-no-drag scroll-thin fixed z-50 overflow-y-auto rounded-[12px]',
+            'app-no-drag scroll-thin fixed z-50 overflow-y-auto rounded-[10px]',
             align === 'end' ? 'origin-top-right' : 'origin-top-left',
-            'border-0 bg-surface-menu p-1.5 shadow-menu',
+            'border-0 bg-surface-menu p-[5px] shadow-menu',
             'transition-[opacity,transform,translate,scale] duration-180 ease-panel motion-reduce:transition-none motion-reduce:transform-none motion-reduce:translate-y-0 motion-reduce:scale-100',
             presence.shown
               ? 'translate-y-0 scale-100 opacity-100'
@@ -327,44 +327,77 @@ export function MenuItem({
       onFocus={activate}
       onClick={onSelect}
       className={cn(
-        'relative flex w-full items-center gap-2.5 rounded-[8px] px-2.5 py-[7px] text-left text-[13px]',
-        'transition-colors disabled:opacity-40',
+        'group/item relative flex w-full items-center gap-2 rounded-[5px] px-2 py-[3px] text-left text-[13px]',
+        'disabled:opacity-40',
+        // 苹果风格:选中行是强调色实底 + 白字(NSMenu)。
         // 有 provider 时由那块滑动的高亮负责;没有时退回逐行 hover
-        !gliding && 'hover:bg-tint-strong disabled:hover:bg-transparent',
-        danger ? 'text-danger' : 'text-fg'
+        !gliding && 'hover:bg-accent hover:text-accent-fg disabled:hover:bg-transparent',
+        lit ? 'text-accent-fg' : danger ? 'text-danger' : 'text-fg'
       )}
     >
       {lit && (
         <motion.span
           aria-hidden
           layoutId={highlight.layoutId}
-          className="absolute inset-0 rounded-[8px] bg-tint-strong"
+          className={cn('absolute inset-0 rounded-[5px]', danger ? 'bg-danger' : 'bg-accent')}
           transition={reduce ? { duration: 0 } : { type: 'spring', stiffness: 520, damping: 38, mass: 0.6 }}
         />
       )}
       {icon !== undefined && (
-        <span className={cn('relative shrink-0', danger ? 'text-danger' : 'text-accent-soft')}>{icon}</span>
+        <span
+          className={cn(
+            'relative shrink-0',
+            lit ? 'text-accent-fg' : danger ? 'text-danger' : 'text-fg-muted',
+            !gliding && 'group-hover/item:text-accent-fg'
+          )}
+        >
+          {icon}
+        </span>
       )}
       <span className="relative min-w-0 flex-1">
         <span className="block truncate">{children}</span>
         {description !== undefined && (
-          <span className="mt-0.5 block truncate text-[11px] text-fg-faint">{description}</span>
+          <span
+            className={cn(
+              'mt-0.5 block truncate text-[11px]',
+              lit ? 'text-accent-fg/80' : 'text-fg-faint',
+              !gliding && 'group-hover/item:text-accent-fg/80'
+            )}
+          >
+            {description}
+          </span>
         )}
       </span>
       {accelerator !== undefined && (
-        <kbd className="relative shrink-0 font-sans text-[11px] text-fg-faint">{accelerator}</kbd>
+        <kbd
+          className={cn(
+            'relative shrink-0 font-sans text-[12px]',
+            lit ? 'text-accent-fg/80' : 'text-fg-faint',
+            !gliding && 'group-hover/item:text-accent-fg/80'
+          )}
+        >
+          {accelerator}
+        </kbd>
       )}
       {checked !== undefined && (
-        <Check size={14} className={cn('relative shrink-0 text-accent', !checked && 'invisible')} />
+        <Check
+          size={14}
+          className={cn(
+            'relative shrink-0',
+            lit ? 'text-accent-fg' : 'text-accent',
+            !gliding && 'group-hover/item:text-accent-fg',
+            !checked && 'invisible'
+          )}
+        />
       )}
     </button>
   )
 }
 
 export function MenuSeparator(): ReactNode {
-  return <div role="separator" className="my-2 h-0" />
+  return <div role="separator" className="mx-2 my-[5px] h-px bg-fg/10" />
 }
 
 export function MenuLabel({ children }: { children: ReactNode }): ReactNode {
-  return <div className="px-2.5 pt-2 pb-1 text-[11px] text-fg-faint">{children}</div>
+  return <div className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-fg-faint">{children}</div>
 }

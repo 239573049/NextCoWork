@@ -74,7 +74,7 @@ describe('conversation loading feedback', () => {
     dom = new JSDOM('<html data-theme-motion="off"><body><div id="root"></div></body></html>', { url: 'http://localhost' })
     Object.assign(dom.window, { nextcowork: {
       on: () => () => {},
-      invoke: async (channel: string) => ({ ok: true, data: channel === 'sessions:getPage' ? await loadPage()
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'shell:listBackground' ? [] : channel === 'sessions:getPage' ? await loadPage()
         : channel === 'sessions:getSummary' ? { session: page().session, messageCount: 2 }
           : channel === 'agent:listInteractions' ? [] : undefined })
     } })
@@ -184,7 +184,7 @@ describe('Skillify command availability', () => {
     Object.assign(dom.window, { nextcowork: {
       on: () => () => {},
       // 元数据走 `sessions:getSummary`,转录按页走 `sessions:getPage` —— 两条都等同一份「库里的会话」
-      invoke: async (channel: string) => ({ ok: true, data: channel === 'sessions:getSummary' || channel === 'sessions:getPage'
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'shell:listBackground' ? [] : channel === 'sessions:getSummary' || channel === 'sessions:getPage'
         ? { ...(await metadata as object), hasMore: false, messageCount: 1 }
         : channel === 'agent:listInteractions' ? [] : undefined })
     } })
@@ -261,7 +261,7 @@ describe('chat history subscription boundary', () => {
     Object.assign(dom.window, { nextcowork: {
       getPathForFile: () => '',
       on: () => () => {},
-      invoke: async (channel: string) => ({ ok: true, data: channel === 'agent:listInteractions' ? []
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'shell:listBackground' ? [] : channel === 'agent:listInteractions' ? []
         : channel === 'goal:get' ? undefined
           : { messages: [], session: { id: 'history-boundary', workspaceId: 'workspace', model: '', mode: 'code' } } })
     } })
@@ -351,7 +351,7 @@ describe('chat task checklist execution', () => {
     Object.assign(dom.window, { nextcowork: {
       getPathForFile: () => '',
       on: () => () => {},
-      invoke: async (channel: string) => ({ ok: true, data: channel === 'agent:listInteractions' ? []
+      invoke: async (channel: string) => ({ ok: true, data: channel === 'shell:listBackground' ? [] : channel === 'agent:listInteractions' ? []
         : channel === 'goal:get' ? undefined
           // 本用例的转录带着 runId，回合底部的改动审查卡会去拉改动集 —— 这里没有改动集
           : channel === 'review:getChangeSet' ? null
@@ -383,21 +383,15 @@ describe('chat task checklist execution', () => {
       transcript: { ...emptyTranscript(), status: 'done', messages, messageRuns: { 'legacy-call': 'run-1', 'legacy-result': 'run-1' } },
       activeRunId: null
     })
-    // 输入框上方那条排在转录之后；工具卡片展开时同屏会有第二条，所以只取最后一条。
-    const lastChecklist = (): Element | null => {
-      const lists = container.querySelectorAll('[data-testid="task-checklist"]')
-      return lists[lists.length - 1] ?? null
-    }
+    // 清单住在右上角活动胶囊的「任务」栏里(见 `ActivityCapsule`),点开胶囊才渲染
+    const lastChecklist = (): Element | null => container.querySelector('[data-testid="activity-tasks"]')
     const executionState = (): string | null => lastChecklist()?.getAttribute('data-execution-state') ?? null
     const spinners = (): number => lastChecklist()?.querySelectorAll('.lucide-loader-circle').length ?? -1
     try {
       await act(async () => root.render(createElement(I18nProvider, { initialLocale: 'en-US', children:
         createElement(ChatView, { sessionId: 'checklist-run', tabId: 'fixture-tab', workspace, fallbackModel: { model: '' } }) })))
-      /*
-        需求:输入框上方那条清单挂载时就是**一颗小球**(见 `TaskChecklist.minimizeToBall`),
-        而这个用例要断言的正是清单内容 —— 先点开它,一次点击到完全展开。
-      */
-      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="task-checklist-ball"]')?.click())
+      // 胶囊点开时落在有内容的那一栏 —— 这里只有清单,所以是「任务」栏
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-activity-capsule]')?.click())
       // 需求：重载的历史没有本窗口的 run_end 事实，只能显示快照，不能报本轮未完成。
       expect(executionState()).toBe('snapshot')
       expect(spinners()).toBe(0)
@@ -452,11 +446,7 @@ describe('chat task checklist execution', () => {
       expect(lastChecklist()?.textContent).not.toContain('Run ended with')
       expect(lastChecklist()?.textContent).toContain('Task checklist · 1/3 completed')
 
-      /*
-        需求:清单收起来时是**一颗小球**,而它不许自己再占一行 —— 和发送队列共用
-        `composer-notices` 那一行(见 ChatView 里那段注释)。队列在跑完一轮后会被立刻
-        消费掉,所以这一步放在最后:这里只是把一条队列条目摆上去。
-      */
+      // 需求:清单搬去右上角之后,输入框上方那一行只剩发送队列,不再有清单或小球
       await act(async () => session.setState({
         queuedInputs: [makeQueuedInput('queued-1', 'Queued follow-up', {
           workspaceId: workspace.id,
@@ -469,10 +459,10 @@ describe('chat task checklist execution', () => {
           skillIds: []
         }, 1)]
       }))
-      await act(async () => (lastChecklist()?.querySelector('[aria-controls]') as HTMLButtonElement).click())
       const notices = container.querySelector('[data-testid="composer-notices"]')
       expect(notices?.querySelector('[data-testid="pending-queue"]')).not.toBeNull()
-      expect(notices?.querySelector('[data-testid="task-checklist-ball"]')).not.toBeNull()
+      expect(notices?.querySelector('[data-testid="task-checklist"]')).toBeNull()
+      expect(notices?.querySelector('[data-testid="task-checklist-ball"]')).toBeNull()
     } finally {
       await act(async () => root.unmount())
       releaseSession('checklist-run')

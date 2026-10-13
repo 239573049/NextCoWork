@@ -474,7 +474,7 @@ function WorkspaceFilesView({
               <Search size={14} />
             </IconButton>
           ) : (
-            <div className="flex min-w-0 flex-1 items-center gap-1 rounded-[7px] bg-surface-input px-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-1 rounded-[8px] bg-surface-input px-1.5">
               <Search size={12} className="shrink-0 text-fg-faint" />
               <input
                 autoFocus
@@ -634,7 +634,7 @@ function WorkspaceFilesView({
       )}
       {notice !== null && (
         <div role={notice.error ? 'alert' : 'status'} className={cn(
-          'mx-2 mb-1.5 flex items-start gap-1 rounded-[7px] bg-tint px-2 py-1.5 text-[12px]',
+          'mx-2 mb-1.5 flex items-start gap-1 rounded-[8px] bg-tint px-2 py-1.5 text-[12px]',
           notice.error ? 'text-danger' : 'text-fg-muted',
         )}>
           <span className="min-w-0 flex-1 break-words">{t(notice.key, { path: notice.path ?? '' })}</span>
@@ -819,7 +819,7 @@ function TreeRow({
         ...(enterDelay === undefined ? {} : { animationDelay: `${enterDelay}ms` })
       }}
       className={cn(
-        'group relative flex h-[26px] cursor-default items-center gap-1.5 rounded-[7px] pr-1 text-[12.5px]',
+        'group relative flex h-[26px] cursor-default items-center gap-1.5 rounded-[8px] pr-1 text-[12.5px]',
         'transition-colors select-none outline-none focus-visible:ring-1 focus-visible:ring-accent',
         // 悬停底色不在行上:由 `TreeHoverGlide` 那一块在行之间滑动,这里只换字色
         selected ? 'bg-surface-raised text-fg' : 'text-fg-muted hover:text-fg',

@@ -11,10 +11,10 @@
 .list { position: relative; margin: 0; padding: 0; list-style: none; pointer-events: auto; }
 /* Tucked toasts scale from their top edge, so exactly the peek shows above the toast in front. */
 .item { position: absolute; right: 0; bottom: 0; left: 0; transform-origin: 50% 0; }
-.card { position: absolute; inset: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface-raised); color: var(--foreground); box-shadow: var(--shadow-raised); container-type: inline-size; touch-action: pan-y; -webkit-tap-highlight-color: transparent; transition: background-color var(--duration-standard) var(--ease-standard), border-color var(--duration-standard) var(--ease-standard); }
+.card { position: absolute; inset: 0; overflow: hidden; border: 0; border-radius: 14px; background: var(--material-menu); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); color: var(--foreground); box-shadow: var(--shadow-raised); container-type: inline-size; touch-action: pan-y; -webkit-tap-highlight-color: transparent; transition: background-color var(--duration-standard) var(--ease-standard), border-color var(--duration-standard) var(--ease-standard); }
 .item[data-front="true"] .card, .item[data-expanded="true"] .card { box-shadow: var(--shadow-floating); }
 /* Tucked toasts sit a step back in tone as well as scale. */
-.item[data-front="false"][data-expanded="false"] .card { background: var(--surface-muted); }
+.item[data-front="false"][data-expanded="false"] .card { background: color-mix(in srgb, var(--color-surface-raised) 92%, var(--foreground)); }
 .card[data-dragging] { cursor: grabbing; user-select: none; }
 
 .content { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4); }
@@ -37,10 +37,10 @@
 .actionSlot { display: flex; flex: none; justify-content: flex-end; margin-top: -4px; }
 .actionSlot[data-moving="true"] { overflow: hidden; }
 .action, .close { flex: none; border: 1px solid transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: scale var(--duration-spring) var(--ease-spring), background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard); }
-.action { height: 28px; padding: 0 var(--space-3); border-color: var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
+.action { height: 24px; padding: 0 var(--space-3); border-color: transparent; border-radius: var(--radius-control); background: var(--surface); box-shadow: var(--shadow-resting); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; }
 .close { display: grid; width: 28px; height: 28px; margin: -4px -2px 0 0; place-items: center; border-radius: var(--radius-pill); background: transparent; color: var(--text-muted); }
 @media (hover: hover) and (pointer: fine) {
-  .action:hover { border-color: var(--border-strong); background: var(--surface-muted); }
+  .action:hover { background: color-mix(in srgb, var(--surface), var(--foreground) 5%); }
   .close:hover { background: var(--surface-muted); color: var(--foreground); }
 }
 /* Quick press, spring release. */

@@ -421,7 +421,7 @@ function ModelConsole(): ReactNode {
         </aside>
         <section className="min-w-0 flex-1">
           {catalogError !== null && (
-            <div className="mb-2 rounded-[7px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11px] text-danger">
+            <div className="mb-2 rounded-[8px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11px] text-danger">
               {t("chat.status.error")}: {catalogError}
             </div>
           )}
@@ -480,7 +480,7 @@ function ModelConsole(): ReactNode {
               onClick={() =>
                 setEditingModel({ model: blankCatalogModel(), isNew: true })
               }
-              className="inline-flex h-8 items-center gap-1 rounded-[7px] bg-accent px-2.5 text-[11.5px] text-accent-fg"
+              className="inline-flex h-8 items-center gap-1 rounded-[8px] bg-accent px-2.5 text-[11.5px] text-accent-fg"
             >
               <Plus size={13} />
               {t("models.addModel")}
@@ -798,7 +798,7 @@ function EditorSelect({
 }
 
 const editorInputClass =
-  "h-8 w-full rounded-[9px] border border-border bg-surface-field px-2.5 text-[11.5px] text-fg outline-none transition-[border-color,box-shadow] duration-200 focus:border-fg-faint focus:ring-2 focus:ring-fg-faint/15";
+  "apple-field h-8 w-full text-[12px]";
 
 function cloneCatalogDraft(model: ModelCatalogDefinition): CatalogDraft {
   return {
@@ -1112,7 +1112,7 @@ function CatalogModelEditor({
       </div>
 
       {error !== null && (
-        <div className="rounded-[7px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11px] text-danger">
+        <div className="rounded-[8px] border border-danger/30 bg-danger/5 px-2.5 py-2 text-[11px] text-danger">
           {t("chat.status.error")}: {error}
         </div>
       )}
@@ -1417,7 +1417,7 @@ function CatalogModelEditor({
                 thinking.mode === "unsupported" || thinking.mode === "always"
               }
               className={cn(
-                "flex h-8 items-center justify-end rounded-[7px] border border-border bg-surface-field px-2",
+                "flex h-8 items-center justify-end rounded-[8px] border border-border bg-surface-field px-2",
                 (thinking.mode === "unsupported" ||
                   thinking.mode === "always") &&
                   "opacity-60",
@@ -1587,7 +1587,7 @@ function CatalogModelEditor({
             value={patchText}
             onChange={(event) => setPatchText(event.target.value)}
             spellCheck={false}
-            className="selectable mt-2 min-h-[112px] w-full resize-y rounded-[7px] border border-border bg-surface-field p-2 font-mono text-[10.5px] text-fg outline-none focus:border-fg-faint"
+            className="apple-field selectable mt-2 min-h-[112px] w-full resize-y rounded-[8px] border border-border bg-surface-field p-2 font-mono text-[10.5px] text-fg outline-none focus:border-fg-faint"
           />
         </EditorField>
         <p className="mt-1 text-[10.5px] leading-[1.45] text-fg-faint">
@@ -1657,7 +1657,7 @@ function CatalogModelEditor({
               type="button"
               onClick={() => void bind()}
               disabled={busy !== null || bindingProviderId === ""}
-              className="rounded-[7px] border border-border px-3 text-[11px] text-fg-muted hover:bg-tint-hover disabled:opacity-50"
+              className="rounded-[8px] border border-border px-3 text-[11px] text-fg-muted hover:bg-tint-hover disabled:opacity-50"
             >
               {busy === "bind" ? t("models.binding") : t("models.bindAndSave")}
             </button>
@@ -1673,7 +1673,7 @@ function CatalogModelEditor({
           type="button"
           onClick={() => void save()}
           disabled={busy !== null}
-          className="rounded-[7px] bg-accent px-4 py-1.5 text-[11.5px] text-accent-fg disabled:opacity-50"
+          className="rounded-[8px] bg-accent px-4 py-1.5 text-[11.5px] text-accent-fg disabled:opacity-50"
         >
           {busy === "save" ? t("models.binding") : t("models.saveCatalog")}
         </button>

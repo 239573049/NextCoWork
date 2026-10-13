@@ -154,7 +154,7 @@ export function ThemeStudioPane({ settings, patch }: Omit<SettingsPageProps, 'su
         <div className="mb-3 flex flex-wrap gap-1">{GROUPS.map((g) => <button type="button" key={g} aria-pressed={group === g} className={cn('rounded-md px-2 py-1.5 text-[11px]', group === g ? 'bg-tint text-fg' : 'text-fg-muted hover:bg-tint-hover')} onClick={() => setGroup(g)}>{t(`themeStudio.${g}`)}</button>)}</div>
         <div className="space-y-3">
           {group === 'wallpaper' && <>
-            <select aria-label={t('themeStudio.wallpaperAsset')} className="studio-select" value={profile.wallpaper?.assetId ?? ''} onChange={(e) => changeWallpaper(resolveImageTheme(e.target.value, images))}><option value="">{t('themeStudio.noWallpaper')}</option>{[...IMAGE_THEMES, ...images].map((i) => {
+            <select aria-label={t('themeStudio.wallpaperAsset')} className="studio-select apple-field" value={profile.wallpaper?.assetId ?? ''} onChange={(e) => changeWallpaper(resolveImageTheme(e.target.value, images))}><option value="">{t('themeStudio.noWallpaper')}</option>{[...IMAGE_THEMES, ...images].map((i) => {
               const key = i.source.kind === 'builtin' ? builtinThemeNameKey('image', i.id) : null
               return <option value={i.id} key={i.id}>{key ? t(key) : i.name}</option>
             })}</select>

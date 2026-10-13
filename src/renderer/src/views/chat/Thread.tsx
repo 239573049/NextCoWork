@@ -981,7 +981,7 @@ function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand
   if (editing) {
     return (
       <div className="flex justify-end">
-        <div className="w-[min(85%,520px)] rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5">
+        <div className="w-[min(85%,520px)] rounded-[18px] bg-tint px-3.5 py-2.5">
           <textarea
             autoFocus
             value={textDraft}
@@ -1019,7 +1019,7 @@ function UserBubble({ message, workspaceId, onEdit, onDelete, disabled, onExpand
     <div className="flex justify-end">
       <div className="group relative flex max-w-[85%] flex-col items-end gap-1.5" data-testid="user-message">
         {text !== '' && (
-          <div className="group relative max-w-full rounded-card rounded-br-[4px] bg-tint px-3.5 py-2.5" data-testid="user-message-bubble">
+          <div className="group relative max-w-full rounded-[18px] bg-tint px-3.5 py-2.5" data-testid="user-message-bubble">
             {/*
               ★ 用 `MentionText` 而不是直接铺 `{text}`:输入框里 `@` 选出来的
               文件在草稿里是一段 markdown 链接,它在气泡里也得是同一个 chip ——

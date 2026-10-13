@@ -11,23 +11,23 @@
  *   而且全程零报错。`.agent-markdown` 一并算作用域:markdown 正文里的围栏
  *   不必再多包一层。
  *
- * 这些值原封不动来自 markdown.css(见那边留下的指路注释),不是重新量的。
+ * 苹果风格分支:配色换成 Xcode 默认主题(Default Light / Default Dark)的语法色。
  */
 
 :is(.agent-markdown, .code-scope) {
-  --md-keyword: #c7a7e8;
-  --md-string: #a3c99e;
-  --md-number: #e1bb89;
-  --md-type: #8fc7d0;
-  --md-comment: #89938e;
+  --md-keyword: #ff7ab2;
+  --md-string: #ff8170;
+  --md-number: #d9c97c;
+  --md-type: #5dd8ff;
+  --md-comment: #7f8c98;
 }
 
 :root[data-theme='light'] :is(.agent-markdown, .code-scope) {
-  --md-keyword: #7953a1;
-  --md-string: #386a46;
-  --md-number: #985524;
-  --md-type: #2c687b;
-  --md-comment: #6a7770;
+  --md-keyword: #ad3da4;
+  --md-string: #c41a16;
+  --md-number: #1c00cf;
+  --md-type: #0b4f79;
+  --md-comment: #5d6c79;
 }
 
 :is(.agent-markdown, .code-scope) .tok-keyword,

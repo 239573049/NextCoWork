@@ -292,7 +292,7 @@ function createMainWindow(
     /*
       ★ **跟着用户的主题偏好走,不能写死。** 这个色是窗口在渲染层画出第一帧之前
       露出来的底色 —— 写死深色的话,浅色用户看到的是「深色空块 → 界面出来 → 啪一下
-      变浅」。两个值取自 theme.css 里的 `--color-app`(深 #2a2d2b / 浅 #f2eee6),
+      变浅」。两个值取自 theme.css 里的 `--color-app`(深 #252527 / 浅 #ececf0),
       改那边记得同步这里。
 
       ★ **不能用 `store.getSettings()`。** 建窗现在排在启动迁移闸门之前,而闸门
@@ -300,7 +300,16 @@ function createMainWindow(
       随后真正的 `openDatabase()` 直接抛错,启动死在那里。
       `peekThemePreference()` 自己开一个只读连接,不碰那个句柄。
     */
-    backgroundColor: resolveTheme(peekThemePreference(join(resolveDataRoot(), DB_FILENAME))) === 'light' ? '#f2eee6' : '#2a2d2b',
+    backgroundColor: resolveTheme(peekThemePreference(join(resolveDataRoot(), DB_FILENAME))) === 'light' ? '#ececf0' : '#252527',
+    /*
+      ★ 苹果风格(Liquid Glass):macOS 上窗口本身是毛玻璃,桌面壁纸透过来 ——
+      渲染层在 `data-vibrancy` 下把窗口底和两块主面板改成半透明(见 theme.css 末尾)。
+      vibrancy 只有在背景色全透明时才看得见,所以这里把上面那个底色覆盖掉;
+      首帧不会闪,因为系统材质本身就跟随深浅外观。Windows/Linux 保持实色。
+    */
+    ...(process.platform === 'darwin'
+      ? { vibrancy: 'under-window' as const, visualEffectState: 'active' as const, backgroundColor: '#00000000' }
+      : {}),
     // Windows/Linux 的任务栏与窗口图标(macOS 忽略,那边走下面的 app.dock.setIcon)
     icon: nativeImage.createFromPath(appIconPath),
     // macOS:红绿灯嵌进侧边栏(方案 §8)。Windows/Linux:只去掉系统标题栏,

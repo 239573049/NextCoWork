@@ -1,4 +1,4 @@
-.root { --slider-thumb: 22px; --slider-track: 6px; display: grid; width: 100%; min-width: 0; color: var(--foreground); font-size: var(--text-sm); line-height: var(--leading-body); letter-spacing: var(--tracking-body); user-select: none; -webkit-user-select: none; }
+.root { --slider-thumb: 20px; --slider-track: 4px; display: grid; width: 100%; min-width: 0; color: var(--foreground); font-size: var(--text-sm); line-height: var(--leading-body); letter-spacing: var(--tracking-body); user-select: none; -webkit-user-select: none; }
 .header { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: var(--space-4); }
 .label { min-width: 0; font-weight: 500; }
 .readout { display: inline-flex; flex: none; align-items: center; gap: .3em; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -25,7 +25,7 @@
    the track, written each frame, and cqw measures the track, so the clamp needs no JavaScript measuring. It floats higher on touch so a fingertip never hides it. */
 .bubbleAnchor { --edge: calc(var(--slider-thumb) / 2); --x: calc(var(--at, 0) * 1cqw); position: absolute; right: 0; bottom: calc(50% + var(--slider-thumb) / 2 + 8px); display: flex; translate: clamp(calc(100% - var(--edge) - var(--x)), 50%, calc(100cqw + var(--edge) - var(--x))) 0; pointer-events: none; }
 @media (pointer: coarse) { .bubbleAnchor { bottom: calc(50% + var(--slider-thumb) / 2 + 18px); } }
-.bubble { display: inline-flex; min-height: 1.75rem; align-items: center; padding: 0 var(--space-3); border: 1px solid color-mix(in oklab, var(--background) 14%, var(--foreground)); border-radius: var(--radius-pill); background: var(--foreground); color: var(--background); box-shadow: var(--shadow-raised); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transform-origin: 50% 100%; }
+.bubble { display: inline-flex; min-height: 1.5rem; align-items: center; padding: 0 var(--space-2); border: 0; border-radius: 6px; background: var(--material-menu); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); color: var(--foreground); box-shadow: var(--shadow-raised); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; transform-origin: 50% 100%; }
 /* Mark labels sit on their ticks; one at a limit keeps its outer edge inside the component. */
 .marks { position: relative; grid-area: 2 / 2; height: 1.25rem; margin: calc(var(--space-1) * -1) calc(var(--slider-thumb) / 2) 0; color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .markLabel { position: absolute; top: 0; translate: -50% 0; white-space: nowrap; cursor: pointer; transition: color var(--duration-fast) var(--ease-standard); }

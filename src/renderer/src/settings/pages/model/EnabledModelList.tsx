@@ -47,7 +47,7 @@ export function EnabledModelList({
           onClick={onAdd}
           className={cn(
             "app-no-drag mt-0.5 flex size-6 shrink-0 items-center justify-center",
-            "rounded-[7px] text-icon transition-colors hover:bg-tint hover:text-fg",
+            "rounded-[8px] text-icon transition-colors hover:bg-tint hover:text-fg",
           )}
         >
           <Plus size={15} />
@@ -62,7 +62,7 @@ export function EnabledModelList({
               onClick={() => onSelect(e.provider.id)}
               aria-current={e.provider.id === selectedId}
               className={cn(
-                "app-no-drag flex w-full items-center gap-2 rounded-[9px] px-1.5 py-2 text-left",
+                "app-no-drag flex w-full items-center gap-2 rounded-[8px] px-1.5 py-2 text-left",
                 "transition-colors",
                 e.provider.id === selectedId ? "bg-tint" : "hover:bg-tint/60",
               )}
@@ -105,7 +105,7 @@ export function EnabledModelList({
         type="button"
         onClick={onAdd}
         className={cn(
-          "app-no-drag mt-1 flex w-full items-center gap-1.5 rounded-[9px] px-1.5 py-2",
+          "app-no-drag mt-1 flex w-full items-center gap-1.5 rounded-[8px] px-1.5 py-2",
           "text-[12.5px] text-fg-muted transition-colors hover:bg-tint/60 hover:text-fg",
         )}
       >

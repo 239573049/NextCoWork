@@ -174,7 +174,7 @@ export function VideoModelPage({ settings, patch }: Pick<SettingsPageProps, 'set
           />
         ) : selected === null ? (
           <div className="min-w-0 flex-1 rounded-[12px] border border-border bg-canvas px-3 py-3">
-            <div className="mb-3 flex items-start gap-2 rounded-[9px] bg-tint px-3 py-2.5 text-[11.5px] leading-[1.6] text-fg-muted">
+            <div className="mb-3 flex items-start gap-2 rounded-[8px] bg-tint px-3 py-2.5 text-[11.5px] leading-[1.6] text-fg-muted">
               <Info size={14} className="mt-0.5 shrink-0 text-icon" />
               <span>{t('videoGen.catalogHint')}</span>
             </div>
@@ -208,7 +208,7 @@ function ProviderList({ rows, models, disabled, selectedId, onAdd, onSelect }: {
           <p className="text-[13px] text-fg">{t('videoGen.providers')}</p>
           <p className="mt-0.5 text-[11.5px] leading-[1.5] text-fg-faint">{t('videoGen.catalogHint')}</p>
         </div>
-        <button type="button" aria-label={t('videoGen.addProvider')} disabled={disabled} onClick={onAdd} className="mt-0.5 flex size-6 items-center justify-center rounded-[7px] text-icon hover:bg-tint disabled:opacity-40">
+        <button type="button" aria-label={t('videoGen.addProvider')} disabled={disabled} onClick={onAdd} className="mt-0.5 flex size-6 items-center justify-center rounded-[8px] text-icon hover:bg-tint disabled:opacity-40">
           <Plus size={15} />
         </button>
       </div>
@@ -219,7 +219,7 @@ function ProviderList({ rows, models, disabled, selectedId, onAdd, onSelect }: {
               type="button"
               disabled={disabled}
               onClick={() => onSelect(row.id)}
-              className={cn('flex w-full items-center gap-2 rounded-[9px] px-1.5 py-2 text-left disabled:opacity-40', row.id === selectedId ? 'bg-tint' : 'hover:bg-tint/60')}
+              className={cn('flex w-full items-center gap-2 rounded-[8px] px-1.5 py-2 text-left disabled:opacity-40', row.id === selectedId ? 'bg-tint' : 'hover:bg-tint/60')}
             >
               <ProviderAvatar name={row.name} id={row.id} />
               <span className="min-w-0 flex-1">
@@ -415,7 +415,7 @@ function ProviderCatalog({ rows, busy, error, onClose, onAdd, onAdded, onBusyCha
         </div>
       ) : (
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        <div className="mb-3 flex items-start gap-2 rounded-[9px] bg-tint px-3 py-2.5 text-[11.5px] leading-[1.6] text-fg-muted">
+        <div className="mb-3 flex items-start gap-2 rounded-[8px] bg-tint px-3 py-2.5 text-[11.5px] leading-[1.6] text-fg-muted">
           <Info size={14} className="mt-0.5 shrink-0 text-icon" />
           <span>{t('videoGen.catalogHint')}</span>
         </div>
@@ -656,7 +656,7 @@ function VideoProviderForm({ provider, preset, models, onCancel, onSaved, onBusy
                 <div className="min-w-0 flex-1">
                   <TextInput value={entry.model} onChange={(model) => updateDraft(entry.key, { model })} ariaLabel={`${t('provider.modelIdLabel')} ${String(index + 1)}`} placeholder={compatiblePreset?.models.find((model) => model.profileId === entry.profileId)?.model ?? 'model-id'} disabled={saving} />
                 </div>
-                <button type="button" aria-label={`${t('provider.deleteModel')} ${String(index + 1)}`} disabled={saving} onClick={() => setModelDrafts((current) => current.filter((model) => model.key !== entry.key))} className="flex size-7 shrink-0 items-center justify-center rounded-[7px] text-fg-faint hover:bg-danger/10 hover:text-danger disabled:opacity-40"><Trash2 size={13} /></button>
+                <button type="button" aria-label={`${t('provider.deleteModel')} ${String(index + 1)}`} disabled={saving} onClick={() => setModelDrafts((current) => current.filter((model) => model.key !== entry.key))} className="flex size-7 shrink-0 items-center justify-center rounded-[8px] text-fg-faint hover:bg-danger/10 hover:text-danger disabled:opacity-40"><Trash2 size={13} /></button>
               </div>
               <div className="space-y-1 text-[11.5px] text-fg-muted">
                 <p>{t('videoGen.profile')}</p>
@@ -751,7 +751,7 @@ function VideoGenModelRow({ settings, patch, models, providers, loaded }: { sett
       <div className="w-[240px] shrink-0">
         <ProviderModelMenu
           trigger={<><span className="min-w-0 flex-1 truncate">{triggerLabel}</span><ChevronDown size={12} className="shrink-0 text-fg-faint" /></>}
-          triggerClassName={cn('group flex h-7 w-full items-center gap-1.5 rounded-[7px] border border-border', 'bg-surface-field px-2 text-left text-[11.5px] text-fg outline-none', 'transition-[background-color,border-color,box-shadow] duration-150', 'hover:bg-tint focus-visible:border-fg-faint focus-visible:ring-2 focus-visible:ring-fg-faint/15')}
+          triggerClassName={cn('apple-field group flex h-7 w-full items-center gap-1.5 rounded-[8px] border border-border', 'bg-surface-field px-2 text-left text-[11.5px] text-fg outline-none', 'transition-[background-color,border-color,box-shadow] duration-150', 'hover:bg-tint focus-visible:border-fg-faint focus-visible:ring-2 focus-visible:ring-fg-faint/15')}
           className="w-full"
           align="end"
           width={280}

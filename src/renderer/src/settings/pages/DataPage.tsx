@@ -828,6 +828,12 @@ function syncErrorMessage(
   if (code === "conflict") return t("data.cloudSyncErrorConflict");
   if (code === "storage") return t("data.cloudSyncErrorStorage");
   if (code === "locked") return t("data.cloudSyncErrorLocked");
+  if (code === "signedOut") return t("data.cloudSyncErrorSignedOut");
+  if (code === "invalidData") return t("data.cloudSyncErrorInvalidData");
+  if (code === "accountChanged") return t("data.cloudSyncErrorAccountChanged");
+  if (code === "busy") return t("data.cloudSyncErrorBusy");
+  // 其余 configSync.* 是内部错误码,不能把 i18n key 原样丢给用户
+  if (code !== null) return t("data.cloudSyncErrorUnknown");
   return message;
 }
 
@@ -1403,7 +1409,7 @@ function PreviewCounts({
       {rows.map(([label, value]) => (
         <div
           key={label}
-          className="rounded-[9px] bg-tint px-2 py-2 text-center"
+          className="rounded-[8px] bg-tint px-2 py-2 text-center"
         >
           <div className="text-[11px] text-fg-faint">{label}</div>
           <strong className="mt-0.5 block text-[14px] font-normal text-fg">

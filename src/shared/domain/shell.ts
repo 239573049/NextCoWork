@@ -11,8 +11,9 @@
  * 本地与 SSH 两条路都走那一个端口),工具通过 `ToolContext.shells` 够到它。
  * 内核因此仍然零 electron、可单测 —— 同 `SchedulingBridge` / `SpawnSubagentFn` 的道理。
  *
- * ★ **故意不做**「后台 shell 面板」这类界面。后台进程的存在感来自
- * `BashOutput` 的回读与工具卡片,多一个常驻面板就多一份要和注册表对齐的状态。
+ * 界面侧只有右上角活动胶囊的「Bash」栏(`ActivityCapsule`):它**不自己存状态**,
+ * 列表靠 `shell:backgroundChanged` 全量广播收敛,输出靠 `shell:peekBackground`
+ * 看尾巴 —— 不消费模型那份缓冲,注册表仍是唯一事实源。
  */
 
 /**
