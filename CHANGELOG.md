@@ -1,6 +1,21 @@
 ﻿# 更新日志
 
 
+## v2.8.2
+
+### 新增
+
+- **新增 Atlas Cloud 供应商预设**:作为聚合渠道内置,提供三个端点 —— OpenAI Chat(`https://api.atlascloud.ai/v1`,模型列表公开)、OpenAI Responses(同一 base)与 Anthropic(`https://api.atlascloud.ai`,客户端自行补 `/v1/messages`)。品牌图标改用 lobehub 的 atlascloud 字形,不再退化成首字母;未标为推荐
+- **内置模型目录新增 `deepseek-v4.1-flash-ultrafast`(DeepSeek V4.1 Flash Ultrafast)**:NextCoWork 内置渠道的极速档,1M 上下文 / 384K 输出,支持视觉输入、函数调用、结构化输出与 prompt 缓存;页面未列思考档位,沿用 V4 系的思考方言。同步写入价格种子(输入 0.3 / 输出 1.2 / 缓存读 0.006),规格状态标为「未核实」
+
+### 文档
+
+- `baseurl.ts` 的 `/v1` 对照表补上 Atlas Cloud
+
+### 测试
+
+- 供应商预设测试钉住 Atlas Cloud 的 Anthropic URL,并把它加入公开模型列表集合、品牌表与 `resolveBrand` 样例
+
 ## v2.8.1
 
 ### 新增

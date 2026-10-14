@@ -476,6 +476,9 @@ const DEEPSEEK: readonly ModelPricing[] = [
   ds('deepseek-v4-flash', 'DeepSeek V4 Flash', one({ input: 0.22, output: 0.66, cacheRead: 0.007 }), {
     windows: PEAK_WINDOWS,
   }),
+  ds('deepseek-v4.1-flash-ultrafast', 'DeepSeek V4.1 Flash Ultrafast', one({ input: 0.3, output: 1.2, cacheRead: 0.006 }), {
+    source: 'https://nextco.work/models/deepseek-v4.1-flash-ultrafast',
+  }),
   ds('deepseek-v4-pro', 'DeepSeek V4 Pro', one({ input: 0.66, output: 1.98, cacheRead: 0.022 }), {
     windows: PEAK_WINDOWS,
   }),
