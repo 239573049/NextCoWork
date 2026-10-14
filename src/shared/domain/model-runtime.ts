@@ -96,6 +96,19 @@ export function auxiliaryThinkingLevel(wanted: ThinkingLevel, model: ThinkingMod
   return picked?.level ?? 'auto'
 }
 
+/**
+ * 这个模型的一次旁路请求能不能**完全不思考**:要么能关(`'off'` 可用),要么它根本不支持思考。
+ *
+ * 需求:输入框补全只要一行字,输出预算按「不思考」定(几十个 token)。关不掉思考的模型
+ * (`always`、effort 轴上没有 `'none'` 的)会先把预算花在推理上,回来的是空答案 ——
+ * 调用方据此要么放宽预算,要么干脆不发。
+ */
+export function canDisableThinking(model: ThinkingModel | undefined): boolean {
+  if (model === undefined) return false
+  return auxiliaryThinkingLevel('off', model) === 'off'
+    || effectiveModelThinking(model).thinkingConfig?.mode === 'unsupported'
+}
+
 function effortFor(level: ThinkingLevel, fallback: ModelReasoningEffort): ModelReasoningEffort {
   switch (level) {
     case 'minimal':

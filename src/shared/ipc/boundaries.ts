@@ -135,6 +135,11 @@ export const INVOKE_BOUNDARIES = {
   'git:pull': 'device',
   'git:push': 'device',
   'git:generateCommitMessage': 'device',
+  // 输入框补全读会话历史、调上游 —— 跟着数据走;设备模式下没有路由,渲染层自己跳过
+  'composer:suggestNext': 'device',
+  'composer:history': 'device',
+  'composer:complete': 'device',
+  'composer:cancel': 'device',
   'tabs:getInner': 'device',
   'session:getInput': 'device',
   'session:queue': 'device',

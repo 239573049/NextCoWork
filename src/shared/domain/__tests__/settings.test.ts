@@ -288,6 +288,8 @@ describe('mergeSettings 的模型配对', () => {
     goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'codex',
     compactModel: 'shared', compactModelProviderId: 'codex',
     imageModel: 'shared', imageModelProviderId: 'codex',
+    completionModel: 'shared', completionModelProviderId: 'codex',
+    inlineCompletionModel: 'shared', inlineCompletionModelProviderId: 'codex',
     subagent: { ...base().subagent, model: 'shared', modelProviderId: 'codex' }
   })
 
@@ -364,6 +366,27 @@ describe('mergeSettings 的模型配对', () => {
     expect(s.compactThinking).toBe('minimal')
   })
 
+  it('★ 输入框补全的两个模型同理 —— 只给别名时旧供应商被清掉', () => {
+    let next = mergeSettings(pinned(), { completionModel: 'other' })
+    expect(next.completionModel).toBe('other')
+    expect(next.completionModelProviderId).toBeUndefined()
+    next = mergeSettings(pinned(), { inlineCompletionModel: '' })
+    expect(next.inlineCompletionModel).toBe('')
+    expect(next.inlineCompletionModelProviderId).toBeUndefined()
+  })
+
+  /**
+   * 三个补全开关:建议下一步与本地补全出厂开,打字续写出厂关(每次停顿都发一次请求);
+   * 只认布尔,坏值退回当前值。
+   */
+  it('补全开关:出厂值、只认布尔、坏值退回当前值', () => {
+    expect(DEFAULT_SETTINGS).toMatchObject({ promptSuggestions: true, localCompletion: true, inlineCompletion: false, completionModel: '', inlineCompletionModel: '' })
+    let s = mergeSettings(base(), { promptSuggestions: false, inlineCompletion: true })
+    expect(s).toMatchObject({ promptSuggestions: false, inlineCompletion: true })
+    s = mergeSettings(s, { promptSuggestions: 'yes' as unknown as boolean, localCompletion: 0 as unknown as boolean })
+    expect(s).toMatchObject({ promptSuggestions: false, localCompletion: true })
+  })
+
   it('成对给出时两个都写进去', () => {
     const next = mergeSettings(pinned(), { defaultModel: 'other', defaultModelProviderId: 'routin' })
     expect(next).toMatchObject({ defaultModel: 'other', defaultModelProviderId: 'routin' })
@@ -376,6 +399,8 @@ describe('mergeSettings 的模型配对', () => {
     expect(next.permissionReviewerModelProviderId).toBe('codex')
     expect(next.goalEvaluatorModelProviderId).toBe('codex')
     expect(next.compactModelProviderId).toBe('codex')
+    expect(next.completionModelProviderId).toBe('codex')
+    expect(next.inlineCompletionModelProviderId).toBe('codex')
   })
 })
 

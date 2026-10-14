@@ -530,6 +530,39 @@ describe('锁定了供应商的设置项在别名表变动后怎么修', () => {
       goalEvaluatorModel: 'shared', goalEvaluatorModelProviderId: 'routin'
     })
   })
+
+  it('改名:输入框补全的两个模型锁定的正是这一家时跟着改', () => {
+    bothOffer('shared')
+    store.updateSettings({
+      completionModel: 'shared', completionModelProviderId: 'codex',
+      inlineCompletionModel: 'shared', inlineCompletionModelProviderId: 'codex'
+    })
+
+    renameModel('codex', 'shared', 'shared-v2')
+
+    expect(store.getSettings()).toMatchObject({
+      completionModel: 'shared-v2', completionModelProviderId: 'codex',
+      inlineCompletionModel: 'shared-v2', inlineCompletionModelProviderId: 'codex'
+    })
+  })
+
+  it('★ 删掉锁定的那家:建议模型解锁回同名别名,续写模型清空整对(不静默换家)', () => {
+    bothOffer('shared')
+    store.updateSettings({
+      completionModel: 'shared', completionModelProviderId: 'codex',
+      inlineCompletionModel: 'shared', inlineCompletionModelProviderId: 'codex'
+    })
+
+    removeProvider('codex')
+
+    const after = store.getSettings()
+    // 建议模型同判定模型:别名在别处还在 → 只解锁
+    expect(after.completionModel).toBe('shared')
+    expect(after.completionModelProviderId).toBeUndefined()
+    // 续写每次停顿都发请求,同视频:绑定失效就回到「未选择」
+    expect(after.inlineCompletionModel).toBe('')
+    expect(after.inlineCompletionModelProviderId).toBeUndefined()
+  })
 })
 
 describe('供应商 id 的字符约束', () => {

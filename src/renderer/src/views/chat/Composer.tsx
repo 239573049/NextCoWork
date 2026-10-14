@@ -148,6 +148,8 @@ import { listModes, onModesChanged } from '../../services/modes';
 import { SkillPopup, type SlashItem } from './SkillPopup';
 import type { TranslationKey } from "../../i18n";
 import type { DraftSelection } from './rich-draft';
+import type { FileSuggestion as HotFile } from "../../../../shared/domain/file-tree";
+import { useComposerGhost } from './useComposerGhost';
 
 /**
  * 内置命令的副标题。★ 磁盘上的命令取 frontmatter 里的 `description`(那是用户
@@ -232,6 +234,9 @@ export function Composer({
   goal,
   onManageMcp,
   conversationUsage,
+  suggestTrigger,
+  started = true,
+  mentionedFiles,
 }: {
   workspace: Workspace;
   /** 应用级默认模型(设置页那个)。工作区还没选过时用它兜底 */
@@ -311,6 +316,15 @@ export function Composer({
   onManageMcp?: () => void;
   /** 整个会话的累计用量，以及最近一轮可计算的输出速度。 */
   conversationUsage?: ConversationUsageSummary;
+  /**
+   * 「刚刚看着一轮成功跑完」的那个 `runEndedAt`(见 `suggest-trigger.ts`)。每变一次,
+   * 输入框就为空草稿请求一次「建议下一步」。缺省 = 不建议。
+   */
+  suggestTrigger?: number;
+  /** 这条会话发过消息了没有。没有时占位符多教一句 `@` 和 `/` 怎么用 */
+  started?: boolean;
+  /** 本会话 `@` 过的文件 —— 热文件补全的来源之一 */
+  mentionedFiles?: readonly HotFile[];
 }): ReactNode {
   const { t } = useI18n();
   const [goalPanelOpen, setGoalPanelOpen] = useState(false);
@@ -769,6 +783,25 @@ export function Composer({
     : mode.description;
   const selectedModeName = selectedMode === undefined ? value.mode : modeName(selectedMode);
 
+  /*
+    ── 灰字(Tab 接受):建议下一步 / 历史指令 / 热文件 / 打字续写 ──
+    ★ 弹层开着时一律不出灰字:那一刻 Tab 归弹层(见 `handleMentionKey` / `handleSkillKey`)。
+  */
+  const ghost = useComposerGhost({
+    input,
+    workspace,
+    sessionId: sessionId ?? null,
+    draft,
+    popupOpen: mention !== null || skillQuery !== null || skillPickerOpen,
+    attachments: attachments.length,
+    running,
+    model,
+    modelProviderId,
+    suggestTrigger,
+    mentionedFiles,
+    commands: [...commands.map((c) => c.name), ...skills.map((sk) => sk.name)],
+  });
+
   function submit(): void {
     const raw = draft.trim();
     // ★ 只有附件、没有文字也该能发 —— 拖一张图进来直接问「这是什么」是常见用法。
@@ -809,6 +842,7 @@ export function Composer({
     // ★ `modelProviderId` 必须和 `model` 一起覆盖:两者都可能来自兜底而不在 `value` 里,
     //   只覆盖一半就会把「兜底的别名」配上「value 里那个陈旧的供应商」。
     onSend(text, { ...value, model, modelProviderId, thinking });
+    ghost.onSubmit(raw);
     onDraft("");
     // 草稿清空了,弹层也得跟着走 —— 不清的话它会挂在一个已经不存在的查询上
     dismissedAt.current = null;
@@ -903,7 +937,15 @@ export function Composer({
           value={draft}
           handle={input}
           metrics={DRAFT_METRICS}
-          placeholder={running ? t("chat.queuePlaceholder") : t("chat.placeholder")}
+          placeholder={
+            ghost.view !== null && ghost.view.empty ? (
+              <span className="flex min-w-0 items-baseline gap-2">
+                <span className="min-w-0 truncate">{ghost.view.display}</span>
+                {ghost.view.showHint && <GhostKey />}
+              </span>
+            ) : running ? t("chat.queuePlaceholder") : started ? t("chat.placeholder") : t("composer.placeholder.fresh")
+          }
+          ghost={ghost.view !== null && !ghost.view.empty ? ghost.view.display : undefined}
           skillDescriptions={Object.fromEntries(skills.map((skill) => [skill.name, skill.description]))}
           aria-expanded={mention !== null || skillQuery !== null}
           aria-controls={mention !== null ? mentionListId : skillQuery !== null ? skillListId : undefined}
@@ -917,22 +959,28 @@ export function Composer({
             lastCaret.current = caret;
             syncMention(text, caret);
             syncSkill(text, caret);
+            ghost.onInput(text, caret);
           }}
           // 点击 / 方向键挪动光标也要重算 —— `@` 的判据是位置不是按键
           onCaret={(text, caret) => {
             lastCaret.current = caret;
             syncMention(text, caret);
             syncSkill(text, caret);
+            ghost.onCaret(text, caret);
           }}
           onComposing={(v) => {
             composing.current = v;
+            ghost.onComposing(v);
           }}
-          onBlur={() => { setMention(null); setSkillQuery(null) }}
-          onPaste={handlePaste}
+          onFocus={ghost.onFocus}
+          onBlur={() => { setMention(null); setSkillQuery(null); ghost.onBlur() }}
+          onPaste={(e) => { ghost.onPaste(); handlePaste(e) }}
           onKeyDown={(e) => {
             // 弹层开着时方向键 / Enter / Tab / Esc 归它,先问一句
             if (handleMentionKey(e)) return;
             if (handleSkillKey(e)) return;
+            // 然后是灰字:Tab / → / ⌘→ / Esc。★ Enter 不在其中 —— 接受和发送是两个动作
+            if (ghost.handleKey(e)) return;
             // Enter 发送,Shift+Enter 换行。输入法组词期间的 Enter 是「上屏」,
             // 不是「发送」—— 少了 isComposing 这个判断,中文用户每打一个词就发一次。
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -1066,7 +1114,21 @@ export function Composer({
             )}
           </Menu>
 
-          <div className="flex-1" />
+          {/*
+            非空草稿上挂着灰字时,这一格说一句「Tab 接受」。★ 放在药丸行的空白里而不是叠在
+            文字上:灰字可能一直写到行尾,任何叠上去的提示都会盖住它。
+          */}
+          <div className="flex min-w-0 flex-1 items-center px-2">
+            {ghost.view !== null && !ghost.view.empty && ghost.view.showHint && (
+              <span className="flex items-center gap-1 truncate text-[11px] text-fg-faint">
+                <GhostKey />
+                {t("composer.ghost.accept")}
+              </span>
+            )}
+          </div>
+          <span className="sr-only" aria-live="polite">
+            {ghost.view !== null ? t("composer.ghost.announce", { text: ghost.view.announce }) : ""}
+          </span>
 
           {/*
             ── 右半边:「怎么想 / 装得下多少 / 发给谁」 ──
@@ -1506,6 +1568,15 @@ function ConversationUsage({ usage, sessionId }: { usage: ConversationUsageSumma
 }
 
 /** 输入框菜单的操作与开关共用一行布局，开关保持菜单展开以便连续调整。 */
+/** 灰字旁边那枚 `Tab` 键帽 —— 用户普遍不知道灰字能按 Tab 接受,接受过几次之后收起 */
+function GhostKey(): ReactNode {
+  return (
+    <kbd className="inline-flex h-[16px] shrink-0 items-center rounded-[4px] border border-[var(--border-strong)] px-1 font-sans text-[10px] leading-none text-fg-faint">
+      Tab
+    </kbd>
+  );
+}
+
 function ComposerMenuItem({
   children,
   icon,

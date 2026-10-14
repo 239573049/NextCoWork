@@ -87,6 +87,9 @@ import * as connections from './connections'
 import { assertLocalBrowserWorkspace } from '../browser/manager'
 import { getBrowserAutomationBridge } from '../browser/runtime'
 import { getEnvironments } from '../runtime'
+import { getHost, getInlineCompletionService, getPromptSuggestionGenerator } from '../runtime'
+import { getActiveGoal } from '../goal/state'
+import { createComposerIpc } from './composer'
 import { getTools, installBackgroundChildHandler, installChildRunLauncher, setAccountsChangeListener, setCredentialChangeListener, setReviewChangeListener, setSessionChangeListener, setSkillWrittenListener, setVideoJobChangeListener } from '../runtime'
 import { setGoalLauncher } from '../goal/runtime'
 import { NotImplementedError, toAgentError } from './errors'
@@ -302,6 +305,22 @@ function todo<K extends InvokeChannel>(channel: K, step: string): Handler<K> {
 // invoke
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * 输入框补全。依赖在这里注入,`composer.ts` 本身不碰 electron / runtime(便于单测)。
+ * 生成器**现取**:换账号作用域时 runtime 会丢掉旧单例,这里不能抓住一个过期的。
+ */
+const composer = createComposerIpc({
+  settings: () => store.getSettings(),
+  session: (id) => store.getSession(id),
+  hasActiveGoal: (id) => getActiveGoal(id) !== undefined,
+  recentSessionPrompts: (id, limit) => store.recentSessionPrompts(id, limit),
+  lastVisibleAssistantMessage: (id) => store.lastVisibleAssistantMessage(id),
+  recentWorkspacePrompts: (id) => store.recentWorkspacePrompts(id),
+  suggest: (input, signal) => getPromptSuggestionGenerator().suggest(input, signal),
+  complete: (input, signal) => getInlineCompletionService().complete(input, signal),
+  logger: { warn: (msg) => getHost().logger.warn(msg) }
+})
+
 const handlers: HandlerMap = {
   // ── 已实现 ──
   'app:getBootstrap': (_req, ctx) => {
@@ -488,6 +507,10 @@ const handlers: HandlerMap = {
   'git:pull': (req) => pullGit(req),
   'git:push': (req) => pushGit(req),
   'git:generateCommitMessage': (req) => generateGitCommitMessage(req),
+  'composer:suggestNext': (req, ctx) => composer.suggestNext(req, ctx),
+  'composer:history': (req) => composer.history(req),
+  'composer:complete': (req, ctx) => composer.complete(req, ctx),
+  'composer:cancel': (req, ctx) => composer.cancel(req, ctx),
   'scheduled:listTasks': ({ workspaceId }) => store.listScheduledTasks(workspaceId),
   'scheduled:getTask': ({ id }) => store.getScheduledTask(id) ?? null,
   // 写入的三件套(落库 → 重排 → 广播)收口在 `scheduled/bridge.ts`,与 Agent 工具共用同一份

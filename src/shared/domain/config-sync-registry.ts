@@ -34,6 +34,11 @@ export const SETTINGS_SYNC_FIELDS: Record<keyof AppSettings, SyncCategory | 'dev
   //   那会把一个别名搬到另一台机器上,而那台机器未必有这家供应商。档位跟着模型归同一档,
   //   拆开会出现「模型同步过去了、档位没有」的半套配置。
   compactModel: 'providers', compactModelProviderId: 'providers', compactThinking: 'providers',
+  // 输入框补全的两个模型同样是「某家供应商的别名」;各自的开关跟着模型归同一档
+  //(同上面压缩模型那段的理由)。本地补全不碰任何模型,是纯粹的用户偏好。
+  promptSuggestions: 'providers', completionModel: 'providers', completionModelProviderId: 'providers',
+  inlineCompletion: 'providers', inlineCompletionModel: 'providers', inlineCompletionModelProviderId: 'providers',
+  localCompletion: 'preferences',
   defaultModel: 'providers', defaultModelProviderId: 'providers',
   // 生图模型同样是「某家供应商的别名」——和 defaultModel 同档同理由。
   imageModel: 'providers', imageModelProviderId: 'providers',

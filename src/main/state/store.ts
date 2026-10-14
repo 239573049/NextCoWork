@@ -451,6 +451,16 @@ export const store = {
   lastAssistantMessage(sessionId: string): AgentMessage | undefined {
     return repo.lastAssistantMessage(sessionId)
   },
+  /** 输入框补全:用户亲手发的最近几条 / 最后一条给人看的回复 / 本工作区的历史指令 */
+  recentSessionPrompts(sessionId: string, limit: number): AgentMessage[] {
+    return repo.recentSessionPrompts(sessionId, limit)
+  },
+  lastVisibleAssistantMessage(sessionId: string): AgentMessage | undefined {
+    return repo.lastVisibleAssistantMessage(sessionId)
+  },
+  recentWorkspacePrompts(workspaceId: string): string[] {
+    return repo.recentWorkspacePrompts(workspaceId)
+  },
   /** 最后一条带目标标记的助手消息 —— 目标重载恢复只看它,不解析整段转录 */
   lastGoalStatusMessage(sessionId: string): AgentMessage | undefined {
     return repo.lastGoalStatusMessage(sessionId)

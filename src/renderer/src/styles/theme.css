@@ -946,6 +946,19 @@ body {
 .image-gen-reveal {
   animation: image-gen-reveal 260ms var(--ease-panel) both;
 }
+/*
+  输入框灰字(Tab 接受)。见 `views/chat/MentionInput.tsx` 的 `ghost` 与 `docs/composer-autocomplete.md`。
+  ★ 画成伪元素而不是节点:`readDraft` / `domDirty` / 光标 / 撤销栈都看不见它,组词也不会被它打断。
+    它接在最后一个子节点后面,而灰字只在「光标折叠在末尾」时出现,所以正好落在光标后面。
+*/
+[data-composer-input][data-ghost]::after {
+  content: attr(data-ghost);
+  color: var(--color-fg-faint);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* ★ `::after` 不能放进 `:is()`(伪元素不是合法的选择器列表项,整条规则会被丢弃),所以拆开写 */
 :root[data-theme-motion='reduced'] .image-gen-sweep::after,
 :root[data-theme-motion='off'] .image-gen-sweep::after,

@@ -24,6 +24,7 @@ import type { ToolInfo } from '../agent/tool'
 import type { Bootstrap } from '../domain/bootstrap'
 import type { DeviceInvitationPreview, DevicesState } from '../domain/device-connection'
 import type { DirListing, FileSuggestion } from '../domain/file-tree'
+import type { ComposerCompletionContext } from '../domain/composer-completion'
 import type { ReviewChangeSet, ReviewFileDiff, ReviewMutationResult } from '../domain/review'
 import type { McpSecretsInfo, McpServerConfig, McpServerStatus } from '../domain/mcp'
 import type { ProxyPasswordInfo } from '../domain/proxy'
@@ -540,6 +541,27 @@ export interface IpcInvokeMap {
    *   的措辞,不是用哪家模型。
    */
   'git:generateCommitMessage': { req: { workspaceId: string }; res: { message: string } }
+
+  // ── 输入框补全(docs/composer-autocomplete.md)──
+  /**
+   * 回合结束后建议下一步。`text` 为空 = 不出声(模型选择沉默、条件不满足、失败、被取消一律如此)。
+   * ★ `triggerKey` 是渲染层看到的那次 `runEndedAt`:主进程按 (sessionId, triggerKey) 合流,
+   *   两个窗口开着同一条会话只发一次请求。
+   * ★ `model` 是输入框此刻的生效模型;设置里点名了补全模型时主进程改用那一个。
+   */
+  'composer:suggestNext': {
+    req: { requestId: string; workspaceId: string; sessionId: string; triggerKey: number; model: string; modelProviderId?: string }
+    res: { requestId: string; text: string }
+  }
+  /** 本工作区发过的指令(新→旧、去重、≤500 条),给本地历史补全用 */
+  'composer:history': { req: { workspaceId: string }; res: { prompts: string[] } }
+  /** 打字中续写。默认关;模型只取设置里点名的那一个 */
+  'composer:complete': {
+    req: { requestId: string; workspaceId: string; sessionId: string | null; draft: string; context: ComposerCompletionContext }
+    res: { requestId: string; text: string }
+  }
+  /** 取消上面两类请求中的一个。已经结束的 id 静默忽略 */
+  'composer:cancel': { req: { requestId: string }; res: void }
 
   // ── 定时任务 ──
   'scheduled:listTasks': { req: { workspaceId?: string }; res: ScheduledTask[] }
@@ -1800,6 +1822,10 @@ export const INVOKE_CHANNELS = {
   'git:pull': 1,
   'git:push': 1,
   'git:generateCommitMessage': 1,
+  'composer:suggestNext': 1,
+  'composer:history': 1,
+  'composer:complete': 1,
+  'composer:cancel': 1,
   'tabs:getInner': 1,
   'session:getInput': 1,
   'session:queue': 1,

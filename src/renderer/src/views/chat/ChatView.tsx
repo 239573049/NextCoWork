@@ -58,6 +58,8 @@ import { parseGoalCommand } from '../../../../shared/domain/goal'
 import { toast } from '../../stores/toast'
 import { skillExtractionErrorKey, startSkillExtraction } from '../skills/skill-extraction'
 import { resolveMaxOutputTokens, type SendOptions, type SessionMode } from '../../../../shared/agent/run-request'
+import { useSuggestTrigger } from './suggest-trigger'
+import { mentionedFilesOf } from './ghost'
 
 // 需求:空会话首屏问候按当前语言显示。切点(几点算「晚上」)是 shared 纯函数
 // (dayPartOf),句子住 i18n —— 原先句子硬编码在 shared 里,英文界面下也一直是中文。
@@ -342,6 +344,21 @@ export function ChatView({
     [contextAlias, maxOutputTokens, workspace.settings.maxContext]
   )
   const started = hasRun(transcript, running)
+  /*
+    输入框「建议下一步」的触发:这个挂载亲眼看着一轮成功跑完(规则与理由见 `suggest-trigger.ts`)。
+    ★ 判定放在这里而不是 Composer:队列、目标、模式、提炼会话这些事实都住在 ChatView。
+  */
+  const suggestTrigger = useSuggestTrigger({
+    running,
+    runEndedAt: transcript.runEndedAt,
+    status: transcript.status,
+    queued: queuedInputs.length,
+    goalActive: goal !== undefined,
+    planMode: sessionMode === 'plan',
+    skillSourceId,
+    sessionId
+  })
+  const mentionedFiles = useMemo(() => mentionedFilesOf(transcript.messages), [transcript.messages])
   const conversationUsage = useMemo(
     () => summarizeConversationUsage(transcript.runUsage, transcript.usage),
     [transcript.runUsage, transcript.usage]
@@ -886,6 +903,9 @@ export function ChatView({
   const composer = (
     <SessionComposer
       storeKey={storeKey}
+      suggestTrigger={suggestTrigger}
+      started={started}
+      mentionedFiles={mentionedFiles}
       workspace={workspace}
       fallbackModel={fallbackModel}
       {...(sessionModel === undefined ? {} : { sessionModel })}

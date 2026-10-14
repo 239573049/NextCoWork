@@ -21,6 +21,7 @@ import { extensionsZh, extensionsEn } from './extensions';
 import { gitZh, gitEn } from './git';
 import { diffZh, diffEn } from './diff';
 import { compactionZh, compactionEn } from './compaction';
+import { composerCompletionZh, composerCompletionEn } from './composer-completion';
 import { usageZh, usageEn } from './usage';
 import { providerAccountsZh, providerAccountsEn } from './provider-accounts';
 import { searchZh, searchEn } from './search';
@@ -73,6 +74,7 @@ const ZH: Messages = {
   ...gitZh,
   ...diffZh,
   ...compactionZh,
+  ...composerCompletionZh,
   ...skillifyZh,
   ...imageGenZh,
   ...videoGenZh,
@@ -286,7 +288,7 @@ const ZH: Messages = {
   "skills.searchPlaceholder": "搜索 Skill…",
   "commands.groupLabel": "命令",
   "commands.skillsGroupLabel": "Skill",
-  "commands.builtin.init": "深入分析项目并生成 AGENTS.md",
+  "commands.builtin.init": "深入分析项目，生成 AGENTS.md、仓库地图与仓库记忆",
   "skills.all": "全部",
   "skills.global": "全局",
   "skills.project": "当前工作区",
@@ -2113,6 +2115,7 @@ const EN: Messages = {
   ...gitEn,
   ...diffEn,
   ...compactionEn,
+  ...composerCompletionEn,
   ...skillifyEn,
   ...imageGenEn,
   ...videoGenEn,
@@ -2321,7 +2324,7 @@ const EN: Messages = {
   "skills.searchPlaceholder": "Search Skills…",
   "commands.groupLabel": "Commands",
   "commands.skillsGroupLabel": "Skills",
-  "commands.builtin.init": "Analyze the project in depth and generate AGENTS.md",
+  "commands.builtin.init": "Analyze the project in depth and generate AGENTS.md, a code map and repository memory",
   "skills.all": "All",
   "skills.global": "Global",
   "skills.project": "Current workspace",

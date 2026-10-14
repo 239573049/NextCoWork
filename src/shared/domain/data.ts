@@ -368,6 +368,14 @@ function isAppSettings(value: unknown): boolean {
     (has(v, 'compactModel') && typeof v.compactModel !== 'string') ||
     !optionalString(v, 'compactModelProviderId') ||
     (has(v, 'compactThinking') && !isSubagentThinking(v.compactThinking)) ||
+    // ★ 输入框补全那五项同理:缺席 = 旧导出,放行并与默认值合并;在场就必须类型正确
+    (has(v, 'promptSuggestions') && typeof v.promptSuggestions !== 'boolean') ||
+    (has(v, 'completionModel') && typeof v.completionModel !== 'string') ||
+    !optionalString(v, 'completionModelProviderId') ||
+    (has(v, 'localCompletion') && typeof v.localCompletion !== 'boolean') ||
+    (has(v, 'inlineCompletion') && typeof v.inlineCompletion !== 'boolean') ||
+    (has(v, 'inlineCompletionModel') && typeof v.inlineCompletionModel !== 'string') ||
+    !optionalString(v, 'inlineCompletionModelProviderId') ||
     typeof v.defaultModel !== 'string' ||
     !optionalString(v, 'defaultModelProviderId') ||
     // ★ 生图模型那一对同理:缺席 = 旧导出,放行并与默认值合并(默认是「没选过」,

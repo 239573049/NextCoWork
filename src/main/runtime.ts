@@ -108,6 +108,8 @@ import type { UnpricedUsageAttempt } from '../shared/domain/usage'
 import { SessionTitleGenerator } from './session-title'
 import { AgentDraftGenerator } from './agent-draft'
 import { CommitMessageGenerator } from './commit-message'
+import { PromptSuggestionGenerator } from './prompt-suggestion'
+import { InlineCompletionService } from './inline-completion'
 import type { SessionChange } from '../shared/domain/session'
 import { ulid } from '../shared/util/id'
 import { clearHookFailuresForTest, installHookHostPorts, resetHookHostPortsForTest, runHookEvent } from './hooks'
@@ -136,6 +138,8 @@ let seeded = false
 let sessionTitles: SessionTitleGenerator | null = null
 let agentDrafts: AgentDraftGenerator | null = null
 let commitMessages: CommitMessageGenerator | null = null
+let promptSuggestions: PromptSuggestionGenerator | null = null
+let inlineCompletions: InlineCompletionService | null = null
 let widgetUpstream: UpstreamRouter | null = null
 let environments: EnvironmentManager | null = null
 let environmentStatusSink: ((status: ConnectionStatus) => void) | undefined
@@ -304,6 +308,8 @@ export function installHost(h: KernelHost): void {
   // 辅助请求那几个路由器同样抓着旧 host(`shutdownSessionTitles` 已经处理了标题那一个)
   agentDrafts = null
   commitMessages = null
+  promptSuggestions = null
+  inlineCompletions = null
   widgetUpstream = null
   /*
     ★ 钩子执行器(零 runtime import)的宿主口。访问器全部**现取**,不做快照 ——
@@ -790,6 +796,48 @@ export function getCommitMessageGenerator(): CommitMessageGenerator {
 }
 
 /**
+ * 输入框「回合结束后建议下一步」用的那一次辅助请求(`docs/composer-autocomplete.md`)。
+ *
+ * ★ 和上面几个逐条同形,又一个独立的 `UpstreamRouter`:建议是每轮都发的后台请求,
+ *   它的失败(模型挑食、被限流)不该把某家供应商在正文侧标记成不健康。
+ */
+export function getPromptSuggestionGenerator(): PromptSuggestionGenerator {
+  if (promptSuggestions !== null) return promptSuggestions
+  const generator = new PromptSuggestionGenerator({
+    upstream: new UpstreamRouter(getHost(), providerConfig, {
+      idleTimeoutMs: upstreamIdleTimeoutMs,
+      onUsageAttempt: (record) => {
+        if (promptSuggestions === generator) persistUsageAttempt(record)
+      },
+      priceAttempt: priceAttemptForRouter
+    }),
+    logger: getHost().logger
+  })
+  promptSuggestions = generator
+  return generator
+}
+
+/**
+ * 输入框「打字中续写」。理由同上;它的缓存与限流状态挂在这个单例上,
+ * 换作用域(换账号)时随单例一起丢掉 —— 上一个账号的缓存不该命中到下一个账号。
+ */
+export function getInlineCompletionService(): InlineCompletionService {
+  if (inlineCompletions !== null) return inlineCompletions
+  const service = new InlineCompletionService({
+    upstream: new UpstreamRouter(getHost(), providerConfig, {
+      idleTimeoutMs: upstreamIdleTimeoutMs,
+      onUsageAttempt: (record) => {
+        if (inlineCompletions === service) persistUsageAttempt(record)
+      },
+      priceAttempt: priceAttemptForRouter
+    }),
+    logger: getHost().logger
+  })
+  inlineCompletions = service
+  return service
+}
+
+/**
  * widget 里 `host.complete()` 用的那条上游。
  *
  * ★ 又一个独立的路由器,理由同上面几条:widget 是模型写的,一个写坏的循环可能连发
@@ -1217,6 +1265,8 @@ export async function refreshRuntimeForConfigScope(): Promise<void> {
   router = null
   agentDrafts = null
   commitMessages = null
+  promptSuggestions = null
+  inlineCompletions = null
   widgetUpstream = null
 
   /*
@@ -3222,6 +3272,8 @@ export function resetRuntimeForTest(): void {
   router = null
   agentDrafts = null
   commitMessages = null
+  promptSuggestions = null
+  inlineCompletions = null
   widgetUpstream = null
   tools = null
   preparePluginTools = async () => {}

@@ -6,6 +6,7 @@ import {
 } from '../../../../shared/agent/permission'
 import type { ModelAlias, UpstreamProvider } from '../../../../shared/domain/provider'
 import { isChatModelAlias } from '../../../../shared/domain/provider'
+import { canDisableThinking } from '../../../../shared/domain/model-runtime'
 import SegmentedControl from '../../components/arc/segmented-control/segmented-control'
 import { Slider } from '../../components/ui/Slider'
 import { Switch } from '../../components/arc/switch/switch'
@@ -75,6 +76,15 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
       patch({ goalEvaluatorModel: model, goalEvaluatorModelProviderId: modelProviderId })
     }
   )
+  /*
+    续写模型关不掉思考 = 续写永远不会出现(`inline-completion.ts` 直接不发)。
+    选中的那一刻就说出来,而不是让用户对着一个「开着却从不出灰字」的开关发愣。
+  */
+  const inlineAlias = settings.inlineCompletionModel === ''
+    ? undefined
+    : models.find((m) => m.alias === settings.inlineCompletionModel
+      && (settings.inlineCompletionModelProviderId === undefined || m.providerId === settings.inlineCompletionModelProviderId))
+  const inlineModelThinks = inlineAlias !== undefined && !canDisableThinking(inlineAlias)
   if (sub === 'agent') {
     // 一条绑定一个选项 —— 同一别名挂在多家上时,「用哪一家审核」是用户要选的东西
     const reviewerOptions = [
@@ -265,6 +275,60 @@ export function GeneralPage({ settings, sub, patch }: SettingsPageProps): ReactN
             }}
           />
         </SettingRow>
+        {/*
+          输入框补全(灰字 + Tab 接受),设计见 docs/composer-autocomplete.md。
+          ★ 三层各有各的开关,因为它们的代价完全不同:建议下一步每轮一次请求(出厂开)、
+            本地补全零请求(出厂开)、打字续写每次停顿一次请求(出厂关、必须点名模型)。
+        */}
+        <SettingRow title={t('settings.completion.suggestions')} description={t('settings.completion.suggestionsHint')}>
+          <Switch aria-label={t('settings.completion.suggestions')} checked={settings.promptSuggestions}
+            onCheckedChange={(promptSuggestions) => patch({ promptSuggestions })} />
+        </SettingRow>
+        {settings.promptSuggestions && (
+          <SettingRow title={t('settings.completion.model')} description={t('settings.completion.modelHint')} wide>
+            <RoleModelPicker
+              label={t('settings.completion.model')}
+              models={models}
+              providers={providers}
+              loaded={loaded}
+              model={settings.completionModel}
+              modelProviderId={settings.completionModelProviderId}
+              onChange={(model, modelProviderId) => {
+                patch({ completionModel: model, completionModelProviderId: modelProviderId })
+              }}
+            />
+          </SettingRow>
+        )}
+        <SettingRow title={t('settings.completion.local')} description={t('settings.completion.localHint')}>
+          <Switch aria-label={t('settings.completion.local')} checked={settings.localCompletion}
+            onCheckedChange={(localCompletion) => patch({ localCompletion })} />
+        </SettingRow>
+        <SettingRow title={t('settings.completion.inline')} description={t('settings.completion.inlineHint')}>
+          <Switch aria-label={t('settings.completion.inline')} checked={settings.inlineCompletion}
+            onCheckedChange={(inlineCompletion) => patch({ inlineCompletion })} />
+        </SettingRow>
+        {settings.inlineCompletion && (
+          <SettingRow
+            title={t('settings.completion.inlineModel')}
+            description={inlineModelThinks
+              ? <span className="text-danger">{t('settings.completion.inlineModelThinking')}</span>
+              : t('settings.completion.inlineModelHint')}
+            wide
+          >
+            <RoleModelPicker
+              label={t('settings.completion.inlineModel')}
+              models={models}
+              providers={providers}
+              loaded={loaded}
+              model={settings.inlineCompletionModel}
+              modelProviderId={settings.inlineCompletionModelProviderId}
+              emptyLabel={t('settings.completion.inlineModelNone')}
+              onChange={(model, modelProviderId) => {
+                patch({ inlineCompletionModel: model, inlineCompletionModelProviderId: modelProviderId })
+              }}
+            />
+          </SettingRow>
+        )}
         <SettingRow
           title={t('general.maxOutputTokens')}
           description={t('general.maxOutputTokensHint', {

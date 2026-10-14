@@ -1280,6 +1280,70 @@ function messageOfRow(r: Record<string, unknown>): AgentMessage {
   }
 }
 
+/**
+ * 这条会话里用户**亲手发的**最近几条消息,新的在前。输入框「建议下一步」读的就是它。
+ *
+ * ★ 不复用 `getHistoryPage`:一轮里几百次工具调用会把前面几条提问整个挤出一页。
+ * ★ `role = 'user'` 不等于「用户说的话」—— 工具结果也以 user 角色落库;
+ *   SQL 先用 `json_each` 挑出带 text 部件的那些(便宜),再交给 `isTurnStart` 认定。
+ */
+export function recentSessionPrompts(sessionId: string, limit: number): AgentMessage[] {
+  const rows = stmt(
+    `SELECT id, role, parts, schema_version, created_at, internal FROM messages
+     WHERE session_id = ? AND role = 'user' AND internal = 0
+       AND EXISTS (SELECT 1 FROM json_each(messages.parts) WHERE json_extract(value, '$.type') = 'text')
+     ORDER BY ordinal DESC, id DESC LIMIT ?`
+  ).all(sessionId, limit) as Record<string, unknown>[]
+  return rows.map(messageOfRow).filter(isTurnStart)
+}
+
+/**
+ * 最后一条**非内部**的助手消息。`lastAssistantMessage` 不挑 internal,而那类消息
+ * (目标 kickoff 之类)不是给用户看的回复,拿它去猜用户下一句是在猜一段他没读过的话。
+ */
+export function lastVisibleAssistantMessage(sessionId: string): AgentMessage | undefined {
+  const row = stmt(
+    `SELECT id, role, parts, schema_version, created_at, internal FROM messages
+     WHERE session_id = ? AND role = 'assistant' AND internal = 0 ORDER BY ordinal DESC, id DESC LIMIT 1`
+  ).get(sessionId) as Record<string, unknown> | undefined
+  return row === undefined ? undefined : messageOfRow(row)
+}
+
+/**
+ * 这个工作区里用户发过的指令,新的在前、去重,给输入框的历史补全用。
+ *
+ * ★ 两道上限是给**主进程**的:node:sqlite 是同步的,一个攒了几年对话的工作区不能让
+ *   一次输入框挂载卡住整个应用。先限最近 `sessions` 个顶层会话(子代理会话不是用户打的),
+ *   再限 `scan` 行。
+ * ★ 斜杠命令在库里是**展开后**的整份模板(`applyCommand` 在发送时展开),所以超长、
+ *   多行的一律不要 —— 用户从没打过它们,补出来只会是一大段陌生文字。
+ */
+export function recentWorkspacePrompts(
+  workspaceId: string,
+  { sessions = 200, scan = 2000, limit = 500 }: { sessions?: number; scan?: number; limit?: number } = {}
+): string[] {
+  const rows = stmt(
+    `SELECT m.id, m.role, m.parts, m.schema_version, m.created_at, m.internal FROM messages m
+     WHERE m.session_id IN (
+         SELECT id FROM sessions WHERE workspace_id = ? AND parent_session_id IS NULL
+         ORDER BY updated_at DESC LIMIT ?)
+       AND m.role = 'user' AND m.internal = 0
+     ORDER BY m.created_at DESC, m.ordinal DESC LIMIT ?`
+  ).all(workspaceId, sessions, scan) as Record<string, unknown>[]
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const row of rows) {
+    const message = messageOfRow(row)
+    if (!isTurnStart(message)) continue
+    const text = message.parts.flatMap((p) => (p.type === 'text' ? [p.text] : [])).join('').trim()
+    if (text === '' || text.length > 500 || text.split('\n').length > 3 || seen.has(text)) continue
+    seen.add(text)
+    out.push(text)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 /** 页首往前补到一轮开头时,最多再多读这么多条 —— 一轮里几百次工具调用也不该让一页无界 */
 const PAGE_TURN_EXTENSION_MAX = 500
 

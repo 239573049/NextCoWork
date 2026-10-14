@@ -349,6 +349,34 @@ export interface AppSettings {
   compactThinking: SubagentThinking
   /** 模型自提目标：默认放开，按用户原话直接设立。 */
   modelProposedGoals: ModelProposedGoals
+  /**
+   * 输入框「回合结束后建议下一步」(灰字,Tab 填入)。设计见 `docs/composer-autocomplete.md`。
+   *
+   * ★ 出厂**开启**:每轮最多一次请求、只发裁剪过的上下文(最近几条用户消息 + 回复末尾),
+   *   而它是输入框「提醒」里最有用的那一层。不想要的用户在设置里一键关掉。
+   */
+  promptSuggestions: boolean
+  /**
+   * 建议下一步用哪个模型;空字符串 = 跟随输入框此刻的模型(出厂默认)。
+   * ★ 跟随时不换家:同 `session-title.ts`「标题请求必须跟着正文走同一家」那条理由。
+   */
+  completionModel: string
+  /** 与 `completionModel` 成对,见 `defaultModelProviderId` */
+  completionModelProviderId?: string
+  /** 本地补全:历史指令前缀 + 改动过的文件名。零请求、零成本,出厂开启。 */
+  localCompletion: boolean
+  /**
+   * 打字中由模型续写。★ 出厂**关闭**:每次停顿都会把草稿发给所选模型 ——
+   * 这是隐私和钱包两方面的决定,只能由用户自己打开。
+   */
+  inlineCompletion: boolean
+  /**
+   * 打字续写用的模型。★ **没有「跟随会话」这一档**:会话模型多半是大模型,
+   * 首 token 一两秒,灰字到的时候用户早打过去了。空字符串 = 未选择,续写不生效。
+   */
+  inlineCompletionModel: string
+  /** 与 `inlineCompletionModel` 成对,见 `defaultModelProviderId` */
+  inlineCompletionModelProviderId?: string
   defaultModel: string
   /**
    * 与 `defaultModel` 成对:同一个别名可以挂在多家上,光凭别名定不下发给谁。
@@ -568,6 +596,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // 这就是引入这两栏之前的行为,老用户升级后压缩发给谁一个字都不变。
   compactModel: '',
   compactThinking: INHERIT_THINKING,
+  // 输入框补全:建议下一步与本地补全出厂开,打字续写出厂关(理由见 AppSettings 上的字段说明)
+  promptSuggestions: true,
+  completionModel: '',
+  localCompletion: true,
+  inlineCompletion: false,
+  inlineCompletionModel: '',
   defaultModel: '',
   // 空 = 没选过生图模型,`generate_image` 不下发(见 AppSettings.imageModel 的说明)
   imageModel: '',
@@ -635,12 +669,12 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   if (patch.defaultPermissionMode !== undefined) {
     next.defaultPermissionMode = patch.defaultPermissionMode
   }
-  // ★★ 六个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
+  // ★★ 八个「模型别名 + 供应商」配对一律**成对写**:只要 patch 给了别名,
   //    供应商就跟着 patch 走,哪怕 patch 里它是 `undefined`(那是「取消锁定」,
   //    供应商被删时的降级路径就靠这个)。
   //    只写别名、让旧 providerId 留下来的话,就会得到「新别名 + 旧供应商」——
   //    正是 `model-selection.ts` 那一整个模块要消灭的那个 bug,在它自己的
-  //    合并函数里复活一次。这六处一个都不能漏。
+  //    合并函数里复活一次。这八处一个都不能漏。
   if (patch.permissionReviewerModel !== undefined) {
     next.permissionReviewerModel = patch.permissionReviewerModel
     next.permissionReviewerModelProviderId = patch.permissionReviewerModelProviderId
@@ -666,6 +700,18 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
   //   「要不要弹审批」,静默放宽成 `'auto'` 是这一整类改动里最不该出现的失败形态。
   if (isModelProposedGoals(patch.modelProposedGoals)) {
     next.modelProposedGoals = patch.modelProposedGoals
+  }
+  // 输入框补全:三个开关只认布尔(同 imageGenerationEnabled),两个模型成对写
+  if (typeof patch.promptSuggestions === 'boolean') next.promptSuggestions = patch.promptSuggestions
+  if (patch.completionModel !== undefined) {
+    next.completionModel = patch.completionModel
+    next.completionModelProviderId = patch.completionModelProviderId
+  }
+  if (typeof patch.localCompletion === 'boolean') next.localCompletion = patch.localCompletion
+  if (typeof patch.inlineCompletion === 'boolean') next.inlineCompletion = patch.inlineCompletion
+  if (patch.inlineCompletionModel !== undefined) {
+    next.inlineCompletionModel = patch.inlineCompletionModel
+    next.inlineCompletionModelProviderId = patch.inlineCompletionModelProviderId
   }
   if (patch.defaultModel !== undefined) {
     next.defaultModel = patch.defaultModel
@@ -803,6 +849,13 @@ const PATCHABLE_KEYS: Record<keyof AppSettings, true> = {
   compactModel: true,
   compactModelProviderId: true,
   compactThinking: true,
+  promptSuggestions: true,
+  completionModel: true,
+  completionModelProviderId: true,
+  localCompletion: true,
+  inlineCompletion: true,
+  inlineCompletionModel: true,
+  inlineCompletionModelProviderId: true,
   defaultModel: true,
   defaultModelProviderId: true,
   imageModel: true,

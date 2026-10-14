@@ -22,6 +22,7 @@ import { AppSkeleton } from './shell/AppSkeleton'
 import { WindowControls } from './shell/WindowControls'
 import { startAgentEventPump, adoptActiveRuns, adoptActiveSubagents, refreshHydratedSessions, useRunIndex } from './stores/session'
 import { setSoundPreferences, startNotificationSounds } from './stores/notification-sounds'
+import { setComposerPrefs } from './stores/composer-prefs'
 import { useImageThemes } from './stores/imageTheme'
 import { usePluginsStore } from './stores/plugins'
 import { useWindowStore, startActiveWorkspaceReporting } from './stores/window'
@@ -82,6 +83,10 @@ export default function App(): React.JSX.Element {
   useEffect(() => startNotificationSounds(), [])
   useEffect(() => {
     if (settings !== null) setSoundPreferences(settings.notifications)
+  }, [settings])
+  // 输入框补全的开关镜像(理由见 stores/composer-prefs.ts 文件头)
+  useEffect(() => {
+    if (settings !== null) setComposerPrefs(settings)
   }, [settings])
 
   /*

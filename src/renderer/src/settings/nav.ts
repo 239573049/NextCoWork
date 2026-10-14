@@ -232,6 +232,24 @@ export const SETTINGS_INDEX: readonly SettingsRow[] = [
   {
     page: 'general',
     sub: 'agent',
+    title: '回合结束后建议下一步',
+    keywords: ['suggestion', 'autocomplete', 'ghost', 'tab', 'prompt', '补全', '建议', '灰字', '提示']
+  },
+  {
+    page: 'general',
+    sub: 'agent',
+    title: '历史与文件补全',
+    keywords: ['history', 'file', 'autocomplete', 'tab', '补全', '历史', '文件']
+  },
+  {
+    page: 'general',
+    sub: 'agent',
+    title: '打字时续写',
+    keywords: ['inline', 'autocomplete', 'completion', 'copilot', 'tab', '续写', '补全']
+  },
+  {
+    page: 'general',
+    sub: 'agent',
     // ★ 标题是**域名词**「Shell」,不翻译(界面那一行也写 Shell);用户打的是
     //   shell 名或 shell 本身,所以关键词把八个取值全收进来,外加 `sheel` 这个
     //   常见拼错 —— 搜不到就等于这一项不存在。

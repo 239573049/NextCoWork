@@ -150,6 +150,14 @@ export function renameModel(
     patch.goalEvaluatorModel = next
     patch.goalEvaluatorModelProviderId = settings.goalEvaluatorModelProviderId
   }
+  if (renames(settings.completionModel, settings.completionModelProviderId)) {
+    patch.completionModel = next
+    patch.completionModelProviderId = settings.completionModelProviderId
+  }
+  if (renames(settings.inlineCompletionModel, settings.inlineCompletionModelProviderId)) {
+    patch.inlineCompletionModel = next
+    patch.inlineCompletionModelProviderId = settings.inlineCompletionModelProviderId
+  }
   if (Object.keys(patch).length > 0) {
     windows.emitToAll("settings:changed", store.updateSettings(patch))
   }
@@ -533,6 +541,28 @@ function repointDanglingDefaults(): void {
   if (goalEvaluator !== undefined) {
     patch.goalEvaluatorModel = goalEvaluator.model
     patch.goalEvaluatorModelProviderId = goalEvaluator.modelProviderId
+  }
+  // 建议下一步的空串是「跟随输入框的模型」,同判定模型:悬空时置空即可
+  const completion = repairModelSelection(before.completionModel,
+    before.completionModelProviderId, aliveBindings, aliveAliases,
+    { model: '', modelProviderId: undefined })
+  if (completion !== undefined) {
+    patch.completionModel = completion.model
+    patch.completionModelProviderId = completion.modelProviderId
+  }
+  /*
+    ★ 打字续写和视频同一个降级方向:**绑定失效就清空整对**,不解锁成裸别名。
+    它每次停顿都发一次请求,静默换到另一家的同名模型,账单会在用户毫无察觉时
+    换一家累积;空串在这一栏的意思是「未选择、续写不生效」,正是安全的那一头。
+  */
+  if (before.inlineCompletionModel !== '') {
+    const aliveInline = before.inlineCompletionModelProviderId !== undefined
+      ? aliveBindings.has(modelSelectionKey(before.inlineCompletionModelProviderId, before.inlineCompletionModel))
+      : aliveAliases.has(before.inlineCompletionModel)
+    if (!aliveInline) {
+      patch.inlineCompletionModel = ''
+      patch.inlineCompletionModelProviderId = undefined
+    }
   }
   /*
     ★ 视频模型和上面几个的降级方向不同:**绑定失效就清空整对**,不解锁成裸别名、
