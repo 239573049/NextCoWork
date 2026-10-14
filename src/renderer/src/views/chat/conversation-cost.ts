@@ -6,7 +6,7 @@
 import type { UsageAttemptRecord } from '../../../../shared/domain/usage'
 import { findBuiltinModel } from '../../../../shared/domain/model-catalog-inventory'
 import { findPricing, priceOf, type Currency } from '../../../../shared/domain/pricing'
-import { PRICING_SEED } from '../../../../shared/domain/pricing-seed'
+import { getPricingTable } from '../../services/pricing'
 
 type Part = 'input' | 'output' | 'cacheRead' | 'cacheWrite' | 'cacheWrite1h' | 'other'
 const PARTS: readonly Part[] = ['input', 'output', 'cacheRead', 'cacheWrite', 'cacheWrite1h', 'other']
@@ -28,7 +28,7 @@ function estimateParts(row: UsageAttemptRecord): Record<Part, number> | null {
   const costMicros = row.costMicros
   if (costMicros === null) return null
   const catalog = findBuiltinModel(row.upstreamModel)
-  const pricing = findPricing(PRICING_SEED, row.providerId, catalog?.pricingModelId ?? catalog?.id ?? row.upstreamModel, row.at)
+  const pricing = findPricing(getPricingTable(), row.providerId, catalog?.pricingModelId ?? catalog?.id ?? row.upstreamModel, row.at)
   if (pricing === null) return null
   // 需求：整次请求共用一个阶梯；逐项独立调用 priceOf 会把输出恒按最低输入档计价。
   const tier = pricing.tiers[row.pricingTier ?? priceOf(pricing, {

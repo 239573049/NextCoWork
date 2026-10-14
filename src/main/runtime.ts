@@ -99,7 +99,7 @@ import type { VideoJobView } from '../shared/domain/video-generation'
 import { resolveImageDataRef } from './kernel/upstream/images'
 import { parseCredential } from '../shared/domain/credential'
 import { listResolvedModels } from './state/model-bindings'
-import { PRICING_SEED } from '../shared/domain/pricing-seed'
+import { getEffectivePricing } from './pricing-sync'
 import { findPricing, priceOf } from '../shared/domain/pricing'
 import type { ModelPricing, PriceResult, RunCost } from '../shared/domain/pricing'
 import { addTokenUsage, type TokenUsage } from '../shared/agent/stream'
@@ -833,7 +833,7 @@ export function resolveUsagePricing(
   pricingModelId: string,
   at: number
 ): ModelPricing | null {
-  return findPricing(PRICING_SEED, providerId, pricingModelId, at)
+  return findPricing(getEffectivePricing(), providerId, pricingModelId, at)
 }
 
 /**

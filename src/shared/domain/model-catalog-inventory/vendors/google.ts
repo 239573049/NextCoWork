@@ -17,6 +17,15 @@ const geminiStandardCapabilities = (fileInput = true): ModelCapabilities =>
   })
 
 export const GOOGLE: readonly BuiltinModelRecord[] = [
+  model('google', 'gemini-4-argon', 'Gemini 4 Argon', {
+    capabilities: geminiStandardCapabilities(),
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    thinkingConfig: effortThinking('reasoning_effort', 'medium'),
+    reasoningEfforts: ['low', 'medium', 'high'],
+    source: source('https://ai.google.dev/gemini-api/docs/models/gemini-4-argon'),
+    verificationStatus: 'official-api',
+  }),
   model('google', 'gemini-3.8-flash', 'Gemini 3.8 Flash', {
     capabilities: geminiStandardCapabilities(),
     contextWindow: 1_048_576,

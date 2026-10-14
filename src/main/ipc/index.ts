@@ -130,6 +130,8 @@ import {
   removeUserModelCatalog,
   upsertUserModelCatalog
 } from './model-catalog'
+import { applyModelCatalogSync, previewModelCatalogSync } from './model-catalog-sync'
+import { applyPricingSync, clearSyncedPricing, listSyncedPricing, previewPricingSync } from './pricing'
 import {
   announceVideoJob,
   cancelVideoJob,
@@ -771,7 +773,13 @@ const handlers: HandlerMap = {
   'video:cancel': (req) => cancelVideoJob(req),
   'video:retryRetrieval': (req) => retryVideoRetrieval(req),
   'video:saveFile': (req) => saveVideoJobFile(req),
+  'pricing:listSynced': () => listSyncedPricing(),
+  'pricing:syncPreview': () => previewPricingSync(),
+  'pricing:syncApply': ({ modelIds }) => applyPricingSync(modelIds),
+  'pricing:clearSynced': () => clearSyncedPricing(),
   'modelCatalog:list': () => listUserModelCatalog(),
+  'modelCatalog:syncPreview': () => previewModelCatalogSync(),
+  'modelCatalog:syncApply': ({ ids }) => applyModelCatalogSync(ids),
   'modelCatalog:upsert': (req) => upsertUserModelCatalog(req),
   'modelCatalog:remove': ({ id }) => removeUserModelCatalog(id),
   'usage:getSummary': (window) => store.getUsageSummary(window),

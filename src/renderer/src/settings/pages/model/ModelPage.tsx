@@ -6,6 +6,7 @@ import {
   Image,
   Pencil,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   Trash2,
@@ -26,7 +27,7 @@ import {
   validateRequestPatches,
   type RequestPatchValidationCode,
 } from "../../../../../shared/domain/request-patch";
-import { PRICING_SEED } from "../../../../../shared/domain/pricing-seed";
+import { usePricingTable } from "../../../services/pricing";
 import {
   mergeModelCatalog,
   type ModelCatalogDefinition,
@@ -58,6 +59,7 @@ import {
 import { useModelsStore } from "../../../stores/models";
 import type { SettingsPageProps } from "../../props";
 import { ProviderCatalog } from "./ProviderCatalog";
+import { ModelCatalogSyncDialog } from "./ModelCatalogSyncDialog";
 import { StubModalityPage } from "./StubModalityPage";
 import { EnabledModelList } from "./EnabledModelList";
 import { ProviderPanel } from "./ProviderPanel";
@@ -230,6 +232,7 @@ function ModelConsole(): ReactNode {
     load = useModelsStore((s) => s.load);
   const [manufacturerId, setManufacturerId] = useState<string | null>(null),
     [selectedKey, setSelectedKey] = useState<string | null>(null),
+    [syncOpen, setSyncOpen] = useState(false),
     [editingModel, setEditingModel] = useState<CatalogEditorTarget | null>(
       null,
     ),
@@ -364,6 +367,7 @@ function ModelConsole(): ReactNode {
   };
   return (
     <>
+      <ModelCatalogSyncDialog open={syncOpen} onClose={() => setSyncOpen(false)} />
       <div className="flex min-h-[520px] min-w-0 gap-3">
         <aside className="flex max-h-[542px] w-[190px] shrink-0 flex-col border-r border-hairline pr-3">
           <div className="mb-2 flex items-center justify-between">
@@ -475,6 +479,14 @@ function ModelConsole(): ReactNode {
                 ]}
               />
             </div>
+            <button
+              type="button"
+              onClick={() => setSyncOpen(true)}
+              className="inline-flex h-8 items-center gap-1 rounded-[8px] border border-border px-2.5 text-[11.5px] text-fg hover:bg-tint-hover"
+            >
+              <RefreshCw size={13} />
+              {t("models.syncButton")}
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -602,6 +614,7 @@ function ModelRow({
   onEdit: () => void;
 }): ReactNode {
   const { t } = useI18n();
+  const pricingTable = usePricingTable();
   const caps = [
     (m.capabilities.vision || m.capabilities.visionInput) &&
       t("models.badgeVision"),
@@ -615,7 +628,7 @@ function ModelRow({
     m.capabilities.tools && t("models.badgeTools"),
     m.capabilities.thinking && t("models.badgeThink"),
   ].filter(Boolean) as string[];
-  const price = selectCatalogPricing(PRICING_SEED, m, Date.now());
+  const price = selectCatalogPricing(pricingTable, m, Date.now());
   const rate = price?.tiers[0]?.rate;
   const currency = price?.currency ?? "USD";
   const money = (value: number | undefined): string =>

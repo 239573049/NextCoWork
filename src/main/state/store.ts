@@ -19,6 +19,7 @@ import type { McpServerConfig } from '../../shared/domain/mcp'
 import type { ModelAlias, UpstreamProvider } from '../../shared/domain/provider'
 import type { ProviderAccountLimit, ProviderQuotaSnapshot } from '../../shared/domain/provider-account'
 import type { ModelCatalogDefinition } from '../../shared/domain/model-catalog'
+import type { ModelPricing } from '../../shared/domain/pricing'
 import type { SearchProviderConfig, SearchProviderId } from '../../shared/domain/search'
 import type { AppSettings, AppSettingsPatch } from '../../shared/domain/settings'
 import type { InnerTabState, WindowTabState } from '../../shared/domain/tab'
@@ -328,6 +329,17 @@ export const store = {
   },
   removeUserModelCatalog(id: string): void {
     repo.removeUserModelCatalog(id)
+  },
+
+  // ── synced pricing (models.dev) ──
+  listSyncedPricing(): ModelPricing[] {
+    return repo.listSyncedPricing()
+  },
+  replaceSyncedPricing(rows: readonly ModelPricing[]): void {
+    repo.replaceSyncedPricing(rows)
+  },
+  clearSyncedPricing(): void {
+    repo.clearSyncedPricing()
   },
 
   // ── MCP 服务器(设置 › 连接 › MCP) ──

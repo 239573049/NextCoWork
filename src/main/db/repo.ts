@@ -16,7 +16,7 @@
 import type { AgentMessage, ContentPart } from '../../shared/agent/message'
 import { isTurnStart } from '../../shared/agent/history-edit'
 import type { RunUsage } from '../../shared/agent/transcript'
-import type { RunCost } from '../../shared/domain/pricing'
+import type { ModelPricing, RunCost } from '../../shared/domain/pricing'
 import type { ContextSearchHit } from '../../shared/agent/context-management'
 import { parseNcwUrl } from '../../shared/domain/attachment'
 import type { McpServerConfig } from '../../shared/domain/mcp'
@@ -2872,6 +2872,64 @@ export function removeUserModelCatalog(id: string): void {
     if (next.length === rows.length) return
     setKv(USER_MODEL_CATALOG_KEY, next)
   })
+}
+
+// ── synced pricing (model_pricing, is_seed = 0) ───────────────────────────
+
+/**
+ * 同步写进来的价目行。`is_seed = 0` 是它们和仓库种子的分界 —— 种子不入库
+ * (升级才能纠正已有用户的价),这张表里**只有**用户确认过的同步价。
+ */
+export function listSyncedPricing(): ModelPricing[] {
+  return stmt(
+    `SELECT provider_id, model_id, display_name, currency, modality, tiers, windows,
+            effective_from, effective_until, source, fetched_at
+       FROM model_pricing WHERE is_seed = 0 ORDER BY model_id, COALESCE(effective_from, '')`
+  )
+    .all()
+    .map((row) => ({
+      providerId: asNullableString(row['provider_id']),
+      modelId: String(row['model_id']),
+      displayName: String(row['display_name']),
+      currency: String(row['currency']) as ModelPricing['currency'],
+      modality: String(row['modality']) as ModelPricing['modality'],
+      tiers: parse<ModelPricing['tiers']>(row['tiers']) ?? [],
+      ...(row['windows'] === null ? {} : { windows: parse<NonNullable<ModelPricing['windows']>>(row['windows']) ?? [] }),
+      ...(row['effective_from'] === null ? {} : { effectiveFrom: String(row['effective_from']) }),
+      ...(row['effective_until'] === null ? {} : { effectiveUntil: String(row['effective_until']) }),
+      source: String(row['source']),
+      fetchedAt: String(row['fetched_at'])
+    }))
+}
+
+/** 同一 `(provider, model)` 的旧同步行整组替换,保证「采用同步价」之后不留旧区间 */
+export function replaceSyncedPricing(rows: readonly ModelPricing[]): void {
+  tx(() => {
+    for (const r of rows) {
+      stmt('DELETE FROM model_pricing WHERE is_seed = 0 AND model_id = ? AND COALESCE(provider_id, \'\') = ?').run(r.modelId, r.providerId ?? '')
+      stmt(
+        `INSERT INTO model_pricing
+           (provider_id, model_id, display_name, currency, modality, tiers, windows, effective_from, effective_until, source, fetched_at, is_seed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+      ).run(
+        r.providerId,
+        r.modelId,
+        r.displayName,
+        r.currency,
+        r.modality,
+        JSON.stringify(r.tiers),
+        r.windows === undefined ? null : JSON.stringify(r.windows),
+        r.effectiveFrom ?? null,
+        r.effectiveUntil ?? null,
+        r.source,
+        r.fetchedAt
+      )
+    }
+  })
+}
+
+export function clearSyncedPricing(): void {
+  stmt('DELETE FROM model_pricing WHERE is_seed = 0').run()
 }
 
 // ── usage records ──────────────────────────────────────────────────────────

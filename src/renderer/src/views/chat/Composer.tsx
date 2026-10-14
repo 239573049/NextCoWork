@@ -72,7 +72,7 @@ import {
   type ContextSegmentKind,
 } from "../../../../shared/agent/context-management";
 import { formatCostMicros, longContextSurcharge, findPricing, type RunCost } from "../../../../shared/domain/pricing";
-import { PRICING_SEED } from "../../../../shared/domain/pricing-seed";
+import { usePricingTable } from "../../services/pricing";
 import { formatTokensPerSecond } from "../../../../shared/agent/duration";
 import { formatTokenCount } from "../../../../shared/agent/tokens";
 import { findBuiltinModel } from "../../../../shared/domain/model-catalog-inventory";
@@ -1880,6 +1880,7 @@ function ContextRing({
   onManageMcp?: () => void;
 }): ReactNode {
   const { t } = useI18n();
+  const pricingTable = usePricingTable();
   /*
     菜单的三个视图。压缩模型 / 压缩档位各自是一张候选表,塞进主面板会把这张
     「还装得下多少」的卡片撑成一屏下拉。
@@ -1915,11 +1916,11 @@ function ContextRing({
   const pricing =
     pricingModelId === undefined
       ? null
-      : findPricing(PRICING_SEED, model?.providerId ?? null, pricingModelId, Date.now());
+      : findPricing(pricingTable, model?.providerId ?? null, pricingModelId, Date.now());
   const surcharge =
     pricingModelId === undefined
       ? undefined
-      : longContextSurcharge(PRICING_SEED, model?.providerId ?? null, pricingModelId, Date.now());
+      : longContextSurcharge(pricingTable, model?.providerId ?? null, pricingModelId, Date.now());
   const protocolLabel = formatContextWindow(effectiveContextWindow(protocolWindow, true));  const maxContextHint = !canMax
     ? t("composer.maxContextUnavailable", { window: protocolLabel })
     : surcharge !== undefined

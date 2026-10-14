@@ -285,6 +285,14 @@ const OPENAI: readonly ModelPricing[] = [
 const gem = maker(null, 'USD', 'https://ai.google.dev/gemini-api/docs/pricing')
 
 const GEMINI: readonly ModelPricing[] = [
+  gem('gemini-4-argon', 'Gemini 4 Argon', one({ input: 2, output: 10, cacheRead: 0.1 }), {
+    effectiveUntil: '2026-11-30',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-4-argon',
+  }),
+  gem('gemini-4-argon', 'Gemini 4 Argon', one({ input: 4, output: 20, cacheRead: 0.2 }), {
+    effectiveFrom: '2026-12-01',
+    source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-4-argon',
+  }),
   gem('gemini-3.8-flash', 'Gemini 3.8 Flash', one({ input: 0.75, output: 3.75, cacheRead: 0.075 }), {
     effectiveUntil: '2026-12-31',
     source: 'https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash',

@@ -57,6 +57,9 @@ import type {
   UpstreamProvider
 } from '../domain/provider'
 import type { ModelCatalogDefinition } from '../domain/model-catalog'
+import type { ModelPricing } from '../domain/pricing'
+import type { PricingSyncPreview } from '../domain/models-dev'
+import type { ModelCatalogSyncPreview } from '../domain/models-dev-catalog'
 import type { ProviderAccount } from '../domain/provider-account'
 import type { SearchHit, Session, SessionChange, SessionDetail, SessionListItem, SessionPage } from '../domain/session'
 import type { AppSettings, AppSettingsPatch, ResolvedTheme, StorageStats } from '../domain/settings'
@@ -1185,6 +1188,15 @@ export interface IpcInvokeMap {
   'modelCatalog:list': { req: void; res: ModelCatalogDefinition[] }
   'modelCatalog:upsert': { req: ModelCatalogDefinition; res: ModelCatalogDefinition }
   'modelCatalog:remove': { req: { id: string }; res: void }
+  /** models.dev 模型目录同步:只新增目录里没有的;apply 取主进程缓存的预览,界面传不来任意数据。 */
+  'modelCatalog:syncPreview': { req: void; res: ModelCatalogSyncPreview }
+  'modelCatalog:syncApply': { req: { ids: string[] }; res: { applied: number } }
+
+  /** models.dev 定价同步。预览不落盘;apply 只采用用户勾选的条目,价格取主进程缓存的那次预览。 */
+  'pricing:listSynced': { req: void; res: ModelPricing[] }
+  'pricing:syncPreview': { req: void; res: PricingSyncPreview }
+  'pricing:syncApply': { req: { modelIds: string[] }; res: { applied: number } }
+  'pricing:clearSynced': { req: void; res: void }
 
   // ── 使用统计 ──
   'usage:getSummary': { req: UsageWindow; res: UsageSummary }
@@ -1577,6 +1589,8 @@ export interface IpcEventMap {
   'scheduled:focusRun': { runId: string }
   /** The persisted user catalogue changed. Built-in rows are bundled code. */
   'modelCatalog:changed': { custom: ModelCatalogDefinition[] }
+  /** 同步价目变了(采用 / 清除)。带全量,渲染层直接替换。 */
+  'pricing:changed': { synced: ModelPricing[] }
   /**
    * 上游供应商或别名变了。**两张表一起带**,因为设置页左列的每一行都是
    * 「供应商 + 它的主别名」—— 只推 providers 的话,改完供应商名字副标题还是旧的,
@@ -1963,6 +1977,12 @@ export const INVOKE_CHANNELS = {
   'modelCatalog:list': 1,
   'modelCatalog:upsert': 1,
   'modelCatalog:remove': 1,
+  'modelCatalog:syncPreview': 1,
+  'modelCatalog:syncApply': 1,
+  'pricing:listSynced': 1,
+  'pricing:syncPreview': 1,
+  'pricing:syncApply': 1,
+  'pricing:clearSynced': 1,
   'usage:getSummary': 1,
   'usage:getRequestLogs': 1,
   'usage:getSessionAttempts': 1,
@@ -2078,6 +2098,7 @@ export const EVENT_CHANNELS = {
   'browser:cua': 1,
   'browser:profilesChanged': 1,
   'modelCatalog:changed': 1,
+  'pricing:changed': 1,
   'clientAuth:changed': 1
   ,'configSync:changed': 1
   ,'app:updateChanged': 1

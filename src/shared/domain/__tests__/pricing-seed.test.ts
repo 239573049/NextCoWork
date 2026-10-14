@@ -595,9 +595,9 @@ describe('GLM-5.3-Flash · 促销到期自动切换', () => {
     }
   })
 
-  it('与 Gemini 3.8/3.7/3.6 Flash 一起构成全表四组带日期区间的行', () => {
+  it('与 Gemini 4 Argon、3.8/3.7/3.6 Flash 一起构成全表五组带日期区间的行', () => {
     const dated = rows.filter((p) => p.effectiveFrom !== undefined || p.effectiveUntil !== undefined)
-    expect(dated.map((p) => p.modelId)).toEqual(['gemini-3.8-flash', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.6-flash', 'glm-5.3-flash', 'glm-5.3-flash'])
+    expect(dated.map((p) => p.modelId)).toEqual(['gemini-4-argon', 'gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.6-flash', 'glm-5.3-flash', 'glm-5.3-flash'])
   })
 })
 
