@@ -46,6 +46,8 @@ const SAMPLES: readonly (readonly [string, Brand])[] = [
   ['Azure', 'azure'],
   ['302.AI', 'ai302'],
   ['AiHubMix', 'aihubmix'],
+  ['Atlas Cloud', 'atlascloud'],
+  ['atlascloud', 'atlascloud'],
   ['百度千帆', 'baiducloud'],
   ['阿里百炼', 'bailian'],
   ['command-r-plus', 'cohere'],

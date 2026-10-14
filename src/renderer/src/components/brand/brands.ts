@@ -21,6 +21,7 @@ export const BRANDS = [
   'ai302',
   'aihubmix',
   'anthropic',
+  'atlascloud',
   'azure',
   'baichuan',
   'baiducloud',
@@ -163,6 +164,7 @@ const RULES: readonly (readonly [RegExp, Brand | null])[] = [
   // 因为它就是一家聚合商。
   [/\broutin[\s_-]*ai\b|^routin(-plan)?$/i, 'routin'],
   [/aihubmix/i, 'aihubmix'],
+  [/atlas[\s_-]*cloud/i, 'atlascloud'],
   [/\b302\.?ai\b/i, 'ai302'],
   [/groq/i, 'groq'],
   [/together/i, 'together'],

@@ -255,6 +255,7 @@ describe('预设表 × joinUpstreamUrl:拼出来的 URL 没有畸形', () => {
     ['fireworks', 'anthropic', 'https://api.fireworks.ai/inference/v1/messages'],
     ['openrouter', 'anthropic', 'https://openrouter.ai/api/v1/messages'],
     ['requesty', 'anthropic', 'https://router.requesty.ai/v1/messages'],
+    ['atlascloud', 'anthropic', 'https://api.atlascloud.ai/v1/messages'],
     ['opper', 'openai-chat', 'https://api.opper.ai/v3/compat/chat/completions'],
     ['opper', 'anthropic', 'https://api.opper.ai/v3/compat/v1/messages'],
     ['kimi-coding', 'anthropic', 'https://api.kimi.com/coding/v1/messages'],
@@ -347,12 +348,12 @@ describe('预设表 · 模型列表', () => {
     })
   })
 
-  it('实测免鉴权的那五家标了 modelListPublic', () => {
+  it('实测免鉴权的那六家标了 modelListPublic', () => {
     const publics = PROVIDER_PRESETS.filter((p) =>
       p.endpoints.some((e) => e.modelListPublic === true)
     ).map((p) => p.id)
     expect(new Set(publics)).toEqual(
-      new Set(['openrouter', 'requesty', 'deepinfra', 'opencode-go', 'ollama-cloud'])
+      new Set(['openrouter', 'requesty', 'atlascloud', 'deepinfra', 'opencode-go', 'ollama-cloud'])
     )
   })
 })
