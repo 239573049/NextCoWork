@@ -931,6 +931,24 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     verification: 'probed'
   },
   {
+    id: 'atlascloud',
+    name: 'Atlas Cloud',
+    category: 'aggregator',
+    endpoints: [
+      oa('https://api.atlascloud.ai/v1', true, true),
+      resp('https://api.atlascloud.ai/v1', true),
+      anth('https://api.atlascloud.ai')
+    ],
+    docsUrl: 'https://www.atlascloud.ai/docs',
+    apiKeyUrl: 'https://console.atlascloud.ai/api-keys',
+    suggestedModels: ['deepseek-ai/deepseek-v4-flash', 'moonshotai/kimi-k3', 'zai-org/glm-5.2'],
+    notes:
+      '模型 ID 带厂商前缀(如 deepseek-ai/deepseek-v4-flash),请使用模型列表返回的完整 ID。' +
+      '模型列表免鉴权就能拉,没填 key 也能先看有哪些模型(因此列表能拉到不代表 key 有效)。' +
+      '同一个 key 也可走 OpenAI Responses 与 Anthropic 协议。',
+    verification: 'documented'
+  },
+  {
     id: 'siliconflow',
     name: '硅基流动(国内)',
     category: 'aggregator',

@@ -85,6 +85,7 @@ const EXPECTED: Readonly<Record<string, Brand | null>> = {
   requesty: null,
   opper: null,
   'api-route': null,
+  atlascloud: 'atlascloud',
   siliconflow: 'siliconcloud',
   'siliconflow-intl': 'siliconcloud',
   together: 'together',
