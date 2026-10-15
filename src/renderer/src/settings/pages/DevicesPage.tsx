@@ -44,7 +44,7 @@ const INSTALL_STEPS: ReadonlyArray<{ title: TranslationKey; note: TranslationKey
   {
     title: 'devices.installStep3',
     note: 'devices.installStep3Note',
-    command: 'ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --invite'
+    command: 'ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --advertise nas.lan --invite'
   }
 ]
 

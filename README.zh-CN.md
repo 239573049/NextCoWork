@@ -39,7 +39,7 @@ Agent 不必跑在应用里。无界面的设备服务（无 Electron，要求 N
 ```bash
 npm i -g @aidotnet/nextcowork-device-service
 ncw-device-service diagnose
-ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --invite
+ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --advertise nas.lan --invite
 ```
 
 把打印出来的 `ncwpair1.…` 邀请粘贴到**设置 → 设备 → 添加设备**，核对指纹后配对。装成开机常驻的服务（systemd / LaunchDaemon / WinSW）、从已有桌面数据根原地接管、以及排障，见 [docs/device-service.md](./docs/device-service.md)。

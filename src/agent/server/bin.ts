@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   try {
     service = await runDeviceService(parseArgs(process.argv.slice(2)), io)
   } catch (error) {
-    io.err(error instanceof UsageError ? `usage: ${error.message}` : 'device service failed to start')
+    io.err(error instanceof UsageError ? `usage: ${error.message}` : `device service failed to start${error instanceof Error ? `: ${error.message}` : ''}`)
     process.exitCode = error instanceof UsageError ? 64 : 1
     return
   }

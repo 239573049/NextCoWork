@@ -39,7 +39,7 @@ The agent does not have to run inside the app. A headless device service (no Ele
 ```bash
 npm i -g @aidotnet/nextcowork-device-service
 ncw-device-service diagnose
-ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --invite
+ncw-device-service --data-dir ~/ncw-device --host 0.0.0.0 --port 7801 --pairing-port 7800 --advertise nas.lan --invite
 ```
 
 Paste the printed `ncwpair1.…` invitation into **Settings → Devices → Add device**, check the fingerprint, then pair. Installing it as a system service (systemd / LaunchDaemon / WinSW), taking over an existing desktop data root, and troubleshooting are covered in [docs/device-service.md](./docs/device-service.md).
