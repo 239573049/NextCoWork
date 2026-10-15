@@ -345,7 +345,7 @@ describe('matchPricing', () => {
   it('命中 modelId / 显示名 / providerId', () => {
     expect(matchPricing(PRICING_SEED, 'claude-fable').length).toBeGreaterThan(0)
     const deepseek = matchPricing(PRICING_SEED, 'deepseek')
-    expect(deepseek).toHaveLength(3)
+    expect(deepseek).toHaveLength(4)
     expect(deepseek.every((p) => p.providerId === null)).toBe(true)
   })
 
