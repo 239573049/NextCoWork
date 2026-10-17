@@ -112,13 +112,19 @@ export function getBootstrap(windowKind: WindowKind): Bootstrap {
 }
 
 /**
- * 外链一律交给系统浏览器,且只放行 https。
+ * 外链一律交给系统浏览器,且只放行 http(s)。
  * 与 main/index.ts 里 setWindowOpenHandler 的策略保持一致 ——
  * 那边挡的是 window.open,这边挡的是渲染层显式请求。两个口子,一条规则。
+ *
+ * 需求(#178):终端里 ⌘+点击 `npm run dev` 打出的 `http://localhost:5173`
+ * 要能跳浏览器,所以 http 也得放。真正危险的是 `file:` / 自定义协议
+ * (等于「用默认应用打开任意本地路径」),这些仍然挡掉;带账号密码的也挡。
  */
 export async function openExternal(url: string): Promise<void> {
-  if (!url.startsWith('https://')) {
-    throw new IpcError('unknown', `拒绝打开非 https 链接: ${url}`)
+  let parsed: URL | null = null
+  try { parsed = new URL(url) } catch { /* 下面统一拒绝。 */ }
+  if (parsed === null || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username !== '' || parsed.password !== '') {
+    throw new IpcError('unknown', `拒绝打开非 http(s) 链接: ${url}`)
   }
   await shell.openExternal(url)
 }

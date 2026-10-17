@@ -79,7 +79,19 @@ function emitInstallProgress(
  */
 function installMessageKey(error: unknown): string {
   const message = error instanceof Error ? error.message : ''
-  return message.startsWith('skills.') ? message : 'skills.operationFailed'
+  if (message.startsWith('skills.')) return message
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'skills.diskPermission'
+  if (code === 'ENOSPC') return 'skills.diskFull'
+  // undici 把网络层失败包成 `TypeError: fetch failed`,没有 skills. 前缀
+  if (error instanceof TypeError && message === 'fetch failed') return 'skills.networkFailed'
+  if (/ZIP 文件过大|解压后体积过大/.test(message)) return 'skills.packageTooLarge'
+  if (/摘要校验失败/.test(message)) return 'skills.digestMismatch'
+  if (/SKILL\.md/.test(message) && !/顶层目录/.test(message)) return 'skills.skillMdInvalid'
+  if (/^ZIP|顶层目录/.test(message)) return 'skills.zipInvalid'
+  if (message === '市场没有可安装版本') return 'skills.noVersion'
+  if (message === 'Skill 安装后未能加载') return 'skills.notLoaded'
+  return 'skills.operationFailed'
 }
 
 /**
@@ -182,8 +194,9 @@ export async function installZip(req: { path: string; workspaceId?: string; scop
     emitInstallProgress(key, 'done')
     return found
   } catch (error) {
-    emitInstallProgress(key, 'failed', { messageKey: installMessageKey(error) })
-    throw error
+    const messageKey = installMessageKey(error)
+    emitInstallProgress(key, 'failed', { messageKey })
+    throw messageKey === 'skills.operationFailed' ? error : new Error(messageKey)
   }
 }
 
@@ -239,8 +252,9 @@ export async function installMarketSkill(req: { slug: string; version?: string; 
       能从 invoke 的 rejection 里知道结果,而**别的窗口**手上只有事件 ——
       它们那颗按钮会一直转下去,直到 3 分钟的兜底把它扫掉。
     */
-    emitInstallProgress(key, 'failed', { messageKey: installMessageKey(error) })
-    throw error
+    const messageKey = installMessageKey(error)
+    emitInstallProgress(key, 'failed', { messageKey })
+    throw messageKey === 'skills.operationFailed' ? error : new Error(messageKey)
   }
 }
 

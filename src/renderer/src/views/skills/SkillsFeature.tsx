@@ -35,6 +35,7 @@ import {
 } from '../../services/skills'
 import type { SkillMarketItem } from '../../../../shared/domain/skill'
 import { useSkillInWorkspace } from './use-skill'
+import { skillErrorDetail, skillErrorKey } from './skill-error'
 
 type ViewMode = 'market' | 'mine'
 /**
@@ -76,19 +77,9 @@ export function SkillsFeature({
 }): ReactNode {
   const { t } = useI18n()
   const skillError = (error: unknown): string => {
-    const key = error instanceof Error ? error.message : ''
-    const known = [
-      'skills.authRequired',
-      'skills.clientAssetsUnavailable',
-      'skills.scopeRequired',
-      'skills.versionUnavailable',
-      'skills.networkFailed',
-      'skills.digestMismatch',
-      'skills.packageTooLarge'
-    ] as const
-    return (known as readonly string[]).includes(key)
-      ? t(key as (typeof known)[number])
-      : t('skills.operationFailed')
+    const key = skillErrorKey(error)
+    const detail = key === 'skills.operationFailed' ? skillErrorDetail(error) : null
+    return detail === null ? t(key) : `${t(key)}（${detail}）`
   }
   const workspaceId = useWindowStore((state) => state.activeWorkspaceId)
   const items = useSkillsStore((state) => state.items)

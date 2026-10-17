@@ -3,7 +3,7 @@ import { constants, promises as fs, type Stats } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { createConnection } from 'node:net'
 import type { KernelHost } from '../kernel/host'
-import { killTree, mergeChildEnv } from '../kernel/node-spawn'
+import { killTree, mergeChildEnv, terminalShellArgs } from '../kernel/node-spawn'
 import type { EnvironmentFs, EnvironmentStat, WorkspaceEnvironment } from './contract'
 import { EnvironmentError, missingPath } from './errors'
 import { createWorkspacePaths } from './paths'
@@ -103,7 +103,7 @@ export function localEnvironment(host: KernelHost, rootPath: string): WorkspaceE
         `options.env` 是插件终端的额外注入(`tabs.openTerminal` 的启动 spec),
         放在默认值之后 —— 插件值赢过默认值;没传时与原行为逐字节一致。
       */
-      return pty.spawn(terminalShell, [], {
+      return pty.spawn(terminalShell, terminalShellArgs(terminalShell), {
         ...options,
         name: 'xterm-256color',
         env: { ...process.env, TERM: 'xterm-256color', ...(options.env ?? {}) } as Record<string, string>

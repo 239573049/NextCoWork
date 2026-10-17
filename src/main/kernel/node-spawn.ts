@@ -131,6 +131,20 @@ export function shellDialect(shell: string): 'cmd' | 'powershell' | 'fish' | 'po
   return name === 'fish' ? 'fish' : 'posix'
 }
 
+/**
+ * 交互终端起 shell 的参数。
+ *
+ * 需求(#178):终端里认不出 brew / nvm 装的命令。Homebrew 等把 PATH 写在
+ * `~/.zprofile` / `~/.bash_profile` 里,只有**登录 shell** 才会读;从 Finder
+ * 启动的应用继承的 PATH 又只有系统那几条。macOS「终端」与 VS Code 都以登录
+ * shell 起,这里对齐。只给认得 `-l` 的 shell 加,不认识的 shell 维持原样。
+ */
+export function terminalShellArgs(shell: string, platform: string = process.platform): string[] {
+  if (platform === 'win32') return []
+  const name = shell.split('/').pop()?.toLowerCase()
+  return name !== undefined && ['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish'].includes(name) ? ['-l'] : []
+}
+
 /** 插件的 argv 必须按实际 shell 引号化，不能把 PowerShell 参数当 cmd 字符串拼接。 */
 export function quoteShellArg(shell: string, arg: string): string {
   switch (shellDialect(shell)) {

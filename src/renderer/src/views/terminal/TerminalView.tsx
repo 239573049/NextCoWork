@@ -1,4 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
@@ -20,6 +21,7 @@ import type { InnerTab } from '../../../../shared/domain/tab'
 import { Button } from '../../components/arc/button/button'
 import { useI18n } from '../../i18n'
 import { connectionErrorKey } from '../../services/connections'
+import { openExternal } from '../../services/app'
 
 // 苹果风格:配色取自 macOS「终端」的 Basic 描述文件 + 系统色(systemRed / systemGreen …)
 const LIGHT_THEME = {
@@ -102,6 +104,17 @@ export function TerminalView({ tab, workspace }: { tab: Extract<InnerTab, { kind
     })
     const fit = new FitAddon()
     terminal.loadAddon(fit)
+    /*
+      需求(#178):`npm run dev` 打出的本地预览地址要能 ⌘+点击(非 mac 为 Ctrl+点击)
+      跳系统浏览器,与 macOS「终端」/ VS Code 一致。必须带修饰键:裸点击会和
+      选中文本、全屏 TUI 的鼠标事件抢。
+    */
+    const isMac = navigator.platform.toLowerCase().includes('mac')
+    terminal.loadAddon(new WebLinksAddon((event, uri) => {
+      if (!(isMac ? event.metaKey : event.ctrlKey)) return
+      event.preventDefault()
+      void openExternal(uri).catch(() => {})
+    }))
     terminal.open(host)
     /*
       GPU 渲染。需求:xterm 6 的默认 DOM 渲染器逐字符改 DOM,而 codex / claude

@@ -34,6 +34,7 @@ import { setConfigCategoryDirty } from './db/repo'
 import { runs } from './kernel/run-registry'
 import { browserManager } from './browser/manager'
 import { terminalHost } from './terminal-host'
+import { listResolvedModels } from './state/model-bindings'
 import { store } from './state/store'
 import { windows } from './window/registry'
 import {
@@ -240,7 +241,7 @@ export async function importLocalConfigIntoCurrentAccount(): Promise<void> {
  */
 function broadcastScopeChanged(): void {
   windows.emitToAll('settings:changed', store.getSettings())
-  windows.emitToAll('provider:changed', { providers: store.listProviders(), models: store.listAliases() })
+  windows.emitToAll('provider:changed', { providers: store.listProviders(), models: listResolvedModels() })
   windows.emitToAll('modelCatalog:changed', { custom: store.listUserModelCatalog() })
   windows.emitToAll('workspace:changed', { workspaces: store.listWorkspaces() })
   // `reset` 而不是某个工作区:侧边栏与内层 Tab 全部重来。

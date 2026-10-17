@@ -20,7 +20,13 @@ const KNOWN = [
   'skills.versionUnavailable',
   'skills.networkFailed',
   'skills.digestMismatch',
-  'skills.packageTooLarge'
+  'skills.packageTooLarge',
+  'skills.diskPermission',
+  'skills.diskFull',
+  'skills.zipInvalid',
+  'skills.skillMdInvalid',
+  'skills.noVersion',
+  'skills.notLoaded'
 ] as const
 
 export function skillErrorKey(error: unknown): TranslationKey {
@@ -40,4 +46,14 @@ export function skillMessageKey(raw: string): TranslationKey {
     if (raw === key || raw.startsWith(`${key}:`)) return key
   }
   return 'skills.operationFailed'
+}
+
+/**
+ * 认不出 key 时的兜底:把原始报错拼在通用文案后面,而不是只留一句「请重试」。
+ * 只用于发起操作的那个窗口(别的窗口拿不到 rejection,也不该看到原文)。
+ */
+export function skillErrorDetail(error: unknown): string | null {
+  const raw = error instanceof Error ? error.message.trim() : ''
+  if (raw === '' || raw.startsWith('skills.')) return null
+  return raw.length > 160 ? `${raw.slice(0, 160)}…` : raw
 }

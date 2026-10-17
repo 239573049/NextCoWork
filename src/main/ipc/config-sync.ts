@@ -66,6 +66,7 @@ import {
   stageSyncEvent,
   syncStateWithVault
 } from '../db/config-sync-state'
+import { listResolvedModels } from '../state/model-bindings'
 import * as repo from '../db/repo'
 import { getHost } from '../runtime'
 import { windows } from '../window/registry'
@@ -752,7 +753,7 @@ async function applyRemoteEvent(
   finishSyncEvent(session.accountId, PROVIDERS, event.mutationId, fingerprint)
   windows.emitToAll('provider:changed', {
     providers: repo.listProviders(),
-    models: repo.listAliases()
+    models: listResolvedModels()
   })
   for (const provider of repo.listProviders()) announceCredentialRef(provider.credentialRef)
 }
@@ -928,7 +929,7 @@ async function resolveConfigSyncConflictInternal(id: string, useRemote: boolean)
       target.pendingApply = null
     })
     repo.setConfigCategoryDirty(PROVIDERS, session.accountId, false)
-    windows.emitToAll('provider:changed', { providers: repo.listProviders(), models: repo.listAliases() })
+    windows.emitToAll('provider:changed', { providers: repo.listProviders(), models: listResolvedModels() })
   } finally {
     key.fill(0)
   }
