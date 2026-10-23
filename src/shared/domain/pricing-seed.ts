@@ -46,7 +46,7 @@
  */
 import type { Currency, ModelPricing, PriceTier, TokenRates } from './pricing'
 
-/** 全表统一的采集日期。改数据时**同时**改它,否则界面上显示的日期是假的 */
+/** 历史快照的默认采集日期。新增或复核的行通过 extra.fetchedAt 记录实际日期。 */
 const FETCHED_AT = '2026-09-05'
 
 /** 单档(绝大多数模型)。多于一档才是阶梯,见下面 OpenAI / Gemini / xAI */
@@ -473,6 +473,10 @@ const ds = maker(null, 'USD', 'https://api-docs.deepseek.com/quick_start/pricing
 
 /** 基准 = **空闲价**(见文件头那段论证) */
 const DEEPSEEK: readonly ModelPricing[] = [
+  ds('deepseek-v4.1-flash-1017', 'DeepSeek V4.1 Flash 1017', one({ input: 0.15, output: 0.6, cacheRead: 0.003 }), {
+    windows: PEAK_WINDOWS,
+    fetchedAt: '2026-10-19',
+  }),
   ds('deepseek-v4-flash', 'DeepSeek V4 Flash', one({ input: 0.22, output: 0.66, cacheRead: 0.007 }), {
     windows: PEAK_WINDOWS,
   }),

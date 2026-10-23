@@ -43,6 +43,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   watch,
@@ -446,7 +447,9 @@ export class ProviderFileStore {
     mkdirSync(dir, { recursive: true })
     const name = basename(this.path)
     try {
-      this.watcher = watch(dir, { persistent: false }, (_event, filename) => {
+      // Windows 临时目录可能带 RUNNER~1 等 8.3 短名,事件却返回长名;
+      // 统一成真实路径,避免 libuv 的 fs-event.c 路径前缀断言直接终止进程。
+      this.watcher = watch(realpathSync.native(dir), { persistent: false }, (_event, filename) => {
         if (filename !== null && filename !== undefined && filename.toString() !== name) return
         if (this.debounce !== undefined) clearTimeout(this.debounce)
         this.debounce = setTimeout(() => {

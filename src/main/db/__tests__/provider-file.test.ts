@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync, existsSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -271,6 +271,27 @@ describe('ProviderFileStore: importLegacy', () => {
 })
 
 describe('ProviderFileStore: watching', () => {
+  it('keeps watching atomic replacements through a directory alias', async () => {
+    const actual = join(dir, 'actual')
+    const linked = join(dir, 'linked')
+    mkdirSync(actual)
+    symlinkSync(actual, linked, 'junction')
+    path = join(linked, PROVIDER_FILE_NAME)
+    store = new ProviderFileStore(path)
+    store.load()
+    store.putProvider(provider())
+    const seen: string[][] = []
+    store.onExternalChange((c) => seen.push(c.providers.map((p) => p.id)))
+    store.startWatching()
+
+    const doc = read()
+    doc.providers['astra'] = { baseUrl: 'http://a/v1', protocol: 'openai-chat' }
+    const replacement = join(actual, 'providers.tmp')
+    writeFileSync(replacement, JSON.stringify(doc))
+    renameSync(replacement, join(actual, PROVIDER_FILE_NAME))
+    await vi.waitFor(() => expect(seen).toEqual([['astra', 'gw']]), { timeout: 10_000 })
+  })
+
   it('notifies on an external edit but not on its own writes', async () => {
     vi.useRealTimers()
     store.load()

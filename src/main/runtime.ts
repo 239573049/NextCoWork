@@ -12,6 +12,7 @@
  * 它存在的另一个理由是**收口**:`ipc/agent.ts` 只该关心「合批与推送」,
  * 不该同时知道 provider 表长什么样、工具在哪注册、演示上游挂在哪一层。
  */
+import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { RunRequest, ThinkingLevel } from '../shared/agent/run-request'
@@ -69,7 +70,7 @@ import type { McpServerConfig, McpServerStatus } from '../shared/domain/mcp'
 import { installSearchConfig } from './search/service'
 import { withDemo } from './kernel/upstream/demo'
 import { opencodeGoProtocolFor } from './kernel/upstream/opencode-protocol'
-import { currentConfigScope, defaultWorkspaceIdForScope, MODEL_DEFAULTS_SEEDED_KEY } from './db/config-profile'
+import { ConfigProfileError, currentConfigScope, defaultWorkspaceIdForScope, MODEL_DEFAULTS_SEEDED_KEY } from './db/config-profile'
 import { ensureProviderAccountsSeeded } from './db/provider-accounts'
 import type { ProviderConfigSource } from './kernel/upstream/router'
 import { UpstreamRouter } from './kernel/upstream/router'
@@ -650,15 +651,24 @@ function seedDefaultWorkspace(): void {
   }
 
   const now = getHost().clock.now()
-  store.putWorkspace({
-    id,
+  const workspace = {
     name: '默认工作区',
     rootPath,
     ...(unavailable ? { unavailable: true } : {}),
     settings: structuredClone(DEFAULT_WORKSPACE_SETTINGS),
     createdAt: now,
     lastOpenedAt: now
-  })
+  }
+  try {
+    store.putWorkspace({ id, ...workspace })
+  } catch (err) {
+    // 这个 id 已被另一个配置作用域占着(当前作用域看不见它,所以上面的查重没拦住)。
+    // 默认工作区只是个便利,不能因此让整个应用起不来 —— 换一个随机 id 重试;
+    // 写成功后 listWorkspaces 非空,之后的启动不会再走到这里。
+    if (!(err instanceof ConfigProfileError) || err.code !== 'workspaceOwned') throw err
+    getHost().logger.warn(`[runtime] 默认工作区 id ${id} 属于其他账户,改用新 id`)
+    store.putWorkspace({ id: `${id}-${randomUUID().slice(0, 8)}`, ...workspace })
+  }
 }
 
 /**

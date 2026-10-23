@@ -123,7 +123,7 @@ export function PricingTable(): ReactNode {
   )
 }
 
-/** 全表的采集日期。种子表的测试保证它一致,不一致时**说出来**而不是挑一个显示 */
+/** 按行保留采集日期;存在多个快照日期时说出来,不挑一个冒充全表日期。 */
 function fetchedLabel(t: ReturnType<typeof useI18n>['t'], table: readonly ModelPricing[]): string {
   const dates = [...new Set(table.map((p) => p.fetchedAt))]
   return dates.length === 1

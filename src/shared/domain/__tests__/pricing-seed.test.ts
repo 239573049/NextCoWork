@@ -53,9 +53,9 @@ describe('种子表 · 基本形状', () => {
     for (const p of rows) expect(p.modality, p.modelId).toBe('text')
   })
 
-  it('fetchedAt 全表一致,且是合法的 YYYY-MM-DD', () => {
+  it('fetchedAt 记录逐行采集日期,历史快照不随新模型刷新', () => {
     for (const p of rows) {
-      expect(p.fetchedAt, p.modelId).toBe('2026-09-05')
+      expect(p.fetchedAt, p.modelId).toBe(p.modelId === 'deepseek-v4.1-flash-1017' ? '2026-10-19' : '2026-09-05')
       expect(Number.isNaN(Date.parse(p.fetchedAt)), p.modelId).toBe(false)
     }
   })

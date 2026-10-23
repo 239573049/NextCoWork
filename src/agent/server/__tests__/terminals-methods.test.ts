@@ -78,7 +78,9 @@ describe('remote terminals (real PTY)', () => {
       const data = event.data as { chunk?: string }
       if (data.chunk !== undefined) output.push(data.chunk)
     })
-    await alice.query('terminals.write', { id: terminal.id, token: lease.token, data: 'echo ncw-$((40+2))\n' })
+    // CMD 与 POSIX shell 使用各自的算术语法;PTY 的回车用 \r,让 CMD 真正执行输入。
+    const command = process.platform === 'win32' ? 'set /a "ncw=40+2"\recho ncw-%ncw%\r' : 'echo ncw-$((40+2))\r'
+    await alice.query('terminals.write', { id: terminal.id, token: lease.token, data: command })
     await vi.waitFor(() => expect(output.join('')).toContain('ncw-42'), { timeout: 10_000 })
     let expected = String(attach.seq)
     for (const frame of frames) { expect(frame.previousCursor).toBe(expected); expected = frame.cursor }

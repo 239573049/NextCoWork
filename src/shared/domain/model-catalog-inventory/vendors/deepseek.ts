@@ -16,6 +16,26 @@ const DEEPSEEK_EFFORT_THINKING: ThinkingConfig = {
 }
 
 export const DEEPSEEK: readonly BuiltinModelRecord[] = [
+  // 1017 版本已在 NextCoWork 渠道上架;官方 API 使用 deepseek-flash 指向同一版本。
+  model('deepseek', 'deepseek-v4.1-flash-1017', 'DeepSeek V4.1 Flash 1017', {
+    capabilities: visionCapabilities({
+      thinking: true,
+      tools: true,
+      caching: true,
+      structuredOutput: true,
+      streaming: true,
+    }),
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
+    thinkingConfig: DEEPSEEK_EFFORT_THINKING,
+    reasoningEfforts: ['none', 'low', 'high', 'max'],
+    aliases: ['deepseek-flash'],
+    source: {
+      url: 'https://nextco.work/models/deepseek-v4.1-flash-1017',
+      fetchedAt: '2026-10-19',
+    },
+    verificationStatus: 'official-api',
+  }),
   // DeepSeek announced this as a time-limited preview on 2026-09-08. Its
   // public announcement confirms native multimodal input and says billing
   // follows V4 Flash, but does not publish independent limits. Keep the
